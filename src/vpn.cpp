@@ -127,6 +127,11 @@ static void handle_supervisor_signal(int) {
     kill(child_pid, SIGTERM);
 }
 
+static std::string describe_retry_policy(int retry_limit) {
+  return retry_limit < 0 ? std::string("infinite")
+                         : std::to_string(retry_limit) + " retries";
+}
+
 static std::string build_openconnect_command(const Config &cfg,
                                              const std::string &password) {
   std::ostringstream cmd;
@@ -145,6 +150,10 @@ static std::string build_openconnect_command(const Config &cfg,
       << utils::shell_quote(cfg.username) << " --passwd-on-stdin"
       << " --script " << utils::shell_quote(utils::get_tunnel_path());
 
+  if (cfg.disable_dtls) {
+    cmd << " --no-dtls";
+  }
+
   for (const auto &arg : cfg.extra_args) {
     cmd << " " << utils::shell_quote(arg);
   }
@@ -160,15 +169,21 @@ static int run_supervisor(const Config &cfg, const std::string &password,
   signal(SIGTERM, handle_supervisor_signal);
   signal(SIGINT, handle_supervisor_signal);
 
+  logger::info("Reconnect supervisor started, retry policy: " +
+               describe_retry_policy(retry_limit));
+
   bool first_attempt = true;
   int reconnect_attempts_used = 0;
+  bool retry_limit_reached = false;
 
   while (!supervisor_stop_requested) {
     if (!first_attempt) {
       if (retry_limit == 0)
         break;
-      if (retry_limit > -1 && reconnect_attempts_used >= retry_limit)
+      if (retry_limit > -1 && reconnect_attempts_used >= retry_limit) {
+        retry_limit_reached = true;
         break;
+      }
 
       ++reconnect_attempts_used;
       logger::warn("VPN disconnected, attempting reconnect " +
@@ -202,11 +217,50 @@ static int run_supervisor(const Config &cfg, const std::string &password,
                  " openconnect, PID: " + std::to_string(child_pid));
 
     int wait_status = 0;
-    while (waitpid(child_pid, &wait_status, 0) < 0) {
-      if (errno == EINTR)
-        continue;
-      logger::error("waitpid failed while supervising openconnect");
-      break;
+    bool route_ready_logged = false;
+    while (true) {
+      pid_t wait_result = waitpid(child_pid, &wait_status, WNOHANG);
+      if (wait_result == child_pid)
+        break;
+      if (wait_result < 0) {
+        if (errno == EINTR)
+          continue;
+        logger::error("waitpid failed while supervising openconnect");
+        break;
+      }
+
+      if (!route_ready_logged) {
+        pid_t vpn_pid = read_pid();
+        std::string vpn_interface;
+        std::string internal_ip;
+        if (vpn_pid > 0 && is_process_alive(vpn_pid) &&
+            read_route_ready(&vpn_interface, &internal_ip)) {
+          logger::info(std::string(first_attempt
+                                       ? "VPN connection ready under reconnect supervisor"
+                                       : "VPN reconnect succeeded") +
+                       ", PID: " + std::to_string(vpn_pid) +
+                       ", interface: " + vpn_interface +
+                       ", internal IP: " + internal_ip);
+          route_ready_logged = true;
+        }
+      }
+
+      usleep(250000);
+    }
+
+    if (!route_ready_logged) {
+      std::string vpn_interface;
+      std::string internal_ip;
+      pid_t vpn_pid = read_pid();
+      if (vpn_pid > 0 && is_process_alive(vpn_pid) &&
+          read_route_ready(&vpn_interface, &internal_ip)) {
+        logger::info(std::string(first_attempt
+                                     ? "VPN connection ready under reconnect supervisor"
+                                     : "VPN reconnect succeeded") +
+                     ", PID: " + std::to_string(vpn_pid) +
+                     ", interface: " + vpn_interface +
+                     ", internal IP: " + internal_ip);
+      }
     }
 
     supervisor_child_pid = -1;
@@ -225,6 +279,13 @@ static int run_supervisor(const Config &cfg, const std::string &password,
     }
 
     first_attempt = false;
+  }
+
+  if (retry_limit_reached) {
+    logger::warn("Reconnect supervisor stopped after reaching retry limit: " +
+                 std::to_string(retry_limit));
+  } else if (supervisor_stop_requested) {
+    logger::info("Reconnect supervisor stop requested");
   }
 
   clear_runtime_state();

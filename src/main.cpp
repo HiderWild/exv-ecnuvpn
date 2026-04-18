@@ -209,7 +209,7 @@ static int handle_config(const std::vector<std::string> &args) {
     if (args.size() < 4) {
       utils::print_error("Usage: exv config set <key>");
       utils::print_info(
-          "Keys: server, username, password, mtu, useragent, log_file");
+          "Keys: server, username, password, mtu, useragent, log_file, remember_password, disable_dtls");
       return 1;
     }
     Config cfg = config::load();

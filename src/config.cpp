@@ -695,6 +695,12 @@ void show(const Config &cfg) {
             << std::endl;
   std::cout << utils::BOLD << "  UserAgent       : " << utils::RESET
             << cfg.useragent << std::endl;
+  std::cout << utils::BOLD << "  Disable DTLS    : " << utils::RESET
+            << (cfg.disable_dtls
+                    ? std::string(utils::YELLOW) + "yes (TLS-only transport)" +
+                          utils::RESET
+                    : std::string(utils::GREEN) + "no" + utils::RESET)
+            << std::endl;
   std::cout << utils::BOLD << "  Log File        : " << utils::RESET
             << cfg.log_file << std::endl;
   std::cout << std::endl;
@@ -770,6 +776,8 @@ Config import_from(const std::string &path) {
       cfg.mtu = j["mtu"].get<int>();
     if (j.contains("useragent"))
       cfg.useragent = j["useragent"].get<std::string>();
+    if (j.contains("disable_dtls"))
+      cfg.disable_dtls = j["disable_dtls"].get<bool>();
     if (j.contains("routes"))
       cfg.routes = j["routes"].get<std::vector<std::string>>();
     if (j.contains("extra_args"))
@@ -867,6 +875,21 @@ bool set_value(Config &cfg, const std::string &key, const std::string &) {
     return false;
   }
 
+  if (key == "disable_dtls") {
+    std::cout << "  Disable DTLS/ESP and force TLS-only transport? [y/N]: ";
+    std::string input;
+    std::getline(std::cin, input);
+    input = utils::trim(input);
+    cfg.disable_dtls =
+        (!input.empty() && (input[0] == 'y' || input[0] == 'Y'));
+    if (save(cfg)) {
+      utils::print_success(std::string("disable_dtls = ") +
+                           (cfg.disable_dtls ? "true" : "false"));
+      return true;
+    }
+    return false;
+  }
+
   auto handle_str = [&](const std::string &k, std::string &field) -> bool {
     if (key != k)
       return false;
@@ -914,7 +937,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &) {
 
   utils::print_error("Unknown config key: " + key);
   utils::print_info("Valid keys: server, username, password, mtu, useragent, "
-                    "log_file, remember_password");
+                    "log_file, remember_password, disable_dtls");
   return false;
 }
 
