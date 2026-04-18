@@ -130,12 +130,16 @@ static void handle_supervisor_signal(int) {
 static std::string build_openconnect_command(const Config &cfg,
                                              const std::string &password) {
   std::ostringstream cmd;
+  std::string openconnect_path = utils::get_openconnect_path();
   std::string heredoc_marker = "__EXV_PASSWORD_EOF__";
   while (password.find(heredoc_marker) != std::string::npos) {
     heredoc_marker += "_X";
   }
 
-  cmd << "exec openconnect " << utils::shell_quote(cfg.server)
+  cmd << "exec "
+      << utils::shell_quote(openconnect_path.empty() ? std::string("openconnect")
+                                                     : openconnect_path)
+      << " " << utils::shell_quote(cfg.server)
       << " --useragent "
       << utils::shell_quote(cfg.useragent) << " -m " << cfg.mtu << " -u "
       << utils::shell_quote(cfg.username) << " --passwd-on-stdin"
@@ -282,6 +286,39 @@ int start(const Config &cfg, int retry_limit) {
     logger::info("openconnect installed via Homebrew");
   }
 
+  if (!utils::check_root()) {
+    Config validated_cfg = cfg;
+    if (validated_cfg.username.empty()) {
+      utils::print_error("Username not configured!");
+      utils::print_info("Use 'exv config set username <your_username>' to set it.");
+      return 1;
+    }
+    if (validated_cfg.remember_password && validated_cfg.password.empty()) {
+      utils::print_error("Password not configured!");
+      utils::print_info("Run: exv config set password");
+      return 1;
+    }
+    if (validated_cfg.server.empty()) {
+      utils::print_error("Server not configured!");
+      return 1;
+    }
+
+    std::string plaintext_password = config::get_plaintext_password(validated_cfg);
+    if (plaintext_password.empty()) {
+      return 1;
+    }
+
+    if (helper::is_available()) {
+      return helper::start_via_helper(validated_cfg, plaintext_password, retry_limit)
+                 ? 0
+                 : 1;
+    }
+
+    utils::print_error("Root privileges required to start the VPN. Install the helper with 'sudo exv service install' or run with sudo.");
+    logger::error("Not running as root for VPN start and helper is unavailable");
+    return 1;
+  }
+
   // Check if VPN is already running
   pid_t supervisor_pid = read_supervisor_pid();
   if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
@@ -326,20 +363,19 @@ int start(const Config &cfg, int retry_limit) {
     return 1; // error already printed by get_plaintext_password
   }
 
-  if (!utils::check_root()) {
-    if (helper::is_available()) {
-      return helper::start_via_helper(cfg, plaintext_password, retry_limit) ? 0 : 1;
-    }
-    utils::print_error("Root privileges required to start the VPN. Install the helper with 'sudo exv service install' or run with sudo.");
-    logger::error("Not running as root for VPN start and helper is unavailable");
-    return 1;
-  }
-
   return start_with_password(cfg, plaintext_password, retry_limit);
 }
 
 int start_with_password(const Config &cfg, const std::string &plaintext_password,
                         int retry_limit) {
+  std::string openconnect_path = utils::get_openconnect_path();
+  if (openconnect_path.empty()) {
+    utils::print_error("openconnect is not installed or is not reachable by the current execution environment.");
+    utils::print_info("Install openconnect or ensure it is available at a stable path such as /opt/homebrew/bin/openconnect.");
+    logger::error("openconnect binary could not be resolved for VPN start");
+    return 1;
+  }
+
   // ── Generate tunnel script ─────────────────────────────────
   utils::print_info("Generating tunnel script...");
   if (!tunnel::write_script(cfg)) {
@@ -450,7 +486,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   std::string vpn_interface;
   std::string internal_ip;
   bool route_ready = false;
-  for (int i = 0; i < 240; ++i) {
+  for (int i = 0; i < 20; ++i) {
     usleep(250000);
     vpn_pid = read_pid();
     route_ready = read_route_ready(&vpn_interface, &internal_ip);
@@ -492,10 +528,29 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
     logger::info("VPN started, PID: " + std::to_string(vpn_pid) +
                  ", supervisor PID: " + std::to_string(supervisor_pid));
   } else {
+    if (vpn_pid > 0 && !is_process_alive(vpn_pid))
+      vpn_pid = -1;
+
     utils::print_warning("VPN process started, but network routes are not ready yet.");
+    if (vpn_pid > 0) {
+      std::cout << utils::DIM << "  PID: " << vpn_pid << utils::RESET
+                << std::endl;
+    }
+    std::cout << utils::DIM << "  Supervisor PID: " << supervisor_pid
+              << utils::RESET << std::endl;
+    std::cout << utils::DIM << "  Server: " << cfg.server << utils::RESET
+              << std::endl;
+    std::cout << utils::DIM << "  Routes: " << cfg.routes.size()
+              << " configured" << utils::RESET << std::endl;
+    std::cout << utils::DIM << "  Auto-reconnect: "
+              << (retry_limit < 0 ? std::string("infinite")
+                                  : std::to_string(retry_limit) + " retries")
+              << utils::RESET << std::endl;
+    std::cout << std::endl;
     utils::print_info("Check status with: exv status");
     utils::print_info("Check logs with: exv logs");
-    logger::warn("VPN supervisor started but route-ready marker not yet detected");
+    utils::print_info("Stop with: sudo exv stop");
+    logger::warn("VPN supervisor started and returned before route-ready marker was detected");
   }
 
   return 0;

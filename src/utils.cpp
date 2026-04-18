@@ -235,9 +235,24 @@ bool write_file(const std::string &path, const std::string &content) {
 
 // ── System checks ───────────────────────────────────────────────
 
-bool check_openconnect() {
-  return system("which openconnect > /dev/null 2>&1") == 0;
+std::string get_openconnect_path() {
+  const char *candidates[] = {"/opt/homebrew/bin/openconnect",
+                              "/usr/local/bin/openconnect",
+                              "/usr/bin/openconnect",
+                              "/bin/openconnect"};
+  for (const char *candidate : candidates) {
+    if (candidate && access(candidate, X_OK) == 0)
+      return candidate;
+  }
+
+  std::string resolved =
+      trim(run_command_output("command -v openconnect 2>/dev/null"));
+  if (!resolved.empty() && access(resolved.c_str(), X_OK) == 0)
+    return resolved;
+  return "";
 }
+
+bool check_openconnect() { return !get_openconnect_path().empty(); }
 
 bool check_root() { return geteuid() == 0; }
 

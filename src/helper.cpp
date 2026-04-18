@@ -549,6 +549,16 @@ void daemon_signal_handler(int) {
   }
 }
 
+void set_close_on_exec(int fd) {
+  if (fd < 0)
+    return;
+
+  int flags = fcntl(fd, F_GETFD);
+  if (flags < 0)
+    return;
+  fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
 bool connect_socket(int *out_fd) {
   if (!out_fd)
     return false;
@@ -594,8 +604,15 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
   ssize_t n = 0;
   while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
     raw.append(buffer, buffer + n);
+    if (raw.find('\n') != std::string::npos)
+      break;
   }
   close(fd);
+
+  std::size_t newline_pos = raw.find('\n');
+  if (newline_pos != std::string::npos)
+    raw.resize(newline_pos);
+  raw = utils::trim(raw);
 
   if (raw.empty()) {
     if (error_message)
@@ -627,6 +644,12 @@ bool wait_until_available(int attempts = 1, useconds_t delay_us = 0) {
     }
   }
   return false;
+}
+
+void reap_finished_request_handlers() {
+  int status = 0;
+  while (waitpid(-1, &status, WNOHANG) > 0) {
+  }
 }
 
 nlohmann::json make_error(const std::string &message) {
@@ -867,6 +890,21 @@ nlohmann::json handle_request(uid_t peer_uid, gid_t peer_gid,
   if (action == "status")
     return handle_status(peer_uid);
   return make_error("Unknown helper action.");
+}
+
+void process_client_request(int client_fd, uid_t peer_uid, gid_t peer_gid,
+                            const std::string &raw) {
+  nlohmann::json response;
+  try {
+    nlohmann::json request = nlohmann::json::parse(raw);
+    response = handle_request(peer_uid, peer_gid, request);
+  } catch (...) {
+    response = make_error("Failed to parse helper request.");
+  }
+
+  std::string payload = response.dump();
+  payload.push_back('\n');
+  write(client_fd, payload.data(), payload.size());
 }
 
 bool print_running_status(const nlohmann::json &response) {
@@ -1213,6 +1251,8 @@ int daemon_main() {
   }
 
   while (!daemon_stop_requested) {
+    reap_finished_request_handlers();
+
     int client_fd = accept(daemon_server_fd, nullptr, nullptr);
     if (client_fd < 0) {
       if (errno == EINTR)
@@ -1221,6 +1261,8 @@ int daemon_main() {
         break;
       continue;
     }
+
+    set_close_on_exec(client_fd);
 
     uid_t peer_uid = 0;
     gid_t peer_gid = 0;
@@ -1236,19 +1278,34 @@ int daemon_main() {
       raw.append(buffer, buffer + n);
     }
 
-    nlohmann::json response;
-    try {
-      nlohmann::json request = nlohmann::json::parse(raw);
-      response = handle_request(peer_uid, peer_gid, request);
-    } catch (...) {
-      response = make_error("Failed to parse helper request.");
+    pid_t handler_pid = fork();
+    if (handler_pid < 0) {
+      nlohmann::json response =
+          make_error("Failed to launch EXV helper request handler.");
+      std::string payload = response.dump();
+      payload.push_back('\n');
+      write(client_fd, payload.data(), payload.size());
+      close(client_fd);
+      continue;
     }
 
-    std::string payload = response.dump();
-    payload.push_back('\n');
-    write(client_fd, payload.data(), payload.size());
+    if (handler_pid == 0) {
+      signal(SIGTERM, SIG_DFL);
+      signal(SIGINT, SIG_DFL);
+      signal(SIGCHLD, SIG_DFL);
+      signal(SIGPIPE, SIG_IGN);
+      if (daemon_server_fd >= 0)
+        close(daemon_server_fd);
+      daemon_server_fd = -1;
+      process_client_request(client_fd, peer_uid, peer_gid, raw);
+      close(client_fd);
+      _exit(0);
+    }
+
     close(client_fd);
   }
+
+  reap_finished_request_handlers();
 
   SessionState state;
   if (load_session_state(&state)) {

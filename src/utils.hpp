@@ -60,6 +60,7 @@ std::string read_file(const std::string &path);
 bool write_file(const std::string &path, const std::string &content);
 
 // System checks
+std::string get_openconnect_path();
 bool check_openconnect();
 bool check_root();
 int run_command(const std::string &cmd);
