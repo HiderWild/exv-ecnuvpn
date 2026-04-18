@@ -13,6 +13,7 @@ set(SOURCES
     src/main.cpp
     src/config.cpp
     src/crypto.cpp
+    src/helper.cpp
     src/vpn.cpp
     src/tunnel.cpp
     src/logger.cpp

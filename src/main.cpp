@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "helper.hpp"
 #include "logger.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
@@ -87,6 +88,8 @@ static void print_help() {
             << "                 Show VPN status" << std::endl;
   std::cout << "  " << utils::GREEN << "config, -c" << utils::RESET
             << "                 Manage configuration" << std::endl;
+  std::cout << "  " << utils::GREEN << "service" << utils::RESET
+            << "                    Manage the root helper service" << std::endl;
   std::cout << "  " << utils::GREEN << "logs, -l" << utils::RESET
             << "                   View recent logs" << std::endl;
   std::cout << "  " << utils::GREEN << "help, -h" << utils::RESET
@@ -123,15 +126,25 @@ static void print_help() {
   std::cout << "  " << utils::YELLOW << "config key reset" << utils::RESET
             << "            Regenerate key (clears password)" << std::endl;
   std::cout << std::endl;
+  std::cout << utils::BOLD << "SERVICE SUBCOMMANDS:" << utils::RESET << std::endl;
+  std::cout << "  " << utils::YELLOW << "service install" << utils::RESET
+            << "            Install launchd helper (needs sudo once)" << std::endl;
+  std::cout << "  " << utils::YELLOW << "service uninstall" << utils::RESET
+            << "          Remove launchd helper" << std::endl;
+  std::cout << "  " << utils::YELLOW << "service status" << utils::RESET
+            << "             Show helper status" << std::endl;
+  std::cout << std::endl;
   std::cout << utils::BOLD << "EXAMPLES:" << utils::RESET << std::endl;
   std::cout
-      << utils::DIM << "  sudo exv                               # Start VPN"
+      << utils::DIM << "  sudo exv service install               # Install root helper once"
       << std::endl
-      << "  sudo exv -rt 3                         # Retry reconnect 3 times"
+      << "  exv                                    # Start VPN via helper"
       << std::endl
-      << "  sudo exv -rt                           # Retry reconnect forever"
+      << "  exv -rt 3                              # Retry reconnect 3 times"
       << std::endl
-      << "  sudo exv stop                          # Stop VPN" << std::endl
+      << "  exv -rt                                # Retry reconnect forever"
+      << std::endl
+      << "  exv stop                               # Stop VPN" << std::endl
       << "  exv status                             # Check status" << std::endl
       << "  exv config set username                # Set username" << std::endl
       << "  exv config set password                # Set password (hidden)"
@@ -147,6 +160,24 @@ static void print_help() {
 static void print_version() {
   std::cout << utils::BOLD << APP_NAME << utils::RESET << " version "
             << utils::GREEN << ECNUVPN_VERSION << utils::RESET << std::endl;
+}
+
+static int handle_service(const std::vector<std::string> &args) {
+  if (args.size() <= 2 || args[2] == "status") {
+    return helper::show_service_status();
+  }
+
+  std::string subcmd = args[2];
+  if (subcmd == "install") {
+    return helper::install_service(utils::get_executable_path());
+  }
+  if (subcmd == "uninstall") {
+    return helper::uninstall_service();
+  }
+
+  utils::print_error("Unknown service subcommand: " + subcmd);
+  utils::print_info("Available: install, uninstall, status");
+  return 1;
 }
 
 static int handle_config(const std::vector<std::string> &args) {
@@ -249,11 +280,16 @@ static int handle_config(const std::vector<std::string> &args) {
 }
 
 int main(int argc, char *argv[]) {
-  logger::init();
-
   std::vector<std::string> raw_args;
   for (int i = 0; i < argc; ++i) {
     raw_args.emplace_back(argv[i]);
+  }
+
+  if (raw_args.size() > 1 && raw_args[1] == "__helper-daemon") {
+    return helper::daemon_main();
+  }
+  if (raw_args.size() > 2 && raw_args[1] == "__helper-exec") {
+    return helper::worker_main(raw_args[2]);
   }
 
   ParsedArgs parsed = parse_args(raw_args);
@@ -298,9 +334,14 @@ int main(int argc, char *argv[]) {
     return vpn::status();
   }
   if (cmd == "config" || cmd == "-c") {
+    logger::init();
     return handle_config(args);
   }
+  if (cmd == "service") {
+    return handle_service(args);
+  }
   if (cmd == "logs" || cmd == "-l") {
+    logger::init();
     logger::show_logs();
     return 0;
   }

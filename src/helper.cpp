@@ -1,0 +1,1099 @@
+#include "helper.hpp"
+
+#include "logger.hpp"
+#include "utils.hpp"
+#include "vpn.hpp"
+
+#include <cerrno>
+#include <csignal>
+#include <cstring>
+#include <cstdio>
+#include <fcntl.h>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <vector>
+
+namespace ecnuvpn {
+namespace helper {
+
+namespace {
+
+constexpr const char *kHelperLabel = "com.ecnu.exv.helper";
+constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
+constexpr const char *kHelperStatePath = "/var/run/exv-helper-session.json";
+constexpr const char *kHelperPlistPath =
+    "/Library/LaunchDaemons/com.ecnu.exv.helper.plist";
+constexpr const char *kStableInstallPath = "/usr/local/bin/exv";
+
+volatile sig_atomic_t daemon_stop_requested = 0;
+int daemon_server_fd = -1;
+
+struct SessionState {
+  uid_t uid = static_cast<uid_t>(-1);
+  gid_t gid = static_cast<gid_t>(-1);
+  std::string username;
+  std::string home;
+  std::string config_dir;
+  std::string server;
+  int route_count = 0;
+  int retry_limit = 0;
+};
+
+struct RuntimeSnapshot {
+  bool running = false;
+  pid_t pid = -1;
+  pid_t supervisor_pid = -1;
+  bool network_ready = false;
+  std::string interface_name;
+  std::string internal_ip;
+  std::string interfaces_output;
+};
+
+std::string pid_path_for(const SessionState &state) {
+  return state.config_dir + "/ecnuvpn.pid";
+}
+
+std::string supervisor_pid_path_for(const SessionState &state) {
+  return state.config_dir + "/ecnuvpn-supervisor.pid";
+}
+
+std::string route_ready_path_for(const SessionState &state) {
+  return state.config_dir + "/route-ready";
+}
+
+void remove_file_if_exists(const std::string &path) {
+  if (utils::file_exists(path)) {
+    std::remove(path.c_str());
+  }
+}
+
+bool copy_file_contents(const std::string &source_path,
+                        const std::string &target_path,
+                        int *error_number = nullptr) {
+  if (error_number)
+    *error_number = 0;
+
+  int src_fd = open(source_path.c_str(), O_RDONLY);
+  if (src_fd < 0) {
+    if (error_number)
+      *error_number = errno;
+    return false;
+  }
+
+  std::string temp_template = target_path + ".tmp.XXXXXX";
+  std::vector<char> temp_path(temp_template.begin(), temp_template.end());
+  temp_path.push_back('\0');
+
+  int dst_fd = mkstemp(temp_path.data());
+  if (dst_fd < 0) {
+    int saved_errno = errno;
+    close(src_fd);
+    if (error_number)
+      *error_number = saved_errno;
+    return false;
+  }
+
+  bool ok = true;
+  int saved_errno = 0;
+  char buffer[16384];
+  while (ok) {
+    ssize_t read_size = read(src_fd, buffer, sizeof(buffer));
+    if (read_size == 0)
+      break;
+    if (read_size < 0) {
+      if (errno == EINTR)
+        continue;
+      saved_errno = errno;
+      ok = false;
+      break;
+    }
+
+    ssize_t total_written = 0;
+    while (total_written < read_size) {
+      ssize_t write_size =
+          write(dst_fd, buffer + total_written, read_size - total_written);
+      if (write_size < 0) {
+        if (errno == EINTR)
+          continue;
+        saved_errno = errno;
+        ok = false;
+        break;
+      }
+      total_written += write_size;
+    }
+  }
+
+  if (ok && fsync(dst_fd) != 0) {
+    saved_errno = errno;
+    ok = false;
+  }
+  if (ok && chmod(temp_path.data(), 0755) != 0) {
+    saved_errno = errno;
+    ok = false;
+  }
+
+  close(src_fd);
+  if (close(dst_fd) != 0 && ok) {
+    saved_errno = errno;
+    ok = false;
+  }
+
+  if (ok && rename(temp_path.data(), target_path.c_str()) != 0) {
+    saved_errno = errno;
+    ok = false;
+  }
+
+  if (!ok) {
+    std::remove(temp_path.data());
+    if (error_number)
+      *error_number = saved_errno;
+    errno = saved_errno;
+    return false;
+  }
+
+  return true;
+}
+
+int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
+  utils::print_warning(
+      "EXV helper service should be installed from a stable system path.");
+  std::cout << utils::DIM << "  Current executable: " << current_path
+            << utils::RESET << std::endl;
+  std::cout << utils::DIM << "  Stable target: " << kStableInstallPath
+            << utils::RESET << std::endl;
+  std::cout << std::endl;
+  std::cout << "  Continue by copying this exv binary to " << kStableInstallPath
+            << " and re-running service installation from there? [Y/n]: ";
+
+  std::string input;
+  std::getline(std::cin, input);
+  input = utils::trim(input);
+  if (!input.empty() && input[0] != 'y' && input[0] != 'Y') {
+    utils::print_info("Service installation canceled.");
+    return 1;
+  }
+
+  if (!utils::ensure_dir("/usr/local") || !utils::ensure_dir("/usr/local/bin")) {
+    utils::print_error("Failed to ensure /usr/local/bin exists.");
+    return 1;
+  }
+
+  utils::print_info("Copying current exv binary to /usr/local/bin/exv ...");
+  int copy_error = 0;
+  if (!copy_file_contents(current_path, kStableInstallPath, &copy_error)) {
+    utils::print_error("Failed to copy exv to /usr/local/bin/exv: " +
+                       std::string(std::strerror(copy_error)));
+    return 1;
+  }
+
+  utils::print_success("Stable exv binary updated at /usr/local/bin/exv.");
+  utils::print_info("Re-running service installation from the copied binary...");
+  execl(kStableInstallPath, kStableInstallPath, "service", "install",
+        static_cast<char *>(nullptr));
+
+  utils::print_error("Failed to launch /usr/local/bin/exv: " +
+                     std::string(std::strerror(errno)));
+  return 1;
+}
+
+void clear_runtime_state(const SessionState &state) {
+  if (state.config_dir.empty())
+    return;
+  remove_file_if_exists(pid_path_for(state));
+  remove_file_if_exists(supervisor_pid_path_for(state));
+  remove_file_if_exists(route_ready_path_for(state));
+}
+
+pid_t read_pid_file(const std::string &path) {
+  if (!utils::file_exists(path))
+    return -1;
+  std::string content = utils::trim(utils::read_file(path));
+  if (content.empty())
+    return -1;
+  try {
+    return static_cast<pid_t>(std::stoi(content));
+  } catch (...) {
+    return -1;
+  }
+}
+
+bool is_process_alive(pid_t pid) {
+  if (pid <= 0)
+    return false;
+  if (kill(pid, 0) == 0)
+    return true;
+  return errno == EPERM;
+}
+
+pid_t find_openconnect_pid() {
+  std::string output = utils::trim(utils::run_command_output("pgrep -x openconnect"));
+  if (output.empty())
+    return -1;
+  std::istringstream iss(output);
+  std::string first;
+  std::getline(iss, first);
+  try {
+    return static_cast<pid_t>(std::stoi(first));
+  } catch (...) {
+    return -1;
+  }
+}
+
+bool read_route_ready(const SessionState &state, std::string *interface_name,
+                      std::string *internal_ip) {
+  std::string path = route_ready_path_for(state);
+  if (!utils::file_exists(path))
+    return false;
+
+  std::istringstream iss(utils::read_file(path));
+  std::string tun;
+  std::string ip;
+  if (!std::getline(iss, tun) || !std::getline(iss, ip))
+    return false;
+
+  tun = utils::trim(tun);
+  ip = utils::trim(ip);
+  if (tun.empty() || ip.empty())
+    return false;
+
+  if (interface_name)
+    *interface_name = tun;
+  if (internal_ip)
+    *internal_ip = ip;
+  return true;
+}
+
+nlohmann::json to_json(const SessionState &state) {
+  return nlohmann::json{{"uid", static_cast<unsigned int>(state.uid)},
+                        {"gid", static_cast<unsigned int>(state.gid)},
+                        {"username", state.username},
+                        {"home", state.home},
+                        {"config_dir", state.config_dir},
+                        {"server", state.server},
+                        {"route_count", state.route_count},
+                        {"retry_limit", state.retry_limit}};
+}
+
+bool from_json(const nlohmann::json &j, SessionState *state) {
+  if (!state)
+    return false;
+  try {
+    state->uid = static_cast<uid_t>(j.at("uid").get<unsigned int>());
+    state->gid = static_cast<gid_t>(j.at("gid").get<unsigned int>());
+    state->username = j.at("username").get<std::string>();
+    state->home = j.at("home").get<std::string>();
+    state->config_dir = j.at("config_dir").get<std::string>();
+    state->server = j.value("server", std::string());
+    state->route_count = j.value("route_count", 0);
+    state->retry_limit = j.value("retry_limit", 0);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool save_session_state(const SessionState &state) {
+  std::ofstream ofs(kHelperStatePath);
+  if (!ofs.is_open())
+    return false;
+  ofs << to_json(state).dump(2);
+  ofs.close();
+  chmod(kHelperStatePath, 0600);
+  return ofs.good();
+}
+
+bool load_session_state(SessionState *state) {
+  if (!state || !utils::file_exists(kHelperStatePath))
+    return false;
+  try {
+    nlohmann::json j = nlohmann::json::parse(utils::read_file(kHelperStatePath));
+    return from_json(j, state);
+  } catch (...) {
+    return false;
+  }
+}
+
+void clear_session_state() { remove_file_if_exists(kHelperStatePath); }
+
+RuntimeSnapshot inspect_runtime(const SessionState &state) {
+  RuntimeSnapshot snapshot;
+  if (state.config_dir.empty())
+    return snapshot;
+
+  snapshot.supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
+  if (!is_process_alive(snapshot.supervisor_pid))
+    snapshot.supervisor_pid = -1;
+
+  snapshot.pid = read_pid_file(pid_path_for(state));
+  if (!is_process_alive(snapshot.pid))
+    snapshot.pid = -1;
+
+  if (snapshot.pid <= 0)
+    snapshot.pid = find_openconnect_pid();
+
+  snapshot.network_ready =
+      read_route_ready(state, &snapshot.interface_name, &snapshot.internal_ip);
+  snapshot.running = snapshot.pid > 0 || snapshot.supervisor_pid > 0;
+
+  if (snapshot.running) {
+    snapshot.interfaces_output =
+        utils::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
+  }
+
+  return snapshot;
+}
+
+bool create_request_file(const nlohmann::json &request, std::string *out_path) {
+  if (!out_path)
+    return false;
+
+  char path_template[] = "/var/run/exv-helper-request-XXXXXX";
+  int fd = mkstemp(path_template);
+  if (fd < 0)
+    return false;
+
+  chmod(path_template, 0600);
+  std::string payload = request.dump();
+  ssize_t written = write(fd, payload.data(), payload.size());
+  close(fd);
+  if (written != static_cast<ssize_t>(payload.size())) {
+    remove_file_if_exists(path_template);
+    return false;
+  }
+
+  *out_path = path_template;
+  return true;
+}
+
+void daemon_signal_handler(int) {
+  daemon_stop_requested = 1;
+  if (daemon_server_fd >= 0) {
+    close(daemon_server_fd);
+    daemon_server_fd = -1;
+  }
+}
+
+bool connect_socket(int *out_fd) {
+  if (!out_fd)
+    return false;
+
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0)
+    return false;
+
+  sockaddr_un addr {};
+  addr.sun_family = AF_UNIX;
+  std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", kHelperSocketPath);
+
+  if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
+    close(fd);
+    return false;
+  }
+
+  *out_fd = fd;
+  return true;
+}
+
+bool send_request(const nlohmann::json &request, nlohmann::json *response,
+                  std::string *error_message = nullptr) {
+  int fd = -1;
+  if (!connect_socket(&fd)) {
+    if (error_message)
+      *error_message = "EXV helper is not available.";
+    return false;
+  }
+
+  std::string payload = request.dump();
+  payload.push_back('\n');
+  if (write(fd, payload.data(), payload.size()) != static_cast<ssize_t>(payload.size())) {
+    if (error_message)
+      *error_message = "Failed to send request to EXV helper.";
+    close(fd);
+    return false;
+  }
+  shutdown(fd, SHUT_WR);
+
+  std::string raw;
+  char buffer[1024];
+  ssize_t n = 0;
+  while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
+    raw.append(buffer, buffer + n);
+  }
+  close(fd);
+
+  if (raw.empty()) {
+    if (error_message)
+      *error_message = "EXV helper returned an empty response.";
+    return false;
+  }
+
+  try {
+    if (response)
+      *response = nlohmann::json::parse(raw);
+    return true;
+  } catch (...) {
+    if (error_message)
+      *error_message = "Failed to parse EXV helper response.";
+    return false;
+  }
+}
+
+bool wait_until_available(int attempts = 1, useconds_t delay_us = 0) {
+  for (int i = 0; i < attempts; ++i) {
+    nlohmann::json response;
+    std::string error_message;
+    if (send_request(nlohmann::json{{"action", "status"}}, &response,
+                     &error_message)) {
+      return true;
+    }
+    if (i + 1 < attempts && delay_us > 0) {
+      usleep(delay_us);
+    }
+  }
+  return false;
+}
+
+nlohmann::json make_error(const std::string &message) {
+  return nlohmann::json{{"ok", false}, {"message", message}};
+}
+
+nlohmann::json make_status_response(const SessionState &state,
+                                    const RuntimeSnapshot &snapshot,
+                                    bool ok = true,
+                                    const std::string &message = "") {
+  return nlohmann::json{{"ok", ok},
+                        {"message", message},
+                        {"running", snapshot.running},
+                        {"pid", snapshot.pid},
+                        {"supervisor_pid", snapshot.supervisor_pid},
+                        {"network_ready", snapshot.network_ready},
+                        {"interface", snapshot.interface_name},
+                        {"internal_ip", snapshot.internal_ip},
+                        {"server", state.server},
+                        {"route_count", state.route_count},
+                        {"retry_limit", state.retry_limit},
+                        {"owner_username", state.username},
+                        {"interfaces_output", snapshot.interfaces_output}};
+}
+
+bool ensure_same_owner(const SessionState &state, uid_t peer_uid) {
+  return peer_uid == 0 || state.uid == peer_uid;
+}
+
+nlohmann::json handle_status(uid_t peer_uid) {
+  SessionState state;
+  if (!load_session_state(&state)) {
+    return nlohmann::json{{"ok", true}, {"running", false}};
+  }
+
+  if (!ensure_same_owner(state, peer_uid)) {
+    return make_error("VPN session belongs to another local user.");
+  }
+
+  RuntimeSnapshot snapshot = inspect_runtime(state);
+  if (!snapshot.running) {
+    clear_runtime_state(state);
+    clear_session_state();
+    return nlohmann::json{{"ok", true}, {"running", false}};
+  }
+
+  return make_status_response(state, snapshot);
+}
+
+bool stop_managed_session(const SessionState &state, std::string *message) {
+  pid_t supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
+  if (!is_process_alive(supervisor_pid))
+    supervisor_pid = -1;
+
+  pid_t pid = read_pid_file(pid_path_for(state));
+  if (!is_process_alive(pid))
+    pid = -1;
+
+  if (pid <= 0)
+    pid = find_openconnect_pid();
+
+  if (pid <= 0 && supervisor_pid <= 0) {
+    clear_runtime_state(state);
+    if (message)
+      *message = "No openconnect process found. VPN is not running.";
+    return false;
+  }
+
+  if (supervisor_pid > 0)
+    kill(supervisor_pid, SIGTERM);
+  if (pid > 0)
+    kill(pid, SIGTERM);
+
+  for (int i = 0; i < 10; ++i) {
+    usleep(300000);
+    if ((pid <= 0 || !is_process_alive(pid)) &&
+        (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))) {
+      break;
+    }
+  }
+
+  if (pid > 0 && is_process_alive(pid))
+    kill(pid, SIGKILL);
+  if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
+    kill(supervisor_pid, SIGKILL);
+
+  usleep(500000);
+
+  pid_t remaining_pid = find_openconnect_pid();
+  if (remaining_pid > 0 && remaining_pid != pid) {
+    kill(remaining_pid, SIGKILL);
+    usleep(500000);
+  }
+
+  if ((pid > 0 && is_process_alive(pid)) ||
+      (remaining_pid > 0 && is_process_alive(remaining_pid)) ||
+      (supervisor_pid > 0 && is_process_alive(supervisor_pid))) {
+    if (message)
+      *message = "Failed to stop VPN connection!";
+    return false;
+  }
+
+  clear_runtime_state(state);
+  if (message)
+    *message = "VPN connection stopped successfully! 🎉";
+  return true;
+}
+
+nlohmann::json handle_stop(uid_t peer_uid) {
+  SessionState state;
+  if (!load_session_state(&state)) {
+    return make_error("No openconnect process found. VPN is not running.");
+  }
+
+  if (!ensure_same_owner(state, peer_uid)) {
+    return make_error("VPN session belongs to another local user.");
+  }
+
+  std::string message;
+  bool ok = stop_managed_session(state, &message);
+  if (ok) {
+    clear_session_state();
+    return nlohmann::json{{"ok", true}, {"message", message}};
+  }
+
+  RuntimeSnapshot snapshot = inspect_runtime(state);
+  if (!snapshot.running)
+    clear_session_state();
+  return make_error(message);
+}
+
+nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
+                            const nlohmann::json &request) {
+  SessionState existing;
+  if (load_session_state(&existing)) {
+    RuntimeSnapshot current = inspect_runtime(existing);
+    if (current.running) {
+      if (!ensure_same_owner(existing, peer_uid)) {
+        return make_error("VPN session belongs to another local user.");
+      }
+      return nlohmann::json{{"ok", false},
+                            {"message", "VPN is already running."},
+                            {"running", true},
+                            {"pid", current.pid},
+                            {"supervisor_pid", current.supervisor_pid}};
+    }
+    clear_runtime_state(existing);
+    clear_session_state();
+  }
+
+  Config cfg;
+  std::string plaintext_password;
+  int retry_limit = 0;
+  try {
+    cfg = request.at("config").get<Config>();
+    plaintext_password = request.at("password").get<std::string>();
+    retry_limit = request.value("retry_limit", 0);
+  } catch (...) {
+    return make_error("Invalid start request payload.");
+  }
+
+  SessionState state;
+  state.uid = peer_uid;
+  state.gid = peer_gid;
+  state.username = utils::get_username_for_uid(peer_uid);
+  state.home = utils::get_home_for_uid(peer_uid);
+  state.config_dir = utils::get_config_dir_for_uid(peer_uid);
+  state.server = cfg.server;
+  state.route_count = static_cast<int>(cfg.routes.size());
+  state.retry_limit = retry_limit;
+
+  nlohmann::json worker_request{{"uid", static_cast<unsigned int>(state.uid)},
+                                {"gid", static_cast<unsigned int>(state.gid)},
+                                {"home", state.home},
+                                {"config_dir", state.config_dir},
+                                {"retry_limit", retry_limit},
+                                {"password", plaintext_password},
+                                {"config", cfg}};
+
+  std::string request_path;
+  if (!create_request_file(worker_request, &request_path)) {
+    return make_error("Failed to prepare helper request file.");
+  }
+
+  std::string executable_path = utils::get_executable_path();
+  pid_t worker_pid = fork();
+  if (worker_pid < 0) {
+    remove_file_if_exists(request_path);
+    return make_error("Failed to launch EXV helper worker.");
+  }
+
+  if (worker_pid == 0) {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDOUT_FILENO);
+      dup2(devnull, STDERR_FILENO);
+      close(devnull);
+    }
+    execl(executable_path.c_str(), executable_path.c_str(), "__helper-exec",
+          request_path.c_str(), static_cast<char *>(nullptr));
+    _exit(127);
+  }
+
+  int status = 0;
+  while (waitpid(worker_pid, &status, 0) < 0) {
+    if (errno != EINTR) {
+      status = -1;
+      break;
+    }
+  }
+
+  remove_file_if_exists(request_path);
+
+  RuntimeSnapshot snapshot = inspect_runtime(state);
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && snapshot.running) {
+    save_session_state(state);
+    if (snapshot.network_ready) {
+      return make_status_response(state, snapshot, true,
+                                  "VPN connected successfully!");
+    }
+    return make_status_response(
+        state, snapshot, true,
+        "VPN process started, but network routes are not ready yet.");
+  }
+
+  clear_runtime_state(state);
+  clear_session_state();
+  return make_error("Failed to establish the VPN connection. Check logs with: exv logs");
+}
+
+nlohmann::json handle_request(uid_t peer_uid, gid_t peer_gid,
+                              const nlohmann::json &request) {
+  std::string action = request.value("action", std::string());
+  if (action == "start")
+    return handle_start(peer_uid, peer_gid, request);
+  if (action == "stop")
+    return handle_stop(peer_uid);
+  if (action == "status")
+    return handle_status(peer_uid);
+  return make_error("Unknown helper action.");
+}
+
+bool print_running_status(const nlohmann::json &response) {
+  bool running = response.value("running", false);
+  if (!running) {
+    std::cout << utils::RED << utils::BOLD << "  ● VPN is NOT RUNNING"
+              << utils::RESET << std::endl;
+    std::cout << std::endl;
+    return true;
+  }
+
+  std::cout << utils::GREEN << utils::BOLD << "  ● VPN is RUNNING"
+            << utils::RESET << std::endl;
+  std::cout << std::endl;
+
+  int pid = response.value("pid", -1);
+  int supervisor_pid = response.value("supervisor_pid", -1);
+  if (pid > 0)
+    std::cout << "  PID            : " << pid << std::endl;
+  if (supervisor_pid > 0)
+    std::cout << "  Supervisor PID : " << supervisor_pid << std::endl;
+  std::cout << "  Network Ready  : "
+            << (response.value("network_ready", false)
+                    ? "yes"
+                    : "no (waiting for tunnel script)")
+            << std::endl;
+  if (response.value("network_ready", false)) {
+    std::cout << "  Interface      : "
+              << response.value("interface", std::string()) << std::endl;
+    std::cout << "  Internal IP    : "
+              << response.value("internal_ip", std::string()) << std::endl;
+  }
+
+  std::string interfaces_output = response.value("interfaces_output", std::string());
+  if (!interfaces_output.empty()) {
+    std::cout << std::endl;
+    std::cout << utils::DIM << "  Network Interfaces:" << utils::RESET
+              << std::endl;
+    std::istringstream iss(interfaces_output);
+    std::string line;
+    while (std::getline(iss, line)) {
+      std::cout << "    " << line << std::endl;
+    }
+  }
+
+  std::cout << std::endl;
+  return true;
+}
+
+} // namespace
+
+bool is_available() {
+  return wait_until_available();
+}
+
+bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
+                      int retry_limit) {
+  nlohmann::json response;
+  std::string error_message;
+  if (!send_request(nlohmann::json{{"action", "start"},
+                                   {"config", cfg},
+                                   {"password", plaintext_password},
+                                   {"retry_limit", retry_limit}},
+                    &response, &error_message)) {
+    utils::print_error(error_message);
+    return false;
+  }
+
+  if (!response.value("ok", false)) {
+    std::string message = response.value("message", std::string("Start failed."));
+    if (message.find("already running") != std::string::npos) {
+      utils::print_warning(message);
+      int pid = response.value("pid", -1);
+      int supervisor_pid = response.value("supervisor_pid", -1);
+      if (pid > 0 || supervisor_pid > 0) {
+        utils::print_info("Use 'exv stop' to stop the current connection first.");
+      }
+    } else {
+      utils::print_error(message);
+    }
+    return false;
+  }
+
+  bool network_ready = response.value("network_ready", false);
+  std::cout << std::endl;
+  if (network_ready) {
+    utils::print_success("VPN connected successfully!");
+  } else {
+    utils::print_warning("VPN process started, but network routes are not ready yet.");
+  }
+  int pid = response.value("pid", -1);
+  int supervisor_pid = response.value("supervisor_pid", -1);
+  if (pid > 0)
+    std::cout << utils::DIM << "  PID: " << pid << utils::RESET << std::endl;
+  if (supervisor_pid > 0)
+    std::cout << utils::DIM << "  Supervisor PID: " << supervisor_pid
+              << utils::RESET << std::endl;
+  if (network_ready) {
+    std::cout << utils::DIM << "  Interface: "
+              << response.value("interface", std::string()) << utils::RESET
+              << std::endl;
+    std::cout << utils::DIM << "  Internal IP: "
+              << response.value("internal_ip", std::string()) << utils::RESET
+              << std::endl;
+  }
+  std::cout << utils::DIM << "  Server: "
+            << response.value("server", std::string()) << utils::RESET
+            << std::endl;
+  std::cout << utils::DIM << "  Routes: " << response.value("route_count", 0)
+            << " configured" << utils::RESET << std::endl;
+  int helper_retry_limit = response.value("retry_limit", 0);
+  if (helper_retry_limit != 0) {
+    std::cout << utils::DIM << "  Auto-reconnect: "
+              << (helper_retry_limit < 0
+                      ? std::string("infinite")
+                      : std::to_string(helper_retry_limit) + " retries")
+              << utils::RESET << std::endl;
+  }
+  std::cout << std::endl;
+  if (!network_ready) {
+    utils::print_info("Check status with: exv status");
+    utils::print_info("Check logs with: exv logs");
+  }
+  utils::print_info("Stop with: exv stop");
+  return true;
+}
+
+bool stop_via_helper() {
+  nlohmann::json response;
+  std::string error_message;
+  if (!send_request(nlohmann::json{{"action", "stop"}}, &response,
+                    &error_message)) {
+    utils::print_error(error_message);
+    return false;
+  }
+
+  if (!response.value("ok", false)) {
+    utils::print_error(response.value("message",
+                                      std::string("Failed to stop VPN connection.")));
+    return false;
+  }
+
+  std::cout << std::endl;
+  utils::print_success(
+      response.value("message", std::string("VPN connection stopped successfully! 🎉")));
+  return true;
+}
+
+bool show_status_via_helper() {
+  nlohmann::json response;
+  std::string error_message;
+  if (!send_request(nlohmann::json{{"action", "status"}}, &response,
+                    &error_message)) {
+    utils::print_error(error_message);
+    return false;
+  }
+
+  if (!response.value("ok", false)) {
+    utils::print_error(response.value("message",
+                                      std::string("Failed to query EXV helper status.")));
+    return false;
+  }
+
+  return print_running_status(response);
+}
+
+int install_service(const std::string &executable_path) {
+  if (!utils::check_root()) {
+    utils::print_error("Root privileges required. Please run with sudo.");
+    return 1;
+  }
+
+  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
+                                                  : executable_path;
+  if (exec_path.empty()) {
+    utils::print_error("Failed to resolve the exv executable path.");
+    return 1;
+  }
+
+  if (exec_path != kStableInstallPath) {
+    return copy_self_to_stable_path_and_reexec(exec_path);
+  }
+
+  std::string shell_command =
+      "if [ ! -x " + utils::shell_quote(exec_path) +
+      " ]; then exit 0; fi; exec " + utils::shell_quote(exec_path) +
+      " __helper-daemon";
+
+  std::ostringstream plist;
+  plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+  plist << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+           "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
+  plist << "<plist version=\"1.0\">\n";
+  plist << "<dict>\n";
+  plist << "  <key>Label</key>\n";
+  plist << "  <string>" << kHelperLabel << "</string>\n";
+  plist << "  <key>ProgramArguments</key>\n";
+  plist << "  <array>\n";
+  plist << "    <string>/bin/sh</string>\n";
+  plist << "    <string>-c</string>\n";
+  plist << "    <string>" << shell_command << "</string>\n";
+  plist << "  </array>\n";
+  plist << "  <key>RunAtLoad</key>\n";
+  plist << "  <true/>\n";
+  plist << "  <key>KeepAlive</key>\n";
+  plist << "  <dict>\n";
+  plist << "    <key>SuccessfulExit</key>\n";
+  plist << "    <false/>\n";
+  plist << "  </dict>\n";
+  plist << "</dict>\n";
+  plist << "</plist>\n";
+
+  std::ofstream ofs(kHelperPlistPath);
+  if (!ofs.is_open()) {
+    utils::print_error("Failed to write LaunchDaemon plist: " +
+                       std::string(kHelperPlistPath));
+    return 1;
+  }
+  ofs << plist.str();
+  ofs.close();
+  chmod(kHelperPlistPath, 0644);
+
+  utils::run_command(std::string("launchctl bootout system ") + kHelperPlistPath +
+                     " >/dev/null 2>&1");
+  if (utils::run_command(std::string("launchctl bootstrap system ") +
+                         kHelperPlistPath) != 0) {
+    utils::print_error("Failed to bootstrap EXV helper LaunchDaemon.");
+    return 1;
+  }
+
+  bool helper_ready = wait_until_available(50, 100000);
+
+  utils::print_success("EXV helper service installed.");
+  if (!helper_ready) {
+    utils::print_warning(
+        "Helper service was installed, but it has not responded on the socket yet.");
+    utils::print_info("Run 'exv service status' again in a moment if needed.");
+  }
+  utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
+  return 0;
+}
+
+int uninstall_service() {
+  if (!utils::check_root()) {
+    utils::print_error("Root privileges required. Please run with sudo.");
+    return 1;
+  }
+
+  nlohmann::json response;
+  std::string error_message;
+  send_request(nlohmann::json{{"action", "stop"}}, &response, &error_message);
+
+  utils::run_command(std::string("launchctl bootout system ") + kHelperPlistPath +
+                     " >/dev/null 2>&1");
+  remove_file_if_exists(kHelperPlistPath);
+  remove_file_if_exists(kHelperSocketPath);
+  clear_session_state();
+
+  utils::print_success("EXV helper service uninstalled.");
+  return 0;
+}
+
+int show_service_status() {
+  utils::print_header("EXV Service Status");
+
+  bool plist_exists = utils::file_exists(kHelperPlistPath);
+  bool available = plist_exists ? wait_until_available(10, 100000) : false;
+  std::cout << "  Installed       : " << (plist_exists ? "yes" : "no")
+            << std::endl;
+  std::cout << "  Socket Ready    : " << (available ? "yes" : "no")
+            << std::endl;
+
+  if (available) {
+    nlohmann::json response;
+    std::string error_message;
+    if (send_request(nlohmann::json{{"action", "status"}}, &response,
+                     &error_message) && response.value("ok", false)) {
+      std::cout << "  VPN Running     : "
+                << (response.value("running", false) ? "yes" : "no")
+                << std::endl;
+      if (response.value("running", false)) {
+        std::cout << "  Session Owner   : "
+                  << response.value("owner_username", std::string()) << std::endl;
+      }
+    }
+  }
+
+  std::cout << std::endl;
+  return 0;
+}
+
+int worker_main(const std::string &request_path) {
+  try {
+    nlohmann::json request =
+        nlohmann::json::parse(utils::read_file(request_path));
+    Config cfg = request.at("config").get<Config>();
+    std::string plaintext_password = request.at("password").get<std::string>();
+    int retry_limit = request.value("retry_limit", 0);
+    uid_t uid = static_cast<uid_t>(request.at("uid").get<unsigned int>());
+    gid_t gid = static_cast<gid_t>(request.at("gid").get<unsigned int>());
+    std::string home = request.at("home").get<std::string>();
+    std::string config_dir = request.at("config_dir").get<std::string>();
+
+    utils::set_runtime_path_override(home, config_dir);
+    utils::set_runtime_owner(uid, gid);
+    logger::init();
+    int result = vpn::start_with_password(cfg, plaintext_password, retry_limit);
+    utils::clear_runtime_owner();
+    utils::clear_runtime_path_override();
+    return result;
+  } catch (...) {
+    return 1;
+  }
+}
+
+int daemon_main() {
+  signal(SIGTERM, daemon_signal_handler);
+  signal(SIGINT, daemon_signal_handler);
+  signal(SIGPIPE, SIG_IGN);
+
+  remove_file_if_exists(kHelperSocketPath);
+
+  daemon_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (daemon_server_fd < 0)
+    return 1;
+
+  sockaddr_un addr {};
+  addr.sun_family = AF_UNIX;
+  std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", kHelperSocketPath);
+
+  if (bind(daemon_server_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
+    close(daemon_server_fd);
+    daemon_server_fd = -1;
+    return 1;
+  }
+
+  chmod(kHelperSocketPath, 0666);
+
+  if (listen(daemon_server_fd, 8) != 0) {
+    close(daemon_server_fd);
+    daemon_server_fd = -1;
+    remove_file_if_exists(kHelperSocketPath);
+    return 1;
+  }
+
+  while (!daemon_stop_requested) {
+    int client_fd = accept(daemon_server_fd, nullptr, nullptr);
+    if (client_fd < 0) {
+      if (errno == EINTR)
+        continue;
+      if (daemon_stop_requested)
+        break;
+      continue;
+    }
+
+    uid_t peer_uid = 0;
+    gid_t peer_gid = 0;
+    if (getpeereid(client_fd, &peer_uid, &peer_gid) != 0) {
+      close(client_fd);
+      continue;
+    }
+
+    std::string raw;
+    char buffer[1024];
+    ssize_t n = 0;
+    while ((n = read(client_fd, buffer, sizeof(buffer))) > 0) {
+      raw.append(buffer, buffer + n);
+    }
+
+    nlohmann::json response;
+    try {
+      nlohmann::json request = nlohmann::json::parse(raw);
+      response = handle_request(peer_uid, peer_gid, request);
+    } catch (...) {
+      response = make_error("Failed to parse helper request.");
+    }
+
+    std::string payload = response.dump();
+    payload.push_back('\n');
+    write(client_fd, payload.data(), payload.size());
+    close(client_fd);
+  }
+
+  SessionState state;
+  if (load_session_state(&state)) {
+    std::string message;
+    stop_managed_session(state, &message);
+    clear_session_state();
+  }
+
+  if (daemon_server_fd >= 0)
+    close(daemon_server_fd);
+  daemon_server_fd = -1;
+  remove_file_if_exists(kHelperSocketPath);
+  return 0;
+}
+
+} // namespace helper
+} // namespace ecnuvpn

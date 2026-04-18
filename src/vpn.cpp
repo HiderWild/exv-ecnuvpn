@@ -1,5 +1,6 @@
 #include "vpn.hpp"
 #include "config.hpp"
+#include "helper.hpp"
 #include "logger.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
@@ -22,6 +23,8 @@ static void write_pid_file(const std::string &path, pid_t pid) {
   std::ofstream ofs(path);
   if (ofs.is_open()) {
     ofs << pid;
+    ofs.flush();
+    utils::sync_owner(path);
   }
 }
 
@@ -323,6 +326,20 @@ int start(const Config &cfg, int retry_limit) {
     return 1; // error already printed by get_plaintext_password
   }
 
+  if (!utils::check_root()) {
+    if (helper::is_available()) {
+      return helper::start_via_helper(cfg, plaintext_password, retry_limit) ? 0 : 1;
+    }
+    utils::print_error("Root privileges required to start the VPN. Install the helper with 'sudo exv service install' or run with sudo.");
+    logger::error("Not running as root for VPN start and helper is unavailable");
+    return 1;
+  }
+
+  return start_with_password(cfg, plaintext_password, retry_limit);
+}
+
+int start_with_password(const Config &cfg, const std::string &plaintext_password,
+                        int retry_limit) {
   // ── Generate tunnel script ─────────────────────────────────
   utils::print_info("Generating tunnel script...");
   if (!tunnel::write_script(cfg)) {
@@ -345,6 +362,7 @@ int start(const Config &cfg, int retry_limit) {
   supervisor_child_pid = -1;
 
   bool use_supervisor = retry_limit != 0;
+  pid_t supervisor_pid = -1;
 
   if (!use_supervisor) {
     pid_t child_pid = fork();
@@ -486,6 +504,14 @@ int start(const Config &cfg, int retry_limit) {
 int stop() {
   utils::print_header("EXV Stopping");
 
+  if (!utils::check_root()) {
+    if (helper::is_available()) {
+      return helper::stop_via_helper() ? 0 : 1;
+    }
+    utils::print_error("Root privileges required. Please run with sudo.");
+    return 1;
+  }
+
   pid_t supervisor_pid = read_supervisor_pid();
   if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
     remove_supervisor_pid();
@@ -503,11 +529,6 @@ int stop() {
     utils::print_error("No openconnect process found. VPN is not running.");
     clear_runtime_state();
     logger::info("Stop requested but no VPN process found");
-    return 1;
-  }
-
-  if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
@@ -572,6 +593,10 @@ int stop() {
 
 int status() {
   utils::print_header("EXV Status");
+
+  if (helper::is_available()) {
+    return helper::show_status_via_helper() ? 0 : 1;
+  }
 
   pid_t supervisor_pid = read_supervisor_pid();
   bool supervisor_from_pidfile = true;

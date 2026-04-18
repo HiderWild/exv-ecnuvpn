@@ -26,6 +26,8 @@ static void write_log(const std::string &level, const std::string &msg) {
   std::ofstream ofs(log_path, std::ios::app);
   if (ofs.is_open()) {
     ofs << "[" << get_timestamp() << "] [" << level << "] " << msg << std::endl;
+    ofs.flush();
+    utils::sync_owner(log_path);
   }
 }
 

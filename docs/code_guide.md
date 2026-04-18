@@ -20,6 +20,7 @@ ECNU-VPN/
     ├── main.cpp            # CLI 入口
     ├── config.hpp/cpp      # 配置管理
     ├── crypto.hpp/cpp      # AES-256-CBC 加密 + 密钥管理
+    ├── helper.hpp/cpp      # launchd root helper / IPC / service 管理
     ├── vpn.hpp/cpp         # VPN 控制
     ├── tunnel.hpp/cpp      # tunnel.sh 动态生成
     ├── logger.hpp/cpp      # 日志系统
@@ -34,7 +35,7 @@ ECNU-VPN/
 
 - C++17 标准
 - 通过 `target_compile_definitions` 注入 `ECNUVPN_VERSION` 宏
-- 源文件：`src/*.cpp`（7 个文件）
+- 源文件：`src/*.cpp`（8 个文件，含 helper）
 - 依赖：`include/nlohmann/json.hpp`（header-only）
 - 系统依赖：`CommonCrypto`（macOS 内置，无需链接额外 framework）
 
@@ -43,6 +44,7 @@ mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(sysctl -n hw.ncpu)
 sudo cmake --install .          # 安装到 /usr/local/bin
+sudo exv service install        # 安装 launchd root helper
 ```
 
 ---
@@ -180,27 +182,78 @@ bool config::key_reset();    // 调用 crypto::reset_key()
 **文件**：`src/vpn.hpp` / `src/vpn.cpp`
 
 ```cpp
-int vpn::start(const Config& cfg);   // 连接 VPN
-int vpn::stop();                     // 断开 VPN
-int vpn::status();                   // 显示状态
+int vpn::start(const Config& cfg, int retry_limit = 0);
+int vpn::start_with_password(const Config& cfg,
+                             const std::string& plaintext_password,
+                             int retry_limit = 0);
+int vpn::stop();
+int vpn::status();
 ```
 
 #### `start()` 流程
 
 1. **openconnect 检查**：未安装则提示安装（Homebrew 流程）
-2. **sudo 检查**：非 root 则退出
-3. **重复连接检查**：`pgrep -x openconnect`
-4. **配置验证**：username / password 非空
-5. **密码解密**：`config::get_plaintext_password(cfg)`
+2. **配置验证**：username / password / server
+3. **密码解密**：`config::get_plaintext_password(cfg)`
+4. **非 root 时优先走 helper**：若 `/var/run/exv-helper.sock` 可用，则通过本地 Unix socket 请求 root helper
+5. **root 直连或 helper worker**：进入 `start_with_password()`
 6. **生成 tunnel.sh**：`tunnel::write_script(cfg)`
-7. **构建命令**：`echo '<password>' | openconnect ... -b --pid-file=...`
-8. **执行 + 验证**：等待 500ms 后检查 PID
+7. **构建命令**：`echo '<password>' | openconnect ... --script tunnel.sh`
+8. **可选 supervisor**：`-rt` 非 0 时 fork 一个重连监督进程
+9. **执行 + 验证**：轮询 PID 文件和 `route-ready` 标记文件
 
 #### PID 管理
 
 - `~/.ecnuvpn/ecnuvpn.pid` 存储 openconnect PID
+- `~/.ecnuvpn/ecnuvpn-supervisor.pid` 存储自动重连 supervisor PID
+- `~/.ecnuvpn/route-ready` 由 tunnel script 在网络配置完成后写入
 - `stop()` 优先读 PID 文件，失败时 fallback 到 `pgrep`
 - 先发 SIGTERM（等 1.5s），再发 SIGKILL（等 1s）
+
+---
+
+### helper — launchd root helper 与 IPC
+
+**文件**：`src/helper.hpp` / `src/helper.cpp`
+
+```cpp
+bool helper::is_available();
+bool helper::start_via_helper(const Config& cfg,
+                              const std::string& plaintext_password,
+                              int retry_limit);
+bool helper::stop_via_helper();
+bool helper::show_status_via_helper();
+
+int helper::install_service(const std::string& executable_path);
+int helper::uninstall_service();
+int helper::show_service_status();
+
+int helper::daemon_main();
+int helper::worker_main(const std::string& request_path);
+```
+
+#### 设计目标
+
+- **只在安装 helper 时需要一次 sudo**
+- **日常 `exv` / `exv stop` 以普通用户运行**
+- **明文密码仍只在用户侧解密，并通过 root-only 临时请求文件传给 worker**
+- **root 生成的用户运行时文件会被 chown 回对应用户**
+
+#### 运行模型
+
+1. `sudo exv service install` 写入 `/Library/LaunchDaemons/com.ecnu.exv.helper.plist`
+2. launchd 以 root 身份拉起 `exv __helper-daemon`
+3. 普通用户执行 `exv` 时，通过 `/var/run/exv-helper.sock` 发送 JSON 请求
+4. daemon 校验发起者 uid/gid，生成 root-only 临时请求文件
+5. daemon fork `exv __helper-exec <request-file>`
+6. worker 设置 runtime path/owner override 后调用 `vpn::start_with_password()`
+
+`service install` 会把**当前执行中的 `exv` 绝对路径**写入 plist，因此生产环境应从稳定安装路径（如 `/usr/local/bin/exv`）执行该命令。
+
+#### 会话状态
+
+- `/var/run/exv-helper-session.json` 记录当前会话归属用户、配置目录、server、route 数量、retry 配置
+- helper 只允许**会话所属用户**查询/停止自己的连接
 
 ---
 
@@ -219,7 +272,9 @@ bool tunnel::write_script(const Config& cfg);
 生成的脚本逻辑：
 1. 检查 `$reason == "connect"`
 2. `ifconfig $TUNDEV $INTERNAL_IP4_ADDRESS ... up`
-3. 循环 `route add <cidr> -interface $TUNDEV`
+3. 为 VPN server IP 保留上游默认路由（避免控制连接被自己分流劫持）
+4. 循环 `route add <cidr> -interface $TUNDEV`
+5. 写入 `route-ready` 标记；若为 helper 模式，额外 `chown` 给用户
 
 ---
 
@@ -258,6 +313,14 @@ std::string utils::get_config_path(); // ~/.ecnuvpn/config.json
 std::string utils::get_pid_path();    // ~/.ecnuvpn/ecnuvpn.pid
 std::string utils::get_log_path();    // ~/.ecnuvpn/ecnuvpn.log
 std::string utils::get_tunnel_path(); // ~/.ecnuvpn/tunnel.sh
+std::string utils::get_route_ready_path();
+std::string utils::get_home_for_uid(uid_t uid);
+std::string utils::get_config_dir_for_uid(uid_t uid);
+void utils::set_runtime_path_override(const std::string& home,
+                                      const std::string& config_dir);
+void utils::set_runtime_owner(uid_t uid, gid_t gid);
+bool utils::sync_owner(const std::string& path);
+std::string utils::get_executable_path();
 
 // 文件 I/O
 bool utils::file_exists(const std::string& path);
@@ -279,7 +342,7 @@ std::string utils::run_command_output(const std::string& cmd);  // popen()
 ### 密码写入流程
 
 ```
-ecnuvpn config set password
+exv config set password
     → crypto::read_password_hidden()       [termios echo-off]
     → crypto::encrypt(plaintext, key)      [AES-256-CBC + base64]
     → Config.password = ciphertext
@@ -289,14 +352,36 @@ ecnuvpn config set password
 ### VPN 启动流程
 
 ```
-ecnuvpn [no args]
+exv [no args]
     → config::load()                       [首次运行时生成密钥]
     → vpn::start(cfg)
         → config::get_plaintext_password()
             → crypto::load_key()
             → crypto::decrypt(ciphertext)  [AES-256-CBC 解密]
-        → tunnel::write_script(cfg)        [动态生成 tunnel.sh]
-        → system("echo '<pw>' | openconnect ...")
+        → helper::is_available() ?
+            helper::start_via_helper(...)
+            : vpn::start_with_password(...)
+                → tunnel::write_script(cfg)
+                → openconnect + optional supervisor
+                → tunnel script writes route-ready
+```
+
+### helper 启动流程
+
+```
+sudo exv service install
+    → helper::install_service(executable_path)
+    → write /Library/LaunchDaemons/com.ecnu.exv.helper.plist
+    → launchctl bootstrap system ...
+
+exv
+    → connect /var/run/exv-helper.sock
+    → daemon validates peer uid/gid
+    → daemon writes root-only request file
+    → worker_main(request_file)
+        → set_runtime_path_override(user_home, user_config_dir)
+        → set_runtime_owner(uid, gid)
+        → vpn::start_with_password(...)
 ```
 
 ---

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/types.h>
+
 #include <string>
 
 namespace ecnuvpn {
@@ -37,6 +39,19 @@ std::string get_tunnel_path();
 std::string get_supervisor_pid_path();
 std::string get_route_ready_path();
 std::string get_effective_home();
+std::string get_home_for_uid(uid_t uid);
+std::string get_username_for_uid(uid_t uid);
+std::string get_config_dir_for_uid(uid_t uid);
+void set_runtime_path_override(const std::string &home,
+                                const std::string &config_dir);
+void clear_runtime_path_override();
+void set_runtime_owner(uid_t uid, gid_t gid);
+void clear_runtime_owner();
+bool has_runtime_owner();
+uid_t get_runtime_owner_uid();
+gid_t get_runtime_owner_gid();
+bool sync_owner(const std::string &path);
+std::string get_executable_path();
 
 // File utilities
 bool file_exists(const std::string &path);

@@ -127,6 +127,9 @@ if $copy_mode; then
     if run_install_cmd cp "$absolute_path" "$link_path" && run_install_cmd chmod +x "$link_path"; then
         echo "✅ Success: File copied and made executable! 🎉"
         echo "🚀 You can now use command '$main_name' to execute this script"
+        if [ "$main_name" = "exv" ]; then
+            echo "🔐 Next step: run 'sudo exv service install' once to enable daily non-sudo usage"
+        fi
         echo "📋 File details:"
         ls -la "$link_path"
     else
@@ -139,6 +142,9 @@ else
     if run_install_cmd ln -s "$absolute_path" "$link_path"; then
         echo "✅ Success: Symbolic link created! 🎉"
         echo "🚀 You can now use command '$main_name' to execute this script"
+        if [ "$main_name" = "exv" ]; then
+            echo "🔐 Next step: run 'sudo exv service install' once to enable daily non-sudo usage"
+        fi
         echo "📋 Link details:"
         ls -la "$link_path"
     else
