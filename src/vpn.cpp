@@ -347,7 +347,9 @@ int start(const Config &cfg, int retry_limit) {
     logger::info("openconnect installed via Homebrew");
   }
 
-  if (!utils::check_root()) {
+  // Prefer helper daemon even when running as root — it manages session state
+  // and the reconnect supervisor, and ensures stop works correctly.
+  if (helper::is_available()) {
     Config validated_cfg = cfg;
     if (validated_cfg.username.empty()) {
       utils::print_error("Username not configured!");
@@ -369,12 +371,12 @@ int start(const Config &cfg, int retry_limit) {
       return 1;
     }
 
-    if (helper::is_available()) {
-      return helper::start_via_helper(validated_cfg, plaintext_password, retry_limit)
-                 ? 0
-                 : 1;
-    }
+    return helper::start_via_helper(validated_cfg, plaintext_password, retry_limit)
+               ? 0
+               : 1;
+  }
 
+  if (!utils::check_root()) {
     utils::print_error("Root privileges required to start the VPN. Install the helper with 'sudo exv service install' or run with sudo.");
     logger::error("Not running as root for VPN start and helper is unavailable");
     return 1;
@@ -620,10 +622,16 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
 int stop() {
   utils::print_header("EXV Stopping");
 
+  // Prefer helper daemon even when running as root — it manages session state
+  // and the reconnect supervisor. Direct kills leave stale state and the
+  // supervisor respawns openconnect immediately.
+  if (helper::is_available()) {
+    bool ok = helper::stop_via_helper();
+    if (ok) return 0;
+    // Helper said not running — check for orphaned processes before giving up
+  }
+
   if (!utils::check_root()) {
-    if (helper::is_available()) {
-      return helper::stop_via_helper() ? 0 : 1;
-    }
     utils::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
