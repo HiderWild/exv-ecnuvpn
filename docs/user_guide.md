@@ -1,8 +1,8 @@
-# ECNU-VPN 使用手册
+# EXV 使用手册
 
-> 包装 Cisco AnyConnect / openconnect 的智能 VPN 客户端，支持分流路由、加密凭据管理与 launchd root helper。
+> 包装 openconnect 的智能 VPN 客户端，支持分流路由、加密凭据管理、launchd root helper 与 WebUI。
 >
-> 当前版本：**v1.0.0** | macOS | 需要 openconnect | 推荐安装一次 helper 后日常免 sudo
+> 当前版本：**v3.3.0** | macOS | 需要 openconnect | 推荐安装一次 helper 后日常免 sudo
 
 ---
 
@@ -13,27 +13,23 @@
 ```bash
 git clone <repo>
 cd ECNU-VPN
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(sysctl -n hw.ncpu)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(sysctl -n hw.ncpu)
 ```
 
 ### 安装到系统路径
 
 ```bash
 sudo cmake --install build
-# 或者使用 cminst
-cminst build/exv -c
 ```
 
-### 安装 root helper
+### 安装 root helper（一次性 sudo）
 
 ```bash
 sudo exv service install
 ```
 
-`service install` 会记录**当前执行的 `exv` 可执行文件路径**到 LaunchDaemon 中。
-因此推荐先把 `exv` 安装到稳定路径（如 `/usr/local/bin/exv`），再执行该命令；不要长期依赖 `build/exv`。
+`service install` 会自动将 `exv` 复制到 `/usr/local/bin/exv` 并注册 launchd 守护进程。之后日常使用不再需要 sudo。
 
 ---
 
@@ -58,7 +54,7 @@ exv config set password
 # 3. 安装一次 helper（仅首次需要 sudo）
 sudo exv service install
 
-# 4. 之后日常直接启动
+# 4. 之后日常直接启动（无需 sudo）
 exv
 ```
 
@@ -74,9 +70,16 @@ exv [command] [subcommand] [args]
 
 | 命令 | 说明 | 需要 sudo |
 |------|------|-----------|
-| `exv` | 启动 VPN | 首次安装 helper 后 ❌ |
-| `exv stop` \| `-s` | 停止 VPN | 首次安装 helper 后 ❌ |
+| `exv` | 启动 VPN（含 WebUI） | 安装 helper 后 ❌ |
+| `exv stop` \| `-s` | 停止 VPN | 安装 helper 后 ❌ |
 | `exv status` \| `-t` | 查看 VPN 状态与网络接口 | ❌ |
+
+### 启动选项
+
+| 选项 | 说明 |
+|------|------|
+| `-rt [count]` | 断线后自动重连次数（省略或 -1 为无限） |
+| `-f`, `--foreground` | 前台运行 WebUI（Ctrl+C 停止） |
 
 ### Helper 服务管理
 
@@ -105,6 +108,9 @@ exv [command] [subcommand] [args]
 | `mtu` | MTU 值（默认 1290） |
 | `useragent` | User-Agent 字符串 |
 | `log_file` | 日志文件路径 |
+| `webui_port` | WebUI 端口（默认 18080） |
+| `webui_bind` | WebUI 绑定地址（默认 127.0.0.1） |
+| `webui_enabled` | 是否启用 WebUI（默认 true） |
 
 ### 路由管理
 
@@ -131,13 +137,26 @@ exv [command] [subcommand] [args]
 
 ---
 
+## WebUI
+
+VPN 启动后自动在后台运行 WebUI（默认 `http://127.0.0.1:18080/`），提供：
+
+- 实时 VPN 状态与流量监控
+- 配置在线编辑
+- 实时日志流（SSE）
+- VPN 启停控制
+
+WebUI 默认启用，可通过 `exv config set webui_enabled` 设为 `false` 关闭。
+
+---
+
 ## 配置文件格式
 
 配置文件位于 `~/.ecnuvpn/config.json`，可手动编辑（密码字段存储的是密文）：
 
 ```json
 {
-    "server": "https://vpn-ct.ecnu.edu.cn",
+    "server": "https://vpn-cn.ecnu.edu.cn",
     "username": "20XXXXXXXXX",
     "password": "<AES-256-CBC ciphertext>",
     "mtu": 1290,
@@ -147,7 +166,10 @@ exv [command] [subcommand] [args]
         "59.78.176.0/20"
     ],
     "extra_args": [],
-    "log_file": "~/.ecnuvpn/ecnuvpn.log"
+    "log_file": "~/.ecnuvpn/ecnuvpn.log",
+    "webui_port": 18080,
+    "webui_bind": "127.0.0.1",
+    "webui_enabled": true
 }
 ```
 
@@ -166,11 +188,8 @@ exv [command] [subcommand] [args]
 如果 `config show` 显示 `[KEY MISSING]` 或 `[KEY CORRUPT]`：
 
 ```bash
-# 重新生成密钥（原密码密文将被清除）
-exv config key reset
-
-# 重新设置密码
-exv config set password
+exv config key reset    # 重新生成密钥（原密码密文将被清除）
+exv config set password # 重新设置密码
 ```
 
 ---
@@ -192,7 +211,7 @@ exv config set password
 | 文件 | 说明 |
 |------|------|
 | `/Library/LaunchDaemons/com.ecnu.exv.helper.plist` | launchd root helper 定义 |
-| `/var/run/exv-helper.sock` | 本地 Unix socket，普通用户通过它请求 root helper |
+| `/var/run/exv-helper.sock` | 本地 Unix socket（root:staff 0660），普通用户通过它请求 root helper |
 | `/var/run/exv-helper-session.json` | 当前 helper 管理的会话状态 |
 
 ---
@@ -205,8 +224,11 @@ exv config set password
 **Q：VPN 已连接但校内资源访问不了？**
 检查路由配置：`exv config routes list`，确认目标 IP 所在网段已添加。
 
-**Q：为什么现在不用每次 `sudo exv` 了？**
-因为 `sudo exv service install` 会安装一个 launchd root helper。之后日常 `exv` / `exv stop` 通过本地 socket 请求 helper 代为执行特权操作。
+**Q：为什么不用每次 `sudo exv` 了？**
+`sudo exv service install` 安装 launchd root helper 后，`exv` / `exv stop` 通过 Unix socket（`/var/run/exv-helper.sock`，group staff）请求 helper 代为执行特权操作。
+
+**Q：`exv` 提示 "helper daemon is not installed"？**
+运行 `sudo exv service install` 安装 helper。安装后 `exv` 和 `exv stop` 均无需 sudo。
 
 **Q：`exv stop` 提示找不到进程？**
 可能 PID 文件已丢失，helper 会回退到 `pgrep` 查找。若 helper 未安装，可先执行 `sudo exv service install`；仍失败时再手动 `sudo killall openconnect`。
