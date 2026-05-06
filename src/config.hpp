@@ -27,11 +27,15 @@ struct Config {
       "219.228.63.0/21",   "202.120.80.0/20", "222.66.117.0/24"};
   std::vector<std::string> extra_args;
   std::string log_file = "~/.ecnuvpn/ecnuvpn.log";
+  int webui_port = 18080;
+  std::string webui_bind = "127.0.0.1";
+  bool webui_enabled = true;
 
   NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(Config, server, username,
                                               password, mtu, useragent,
                                               disable_dtls, remember_password, routes,
-                                              extra_args, log_file)
+                                              extra_args, log_file,
+                                              webui_port, webui_bind, webui_enabled)
 };
 
 namespace config {

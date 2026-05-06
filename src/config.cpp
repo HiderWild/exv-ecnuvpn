@@ -703,6 +703,12 @@ void show(const Config &cfg) {
             << std::endl;
   std::cout << utils::BOLD << "  Log File        : " << utils::RESET
             << cfg.log_file << std::endl;
+  std::cout << utils::BOLD << "  WebUI Port      : " << utils::RESET
+            << cfg.webui_port << std::endl;
+  std::cout << utils::BOLD << "  WebUI Bind      : " << utils::RESET
+            << cfg.webui_bind << std::endl;
+  std::cout << utils::BOLD << "  WebUI Enabled   : " << utils::RESET
+            << (cfg.webui_enabled ? "true" : "false") << std::endl;
   std::cout << std::endl;
 
   std::cout << utils::BOLD << "  Routes (" << cfg.routes.size()
@@ -786,6 +792,12 @@ Config import_from(const std::string &path) {
       cfg.log_file = j["log_file"].get<std::string>();
     if (j.contains("remember_password"))
       cfg.remember_password = j["remember_password"].get<bool>();
+    if (j.contains("webui_port"))
+      cfg.webui_port = j["webui_port"].get<int>();
+    if (j.contains("webui_bind"))
+      cfg.webui_bind = j["webui_bind"].get<std::string>();
+    if (j.contains("webui_enabled"))
+      cfg.webui_enabled = j["webui_enabled"].get<bool>();
 
     if (j.contains("password")) {
       std::string pw = j["password"].get<std::string>();
