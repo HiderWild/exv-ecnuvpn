@@ -704,7 +704,8 @@ nlohmann::json make_status_response(const SessionState &state,
 
 bool ensure_same_owner(const SessionState &state, uid_t peer_uid) {
   // Any local user who can reach the helper socket may manage the VPN session.
-  // Socket is mode 0660, group wheel — access controlled at OS level.
+  // Any local user who can reach the helper socket may manage the VPN session.
+  // Socket is mode 0660, group staff (gid 20) — access controlled at OS level.
   (void)state;
   (void)peer_uid;
   return true;
@@ -1273,7 +1274,7 @@ int daemon_main() {
   }
 
   chmod(kHelperSocketPath, 0660);
-  chown(kHelperSocketPath, 0, 0);
+  chown(kHelperSocketPath, 0, 20); // group staff (gid 20) — all macOS user accounts
 
   if (listen(daemon_server_fd, 8) != 0) {
     close(daemon_server_fd);
