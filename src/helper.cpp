@@ -53,6 +53,9 @@ struct RuntimeSnapshot {
   pid_t supervisor_pid = -1;
   bool network_ready = false;
   std::string interface_name;
+  uint64_t rx_bytes = 0;
+  uint64_t tx_bytes = 0;
+  std::chrono::steady_clock::time_point last_traffic_update{};
   std::string internal_ip;
   std::string interfaces_output;
 };
@@ -581,7 +584,8 @@ bool connect_socket(int *out_fd) {
 }
 
 bool send_request(const nlohmann::json &request, nlohmann::json *response,
-                  std::string *error_message = nullptr) {
+                  std::string *error_message = nullptr,
+                  int timeout_seconds = 15) {
   int fd = -1;
   if (!connect_socket(&fd)) {
     if (error_message)
@@ -602,6 +606,27 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
   std::string raw;
   char buffer[1024];
   ssize_t n = 0;
+
+  struct timeval tv;
+  tv.tv_sec = timeout_seconds;
+  tv.tv_usec = 0;
+
+  fd_set readfds;
+  FD_ZERO(&readfds);
+  FD_SET(fd, &readfds);
+
+  int sel_ret = select(fd + 1, &readfds, nullptr, nullptr, &tv);
+  if (sel_ret <= 0) {
+    if (error_message) {
+      if (sel_ret == 0)
+        *error_message = "EXV helper request timed out.";
+      else
+        *error_message = "EXV helper select error.";
+    }
+    close(fd);
+    return false;
+  }
+
   while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
     raw.append(buffer, buffer + n);
     if (raw.find('\n') != std::string::npos)
@@ -668,6 +693,8 @@ nlohmann::json make_status_response(const SessionState &state,
                         {"network_ready", snapshot.network_ready},
                         {"interface", snapshot.interface_name},
                         {"internal_ip", snapshot.internal_ip},
+                        {"rx_bytes", snapshot.rx_bytes},
+                        {"tx_bytes", snapshot.tx_bytes},
                         {"server", state.server},
                         {"route_count", state.route_count},
                         {"retry_limit", state.retry_limit},
@@ -676,7 +703,11 @@ nlohmann::json make_status_response(const SessionState &state,
 }
 
 bool ensure_same_owner(const SessionState &state, uid_t peer_uid) {
-  return peer_uid == 0 || state.uid == peer_uid;
+  // Any local user who can reach the helper socket may manage the VPN session.
+  // Socket is mode 0660, group wheel — access controlled at OS level.
+  (void)state;
+  (void)peer_uid;
+  return true;
 }
 
 nlohmann::json handle_status(uid_t peer_uid) {
@@ -968,7 +999,7 @@ bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
                                    {"config", cfg},
                                    {"password", plaintext_password},
                                    {"retry_limit", retry_limit}},
-                    &response, &error_message)) {
+                    &response, &error_message, 120)) {
     utils::print_error(error_message);
     return false;
   }
@@ -1241,7 +1272,8 @@ int daemon_main() {
     return 1;
   }
 
-  chmod(kHelperSocketPath, 0666);
+  chmod(kHelperSocketPath, 0660);
+  chown(kHelperSocketPath, 0, 0);
 
   if (listen(daemon_server_fd, 8) != 0) {
     close(daemon_server_fd);

@@ -63,6 +63,8 @@ bool write_file(const std::string &path, const std::string &content);
 std::string get_openconnect_path();
 bool check_openconnect();
 bool check_root();
+bool get_interface_traffic(const std::string &iface,
+                            uint64_t *rx_bytes, uint64_t *tx_bytes);
 int run_command(const std::string &cmd);
 std::string run_command_output(const std::string &cmd);
 std::string shell_quote(const std::string &value);
