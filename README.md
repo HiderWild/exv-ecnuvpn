@@ -89,8 +89,24 @@ exv stop
 
 | 选项 | 说明 |
 |------|------|
-| `-rt [count]` | 断线后自动重连次数（省略或 `-1` 为无限重连） |
+| `-rt [count]` | 断线后自动重连（详见下方） |
 | `-f` / `--foreground` | 前台运行 WebUI（Ctrl+C 停止） |
+
+#### `-rt` 自动重连
+
+默认情况下（不指定 `-rt`），VPN 断开后不会自动重连。使用 `-rt` 可启用自动重连：
+
+```bash
+exv -rt          # 无限重连，直到手动停止
+exv -rt -1       # 同上，无限重连
+exv -rt 3        # 最多重连 3 次
+exv -rt 0        # 不重连（等同于默认行为）
+```
+
+- 仅在启动 VPN 时生效，不能与 `stop`、`status` 等命令组合使用
+- 只能指定一次，重复指定会报错
+- 启用后程序会 fork 一个 supervisor 进程监控 openconnect，断线时自动重新连接
+- 重连次数达到上限后 supervisor 自动退出
 
 ### 配置管理
 
@@ -237,4 +253,4 @@ exv config routes add 202.120.96.0/19
 
 ## 许可证
 
-详见 [LICENSE](LICENSE)。
+[MIT](LICENSE)
