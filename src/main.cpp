@@ -1,22 +1,35 @@
 #include "config.hpp"
+#include "config_manager.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
+#include "sse_broadcaster.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
+#include "webui.hpp"
 
+#include <csignal>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #include <vector>
 
 using namespace ecnuvpn;
 
 static constexpr const char *APP_NAME = "exv";
 
+static volatile sig_atomic_t webui_stop_requested = 0;
+static webui::WebUIServer *g_webui_server = nullptr;
+
+static void webui_signal_handler(int) { webui_stop_requested = 1; }
+
 struct ParsedArgs {
   std::vector<std::string> positional;
   int retry_limit = 0;
   bool retry_specified = false;
+  bool foreground = false;
   std::string error;
 };
 
@@ -60,6 +73,11 @@ static ParsedArgs parse_args(const std::vector<std::string> &args) {
       continue;
     }
 
+    if (arg == "--foreground" || arg == "-f") {
+      parsed.foreground = true;
+      continue;
+    }
+
     parsed.positional.push_back(arg);
   }
 
@@ -69,10 +87,10 @@ static ParsedArgs parse_args(const std::vector<std::string> &args) {
 static void print_help() {
   std::cout << std::endl;
   std::cout << utils::BOLD << utils::CYAN
-            << "  ╔═══════════════════════════════════════╗" << std::endl
-            << "  ║             EXV Client  v" << ECNUVPN_VERSION
-            << "        ║" << std::endl
-            << "  ╚═══════════════════════════════════════╝" << utils::RESET
+            << "  \xe2\x95\x94\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90" << std::endl
+            << "  \xe2\x95\x91             EXV Client  v" << ECNUVPN_VERSION
+            << "        \xe2\x95\x91" << std::endl
+            << "  \xe2\x95\x9a\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90" << utils::RESET
             << std::endl;
   std::cout << std::endl;
   std::cout << utils::BOLD << "USAGE:" << utils::RESET << std::endl;
@@ -102,6 +120,12 @@ static void print_help() {
             << "               Reconnect count after disconnect" << std::endl;
   std::cout << "                           Omit count or use -1 for infinite"
             << std::endl;
+  std::cout << "  " << utils::YELLOW << "-f, --foreground" << utils::RESET
+            << "          Keep process in foreground (with WebUI)" << std::endl;
+  std::cout << std::endl;
+  std::cout << "  Note: WebUI starts automatically when \"webui_enabled\" is true in config"
+            << std::endl;
+  std::cout << "        (default: true). Configure port/bind via config settings." << std::endl;
   std::cout << std::endl;
   std::cout << utils::BOLD << "CONFIG SUBCOMMANDS:" << utils::RESET
             << std::endl;
@@ -213,7 +237,6 @@ static int handle_config(const std::vector<std::string> &args) {
       return 1;
     }
     Config cfg = config::load();
-    // set_value for password prompts hidden input internally
     return config::set_value(cfg, args[3]) ? 0 : 1;
   }
 
@@ -304,8 +327,7 @@ int main(int argc, char *argv[]) {
 
   // No arguments -> start VPN
   if (args.size() <= 1) {
-    Config cfg = config::load();
-    return vpn::start(cfg, parsed.retry_limit);
+    args.push_back("start");
   }
 
   std::string cmd = args[1];
@@ -325,7 +347,250 @@ int main(int argc, char *argv[]) {
   }
   if (cmd == "start") {
     Config cfg = config::load();
-    return vpn::start(cfg, parsed.retry_limit);
+
+    // Warn if WebUI is enabled but helper daemon is not installed
+    if (cfg.webui_enabled && !helper::is_available()) {
+      utils::print_warning(
+          "WebUI is enabled but helper daemon is not installed. "
+          "WebUI will have limited VPN control. "
+          "Install the helper with: sudo exv service install");
+    }
+
+    int vpn_result = vpn::start(cfg, parsed.retry_limit);
+
+    if (vpn_result != 0) {
+      return vpn_result;
+    }
+
+    if (cfg.webui_enabled) {
+      if (parsed.foreground) {
+        // Foreground mode: start WebUI in current process, block until Ctrl+C
+        std::string config_dir = utils::get_config_dir();
+        std::string log_path = utils::expand_home(cfg.log_file);
+
+        config::ConfigManager config_mgr(config_dir);
+
+        sse::SseBroadcaster log_broadcaster(
+            log_path,
+            []() -> std::string {
+              return "{}";
+            },
+            8);
+
+        sse::SseBroadcaster status_broadcaster(
+            log_path,
+            []() -> std::string {
+              int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+              if (fd < 0) return "";
+
+              struct sockaddr_un addr {};
+              addr.sun_family = AF_UNIX;
+              snprintf(addr.sun_path, sizeof(addr.sun_path), "/var/run/exv-helper.sock");
+
+              if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+                close(fd);
+                return "";
+              }
+
+              std::string req = R"({"action":"status"})" "\n";
+              if (write(fd, req.data(), req.size()) != static_cast<ssize_t>(req.size())) {
+                close(fd);
+                return "";
+              }
+              shutdown(fd, SHUT_WR);
+
+              std::string raw;
+              char buf[1024];
+              ssize_t n;
+              while ((n = read(fd, buf, sizeof(buf))) > 0) {
+                raw.append(buf, static_cast<size_t>(n));
+                if (raw.find('\n') != std::string::npos) break;
+              }
+              close(fd);
+
+              auto nl = raw.find('\n');
+              if (nl != std::string::npos) raw.resize(nl);
+              raw = utils::trim(raw);
+              if (raw.empty()) return "";
+
+              try {
+                auto resp = nlohmann::json::parse(raw);
+                nlohmann::json status;
+                status["connected"] = resp.value("running", false);
+                status["network_ready"] = resp.value("network_ready", false);
+                status["interface"] = resp.value("interface", "");
+                status["internal_ip"] = resp.value("internal_ip", "");
+                status["pid"] = resp.value("pid", -1);
+                status["server"] = resp.value("server", "");
+                return sse::format_sse_event("status", status.dump());
+              } catch (...) {
+                return "";
+              }
+            },
+            8);
+
+        log_broadcaster.start();
+        status_broadcaster.start();
+
+        webui::WebUIServer webui(config_mgr, log_broadcaster, status_broadcaster,
+                                 cfg.webui_port, cfg.webui_bind);
+
+        g_webui_server = &webui;
+        signal(SIGINT, webui_signal_handler);
+        signal(SIGTERM, webui_signal_handler);
+
+        webui.start();
+
+        std::cout << std::endl;
+        utils::print_info("WebUI running in foreground. Press Ctrl+C to stop.");
+        while (!webui_stop_requested) {
+          pause();
+        }
+        std::cout << std::endl;
+        utils::print_info("Shutting down WebUI...");
+
+        webui.stop();
+        status_broadcaster.stop();
+        log_broadcaster.stop();
+        g_webui_server = nullptr;
+      } else {
+        // Background mode: fork first, then start WebUI in child only.
+        // This avoids the fork-after-thread bug where fork() only duplicates
+        // the calling thread, leaving the HTTP server thread dead in the child.
+        pid_t bg_pid = fork();
+        if (bg_pid > 0) {
+          // Parent: return to shell immediately
+          std::cout << std::endl;
+          utils::print_info("WebUI running in background at http://" +
+                            cfg.webui_bind + ":" + std::to_string(cfg.webui_port) + "/");
+          utils::print_info("Stop with: exv stop");
+          return 0;
+        }
+        if (bg_pid < 0) {
+          // Fork failed: fall back to foreground
+          utils::print_warning("Could not detach to background, running in foreground.");
+          // Re-enter foreground path by setting foreground flag
+          parsed.foreground = true;
+          // Fall through to foreground handling below — but we need to
+          // restructure, so just do inline foreground here
+          std::string config_dir = utils::get_config_dir();
+          std::string log_path = utils::expand_home(cfg.log_file);
+          config::ConfigManager config_mgr(config_dir);
+          sse::SseBroadcaster log_broadcaster(log_path, []() -> std::string { return "{}"; }, 8);
+          sse::SseBroadcaster status_broadcaster(log_path, []() -> std::string { return ""; }, 8);
+          log_broadcaster.start();
+          status_broadcaster.start();
+          webui::WebUIServer webui(config_mgr, log_broadcaster, status_broadcaster,
+                                   cfg.webui_port, cfg.webui_bind);
+          g_webui_server = &webui;
+          signal(SIGINT, webui_signal_handler);
+          signal(SIGTERM, webui_signal_handler);
+          webui.start();
+          while (!webui_stop_requested) { pause(); }
+          webui.stop();
+          status_broadcaster.stop();
+          log_broadcaster.stop();
+          g_webui_server = nullptr;
+          return 0;
+        }
+
+        // Child: detach from terminal, then start WebUI
+        setsid();
+        freopen("/dev/null", "r", stdin);
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+
+        std::string config_dir = utils::get_config_dir();
+        std::string log_path = utils::expand_home(cfg.log_file);
+
+        config::ConfigManager config_mgr(config_dir);
+
+        sse::SseBroadcaster log_broadcaster(
+            log_path,
+            []() -> std::string {
+              return "{}";
+            },
+            8);
+
+        sse::SseBroadcaster status_broadcaster(
+            log_path,
+            []() -> std::string {
+              int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+              if (fd < 0) return "";
+
+              struct sockaddr_un addr {};
+              addr.sun_family = AF_UNIX;
+              snprintf(addr.sun_path, sizeof(addr.sun_path), "/var/run/exv-helper.sock");
+
+              if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+                close(fd);
+                return "";
+              }
+
+              std::string req = R"({"action":"status"})" "\n";
+              if (write(fd, req.data(), req.size()) != static_cast<ssize_t>(req.size())) {
+                close(fd);
+                return "";
+              }
+              shutdown(fd, SHUT_WR);
+
+              std::string raw;
+              char buf[1024];
+              ssize_t n;
+              while ((n = read(fd, buf, sizeof(buf))) > 0) {
+                raw.append(buf, static_cast<size_t>(n));
+                if (raw.find('\n') != std::string::npos) break;
+              }
+              close(fd);
+
+              auto nl = raw.find('\n');
+              if (nl != std::string::npos) raw.resize(nl);
+              raw = utils::trim(raw);
+              if (raw.empty()) return "";
+
+              try {
+                auto resp = nlohmann::json::parse(raw);
+                nlohmann::json status;
+                status["connected"] = resp.value("running", false);
+                status["network_ready"] = resp.value("network_ready", false);
+                status["interface"] = resp.value("interface", "");
+                status["internal_ip"] = resp.value("internal_ip", "");
+                status["pid"] = resp.value("pid", -1);
+                status["server"] = resp.value("server", "");
+                return sse::format_sse_event("status", status.dump());
+              } catch (...) {
+                return "";
+              }
+            },
+            8);
+
+        log_broadcaster.start();
+        status_broadcaster.start();
+
+        webui::WebUIServer webui(config_mgr, log_broadcaster, status_broadcaster,
+                                 cfg.webui_port, cfg.webui_bind);
+
+        g_webui_server = &webui;
+        signal(SIGINT, webui_signal_handler);
+        signal(SIGTERM, webui_signal_handler);
+
+        webui.start();
+
+        while (!webui_stop_requested) {
+          pause();
+        }
+
+        webui.stop();
+        status_broadcaster.stop();
+        log_broadcaster.stop();
+        g_webui_server = nullptr;
+        return 0;
+      }
+    } else {
+      utils::print_info("WebUI disabled (webui_enabled = false)");
+    }
+
+    return 0;
   }
   if (cmd == "stop" || cmd == "-s") {
     return vpn::stop();
