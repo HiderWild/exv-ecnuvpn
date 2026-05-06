@@ -6,6 +6,12 @@
 
 namespace ecnuvpn {
 
+#ifdef __APPLE__
+static constexpr bool DEFAULT_DISABLE_DTLS = true;
+#else
+static constexpr bool DEFAULT_DISABLE_DTLS = false;
+#endif
+
 struct Config {
   std::string server = "https://vpn-ct.ecnu.edu.cn";
   std::string username = "";
@@ -13,6 +19,7 @@ struct Config {
       ""; // AES-256-CBC ciphertext (base64); empty if remember_password=false
   int mtu = 1290;
   std::string useragent = "AnyConnect Darwin_x86_64 4.10.05095";
+  bool disable_dtls = DEFAULT_DISABLE_DTLS;
   bool remember_password = true; // false = prompt hidden input at connect time
   std::vector<std::string> routes = {
       "49.52.4.0/25",      "59.78.176.0/20",  "59.78.199.0/21",
@@ -20,11 +27,15 @@ struct Config {
       "219.228.63.0/21",   "202.120.80.0/20", "222.66.117.0/24"};
   std::vector<std::string> extra_args;
   std::string log_file = "~/.ecnuvpn/ecnuvpn.log";
+  int webui_port = 18080;
+  std::string webui_bind = "127.0.0.1";
+  bool webui_enabled = true;
 
   NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(Config, server, username,
                                               password, mtu, useragent,
-                                              remember_password, routes,
-                                              extra_args, log_file)
+                                              disable_dtls, remember_password, routes,
+                                              extra_args, log_file,
+                                              webui_port, webui_bind, webui_enabled)
 };
 
 namespace config {

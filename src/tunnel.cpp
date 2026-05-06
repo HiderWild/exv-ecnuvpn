@@ -123,6 +123,9 @@ std::string generate(const Config &cfg) {
   std::ostringstream ss;
   std::vector<std::string> server_route_exceptions =
       find_server_route_exceptions(cfg);
+  bool has_runtime_owner = utils::has_runtime_owner();
+  uid_t runtime_owner_uid = utils::get_runtime_owner_uid();
+  gid_t runtime_owner_gid = utils::get_runtime_owner_gid();
 
   ss << "#!/bin/bash\n";
   ss << "\n";
@@ -132,6 +135,10 @@ std::string generate(const Config &cfg) {
   ss << "# =================================================================\n";
   ss << "\n";
   ss << "READY_FILE=\"" << utils::get_route_ready_path() << "\"\n";
+  if (has_runtime_owner) {
+    ss << "OWNER_UID=\"" << runtime_owner_uid << "\"\n";
+    ss << "OWNER_GID=\"" << runtime_owner_gid << "\"\n";
+  }
   ss << "rm -f \"$READY_FILE\"\n";
   ss << "\n";
   ss << "# Only run on connect\n";
@@ -193,6 +200,10 @@ std::string generate(const Config &cfg) {
   ss << "    echo \">>> [VPN] Failed to write route-ready marker.\"\n";
   ss << "    exit 1\n";
   ss << "fi\n";
+  if (has_runtime_owner) {
+    ss << "chown \"$OWNER_UID\":\"$OWNER_GID\" \"$READY_FILE\" >/dev/null 2>&1\n";
+    ss << "chmod 0644 \"$READY_FILE\" >/dev/null 2>&1\n";
+  }
   ss << "\n";
   ss << "echo \">>> [VPN] Network configuration complete!\"\n";
   ss << "echo \">>> [Tip] Campus traffic via VPN, other traffic via default "
@@ -223,6 +234,8 @@ bool write_script(const Config &cfg) {
     logger::error("Failed to chmod tunnel script: " + path);
     return false;
   }
+
+  utils::sync_owner(path);
 
   logger::info("Tunnel script generated: " + path);
   return true;

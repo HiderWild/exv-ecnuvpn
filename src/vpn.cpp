@@ -1,5 +1,6 @@
 #include "vpn.hpp"
 #include "config.hpp"
+#include "helper.hpp"
 #include "logger.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
@@ -22,6 +23,8 @@ static void write_pid_file(const std::string &path, pid_t pid) {
   std::ofstream ofs(path);
   if (ofs.is_open()) {
     ofs << pid;
+    ofs.flush();
+    utils::sync_owner(path);
   }
 }
 
@@ -124,19 +127,32 @@ static void handle_supervisor_signal(int) {
     kill(child_pid, SIGTERM);
 }
 
+static std::string describe_retry_policy(int retry_limit) {
+  return retry_limit < 0 ? std::string("infinite")
+                         : std::to_string(retry_limit) + " retries";
+}
+
 static std::string build_openconnect_command(const Config &cfg,
                                              const std::string &password) {
   std::ostringstream cmd;
+  std::string openconnect_path = utils::get_openconnect_path();
   std::string heredoc_marker = "__EXV_PASSWORD_EOF__";
   while (password.find(heredoc_marker) != std::string::npos) {
     heredoc_marker += "_X";
   }
 
-  cmd << "exec openconnect " << utils::shell_quote(cfg.server)
+  cmd << "exec "
+      << utils::shell_quote(openconnect_path.empty() ? std::string("openconnect")
+                                                     : openconnect_path)
+      << " " << utils::shell_quote(cfg.server)
       << " --useragent "
       << utils::shell_quote(cfg.useragent) << " -m " << cfg.mtu << " -u "
       << utils::shell_quote(cfg.username) << " --passwd-on-stdin"
       << " --script " << utils::shell_quote(utils::get_tunnel_path());
+
+  if (cfg.disable_dtls) {
+    cmd << " --no-dtls";
+  }
 
   for (const auto &arg : cfg.extra_args) {
     cmd << " " << utils::shell_quote(arg);
@@ -153,15 +169,21 @@ static int run_supervisor(const Config &cfg, const std::string &password,
   signal(SIGTERM, handle_supervisor_signal);
   signal(SIGINT, handle_supervisor_signal);
 
+  logger::info("Reconnect supervisor started, retry policy: " +
+               describe_retry_policy(retry_limit));
+
   bool first_attempt = true;
   int reconnect_attempts_used = 0;
+  bool retry_limit_reached = false;
 
   while (!supervisor_stop_requested) {
     if (!first_attempt) {
       if (retry_limit == 0)
         break;
-      if (retry_limit > -1 && reconnect_attempts_used >= retry_limit)
+      if (retry_limit > -1 && reconnect_attempts_used >= retry_limit) {
+        retry_limit_reached = true;
         break;
+      }
 
       ++reconnect_attempts_used;
       logger::warn("VPN disconnected, attempting reconnect " +
@@ -195,11 +217,50 @@ static int run_supervisor(const Config &cfg, const std::string &password,
                  " openconnect, PID: " + std::to_string(child_pid));
 
     int wait_status = 0;
-    while (waitpid(child_pid, &wait_status, 0) < 0) {
-      if (errno == EINTR)
-        continue;
-      logger::error("waitpid failed while supervising openconnect");
-      break;
+    bool route_ready_logged = false;
+    while (true) {
+      pid_t wait_result = waitpid(child_pid, &wait_status, WNOHANG);
+      if (wait_result == child_pid)
+        break;
+      if (wait_result < 0) {
+        if (errno == EINTR)
+          continue;
+        logger::error("waitpid failed while supervising openconnect");
+        break;
+      }
+
+      if (!route_ready_logged) {
+        pid_t vpn_pid = read_pid();
+        std::string vpn_interface;
+        std::string internal_ip;
+        if (vpn_pid > 0 && is_process_alive(vpn_pid) &&
+            read_route_ready(&vpn_interface, &internal_ip)) {
+          logger::info(std::string(first_attempt
+                                       ? "VPN connection ready under reconnect supervisor"
+                                       : "VPN reconnect succeeded") +
+                       ", PID: " + std::to_string(vpn_pid) +
+                       ", interface: " + vpn_interface +
+                       ", internal IP: " + internal_ip);
+          route_ready_logged = true;
+        }
+      }
+
+      usleep(250000);
+    }
+
+    if (!route_ready_logged) {
+      std::string vpn_interface;
+      std::string internal_ip;
+      pid_t vpn_pid = read_pid();
+      if (vpn_pid > 0 && is_process_alive(vpn_pid) &&
+          read_route_ready(&vpn_interface, &internal_ip)) {
+        logger::info(std::string(first_attempt
+                                     ? "VPN connection ready under reconnect supervisor"
+                                     : "VPN reconnect succeeded") +
+                     ", PID: " + std::to_string(vpn_pid) +
+                     ", interface: " + vpn_interface +
+                     ", internal IP: " + internal_ip);
+      }
     }
 
     supervisor_child_pid = -1;
@@ -218,6 +279,13 @@ static int run_supervisor(const Config &cfg, const std::string &password,
     }
 
     first_attempt = false;
+  }
+
+  if (retry_limit_reached) {
+    logger::warn("Reconnect supervisor stopped after reaching retry limit: " +
+                 std::to_string(retry_limit));
+  } else if (supervisor_stop_requested) {
+    logger::info("Reconnect supervisor stop requested");
   }
 
   clear_runtime_state();
@@ -279,6 +347,41 @@ int start(const Config &cfg, int retry_limit) {
     logger::info("openconnect installed via Homebrew");
   }
 
+  // Prefer helper daemon even when running as root — it manages session state
+  // and the reconnect supervisor, and ensures stop works correctly.
+  if (helper::is_available()) {
+    Config validated_cfg = cfg;
+    if (validated_cfg.username.empty()) {
+      utils::print_error("Username not configured!");
+      utils::print_info("Use 'exv config set username <your_username>' to set it.");
+      return 1;
+    }
+    if (validated_cfg.remember_password && validated_cfg.password.empty()) {
+      utils::print_error("Password not configured!");
+      utils::print_info("Run: exv config set password");
+      return 1;
+    }
+    if (validated_cfg.server.empty()) {
+      utils::print_error("Server not configured!");
+      return 1;
+    }
+
+    std::string plaintext_password = config::get_plaintext_password(validated_cfg);
+    if (plaintext_password.empty()) {
+      return 1;
+    }
+
+    return helper::start_via_helper(validated_cfg, plaintext_password, retry_limit)
+               ? 0
+               : 1;
+  }
+
+  if (!utils::check_root()) {
+    utils::print_error("Root privileges required to start the VPN. Install the helper with 'sudo exv service install' or run with sudo.");
+    logger::error("Not running as root for VPN start and helper is unavailable");
+    return 1;
+  }
+
   // Check if VPN is already running
   pid_t supervisor_pid = read_supervisor_pid();
   if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
@@ -323,6 +426,19 @@ int start(const Config &cfg, int retry_limit) {
     return 1; // error already printed by get_plaintext_password
   }
 
+  return start_with_password(cfg, plaintext_password, retry_limit);
+}
+
+int start_with_password(const Config &cfg, const std::string &plaintext_password,
+                        int retry_limit) {
+  std::string openconnect_path = utils::get_openconnect_path();
+  if (openconnect_path.empty()) {
+    utils::print_error("openconnect is not installed or is not reachable by the current execution environment.");
+    utils::print_info("Install openconnect or ensure it is available at a stable path such as /opt/homebrew/bin/openconnect.");
+    logger::error("openconnect binary could not be resolved for VPN start");
+    return 1;
+  }
+
   // ── Generate tunnel script ─────────────────────────────────
   utils::print_info("Generating tunnel script...");
   if (!tunnel::write_script(cfg)) {
@@ -345,6 +461,7 @@ int start(const Config &cfg, int retry_limit) {
   supervisor_child_pid = -1;
 
   bool use_supervisor = retry_limit != 0;
+  pid_t supervisor_pid = -1;
 
   if (!use_supervisor) {
     pid_t child_pid = fork();
@@ -432,7 +549,7 @@ int start(const Config &cfg, int retry_limit) {
   std::string vpn_interface;
   std::string internal_ip;
   bool route_ready = false;
-  for (int i = 0; i < 240; ++i) {
+  for (int i = 0; i < 20; ++i) {
     usleep(250000);
     vpn_pid = read_pid();
     route_ready = read_route_ready(&vpn_interface, &internal_ip);
@@ -474,10 +591,29 @@ int start(const Config &cfg, int retry_limit) {
     logger::info("VPN started, PID: " + std::to_string(vpn_pid) +
                  ", supervisor PID: " + std::to_string(supervisor_pid));
   } else {
+    if (vpn_pid > 0 && !is_process_alive(vpn_pid))
+      vpn_pid = -1;
+
     utils::print_warning("VPN process started, but network routes are not ready yet.");
+    if (vpn_pid > 0) {
+      std::cout << utils::DIM << "  PID: " << vpn_pid << utils::RESET
+                << std::endl;
+    }
+    std::cout << utils::DIM << "  Supervisor PID: " << supervisor_pid
+              << utils::RESET << std::endl;
+    std::cout << utils::DIM << "  Server: " << cfg.server << utils::RESET
+              << std::endl;
+    std::cout << utils::DIM << "  Routes: " << cfg.routes.size()
+              << " configured" << utils::RESET << std::endl;
+    std::cout << utils::DIM << "  Auto-reconnect: "
+              << (retry_limit < 0 ? std::string("infinite")
+                                  : std::to_string(retry_limit) + " retries")
+              << utils::RESET << std::endl;
+    std::cout << std::endl;
     utils::print_info("Check status with: exv status");
     utils::print_info("Check logs with: exv logs");
-    logger::warn("VPN supervisor started but route-ready marker not yet detected");
+    utils::print_info("Stop with: sudo exv stop");
+    logger::warn("VPN supervisor started and returned before route-ready marker was detected");
   }
 
   return 0;
@@ -485,6 +621,20 @@ int start(const Config &cfg, int retry_limit) {
 
 int stop() {
   utils::print_header("EXV Stopping");
+
+  // Prefer helper daemon even when running as root — it manages session state
+  // and the reconnect supervisor. Direct kills leave stale state and the
+  // supervisor respawns openconnect immediately.
+  if (helper::is_available()) {
+    bool ok = helper::stop_via_helper();
+    if (ok) return 0;
+    // Helper said not running — check for orphaned processes before giving up
+  }
+
+  if (!utils::check_root()) {
+    utils::print_error("Root privileges required. Please run with sudo.");
+    return 1;
+  }
 
   pid_t supervisor_pid = read_supervisor_pid();
   if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
@@ -503,11 +653,6 @@ int stop() {
     utils::print_error("No openconnect process found. VPN is not running.");
     clear_runtime_state();
     logger::info("Stop requested but no VPN process found");
-    return 1;
-  }
-
-  if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
@@ -572,6 +717,10 @@ int stop() {
 
 int status() {
   utils::print_header("EXV Status");
+
+  if (helper::is_available()) {
+    return helper::show_status_via_helper() ? 0 : 1;
+  }
 
   pid_t supervisor_pid = read_supervisor_pid();
   bool supervisor_from_pidfile = true;
