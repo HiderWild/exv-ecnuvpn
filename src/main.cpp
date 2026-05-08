@@ -512,9 +512,9 @@ int main(int argc, char *argv[]) {
 
         // Child: detach from terminal, then start WebUI
         setsid();
-        freopen("/dev/null", "r", stdin);
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
+        (void)freopen("/dev/null", "r", stdin);
+        (void)freopen("/dev/null", "w", stdout);
+        (void)freopen("/dev/null", "w", stderr);
 
         std::string config_dir = utils::get_config_dir();
         std::string log_path = utils::expand_home(cfg.log_file);
