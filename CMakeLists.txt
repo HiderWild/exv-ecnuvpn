@@ -30,6 +30,21 @@ add_executable(exv ${SOURCES})
 find_package(Threads REQUIRED)
 target_link_libraries(exv PRIVATE Threads::Threads)
 
+# Platform-specific dependencies
+if(APPLE)
+    # CommonCrypto links implicitly on macOS
+elseif(UNIX AND NOT APPLE)
+    find_package(OpenSSL 1.1.1 REQUIRED)
+    target_link_libraries(exv PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+elseif(WIN32)
+    find_package(OpenSSL 1.1.1 REQUIRED)
+    target_link_libraries(exv PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    # Windows Service API and Named Pipe
+    target_link_libraries(exv PRIVATE advapi32)
+else()
+    message(FATAL_ERROR "Unsupported platform. Supported: macOS, Linux, Windows.")
+endif()
+
 # Pass version to source
 target_compile_definitions(exv PRIVATE
     ECNUVPN_VERSION="${PROJECT_VERSION}"
