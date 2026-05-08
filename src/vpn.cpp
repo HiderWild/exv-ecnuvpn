@@ -351,42 +351,36 @@ int start(const Config &cfg, int retry_limit) {
     logger::error("openconnect not found");
     return 1;
 #else
-    // Check if Homebrew is available
-    if (utils::run_command("which brew > /dev/null 2>&1") != 0) {
-      utils::print_error("Homebrew is not installed either.");
-      std::cout << std::endl;
-      std::cout << utils::BOLD
-                << "  Please run the following commands to install:"
-                << utils::RESET << std::endl;
-      std::cout << std::endl;
-      std::cout << utils::YELLOW << "  # 1. Install Homebrew:" << utils::RESET
-                << std::endl
-                << "  /bin/bash -c \"$(curl -fsSL "
-                   "https://raw.githubusercontent.com/Homebrew/install/HEAD/"
-                   "install.sh)\""
-                << std::endl
-                << std::endl;
-      std::cout << utils::YELLOW
-                << "  # 2. Install openconnect:" << utils::RESET << std::endl
-                << "  brew install openconnect" << std::endl
-                << std::endl;
-      logger::error("openconnect and Homebrew both not found");
-      return 1;
-    }
-
-    // Homebrew found — attempt to install openconnect
-    utils::print_info("Running: brew install openconnect ...");
-    std::cout << std::endl;
-    int ret = utils::run_command("brew install openconnect");
-    std::cout << std::endl;
-    if (ret != 0 || !utils::check_openconnect()) {
-      utils::print_error("brew install openconnect failed.");
-      utils::print_info("Try running it manually: brew install openconnect");
-      logger::error("brew install openconnect failed");
+    // Linux: try system package managers
+    if (utils::run_command("which apt-get > /dev/null 2>&1") == 0) {
+      utils::print_info("Running: sudo apt-get install -y openconnect ...");
+      int ret = utils::run_command("sudo apt-get install -y openconnect");
+      if (ret != 0 || !utils::check_openconnect()) {
+        utils::print_error("apt-get install openconnect failed.");
+        return 1;
+      }
+    } else if (utils::run_command("which dnf > /dev/null 2>&1") == 0) {
+      utils::print_info("Running: sudo dnf install -y openconnect ...");
+      int ret = utils::run_command("sudo dnf install -y openconnect");
+      if (ret != 0 || !utils::check_openconnect()) {
+        utils::print_error("dnf install openconnect failed.");
+        return 1;
+      }
+    } else if (utils::run_command("which pacman > /dev/null 2>&1") == 0) {
+      utils::print_info("Running: sudo pacman -S --noconfirm openconnect ...");
+      int ret = utils::run_command("sudo pacman -S --noconfirm openconnect");
+      if (ret != 0 || !utils::check_openconnect()) {
+        utils::print_error("pacman install openconnect failed.");
+        return 1;
+      }
+    } else {
+      utils::print_error("No supported package manager found (apt-get/dnf/pacman).");
+      utils::print_info("Install openconnect manually, then run exv again.");
+      logger::error("openconnect not found, no package manager available");
       return 1;
     }
     utils::print_success("openconnect installed successfully!");
-    logger::info("openconnect installed via Homebrew");
+    logger::info("openconnect installed via system package manager");
 #endif
   }
 

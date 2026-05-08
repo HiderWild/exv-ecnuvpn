@@ -948,7 +948,7 @@ void process_client_request(int client_fd, uid_t peer_uid, gid_t peer_gid,
 
   std::string payload = response.dump();
   payload.push_back('\n');
-  write(client_fd, payload.data(), payload.size());
+  (void)write(client_fd, payload.data(), payload.size());
 }
 
 bool print_running_status(const nlohmann::json &response) {
@@ -1539,7 +1539,7 @@ int daemon_main() {
           make_error("Failed to launch EXV helper request handler.");
       std::string payload = response.dump();
       payload.push_back('\n');
-      write(client_fd, payload.data(), payload.size());
+      (void)write(client_fd, payload.data(), payload.size());
       close(client_fd);
       continue;
     }
