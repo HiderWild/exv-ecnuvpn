@@ -12,9 +12,14 @@
 
 #include <nlohmann/json.hpp>
 
-// macOS built-in — no extra brew install required
+// Platform-specific crypto
+#ifdef __APPLE__
 #include <CommonCrypto/CommonCryptor.h>
 #include <CommonCrypto/CommonRandom.h>
+#elif defined(__linux__) || defined(_WIN32)
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#endif
 
 // POSIX for termios hidden input
 #include <sys/stat.h>
@@ -110,11 +115,17 @@ std::string key_path() { return utils::get_config_dir() + "/.key"; }
 
 std::string generate_key() {
   uint8_t raw[32];
+#ifdef __APPLE__
   if (CCRandomGenerateBytes(raw, sizeof(raw)) != kCCSuccess) {
-    // Fallback: use /dev/urandom
     std::ifstream urandom("/dev/urandom", std::ios::binary);
     urandom.read(reinterpret_cast<char *>(raw), sizeof(raw));
   }
+#else
+  if (RAND_bytes(raw, sizeof(raw)) != 1) {
+    std::ifstream urandom("/dev/urandom", std::ios::binary);
+    urandom.read(reinterpret_cast<char *>(raw), sizeof(raw));
+  }
+#endif
   return bytes_to_hex(raw, sizeof(raw));
 }
 
@@ -215,22 +226,33 @@ std::string encrypt(const std::string &plaintext, const std::string &hex_key) {
   if (!hex_to_bytes(hex_key, key_bytes, 32))
     return "";
 
+  constexpr size_t IV_LEN = 16;
+
   // Generate random IV
-  uint8_t iv[kCCBlockSizeAES128];
+  uint8_t iv[IV_LEN];
+#ifdef __APPLE__
   if (CCRandomGenerateBytes(iv, sizeof(iv)) != kCCSuccess) {
     std::ifstream urandom("/dev/urandom", std::ios::binary);
     urandom.read(reinterpret_cast<char *>(iv), sizeof(iv));
   }
+#else
+  if (RAND_bytes(iv, sizeof(iv)) != 1) {
+    std::ifstream urandom("/dev/urandom", std::ios::binary);
+    urandom.read(reinterpret_cast<char *>(iv), sizeof(iv));
+  }
+#endif
 
-  // Compute output buffer size (AES CBC pads to block boundary)
+  // Encrypt
   size_t out_len = 0;
+  std::vector<uint8_t> ciphertext;
+
+#ifdef __APPLE__
   size_t buf_size = plaintext.size() + kCCBlockSizeAES128;
-  std::vector<uint8_t> ciphertext(buf_size);
+  ciphertext.resize(buf_size);
 
   CCCryptorStatus status =
       CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding, key_bytes,
-              sizeof(key_bytes), // key + key size
-              iv,                // IV
+              sizeof(key_bytes), iv,
               plaintext.data(), plaintext.size(), ciphertext.data(), buf_size,
               &out_len);
 
@@ -239,11 +261,34 @@ std::string encrypt(const std::string &plaintext, const std::string &hex_key) {
     return "";
   }
   ciphertext.resize(out_len);
+#else
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) {
+    logger::error("AES encrypt: EVP_CIPHER_CTX_new failed");
+    return "";
+  }
+
+  ciphertext.resize(plaintext.size() + IV_LEN);
+  int out_len1 = 0, out_len2 = 0;
+
+  if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key_bytes, iv) != 1 ||
+      EVP_EncryptUpdate(ctx, ciphertext.data(), &out_len1,
+                        reinterpret_cast<const uint8_t *>(plaintext.data()),
+                        static_cast<int>(plaintext.size())) != 1 ||
+      EVP_EncryptFinal_ex(ctx, ciphertext.data() + out_len1, &out_len2) != 1) {
+    logger::error("AES encrypt failed (OpenSSL EVP)");
+    EVP_CIPHER_CTX_free(ctx);
+    return "";
+  }
+  EVP_CIPHER_CTX_free(ctx);
+  out_len = static_cast<size_t>(out_len1 + out_len2);
+  ciphertext.resize(out_len);
+#endif
 
   // Prepend IV to ciphertext, then base64 encode the whole thing
-  std::vector<uint8_t> combined(sizeof(iv) + out_len);
-  std::memcpy(combined.data(), iv, sizeof(iv));
-  std::memcpy(combined.data() + sizeof(iv), ciphertext.data(), out_len);
+  std::vector<uint8_t> combined(IV_LEN + out_len);
+  std::memcpy(combined.data(), iv, IV_LEN);
+  std::memcpy(combined.data() + IV_LEN, ciphertext.data(), out_len);
 
   return base64_encode(combined.data(), combined.size());
 }
@@ -259,17 +304,20 @@ std::string decrypt(const std::string &ciphertext_b64,
   if (!hex_to_bytes(hex_key, key_bytes, 32))
     return "";
 
+  constexpr size_t IV_LEN = 16;
+
   auto combined = base64_decode(ciphertext_b64);
-  if (combined.size() <= kCCBlockSizeAES128) {
+  if (combined.size() <= IV_LEN) {
     logger::error("AES decrypt: ciphertext too short");
     return "";
   }
 
   // Split IV and ciphertext
   const uint8_t *iv = combined.data();
-  const uint8_t *enc_data = combined.data() + kCCBlockSizeAES128;
-  size_t enc_len = combined.size() - kCCBlockSizeAES128;
+  const uint8_t *enc_data = combined.data() + IV_LEN;
+  size_t enc_len = combined.size() - IV_LEN;
 
+#ifdef __APPLE__
   size_t out_len = 0;
   std::vector<uint8_t> plaintext(enc_len + kCCBlockSizeAES128);
 
@@ -284,6 +332,29 @@ std::string decrypt(const std::string &ciphertext_b64,
   }
 
   return std::string(reinterpret_cast<char *>(plaintext.data()), out_len);
+#else
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) {
+    logger::error("AES decrypt: EVP_CIPHER_CTX_new failed");
+    return "";
+  }
+
+  std::vector<uint8_t> plaintext(enc_len + IV_LEN);
+  int out_len1 = 0, out_len2 = 0;
+
+  if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key_bytes, iv) != 1 ||
+      EVP_DecryptUpdate(ctx, plaintext.data(), &out_len1,
+                        enc_data, static_cast<int>(enc_len)) != 1 ||
+      EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len1, &out_len2) != 1) {
+    logger::error("AES decrypt failed (OpenSSL EVP)");
+    EVP_CIPHER_CTX_free(ctx);
+    return "";
+  }
+  EVP_CIPHER_CTX_free(ctx);
+
+  return std::string(reinterpret_cast<char *>(plaintext.data()),
+                     static_cast<size_t>(out_len1 + out_len2));
+#endif
 }
 
 // ── Secure hidden input ──────────────────────────────────────────
