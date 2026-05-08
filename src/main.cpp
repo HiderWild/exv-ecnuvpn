@@ -152,9 +152,25 @@ static void print_help() {
   std::cout << std::endl;
   std::cout << utils::BOLD << "SERVICE SUBCOMMANDS:" << utils::RESET << std::endl;
   std::cout << "  " << utils::YELLOW << "service install" << utils::RESET
-            << "            Install launchd helper (needs sudo once)" << std::endl;
+            << "            Install "
+#ifdef __APPLE__
+            << "launchd"
+#elif defined(_WIN32)
+            << "Windows service"
+#else
+            << "systemd"
+#endif
+            << " helper (needs sudo once)" << std::endl;
   std::cout << "  " << utils::YELLOW << "service uninstall" << utils::RESET
-            << "          Remove launchd helper" << std::endl;
+            << "          Remove "
+#ifdef __APPLE__
+            << "launchd"
+#elif defined(_WIN32)
+            << "Windows service"
+#else
+            << "systemd"
+#endif
+            << " helper" << std::endl;
   std::cout << "  " << utils::YELLOW << "service status" << utils::RESET
             << "             Show helper status" << std::endl;
   std::cout << std::endl;
