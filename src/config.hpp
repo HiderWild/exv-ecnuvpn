@@ -18,7 +18,13 @@ struct Config {
   std::string password =
       ""; // AES-256-CBC ciphertext (base64); empty if remember_password=false
   int mtu = 1290;
+  #ifdef __APPLE__
   std::string useragent = "AnyConnect Darwin_x86_64 4.10.05095";
+#elif defined(_WIN32)
+  std::string useragent = "AnyConnect Win_x86_64 4.10.05095";
+#else
+  std::string useragent = "AnyConnect Linux_x86_64 4.10.05095";
+#endif
   bool disable_dtls = DEFAULT_DISABLE_DTLS;
   bool remember_password = true; // false = prompt hidden input at connect time
   std::vector<std::string> routes = {

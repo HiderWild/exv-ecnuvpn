@@ -1,4 +1,33 @@
+# Build
 build/
-.cache/
-.DS_Store
+cmake-build-*/
 *.o
+*.d
+exv
+
+# Generated files
+src/webui_assets.hpp
+
+# IDE / editor
+.cache/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# OMC / Claude
+.omc/
+.claude/
+
+# Legacy
+bash/
+cminst.sh
+walkthrough.md

@@ -6,7 +6,14 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sstream>
+#ifdef __APPLE__
 #include <sys/event.h>
+#elif defined(__linux__)
+#include <sys/inotify.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
+#include <filesystem>
 #include <unistd.h>
 
 namespace ecnuvpn {
@@ -191,6 +198,7 @@ void SseBroadcaster::parse_and_broadcast_log_line(const std::string& line) {
 // ── Background threads ────────────────────────────────────────────
 
 void SseBroadcaster::log_watcher() {
+#ifdef __APPLE__
     int kq = kqueue();
     if (kq < 0) {
         logger::error("SseBroadcaster: kqueue() failed: " +
@@ -284,6 +292,216 @@ void SseBroadcaster::log_watcher() {
 
     if (fd >= 0) close(fd);
     close(kq);
+#elif defined(__linux__)
+    // Linux: inotify-based file watching
+    int inotify_fd = inotify_init1(IN_NONBLOCK);
+    if (inotify_fd < 0) {
+        logger::error("SseBroadcaster: inotify_init1() failed: " +
+                      std::string(std::strerror(errno)));
+        return;
+    }
+
+    int watch_fd = -1;
+    int fd = -1;
+
+    auto add_watch = [&]() -> bool {
+        if (watch_fd >= 0) {
+            inotify_rm_watch(inotify_fd, watch_fd);
+            watch_fd = -1;
+        }
+        if (!utils::file_exists(log_path_)) return false;
+        watch_fd = inotify_add_watch(inotify_fd, log_path_.c_str(),
+                                      IN_MODIFY | IN_DELETE_SELF | IN_MOVE_SELF);
+        return watch_fd >= 0;
+    };
+
+    auto open_log = [&]() -> bool {
+        if (fd >= 0) {
+            close(fd);
+            fd = -1;
+        }
+        if (!utils::file_exists(log_path_)) return false;
+        fd = ::open(log_path_.c_str(), O_RDONLY);
+        if (fd < 0) return false;
+        ::lseek(fd, 0, SEEK_END);
+        return true;
+    };
+
+    // Initial setup
+    if (utils::file_exists(log_path_)) {
+        open_log();
+        add_watch();
+    }
+
+    char buf[4096];
+    // inotify events need aligned buffer
+    alignas(struct inotify_event) char inotify_buf[4096];
+    std::string leftover;
+
+    while (running_) {
+        // Poll with 1-second timeout using select
+        struct timeval tv = {1, 0};
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(inotify_fd, &readfds);
+        int n = select(inotify_fd + 1, &readfds, nullptr, nullptr, &tv);
+
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            logger::error("SseBroadcaster: select() failed: " +
+                          std::string(std::strerror(errno)));
+            break;
+        }
+
+        if (n == 0) {
+            // Timeout — try to set up watch if file appeared
+            if (watch_fd < 0 && utils::file_exists(log_path_)) {
+                add_watch();
+                open_log();
+            }
+            continue;
+        }
+
+        // Read inotify events
+        ssize_t len = read(inotify_fd, inotify_buf, sizeof(inotify_buf));
+        if (len < 0) {
+            if (errno == EINTR) continue;
+            continue;
+        }
+
+        bool file_modified = false;
+        bool file_deleted = false;
+        for (char *ptr = inotify_buf; ptr < inotify_buf + len; ) {
+            auto *event = reinterpret_cast<struct inotify_event *>(ptr);
+            if (event->mask & IN_MODIFY) file_modified = true;
+            if (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF)) file_deleted = true;
+            ptr += sizeof(struct inotify_event) + event->len;
+        }
+
+        if (file_deleted) {
+            leftover.clear();
+            inotify_rm_watch(inotify_fd, watch_fd);
+            watch_fd = -1;
+            if (fd >= 0) { close(fd); fd = -1; }
+            // Re-add when file reappears
+            if (utils::file_exists(log_path_)) {
+                add_watch();
+                open_log();
+            }
+            continue;
+        }
+
+        if (file_modified) {
+            if (fd < 0) {
+                if (!open_log()) continue;
+            }
+
+            ssize_t nread;
+            while ((nread = ::read(fd, buf, sizeof(buf))) > 0) {
+                leftover.append(buf, static_cast<size_t>(nread));
+
+                std::string::size_type pos;
+                while ((pos = leftover.find('\n')) != std::string::npos) {
+                    std::string line = leftover.substr(0, pos);
+                    leftover.erase(0, pos + 1);
+                    if (!line.empty()) {
+                        parse_and_broadcast_log_line(line);
+                    }
+                }
+            }
+        }
+    }
+
+    if (fd >= 0) close(fd);
+    if (watch_fd >= 0) inotify_rm_watch(inotify_fd, watch_fd);
+    close(inotify_fd);
+#elif defined(_WIN32)
+    // Windows: ReadDirectoryChangesW-based file watching
+    std::string dir_path = std::filesystem::path(log_path_).parent_path().string();
+    HANDLE hDir = CreateFileA(
+        dir_path.c_str(),
+        FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+        NULL);
+
+    if (hDir == INVALID_HANDLE_VALUE) {
+        logger::error("SseBroadcaster: CreateFile failed for directory: " + dir_path);
+        return;
+    }
+
+    OVERLAPPED overlapped = {};
+    overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+    int fd = -1;
+    if (utils::file_exists(log_path_)) {
+        fd = ::open(log_path_.c_str(), O_RDONLY);
+        if (fd >= 0) ::lseek(fd, 0, SEEK_END);
+    }
+
+    alignas(DWORD) char notifyBuf[4096];
+    char buf[4096];
+    std::string leftover;
+
+    while (running_) {
+        ZeroMemory(notifyBuf, sizeof(notifyBuf));
+        DWORD bytesReturned = 0;
+        ReadDirectoryChangesW(hDir, notifyBuf, sizeof(notifyBuf), FALSE,
+                              FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
+                              &bytesReturned, &overlapped, NULL);
+
+        DWORD waitResult = WaitForSingleObject(overlapped.hEvent, 1000);
+        if (waitResult == WAIT_TIMEOUT) {
+            if (fd < 0 && utils::file_exists(log_path_)) {
+                fd = ::open(log_path_.c_str(), O_RDONLY);
+                if (fd >= 0) ::lseek(fd, 0, SEEK_END);
+            }
+            continue;
+        }
+        if (waitResult != WAIT_OBJECT_0) continue;
+
+        if (!GetOverlappedResult(hDir, &overlapped, &bytesReturned, FALSE)) {
+            ResetEvent(overlapped.hEvent);
+            continue;
+        }
+
+        FILE_NOTIFY_INFORMATION *pNotify = reinterpret_cast<FILE_NOTIFY_INFORMATION *>(notifyBuf);
+        bool modified = false;
+        while (true) {
+            if (pNotify->Action == FILE_ACTION_MODIFIED ||
+                pNotify->Action == FILE_ACTION_RENAMED_NEW_NAME) {
+                modified = true;
+            }
+            if (pNotify->NextEntryOffset == 0) break;
+            pNotify = reinterpret_cast<FILE_NOTIFY_INFORMATION *>(
+                reinterpret_cast<char *>(pNotify) + pNotify->NextEntryOffset);
+        }
+
+        if (modified) {
+            if (fd < 0) {
+                fd = ::open(log_path_.c_str(), O_RDONLY);
+                if (fd < 0) { ResetEvent(overlapped.hEvent); continue; }
+                ::lseek(fd, 0, SEEK_END);
+            }
+            ssize_t nread;
+            while ((nread = ::read(fd, buf, sizeof(buf))) > 0) {
+                leftover.append(buf, static_cast<size_t>(nread));
+                std::string::size_type pos;
+                while ((pos = leftover.find('\n')) != std::string::npos) {
+                    std::string line = leftover.substr(0, pos);
+                    leftover.erase(0, pos + 1);
+                    if (!line.empty()) parse_and_broadcast_log_line(line);
+                }
+            }
+        }
+        ResetEvent(overlapped.hEvent);
+    }
+
+    if (fd >= 0) close(fd);
+    CloseHandle(overlapped.hEvent);
+    CloseHandle(hDir);
+#endif
 }
 
 void SseBroadcaster::status_poller() {

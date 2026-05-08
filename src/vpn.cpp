@@ -309,6 +309,7 @@ int start(const Config &cfg, int retry_limit) {
       return 1;
     }
 
+#ifdef __APPLE__
     // Check if Homebrew is available
     if (utils::run_command("which brew > /dev/null 2>&1") != 0) {
       utils::print_error("Homebrew is not installed either.");
@@ -345,6 +346,48 @@ int start(const Config &cfg, int retry_limit) {
     }
     utils::print_success("openconnect installed successfully!");
     logger::info("openconnect installed via Homebrew");
+#elif defined(_WIN32)
+    std::cout << "Download openconnect from: https://github.com/openconnect/openconnect-gui/releases\n";
+    logger::error("openconnect not found");
+    return 1;
+#else
+    // Check if Homebrew is available
+    if (utils::run_command("which brew > /dev/null 2>&1") != 0) {
+      utils::print_error("Homebrew is not installed either.");
+      std::cout << std::endl;
+      std::cout << utils::BOLD
+                << "  Please run the following commands to install:"
+                << utils::RESET << std::endl;
+      std::cout << std::endl;
+      std::cout << utils::YELLOW << "  # 1. Install Homebrew:" << utils::RESET
+                << std::endl
+                << "  /bin/bash -c \"$(curl -fsSL "
+                   "https://raw.githubusercontent.com/Homebrew/install/HEAD/"
+                   "install.sh)\""
+                << std::endl
+                << std::endl;
+      std::cout << utils::YELLOW
+                << "  # 2. Install openconnect:" << utils::RESET << std::endl
+                << "  brew install openconnect" << std::endl
+                << std::endl;
+      logger::error("openconnect and Homebrew both not found");
+      return 1;
+    }
+
+    // Homebrew found — attempt to install openconnect
+    utils::print_info("Running: brew install openconnect ...");
+    std::cout << std::endl;
+    int ret = utils::run_command("brew install openconnect");
+    std::cout << std::endl;
+    if (ret != 0 || !utils::check_openconnect()) {
+      utils::print_error("brew install openconnect failed.");
+      utils::print_info("Try running it manually: brew install openconnect");
+      logger::error("brew install openconnect failed");
+      return 1;
+    }
+    utils::print_success("openconnect installed successfully!");
+    logger::info("openconnect installed via Homebrew");
+#endif
   }
 
   // Prefer helper daemon even when running as root — it manages session state
@@ -764,9 +807,17 @@ int status() {
       std::cout << "  Internal IP    : " << internal_ip << std::endl;
     }
 
-    // Try to get utun interface info
+    // Try to get tunnel interface info
+#ifdef __APPLE__
     std::string ifconfig_out =
         utils::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
+#elif defined(_WIN32)
+    std::string ifconfig_out =
+        utils::run_command_output("netsh interface show interface 2>nul");
+#else
+    std::string ifconfig_out =
+        utils::run_command_output("ip addr show type tun 2>/dev/null | head -20");
+#endif
     if (!ifconfig_out.empty()) {
       std::cout << std::endl;
       std::cout << utils::DIM << "  Network Interfaces:" << utils::RESET
