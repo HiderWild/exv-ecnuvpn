@@ -4,7 +4,12 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <memory>
 #include <pwd.h>
 #include <sstream>
@@ -236,10 +241,22 @@ bool write_file(const std::string &path, const std::string &content) {
 // ── System checks ───────────────────────────────────────────────
 
 std::string get_openconnect_path() {
+#ifdef __APPLE__
   const char *candidates[] = {"/opt/homebrew/bin/openconnect",
                               "/usr/local/bin/openconnect",
                               "/usr/bin/openconnect",
                               "/bin/openconnect"};
+#elif defined(_WIN32)
+    const char *candidates[] = {
+        "C:\\Program Files\\OpenConnect\\openconnect.exe",
+        "C:\\Program Files (x86)\\OpenConnect\\openconnect.exe",
+        "openconnect.exe"};
+#else
+  const char *candidates[] = {"/usr/sbin/openconnect",
+                              "/usr/bin/openconnect",
+                              "/sbin/openconnect",
+                              "/usr/local/bin/openconnect"};
+#endif
   for (const char *candidate : candidates) {
     if (candidate && access(candidate, X_OK) == 0)
       return candidate;
@@ -263,6 +280,7 @@ bool get_interface_traffic(const std::string &iface,
   *rx_bytes = 0;
   *tx_bytes = 0;
 
+#ifdef __APPLE__
   std::string output = run_command_output(
       "netstat -b -I " + shell_quote(iface) + " 2>/dev/null");
   std::istringstream stream(output);
@@ -303,11 +321,31 @@ bool get_interface_traffic(const std::string &iface,
   } catch (...) {
     return false;
   }
+#elif defined(_WIN32)
+    // Windows: simplified implementation using netsh
+    // Full implementation would use GetIfEntry2 from iphlpapi
+    return false;
+#else
+  // Linux: read from sysfs
+  auto read_sysfs_counter = [](const std::string &path) -> uint64_t {
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) return 0;
+    std::string val;
+    std::getline(ifs, val);
+    try { return std::stoull(val); } catch (...) { return 0; }
+  };
+
+  std::string base = "/sys/class/net/" + iface + "/statistics/";
+  *rx_bytes = read_sysfs_counter(base + "rx_bytes");
+  *tx_bytes = read_sysfs_counter(base + "tx_bytes");
+  return (*rx_bytes > 0 || *tx_bytes > 0);
+#endif
 }
 
 int run_command(const std::string &cmd) { return system(cmd.c_str()); }
 
 std::string get_executable_path() {
+#ifdef __APPLE__
   uint32_t size = 0;
   _NSGetExecutablePath(nullptr, &size);
   if (size == 0)
@@ -322,6 +360,18 @@ std::string get_executable_path() {
     return resolved.data();
 
   return buffer.data();
+#elif defined(_WIN32)
+    char buf[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, buf, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) return "";
+    return std::string(buf);
+#else
+  char buf[4096];
+  ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (len <= 0) return "";
+  buf[len] = '\0';
+  return std::string(buf);
+#endif
 }
 
 std::string run_command_output(const std::string &cmd) {
