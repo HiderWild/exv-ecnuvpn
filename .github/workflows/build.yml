@@ -26,3 +26,14 @@ jobs:
         run: cmake -B build && cmake --build build -j$(nproc)
       - name: Test
         run: ./build/exv version
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSSL
+        run: choco install openssl -y
+      - name: Build
+        run: cmake -B build && cmake --build build --config Release
+      - name: Test
+        run: .\build\Release\exv.exe version

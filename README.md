@@ -54,6 +54,35 @@ sudo exv service install
 
 此命令会将 `exv` 复制到 `/usr/local/bin/exv` 并注册 launchd 守护进程。**安装后日常使用不再需要 sudo。**
 
+## Platform Support
+
+### macOS
+```bash
+brew install openconnect
+cmake -B build && cmake --build build
+sudo ./cminst.sh
+```
+
+### Linux (Ubuntu/Debian)
+```bash
+sudo apt install openconnect libssl-dev cmake build-essential
+cmake -B build && cmake --build build
+sudo ./scripts/install-linux.sh
+```
+
+### Linux (Fedora/RHEL)
+```bash
+sudo dnf install openconnect openssl-devel cmake gcc-c++
+cmake -B build && cmake --build build
+sudo ./scripts/install-linux.sh
+```
+
+### Windows
+1. Install [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases)
+2. Install OpenSSL (via [vcpkg](https://vcpkg.io/) or [choco](https://chocolatey.org/)): `choco install openssl`
+3. Build: `cmake -B build && cmake --build build --config Release`
+4. Run as Administrator: `.\build\Release\exv.exe install-helper`
+
 ## 快速开始
 
 ```bash
