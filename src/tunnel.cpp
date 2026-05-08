@@ -151,22 +151,47 @@ std::string generate(const Config &cfg) {
         "$INTERNAL_IP4_ADDRESS\"\n";
   ss << "\n";
   ss << "# Activate virtual interface\n";
+#ifdef __APPLE__
   ss << "ifconfig \"$TUNDEV\" \"$INTERNAL_IP4_ADDRESS\" "
         "\"$INTERNAL_IP4_ADDRESS\" netmask 255.255.255.255 up >/dev/null 2>&1\n";
+#elif defined(_WIN32)
+    // Windows: openconnect handles TUN setup via WinTUN/TAP driver
+    ss << "echo \"[VPN] Interface activation handled by openconnect (WinTUN)\"\n";
+#else
+  ss << "ip addr add \"$INTERNAL_IP4_ADDRESS/32\" dev \"$TUNDEV\" >/dev/null 2>&1\n";
+  ss << "ip link set \"$TUNDEV\" up >/dev/null 2>&1\n";
+#endif
   ss << "if [ $? -ne 0 ]; then\n";
   ss << "    echo \">>> [VPN] Failed to activate interface: $TUNDEV\"\n";
   ss << "    exit 1\n";
   ss << "fi\n";
   ss << "\n";
   if (!server_route_exceptions.empty()) {
+#ifdef __APPLE__
     ss << "DEFAULT_ROUTE=$(route -n get default 2>/dev/null)\n";
     ss << "DEFAULT_GATEWAY=$(printf '%s\\n' \"$DEFAULT_ROUTE\" | awk '/gateway:/{print $2; exit}')\n";
     ss << "DEFAULT_INTERFACE=$(printf '%s\\n' \"$DEFAULT_ROUTE\" | awk '/interface:/{print $2; exit}')\n";
+#elif defined(_WIN32)
+    ss << "FOR /F \"tokens=4\" %%G IN ('route print 0.0.0.0 ^| findstr /C:\"0.0.0.0\"') DO set DEFAULT_GATEWAY=%%G\n";
+    ss << "FOR /F \"tokens=5\" %%G IN ('route print 0.0.0.0 ^| findstr /C:\"0.0.0.0\"') DO set DEFAULT_INTERFACE=%%G\n";
+#else
+    ss << "DEFAULT_GATEWAY=$(ip route show default 0.0.0.0/0 2>/dev/null | awk '{print $3; exit}')\n";
+    ss << "DEFAULT_INTERFACE=$(ip route show default 0.0.0.0/0 2>/dev/null | awk '{print $5; exit}')\n";
+#endif
     ss << "if [ -n \"$DEFAULT_GATEWAY\" ] && [ -n \"$DEFAULT_INTERFACE\" ]; then\n";
     for (const auto &server_ip : server_route_exceptions) {
+#ifdef __APPLE__
       ss << "    route -n delete \"" << server_ip << "\" >/dev/null 2>&1\n";
       ss << "    route -n add -host \"" << server_ip
          << "\" \"$DEFAULT_GATEWAY\" >/dev/null 2>&1\n";
+#elif defined(_WIN32)
+      ss << "    route delete " << server_ip << " >nul 2>&1\n";
+      ss << "    route add " << server_ip << " %DEFAULT_GATEWAY% >nul 2>&1\n";
+#else
+      ss << "    ip route del \"" << server_ip << "\" >/dev/null 2>&1\n";
+      ss << "    ip route add \"" << server_ip
+         << "\" via \"$DEFAULT_GATEWAY\" >/dev/null 2>&1\n";
+#endif
       ss << "    if [ $? -eq 0 ]; then\n";
       ss << "        echo \"  [+] Server route preserved: " << server_ip
          << " via $DEFAULT_INTERFACE\"\n";
@@ -183,9 +208,18 @@ std::string generate(const Config &cfg) {
   ss << "\n";
 
   for (const auto &route : cfg.routes) {
+#ifdef __APPLE__
     ss << "route -n delete \"" << route << "\" >/dev/null 2>&1\n";
     ss << "route -n add \"" << route
        << "\" -interface \"$TUNDEV\" >/dev/null 2>&1\n";
+#elif defined(_WIN32)
+    ss << "route delete " << route << " >nul 2>&1\n";
+    ss << "route add " << route << " %DEFAULT_GATEWAY% >nul 2>&1\n";
+#else
+    ss << "ip route del \"" << route << "\" >/dev/null 2>&1\n";
+    ss << "ip route add \"" << route
+       << "\" dev \"$TUNDEV\" >/dev/null 2>&1\n";
+#endif
     ss << "if [ $? -eq 0 ]; then\n";
     ss << "    echo \"  [+] Route added: " << route << "\"\n";
     ss << "else\n";
