@@ -33,14 +33,17 @@ target_link_libraries(exv PRIVATE Threads::Threads)
 # Platform-specific dependencies
 if(APPLE)
     # CommonCrypto links implicitly on macOS
+    target_sources(exv PRIVATE src/helper_daemon_mac.cpp)
 elseif(UNIX AND NOT APPLE)
     find_package(OpenSSL 1.1.1 REQUIRED)
     target_link_libraries(exv PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_sources(exv PRIVATE src/helper_daemon_linux.cpp)
 elseif(WIN32)
     find_package(OpenSSL 1.1.1 REQUIRED)
     target_link_libraries(exv PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     # Windows Service API and Named Pipe
-    target_link_libraries(exv PRIVATE advapi32)
+    target_link_libraries(exv PRIVATE advapi32 iphlpapi)
+    target_sources(exv PRIVATE src/helper_daemon_win.cpp)
 else()
     message(FATAL_ERROR "Unsupported platform. Supported: macOS, Linux, Windows.")
 endif()
