@@ -26,11 +26,23 @@ namespace helper {
 
 namespace {
 
+#ifdef __APPLE__
 constexpr const char *kHelperLabel = "com.ecnu.exv.helper";
-constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
-constexpr const char *kHelperStatePath = "/var/run/exv-helper-session.json";
 constexpr const char *kHelperPlistPath =
     "/Library/LaunchDaemons/com.ecnu.exv.helper.plist";
+constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
+constexpr const char *kHelperStatePath = "/var/run/exv-helper-session.json";
+#elif defined(__linux__)
+constexpr const char *kHelperServiceName = "exv-helper";
+constexpr const char *kHelperServicePath =
+    "/etc/systemd/system/exv-helper.service";
+constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
+constexpr const char *kHelperStatePath = "/var/run/exv-helper-session.json";
+#elif defined(_WIN32)
+constexpr const char *kHelperServiceName = "exv-helper";
+constexpr const char *kHelperPipePath = "\\\\.\\pipe\\exv-helper";
+constexpr const char *kHelperStatePath = "C:\\ProgramData\\exv-helper-session.json";
+#endif
 constexpr const char *kStableInstallPath = "/usr/local/bin/exv";
 
 volatile sig_atomic_t daemon_stop_requested = 0;
@@ -1104,6 +1116,7 @@ bool show_status_via_helper() {
 }
 
 int install_service(const std::string &executable_path) {
+#ifdef __APPLE__
   if (!utils::check_root()) {
     utils::print_error("Root privileges required. Please run with sudo.");
     return 1;
@@ -1177,9 +1190,112 @@ int install_service(const std::string &executable_path) {
   }
   utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
   return 0;
+#elif defined(__linux__)
+  // Linux systemd service installation
+  if (!utils::check_root()) {
+    utils::print_error("Root privileges required. Please run with sudo.");
+    return 1;
+  }
+
+  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
+                                                  : executable_path;
+  if (exec_path.empty()) {
+    utils::print_error("Failed to resolve the exv executable path.");
+    return 1;
+  }
+
+  std::ofstream ofs(kHelperServicePath);
+  if (!ofs.is_open()) {
+    utils::print_error("Failed to write systemd unit file: " +
+                       std::string(kHelperServicePath));
+    return 1;
+  }
+  ofs << "[Unit]\n";
+  ofs << "Description=ECNU VPN Helper Daemon\n";
+  ofs << "After=network.target\n\n";
+  ofs << "[Service]\n";
+  ofs << "Type=forking\n";
+  ofs << "ExecStart=" << exec_path << " __helper-daemon\n";
+  ofs << "Restart=on-failure\n";
+  ofs << "RestartSec=5\n\n";
+  ofs << "[Install]\n";
+  ofs << "WantedBy=multi-user.target\n";
+  ofs.close();
+
+  std::string reload_cmd = "systemctl daemon-reload";
+  if (utils::run_command(reload_cmd) != 0) {
+    utils::print_error("Failed to reload systemd daemon.");
+    return 1;
+  }
+
+  std::string enable_cmd = "systemctl enable " + std::string(kHelperServiceName);
+  if (utils::run_command(enable_cmd) != 0) {
+    utils::print_error("Failed to enable EXV helper service.");
+    return 1;
+  }
+
+  std::string start_cmd = "systemctl start " + std::string(kHelperServiceName);
+  if (utils::run_command(start_cmd) != 0) {
+    utils::print_error("Failed to start EXV helper service.");
+    return 1;
+  }
+
+  bool helper_ready = wait_until_available(50, 100000);
+
+  utils::print_success("EXV helper service installed.");
+  if (!helper_ready) {
+    utils::print_warning(
+        "Helper service was installed, but it has not responded on the socket yet.");
+    utils::print_info("Run 'exv service status' again in a moment if needed.");
+  }
+  utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
+  return 0;
+#elif defined(_WIN32)
+  SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
+  if (!hSCM) {
+    logger::error("Cannot open Service Control Manager");
+    return 1;
+  }
+
+  std::string exv_path = utils::get_executable_path();
+  std::filesystem::path exv_dir = std::filesystem::path(exv_path).parent_path();
+  std::string helper_bin = (exv_dir / "exv-helper.exe").string();
+
+  if (!utils::file_exists(helper_bin)) {
+    logger::error("Helper binary not found at: " + helper_bin);
+    CloseServiceHandle(hSCM);
+    return 1;
+  }
+
+  SC_HANDLE hService = CreateServiceA(
+      hSCM, kHelperServiceName, "ECNU VPN Helper",
+      SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+      SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+      helper_bin.c_str(), NULL, NULL, NULL, NULL, NULL);
+
+  if (!hService) {
+    DWORD err = GetLastError();
+    if (err == ERROR_SERVICE_EXISTS) {
+      std::cout << "Helper service is already installed.\n";
+      CloseServiceHandle(hSCM);
+      return 0;
+    }
+    logger::error("CreateService failed: " + std::to_string(err));
+    CloseServiceHandle(hSCM);
+    return 1;
+  }
+
+  StartService(hService, 0, NULL);
+  CloseServiceHandle(hService);
+  CloseServiceHandle(hSCM);
+
+  std::cout << "Helper service installed and started.\n";
+  return 0;
+#endif
 }
 
 int uninstall_service() {
+#ifdef __APPLE__
   if (!utils::check_root()) {
     utils::print_error("Root privileges required. Please run with sudo.");
     return 1;
@@ -1197,9 +1313,52 @@ int uninstall_service() {
 
   utils::print_success("EXV helper service uninstalled.");
   return 0;
+#elif defined(__linux__)
+  if (!utils::check_root()) {
+    utils::print_error("Root privileges required. Please run with sudo.");
+    return 1;
+  }
+
+  nlohmann::json response;
+  std::string error_message;
+  send_request(nlohmann::json{{"action", "stop"}}, &response, &error_message);
+
+  std::string stop_cmd = "systemctl stop " + std::string(kHelperServiceName);
+  utils::run_command(stop_cmd + " >/dev/null 2>&1");
+  std::string disable_cmd = "systemctl disable " + std::string(kHelperServiceName);
+  utils::run_command(disable_cmd + " >/dev/null 2>&1");
+  remove_file_if_exists(kHelperServicePath);
+  remove_file_if_exists(kHelperSocketPath);
+  utils::run_command("systemctl daemon-reload >/dev/null 2>&1");
+  clear_session_state();
+
+  utils::print_success("EXV helper service uninstalled.");
+  return 0;
+#elif defined(_WIN32)
+  SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+  if (!hSCM) return 1;
+
+  SC_HANDLE hService = OpenServiceA(hSCM, kHelperServiceName, SERVICE_STOP | DELETE);
+  if (!hService) {
+    std::cout << "Helper service is not installed.\n";
+    CloseServiceHandle(hSCM);
+    return 0;
+  }
+
+  SERVICE_STATUS status;
+  ControlService(hService, SERVICE_CONTROL_STOP, &status);
+  DeleteService(hService);
+
+  CloseServiceHandle(hService);
+  CloseServiceHandle(hSCM);
+
+  std::cout << "Helper service uninstalled.\n";
+  return 0;
+#endif
 }
 
 int show_service_status() {
+#ifdef __APPLE__
   utils::print_header("EXV Service Status");
 
   bool plist_exists = utils::file_exists(kHelperPlistPath);
@@ -1226,6 +1385,47 @@ int show_service_status() {
 
   std::cout << std::endl;
   return 0;
+#elif defined(__linux__)
+  utils::print_header("EXV Service Status");
+
+  bool service_exists = utils::file_exists(kHelperServicePath);
+  bool available = service_exists ? wait_until_available(10, 100000) : false;
+  std::cout << "  Installed       : " << (service_exists ? "yes" : "no")
+            << std::endl;
+  std::cout << "  Socket Ready    : " << (available ? "yes" : "no")
+            << std::endl;
+
+  if (available) {
+    nlohmann::json response;
+    std::string error_message;
+    if (send_request(nlohmann::json{{"action", "status"}}, &response,
+                     &error_message) && response.value("ok", false)) {
+      std::cout << "  VPN Running     : "
+                << (response.value("running", false) ? "yes" : "no")
+                << std::endl;
+      if (response.value("running", false)) {
+        std::cout << "  Session Owner   : "
+                  << response.value("owner_username", std::string()) << std::endl;
+      }
+    }
+  }
+
+  std::cout << std::endl;
+  return 0;
+#elif defined(_WIN32)
+  SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+  SC_HANDLE hService = OpenServiceA(hSCM, kHelperServiceName, SERVICE_QUERY_STATUS);
+  bool installed = (hService != NULL);
+  std::cout << "Helper service: " << (installed ? "installed" : "not installed") << "\n";
+  if (installed) {
+    SERVICE_STATUS status;
+    QueryServiceStatus(hService, &status);
+    std::cout << "  State: " << (status.dwCurrentState == SERVICE_RUNNING ? "running" : "stopped") << "\n";
+    CloseServiceHandle(hService);
+  }
+  CloseServiceHandle(hSCM);
+  return 0;
+#endif
 }
 
 int worker_main(const std::string &request_path) {
@@ -1273,8 +1473,14 @@ int daemon_main() {
     return 1;
   }
 
+#ifdef __APPLE__
   chmod(kHelperSocketPath, 0660);
   chown(kHelperSocketPath, 0, 20); // group staff (gid 20) — all macOS user accounts
+#elif defined(__linux__)
+  chmod(kHelperSocketPath, 0666);
+#else
+  // Windows: Named Pipe ACLs handle access control, no chmod needed
+#endif
 
   if (listen(daemon_server_fd, 8) != 0) {
     close(daemon_server_fd);
@@ -1299,10 +1505,26 @@ int daemon_main() {
 
     uid_t peer_uid = 0;
     gid_t peer_gid = 0;
+#ifdef __APPLE__
     if (getpeereid(client_fd, &peer_uid, &peer_gid) != 0) {
       close(client_fd);
       continue;
     }
+#elif defined(__linux__)
+    struct ucred cred;
+    socklen_t cred_len = sizeof(cred);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) != 0) {
+      close(client_fd);
+      continue;
+    }
+    peer_uid = cred.uid;
+    peer_gid = cred.gid;
+#elif defined(_WIN32)
+    // Windows Named Pipe auth: impersonation is handled at the pipe level
+    // The helper checks client identity via ImpersonateNamedPipeClient
+    // For now, allow all local connections (same as chmod 0666 on Linux)
+    // TODO: implement proper SID-based access check
+#endif
 
     std::string raw;
     char buffer[1024];
