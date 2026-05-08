@@ -674,7 +674,13 @@ void WebUIServer::setup_routes() {
                                          httplib::Response& res) {
         bool available = helper::is_available();
         nlohmann::json j;
+        #ifdef __APPLE__
         j["installed"] = utils::file_exists("/Library/LaunchDaemons/com.ecnu.exv.helper.plist");
+#elif defined(__linux__)
+        j["installed"] = utils::file_exists("/etc/systemd/system/exv-helper.service");
+#elif defined(_WIN32)
+        j["installed"] = false; // TODO: check Windows SCM for service existence
+#endif
         j["running"] = available;
         j["path"] = "/usr/local/bin/exv";
         j["available"] = available;
