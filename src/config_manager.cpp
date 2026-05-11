@@ -8,7 +8,9 @@
 #include <cstdio>
 #include <cstring>
 #include <sstream>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace ecnuvpn {
 namespace config {
@@ -59,7 +61,11 @@ void ConfigManager::save(const Config& cfg) {
         if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
             logger::error("ConfigManager::save: rename failed: " +
                           std::string(std::strerror(errno)));
+#ifdef _WIN32
+            ::_unlink(tmp_path.c_str());
+#else
             ::unlink(tmp_path.c_str());
+#endif
             return;
         }
 
@@ -68,7 +74,11 @@ void ConfigManager::save(const Config& cfg) {
     } catch (const std::exception& e) {
         logger::error("ConfigManager::save error: " +
                       std::string(e.what()));
+#ifdef _WIN32
+        ::_unlink(tmp_path.c_str());
+#else
         ::unlink(tmp_path.c_str());
+#endif
     }
 }
 

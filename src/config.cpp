@@ -9,8 +9,13 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#ifndef _WIN32
 #include <termios.h>
 #include <unistd.h>
+#else
+#include <windows.h>
+#include <conio.h>
+#endif
 
 namespace ecnuvpn {
 namespace config {
@@ -144,6 +149,7 @@ struct KeyEvent {
 };
 
 static KeyEvent read_key_raw() {
+#ifndef _WIN32
   unsigned char c;
   if (read(STDIN_FILENO, &c, 1) != 1)
     return {KEY_NONE, 0};
@@ -182,6 +188,31 @@ static KeyEvent read_key_raw() {
   if (c >= 32 && c < 127)
     return {KEY_PRINTABLE, static_cast<char>(c)};
   return {KEY_NONE, 0};
+#else
+  // Windows: use _getch() from conio.h
+  int c = _getch();
+  if (c == '\r' || c == '\n')
+    return {KEY_ENTER, 0};
+  if (c == ' ')
+    return {KEY_SPACE, 0};
+  if (c == 8 || c == 127)
+    return {KEY_BACKSPACE, 0};
+  if (c == 0 || c == 0xE0) {
+    // Extended key - read the second byte
+    int ext = _getch();
+    switch (ext) {
+    case 72: return {KEY_UP, 0};
+    case 80: return {KEY_DOWN, 0};
+    case 75: return {KEY_LEFT, 0};
+    case 77: return {KEY_RIGHT, 0};
+    case 83: return {KEY_DELETE, 0};
+    }
+    return {KEY_NONE, 0};
+  }
+  if (c >= 32 && c < 127)
+    return {KEY_PRINTABLE, static_cast<char>(c)};
+  return {KEY_NONE, 0};
+#endif
 }
 
 // ── Route selector state ─────────────────────────────────────────
@@ -398,6 +429,7 @@ wiz_route_selector(const std::vector<std::string> &default_routes) {
   st.defaults = default_routes;
   st.def_sel.assign(st.defaults.size(), true);
 
+#ifndef _WIN32
   struct termios oldt, newt;
   tcgetattr(STDIN_FILENO, &oldt);
   newt = oldt;
@@ -405,6 +437,14 @@ wiz_route_selector(const std::vector<std::string> &default_routes) {
   newt.c_cc[VMIN] = 1;
   newt.c_cc[VTIME] = 0;
   tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+#else
+  HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD old_console_mode = 0;
+  if (hStdin != INVALID_HANDLE_VALUE) {
+    GetConsoleMode(hStdin, &old_console_mode);
+    SetConsoleMode(hStdin, old_console_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT));
+  }
+#endif
 
   rendered_lines = 0;
   std::cout << std::endl;
@@ -500,7 +540,13 @@ wiz_route_selector(const std::vector<std::string> &default_routes) {
       render_tui(st);
   }
 
+#ifndef _WIN32
   tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+#else
+  if (hStdin != INVALID_HANDLE_VALUE) {
+    SetConsoleMode(hStdin, old_console_mode);
+  }
+#endif
   std::cout << std::endl;
 
   std::vector<std::string> result;
@@ -557,8 +603,9 @@ static Config run_wizard() {
 
     wiz_step(1, TOTAL, "Working Directory");
     std::cout << "    Where should exv store its files?" << std::endl;
-    std::string new_dir = wiz_prompt("Directory", "~/.ecnuvpn");
-    if (new_dir != "~/.ecnuvpn") {
+    std::string default_dir = utils::get_config_dir();
+    std::string new_dir = wiz_prompt("Directory", default_dir);
+    if (new_dir != default_dir) {
       if (!utils::set_config_dir(new_dir))
         utils::print_warning("Could not create " + new_dir +
                              ". Using default.");

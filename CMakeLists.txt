@@ -68,4 +68,8 @@ add_dependencies(exv embed_assets)
 target_compile_definitions(exv PRIVATE EMBEDDED_ASSETS)
 
 # Install target
-install(TARGETS exv DESTINATION /usr/local/bin)
+if(WIN32)
+  install(TARGETS exv DESTINATION "C:/Program Files/ECNU-VPN")
+else()
+  install(TARGETS exv DESTINATION /usr/local/bin)
+endif()

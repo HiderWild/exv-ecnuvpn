@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,22 @@ namespace ecnuvpn {
 static constexpr bool DEFAULT_DISABLE_DTLS = true;
 #else
 static constexpr bool DEFAULT_DISABLE_DTLS = false;
+#endif
+
+#ifdef _WIN32
+static inline std::string default_log_file_path() {
+  const char *appdata = std::getenv("APPDATA");
+  if (appdata && *appdata)
+    return std::string(appdata) + "\ecnuvpn\ecnuvpn.log";
+  const char *home = std::getenv("USERPROFILE");
+  if (home && *home)
+    return std::string(home) + "\AppData\Roaming\ecnuvpn\ecnuvpn.log";
+  return "C:\ProgramData\ecnuvpn\ecnuvpn.log";
+}
+#else
+static inline std::string default_log_file_path() {
+  return "~/.ecnuvpn/ecnuvpn.log";
+}
 #endif
 
 struct Config {
@@ -32,7 +49,7 @@ struct Config {
       "58.198.176.128/25", "219.228.60.69",   "59.78.189.128/25",
       "219.228.63.0/21",   "202.120.80.0/20", "222.66.117.0/24"};
   std::vector<std::string> extra_args;
-  std::string log_file = "~/.ecnuvpn/ecnuvpn.log";
+  std::string log_file = default_log_file_path();
   int webui_port = 18080;
   std::string webui_bind = "127.0.0.1";
   bool webui_enabled = true;

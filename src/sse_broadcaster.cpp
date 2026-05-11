@@ -4,7 +4,9 @@
 
 #include <cerrno>
 #include <cstring>
+#ifndef _WIN32
 #include <fcntl.h>
+#endif
 #include <sstream>
 #ifdef __APPLE__
 #include <sys/event.h>
@@ -14,7 +16,9 @@
 #include <windows.h>
 #endif
 #include <filesystem>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace ecnuvpn {
 namespace sse {
@@ -434,10 +438,23 @@ void SseBroadcaster::log_watcher() {
     OVERLAPPED overlapped = {};
     overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-    int fd = -1;
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    auto open_log = [&]() -> bool {
+        if (hFile != INVALID_HANDLE_VALUE) {
+            CloseHandle(hFile);
+            hFile = INVALID_HANDLE_VALUE;
+        }
+        if (!utils::file_exists(log_path_)) return false;
+        hFile = CreateFileA(log_path_.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return false;
+        // Seek to end so we only read new data
+        SetFilePointer(hFile, 0, NULL, FILE_END);
+        return true;
+    };
+
     if (utils::file_exists(log_path_)) {
-        fd = ::open(log_path_.c_str(), O_RDONLY);
-        if (fd >= 0) ::lseek(fd, 0, SEEK_END);
+        open_log();
     }
 
     alignas(DWORD) char notifyBuf[4096];
@@ -453,9 +470,8 @@ void SseBroadcaster::log_watcher() {
 
         DWORD waitResult = WaitForSingleObject(overlapped.hEvent, 1000);
         if (waitResult == WAIT_TIMEOUT) {
-            if (fd < 0 && utils::file_exists(log_path_)) {
-                fd = ::open(log_path_.c_str(), O_RDONLY);
-                if (fd >= 0) ::lseek(fd, 0, SEEK_END);
+            if (hFile == INVALID_HANDLE_VALUE && utils::file_exists(log_path_)) {
+                open_log();
             }
             continue;
         }
@@ -479,14 +495,12 @@ void SseBroadcaster::log_watcher() {
         }
 
         if (modified) {
-            if (fd < 0) {
-                fd = ::open(log_path_.c_str(), O_RDONLY);
-                if (fd < 0) { ResetEvent(overlapped.hEvent); continue; }
-                ::lseek(fd, 0, SEEK_END);
+            if (hFile == INVALID_HANDLE_VALUE) {
+                if (!open_log()) { ResetEvent(overlapped.hEvent); continue; }
             }
-            ssize_t nread;
-            while ((nread = ::read(fd, buf, sizeof(buf))) > 0) {
-                leftover.append(buf, static_cast<size_t>(nread));
+            DWORD bytesRead = 0;
+            while (ReadFile(hFile, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                leftover.append(buf, bytesRead);
                 std::string::size_type pos;
                 while ((pos = leftover.find('\n')) != std::string::npos) {
                     std::string line = leftover.substr(0, pos);
@@ -498,7 +512,7 @@ void SseBroadcaster::log_watcher() {
         ResetEvent(overlapped.hEvent);
     }
 
-    if (fd >= 0) close(fd);
+    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
     CloseHandle(overlapped.hEvent);
     CloseHandle(hDir);
 #endif

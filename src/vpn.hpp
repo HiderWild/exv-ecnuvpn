@@ -10,6 +10,11 @@ int start(const Config &cfg, int retry_limit = 0);
 int start_with_password(const Config &cfg, const std::string &plaintext_password,
                         int retry_limit = 0);
 
+#ifdef _WIN32
+// Hidden entrypoint used for the detached Windows reconnect supervisor.
+int supervisor_main();
+#endif
+
 // Stop the VPN connection
 int stop();
 

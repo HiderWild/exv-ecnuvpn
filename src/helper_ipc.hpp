@@ -26,8 +26,15 @@ public:
   // Send a response to the current client
   virtual bool send_response(const std::string &response) = 0;
 
+  // Close the current client connection (server keeps listening)
+  virtual void close_client() {}
+
   // Close the server and release resources
   virtual void close() = 0;
+
+  // Get the server listen fd (POSIX only; returns -1 on Windows)
+  // Used by signal handlers to interrupt accept()
+  virtual int server_fd() const { return -1; }
 
   // Get the peer uid/gid after verify_client (POSIX only; Windows returns 0)
   virtual unsigned int peer_uid() const = 0;

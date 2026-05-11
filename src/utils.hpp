@@ -2,6 +2,10 @@
 
 #include <sys/types.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <string>
 
 namespace ecnuvpn {
@@ -71,6 +75,21 @@ std::string shell_quote(const std::string &value);
 
 // String utilities
 std::string trim(const std::string &s);
+
+// Windows console: enable ANSI escape code processing
+#ifdef _WIN32
+inline void enable_windows_ansi() {
+  HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (hOut != INVALID_HANDLE_VALUE) {
+    DWORD mode = 0;
+    if (GetConsoleMode(hOut, &mode)) {
+      SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+  }
+}
+#else
+inline void enable_windows_ansi() {}
+#endif
 
 } // namespace utils
 } // namespace ecnuvpn

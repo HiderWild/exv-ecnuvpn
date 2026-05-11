@@ -66,11 +66,11 @@ sudo ./scripts/install-linux.sh
 1. 安装 [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases)
 2. 安装 OpenSSL（通过 [vcpkg](https://vcpkg.io/) 或 [choco](https://chocolatey.org/)）：`choco install openssl`
 3. 构建：`cmake -B build && cmake --build build --config Release`
-4. 以管理员身份运行：`.\build\Release\exv.exe install-helper`
+4. 以管理员身份运行：`.\build\Release\exv.exe service install`
 
 ## 配置
 
-配置文件位于 `~/.ecnuvpn/config.json`：
+配置文件默认位于：macOS/Linux 为 `~/.ecnuvpn/config.json`，Windows 为 `%APPDATA%\ecnuvpn\config.json`。
 
 ```json
 {

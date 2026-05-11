@@ -21,10 +21,15 @@
 #include <openssl/rand.h>
 #endif
 
-// POSIX for termios hidden input
+// Platform-specific hidden input
+#ifndef _WIN32
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
+#else
+#include <windows.h>
+#include <conio.h>
+#endif
 
 namespace ecnuvpn {
 namespace crypto {
@@ -144,8 +149,10 @@ bool save_key(const std::string &hex_key) {
   if (!ofs.is_open())
     return false;
   ofs << hex_key;
+#ifndef _WIN32
   // Restrict to owner read/write only
   chmod(path.c_str(), 0600);
+#endif
   return ofs.good();
 }
 
@@ -364,7 +371,8 @@ std::string read_password_hidden(const std::string &prompt) {
   std::cerr << prompt;
   std::cerr.flush();
 
-  // Disable echo via termios
+#ifndef _WIN32
+  // POSIX: disable echo via termios
   struct termios old_termios, new_termios;
   bool tty = (tcgetattr(STDIN_FILENO, &old_termios) == 0);
   if (tty) {
@@ -380,6 +388,24 @@ std::string read_password_hidden(const std::string &prompt) {
   if (tty) {
     tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
   }
+#else
+  // Windows: disable echo via SetConsoleMode
+  HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD old_mode = 0;
+  bool console_ok = (hStdin != INVALID_HANDLE_VALUE &&
+                     GetConsoleMode(hStdin, &old_mode) != 0);
+  if (console_ok) {
+    SetConsoleMode(hStdin, old_mode & ~ENABLE_ECHO_INPUT);
+  }
+
+  std::string password;
+  std::getline(std::cin, password);
+
+  // Restore console mode
+  if (console_ok) {
+    SetConsoleMode(hStdin, old_mode);
+  }
+#endif
 
   // Print newline (since echo was off, enter key didn't produce one)
   std::cerr << std::endl;

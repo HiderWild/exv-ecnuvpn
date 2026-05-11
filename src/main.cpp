@@ -11,9 +11,13 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#else
+#include <windows.h>
+#endif
 #include <vector>
 
 using namespace ecnuvpn;
@@ -160,7 +164,12 @@ static void print_help() {
 #else
             << "systemd"
 #endif
-            << " helper (needs sudo once)" << std::endl;
+            << " helper "
+#ifdef _WIN32
+            << "(needs Administrator once)" << std::endl;
+#else
+            << "(needs sudo once)" << std::endl;
+#endif
   std::cout << "  " << utils::YELLOW << "service uninstall" << utils::RESET
             << "          Remove "
 #ifdef __APPLE__
@@ -175,13 +184,19 @@ static void print_help() {
             << "             Show helper status" << std::endl;
   std::cout << std::endl;
   std::cout << utils::BOLD << "EXAMPLES:" << utils::RESET << std::endl;
-  std::cout
-      << utils::DIM << "  sudo exv service install               # Install root helper once"
-      << std::endl
-      << "  exv                                    # Start VPN via helper"
-      << std::endl
-      << "  exv -rt 3                              # Retry reconnect 3 times"
-      << std::endl
+#ifdef _WIN32
+  std::cout << utils::DIM
+            << "  exv service install                    # Install Windows helper once"
+            << utils::RESET << std::endl;
+#else
+  std::cout << utils::DIM
+            << "  sudo exv service install               # Install root helper once"
+            << utils::RESET << std::endl;
+#endif
+  std::cout << "  exv                                    # Start VPN via helper"
+            << std::endl
+            << "  exv -rt 3                              # Retry reconnect 3 times"
+            << std::endl
       << "  exv -rt                                # Retry reconnect forever"
       << std::endl
       << "  exv stop                               # Stop VPN" << std::endl
@@ -319,6 +334,8 @@ static int handle_config(const std::vector<std::string> &args) {
 }
 
 int main(int argc, char *argv[]) {
+  utils::enable_windows_ansi();
+
   std::vector<std::string> raw_args;
   for (int i = 0; i < argc; ++i) {
     raw_args.emplace_back(argv[i]);
@@ -330,6 +347,11 @@ int main(int argc, char *argv[]) {
   if (raw_args.size() > 2 && raw_args[1] == "__helper-exec") {
     return helper::worker_main(raw_args[2]);
   }
+#ifdef _WIN32
+  if (raw_args.size() > 1 && raw_args[1] == "__vpn-supervisor") {
+    return vpn::supervisor_main();
+  }
+#endif
 
   ParsedArgs parsed = parse_args(raw_args);
   if (!parsed.error.empty()) {
@@ -366,10 +388,17 @@ int main(int argc, char *argv[]) {
 
     // Warn if WebUI is enabled but helper daemon is not installed
     if (cfg.webui_enabled && !helper::is_available()) {
+#ifdef _WIN32
+      utils::print_warning(
+          "WebUI is enabled but helper daemon is not installed. "
+          "WebUI will have limited VPN control. "
+          "Install the helper with: exv service install from an elevated prompt");
+#else
       utils::print_warning(
           "WebUI is enabled but helper daemon is not installed. "
           "WebUI will have limited VPN control. "
           "Install the helper with: sudo exv service install");
+#endif
     }
 
     int vpn_result = vpn::start(cfg, parsed.retry_limit);
@@ -396,6 +425,7 @@ int main(int argc, char *argv[]) {
         sse::SseBroadcaster status_broadcaster(
             log_path,
             []() -> std::string {
+#ifndef _WIN32
               int fd = socket(AF_UNIX, SOCK_STREAM, 0);
               if (fd < 0) return "";
 
@@ -423,7 +453,26 @@ int main(int argc, char *argv[]) {
                 if (raw.find('\n') != std::string::npos) break;
               }
               close(fd);
+#else
+              // Windows: use Named Pipe
+              HANDLE hPipe = CreateFileA("\\\\.\\pipe\\exv-helper",
+                                         GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                         OPEN_EXISTING, 0, NULL);
+              if (hPipe == INVALID_HANDLE_VALUE) return "";
 
+              std::string req = R"({"action":"status"})" "\n";
+              DWORD bytesWritten = 0;
+              WriteFile(hPipe, req.c_str(), static_cast<DWORD>(req.size()), &bytesWritten, NULL);
+
+              std::string raw;
+              char buf[1024];
+              DWORD bytesRead = 0;
+              while (ReadFile(hPipe, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
+                raw.append(buf, bytesRead);
+                if (raw.find('\n') != std::string::npos) break;
+              }
+              CloseHandle(hPipe);
+#endif
               auto nl = raw.find('\n');
               if (nl != std::string::npos) raw.resize(nl);
               raw = utils::trim(raw);
@@ -460,7 +509,11 @@ int main(int argc, char *argv[]) {
         std::cout << std::endl;
         utils::print_info("WebUI running in foreground. Press Ctrl+C to stop.");
         while (!webui_stop_requested) {
+#ifndef _WIN32
           pause();
+#else
+          Sleep(1000);
+#endif
         }
         std::cout << std::endl;
         utils::print_info("Shutting down WebUI...");
@@ -470,6 +523,7 @@ int main(int argc, char *argv[]) {
         log_broadcaster.stop();
         g_webui_server = nullptr;
       } else {
+#ifndef _WIN32
         // Background mode: fork first, then start WebUI in child only.
         // This avoids the fork-after-thread bug where fork() only duplicates
         // the calling thread, leaving the HTTP server thread dead in the child.
@@ -485,10 +539,6 @@ int main(int argc, char *argv[]) {
         if (bg_pid < 0) {
           // Fork failed: fall back to foreground
           utils::print_warning("Could not detach to background, running in foreground.");
-          // Re-enter foreground path by setting foreground flag
-          parsed.foreground = true;
-          // Fall through to foreground handling below — but we need to
-          // restructure, so just do inline foreground here
           std::string config_dir = utils::get_config_dir();
           std::string log_path = utils::expand_home(cfg.log_file);
           config::ConfigManager config_mgr(config_dir);
@@ -601,6 +651,34 @@ int main(int argc, char *argv[]) {
         log_broadcaster.stop();
         g_webui_server = nullptr;
         return 0;
+#else
+        // Windows: no fork/setsid, run in foreground mode instead
+        std::string config_dir = utils::get_config_dir();
+        std::string log_path = utils::expand_home(cfg.log_file);
+        config::ConfigManager config_mgr(config_dir);
+        sse::SseBroadcaster log_broadcaster(log_path, []() -> std::string { return "{}"; }, 8);
+        sse::SseBroadcaster status_broadcaster(log_path, []() -> std::string { return ""; }, 8);
+        log_broadcaster.start();
+        status_broadcaster.start();
+        webui::WebUIServer webui(config_mgr, log_broadcaster, status_broadcaster,
+                                 cfg.webui_port, cfg.webui_bind);
+        g_webui_server = &webui;
+        signal(SIGINT, webui_signal_handler);
+        signal(SIGTERM, webui_signal_handler);
+        webui.start();
+        std::cout << std::endl;
+        utils::print_info("WebUI running in foreground. Press Ctrl+C to stop.");
+        while (!webui_stop_requested) {
+          Sleep(1000);
+        }
+        std::cout << std::endl;
+        utils::print_info("Shutting down WebUI...");
+        webui.stop();
+        status_broadcaster.stop();
+        log_broadcaster.stop();
+        g_webui_server = nullptr;
+        return 0;
+#endif
       }
     } else {
       utils::print_info("WebUI disabled (webui_enabled = false)");
