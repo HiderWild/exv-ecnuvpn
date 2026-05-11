@@ -18,6 +18,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install webui deps
+        working-directory: webui
+        run: npm install
+      - name: Build webui
+        working-directory: webui
+        run: npm run build
       - name: Build
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(sysctl -n hw.ncpu)
       - name: Test
@@ -35,8 +44,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Install webui deps
+        working-directory: webui
+        run: npm install
+      - name: Build webui
+        working-directory: webui
+        run: npm run build
       - name: Build
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
       - name: Test
@@ -54,8 +72,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - name: Install OpenSSL
         run: choco install openssl -y
+      - name: Install webui deps
+        working-directory: webui
+        run: npm install
+      - name: Build webui
+        working-directory: webui
+        run: npm run build
       - name: Build
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release
       - name: Test
@@ -74,6 +101,15 @@ jobs:
     needs: build-linux
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install webui deps
+        working-directory: webui
+        run: npm install
+      - name: Build webui
+        working-directory: webui
+        run: npm run build
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
