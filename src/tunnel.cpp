@@ -502,58 +502,64 @@ static std::string generate_posix(const Config &cfg) {
     ss << "OWNER_UID=\"" << runtime_owner_uid << "\"\n";
     ss << "OWNER_GID=\"" << runtime_owner_gid << "\"\n";
   }
+  ss << "\n";
 
-  // Bake route lists into the script so cleanup_routes can delete them.
+  // Bake route lists into the script so disconnect can clean them up
+  // without depending on the route-ready file or config.
   ss << "CUSTOM_ROUTES=\"";
-  for (const auto &route : cfg.routes) {
-    ss << route << " ";
+  for (std::size_t i = 0; i < cfg.routes.size(); ++i) {
+    if (i > 0) ss << " ";
+    ss << cfg.routes[i];
   }
   ss << "\"\n";
   ss << "SERVER_EXCEPTIONS=\"";
-  for (const auto &ip : server_route_exceptions) {
-    ss << ip << " ";
+  for (std::size_t i = 0; i < server_route_exceptions.size(); ++i) {
+    if (i > 0) ss << " ";
+    ss << server_route_exceptions[i];
   }
   ss << "\"\n";
   ss << "\n";
 
-  // cleanup_routes — delete all VPN split-tunnel routes from the OS table.
+  ss << "delete_ready_file() {\n";
+  ss << "    rm -f \"$READY_FILE\"\n";
+  ss << "}\n";
+  ss << "\n";
+
+  // Shell cleanup function — deletes all VPN routes from the OS table.
+  ss << "cleanup_routes() {\n";
+  ss << "    VPN_GW=\"$VPNGATEWAY\"\n";
+  ss << "    if [ -n \"$VPN_GW\" ] && [ \"${VPN_GW%%:*}\" = \"$VPN_GW\" ]; then\n";
 #ifdef __APPLE__
-  ss << "cleanup_routes() {\n";
-  ss << "    echo \">>> [VPN] Disconnect detected, cleaning up routes...\"\n";
-  ss << "    for ip in $SERVER_EXCEPTIONS; do\n";
-  ss << "        route -n delete \"$ip\" >/dev/null 2>&1\n";
-  ss << "    done\n";
-  ss << "    for route in $CUSTOM_ROUTES; do\n";
-  ss << "        route -n delete \"$route\" >/dev/null 2>&1\n";
-  ss << "    done\n";
-  ss << "    echo \">>> [VPN] Route cleanup complete.\"\n";
-  ss << "}\n";
+  ss << "        route -n delete \"$VPN_GW\" >/dev/null 2>&1\n";
 #else
-  ss << "cleanup_routes() {\n";
-  ss << "    echo \">>> [VPN] Disconnect detected, cleaning up routes...\"\n";
+  ss << "        ip route del \"$VPN_GW\" >/dev/null 2>&1\n";
+#endif
+  ss << "    fi\n";
   ss << "    for ip in $SERVER_EXCEPTIONS; do\n";
+#ifdef __APPLE__
+  ss << "        route -n delete \"$ip\" >/dev/null 2>&1\n";
+#else
   ss << "        ip route del \"$ip\" >/dev/null 2>&1\n";
+#endif
   ss << "    done\n";
   ss << "    for route in $CUSTOM_ROUTES; do\n";
+#ifdef __APPLE__
+  ss << "        route -n delete \"$route\" >/dev/null 2>&1\n";
+#else
   ss << "        ip route del \"$route\" >/dev/null 2>&1\n";
-  ss << "    done\n";
-  ss << "    echo \">>> [VPN] Route cleanup complete.\"\n";
-  ss << "}\n";
 #endif
+  ss << "    done\n";
+  ss << "}\n";
   ss << "\n";
 
   ss << "case \"$reason\" in\n";
   ss << "    pre-init)\n";
-  ss << "        rm -f \"$READY_FILE\"\n";
+  ss << "        delete_ready_file\n";
   ss << "        exit 0\n";
   ss << "        ;;\n";
-  ss << "    disconnect)\n";
+  ss << "    disconnect|reconnect|attempt-reconnect)\n";
   ss << "        cleanup_routes\n";
-  ss << "        rm -f \"$READY_FILE\"\n";
-  ss << "        exit 0\n";
-  ss << "        ;;\n";
-  ss << "    reconnect|attempt-reconnect)\n";
-  ss << "        echo \">>> [VPN] Reconnect in progress, keeping routes.\"\n";
+  ss << "        delete_ready_file\n";
   ss << "        exit 0\n";
   ss << "        ;;\n";
   ss << "    connect)\n";
@@ -567,6 +573,7 @@ static std::string generate_posix(const Config &cfg) {
   ss << "echo \">>> [VPN] Connection established, configuring network...\"\n";
   ss << "echo \">>> [VPN] Interface: $TUNDEV | Internal IP: $INTERNAL_IP4_ADDRESS\"\n";
   ss << "\n";
+
   ss << "# Activate virtual interface\n";
 #ifdef __APPLE__
   ss << "ifconfig \"$TUNDEV\" \"$INTERNAL_IP4_ADDRESS\" \"$INTERNAL_IP4_ADDRESS\" netmask 255.255.255.255 up >/dev/null 2>&1\n";
@@ -692,35 +699,15 @@ bool write_script(const Config &cfg) {
 
 void cleanup_routes() {
 #ifndef _WIN32
-  std::string ready_path = utils::get_route_ready_path();
-  if (!utils::file_exists(ready_path)) {
-    logger::info("No route-ready marker found, skipping route cleanup");
-    return;
-  }
-
-  std::string content = utils::read_file(ready_path);
-  std::istringstream iss(content);
-  std::string tun, ip;
-  if (!std::getline(iss, tun) || !std::getline(iss, ip)) {
-    logger::warn("Could not parse route-ready file for route cleanup");
-    return;
-  }
-  tun = utils::trim(tun);
-  if (tun.empty()) {
-    logger::warn("Empty interface name in route-ready file, skipping route cleanup");
-    return;
-  }
 
   Config cfg = config::load();
   if (cfg.routes.empty()) {
     logger::info("No routes configured, skipping route cleanup");
     return;
   }
-
-  std::vector<std::string> server_exceptions =
-      find_server_route_exceptions(cfg);
-
-  logger::info("Cleaning up VPN routes (interface: " + tun + ")");
+  std::vector<std::string> server_exceptions = find_server_route_exceptions(cfg);
+  logger::info("Cleaning up VPN routes (" + std::to_string(cfg.routes.size()) +
+               " configured)");
 
 #ifdef __APPLE__
   for (const auto &route : cfg.routes) {
