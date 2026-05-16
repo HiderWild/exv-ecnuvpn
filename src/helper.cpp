@@ -2,6 +2,7 @@
 #include "helper_ipc.hpp"
 
 #include "logger.hpp"
+#include "tunnel.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
 
@@ -485,6 +486,30 @@ pid_t find_openconnect_pid() {
 #endif
 }
 
+static void kill_all_supervisors() {
+#ifndef _WIN32
+  std::string output = utils::trim(utils::run_command_output("pgrep -f 'exv -rt'"));
+  if (output.empty())
+    return;
+  std::istringstream iss(output);
+  std::string line;
+  while (std::getline(iss, line)) {
+    line = utils::trim(line);
+    if (line.empty())
+      continue;
+    try {
+      pid_t pid = static_cast<pid_t>(std::stoi(line));
+      if (pid > 0 && is_process_alive(pid)) {
+        logger::info("Killing orphaned supervisor: PID " + line);
+        kill(pid, SIGKILL);
+      }
+    } catch (...) {
+    }
+  }
+  usleep(500000);
+#endif
+}
+
 bool read_route_ready(const SessionState &state, std::string *interface_name,
                       std::string *internal_ip) {
   std::string path = route_ready_path_for(state);
@@ -893,11 +918,18 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
     pid = find_openconnect_pid();
 
   if (pid <= 0 && supervisor_pid <= 0) {
+    tunnel::cleanup_routes();
+    kill_all_supervisors();
     clear_runtime_state(state);
     if (message)
       *message = "No openconnect process found. VPN is not running.";
     return false;
   }
+
+  // Clean routes before killing — while tunnel interface still exists
+#ifndef _WIN32
+  tunnel::cleanup_routes();
+#endif
 
   if (supervisor_pid > 0)
 #ifndef _WIN32
@@ -962,6 +994,10 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
     return false;
   }
 
+  #ifndef _WIN32
+  kill_all_supervisors();
+#endif
+
   clear_runtime_state(state);
   if (message)
     *message = "VPN connection stopped successfully! 🎉";
@@ -971,6 +1007,11 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
 nlohmann::json handle_stop(uid_t peer_uid) {
   SessionState state;
   if (!load_session_state(&state)) {
+    // No session state — still clean up any orphaned routes/supervisors
+#ifndef _WIN32
+    tunnel::cleanup_routes();
+    kill_all_supervisors();
+#endif
     return make_error("No openconnect process found. VPN is not running.");
   }
 
@@ -985,6 +1026,11 @@ nlohmann::json handle_stop(uid_t peer_uid) {
     return nlohmann::json{{"ok", true}, {"message", message}};
   }
 
+  // stop_managed_session failed — belt-and-suspenders cleanup
+#ifndef _WIN32
+  tunnel::cleanup_routes();
+  kill_all_supervisors();
+#endif
   RuntimeSnapshot snapshot = inspect_runtime(state);
   if (!snapshot.running)
     clear_session_state();
@@ -1680,6 +1726,9 @@ int daemon_main() {
     unsigned int peer_uid = ipc->peer_uid();
     unsigned int peer_gid = ipc->peer_gid();
 
+    // DEBUG: log request handling
+    { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "parent: accepted client, raw='" << raw << "' uid=" << peer_uid << std::endl; }
+
 #ifdef _WIN32
     // Windows: use threads instead of fork (no fork available)
     // Each request is processed in a background thread so long-running
@@ -1698,6 +1747,7 @@ int daemon_main() {
 #else
     // POSIX: fork a child to handle the request
     pid_t handler_pid = fork();
+    { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "parent: forked handler_pid=" << handler_pid << std::endl; }
     if (handler_pid < 0) {
       nlohmann::json response =
           make_error("Failed to launch EXV helper request handler.");
@@ -1711,7 +1761,7 @@ int daemon_main() {
       signal(SIGINT, SIG_DFL);
       signal(SIGCHLD, SIG_DFL);
       signal(SIGPIPE, SIG_IGN);
-      ipc->close();
+      ipc->close_server();
       nlohmann::json response;
       try {
         nlohmann::json request = nlohmann::json::parse(raw);
@@ -1719,10 +1769,20 @@ int daemon_main() {
       } catch (...) {
         response = make_error("Failed to parse helper request.");
       }
-      ipc->send_response(response.dump());
+      { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "child: sending response, size=" << response.dump().size() << std::endl; }
+      bool sent = ipc->send_response(response.dump());
+      { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "child: send_response returned " << sent << std::endl; }
       _exit(0);
     }
 
+    // Wait for the child to finish writing the response before closing
+    // the client fd.  The child inherited client_fd_ across fork(); if
+    // the parent closes it first, the child's write() fails and the
+    // client receives an empty response.
+    int status = 0;
+    while (waitpid(handler_pid, &status, 0) < 0 && errno == EINTR)
+      ;
+    { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "parent: waitpid returned, status=" << status << std::endl; }
     ipc->close_client();
 #endif
   }

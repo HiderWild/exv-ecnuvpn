@@ -125,6 +125,30 @@ static bool is_process_alive(pid_t pid) {
 #endif
 }
 
+static void kill_all_supervisors() {
+#ifndef _WIN32
+  std::string output = utils::trim(utils::run_command_output("pgrep -f 'exv -rt'"));
+  if (output.empty())
+    return;
+  std::istringstream iss(output);
+  std::string line;
+  while (std::getline(iss, line)) {
+    line = utils::trim(line);
+    if (line.empty())
+      continue;
+    try {
+      pid_t pid = static_cast<pid_t>(std::stoi(line));
+      if (pid > 0 && is_process_alive(pid)) {
+        logger::info("Killing orphaned supervisor: PID " + line);
+        kill(pid, SIGKILL);
+      }
+    } catch (...) {
+    }
+  }
+  usleep(500000);
+#endif
+}
+
 static pid_t find_openconnect_pid() {
 #ifndef _WIN32
   std::string output = utils::run_command_output("pgrep -x openconnect");
@@ -1109,6 +1133,8 @@ int stop() {
   }
 
   if (pid <= 0 && supervisor_pid <= 0) {
+    tunnel::cleanup_routes();
+    kill_all_supervisors();
     utils::print_error("No openconnect process found. VPN is not running.");
     clear_runtime_state();
     logger::info("Stop requested but no VPN process found");
@@ -1125,6 +1151,12 @@ int stop() {
   utils::print_info("Sending SIGTERM...");
   logger::info("Stopping VPN, PID: " + std::to_string(pid) +
                ", supervisor PID: " + std::to_string(supervisor_pid));
+
+  // Clean routes before killing — while tunnel interface still exists, deletion
+  // is more reliable. Belt-and-suspenders with the script's cleanup_routes().
+#ifndef _WIN32
+  tunnel::cleanup_routes();
+#endif
 
 #ifndef _WIN32
   if (supervisor_pid > 0)
@@ -1206,6 +1238,10 @@ int stop() {
                   ", supervisor PID: " + std::to_string(supervisor_pid));
     return 1;
   }
+
+  #ifndef _WIN32
+  kill_all_supervisors();
+#endif
 
   clear_runtime_state();
   std::cout << std::endl;
