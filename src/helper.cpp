@@ -5,6 +5,7 @@
 #include "tunnel.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
+#include "virtual_network.hpp"
 
 #include <cerrno>
 #include <cctype>
@@ -852,21 +853,23 @@ nlohmann::json make_status_response(const SessionState &state,
                                     const RuntimeSnapshot &snapshot,
                                     bool ok = true,
                                     const std::string &message = "") {
-  return nlohmann::json{{"ok", ok},
-                        {"message", message},
-                        {"running", snapshot.running},
-                        {"pid", snapshot.pid},
-                        {"supervisor_pid", snapshot.supervisor_pid},
-                        {"network_ready", snapshot.network_ready},
-                        {"interface", snapshot.interface_name},
-                        {"internal_ip", snapshot.internal_ip},
-                        {"rx_bytes", snapshot.rx_bytes},
-                        {"tx_bytes", snapshot.tx_bytes},
-                        {"server", state.server},
-                        {"route_count", state.route_count},
-                        {"retry_limit", state.retry_limit},
-                        {"owner_username", state.username},
-                        {"interfaces_output", snapshot.interfaces_output}};
+  nlohmann::json response{{"ok", ok},
+                          {"message", message},
+                          {"running", snapshot.running},
+                          {"pid", snapshot.pid},
+                          {"supervisor_pid", snapshot.supervisor_pid},
+                          {"network_ready", snapshot.network_ready},
+                          {"interface", snapshot.interface_name},
+                          {"internal_ip", snapshot.internal_ip},
+                          {"rx_bytes", snapshot.rx_bytes},
+                          {"tx_bytes", snapshot.tx_bytes},
+                          {"server", state.server},
+                          {"route_count", state.route_count},
+                          {"retry_limit", state.retry_limit},
+                          {"owner_username", state.username},
+                          {"interfaces_output", snapshot.interfaces_output}};
+  virtual_network::add_status_fields(response, snapshot.interface_name);
+  return response;
 }
 
 bool ensure_same_owner(const SessionState &state, uid_t peer_uid) {
@@ -1190,6 +1193,14 @@ bool print_running_status(const nlohmann::json &response) {
     std::cout << "  Internal IP    : "
               << response.value("internal_ip", std::string()) << std::endl;
   }
+  if (response.value("upstream_virtual_detected", false)) {
+    std::cout << "  Route Policy   : EXV campus routes first, upstream virtual adapter preserved"
+              << std::endl;
+    std::string message =
+        response.value("upstream_virtual_message", std::string());
+    if (!message.empty())
+      std::cout << "  Notice         : " << message << std::endl;
+  }
 
   std::string interfaces_output = response.value("interfaces_output", std::string());
   if (!interfaces_output.empty()) {
@@ -1270,6 +1281,12 @@ bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
             << std::endl;
   std::cout << utils::DIM << "  Routes: " << response.value("route_count", 0)
             << " configured" << utils::RESET << std::endl;
+  if (response.value("upstream_virtual_detected", false)) {
+    std::string message =
+        response.value("upstream_virtual_message", std::string());
+    if (!message.empty())
+      utils::print_warning(message);
+  }
   int helper_retry_limit = response.value("retry_limit", 0);
   if (helper_retry_limit != 0) {
     std::cout << utils::DIM << "  Auto-reconnect: "
@@ -1781,7 +1798,7 @@ int daemon_main() {
       signal(SIGINT, SIG_DFL);
       signal(SIGCHLD, SIG_DFL);
       signal(SIGPIPE, SIG_IGN);
-      ipc->close();
+      ipc->close_server();
       nlohmann::json response;
       try {
         nlohmann::json request = nlohmann::json::parse(raw);
@@ -1793,13 +1810,7 @@ int daemon_main() {
       _exit(0);
     }
 
-    // Wait for the child to finish writing the response before closing
-    // the client fd.  The child inherited client_fd_ across fork(); if
-    // the parent closes it first, the child's write() fails and the
-    // client receives an empty response.
-    int status = 0;
-    while (waitpid(handler_pid, &status, 0) < 0 && errno == EINTR)
-      ;
+    // The child has its own copy of the accepted fd and will write the response.
     ipc->close_client();
 #endif
   }

@@ -17,6 +17,15 @@ export interface VpnStatus {
   uptime_seconds: number
   rx_bytes: number
   tx_bytes: number
+  upstream_virtual_detected: boolean
+  upstream_virtual_adapters: UpstreamVirtualAdapter[]
+  upstream_virtual_message: string
+  route_policy: string
+}
+
+export interface UpstreamVirtualAdapter {
+  name: string
+  detail: string
 }
 
 export interface RouteEntry {

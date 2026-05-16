@@ -2,6 +2,7 @@
 build/
 build-*/
 cmake-build-*/
+dbg/
 *.o
 *.d
 exv

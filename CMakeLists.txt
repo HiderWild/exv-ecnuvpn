@@ -42,6 +42,7 @@ set(SOURCES
     src/helper.cpp
     src/vpn.cpp
     src/tunnel.cpp
+    src/virtual_network.cpp
     src/logger.cpp
     src/utils.cpp
     src/sse_broadcaster.cpp

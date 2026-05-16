@@ -44,9 +44,13 @@ static std::string join_path(const std::string &base,
                              const std::string &component) {
   if (base.empty())
     return component;
+  char sep = '/';
+#ifdef _WIN32
+  sep = '\\';
+#endif
   if (base.back() == '/' || base.back() == '\\')
     return base + component;
-  return base + "/" + component;
+  return base + sep + component;
 }
 
 #ifdef _WIN32
@@ -302,26 +306,52 @@ bool set_config_dir(const std::string &dir) {
   return wf.good() && sync_owner(get_redirect_path());
 }
 
-std::string get_config_path() { return get_config_dir() + "/config.json"; }
+std::string get_config_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\config.json";
+#else
+  return get_config_dir() + "/config.json";
+#endif
+}
 
-std::string get_pid_path() { return get_config_dir() + "/ecnuvpn.pid"; }
+std::string get_pid_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\ecnuvpn.pid";
+#else
+  return get_config_dir() + "/ecnuvpn.pid";
+#endif
+}
 
-std::string get_log_path() { return get_config_dir() + "/ecnuvpn.log"; }
+std::string get_log_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\ecnuvpn.log";
+#else
+  return get_config_dir() + "/ecnuvpn.log";
+#endif
+}
 
 std::string get_tunnel_path() {
 #ifdef _WIN32
-  return get_config_dir() + "/tunnel.js";
+  return get_config_dir() + "\\tunnel.js";
 #else
   return get_config_dir() + "/tunnel.sh";
 #endif
 }
 
 std::string get_supervisor_pid_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\ecnuvpn-supervisor.pid";
+#else
   return get_config_dir() + "/ecnuvpn-supervisor.pid";
+#endif
 }
 
 std::string get_route_ready_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\route-ready";
+#else
   return get_config_dir() + "/route-ready";
+#endif
 }
 
 // ── File utilities ──────────────────────────────────────────────

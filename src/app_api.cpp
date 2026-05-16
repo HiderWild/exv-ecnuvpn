@@ -7,6 +7,7 @@
 #include "helper.hpp"
 #include "logger.hpp"
 #include "utils.hpp"
+#include "virtual_network.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -146,6 +147,7 @@ nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
   j["uptime_seconds"] = 0;
   j["rx_bytes"] = helper_resp.value("rx_bytes", 0);
   j["tx_bytes"] = helper_resp.value("tx_bytes", 0);
+  virtual_network::add_status_fields(j, j.value("interface", std::string()));
   return j;
 }
 

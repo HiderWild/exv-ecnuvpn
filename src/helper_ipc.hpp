@@ -29,6 +29,9 @@ public:
   // Close the current client connection (server keeps listening)
   virtual void close_client() {}
 
+  // Close only the server/listen endpoint (client connection stays open)
+  virtual void close_server() {}
+
   // Close the server and release resources
   virtual void close() = 0;
 

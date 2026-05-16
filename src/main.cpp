@@ -6,6 +6,7 @@
 #include "sse_broadcaster.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
+#include "virtual_network.hpp"
 #include "webui.hpp"
 
 #include <csignal>
@@ -510,6 +511,8 @@ int main(int argc, char *argv[]) {
                 status["internal_ip"] = resp.value("internal_ip", "");
                 status["pid"] = resp.value("pid", -1);
                 status["server"] = resp.value("server", "");
+                virtual_network::add_status_fields(
+                    status, status.value("interface", std::string()));
                 return sse::format_sse_event("status", status.dump());
               } catch (...) {
                 return "";

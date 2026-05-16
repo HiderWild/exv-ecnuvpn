@@ -4,7 +4,7 @@ import { useVpnStore } from '../stores/vpn'
 import { useSSE } from '../composables/useSSE'
 import StatusBadge from '../components/StatusBadge.vue'
 import {
-  Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff
+  Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff, Route
 } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
@@ -41,6 +41,11 @@ const bytesFormatted = (bytes: number) => {
   while (val >= 1024 && i < units.length - 1) { val /= 1024; i++ }
   return `${val.toFixed(1)} ${units[i]}`
 }
+
+const upstreamVirtualNames = computed(() => {
+  const adapters = vpn.status?.upstream_virtual_adapters || []
+  return adapters.map((adapter) => adapter.name).filter(Boolean).join('、')
+})
 </script>
 
 <template>
@@ -85,6 +90,21 @@ const bytesFormatted = (bytes: number) => {
         class="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300"
       >
         {{ vpn.lastError }}
+      </div>
+
+      <div
+        v-if="vpn.status?.upstream_virtual_detected"
+        class="mt-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
+      >
+        <Route class="mt-0.5 h-4 w-4 shrink-0" />
+        <div class="min-w-0">
+          <p class="leading-5">
+            {{ vpn.status.upstream_virtual_message || '发现其他虚拟网卡，正在把 EXV 串联到它们前面提前路由校园流量。' }}
+          </p>
+          <p v-if="upstreamVirtualNames" class="mt-1 text-xs opacity-80 break-words">
+            {{ upstreamVirtualNames }}
+          </p>
+        </div>
       </div>
     </div>
 
