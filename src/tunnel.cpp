@@ -257,10 +257,36 @@ static std::string generate_windows(const Config &cfg) {
   ss << "  return exitCode === 0;\n";
   ss << "}\n\n";
 
+  ss << "function runWithRetry(cmd, maxRetries, delayMs, ignoreFailure) {\n";
+  ss << "  for (var attempt = 1; attempt <= maxRetries; ++attempt) {\n";
+  ss << "    var fullCmd = comspec + ' /C \"' + cmd + '\" >nul 2>&1';\n";
+  ss << "    var exitCode = ws.Run(fullCmd, 0, true);\n";
+  ss << "    if (exitCode === 0) return true;\n";
+  ss << "    if (attempt < maxRetries) {\n";
+  ss << "      WScript.Echo('>>> [VPN] Retry ' + attempt + '/' + maxRetries + ': ' + cmd);\n";
+  ss << "      WScript.Sleep(delayMs);\n";
+  ss << "    }\n";
+  ss << "  }\n";
+  ss << "  if (!ignoreFailure) {\n";
+  ss << "    accumulatedExitCode += 1;\n";
+  ss << "    WScript.Echo('>>> [VPN] Failed after ' + maxRetries + ' attempts: ' + cmd);\n";
+  ss << "  }\n";
+  ss << "  return false;\n";
+  ss << "}\n\n";
+
   ss << "function getDefaultGateway4() {\n";
   ss << "  var output = runCapture('route print 0.0.0.0');\n";
   ss << "  if (output.match(/0\\.0\\.0\\.0 *(0|128)\\.0\\.0\\.0 *([0-9\\.]*)/))\n";
   ss << "    return RegExp.$2;\n";
+  ss << "  return '';\n";
+  ss << "}\n\n";
+
+  ss << "function getInterfaceIndex(adapterName) {\n";
+  ss << "  // Use PowerShell for locale-independent adapter lookup\n";
+  ss << "  var psCmd = 'powershell -NoProfile -NonInteractive -Command \"(Get-NetAdapter -Name \\\"' + adapterName + '\\\").ifIndex\"';\n";
+  ss << "  var output = runCapture(psCmd);\n";
+  ss << "  var idx = output.replace(/[\\s\\r\\n]/g, '');\n";
+  ss << "  if (/^[0-9]+$/.test(idx)) return idx;\n";
   ss << "  return '';\n";
   ss << "}\n\n";
 
@@ -324,25 +350,49 @@ static std::string generate_windows(const Config &cfg) {
   ss << "    WScript.Quit(1);\n";
   ss << "  }\n\n";
 
+  // Use adapter name directly for netsh commands (locale-independent)
+  ss << "  var adapterName = tundev;\n\n";
+
+  // Resolve numeric interface index only for route add ... if <index>
+  ss << "  var ifIndex = '';\n";
+  ss << "  if (/^[0-9]+$/.test(tunidx)) {\n";
+  ss << "    ifIndex = tunidx;\n";
+  ss << "  } else {\n";
+  ss << "    // Adapter name: resolve via PowerShell (locale-independent)\n";
+  ss << "    ifIndex = getInterfaceIndex(adapterName);\n";
+  ss << "  }\n\n";
+
   ss << "  var defaultGateway = getDefaultGateway4();\n";
   ss << "  WScript.Echo('>>> [VPN] Connection established, configuring network...');\n";
-  ss << "  WScript.Echo('>>> [VPN] Interface idx: ' + tunidx + ' (' + tundev + ') | Internal IP: ' + internalIp);\n";
+  ss << "  WScript.Echo('>>> [VPN] Adapter: ' + adapterName + ' | Index: ' + ifIndex + ' | Internal IP: ' + internalIp);\n";
   ss << "  if (defaultGateway)\n";
   ss << "    WScript.Echo('>>> [VPN] Default gateway: ' + defaultGateway);\n\n";
 
   ss << "  preserveBypassRoutes(defaultGateway);\n\n";
 
+  // Use adapter name for netsh commands (avoids index lookup issues)
   ss << "  var mtu = envValue('INTERNAL_IP4_MTU', '');\n";
   ss << "  if (mtu)\n";
-  ss << "    run('netsh interface ipv4 set subinterface ' + tunidx + ' mtu=' + mtu + ' store=active', false);\n\n";
+  ss << "    runWithRetry('netsh interface ipv4 set subinterface name=\"' + adapterName + '\" mtu=' + mtu + ' store=active', 3, 1000, false);\n\n";
 
-  ss << "  run('netsh interface ip set address ' + tunidx + ' static ' + internalIp + ' ' + netmask, false);\n\n";
+  ss << "  runWithRetry('netsh interface ip set address name=\"' + adapterName + '\" static ' + internalIp + ' ' + netmask, 5, 1000, false);\n\n";
+
+  // Wait for the interface IP to be fully registered before adding routes
+  ss << "  WScript.Sleep(3000);\n\n";
+
+  // If we couldn't resolve the interface index, try again now that the adapter is configured
+  ss << "  if (!ifIndex && !/^[0-9]+$/.test(tunidx)) {\n";
+  ss << "    ifIndex = getInterfaceIndex(adapterName);\n";
+  ss << "  }\n\n";
 
   ss << "  WScript.Echo('>>> [VPN] Adding split tunnel routes...');\n";
   ss << "  for (var i = 0; i < customRoutes.length; ++i) {\n";
   ss << "    var route = customRoutes[i];\n";
   ss << "    run('route delete ' + route.network + ' mask ' + route.mask, true);\n";
-  ss << "    if (run('route add ' + route.network + ' mask ' + route.mask + ' ' + internalIp + ' if ' + tunidx, false))\n";
+  ss << "    var routeCmd = 'route add ' + route.network + ' mask ' + route.mask + ' ' + internalIp;\n";
+  ss << "    if (ifIndex) routeCmd += ' if ' + ifIndex;\n";
+  ss << "    routeCmd += ' metric 1';\n";
+  ss << "    if (runWithRetry(routeCmd, 5, 1000, false))\n";
   ss << "      WScript.Echo('  [+] Route added: ' + route.cidr);\n";
   ss << "    else\n";
   ss << "      WScript.Echo('  [-] Route warning: ' + route.cidr + ' (failed to refresh)');\n";
@@ -354,21 +404,29 @@ static std::string generate_windows(const Config &cfg) {
   ss << "  WScript.Quit(accumulatedExitCode === 0 ? 0 : 1);\n";
   ss << "}\n\n";
 
-  ss << "switch (envValue('reason', '')) {\n";
-  ss << "case 'pre-init':\n";
-  ss << "  deleteReadyFile();\n";
-  ss << "  WScript.Quit(0);\n";
-  ss << "case 'disconnect':\n";
-  ss << "case 'reconnect':\n";
-  ss << "case 'attempt-reconnect':\n";
-  ss << "  cleanupRoutes();\n";
-  ss << "  deleteReadyFile();\n";
-  ss << "  WScript.Quit(0);\n";
-  ss << "case 'connect':\n";
-  ss << "  connectVpn();\n";
-  ss << "  break;\n";
-  ss << "default:\n";
-  ss << "  WScript.Quit(0);\n";
+  // Wrap the switch in try-catch to prevent unhandled errors from causing exit 1
+  // during pre-init (before the adapter exists)
+  ss << "try {\n";
+  ss << "  switch (envValue('reason', '')) {\n";
+  ss << "  case 'pre-init':\n";
+  ss << "    deleteReadyFile();\n";
+  ss << "    WScript.Quit(0);\n";
+  ss << "  case 'disconnect':\n";
+  ss << "  case 'reconnect':\n";
+  ss << "  case 'attempt-reconnect':\n";
+  ss << "    cleanupRoutes();\n";
+  ss << "    deleteReadyFile();\n";
+  ss << "    WScript.Quit(0);\n";
+  ss << "  case 'connect':\n";
+  ss << "    connectVpn();\n";
+  ss << "    break;\n";
+  ss << "  default:\n";
+  ss << "    WScript.Quit(0);\n";
+  ss << "  }\n";
+  ss << "} catch (e) {\n";
+  ss << "  WScript.Echo('>>> [VPN] Script error: ' + (e.message || e.description || 'unknown'));\n";
+  ss << "  if (envValue('reason', '') === 'pre-init') WScript.Quit(0);\n";
+  ss << "  WScript.Quit(1);\n";
   ss << "}\n";
 
   return ss.str();

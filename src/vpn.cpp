@@ -253,7 +253,8 @@ static std::string build_openconnect_command_line(const Config &cfg) {
   args.push_back(cfg.username);
   args.push_back("--passwd-on-stdin");
   args.push_back("--script");
-  args.push_back(utils::get_tunnel_path());
+  args.push_back(std::string("cscript.exe //B //nologo ") +
+                 windows_quote_arg(utils::get_tunnel_path()));
   if (cfg.disable_dtls) {
     args.push_back("--no-dtls");
   }
