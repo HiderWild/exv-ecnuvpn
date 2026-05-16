@@ -2,6 +2,7 @@
 #include "helper_ipc.hpp"
 
 #include "logger.hpp"
+#include "tunnel.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
 
@@ -24,9 +25,11 @@
 #else
 #include <windows.h>
 #include <thread>
+#ifdef _MSC_VER
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;
 typedef int pid_t;
+#endif
 #endif
 #include <vector>
 
@@ -699,7 +702,15 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
   std::string raw;
 
 #ifdef _WIN32
-  HANDLE hPipe = CreateFileA("\\\\\\.\\pipe\\exv-helper",
+  // Use WaitNamedPipeA with a short timeout so we don't block when the
+  // pipe doesn't exist yet (e.g. during service startup polling).
+  if (!WaitNamedPipeA("\\\\.\\pipe\\exv-helper", 2000 /* ms */)) {
+    if (error_message)
+      *error_message = "EXV helper is not available.";
+    return false;
+  }
+
+  HANDLE hPipe = CreateFileA("\\\\.\\pipe\\exv-helper",
                              GENERIC_READ | GENERIC_WRITE, 0, NULL,
                              OPEN_EXISTING, 0, NULL);
   if (hPipe == INVALID_HANDLE_VALUE) {
@@ -707,6 +718,13 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
       *error_message = "EXV helper is not available.";
     return false;
   }
+
+  // Set read timeout on the pipe so we don't hang if the daemon stalls.
+  COMMTIMEOUTS timeouts = {};
+  timeouts.ReadIntervalTimeout = MAXDWORD;
+  timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
+  timeouts.ReadTotalTimeoutConstant = timeout_seconds * 1000;
+  SetCommTimeouts(hPipe, &timeouts);
 
   std::string payload = request.dump();
   payload.push_back('\n');
@@ -898,6 +916,12 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
       *message = "No openconnect process found. VPN is not running.";
     return false;
   }
+
+  // Clean up routes before killing openconnect — while the tunnel
+  // interface is still valid, route deletion is more reliable.
+#ifndef _WIN32
+  tunnel::cleanup_routes();
+#endif
 
   if (supervisor_pid > 0)
 #ifndef _WIN32
@@ -1438,6 +1462,12 @@ int install_service(const std::string &executable_path) {
   utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
   return 0;
 #elif defined(_WIN32)
+  if (!utils::check_root()) {
+    utils::print_error("Administrator privileges required. Please run from an elevated prompt.");
+    return 1;
+  }
+
+  utils::print_info("Opening Service Control Manager...");
   SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
   if (!hSCM) {
     logger::error("Cannot open Service Control Manager");
@@ -1455,6 +1485,7 @@ int install_service(const std::string &executable_path) {
   // Register the main exv binary with __helper-daemon argument
   std::string binary_path = "\"" + exec_path + "\" __helper-daemon";
 
+  utils::print_info("Registering helper service...");
   SC_HANDLE hService = CreateServiceA(
       hSCM, kHelperServiceName, "ECNU VPN Helper",
       SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
@@ -1473,11 +1504,21 @@ int install_service(const std::string &executable_path) {
     return 1;
   }
 
+  utils::print_info("Starting helper service...");
   StartService(hService, 0, NULL);
   CloseServiceHandle(hService);
   CloseServiceHandle(hSCM);
 
-  std::cout << "Helper service installed and started.\n";
+  utils::print_info("Waiting for helper to become ready...");
+  bool helper_ready = wait_until_available(50, 100000);
+
+  utils::print_success("EXV helper service installed.");
+  if (!helper_ready) {
+    utils::print_warning(
+        "Helper service was installed, but it has not responded yet.");
+    utils::print_info("Run 'exv service status' again in a moment if needed.");
+  }
+  utils::print_info("You can now run 'exv' and 'exv stop' without elevation.");
   return 0;
 #endif
 }
@@ -1601,16 +1642,45 @@ int show_service_status() {
   std::cout << std::endl;
   return 0;
 #elif defined(_WIN32)
+  utils::print_header("EXV Service Status");
+
   SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+  if (!hSCM) {
+    std::cout << "  Installed       : unknown (cannot open SCM)\n";
+    return 1;
+  }
   SC_HANDLE hService = OpenServiceA(hSCM, kHelperServiceName, SERVICE_QUERY_STATUS);
   bool installed = (hService != NULL);
-  std::cout << "Helper service: " << (installed ? "installed" : "not installed") << "\n";
+  std::cout << "  Installed       : " << (installed ? "yes" : "no") << std::endl;
+
+  bool available = false;
   if (installed) {
     SERVICE_STATUS status;
     QueryServiceStatus(hService, &status);
-    std::cout << "  State: " << (status.dwCurrentState == SERVICE_RUNNING ? "running" : "stopped") << "\n";
+    std::cout << "  State           : " << (status.dwCurrentState == SERVICE_RUNNING ? "running" : "stopped") << std::endl;
+    if (status.dwCurrentState == SERVICE_RUNNING) {
+      available = wait_until_available(10, 100000);
+    }
     CloseServiceHandle(hService);
   }
+  std::cout << "  Socket Ready    : " << (available ? "yes" : "no") << std::endl;
+
+  if (available) {
+    nlohmann::json response;
+    std::string error_message;
+    if (send_request(nlohmann::json{{"action", "status"}}, &response,
+                     &error_message) && response.value("ok", false)) {
+      std::cout << "  VPN Running     : "
+                << (response.value("running", false) ? "yes" : "no")
+                << std::endl;
+      if (response.value("running", false)) {
+        std::cout << "  Session Owner   : "
+                  << response.value("owner_username", std::string()) << std::endl;
+      }
+    }
+  }
+
+  std::cout << std::endl;
   CloseServiceHandle(hSCM);
   return 0;
 #endif
@@ -1723,6 +1793,13 @@ int daemon_main() {
       _exit(0);
     }
 
+    // Wait for the child to finish writing the response before closing
+    // the client fd.  The child inherited client_fd_ across fork(); if
+    // the parent closes it first, the child's write() fails and the
+    // client receives an empty response.
+    int status = 0;
+    while (waitpid(handler_pid, &status, 0) < 0 && errno == EINTR)
+      ;
     ipc->close_client();
 #endif
   }

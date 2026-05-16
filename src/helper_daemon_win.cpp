@@ -1,8 +1,10 @@
 #include "helper_ipc.hpp"
+#include "logger.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
 #include <sddl.h>
+#include <vector>
 #endif
 
 namespace ecnuvpn {
