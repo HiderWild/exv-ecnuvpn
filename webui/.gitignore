@@ -25,6 +25,9 @@ node_modules
 
 # Build output
 dist/
+dist-electron/
+release/
+native/bin/
 
 # CMake build artifacts (from parent project)
 CMakeCache.txt
@@ -33,3 +36,7 @@ Makefile
 cmake_install.cmake
 compile_commands.json
 exv
+exv.exe
+
+# Driver / GPU vendor caches that can land here when running build tools
+NVIDIA Corporation/

@@ -1,5 +1,6 @@
 # Build
 build/
+build-*/
 cmake-build-*/
 *.o
 *.d
@@ -22,6 +23,12 @@ src/webui_assets.hpp
 # Dependencies
 node_modules/
 package-lock.json
+webui/dist-electron/
+webui/native/bin/
+webui/release/
+reference/
+runtime/*
+!runtime/README.md
 
 # OMC / Claude
 .omc/

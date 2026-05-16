@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import api from '../api/client'
+import api from '../api/desktop'
+import { errorMessage } from '../utils/errors'
 
 export interface VpnStatus {
   connected: boolean
@@ -41,19 +42,24 @@ export const useVpnStore = defineStore('vpn', () => {
   const logs = ref<LogEntry[]>([])
   const serviceStatus = ref<ServiceStatus | null>(null)
   const loading = ref(false)
+  const lastError = ref<string | null>(null)
 
   async function fetchStatus() {
     try {
-      const { data } = await api.get('/status')
+      const { data } = await api.get<VpnStatus>('/status')
       status.value = data
-    } catch {}
+      if (data.connected) lastError.value = null
+    } catch (e) { console.error('[vpn] fetchStatus failed:', e) }
   }
 
   async function connect() {
     loading.value = true
+    lastError.value = null
     try {
-      const { data } = await api.post('/connect')
+      const { data } = await api.post<VpnStatus>('/connect')
       status.value = data
+    } catch (error) {
+      lastError.value = errorMessage(error)
     } finally {
       loading.value = false
     }
@@ -62,8 +68,11 @@ export const useVpnStore = defineStore('vpn', () => {
   async function disconnect() {
     loading.value = true
     try {
-      const { data } = await api.post('/disconnect')
+      const { data } = await api.post<VpnStatus>('/disconnect')
       status.value = data
+      lastError.value = null
+    } catch (error) {
+      lastError.value = errorMessage(error)
     } finally {
       loading.value = false
     }
@@ -71,40 +80,40 @@ export const useVpnStore = defineStore('vpn', () => {
 
   async function fetchRoutes() {
     try {
-      const { data } = await api.get('/routes')
+      const { data } = await api.get<RouteEntry[]>('/routes')
       routes.value = data
-    } catch {}
+    } catch (e) { console.error('[vpn] fetchRoutes failed:', e) }
   }
 
   async function addRoute(cidr: string) {
-    const { data } = await api.post('/routes', { cidr })
+    const { data } = await api.post<RouteEntry[]>('/routes', { cidr })
     routes.value = data
   }
 
   async function removeRoute(cidr: string) {
-    const { data } = await api.delete('/routes', { data: { cidr } })
+    const { data } = await api.delete<RouteEntry[]>('/routes', { data: { cidr } })
     routes.value = data
   }
 
   async function resetRoutes() {
-    const { data } = await api.post('/routes/reset')
+    const { data } = await api.post<RouteEntry[]>('/routes/reset')
     routes.value = data
   }
 
   async function fetchServiceStatus() {
     try {
-      const { data } = await api.get('/service')
+      const { data } = await api.get<ServiceStatus>('/service')
       serviceStatus.value = data
-    } catch {}
+    } catch (e) { console.error('[vpn] fetchServiceStatus failed:', e) }
   }
 
   async function installService() {
-    const { data } = await api.post('/service/install')
+    const { data } = await api.post<ServiceStatus>('/service/install')
     serviceStatus.value = data
   }
 
   async function uninstallService() {
-    const { data } = await api.post('/service/uninstall')
+    const { data } = await api.post<ServiceStatus>('/service/uninstall')
     serviceStatus.value = data
   }
 
@@ -124,7 +133,7 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   return {
-    status, loading, routes, logs, serviceStatus,
+    status, loading, routes, logs, serviceStatus, lastError,
     fetchStatus, connect, disconnect,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
     fetchServiceStatus, installService, uninstallService,

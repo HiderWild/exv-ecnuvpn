@@ -1,131 +1,91 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useVpnStore } from '../stores/vpn'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { useVpnStore, type LogEntry } from '../stores/vpn'
 import { useSSE } from '../composables/useSSE'
-import { Trash2, Pause, Play, ArrowDown } from 'lucide-vue-next'
+import { FileText, Trash2, Download } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
-
-const filter = ref('')
-const paused = ref(false)
+const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
 const autoScroll = ref(true)
-const logContainer = ref<HTMLElement | null>(null)
 
-useSSE()
-
-const filteredLogs = computed(() => {
-  if (!filter.value) return vpn.logs
-  const q = filter.value.toLowerCase()
-  return vpn.logs.filter(
-    (l) => l.message.toLowerCase().includes(q) || l.level.toLowerCase().includes(q),
-  )
+onMounted(async () => {
+  sseConnect()
+  try {
+    const api = (await import('../api/desktop')).default
+    const { data } = await api.get<LogEntry[]>('/logs')
+    if (Array.isArray(data)) {
+      vpn.setLogs(data)
+    }
+  } catch {}
 })
 
-function scrollToBottom() {
-  if (logContainer.value) {
-    logContainer.value.scrollTop = logContainer.value.scrollHeight
-  }
+onUnmounted(() => {
+  sseDisconnect()
+})
+
+function clearLogs() {
+  vpn.clearLogs()
 }
 
-function levelColor(level: string) {
-  switch (level) {
-    case 'error':
-      return 'text-destructive'
-    case 'warn':
-      return 'text-warning'
-    case 'debug':
-      return 'text-muted'
-    default:
-      return 'text-foreground'
-  }
-}
-
-function levelBg(level: string) {
-  switch (level) {
-    case 'error':
-      return 'bg-destructive/10'
-    case 'warn':
-      return 'bg-warning/10'
-    case 'debug':
-      return 'bg-surface'
-    default:
-      return 'bg-transparent'
-  }
+function downloadLogs() {
+  const text = vpn.logs
+    .map((e: LogEntry) => `[${e.level.toUpperCase()}] ${e.message}`)
+    .join('\n')
+  const blob = new Blob([text], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `ecnu-vpn-${new Date().toISOString().slice(0, 10)}.log`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 </script>
 
 <template>
   <div class="py-8">
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-semibold text-foreground">Logs</h1>
+      <h1 class="text-xl font-semibold text-foreground flex items-center gap-2">
+        <FileText class="w-5 h-5 text-accent" />
+        日志
+      </h1>
       <div class="flex items-center gap-2">
+        <label class="flex items-center gap-2 text-xs text-muted cursor-pointer">
+          <input v-model="autoScroll" type="checkbox" class="w-3.5 h-3.5 accent-accent" />
+          自动滚动
+        </label>
         <button
-          :class="[
-            'p-2 rounded-lg transition-colors',
-            paused ? 'text-warning bg-warning/10' : 'text-muted hover:text-foreground'
-          ]"
-          @click="paused = !paused"
+          class="flex items-center gap-1.5 border border-border text-muted rounded-lg px-3 py-1.5 text-xs hover:text-foreground transition-colors"
+          @click="downloadLogs"
         >
-          <Play v-if="paused" class="w-4 h-4" />
-          <Pause v-else class="w-4 h-4" />
+          <Download class="w-3.5 h-3.5" />
+          导出
         </button>
         <button
-          class="p-2 rounded-lg text-muted hover:text-destructive transition-colors"
-          @click="vpn.clearLogs()"
+          class="flex items-center gap-1.5 border border-border text-muted rounded-lg px-3 py-1.5 text-xs hover:text-foreground transition-colors"
+          @click="clearLogs"
         >
-          <Trash2 class="w-4 h-4" />
+          <Trash2 class="w-3.5 h-3.5" />
+          清空
         </button>
       </div>
     </div>
 
-    <!-- Search filter -->
-    <div class="mb-3 flex items-center gap-3">
-      <input
-        v-model="filter"
-        type="text"
-        placeholder="Filter logs..."
-        class="flex-1 bg-surface border border-border rounded-lg px-3 py-2 text-sm text-foreground font-mono placeholder:text-muted focus:outline-none focus:border-accent/50 transition-colors"
-      />
-      <label class="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none">
-        <input v-model="autoScroll" type="checkbox" class="rounded" />
-        Auto-scroll
-      </label>
-    </div>
-
-    <!-- Log container -->
     <div
-      ref="logContainer"
-      class="bg-bg border border-border rounded-xl overflow-auto font-mono text-xs leading-relaxed max-h-[60vh]"
+      class="bg-bg border border-border rounded-xl p-4 h-[calc(100vh-200px)] overflow-y-auto font-mono text-xs leading-relaxed"
     >
-      <div v-if="!filteredLogs.length" class="flex items-center justify-center py-16 text-muted">
-        No logs yet
+      <div v-if="vpn.logs.length === 0" class="text-muted text-center py-8">
+        暂无日志
       </div>
       <div
-        v-for="(log, i) in filteredLogs"
+        v-for="(entry, i) in vpn.logs"
         :key="i"
-        :class="['flex gap-3 px-4 py-1.5 border-b border-border/50', levelBg(log.level)]"
-      >
-        <span class="text-muted shrink-0 w-20">{{ log.timestamp }}</span>
-        <span :class="['shrink-0 w-12 font-medium uppercase', levelColor(log.level)]">
-          {{ log.level }}
-        </span>
-        <span :class="['flex-1', levelColor(log.level)]">{{ log.message }}</span>
-      </div>
+        class="whitespace-pre-wrap break-all"
+        :class="{
+          'text-red-400': entry.level === 'error' || entry.message.includes('[ERROR]') || entry.message.includes('[error]'),
+          'text-yellow-400': entry.level === 'warn' || entry.message.includes('[WARN]') || entry.message.includes('[warn]'),
+          'text-foreground': entry.level === 'info' && !entry.message.includes('[ERROR]') && !entry.message.includes('[error]') && !entry.message.includes('[WARN]') && !entry.message.includes('[warn]'),
+        }"
+      >{{ entry.message }}</div>
     </div>
-
-    <!-- Scroll to bottom button -->
-    <button
-      v-if="!autoScroll"
-      class="mt-3 flex items-center gap-1.5 mx-auto text-xs text-muted hover:text-foreground transition-colors"
-      @click="scrollToBottom"
-    >
-      <ArrowDown class="w-3.5 h-3.5" />
-      Scroll to bottom
-    </button>
-
-    <p class="text-xs text-muted mt-2">
-      {{ filteredLogs.length }} log{{ filteredLogs.length !== 1 ? 's' : '' }}
-      <span v-if="paused" class="text-warning ml-2">(paused)</span>
-    </p>
   </div>
 </template>

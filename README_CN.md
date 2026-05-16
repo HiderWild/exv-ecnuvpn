@@ -28,7 +28,7 @@
 
 - **openconnect** — VPN 连接核心
 - **CMake** — 构建系统
-- **OpenSSL** — 加密库
+- **OpenSSL**（仅 Linux 需要） — Linux 上的 AES-256-CBC 加密库；macOS 用系统 CommonCrypto，Windows 用 CNG/BCrypt
 
 ### 构建与安装
 
@@ -63,10 +63,31 @@ sudo ./scripts/install-linux.sh
 ```
 
 ### Windows
-1. 安装 [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases)
-2. 安装 OpenSSL（通过 [vcpkg](https://vcpkg.io/) 或 [choco](https://chocolatey.org/)）：`choco install openssl`
-3. 构建：`cmake -B build && cmake --build build --config Release`
-4. 以管理员身份运行：`.\build\Release\exv.exe service install`
+1. 安装 [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases)（提供 `openconnect.exe` 与 GnuTLS 运行时 DLL）。
+2. 构建：`cmake -B build && cmake --build build --config Release`
+   - Windows 端的 AES-256-CBC 已切到系统自带的 **BCrypt (CNG)**，不再需要安装 OpenSSL。
+3. 以管理员身份运行：`.\build\Release\exv.exe service install`
+
+### Windows 桌面打包：便携版 + 安装版
+
+Electron 桌面端可以同时产出便携版和安装版。
+
+```powershell
+# 1. 一次性 stage openconnect 运行时（DLL + wintun.dll + 可选 TAP 资源）
+powershell -ExecutionPolicy Bypass -File scripts\stage-openconnect-runtime-win.ps1 -SourceDir <openconnect-gui 安装目录>
+
+# 2. 构建 Electron 桌面包（两个目标都会输出到 webui/release/）
+cd webui
+npm install
+npm run desktop:build
+```
+
+产物位于 `webui/release/`：
+
+- `ECNU-VPN-<version>-portable.exe`：便携版，单文件，双击即用，不会安装服务。
+- `ECNU VPN Setup <version>.exe`：NSIS 安装版，支持选择安装目录，并自动通过 `installer.nsh` 注册 `exv-helper` 服务。
+
+打包后的 `bin/` 目录只包含必要文件：`exv.exe`、MinGW 运行时 DLL、`openconnect.exe`、GnuTLS / libxml2 / wintun.dll，以及（如果 stage 过）TAP 资源。`libssl-3-x64.dll` 与 `libcrypto-3-x64.dll` 被打包脚本主动剔除——Windows 端不再依赖 OpenSSL。
 
 ## 配置
 
@@ -95,8 +116,25 @@ sudo ./scripts/install-linux.sh
 - **nlohmann/json** — JSON 解析
 - **cpp-httplib** — 嵌入式 HTTP 服务器
 - **Vue 3 + TypeScript + Vite** — WebUI 前端
-- **CommonCrypto** (macOS) / **OpenSSL** (Linux/Windows) — AES-256-CBC 加密
+- **CommonCrypto** (macOS) / **OpenSSL** (Linux) / **CNG BCrypt** (Windows) — AES-256-CBC 加密
 
 ## 许可证
 
 [MIT](LICENSE)
+
+## Desktop UI (Electron)
+
+Vue UI can run as a Windows/macOS desktop app. The Electron shell uses the
+`exv desktop-rpc` JSON interface through preload IPC, so the renderer does not
+open or depend on the browser WebUI server.
+
+```bash
+cd webui
+npm install
+npm run build
+npm run build:electron
+npm run desktop:build
+```
+
+For development, build the native binary first or set `EXV_PATH` to the target
+`exv`/`exv.exe`, then run `npm run desktop:dev`.

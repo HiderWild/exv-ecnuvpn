@@ -8,15 +8,20 @@
 #include <cerrno>
 #include <csignal>
 #include <filesystem>
+#include <functional>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <vector>
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
 #else
 #include <windows.h>
+#ifdef _MSC_VER
 typedef int pid_t;
+#endif
 #endif
 
 namespace ecnuvpn {
@@ -177,11 +182,36 @@ static std::string describe_retry_policy(int retry_limit) {
                          : std::to_string(retry_limit) + " retries";
 }
 
+#ifdef _WIN32
+static std::string windows_generated_interface_name(const Config &cfg) {
+  std::ostringstream seed;
+  seed << cfg.username << "@" << cfg.server;
+  std::size_t hash = std::hash<std::string>{}(seed.str());
+  std::ostringstream name;
+  name << "ECNUVPN-" << std::uppercase << std::hex
+       << static_cast<unsigned long long>(hash & 0xffffffffULL);
+  return name.str();
+}
+
+static std::string select_windows_interface_name(const Config &cfg) {
+  if (cfg.windows_tunnel_driver == "tap")
+    return cfg.windows_tap_interface;
+
+  if (cfg.windows_tunnel_driver == "wintun")
+    return windows_generated_interface_name(cfg);
+
+  if (!utils::get_bundled_wintun_path().empty())
+    return windows_generated_interface_name(cfg);
+
+  return cfg.windows_tap_interface;
+}
+#endif
+
 #ifndef _WIN32
 static std::string build_openconnect_command(const Config &cfg,
                                              const std::string &password) {
   std::ostringstream cmd;
-  std::string openconnect_path = utils::get_openconnect_path();
+  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
   std::string heredoc_marker = "__EXV_PASSWORD_EOF__";
   while (password.find(heredoc_marker) != std::string::npos) {
     heredoc_marker += "_X";
@@ -220,28 +250,28 @@ static std::string windows_quote_arg(const std::string &value) {
   std::string quoted = "\"";
   unsigned int backslashes = 0;
   for (char c : value) {
-    if (c == '\') {
+    if (c == '\\') {
       ++backslashes;
       continue;
     }
     if (c == '"') {
-      quoted.append(backslashes * 2 + 1, '\');
+      quoted.append(backslashes * 2 + 1, '\\');
       quoted.push_back('"');
       backslashes = 0;
       continue;
     }
-    quoted.append(backslashes, '\');
+    quoted.append(backslashes, '\\');
     backslashes = 0;
     quoted.push_back(c);
   }
-  quoted.append(backslashes * 2, '\');
+  quoted.append(backslashes * 2, '\\');
   quoted.push_back('"');
   return quoted;
 }
 
 static std::string build_openconnect_command_line(const Config &cfg) {
   std::vector<std::string> args;
-  std::string openconnect_path = utils::get_openconnect_path();
+  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
   args.push_back(openconnect_path.empty() ? std::string("openconnect.exe")
                                     : openconnect_path);
   args.push_back(cfg.server);
@@ -254,6 +284,11 @@ static std::string build_openconnect_command_line(const Config &cfg) {
   args.push_back("--passwd-on-stdin");
   args.push_back("--script");
   args.push_back(utils::get_tunnel_path());
+  std::string interface_name = select_windows_interface_name(cfg);
+  if (!interface_name.empty()) {
+    args.push_back("--interface");
+    args.push_back(interface_name);
+  }
   if (cfg.disable_dtls) {
     args.push_back("--no-dtls");
   }
@@ -324,10 +359,19 @@ static bool launch_openconnect_process(const Config &cfg,
     return false;
   }
 
-  std::string openconnect_path = utils::get_openconnect_path();
+  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
+  if (openconnect_path.empty()) {
+    CloseHandle(stdin_read);
+    CloseHandle(stdin_write);
+    CloseHandle(log_handle);
+    logger::error("Bundled/system openconnect binary could not be resolved.");
+    return false;
+  }
   std::string cmdline = build_openconnect_command_line(cfg);
   std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
   mutable_cmd.push_back('\0');
+  std::string current_dir =
+      std::filesystem::path(openconnect_path).parent_path().string();
 
   STARTUPINFOA si = {};
   si.cb = sizeof(si);
@@ -337,7 +381,8 @@ static bool launch_openconnect_process(const Config &cfg,
   si.hStdError = log_handle;
   PROCESS_INFORMATION pi = {};
   BOOL created = CreateProcessA(openconnect_path.c_str(), mutable_cmd.data(),
-                                NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL,
+                                NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
+                                current_dir.empty() ? NULL : current_dir.c_str(),
                                 &si, &pi);
   CloseHandle(stdin_read);
   CloseHandle(log_handle);
@@ -661,7 +706,22 @@ int start(const Config &cfg, int retry_limit) {
   utils::print_header("EXV Starting");
 
   // ── Pre-flight checks ──────────────────────────────────────
-  if (!utils::check_openconnect()) {
+  if (!utils::check_openconnect(cfg.openconnect_runtime)) {
+#ifdef _WIN32
+    if (cfg.openconnect_runtime != "system") {
+      utils::print_error("Bundled OpenConnect runtime is missing from this installation.");
+      utils::print_info("Rebuild the desktop package with the bundled native runtime assets.");
+      logger::error("Bundled OpenConnect runtime missing on Windows");
+      return 1;
+    }
+#elif defined(__APPLE__)
+    if (cfg.openconnect_runtime != "system") {
+      utils::print_error("Bundled OpenConnect runtime is missing from this installation.");
+      utils::print_info("Rebuild the desktop package with the macOS bundled runtime assets.");
+      logger::error("Bundled OpenConnect runtime missing on macOS");
+      return 1;
+    }
+#endif
     utils::print_warning("openconnect is not installed.");
     std::cout << std::endl;
     std::cout << utils::BOLD << "  Install openconnect now? [Y/n] "
@@ -703,7 +763,7 @@ int start(const Config &cfg, int retry_limit) {
     std::cout << std::endl;
     int ret = utils::run_command("brew install openconnect");
     std::cout << std::endl;
-    if (ret != 0 || !utils::check_openconnect()) {
+    if (ret != 0 || !utils::check_openconnect(cfg.openconnect_runtime)) {
       utils::print_error("brew install openconnect failed.");
       utils::print_info("Try running it manually: brew install openconnect");
       logger::error("brew install openconnect failed");
@@ -720,21 +780,21 @@ int start(const Config &cfg, int retry_limit) {
     if (utils::run_command("which apt-get > /dev/null 2>&1") == 0) {
       utils::print_info("Running: sudo apt-get install -y openconnect ...");
       int ret = utils::run_command("sudo apt-get install -y openconnect");
-      if (ret != 0 || !utils::check_openconnect()) {
+      if (ret != 0 || !utils::check_openconnect(cfg.openconnect_runtime)) {
         utils::print_error("apt-get install openconnect failed.");
         return 1;
       }
     } else if (utils::run_command("which dnf > /dev/null 2>&1") == 0) {
       utils::print_info("Running: sudo dnf install -y openconnect ...");
       int ret = utils::run_command("sudo dnf install -y openconnect");
-      if (ret != 0 || !utils::check_openconnect()) {
+      if (ret != 0 || !utils::check_openconnect(cfg.openconnect_runtime)) {
         utils::print_error("dnf install openconnect failed.");
         return 1;
       }
     } else if (utils::run_command("which pacman > /dev/null 2>&1") == 0) {
       utils::print_info("Running: sudo pacman -S --noconfirm openconnect ...");
       int ret = utils::run_command("sudo pacman -S --noconfirm openconnect");
-      if (ret != 0 || !utils::check_openconnect()) {
+      if (ret != 0 || !utils::check_openconnect(cfg.openconnect_runtime)) {
         utils::print_error("pacman install openconnect failed.");
         return 1;
       }
@@ -838,10 +898,14 @@ int start(const Config &cfg, int retry_limit) {
 
 int start_with_password(const Config &cfg, const std::string &plaintext_password,
                         int retry_limit) {
-  std::string openconnect_path = utils::get_openconnect_path();
+  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
   if (openconnect_path.empty()) {
-    utils::print_error("openconnect is not installed or is not reachable by the current execution environment.");
-    utils::print_info("Install openconnect or ensure it is available at a stable path such as /opt/homebrew/bin/openconnect.");
+    utils::print_error("OpenConnect is not reachable by the current execution environment.");
+    if (cfg.openconnect_runtime == "system") {
+      utils::print_info("Install system openconnect or switch the runtime mode back to bundled/auto.");
+    } else {
+      utils::print_info("Ensure the desktop package contains the bundled OpenConnect runtime assets.");
+    }
     logger::error("openconnect binary could not be resolved for VPN start");
     return 1;
   }
@@ -1125,6 +1189,12 @@ int stop() {
   utils::print_info("Sending SIGTERM...");
   logger::info("Stopping VPN, PID: " + std::to_string(pid) +
                ", supervisor PID: " + std::to_string(supervisor_pid));
+
+  // Clean up routes before killing openconnect — while the tunnel
+  // interface is still valid, route deletion is more reliable.
+#ifndef _WIN32
+  tunnel::cleanup_routes();
+#endif
 
 #ifndef _WIN32
   if (supervisor_pid > 0)

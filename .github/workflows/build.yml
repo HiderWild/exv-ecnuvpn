@@ -75,8 +75,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Install OpenSSL
-        run: choco install openssl -y
+      # OpenSSL is no longer required on Windows: crypto runs through
+      # Windows CNG (bcrypt) at runtime and links to bcrypt.lib at build time.
       - name: Install webui deps
         working-directory: webui
         run: npm install

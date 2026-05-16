@@ -49,9 +49,9 @@ const bytesFormatted = (bytes: number) => {
     <div class="bg-surface border border-border rounded-xl p-8 mb-6">
       <div class="flex items-center justify-between mb-6">
         <div>
-          <h1 class="text-xl font-semibold text-foreground mb-1">VPN Status</h1>
+          <h1 class="text-xl font-semibold text-foreground mb-1">VPN 状态</h1>
           <p class="text-sm text-muted">
-            {{ vpn.status?.server || 'Not configured' }}
+            {{ vpn.status?.server || '未配置' }}
           </p>
         </div>
         <StatusBadge
@@ -67,7 +67,7 @@ const bytesFormatted = (bytes: number) => {
           @click="vpn.connect()"
         >
           <PlugZap class="w-4 h-4" />
-          {{ vpn.loading ? 'Connecting...' : 'Connect' }}
+          {{ vpn.loading ? '连接中...' : '连接' }}
         </button>
         <button
           v-else
@@ -76,8 +76,15 @@ const bytesFormatted = (bytes: number) => {
           @click="vpn.disconnect()"
         >
           <Plug class="w-4 h-4" />
-          {{ vpn.loading ? 'Disconnecting...' : 'Disconnect' }}
+          {{ vpn.loading ? '断开中...' : '断开连接' }}
         </button>
+      </div>
+
+      <div
+        v-if="vpn.lastError"
+        class="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+      >
+        {{ vpn.lastError }}
       </div>
     </div>
 
@@ -86,7 +93,7 @@ const bytesFormatted = (bytes: number) => {
       <div class="bg-surface border border-border rounded-xl p-4">
         <div class="flex items-center gap-2 text-muted text-xs mb-2">
           <Clock class="w-3.5 h-3.5" />
-          Uptime
+          运行时长
         </div>
         <p class="text-lg font-mono text-foreground">
           {{ vpn.status?.connected ? uptimeFormatted : '--' }}
@@ -96,7 +103,7 @@ const bytesFormatted = (bytes: number) => {
       <div class="bg-surface border border-border rounded-xl p-4">
         <div class="flex items-center gap-2 text-muted text-xs mb-2">
           <ArrowDownToLine class="w-3.5 h-3.5" />
-          Received
+          已接收
         </div>
         <p class="text-lg font-mono text-foreground">
           {{ vpn.status ? bytesFormatted(vpn.status.rx_bytes) : '--' }}
@@ -106,7 +113,7 @@ const bytesFormatted = (bytes: number) => {
       <div class="bg-surface border border-border rounded-xl p-4">
         <div class="flex items-center gap-2 text-muted text-xs mb-2">
           <ArrowUpToLine class="w-3.5 h-3.5" />
-          Transmitted
+          已发送
         </div>
         <p class="text-lg font-mono text-foreground">
           {{ vpn.status ? bytesFormatted(vpn.status.tx_bytes) : '--' }}
@@ -126,31 +133,31 @@ const bytesFormatted = (bytes: number) => {
 
     <!-- Status details -->
     <div v-if="vpn.status" class="bg-surface border border-border rounded-xl p-6">
-      <h2 class="text-sm font-medium text-foreground mb-4">Connection Details</h2>
+      <h2 class="text-sm font-medium text-foreground mb-4">连接详情</h2>
       <div class="grid grid-cols-2 gap-3 text-sm">
         <div>
-          <span class="text-muted">Server:</span>
+          <span class="text-muted">服务器：</span>
           <span class="text-foreground ml-2">{{ vpn.status.server }}</span>
         </div>
         <div>
-          <span class="text-muted">Username:</span>
+          <span class="text-muted">用户名：</span>
           <span class="text-foreground ml-2">{{ vpn.status.username }}</span>
         </div>
         <div v-if="vpn.status.internal_ip">
-          <span class="text-muted">Internal IP:</span>
+          <span class="text-muted">内网 IP：</span>
           <span class="text-foreground ml-2">{{ vpn.status.internal_ip }}</span>
         </div>
         <div v-if="vpn.status.interface">
-          <span class="text-muted">Interface:</span>
+          <span class="text-muted">接口：</span>
           <span class="text-foreground ml-2">{{ vpn.status.interface }}</span>
         </div>
         <div v-if="vpn.status.pid > 0">
-          <span class="text-muted">PID:</span>
+          <span class="text-muted">PID：</span>
           <span class="text-foreground ml-2">{{ vpn.status.pid }}</span>
         </div>
         <div>
-          <span class="text-muted">Network Ready:</span>
-          <span class="text-foreground ml-2">{{ vpn.status.network_ready ? 'Yes' : 'No' }}</span>
+          <span class="text-muted">网络就绪：</span>
+          <span class="text-foreground ml-2">{{ vpn.status.network_ready ? '是' : '否' }}</span>
         </div>
       </div>
     </div>
@@ -158,8 +165,8 @@ const bytesFormatted = (bytes: number) => {
     <div v-if="!vpn.status" class="flex items-center justify-center py-16">
       <div class="text-center">
         <WifiOff class="w-12 h-12 text-muted mx-auto mb-4" />
-        <p class="text-muted text-sm">Unable to fetch VPN status</p>
-        <p class="text-muted text-xs mt-1">Ensure the VPN service is running</p>
+        <p class="text-muted text-sm">无法获取 VPN 状态</p>
+        <p class="text-muted text-xs mt-1">请确保 VPN 服务正在运行</p>
       </div>
     </div>
   </div>

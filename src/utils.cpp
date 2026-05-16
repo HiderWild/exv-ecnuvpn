@@ -1,7 +1,9 @@
 #include "utils.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #ifdef __APPLE__
@@ -98,6 +100,34 @@ static std::string get_config_dir_for_home(const std::string &home) {
   }
 
   return default_dir;
+}
+
+static std::vector<std::string> candidate_runtime_dirs() {
+  std::vector<std::string> dirs;
+
+  const char *env_runtime_dir = std::getenv("ECNUVPN_RUNTIME_DIR");
+  if (env_runtime_dir && *env_runtime_dir) {
+    dirs.push_back(env_runtime_dir);
+  }
+
+  std::string exec_path = get_executable_path();
+  if (!exec_path.empty()) {
+    std::filesystem::path exec_dir = std::filesystem::path(exec_path).parent_path();
+    dirs.push_back(exec_dir.string());
+    dirs.push_back((exec_dir / "runtime").string());
+    dirs.push_back((exec_dir / "openconnect").string());
+    dirs.push_back((exec_dir / "runtime" / "openconnect").string());
+  }
+
+  return dirs;
+}
+
+static std::string first_existing_file(const std::vector<std::string> &paths) {
+  for (const auto &path : paths) {
+    if (!path.empty() && file_exists(path))
+      return path;
+  }
+  return "";
 }
 
 // ── Colored output ──────────────────────────────────────────────
@@ -341,17 +371,82 @@ bool write_file(const std::string &path, const std::string &content) {
 
 // ── System checks ───────────────────────────────────────────────
 
-std::string get_openconnect_path() {
+std::string get_bundled_runtime_dir() {
+  std::vector<std::string> dirs = candidate_runtime_dirs();
+  for (const auto &dir : dirs) {
+    if (!dir.empty() && file_exists(dir))
+      return dir;
+  }
+  return "";
+}
+
+std::string get_bundled_openconnect_path() {
+  std::vector<std::string> candidates;
+  for (const auto &dir : candidate_runtime_dirs()) {
+    if (dir.empty())
+      continue;
+#ifdef _WIN32
+    candidates.push_back(join_path(dir, "openconnect.exe"));
+#else
+    candidates.push_back(join_path(dir, "openconnect"));
+#endif
+  }
+  return first_existing_file(candidates);
+}
+
+std::string get_bundled_wintun_path() {
+#ifdef _WIN32
+  std::vector<std::string> candidates;
+  for (const auto &dir : candidate_runtime_dirs()) {
+    if (dir.empty())
+      continue;
+    candidates.push_back(join_path(dir, "wintun.dll"));
+  }
+  return first_existing_file(candidates);
+#else
+  return "";
+#endif
+}
+
+std::string get_bundled_tap_installer_path() {
+#ifdef _WIN32
+  std::vector<std::string> candidates;
+  for (const auto &dir : candidate_runtime_dirs()) {
+    if (dir.empty())
+      continue;
+    candidates.push_back(join_path(dir, "tap-windows-installer.exe"));
+    candidates.push_back(join_path(dir, "tap-windows-amd64.exe"));
+    candidates.push_back(join_path(dir, "tap-windows-x86.exe"));
+    candidates.push_back(join_path(dir, "tap-windows" "/OemVista.inf"));
+    candidates.push_back(join_path(dir, "tap" "/OemVista.inf"));
+  }
+  return first_existing_file(candidates);
+#else
+  return "";
+#endif
+}
+
+std::string get_openconnect_path(const std::string &runtime_mode) {
+  const char *env_openconnect = std::getenv("ECNUVPN_OPENCONNECT");
+  if (env_openconnect && *env_openconnect && file_exists(env_openconnect))
+    return env_openconnect;
+
+  if (runtime_mode != "system") {
+    std::string bundled = get_bundled_openconnect_path();
+    if (!bundled.empty())
+      return bundled;
+  }
+
 #ifdef __APPLE__
   const char *candidates[] = {"/opt/homebrew/bin/openconnect",
                               "/usr/local/bin/openconnect",
                               "/usr/bin/openconnect",
                               "/bin/openconnect"};
 #elif defined(_WIN32)
-    const char *candidates[] = {
-        "C:\\Program Files\\OpenConnect\\openconnect.exe",
-        "C:\\Program Files (x86)\\OpenConnect\\openconnect.exe",
-        "openconnect.exe"};
+  const char *candidates[] = {
+      "C:\\Program Files\\OpenConnect\\openconnect.exe",
+      "C:\\Program Files (x86)\\OpenConnect\\openconnect.exe",
+      "openconnect.exe"};
 #else
   const char *candidates[] = {"/usr/sbin/openconnect",
                               "/usr/bin/openconnect",
@@ -383,7 +478,9 @@ std::string get_openconnect_path() {
   return "";
 }
 
-bool check_openconnect() { return !get_openconnect_path().empty(); }
+bool check_openconnect(const std::string &runtime_mode) {
+  return !get_openconnect_path(runtime_mode).empty();
+}
 
 bool check_root() {
 #ifndef _WIN32
@@ -452,30 +549,13 @@ bool get_interface_traffic(const std::string &iface,
     return false;
   }
 #elif defined(_WIN32)
-    // Windows: use GetIfEntry2 from iphlpapi
-    ULONG bufLen = 0;
-    GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_ALL_INTERFACES,
-                         NULL, NULL, &bufLen);
-    std::vector<uint8_t> buf(bufLen);
-    PIP_ADAPTER_ADDRESSES addrs = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
-    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_ALL_INTERFACES,
-                             NULL, addrs, &bufLen) != ERROR_SUCCESS)
-      return false;
-
-    for (PIP_ADAPTER_ADDRESSES a = addrs; a; a = a->Next) {
-      if (a->FriendlyName && iface == a->FriendlyName) {
-        MIB_IF_ROW2 row;
-        InitializeMibIfEntry2(&row);
-        row.InterfaceIndex = a->IfIndex;
-        if (GetIfEntry2(&row) == NO_ERROR) {
-          *rx_bytes = row.InOctets;
-          *tx_bytes = row.OutOctets;
-          return true;
-        }
-        return false;
-      }
-    }
-    return false;
+  // Windows traffic counters are not required for connection control.
+  // Keep status functional and report zero counters until a stable adapter
+  // lookup implementation is added for both MSVC and MinGW.
+  (void)iface;
+  *rx_bytes = 0;
+  *tx_bytes = 0;
+  return false;
 #else
   // Linux: read from sysfs
   auto read_sysfs_counter = [](const std::string &path) -> uint64_t {
@@ -569,6 +649,18 @@ std::string shell_quote(const std::string &value) {
   quoted += "\"";
   return quoted;
 #endif
+}
+
+std::vector<std::string> split_lines(const std::string &text) {
+  std::vector<std::string> lines;
+  std::istringstream stream(text);
+  std::string line;
+  while (std::getline(stream, line)) {
+    line = trim(line);
+    if (!line.empty())
+      lines.push_back(line);
+  }
+  return lines;
 }
 
 // ── String utilities ────────────────────────────────────────────

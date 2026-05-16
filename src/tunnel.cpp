@@ -394,13 +394,70 @@ static std::string generate_posix(const Config &cfg) {
     ss << "OWNER_UID=\"" << runtime_owner_uid << "\"\n";
     ss << "OWNER_GID=\"" << runtime_owner_gid << "\"\n";
   }
-  ss << "rm -f \"$READY_FILE\"\n";
+
+  // Bake route lists into the script so cleanup_routes can delete them.
+  ss << "CUSTOM_ROUTES=\"";
+  for (const auto &route : cfg.routes) {
+    ss << route << " ";
+  }
+  ss << "\"\n";
+  ss << "SERVER_EXCEPTIONS=\"";
+  for (const auto &ip : server_route_exceptions) {
+    ss << ip << " ";
+  }
+  ss << "\"\n";
   ss << "\n";
-  ss << "# Only run on connect\n";
-  ss << "if [ \"$reason\" != \"connect\" ]; then\n";
-  ss << "    exit 0\n";
-  ss << "fi\n";
+
+  // cleanup_routes — delete all VPN split-tunnel routes from the OS table.
+#ifdef __APPLE__
+  ss << "cleanup_routes() {\n";
+  ss << "    echo \">>> [VPN] Disconnect detected, cleaning up routes...\"\n";
+  ss << "    if [ -n \"$VPNGATEWAY\" ] && [ \"${VPNGATEWAY##*:}\" = \"$VPNGATEWAY\" ]; then\n";
+  ss << "        route -n delete \"$VPNGATEWAY\" >/dev/null 2>&1\n";
+  ss << "    fi\n";
+  ss << "    for ip in $SERVER_EXCEPTIONS; do\n";
+  ss << "        route -n delete \"$ip\" >/dev/null 2>&1\n";
+  ss << "    done\n";
+  ss << "    for route in $CUSTOM_ROUTES; do\n";
+  ss << "        route -n delete \"$route\" >/dev/null 2>&1\n";
+  ss << "    done\n";
+  ss << "    echo \">>> [VPN] Route cleanup complete.\"\n";
+  ss << "}\n";
+#else
+  ss << "cleanup_routes() {\n";
+  ss << "    echo \">>> [VPN] Disconnect detected, cleaning up routes...\"\n";
+  ss << "    if [ -n \"$VPNGATEWAY\" ] && [ \"${VPNGATEWAY##*:}\" = \"$VPNGATEWAY\" ]; then\n";
+  ss << "        ip route del \"$VPNGATEWAY\" >/dev/null 2>&1\n";
+  ss << "    fi\n";
+  ss << "    for ip in $SERVER_EXCEPTIONS; do\n";
+  ss << "        ip route del \"$ip\" >/dev/null 2>&1\n";
+  ss << "    done\n";
+  ss << "    for route in $CUSTOM_ROUTES; do\n";
+  ss << "        ip route del \"$route\" >/dev/null 2>&1\n";
+  ss << "    done\n";
+  ss << "    echo \">>> [VPN] Route cleanup complete.\"\n";
+  ss << "}\n";
+#endif
   ss << "\n";
+
+  ss << "case \"$reason\" in\n";
+  ss << "    pre-init)\n";
+  ss << "        rm -f \"$READY_FILE\"\n";
+  ss << "        exit 0\n";
+  ss << "        ;;\n";
+  ss << "    disconnect|reconnect|attempt-reconnect)\n";
+  ss << "        cleanup_routes\n";
+  ss << "        rm -f \"$READY_FILE\"\n";
+  ss << "        exit 0\n";
+  ss << "        ;;\n";
+  ss << "    connect)\n";
+  ss << "        ;;\n";
+  ss << "    *)\n";
+  ss << "        exit 0\n";
+  ss << "        ;;\n";
+  ss << "esac\n";
+  ss << "\n";
+
   ss << "echo \">>> [VPN] Connection established, configuring network...\"\n";
   ss << "echo \">>> [VPN] Interface: $TUNDEV | Internal IP: $INTERNAL_IP4_ADDRESS\"\n";
   ss << "\n";
@@ -525,6 +582,63 @@ bool write_script(const Config &cfg) {
 
   logger::info("Tunnel script generated: " + path);
   return true;
+}
+
+void cleanup_routes() {
+#ifndef _WIN32
+  std::string ready_path = utils::get_route_ready_path();
+  if (!utils::file_exists(ready_path)) {
+    logger::info("No route-ready marker found, skipping route cleanup");
+    return;
+  }
+
+  std::string content = utils::read_file(ready_path);
+  std::istringstream iss(content);
+  std::string tun, ip;
+  if (!std::getline(iss, tun) || !std::getline(iss, ip)) {
+    logger::warn("Could not parse route-ready file for route cleanup");
+    return;
+  }
+  tun = utils::trim(tun);
+  if (tun.empty()) {
+    logger::warn("Empty interface name in route-ready file, skipping route cleanup");
+    return;
+  }
+
+  Config cfg = config::load();
+  if (cfg.routes.empty()) {
+    logger::info("No routes configured, skipping route cleanup");
+    return;
+  }
+
+  std::vector<std::string> server_exceptions =
+      find_server_route_exceptions(cfg);
+
+  logger::info("Cleaning up VPN routes (interface: " + tun + ")");
+
+#ifdef __APPLE__
+  for (const auto &route : cfg.routes) {
+    utils::run_command("route -n delete " + utils::shell_quote(route) +
+                       " >/dev/null 2>&1");
+  }
+  for (const auto &ip : server_exceptions) {
+    utils::run_command("route -n delete " + utils::shell_quote(ip) +
+                       " >/dev/null 2>&1");
+  }
+#else
+  for (const auto &route : cfg.routes) {
+    utils::run_command("ip route del " + utils::shell_quote(route) +
+                       " >/dev/null 2>&1");
+  }
+  for (const auto &ip : server_exceptions) {
+    utils::run_command("ip route del " + utils::shell_quote(ip) +
+                       " >/dev/null 2>&1");
+  }
+#endif
+
+  logger::info("Route cleanup complete (" +
+               std::to_string(cfg.routes.size()) + " routes removed)");
+#endif
 }
 
 } // namespace tunnel

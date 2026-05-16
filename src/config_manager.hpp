@@ -13,15 +13,15 @@ public:
     explicit ConfigManager(const std::string& config_dir);
 
     Config load();
-    void save(const Config& cfg);
+    // Returns true on success; false if the JSON could not be serialised or
+    // the on-disk write failed. The error reason is written to the logger.
+    bool save(const Config& cfg);
     Config get() const;
 
-    const std::string& config_dir() const { return config_dir_; }
-
 private:
-    mutable std::mutex mutex_;
-    Config config_;
     std::string config_dir_;
+    Config config_;
+    mutable std::mutex mutex_;
 };
 
 } // namespace config

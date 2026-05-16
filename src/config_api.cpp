@@ -102,11 +102,28 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
         } else {
             return "Invalid boolean value for webui_enabled";
         }
+    } else if (key == "openconnect_runtime") {
+        if (value == "bundled" || value == "system" || value == "auto") {
+            cfg.openconnect_runtime = value;
+        } else {
+            return "openconnect_runtime must be bundled, system, or auto";
+        }
+    } else if (key == "windows_tunnel_driver") {
+        if (value == "auto" || value == "wintun" || value == "tap") {
+            cfg.windows_tunnel_driver = value;
+        } else {
+            return "windows_tunnel_driver must be auto, wintun, or tap";
+        }
+    } else if (key == "windows_tap_interface") {
+        cfg.windows_tap_interface = value;
     } else {
         return "Unknown config key: " + key;
     }
 
-    mgr.save(cfg);
+    if (!mgr.save(cfg)) {
+        return "Failed to write config file. Check disk permissions for " +
+               utils::get_config_path();
+    }
     logger::info("Config key set via config_api: " + key);
     return "";
 }
@@ -123,6 +140,11 @@ std::string config_set_password(config::ConfigManager& mgr,
         cfg.remember_password = true;
     }
 
+    // Make sure the encryption key is available before validating. The
+    // desktop entrypoint already calls init_key_if_needed() but the CLI
+    // can still hit this path on a clean install.
+    crypto::init_key_if_needed();
+
     std::string ks = crypto::key_status();
     if (ks != "valid") {
         return "Encryption key is " + ks + ". Reset key first.";
@@ -135,7 +157,10 @@ std::string config_set_password(config::ConfigManager& mgr,
     }
 
     cfg.password = encrypted;
-    mgr.save(cfg);
+    if (!mgr.save(cfg)) {
+        return "Failed to write config file. Check disk permissions for " +
+               utils::get_config_path();
+    }
     logger::info("Password updated via config_api (encrypted)");
     return "";
 }
@@ -169,6 +194,9 @@ std::string config_import(config::ConfigManager& mgr, const std::string& json_st
     if (j.contains("extra_args")) cfg.extra_args = j["extra_args"].get<std::vector<std::string>>();
     if (j.contains("log_file")) cfg.log_file = j["log_file"].get<std::string>();
     if (j.contains("remember_password")) cfg.remember_password = j["remember_password"].get<bool>();
+    if (j.contains("openconnect_runtime")) cfg.openconnect_runtime = j["openconnect_runtime"].get<std::string>();
+    if (j.contains("windows_tunnel_driver")) cfg.windows_tunnel_driver = j["windows_tunnel_driver"].get<std::string>();
+    if (j.contains("windows_tap_interface")) cfg.windows_tap_interface = j["windows_tap_interface"].get<std::string>();
 
     if (j.contains("password")) {
         std::string pw = j["password"].get<std::string>();
@@ -198,7 +226,10 @@ std::string route_add(config::ConfigManager& mgr, const std::string& cidr) {
     }
 
     cfg.routes.push_back(cidr);
-    mgr.save(cfg);
+    if (!mgr.save(cfg)) {
+        return "Failed to write config file. Check disk permissions for " +
+               utils::get_config_path();
+    }
     logger::info("Route added via config_api: " + cidr);
     return "";
 }
@@ -211,7 +242,10 @@ std::string route_remove(config::ConfigManager& mgr, const std::string& cidr) {
     }
 
     cfg.routes.erase(it);
-    mgr.save(cfg);
+    if (!mgr.save(cfg)) {
+        return "Failed to write config file. Check disk permissions for " +
+               utils::get_config_path();
+    }
     logger::info("Route removed via config_api: " + cidr);
     return "";
 }

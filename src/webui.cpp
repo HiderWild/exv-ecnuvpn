@@ -97,8 +97,9 @@ nlohmann::json send_helper_request(const nlohmann::json& request) {
     std::string raw;
 
 #ifdef _WIN32
-    // Windows: Named Pipe client
-    HANDLE hPipe = CreateFileA("\\\\\\.\\pipe\\exv-helper",
+    // Windows: Named Pipe client. The pipe name uses the literal "\\.\pipe\exv-helper"
+    // form, so the C string only needs two backslashes followed by a single dot.
+    HANDLE hPipe = CreateFileA("\\\\.\\pipe\\exv-helper",
                                GENERIC_READ | GENERIC_WRITE, 0, NULL,
                                OPEN_EXISTING, 0, NULL);
     if (hPipe == INVALID_HANDLE_VALUE) {
@@ -199,10 +200,15 @@ nlohmann::json build_frontend_status(const nlohmann::json& helper_resp,
 
 // Build auth config subset with frontend-friendly field names
 nlohmann::json build_auth_config(const Config& cfg) {
+    // The UI must not see the stored ciphertext OR a fake mask string
+    // (a previous version used 6 bullet characters which silently polluted
+    // the password field when the user kept typing). Instead we expose a
+    // password_stored boolean and always serialize an empty password.
     nlohmann::json j;
     j["server"] = cfg.server;
     j["username"] = cfg.username;
-    j["password"] = cfg.password.empty() ? "" : "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
+    j["password"] = "";
+    j["password_stored"] = !cfg.password.empty();
     j["user_agent"] = cfg.useragent;
     j["remember_password"] = cfg.remember_password;
     return j;
@@ -348,19 +354,6 @@ void WebUIServer::setup_routes() {
         res.set_content("{\"status\":\"disconnecting\"}", "application/json");
     });
 
-    // ── GET /api/config ─────────────────────────────────────────────
-    server_->Get("/api/config", [this](const httplib::Request&,
-                                        httplib::Response& res) {
-        Config cfg = config_mgr_.load();
-        nlohmann::json j = cfg;
-
-        // Mask password
-        if (!cfg.password.empty()) {
-            j["password"] = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
-        }
-
-        res.set_content(j.dump(), "application/json");
-    });
 
     // ── GET /api/config/auth ────────────────────────────────────────
     server_->Get("/api/config/auth", [this](const httplib::Request&,
@@ -382,27 +375,44 @@ void WebUIServer::setup_routes() {
             return;
         }
 
-        const std::string masked = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
+        auto respond_error = [&res](int status, const std::string& message) {
+            res.status = status;
+            nlohmann::json err{{"error", message}};
+            res.set_content(err.dump(), "application/json");
+        };
 
         // Map frontend field names to config keys
         if (body.contains("server") && body["server"].is_string()) {
-            config_api::config_set(config_mgr_, "server", body["server"].get<std::string>());
+            std::string err = config_api::config_set(
+                config_mgr_, "server", body["server"].get<std::string>());
+            if (!err.empty()) { respond_error(400, err); return; }
         }
         if (body.contains("username") && body["username"].is_string()) {
-            config_api::config_set(config_mgr_, "username", body["username"].get<std::string>());
+            std::string err = config_api::config_set(
+                config_mgr_, "username", body["username"].get<std::string>());
+            if (!err.empty()) { respond_error(400, err); return; }
+        }
+        // Update remember_password first so that a fresh enable also unlocks
+        // the subsequent password setter in the same request.
+        if (body.contains("remember_password") && body["remember_password"].is_boolean()) {
+            std::string err = config_api::config_set(
+                config_mgr_, "remember_password",
+                body["remember_password"].get<bool>() ? "true" : "false");
+            if (!err.empty()) { respond_error(400, err); return; }
         }
         if (body.contains("password") && body["password"].is_string()) {
             std::string pw = body["password"].get<std::string>();
-            if (pw != masked && !pw.empty()) {
-                config_api::config_set_password(config_mgr_, pw);
+            if (!pw.empty()) {
+                std::string err = config_api::config_set_password(config_mgr_, pw);
+                if (!err.empty()) { respond_error(400, err); return; }
             }
         }
         if (body.contains("user_agent") && body["user_agent"].is_string()) {
-            config_api::config_set(config_mgr_, "useragent", body["user_agent"].get<std::string>());
-        }
-        if (body.contains("remember_password") && body["remember_password"].is_boolean()) {
-            config_api::config_set(config_mgr_, "remember_password",
-                                   body["remember_password"].get<bool>() ? "true" : "false");
+            std::string value = body["user_agent"].get<std::string>();
+            if (!utils::trim(value).empty()) {
+                std::string err = config_api::config_set(config_mgr_, "useragent", value);
+                if (!err.empty()) { respond_error(400, err); return; }
+            }
         }
 
         Config updated = config_mgr_.load();
@@ -485,13 +495,11 @@ void WebUIServer::setup_routes() {
             return;
         }
 
-        const std::string masked = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
-
         for (auto it = body.begin(); it != body.end(); ++it) {
             std::string key = it.key();
             if (key == "password") {
                 std::string pw = it.value().get<std::string>();
-                if (pw != masked && !pw.empty()) {
+                if (!pw.empty()) {
                     std::string err =
                         config_api::config_set_password(config_mgr_, pw);
                     if (!err.empty()) {
@@ -538,15 +546,15 @@ void WebUIServer::setup_routes() {
             }
         }
 
+        // Always return a fresh snapshot with the password field stripped.
         Config updated = config_mgr_.load();
         nlohmann::json j = updated;
-        if (!updated.password.empty()) {
-            j["password"] = masked;
-        }
+        j["password"] = "";
+        j["password_stored"] = !updated.password.empty();
         res.set_content(j.dump(), "application/json");
     });
 
-    // ── POST /api/config/import ─────────────────────────────────────
+    // ── POST /api/config/import ──────────────────────────────────
     server_->Post("/api/config/import", [this](const httplib::Request& req,
                                                 httplib::Response& res) {
         std::string err = config_api::config_import(config_mgr_, req.body);
@@ -560,18 +568,20 @@ void WebUIServer::setup_routes() {
 
         Config cfg = config_mgr_.load();
         nlohmann::json j = cfg;
-        if (!cfg.password.empty()) {
-            j["password"] = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
-        }
+        j["password"] = "";
+        j["password_stored"] = !cfg.password.empty();
         res.set_content(j.dump(), "application/json");
     });
 
-    // ── POST /api/config/reset ──────────────────────────────────────
+    // ── POST /api/config/reset ─────────────────────────────────
     server_->Post("/api/config/reset", [this](const httplib::Request&,
                                                httplib::Response& res) {
         config_api::config_reset(config_mgr_);
         Config cfg = config_mgr_.load();
-        res.set_content(nlohmann::json(cfg).dump(), "application/json");
+        nlohmann::json j = cfg;
+        j["password"] = "";
+        j["password_stored"] = false;
+        res.set_content(j.dump(), "application/json");
     });
 
     // ── GET /api/routes ─────────────────────────────────────────────

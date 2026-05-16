@@ -78,10 +78,55 @@ sudo ./scripts/install-linux.sh
 ```
 
 ### Windows
-1. Install [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases)
-2. Install OpenSSL (via [vcpkg](https://vcpkg.io/) or [choco](https://chocolatey.org/)): `choco install openssl`
-3. Build: `cmake -B build && cmake --build build --config Release`
-4. Run as Administrator: `.\build\Release\exv.exe service install`
+1. Install [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases) (provides `openconnect.exe` + GnuTLS runtime DLLs).
+2. Build: `cmake -B build && cmake --build build --config Release`
+   - The desktop client uses Windows **BCrypt** (CNG) for AES-256-CBC, so OpenSSL is no longer required on Windows.
+3. Run as Administrator: `.\build\Release\exv.exe service install`
+
+### Windows desktop packaging (portable + installer)
+
+The Electron-based desktop UI can be packaged for Windows in two flavours:
+
+```powershell
+# 1. Stage the openconnect runtime once (DLLs + wintun.dll + optional TAP assets)
+powershell -ExecutionPolicy Bypass -File scripts\stage-openconnect-runtime-win.ps1 -SourceDir <openconnect-gui install dir>
+
+# 2. Build the Electron desktop bundle (produces both targets in webui/release/)
+cd webui
+npm install
+npm run desktop:build
+```
+
+Artifacts (under `webui/release/`):
+
+- `ECNU-VPN-<version>-portable.exe` — single-file portable build; just double-click. No service is installed.
+- `ECNU VPN Setup <version>.exe` — NSIS installer; offers per-machine install and automatically registers the `exv-helper` Windows service via `installer.nsh`.
+
+The bundled `bin/` directory contains `exv.exe`, the MinGW runtime DLLs, `openconnect.exe`, GnuTLS / libxml2 / wintun.dll, and (when staged) TAP assets. `libssl-3-x64.dll` and `libcrypto-3-x64.dll` are intentionally excluded — the client no longer links against OpenSSL on Windows.
+
+### Desktop UI (Electron)
+
+The Vue UI can also run as a desktop application without opening the browser.
+The desktop shell talks to the native `exv desktop-rpc` JSON interface through
+Electron IPC and keeps the existing CLI/helper service model intact.
+
+```bash
+cd webui
+npm install
+npm run build
+npm run build:electron
+
+# Package the desktop app after building the native C++ binary.
+npm run desktop:build
+```
+
+For development, build the native binary first or set `EXV_PATH` to an existing
+`exv`/`exv.exe`, then run:
+
+```bash
+cd webui
+npm run desktop:dev
+```
 
 ## 快速开始
 
