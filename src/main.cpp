@@ -1,3 +1,4 @@
+#include "app_api.hpp"
 #include "config.hpp"
 #include "config_manager.hpp"
 #include "helper.hpp"
@@ -137,7 +138,7 @@ static void print_help() {
             << "                 Show current config" << std::endl;
   std::cout << "  " << utils::YELLOW << "config import <file>" << utils::RESET
             << "        Import from JSON file" << std::endl;
-  std::cout << "  " << utils::YELLOW << "config set <key>" << utils::RESET
+  std::cout << "  " << utils::YELLOW << "config set <key> [value]" << utils::RESET
             << "            Set a config value (interactive)" << std::endl;
   std::cout << "  " << utils::YELLOW << "config reset" << utils::RESET
             << "                Reset to defaults (key preserved)" << std::endl;
@@ -262,13 +263,14 @@ static int handle_config(const std::vector<std::string> &args) {
 
   if (subcmd == "set") {
     if (args.size() < 4) {
-      utils::print_error("Usage: exv config set <key>");
+      utils::print_error("Usage: exv config set <key> [value]");
       utils::print_info(
           "Keys: server, username, password, mtu, useragent, log_file, remember_password, disable_dtls");
       return 1;
     }
     Config cfg = config::load();
-    return config::set_value(cfg, args[3]) ? 0 : 1;
+    std::string inline_value = (args.size() >= 5) ? args[4] : "";
+    return config::set_value(cfg, args[3], inline_value) ? 0 : 1;
   }
 
   if (subcmd == "reset") {
@@ -352,6 +354,27 @@ int main(int argc, char *argv[]) {
     return vpn::supervisor_main();
   }
 #endif
+  if (raw_args.size() > 2 && raw_args[1] == "desktop-rpc") {
+    nlohmann::json payload = nlohmann::json::object();
+    if (raw_args.size() > 3) {
+      try {
+        payload = nlohmann::json::parse(raw_args[3]);
+      } catch (const std::exception &ex) {
+        std::cout << nlohmann::json{{"ok", false},
+                                    {"error", std::string("invalid JSON payload: ") + ex.what()}}
+                         .dump()
+                  << std::endl;
+        return 1;
+      }
+    }
+
+    nlohmann::json result = app_api::handle_action(raw_args[2], payload);
+    std::cout << result.dump() << std::endl;
+    if (result.is_object() && result.value("ok", true) == false) {
+      return 1;
+    }
+    return 0;
+  }
 
   ParsedArgs parsed = parse_args(raw_args);
   if (!parsed.error.empty()) {

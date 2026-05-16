@@ -756,6 +756,16 @@ void show(const Config &cfg) {
             << cfg.webui_bind << std::endl;
   std::cout << utils::BOLD << "  WebUI Enabled   : " << utils::RESET
             << (cfg.webui_enabled ? "true" : "false") << std::endl;
+  std::cout << utils::BOLD << "  Runtime Mode    : " << utils::RESET
+            << cfg.openconnect_runtime << std::endl;
+#ifdef _WIN32
+  std::cout << utils::BOLD << "  Tunnel Driver   : " << utils::RESET
+            << cfg.windows_tunnel_driver << std::endl;
+  std::cout << utils::BOLD << "  TAP Interface   : " << utils::RESET
+            << (cfg.windows_tap_interface.empty() ? "(auto)"
+                                                  : cfg.windows_tap_interface)
+            << std::endl;
+#endif
   std::cout << std::endl;
 
   std::cout << utils::BOLD << "  Routes (" << cfg.routes.size()
@@ -845,6 +855,14 @@ Config import_from(const std::string &path) {
       cfg.webui_bind = j["webui_bind"].get<std::string>();
     if (j.contains("webui_enabled"))
       cfg.webui_enabled = j["webui_enabled"].get<bool>();
+    if (j.contains("openconnect_runtime"))
+      cfg.openconnect_runtime = j["openconnect_runtime"].get<std::string>();
+    if (j.contains("windows_tunnel_driver"))
+      cfg.windows_tunnel_driver =
+          j["windows_tunnel_driver"].get<std::string>();
+    if (j.contains("windows_tap_interface"))
+      cfg.windows_tap_interface =
+          j["windows_tap_interface"].get<std::string>();
 
     if (j.contains("password")) {
       std::string pw = j["password"].get<std::string>();
@@ -873,7 +891,25 @@ Config import_from(const std::string &path) {
 
 // ── set_value ────────────────────────────────────────────────────
 
-bool set_value(Config &cfg, const std::string &key, const std::string &) {
+bool set_value(Config &cfg, const std::string &key, const std::string &inline_value) {
+  // Strip surrounding quotes that Windows CMD/PowerShell may add.
+  auto strip_quotes = [](const std::string &s) -> std::string {
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+      return s.substr(1, s.size() - 2);
+    return s;
+  };
+  std::string value = strip_quotes(inline_value);
+
+  // Helper: use inline value if provided, otherwise prompt from stdin.
+  auto read_value = [&](const std::string &prompt) -> std::string {
+    if (!value.empty())
+      return value;
+    std::cout << prompt;
+    std::string val;
+    std::getline(std::cin, val);
+    return strip_quotes(utils::trim(val));
+  };
+
   if (key == "password") {
     if (!cfg.remember_password) {
       utils::print_warning("remember_password is currently disabled.");
@@ -918,12 +954,10 @@ bool set_value(Config &cfg, const std::string &key, const std::string &) {
   }
 
   if (key == "remember_password") {
-    std::cout << "  Remember password? [Y/n]: ";
-    std::string input;
-    std::getline(std::cin, input);
-    input = utils::trim(input);
-    cfg.remember_password =
-        (input.empty() || input[0] == 'y' || input[0] == 'Y');
+    std::string input = read_value("  Remember password? [Y/n]: ");
+    if (input.empty())
+      input = "y";
+    cfg.remember_password = (input[0] == 'y' || input[0] == 'Y');
     if (!cfg.remember_password)
       cfg.password = "";
     if (save(cfg)) {
@@ -935,12 +969,8 @@ bool set_value(Config &cfg, const std::string &key, const std::string &) {
   }
 
   if (key == "disable_dtls") {
-    std::cout << "  Disable DTLS/ESP and force TLS-only transport? [y/N]: ";
-    std::string input;
-    std::getline(std::cin, input);
-    input = utils::trim(input);
-    cfg.disable_dtls =
-        (!input.empty() && (input[0] == 'y' || input[0] == 'Y'));
+    std::string input = read_value("  Disable DTLS? [y/N]: ");
+    cfg.disable_dtls = (!input.empty() && (input[0] == 'y' || input[0] == 'Y'));
     if (save(cfg)) {
       utils::print_success(std::string("disable_dtls = ") +
                            (cfg.disable_dtls ? "true" : "false"));
@@ -949,13 +979,38 @@ bool set_value(Config &cfg, const std::string &key, const std::string &) {
     return false;
   }
 
+  if (key == "openconnect_runtime") {
+    std::string input = read_value("  Runtime mode [bundled/auto/system]: ");
+    if (input != "bundled" && input != "auto" && input != "system") {
+      utils::print_error("Invalid runtime mode.");
+      return false;
+    }
+    cfg.openconnect_runtime = input;
+    if (save(cfg)) {
+      utils::print_success("Set openconnect_runtime = " + input);
+      return true;
+    }
+    return false;
+  }
+
+  if (key == "windows_tunnel_driver") {
+    std::string input = read_value("  Tunnel driver [auto/wintun/tap]: ");
+    if (input != "auto" && input != "wintun" && input != "tap") {
+      utils::print_error("Invalid tunnel driver.");
+      return false;
+    }
+    cfg.windows_tunnel_driver = input;
+    if (save(cfg)) {
+      utils::print_success("Set windows_tunnel_driver = " + input);
+      return true;
+    }
+    return false;
+  }
+
   auto handle_str = [&](const std::string &k, std::string &field) -> bool {
     if (key != k)
       return false;
-    std::cout << "  Enter value for " << k << ": ";
-    std::string val;
-    std::getline(std::cin, val);
-    val = utils::trim(val);
+    std::string val = read_value("  Enter value for " + k + ": ");
     if (val.empty()) {
       utils::print_error("Value cannot be empty.");
       return false;
@@ -976,13 +1031,13 @@ bool set_value(Config &cfg, const std::string &key, const std::string &) {
     return true;
   if (handle_str("log_file", cfg.log_file))
     return true;
+  if (handle_str("windows_tap_interface", cfg.windows_tap_interface))
+    return true;
 
   if (key == "mtu") {
-    std::cout << "  Enter value for mtu: ";
-    std::string val;
-    std::getline(std::cin, val);
+    std::string val = read_value("  Enter value for mtu: ");
     try {
-      cfg.mtu = std::stoi(utils::trim(val));
+      cfg.mtu = std::stoi(val);
     } catch (...) {
       utils::print_error("Invalid MTU.");
       return false;
@@ -996,7 +1051,9 @@ bool set_value(Config &cfg, const std::string &key, const std::string &) {
 
   utils::print_error("Unknown config key: " + key);
   utils::print_info("Valid keys: server, username, password, mtu, useragent, "
-                    "log_file, remember_password, disable_dtls");
+                    "log_file, remember_password, disable_dtls, "
+                    "openconnect_runtime, windows_tunnel_driver, "
+                    "windows_tap_interface");
   return false;
 }
 

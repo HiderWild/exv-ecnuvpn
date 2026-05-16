@@ -17,11 +17,11 @@ static constexpr bool DEFAULT_DISABLE_DTLS = false;
 static inline std::string default_log_file_path() {
   const char *appdata = std::getenv("APPDATA");
   if (appdata && *appdata)
-    return std::string(appdata) + "\ecnuvpn\ecnuvpn.log";
+    return std::string(appdata) + "\\ecnuvpn\\ecnuvpn.log";
   const char *home = std::getenv("USERPROFILE");
   if (home && *home)
-    return std::string(home) + "\AppData\Roaming\ecnuvpn\ecnuvpn.log";
-  return "C:\ProgramData\ecnuvpn\ecnuvpn.log";
+    return std::string(home) + "\\AppData\\Roaming\\ecnuvpn\\ecnuvpn.log";
+  return "C:\\ProgramData\\ecnuvpn\\ecnuvpn.log";
 }
 #else
 static inline std::string default_log_file_path() {
@@ -53,12 +53,18 @@ struct Config {
   int webui_port = 18080;
   std::string webui_bind = "127.0.0.1";
   bool webui_enabled = true;
+  std::string openconnect_runtime = "bundled";
+  std::string windows_tunnel_driver = "auto";
+  std::string windows_tap_interface = "";
 
   NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(Config, server, username,
                                               password, mtu, useragent,
                                               disable_dtls, remember_password, routes,
                                               extra_args, log_file,
-                                              webui_port, webui_bind, webui_enabled)
+                                              webui_port, webui_bind, webui_enabled,
+                                              openconnect_runtime,
+                                              windows_tunnel_driver,
+                                              windows_tap_interface)
 };
 
 namespace config {
