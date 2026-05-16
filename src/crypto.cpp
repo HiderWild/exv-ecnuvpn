@@ -16,15 +16,26 @@
 #ifdef __APPLE__
 #include <CommonCrypto/CommonCryptor.h>
 #include <CommonCrypto/CommonRandom.h>
-#elif defined(__linux__) || defined(_WIN32)
+#elif defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#include <ntstatus.h>
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+#elif defined(__linux__)
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #endif
 
-// POSIX for termios hidden input
+// Platform-specific hidden input
+#ifndef _WIN32
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
+#else
+#include <conio.h>
+#endif
 
 namespace ecnuvpn {
 namespace crypto {
@@ -113,19 +124,32 @@ static bool hex_to_bytes(const std::string &hex, uint8_t *out,
 
 std::string key_path() { return utils::get_config_dir() + "/.key"; }
 
+static bool fill_random_bytes(uint8_t *buffer, size_t len) {
+#ifdef __APPLE__
+  if (CCRandomGenerateBytes(buffer, len) == kCCSuccess)
+    return true;
+  std::ifstream urandom("/dev/urandom", std::ios::binary);
+  urandom.read(reinterpret_cast<char *>(buffer), static_cast<std::streamsize>(len));
+  return urandom.good();
+#elif defined(_WIN32)
+  NTSTATUS status = BCryptGenRandom(nullptr, buffer, static_cast<ULONG>(len),
+                                    BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+  return NT_SUCCESS(status);
+#else
+  if (RAND_bytes(buffer, static_cast<int>(len)) == 1)
+    return true;
+  std::ifstream urandom("/dev/urandom", std::ios::binary);
+  urandom.read(reinterpret_cast<char *>(buffer), static_cast<std::streamsize>(len));
+  return urandom.good();
+#endif
+}
+
 std::string generate_key() {
   uint8_t raw[32];
-#ifdef __APPLE__
-  if (CCRandomGenerateBytes(raw, sizeof(raw)) != kCCSuccess) {
-    std::ifstream urandom("/dev/urandom", std::ios::binary);
-    urandom.read(reinterpret_cast<char *>(raw), sizeof(raw));
+  if (!fill_random_bytes(raw, sizeof(raw))) {
+    logger::error("generate_key: random source failure");
+    return "";
   }
-#else
-  if (RAND_bytes(raw, sizeof(raw)) != 1) {
-    std::ifstream urandom("/dev/urandom", std::ios::binary);
-    urandom.read(reinterpret_cast<char *>(raw), sizeof(raw));
-  }
-#endif
   return bytes_to_hex(raw, sizeof(raw));
 }
 
@@ -144,8 +168,10 @@ bool save_key(const std::string &hex_key) {
   if (!ofs.is_open())
     return false;
   ofs << hex_key;
+#ifndef _WIN32
   // Restrict to owner read/write only
   chmod(path.c_str(), 0600);
+#endif
   return ofs.good();
 }
 
@@ -218,6 +244,45 @@ bool reset_key() {
 
 // ── Encryption / Decryption ──────────────────────────────────────
 
+#ifdef _WIN32
+// RAII wrappers for CNG handles
+struct BCryptAlgRAII {
+  BCRYPT_ALG_HANDLE handle = nullptr;
+  ~BCryptAlgRAII() {
+    if (handle)
+      BCryptCloseAlgorithmProvider(handle, 0);
+  }
+};
+
+struct BCryptKeyRAII {
+  BCRYPT_KEY_HANDLE handle = nullptr;
+  ~BCryptKeyRAII() {
+    if (handle)
+      BCryptDestroyKey(handle);
+  }
+};
+
+static bool bcrypt_open_aes_cbc(BCryptAlgRAII *alg) {
+  NTSTATUS status = BCryptOpenAlgorithmProvider(
+      &alg->handle, BCRYPT_AES_ALGORITHM, nullptr, 0);
+  if (!NT_SUCCESS(status)) {
+    logger::error("BCryptOpenAlgorithmProvider failed: 0x" +
+                  std::to_string(static_cast<unsigned long>(status)));
+    return false;
+  }
+  status = BCryptSetProperty(
+      alg->handle, BCRYPT_CHAINING_MODE,
+      reinterpret_cast<PUCHAR>(const_cast<wchar_t *>(BCRYPT_CHAIN_MODE_CBC)),
+      sizeof(BCRYPT_CHAIN_MODE_CBC), 0);
+  if (!NT_SUCCESS(status)) {
+    logger::error("BCryptSetProperty(CHAINING_MODE) failed: 0x" +
+                  std::to_string(static_cast<unsigned long>(status)));
+    return false;
+  }
+  return true;
+}
+#endif
+
 std::string encrypt(const std::string &plaintext, const std::string &hex_key) {
   if (!validate_key(hex_key))
     return "";
@@ -230,17 +295,10 @@ std::string encrypt(const std::string &plaintext, const std::string &hex_key) {
 
   // Generate random IV
   uint8_t iv[IV_LEN];
-#ifdef __APPLE__
-  if (CCRandomGenerateBytes(iv, sizeof(iv)) != kCCSuccess) {
-    std::ifstream urandom("/dev/urandom", std::ios::binary);
-    urandom.read(reinterpret_cast<char *>(iv), sizeof(iv));
+  if (!fill_random_bytes(iv, sizeof(iv))) {
+    logger::error("AES encrypt: failed to gather random IV");
+    return "";
   }
-#else
-  if (RAND_bytes(iv, sizeof(iv)) != 1) {
-    std::ifstream urandom("/dev/urandom", std::ios::binary);
-    urandom.read(reinterpret_cast<char *>(iv), sizeof(iv));
-  }
-#endif
 
   // Encrypt
   size_t out_len = 0;
@@ -260,6 +318,50 @@ std::string encrypt(const std::string &plaintext, const std::string &hex_key) {
     logger::error("AES encrypt failed, status: " + std::to_string(status));
     return "";
   }
+  ciphertext.resize(out_len);
+#elif defined(_WIN32)
+  BCryptAlgRAII alg;
+  if (!bcrypt_open_aes_cbc(&alg))
+    return "";
+
+  BCryptKeyRAII key_handle;
+  NTSTATUS status = BCryptGenerateSymmetricKey(
+      alg.handle, &key_handle.handle, nullptr, 0, key_bytes, 32, 0);
+  if (!NT_SUCCESS(status)) {
+    logger::error("BCryptGenerateSymmetricKey failed: 0x" +
+                  std::to_string(static_cast<unsigned long>(status)));
+    return "";
+  }
+
+  ULONG cbResult = 0;
+  uint8_t iv_copy[IV_LEN];
+  std::memcpy(iv_copy, iv, IV_LEN);
+
+  status = BCryptEncrypt(
+      key_handle.handle,
+      reinterpret_cast<PUCHAR>(const_cast<char *>(plaintext.data())),
+      static_cast<ULONG>(plaintext.size()), nullptr, iv_copy, IV_LEN, nullptr,
+      0, &cbResult, BCRYPT_BLOCK_PADDING);
+  if (!NT_SUCCESS(status)) {
+    logger::error("BCryptEncrypt (size query) failed: 0x" +
+                  std::to_string(static_cast<unsigned long>(status)));
+    return "";
+  }
+
+  ciphertext.resize(cbResult);
+  std::memcpy(iv_copy, iv, IV_LEN);
+  status = BCryptEncrypt(
+      key_handle.handle,
+      reinterpret_cast<PUCHAR>(const_cast<char *>(plaintext.data())),
+      static_cast<ULONG>(plaintext.size()), nullptr, iv_copy, IV_LEN,
+      ciphertext.data(), static_cast<ULONG>(ciphertext.size()), &cbResult,
+      BCRYPT_BLOCK_PADDING);
+  if (!NT_SUCCESS(status)) {
+    logger::error("BCryptEncrypt failed: 0x" +
+                  std::to_string(static_cast<unsigned long>(status)));
+    return "";
+  }
+  out_len = static_cast<size_t>(cbResult);
   ciphertext.resize(out_len);
 #else
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -332,6 +434,37 @@ std::string decrypt(const std::string &ciphertext_b64,
   }
 
   return std::string(reinterpret_cast<char *>(plaintext.data()), out_len);
+#elif defined(_WIN32)
+  BCryptAlgRAII alg;
+  if (!bcrypt_open_aes_cbc(&alg))
+    return "";
+
+  BCryptKeyRAII key_handle;
+  NTSTATUS status = BCryptGenerateSymmetricKey(
+      alg.handle, &key_handle.handle, nullptr, 0, key_bytes, 32, 0);
+  if (!NT_SUCCESS(status)) {
+    logger::error("BCryptGenerateSymmetricKey (decrypt) failed: 0x" +
+                  std::to_string(static_cast<unsigned long>(status)));
+    return "";
+  }
+
+  std::vector<uint8_t> plaintext(enc_len);
+  uint8_t iv_copy[IV_LEN];
+  std::memcpy(iv_copy, iv, IV_LEN);
+  ULONG cbResult = 0;
+
+  status = BCryptDecrypt(
+      key_handle.handle, const_cast<PUCHAR>(enc_data),
+      static_cast<ULONG>(enc_len), nullptr, iv_copy, IV_LEN, plaintext.data(),
+      static_cast<ULONG>(plaintext.size()), &cbResult, BCRYPT_BLOCK_PADDING);
+  if (!NT_SUCCESS(status)) {
+    logger::error("BCryptDecrypt failed: 0x" +
+                  std::to_string(static_cast<unsigned long>(status)));
+    return "";
+  }
+
+  return std::string(reinterpret_cast<char *>(plaintext.data()),
+                     static_cast<size_t>(cbResult));
 #else
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
@@ -364,7 +497,8 @@ std::string read_password_hidden(const std::string &prompt) {
   std::cerr << prompt;
   std::cerr.flush();
 
-  // Disable echo via termios
+#ifndef _WIN32
+  // POSIX: disable echo via termios
   struct termios old_termios, new_termios;
   bool tty = (tcgetattr(STDIN_FILENO, &old_termios) == 0);
   if (tty) {
@@ -380,6 +514,24 @@ std::string read_password_hidden(const std::string &prompt) {
   if (tty) {
     tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
   }
+#else
+  // Windows: disable echo via SetConsoleMode
+  HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD old_mode = 0;
+  bool console_ok = (hStdin != INVALID_HANDLE_VALUE &&
+                     GetConsoleMode(hStdin, &old_mode) != 0);
+  if (console_ok) {
+    SetConsoleMode(hStdin, old_mode & ~ENABLE_ECHO_INPUT);
+  }
+
+  std::string password;
+  std::getline(std::cin, password);
+
+  // Restore console mode
+  if (console_ok) {
+    SetConsoleMode(hStdin, old_mode);
+  }
+#endif
 
   // Print newline (since echo was off, enter key didn't produce one)
   std::cerr << std::endl;

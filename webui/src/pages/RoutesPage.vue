@@ -1,112 +1,117 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useVpnStore } from '../stores/vpn'
-import { useUiStore } from '../stores/ui'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { Plus, Trash2, RotateCcw } from 'lucide-vue-next'
+import { Route, Plus, Trash2, Save } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
-const ui = useUiStore()
-const newCidr = ref('')
 
-const defaultRoutes = [
-  '10.0.0.0/8',
-  '172.16.0.0/12',
-  '192.168.0.0/16',
-]
+const routes = ref<string[]>([])
+const newRoute = ref('')
+const saving = ref(false)
+const message = ref<{ type: 'success' | 'error'; text: string } | null>(null)
 
-onMounted(() => {
-  vpn.fetchRoutes()
+onMounted(async () => {
+  await vpn.fetchRoutes()
+  routes.value = vpn.routes.map(r => r.cidr)
 })
 
-async function add() {
-  const cidr = newCidr.value.trim()
-  if (!cidr) return
-  try {
-    await vpn.addRoute(cidr)
-    newCidr.value = ''
-    ui.addToast('Route added', 'success')
-  } catch {
-    ui.addToast('Failed to add route', 'error')
+function addRoute() {
+  const r = newRoute.value.trim()
+  if (r && !routes.value.includes(r)) {
+    routes.value.push(r)
+    newRoute.value = ''
   }
 }
 
-async function remove(cidr: string) {
-  try {
-    await vpn.removeRoute(cidr)
-    ui.addToast('Route removed', 'success')
-  } catch {
-    ui.addToast('Failed to remove route', 'error')
-  }
+function removeRoute(index: number) {
+  routes.value.splice(index, 1)
 }
 
-function reset() {
-  ui.requestConfirm('Reset all routes to defaults? This will remove custom routes.', async () => {
-    await vpn.resetRoutes()
-    ui.addToast('Routes reset to defaults', 'success')
-  })
+async function saveRoutes() {
+  saving.value = true
+  message.value = null
+  try {
+    const current = vpn.routes.map(r => r.cidr)
+    const toAdd = routes.value.filter(r => !current.includes(r))
+    const toRemove = current.filter(r => !routes.value.includes(r))
+    for (const cidr of toRemove) {
+      await vpn.removeRoute(cidr)
+    }
+    for (const cidr of toAdd) {
+      await vpn.addRoute(cidr)
+    }
+    message.value = { type: 'success', text: '路由设置已保存' }
+  } catch (e: any) {
+    message.value = { type: 'error', text: e?.message || '保存失败' }
+  } finally {
+    saving.value = false
+  }
 }
 </script>
 
 <template>
   <div class="py-8">
-    <h1 class="text-xl font-semibold text-foreground mb-6">Route Configuration</h1>
+    <h1 class="text-xl font-semibold text-foreground mb-6 flex items-center gap-2">
+      <Route class="w-5 h-5 text-accent" />
+      分流路由
+    </h1>
 
-    <div class="bg-surface border border-border rounded-xl p-6">
-      <!-- Add route -->
-      <div class="flex gap-2 mb-6">
-        <input
-          v-model="newCidr"
-          type="text"
-          placeholder="CIDR (e.g., 10.0.0.0/8)"
-          class="flex-1 bg-bg border border-border rounded-lg px-3 py-2 text-sm text-foreground font-mono placeholder:text-muted focus:outline-none focus:border-accent/50 transition-colors"
-          @keyup.enter="add"
-        />
-        <button
-          class="flex items-center gap-1.5 bg-accent text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-accent/90 transition-colors"
-          @click="add"
-        >
-          <Plus class="w-4 h-4" />
-          Add
-        </button>
-      </div>
+    <div class="bg-surface border border-border rounded-xl p-6 max-w-3xl">
+      <p class="text-sm text-muted mb-4">
+        配置分流路由，仅将指定网段的流量通过 VPN 隧道。留空表示全局隧道。
+      </p>
 
-      <!-- Route list -->
-      <div v-if="vpn.routes.length" class="space-y-2 mb-6">
+      <div class="space-y-3 mb-6">
         <div
-          v-for="route in vpn.routes"
-          :key="route.cidr"
-          class="flex items-center justify-between bg-bg border border-border rounded-lg px-4 py-2.5 group"
+          v-for="(route, index) in routes"
+          :key="index"
+          class="flex items-center gap-3 bg-bg border border-border rounded-lg px-4 py-2.5"
         >
-          <code class="text-sm text-foreground font-mono">{{ route.cidr }}</code>
+          <span class="text-sm text-foreground font-mono flex-1">{{ route }}</span>
           <button
-            class="text-muted hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
-            @click="remove(route.cidr)"
+            class="text-muted hover:text-destructive transition-colors"
+            @click="removeRoute(index)"
           >
             <Trash2 class="w-4 h-4" />
           </button>
         </div>
       </div>
 
-      <div v-else class="text-center py-8 text-muted text-sm">
-        No routes configured. Add a CIDR above or reset to defaults.
+      <div class="flex items-center gap-3 mb-6">
+        <input
+          v-model="newRoute"
+          type="text"
+          placeholder="例如 10.0.0.0/8"
+          class="flex-1 bg-bg border border-border rounded-lg px-4 py-2.5 text-sm text-foreground font-mono placeholder:text-muted focus:outline-none focus:border-accent/50 transition-colors"
+          @keyup.enter="addRoute"
+        />
+        <button
+          class="flex items-center gap-2 border border-border rounded-lg px-4 py-2.5 text-sm text-foreground hover:border-accent/50 transition-colors"
+          @click="addRoute"
+        >
+          <Plus class="w-4 h-4" />
+          添加
+        </button>
       </div>
 
-      <!-- Reset button -->
-      <div class="border-t border-border pt-4">
-        <button
-          class="flex items-center gap-1.5 text-sm text-warning hover:text-warning/80 transition-colors"
-          @click="reset"
-        >
-          <RotateCcw class="w-4 h-4" />
-          Reset to Default Routes
-        </button>
-        <p class="text-xs text-muted mt-2">
-          Defaults: {{ defaultRoutes.join(', ') }}
-        </p>
+      <button
+        :disabled="saving"
+        class="flex items-center gap-2 bg-accent text-white rounded-lg px-5 py-2.5 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
+        @click="saveRoutes"
+      >
+        <Save class="w-4 h-4" />
+        {{ saving ? '保存中...' : '保存路由' }}
+      </button>
+
+      <div
+        v-if="message"
+        :class="[
+          'text-sm rounded-lg px-4 py-2.5 mt-4',
+          message.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+        ]"
+      >
+        {{ message.text }}
       </div>
     </div>
-
-    <ConfirmDialog />
   </div>
 </template>

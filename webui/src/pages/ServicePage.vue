@@ -15,13 +15,13 @@ onMounted(() => {
 
 function install() {
   ui.requestConfirm(
-    'This will install the VPN helper as a system service. You may be prompted for your sudo password in the terminal.',
+    '将安装 VPN 辅助服务为系统服务。可能需要管理员权限。',
     async () => {
       try {
         await vpn.installService()
-        ui.addToast('Service installed successfully', 'success')
+        ui.addToast('服务安装成功', 'success')
       } catch {
-        ui.addToast('Failed to install service', 'error')
+        ui.addToast('服务安装失败', 'error')
       }
     },
   )
@@ -29,13 +29,13 @@ function install() {
 
 function uninstall() {
   ui.requestConfirm(
-    'This will uninstall the VPN helper service. You may be prompted for your sudo password in the terminal.',
+    '将卸载 VPN 辅助服务。可能需要管理员权限。',
     async () => {
       try {
         await vpn.uninstallService()
-        ui.addToast('Service uninstalled successfully', 'success')
+        ui.addToast('服务卸载成功', 'success')
       } catch {
-        ui.addToast('Failed to uninstall service', 'error')
+        ui.addToast('服务卸载失败', 'error')
       }
     },
   )
@@ -44,7 +44,7 @@ function uninstall() {
 
 <template>
   <div class="py-8">
-    <h1 class="text-xl font-semibold text-foreground mb-6">Service Management</h1>
+    <h1 class="text-xl font-semibold text-foreground mb-6">服务管理</h1>
 
     <div class="bg-surface border border-border rounded-xl p-6">
       <!-- Status -->
@@ -52,8 +52,8 @@ function uninstall() {
         <div class="flex items-center gap-3">
           <Terminal class="w-5 h-5 text-muted" />
           <div>
-            <p class="text-sm font-medium text-foreground">Daemon Service</p>
-            <p class="text-xs text-muted">{{ vpn.serviceStatus?.path || 'Not installed' }}</p>
+            <p class="text-sm font-medium text-foreground">守护进程服务</p>
+            <p class="text-xs text-muted">{{ vpn.serviceStatus?.path || '未安装' }}</p>
           </div>
         </div>
         <div class="flex items-center gap-3">
@@ -73,7 +73,7 @@ function uninstall() {
           @click="install"
         >
           <Download class="w-4 h-4" />
-          Install Service
+          安装服务
         </button>
 
         <template v-else>
@@ -82,7 +82,7 @@ function uninstall() {
             @click="uninstall"
           >
             <Trash2 class="w-4 h-4" />
-            Uninstall Service
+            卸载服务
           </button>
         </template>
 
@@ -91,29 +91,29 @@ function uninstall() {
           @click="vpn.fetchServiceStatus()"
         >
           <RefreshCw class="w-4 h-4" />
-          Refresh
+          刷新
         </button>
       </div>
     </div>
 
     <div class="bg-surface border border-border rounded-xl p-6 mt-4">
-      <h2 class="text-sm font-medium text-foreground mb-3">Terminal Commands</h2>
+      <h2 class="text-sm font-medium text-foreground mb-3">终端命令</h2>
       <p class="text-xs text-muted mb-3">
-        If the web interface cannot manage the service, use these commands in your terminal:
+        如果界面无法管理服务，可在终端中使用以下命令：
       </p>
       <div class="bg-bg rounded-lg p-4 font-mono text-xs text-foreground space-y-2">
         <div>
-          <span class="text-muted"># Install service</span>
+          <span class="text-muted"># 安装服务</span>
           <br />
           <span class="text-accent">sudo</span> ecnu-vpn service install
         </div>
         <div>
-          <span class="text-muted"># Uninstall service</span>
+          <span class="text-muted"># 卸载服务</span>
           <br />
           <span class="text-accent">sudo</span> ecnu-vpn service uninstall
         </div>
         <div>
-          <span class="text-muted"># Check status</span>
+          <span class="text-muted"># 查看状态</span>
           <br />
           ecnu-vpn service status
         </div>

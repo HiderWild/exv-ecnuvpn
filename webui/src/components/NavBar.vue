@@ -8,12 +8,12 @@ const router = useRouter()
 const route = useRoute()
 
 const navItems = [
-  { path: '/', name: 'Dashboard', icon: LayoutDashboard },
-  { path: '/auth', name: 'Auth', icon: Key },
-  { path: '/routes', name: 'Routes', icon: Route },
-  { path: '/service', name: 'Service', icon: Terminal },
-  { path: '/logs', name: 'Logs', icon: FileText },
-  { path: '/settings', name: 'Settings', icon: Settings },
+  { path: '/', name: '仪表盘', icon: LayoutDashboard },
+  { path: '/auth', name: '认证', icon: Key },
+  { path: '/routes', name: '路由', icon: Route },
+  { path: '/service', name: '服务', icon: Terminal },
+  { path: '/logs', name: '日志', icon: FileText },
+  { path: '/settings', name: '设置', icon: Settings },
 ]
 
 function isActive(path: string) {

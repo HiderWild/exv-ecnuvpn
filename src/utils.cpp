@@ -1,7 +1,9 @@
 #include "utils.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #ifdef __APPLE__
@@ -9,12 +11,17 @@
 #endif
 #ifdef _WIN32
 #include <windows.h>
-#endif
-#include <memory>
+#include <iphlpapi.h>
+#include <direct.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
 #include <pwd.h>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+#include <memory>
+#include <sstream>
 #include <vector>
 
 namespace ecnuvpn {
@@ -33,21 +40,94 @@ static std::string expand_home_with_base(const std::string &path,
   return path;
 }
 
+static std::string join_path(const std::string &base,
+                             const std::string &component) {
+  if (base.empty())
+    return component;
+  if (base.back() == '/' || base.back() == '\\')
+    return base + component;
+  return base + "/" + component;
+}
+
+#ifdef _WIN32
+static std::string get_windows_roaming_home(const std::string &home) {
+  const char *appdata = getenv("APPDATA");
+  if (appdata && *appdata)
+    return appdata;
+  if (!home.empty())
+    return join_path(join_path(home, "AppData"), "Roaming");
+  return "";
+}
+#endif
+
+static std::string get_redirect_path_for_home(const std::string &home) {
+#ifdef _WIN32
+  std::string base = get_windows_roaming_home(home);
+  if (base.empty())
+    return "";
+  return join_path(base, "ecnuvpn_home");
+#else
+  return expand_home_with_base("~/.ecnuvpn_home", home);
+#endif
+}
+
+static std::string get_default_config_dir_for_home(const std::string &home) {
+#ifdef _WIN32
+  std::string base = get_windows_roaming_home(home);
+  if (base.empty())
+    return "";
+  return join_path(base, "ecnuvpn");
+#else
+  return expand_home_with_base("~/.ecnuvpn", home);
+#endif
+}
+
 static std::string get_config_dir_for_home(const std::string &home) {
-  if (home.empty())
+  std::string default_dir = get_default_config_dir_for_home(home);
+  if (default_dir.empty())
     return "";
 
-  std::string redirect = expand_home_with_base("~/.ecnuvpn_home", home);
-  std::ifstream rf(redirect);
-  if (rf.is_open()) {
-    std::string dir;
-    std::getline(rf, dir);
-    dir = trim(dir);
-    if (!dir.empty())
-      return expand_home_with_base(dir, home);
+  std::string redirect = get_redirect_path_for_home(home);
+  if (!redirect.empty()) {
+    std::ifstream rf(redirect);
+    if (rf.is_open()) {
+      std::string dir;
+      std::getline(rf, dir);
+      dir = trim(dir);
+      if (!dir.empty())
+        return expand_home_with_base(dir, home);
+    }
   }
 
-  return expand_home_with_base("~/.ecnuvpn", home);
+  return default_dir;
+}
+
+static std::vector<std::string> candidate_runtime_dirs() {
+  std::vector<std::string> dirs;
+
+  const char *env_runtime_dir = std::getenv("ECNUVPN_RUNTIME_DIR");
+  if (env_runtime_dir && *env_runtime_dir) {
+    dirs.push_back(env_runtime_dir);
+  }
+
+  std::string exec_path = get_executable_path();
+  if (!exec_path.empty()) {
+    std::filesystem::path exec_dir = std::filesystem::path(exec_path).parent_path();
+    dirs.push_back(exec_dir.string());
+    dirs.push_back((exec_dir / "runtime").string());
+    dirs.push_back((exec_dir / "openconnect").string());
+    dirs.push_back((exec_dir / "runtime" / "openconnect").string());
+  }
+
+  return dirs;
+}
+
+static std::string first_existing_file(const std::vector<std::string> &paths) {
+  for (const auto &path : paths) {
+    if (!path.empty() && file_exists(path))
+      return path;
+  }
+  return "";
 }
 
 // ── Colored output ──────────────────────────────────────────────
@@ -86,23 +166,40 @@ void print_header(const std::string &msg) {
 // ── Path utilities ──────────────────────────────────────────────
 
 std::string get_home_for_uid(uid_t uid) {
+#ifndef _WIN32
   struct passwd *pw = getpwuid(uid);
   if (pw && pw->pw_dir)
     return pw->pw_dir;
   return "";
+#else
+  (void)uid;
+  const char *home = getenv("USERPROFILE");
+  if (home && *home) return home;
+  const char *homeDrive = getenv("HOMEDRIVE");
+  const char *homePath = getenv("HOMEPATH");
+  if (homeDrive && homePath) return std::string(homeDrive) + homePath;
+  return "";
+#endif
 }
 
 std::string get_username_for_uid(uid_t uid) {
+#ifndef _WIN32
   struct passwd *pw = getpwuid(uid);
   if (pw && pw->pw_name)
     return pw->pw_name;
   return "";
+#else
+  (void)uid;
+  const char *username = getenv("USERNAME");
+  return username ? username : "";
+#endif
 }
 
 std::string get_effective_home() {
   if (!runtime_home_override.empty())
     return runtime_home_override;
 
+#ifndef _WIN32
   const char *sudo_user = getenv("SUDO_USER");
   if (sudo_user && *sudo_user) {
     struct passwd *pw = getpwnam(sudo_user);
@@ -119,13 +216,23 @@ std::string get_effective_home() {
     return pw->pw_dir;
 
   return "";
+#else
+  const char *home = getenv("USERPROFILE");
+  if (home && *home) return home;
+  const char *homeDrive = getenv("HOMEDRIVE");
+  const char *homePath = getenv("HOMEPATH");
+  if (homeDrive && homePath) return std::string(homeDrive) + homePath;
+  return "";
+#endif
 }
 
 std::string expand_home(const std::string &path) {
   return expand_home_with_base(path, get_effective_home());
 }
 
-std::string get_redirect_path() { return expand_home("~/.ecnuvpn_home"); }
+std::string get_redirect_path() {
+  return get_redirect_path_for_home(get_effective_home());
+}
 
 std::string get_config_dir() {
   if (!runtime_config_dir_override.empty())
@@ -175,7 +282,12 @@ bool sync_owner(const std::string &path) {
     return true;
   if (!file_exists(path))
     return false;
+#ifndef _WIN32
   return chown(path.c_str(), runtime_owner_uid, runtime_owner_gid) == 0;
+#else
+  // chown not available on Windows; ownership is handled by the system
+  return true;
+#endif
 }
 
 bool set_config_dir(const std::string &dir) {
@@ -196,7 +308,13 @@ std::string get_pid_path() { return get_config_dir() + "/ecnuvpn.pid"; }
 
 std::string get_log_path() { return get_config_dir() + "/ecnuvpn.log"; }
 
-std::string get_tunnel_path() { return get_config_dir() + "/tunnel.sh"; }
+std::string get_tunnel_path() {
+#ifdef _WIN32
+  return get_config_dir() + "/tunnel.js";
+#else
+  return get_config_dir() + "/tunnel.sh";
+#endif
+}
 
 std::string get_supervisor_pid_path() {
   return get_config_dir() + "/ecnuvpn-supervisor.pid";
@@ -209,16 +327,29 @@ std::string get_route_ready_path() {
 // ── File utilities ──────────────────────────────────────────────
 
 bool file_exists(const std::string &path) {
+#ifndef _WIN32
   struct stat st;
   return stat(path.c_str(), &st) == 0;
+#else
+  struct _stat st;
+  return _stat(path.c_str(), &st) == 0;
+#endif
 }
 
 bool ensure_dir(const std::string &path) {
+#ifndef _WIN32
   struct stat st;
   if (stat(path.c_str(), &st) == 0) {
     return S_ISDIR(st.st_mode) && sync_owner(path);
   }
   return mkdir(path.c_str(), 0755) == 0 && sync_owner(path);
+#else
+  struct _stat st;
+  if (_stat(path.c_str(), &st) == 0) {
+    return (st.st_mode & _S_IFDIR) != 0 && sync_owner(path);
+  }
+  return _mkdir(path.c_str()) == 0 && sync_owner(path);
+#endif
 }
 
 std::string read_file(const std::string &path) {
@@ -240,17 +371,82 @@ bool write_file(const std::string &path, const std::string &content) {
 
 // ── System checks ───────────────────────────────────────────────
 
-std::string get_openconnect_path() {
+std::string get_bundled_runtime_dir() {
+  std::vector<std::string> dirs = candidate_runtime_dirs();
+  for (const auto &dir : dirs) {
+    if (!dir.empty() && file_exists(dir))
+      return dir;
+  }
+  return "";
+}
+
+std::string get_bundled_openconnect_path() {
+  std::vector<std::string> candidates;
+  for (const auto &dir : candidate_runtime_dirs()) {
+    if (dir.empty())
+      continue;
+#ifdef _WIN32
+    candidates.push_back(join_path(dir, "openconnect.exe"));
+#else
+    candidates.push_back(join_path(dir, "openconnect"));
+#endif
+  }
+  return first_existing_file(candidates);
+}
+
+std::string get_bundled_wintun_path() {
+#ifdef _WIN32
+  std::vector<std::string> candidates;
+  for (const auto &dir : candidate_runtime_dirs()) {
+    if (dir.empty())
+      continue;
+    candidates.push_back(join_path(dir, "wintun.dll"));
+  }
+  return first_existing_file(candidates);
+#else
+  return "";
+#endif
+}
+
+std::string get_bundled_tap_installer_path() {
+#ifdef _WIN32
+  std::vector<std::string> candidates;
+  for (const auto &dir : candidate_runtime_dirs()) {
+    if (dir.empty())
+      continue;
+    candidates.push_back(join_path(dir, "tap-windows-installer.exe"));
+    candidates.push_back(join_path(dir, "tap-windows-amd64.exe"));
+    candidates.push_back(join_path(dir, "tap-windows-x86.exe"));
+    candidates.push_back(join_path(dir, "tap-windows" "/OemVista.inf"));
+    candidates.push_back(join_path(dir, "tap" "/OemVista.inf"));
+  }
+  return first_existing_file(candidates);
+#else
+  return "";
+#endif
+}
+
+std::string get_openconnect_path(const std::string &runtime_mode) {
+  const char *env_openconnect = std::getenv("ECNUVPN_OPENCONNECT");
+  if (env_openconnect && *env_openconnect && file_exists(env_openconnect))
+    return env_openconnect;
+
+  if (runtime_mode != "system") {
+    std::string bundled = get_bundled_openconnect_path();
+    if (!bundled.empty())
+      return bundled;
+  }
+
 #ifdef __APPLE__
   const char *candidates[] = {"/opt/homebrew/bin/openconnect",
                               "/usr/local/bin/openconnect",
                               "/usr/bin/openconnect",
                               "/bin/openconnect"};
 #elif defined(_WIN32)
-    const char *candidates[] = {
-        "C:\\Program Files\\OpenConnect\\openconnect.exe",
-        "C:\\Program Files (x86)\\OpenConnect\\openconnect.exe",
-        "openconnect.exe"};
+  const char *candidates[] = {
+      "C:\\Program Files\\OpenConnect\\openconnect.exe",
+      "C:\\Program Files (x86)\\OpenConnect\\openconnect.exe",
+      "openconnect.exe"};
 #else
   const char *candidates[] = {"/usr/sbin/openconnect",
                               "/usr/bin/openconnect",
@@ -258,20 +454,51 @@ std::string get_openconnect_path() {
                               "/usr/local/bin/openconnect"};
 #endif
   for (const char *candidate : candidates) {
+#ifdef _WIN32
+    if (candidate && _access(candidate, 0) == 0)
+#else
     if (candidate && access(candidate, X_OK) == 0)
+#endif
       return candidate;
   }
 
+#ifdef _WIN32
+  std::string resolved = trim(run_command_output("where openconnect.exe 2>nul"));
+  std::string::size_type newline = resolved.find_first_of("\r\n");
+  if (newline != std::string::npos)
+    resolved.resize(newline);
+  if (!resolved.empty() && _access(resolved.c_str(), 0) == 0)
+    return resolved;
+#else
   std::string resolved =
       trim(run_command_output("command -v openconnect 2>/dev/null"));
   if (!resolved.empty() && access(resolved.c_str(), X_OK) == 0)
     return resolved;
+#endif
   return "";
 }
 
-bool check_openconnect() { return !get_openconnect_path().empty(); }
+bool check_openconnect(const std::string &runtime_mode) {
+  return !get_openconnect_path(runtime_mode).empty();
+}
 
-bool check_root() { return geteuid() == 0; }
+bool check_root() {
+#ifndef _WIN32
+  return geteuid() == 0;
+#else
+  // On Windows, check if the process is running as Administrator
+  SID_IDENTIFIER_AUTHORITY nt_auth = SECURITY_NT_AUTHORITY;
+  PSID admin_group = nullptr;
+  BOOL is_admin = FALSE;
+  if (AllocateAndInitializeSid(&nt_auth, 2,
+        SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+        0, 0, 0, 0, 0, 0, &admin_group)) {
+    CheckTokenMembership(nullptr, admin_group, &is_admin);
+    FreeSid(admin_group);
+  }
+  return is_admin ? true : false;
+#endif
+}
 
 bool get_interface_traffic(const std::string &iface,
                             uint64_t *rx_bytes, uint64_t *tx_bytes) {
@@ -322,9 +549,13 @@ bool get_interface_traffic(const std::string &iface,
     return false;
   }
 #elif defined(_WIN32)
-    // Windows: simplified implementation using netsh
-    // Full implementation would use GetIfEntry2 from iphlpapi
-    return false;
+  // Windows traffic counters are not required for connection control.
+  // Keep status functional and report zero counters until a stable adapter
+  // lookup implementation is added for both MSVC and MinGW.
+  (void)iface;
+  *rx_bytes = 0;
+  *tx_bytes = 0;
+  return false;
 #else
   // Linux: read from sysfs
   auto read_sysfs_counter = [](const std::string &path) -> uint64_t {
@@ -377,8 +608,13 @@ std::string get_executable_path() {
 std::string run_command_output(const std::string &cmd) {
   std::array<char, 256> buffer;
   std::string result;
+#ifndef _WIN32
   std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"),
                                                 pclose);
+#else
+  std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd.c_str(), "r"),
+                                                 _pclose);
+#endif
   if (!pipe)
     return "";
   while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe.get()) !=
@@ -389,6 +625,7 @@ std::string run_command_output(const std::string &cmd) {
 }
 
 std::string shell_quote(const std::string &value) {
+#ifndef _WIN32
   std::string quoted = "'";
   for (char c : value) {
     if (c == '\'')
@@ -398,6 +635,32 @@ std::string shell_quote(const std::string &value) {
   }
   quoted += "'";
   return quoted;
+#else
+  // Windows cmd.exe: double-quote with internal escaping
+  std::string quoted = "\"";
+  for (char c : value) {
+    if (c == '\"')
+      quoted += "\\\"";
+    else if (c == '%')
+      quoted += "%%";
+    else
+      quoted += c;
+  }
+  quoted += "\"";
+  return quoted;
+#endif
+}
+
+std::vector<std::string> split_lines(const std::string &text) {
+  std::vector<std::string> lines;
+  std::istringstream stream(text);
+  std::string line;
+  while (std::getline(stream, line)) {
+    line = trim(line);
+    if (!line.empty())
+      lines.push_back(line);
+  }
+  return lines;
 }
 
 // ── String utilities ────────────────────────────────────────────

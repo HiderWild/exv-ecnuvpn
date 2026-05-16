@@ -2,6 +2,16 @@
 defineProps<{
   status: 'connected' | 'disconnected' | 'connecting' | 'error' | 'installed' | 'running' | 'stopped'
 }>()
+
+const statusLabels: Record<string, string> = {
+  connected: '已连接',
+  disconnected: '未连接',
+  connecting: '连接中',
+  error: '错误',
+  installed: '已安装',
+  running: '运行中',
+  stopped: '已停止',
+}
 </script>
 
 <template>
@@ -25,6 +35,6 @@ defineProps<{
         'bg-foreground'
       ]"
     />
-    {{ status }}
+    {{ statusLabels[status] || status }}
   </span>
 </template>

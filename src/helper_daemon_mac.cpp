@@ -93,16 +93,22 @@ public:
     return written == static_cast<ssize_t>(payload.size());
   }
 
-  void close() override {
+  void close_client() override {
     if (client_fd_ >= 0) {
       ::close(client_fd_);
       client_fd_ = -1;
     }
+  }
+
+  void close() override {
+    close_client();
     if (server_fd_ >= 0) {
       ::close(server_fd_);
       server_fd_ = -1;
     }
   }
+
+  int server_fd() const override { return server_fd_; }
 
   unsigned int peer_uid() const override { return peer_uid_; }
   unsigned int peer_gid() const override { return peer_gid_; }

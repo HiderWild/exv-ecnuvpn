@@ -1,8 +1,23 @@
 #pragma once
 
 #include <sys/types.h>
+#include <cstdint>
+
+#ifdef _WIN32
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <windows.h>
+using uid_t = unsigned int;
+using gid_t = unsigned int;
+#endif
 
 #include <string>
+#include <vector>
 
 namespace ecnuvpn {
 namespace utils {
@@ -60,17 +75,39 @@ std::string read_file(const std::string &path);
 bool write_file(const std::string &path, const std::string &content);
 
 // System checks
-std::string get_openconnect_path();
-bool check_openconnect();
+std::string get_bundled_runtime_dir();
+std::string get_bundled_openconnect_path();
+std::string get_bundled_wintun_path();
+std::string get_bundled_tap_installer_path();
+std::string get_openconnect_path(const std::string &runtime_mode = "auto");
+bool check_openconnect(const std::string &runtime_mode = "auto");
 bool check_root();
 bool get_interface_traffic(const std::string &iface,
                             uint64_t *rx_bytes, uint64_t *tx_bytes);
 int run_command(const std::string &cmd);
 std::string run_command_output(const std::string &cmd);
 std::string shell_quote(const std::string &value);
+std::vector<std::string> split_lines(const std::string &text);
 
 // String utilities
 std::string trim(const std::string &s);
+
+// Windows console: enable ANSI escape code processing and UTF-8 codepage
+#ifdef _WIN32
+inline void enable_windows_ansi() {
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+  HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (hOut != INVALID_HANDLE_VALUE) {
+    DWORD mode = 0;
+    if (GetConsoleMode(hOut, &mode)) {
+      SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+  }
+}
+#else
+inline void enable_windows_ansi() {}
+#endif
 
 } // namespace utils
 } // namespace ecnuvpn

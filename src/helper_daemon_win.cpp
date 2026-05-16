@@ -1,7 +1,10 @@
 #include "helper_ipc.hpp"
+#include "logger.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
+#include <sddl.h>
+#include <vector>
 #endif
 
 namespace ecnuvpn {
@@ -10,10 +13,9 @@ namespace helper {
 class WinIpcServer : public IpcServer {
 #ifdef _WIN32
   HANDLE hPipe_ = INVALID_HANDLE_VALUE;
-  HANDLE hEvent_ = INVALID_HANDLE_VALUE;
+#endif
   unsigned int peer_uid_ = 0;
   unsigned int peer_gid_ = 0;
-#endif
 
 public:
   ~WinIpcServer() override { close(); }
@@ -22,7 +24,7 @@ public:
 #ifdef _WIN32
     hPipe_ = CreateNamedPipeA(
         path.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
         1, 65536, 65536, 0, NULL);
 
@@ -31,12 +33,6 @@ public:
       return false;
     }
 
-    hEvent_ = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (hEvent_ == INVALID_HANDLE_VALUE) {
-      CloseHandle(hPipe_);
-      hPipe_ = INVALID_HANDLE_VALUE;
-      return false;
-    }
     return true;
 #else
     (void)path;
@@ -46,15 +42,11 @@ public:
 
   bool accept_client() override {
 #ifdef _WIN32
-    OVERLAPPED ol = {};
-    ol.hEvent = hEvent_;
-    ResetEvent(hEvent_);
-
-    ConnectNamedPipe(hPipe_, &ol);
-
-    DWORD waitResult = WaitForSingleObject(hEvent_, INFINITE);
-    if (waitResult != WAIT_OBJECT_0) {
-      return false;
+    if (!ConnectNamedPipe(hPipe_, NULL)) {
+      DWORD err = GetLastError();
+      if (err != ERROR_PIPE_CONNECTED) {
+        return false;
+      }
     }
     return true;
 #else
@@ -70,17 +62,40 @@ public:
       return false;
     }
 
-    // Get the impersonated token and extract SID
+    // Get the impersonated token and extract user SID
     HANDLE hToken = NULL;
     if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken)) {
       RevertToSelf();
       return false;
     }
 
-    // For now, allow all local connections
-    // TODO: implement proper SID-based access check
-    peer_uid_ = 0;
-    peer_gid_ = 0;
+    // Get the user SID from the token
+    DWORD sid_size = 0;
+    GetTokenInformation(hToken, TokenUser, NULL, 0, &sid_size);
+    if (sid_size == 0) {
+      CloseHandle(hToken);
+      RevertToSelf();
+      return false;
+    }
+
+    std::vector<BYTE> sid_buf(sid_size);
+    TOKEN_USER *tu = reinterpret_cast<TOKEN_USER *>(sid_buf.data());
+    if (!GetTokenInformation(hToken, TokenUser, tu, sid_size, &sid_size)) {
+      CloseHandle(hToken);
+      RevertToSelf();
+      return false;
+    }
+
+    // Convert SID to a numeric hash for uid/gid (Windows has no uid/gid concept)
+    // Use the RID (Relative ID) from the SID as a pseudo-uid
+    PSID sid = tu->User.Sid;
+    SID_IDENTIFIER_AUTHORITY *auth = GetSidIdentifierAuthority(sid);
+    BYTE rid_count = *GetSidSubAuthorityCount(sid);
+    DWORD rid = rid_count > 0 ? *GetSidSubAuthority(sid, rid_count - 1) : 0;
+
+    // For Administrators group (RID 544), use uid=0; otherwise use the RID
+    peer_uid_ = (rid == 544) ? 0 : rid;
+    peer_gid_ = peer_uid_;
 
     CloseHandle(hToken);
     RevertToSelf();
@@ -126,10 +141,6 @@ public:
 
   void close() override {
 #ifdef _WIN32
-    if (hEvent_ != INVALID_HANDLE_VALUE) {
-      CloseHandle(hEvent_);
-      hEvent_ = INVALID_HANDLE_VALUE;
-    }
     if (hPipe_ != INVALID_HANDLE_VALUE) {
       CloseHandle(hPipe_);
       hPipe_ = INVALID_HANDLE_VALUE;

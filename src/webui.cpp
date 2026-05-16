@@ -8,14 +8,17 @@
 #include <nlohmann/json.hpp>
 #include <httplib.h>
 
-#include <sys/socket.h>
-#include <sys/un.h>
-
 #include <cerrno>
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#ifndef _WIN32
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
+#else
+#include <windows.h>
+#endif
 
 namespace ecnuvpn {
 namespace webui {
@@ -24,6 +27,11 @@ namespace {
 
 constexpr const char* kStaticDir = "webui/dist";
 constexpr const char* kHelperSocketPath = "/var/run/exv-helper.sock";
+#ifdef _WIN32
+constexpr const char* kStableInstallPath = "C:\\Program Files\\ECNU-VPN\\exv.exe";
+#else
+constexpr const char* kStableInstallPath = "/usr/local/bin/exv";
+#endif
 
 std::string mime_type(const std::string& path) {
     if (path.size() >= 5 && path.compare(path.size() - 5, 5, ".html") == 0)
@@ -84,6 +92,39 @@ void serve_static(const httplib::Request& req, httplib::Response& res) {
 }
 
 nlohmann::json send_helper_request(const nlohmann::json& request) {
+    std::string payload = request.dump();
+    payload.push_back('\n');
+    std::string raw;
+
+#ifdef _WIN32
+    // Windows: Named Pipe client. The pipe name uses the literal "\\.\pipe\exv-helper"
+    // form, so the C string only needs two backslashes followed by a single dot.
+    HANDLE hPipe = CreateFileA("\\\\.\\pipe\\exv-helper",
+                               GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                               OPEN_EXISTING, 0, NULL);
+    if (hPipe == INVALID_HANDLE_VALUE) {
+        return nlohmann::json{{"ok", false},
+                              {"message", "Helper daemon not available"}};
+    }
+
+    DWORD bytesWritten = 0;
+    if (!WriteFile(hPipe, payload.c_str(), static_cast<DWORD>(payload.size()),
+                   &bytesWritten, NULL) ||
+        bytesWritten != payload.size()) {
+        CloseHandle(hPipe);
+        return nlohmann::json{{"ok", false},
+                              {"message", "Failed to send helper request"}};
+    }
+
+    char buffer[1024];
+    DWORD bytesRead = 0;
+    while (ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        raw.append(buffer, bytesRead);
+        if (raw.find('\n') != std::string::npos) break;
+    }
+    CloseHandle(hPipe);
+#else
+    // POSIX: Unix domain socket
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         return nlohmann::json{{"ok", false},
@@ -101,8 +142,6 @@ nlohmann::json send_helper_request(const nlohmann::json& request) {
                               {"message", "Helper daemon not available"}};
     }
 
-    std::string payload = request.dump();
-    payload.push_back('\n');
     if (write(fd, payload.data(), payload.size()) !=
         static_cast<ssize_t>(payload.size())) {
         close(fd);
@@ -111,7 +150,6 @@ nlohmann::json send_helper_request(const nlohmann::json& request) {
     }
     shutdown(fd, SHUT_WR);
 
-    std::string raw;
     char buffer[1024];
     ssize_t n;
     while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
@@ -119,6 +157,7 @@ nlohmann::json send_helper_request(const nlohmann::json& request) {
         if (raw.find('\n') != std::string::npos) break;
     }
     close(fd);
+#endif
 
     auto nl = raw.find('\n');
     if (nl != std::string::npos) raw.resize(nl);
@@ -161,10 +200,15 @@ nlohmann::json build_frontend_status(const nlohmann::json& helper_resp,
 
 // Build auth config subset with frontend-friendly field names
 nlohmann::json build_auth_config(const Config& cfg) {
+    // The UI must not see the stored ciphertext OR a fake mask string
+    // (a previous version used 6 bullet characters which silently polluted
+    // the password field when the user kept typing). Instead we expose a
+    // password_stored boolean and always serialize an empty password.
     nlohmann::json j;
     j["server"] = cfg.server;
     j["username"] = cfg.username;
-    j["password"] = cfg.password.empty() ? "" : "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
+    j["password"] = "";
+    j["password_stored"] = !cfg.password.empty();
     j["user_agent"] = cfg.useragent;
     j["remember_password"] = cfg.remember_password;
     return j;
@@ -310,19 +354,6 @@ void WebUIServer::setup_routes() {
         res.set_content("{\"status\":\"disconnecting\"}", "application/json");
     });
 
-    // ── GET /api/config ─────────────────────────────────────────────
-    server_->Get("/api/config", [this](const httplib::Request&,
-                                        httplib::Response& res) {
-        Config cfg = config_mgr_.load();
-        nlohmann::json j = cfg;
-
-        // Mask password
-        if (!cfg.password.empty()) {
-            j["password"] = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
-        }
-
-        res.set_content(j.dump(), "application/json");
-    });
 
     // ── GET /api/config/auth ────────────────────────────────────────
     server_->Get("/api/config/auth", [this](const httplib::Request&,
@@ -344,27 +375,44 @@ void WebUIServer::setup_routes() {
             return;
         }
 
-        const std::string masked = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
+        auto respond_error = [&res](int status, const std::string& message) {
+            res.status = status;
+            nlohmann::json err{{"error", message}};
+            res.set_content(err.dump(), "application/json");
+        };
 
         // Map frontend field names to config keys
         if (body.contains("server") && body["server"].is_string()) {
-            config_api::config_set(config_mgr_, "server", body["server"].get<std::string>());
+            std::string err = config_api::config_set(
+                config_mgr_, "server", body["server"].get<std::string>());
+            if (!err.empty()) { respond_error(400, err); return; }
         }
         if (body.contains("username") && body["username"].is_string()) {
-            config_api::config_set(config_mgr_, "username", body["username"].get<std::string>());
+            std::string err = config_api::config_set(
+                config_mgr_, "username", body["username"].get<std::string>());
+            if (!err.empty()) { respond_error(400, err); return; }
+        }
+        // Update remember_password first so that a fresh enable also unlocks
+        // the subsequent password setter in the same request.
+        if (body.contains("remember_password") && body["remember_password"].is_boolean()) {
+            std::string err = config_api::config_set(
+                config_mgr_, "remember_password",
+                body["remember_password"].get<bool>() ? "true" : "false");
+            if (!err.empty()) { respond_error(400, err); return; }
         }
         if (body.contains("password") && body["password"].is_string()) {
             std::string pw = body["password"].get<std::string>();
-            if (pw != masked && !pw.empty()) {
-                config_api::config_set_password(config_mgr_, pw);
+            if (!pw.empty()) {
+                std::string err = config_api::config_set_password(config_mgr_, pw);
+                if (!err.empty()) { respond_error(400, err); return; }
             }
         }
         if (body.contains("user_agent") && body["user_agent"].is_string()) {
-            config_api::config_set(config_mgr_, "useragent", body["user_agent"].get<std::string>());
-        }
-        if (body.contains("remember_password") && body["remember_password"].is_boolean()) {
-            config_api::config_set(config_mgr_, "remember_password",
-                                   body["remember_password"].get<bool>() ? "true" : "false");
+            std::string value = body["user_agent"].get<std::string>();
+            if (!utils::trim(value).empty()) {
+                std::string err = config_api::config_set(config_mgr_, "useragent", value);
+                if (!err.empty()) { respond_error(400, err); return; }
+            }
         }
 
         Config updated = config_mgr_.load();
@@ -447,13 +495,11 @@ void WebUIServer::setup_routes() {
             return;
         }
 
-        const std::string masked = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
-
         for (auto it = body.begin(); it != body.end(); ++it) {
             std::string key = it.key();
             if (key == "password") {
                 std::string pw = it.value().get<std::string>();
-                if (pw != masked && !pw.empty()) {
+                if (!pw.empty()) {
                     std::string err =
                         config_api::config_set_password(config_mgr_, pw);
                     if (!err.empty()) {
@@ -500,15 +546,15 @@ void WebUIServer::setup_routes() {
             }
         }
 
+        // Always return a fresh snapshot with the password field stripped.
         Config updated = config_mgr_.load();
         nlohmann::json j = updated;
-        if (!updated.password.empty()) {
-            j["password"] = masked;
-        }
+        j["password"] = "";
+        j["password_stored"] = !updated.password.empty();
         res.set_content(j.dump(), "application/json");
     });
 
-    // ── POST /api/config/import ─────────────────────────────────────
+    // ── POST /api/config/import ──────────────────────────────────
     server_->Post("/api/config/import", [this](const httplib::Request& req,
                                                 httplib::Response& res) {
         std::string err = config_api::config_import(config_mgr_, req.body);
@@ -522,18 +568,20 @@ void WebUIServer::setup_routes() {
 
         Config cfg = config_mgr_.load();
         nlohmann::json j = cfg;
-        if (!cfg.password.empty()) {
-            j["password"] = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";
-        }
+        j["password"] = "";
+        j["password_stored"] = !cfg.password.empty();
         res.set_content(j.dump(), "application/json");
     });
 
-    // ── POST /api/config/reset ──────────────────────────────────────
+    // ── POST /api/config/reset ─────────────────────────────────
     server_->Post("/api/config/reset", [this](const httplib::Request&,
                                                httplib::Response& res) {
         config_api::config_reset(config_mgr_);
         Config cfg = config_mgr_.load();
-        res.set_content(nlohmann::json(cfg).dump(), "application/json");
+        nlohmann::json j = cfg;
+        j["password"] = "";
+        j["password_stored"] = false;
+        res.set_content(j.dump(), "application/json");
     });
 
     // ── GET /api/routes ─────────────────────────────────────────────
@@ -679,10 +727,18 @@ void WebUIServer::setup_routes() {
 #elif defined(__linux__)
         j["installed"] = utils::file_exists("/etc/systemd/system/exv-helper.service");
 #elif defined(_WIN32)
-        j["installed"] = false; // TODO: check Windows SCM for service existence
+    SC_HANDLE scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm) {
+      SC_HANDLE svc = OpenServiceA(scm, "exv-helper", SERVICE_QUERY_STATUS);
+      j["installed"] = (svc != NULL);
+      if (svc) CloseServiceHandle(svc);
+      CloseServiceHandle(scm);
+    } else {
+      j["installed"] = false;
+    }
 #endif
         j["running"] = available;
-        j["path"] = "/usr/local/bin/exv";
+        j["path"] = kStableInstallPath;
         j["available"] = available;
         res.set_content(j.dump(), "application/json");
     });
