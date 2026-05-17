@@ -1404,6 +1404,7 @@ nlohmann::json direct_status_json(const Config &cfg) {
   j["rx_bytes"] = 0;
   j["tx_bytes"] = 0;
   j["mode"] = connected ? "direct" : "disconnected";
+  j["log_path"] = cfg.log_file;
   virtual_network::add_status_fields(j, j.value("interface", std::string()));
   return j;
 }

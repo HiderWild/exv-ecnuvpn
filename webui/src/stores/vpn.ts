@@ -21,6 +21,7 @@ export interface VpnStatus {
   upstream_virtual_adapters: UpstreamVirtualAdapter[]
   upstream_virtual_message: string
   route_policy: string
+  log_path?: string
   mode?: 'helper' | 'direct' | 'elevated' | 'disconnected'
 }
 
@@ -62,6 +63,7 @@ export interface VpnError {
   message: string
   recoverable: boolean
   recommended_action: string
+  timestamp?: number
 }
 
 export function normalizeError(raw: unknown): VpnError {
@@ -75,6 +77,7 @@ export function normalizeError(raw: unknown): VpnError {
         message: String(obj.message || 'Operation failed'),
         recoverable: obj.recoverable !== undefined ? !!obj.recoverable : true,
         recommended_action: String(obj.recommended_action || ''),
+        timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : undefined,
       }
     }
     // If the error has ok:false with a message, wrap as native_failure
@@ -85,6 +88,7 @@ export function normalizeError(raw: unknown): VpnError {
         message: String(obj.message),
         recoverable: true,
         recommended_action: 'Retry the operation',
+        timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : undefined,
       }
     }
   }
@@ -126,6 +130,7 @@ export const useVpnStore = defineStore('vpn', () => {
   const lastErrorType = ref<VpnErrorType | null>(null)
   const lastRecoverable = ref(true)
   const lastRecommendedAction = ref('')
+  const lastErrorTime = ref<number | null>(null)
 
   // Derived state for service-first UX
   const serviceInstalled = computed(() => serviceStatus.value?.installed ?? false)
@@ -266,6 +271,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastErrorType.value = err.error_type
     lastRecoverable.value = err.recoverable
     lastRecommendedAction.value = err.recommended_action
+    lastErrorTime.value = Date.now()
   }
 
   function clearError() {
@@ -273,6 +279,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastErrorType.value = null
     lastRecoverable.value = true
     lastRecommendedAction.value = ''
+    lastErrorTime.value = null
   }
 
   async function fetchStatus() {
@@ -419,7 +426,7 @@ export const useVpnStore = defineStore('vpn', () => {
 
   return {
     status, loading, routes, logs, serviceStatus, lastError, lastErrorType,
-    lastRecoverable, lastRecommendedAction,
+    lastRecoverable, lastRecommendedAction, lastErrorTime,
     serviceInstalled, serviceRunning, canUseElevatedFallback,
     recommendedConnectMode, currentSessionMode,
     isDesktop, dashboardState, dashboardPrimaryAction, dashboardSecondaryAction,

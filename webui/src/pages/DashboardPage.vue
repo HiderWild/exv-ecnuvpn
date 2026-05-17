@@ -6,7 +6,7 @@ import { useSSE } from '../composables/useSSE'
 import StatusBadge from '../components/StatusBadge.vue'
 import {
   Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff, Route,
-  Shield, AlertTriangle, XCircle, AlertOctagon, Settings, RefreshCw
+  Shield, AlertTriangle, XCircle, AlertOctagon, Settings, RefreshCw, FileText
 } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
@@ -207,6 +207,13 @@ const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'erro
           <div class="min-w-0">
             <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
             <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
+            <router-link
+              :to="{ path: '/logs', query: { from: 'dashboard' } }"
+              class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
+            >
+              <FileText class="w-3 h-3" />
+              查看日志 →
+            </router-link>
           </div>
         </div>
         <div class="flex items-center gap-3">
@@ -235,6 +242,13 @@ const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'erro
           <div class="min-w-0">
             <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
             <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
+            <router-link
+              :to="{ path: '/logs', query: { from: 'dashboard' } }"
+              class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
+            >
+              <FileText class="w-3 h-3" />
+              查看日志 →
+            </router-link>
           </div>
         </div>
         <button
