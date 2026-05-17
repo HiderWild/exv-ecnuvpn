@@ -1410,7 +1410,7 @@ nlohmann::json direct_status_json(const Config &cfg) {
   return j;
 }
 
-nlohmann::json direct_stop_json() {
+nlohmann::json direct_stop_json(const Config &cfg) {
   if (!utils::check_root()) {
 #ifdef _WIN32
     return structured_error(kErrorElevationRequired,
@@ -1437,7 +1437,7 @@ nlohmann::json direct_stop_json() {
 
   if (pid <= 0 && supervisor_pid <= 0) {
     clear_runtime_state();
-    return nlohmann::json{{"ok", true}, {"message", "VPN was not running."}};
+    return direct_status_json(cfg);
   }
 
 #ifndef _WIN32
@@ -1475,7 +1475,7 @@ nlohmann::json direct_stop_json() {
   logger::info("VPN stopped via direct mode (PID " + std::to_string(pid) +
                ", supervisor PID " + std::to_string(supervisor_pid) + ")");
 
-  return nlohmann::json{{"ok", true}, {"message", "VPN stopped successfully."}};
+  return direct_status_json(cfg);
 }
 
 nlohmann::json direct_start_json(const Config &cfg,

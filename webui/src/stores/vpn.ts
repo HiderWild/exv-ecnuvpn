@@ -93,7 +93,7 @@ export function normalizeError(raw: unknown): VpnError {
   }
   // Final fallback for truly unexpected values — wrap as native_failure
   const msg = raw instanceof Error ? raw.message : (raw ? String(raw) : 'Unknown error')
-  return { ok: false, error_type: 'native_failure', message: msg, recoverable: true, recommended_action: 'Retry the operation' }
+  return { ok: false, error_type: 'native_failure', message: msg, recoverable: true, recommended_action: 'Retry the operation', timestamp: Date.now() }
 }
 
 export function isVpnError(data: unknown): data is VpnError {

@@ -618,7 +618,7 @@ nlohmann::json handle_action(const std::string &action,
 
       bool allow_direct = payload.value("allow_direct_fallback", false);
       if (allow_direct) {
-        auto result = vpn::direct_stop_json();
+        auto result = vpn::direct_stop_json(cfg);
         if (result.value("ok", false)) {
           result["mode"] = "direct";
           result["connected"] = false;
@@ -657,7 +657,7 @@ nlohmann::json handle_action(const std::string &action,
     }
 
     if (action == "vpn.disconnect.direct") {
-      auto result = vpn::direct_stop_json();
+      auto result = vpn::direct_stop_json(cfg);
       // Tag mode on success responses
       if (result.value("ok", false)) {
         result["mode"] = "direct";

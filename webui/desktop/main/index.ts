@@ -314,6 +314,10 @@ ipcMain.handle('ecnu-vpn:vpn-command', async (_event, command: string, payload: 
     if (elevatedResult && typeof elevatedResult === 'object' && 'error_type' in elevatedResult) {
       return elevatedResult
     }
+    // Tag the result as elevated mode so the UI can distinguish it from direct
+    if (elevatedResult && typeof elevatedResult === 'object' && !('error_type' in elevatedResult)) {
+      ;(elevatedResult as Record<string, unknown>).mode = 'elevated'
+    }
     return elevatedResult
   } catch (err: unknown) {
     // PowerShell Start-Process -Verb RunAs throws when the user cancels UAC.

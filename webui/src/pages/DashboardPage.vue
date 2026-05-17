@@ -144,21 +144,6 @@ function handlePrimaryAction() {
   action.action()
 }
 
-// Secondary action handler
-function handleSecondaryAction() {
-  const action = vpn.dashboardSecondaryAction
-  if (!action) return
-
-  const state = dashboardState.value
-  // Direct/elevated connected "install service" navigates to /service
-  if (state === 'direct connected' || state === 'elevated connected') {
-    router.push('/service')
-    return
-  }
-
-  action.action()
-}
-
 // Status badge state derived from dashboard state
 const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'error'>(() => {
   const state = dashboardState.value
@@ -207,6 +192,7 @@ const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'erro
           <div class="min-w-0">
             <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
             <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
+            <p v-if="vpn.lastRecommendedAction" class="mt-1 opacity-80 leading-5">{{ vpn.lastRecommendedAction }}</p>
             <router-link
               :to="{ path: '/logs', query: { from: 'dashboard' } }"
               class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
@@ -242,6 +228,7 @@ const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'erro
           <div class="min-w-0">
             <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
             <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
+            <p v-if="vpn.lastRecommendedAction" class="mt-1 opacity-80 leading-5">{{ vpn.lastRecommendedAction }}</p>
             <router-link
               :to="{ path: '/logs', query: { from: 'dashboard' } }"
               class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
