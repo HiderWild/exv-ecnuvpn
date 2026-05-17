@@ -114,6 +114,10 @@ void remove_file_if_exists(const std::string &path) {
 }
 
 bool prompt_confirm(const std::string &question, bool default_yes) {
+  // When stdin is not a TTY (e.g. osascript elevation), auto-confirm.
+  // The user already authorized via the macOS admin dialog.
+  if (!isatty(STDIN_FILENO))
+    return true;
   std::cout << "  " << question << (default_yes ? " [Y/n]: " : " [y/N]: ");
   std::string input;
   std::getline(std::cin, input);
@@ -917,6 +921,9 @@ nlohmann::json handle_status(uid_t peer_uid) {
 
   RuntimeSnapshot snapshot = inspect_runtime(state);
   if (!snapshot.running) {
+#ifndef _WIN32
+    tunnel::cleanup_routes();
+#endif
     clear_runtime_state(state);
     clear_session_state();
     return nlohmann::json{{"ok", true}, {"running", false}};
@@ -1450,6 +1457,11 @@ int install_service(const std::string &executable_path) {
 
   bool helper_ready = wait_until_available(50, 100000);
 
+  // Fix config directory ownership: the install process ran as root and may
+  // have created/modified ~/.ecnuvpn/ with root ownership. Restore it to the
+  // invoking user so the desktop app can read/write config normally.
+  utils::fix_config_dir_ownership();
+
   utils::print_success("EXV helper service installed.");
   if (!helper_ready) {
     utils::print_warning(
@@ -1590,6 +1602,10 @@ int uninstall_service() {
   nlohmann::json response;
   std::string error_message;
   send_request(nlohmann::json{{"action", "stop"}}, &response, &error_message);
+
+  // Belt-and-suspenders: clean up routes even if helper stop failed
+  tunnel::cleanup_routes();
+  kill_all_supervisors();
 
   utils::run_command(std::string("launchctl bootout system ") + kHelperPlistPath +
                      " >/dev/null 2>&1");
@@ -1807,9 +1823,6 @@ int daemon_main() {
     unsigned int peer_uid = ipc->peer_uid();
     unsigned int peer_gid = ipc->peer_gid();
 
-    // DEBUG: log request handling
-    { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "parent: accepted client, raw='" << raw << "' uid=" << peer_uid << std::endl; }
-
 #ifdef _WIN32
     // Windows: use threads instead of fork (no fork available)
     // Each request is processed in a background thread so long-running
@@ -1828,7 +1841,6 @@ int daemon_main() {
 #else
     // POSIX: fork a child to handle the request
     pid_t handler_pid = fork();
-    { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "parent: forked handler_pid=" << handler_pid << std::endl; }
     if (handler_pid < 0) {
       nlohmann::json response =
           make_error("Failed to launch EXV helper request handler.");
@@ -1850,9 +1862,7 @@ int daemon_main() {
       } catch (...) {
         response = make_error("Failed to parse helper request.");
       }
-      { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "child: sending response, size=" << response.dump().size() << std::endl; }
       bool sent = ipc->send_response(response.dump());
-      { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "child: send_response returned " << sent << std::endl; }
       _exit(0);
     }
 
@@ -1863,7 +1873,6 @@ int daemon_main() {
     int status = 0;
     while (waitpid(handler_pid, &status, 0) < 0 && errno == EINTR)
       ;
-    { std::ofstream dbg("/tmp/exv-debug.log", std::ios::app); dbg << "parent: waitpid returned, status=" << status << std::endl; }
     ipc->close_client();
 #endif
   }

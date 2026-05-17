@@ -48,7 +48,8 @@ async function save() {
   try {
     // Always send the form values; the backend treats an empty password as
     // "keep the existing one" and an empty user_agent as "no change".
-    await config.saveAuthConfig(form.value)
+    // Use spread to strip Vue reactive proxy — Electron IPC cannot clone proxies.
+    await config.saveAuthConfig({ ...form.value })
     form.value.password = ''
     form.value.password_stored = config.authConfig.password_stored ?? form.value.password_stored
     message.value = { type: 'success', text: '认证设置已保存' }

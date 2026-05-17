@@ -366,6 +366,43 @@ bool file_exists(const std::string &path) {
 #endif
 }
 
+bool fix_config_dir_ownership() {
+  std::string dir = get_config_dir();
+  if (dir.empty() || !file_exists(dir))
+    return true;
+
+#ifndef _WIN32
+  struct stat st;
+  if (stat(dir.c_str(), &st) != 0)
+    return false;
+
+  // When running as root (sudo/osascript), getuid() returns 0 which is wrong.
+  // Derive the real user from the home directory's owner instead.
+  uid_t expected_uid = getuid();
+  if (expected_uid == 0) {
+    std::string home = get_effective_home();
+    if (!home.empty()) {
+      struct stat home_st;
+      if (stat(home.c_str(), &home_st) == 0)
+        expected_uid = home_st.st_uid;
+    }
+  }
+
+  if (st.st_uid == expected_uid)
+    return true;
+
+  if (chown(dir.c_str(), expected_uid, static_cast<gid_t>(-1)) != 0)
+    return false;
+
+  for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+    chown(entry.path().c_str(), expected_uid, static_cast<gid_t>(-1));
+  }
+  return true;
+#else
+  return true;
+#endif
+}
+
 bool ensure_dir(const std::string &path) {
 #ifndef _WIN32
   struct stat st;

@@ -32,3 +32,16 @@ Recommended macOS contents:
 
 - `openconnect`
 - required `.dylib` dependencies adjacent to the binary
+
+macOS staging example (Homebrew openconnect):
+
+```bash
+# Stage from Homebrew prefix (auto-detects arch)
+./scripts/stage-openconnect-runtime-mac.sh /opt/homebrew/bin arm64
+# or for Intel Macs:
+./scripts/stage-openconnect-runtime-mac.sh /usr/local/bin x64
+```
+
+The script copies `openconnect` and all adjacent `.dylib` files into
+`runtime/darwin-$ARCH/`. `prepare-native.cjs` then bundles these into
+the Electron app's `extraResources/bin/` directory.

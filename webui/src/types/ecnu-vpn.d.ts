@@ -1,6 +1,6 @@
 import type {
   AuthConfig,
-  DriverStatus,
+  HelperStatus,
   KeyStatus,
   RuntimeStatus,
   SettingsConfig,
@@ -11,6 +11,27 @@ import type {
   ServiceStatus,
   VpnStatus,
 } from '../stores/vpn'
+
+export type SessionMode = 'helper' | 'direct' | 'elevated' | 'disconnected'
+
+export type VpnErrorType =
+  | 'elevation_denied'
+  | 'runtime_missing'
+  | 'config_missing'
+  | 'helper_missing'
+  | 'helper_unavailable'
+  | 'cleanup_failed'
+  | 'cleanup_pending'
+  | 'connect_failed'
+  | 'disconnect_failed'
+  | 'unknown'
+
+export interface VpnError {
+  type: VpnErrorType
+  message: string
+  recoverable: boolean
+  recovery_hint?: string
+}
 
 export interface EcnuVpnEvent {
   type: 'log' | 'status' | 'heartbeat'
@@ -23,6 +44,7 @@ export interface EcnuVpnApi {
   }
   vpn: {
     connect(password?: string): Promise<VpnStatus | { status: 'connecting' }>
+    connectElevated(password?: string): Promise<VpnStatus | { status: 'connecting' }>
     disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
   }
   config: {
@@ -49,9 +71,8 @@ export interface EcnuVpnApi {
   runtime: {
     status(): Promise<RuntimeStatus>
   }
-  drivers: {
-    status(): Promise<DriverStatus>
-    install(driver: 'wintun' | 'tap'): Promise<DriverStatus>
+  helper: {
+    status(): Promise<HelperStatus>
   }
   events: {
     subscribe(handler: (event: EcnuVpnEvent) => void): () => void

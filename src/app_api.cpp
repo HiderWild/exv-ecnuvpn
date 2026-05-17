@@ -7,6 +7,7 @@
 #include "helper.hpp"
 #include "logger.hpp"
 #include "utils.hpp"
+#include "vpn.hpp"
 #include "virtual_network.hpp"
 
 #include <algorithm>
@@ -17,7 +18,10 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <cerrno>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #else
@@ -133,7 +137,8 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
 nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
                                            const Config &cfg) {
   nlohmann::json j;
-  j["connected"] = helper_resp.value("running", false);
+  bool running = helper_resp.value("running", false);
+  j["connected"] = running;
   j["server"] = helper_resp.value("server", cfg.server);
   j["username"] = cfg.username;
   j["pid"] = helper_resp.value("pid", -1);
@@ -148,11 +153,19 @@ nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
   j["rx_bytes"] = helper_resp.value("rx_bytes", 0);
   j["tx_bytes"] = helper_resp.value("tx_bytes", 0);
   virtual_network::add_status_fields(j, j.value("interface", std::string()));
+
+  // Session mode: helper-connected sessions are "helper" mode
+  j["session_mode"] = running ? "helper" : "disconnected";
+  j["cleanup_pending"] = false;
+
   return j;
 }
 
 nlohmann::json disconnected_status(const Config &cfg) {
-  return frontend_status_from_helper(nlohmann::json{{"running", false}}, cfg);
+  auto j = frontend_status_from_helper(nlohmann::json{{"running", false}}, cfg);
+  j["session_mode"] = "disconnected";
+  j["cleanup_pending"] = false;
+  return j;
 }
 
 nlohmann::json auth_config(const Config &cfg) {
@@ -175,16 +188,23 @@ nlohmann::json settings_config(const Config &cfg) {
     extra_args += cfg.extra_args[i];
   }
 
-  return nlohmann::json{{"mtu", cfg.mtu},
-                        {"dtls", !cfg.disable_dtls},
-                        {"extra_args", extra_args},
-                        {"log_path", cfg.log_file},
-                        {"webui_port", cfg.webui_port},
-                        {"webui_host", cfg.webui_bind},
-                        {"webui_enabled", cfg.webui_enabled},
-                        {"openconnect_runtime", cfg.openconnect_runtime},
-                        {"windows_tunnel_driver", cfg.windows_tunnel_driver},
-                        {"windows_tap_interface", cfg.windows_tap_interface}};
+  nlohmann::json j{
+      {"mtu", cfg.mtu},
+      {"dtls", !cfg.disable_dtls},
+      {"extra_args", extra_args},
+      {"log_path", cfg.log_file},
+      {"webui_port", cfg.webui_port},
+      {"webui_host", cfg.webui_bind},
+      {"webui_enabled", cfg.webui_enabled},
+      {"openconnect_runtime", cfg.openconnect_runtime},
+  };
+
+#ifdef _WIN32
+  j["windows_tunnel_driver"] = cfg.windows_tunnel_driver;
+  j["windows_tap_interface"] = cfg.windows_tap_interface;
+#endif
+
+  return j;
 }
 
 nlohmann::json routes_json(const Config &cfg) {
@@ -204,18 +224,21 @@ nlohmann::json key_status_json() {
                         {"status", status}};
 }
 
-nlohmann::json service_status_json() {
+nlohmann::json helper_status_json() {
   bool available = helper::is_available();
   nlohmann::json j;
 #ifdef __APPLE__
   j["installed"] =
       utils::file_exists("/Library/LaunchDaemons/com.ecnu.exv.helper.plist");
-  j["path"] = "/usr/local/bin/exv";
+  j["socket_path"] = "/var/run/exv-helper.sock";
+  j["label"] = "com.ecnu.exv.helper";
 #elif defined(__linux__)
   j["installed"] = utils::file_exists("/etc/systemd/system/exv-helper.service");
-  j["path"] = "/usr/local/bin/exv";
+  j["socket_path"] = "/var/run/exv-helper.sock";
+  j["label"] = "exv-helper";
 #elif defined(_WIN32)
-  j["path"] = "C:\\Program Files\\ECNU-VPN\\exv.exe";
+  j["socket_path"] = "\\\\.\pipe\\exv-helper";
+  j["label"] = "exv-helper";
   SC_HANDLE scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
   if (scm) {
     SC_HANDLE svc = OpenServiceA(scm, "exv-helper", SERVICE_QUERY_STATUS);
@@ -398,17 +421,23 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password)
   if (password.empty())
     return error("VPN password is not configured.");
 
+  nlohmann::json runtime = runtime_status_json(cfg);
+  if (!runtime.value("available", false)) {
+    return error("OpenConnect runtime is not available. The desktop bundle is missing openconnect and its native dependencies.");
+  }
+
   if (!helper::is_available()) {
-#ifdef _WIN32
+#ifdef __APPLE__
+    // On macOS, the Electron main process can use osascript to run
+    // vpn.connect with administrator privileges as a fallback.
+    return nlohmann::json{{"ok", false},
+                          {"error", "helper_missing"},
+                          {"message", "Helper daemon is not available. The desktop app can connect via one-time administrator authorization, or install the helper service for persistent connections."}};
+#elif defined(_WIN32)
     return error("Helper daemon is not available. Install the helper service from Settings or run 'exv service install' as Administrator.");
 #else
     return error("Helper daemon is not available. Install the helper service before starting the desktop client.");
 #endif
-  }
-
-  nlohmann::json runtime = runtime_status_json(cfg);
-  if (!runtime.value("available", false)) {
-    return error("OpenConnect runtime is not available. The desktop bundle is missing openconnect and its native dependencies.");
   }
 
 #ifdef _WIN32
@@ -472,6 +501,44 @@ nlohmann::json handle_action(const std::string &action,
       auto helper_resp = send_helper_request({{"action", "status"}});
       if (!helper_resp.value("ok", false) &&
           helper_resp.value("message", "") == "Helper daemon not available") {
+        // Helper unavailable — check if an elevated direct-mode VPN is running
+        // by probing the PID file and route-ready marker.
+        std::string pid_str = utils::trim(utils::read_file(utils::get_pid_path()));
+        pid_t vpn_pid = -1;
+        try { vpn_pid = std::stoi(pid_str); } catch (...) {}
+        bool alive = false;
+        if (vpn_pid > 0) {
+#ifndef _WIN32
+          alive = (kill(vpn_pid, 0) == 0 || errno == EPERM);
+#else
+          HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 static_cast<DWORD>(vpn_pid));
+          if (h) {
+            DWORD exitCode = 0;
+            alive = GetExitCodeProcess(h, &exitCode) && exitCode == STILL_ACTIVE;
+            CloseHandle(h);
+          }
+#endif
+        }
+        if (alive) {
+          std::string ready_path = utils::get_route_ready_path();
+          std::string iface, ip;
+          if (utils::file_exists(ready_path)) {
+            std::istringstream iss(utils::read_file(ready_path));
+            std::string line;
+            if (std::getline(iss, line)) iface = utils::trim(line);
+            if (std::getline(iss, line)) ip = utils::trim(line);
+          }
+          nlohmann::json j = disconnected_status(cfg);
+          j["connected"] = true;
+          j["pid"] = vpn_pid;
+          j["interface"] = iface;
+          j["internal_ip"] = ip;
+          j["network_ready"] = !iface.empty();
+          j["session_mode"] = "elevated";
+          virtual_network::add_status_fields(j, iface);
+          return j;
+        }
         return disconnected_status(cfg);
       }
       return frontend_status_from_helper(helper_resp, cfg);
@@ -484,6 +551,42 @@ nlohmann::json handle_action(const std::string &action,
         if (!key.empty())
           password = crypto::decrypt(cfg.password, key);
       }
+
+      // When running as root (elevated via osascript), bypass the helper
+      // and connect directly — the helper is not needed with root privileges.
+      if (!helper::is_available() && utils::check_root()) {
+        if (cfg.server.empty())
+          return error("VPN server is not configured.");
+        if (cfg.username.empty())
+          return error("VPN username is not configured.");
+        if (password.empty())
+          return error("VPN password is not configured.");
+        nlohmann::json runtime = runtime_status_json(cfg);
+        if (!runtime.value("available", false))
+          return error("OpenConnect runtime is not available. The desktop bundle is missing openconnect and its native dependencies.");
+
+        // Set runtime owner so files written as root are chowned to the
+        // real user (derived from the home directory's owner).
+        std::string home = utils::get_effective_home();
+        if (!home.empty()) {
+          struct stat home_st;
+          if (stat(home.c_str(), &home_st) == 0) {
+            utils::set_runtime_owner(home_st.st_uid, home_st.st_gid);
+            utils::set_runtime_path_override(home, utils::get_config_dir());
+          }
+        }
+        utils::fix_config_dir_ownership();
+
+        int rc = vpn::start_with_password(cfg, password, 0);
+        if (rc != 0)
+          return error("Failed to start VPN (elevated direct mode).");
+
+        nlohmann::json result = disconnected_status(cfg);
+        result["connected"] = true;
+        result["session_mode"] = "elevated";
+        return result;
+      }
+
       nlohmann::json preflight = preflight_connect(cfg, password);
       if (preflight.is_object() && preflight.value("ok", true) == false)
         return preflight;
@@ -594,6 +697,7 @@ nlohmann::json handle_action(const std::string &action,
                                payload["openconnect_runtime"].get<std::string>());
         if (!err.empty()) return error(err);
       }
+#ifdef _WIN32
       if (payload.contains("windows_tunnel_driver") &&
           payload["windows_tunnel_driver"].is_string()) {
         std::string err = config_api::config_set(mgr, "windows_tunnel_driver",
@@ -606,6 +710,7 @@ nlohmann::json handle_action(const std::string &action,
                                payload["windows_tap_interface"].get<std::string>());
         if (!err.empty()) return error(err);
       }
+#endif
       return settings_config(mgr.load());
     }
 
@@ -635,16 +740,13 @@ nlohmann::json handle_action(const std::string &action,
     }
 
     if (action == "service.status")
-      return service_status_json();
+      return helper_status_json();
+
+    if (action == "helper.status")
+      return helper_status_json();
 
     if (action == "runtime.status")
       return runtime_status_json(cfg);
-
-    if (action == "drivers.status")
-      return driver_status_json(cfg);
-
-    if (action == "drivers.install")
-      return install_driver(cfg, payload);
 
     if (action == "logs.list")
       return logs_json(payload);

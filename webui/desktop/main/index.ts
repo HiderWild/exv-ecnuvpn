@@ -23,8 +23,7 @@ const validRpcActions = new Set([
   'routes.reset',
   'service.status',
   'runtime.status',
-  'drivers.status',
-  'drivers.install',
+  'helper.status',
   'logs.list',
 ])
 
@@ -32,6 +31,7 @@ let mainWindow: BrowserWindow | null = null
 let statusTimer: NodeJS.Timeout | null = null
 let logTimer: NodeJS.Timeout | null = null
 let seenLogCount = 0
+let cleanupPending = false
 
 function rendererUrl() {
   return process.env.VITE_DEV_SERVER_URL
@@ -155,10 +155,15 @@ async function runServiceCommandElevated(command: 'install' | 'uninstall') {
 
   if (process.platform === 'darwin') {
     const cmd = `${shellQuote(exv)} service ${command}`
-    await execFileAsync('osascript', [
-      '-e',
-      `do shell script ${JSON.stringify(cmd)} with administrator privileges`,
-    ])
+    try {
+      await execFileAsync('osascript', [
+        '-e',
+        `do shell script ${JSON.stringify(cmd)} with administrator privileges`,
+      ])
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      throw new Error(msg)
+    }
     return
   }
 
@@ -184,6 +189,24 @@ async function runDesktopRpcElevated(action: string, payload: unknown, followupA
       '-Command',
       ps,
     ], { windowsHide: true })
+    return runDesktopRpc(followupAction)
+  }
+
+  if (process.platform === 'darwin') {
+    const args = ['desktop-rpc', action, JSON.stringify(payload ?? {})]
+    const cmd = args.map((a) => shellQuote(a)).join(' ')
+    try {
+      await execFileAsync('osascript', [
+        '-e',
+        `do shell script ${JSON.stringify(`${shellQuote(exv)} ${cmd}`)} with administrator privileges`,
+      ])
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (msg.includes('User canceled') || msg.includes('not allowed')) {
+        throw new Error('elevation_denied: User canceled administrator authorization')
+      }
+      throw error
+    }
     return runDesktopRpc(followupAction)
   }
 
@@ -223,6 +246,9 @@ function startEventPump() {
     if (!mainWindow || mainWindow.isDestroyed()) return
     try {
       const status = await runDesktopRpc('status.get')
+      // Inject cleanup_pending flag: set during disconnect until status shows disconnected
+      status.cleanup_pending = cleanupPending
+      if (status.connected === false) cleanupPending = false
       mainWindow.webContents.send('ecnu-vpn:event', { type: 'status', data: status })
       mainWindow.webContents.send('ecnu-vpn:event', { type: 'heartbeat', data: {} })
     } catch {
@@ -255,6 +281,7 @@ function stopEventPump() {
 }
 
 ipcMain.handle('ecnu-vpn:rpc', async (_event, action: string, payload?: unknown) => {
+  if (action === 'vpn.disconnect') cleanupPending = true
   return runDesktopRpc(action, payload)
 })
 
@@ -263,8 +290,14 @@ ipcMain.handle('ecnu-vpn:service-command', async (_event, command: 'install' | '
   return runDesktopRpc('service.status')
 })
 
-ipcMain.handle('ecnu-vpn:driver-install', async (_event, driver: 'wintun' | 'tap') => {
-  return runDesktopRpcElevated('drivers.install', { driver }, 'drivers.status')
+ipcMain.handle('ecnu-vpn:connect-elevated', async (_event, payload?: unknown) => {
+  const result = await runDesktopRpcElevated('vpn.connect', payload, 'status.get')
+  // Mark the session as "elevated" so the frontend can distinguish
+  // one-time osascript-authorized connections from helper-managed ones.
+  if (result && typeof result === 'object' && result.connected) {
+    result.session_mode = 'elevated'
+  }
+  return result
 })
 
 app.whenReady().then(createWindow)

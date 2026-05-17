@@ -23,8 +23,14 @@ export interface SettingsConfig {
   webui_host: string
   webui_enabled: boolean
   openconnect_runtime: 'bundled' | 'system' | 'auto'
-  windows_tunnel_driver: 'auto' | 'wintun' | 'tap'
-  windows_tap_interface: string
+}
+
+export interface HelperStatus {
+  installed: boolean
+  running: boolean
+  available: boolean
+  socket_path: string
+  label: string
 }
 
 export interface KeyStatus {
@@ -42,22 +48,6 @@ export interface RuntimeStatus {
   system_path: string
   version: string
   bundled_runtime_dir: string
-  wintun_path?: string
-  tap_installer_path?: string
-}
-
-export interface DriverStatus {
-  preferred: 'auto' | 'wintun' | 'tap'
-  tap_interface: string
-  supported: boolean
-  effective_driver?: 'wintun' | 'tap'
-  wintun_bundled?: boolean
-  wintun_path?: string
-  wintun_adapters?: string[]
-  tap_installer_path?: string
-  tap_can_install?: boolean
-  tap_adapters?: string[]
-  tap_available?: boolean
 }
 
 export const useConfigStore = defineStore('config', () => {
@@ -79,13 +69,11 @@ export const useConfigStore = defineStore('config', () => {
     webui_host: '127.0.0.1',
     webui_enabled: true,
     openconnect_runtime: 'bundled',
-    windows_tunnel_driver: 'auto',
-    windows_tap_interface: '',
   })
 
   const keyStatus = ref<KeyStatus>({ present: false, fingerprint: null, status: 'missing' })
   const runtimeStatus = ref<RuntimeStatus | null>(null)
-  const driverStatus = ref<DriverStatus | null>(null)
+  const helperStatus = ref<HelperStatus | null>(null)
 
   async function fetchAuthConfig() {
     try {
@@ -123,21 +111,16 @@ export const useConfigStore = defineStore('config', () => {
     runtimeStatus.value = data
   }
 
-  async function fetchDriverStatus() {
-    const { data } = await api.get<DriverStatus>('/drivers')
-    driverStatus.value = data
-  }
-
-  async function installDriver(driver: 'wintun' | 'tap') {
-    const { data } = await api.post<DriverStatus>('/drivers/install', { driver })
-    driverStatus.value = data
+  async function fetchHelperStatus() {
+    const { data } = await api.get<HelperStatus>('/helper')
+    helperStatus.value = data
   }
 
   return {
-    authConfig, settings, keyStatus, runtimeStatus, driverStatus,
+    authConfig, settings, keyStatus, runtimeStatus, helperStatus,
     fetchAuthConfig, saveAuthConfig,
     fetchSettings, saveSettings,
     fetchKeyStatus,
-    fetchRuntimeStatus, fetchDriverStatus, installDriver,
+    fetchRuntimeStatus, fetchHelperStatus,
   }
 })

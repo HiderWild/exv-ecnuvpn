@@ -15,12 +15,14 @@
 ## 功能特性
 
 - **分流路由** — 仅校园网流量走 VPN，其余走本地网络
+- **桌面端图形界面** — Electron 桌面应用，连接/断开/配置/状态一览无余
 - **加密凭据存储** — AES-256-CBC 加密密码，密钥权限 0600
 - **免 sudo 日常使用** — launchd root helper，安装一次后无需再输 sudo
-- **WebUI 管理界面** — 浏览器实时查看状态、编辑配置、查看日志
+- **一次性授权连接** — 未安装 helper 时，通过管理员授权完成临时连接
 - **自动重连** — 断线后自动恢复连接
 - **路由自定义** — 随时添加/删除分流路由
 - **VPN 服务器路由保护** — 自动防止 VPN 服务器自身流量被隧道吞没
+- **浏览器 WebUI（兼容模式）** — 保留浏览器入口以兼容旧版
 
 ## 安装
 
@@ -106,9 +108,14 @@ The bundled `bin/` directory contains `exv.exe`, the MinGW runtime DLLs, `openco
 
 ### Desktop UI (Electron)
 
-The Vue UI can also run as a desktop application without opening the browser.
-The desktop shell talks to the native `exv desktop-rpc` JSON interface through
-Electron IPC and keeps the existing CLI/helper service model intact.
+The desktop app is the recommended interface on macOS. The Electron shell
+communicates with the native binary via `exv desktop-rpc` JSON interface
+through preload IPC, so the renderer does not depend on the browser WebUI.
+
+On macOS, the desktop app supports:
+- **Helper service connection** — After installing the launchd helper, connect/disconnect is managed by the daemon
+- **One-time elevated connection** — Without the helper, connect via osascript administrator authorization
+- **Route cleanup status** — Shows cleanup progress on disconnect, ensuring no stale routes remain
 
 ```bash
 cd webui
@@ -127,6 +134,8 @@ For development, build the native binary first or set `EXV_PATH` to an existing
 cd webui
 npm run desktop:dev
 ```
+
+The browser WebUI is retained as a compatibility entry point, enabled via `exv -f` in foreground mode.
 
 ## 快速开始
 
@@ -155,7 +164,7 @@ exv stop
 
 | 命令 | 说明 |
 |------|------|
-| `exv` | 启动 VPN（含 WebUI） |
+| `exv` | 启动 VPN（桌面端） |
 | `exv stop` / `exv -s` | 停止 VPN |
 | `exv status` / `exv -t` | 查看 VPN 状态与网络接口 |
 
@@ -212,7 +221,7 @@ exv config routes remove 10.0.0.0/8
 
 ### WebUI
 
-VPN 启动后自动在后台运行 WebUI，默认地址 `http://127.0.0.1:18080/`，提供：
+VPN 启动后自动打开桌面端界面（macOS 默认）。浏览器 WebUI 可通过 `-f` 前台模式启用，默认地址 `http://127.0.0.1:18080/`，提供：
 
 - 实时 VPN 状态与流量监控
 - 配置在线编辑
@@ -309,7 +318,7 @@ exv config routes add 202.120.96.0/19
     "log_file": "~/.ecnuvpn/ecnuvpn.log",
     "webui_port": 18080,
     "webui_bind": "127.0.0.1",
-    "webui_enabled": true
+    "webui_enabled": false,
 }
 ```
 

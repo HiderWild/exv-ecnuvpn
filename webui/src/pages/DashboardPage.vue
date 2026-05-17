@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { useVpnStore } from '../stores/vpn'
+import { useVpnStore, type DashboardState } from '../stores/vpn'
+import { useConfigStore } from '../stores/config'
 import { useSSE } from '../composables/useSSE'
 import StatusBadge from '../components/StatusBadge.vue'
 import {
-  Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff, Route
+  Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff, Route, ShieldCheck, ShieldAlert, AlertTriangle
 } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
+const config = useConfigStore()
 const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
 
 const elapsed = ref(0)
@@ -15,6 +17,7 @@ let timer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   vpn.fetchStatus()
+  config.fetchHelperStatus()
   sseConnect()
   timer = setInterval(() => {
     if (vpn.status?.connected) elapsed.value++
@@ -46,6 +49,35 @@ const upstreamVirtualNames = computed(() => {
   const adapters = vpn.status?.upstream_virtual_adapters || []
   return adapters.map((adapter) => adapter.name).filter(Boolean).join('、')
 })
+
+const badgeStatus = computed(() => {
+  const state = vpn.dashboardState
+  if (state === 'helper_connected') return 'connected'
+  if (state === 'direct_connected') return 'elevated'
+  if (state === 'elevated_connecting') return 'connecting'
+  if (state === 'cleanup_pending') return 'cleanup_pending'
+  if (state === 'authorization_denied') return 'error'
+  if (state === 'runtime_missing') return 'error'
+  return 'disconnected'
+})
+
+const badgeLabel = computed(() => {
+  const state = vpn.dashboardState
+  const labels: Record<DashboardState, string> = {
+    helper_ready: '辅助服务就绪',
+    helper_missing: '辅助服务未安装',
+    elevated_connecting: '授权连接中...',
+    direct_connected: '临时连接',
+    helper_connected: '已连接',
+    cleanup_pending: '正在清理路由...',
+    runtime_missing: '运行时缺失',
+    authorization_denied: '授权被拒绝',
+    disconnected: '未连接',
+  }
+  return labels[state] || '未连接'
+})
+
+const isTemporarySession = computed(() => vpn.sessionMode === 'elevated' || vpn.sessionMode === 'direct')
 </script>
 
 <template>
@@ -59,11 +91,50 @@ const upstreamVirtualNames = computed(() => {
             {{ vpn.status?.server || '未配置' }}
           </p>
         </div>
-        <StatusBadge
-          :status="vpn.status?.connected ? 'connected' : 'disconnected'"
-        />
+        <StatusBadge :status="badgeStatus" />
       </div>
 
+      <!-- Temporary session warning -->
+      <div
+        v-if="isTemporarySession && vpn.status?.connected"
+        class="mb-4 flex items-start gap-3 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-300"
+      >
+        <ShieldAlert class="mt-0.5 h-4 w-4 shrink-0" />
+        <div>
+          <p class="leading-5 font-medium">临时连接模式</p>
+          <p class="text-xs opacity-80 mt-1">
+            当前通过一次性管理员授权连接。安装 launchd 辅助服务后，连接将由守护进程自动管理，无需每次授权。
+          </p>
+        </div>
+      </div>
+
+      <!-- Cleanup pending notice -->
+      <div
+        v-if="vpn.cleanupPending"
+        class="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
+      >
+        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 animate-pulse" />
+        <div>
+          <p class="leading-5 font-medium">正在清理路由...</p>
+          <p class="text-xs opacity-80 mt-1">断开连接后正在清理临时路由，请勿关闭应用。</p>
+        </div>
+      </div>
+
+      <!-- Helper missing: recommend install -->
+      <div
+        v-if="vpn.dashboardState === 'helper_missing' && !vpn.status?.connected"
+        class="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
+      >
+        <ShieldAlert class="mt-0.5 h-4 w-4 shrink-0" />
+        <div>
+          <p class="leading-5 font-medium">建议安装辅助服务</p>
+          <p class="text-xs opacity-80 mt-1">
+            安装 launchd 辅助服务后，VPN 连接将由系统守护进程管理，无需每次输入管理员密码。
+          </p>
+        </div>
+      </div>
+
+      <!-- Action buttons -->
       <div class="flex items-center gap-4">
         <button
           v-if="!vpn.status?.connected"
@@ -76,7 +147,7 @@ const upstreamVirtualNames = computed(() => {
         </button>
         <button
           v-else
-          :disabled="vpn.loading"
+          :disabled="vpn.loading || vpn.cleanupPending"
           class="flex items-center gap-2 bg-destructive text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-destructive/90 disabled:opacity-50 transition-colors"
           @click="vpn.disconnect()"
         >
@@ -85,13 +156,18 @@ const upstreamVirtualNames = computed(() => {
         </button>
       </div>
 
+      <!-- Error display -->
       <div
         v-if="vpn.lastError"
         class="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300"
       >
-        {{ vpn.lastError }}
+        <p>{{ vpn.lastError.message }}</p>
+        <p v-if="vpn.lastError.recovery_hint" class="text-xs opacity-80 mt-1">
+          {{ vpn.lastError.recovery_hint }}
+        </p>
       </div>
 
+      <!-- Upstream virtual adapter warning -->
       <div
         v-if="vpn.status?.upstream_virtual_detected"
         class="mt-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
@@ -178,6 +254,12 @@ const upstreamVirtualNames = computed(() => {
         <div>
           <span class="text-muted">网络就绪：</span>
           <span class="text-foreground ml-2">{{ vpn.status.network_ready ? '是' : '否' }}</span>
+        </div>
+        <div>
+          <span class="text-muted">连接模式：</span>
+          <span class="text-foreground ml-2">
+            {{ vpn.sessionMode === 'helper' ? '辅助服务' : vpn.sessionMode === 'elevated' ? '临时授权' : vpn.sessionMode === 'direct' ? '直接连接' : '未连接' }}
+          </span>
         </div>
       </div>
     </div>

@@ -12,6 +12,7 @@ const api = {
   },
   vpn: {
     connect: (password?: string) => rpc('vpn.connect', { password }),
+    connectElevated: (password?: string) => ipcRenderer.invoke('ecnu-vpn:connect-elevated', { password }),
     disconnect: () => rpc('vpn.disconnect'),
   },
   config: {
@@ -38,9 +39,8 @@ const api = {
   runtime: {
     status: () => rpc('runtime.status'),
   },
-  drivers: {
-    status: () => rpc('drivers.status'),
-    install: (driver: 'wintun' | 'tap') => ipcRenderer.invoke('ecnu-vpn:driver-install', driver),
+  helper: {
+    status: () => rpc('helper.status'),
   },
   events: {
     subscribe: (handler: EventHandler) => {

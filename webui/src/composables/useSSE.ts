@@ -27,9 +27,13 @@ export function useSSE() {
 
         if (event.type === 'status' && event.data && typeof event.data === 'object') {
           const store = useVpnStore()
+          const patch = event.data as Partial<VpnStatus>
           store.status = store.status
-            ? { ...store.status, ...(event.data as Partial<VpnStatus>) }
+            ? { ...store.status, ...patch }
             : (event.data as VpnStatus)
+          if (patch.connected && !patch.cleanup_pending) {
+            store.lastError = null
+          }
         }
       })
       return
