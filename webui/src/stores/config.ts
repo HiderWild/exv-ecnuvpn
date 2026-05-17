@@ -44,6 +44,11 @@ export interface RuntimeStatus {
   bundled_runtime_dir: string
   wintun_path?: string
   tap_installer_path?: string
+  missing_what?: string
+  recommended_action?: string
+  effect_on_connect?: string
+  wintun_missing?: boolean
+  tap_missing?: boolean
 }
 
 export interface DriverStatus {
@@ -54,10 +59,17 @@ export interface DriverStatus {
   wintun_bundled?: boolean
   wintun_path?: string
   wintun_adapters?: string[]
+  wintun_missing?: boolean
+  wintun_missing_reason?: string
+  wintun_recommended_action?: string
   tap_installer_path?: string
   tap_can_install?: boolean
   tap_adapters?: string[]
   tap_available?: boolean
+  tap_missing?: boolean
+  tap_missing_reason?: string
+  tap_recommended_action?: string
+  effective_driver_status?: 'ready' | 'degraded' | 'unavailable'
 }
 
 export const useConfigStore = defineStore('config', () => {
@@ -129,8 +141,16 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function installDriver(driver: 'wintun' | 'tap') {
-    const { data } = await api.post<DriverStatus>('/drivers/install', { driver })
-    driverStatus.value = data
+    const { data } = await api.post<{
+      ok: boolean
+      message: string
+      takes_effect?: 'next_connect' | 'immediately'
+      status: DriverStatus
+    }>('/drivers/install', { driver })
+    if (data.status) {
+      driverStatus.value = data.status
+    }
+    return data
   }
 
   return {

@@ -1505,22 +1505,22 @@ nlohmann::json direct_start_json(const Config &cfg,
     return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
                           {"message", "VPN server is not configured."},
                           {"recoverable", true},
-                          {"recommended_action", "Configure the VPN server address in Settings"};
+                          {"recommended_action", "Configure the VPN server address in Settings"}};
   if (cfg.username.empty())
     return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
                           {"message", "VPN username is not configured."},
                           {"recoverable", true},
-                          {"recommended_action", "Configure your VPN username in Settings"};
+                          {"recommended_action", "Configure your VPN username in Settings"}};
   if (plaintext_password.empty() && cfg.password.empty())
     return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
                           {"message", "VPN password is not configured."},
                           {"recoverable", true},
-                          {"recommended_action", "Configure your VPN password in Settings"};
+                          {"recommended_action", "Configure your VPN password in Settings"}};
   if (!tunnel::write_script(cfg)) {
     return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
                           {"message", "Failed to generate tunnel script."},
                           {"recoverable", true},
-                          {"recommended_action", "Retry the operation"};
+                          {"recommended_action", "Retry the operation"}};
   }
 
 #ifdef _WIN32
@@ -1531,7 +1531,7 @@ nlohmann::json direct_start_json(const Config &cfg,
     return nlohmann::json{{"ok", false}, {"error_type", "runtime_missing"},
                           {"message", "Wintun is selected but bundled wintun.dll is missing."},
                           {"recoverable", true},
-                          {"recommended_action", "Rebuild the desktop package with the bundled native runtime assets"};
+                          {"recommended_action", "Rebuild the desktop package with the bundled native runtime assets"}};
   }
 #endif
 
@@ -1543,7 +1543,7 @@ nlohmann::json direct_start_json(const Config &cfg,
     return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
                           {"message", "VPN is already running (PID " + std::to_string(existing_pid) + ")."},
                           {"recoverable", true},
-                          {"recommended_action", "Disconnect the current VPN session first"};
+                          {"recommended_action", "Disconnect the current VPN session first"}};
   }
 
   int rc = start_with_password(cfg, plaintext_password, retry_limit);
@@ -1551,7 +1551,7 @@ nlohmann::json direct_start_json(const Config &cfg,
     return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
                           {"message", "VPN connection failed."},
                           {"recoverable", true},
-                          {"recommended_action", "Check VPN logs for details and retry"};
+                          {"recommended_action", "Check VPN logs for details and retry"}};
   }
 
   // Return the new status after successful start
