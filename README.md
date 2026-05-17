@@ -1,89 +1,161 @@
-# EXV — 华东师范大学智能 VPN 客户端
+# EXV — Smart VPN Client for ECNU
 
-> 解决 Cisco AnyConnect 全局路由导致网络卡慢的问题，仅让校园网流量走 VPN，其余流量走本地网络。
+> Split-tunneling VPN client that routes only campus traffic through the tunnel — everything else stays on your local network. Available on **macOS**, **Windows**, and **Linux**.
 
-## 问题背景
+## Background
 
-使用 Cisco AnyConnect 连接校园 VPN 后，**默认路由会将所有流量都发送到 VPN 隧道**。这意味着：
+When Cisco AnyConnect connects to the campus VPN, **all traffic is routed through the VPN tunnel by default**. This means:
 
-- 访问百度、B站、微信等国内资源时，数据包绕经校园 VPN 再出去，延迟高、速度慢
-- 访问国外网站同样绕远路，体验极差
-- 校园网带宽有限，所有流量挤在一起互相抢占
+- Accessing domestic services (Baidu, Bilibili, WeChat) is slow because packets detour through the campus VPN
+- International traffic also suffers from the extra hop
+- Limited campus bandwidth is shared across all traffic
 
-**EXV 的解决方案**：通过 **分流路由（Split Tunneling）**，仅将校园网 IP 段的流量路由到 VPN 隧道，其他流量继续走本地默认路由。连接 VPN 后，日常上网速度不受影响，同时可以正常访问校内资源。
+**EXV's solution**: **Split tunneling** — only campus IP ranges are routed through the VPN tunnel; all other traffic uses your default route. After connecting, everyday browsing speed is unaffected while campus resources remain accessible.
 
-## 功能特性
+## Features
 
-- **分流路由** — 仅校园网流量走 VPN，其余走本地网络
-- **加密凭据存储** — AES-256-CBC 加密密码，密钥权限 0600
-- **免 sudo 日常使用** — launchd root helper，安装一次后无需再输 sudo
-- **WebUI 管理界面** — 浏览器实时查看状态、编辑配置、查看日志
-- **自动重连** — 断线后自动恢复连接
-- **路由自定义** — 随时添加/删除分流路由
-- **VPN 服务器路由保护** — 自动防止 VPN 服务器自身流量被隧道吞没
+- **Split tunneling** — Only campus traffic goes through VPN; everything else uses your local network
+- **Desktop app** — Electron-based GUI for macOS and Windows; manage VPN, config, and logs without a browser
+- **Service installation** — One-time elevation installs a privileged helper (launchd on macOS, Windows service on Windows); daily use needs no admin/sudo
+- **Encrypted credentials** — AES-256-CBC encrypted password storage with key file permission 0600
+- **WebUI** — Browser-based management interface for status, config, and logs (compatibility option; the desktop app is the recommended interface)
+- **Auto-reconnect** — Automatic reconnection after disconnection
+- **Custom routes** — Add or remove split-tunnel routes at any time
+- **VPN server route protection** — Automatically prevents VPN server traffic from being swallowed by the tunnel
 
-## 安装
+## Quick Start
 
-### 前置依赖
+The recommended way to use EXV is through the **desktop app** (macOS / Windows). It bundles the native VPN binary and provides a graphical interface for connecting, configuring routes, and viewing logs — no terminal or browser needed.
 
-- **macOS**（本项目仅支持 macOS）
-- **openconnect** — VPN 连接核心
+For CLI-only or Linux usage, see [Platform Support](#platform-support) below.
+
+### Desktop App (Recommended)
+
+1. Download the latest release for your platform from the Releases page.
+2. On **macOS**: Drag to Applications, then run. On first launch the app will prompt for your admin password to install the privileged helper.
+3. On **Windows**: Run the NSIS installer (or the portable `.exe`). On first launch, accept the UAC prompt to install the `exv-helper` Windows service.
+4. Enter your campus username and password in the desktop app and click Connect.
+
+### Service Installation (All Platforms)
+
+Whether you use the desktop app or the CLI, installing the privileged helper is a one-time step that eliminates the need for repeated `sudo`/admin elevation:
 
 ```bash
-# 安装 openconnect（如果尚未安装）
-brew install openconnect
+# macOS / Linux
+sudo exv service install
+
+# Windows (run as Administrator)
+exv.exe service install
 ```
 
-### 构建与安装
+After installation, `exv` and `exv stop` work without elevated privileges.
+
+### CLI Quick Start
+
+```bash
+# 1. Set username
+exv config set username
+# > Enter value for username: 20XXXXXXXXX
+
+# 2. Set password (hidden input, encrypted storage)
+exv config set password
+# >   New password: ••••••••
+# >   Confirm password: ••••••••
+
+# 3. Start VPN (no sudo needed after helper is installed)
+exv
+
+# 4. Stop VPN
+exv stop
+```
+
+On first run, the config file and encryption key are created automatically: `~/.ecnuvpn/` on macOS/Linux, `%APPDATA%\ecnuvpn\` on Windows.
+
+## Build Order
+
+The project has a strict build dependency chain that must be followed:
+
+1. **Frontend build** — `cd webui && npm install && npm run build`
+2. **Native build** — `cmake -B build && cmake --build build`
+3. **Desktop build** (optional) — `cd webui && npm run desktop:build`
+
+The frontend must be built first because the C++ build runs `scripts/embed_assets.py`, which reads `webui/dist/` and generates `src/webui_assets.hpp`. If `webui/dist/` does not exist, the native build will fail.
+
+## Building from Source
+
+### Prerequisites
+
+- **openconnect** — VPN connection core
+- **CMake** — Build system
+- **Node.js** (v18+) — Required to build the frontend (which must be built before the native binary)
+- **OpenSSL** (Linux only) — AES-256-CBC on Linux; macOS uses CommonCrypto, Windows uses CNG/BCrypt
+
+### Full Build
 
 ```bash
 git clone <repo>
 cd ECNU-VPN
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(sysctl -n hw.ncpu)
 
-# 安装到系统路径
-sudo cmake --install build
+# 1. Build the frontend first
+cd webui
+npm install
+npm run build
+cd ..
+
+# 2. Build the native binary
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# 3. Install to system path
+sudo cmake --install build    # macOS / Linux
 ```
 
-### 安装 root helper（一次性）
+### Installing the Privileged Helper (One-Time)
 
 ```bash
 sudo exv service install
 ```
 
-此命令会将 `exv` 复制到 `/usr/local/bin/exv` 并注册 launchd 守护进程。**安装后日常使用不再需要 sudo。**
+This copies `exv` to `/usr/local/bin/exv` (macOS/Linux) or registers the Windows service, and sets up the privileged helper daemon. **After installation, daily use does not require sudo/admin.**
 
 ## Platform Support
 
 ### macOS
+
 ```bash
 brew install openconnect
+cd webui && npm install && npm run build && cd ..
 cmake -B build && cmake --build build
-sudo ./cminst.sh
+sudo exv service install
 ```
 
 ### Linux (Ubuntu/Debian)
+
 ```bash
 sudo apt install openconnect libssl-dev cmake build-essential
+cd webui && npm install && npm run build && cd ..
 cmake -B build && cmake --build build
 sudo ./scripts/install-linux.sh
 ```
 
 ### Linux (Fedora/RHEL)
+
 ```bash
 sudo dnf install openconnect openssl-devel cmake gcc-c++
+cd webui && npm install && npm run build && cd ..
 cmake -B build && cmake --build build
 sudo ./scripts/install-linux.sh
 ```
 
 ### Windows
-1. Install [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases) (provides `openconnect.exe` + GnuTLS runtime DLLs).
-2. Build: `cmake -B build && cmake --build build --config Release`
-   - The desktop client uses Windows **BCrypt** (CNG) for AES-256-CBC, so OpenSSL is no longer required on Windows.
-3. Run as Administrator: `.\build\Release\exv.exe service install`
 
-### Windows desktop packaging (portable + installer)
+1. Install [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases) (provides `openconnect.exe` + GnuTLS runtime DLLs).
+2. Build the frontend first: `cd webui && npm install && npm run build && cd ..`
+3. Build: `cmake -B build && cmake --build build --config Release`
+   - The desktop client uses Windows **BCrypt** (CNG) for AES-256-CBC, so OpenSSL is no longer required on Windows.
+4. Run as Administrator: `.\build\Release\exv.exe service install`
+
+### Windows Desktop Packaging (Portable + Installer)
 
 The Electron-based desktop UI can be packaged for Windows in two flavours:
 
@@ -104,204 +176,209 @@ Artifacts (under `webui/release/`):
 
 The bundled `bin/` directory contains `exv.exe`, the MinGW runtime DLLs, `openconnect.exe`, GnuTLS / libxml2 / wintun.dll, and (when staged) TAP assets. `libssl-3-x64.dll` and `libcrypto-3-x64.dll` are intentionally excluded — the client no longer links against OpenSSL on Windows.
 
-### Desktop UI (Electron)
+Both artifacts carry the same native runtime bundle. The runtime must be staged before packaging; otherwise the packaged app will fail with a `runtime_missing` error when attempting to connect VPN.
 
-The Vue UI can also run as a desktop application without opening the browser.
-The desktop shell talks to the native `exv desktop-rpc` JSON interface through
-Electron IPC and keeps the existing CLI/helper service model intact.
+#### Installer vs Portable — Behavioral Differences
+
+| Aspect | NSIS Installer | Portable |
+|--------|---------------|----------|
+| **Installation** | Per-machine install to `Program Files` (requires admin) | Single `.exe`, no installation |
+| **Service registration** | Offered during setup (UAC already active); runs `exv.exe service install` | Not installed on launch; user must install manually from the Service page |
+| **UAC prompts (daily use)** | None after service install | One UAC prompt per VPN session until service is installed |
+| **Runtime lookup path** | `%ProgramFiles%\ECNU VPN\bin\` | `<portable-exe-dir>\bin\` (relative to the portable executable) |
+| **Shortcuts** | Desktop and Start Menu shortcuts created | None — run the `.exe` directly |
+| **Uninstall** | Uninstaller stops + unregisters service, then removes files | Delete the `.exe` — no service cleanup (install service first if needed) |
+| **App data** | Preserved on uninstall (`deleteAppDataOnUninstall: false`) | Same — config lives in `%APPDATA%\ecnuvpn\` regardless of artifact type |
+
+### Desktop App (Electron)
+
+The primary interface for EXV is the Electron-based desktop app, which wraps the Vue frontend in a native window. The desktop shell communicates with the native `exv desktop-rpc` JSON interface through Electron IPC — it does not depend on the browser WebUI server.
+
+**Development:**
 
 ```bash
+# Build the frontend first
 cd webui
 npm install
 npm run build
+
+# Build the Electron main-process code
 npm run build:electron
 
-# Package the desktop app after building the native C++ binary.
+# Package the desktop app (after building the native C++ binary)
 npm run desktop:build
 ```
 
-For development, build the native binary first or set `EXV_PATH` to an existing
-`exv`/`exv.exe`, then run:
+For live development, build the native binary first (or set `EXV_PATH` to an existing `exv`/`exv.exe`), then run:
 
 ```bash
 cd webui
 npm run desktop:dev
 ```
 
-## 快速开始
+## Usage
+
+### VPN Control
+
+| Command | Description |
+|---------|-------------|
+| `exv` | Start VPN and return to shell |
+| `exv stop` / `exv -s` | Stop VPN |
+| `exv status` / `exv -t` | Show VPN status and network interfaces |
+
+### Start Options
+
+| Option | Description |
+|--------|-------------|
+| `-rt [count]` | Auto-reconnect after disconnect (see below) |
+| `-f` / `--foreground` | Run WebUI in foreground — compatibility mode (Ctrl+C to stop) |
+
+#### `-rt` Auto-Reconnect
+
+By default (without `-rt`), VPN does not auto-reconnect after a disconnect. Use `-rt` to enable:
 
 ```bash
-# 1. 设置学号
-exv config set username
-# > Enter value for username: 20XXXXXXXXX
-
-# 2. 设置密码（隐匿输入，加密存储）
-exv config set password
-# >   New password: ••••••••
-# >   Confirm password: ••••••••
-
-# 3. 启动 VPN（安装 helper 后无需 sudo）
-exv
-
-# 4. 停止 VPN
-exv stop
+exv -rt          # Reconnect indefinitely until manually stopped
+exv -rt -1       # Same as above
+exv -rt 3        # Reconnect up to 3 times
+exv -rt 0        # No reconnect (same as default)
 ```
 
-首次运行任意命令时，程序会自动创建配置文件与密钥文件：macOS/Linux 位于 `~/.ecnuvpn/`，Windows 位于 `%APPDATA%\ecnuvpn\`。
+- Only takes effect when starting VPN; cannot be combined with `stop`, `status`, etc.
+- Can only be specified once; duplicate specifications cause an error
+- A supervisor process forks to monitor openconnect and auto-reconnects on disconnect
+- The supervisor exits automatically after the reconnect limit is reached
 
-## 使用方法
+### Config Management
 
-### VPN 控制
+| Command | Description |
+|---------|-------------|
+| `exv config` / `exv config show` | Show current config (password masked) |
+| `exv config set <key>` | Set a config value interactively |
+| `exv config import <file>` | Import config from a JSON file |
+| `exv config reset` | Reset to default config (key preserved) |
 
-| 命令 | 说明 |
-|------|------|
-| `exv` | 启动 VPN（含 WebUI） |
-| `exv stop` / `exv -s` | 停止 VPN |
-| `exv status` / `exv -t` | 查看 VPN 状态与网络接口 |
+Configurable keys: `server`, `username`, `password`, `mtu`, `useragent`, `log_file`, `webui_port`, `webui_bind`, `webui_enabled`.
 
-### 启动选项
+### Route Management
 
-| 选项 | 说明 |
-|------|------|
-| `-rt [count]` | 断线后自动重连（详见下方） |
-| `-f` / `--foreground` | 前台运行 WebUI（Ctrl+C 停止） |
-
-#### `-rt` 自动重连
-
-默认情况下（不指定 `-rt`），VPN 断开后不会自动重连。使用 `-rt` 可启用自动重连：
+This is the core of the split-tunneling feature. Nine ECNU campus routes are built in by default, and you can add your own:
 
 ```bash
-exv -rt          # 无限重连，直到手动停止
-exv -rt -1       # 同上，无限重连
-exv -rt 3        # 最多重连 3 次
-exv -rt 0        # 不重连（等同于默认行为）
-```
-
-- 仅在启动 VPN 时生效，不能与 `stop`、`status` 等命令组合使用
-- 只能指定一次，重复指定会报错
-- 启用后程序会 fork 一个 supervisor 进程监控 openconnect，断线时自动重新连接
-- 重连次数达到上限后 supervisor 自动退出
-
-### 配置管理
-
-| 命令 | 说明 |
-|------|------|
-| `exv config` / `exv config show` | 显示当前配置（密码脱敏） |
-| `exv config set <key>` | 交互式设置配置项 |
-| `exv config import <file>` | 从 JSON 文件导入配置 |
-| `exv config reset` | 重置为默认配置（密钥保留） |
-
-可设置的 key：`server`、`username`、`password`、`mtu`、`useragent`、`log_file`、`webui_port`、`webui_bind`、`webui_enabled`。
-
-### 路由管理
-
-这是分流功能的核心。默认已内置 9 条华东师大校园网路由，你也可以自行添加：
-
-```bash
-# 查看当前所有分流路由
+# List all split-tunnel routes
 exv config routes list
 
-# 添加一条路由（CIDR 格式，自动去重）
+# Add a route (CIDR format, auto-deduplicated)
 exv config routes add 10.0.0.0/8
 
-# 删除一条路由
+# Remove a route
 exv config routes remove 10.0.0.0/8
 ```
 
-> **路由格式**：使用 CIDR 表示法，如 `192.168.1.0/24`（网段）或 `219.228.60.69`（单 IP）。
+> **Route format**: Use CIDR notation, e.g. `192.168.1.0/24` (network) or `219.228.60.69` (single IP).
 
-### WebUI
+### WebUI (Browser Compatibility Mode)
 
-VPN 启动后自动在后台运行 WebUI，默认地址 `http://127.0.0.1:18080/`，提供：
+A browser-based WebUI is available for environments where the desktop app is not available (e.g., Linux or headless servers). It provides:
 
-- 实时 VPN 状态与流量监控
-- 配置在线编辑
-- 实时日志流
-- VPN 启停控制
-- 路由管理
+- Real-time VPN status and traffic monitoring
+- Config editing
+- Real-time log stream
+- VPN start/stop control
+- Route management
 
-关闭 WebUI：`exv config set webui_enabled` 设为 `false`。
+The WebUI does **not** start by default. To launch it, use `exv --webui` (starts VPN + WebUI server) or `exv --webui --foreground` (attached to terminal, Ctrl+C to stop). The WebUI listens at `http://127.0.0.1:18080/` by default.
 
-### Helper 服务管理
+The desktop app is the recommended interface on macOS and Windows. The WebUI is a compatibility/debugging option.
 
-| 命令 | 说明 | 需要 sudo |
-|------|------|-----------|
-| `exv service install` | 安装 launchd root helper | 是 |
-| `exv service uninstall` | 卸载 launchd root helper | 是 |
-| `exv service status` | 查看 helper 状态 | 否 |
+### Helper Service Management
 
-## 默认路由
+| Command | Description | Needs sudo/admin |
+|---------|-------------|------------------|
+| `exv service install` | Install the privileged helper | Yes |
+| `exv service uninstall` | Uninstall the privileged helper | Yes |
+| `exv service status` | Show helper status | No |
 
-程序默认内置了华东师范大学校内部分资源机器的路由信息，连接 VPN 后**仅这些 IP 的流量走 VPN 隧道**，其余流量走本地网络。
+### VPN Modes
 
-可通过 `exv config routes list` 查看当前路由，也可自行添加或删除。
+- **Helper mode** — The recommended mode for daily use. After installing the privileged helper service (one-time `exv service install`), the desktop app and CLI can start/stop VPN without sudo or admin elevation.
+- **Elevated mode** — When the helper service is not installed, the desktop app can use one-time elevation (UAC prompt on Windows, sudo prompt on macOS) for a temporary VPN session. This works for quick use but does not provide persistent convenience like helper mode.
+- **Direct mode** — An internal fallback where the desktop app manages VPN directly with elevated privileges. Used automatically when the helper is unavailable and the user grants elevation.
 
-## 注意事项
+For persistent convenience, install the helper service via the desktop app's Service page or `exv service install`.
 
-1. **首次使用需 sudo 安装 helper** — `sudo exv service install` 仅需执行一次，之后 `exv` 和 `exv stop` 均无需 sudo。
+## Default Routes
 
-2. **密码加密存储** — 密码使用 AES-256-CBC 加密后存入 `config.json`，密钥文件 `~/.ecnuvpn/.key` 权限为 0600。`config show` 输出始终脱敏。
+The program ships with built-in routes for ECNU campus resources. When connected, **only traffic to these IPs goes through the VPN tunnel**; all other traffic uses your local network.
 
-3. **路由格式必须为 CIDR** — 添加路由时使用 CIDR 表示法（如 `10.0.0.0/8`），单 IP 可省略掩码（如 `219.228.60.69`）。格式错误会导致路由不生效。
+View current routes with `exv config routes list`, and add or remove routes as needed.
 
-4. **VPN 服务器路由自动保护** — 程序会自动检测 VPN 服务器 IP 是否被分流路由覆盖，若覆盖则添加一条指向默认网关的主机路由，防止 VPN 连接自身被隧道吞没（"split-brain" 问题）。
+## Notes
 
-5. **openconnect 必须已安装** — 若未安装，启动时会提示是否通过 Homebrew 自动安装。
+1. **One-time helper installation requires sudo/admin** — `sudo exv service install` (macOS/Linux) or run as Administrator on Windows. After that, `exv` and `exv stop` do not need elevated privileges.
 
-6. **WebUI 默认仅监听本地** — 默认绑定 `127.0.0.1:18080`，仅本机可访问。如需局域网访问，修改 `webui_bind` 为 `0.0.0.0`（注意安全风险）。
+2. **Encrypted password storage** — Passwords are encrypted with AES-256-CBC and stored in `config.json`. The key file (`~/.ecnuvpn/.key` on macOS/Linux, `%APPDATA%\ecnuvpn\.key` on Windows) has permission 0600. `config show` always masks the password.
 
-7. **前台模式用于调试** — `exv -f` 在前台运行 WebUI，Ctrl+C 可停止。默认为后台模式。
+3. **Route format must be CIDR** — Use CIDR notation (e.g. `10.0.0.0/8`) when adding routes. Single IPs can omit the mask (e.g. `219.228.60.69`). Incorrect formats will cause routes to not take effect.
 
-8. **卸载时先卸载 helper** — 卸载程序前执行 `sudo exv service uninstall` 清理 launchd 守护进程。
+4. **VPN server route auto-protection** — The program automatically detects whether the VPN server IP is covered by a split-tunnel route. If so, it adds a host route pointing to the default gateway to prevent the VPN connection itself from being swallowed by the tunnel ("split-brain" problem).
 
-## 常见问题
+5. **openconnect must be installed** — On macOS, the program will prompt to install via Homebrew if openconnect is missing.
 
-**Q：连接 VPN 后上网变慢了？**
+6. **WebUI listens on localhost by default** — Default binding is `127.0.0.1:18080`, accessible only from the local machine. To allow LAN access, change `webui_bind` to `0.0.0.0` (note the security implications).
 
-这正是本项目要解决的问题。确认你使用的是 `exv` 而非原生 AnyConnect 客户端。`exv` 通过分流路由仅让校园网流量走 VPN。运行 `exv config routes list` 确认路由配置正确。
+7. **Foreground mode is for debugging/compatibility** — `exv -f` runs the WebUI in the foreground (compatibility mode); Ctrl+C stops it. The default CLI behavior is start VPN and return to shell.
 
-**Q：VPN 启动失败，提示 openconnect not installed？**
+8. **Uninstall helper before removing the program** — Run `sudo exv service uninstall` (or the Windows equivalent) to clean up the helper daemon before uninstalling.
 
-程序会询问是否自动安装：`Install openconnect now? [Y/n]`，回车即可。也可手动 `brew install openconnect`。
+## FAQ
 
-**Q：VPN 已连接但校内资源访问不了？**
+**Q: Internet is slow after connecting to VPN?**
 
-检查路由配置：`exv config routes list`，确认目标 IP 所在网段已添加。如果访问的校内 IP 不在默认路由表中，需要手动添加。
+This is the problem EXV solves. Make sure you are using `exv` instead of the native AnyConnect client. `exv` uses split tunneling to route only campus traffic through the VPN. Run `exv config routes list` to verify your route configuration.
 
-**Q：提示 "helper daemon is not installed"？**
+**Q: VPN fails to start, says openconnect not installed?**
 
-运行 `sudo exv service install` 安装 helper。安装后 `exv` 和 `exv stop` 均无需 sudo。
+The program will ask: `Install openconnect now? [Y/n]` — press Enter to install via Homebrew. You can also manually run `brew install openconnect`.
 
-**Q：密码显示 `[KEY MISSING]` 或 `[KEY CORRUPT]`？**
+**Q: VPN is connected but campus resources are inaccessible?**
 
-密钥文件损坏，需要重新生成：
+Check your route configuration: `exv config routes list`, and confirm the target IP range is included. If the campus IP you need is not in the default route table, add it manually.
+
+**Q: Prompt says "helper daemon is not installed"?**
+
+Run `sudo exv service install` to install the helper. After installation, `exv` and `exv stop` do not need sudo.
+
+**Q: Password shows `[KEY MISSING]` or `[KEY CORRUPT]`?**
+
+The key file is corrupted. Regenerate it:
 
 ```bash
-exv config key reset    # 重新生成密钥（原密码密文将被清除）
-exv config set password # 重新设置密码
+exv config key reset    # Regenerate key (existing password ciphertext will be cleared)
+exv config set password # Set password again
 ```
 
-**Q：如何添加新的校园网路由？**
+**Q: How to add a new campus route?**
 
 ```bash
 exv config routes add 202.120.96.0/19
 ```
 
-添加后下次启动 VPN 时生效。也可通过 WebUI 的路由管理页面添加。
+The route takes effect the next time VPN is started. You can also add routes through the desktop app or WebUI.
 
-**Q：`exv stop` 提示找不到进程？**
+**Q: `exv stop` says process not found?**
 
-可能 PID 文件已丢失，helper 会回退到 `pgrep` 查找。若仍失败，可手动 `sudo killall openconnect`。
+The PID file may be lost; the helper falls back to `pgrep` to find it. If that also fails, you can manually run `sudo killall openconnect`.
 
-## 配置文件
+## Configuration
 
-配置文件默认位于：macOS/Linux 为 `~/.ecnuvpn/config.json`，Windows 为 `%APPDATA%\ecnuvpn\config.json`。
+Config file location: `~/.ecnuvpn/config.json` on macOS/Linux, `%APPDATA%\ecnuvpn\config.json` on Windows.
 
 ```json
 {
     "server": "https://vpn-ct.ecnu.edu.cn",
     "username": "20XXXXXXXXX",
-    "password": "<AES-256-CBC 密文>",
+    "password": "<AES-256-CBC ciphertext>",
     "mtu": 1290,
     "useragent": "AnyConnect Darwin_x86_64 4.10.05095",
     "routes": ["49.52.4.0/25", "..."],
@@ -309,22 +386,23 @@ exv config routes add 202.120.96.0/19
     "log_file": "~/.ecnuvpn/ecnuvpn.log",
     "webui_port": 18080,
     "webui_bind": "127.0.0.1",
-    "webui_enabled": true
+    "webui_enabled": false
 }
 ```
 
-通过 `config import` 导入时，`password` 字段可写明文，程序会自动加密后存储。
+When importing via `config import`, the `password` field can be plaintext — the program will encrypt it automatically.
 
-## 技术栈
+## Tech Stack
 
-- **C++17** + CMake 构建
-- **openconnect** — VPN 连接核心
-- **nlohmann/json** — JSON 解析
-- **cpp-httplib** — 嵌入式 HTTP 服务器
-- **CommonCrypto** — macOS 内置加密（AES-256-CBC）
-- **Vue 3 + TypeScript + Vite** — WebUI 前端
-- **launchd** — macOS 服务管理
+- **C++17** + CMake
+- **openconnect** — VPN connection core
+- **nlohmann/json** — JSON parsing
+- **cpp-httplib** — Embedded HTTP server
+- **Vue 3 + TypeScript + Vite** — Frontend (shared by desktop app and browser WebUI)
+- **Electron** — Desktop app shell (macOS / Windows)
+- **CommonCrypto** (macOS) / **OpenSSL** (Linux) / **CNG BCrypt** (Windows) — AES-256-CBC encryption
+- **launchd** (macOS) / **Windows Service** (Windows) / **systemd** (Linux) — Privileged helper management
 
-## 许可证
+## License
 
 [MIT](LICENSE)

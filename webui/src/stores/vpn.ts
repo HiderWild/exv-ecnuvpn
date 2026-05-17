@@ -99,6 +99,23 @@ export function isVpnError(data: unknown): data is VpnError {
 
 export type ConnectMode = 'helper' | 'elevated' | 'direct'
 
+export type DashboardState =
+  | 'service-ready disconnected'
+  | 'service-missing disconnected'
+  | 'helper connected'
+  | 'direct connected'
+  | 'elevated connected'
+  | 'elevated connecting'
+  | 'error recoverable'
+  | 'error blocking'
+  | 'loading'
+
+export interface DashboardAction {
+  label: string
+  action: () => void
+  variant?: 'primary' | 'secondary' | 'destructive'
+}
+
 export const useVpnStore = defineStore('vpn', () => {
   const status = ref<VpnStatus | null>(null)
   const routes = ref<RouteEntry[]>([])
@@ -128,7 +145,123 @@ export const useVpnStore = defineStore('vpn', () => {
     return status.value.mode ?? 'helper'
   })
 
+  // ── Dashboard state machine ──────────────────────────────────────────
+  const isDesktop = computed(() => {
+    return typeof window !== 'undefined' && !!window.ecnuVpn
+  })
+
+  const dashboardState = computed<DashboardState>(() => {
+    // Error states take priority when an error is present.
+    // Note: elevation_required and service_missing are auto-cleared in setError(),
+    // but we guard here as a safety net against direct ref mutation.
+    if (lastError.value && lastErrorType.value) {
+      if (lastErrorType.value === 'elevation_required' || lastErrorType.value === 'service_missing') {
+        // These should not appear as error states — fall through to disconnected logic
+      } else if (lastErrorType.value === 'runtime_missing') {
+        return 'error blocking'
+      } else {
+        return lastRecoverable.value ? 'error recoverable' : 'error blocking'
+      }
+    }
+
+    // Elevated connecting: loading and last action was elevated connect
+    if (loading.value && lastActionWasElevatedConnect.value) {
+      return 'elevated connecting'
+    }
+
+    // Connected states
+    if (status.value?.connected) {
+      const mode = currentSessionMode.value
+      if (mode === 'helper') return 'helper connected'
+      if (mode === 'elevated') return 'elevated connected'
+      return 'direct connected'
+    }
+
+    // Disconnected states
+    if (serviceInstalled.value && serviceRunning.value) {
+      return 'service-ready disconnected'
+    }
+    return 'service-missing disconnected'
+  })
+
+  // Track whether the last action was an elevated connect (for the "connecting" state)
+  const lastActionWasElevatedConnect = ref(false)
+
+  const dashboardPrimaryAction = computed<DashboardAction | null>(() => {
+    const state = dashboardState.value
+    switch (state) {
+      case 'service-ready disconnected':
+        return { label: '连接', action: () => connect(), variant: 'primary' }
+      case 'service-missing disconnected':
+        return { label: '安装服务（推荐）', action: () => { /* navigated via router */ }, variant: 'primary' }
+      case 'helper connected':
+        return { label: '断开连接', action: () => disconnect(), variant: 'destructive' }
+      case 'direct connected':
+      case 'elevated connected':
+        return { label: '断开连接', action: () => disconnectElevated(), variant: 'destructive' }
+      case 'elevated connecting':
+        return null // No CTA — just show spinner
+      case 'error recoverable':
+        return recoverableErrorAction.value
+      case 'error blocking':
+        return { label: '关闭', action: () => clearError(), variant: 'secondary' }
+      default:
+        return null
+    }
+  })
+
+  const dashboardSecondaryAction = computed<DashboardAction | null>(() => {
+    const state = dashboardState.value
+    switch (state) {
+      case 'service-missing disconnected':
+        if (canUseElevatedFallback.value) {
+          return { label: '仅本次连接', action: () => connectElevated(), variant: 'secondary' }
+        }
+        return null
+      case 'direct connected':
+      case 'elevated connected':
+        return { label: '安装服务', action: () => { /* navigated via router */ }, variant: 'secondary' }
+      case 'error recoverable':
+        return { label: '关闭', action: () => clearError(), variant: 'secondary' }
+      default:
+        return null
+    }
+  })
+
+  // Maps error types to specific recovery actions
+  const recoverableErrorAction = computed<DashboardAction | null>(() => {
+    if (!lastErrorType.value) return null
+    switch (lastErrorType.value) {
+      case 'elevation_denied':
+        return { label: '安装服务', action: () => { /* navigated via router */ }, variant: 'primary' }
+      case 'config_invalid':
+        return { label: '前往设置', action: () => { /* navigated via router */ }, variant: 'primary' }
+      case 'native_failure':
+      case 'parse_failure':
+        return { label: '重试', action: () => retryLastAction(), variant: 'primary' }
+      default:
+        return { label: '重试', action: () => retryLastAction(), variant: 'primary' }
+    }
+  })
+
+  // Track the last mutating action for retry
+  const _lastMutatingAction = ref<(() => Promise<void>) | null>(null)
+
+  function retryLastAction() {
+    clearError()
+    if (_lastMutatingAction.value) {
+      _lastMutatingAction.value()
+    }
+  }
+
   function setError(err: VpnError) {
+    // elevation_required and service_missing are not error states — they
+    // indicate the user should be in the service-missing flow instead.
+    // Auto-clear them so the dashboard falls through to actionable CTAs.
+    if (err.error_type === 'elevation_required' || err.error_type === 'service_missing') {
+      clearError()
+      return
+    }
     lastError.value = err.message
     lastErrorType.value = err.error_type
     lastRecoverable.value = err.recoverable
@@ -158,9 +291,12 @@ export const useVpnStore = defineStore('vpn', () => {
   async function connect() {
     loading.value = true
     clearError()
+    lastActionWasElevatedConnect.value = false
+    _lastMutatingAction.value = connect
     try {
       const { data } = await api.post<VpnStatus>('/connect')
       status.value = data
+      await fetchAppShellState()
     } catch (error) {
       setError(normalizeError(error))
     } finally {
@@ -170,10 +306,13 @@ export const useVpnStore = defineStore('vpn', () => {
 
   async function disconnect() {
     loading.value = true
+    lastActionWasElevatedConnect.value = false
+    _lastMutatingAction.value = disconnect
     try {
       const { data } = await api.post<VpnStatus>('/disconnect')
       status.value = data
       clearError()
+      await fetchAppShellState()
     } catch (error) {
       setError(normalizeError(error))
     } finally {
@@ -184,22 +323,28 @@ export const useVpnStore = defineStore('vpn', () => {
   async function connectElevated() {
     loading.value = true
     clearError()
+    lastActionWasElevatedConnect.value = true
+    _lastMutatingAction.value = connectElevated
     try {
       const { data } = await api.post<VpnStatus | VpnError>('/connect/elevated')
       if (isVpnError(data)) {
         setError(data)
       } else {
         status.value = data
+        await fetchAppShellState()
       }
     } catch (error) {
       setError(normalizeError(error))
     } finally {
+      lastActionWasElevatedConnect.value = false
       loading.value = false
     }
   }
 
   async function disconnectElevated() {
     loading.value = true
+    lastActionWasElevatedConnect.value = false
+    _lastMutatingAction.value = disconnectElevated
     try {
       const { data } = await api.post<VpnStatus | VpnError>('/disconnect/elevated')
       if (isVpnError(data)) {
@@ -207,6 +352,7 @@ export const useVpnStore = defineStore('vpn', () => {
       } else {
         status.value = data
         clearError()
+        await fetchAppShellState()
       }
     } catch (error) {
       setError(normalizeError(error))
@@ -247,11 +393,13 @@ export const useVpnStore = defineStore('vpn', () => {
   async function installService() {
     const { data } = await api.post<ServiceStatus>('/service/install')
     serviceStatus.value = data
+    await fetchAppShellState()
   }
 
   async function uninstallService() {
     const { data } = await api.post<ServiceStatus>('/service/uninstall')
     serviceStatus.value = data
+    await fetchAppShellState()
   }
 
   function addLog(entry: LogEntry) {
@@ -274,9 +422,10 @@ export const useVpnStore = defineStore('vpn', () => {
     lastRecoverable, lastRecommendedAction,
     serviceInstalled, serviceRunning, canUseElevatedFallback,
     recommendedConnectMode, currentSessionMode,
+    isDesktop, dashboardState, dashboardPrimaryAction, dashboardSecondaryAction,
     fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
     fetchServiceStatus, installService, uninstallService,
-    addLog, clearLogs, setLogs,
+    addLog, clearLogs, setLogs, clearError, retryLastAction,
   }
 })
