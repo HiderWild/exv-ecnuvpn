@@ -23,26 +23,25 @@ function isActive(path: string) {
 </script>
 
 <template>
-  <nav class="border-b border-border bg-surface/50 backdrop-blur-sm sticky top-0 z-40">
-    <div class="max-w-5xl mx-auto px-4 flex items-center h-14 gap-1">
-      <span class="text-foreground font-semibold text-sm mr-4 shrink-0">ECNU VPN</span>
-      <div class="flex items-center gap-1 overflow-x-auto">
-        <button
-          v-for="item in navItems"
-          :key="item.path"
-          :class="[
-            'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm whitespace-nowrap transition-colors',
-            isActive(item.path)
-              ? 'bg-primary/40 text-foreground'
-              : 'text-muted hover:text-foreground hover:bg-surface'
-          ]"
-          @click="router.push(item.path)"
-        >
-          <component :is="item.icon" class="w-4 h-4" />
-          {{ item.name }}
-        </button>
-      </div>
-      <div class="flex-1" />
+  <aside class="w-52 shrink-0 border-r border-border bg-surface/50 backdrop-blur-sm flex flex-col h-screen sticky top-0">
+    <div class="px-4 h-14 flex items-center border-b border-border">
+      <span class="text-foreground font-semibold text-sm">ECNU VPN</span>
     </div>
-  </nav>
+    <nav class="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
+      <button
+        v-for="item in navItems"
+        :key="item.path"
+        :class="[
+          'flex items-center gap-2 w-full px-3 py-2 rounded-md text-sm transition-colors text-left',
+          isActive(item.path)
+            ? 'bg-primary/40 text-foreground'
+            : 'text-muted hover:text-foreground hover:bg-surface'
+        ]"
+        @click="router.push(item.path)"
+      >
+        <component :is="item.icon" class="w-4 h-4 shrink-0" />
+        <span class="truncate">{{ item.name }}</span>
+      </button>
+    </nav>
+  </aside>
 </template>

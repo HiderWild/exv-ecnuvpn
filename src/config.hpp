@@ -52,7 +52,7 @@ struct Config {
   std::string log_file = default_log_file_path();
   int webui_port = 18080;
   std::string webui_bind = "127.0.0.1";
-  bool webui_enabled = true;
+  bool webui_enabled = false;
   std::string openconnect_runtime = "bundled";
   std::string windows_tunnel_driver = "auto";
   std::string windows_tap_interface = "";

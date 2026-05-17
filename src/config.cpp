@@ -755,7 +755,10 @@ void show(const Config &cfg) {
   std::cout << utils::BOLD << "  WebUI Bind      : " << utils::RESET
             << cfg.webui_bind << std::endl;
   std::cout << utils::BOLD << "  WebUI Enabled   : " << utils::RESET
-            << (cfg.webui_enabled ? "true" : "false") << std::endl;
+            << (cfg.webui_enabled
+                    ? std::string(utils::DIM) + "true (compatibility mode)" + utils::RESET
+                    : std::string(utils::DIM) + "false" + utils::RESET)
+            << std::endl;
   std::cout << utils::BOLD << "  Runtime Mode    : " << utils::RESET
             << cfg.openconnect_runtime << std::endl;
 #ifdef _WIN32

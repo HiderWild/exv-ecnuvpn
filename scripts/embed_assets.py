@@ -190,7 +190,9 @@ def generate_header(files):
 def main():
     if not os.path.isdir(DIST_DIR):
         print(f"Error: dist directory not found at {DIST_DIR}", file=sys.stderr)
-        print("Build the frontend first: cd webui && npm run build", file=sys.stderr)
+        print("The frontend must be built before the native binary can be compiled.", file=sys.stderr)
+        print("Build the frontend first: cd webui && npm install && npm run build", file=sys.stderr)
+        print("Then rebuild the native binary.", file=sys.stderr)
         sys.exit(1)
 
     files = collect_files()
