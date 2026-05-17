@@ -310,9 +310,22 @@ nlohmann::json runtime_status_json(const Config &cfg) {
   };
 
 #ifdef _WIN32
-  j["wintun_path"] = utils::get_bundled_wintun_path();
-  j["tap_installer_path"] = utils::get_bundled_tap_installer_path();
+  std::string wintun_path = utils::get_bundled_wintun_path();
+  std::string tap_installer_path = utils::get_bundled_tap_installer_path();
+  j["wintun_path"] = wintun_path;
+  j["tap_installer_path"] = tap_installer_path;
+  j["wintun_missing"] = wintun_path.empty();
+  j["tap_missing"] = tap_installer_path.empty();
 #endif
+
+  if (resolved_path.empty()) {
+    j["missing_what"] = "openconnect binary";
+    j["recommended_action"] =
+        "Reinstall the desktop package with the bundled OpenConnect runtime assets.";
+    j["effect_on_connect"] =
+        "VPN connection will fail with runtime_missing error.";
+  }
+
   return j;
 }
 
@@ -372,10 +385,48 @@ nlohmann::json driver_status_json(const Config &cfg) {
   j["wintun_bundled"] = !wintun_path.empty();
   j["wintun_path"] = wintun_path;
   j["wintun_adapters"] = wintun_adapters;
+  j["wintun_missing"] = wintun_path.empty();
   j["tap_installer_path"] = tap_installer_path;
   j["tap_can_install"] = !tap_installer_path.empty();
   j["tap_adapters"] = tap_adapters;
   j["tap_available"] = !tap_adapters.empty();
+  j["tap_missing"] = !tap_adapters.empty() ? false : tap_installer_path.empty();
+
+  // Wintun missing details
+  if (wintun_path.empty()) {
+    j["wintun_missing_reason"] = "bundled wintun.dll not found";
+    j["wintun_recommended_action"] =
+        "Reinstall the desktop package to restore bundled wintun.dll.";
+  }
+
+  // TAP missing details
+  if (!j.value("tap_available", false) && tap_installer_path.empty()) {
+    j["tap_missing_reason"] = "no TAP adapters detected and no bundled installer";
+    j["tap_recommended_action"] =
+        "Install TAP driver from Settings, or switch tunnel driver to Wintun.";
+  } else if (!j.value("tap_available", false)) {
+    j["tap_missing_reason"] = "no TAP adapters detected";
+    j["tap_recommended_action"] =
+        "Click 'Install TAP' to install the TAP adapter.";
+  }
+
+  // Effective driver status summary
+  bool wintun_ok = !wintun_path.empty();
+  bool tap_ok = !tap_adapters.empty();
+  if (wintun_ok || tap_ok) {
+    // "ready" if the effective/preferred driver works; "degraded" if
+    // the preferred driver is missing but a fallback is available.
+    bool preferred_ok = false;
+    if (cfg.windows_tunnel_driver == "wintun")
+      preferred_ok = wintun_ok;
+    else if (cfg.windows_tunnel_driver == "tap")
+      preferred_ok = tap_ok;
+    else // "auto" — prefers wintun
+      preferred_ok = wintun_ok;
+    j["effective_driver_status"] = preferred_ok ? "ready" : "degraded";
+  } else {
+    j["effective_driver_status"] = "unavailable";
+  }
 #endif
 
   return j;
@@ -393,6 +444,7 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
                               "Rebuild the desktop package with the bundled native runtime assets");
     return nlohmann::json{{"ok", true},
                           {"message", "Wintun is bundled and will be activated on the next connection attempt."},
+                          {"takes_effect", "next_connect"},
                           {"status", driver_status_json(cfg)}};
   }
 
@@ -422,6 +474,7 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
 
     return nlohmann::json{{"ok", true},
                           {"message", "TAP driver installation completed."},
+                          {"takes_effect", "immediately"},
                           {"status", driver_status_json(cfg)}};
   }
 
@@ -459,9 +512,9 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password)
   if (!helper::is_available()) {
 #ifdef _WIN32
     return structured_error(kErrorServiceMissing,
-                            "Helper service is not available. Install the helper service from Settings or run 'exv service install' as Administrator.",
+                            "Helper service is not available. Use the desktop app's Service page to install it with one click, or run 'exv service install' as Administrator.",
                             /*recoverable=*/true,
-                            "Install the helper service from Settings");
+                            "Install the helper service from the desktop app or CLI");
 #else
     return structured_error(kErrorServiceMissing,
                             "Helper daemon is not available. Install the helper service before starting the desktop client.",

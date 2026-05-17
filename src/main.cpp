@@ -36,6 +36,7 @@ struct ParsedArgs {
   int retry_limit = 0;
   bool retry_specified = false;
   bool foreground = false;
+  bool webui = false;
   std::string error;
 };
 
@@ -84,6 +85,11 @@ static ParsedArgs parse_args(const std::vector<std::string> &args) {
       continue;
     }
 
+    if (arg == "--webui" || arg == "-w") {
+      parsed.webui = true;
+      continue;
+    }
+
     parsed.positional.push_back(arg);
   }
 
@@ -105,7 +111,7 @@ static void print_help() {
   std::cout << utils::BOLD << "COMMANDS:" << utils::RESET << std::endl;
   std::cout << "  " << utils::GREEN << "start" << utils::RESET << " / "
             << utils::GREEN << "(default)" << utils::RESET
-            << "         Start VPN connection" << std::endl;
+            << "         Start VPN connection and return" << std::endl;
   std::cout << "  " << utils::GREEN << "stop, -s" << utils::RESET
             << "                   Stop VPN connection" << std::endl;
   std::cout << "  " << utils::GREEN << "status, -t" << utils::RESET
@@ -127,11 +133,37 @@ static void print_help() {
   std::cout << "                           Omit count or use -1 for infinite"
             << std::endl;
   std::cout << "  " << utils::YELLOW << "-f, --foreground" << utils::RESET
-            << "          Keep process in foreground (with WebUI)" << std::endl;
+            << "          Keep process alive for WebUI server" << std::endl;
+  std::cout << "  " << utils::YELLOW << "-w, --webui" << utils::RESET
+            << "              Start WebUI server (compatibility mode)" << std::endl;
   std::cout << std::endl;
-  std::cout << "  Note: WebUI starts automatically when \"webui_enabled\" is true in config"
+  std::cout << "  Note: Default behavior is start VPN and return to shell."
             << std::endl;
-  std::cout << "        (default: true). Configure port/bind via config settings." << std::endl;
+  std::cout << "        Use --webui to launch the browser-based WebUI."
+            << std::endl;
+  std::cout << "        Use --foreground with --webui to keep the process attached."
+            << std::endl;
+  std::cout << std::endl;
+  std::cout << utils::BOLD << "VPN MODES:" << utils::RESET << std::endl;
+  std::cout << "  Helper mode    VPN managed via the installed helper service."
+            << std::endl;
+  std::cout << "                 Recommended for daily use. No sudo/admin needed."
+            << std::endl;
+#ifdef _WIN32
+  std::cout << "  Elevated mode  Desktop app uses one-time UAC elevation when"
+            << std::endl;
+  std::cout << "                 the helper is not installed, for a temporary VPN"
+            << std::endl;
+  std::cout << "                 session. Install the helper for persistent convenience."
+            << std::endl;
+#else
+  std::cout << "  Elevated mode  Desktop app can request one-time sudo when"
+            << std::endl;
+  std::cout << "                 the helper is not installed, for a temporary VPN"
+            << std::endl;
+  std::cout << "                 session. Install the helper for persistent convenience."
+            << std::endl;
+#endif
   std::cout << std::endl;
   std::cout << utils::BOLD << "CONFIG SUBCOMMANDS:" << utils::RESET
             << std::endl;
@@ -200,6 +232,10 @@ static void print_help() {
             << "  exv -rt 3                              # Retry reconnect 3 times"
             << std::endl
       << "  exv -rt                                # Retry reconnect forever"
+      << std::endl
+      << "  exv --webui                            # Start VPN + WebUI server"
+      << std::endl
+      << "  exv --webui --foreground               # Start VPN + WebUI (attached)"
       << std::endl
       << "  exv stop                               # Stop VPN" << std::endl
       << "  exv status                             # Check status" << std::endl
@@ -410,17 +446,20 @@ int main(int argc, char *argv[]) {
   if (cmd == "start") {
     Config cfg = config::load();
 
-    // Warn if WebUI is enabled but helper daemon is not installed
-    if (cfg.webui_enabled && !helper::is_available()) {
+    // Warn if WebUI is requested but helper daemon is not installed
+    bool want_webui = parsed.webui || (parsed.foreground && cfg.webui_enabled);
+    if (want_webui && !helper::is_available()) {
 #ifdef _WIN32
       utils::print_warning(
-          "WebUI is enabled but helper daemon is not installed. "
+          "WebUI is requested but helper daemon is not installed. "
           "WebUI will have limited VPN control. "
+          "The desktop app is the recommended interface for macOS and Windows. "
           "Install the helper with: exv service install from an elevated prompt");
 #else
       utils::print_warning(
-          "WebUI is enabled but helper daemon is not installed. "
+          "WebUI is requested but helper daemon is not installed. "
           "WebUI will have limited VPN control. "
+          "The desktop app is the recommended interface for macOS and Windows. "
           "Install the helper with: sudo exv service install");
 #endif
     }
@@ -431,7 +470,10 @@ int main(int argc, char *argv[]) {
       return vpn_result;
     }
 
-    if (cfg.webui_enabled) {
+    // Default behavior: start VPN and return.
+    // WebUI only starts when explicitly requested via --webui,
+    // or when --foreground is given AND webui_enabled is true in config.
+    if (want_webui) {
       if (parsed.foreground) {
         // Foreground mode: start WebUI in current process, block until Ctrl+C
         std::string config_dir = utils::get_config_dir();
@@ -533,7 +575,7 @@ int main(int argc, char *argv[]) {
         webui.start();
 
         std::cout << std::endl;
-        utils::print_info("WebUI running in foreground. Press Ctrl+C to stop.");
+        utils::print_info("WebUI running in foreground (compatibility mode). Press Ctrl+C to stop.");
         while (!webui_stop_requested) {
 #ifndef _WIN32
           pause();
@@ -557,7 +599,7 @@ int main(int argc, char *argv[]) {
         if (bg_pid > 0) {
           // Parent: return to shell immediately
           std::cout << std::endl;
-          utils::print_info("WebUI running in background at http://" +
+          utils::print_info("WebUI running in background (compatibility mode) at http://" +
                             cfg.webui_bind + ":" + std::to_string(cfg.webui_port) + "/");
           utils::print_info("Stop with: exv stop");
           return 0;
@@ -678,7 +720,8 @@ int main(int argc, char *argv[]) {
         g_webui_server = nullptr;
         return 0;
 #else
-        // Windows: no fork/setsid, run in foreground mode instead
+        // Windows: no fork/setsid. When --webui is given without --foreground,
+        // start WebUI in foreground as a compatibility fallback.
         std::string config_dir = utils::get_config_dir();
         std::string log_path = utils::expand_home(cfg.log_file);
         config::ConfigManager config_mgr(config_dir);
@@ -693,7 +736,7 @@ int main(int argc, char *argv[]) {
         signal(SIGTERM, webui_signal_handler);
         webui.start();
         std::cout << std::endl;
-        utils::print_info("WebUI running in foreground. Press Ctrl+C to stop.");
+        utils::print_info("WebUI running in foreground (compatibility mode). Press Ctrl+C to stop.");
         while (!webui_stop_requested) {
           Sleep(1000);
         }
@@ -706,10 +749,9 @@ int main(int argc, char *argv[]) {
         return 0;
 #endif
       }
-    } else {
-      utils::print_info("WebUI disabled (webui_enabled = false)");
     }
 
+    // Default: VPN started, print status and return to shell.
     return 0;
   }
   if (cmd == "stop" || cmd == "-s") {

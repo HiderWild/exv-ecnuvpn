@@ -1,158 +1,273 @@
-# EXV 使用手册
+# EXV User Guide
 
-> 包装 openconnect 的智能 VPN 客户端，支持分流路由、加密凭据管理、launchd root helper 与 WebUI。
+> Smart VPN client wrapping openconnect with split tunneling, encrypted credential management, privileged helper service, and desktop/WebUI interfaces.
 >
-> 当前版本：**v3.3.0** | macOS | 需要 openconnect | 推荐安装一次 helper 后日常免 sudo
+> Current version: **v3.3.0** | macOS / Windows / Linux | Requires openconnect | Service installation recommended for daily use
 
 ---
 
-## 安装
+## Installation
 
-### 构建
+### Desktop App (Recommended)
+
+The easiest way to get started is with the **desktop app** (macOS / Windows):
+
+1. Download the latest release for your platform from the Releases page.
+2. **macOS**: Drag to Applications, then run. On first launch, grant admin access to install the privileged helper.
+3. **Windows**: Run the NSIS installer (or the portable `.exe`). On first launch, accept the UAC prompt to install the `exv-helper` Windows service.
+4. Enter your campus username and password and click Connect.
+
+The desktop app communicates with the native `exv desktop-rpc` JSON interface through Electron IPC. It does not depend on the browser WebUI server.
+
+### Building from Source
+
+The project has a strict build dependency chain: **frontend build -> native build -> desktop build**. The frontend must be built first because `scripts/embed_assets.py` reads `webui/dist/` during the C++ build.
 
 ```bash
 git clone <repo>
 cd ECNU-VPN
+
+# 1. Build the frontend first
+cd webui
+npm install
+npm run build
+cd ..
+
+# 2. Build the native binary
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(sysctl -n hw.ncpu)
+cmake --build build
+
+# 3. Install to system path
+sudo cmake --install build    # macOS / Linux
 ```
 
-### 安装到系统路径
+#### Platform-Specific Prerequisites
+
+| Platform | Prerequisites |
+|----------|--------------|
+| macOS | `brew install openconnect` |
+| Linux (Ubuntu/Debian) | `sudo apt install openconnect libssl-dev cmake build-essential` |
+| Linux (Fedora/RHEL) | `sudo dnf install openconnect openssl-devel cmake gcc-c++` |
+| Windows | Install [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases); build with `cmake -B build && cmake --build build --config Release` |
+
+All platforms also require **Node.js** (v18+) for the frontend build step.
+
+### Installing the Privileged Helper (One-Time)
 
 ```bash
-sudo cmake --install build
-```
-
-### 安装 root helper（一次性 sudo）
-
-```bash
+# macOS / Linux
 sudo exv service install
+
+# Windows (run as Administrator)
+exv.exe service install
 ```
 
-`service install` 会自动将 `exv` 复制到 `/usr/local/bin/exv` 并注册 launchd 守护进程。之后日常使用不再需要 sudo。
+This installs the privileged helper daemon (launchd on macOS, Windows service on Windows, systemd helper on Linux). After installation, `exv` and `exv stop` work without elevated privileges.
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 首次使用
+### Using the Desktop App
 
-首次运行任意命令时，程序自动完成初始化：
-- 创建 `~/.ecnuvpn/config.json`（默认配置）
-- 生成 AES-256 加密密钥 → `~/.ecnuvpn/.key`（权限 0600）
+1. Launch the EXV desktop app.
+2. On first run, enter your campus username and password.
+3. Click **Connect**. The app will handle VPN startup, split-tunnel routing, and reconnection.
+4. Use the **Routes** tab to add or remove campus IP ranges.
+5. Check the **Logs** tab for real-time connection status.
+
+### Using the CLI
+
+First-time setup:
 
 ```bash
-# 1. 设置学号
+# 1. Set username
 exv config set username
 # > Enter value for username: 20XXXXXXXXX
 
-# 2. 设置密码（隐匿输入，不回显）
+# 2. Set password (hidden input, encrypted storage)
 exv config set password
 # >   New password: ••••••••
 # >   Confirm password: ••••••••
 
-# 3. 安装一次 helper（仅首次需要 sudo）
+# 3. Install the helper (one-time, requires sudo/admin)
 sudo exv service install
 
-# 4. 之后日常直接启动（无需 sudo）
+# 4. Start VPN (no sudo needed after helper is installed)
 exv
 ```
 
+On first run, the config file and encryption key are created automatically at:
+- **macOS / Linux**: `~/.ecnuvpn/`
+- **Windows**: `%APPDATA%\ecnuvpn\`
+
 ---
 
-## 命令参考
+## Command Reference
 
 ```
 exv [command] [subcommand] [args]
 ```
 
-### VPN 控制
+### VPN Control
 
-| 命令 | 说明 | 需要 sudo |
-|------|------|-----------|
-| `exv` | 启动 VPN（含 WebUI） | 安装 helper 后 ❌ |
-| `exv stop` \| `-s` | 停止 VPN | 安装 helper 后 ❌ |
-| `exv status` \| `-t` | 查看 VPN 状态与网络接口 | ❌ |
+| Command | Description | Needs sudo/admin |
+|---------|-------------|------------------|
+| `exv` | Start VPN and return to shell | No (after helper install) |
+| `exv stop` \| `-s` | Stop VPN | No (after helper install) |
+| `exv status` \| `-t` | Show VPN status and network interfaces | No |
 
-### 启动选项
+### Start Options
 
-| 选项 | 说明 |
-|------|------|
-| `-rt [count]` | 断线后自动重连次数（省略或 -1 为无限） |
-| `-f`, `--foreground` | 前台运行 WebUI（Ctrl+C 停止） |
+| Option | Description |
+|--------|-------------|
+| `-rt [count]` | Auto-reconnect count after disconnect (omit or -1 for unlimited) |
+| `-f`, `--foreground` | Run WebUI in foreground (compatibility mode; Ctrl+C to stop) |
 
-### Helper 服务管理
+### Helper Service Management
 
-| 命令 | 说明 | 需要 sudo |
-|------|------|-----------|
-| `exv service install` | 安装 launchd root helper | ✅ |
-| `exv service uninstall` | 卸载 launchd root helper | ✅ |
-| `exv service status` | 查看 helper 状态 | ❌ |
+| Command | Description | Needs sudo/admin |
+|---------|-------------|------------------|
+| `exv service install` | Install the privileged helper | Yes |
+| `exv service uninstall` | Uninstall the privileged helper | Yes |
+| `exv service status` | Show helper status | No |
 
-### 配置管理
+On macOS, `service install` copies `exv` to `/usr/local/bin/exv` and registers a launchd daemon. On Windows, it registers the `exv-helper` Windows service. On Linux, it installs a systemd helper.
 
-| 命令 | 说明 |
-|------|------|
-| `exv config` \| `config show` | 显示当前配置（密码脱敏） |
-| `exv config set <key>` | 交互式设置配置项 |
-| `exv config import <file>` | 从 JSON 文件导入配置 |
-| `exv config reset` | 重置为默认配置（密钥保留） |
+### Config Management
 
-**可设置的 key：**
+| Command | Description |
+|---------|-------------|
+| `exv config` \| `config show` | Show current config (password masked) |
+| `exv config set <key>` | Set a config value interactively |
+| `exv config import <file>` | Import config from a JSON file |
+| `exv config reset` | Reset to default config (key preserved) |
 
-| Key | 说明 |
-|-----|------|
-| `server` | VPN 服务器地址 |
-| `username` | 登录学号 |
-| `password` | 登录密码（隐匿输入，加密存储） |
-| `mtu` | MTU 值（默认 1290） |
-| `useragent` | User-Agent 字符串 |
-| `log_file` | 日志文件路径 |
-| `webui_port` | WebUI 端口（默认 18080） |
-| `webui_bind` | WebUI 绑定地址（默认 127.0.0.1） |
-| `webui_enabled` | 是否启用 WebUI（默认 true） |
+**Configurable keys:**
 
-### 路由管理
+| Key | Description |
+|-----|-------------|
+| `server` | VPN server address |
+| `username` | Login username (student ID) |
+| `password` | Login password (hidden input, encrypted storage) |
+| `mtu` | MTU value (default 1290) |
+| `useragent` | User-Agent string |
+| `log_file` | Log file path |
+| `webui_port` | WebUI port (default 18080) |
+| `webui_bind` | WebUI bind address (default 127.0.0.1) |
+| `webui_enabled` | Enable WebUI (default false, compatibility mode) |
 
-| 命令 | 说明 |
-|------|------|
-| `exv config routes list` | 列出所有分流路由 |
-| `exv config routes add <cidr>` | 添加路由（自动去重） |
-| `exv config routes remove <cidr>` | 删除路由 |
+### Route Management
 
-### 密钥管理
+| Command | Description |
+|---------|-------------|
+| `exv config routes list` | List all split-tunnel routes |
+| `exv config routes add <cidr>` | Add a route (auto-deduplicated) |
+| `exv config routes remove <cidr>` | Remove a route |
 
-| 命令 | 说明 |
-|------|------|
-| `exv config key show` | 查看密钥文件路径与有效性 |
-| `exv config key reset` | 重新生成密钥（清除密码密文，需确认） |
+### Key Management
 
-### 日志与帮助
+| Command | Description |
+|---------|-------------|
+| `exv config key show` | Show key file path and validity |
+| `exv config key reset` | Regenerate key (clears password ciphertext, requires confirmation) |
 
-| 命令 | 说明 |
-|------|------|
-| `exv logs` \| `-l` | 查看最近 50 条日志 |
-| `exv help` \| `-h` | 帮助信息 |
-| `exv version` \| `-v` | 版本号 |
+### Logs and Help
 
----
-
-## WebUI
-
-VPN 启动后自动在后台运行 WebUI（默认 `http://127.0.0.1:18080/`），提供：
-
-- 实时 VPN 状态与流量监控
-- 配置在线编辑
-- 实时日志流（SSE）
-- VPN 启停控制
-
-WebUI 默认启用，可通过 `exv config set webui_enabled` 设为 `false` 关闭。
+| Command | Description |
+|---------|-------------|
+| `exv logs` \| `-l` | Show last 50 log entries |
+| `exv help` \| `-h` | Help information |
+| `exv version` \| `-v` | Version number |
 
 ---
 
-## 配置文件格式
+## Desktop App
 
-配置文件位于 `~/.ecnuvpn/config.json`，可手动编辑（密码字段存储的是密文）：
+The Electron-based desktop app is the recommended interface for macOS and Windows. It provides:
+
+- One-click VPN connect/disconnect
+- Real-time VPN status and traffic monitoring
+- Route management (add/remove campus IP ranges)
+- Config editing
+- Real-time log viewer
+- No browser required
+
+The desktop shell communicates with the native `exv desktop-rpc` JSON interface through Electron IPC (preload script). It does not open or depend on the embedded WebUI HTTP server.
+
+### Desktop App Development
+
+```bash
+cd webui
+npm install
+npm run build
+npm run build:electron
+
+# Package the desktop app (after building the native C++ binary)
+npm run desktop:build
+```
+
+For live development, build the native binary first or set `EXV_PATH`:
+
+```bash
+cd webui
+npm run desktop:dev
+```
+
+### Windows Desktop Packaging
+
+The Electron desktop app can be packaged for Windows in two flavours:
+
+```powershell
+# 1. Stage the openconnect runtime once (DLLs + wintun.dll + optional TAP assets)
+powershell -ExecutionPolicy Bypass -File scripts\stage-openconnect-runtime-win.ps1 -SourceDir <openconnect-gui install dir>
+
+# 2. Build the Electron desktop bundle (produces both targets in webui/release/)
+cd webui
+npm install
+npm run desktop:build
+```
+
+Artifacts (under `webui/release/`):
+
+- `ECNU-VPN-<version>-portable.exe` — single-file portable build; just double-click. No service is installed.
+- `ECNU VPN Setup <version>.exe` — NSIS installer; offers per-machine install and automatically registers the `exv-helper` Windows service.
+
+### Desktop App VPN Modes
+
+The desktop app can operate in three modes depending on whether the privileged helper service is installed:
+
+- **Helper mode** — The recommended mode for daily use. After installing the helper service (one-time step via the desktop app's Service page or `exv service install`), the desktop app and CLI can start/stop VPN without sudo or admin elevation. All operations go through the helper daemon (launchd on macOS, Windows service on Windows, systemd on Linux).
+
+- **Elevated mode** — When the helper service is not installed, the desktop app can use one-time elevation (UAC prompt on Windows, sudo prompt on macOS) for a temporary VPN session. This works for quick use but does not provide persistent convenience like helper mode. The desktop app handles the elevation flow automatically.
+
+- **Direct mode** — An internal fallback where the desktop app manages VPN operations directly with elevated privileges. Used automatically when the helper is unavailable and the user has granted elevation. This mode does not persist across app restarts.
+
+For persistent convenience, install the helper service via the desktop app's Service page or `exv service install`.
+
+---
+
+## WebUI (Browser Compatibility Mode)
+
+A browser-based WebUI is available for environments where the desktop app is not available (e.g., Linux, or running on a headless server), providing:
+
+- Real-time VPN status and traffic monitoring
+- Config editing
+- Real-time log stream (SSE)
+- VPN start/stop control
+- Route management
+
+The WebUI does **not** start by default. To launch it, use `exv --webui` (starts VPN + WebUI server) or `exv --webui --foreground` (attached to terminal, Ctrl+C to stop). The WebUI listens at `http://127.0.0.1:18080/` by default.
+
+The WebUI is a **compatibility/debugging option**. The desktop app is the recommended interface on macOS and Windows.
+
+WebUI is disabled by default. To enable it (compatibility mode): `exv config set webui_enabled` set to `true`, or use `exv --webui` for a one-time session.
+
+---
+
+## Config File Format
+
+Config file location: `~/.ecnuvpn/config.json` on macOS/Linux, `%APPDATA%\ecnuvpn\config.json` on Windows.
 
 ```json
 {
@@ -169,66 +284,84 @@ WebUI 默认启用，可通过 `exv config set webui_enabled` 设为 `false` 关
     "log_file": "~/.ecnuvpn/ecnuvpn.log",
     "webui_port": 18080,
     "webui_bind": "127.0.0.1",
-    "webui_enabled": true
+    "webui_enabled": false
 }
 ```
 
-**通过 `config import` 导入时**，`password` 字段可写明文——程序会自动加密后存储。
+When importing via `config import`, the `password` field can be plaintext — the program will encrypt it automatically.
 
 ---
 
-## 加密说明
+## Encryption
 
-- 密码通过 **AES-256-CBC** 加密（macOS 内置 CommonCrypto，无需额外依赖）
-- 密钥（32 字节随机数）存储于 `~/.ecnuvpn/.key`，文件权限 **0600**
-- `config show` 始终展示脱敏结果（`••••••••  (encrypted)`）
+- Passwords are encrypted with **AES-256-CBC**
+  - macOS: CommonCrypto (built-in, no extra dependency)
+  - Windows: CNG/BCrypt (built-in, no extra dependency)
+  - Linux: OpenSSL
+- The encryption key (32-byte random) is stored at `~/.ecnuvpn/.key` (macOS/Linux) or `%APPDATA%\ecnuvpn\.key` (Windows) with file permission **0600**
+- `config show` always displays a masked result (`••••••••  (encrypted)`)
 
-### 密钥故障处理
+### Key Troubleshooting
 
-如果 `config show` 显示 `[KEY MISSING]` 或 `[KEY CORRUPT]`：
+If `config show` displays `[KEY MISSING]` or `[KEY CORRUPT]`:
 
 ```bash
-exv config key reset    # 重新生成密钥（原密码密文将被清除）
-exv config set password # 重新设置密码
+exv config key reset    # Regenerate key (existing password ciphertext will be cleared)
+exv config set password # Set password again
 ```
 
 ---
 
-## 运行时文件
+## Runtime Files
 
-| 文件 | 说明 |
-|------|------|
-| `~/.ecnuvpn/config.json` | 配置（密码为密文） |
-| `~/.ecnuvpn/.key` | AES-256 加密密钥（0600） |
-| `~/.ecnuvpn/tunnel.sh` | 隧道脚本（每次 start 自动生成） |
-| `~/.ecnuvpn/ecnuvpn.pid` | openconnect 进程 PID |
-| `~/.ecnuvpn/ecnuvpn-supervisor.pid` | 自动重连 supervisor PID |
-| `~/.ecnuvpn/route-ready` | 路由配置完成标记（接口名 + 内网 IP） |
-| `~/.ecnuvpn/ecnuvpn.log` | 带时间戳的运行日志 |
+### User-Level Files
 
-### 系统级文件
+| File | Description |
+|------|-------------|
+| `~/.ecnuvpn/config.json` (or `%APPDATA%\ecnuvpn\config.json`) | Config (password is ciphertext) |
+| `~/.ecnuvpn/.key` (or `%APPDATA%\ecnuvpn\.key`) | AES-256 encryption key (0600) |
+| `~/.ecnuvpn/tunnel.sh` | Tunnel script (auto-generated on each start) |
+| `~/.ecnuvpn/ecnuvpn.pid` | openconnect process PID |
+| `~/.ecnuvpn/ecnuvpn-supervisor.pid` | Auto-reconnect supervisor PID |
+| `~/.ecnuvpn/route-ready` | Route configuration completion marker (interface name + internal IP) |
+| `~/.ecnuvpn/ecnuvpn.log` | Timestamped runtime log |
 
-| 文件 | 说明 |
-|------|------|
-| `/Library/LaunchDaemons/com.ecnu.exv.helper.plist` | launchd root helper 定义 |
-| `/var/run/exv-helper.sock` | 本地 Unix socket（root:staff 0660），普通用户通过它请求 root helper |
-| `/var/run/exv-helper-session.json` | 当前 helper 管理的会话状态 |
+### System-Level Files (macOS)
+
+| File | Description |
+|------|-------------|
+| `/Library/LaunchDaemons/com.ecnu.exv.helper.plist` | launchd root helper definition |
+| `/var/run/exv-helper.sock` | Local Unix socket (root:staff 0660), used by regular users to request the root helper |
+| `/var/run/exv-helper-session.json` | Current session state managed by the helper |
+
+### System-Level Files (Windows)
+
+| File | Description |
+|------|-------------|
+| `C:\Program Files\ECNU-VPN\bin\exv.exe` | Native VPN binary |
+| `exv-helper` Windows service | Registered via `exv service install` |
+| `%APPDATA%\ecnuvpn\` | User config, key, and log files |
 
 ---
 
-## 常见问题
+## FAQ
 
-**Q：VPN 启动失败，提示 openconnect not installed？**
-程序会询问是否自动安装：`Install openconnect now? [Y/n]`，回车即可通过 Homebrew 安装。
+**Q: VPN fails to start, says openconnect not installed?**
 
-**Q：VPN 已连接但校内资源访问不了？**
-检查路由配置：`exv config routes list`，确认目标 IP 所在网段已添加。
+On macOS, the program will ask: `Install openconnect now? [Y/n]` — press Enter to install via Homebrew. On other platforms, install openconnect manually.
 
-**Q：为什么不用每次 `sudo exv` 了？**
-`sudo exv service install` 安装 launchd root helper 后，`exv` / `exv stop` 通过 Unix socket（`/var/run/exv-helper.sock`，group staff）请求 helper 代为执行特权操作。
+**Q: VPN is connected but campus resources are inaccessible?**
 
-**Q：`exv` 提示 "helper daemon is not installed"？**
-运行 `sudo exv service install` 安装 helper。安装后 `exv` 和 `exv stop` 均无需 sudo。
+Check your route configuration: `exv config routes list`, and confirm the target IP range is included.
 
-**Q：`exv stop` 提示找不到进程？**
-可能 PID 文件已丢失，helper 会回退到 `pgrep` 查找。若 helper 未安装，可先执行 `sudo exv service install`；仍失败时再手动 `sudo killall openconnect`。
+**Q: Why don't I need `sudo exv` every time?**
+
+After `sudo exv service install` (or the Windows equivalent), `exv` / `exv stop` communicate with the privileged helper through a Unix socket (macOS/Linux) or named pipe (Windows) to perform privileged operations on your behalf.
+
+**Q: `exv` says "helper daemon is not installed"?**
+
+Run `sudo exv service install` to install the helper. After installation, `exv` and `exv stop` do not need sudo.
+
+**Q: `exv stop` says process not found?**
+
+The PID file may be lost; the helper falls back to `pgrep` to find it. If that also fails, you can manually run `sudo killall openconnect` (macOS/Linux) or stop the process via Task Manager (Windows).
