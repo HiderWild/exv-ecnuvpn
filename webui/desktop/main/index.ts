@@ -333,7 +333,16 @@ ipcMain.handle('ecnu-vpn:service-command', async (_event, command: 'install' | '
 })
 
 ipcMain.handle('ecnu-vpn:driver-install', async (_event, driver: 'wintun' | 'tap') => {
-  return runDesktopRpcElevated('drivers.install', { driver }, 'drivers.status')
+  try {
+    return await runDesktopRpcElevated('drivers.install', { driver }, 'drivers.status')
+  } catch (err: unknown) {
+    return structuredError(
+      'elevation_denied',
+      'User denied elevation request for driver installation',
+      true,
+      'Retry and accept the elevation request, or install the driver manually',
+    )
+  }
 })
 
 app.whenReady().then(createWindow)

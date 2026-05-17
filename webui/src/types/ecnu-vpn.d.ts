@@ -33,6 +33,7 @@ export interface VpnError {
   message: string
   recoverable: boolean
   recommended_action: string
+  timestamp?: number
 }
 
 export type ConnectMode = 'helper' | 'elevated' | 'direct'

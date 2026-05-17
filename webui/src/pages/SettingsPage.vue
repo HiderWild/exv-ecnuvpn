@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { AlertTriangle, CheckCircle, HardDriveDownload, RefreshCcw, Save } from 'lucide-vue-next'
 import { useConfigStore, type SettingsConfig } from '../stores/config'
-import { errorMessage } from '../utils/errors'
+import { normalizeError } from '../stores/vpn'
 
 const config = useConfigStore()
 const saving = ref(false)
@@ -74,7 +74,7 @@ onMounted(async () => {
     try {
       await refreshRuntime()
     } catch (error) {
-      message.value = { type: 'error', text: errorMessage(error) }
+      message.value = { type: 'error', text: normalizeError(error).message }
     }
   }
 })
@@ -89,7 +89,7 @@ async function save() {
     }
     message.value = { type: 'success', text: '设置已保存' }
   } catch (error) {
-    message.value = { type: 'error', text: errorMessage(error) }
+    message.value = { type: 'error', text: normalizeError(error).message }
   } finally {
     saving.value = false
   }
@@ -120,7 +120,7 @@ async function installDriver(driver: 'wintun' | 'tap') {
       }
     }
   } catch (error) {
-    message.value = { type: 'error', text: errorMessage(error) }
+    message.value = { type: 'error', text: normalizeError(error).message }
   } finally {
     busyDriver.value = null
   }

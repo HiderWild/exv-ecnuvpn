@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import api from '../api/desktop'
-import { errorMessage } from '../utils/errors'
 
 export interface VpnStatus {
   connected: boolean

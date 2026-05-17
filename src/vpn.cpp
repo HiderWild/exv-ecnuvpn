@@ -1,5 +1,6 @@
 #include "vpn.hpp"
 #include "config.hpp"
+#include "error_types.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
 #include "tunnel.hpp"
@@ -1412,15 +1413,15 @@ nlohmann::json direct_status_json(const Config &cfg) {
 nlohmann::json direct_stop_json() {
   if (!utils::check_root()) {
 #ifdef _WIN32
-    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
-                          {"message", "Administrator privileges required to stop VPN."},
-                          {"recoverable", true},
-                          {"recommended_action", "Install the helper service to avoid elevation prompts, or retry and accept the elevation request"}};
+    return structured_error(kErrorElevationRequired,
+                            "Administrator privileges required to stop VPN.",
+                            true,
+                            "Install the helper service to avoid elevation prompts, or retry and accept the elevation request");
 #else
-    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
-                          {"message", "Root privileges required to stop VPN."},
-                          {"recoverable", true},
-                          {"recommended_action", "Install the helper service to avoid elevation prompts, or run with sudo"}};
+    return structured_error(kErrorElevationRequired,
+                            "Root privileges required to stop VPN.",
+                            true,
+                            "Install the helper service to avoid elevation prompts, or run with sudo");
 #endif
   }
 
@@ -1482,46 +1483,46 @@ nlohmann::json direct_start_json(const Config &cfg,
                                  int retry_limit) {
   if (!utils::check_root()) {
 #ifdef _WIN32
-    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
-                          {"message", "Administrator privileges required to start VPN."},
-                          {"recoverable", true},
-                          {"recommended_action", "Install the helper service to avoid elevation prompts, or retry and accept the elevation request"}};
+    return structured_error(kErrorElevationRequired,
+                            "Administrator privileges required to start VPN.",
+                            true,
+                            "Install the helper service to avoid elevation prompts, or retry and accept the elevation request");
 #else
-    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
-                          {"message", "Root privileges required to start VPN."},
-                          {"recoverable", true},
-                          {"recommended_action", "Install the helper service to avoid elevation prompts, or run with sudo"}};
+    return structured_error(kErrorElevationRequired,
+                            "Root privileges required to start VPN.",
+                            true,
+                            "Install the helper service to avoid elevation prompts, or run with sudo");
 #endif
   }
 
   std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
   if (openconnect_path.empty()) {
-    return nlohmann::json{{"ok", false}, {"error_type", "runtime_missing"},
-                          {"message", "OpenConnect runtime is not available."},
-                          {"recoverable", true},
-                          {"recommended_action", "Ensure the desktop package contains the bundled OpenConnect runtime"}};
+    return structured_error(kErrorRuntimeMissing,
+                            "OpenConnect runtime is not available.",
+                            true,
+                            "Ensure the desktop package contains the bundled OpenConnect runtime");
   }
 
   if (cfg.server.empty())
-    return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
-                          {"message", "VPN server is not configured."},
-                          {"recoverable", true},
-                          {"recommended_action", "Configure the VPN server address in Settings"}};
+    return structured_error(kErrorConfigInvalid,
+                            "VPN server is not configured.",
+                            true,
+                            "Configure the VPN server address in Settings");
   if (cfg.username.empty())
-    return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
-                          {"message", "VPN username is not configured."},
-                          {"recoverable", true},
-                          {"recommended_action", "Configure your VPN username in Settings"}};
+    return structured_error(kErrorConfigInvalid,
+                            "VPN username is not configured.",
+                            true,
+                            "Configure your VPN username in Settings");
   if (plaintext_password.empty() && cfg.password.empty())
-    return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
-                          {"message", "VPN password is not configured."},
-                          {"recoverable", true},
-                          {"recommended_action", "Configure your VPN password in Settings"}};
+    return structured_error(kErrorConfigInvalid,
+                            "VPN password is not configured.",
+                            true,
+                            "Configure your VPN password in Settings");
   if (!tunnel::write_script(cfg)) {
-    return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
-                          {"message", "Failed to generate tunnel script."},
-                          {"recoverable", true},
-                          {"recommended_action", "Retry the operation"}};
+    return structured_error(kErrorNativeFailure,
+                            "Failed to generate tunnel script.",
+                            true,
+                            "Retry the operation");
   }
 
 #ifdef _WIN32
@@ -1529,10 +1530,10 @@ nlohmann::json direct_start_json(const Config &cfg,
   // Basic driver validation for Windows
   std::string wintun_path = utils::get_bundled_wintun_path();
   if (cfg.windows_tunnel_driver == "wintun" && wintun_path.empty()) {
-    return nlohmann::json{{"ok", false}, {"error_type", "runtime_missing"},
-                          {"message", "Wintun is selected but bundled wintun.dll is missing."},
-                          {"recoverable", true},
-                          {"recommended_action", "Rebuild the desktop package with the bundled native runtime assets"}};
+    return structured_error(kErrorRuntimeMissing,
+                            "Wintun is selected but bundled wintun.dll is missing.",
+                            true,
+                            "Rebuild the desktop package with the bundled native runtime assets");
   }
 #endif
 
@@ -1541,18 +1542,18 @@ nlohmann::json direct_start_json(const Config &cfg,
   if (existing_pid <= 0 || !is_process_alive(existing_pid))
     existing_pid = find_openconnect_pid();
   if (existing_pid > 0) {
-    return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
-                          {"message", "VPN is already running (PID " + std::to_string(existing_pid) + ")."},
-                          {"recoverable", true},
-                          {"recommended_action", "Disconnect the current VPN session first"}};
+    return structured_error(kErrorNativeFailure,
+                            "VPN is already running (PID " + std::to_string(existing_pid) + ").",
+                            true,
+                            "Disconnect the current VPN session first");
   }
 
   int rc = start_with_password(cfg, plaintext_password, retry_limit);
   if (rc != 0) {
-    return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
-                          {"message", "VPN connection failed."},
-                          {"recoverable", true},
-                          {"recommended_action", "Check VPN logs for details and retry"}};
+    return structured_error(kErrorNativeFailure,
+                            "VPN connection failed.",
+                            true,
+                            "Check VPN logs for details and retry");
   }
 
   // Return the new status after successful start
