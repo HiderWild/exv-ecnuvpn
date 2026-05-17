@@ -1,6 +1,7 @@
 # Build
 build/
 build-*/
+!webui/build-resources/
 cmake-build-*/
 dbg/
 *.o
