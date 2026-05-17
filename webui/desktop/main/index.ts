@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, Menu } from 'electron'
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -41,9 +41,13 @@ function rendererIndex() {
   return join(__dirname, '..', '..', 'dist', 'index.html')
 }
 
+function repoRoot() {
+  return resolve(__dirname, '..', '..', '..')
+}
+
 function resolveExvPath() {
   if (process.env.EXV_PATH && existsSync(process.env.EXV_PATH)) {
-    return process.env.EXV_PATH
+    return resolve(process.env.EXV_PATH)
   }
 
   const exeName = process.platform === 'win32' ? 'exv.exe' : 'exv'
@@ -52,22 +56,61 @@ function resolveExvPath() {
     return packaged
   }
 
-  const repoRoot = resolve(__dirname, '..', '..', '..')
+  const root = repoRoot()
   const candidates = process.platform === 'win32'
     ? [
-        join(repoRoot, 'build', 'Release', 'exv.exe'),
-        join(repoRoot, 'build', 'exv.exe'),
-        join(repoRoot, 'build-desktop', 'Release', 'exv.exe'),
-        join(repoRoot, 'build-desktop', 'exv.exe'),
+        join(root, 'build', 'exv.exe'),
+        join(root, 'build', 'Release', 'exv.exe'),
+        join(root, 'build-desktop', 'exv.exe'),
+        join(root, 'build-desktop', 'Release', 'exv.exe'),
       ]
     : [
-        join(repoRoot, 'build', 'exv'),
-        join(repoRoot, 'build-desktop', 'exv'),
+        join(root, 'build', 'exv'),
+        join(root, 'build-desktop', 'exv'),
       ]
 
   const found = candidates.find((candidate) => existsSync(candidate))
   if (found) return found
   return candidates[0]
+}
+
+function runtimeBinaryName() {
+  return process.platform === 'win32' ? 'openconnect.exe' : 'openconnect'
+}
+
+function resolveRuntimeDir(exv = resolveExvPath()) {
+  if (process.env.ECNUVPN_RUNTIME_DIR && existsSync(process.env.ECNUVPN_RUNTIME_DIR)) {
+    return process.env.ECNUVPN_RUNTIME_DIR
+  }
+
+  const root = repoRoot()
+  const candidates = app.isPackaged
+    ? [join(process.resourcesPath, 'bin')]
+    : [
+        join(root, 'runtime', `${process.platform}-${process.arch}`),
+        join(root, 'runtime', process.platform),
+        dirname(exv),
+      ]
+
+  return candidates.find((candidate) => existsSync(join(candidate, runtimeBinaryName())))
+}
+
+function nativeEnv(exv = resolveExvPath()) {
+  const env = { ...process.env }
+  const runtimeDir = resolveRuntimeDir(exv)
+  if (runtimeDir) {
+    env.ECNUVPN_RUNTIME_DIR = runtimeDir
+  }
+  return env
+}
+
+function nativeExecOptions(exv: string, extra: { maxBuffer?: number } = {}) {
+  return {
+    windowsHide: true,
+    cwd: dirname(exv),
+    env: nativeEnv(exv),
+    ...extra,
+  }
 }
 
 function parseJsonOutput(stdout: string) {
@@ -82,6 +125,19 @@ function parseJsonOutput(stdout: string) {
   throw new Error(`Native command returned non-JSON output: ${stdout.slice(0, 500)}`)
 }
 
+function isServiceUsable(status: unknown) {
+  return Boolean(
+    status &&
+      typeof status === 'object' &&
+      'installed' in status &&
+      'running' in status &&
+      'available' in status &&
+      (status as { installed?: unknown }).installed === true &&
+      (status as { running?: unknown }).running === true &&
+      (status as { available?: unknown }).available === true,
+  )
+}
+
 async function runDesktopRpc(action: string, payload: unknown = {}) {
   if (!validRpcActions.has(action)) {
     throw new Error(`Unknown desktop RPC action: ${action}`)
@@ -92,7 +148,7 @@ async function runDesktopRpc(action: string, payload: unknown = {}) {
     const { stdout } = await execFileAsync(
       exv,
       ['desktop-rpc', action, JSON.stringify(payload ?? {})],
-      { windowsHide: true, maxBuffer: 1024 * 1024 * 4 },
+      nativeExecOptions(exv, { maxBuffer: 1024 * 1024 * 4 }),
     )
     const result = parseJsonOutput(stdout)
     if (result && result.ok === false) {
@@ -132,24 +188,98 @@ function psArray(values: string[]) {
   return `@(${values.map((value) => psQuote(value)).join(', ')})`
 }
 
+function emitEvent(type: string, data: unknown) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('ecnu-vpn:event', { type, data })
+}
+
+function psRuntimeEnvPrefix(exv: string) {
+  const runtimeDir = resolveRuntimeDir(exv)
+  return runtimeDir ? `$env:ECNUVPN_RUNTIME_DIR = ${psQuote(runtimeDir)}; ` : ''
+}
+
+function readNewLogLines(logPath: string, offset: number) {
+  if (!existsSync(logPath)) {
+    return { offset, lines: [] as string[] }
+  }
+  const content = readFileSync(logPath, 'utf8')
+  const chunk = content.slice(offset)
+  const lines = chunk
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  return { offset: content.length, lines }
+}
+
+function emitServiceProgress(command: 'install' | 'uninstall', line: string) {
+  emitEvent('service-progress', {
+    command,
+    message: line.replace(/\u001b\[[0-9;]*m/g, ''),
+    timestamp: new Date().toISOString(),
+  })
+}
+
 async function runServiceCommandElevated(command: 'install' | 'uninstall') {
   const exv = resolveExvPath()
+  emitServiceProgress(command, `Starting service ${command}...`)
 
   if (process.platform === 'win32') {
+    const logPath = join(app.getPath('temp'), `ecnu-vpn-service-${command}-${Date.now()}.log`)
+    let offset = 0
+    const poll = setInterval(() => {
+      const next = readNewLogLines(logPath, offset)
+      offset = next.offset
+      for (const line of next.lines) emitServiceProgress(command, line)
+    }, 250)
+
+    const inner = [
+      '$ErrorActionPreference = "Continue"',
+      psRuntimeEnvPrefix(exv).trim(),
+      `Set-Location ${psQuote(dirname(exv))}`,
+      `& ${psQuote(exv)} service ${command} *>&1 | ForEach-Object { $_; $_ | Out-File -FilePath ${psQuote(logPath)} -Append -Encoding utf8 }`,
+      'exit $LASTEXITCODE',
+    ].filter(Boolean).join('; ')
+
     const ps = [
       'Start-Process',
-      '-FilePath', psQuote(exv),
-      '-ArgumentList', psQuote(`service ${command}`),
+      '-FilePath', psQuote('powershell.exe'),
+      '-ArgumentList', psArray([
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        inner,
+      ]),
+      '-WorkingDirectory', psQuote(dirname(exv)),
+      '-WindowStyle', 'Hidden',
       '-Verb', 'RunAs',
       '-Wait',
+      '-PassThru',
     ].join(' ')
-    await execFileAsync('powershell.exe', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      ps,
-    ], { windowsHide: true })
+    try {
+      await execFileAsync('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `$p = ${ps}; if ($p.ExitCode -ne 0) { exit $p.ExitCode }`,
+      ], { windowsHide: true })
+    } catch (error) {
+      const next = readNewLogLines(logPath, offset)
+      offset = next.offset
+      for (const line of next.lines) emitServiceProgress(command, line)
+      throw error
+    } finally {
+      clearInterval(poll)
+      const next = readNewLogLines(logPath, offset)
+      for (const line of next.lines) emitServiceProgress(command, line)
+      try {
+        if (existsSync(logPath)) unlinkSync(logPath)
+      } catch {
+        // Temporary progress logs are best-effort cleanup.
+      }
+    }
+    emitServiceProgress(command, `Service ${command} command completed.`)
     return
   }
 
@@ -159,21 +289,28 @@ async function runServiceCommandElevated(command: 'install' | 'uninstall') {
       '-e',
       `do shell script ${JSON.stringify(cmd)} with administrator privileges`,
     ])
+    emitServiceProgress(command, `Service ${command} command completed.`)
     return
   }
 
-  await execFileAsync(exv, ['service', command], { windowsHide: true })
+  await execFileAsync(exv, ['service', command], nativeExecOptions(exv))
+  emitServiceProgress(command, `Service ${command} command completed.`)
 }
 
 async function runDesktopRpcElevated(action: string, payload: unknown, followupAction: string) {
+  if (!validRpcActions.has(action)) {
+    throw new Error(`Unknown desktop RPC action: ${action}`)
+  }
+
   const exv = resolveExvPath()
 
   if (process.platform === 'win32') {
     const args = ['desktop-rpc', action, JSON.stringify(payload ?? {})]
-    const ps = [
+    const ps = psRuntimeEnvPrefix(exv) + [
       'Start-Process',
       '-FilePath', psQuote(exv),
       '-ArgumentList', psArray(args),
+      '-WorkingDirectory', psQuote(dirname(exv)),
       '-Verb', 'RunAs',
       '-Wait',
     ].join(' ')
@@ -185,6 +322,21 @@ async function runDesktopRpcElevated(action: string, payload: unknown, followupA
       ps,
     ], { windowsHide: true })
     return runDesktopRpc(followupAction)
+  }
+
+  if (process.platform === 'darwin') {
+    const args = ['desktop-rpc', action, JSON.stringify(payload ?? {})]
+    const command = [shellQuote(exv), ...args.map((value) => shellQuote(value))].join(' ')
+    const { stdout } = await execFileAsync('osascript', [
+      '-e',
+      `do shell script ${JSON.stringify(command)} with administrator privileges`,
+    ], { maxBuffer: 1024 * 1024 * 4 })
+
+    const result = parseJsonOutput(stdout)
+    if (result && result.ok === false) {
+      throw new Error(result.error || result.message || 'Native desktop RPC failed')
+    }
+    return result
   }
 
   return runDesktopRpc(action, payload)
@@ -223,10 +375,10 @@ function startEventPump() {
     if (!mainWindow || mainWindow.isDestroyed()) return
     try {
       const status = await runDesktopRpc('status.get')
-      mainWindow.webContents.send('ecnu-vpn:event', { type: 'status', data: status })
-      mainWindow.webContents.send('ecnu-vpn:event', { type: 'heartbeat', data: {} })
+      emitEvent('status', status)
+      emitEvent('heartbeat', {})
     } catch {
-      mainWindow.webContents.send('ecnu-vpn:event', { type: 'heartbeat', data: {} })
+      emitEvent('heartbeat', {})
     }
   }, 3000)
 
@@ -238,7 +390,7 @@ function startEventPump() {
         const next = logs.slice(seenLogCount)
         seenLogCount = logs.length
         for (const entry of next) {
-          mainWindow.webContents.send('ecnu-vpn:event', { type: 'log', data: entry })
+          emitEvent('log', entry)
         }
       }
     } catch {
@@ -258,9 +410,41 @@ ipcMain.handle('ecnu-vpn:rpc', async (_event, action: string, payload?: unknown)
   return runDesktopRpc(action, payload)
 })
 
+ipcMain.handle(
+  'ecnu-vpn:rpc-elevated',
+  async (_event, action: string, payload?: unknown, followupAction = 'status.get') => {
+    return runDesktopRpcElevated(action, payload, followupAction)
+  },
+)
+
 ipcMain.handle('ecnu-vpn:service-command', async (_event, command: 'install' | 'uninstall') => {
-  await runServiceCommandElevated(command)
-  return runDesktopRpc('service.status')
+  try {
+    await runServiceCommandElevated(command)
+    const status = await runDesktopRpc('service.status')
+    if (command === 'install' && !isServiceUsable(status)) {
+      throw new Error('Helper service was installed but is not available to the desktop client.')
+    }
+    if (
+      command === 'uninstall' &&
+      status &&
+      typeof status === 'object' &&
+      (status as { installed?: unknown }).installed === true
+    ) {
+      throw new Error('Helper service uninstall completed, but the service is still registered.')
+    }
+    return status
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    try {
+      const status = await runDesktopRpc('service.status')
+      if (status && typeof status === 'object' && status.installed) {
+        return { ...status, warning: message }
+      }
+    } catch {
+      // Preserve the original elevated command error below.
+    }
+    throw error
+  }
 })
 
 ipcMain.handle('ecnu-vpn:driver-install', async (_event, driver: 'wintun' | 'tap') => {

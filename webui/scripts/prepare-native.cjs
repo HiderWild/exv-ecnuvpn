@@ -27,6 +27,11 @@ const DENY_EXACT = new Set([
 ])
 const DENY_PATTERNS = [/^libssl-/i, /^libcrypto-/i]
 const DENY_EXTS = new Set(['.lib', '.pdb', '.exp', '.a', '.map'])
+const MINGW_RUNTIME_DLLS = [
+  'libgcc_s_seh-1.dll',
+  'libstdc++-6.dll',
+  'libwinpthread-1.dll',
+]
 
 function isAllowed(name) {
   if (DENY_EXACT.has(name)) return false
@@ -50,6 +55,10 @@ function copyRecursive(source, target) {
       console.log(`Skipping ${entry.name}`)
       continue
     }
+    if (MINGW_RUNTIME_DLLS.includes(entry.name) && fs.existsSync(targetPath)) {
+      console.log(`Keeping staged native runtime DLL: ${entry.name}`)
+      continue
+    }
     fs.copyFileSync(sourcePath, targetPath)
   }
 }
@@ -58,9 +67,10 @@ const exeCandidates = [
   process.env.EXV_PATH,
   ...(process.platform === 'win32'
   ? [
-      path.join(root, 'build', 'Release', 'exv.exe'),
       path.join(root, 'build', 'exv.exe'),
+      path.join(root, 'build', 'Release', 'exv.exe'),
       path.join(root, 'build-desktop', 'exv.exe'),
+      path.join(root, 'build-desktop', 'Release', 'exv.exe'),
     ]
   : [
       path.join(root, 'build', 'exv'),
@@ -82,13 +92,24 @@ if (process.platform !== 'win32') {
 }
 console.log(`Copied native binary: ${exeSource} -> ${target}`)
 
-// On Windows the native exv binary depends on a handful of MinGW runtime DLLs.
-// They live next to the build output, so we look in the same directories.
-const MINGW_RUNTIME_DLLS = [
-  'libgcc_s_seh-1.dll',
-  'libstdc++-6.dll',
-  'libwinpthread-1.dll',
-]
+if (process.platform === 'win32') {
+  const helperCandidates = [
+    process.env.EXV_HELPER_PATH,
+    path.join(path.dirname(exeSource), 'exv-helper.exe'),
+    path.join(root, 'build', 'exv-helper.exe'),
+    path.join(root, 'build', 'Release', 'exv-helper.exe'),
+    path.join(root, 'build-desktop', 'exv-helper.exe'),
+    path.join(root, 'build-desktop', 'Release', 'exv-helper.exe'),
+  ].filter(Boolean)
+  const helperSource = helperCandidates.find((candidate) => fs.existsSync(candidate))
+  if (!helperSource) {
+    throw new Error(
+      `Native exv-helper binary not found. Build it first with CMake. Checked:\n  - ${helperCandidates.join('\n  - ')}`,
+    )
+  }
+  fs.copyFileSync(helperSource, path.join(outDir, 'exv-helper.exe'))
+  console.log(`Copied native helper: ${helperSource} -> ${path.join(outDir, 'exv-helper.exe')}`)
+}
 
 if (process.platform === 'win32') {
   const exeDir = path.dirname(exeSource)

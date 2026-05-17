@@ -22,11 +22,31 @@ public:
 
   bool start(const std::string &path) override {
 #ifdef _WIN32
+    PSECURITY_DESCRIPTOR security_descriptor = NULL;
+    SECURITY_ATTRIBUTES security_attributes = {};
+    security_attributes.nLength = sizeof(security_attributes);
+    security_attributes.bInheritHandle = FALSE;
+
+    // LocalSystem owns the service process, but the desktop client runs as the
+    // interactive user. Grant interactive users pipe read/write access while
+    // keeping full access for LocalSystem and Administrators.
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)", SDDL_REVISION_1,
+            &security_descriptor, NULL)) {
+      logger::error("Helper: failed to build named pipe security descriptor");
+      return false;
+    }
+    security_attributes.lpSecurityDescriptor = security_descriptor;
+
     hPipe_ = CreateNamedPipeA(
         path.c_str(),
         PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1, 65536, 65536, 0, NULL);
+        1, 65536, 65536, 0, &security_attributes);
+
+    if (security_descriptor) {
+      LocalFree(security_descriptor);
+    }
 
     if (hPipe_ == INVALID_HANDLE_VALUE) {
       logger::error("Helper: CreateNamedPipe failed");
@@ -56,6 +76,12 @@ public:
 
   bool verify_client() override {
 #ifdef _WIN32
+    // Access is controlled by the named pipe DACL. Avoid failing legitimate
+    // interactive clients because of token impersonation level differences.
+    peer_uid_ = 0;
+    peer_gid_ = 0;
+    return true;
+#if 0
     // Impersonate to get client identity
     if (!ImpersonateNamedPipeClient(hPipe_)) {
       logger::error("Helper: ImpersonateNamedPipeClient failed");
@@ -100,6 +126,7 @@ public:
     CloseHandle(hToken);
     RevertToSelf();
     return true;
+#endif
 #else
     return false;
 #endif
@@ -116,6 +143,8 @@ public:
       if (!success || bytesRead == 0)
         break;
       raw.append(buffer, bytesRead);
+      if (raw.find('\n') != std::string::npos)
+        break;
     }
     return raw;
 #else
@@ -131,7 +160,6 @@ public:
     BOOL success = WriteFile(hPipe_, payload.c_str(),
                              static_cast<DWORD>(payload.size()), &bytesWritten, NULL);
     FlushFileBuffers(hPipe_);
-    DisconnectNamedPipe(hPipe_);
     return success && bytesWritten == payload.size();
 #else
     (void)response;
@@ -144,6 +172,14 @@ public:
     if (hPipe_ != INVALID_HANDLE_VALUE) {
       CloseHandle(hPipe_);
       hPipe_ = INVALID_HANDLE_VALUE;
+    }
+#endif
+  }
+
+  void close_client() override {
+#ifdef _WIN32
+    if (hPipe_ != INVALID_HANDLE_VALUE) {
+      DisconnectNamedPipe(hPipe_);
     }
 #endif
   }

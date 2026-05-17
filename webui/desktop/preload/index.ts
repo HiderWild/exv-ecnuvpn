@@ -13,6 +13,13 @@ const api = {
   vpn: {
     connect: (password?: string) => rpc('vpn.connect', { password }),
     disconnect: () => rpc('vpn.disconnect'),
+    connectElevated: (password?: string) =>
+      ipcRenderer.invoke('ecnu-vpn:rpc-elevated', 'vpn.connect', {
+        password,
+        allow_direct_fallback: true,
+      }, 'status.get'),
+    disconnectElevated: () =>
+      ipcRenderer.invoke('ecnu-vpn:rpc-elevated', 'vpn.disconnect', {}, 'status.get'),
   },
   config: {
     getAuth: () => rpc('config.getAuth'),

@@ -43,6 +43,14 @@ export interface ServiceStatus {
   running: boolean
   path: string
   available: boolean
+  service_state?: number
+  warning?: string
+}
+
+export interface ServiceProgressEntry {
+  command: 'install' | 'uninstall'
+  message: string
+  timestamp: string
 }
 
 export const useVpnStore = defineStore('vpn', () => {
@@ -50,6 +58,8 @@ export const useVpnStore = defineStore('vpn', () => {
   const routes = ref<RouteEntry[]>([])
   const logs = ref<LogEntry[]>([])
   const serviceStatus = ref<ServiceStatus | null>(null)
+  const serviceProgress = ref<ServiceProgressEntry[]>([])
+  const serviceBusy = ref(false)
   const loading = ref(false)
   const lastError = ref<string | null>(null)
 
@@ -117,13 +127,38 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   async function installService() {
-    const { data } = await api.post<ServiceStatus>('/service/install')
-    serviceStatus.value = data
+    serviceBusy.value = true
+    serviceProgress.value = []
+    try {
+      const { data } = await api.post<ServiceStatus>('/service/install')
+      serviceStatus.value = data
+      if (data.warning || !data.available) {
+        throw new Error(data.warning || 'Helper service is not available after install.')
+      }
+    } finally {
+      serviceBusy.value = false
+    }
   }
 
   async function uninstallService() {
-    const { data } = await api.post<ServiceStatus>('/service/uninstall')
-    serviceStatus.value = data
+    serviceBusy.value = true
+    serviceProgress.value = []
+    try {
+      const { data } = await api.post<ServiceStatus>('/service/uninstall')
+      serviceStatus.value = data
+      if (data.warning || data.installed) {
+        throw new Error(data.warning || 'Helper service is still installed after uninstall.')
+      }
+    } finally {
+      serviceBusy.value = false
+    }
+  }
+
+  function addServiceProgress(entry: ServiceProgressEntry) {
+    serviceProgress.value.push(entry)
+    if (serviceProgress.value.length > 200) {
+      serviceProgress.value = serviceProgress.value.slice(-200)
+    }
   }
 
   function addLog(entry: LogEntry) {
@@ -142,10 +177,10 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   return {
-    status, loading, routes, logs, serviceStatus, lastError,
+    status, loading, routes, logs, serviceStatus, serviceProgress, serviceBusy, lastError,
     fetchStatus, connect, disconnect,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
     fetchServiceStatus, installService, uninstallService,
-    addLog, clearLogs, setLogs,
+    addLog, clearLogs, setLogs, addServiceProgress,
   }
 })

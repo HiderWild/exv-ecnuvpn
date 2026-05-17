@@ -8,6 +8,7 @@
 #include "logger.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
+#include "vpn.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -155,6 +156,32 @@ nlohmann::json disconnected_status(const Config &cfg) {
   return frontend_status_from_helper(nlohmann::json{{"running", false}}, cfg);
 }
 
+nlohmann::json frontend_status_from_snapshot(
+    const vpn::RuntimeStatusSnapshot &snapshot, const Config &cfg) {
+  uint64_t rx_bytes = 0;
+  uint64_t tx_bytes = 0;
+  if (snapshot.network_ready && !snapshot.interface_name.empty()) {
+    utils::get_interface_traffic(snapshot.interface_name, &rx_bytes, &tx_bytes);
+  }
+
+  nlohmann::json j;
+  j["connected"] = snapshot.running;
+  j["server"] = cfg.server;
+  j["username"] = cfg.username;
+  j["pid"] = snapshot.pid;
+  j["supervisor_pid"] = snapshot.supervisor_pid;
+  j["network_ready"] = snapshot.network_ready;
+  j["interface"] = snapshot.interface_name;
+  j["internal_ip"] = snapshot.internal_ip;
+  j["route_count"] = static_cast<int>(cfg.routes.size());
+  j["mtu"] = cfg.mtu;
+  j["uptime_seconds"] = 0;
+  j["rx_bytes"] = rx_bytes;
+  j["tx_bytes"] = tx_bytes;
+  virtual_network::add_status_fields(j, snapshot.interface_name);
+  return j;
+}
+
 nlohmann::json auth_config(const Config &cfg) {
   // Never echo the stored ciphertext or a fake mask back to the UI. The UI
   // shows a placeholder when password_stored is true and treats an empty
@@ -215,19 +242,41 @@ nlohmann::json service_status_json() {
   j["installed"] = utils::file_exists("/etc/systemd/system/exv-helper.service");
   j["path"] = "/usr/local/bin/exv";
 #elif defined(_WIN32)
-  j["path"] = "C:\\Program Files\\ECNU-VPN\\exv.exe";
+  j["path"] = "C:\\Program Files\\ECNU-VPN\\exv-helper.exe";
   SC_HANDLE scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
   if (scm) {
-    SC_HANDLE svc = OpenServiceA(scm, "exv-helper", SERVICE_QUERY_STATUS);
+    SC_HANDLE svc = OpenServiceA(scm, "exv-helper", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
     j["installed"] = (svc != NULL);
-    if (svc)
+    if (svc) {
+      SERVICE_STATUS status;
+      if (QueryServiceStatus(svc, &status)) {
+        j["running"] = status.dwCurrentState == SERVICE_RUNNING;
+        j["service_state"] = static_cast<int>(status.dwCurrentState);
+      } else {
+        j["running"] = false;
+      }
+      DWORD bytes_needed = 0;
+      QueryServiceConfigA(svc, NULL, 0, &bytes_needed);
+      if (bytes_needed > 0) {
+        std::vector<unsigned char> buffer(bytes_needed);
+        auto *config = reinterpret_cast<QUERY_SERVICE_CONFIGA *>(buffer.data());
+        if (QueryServiceConfigA(svc, config, bytes_needed, &bytes_needed) &&
+            config->lpBinaryPathName) {
+          j["binary_path"] = std::string(config->lpBinaryPathName);
+        }
+      }
       CloseServiceHandle(svc);
+    } else {
+      j["running"] = false;
+    }
     CloseServiceHandle(scm);
   } else {
     j["installed"] = false;
+    j["running"] = false;
   }
 #endif
-  j["running"] = available;
+  if (!j.contains("running"))
+    j["running"] = available;
   j["available"] = available;
   return j;
 }
@@ -238,6 +287,19 @@ std::string first_nonempty_line(const std::string &text) {
       return line;
   }
   return "";
+}
+
+std::string json_safe_text(const std::string &text) {
+  std::string out;
+  out.reserve(text.size());
+  for (unsigned char c : text) {
+    if (c == '\t' || c == '\n' || c == '\r' || (c >= 0x20 && c < 0x80)) {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('?');
+    }
+  }
+  return out;
 }
 
 std::string openconnect_version(const std::string &path) {
@@ -390,7 +452,8 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
 #endif
 }
 
-nlohmann::json preflight_connect(const Config &cfg, const std::string &password) {
+nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
+                                bool allow_direct_fallback = false) {
   if (cfg.server.empty())
     return error("VPN server is not configured.");
   if (cfg.username.empty())
@@ -398,7 +461,7 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password)
   if (password.empty())
     return error("VPN password is not configured.");
 
-  if (!helper::is_available()) {
+  if (!helper::is_available() && !allow_direct_fallback) {
 #ifdef _WIN32
     return error("Helper daemon is not available. Install the helper service from Settings or run 'exv service install' as Administrator.");
 #else
@@ -455,7 +518,7 @@ nlohmann::json logs_json(const nlohmann::json &payload) {
   for (size_t i = start; i < all_lines.size(); ++i) {
     lines.push_back({{"timestamp", ""},
                      {"level", "info"},
-                     {"message", all_lines[i]}});
+                     {"message", json_safe_text(all_lines[i])}});
   }
   return lines;
 }
@@ -472,6 +535,9 @@ nlohmann::json handle_action(const std::string &action,
       auto helper_resp = send_helper_request({{"action", "status"}});
       if (!helper_resp.value("ok", false) &&
           helper_resp.value("message", "") == "Helper daemon not available") {
+        vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
+        if (snapshot.running)
+          return frontend_status_from_snapshot(snapshot, cfg);
         return disconnected_status(cfg);
       }
       return frontend_status_from_helper(helper_resp, cfg);
@@ -479,14 +545,29 @@ nlohmann::json handle_action(const std::string &action,
 
     if (action == "vpn.connect") {
       std::string password = payload.value("password", std::string());
+      bool allow_direct_fallback =
+          payload.value("allow_direct_fallback", false);
       if (password.empty() && !cfg.password.empty()) {
         std::string key = crypto::load_key();
         if (!key.empty())
           password = crypto::decrypt(cfg.password, key);
       }
-      nlohmann::json preflight = preflight_connect(cfg, password);
+      nlohmann::json preflight =
+          preflight_connect(cfg, password, allow_direct_fallback);
       if (preflight.is_object() && preflight.value("ok", true) == false)
         return preflight;
+
+      if (!helper::is_available() && allow_direct_fallback) {
+        if (vpn::start_with_password(cfg, password, 0) != 0) {
+          return error("Failed to start VPN");
+        }
+
+        vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
+        if (snapshot.running)
+          return frontend_status_from_snapshot(snapshot, cfg);
+        return disconnected_status(cfg);
+      }
+
       auto helper_resp = send_helper_request({{"action", "start"},
                                               {"config", cfg},
                                               {"password", password},
@@ -501,6 +582,15 @@ nlohmann::json handle_action(const std::string &action,
 
     if (action == "vpn.disconnect") {
       auto helper_resp = send_helper_request({{"action", "stop"}});
+      if (!helper_resp.value("ok", false) &&
+          helper_resp.value("message", "") == "Helper daemon not available") {
+        vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
+        if (!snapshot.running)
+          return disconnected_status(cfg);
+        if (!vpn::stop_direct_session())
+          return error("Failed to stop VPN");
+        return disconnected_status(cfg);
+      }
       if (!helper_resp.value("ok", false)) {
         return error(helper_resp.value("message", "Failed to stop VPN"));
       }

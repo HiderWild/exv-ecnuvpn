@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+enable_testing()
+
 # Release builds optimise for size and strip debug symbols. The MinGW
 # toolchain we ship on Windows links against the gcc/g++ runtime DLLs, so
 # stripping the binary itself gives the bulk of the savings (~3-4MB).
@@ -31,22 +33,27 @@ endif()
 # Header-only nlohmann/json
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
-# Source files
-set(SOURCES
-    src/main.cpp
+set(EXV_COMMON_SOURCES
     src/config.cpp
     src/config_manager.cpp
     src/config_api.cpp
-    src/app_api.cpp
     src/crypto.cpp
     src/helper.cpp
     src/vpn.cpp
+    src/vpn_runtime.cpp
     src/tunnel.cpp
     src/virtual_network.cpp
     src/logger.cpp
     src/utils.cpp
+)
+
+# Source files
+set(SOURCES
+    src/main.cpp
+    src/app_api.cpp
     src/sse_broadcaster.cpp
     src/webui.cpp
+    ${EXV_COMMON_SOURCES}
 )
 
 add_executable(exv ${SOURCES})
@@ -69,6 +76,15 @@ elseif(WIN32)
     # dropped from the desktop bundle entirely.
     target_link_libraries(exv PRIVATE bcrypt advapi32 iphlpapi ws2_32)
     target_sources(exv PRIVATE src/helper_daemon_win.cpp)
+    add_executable(exv-helper
+        src/helper_service_win.cpp
+        src/helper_daemon_win.cpp
+        ${EXV_COMMON_SOURCES}
+    )
+    target_link_libraries(exv-helper PRIVATE Threads::Threads bcrypt advapi32 iphlpapi ws2_32)
+    target_compile_definitions(exv-helper PRIVATE
+        ECNUVPN_VERSION="${PROJECT_VERSION}"
+    )
 else()
     message(FATAL_ERROR "Unsupported platform. Supported: macOS, Linux, Windows.")
 endif()
@@ -92,9 +108,22 @@ add_dependencies(exv embed_assets)
 
 target_compile_definitions(exv PRIVATE EMBEDDED_ASSETS)
 
+add_executable(vpn_runtime_test
+        tests/vpn_runtime_test.cpp
+    src/vpn_runtime.cpp
+        src/utils.cpp
+)
+
+target_include_directories(vpn_runtime_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME vpn_runtime_test COMMAND vpn_runtime_test)
+
 # Install target
 if(WIN32)
-  install(TARGETS exv DESTINATION "C:/Program Files/ECNU-VPN")
+  install(TARGETS exv exv-helper DESTINATION "C:/Program Files/ECNU-VPN")
 else()
   install(TARGETS exv DESTINATION /usr/local/bin)
 endif()

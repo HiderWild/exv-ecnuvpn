@@ -95,7 +95,14 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function saveAuthConfig(config: Partial<AuthConfig>) {
-    const { data } = await api.put<AuthConfig>('/config/auth', config)
+    const payload = {
+      server: config.server ?? '',
+      username: config.username ?? '',
+      password: config.password ?? '',
+      remember_password: config.remember_password ?? true,
+      user_agent: config.user_agent ?? '',
+    }
+    const { data } = await api.put<AuthConfig>('/config/auth', payload)
     authConfig.value = { ...authConfig.value, ...data }
   }
 
@@ -107,7 +114,7 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function saveSettings(s: Partial<SettingsConfig>) {
-    const { data } = await api.put<SettingsConfig>('/config/settings', s)
+    const { data } = await api.put<SettingsConfig>('/config/settings', { ...s })
     settings.value = { ...settings.value, ...data }
   }
 

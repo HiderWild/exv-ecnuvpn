@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "desktop:dev": "npm-run-all --parallel dev electron:dev electron:start",
+    "dev:desktop": "vite --port 5176 --strictPort",
+    "desktop:dev": "npm-run-all --parallel dev:desktop electron:dev electron:start",
     "electron:dev": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
-    "electron:start": "wait-on http://localhost:5173 dist-electron/main/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron dist-electron/main/index.js",
+    "electron:start": "wait-on http://localhost:5176 dist-electron/main/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5176 electron dist-electron/main/index.js",
     "build": "vue-tsc -b && vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "prepare:native": "node scripts/prepare-native.cjs",
