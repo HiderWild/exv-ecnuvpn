@@ -8,6 +8,7 @@
 #include "logger.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
+#include "vpn.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -32,8 +33,24 @@ namespace {
 constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
 #endif
 
-nlohmann::json error(const std::string &message) {
-  return nlohmann::json{{"ok", false}, {"error", message}};
+// Unified error type strings matching the TypeScript VpnErrorType enum.
+static constexpr const char *kErrorElevationRequired = "elevation_required";
+static constexpr const char *kErrorElevationDenied    = "elevation_denied";
+static constexpr const char *kErrorRuntimeMissing     = "runtime_missing";
+static constexpr const char *kErrorConfigInvalid      = "config_invalid";
+static constexpr const char *kErrorServiceMissing     = "service_missing";
+static constexpr const char *kErrorNativeFailure      = "native_failure";
+static constexpr const char *kErrorParseFailure       = "parse_failure";
+static constexpr const char *kErrorUnknownAction      = "unknown_action";
+
+nlohmann::json structured_error(const char *error_type, const std::string &message,
+                                bool recoverable = true,
+                                const std::string &recommended_action = "") {
+  return nlohmann::json{{"ok", false},
+                        {"error_type", error_type},
+                        {"message", message},
+                        {"recoverable", recoverable},
+                        {"recommended_action", recommended_action}};
 }
 
 config::ConfigManager make_config_manager() {
@@ -57,8 +74,10 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
                              GENERIC_READ | GENERIC_WRITE, 0, NULL,
                              OPEN_EXISTING, 0, NULL);
   if (hPipe == INVALID_HANDLE_VALUE) {
-    return nlohmann::json{{"ok", false},
-                          {"message", "Helper daemon not available"}};
+    return structured_error(kErrorServiceMissing,
+                            "Helper daemon not available",
+                            /*recoverable=*/true,
+                            "Install the helper service");
   }
 
   DWORD bytesWritten = 0;
@@ -66,8 +85,10 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
                  &bytesWritten, NULL) ||
       bytesWritten != payload.size()) {
     CloseHandle(hPipe);
-    return nlohmann::json{{"ok", false},
-                          {"message", "Failed to send helper request"}};
+    return structured_error(kErrorNativeFailure,
+                            "Failed to send helper request",
+                            /*recoverable=*/true,
+                            "Retry the operation");
   }
 
   char buffer[1024];
@@ -82,7 +103,10 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
 #else
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
-    return nlohmann::json{{"ok", false}, {"message", "Failed to create socket"}};
+    return structured_error(kErrorNativeFailure,
+                            "Failed to create socket",
+                            /*recoverable=*/true,
+                            "Retry the operation");
   }
 
   sockaddr_un addr {};
@@ -91,17 +115,21 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
 
   if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
     close(fd);
-    return nlohmann::json{{"ok", false},
-                          {"message", "Helper daemon not available"}};
+    return structured_error(kErrorServiceMissing,
+                            "Helper daemon not available",
+                            /*recoverable=*/true,
+                            "Install the helper service");
   }
 
   if (write(fd, payload.data(), payload.size()) !=
       static_cast<ssize_t>(payload.size())) {
     close(fd);
-    return nlohmann::json{{"ok", false},
-                          {"message", "Failed to send helper request"}};
+    return structured_error(kErrorNativeFailure,
+                            "Failed to send helper request",
+                            /*recoverable=*/true,
+                            "Retry the operation");
   }
-  shutdown(fd, SHUT_WR);
+  shutdown(fd,SHUT_WR);
 
   char buffer[1024];
   ssize_t n;
@@ -119,14 +147,19 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
   raw = utils::trim(raw);
 
   if (raw.empty()) {
-    return nlohmann::json{{"ok", false}, {"message", "Empty helper response"}};
+    return structured_error(kErrorParseFailure,
+                            "Empty helper response",
+                            /*recoverable=*/true,
+                            "Retry the operation");
   }
 
   try {
     return nlohmann::json::parse(raw);
   } catch (...) {
-    return nlohmann::json{{"ok", false},
-                          {"message", "Failed to parse helper response"}};
+    return structured_error(kErrorParseFailure,
+                            "Failed to parse helper response",
+                            /*recoverable=*/true,
+                            "Retry the operation");
   }
 }
 
@@ -134,6 +167,7 @@ nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
                                            const Config &cfg) {
   nlohmann::json j;
   j["connected"] = helper_resp.value("running", false);
+  j["mode"] = helper_resp.value("running", false) ? "helper" : "disconnected";
   j["server"] = helper_resp.value("server", cfg.server);
   j["username"] = cfg.username;
   j["pid"] = helper_resp.value("pid", -1);
@@ -353,7 +387,10 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
   if (driver == "wintun") {
     std::string wintun_path = utils::get_bundled_wintun_path();
     if (wintun_path.empty())
-      return error("Bundled wintun.dll not found. Add it to the packaged runtime first.");
+      return structured_error(kErrorRuntimeMissing,
+                              "Bundled wintun.dll not found. Add it to the packaged runtime first.",
+                              /*recoverable=*/true,
+                              "Rebuild the desktop package with the bundled native runtime assets");
     return nlohmann::json{{"ok", true},
                           {"message", "Wintun is bundled and will be activated on the next connection attempt."},
                           {"status", driver_status_json(cfg)}};
@@ -362,7 +399,10 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
   if (driver == "tap") {
     std::string installer = utils::get_bundled_tap_installer_path();
     if (installer.empty()) {
-      return error("Bundled TAP installer assets are missing. Provide an installer executable or OemVista.inf in the runtime directory.");
+      return structured_error(kErrorRuntimeMissing,
+                              "Bundled TAP installer assets are missing. Provide an installer executable or OemVista.inf in the runtime directory.",
+                              /*recoverable=*/true,
+                              "Rebuild the desktop package with the bundled TAP installer assets");
     }
 
     int rc = 0;
@@ -374,7 +414,10 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
       rc = utils::run_command(utils::shell_quote(installer) + " /S");
     }
     if (rc != 0) {
-      return error("TAP driver installation failed. Check the bundled installer assets and elevated permissions.");
+      return structured_error(kErrorNativeFailure,
+                              "TAP driver installation failed. Check the bundled installer assets and elevated permissions.",
+                              /*recoverable=*/true,
+                              "Retry with elevated permissions or check the bundled installer assets");
     }
 
     return nlohmann::json{{"ok", true},
@@ -382,33 +425,57 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
                           {"status", driver_status_json(cfg)}};
   }
 
-  return error("Unknown driver install target: " + driver);
+  return structured_error(kErrorUnknownAction,
+                          "Unknown driver install target: " + driver,
+                          /*recoverable=*/false,
+                          "");
 #else
   (void)cfg;
   (void)payload;
-  return error("Driver installation is only supported on Windows.");
+  return structured_error(kErrorNativeFailure,
+                          "Driver installation is only supported on Windows.",
+                          /*recoverable=*/false,
+                          "");
 #endif
 }
 
 nlohmann::json preflight_connect(const Config &cfg, const std::string &password) {
   if (cfg.server.empty())
-    return error("VPN server is not configured.");
+    return structured_error(kErrorConfigInvalid,
+                            "VPN server is not configured",
+                            /*recoverable=*/true,
+                            "Configure the VPN server address in Settings");
   if (cfg.username.empty())
-    return error("VPN username is not configured.");
+    return structured_error(kErrorConfigInvalid,
+                            "VPN username is not configured",
+                            /*recoverable=*/true,
+                            "Configure your VPN username in Settings");
   if (password.empty())
-    return error("VPN password is not configured.");
+    return structured_error(kErrorConfigInvalid,
+                            "VPN password is not configured",
+                            /*recoverable=*/true,
+                            "Configure your VPN password in Settings");
 
   if (!helper::is_available()) {
 #ifdef _WIN32
-    return error("Helper daemon is not available. Install the helper service from Settings or run 'exv service install' as Administrator.");
+    return structured_error(kErrorServiceMissing,
+                            "Helper service is not available. Install the helper service from Settings or run 'exv service install' as Administrator.",
+                            /*recoverable=*/true,
+                            "Install the helper service from Settings");
 #else
-    return error("Helper daemon is not available. Install the helper service before starting the desktop client.");
+    return structured_error(kErrorServiceMissing,
+                            "Helper daemon is not available. Install the helper service before starting the desktop client.",
+                            /*recoverable=*/true,
+                            "Install the helper service");
 #endif
   }
 
   nlohmann::json runtime = runtime_status_json(cfg);
   if (!runtime.value("available", false)) {
-    return error("OpenConnect runtime is not available. The desktop bundle is missing openconnect and its native dependencies.");
+    return structured_error(kErrorRuntimeMissing,
+                            "OpenConnect runtime is not available",
+                            /*recoverable=*/true,
+                            "Ensure the desktop package contains the bundled OpenConnect runtime");
   }
 
 #ifdef _WIN32
@@ -416,11 +483,17 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password)
   std::string effective = drivers.value("effective_driver", std::string("wintun"));
   if (cfg.windows_tunnel_driver == "wintun" &&
       !drivers.value("wintun_bundled", false)) {
-    return error("Wintun is selected but bundled wintun.dll is missing.");
+    return structured_error(kErrorRuntimeMissing,
+                            "Wintun is selected but bundled wintun.dll is missing",
+                            /*recoverable=*/true,
+                            "Rebuild the desktop package with the bundled native runtime assets");
   }
   if (effective == "tap" && cfg.windows_tunnel_driver == "tap" &&
       cfg.windows_tap_interface.empty()) {
-    return error("TAP is selected but no TAP interface is configured. Choose an installed TAP adapter or switch back to Wintun.");
+    return structured_error(kErrorConfigInvalid,
+                            "TAP is selected but no TAP interface is configured",
+                            /*recoverable=*/true,
+                            "Choose an installed TAP adapter from the Drivers page, or switch back to Wintun in Settings");
   }
 #endif
 
@@ -468,15 +541,97 @@ nlohmann::json handle_action(const std::string &action,
     config::ConfigManager mgr = make_config_manager();
     Config cfg = mgr.load();
 
+    // --- status.get: recommended status query (prefers helper) ---
     if (action == "status.get") {
-      auto helper_resp = send_helper_request({{"action", "status"}});
-      if (!helper_resp.value("ok", false) &&
-          helper_resp.value("message", "") == "Helper daemon not available") {
-        return disconnected_status(cfg);
+      if (helper::is_available()) {
+        auto helper_resp = send_helper_request({{"action", "status"}});
+        if (helper_resp.value("ok", false)) {
+          auto j = frontend_status_from_helper(helper_resp, cfg);
+          j["mode"] = "helper";
+          return j;
+        }
+        // Helper responded but with error — if it's not a "helper not available"
+        // error, still try to return status from the helper response
+        if (helper_resp.value("error_type", "") != kErrorServiceMissing) {
+          auto j = frontend_status_from_helper(helper_resp, cfg);
+          j["mode"] = "helper";
+          return j;
+        }
       }
-      return frontend_status_from_helper(helper_resp, cfg);
+      // Helper not available — check direct VPN state
+      auto j = vpn::direct_status_json(cfg);
+      // direct_status_json already sets mode to "direct" or "disconnected"
+      return j;
     }
 
+    // --- vpn.disconnect: tries helper first, falls back to direct ---
+    if (action == "vpn.disconnect") {
+      if (helper::is_available()) {
+        auto helper_resp = send_helper_request({{"action", "stop"}});
+        if (helper_resp.value("ok", false)) {
+          auto j = disconnected_status(cfg);
+          j["mode"] = "helper";
+          return j;
+        }
+        // Helper failed but is available — return the error, don't fallback
+        return structured_error(kErrorNativeFailure,
+                                helper_resp.value("message", "Failed to stop VPN"),
+                                /*recoverable=*/true,
+                                "Retry the operation");
+      }
+
+      bool allow_direct = payload.value("allow_direct_fallback", false);
+      if (allow_direct) {
+        auto result = vpn::direct_stop_json();
+        if (result.value("ok", false)) {
+          result["mode"] = "direct";
+          result["connected"] = false;
+          result["network_ready"] = false;
+        }
+        return result;
+      }
+
+      return structured_error(kErrorServiceMissing,
+#ifdef _WIN32
+                              "Helper service is not installed. Install the service or use elevated mode.",
+#else
+                              "Helper daemon is not available. Install the service or use elevated mode.",
+#endif
+                              /*recoverable=*/true,
+                              "Install the helper service or use elevated mode");
+    }
+
+    // --- Direct-mode actions: bypass the helper daemon ---
+    // These require elevated privileges and are used by the Electron shell
+    // when the helper service is not installed.
+
+    if (action == "status.get.direct") {
+      return vpn::direct_status_json(cfg);
+    }
+
+    if (action == "vpn.connect.direct") {
+      std::string password = payload.value("password", std::string());
+      if (password.empty() && !cfg.password.empty()) {
+        std::string key = crypto::load_key();
+        if (!key.empty())
+          password = crypto::decrypt(cfg.password, key);
+      }
+      int retry_limit = payload.value("retry_limit", 0);
+      return vpn::direct_start_json(cfg, password, retry_limit);
+    }
+
+    if (action == "vpn.disconnect.direct") {
+      auto result = vpn::direct_stop_json();
+      // Tag mode on success responses
+      if (result.value("ok", false)) {
+        result["mode"] = "direct";
+        result["connected"] = false;
+        result["network_ready"] = false;
+      }
+      return result;
+    }
+
+    // --- vpn.connect: tries helper first, falls back to direct ---
     if (action == "vpn.connect") {
       std::string password = payload.value("password", std::string());
       if (password.empty() && !cfg.password.empty()) {
@@ -484,27 +639,45 @@ nlohmann::json handle_action(const std::string &action,
         if (!key.empty())
           password = crypto::decrypt(cfg.password, key);
       }
-      nlohmann::json preflight = preflight_connect(cfg, password);
-      if (preflight.is_object() && preflight.value("ok", true) == false)
-        return preflight;
-      auto helper_resp = send_helper_request({{"action", "start"},
-                                              {"config", cfg},
-                                              {"password", password},
-                                              {"retry_limit", 0},
-                                              {"home", utils::get_effective_home()},
-                                              {"config_dir", utils::get_config_dir()}});
-      if (!helper_resp.value("ok", false)) {
-        return error(helper_resp.value("message", "Failed to start VPN"));
-      }
-      return frontend_status_from_helper(helper_resp, cfg);
-    }
 
-    if (action == "vpn.disconnect") {
-      auto helper_resp = send_helper_request({{"action", "stop"}});
-      if (!helper_resp.value("ok", false)) {
-        return error(helper_resp.value("message", "Failed to stop VPN"));
+      bool allow_direct = payload.value("allow_direct_fallback", false);
+
+      // Try helper first
+      if (helper::is_available()) {
+        nlohmann::json preflight = preflight_connect(cfg, password);
+        if (preflight.is_object() && preflight.value("ok", true) == false)
+          return preflight;
+        auto helper_resp = send_helper_request({{"action", "start"},
+                                                {"config", cfg},
+                                                {"password", password},
+                                                {"retry_limit", 0},
+                                                {"home", utils::get_effective_home()},
+                                                {"config_dir", utils::get_config_dir()}});
+        if (helper_resp.value("ok", false)) {
+          auto j = frontend_status_from_helper(helper_resp, cfg);
+          j["mode"] = "helper";
+          return j;
+        }
+        // Helper failed but is available — return the error, don't fallback
+        return structured_error(kErrorNativeFailure,
+                                helper_resp.value("message", "Failed to start VPN"),
+                                /*recoverable=*/true,
+                                "Retry the operation");
       }
-      return disconnected_status(cfg);
+
+      // Helper not available
+      if (allow_direct) {
+        return vpn::direct_start_json(cfg, password, 0);
+      }
+
+      return structured_error(kErrorServiceMissing,
+#ifdef _WIN32
+                              "Helper service is not installed. Install the service or use elevated mode.",
+#else
+                              "Helper daemon is not available. Install the service or use elevated mode.",
+#endif
+                              /*recoverable=*/true,
+                              "Install the helper service or use elevated mode");
     }
 
     if (action == "config.getAuth")
@@ -513,11 +686,11 @@ nlohmann::json handle_action(const std::string &action,
     if (action == "config.saveAuth") {
       if (payload.contains("server") && payload["server"].is_string()) {
         std::string err = config_api::config_set(mgr, "server", payload["server"].get<std::string>());
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("username") && payload["username"].is_string()) {
         std::string err = config_api::config_set(mgr, "username", payload["username"].get<std::string>());
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       // Update remember_password BEFORE password so that the password setter
       // sees the correct toggle state. The UI treats an empty password field
@@ -527,14 +700,14 @@ nlohmann::json handle_action(const std::string &action,
         std::string err = config_api::config_set(mgr, "remember_password",
                                payload["remember_password"].get<bool>() ? "true"
                                                                          : "false");
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("password") && payload["password"].is_string()) {
         std::string password = payload["password"].get<std::string>();
         if (!password.empty()) {
           std::string err = config_api::config_set_password(mgr, password);
           if (!err.empty())
-            return error(err);
+            return structured_error(kErrorConfigInvalid, err);
         }
       }
       if (payload.contains("user_agent") && payload["user_agent"].is_string()) {
@@ -543,7 +716,7 @@ nlohmann::json handle_action(const std::string &action,
         // accidentally overwrite the platform default.
         if (!utils::trim(value).empty()) {
           std::string err = config_api::config_set(mgr, "useragent", value);
-          if (!err.empty()) return error(err);
+          if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
         }
       }
       return auth_config(mgr.load());
@@ -555,12 +728,12 @@ nlohmann::json handle_action(const std::string &action,
     if (action == "config.saveSettings") {
       if (payload.contains("mtu") && payload["mtu"].is_number_integer()) {
         std::string err = config_api::config_set(mgr, "mtu", std::to_string(payload["mtu"].get<int>()));
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("dtls") && payload["dtls"].is_boolean()) {
         std::string err = config_api::config_set(mgr, "disable_dtls",
                                payload["dtls"].get<bool>() ? "false" : "true");
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("extra_args") && payload["extra_args"].is_string()) {
         Config updated = mgr.load();
@@ -571,7 +744,7 @@ nlohmann::json handle_action(const std::string &action,
       }
       if (payload.contains("log_path") && payload["log_path"].is_string()) {
         std::string err = config_api::config_set(mgr, "log_file", payload["log_path"].get<std::string>());
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("webui_port") && payload["webui_port"].is_number_integer()) {
         Config updated = mgr.load();
@@ -586,25 +759,25 @@ nlohmann::json handle_action(const std::string &action,
       if (payload.contains("webui_enabled") && payload["webui_enabled"].is_boolean()) {
         std::string err = config_api::config_set(mgr, "webui_enabled",
                                payload["webui_enabled"].get<bool>() ? "true" : "false");
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("openconnect_runtime") &&
           payload["openconnect_runtime"].is_string()) {
         std::string err = config_api::config_set(mgr, "openconnect_runtime",
                                payload["openconnect_runtime"].get<std::string>());
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("windows_tunnel_driver") &&
           payload["windows_tunnel_driver"].is_string()) {
         std::string err = config_api::config_set(mgr, "windows_tunnel_driver",
                                payload["windows_tunnel_driver"].get<std::string>());
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       if (payload.contains("windows_tap_interface") &&
           payload["windows_tap_interface"].is_string()) {
         std::string err = config_api::config_set(mgr, "windows_tap_interface",
                                payload["windows_tap_interface"].get<std::string>());
-        if (!err.empty()) return error(err);
+        if (!err.empty()) return structured_error(kErrorConfigInvalid, err);
       }
       return settings_config(mgr.load());
     }
@@ -618,14 +791,14 @@ nlohmann::json handle_action(const std::string &action,
     if (action == "routes.add") {
       std::string err = config_api::route_add(mgr, payload.value("cidr", ""));
       if (!err.empty())
-        return error(err);
+        return structured_error(kErrorConfigInvalid, err);
       return routes_json(mgr.load());
     }
 
     if (action == "routes.remove") {
       std::string err = config_api::route_remove(mgr, payload.value("cidr", ""));
       if (!err.empty())
-        return error(err);
+        return structured_error(kErrorConfigInvalid, err);
       return routes_json(mgr.load());
     }
 
@@ -649,11 +822,20 @@ nlohmann::json handle_action(const std::string &action,
     if (action == "logs.list")
       return logs_json(payload);
 
-    return error("Unknown desktop action: " + action);
+    return structured_error(kErrorUnknownAction,
+                            "Unknown desktop action: " + action,
+                            /*recoverable=*/false,
+                            "");
   } catch (const std::exception &ex) {
-    return error(ex.what());
+    return structured_error(kErrorNativeFailure,
+                            ex.what(),
+                            /*recoverable=*/true,
+                            "Retry the operation");
   } catch (...) {
-    return error("Unknown desktop API error");
+    return structured_error(kErrorNativeFailure,
+                            "Unknown desktop API error",
+                            /*recoverable=*/true,
+                            "Retry the operation");
   }
 }
 

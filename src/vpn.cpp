@@ -1374,5 +1374,189 @@ int status() {
   return 0;
 }
 
+nlohmann::json direct_status_json(const Config &cfg) {
+  pid_t supervisor_pid = read_supervisor_pid();
+  if (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))
+    supervisor_pid = -1;
+
+  pid_t pid = read_pid();
+  if (pid <= 0 || !is_process_alive(pid))
+    pid = find_openconnect_pid();
+
+  std::string vpn_interface;
+  std::string internal_ip;
+  bool route_ready = read_route_ready(&vpn_interface, &internal_ip);
+
+  bool connected = (pid > 0 || supervisor_pid > 0);
+
+  nlohmann::json j;
+  j["connected"] = connected;
+  j["server"] = cfg.server;
+  j["username"] = cfg.username;
+  j["pid"] = pid > 0 ? pid : -1;
+  j["supervisor_pid"] = supervisor_pid > 0 ? supervisor_pid : -1;
+  j["network_ready"] = connected && route_ready;
+  j["interface"] = route_ready ? vpn_interface : "";
+  j["internal_ip"] = route_ready ? internal_ip : "";
+  j["route_count"] = static_cast<int>(cfg.routes.size());
+  j["mtu"] = cfg.mtu;
+  j["uptime_seconds"] = 0;
+  j["rx_bytes"] = 0;
+  j["tx_bytes"] = 0;
+  j["mode"] = connected ? "direct" : "disconnected";
+  virtual_network::add_status_fields(j, j.value("interface", std::string()));
+  return j;
+}
+
+nlohmann::json direct_stop_json() {
+  if (!utils::check_root()) {
+#ifdef _WIN32
+    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
+                          {"message", "Administrator privileges required to stop VPN."},
+                          {"recoverable", true},
+                          {"recommended_action", "Install the helper service to avoid elevation prompts, or retry and accept the elevation request"}};
+#else
+    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
+                          {"message", "Root privileges required to stop VPN."},
+                          {"recoverable", true},
+                          {"recommended_action", "Install the helper service to avoid elevation prompts, or run with sudo"}};
+#endif
+  }
+
+  pid_t supervisor_pid = read_supervisor_pid();
+  if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
+    remove_supervisor_pid();
+    supervisor_pid = -1;
+  }
+
+  pid_t pid = read_pid();
+  if (pid <= 0 || !is_process_alive(pid))
+    pid = find_openconnect_pid();
+
+  if (pid <= 0 && supervisor_pid <= 0) {
+    clear_runtime_state();
+    return nlohmann::json{{"ok", true}, {"message", "VPN was not running."}};
+  }
+
+#ifndef _WIN32
+  tunnel::cleanup_routes();
+  if (supervisor_pid > 0) kill(supervisor_pid, SIGTERM);
+  if (pid > 0) kill(pid, SIGTERM);
+#else
+  if (supervisor_pid > 0) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(supervisor_pid));
+    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+  }
+  if (pid > 0) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(pid));
+    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+  }
+#endif
+
+  // Wait for processes to die
+  for (int i = 0; i < 10; ++i) {
+#ifndef _WIN32
+    usleep(300000);
+#else
+    Sleep(300);
+#endif
+    pid_t check_pid = read_pid();
+    if (check_pid <= 0 || !is_process_alive(check_pid)) {
+      if (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))
+        break;
+    }
+  }
+
+  clear_runtime_state();
+  logger::info("VPN stopped via direct mode (PID " + std::to_string(pid) +
+               ", supervisor PID " + std::to_string(supervisor_pid) + ")");
+
+  return nlohmann::json{{"ok", true}, {"message", "VPN stopped successfully."}};
+}
+
+nlohmann::json direct_start_json(const Config &cfg,
+                                 const std::string &plaintext_password,
+                                 int retry_limit) {
+  if (!utils::check_root()) {
+#ifdef _WIN32
+    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
+                          {"message", "Administrator privileges required to start VPN."},
+                          {"recoverable", true},
+                          {"recommended_action", "Install the helper service to avoid elevation prompts, or retry and accept the elevation request"}};
+#else
+    return nlohmann::json{{"ok", false}, {"error_type", "elevation_required"},
+                          {"message", "Root privileges required to start VPN."},
+                          {"recoverable", true},
+                          {"recommended_action", "Install the helper service to avoid elevation prompts, or run with sudo"}};
+#endif
+  }
+
+  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
+  if (openconnect_path.empty()) {
+    return nlohmann::json{{"ok", false}, {"error_type", "runtime_missing"},
+                          {"message", "OpenConnect runtime is not available."},
+                          {"recoverable", true},
+                          {"recommended_action", "Ensure the desktop package contains the bundled OpenConnect runtime"}};
+  }
+
+  if (cfg.server.empty())
+    return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
+                          {"message", "VPN server is not configured."},
+                          {"recoverable", true},
+                          {"recommended_action", "Configure the VPN server address in Settings"};
+  if (cfg.username.empty())
+    return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
+                          {"message", "VPN username is not configured."},
+                          {"recoverable", true},
+                          {"recommended_action", "Configure your VPN username in Settings"};
+  if (plaintext_password.empty() && cfg.password.empty())
+    return nlohmann::json{{"ok", false}, {"error_type", "config_invalid"},
+                          {"message", "VPN password is not configured."},
+                          {"recoverable", true},
+                          {"recommended_action", "Configure your VPN password in Settings"};
+  if (!tunnel::write_script(cfg)) {
+    return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
+                          {"message", "Failed to generate tunnel script."},
+                          {"recoverable", true},
+                          {"recommended_action", "Retry the operation"};
+  }
+
+#ifdef _WIN32
+  nlohmann::json drivers = nlohmann::json::object();
+  // Basic driver validation for Windows
+  std::string wintun_path = utils::get_bundled_wintun_path();
+  if (cfg.windows_tunnel_driver == "wintun" && wintun_path.empty()) {
+    return nlohmann::json{{"ok", false}, {"error_type", "runtime_missing"},
+                          {"message", "Wintun is selected but bundled wintun.dll is missing."},
+                          {"recoverable", true},
+                          {"recommended_action", "Rebuild the desktop package with the bundled native runtime assets"};
+  }
+#endif
+
+  // Check for already-running VPN
+  pid_t existing_pid = read_pid();
+  if (existing_pid <= 0 || !is_process_alive(existing_pid))
+    existing_pid = find_openconnect_pid();
+  if (existing_pid > 0) {
+    return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
+                          {"message", "VPN is already running (PID " + std::to_string(existing_pid) + ")."},
+                          {"recoverable", true},
+                          {"recommended_action", "Disconnect the current VPN session first"};
+  }
+
+  int rc = start_with_password(cfg, plaintext_password, retry_limit);
+  if (rc != 0) {
+    return nlohmann::json{{"ok", false}, {"error_type", "native_failure"},
+                          {"message", "VPN connection failed."},
+                          {"recoverable", true},
+                          {"recommended_action", "Check VPN logs for details and retry"};
+  }
+
+  // Return the new status after successful start
+  return direct_status_json(cfg);
+}
+
 } // namespace vpn
 } // namespace ecnuvpn
