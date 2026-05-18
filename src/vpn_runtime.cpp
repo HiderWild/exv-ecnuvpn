@@ -32,18 +32,6 @@ static pid_t read_pid_file(const std::string &path) {
   }
 }
 
-static void remove_runtime_file(const std::string &path) {
-  if (utils::file_exists(path)) {
-    std::remove(path.c_str());
-  }
-}
-
-static void clear_runtime_state() {
-  remove_runtime_file(utils::get_pid_path());
-  remove_runtime_file(utils::get_supervisor_pid_path());
-  remove_runtime_file(utils::get_route_ready_path());
-}
-
 static bool is_process_alive(pid_t pid) {
   if (pid <= 0)
     return false;
@@ -62,61 +50,6 @@ static bool is_process_alive(pid_t pid) {
   BOOL ok = GetExitCodeProcess(h_process, &exit_code);
   CloseHandle(h_process);
   return ok && exit_code == STILL_ACTIVE;
-#endif
-}
-
-static void terminate_process(pid_t pid, bool force) {
-  if (pid <= 0)
-    return;
-
-#ifndef _WIN32
-  kill(pid, force ? SIGKILL : SIGTERM);
-#else
-  HANDLE h_process = OpenProcess(PROCESS_TERMINATE, FALSE,
-                                 static_cast<DWORD>(pid));
-  if (!h_process)
-    return;
-
-  TerminateProcess(h_process, force ? 1 : 0);
-  CloseHandle(h_process);
-#endif
-}
-
-static void wait_briefly() {
-#ifndef _WIN32
-  usleep(300000);
-#else
-  Sleep(300);
-#endif
-}
-
-static pid_t find_openconnect_pid() {
-#ifndef _WIN32
-  std::string output = utils::trim(utils::run_command_output("pgrep -x openconnect"));
-  if (output.empty())
-    return -1;
-
-  try {
-    return static_cast<pid_t>(std::stoi(output));
-  } catch (...) {
-    return -1;
-  }
-#else
-  std::string output = utils::run_command_output(
-      "tasklist /FI \"IMAGENAME eq openconnect.exe\" /NH /FO CSV 2>nul");
-  auto start = output.find('"', output.find(',') + 1);
-  if (start == std::string::npos)
-    return -1;
-
-  auto end = output.find('"', start + 1);
-  if (end == std::string::npos)
-    return -1;
-
-  try {
-    return static_cast<pid_t>(std::stoi(output.substr(start + 1, end - start - 1)));
-  } catch (...) {
-    return -1;
-  }
 #endif
 }
 
@@ -165,7 +98,7 @@ RuntimeStatusSnapshot read_runtime_status_snapshot() {
 
   pid_t pid = read_pid_file(utils::get_pid_path());
   if (pid <= 0 || !is_process_alive(pid))
-    pid = find_openconnect_pid();
+    pid = -1;
 
   snapshot.pid = pid > 0 ? static_cast<int>(pid) : -1;
   snapshot.supervisor_pid = supervisor_pid > 0 ? static_cast<int>(supervisor_pid)

@@ -12,6 +12,7 @@
 #include <csignal>
 #include <cstring>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -1272,6 +1273,20 @@ bool print_running_status(const nlohmann::json &response) {
 
 } // namespace
 
+void request_daemon_stop() {
+  daemon_stop_requested = 1;
+
+#ifdef _WIN32
+  if (WaitNamedPipeA(kHelperPipePath, 200)) {
+    HANDLE hPipe = CreateFileA(kHelperPipePath, GENERIC_READ | GENERIC_WRITE,
+                               0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hPipe != INVALID_HANDLE_VALUE) {
+      CloseHandle(hPipe);
+    }
+  }
+#endif
+}
+
 bool is_available() {
   return wait_until_available();
 }
@@ -1556,8 +1571,18 @@ int install_service(const std::string &executable_path) {
     return 1;
   }
 
-  // Register the main exv binary with __helper-daemon argument
-  std::string binary_path = "\"" + exec_path + "\" __helper-daemon";
+  std::filesystem::path exec_fs_path(exec_path);
+  std::filesystem::path helper_path =
+      exec_fs_path.parent_path() / "exv-helper.exe";
+
+  std::string binary_path;
+  if (std::filesystem::exists(helper_path)) {
+    binary_path = "\"" + helper_path.string() + "\" --service";
+  } else {
+    utils::print_warning(
+        "Dedicated exv-helper.exe was not found next to exv.exe. Falling back to legacy in-process helper service mode.");
+    binary_path = "\"" + exec_path + "\" __helper-daemon";
+  }
 
   utils::print_info("Registering helper service...");
   SC_HANDLE hService = CreateServiceA(
@@ -1569,17 +1594,59 @@ int install_service(const std::string &executable_path) {
   if (!hService) {
     DWORD err = GetLastError();
     if (err == ERROR_SERVICE_EXISTS) {
-      std::cout << "Helper service is already installed.\n";
+      utils::print_info(
+          "Helper service is already installed. Refreshing service configuration...");
+      hService = OpenServiceA(hSCM, kHelperServiceName,
+                              SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS |
+                                  SERVICE_START | SERVICE_STOP);
+      if (!hService) {
+        logger::error("OpenService failed: " +
+                      std::to_string(GetLastError()));
+        CloseServiceHandle(hSCM);
+        return 1;
+      }
+
+      if (!ChangeServiceConfigA(hService, SERVICE_NO_CHANGE,
+                                SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+                                binary_path.c_str(), NULL, NULL, NULL, NULL,
+                                NULL, NULL)) {
+        logger::error("ChangeServiceConfig failed: " +
+                      std::to_string(GetLastError()));
+        CloseServiceHandle(hService);
+        CloseServiceHandle(hSCM);
+        return 1;
+      }
+
+      SERVICE_STATUS service_status = {};
+      if (QueryServiceStatus(hService, &service_status) &&
+          service_status.dwCurrentState != SERVICE_STOPPED) {
+        utils::print_info("Restarting helper service to apply the new binary path...");
+        ControlService(hService, SERVICE_CONTROL_STOP, &service_status);
+        for (int i = 0; i < 50; ++i) {
+          if (!QueryServiceStatus(hService, &service_status) ||
+              service_status.dwCurrentState == SERVICE_STOPPED) {
+            break;
+          }
+          Sleep(100);
+        }
+      }
+    } else {
+      logger::error("CreateService failed: " + std::to_string(err));
       CloseServiceHandle(hSCM);
-      return 0;
+      return 1;
     }
-    logger::error("CreateService failed: " + std::to_string(err));
-    CloseServiceHandle(hSCM);
-    return 1;
   }
 
   utils::print_info("Starting helper service...");
-  StartService(hService, 0, NULL);
+  if (!StartService(hService, 0, NULL)) {
+    DWORD err = GetLastError();
+    if (err != ERROR_SERVICE_ALREADY_RUNNING) {
+      logger::error("StartService failed: " + std::to_string(err));
+      CloseServiceHandle(hService);
+      CloseServiceHandle(hSCM);
+      return 1;
+    }
+  }
   CloseServiceHandle(hService);
   CloseServiceHandle(hSCM);
 

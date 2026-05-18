@@ -1156,7 +1156,8 @@ bool stop_direct_session() {
 
   pid_t pid = read_pid();
   if (pid <= 0 || !is_process_alive(pid)) {
-    pid = find_openconnect_pid();
+    remove_pid();
+    pid = -1;
   }
 
   if (pid <= 0 && supervisor_pid <= 0) {
@@ -1200,11 +1201,6 @@ bool stop_direct_session() {
     kill(pid, SIGKILL);
   if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
     kill(supervisor_pid, SIGKILL);
-  pid_t remaining_pid = find_openconnect_pid();
-  if (remaining_pid > 0 && remaining_pid != pid) {
-    kill(remaining_pid, SIGKILL);
-    usleep(500000);
-  }
 #else
   if (pid > 0 && is_process_alive(pid)) {
     HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
@@ -1216,17 +1212,9 @@ bool stop_direct_session() {
                            static_cast<DWORD>(supervisor_pid));
     if (h) { TerminateProcess(h, 1); CloseHandle(h); }
   }
-  pid_t remaining_pid = find_openconnect_pid();
-  if (remaining_pid > 0 && remaining_pid != pid) {
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(remaining_pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-    Sleep(500);
-  }
 #endif
 
   if ((pid > 0 && is_process_alive(pid)) ||
-      (remaining_pid > 0 && is_process_alive(remaining_pid)) ||
       (supervisor_pid > 0 && is_process_alive(supervisor_pid))) {
     return false;
   }

@@ -37,6 +37,8 @@ int main() {
   ecnuvpn::utils::set_runtime_path_override(temp_root.string(),
                                             temp_root.string());
 
+  const auto empty_snapshot = ecnuvpn::vpn::read_runtime_status_snapshot();
+
   ecnuvpn::utils::write_file(ecnuvpn::utils::get_pid_path(),
                              std::to_string(current_process_id()));
   ecnuvpn::utils::write_file(ecnuvpn::utils::get_supervisor_pid_path(),
@@ -47,6 +49,8 @@ int main() {
   const auto snapshot = ecnuvpn::vpn::read_runtime_status_snapshot();
 
   bool ok = true;
+  ok = expect(!empty_snapshot.running,
+              "snapshot should stay disconnected without managed pid files") && ok;
   ok = expect(snapshot.running, "snapshot should report a running session") && ok;
   ok = expect(snapshot.pid == current_process_id(), "snapshot should use the live PID file") && ok;
   ok = expect(snapshot.supervisor_pid == current_process_id(), "snapshot should use the live supervisor PID file") && ok;

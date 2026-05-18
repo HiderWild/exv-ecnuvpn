@@ -139,6 +139,14 @@ public:
 #endif
   }
 
+  void close_client() override {
+#ifdef _WIN32
+    if (hPipe_ != INVALID_HANDLE_VALUE) {
+      DisconnectNamedPipe(hPipe_);
+    }
+#endif
+  }
+
   void close() override {
 #ifdef _WIN32
     if (hPipe_ != INVALID_HANDLE_VALUE) {

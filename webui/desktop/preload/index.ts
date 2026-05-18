@@ -33,7 +33,9 @@ const api = {
         allow_direct_fallback: true,
       }, 'status.get'),
     disconnectElevated: () =>
-      ipcRenderer.invoke(desktopIpcChannels.rpcElevated, 'vpn.disconnect', {}, 'status.get'),
+      ipcRenderer.invoke(desktopIpcChannels.rpcElevated, 'vpn.disconnect', {
+        allow_direct_fallback: true,
+      }, 'status.get'),
   },
   config: {
     getAuth: () => rpc('config.getAuth'),

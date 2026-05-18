@@ -438,11 +438,25 @@ nlohmann::json handle_action(const std::string &action,
     }
 
     if (action == "vpn.disconnect") {
+      bool allow_direct_fallback =
+          payload.value("allow_direct_fallback", false);
       auto helper_resp = send_helper_request({{"action", "stop"}});
       if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
         vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
         if (!snapshot.running)
           return disconnected_status(cfg);
+        if (!allow_direct_fallback) {
+#ifdef _WIN32
+          return error("Helper daemon is not available. Use the elevated desktop action or install the helper service from Settings.",
+                       kHelperUnavailableCode);
+#elif defined(__APPLE__)
+          return error("Helper daemon is not available. The desktop app can request one-time administrator authorization to disconnect this session, or you can install the helper service.",
+                       kHelperUnavailableCode);
+#else
+          return error("Helper daemon is not available. Install the helper service before disconnecting managed sessions.",
+                       kHelperUnavailableCode);
+#endif
+        }
         if (!vpn::stop_direct_session())
           return error("Failed to stop VPN");
         return disconnected_status(cfg);

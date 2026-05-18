@@ -18,6 +18,7 @@ int uninstall_service();
 int show_service_status();
 
 int daemon_main();
+void request_daemon_stop();
 int worker_main(const std::string &request_path);
 
 } // namespace helper

@@ -71,7 +71,19 @@ const desktopApi = {
           }),
         ) as ApiResponse<T>
       case desktopApiPaths.disconnect:
-        return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
+        return wrap(
+          window.ecnuVpn!.vpn.disconnect().catch((error) => {
+            const errorCode = typeof error?.code === 'string' ? error.code : ''
+            const message = error?.message || String(error)
+            if (
+              errorCode === desktopRpcErrorCodes.helperUnavailable ||
+              message.includes('Helper daemon is not available')
+            ) {
+              return window.ecnuVpn!.vpn.disconnectElevated()
+            }
+            throw error
+          }),
+        ) as ApiResponse<T>
       case desktopApiPaths.routes:
         return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
       case desktopApiPaths.routesReset:
