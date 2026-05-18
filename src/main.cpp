@@ -127,11 +127,19 @@ static void print_help() {
   std::cout << "                           Omit count or use -1 for infinite"
             << std::endl;
   std::cout << "  " << utils::YELLOW << "-f, --foreground" << utils::RESET
+#ifdef __APPLE__
+            << "          Keep process in foreground (compatibility mode)" << std::endl;
+#else
             << "          Keep process in foreground (with WebUI)" << std::endl;
+#endif
   std::cout << std::endl;
-  std::cout << "  Note: WebUI starts automatically when \"webui_enabled\" is true in config"
-            << std::endl;
+#ifdef __APPLE__
+  std::cout << "  Note: Desktop app is the recommended interface. WebUI is a" << std::endl;
+  std::cout << "        compatibility entry point. Use --foreground to enable it." << std::endl;
+#else
+  std::cout << "  Note: WebUI starts automatically when \"webui_enabled\" is true in config" << std::endl;
   std::cout << "        (default: true). Configure port/bind via config settings." << std::endl;
+#endif
   std::cout << std::endl;
   std::cout << utils::BOLD << "CONFIG SUBCOMMANDS:" << utils::RESET
             << std::endl;
@@ -707,7 +715,11 @@ int main(int argc, char *argv[]) {
 #endif
       }
     } else {
+#ifdef __APPLE__
+      utils::print_info("WebUI disabled (use desktop app for full control, or --foreground for compatibility mode)");
+#else
       utils::print_info("WebUI disabled (webui_enabled = false)");
+#endif
     }
 
     return 0;

@@ -52,7 +52,11 @@ struct Config {
   std::string log_file = default_log_file_path();
   int webui_port = 18080;
   std::string webui_bind = "127.0.0.1";
+  #ifdef __APPLE__
+  bool webui_enabled = false;
+#else
   bool webui_enabled = true;
+#endif
   std::string openconnect_runtime = "bundled";
   std::string windows_tunnel_driver = "auto";
   std::string windows_tap_interface = "";

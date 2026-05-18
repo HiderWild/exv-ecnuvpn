@@ -558,11 +558,37 @@ nlohmann::json handle_action(const std::string &action,
         return preflight;
 
       if (!helper::is_available() && allow_direct_fallback) {
+#ifndef _WIN32
+        bool owner_override_set = false;
+        if (utils::check_root()) {
+          std::string home = utils::get_effective_home();
+          if (!home.empty()) {
+            struct stat home_st;
+            if (stat(home.c_str(), &home_st) == 0) {
+              utils::set_runtime_owner(home_st.st_uid, home_st.st_gid);
+              utils::set_runtime_path_override(home, utils::get_config_dir());
+              owner_override_set = true;
+            }
+          }
+        }
+#endif
         if (vpn::start_with_password(cfg, password, 0) != 0) {
+#ifndef _WIN32
+          if (owner_override_set) {
+            utils::clear_runtime_owner();
+            utils::clear_runtime_path_override();
+          }
+#endif
           return error("Failed to start VPN");
         }
 
         vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
+#ifndef _WIN32
+        if (owner_override_set) {
+          utils::clear_runtime_owner();
+          utils::clear_runtime_path_override();
+        }
+#endif
         if (snapshot.running)
           return frontend_status_from_snapshot(snapshot, cfg);
         return disconnected_status(cfg);

@@ -15,12 +15,14 @@
 ## 功能特性
 
 - **分流路由** — 仅校园网流量走 VPN，其余走本地网络
+- **桌面端图形界面** — Electron 桌面应用，连接/断开/配置/状态一览无余
 - **加密凭据存储** — AES-256-CBC 加密密码，密钥权限 0600
 - **免 sudo 日常使用** — launchd root helper，安装一次后无需再输 sudo
-- **WebUI 管理界面** — 浏览器实时查看状态、编辑配置、查看日志
+- **一次性授权连接** — 未安装 helper 时，通过管理员授权完成临时连接
 - **自动重连** — 断线后自动恢复连接
 - **路由自定义** — 随时添加/删除分流路由
 - **VPN 服务器路由保护** — 自动防止 VPN 服务器自身流量被隧道吞没
+- **浏览器 WebUI（兼容模式）** — 保留浏览器入口以兼容旧版
 
 ## 安装
 
@@ -105,7 +107,7 @@ npm run desktop:build
     "log_file": "~/.ecnuvpn/ecnuvpn.log",
     "webui_port": 18080,
     "webui_bind": "127.0.0.1",
-    "webui_enabled": true
+    "webui_enabled": false
 }
 ```
 
@@ -124,9 +126,12 @@ npm run desktop:build
 
 ## Desktop UI (Electron)
 
-Vue UI can run as a Windows/macOS desktop app. The Electron shell uses the
-`exv desktop-rpc` JSON interface through preload IPC, so the renderer does not
-open or depend on the browser WebUI server.
+桌面端是推荐的交互入口。Electron 壳层通过 `exv desktop-rpc` JSON 接口与 native binary 通信，不依赖浏览器 WebUI 服务器。
+
+macOS 上，桌面端支持：
+- **辅助服务连接** — 安装 launchd helper 后，连接/断开由守护进程管理
+- **一次性授权连接** — 未安装 helper 时，通过 osascript 管理员授权完成临时连接
+- **路由清理状态** — 断开时显示清理进度，确保不留残留路由
 
 ```bash
 cd webui
@@ -136,5 +141,6 @@ npm run build:electron
 npm run desktop:build
 ```
 
-For development, build the native binary first or set `EXV_PATH` to the target
-`exv`/`exv.exe`, then run `npm run desktop:dev`.
+开发模式：先构建 native binary 或设置 `EXV_PATH`，然后运行 `npm run desktop:dev`。
+
+浏览器 WebUI 保留为兼容入口，可通过 `exv -f` 在前台模式启用。

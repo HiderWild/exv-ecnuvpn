@@ -62,6 +62,8 @@ const desktopApi = {
             throw error
           }),
         ) as ApiResponse<T>
+      case '/connect/elevated':
+        return wrap(window.ecnuVpn!.vpn.connectElevated(plainPayload(body)?.password)) as ApiResponse<T>
       case '/disconnect':
         return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
       case '/routes':
