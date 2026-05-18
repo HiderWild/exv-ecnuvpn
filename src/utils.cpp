@@ -500,6 +500,14 @@ std::string get_openconnect_path(const std::string &runtime_mode) {
 
   if (runtime_mode != "system") {
     std::string bundled = get_bundled_openconnect_path();
+    if (!bundled.empty()) {
+#ifdef __APPLE__
+      std::string verify_cmd = "codesign --verify --strict " +
+                               shell_quote(bundled) + " >/dev/null 2>&1";
+      if (std::system(verify_cmd.c_str()) != 0)
+        bundled.clear();
+#endif
+    }
     if (!bundled.empty())
       return bundled;
   }

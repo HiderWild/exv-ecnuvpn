@@ -61,7 +61,19 @@ const desktopApi = {
       case '/connect/elevated':
         return wrap(window.ecnuVpn!.vpn.connectElevated(deproxy(body)?.password)) as ApiResponse<T>
       case '/disconnect':
-        return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
+        return wrap(
+          window.ecnuVpn!.vpn.disconnect().catch((error) => {
+            const message = error?.message || String(error)
+            if (
+              message.includes('Failed to stop VPN') ||
+              message.includes('Root privileges required') ||
+              message.includes('Administrator privileges required')
+            ) {
+              return window.ecnuVpn!.vpn.disconnectElevated()
+            }
+            throw error
+          }),
+        ) as ApiResponse<T>
       case '/routes':
         return wrap(window.ecnuVpn!.routes.add(deproxy(body)?.cidr ?? '')) as ApiResponse<T>
       case '/routes/reset':

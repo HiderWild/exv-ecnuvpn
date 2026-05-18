@@ -16,6 +16,7 @@ int supervisor_main();
 #endif
 
 // Stop the VPN connection
+bool stop_direct_session();
 int stop();
 
 // Show VPN status

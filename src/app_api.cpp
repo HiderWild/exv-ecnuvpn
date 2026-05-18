@@ -604,6 +604,36 @@ nlohmann::json handle_action(const std::string &action,
 
     if (action == "vpn.disconnect") {
       auto helper_resp = send_helper_request({{"action", "stop"}});
+      if (!helper_resp.value("ok", false) &&
+          helper_resp.value("message", "") == "Helper daemon not available") {
+        std::string pid_str = utils::trim(utils::read_file(utils::get_pid_path()));
+        pid_t vpn_pid = -1;
+        try { vpn_pid = std::stoi(pid_str); } catch (...) {}
+        bool alive = false;
+        if (vpn_pid > 0) {
+#ifndef _WIN32
+          alive = (kill(vpn_pid, 0) == 0 || errno == EPERM);
+#else
+          HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 static_cast<DWORD>(vpn_pid));
+          if (h) {
+            DWORD exitCode = 0;
+            alive = GetExitCodeProcess(h, &exitCode) && exitCode == STILL_ACTIVE;
+            CloseHandle(h);
+          }
+#endif
+        }
+        if (!alive)
+          return disconnected_status(cfg);
+#ifndef _WIN32
+        if (!utils::check_root()) {
+          return error("Root privileges required to stop the elevated VPN session.");
+        }
+#endif
+        if (!vpn::stop_direct_session())
+          return error("Failed to stop VPN");
+        return disconnected_status(cfg);
+      }
       if (!helper_resp.value("ok", false)) {
         return error(helper_resp.value("message", "Failed to stop VPN"));
       }

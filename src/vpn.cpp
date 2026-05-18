@@ -1147,6 +1147,94 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   return 0;
 }
 
+bool stop_direct_session() {
+  pid_t supervisor_pid = read_supervisor_pid();
+  if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
+    remove_supervisor_pid();
+    supervisor_pid = -1;
+  }
+
+  pid_t pid = read_pid();
+  if (pid <= 0 || !is_process_alive(pid)) {
+    pid = find_openconnect_pid();
+  }
+
+  if (pid <= 0 && supervisor_pid <= 0) {
+    clear_runtime_state();
+    return true;
+  }
+
+#ifndef _WIN32
+  tunnel::cleanup_routes();
+  if (supervisor_pid > 0)
+    kill(supervisor_pid, SIGTERM);
+  if (pid > 0)
+    kill(pid, SIGTERM);
+#else
+  if (supervisor_pid > 0) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(supervisor_pid));
+    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+  }
+  if (pid > 0) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(pid));
+    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+  }
+#endif
+
+  for (int i = 0; i < 10; ++i) {
+#ifndef _WIN32
+    usleep(300000);
+#else
+    Sleep(300);
+#endif
+    if ((pid <= 0 || !is_process_alive(pid)) &&
+        (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))) {
+      break;
+    }
+  }
+
+#ifndef _WIN32
+  if (pid > 0 && is_process_alive(pid))
+    kill(pid, SIGKILL);
+  if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
+    kill(supervisor_pid, SIGKILL);
+  pid_t remaining_pid = find_openconnect_pid();
+  if (remaining_pid > 0 && remaining_pid != pid) {
+    kill(remaining_pid, SIGKILL);
+    usleep(500000);
+  }
+#else
+  if (pid > 0 && is_process_alive(pid)) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(pid));
+    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+  }
+  if (supervisor_pid > 0 && is_process_alive(supervisor_pid)) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(supervisor_pid));
+    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+  }
+  pid_t remaining_pid = find_openconnect_pid();
+  if (remaining_pid > 0 && remaining_pid != pid) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(remaining_pid));
+    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+    Sleep(500);
+  }
+#endif
+
+  if ((pid > 0 && is_process_alive(pid)) ||
+      (remaining_pid > 0 && is_process_alive(remaining_pid)) ||
+      (supervisor_pid > 0 && is_process_alive(supervisor_pid))) {
+    return false;
+  }
+
+  clear_runtime_state();
+  return true;
+}
+
 int stop() {
   utils::print_header("EXV Stopping");
 
