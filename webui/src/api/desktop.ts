@@ -66,6 +66,10 @@ const desktopApi = {
         return wrap(window.ecnuVpn!.vpn.connectElevated(plainPayload(body)?.password)) as ApiResponse<T>
       case '/disconnect':
         return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
+      case '/connect/elevated':
+        return wrap(window.ecnuVpn!.vpn.connectElevated(body?.password)) as ApiResponse<T>
+      case '/disconnect/elevated':
+        return wrap(window.ecnuVpn!.vpn.disconnectElevated()) as ApiResponse<T>
       case '/routes':
         return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
       case '/routes/reset':

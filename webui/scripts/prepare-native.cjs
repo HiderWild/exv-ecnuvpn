@@ -144,3 +144,45 @@ if (runtimeSource) {
     `No bundled runtime assets found. Checked:\n  - ${runtimeCandidates.join('\n  - ')}`,
   )
 }
+
+// ---------------------------------------------------------------------------
+// Post-copy validation: ensure critical runtime files are present before
+// packaging. Missing files result in clear warnings so developers know the
+// packaged app will not be fully functional.
+// ---------------------------------------------------------------------------
+
+const nativeExeName = process.platform === 'win32' ? 'exv.exe' : 'exv'
+const nativeExePath = path.join(outDir, nativeExeName)
+if (!fs.existsSync(nativeExePath)) {
+  // This should never happen — we copied it above — but guard anyway.
+  throw new Error(
+    `Validation failed: native binary not found at ${nativeExePath}. ` +
+    'The desktop app will not work without it.',
+  )
+}
+console.log(`[validation] Native binary present: ${nativeExeName}`)
+
+if (process.platform === 'win32') {
+  const openconnectPath = path.join(outDir, 'openconnect.exe')
+  if (!fs.existsSync(openconnectPath)) {
+    console.warn(
+      '[validation] WARNING: openconnect.exe not found in output directory.\n' +
+      '  The packaged desktop app will NOT be able to connect to VPN without\n' +
+      '  the bundled OpenConnect runtime. Stage it first with:\n' +
+      '    powershell -File scripts/stage-openconnect-runtime-win.ps1 -SourceDir <dir>',
+    )
+  } else {
+    console.log('[validation] OpenConnect runtime present: openconnect.exe')
+  }
+
+  const wintunPath = path.join(outDir, 'wintun.dll')
+  if (!fs.existsSync(wintunPath)) {
+    console.warn(
+      '[validation] WARNING: wintun.dll not found in output directory.\n' +
+      '  Wintun tunnel mode will not work in the packaged app.\n' +
+      '  Provide it via: stage-openconnect-runtime-win.ps1 -WintunDllPath <path>',
+    )
+  } else {
+    console.log('[validation] Wintun DLL present: wintun.dll')
+  }
+}

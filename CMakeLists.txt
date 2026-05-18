@@ -95,6 +95,20 @@ target_compile_definitions(exv PRIVATE
 )
 
 # Embedded WebUI assets
+#
+# Build dependency chain: frontend must be built before the C++ build can
+# succeed.  The custom command below runs scripts/embed_assets.py, which reads
+# webui/dist/ (the Vite build output) and generates src/webui_assets.hpp.
+# If webui/dist/ does not exist, embed_assets.py will fail with instructions
+# to build the frontend first:
+#
+#   cd webui && npm install && npm run build
+#
+# Then re-run the C++ build.  The full ordering is:
+#   1. Frontend build (webui/dist/)
+#   2. Native build    (this step — consumes webui/dist/)
+#   3. Desktop build   (optional — packages native binary + Electron shell)
+#
 add_custom_command(
     OUTPUT ${CMAKE_SOURCE_DIR}/src/webui_assets.hpp
     COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/embed_assets.py

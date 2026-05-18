@@ -101,7 +101,7 @@ struct Config {
     std::string log_file;
     int webui_port = 18080;
     std::string webui_bind = "127.0.0.1";
-    bool webui_enabled = true;
+    bool webui_enabled = false;
 };
 
 Config config::load();

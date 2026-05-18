@@ -1,23 +1,23 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { useVpnStore, type DashboardState } from '../stores/vpn'
-import { useConfigStore } from '../stores/config'
+import { useRouter } from 'vue-router'
+import { useVpnStore } from '../stores/vpn'
 import { useSSE } from '../composables/useSSE'
 import StatusBadge from '../components/StatusBadge.vue'
 import {
-  Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff, Route, ShieldCheck, ShieldAlert, AlertTriangle
+  Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff, Route,
+  Shield, AlertTriangle, XCircle, AlertOctagon, Settings, RefreshCw, FileText
 } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
-const config = useConfigStore()
+const router = useRouter()
 const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
 
 const elapsed = ref(0)
 let timer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
-  vpn.fetchStatus()
-  config.fetchHelperStatus()
+  vpn.fetchAppShellState()
   sseConnect()
   timer = setInterval(() => {
     if (vpn.status?.connected) elapsed.value++
@@ -50,38 +50,112 @@ const upstreamVirtualNames = computed(() => {
   return adapters.map((adapter) => adapter.name).filter(Boolean).join('、')
 })
 
-const badgeStatus = computed(() => {
-  const state = vpn.dashboardState
-  if (state === 'helper_connected') return 'connected'
-  if (state === 'direct_connected') return 'elevated'
-  if (state === 'elevated_connecting') return 'connecting'
-  if (state === 'cleanup_pending') return 'cleanup_pending'
-  if (state === 'authorization_denied') return 'error'
-  if (state === 'runtime_missing') return 'error'
+// ── Dashboard state machine helpers ──────────────────────────────────
+
+const dashboardState = computed(() => vpn.dashboardState)
+
+const isTransientConnected = computed(() => {
+  return dashboardState.value === 'direct connected' || dashboardState.value === 'elevated connected'
+})
+
+const sessionModeLabel = computed(() => {
+  const mode = vpn.currentSessionMode
+  switch (mode) {
+    case 'helper': return '通过服务'
+    case 'elevated': return '临时提权'
+    case 'direct': return '直接连接'
+    default: return ''
+  }
+})
+
+// Error-specific display info
+const errorDisplayInfo = computed(() => {
+  if (!vpn.lastErrorType) return null
+  switch (vpn.lastErrorType) {
+    case 'elevation_denied':
+      return {
+        icon: AlertOctagon,
+        title: '用户拒绝了授权请求',
+        description: vpn.lastError || '提权授权被用户取消，VPN 无法建立连接。',
+        color: 'warning' as const,
+      }
+    case 'runtime_missing':
+      return {
+        icon: XCircle,
+        title: '缺少 OpenConnect 运行时',
+        description: '请重新安装桌面客户端以修复运行时组件。',
+        color: 'destructive' as const,
+      }
+    case 'config_invalid':
+      return {
+        icon: AlertTriangle,
+        title: '配置不完整',
+        description: vpn.lastError || '请检查连接设置是否完整。',
+        color: 'warning' as const,
+      }
+    case 'native_failure':
+      return {
+        icon: AlertOctagon,
+        title: '操作失败',
+        description: vpn.lastError || '原生操作执行失败。',
+        color: 'destructive' as const,
+      }
+    case 'parse_failure':
+      return {
+        icon: AlertOctagon,
+        title: '解析失败',
+        description: vpn.lastError || '无法解析服务端响应。',
+        color: 'destructive' as const,
+      }
+    default:
+      return {
+        icon: AlertOctagon,
+        title: '发生错误',
+        description: vpn.lastError || '未知错误。',
+        color: 'destructive' as const,
+      }
+  }
+})
+
+// Primary action handler — wraps the store action to support router navigation
+function handlePrimaryAction() {
+  const action = vpn.dashboardPrimaryAction
+  if (!action) return
+
+  // Service-missing states navigate to /service
+  const state = dashboardState.value
+  if (state === 'service-missing disconnected') {
+    router.push('/service')
+    return
+  }
+
+  // Error recoverable: some actions need router navigation
+  if (state === 'error recoverable' && vpn.lastErrorType) {
+    if (vpn.lastErrorType === 'elevation_denied') {
+      router.push('/service')
+      return
+    }
+    if (vpn.lastErrorType === 'config_invalid') {
+      router.push('/settings')
+      return
+    }
+  }
+
+  action.action()
+}
+
+// Status badge state derived from dashboard state
+const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'error'>(() => {
+  const state = dashboardState.value
+  if (state === 'helper connected' || state === 'direct connected' || state === 'elevated connected') return 'connected'
+  if (state === 'elevated connecting') return 'connecting'
+  if (state === 'error recoverable' || state === 'error blocking') return 'error'
   return 'disconnected'
 })
-
-const badgeLabel = computed(() => {
-  const state = vpn.dashboardState
-  const labels: Record<DashboardState, string> = {
-    helper_ready: '辅助服务就绪',
-    helper_missing: '辅助服务未安装',
-    elevated_connecting: '授权连接中...',
-    direct_connected: '临时连接',
-    helper_connected: '已连接',
-    cleanup_pending: '正在清理路由...',
-    runtime_missing: '运行时缺失',
-    authorization_denied: '授权被拒绝',
-    disconnected: '未连接',
-  }
-  return labels[state] || '未连接'
-})
-
-const isTemporarySession = computed(() => vpn.sessionMode === 'elevated' || vpn.sessionMode === 'direct')
 </script>
 
 <template>
-  <div class="py-8">
+  <div>
     <!-- Hero card -->
     <div class="bg-surface border border-border rounded-xl p-8 mb-6">
       <div class="flex items-center justify-between mb-6">
@@ -94,50 +168,87 @@ const isTemporarySession = computed(() => vpn.sessionMode === 'elevated' || vpn.
         <StatusBadge :status="badgeStatus" />
       </div>
 
-      <!-- Temporary session warning -->
-      <div
-        v-if="isTemporarySession && vpn.status?.connected"
-        class="mb-4 flex items-start gap-3 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-300"
-      >
-        <ShieldAlert class="mt-0.5 h-4 w-4 shrink-0" />
-        <div>
-          <p class="leading-5 font-medium">临时连接模式</p>
-          <p class="text-xs opacity-80 mt-1">
-            当前通过一次性管理员授权连接。安装 launchd 辅助服务后，连接将由守护进程自动管理，无需每次授权。
-          </p>
+      <!-- ── State: elevated connecting ──────────────────────────────── -->
+      <div v-if="dashboardState === 'elevated connecting'" class="flex items-center gap-4">
+        <div class="flex items-center gap-2 text-warning">
+          <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+          </svg>
+          <span class="text-sm font-medium">等待授权...</span>
+        </div>
+        <p class="text-xs text-muted">请在系统弹窗中确认提权请求</p>
+      </div>
+
+      <!-- ── State: error recoverable ────────────────────────────────── -->
+      <div v-else-if="dashboardState === 'error recoverable'" class="space-y-4">
+        <div
+          class="flex items-start gap-3 rounded-lg border px-4 py-3 text-sm"
+          :class="errorDisplayInfo?.color === 'warning'
+            ? 'border-warning/30 bg-warning/10 text-warning'
+            : 'border-red-500/20 bg-red-500/10 text-red-300'"
+        >
+          <component :is="errorDisplayInfo?.icon" class="mt-0.5 h-4 w-4 shrink-0" />
+          <div class="min-w-0">
+            <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
+            <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
+            <p v-if="vpn.lastRecommendedAction" class="mt-1 opacity-80 leading-5">{{ vpn.lastRecommendedAction }}</p>
+            <router-link
+              :to="{ path: '/logs', query: { from: 'dashboard' } }"
+              class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
+            >
+              <FileText class="w-3 h-3" />
+              查看日志 →
+            </router-link>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <button
+            class="flex items-center gap-2 bg-accent text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-accent/90 transition-colors"
+            @click="handlePrimaryAction"
+          >
+            <RefreshCw v-if="vpn.lastErrorType === 'native_failure' || vpn.lastErrorType === 'parse_failure'" class="w-4 h-4" />
+            <Shield v-else-if="vpn.lastErrorType === 'elevation_denied'" class="w-4 h-4" />
+            <Settings v-else-if="vpn.lastErrorType === 'config_invalid'" class="w-4 h-4" />
+            {{ vpn.dashboardPrimaryAction?.label }}
+          </button>
+          <button
+            class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 transition-colors"
+            @click="vpn.clearError()"
+          >
+            {{ vpn.dashboardSecondaryAction?.label }}
+          </button>
         </div>
       </div>
 
-      <!-- Cleanup pending notice -->
-      <div
-        v-if="vpn.cleanupPending"
-        class="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
-      >
-        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 animate-pulse" />
-        <div>
-          <p class="leading-5 font-medium">正在清理路由...</p>
-          <p class="text-xs opacity-80 mt-1">断开连接后正在清理临时路由，请勿关闭应用。</p>
+      <!-- ── State: error blocking ───────────────────────────────────── -->
+      <div v-else-if="dashboardState === 'error blocking'" class="space-y-4">
+        <div class="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          <component :is="errorDisplayInfo?.icon" class="mt-0.5 h-4 w-4 shrink-0" />
+          <div class="min-w-0">
+            <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
+            <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
+            <p v-if="vpn.lastRecommendedAction" class="mt-1 opacity-80 leading-5">{{ vpn.lastRecommendedAction }}</p>
+            <router-link
+              :to="{ path: '/logs', query: { from: 'dashboard' } }"
+              class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
+            >
+              <FileText class="w-3 h-3" />
+              查看日志 →
+            </router-link>
+          </div>
         </div>
-      </div>
-
-      <!-- Helper missing: recommend install -->
-      <div
-        v-if="vpn.dashboardState === 'helper_missing' && !vpn.status?.connected"
-        class="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
-      >
-        <ShieldAlert class="mt-0.5 h-4 w-4 shrink-0" />
-        <div>
-          <p class="leading-5 font-medium">建议安装辅助服务</p>
-          <p class="text-xs opacity-80 mt-1">
-            安装 launchd 辅助服务后，VPN 连接将由系统守护进程管理，无需每次输入管理员密码。
-          </p>
-        </div>
-      </div>
-
-      <!-- Action buttons -->
-      <div class="flex items-center gap-4">
         <button
-          v-if="!vpn.status?.connected"
+          class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 transition-colors"
+          @click="vpn.clearError()"
+        >
+          {{ vpn.dashboardPrimaryAction?.label }}
+        </button>
+      </div>
+
+      <!-- ── State: service-ready disconnected ───────────────────────── -->
+      <div v-else-if="dashboardState === 'service-ready disconnected'" class="flex items-center gap-4">
+        <button
           :disabled="vpn.loading"
           class="flex items-center gap-2 bg-accent text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
           @click="vpn.connect()"
@@ -145,9 +256,36 @@ const isTemporarySession = computed(() => vpn.sessionMode === 'elevated' || vpn.
           <PlugZap class="w-4 h-4" />
           {{ vpn.loading ? '连接中...' : '连接' }}
         </button>
+      </div>
+
+      <!-- ── State: service-missing disconnected ─────────────────────── -->
+      <div v-else-if="dashboardState === 'service-missing disconnected'" class="space-y-3">
         <button
-          v-else
-          :disabled="vpn.loading || vpn.cleanupPending"
+          :disabled="vpn.loading"
+          class="flex items-center gap-2 bg-accent text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
+          @click="$router.push('/service')"
+        >
+          <Shield class="w-4 h-4" />
+          安装服务（推荐）
+        </button>
+        <p class="text-xs text-muted">
+          安装后 VPN 可开机自启、无需每次授权
+        </p>
+        <button
+          v-if="vpn.canUseElevatedFallback"
+          :disabled="vpn.loading"
+          class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 disabled:opacity-50 transition-colors"
+          @click="vpn.connectElevated()"
+        >
+          <PlugZap class="w-4 h-4" />
+          仅本次连接
+        </button>
+      </div>
+
+      <!-- ── State: helper connected ─────────────────────────────────── -->
+      <div v-else-if="dashboardState === 'helper connected'" class="flex items-center gap-4">
+        <button
+          :disabled="vpn.loading"
           class="flex items-center gap-2 bg-destructive text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-destructive/90 disabled:opacity-50 transition-colors"
           @click="vpn.disconnect()"
         >
@@ -156,18 +294,39 @@ const isTemporarySession = computed(() => vpn.sessionMode === 'elevated' || vpn.
         </button>
       </div>
 
-      <!-- Error display -->
-      <div
-        v-if="vpn.lastError"
-        class="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-      >
-        <p>{{ vpn.lastError.message }}</p>
-        <p v-if="vpn.lastError.recovery_hint" class="text-xs opacity-80 mt-1">
-          {{ vpn.lastError.recovery_hint }}
-        </p>
+      <!-- ── State: direct connected / elevated connected ────────────── -->
+      <div v-else-if="isTransientConnected" class="space-y-3">
+        <button
+          :disabled="vpn.loading"
+          class="flex items-center gap-2 bg-destructive text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-destructive/90 disabled:opacity-50 transition-colors"
+          @click="vpn.disconnectElevated()"
+        >
+          <Plug class="w-4 h-4" />
+          {{ vpn.loading ? '断开中...' : '断开连接' }}
+        </button>
+        <button
+          class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 transition-colors"
+          @click="$router.push('/service')"
+        >
+          <Shield class="w-4 h-4" />
+          安装服务
+        </button>
       </div>
 
-      <!-- Upstream virtual adapter warning -->
+      <!-- ── Transient mode warning banner ───────────────────────────── -->
+      <div
+        v-if="isTransientConnected"
+        class="mt-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
+      >
+        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+        <div class="min-w-0">
+          <p class="leading-5">
+            当前为临时连接模式，重启后将失效。建议安装服务以获得持久连接。
+          </p>
+        </div>
+      </div>
+
+      <!-- ── Upstream virtual adapter warning ─────────────────────────── -->
       <div
         v-if="vpn.status?.upstream_virtual_detected"
         class="mt-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
@@ -255,20 +414,23 @@ const isTemporarySession = computed(() => vpn.sessionMode === 'elevated' || vpn.
           <span class="text-muted">网络就绪：</span>
           <span class="text-foreground ml-2">{{ vpn.status.network_ready ? '是' : '否' }}</span>
         </div>
-        <div>
+        <div v-if="vpn.status.connected">
           <span class="text-muted">连接模式：</span>
-          <span class="text-foreground ml-2">
-            {{ vpn.sessionMode === 'helper' ? '辅助服务' : vpn.sessionMode === 'elevated' ? '临时授权' : vpn.sessionMode === 'direct' ? '直接连接' : '未连接' }}
-          </span>
+          <span class="text-foreground ml-2">{{ sessionModeLabel }}</span>
         </div>
       </div>
     </div>
 
-    <div v-if="!vpn.status" class="flex items-center justify-center py-16">
+    <!-- Empty state — context-appropriate message -->
+    <div v-if="!vpn.status && !vpn.loading && !vpn.lastError" class="flex items-center justify-center py-16">
       <div class="text-center">
         <WifiOff class="w-12 h-12 text-muted mx-auto mb-4" />
-        <p class="text-muted text-sm">无法获取 VPN 状态</p>
-        <p class="text-muted text-xs mt-1">请确保 VPN 服务正在运行</p>
+        <p class="text-muted text-sm">
+          {{ vpn.isDesktop ? '无法连接到本地服务' : '无法获取 VPN 状态' }}
+        </p>
+        <p class="text-muted text-xs mt-1">
+          {{ vpn.isDesktop ? '请确保应用已正确启动' : '请确保 VPN 服务正在运行' }}
+        </p>
       </div>
     </div>
   </div>

@@ -5,12 +5,10 @@ import ToastStack from './components/Toast.vue'
 </script>
 
 <template>
-  <div class="min-h-screen bg-bg text-foreground font-sans lg:flex">
+  <div class="min-h-screen bg-bg text-foreground font-sans flex">
     <NavBar />
-    <main class="min-w-0 flex-1 lg:pl-72">
-      <div class="mx-auto w-full max-w-6xl px-4 pb-8 pt-4 lg:px-8 lg:py-8">
-        <RouterView />
-      </div>
+    <main class="flex-1 min-w-0 overflow-y-auto h-screen px-6 py-6">
+      <RouterView />
     </main>
     <ToastStack />
   </div>
