@@ -4,6 +4,10 @@
 #include <filesystem>
 #include <iostream>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace {
 
 int current_process_id() {
