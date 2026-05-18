@@ -25,6 +25,7 @@
 #include <sys/un.h>
 #else
 #include <windows.h>
+#include <io.h>
 #include <thread>
 #ifdef _MSC_VER
 typedef unsigned int uid_t;
@@ -116,7 +117,11 @@ void remove_file_if_exists(const std::string &path) {
 bool prompt_confirm(const std::string &question, bool default_yes) {
   // When stdin is not a TTY (e.g. osascript elevation), auto-confirm.
   // The user already authorized via the macOS admin dialog.
+  #ifdef _WIN32
+  if (!_isatty(_fileno(stdin)))
+  #else
   if (!isatty(STDIN_FILENO))
+  #endif
     return true;
   std::cout << "  " << question << (default_yes ? " [Y/n]: " : " [y/N]: ");
   std::string input;

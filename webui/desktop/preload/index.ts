@@ -1,9 +1,23 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import {
+  desktopDriverInstallTargets,
+  desktopEventTypes,
+  desktopIpcChannels,
+  desktopServiceCommands,
+  type DesktopDriverInstallTarget,
+  type DesktopEventType,
+  type DesktopRpcAction,
+  type DesktopServiceCommand,
+} from '../shared/desktop-contract.js'
 
-type EventHandler = (event: { type: string; data: unknown }) => void
+type EventHandler = (event: { type: DesktopEventType; data: unknown }) => void
 
-function rpc(action: string, payload?: unknown) {
-  return ipcRenderer.invoke('ecnu-vpn:rpc', action, payload ?? {})
+void desktopDriverInstallTargets
+void desktopEventTypes
+void desktopServiceCommands
+
+function rpc(action: DesktopRpcAction, payload?: unknown) {
+  return ipcRenderer.invoke(desktopIpcChannels.rpc, action, payload ?? {})
 }
 
 const api = {
@@ -12,8 +26,14 @@ const api = {
   },
   vpn: {
     connect: (password?: string) => rpc('vpn.connect', { password }),
-    connectElevated: (password?: string) => ipcRenderer.invoke('ecnu-vpn:connect-elevated', { password }),
     disconnect: () => rpc('vpn.disconnect'),
+    connectElevated: (password?: string) =>
+      ipcRenderer.invoke(desktopIpcChannels.rpcElevated, 'vpn.connect', {
+        password,
+        allow_direct_fallback: true,
+      }, 'status.get'),
+    disconnectElevated: () =>
+      ipcRenderer.invoke(desktopIpcChannels.rpcElevated, 'vpn.disconnect', {}, 'status.get'),
   },
   config: {
     getAuth: () => rpc('config.getAuth'),
@@ -30,8 +50,8 @@ const api = {
   },
   service: {
     status: () => rpc('service.status'),
-    install: () => ipcRenderer.invoke('ecnu-vpn:service-command', 'install'),
-    uninstall: () => ipcRenderer.invoke('ecnu-vpn:service-command', 'uninstall'),
+    install: () => ipcRenderer.invoke(desktopIpcChannels.serviceCommand, 'install' satisfies DesktopServiceCommand),
+    uninstall: () => ipcRenderer.invoke(desktopIpcChannels.serviceCommand, 'uninstall' satisfies DesktopServiceCommand),
   },
   logs: {
     list: (options?: { lines?: number; filter?: string }) => rpc('logs.list', options ?? {}),
@@ -39,16 +59,17 @@ const api = {
   runtime: {
     status: () => rpc('runtime.status'),
   },
-  helper: {
-    status: () => rpc('helper.status'),
+  drivers: {
+    status: () => rpc('drivers.status'),
+    install: (driver: DesktopDriverInstallTarget) => ipcRenderer.invoke(desktopIpcChannels.driverInstall, driver),
   },
   events: {
     subscribe: (handler: EventHandler) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: { type: string; data: unknown }) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { type: DesktopEventType; data: unknown }) => {
         handler(payload)
       }
-      ipcRenderer.on('ecnu-vpn:event', listener)
-      return () => ipcRenderer.removeListener('ecnu-vpn:event', listener)
+      ipcRenderer.on(desktopIpcChannels.event, listener)
+      return () => ipcRenderer.removeListener(desktopIpcChannels.event, listener)
     },
   },
 }

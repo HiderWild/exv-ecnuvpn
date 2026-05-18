@@ -1,6 +1,10 @@
 import type {
+  DesktopDriverInstallTarget,
+  DesktopEventType,
+} from '../../desktop/shared/desktop-contract'
+import type {
   AuthConfig,
-  HelperStatus,
+  DriverStatus,
   KeyStatus,
   RuntimeStatus,
   SettingsConfig,
@@ -9,33 +13,13 @@ import type {
   LogEntry,
   RouteEntry,
   ServiceStatus,
+  ServiceProgressEntry,
   VpnStatus,
 } from '../stores/vpn'
 
-export type SessionMode = 'helper' | 'direct' | 'elevated' | 'disconnected'
-
-export type VpnErrorType =
-  | 'elevation_denied'
-  | 'runtime_missing'
-  | 'config_missing'
-  | 'helper_missing'
-  | 'helper_unavailable'
-  | 'cleanup_failed'
-  | 'cleanup_pending'
-  | 'connect_failed'
-  | 'disconnect_failed'
-  | 'unknown'
-
-export interface VpnError {
-  type: VpnErrorType
-  message: string
-  recoverable: boolean
-  recovery_hint?: string
-}
-
 export interface EcnuVpnEvent {
-  type: 'log' | 'status' | 'heartbeat'
-  data: unknown
+  type: DesktopEventType
+  data: unknown | ServiceProgressEntry
 }
 
 export interface EcnuVpnApi {
@@ -44,8 +28,9 @@ export interface EcnuVpnApi {
   }
   vpn: {
     connect(password?: string): Promise<VpnStatus | { status: 'connecting' }>
-    connectElevated(password?: string): Promise<VpnStatus | { status: 'connecting' }>
     disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
+    connectElevated(password?: string): Promise<VpnStatus>
+    disconnectElevated(): Promise<VpnStatus>
   }
   config: {
     getAuth(): Promise<AuthConfig>
@@ -71,8 +56,9 @@ export interface EcnuVpnApi {
   runtime: {
     status(): Promise<RuntimeStatus>
   }
-  helper: {
-    status(): Promise<HelperStatus>
+  drivers: {
+    status(): Promise<DriverStatus>
+    install(driver: DesktopDriverInstallTarget): Promise<DriverStatus>
   }
   events: {
     subscribe(handler: (event: EcnuVpnEvent) => void): () => void

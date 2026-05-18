@@ -1,5 +1,5 @@
 import { ref, onUnmounted } from 'vue'
-import { useVpnStore, type LogEntry, type VpnStatus } from '../stores/vpn'
+import { useVpnStore, type LogEntry, type ServiceProgressEntry, type VpnStatus } from '../stores/vpn'
 
 export function useSSE() {
   const connected = ref(false)
@@ -27,13 +27,14 @@ export function useSSE() {
 
         if (event.type === 'status' && event.data && typeof event.data === 'object') {
           const store = useVpnStore()
-          const patch = event.data as Partial<VpnStatus>
           store.status = store.status
-            ? { ...store.status, ...patch }
+            ? { ...store.status, ...(event.data as Partial<VpnStatus>) }
             : (event.data as VpnStatus)
-          if (patch.connected && !patch.cleanup_pending) {
-            store.lastError = null
-          }
+        }
+
+        if (event.type === 'service-progress' && event.data && typeof event.data === 'object') {
+          const store = useVpnStore()
+          store.addServiceProgress(event.data as ServiceProgressEntry)
         }
       })
       return
