@@ -5,7 +5,9 @@
 #include "tunnel.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
+#include "virtual_network.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <cctype>
 #include <csignal>
@@ -15,6 +17,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <filesystem>
 #ifndef _WIN32
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -58,6 +61,8 @@ constexpr const char *kHelperStatePath = "C:\\ProgramData\\exv-helper-session.js
 #endif
 #ifdef _WIN32
 constexpr const char *kStableInstallPath = "C:\\Program Files\\ECNU-VPN\\exv.exe";
+constexpr const char *kStableHelperInstallPath =
+    "C:\\Program Files\\ECNU-VPN\\exv-helper.exe";
 #else
 constexpr const char *kStableInstallPath = "/usr/local/bin/exv";
 #endif
@@ -659,6 +664,92 @@ void daemon_signal_handler(int) {
   daemon_stop_requested = 1;
 }
 
+std::string windows_sibling_helper_path(const std::string &executable_path) {
+#ifdef _WIN32
+  std::filesystem::path exe_path(executable_path);
+  std::filesystem::path helper_path =
+      exe_path.parent_path() / "exv-helper.exe";
+  if (utils::file_exists(helper_path.string()))
+    return helper_path.string();
+#endif
+  return executable_path;
+}
+
+bool should_stage_windows_runtime_file(const std::filesystem::path &path) {
+#ifdef _WIN32
+  std::string name = path.filename().string();
+  std::string ext = path.extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (ext == ".exe" || ext == ".dll" || ext == ".js")
+    return true;
+  return name == "LICENSE.txt";
+#else
+  (void)path;
+  return false;
+#endif
+}
+
+bool stage_windows_helper_runtime(const std::string &executable_path,
+                                  std::string *helper_path) {
+#ifdef _WIN32
+  std::filesystem::path source_exe(executable_path);
+  std::filesystem::path source_dir = source_exe.parent_path();
+  std::filesystem::path target_dir =
+      std::filesystem::path(kStableInstallPath).parent_path();
+  std::error_code ec;
+
+  std::filesystem::create_directories(target_dir, ec);
+  if (ec) {
+    utils::print_error("Failed to create stable helper directory: " +
+                       ec.message());
+    return false;
+  }
+
+  utils::print_info("Staging helper runtime to " + target_dir.string() + " ...");
+  for (const auto &entry : std::filesystem::directory_iterator(source_dir, ec)) {
+    if (ec)
+      break;
+    if (!entry.is_regular_file())
+      continue;
+    if (!should_stage_windows_runtime_file(entry.path()))
+      continue;
+
+    std::filesystem::path target = target_dir / entry.path().filename();
+    if (std::filesystem::equivalent(entry.path(), target, ec)) {
+      ec.clear();
+      continue;
+    }
+    ec.clear();
+    std::filesystem::copy_file(entry.path(), target,
+                               std::filesystem::copy_options::overwrite_existing,
+                               ec);
+    if (ec) {
+      utils::print_error("Failed to copy " + entry.path().filename().string() +
+                         ": " + ec.message());
+      return false;
+    }
+  }
+
+  if (!utils::file_exists(kStableInstallPath)) {
+    utils::print_error("Staged exv.exe is missing from the stable directory.");
+    return false;
+  }
+  if (!utils::file_exists(kStableHelperInstallPath)) {
+    utils::print_error("Staged exv-helper.exe is missing from the stable directory.");
+    return false;
+  }
+
+  if (helper_path)
+    *helper_path = kStableHelperInstallPath;
+  return true;
+#else
+  (void)executable_path;
+  (void)helper_path;
+  return false;
+#endif
+}
+
 void set_close_on_exec(int fd) {
 #ifndef _WIN32
   if (fd < 0)
@@ -698,15 +789,24 @@ bool connect_socket(int *out_fd) {
 
 bool send_request(const nlohmann::json &request, nlohmann::json *response,
                   std::string *error_message = nullptr,
-                  int timeout_seconds = 15) {
+                  int timeout_ms = 15000) {
   std::string raw;
 
 #ifdef _WIN32
   // Use WaitNamedPipeA with a short timeout so we don't block when the
   // pipe doesn't exist yet (e.g. during service startup polling).
-  if (!WaitNamedPipeA("\\\\.\\pipe\\exv-helper", 2000 /* ms */)) {
-    if (error_message)
-      *error_message = "EXV helper is not available.";
+  DWORD wait_ms = static_cast<DWORD>(timeout_ms > 0 ? timeout_ms : 1);
+  if (!WaitNamedPipeA("\\\\.\\pipe\\exv-helper", wait_ms)) {
+    if (error_message) {
+      DWORD err = GetLastError();
+      if (err == ERROR_FILE_NOT_FOUND)
+        *error_message = "EXV helper pipe does not exist.";
+      else if (err == ERROR_SEM_TIMEOUT)
+        *error_message = "EXV helper pipe is busy or not responding.";
+      else
+        *error_message = "EXV helper is not available. Windows error: " +
+                         std::to_string(err);
+    }
     return false;
   }
 
@@ -714,8 +814,15 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
                              GENERIC_READ | GENERIC_WRITE, 0, NULL,
                              OPEN_EXISTING, 0, NULL);
   if (hPipe == INVALID_HANDLE_VALUE) {
-    if (error_message)
-      *error_message = "EXV helper is not available.";
+    if (error_message) {
+      DWORD err = GetLastError();
+      if (err == ERROR_ACCESS_DENIED)
+        *error_message =
+            "EXV helper pipe denied access to the current user.";
+      else
+        *error_message = "EXV helper is not available. Windows error: " +
+                         std::to_string(err);
+    }
     return false;
   }
 
@@ -723,7 +830,7 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
   COMMTIMEOUTS timeouts = {};
   timeouts.ReadIntervalTimeout = MAXDWORD;
   timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
-  timeouts.ReadTotalTimeoutConstant = timeout_seconds * 1000;
+  timeouts.ReadTotalTimeoutConstant = wait_ms;
   SetCommTimeouts(hPipe, &timeouts);
 
   std::string payload = request.dump();
@@ -768,8 +875,8 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
   ssize_t n = 0;
 
   struct timeval tv;
-  tv.tv_sec = timeout_seconds;
-  tv.tv_usec = 0;
+  tv.tv_sec = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
 
   fd_set readfds;
   FD_ZERO(&readfds);
@@ -821,8 +928,14 @@ bool wait_until_available(int attempts = 1, useconds_t delay_us = 0) {
   for (int i = 0; i < attempts; ++i) {
     nlohmann::json response;
     std::string error_message;
-    if (send_request(nlohmann::json{{"action", "status"}}, &response,
-                     &error_message)) {
+#ifdef _WIN32
+    bool ok = send_request(nlohmann::json{{"action", "status"}}, &response,
+                           &error_message, 250);
+#else
+    bool ok = send_request(nlohmann::json{{"action", "status"}}, &response,
+                           &error_message);
+#endif
+    if (ok) {
       return true;
     }
     if (i + 1 < attempts && delay_us > 0) {
@@ -852,21 +965,23 @@ nlohmann::json make_status_response(const SessionState &state,
                                     const RuntimeSnapshot &snapshot,
                                     bool ok = true,
                                     const std::string &message = "") {
-  return nlohmann::json{{"ok", ok},
-                        {"message", message},
-                        {"running", snapshot.running},
-                        {"pid", snapshot.pid},
-                        {"supervisor_pid", snapshot.supervisor_pid},
-                        {"network_ready", snapshot.network_ready},
-                        {"interface", snapshot.interface_name},
-                        {"internal_ip", snapshot.internal_ip},
-                        {"rx_bytes", snapshot.rx_bytes},
-                        {"tx_bytes", snapshot.tx_bytes},
-                        {"server", state.server},
-                        {"route_count", state.route_count},
-                        {"retry_limit", state.retry_limit},
-                        {"owner_username", state.username},
-                        {"interfaces_output", snapshot.interfaces_output}};
+  nlohmann::json response{{"ok", ok},
+                          {"message", message},
+                          {"running", snapshot.running},
+                          {"pid", snapshot.pid},
+                          {"supervisor_pid", snapshot.supervisor_pid},
+                          {"network_ready", snapshot.network_ready},
+                          {"interface", snapshot.interface_name},
+                          {"internal_ip", snapshot.internal_ip},
+                          {"rx_bytes", snapshot.rx_bytes},
+                          {"tx_bytes", snapshot.tx_bytes},
+                          {"server", state.server},
+                          {"route_count", state.route_count},
+                          {"retry_limit", state.retry_limit},
+                          {"owner_username", state.username},
+                          {"interfaces_output", snapshot.interfaces_output}};
+  virtual_network::add_status_fields(response, snapshot.interface_name);
+  return response;
 }
 
 bool ensure_same_owner(const SessionState &state, uid_t peer_uid) {
@@ -1190,6 +1305,14 @@ bool print_running_status(const nlohmann::json &response) {
     std::cout << "  Internal IP    : "
               << response.value("internal_ip", std::string()) << std::endl;
   }
+  if (response.value("upstream_virtual_detected", false)) {
+    std::cout << "  Route Policy   : EXV campus routes first, upstream virtual adapter preserved"
+              << std::endl;
+    std::string message =
+        response.value("upstream_virtual_message", std::string());
+    if (!message.empty())
+      std::cout << "  Notice         : " << message << std::endl;
+  }
 
   std::string interfaces_output = response.value("interfaces_output", std::string());
   if (!interfaces_output.empty()) {
@@ -1270,6 +1393,12 @@ bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
             << std::endl;
   std::cout << utils::DIM << "  Routes: " << response.value("route_count", 0)
             << " configured" << utils::RESET << std::endl;
+  if (response.value("upstream_virtual_detected", false)) {
+    std::string message =
+        response.value("upstream_virtual_message", std::string());
+    if (!message.empty())
+      utils::print_warning(message);
+  }
   int helper_retry_limit = response.value("retry_limit", 0);
   if (helper_retry_limit != 0) {
     std::cout << utils::DIM << "  Auto-reconnect: "
@@ -1467,6 +1596,11 @@ int install_service(const std::string &executable_path) {
     return 1;
   }
 
+  ULONGLONG install_started = GetTickCount64();
+  auto elapsed_ms = [&]() -> unsigned long long {
+    return static_cast<unsigned long long>(GetTickCount64() - install_started);
+  };
+
   utils::print_info("Opening Service Control Manager...");
   SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
   if (!hSCM) {
@@ -1481,9 +1615,13 @@ int install_service(const std::string &executable_path) {
     CloseServiceHandle(hSCM);
     return 1;
   }
+  if (!stage_windows_helper_runtime(exec_path, &exec_path)) {
+    CloseServiceHandle(hSCM);
+    return 1;
+  }
 
-  // Register the main exv binary with __helper-daemon argument
-  std::string binary_path = "\"" + exec_path + "\" __helper-daemon";
+  // Register the dedicated Windows service executable.
+  std::string binary_path = "\"" + exec_path + "\" --service";
 
   utils::print_info("Registering helper service...");
   SC_HANDLE hService = CreateServiceA(
@@ -1495,28 +1633,57 @@ int install_service(const std::string &executable_path) {
   if (!hService) {
     DWORD err = GetLastError();
     if (err == ERROR_SERVICE_EXISTS) {
-      std::cout << "Helper service is already installed.\n";
+      utils::print_info("Helper service already exists; opening existing service...");
+      hService = OpenServiceA(hSCM, kHelperServiceName,
+                              SERVICE_CHANGE_CONFIG | SERVICE_START |
+                                  SERVICE_QUERY_STATUS);
+      if (!hService) {
+        logger::error("OpenService failed: " + std::to_string(GetLastError()));
+        CloseServiceHandle(hSCM);
+        return 1;
+      }
+      utils::print_info("Refreshing helper service executable path...");
+      if (!ChangeServiceConfigA(
+              hService, SERVICE_NO_CHANGE, SERVICE_AUTO_START,
+              SERVICE_ERROR_NORMAL, binary_path.c_str(), NULL, NULL, NULL,
+              NULL, NULL, NULL)) {
+        logger::error("ChangeServiceConfig failed: " +
+                      std::to_string(GetLastError()));
+        CloseServiceHandle(hService);
+        CloseServiceHandle(hSCM);
+        return 1;
+      }
+    } else {
+      logger::error("CreateService failed: " + std::to_string(err));
       CloseServiceHandle(hSCM);
-      return 0;
+      return 1;
     }
-    logger::error("CreateService failed: " + std::to_string(err));
-    CloseServiceHandle(hSCM);
-    return 1;
   }
 
   utils::print_info("Starting helper service...");
-  StartService(hService, 0, NULL);
+  if (!StartService(hService, 0, NULL)) {
+    DWORD err = GetLastError();
+    if (err != ERROR_SERVICE_ALREADY_RUNNING) {
+      logger::error("StartService failed: " + std::to_string(err));
+      CloseServiceHandle(hService);
+      CloseServiceHandle(hSCM);
+      return 1;
+    }
+    utils::print_info("Helper service is already running.");
+  }
   CloseServiceHandle(hService);
   CloseServiceHandle(hSCM);
 
   utils::print_info("Waiting for helper to become ready...");
-  bool helper_ready = wait_until_available(50, 100000);
+  bool helper_ready = wait_until_available(20, 250000);
 
-  utils::print_success("EXV helper service installed.");
+  utils::print_success("EXV helper service installed in " +
+                       std::to_string(elapsed_ms()) + " ms.");
   if (!helper_ready) {
     utils::print_warning(
-        "Helper service was installed, but it has not responded yet.");
+        "Helper service is installed, but the named pipe is not responding yet.");
     utils::print_info("Run 'exv service status' again in a moment if needed.");
+    return 2;
   }
   utils::print_info("You can now run 'exv' and 'exv stop' without elevation.");
   return 0;
@@ -1576,6 +1743,14 @@ int uninstall_service() {
 
   SERVICE_STATUS status;
   ControlService(hService, SERVICE_CONTROL_STOP, &status);
+  for (int i = 0; i < 40; ++i) {
+    SERVICE_STATUS current = {};
+    if (!QueryServiceStatus(hService, &current))
+      break;
+    if (current.dwCurrentState == SERVICE_STOPPED)
+      break;
+    Sleep(250);
+  }
   DeleteService(hService);
 
   CloseServiceHandle(hService);
@@ -1710,6 +1885,17 @@ int worker_main(const std::string &request_path) {
   }
 }
 
+void request_daemon_stop() {
+  daemon_stop_requested = 1;
+#ifdef _WIN32
+  HANDLE hPipe = CreateFileA(kHelperPipePath, GENERIC_READ | GENERIC_WRITE, 0,
+                             NULL, OPEN_EXISTING, 0, NULL);
+  if (hPipe != INVALID_HANDLE_VALUE) {
+    CloseHandle(hPipe);
+  }
+#endif
+}
+
 int daemon_main() {
   signal(SIGTERM, daemon_signal_handler);
   signal(SIGINT, daemon_signal_handler);
@@ -1751,20 +1937,15 @@ int daemon_main() {
     unsigned int peer_gid = ipc->peer_gid();
 
 #ifdef _WIN32
-    // Windows: use threads instead of fork (no fork available)
-    // Each request is processed in a background thread so long-running
-    // operations (e.g. VPN start) don't block new client connections.
-    IpcServer *ipc_ptr = ipc.get();
-    std::thread([ipc_ptr, raw, peer_uid, peer_gid]() {
-      nlohmann::json response;
-      try {
-        nlohmann::json request = nlohmann::json::parse(raw);
-        response = handle_request(peer_uid, peer_gid, request);
-      } catch (...) {
-        response = make_error("Failed to parse helper request.");
-      }
-      ipc_ptr->send_response(response.dump());
-    }).detach();
+    nlohmann::json response;
+    try {
+      nlohmann::json request = nlohmann::json::parse(raw);
+      response = handle_request(peer_uid, peer_gid, request);
+    } catch (...) {
+      response = make_error("Failed to parse helper request.");
+    }
+    ipc->send_response(response.dump());
+    ipc->close_client();
 #else
     // POSIX: fork a child to handle the request
     pid_t handler_pid = fork();
@@ -1781,7 +1962,7 @@ int daemon_main() {
       signal(SIGINT, SIG_DFL);
       signal(SIGCHLD, SIG_DFL);
       signal(SIGPIPE, SIG_IGN);
-      ipc->close();
+      ipc->close_server();
       nlohmann::json response;
       try {
         nlohmann::json request = nlohmann::json::parse(raw);
@@ -1793,13 +1974,7 @@ int daemon_main() {
       _exit(0);
     }
 
-    // Wait for the child to finish writing the response before closing
-    // the client fd.  The child inherited client_fd_ across fork(); if
-    // the parent closes it first, the child's write() fails and the
-    // client receives an empty response.
-    int status = 0;
-    while (waitpid(handler_pid, &status, 0) < 0 && errno == EINTR)
-      ;
+    // The child has its own copy of the accepted fd and will write the response.
     ipc->close_client();
 #endif
   }

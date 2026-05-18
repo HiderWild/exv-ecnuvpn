@@ -4,6 +4,7 @@
 #include "crypto.hpp"
 #include "helper.hpp"
 #include "utils.hpp"
+#include "virtual_network.hpp"
 
 #include <nlohmann/json.hpp>
 #include <httplib.h>
@@ -195,6 +196,7 @@ nlohmann::json build_frontend_status(const nlohmann::json& helper_resp,
     j["uptime_seconds"] = 0;
     j["rx_bytes"] = 0;
     j["tx_bytes"] = 0;
+    virtual_network::add_status_fields(j, j.value("interface", std::string()));
     return j;
 }
 
@@ -278,6 +280,7 @@ void WebUIServer::setup_routes() {
             j["uptime_seconds"] = 0;
             j["rx_bytes"] = 0;
             j["tx_bytes"] = 0;
+            virtual_network::add_status_fields(j);
             res.set_content(j.dump(), "application/json");
             return;
         }

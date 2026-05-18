@@ -5,9 +5,9 @@ import ToastStack from './components/Toast.vue'
 </script>
 
 <template>
-  <div class="min-h-screen bg-bg text-foreground font-sans">
+  <div class="min-h-screen bg-bg text-foreground font-sans flex">
     <NavBar />
-    <main class="max-w-5xl mx-auto px-4 pb-8">
+    <main class="flex-1 min-w-0 overflow-y-auto h-screen px-6 py-6">
       <RouterView />
     </main>
     <ToastStack />

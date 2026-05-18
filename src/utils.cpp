@@ -44,9 +44,13 @@ static std::string join_path(const std::string &base,
                              const std::string &component) {
   if (base.empty())
     return component;
+  char sep = '/';
+#ifdef _WIN32
+  sep = '\\';
+#endif
   if (base.back() == '/' || base.back() == '\\')
     return base + component;
-  return base + "/" + component;
+  return base + sep + component;
 }
 
 #ifdef _WIN32
@@ -302,26 +306,52 @@ bool set_config_dir(const std::string &dir) {
   return wf.good() && sync_owner(get_redirect_path());
 }
 
-std::string get_config_path() { return get_config_dir() + "/config.json"; }
+std::string get_config_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\config.json";
+#else
+  return get_config_dir() + "/config.json";
+#endif
+}
 
-std::string get_pid_path() { return get_config_dir() + "/ecnuvpn.pid"; }
+std::string get_pid_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\ecnuvpn.pid";
+#else
+  return get_config_dir() + "/ecnuvpn.pid";
+#endif
+}
 
-std::string get_log_path() { return get_config_dir() + "/ecnuvpn.log"; }
+std::string get_log_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\ecnuvpn.log";
+#else
+  return get_config_dir() + "/ecnuvpn.log";
+#endif
+}
 
 std::string get_tunnel_path() {
 #ifdef _WIN32
-  return get_config_dir() + "/tunnel.js";
+  return get_config_dir() + "\\tunnel.js";
 #else
   return get_config_dir() + "/tunnel.sh";
 #endif
 }
 
 std::string get_supervisor_pid_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\ecnuvpn-supervisor.pid";
+#else
   return get_config_dir() + "/ecnuvpn-supervisor.pid";
+#endif
 }
 
 std::string get_route_ready_path() {
+#ifdef _WIN32
+  return get_config_dir() + "\\route-ready";
+#else
   return get_config_dir() + "/route-ready";
+#endif
 }
 
 // ── File utilities ──────────────────────────────────────────────
@@ -333,6 +363,43 @@ bool file_exists(const std::string &path) {
 #else
   struct _stat st;
   return _stat(path.c_str(), &st) == 0;
+#endif
+}
+
+bool fix_config_dir_ownership() {
+  std::string dir = get_config_dir();
+  if (dir.empty() || !file_exists(dir))
+    return true;
+
+#ifndef _WIN32
+  struct stat st;
+  if (stat(dir.c_str(), &st) != 0)
+    return false;
+
+  // When running as root (sudo/osascript), getuid() returns 0 which is wrong.
+  // Derive the real user from the home directory's owner instead.
+  uid_t expected_uid = getuid();
+  if (expected_uid == 0) {
+    std::string home = get_effective_home();
+    if (!home.empty()) {
+      struct stat home_st;
+      if (stat(home.c_str(), &home_st) == 0)
+        expected_uid = home_st.st_uid;
+    }
+  }
+
+  if (st.st_uid == expected_uid)
+    return true;
+
+  if (chown(dir.c_str(), expected_uid, static_cast<gid_t>(-1)) != 0)
+    return false;
+
+  for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+    chown(entry.path().c_str(), expected_uid, static_cast<gid_t>(-1));
+  }
+  return true;
+#else
+  return true;
 #endif
 }
 

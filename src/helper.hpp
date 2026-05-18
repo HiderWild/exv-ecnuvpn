@@ -19,6 +19,7 @@ int show_service_status();
 
 int daemon_main();
 int worker_main(const std::string &request_path);
+void request_daemon_stop();
 
 } // namespace helper
 } // namespace ecnuvpn

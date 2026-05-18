@@ -1,5 +1,5 @@
 import { ref, onUnmounted } from 'vue'
-import { useVpnStore, type LogEntry, type VpnStatus } from '../stores/vpn'
+import { useVpnStore, type LogEntry, type ServiceProgressEntry, type VpnStatus } from '../stores/vpn'
 
 export function useSSE() {
   const connected = ref(false)
@@ -30,6 +30,11 @@ export function useSSE() {
           store.status = store.status
             ? { ...store.status, ...(event.data as Partial<VpnStatus>) }
             : (event.data as VpnStatus)
+        }
+
+        if (event.type === 'service-progress' && event.data && typeof event.data === 'object') {
+          const store = useVpnStore()
+          store.addServiceProgress(event.data as ServiceProgressEntry)
         }
       })
       return

@@ -29,6 +29,11 @@ public:
   // Close the current client connection (server keeps listening)
   virtual void close_client() {}
 
+  // Close the server listen socket only (client fd stays open)
+  // Used by forked children to stop accepting new connections while
+  // still sending the response on the inherited client fd.
+  virtual void close_server() {}
+
   // Close the server and release resources
   virtual void close() = 0;
 

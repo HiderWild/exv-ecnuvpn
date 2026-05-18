@@ -9,13 +9,35 @@ import type {
   LogEntry,
   RouteEntry,
   ServiceStatus,
+  ServiceProgressEntry,
   VpnStatus,
 } from '../stores/vpn'
 
 export interface EcnuVpnEvent {
-  type: 'log' | 'status' | 'heartbeat'
-  data: unknown
+  type: 'log' | 'status' | 'heartbeat' | 'service-progress'
+  data: unknown | ServiceProgressEntry
 }
+
+export type VpnErrorType =
+  | 'elevation_required'
+  | 'elevation_denied'
+  | 'runtime_missing'
+  | 'config_invalid'
+  | 'service_missing'
+  | 'native_failure'
+  | 'parse_failure'
+  | 'unknown_action'
+
+export interface VpnError {
+  ok: false
+  error_type: VpnErrorType
+  message: string
+  recoverable: boolean
+  recommended_action: string
+  timestamp?: number
+}
+
+export type ConnectMode = 'helper' | 'elevated' | 'direct'
 
 export interface EcnuVpnApi {
   status: {
@@ -24,6 +46,8 @@ export interface EcnuVpnApi {
   vpn: {
     connect(password?: string): Promise<VpnStatus | { status: 'connecting' }>
     disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
+    connectElevated(password?: string): Promise<VpnStatus | VpnError>
+    disconnectElevated(): Promise<VpnStatus | VpnError>
   }
   config: {
     getAuth(): Promise<AuthConfig>

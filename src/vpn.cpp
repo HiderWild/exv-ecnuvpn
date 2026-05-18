@@ -4,6 +4,7 @@
 #include "logger.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
+#include "virtual_network.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -398,14 +399,18 @@ static bool launch_openconnect_process(const Config &cfg,
   DWORD written = 0;
   BOOL wrote = WriteFile(stdin_write, stdin_payload.data(),
                         static_cast<DWORD>(stdin_payload.size()), &written, NULL);
-  CloseHandle(stdin_write);
   CloseHandle(pi.hThread);
   if (!wrote) {
+    CloseHandle(stdin_write);
     TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hProcess);
     logger::error("Failed to write password to openconnect stdin.");
     return false;
   }
+
+  // Keep the write end open while openconnect is running. On Windows,
+  // openconnect later spawns the tunnel script; closing stdin immediately can
+  // leave cscript.exe with an invalid inherited standard input handle.
 
   if (pid)
     *pid = static_cast<pid_t>(pi.dwProcessId);
@@ -1006,6 +1011,8 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
                 << std::endl;
       std::cout << utils::DIM << "  Routes: " << cfg.routes.size()
                 << " configured" << utils::RESET << std::endl;
+      virtual_network::print_notice(
+          virtual_network::detect_upstream_virtual_network(vpn_interface));
       std::cout << std::endl;
 #ifdef _WIN32
       utils::print_info("Stop with: exv stop");
@@ -1091,6 +1098,8 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
               << std::endl;
     std::cout << utils::DIM << "  Routes: " << cfg.routes.size()
               << " configured" << utils::RESET << std::endl;
+    virtual_network::print_notice(
+        virtual_network::detect_upstream_virtual_network(vpn_interface));
     if (retry_limit != 0) {
       std::cout << utils::DIM << "  Auto-reconnect: "
                 << (retry_limit < 0 ? std::string("infinite")

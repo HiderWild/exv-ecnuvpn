@@ -99,12 +99,16 @@ public:
     }
   }
 
-  void close() override {
-    close_client();
+  void close_server() override {
     if (server_fd_ >= 0) {
       ::close(server_fd_);
       server_fd_ = -1;
     }
+  }
+
+  void close() override {
+    close_client();
+    close_server();
   }
 
   int server_fd() const override { return server_fd_; }

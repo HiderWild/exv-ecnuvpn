@@ -68,6 +68,8 @@ gid_t get_runtime_owner_gid();
 bool sync_owner(const std::string &path);
 std::string get_executable_path();
 
+bool fix_config_dir_ownership();
+
 // File utilities
 bool file_exists(const std::string &path);
 bool ensure_dir(const std::string &path);

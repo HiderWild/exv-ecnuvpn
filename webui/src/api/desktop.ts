@@ -14,6 +14,11 @@ function unsupported(path: string): never {
   throw new Error(`Unsupported desktop API path: ${path}`)
 }
 
+function plainPayload<T>(value: T): T {
+  if (value === undefined || value === null) return value
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
 const desktopApi = {
   get<T = unknown>(path: string): ApiResponse<T> {
     if (!desktopAvailable()) return httpApi.get(path)
@@ -48,11 +53,25 @@ const desktopApi = {
 
     switch (path) {
       case '/connect':
-        return wrap(window.ecnuVpn!.vpn.connect(body?.password)) as ApiResponse<T>
+        return wrap(
+          window.ecnuVpn!.vpn.connect(body?.password).catch((error) => {
+            const message = error?.message || String(error)
+            if (message.includes('Helper daemon is not available')) {
+              return window.ecnuVpn!.vpn.connectElevated(body?.password)
+            }
+            throw error
+          }),
+        ) as ApiResponse<T>
+      case '/connect/elevated':
+        return wrap(window.ecnuVpn!.vpn.connectElevated(plainPayload(body)?.password)) as ApiResponse<T>
       case '/disconnect':
         return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
+      case '/connect/elevated':
+        return wrap(window.ecnuVpn!.vpn.connectElevated(body?.password)) as ApiResponse<T>
+      case '/disconnect/elevated':
+        return wrap(window.ecnuVpn!.vpn.disconnectElevated()) as ApiResponse<T>
       case '/routes':
-        return wrap(window.ecnuVpn!.routes.add(body?.cidr ?? '')) as ApiResponse<T>
+        return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
       case '/routes/reset':
         return wrap(window.ecnuVpn!.routes.reset()) as ApiResponse<T>
       case '/service/install':
@@ -60,7 +79,7 @@ const desktopApi = {
       case '/service/uninstall':
         return wrap(window.ecnuVpn!.service.uninstall()) as ApiResponse<T>
       case '/drivers/install':
-        return wrap(window.ecnuVpn!.drivers.install(body?.driver)) as ApiResponse<T>
+        return wrap(window.ecnuVpn!.drivers.install(plainPayload(body)?.driver)) as ApiResponse<T>
       default:
         unsupported(path)
     }
@@ -71,9 +90,9 @@ const desktopApi = {
 
     switch (path) {
       case '/config/auth':
-        return wrap(window.ecnuVpn!.config.saveAuth(body ?? {})) as ApiResponse<T>
+        return wrap(window.ecnuVpn!.config.saveAuth(plainPayload(body ?? {}))) as ApiResponse<T>
       case '/config/settings':
-        return wrap(window.ecnuVpn!.config.saveSettings(body ?? {})) as ApiResponse<T>
+        return wrap(window.ecnuVpn!.config.saveSettings(plainPayload(body ?? {}))) as ApiResponse<T>
       default:
         unsupported(path)
     }
@@ -84,7 +103,7 @@ const desktopApi = {
 
     switch (path) {
       case '/routes':
-        return wrap(window.ecnuVpn!.routes.remove(options?.data?.cidr ?? '')) as ApiResponse<T>
+        return wrap(window.ecnuVpn!.routes.remove(plainPayload(options?.data)?.cidr ?? '')) as ApiResponse<T>
       default:
         unsupported(path)
     }
