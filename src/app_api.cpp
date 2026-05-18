@@ -6,6 +6,9 @@
 #include "crypto.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
+#include "platform/common/driver_status.hpp"
+#include "platform/common/runtime_status.hpp"
+#include "platform/common/service_status.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
 #include "vpn.hpp"
@@ -33,8 +36,26 @@ namespace {
 constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
 #endif
 
-nlohmann::json error(const std::string &message) {
-  return nlohmann::json{{"ok", false}, {"error", message}};
+constexpr const char *kHelperUnavailableCode = "helper_unavailable";
+
+nlohmann::json error(const std::string &message,
+                     const std::string &code = std::string()) {
+  nlohmann::json result{{"ok", false}, {"error", message}};
+  if (!code.empty())
+    result["code"] = code;
+  return result;
+}
+
+bool helper_unavailable(const nlohmann::json &response) {
+  return response.value("code", std::string()) == kHelperUnavailableCode ||
+         response.value("message", std::string()) ==
+             "Helper daemon not available";
+}
+
+nlohmann::json helper_error(const nlohmann::json &response,
+                            const std::string &fallback_message) {
+  return error(response.value("message", fallback_message),
+               response.value("code", std::string()));
 }
 
 config::ConfigManager make_config_manager() {
@@ -59,7 +80,8 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
                              OPEN_EXISTING, 0, NULL);
   if (hPipe == INVALID_HANDLE_VALUE) {
     return nlohmann::json{{"ok", false},
-                          {"message", "Helper daemon not available"}};
+                          {"message", "Helper daemon not available"},
+                          {"code", kHelperUnavailableCode}};
   }
 
   DWORD bytesWritten = 0;
@@ -93,7 +115,8 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
   if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
     close(fd);
     return nlohmann::json{{"ok", false},
-                          {"message", "Helper daemon not available"}};
+                          {"message", "Helper daemon not available"},
+                          {"code", kHelperUnavailableCode}};
   }
 
   if (write(fd, payload.data(), payload.size()) !=
@@ -232,61 +255,7 @@ nlohmann::json key_status_json() {
 }
 
 nlohmann::json service_status_json() {
-  bool available = helper::is_available();
-  nlohmann::json j;
-#ifdef __APPLE__
-  j["installed"] =
-      utils::file_exists("/Library/LaunchDaemons/com.ecnu.exv.helper.plist");
-  j["path"] = "/usr/local/bin/exv";
-#elif defined(__linux__)
-  j["installed"] = utils::file_exists("/etc/systemd/system/exv-helper.service");
-  j["path"] = "/usr/local/bin/exv";
-#elif defined(_WIN32)
-  j["path"] = "C:\\Program Files\\ECNU-VPN\\exv-helper.exe";
-  SC_HANDLE scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
-  if (scm) {
-    SC_HANDLE svc = OpenServiceA(scm, "exv-helper", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
-    j["installed"] = (svc != NULL);
-    if (svc) {
-      SERVICE_STATUS status;
-      if (QueryServiceStatus(svc, &status)) {
-        j["running"] = status.dwCurrentState == SERVICE_RUNNING;
-        j["service_state"] = static_cast<int>(status.dwCurrentState);
-      } else {
-        j["running"] = false;
-      }
-      DWORD bytes_needed = 0;
-      QueryServiceConfigA(svc, NULL, 0, &bytes_needed);
-      if (bytes_needed > 0) {
-        std::vector<unsigned char> buffer(bytes_needed);
-        auto *config = reinterpret_cast<QUERY_SERVICE_CONFIGA *>(buffer.data());
-        if (QueryServiceConfigA(svc, config, bytes_needed, &bytes_needed) &&
-            config->lpBinaryPathName) {
-          j["binary_path"] = std::string(config->lpBinaryPathName);
-        }
-      }
-      CloseServiceHandle(svc);
-    } else {
-      j["running"] = false;
-    }
-    CloseServiceHandle(scm);
-  } else {
-    j["installed"] = false;
-    j["running"] = false;
-  }
-#endif
-  if (!j.contains("running"))
-    j["running"] = available;
-  j["available"] = available;
-  return j;
-}
-
-std::string first_nonempty_line(const std::string &text) {
-  for (const auto &line : utils::split_lines(text)) {
-    if (!line.empty())
-      return line;
-  }
-  return "";
+  return platform::service_status_to_json(platform::current_service_status());
 }
 
 std::string json_safe_text(const std::string &text) {
@@ -302,154 +271,16 @@ std::string json_safe_text(const std::string &text) {
   return out;
 }
 
-std::string openconnect_version(const std::string &path) {
-  if (path.empty())
-    return "";
-#ifdef _WIN32
-  return first_nonempty_line(
-      utils::run_command_output(utils::shell_quote(path) + " --version 2>nul"));
-#else
-  return first_nonempty_line(
-      utils::run_command_output(utils::shell_quote(path) + " --version 2>/dev/null"));
-#endif
-}
-
 nlohmann::json runtime_status_json(const Config &cfg) {
-  std::string bundled_path = utils::get_bundled_openconnect_path();
-  std::string system_path = utils::get_openconnect_path("system");
-  std::string resolved_path = utils::get_openconnect_path(cfg.openconnect_runtime);
-
-  std::string source = "missing";
-  if (!bundled_path.empty() && resolved_path == bundled_path) {
-    source = "bundled";
-  } else if (!system_path.empty() && resolved_path == system_path) {
-    source = "system";
-  }
-
-  nlohmann::json j{
-      {"mode", cfg.openconnect_runtime},
-      {"available", !resolved_path.empty()},
-      {"source", source},
-      {"path", resolved_path},
-      {"bundled_path", bundled_path},
-      {"system_path", system_path},
-      {"version", openconnect_version(resolved_path)},
-      {"bundled_runtime_dir", utils::get_bundled_runtime_dir()},
-  };
-
-#ifdef _WIN32
-  j["wintun_path"] = utils::get_bundled_wintun_path();
-  j["tap_installer_path"] = utils::get_bundled_tap_installer_path();
-#endif
-  return j;
+  return platform::runtime_status_json(cfg);
 }
-
-#ifdef _WIN32
-std::vector<std::string> list_windows_adapters(const std::string &kind) {
-  std::string filter;
-  if (kind == "wintun") {
-    filter =
-        "($_.NetConnectionID -like '*Wintun*' -or $_.Name -like '*Wintun*' -or $_.Description -like '*Wintun*')";
-  } else {
-    filter =
-        "($_.NetConnectionID -like '*TAP*' -or $_.Name -like '*TAP*' -or $_.Description -like '*TAP-Windows*' -or $_.Description -like '*tap0901*')";
-  }
-
-  std::string command =
-      "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-      "\"Get-CimInstance Win32_NetworkAdapter | Where-Object { "
-      "$_.NetEnabled -ne $false -and " +
-      filter + " } | ForEach-Object { "
-      "if ($_.NetConnectionID) { $_.NetConnectionID } elseif ($_.Name) { $_.Name } }\"";
-
-  return utils::split_lines(utils::run_command_output(command));
-}
-
-std::string effective_windows_driver(const Config &cfg,
-                                     const std::vector<std::string> &tap_adapters,
-                                     bool has_bundled_wintun) {
-  if (cfg.windows_tunnel_driver == "tap")
-    return "tap";
-  if (cfg.windows_tunnel_driver == "wintun")
-    return "wintun";
-  if (has_bundled_wintun)
-    return "wintun";
-  if (!cfg.windows_tap_interface.empty() || !tap_adapters.empty())
-    return "tap";
-  return "wintun";
-}
-#endif
 
 nlohmann::json driver_status_json(const Config &cfg) {
-  nlohmann::json j{
-      {"preferred", cfg.windows_tunnel_driver},
-      {"tap_interface", cfg.windows_tap_interface},
-      {"supported", false},
-  };
-
-#ifdef _WIN32
-  std::string wintun_path = utils::get_bundled_wintun_path();
-  std::string tap_installer_path = utils::get_bundled_tap_installer_path();
-  std::vector<std::string> wintun_adapters = list_windows_adapters("wintun");
-  std::vector<std::string> tap_adapters = list_windows_adapters("tap");
-  std::string effective =
-      effective_windows_driver(cfg, tap_adapters, !wintun_path.empty());
-
-  j["supported"] = true;
-  j["effective_driver"] = effective;
-  j["wintun_bundled"] = !wintun_path.empty();
-  j["wintun_path"] = wintun_path;
-  j["wintun_adapters"] = wintun_adapters;
-  j["tap_installer_path"] = tap_installer_path;
-  j["tap_can_install"] = !tap_installer_path.empty();
-  j["tap_adapters"] = tap_adapters;
-  j["tap_available"] = !tap_adapters.empty();
-#endif
-
-  return j;
+  return platform::driver_status_json(cfg);
 }
 
 nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) {
-#ifdef _WIN32
-  std::string driver = payload.value("driver", std::string());
-  if (driver == "wintun") {
-    std::string wintun_path = utils::get_bundled_wintun_path();
-    if (wintun_path.empty())
-      return error("Bundled wintun.dll not found. Add it to the packaged runtime first.");
-    return nlohmann::json{{"ok", true},
-                          {"message", "Wintun is bundled and will be activated on the next connection attempt."},
-                          {"status", driver_status_json(cfg)}};
-  }
-
-  if (driver == "tap") {
-    std::string installer = utils::get_bundled_tap_installer_path();
-    if (installer.empty()) {
-      return error("Bundled TAP installer assets are missing. Provide an installer executable or OemVista.inf in the runtime directory.");
-    }
-
-    int rc = 0;
-    if (installer.size() >= 4 &&
-        installer.substr(installer.size() - 4) == ".inf") {
-      rc = utils::run_command("pnputil /add-driver " + utils::shell_quote(installer) +
-                              " /install");
-    } else {
-      rc = utils::run_command(utils::shell_quote(installer) + " /S");
-    }
-    if (rc != 0) {
-      return error("TAP driver installation failed. Check the bundled installer assets and elevated permissions.");
-    }
-
-    return nlohmann::json{{"ok", true},
-                          {"message", "TAP driver installation completed."},
-                          {"status", driver_status_json(cfg)}};
-  }
-
-  return error("Unknown driver install target: " + driver);
-#else
-  (void)cfg;
-  (void)payload;
-  return error("Driver installation is only supported on Windows.");
-#endif
+  return platform::install_driver(cfg, payload);
 }
 
 nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
@@ -463,9 +294,11 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
 
   if (!helper::is_available() && !allow_direct_fallback) {
 #ifdef _WIN32
-    return error("Helper daemon is not available. Install the helper service from Settings or run 'exv service install' as Administrator.");
+    return error("Helper daemon is not available. Install the helper service from Settings or run 'exv service install' as Administrator.",
+           kHelperUnavailableCode);
 #else
-    return error("Helper daemon is not available. Install the helper service before starting the desktop client.");
+    return error("Helper daemon is not available. Install the helper service before starting the desktop client.",
+           kHelperUnavailableCode);
 #endif
   }
 
@@ -533,8 +366,7 @@ nlohmann::json handle_action(const std::string &action,
 
     if (action == "status.get") {
       auto helper_resp = send_helper_request({{"action", "status"}});
-      if (!helper_resp.value("ok", false) &&
-          helper_resp.value("message", "") == "Helper daemon not available") {
+      if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
         vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
         if (snapshot.running)
           return frontend_status_from_snapshot(snapshot, cfg);
@@ -575,15 +407,14 @@ nlohmann::json handle_action(const std::string &action,
                                               {"home", utils::get_effective_home()},
                                               {"config_dir", utils::get_config_dir()}});
       if (!helper_resp.value("ok", false)) {
-        return error(helper_resp.value("message", "Failed to start VPN"));
+        return helper_error(helper_resp, "Failed to start VPN");
       }
       return frontend_status_from_helper(helper_resp, cfg);
     }
 
     if (action == "vpn.disconnect") {
       auto helper_resp = send_helper_request({{"action", "stop"}});
-      if (!helper_resp.value("ok", false) &&
-          helper_resp.value("message", "") == "Helper daemon not available") {
+      if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
         vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
         if (!snapshot.running)
           return disconnected_status(cfg);
@@ -592,7 +423,7 @@ nlohmann::json handle_action(const std::string &action,
         return disconnected_status(cfg);
       }
       if (!helper_resp.value("ok", false)) {
-        return error(helper_resp.value("message", "Failed to stop VPN"));
+        return helper_error(helper_resp, "Failed to stop VPN");
       }
       return disconnected_status(cfg);
     }

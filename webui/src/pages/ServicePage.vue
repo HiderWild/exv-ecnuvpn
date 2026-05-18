@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useVpnStore } from '../stores/vpn'
 import { useUiStore } from '../stores/ui'
 import { useSSE } from '../composables/useSSE'
@@ -10,6 +10,20 @@ import { Terminal, Download, Trash2, RefreshCw } from 'lucide-vue-next'
 const vpn = useVpnStore()
 const ui = useUiStore()
 const { connect: eventsConnect, disconnect: eventsDisconnect } = useSSE()
+
+const serviceBadgeStatus = computed(() => {
+  if (!vpn.serviceStatus?.installed) return 'disconnected' as const
+  return vpn.serviceStatus.running ? 'running' : 'stopped'
+})
+
+const serviceHeadline = computed(() => {
+  if (!vpn.serviceStatus?.installed) return '辅助服务'
+  return vpn.serviceStatus.label || '辅助服务'
+})
+
+const serviceSubtitle = computed(() => {
+  return vpn.serviceStatus?.binary_path || vpn.serviceStatus?.path || '未安装'
+})
 
 onMounted(() => {
   vpn.fetchServiceStatus()
@@ -62,20 +76,19 @@ function uninstall() {
         <div class="flex items-center gap-3">
           <Terminal class="w-5 h-5 text-muted" />
           <div>
-            <p class="text-sm font-medium text-foreground">辅助服务</p>
-            <p class="text-xs text-muted">{{ vpn.serviceStatus?.path || '未安装' }}</p>
+            <p class="text-sm font-medium text-foreground">{{ serviceHeadline }}</p>
+            <p class="text-xs text-muted break-all">{{ serviceSubtitle }}</p>
+            <p v-if="vpn.serviceStatus?.endpoint" class="text-xs text-muted break-all mt-1">
+              {{ vpn.serviceStatus.endpoint }}
+            </p>
           </div>
         </div>
         <div class="flex items-center gap-3">
-          <StatusBadge
-            v-if="vpn.serviceStatus?.installed"
-            :status="vpn.serviceStatus?.available ? 'running' : 'stopped'"
-          />
-          <StatusBadge v-else status="disconnected" />
+          <StatusBadge :status="serviceBadgeStatus" />
         </div>
       </div>
 
-      <div class="grid grid-cols-3 gap-3 border-t border-border pt-5 text-xs">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 border-t border-border pt-5 text-xs">
         <div>
           <p class="text-muted mb-1">Installed</p>
           <p class="text-foreground">{{ vpn.serviceStatus?.installed ? 'yes' : 'no' }}</p>
@@ -87,6 +100,14 @@ function uninstall() {
         <div>
           <p class="text-muted mb-1">Available</p>
           <p class="text-foreground">{{ vpn.serviceStatus?.available ? 'yes' : 'no' }}</p>
+        </div>
+        <div>
+          <p class="text-muted mb-1">Mode</p>
+          <p class="text-foreground">{{ vpn.serviceStatus?.mode || 'unknown' }}</p>
+        </div>
+        <div>
+          <p class="text-muted mb-1">State</p>
+          <p class="text-foreground">{{ vpn.serviceStatus?.service_state ?? '--' }}</p>
         </div>
       </div>
 

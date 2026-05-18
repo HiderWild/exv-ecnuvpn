@@ -43,6 +43,10 @@ export interface ServiceStatus {
   running: boolean
   path: string
   available: boolean
+  mode?: string
+  endpoint?: string
+  label?: string
+  binary_path?: string
   service_state?: number
   warning?: string
 }

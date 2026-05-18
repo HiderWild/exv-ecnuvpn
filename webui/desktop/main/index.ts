@@ -5,28 +5,26 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
+import {
+  desktopIpcChannels,
+  desktopRpcActions,
+  type DesktopDriverInstallTarget,
+  type DesktopEventType,
+  type DesktopRpcAction,
+  type DesktopServiceCommand,
+} from '../shared/desktop-contract.js'
+
 const execFileAsync = promisify(execFile)
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-const validRpcActions = new Set([
-  'status.get',
-  'vpn.connect',
-  'vpn.disconnect',
-  'config.getAuth',
-  'config.saveAuth',
-  'config.getSettings',
-  'config.saveSettings',
-  'config.getKey',
-  'routes.list',
-  'routes.add',
-  'routes.remove',
-  'routes.reset',
-  'service.status',
-  'runtime.status',
-  'drivers.status',
-  'drivers.install',
-  'logs.list',
-])
+const validRpcActions = new Set<DesktopRpcAction>(desktopRpcActions)
+
+type RpcErrorResult = {
+  ok?: boolean
+  error?: string
+  message?: string
+  code?: string
+}
 
 let mainWindow: BrowserWindow | null = null
 let statusTimer: NodeJS.Timeout | null = null
@@ -125,6 +123,16 @@ function parseJsonOutput(stdout: string) {
   throw new Error(`Native command returned non-JSON output: ${stdout.slice(0, 500)}`)
 }
 
+function throwRpcResultError(result: RpcErrorResult): never {
+  const error = new Error(
+    result.error || result.message || 'Native desktop RPC failed',
+  ) as Error & { code?: string }
+  if (typeof result.code === 'string' && result.code) {
+    error.code = result.code
+  }
+  throw error
+}
+
 function isServiceUsable(status: unknown) {
   return Boolean(
     status &&
@@ -169,7 +177,7 @@ async function waitForServiceCommandStatus(command: 'install' | 'uninstall') {
   return lastStatus ?? runDesktopRpc('service.status')
 }
 
-async function runDesktopRpc(action: string, payload: unknown = {}) {
+async function runDesktopRpc(action: DesktopRpcAction, payload: unknown = {}) {
   if (!validRpcActions.has(action)) {
     throw new Error(`Unknown desktop RPC action: ${action}`)
   }
@@ -183,7 +191,7 @@ async function runDesktopRpc(action: string, payload: unknown = {}) {
     )
     const result = parseJsonOutput(stdout)
     if (result && result.ok === false) {
-      throw new Error(result.error || result.message || 'Native desktop RPC failed')
+      throwRpcResultError(result)
     }
     return result
   } catch (error) {
@@ -192,7 +200,7 @@ async function runDesktopRpc(action: string, payload: unknown = {}) {
       try {
         const result = parseJsonOutput(execError.stdout)
         if (result && result.ok === false) {
-          throw new Error(result.error || result.message || 'Native desktop RPC failed')
+          throwRpcResultError(result)
         }
         return result
       } catch (parseError) {
@@ -219,9 +227,9 @@ function psArray(values: string[]) {
   return `@(${values.map((value) => psQuote(value)).join(', ')})`
 }
 
-function emitEvent(type: string, data: unknown) {
+function emitEvent(type: DesktopEventType, data: unknown) {
   if (!mainWindow || mainWindow.isDestroyed()) return
-  mainWindow.webContents.send('ecnu-vpn:event', { type, data })
+  mainWindow.webContents.send(desktopIpcChannels.event, { type, data })
 }
 
 function psRuntimeEnvPrefix(exv: string) {
@@ -250,7 +258,7 @@ function emitServiceProgress(command: 'install' | 'uninstall', line: string) {
   })
 }
 
-async function runServiceCommandElevated(command: 'install' | 'uninstall') {
+async function runServiceCommandElevated(command: DesktopServiceCommand) {
   const exv = resolveExvPath()
   emitServiceProgress(command, `Starting service ${command}...`)
 
@@ -328,7 +336,11 @@ async function runServiceCommandElevated(command: 'install' | 'uninstall') {
   emitServiceProgress(command, `Service ${command} command completed.`)
 }
 
-async function runDesktopRpcElevated(action: string, payload: unknown, followupAction: string) {
+async function runDesktopRpcElevated(
+  action: DesktopRpcAction,
+  payload: unknown,
+  followupAction: DesktopRpcAction,
+) {
   if (!validRpcActions.has(action)) {
     throw new Error(`Unknown desktop RPC action: ${action}`)
   }
@@ -365,7 +377,7 @@ async function runDesktopRpcElevated(action: string, payload: unknown, followupA
 
     const result = parseJsonOutput(stdout)
     if (result && result.ok === false) {
-      throw new Error(result.error || result.message || 'Native desktop RPC failed')
+      throwRpcResultError(result)
     }
     return result
   }
@@ -437,18 +449,18 @@ function stopEventPump() {
   logTimer = null
 }
 
-ipcMain.handle('ecnu-vpn:rpc', async (_event, action: string, payload?: unknown) => {
+ipcMain.handle(desktopIpcChannels.rpc, async (_event, action: DesktopRpcAction, payload?: unknown) => {
   return runDesktopRpc(action, payload)
 })
 
 ipcMain.handle(
-  'ecnu-vpn:rpc-elevated',
-  async (_event, action: string, payload?: unknown, followupAction = 'status.get') => {
+  desktopIpcChannels.rpcElevated,
+  async (_event, action: DesktopRpcAction, payload?: unknown, followupAction: DesktopRpcAction = 'status.get') => {
     return runDesktopRpcElevated(action, payload, followupAction)
   },
 )
 
-ipcMain.handle('ecnu-vpn:service-command', async (_event, command: 'install' | 'uninstall') => {
+ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: DesktopServiceCommand) => {
   try {
     await runServiceCommandElevated(command)
     const status = await waitForServiceCommandStatus(command)
@@ -478,7 +490,7 @@ ipcMain.handle('ecnu-vpn:service-command', async (_event, command: 'install' | '
   }
 })
 
-ipcMain.handle('ecnu-vpn:driver-install', async (_event, driver: 'wintun' | 'tap') => {
+ipcMain.handle(desktopIpcChannels.driverInstall, async (_event, driver: DesktopDriverInstallTarget) => {
   return runDesktopRpcElevated('drivers.install', { driver }, 'drivers.status')
 })
 
