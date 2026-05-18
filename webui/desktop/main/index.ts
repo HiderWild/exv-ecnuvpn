@@ -138,6 +138,37 @@ function isServiceUsable(status: unknown) {
   )
 }
 
+function isServiceUninstalled(status: unknown) {
+  return Boolean(
+    status &&
+      typeof status === 'object' &&
+      'installed' in status &&
+      (status as { installed?: unknown }).installed !== true,
+  )
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function waitForServiceCommandStatus(command: 'install' | 'uninstall') {
+  const deadline = Date.now() + 8000
+  let lastStatus: unknown = null
+
+  while (Date.now() < deadline) {
+    lastStatus = await runDesktopRpc('service.status')
+    if (command === 'install' && isServiceUsable(lastStatus)) {
+      return lastStatus
+    }
+    if (command === 'uninstall' && isServiceUninstalled(lastStatus)) {
+      return lastStatus
+    }
+    await delay(250)
+  }
+
+  return lastStatus ?? runDesktopRpc('service.status')
+}
+
 async function runDesktopRpc(action: string, payload: unknown = {}) {
   if (!validRpcActions.has(action)) {
     throw new Error(`Unknown desktop RPC action: ${action}`)
@@ -420,7 +451,7 @@ ipcMain.handle(
 ipcMain.handle('ecnu-vpn:service-command', async (_event, command: 'install' | 'uninstall') => {
   try {
     await runServiceCommandElevated(command)
-    const status = await runDesktopRpc('service.status')
+    const status = await waitForServiceCommandStatus(command)
     if (command === 'install' && !isServiceUsable(status)) {
       throw new Error('Helper service was installed but is not available to the desktop client.')
     }
