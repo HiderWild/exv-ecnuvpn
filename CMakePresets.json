@@ -15,6 +15,19 @@
       }
     },
     {
+      "name": "linux-release",
+      "displayName": "Linux release build",
+      "description": "Configure the native Linux build under build/linux/cpp.",
+      "inherits": "release-base",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/linux/cpp",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "windows-release",
       "displayName": "Windows release build",
       "description": "Configure the native Windows build under build/windows/cpp.",
@@ -43,6 +56,10 @@
   ],
   "buildPresets": [
     {
+      "name": "linux-release",
+      "configurePreset": "linux-release"
+    },
+    {
       "name": "windows-release",
       "configurePreset": "windows-release"
     },
@@ -52,6 +69,13 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
     {
       "name": "windows-release",
       "configurePreset": "windows-release",

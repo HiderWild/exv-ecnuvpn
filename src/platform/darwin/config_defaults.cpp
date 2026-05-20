@@ -8,7 +8,7 @@ const ConfigDefaults &config_defaults() {
       true,
       "AnyConnect Darwin_x86_64 4.10.05095",
       "~/.ecnuvpn/ecnuvpn.log",
-      false,
+      true,
   };
   return defaults;
 }

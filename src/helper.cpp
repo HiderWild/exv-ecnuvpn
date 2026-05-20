@@ -2,6 +2,7 @@
 #include "helper_ipc.hpp"
 
 #include "logger.hpp"
+#include "platform/common/helper_client.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "platform/common/helper_service_manager.hpp"
@@ -19,24 +20,11 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
+
 #ifndef _WIN32
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#else
-#include <windows.h>
-#include <io.h>
-#include <thread>
-#ifdef _MSC_VER
-typedef unsigned int uid_t;
-typedef unsigned int gid_t;
-typedef int pid_t;
 #endif
-#endif
-#include <vector>
 
 
 namespace ecnuvpn {
@@ -109,56 +97,9 @@ pid_t read_pid_file(const std::string &path) {
   }
 }
 
-bool is_process_alive(pid_t pid) {
-  if (pid <= 0)
-    return false;
-#ifndef _WIN32
-  if (kill(pid, 0) == 0)
-    return true;
-  return errno == EPERM;
-#else
-  HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
-  if (!hProcess)
-    return false;
-  DWORD exitCode = 0;
-  BOOL ok = GetExitCodeProcess(hProcess, &exitCode);
-  CloseHandle(hProcess);
-  return ok && exitCode == STILL_ACTIVE;
-#endif
-}
+bool is_process_alive(int pid) { return platform::is_process_alive(pid); }
 
-pid_t find_openconnect_pid() {
-#ifndef _WIN32
-  std::string output = utils::trim(utils::run_command_output("pgrep -x openconnect"));
-  if (output.empty())
-    return -1;
-  std::istringstream iss(output);
-  std::string first;
-  std::getline(iss, first);
-  try {
-    return static_cast<pid_t>(std::stoi(first));
-  } catch (...) {
-    return -1;
-  }
-#else
-  // Use tasklist to find openconnect.exe PID
-  std::string output = utils::run_command_output("tasklist /FI \"IMAGENAME eq openconnect.exe\" /NH /FO CSV 2>nul");
-  // Parse CSV: "openconnect.exe","1234","Console","1","4,096 K"
-  auto pos = output.find(',');
-  if (pos == std::string::npos || pos < 2) return -1;
-  // Extract PID between first and second comma - find the second field
-  auto start = output.find('"', pos + 1);
-  if (start == std::string::npos) return -1;
-  auto end = output.find('"', start + 1);
-  if (end == std::string::npos) return -1;
-  std::string pid_str = output.substr(start + 1, end - start - 1);
-  try {
-    return static_cast<pid_t>(std::stoi(pid_str));
-  } catch (...) {
-    return -1;
-  }
-#endif
-}
+int find_openconnect_pid() { return platform::find_openconnect_pid(); }
 
 bool read_route_ready(const SessionState &state, std::string *interface_name,
                       std::string *internal_ip) {
@@ -264,16 +205,7 @@ RuntimeSnapshot inspect_runtime(const SessionState &state) {
   snapshot.running = snapshot.pid > 0 || snapshot.supervisor_pid > 0;
 
   if (snapshot.running) {
-#ifdef __APPLE__
-    snapshot.interfaces_output =
-        utils::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
-#elif defined(_WIN32)
-    snapshot.interfaces_output =
-        utils::run_command_output("netsh interface show interface 2>nul");
-#else
-    snapshot.interfaces_output =
-        utils::run_command_output("ip addr show type tun 2>/dev/null | head -20");
-#endif
+    snapshot.interfaces_output = platform::get_interfaces_output();
   }
 
   return snapshot;
@@ -283,219 +215,45 @@ bool create_request_file(const nlohmann::json &request, std::string *out_path) {
   if (!out_path)
     return false;
 
-#ifdef _WIN32
-  char temp_path[MAX_PATH];
-  if (GetTempPathA(MAX_PATH, temp_path) == 0)
-    return false;
-
-  char temp_file[MAX_PATH];
-  if (GetTempFileNameA(temp_path, "exv", 0, temp_file) == 0)
-    return false;
-
   std::string payload = request.dump();
-  HANDLE hFile = CreateFileA(temp_file, GENERIC_WRITE, 0, NULL,
-                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (hFile == INVALID_HANDLE_VALUE) {
-    DeleteFileA(temp_file);
+  std::string path = platform::create_temp_request_file(payload);
+  if (path.empty())
     return false;
-  }
 
-  DWORD written = 0;
-  BOOL ok = WriteFile(hFile, payload.data(), static_cast<DWORD>(payload.size()),
-                      &written, NULL);
-  CloseHandle(hFile);
-
-  if (!ok || written != payload.size()) {
-    DeleteFileA(temp_file);
-    return false;
-  }
-
-  *out_path = temp_file;
+  *out_path = path;
   return true;
-#else
-  char path_template[] = "/var/run/exv-helper-request-XXXXXX";
-  int fd = mkstemp(path_template);
-  if (fd < 0)
-    return false;
-
-  chmod(path_template, 0600);
-  std::string payload = request.dump();
-  ssize_t written = write(fd, payload.data(), payload.size());
-  close(fd);
-  if (written != static_cast<ssize_t>(payload.size())) {
-    remove_file_if_exists(path_template);
-    return false;
-  }
-
-  *out_path = path_template;
-  return true;
-#endif
 }
 
 void daemon_signal_handler(int) {
   daemon_stop_requested = 1;
 }
 
-void set_close_on_exec(int fd) {
-#ifndef _WIN32
-  if (fd < 0)
-    return;
-
-  int flags = fcntl(fd, F_GETFD);
-  if (flags < 0)
-    return;
-  fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
-#else
-  (void)fd;
-#endif
-}
-
-#ifndef _WIN32
-bool connect_socket(int *out_fd) {
-  if (!out_fd)
-    return false;
-
-  const auto &platform_config = platform::helper_platform_config();
-
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0)
-    return false;
-
-  sockaddr_un addr {};
-  addr.sun_family = AF_UNIX;
-  std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
-                platform_config.endpoint);
-
-  if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
-    close(fd);
-    return false;
-  }
-
-  *out_fd = fd;
-  return true;
-}
-#endif
-
 bool send_request(const nlohmann::json &request, nlohmann::json *response,
                   std::string *error_message = nullptr,
-                  int timeout_seconds = 15) {
-  std::string raw;
+                  int /*timeout_seconds*/ = 15) {
+  nlohmann::json result = platform::send_helper_request(request);
 
-#ifdef _WIN32
-  const auto &platform_config = platform::helper_platform_config();
-  // Use WaitNamedPipeA with a short timeout so we don't block when the
-  // pipe doesn't exist yet (e.g. during service startup polling).
-  if (!WaitNamedPipeA(platform_config.endpoint, 2000 /* ms */)) {
-    if (error_message)
-      *error_message = "EXV helper is not available.";
-    return false;
-  }
-
-  HANDLE hPipe = CreateFileA(platform_config.endpoint,
-                             GENERIC_READ | GENERIC_WRITE, 0, NULL,
-                             OPEN_EXISTING, 0, NULL);
-  if (hPipe == INVALID_HANDLE_VALUE) {
-    if (error_message)
-      *error_message = "EXV helper is not available.";
-    return false;
-  }
-
-  // Set read timeout on the pipe so we don't hang if the daemon stalls.
-  COMMTIMEOUTS timeouts = {};
-  timeouts.ReadIntervalTimeout = MAXDWORD;
-  timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
-  timeouts.ReadTotalTimeoutConstant = timeout_seconds * 1000;
-  SetCommTimeouts(hPipe, &timeouts);
-
-  std::string payload = request.dump();
-  payload.push_back('\n');
-  DWORD bytesWritten = 0;
-  if (!WriteFile(hPipe, payload.c_str(), static_cast<DWORD>(payload.size()),
-                 &bytesWritten, NULL) ||
-      bytesWritten != payload.size()) {
-    if (error_message)
-      *error_message = "Failed to send request to EXV helper.";
-    CloseHandle(hPipe);
-    return false;
-  }
-
-  char buffer[1024];
-  DWORD bytesRead = 0;
-  while (ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
-    raw.append(buffer, bytesRead);
-    if (raw.find('\n') != std::string::npos)
-      break;
-  }
-  CloseHandle(hPipe);
-#else
-  int fd = -1;
-  if (!connect_socket(&fd)) {
-    if (error_message)
-      *error_message = "EXV helper is not available.";
-    return false;
-  }
-
-  std::string payload = request.dump();
-  payload.push_back('\n');
-  if (write(fd, payload.data(), payload.size()) != static_cast<ssize_t>(payload.size())) {
-    if (error_message)
-      *error_message = "Failed to send request to EXV helper.";
-    close(fd);
-    return false;
-  }
-  shutdown(fd, SHUT_WR);
-
-  char buffer[1024];
-  ssize_t n = 0;
-
-  struct timeval tv;
-  tv.tv_sec = timeout_seconds;
-  tv.tv_usec = 0;
-
-  fd_set readfds;
-  FD_ZERO(&readfds);
-  FD_SET(fd, &readfds);
-
-  int sel_ret = select(fd + 1, &readfds, nullptr, nullptr, &tv);
-  if (sel_ret <= 0) {
-    if (error_message) {
-      if (sel_ret == 0)
-        *error_message = "EXV helper request timed out.";
-      else
-        *error_message = "EXV helper select error.";
-    }
-    close(fd);
-    return false;
-  }
-
-  while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-    raw.append(buffer, buffer + n);
-    if (raw.find('\n') != std::string::npos)
-      break;
-  }
-  close(fd);
-#endif
-
-  std::size_t newline_pos = raw.find('\n');
-  if (newline_pos != std::string::npos)
-    raw.resize(newline_pos);
-  raw = utils::trim(raw);
-
-  if (raw.empty()) {
-    if (error_message)
-      *error_message = "EXV helper returned an empty response.";
-    return false;
-  }
-
-  try {
-    if (response)
-      *response = nlohmann::json::parse(raw);
-    return true;
-  } catch (...) {
+  if (!result.is_object()) {
     if (error_message)
       *error_message = "Failed to parse EXV helper response.";
     return false;
   }
+
+  if (result.contains("ok") && result["ok"].is_boolean() && !result["ok"].get<bool>()) {
+    if (result.contains("code") && result["code"].is_string() &&
+        result["code"].get<std::string>() == std::string(platform::kHelperUnavailableCode)) {
+      if (error_message)
+        *error_message = "EXV helper is not available.";
+    } else {
+      if (error_message)
+        *error_message = result.value("message", std::string("EXV helper request failed."));
+    }
+    return false;
+  }
+
+  if (response)
+    *response = result;
+  return true;
 }
 
 bool wait_until_available(int attempts = 1, useconds_t delay_us = 0) {
@@ -507,22 +265,14 @@ bool wait_until_available(int attempts = 1, useconds_t delay_us = 0) {
       return true;
     }
     if (i + 1 < attempts && delay_us > 0) {
-#ifndef _WIN32
-      usleep(delay_us);
-#else
-      Sleep(delay_us / 1000);
-#endif
+      platform::sleep_ms(static_cast<int>(delay_us / 1000));
     }
   }
   return false;
 }
 
 void reap_finished_request_handlers() {
-#ifndef _WIN32
-  int status = 0;
-  while (waitpid(-1, &status, WNOHANG) > 0) {
-  }
-#endif
+  platform::reap_children();
 }
 
 nlohmann::json make_error(const std::string &message) {
@@ -608,24 +358,12 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
   platform::cleanup_routes();
 
   if (supervisor_pid > 0)
-#ifndef _WIN32
-    kill(supervisor_pid, SIGTERM);
-#else
-    { HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(supervisor_pid)); if (h) { TerminateProcess(h, 1); CloseHandle(h); } }
-#endif
+    platform::terminate_process(supervisor_pid);
   if (pid > 0)
-#ifndef _WIN32
-    kill(pid, SIGTERM);
-#else
-    { HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid)); if (h) { TerminateProcess(h, 1); CloseHandle(h); } }
-#endif
+    platform::terminate_process(pid);
 
   for (int i = 0; i < 10; ++i) {
-#ifndef _WIN32
-    usleep(300000);
-#else
-    Sleep(300);
-#endif
+    platform::sleep_ms(300);
     if ((pid <= 0 || !is_process_alive(pid)) &&
         (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))) {
       break;
@@ -633,33 +371,16 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
   }
 
   if (pid > 0 && is_process_alive(pid))
-#ifndef _WIN32
-    kill(pid, SIGKILL);
-#else
-    { HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid)); if (h) { TerminateProcess(h, 1); CloseHandle(h); } }
-#endif
+    platform::terminate_process(pid);
   if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
-#ifndef _WIN32
-    kill(supervisor_pid, SIGKILL);
-#else
-    { HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(supervisor_pid)); if (h) { TerminateProcess(h, 1); CloseHandle(h); } }
-#endif
+    platform::terminate_process(supervisor_pid);
 
-#ifndef _WIN32
-  usleep(500000);
-#else
-  Sleep(500);
-#endif
+  platform::sleep_ms(500);
 
   pid_t remaining_pid = find_openconnect_pid();
   if (remaining_pid > 0 && remaining_pid != pid) {
-#ifndef _WIN32
-    kill(remaining_pid, SIGKILL);
-    usleep(500000);
-#else
-    { HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(remaining_pid)); if (h) { TerminateProcess(h, 1); CloseHandle(h); } }
-    Sleep(500);
-#endif
+    platform::terminate_process(remaining_pid);
+    platform::sleep_ms(500);
   }
 
   if ((pid > 0 && is_process_alive(pid)) ||
@@ -768,63 +489,16 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
   }
 
   std::string executable_path = utils::get_executable_path();
-  int status = 0;
-#ifdef _WIN32
-  // Windows: CreateProcess to launch worker
-  std::string cmdline =
-      "\"" + executable_path + "\" __helper-exec \"" + request_path + "\"";
-  std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
-  mutable_cmd.push_back('\0');
-  STARTUPINFOA si = {};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi = {};
-  if (!CreateProcessA(executable_path.c_str(), mutable_cmd.data(), NULL, NULL, TRUE,
-                       CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+  int status = platform::spawn_worker_process(executable_path, request_path);
+  if (status < 0) {
     remove_file_if_exists(request_path);
     return make_error("Failed to launch EXV helper worker.");
   }
-  CloseHandle(pi.hThread);
-  WaitForSingleObject(pi.hProcess, INFINITE);
-  DWORD exitCode = 1;
-  GetExitCodeProcess(pi.hProcess, &exitCode);
-  CloseHandle(pi.hProcess);
-  status = (exitCode == 0) ? 0 : 1;
-#else
-  pid_t worker_pid = fork();
-  if (worker_pid < 0) {
-    remove_file_if_exists(request_path);
-    return make_error("Failed to launch EXV helper worker.");
-  }
-
-  if (worker_pid == 0) {
-    int devnull = open("/dev/null", O_WRONLY);
-    if (devnull >= 0) {
-      dup2(devnull, STDOUT_FILENO);
-      dup2(devnull, STDERR_FILENO);
-      close(devnull);
-    }
-    execl(executable_path.c_str(), executable_path.c_str(), "__helper-exec",
-          request_path.c_str(), static_cast<char *>(nullptr));
-    _exit(127);
-  }
-
-  status = 0;
-  while (waitpid(worker_pid, &status, 0) < 0) {
-    if (errno != EINTR) {
-      status = -1;
-      break;
-    }
-  }
-#endif
 
   remove_file_if_exists(request_path);
 
   RuntimeSnapshot snapshot = inspect_runtime(state);
-#ifndef _WIN32
-  if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && snapshot.running) {
-#else
   if (status == 0 && snapshot.running) {
-#endif
     save_session_state(state);
     if (snapshot.network_ready) {
       return make_status_response(state, snapshot, true,
@@ -1116,9 +790,7 @@ int daemon_main() {
   }
 
   while (!daemon_stop_requested) {
-#ifndef _WIN32
     reap_finished_request_handlers();
-#endif
 
     if (!ipc->accept_client()) {
       if (daemon_stop_requested)
@@ -1135,63 +807,15 @@ int daemon_main() {
     unsigned int peer_uid = ipc->peer_uid();
     unsigned int peer_gid = ipc->peer_gid();
 
-#ifdef _WIN32
-    // Windows: use threads instead of fork (no fork available)
-    // Each request is processed in a background thread so long-running
-    // operations (e.g. VPN start) don't block new client connections.
-    IpcServer *ipc_ptr = ipc.get();
-    std::thread([ipc_ptr, raw, peer_uid, peer_gid]() {
-      nlohmann::json response;
-      try {
-        nlohmann::json request = nlohmann::json::parse(raw);
-        response = handle_request(peer_uid, peer_gid, request);
-      } catch (...) {
-        response = make_error("Failed to parse helper request.");
-      }
-      ipc_ptr->send_response(response.dump());
-    }).detach();
-#else
-    // POSIX: fork a child to handle the request
-    pid_t handler_pid = fork();
-    if (handler_pid < 0) {
-      nlohmann::json response =
-          make_error("Failed to launch EXV helper request handler.");
-      ipc->send_response(response.dump());
-      ipc->close_client();
-      continue;
-    }
-
-    if (handler_pid == 0) {
-      signal(SIGTERM, SIG_DFL);
-      signal(SIGINT, SIG_DFL);
-      signal(SIGCHLD, SIG_DFL);
-      signal(SIGPIPE, SIG_IGN);
-      ipc->close_server();
-      nlohmann::json response;
-      try {
-        nlohmann::json request = nlohmann::json::parse(raw);
-        response = handle_request(peer_uid, peer_gid, request);
-      } catch (...) {
-        response = make_error("Failed to parse helper request.");
-      }
-      bool sent = ipc->send_response(response.dump());
-      _exit(0);
-    }
-
-    // Wait for the child to finish writing the response before closing
-    // the client fd.  The child inherited client_fd_ across fork(); if
-    // the parent closes it first, the child's write() fails and the
-    // client receives an empty response.
-    int status = 0;
-    while (waitpid(handler_pid, &status, 0) < 0 && errno == EINTR)
-      ;
-    ipc->close_client();
-#endif
+    platform::dispatch_request_background(
+        *ipc, raw, peer_uid, peer_gid,
+        [](unsigned int uid, unsigned int gid,
+           const nlohmann::json &req) -> nlohmann::json {
+          return handle_request(uid, gid, req);
+        });
   }
 
-#ifndef _WIN32
   reap_finished_request_handlers();
-#endif
 
   SessionState state;
   if (load_session_state(&state)) {

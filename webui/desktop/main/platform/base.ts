@@ -35,6 +35,11 @@ export type DesktopPlatformContext = {
 }
 
 export interface DesktopPlatformRunner {
+  resolveExvName: () => string
+  resolveExvCandidates: (root: string) => string[]
+  resolveRuntimeBinaryName: () => string
+  resolveRuntimeCandidates: (root: string, resourcesPath: string, isPackaged: boolean, exv: string, runtimeBinaryName: string) => string[]
+  shouldQuitOnWindowClose: () => boolean
   runServiceCommandElevated: (
     context: DesktopPlatformContext,
     command: DesktopServiceCommand,

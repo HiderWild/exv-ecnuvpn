@@ -59,12 +59,7 @@ const desktopApi = {
       case desktopApiPaths.connect:
         return wrap(
           window.ecnuVpn!.vpn.connect(body?.password).catch((error) => {
-            const errorCode = typeof error?.code === 'string' ? error.code : ''
-            const message = error?.message || String(error)
-            if (
-              errorCode === desktopRpcErrorCodes.helperUnavailable ||
-              message.includes('Helper daemon is not available')
-            ) {
+            if (typeof error?.code === 'string' && error.code === desktopRpcErrorCodes.helperUnavailable) {
               return window.ecnuVpn!.vpn.connectElevated(body?.password)
             }
             throw error
@@ -73,12 +68,7 @@ const desktopApi = {
       case desktopApiPaths.disconnect:
         return wrap(
           window.ecnuVpn!.vpn.disconnect().catch((error) => {
-            const errorCode = typeof error?.code === 'string' ? error.code : ''
-            const message = error?.message || String(error)
-            if (
-              errorCode === desktopRpcErrorCodes.helperUnavailable ||
-              message.includes('Helper daemon is not available')
-            ) {
+            if (typeof error?.code === 'string' && error.code === desktopRpcErrorCodes.helperUnavailable) {
               return window.ecnuVpn!.vpn.disconnectElevated()
             }
             throw error

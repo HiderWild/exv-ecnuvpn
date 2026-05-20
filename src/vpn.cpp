@@ -766,18 +766,15 @@ bool stop_direct_session() {
     return true;
   }
 
-#ifndef _WIN32
+// Clean up routes before killing openconnect — while the tunnel
+  // interface is still valid, route deletion is more reliable.
+  // On Windows, tunnel::cleanup_routes() is a no-op.
   tunnel::cleanup_routes();
+
   if (supervisor_pid > 0)
     terminate_process(supervisor_pid, false);
   if (pid > 0)
     terminate_process(pid, false);
-#else
-  if (supervisor_pid > 0)
-    terminate_process(supervisor_pid, false);
-  if (pid > 0)
-    terminate_process(pid, false);
-#endif
 
   for (int i = 0; i < 10; ++i) {
     sleep_ms(300);
@@ -787,17 +784,10 @@ bool stop_direct_session() {
     }
   }
 
-#ifndef _WIN32
   if (pid > 0 && is_process_alive(pid))
     terminate_process(pid, true);
   if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
     terminate_process(supervisor_pid, true);
-#else
-  if (pid > 0 && is_process_alive(pid))
-    terminate_process(pid, true);
-  if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
-    terminate_process(supervisor_pid, true);
-#endif
 
   if ((pid > 0 && is_process_alive(pid)) ||
       (supervisor_pid > 0 && is_process_alive(supervisor_pid))) {
@@ -856,34 +846,22 @@ int stop() {
     utils::print_info("Found reconnect supervisor: PID " +
                       std::to_string(supervisor_pid));
   }
-  utils::print_info("Sending SIGTERM...");
+  utils::print_info("Stopping VPN...");
   logger::info("Stopping VPN, PID: " + std::to_string(pid) +
                ", supervisor PID: " + std::to_string(supervisor_pid));
 
   // Clean up routes before killing openconnect — while the tunnel
   // interface is still valid, route deletion is more reliable.
-#ifndef _WIN32
+  // On Windows, tunnel::cleanup_routes() is a no-op.
   tunnel::cleanup_routes();
-#endif
 
-#ifndef _WIN32
   if (supervisor_pid > 0)
     terminate_process(supervisor_pid, false);
   if (pid > 0)
     terminate_process(pid, false);
-#else
-  if (supervisor_pid > 0)
-    terminate_process(supervisor_pid, false);
-  if (pid > 0)
-    terminate_process(pid, false);
-#endif
 
   for (int i = 0; i < 10; ++i) {
-#ifndef _WIN32
-    usleep(300000);
-#else
-    Sleep(300);
-#endif
+    sleep_ms(300);
     if ((pid <= 0 || !is_process_alive(pid)) &&
         (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))) {
       break;
@@ -891,44 +869,21 @@ int stop() {
   }
 
   if (pid > 0 && is_process_alive(pid)) {
-    utils::print_warning("openconnect still running, sending SIGKILL...");
-#ifndef _WIN32
-    kill(pid, SIGKILL);
-#else
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-#endif
+    utils::print_warning("openconnect still running, force terminating...");
+    terminate_process(pid, true);
   }
   if (supervisor_pid > 0 && is_process_alive(supervisor_pid)) {
-    utils::print_warning("Reconnect supervisor still running, sending SIGKILL...");
-#ifndef _WIN32
-    kill(supervisor_pid, SIGKILL);
-#else
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(supervisor_pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-#endif
+    utils::print_warning("Reconnect supervisor still running, force terminating...");
+    terminate_process(supervisor_pid, true);
   }
 
-#ifndef _WIN32
-  usleep(500000);
-#else
-  Sleep(500);
-#endif
+  sleep_ms(500);
 
   pid_t remaining_pid = find_openconnect_pid();
   if (remaining_pid > 0 && remaining_pid != pid) {
-    utils::print_warning("Detected remaining openconnect process, sending SIGKILL...");
-#ifndef _WIN32
-    kill(remaining_pid, SIGKILL);
-    usleep(500000);
-#else
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(remaining_pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-    Sleep(500);
-#endif
+    utils::print_warning("Detected remaining openconnect process, force terminating...");
+    terminate_process(remaining_pid, true);
+    sleep_ms(500);
   }
 
   if ((pid > 0 && is_process_alive(pid)) ||

@@ -1,3 +1,5 @@
+import { dirname, join } from 'node:path'
+
 import type {
   DesktopRpcAction,
   DesktopServiceCommand,
@@ -8,6 +10,33 @@ import type {
 } from './base.js'
 
 const runner: DesktopPlatformRunner = {
+  resolveExvName() {
+    return 'exv'
+  },
+
+  shouldQuitOnWindowClose() {
+    return true
+  },
+
+  resolveExvCandidates(root: string) {
+    return [
+      join(root, 'build', 'exv'),
+      join(root, 'build-desktop', 'exv'),
+    ]
+  },
+
+  resolveRuntimeBinaryName() {
+    return 'openconnect'
+  },
+
+  resolveRuntimeCandidates(root: string, _resourcesPath: string, _isPackaged: boolean, exv: string, _runtimeBinaryName: string) {
+    return [
+      join(root, 'runtime', `${process.platform}-${process.arch}`),
+      join(root, 'runtime', process.platform),
+      dirname(exv),
+    ]
+  },
+
   async runServiceCommandElevated(
     context: DesktopPlatformContext,
     command: DesktopServiceCommand,

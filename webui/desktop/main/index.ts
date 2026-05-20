@@ -43,32 +43,17 @@ function resolveExvPath() {
     return resolve(process.env.EXV_PATH)
   }
 
-  const exeName = process.platform === 'win32' ? 'exv.exe' : 'exv'
+  const exeName = platformRunner.resolveExvName()
   const packaged = join(process.resourcesPath, 'bin', exeName)
   if (app.isPackaged && existsSync(packaged)) {
     return packaged
   }
 
   const root = repoRoot()
-  const candidates = process.platform === 'win32'
-    ? [
-        join(root, 'build', 'exv.exe'),
-        join(root, 'build', 'Release', 'exv.exe'),
-        join(root, 'build-desktop', 'exv.exe'),
-        join(root, 'build-desktop', 'Release', 'exv.exe'),
-      ]
-    : [
-        join(root, 'build', 'exv'),
-        join(root, 'build-desktop', 'exv'),
-      ]
-
+  const candidates = platformRunner.resolveExvCandidates(root)
   const found = candidates.find((candidate) => existsSync(candidate))
   if (found) return found
   return candidates[0]
-}
-
-function runtimeBinaryName() {
-  return process.platform === 'win32' ? 'openconnect.exe' : 'openconnect'
 }
 
 function resolveRuntimeDir(exv = resolveExvPath()) {
@@ -77,15 +62,12 @@ function resolveRuntimeDir(exv = resolveExvPath()) {
   }
 
   const root = repoRoot()
+  const runtimeBinaryName = platformRunner.resolveRuntimeBinaryName()
   const candidates = app.isPackaged
     ? [join(process.resourcesPath, 'bin')]
-    : [
-        join(root, 'runtime', `${process.platform}-${process.arch}`),
-        join(root, 'runtime', process.platform),
-        dirname(exv),
-      ]
+    : platformRunner.resolveRuntimeCandidates(root, process.resourcesPath, app.isPackaged, exv, runtimeBinaryName)
 
-  return candidates.find((candidate) => existsSync(join(candidate, runtimeBinaryName())))
+  return candidates.find((candidate) => existsSync(join(candidate, runtimeBinaryName)))
 }
 
 function nativeEnv(exv = resolveExvPath()) {
@@ -119,11 +101,13 @@ function parseJsonOutput(stdout: string) {
 }
 
 function throwRpcResultError(result: RpcErrorResult): never {
+  const code = typeof result.code === 'string' && result.code ? result.code : undefined
+  const message = result.message || result.error || 'Native desktop RPC failed'
   const error = new Error(
-    result.error || result.message || 'Native desktop RPC failed',
+    code ? `${code}: ${message}` : message,
   ) as Error & { code?: string }
-  if (typeof result.code === 'string' && result.code) {
-    error.code = result.code
+  if (code) {
+    error.code = code
   }
   throw error
 }
@@ -363,7 +347,7 @@ app.whenReady().then(createWindow)
 
 app.on('window-all-closed', () => {
   stopEventPump()
-  if (process.platform !== 'darwin') {
+  if (platformRunner.shouldQuitOnWindowClose()) {
     app.quit()
   }
 })

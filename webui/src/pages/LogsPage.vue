@@ -81,9 +81,9 @@ function downloadLogs() {
         :key="i"
         class="whitespace-pre-wrap break-all"
         :class="{
-          'text-red-400': entry.level === 'error' || entry.message.includes('[ERROR]') || entry.message.includes('[error]'),
-          'text-yellow-400': entry.level === 'warn' || entry.message.includes('[WARN]') || entry.message.includes('[warn]'),
-          'text-foreground': entry.level === 'info' && !entry.message.includes('[ERROR]') && !entry.message.includes('[error]') && !entry.message.includes('[WARN]') && !entry.message.includes('[warn]'),
+          'text-red-400': entry.level === 'error',
+          'text-yellow-400': entry.level === 'warn',
+          'text-foreground': entry.level === 'info' || entry.level === 'debug',
         }"
       >{{ entry.message }}</div>
     </div>

@@ -13,7 +13,6 @@
 #include "platform/common/service_status.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
-#include "vpn.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -83,29 +82,30 @@ nlohmann::json disconnected_status(const Config &cfg) {
   return frontend_status_from_helper(nlohmann::json{{"running", false}}, cfg);
 }
 
-nlohmann::json frontend_status_from_snapshot(
-    const vpn::RuntimeStatusSnapshot &snapshot, const Config &cfg) {
+nlohmann::json frontend_status_from_snapshot_json(const nlohmann::json &snapshot,
+                                                   const Config &cfg) {
+  std::string iface = snapshot.value("interface", std::string());
   uint64_t rx_bytes = 0;
   uint64_t tx_bytes = 0;
-  if (snapshot.network_ready && !snapshot.interface_name.empty()) {
-    utils::get_interface_traffic(snapshot.interface_name, &rx_bytes, &tx_bytes);
+  if (snapshot.value("network_ready", false) && !iface.empty()) {
+    utils::get_interface_traffic(iface, &rx_bytes, &tx_bytes);
   }
 
   nlohmann::json j;
-  j["connected"] = snapshot.running;
+  j["connected"] = snapshot.value("running", false);
   j["server"] = cfg.server;
   j["username"] = cfg.username;
-  j["pid"] = snapshot.pid;
-  j["supervisor_pid"] = snapshot.supervisor_pid;
-  j["network_ready"] = snapshot.network_ready;
-  j["interface"] = snapshot.interface_name;
-  j["internal_ip"] = snapshot.internal_ip;
+  j["pid"] = snapshot.value("pid", -1);
+  j["supervisor_pid"] = snapshot.value("supervisor_pid", -1);
+  j["network_ready"] = snapshot.value("network_ready", false);
+  j["interface"] = iface;
+  j["internal_ip"] = snapshot.value("internal_ip", std::string());
   j["route_count"] = static_cast<int>(cfg.routes.size());
   j["mtu"] = cfg.mtu;
   j["uptime_seconds"] = 0;
   j["rx_bytes"] = rx_bytes;
   j["tx_bytes"] = tx_bytes;
-  virtual_network::add_status_fields(j, snapshot.interface_name);
+  virtual_network::add_status_fields(j, iface);
   return j;
 }
 
@@ -206,18 +206,9 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
     return error("OpenConnect runtime is not available. The desktop bundle is missing openconnect and its native dependencies.");
   }
 
-#ifdef _WIN32
-  nlohmann::json drivers = driver_status_json(cfg);
-  std::string effective = drivers.value("effective_driver", std::string("wintun"));
-  if (cfg.windows_tunnel_driver == "wintun" &&
-      !drivers.value("wintun_bundled", false)) {
-    return error("Wintun is selected but bundled wintun.dll is missing.");
-  }
-  if (effective == "tap" && cfg.windows_tunnel_driver == "tap" &&
-      cfg.windows_tap_interface.empty()) {
-    return error("TAP is selected but no TAP interface is configured. Choose an installed TAP adapter or switch back to Wintun.");
-  }
-#endif
+  nlohmann::json platform_err = platform::preflight_connect_platform_checks(cfg);
+  if (platform_err.is_object() && platform_err.value("ok", true) == false)
+    return platform_err;
 
   return nlohmann::json{{"ok", true}};
 }
@@ -266,10 +257,14 @@ nlohmann::json handle_action(const std::string &action,
     if (action == "status.get") {
       auto helper_resp = platform::send_helper_request({{"action", "status"}});
       if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
-        vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
-        if (snapshot.running)
-          return frontend_status_from_snapshot(snapshot, cfg);
-        return disconnected_status(cfg);
+        nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
+        if (fallback.value("_snapshot", false)) {
+          if (fallback.value("_running", false)) {
+            return frontend_status_from_snapshot_json(
+                fallback.value("_snapshot_data", nlohmann::json::object()), cfg);
+          }
+          return disconnected_status(cfg);
+        }
       }
       return frontend_status_from_helper(helper_resp, cfg);
     }
@@ -289,15 +284,16 @@ nlohmann::json handle_action(const std::string &action,
         return preflight;
 
       if (!helper::is_available() && allow_direct_fallback) {
-        platform::prepare_direct_fallback_runtime();
-        if (vpn::start_with_password(cfg, password, 0) != 0) {
-          return error("Failed to start VPN");
+        nlohmann::json direct =
+            platform::try_connect_direct_fallback(cfg, password);
+        if (direct.is_object() && direct.value("_direct_fallback", false)) {
+          auto &sd = direct["_snapshot_data"];
+          if (sd.value("running", false))
+            return frontend_status_from_snapshot_json(sd, cfg);
+          return disconnected_status(cfg);
         }
-
-        vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
-        if (snapshot.running)
-          return frontend_status_from_snapshot(snapshot, cfg);
-        return disconnected_status(cfg);
+        if (direct.is_object() && direct.value("ok", true) == false)
+          return direct;
       }
 
         auto helper_resp = platform::send_helper_request(
@@ -318,15 +314,18 @@ nlohmann::json handle_action(const std::string &action,
           payload.value("allow_direct_fallback", false);
       auto helper_resp = platform::send_helper_request({{"action", "stop"}});
       if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
-        vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
-        if (!snapshot.running)
+        nlohmann::json direct =
+            platform::try_disconnect_direct_fallback(allow_direct_fallback);
+        if (direct.is_object() && direct.value("_not_running", false))
+          return disconnected_status(cfg);
+        if (direct.is_object() && direct.value("_direct_fallback", false))
           return disconnected_status(cfg);
         if (!allow_direct_fallback) {
           return error(platform::helper_unavailable_disconnect_message(),
                        platform::kHelperUnavailableCode);
         }
-        if (!vpn::stop_direct_session())
-          return error("Failed to stop VPN");
+        if (direct.is_object() && direct.value("ok", true) == false)
+          return direct;
         return disconnected_status(cfg);
       }
       if (!helper_resp.value("ok", false)) {

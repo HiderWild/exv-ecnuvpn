@@ -16,6 +16,35 @@ import {
 } from './base.js'
 
 const runner: DesktopPlatformRunner = {
+  resolveExvName() {
+    return 'exv.exe'
+  },
+
+  shouldQuitOnWindowClose() {
+    return true
+  },
+
+  resolveExvCandidates(root: string) {
+    return [
+      join(root, 'build', 'exv.exe'),
+      join(root, 'build', 'Release', 'exv.exe'),
+      join(root, 'build-desktop', 'exv.exe'),
+      join(root, 'build-desktop', 'Release', 'exv.exe'),
+    ]
+  },
+
+  resolveRuntimeBinaryName() {
+    return 'openconnect.exe'
+  },
+
+  resolveRuntimeCandidates(root: string, _resourcesPath: string, _isPackaged: boolean, exv: string, _runtimeBinaryName: string) {
+    return [
+      join(root, 'runtime', `${process.platform}-${process.arch}`),
+      join(root, 'runtime', process.platform),
+      dirname(exv),
+    ]
+  },
+
   async runServiceCommandElevated(
     context: DesktopPlatformContext,
     command: DesktopServiceCommand,
