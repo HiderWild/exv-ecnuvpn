@@ -1,4 +1,5 @@
 #include "helper.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "utils.hpp"
 
 #include <string>
@@ -7,8 +8,6 @@
 #include <windows.h>
 
 namespace {
-
-constexpr const char *kServiceName = "exv-helper";
 
 SERVICE_STATUS_HANDLE service_status_handle = nullptr;
 SERVICE_STATUS service_status = {};
@@ -46,8 +45,10 @@ DWORD WINAPI service_control_handler(DWORD control, DWORD, LPVOID, LPVOID) {
 }
 
 void WINAPI service_main(DWORD, LPSTR *) {
+  const auto &config = ecnuvpn::platform::helper_platform_config();
   service_status_handle =
-      RegisterServiceCtrlHandlerExA(kServiceName, service_control_handler, NULL);
+      RegisterServiceCtrlHandlerExA(config.service_name, service_control_handler,
+                                    NULL);
   if (!service_status_handle)
     return;
 
@@ -58,8 +59,9 @@ void WINAPI service_main(DWORD, LPSTR *) {
 }
 
 int run_service() {
+  const auto &config = ecnuvpn::platform::helper_platform_config();
   SERVICE_TABLE_ENTRYA table[] = {
-      {const_cast<char *>(kServiceName), service_main},
+      {const_cast<char *>(config.service_name), service_main},
       {NULL, NULL},
   };
 

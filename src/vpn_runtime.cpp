@@ -1,17 +1,11 @@
 #include "vpn.hpp"
 
+#include "platform/common/process_control.hpp"
 #include "utils.hpp"
 
 #include <cerrno>
 #include <fstream>
 #include <sstream>
-
-#ifndef _WIN32
-#include <csignal>
-#include <unistd.h>
-#else
-#include <windows.h>
-#endif
 
 namespace ecnuvpn {
 namespace vpn {
@@ -33,24 +27,7 @@ static pid_t read_pid_file(const std::string &path) {
 }
 
 static bool is_process_alive(pid_t pid) {
-  if (pid <= 0)
-    return false;
-
-#ifndef _WIN32
-  if (kill(pid, 0) == 0)
-    return true;
-  return errno == EPERM;
-#else
-  HANDLE h_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                                 static_cast<DWORD>(pid));
-  if (!h_process)
-    return false;
-
-  DWORD exit_code = 0;
-  BOOL ok = GetExitCodeProcess(h_process, &exit_code);
-  CloseHandle(h_process);
-  return ok && exit_code == STILL_ACTIVE;
-#endif
+  return platform::is_process_alive(static_cast<int>(pid));
 }
 
 static bool read_route_ready(std::string *interface_name,

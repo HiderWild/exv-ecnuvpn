@@ -2,7 +2,9 @@
 #include "helper_ipc.hpp"
 
 #include "logger.hpp"
-#include "tunnel.hpp"
+#include "platform/common/helper_lifecycle.hpp"
+#include "platform/common/helper_platform.hpp"
+#include "platform/common/helper_service_manager.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
 #include "virtual_network.hpp"
@@ -42,29 +44,6 @@ namespace helper {
 
 namespace {
 
-#ifdef __APPLE__
-constexpr const char *kHelperLabel = "com.ecnu.exv.helper";
-constexpr const char *kHelperPlistPath =
-    "/Library/LaunchDaemons/com.ecnu.exv.helper.plist";
-constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
-constexpr const char *kHelperStatePath = "/var/run/exv-helper-session.json";
-#elif defined(__linux__)
-constexpr const char *kHelperServiceName = "exv-helper";
-constexpr const char *kHelperServicePath =
-    "/etc/systemd/system/exv-helper.service";
-constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
-constexpr const char *kHelperStatePath = "/var/run/exv-helper-session.json";
-#elif defined(_WIN32)
-constexpr const char *kHelperServiceName = "exv-helper";
-constexpr const char *kHelperPipePath = "\\\\.\\pipe\\exv-helper";
-constexpr const char *kHelperStatePath = "C:\\ProgramData\\exv-helper-session.json";
-#endif
-#ifdef _WIN32
-constexpr const char *kStableInstallPath = "C:\\Program Files\\ECNU-VPN\\exv.exe";
-#else
-constexpr const char *kStableInstallPath = "/usr/local/bin/exv";
-#endif
-
 volatile sig_atomic_t daemon_stop_requested = 0;
 
 struct SessionState {
@@ -91,12 +70,6 @@ struct RuntimeSnapshot {
   std::string interfaces_output;
 };
 
-struct SemanticVersion {
-  int major = -1;
-  int minor = -1;
-  int patch = -1;
-};
-
 std::string pid_path_for(const SessionState &state) {
   return state.config_dir + "/ecnuvpn.pid";
 }
@@ -113,318 +86,6 @@ void remove_file_if_exists(const std::string &path) {
   if (utils::file_exists(path)) {
     std::remove(path.c_str());
   }
-}
-
-bool prompt_confirm(const std::string &question, bool default_yes) {
-  // When stdin is not a TTY (e.g. osascript elevation), auto-confirm.
-  // The user already authorized via the macOS admin dialog.
-  #ifdef _WIN32
-  if (!_isatty(_fileno(stdin)))
-  #else
-  if (!isatty(STDIN_FILENO))
-  #endif
-    return true;
-  std::cout << "  " << question << (default_yes ? " [Y/n]: " : " [y/N]: ");
-  std::string input;
-  std::getline(std::cin, input);
-  input = utils::trim(input);
-  if (input.empty())
-    return default_yes;
-  return input[0] == 'y' || input[0] == 'Y';
-}
-
-bool parse_semantic_version_token(const std::string &token,
-                                  SemanticVersion *version) {
-  if (!version || token.empty())
-    return false;
-
-  std::istringstream iss(token);
-  std::string part;
-  std::vector<int> parts;
-  while (std::getline(iss, part, '.')) {
-    if (part.empty())
-      return false;
-    for (char ch : part) {
-      if (!std::isdigit(static_cast<unsigned char>(ch)))
-        return false;
-    }
-    try {
-      parts.push_back(std::stoi(part));
-    } catch (...) {
-      return false;
-    }
-  }
-
-  if (parts.size() != 3)
-    return false;
-
-  version->major = parts[0];
-  version->minor = parts[1];
-  version->patch = parts[2];
-  return true;
-}
-
-bool parse_semantic_version(const std::string &text, SemanticVersion *version) {
-  if (!version)
-    return false;
-
-  std::string candidate;
-  auto flush_candidate = [&]() -> bool {
-    if (candidate.empty())
-      return false;
-    SemanticVersion parsed;
-    bool ok = parse_semantic_version_token(candidate, &parsed);
-    candidate.clear();
-    if (ok) {
-      *version = parsed;
-      return true;
-    }
-    return false;
-  };
-
-  for (char ch : text) {
-    unsigned char uch = static_cast<unsigned char>(ch);
-    if (std::isdigit(uch) || ch == '.') {
-      candidate.push_back(ch);
-    } else if (flush_candidate()) {
-      return true;
-    }
-  }
-
-  return flush_candidate();
-}
-
-std::string format_semantic_version(const SemanticVersion &version) {
-  return std::to_string(version.major) + "." +
-         std::to_string(version.minor) + "." +
-         std::to_string(version.patch);
-}
-
-int compare_semantic_versions(const SemanticVersion &lhs,
-                              const SemanticVersion &rhs) {
-  if (lhs.major != rhs.major)
-    return lhs.major < rhs.major ? -1 : 1;
-  if (lhs.minor != rhs.minor)
-    return lhs.minor < rhs.minor ? -1 : 1;
-  if (lhs.patch != rhs.patch)
-    return lhs.patch < rhs.patch ? -1 : 1;
-  return 0;
-}
-
-bool read_binary_version(const std::string &path, SemanticVersion *version) {
-  if (!version || !utils::file_exists(path))
-    return false;
-
-  std::string output = utils::trim(
-      utils::run_command_output(utils::shell_quote(path) + " version 2>/dev/null"));
-  if (output.empty())
-    return false;
-  return parse_semantic_version(output, version);
-}
-
-bool uninstall_existing_stable_exv() {
-  if (!utils::file_exists(kStableInstallPath))
-    return true;
-
-  utils::print_info(
-      "Running service uninstall using the existing stable exv before replacement...");
-  if (utils::run_command(utils::shell_quote(kStableInstallPath) +
-                         " service uninstall") != 0) {
-    utils::print_error(
-        "Failed to uninstall the existing helper service before replacing /usr/local/bin/exv.");
-    return false;
-  }
-  return true;
-}
-
-bool copy_file_contents(const std::string &source_path,
-                        const std::string &target_path,
-                        int *error_number = nullptr) {
-#ifndef _WIN32
-  if (error_number)
-    *error_number = 0;
-
-  int src_fd = open(source_path.c_str(), O_RDONLY);
-  if (src_fd < 0) {
-    if (error_number)
-      *error_number = errno;
-    return false;
-  }
-
-  std::string temp_template = target_path + ".tmp.XXXXXX";
-  std::vector<char> temp_path(temp_template.begin(), temp_template.end());
-  temp_path.push_back('\0');
-
-  int dst_fd = mkstemp(temp_path.data());
-  if (dst_fd < 0) {
-    int saved_errno = errno;
-    close(src_fd);
-    if (error_number)
-      *error_number = saved_errno;
-    return false;
-  }
-
-  bool ok = true;
-  int saved_errno = 0;
-  char buffer[16384];
-  while (ok) {
-    ssize_t read_size = read(src_fd, buffer, sizeof(buffer));
-    if (read_size == 0)
-      break;
-    if (read_size < 0) {
-      if (errno == EINTR)
-        continue;
-      saved_errno = errno;
-      ok = false;
-      break;
-    }
-
-    ssize_t total_written = 0;
-    while (total_written < read_size) {
-      ssize_t write_size =
-          write(dst_fd, buffer + total_written, read_size - total_written);
-      if (write_size < 0) {
-        if (errno == EINTR)
-          continue;
-        saved_errno = errno;
-        ok = false;
-        break;
-      }
-      total_written += write_size;
-    }
-  }
-
-  if (ok && fsync(dst_fd) != 0) {
-    saved_errno = errno;
-    ok = false;
-  }
-  if (ok && chmod(temp_path.data(), 0755) != 0) {
-    saved_errno = errno;
-    ok = false;
-  }
-
-  close(src_fd);
-  if (close(dst_fd) != 0 && ok) {
-    saved_errno = errno;
-    ok = false;
-  }
-
-  if (ok && rename(temp_path.data(), target_path.c_str()) != 0) {
-    saved_errno = errno;
-    ok = false;
-  }
-
-  if (!ok) {
-    std::remove(temp_path.data());
-    if (error_number)
-      *error_number = saved_errno;
-    errno = saved_errno;
-    return false;
-  }
-
-  return true;
-#else
-  (void)source_path;
-  (void)target_path;
-  if (error_number)
-    *error_number = 0;
-  return false;
-#endif
-}
-
-int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
-#ifndef _WIN32
-  SemanticVersion current_version;
-  bool current_version_ok = parse_semantic_version(ECNUVPN_VERSION, &current_version);
-  bool stable_exists = utils::file_exists(kStableInstallPath);
-
-  utils::print_warning(
-      "EXV helper service should be installed from a stable system path.");
-  std::cout << utils::DIM << "  Current executable: " << current_path
-            << utils::RESET << std::endl;
-  std::cout << utils::DIM << "  Stable target: " << kStableInstallPath
-            << utils::RESET << std::endl;
-  if (current_version_ok) {
-    std::cout << utils::DIM << "  Current version: "
-              << format_semantic_version(current_version) << utils::RESET
-              << std::endl;
-  }
-
-  bool proceed = false;
-  if (!stable_exists) {
-    std::cout << std::endl;
-    proceed = prompt_confirm(
-        "No exv binary was found at the stable target. Copy this binary there and re-run service installation from that location?",
-        true);
-  } else {
-    SemanticVersion stable_version;
-    bool stable_version_ok = read_binary_version(kStableInstallPath, &stable_version);
-    if (stable_version_ok) {
-      std::cout << utils::DIM << "  Existing stable version: "
-                << format_semantic_version(stable_version) << utils::RESET
-                << std::endl;
-    } else {
-      std::cout << utils::DIM << "  Existing stable version: unknown"
-                << utils::RESET << std::endl;
-    }
-
-    std::cout << std::endl;
-    if (stable_version_ok && current_version_ok) {
-      int cmp = compare_semantic_versions(stable_version, current_version);
-      if (cmp == 0) {
-        proceed = prompt_confirm(
-            "The stable exv already matches this version. Reinstall it and refresh the helper service?",
-            false);
-      } else if (cmp < 0) {
-        proceed = prompt_confirm(
-            "The stable exv is older than this build. Upgrade it and reinstall the helper service?",
-            true);
-      } else {
-        proceed = prompt_confirm(
-            "The stable exv is newer than this build. Downgrade it and reinstall the helper service?",
-            false);
-      }
-    } else {
-      proceed = prompt_confirm(
-          "An existing exv was found at the stable target, but its version could not be compared reliably. Replace it and reinstall the helper service?",
-          false);
-    }
-  }
-
-  if (!proceed) {
-    utils::print_info("Service installation canceled.");
-    return 1;
-  }
-
-  if (stable_exists && !uninstall_existing_stable_exv()) {
-    return 1;
-  }
-
-  if (!utils::ensure_dir("/usr/local") || !utils::ensure_dir("/usr/local/bin")) {
-    utils::print_error("Failed to ensure /usr/local/bin exists.");
-    return 1;
-  }
-
-  utils::print_info("Copying current exv binary to /usr/local/bin/exv ...");
-  int copy_error = 0;
-  if (!copy_file_contents(current_path, kStableInstallPath, &copy_error)) {
-    utils::print_error("Failed to copy exv to /usr/local/bin/exv: " +
-                       std::string(std::strerror(copy_error)));
-    return 1;
-  }
-
-  utils::print_success("Stable exv binary updated at /usr/local/bin/exv.");
-  utils::print_info("Re-running service installation from the copied binary...");
-  execl(kStableInstallPath, kStableInstallPath, "service", "install",
-        static_cast<char *>(nullptr));
-
-  utils::print_error("Failed to launch /usr/local/bin/exv: " +
-                     std::string(std::strerror(errno)));
-  return 1;
-#else
-  (void)current_path;
-  return 1;
-#endif
 }
 
 void clear_runtime_state(const SessionState &state) {
@@ -499,30 +160,6 @@ pid_t find_openconnect_pid() {
 #endif
 }
 
-static void kill_all_supervisors() {
-#ifndef _WIN32
-  std::string output = utils::trim(utils::run_command_output("pgrep -f 'exv -rt'"));
-  if (output.empty())
-    return;
-  std::istringstream iss(output);
-  std::string line;
-  while (std::getline(iss, line)) {
-    line = utils::trim(line);
-    if (line.empty())
-      continue;
-    try {
-      pid_t pid = static_cast<pid_t>(std::stoi(line));
-      if (pid > 0 && is_process_alive(pid)) {
-        logger::info("Killing orphaned supervisor: PID " + line);
-        kill(pid, SIGKILL);
-      }
-    } catch (...) {
-    }
-  }
-  usleep(500000);
-#endif
-}
-
 bool read_route_ready(const SessionState &state, std::string *interface_name,
                       std::string *internal_ip) {
   std::string path = route_ready_path_for(state);
@@ -577,29 +214,34 @@ bool from_json(const nlohmann::json &j, SessionState *state) {
 }
 
 bool save_session_state(const SessionState &state) {
-  std::ofstream ofs(kHelperStatePath);
+  const auto &platform_config = platform::helper_platform_config();
+  std::ofstream ofs(platform_config.session_state_path);
   if (!ofs.is_open())
     return false;
   ofs << to_json(state).dump(2);
   ofs.close();
 #ifndef _WIN32
-  chmod(kHelperStatePath, 0600);
+  chmod(platform_config.session_state_path, 0600);
 #endif
   return ofs.good();
 }
 
 bool load_session_state(SessionState *state) {
-  if (!state || !utils::file_exists(kHelperStatePath))
+  const auto &platform_config = platform::helper_platform_config();
+  if (!state || !utils::file_exists(platform_config.session_state_path))
     return false;
   try {
-    nlohmann::json j = nlohmann::json::parse(utils::read_file(kHelperStatePath));
+    nlohmann::json j =
+        nlohmann::json::parse(utils::read_file(platform_config.session_state_path));
     return from_json(j, state);
   } catch (...) {
     return false;
   }
 }
 
-void clear_session_state() { remove_file_if_exists(kHelperStatePath); }
+void clear_session_state() {
+  remove_file_if_exists(platform::helper_platform_config().session_state_path);
+}
 
 RuntimeSnapshot inspect_runtime(const SessionState &state) {
   RuntimeSnapshot snapshot;
@@ -713,13 +355,16 @@ bool connect_socket(int *out_fd) {
   if (!out_fd)
     return false;
 
+  const auto &platform_config = platform::helper_platform_config();
+
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0)
     return false;
 
   sockaddr_un addr {};
   addr.sun_family = AF_UNIX;
-  std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", kHelperSocketPath);
+  std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
+                platform_config.endpoint);
 
   if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
     close(fd);
@@ -737,15 +382,16 @@ bool send_request(const nlohmann::json &request, nlohmann::json *response,
   std::string raw;
 
 #ifdef _WIN32
+  const auto &platform_config = platform::helper_platform_config();
   // Use WaitNamedPipeA with a short timeout so we don't block when the
   // pipe doesn't exist yet (e.g. during service startup polling).
-  if (!WaitNamedPipeA("\\\\.\\pipe\\exv-helper", 2000 /* ms */)) {
+  if (!WaitNamedPipeA(platform_config.endpoint, 2000 /* ms */)) {
     if (error_message)
       *error_message = "EXV helper is not available.";
     return false;
   }
 
-  HANDLE hPipe = CreateFileA("\\\\.\\pipe\\exv-helper",
+  HANDLE hPipe = CreateFileA(platform_config.endpoint,
                              GENERIC_READ | GENERIC_WRITE, 0, NULL,
                              OPEN_EXISTING, 0, NULL);
   if (hPipe == INVALID_HANDLE_VALUE) {
@@ -927,9 +573,7 @@ nlohmann::json handle_status(uid_t peer_uid) {
 
   RuntimeSnapshot snapshot = inspect_runtime(state);
   if (!snapshot.running) {
-#ifndef _WIN32
-    tunnel::cleanup_routes();
-#endif
+  platform::cleanup_routes();
     clear_runtime_state(state);
     clear_session_state();
     return nlohmann::json{{"ok", true}, {"running", false}};
@@ -951,8 +595,8 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
     pid = find_openconnect_pid();
 
   if (pid <= 0 && supervisor_pid <= 0) {
-    tunnel::cleanup_routes();
-    kill_all_supervisors();
+    platform::cleanup_routes();
+    platform::kill_all_supervisors();
     clear_runtime_state(state);
     if (message)
       *message = "No openconnect process found. VPN is not running.";
@@ -961,9 +605,7 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
 
   // Clean up routes before killing openconnect — while the tunnel
   // interface is still valid, route deletion is more reliable.
-#ifndef _WIN32
-  tunnel::cleanup_routes();
-#endif
+  platform::cleanup_routes();
 
   if (supervisor_pid > 0)
 #ifndef _WIN32
@@ -1028,9 +670,7 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
     return false;
   }
 
-  #ifndef _WIN32
-  kill_all_supervisors();
-#endif
+  platform::kill_all_supervisors();
 
   clear_runtime_state(state);
   if (message)
@@ -1042,10 +682,8 @@ nlohmann::json handle_stop(uid_t peer_uid) {
   SessionState state;
   if (!load_session_state(&state)) {
     // No session state — still clean up any orphaned routes/supervisors
-#ifndef _WIN32
-    tunnel::cleanup_routes();
-    kill_all_supervisors();
-#endif
+  platform::cleanup_routes();
+  platform::kill_all_supervisors();
     return make_error("No openconnect process found. VPN is not running.");
   }
 
@@ -1061,10 +699,8 @@ nlohmann::json handle_stop(uid_t peer_uid) {
   }
 
   // stop_managed_session failed — belt-and-suspenders cleanup
-#ifndef _WIN32
-  tunnel::cleanup_routes();
-  kill_all_supervisors();
-#endif
+  platform::cleanup_routes();
+  platform::kill_all_supervisors();
   RuntimeSnapshot snapshot = inspect_runtime(state);
   if (!snapshot.running)
     clear_session_state();
@@ -1271,20 +907,32 @@ bool print_running_status(const nlohmann::json &response) {
   return true;
 }
 
+bool wait_until_available_for_platform(int attempts, unsigned int delay_us) {
+  return wait_until_available(attempts, delay_us);
+}
+
+bool send_request_for_platform(const nlohmann::json &request,
+                               nlohmann::json *response,
+                               std::string *error_message,
+                               int timeout_seconds) {
+  return send_request(request, response, error_message, timeout_seconds);
+}
+
+void clear_session_state_for_platform() { clear_session_state(); }
+
+platform::HelperServiceManagerContext make_helper_service_manager_context() {
+  return platform::HelperServiceManagerContext{
+      wait_until_available_for_platform,
+      send_request_for_platform,
+      clear_session_state_for_platform,
+  };
+}
+
 } // namespace
 
 void request_daemon_stop() {
   daemon_stop_requested = 1;
-
-#ifdef _WIN32
-  if (WaitNamedPipeA(kHelperPipePath, 200)) {
-    HANDLE hPipe = CreateFileA(kHelperPipePath, GENERIC_READ | GENERIC_WRITE,
-                               0, NULL, OPEN_EXISTING, 0, NULL);
-    if (hPipe != INVALID_HANDLE_VALUE) {
-      CloseHandle(hPipe);
-    }
-  }
-#endif
+  platform::wake_helper_daemon_for_shutdown();
 }
 
 bool is_available() {
@@ -1411,424 +1059,18 @@ bool show_status_via_helper() {
 }
 
 int install_service(const std::string &executable_path) {
-#ifdef __APPLE__
-  if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
-    return 1;
-  }
-
-  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
-                                                  : executable_path;
-  if (exec_path.empty()) {
-    utils::print_error("Failed to resolve the exv executable path.");
-    return 1;
-  }
-
-  if (exec_path != kStableInstallPath) {
-    return copy_self_to_stable_path_and_reexec(exec_path);
-  }
-
-  std::string shell_command =
-      "if [ ! -x " + utils::shell_quote(exec_path) +
-      " ]; then exit 0; fi; exec " + utils::shell_quote(exec_path) +
-      " __helper-daemon";
-
-  std::ostringstream plist;
-  plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-  plist << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-           "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
-  plist << "<plist version=\"1.0\">\n";
-  plist << "<dict>\n";
-  plist << "  <key>Label</key>\n";
-  plist << "  <string>" << kHelperLabel << "</string>\n";
-  plist << "  <key>ProgramArguments</key>\n";
-  plist << "  <array>\n";
-  plist << "    <string>/bin/sh</string>\n";
-  plist << "    <string>-c</string>\n";
-  plist << "    <string>" << shell_command << "</string>\n";
-  plist << "  </array>\n";
-  plist << "  <key>RunAtLoad</key>\n";
-  plist << "  <true/>\n";
-  plist << "  <key>KeepAlive</key>\n";
-  plist << "  <dict>\n";
-  plist << "    <key>SuccessfulExit</key>\n";
-  plist << "    <false/>\n";
-  plist << "  </dict>\n";
-  plist << "</dict>\n";
-  plist << "</plist>\n";
-
-  std::ofstream ofs(kHelperPlistPath);
-  if (!ofs.is_open()) {
-    utils::print_error("Failed to write LaunchDaemon plist: " +
-                       std::string(kHelperPlistPath));
-    return 1;
-  }
-  ofs << plist.str();
-  ofs.close();
-  chmod(kHelperPlistPath, 0644);
-
-  utils::run_command(std::string("launchctl bootout system ") + kHelperPlistPath +
-                     " >/dev/null 2>&1");
-  if (utils::run_command(std::string("launchctl bootstrap system ") +
-                         kHelperPlistPath) != 0) {
-    utils::print_error("Failed to bootstrap EXV helper LaunchDaemon.");
-    return 1;
-  }
-
-  bool helper_ready = wait_until_available(50, 100000);
-
-  // Fix config directory ownership: the install process ran as root and may
-  // have created/modified ~/.ecnuvpn/ with root ownership. Restore it to the
-  // invoking user so the desktop app can read/write config normally.
-  utils::fix_config_dir_ownership();
-
-  utils::print_success("EXV helper service installed.");
-  if (!helper_ready) {
-    utils::print_warning(
-        "Helper service was installed, but it has not responded on the socket yet.");
-    utils::print_info("Run 'exv service status' again in a moment if needed.");
-  }
-  utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
-  return 0;
-#elif defined(__linux__)
-  // Linux systemd service installation
-  if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
-    return 1;
-  }
-
-  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
-                                                  : executable_path;
-  if (exec_path.empty()) {
-    utils::print_error("Failed to resolve the exv executable path.");
-    return 1;
-  }
-
-  std::ofstream ofs(kHelperServicePath);
-  if (!ofs.is_open()) {
-    utils::print_error("Failed to write systemd unit file: " +
-                       std::string(kHelperServicePath));
-    return 1;
-  }
-  ofs << "[Unit]\n";
-  ofs << "Description=ECNU VPN Helper Daemon\n";
-  ofs << "After=network.target\n\n";
-  ofs << "[Service]\n";
-  ofs << "Type=forking\n";
-  ofs << "ExecStart=" << exec_path << " __helper-daemon\n";
-  ofs << "Restart=on-failure\n";
-  ofs << "RestartSec=5\n\n";
-  ofs << "[Install]\n";
-  ofs << "WantedBy=multi-user.target\n";
-  ofs.close();
-
-  std::string reload_cmd = "systemctl daemon-reload";
-  if (utils::run_command(reload_cmd) != 0) {
-    utils::print_error("Failed to reload systemd daemon.");
-    return 1;
-  }
-
-  std::string enable_cmd = "systemctl enable " + std::string(kHelperServiceName);
-  if (utils::run_command(enable_cmd) != 0) {
-    utils::print_error("Failed to enable EXV helper service.");
-    return 1;
-  }
-
-  std::string start_cmd = "systemctl start " + std::string(kHelperServiceName);
-  if (utils::run_command(start_cmd) != 0) {
-    utils::print_error("Failed to start EXV helper service.");
-    return 1;
-  }
-
-  bool helper_ready = wait_until_available(50, 100000);
-
-  utils::print_success("EXV helper service installed.");
-  if (!helper_ready) {
-    utils::print_warning(
-        "Helper service was installed, but it has not responded on the socket yet.");
-    utils::print_info("Run 'exv service status' again in a moment if needed.");
-  }
-  utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
-  return 0;
-#elif defined(_WIN32)
-  if (!utils::check_root()) {
-    utils::print_error("Administrator privileges required. Please run from an elevated prompt.");
-    return 1;
-  }
-
-  utils::print_info("Opening Service Control Manager...");
-  SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
-  if (!hSCM) {
-    logger::error("Cannot open Service Control Manager");
-    return 1;
-  }
-
-  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
-                                                  : executable_path;
-  if (exec_path.empty()) {
-    logger::error("Failed to resolve the exv executable path.");
-    CloseServiceHandle(hSCM);
-    return 1;
-  }
-
-  std::filesystem::path exec_fs_path(exec_path);
-  std::filesystem::path helper_path =
-      exec_fs_path.parent_path() / "exv-helper.exe";
-
-  std::string binary_path;
-  if (std::filesystem::exists(helper_path)) {
-    binary_path = "\"" + helper_path.string() + "\" --service";
-  } else {
-    utils::print_warning(
-        "Dedicated exv-helper.exe was not found next to exv.exe. Falling back to legacy in-process helper service mode.");
-    binary_path = "\"" + exec_path + "\" __helper-daemon";
-  }
-
-  utils::print_info("Registering helper service...");
-  SC_HANDLE hService = CreateServiceA(
-      hSCM, kHelperServiceName, "ECNU VPN Helper",
-      SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
-      SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-      binary_path.c_str(), NULL, NULL, NULL, NULL, NULL);
-
-  if (!hService) {
-    DWORD err = GetLastError();
-    if (err == ERROR_SERVICE_EXISTS) {
-      utils::print_info(
-          "Helper service is already installed. Refreshing service configuration...");
-      hService = OpenServiceA(hSCM, kHelperServiceName,
-                              SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS |
-                                  SERVICE_START | SERVICE_STOP);
-      if (!hService) {
-        logger::error("OpenService failed: " +
-                      std::to_string(GetLastError()));
-        CloseServiceHandle(hSCM);
-        return 1;
-      }
-
-      if (!ChangeServiceConfigA(hService, SERVICE_NO_CHANGE,
-                                SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
-                                binary_path.c_str(), NULL, NULL, NULL, NULL,
-                                NULL, NULL)) {
-        logger::error("ChangeServiceConfig failed: " +
-                      std::to_string(GetLastError()));
-        CloseServiceHandle(hService);
-        CloseServiceHandle(hSCM);
-        return 1;
-      }
-
-      SERVICE_STATUS service_status = {};
-      if (QueryServiceStatus(hService, &service_status) &&
-          service_status.dwCurrentState != SERVICE_STOPPED) {
-        utils::print_info("Restarting helper service to apply the new binary path...");
-        ControlService(hService, SERVICE_CONTROL_STOP, &service_status);
-        for (int i = 0; i < 50; ++i) {
-          if (!QueryServiceStatus(hService, &service_status) ||
-              service_status.dwCurrentState == SERVICE_STOPPED) {
-            break;
-          }
-          Sleep(100);
-        }
-      }
-    } else {
-      logger::error("CreateService failed: " + std::to_string(err));
-      CloseServiceHandle(hSCM);
-      return 1;
-    }
-  }
-
-  utils::print_info("Starting helper service...");
-  if (!StartService(hService, 0, NULL)) {
-    DWORD err = GetLastError();
-    if (err != ERROR_SERVICE_ALREADY_RUNNING) {
-      logger::error("StartService failed: " + std::to_string(err));
-      CloseServiceHandle(hService);
-      CloseServiceHandle(hSCM);
-      return 1;
-    }
-  }
-  CloseServiceHandle(hService);
-  CloseServiceHandle(hSCM);
-
-  utils::print_info("Waiting for helper to become ready...");
-  bool helper_ready = wait_until_available(50, 100000);
-
-  utils::print_success("EXV helper service installed.");
-  if (!helper_ready) {
-    utils::print_warning(
-        "Helper service was installed, but it has not responded yet.");
-    utils::print_info("Run 'exv service status' again in a moment if needed.");
-  }
-  utils::print_info("You can now run 'exv' and 'exv stop' without elevation.");
-  return 0;
-#endif
+  return platform::install_helper_service(executable_path,
+                                          make_helper_service_manager_context());
 }
 
 int uninstall_service() {
-#ifdef __APPLE__
-  if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
-    return 1;
-  }
-
-  nlohmann::json response;
-  std::string error_message;
-  send_request(nlohmann::json{{"action", "stop"}}, &response, &error_message);
-
-  // Belt-and-suspenders: clean up routes even if helper stop failed
-  tunnel::cleanup_routes();
-  kill_all_supervisors();
-
-  utils::run_command(std::string("launchctl bootout system ") + kHelperPlistPath +
-                     " >/dev/null 2>&1");
-  remove_file_if_exists(kHelperPlistPath);
-  remove_file_if_exists(kHelperSocketPath);
-  clear_session_state();
-
-  utils::print_success("EXV helper service uninstalled.");
-  return 0;
-#elif defined(__linux__)
-  if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
-    return 1;
-  }
-
-  nlohmann::json response;
-  std::string error_message;
-  send_request(nlohmann::json{{"action", "stop"}}, &response, &error_message);
-
-  std::string stop_cmd = "systemctl stop " + std::string(kHelperServiceName);
-  utils::run_command(stop_cmd + " >/dev/null 2>&1");
-  std::string disable_cmd = "systemctl disable " + std::string(kHelperServiceName);
-  utils::run_command(disable_cmd + " >/dev/null 2>&1");
-  remove_file_if_exists(kHelperServicePath);
-  remove_file_if_exists(kHelperSocketPath);
-  utils::run_command("systemctl daemon-reload >/dev/null 2>&1");
-  clear_session_state();
-
-  utils::print_success("EXV helper service uninstalled.");
-  return 0;
-#elif defined(_WIN32)
-  SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
-  if (!hSCM) return 1;
-
-  SC_HANDLE hService = OpenServiceA(hSCM, kHelperServiceName, SERVICE_STOP | DELETE);
-  if (!hService) {
-    std::cout << "Helper service is not installed.\n";
-    CloseServiceHandle(hSCM);
-    return 0;
-  }
-
-  SERVICE_STATUS status;
-  ControlService(hService, SERVICE_CONTROL_STOP, &status);
-  DeleteService(hService);
-
-  CloseServiceHandle(hService);
-  CloseServiceHandle(hSCM);
-
-  std::cout << "Helper service uninstalled.\n";
-  return 0;
-#endif
+  return platform::uninstall_helper_service(
+      make_helper_service_manager_context());
 }
 
 int show_service_status() {
-#ifdef __APPLE__
-  utils::print_header("EXV Service Status");
-
-  bool plist_exists = utils::file_exists(kHelperPlistPath);
-  bool available = plist_exists ? wait_until_available(10, 100000) : false;
-  std::cout << "  Installed       : " << (plist_exists ? "yes" : "no")
-            << std::endl;
-  std::cout << "  Socket Ready    : " << (available ? "yes" : "no")
-            << std::endl;
-
-  if (available) {
-    nlohmann::json response;
-    std::string error_message;
-    if (send_request(nlohmann::json{{"action", "status"}}, &response,
-                     &error_message) && response.value("ok", false)) {
-      std::cout << "  VPN Running     : "
-                << (response.value("running", false) ? "yes" : "no")
-                << std::endl;
-      if (response.value("running", false)) {
-        std::cout << "  Session Owner   : "
-                  << response.value("owner_username", std::string()) << std::endl;
-      }
-    }
-  }
-
-  std::cout << std::endl;
-  return 0;
-#elif defined(__linux__)
-  utils::print_header("EXV Service Status");
-
-  bool service_exists = utils::file_exists(kHelperServicePath);
-  bool available = service_exists ? wait_until_available(10, 100000) : false;
-  std::cout << "  Installed       : " << (service_exists ? "yes" : "no")
-            << std::endl;
-  std::cout << "  Socket Ready    : " << (available ? "yes" : "no")
-            << std::endl;
-
-  if (available) {
-    nlohmann::json response;
-    std::string error_message;
-    if (send_request(nlohmann::json{{"action", "status"}}, &response,
-                     &error_message) && response.value("ok", false)) {
-      std::cout << "  VPN Running     : "
-                << (response.value("running", false) ? "yes" : "no")
-                << std::endl;
-      if (response.value("running", false)) {
-        std::cout << "  Session Owner   : "
-                  << response.value("owner_username", std::string()) << std::endl;
-      }
-    }
-  }
-
-  std::cout << std::endl;
-  return 0;
-#elif defined(_WIN32)
-  utils::print_header("EXV Service Status");
-
-  SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
-  if (!hSCM) {
-    std::cout << "  Installed       : unknown (cannot open SCM)\n";
-    return 1;
-  }
-  SC_HANDLE hService = OpenServiceA(hSCM, kHelperServiceName, SERVICE_QUERY_STATUS);
-  bool installed = (hService != NULL);
-  std::cout << "  Installed       : " << (installed ? "yes" : "no") << std::endl;
-
-  bool available = false;
-  if (installed) {
-    SERVICE_STATUS status;
-    QueryServiceStatus(hService, &status);
-    std::cout << "  State           : " << (status.dwCurrentState == SERVICE_RUNNING ? "running" : "stopped") << std::endl;
-    if (status.dwCurrentState == SERVICE_RUNNING) {
-      available = wait_until_available(10, 100000);
-    }
-    CloseServiceHandle(hService);
-  }
-  std::cout << "  Socket Ready    : " << (available ? "yes" : "no") << std::endl;
-
-  if (available) {
-    nlohmann::json response;
-    std::string error_message;
-    if (send_request(nlohmann::json{{"action", "status"}}, &response,
-                     &error_message) && response.value("ok", false)) {
-      std::cout << "  VPN Running     : "
-                << (response.value("running", false) ? "yes" : "no")
-                << std::endl;
-      if (response.value("running", false)) {
-        std::cout << "  Session Owner   : "
-                  << response.value("owner_username", std::string()) << std::endl;
-      }
-    }
-  }
-
-  std::cout << std::endl;
-  CloseServiceHandle(hSCM);
-  return 0;
-#endif
+  return platform::show_helper_service_status(
+      make_helper_service_manager_context());
 }
 
 int worker_main(const std::string &request_path) {
@@ -1863,15 +1105,13 @@ int daemon_main() {
 #endif
 
   auto ipc = create_ipc_server();
+  const auto &platform_config = platform::helper_platform_config();
 
-#ifdef _WIN32
-  constexpr const char *ipc_path = "\\\\.\\pipe\\exv-helper";
-#else
-  constexpr const char *ipc_path = "/var/run/exv-helper.sock";
-  remove_file_if_exists(ipc_path);
+#ifndef _WIN32
+  remove_file_if_exists(platform_config.endpoint);
 #endif
 
-  if (!ipc->start(ipc_path)) {
+  if (!ipc->start(platform_config.endpoint)) {
     return 1;
   }
 
@@ -1962,7 +1202,7 @@ int daemon_main() {
 
   ipc->close();
 #ifndef _WIN32
-  remove_file_if_exists(ipc_path);
+  remove_file_if_exists(platform_config.endpoint);
 #endif
   return 0;
 }

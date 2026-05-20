@@ -6,6 +6,8 @@
 #include "crypto.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
+#include "platform/common/app_api_runtime_policy.hpp"
+#include "platform/common/helper_client.hpp"
 #include "platform/common/driver_status.hpp"
 #include "platform/common/runtime_status.hpp"
 #include "platform/common/service_status.hpp"
@@ -20,24 +22,9 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
-#include <unistd.h>
-#else
-#include <windows.h>
-#endif
-
 namespace ecnuvpn {
 namespace app_api {
 namespace {
-
-#ifndef _WIN32
-constexpr const char *kHelperSocketPath = "/var/run/exv-helper.sock";
-#endif
-
-constexpr const char *kHelperUnavailableCode = "helper_unavailable";
 
 nlohmann::json error(const std::string &message,
                      const std::string &code = std::string()) {
@@ -48,7 +35,8 @@ nlohmann::json error(const std::string &message,
 }
 
 bool helper_unavailable(const nlohmann::json &response) {
-  return response.value("code", std::string()) == kHelperUnavailableCode ||
+  return response.value("code", std::string()) ==
+             platform::kHelperUnavailableCode ||
          response.value("message", std::string()) ==
              "Helper daemon not available";
 }
@@ -59,26 +47,6 @@ nlohmann::json helper_error(const nlohmann::json &response,
                response.value("code", std::string()));
 }
 
-#ifndef _WIN32
-void prepare_direct_fallback_runtime() {
-  if (!utils::check_root())
-    return;
-
-  std::string home = utils::get_effective_home();
-  if (home.empty())
-    return;
-
-  struct stat home_stat {};
-  if (stat(home.c_str(), &home_stat) == 0) {
-    utils::set_runtime_owner(home_stat.st_uid, home_stat.st_gid);
-    utils::set_runtime_path_override(home, utils::get_config_dir());
-  }
-  utils::fix_config_dir_ownership();
-}
-#else
-void prepare_direct_fallback_runtime() {}
-#endif
-
 config::ConfigManager make_config_manager() {
   utils::ensure_dir(utils::get_config_dir());
   // The desktop / RPC entrypoint does not go through the CLI wizard, so we
@@ -88,91 +56,6 @@ config::ConfigManager make_config_manager() {
   crypto::init_key_if_needed();
   logger::init();
   return config::ConfigManager(utils::get_config_dir());
-}
-
-nlohmann::json send_helper_request(const nlohmann::json &request) {
-  std::string payload = request.dump();
-  payload.push_back('\n');
-  std::string raw;
-
-#ifdef _WIN32
-  HANDLE hPipe = CreateFileA("\\\\.\\pipe\\exv-helper",
-                             GENERIC_READ | GENERIC_WRITE, 0, NULL,
-                             OPEN_EXISTING, 0, NULL);
-  if (hPipe == INVALID_HANDLE_VALUE) {
-    return nlohmann::json{{"ok", false},
-                          {"message", "Helper daemon not available"},
-                          {"code", kHelperUnavailableCode}};
-  }
-
-  DWORD bytesWritten = 0;
-  if (!WriteFile(hPipe, payload.c_str(), static_cast<DWORD>(payload.size()),
-                 &bytesWritten, NULL) ||
-      bytesWritten != payload.size()) {
-    CloseHandle(hPipe);
-    return nlohmann::json{{"ok", false},
-                          {"message", "Failed to send helper request"}};
-  }
-
-  char buffer[1024];
-  DWORD bytesRead = 0;
-  while (ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL) &&
-         bytesRead > 0) {
-    raw.append(buffer, bytesRead);
-    if (raw.find('\n') != std::string::npos)
-      break;
-  }
-  CloseHandle(hPipe);
-#else
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0) {
-    return nlohmann::json{{"ok", false}, {"message", "Failed to create socket"}};
-  }
-
-  sockaddr_un addr {};
-  addr.sun_family = AF_UNIX;
-  std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", kHelperSocketPath);
-
-  if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
-    close(fd);
-    return nlohmann::json{{"ok", false},
-                          {"message", "Helper daemon not available"},
-                          {"code", kHelperUnavailableCode}};
-  }
-
-  if (write(fd, payload.data(), payload.size()) !=
-      static_cast<ssize_t>(payload.size())) {
-    close(fd);
-    return nlohmann::json{{"ok", false},
-                          {"message", "Failed to send helper request"}};
-  }
-  shutdown(fd, SHUT_WR);
-
-  char buffer[1024];
-  ssize_t n;
-  while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-    raw.append(buffer, static_cast<size_t>(n));
-    if (raw.find('\n') != std::string::npos)
-      break;
-  }
-  close(fd);
-#endif
-
-  auto nl = raw.find('\n');
-  if (nl != std::string::npos)
-    raw.resize(nl);
-  raw = utils::trim(raw);
-
-  if (raw.empty()) {
-    return nlohmann::json{{"ok", false}, {"message", "Empty helper response"}};
-  }
-
-  try {
-    return nlohmann::json::parse(raw);
-  } catch (...) {
-    return nlohmann::json{{"ok", false},
-                          {"message", "Failed to parse helper response"}};
-  }
 }
 
 nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
@@ -314,16 +197,8 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
     return error("VPN password is not configured.");
 
   if (!helper::is_available() && !allow_direct_fallback) {
-#ifdef _WIN32
-    return error("Helper daemon is not available. Install the helper service from Settings or run 'exv service install' as Administrator.",
-           kHelperUnavailableCode);
-#elif defined(__APPLE__)
-    return error("Helper daemon is not available. The desktop app can request one-time administrator authorization, or you can install the helper service for persistent connections.",
-           kHelperUnavailableCode);
-#else
-    return error("Helper daemon is not available. Install the helper service before starting the desktop client.",
-           kHelperUnavailableCode);
-#endif
+    return error(platform::helper_unavailable_connect_message(),
+                 platform::kHelperUnavailableCode);
   }
 
   nlohmann::json runtime = runtime_status_json(cfg);
@@ -389,7 +264,7 @@ nlohmann::json handle_action(const std::string &action,
     Config cfg = mgr.load();
 
     if (action == "status.get") {
-      auto helper_resp = send_helper_request({{"action", "status"}});
+      auto helper_resp = platform::send_helper_request({{"action", "status"}});
       if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
         vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
         if (snapshot.running)
@@ -414,7 +289,7 @@ nlohmann::json handle_action(const std::string &action,
         return preflight;
 
       if (!helper::is_available() && allow_direct_fallback) {
-        prepare_direct_fallback_runtime();
+        platform::prepare_direct_fallback_runtime();
         if (vpn::start_with_password(cfg, password, 0) != 0) {
           return error("Failed to start VPN");
         }
@@ -425,12 +300,13 @@ nlohmann::json handle_action(const std::string &action,
         return disconnected_status(cfg);
       }
 
-      auto helper_resp = send_helper_request({{"action", "start"},
-                                              {"config", cfg},
-                                              {"password", password},
-                                              {"retry_limit", 0},
-                                              {"home", utils::get_effective_home()},
-                                              {"config_dir", utils::get_config_dir()}});
+        auto helper_resp = platform::send_helper_request(
+          {{"action", "start"},
+           {"config", cfg},
+           {"password", password},
+           {"retry_limit", 0},
+           {"home", utils::get_effective_home()},
+           {"config_dir", utils::get_config_dir()}});
       if (!helper_resp.value("ok", false)) {
         return helper_error(helper_resp, "Failed to start VPN");
       }
@@ -440,22 +316,14 @@ nlohmann::json handle_action(const std::string &action,
     if (action == "vpn.disconnect") {
       bool allow_direct_fallback =
           payload.value("allow_direct_fallback", false);
-      auto helper_resp = send_helper_request({{"action", "stop"}});
+      auto helper_resp = platform::send_helper_request({{"action", "stop"}});
       if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
         vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
         if (!snapshot.running)
           return disconnected_status(cfg);
         if (!allow_direct_fallback) {
-#ifdef _WIN32
-          return error("Helper daemon is not available. Use the elevated desktop action or install the helper service from Settings.",
-                       kHelperUnavailableCode);
-#elif defined(__APPLE__)
-          return error("Helper daemon is not available. The desktop app can request one-time administrator authorization to disconnect this session, or you can install the helper service.",
-                       kHelperUnavailableCode);
-#else
-          return error("Helper daemon is not available. Install the helper service before disconnecting managed sessions.",
-                       kHelperUnavailableCode);
-#endif
+          return error(platform::helper_unavailable_disconnect_message(),
+                       platform::kHelperUnavailableCode);
         }
         if (!vpn::stop_direct_session())
           return error("Failed to stop VPN");

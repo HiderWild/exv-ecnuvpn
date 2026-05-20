@@ -22,11 +22,31 @@ public:
 
   bool start(const std::string &path) override {
 #ifdef _WIN32
+    PSECURITY_DESCRIPTOR security_descriptor = NULL;
+    SECURITY_ATTRIBUTES security_attributes = {};
+    security_attributes.nLength = sizeof(security_attributes);
+    security_attributes.bInheritHandle = FALSE;
+
+    // LocalSystem owns the service process, but the desktop client runs as the
+    // interactive user. Grant interactive users pipe read/write access while
+    // keeping full access for LocalSystem and Administrators.
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)", SDDL_REVISION_1,
+            &security_descriptor, NULL)) {
+      logger::error("Helper: failed to build named pipe security descriptor");
+      return false;
+    }
+    security_attributes.lpSecurityDescriptor = security_descriptor;
+
     hPipe_ = CreateNamedPipeA(
         path.c_str(),
         PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1, 65536, 65536, 0, NULL);
+        1, 65536, 65536, 0, &security_attributes);
+
+    if (security_descriptor) {
+      LocalFree(security_descriptor);
+    }
 
     if (hPipe_ == INVALID_HANDLE_VALUE) {
       logger::error("Helper: CreateNamedPipe failed");
@@ -58,15 +78,22 @@ public:
 #ifdef _WIN32
     // Impersonate to get client identity
     if (!ImpersonateNamedPipeClient(hPipe_)) {
-      logger::error("Helper: ImpersonateNamedPipeClient failed");
-      return false;
+      logger::warn(
+          "Helper: named pipe client impersonation failed, falling back to DACL-authorized peer");
+      peer_uid_ = 0;
+      peer_gid_ = 0;
+      return true;
     }
 
     // Get the impersonated token and extract user SID
     HANDLE hToken = NULL;
     if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken)) {
       RevertToSelf();
-      return false;
+      logger::warn(
+          "Helper: failed to open thread token, falling back to DACL-authorized peer");
+      peer_uid_ = 0;
+      peer_gid_ = 0;
+      return true;
     }
 
     // Get the user SID from the token
@@ -75,7 +102,11 @@ public:
     if (sid_size == 0) {
       CloseHandle(hToken);
       RevertToSelf();
-      return false;
+      logger::warn(
+          "Helper: empty token user SID size, falling back to DACL-authorized peer");
+      peer_uid_ = 0;
+      peer_gid_ = 0;
+      return true;
     }
 
     std::vector<BYTE> sid_buf(sid_size);
@@ -83,7 +114,11 @@ public:
     if (!GetTokenInformation(hToken, TokenUser, tu, sid_size, &sid_size)) {
       CloseHandle(hToken);
       RevertToSelf();
-      return false;
+      logger::warn(
+          "Helper: failed to query token SID, falling back to DACL-authorized peer");
+      peer_uid_ = 0;
+      peer_gid_ = 0;
+      return true;
     }
 
     // Convert SID to a numeric hash for uid/gid (Windows has no uid/gid concept)
@@ -116,6 +151,8 @@ public:
       if (!success || bytesRead == 0)
         break;
       raw.append(buffer, bytesRead);
+      if (raw.find('\n') != std::string::npos)
+        break;
     }
     return raw;
 #else
