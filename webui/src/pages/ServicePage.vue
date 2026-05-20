@@ -5,7 +5,7 @@ import { useUiStore } from '../stores/ui'
 import { useSSE } from '../composables/useSSE'
 import StatusBadge from '../components/StatusBadge.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { Download, RefreshCw, Shield, ShieldCheck, ShieldOff, Terminal, Trash2 } from 'lucide-vue-next'
+import { Download, RefreshCw, Terminal, Trash2 } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
 const ui = useUiStore()
@@ -16,12 +16,6 @@ const platform = computed(() => {
   if (path.includes('LaunchDaemons') || path.includes('/usr/local/bin')) return 'darwin'
   if (path.includes('Program Files') || path.includes('exv-helper.exe')) return 'win32'
   return 'generic'
-})
-
-const serviceName = computed(() => {
-  if (platform.value === 'darwin') return 'launchd 辅助服务'
-  if (platform.value === 'win32') return 'Windows 辅助服务'
-  return 'VPN 辅助服务'
 })
 
 const installCommand = computed(() => platform.value === 'win32' ? 'exv service install' : 'sudo exv service install')
