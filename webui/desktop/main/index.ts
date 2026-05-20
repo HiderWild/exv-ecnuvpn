@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, Menu } from 'electron'
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -13,18 +13,13 @@ import {
   type DesktopRpcAction,
   type DesktopServiceCommand,
 } from '../shared/desktop-contract.js'
+import { platformRunner } from './platform/index.js'
+import type { RpcErrorResult } from './platform/base.js'
 
 const execFileAsync = promisify(execFile)
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const validRpcActions = new Set<DesktopRpcAction>(desktopRpcActions)
-
-type RpcErrorResult = {
-  ok?: boolean
-  error?: string
-  message?: string
-  code?: string
-}
 
 let mainWindow: BrowserWindow | null = null
 let statusTimer: NodeJS.Timeout | null = null
@@ -215,39 +210,9 @@ async function runDesktopRpc(action: DesktopRpcAction, payload: unknown = {}) {
   }
 }
 
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-function psQuote(value: string) {
-  return `'${value.replace(/'/g, `''`)}'`
-}
-
-function psArray(values: string[]) {
-  return `@(${values.map((value) => psQuote(value)).join(', ')})`
-}
-
 function emitEvent(type: DesktopEventType, data: unknown) {
   if (!mainWindow || mainWindow.isDestroyed()) return
   mainWindow.webContents.send(desktopIpcChannels.event, { type, data })
-}
-
-function psRuntimeEnvPrefix(exv: string) {
-  const runtimeDir = resolveRuntimeDir(exv)
-  return runtimeDir ? `$env:ECNUVPN_RUNTIME_DIR = ${psQuote(runtimeDir)}; ` : ''
-}
-
-function readNewLogLines(logPath: string, offset: number) {
-  if (!existsSync(logPath)) {
-    return { offset, lines: [] as string[] }
-  }
-  const content = readFileSync(logPath, 'utf8')
-  const chunk = content.slice(offset)
-  const lines = chunk
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-  return { offset: content.length, lines }
 }
 
 function emitServiceProgress(command: 'install' | 'uninstall', line: string) {
@@ -256,133 +221,6 @@ function emitServiceProgress(command: 'install' | 'uninstall', line: string) {
     message: line.replace(/\u001b\[[0-9;]*m/g, ''),
     timestamp: new Date().toISOString(),
   })
-}
-
-async function runServiceCommandElevated(command: DesktopServiceCommand) {
-  const exv = resolveExvPath()
-  emitServiceProgress(command, `Starting service ${command}...`)
-
-  if (process.platform === 'win32') {
-    const logPath = join(app.getPath('temp'), `ecnu-vpn-service-${command}-${Date.now()}.log`)
-    let offset = 0
-    const poll = setInterval(() => {
-      const next = readNewLogLines(logPath, offset)
-      offset = next.offset
-      for (const line of next.lines) emitServiceProgress(command, line)
-    }, 250)
-
-    const inner = [
-      '$ErrorActionPreference = "Continue"',
-      psRuntimeEnvPrefix(exv).trim(),
-      `Set-Location ${psQuote(dirname(exv))}`,
-      `& ${psQuote(exv)} service ${command} *>&1 | ForEach-Object { $_; $_ | Out-File -FilePath ${psQuote(logPath)} -Append -Encoding utf8 }`,
-      'exit $LASTEXITCODE',
-    ].filter(Boolean).join('; ')
-
-    const ps = [
-      'Start-Process',
-      '-FilePath', psQuote('powershell.exe'),
-      '-ArgumentList', psArray([
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        inner,
-      ]),
-      '-WorkingDirectory', psQuote(dirname(exv)),
-      '-WindowStyle', 'Hidden',
-      '-Verb', 'RunAs',
-      '-Wait',
-      '-PassThru',
-    ].join(' ')
-    try {
-      await execFileAsync('powershell.exe', [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        `$p = ${ps}; if ($p.ExitCode -ne 0) { exit $p.ExitCode }`,
-      ], { windowsHide: true })
-    } catch (error) {
-      const next = readNewLogLines(logPath, offset)
-      offset = next.offset
-      for (const line of next.lines) emitServiceProgress(command, line)
-      throw error
-    } finally {
-      clearInterval(poll)
-      const next = readNewLogLines(logPath, offset)
-      for (const line of next.lines) emitServiceProgress(command, line)
-      try {
-        if (existsSync(logPath)) unlinkSync(logPath)
-      } catch {
-        // Temporary progress logs are best-effort cleanup.
-      }
-    }
-    emitServiceProgress(command, `Service ${command} command completed.`)
-    return
-  }
-
-  if (process.platform === 'darwin') {
-    const cmd = `${shellQuote(exv)} service ${command}`
-    await execFileAsync('osascript', [
-      '-e',
-      `do shell script ${JSON.stringify(cmd)} with administrator privileges`,
-    ])
-    emitServiceProgress(command, `Service ${command} command completed.`)
-    return
-  }
-
-  await execFileAsync(exv, ['service', command], nativeExecOptions(exv))
-  emitServiceProgress(command, `Service ${command} command completed.`)
-}
-
-async function runDesktopRpcElevated(
-  action: DesktopRpcAction,
-  payload: unknown,
-  followupAction: DesktopRpcAction,
-) {
-  if (!validRpcActions.has(action)) {
-    throw new Error(`Unknown desktop RPC action: ${action}`)
-  }
-
-  const exv = resolveExvPath()
-
-  if (process.platform === 'win32') {
-    const args = ['desktop-rpc', action, JSON.stringify(payload ?? {})]
-    const ps = psRuntimeEnvPrefix(exv) + [
-      'Start-Process',
-      '-FilePath', psQuote(exv),
-      '-ArgumentList', psArray(args),
-      '-WorkingDirectory', psQuote(dirname(exv)),
-      '-Verb', 'RunAs',
-      '-Wait',
-    ].join(' ')
-    await execFileAsync('powershell.exe', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      ps,
-    ], { windowsHide: true })
-    return runDesktopRpc(followupAction)
-  }
-
-  if (process.platform === 'darwin') {
-    const args = ['desktop-rpc', action, JSON.stringify(payload ?? {})]
-    const command = [shellQuote(exv), ...args.map((value) => shellQuote(value))].join(' ')
-    const { stdout } = await execFileAsync('osascript', [
-      '-e',
-      `do shell script ${JSON.stringify(command)} with administrator privileges`,
-    ], { maxBuffer: 1024 * 1024 * 4 })
-
-    const result = parseJsonOutput(stdout)
-    if (result && result.ok === false) {
-      throwRpcResultError(result)
-    }
-    return result
-  }
-
-  return runDesktopRpc(action, payload)
 }
 
 async function createWindow() {
@@ -456,13 +294,31 @@ ipcMain.handle(desktopIpcChannels.rpc, async (_event, action: DesktopRpcAction, 
 ipcMain.handle(
   desktopIpcChannels.rpcElevated,
   async (_event, action: DesktopRpcAction, payload?: unknown, followupAction: DesktopRpcAction = 'status.get') => {
-    return runDesktopRpcElevated(action, payload, followupAction)
+    return platformRunner.runDesktopRpcElevated({
+      execFileAsync,
+      resolveExvPath,
+      resolveRuntimeDir,
+      nativeExecOptions,
+      parseJsonOutput,
+      throwRpcResultError,
+      runDesktopRpc,
+      emitServiceProgress,
+    }, action, payload, followupAction)
   },
 )
 
 ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: DesktopServiceCommand) => {
   try {
-    await runServiceCommandElevated(command)
+    await platformRunner.runServiceCommandElevated({
+      execFileAsync,
+      resolveExvPath,
+      resolveRuntimeDir,
+      nativeExecOptions,
+      parseJsonOutput,
+      throwRpcResultError,
+      runDesktopRpc,
+      emitServiceProgress,
+    }, command)
     const status = await waitForServiceCommandStatus(command)
     if (command === 'install' && !isServiceUsable(status)) {
       throw new Error('Helper service was installed but is not available to the desktop client.')
@@ -491,7 +347,16 @@ ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: Deskto
 })
 
 ipcMain.handle(desktopIpcChannels.driverInstall, async (_event, driver: DesktopDriverInstallTarget) => {
-  return runDesktopRpcElevated('drivers.install', { driver }, 'drivers.status')
+  return platformRunner.runDesktopRpcElevated({
+    execFileAsync,
+    resolveExvPath,
+    resolveRuntimeDir,
+    nativeExecOptions,
+    parseJsonOutput,
+    throwRpcResultError,
+    runDesktopRpc,
+    emitServiceProgress,
+  }, 'drivers.install', { driver }, 'drivers.status')
 })
 
 app.whenReady().then(createWindow)
