@@ -44,6 +44,15 @@ void sleep_ms(int milliseconds);
 // Reap finished child processes (POSIX only; no-op on Windows).
 void reap_children();
 
+// Set restrictive permissions on the session state file (POSIX only; no-op on Windows).
+void set_session_state_permissions(const std::string &path);
+
+// Set up platform-specific daemon signal handlers (e.g. SIGPIPE on POSIX).
+void setup_daemon_signals();
+
+// Clean up the daemon IPC endpoint (e.g. remove Unix socket on POSIX; no-op on Windows).
+void cleanup_daemon_endpoint(const std::string &endpoint);
+
 // Dispatch a helper request in the background (fork on POSIX, thread on Windows).
 // The handler callback produces a JSON response string.
 // On POSIX, the caller must close the client fd after this returns.

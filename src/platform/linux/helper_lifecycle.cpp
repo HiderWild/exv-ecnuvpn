@@ -168,5 +168,17 @@ void dispatch_request_background(
   ipc.close_client();
 }
 
+void set_session_state_permissions(const std::string &path) {
+  chmod(path.c_str(), 0600);
+}
+
+void setup_daemon_signals() {
+  signal(SIGPIPE, SIG_IGN);
+}
+
+void cleanup_daemon_endpoint(const std::string &endpoint) {
+  std::remove(endpoint.c_str());
+}
+
 } // namespace platform
 } // namespace ecnuvpn
