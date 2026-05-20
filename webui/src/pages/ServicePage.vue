@@ -27,6 +27,20 @@ const serviceName = computed(() => {
 const installCommand = computed(() => platform.value === 'win32' ? 'exv service install' : 'sudo exv service install')
 const uninstallCommand = computed(() => platform.value === 'win32' ? 'exv service uninstall' : 'sudo exv service uninstall')
 
+const serviceBadgeStatus = computed(() => {
+  if (!vpn.serviceStatus?.installed) return 'disconnected' as const
+  return vpn.serviceStatus.running ? 'running' : 'stopped'
+})
+
+const serviceHeadline = computed(() => {
+  if (!vpn.serviceStatus?.installed) return '辅助服务'
+  return vpn.serviceStatus.label || '辅助服务'
+})
+
+const serviceSubtitle = computed(() => {
+  return vpn.serviceStatus?.binary_path || vpn.serviceStatus?.path || '未安装'
+})
+
 onMounted(() => {
   vpn.fetchServiceStatus()
   eventsConnect()
@@ -73,27 +87,24 @@ function uninstall() {
   <div class="py-8">
     <h1 class="text-xl font-semibold text-foreground mb-6">服务管理</h1>
 
-    <div class="bg-surface border border-border rounded-lg p-6">
-      <div class="flex items-center justify-between gap-4 mb-6">
-        <div class="flex items-center gap-3 min-w-0">
-          <ShieldCheck v-if="vpn.serviceStatus?.available" class="w-5 h-5 text-accent shrink-0" />
-          <Shield v-else-if="vpn.serviceStatus?.installed" class="w-5 h-5 text-warning shrink-0" />
-          <ShieldOff v-else class="w-5 h-5 text-muted shrink-0" />
-          <div class="min-w-0">
-            <p class="text-sm font-medium text-foreground">{{ serviceName }}</p>
-            <p class="text-xs text-muted font-mono truncate">
-              {{ vpn.serviceStatus?.binary_path || vpn.serviceStatus?.path || '未安装' }}
+    <div class="bg-surface border border-border rounded-xl p-6">
+      <div class="flex items-center justify-between mb-6">
+        <div class="flex items-center gap-3">
+          <Terminal class="w-5 h-5 text-muted" />
+          <div>
+            <p class="text-sm font-medium text-foreground">{{ serviceHeadline }}</p>
+            <p class="text-xs text-muted break-all">{{ serviceSubtitle }}</p>
+            <p v-if="vpn.serviceStatus?.endpoint" class="text-xs text-muted break-all mt-1">
+              {{ vpn.serviceStatus.endpoint }}
             </p>
           </div>
         </div>
-        <StatusBadge
-          v-if="vpn.serviceStatus?.installed"
-          :status="vpn.serviceStatus?.available ? 'running' : 'stopped'"
-        />
-        <StatusBadge v-else status="disconnected" />
+        <div class="flex items-center gap-3">
+          <StatusBadge :status="serviceBadgeStatus" />
+        </div>
       </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 border-t border-border pt-5 text-xs">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 border-t border-border pt-5 text-xs">
         <div>
           <p class="text-muted mb-1">Installed</p>
           <p class="text-foreground">{{ vpn.serviceStatus?.installed ? 'yes' : 'no' }}</p>
@@ -105,6 +116,14 @@ function uninstall() {
         <div>
           <p class="text-muted mb-1">Available</p>
           <p class="text-foreground">{{ vpn.serviceStatus?.available ? 'yes' : 'no' }}</p>
+        </div>
+        <div>
+          <p class="text-muted mb-1">Mode</p>
+          <p class="text-foreground">{{ vpn.serviceStatus?.mode || 'unknown' }}</p>
+        </div>
+        <div>
+          <p class="text-muted mb-1">State</p>
+          <p class="text-foreground">{{ vpn.serviceStatus?.service_state ?? '--' }}</p>
         </div>
       </div>
 

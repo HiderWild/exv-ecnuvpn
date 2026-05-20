@@ -1,4 +1,8 @@
 import httpApi from './client'
+import {
+  desktopApiPaths,
+  desktopRpcErrorCodes,
+} from '../../desktop/shared/desktop-contract'
 
 type ApiResponse<T> = Promise<{ data: T }>
 
@@ -24,24 +28,24 @@ const desktopApi = {
     if (!desktopAvailable()) return httpApi.get(path)
 
     switch (path) {
-      case '/status':
+      case desktopApiPaths.status:
         return wrap(window.ecnuVpn!.status.get()) as ApiResponse<T>
-      case '/config/auth':
+      case desktopApiPaths.configAuth:
         return wrap(window.ecnuVpn!.config.getAuth()) as ApiResponse<T>
-      case '/config/settings':
+      case desktopApiPaths.configSettings:
         return wrap(window.ecnuVpn!.config.getSettings()) as ApiResponse<T>
-      case '/config/key':
-      case '/key':
+      case desktopApiPaths.configKey:
+      case desktopApiPaths.configKeyAlias:
         return wrap(window.ecnuVpn!.config.getKey()) as ApiResponse<T>
-      case '/routes':
+      case desktopApiPaths.routes:
         return wrap(window.ecnuVpn!.routes.list()) as ApiResponse<T>
-      case '/service':
+      case desktopApiPaths.service:
         return wrap(window.ecnuVpn!.service.status()) as ApiResponse<T>
-      case '/runtime':
+      case desktopApiPaths.runtime:
         return wrap(window.ecnuVpn!.runtime.status()) as ApiResponse<T>
-      case '/drivers':
+      case desktopApiPaths.drivers:
         return wrap(window.ecnuVpn!.drivers.status()) as ApiResponse<T>
-      case '/logs':
+      case desktopApiPaths.logs:
         return wrap(window.ecnuVpn!.logs.list()) as ApiResponse<T>
       default:
         unsupported(path)
@@ -52,33 +56,35 @@ const desktopApi = {
     if (!desktopAvailable()) return httpApi.post(path, body)
 
     switch (path) {
-      case '/connect':
+      case desktopApiPaths.connect:
         return wrap(
           window.ecnuVpn!.vpn.connect(body?.password).catch((error) => {
+            const errorCode = typeof error?.code === 'string' ? error.code : ''
             const message = error?.message || String(error)
-            if (message.includes('Helper daemon is not available')) {
+            if (
+              errorCode === desktopRpcErrorCodes.helperUnavailable ||
+              message.includes('Helper daemon is not available')
+            ) {
               return window.ecnuVpn!.vpn.connectElevated(body?.password)
             }
             throw error
           }),
         ) as ApiResponse<T>
-      case '/connect/elevated':
-        return wrap(window.ecnuVpn!.vpn.connectElevated(plainPayload(body)?.password)) as ApiResponse<T>
-      case '/disconnect':
-        return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
-      case '/connect/elevated':
+      case desktopApiPaths.connectElevated:
         return wrap(window.ecnuVpn!.vpn.connectElevated(body?.password)) as ApiResponse<T>
-      case '/disconnect/elevated':
+      case desktopApiPaths.disconnect:
+        return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
+      case desktopApiPaths.disconnectElevated:
         return wrap(window.ecnuVpn!.vpn.disconnectElevated()) as ApiResponse<T>
-      case '/routes':
+      case desktopApiPaths.routes:
         return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
-      case '/routes/reset':
+      case desktopApiPaths.routesReset:
         return wrap(window.ecnuVpn!.routes.reset()) as ApiResponse<T>
-      case '/service/install':
+      case desktopApiPaths.serviceInstall:
         return wrap(window.ecnuVpn!.service.install()) as ApiResponse<T>
-      case '/service/uninstall':
+      case desktopApiPaths.serviceUninstall:
         return wrap(window.ecnuVpn!.service.uninstall()) as ApiResponse<T>
-      case '/drivers/install':
+      case desktopApiPaths.driversInstall:
         return wrap(window.ecnuVpn!.drivers.install(plainPayload(body)?.driver)) as ApiResponse<T>
       default:
         unsupported(path)
@@ -89,9 +95,9 @@ const desktopApi = {
     if (!desktopAvailable()) return httpApi.put(path, body)
 
     switch (path) {
-      case '/config/auth':
+      case desktopApiPaths.configAuth:
         return wrap(window.ecnuVpn!.config.saveAuth(plainPayload(body ?? {}))) as ApiResponse<T>
-      case '/config/settings':
+      case desktopApiPaths.configSettings:
         return wrap(window.ecnuVpn!.config.saveSettings(plainPayload(body ?? {}))) as ApiResponse<T>
       default:
         unsupported(path)
@@ -102,7 +108,7 @@ const desktopApi = {
     if (!desktopAvailable()) return httpApi.delete(path, options)
 
     switch (path) {
-      case '/routes':
+      case desktopApiPaths.routes:
         return wrap(window.ecnuVpn!.routes.remove(plainPayload(options?.data)?.cidr ?? '')) as ApiResponse<T>
       default:
         unsupported(path)

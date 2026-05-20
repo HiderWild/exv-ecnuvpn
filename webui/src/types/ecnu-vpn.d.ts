@@ -1,4 +1,8 @@
 import type {
+  DesktopDriverInstallTarget,
+  DesktopEventType,
+} from '../../desktop/shared/desktop-contract'
+import type {
   AuthConfig,
   DriverStatus,
   KeyStatus,
@@ -14,7 +18,7 @@ import type {
 } from '../stores/vpn'
 
 export interface EcnuVpnEvent {
-  type: 'log' | 'status' | 'heartbeat' | 'service-progress'
+  type: DesktopEventType
   data: unknown | ServiceProgressEntry
 }
 
@@ -75,7 +79,7 @@ export interface EcnuVpnApi {
   }
   drivers: {
     status(): Promise<DriverStatus>
-    install(driver: 'wintun' | 'tap'): Promise<DriverStatus>
+    install(driver: DesktopDriverInstallTarget): Promise<DriverStatus>
   }
   events: {
     subscribe(handler: (event: EcnuVpnEvent) => void): () => void

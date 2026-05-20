@@ -32,6 +32,7 @@ endif()
 
 # Header-only nlohmann/json
 include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/src)
 
 set(EXV_COMMON_SOURCES
     src/config.cpp
@@ -53,6 +54,8 @@ set(SOURCES
     src/app_api.cpp
     src/sse_broadcaster.cpp
     src/webui.cpp
+    src/platform/common/status_models.cpp
+    src/platform/common/runtime_status.cpp
     ${EXV_COMMON_SOURCES}
 )
 
@@ -65,17 +68,29 @@ target_link_libraries(exv PRIVATE Threads::Threads)
 # Platform-specific dependencies
 if(APPLE)
     # CommonCrypto links implicitly on macOS
-    target_sources(exv PRIVATE src/helper_daemon_mac.cpp)
+    target_sources(exv PRIVATE
+        src/helper_daemon_mac.cpp
+        src/platform/darwin/service_status.cpp
+        src/platform/common/driver_status_stub.cpp
+    )
 elseif(UNIX AND NOT APPLE)
     find_package(OpenSSL 1.1.1 REQUIRED)
     target_link_libraries(exv PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    target_sources(exv PRIVATE src/helper_daemon_linux.cpp)
+    target_sources(exv PRIVATE
+        src/helper_daemon_linux.cpp
+        src/platform/common/service_status_linux.cpp
+        src/platform/common/driver_status_stub.cpp
+    )
 elseif(WIN32)
     # AES-256-CBC and CSPRNG come from Windows CNG (bcrypt) so we no longer
     # need OpenSSL on this platform. The ~7MB libssl/libcrypto DLLs can be
     # dropped from the desktop bundle entirely.
     target_link_libraries(exv PRIVATE bcrypt advapi32 iphlpapi ws2_32)
-    target_sources(exv PRIVATE src/helper_daemon_win.cpp)
+    target_sources(exv PRIVATE
+        src/helper_daemon_win.cpp
+        src/platform/win32/service_status.cpp
+        src/platform/win32/driver_status.cpp
+    )
     add_executable(exv-helper
         src/helper_service_win.cpp
         src/helper_daemon_win.cpp
@@ -134,6 +149,18 @@ target_include_directories(vpn_runtime_test PRIVATE
 )
 
 add_test(NAME vpn_runtime_test COMMAND vpn_runtime_test)
+
+add_executable(platform_status_models_test
+    tests/platform_status_models_test.cpp
+    src/platform/common/status_models.cpp
+)
+
+target_include_directories(platform_status_models_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME platform_status_models_test COMMAND platform_status_models_test)
 
 # Install target
 if(WIN32)

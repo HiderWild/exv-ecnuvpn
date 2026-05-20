@@ -36,7 +36,7 @@ export interface KeyStatus {
 export interface RuntimeStatus {
   mode: string
   available: boolean
-  source: 'bundled' | 'system' | 'missing'
+  source: 'bundled' | 'system' | 'missing' | 'custom'
   path: string
   bundled_path: string
   system_path: string
