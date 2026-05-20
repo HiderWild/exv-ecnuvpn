@@ -1,36 +1,21 @@
 #pragma once
 
-#include <string>
-
 namespace ecnuvpn {
 namespace platform {
 
-// Returns the IPC endpoint path for the helper daemon.
-// macOS/Linux: Unix domain socket path
-// Windows: Named pipe path
-std::string helper_endpoint_path();
+struct HelperPlatformConfig {
+  const char *service_name;
+  const char *service_label;
+  const char *service_definition_path;
+  const char *endpoint;
+  const char *session_state_path;
+  const char *stable_install_path;
+  const char *default_service_binary_path;
+  const char *service_mode;
+};
 
-// Returns the session state file path.
-std::string helper_state_path();
-
-// Returns the stable installation path for the main exv binary.
-std::string stable_install_path();
-
-// Returns the stable installation path for the helper binary (Windows only).
-// On POSIX platforms, returns the same as stable_install_path().
-std::string stable_helper_install_path();
-
-// Returns the service label/name used by the platform's service manager.
-// macOS: launchd label (e.g. "com.ecnu.exv.helper")
-// Linux: systemd service name (e.g. "exv-helper")
-// Windows: service name (e.g. "exv-helper")
-std::string helper_service_label();
-
-// Returns the service configuration file path (POSIX only).
-// macOS: plist path
-// Linux: systemd unit path
-// Windows: empty string (SCM doesn't use a config file)
-std::string helper_service_config_path();
+const HelperPlatformConfig &helper_platform_config();
+void wake_helper_daemon_for_shutdown();
 
 } // namespace platform
 } // namespace ecnuvpn

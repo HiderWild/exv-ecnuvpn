@@ -122,6 +122,18 @@ for dylib in "$OUT_DIR/"*.dylib; do
   done
 done
 
+# install_name_tool mutates Mach-O load commands, which invalidates the source
+# code signature. On Apple Silicon and recent macOS releases an invalid Mach-O
+# signature can cause the kernel to SIGKILL the binary at exec time. Re-sign the
+# staged runtime ad-hoc so the bundled openconnect can run from Electron.
+echo "Ad-hoc signing staged Mach-O files..."
+for binary in "$OUT_DIR/"*.dylib "$OUT_DIR/openconnect"; do
+  [[ -f "$binary" ]] || continue
+  chmod +w "$binary"
+  codesign --force --sign - "$binary" >/dev/null
+  codesign --verify --strict "$binary" >/dev/null
+done
+
 echo ""
 echo "Staged contents:"
 find "$OUT_DIR" -type f | sort | while read -r f; do

@@ -1,21 +1,22 @@
 #include "platform/common/service_status.hpp"
 
 #include "helper.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "utils.hpp"
 
 namespace ecnuvpn {
 namespace platform {
 
 ServiceStatusSnapshot current_service_status() {
+  const auto &config = helper_platform_config();
   ServiceStatusSnapshot status;
-  status.installed =
-      utils::file_exists("/etc/systemd/system/exv-helper.service");
+  status.installed = utils::file_exists(config.service_definition_path);
   status.available = helper::is_available();
   status.running = status.available;
-  status.mode = "systemd";
-  status.path = "/usr/local/bin/exv";
-  status.endpoint = "/var/run/exv-helper.sock";
-  status.label = "exv-helper.service";
+  status.mode = config.service_mode;
+  status.path = config.default_service_binary_path;
+  status.endpoint = config.endpoint;
+  status.label = config.service_label;
   return status;
 }
 

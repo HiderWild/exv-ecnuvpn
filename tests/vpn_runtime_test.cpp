@@ -1,7 +1,6 @@
 #include "utils.hpp"
 #include "vpn.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 
@@ -131,6 +130,8 @@ int main() {
   ecnuvpn::utils::set_runtime_path_override(temp_root.string(),
                                             temp_root.string());
 
+  const auto empty_snapshot = ecnuvpn::vpn::read_runtime_status_snapshot();
+
   ecnuvpn::utils::write_file(ecnuvpn::utils::get_pid_path(),
                              std::to_string(current_process_id()));
   ecnuvpn::utils::write_file(ecnuvpn::utils::get_supervisor_pid_path(),
@@ -141,6 +142,8 @@ int main() {
   const auto snapshot = ecnuvpn::vpn::read_runtime_status_snapshot();
 
   bool ok = true;
+  ok = expect(!empty_snapshot.running,
+              "snapshot should stay disconnected without managed pid files") && ok;
   ok = expect(snapshot.running, "snapshot should report a running session") && ok;
   ok = expect(snapshot.pid == current_process_id(), "snapshot should use the live PID file") && ok;
   ok = expect(snapshot.supervisor_pid == current_process_id(), "snapshot should use the live supervisor PID file") && ok;
@@ -154,17 +157,34 @@ int main() {
   if (process.pid > 0) {
     ecnuvpn::utils::write_file(ecnuvpn::utils::get_pid_path(),
                                std::to_string(process.pid));
+    ecnuvpn::utils::write_file(ecnuvpn::utils::get_supervisor_pid_path(),
+                               std::to_string(process.pid));
     ecnuvpn::utils::write_file(ecnuvpn::utils::get_route_ready_path(),
                                "utun11\n10.0.0.9\n");
 
-    ok = expect(ecnuvpn::vpn::stop_direct_session(),
-                "direct stop should succeed for a live pid file") && ok;
-    ok = expect(!is_dummy_process_alive(process),
-                "direct stop should terminate the dummy process") && ok;
-    ok = expect(!ecnuvpn::utils::file_exists(ecnuvpn::utils::get_pid_path()),
-                "direct stop should remove the pid file") && ok;
-    ok = expect(!ecnuvpn::utils::file_exists(ecnuvpn::utils::get_route_ready_path()),
-                "direct stop should remove the route-ready file") && ok;
+    const auto live_dummy_snapshot =
+        ecnuvpn::vpn::read_runtime_status_snapshot();
+    ok = expect(live_dummy_snapshot.running,
+                "snapshot should report a running dummy session") && ok;
+    ok = expect(live_dummy_snapshot.pid == process.pid,
+                "snapshot should use the live dummy pid file") && ok;
+    ok = expect(live_dummy_snapshot.supervisor_pid == process.pid,
+                "snapshot should use the live dummy supervisor pid file") && ok;
+    ok = expect(live_dummy_snapshot.interface_name == "utun11",
+                "snapshot should update the interface name for dummy sessions") && ok;
+    ok = expect(live_dummy_snapshot.internal_ip == "10.0.0.9",
+                "snapshot should update the internal IP for dummy sessions") && ok;
+
+    cleanup_dummy_process(&process);
+
+    const auto stale_dummy_snapshot =
+        ecnuvpn::vpn::read_runtime_status_snapshot();
+    ok = expect(!stale_dummy_snapshot.running,
+                "snapshot should treat stale dummy pid files as disconnected") && ok;
+    ok = expect(stale_dummy_snapshot.pid == -1,
+                "snapshot should clear stale dummy pid values") && ok;
+    ok = expect(stale_dummy_snapshot.supervisor_pid == -1,
+                "snapshot should clear stale dummy supervisor pid values") && ok;
   }
 
   ecnuvpn::utils::clear_runtime_path_override();

@@ -2,6 +2,9 @@
 #include "config.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
+#include "platform/common/openconnect_process.hpp"
+#include "platform/common/process_control.hpp"
+#include "platform/common/vpn_supervisor_process.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
@@ -16,8 +19,8 @@
 #include <sstream>
 #include <vector>
 #ifndef _WIN32
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #else
 #include <windows.h>
 #ifdef _MSC_VER
@@ -113,68 +116,26 @@ static void clear_runtime_state() {
 }
 
 static bool is_process_alive(pid_t pid) {
-  if (pid <= 0)
-    return false;
-#ifndef _WIN32
-  if (kill(pid, 0) == 0)
-    return true;
-  return errno == EPERM;
-#else
-  HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                                static_cast<DWORD>(pid));
-  if (!hProcess)
-    return false;
-  DWORD exitCode = 0;
-  BOOL ok = GetExitCodeProcess(hProcess, &exitCode);
-  CloseHandle(hProcess);
-  return ok && exitCode == STILL_ACTIVE;
-#endif
+  return platform::is_process_alive(static_cast<int>(pid));
 }
 
 static pid_t find_openconnect_pid() {
-#ifndef _WIN32
-  std::string output = utils::run_command_output("pgrep -x openconnect");
-  output = utils::trim(output);
-  if (output.empty())
-    return -1;
-  try {
-    return static_cast<pid_t>(std::stoi(output));
-  } catch (...) {
-    return -1;
-  }
-#else
-  std::string output = utils::run_command_output(
-      "tasklist /FI \"IMAGENAME eq openconnect.exe\" /NH /FO CSV 2>nul");
-  // Parse CSV: "openconnect.exe","1234","Console","1","4,096 K"
-  auto start = output.find('"', output.find(',') + 1);
-  if (start == std::string::npos)
-    return -1;
-  auto end = output.find('"', start + 1);
-  if (end == std::string::npos)
-    return -1;
-  std::string pid_str = output.substr(start + 1, end - start - 1);
-  try {
-    return static_cast<pid_t>(std::stoi(pid_str));
-  } catch (...) {
-    return -1;
-  }
-#endif
+  return static_cast<pid_t>(platform::find_openconnect_pid());
+}
+
+static void terminate_process(pid_t pid, bool force) {
+  platform::terminate_process(static_cast<int>(pid), force);
+}
+
+static void sleep_ms(unsigned int milliseconds) {
+  platform::sleep_ms(milliseconds);
 }
 
 static void handle_supervisor_signal(int) {
   supervisor_stop_requested = 1;
   pid_t child_pid = supervisor_child_pid;
   if (child_pid > 0) {
-#ifndef _WIN32
-    kill(child_pid, SIGTERM);
-#else
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(child_pid));
-    if (h) {
-      TerminateProcess(h, 1);
-      CloseHandle(h);
-    }
-#endif
+    terminate_process(child_pid, false);
   }
 }
 
@@ -182,320 +143,6 @@ static std::string describe_retry_policy(int retry_limit) {
   return retry_limit < 0 ? std::string("infinite")
                          : std::to_string(retry_limit) + " retries";
 }
-
-#ifdef _WIN32
-static std::string windows_generated_interface_name(const Config &cfg) {
-  std::ostringstream seed;
-  seed << cfg.username << "@" << cfg.server;
-  std::size_t hash = std::hash<std::string>{}(seed.str());
-  std::ostringstream name;
-  name << "ECNUVPN-" << std::uppercase << std::hex
-       << static_cast<unsigned long long>(hash & 0xffffffffULL);
-  return name.str();
-}
-
-static std::string select_windows_interface_name(const Config &cfg) {
-  if (cfg.windows_tunnel_driver == "tap")
-    return cfg.windows_tap_interface;
-
-  if (cfg.windows_tunnel_driver == "wintun")
-    return windows_generated_interface_name(cfg);
-
-  if (!utils::get_bundled_wintun_path().empty())
-    return windows_generated_interface_name(cfg);
-
-  return cfg.windows_tap_interface;
-}
-#endif
-
-#ifndef _WIN32
-static std::string build_openconnect_command(const Config &cfg,
-                                             const std::string &password) {
-  std::ostringstream cmd;
-  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
-  std::string heredoc_marker = "__EXV_PASSWORD_EOF__";
-  while (password.find(heredoc_marker) != std::string::npos) {
-    heredoc_marker += "_X";
-  }
-
-  cmd << "exec "
-      << utils::shell_quote(openconnect_path.empty() ? std::string("openconnect")
-                                                     : openconnect_path)
-      << " " << utils::shell_quote(cfg.server)
-      << " --useragent "
-      << utils::shell_quote(cfg.useragent) << " -m " << cfg.mtu << " -u "
-      << utils::shell_quote(cfg.username) << " --passwd-on-stdin"
-      << " --script " << utils::shell_quote(utils::get_tunnel_path());
-
-  if (cfg.disable_dtls) {
-    cmd << " --no-dtls";
-  }
-
-  for (const auto &arg : cfg.extra_args) {
-    cmd << " " << utils::shell_quote(arg);
-  }
-
-  cmd << " <<'" << heredoc_marker << "' >> "
-      << utils::shell_quote(utils::expand_home(cfg.log_file)) << " 2>&1\n"
-      << password << "\n" << heredoc_marker;
-  return cmd.str();
-}
-#else
-static std::string windows_quote_arg(const std::string &value) {
-  if (value.empty())
-    return "\"\"";
-  bool needs_quotes = value.find_first_of(" 	\"") != std::string::npos;
-  if (!needs_quotes)
-    return value;
-
-  std::string quoted = "\"";
-  unsigned int backslashes = 0;
-  for (char c : value) {
-    if (c == '\\') {
-      ++backslashes;
-      continue;
-    }
-    if (c == '"') {
-      quoted.append(backslashes * 2 + 1, '\\');
-      quoted.push_back('"');
-      backslashes = 0;
-      continue;
-    }
-    quoted.append(backslashes, '\\');
-    backslashes = 0;
-    quoted.push_back(c);
-  }
-  quoted.append(backslashes * 2, '\\');
-  quoted.push_back('"');
-  return quoted;
-}
-
-static std::string build_openconnect_command_line(const Config &cfg) {
-  std::vector<std::string> args;
-  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
-  args.push_back(openconnect_path.empty() ? std::string("openconnect.exe")
-                                    : openconnect_path);
-  args.push_back(cfg.server);
-  args.push_back("--useragent");
-  args.push_back(cfg.useragent);
-  args.push_back("-m");
-  args.push_back(std::to_string(cfg.mtu));
-  args.push_back("-u");
-  args.push_back(cfg.username);
-  args.push_back("--passwd-on-stdin");
-  args.push_back("--script");
-  args.push_back(utils::get_tunnel_path());
-  std::string interface_name = select_windows_interface_name(cfg);
-  if (!interface_name.empty()) {
-    args.push_back("--interface");
-    args.push_back(interface_name);
-  }
-  if (cfg.disable_dtls) {
-    args.push_back("--no-dtls");
-  }
-  for (const auto &arg : cfg.extra_args) {
-    args.push_back(arg);
-  }
-
-  std::ostringstream cmd;
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    if (i)
-      cmd << ' ';
-    cmd << windows_quote_arg(args[i]);
-  }
-  return cmd.str();
-}
-
-static HANDLE open_inheritable_append_handle(const std::string &path) {
-  std::error_code ec;
-  std::filesystem::path parent = std::filesystem::path(path).parent_path();
-  if (!parent.empty())
-    std::filesystem::create_directories(parent, ec);
-
-  SECURITY_ATTRIBUTES sa = {};
-  sa.nLength = sizeof(sa);
-  sa.bInheritHandle = TRUE;
-  HANDLE h = CreateFileA(path.c_str(), FILE_APPEND_DATA | GENERIC_WRITE,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS,
-                         FILE_ATTRIBUTE_NORMAL, NULL);
-  if (h != INVALID_HANDLE_VALUE)
-    SetFilePointer(h, 0, NULL, FILE_END);
-  return h;
-}
-
-static HANDLE open_inheritable_null_handle(DWORD access) {
-  SECURITY_ATTRIBUTES sa = {};
-  sa.nLength = sizeof(sa);
-  sa.bInheritHandle = TRUE;
-  return CreateFileA("NUL", access, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-}
-
-static bool launch_openconnect_process(const Config &cfg,
-                                       const std::string &password,
-                                       pid_t *pid,
-                                       HANDLE *process_handle) {
-  if (pid)
-    *pid = -1;
-  if (process_handle)
-    *process_handle = NULL;
-
-  SECURITY_ATTRIBUTES sa = {};
-  sa.nLength = sizeof(sa);
-  sa.bInheritHandle = TRUE;
-  HANDLE stdin_read = NULL;
-  HANDLE stdin_write = NULL;
-  if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
-    logger::error("Failed to create password pipe for openconnect.");
-    return false;
-  }
-  SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
-
-  std::string log_path = utils::expand_home(cfg.log_file);
-  HANDLE log_handle = open_inheritable_append_handle(log_path);
-  if (log_handle == INVALID_HANDLE_VALUE) {
-    CloseHandle(stdin_read);
-    CloseHandle(stdin_write);
-    logger::error("Failed to open VPN log file for Windows launch: " + log_path);
-    return false;
-  }
-
-  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
-  if (openconnect_path.empty()) {
-    CloseHandle(stdin_read);
-    CloseHandle(stdin_write);
-    CloseHandle(log_handle);
-    logger::error("Bundled/system openconnect binary could not be resolved.");
-    return false;
-  }
-  std::string cmdline = build_openconnect_command_line(cfg);
-  std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
-  mutable_cmd.push_back('\0');
-  std::string current_dir =
-      std::filesystem::path(openconnect_path).parent_path().string();
-
-  STARTUPINFOA si = {};
-  si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdInput = stdin_read;
-  si.hStdOutput = log_handle;
-  si.hStdError = log_handle;
-  PROCESS_INFORMATION pi = {};
-  BOOL created = CreateProcessA(openconnect_path.c_str(), mutable_cmd.data(),
-                                NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
-                                current_dir.empty() ? NULL : current_dir.c_str(),
-                                &si, &pi);
-  CloseHandle(stdin_read);
-  CloseHandle(log_handle);
-  if (!created) {
-    CloseHandle(stdin_write);
-    logger::error("Failed to create openconnect process: " +
-                  std::to_string(GetLastError()));
-    return false;
-  }
-
-  std::string stdin_payload = password;
-  stdin_payload.push_back('\n');
-  DWORD written = 0;
-  BOOL wrote = WriteFile(stdin_write, stdin_payload.data(),
-                        static_cast<DWORD>(stdin_payload.size()), &written, NULL);
-  CloseHandle(pi.hThread);
-  if (!wrote) {
-    CloseHandle(stdin_write);
-    TerminateProcess(pi.hProcess, 1);
-    CloseHandle(pi.hProcess);
-    logger::error("Failed to write password to openconnect stdin.");
-    return false;
-  }
-
-  // Keep the write end open while openconnect is running. On Windows,
-  // openconnect later spawns the tunnel script; closing stdin immediately can
-  // leave cscript.exe with an invalid inherited standard input handle.
-
-  if (pid)
-    *pid = static_cast<pid_t>(pi.dwProcessId);
-  if (process_handle)
-    *process_handle = pi.hProcess;
-  else
-    CloseHandle(pi.hProcess);
-  return true;
-}
-
-static bool launch_supervisor_process(const Config &cfg,
-                                      const std::string &password,
-                                      int retry_limit,
-                                      pid_t *pid) {
-  if (pid)
-    *pid = -1;
-
-  nlohmann::json request{{"config", cfg},
-                         {"password", password},
-                         {"retry_limit", retry_limit},
-                         {"home", utils::get_effective_home()},
-                         {"config_dir", utils::get_config_dir()}};
-  std::string payload = request.dump();
-
-  SECURITY_ATTRIBUTES sa = {};
-  sa.nLength = sizeof(sa);
-  sa.bInheritHandle = TRUE;
-  HANDLE stdin_read = NULL;
-  HANDLE stdin_write = NULL;
-  if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
-    logger::error("Failed to create Windows supervisor pipe.");
-    return false;
-  }
-  SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
-
-  HANDLE null_handle = open_inheritable_null_handle(GENERIC_WRITE);
-  if (null_handle == INVALID_HANDLE_VALUE) {
-    CloseHandle(stdin_read);
-    CloseHandle(stdin_write);
-    logger::error("Failed to open NUL handle for Windows supervisor.");
-    return false;
-  }
-
-  std::string exec_path = utils::get_executable_path();
-  std::string cmdline = windows_quote_arg(exec_path) + " __vpn-supervisor";
-  std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
-  mutable_cmd.push_back('\0');
-
-  STARTUPINFOA si = {};
-  si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdInput = stdin_read;
-  si.hStdOutput = null_handle;
-  si.hStdError = null_handle;
-  PROCESS_INFORMATION pi = {};
-  BOOL created = CreateProcessA(exec_path.c_str(), mutable_cmd.data(), NULL,
-                                NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL,
-                                &si, &pi);
-  CloseHandle(stdin_read);
-  CloseHandle(null_handle);
-  if (!created) {
-    CloseHandle(stdin_write);
-    logger::error("Failed to create reconnect supervisor process: " +
-                  std::to_string(GetLastError()));
-    return false;
-  }
-
-  DWORD written = 0;
-  BOOL wrote = WriteFile(stdin_write, payload.data(),
-                        static_cast<DWORD>(payload.size()), &written, NULL);
-  CloseHandle(stdin_write);
-  CloseHandle(pi.hThread);
-  if (!wrote) {
-    TerminateProcess(pi.hProcess, 1);
-    CloseHandle(pi.hProcess);
-    logger::error("Failed to send startup payload to Windows reconnect supervisor.");
-    return false;
-  }
-
-  if (pid)
-    *pid = static_cast<pid_t>(pi.dwProcessId);
-  CloseHandle(pi.hProcess);
-  return true;
-}
-#endif
 
 static int run_supervisor(const Config &cfg, const std::string &password,
                           int retry_limit) {
@@ -533,32 +180,15 @@ static int run_supervisor(const Config &cfg, const std::string &password,
     }
 
     pid_t child_pid = -1;
-#ifndef _WIN32
-    child_pid = fork();
-    if (child_pid < 0) {
-      logger::error("Failed to fork openconnect child process");
+    platform::OpenconnectProcess child_process;
+    if (!platform::spawn_openconnect_process(cfg, password, &child_process)) {
       if (first_attempt) {
         clear_runtime_state();
         return 1;
       }
       continue;
     }
-
-    if (child_pid == 0) {
-      std::string cmd = build_openconnect_command(cfg, password);
-      execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char *>(nullptr));
-      _exit(127);
-    }
-#else
-    HANDLE child_handle = NULL;
-    if (!launch_openconnect_process(cfg, password, &child_pid, &child_handle)) {
-      if (first_attempt) {
-        clear_runtime_state();
-        return 1;
-      }
-      continue;
-    }
-#endif
+    child_pid = static_cast<pid_t>(child_process.pid);
 
     supervisor_child_pid = child_pid;
     write_pid(child_pid);
@@ -599,7 +229,7 @@ static int run_supervisor(const Config &cfg, const std::string &password,
     }
 #else
     DWORD child_exit_code = 1;
-    HANDLE hChild = child_handle;
+    HANDLE hChild = static_cast<HANDLE>(child_process.wait_handle);
     while (true) {
       if (!hChild) {
         logger::error("Invalid Windows openconnect process handle while supervising.");
@@ -632,8 +262,8 @@ static int run_supervisor(const Config &cfg, const std::string &password,
     }
     if (hChild) {
       GetExitCodeProcess(hChild, &child_exit_code);
-      CloseHandle(hChild);
     }
+    platform::close_openconnect_process(&child_process);
 #endif
 
     if (!route_ready_logged) {
@@ -946,29 +576,16 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
 
   if (!use_supervisor) {
     pid_t child_pid = -1;
-#ifndef _WIN32
-    child_pid = fork();
-    if (child_pid < 0) {
+    platform::OpenconnectProcess child_process;
+    if (!platform::spawn_openconnect_process(cfg, plaintext_password,
+                                             &child_process)) {
       utils::print_error("Failed to launch openconnect process.");
-      logger::error("Failed to fork openconnect process");
+      logger::error("Failed to spawn openconnect process");
       return 1;
     }
-
-    if (child_pid == 0) {
-      std::string cmd = build_openconnect_command(cfg, plaintext_password);
-      execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char *>(nullptr));
-      _exit(127);
-    }
-#else
-    HANDLE child_handle = NULL;
-    if (!launch_openconnect_process(cfg, plaintext_password, &child_pid,
-                                   &child_handle)) {
-      utils::print_error("Failed to launch openconnect process.");
-      logger::error("Failed to create openconnect process");
-      return 1;
-    }
-    if (child_handle)
-      CloseHandle(child_handle);
+    child_pid = static_cast<pid_t>(child_process.pid);
+#ifdef _WIN32
+    platform::close_openconnect_process(&child_process);
 #endif
 
     write_pid(child_pid);
@@ -1031,31 +648,15 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   }
 
   supervisor_pid = -1;
-#ifndef _WIN32
-  supervisor_pid = fork();
-  if (supervisor_pid < 0) {
+  int spawned_supervisor_pid = -1;
+  if (!platform::spawn_vpn_supervisor_process(cfg, plaintext_password,
+                                              retry_limit, run_supervisor,
+                                              &spawned_supervisor_pid)) {
     utils::print_error("Failed to launch reconnect supervisor.");
-    logger::error("Failed to fork reconnect supervisor");
+    logger::error("Failed to spawn reconnect supervisor process");
     return 1;
   }
-
-  if (supervisor_pid == 0) {
-    if (setsid() < 0) {
-      logger::error("Failed to detach reconnect supervisor session");
-      _exit(1);
-    }
-    write_supervisor_pid(getpid());
-    int result = run_supervisor(cfg, plaintext_password, retry_limit);
-    _exit(result == 0 ? 0 : 1);
-  }
-#else
-  if (!launch_supervisor_process(cfg, plaintext_password, retry_limit,
-                                 &supervisor_pid)) {
-    utils::print_error("Failed to launch reconnect supervisor.");
-    logger::error("Failed to create reconnect supervisor process");
-    return 1;
-  }
-#endif
+  supervisor_pid = static_cast<pid_t>(spawned_supervisor_pid);
 
   write_supervisor_pid(supervisor_pid);
 
@@ -1147,6 +748,56 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   return 0;
 }
 
+bool stop_direct_session() {
+  pid_t supervisor_pid = read_supervisor_pid();
+  if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
+    remove_supervisor_pid();
+    supervisor_pid = -1;
+  }
+
+  pid_t pid = read_pid();
+  if (pid <= 0 || !is_process_alive(pid)) {
+    remove_pid();
+    pid = -1;
+  }
+
+  if (pid <= 0 && supervisor_pid <= 0) {
+    clear_runtime_state();
+    return true;
+  }
+
+// Clean up routes before killing openconnect — while the tunnel
+  // interface is still valid, route deletion is more reliable.
+  // On Windows, tunnel::cleanup_routes() is a no-op.
+  tunnel::cleanup_routes();
+
+  if (supervisor_pid > 0)
+    terminate_process(supervisor_pid, false);
+  if (pid > 0)
+    terminate_process(pid, false);
+
+  for (int i = 0; i < 10; ++i) {
+    sleep_ms(300);
+    if ((pid <= 0 || !is_process_alive(pid)) &&
+        (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))) {
+      break;
+    }
+  }
+
+  if (pid > 0 && is_process_alive(pid))
+    terminate_process(pid, true);
+  if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
+    terminate_process(supervisor_pid, true);
+
+  if ((pid > 0 && is_process_alive(pid)) ||
+      (supervisor_pid > 0 && is_process_alive(supervisor_pid))) {
+    return false;
+  }
+
+  clear_runtime_state();
+  return true;
+}
+
 int stop() {
   utils::print_header("EXV Stopping");
 
@@ -1195,40 +846,22 @@ int stop() {
     utils::print_info("Found reconnect supervisor: PID " +
                       std::to_string(supervisor_pid));
   }
-  utils::print_info("Sending SIGTERM...");
+  utils::print_info("Stopping VPN...");
   logger::info("Stopping VPN, PID: " + std::to_string(pid) +
                ", supervisor PID: " + std::to_string(supervisor_pid));
 
   // Clean up routes before killing openconnect — while the tunnel
   // interface is still valid, route deletion is more reliable.
-#ifndef _WIN32
+  // On Windows, tunnel::cleanup_routes() is a no-op.
   tunnel::cleanup_routes();
-#endif
 
-#ifndef _WIN32
   if (supervisor_pid > 0)
-    kill(supervisor_pid, SIGTERM);
+    terminate_process(supervisor_pid, false);
   if (pid > 0)
-    kill(pid, SIGTERM);
-#else
-  if (supervisor_pid > 0) {
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(supervisor_pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-  }
-  if (pid > 0) {
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-  }
-#endif
+    terminate_process(pid, false);
 
   for (int i = 0; i < 10; ++i) {
-#ifndef _WIN32
-    usleep(300000);
-#else
-    Sleep(300);
-#endif
+    sleep_ms(300);
     if ((pid <= 0 || !is_process_alive(pid)) &&
         (supervisor_pid <= 0 || !is_process_alive(supervisor_pid))) {
       break;
@@ -1236,44 +869,21 @@ int stop() {
   }
 
   if (pid > 0 && is_process_alive(pid)) {
-    utils::print_warning("openconnect still running, sending SIGKILL...");
-#ifndef _WIN32
-    kill(pid, SIGKILL);
-#else
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-#endif
+    utils::print_warning("openconnect still running, force terminating...");
+    terminate_process(pid, true);
   }
   if (supervisor_pid > 0 && is_process_alive(supervisor_pid)) {
-    utils::print_warning("Reconnect supervisor still running, sending SIGKILL...");
-#ifndef _WIN32
-    kill(supervisor_pid, SIGKILL);
-#else
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(supervisor_pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-#endif
+    utils::print_warning("Reconnect supervisor still running, force terminating...");
+    terminate_process(supervisor_pid, true);
   }
 
-#ifndef _WIN32
-  usleep(500000);
-#else
-  Sleep(500);
-#endif
+  sleep_ms(500);
 
   pid_t remaining_pid = find_openconnect_pid();
   if (remaining_pid > 0 && remaining_pid != pid) {
-    utils::print_warning("Detected remaining openconnect process, sending SIGKILL...");
-#ifndef _WIN32
-    kill(remaining_pid, SIGKILL);
-    usleep(500000);
-#else
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                           static_cast<DWORD>(remaining_pid));
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-    Sleep(500);
-#endif
+    utils::print_warning("Detected remaining openconnect process, force terminating...");
+    terminate_process(remaining_pid, true);
+    sleep_ms(500);
   }
 
   if ((pid > 0 && is_process_alive(pid)) ||

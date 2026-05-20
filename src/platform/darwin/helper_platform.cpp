@@ -3,29 +3,21 @@
 namespace ecnuvpn {
 namespace platform {
 
-std::string helper_endpoint_path() {
-  return "/var/run/exv-helper.sock";
+const HelperPlatformConfig &helper_platform_config() {
+  static const HelperPlatformConfig config{
+      "com.ecnu.exv.helper",
+      "com.ecnu.exv.helper",
+      "/Library/LaunchDaemons/com.ecnu.exv.helper.plist",
+      "/var/run/exv-helper.sock",
+      "/var/run/exv-helper-session.json",
+      "/usr/local/bin/exv",
+      "/usr/local/bin/exv",
+      "launchd",
+  };
+  return config;
 }
 
-std::string helper_state_path() {
-  return "/var/run/exv-helper-session.json";
-}
-
-std::string stable_install_path() {
-  return "/usr/local/bin/exv";
-}
-
-std::string stable_helper_install_path() {
-  return "/usr/local/bin/exv";
-}
-
-std::string helper_service_label() {
-  return "com.ecnu.exv.helper";
-}
-
-std::string helper_service_config_path() {
-  return "/Library/LaunchDaemons/com.ecnu.exv.helper.plist";
-}
+void wake_helper_daemon_for_shutdown() {}
 
 } // namespace platform
 } // namespace ecnuvpn

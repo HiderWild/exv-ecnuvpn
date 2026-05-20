@@ -2,7 +2,7 @@
 
 #include "config.hpp"
 
-#include <nlohmann/json.hpp>
+#include <string>
 
 namespace ecnuvpn {
 namespace vpn {
@@ -35,14 +35,6 @@ int stop();
 
 // Show VPN status
 int status();
-
-// Direct-mode API: structured JSON variants for desktop RPC.
-// These bypass the helper daemon and read/act on state directly.
-nlohmann::json direct_status_json(const Config &cfg);
-nlohmann::json direct_stop_json(const Config &cfg);
-nlohmann::json direct_start_json(const Config &cfg,
-                                 const std::string &plaintext_password,
-                                 int retry_limit = 0);
 
 } // namespace vpn
 } // namespace ecnuvpn

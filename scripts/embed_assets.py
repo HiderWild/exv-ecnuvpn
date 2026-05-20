@@ -13,8 +13,9 @@ Generates src/webui_assets.hpp with:
 import os
 import sys
 
-DIST_DIR = os.path.join(os.path.dirname(__file__), "..", "webui", "dist")
-OUTPUT = os.path.join(os.path.dirname(__file__), "..", "src", "webui_assets.hpp")
+SCRIPT_DIR = os.path.dirname(__file__)
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+OUTPUT = os.path.join(REPO_ROOT, "src", "webui_assets.hpp")
 
 MIME_TYPES = {
     ".html": "text/html",
@@ -32,6 +33,48 @@ MIME_TYPES = {
 TEXT_EXTENSIONS = {".html", ".css", ".js", ".json", ".svg"}
 
 
+def build_platform():
+    raw = (os.environ.get("ECNUVPN_BUILD_PLATFORM") or sys.platform).lower()
+    mapping = {
+        "win32": "windows",
+        "windows": "windows",
+        "darwin": "macos",
+        "mac": "macos",
+        "macos": "macos",
+        "linux": "linux",
+    }
+    return mapping.get(raw, raw)
+
+
+def candidate_dist_dirs():
+    candidates = []
+
+    override = os.environ.get("ECNUVPN_WEBUI_DIST_DIR")
+    if override:
+        candidates.append(os.path.abspath(override))
+
+    candidates.append(
+        os.path.join(REPO_ROOT, "build", build_platform(), "electron", "dist")
+    )
+    candidates.append(os.path.join(REPO_ROOT, "webui", "dist"))
+
+    unique_candidates = []
+    for path in candidates:
+        normalized = os.path.normpath(path)
+        if normalized not in unique_candidates:
+            unique_candidates.append(normalized)
+
+    return unique_candidates
+
+
+def resolve_dist_dir():
+    for path in candidate_dist_dirs():
+        if os.path.isdir(path):
+            return path
+
+    return candidate_dist_dirs()[0]
+
+
 def mime_type(path):
     _, ext = os.path.splitext(path)
     return MIME_TYPES.get(ext.lower(), "application/octet-stream")
@@ -44,8 +87,7 @@ def is_text(path):
 
 def safe_var_name(path):
     """Convert a filesystem path to a valid C++ identifier."""
-    rel = os.path.relpath(path, DIST_DIR)
-    name = rel.replace("/", "_").replace(".", "_").replace("-", "_")
+    name = path.replace("\\", "_").replace("/", "_").replace(".", "_").replace("-", "_")
     return name
 
 
@@ -65,13 +107,13 @@ def sanitize_for_raw_string(content):
         i += 1
 
 
-def collect_files():
-    """Walk DIST_DIR and return [(rel_path, abs_path), ...] sorted by rel_path."""
+def collect_files(dist_dir):
+    """Walk dist_dir and return [(rel_path, abs_path), ...] sorted by rel_path."""
     files = []
-    for root, _, filenames in os.walk(DIST_DIR):
+    for root, _, filenames in os.walk(dist_dir):
         for fn in filenames:
             abs_path = os.path.join(root, fn)
-            rel_path = os.path.relpath(abs_path, DIST_DIR)
+            rel_path = os.path.relpath(abs_path, dist_dir)
             files.append((rel_path, abs_path))
     files.sort(key=lambda x: x[0])
     return files
@@ -188,16 +230,17 @@ def generate_header(files):
 
 
 def main():
-    if not os.path.isdir(DIST_DIR):
-        print(f"Error: dist directory not found at {DIST_DIR}", file=sys.stderr)
-        print("The frontend must be built before the native binary can be compiled.", file=sys.stderr)
-        print("Build the frontend first: cd webui && npm install && npm run build", file=sys.stderr)
-        print("Then rebuild the native binary.", file=sys.stderr)
+    dist_dir = resolve_dist_dir()
+    if not os.path.isdir(dist_dir):
+        print("Error: dist directory not found in any expected location:", file=sys.stderr)
+        for path in candidate_dist_dirs():
+            print(f"  - {path}", file=sys.stderr)
+        print("Build the frontend first: cd webui && npm run build", file=sys.stderr)
         sys.exit(1)
 
-    files = collect_files()
+    files = collect_files(dist_dir)
     if not files:
-        print(f"Error: no files found in {DIST_DIR}", file=sys.stderr)
+        print(f"Error: no files found in {dist_dir}", file=sys.stderr)
         sys.exit(1)
 
     content = generate_header(files)

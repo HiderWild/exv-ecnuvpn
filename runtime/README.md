@@ -1,6 +1,7 @@
 # Bundled OpenConnect Runtime
 
-Place desktop runtime assets here before running `npm run desktop:build`.
+Place desktop runtime assets here before running `npm run desktop:build` or
+`npm run desktop:debug`.
 
 Supported layouts:
 
@@ -36,10 +37,10 @@ Recommended macOS contents:
 macOS staging example (Homebrew openconnect):
 
 ```bash
-# Stage from Homebrew prefix (auto-detects arch)
-./scripts/stage-openconnect-runtime-mac.sh /opt/homebrew/bin arm64
+# Stage from the Homebrew openconnect binary (Apple Silicon)
+bash ./scripts/stage-openconnect-runtime-mac.sh /opt/homebrew/bin/openconnect arm64
 # or for Intel Macs:
-./scripts/stage-openconnect-runtime-mac.sh /usr/local/bin x64
+bash ./scripts/stage-openconnect-runtime-mac.sh /usr/local/bin/openconnect x64
 ```
 
 The script copies `openconnect` and all adjacent `.dylib` files into

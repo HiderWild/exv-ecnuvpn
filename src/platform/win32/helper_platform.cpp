@@ -1,30 +1,35 @@
 #include "platform/common/helper_platform.hpp"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 namespace ecnuvpn {
 namespace platform {
 
-std::string helper_endpoint_path() {
-  return "\\\\.\\pipe\\exv-helper";
+const HelperPlatformConfig &helper_platform_config() {
+  static const HelperPlatformConfig config{
+      "exv-helper",
+      "exv-helper",
+      "",
+      "\\\\.\\pipe\\exv-helper",
+      "C:\\ProgramData\\exv-helper-session.json",
+      "C:\\Program Files\\ECNU-VPN\\exv.exe",
+      "C:\\Program Files\\ECNU-VPN\\exv-helper.exe",
+      "windows-service",
+  };
+  return config;
 }
 
-std::string helper_state_path() {
-  return "C:\\ProgramData\\exv-helper-session.json";
-}
-
-std::string stable_install_path() {
-  return "C:\\Program Files\\ECNU-VPN\\exv.exe";
-}
-
-std::string stable_helper_install_path() {
-  return "C:\\Program Files\\ECNU-VPN\\exv-helper.exe";
-}
-
-std::string helper_service_label() {
-  return "exv-helper";
-}
-
-std::string helper_service_config_path() {
-  return "";
+void wake_helper_daemon_for_shutdown() {
+  const auto &config = helper_platform_config();
+  if (WaitNamedPipeA(config.endpoint, 200)) {
+    HANDLE hPipe = CreateFileA(config.endpoint, GENERIC_READ | GENERIC_WRITE, 0,
+                               NULL, OPEN_EXISTING, 0, NULL);
+    if (hPipe != INVALID_HANDLE_VALUE)
+      CloseHandle(hPipe);
+  }
 }
 
 } // namespace platform

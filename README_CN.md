@@ -37,17 +37,42 @@
 ```bash
 git clone <repo>
 cd ECNU-VPN
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake --preset macos-release
+cmake --build --preset macos-release
 ```
+
+## 构建产物目录
+
+为了让 `windows` 与 `macos` 两条分支在合并前尽量少互相踩到产物，新的编译和打包输出都统一分叉到 `build/<platform>/...`。
+
+- `build/windows/cpp`：Windows 原生 CMake 产物、测试与 `compile_commands.json`
+- `build/windows/electron/dist`：Windows renderer 产物
+- `build/windows/electron/dist-electron`：Windows Electron main/preload 产物
+- `build/windows/electron/native/bin`：Windows 桌面打包用 native staged payload
+- `build/windows/electron/release`：Windows 安装包与 portable 输出
+- `build/macos/cpp`：macOS 原生 CMake 产物、测试与 `compile_commands.json`
+- `build/macos/electron/dist`：macOS renderer 产物
+- `build/macos/electron/dist-electron`：macOS Electron main/preload 产物
+- `build/macos/electron/native/bin`：macOS 桌面打包用 native staged payload
+- `build/macos/electron/release`：macOS 桌面打包输出
+
+推荐直接使用 `scripts/` 里的平台脚本，不要再默认把产物写回旧的共享目录。
 
 ## 平台支持
 
 ### macOS
 ```bash
 brew install openconnect
-cmake -B build && cmake --build build
+./scripts/build-macos.sh all
 sudo ./cminst.sh
+```
+
+只做原生编译时可以直接用 preset：
+
+```bash
+cmake --preset macos-release
+cmake --build --preset macos-release
+ctest --preset macos-release -R 'platform_status_models_test|vpn_runtime_test'
 ```
 
 ### Linux (Ubuntu/Debian)
@@ -66,9 +91,17 @@ sudo ./scripts/install-linux.sh
 
 ### Windows
 1. 安装 [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases)（提供 `openconnect.exe` 与 GnuTLS 运行时 DLL）。
-2. 构建：`cmake -B build && cmake --build build --config Release`
+2. 构建：`powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action all`
    - Windows 端的 AES-256-CBC 已切到系统自带的 **BCrypt (CNG)**，不再需要安装 OpenSSL。
-3. 以管理员身份运行：`.\build\Release\exv.exe service install`
+3. 以管理员身份运行：`.\build\windows\cpp\exv.exe service install`
+
+只做原生编译时可以直接用 preset：
+
+```powershell
+cmake --preset windows-release
+cmake --build --preset windows-release --target exv exv-helper platform_status_models_test vpn_runtime_test
+ctest --preset windows-release -R 'platform_status_models_test|vpn_runtime_test'
+```
 
 ### Windows 桌面打包：便携版 + 安装版
 
@@ -78,18 +111,41 @@ Electron 桌面端可以同时产出便携版和安装版。
 # 1. 一次性 stage openconnect 运行时（DLL + wintun.dll + 可选 TAP 资源）
 powershell -ExecutionPolicy Bypass -File scripts\stage-openconnect-runtime-win.ps1 -SourceDir <openconnect-gui 安装目录>
 
-# 2. 构建 Electron 桌面包（两个目标都会输出到 webui/release/）
-cd webui
-npm install
-npm run desktop:build
+# 2. 构建并打包 Windows 桌面端
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action desktop
 ```
 
-产物位于 `webui/release/`：
+产物位于 `build/windows/electron/release/`：
 
 - `ECNU-VPN-<version>-portable.exe`：便携版，单文件，双击即用，不会安装服务。
 - `ECNU VPN Setup <version>.exe`：NSIS 安装版，支持选择安装目录，并自动通过 `installer.nsh` 注册 `exv-helper` 服务。
 
 打包后的 `bin/` 目录只包含必要文件：`exv.exe`、MinGW 运行时 DLL、`openconnect.exe`、GnuTLS / libxml2 / wintun.dll，以及（如果 stage 过）TAP 资源。`libssl-3-x64.dll` 与 `libcrypto-3-x64.dll` 被打包脚本主动剔除——Windows 端不再依赖 OpenSSL。
+
+### 桌面调试构建（unpacked）
+
+如果只需要可调试的桌面构建，而不希望直接生成安装包、便携版或 DMG，可使用下面两条平台脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action debug
+```
+
+```bash
+./scripts/build-macos.sh debug
+```
+
+如果希望在构建完成后自动弹出 Electron UI，可使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action debug-run
+```
+
+```bash
+./scripts/build-macos.sh debug-run
+```
+
+unpacked Electron 目录会输出到 `build/windows/electron/release/win-unpacked/`
+以及 `build/macos/electron/release/mac*/`。
 
 ## 配置
 
@@ -134,13 +190,12 @@ macOS 上，桌面端支持：
 - **路由清理状态** — 断开时显示清理进度，确保不留残留路由
 
 ```bash
-cd webui
-npm install
-npm run build
-npm run build:electron
-npm run desktop:build
+./scripts/build-macos.sh all
+./scripts/build-macos.sh desktop
 ```
 
 开发模式：先构建 native binary 或设置 `EXV_PATH`，然后运行 `npm run desktop:dev`。
 
 浏览器 WebUI 保留为兼容入口，可通过 `exv -f` 在前台模式启用。
+
+完整构建矩阵与脚本说明见 [docs/build_guide.md](d:\Development\Projects\cpp\ECNU-VPN\docs\build_guide.md)。

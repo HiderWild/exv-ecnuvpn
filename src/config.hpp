@@ -1,33 +1,12 @@
 #pragma once
 
+#include "platform/common/config_defaults.hpp"
+
 #include <nlohmann/json.hpp>
-#include <cstdlib>
 #include <string>
 #include <vector>
 
 namespace ecnuvpn {
-
-#ifdef __APPLE__
-static constexpr bool DEFAULT_DISABLE_DTLS = true;
-#else
-static constexpr bool DEFAULT_DISABLE_DTLS = false;
-#endif
-
-#ifdef _WIN32
-static inline std::string default_log_file_path() {
-  const char *appdata = std::getenv("APPDATA");
-  if (appdata && *appdata)
-    return std::string(appdata) + "\\ecnuvpn\\ecnuvpn.log";
-  const char *home = std::getenv("USERPROFILE");
-  if (home && *home)
-    return std::string(home) + "\\AppData\\Roaming\\ecnuvpn\\ecnuvpn.log";
-  return "C:\\ProgramData\\ecnuvpn\\ecnuvpn.log";
-}
-#else
-static inline std::string default_log_file_path() {
-  return "~/.ecnuvpn/ecnuvpn.log";
-}
-#endif
 
 struct Config {
   std::string server = "https://vpn-ct.ecnu.edu.cn";
@@ -35,28 +14,18 @@ struct Config {
   std::string password =
       ""; // AES-256-CBC ciphertext (base64); empty if remember_password=false
   int mtu = 1290;
-  #ifdef __APPLE__
-  std::string useragent = "AnyConnect Darwin_x86_64 4.10.05095";
-#elif defined(_WIN32)
-  std::string useragent = "AnyConnect Win_x86_64 4.10.05095";
-#else
-  std::string useragent = "AnyConnect Linux_x86_64 4.10.05095";
-#endif
-  bool disable_dtls = DEFAULT_DISABLE_DTLS;
+  std::string useragent = platform::config_defaults().useragent;
+  bool disable_dtls = platform::config_defaults().disable_dtls;
   bool remember_password = true; // false = prompt hidden input at connect time
   std::vector<std::string> routes = {
       "49.52.4.0/25",      "59.78.176.0/20",  "59.78.199.0/21",
       "58.198.176.128/25", "219.228.60.69",   "59.78.189.128/25",
       "219.228.63.0/21",   "202.120.80.0/20", "222.66.117.0/24"};
   std::vector<std::string> extra_args;
-  std::string log_file = default_log_file_path();
+  std::string log_file = platform::config_defaults().log_file;
   int webui_port = 18080;
   std::string webui_bind = "127.0.0.1";
-  #ifdef __APPLE__
-  bool webui_enabled = false;
-#else
-  bool webui_enabled = true;
-#endif
+  bool webui_enabled = platform::config_defaults().webui_enabled;
   std::string openconnect_runtime = "bundled";
   std::string windows_tunnel_driver = "auto";
   std::string windows_tap_interface = "";

@@ -59,23 +59,21 @@ const desktopApi = {
       case desktopApiPaths.connect:
         return wrap(
           window.ecnuVpn!.vpn.connect(body?.password).catch((error) => {
-            const errorCode = typeof error?.code === 'string' ? error.code : ''
-            const message = error?.message || String(error)
-            if (
-              errorCode === desktopRpcErrorCodes.helperUnavailable ||
-              message.includes('Helper daemon is not available')
-            ) {
+            if (typeof error?.code === 'string' && error.code === desktopRpcErrorCodes.helperUnavailable) {
               return window.ecnuVpn!.vpn.connectElevated(body?.password)
             }
             throw error
           }),
         ) as ApiResponse<T>
-      case desktopApiPaths.connectElevated:
-        return wrap(window.ecnuVpn!.vpn.connectElevated(body?.password)) as ApiResponse<T>
       case desktopApiPaths.disconnect:
-        return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
-      case desktopApiPaths.disconnectElevated:
-        return wrap(window.ecnuVpn!.vpn.disconnectElevated()) as ApiResponse<T>
+        return wrap(
+          window.ecnuVpn!.vpn.disconnect().catch((error) => {
+            if (typeof error?.code === 'string' && error.code === desktopRpcErrorCodes.helperUnavailable) {
+              return window.ecnuVpn!.vpn.disconnectElevated()
+            }
+            throw error
+          }),
+        ) as ApiResponse<T>
       case desktopApiPaths.routes:
         return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
       case desktopApiPaths.routesReset:

@@ -70,6 +70,19 @@ if(APPLE)
     # CommonCrypto links implicitly on macOS
     target_sources(exv PRIVATE
         src/helper_daemon_mac.cpp
+        src/platform/darwin/app_api_runtime_policy.cpp
+        src/platform/darwin/crypto_backend.cpp
+        src/platform/darwin/config_defaults.cpp
+        src/platform/darwin/helper_client.cpp
+        src/platform/darwin/helper_lifecycle.cpp
+        src/platform/darwin/helper_platform.cpp
+        src/platform/darwin/helper_service_manager.cpp
+        src/platform/darwin/openconnect_process.cpp
+        src/platform/darwin/process_control.cpp
+        src/platform/darwin/tunnel_script.cpp
+        src/platform/darwin/virtual_network_probe.cpp
+        src/platform/darwin/vpn_supervisor_process.cpp
+        src/platform/darwin/path_utils.cpp
         src/platform/darwin/service_status.cpp
         src/platform/common/driver_status_stub.cpp
     )
@@ -78,6 +91,19 @@ elseif(UNIX AND NOT APPLE)
     target_link_libraries(exv PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     target_sources(exv PRIVATE
         src/helper_daemon_linux.cpp
+        src/platform/linux/app_api_runtime_policy.cpp
+        src/platform/linux/crypto_backend.cpp
+        src/platform/common/config_defaults_linux.cpp
+        src/platform/linux/helper_client.cpp
+        src/platform/linux/helper_lifecycle.cpp
+        src/platform/linux/helper_platform.cpp
+        src/platform/linux/helper_service_manager.cpp
+        src/platform/linux/openconnect_process.cpp
+        src/platform/linux/process_control.cpp
+        src/platform/linux/tunnel_script.cpp
+        src/platform/linux/virtual_network_probe.cpp
+        src/platform/linux/vpn_supervisor_process.cpp
+        src/platform/linux/path_utils.cpp
         src/platform/common/service_status_linux.cpp
         src/platform/common/driver_status_stub.cpp
     )
@@ -88,12 +114,36 @@ elseif(WIN32)
     target_link_libraries(exv PRIVATE bcrypt advapi32 iphlpapi ws2_32)
     target_sources(exv PRIVATE
         src/helper_daemon_win.cpp
+        src/platform/win32/app_api_runtime_policy.cpp
+        src/platform/win32/crypto_backend.cpp
+        src/platform/win32/config_defaults.cpp
+        src/platform/win32/helper_client.cpp
+        src/platform/win32/helper_lifecycle.cpp
+        src/platform/win32/helper_platform.cpp
+        src/platform/win32/helper_service_manager.cpp
+        src/platform/win32/openconnect_process.cpp
+        src/platform/win32/process_control.cpp
+        src/platform/win32/tunnel_script.cpp
+        src/platform/win32/virtual_network_probe.cpp
+        src/platform/win32/vpn_supervisor_process.cpp
+        src/platform/win32/path_utils.cpp
         src/platform/win32/service_status.cpp
         src/platform/win32/driver_status.cpp
     )
     add_executable(exv-helper
         src/helper_service_win.cpp
         src/helper_daemon_win.cpp
+        src/platform/win32/crypto_backend.cpp
+        src/platform/win32/config_defaults.cpp
+        src/platform/win32/helper_lifecycle.cpp
+        src/platform/win32/helper_platform.cpp
+        src/platform/win32/helper_service_manager.cpp
+        src/platform/win32/openconnect_process.cpp
+        src/platform/win32/process_control.cpp
+        src/platform/win32/tunnel_script.cpp
+        src/platform/win32/virtual_network_probe.cpp
+        src/platform/win32/vpn_supervisor_process.cpp
+        src/platform/win32/path_utils.cpp
         ${EXV_COMMON_SOURCES}
     )
     target_link_libraries(exv-helper PRIVATE Threads::Threads bcrypt advapi32 iphlpapi ws2_32)
@@ -143,6 +193,14 @@ add_executable(vpn_runtime_test
         src/utils.cpp
 )
 
+if(APPLE)
+    target_sources(vpn_runtime_test PRIVATE src/platform/darwin/path_utils.cpp src/platform/darwin/process_control.cpp)
+elseif(UNIX AND NOT APPLE)
+    target_sources(vpn_runtime_test PRIVATE src/platform/linux/path_utils.cpp src/platform/linux/process_control.cpp)
+elseif(WIN32)
+    target_sources(vpn_runtime_test PRIVATE src/platform/win32/path_utils.cpp src/platform/win32/process_control.cpp)
+endif()
+
 target_include_directories(vpn_runtime_test PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
@@ -161,6 +219,68 @@ target_include_directories(platform_status_models_test PRIVATE
 )
 
 add_test(NAME platform_status_models_test COMMAND platform_status_models_test)
+
+add_executable(tunnel_script_contract_test
+    tests/tunnel_script_contract_test.cpp
+    src/tunnel.cpp
+)
+
+if(APPLE)
+    target_sources(tunnel_script_contract_test PRIVATE src/platform/darwin/tunnel_script.cpp)
+elseif(UNIX AND NOT APPLE)
+    target_sources(tunnel_script_contract_test PRIVATE src/platform/linux/tunnel_script.cpp)
+elseif(WIN32)
+    target_sources(tunnel_script_contract_test PRIVATE src/platform/win32/tunnel_script.cpp)
+    target_link_libraries(tunnel_script_contract_test PRIVATE ws2_32)
+endif()
+
+target_include_directories(tunnel_script_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME tunnel_script_contract_test COMMAND tunnel_script_contract_test)
+
+add_executable(app_api_runtime_policy_test
+    tests/app_api_runtime_policy_test.cpp
+)
+
+if(APPLE)
+    target_sources(app_api_runtime_policy_test PRIVATE src/platform/darwin/app_api_runtime_policy.cpp)
+elseif(UNIX AND NOT APPLE)
+    target_sources(app_api_runtime_policy_test PRIVATE src/platform/linux/app_api_runtime_policy.cpp)
+elseif(WIN32)
+    target_sources(app_api_runtime_policy_test PRIVATE src/platform/win32/app_api_runtime_policy.cpp)
+endif()
+
+target_include_directories(app_api_runtime_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME app_api_runtime_policy_test COMMAND app_api_runtime_policy_test)
+
+add_executable(crypto_roundtrip_test
+    tests/crypto_roundtrip_test.cpp
+    src/crypto.cpp
+)
+
+if(APPLE)
+    target_sources(crypto_roundtrip_test PRIVATE src/platform/darwin/crypto_backend.cpp)
+elseif(UNIX AND NOT APPLE)
+    target_sources(crypto_roundtrip_test PRIVATE src/platform/linux/crypto_backend.cpp)
+    target_link_libraries(crypto_roundtrip_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+elseif(WIN32)
+    target_sources(crypto_roundtrip_test PRIVATE src/platform/win32/crypto_backend.cpp)
+    target_link_libraries(crypto_roundtrip_test PRIVATE bcrypt advapi32)
+endif()
+
+target_include_directories(crypto_roundtrip_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME crypto_roundtrip_test COMMAND crypto_roundtrip_test)
 
 # Install target
 if(WIN32)

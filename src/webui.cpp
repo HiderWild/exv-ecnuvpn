@@ -3,6 +3,8 @@
 #include "config_api.hpp"
 #include "crypto.hpp"
 #include "helper.hpp"
+#include "platform/common/helper_client.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
 
@@ -13,13 +15,6 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
-#ifndef _WIN32
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-#else
-#include <windows.h>
-#endif
 
 namespace ecnuvpn {
 namespace webui {
@@ -27,12 +22,6 @@ namespace webui {
 namespace {
 
 constexpr const char* kStaticDir = "webui/dist";
-constexpr const char* kHelperSocketPath = "/var/run/exv-helper.sock";
-#ifdef _WIN32
-constexpr const char* kStableInstallPath = "C:\\Program Files\\ECNU-VPN\\exv.exe";
-#else
-constexpr const char* kStableInstallPath = "/usr/local/bin/exv";
-#endif
 
 std::string mime_type(const std::string& path) {
     if (path.size() >= 5 && path.compare(path.size() - 5, 5, ".html") == 0)
@@ -90,91 +79,6 @@ void serve_static(const httplib::Request& req, httplib::Response& res) {
 
     res.status = 404;
     res.set_content("{\"error\":\"not found\"}", "application/json");
-}
-
-nlohmann::json send_helper_request(const nlohmann::json& request) {
-    std::string payload = request.dump();
-    payload.push_back('\n');
-    std::string raw;
-
-#ifdef _WIN32
-    // Windows: Named Pipe client. The pipe name uses the literal "\\.\pipe\exv-helper"
-    // form, so the C string only needs two backslashes followed by a single dot.
-    HANDLE hPipe = CreateFileA("\\\\.\\pipe\\exv-helper",
-                               GENERIC_READ | GENERIC_WRITE, 0, NULL,
-                               OPEN_EXISTING, 0, NULL);
-    if (hPipe == INVALID_HANDLE_VALUE) {
-        return nlohmann::json{{"ok", false},
-                              {"message", "Helper daemon not available"}};
-    }
-
-    DWORD bytesWritten = 0;
-    if (!WriteFile(hPipe, payload.c_str(), static_cast<DWORD>(payload.size()),
-                   &bytesWritten, NULL) ||
-        bytesWritten != payload.size()) {
-        CloseHandle(hPipe);
-        return nlohmann::json{{"ok", false},
-                              {"message", "Failed to send helper request"}};
-    }
-
-    char buffer[1024];
-    DWORD bytesRead = 0;
-    while (ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
-        raw.append(buffer, bytesRead);
-        if (raw.find('\n') != std::string::npos) break;
-    }
-    CloseHandle(hPipe);
-#else
-    // POSIX: Unix domain socket
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return nlohmann::json{{"ok", false},
-                              {"message", "Failed to create socket"}};
-    }
-
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
-                  kHelperSocketPath);
-
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close(fd);
-        return nlohmann::json{{"ok", false},
-                              {"message", "Helper daemon not available"}};
-    }
-
-    if (write(fd, payload.data(), payload.size()) !=
-        static_cast<ssize_t>(payload.size())) {
-        close(fd);
-        return nlohmann::json{{"ok", false},
-                              {"message", "Failed to send helper request"}};
-    }
-    shutdown(fd, SHUT_WR);
-
-    char buffer[1024];
-    ssize_t n;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        raw.append(buffer, static_cast<size_t>(n));
-        if (raw.find('\n') != std::string::npos) break;
-    }
-    close(fd);
-#endif
-
-    auto nl = raw.find('\n');
-    if (nl != std::string::npos) raw.resize(nl);
-    raw = utils::trim(raw);
-
-    if (raw.empty()) {
-        return nlohmann::json{{"ok", false},
-                              {"message", "Empty helper response"}};
-    }
-
-    try {
-        return nlohmann::json::parse(raw);
-    } catch (...) {
-        return nlohmann::json{{"ok", false},
-                              {"message", "Failed to parse helper response"}};
-    }
 }
 
 // Build a frontend-friendly status response from helper daemon response
@@ -261,10 +165,11 @@ void WebUIServer::setup_routes() {
     server_->Get("/api/status", [this](const httplib::Request&,
                                         httplib::Response& res) {
         Config cfg = config_mgr_.load();
-        auto helper_resp = send_helper_request({{"action", "status"}});
+        auto helper_resp = platform::send_helper_request({{"action", "status"}});
 
         if (!helper_resp.value("ok", false) &&
-            helper_resp.value("message", "") == "Helper daemon not available") {
+            (helper_resp.value("code", std::string()) == platform::kHelperUnavailableCode ||
+             helper_resp.value("message", "") == "Helper daemon not available")) {
             // Helper not available — return disconnected status with config info
             nlohmann::json j;
             j["connected"] = false;
@@ -724,15 +629,16 @@ void WebUIServer::setup_routes() {
     server_->Get("/api/service", [this](const httplib::Request&,
                                          httplib::Response& res) {
         bool available = helper::is_available();
+        const auto& helper_platform = platform::helper_platform_config();
         nlohmann::json j;
         #ifdef __APPLE__
-        j["installed"] = utils::file_exists("/Library/LaunchDaemons/com.ecnu.exv.helper.plist");
+        j["installed"] = utils::file_exists(helper_platform.service_definition_path);
 #elif defined(__linux__)
-        j["installed"] = utils::file_exists("/etc/systemd/system/exv-helper.service");
+        j["installed"] = utils::file_exists(helper_platform.service_definition_path);
 #elif defined(_WIN32)
     SC_HANDLE scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
     if (scm) {
-      SC_HANDLE svc = OpenServiceA(scm, "exv-helper", SERVICE_QUERY_STATUS);
+          SC_HANDLE svc = OpenServiceA(scm, helper_platform.service_name, SERVICE_QUERY_STATUS);
       j["installed"] = (svc != NULL);
       if (svc) CloseServiceHandle(svc);
       CloseServiceHandle(scm);
@@ -741,7 +647,7 @@ void WebUIServer::setup_routes() {
     }
 #endif
         j["running"] = available;
-        j["path"] = kStableInstallPath;
+        j["path"] = platform::helper_platform_config().stable_install_path;
         j["available"] = available;
         res.set_content(j.dump(), "application/json");
     });

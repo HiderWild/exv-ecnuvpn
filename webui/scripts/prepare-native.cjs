@@ -13,8 +13,11 @@
 const fs = require('fs')
 const path = require('path')
 
+const { getBuildLayout } = require('./build-layout.cjs')
+
 const root = path.resolve(__dirname, '..', '..')
-const outDir = path.resolve(__dirname, '..', 'native', 'bin')
+const layout = getBuildLayout()
+const outDir = layout.nativeBinDir
 fs.rmSync(outDir, { recursive: true, force: true })
 fs.mkdirSync(outDir, { recursive: true })
 
@@ -67,12 +70,15 @@ const exeCandidates = [
   process.env.EXV_PATH,
   ...(process.platform === 'win32'
   ? [
+      path.join(layout.cppBuildDir, 'exv.exe'),
+      path.join(layout.cppBuildDir, 'Release', 'exv.exe'),
       path.join(root, 'build', 'exv.exe'),
       path.join(root, 'build', 'Release', 'exv.exe'),
       path.join(root, 'build-desktop', 'exv.exe'),
       path.join(root, 'build-desktop', 'Release', 'exv.exe'),
     ]
   : [
+      path.join(layout.cppBuildDir, 'exv'),
       path.join(root, 'build', 'exv'),
       path.join(root, 'build-desktop', 'exv'),
     ]),
@@ -95,22 +101,29 @@ console.log(`Copied native binary: ${exeSource} -> ${target}`)
 if (process.platform === 'win32') {
   const helperCandidates = [
     process.env.EXV_HELPER_PATH,
+    path.join(layout.cppBuildDir, 'exv-helper.exe'),
+    path.join(layout.cppBuildDir, 'Release', 'exv-helper.exe'),
     path.join(path.dirname(exeSource), 'exv-helper.exe'),
     path.join(root, 'build', 'exv-helper.exe'),
     path.join(root, 'build', 'Release', 'exv-helper.exe'),
     path.join(root, 'build-desktop', 'exv-helper.exe'),
     path.join(root, 'build-desktop', 'Release', 'exv-helper.exe'),
   ].filter(Boolean)
+
   const helperSource = helperCandidates.find((candidate) => fs.existsSync(candidate))
   if (!helperSource) {
     throw new Error(
       `Native exv-helper binary not found. Build it first with CMake. Checked:\n  - ${helperCandidates.join('\n  - ')}`,
     )
   }
-  fs.copyFileSync(helperSource, path.join(outDir, 'exv-helper.exe'))
-  console.log(`Copied native helper: ${helperSource} -> ${path.join(outDir, 'exv-helper.exe')}`)
+
+  const helperTarget = path.join(outDir, 'exv-helper.exe')
+  fs.copyFileSync(helperSource, helperTarget)
+  console.log(`Copied native helper: ${helperSource} -> ${helperTarget}`)
 }
 
+// On Windows the native exv binary depends on a handful of MinGW runtime DLLs.
+// They live next to the build output, so we look in the same directories.
 if (process.platform === 'win32') {
   const exeDir = path.dirname(exeSource)
   for (const dll of MINGW_RUNTIME_DLLS) {

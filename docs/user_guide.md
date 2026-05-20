@@ -52,6 +52,25 @@ sudo cmake --install build    # macOS / Linux
 
 All platforms also require **Node.js** (v18+) for the frontend build step.
 
+### Build Directory Convention
+
+To reduce artifact conflicts between the `windows` and `macos` branches before merge, build output is separated into:
+
+- `build/windows/cpp`
+- `build/windows/electron/*`
+- `build/macos/cpp`
+- `build/macos/electron/*`
+
+Recommended: use the platform scripts directly:
+
+```bash
+# macOS
+./scripts/build-macos.sh all
+
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action all
+```
+
 ### Installing the Privileged Helper (One-Time)
 
 ```bash
@@ -155,7 +174,7 @@ On macOS, `service install` copies `exv` to `/usr/local/bin/exv` and registers a
 | `log_file` | Log file path |
 | `webui_port` | WebUI port (default 18080) |
 | `webui_bind` | WebUI bind address (default 127.0.0.1) |
-| `webui_enabled` | Enable WebUI (default false, compatibility mode) |
+| `webui_enabled` | Enable WebUI (default true) |
 
 ### Route Management
 
@@ -257,11 +276,9 @@ A browser-based WebUI is available for environments where the desktop app is not
 - VPN start/stop control
 - Route management
 
-The WebUI does **not** start by default. To launch it, use `exv --webui` (starts VPN + WebUI server) or `exv --webui --foreground` (attached to terminal, Ctrl+C to stop). The WebUI listens at `http://127.0.0.1:18080/` by default.
+The WebUI starts by default when VPN is launched. To disable it: `exv config set webui_enabled` set to `false`. To run in foreground: `exv --webui --foreground` (Ctrl+C to stop). The WebUI listens at `http://127.0.0.1:18080/` by default.
 
 The WebUI is a **compatibility/debugging option**. The desktop app is the recommended interface on macOS and Windows.
-
-WebUI is disabled by default. To enable it (compatibility mode): `exv config set webui_enabled` set to `true`, or use `exv --webui` for a one-time session.
 
 ---
 
@@ -284,7 +301,7 @@ Config file location: `~/.ecnuvpn/config.json` on macOS/Linux, `%APPDATA%\ecnuvp
     "log_file": "~/.ecnuvpn/ecnuvpn.log",
     "webui_port": 18080,
     "webui_bind": "127.0.0.1",
-    "webui_enabled": false
+    "webui_enabled": true
 }
 ```
 

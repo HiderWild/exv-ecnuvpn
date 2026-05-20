@@ -10,9 +10,13 @@
     "electron:dev": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "electron:start": "wait-on http://localhost:5176 dist-electron/main/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5176 electron dist-electron/main/index.js",
     "build": "vue-tsc -b && vite build",
-    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:electron": "node scripts/build-electron.cjs",
     "prepare:native": "node scripts/prepare-native.cjs",
-    "desktop:build": "npm run build && npm run build:electron && npm run prepare:native && electron-builder",
+    "desktop:compile": "npm run build && npm run build:electron && npm run prepare:native",
+    "desktop:package": "electron-builder --config electron-builder.config.cjs",
+    "desktop:package:dir": "electron-builder --dir --config electron-builder.config.cjs",
+    "desktop:debug": "npm run desktop:compile && npm run desktop:package:dir",
+    "desktop:build": "npm run desktop:compile && npm run desktop:package",
     "preview": "vite preview"
   },
   "devDependencies": {
@@ -39,69 +43,5 @@
     "vue-tsc": "^3.2.7",
     "wait-on": "^9.0.3"
   },
-  "main": "dist-electron/main/index.js",
-  "build": {
-    "appId": "cn.edu.ecnu.vpn",
-    "productName": "ECNU VPN",
-    "directories": {
-      "output": "release",
-      "buildResources": "build-resources"
-    },
-    "asar": true,
-    "compression": "maximum",
-    "files": [
-      "dist/**/*",
-      "dist-electron/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "native/bin",
-        "to": "bin",
-        "filter": [
-          "**/*",
-          "!*.lib",
-          "!*.pdb",
-          "!*.exp",
-          "!*.a",
-          "!libssl-*.dll",
-          "!libcrypto-*.dll"
-        ]
-      }
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "executableName": "ECNU-VPN",
-      "signAndEditExecutable": false
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": true,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "ECNU VPN",
-      "deleteAppDataOnUninstall": false,
-      "include": "build-resources/installer.nsh"
-    },
-    "portable": {
-      "artifactName": "ECNU-VPN-${version}-portable.${ext}"
-    },
-    "mac": {
-      "target": "dmg",
-      "category": "public.app-category.utilities"
-    }
-  }
+  "main": "dist-electron/main/index.js"
 }
