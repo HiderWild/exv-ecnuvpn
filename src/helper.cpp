@@ -22,10 +22,6 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <sys/stat.h>
-#endif
-
 
 namespace ecnuvpn {
 namespace helper {
@@ -161,9 +157,7 @@ bool save_session_state(const SessionState &state) {
     return false;
   ofs << to_json(state).dump(2);
   ofs.close();
-#ifndef _WIN32
-  chmod(platform_config.session_state_path, 0600);
-#endif
+  platform::set_session_state_permissions(platform_config.session_state_path);
   return ofs.good();
 }
 
@@ -774,16 +768,12 @@ int worker_main(const std::string &request_path) {
 int daemon_main() {
   signal(SIGTERM, daemon_signal_handler);
   signal(SIGINT, daemon_signal_handler);
-#ifndef _WIN32
-  signal(SIGPIPE, SIG_IGN);
-#endif
+  platform::setup_daemon_signals();
 
   auto ipc = create_ipc_server();
   const auto &platform_config = platform::helper_platform_config();
 
-#ifndef _WIN32
-  remove_file_if_exists(platform_config.endpoint);
-#endif
+  platform::cleanup_daemon_endpoint(platform_config.endpoint);
 
   if (!ipc->start(platform_config.endpoint)) {
     return 1;
@@ -825,9 +815,7 @@ int daemon_main() {
   }
 
   ipc->close();
-#ifndef _WIN32
-  remove_file_if_exists(platform_config.endpoint);
-#endif
+  platform::cleanup_daemon_endpoint(platform_config.endpoint);
   return 0;
 }
 

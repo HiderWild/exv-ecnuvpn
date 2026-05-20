@@ -150,5 +150,17 @@ void dispatch_request_background(
   }).detach();
 }
 
+void set_session_state_permissions(const std::string & /*path*/) {
+  // No-op on Windows; NTFS ACLs handle file permissions.
+}
+
+void setup_daemon_signals() {
+  // No-op on Windows; no SIGPIPE equivalent needed.
+}
+
+void cleanup_daemon_endpoint(const std::string & /*endpoint*/) {
+  // No-op on Windows; named pipes don't leave filesystem artifacts.
+}
+
 } // namespace platform
 } // namespace ecnuvpn
