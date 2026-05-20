@@ -13,14 +13,33 @@
 ```bash
 git clone <repo>
 cd ECNU-VPN
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(sysctl -n hw.ncpu)
+cmake --preset macos-release
+cmake --build --preset macos-release
 ```
 
 ### 安装到系统路径
 
 ```bash
-sudo cmake --install build
+sudo cmake --install build/macos/cpp
+```
+
+### 构建目录约定
+
+为减少 `windows` / `macos` 分支在合并前的产物冲突，新的构建输出固定分叉到：
+
+- `build/windows/cpp`
+- `build/windows/electron/*`
+- `build/macos/cpp`
+- `build/macos/electron/*`
+
+推荐直接使用平台脚本：
+
+```bash
+# macOS
+./scripts/build-macos.sh all
+
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action all
 ```
 
 ### 安装 root helper（一次性 sudo）
