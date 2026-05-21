@@ -1,5 +1,11 @@
 # Windows/macOS Merge Finalization Implementation Plan
 
+> Status: CLOSED / SUPERSEDED.
+> Closed on: 2026-05-21.
+> Superseded by: `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`.
+> Closure summary: the platform-boundary extraction and merge-finalization wave has landed in `integration/platform-convergence-next`. The remaining open items from M6, M7, and M8 are transferred to the successor plan as Windows validation, macOS functional validation, targeted regression repair, and the final `develop` merge gate.
+> Historical note: keep this file as the implementation history for the extraction wave; do not use its unchecked boxes as the active task list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Finish merge preparation between the `windows` and `macos` branches so both branches remain independently buildable while the final merge can be rehearsed and executed with bounded, documented conflicts.

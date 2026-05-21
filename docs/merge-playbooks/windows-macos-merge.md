@@ -2,7 +2,51 @@
 
 This playbook records the working agreement, merge rehearsal steps, manual conflict resolutions, validation evidence, and residual risks for the current merge-prep wave.
 
+## Develop Merge Gate Handoff (2026-05-21)
+
+Active successor plan:
+
+- `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`
+
+Current branch heads:
+
+- `develop` = `7d39136` (Merge Windows desktop convergence)
+- `windows` = `66dbfa8` (refactor: unify desktop contract and platform status adapters)
+- `macos` = `6fb5ebb` (docs: record S4 integration rehearsal results)
+- `integration/platform-convergence-next` = `cc11a5b` (validation: record G3 macOS platform validation results)
+
+Current branch relationship:
+
+- `git merge-base --is-ancestor windows integration/platform-convergence-next`: PASS
+- `git merge-base --is-ancestor macos integration/platform-convergence-next`: PASS
+- `git merge-tree --write-tree --messages --name-only develop integration/platform-convergence-next`: PASS, no conflict paths reported
+
+Completed in the previous stage:
+
+- G0 baseline lock: complete.
+- G1.1 native platform adapter audit: complete.
+- G1.2 native lifecycle audit: complete.
+- G1.3 desktop contract audit: complete.
+- G1.4 build/package audit: complete.
+- G2 tracked sync-conflict cleanup: complete by tracked-file check; `git ls-files | rg "sync-conflict|rehearsal"` reports no tracked artifacts.
+- G3 macOS automated validation: complete; native build, 5 focused tests, webui build, and Electron build passed.
+- G4 develop merge rehearsal: ready; merge-tree reports no conflict paths.
+
+Pending before `develop` merge:
+
+- Windows automated validation from `integration/platform-convergence-next`.
+- Windows manual helper service install/connect/disconnect/uninstall validation.
+- macOS manual helper-installed connect/disconnect validation with real credentials.
+- macOS manual helper-missing one-time elevated connect/disconnect validation.
+- Any targeted repair required by those validation gates.
+
+Gate rule:
+
+- Do not merge or push `develop` until the pending validations pass or an explicitly accepted risk is recorded in this playbook.
+
 ## G0 Baseline Lock (2026-05-21)
+
+Historical snapshot: this section records the earlier G0 state. The current active handoff is the "Develop Merge Gate Handoff" section above.
 
 Branch heads:
 - `macos` = 6fb5ebb (docs: record S4 integration rehearsal results)
@@ -27,7 +71,8 @@ Merge of macos into integration (G0.2): clean merge, no new conflicts. Committed
 
 ## Scope
 
-- Execution contract: `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.md`
+- Active execution contract: `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`
+- Historical execution contract: `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.md`
 - Architecture entrypoint: `docs/merge-prep-platform-architecture.md`
 - Rehearsal owner: integration lead
 - Runtime behavior changes do not belong in this file; record process and evidence only.
