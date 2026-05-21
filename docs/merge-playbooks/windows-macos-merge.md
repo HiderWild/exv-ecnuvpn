@@ -2,6 +2,29 @@
 
 This playbook records the working agreement, merge rehearsal steps, manual conflict resolutions, validation evidence, and residual risks for the current merge-prep wave.
 
+## G0 Baseline Lock (2026-05-21)
+
+Branch heads:
+- `macos` = 6fb5ebb (docs: record S4 integration rehearsal results)
+- `windows` = 66dbfa8 (refactor: unify desktop contract and platform status adapters)
+- `integration/platform-convergence-next` = 58074c5 (merge-prep: integrate macos tail commits)
+- `develop` = 7d39136 (Merge Windows desktop convergence)
+
+Worktree surface: single worktree at /Users/tomli/Development/Projects/CPP/ECNU-VPN (macos branch).
+
+Ancestor verification:
+- `git merge-base --is-ancestor windows integration/platform-convergence-next`: PASS
+- `git merge-base --is-ancestor macos integration/platform-convergence-next`: PASS (after merging macos tail commit 6fb5ebb into integration)
+
+Conflict counts (baseline):
+- `windows` + `macos`: 34 conflict paths
+- `develop` + `windows`: 3 conflict paths
+- `develop` + `macos`: 29 conflict paths
+
+Merge of macos into integration (G0.2): clean merge, no new conflicts. Committed as 58074c5.
+
+**Freeze rule**: No direct merge into `develop` until G3 dual-platform validation passes. All subsequent commits must carry one of these labels: `audit`, `repair`, `validation`, or `merge-prep`.
+
 ## Scope
 
 - Execution contract: `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.md`

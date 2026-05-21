@@ -1,391 +1,345 @@
 # Windows/macOS Platform Convergence Next Stage Plan
 
-> Status: planning baseline for the next large implementation stage.
+> Status: execution plan for the next large integration stage.
 > Date: 2026-05-21
-> Primary goal: turn the current Windows/macOS merge-prep work into clean, reviewable branch history and a reproducible path to `develop`.
+> Primary goal: turn the current Windows/macOS convergence work into a validated `integration/platform-convergence-next` branch, then merge that branch into `develop` only after both platforms pass the agreed gates.
 
-## 1. Stage Goal And Success Criteria
+## 1. Stage Goal And Current Baseline
 
 ### Overall Goal
 
-Prepare `windows` and `macos` for a controlled merge into `develop` by converting the current merge-prep experiments into clean branch commits, freezing the shared desktop/native contract, and resolving the remaining high-risk conflict files with explicit ownership.
+Converge the `windows` and `macos` branches through one temporary integration branch while preserving the platform-specific behavior that is already working on each side.
 
-This stage is not a feature-expansion stage. It is a stabilization and integration stage.
+This stage is not a new feature wave. It is a branch-integration, conflict-audit, and validation wave. Product behavior should change only when a regression is found during integration validation.
 
 ### Current Baseline
 
-Current branch and worktree state must be treated as unsafe until cleaned:
+Current repository facts as of 2026-05-21:
 
-- `macos` currently has a large staged/unstaged merge-prep inventory.
-- `windows` has already advanced with Windows helper/service fixes and desktop contract work.
-- Direct `windows` + `macos` merge rehearsal currently reports conflicts in 15 files.
-- Several rehearsal worktrees exist, including detached and nested wrapper worktrees. They are rehearsal artifacts, not implementation baselines.
-- Existing abstraction work under `src/platform/{common,darwin,linux,win32}` appears directionally correct, but must be audited before landing as branch history.
+- Active local worktree count is reduced to one Windows worktree: `D:\Development\Projects\cpp\ECNU-VPN`.
+- Current working tree is clean on `macos`.
+- Long-lived branches are `main`, `develop`, `windows`, and `macos`.
+- Temporary integration branch is `integration/platform-convergence-next`.
+- `windows` is already an ancestor of `integration/platform-convergence-next`.
+- `macos` is not yet an ancestor of `integration/platform-convergence-next`; the integration branch is missing the latest macOS tail commit.
+- Direct `windows` + `macos` merge still reports 34 conflicting paths, mostly because both branches independently added platform-adapter files with the same names.
+- `develop` + `windows` reports only 3 conflicts, all in desktop UI/state files.
+- `develop` + `macos` reports 29 conflicts, covering native, desktop, scripts, and docs.
 
 ### Stage Exit Criteria
 
-The stage is complete only when all of the following are true:
+This stage is complete only when all of the following are true:
 
-- Git branch surface is reduced to `main`, `develop`, `windows`, `macos`, and at most one active `integration/*` branch.
-- Git worktree surface is reduced to the main Windows worktree plus the macOS machine/worktree actually used for mac validation.
-- `windows` and `macos` are both clean working trees with their useful merge-prep changes committed in reviewable slices.
-- `git merge-tree --write-tree --messages --name-only windows macos` reports no behavioral conflict in shared contract files.
-- A fresh `integration/platform-convergence-next` branch can merge `windows` then `macos` with a documented conflict list and no surprise generated files.
-- Windows validation passes from a fresh checkout/worktree.
-- macOS validation passes from the mac mini checkout/worktree.
-- The integration branch can be pushed to GitHub and reviewed without relying on untracked local files.
+- `integration/platform-convergence-next` contains the current heads of both `windows` and `macos`.
+- Integration branch conflict resolutions are audited against both source branches, not accepted solely because they compile.
+- Windows native build, focused tests, Electron build, desktop package, and manual service/connect/disconnect scenarios pass from the integration branch.
+- macOS native build, focused tests, Electron build, desktop package, helper scenarios, and one-time elevated connect/disconnect pass from the integration branch.
+- `develop` is not touched until the integration branch passes both platform gates.
+- The final merge playbook records the conflict inventory, chosen resolutions, validation commands, manual scenarios, and residual risks.
 
-## 2. Stage Overview
+## 2. Level 1 Workstream Overview
 
 | Workstream | Purpose | Primary Output | Parallelizable |
 |---|---|---|---|
-| S0. Repository Hygiene | Remove rehearsal noise and preserve useful WIP safely | Clean branch/worktree inventory | No |
-| S1. Contract Freeze | Decide the single shared desktop/native status contract | Frozen DTOs and no ad hoc status fields | Partly |
-| S2. Platform Boundary Audit | Verify platform abstractions are real and minimal | Accepted/removed adapter files | Yes after S1 |
-| S3. Hotspot Resolution | Resolve the remaining 15 merge conflict files by ownership | Conflict-free shared files | Yes by lane |
-| S4. Validation And Rehearsal | Prove merge readiness on both platforms | Green validation matrix and merge playbook | No final gate |
-| S5. GitHub Integration Prep | Produce clean push/PR sequence | Pushable branches and PR checklist | No |
+| G0. Baseline Lock | Make the integration branch the single source of truth for final convergence | Clean branch inventory and updated integration head | No |
+| G1. Resolution Audit | Verify previous conflict resolutions preserve both platforms | Audited integration diff with no unowned conflict decisions | Yes by lane |
+| G2. Regression Repair | Fix only validated integration regressions | Small integration-only repair commits | Partly |
+| G3. Dual-Platform Validation | Prove the integration branch runs on Windows and macOS | Green validation matrix and manual evidence | Yes until final gate |
+| G4. Develop Merge Prep | Prepare the safe merge and GitHub review path | Push/PR/merge checklist and rollback policy | No |
 
-High-level dependency:
+Dependency overview:
 
 ```mermaid
 flowchart LR
-  S0["S0 Repository Hygiene"] --> S1["S1 Contract Freeze"]
-  S1 --> S2["S2 Platform Boundary Audit"]
-  S1 --> S3["S3 Hotspot Resolution"]
-  S2 --> S4["S4 Validation And Rehearsal"]
-  S3 --> S4
-  S4 --> S5["S5 GitHub Integration Prep"]
+  G0["G0 Baseline Lock"] --> G1["G1 Resolution Audit"]
+  G1 --> G2["G2 Regression Repair"]
+  G2 --> G3["G3 Dual-Platform Validation"]
+  G3 --> G4["G4 Develop Merge Prep"]
 ```
 
-## 3. Detailed Task Plan
+## 3. Level 2 Detailed Task Plan
 
-### S0. Repository Hygiene
+### G0. Baseline Lock
 
-Objective: stop accidental work on stale rehearsal state and preserve all useful changes before implementation continues.
+Objective: stop new convergence work from spreading across branch heads and make `integration/platform-convergence-next` the only final-merge candidate.
 
-#### S0.1 Capture Current State
-
-Owner: integration lead
-
-Actions:
-
-- Record `git status --short --branch`, `git branch --list --verbose --no-abbrev`, and `git worktree list --porcelain` into `docs/merge-playbooks/windows-macos-merge.md`.
-- Record the current 15-file conflict list from `git merge-tree --write-tree --messages --name-only windows macos`.
-- Record which worktrees are real implementation locations and which are rehearsal artifacts.
-
-Acceptance:
-
-- The merge playbook contains a dated 2026-05-21 inventory section.
-- Every worktree listed by Git is categorized as `keep`, `remove`, or `archive-before-remove`.
-
-#### S0.2 Quarantine Rehearsal Worktrees
+#### G0.1 Confirm Branch And Worktree Surface
 
 Owner: integration lead
 
 Actions:
 
-- Do not continue implementation in any `rehearsal-*` detached worktree.
-- For each rehearsal worktree, inspect `git status --short --branch`.
-- If a detached worktree contains unique useful work, create a named branch `archive/<short-purpose>` before removal.
-- Remove rehearsal worktrees only after any useful work is either committed to `windows`/`macos` or archived.
+- Run and record `git status --short --branch`, `git branch --list --verbose --no-abbrev`, and `git worktree list --porcelain`.
+- Confirm only `main`, `develop`, `windows`, `macos`, and `integration/platform-convergence-next` are active.
+- Record the current direct merge conflict counts:
+  - `windows` + `macos`: 34 conflict paths.
+  - `develop` + `windows`: 3 conflict paths.
+  - `develop` + `macos`: 29 conflict paths.
 
-Acceptance:
+Scope boundary:
 
-- `git worktree list --porcelain` shows only approved active worktrees.
-- No active implementation branch points at a detached rehearsal snapshot.
+- Do not delete branches in this task unless they are already confirmed obsolete by the branch cleanup decision.
+- Do not edit runtime code.
 
-#### S0.3 Split Current macOS Merge-Prep WIP
+Acceptance criteria:
 
-Owner: integration lead
+- `docs/merge-playbooks/windows-macos-merge.md` has a dated baseline entry matching current branch/worktree facts.
+- No untracked rehearsal worktree is treated as an implementation source.
 
-Actions:
-
-- Do not commit the current `macos` staged inventory as one bulk commit.
-- Split the inventory into reviewable commits by topic:
-  - build wrappers and CMake presets,
-  - desktop contract/build scripts,
-  - native platform adapters,
-  - validation tests,
-  - documentation/playbook updates.
-- Drop or archive files that only document obsolete rehearsal attempts.
-
-Acceptance:
-
-- `macos` is clean.
-- Each macOS commit has one coherent purpose and can be reverted independently.
-- No generated build output, cache, or rehearsal-only snapshot is committed.
-
-#### S0.4 Normalize Branch Baseline
+#### G0.2 Bring Integration Branch To Both Current Heads
 
 Owner: integration lead
 
 Actions:
 
-- Keep `main`, `develop`, `windows`, and `macos`.
-- Keep one new temporary branch only when needed: `integration/platform-convergence-next`.
-- Delete stale local `rehearsal/*` branches after their useful content is either committed or archived.
+- Check out `integration/platform-convergence-next`.
+- Merge or cherry-pick the missing `macos` tail commit(s), starting with the current documentation tail.
+- If new conflicts appear, resolve them only in the integration branch and record them in the merge playbook.
 
-Acceptance:
+Scope boundary:
 
-- `git branch --list` has only the four long-lived branches plus at most one active `integration/*` branch.
+- Do not merge `integration/platform-convergence-next` into `develop` in this task.
+- Do not rewrite `windows` or `macos` history unless explicitly required by a later cleanup decision.
 
-### S1. Contract Freeze
+Acceptance criteria:
 
-Objective: make the shared API contract decision complete before resolving UI/native conflicts.
+- `git merge-base --is-ancestor windows integration/platform-convergence-next` succeeds.
+- `git merge-base --is-ancestor macos integration/platform-convergence-next` succeeds.
+- Integration branch working tree is clean.
 
-#### S1.1 Freeze Desktop Contract
-
-Owner: contract lead
-
-Canonical files:
-
-- `webui/desktop/shared/desktop-contract.ts`
-- `webui/src/types/ecnu-vpn.d.ts`
-- native status model headers under `src/platform/common/*status*.hpp`
-
-Actions:
-
-- Define the final field set for:
-  - VPN status,
-  - service status,
-  - runtime status,
-  - driver status,
-  - structured error payloads.
-- Use Windows UI behavior as the canonical desktop UX.
-- Preserve macOS direct/elevated session semantics using the same fields, not platform-specific UI branches.
-
-Acceptance:
-
-- `mode` or equivalent session field has one name and one enum across native, preload, API client, store, and UI.
-- Service status distinguishes `installed`, `running`, and `available`.
-- Direct/elevated fallback uses structured errors, not string matching in Vue components.
-- No UI component reads platform-specific native fields unless the field is explicitly part of the shared contract.
-
-#### S1.2 Freeze Native RPC Actions
-
-Owner: contract lead
-
-Actions:
-
-- Lock the desktop RPC action set used by Electron:
-  - status,
-  - connect/disconnect,
-  - direct/elevated connect/disconnect,
-  - config/auth/settings,
-  - routes,
-  - service,
-  - runtime,
-  - drivers,
-  - logs.
-- Decide which actions are shared and which are internal Electron elevated helpers.
-
-Acceptance:
-
-- `webui/desktop/preload/index.ts`, `webui/src/api/desktop.ts`, and `src/app_api.cpp` agree on action names.
-- There are no duplicate connect/disconnect cases with divergent payload shapes.
-
-#### S1.3 Contract Change Gate
+#### G0.3 Freeze Final Integration Inputs
 
 Owner: integration lead
 
 Actions:
 
-- Add a short "contract frozen" note to the merge playbook.
-- Require all later changes to contract files to name the task that needed the change.
+- Announce that new platform-specific fixes should land on their platform branch only if they are urgent.
+- Non-urgent shared fixes should land directly on the integration branch as small, named repair commits.
+- Update the merge playbook with the rule: no direct merge into `develop` until G3 is green.
 
-Acceptance:
+Acceptance criteria:
 
-- No worker lane changes frozen contract files without an explicit task reference.
+- Every later commit in the stage has one of these labels in the commit message or playbook note: `audit`, `repair`, `validation`, or `merge-prep`.
 
-### S2. Platform Boundary Audit
+### G1. Resolution Audit
 
-Objective: keep only abstractions that reduce real merge conflicts or clarify platform ownership.
+Objective: audit the current integration branch by subsystem so previous conflict resolutions become intentional decisions rather than opaque merge artifacts.
 
-#### S2.1 Audit New Platform Adapter Files
+#### G1.1 Native Platform Adapter Audit
 
-Owner: platform audit lead
+Owner: native platform lane
 
-Actions:
+Primary files:
 
-- Review every new file under:
-  - `src/platform/common`,
-  - `src/platform/darwin`,
-  - `src/platform/linux`,
-  - `src/platform/win32`.
-- Mark each as `accept`, `merge with another adapter`, or `remove`.
-- Keep Linux adapters only when they preserve current CLI behavior or avoid `#ifdef` returning to shared code.
-
-Acceptance:
-
-- Every accepted adapter has at least one shared caller.
-- No adapter exists only as a naming wrapper around one line of unchanged code unless it removes repeated platform branching.
-
-#### S2.2 Validate CMake Integration
-
-Owner: build lead
+- `src/platform/common/*`
+- `src/platform/win32/*`
+- `src/platform/darwin/*`
+- `tests/platform_status_models_test.cpp`
 
 Actions:
 
-- Ensure platform adapter sources are included exactly once per target.
-- Ensure Windows builds both `exv.exe` and `exv-helper.exe`.
-- Ensure macOS builds the CLI/native binary and includes required platform sources.
-- Avoid source lists that include Windows-only service files on macOS or Unix-only files on Windows.
+- Compare integration branch versions against `windows` and `macos` for add/add adapter files.
+- Keep shared DTO/model definitions under `src/platform/common`.
+- Keep OS APIs and service/process/runtime probing under `src/platform/win32` and `src/platform/darwin`.
+- Remove or relocate any common file that is actually Linux-only or platform-specific.
 
-Acceptance:
+Scope boundary:
 
-- Windows CMake configure/build succeeds from a clean build directory.
-- macOS CMake configure/build succeeds from a clean build directory.
-- No platform-specific source file is compiled on the wrong platform.
+- This lane may not change Electron files.
+- This lane may not change public desktop contract fields unless G1.3 opens a contract repair task.
 
-#### S2.3 Validate Packaging Integration
+Acceptance criteria:
 
-Owner: desktop build lead
+- `src/platform/common` contains interfaces, DTOs, and platform-neutral logic only.
+- Windows service status still exposes installed/running/available/binary path semantics.
+- macOS service status still exposes launchd/helper availability semantics.
+- `platform_status_models_test` passes on both platforms.
 
-Actions:
+#### G1.2 Native RPC, Helper, And VPN Runtime Audit
 
-- Keep Windows packaging behavior from the Windows branch, including `exv-helper.exe` and runtime DLL staging.
-- Keep macOS runtime signing behavior from the macOS branch.
-- Ensure build scripts do not depend on untracked local paths or stale worktree directories.
+Owner: native lifecycle lane
 
-Acceptance:
-
-- Windows `resources/bin` contains `exv.exe`, `exv-helper.exe`, MinGW runtime DLLs, OpenConnect runtime, and `wintun.dll`.
-- macOS packaged runtime contains a codesigned staged `openconnect` and required dylibs.
-
-### S3. Hotspot Resolution
-
-Objective: reduce the 15 direct merge conflicts to zero or to documented integration-only conflicts.
-
-#### S3.1 Build System Hotspot
-
-Owner: build lead
-
-Files:
-
-- `CMakeLists.txt`
-- `webui/package.json`
-- `webui/scripts/prepare-native.cjs`
-
-Actions:
-
-- Resolve toward one build matrix with platform-specific source inclusion.
-- Keep Windows helper executable support.
-- Keep macOS runtime staging/signing support.
-- Avoid deleting existing Windows package validation.
-
-Acceptance:
-
-- `git merge-tree` no longer reports conflicts in these files.
-- Both platform build wrappers call the same underlying package scripts where possible.
-
-#### S3.2 Native RPC Hotspot
-
-Owner: native API lead
-
-Files:
+Primary files:
 
 - `src/app_api.cpp`
-- related platform policy adapters.
-
-Actions:
-
-- Keep `src/app_api.cpp` focused on shared RPC routing and response shaping.
-- Move platform decisions for helper missing, direct fallback, and runtime policy behind platform adapters.
-- Preserve Windows helper-first behavior and macOS one-time elevated direct fallback.
-
-Acceptance:
-
-- `src/app_api.cpp` has no large OS-specific service/process blocks.
-- Windows helper unavailable behavior is unchanged from tested Windows branch.
-- macOS direct fallback connect/disconnect works through the shared contract.
-
-#### S3.3 Helper And Pipe Hotspot
-
-Owner: helper lifecycle lead
-
-Files:
-
 - `src/helper.cpp`
+- `src/helper.hpp`
 - `src/helper_daemon_win.cpp`
-- helper lifecycle/platform adapters.
-
-Actions:
-
-- Preserve Windows named pipe newline-delimited JSON behavior.
-- Preserve `DisconnectNamedPipe` cleanup and Windows service lifecycle behavior.
-- Move platform install/uninstall/status details into service manager adapters.
-- Keep helper request protocol identical across clients.
-
-Acceptance:
-
-- Repeated `service.status` calls do not hang.
-- Windows helper service remains available after install.
-- macOS launchd helper remains available after install.
-
-#### S3.4 VPN Runtime Hotspot
-
-Owner: VPN runtime lead
-
-Files:
-
+- `src/helper_service_win.cpp`
+- `src/vpn.hpp`
 - `src/vpn_runtime.cpp`
 - `tests/vpn_runtime_test.cpp`
 
 Actions:
 
-- Merge Windows direct-session stop semantics with macOS elevated direct-session semantics.
-- Keep root-owned macOS direct session stoppable through elevated disconnect.
-- Keep Windows process tree cleanup and runtime status behavior.
-- Keep tests platform-aware without weakening assertions.
+- Verify shared native files own routing, state shaping, and orchestration only.
+- Verify Windows helper service still uses the dedicated service executable and named-pipe behavior validated on Windows.
+- Verify macOS helper and direct elevated session behavior still supports service-installed and helper-missing paths.
+- Confirm direct/elevated disconnect uses the correct privilege path for the process owner.
 
-Acceptance:
+Scope boundary:
 
-- Tests cover direct stop when process exists, process missing, and stale pid state.
-- Windows test build passes.
-- macOS test build passes.
+- Do not redesign helper IPC.
+- Do not change VPN protocol or route policy semantics.
+- Do not add new fallback behavior unless a validation failure proves it is required.
 
-#### S3.5 Desktop IPC And UI Hotspot
+Acceptance criteria:
 
-Owner: desktop UI lead
+- Windows helper-installed connect/disconnect works through the service.
+- macOS helper-installed connect/disconnect works through launchd helper.
+- macOS helper-missing one-time elevated connect and disconnect both work.
+- `vpn_runtime_test` passes on both platforms.
 
-Files:
+#### G1.3 Desktop Contract And Renderer Audit
 
+Owner: desktop contract lane
+
+Primary files:
+
+- `webui/desktop/shared/desktop-contract.ts`
+- `webui/desktop/main/index.ts`
 - `webui/desktop/preload/index.ts`
 - `webui/src/api/desktop.ts`
 - `webui/src/stores/vpn.ts`
+- `webui/src/stores/config.ts`
 - `webui/src/types/ecnu-vpn.d.ts`
-- `webui/src/components/NavBar.vue`
-- `webui/src/composables/useSSE.ts`
 
 Actions:
 
-- Keep Windows UI layout and service UX as canonical.
-- Use platform runner modules in Electron main only; do not fork Vue pages by platform.
-- Remove string-matching fallbacks when structured error fields exist.
-- Keep service progress logs visible for install/uninstall.
+- Treat the Windows UI layout and state model as canonical.
+- Keep one shared desktop contract for Windows and macOS.
+- Confirm renderer code does not send Vue reactive/proxy payloads over IPC.
+- Confirm helper-missing, elevated fallback, service unavailable, and command-cancelled errors use structured errors instead of brittle string matching.
 
-Acceptance:
+Scope boundary:
 
-- UI can install/uninstall service on Windows without false failure from SCM status lag.
-- UI can connect/disconnect via helper on Windows.
-- UI can one-time connect/disconnect on macOS when helper is missing.
-- No renderer payload sends reactive/proxy objects directly to IPC.
+- This lane may change TypeScript contract and store logic only if the native RPC lane confirms the same fields exist natively.
+- This lane may not fork Vue pages by platform.
 
-### S4. Validation And Rehearsal
+Acceptance criteria:
 
-Objective: prove the branches can merge and run on both platforms from clean state.
+- `npm run build` and `npm run build:electron` pass.
+- Windows service page still shows progress and final installed/running/available state correctly.
+- macOS one-time connection UX displays actionable results for success, cancellation, and helper unavailable states.
+- No duplicate `mode`/`session_mode` contract fields remain unless both are documented compatibility fields.
 
-#### S4.1 Windows Validation Gate
+#### G1.4 Packaging, Runtime, And Build Script Audit
 
-Owner: Windows validation agent
+Owner: build/package lane
+
+Primary files:
+
+- `CMakeLists.txt`
+- `CMakePresets.json`
+- `scripts/build-windows.ps1`
+- `scripts/build-macos.sh`
+- `scripts/validate-merge-prep-windows.ps1`
+- `scripts/validate-merge-prep-macos.sh`
+- `webui/package.json`
+- `webui/scripts/prepare-native.cjs`
+
+Actions:
+
+- Confirm Windows package staging includes `exv.exe`, `exv-helper.exe`, MinGW runtime DLLs, OpenConnect runtime, and `wintun.dll`.
+- Confirm macOS package staging includes the staged/codesigned OpenConnect runtime and dylibs.
+- Confirm build scripts do not depend on stale rehearsal paths.
+- Confirm build outputs remain platform-separated.
+
+Scope boundary:
+
+- Do not change package identifiers, signing identity, installer behavior, or release naming unless a validation failure requires it.
+- Do not collapse Windows and macOS build output directories.
+
+Acceptance criteria:
+
+- Windows package can be produced without manually copying runtime files.
+- macOS package can be produced after staging/signing runtime assets.
+- Validation wrappers invoke the same build path documented in `docs/build_guide.md`.
+
+### G2. Regression Repair
+
+Objective: fix only issues proven by G1 audit or G3 validation. Keep repairs small and tied to evidence.
+
+#### G2.1 Windows Regression Repair Gate
+
+Owner: Windows repair lane
+
+Triggers:
+
+- UI service uninstall says success but state still shows installed after refresh.
+- Service install succeeds but helper availability stays false.
+- Connect button returns to idle with helper unavailable despite service running.
+- Packaged runtime lacks required helper/runtime files.
+
+Actions:
+
+- Reproduce on `integration/platform-convergence-next`.
+- Patch the smallest owner module.
+- Record the exact failing command or manual step and the retest evidence.
+
+Acceptance criteria:
+
+- Administrator-launched Windows UI can install service, connect, disconnect, uninstall service, and refresh service state without false failure.
+- CLI `service.status` and desktop RPC `service.status` agree on installed/running/available.
+
+#### G2.2 macOS Regression Repair Gate
+
+Owner: macOS repair lane
+
+Triggers:
+
+- Helper-installed connect/disconnect regresses.
+- Helper-missing one-time elevated connect succeeds but disconnect fails.
+- Runtime staging produces unsigned or killed OpenConnect binary.
+- UI service install is blocked by interactive CLI prompts.
+
+Actions:
+
+- Reproduce on the mac mini checkout from the integration branch.
+- Patch the smallest owner module.
+- Record exact commands and user-visible result.
+
+Acceptance criteria:
+
+- Helper service install/uninstall/connect/disconnect works.
+- Helper-missing one-time elevated connect and disconnect both work.
+- Packaged macOS runtime passes signing verification.
+
+#### G2.3 Shared Contract Repair Gate
+
+Owner: integration lead plus affected lane
+
+Triggers:
+
+- Windows and macOS require incompatible fields for the same UI state.
+- Renderer code must branch by platform to interpret the same RPC response.
+- Native code and TypeScript contract disagree on success/error envelope.
+
+Actions:
+
+- Open one explicit contract repair commit.
+- Update native DTOs, desktop contract, preload typings, API client, and store usage together.
+- Add or update a focused contract test if one exists for the touched area.
+
+Acceptance criteria:
+
+- Renderer sees one shared response shape.
+- Platform-specific meaning is carried by values, not by different field names.
+- Both platform validation lanes rerun after the contract change.
+
+### G3. Dual-Platform Validation
+
+Objective: prove the integration branch is shippable enough to merge into `develop`.
+
+#### G3.1 Windows Automated Validation
+
+Owner: Windows validation lane
 
 Commands:
 
 ```powershell
 cd "D:\Development\Projects\cpp\ECNU-VPN"
-cmake --build "D:\Development\Projects\cpp\ECNU-VPN\build" --config Release
-ctest --test-dir "D:\Development\Projects\cpp\ECNU-VPN\build" --output-on-failure
+powershell -ExecutionPolicy Bypass -File ".\scripts\validate-merge-prep-windows.ps1"
 
 cd "D:\Development\Projects\cpp\ECNU-VPN\webui"
 npm run build
@@ -393,30 +347,45 @@ npm run build:electron
 npm run desktop:build
 ```
 
-Manual scenarios:
+Acceptance criteria:
 
+- Native build passes.
+- Focused native tests pass.
+- Electron TypeScript build passes.
+- Desktop package build passes.
+- `webui\release\win-unpacked\resources\bin` contains all required native/runtime files.
+
+#### G3.2 Windows Manual Validation
+
+Owner: Windows validation lane
+
+Scenarios:
+
+- Launch packaged or dev Electron UI from an administrator PowerShell.
 - Install helper service from UI.
-- Confirm service status shows installed/running/available.
+- Confirm service page shows installed/running/available.
+- Save auth settings.
 - Connect through helper.
 - Disconnect through helper.
-- Uninstall helper service and confirm UI does not show false "uninstall incomplete" after SCM settles.
+- Uninstall helper service from UI.
+- Confirm service page refreshes to uninstalled/not running/not available.
 
-Acceptance:
+Acceptance criteria:
 
-- All commands pass.
-- Manual service lifecycle passes on administrator-launched UI.
+- No `Helper daemon is not available` error after service status reports available.
+- No false "uninstall incomplete" message after SCM settles.
+- No IPC clone error when saving auth/settings/routes.
+- UI button state returns to the correct final state after connect/disconnect failure or success.
 
-#### S4.2 macOS Validation Gate
+#### G3.3 macOS Automated Validation
 
-Owner: macOS validation agent
+Owner: macOS validation lane
 
 Commands:
 
 ```bash
 cd /Users/tomli/Development/Projects/cpp/ECNU-VPN
-cmake --preset macos-release
-cmake --build --preset macos-release
-ctest --preset macos-release --output-on-failure
+./scripts/validate-merge-prep-macos.sh
 
 cd webui
 npm run build
@@ -424,138 +393,192 @@ npm run build:electron
 npm run desktop:build
 ```
 
-Manual scenarios:
+Acceptance criteria:
 
-- Install helper service through UI.
-- Connect and disconnect through helper.
+- Native build passes.
+- Focused native tests pass.
+- Electron TypeScript build passes.
+- Desktop package build passes.
+- Staged OpenConnect runtime is present and signed.
+
+#### G3.4 macOS Manual Validation
+
+Owner: macOS validation lane
+
+Scenarios:
+
+- Install helper service from UI.
+- Confirm service status shows installed/running/available.
+- Connect through helper.
+- Disconnect through helper.
 - Uninstall helper service.
-- Use one-time elevated connect when helper is missing.
-- Disconnect one-time elevated session successfully.
+- With helper missing, run one-time elevated connect.
+- Disconnect that one-time elevated session.
+- Cancel the privilege prompt and confirm UI shows a clean cancellation/error state.
 
-Acceptance:
+Acceptance criteria:
 
-- Bundled `openconnect` passes `codesign --verify --strict`.
-- One-time elevated disconnect no longer reports `Failed to stop VPN`.
+- Helper-installed path works.
+- Helper-missing one-time connect works.
+- Helper-missing one-time disconnect works.
+- OpenConnect is not killed by macOS signing/quarantine checks.
+- UI does not require direct terminal commands for normal validation scenarios.
 
-#### S4.3 Fresh Merge Rehearsal
-
-Owner: integration lead
-
-Actions:
-
-- Create a fresh worktree from `develop`.
-- Create `integration/platform-convergence-next`.
-- Merge `windows`.
-- Merge `macos`.
-- Resolve remaining conflicts using this plan's ownership.
-- Record every conflict and resolution in `docs/merge-playbooks/windows-macos-merge.md`.
-
-Acceptance:
-
-- Rehearsal result builds on Windows.
-- Rehearsal result builds on macOS.
-- Conflict list is stable and explained.
-
-### S5. GitHub Integration Prep
-
-Objective: make the final push/PR sequence simple and auditable.
-
-#### S5.1 Branch Push Order
+#### G3.5 Final Merge Rehearsal
 
 Owner: integration lead
 
 Actions:
 
-- Push `windows`.
-- Push `macos`.
-- Push `integration/platform-convergence-next`.
-- Do not push rehearsal branches.
+- From a clean checkout/worktree, merge `integration/platform-convergence-next` into `develop` with `--no-commit --no-ff`.
+- Confirm conflicts are either zero or already documented integration-only conflicts.
+- Abort the rehearsal merge after recording the result.
 
-Acceptance:
+Acceptance criteria:
 
-- GitHub shows only meaningful branches for review.
-- Integration branch contains no detached snapshot commits or local path artifacts.
+- No new conflict appears outside the documented conflict classes.
+- The merge playbook records the final `develop` rehearsal command and result.
 
-#### S5.2 PR Structure
+### G4. Develop Merge And GitHub Prep
+
+Objective: land the validated integration branch into `develop` with a clear rollback and review path.
+
+#### G4.1 Pre-Merge Checklist
 
 Owner: integration lead
 
-Recommended PRs:
+Actions:
 
-1. `windows` -> `develop`: Windows helper/service and desktop contract baseline.
-2. `macos` -> `develop` or `macos` -> `integration/platform-convergence-next`: macOS helper/direct fallback/runtime signing.
-3. `integration/platform-convergence-next` -> `develop`: final resolved convergence if direct platform PRs remain too noisy.
+- Confirm `windows`, `macos`, and `integration/platform-convergence-next` are clean.
+- Confirm integration contains both platform heads.
+- Confirm G3 Windows and macOS validation evidence is recorded.
+- Confirm unresolved risks are either closed or explicitly accepted.
 
-Acceptance:
+Acceptance criteria:
 
-- Each PR description lists validation commands and manual scenarios.
-- No PR depends on untracked local worktree files.
+- No merge to `develop` happens without the checklist being complete.
 
-## 4. Dependency And Parallelism Plan
+#### G4.2 Merge Into Develop
 
-### Serial Work
+Owner: integration lead
 
-These tasks must happen in order:
+Actions:
 
-1. `S0.1` capture state.
-2. `S0.2` clean/quarantine rehearsal worktrees.
-3. `S0.3` split current macOS WIP into coherent commits.
-4. `S1.1` and `S1.2` freeze contract.
-5. `S4.3` fresh merge rehearsal.
-6. `S5` GitHub integration prep.
+- Check out `develop`.
+- Merge `integration/platform-convergence-next`.
+- Run a lightweight post-merge smoke check on the merge result.
+- Record the merge commit and validation summary in the merge playbook.
 
-### Parallel Work After Contract Freeze
+Scope boundary:
 
-The following can run in parallel after `S1`:
+- Do not perform new feature repairs on `develop`.
+- If merge-result validation fails, revert or reset the merge locally before pushing, then repair on integration.
 
-- Build lead: `S2.2`, `S3.1`.
-- Native API lead: `S3.2`.
-- Helper lifecycle lead: `S3.3`.
-- VPN runtime lead: `S3.4`.
-- Desktop UI lead: `S3.5`.
-- Platform audit lead: `S2.1`, `S2.3`.
+Acceptance criteria:
+
+- `develop` contains the validated integration branch.
+- `develop` is clean after merge.
+- No unreviewed local artifact is committed.
+
+#### G4.3 GitHub Push And PR Sequence
+
+Owner: integration lead
+
+Preferred sequence:
+
+1. Push `windows`.
+2. Push `macos`.
+3. Push `integration/platform-convergence-next`.
+4. Merge or PR `integration/platform-convergence-next` into `develop`.
+5. Push `develop` only after the final local validation gate.
+
+Acceptance criteria:
+
+- GitHub history has one understandable integration path.
+- The PR or merge description links to the merge playbook and this plan.
+- Reviewers can reproduce validation without local hidden state.
+
+## 4. Multi-Agent Collaboration Model
+
+### Lane Assignments
+
+| Lane | Responsibility | Primary Write Scope | Blocked Scope |
+|---|---|---|---|
+| Integration Lead | Branch hygiene, integration branch, merge playbook, final gate | docs, merge commits, integration-only conflict resolutions | Lane-owned implementation changes unless unblocking merge |
+| Native Platform Lane | Platform DTOs/status/runtime adapters | `src/platform/**`, status tests | Electron/UI files |
+| Native Lifecycle Lane | app API/helper/VPN runtime behavior | `src/app_api.cpp`, `src/helper*`, `src/vpn*`, runtime tests | Build/package scripts except via integration lead |
+| Desktop Contract Lane | Electron contract, preload, stores, renderer API | `webui/desktop/**`, `webui/src/api/**`, `webui/src/stores/**`, typings | Native C++ behavior |
+| Build Package Lane | CMake, wrapper scripts, runtime staging | CMake/scripts/package files | Runtime behavior unless required by packaging validation |
+| Windows Validation Lane | Windows automated/manual validation | validation notes only; repair patches only after trigger | macOS-only behavior |
+| macOS Validation Lane | macOS automated/manual validation | validation notes only; repair patches only after trigger | Windows-only behavior |
+
+### Parallelism Rules
+
+- G0 is serial.
+- G1.1, G1.2, G1.3, and G1.4 can run in parallel after G0.
+- G2 repair lanes can run in parallel only when they touch disjoint files.
+- G3.1/G3.2 and G3.3/G3.4 can run in parallel on Windows and macOS machines.
+- G3.5 and all G4 tasks are serial final gates.
 
 ### Cross-Lane Blocking Rules
 
-- `S3.5` cannot finalize renderer/store behavior until `S1.1` freezes status/error fields.
-- `S3.2` cannot finalize direct fallback behavior until `S3.4` exposes final direct runtime stop semantics.
-- `S3.1` must be complete before final platform validation wrappers are considered authoritative.
-- `S4.3` cannot start until every lane has a clean branch handoff and validation evidence.
+- Desktop contract changes block all UI validation until native DTO and TypeScript typings agree.
+- Native lifecycle changes block manual connect/disconnect validation on both platforms.
+- Build/package changes block desktop package validation on both platforms.
+- Any change to `webui/desktop/shared/desktop-contract.ts` requires rerunning both Windows and macOS desktop validation.
+- Any change to `src/vpn_runtime.cpp` or process-control adapters requires rerunning connect/disconnect manual scenarios on both platforms.
 
-## 5. Completed Work Review: Keep, Repair, Or Discard
+### Handoff Requirements
+
+Every lane handoff must include:
+
+- Branch name and commit hash.
+- Files intentionally changed.
+- Files intentionally not touched.
+- Exact validation commands run.
+- Manual scenarios run, if any.
+- Known residual risk.
+
+## 5. Repair Of Previously Completed Work
 
 ### Keep
 
-- Windows helper service split and `exv-helper.exe` packaging path.
-- Windows service uninstall status-settle polling.
-- macOS elevated direct connect/disconnect fixes.
-- macOS staged OpenConnect ad-hoc signing and signature validation.
-- Shared desktop contract direction.
-- Platform status adapter direction.
+- Windows dedicated helper executable and service-manager path.
+- Windows named-pipe helper availability model.
+- Windows UI layout and service progress UX as canonical frontend.
+- macOS stable helper install path and launchd helper model.
+- macOS staged/codesigned OpenConnect runtime.
+- macOS one-time elevated connection concept when helper is missing.
+- Shared desktop contract and platform adapter direction.
+- Single temporary integration branch strategy.
 
-### Repair
+### Repair Or Re-Audit
 
-- Current `macos` staged/unstaged merge-prep inventory must be split into reviewed commits.
-- Rehearsal worktrees must be cleaned or archived; they are not implementation baselines.
-- `webui` IPC/store contract must be audited for duplicate `mode`/`session_mode` semantics.
-- `src/vpn_runtime.cpp` and `tests/vpn_runtime_test.cpp` add/add conflict must be resolved as one shared runtime contract, not by choosing one side.
-- Build scripts must be verified from clean worktrees, not from local dirty state.
+- `integration/platform-convergence-next` must be updated to include the current `macos` head.
+- Add/add platform adapter resolutions must be audited; compiling is not enough.
+- Direct/elevated connect and disconnect semantics must be validated on both platforms from the integration branch.
+- Windows service uninstall UI state must be rechecked because this has regressed before.
+- macOS helper-missing one-time disconnect must be rechecked because this has regressed before.
+- Packaging scripts must be validated from clean branch state, not from runtime files copied manually during debugging.
 
-### Discard Or Archive
+### Do Not Repeat
 
-- Detached rehearsal snapshot commits that only record failed merge attempts.
-- Nested `rehearsal-windows-wrapper*` worktrees.
-- Obsolete docs that describe branch states no longer true after 2026-05-21, unless preserved in the playbook as historical notes.
-- Any platform abstraction that has no shared caller and does not reduce an actual conflict hotspot.
+- Do not create more rehearsal worktrees unless a specific validation step requires one.
+- Do not merge directly into `develop` before G3 passes.
+- Do not resolve direct `windows` + `macos` conflicts from scratch when the integration branch already contains a resolved candidate.
+- Do not move platform files into separate renamed directories just to avoid Git conflicts; use the existing `src/platform/{common,win32,darwin,linux}` ownership model and audit content instead.
 
-## 6. Final Integration Checklist
+## 6. Final Readiness Checklist
 
 Before merging to `develop`, verify:
 
-- `git status --short --branch` is clean on `windows`, `macos`, and `integration/platform-convergence-next`.
-- `git worktree list --porcelain` contains only intentional active worktrees.
-- `git merge-tree --write-tree --messages --name-only windows macos` has no unresolved contract conflicts.
-- Windows native, tests, Electron build, desktop package, and manual service lifecycle pass.
-- macOS native, tests, Electron build, desktop package, helper lifecycle, and one-time elevated fallback pass.
-- `docs/merge-playbooks/windows-macos-merge.md` records final conflict resolutions and validation evidence.
-- GitHub PR descriptions include exact commands and platform/manual test results.
+- [ ] `integration/platform-convergence-next` contains current `windows`.
+- [ ] `integration/platform-convergence-next` contains current `macos`.
+- [ ] G1 audit notes are recorded for native platform, native lifecycle, desktop contract, and build/package lanes.
+- [ ] Windows automated validation passes.
+- [ ] Windows manual service/connect/disconnect validation passes.
+- [ ] macOS automated validation passes.
+- [ ] macOS manual helper and helper-missing validation passes.
+- [ ] Final `develop` merge rehearsal is recorded.
+- [ ] `docs/merge-playbooks/windows-macos-merge.md` contains final validation evidence and residual risks.
+- [ ] `develop` merge is performed only after all previous boxes are checked.
