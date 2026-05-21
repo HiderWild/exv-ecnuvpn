@@ -250,6 +250,50 @@ Current branch-history landing scope (2026-05-21):
 - The active `windows` worktree still carries the Windows-side subset of that landing batch: scripts/presets/wrappers plus desktop build/package wiring (`webui/package.json`, Electron build scripts, `prepare-native.cjs`).
 - Until those batches are landed into branch history, branch-head rehearsals remain a hotspot inventory only; the current-state snapshot rehearsal remains the authoritative integration signal.
 
+## S4 Integration Rehearsal (2026-05-21)
+
+Branch: `integration/platform-convergence-next` (from `develop`)
+
+### Step 1: Merge windows into integration
+
+- `git merge windows --no-commit`
+- 3 conflicts: `webui/src/api/desktop.ts`, `webui/src/pages/ServicePage.vue`, `webui/src/stores/vpn.ts`
+- Resolution: preferred windows-side contract patterns (desktopApiPaths constants, ServiceStatus label/endpoint fields, VpnErrorType)
+- Committed as `8b05440`
+
+### Step 2: Merge macos into integration
+
+- `git merge macos --no-commit`
+- 47 conflicts across C++ core, platform adapters, tests, docs, and webui
+- Resolution strategy:
+  - C++ core: preferred macos platform adapter delegation
+  - Platform adapters: macos for darwin/common, windows for win32
+  - Tests: preferred macos audit-fixed versions
+  - Docs: combined both platforms' content
+  - Webui: preferred integration branch (richer state machine, structured errors)
+- Committed as `75244f0`
+
+### Step 3: Post-merge fixes
+
+- Removed unused Shield/ShieldCheck/ShieldOff imports and serviceName from ServicePage.vue (`fc42921`)
+- Removed stale `src/platform/common/helper_platform_linux.cpp` (moved to `src/platform/linux/`) (`f2a6f0c`)
+
+### Validation
+
+- `cmake --build --preset macos-release`: pass
+- `ctest --preset macos-release --output-on-failure`: 5/5 passed
+- `cd webui && npm run build`: pass
+
+### Conflict inventory (47 files, all resolved)
+
+C++ core (10): .gitignore, CMakeLists.txt, src/app_api.cpp, src/helper.cpp, src/helper.hpp, src/helper_daemon_win.cpp, src/helper_service_win.cpp, src/vpn.hpp, src/vpn_runtime.cpp, scripts/embed_assets.py
+
+Platform adapters (16): src/platform/common/{driver_status.hpp, driver_status_stub.cpp, helper_client.hpp, helper_platform.hpp, runtime_status.cpp, runtime_status.hpp, service_status.hpp, service_status_linux.cpp, status_models.cpp, status_models.hpp}, src/platform/darwin/{helper_client.cpp, helper_platform.cpp, service_status.cpp}, src/platform/win32/{driver_status.cpp, helper_platform.cpp, service_status.cpp}
+
+Tests+docs (4): tests/platform_status_models_test.cpp, tests/vpn_runtime_test.cpp, docs/code_guide.md, docs/user_guide.md
+
+Webui (17): webui/README.md, webui/desktop/main/index.ts, webui/desktop/preload/index.ts, webui/desktop/shared/desktop-contract.ts, webui/package.json, webui/scripts/prepare-native.cjs, webui/src/{App.vue, api/desktop.ts, components/NavBar.vue, composables/useSSE.ts, pages/{DashboardPage.vue, LogsPage.vue, ServicePage.vue, SettingsPage.vue}, stores/{config.ts, vpn.ts}, types/ecnu-vpn.d.ts}
+
 ## Closure Criteria
 
 - Both merge directions are rehearsed in fresh worktrees.
