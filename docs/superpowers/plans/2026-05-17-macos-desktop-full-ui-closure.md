@@ -1,5 +1,11 @@
 # macOS Desktop-First Full-UI Closure Implementation Plan
 
+> Status: CLOSED / SUPERSEDED.
+> Closed on: 2026-05-22.
+> Superseded by: `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`.
+> Closure summary: macOS desktop-first implementation work has been absorbed into the platform convergence branch. Helper-installed and helper-missing functional validation moves to R2; route cleanup and packaged `.app`/DMG checks move to R2/R5.
+> Historical note: keep this file as background for macOS UI closure only; do not use its unchecked boxes as the active task list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 `macos` 分支上，把当前仍以 CLI/browser-WebUI 为主的实现推进到真正的桌面优先产品形态：用户通过 Electron 图形界面即可完成 launchd helper 安装、一次性授权连接、状态查看、断开、配置修改和错误恢复；同时保持 macOS 上的 route cleanup、route-ready 与 helper 生命周期一致可靠。

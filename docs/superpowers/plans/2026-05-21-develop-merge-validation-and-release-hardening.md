@@ -1,6 +1,12 @@
 # Develop Merge Validation And Release Hardening Plan
 
-> Status: active execution plan for the next large stage.
+> Status: CLOSED / SUPERSEDED.
+> Closed on: 2026-05-22.
+> Superseded by: `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`.
+> Closure summary: this plan established the first develop merge validation gate, but its baseline predates the 2026-05-22 completion review. Remaining Windows validation, macOS functional validation, remote team status cleanup, final `develop` merge, and release hardening are transferred to the successor plan.
+> Historical note: keep this file for context only; do not use it as the active checklist.
+
+> Original status: active execution plan for the next large stage.
 > Date: 2026-05-21
 > Supersedes:
 > - `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.md`

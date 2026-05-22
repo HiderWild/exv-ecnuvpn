@@ -4,6 +4,8 @@
 > Branch: integration/platform-convergence-next
 > Owner: team-lead
 
+> Supersession note (2026-05-22): this document remains valid as historical macOS automated validation evidence, but its final recommendation is superseded by `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`. The current gate requires Windows validation and macOS manual helper-installed plus helper-missing functional evidence before merging to `develop`.
+
 ## Automated Validation Results
 
 ### Native Build
@@ -53,4 +55,4 @@ Windows validation (G3.1/G3.2) cannot be performed from macOS. Requires:
 | macOS functional VPN test | PENDING (requires user) |
 | Windows build + tests | PENDING (requires Windows) |
 
-**Recommendation**: Proceed with G4 (develop merge) based on automated macOS validation passing. Windows validation should be confirmed separately before final release.
+**Historical recommendation, superseded on 2026-05-22**: this earlier recommendation to proceed with G4 based on automated macOS validation alone is no longer sufficient. Follow `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md` for the active merge gate.

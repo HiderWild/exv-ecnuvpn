@@ -1,5 +1,11 @@
 # Cross-Platform Convergence Implementation Plan
 
+> Status: CLOSED / SUPERSEDED.
+> Closed on: 2026-05-22.
+> Superseded by: `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`.
+> Closure summary: the original cross-platform implementation plan is obsolete as the Windows/macOS platform convergence has landed in `integration/platform-convergence-next`. Linux completion, CI, and remaining broad cross-platform hardening are transferred to R5 as post-merge release/readiness work.
+> Historical note: keep this file as the initial convergence blueprint only; do not use its unchecked boxes as the active task list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make ECNU-VPN (exv) fully functional on macOS, Linux, and Windows with automated CI.

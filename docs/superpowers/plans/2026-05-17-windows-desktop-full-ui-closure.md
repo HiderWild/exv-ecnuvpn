@@ -1,5 +1,11 @@
 # Windows Desktop-First Full-UI Closure Implementation Plan
 
+> Status: CLOSED / SUPERSEDED.
+> Closed on: 2026-05-22.
+> Superseded by: `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`.
+> Closure summary: Windows desktop-first implementation work has been absorbed into the platform convergence branch. Service-first validation moves to R1; no-service elevated fallback, driver/runtime readiness, portable-vs-installer parity, and release verification move to R5 release hardening.
+> Historical note: keep this file as background for Windows UI closure only; do not use its unchecked boxes as the active task list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 `windows` 分支上，把当前已经成型的 Windows 桌面端能力收束成真正可发布、可验证、可完全通过 GUI 使用的产品闭环，让用户在未接触终端的前提下完成安装服务、一次性提权连接、驱动准备、运行时诊断、连接与断开。

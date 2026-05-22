@@ -2,24 +2,25 @@
 
 This playbook records the working agreement, merge rehearsal steps, manual conflict resolutions, validation evidence, and residual risks for the current merge-prep wave.
 
-## Develop Merge Gate Handoff (2026-05-21)
+## Develop Merge Gate Handoff (2026-05-22)
 
 Active successor plan:
 
-- `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`
+- `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`
 
 Current branch heads:
 
 - `develop` = `7d39136` (Merge Windows desktop convergence)
 - `windows` = `66dbfa8` (refactor: unify desktop contract and platform status adapters)
 - `macos` = `6fb5ebb` (docs: record S4 integration rehearsal results)
-- `integration/platform-convergence-next` = `cc11a5b` (validation: record G3 macOS platform validation results)
+- `integration/platform-convergence-next` = `96d781c` (docs: plan develop merge validation gate)
 
 Current branch relationship:
 
 - `git merge-base --is-ancestor windows integration/platform-convergence-next`: PASS
 - `git merge-base --is-ancestor macos integration/platform-convergence-next`: PASS
 - `git merge-tree --write-tree --messages --name-only develop integration/platform-convergence-next`: PASS, no conflict paths reported
+- `git diff --name-only develop..integration/platform-convergence-next`: 136 changed paths
 
 Completed in the previous stage:
 
@@ -32,6 +33,12 @@ Completed in the previous stage:
 - G3 macOS automated validation: complete; native build, 5 focused tests, webui build, and Electron build passed.
 - G4 develop merge rehearsal: ready; merge-tree reports no conflict paths.
 
+Not accepted as completion evidence:
+
+- Remote OMC team `ecnu-vpn-develop-merge-validat` is still in planning/pending state; all three tasks are pending and no validation artifact has been produced.
+- The remote macmini worktree at `/Users/tomli/Development/Projects/CPP/ECNU-VPN` is dirty; those edits cannot be counted as validation until they are reviewed, committed or discarded, and tied to exact commands.
+- The 2026-05-21 G3 macOS recommendation to proceed with G4 based only on automated macOS validation is superseded by the 2026-05-22 plan.
+
 Pending before `develop` merge:
 
 - Windows automated validation from `integration/platform-convergence-next`.
@@ -42,7 +49,8 @@ Pending before `develop` merge:
 
 Gate rule:
 
-- Do not merge or push `develop` until the pending validations pass or an explicitly accepted risk is recorded in this playbook.
+- Do not merge, push, or repair directly on `develop` until the pending validations pass or an explicitly accepted risk is recorded in this playbook.
+- All develop-blocker repairs land on `integration/platform-convergence-next` first, followed by focused retest evidence.
 
 ## G0 Baseline Lock (2026-05-21)
 
@@ -71,8 +79,10 @@ Merge of macos into integration (G0.2): clean merge, no new conflicts. Committed
 
 ## Scope
 
-- Active execution contract: `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`
-- Historical execution contract: `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.md`
+- Active execution contract: `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`
+- Historical execution contracts:
+	- `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`
+	- `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.md`
 - Architecture entrypoint: `docs/merge-prep-platform-architecture.md`
 - Rehearsal owner: integration lead
 - Runtime behavior changes do not belong in this file; record process and evidence only.

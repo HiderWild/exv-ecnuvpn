@@ -1,12 +1,12 @@
 # Windows/macOS Platform Convergence Next Stage Plan
 
 > Status: CLOSED / SUPERSEDED.
-> Closed on: 2026-05-21.
-> Superseded by: `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`.
+> Closed on: 2026-05-21; successor updated on 2026-05-22.
+> Superseded by: `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`.
 > Closure summary: G0 baseline lock, G1 audits, G2 tracked-artifact cleanup, and macOS automated validation have been recorded on `integration/platform-convergence-next`. Remaining Windows validation, macOS functional validation, final `develop` merge gating, and release hardening are transferred to the successor plan.
 > Historical note: keep this file for context only; do not use it as the active execution checklist.
 
-> Status: execution plan for the next large integration stage.
+> Original status: execution plan for the next large integration stage.
 > Date: 2026-05-21
 > Primary goal: turn the current Windows/macOS convergence work into a validated `integration/platform-convergence-next` branch, then merge that branch into `develop` only after both platforms pass the agreed gates.
 
