@@ -13,14 +13,14 @@ Current branch heads (verified 2026-05-22):
 - `develop` = `7d39136` (Merge Windows desktop convergence)
 - `windows` = `66dbfa8` (refactor: unify desktop contract and platform status adapters)
 - `macos` = `6fb5ebb` (docs: record S4 integration rehearsal results)
-- `integration/platform-convergence-next` = `25a1729` (docs: define develop merge readiness plan)
+- `integration/platform-convergence-next` = `c00d44e` (fix: restore windows helper packaging validation)
 
 Current branch relationship (verified 2026-05-22):
 
 - `git merge-base --is-ancestor windows integration/platform-convergence-next`: PASS
 - `git merge-base --is-ancestor macos integration/platform-convergence-next`: PASS
-- `git merge-tree --write-tree --messages --name-only develop integration/platform-convergence-next`: PASS — output is tree hash `dc90fc3` only, no conflict paths listed
-- `git diff --name-only develop..integration/platform-convergence-next`: 140 changed paths (updated 2026-05-22; was 136 at initial handoff)
+- `git merge-tree --write-tree --messages --name-only develop integration/platform-convergence-next`: PASS - output is tree hash `f51b701` only, no conflict paths listed
+- `git diff --name-only develop..integration/platform-convergence-next`: 142 changed paths (updated 2026-05-22; was 136 at initial handoff)
 
 Completed in the previous stage (evidence labels):
 
@@ -32,7 +32,9 @@ Completed in the previous stage (evidence labels):
 - G2 tracked sync-conflict cleanup: [EVIDENCE] complete by tracked-file check; `git ls-files | rg "sync-conflict|rehearsal"` reports no tracked artifacts. Note (2026-05-22): 3 untracked sync-conflict files exist on disk but are not tracked by git — `docs/merge-playbooks/windows-macos-merge.sync-conflict-20260522-133053-AAEI436.md`, `docs/merge-playbooks/windows-macos-merge.sync-conflict-20260522-133054-AAEI436.md`, `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.sync-conflict-20260522-132919-AAEI436.md`. These should be deleted before merge.
 - G3 macOS automated validation: [EVIDENCE] complete; native build, 5 focused tests, webui build, and Electron build passed — see `docs/merge-playbooks/g3-macos-validation.md`. Note: macOS-only; does not satisfy the dual-platform gate.
 - R2.1 macOS automated validation (2026-05-22): [EVIDENCE] PASS on `integration/platform-convergence-next` at `25a1729`. `cmake --build --preset macos-release`: PASS. `ctest --preset macos-release --output-on-failure`: 5/5 passed (platform_status_models_test, vpn_runtime_test, tunnel_script_contract_test, app_api_runtime_policy_test, crypto_roundtrip_test). `cd webui && npm run build`: PASS (215ms). `cd webui && npm run build:electron`: PASS. Desktop package build: PASS — arm64 and x64 DMGs built with ad-hoc signing; notarization skipped (no Apple developer certificate).
-- G4 develop merge rehearsal: [EVIDENCE] ready; `git merge-tree --write-tree develop integration/platform-convergence-next` reports no conflict paths (tree hash `dc90fc3`, verified 2026-05-22).
+- R1.1 Windows automated validation (2026-05-22): [EVIDENCE] PASS on `integration/platform-convergence-next` at `c00d44e`. `powershell -ExecutionPolicy Bypass -File .\scripts\validate-merge-prep-windows.ps1`: PASS. It completed frontend asset build, native configure/build, 5 focused native tests, Electron main/preload compilation, native staging, and printed `[merge-prep] Windows validation complete.`.
+- R1.3 Windows package runtime inspection (2026-05-22): [EVIDENCE] PASS on `integration/platform-convergence-next` at `c00d44e`. `cd webui && npm run desktop:build`: PASS; generated `ECNU VPN Setup 0.0.0.exe`, `ECNU-VPN-0.0.0-portable.exe`, and `win-unpacked`. Packaged `resources/bin` contains `exv.exe`, `exv-helper.exe`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`, `openconnect.exe`, and `wintun.dll`. Packaged `exv.exe --version`, `desktop-rpc runtime.status '{}'`, and `desktop-rpc service.status '{}'` all returned exit code 0.
+- G4 develop merge rehearsal: [EVIDENCE] ready; `git merge-tree --write-tree develop integration/platform-convergence-next` reports no conflict paths (tree hash `f51b701`, verified 2026-05-22).
 
 Not accepted as completion evidence:
 
@@ -43,8 +45,9 @@ Not accepted as completion evidence:
 Pending before `develop` merge (dual-platform gate — both must pass):
 
 - R2.1 macOS automated validation: PASS (evidence recorded above).
-- R2.2 Windows automated validation from `integration/platform-convergence-next`: pending.
-- R2.3 Windows manual helper service install/connect/disconnect/uninstall validation: pending.
+- R1.1 Windows automated validation from `integration/platform-convergence-next`: PASS (evidence recorded above).
+- R1.3 Windows package runtime inspection: PASS (evidence recorded above).
+- R1.2 Windows manual helper service install/connect/disconnect/uninstall validation: pending. Current terminal is not elevated; packaged CLI `service.status` reports the installed Windows helper service is running and available, but the GUI install/connect/disconnect/uninstall path still requires Administrator UI testing with credentials.
 - macOS manual helper-installed connect/disconnect validation with real credentials: pending.
 - macOS manual helper-missing one-time elevated connect/disconnect validation: pending.
 - Any targeted repair required by those validation gates.
