@@ -8,55 +8,59 @@ Active successor plan:
 
 - `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md`
 
-Current branch heads:
+Current branch heads (verified 2026-05-22):
 
 - `develop` = `7d39136` (Merge Windows desktop convergence)
 - `windows` = `66dbfa8` (refactor: unify desktop contract and platform status adapters)
 - `macos` = `6fb5ebb` (docs: record S4 integration rehearsal results)
-- `integration/platform-convergence-next` = `96d781c` (docs: plan develop merge validation gate)
+- `integration/platform-convergence-next` = `25a1729` (docs: define develop merge readiness plan)
 
-Current branch relationship:
+Current branch relationship (verified 2026-05-22):
 
 - `git merge-base --is-ancestor windows integration/platform-convergence-next`: PASS
 - `git merge-base --is-ancestor macos integration/platform-convergence-next`: PASS
-- `git merge-tree --write-tree --messages --name-only develop integration/platform-convergence-next`: PASS, no conflict paths reported
-- `git diff --name-only develop..integration/platform-convergence-next`: 136 changed paths
+- `git merge-tree --write-tree --messages --name-only develop integration/platform-convergence-next`: PASS — output is tree hash `dc90fc3` only, no conflict paths listed
+- `git diff --name-only develop..integration/platform-convergence-next`: 140 changed paths (updated 2026-05-22; was 136 at initial handoff)
 
-Completed in the previous stage:
+Completed in the previous stage (evidence labels):
 
-- G0 baseline lock: complete.
-- G1.1 native platform adapter audit: complete.
-- G1.2 native lifecycle audit: complete.
-- G1.3 desktop contract audit: complete.
-- G1.4 build/package audit: complete.
-- G2 tracked sync-conflict cleanup: complete by tracked-file check; `git ls-files | rg "sync-conflict|rehearsal"` reports no tracked artifacts.
-- G3 macOS automated validation: complete; native build, 5 focused tests, webui build, and Electron build passed.
-- G4 develop merge rehearsal: ready; merge-tree reports no conflict paths.
+- G0 baseline lock: [EVIDENCE] complete — branch heads and ancestor checks recorded above.
+- G1.1 native platform adapter audit: [EVIDENCE] complete — audit recorded in `docs/merge-playbooks/g1.1-native-platform-audit.md`.
+- G1.2 native lifecycle audit: [EVIDENCE] complete — audit recorded in `docs/merge-playbooks/g1.2-native-lifecycle-audit.md`.
+- G1.3 desktop contract audit: [EVIDENCE] complete — audit recorded in `docs/merge-playbooks/g1.3-desktop-contract-audit.md`.
+- G1.4 build/package audit: [EVIDENCE] complete — audit recorded in `docs/merge-playbooks/g1.4-build-package-audit.md`.
+- G2 tracked sync-conflict cleanup: [EVIDENCE] complete by tracked-file check; `git ls-files | rg "sync-conflict|rehearsal"` reports no tracked artifacts. Note (2026-05-22): 3 untracked sync-conflict files exist on disk but are not tracked by git — `docs/merge-playbooks/windows-macos-merge.sync-conflict-20260522-133053-AAEI436.md`, `docs/merge-playbooks/windows-macos-merge.sync-conflict-20260522-133054-AAEI436.md`, `docs/superpowers/plans/2026-05-19-windows-macos-merge-finalization.sync-conflict-20260522-132919-AAEI436.md`. These should be deleted before merge.
+- G3 macOS automated validation: [EVIDENCE] complete; native build, 5 focused tests, webui build, and Electron build passed — see `docs/merge-playbooks/g3-macos-validation.md`. Note: macOS-only; does not satisfy the dual-platform gate.
+- R2.1 macOS automated validation (2026-05-22): [EVIDENCE] PASS on `integration/platform-convergence-next` at `25a1729`. `cmake --build --preset macos-release`: PASS. `ctest --preset macos-release --output-on-failure`: 5/5 passed (platform_status_models_test, vpn_runtime_test, tunnel_script_contract_test, app_api_runtime_policy_test, crypto_roundtrip_test). `cd webui && npm run build`: PASS (215ms). `cd webui && npm run build:electron`: PASS. Desktop package build: PASS — arm64 and x64 DMGs built with ad-hoc signing; notarization skipped (no Apple developer certificate).
+- G4 develop merge rehearsal: [EVIDENCE] ready; `git merge-tree --write-tree develop integration/platform-convergence-next` reports no conflict paths (tree hash `dc90fc3`, verified 2026-05-22).
 
 Not accepted as completion evidence:
 
-- Remote OMC team `ecnu-vpn-develop-merge-validat` is still in planning/pending state; all three tasks are pending and no validation artifact has been produced.
+- Remote OMC team `ecnu-vpn-develop-merge-validat`: **pending and not counted**. Verified 2026-05-22: the team state at `.omc/state/team/ecnu-vpn-develop-merge-validat/` shows 3 tasks (D0-D4 validation), all `pending` with `owner: null`, `result: null`, and worker turn counts at 0. The events log records `startup_manual_intervention_required` for all 3 workers — Claude never started in any pane. The tmux session still exists but is idle. No validation artifact was produced. No validation gate depends on this team's output; it is not a blocker.
 - The remote macmini worktree at `/Users/tomli/Development/Projects/CPP/ECNU-VPN` is dirty; those edits cannot be counted as validation until they are reviewed, committed or discarded, and tied to exact commands.
-- The 2026-05-21 G3 macOS recommendation to proceed with G4 based only on automated macOS validation is superseded by the 2026-05-22 plan.
+- **Superseded**: the 2026-05-21 G3 macOS recommendation to proceed with G4 based only on automated macOS validation is no longer operative. The 2026-05-22 plan requires both Windows AND macOS develop-blocker validations to pass before merge.
 
-Pending before `develop` merge:
+Pending before `develop` merge (dual-platform gate — both must pass):
 
-- Windows automated validation from `integration/platform-convergence-next`.
-- Windows manual helper service install/connect/disconnect/uninstall validation.
-- macOS manual helper-installed connect/disconnect validation with real credentials.
-- macOS manual helper-missing one-time elevated connect/disconnect validation.
+- R2.1 macOS automated validation: PASS (evidence recorded above).
+- R2.2 Windows automated validation from `integration/platform-convergence-next`: pending.
+- R2.3 Windows manual helper service install/connect/disconnect/uninstall validation: pending.
+- macOS manual helper-installed connect/disconnect validation with real credentials: pending.
+- macOS manual helper-missing one-time elevated connect/disconnect validation: pending.
 - Any targeted repair required by those validation gates.
 
-Gate rule:
+Gate rule (evidence-based, dual-platform):
 
+- **Both Windows AND macOS develop-blocker validations must pass before merge.** Passing one platform alone is not sufficient.
 - Do not merge, push, or repair directly on `develop` until the pending validations pass or an explicitly accepted risk is recorded in this playbook.
 - All develop-blocker repairs land on `integration/platform-convergence-next` first, followed by focused retest evidence.
+- Evidence = command + output recorded in this playbook. Claims without commands are not evidence.
 
 ## G0 Baseline Lock (2026-05-21)
 
 Historical snapshot: this section records the earlier G0 state. The current active handoff is the "Develop Merge Gate Handoff" section above.
 
-Branch heads:
+Branch heads (historical, as of 2026-05-21):
 - `macos` = 6fb5ebb (docs: record S4 integration rehearsal results)
 - `windows` = 66dbfa8 (refactor: unify desktop contract and platform status adapters)
 - `integration/platform-convergence-next` = 58074c5 (merge-prep: integrate macos tail commits)
@@ -75,7 +79,7 @@ Conflict counts (baseline):
 
 Merge of macos into integration (G0.2): clean merge, no new conflicts. Committed as 58074c5.
 
-**Freeze rule**: No direct merge into `develop` until G3 dual-platform validation passes. All subsequent commits must carry one of these labels: `audit`, `repair`, `validation`, or `merge-prep`.
+**Freeze rule**: No direct merge into `develop` until both Windows AND macOS develop-blocker validations pass. All subsequent commits must carry one of these labels: `audit`, `repair`, `validation`, or `merge-prep`.
 
 ## Scope
 
