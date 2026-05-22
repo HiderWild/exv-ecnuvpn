@@ -126,12 +126,34 @@ if (process.platform === 'win32') {
 // They live next to the build output, so we look in the same directories.
 if (process.platform === 'win32') {
   const exeDir = path.dirname(exeSource)
+  const runtimeSearchDirs = [
+    exeDir,
+    ...process.env.PATH.split(path.delimiter),
+    path.join(root, 'build'),
+    path.join(root, 'build', 'Release'),
+    path.join(root, 'build-desktop'),
+    path.join(root, 'build-desktop', 'Release'),
+  ]
+  const uniqueRuntimeSearchDirs = [...new Set(runtimeSearchDirs.filter(Boolean))]
+  const missingRuntimeDlls = []
+
   for (const dll of MINGW_RUNTIME_DLLS) {
-    const source = path.join(exeDir, dll)
-    if (fs.existsSync(source)) {
+    const source = uniqueRuntimeSearchDirs
+      .map((dir) => path.join(dir, dll))
+      .find((candidate) => fs.existsSync(candidate))
+    if (source) {
       fs.copyFileSync(source, path.join(outDir, dll))
       console.log(`Copied runtime DLL: ${dll}`)
+    } else {
+      missingRuntimeDlls.push(dll)
     }
+  }
+
+  if (missingRuntimeDlls.length > 0) {
+    throw new Error(
+      `Missing MinGW runtime DLL(s): ${missingRuntimeDlls.join(', ')}. ` +
+      `Checked:\n  - ${uniqueRuntimeSearchDirs.join('\n  - ')}`,
+    )
   }
 }
 

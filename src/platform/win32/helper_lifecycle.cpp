@@ -26,37 +26,6 @@ int copy_self_to_stable_path_and_reexec(const std::string &) {
   return 1;
 }
 
-bool is_process_alive(int pid) {
-  if (pid <= 0)
-    return false;
-  HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
-  if (!hProcess)
-    return false;
-  DWORD exitCode = 0;
-  BOOL ok = GetExitCodeProcess(hProcess, &exitCode);
-  CloseHandle(hProcess);
-  return ok && exitCode == STILL_ACTIVE;
-}
-
-int find_openconnect_pid() {
-  std::string output = utils::run_command_output("tasklist /FI \"IMAGENAME eq openconnect.exe\" /NH /FO CSV 2>nul");
-  auto pos = output.find(',');
-  if (pos == std::string::npos || pos < 2)
-    return -1;
-  auto start = output.find('"', pos + 1);
-  if (start == std::string::npos)
-    return -1;
-  auto end = output.find('"', start + 1);
-  if (end == std::string::npos)
-    return -1;
-  std::string pid_str = output.substr(start + 1, end - start - 1);
-  try {
-    return std::stoi(pid_str);
-  } catch (...) {
-    return -1;
-  }
-}
-
 std::string get_interfaces_output() {
   return utils::run_command_output("netsh interface show interface 2>nul");
 }

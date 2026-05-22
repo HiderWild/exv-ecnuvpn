@@ -44,6 +44,19 @@ bool fix_config_dir_ownership() {
 } // namespace utils
 } // namespace ecnuvpn
 
+#ifdef _WIN32
+namespace ecnuvpn {
+namespace platform {
+
+nlohmann::json driver_status_json(const Config &) {
+  return nlohmann::json{{"effective_driver", "wintun"},
+                        {"wintun_bundled", true}};
+}
+
+} // namespace platform
+} // namespace ecnuvpn
+#endif
+
 int main() {
   bool ok = true;
 

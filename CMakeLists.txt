@@ -135,6 +135,7 @@ elseif(WIN32)
         src/helper_daemon_win.cpp
         src/platform/win32/crypto_backend.cpp
         src/platform/win32/config_defaults.cpp
+        src/platform/win32/helper_client.cpp
         src/platform/win32/helper_lifecycle.cpp
         src/platform/win32/helper_platform.cpp
         src/platform/win32/helper_service_manager.cpp
