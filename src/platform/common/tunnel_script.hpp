@@ -16,6 +16,9 @@ struct TunnelScriptContext {
 };
 
 std::string generate_tunnel_script(const TunnelScriptContext &context);
+int run_tunnel_script(const TunnelScriptContext &context);
+bool configure_from_openconnect_log(const TunnelScriptContext &context,
+                                    const std::string &log_path);
 void cleanup_tunnel_routes(const TunnelScriptContext &context);
 
 } // namespace platform

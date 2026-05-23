@@ -32,9 +32,10 @@ const api = {
         password,
         allow_direct_fallback: true,
       }, 'status.get'),
-    disconnectElevated: () =>
+    disconnectElevated: (backend?: unknown) =>
       ipcRenderer.invoke(desktopIpcChannels.rpcElevated, 'vpn.disconnect', {
         allow_direct_fallback: true,
+        backend,
       }, 'status.get'),
   },
   config: {

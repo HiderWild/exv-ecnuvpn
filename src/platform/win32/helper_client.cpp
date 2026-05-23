@@ -20,18 +20,52 @@ std::string trim_copy(const std::string &value) {
 } // namespace
 
 nlohmann::json send_helper_request(const nlohmann::json &request) {
-  std::string payload = request.dump();
+  return send_helper_request(
+      HelperEndpoint{helper_platform_config().endpoint, std::string()},
+      request);
+}
+
+nlohmann::json send_helper_request(const HelperEndpoint &endpoint,
+                                   const nlohmann::json &request) {
+  nlohmann::json authed_request = request;
+  if (!endpoint.auth_token.empty())
+    authed_request["auth_token"] = endpoint.auth_token;
+
+  std::string payload = authed_request.dump();
   payload.push_back('\n');
   std::string raw;
-  const auto &config = helper_platform_config();
 
-  HANDLE hPipe = CreateFileA(config.endpoint,
-                             GENERIC_READ | GENERIC_WRITE, 0, NULL,
-                             OPEN_EXISTING, 0, NULL);
+  HANDLE hPipe = INVALID_HANDLE_VALUE;
+  DWORD last_error = ERROR_SUCCESS;
+  const DWORD start_tick = GetTickCount();
+  const DWORD busy_deadline = start_tick + 30000;
+  const DWORD missing_deadline = start_tick + 1000;
+  while (GetTickCount() < busy_deadline) {
+    hPipe = CreateFileA(endpoint.endpoint.c_str(),
+                        GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                        OPEN_EXISTING, 0, NULL);
+    if (hPipe != INVALID_HANDLE_VALUE)
+      break;
+
+    last_error = GetLastError();
+    if (last_error != ERROR_PIPE_BUSY && last_error != ERROR_FILE_NOT_FOUND) {
+      break;
+    }
+
+    if (last_error == ERROR_PIPE_BUSY) {
+      WaitNamedPipeA(endpoint.endpoint.c_str(), 250);
+    } else {
+      if (GetTickCount() >= missing_deadline)
+        break;
+      Sleep(100);
+    }
+  }
+
   if (hPipe == INVALID_HANDLE_VALUE) {
     return nlohmann::json{{"ok", false},
                           {"message", "Helper daemon not available"},
-                          {"code", kHelperUnavailableCode}};
+                          {"code", kHelperUnavailableCode},
+                          {"win32_error", static_cast<int>(last_error)}};
   }
 
   DWORD bytesWritten = 0;

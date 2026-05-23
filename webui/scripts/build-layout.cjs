@@ -22,13 +22,16 @@ function getBuildLayout() {
   const buildPlatform = normalizeBuildPlatform()
   const buildRoot = path.join(repoRoot, 'build', buildPlatform)
   const electronRoot = path.join(buildRoot, 'electron')
+  const defaultCppBuildDir = buildPlatform === 'windows'
+    ? path.join(repoRoot, 'build-windows', 'cpp')
+    : path.join(buildRoot, 'cpp')
 
   return {
     repoRoot,
     webuiRoot,
     buildPlatform,
     buildRoot,
-    cppBuildDir: path.join(buildRoot, 'cpp'),
+    cppBuildDir: process.env.ECNUVPN_CPP_BUILD_DIR || defaultCppBuildDir,
     electronRoot,
     rendererOutDir: path.join(electronRoot, 'dist'),
     electronOutDir: path.join(electronRoot, 'dist-electron'),

@@ -65,6 +65,12 @@ std::string windows_quote_arg(const std::string &value) {
   return quoted;
 }
 
+std::string windows_openconnect_script_command() {
+  std::ostringstream cmd;
+  cmd << windows_quote_arg(utils::get_executable_path()) << " __tunnel-script";
+  return cmd.str();
+}
+
 std::string build_openconnect_command_line(const Config &cfg) {
   std::vector<std::string> args;
   std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
@@ -79,7 +85,7 @@ std::string build_openconnect_command_line(const Config &cfg) {
   args.push_back(cfg.username);
   args.push_back("--passwd-on-stdin");
   args.push_back("--script");
-  args.push_back(utils::get_tunnel_path());
+  args.push_back(windows_openconnect_script_command());
   std::string interface_name = select_windows_interface_name(cfg);
   if (!interface_name.empty()) {
     args.push_back("--interface");

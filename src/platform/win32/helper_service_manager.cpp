@@ -176,14 +176,14 @@ int install_helper_service(const std::string &executable_path,
 
 int uninstall_helper_service(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
-  (void)context;
 
   SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
   if (!hSCM)
     return 1;
 
-  SC_HANDLE hService =
-      OpenServiceA(hSCM, platform_config.service_name, SERVICE_STOP | DELETE);
+  SC_HANDLE hService = OpenServiceA(
+      hSCM, platform_config.service_name,
+      SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
   if (!hService) {
     std::cout << "Helper service is not installed.\n";
     CloseServiceHandle(hSCM);
@@ -191,11 +191,55 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   }
 
   SERVICE_STATUS status = {};
-  ControlService(hService, SERVICE_CONTROL_STOP, &status);
-  DeleteService(hService);
+  if (QueryServiceStatus(hService, &status) &&
+      status.dwCurrentState != SERVICE_STOPPED) {
+    std::cout << "Stopping helper service...\n";
+    ControlService(hService, SERVICE_CONTROL_STOP, &status);
+    for (int i = 0; i < 100; ++i) {
+      if (!QueryServiceStatus(hService, &status) ||
+          status.dwCurrentState == SERVICE_STOPPED) {
+        break;
+      }
+      Sleep(100);
+    }
+  }
+
+  if (context.clear_session_state)
+    context.clear_session_state();
+
+  std::cout << "Deleting helper service registration...\n";
+  if (!DeleteService(hService)) {
+    DWORD err = GetLastError();
+    if (err != ERROR_SERVICE_MARKED_FOR_DELETE) {
+      logger::error("DeleteService failed: " + std::to_string(err));
+      CloseServiceHandle(hService);
+      CloseServiceHandle(hSCM);
+      return 1;
+    }
+  }
 
   CloseServiceHandle(hService);
+
+  bool removed = false;
+  for (int i = 0; i < 50; ++i) {
+    SC_HANDLE check =
+        OpenServiceA(hSCM, platform_config.service_name, SERVICE_QUERY_STATUS);
+    if (!check) {
+      removed = GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST;
+      if (removed)
+        break;
+    } else {
+      CloseServiceHandle(check);
+    }
+    Sleep(100);
+  }
+
   CloseServiceHandle(hSCM);
+
+  if (!removed) {
+    logger::error("Helper service is still registered after uninstall.");
+    return 1;
+  }
 
   std::cout << "Helper service uninstalled.\n";
   return 0;

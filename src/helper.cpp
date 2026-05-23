@@ -29,6 +29,7 @@ namespace helper {
 namespace {
 
 volatile sig_atomic_t daemon_stop_requested = 0;
+DaemonOptions active_daemon_options;
 
 struct SessionState {
   uid_t uid = static_cast<uid_t>(-1);
@@ -273,6 +274,55 @@ nlohmann::json make_error(const std::string &message) {
   return nlohmann::json{{"ok", false}, {"message", message}};
 }
 
+nlohmann::json make_helper_capabilities() {
+  return nlohmann::json{{"vpn_connect", true},
+                        {"vpn_disconnect", true},
+                        {"logs", false},
+                        {"events", false},
+                        {"temporary_connect", active_daemon_options.oneshot},
+                        {"oneshot_mode", active_daemon_options.oneshot},
+                        {"service_mode", true}};
+}
+
+nlohmann::json make_helper_descriptor() {
+  const auto &platform_config = platform::helper_platform_config();
+  return nlohmann::json{{"name", "exv-helper"},
+                        {"version", ECNUVPN_VERSION},
+                        {"platform_service_mode", platform_config.service_mode},
+                        {"mode", active_daemon_options.mode},
+                        {"endpoint", active_daemon_options.endpoint},
+                        {"auth_required", active_daemon_options.auth_required},
+#ifdef _WIN32
+                        {"platform", "windows"},
+                        {"transport", "named-pipe"},
+#elif defined(__APPLE__)
+                        {"platform", "darwin"},
+                        {"transport", "unix-socket"},
+#elif defined(__linux__)
+                        {"platform", "linux"},
+                        {"transport", "unix-socket"},
+#else
+                        {"platform", "unknown"},
+                        {"transport", "unknown"},
+#endif
+                        {"capabilities", make_helper_capabilities()}};
+}
+
+nlohmann::json make_hello_response() {
+  nlohmann::json descriptor = make_helper_descriptor();
+  descriptor["ok"] = true;
+  return descriptor;
+}
+
+void add_helper_descriptor_fields(nlohmann::json &response) {
+  nlohmann::json descriptor = make_helper_descriptor();
+  response["helper"] = descriptor;
+  response["backend_mode"] = descriptor.value("mode", "service");
+  response["transport"] = descriptor.value("transport", "unknown");
+  response["capabilities"] =
+      descriptor.value("capabilities", nlohmann::json::object());
+}
+
 nlohmann::json make_status_response(const SessionState &state,
                                     const RuntimeSnapshot &snapshot,
                                     bool ok = true,
@@ -293,6 +343,7 @@ nlohmann::json make_status_response(const SessionState &state,
                           {"owner_username", state.username},
                           {"interfaces_output", snapshot.interfaces_output}};
   virtual_network::add_status_fields(response, snapshot.interface_name);
+  add_helper_descriptor_fields(response);
   return response;
 }
 
@@ -308,7 +359,9 @@ bool ensure_same_owner(const SessionState &state, uid_t peer_uid) {
 nlohmann::json handle_status(uid_t peer_uid) {
   SessionState state;
   if (!load_session_state(&state)) {
-    return nlohmann::json{{"ok", true}, {"running", false}};
+    nlohmann::json response{{"ok", true}, {"running", false}};
+    add_helper_descriptor_fields(response);
+    return response;
   }
 
   if (!ensure_same_owner(state, peer_uid)) {
@@ -317,10 +370,12 @@ nlohmann::json handle_status(uid_t peer_uid) {
 
   RuntimeSnapshot snapshot = inspect_runtime(state);
   if (!snapshot.running) {
-  platform::cleanup_routes();
+    platform::cleanup_routes();
     clear_runtime_state(state);
     clear_session_state();
-    return nlohmann::json{{"ok", true}, {"running", false}};
+    nlohmann::json response{{"ok", true}, {"running", false}};
+    add_helper_descriptor_fields(response);
+    return response;
   }
 
   return make_status_response(state, snapshot);
@@ -505,12 +560,25 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
 
   clear_runtime_state(state);
   clear_session_state();
+  if (active_daemon_options.oneshot) {
+    daemon_stop_requested = 1;
+  }
   return make_error("Failed to establish the VPN connection. Check logs with: exv logs");
 }
 
 nlohmann::json handle_request(uid_t peer_uid, gid_t peer_gid,
                               const nlohmann::json &request) {
+  if (active_daemon_options.auth_required &&
+      request.value("auth_token", std::string()) !=
+          active_daemon_options.auth_token) {
+    return nlohmann::json{{"ok", false},
+                          {"code", "auth_failed"},
+                          {"message", "Helper authentication failed."}};
+  }
+
   std::string action = request.value("action", std::string());
+  if (action == "hello")
+    return make_hello_response();
   if (action == "start")
     return handle_start(peer_uid, peer_gid, request);
   if (action == "stop")
@@ -765,17 +833,25 @@ int worker_main(const std::string &request_path) {
   }
 }
 
-int daemon_main() {
+int daemon_main(const DaemonOptions &options) {
+  active_daemon_options = options;
+  if (active_daemon_options.endpoint.empty()) {
+    active_daemon_options.endpoint = platform::helper_platform_config().endpoint;
+  }
+  if (active_daemon_options.mode.empty()) {
+    active_daemon_options.mode =
+        active_daemon_options.oneshot ? "oneshot" : "service";
+  }
+
   signal(SIGTERM, daemon_signal_handler);
   signal(SIGINT, daemon_signal_handler);
   platform::setup_daemon_signals();
 
   auto ipc = create_ipc_server();
-  const auto &platform_config = platform::helper_platform_config();
 
-  platform::cleanup_daemon_endpoint(platform_config.endpoint);
+  platform::cleanup_daemon_endpoint(active_daemon_options.endpoint);
 
-  if (!ipc->start(platform_config.endpoint)) {
+  if (!ipc->start(active_daemon_options.endpoint)) {
     return 1;
   }
 
@@ -803,6 +879,16 @@ int daemon_main() {
            const nlohmann::json &req) -> nlohmann::json {
           return handle_request(uid, gid, req);
         });
+
+    if (active_daemon_options.oneshot) {
+      try {
+        nlohmann::json req = nlohmann::json::parse(raw);
+        if (req.value("action", std::string()) == "stop") {
+          daemon_stop_requested = 1;
+        }
+      } catch (...) {
+      }
+    }
   }
 
   reap_finished_request_handlers();
@@ -815,8 +901,15 @@ int daemon_main() {
   }
 
   ipc->close();
-  platform::cleanup_daemon_endpoint(platform_config.endpoint);
+  platform::cleanup_daemon_endpoint(active_daemon_options.endpoint);
   return 0;
+}
+
+int daemon_main() {
+  DaemonOptions options;
+  options.mode = "service";
+  options.endpoint = platform::helper_platform_config().endpoint;
+  return daemon_main(options);
 }
 
 } // namespace helper

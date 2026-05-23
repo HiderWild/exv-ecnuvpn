@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
+#include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/openconnect_process.hpp"
 #include "platform/common/process_control.hpp"
 #include "platform/common/vpn_supervisor_process.hpp"
@@ -594,6 +595,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
     std::string vpn_interface;
     std::string internal_ip;
     bool route_ready = false;
+    bool log_fallback_configured = false;
     for (int i = 0; i < 240; ++i) {
 #ifndef _WIN32
       usleep(250000);
@@ -602,6 +604,13 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
 #endif
       vpn_pid = read_pid();
       route_ready = read_route_ready(&vpn_interface, &internal_ip);
+#ifdef _WIN32
+      if (!route_ready && !log_fallback_configured &&
+          tunnel::configure_from_runtime_log(cfg)) {
+        log_fallback_configured = true;
+        route_ready = read_route_ready(&vpn_interface, &internal_ip);
+      }
+#endif
 
       if (vpn_pid > 0 && !is_process_alive(vpn_pid)) {
         clear_runtime_state();
@@ -640,11 +649,14 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
       return 0;
     }
 
-    utils::print_warning("VPN process started, but network routes are not ready yet.");
-    utils::print_info("Check status with: exv status");
+    utils::print_error("VPN process started, but network configuration did not complete.");
     utils::print_info("Check logs with: exv logs");
-    logger::warn("VPN started without supervisor but route-ready marker not yet detected");
-    return 0;
+    if (vpn_pid > 0 && is_process_alive(vpn_pid)) {
+      terminate_process(vpn_pid, true);
+    }
+    clear_runtime_state();
+    logger::error("VPN start aborted because route-ready marker was not detected");
+    return 1;
   }
 
   supervisor_pid = -1;
@@ -664,6 +676,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   std::string vpn_interface;
   std::string internal_ip;
   bool route_ready = false;
+  bool log_fallback_configured = false;
   for (int i = 0; i < 20; ++i) {
 #ifndef _WIN32
     usleep(250000);
@@ -672,6 +685,13 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
 #endif
     vpn_pid = read_pid();
     route_ready = read_route_ready(&vpn_interface, &internal_ip);
+#ifdef _WIN32
+    if (!route_ready && !log_fallback_configured &&
+        tunnel::configure_from_runtime_log(cfg)) {
+      log_fallback_configured = true;
+      route_ready = read_route_ready(&vpn_interface, &internal_ip);
+    }
+#endif
     if (vpn_pid > 0 && is_process_alive(vpn_pid) && route_ready)
       break;
     if (!is_process_alive(supervisor_pid)) {
@@ -758,7 +778,7 @@ bool stop_direct_session() {
   pid_t pid = read_pid();
   if (pid <= 0 || !is_process_alive(pid)) {
     remove_pid();
-    pid = -1;
+    pid = find_openconnect_pid();
   }
 
   if (pid <= 0 && supervisor_pid <= 0) {
@@ -796,6 +816,35 @@ bool stop_direct_session() {
 
   clear_runtime_state();
   return true;
+}
+
+RuntimeStatusSnapshot read_runtime_status_snapshot() {
+  RuntimeStatusSnapshot snapshot;
+
+  pid_t supervisor_pid = read_supervisor_pid();
+  if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
+    remove_supervisor_pid();
+    supervisor_pid = -1;
+  }
+
+  pid_t pid = read_pid();
+  if (pid <= 0 || !is_process_alive(pid)) {
+    remove_pid();
+    pid = find_openconnect_pid();
+  }
+
+  std::string interface_name;
+  std::string internal_ip;
+  bool route_ready = read_route_ready(&interface_name, &internal_ip);
+
+  snapshot.running = pid > 0 || supervisor_pid > 0;
+  snapshot.pid = static_cast<int>(pid);
+  snapshot.supervisor_pid = static_cast<int>(supervisor_pid);
+  snapshot.network_ready = snapshot.running && route_ready;
+  snapshot.interface_name = interface_name;
+  snapshot.internal_ip = internal_ip;
+  snapshot.interfaces_output = platform::get_interfaces_output();
+  return snapshot;
 }
 
 int stop() {

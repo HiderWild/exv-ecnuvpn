@@ -4,6 +4,7 @@
 #include "helper.hpp"
 #include "logger.hpp"
 #include "sse_broadcaster.hpp"
+#include "tunnel.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
 #include "virtual_network.hpp"
@@ -355,6 +356,9 @@ int main(int argc, char *argv[]) {
   if (raw_args.size() > 1 && raw_args[1] == "__helper-daemon") {
     return helper::daemon_main();
   }
+  if (raw_args.size() > 1 && raw_args[1] == "__tunnel-script") {
+    return tunnel::run_script_hook();
+  }
   if (raw_args.size() > 2 && raw_args[1] == "__helper-exec") {
     return helper::worker_main(raw_args[2]);
   }
@@ -363,22 +367,45 @@ int main(int argc, char *argv[]) {
     return vpn::supervisor_main();
   }
 #endif
-  if (raw_args.size() > 2 && raw_args[1] == "desktop-rpc") {
+  if (raw_args.size() > 2 &&
+      (raw_args[1] == "desktop-rpc" || raw_args[1] == "desktop-rpc-file" ||
+       raw_args[1] == "desktop-rpc-file-output")) {
+    const bool payload_is_file = raw_args[1] == "desktop-rpc-file" ||
+                                 raw_args[1] == "desktop-rpc-file-output";
+    const bool output_is_file = raw_args[1] == "desktop-rpc-file-output";
+    const std::string output_path =
+        output_is_file && raw_args.size() > 4 ? raw_args[4] : "";
+
+    auto write_rpc_result = [&](const nlohmann::json &result) {
+      std::string body = result.dump();
+      if (output_is_file && !output_path.empty()) {
+        return utils::write_file(output_path, body + "\n") ? 0 : 1;
+      }
+      std::cout << body << std::endl;
+      return 0;
+    };
+
     nlohmann::json payload = nlohmann::json::object();
     if (raw_args.size() > 3) {
       try {
-        payload = nlohmann::json::parse(raw_args[3]);
+        if (payload_is_file) {
+          payload = nlohmann::json::parse(utils::read_file(raw_args[3]));
+        } else {
+          payload = nlohmann::json::parse(raw_args[3]);
+        }
       } catch (const std::exception &ex) {
-        std::cout << nlohmann::json{{"ok", false},
-                                    {"error", std::string("invalid JSON payload: ") + ex.what()}}
-                         .dump()
-                  << std::endl;
+        write_rpc_result(nlohmann::json{
+            {"ok", false},
+            {"error", std::string("invalid JSON payload: ") + ex.what()}});
         return 1;
       }
     }
 
     nlohmann::json result = app_api::handle_action(raw_args[2], payload);
-    std::cout << result.dump() << std::endl;
+    int write_result = write_rpc_result(result);
+    if (write_result != 0) {
+      return write_result;
+    }
     if (result.is_object() && result.value("ok", true) == false) {
       return 1;
     }

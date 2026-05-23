@@ -15,11 +15,15 @@ namespace platform {
 
 ServiceStatusSnapshot current_service_status() {
   ServiceStatusSnapshot status;
-  status.available = helper::is_available();
   status.mode = "windows-service";
   status.path = "C:\\Program Files\\ECNU-VPN\\exv-helper.exe";
   status.endpoint = "\\\\.\\pipe\\exv-helper";
   status.label = "exv-helper";
+  status.capabilities = nlohmann::json{{"service_mode", true},
+                                       {"oneshot_mode", true},
+                                       {"temporary_connect", true},
+                                       {"direct_fallback", false},
+                                       {"helper_binary", true}};
 
   SC_HANDLE scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
   if (!scm) {
@@ -54,11 +58,21 @@ ServiceStatusSnapshot current_service_status() {
     if (QueryServiceConfigA(svc, config, bytes_needed, &bytes_needed) &&
         config->lpBinaryPathName) {
       status.binary_path = std::string(config->lpBinaryPathName);
+      std::string binary = status.binary_path;
+      if (!binary.empty() && binary.front() == '"') {
+        const auto end_quote = binary.find('"', 1);
+        if (end_quote != std::string::npos)
+          status.path = binary.substr(1, end_quote - 1);
+      } else {
+        const auto arg_pos = binary.find(" --");
+        status.path = binary.substr(0, arg_pos);
+      }
     }
   }
 
   CloseServiceHandle(svc);
   CloseServiceHandle(scm);
+  status.available = status.running && helper::is_available();
   return status;
 }
 

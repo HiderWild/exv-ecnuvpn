@@ -6,7 +6,7 @@ outputs before merge.
 
 ## Layout
 
-- `build/windows/cpp` — Windows CMake configure/build/test output
+- `build-windows/cpp` — Windows CMake configure/build/test output
 - `build/windows/electron/dist` — Windows renderer bundle
 - `build/windows/electron/dist-electron` — Windows Electron main/preload bundle
 - `build/windows/electron/native/bin` — staged native binaries and runtime assets
@@ -23,8 +23,8 @@ outputs before merge.
 
 ```powershell
 cmake --preset windows-release
-cmake --build --preset windows-release --target exv exv-helper platform_status_models_test vpn_runtime_test
-ctest --preset windows-release -R 'platform_status_models_test|vpn_runtime_test'
+cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test
+ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test'
 ```
 
 ### macOS
@@ -75,14 +75,14 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action deskt
 
 Actions:
 
-- `cpp` — configure/build native Windows targets into `build/windows/cpp`
-- `test` — run focused native tests from `build/windows/cpp`
+- `cpp` — configure/build native Windows targets into `build-windows/cpp`
+- `test` — run focused native tests from `build-windows/cpp`
 - `electron` — build renderer/main and stage native assets into `build/windows/electron`
 - `debug` — native build + tests + unpacked Electron debug app under `build/windows/electron/release/win-unpacked`
 - `debug-run` — same as `debug`, then launch the unpacked Windows Electron UI
 - `desktop` — native build + tests + packaged Electron output
 - `all` — native build + tests + Electron compile/stage
-- `clean` — remove `build/windows`
+- `clean` — remove `build/windows` and `build-windows`
 
 ### macOS
 

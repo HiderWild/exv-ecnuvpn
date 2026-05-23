@@ -19,6 +19,7 @@ nlohmann::json service_status_to_json(const ServiceStatusSnapshot &status) {
   nlohmann::json json{{"installed", status.installed},
                       {"running", status.running},
                       {"available", status.available},
+                      {"capabilities", status.capabilities},
                       {"mode", status.mode},
                       {"path", status.path}};
 

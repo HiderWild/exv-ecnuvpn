@@ -177,6 +177,18 @@ bool write_script(const Config &cfg) {
   return true;
 }
 
+int run_script_hook() {
+  Config cfg = config::load();
+  platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
+  return platform::run_tunnel_script(context);
+}
+
+bool configure_from_runtime_log(const Config &cfg) {
+  platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
+  return platform::configure_from_openconnect_log(context,
+                                                 utils::expand_home(cfg.log_file));
+}
+
 void cleanup_routes() {
 #ifndef _WIN32
   Config cfg = config::load();

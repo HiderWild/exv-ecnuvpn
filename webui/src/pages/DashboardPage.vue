@@ -122,19 +122,8 @@ function handlePrimaryAction() {
   const action = vpn.dashboardPrimaryAction
   if (!action) return
 
-  // Service-missing states navigate to /service
   const state = dashboardState.value
-  if (state === 'service-missing disconnected') {
-    router.push('/service')
-    return
-  }
-
-  // Error recoverable: some actions need router navigation
   if (state === 'error recoverable' && vpn.lastErrorType) {
-    if (vpn.lastErrorType === 'elevation_denied') {
-      router.push('/service')
-      return
-    }
     if (vpn.lastErrorType === 'config_invalid') {
       router.push('/settings')
       return
@@ -263,7 +252,7 @@ const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'erro
         <button
           :disabled="vpn.loading"
           class="flex items-center gap-2 bg-accent text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
-          @click="$router.push('/service')"
+          @click="handlePrimaryAction"
         >
           <Shield class="w-4 h-4" />
           安装服务（推荐）

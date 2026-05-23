@@ -9,6 +9,7 @@ export interface UpstreamVirtualAdapter {
 
 export interface VpnStatus {
   connected: boolean
+  process_running?: boolean
   server: string
   username: string
   pid: number
@@ -27,6 +28,7 @@ export interface VpnStatus {
   route_policy: string
   log_path?: string
   mode?: 'helper' | 'direct' | 'elevated' | 'disconnected'
+  backend?: unknown
 }
 
 export interface RouteEntry {
@@ -44,6 +46,13 @@ export interface ServiceStatus {
   running: boolean
   path: string
   available: boolean
+  capabilities?: {
+    service_mode?: boolean
+    oneshot_mode?: boolean
+    temporary_connect?: boolean
+    direct_fallback?: boolean
+    helper_binary?: boolean
+  }
   mode?: string
   endpoint?: string
   label?: string
@@ -151,13 +160,16 @@ export const useVpnStore = defineStore('vpn', () => {
   const lastErrorTime = ref<number | null>(null)
   const lastActionWasElevatedConnect = ref(false)
   const lastMutatingAction = ref<(() => Promise<void>) | null>(null)
+  const activeTemporaryBackend = ref<unknown | null>(null)
 
   const serviceInstalled = computed(() => serviceStatus.value?.installed ?? false)
   const serviceRunning = computed(() => serviceStatus.value?.running ?? false)
   const isDesktop = computed(() => typeof window !== 'undefined' && !!window.ecnuVpn)
   const canUseElevatedFallback = computed(() => {
-    return isDesktop.value &&
-      (navigator.platform?.includes('Win') || navigator.platform?.includes('Mac'))
+    const capabilities = serviceStatus.value?.capabilities
+    return isDesktop.value && Boolean(
+      capabilities?.temporary_connect || capabilities?.oneshot_mode,
+    )
   })
   const recommendedConnectMode = computed<ConnectMode>(() => {
     if (serviceInstalled.value && serviceRunning.value) return 'helper'
@@ -193,7 +205,7 @@ export const useVpnStore = defineStore('vpn', () => {
   const recoverableErrorAction = computed<DashboardAction | null>(() => {
     switch (lastErrorType.value) {
       case 'elevation_denied':
-        return { label: '安装服务', action: () => {}, variant: 'primary' }
+        return { label: '安装服务', action: () => installService(), variant: 'primary' }
       case 'config_invalid':
         return { label: '前往设置', action: () => {}, variant: 'primary' }
       case 'native_failure':
@@ -209,7 +221,7 @@ export const useVpnStore = defineStore('vpn', () => {
       case 'service-ready disconnected':
         return { label: '连接', action: () => connect(), variant: 'primary' }
       case 'service-missing disconnected':
-        return { label: '安装服务（推荐）', action: () => {}, variant: 'primary' }
+        return { label: '安装服务（推荐）', action: () => installService(), variant: 'primary' }
       case 'helper connected':
         return { label: '断开连接', action: () => disconnect(), variant: 'destructive' }
       case 'direct connected':
@@ -234,7 +246,7 @@ export const useVpnStore = defineStore('vpn', () => {
           : null
       case 'direct connected':
       case 'elevated connected':
-        return { label: '安装服务', action: () => {}, variant: 'secondary' }
+        return { label: '安装服务', action: () => installService(), variant: 'secondary' }
       case 'error recoverable':
         return { label: '关闭', action: () => clearError(), variant: 'secondary' }
       default:
@@ -324,6 +336,7 @@ export const useVpnStore = defineStore('vpn', () => {
         setError(data)
       } else {
         status.value = { ...data, mode: data.mode ?? 'elevated' }
+        activeTemporaryBackend.value = status.value.backend ?? null
         await fetchAppShellState()
       }
     } catch (error) {
@@ -339,11 +352,14 @@ export const useVpnStore = defineStore('vpn', () => {
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = disconnectElevated
     try {
-      const { data } = await api.post<VpnStatus | VpnError>('/disconnect/elevated')
+      const { data } = await api.post<VpnStatus | VpnError>('/disconnect/elevated', {
+        backend: activeTemporaryBackend.value,
+      })
       if (isVpnError(data)) {
         setError(data)
       } else {
         status.value = data
+        activeTemporaryBackend.value = null
         clearError()
         await fetchAppShellState()
       }

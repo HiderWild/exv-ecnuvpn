@@ -41,6 +41,7 @@ export const desktopRpcActions = [
   'routes.remove',
   'routes.reset',
   'service.status',
+  'helper.status',
   'runtime.status',
   'drivers.status',
   'drivers.install',
@@ -59,6 +60,14 @@ export const desktopDriverInstallTargets = ['wintun', 'tap'] as const
 
 export const desktopRpcErrorCodes = {
   helperUnavailable: 'helper_unavailable',
+  serviceNotInstalled: 'service_not_installed',
+  serviceInstalledNotRunning: 'service_installed_not_running',
+  serviceStartFailed: 'service_start_failed',
+  oneshotNotSupported: 'oneshot_not_supported',
+  oneshotElevationDenied: 'oneshot_elevation_denied',
+  helperRpcFailed: 'helper_rpc_failed',
+  authFailed: 'auth_failed',
+  vpnStartFailed: 'vpn_start_failed',
 } as const
 
 export type DesktopRpcAction = (typeof desktopRpcActions)[number]

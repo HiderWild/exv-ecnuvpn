@@ -10,7 +10,6 @@
 #include <windows.h>
 
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace ecnuvpn {
@@ -103,20 +102,16 @@ void dispatch_request_background(
     unsigned int peer_uid, unsigned int peer_gid,
     std::function<nlohmann::json(unsigned int, unsigned int,
                                   const nlohmann::json &)> handler) {
-  // Windows: use threads instead of fork (no fork available)
-  // Each request is processed in a background thread so long-running
-  // operations (e.g. VPN start) don't block new client connections.
-  helper::IpcServer *ipc_ptr = &ipc;
-  std::thread([ipc_ptr, raw_request, peer_uid, peer_gid, handler]() {
-    nlohmann::json response;
-    try {
-      nlohmann::json request = nlohmann::json::parse(raw_request);
-      response = handler(peer_uid, peer_gid, request);
-    } catch (...) {
-      response = nlohmann::json{{"ok", false}, {"message", "Failed to parse helper request."}};
-    }
-    ipc_ptr->send_response(response.dump());
-  }).detach();
+  nlohmann::json response;
+  try {
+    nlohmann::json request = nlohmann::json::parse(raw_request);
+    response = handler(peer_uid, peer_gid, request);
+  } catch (...) {
+    response = nlohmann::json{{"ok", false},
+                              {"message", "Failed to parse helper request."}};
+  }
+  ipc.send_response(response.dump());
+  ipc.close_client();
 }
 
 void set_session_state_permissions(const std::string & /*path*/) {

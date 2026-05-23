@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -234,6 +235,11 @@ bool copy_file_contents(const std::string &source_path,
   return true;
 }
 
+std::string helper_binary_next_to(const std::string &executable_path) {
+  std::filesystem::path path(executable_path);
+  return (path.parent_path() / "exv-helper").string();
+}
+
 } // namespace
 
 void cleanup_routes() {
@@ -356,6 +362,24 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
   }
 
   utils::print_success("Stable exv binary updated at /usr/local/bin/exv.");
+  std::string helper_source = helper_binary_next_to(current_path);
+  if (!utils::file_exists(helper_source)) {
+    utils::print_error("Expected exv-helper next to the current exv binary: " +
+                       helper_source);
+    return 1;
+  }
+
+  utils::print_info("Copying exv-helper binary to /usr/local/bin/exv-helper ...");
+  if (!copy_file_contents(helper_source,
+                          platform_config.default_service_binary_path,
+                          &copy_error)) {
+    utils::print_error("Failed to copy exv-helper to /usr/local/bin/exv-helper: " +
+                       std::string(std::strerror(copy_error)));
+    return 1;
+  }
+  utils::print_success(
+      "Stable exv-helper binary updated at /usr/local/bin/exv-helper.");
+
   utils::print_info("Re-running service installation from the copied binary...");
   execl(platform_config.stable_install_path, platform_config.stable_install_path,
         "service", "install", static_cast<char *>(nullptr));

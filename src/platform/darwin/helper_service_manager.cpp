@@ -74,10 +74,20 @@ int install_helper_service(const std::string &executable_path,
     return platform::copy_self_to_stable_path_and_reexec(exec_path);
   }
 
+  if (!utils::file_exists(platform_config.default_service_binary_path)) {
+    utils::print_error("Stable exv-helper binary is missing: " +
+                       std::string(platform_config.default_service_binary_path));
+    utils::print_info(
+        "Build or install exv-helper next to exv, then re-run 'exv service install'.");
+    return 1;
+  }
+
   std::string shell_command =
-      "if [ ! -x " + utils::shell_quote(exec_path) +
-      " ]; then exit 0; fi; exec " + utils::shell_quote(exec_path) +
-      " __helper-daemon";
+      "if [ ! -x " +
+      utils::shell_quote(platform_config.default_service_binary_path) +
+      " ]; then exit 0; fi; exec " +
+      utils::shell_quote(platform_config.default_service_binary_path) +
+      " --service";
 
   std::ostringstream plist;
   plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";

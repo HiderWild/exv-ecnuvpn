@@ -98,16 +98,17 @@ if (process.platform !== 'win32') {
 }
 console.log(`Copied native binary: ${exeSource} -> ${target}`)
 
-if (process.platform === 'win32') {
+if (process.platform === 'win32' || process.platform === 'darwin') {
+  const helperName = process.platform === 'win32' ? 'exv-helper.exe' : 'exv-helper'
   const helperCandidates = [
     process.env.EXV_HELPER_PATH,
-    path.join(layout.cppBuildDir, 'exv-helper.exe'),
-    path.join(layout.cppBuildDir, 'Release', 'exv-helper.exe'),
-    path.join(path.dirname(exeSource), 'exv-helper.exe'),
-    path.join(root, 'build', 'exv-helper.exe'),
-    path.join(root, 'build', 'Release', 'exv-helper.exe'),
-    path.join(root, 'build-desktop', 'exv-helper.exe'),
-    path.join(root, 'build-desktop', 'Release', 'exv-helper.exe'),
+    path.join(layout.cppBuildDir, helperName),
+    path.join(layout.cppBuildDir, 'Release', helperName),
+    path.join(path.dirname(exeSource), helperName),
+    path.join(root, 'build', helperName),
+    path.join(root, 'build', 'Release', helperName),
+    path.join(root, 'build-desktop', helperName),
+    path.join(root, 'build-desktop', 'Release', helperName),
   ].filter(Boolean)
 
   const helperSource = helperCandidates.find((candidate) => fs.existsSync(candidate))
@@ -117,8 +118,11 @@ if (process.platform === 'win32') {
     )
   }
 
-  const helperTarget = path.join(outDir, 'exv-helper.exe')
+  const helperTarget = path.join(outDir, helperName)
   fs.copyFileSync(helperSource, helperTarget)
+  if (process.platform !== 'win32') {
+    fs.chmodSync(helperTarget, 0o755)
+  }
   console.log(`Copied native helper: ${helperSource} -> ${helperTarget}`)
 }
 

@@ -137,6 +137,13 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
   return ss.str();
 }
 
+int run_tunnel_script(const TunnelScriptContext &) { return 0; }
+
+bool configure_from_openconnect_log(const TunnelScriptContext &,
+                                    const std::string &) {
+  return false;
+}
+
 void cleanup_tunnel_routes(const TunnelScriptContext &context) {
   for (const auto &route : context.custom_routes) {
     utils::run_command("route -n delete " + utils::shell_quote(route) +

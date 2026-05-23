@@ -2,8 +2,15 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+
+#include "utils.hpp"
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
+#include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -36,6 +43,166 @@ std::string js_quote(const std::string &value) {
   }
   quoted += '"';
   return quoted;
+}
+
+std::string env_value(const char *name, const std::string &fallback = "") {
+  const char *value = std::getenv(name);
+  if (!value || !*value)
+    return fallback;
+  return value;
+}
+
+bool is_numeric(const std::string &value) {
+  if (value.empty())
+    return false;
+  for (char c : value) {
+    if (c < '0' || c > '9')
+      return false;
+  }
+  return true;
+}
+
+std::string cmd_quote_arg(const std::string &value) {
+  std::string quoted = "\"";
+  for (char c : value) {
+    if (c == '"')
+      quoted += "\\\"";
+    else
+      quoted += c;
+  }
+  quoted += "\"";
+  return quoted;
+}
+
+void debug_log(const std::string &ready_path, const std::string &message) {
+  std::ofstream out(ready_path + ".debug.log", std::ios::app);
+  if (out.is_open())
+    out << message << "\n";
+}
+
+int run_exit(const std::string &ready_path, const std::string &cmd) {
+  debug_log(ready_path, "run: " + cmd);
+  int rc = utils::run_command(cmd);
+  debug_log(ready_path, "exit " + std::to_string(rc) + ": " + cmd);
+  return rc;
+}
+
+bool run_with_retry(const std::string &ready_path, const std::string &cmd,
+                    int max_retries, unsigned int delay_ms,
+                    bool ignore_failure) {
+  for (int attempt = 1; attempt <= max_retries; ++attempt) {
+    int rc = run_exit(ready_path, cmd);
+    if (rc == 0)
+      return true;
+    if (attempt < max_retries)
+      Sleep(delay_ms);
+  }
+  return ignore_failure;
+}
+
+std::string get_default_gateway4() {
+  std::string output = utils::run_command_output("route.exe print 0.0.0.0");
+  std::regex route_regex(R"(0\.0\.0\.0\s+(?:0|128)\.0\.0\.0\s+([0-9.]+))");
+  std::smatch match;
+  if (std::regex_search(output, match, route_regex) && match.size() > 1)
+    return match[1].str();
+  return "";
+}
+
+void delete_ready_file(const std::string &ready_path) {
+  std::remove(ready_path.c_str());
+}
+
+bool write_ready_file(const std::string &ready_path, const std::string &tundev,
+                      const std::string &internal_ip) {
+  std::ofstream out(ready_path, std::ios::trunc);
+  if (!out.is_open())
+    return false;
+  out << tundev << "\n" << internal_ip << "\n";
+  return true;
+}
+
+std::pair<std::string, std::string>
+cidr_to_network_and_mask(const std::string &cidr);
+
+bool configure_tunnel_network(const TunnelScriptContext &context,
+                              const std::string &tunidx,
+                              const std::string &tundev,
+                              const std::string &internal_ip,
+                              const std::string &netmask,
+                              const std::string &mtu) {
+  const std::string &ready_path = context.route_ready_path;
+  delete_ready_file(ready_path);
+
+  if (tunidx.empty() || internal_ip.empty()) {
+    debug_log(ready_path, "missing openconnect tunnel metadata");
+    return false;
+  }
+
+  const std::string adapter = tundev.empty() ? tunidx : tundev;
+  const std::string if_index = is_numeric(tunidx) ? tunidx : "";
+  const std::string address_target =
+      is_numeric(adapter) ? adapter : "name=" + cmd_quote_arg(adapter);
+  const std::string subinterface_target =
+      is_numeric(adapter) ? adapter : cmd_quote_arg(adapter);
+
+  const std::string default_gateway = get_default_gateway4();
+  if (!default_gateway.empty()) {
+    for (const auto &ip : context.server_route_exceptions) {
+      run_exit(ready_path,
+               "route.exe delete " + ip + " mask 255.255.255.255");
+      if (!run_with_retry(ready_path,
+                          "route.exe add " + ip +
+                              " mask 255.255.255.255 " + default_gateway,
+                          2, 500, true)) {
+        debug_log(ready_path, "failed to preserve server route " + ip);
+      }
+    }
+  }
+
+  bool ok = true;
+  if (!mtu.empty()) {
+    ok = run_with_retry(
+             ready_path,
+             "netsh.exe interface ipv4 set subinterface " +
+                 subinterface_target + " mtu=" + mtu + " store=active",
+             3, 1000, false) &&
+         ok;
+  }
+
+  ok = run_with_retry(ready_path,
+                      "netsh.exe interface ipv4 set address " +
+                          address_target + " static " + internal_ip + " " +
+                          netmask,
+                      5, 1000, false) &&
+       ok;
+
+  Sleep(3000);
+
+  for (const auto &cidr : context.custom_routes) {
+    auto [network, mask] = cidr_to_network_and_mask(cidr);
+    run_exit(ready_path, "route.exe delete " + network + " mask " + mask);
+    std::string route_cmd = "route.exe add " + network + " mask " + mask +
+                            " " + internal_ip;
+    if (!if_index.empty())
+      route_cmd += " if " + if_index;
+    route_cmd += " metric 1";
+    ok = run_with_retry(ready_path, route_cmd, 5, 1000, false) && ok;
+  }
+
+  if (!ok) {
+    debug_log(ready_path, "native network configuration incomplete");
+    return false;
+  }
+
+  if (!write_ready_file(ready_path, adapter, internal_ip)) {
+    debug_log(ready_path, "failed to write route-ready marker");
+    return false;
+  }
+
+  debug_log(ready_path,
+            "writeReadyFile tundev=" + adapter + " ip=" + internal_ip);
+  return true;
 }
 
 std::pair<std::string, std::string>
@@ -366,6 +533,85 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
   ss << "}\n";
 
   return ss.str();
+}
+
+int run_tunnel_script(const TunnelScriptContext &context) {
+  const std::string reason = env_value("reason");
+  const std::string &ready_path = context.route_ready_path;
+  debug_log(ready_path, "native script reason=" + reason);
+
+  if (reason == "pre-init") {
+    delete_ready_file(ready_path);
+    return 0;
+  }
+
+  if (reason == "disconnect") {
+    for (const auto &ip : context.server_route_exceptions)
+      run_exit(ready_path,
+               "route.exe delete " + ip + " mask 255.255.255.255");
+    for (const auto &cidr : context.custom_routes) {
+      auto [network, mask] = cidr_to_network_and_mask(cidr);
+      run_exit(ready_path, "route.exe delete " + network + " mask " + mask);
+    }
+    delete_ready_file(ready_path);
+    return 0;
+  }
+
+  if (reason == "reconnect" || reason == "attempt-reconnect") {
+    return 0;
+  }
+
+  if (reason != "connect") {
+    return 0;
+  }
+
+  const std::string tunidx = env_value("TUNIDX");
+  const std::string tundev = env_value("TUNDEV", tunidx);
+  const std::string internal_ip = env_value("INTERNAL_IP4_ADDRESS");
+  const std::string netmask = env_value("INTERNAL_IP4_NETMASK",
+                                        "255.255.255.255");
+  const std::string mtu = env_value("INTERNAL_IP4_MTU");
+
+  debug_log(ready_path, "connect TUNIDX=" + tunidx + " TUNDEV=" + tundev +
+                            " IP=" + internal_ip);
+
+  return configure_tunnel_network(context, tunidx, tundev, internal_ip,
+                                  netmask, mtu)
+             ? 0
+             : 1;
+}
+
+bool configure_from_openconnect_log(const TunnelScriptContext &context,
+                                    const std::string &log_path) {
+  std::ifstream in(log_path);
+  if (!in.is_open())
+    return false;
+  std::string content((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+
+  std::size_t start = content.rfind("Starting VPN:");
+  if (start != std::string::npos)
+    content = content.substr(start);
+
+  std::regex ip_regex(R"(Configured as ([0-9.]+), with)");
+  std::regex adapter_regex(R"(Using Wintun device '([^']+)', index ([0-9]+))");
+  std::smatch ip_match;
+  std::smatch adapter_match;
+  if (!std::regex_search(content, ip_match, ip_regex) ||
+      !std::regex_search(content, adapter_match, adapter_regex) ||
+      ip_match.size() < 2 || adapter_match.size() < 3) {
+    return false;
+  }
+
+  std::string internal_ip = ip_match[1].str();
+  std::string adapter = adapter_match[1].str();
+  std::string if_index = adapter_match[2].str();
+
+  debug_log(context.route_ready_path,
+            "fallback from log TUNIDX=" + if_index + " TUNDEV=" + adapter +
+                " IP=" + internal_ip);
+  return configure_tunnel_network(context, if_index, adapter, internal_ip,
+                                  "255.255.240.0", "");
 }
 
 void cleanup_tunnel_routes(const TunnelScriptContext &) {}

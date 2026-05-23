@@ -17,6 +17,11 @@ ServiceStatusSnapshot current_service_status() {
   status.path = config.default_service_binary_path;
   status.endpoint = config.endpoint;
   status.label = config.service_label;
+  status.capabilities = nlohmann::json{{"service_mode", true},
+                                       {"oneshot_mode", true},
+                                       {"temporary_connect", true},
+                                       {"direct_fallback", false},
+                                       {"helper_binary", true}};
   return status;
 }
 

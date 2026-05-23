@@ -32,6 +32,12 @@ bool check_root() {
 
 std::string get_effective_home() { return ""; }
 std::string get_config_dir() { return ""; }
+std::string get_pid_path() { return ""; }
+std::string get_supervisor_pid_path() { return ""; }
+std::string get_route_ready_path() { return ""; }
+bool file_exists(const std::string &) { return false; }
+std::string read_file(const std::string &) { return ""; }
+std::string trim(const std::string &value) { return value; }
 void set_runtime_owner(uid_t, gid_t) { g_runtime_owner_updated = true; }
 void set_runtime_path_override(const std::string &, const std::string &) {
   g_runtime_path_overridden = true;
@@ -52,6 +58,11 @@ nlohmann::json driver_status_json(const Config &) {
   return nlohmann::json{{"effective_driver", "wintun"},
                         {"wintun_bundled", true}};
 }
+
+int find_openconnect_pid() { return -1; }
+bool is_process_alive(int) { return false; }
+bool terminate_process(int, bool) { return true; }
+void sleep_ms(unsigned int) {}
 
 } // namespace platform
 } // namespace ecnuvpn

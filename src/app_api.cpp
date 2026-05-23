@@ -7,8 +7,10 @@
 #include "helper.hpp"
 #include "logger.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
+#include "platform/common/backend_resolver.hpp"
 #include "platform/common/helper_client.hpp"
 #include "platform/common/driver_status.hpp"
+#include "platform/common/oneshot_bootstrap.hpp"
 #include "platform/common/runtime_status.hpp"
 #include "platform/common/service_status.hpp"
 #include "utils.hpp"
@@ -16,6 +18,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -33,17 +37,56 @@ nlohmann::json error(const std::string &message,
   return result;
 }
 
+std::string json_string(const nlohmann::json &object, const char *key,
+                        const std::string &fallback = std::string());
+
 bool helper_unavailable(const nlohmann::json &response) {
-  return response.value("code", std::string()) ==
-             platform::kHelperUnavailableCode ||
-         response.value("message", std::string()) ==
-             "Helper daemon not available";
+  return json_string(response, "code") == platform::kHelperUnavailableCode ||
+         json_string(response, "message") == "Helper daemon not available";
+}
+
+bool json_bool(const nlohmann::json &object, const char *key, bool fallback) {
+  if (!object.is_object() || !object.contains(key) || object[key].is_null())
+    return fallback;
+  if (object[key].is_boolean())
+    return object[key].get<bool>();
+  return fallback;
+}
+
+int json_int(const nlohmann::json &object, const char *key, int fallback) {
+  if (!object.is_object() || !object.contains(key) || object[key].is_null())
+    return fallback;
+  if (object[key].is_number_integer())
+    return object[key].get<int>();
+  return fallback;
+}
+
+uint64_t json_u64(const nlohmann::json &object, const char *key,
+                  uint64_t fallback) {
+  if (!object.is_object() || !object.contains(key) || object[key].is_null())
+    return fallback;
+  if (object[key].is_number_unsigned())
+    return object[key].get<uint64_t>();
+  if (object[key].is_number_integer()) {
+    int64_t value = object[key].get<int64_t>();
+    return value < 0 ? fallback : static_cast<uint64_t>(value);
+  }
+  return fallback;
+}
+
+std::string json_string(const nlohmann::json &object, const char *key,
+                        const std::string &fallback) {
+  if (!object.is_object() || !object.contains(key) || object[key].is_null())
+    return fallback;
+  if (object[key].is_string())
+    return object[key].get<std::string>();
+  return fallback;
 }
 
 nlohmann::json helper_error(const nlohmann::json &response,
                             const std::string &fallback_message) {
-  return error(response.value("message", fallback_message),
-               response.value("code", std::string()));
+  return error(json_string(response, "message", fallback_message),
+               json_string(response, "code"));
 }
 
 config::ConfigManager make_config_manager() {
@@ -59,53 +102,87 @@ config::ConfigManager make_config_manager() {
 
 nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
                                            const Config &cfg) {
+  bool running = json_bool(helper_resp, "running", false);
+  bool network_ready = json_bool(helper_resp, "network_ready", false);
   nlohmann::json j;
-  j["connected"] = helper_resp.value("running", false);
-  j["server"] = helper_resp.value("server", cfg.server);
+  j["connected"] = running && network_ready;
+  j["process_running"] = running;
+  j["server"] = json_string(helper_resp, "server", cfg.server);
   j["username"] = cfg.username;
-  j["pid"] = helper_resp.value("pid", -1);
-  j["supervisor_pid"] = helper_resp.value("supervisor_pid", -1);
-  j["network_ready"] = helper_resp.value("network_ready", false);
-  j["interface"] = helper_resp.value("interface", "");
-  j["internal_ip"] = helper_resp.value("internal_ip", "");
-  j["route_count"] = helper_resp.value("route_count",
-                                        static_cast<int>(cfg.routes.size()));
+  j["pid"] = json_int(helper_resp, "pid", -1);
+  j["supervisor_pid"] = json_int(helper_resp, "supervisor_pid", -1);
+  j["network_ready"] = network_ready;
+  j["interface"] = json_string(helper_resp, "interface");
+  j["internal_ip"] = json_string(helper_resp, "internal_ip");
+  j["route_count"] =
+      json_int(helper_resp, "route_count", static_cast<int>(cfg.routes.size()));
   j["mtu"] = cfg.mtu;
   j["uptime_seconds"] = 0;
-  j["rx_bytes"] = helper_resp.value("rx_bytes", 0);
-  j["tx_bytes"] = helper_resp.value("tx_bytes", 0);
-  virtual_network::add_status_fields(j, j.value("interface", std::string()));
+  j["rx_bytes"] = json_u64(helper_resp, "rx_bytes", 0);
+  j["tx_bytes"] = json_u64(helper_resp, "tx_bytes", 0);
+  try {
+    virtual_network::add_status_fields(j, json_string(j, "interface"));
+  } catch (...) {
+  }
   return j;
 }
 
 nlohmann::json disconnected_status(const Config &cfg) {
-  return frontend_status_from_helper(nlohmann::json{{"running", false}}, cfg);
+  nlohmann::json j{{"connected", false},
+                   {"process_running", false},
+                   {"server", cfg.server},
+                   {"username", cfg.username},
+                   {"pid", -1},
+                   {"supervisor_pid", -1},
+                   {"network_ready", false},
+                   {"interface", ""},
+                   {"internal_ip", ""},
+                   {"route_count", static_cast<int>(cfg.routes.size())},
+                   {"mtu", cfg.mtu},
+                   {"uptime_seconds", 0},
+                   {"rx_bytes", 0},
+                   {"tx_bytes", 0},
+                   {"upstream_virtual_detected", false},
+                   {"upstream_virtual_adapters", nlohmann::json::array()},
+                   {"upstream_virtual_message", ""},
+                   {"route_policy", "normal"}};
+  try {
+    virtual_network::add_status_fields(j, "");
+  } catch (...) {
+  }
+  return j;
 }
 
 nlohmann::json frontend_status_from_snapshot_json(const nlohmann::json &snapshot,
                                                    const Config &cfg) {
-  std::string iface = snapshot.value("interface", std::string());
+  std::string iface = json_string(snapshot, "interface");
+  bool running = json_bool(snapshot, "running", false);
+  bool network_ready = json_bool(snapshot, "network_ready", false);
   uint64_t rx_bytes = 0;
   uint64_t tx_bytes = 0;
-  if (snapshot.value("network_ready", false) && !iface.empty()) {
+  if (network_ready && !iface.empty()) {
     utils::get_interface_traffic(iface, &rx_bytes, &tx_bytes);
   }
 
   nlohmann::json j;
-  j["connected"] = snapshot.value("running", false);
+  j["connected"] = running && network_ready;
+  j["process_running"] = running;
   j["server"] = cfg.server;
   j["username"] = cfg.username;
-  j["pid"] = snapshot.value("pid", -1);
-  j["supervisor_pid"] = snapshot.value("supervisor_pid", -1);
-  j["network_ready"] = snapshot.value("network_ready", false);
+  j["pid"] = json_int(snapshot, "pid", -1);
+  j["supervisor_pid"] = json_int(snapshot, "supervisor_pid", -1);
+  j["network_ready"] = network_ready;
   j["interface"] = iface;
-  j["internal_ip"] = snapshot.value("internal_ip", std::string());
+  j["internal_ip"] = json_string(snapshot, "internal_ip");
   j["route_count"] = static_cast<int>(cfg.routes.size());
   j["mtu"] = cfg.mtu;
   j["uptime_seconds"] = 0;
   j["rx_bytes"] = rx_bytes;
   j["tx_bytes"] = tx_bytes;
-  virtual_network::add_status_fields(j, iface);
+  try {
+    virtual_network::add_status_fields(j, iface);
+  } catch (...) {
+  }
   return j;
 }
 
@@ -162,6 +239,15 @@ nlohmann::json service_status_json() {
   return platform::service_status_to_json(platform::current_service_status());
 }
 
+std::string helper_binary_next_to_exv() {
+  std::filesystem::path exv_path(utils::get_executable_path());
+#ifdef _WIN32
+  return (exv_path.parent_path() / "exv-helper.exe").string();
+#else
+  return (exv_path.parent_path() / "exv-helper").string();
+#endif
+}
+
 std::string json_safe_text(const std::string &text) {
   std::string out;
   out.reserve(text.size());
@@ -196,9 +282,16 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
   if (password.empty())
     return error("VPN password is not configured.");
 
-  if (!helper::is_available() && !allow_direct_fallback) {
-    return error(platform::helper_unavailable_connect_message(),
-                 platform::kHelperUnavailableCode);
+  if (!allow_direct_fallback) {
+    platform::BackendResolveOptions options;
+    options.preferred_mode = "service";
+    options.allow_oneshot = false;
+    options.allow_service_start = false;
+    nlohmann::json backend = platform::resolve_backend(options);
+    if (!backend.value("ok", false)) {
+      return platform::backend_unavailable_error(
+          backend, platform::helper_unavailable_connect_message());
+    }
   }
 
   nlohmann::json runtime = runtime_status_json(cfg);
@@ -256,15 +349,19 @@ nlohmann::json handle_action(const std::string &action,
 
     if (action == "status.get") {
       auto helper_resp = platform::send_helper_request({{"action", "status"}});
-      if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
+      if (!json_bool(helper_resp, "ok", false) && helper_unavailable(helper_resp)) {
         nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
-        if (fallback.value("_snapshot", false)) {
-          if (fallback.value("_running", false)) {
+        if (json_bool(fallback, "_snapshot", false)) {
+          if (json_bool(fallback, "_running", false)) {
             return frontend_status_from_snapshot_json(
-                fallback.value("_snapshot_data", nlohmann::json::object()), cfg);
+                fallback.contains("_snapshot_data")
+                    ? fallback["_snapshot_data"]
+                    : nlohmann::json::object(),
+                cfg);
           }
           return disconnected_status(cfg);
         }
+        return disconnected_status(cfg);
       }
       return frontend_status_from_helper(helper_resp, cfg);
     }
@@ -283,17 +380,50 @@ nlohmann::json handle_action(const std::string &action,
       if (preflight.is_object() && preflight.value("ok", true) == false)
         return preflight;
 
-      if (!helper::is_available() && allow_direct_fallback) {
-        nlohmann::json direct =
-            platform::try_connect_direct_fallback(cfg, password);
-        if (direct.is_object() && direct.value("_direct_fallback", false)) {
-          auto &sd = direct["_snapshot_data"];
-          if (sd.value("running", false))
-            return frontend_status_from_snapshot_json(sd, cfg);
-          return disconnected_status(cfg);
+      if (allow_direct_fallback && !helper::is_available()) {
+        nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
+        if (json_bool(fallback, "_snapshot", false) &&
+            json_bool(fallback, "_running", false)) {
+          nlohmann::json status = frontend_status_from_snapshot_json(
+              fallback.contains("_snapshot_data")
+                  ? fallback["_snapshot_data"]
+                  : nlohmann::json::object(),
+              cfg);
+          status["mode"] = "elevated";
+          return status;
         }
-        if (direct.is_object() && direct.value("ok", true) == false)
-          return direct;
+      }
+
+      if (!helper::is_available() && allow_direct_fallback) {
+        platform::BackendResolveOptions options;
+        options.preferred_mode = "oneshot";
+        options.helper_path = helper_binary_next_to_exv();
+        options.allow_oneshot = true;
+        options.allow_service_start = false;
+        options.start_oneshot = true;
+        nlohmann::json backend = platform::resolve_backend(options);
+        if (backend.value("ok", false)) {
+          platform::HelperEndpoint endpoint{
+              backend.value("endpoint", std::string()),
+              backend.value("auth_token", std::string())};
+          nlohmann::json helper_resp = platform::send_helper_request(
+              endpoint,
+              {{"action", "start"},
+               {"config", cfg},
+               {"password", password},
+               {"retry_limit", 0},
+               {"home", utils::get_effective_home()},
+               {"config_dir", utils::get_config_dir()}});
+          if (!helper_resp.value("ok", false)) {
+            return helper_error(helper_resp, "Failed to start VPN");
+          }
+          nlohmann::json status = frontend_status_from_helper(helper_resp, cfg);
+          status["mode"] = "elevated";
+          status["backend"] = backend;
+          return status;
+        }
+        return platform::backend_unavailable_error(
+            backend, "Failed to start one-shot helper.");
       }
 
         auto helper_resp = platform::send_helper_request(
@@ -312,21 +442,37 @@ nlohmann::json handle_action(const std::string &action,
     if (action == "vpn.disconnect") {
       bool allow_direct_fallback =
           payload.value("allow_direct_fallback", false);
+      nlohmann::json backend =
+          payload.value("backend", nlohmann::json::object());
+      if (backend.is_object() &&
+          backend.value("backend", std::string()) == "oneshot") {
+        platform::HelperEndpoint endpoint{
+            backend.value("endpoint", std::string()),
+            backend.value("auth_token", std::string())};
+        auto helper_resp =
+            platform::send_helper_request(endpoint, {{"action", "stop"}});
+        if (!helper_resp.value("ok", false)) {
+          return helper_error(helper_resp, "Failed to stop VPN");
+        }
+        return disconnected_status(cfg);
+      }
+
       auto helper_resp = platform::send_helper_request({{"action", "stop"}});
       if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
-        nlohmann::json direct =
-            platform::try_disconnect_direct_fallback(allow_direct_fallback);
-        if (direct.is_object() && direct.value("_not_running", false))
-          return disconnected_status(cfg);
-        if (direct.is_object() && direct.value("_direct_fallback", false))
-          return disconnected_status(cfg);
         if (!allow_direct_fallback) {
           return error(platform::helper_unavailable_disconnect_message(),
                        platform::kHelperUnavailableCode);
         }
-        if (direct.is_object() && direct.value("ok", true) == false)
-          return direct;
-        return disconnected_status(cfg);
+        nlohmann::json fallback =
+            platform::try_disconnect_direct_fallback(allow_direct_fallback);
+        if (fallback.is_object() && !fallback.empty()) {
+          if (!fallback.value("ok", false)) {
+            return error(fallback.value("error", "Failed to stop VPN"));
+          }
+          return disconnected_status(cfg);
+        }
+        return error("One-shot helper is no longer running.",
+                     platform::kHelperUnavailableCode);
       }
       if (!helper_resp.value("ok", false)) {
         return helper_error(helper_resp, "Failed to stop VPN");
@@ -465,7 +611,23 @@ nlohmann::json handle_action(const std::string &action,
       return service_status_json();
 
     if (action == "helper.status")
-      return service_status_json();
+    {
+      platform::BackendResolveOptions options;
+      options.preferred_mode = "auto";
+      options.allow_oneshot = true;
+      options.allow_service_start = false;
+      nlohmann::json resolved = platform::resolve_backend(options);
+      if (!resolved.value("ok", false)) {
+        resolved["resolved"] = false;
+        resolved["resolution_code"] = resolved.value("code", std::string());
+        resolved["resolution_message"] =
+            resolved.value("message", std::string());
+        resolved["ok"] = true;
+      } else {
+        resolved["resolved"] = true;
+      }
+      return resolved;
+    }
 
     if (action == "runtime.status")
       return runtime_status_json(cfg);

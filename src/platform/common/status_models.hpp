@@ -11,6 +11,7 @@ struct ServiceStatusSnapshot {
   bool installed = false;
   bool running = false;
   bool available = false;
+  nlohmann::json capabilities = nlohmann::json::object();
   std::string mode;
   std::string path;
   std::string endpoint;

@@ -51,7 +51,7 @@ export interface EcnuVpnApi {
     connect(password?: string): Promise<VpnStatus | { status: 'connecting' }>
     disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
     connectElevated(password?: string): Promise<VpnStatus | VpnError>
-    disconnectElevated(): Promise<VpnStatus | VpnError>
+    disconnectElevated(backend?: unknown): Promise<VpnStatus | VpnError>
   }
   config: {
     getAuth(): Promise<AuthConfig>

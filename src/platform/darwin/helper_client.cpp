@@ -23,7 +23,18 @@ std::string trim_copy(const std::string &value) {
 } // namespace
 
 nlohmann::json send_helper_request(const nlohmann::json &request) {
-  std::string payload = request.dump();
+  return send_helper_request(
+      HelperEndpoint{helper_platform_config().endpoint, std::string()},
+      request);
+}
+
+nlohmann::json send_helper_request(const HelperEndpoint &endpoint,
+                                   const nlohmann::json &request) {
+  nlohmann::json authed_request = request;
+  if (!endpoint.auth_token.empty())
+    authed_request["auth_token"] = endpoint.auth_token;
+
+  std::string payload = authed_request.dump();
   payload.push_back('\n');
   std::string raw;
 
@@ -36,7 +47,7 @@ nlohmann::json send_helper_request(const nlohmann::json &request) {
   sockaddr_un addr {};
   addr.sun_family = AF_UNIX;
   std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
-                helper_platform_config().endpoint);
+                endpoint.endpoint.c_str());
 
   if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
     close(fd);

@@ -8,6 +8,7 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $buildRoot = Join-Path $repoRoot 'build\windows'
+$cppBuildRoot = Join-Path $repoRoot 'build-windows'
 $env:ECNUVPN_BUILD_PLATFORM = 'windows'
 $env:ECNUVPN_WEBUI_DIST_DIR = Join-Path $buildRoot 'electron\dist'
 
@@ -29,7 +30,7 @@ function Invoke-CppBuild {
   Push-Location $repoRoot
   try {
     Invoke-Step cmake --preset windows-release
-    Invoke-Step cmake --build --preset windows-release --target exv exv-helper platform_status_models_test vpn_runtime_test
+    Invoke-Step cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test
   }
   finally {
     Pop-Location
@@ -39,7 +40,7 @@ function Invoke-CppBuild {
 function Invoke-CppTests {
   Push-Location $repoRoot
   try {
-    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|vpn_runtime_test'
+    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test'
   }
   finally {
     Pop-Location
@@ -155,6 +156,9 @@ switch ($Action) {
   'clean' {
     if (Test-Path $buildRoot) {
       Remove-Item -Recurse -Force $buildRoot
+    }
+    if (Test-Path $cppBuildRoot) {
+      Remove-Item -Recurse -Force $cppBuildRoot
     }
   }
 }

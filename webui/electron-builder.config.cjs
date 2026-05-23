@@ -5,6 +5,12 @@ const { getBuildLayout } = require('./scripts/build-layout.cjs')
 
 const layout = getBuildLayout()
 const buildResourcesDir = path.join(__dirname, 'build-resources')
+const rendererIndex = path.join(layout.rendererOutDir, 'index.html')
+const electronMain = path.join(layout.electronOutDir, 'main', 'index.js')
+const nativeExe = path.join(
+  layout.nativeBinDir,
+  process.platform === 'win32' ? 'exv.exe' : 'exv',
+)
 
 function relativeToWebui(target) {
   return path.relative(__dirname, target).split(path.sep).join('/')
@@ -16,6 +22,18 @@ function buildResource(name) {
 
 function hasBuildResource(name) {
   return fs.existsSync(path.join(buildResourcesDir, name))
+}
+
+for (const [label, file] of [
+  ['renderer bundle', rendererIndex],
+  ['Electron main bundle', electronMain],
+  ['native exv binary', nativeExe],
+]) {
+  if (!fs.existsSync(file)) {
+    throw new Error(
+      `Missing ${label}: ${file}. Run the platform build script or npm run build, npm run build:electron, and npm run prepare:native before packaging.`,
+    )
+  }
 }
 
 const installerInclude = hasBuildResource('installer.nsh')

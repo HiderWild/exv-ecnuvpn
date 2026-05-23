@@ -11,7 +11,7 @@ const HelperPlatformConfig &helper_platform_config() {
       "/var/run/exv-helper.sock",
       "/var/run/exv-helper-session.json",
       "/usr/local/bin/exv",
-      "/usr/local/bin/exv",
+      "/usr/local/bin/exv-helper",
       "launchd",
   };
   return config;
