@@ -164,9 +164,9 @@ const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'erro
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
           </svg>
-          <span class="text-sm font-medium">等待授权...</span>
+          <span class="text-sm font-medium">{{ vpn.connectionProgress.label }}...</span>
         </div>
-        <p class="text-xs text-muted">请在系统弹窗中确认提权请求</p>
+        <p class="text-xs text-muted">{{ vpn.connectionProgress.description }}</p>
       </div>
 
       <!-- ── State: error recoverable ────────────────────────────────── -->
@@ -317,7 +317,7 @@ const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'erro
 
       <!-- ── Upstream virtual adapter warning ─────────────────────────── -->
       <div
-        v-if="vpn.status?.upstream_virtual_detected"
+        v-if="vpn.status?.connected && vpn.status?.upstream_virtual_detected"
         class="mt-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
       >
         <Route class="mt-0.5 h-4 w-4 shrink-0" />

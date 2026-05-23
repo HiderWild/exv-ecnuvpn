@@ -132,6 +132,120 @@ valid UTF-8. `nlohmann::json` validates strings during serialization, so raw log
 lines could terminate the native RPC process. Log lines are now sanitized before
 being returned to Electron.
 
+### 7. Elevated RPC cannot depend on stdout or process lifetime
+
+The no-service Windows path originally tried to run elevated native RPC through
+PowerShell and read stdout after `Start-Process -Verb RunAs -Wait`. This broke in
+two different ways:
+
+- JSON payloads passed through nested PowerShell quoting could arrive corrupted.
+- The elevated wrapper could keep waiting even after the native command had
+  already produced a valid result, because the one-shot helper and OpenConnect
+  outlived the short RPC process.
+
+The stable pattern is now:
+
+```text
+normal Electron main
+  -> write payload JSON file
+  -> launch elevated PowerShell script
+  -> elevated exv.exe writes result JSON file directly
+  -> normal Electron main polls the result file
+```
+
+Do not reintroduce stdout capture for Windows elevated desktop RPC. Result files
+are the handoff boundary; the elevated process lifetime is not the completion
+signal.
+
+### 8. OpenConnect `--script` is unreliable in the hidden elevated chain
+
+OpenConnect reached CSTP/DTLS, but its Windows `--script` child launch failed
+with `句柄无效` for all tested script hosts:
+
+- `cscript.exe`
+- `wscript.exe`
+- `exv-helper.exe __tunnel-script`
+
+That means the failure was not JavaScript-specific. It was the hidden elevated
+process chain and inherited handle environment. The connection could appear
+established while Windows routes and interface configuration were still missing.
+
+The current Windows workaround parses the OpenConnect runtime log for:
+
+- assigned internal IP
+- Wintun adapter name
+- adapter index
+
+Then native code configures the interface and routes and writes `route-ready`.
+Status must treat `connected` as `process_running && network_ready`; a running
+OpenConnect process alone is not enough.
+
+### 9. One-shot mode must keep its backend identity in the UI
+
+After a successful one-shot connection, the first `connectElevated` response has
+the temporary backend endpoint and token. A later plain `status.get` can only see
+the OpenConnect process and route marker; it cannot rediscover the one-shot
+auth token. If the UI overwrites the session with that plain status, it loses the
+fact that this is an elevated temporary connection.
+
+The observed failure mode was:
+
+```text
+connectElevated succeeds
+status polling overwrites mode/backend
+UI thinks the session is helper/service managed
+disconnect calls normal ecnu-vpn:rpc
+normal RPC fails with helper_unavailable
+```
+
+The store now preserves the temporary backend and infers `mode=elevated` while
+connected without a running service. Disconnect for elevated/direct sessions must
+use the elevated path, even if the backend has been lost; the native fallback can
+clean up OpenConnect and the one-shot helper.
+
+### 10. Service status is not helper status
+
+A running `exv-helper.exe --oneshot` process is not an installed Windows
+service. The service page and service status must be based on SCM state only:
+
+```powershell
+sc.exe query exv-helper
+```
+
+If SCM returns 1060, the service is not installed, even if a temporary helper
+process is currently serving a one-shot VPN session. Keep these concepts
+separate in UI copy and state:
+
+- service installed/running/available
+- one-shot helper running for the current session
+- OpenConnect process running
+- network ready
+
+### 11. Connection progress should expose phases
+
+Showing only `等待授权` makes the user think the app is still waiting for UAC,
+even after authorization has succeeded and the client is actually creating the
+adapter, connecting to the VPN server, or writing routes. The UI now separates
+the temporary connection flow into visible phases:
+
+- waiting for authorization
+- starting one-shot helper
+- connecting to VPN server
+- creating virtual adapter
+- writing routes
+- waiting for network readiness
+
+Future native progress events should replace the current UI-side phase estimate,
+but the user-facing model should remain multi-stage. These phases are also good
+log markers for future debugging.
+
+### 12. Virtual-adapter warnings are connected-state context
+
+The app can detect upstream virtual adapters such as Mihomo even while
+disconnected. Showing that warning before a connection is active makes it look
+like EXV has already changed networking. The dashboard should only show the
+upstream virtual adapter warning while connected.
+
 ## Current Windows Architecture
 
 ```text
