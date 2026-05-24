@@ -440,6 +440,12 @@ void terminate_process(int pid) {
   kill(pid, SIGTERM);
 }
 
+void force_terminate_process(int pid) {
+  if (pid <= 0)
+    return;
+  kill(pid, SIGKILL);
+}
+
 void sleep_ms(int milliseconds) {
   usleep(static_cast<useconds_t>(milliseconds) * 1000);
 }

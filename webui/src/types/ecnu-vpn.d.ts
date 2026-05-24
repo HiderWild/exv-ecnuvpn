@@ -24,6 +24,7 @@ export interface EcnuVpnEvent {
 
 export type VpnErrorType =
   | 'elevation_required'
+  | 'elevation_cancelled'
   | 'elevation_denied'
   | 'runtime_missing'
   | 'config_invalid'

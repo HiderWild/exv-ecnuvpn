@@ -8,6 +8,7 @@ namespace ecnuvpn {
 
 // Unified error type strings matching the TypeScript VpnErrorType enum.
 static constexpr const char *kErrorElevationRequired = "elevation_required";
+static constexpr const char *kErrorElevationCancelled = "elevation_cancelled";
 static constexpr const char *kErrorElevationDenied    = "elevation_denied";
 static constexpr const char *kErrorRuntimeMissing     = "runtime_missing";
 static constexpr const char *kErrorConfigInvalid      = "config_invalid";

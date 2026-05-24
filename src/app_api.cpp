@@ -24,6 +24,9 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace ecnuvpn {
 namespace app_api {
@@ -112,6 +115,26 @@ void apply_desktop_runtime_context(const nlohmann::json &payload) {
   utils::set_runtime_path_override(home.empty() ? utils::get_effective_home()
                                                 : home,
                                    config_dir);
+#ifndef _WIN32
+  std::string owner_home = home.empty() ? utils::get_effective_home() : home;
+  struct stat home_stat {};
+  if (!owner_home.empty() && stat(owner_home.c_str(), &home_stat) == 0) {
+    utils::set_runtime_owner(home_stat.st_uid, home_stat.st_gid);
+  }
+#endif
+}
+
+void add_desktop_owner_context(nlohmann::json &request) {
+#ifndef _WIN32
+  if (!utils::has_runtime_owner())
+    return;
+  request["owner_uid"] =
+      static_cast<unsigned int>(utils::get_runtime_owner_uid());
+  request["owner_gid"] =
+      static_cast<unsigned int>(utils::get_runtime_owner_gid());
+#else
+  (void)request;
+#endif
 }
 
 nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
@@ -424,12 +447,16 @@ nlohmann::json handle_action(const std::string &action,
               backend.value("auth_token", std::string())};
           nlohmann::json helper_resp = platform::send_helper_request(
               endpoint,
-              {{"action", "start"},
-               {"config", cfg},
-               {"password", password},
-               {"retry_limit", 0},
-               {"home", utils::get_effective_home()},
-               {"config_dir", utils::get_config_dir()}});
+              [&] {
+                nlohmann::json request{{"action", "start"},
+                                       {"config", cfg},
+                                       {"password", password},
+                                       {"retry_limit", 0},
+                                       {"home", utils::get_effective_home()},
+                                       {"config_dir", utils::get_config_dir()}};
+                add_desktop_owner_context(request);
+                return request;
+              }());
           if (!helper_resp.value("ok", false)) {
             return helper_error(helper_resp, "Failed to start VPN");
           }
@@ -442,13 +469,14 @@ nlohmann::json handle_action(const std::string &action,
             backend, "Failed to start one-shot helper.");
       }
 
-        auto helper_resp = platform::send_helper_request(
-          {{"action", "start"},
-           {"config", cfg},
-           {"password", password},
-           {"retry_limit", 0},
-           {"home", utils::get_effective_home()},
-           {"config_dir", utils::get_config_dir()}});
+      nlohmann::json start_request{{"action", "start"},
+                                   {"config", cfg},
+                                   {"password", password},
+                                   {"retry_limit", 0},
+                                   {"home", utils::get_effective_home()},
+                                   {"config_dir", utils::get_config_dir()}};
+      add_desktop_owner_context(start_request);
+      auto helper_resp = platform::send_helper_request(start_request);
       if (!helper_resp.value("ok", false)) {
         return helper_error(helper_resp, "Failed to start VPN");
       }

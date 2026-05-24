@@ -89,6 +89,8 @@ void terminate_process(int pid) {
   }
 }
 
+void force_terminate_process(int pid) { terminate_process(pid); }
+
 void sleep_ms(int milliseconds) {
   Sleep(static_cast<DWORD>(milliseconds));
 }

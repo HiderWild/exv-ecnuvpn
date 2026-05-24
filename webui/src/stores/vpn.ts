@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import api from '../api/desktop'
+import { useUiStore } from './ui'
 
 export interface UpstreamVirtualAdapter {
   name: string
@@ -75,6 +76,7 @@ export interface ConnectionProgressStage {
 
 export type VpnErrorType =
   | 'elevation_required'
+  | 'elevation_cancelled'
   | 'elevation_denied'
   | 'runtime_missing'
   | 'config_invalid'
@@ -115,6 +117,21 @@ export function isVpnError(data: unknown): data is VpnError {
   return data != null && typeof data === 'object' && 'error_type' in (data as object)
 }
 
+function isElevationCancelledMessage(message: string) {
+  const normalized = message.toLowerCase()
+  return message.includes('用户已取消') ||
+    message.includes('使用者已取消') ||
+    message.includes('操作已取消') ||
+    normalized.includes('user canceled') ||
+    normalized.includes('user cancelled') ||
+    normalized.includes('operation was canceled') ||
+    normalized.includes('operation was cancelled') ||
+    normalized.includes('cancelled by the user') ||
+    normalized.includes('canceled by the user') ||
+    normalized.includes('error 1223') ||
+    message.includes('(-128)')
+}
+
 export function normalizeError(raw: unknown): VpnError {
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
@@ -141,6 +158,16 @@ export function normalizeError(raw: unknown): VpnError {
   }
 
   const message = raw instanceof Error ? raw.message : raw ? String(raw) : 'Unknown error'
+  if (isElevationCancelledMessage(message)) {
+    return {
+      ok: false,
+      error_type: 'elevation_cancelled',
+      message: '提权失败：用户已取消授权。',
+      recoverable: true,
+      recommended_action: '',
+      timestamp: Date.now(),
+    }
+  }
   return {
     ok: false,
     error_type: message.includes('elevation_denied') ? 'elevation_denied' : 'native_failure',
@@ -153,6 +180,7 @@ export function normalizeError(raw: unknown): VpnError {
 
 export const useVpnStore = defineStore('vpn', () => {
   let progressTimer: ReturnType<typeof setInterval> | null = null
+  const ui = useUiStore()
 
   const status = ref<VpnStatus | null>(null)
   const routes = ref<RouteEntry[]>([])
@@ -319,6 +347,11 @@ export const useVpnStore = defineStore('vpn', () => {
   })
 
   function setError(err: VpnError) {
+    if (err.error_type === 'elevation_cancelled') {
+      clearError()
+      ui.addToast(err.message || '提权失败：用户已取消授权。', 'warning')
+      return
+    }
     if (err.error_type === 'elevation_required' || err.error_type === 'service_missing') {
       clearError()
       return
@@ -500,6 +533,8 @@ export const useVpnStore = defineStore('vpn', () => {
   async function installService() {
     serviceBusy.value = true
     serviceProgress.value = []
+    clearError()
+    lastMutatingAction.value = installService
     try {
       const { data } = await api.post<ServiceStatus>('/service/install')
       serviceStatus.value = data
@@ -507,6 +542,8 @@ export const useVpnStore = defineStore('vpn', () => {
         throw new Error(data.warning || 'Helper service is not available after install.')
       }
       await fetchAppShellState()
+    } catch (error) {
+      setError(normalizeError(error))
     } finally {
       serviceBusy.value = false
     }
@@ -515,6 +552,8 @@ export const useVpnStore = defineStore('vpn', () => {
   async function uninstallService() {
     serviceBusy.value = true
     serviceProgress.value = []
+    clearError()
+    lastMutatingAction.value = uninstallService
     try {
       const { data } = await api.post<ServiceStatus>('/service/uninstall')
       serviceStatus.value = data
@@ -522,6 +561,8 @@ export const useVpnStore = defineStore('vpn', () => {
         throw new Error(data.warning || 'Helper service is still installed after uninstall.')
       }
       await fetchAppShellState()
+    } catch (error) {
+      setError(normalizeError(error))
     } finally {
       serviceBusy.value = false
     }

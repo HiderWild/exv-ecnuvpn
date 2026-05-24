@@ -420,9 +420,9 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
   }
 
   if (pid > 0 && is_process_alive(pid))
-    platform::terminate_process(pid);
+    platform::force_terminate_process(pid);
   if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
-    platform::terminate_process(supervisor_pid);
+    platform::force_terminate_process(supervisor_pid);
 
   platform::sleep_ms(500);
 
@@ -430,6 +430,8 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
   if (remaining_pid > 0 && remaining_pid != pid) {
     platform::terminate_process(remaining_pid);
     platform::sleep_ms(500);
+    if (is_process_alive(remaining_pid))
+      platform::force_terminate_process(remaining_pid);
   }
 
   if ((pid > 0 && is_process_alive(pid)) ||
@@ -512,9 +514,11 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
   }
 
   SessionState state;
-  state.uid = peer_uid;
-  state.gid = peer_gid;
-  state.username = utils::get_username_for_uid(peer_uid);
+  state.uid = static_cast<uid_t>(request.value(
+      "owner_uid", static_cast<unsigned int>(peer_uid)));
+  state.gid = static_cast<gid_t>(request.value(
+      "owner_gid", static_cast<unsigned int>(peer_gid)));
+  state.username = utils::get_username_for_uid(state.uid);
   state.home = requested_home.empty() ? utils::get_home_for_uid(peer_uid)
                                     : requested_home;
   state.config_dir =

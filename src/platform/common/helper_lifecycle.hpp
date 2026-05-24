@@ -37,6 +37,7 @@ int spawn_worker_process(const std::string &executable_path,
 
 // Terminate a process by PID. Used for stopping VPN/supervisor processes.
 void terminate_process(int pid);
+void force_terminate_process(int pid);
 
 // Sleep for the given number of milliseconds.
 void sleep_ms(int milliseconds);
