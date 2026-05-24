@@ -100,6 +100,20 @@ config::ConfigManager make_config_manager() {
   return config::ConfigManager(utils::get_config_dir());
 }
 
+void apply_desktop_runtime_context(const nlohmann::json &payload) {
+  if (!payload.is_object())
+    return;
+
+  std::string home = json_string(payload, "home");
+  std::string config_dir = json_string(payload, "config_dir");
+  if (home.empty() && config_dir.empty())
+    return;
+
+  utils::set_runtime_path_override(home.empty() ? utils::get_effective_home()
+                                                : home,
+                                   config_dir);
+}
+
 nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
                                            const Config &cfg) {
   bool running = json_bool(helper_resp, "running", false);
@@ -344,6 +358,8 @@ nlohmann::json logs_json(const nlohmann::json &payload) {
 nlohmann::json handle_action(const std::string &action,
                              const nlohmann::json &payload) {
   try {
+    apply_desktop_runtime_context(payload);
+
     config::ConfigManager mgr = make_config_manager();
     Config cfg = mgr.load();
 

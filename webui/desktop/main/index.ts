@@ -88,6 +88,21 @@ function nativeExecOptions(exv: string, extra: { maxBuffer?: number } = {}) {
   }
 }
 
+function withDesktopRuntimeContext(payload: unknown) {
+  const context = {
+    home: app.getPath('home'),
+  }
+
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    return {
+      ...(payload as Record<string, unknown>),
+      ...context,
+    }
+  }
+
+  return context
+}
+
 function parseJsonOutput(stdout: string) {
   const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   for (let i = lines.length - 1; i >= 0; --i) {
@@ -287,7 +302,7 @@ ipcMain.handle(
       throwRpcResultError,
       runDesktopRpc,
       emitServiceProgress,
-    }, action, payload, followupAction)
+    }, action, withDesktopRuntimeContext(payload), followupAction)
   },
 )
 
