@@ -7,6 +7,14 @@
 namespace ecnuvpn {
 namespace helper {
 
+struct DaemonOptions {
+  std::string mode = "service";
+  std::string endpoint;
+  std::string auth_token;
+  bool auth_required = false;
+  bool oneshot = false;
+};
+
 bool is_available();
 bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
                       int retry_limit);
@@ -17,9 +25,10 @@ int install_service(const std::string &executable_path);
 int uninstall_service();
 int show_service_status();
 
+int daemon_main(const DaemonOptions &options);
 int daemon_main();
-int worker_main(const std::string &request_path);
 void request_daemon_stop();
+int worker_main(const std::string &request_path);
 
 } // namespace helper
 } // namespace ecnuvpn

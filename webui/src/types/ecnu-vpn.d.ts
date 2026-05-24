@@ -1,4 +1,8 @@
 import type {
+  DesktopDriverInstallTarget,
+  DesktopEventType,
+} from '../../desktop/shared/desktop-contract'
+import type {
   AuthConfig,
   DriverStatus,
   KeyStatus,
@@ -14,12 +18,13 @@ import type {
 } from '../stores/vpn'
 
 export interface EcnuVpnEvent {
-  type: 'log' | 'status' | 'heartbeat' | 'service-progress'
+  type: DesktopEventType
   data: unknown | ServiceProgressEntry
 }
 
 export type VpnErrorType =
   | 'elevation_required'
+  | 'elevation_cancelled'
   | 'elevation_denied'
   | 'runtime_missing'
   | 'config_invalid'
@@ -47,7 +52,7 @@ export interface EcnuVpnApi {
     connect(password?: string): Promise<VpnStatus | { status: 'connecting' }>
     disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
     connectElevated(password?: string): Promise<VpnStatus | VpnError>
-    disconnectElevated(): Promise<VpnStatus | VpnError>
+    disconnectElevated(backend?: unknown): Promise<VpnStatus | VpnError>
   }
   config: {
     getAuth(): Promise<AuthConfig>
@@ -75,7 +80,7 @@ export interface EcnuVpnApi {
   }
   drivers: {
     status(): Promise<DriverStatus>
-    install(driver: 'wintun' | 'tap'): Promise<DriverStatus>
+    install(driver: DesktopDriverInstallTarget): Promise<DriverStatus>
   }
   events: {
     subscribe(handler: (event: EcnuVpnEvent) => void): () => void

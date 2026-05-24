@@ -1,0 +1,158 @@
+#include "platform/common/oneshot_bootstrap.hpp"
+
+#include "platform/common/backend_resolver.hpp"
+#include "utils.hpp"
+
+#include <chrono>
+#include <random>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <shellapi.h>
+#include <windows.h>
+
+namespace ecnuvpn {
+namespace platform {
+namespace {
+
+std::string random_hex(size_t bytes) {
+  std::random_device rd;
+  std::ostringstream out;
+  out << std::hex;
+  for (size_t i = 0; i < bytes; ++i) {
+    unsigned int value = rd() & 0xffU;
+    if (value < 16)
+      out << '0';
+    out << value;
+  }
+  return out.str();
+}
+
+bool wait_for_helper_hello(const HelperEndpoint &endpoint) {
+  for (int i = 0; i < 40; ++i) {
+    nlohmann::json hello = send_helper_request(endpoint, {{"action", "hello"}});
+    if (hello.value("ok", false))
+      return true;
+    Sleep(100);
+  }
+  return false;
+}
+
+std::string quote_arg(const std::string &value) {
+  if (value.empty())
+    return "\"\"";
+  bool needs_quotes = value.find_first_of(" \t\"") != std::string::npos;
+  if (!needs_quotes)
+    return value;
+
+  std::string quoted = "\"";
+  unsigned int backslashes = 0;
+  for (char c : value) {
+    if (c == '\\') {
+      ++backslashes;
+      continue;
+    }
+    if (c == '"') {
+      quoted.append(backslashes * 2 + 1, '\\');
+      quoted.push_back('"');
+      backslashes = 0;
+      continue;
+    }
+    quoted.append(backslashes, '\\');
+    backslashes = 0;
+    quoted.push_back(c);
+  }
+  quoted.append(backslashes * 2, '\\');
+  quoted.push_back('"');
+  return quoted;
+}
+
+bool start_helper_direct(const std::string &helper_path,
+                         const std::string &args, int *pid) {
+  std::string cmdline = quote_arg(helper_path) + " " + args;
+  std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
+  mutable_cmd.push_back('\0');
+
+  STARTUPINFOA si = {};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi = {};
+  BOOL created =
+      CreateProcessA(helper_path.c_str(), mutable_cmd.data(), NULL, NULL, FALSE,
+                     CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+  if (!created)
+    return false;
+
+  if (pid)
+    *pid = static_cast<int>(pi.dwProcessId);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return true;
+}
+
+} // namespace
+
+OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
+  OneshotBackend backend;
+  backend.transport = "named-pipe";
+
+  if (request.helper_path.empty()) {
+    backend.code = kOneshotNotSupportedCode;
+    backend.message = "exv-helper.exe path is not available.";
+    return backend;
+  }
+
+  std::string session_id = random_hex(8);
+  backend.auth_token = random_hex(32);
+  backend.endpoint = "\\\\.\\pipe\\exv-oneshot-" + session_id;
+
+  std::string args = "--oneshot --pipe \"" + backend.endpoint +
+                     "\" --auth-token \"" + backend.auth_token + "\"";
+
+  if (utils::check_root()) {
+    if (!start_helper_direct(request.helper_path, args, &backend.pid)) {
+      backend.code = kServiceStartFailedCode;
+      backend.message = "Failed to start elevated one-shot helper.";
+      return backend;
+    }
+  } else {
+  SHELLEXECUTEINFOA sei = {};
+  sei.cbSize = sizeof(sei);
+  sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+  sei.lpVerb = "runas";
+  sei.lpFile = request.helper_path.c_str();
+  sei.lpParameters = args.c_str();
+  sei.nShow = SW_HIDE;
+
+  if (!ShellExecuteExA(&sei)) {
+    DWORD err = GetLastError();
+    backend.code = err == ERROR_CANCELLED ? kOneshotElevationDeniedCode
+                                          : kServiceStartFailedCode;
+    backend.message = err == ERROR_CANCELLED
+                          ? "Administrator authorization was cancelled."
+                          : "Failed to start elevated one-shot helper.";
+    return backend;
+  }
+
+  if (sei.hProcess) {
+    backend.pid = static_cast<int>(GetProcessId(sei.hProcess));
+    CloseHandle(sei.hProcess);
+  }
+  }
+
+  if (!wait_for_helper_hello(
+          HelperEndpoint{backend.endpoint, backend.auth_token})) {
+    backend.code = kHelperRpcFailedCode;
+    backend.message = "One-shot helper did not become ready.";
+    return backend;
+  }
+
+  backend.ok = true;
+  return backend;
+}
+
+} // namespace platform
+} // namespace ecnuvpn
