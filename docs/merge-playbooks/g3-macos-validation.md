@@ -35,6 +35,7 @@ The following manual tests require actual VPN credentials and network access:
 3. **macOS helper-missing one-time elevated connect**: Uninstall helper, click connect, verify elevated prompt appears and connection works
 4. **macOS helper-missing one-time disconnect**: While connected via elevated path, click disconnect, verify clean teardown
 5. **Service page status**: Verify service page shows correct installed/running/available status
+6. **Legacy launchd migration**: If `/Library/LaunchDaemons/com.ecnu.exv.helper.plist` still points to `/usr/local/bin/exv __helper-daemon`, the service page must warn that this is a legacy daemon and require reinstall/migration to `/usr/local/bin/exv-helper --service`
 
 ## Windows Validation (Requires Windows Machine)
 

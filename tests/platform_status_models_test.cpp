@@ -45,6 +45,7 @@ int main() {
   status.path = "/usr/local/bin/exv";
   status.endpoint = "/var/run/exv-helper.sock";
   status.label = "com.ecnu.exv.helper";
+  status.binary_path = "/usr/local/bin/exv-helper";
   status.capabilities = {{"service_mode", true}, {"oneshot_mode", true}};
   status.warning = "waiting for helper";
   status.has_service_state = true;
@@ -72,6 +73,10 @@ int main() {
        ok;
   ok = expect(json.value("label", std::string()) == "com.ecnu.exv.helper",
               "service status should expose the platform label") &&
+       ok;
+  ok = expect(json.value("binary_path", std::string()) ==
+                  "/usr/local/bin/exv-helper",
+              "service status should expose the resolved helper binary path") &&
        ok;
   ok = expect(json.contains("capabilities") &&
                   json["capabilities"].value("oneshot_mode", false),
