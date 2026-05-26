@@ -62,8 +62,27 @@ const driverReadinessColor = computed(() => {
 })
 
 const serviceButtonLabel = computed(() => {
-  if (vpn.serviceBusy) return vpn.serviceInstalled ? '卸载中...' : '安装中...'
+  if (vpn.serviceOperation === 'install') return '安装中...'
+  if (vpn.serviceOperation === 'uninstall') return '卸载中...'
   return vpn.serviceInstalled ? '卸载服务' : '安装服务'
+})
+
+const serviceButtonInstalled = computed(() => {
+  if (vpn.serviceOperation === 'uninstall') return true
+  if (vpn.serviceOperation === 'install') return false
+  return vpn.serviceInstalled
+})
+
+const cliButtonLabel = computed(() => {
+  if (vpn.cliOperation === 'install') return '安装中...'
+  if (vpn.cliOperation === 'uninstall') return '卸载中...'
+  return vpn.cliStatus?.installed ? '卸载 CLI' : '安装 CLI'
+})
+
+const cliButtonInstalled = computed(() => {
+  if (vpn.cliOperation === 'uninstall') return true
+  if (vpn.cliOperation === 'install') return false
+  return vpn.cliStatus?.installed ?? false
 })
 
 async function refreshRuntime() {
@@ -78,6 +97,7 @@ onMounted(async () => {
   await config.fetchSettings()
   form.value = { ...config.settings }
   await vpn.fetchServiceStatus()
+  await vpn.fetchCliStatus()
 
   if (isDesktop) {
     try {
@@ -110,6 +130,15 @@ async function toggleService() {
   const ok = installed ? await vpn.uninstallService() : await vpn.installService()
   if (ok) {
     ui.addToast(installed ? '辅助服务已卸载' : '辅助服务已安装', 'success')
+  }
+}
+
+async function toggleCli() {
+  message.value = null
+  const installed = vpn.cliStatus?.installed ?? false
+  const ok = installed ? await vpn.uninstallCli() : await vpn.installCli()
+  if (ok) {
+    ui.addToast(installed ? 'CLI 已卸载' : 'CLI 已安装；请打开新终端使用 exv', 'success')
   }
 }
 
@@ -202,18 +231,62 @@ async function switchToSystemRuntime() {
           </div>
 
           <div class="border-t border-border pt-4">
+            <div class="mb-3">
+              <p class="text-sm font-medium text-foreground">Helper 服务</p>
+              <p class="text-xs text-muted">安装后连接和断开不需要每次提权。</p>
+            </div>
             <button
               :disabled="vpn.serviceBusy"
               :class="[
                 'inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50',
-                vpn.serviceInstalled ? 'bg-destructive hover:bg-destructive/90' : 'bg-accent hover:bg-accent/90',
+                serviceButtonInstalled ? 'bg-destructive hover:bg-destructive/90' : 'bg-accent hover:bg-accent/90',
               ]"
               @click="toggleService"
             >
-              <Trash2 v-if="vpn.serviceInstalled" class="w-4 h-4" />
+              <Trash2 v-if="serviceButtonInstalled" class="w-4 h-4" />
               <Download v-else class="w-4 h-4" />
               {{ serviceButtonLabel }}
             </button>
+          </div>
+
+          <div v-if="isDesktop" class="border-t border-border pt-4">
+            <div class="mb-3">
+              <p class="text-sm font-medium text-foreground">终端 CLI</p>
+              <p class="text-xs text-muted">
+                {{ vpn.cliStatus?.installed ? '已安装全局 exv 命令。' : '未安装全局命令；仍可从应用包内 bin 目录直接运行 exv。' }}
+              </p>
+              <p class="mt-1 break-all font-mono text-[11px] text-muted">
+                {{ vpn.cliStatus?.installed ? vpn.cliStatus.installPath : vpn.cliStatus?.targetPath }}
+              </p>
+              <p v-if="vpn.cliStatus?.warning" class="mt-1 text-xs text-warning">
+                {{ vpn.cliStatus.warning }}
+              </p>
+              <p v-else-if="vpn.cliStatus?.installed && !vpn.cliStatus.availableInPath" class="mt-1 text-xs text-warning">
+                已安装；请打开新终端让 PATH 生效。
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-3">
+              <button
+                :disabled="!!vpn.cliOperation"
+                :class="[
+                  'inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50',
+                  cliButtonInstalled ? 'bg-destructive hover:bg-destructive/90' : 'bg-accent hover:bg-accent/90',
+                ]"
+                @click="toggleCli"
+              >
+                <Trash2 v-if="cliButtonInstalled" class="w-4 h-4" />
+                <Download v-else class="w-4 h-4" />
+                {{ cliButtonLabel }}
+              </button>
+              <button
+                :disabled="!!vpn.cliOperation"
+                class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2.5 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
+                @click="vpn.fetchCliStatus()"
+              >
+                <RefreshCcw class="w-4 h-4" />
+                刷新
+              </button>
+            </div>
           </div>
         </div>
       </div>

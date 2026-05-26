@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import {
   desktopIpcChannels,
   desktopRpcActions,
+  type DesktopCliCommand,
   type DesktopDriverInstallTarget,
   type DesktopEventType,
   type DesktopRpcAction,
@@ -345,6 +346,19 @@ ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: Deskto
     }
     throw error
   }
+})
+
+ipcMain.handle(desktopIpcChannels.cliCommand, async (_event, command: DesktopCliCommand) => {
+  return platformRunner.runCliCommand({
+    execFileAsync,
+    resolveExvPath,
+    resolveRuntimeDir,
+    nativeExecOptions,
+    parseJsonOutput,
+    throwRpcResultError,
+    runDesktopRpc,
+    emitServiceProgress,
+  }, command)
 })
 
 ipcMain.handle(desktopIpcChannels.driverInstall, async (_event, driver: DesktopDriverInstallTarget) => {

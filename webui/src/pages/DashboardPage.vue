@@ -43,9 +43,11 @@ const disconnecting = computed(() => vpn.disconnectInFlight)
 const preparingService = computed(() => vpn.serviceBusy && !connected.value)
 const upstreamAdapters = computed(() => vpn.status?.upstream_virtual_adapters || [])
 const hasUpstreamVirtual = computed(() => Boolean(vpn.status?.upstream_virtual_detected || upstreamAdapters.value.length > 0))
-const showExvAdapter = computed(() => connected.value || connecting.value)
 const progressKey = computed(() => connecting.value ? vpn.connectionProgress.key : '')
-const routeStageComplete = computed(() => connecting.value && ['vpn-server', 'network-ready'].includes(progressKey.value))
+const adapterStageStarted = computed(() => connecting.value && ['adapter', 'routes', 'network-ready'].includes(progressKey.value))
+const showExvAdapter = computed(() => connected.value || disconnecting.value || adapterStageStarted.value)
+const vpnServerStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && ['adapter', 'routes', 'network-ready'].includes(progressKey.value)))
+const routeStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && progressKey.value === 'network-ready'))
 
 const sessionModeLabel = computed(() => {
   if (disconnecting.value) return '正在断开'
@@ -435,36 +437,43 @@ const arcSegments = computed(() => {
 const readySegmentKeys = computed(() => {
   const ready = new Set<string>()
   if (internetPathReady.value) {
-    if (hasUpstreamVirtual.value) {
-      ready.add(showExvAdapter.value ? 'upstream-physical' : 'traffic-upstream')
-      ready.add('upstream-physical')
-    } else if (!showExvAdapter.value) {
-      ready.add('traffic-physical')
-    }
     ready.add('physical-internet')
   }
-  if (vpnPathActive.value) {
-    ready.add('traffic-exv')
-    ready.add(hasUpstreamVirtual.value ? 'exv-upstream' : 'exv-physical')
+  if (vpnServerStageComplete.value) {
     ready.add('internet-server')
+  }
+  if (routeStageComplete.value) {
+    if (showExvAdapter.value) {
+      ready.add('traffic-exv')
+      ready.add(hasUpstreamVirtual.value ? 'exv-upstream' : 'exv-physical')
+      if (hasUpstreamVirtual.value) ready.add('upstream-physical')
+    } else {
+      ready.add('traffic-physical')
+    }
+  }
+  if (vpnPathActive.value || disconnecting.value) {
     ready.add('server-lock')
   }
-  if (routeStageComplete.value) ready.add('traffic-exv')
   return ready
 })
 
 const activePulseKeys = computed(() => {
   if (!connecting.value) return []
   const key = progressKey.value
-  if (['authorization', 'oneshot-helper', 'adapter', 'routes'].includes(key)) {
+  if (['authorization', 'oneshot-helper'].includes(key)) return []
+  if (key === 'adapter') {
     return ['traffic-exv']
+  }
+  if (key === 'routes') {
+    if (!showExvAdapter.value) return ['traffic-physical']
+    return hasUpstreamVirtual.value ? ['traffic-exv', 'exv-upstream'] : ['traffic-exv', 'exv-physical']
   }
   if (key === 'vpn-server') return ['internet-server']
   if (key === 'network-ready') return ['server-lock']
   return []
 })
 
-type ReadySegmentPhase = 'entering' | 'steady' | 'leaving'
+type ReadySegmentPhase = 'entering' | 'steady' | 'disconnecting' | 'leaving'
 type VisibleReadySegment = {
   key: string
   d: string
@@ -511,7 +520,12 @@ watch(
       const d = segmentMap.get(key) || segment.d
       if (ready.has(key)) {
         clearReadySegmentTimer(`leave-${key}`)
-        next.push({ ...segment, d, phase: segment.phase === 'leaving' ? 'entering' : segment.phase })
+        const phase = disconnecting.value
+          ? 'disconnecting'
+          : segment.phase === 'leaving' || segment.phase === 'disconnecting'
+            ? 'entering'
+            : segment.phase
+        next.push({ ...segment, d, phase })
         return
       }
       if (segment.phase !== 'leaving') {
@@ -528,7 +542,7 @@ watch(
       if (previousByKey.has(key)) return
       const d = segmentMap.get(key)
       if (!d) return
-      next.push({ key, d, phase: 'entering' })
+      next.push({ key, d, phase: disconnecting.value ? 'disconnecting' : 'entering' })
       setReadySegmentTimer(`enter-${key}`, () => {
         visibleReadySegments.value = visibleReadySegments.value.map((segment) => (
           segment.key === key && segment.phase === 'entering'
@@ -553,12 +567,20 @@ function nodeToneClass(tone?: string) {
 function nodeActive(node: { key: string; pulseKeys?: string[] }) {
   if (!connecting.value) return false
   const key = progressKey.value
-  if (['authorization', 'oneshot-helper', 'adapter', 'routes'].includes(key)) {
-    return ['traffic', 'exv'].includes(node.key)
-  }
+  if (['authorization', 'oneshot-helper'].includes(key)) return node.key === 'traffic'
+  if (key === 'adapter') return ['traffic', 'exv'].includes(node.key)
+  if (key === 'routes') return ['traffic', 'exv', 'upstream', 'physical'].includes(node.key)
   if (key === 'vpn-server') return ['internet', 'server'].includes(node.key)
   if (key === 'network-ready') return ['server', 'lock'].includes(node.key)
   return Boolean(node.pulseKeys?.includes(key))
+}
+
+function nodeReady(nodeKey: string) {
+  return visibleReadySegments.value.some((segment) => {
+    if (segment.phase === 'leaving') return false
+    const [from, to] = segment.key.split('-')
+    return from === nodeKey || to === nodeKey
+  })
 }
 </script>
 
@@ -619,6 +641,7 @@ function nodeActive(node: { key: string; pulseKeys?: string[] }) {
           :key="node.key"
           :class="[
             'arc-node',
+            nodeReady(node.key) ? 'node-ready' : '',
             nodeActive(node) ? 'stage-active' : '',
           ]"
           :style="node.style"
@@ -813,7 +836,14 @@ function nodeActive(node: { key: string; pulseKeys?: string[] }) {
   animation: ready-segment-draw 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.ready-segment.is-disconnecting {
+  stroke: rgba(245, 158, 11, 0.9);
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.24));
+}
+
 .ready-segment.is-leaving {
+  stroke: rgba(245, 158, 11, 0.9);
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.24));
   animation: ready-segment-retract 720ms cubic-bezier(0.64, 0, 0.78, 0) both;
 }
 
@@ -847,6 +877,15 @@ function nodeActive(node: { key: string; pulseKeys?: string[] }) {
 
 .arc-node.stage-active {
   z-index: 2;
+}
+
+.arc-node.node-ready {
+  color: rgb(34 197 94);
+}
+
+.arc-node.node-ready .node-title,
+.arc-node.node-ready .node-caption {
+  color: rgb(134 239 172);
 }
 
 .arc-node.stage-active::before,

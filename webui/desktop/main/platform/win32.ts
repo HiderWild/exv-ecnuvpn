@@ -1,13 +1,16 @@
 import { app } from 'electron'
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import type {
+  DesktopCliCommand,
   DesktopRpcAction,
   DesktopServiceCommand,
 } from '../../shared/desktop-contract.js'
 import {
   readNewLogLines,
+  psQuote,
+  type CliInstallStatus,
   type DesktopPlatformContext,
   type DesktopPlatformRunner,
   type RpcErrorResult,
@@ -75,6 +78,122 @@ async function launchPowerShellScriptElevated(
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function cliInstallDir() {
+  const localAppData = process.env.LOCALAPPDATA || app.getPath('userData')
+  return join(localAppData, 'ECNU-VPN', 'cli')
+}
+
+function cliShimPath() {
+  return join(cliInstallDir(), 'exv.cmd')
+}
+
+function normalizePathForCompare(value: string) {
+  return value.replace(/[\\/]+$/, '').toLowerCase()
+}
+
+function userPathEntries() {
+  const pathValue = process.env.Path || process.env.PATH || ''
+  return pathValue.split(';').map((entry) => entry.trim()).filter(Boolean)
+}
+
+function cliDirInProcessPath() {
+  const wanted = normalizePathForCompare(cliInstallDir())
+  return userPathEntries().some((entry) => normalizePathForCompare(entry) === wanted)
+}
+
+async function userPathFromRegistry(context: DesktopPlatformContext) {
+  try {
+    const { stdout } = await context.execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      '[Environment]::GetEnvironmentVariable("Path","User")',
+    ], { windowsHide: true, maxBuffer: 1024 * 1024 })
+    return stdout.trim()
+  } catch {
+    return ''
+  }
+}
+
+async function setUserPath(context: DesktopPlatformContext, value: string) {
+  await context.execFileAsync('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    `[Environment]::SetEnvironmentVariable("Path", ${psQuote(value)}, "User")`,
+  ], { windowsHide: true, maxBuffer: 1024 * 1024 })
+}
+
+async function cliStatus(context: DesktopPlatformContext): Promise<CliInstallStatus> {
+  const installPath = cliShimPath()
+  const targetPath = context.resolveExvPath()
+  const installed = existsSync(installPath)
+  const userPath = await userPathFromRegistry(context)
+  const wanted = normalizePathForCompare(cliInstallDir())
+  const availableInPath =
+    userPath.split(';').map((entry) => entry.trim()).filter(Boolean)
+      .some((entry) => normalizePathForCompare(entry) === wanted) ||
+    cliDirInProcessPath()
+  const status: CliInstallStatus = { installed, installPath, targetPath, availableInPath }
+
+  if (installed) {
+    try {
+      const content = readFileSync(installPath, 'utf8')
+      if (!content.includes(targetPath)) {
+        status.warning = 'Existing exv command points to a different binary.'
+      }
+    } catch {
+      status.warning = 'Unable to read existing exv command shim.'
+    }
+  }
+  return status
+}
+
+async function installCli(context: DesktopPlatformContext): Promise<CliInstallStatus> {
+  const installDir = cliInstallDir()
+  const installPath = cliShimPath()
+  const targetPath = context.resolveExvPath()
+  mkdirSync(installDir, { recursive: true })
+  writeFileSync(
+    installPath,
+    [
+      '@echo off',
+      `set "EXV_TARGET=${targetPath}"`,
+      '"%EXV_TARGET%" %*',
+      '',
+    ].join('\r\n'),
+    'utf8',
+  )
+
+  const userPath = await userPathFromRegistry(context)
+  const entries = userPath.split(';').map((entry) => entry.trim()).filter(Boolean)
+  const wanted = normalizePathForCompare(installDir)
+  if (!entries.some((entry) => normalizePathForCompare(entry) === wanted)) {
+    entries.push(installDir)
+    await setUserPath(context, entries.join(';'))
+  }
+  return cliStatus(context)
+}
+
+async function uninstallCli(context: DesktopPlatformContext): Promise<CliInstallStatus> {
+  const installDir = cliInstallDir()
+  const installPath = cliShimPath()
+  if (existsSync(installPath)) {
+    rmSync(installPath, { force: true })
+  }
+
+  const userPath = await userPathFromRegistry(context)
+  const wanted = normalizePathForCompare(installDir)
+  const entries = userPath.split(';').map((entry) => entry.trim()).filter(Boolean)
+    .filter((entry) => normalizePathForCompare(entry) !== wanted)
+  if (entries.join(';') !== userPath) {
+    await setUserPath(context, entries.join(';'))
+  }
+  return cliStatus(context)
 }
 
 async function readJsonFileWhenReady(
@@ -196,6 +315,15 @@ const runner: DesktopPlatformRunner = {
     }
 
     context.emitServiceProgress(command, `Service ${command} command completed.`)
+  },
+
+  runCliCommand(
+    context: DesktopPlatformContext,
+    command: DesktopCliCommand,
+  ) {
+    if (command === 'install') return installCli(context)
+    if (command === 'uninstall') return uninstallCli(context)
+    return cliStatus(context)
   },
 
   async runDesktopRpcElevated(

@@ -45,6 +45,8 @@ const desktopApi = {
         return wrap(window.ecnuVpn!.routes.list()) as ApiResponse<T>
       case desktopApiPaths.service:
         return wrap(window.ecnuVpn!.service.status()) as ApiResponse<T>
+      case desktopApiPaths.cli:
+        return wrap(window.ecnuVpn!.cli.status()) as ApiResponse<T>
       case desktopApiPaths.runtime:
         return wrap(window.ecnuVpn!.runtime.status()) as ApiResponse<T>
       case desktopApiPaths.drivers:
@@ -78,6 +80,10 @@ const desktopApi = {
         return wrap(window.ecnuVpn!.service.install()) as ApiResponse<T>
       case desktopApiPaths.serviceUninstall:
         return wrap(window.ecnuVpn!.service.uninstall()) as ApiResponse<T>
+      case desktopApiPaths.cliInstall:
+        return wrap(window.ecnuVpn!.cli.install()) as ApiResponse<T>
+      case desktopApiPaths.cliUninstall:
+        return wrap(window.ecnuVpn!.cli.uninstall()) as ApiResponse<T>
       case desktopApiPaths.driversInstall:
         return wrap(window.ecnuVpn!.drivers.install(plainPayload(body)?.driver)) as ApiResponse<T>
       default:

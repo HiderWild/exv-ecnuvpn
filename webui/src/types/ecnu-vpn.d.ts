@@ -10,6 +10,7 @@ import type {
   SettingsConfig,
 } from '../stores/config'
 import type {
+  CliInstallStatus,
   LogEntry,
   RouteEntry,
   ServiceStatus,
@@ -71,6 +72,11 @@ export interface EcnuVpnApi {
     status(): Promise<ServiceStatus>
     install(): Promise<ServiceStatus>
     uninstall(): Promise<ServiceStatus>
+  }
+  cli: {
+    status(): Promise<CliInstallStatus>
+    install(): Promise<CliInstallStatus>
+    uninstall(): Promise<CliInstallStatus>
   }
   logs: {
     list(options?: { lines?: number; filter?: string }): Promise<LogEntry[]>

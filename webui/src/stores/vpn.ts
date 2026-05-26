@@ -72,6 +72,14 @@ export interface ServiceProgressEntry {
   timestamp: string
 }
 
+export interface CliInstallStatus {
+  installed: boolean
+  installPath: string
+  targetPath: string
+  availableInPath: boolean
+  warning?: string
+}
+
 export interface ConnectionProgressStage {
   key: string
   label: string
@@ -200,8 +208,11 @@ export const useVpnStore = defineStore('vpn', () => {
   const routes = ref<RouteEntry[]>([])
   const logs = ref<LogEntry[]>([])
   const serviceStatus = ref<ServiceStatus | null>(null)
+  const cliStatus = ref<CliInstallStatus | null>(null)
   const serviceProgress = ref<ServiceProgressEntry[]>([])
   const serviceBusy = ref(false)
+  const serviceOperation = ref<'install' | 'uninstall' | null>(null)
+  const cliOperation = ref<'install' | 'uninstall' | null>(null)
   const loading = ref(false)
   const lastError = ref<string | null>(null)
   const lastErrorType = ref<VpnErrorType | null>(null)
@@ -639,8 +650,18 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
+  async function fetchCliStatus() {
+    try {
+      const { data } = await api.get<CliInstallStatus>('/cli')
+      cliStatus.value = data
+    } catch (e) {
+      console.error('[vpn] fetchCliStatus failed:', e)
+    }
+  }
+
   async function installService() {
     serviceBusy.value = true
+    serviceOperation.value = 'install'
     serviceProgress.value = []
     clearError()
     lastMutatingAction.value = installService
@@ -656,12 +677,14 @@ export const useVpnStore = defineStore('vpn', () => {
       setError(normalizeError(error))
       return false
     } finally {
+      serviceOperation.value = null
       serviceBusy.value = false
     }
   }
 
   async function uninstallService() {
     serviceBusy.value = true
+    serviceOperation.value = 'uninstall'
     serviceProgress.value = []
     clearError()
     lastMutatingAction.value = uninstallService
@@ -677,7 +700,38 @@ export const useVpnStore = defineStore('vpn', () => {
       setError(normalizeError(error))
       return false
     } finally {
+      serviceOperation.value = null
       serviceBusy.value = false
+    }
+  }
+
+  async function installCli() {
+    cliOperation.value = 'install'
+    clearError()
+    try {
+      const { data } = await api.post<CliInstallStatus>('/cli/install')
+      cliStatus.value = data
+      return true
+    } catch (error) {
+      setError(normalizeError(error))
+      return false
+    } finally {
+      cliOperation.value = null
+    }
+  }
+
+  async function uninstallCli() {
+    cliOperation.value = 'uninstall'
+    clearError()
+    try {
+      const { data } = await api.post<CliInstallStatus>('/cli/uninstall')
+      cliStatus.value = data
+      return true
+    } catch (error) {
+      setError(normalizeError(error))
+      return false
+    } finally {
+      cliOperation.value = null
     }
   }
 
@@ -702,7 +756,8 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   return {
-    status, loading, routes, logs, serviceStatus, serviceProgress, serviceBusy,
+    status, loading, routes, logs, serviceStatus, cliStatus, serviceProgress, serviceBusy,
+    serviceOperation, cliOperation,
     lastError, lastErrorType, lastRecoverable, lastRecommendedAction, lastErrorTime,
     serviceInstalled, serviceRunning, serviceAvailable, canUseElevatedFallback,
     recommendedConnectMode, currentSessionMode, displayUptimeSeconds,
@@ -711,7 +766,7 @@ export const useVpnStore = defineStore('vpn', () => {
     isDesktop, dashboardState, dashboardPrimaryAction, dashboardSecondaryAction,
     fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated, connectFromDashboard,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
-    fetchServiceStatus, installService, uninstallService,
+    fetchServiceStatus, fetchCliStatus, installService, uninstallService, installCli, uninstallCli,
     addLog, clearLogs, setLogs, addServiceProgress, clearError, retryLastAction,
   }
 })

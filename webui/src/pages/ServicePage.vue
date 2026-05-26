@@ -26,6 +26,16 @@ const serviceBadgeStatus = computed(() => {
   return vpn.serviceStatus.running ? 'running' : 'stopped'
 })
 
+const showInstallButton = computed(() => {
+  return vpn.serviceOperation === 'install' ||
+    (!vpn.serviceStatus?.installed && vpn.serviceOperation !== 'uninstall')
+})
+
+const showUninstallButton = computed(() => {
+  return vpn.serviceOperation === 'uninstall' ||
+    (Boolean(vpn.serviceStatus?.installed) && vpn.serviceOperation !== 'install')
+})
+
 const serviceHeadline = computed(() => {
   if (!vpn.serviceStatus?.installed) return '辅助服务'
   return vpn.serviceStatus.label || '辅助服务'
@@ -128,23 +138,23 @@ function uninstall() {
 
       <div class="flex flex-wrap items-center gap-3 border-t border-border pt-5 mt-5">
         <button
-          v-if="!vpn.serviceStatus?.installed"
+          v-if="showInstallButton"
           :disabled="vpn.serviceBusy"
           class="flex items-center gap-2 bg-accent text-white rounded-md px-5 py-2 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
           @click="install"
         >
           <Download class="w-4 h-4" />
-          {{ vpn.serviceBusy ? '安装中...' : '安装服务' }}
+          {{ vpn.serviceOperation === 'install' ? '安装中...' : '安装服务' }}
         </button>
 
         <button
-          v-else
+          v-if="showUninstallButton"
           :disabled="vpn.serviceBusy"
           class="flex items-center gap-2 bg-destructive text-white rounded-md px-5 py-2 text-sm font-medium hover:bg-destructive/90 disabled:opacity-50 transition-colors"
           @click="uninstall"
         >
           <Trash2 class="w-4 h-4" />
-          {{ vpn.serviceBusy ? '处理中...' : '卸载服务' }}
+          {{ vpn.serviceOperation === 'uninstall' ? '卸载中...' : '卸载服务' }}
         </button>
 
         <button
@@ -183,12 +193,12 @@ function uninstall() {
       </h2>
       <div class="bg-bg rounded-md p-4 font-mono text-xs text-foreground space-y-2">
         <div>
-          <span class="text-muted"># 安装服务</span>
+          <span class="text-muted"># 安装 helper 服务</span>
           <br />
           {{ installCommand }}
         </div>
         <div>
-          <span class="text-muted"># 卸载服务</span>
+          <span class="text-muted"># 卸载 helper 服务</span>
           <br />
           {{ uninstallCommand }}
         </div>

@@ -81,7 +81,7 @@ sudo exv service install
 exv.exe service install
 ```
 
-This installs the privileged helper daemon (launchd on macOS, Windows service on Windows, systemd helper on Linux). After installation, `exv` and `exv stop` work without elevated privileges.
+This installs the privileged helper daemon (launchd on macOS, Windows service on Windows, systemd helper on Linux). After installation, VPN connect/disconnect operations work without repeated elevation prompts. Installing the global `exv` terminal command is a separate optional setting in the desktop app.
 
 ---
 
@@ -115,6 +115,8 @@ sudo exv service install
 # 4. Start VPN (no sudo needed after helper is installed)
 exv
 ```
+
+If you use the desktop app and have not installed the global CLI, the packaged `exv` binary is still available inside the app resources. Install the global CLI from Settings only when you want `exv` to resolve from a normal terminal.
 
 On first run, the config file and encryption key are created automatically at:
 - **macOS / Linux**: `~/.ecnuvpn/`
@@ -151,7 +153,18 @@ exv [command] [subcommand] [args]
 | `exv service uninstall` | Uninstall the privileged helper | Yes |
 | `exv service status` | Show helper status | No |
 
-On macOS, `service install` copies `exv` to `/usr/local/bin/exv` and registers a launchd daemon. On Windows, it registers the `exv-helper` Windows service. On Linux, it installs a systemd helper.
+On macOS, `service install` registers the launchd helper and manages `/usr/local/bin/exv-helper`; it does not install the global `/usr/local/bin/exv` CLI command. On Windows, it registers the `exv-helper` Windows service. On Linux, it installs a systemd helper.
+
+### Optional Global CLI
+
+The desktop app always bundles the native `exv` program in its resources so it can be run by full path. Installing the global CLI only adds a convenient terminal entry point:
+
+| Platform | Install behavior |
+|----------|------------------|
+| Windows | Creates a user-level `exv.cmd` shim under `%LOCALAPPDATA%\ECNU-VPN\cli` and adds that directory to the user PATH. |
+| macOS | Creates `/usr/local/bin/exv` as a symlink to the packaged `exv` binary. |
+
+Use **Settings -> Terminal CLI** to install or uninstall this global command. Helper service installation and CLI installation are independent.
 
 ### Config Management
 
@@ -251,6 +264,8 @@ Artifacts (under `webui/release/`):
 
 - `ECNU-VPN-<version>-portable.exe` — single-file portable build; just double-click. No service is installed.
 - `ECNU VPN Setup <version>.exe` — NSIS installer; offers per-machine install and automatically registers the `exv-helper` Windows service.
+
+Neither Windows artifact adds `exv` to PATH by default. Use Settings -> Terminal CLI to install or remove the global command explicitly.
 
 ### Desktop App VPN Modes
 

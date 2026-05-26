@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 
 import type {
+  DesktopCliCommand,
   DesktopRpcAction,
   DesktopServiceCommand,
 } from '../../shared/desktop-contract.js'
@@ -17,6 +18,14 @@ export type NativeExecOptions = {
   cwd?: string
   env?: NodeJS.ProcessEnv
   maxBuffer?: number
+}
+
+export type CliInstallStatus = {
+  installed: boolean
+  installPath: string
+  targetPath: string
+  availableInPath: boolean
+  warning?: string
 }
 
 export type DesktopPlatformContext = {
@@ -44,6 +53,10 @@ export interface DesktopPlatformRunner {
     context: DesktopPlatformContext,
     command: DesktopServiceCommand,
   ) => Promise<void>
+  runCliCommand: (
+    context: DesktopPlatformContext,
+    command: DesktopCliCommand,
+  ) => Promise<CliInstallStatus>
   runDesktopRpcElevated: (
     context: DesktopPlatformContext,
     action: DesktopRpcAction,

@@ -3,6 +3,8 @@
 ; This script is included by electron-builder during NSIS packaging.
 ; It handles optional service registration on install and clean service
 ; teardown on uninstall.
+; It does not install the global exv CLI command; that is managed from
+; the desktop Settings page.
 ;
 ; Behavior summary:
 ;   INSTALL:

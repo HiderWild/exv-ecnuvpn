@@ -1,9 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import {
+  desktopCliCommands,
   desktopDriverInstallTargets,
   desktopEventTypes,
   desktopIpcChannels,
   desktopServiceCommands,
+  type DesktopCliCommand,
   type DesktopDriverInstallTarget,
   type DesktopEventType,
   type DesktopRpcAction,
@@ -13,6 +15,7 @@ import {
 type EventHandler = (event: { type: DesktopEventType; data: unknown }) => void
 
 void desktopDriverInstallTargets
+void desktopCliCommands
 void desktopEventTypes
 void desktopServiceCommands
 
@@ -55,6 +58,11 @@ const api = {
     status: () => rpc('service.status'),
     install: () => ipcRenderer.invoke(desktopIpcChannels.serviceCommand, 'install' satisfies DesktopServiceCommand),
     uninstall: () => ipcRenderer.invoke(desktopIpcChannels.serviceCommand, 'uninstall' satisfies DesktopServiceCommand),
+  },
+  cli: {
+    status: () => ipcRenderer.invoke(desktopIpcChannels.cliCommand, 'status' satisfies DesktopCliCommand),
+    install: () => ipcRenderer.invoke(desktopIpcChannels.cliCommand, 'install' satisfies DesktopCliCommand),
+    uninstall: () => ipcRenderer.invoke(desktopIpcChannels.cliCommand, 'uninstall' satisfies DesktopCliCommand),
   },
   logs: {
     list: (options?: { lines?: number; filter?: string }) => rpc('logs.list', options ?? {}),

@@ -1,10 +1,12 @@
 import { dirname, join } from 'node:path'
 
 import type {
+  DesktopCliCommand,
   DesktopRpcAction,
   DesktopServiceCommand,
 } from '../../shared/desktop-contract.js'
 import type {
+  CliInstallStatus,
   DesktopPlatformContext,
   DesktopPlatformRunner,
 } from './base.js'
@@ -44,6 +46,20 @@ const runner: DesktopPlatformRunner = {
     const exv = context.resolveExvPath()
     await context.execFileAsync(exv, ['service', command], context.nativeExecOptions(exv))
     context.emitServiceProgress(command, `Service ${command} command completed.`)
+  },
+
+  runCliCommand(
+    context: DesktopPlatformContext,
+    _command: DesktopCliCommand,
+  ): Promise<CliInstallStatus> {
+    const targetPath = context.resolveExvPath()
+    return Promise.resolve({
+      installed: false,
+      installPath: '/usr/local/bin/exv',
+      targetPath,
+      availableInPath: false,
+      warning: 'CLI install from the desktop app is not implemented on Linux yet.',
+    })
   },
 
   runDesktopRpcElevated(
