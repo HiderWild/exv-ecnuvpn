@@ -41,6 +41,7 @@ set(EXV_COMMON_SOURCES
     src/crypto.cpp
     src/platform/common/backend_resolver.cpp
     src/platform/common/oneshot_bootstrap.cpp
+    src/platform/common/proxy_tun_detector.cpp
     src/vpn.cpp
     src/vpn_runtime.cpp
     src/tunnel.cpp
@@ -279,6 +280,18 @@ target_include_directories(tunnel_script_contract_test PRIVATE
 )
 
 add_test(NAME tunnel_script_contract_test COMMAND tunnel_script_contract_test)
+
+add_executable(proxy_tun_detector_test
+    tests/proxy_tun_detector_test.cpp
+    src/platform/common/proxy_tun_detector.cpp
+)
+
+target_include_directories(proxy_tun_detector_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME proxy_tun_detector_test COMMAND proxy_tun_detector_test)
 
 add_executable(app_api_runtime_policy_test
     tests/app_api_runtime_policy_test.cpp

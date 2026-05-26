@@ -6,6 +6,10 @@ import { useUiStore } from './ui'
 export interface UpstreamVirtualAdapter {
   name: string
   detail: string
+  kind?: string
+  role?: string
+  if_index?: string
+  route_reason?: string
 }
 
 export interface VpnStatus {
@@ -178,8 +182,18 @@ export function normalizeError(raw: unknown): VpnError {
   }
 }
 
+function summarizeError(message: string) {
+  const normalized = message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+  if (!normalized) return '操作失败，请查看日志。'
+  return normalized.length > 96 ? `${normalized.slice(0, 96)}...` : normalized
+}
+
 export const useVpnStore = defineStore('vpn', () => {
   let progressTimer: ReturnType<typeof setInterval> | null = null
+  let uptimeTimer: ReturnType<typeof setInterval> | null = null
   const ui = useUiStore()
 
   const status = ref<VpnStatus | null>(null)
@@ -195,10 +209,16 @@ export const useVpnStore = defineStore('vpn', () => {
   const lastRecommendedAction = ref('')
   const lastErrorTime = ref<number | null>(null)
   const lastActionWasElevatedConnect = ref(false)
-  const lastMutatingAction = ref<(() => Promise<void>) | null>(null)
+  const lastMutatingAction = ref<(() => Promise<unknown>) | null>(null)
   const activeTemporaryBackend = ref<unknown | null>(null)
+  const connectInFlight = ref(false)
+  const disconnectInFlight = ref(false)
   const connectionProgressStartedAt = ref<number | null>(null)
+  const connectionProgressStageOffset = ref(0)
   const progressTick = ref(0)
+  const uptimeBaseSeconds = ref(0)
+  const uptimeStartedAt = ref<number | null>(null)
+  const uptimeTick = ref(0)
 
   const connectionProgressStages: ConnectionProgressStage[] = [
     {
@@ -235,6 +255,7 @@ export const useVpnStore = defineStore('vpn', () => {
 
   const serviceInstalled = computed(() => serviceStatus.value?.installed ?? false)
   const serviceRunning = computed(() => serviceStatus.value?.running ?? false)
+  const serviceAvailable = computed(() => serviceStatus.value?.available ?? false)
   const isDesktop = computed(() => typeof window !== 'undefined' && !!window.ecnuVpn)
   const canUseElevatedFallback = computed(() => {
     const capabilities = serviceStatus.value?.capabilities
@@ -243,7 +264,7 @@ export const useVpnStore = defineStore('vpn', () => {
     )
   })
   const recommendedConnectMode = computed<ConnectMode>(() => {
-    if (serviceInstalled.value && serviceRunning.value) return 'helper'
+    if (serviceAvailable.value) return 'helper'
     if (canUseElevatedFallback.value) return 'elevated'
     return 'helper'
   })
@@ -254,12 +275,57 @@ export const useVpnStore = defineStore('vpn', () => {
     return 'helper'
   })
 
+  const displayUptimeSeconds = computed(() => {
+    void uptimeTick.value
+    if (!status.value?.connected || !uptimeStartedAt.value) return 0
+    const elapsed = Math.max(0, Math.floor((Date.now() - uptimeStartedAt.value) / 1000))
+    return uptimeBaseSeconds.value + elapsed
+  })
+
+  function startUptimeTimer() {
+    if (uptimeTimer) return
+    uptimeTimer = setInterval(() => {
+      uptimeTick.value++
+    }, 1000)
+  }
+
+  function stopUptimeTimer() {
+    if (uptimeTimer) {
+      clearInterval(uptimeTimer)
+      uptimeTimer = null
+    }
+  }
+
+  function syncUptime(nextStatus: VpnStatus) {
+    if (!nextStatus.connected) {
+      uptimeBaseSeconds.value = 0
+      uptimeStartedAt.value = null
+      stopUptimeTimer()
+      return
+    }
+
+    const reported = Math.max(0, nextStatus.uptime_seconds || 0)
+    if (!uptimeStartedAt.value) {
+      uptimeBaseSeconds.value = reported
+      uptimeStartedAt.value = Date.now()
+    } else if (reported > displayUptimeSeconds.value) {
+      uptimeBaseSeconds.value = reported
+      uptimeStartedAt.value = Date.now()
+    }
+    startUptimeTimer()
+  }
+
+  function applyStatus(nextStatus: VpnStatus) {
+    status.value = nextStatus
+    syncUptime(nextStatus)
+  }
+
   const connectionProgress = computed<ConnectionProgressStage>(() => {
     void progressTick.value
     if (!connectionProgressStartedAt.value) return connectionProgressStages[0]
 
     const elapsed = Date.now() - connectionProgressStartedAt.value
-    const stageIndex = elapsed < 1500
+    const localStageIndex = elapsed < 1500
       ? 0
       : elapsed < 3000
         ? 1
@@ -270,6 +336,10 @@ export const useVpnStore = defineStore('vpn', () => {
             : elapsed < 9000
               ? 4
               : 5
+    const stageIndex = Math.min(
+      connectionProgressStages.length - 1,
+      connectionProgressStageOffset.value + localStageIndex,
+    )
     return connectionProgressStages[stageIndex]
   })
 
@@ -281,7 +351,7 @@ export const useVpnStore = defineStore('vpn', () => {
       }
     }
 
-    if (loading.value && lastActionWasElevatedConnect.value) return 'elevated connecting'
+    if (connectInFlight.value) return 'elevated connecting'
 
     if (status.value?.connected) {
       const mode = currentSessionMode.value
@@ -290,7 +360,7 @@ export const useVpnStore = defineStore('vpn', () => {
       return 'direct connected'
     }
 
-    if (serviceInstalled.value && serviceRunning.value) return 'service-ready disconnected'
+    if (serviceAvailable.value) return 'service-ready disconnected'
     return 'service-missing disconnected'
   })
 
@@ -361,6 +431,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastRecoverable.value = err.recoverable
     lastRecommendedAction.value = err.recommended_action
     lastErrorTime.value = Date.now()
+    ui.addToast(summarizeError(err.message), err.recoverable ? 'warning' : 'error')
   }
 
   function clearError() {
@@ -376,7 +447,8 @@ export const useVpnStore = defineStore('vpn', () => {
     lastMutatingAction.value?.()
   }
 
-  function startConnectionProgress() {
+  function startConnectionProgress(stageOffset = 0) {
+    connectionProgressStageOffset.value = stageOffset
     connectionProgressStartedAt.value = Date.now()
     progressTick.value++
     if (progressTimer) clearInterval(progressTimer)
@@ -387,6 +459,7 @@ export const useVpnStore = defineStore('vpn', () => {
 
   function stopConnectionProgress() {
     connectionProgressStartedAt.value = null
+    connectionProgressStageOffset.value = 0
     if (progressTimer) {
       clearInterval(progressTimer)
       progressTimer = null
@@ -400,11 +473,11 @@ export const useVpnStore = defineStore('vpn', () => {
       const inferredMode = data.mode
         ?? (data.connected && previous?.connected ? previous.mode : undefined)
         ?? (data.connected && (activeTemporaryBackend.value || !serviceRunning.value) ? 'elevated' : undefined)
-      status.value = {
+      applyStatus({
         ...data,
         mode: inferredMode,
         backend: data.backend ?? (data.connected ? activeTemporaryBackend.value ?? previous?.backend : undefined),
-      }
+      })
       if (data.connected) clearError()
     } catch (e) {
       console.error('[vpn] fetchStatus failed:', e)
@@ -420,29 +493,35 @@ export const useVpnStore = defineStore('vpn', () => {
     clearError()
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = connect
+    connectInFlight.value = true
+    startConnectionProgress(2)
     try {
       const { data } = await api.post<VpnStatus>('/connect')
-      status.value = data
+      applyStatus(data)
       await fetchAppShellState()
     } catch (error) {
       setError(normalizeError(error))
     } finally {
+      connectInFlight.value = false
+      stopConnectionProgress()
       loading.value = false
     }
   }
 
   async function disconnect() {
     loading.value = true
+    disconnectInFlight.value = true
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = disconnect
     try {
       const { data } = await api.post<VpnStatus>('/disconnect')
-      status.value = data
+      applyStatus(data)
       clearError()
       await fetchAppShellState()
     } catch (error) {
       setError(normalizeError(error))
     } finally {
+      disconnectInFlight.value = false
       loading.value = false
     }
   }
@@ -452,30 +531,59 @@ export const useVpnStore = defineStore('vpn', () => {
     clearError()
     lastActionWasElevatedConnect.value = true
     lastMutatingAction.value = connectElevated
+    connectInFlight.value = true
     startConnectionProgress()
     try {
       const { data } = await api.post<VpnStatus | VpnError>('/connect/elevated')
       if (isVpnError(data)) {
         setError(data)
       } else {
-        status.value = { ...data, mode: data.mode ?? 'elevated' }
-        activeTemporaryBackend.value = status.value.backend ?? null
+        const elevatedStatus = { ...data, mode: data.mode ?? 'elevated' }
+        applyStatus(elevatedStatus)
+        activeTemporaryBackend.value = elevatedStatus.backend ?? null
         await fetchAppShellState()
         if (status.value?.connected && !status.value.mode) {
-          status.value = { ...status.value, mode: 'elevated', backend: activeTemporaryBackend.value }
+          applyStatus({ ...status.value, mode: 'elevated', backend: activeTemporaryBackend.value })
         }
       }
     } catch (error) {
       setError(normalizeError(error))
     } finally {
       lastActionWasElevatedConnect.value = false
+      connectInFlight.value = false
       stopConnectionProgress()
       loading.value = false
     }
   }
 
+  async function connectFromDashboard(installServiceFirst: boolean) {
+    if (status.value?.connected) {
+      if (currentSessionMode.value === 'helper') {
+        await disconnect()
+      } else {
+        await disconnectElevated()
+      }
+      return
+    }
+
+    if (serviceAvailable.value) {
+      await connect()
+      return
+    }
+
+    if (installServiceFirst) {
+      const installed = await installService()
+      if (!installed) return
+      await connect()
+      return
+    }
+
+    await connectElevated()
+  }
+
   async function disconnectElevated() {
     loading.value = true
+    disconnectInFlight.value = true
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = disconnectElevated
     try {
@@ -485,7 +593,7 @@ export const useVpnStore = defineStore('vpn', () => {
       if (isVpnError(data)) {
         setError(data)
       } else {
-        status.value = data
+        applyStatus(data)
         activeTemporaryBackend.value = null
         clearError()
         await fetchAppShellState()
@@ -493,6 +601,7 @@ export const useVpnStore = defineStore('vpn', () => {
     } catch (error) {
       setError(normalizeError(error))
     } finally {
+      disconnectInFlight.value = false
       loading.value = false
     }
   }
@@ -542,8 +651,10 @@ export const useVpnStore = defineStore('vpn', () => {
         throw new Error(data.warning || 'Helper service is not available after install.')
       }
       await fetchAppShellState()
+      return true
     } catch (error) {
       setError(normalizeError(error))
+      return false
     } finally {
       serviceBusy.value = false
     }
@@ -561,8 +672,10 @@ export const useVpnStore = defineStore('vpn', () => {
         throw new Error(data.warning || 'Helper service is still installed after uninstall.')
       }
       await fetchAppShellState()
+      return true
     } catch (error) {
       setError(normalizeError(error))
+      return false
     } finally {
       serviceBusy.value = false
     }
@@ -591,11 +704,12 @@ export const useVpnStore = defineStore('vpn', () => {
   return {
     status, loading, routes, logs, serviceStatus, serviceProgress, serviceBusy,
     lastError, lastErrorType, lastRecoverable, lastRecommendedAction, lastErrorTime,
-    serviceInstalled, serviceRunning, canUseElevatedFallback,
-    recommendedConnectMode, currentSessionMode,
+    serviceInstalled, serviceRunning, serviceAvailable, canUseElevatedFallback,
+    recommendedConnectMode, currentSessionMode, displayUptimeSeconds,
+    connectInFlight, disconnectInFlight,
     connectionProgress,
     isDesktop, dashboardState, dashboardPrimaryAction, dashboardSecondaryAction,
-    fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated,
+    fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated, connectFromDashboard,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
     fetchServiceStatus, installService, uninstallService,
     addLog, clearLogs, setLogs, addServiceProgress, clearError, retryLastAction,

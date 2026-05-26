@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { AlertTriangle, CheckCircle, HardDriveDownload, RefreshCcw, Save } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle, Download, HardDriveDownload, RefreshCcw, Save, Trash2 } from 'lucide-vue-next'
 import { useConfigStore, type SettingsConfig } from '../stores/config'
-import { normalizeError } from '../stores/vpn'
+import { normalizeError, useVpnStore } from '../stores/vpn'
+import { useUiStore } from '../stores/ui'
 
 const config = useConfigStore()
+const vpn = useVpnStore()
+const ui = useUiStore()
 const saving = ref(false)
 const busyDriver = ref<'wintun' | 'tap' | null>(null)
 const message = ref<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -58,6 +61,11 @@ const driverReadinessColor = computed(() => {
   }
 })
 
+const serviceButtonLabel = computed(() => {
+  if (vpn.serviceBusy) return vpn.serviceInstalled ? '卸载中...' : '安装中...'
+  return vpn.serviceInstalled ? '卸载服务' : '安装服务'
+})
+
 async function refreshRuntime() {
   if (!isDesktop) return
   await Promise.all([
@@ -69,6 +77,7 @@ async function refreshRuntime() {
 onMounted(async () => {
   await config.fetchSettings()
   form.value = { ...config.settings }
+  await vpn.fetchServiceStatus()
 
   if (isDesktop) {
     try {
@@ -92,6 +101,15 @@ async function save() {
     message.value = { type: 'error', text: normalizeError(error).message }
   } finally {
     saving.value = false
+  }
+}
+
+async function toggleService() {
+  message.value = null
+  const installed = vpn.serviceInstalled
+  const ok = installed ? await vpn.uninstallService() : await vpn.installService()
+  if (ok) {
+    ui.addToast(installed ? '辅助服务已卸载' : '辅助服务已安装', 'success')
   }
 }
 
@@ -133,10 +151,10 @@ async function switchToSystemRuntime() {
 </script>
 
 <template>
-  <div class="py-8">
-    <h1 class="text-xl font-semibold text-foreground mb-6">设置</h1>
+  <div class="h-full overflow-hidden py-4">
+    <h1 class="text-xl font-semibold text-foreground mb-4">设置</h1>
 
-    <div class="space-y-6 max-w-3xl">
+    <div class="grid h-[calc(100%-3rem)] grid-cols-2 gap-4">
       <div class="bg-surface border border-border rounded-xl p-6">
         <h2 class="text-sm font-medium text-foreground mb-4">连接</h2>
         <div class="space-y-4">
@@ -182,10 +200,25 @@ async function switchToSystemRuntime() {
               class="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm text-foreground font-mono placeholder:text-muted focus:outline-none focus:border-accent/50 transition-colors"
             />
           </div>
+
+          <div class="border-t border-border pt-4">
+            <button
+              :disabled="vpn.serviceBusy"
+              :class="[
+                'inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50',
+                vpn.serviceInstalled ? 'bg-destructive hover:bg-destructive/90' : 'bg-accent hover:bg-accent/90',
+              ]"
+              @click="toggleService"
+            >
+              <Trash2 v-if="vpn.serviceInstalled" class="w-4 h-4" />
+              <Download v-else class="w-4 h-4" />
+              {{ serviceButtonLabel }}
+            </button>
+          </div>
         </div>
       </div>
 
-      <div v-if="isDesktop" class="bg-surface border border-border rounded-xl p-6">
+      <div v-if="isDesktop" class="bg-surface border border-border rounded-xl p-6 overflow-hidden">
         <div class="flex items-start justify-between gap-4 mb-4">
           <div>
             <h2 class="text-sm font-medium text-foreground">运行时</h2>
@@ -377,62 +410,25 @@ async function switchToSystemRuntime() {
         </div>
       </div>
 
-      <!-- Browser compatibility (advanced) -->
-      <details class="bg-surface border border-border rounded-xl">
-        <summary class="px-6 py-4 text-sm text-muted cursor-pointer hover:text-foreground transition-colors">
-          浏览器兼容设置（高级）
-        </summary>
-        <div class="px-6 pb-5 space-y-4">
-          <div class="flex items-center justify-between py-1">
-            <div>
-              <p class="text-sm text-foreground">启用浏览器界面</p>
-              <p class="text-xs text-muted">保留浏览器入口以兼容旧版</p>
-            </div>
-            <input
-              v-model="form.webui_enabled"
-              type="checkbox"
-              class="w-4 h-4 rounded border-border accent-accent"
-            />
-          </div>
+      <div class="col-span-2 flex items-center gap-3">
+        <button
+          :disabled="saving"
+          class="flex items-center gap-2 bg-accent text-white rounded-lg px-5 py-2.5 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
+          @click="save"
+        >
+          <Save class="w-4 h-4" />
+          {{ saving ? '保存中...' : '保存设置' }}
+        </button>
 
-          <div class="grid grid-cols-2 gap-4">
-            <div>
-              <label class="block text-xs font-medium text-muted mb-1.5">主机</label>
-              <input
-                v-model="form.webui_host"
-                type="text"
-                class="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors"
-              />
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-muted mb-1.5">端口</label>
-              <input
-                v-model.number="form.webui_port"
-                type="number"
-                class="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors"
-              />
-            </div>
-          </div>
+        <div
+          v-if="message"
+          :class="[
+            'text-sm rounded-lg px-4 py-2.5',
+            message.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+          ]"
+        >
+          {{ message.text }}
         </div>
-      </details>
-
-      <button
-        :disabled="saving"
-        class="flex items-center gap-2 bg-accent text-white rounded-lg px-5 py-2.5 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
-        @click="save"
-      >
-        <Save class="w-4 h-4" />
-        {{ saving ? '保存中...' : '保存设置' }}
-      </button>
-
-      <div
-        v-if="message"
-        :class="[
-          'text-sm rounded-lg px-4 py-2.5',
-          message.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
-        ]"
-      >
-        {{ message.text }}
       </div>
     </div>
   </div>

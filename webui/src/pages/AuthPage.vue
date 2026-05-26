@@ -61,14 +61,14 @@ async function save() {
 </script>
 
 <template>
-  <div class="py-8">
-    <h1 class="text-xl font-semibold text-foreground mb-6 flex items-center gap-2">
+  <div class="h-full overflow-hidden py-4">
+    <h1 class="text-xl font-semibold text-foreground mb-4 flex items-center gap-2">
       <Shield class="w-5 h-5 text-accent" />
       认证设置
     </h1>
 
-    <div class="bg-surface border border-border rounded-xl p-6 max-w-2xl">
-      <form @submit.prevent="save" class="space-y-5">
+    <div class="bg-surface border border-border rounded-xl p-5">
+      <form @submit.prevent="save" class="grid grid-cols-2 gap-4">
         <!-- Server -->
         <div>
           <label class="block text-sm text-muted mb-1.5">VPN 服务器</label>
@@ -116,7 +116,7 @@ async function save() {
         </div>
 
         <!-- Remember Password -->
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-3 self-end">
           <input
             v-model="form.remember_password"
             type="checkbox"
@@ -130,7 +130,7 @@ async function save() {
 
         <!-- User Agent -->
         <div>
-          <label class="block text-sm text-muted mb-1.5">用户代理</label>
+          <label class="block text-sm text-muted mb-1.5">客户端伪装</label>
           <div class="relative">
             <Fingerprint class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
             <input
@@ -144,7 +144,7 @@ async function save() {
         </div>
 
         <!-- Save -->
-        <div class="pt-2">
+        <div class="col-span-2 flex items-center gap-3 pt-1">
           <button
             type="submit"
             :disabled="saving"
@@ -152,7 +152,6 @@ async function save() {
           >
             {{ saving ? '保存中...' : '保存认证设置' }}
           </button>
-        </div>
 
         <!-- Message -->
         <div
@@ -163,6 +162,7 @@ async function save() {
           ]"
         >
           {{ message.text }}
+        </div>
         </div>
       </form>
     </div>

@@ -134,6 +134,7 @@ platform::TunnelScriptContext make_tunnel_script_context(const Config &cfg) {
   context.route_ready_path = utils::get_route_ready_path();
   context.custom_routes = cfg.routes;
   context.server_route_exceptions = find_server_route_exceptions(cfg);
+  context.configured_mtu = cfg.mtu;
   context.has_runtime_owner = utils::has_runtime_owner();
   context.runtime_owner_uid =
       static_cast<unsigned int>(utils::get_runtime_owner_uid());

@@ -1,46 +1,32 @@
 #include "platform/common/virtual_network_probe.hpp"
 
+#include "platform/common/proxy_tun_detector.hpp"
 #include "utils.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <set>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace ecnuvpn {
 namespace platform {
 namespace {
 
+struct Candidate {
+  std::string name;
+  std::string detail;
+  std::string if_index;
+  std::set<std::string> reasons;
+};
+
 std::string lower_ascii(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
   });
   return value;
-}
-
-bool contains_any_virtual_token(const std::string &value) {
-  std::string lower = lower_ascii(value);
-  const char *tokens[] = {"clash",     "mihomo",  "meta",      "sing-box",
-                          "singbox",   "tun2socks", "wireguard", "tailscale",
-                          "zerotier",  "openvpn", "wintun",    "tap",
-                          "utun",      "vpn"};
-  for (const char *token : tokens) {
-    if (lower.find(token) != std::string::npos)
-      return true;
-  }
-  return false;
-}
-
-bool is_exv_adapter(const std::string &name, const std::string &detail,
-                    const std::string &exv_interface) {
-  std::string lower_name = lower_ascii(name);
-  std::string lower_detail = lower_ascii(detail);
-  std::string lower_exv = lower_ascii(exv_interface);
-  if (!lower_exv.empty() && lower_name == lower_exv)
-    return true;
-  return lower_name.find("ecnuvpn") != std::string::npos ||
-         lower_detail.find("openconnect tunnel") != std::string::npos;
 }
 
 std::vector<std::string> split_pipe_fields(const std::string &line) {
@@ -53,63 +39,101 @@ std::vector<std::string> split_pipe_fields(const std::string &line) {
   return fields;
 }
 
-void add_adapter(std::vector<virtual_network::AdapterInfo> *adapters,
-                 std::set<std::string> *seen, const std::string &name,
-                 const std::string &detail, const std::string &exv_interface) {
-  if (!adapters || !seen)
-    return;
-
-  std::string clean_name = utils::trim(name);
-  std::string clean_detail = utils::trim(detail);
-  if (clean_name.empty() ||
-      is_exv_adapter(clean_name, clean_detail, exv_interface)) {
-    return;
+std::string route_reason_for_prefix(const std::string &prefix,
+                                    const std::string &next_hop,
+                                    const std::string &metric) {
+  std::string lower_prefix = lower_ascii(prefix);
+  std::string lower_next_hop = lower_ascii(next_hop);
+  std::string reason;
+  if (lower_prefix == "0.0.0.0/0") {
+    reason = "default route";
+  } else if (lower_prefix == "0.0.0.0/1" ||
+             lower_prefix == "128.0.0.0/1") {
+    reason = "split-default route " + prefix;
+  } else if (lower_prefix.rfind("198.18.", 0) == 0 ||
+             lower_prefix.rfind("198.19.", 0) == 0 ||
+             lower_next_hop.rfind("198.18.", 0) == 0 ||
+             lower_next_hop.rfind("198.19.", 0) == 0) {
+    reason = "fake-ip route " + prefix;
   }
+  if (!reason.empty() && !metric.empty())
+    reason += " metric " + metric;
+  return reason;
+}
 
-  std::string key = lower_ascii(clean_name);
-  if (seen->find(key) != seen->end())
-    return;
-  seen->insert(key);
-  adapters->push_back(virtual_network::AdapterInfo{clean_name, clean_detail});
+std::string join_reasons(const std::set<std::string> &reasons) {
+  std::string joined;
+  for (const auto &reason : reasons) {
+    if (!joined.empty())
+      joined += "; ";
+    joined += reason;
+  }
+  return joined;
+}
+
+Candidate &candidate_for(std::map<std::string, Candidate> *candidates,
+                         const std::string &if_index,
+                         const std::string &alias = "") {
+  Candidate &candidate = (*candidates)[if_index.empty() ? alias : if_index];
+  if (!if_index.empty())
+    candidate.if_index = if_index;
+  if (!alias.empty() && candidate.name.empty())
+    candidate.name = alias;
+  return candidate;
 }
 
 } // namespace
 
 std::vector<virtual_network::AdapterInfo>
 detect_virtual_network_adapters(const std::string &exv_interface) {
-  std::vector<virtual_network::AdapterInfo> adapters;
-  std::set<std::string> seen;
+  std::map<std::string, Candidate> candidates;
+
   std::string command =
       "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
-      "\"$patterns='clash|mihomo|meta|sing-box|singbox|tun2socks|wireguard|tailscale|zerotier|openvpn|vpn|wintun|tap|tun'; "
-      "Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { "
-      "$_.Status -eq 'Up' -and $_.Name -notlike 'ECNUVPN*' -and "
-      "$_.InterfaceDescription -notlike 'OpenConnect Tunnel*' -and "
-      "(($_.Name -match $patterns) -or ($_.InterfaceDescription -match $patterns)) "
-      "} | ForEach-Object { 'adapter|' + $_.Name + '|' + $_.InterfaceDescription + '|' + $_.ifIndex }; "
-      "Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { "
-      "$_.InterfaceAlias -notlike 'ECNUVPN*' -and "
-      "(($_.DestinationPrefix -like '198.18.*') -or ($_.DestinationPrefix -like '198.19.*') -or "
-      "($_.NextHop -like '198.18.*') -or ($_.NextHop -like '198.19.*')) "
-      "} | ForEach-Object { 'route|' + $_.InterfaceAlias + '|' + $_.DestinationPrefix + ' via ' + $_.NextHop + '|' + $_.InterfaceIndex }\"";
+      "\"Get-NetAdapter -ErrorAction SilentlyContinue | "
+      "ForEach-Object { 'adapter|' + $_.ifIndex + '|' + $_.Name + '|' + $_.InterfaceDescription + '|' + $_.Status }; "
+      "Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+      "Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1') -or "
+      "$_.DestinationPrefix -like '198.18.*' -or $_.DestinationPrefix -like '198.19.*' -or "
+      "$_.NextHop -like '198.18.*' -or $_.NextHop -like '198.19.*' } | "
+      "Sort-Object RouteMetric,InterfaceMetric | "
+      "ForEach-Object { 'route|' + $_.InterfaceIndex + '|' + $_.InterfaceAlias + '|' + $_.DestinationPrefix + '|' + $_.NextHop + '|' + $_.RouteMetric }\"";
 
   for (const auto &line : utils::split_lines(utils::run_command_output(command))) {
     std::vector<std::string> fields = split_pipe_fields(line);
-    if (fields.size() < 3)
+    if (fields.empty())
       continue;
 
-    if (fields[0] == "adapter") {
-      add_adapter(&adapters, &seen, fields[1], fields[2], exv_interface);
-    } else if (fields[0] == "route") {
-      std::string detail = fields[2];
-      if (detail.find("198.18.") != std::string::npos ||
-          detail.find("198.19.") != std::string::npos ||
-          contains_any_virtual_token(fields[1])) {
-        add_adapter(&adapters, &seen, fields[1], detail, exv_interface);
-      }
+    if (fields[0] == "adapter" && fields.size() >= 5) {
+      Candidate &candidate = candidate_for(&candidates, fields[1], fields[2]);
+      candidate.detail = fields[3];
+      continue;
+    }
+
+    if (fields[0] == "route" && fields.size() >= 6) {
+      std::string reason = route_reason_for_prefix(fields[3], fields[4], fields[5]);
+      if (reason.empty())
+        continue;
+      Candidate &candidate = candidate_for(&candidates, fields[1], fields[2]);
+      candidate.reasons.insert(reason);
     }
   }
 
+  std::vector<virtual_network::AdapterInfo> adapters;
+  std::set<std::string> seen;
+  for (const auto &[_, candidate] : candidates) {
+    std::string route_reason = join_reasons(candidate.reasons);
+    if (!is_proxy_tun_candidate(candidate.name, candidate.detail, route_reason,
+                                exv_interface)) {
+      continue;
+    }
+    std::string key = lower_ascii(candidate.name);
+    if (seen.insert(key).second) {
+      adapters.push_back(make_proxy_tun_adapter(candidate.name, candidate.detail,
+                                                candidate.if_index,
+                                                route_reason));
+    }
+  }
   return adapters;
 }
 

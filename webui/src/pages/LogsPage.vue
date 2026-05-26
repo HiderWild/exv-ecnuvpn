@@ -67,7 +67,7 @@ function shouldHighlight(index: number): boolean {
 </script>
 
 <template>
-  <div class="py-8">
+  <div class="h-full overflow-hidden py-4">
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-3">
         <button
@@ -107,7 +107,7 @@ function shouldHighlight(index: number): boolean {
 
     <div
       id="logs-container"
-      class="bg-bg border border-border rounded-xl p-4 h-[calc(100vh-200px)] overflow-y-auto font-mono text-xs leading-relaxed"
+      class="bg-bg border border-border rounded-xl p-4 h-[calc(100%-4rem)] overflow-y-auto font-mono text-xs leading-relaxed"
     >
       <div v-if="vpn.logs.length === 0" class="text-muted text-center py-8">
         暂无日志

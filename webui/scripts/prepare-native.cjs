@@ -18,7 +18,59 @@ const { getBuildLayout } = require('./build-layout.cjs')
 const root = path.resolve(__dirname, '..', '..')
 const layout = getBuildLayout()
 const outDir = layout.nativeBinDir
-fs.rmSync(outDir, { recursive: true, force: true })
+
+function sleepSync(ms) {
+  const signal = new Int32Array(new SharedArrayBuffer(4))
+  Atomics.wait(signal, 0, 0, ms)
+}
+
+function resetOutputDirectory(target) {
+  if (!fs.existsSync(target)) {
+    return
+  }
+
+  let removeError = null
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true })
+      return
+    } catch (error) {
+      removeError = error
+      if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error.code) || attempt === 3) {
+        break
+      }
+      sleepSync(150)
+    }
+  }
+
+  const parent = path.dirname(target)
+  const base = path.basename(target)
+  let renameError = null
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const lockedTarget = path.join(parent, `${base}.locked-${Date.now()}-${process.pid}-${attempt}`)
+    try {
+      fs.renameSync(target, lockedTarget)
+      console.warn(
+        `Native staging directory was locked; moved it aside for a clean stage: ${lockedTarget}`,
+      )
+      return
+    } catch (error) {
+      renameError = error
+      sleepSync(150)
+    }
+  }
+
+  throw new Error(
+    [
+      `Unable to reset native staging directory: ${target}`,
+      `Remove failed: ${removeError ? removeError.message : 'not attempted'}`,
+      `Rename fallback failed: ${renameError ? renameError.message : 'not attempted'}`,
+      'Stop any running exv-helper/exv/Electron process that uses this build directory and retry.',
+    ].join('\n'),
+  )
+}
+
+resetOutputDirectory(outDir)
 fs.mkdirSync(outDir, { recursive: true })
 
 // Filenames we never want in the desktop bundle.

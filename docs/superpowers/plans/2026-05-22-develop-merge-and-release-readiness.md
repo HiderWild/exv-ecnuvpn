@@ -242,6 +242,8 @@ Acceptance criteria:
 
 Objective: prove that macOS real VPN workflows still work after integration.
 
+Execution note (2026-05-26): the current cleanup is running from a Windows workspace. R2.2 and R2.3 cannot be truthfully completed here; they must be recorded from a macOS machine with branch/commit, commands, and manual scenario results.
+
 #### R2.1 macOS Automated Recheck
 
 Owner: macOS validation lane

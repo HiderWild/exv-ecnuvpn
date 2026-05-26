@@ -2,6 +2,36 @@
 
 This playbook records the working agreement, merge rehearsal steps, manual conflict resolutions, validation evidence, and residual risks for the current merge-prep wave.
 
+## Develop Finalization Update (2026-05-26)
+
+Current target state:
+
+- `develop` = `dbe1f5c` (`fix: finalize cross-platform helper elevation flow`).
+- `integration/platform-convergence-next` = `dbe1f5c`.
+- `windows` = `66dbfa8`; `git merge-base --is-ancestor windows develop`: PASS.
+- `macos` = `6fb5ebb`; `git merge-base --is-ancestor macos develop`: PASS.
+- The Windows and macOS platform branches are already integrated into `develop`; the remaining gate is cleanup plus validation evidence, not another branch-topology merge.
+
+Cleanup evidence:
+
+- `git ls-files --others --exclude-standard | rg "sync-conflict"`: no files after removing untracked sync-conflict artifacts.
+- `webui/src/api/client.ts` remains deleted; `rg -n "api/client|from './client'|from '../api/client'" webui/src webui/desktop` has no matches.
+- `stash@{0}: On develop: codex-pre-final-merge-sync` remains untouched and is not counted as validation evidence.
+
+Windows validation evidence from this workspace:
+
+- `cmake --build --preset windows-release --target proxy_tun_detector_test`: PASS.
+- `ctest --preset windows-release -R proxy_tun_detector_test --output-on-failure`: PASS, 1/1 passed.
+- `powershell -ExecutionPolicy Bypass -File .\scripts\validate-merge-prep-windows.ps1`: PASS.
+- The Windows merge-prep script now builds and runs 7 focused tests: `vpn_runtime_test`, `platform_status_models_test`, `backend_resolver_test`, `tunnel_script_contract_test`, `proxy_tun_detector_test`, `app_api_runtime_policy_test`, and `crypto_roundtrip_test`.
+- Native staging initially failed because the installed `exv-helper` Windows service was running from `build/windows/electron/native/bin/exv-helper.exe`; the staging script now retries removal and moves a locked staging directory aside before creating a fresh `native/bin`.
+
+Remaining evidence before declaring the develop gate fully closed:
+
+- Windows administrator GUI helper service install/connect/disconnect/uninstall validation still requires an elevated desktop/manual credential run.
+- macOS helper-installed real connect/disconnect validation must be run on a macOS machine.
+- macOS helper-missing one-time elevated connect/disconnect validation must be run on a macOS machine.
+
 ## Develop Merge Gate Handoff (2026-05-22)
 
 Active successor plan:

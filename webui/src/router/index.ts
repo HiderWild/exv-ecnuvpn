@@ -20,8 +20,7 @@ const router = createRouter({
     },
     {
       path: '/service',
-      name: 'service',
-      component: () => import('../pages/ServicePage.vue'),
+      redirect: '/settings',
     },
     {
       path: '/logs',

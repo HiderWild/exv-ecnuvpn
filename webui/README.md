@@ -62,13 +62,6 @@ npm run desktop:build  # Package with electron-builder
 
 ### Development (live reload)
 
-For browser-only development:
-
-```bash
-cd webui
-npm run dev            # Vite dev server on http://localhost:5173
-```
-
 For desktop development (requires the native `exv` binary already built, or set `EXV_PATH`):
 
 ```bash
@@ -76,14 +69,9 @@ cd webui
 npm run desktop:dev    # Vite dev server + Electron with hot reload
 ```
 
-## Desktop vs Browser API Routing
+## Desktop API Routing
 
-The API layer (`src/api/desktop.ts`) checks for `window.ecnuVpn`:
-
-- If present (Electron desktop mode): calls go through `ipcRenderer.invoke()` to the Electron main process, which execs `exv desktop-rpc <action>` and returns JSON.
-- If absent (browser WebUI mode): calls go through `axios` HTTP requests to the embedded WebUI server's `/api/*` endpoints.
-
-Both paths return the same JSON shapes, so pages and stores are mode-agnostic.
+The API layer (`src/api/desktop.ts`) only supports Electron desktop mode. Calls go through `window.ecnuVpn`, then `ipcRenderer.invoke()` to the Electron main process, which execs `exv desktop-rpc <action>` and returns JSON. Browser `/api/*` compatibility is intentionally not supported.
 
 ## Build Dependency
 

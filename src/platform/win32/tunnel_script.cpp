@@ -100,6 +100,21 @@ bool run_with_retry(const std::string &ready_path, const std::string &cmd,
   return ignore_failure;
 }
 
+std::string effective_mtu(const std::string &reported_mtu, int configured_mtu) {
+  int reported = 0;
+  try {
+    reported = reported_mtu.empty() ? 0 : std::stoi(reported_mtu);
+  } catch (...) {
+    reported = 0;
+  }
+
+  if (reported >= 1200)
+    return std::to_string(reported);
+  if (configured_mtu >= 1200)
+    return std::to_string(configured_mtu);
+  return "";
+}
+
 std::string get_default_gateway4() {
   std::string output = utils::run_command_output("route.exe print 0.0.0.0");
   std::regex route_regex(R"(0\.0\.0\.0\s+(?:0|128)\.0\.0\.0\s+([0-9.]+))");
@@ -161,11 +176,16 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
   }
 
   bool ok = true;
-  if (!mtu.empty()) {
+  std::string adapter_mtu = effective_mtu(mtu, context.configured_mtu);
+  if (!adapter_mtu.empty()) {
+    if (adapter_mtu != mtu) {
+      debug_log(ready_path, "ignoring low reported MTU=" + mtu +
+                                ", using configured MTU=" + adapter_mtu);
+    }
     ok = run_with_retry(
              ready_path,
              "netsh.exe interface ipv4 set subinterface " +
-                 subinterface_target + " mtu=" + mtu + " store=active",
+                 subinterface_target + " mtu=" + adapter_mtu + " store=active",
              3, 1000, false) &&
          ok;
   }
@@ -272,6 +292,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
   ss << "var fs = WScript.CreateObject(\"Scripting.FileSystemObject\");\n";
   ss << "var readyFile = " << js_quote(context.route_ready_path) << ";\n";
   ss << "var debugFile = readyFile + '.debug.log';\n";
+  ss << "var configuredMtu = " << context.configured_mtu << ";\n";
   append_windows_route_array(ss, "customRoutes", context.custom_routes);
   append_windows_string_array(ss, "serverRouteExceptions",
                               context.server_route_exceptions);
@@ -303,6 +324,17 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
   ss << "function isNumeric(value) {\n";
   ss << "  return /^[0-9]+$/.test(String(value));\n";
+  ss << "}\n\n";
+
+  ss << "function effectiveMtu(reportedMtu) {\n";
+  ss << "  var reported = parseInt(reportedMtu || '0', 10);\n";
+  ss << "  if (reported >= 1200) return String(reported);\n";
+  ss << "  if (configuredMtu >= 1200) {\n";
+  ss << "    if (reportedMtu)\n";
+  ss << "      debugLog('ignoring low reported MTU=' + reportedMtu + ', using configured MTU=' + configuredMtu);\n";
+  ss << "    return String(configuredMtu);\n";
+  ss << "  }\n";
+  ss << "  return '';\n";
   ss << "}\n\n";
 
   ss << "function quoteArg(value) {\n";
@@ -465,7 +497,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
   ss << "  preserveBypassRoutes(defaultGateway);\n\n";
 
-  ss << "  var mtu = envValue('INTERNAL_IP4_MTU', '');\n";
+  ss << "  var mtu = effectiveMtu(envValue('INTERNAL_IP4_MTU', ''));\n";
   ss << "  if (mtu && subinterfaceTarget)\n";
   ss << "    runWithRetry('netsh.exe interface ipv4 set subinterface ' + subinterfaceTarget + ' mtu=' + mtu + ' store=active', 3, 1000, false);\n\n";
 

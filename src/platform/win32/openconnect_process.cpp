@@ -81,6 +81,10 @@ std::string build_openconnect_command_line(const Config &cfg) {
   args.push_back(cfg.useragent);
   args.push_back("-m");
   args.push_back(std::to_string(cfg.mtu));
+  if (cfg.mtu > 0) {
+    args.push_back("--base-mtu");
+    args.push_back(std::to_string(cfg.mtu));
+  }
   args.push_back("-u");
   args.push_back(cfg.username);
   args.push_back("--passwd-on-stdin");

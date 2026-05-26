@@ -78,10 +78,11 @@ function uninstall() {
 </script>
 
 <template>
-  <div class="py-8">
-    <h1 class="text-xl font-semibold text-foreground mb-6">服务管理</h1>
+  <div class="h-full overflow-hidden py-4">
+    <h1 class="text-xl font-semibold text-foreground mb-4">服务管理</h1>
 
-    <div class="bg-surface border border-border rounded-xl p-6">
+    <div class="grid h-[calc(100%-3rem)] grid-cols-2 gap-4">
+    <div class="bg-surface border border-border rounded-xl p-5">
       <div class="flex items-center justify-between mb-6">
         <div class="flex items-center gap-3">
           <Terminal class="w-5 h-5 text-muted" />
@@ -159,7 +160,7 @@ function uninstall() {
 
     <div
       v-if="vpn.serviceProgress.length"
-      class="bg-surface border border-border rounded-lg p-6 mt-4"
+      class="bg-surface border border-border rounded-lg p-5"
     >
       <h2 class="text-sm font-medium text-foreground mb-3">操作输出</h2>
       <div class="bg-bg rounded-md p-4 font-mono text-xs text-foreground space-y-1 max-h-64 overflow-auto">
@@ -170,7 +171,12 @@ function uninstall() {
       </div>
     </div>
 
-    <div class="bg-surface border border-border rounded-lg p-6 mt-4">
+    <div v-else class="bg-surface border border-border rounded-lg p-5">
+      <h2 class="text-sm font-medium text-foreground mb-3">操作输出</h2>
+      <p class="text-sm text-muted">暂无服务操作输出。</p>
+    </div>
+
+    <div class="col-span-2 bg-surface border border-border rounded-lg p-5">
       <h2 class="text-sm font-medium text-foreground mb-3 flex items-center gap-2">
         <Terminal class="w-4 h-4" />
         终端命令
@@ -192,6 +198,7 @@ function uninstall() {
           exv service status
         </div>
       </div>
+    </div>
     </div>
 
     <ConfirmDialog />
