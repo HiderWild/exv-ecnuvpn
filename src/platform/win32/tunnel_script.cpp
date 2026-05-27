@@ -4,8 +4,10 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include "logger.hpp"
 #include "utils.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -19,6 +21,46 @@
 namespace ecnuvpn {
 namespace platform {
 namespace {
+
+class TunnelTiming {
+public:
+  TunnelTiming() : started_(Clock::now()), last_(started_) {
+    logger::info("[connect-timing] scope=tunnel.windows stage=begin delta_ms=0 total_ms=0");
+  }
+
+  void mark(const std::string &stage, const std::string &detail = "") {
+    auto now = Clock::now();
+    auto delta_ms = elapsed_ms(last_, now);
+    auto total_ms = elapsed_ms(started_, now);
+    last_ = now;
+    std::string message = "[connect-timing] scope=tunnel.windows stage=" +
+                          stage + " delta_ms=" + std::to_string(delta_ms) +
+                          " total_ms=" + std::to_string(total_ms);
+    if (!detail.empty())
+      message += " " + detail;
+    logger::info(message);
+  }
+
+  void finish(bool ok, const std::string &detail = "") {
+    if (finished_)
+      return;
+    finished_ = true;
+    mark(ok ? "finish.ok" : "finish.error", detail);
+  }
+
+private:
+  using Clock = std::chrono::steady_clock;
+
+  static long long elapsed_ms(const Clock::time_point &from,
+                              const Clock::time_point &to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
+        .count();
+  }
+
+  Clock::time_point started_;
+  Clock::time_point last_;
+  bool finished_ = false;
+};
 
 std::string js_quote(const std::string &value) {
   std::string quoted = "\"";
@@ -146,11 +188,13 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
                               const std::string &internal_ip,
                               const std::string &netmask,
                               const std::string &mtu) {
+  TunnelTiming timing;
   const std::string &ready_path = context.route_ready_path;
   delete_ready_file(ready_path);
 
   if (tunidx.empty() || internal_ip.empty()) {
     debug_log(ready_path, "missing openconnect tunnel metadata");
+    timing.finish(false, "reason=missing_metadata");
     return false;
   }
 
@@ -160,8 +204,14 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
       is_numeric(adapter) ? adapter : "name=" + cmd_quote_arg(adapter);
   const std::string subinterface_target =
       is_numeric(adapter) ? adapter : cmd_quote_arg(adapter);
+  timing.mark("resolve_adapter",
+              "adapter=" + adapter + " if_index=" + if_index +
+                  " internal_ip=" + internal_ip);
 
   const std::string default_gateway = get_default_gateway4();
+  timing.mark("default_gateway",
+              default_gateway.empty() ? "result=missing"
+                                      : "gateway=" + default_gateway);
   if (!default_gateway.empty()) {
     for (const auto &ip : context.server_route_exceptions) {
       run_exit(ready_path,
@@ -174,6 +224,8 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
       }
     }
   }
+  timing.mark("preserve_server_routes",
+              "count=" + std::to_string(context.server_route_exceptions.size()));
 
   bool ok = true;
   std::string adapter_mtu = effective_mtu(mtu, context.configured_mtu);
@@ -189,6 +241,8 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
              3, 1000, false) &&
          ok;
   }
+  timing.mark("set_mtu", adapter_mtu.empty() ? "result=skipped"
+                                             : "mtu=" + adapter_mtu);
 
   ok = run_with_retry(ready_path,
                       "netsh.exe interface ipv4 set address " +
@@ -196,8 +250,10 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
                           netmask,
                       5, 1000, false) &&
        ok;
+  timing.mark("set_address", ok ? "result=ok" : "result=failed");
 
   Sleep(3000);
+  timing.mark("wait_interface_registration", "sleep_ms=3000");
 
   for (const auto &cidr : context.custom_routes) {
     auto [network, mask] = cidr_to_network_and_mask(cidr);
@@ -209,19 +265,26 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
     route_cmd += " metric 1";
     ok = run_with_retry(ready_path, route_cmd, 5, 1000, false) && ok;
   }
+  timing.mark("add_split_routes",
+              "count=" + std::to_string(context.custom_routes.size()) +
+                  (ok ? " result=ok" : " result=failed"));
 
   if (!ok) {
     debug_log(ready_path, "native network configuration incomplete");
+    timing.finish(false, "reason=network_configuration_incomplete");
     return false;
   }
 
   if (!write_ready_file(ready_path, adapter, internal_ip)) {
     debug_log(ready_path, "failed to write route-ready marker");
+    timing.finish(false, "reason=write_route_ready_failed");
     return false;
   }
 
   debug_log(ready_path,
             "writeReadyFile tundev=" + adapter + " ip=" + internal_ip);
+  timing.mark("write_route_ready", "interface=" + adapter);
+  timing.finish(true, "interface=" + adapter + " internal_ip=" + internal_ip);
   return true;
 }
 

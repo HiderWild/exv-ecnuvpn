@@ -13,6 +13,7 @@
 #include <ws2tcpip.h>
 #endif
 
+#include <cstdlib>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -179,6 +180,14 @@ bool write_script(const Config &cfg) {
 }
 
 int run_script_hook() {
+#ifdef _WIN32
+  const char *home = std::getenv("ECNUVPN_HOME");
+  const char *config_dir = std::getenv("ECNUVPN_CONFIG_DIR");
+  if ((home && *home) || (config_dir && *config_dir)) {
+    utils::set_runtime_path_override(home ? home : "",
+                                     config_dir ? config_dir : "");
+  }
+#endif
   Config cfg = config::load();
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
   return platform::run_tunnel_script(context);

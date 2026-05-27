@@ -120,12 +120,22 @@ HANDLE open_inheritable_append_handle(const std::string &path) {
   SECURITY_ATTRIBUTES sa = {};
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
-  HANDLE handle = CreateFileA(path.c_str(), FILE_APPEND_DATA | GENERIC_WRITE,
+  std::wstring wide_path = utils::wide_from_utf8(path);
+  HANDLE handle = CreateFileW(wide_path.empty() ? L"" : wide_path.c_str(),
+                              FILE_APPEND_DATA | GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (handle != INVALID_HANDLE_VALUE)
     SetFilePointer(handle, 0, NULL, FILE_END);
   return handle;
+}
+
+void set_child_environment_override(const char *name, const std::string &value) {
+  std::wstring wide_name = utils::wide_from_utf8(name);
+  std::wstring wide_value = utils::wide_from_utf8(value);
+  if (!wide_name.empty())
+    SetEnvironmentVariableW(wide_name.c_str(),
+                            wide_value.empty() ? nullptr : wide_value.c_str());
 }
 
 } // namespace
@@ -167,28 +177,36 @@ bool spawn_openconnect_process(const Config &cfg, const std::string &password,
   }
 
   std::string cmdline = build_openconnect_command_line(cfg);
-  std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
-  mutable_cmd.push_back('\0');
+  std::wstring wide_cmdline = utils::wide_from_utf8(cmdline);
   std::string current_dir =
       std::filesystem::path(openconnect_path).parent_path().string();
+  std::wstring wide_openconnect_path = utils::wide_from_utf8(openconnect_path);
+  std::wstring wide_current_dir = utils::wide_from_utf8(current_dir);
 
-  STARTUPINFOA si = {};
+  set_child_environment_override("ECNUVPN_HOME", utils::get_effective_home());
+  set_child_environment_override("ECNUVPN_CONFIG_DIR", utils::get_config_dir());
+  set_child_environment_override("LANG", "C.UTF-8");
+  set_child_environment_override("LC_ALL", "C.UTF-8");
+
+  STARTUPINFOW si = {};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdInput = stdin_read;
   si.hStdOutput = log_handle;
   si.hStdError = log_handle;
   PROCESS_INFORMATION pi = {};
-  BOOL created = CreateProcessA(openconnect_path.c_str(), mutable_cmd.data(),
+  BOOL created = CreateProcessW(wide_openconnect_path.c_str(),
+                                wide_cmdline.empty() ? nullptr : wide_cmdline.data(),
                                 NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
-                                current_dir.empty() ? NULL : current_dir.c_str(),
+                                wide_current_dir.empty() ? NULL : wide_current_dir.c_str(),
                                 &si, &pi);
   CloseHandle(stdin_read);
   CloseHandle(log_handle);
   if (!created) {
+    DWORD error = GetLastError();
     CloseHandle(stdin_write);
     logger::error("Failed to create openconnect process: " +
-                  std::to_string(GetLastError()));
+                  utils::windows_error_message(error));
     return false;
   }
 

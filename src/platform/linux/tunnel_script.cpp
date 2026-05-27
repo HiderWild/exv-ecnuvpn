@@ -40,6 +40,18 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
   }
   ss << "\"\n";
   ss << "\n";
+  ss << "now_ms() {\n";
+  ss << "    perl -MTime::HiRes=time -e 'printf \"%.0f\", time()*1000' 2>/dev/null || date +%s000\n";
+  ss << "}\n";
+  ss << "SCRIPT_START_MS=$(now_ms)\n";
+  ss << "SCRIPT_LAST_MS=$SCRIPT_START_MS\n";
+  ss << "timing_mark() {\n";
+  ss << "    NOW_MS=$(now_ms)\n";
+  ss << "    DELTA_MS=$((NOW_MS - SCRIPT_LAST_MS))\n";
+  ss << "    TOTAL_MS=$((NOW_MS - SCRIPT_START_MS))\n";
+  ss << "    SCRIPT_LAST_MS=$NOW_MS\n";
+  ss << "    echo \"[EXV-TIMING] scope=tunnel.linux stage=$1 delta_ms=$DELTA_MS total_ms=$TOTAL_MS\"\n";
+  ss << "}\n\n";
 
   ss << "delete_ready_file() {\n";
   ss << "    rm -f \"$READY_FILE\"\n";
@@ -60,12 +72,15 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
   ss << "case \"$reason\" in\n";
   ss << "    pre-init)\n";
+  ss << "        timing_mark pre_init\n";
   ss << "        delete_ready_file\n";
   ss << "        exit 0\n";
   ss << "        ;;\n";
   ss << "    disconnect|reconnect|attempt-reconnect)\n";
+  ss << "        timing_mark cleanup_start\n";
   ss << "        cleanup_routes\n";
   ss << "        delete_ready_file\n";
+  ss << "        timing_mark cleanup_done\n";
   ss << "        exit 0\n";
   ss << "        ;;\n";
   ss << "    connect)\n";
@@ -77,6 +92,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
   ss << "echo \">>> [VPN] Connection established, configuring network...\"\n";
   ss << "echo \">>> [VPN] Interface: $TUNDEV | Internal IP: $INTERNAL_IP4_ADDRESS\"\n\n";
+  ss << "timing_mark connect_start\n\n";
 
   ss << "# Activate virtual interface\n";
   ss << "ip addr add \"$INTERNAL_IP4_ADDRESS/32\" dev \"$TUNDEV\" >/dev/null 2>&1\n";
@@ -85,6 +101,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
   ss << "    echo \">>> [VPN] Failed to activate interface: $TUNDEV\"\n";
   ss << "    exit 1\n";
   ss << "fi\n\n";
+  ss << "timing_mark activate_interface\n\n";
 
   if (!context.server_route_exceptions.empty()) {
     ss << "DEFAULT_GATEWAY=$(ip route show default 0.0.0.0/0 2>/dev/null | awk '{print $3; exit}')\n";
@@ -104,6 +121,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
     }
     ss << "fi\n\n";
   }
+  ss << "timing_mark preserve_server_routes\n\n";
 
   ss << "# Split tunnel routes\n";
   ss << "echo \">>> [VPN] Adding split tunnel routes...\"\n\n";
@@ -118,6 +136,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
        << " (failed to refresh)\"\n";
     ss << "fi\n\n";
   }
+  ss << "timing_mark add_split_routes\n\n";
 
   ss << "printf '%s\\n%s\\n' \"$TUNDEV\" \"$INTERNAL_IP4_ADDRESS\" > \"$READY_FILE\"\n";
   ss << "if [ $? -ne 0 ]; then\n";
@@ -129,8 +148,10 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
     ss << "chmod 0644 \"$READY_FILE\" >/dev/null 2>&1\n";
   }
   ss << "\n";
+  ss << "timing_mark write_route_ready\n";
   ss << "echo \">>> [VPN] Network configuration complete!\"\n";
   ss << "echo \">>> [Tip] Campus traffic via VPN, other traffic via default route.\"\n\n";
+  ss << "timing_mark finish_ok\n\n";
   ss << "exit 0\n";
 
   return ss.str();
