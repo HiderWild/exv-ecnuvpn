@@ -49,17 +49,6 @@ const showExvAdapter = computed(() => connected.value || disconnecting.value || 
 const vpnServerStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && ['adapter', 'routes', 'network-ready'].includes(progressKey.value)))
 const routeStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && progressKey.value === 'network-ready'))
 
-const sessionModeLabel = computed(() => {
-  if (disconnecting.value) return '正在断开'
-  if (connecting.value || preparingService.value) return '连接中'
-  switch (vpn.currentSessionMode) {
-    case 'helper': return '通过服务'
-    case 'elevated': return '临时提权'
-    case 'direct': return '直接连接'
-    default: return '未连接'
-  }
-})
-
 const statusLabel = computed(() => {
   if (disconnecting.value) return '正在断开'
   if (preparingService.value) return '正在准备服务'
@@ -131,18 +120,6 @@ const upstreamVirtualNames = computed(() => {
 
 const upstreamVirtualCaption = computed(() => {
   return upstreamVirtualNames.value || vpn.status?.upstream_virtual_message || '已检测到'
-})
-
-const upstreamVirtualReason = computed(() => {
-  return upstreamAdapters.value.map((adapter) => adapter.route_reason).filter(Boolean).join('；')
-})
-
-const uptimeFormatted = computed(() => {
-  const total = vpn.displayUptimeSeconds
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 })
 
 const errorDisplayInfo = computed(() => {
@@ -605,15 +582,6 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
         <div class="min-w-0">
           <h1 class="text-xl font-semibold text-foreground">主面板</h1>
         </div>
-        <div class="flex items-center gap-2 rounded-full border border-border px-3 py-1.5 text-xs">
-          <span
-            :class="[
-              'h-2 w-2 rounded-full',
-              connected ? 'bg-accent' : (connecting || disconnecting || preparingService) ? 'bg-warning' : 'bg-muted',
-            ]"
-          />
-          <span class="text-muted">{{ sessionModeLabel }}</span>
-        </div>
       </div>
 
       <div class="arc-stage">
@@ -681,15 +649,6 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
           >
             {{ node.title }}
           </p>
-          <p
-            :class="[
-              'node-caption truncate',
-              node.key === 'upstream' ? 'strong' : '',
-            ]"
-            :title="node.caption"
-          >
-            {{ node.caption }}
-          </p>
         </div>
       </div>
 
@@ -728,30 +687,6 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
           <div class="text-center">
             <p class="text-lg font-semibold text-foreground">{{ statusLabel }}</p>
             <p class="mx-auto mt-1 max-w-xl text-sm text-muted">{{ statusDescription }}</p>
-          </div>
-          <div
-            v-if="connected"
-            :class="[
-              'session-inline-row',
-              hasUpstreamVirtual ? 'with-proxy' : 'without-proxy',
-            ]"
-          >
-            <div class="session-inline-item">
-              <p>用户</p>
-              <strong>{{ vpn.status?.username || '--' }}</strong>
-            </div>
-            <div class="session-inline-item">
-              <p>运行时长</p>
-              <strong>{{ uptimeFormatted }}</strong>
-            </div>
-            <div
-              v-if="hasUpstreamVirtual"
-              class="session-inline-item warning"
-              :title="upstreamVirtualReason || upstreamVirtualCaption"
-            >
-              <p>代理 TUN</p>
-              <strong>{{ upstreamVirtualCaption }}</strong>
-            </div>
           </div>
           <label
             v-if="!connected && !vpn.serviceInstalled"
@@ -962,50 +897,6 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   align-items: center;
   gap: 0.6rem;
   width: min(34rem, 100%);
-}
-
-.session-inline-row {
-  display: grid;
-  width: min(100%, 32rem);
-  align-items: start;
-  gap: 0.8rem;
-  padding-top: 0.2rem;
-}
-
-.session-inline-row.with-proxy {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.session-inline-row.without-proxy {
-  grid-template-columns: repeat(2, minmax(0, 10rem));
-  justify-content: center;
-}
-
-.session-inline-item {
-  min-width: 0;
-  text-align: center;
-}
-
-.session-inline-item p {
-  color: rgb(148 163 184);
-  font-size: 0.68rem;
-  line-height: 0.9rem;
-}
-
-.session-inline-item strong {
-  display: block;
-  margin-top: 0.2rem;
-  overflow: hidden;
-  color: rgb(248 250 252);
-  font-size: 0.82rem;
-  font-weight: 600;
-  line-height: 1.1rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.session-inline-item.warning strong {
-  color: rgb(148 163 184);
 }
 
 @keyframes arc-pulse-run {
@@ -1260,19 +1151,6 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   font-size: 0.78rem;
   font-weight: 600;
   line-height: 1.1rem;
-}
-
-.node-caption {
-  max-width: 7.5rem;
-  color: rgb(148 163 184);
-  font-size: 0.68rem;
-  line-height: 0.9rem;
-}
-
-.node-caption.strong {
-  color: rgb(148 163 184);
-  font-size: 0.74rem;
-  font-weight: 500;
 }
 
 .photon-field {
