@@ -10,15 +10,15 @@ const router = createRouter({
     },
     {
       path: '/auth',
-      redirect: { path: '/settings', query: { section: 'auth' } },
+      redirect: { path: '/settings', hash: '#settings-auth' },
     },
     {
       path: '/routes',
-      redirect: { path: '/settings', query: { section: 'routes' } },
+      redirect: { path: '/settings', hash: '#settings-routes' },
     },
     {
       path: '/service',
-      redirect: { path: '/settings', query: { section: 'system' } },
+      redirect: { path: '/settings', hash: '#settings-system' },
     },
     {
       path: '/logs',

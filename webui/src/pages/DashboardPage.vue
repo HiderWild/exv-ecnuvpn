@@ -40,7 +40,6 @@ onUnmounted(() => {
 const connected = computed(() => Boolean(vpn.status?.connected))
 const connecting = computed(() => vpn.connectInFlight)
 const disconnecting = computed(() => vpn.disconnectInFlight)
-const preparingService = computed(() => vpn.serviceBusy && !connected.value)
 const upstreamAdapters = computed(() => vpn.status?.upstream_virtual_adapters || [])
 const hasUpstreamVirtual = computed(() => Boolean(vpn.status?.upstream_virtual_detected || upstreamAdapters.value.length > 0))
 const progressKey = computed(() => connecting.value ? vpn.connectionProgress.key : '')
@@ -51,7 +50,6 @@ const routeStageComplete = computed(() => connected.value || disconnecting.value
 
 const statusLabel = computed(() => {
   if (disconnecting.value) return '正在断开'
-  if (preparingService.value) return '正在准备服务'
   if (connecting.value) return vpn.connectionProgress.label
   if (connected.value) return '连接已建立'
   if (vpn.lastError) return '需要处理'
@@ -84,7 +82,6 @@ const lastErrorSummary = computed(() => {
 
 const statusDescription = computed(() => {
   if (disconnecting.value) return '正在关闭隧道并恢复本机网络状态。'
-  if (preparingService.value) return '正在安装或更新辅助服务，完成后会继续连接。'
   if (connecting.value) return vpn.connectionProgress.description
   if (connected.value) {
     return vpn.status?.network_ready ? '隧道接口和路由已写入，正在通过 EXV 转发校园网流量。' : 'VPN 进程已启动，正在等待网络就绪。'
@@ -108,7 +105,7 @@ const powerButtonClass = computed(() => {
   if (connected.value) return 'bg-accent text-white hover:bg-accent/90 shadow-accent/20'
   return 'bg-destructive text-white hover:bg-destructive/90 shadow-destructive/20'
 })
-const powerAnimating = computed(() => vpn.loading || vpn.serviceBusy || disconnecting.value)
+const powerAnimating = computed(() => vpn.loading || disconnecting.value)
 
 const vpnPathActive = computed(() => connected.value && Boolean(vpn.status?.network_ready))
 const vpnPathPending = computed(() => connecting.value || (connected.value && !vpn.status?.network_ready))
@@ -655,7 +652,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
       <div
         :class="[
           'control-zone',
-          (connected || connecting || preparingService) ? 'is-lifted' : '',
+          (connected || connecting) ? 'is-lifted' : '',
         ]"
       >
         <div class="control-center">
@@ -675,13 +672,13 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
             <button
               :disabled="vpn.loading || vpn.serviceBusy"
               :class="[
-                'relative z-10 grid h-40 w-40 place-items-center rounded-full shadow-2xl transition-all duration-500 disabled:cursor-not-allowed disabled:opacity-95',
+                'power-button relative z-10 grid h-28 w-28 place-items-center rounded-full transition-all duration-500 disabled:cursor-not-allowed disabled:opacity-95',
                 powerButtonClass,
               ]"
               :title="powerButtonLabel"
               @click="handlePowerClick"
             >
-              <Power class="h-16 w-16" />
+              <Power class="h-11 w-11 drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)]" />
             </button>
           </div>
           <div class="text-center">
@@ -951,8 +948,44 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   position: relative;
   display: grid;
   place-items: center;
-  width: 14rem;
-  height: 14rem;
+  width: 9.8rem;
+  height: 9.8rem;
+  perspective: 24rem;
+}
+
+.power-button {
+  box-shadow:
+    0 1.35rem 2.6rem rgba(0, 0, 0, 0.34),
+    0 0.45rem 0.9rem rgba(0, 0, 0, 0.22),
+    inset 0 0.45rem 0.65rem rgba(255, 255, 255, 0.2),
+    inset 0 -0.7rem 1.1rem rgba(0, 0, 0, 0.2);
+  transform: translateY(-0.12rem);
+}
+
+.power-button::before {
+  content: '';
+  position: absolute;
+  inset: 0.35rem;
+  border-radius: 9999px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0));
+  pointer-events: none;
+}
+
+.power-button:hover:not(:disabled) {
+  transform: translateY(-0.22rem);
+  box-shadow:
+    0 1.55rem 2.9rem rgba(0, 0, 0, 0.38),
+    0 0.55rem 1rem rgba(0, 0, 0, 0.24),
+    inset 0 0.5rem 0.7rem rgba(255, 255, 255, 0.22),
+    inset 0 -0.75rem 1.15rem rgba(0, 0, 0, 0.22);
+}
+
+.power-button:active:not(:disabled) {
+  transform: translateY(0.08rem) scale(0.985);
+  box-shadow:
+    0 0.65rem 1.4rem rgba(0, 0, 0, 0.28),
+    inset 0 0.25rem 0.45rem rgba(255, 255, 255, 0.16),
+    inset 0 -0.45rem 0.75rem rgba(0, 0, 0, 0.26);
 }
 
 .power-ripple-ring {

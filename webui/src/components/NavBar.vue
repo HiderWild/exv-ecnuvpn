@@ -44,7 +44,7 @@ const proxyTunLabel = computed(() => {
 
 const connectionState = computed(() => {
   if (vpn.disconnectInFlight) return { label: '正在断开', tone: 'warning' }
-  if (vpn.connectInFlight || vpn.serviceBusy) return { label: '连接中', tone: 'warning' }
+  if (vpn.connectInFlight) return { label: '连接中', tone: 'warning' }
   if (vpn.lastError) return { label: '需要处理', tone: 'warning' }
   if (!vpn.status?.connected) return { label: '未连接', tone: 'muted' }
   return { label: '已连接', tone: 'accent' }

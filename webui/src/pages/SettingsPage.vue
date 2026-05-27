@@ -152,22 +152,41 @@ function sectionElement(key: SectionKey) {
   return routesSection.value
 }
 
+function sectionHash(key: SectionKey) {
+  return `#settings-${key}`
+}
+
+function sectionFromHash(hash: unknown): SectionKey | null {
+  if (hash === '#settings-auth' || hash === '#auth') return 'auth'
+  if (hash === '#settings-system' || hash === '#system') return 'system'
+  if (hash === '#settings-routes' || hash === '#routes') return 'routes'
+  return null
+}
+
+function sectionFromQuery(value: unknown): SectionKey | null {
+  const section = Array.isArray(value) ? value[0] : value
+  return section === 'auth' || section === 'system' || section === 'routes'
+    ? section
+    : null
+}
+
 function updateActiveSection() {
   const root = scrollRoot.value
   if (!root) return
 
-  const rootTop = root.getBoundingClientRect().top
+  const rootRect = root.getBoundingClientRect()
+  const threshold = rootRect.top + Math.min(180, root.clientHeight * 0.35)
   let next = activeSection.value
-  let bestDistance = Number.POSITIVE_INFINITY
 
   for (const section of sections) {
     const el = sectionElement(section.key)
     if (!el) continue
-    const distance = Math.abs(el.getBoundingClientRect().top - rootTop - 16)
-    if (distance < bestDistance) {
-      bestDistance = distance
+    if (el.getBoundingClientRect().top <= threshold) {
       next = section.key
     }
+  }
+  if (root.scrollTop + root.clientHeight >= root.scrollHeight - 12) {
+    next = sections[sections.length - 1].key
   }
   activeSection.value = next
 }
@@ -177,13 +196,12 @@ async function scrollToSection(key: SectionKey, updateRoute = true) {
   sectionElement(key)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   activeSection.value = key
   if (updateRoute) {
-    router.replace({ path: '/settings', query: { ...route.query, section: key } })
+    router.replace({ path: '/settings', hash: sectionHash(key) })
   }
 }
 
 function initialSection(): SectionKey {
-  const value = route.query.section
-  return value === 'system' || value === 'routes' || value === 'auth' ? value : 'auth'
+  return sectionFromHash(route.hash) || sectionFromQuery(route.query.section) || 'auth'
 }
 
 function applyServerChoice(server: string) {
@@ -259,11 +277,10 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  () => route.query.section,
-  (value) => {
-    if (value === 'auth' || value === 'system' || value === 'routes') {
-      scrollToSection(value, false)
-    }
+  () => [route.hash, route.query.section],
+  () => {
+    const section = initialSection()
+    scrollToSection(section, false)
   },
 )
 
@@ -915,25 +932,36 @@ async function removeRoute(index: number) {
       </section>
     </div>
 
-    <nav class="fixed right-5 top-1/2 z-30 hidden -translate-y-1/2 flex-col items-center gap-2 xl:flex">
+    <nav class="fixed bottom-6 right-6 z-30 flex flex-col items-center gap-2 rounded-full border border-border bg-surface/90 p-2 shadow-xl shadow-black/25 backdrop-blur">
       <button
         v-for="section in sections"
         :key="section.key"
+        type="button"
+        :title="section.label"
+        :aria-label="section.label"
         :class="[
-          'flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-colors',
+          'group flex items-center gap-2 rounded-full border transition-all duration-200',
           activeSection === section.key
-            ? 'border-accent bg-accent/15 text-foreground'
-            : 'border-border bg-surface/80 text-muted hover:border-accent/50 hover:text-foreground',
+            ? 'h-9 border-accent bg-accent/15 px-3 text-foreground'
+            : 'h-7 border-transparent px-2 text-muted hover:border-accent/50 hover:text-foreground',
         ]"
         @click="scrollToSection(section.key)"
       >
         <span
           :class="[
-            'h-2 w-2 rounded-full',
+            'rounded-full transition-all duration-200',
+            activeSection === section.key ? 'h-3 w-3' : 'h-2 w-2',
             activeSection === section.key ? 'bg-accent' : 'bg-muted',
           ]"
         />
-        {{ section.label }}
+        <span
+          :class="[
+            'overflow-hidden whitespace-nowrap text-xs transition-all duration-200',
+            activeSection === section.key ? 'max-w-12 opacity-100' : 'max-w-0 opacity-0',
+          ]"
+        >
+          {{ section.label }}
+        </span>
       </button>
     </nav>
   </div>
