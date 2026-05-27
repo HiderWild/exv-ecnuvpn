@@ -47,6 +47,8 @@ const adapterStageStarted = computed(() => connecting.value && ['adapter', 'rout
 const showExvAdapter = computed(() => connected.value || disconnecting.value || adapterStageStarted.value)
 const vpnServerStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && ['adapter', 'routes', 'network-ready'].includes(progressKey.value)))
 const routeStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && progressKey.value === 'network-ready'))
+const showInstallServiceChoice = computed(() => !connected.value && !vpn.serviceAvailable)
+const installServiceChoiceDisabled = computed(() => connecting.value || disconnecting.value || vpn.loading || vpn.serviceBusy)
 
 const statusLabel = computed(() => {
   if (disconnecting.value) return '正在断开'
@@ -183,6 +185,8 @@ const arcViewBox = {
   startAngle: 175,
   endAngle: 365,
 }
+const NODE_EXCLUSION_RADIUS = 58
+const NODE_EXCLUSION_ANGLE = (NODE_EXCLUSION_RADIUS / arcViewBox.radius) * (180 / Math.PI)
 
 type TopologyNode = {
   key: string
@@ -392,7 +396,19 @@ watch(
 )
 
 function segmentPath(from: ArcNodeTarget, to: ArcNodeTarget) {
-  return `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} A ${arcViewBox.radius} ${arcViewBox.radius} 0 0 1 ${to.x.toFixed(2)} ${to.y.toFixed(2)}`
+  const direction = to.angle >= from.angle ? 1 : -1
+  const startAngle = from.angle + direction * NODE_EXCLUSION_ANGLE
+  const endAngle = to.angle - direction * NODE_EXCLUSION_ANGLE
+  if ((endAngle - startAngle) * direction <= 0) {
+    const midpointAngle = from.angle + ((to.angle - from.angle) / 2)
+    const midpoint = positionForAngle(midpointAngle)
+    return `M ${midpoint.x.toFixed(2)} ${midpoint.y.toFixed(2)}`
+  }
+  const start = positionForAngle(startAngle)
+  const end = positionForAngle(endAngle)
+  const largeArc = Math.abs(endAngle - startAngle) > 180 ? 1 : 0
+  const sweep = direction > 0 ? 1 : 0
+  return `M ${start.x.toFixed(2)} ${start.y.toFixed(2)} A ${arcViewBox.radius} ${arcViewBox.radius} 0 ${largeArc} ${sweep} ${end.x.toFixed(2)} ${end.y.toFixed(2)}`
 }
 
 const arcSegments = computed(() => {
@@ -626,20 +642,35 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
           ]"
           :style="node.style"
         >
-          <div v-if="node.key === 'traffic'" class="photon-field" aria-hidden="true">
-            <span class="photon photon-a" />
-            <span class="photon photon-b" />
-            <span class="photon photon-c" />
-            <span class="photon photon-d" />
-          </div>
-          <component
-            :is="node.icon"
-            v-else
+          <div
+            v-if="node.key === 'traffic'"
             :class="[
-              'node-icon',
+              'node-icon-shell',
+              'node-traffic-shell',
               nodeToneClass(node.tone),
             ]"
-          />
+            aria-hidden="true"
+          >
+            <div class="photon-field">
+              <span class="photon photon-a" />
+              <span class="photon photon-b" />
+              <span class="photon photon-c" />
+              <span class="photon photon-d" />
+            </div>
+          </div>
+          <div
+            v-else
+            :class="[
+              'node-icon-shell',
+              nodeToneClass(node.tone),
+            ]"
+            aria-hidden="true"
+          >
+            <component
+              :is="node.icon"
+              class="node-icon"
+            />
+          </div>
           <p
             class="node-title"
             :title="node.title"
@@ -686,12 +717,13 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
             <p class="mx-auto mt-1 max-w-xl text-sm text-muted">{{ statusDescription }}</p>
           </div>
           <label
-            v-if="!connected && !vpn.serviceInstalled"
+            v-if="showInstallServiceChoice"
             class="inline-flex items-center gap-2 rounded-full border border-border bg-bg/40 px-3 py-1.5 text-xs text-muted"
           >
             <input
               v-model="installServiceBeforeConnect"
               type="checkbox"
+              :disabled="installServiceChoiceDisabled"
               class="h-3.5 w-3.5 accent-accent"
             />
             连接前安装服务（推荐）
@@ -828,16 +860,19 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   z-index: 2;
 }
 
+.arc-node.node-success .node-icon-shell,
 .arc-node.node-success .node-icon,
 .arc-node.node-success .node-title {
   color: rgb(134 239 172);
 }
 
+.arc-node.node-warning .node-icon-shell,
 .arc-node.node-warning .node-icon,
 .arc-node.node-warning .node-title {
   color: rgb(251 191 36);
 }
 
+.arc-node.node-muted .node-icon-shell,
 .arc-node.node-muted .node-icon,
 .arc-node.node-muted .node-title {
   color: rgb(148 163 184);
@@ -1174,9 +1209,58 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   min-height: 86px;
 }
 
+.node-icon-shell {
+  position: relative;
+  display: grid;
+  width: 3.35rem;
+  height: 3.35rem;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 9999px;
+  border: 1px solid color-mix(in srgb, currentColor 38%, rgba(255, 255, 255, 0.18));
+  background:
+    radial-gradient(circle at 30% 22%, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.1) 24%, transparent 45%),
+    linear-gradient(145deg, color-mix(in srgb, currentColor 24%, #172033), color-mix(in srgb, currentColor 7%, #0b1220 92%));
+  box-shadow:
+    0 0.9rem 1.4rem rgba(0, 0, 0, 0.26),
+    0 0.22rem 0.42rem rgba(0, 0, 0, 0.18),
+    inset 0 0.32rem 0.45rem rgba(255, 255, 255, 0.18),
+    inset 0 -0.55rem 0.85rem rgba(0, 0, 0, 0.24),
+    0 0 0.75rem color-mix(in srgb, currentColor 20%, transparent);
+  transform: translateY(-0.08rem) rotateX(8deg);
+}
+
+.node-icon-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0.34rem 0.45rem auto;
+  height: 0.74rem;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.46), rgba(255, 255, 255, 0));
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.node-icon-shell::after {
+  content: '';
+  position: absolute;
+  inset: auto 0.45rem 0.26rem;
+  height: 0.36rem;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.24);
+  filter: blur(5px);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
 .node-icon {
-  width: 2rem;
-  height: 2rem;
+  position: relative;
+  z-index: 1;
+  width: 1.78rem;
+  height: 1.78rem;
+  stroke-width: 2.25;
+  color: currentColor;
+  filter: drop-shadow(0 0.12rem 0.16rem rgba(0, 0, 0, 0.4));
 }
 
 .node-title {
@@ -1188,8 +1272,9 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 
 .photon-field {
   position: relative;
-  width: 4.5rem;
-  height: 2.5rem;
+  z-index: 1;
+  width: 2.3rem;
+  height: 1.7rem;
 }
 
 .photon {
@@ -1204,22 +1289,22 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 }
 
 .photon-a {
-  left: 2.7rem;
-  top: 0.2rem;
+  left: 1.55rem;
+  top: 0.06rem;
 }
 
 .photon-b {
-  left: 1.5rem;
-  top: 0.95rem;
+  left: 0.78rem;
+  top: 0.58rem;
 }
 
 .photon-c {
-  left: 3.2rem;
-  top: 1.55rem;
+  left: 1.82rem;
+  top: 1.02rem;
 }
 
 .photon-d {
-  left: 0.8rem;
-  top: 1.9rem;
+  left: 0.34rem;
+  top: 1.18rem;
 }
 </style>
