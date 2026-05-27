@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import api from '../api/desktop'
 import { useUiStore } from './ui'
+import { useConfigStore } from './config'
 
 export interface UpstreamVirtualAdapter {
   name: string
@@ -207,6 +208,7 @@ export const useVpnStore = defineStore('vpn', () => {
   let progressTimer: ReturnType<typeof setInterval> | null = null
   let uptimeTimer: ReturnType<typeof setInterval> | null = null
   const ui = useUiStore()
+  const config = useConfigStore()
 
   const status = ref<VpnStatus | null>(null)
   const routes = ref<RouteEntry[]>([])
@@ -503,7 +505,20 @@ export const useVpnStore = defineStore('vpn', () => {
     await Promise.allSettled([fetchStatus(), fetchServiceStatus()])
   }
 
+  async function resolveConnectPassword() {
+    await config.fetchAuthConfig()
+    const auth = config.authConfig
+    if (auth.remember_password && auth.password_stored) return undefined
+
+    const username = auth.username || status.value?.username
+    const message = username ? `请输入用户 ${username} 的密码` : '请输入 VPN 密码'
+    return ui.requestPassword(message)
+  }
+
   async function connect() {
+    const password = await resolveConnectPassword()
+    if (password === null) return false
+
     loading.value = true
     clearError()
     lastActionWasElevatedConnect.value = false
@@ -511,11 +526,16 @@ export const useVpnStore = defineStore('vpn', () => {
     connectInFlight.value = true
     startConnectionProgress(2)
     try {
-      const { data } = await api.post<VpnStatus>('/connect')
+      const { data } = await api.post<VpnStatus>(
+        '/connect',
+        password === undefined ? undefined : { password },
+      )
       applyStatus(data)
       await fetchAppShellState()
+      return true
     } catch (error) {
       setError(normalizeError(error))
+      return false
     } finally {
       connectInFlight.value = false
       stopConnectionProgress()
@@ -542,6 +562,9 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   async function connectElevated() {
+    const password = await resolveConnectPassword()
+    if (password === null) return false
+
     loading.value = true
     clearError()
     lastActionWasElevatedConnect.value = true
@@ -549,9 +572,13 @@ export const useVpnStore = defineStore('vpn', () => {
     connectInFlight.value = true
     startConnectionProgress()
     try {
-      const { data } = await api.post<VpnStatus | VpnError>('/connect/elevated')
+      const { data } = await api.post<VpnStatus | VpnError>(
+        '/connect/elevated',
+        password === undefined ? undefined : { password },
+      )
       if (isVpnError(data)) {
         setError(data)
+        return false
       } else {
         const elevatedStatus = { ...data, mode: data.mode ?? 'elevated' }
         applyStatus(elevatedStatus)
@@ -560,9 +587,11 @@ export const useVpnStore = defineStore('vpn', () => {
         if (status.value?.connected && !status.value.mode) {
           applyStatus({ ...status.value, mode: 'elevated', backend: activeTemporaryBackend.value })
         }
+        return true
       }
     } catch (error) {
       setError(normalizeError(error))
+      return false
     } finally {
       lastActionWasElevatedConnect.value = false
       connectInFlight.value = false

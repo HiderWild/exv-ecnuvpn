@@ -12,6 +12,9 @@ export const useUiStore = defineStore('ui', () => {
   const showConfirm = ref(false)
   const confirmMessage = ref('')
   const confirmCallback = ref<(() => void) | null>(null)
+  const showPasswordPrompt = ref(false)
+  const passwordPromptMessage = ref('')
+  const passwordPromptResolver = ref<((value: string | null) => void) | null>(null)
   let nextId = 1
 
   function addToast(text: string, type: ToastMessage['type'] = 'info') {
@@ -40,9 +43,36 @@ export const useUiStore = defineStore('ui', () => {
     closeConfirm()
   }
 
+  function requestPassword(message: string) {
+    passwordPromptResolver.value?.(null)
+    passwordPromptMessage.value = message
+    showPasswordPrompt.value = true
+    return new Promise<string | null>((resolve) => {
+      passwordPromptResolver.value = resolve
+    })
+  }
+
+  function submitPasswordPrompt(password: string) {
+    const resolver = passwordPromptResolver.value
+    showPasswordPrompt.value = false
+    passwordPromptMessage.value = ''
+    passwordPromptResolver.value = null
+    resolver?.(password)
+  }
+
+  function closePasswordPrompt() {
+    const resolver = passwordPromptResolver.value
+    showPasswordPrompt.value = false
+    passwordPromptMessage.value = ''
+    passwordPromptResolver.value = null
+    resolver?.(null)
+  }
+
   return {
     toasts, showConfirm, confirmMessage, confirmCallback,
+    showPasswordPrompt, passwordPromptMessage,
     addToast, removeToast,
     requestConfirm, closeConfirm, onConfirm,
+    requestPassword, submitPasswordPrompt, closePasswordPrompt,
   }
 })

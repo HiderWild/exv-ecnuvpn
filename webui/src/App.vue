@@ -2,6 +2,7 @@
 import { RouterView } from 'vue-router'
 import NavBar from './components/NavBar.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import PasswordPromptDialog from './components/PasswordPromptDialog.vue'
 import ToastStack from './components/Toast.vue'
 </script>
 
@@ -14,6 +15,7 @@ import ToastStack from './components/Toast.vue'
       </div>
     </main>
     <ConfirmDialog />
+    <PasswordPromptDialog />
     <ToastStack />
   </div>
 </template>
