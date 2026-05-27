@@ -42,6 +42,12 @@ const installerInclude = hasBuildResource('installer.nsh')
 const macIcon = hasBuildResource('icon.icns')
   ? buildResource('icon.icns')
   : undefined
+const winIcon = hasBuildResource('icon.ico')
+  ? buildResource('icon.ico')
+  : undefined
+const pngIcon = hasBuildResource('icon.png')
+  ? buildResource('icon.png')
+  : undefined
 const macEntitlements = hasBuildResource('entitlements.mac.plist')
   ? buildResource('entitlements.mac.plist')
   : undefined
@@ -85,6 +91,12 @@ module.exports = {
         '!libcrypto-*.dll',
       ],
     },
+    ...(pngIcon
+      ? [{
+          from: pngIcon,
+          to: 'icon.png',
+        }]
+      : []),
   ],
   win: {
     target: [
@@ -99,6 +111,7 @@ module.exports = {
     ],
     executableName: 'ECNU-VPN',
     signAndEditExecutable: false,
+    ...(winIcon ? { icon: winIcon } : {}),
   },
   nsis: {
     oneClick: false,
@@ -108,6 +121,7 @@ module.exports = {
     createStartMenuShortcut: true,
     shortcutName: 'ECNU VPN',
     deleteAppDataOnUninstall: false,
+    ...(winIcon ? { installerIcon: winIcon, uninstallerIcon: winIcon } : {}),
     ...(installerInclude ? { include: installerInclude } : {}),
   },
   portable: {

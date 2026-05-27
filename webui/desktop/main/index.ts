@@ -35,6 +35,13 @@ function rendererIndex() {
   return join(__dirname, '..', '..', 'dist', 'index.html')
 }
 
+function windowIconPath() {
+  const packagedIcon = join(process.resourcesPath, 'icon.png')
+  if (app.isPackaged && existsSync(packagedIcon)) return packagedIcon
+  const devIcon = join(repoRoot(), 'webui', 'build-resources', 'icon.png')
+  return existsSync(devIcon) ? devIcon : undefined
+}
+
 function repoRoot() {
   return resolve(__dirname, '..', '..', '..')
 }
@@ -233,6 +240,7 @@ async function createWindow() {
     resizable: false,
     maximizable: false,
     autoHideMenuBar: true,
+    icon: windowIconPath(),
     webPreferences: {
       preload: join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
