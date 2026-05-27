@@ -126,8 +126,26 @@ async function save() {
 
 async function toggleService() {
   message.value = null
+  if (vpn.status?.connected) {
+    ui.requestConfirm(
+      '当前 VPN 连接已建立。本操作会先断开连接，然后继续变更 helper 服务。',
+      () => { void runServiceToggle(true) },
+    )
+    return
+  }
   const installed = vpn.serviceInstalled
   const ok = installed ? await vpn.uninstallService() : await vpn.installService()
+  if (ok) {
+    ui.addToast(installed ? '辅助服务已卸载' : '辅助服务已安装', 'success')
+  }
+}
+
+async function runServiceToggle(disconnectFirst = false) {
+  message.value = null
+  const installed = vpn.serviceInstalled
+  const ok = installed
+    ? await vpn.uninstallService({ disconnectFirst })
+    : await vpn.installService({ disconnectFirst })
   if (ok) {
     ui.addToast(installed ? '辅助服务已卸载' : '辅助服务已安装', 'success')
   }

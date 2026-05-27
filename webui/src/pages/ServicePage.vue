@@ -4,7 +4,6 @@ import { useVpnStore } from '../stores/vpn'
 import { useUiStore } from '../stores/ui'
 import { useSSE } from '../composables/useSSE'
 import StatusBadge from '../components/StatusBadge.vue'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { Download, RefreshCw, Terminal, Trash2 } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
@@ -55,35 +54,43 @@ onUnmounted(() => {
 })
 
 function install() {
+  if (vpn.status?.connected) {
+    ui.requestConfirm(
+      '当前 VPN 连接已建立。安装 helper 服务前会先断开连接，然后继续安装。',
+      () => { void runServiceAction('install', true) },
+    )
+    return
+  }
   ui.requestConfirm(
     '将安装 VPN 辅助服务。系统可能会请求管理员权限。',
-    async () => {
-      try {
-        await vpn.installService()
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务安装完成', 'success')
-      } catch {
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务安装未完成，请查看输出', 'error')
-      }
-    },
+    () => { void runServiceAction('install') },
   )
 }
 
 function uninstall() {
+  if (vpn.status?.connected) {
+    ui.requestConfirm(
+      '当前 VPN 连接已建立。卸载 helper 服务前会先断开连接，然后继续卸载。',
+      () => { void runServiceAction('uninstall', true) },
+    )
+    return
+  }
   ui.requestConfirm(
     '将卸载 VPN 辅助服务。系统可能会请求管理员权限。',
-    async () => {
-      try {
-        await vpn.uninstallService()
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务卸载完成', 'success')
-      } catch {
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务卸载未完成，请查看输出', 'error')
-      }
-    },
+    () => { void runServiceAction('uninstall') },
   )
+}
+
+async function runServiceAction(action: 'install' | 'uninstall', disconnectFirst = false) {
+  const ok = action === 'install'
+    ? await vpn.installService({ disconnectFirst })
+    : await vpn.uninstallService({ disconnectFirst })
+  await vpn.fetchServiceStatus()
+  if (ok) {
+    ui.addToast(action === 'install' ? '辅助服务安装完成' : '辅助服务卸载完成', 'success')
+    return
+  }
+  ui.addToast(action === 'install' ? '辅助服务安装未完成，请查看输出' : '辅助服务卸载未完成，请查看输出', 'error')
 }
 </script>
 
@@ -210,7 +217,5 @@ function uninstall() {
       </div>
     </div>
     </div>
-
-    <ConfirmDialog />
   </div>
 </template>

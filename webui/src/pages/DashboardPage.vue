@@ -620,7 +620,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
         <svg
           class="arc-svg"
           :viewBox="`0 0 ${arcViewBox.width} ${arcViewBox.height}`"
-          preserveAspectRatio="none"
+          preserveAspectRatio="xMidYMid meet"
           aria-hidden="true"
         >
           <path
@@ -816,9 +816,11 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 
 .arc-stage {
   position: relative;
-  height: 350px;
+  aspect-ratio: 760 / 360;
+  flex: 0 0 auto;
+  height: auto;
   margin: -0.35rem auto 0;
-  width: min(100%, 780px);
+  width: min(100%, 760px);
 }
 
 .arc-svg {

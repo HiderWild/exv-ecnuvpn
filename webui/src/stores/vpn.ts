@@ -86,6 +86,10 @@ export interface ConnectionProgressStage {
   description: string
 }
 
+type ServiceChangeOptions = {
+  disconnectFirst?: boolean
+}
+
 export type VpnErrorType =
   | 'elevation_required'
   | 'elevation_cancelled'
@@ -617,6 +621,38 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
+  async function ensureDisconnectedForServiceChange(options: ServiceChangeOptions = {}) {
+    if (!status.value?.connected) return true
+    if (!options.disconnectFirst) {
+      setError({
+        ok: false,
+        error_type: 'native_failure',
+        message: 'VPN 连接已建立，请先断开连接再变更 helper 服务。',
+        recoverable: true,
+        recommended_action: 'disconnect_first',
+        timestamp: Date.now(),
+      })
+      return false
+    }
+
+    if (currentSessionMode.value === 'helper') {
+      await disconnect()
+    } else {
+      await disconnectElevated()
+    }
+    await fetchStatus()
+    if (!status.value?.connected) return true
+    setError({
+      ok: false,
+      error_type: 'native_failure',
+      message: '变更 helper 服务前未能断开 VPN 连接。',
+      recoverable: true,
+      recommended_action: 'disconnect_first',
+      timestamp: Date.now(),
+    })
+    return false
+  }
+
   async function fetchRoutes() {
     try {
       const { data } = await api.get<RouteEntry[]>('/routes')
@@ -659,7 +695,8 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
-  async function installService() {
+  async function installService(options: ServiceChangeOptions = {}) {
+    if (!await ensureDisconnectedForServiceChange(options)) return false
     serviceBusy.value = true
     serviceOperation.value = 'install'
     serviceProgress.value = []
@@ -682,7 +719,8 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
-  async function uninstallService() {
+  async function uninstallService(options: ServiceChangeOptions = {}) {
+    if (!await ensureDisconnectedForServiceChange(options)) return false
     serviceBusy.value = true
     serviceOperation.value = 'uninstall'
     serviceProgress.value = []

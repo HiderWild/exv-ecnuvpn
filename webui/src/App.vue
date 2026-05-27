@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 import NavBar from './components/NavBar.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import ToastStack from './components/Toast.vue'
 </script>
 
@@ -12,6 +13,7 @@ import ToastStack from './components/Toast.vue'
         <RouterView />
       </div>
     </main>
+    <ConfirmDialog />
     <ToastStack />
   </div>
 </template>
