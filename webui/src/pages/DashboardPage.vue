@@ -675,13 +675,13 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
             <button
               :disabled="vpn.loading || vpn.serviceBusy"
               :class="[
-                'relative z-10 grid h-20 w-20 place-items-center rounded-full shadow-2xl transition-all duration-500 disabled:cursor-not-allowed disabled:opacity-95',
+                'relative z-10 grid h-40 w-40 place-items-center rounded-full shadow-2xl transition-all duration-500 disabled:cursor-not-allowed disabled:opacity-95',
                 powerButtonClass,
               ]"
               :title="powerButtonLabel"
               @click="handlePowerClick"
             >
-              <Power class="h-9 w-9" />
+              <Power class="h-16 w-16" />
             </button>
           </div>
           <div class="text-center">
@@ -881,14 +881,14 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   position: relative;
   display: flex;
   justify-content: center;
-  margin-top: -7.5rem;
+  margin-top: -15rem;
   transform: translateY(0);
   transition: transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform;
 }
 
 .control-zone.is-lifted {
-  transform: translateY(-0.65rem);
+  transform: translateY(-1.15rem);
 }
 
 .control-center {
@@ -951,8 +951,8 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   position: relative;
   display: grid;
   place-items: center;
-  width: 7rem;
-  height: 7rem;
+  width: 14rem;
+  height: 14rem;
 }
 
 .power-ripple-ring {

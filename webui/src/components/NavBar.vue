@@ -9,6 +9,7 @@ import { useVpnStore } from '../stores/vpn'
 const router = useRouter()
 const route = useRoute()
 const vpn = useVpnStore()
+const showSidebarStatusDetails = computed(() => Boolean(vpn.status?.connected))
 
 const navItems = [
   { path: '/', name: '主面板', icon: LayoutDashboard },
@@ -103,8 +104,13 @@ const sidebarStatusItems = computed(() => [
     </div>
 
     <div class="hidden px-3 pb-4 lg:block">
-      <div class="space-y-3 border-t border-border pt-3">
-        <div class="space-y-2">
+      <div
+        :class="[
+          'space-y-3',
+          showSidebarStatusDetails ? 'border-t border-border pt-3' : '',
+        ]"
+      >
+        <div v-if="showSidebarStatusDetails" class="space-y-2">
           <div
             v-for="item in sidebarStatusItems"
             :key="item.label"

@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useConfigStore, type AuthConfig } from '../stores/config'
-import { Shield, User, Key, Fingerprint } from 'lucide-vue-next'
+import { Shield, User, Key, Fingerprint, Server } from 'lucide-vue-next'
 
 const config = useConfigStore()
 
 const saving = ref(false)
 const message = ref<{ type: 'success' | 'error'; text: string } | null>(null)
+const serverOptions = [
+  'vpn-ct.ecnu.edu.cn',
+  'vpn-cn.ecnu.edu.cn',
+  'vpn-lt.ecnu.edu.cn',
+]
+const serverChoice = ref(serverOptions[0])
+const customServer = ref('')
 
 const form = ref<AuthConfig>({
   server: '',
@@ -25,7 +32,25 @@ onMounted(async () => {
     ...config.authConfig,
     password: '',
   }
+  if (serverOptions.includes(form.value.server)) {
+    serverChoice.value = form.value.server
+    customServer.value = ''
+  } else if (form.value.server) {
+    serverChoice.value = 'custom'
+    customServer.value = form.value.server
+  } else {
+    serverChoice.value = serverOptions[0]
+  }
 })
+
+watch(
+  () => form.value.remember_password,
+  (remember) => {
+    if (!remember) {
+      form.value.password = ''
+    }
+  },
+)
 
 const passwordPlaceholder = computed(() =>
   form.value.password_stored
@@ -46,6 +71,12 @@ async function save() {
   saving.value = true
   message.value = null
   try {
+    form.value.server = serverChoice.value === 'custom'
+      ? customServer.value.trim()
+      : serverChoice.value
+    if (!form.value.remember_password) {
+      form.value.password = ''
+    }
     // Always send the form values; the backend treats an empty password as
     // "keep the existing one" and an empty user_agent as "no change".
     await config.saveAuthConfig(form.value)
@@ -72,14 +103,32 @@ async function save() {
         <!-- Server -->
         <div>
           <label class="block text-sm text-muted mb-1.5">VPN 服务器</label>
-          <div class="relative">
-            <User class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
-            <input
-              v-model="form.server"
-              type="text"
-              placeholder="vpn.ecnu.edu.cn"
-              class="w-full bg-background border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
-            />
+          <div class="space-y-2">
+            <div class="relative">
+              <Server class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
+              <select
+                v-model="serverChoice"
+                class="w-full appearance-none bg-background border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
+              >
+                <option
+                  v-for="server in serverOptions"
+                  :key="server"
+                  :value="server"
+                >
+                  {{ server }}
+                </option>
+                <option value="custom">自定义</option>
+              </select>
+            </div>
+            <div v-if="serverChoice === 'custom'" class="relative">
+              <Server class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
+              <input
+                v-model="customServer"
+                type="text"
+                placeholder="请输入 VPN 服务器地址"
+                class="w-full bg-background border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
+              />
+            </div>
           </div>
         </div>
 
@@ -98,7 +147,7 @@ async function save() {
         </div>
 
         <!-- Password -->
-        <div>
+        <div v-if="form.remember_password">
           <label class="block text-sm text-muted mb-1.5">密码</label>
           <div class="relative">
             <Key class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
@@ -130,7 +179,7 @@ async function save() {
 
         <!-- User Agent -->
         <div>
-          <label class="block text-sm text-muted mb-1.5">客户端伪装</label>
+          <label class="block text-sm text-muted mb-1.5">客户端标识</label>
           <div class="relative">
             <Fingerprint class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
             <input
