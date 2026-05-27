@@ -317,8 +317,12 @@ void reap_finished_request_handlers() {
   platform::reap_children();
 }
 
-nlohmann::json make_error(const std::string &message) {
-  return nlohmann::json{{"ok", false}, {"message", message}};
+nlohmann::json make_error(const std::string &message,
+                          const std::string &code = std::string()) {
+  nlohmann::json result{{"ok", false}, {"message", message}};
+  if (!code.empty())
+    result["code"] = code;
+  return result;
 }
 
 nlohmann::json make_helper_capabilities() {
@@ -641,6 +645,11 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
     daemon_stop_requested = 1;
   }
   timing.finish(false, "reason=worker_failed");
+  if (status == vpn::kVpnInitialConnectFailedExitCode) {
+    logger::warn("Initial VPN connection failed before network was ready");
+    return make_error("VPN authentication failed or the server rejected the connection.",
+                      "auth_failed");
+  }
   return make_error("Failed to establish the VPN connection. Check logs with: exv logs");
 }
 

@@ -17,6 +17,7 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -431,7 +432,11 @@ int spawn_worker_process(const std::string &executable_path,
       break;
     }
   }
-  return status;
+  if (status < 0)
+    return -1;
+  if (WIFEXITED(status))
+    return WEXITSTATUS(status);
+  return 1;
 }
 
 void terminate_process(int pid) {

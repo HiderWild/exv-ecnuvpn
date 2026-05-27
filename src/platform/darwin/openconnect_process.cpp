@@ -25,6 +25,7 @@ std::string build_openconnect_command(const Config &cfg,
       << " --useragent " << utils::shell_quote(cfg.useragent)
       << " -m " << cfg.mtu << " -u " << utils::shell_quote(cfg.username)
       << " --passwd-on-stdin"
+      << " --non-inter"
       << " --script " << utils::shell_quote(utils::get_tunnel_path());
 
   if (cfg.disable_dtls) {

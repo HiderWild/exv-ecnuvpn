@@ -76,7 +76,7 @@ int spawn_worker_process(const std::string &executable_path,
   DWORD exitCode = 1;
   GetExitCodeProcess(pi.hProcess, &exitCode);
   CloseHandle(pi.hProcess);
-  return (exitCode == 0) ? 0 : 1;
+  return static_cast<int>(exitCode);
 }
 
 void terminate_process(int pid) {

@@ -7,6 +7,8 @@
 namespace ecnuvpn {
 namespace vpn {
 
+inline constexpr int kVpnInitialConnectFailedExitCode = 2;
+
 struct RuntimeStatusSnapshot {
     bool running = false;
     int pid = -1;

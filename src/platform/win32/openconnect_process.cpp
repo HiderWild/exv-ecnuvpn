@@ -88,6 +88,7 @@ std::string build_openconnect_command_line(const Config &cfg) {
   args.push_back("-u");
   args.push_back(cfg.username);
   args.push_back("--passwd-on-stdin");
+  args.push_back("--non-inter");
   args.push_back("--script");
   args.push_back(windows_openconnect_script_command());
   std::string interface_name = select_windows_interface_name(cfg);

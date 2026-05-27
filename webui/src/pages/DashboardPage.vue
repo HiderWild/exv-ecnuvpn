@@ -145,6 +145,13 @@ const errorDisplayInfo = computed(() => {
         description: vpn.lastError || '请检查服务器、用户名和密码设置。',
         color: 'warning' as const,
       }
+    case 'auth_failed':
+      return {
+        icon: AlertTriangle,
+        title: '密码错误',
+        description: vpn.lastError || 'VPN 认证失败，请重新输入密码。',
+        color: 'warning' as const,
+      }
     case 'native_failure':
     case 'parse_failure':
       return {
@@ -884,8 +891,8 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
     -1.45rem 0 0 -0.28rem rgba(245, 158, 11, 0.25);
 }
 
-.arc-node.stage-active::before,
-.arc-node.stage-active::after {
+.arc-node::before,
+.arc-node::after {
   content: '';
   position: absolute;
   inset: 0.18rem;
@@ -893,20 +900,40 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   pointer-events: none;
 }
 
-.arc-node.stage-active::before {
+.arc-node::before {
   z-index: -1;
-  border: 1px solid rgba(245, 158, 11, 0.48);
-  background: rgba(245, 158, 11, 0.12);
-  box-shadow: inset 0 0 1rem rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  background: transparent;
+  box-shadow: none;
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.arc-node::after {
+  z-index: -2;
+  background: transparent;
+  filter: blur(9px);
+  opacity: 0;
+  transform: translateZ(0) scale(0.92);
+  transition: opacity 180ms ease, background 180ms ease;
+  will-change: opacity, transform;
+}
+
+.arc-node.node-success::before {
+  border-color: rgba(34, 197, 94, 0.68);
+  box-shadow: 0 0 0.65rem rgba(34, 197, 94, 0.16);
+}
+
+.arc-node.stage-active::before {
+  border-color: rgba(245, 158, 11, 0.72);
+  background: rgba(245, 158, 11, 0.14);
+  box-shadow:
+    inset 0 0 1rem rgba(245, 158, 11, 0.13),
+    0 0 1rem rgba(245, 158, 11, 0.24);
 }
 
 .arc-node.stage-active::after {
-  z-index: -2;
   background: rgba(245, 158, 11, 0.34);
-  filter: blur(9px);
-  opacity: 0.58;
-  transform: translateZ(0) scale(0.92);
-  will-change: opacity, transform;
+  opacity: 0.52;
 }
 
 .control-zone {
@@ -1212,55 +1239,29 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 .node-icon-shell {
   position: relative;
   display: grid;
-  width: 3.35rem;
-  height: 3.35rem;
+  width: 2.9rem;
+  height: 2.9rem;
   place-items: center;
   flex: 0 0 auto;
-  border-radius: 9999px;
-  border: 1px solid color-mix(in srgb, currentColor 38%, rgba(255, 255, 255, 0.18));
-  background:
-    radial-gradient(circle at 30% 22%, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.1) 24%, transparent 45%),
-    linear-gradient(145deg, color-mix(in srgb, currentColor 24%, #172033), color-mix(in srgb, currentColor 7%, #0b1220 92%));
-  box-shadow:
-    0 0.9rem 1.4rem rgba(0, 0, 0, 0.26),
-    0 0.22rem 0.42rem rgba(0, 0, 0, 0.18),
-    inset 0 0.32rem 0.45rem rgba(255, 255, 255, 0.18),
-    inset 0 -0.55rem 0.85rem rgba(0, 0, 0, 0.24),
-    0 0 0.75rem color-mix(in srgb, currentColor 20%, transparent);
-  transform: translateY(-0.08rem) rotateX(8deg);
+  transform: translateY(-0.04rem);
 }
 
 .node-icon-shell::before {
-  content: '';
-  position: absolute;
-  inset: 0.34rem 0.45rem auto;
-  height: 0.74rem;
-  border-radius: 9999px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.46), rgba(255, 255, 255, 0));
-  opacity: 0.8;
-  pointer-events: none;
+  display: none;
 }
 
 .node-icon-shell::after {
-  content: '';
-  position: absolute;
-  inset: auto 0.45rem 0.26rem;
-  height: 0.36rem;
-  border-radius: 9999px;
-  background: rgba(0, 0, 0, 0.24);
-  filter: blur(5px);
-  opacity: 0.7;
-  pointer-events: none;
+  display: none;
 }
 
 .node-icon {
   position: relative;
   z-index: 1;
-  width: 1.78rem;
-  height: 1.78rem;
+  width: 2.05rem;
+  height: 2.05rem;
   stroke-width: 2.25;
   color: currentColor;
-  filter: drop-shadow(0 0.12rem 0.16rem rgba(0, 0, 0, 0.4));
+  filter: drop-shadow(0 0.16rem 0.22rem rgba(0, 0, 0, 0.38));
 }
 
 .node-title {

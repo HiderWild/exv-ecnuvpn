@@ -98,6 +98,7 @@ export type VpnErrorType =
   | 'runtime_missing'
   | 'config_invalid'
   | 'service_missing'
+  | 'auth_failed'
   | 'native_failure'
   | 'parse_failure'
   | 'unknown_action'
@@ -149,6 +150,15 @@ function isElevationCancelledMessage(message: string) {
     message.includes('(-128)')
 }
 
+function isAuthFailureMessage(message: string) {
+  const normalized = message.toLowerCase()
+  return normalized.includes('auth_failed') ||
+    normalized.includes('login failed') ||
+    normalized.includes('authentication failed') ||
+    normalized.includes('invalid password') ||
+    normalized.includes('password is incorrect')
+}
+
 export function normalizeError(raw: unknown): VpnError {
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
@@ -160,6 +170,16 @@ export function normalizeError(raw: unknown): VpnError {
         recoverable: obj.recoverable !== undefined ? !!obj.recoverable : true,
         recommended_action: String(obj.recommended_action || ''),
         timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : undefined,
+      }
+    }
+    if (typeof obj.code === 'string' && obj.code === 'auth_failed') {
+      return {
+        ok: false,
+        error_type: 'auth_failed',
+        message: String(obj.message || obj.error || 'VPN authentication failed. Please check your password.'),
+        recoverable: true,
+        recommended_action: 'retry_password',
+        timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
       }
     }
     if (obj.ok === false && obj.message) {
@@ -182,6 +202,16 @@ export function normalizeError(raw: unknown): VpnError {
       message: '提权失败：用户已取消授权。',
       recoverable: true,
       recommended_action: '',
+      timestamp: Date.now(),
+    }
+  }
+  if (isAuthFailureMessage(message)) {
+    return {
+      ok: false,
+      error_type: 'auth_failed',
+      message: 'VPN 密码错误，请重新输入密码。',
+      recoverable: true,
+      recommended_action: 'retry_password',
       timestamp: Date.now(),
     }
   }
@@ -387,6 +417,8 @@ export const useVpnStore = defineStore('vpn', () => {
         return { label: '安装服务', action: () => installService(), variant: 'primary' }
       case 'config_invalid':
         return { label: '前往设置', action: () => {}, variant: 'primary' }
+      case 'auth_failed':
+        return { label: '重新输入密码', action: () => retryLastAction(), variant: 'primary' }
       case 'native_failure':
       case 'parse_failure':
         return { label: '重试', action: () => retryLastAction(), variant: 'primary' }
@@ -505,18 +537,37 @@ export const useVpnStore = defineStore('vpn', () => {
     await Promise.allSettled([fetchStatus(), fetchServiceStatus()])
   }
 
-  async function resolveConnectPassword() {
+  function buildPasswordPromptMessage(prefix = '') {
+    const auth = config.authConfig
+    const username = auth.username || status.value?.username
+    const base = username ? `请输入用户 ${username} 的密码` : '请输入 VPN 密码'
+    return prefix ? `${prefix}${base}` : base
+  }
+
+  async function resolveConnectPassword(messagePrefix = ''): Promise<string | undefined | null> {
     await config.fetchAuthConfig()
     const auth = config.authConfig
     if (auth.remember_password && auth.password_stored) return undefined
 
-    const username = auth.username || status.value?.username
-    const message = username ? `请输入用户 ${username} 的密码` : '请输入 VPN 密码'
-    return ui.requestPassword(message)
+    return ui.requestPassword(buildPasswordPromptMessage(messagePrefix))
   }
 
-  async function connect() {
-    const password = await resolveConnectPassword()
+  async function retryConnectAfterAuthFailure(mode: 'helper' | 'elevated'): Promise<boolean> {
+    await config.fetchAuthConfig()
+    if (config.authConfig.remember_password && config.authConfig.password_stored) return false
+
+    const password = await ui.requestPassword(
+      buildPasswordPromptMessage('密码不正确，请重新输入。'),
+    )
+    if (password === null) return false
+    clearError()
+    return mode === 'helper' ? connect(password) : connectElevated(password)
+  }
+
+  async function connect(providedPassword?: string): Promise<boolean> {
+    const password = providedPassword !== undefined
+      ? providedPassword
+      : await resolveConnectPassword()
     if (password === null) return false
 
     loading.value = true
@@ -525,6 +576,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastMutatingAction.value = connect
     connectInFlight.value = true
     startConnectionProgress(2)
+    let authFailed = false
     try {
       const { data } = await api.post<VpnStatus>(
         '/connect',
@@ -534,13 +586,17 @@ export const useVpnStore = defineStore('vpn', () => {
       await fetchAppShellState()
       return true
     } catch (error) {
-      setError(normalizeError(error))
-      return false
+      const normalized = normalizeError(error)
+      authFailed = normalized.error_type === 'auth_failed'
+      setError(normalized)
     } finally {
       connectInFlight.value = false
       stopConnectionProgress()
       loading.value = false
     }
+
+    if (authFailed) return retryConnectAfterAuthFailure('helper')
+    return false
   }
 
   async function disconnect() {
@@ -561,8 +617,10 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
-  async function connectElevated() {
-    const password = await resolveConnectPassword()
+  async function connectElevated(providedPassword?: string): Promise<boolean> {
+    const password = providedPassword !== undefined
+      ? providedPassword
+      : await resolveConnectPassword()
     if (password === null) return false
 
     loading.value = true
@@ -571,14 +629,15 @@ export const useVpnStore = defineStore('vpn', () => {
     lastMutatingAction.value = connectElevated
     connectInFlight.value = true
     startConnectionProgress()
+    let authFailed = false
     try {
       const { data } = await api.post<VpnStatus | VpnError>(
         '/connect/elevated',
         password === undefined ? undefined : { password },
       )
       if (isVpnError(data)) {
+        authFailed = data.error_type === 'auth_failed'
         setError(data)
-        return false
       } else {
         const elevatedStatus = { ...data, mode: data.mode ?? 'elevated' }
         applyStatus(elevatedStatus)
@@ -590,14 +649,18 @@ export const useVpnStore = defineStore('vpn', () => {
         return true
       }
     } catch (error) {
-      setError(normalizeError(error))
-      return false
+      const normalized = normalizeError(error)
+      authFailed = normalized.error_type === 'auth_failed'
+      setError(normalized)
     } finally {
       lastActionWasElevatedConnect.value = false
       connectInFlight.value = false
       stopConnectionProgress()
       loading.value = false
     }
+
+    if (authFailed) return retryConnectAfterAuthFailure('elevated')
+    return false
   }
 
   async function connectFromDashboard(installServiceFirst: boolean) {

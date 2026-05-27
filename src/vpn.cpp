@@ -82,6 +82,59 @@ private:
   bool finished_ = false;
 };
 
+class ConnectionDiagnostics {
+public:
+  explicit ConnectionDiagnostics(std::string scope) : scope_(std::move(scope)) {}
+
+  void event(const std::string &name, const std::string &detail = "") {
+    std::string item = name;
+    if (!detail.empty())
+      item += "(" + detail + ")";
+    events_.push_back(item);
+    if (events_.size() > 24)
+      events_.erase(events_.begin());
+  }
+
+  void mark_route_ready(const std::string &interface_name,
+                        const std::string &internal_ip) {
+    route_ready_ = true;
+    event("route_ready", interface_name + "," + internal_ip);
+  }
+
+  void mark_process_exited_before_ready() {
+    process_exited_before_ready_ = true;
+    event("openconnect_exited_before_route_ready");
+  }
+
+  bool initial_connection_failed() const {
+    return process_exited_before_ready_ && !route_ready_;
+  }
+
+  void flush_summary(bool ok) const {
+    std::string summary = "[connect-diagnostics] scope=" + scope_ +
+                          " result=" + (ok ? "ok" : "failed") +
+                          " route_ready=" + (route_ready_ ? "true" : "false") +
+                          " process_exited_before_ready=" +
+                          (process_exited_before_ready_ ? "true" : "false") +
+                          " events=";
+    for (std::size_t i = 0; i < events_.size(); ++i) {
+      if (i)
+        summary += ">";
+      summary += events_[i];
+    }
+    if (ok)
+      logger::info(summary);
+    else
+      logger::warn(summary);
+  }
+
+private:
+  std::string scope_;
+  std::vector<std::string> events_;
+  bool route_ready_ = false;
+  bool process_exited_before_ready_ = false;
+};
+
 static void write_pid_file(const std::string &path, pid_t pid) {
   std::ofstream ofs(path);
   if (ofs.is_open()) {
@@ -664,6 +717,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   pid_t supervisor_pid = -1;
 
   if (!use_supervisor) {
+    ConnectionDiagnostics diagnostics("vpn.start.direct");
     pid_t child_pid = -1;
     platform::OpenconnectProcess child_process;
     if (!platform::spawn_openconnect_process(cfg, plaintext_password,
@@ -674,6 +728,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
       return 1;
     }
     child_pid = static_cast<pid_t>(child_process.pid);
+    diagnostics.event("spawn_openconnect", "pid=" + std::to_string(child_pid));
     timing.mark("spawn_openconnect", "pid=" + std::to_string(child_pid));
 #ifdef _WIN32
     platform::close_openconnect_process(&child_process);
@@ -700,21 +755,28 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
           tunnel::configure_from_runtime_log(cfg)) {
         log_fallback_configured = true;
         route_ready = read_route_ready(&vpn_interface, &internal_ip);
+        diagnostics.event("route_log_fallback",
+                          route_ready ? "ready" : "pending");
         timing.mark("route_log_fallback",
                     route_ready ? "result=ready" : "result=pending");
       }
 #endif
 
       if (vpn_pid > 0 && !is_process_alive(vpn_pid)) {
+        diagnostics.mark_process_exited_before_ready();
+        diagnostics.flush_summary(false);
         clear_runtime_state();
         utils::print_error("Failed to establish the VPN connection.");
         utils::print_info("Check logs with: exv logs");
         logger::error("openconnect exited before initial connection was established");
         timing.finish(false, "reason=openconnect_exited_before_ready");
-        return 1;
+        return diagnostics.initial_connection_failed()
+                   ? kVpnInitialConnectFailedExitCode
+                   : 1;
       }
 
       if (vpn_pid > 0 && is_process_alive(vpn_pid) && route_ready) {
+        diagnostics.mark_route_ready(vpn_interface, internal_ip);
         timing.mark("route_ready",
                     "pid=" + std::to_string(vpn_pid) + " interface=" +
                         vpn_interface + " internal_ip=" + internal_ip);
@@ -745,6 +807,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
 #endif
       logger::info("VPN started, PID: " + std::to_string(vpn_pid));
       timing.finish(true, "pid=" + std::to_string(vpn_pid));
+      diagnostics.flush_summary(true);
       return 0;
     }
 
@@ -756,6 +819,8 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
     clear_runtime_state();
     logger::error("VPN start aborted because route-ready marker was not detected");
     timing.finish(false, "reason=route_ready_timeout");
+    diagnostics.event("route_ready_timeout");
+    diagnostics.flush_summary(false);
     return 1;
   }
 
