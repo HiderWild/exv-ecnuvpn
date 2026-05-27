@@ -10,17 +10,15 @@ const router = createRouter({
     },
     {
       path: '/auth',
-      name: 'auth',
-      component: () => import('../pages/AuthPage.vue'),
+      redirect: { path: '/settings', query: { section: 'auth' } },
     },
     {
       path: '/routes',
-      name: 'routes',
-      component: () => import('../pages/RoutesPage.vue'),
+      redirect: { path: '/settings', query: { section: 'routes' } },
     },
     {
       path: '/service',
-      redirect: '/settings',
+      redirect: { path: '/settings', query: { section: 'system' } },
     },
     {
       path: '/logs',

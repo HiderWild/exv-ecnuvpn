@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  LayoutDashboard, Key, Route, Settings, FileText
+  LayoutDashboard, Settings, FileText
 } from 'lucide-vue-next'
 import { useVpnStore } from '../stores/vpn'
 
@@ -13,10 +13,8 @@ const showSidebarStatusDetails = computed(() => Boolean(vpn.status?.connected))
 
 const navItems = [
   { path: '/', name: '主面板', icon: LayoutDashboard },
-  { path: '/auth', name: '认证', icon: Key },
-  { path: '/routes', name: '路由', icon: Route },
-  { path: '/logs', name: '日志', icon: FileText },
   { path: '/settings', name: '设置', icon: Settings },
+  { path: '/logs', name: '日志', icon: FileText },
 ]
 
 function isActive(path: string) {
@@ -49,13 +47,11 @@ const connectionState = computed(() => {
   if (vpn.connectInFlight || vpn.serviceBusy) return { label: '连接中', tone: 'warning' }
   if (vpn.lastError) return { label: '需要处理', tone: 'warning' }
   if (!vpn.status?.connected) return { label: '未连接', tone: 'muted' }
+  return { label: '已连接', tone: 'accent' }
+})
 
-  switch (vpn.currentSessionMode) {
-    case 'helper': return { label: '通过服务', tone: 'accent' }
-    case 'elevated': return { label: '临时提权', tone: 'accent' }
-    case 'direct': return { label: '直接连接', tone: 'accent' }
-    default: return { label: '已连接', tone: 'accent' }
-  }
+const connectionMethodLabel = computed(() => {
+  return vpn.currentSessionMode === 'helper' ? '服务' : '单次连接'
 })
 
 const sidebarStatusItems = computed(() => [
@@ -64,6 +60,7 @@ const sidebarStatusItems = computed(() => [
   { label: '代理 TUN', value: proxyTunLabel.value },
   { label: '内网地址', value: vpn.status?.internal_ip || '--' },
   { label: 'VPN 服务器', value: vpn.status?.server || '--' },
+  { label: '连接方式', value: connectionMethodLabel.value },
 ])
 </script>
 
