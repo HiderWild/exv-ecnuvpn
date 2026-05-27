@@ -437,6 +437,12 @@ const arcSegments = computed(() => {
 const readySegmentKeys = computed(() => {
   const ready = new Set<string>()
   if (internetPathReady.value) {
+    if (hasUpstreamVirtual.value) {
+      ready.add(showExvAdapter.value ? 'upstream-physical' : 'traffic-upstream')
+      ready.add('upstream-physical')
+    } else if (!showExvAdapter.value) {
+      ready.add('traffic-physical')
+    }
     ready.add('physical-internet')
   }
   if (vpnServerStageComplete.value) {
@@ -582,6 +588,14 @@ function nodeReady(nodeKey: string) {
     return from === nodeKey || to === nodeKey
   })
 }
+
+function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[] }) {
+  if (nodeActive(node) || (node.key === 'exv' && node.tone === 'warning')) return 'node-warning'
+  if (nodeReady(node.key) || node.tone === 'accent') return 'node-success'
+  if (node.tone === 'warning') return 'node-warning'
+  if (node.tone === 'muted') return 'node-muted'
+  return ''
+}
 </script>
 
 <template>
@@ -643,6 +657,7 @@ function nodeReady(nodeKey: string) {
             'arc-node',
             nodeReady(node.key) ? 'node-ready' : '',
             nodeActive(node) ? 'stage-active' : '',
+            nodeVisualClass(node),
           ]"
           :style="node.style"
         >
@@ -879,13 +894,25 @@ function nodeReady(nodeKey: string) {
   z-index: 2;
 }
 
-.arc-node.node-ready {
-  color: rgb(34 197 94);
+.arc-node.node-success .node-icon,
+.arc-node.node-success .node-title {
+  color: rgb(134 239 172);
 }
 
-.arc-node.node-ready .node-title,
-.arc-node.node-ready .node-caption {
-  color: rgb(134 239 172);
+.arc-node.node-warning .node-icon,
+.arc-node.node-warning .node-title {
+  color: rgb(251 191 36);
+}
+
+.arc-node.node-muted .node-icon,
+.arc-node.node-muted .node-title {
+  color: rgb(148 163 184);
+}
+
+.arc-node.node-warning .photon {
+  background: rgb(245 158 11);
+  box-shadow: -0.8rem 0 0 -0.18rem rgba(245, 158, 11, 0.55),
+    -1.45rem 0 0 -0.28rem rgba(245, 158, 11, 0.25);
 }
 
 .arc-node.stage-active::before,
