@@ -19,10 +19,12 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -47,6 +49,51 @@ bool helper_unavailable(const nlohmann::json &response) {
   return json_string(response, "code") == platform::kHelperUnavailableCode ||
          json_string(response, "message") == "Helper daemon not available";
 }
+
+class StageTimer {
+public:
+  explicit StageTimer(std::string scope)
+      : scope_(std::move(scope)), started_(Clock::now()), last_(started_) {
+    logger::info("[connect-timing] scope=" + scope_ +
+                 " stage=begin delta_ms=0 total_ms=0");
+  }
+
+  void mark(const std::string &stage, const std::string &detail = "") {
+    auto now = Clock::now();
+    long long delta_ms = elapsed_ms(last_, now);
+    long long total_ms = elapsed_ms(started_, now);
+    last_ = now;
+
+    std::string message = "[connect-timing] scope=" + scope_ +
+                          " stage=" + stage +
+                          " delta_ms=" + std::to_string(delta_ms) +
+                          " total_ms=" + std::to_string(total_ms);
+    if (!detail.empty())
+      message += " " + detail;
+    logger::info(message);
+  }
+
+  void finish(bool ok, const std::string &detail = "") {
+    if (finished_)
+      return;
+    finished_ = true;
+    mark(ok ? "finish.ok" : "finish.error", detail);
+  }
+
+private:
+  using Clock = std::chrono::steady_clock;
+
+  static long long elapsed_ms(const Clock::time_point &from,
+                              const Clock::time_point &to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
+        .count();
+  }
+
+  std::string scope_;
+  Clock::time_point started_;
+  Clock::time_point last_;
+  bool finished_ = false;
+};
 
 bool json_bool(const nlohmann::json &object, const char *key, bool fallback) {
   if (!object.is_object() || !object.contains(key) || object[key].is_null())
@@ -406,6 +453,7 @@ nlohmann::json handle_action(const std::string &action,
     }
 
     if (action == "vpn.connect") {
+      StageTimer timing("desktop.connect");
       std::string password = payload.value("password", std::string());
       bool allow_direct_fallback =
           payload.value("allow_direct_fallback", false);
@@ -414,13 +462,28 @@ nlohmann::json handle_action(const std::string &action,
         if (!key.empty())
           password = crypto::decrypt(cfg.password, key);
       }
+      timing.mark("password_resolved",
+                  password.empty() ? "source=missing" : "source=available");
       nlohmann::json preflight =
           preflight_connect(cfg, password, allow_direct_fallback);
-      if (preflight.is_object() && preflight.value("ok", true) == false)
+      if (preflight.is_object() && preflight.value("ok", true) == false) {
+        timing.finish(false, "stage=preflight error=" +
+                                 json_string(preflight, "error"));
         return preflight;
+      }
+      timing.mark("preflight", "result=ok allow_direct_fallback=" +
+                                   std::string(allow_direct_fallback ? "true"
+                                                                     : "false"));
 
-      if (allow_direct_fallback && !helper::is_available()) {
+      bool helper_available = helper::is_available();
+      timing.mark("helper_availability",
+                  helper_available ? "available=true" : "available=false");
+
+      if (allow_direct_fallback && !helper_available) {
         nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
+        timing.mark("direct_fallback_status",
+                    json_bool(fallback, "_running", false) ? "running=true"
+                                                           : "running=false");
         if (json_bool(fallback, "_snapshot", false) &&
             json_bool(fallback, "_running", false)) {
           nlohmann::json status = frontend_status_from_snapshot_json(
@@ -429,11 +492,12 @@ nlohmann::json handle_action(const std::string &action,
                   : nlohmann::json::object(),
               cfg);
           status["mode"] = "elevated";
+          timing.finish(true, "mode=elevated existing=true");
           return status;
         }
       }
 
-      if (!helper::is_available() && allow_direct_fallback) {
+      if (!helper_available && allow_direct_fallback) {
         platform::BackendResolveOptions options;
         options.preferred_mode = "oneshot";
         options.helper_path = helper_binary_next_to_exv();
@@ -441,6 +505,8 @@ nlohmann::json handle_action(const std::string &action,
         options.allow_service_start = false;
         options.start_oneshot = true;
         nlohmann::json backend = platform::resolve_backend(options);
+        timing.mark("oneshot_backend",
+                    backend.value("ok", false) ? "result=ok" : "result=failed");
         if (backend.value("ok", false)) {
           platform::HelperEndpoint endpoint{
               backend.value("endpoint", std::string()),
@@ -454,17 +520,27 @@ nlohmann::json handle_action(const std::string &action,
                                        {"retry_limit", 0},
                                        {"home", utils::get_effective_home()},
                                        {"config_dir", utils::get_config_dir()}};
-                add_desktop_owner_context(request);
-                return request;
-              }());
+                 add_desktop_owner_context(request);
+                 return request;
+               }());
+          timing.mark("oneshot_helper_request",
+                      helper_resp.value("ok", false) ? "result=ok"
+                                                     : "result=failed");
           if (!helper_resp.value("ok", false)) {
+            timing.finish(false, "stage=oneshot_helper_request");
             return helper_error(helper_resp, "Failed to start VPN");
           }
           nlohmann::json status = frontend_status_from_helper(helper_resp, cfg);
           status["mode"] = "elevated";
           status["backend"] = backend;
+          timing.finish(true,
+                        "mode=elevated network_ready=" +
+                            std::string(status.value("network_ready", false)
+                                            ? "true"
+                                            : "false"));
           return status;
         }
+        timing.finish(false, "stage=oneshot_backend");
         return platform::backend_unavailable_error(
             backend, "Failed to start one-shot helper.");
       }
@@ -477,10 +553,20 @@ nlohmann::json handle_action(const std::string &action,
                                    {"config_dir", utils::get_config_dir()}};
       add_desktop_owner_context(start_request);
       auto helper_resp = platform::send_helper_request(start_request);
+      timing.mark("service_helper_request",
+                  helper_resp.value("ok", false) ? "result=ok"
+                                                 : "result=failed");
       if (!helper_resp.value("ok", false)) {
+        timing.finish(false, "stage=service_helper_request");
         return helper_error(helper_resp, "Failed to start VPN");
       }
-      return frontend_status_from_helper(helper_resp, cfg);
+      nlohmann::json status = frontend_status_from_helper(helper_resp, cfg);
+      timing.finish(true,
+                    "mode=helper network_ready=" +
+                        std::string(status.value("network_ready", false)
+                                        ? "true"
+                                        : "false"));
+      return status;
     }
 
     if (action == "vpn.disconnect") {

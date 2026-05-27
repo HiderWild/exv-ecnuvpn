@@ -188,6 +188,7 @@ int run_script_hook() {
                                      config_dir ? config_dir : "");
   }
 #endif
+  logger::init();
   Config cfg = config::load();
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
   return platform::run_tunnel_script(context);
