@@ -2,9 +2,11 @@
 
 #include "vpn_engine/protocol/tls_stream.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -103,7 +105,16 @@ private:
   std::vector<std::uint8_t> encrypted_buffer_;
   bool api_started_ = false;
   bool connected_ = false;
-  bool closed_ = false;
+  std::atomic<bool> closed_{false};
+
+  // Serializes inbound read_some() decrypt/teardown against close() so the
+  // Schannel context and socket are never destroyed while the reader thread is
+  // mid-DecryptMessage. The blocking recv() in read_some() runs OUTSIDE this
+  // lock; close() unblocks it by closing the socket. write_all() runs on the
+  // same thread as close() in the full-duplex session, and Schannel permits a
+  // concurrent encrypt (writer) with a decrypt (reader) on one context, so the
+  // writer does not take this lock across its blocking send().
+  std::mutex io_mutex_;
 };
 
 } // namespace platform

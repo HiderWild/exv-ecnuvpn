@@ -1,7 +1,10 @@
 #include "vpn_engine/protocol/session.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -94,12 +97,22 @@ ValidationResult ProtocolSession::connect_cstp(TunnelMetadata *metadata) {
     return connected;
   }
 
+  // Defensive tunnel-MTU normalization at the device seam: the gateway value
+  // is validated by the CSTP parser, but a misbehaving/forged transport could
+  // still yield an unusable MTU. Fall back to the configured safe default
+  // rather than handing an out-of-range value to the platform packet device.
+  if (connected_metadata.mtu < 576 || connected_metadata.mtu > 1500) {
+    int fallback = options_.mtu_fallback;
+    if (fallback < 576 || fallback > 1500)
+      fallback = 1290;
+    connected_metadata.mtu = fallback;
+  }
+
   metadata_ = connected_metadata;
   *metadata = connected_metadata;
   cstp_connected_ = true;
   state_.tunnel_configured(connected_metadata);
-  return ValidationResult{};
-}
+  return ValidationResult{};}
 
 ValidationResult ProtocolSession::run_packet_loop(PacketDevice *device,
                                                   EventSink *events,
@@ -128,86 +141,252 @@ ValidationResult ProtocolSession::run_packet_loop(PacketDevice *device,
   state_.packet_loop_started();
   emit_event(events, "packet.loop.started", "info", "packet loop started");
 
+  while (true) {
+    ForwardingOutcome outcome = run_forwarding(device, events, cancel);
+
+    if (outcome.cancelled) {
+      return stop_cancelled(device, events);
+    }
+
+    if (outcome.result.ok) {
+      // Graceful end of the forwarding session (e.g. the device drained). Close
+      // the device on this (the loop) thread but leave the session marked
+      // network-ready and report success.
+      device->close();
+      current_device_ = nullptr;
+      return outcome.result;
+    }
+
+    const ValidationResult &failed = outcome.result;
+    emit_event(events, "transport.closed", "error", failed.message,
+               {{"code", failed.code}});
+
+    const bool can_reconnect =
+        failed.code == "transport_closed" && options_.auto_reconnect &&
+        reconnect_attempts_ < options_.max_reconnects &&
+        !cancellation_requested(cancel);
+
+    if (can_reconnect) {
+      ValidationResult reconnected = reconnect(device, events, cancel);
+      if (reconnected.ok)
+        continue;
+      current_device_ = nullptr;
+      return reconnected;
+    }
+
+    device->close();
+    current_device_ = nullptr;
+    state_.failed(failed.code, failed.message);
+    return failed;
+  }
+}
+
+ProtocolSession::ForwardingOutcome
+ProtocolSession::run_forwarding(PacketDevice *device, EventSink *events,
+                                CancellationToken *cancel) {
+  std::atomic<bool> stop{false};
+
+  // Monotonic counter of inbound CSTP frames seen by the reader thread. Any
+  // frame (data, keepalive, DPD request/response) proves the peer is alive and
+  // is used by the outbound thread's dead-peer detector.
+  std::atomic<std::uint64_t> inbound_activity{0};
+
+  // terminate reason: 0 = none, 1 = graceful, 2 = cancelled, 3 = fatal.
+  std::mutex reason_mu;
+  int reason = 0;
+  ValidationResult fatal;
+
+  auto set_reason = [&](int new_reason, ValidationResult result) {
+    const std::lock_guard<std::mutex> lock(reason_mu);
+    if (reason == 0) {
+      reason = new_reason;
+      if (new_reason == 3)
+        fatal = std::move(result);
+    }
+    stop.store(true);
+  };
+
+  // Inbound: drain CSTP frames from the gateway and route them to the device.
+  // Runs until the transport reports a closed/failed read (which the outbound
+  // side triggers via transport_->disconnect()), a peer disconnect frame, a
+  // device write failure, or cancellation. It intentionally does not gate on
+  // `stop` so that frames already queued when the outbound side ends are still
+  // drained before the transport read reports closure.
+  std::thread inbound([&]() {
+    while (true) {
+      if (cancellation_requested(cancel)) {
+        set_reason(2, ValidationResult{});
+        break;
+      }
+
+      InboundFrame frame;
+      ValidationResult received = transport_->receive_frame(&frame);
+      if (!received.ok) {
+        set_reason(3, received);
+        break;
+      }
+
+      // Any decoded frame is liveness evidence for the dead-peer detector.
+      inbound_activity.fetch_add(1, std::memory_order_relaxed);
+
+      if (frame.kind == InboundFrameKind::data) {
+        ValidationResult written = device->write_packet(frame.payload);
+        if (!written.ok) {
+          set_reason(3, written);
+          break;
+        }
+        emit_event(events, "packet.inbound", "info", "inbound packet",
+                   {{"bytes", std::to_string(frame.payload.size())}});
+        continue;
+      }
+
+      if (frame.kind == InboundFrameKind::dpd_request) {
+        // Servicing an inbound DPD request is mandatory regardless of timers:
+        // answer with a DPD response so the gateway sees us as alive.
+        ValidationResult responded =
+            transport_->send_control(InboundFrameKind::dpd_response);
+        if (!responded.ok) {
+          set_reason(3, responded);
+          break;
+        }
+        emit_event(events, "dpd.responded", "info", "DPD response sent");
+        continue;
+      }
+
+      if (frame.kind == InboundFrameKind::disconnect) {
+        set_reason(3, invalid("transport_closed", "CSTP peer disconnected"));
+        break;
+      }
+
+      // dpd_response / keepalive / none: already counted as activity above;
+      // no further data-plane action.
+    }
+
+    // Signal the outbound (loop) thread to stop. The device is non-blocking and
+    // polled by the outbound thread, so it observes `stop` and exits on its own;
+    // the loop thread owns closing the device.
+    stop.store(true);
+  });
+
+  // Outbound: read IP packets from the device and frame them to the gateway.
   int retryable_read_count = 0;
   const int max_retryable_reads =
       options_.packet_loop_no_data_poll_limit < 0
           ? 0
           : options_.packet_loop_no_data_poll_limit;
 
-  while (true) {
+  // Dead-peer / keepalive state for the idle path.
+  bool dpd_probe_outstanding = false;
+  std::uint64_t dpd_probe_baseline = 0;
+  int dpd_wait_polls = 0;
+
+  // Services keepalive/DPD timers on each idle outbound poll. Returns a non-ok
+  // result to terminate forwarding (transport_closed for a dead peer, or a
+  // propagated control-write failure). `idle_polls` is the current count of
+  // consecutive idle polls.
+  auto service_liveness = [&](int idle_polls) -> ValidationResult {
+    // Dead-peer detection: if a DPD probe is outstanding and no inbound frame
+    // has arrived since it was sent, count down the budget.
+    if (dpd_probe_outstanding) {
+      if (inbound_activity.load(std::memory_order_relaxed) !=
+          dpd_probe_baseline) {
+        dpd_probe_outstanding = false;
+        dpd_wait_polls = 0;
+      } else if (options_.dead_peer_poll_budget > 0) {
+        ++dpd_wait_polls;
+        if (dpd_wait_polls >= options_.dead_peer_poll_budget) {
+          return invalid("transport_closed",
+                         "dead peer detected: no response to DPD probe");
+        }
+      }
+    }
+
+    if (options_.keepalive_idle_poll_interval > 0 &&
+        (idle_polls % options_.keepalive_idle_poll_interval) == 0) {
+      ValidationResult sent = transport_->send_control(InboundFrameKind::keepalive);
+      if (!sent.ok)
+        return sent;
+      emit_event(events, "dpd.keepalive", "info", "keepalive sent");
+    }
+
+    if (options_.dpd_idle_poll_interval > 0 && !dpd_probe_outstanding &&
+        (idle_polls % options_.dpd_idle_poll_interval) == 0) {
+      ValidationResult sent =
+          transport_->send_control(InboundFrameKind::dpd_request);
+      if (!sent.ok)
+        return sent;
+      dpd_probe_outstanding = true;
+      dpd_probe_baseline = inbound_activity.load(std::memory_order_relaxed);
+      dpd_wait_polls = 0;
+      emit_event(events, "dpd.request", "info", "DPD probe sent");
+    }
+
+    return {};
+  };
+
+  while (!stop.load()) {
     if (cancellation_requested(cancel)) {
-      return stop_cancelled(device, events);
+      set_reason(2, ValidationResult{});
+      break;
     }
 
     std::vector<std::uint8_t> packet;
     ValidationResult read = device->read_packet(&packet);
     if (!read.ok) {
       if (is_clean_packet_loop_end(read)) {
-        current_device_ = nullptr;
-        return ValidationResult{};
+        set_reason(1, ValidationResult{});
+        break;
       }
 
       if (is_retryable_packet_read(read)) {
         ++retryable_read_count;
         if (cancellation_requested(cancel)) {
-          return stop_cancelled(device, events);
+          set_reason(2, ValidationResult{});
+          break;
         }
-        if (retryable_read_count <= max_retryable_reads) {
+        if (retryable_read_count <= max_retryable_reads && !stop.load()) {
+          ValidationResult live = service_liveness(retryable_read_count);
+          if (!live.ok) {
+            set_reason(3, live);
+            break;
+          }
           std::this_thread::yield();
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
           continue;
         }
+        if (stop.load())
+          break;
       }
 
-      device->close();
-      current_device_ = nullptr;
-      state_.failed(read.code, read.message);
-      return read;
+      set_reason(3, read);
+      break;
     }
 
     retryable_read_count = 0;
 
-    if (cancellation_requested(cancel)) {
-      return stop_cancelled(device, events);
+    ValidationResult sent = transport_->send_packet(packet);
+    if (!sent.ok) {
+      set_reason(3, sent);
+      break;
     }
 
-    std::vector<std::uint8_t> response_packet;
-    ValidationResult exchanged =
-        transport_->exchange_packet(packet, &response_packet);
-    if (!exchanged.ok) {
-      emit_event(events, "transport.closed", "error", exchanged.message,
-                 {{"code", exchanged.code}});
-
-      const bool can_reconnect =
-          exchanged.code == "transport_closed" && options_.auto_reconnect &&
-          reconnect_attempts_ < options_.max_reconnects &&
-          !cancellation_requested(cancel);
-
-      if (can_reconnect) {
-        ValidationResult reconnected = reconnect(device, events, cancel);
-        if (reconnected.ok)
-          continue;
-        current_device_ = nullptr;
-        return reconnected;
-      }
-
-      device->close();
-      current_device_ = nullptr;
-      state_.failed(exchanged.code, exchanged.message);
-      return exchanged;
-    }
-
-    ValidationResult written = device->write_packet(response_packet);
-    if (!written.ok) {
-      device->close();
-      current_device_ = nullptr;
-      state_.failed(written.code, written.message);
-      return written;
-    }
-
-    emit_event(events, "packet.echo", "info", "packet echoed",
-               {{"bytes", std::to_string(response_packet.size())}});
+    emit_event(events, "packet.outbound", "info", "outbound packet",
+               {{"bytes", std::to_string(packet.size())}});
   }
+
+  stop.store(true);
+  // Unblock a blocking inbound transport read.
+  transport_->disconnect();
+  inbound.join();
+
+  ForwardingOutcome outcome;
+  {
+    const std::lock_guard<std::mutex> lock(reason_mu);
+    outcome.cancelled = reason == 2;
+    if (reason == 3)
+      outcome.result = fatal;
+  }
+  return outcome;
 }
 
 void ProtocolSession::disconnect() {

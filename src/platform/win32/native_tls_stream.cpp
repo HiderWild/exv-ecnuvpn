@@ -788,112 +788,155 @@ NativeTlsStream::read_some(std::vector<std::uint8_t> *bytes) {
   if (!bytes)
     return invalid("tls_stream_null_output", "read output must not be null");
 
-  vpn_engine::ValidationResult open = ensure_open();
-  if (!open.ok)
-    return open;
+  {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    vpn_engine::ValidationResult open = ensure_open();
+    if (!open.ok)
+      return open;
+  }
 
   bytes->clear();
 
-  auto receive_more =
-      [this](bool *peer_closed) -> vpn_engine::ValidationResult {
-    *peer_closed = false;
-    NativeTlsRecvResult received = api_->recv_encrypted(socket_);
+  // Full-duplex hardening: the decrypt path and the buffer mutate under
+  // io_mutex_ so close() (driven from the outbound thread) can never destroy
+  // the Schannel context while this reader thread is mid-DecryptMessage. The
+  // blocking recv() runs OUTSIDE the lock; close() interrupts it by closing the
+  // socket, after which the reader re-checks closed_ under the lock and bails
+  // before touching the torn-down context.
+  enum class Step { return_ok, loop, do_recv, peer_closed, fail };
+
+  while (true) {
+    Step step = Step::do_recv;
+    vpn_engine::ValidationResult fail_result;
+    NativeTlsSocketHandle recv_socket = kInvalidNativeTlsSocketHandle;
+
+    {
+      std::lock_guard<std::mutex> lock(io_mutex_);
+      if (closed_.load())
+        return invalid("tls_stream_closed", "TLS stream is closed");
+
+      if (encrypted_buffer_.empty()) {
+        step = Step::do_recv;
+        recv_socket = socket_;
+      } else {
+        NativeTlsDecryptResult decrypted =
+            api_->decrypt(tls_context_, encrypted_buffer_);
+        if (!decrypted.result.ok) {
+          step = Step::fail;
+          fail_result = decrypted.result;
+        } else if (decrypted.encrypted_bytes_consumed >
+                   encrypted_buffer_.size()) {
+          step = Step::fail;
+          fail_result = invalid(
+              "tls_decrypt_failed",
+              "TLS decrypt consumed more encrypted bytes than available");
+        } else {
+          const std::size_t consumed = decrypted.encrypted_bytes_consumed;
+          if (consumed > 0) {
+            encrypted_buffer_.erase(encrypted_buffer_.begin(),
+                                    encrypted_buffer_.begin() + consumed);
+          }
+
+          switch (decrypted.status) {
+          case NativeTlsReadStatus::data:
+            if (!decrypted.plaintext.empty()) {
+              if (consumed == 0) {
+                step = Step::fail;
+                fail_result = invalid(
+                    "tls_decrypt_failed",
+                    "TLS decrypt returned plaintext without consuming input");
+              } else {
+                *bytes = std::move(decrypted.plaintext);
+                step = Step::return_ok;
+              }
+            } else if (consumed == 0) {
+              step = Step::fail;
+              fail_result =
+                  invalid("tls_decrypt_failed", "TLS decrypt made no progress");
+            } else {
+              step = Step::loop;
+            }
+            break;
+
+          case NativeTlsReadStatus::need_more_data:
+            step = Step::do_recv;
+            recv_socket = socket_;
+            break;
+
+          case NativeTlsReadStatus::peer_closed:
+            step = Step::peer_closed;
+            break;
+
+          case NativeTlsReadStatus::tls_alert:
+            step = Step::fail;
+            fail_result = invalid("tls_alert", "TLS alert received");
+            break;
+          }
+        }
+      }
+    }
+
+    switch (step) {
+    case Step::return_ok:
+      return {};
+    case Step::loop:
+      continue;
+    case Step::peer_closed:
+      close();
+      return {};
+    case Step::fail:
+      return fail_and_close(fail_result);
+    case Step::do_recv:
+      break;
+    }
+
+    // Blocking recv must stay outside io_mutex_ so close() can interrupt it.
+    NativeTlsRecvResult received = api_->recv_encrypted(recv_socket);
     if (!received.result.ok)
-      return received.result;
+      return fail_and_close(received.result);
     if (received.peer_closed) {
-      *peer_closed = true;
+      close();
       return {};
     }
     if (received.bytes.empty())
-      return invalid("tls_read_failed", "socket read returned no data");
+      return fail_and_close(
+          invalid("tls_read_failed", "socket read returned no data"));
 
-    append_bytes(&encrypted_buffer_, received.bytes);
-    return {};
-  };
-
-  while (true) {
-    if (encrypted_buffer_.empty()) {
-      bool peer_closed = false;
-      vpn_engine::ValidationResult received = receive_more(&peer_closed);
-      if (!received.ok)
-        return fail_and_close(received);
-      if (peer_closed) {
-        close();
-        return {};
-      }
-    }
-
-    NativeTlsDecryptResult decrypted =
-        api_->decrypt(tls_context_, encrypted_buffer_);
-    if (!decrypted.result.ok)
-      return fail_and_close(decrypted.result);
-    if (decrypted.encrypted_bytes_consumed > encrypted_buffer_.size()) {
-      return fail_and_close(invalid(
-          "tls_decrypt_failed",
-          "TLS decrypt consumed more encrypted bytes than available"));
-    }
-
-    const std::size_t consumed = decrypted.encrypted_bytes_consumed;
-    if (consumed > 0) {
-      encrypted_buffer_.erase(encrypted_buffer_.begin(),
-                              encrypted_buffer_.begin() + consumed);
-    }
-
-    switch (decrypted.status) {
-    case NativeTlsReadStatus::data:
-      if (!decrypted.plaintext.empty()) {
-        if (consumed == 0) {
-          return fail_and_close(invalid(
-              "tls_decrypt_failed",
-              "TLS decrypt returned plaintext without consuming input"));
-        }
-        *bytes = std::move(decrypted.plaintext);
-        return {};
-      }
-      if (consumed == 0) {
-        return fail_and_close(invalid(
-            "tls_decrypt_failed",
-            "TLS decrypt made no progress"));
-      }
-      break;
-
-    case NativeTlsReadStatus::need_more_data: {
-      bool peer_closed = false;
-      vpn_engine::ValidationResult received = receive_more(&peer_closed);
-      if (!received.ok)
-        return fail_and_close(received);
-      if (peer_closed) {
-        close();
-        return {};
-      }
-      break;
-    }
-
-    case NativeTlsReadStatus::peer_closed:
-      close();
-      return {};
-
-    case NativeTlsReadStatus::tls_alert:
-      return fail_and_close(invalid("tls_alert", "TLS alert received"));
+    {
+      std::lock_guard<std::mutex> lock(io_mutex_);
+      if (closed_.load())
+        return invalid("tls_stream_closed", "TLS stream is closed");
+      append_bytes(&encrypted_buffer_, received.bytes);
     }
   }
 }
 
 void NativeTlsStream::close() {
-  const NativeTlsContextHandle tls_context = tls_context_;
-  const NativeTlsSocketHandle socket = socket_;
-  const bool api_started = api_started_;
+  NativeTlsContextHandle tls_context;
+  NativeTlsSocketHandle socket;
+  bool api_started;
 
-  tls_context_ = kInvalidNativeTlsContextHandle;
-  socket_ = kInvalidNativeTlsSocketHandle;
-  encrypted_buffer_.clear();
-  connected_ = false;
-  closed_ = true;
-  api_started_ = false;
+  {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    tls_context = tls_context_;
+    socket = socket_;
+    api_started = api_started_;
+
+    tls_context_ = kInvalidNativeTlsContextHandle;
+    socket_ = kInvalidNativeTlsSocketHandle;
+    encrypted_buffer_.clear();
+    connected_ = false;
+    closed_.store(true);
+    api_started_ = false;
+  }
 
   if (!api_)
     return;
 
+  // Destroyed after releasing io_mutex_: any concurrent reader either holds the
+  // lock during DecryptMessage (so this teardown waited for it) or re-checks
+  // closed_ under the lock before reusing the context. Closing the socket
+  // unblocks an in-flight recv() on the reader thread.
   if (valid_context_handle(tls_context))
     api_->close_tls_context(tls_context);
   if (valid_socket_handle(socket))

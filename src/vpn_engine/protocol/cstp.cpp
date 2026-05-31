@@ -13,9 +13,27 @@ namespace protocol {
 
 namespace {
 
-constexpr std::uint32_t kMaxFramePayloadBytes = 1024 * 1024; // 1 MiB
+// CSTP data-channel record header ("STF"): the AnyConnect-compatible record
+// framing places one 8-byte header before each payload. The payload length is
+// a big-endian uint16, so the maximum payload per record is 65535 bytes.
+//   [0]=0x53 'S' [1]=0x54 'T' [2]=0x46 'F' [3]=0x01
+//   [4..5]=payload length (big-endian uint16)
+//   [6]=packet type [7]=0x00
+constexpr std::uint8_t kStfMagic0 = 0x53; // 'S'
+constexpr std::uint8_t kStfMagic1 = 0x54; // 'T'
+constexpr std::uint8_t kStfMagic2 = 0x46; // 'F'
+constexpr std::uint8_t kStfVersion = 0x01;
+constexpr std::size_t kStfHeaderBytes = 8;
+constexpr std::uint32_t kMaxFramePayloadBytes = 0xFFFF; // big-endian uint16
 constexpr std::size_t kMaxRouteCount = 256;
 constexpr std::size_t kMaxHeaderValueBytes = 512;
+
+// Public CSTP/AnyConnect data-channel packet type tags.
+constexpr std::uint8_t kPktData = 0x00;
+constexpr std::uint8_t kPktDpdRequest = 0x03;
+constexpr std::uint8_t kPktDpdResponse = 0x04;
+constexpr std::uint8_t kPktDisconnect = 0x05;
+constexpr std::uint8_t kPktKeepalive = 0x07;
 
 ValidationResult invalid(std::string code, std::string message) {
   ValidationResult r;
@@ -165,6 +183,17 @@ ValidationResult ByteReader::read_u8(std::uint8_t *out) {
   return ValidationResult{};
 }
 
+ValidationResult ByteReader::read_be_u16(std::uint16_t *out) {
+  if (!out)
+    return invalid("cstp_null_out", "output pointer is null");
+  if (!can_read(2))
+    return incomplete_frame();
+  *out = static_cast<std::uint16_t>((static_cast<std::uint16_t>(data_[pos_]) << 8) |
+                                    static_cast<std::uint16_t>(data_[pos_ + 1]));
+  pos_ += 2;
+  return ValidationResult{};
+}
+
 ValidationResult ByteReader::read_be_u32(std::uint32_t *out) {
   if (!out)
     return invalid("cstp_null_out", "output pointer is null");
@@ -187,9 +216,7 @@ ValidationResult ByteReader::read_payload(std::size_t n, std::vector<std::uint8_
 
 namespace {
 
-void write_be_u32(std::uint32_t v, std::vector<std::uint8_t> *out) {
-  out->push_back(static_cast<std::uint8_t>((v >> 24) & 0xff));
-  out->push_back(static_cast<std::uint8_t>((v >> 16) & 0xff));
+void write_be_u16(std::uint16_t v, std::vector<std::uint8_t> *out) {
   out->push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
   out->push_back(static_cast<std::uint8_t>((v >> 0) & 0xff));
 }
@@ -198,23 +225,22 @@ ValidationResult type_to_wire(CstpFrameType t, std::uint8_t *out) {
   if (!out)
     return invalid("cstp_null_out", "output pointer is null");
 
-  // These type tags are fake-server/test-harness framing only. They are not
-  // verified production CSTP wire-format tags.
+  // Public CSTP/AnyConnect data-channel packet type tags.
   switch (t) {
   case CstpFrameType::data:
-    *out = 0;
+    *out = kPktData;
     return ValidationResult{};
   case CstpFrameType::keepalive:
-    *out = 1;
+    *out = kPktKeepalive;
     return ValidationResult{};
   case CstpFrameType::dpd_request:
-    *out = 2;
+    *out = kPktDpdRequest;
     return ValidationResult{};
   case CstpFrameType::dpd_response:
-    *out = 3;
+    *out = kPktDpdResponse;
     return ValidationResult{};
   case CstpFrameType::disconnect:
-    *out = 4;
+    *out = kPktDisconnect;
     return ValidationResult{};
   }
 
@@ -225,22 +251,21 @@ ValidationResult wire_to_type(std::uint8_t t, CstpFrameType *out) {
   if (!out)
     return invalid("cstp_null_out", "output pointer is null");
 
-  // These type tags are fake-server/test-harness framing only. They are not
-  // verified production CSTP wire-format tags.
+  // Public CSTP/AnyConnect data-channel packet type tags.
   switch (t) {
-  case 0:
+  case kPktData:
     *out = CstpFrameType::data;
     return ValidationResult{};
-  case 1:
+  case kPktKeepalive:
     *out = CstpFrameType::keepalive;
     return ValidationResult{};
-  case 2:
+  case kPktDpdRequest:
     *out = CstpFrameType::dpd_request;
     return ValidationResult{};
-  case 3:
+  case kPktDpdResponse:
     *out = CstpFrameType::dpd_response;
     return ValidationResult{};
-  case 4:
+  case kPktDisconnect:
     *out = CstpFrameType::disconnect;
     return ValidationResult{};
   default:
@@ -328,9 +353,14 @@ ValidationResult encode_cstp_frame(const CstpFrame &frame,
   }
 
   std::vector<std::uint8_t> encoded;
-  encoded.reserve(1 + 4 + frame.payload.size());
+  encoded.reserve(kStfHeaderBytes + frame.payload.size());
+  encoded.push_back(kStfMagic0);
+  encoded.push_back(kStfMagic1);
+  encoded.push_back(kStfMagic2);
+  encoded.push_back(kStfVersion);
+  write_be_u16(static_cast<std::uint16_t>(frame.payload.size()), &encoded);
   encoded.push_back(type_tag);
-  write_be_u32(static_cast<std::uint32_t>(frame.payload.size()), &encoded);
+  encoded.push_back(0x00);
   encoded.insert(encoded.end(), frame.payload.begin(), frame.payload.end());
 
   *out = std::move(encoded);
@@ -343,9 +373,38 @@ ValidationResult decode_cstp_frame(ByteReader *reader, CstpFrame *out) {
   if (!out)
     return invalid("cstp_null_out", "output pointer is null");
 
-  // Wire format (fake-server/test-harness framing only; NOT verified production CSTP):
-  // [type_tag:1][payload_len_be:4][payload:payload_len]
+  // Wire format (AnyConnect-compatible CSTP "STF" record header):
+  // [0..2]='S''T''F' [3]=0x01 [4..5]=payload_len_be16 [6]=type [7]=0x00
   const std::size_t start_pos = reader->position();
+
+  std::uint8_t magic0 = 0;
+  std::uint8_t magic1 = 0;
+  std::uint8_t magic2 = 0;
+  std::uint8_t version = 0;
+  if (!reader->can_read(kStfHeaderBytes)) {
+    reader->set_position(start_pos);
+    return incomplete_frame();
+  }
+
+  // Peek/validate the fixed header before consuming the payload.
+  (void)reader->read_u8(&magic0);
+  (void)reader->read_u8(&magic1);
+  (void)reader->read_u8(&magic2);
+  (void)reader->read_u8(&version);
+  if (magic0 != kStfMagic0 || magic1 != kStfMagic1 || magic2 != kStfMagic2 ||
+      version != kStfVersion) {
+    reader->set_position(start_pos);
+    return invalid("cstp_bad_magic", "CSTP record header magic mismatch");
+  }
+
+  std::uint16_t payload_len = 0;
+  {
+    ValidationResult v = reader->read_be_u16(&payload_len);
+    if (!v.ok) {
+      reader->set_position(start_pos);
+      return v;
+    }
+  }
 
   std::uint8_t type_tag = 0;
   {
@@ -356,18 +415,12 @@ ValidationResult decode_cstp_frame(ByteReader *reader, CstpFrame *out) {
     }
   }
 
+  std::uint8_t reserved = 0;
+  (void)reader->read_u8(&reserved); // header byte [7]; ignored on decode
+
   CstpFrameType type;
   {
     ValidationResult v = wire_to_type(type_tag, &type);
-    if (!v.ok) {
-      reader->set_position(start_pos);
-      return v;
-    }
-  }
-
-  std::uint32_t payload_len = 0;
-  {
-    ValidationResult v = reader->read_be_u32(&payload_len);
     if (!v.ok) {
       reader->set_position(start_pos);
       return v;

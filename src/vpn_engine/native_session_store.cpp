@@ -406,6 +406,9 @@ read_native_session_snapshot(const std::string &config_dir,
     snapshot.network_ready = false;
   }
 
+  snapshot.failure_code = record.session.failure_code;
+  snapshot.failure_message = record.session.failure_message;
+
   return snapshot;
 }
 

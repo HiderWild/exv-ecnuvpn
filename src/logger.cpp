@@ -7,6 +7,8 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 namespace ecnuvpn {
 namespace logger {
@@ -36,6 +38,46 @@ void info(const std::string &msg) { write_log("INFO", msg); }
 void error(const std::string &msg) { write_log("ERROR", msg); }
 
 void warn(const std::string &msg) { write_log("WARN", msg); }
+
+void event(const std::string &level, const std::string &component,
+           const std::string &code, const std::string &message,
+           const std::vector<std::pair<std::string, std::string>> &fields) {
+  std::ostringstream ss;
+  if (!component.empty()) {
+    ss << "[" << component << "] ";
+  }
+  if (!code.empty()) {
+    ss << "code=" << code << " ";
+  }
+  ss << message;
+  for (const auto &field : fields) {
+    ss << " " << field.first << "=" << field.second;
+  }
+  std::string normalized = level;
+  if (normalized != "INFO" && normalized != "WARN" && normalized != "ERROR") {
+    normalized = "INFO";
+  }
+  write_log(normalized, ss.str());
+}
+
+std::vector<std::string> tail(int lines) {
+  std::vector<std::string> result;
+  std::string log_path = utils::get_log_path();
+  std::ifstream ifs(log_path);
+  if (!ifs.is_open()) {
+    return result;
+  }
+  std::deque<std::string> buffer;
+  std::string line;
+  while (std::getline(ifs, line)) {
+    buffer.push_back(line);
+    if (lines > 0 && static_cast<int>(buffer.size()) > lines) {
+      buffer.pop_front();
+    }
+  }
+  result.assign(buffer.begin(), buffer.end());
+  return result;
+}
 
 void show_logs(int lines) {
   std::string log_path = utils::get_log_path();

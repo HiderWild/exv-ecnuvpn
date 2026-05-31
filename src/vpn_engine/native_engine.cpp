@@ -41,12 +41,12 @@ ValidationResult validate_engine_config(const VpnEngineConfig &cfg) {
 
 ValidationResult native_transport_unimplemented() {
   return invalid("native_transport_unimplemented",
-                 "Native engine production TLS transport is not implemented yet.");
+                 "Native engine transport factory is not configured.");
 }
 
 ValidationResult native_packet_device_unimplemented() {
   return invalid("native_packet_device_unimplemented",
-                 "Native engine platform packet device is not available.");
+                 "Native engine packet device factory is not configured.");
 }
 
 class UnsupportedProtocolTransport final
@@ -69,8 +69,18 @@ public:
   }
 
   ValidationResult
-  exchange_packet(const std::vector<std::uint8_t> & /*packet*/,
-                  std::vector<std::uint8_t> * /*response_packet*/) override {
+  send_packet(const std::vector<std::uint8_t> & /*packet*/) override {
+    return invalid("native_transport_unavailable",
+                   "Native engine production TLS transport is not available on this platform.");
+  }
+
+  ValidationResult
+  send_control(protocol::InboundFrameKind /*kind*/) override {
+    return invalid("native_transport_unavailable",
+                   "Native engine production TLS transport is not available on this platform.");
+  }
+
+  ValidationResult receive_frame(protocol::InboundFrame * /*out*/) override {
     return invalid("native_transport_unavailable",
                    "Native engine production TLS transport is not available on this platform.");
   }
@@ -127,7 +137,10 @@ VpnEngineConfig make_native_config(const Config &cfg,
   engine_cfg.windows_tunnel_driver = cfg.windows_tunnel_driver;
   engine_cfg.windows_tap_interface = cfg.windows_tap_interface;
   engine_cfg.auto_reconnect = cfg.auto_reconnect;
-  engine_cfg.disable_dtls = cfg.disable_dtls;
+  // Native engine v1 is CSTP/TLS-only; the user-facing disable_dtls config flag
+  // applies to the OpenConnect command-line path. Force true here so the engine
+  // always operates in CSTP mode regardless of user config.json.
+  engine_cfg.disable_dtls = true;
   return engine_cfg;
 }
 
@@ -227,11 +240,6 @@ ValidationResult NativeVpnEngineSession::start() {
   if (!validated.ok)
     return fail(validated);
 
-  if (!config_.disable_dtls) {
-    return fail(invalid("unsupported_dtls",
-                        "Native engine v1 supports CSTP/TLS only."));
-  }
-
   protocol::ParsedVpnUrl parsed;
   ValidationResult parsed_result = protocol::parse_vpn_url(config_.server, &parsed);
   if (!parsed_result.ok)
@@ -261,6 +269,17 @@ ValidationResult NativeVpnEngineSession::start() {
   options.disable_dtls = config_.disable_dtls;
   options.auto_reconnect = config_.auto_reconnect;
   options.max_reconnects = config_.auto_reconnect ? 1 : 0;
+
+  // Documented safe-default MTU used when the gateway omits or negotiates an
+  // out-of-range tunnel MTU. Honor the configured MTU when it is itself valid,
+  // otherwise fall back to the AnyConnect-typical 1290.
+  options.mtu_fallback =
+      (config_.mtu >= 576 && config_.mtu <= 1500) ? config_.mtu : 1290;
+
+  // Liveness timers (keepalive / proactive DPD probe / dead-peer budget) are
+  // left at their disabled defaults until a live gateway capture validates the
+  // timing. Responding to an inbound DPD request is always on inside the
+  // forwarding loop, so the gateway still observes us as alive.
 
   auto protocol_session =
       std::make_unique<protocol::ProtocolSession>(options, transport.get());
