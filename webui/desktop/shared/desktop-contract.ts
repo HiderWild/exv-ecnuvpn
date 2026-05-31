@@ -80,6 +80,15 @@ export const desktopRpcErrorCodes = {
   oneshotElevationDenied: 'oneshot_elevation_denied',
   helperRpcFailed: 'helper_rpc_failed',
   authFailed: 'auth_failed',
+  tlsVerifyFailed: 'tls_verify_failed',
+  wintunMissing: 'wintun_missing',
+  utunPermissionDenied: 'utun_permission_denied',
+  unsupportedDtls: 'unsupported_dtls',
+  permissionDenied: 'permission_denied',
+  networkUnreachable: 'network_unreachable',
+  userCancelled: 'user_cancelled',
+  invalidRequest: 'invalid_request',
+  connectionFailed: 'connection_failed',
   vpnStartFailed: 'vpn_start_failed',
 } as const
 

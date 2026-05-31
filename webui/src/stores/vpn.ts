@@ -99,6 +99,16 @@ export type VpnErrorType =
   | 'config_invalid'
   | 'service_missing'
   | 'auth_failed'
+  | 'tls_verify_failed'
+  | 'wintun_missing'
+  | 'utun_permission_denied'
+  | 'unsupported_dtls'
+  | 'permission_denied'
+  | 'helper_unavailable'
+  | 'network_unreachable'
+  | 'user_cancelled'
+  | 'invalid_request'
+  | 'connection_failed'
   | 'native_failure'
   | 'parse_failure'
   | 'unknown_action'
@@ -159,6 +169,86 @@ function isAuthFailureMessage(message: string) {
     normalized.includes('password is incorrect')
 }
 
+type NativeErrorDescriptor = {
+  error_type: VpnErrorType
+  message: string
+  recommended_action: string
+  recoverable: boolean
+}
+
+// Single source of truth: every canonical backend code maps to one user-facing
+// descriptor. The backend (feedback module) always sends `code`, `recoverable`
+// and `recommended_action`; this table supplies the localized label and a
+// sensible default action when the backend omits one.
+const contractErrorMap: Record<string, NativeErrorDescriptor> = {
+  auth_failed: {
+    error_type: 'auth_failed',
+    message: 'VPN 密码错误，请重新输入密码。',
+    recommended_action: 'retry_password',
+    recoverable: true,
+  },
+  tls_verify_failed: {
+    error_type: 'tls_verify_failed',
+    message: '无法验证 VPN 服务器证书，连接已中止。',
+    recommended_action: 'check_server_certificate',
+    recoverable: true,
+  },
+  wintun_missing: {
+    error_type: 'wintun_missing',
+    message: '缺少 Wintun 网络驱动，无法建立隧道。请安装网络驱动后重试。',
+    recommended_action: 'install_wintun_driver',
+    recoverable: true,
+  },
+  utun_permission_denied: {
+    error_type: 'utun_permission_denied',
+    message: '没有创建虚拟网卡的权限，请以管理员身份运行后重试。',
+    recommended_action: 'retry_with_elevation',
+    recoverable: true,
+  },
+  unsupported_dtls: {
+    error_type: 'unsupported_dtls',
+    message: '服务器要求的 DTLS 模式暂不受支持，已回退到 TLS。',
+    recommended_action: 'retry_connection',
+    recoverable: false,
+  },
+  permission_denied: {
+    error_type: 'permission_denied',
+    message: '需要管理员权限才能继续，请在弹出的授权窗口中点击允许。',
+    recommended_action: 'retry_with_elevation',
+    recoverable: true,
+  },
+  helper_unavailable: {
+    error_type: 'helper_unavailable',
+    message: 'VPN 助手服务不可用，请启动或重新安装助手后重试。',
+    recommended_action: 'reinstall_helper',
+    recoverable: true,
+  },
+  network_unreachable: {
+    error_type: 'network_unreachable',
+    message: '无法连接到 VPN 服务器，请检查网络连接或服务器地址。',
+    recommended_action: 'check_network',
+    recoverable: true,
+  },
+  user_cancelled: {
+    error_type: 'user_cancelled',
+    message: '操作已取消。',
+    recommended_action: '',
+    recoverable: true,
+  },
+  invalid_request: {
+    error_type: 'invalid_request',
+    message: '请求无效，请检查配置后重试。',
+    recommended_action: '',
+    recoverable: false,
+  },
+  connection_failed: {
+    error_type: 'connection_failed',
+    message: '连接失败，请打开日志（exv logs）查看详细原因后重试。',
+    recommended_action: 'view_logs',
+    recoverable: true,
+  },
+}
+
 export function normalizeError(raw: unknown): VpnError {
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
@@ -172,13 +262,17 @@ export function normalizeError(raw: unknown): VpnError {
         timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : undefined,
       }
     }
-    if (typeof obj.code === 'string' && obj.code === 'auth_failed') {
+    // Canonical backend code is the single source of truth. The feedback module
+    // guarantees a non-empty code plus recoverable/recommended_action; this
+    // table only supplies a localized label and default action fallback.
+    if (typeof obj.code === 'string' && obj.code in contractErrorMap) {
+      const descriptor = contractErrorMap[obj.code]
       return {
         ok: false,
-        error_type: 'auth_failed',
-        message: String(obj.message || obj.error || 'VPN authentication failed. Please check your password.'),
-        recoverable: true,
-        recommended_action: 'retry_password',
+        error_type: descriptor.error_type,
+        message: String(obj.message || obj.error || descriptor.message),
+        recoverable: obj.recoverable !== undefined ? !!obj.recoverable : descriptor.recoverable,
+        recommended_action: String(obj.recommended_action || descriptor.recommended_action),
         timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
       }
     }
@@ -510,6 +604,30 @@ export const useVpnStore = defineStore('vpn', () => {
       case 'elevation_denied':
         return {
           title: '授权被拒绝',
+          primaryLabel: '重试',
+          onPrimary: () => retryLastAction(),
+        }
+      case 'tls_verify_failed':
+        return {
+          title: '证书验证失败',
+          primaryLabel: '重试',
+          onPrimary: () => retryLastAction(),
+        }
+      case 'wintun_missing':
+        return {
+          title: '缺少网络驱动',
+          primaryLabel: '重试',
+          onPrimary: () => retryLastAction(),
+        }
+      case 'utun_permission_denied':
+        return {
+          title: '权限不足',
+          primaryLabel: '重试',
+          onPrimary: () => retryLastAction(),
+        }
+      case 'unsupported_dtls':
+        return {
+          title: '协议不受支持',
           primaryLabel: '重试',
           onPrimary: () => retryLastAction(),
         }

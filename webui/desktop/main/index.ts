@@ -115,12 +115,24 @@ function resolveRuntimeDir(exv = resolveExvPath()) {
   return candidates.find((candidate) => existsSync(join(candidate, runtimeBinaryName)))
 }
 
+// Canonical state/log directory, resolved on the (non-elevated) desktop process
+// so every exv invocation — including UAC-elevated ones whose ambient %APPDATA%
+// differs — writes config, state and logs to the same place. Mirrors the C++
+// platform defaults exactly so the CLI (`exv logs`) and the app agree.
+function resolveStateDir() {
+  if (process.platform === 'win32') {
+    return join(app.getPath('appData'), 'ecnuvpn')
+  }
+  return join(app.getPath('home'), '.ecnuvpn')
+}
+
 function nativeEnv(exv = resolveExvPath()) {
   const env = { ...process.env }
   const runtimeDir = resolveRuntimeDir(exv)
   if (runtimeDir) {
     env.ECNUVPN_RUNTIME_DIR = runtimeDir
   }
+  env.ECNUVPN_STATE_DIR = resolveStateDir()
   return env
 }
 
@@ -136,6 +148,7 @@ function nativeExecOptions(exv: string, extra: { maxBuffer?: number } = {}) {
 function withDesktopRuntimeContext(payload: unknown) {
   const context = {
     home: app.getPath('home'),
+    config_dir: resolveStateDir(),
   }
 
   if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
@@ -272,6 +285,7 @@ function desktopPlatformContext() {
     execFileAsync,
     resolveExvPath,
     resolveRuntimeDir,
+    resolveStateDir,
     nativeExecOptions,
     parseJsonOutput,
     throwRpcResultError,
@@ -674,31 +688,18 @@ ipcMain.handle(desktopIpcChannels.rpc, async (_event, action: DesktopRpcAction, 
 ipcMain.handle(
   desktopIpcChannels.rpcElevated,
   async (_event, action: DesktopRpcAction, payload?: unknown, followupAction: DesktopRpcAction = 'status.get') => {
-    return platformRunner.runDesktopRpcElevated({
-      execFileAsync,
-      resolveExvPath,
-      resolveRuntimeDir,
-      nativeExecOptions,
-      parseJsonOutput,
-      throwRpcResultError,
-      runDesktopRpc,
-      emitServiceProgress,
-    }, action, withDesktopRuntimeContext(payload), followupAction)
+    return platformRunner.runDesktopRpcElevated(
+      desktopPlatformContext(),
+      action,
+      withDesktopRuntimeContext(payload),
+      followupAction,
+    )
   },
 )
 
 ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: DesktopServiceCommand) => {
   try {
-    await platformRunner.runServiceCommandElevated({
-      execFileAsync,
-      resolveExvPath,
-      resolveRuntimeDir,
-      nativeExecOptions,
-      parseJsonOutput,
-      throwRpcResultError,
-      runDesktopRpc,
-      emitServiceProgress,
-    }, command)
+    await platformRunner.runServiceCommandElevated(desktopPlatformContext(), command)
     const status = await waitForServiceCommandStatus(command)
     if (command === 'install' && !isServiceUsable(status)) {
       throw new Error('Helper service was installed but is not available to the desktop client.')
@@ -727,29 +728,16 @@ ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: Deskto
 })
 
 ipcMain.handle(desktopIpcChannels.cliCommand, async (_event, command: DesktopCliCommand) => {
-  return platformRunner.runCliCommand({
-    execFileAsync,
-    resolveExvPath,
-    resolveRuntimeDir,
-    nativeExecOptions,
-    parseJsonOutput,
-    throwRpcResultError,
-    runDesktopRpc,
-    emitServiceProgress,
-  }, command)
+  return platformRunner.runCliCommand(desktopPlatformContext(), command)
 })
 
 ipcMain.handle(desktopIpcChannels.driverInstall, async (_event, driver: DesktopDriverInstallTarget) => {
-  return platformRunner.runDesktopRpcElevated({
-    execFileAsync,
-    resolveExvPath,
-    resolveRuntimeDir,
-    nativeExecOptions,
-    parseJsonOutput,
-    throwRpcResultError,
-    runDesktopRpc,
-    emitServiceProgress,
-  }, 'drivers.install', { driver }, 'drivers.status')
+  return platformRunner.runDesktopRpcElevated(
+    desktopPlatformContext(),
+    'drivers.install',
+    { driver },
+    'drivers.status',
+  )
 })
 
 ipcMain.handle(desktopIpcChannels.windowMode, async (_event, mode: DesktopWindowMode) => {

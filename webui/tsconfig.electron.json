@@ -10,5 +10,6 @@
     "skipLibCheck": true,
     "sourceMap": true
   },
-  "include": ["desktop/**/*.ts"]
+  "include": ["desktop/**/*.ts"],
+  "exclude": ["desktop/**/*sync-conflict*.ts"]
 }

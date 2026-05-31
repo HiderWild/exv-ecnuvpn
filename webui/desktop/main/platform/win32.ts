@@ -274,9 +274,11 @@ const runner: DesktopPlatformRunner = {
 
     const logPath = join(app.getPath('temp'), `ecnu-vpn-service-${command}-${Date.now()}.log`)
     const runtimeDir = context.resolveRuntimeDir(exv)
+    const stateDir = context.resolveStateDir()
     const scriptPath = writeElevatedScript(`ecnu-vpn-service-${command}`, [
       '$ErrorActionPreference = "Continue"',
       runtimeDir ? `$env:ECNUVPN_RUNTIME_DIR = ${psSingleQuoted(runtimeDir)}` : '',
+      `$env:ECNUVPN_STATE_DIR = ${psSingleQuoted(stateDir)}`,
       `Set-Location ${psSingleQuoted(dirname(exv))}`,
       `& ${psSingleQuoted(exv)} service ${command} *>&1 | ForEach-Object { $_; $_ | Out-File -FilePath ${psSingleQuoted(logPath)} -Append -Encoding utf8 }`,
       'exit $LASTEXITCODE',
@@ -339,11 +341,13 @@ const runner: DesktopPlatformRunner = {
     const logPath = join(app.getPath('temp'), `ecnu-vpn-elevated-rpc-${nonce}.log`)
     const payloadPath = join(app.getPath('temp'), `ecnu-vpn-elevated-rpc-payload-${nonce}.json`)
     const runtimeDir = context.resolveRuntimeDir(exv)
+    const stateDir = context.resolveStateDir()
     writeFileSync(payloadPath, JSON.stringify(payload ?? {}), 'utf8')
     const args = ['desktop-rpc-file-output', action, payloadPath, outputPath]
     const scriptPath = writeElevatedScript('ecnu-vpn-elevated-rpc', [
       '$ErrorActionPreference = "Continue"',
       runtimeDir ? `$env:ECNUVPN_RUNTIME_DIR = ${psSingleQuoted(runtimeDir)}` : '',
+      `$env:ECNUVPN_STATE_DIR = ${psSingleQuoted(stateDir)}`,
       `Set-Location ${psSingleQuoted(dirname(exv))}`,
       `& ${psSingleQuoted(exv)} ${args.map((arg) => psSingleQuoted(arg)).join(' ')} 2> ${psSingleQuoted(logPath)}`,
       `$code = $LASTEXITCODE`,

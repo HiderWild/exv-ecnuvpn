@@ -36,6 +36,7 @@ export type DesktopPlatformContext = {
   ) => Promise<{ stdout: string; stderr: string }>
   resolveExvPath: () => string
   resolveRuntimeDir: (exv?: string) => string | undefined
+  resolveStateDir: () => string
   nativeExecOptions: (exv: string, extra?: { maxBuffer?: number }) => NativeExecOptions
   parseJsonOutput: (stdout: string) => unknown
   throwRpcResultError: (result: RpcErrorResult) => never
