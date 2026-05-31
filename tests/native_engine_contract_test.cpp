@@ -6,7 +6,9 @@
 #include "vpn_engine/session_state.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -111,6 +113,7 @@ public:
     int exchange_count = 0;
     int disconnect_count = 0;
     int reset_count = 0;
+    int cstp_mtu = 1400;
     std::string last_cookie;
     ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions last_options;
   };
@@ -151,28 +154,76 @@ public:
     metadata->interface_index = 7;
     metadata->internal_ip4_address = "10.255.0.10";
     metadata->internal_ip4_netmask = "255.255.255.0";
-    metadata->mtu = 1400;
+    metadata->mtu = state_->cstp_mtu;
     metadata->routes = {"198.51.100.0/24"};
     metadata->server_bypass_ips = {"192.0.2.10"};
     return {};
   }
 
   ecnuvpn::vpn_engine::ValidationResult
-  exchange_packet(const std::vector<std::uint8_t> &packet,
-                  std::vector<std::uint8_t> *response_packet) override {
-    if (!response_packet)
-      return {false, "packet_null_out", "packet output must not be null"};
+  send_packet(const std::vector<std::uint8_t> &packet) override {
+    std::unique_lock<std::mutex> lock(transport_mu_);
     ++state_->exchange_count;
-    *response_packet = packet;
+    if (transport_closed_)
+      return {false, "transport_closed", "fake transport is closed"};
+    echo_queue_.push_back(packet);
+    transport_cv_.notify_all();
     return {};
   }
 
-  void disconnect() override { ++state_->disconnect_count; }
+  ecnuvpn::vpn_engine::ValidationResult
+  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind /*kind*/)
+      override {
+    std::unique_lock<std::mutex> lock(transport_mu_);
+    if (transport_closed_)
+      return {false, "transport_closed", "fake transport is closed"};
+    return {};
+  }
 
-  void reset_for_reconnect() override { ++state_->reset_count; }
+  ecnuvpn::vpn_engine::ValidationResult
+  receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame *out) override {
+    if (!out)
+      return {false, "packet_null_out", "inbound frame output must not be null"};
+    out->kind = ecnuvpn::vpn_engine::protocol::InboundFrameKind::none;
+    out->payload.clear();
+
+    std::unique_lock<std::mutex> lock(transport_mu_);
+    transport_cv_.wait(
+        lock, [this] { return !echo_queue_.empty() || transport_closed_; });
+    if (!echo_queue_.empty()) {
+      out->kind = ecnuvpn::vpn_engine::protocol::InboundFrameKind::data;
+      out->payload = std::move(echo_queue_.front());
+      echo_queue_.pop_front();
+      return {};
+    }
+    return {false, "transport_closed", "fake transport is closed"};
+  }
+
+  void disconnect() override {
+    {
+      std::unique_lock<std::mutex> lock(transport_mu_);
+      transport_closed_ = true;
+      transport_cv_.notify_all();
+    }
+    ++state_->disconnect_count;
+  }
+
+  void reset_for_reconnect() override {
+    {
+      std::unique_lock<std::mutex> lock(transport_mu_);
+      transport_closed_ = false;
+      echo_queue_.clear();
+      transport_cv_.notify_all();
+    }
+    ++state_->reset_count;
+  }
 
 private:
   std::shared_ptr<State> state_;
+  std::mutex transport_mu_;
+  std::condition_variable transport_cv_;
+  std::deque<std::vector<std::uint8_t>> echo_queue_;
+  bool transport_closed_ = false;
 };
 
 struct TlsStreamLifetimeState {
@@ -486,6 +537,20 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
               "start should open the injected packet device") &&
        ok;
 
+  const ecnuvpn::vpn_engine::TunnelMetadata opened_metadata =
+      last_open_metadata(device);
+  ok = expect(opened_metadata.mtu == 1400,
+              "negotiated tunnel MTU should reach the packet device") &&
+       ok;
+  ok = expect(opened_metadata.routes ==
+                  std::vector<std::string>{"198.51.100.0/24"},
+              "split-include routes should reach the packet device") &&
+       ok;
+  ok = expect(opened_metadata.server_bypass_ips ==
+                  std::vector<std::string>{"192.0.2.10"},
+              "server-bypass IPs should reach the packet device") &&
+       ok;
+
   ok = expect(wait_until([&device]() {
                 return written_packets(device).size() == 1;
               }),
@@ -532,29 +597,43 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
   return ok;
 }
 
-bool test_unsupported_dtls_is_rejected() {
+bool test_dtls_config_flag_does_not_block_native_engine() {
+  // The native engine v1 is CSTP/TLS-only by design. Historically the engine
+  // had a run-time guard that rejected configs with disable_dtls=false.
+  // That guard was a bug: the Windows platform default for disable_dtls is
+  // false (only relevant for the OpenConnect CLI path), so the native engine
+  // would crash within 250ms for all users who had not explicitly set
+  // disable_dtls=true in config.json. The guard has been removed; the engine
+  // forces CSTP mode internally and accepts configs regardless of the flag.
   bool ok = true;
 
-  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
-  cfg.disable_dtls = false;
+  // Use a fake transport so the test doesn't attempt real network I/O.
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  transport->auth_ok = false; // fail at auth so we stop cleanly
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg);
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = []() {
+    return make_scripted_device(std::make_shared<PacketDeviceState>());
+  };
+
+  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
+  cfg.disable_dtls = false; // intentionally set the "wrong" flag
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg, deps);
   const ecnuvpn::vpn_engine::ValidationResult started = session.start();
   const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
 
-  ok = expect(!started.ok, "native v1 should reject requested DTLS") && ok;
-  ok = expect(started.code == "unsupported_dtls",
-              "DTLS rejection should use unsupported_dtls") &&
-       ok;
-  ok = expect(started.message == "Native engine v1 supports CSTP/TLS only.",
-              "DTLS rejection should use the exact v1 message") &&
-       ok;
-  ok = expect(status.error_code == "unsupported_dtls",
-              "status should retain DTLS error code") &&
-       ok;
+  // Must NOT be rejected as unsupported_dtls — engine forces CSTP mode
+  // regardless of this flag and proceeds to auth.
+  ok = expect(started.code != "unsupported_dtls",
+              "native engine must not reject disable_dtls=false configs") && ok;
+  // Should fail at auth (fake transport rejects auth), not at the DTLS guard.
+  ok = expect(!started.ok, "start should fail at auth stage with fake transport") && ok;
   ok = expect(!status.running && !status.network_ready,
-              "DTLS rejection must not mark session running") &&
-       ok;
+              "session must not be running after auth failure") && ok;
 
   return ok;
 }
@@ -809,6 +888,42 @@ bool test_production_transport_can_own_tls_stream() {
   return ok;
 }
 
+bool test_invalid_metadata_mtu_falls_back_to_safe_default() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  transport->cstp_mtu = 0; // gateway yields an unusable MTU
+  auto device = std::make_shared<PacketDeviceState>();
+  RecordingEventSink events;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = [&device]() {
+    return make_scripted_device(device, std::vector<std::vector<std::uint8_t>>{});
+  };
+  deps.event_sink = &events;
+
+  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
+  cfg.mtu = 1290; // documented safe default
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg, deps);
+  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+
+  ok = expect(started.ok, "start should succeed despite an invalid gateway MTU") &&
+       ok;
+  ok = expect(wait_until([&device]() { return open_count(device) == 1; }),
+              "packet device should still open with a fallback MTU") &&
+       ok;
+  ok = expect(last_open_metadata(device).mtu == 1290,
+              "invalid gateway MTU should fall back to the configured default") &&
+       ok;
+
+  session.stop();
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -887,8 +1002,8 @@ int main() {
   ok = expect(engine_cfg.password == "secret",
               "native engine config should carry per-session password") &&
        ok;
-  ok = expect(engine_cfg.disable_dtls == cfg.disable_dtls,
-              "native engine config should preserve DTLS preference") &&
+  ok = expect(engine_cfg.disable_dtls == true,
+              "native engine config forces disable_dtls=true (CSTP-only; user flag is for OpenConnect)") &&
        ok;
 
   ecnuvpn::vpn_engine::VpnEngineEvent event;
@@ -911,7 +1026,7 @@ int main() {
        ok;
 
   ok = test_injected_fake_start_runs_packet_loop_and_cleans_up() && ok;
-  ok = test_unsupported_dtls_is_rejected() && ok;
+  ok = test_dtls_config_flag_does_not_block_native_engine() && ok;
   ok = test_auth_failure_maps_error_without_device() && ok;
   ok = test_cstp_failure_maps_error_without_device_open() && ok;
   ok = test_packet_loop_start_failure_emits_native_start_failed() && ok;
@@ -920,6 +1035,7 @@ int main() {
   ok = test_default_tls_only_start_does_not_report_missing_transport_factory() &&
        ok;
   ok = test_production_transport_can_own_tls_stream() && ok;
+  ok = test_invalid_metadata_mtu_falls_back_to_safe_default() && ok;
 
   return ok ? 0 : 1;
 }

@@ -3,6 +3,7 @@
 #include "config_manager.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
+#include "runtime/runtime_context.hpp"
 #include "sse_broadcaster.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
@@ -347,6 +348,13 @@ static int handle_config(const std::vector<std::string> &args) {
 
 int main(int argc, char *argv[]) {
   utils::enable_windows_ansi();
+
+  // Pin the runtime state/log directory before any logging happens so that
+  // every process (CLI, elevated desktop-rpc, helper worker, supervisor) writes
+  // to the same location. Honors the ECNUVPN_STATE_DIR environment variable the
+  // desktop sets across the elevation boundary. Payload-scoped overrides (e.g.
+  // app_api desktop-rpc) refine this later when richer context is available.
+  runtime::bootstrap();
 
   std::vector<std::string> raw_args;
   for (int i = 0; i < argc; ++i) {

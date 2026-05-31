@@ -193,13 +193,9 @@ vpn_engine::ValidationResult FakeAnyConnectServer::connect_cstp(
   return vpn_engine::ValidationResult{};
 }
 
-vpn_engine::ValidationResult FakeAnyConnectServer::exchange_packet(
-    const std::vector<std::uint8_t> &packet,
-    std::vector<std::uint8_t> *echoed_packet) {
-  if (!echoed_packet)
-    return invalid("packet_null_out", "echoed packet output must not be null");
-  echoed_packet->clear();
-
+vpn_engine::ValidationResult FakeAnyConnectServer::send_packet(
+    const std::vector<std::uint8_t> &packet) {
+  std::unique_lock<std::mutex> lock(mu_);
   if (closed_)
     return invalid("transport_closed", "server transport is closed");
 
@@ -231,43 +227,75 @@ vpn_engine::ValidationResult FakeAnyConnectServer::exchange_packet(
   if (should_close) {
     close_triggered_ = true;
     closed_ = true;
+    cv_.notify_all();
     return invalid("transport_closed", "server closed during packet loop");
   }
 
-  vpn_engine::protocol::CstpFrame echo;
-  echo.type = vpn_engine::protocol::CstpFrameType::data;
-  echo.payload = decoded.payload;
-
-  std::vector<std::uint8_t> echo_wire;
-  vpn_engine::ValidationResult echo_encoded =
-      vpn_engine::protocol::encode_cstp_frame(echo, &echo_wire);
-  if (!echo_encoded.ok)
-    return echo_encoded;
-
-  vpn_engine::protocol::CstpFrame echo_decoded;
-  vpn_engine::ValidationResult echo_decoded_result =
-      vpn_engine::protocol::decode_cstp_frame(echo_wire, &echo_decoded);
-  if (!echo_decoded_result.ok)
-    return echo_decoded_result;
-  if (echo_decoded.type != vpn_engine::protocol::CstpFrameType::data)
-    return invalid("cstp_unexpected_frame", "expected echoed data frame");
-
-  *echoed_packet = std::move(echo_decoded.payload);
+  echo_queue_.push_back(decoded.payload);
+  cv_.notify_all();
   return vpn_engine::ValidationResult{};
 }
 
-void FakeAnyConnectServer::reset_transport() {
-  closed_ = false;
-  data_frames_on_transport_ = 0;
+vpn_engine::ValidationResult FakeAnyConnectServer::send_control(
+    vpn_engine::protocol::InboundFrameKind kind) {
+  std::unique_lock<std::mutex> lock(mu_);
+  if (closed_)
+    return invalid("transport_closed", "server transport is closed");
+  (void)kind;
+  return vpn_engine::ValidationResult{};
 }
 
-bool FakeAnyConnectServer::closed() const { return closed_; }
+vpn_engine::ValidationResult FakeAnyConnectServer::receive_frame(
+    vpn_engine::protocol::InboundFrame *out) {
+  if (!out)
+    return invalid("packet_null_out", "inbound frame output must not be null");
+  out->kind = vpn_engine::protocol::InboundFrameKind::none;
+  out->payload.clear();
 
-int FakeAnyConnectServer::auth_attempts() const { return auth_attempts_; }
+  std::unique_lock<std::mutex> lock(mu_);
+  cv_.wait(lock, [this] { return !echo_queue_.empty() || closed_; });
 
-int FakeAnyConnectServer::cstp_connects() const { return cstp_connects_; }
+  if (!echo_queue_.empty()) {
+    out->kind = vpn_engine::protocol::InboundFrameKind::data;
+    out->payload = std::move(echo_queue_.front());
+    echo_queue_.pop_front();
+    return vpn_engine::ValidationResult{};
+  }
+
+  return invalid("transport_closed", "server transport is closed");
+}
+
+void FakeAnyConnectServer::close_transport() {
+  std::unique_lock<std::mutex> lock(mu_);
+  closed_ = true;
+  cv_.notify_all();
+}
+
+void FakeAnyConnectServer::reset_transport() {
+  std::unique_lock<std::mutex> lock(mu_);
+  closed_ = false;
+  data_frames_on_transport_ = 0;
+  echo_queue_.clear();
+  cv_.notify_all();
+}
+
+bool FakeAnyConnectServer::closed() const {
+  std::unique_lock<std::mutex> lock(mu_);
+  return closed_;
+}
+
+int FakeAnyConnectServer::auth_attempts() const {
+  std::unique_lock<std::mutex> lock(mu_);
+  return auth_attempts_;
+}
+
+int FakeAnyConnectServer::cstp_connects() const {
+  std::unique_lock<std::mutex> lock(mu_);
+  return cstp_connects_;
+}
 
 int FakeAnyConnectServer::data_frames_received() const {
+  std::unique_lock<std::mutex> lock(mu_);
   return data_frames_received_;
 }
 
@@ -288,6 +316,7 @@ ScriptedPacketDevice::ScriptedPacketDevice(
 
 vpn_engine::ValidationResult
 ScriptedPacketDevice::open(const vpn_engine::TunnelMetadata &metadata) {
+  const std::lock_guard<std::mutex> lock(device_mu_);
   last_open_metadata_ = metadata;
   open_ = true;
   ++open_count_;
@@ -296,6 +325,7 @@ ScriptedPacketDevice::open(const vpn_engine::TunnelMetadata &metadata) {
 
 vpn_engine::ValidationResult
 ScriptedPacketDevice::read_packet(std::vector<std::uint8_t> *packet) {
+  const std::lock_guard<std::mutex> lock(device_mu_);
   if (!packet)
     return invalid("packet_null_out", "packet output must not be null");
   if (!open_)
@@ -310,6 +340,7 @@ ScriptedPacketDevice::read_packet(std::vector<std::uint8_t> *packet) {
 
 vpn_engine::ValidationResult ScriptedPacketDevice::write_packet(
     const std::vector<std::uint8_t> &packet) {
+  const std::lock_guard<std::mutex> lock(device_mu_);
   if (!open_)
     return invalid("packet_device_closed", "packet device is closed");
 
@@ -318,6 +349,7 @@ vpn_engine::ValidationResult ScriptedPacketDevice::write_packet(
 }
 
 void ScriptedPacketDevice::close() {
+  const std::lock_guard<std::mutex> lock(device_mu_);
   if (open_) {
     open_ = false;
     ++close_count_;
@@ -334,11 +366,20 @@ ScriptedPacketDevice::last_open_metadata() const {
   return last_open_metadata_;
 }
 
-int ScriptedPacketDevice::open_count() const { return open_count_; }
+int ScriptedPacketDevice::open_count() const {
+  const std::lock_guard<std::mutex> lock(device_mu_);
+  return open_count_;
+}
 
-int ScriptedPacketDevice::close_count() const { return close_count_; }
+int ScriptedPacketDevice::close_count() const {
+  const std::lock_guard<std::mutex> lock(device_mu_);
+  return close_count_;
+}
 
-bool ScriptedPacketDevice::is_open() const { return open_; }
+bool ScriptedPacketDevice::is_open() const {
+  const std::lock_guard<std::mutex> lock(device_mu_);
+  return open_;
+}
 
 FakeAnyConnectRunResult run_fake_anyconnect_session(
     FakeAnyConnectServer &server, vpn_engine::PacketDevice &device,
@@ -365,8 +406,13 @@ FakeAnyConnectRunResult run_fake_anyconnect_session(
     }
 
     std::vector<std::uint8_t> echoed_packet;
-    vpn_engine::ValidationResult exchanged =
-        server.exchange_packet(packet, &echoed_packet);
+    vpn_engine::ValidationResult exchanged = server.send_packet(packet);
+    if (exchanged.ok) {
+      vpn_engine::protocol::InboundFrame frame;
+      exchanged = server.receive_frame(&frame);
+      if (exchanged.ok)
+        echoed_packet = std::move(frame.payload);
+    }
     if (!exchanged.ok) {
       emit_event(events, "transport.closed", "error", exchanged.message,
                  {{"code", exchanged.code}});

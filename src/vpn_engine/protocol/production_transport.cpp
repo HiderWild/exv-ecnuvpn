@@ -449,16 +449,22 @@ ProductionProtocolTransport::connect_cstp(const std::string &cookie,
   return {};
 }
 
-ValidationResult ProductionProtocolTransport::exchange_packet(
-    const std::vector<std::uint8_t> &packet,
-    std::vector<std::uint8_t> *response_packet) {
-  if (!response_packet)
-    return invalid("packet_null_out", "response packet output must not be null");
-  response_packet->clear();
-
+ValidationResult ProductionProtocolTransport::write_frame_locked(
+    const std::vector<std::uint8_t> &wire) {
+  const std::lock_guard<std::mutex> lock(write_mutex_);
   if (!stream_ || !stream_connected_ || !cstp_connected_)
     return invalid("transport_closed", "CSTP transport is not connected");
 
+  ValidationResult written = stream_->write_all(wire);
+  if (!written.ok) {
+    return sanitized_result(written, current_password_,
+                            current_password_form_encoded_, cookies_.header());
+  }
+  return {};
+}
+
+ValidationResult ProductionProtocolTransport::send_packet(
+    const std::vector<std::uint8_t> &packet) {
   CstpFrame outbound;
   outbound.type = CstpFrameType::data;
   outbound.payload = packet;
@@ -468,11 +474,49 @@ ValidationResult ProductionProtocolTransport::exchange_packet(
   if (!encoded.ok)
     return encoded;
 
-  ValidationResult written = stream_->write_all(wire);
-  if (!written.ok) {
-    return sanitized_result(written, current_password_,
-                            current_password_form_encoded_, cookies_.header());
+  return write_frame_locked(wire);
+}
+
+ValidationResult
+ProductionProtocolTransport::send_control(InboundFrameKind kind) {
+  CstpFrame outbound;
+  switch (kind) {
+  case InboundFrameKind::dpd_request:
+    outbound.type = CstpFrameType::dpd_request;
+    break;
+  case InboundFrameKind::dpd_response:
+    outbound.type = CstpFrameType::dpd_response;
+    break;
+  case InboundFrameKind::keepalive:
+    outbound.type = CstpFrameType::keepalive;
+    break;
+  case InboundFrameKind::disconnect:
+    outbound.type = CstpFrameType::disconnect;
+    break;
+  case InboundFrameKind::data:
+  case InboundFrameKind::none:
+  default:
+    return invalid("cstp_control_invalid",
+                   "send_control requires a control frame kind");
   }
+
+  std::vector<std::uint8_t> wire;
+  ValidationResult encoded = encode_cstp_frame(outbound, &wire);
+  if (!encoded.ok)
+    return encoded;
+
+  return write_frame_locked(wire);
+}
+
+ValidationResult
+ProductionProtocolTransport::receive_frame(InboundFrame *out) {
+  if (!out)
+    return invalid("packet_null_out", "inbound frame output must not be null");
+  out->kind = InboundFrameKind::none;
+  out->payload.clear();
+
+  if (!stream_ || !stream_connected_ || !cstp_connected_)
+    return invalid("transport_closed", "CSTP transport is not connected");
 
   while (true) {
     ByteReader reader(read_buffer_);
@@ -483,14 +527,25 @@ ValidationResult ProductionProtocolTransport::exchange_packet(
                          read_buffer_.begin() +
                              static_cast<std::ptrdiff_t>(reader.position()));
 
-      if (inbound.type == CstpFrameType::data) {
-        *response_packet = std::move(inbound.payload);
-        return {};
+      switch (inbound.type) {
+      case CstpFrameType::data:
+        out->kind = InboundFrameKind::data;
+        break;
+      case CstpFrameType::keepalive:
+        out->kind = InboundFrameKind::keepalive;
+        break;
+      case CstpFrameType::dpd_request:
+        out->kind = InboundFrameKind::dpd_request;
+        break;
+      case CstpFrameType::dpd_response:
+        out->kind = InboundFrameKind::dpd_response;
+        break;
+      case CstpFrameType::disconnect:
+        out->kind = InboundFrameKind::disconnect;
+        break;
       }
-      if (inbound.type == CstpFrameType::disconnect) {
-        return invalid("transport_closed", "CSTP peer disconnected");
-      }
-      continue;
+      out->payload = std::move(inbound.payload);
+      return {};
     }
 
     if (decoded.code != "cstp_frame_incomplete") {
@@ -505,6 +560,7 @@ ValidationResult ProductionProtocolTransport::exchange_packet(
 }
 
 void ProductionProtocolTransport::disconnect() {
+  const std::lock_guard<std::mutex> lock(write_mutex_);
   if (stream_ && stream_connected_) {
     CstpFrame frame;
     frame.type = CstpFrameType::disconnect;
@@ -525,6 +581,7 @@ void ProductionProtocolTransport::disconnect() {
 }
 
 void ProductionProtocolTransport::reset_for_reconnect() {
+  const std::lock_guard<std::mutex> lock(write_mutex_);
   if (stream_ && stream_connected_)
     stream_->close();
 

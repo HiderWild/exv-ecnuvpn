@@ -1,3 +1,4 @@
+#include "vpn_engine/native_error_contract.hpp"
 #include "vpn_engine/native_session_store.hpp"
 #include "vpn_engine/session_state.hpp"
 
@@ -439,6 +440,57 @@ bool test_marker_only_malformed_stopped_and_stale_are_disconnected(
 
 } // namespace
 
+bool test_native_error_codes_map_to_contract_codes() {
+  namespace store = ecnuvpn::vpn_engine;
+  bool ok = true;
+
+  // Direct internal codes map to their canonical contract code.
+  ok = expect(store::map_native_error_to_contract_code("tls_verify_failed",
+                                                       "certificate rejected") ==
+                  "tls_verify_failed",
+              "tls_verify_failed should pass through") &&
+       ok;
+  ok = expect(store::map_native_error_to_contract_code("auth_failed",
+                                                       "login failed") ==
+                  "auth_failed",
+              "auth_failed should pass through") &&
+       ok;
+  ok = expect(store::map_native_error_to_contract_code("unsupported_auth_flow",
+                                                       "") == "auth_failed",
+              "unsupported_auth_flow should collapse to auth_failed") &&
+       ok;
+  ok = expect(store::map_native_error_to_contract_code("unsupported_dtls",
+                                                       "") == "unsupported_dtls",
+              "unsupported_dtls should pass through") &&
+       ok;
+
+  // Platform device failures are recognized via message hints.
+  ok = expect(store::map_native_error_to_contract_code(
+                  "native_packet_device_factory_failed",
+                  "Wintun adapter could not be opened") == "wintun_missing",
+              "wintun device failure should map to wintun_missing") &&
+       ok;
+  ok = expect(store::map_native_error_to_contract_code(
+                  "utun_permission_denied", "") == "utun_permission_denied",
+              "utun_permission_denied should pass through") &&
+       ok;
+  ok = expect(store::map_native_error_to_contract_code(
+                  "native_packet_device_factory_failed",
+                  "utun open failed: permission denied") ==
+                  "utun_permission_denied",
+              "utun permission message should map to utun_permission_denied") &&
+       ok;
+
+  // Unknown codes are returned unchanged so the frontend can fall back.
+  ok = expect(store::map_native_error_to_contract_code("protocol_error",
+                                                       "bad frame") ==
+                  "protocol_error",
+              "unrecognized codes should pass through unchanged") &&
+       ok;
+
+  return ok;
+}
+
 int main() {
   namespace fs = std::filesystem;
 
@@ -461,6 +513,7 @@ int main() {
   ok = test_clear_native_session_states_clears_known_config_dirs(root) && ok;
   ok = test_marker_only_malformed_stopped_and_stale_are_disconnected(root) &&
        ok;
+  ok = test_native_error_codes_map_to_contract_codes() && ok;
 
   fs::remove_all(root);
   return ok ? 0 : 1;

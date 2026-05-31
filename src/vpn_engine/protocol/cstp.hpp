@@ -20,9 +20,11 @@ struct CstpFrame {
 
 // A minimal C++17 byte reader to support stream-style decoding.
 //
-// Note: The CSTP "frame" format used by this clean-room library is a
-// fake-server/test-harness framing only and is NOT a verified production CSTP
-// wire format.
+// Wire format note: this library encodes/decodes the AnyConnect-compatible
+// CSTP data-channel record framing as described by the public CSTP/AnyConnect
+// protocol description (the 8-byte "STF" record header). It is written
+// independently for interoperability and does not reproduce any third-party
+// implementation source.
 class ByteReader {
 public:
   ByteReader(const std::uint8_t *data, std::size_t size);
@@ -37,6 +39,7 @@ public:
   bool can_read(std::size_t n) const;
 
   ValidationResult read_u8(std::uint8_t *out);
+  ValidationResult read_be_u16(std::uint16_t *out);
   ValidationResult read_be_u32(std::uint32_t *out);
   ValidationResult read_payload(std::size_t n, std::vector<std::uint8_t> *out);
 

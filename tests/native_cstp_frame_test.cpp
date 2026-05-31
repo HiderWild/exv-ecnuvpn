@@ -125,14 +125,49 @@ int main() {
     auto r = encode_cstp_frame(f, &out);
     ok = expect(r.ok, "keepalive frame should encode") && ok;
 
-    // [type=1][len=0]
-    ok = expect(out == bytes({1, 0, 0, 0, 0}), "keepalive encoding should match") && ok;
+    // STF header: 'S''T''F' 0x01 | len_be16=0 | type=0x07 | 0x00
+    ok = expect(out == bytes({0x53, 0x54, 0x46, 0x01, 0x00, 0x00, 0x07, 0x00}),
+                "keepalive encoding should match STF framing") &&
+         ok;
+  }
+
+  // Byte-exact encode vectors for every frame type (empty payload).
+  {
+    struct Case {
+      CstpFrameType type;
+      std::uint8_t tag;
+      const char *name;
+    };
+    const Case cases[] = {
+        {CstpFrameType::data, 0x00, "data"},
+        {CstpFrameType::dpd_request, 0x03, "dpd_request"},
+        {CstpFrameType::dpd_response, 0x04, "dpd_response"},
+        {CstpFrameType::disconnect, 0x05, "disconnect"},
+        {CstpFrameType::keepalive, 0x07, "keepalive"},
+    };
+    for (const Case &c : cases) {
+      CstpFrame f;
+      f.type = c.type;
+      std::vector<std::uint8_t> out;
+      auto r = encode_cstp_frame(f, &out);
+      ok = expect(r.ok, "frame type should encode") && ok;
+      ok = expect(out == bytes({0x53, 0x54, 0x46, 0x01, 0x00, 0x00, c.tag, 0x00}),
+                  c.name) &&
+           ok;
+
+      // Round-trip decode restores the type.
+      CstpFrame decoded;
+      auto d = decode_cstp_frame(out, &decoded);
+      ok = expect(d.ok && decoded.type == c.type, "frame type round-trips") && ok;
+    }
   }
 
   // Decode data frame.
   {
     const std::vector<std::uint8_t> payload = {0x01, 0x02, 0x03, 0x04};
-    const std::vector<std::uint8_t> wire = bytes({0, 0, 0, 0, 4, 0x01, 0x02, 0x03, 0x04});
+    const std::vector<std::uint8_t> wire =
+        bytes({0x53, 0x54, 0x46, 0x01, 0x00, 0x04, 0x00, 0x00, 0x01, 0x02, 0x03,
+               0x04});
 
     CstpFrame f;
     auto r = decode_cstp_frame(wire, &f);
@@ -143,8 +178,10 @@ int main() {
 
   // Concatenated frames: decode first then decode second.
   {
-    const std::vector<std::uint8_t> frame1 = bytes({1, 0, 0, 0, 0}); // keepalive
-    const std::vector<std::uint8_t> frame2 = bytes({0, 0, 0, 0, 2, 0xAA, 0xBB}); // data
+    const std::vector<std::uint8_t> frame1 =
+        bytes({0x53, 0x54, 0x46, 0x01, 0x00, 0x00, 0x07, 0x00}); // keepalive
+    const std::vector<std::uint8_t> frame2 = bytes(
+        {0x53, 0x54, 0x46, 0x01, 0x00, 0x02, 0x00, 0x00, 0xAA, 0xBB}); // data
 
     std::vector<std::uint8_t> wire;
     wire.insert(wire.end(), frame1.begin(), frame1.end());
@@ -168,7 +205,8 @@ int main() {
 
   // First frame with trailing bytes should be accepted by ByteReader decode.
   {
-    const std::vector<std::uint8_t> wire = bytes({1, 0, 0, 0, 0, 0xFF});
+    const std::vector<std::uint8_t> wire =
+        bytes({0x53, 0x54, 0x46, 0x01, 0x00, 0x00, 0x07, 0x00, 0xFF});
     ByteReader reader(wire);
     CstpFrame f;
     auto r = decode_cstp_frame(&reader, &f);
@@ -177,25 +215,50 @@ int main() {
     ok = expect(reader.remaining() == 1, "trailing byte should remain") && ok;
   }
 
-  // Partial frame fails with stable code and must not consume bytes.
+  // Partial payload fails with stable code and must not consume bytes.
   {
-    // Claims payload_len=3 but only provides 2 bytes.
-    const std::vector<std::uint8_t> wire = bytes({0, 0, 0, 0, 3, 0xAA, 0xBB});
+    // Header claims payload_len=3 but only provides 2 payload bytes.
+    const std::vector<std::uint8_t> wire =
+        bytes({0x53, 0x54, 0x46, 0x01, 0x00, 0x03, 0x00, 0x00, 0xAA, 0xBB});
     ByteReader reader(wire);
     CstpFrame f;
     auto r = decode_cstp_frame(&reader, &f);
     ok = expect(!r.ok && r.code == "cstp_frame_incomplete",
-                "partial frame must be rejected deterministically") && ok;
+                "partial payload must be rejected deterministically") && ok;
     ok = expect(reader.position() == 0, "reader position must not advance on incomplete") && ok;
     ok = expect(reader.remaining() == wire.size(), "reader remaining must be unchanged") && ok;
   }
 
-  // Reject oversized frames.
+  // Partial header (fewer than 8 header bytes) is incomplete, not an error.
   {
-    // payload_len = 0x0010_0001 (1 MiB + 1)
-    const std::vector<std::uint8_t> wire = bytes({0, 0, 0x10, 0x00, 0x01});
+    const std::vector<std::uint8_t> wire = bytes({0x53, 0x54, 0x46, 0x01, 0x00});
+    ByteReader reader(wire);
     CstpFrame f;
-    auto r = decode_cstp_frame(wire, &f);
+    auto r = decode_cstp_frame(&reader, &f);
+    ok = expect(!r.ok && r.code == "cstp_frame_incomplete",
+                "partial header must be reported as incomplete") && ok;
+    ok = expect(reader.position() == 0, "reader must not advance on partial header") && ok;
+  }
+
+  // Bad magic is a hard error (not incomplete), so callers stop reading.
+  {
+    const std::vector<std::uint8_t> wire =
+        bytes({0x00, 0x54, 0x46, 0x01, 0x00, 0x00, 0x07, 0x00});
+    ByteReader reader(wire);
+    CstpFrame f;
+    auto r = decode_cstp_frame(&reader, &f);
+    ok = expect(!r.ok && r.code == "cstp_bad_magic",
+                "bad magic must fail deterministically") && ok;
+    ok = expect(reader.position() == 0, "reader must not advance on bad magic") && ok;
+  }
+
+  // Reject oversized frames at encode time (payload exceeds uint16 length).
+  {
+    CstpFrame f;
+    f.type = CstpFrameType::data;
+    f.payload.assign(0x10000, 0x00); // 65536 bytes, one past uint16 max
+    std::vector<std::uint8_t> out;
+    auto r = encode_cstp_frame(f, &out);
     ok = expect(!r.ok && r.code == "cstp_frame_oversized",
                 "oversized payload must be rejected deterministically") && ok;
   }

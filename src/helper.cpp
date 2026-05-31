@@ -2,6 +2,8 @@
 #include "helper_ipc.hpp"
 
 #include "logger.hpp"
+#include "runtime/runtime_context.hpp"
+#include "feedback/feedback.hpp"
 #include "platform/common/helper_client.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
@@ -9,6 +11,7 @@
 #include "utils.hpp"
 #include "vpn.hpp"
 #include "virtual_network.hpp"
+#include "vpn_engine/native_error_contract.hpp"
 #include "vpn_engine/native_session_store.hpp"
 
 #include <cerrno>
@@ -361,10 +364,9 @@ void reap_finished_request_handlers() {
 
 nlohmann::json make_error(const std::string &message,
                           const std::string &code = std::string()) {
-  nlohmann::json result{{"ok", false}, {"message", message}};
-  if (!code.empty())
-    result["code"] = code;
-  return result;
+  // Route every helper error through the unified feedback module so it always
+  // carries a canonical, non-empty code plus recoverable/recommended_action.
+  return feedback::make_error(message, code);
 }
 
 nlohmann::json make_helper_capabilities() {
@@ -690,16 +692,6 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
               "server=" + state.server +
                   " routes=" + std::to_string(state.route_count));
 
-  if (is_native_session(state)) {
-    pid_t supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
-    if (supervisor_pid <= 0 || !is_process_alive(supervisor_pid)) {
-      timing.finish(false, "reason=native_session_not_durable");
-      return make_error(
-          "Native VPN helper-managed sessions are not available in this build yet.",
-          "native_session_not_durable");
-    }
-  }
-
   nlohmann::json worker_request{{"uid", static_cast<unsigned int>(state.uid)},
                                 {"gid", static_cast<unsigned int>(state.gid)},
                                 {"home", state.home},
@@ -746,7 +738,24 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
         "VPN process started, but network routes are not ready yet.");
   }
 
+  std::string native_failure_code;
+  std::string native_failure_message;
   if (is_native_session(state)) {
+    vpn_engine::NativeSessionProbe failure_probe;
+    failure_probe.is_process_alive = [](int pid) {
+      return is_process_alive(pid);
+    };
+    vpn_engine::NativeSessionSnapshot native_failure =
+        vpn_engine::read_native_session_snapshot(state.config_dir,
+                                                 failure_probe);
+    if (!native_failure.failure_code.empty()) {
+      native_failure_code = vpn_engine::map_native_error_to_contract_code(
+          native_failure.failure_code, native_failure.failure_message);
+      native_failure_message = native_failure.failure_message;
+    }
+    // Clear state now that we have captured the failure code. This was
+    // previously cleared prematurely inside start_with_password (Bug 2).
+    vpn_engine::clear_native_session_state(state.config_dir);
     remove_file_if_exists(pid_path_for(state));
     remove_file_if_exists(supervisor_pid_path_for(state));
   } else {
@@ -762,6 +771,18 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
     return make_error("VPN authentication failed or the server rejected the connection.",
                       "auth_failed");
   }
+  if (!native_failure_code.empty()) {
+    logger::warn("Native VPN connection failed with code: " +
+                 native_failure_code);
+    return make_error(native_failure_message.empty()
+                          ? "The native VPN engine failed to establish the connection."
+                          : native_failure_message,
+                      native_failure_code);
+  }
+  logger::event("ERROR", "helper", feedback::code::kConnectionFailed,
+                "VPN connection failed without a specific engine failure code",
+                {{"status", std::to_string(status)},
+                 {"native", is_native_session(state) ? "true" : "false"}});
   return make_error("Failed to establish the VPN connection. Check logs with: exv logs");
 }
 
@@ -1028,7 +1049,7 @@ int worker_main(const std::string &request_path) {
     std::string home = request.at("home").get<std::string>();
     std::string config_dir = request.at("config_dir").get<std::string>();
 
-    utils::set_runtime_path_override(home, config_dir);
+    runtime::bootstrap(config_dir, home, /*force=*/true);
     utils::set_runtime_owner(uid, gid);
     logger::init();
     int result = vpn::start_with_password(cfg, plaintext_password, retry_limit);

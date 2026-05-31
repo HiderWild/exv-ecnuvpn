@@ -35,6 +35,8 @@ struct NativeSessionSnapshot {
   std::string server;
   int route_count = 0;
   int retry_limit = 0;
+  std::string failure_code;
+  std::string failure_message;
 };
 
 class NativeSessionEventRecorder final : public EventSink {

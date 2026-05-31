@@ -3,11 +3,14 @@
 #include "vpn_engine/event_sink.hpp"
 #include "vpn_engine/packet_device.hpp"
 #include "vpn_engine/protocol/auth.hpp"
+#include "vpn_engine/protocol/session.hpp"
 #include "vpn_engine/session_state.hpp"
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -45,9 +48,19 @@ public:
   connect_cstp(const std::string &cookie,
                vpn_engine::TunnelMetadata *metadata);
 
+  // Full-duplex data plane: the fake echoes each outbound data packet back as
+  // an inbound data frame. send_packet enqueues the echo; receive_frame blocks
+  // until an echo is available or the transport is closed.
   vpn_engine::ValidationResult
-  exchange_packet(const std::vector<std::uint8_t> &packet,
-                  std::vector<std::uint8_t> *echoed_packet);
+  send_packet(const std::vector<std::uint8_t> &packet);
+  vpn_engine::ValidationResult
+  send_control(vpn_engine::protocol::InboundFrameKind kind);
+  vpn_engine::ValidationResult
+  receive_frame(vpn_engine::protocol::InboundFrame *out);
+
+  // Close the data-plane transport: unblocks a pending receive_frame with a
+  // transport_closed result. Mirrors the production transport disconnect().
+  void close_transport();
 
   void reset_transport();
 
@@ -58,6 +71,9 @@ public:
 
 private:
   FakeAnyConnectServerOptions options_;
+  mutable std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<std::vector<std::uint8_t>> echo_queue_;
   bool closed_ = false;
   bool close_triggered_ = false;
   int auth_attempts_ = 0;
@@ -97,6 +113,7 @@ public:
   bool is_open() const;
 
 private:
+  mutable std::mutex device_mu_;
   std::deque<std::vector<std::uint8_t>> packets_;
   std::vector<std::vector<std::uint8_t>> written_packets_;
   vpn_engine::TunnelMetadata last_open_metadata_;

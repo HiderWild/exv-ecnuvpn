@@ -4,6 +4,7 @@
 #include "config_api.hpp"
 #include "config_manager.hpp"
 #include "crypto.hpp"
+#include "feedback/feedback.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
@@ -13,6 +14,7 @@
 #include "platform/common/oneshot_bootstrap.hpp"
 #include "platform/common/runtime_status.hpp"
 #include "platform/common/service_status.hpp"
+#include "runtime/runtime_context.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
 #include "vpn_engine/native_engine.hpp"
@@ -37,10 +39,15 @@ namespace {
 
 nlohmann::json error(const std::string &message,
                      const std::string &code = std::string()) {
-  nlohmann::json result{{"ok", false}, {"error", message}};
-  if (!code.empty())
-    result["code"] = code;
-  return result;
+  // Route through the unified feedback module: guarantees a canonical,
+  // non-empty code plus recoverable/recommended_action. The frontend contract
+  // uses the "error" key for the human message.
+  feedback::ErrorInfo info = feedback::lookup_error(code, message);
+  return nlohmann::json{{"ok", false},
+                        {"error", message},
+                        {"code", info.code},
+                        {"recoverable", info.recoverable},
+                        {"recommended_action", info.recommended_action}};
 }
 
 std::string json_string(const nlohmann::json &object, const char *key,
@@ -404,7 +411,12 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
 nlohmann::json logs_json(const nlohmann::json &payload) {
   config::ConfigManager mgr = make_config_manager();
   Config cfg = mgr.load();
-  std::string log_path = utils::expand_home(cfg.log_file);
+  (void)cfg;
+  // Read from the unified log path pinned by the runtime module, NOT from
+  // cfg.log_file, so the UI sees exactly what every process writes and what
+  // `exv logs` shows. Using cfg.log_file here previously diverged from the
+  // real log location and made logs appear empty in the app.
+  std::string log_path = runtime::paths().log_path;
   int max_lines = payload.value("lines", 100);
   if (max_lines < 1)
     max_lines = 1;

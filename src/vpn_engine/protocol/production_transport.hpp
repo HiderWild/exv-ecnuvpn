@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -26,8 +27,9 @@ public:
   ValidationResult connect_cstp(const std::string &cookie,
                                 TunnelMetadata *metadata) override;
   ValidationResult
-  exchange_packet(const std::vector<std::uint8_t> &packet,
-                  std::vector<std::uint8_t> *response_packet) override;
+  send_packet(const std::vector<std::uint8_t> &packet) override;
+  ValidationResult send_control(InboundFrameKind kind) override;
+  ValidationResult receive_frame(InboundFrame *out) override;
 
   void disconnect() override;
   void reset_for_reconnect() override;
@@ -36,6 +38,7 @@ private:
   ValidationResult read_more();
   ValidationResult read_http_response(bool leave_body_in_buffer,
                                       HttpResponse *response);
+  ValidationResult write_frame_locked(const std::vector<std::uint8_t> &wire);
 
   std::unique_ptr<TlsStream> owned_stream_;
   TlsStream *stream_ = nullptr;
@@ -49,6 +52,10 @@ private:
   std::vector<std::uint8_t> read_buffer_;
   bool stream_connected_ = false;
   bool cstp_connected_ = false;
+
+  // Serializes outbound writes (send_packet / send_control / disconnect frame)
+  // so the inbound read thread and outbound write thread can share one stream.
+  std::mutex write_mutex_;
 };
 
 } // namespace protocol

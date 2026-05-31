@@ -61,6 +61,8 @@ set(EXV_COMMON_SOURCES
     src/vpn_runtime.cpp
     src/tunnel.cpp
     src/virtual_network.cpp
+    src/runtime/runtime_context.cpp
+    src/feedback/feedback.cpp
     src/logger.cpp
     src/utils.cpp
 )
@@ -272,6 +274,18 @@ target_include_directories(platform_status_models_test PRIVATE
 
 add_test(NAME platform_status_models_test COMMAND platform_status_models_test)
 
+add_executable(feedback_test
+    tests/feedback_test.cpp
+    src/feedback/feedback.cpp
+)
+
+target_include_directories(feedback_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME feedback_test COMMAND feedback_test)
+
 add_executable(runtime_status_native_test
     tests/runtime_status_native_test.cpp
     src/platform/common/runtime_status.cpp
@@ -392,23 +406,44 @@ add_executable(native_event_sink_test
     tests/native_event_sink_test.cpp
     src/vpn_engine/event_sink.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/protocol/auth.cpp
+    src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/http.cpp
+    src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/session.cpp
+    src/vpn_engine/protocol/tls_stream.cpp
     src/vpn_engine/protocol/url.cpp
     src/vpn_engine/session_state.cpp
 )
 
 if(APPLE)
-    target_sources(native_event_sink_test PRIVATE src/platform/darwin/config_defaults.cpp)
+    target_sources(native_event_sink_test PRIVATE
+        src/platform/darwin/config_defaults.cpp
+        src/platform/darwin/native_tls_stream.cpp
+        src/platform/darwin/native_packet_device.cpp
+        src/platform/darwin/native_route_config.cpp
+        src/platform/darwin/native_utun.cpp
+    )
 elseif(UNIX AND NOT APPLE)
     target_sources(native_event_sink_test PRIVATE src/platform/common/config_defaults_linux.cpp)
 elseif(WIN32)
-    target_sources(native_event_sink_test PRIVATE src/platform/win32/config_defaults.cpp)
+    target_sources(native_event_sink_test PRIVATE
+        src/platform/win32/config_defaults.cpp
+        src/platform/win32/native_tls_stream.cpp
+        src/platform/win32/native_packet_device.cpp
+        src/platform/win32/native_wintun.cpp
+        src/platform/win32/native_ip_config.cpp
+        src/platform/win32/path_utils.cpp
+        src/utils.cpp
+    )
 endif()
 
 target_include_directories(native_event_sink_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(native_event_sink_test PRIVATE Threads::Threads ${EXV_PLATFORM_LIBS})
 
 add_test(NAME native_event_sink_test COMMAND native_event_sink_test)
 

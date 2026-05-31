@@ -543,6 +543,8 @@ bool failed_cstp_connect_read_clears_stale_bytes_before_retry() {
 bool exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() {
   using ecnuvpn::vpn_engine::protocol::CstpFrame;
   using ecnuvpn::vpn_engine::protocol::CstpFrameType;
+  using ecnuvpn::vpn_engine::protocol::InboundFrame;
+  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
   using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
   using ecnuvpn::vpn_engine::protocol::decode_cstp_frame;
 
@@ -564,13 +566,8 @@ bool exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() {
               "CSTP should succeed before packet exchange") &&
        ok;
 
-  std::vector<std::uint8_t> response;
-  auto exchanged = transport.exchange_packet(bytes({0xaa, 0xbb}), &response);
-
-  ok = expect(exchanged.ok, "packet exchange should succeed") && ok;
-  ok = expect(response == bytes({0x45, 0x00, 0x00, 0x14}),
-              "packet exchange should return inbound IP packet") &&
-       ok;
+  auto sent = transport.send_packet(bytes({0xaa, 0xbb}));
+  ok = expect(sent.ok, "send_packet should succeed") && ok;
 
   CstpFrame outbound;
   auto decoded = decode_cstp_frame(stream.writes().back(), &outbound);
@@ -582,10 +579,21 @@ bool exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() {
               "outbound CSTP frame should contain packet bytes") &&
        ok;
 
+  InboundFrame frame;
+  auto received = transport.receive_frame(&frame);
+  ok = expect(received.ok, "receive_frame should succeed") && ok;
+  ok = expect(frame.kind == InboundFrameKind::data,
+              "inbound frame should be data") &&
+       ok;
+  ok = expect(frame.payload == bytes({0x45, 0x00, 0x00, 0x14}),
+              "receive_frame should reassemble partial inbound IP packet") &&
+       ok;
+
   return ok;
 }
 
 bool eof_during_cstp_exchange_returns_transport_closed() {
+  using ecnuvpn::vpn_engine::protocol::InboundFrame;
   using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
@@ -602,14 +610,16 @@ bool eof_during_cstp_exchange_returns_transport_closed() {
               "CSTP should succeed before EOF exchange") &&
        ok;
 
-  std::vector<std::uint8_t> response = bytes({0xff});
-  auto exchanged = transport.exchange_packet(bytes({0xaa}), &response);
+  auto sent = transport.send_packet(bytes({0xaa}));
+  ok = expect(sent.ok, "send_packet should succeed before EOF read") && ok;
 
-  ok = expect(!exchanged.ok, "EOF during CSTP should fail exchange") && ok;
-  ok = expect(exchanged.code == "transport_closed",
+  InboundFrame frame;
+  auto received = transport.receive_frame(&frame);
+
+  ok = expect(!received.ok, "EOF during CSTP read should fail receive") && ok;
+  ok = expect(received.code == "transport_closed",
               "EOF during CSTP should return transport_closed") &&
        ok;
-  ok = expect(response.empty(), "failed exchange should clear output packet") && ok;
 
   return ok;
 }

@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
+#include "runtime/runtime_context.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/openconnect_process.hpp"
 #include "platform/common/process_control.hpp"
@@ -10,6 +11,7 @@
 #include "tunnel.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
+#include "vpn_engine/event_sink.hpp"
 #include "vpn_engine/native_engine.hpp"
 #include "vpn_engine/native_session_store.hpp"
 
@@ -366,8 +368,135 @@ static std::string describe_retry_policy(int retry_limit) {
                          : std::to_string(retry_limit) + " retries";
 }
 
+class LoggingEventSink final : public vpn_engine::EventSink {
+public:
+  explicit LoggingEventSink(vpn_engine::EventSink *inner) : inner_(inner) {}
+
+  void emit(const vpn_engine::VpnEngineEvent &event) override {
+    std::string message = "[native-engine] " + event.type;
+    if (!event.message.empty())
+      message += ": " + event.message;
+
+    const auto code = event.fields.find("code");
+    if (code != event.fields.end() && !code->second.empty())
+      message += " (code=" + code->second + ")";
+
+    if (event.level == "error")
+      logger::error(message);
+    else if (event.level == "warn")
+      logger::warn(message);
+    else
+      logger::info(message);
+
+    if (inner_)
+      inner_->emit(event);
+  }
+
+private:
+  vpn_engine::EventSink *inner_;
+};
+
+// Durable owner for native-engine sessions. The native packet loop runs on a
+// background thread that lives inside the *process* hosting the
+// NativeVpnEngineSession, so the session must be owned by this long-lived
+// supervisor (not the short-lived CLI/RPC invocation that requested the
+// connection). This process records itself as the durable supervisor PID in
+// native-session-state.json and holds the session open until a stop is
+// requested or the retry budget is exhausted.
+static int run_native_supervisor(const Config &cfg, const std::string &password,
+                                 int retry_limit) {
+  signal(SIGTERM, handle_supervisor_signal);
+  signal(SIGINT, handle_supervisor_signal);
+
+  logger::info("Native VPN supervisor started, retry policy: " +
+               describe_retry_policy(retry_limit));
+
+  const std::string config_dir = utils::get_config_dir();
+  const pid_t own_pid = current_process_pid();
+  int reconnect_attempts_used = 0;
+  bool first_attempt = true;
+
+  while (!supervisor_stop_requested) {
+    if (!first_attempt) {
+      if (retry_limit == 0)
+        break;
+      if (retry_limit > -1 && reconnect_attempts_used >= retry_limit) {
+        logger::warn("Native VPN supervisor reached retry limit: " +
+                     std::to_string(retry_limit));
+        break;
+      }
+      ++reconnect_attempts_used;
+      logger::warn("Native VPN session ended; reconnect attempt " +
+                   std::to_string(reconnect_attempts_used) +
+                   (retry_limit > -1 ? ("/" + std::to_string(retry_limit))
+                                     : " (infinite mode)"));
+      sleep_ms(2000);
+      if (supervisor_stop_requested)
+        break;
+    }
+
+    vpn_engine::NativeSessionRecord record;
+    record.pid = -1;
+    record.supervisor_pid = static_cast<int>(own_pid);
+    record.server = cfg.server;
+    record.route_count = static_cast<int>(cfg.routes.size());
+    record.retry_limit = retry_limit;
+
+    vpn_engine::NativeSessionEventRecorder recorder(config_dir, record);
+  LoggingEventSink logging_sink(&recorder);
+    vpn_engine::NativeVpnEngineDependencies dependencies =
+        vpn_engine::default_native_engine_dependencies();
+  dependencies.event_sink = &logging_sink;
+
+    vpn_engine::NativeVpnEngineSession session(
+        vpn_engine::make_native_config(cfg, password), dependencies);
+
+    auto result = session.start();
+    if (!result.ok) {
+      logger::error("Native VPN engine start failed: " + result.code);
+      recorder.mark_stopped();
+      first_attempt = false;
+      continue;
+    }
+
+    logger::info("Native VPN session established under durable supervisor, PID: " +
+                 std::to_string(own_pid));
+
+    // Own the session for the lifetime of this process: hold it open until the
+    // session stops on its own (transport failure) or a stop is requested.
+    while (!supervisor_stop_requested) {
+      vpn_engine::VpnEngineStatus status = session.status();
+      if (!status.running)
+        break;
+      sleep_ms(250);
+    }
+
+    session.stop();
+    recorder.mark_stopped();
+
+    if (supervisor_stop_requested)
+      break;
+
+    first_attempt = false;
+  }
+
+  clear_runtime_state();
+  // Do NOT clear native session state here. When the engine fails to reach a
+  // network-ready state, the recorder has just persisted the real failure_code
+  // to native-session-state.json. handle_start() reads that code after the
+  // worker process exits and is responsible for clearing the file afterwards.
+  // Clearing here destroys the failure code before the desktop can see it,
+  // producing a generic "Failed to establish the VPN connection" error.
+  logger::info("Native VPN supervisor stopped");
+  return 0;
+}
+
 static int run_supervisor(const Config &cfg, const std::string &password,
                           int retry_limit) {
+  if (cfg.vpn_engine == "native") {
+    return run_native_supervisor(cfg, password, retry_limit);
+  }
+
   signal(SIGTERM, handle_supervisor_signal);
   signal(SIGINT, handle_supervisor_signal);
 
@@ -600,7 +729,7 @@ int supervisor_main() {
     nlohmann::json request = nlohmann::json::parse(payload.str());
     std::string home = request.value("home", std::string());
     std::string config_dir = request.value("config_dir", std::string());
-    utils::set_runtime_path_override(home, config_dir);
+    runtime::bootstrap(config_dir, home, /*force=*/true);
     logger::init();
     write_supervisor_pid(static_cast<pid_t>(GetCurrentProcessId()));
     Config cfg = request.at("config").get<Config>();
@@ -829,56 +958,77 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
     }
 
     const pid_t process_pid = current_process_pid();
-    pid_t supervisor_pid = read_supervisor_pid();
-    if (supervisor_pid <= 0 || supervisor_pid == process_pid ||
-        !is_process_alive(supervisor_pid)) {
-      supervisor_pid = -1;
-    }
-
-    vpn_engine::NativeSessionRecord native_record;
-    native_record.pid = -1;
-    native_record.supervisor_pid = static_cast<int>(supervisor_pid);
-    native_record.server = cfg.server;
-    native_record.route_count = static_cast<int>(cfg.routes.size());
-    native_record.retry_limit = retry_limit;
-
-    if (!vpn_engine::native_session_identity_can_outlive_process(
-            native_record, static_cast<int>(process_pid))) {
-      utils::print_error(
-          "Native VPN helper-managed sessions are not available in this build yet.");
-      logger::error(
-          "Native VPN engine start refused: no durable managed session PID");
-      timing.finish(false, "reason=native_session_not_durable");
+    pid_t existing_supervisor = read_supervisor_pid();
+    if (existing_supervisor > 0 && existing_supervisor != process_pid &&
+        is_process_alive(existing_supervisor)) {
+      utils::print_warning("VPN is already running (supervisor PID: " +
+                           std::to_string(existing_supervisor) + ")");
+      utils::print_info("Use 'exv stop' to stop the current connection first.");
+      timing.finish(false, "reason=already_running");
       return 1;
     }
 
-    vpn_engine::NativeSessionEventRecorder recorder(utils::get_config_dir(),
-                                                    native_record);
-    vpn_engine::NativeVpnEngineDependencies dependencies =
-        vpn_engine::default_native_engine_dependencies();
-    dependencies.event_sink = &recorder;
-
-    vpn_engine::NativeVpnEngineSession session(
-        vpn_engine::make_native_config(cfg, plaintext_password), dependencies);
-    auto result = session.start();
-    if (!result.ok) {
-      utils::print_error(result.message);
-      logger::error("Native VPN engine start failed: " + result.code);
-      timing.finish(false, "reason=" + result.code);
+    // The native packet loop runs on a background thread owned by the process
+    // that hosts NativeVpnEngineSession. Spawn a durable supervisor process to
+    // own the session so it outlives this short-lived CLI/RPC invocation.
+    int spawned_supervisor_pid = -1;
+    if (!platform::spawn_vpn_supervisor_process(cfg, plaintext_password,
+                                                retry_limit, run_supervisor,
+                                                &spawned_supervisor_pid)) {
+      utils::print_error("Failed to launch native VPN supervisor.");
+      logger::error("Failed to spawn native VPN supervisor process");
+      timing.finish(false, "reason=spawn_supervisor_failed");
       return 1;
     }
+    write_supervisor_pid(static_cast<pid_t>(spawned_supervisor_pid));
+    timing.mark("spawn_native_supervisor",
+                "pid=" + std::to_string(spawned_supervisor_pid));
 
-    const vpn_engine::VpnEngineStatus status = session.status();
-    if (!status.running) {
-      recorder.mark_stopped();
-      utils::print_error("Native VPN engine exited before a managed session was established.");
-      logger::error("Native VPN engine exited before a managed session was established");
-      timing.finish(false, "reason=native_session_not_running");
-      return 1;
+    // Wait for the supervisor-owned session to reach network-ready, sourcing
+    // status from native-session-state.json (never the legacy route-ready
+    // marker as the primary readiness signal).
+    vpn_engine::NativeSessionProbe probe;
+    probe.is_process_alive = [](int pid) {
+      return platform::is_process_alive(pid);
+    };
+    for (int i = 0; i < 40; ++i) {
+      sleep_ms(250);
+      vpn_engine::NativeSessionSnapshot snapshot =
+          vpn_engine::read_native_session_snapshot(utils::get_config_dir(),
+                                                   probe);
+      if (snapshot.network_ready) {
+        std::cout << std::endl;
+        utils::print_success("VPN connected successfully!");
+        std::cout << utils::DIM << "  Supervisor PID: " << spawned_supervisor_pid
+                  << utils::RESET << std::endl;
+        std::cout << utils::DIM << "  Interface: " << snapshot.interface_name
+                  << utils::RESET << std::endl;
+        std::cout << utils::DIM << "  Internal IP: " << snapshot.internal_ip
+                  << utils::RESET << std::endl;
+        std::cout << utils::DIM << "  Server: " << cfg.server << utils::RESET
+                  << std::endl;
+        logger::info("Native VPN started under durable supervisor, PID: " +
+                     std::to_string(spawned_supervisor_pid));
+        timing.finish(true, "engine=native pid=" +
+                                std::to_string(spawned_supervisor_pid));
+        return 0;
+      }
+      if (!is_process_alive(spawned_supervisor_pid))
+        break;
     }
 
-    timing.finish(true, "engine=native");
-    return 0;
+    clear_runtime_state();
+    // Do NOT clear native session state here: when called from the helper
+    // worker process, handle_start() reads the failure_code from that file
+    // after this function returns. Clearing here destroys the error before it
+    // can be read and propagated to the desktop. handle_start() clears it
+    // after reading. For direct CLI invocations the file is harmless because
+    // the next connect attempt overwrites or clears it.
+    utils::print_error("Native VPN session did not reach a network-ready state.");
+    utils::print_info("Check logs with: exv logs");
+    logger::error("Native VPN supervisor did not reach network-ready state");
+    timing.finish(false, "reason=native_not_ready");
+    return 1;
   }
 
   std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
