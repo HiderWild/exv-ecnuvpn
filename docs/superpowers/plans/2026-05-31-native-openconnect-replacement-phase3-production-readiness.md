@@ -1,7 +1,11 @@
 # Native OpenConnect Replacement Phase 3 - Production Transport And Native Release Readiness Plan
 
+> **SUPERSEDED (2026-05-31):** This plan is no longer the active execution source. All remaining/unfinished work has been re-planned into the authoritative successor:
+> **`docs/superpowers/plans/2026-05-31-native-openconnect-extraction-completion-plan.md`** (plan v4).
+> Keep this document as historical input only. Completed tasks here (A1, B1, B2, B3, C1, E1) remain valid evidence; open tasks (B4 macOS validation, C2, D*, F*, G*, H*) are owned by the v4 plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
-> Status: ACTIVE.
+> Status: SUPERSEDED by plan v4 (see banner above).
 > Date: 2026-05-31.
 > Successor to:
 > - `docs/superpowers/plans/2026-05-31-native-openconnect-replacement-phase2.md`
