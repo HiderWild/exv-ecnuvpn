@@ -1,8 +1,11 @@
 # Manual Test Guide — Develop Merge Readiness
 
-> Status: PENDING USER EXECUTION
+> Status: CLOSED FOR NATIVE REPLACEMENT LANE / HISTORICAL DEVELOP-MERGE GUIDE.
+> Closure date: 2026-05-31.
 > Date: 2026-05-22
 > Branch: `integration/platform-convergence-next`
+> Native successor: `docs/superpowers/plans/2026-05-31-native-openconnect-replacement-phase3-production-readiness.md`.
+> Closure summary: OpenConnect runtime package expectations in this guide are historical for native replacement. Windows and macOS native manual acceptance moved to Phase 3 tasks F2 and G2.
 
 ---
 

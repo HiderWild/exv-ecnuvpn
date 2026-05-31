@@ -1,48 +1,52 @@
-# Bundled OpenConnect Runtime
+# Native Production Runtime
 
-Place desktop runtime assets here before running `npm run desktop:build` or
-`npm run desktop:debug`.
+Production desktop packages are native-first. They must not require or bundle
+OpenConnect, libopenconnect, GnuTLS, or staged macOS OpenConnect dylibs.
 
-Supported layouts:
+`webui/scripts/prepare-native.cjs` always stages the native binaries built by
+CMake:
+
+- `exv` / `exv.exe`
+- `exv-helper` / `exv-helper.exe`
+- required MinGW runtime DLLs on Windows
+
+Optional production runtime assets can be placed in the first matching
+directory below, or supplied with `ECNUVPN_RUNTIME_DIR`:
 
 - `runtime/win32-x64/`
 - `runtime/win32-arm64/`
-- `runtime/darwin-x64/`
-- `runtime/darwin-arm64/`
 - `runtime/win32/`
-- `runtime/darwin/`
 
-`webui/scripts/prepare-native.cjs` copies the first matching directory into
-`webui/native/bin/`. You can override the source directory with
-`ECNUVPN_RUNTIME_DIR`.
+The only Windows production asset currently copied from those directories is
+`wintun.dll`. The production prepare step copies allowed assets by name; it
+does not copy runtime directories wholesale.
 
-Helper staging scripts:
+## Legacy Diagnostic OpenConnect Runtime
 
-- Windows: `scripts/stage-openconnect-runtime-win.ps1`
-- macOS: `scripts/stage-openconnect-runtime-mac.sh`
+The OpenConnect staging scripts are preserved only for explicit legacy diagnostic
+work. They are not part of production packaging.
 
-Recommended Windows contents:
+Preserved legacy payloads live outside production runtime roots:
 
-- `openconnect.exe`
-- `libopenconnect-5.dll`
-- OpenConnect dependency DLLs
-- `wintun.dll`
-- Optional TAP assets such as `tap-windows-installer.exe` or `tap/OemVista.inf`
+- `runtime/legacy-openconnect/win32-x64/`
+- `runtime/legacy-openconnect/darwin-arm64/`
 
-Recommended macOS contents:
+Set `ECNUVPN_LEGACY_OPENCONNECT_RUNTIME=1` before invoking either script:
 
-- `openconnect`
-- required `.dylib` dependencies adjacent to the binary
-
-macOS staging example (Homebrew openconnect):
-
-```bash
-# Stage from the Homebrew openconnect binary (Apple Silicon)
-bash ./scripts/stage-openconnect-runtime-mac.sh /opt/homebrew/bin/openconnect arm64
-# or for Intel Macs:
-bash ./scripts/stage-openconnect-runtime-mac.sh /usr/local/bin/openconnect x64
+```powershell
+$env:ECNUVPN_LEGACY_OPENCONNECT_RUNTIME = "1"
+powershell -File scripts/stage-openconnect-runtime-win.ps1 -SourceDir <dir> -Arch x64
 ```
 
-The script copies `openconnect` and all adjacent `.dylib` files into
-`runtime/darwin-$ARCH/`. `prepare-native.cjs` then bundles these into
-the Electron app's `extraResources/bin/` directory.
+```bash
+ECNUVPN_LEGACY_OPENCONNECT_RUNTIME=1 \
+  bash ./scripts/stage-openconnect-runtime-mac.sh /opt/homebrew/bin/openconnect arm64
+```
+
+Those scripts may stage `openconnect`, `openconnect.exe`, libopenconnect,
+GnuTLS, and adjacent dependency files for diagnostics. Production packaging
+filters still deny those legacy payloads from `extraResources/bin`.
+
+`webui/scripts/prepare-native.cjs` also uses those legacy diagnostic paths only
+when `ECNUVPN_LEGACY_OPENCONNECT_RUNTIME=1` is set. To point it at an external
+diagnostic payload directory, set `ECNUVPN_LEGACY_OPENCONNECT_RUNTIME_DIR`.

@@ -21,6 +21,10 @@ const router = createRouter({
       redirect: { path: '/settings', hash: '#settings-system' },
     },
     {
+      path: '/connection',
+      redirect: { path: '/settings', hash: '#settings-connection' },
+    },
+    {
       path: '/logs',
       name: 'logs',
       component: () => import('../pages/LogsPage.vue'),
@@ -29,6 +33,26 @@ const router = createRouter({
       path: '/settings',
       name: 'settings',
       component: () => import('../pages/SettingsPage.vue'),
+    },
+    {
+      path: '/modal/service-install',
+      name: 'modal-service-install',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
+    },
+    {
+      path: '/modal/password',
+      name: 'modal-password',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
+    },
+    {
+      path: '/modal/confirm',
+      name: 'modal-confirm',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
+    },
+    {
+      path: '/modal/close-app',
+      name: 'modal-close-app',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
     },
   ],
 })

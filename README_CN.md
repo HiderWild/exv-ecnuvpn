@@ -28,9 +28,10 @@
 
 ### 前置依赖
 
-- **openconnect** — VPN 连接核心
+- **原生 VPN 引擎** — 生产默认运行时，不依赖 OpenConnect
 - **CMake** — 构建系统
 - **OpenSSL**（仅 Linux 需要） — Linux 上的 AES-256-CBC 加密库；macOS 用系统 CommonCrypto，Windows 用 CNG/BCrypt
+- **OpenConnect**（可选） — 仅用于开发/诊断时对比旧后端行为，不是生产依赖
 
 ### 构建与安装
 
@@ -43,17 +44,17 @@ cmake --build --preset macos-release
 
 ## 构建产物目录
 
-为了让 `windows` 与 `macos` 两条分支在合并前尽量少互相踩到产物，新的编译和打包输出都统一分叉到 `build/<platform>/...`。
+为了让 `windows` 与 `macos` 两条分支在合并前尽量少互相踩到产物，新的编译和打包输出都统一分叉到平台专用目录。
 
-- `build/windows/cpp`：Windows 原生 CMake 产物、测试与 `compile_commands.json`
+- `build-windows/cpp`：Windows 原生 CMake 产物、测试与 `compile_commands.json`
 - `build/windows/electron/dist`：Windows renderer 产物
 - `build/windows/electron/dist-electron`：Windows Electron main/preload 产物
-- `build/windows/electron/native/bin`：Windows 桌面打包用 native staged payload
+- `build/windows/electron/native/bin`：Windows 桌面打包用原生运行时资产
 - `build/windows/electron/release`：Windows 安装包与 portable 输出
 - `build/macos/cpp`：macOS 原生 CMake 产物、测试与 `compile_commands.json`
 - `build/macos/electron/dist`：macOS renderer 产物
 - `build/macos/electron/dist-electron`：macOS Electron main/preload 产物
-- `build/macos/electron/native/bin`：macOS 桌面打包用 native staged payload
+- `build/macos/electron/native/bin`：macOS 桌面打包用原生运行时资产
 - `build/macos/electron/release`：macOS 桌面打包输出
 
 推荐直接使用 `scripts/` 里的平台脚本，不要再默认把产物写回旧的共享目录。
@@ -62,10 +63,11 @@ cmake --build --preset macos-release
 
 ### macOS
 ```bash
-brew install openconnect
 ./scripts/build-macos.sh all
 sudo ./cminst.sh
 ```
+
+macOS 原生生产包不要求安装 Homebrew OpenConnect。
 
 只做原生编译时可以直接用 preset：
 
@@ -77,23 +79,25 @@ ctest --preset macos-release -R 'platform_status_models_test|vpn_runtime_test'
 
 ### Linux (Ubuntu/Debian)
 ```bash
-sudo apt install openconnect libssl-dev cmake build-essential
-cmake -B build && cmake --build build
+sudo apt install libssl-dev cmake build-essential
+cmake --preset linux-release
+cmake --build --preset linux-release
 sudo ./scripts/install-linux.sh
 ```
 
 ### Linux (Fedora/RHEL)
 ```bash
-sudo dnf install openconnect openssl-devel cmake gcc-c++
-cmake -B build && cmake --build build
+sudo dnf install openssl-devel cmake gcc-c++
+cmake --preset linux-release
+cmake --build --preset linux-release
 sudo ./scripts/install-linux.sh
 ```
 
 ### Windows
-1. 安装 [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases)（提供 `openconnect.exe` 与 GnuTLS 运行时 DLL）。
-2. 构建：`powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action all`
+1. 构建：`powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action all`
    - Windows 端的 AES-256-CBC 已切到系统自带的 **BCrypt (CNG)**，不再需要安装 OpenSSL。
-3. 以管理员身份运行：`.\build\windows\cpp\exv.exe service install`
+   - 原生模式是生产默认，不需要安装 openconnect-gui。
+2. 以管理员身份运行：`.\build-windows\cpp\exv.exe service install`
 
 只做原生编译时可以直接用 preset：
 
@@ -108,10 +112,7 @@ ctest --preset windows-release -R 'platform_status_models_test|vpn_runtime_test'
 Electron 桌面端可以同时产出便携版和安装版。
 
 ```powershell
-# 1. 一次性 stage openconnect 运行时（DLL + wintun.dll + 可选 TAP 资源）
-powershell -ExecutionPolicy Bypass -File scripts\stage-openconnect-runtime-win.ps1 -SourceDir <openconnect-gui 安装目录>
-
-# 2. 构建并打包 Windows 桌面端
+# 构建并打包 Windows 桌面端
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action desktop
 ```
 
@@ -120,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action deskt
 - `ECNU-VPN-<version>-portable.exe`：便携版，单文件，双击即用，不会安装服务。
 - `ECNU VPN Setup <version>.exe`：NSIS 安装版，支持选择安装目录，并自动通过 `installer.nsh` 注册 `exv-helper` 服务。
 
-打包后的 `bin/` 目录只包含必要文件：`exv.exe`、MinGW 运行时 DLL、`openconnect.exe`、GnuTLS / libxml2 / wintun.dll，以及（如果 stage 过）TAP 资源。`libssl-3-x64.dll` 与 `libcrypto-3-x64.dll` 被打包脚本主动剔除——Windows 端不再依赖 OpenSSL。
+打包后的 `bin/` 目录只包含生产必要文件：`exv.exe`、`exv-helper.exe`、MinGW 运行时 DLL 与 `wintun.dll`。`wintun.dll` 是 Windows 原生模式的运行时资产；生产包不再要求暂存旧版 OpenConnect 运行时。`libssl-3-x64.dll` 与 `libcrypto-3-x64.dll` 被打包脚本主动剔除——Windows 端不再依赖 OpenSSL。
 
 ### 桌面调试构建（unpacked）
 
@@ -159,7 +160,6 @@ unpacked Electron 目录会输出到 `build/windows/electron/release/win-unpacke
     "mtu": 1290,
     "useragent": "AnyConnect Darwin_x86_64 4.10.05095",
     "routes": ["49.52.4.0/25", "..."],
-    "extra_args": [],
     "log_file": "~/.ecnuvpn/ecnuvpn.log",
     "webui_port": 18080,
     "webui_bind": "127.0.0.1",
@@ -167,10 +167,12 @@ unpacked Electron 目录会输出到 `build/windows/electron/release/win-unpacke
 }
 ```
 
+原生生产模式不支持任意 `extra_args` 透传；请使用 EXV 支持的显式配置项和路由命令。旧 OpenConnect 后端只保留为开发/诊断回退。
+
 ## 技术栈
 
 - **C++17** + CMake 构建
-- **openconnect** — VPN 连接核心
+- **原生 VPN 协议实现** — 生产默认 VPN 连接核心
 - **nlohmann/json** — JSON 解析
 - **cpp-httplib** — 嵌入式 HTTP 服务器
 - **Vue 3 + TypeScript + Vite** — WebUI 前端
@@ -198,4 +200,4 @@ macOS 上，桌面端支持：
 
 浏览器 WebUI 保留为兼容入口，可通过 `exv -f` 在前台模式启用。
 
-完整构建矩阵与脚本说明见 [docs/build_guide.md](d:\Development\Projects\cpp\ECNU-VPN\docs\build_guide.md)。
+完整构建矩阵与脚本说明见 [docs/build_guide.md](docs/build_guide.md)。

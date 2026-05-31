@@ -3,6 +3,10 @@
 #include "platform/common/status_models.hpp"
 #include "utils.hpp"
 
+#ifndef ECNUVPN_VERSION
+#define ECNUVPN_VERSION "dev"
+#endif
+
 namespace ecnuvpn {
 namespace platform {
 namespace {
@@ -34,23 +38,40 @@ nlohmann::json runtime_status_json(const Config &cfg) {
   std::string system_path = utils::get_openconnect_path("system");
   std::string resolved_path = utils::get_openconnect_path(cfg.openconnect_runtime);
 
-  nlohmann::json json{{"mode", cfg.openconnect_runtime},
-                      {"available", !resolved_path.empty()},
-                      {"source", runtime_source_from_paths(resolved_path,
-                                                           bundled_path,
-                                                           system_path)},
-                      {"path", resolved_path},
-                      {"bundled_path", bundled_path},
-                      {"system_path", system_path},
-                      {"version", openconnect_version(resolved_path)},
-                      {"bundled_runtime_dir", utils::get_bundled_runtime_dir()}};
+  nlohmann::json legacy{{"engine", "legacy_openconnect"},
+                        {"mode", cfg.openconnect_runtime},
+                        {"available", !resolved_path.empty()},
+                        {"source", runtime_source_from_paths(resolved_path,
+                                                             bundled_path,
+                                                             system_path)},
+                        {"path", resolved_path},
+                        {"bundled_path", bundled_path},
+                        {"system_path", system_path},
+                        {"version", openconnect_version(resolved_path)},
+                        {"bundled_runtime_dir", utils::get_bundled_runtime_dir()}};
 
 #ifdef _WIN32
-  json["wintun_path"] = utils::get_bundled_wintun_path();
-  json["tap_installer_path"] = utils::get_bundled_tap_installer_path();
+  legacy["wintun_path"] = utils::get_bundled_wintun_path();
+  legacy["tap_installer_path"] = utils::get_bundled_tap_installer_path();
 #endif
 
-  return json;
+  if (cfg.vpn_engine == "native") {
+    nlohmann::json native{{"engine", "native"},
+                          {"mode", "native"},
+                          {"available", true},
+                          {"source", "native"},
+                          {"path", ""},
+                          {"version", ECNUVPN_VERSION},
+                          {"bundled_runtime_dir", utils::get_bundled_runtime_dir()},
+                          {"legacy_openconnect", legacy}};
+#ifdef _WIN32
+    native["wintun_path"] = utils::get_bundled_wintun_path();
+    native["tap_installer_path"] = utils::get_bundled_tap_installer_path();
+#endif
+    return native;
+  }
+
+  return legacy;
 }
 
 } // namespace platform

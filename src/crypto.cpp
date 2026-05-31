@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -141,6 +142,18 @@ std::string init_key_if_needed() {
     logger::info("Generated new encryption key: " + key_path());
   }
   return key;
+}
+
+bool delete_key_file() {
+  std::string path = key_path();
+  if (!utils::file_exists(path))
+    return true;
+  if (std::remove(path.c_str()) == 0) {
+    logger::info("Deleted encryption key: " + path);
+    return true;
+  }
+  logger::error("Failed to delete encryption key: " + path);
+  return false;
 }
 
 std::string key_status() {

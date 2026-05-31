@@ -22,9 +22,14 @@ export interface SettingsConfig {
   webui_port: number
   webui_host: string
   webui_enabled: boolean
+  vpn_engine: 'native' | 'legacy_openconnect'
   openconnect_runtime: 'bundled' | 'system' | 'auto'
   windows_tunnel_driver: 'auto' | 'wintun' | 'tap'
   windows_tap_interface: string
+  auto_reconnect: boolean
+  minimal_mode: boolean
+  service_install_prompt_seen: boolean
+  minimal_install_service_before_connect: boolean
 }
 
 export interface KeyStatus {
@@ -35,11 +40,12 @@ export interface KeyStatus {
 
 export interface RuntimeStatus {
   mode: string
+  engine?: 'native' | 'legacy_openconnect'
   available: boolean
-  source: 'bundled' | 'system' | 'missing' | 'custom'
+  source: 'native' | 'bundled' | 'system' | 'missing' | 'custom'
   path: string
-  bundled_path: string
-  system_path: string
+  bundled_path?: string
+  system_path?: string
   version: string
   bundled_runtime_dir: string
   wintun_path?: string
@@ -49,6 +55,7 @@ export interface RuntimeStatus {
   effect_on_connect?: string
   wintun_missing?: boolean
   tap_missing?: boolean
+  legacy_openconnect?: RuntimeStatus
 }
 
 export interface DriverStatus {
@@ -90,9 +97,14 @@ export const useConfigStore = defineStore('config', () => {
     webui_port: 18080,
     webui_host: '127.0.0.1',
     webui_enabled: true,
+    vpn_engine: 'native',
     openconnect_runtime: 'bundled',
     windows_tunnel_driver: 'auto',
     windows_tap_interface: '',
+    auto_reconnect: true,
+    minimal_mode: false,
+    service_install_prompt_seen: false,
+    minimal_install_service_before_connect: true,
   })
 
   const keyStatus = ref<KeyStatus>({ present: false, fingerprint: null, status: 'missing' })
@@ -126,6 +138,12 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function saveSettings(s: Partial<SettingsConfig>) {
+    if (typeof s.minimal_mode === 'boolean') {
+      settings.value = { ...settings.value, minimal_mode: s.minimal_mode }
+      if (typeof window !== 'undefined' && window.ecnuVpn?.window) {
+        void window.ecnuVpn.window.setMode(s.minimal_mode ? 'minimal' : 'advanced')
+      }
+    }
     const { data } = await api.put<SettingsConfig>('/config/settings', { ...s })
     settings.value = { ...settings.value, ...data }
   }

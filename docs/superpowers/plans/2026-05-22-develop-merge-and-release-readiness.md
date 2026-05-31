@@ -1,8 +1,11 @@
 # Develop Merge And Release Readiness Plan
 
-> Status: ACTIVE.
+> Status: CLOSED FOR NATIVE REPLACEMENT LANE / HISTORICAL DEVELOP-MERGE PLAN.
+> Closure date: 2026-05-31.
 > Date: 2026-05-22.
 > Branch baseline: `integration/platform-convergence-next` at `96d781c`.
+> Native successor: `docs/superpowers/plans/2026-05-31-native-openconnect-replacement-phase3-production-readiness.md`.
+> Closure summary: Native production transport, packaging, documentation, manual acceptance, and clean-room/security release readiness moved to the Phase 3 production readiness plan.
 > Supersedes:
 > - `docs/superpowers/plans/2026-05-21-develop-merge-validation-and-release-hardening.md`
 > - `docs/superpowers/plans/2026-05-21-platform-convergence-next-stage.md`

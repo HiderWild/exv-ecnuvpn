@@ -159,9 +159,12 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
 int run_tunnel_script(const TunnelScriptContext &) { return 0; }
 
-bool configure_from_openconnect_log(const TunnelScriptContext &,
-                                    const std::string &) {
-  return false;
+OpenconnectLogConfigureResult
+configure_from_openconnect_log(const TunnelScriptContext &context,
+                               const std::string &) {
+  if (context.vpn_engine == "native")
+    return {false, "native_log_scraping_disabled"};
+  return {false, ""};
 }
 
 void cleanup_tunnel_routes(const TunnelScriptContext &context) {

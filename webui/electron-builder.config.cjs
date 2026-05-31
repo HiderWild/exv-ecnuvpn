@@ -89,6 +89,12 @@ module.exports = {
         '!*.a',
         '!libssl-*.dll',
         '!libcrypto-*.dll',
+        '!openconnect.exe',
+        '!openconnect',
+        '!libopenconnect-*',
+        '!libopenconnect*.dylib',
+        '!libgnutls-*',
+        '!*gnutls*',
       ],
     },
     ...(pngIcon

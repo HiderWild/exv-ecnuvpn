@@ -135,14 +135,31 @@ Optional flags:
 - `--skip-desktop` — skip Electron compile + native staging checks
 - `--desktop-smoke` — run an additional debug-run desktop smoke flow
 
-## Runtime Staging Notes
+## Native Runtime Assets
 
-- Windows OpenConnect runtime staging stays under `runtime/win32-x64/` and is
-  still prepared with `scripts/stage-openconnect-runtime-win.ps1` before
-  packaging.
-- macOS OpenConnect runtime staging stays under `runtime/darwin-<arch>/` and is
-  still prepared with `scripts/stage-openconnect-runtime-mac.sh` before
-  packaging.
+Production packages use the native VPN implementation by default.
 
-When staging on macOS, pass the `openconnect` binary path explicitly, for
-example `bash ./scripts/stage-openconnect-runtime-mac.sh /opt/homebrew/bin/openconnect arm64`.
+- Windows production packages stage the native `exv`/`exv-helper` binaries,
+  required MinGW runtime DLLs, and `wintun.dll`. `wintun.dll` is the Windows
+  native runtime asset.
+- macOS production packages stage the native `exv` binary and helper
+  integration. Homebrew OpenConnect is not required for native production
+  packages.
+
+Native production mode does not support arbitrary OpenConnect-style
+`extra_args`. Use the supported EXV config keys and route commands instead.
+
+### Legacy Diagnostic Fallback
+
+Legacy OpenConnect runtime files are retained only for development and
+diagnostic comparisons with the legacy backend. They are not required before
+production packaging.
+
+- Windows legacy diagnostic assets can be prepared under `runtime/win32-x64/`
+  with `scripts/stage-openconnect-runtime-win.ps1`.
+- macOS legacy diagnostic assets can be prepared under `runtime/darwin-<arch>/`
+  with `scripts/stage-openconnect-runtime-mac.sh`.
+
+Those scripts may copy legacy OpenConnect executables, GnuTLS-related DLLs, and
+other compatibility files used by the old backend. Do not treat those files as
+native production package requirements.

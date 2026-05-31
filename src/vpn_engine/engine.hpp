@@ -1,0 +1,58 @@
+#pragma once
+
+#include <map>
+#include <string>
+#include <vector>
+
+namespace ecnuvpn {
+namespace vpn_engine {
+
+struct VpnEngineConfig {
+  std::string engine = "native";
+  std::string server;
+  std::string username;
+  std::string password;
+  std::string useragent;
+  int mtu = 1290;
+  std::vector<std::string> routes;
+  std::vector<std::string> server_bypass_ips;
+  std::string windows_tunnel_driver = "auto";
+  std::string windows_tap_interface;
+  bool auto_reconnect = true;
+  bool disable_dtls = true;
+};
+
+struct VpnEngineEvent {
+  std::string type;
+  std::string level = "info";
+  std::string message;
+  std::map<std::string, std::string> fields;
+};
+
+struct VpnEngineStatus {
+  bool running = false;
+  bool network_ready = false;
+  int pid = -1;
+  std::string interface_name;
+  std::string internal_ip;
+  std::string error_code;
+  std::string error_message;
+};
+
+struct ValidationResult {
+  bool ok = true;
+  std::string code;
+  std::string message;
+};
+
+class VpnEngineSession {
+public:
+  virtual ~VpnEngineSession() = default;
+
+  virtual ValidationResult start() = 0;
+  virtual void stop() = 0;
+  virtual VpnEngineStatus status() const = 0;
+};
+
+} // namespace vpn_engine
+} // namespace ecnuvpn

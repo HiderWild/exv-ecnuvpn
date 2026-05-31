@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include "logger.hpp"
+#include "openconnect_log.hpp"
 #include "utils.hpp"
 
 #include <chrono>
@@ -676,37 +677,31 @@ int run_tunnel_script(const TunnelScriptContext &context) {
              : 1;
 }
 
-bool configure_from_openconnect_log(const TunnelScriptContext &context,
-                                    const std::string &log_path) {
+OpenconnectLogConfigureResult
+configure_from_openconnect_log(const TunnelScriptContext &context,
+                               const std::string &log_path) {
+  if (context.vpn_engine == "native")
+    return {false, "native_log_scraping_disabled"};
+
   std::ifstream in(log_path);
   if (!in.is_open())
-    return false;
+    return {false, ""};
   std::string content((std::istreambuf_iterator<char>(in)),
                       std::istreambuf_iterator<char>());
 
-  std::size_t start = content.rfind("Starting VPN:");
-  if (start != std::string::npos)
-    content = content.substr(start);
-
-  std::regex ip_regex(R"(Configured as ([0-9.]+), with)");
-  std::regex adapter_regex(R"(Using Wintun device '([^']+)', index ([0-9]+))");
-  std::smatch ip_match;
-  std::smatch adapter_match;
-  if (!std::regex_search(content, ip_match, ip_regex) ||
-      !std::regex_search(content, adapter_match, adapter_regex) ||
-      ip_match.size() < 2 || adapter_match.size() < 3) {
-    return false;
+  openconnect_log::Evidence evidence = openconnect_log::parse_evidence(content);
+  if (evidence.auth_failed || !evidence.has_tunnel_metadata) {
+    return {false, ""};
   }
 
-  std::string internal_ip = ip_match[1].str();
-  std::string adapter = adapter_match[1].str();
-  std::string if_index = adapter_match[2].str();
-
   debug_log(context.route_ready_path,
-            "fallback from log TUNIDX=" + if_index + " TUNDEV=" + adapter +
-                " IP=" + internal_ip);
-  return configure_tunnel_network(context, if_index, adapter, internal_ip,
-                                  "255.255.240.0", "");
+            "fallback from log TUNIDX=" + evidence.if_index +
+                " TUNDEV=" + evidence.adapter + " IP=" +
+                evidence.internal_ip);
+  bool ok = configure_tunnel_network(context, evidence.if_index,
+                                     evidence.adapter, evidence.internal_ip,
+                                     "255.255.240.0", "");
+  return {ok, ""};
 }
 
 void cleanup_tunnel_routes(const TunnelScriptContext &) {}

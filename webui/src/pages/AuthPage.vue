@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useConfigStore, type AuthConfig } from '../stores/config'
+import { useUiStore } from '../stores/ui'
 import { Shield, User, Key, Fingerprint, Server } from 'lucide-vue-next'
 
 const config = useConfigStore()
+const ui = useUiStore()
 
 const saving = ref(false)
-const message = ref<{ type: 'success' | 'error'; text: string } | null>(null)
+const message = ref<{ text: string } | null>(null)
 const serverOptions = [
   'vpn-ct.ecnu.edu.cn',
   'vpn-cn.ecnu.edu.cn',
@@ -82,9 +84,9 @@ async function save() {
     await config.saveAuthConfig(form.value)
     form.value.password = ''
     form.value.password_stored = config.authConfig.password_stored ?? form.value.password_stored
-    message.value = { type: 'success', text: '认证设置已保存' }
+    message.value = { text: '认证设置已保存' }
   } catch (e: any) {
-    message.value = { type: 'error', text: extractErrorText(e) }
+    ui.requestError({ title: '保存认证设置失败', message: extractErrorText(e) })
   } finally {
     saving.value = false
   }
@@ -207,7 +209,7 @@ async function save() {
           v-if="message"
           :class="[
             'text-sm rounded-lg px-4 py-2.5',
-            message.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+          'bg-green-500/10 text-green-400'
           ]"
         >
           {{ message.text }}

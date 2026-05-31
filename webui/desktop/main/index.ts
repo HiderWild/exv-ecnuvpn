@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, Tray } from 'electron'
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -11,8 +11,12 @@ import {
   type DesktopCliCommand,
   type DesktopDriverInstallTarget,
   type DesktopEventType,
+  type DesktopModalKind,
+  type DesktopModalPayload,
   type DesktopRpcAction,
   type DesktopServiceCommand,
+  type DesktopServiceInstallPromptResult,
+  type DesktopWindowMode,
 } from '../shared/desktop-contract.js'
 import { platformRunner } from './platform/index.js'
 import type { RpcErrorResult } from './platform/base.js'
@@ -26,6 +30,39 @@ let mainWindow: BrowserWindow | null = null
 let statusTimer: NodeJS.Timeout | null = null
 let logTimer: NodeJS.Timeout | null = null
 let seenLogCount = 0
+let appTray: Tray | null = null
+let trayConnectionConnected = false
+let trayConnectionBusy = false
+let forceQuit = false
+let closePromptOpen = false
+let currentWindowMode: DesktopWindowMode = 'advanced'
+let closePromptResolver: ((result: unknown) => void) | null = null
+let activeModal: {
+  kind: DesktopModalKind
+  payload: DesktopModalPayload
+  window: BrowserWindow
+  resolve: (result: unknown) => void
+} | null = null
+
+type CloseAppChoice = 'tray' | 'quit'
+
+type CloseAppPromptResult =
+  | 'cancel'
+  | CloseAppChoice
+  | {
+      action?: unknown
+      remember?: unknown
+    }
+
+const advancedWindowBounds = {
+  width: 972,
+  height: 563,
+}
+
+const minimalWindowBounds = {
+  width: 302,
+  height: 118,
+}
 
 function rendererUrl() {
   return process.env.VITE_DEV_SERVER_URL
@@ -230,13 +267,339 @@ function emitServiceProgress(command: 'install' | 'uninstall', line: string) {
   })
 }
 
+function desktopPlatformContext() {
+  return {
+    execFileAsync,
+    resolveExvPath,
+    resolveRuntimeDir,
+    nativeExecOptions,
+    parseJsonOutput,
+    throwRpcResultError,
+    runDesktopRpc,
+    emitServiceProgress,
+  }
+}
+
+function boundsForWindowMode(mode: DesktopWindowMode) {
+  return mode === 'minimal' ? minimalWindowBounds : advancedWindowBounds
+}
+
+function applyWindowMode(mode: DesktopWindowMode) {
+  currentWindowMode = mode
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const bounds = boundsForWindowMode(mode)
+  mainWindow.setTitle('EXV for ECNU')
+  mainWindow.setMinimumSize(bounds.width, bounds.height)
+  mainWindow.setSize(bounds.width, bounds.height)
+}
+
+async function loadRendererRoute(window: BrowserWindow, route: string) {
+  const devUrl = rendererUrl()
+  if (devUrl) {
+    const url = new URL(devUrl)
+    url.hash = route
+    await window.loadURL(url.toString())
+    return
+  }
+
+  await window.loadFile(rendererIndex(), { hash: route })
+}
+
+function modalBounds(kind: DesktopModalKind) {
+  if (kind === 'password') return { width: 420, height: 270 }
+  if (kind === 'close-app') return { width: 440, height: 312 }
+  return { width: 420, height: 220 }
+}
+
+function defaultModalResult(kind: DesktopModalKind) {
+  if (kind === 'close-app') return 'cancel'
+  if (kind === 'confirm') return false
+  if (kind === 'password') return null
+  return 'dismiss'
+}
+
+function closeActiveModal(result: unknown) {
+  const modal = activeModal
+  activeModal = null
+  setMainWindowModalBlocked(false)
+  modal?.resolve(result)
+  if (modal?.window && !modal.window.isDestroyed()) {
+    modal.window.close()
+  }
+}
+
+function resolveRendererClosePrompt(result: unknown) {
+  const resolver = closePromptResolver
+  closePromptResolver = null
+  resolver?.(result)
+}
+
+function setMainWindowModalBlocked(blocked: boolean) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (process.platform === 'win32' || process.platform === 'linux') {
+    mainWindow.setEnabled(!blocked)
+  }
+}
+
+async function openModal(kind: DesktopModalKind, payload: DesktopModalPayload): Promise<unknown> {
+  if (!mainWindow || mainWindow.isDestroyed()) return defaultModalResult(kind)
+  if (activeModal) return defaultModalResult(kind)
+
+  return new Promise<unknown>((resolvePrompt) => {
+    const bounds = modalBounds(kind)
+    const modalWindow = new BrowserWindow({
+      parent: mainWindow!,
+      modal: true,
+      frame: false,
+      transparent: kind !== 'close-app',
+      backgroundColor: kind === 'close-app' ? '#111827' : '#00000000',
+      hasShadow: kind !== 'close-app',
+      width: bounds.width,
+      height: bounds.height,
+      minWidth: bounds.width,
+      minHeight: bounds.height,
+      title: 'EXV for ECNU',
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+      autoHideMenuBar: true,
+      icon: windowIconPath(),
+      webPreferences: {
+        preload: join(__dirname, '..', 'preload', 'index.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    })
+
+    activeModal = {
+      kind,
+      payload,
+      window: modalWindow,
+      resolve: resolvePrompt,
+    }
+    setMainWindowModalBlocked(true)
+    modalWindow.on('closed', () => {
+      if (activeModal?.window === modalWindow) {
+        const modal = activeModal
+        activeModal = null
+        setMainWindowModalBlocked(false)
+        modal.resolve(defaultModalResult(modal.kind))
+      }
+    })
+    void loadRendererRoute(modalWindow, `/modal/${kind}`).catch(() => {
+      closeActiveModal(defaultModalResult(kind))
+    })
+  })
+}
+
+async function openRendererClosePrompt(): Promise<unknown> {
+  if (!mainWindow || mainWindow.isDestroyed()) return 'cancel'
+  if (closePromptResolver) return 'cancel'
+
+  return new Promise((resolvePrompt) => {
+    closePromptResolver = resolvePrompt
+    emitEvent('close-request', {})
+  })
+}
+
+async function openServiceInstallPrompt(): Promise<DesktopServiceInstallPromptResult> {
+  const result = await openModal('service-install', { kind: 'service-install' })
+  return result === 'install' ? 'install' : 'dismiss'
+}
+
+function closePreferencePath() {
+  return join(app.getPath('userData'), 'close-preference.json')
+}
+
+function readClosePreference(): CloseAppChoice | null {
+  try {
+    const parsed = JSON.parse(readFileSync(closePreferencePath(), 'utf8')) as { action?: unknown }
+    return parsed.action === 'tray' || parsed.action === 'quit' ? parsed.action : null
+  } catch {
+    return null
+  }
+}
+
+function saveClosePreference(action: CloseAppChoice) {
+  const target = closePreferencePath()
+  mkdirSync(dirname(target), { recursive: true })
+  writeFileSync(target, JSON.stringify({ action }, null, 2))
+}
+
+function normalizeClosePromptResult(result: unknown): { action: CloseAppChoice | 'cancel'; remember: boolean } {
+  if (result === 'tray' || result === 'quit' || result === 'cancel') {
+    return { action: result, remember: false }
+  }
+  if (result && typeof result === 'object') {
+    const raw = result as { action?: unknown; remember?: unknown }
+    const action = raw.action === 'tray' || raw.action === 'quit' ? raw.action : 'cancel'
+    return { action, remember: Boolean(raw.remember) }
+  }
+  return { action: 'cancel', remember: false }
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.show()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.focus()
+}
+
+function ensureTray() {
+  if (appTray) return appTray
+
+  const iconPath = windowIconPath()
+  const trayImage = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+  appTray = new Tray(trayImage)
+  appTray.setToolTip('EXV for ECNU')
+  refreshTrayMenu()
+  appTray.on('click', showMainWindow)
+  return appTray
+}
+
+function refreshTrayMenu(connected = trayConnectionConnected) {
+  trayConnectionConnected = connected
+  if (!appTray) return
+
+  appTray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示 EXV for ECNU', click: showMainWindow },
+    { type: 'separator' },
+    {
+      label: trayConnectionConnected ? '断开' : '连接',
+      enabled: !trayConnectionBusy,
+      click: () => { void toggleTrayConnection() },
+    },
+    { type: 'separator' },
+    { label: '退出', click: () => { void disconnectThenQuit() } },
+  ]))
+}
+
+function connectedFromStatus(status: unknown) {
+  return Boolean(
+    status &&
+      typeof status === 'object' &&
+      (status as { connected?: unknown }).connected === true,
+  )
+}
+
+async function toggleTrayConnection() {
+  if (trayConnectionBusy) return
+  trayConnectionBusy = true
+  refreshTrayMenu()
+  try {
+    const status = await runDesktopRpc('status.get')
+    const connected = connectedFromStatus(status)
+    refreshTrayMenu(connected)
+    if (connected) {
+      try {
+        await runDesktopRpc('vpn.disconnect', { allow_direct_fallback: true })
+      } catch {
+        await platformRunner.runDesktopRpcElevated(
+          desktopPlatformContext(),
+          'vpn.disconnect',
+          { allow_direct_fallback: true },
+          'status.get',
+        )
+      }
+    } else {
+      await runDesktopRpc('vpn.connect')
+    }
+    const nextStatus = await runDesktopRpc('status.get')
+    refreshTrayMenu(connectedFromStatus(nextStatus))
+    emitEvent('status', nextStatus)
+  } catch (error) {
+    showMainWindow()
+    const action = trayConnectionConnected ? '断开' : '连接'
+    const message = error instanceof Error ? error.message : String(error)
+    await openModal('confirm', {
+      kind: 'confirm',
+      message: `托盘${action}失败。${message}`,
+    })
+  } finally {
+    trayConnectionBusy = false
+    try {
+      const status = await runDesktopRpc('status.get')
+      refreshTrayMenu(connectedFromStatus(status))
+    } catch {
+      refreshTrayMenu()
+    }
+  }
+}
+
+async function disconnectThenQuit() {
+  try {
+    const status = await runDesktopRpc('status.get')
+    if (status && typeof status === 'object' && (status as { connected?: unknown }).connected === true) {
+      await platformRunner.runDesktopRpcElevated(desktopPlatformContext(), 'vpn.disconnect', {
+        allow_direct_fallback: true,
+      }, 'status.get')
+    }
+    forceQuit = true
+    app.quit()
+  } catch (error) {
+    showMainWindow()
+    const message = error instanceof Error ? error.message : String(error)
+    await openModal('confirm', {
+      kind: 'confirm',
+      message: `断开 VPN 失败，程序仍保持打开。${message}`,
+    })
+  }
+}
+
+async function handleMainWindowClose() {
+  if (closePromptOpen) return
+  closePromptOpen = true
+  try {
+    showMainWindow()
+    const remembered = readClosePreference()
+    const result = remembered
+      ? { action: remembered, remember: false }
+      : normalizeClosePromptResult(
+          await (currentWindowMode === 'minimal'
+            ? openModal('close-app', { kind: 'close-app' })
+            : openRendererClosePrompt()),
+        )
+    if (result.remember && result.action !== 'cancel') {
+      saveClosePreference(result.action)
+    }
+    if (result.action === 'quit') {
+      await disconnectThenQuit()
+      return
+    }
+    if (result.action === 'tray') {
+      ensureTray()
+      mainWindow?.hide()
+    }
+  } finally {
+    closePromptOpen = false
+  }
+}
+
+async function initialWindowMode(): Promise<DesktopWindowMode> {
+  try {
+    const settings = await runDesktopRpc('config.getSettings')
+    const minimalMode = settings && typeof settings === 'object'
+      ? (settings as { minimal_mode?: unknown }).minimal_mode
+      : undefined
+    return minimalMode === true
+      ? 'minimal'
+      : 'advanced'
+  } catch {
+    return 'advanced'
+  }
+}
+
 async function createWindow() {
+  const mode = await initialWindowMode()
+  currentWindowMode = mode
+  const bounds = boundsForWindowMode(mode)
   mainWindow = new BrowserWindow({
-    width: 1080,
-    height: 590,
-    minWidth: 1080,
-    minHeight: 590,
-    title: 'ECNU VPN',
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: bounds.width,
+    minHeight: bounds.height,
+    title: 'EXV for ECNU',
     resizable: false,
     maximizable: false,
     autoHideMenuBar: true,
@@ -256,6 +619,12 @@ async function createWindow() {
     await mainWindow.loadFile(rendererIndex())
   }
 
+  mainWindow.on('close', (event) => {
+    if (forceQuit) return
+    event.preventDefault()
+    void handleMainWindowClose()
+  })
+
   startEventPump()
 }
 
@@ -267,6 +636,7 @@ function startEventPump() {
     try {
       const status = await runDesktopRpc('status.get')
       emitEvent('status', status)
+      refreshTrayMenu(connectedFromStatus(status))
       emitEvent('heartbeat', {})
     } catch {
       emitEvent('heartbeat', {})
@@ -382,7 +752,53 @@ ipcMain.handle(desktopIpcChannels.driverInstall, async (_event, driver: DesktopD
   }, 'drivers.install', { driver }, 'drivers.status')
 })
 
+ipcMain.handle(desktopIpcChannels.windowMode, async (_event, mode: DesktopWindowMode) => {
+  if (mode !== 'minimal' && mode !== 'advanced') {
+    throw new Error(`Unknown window mode: ${String(mode)}`)
+  }
+  applyWindowMode(mode)
+  return { ok: true, mode }
+})
+
+ipcMain.handle(desktopIpcChannels.serviceInstallPrompt, async () => {
+  return openServiceInstallPrompt()
+})
+
+ipcMain.handle(desktopIpcChannels.passwordPrompt, async (_event, message: string) => {
+  const result = await openModal('password', {
+    kind: 'password',
+    message: typeof message === 'string' ? message : '',
+  })
+  return typeof result === 'string' ? result : null
+})
+
+ipcMain.handle(desktopIpcChannels.confirmPrompt, async (_event, message: string) => {
+  const result = await openModal('confirm', {
+    kind: 'confirm',
+    message: typeof message === 'string' ? message : '',
+  })
+  return result === true
+})
+
+ipcMain.handle(desktopIpcChannels.modalPayload, async () => {
+  return activeModal?.payload ?? null
+})
+
+ipcMain.handle(desktopIpcChannels.modalResult, async (_event, result: unknown) => {
+  closeActiveModal(result)
+  return { ok: true }
+})
+
+ipcMain.handle(desktopIpcChannels.closePromptResult, async (_event, result: unknown) => {
+  resolveRendererClosePrompt(result)
+  return { ok: true }
+})
+
 app.whenReady().then(createWindow)
+
+app.on('before-quit', () => {
+  forceQuit = true
+})
 
 app.on('window-all-closed', () => {
   stopEventPump()

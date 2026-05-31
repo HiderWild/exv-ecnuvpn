@@ -1,9 +1,13 @@
 #include "config.hpp"
 #include "logger.hpp"
+#include "platform/common/tunnel_script.hpp"
 #include "platform/common/config_defaults.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -195,6 +199,56 @@ int main() {
   ok = expect(no_exception_script.find("203.0.113.10") == std::string::npos,
               "generated script should not invent unmatched server route exceptions") &&
        ok;
+
+  std::filesystem::path temp_dir = std::filesystem::temp_directory_path();
+  std::filesystem::path log_path =
+      temp_dir / "exv-native-log-scraping-contract.log";
+  std::filesystem::path ready_path =
+      temp_dir / "exv-native-log-scraping-contract.ready";
+  std::remove(log_path.string().c_str());
+  std::remove(ready_path.string().c_str());
+
+  {
+    std::ofstream log(log_path);
+    log << "Starting VPN: vpn.example.edu user=test\n"
+        << "Using Wintun device 'ECNUVPN-NATIVE', index 77\n"
+        << "Configured as 10.77.0.8, with SSL connected\n";
+  }
+
+  ecnuvpn::platform::TunnelScriptContext native_context;
+  native_context.vpn_engine = "native";
+  native_context.route_ready_path = ready_path.string();
+  native_context.custom_routes = cfg.routes;
+  native_context.configured_mtu = cfg.mtu;
+
+  auto native_result = ecnuvpn::platform::configure_from_openconnect_log(
+      native_context, log_path.string());
+  ok = expect(!native_result.ok,
+              "native mode should reject OpenConnect log scraping") &&
+       ok;
+  ok = expect(native_result.code == "native_log_scraping_disabled",
+              "native mode should return the deterministic disabled code") &&
+       ok;
+  ok = expect(!std::filesystem::exists(ready_path),
+              "native mode should not parse tunnel metadata into a ready file") &&
+       ok;
+
+#ifdef _WIN32
+  std::remove(ready_path.string().c_str());
+  ecnuvpn::platform::TunnelScriptContext legacy_context = native_context;
+  legacy_context.vpn_engine = "legacy_openconnect";
+  auto legacy_result = ecnuvpn::platform::configure_from_openconnect_log(
+      legacy_context, log_path.string());
+  ok = expect(legacy_result.ok,
+              "legacy OpenConnect mode should preserve log fallback parsing") &&
+       ok;
+  ok = expect(std::filesystem::exists(ready_path),
+              "legacy OpenConnect mode should still write route-ready metadata") &&
+       ok;
+#endif
+
+  std::remove(log_path.string().c_str());
+  std::remove(ready_path.string().c_str());
 
   return ok ? 0 : 1;
 }

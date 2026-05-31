@@ -4,11 +4,11 @@
  *
  * The script is intentionally strict about WHAT it copies:
  *  - It does NOT copy libssl/libcrypto: we now use Windows BCrypt on Win32
- *    and CommonCrypto on macOS. Linux desktop bundles continue to ship
- *    OpenSSL because libopenconnect on Linux already provides its own.
+ *    and CommonCrypto on macOS.
+ *  - It does NOT copy OpenConnect/GnuTLS assets for production packaging.
+ *    That runtime is legacy diagnostic-only and must be explicitly gated.
  *  - It does NOT copy debug/dev artifacts like .lib, .pdb, .exp, .a.
- *  - It DOES copy wintun.dll and any TAP installer assets staged under
- *    runtime/<platform>-<arch>/.
+ *  - It DOES copy allowed native runtime assets such as wintun.dll.
  */
 const fs = require('fs')
 const path = require('path')
@@ -18,6 +18,19 @@ const { getBuildLayout } = require('./build-layout.cjs')
 const root = path.resolve(__dirname, '..', '..')
 const layout = getBuildLayout()
 const outDir = layout.nativeBinDir
+const LEGACY_OPENCONNECT_ENV = 'ECNUVPN_LEGACY_OPENCONNECT_RUNTIME'
+const LEGACY_OPENCONNECT_RUNTIME_DIR_ENV = 'ECNUVPN_LEGACY_OPENCONNECT_RUNTIME_DIR'
+const legacyOpenconnectRuntime = process.env[LEGACY_OPENCONNECT_ENV] === '1'
+const productionRuntimeCandidates = [
+  process.env.ECNUVPN_RUNTIME_DIR,
+  path.join(root, 'runtime', `${process.platform}-${process.arch}`),
+  path.join(root, 'runtime', process.platform),
+].filter(Boolean)
+const legacyOpenconnectRuntimeCandidates = [
+  process.env[LEGACY_OPENCONNECT_RUNTIME_DIR_ENV],
+  path.join(root, 'runtime', 'legacy-openconnect', `${process.platform}-${process.arch}`),
+  path.join(root, 'runtime', 'legacy-openconnect', process.platform),
+].filter(Boolean)
 
 function sleepSync(ms) {
   const signal = new Int32Array(new SharedArrayBuffer(4))
@@ -87,6 +100,7 @@ const MINGW_RUNTIME_DLLS = [
   'libstdc++-6.dll',
   'libwinpthread-1.dll',
 ]
+const ALLOWED_NATIVE_RUNTIME_ASSETS = new Set(['wintun.dll'])
 
 function isAllowed(name) {
   if (DENY_EXACT.has(name)) return false
@@ -115,6 +129,40 @@ function copyRecursive(source, target) {
       continue
     }
     fs.copyFileSync(sourcePath, targetPath)
+  }
+}
+
+function copyLegacyRuntimeAssets(source, target) {
+  console.warn(
+    `[legacy diagnostic] ${LEGACY_OPENCONNECT_ENV}=1; copying legacy OpenConnect runtime assets from ${source}`,
+  )
+  copyRecursive(source, target)
+  const bundledOpenconnect = path.join(
+    target,
+    process.platform === 'win32' ? 'openconnect.exe' : 'openconnect',
+  )
+  if (process.platform !== 'win32' && fs.existsSync(bundledOpenconnect)) {
+    fs.chmodSync(bundledOpenconnect, 0o755)
+  }
+}
+
+function copyAllowedNativeRuntimeAssets(source, target) {
+  const copied = []
+  for (const assetName of ALLOWED_NATIVE_RUNTIME_ASSETS) {
+    const sourcePath = path.join(source, assetName)
+    if (!fs.existsSync(sourcePath)) {
+      continue
+    }
+
+    const targetPath = path.join(target, assetName)
+    fs.copyFileSync(sourcePath, targetPath)
+    copied.push(assetName)
+  }
+
+  if (copied.length > 0) {
+    console.log(`Copied native runtime asset(s): ${copied.join(', ')} from ${source}`)
+  } else {
+    console.log(`No allowed native runtime assets found in ${source}`)
   }
 }
 
@@ -213,27 +261,28 @@ if (process.platform === 'win32') {
   }
 }
 
-const runtimeCandidates = [
-  process.env.ECNUVPN_RUNTIME_DIR,
-  path.join(root, 'runtime', `${process.platform}-${process.arch}`),
-  path.join(root, 'runtime', process.platform),
-].filter(Boolean)
-
-const runtimeSource = runtimeCandidates.find((candidate) => fs.existsSync(candidate))
-if (runtimeSource) {
-  copyRecursive(runtimeSource, outDir)
-  const bundledOpenconnect = path.join(
-    outDir,
-    process.platform === 'win32' ? 'openconnect.exe' : 'openconnect',
-  )
-  if (process.platform !== 'win32' && fs.existsSync(bundledOpenconnect)) {
-    fs.chmodSync(bundledOpenconnect, 0o755)
-  }
-  console.log(`Copied bundled runtime assets: ${runtimeSource} -> ${outDir}`)
-} else {
+const productionRuntimeSource = productionRuntimeCandidates.find((candidate) => fs.existsSync(candidate))
+if (!productionRuntimeSource) {
   console.warn(
-    `No bundled runtime assets found. Checked:\n  - ${runtimeCandidates.join('\n  - ')}`,
+    `No optional native runtime assets found. Checked:\n  - ${productionRuntimeCandidates.join('\n  - ')}`,
   )
+} else {
+  copyAllowedNativeRuntimeAssets(productionRuntimeSource, outDir)
+}
+
+if (legacyOpenconnectRuntime) {
+  const legacyRuntimeSource = legacyOpenconnectRuntimeCandidates.find((candidate) =>
+    fs.existsSync(candidate),
+  )
+  if (!legacyRuntimeSource) {
+    throw new Error(
+      `[legacy diagnostic] ${LEGACY_OPENCONNECT_ENV}=1 but no legacy OpenConnect runtime assets were found. ` +
+      `Checked:\n  - ${legacyOpenconnectRuntimeCandidates.join('\n  - ')}`,
+    )
+  }
+
+  copyLegacyRuntimeAssets(legacyRuntimeSource, outDir)
+  console.log(`Copied legacy diagnostic runtime assets: ${legacyRuntimeSource} -> ${outDir}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -254,24 +303,12 @@ if (!fs.existsSync(nativeExePath)) {
 console.log(`[validation] Native binary present: ${nativeExeName}`)
 
 if (process.platform === 'win32') {
-  const openconnectPath = path.join(outDir, 'openconnect.exe')
-  if (!fs.existsSync(openconnectPath)) {
-    console.warn(
-      '[validation] WARNING: openconnect.exe not found in output directory.\n' +
-      '  The packaged desktop app will NOT be able to connect to VPN without\n' +
-      '  the bundled OpenConnect runtime. Stage it first with:\n' +
-      '    powershell -File scripts/stage-openconnect-runtime-win.ps1 -SourceDir <dir>',
-    )
-  } else {
-    console.log('[validation] OpenConnect runtime present: openconnect.exe')
-  }
-
   const wintunPath = path.join(outDir, 'wintun.dll')
   if (!fs.existsSync(wintunPath)) {
     console.warn(
       '[validation] WARNING: wintun.dll not found in output directory.\n' +
       '  Wintun tunnel mode will not work in the packaged app.\n' +
-      '  Provide it via: stage-openconnect-runtime-win.ps1 -WintunDllPath <path>',
+      '  Provide it via ECNUVPN_RUNTIME_DIR or runtime/win32-x64/wintun.dll.',
     )
   } else {
     console.log('[validation] Wintun DLL present: wintun.dll')

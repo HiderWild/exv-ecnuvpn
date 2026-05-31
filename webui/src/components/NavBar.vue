@@ -65,8 +65,8 @@ const sidebarStatusItems = computed(() => [
 </script>
 
 <template>
-  <nav class="sticky top-0 z-40 border-b border-border bg-surface/80 backdrop-blur-sm lg:fixed lg:inset-y-0 lg:left-0 lg:flex lg:w-44 lg:flex-col lg:border-b-0 lg:border-r">
-    <div class="flex items-center justify-between gap-3 px-4 py-4 lg:px-3 lg:py-5">
+  <nav class="fixed inset-y-0 left-0 z-40 flex w-44 flex-col border-r border-border bg-surface/80 backdrop-blur-sm">
+    <div class="flex items-center justify-between gap-3 px-3 py-5">
       <div class="min-w-0">
         <button
           class="flex min-w-0 items-center gap-2.5 text-left transition-colors hover:text-accent"
@@ -81,13 +81,13 @@ const sidebarStatusItems = computed(() => [
       </div>
     </div>
 
-    <div class="px-3 pb-3 lg:min-h-0 lg:flex-1 lg:px-3 lg:pb-5">
-      <div class="flex items-center gap-1 overflow-x-auto lg:flex-col lg:items-stretch lg:gap-1.5 lg:overflow-y-auto">
+    <div class="min-h-0 flex-1 px-3 pb-5">
+      <div class="flex flex-col items-stretch gap-1.5 overflow-y-auto">
         <button
           v-for="item in navItems"
           :key="item.path"
           :class="[
-            'flex items-center gap-2 rounded-lg px-3 py-2 text-sm whitespace-nowrap transition-colors lg:w-full',
+            'flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm whitespace-nowrap transition-colors',
             isActive(item.path)
               ? 'bg-primary/50 text-foreground shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]'
               : 'text-muted hover:bg-bg/70 hover:text-foreground'
@@ -100,7 +100,7 @@ const sidebarStatusItems = computed(() => [
       </div>
     </div>
 
-    <div class="hidden px-3 pb-4 lg:block">
+    <div class="px-3 pb-4">
       <div
         :class="[
           'space-y-3',

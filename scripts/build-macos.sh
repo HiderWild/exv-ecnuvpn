@@ -29,14 +29,14 @@ build_cpp() {
   (
     cd "$REPO_ROOT"
     cmake --preset macos-release
-    cmake --build --preset macos-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test
+    cmake --build --preset macos-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test
   )
 }
 
 run_tests() {
   (
     cd "$REPO_ROOT"
-    ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test'
+    ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test'
   )
 }
 

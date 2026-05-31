@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   AlertTriangle,
   CheckCircle,
   Download,
+  EthernetPort,
   Fingerprint,
   HardDriveDownload,
   Key,
@@ -21,8 +22,11 @@ import {
 import { useConfigStore, type AuthConfig, type SettingsConfig } from '../stores/config'
 import { normalizeError, useVpnStore } from '../stores/vpn'
 import { useUiStore } from '../stores/ui'
+import ToggleSwitch from '../components/ToggleSwitch.vue'
 
-type SectionKey = 'auth' | 'system' | 'routes'
+defineOptions({ name: 'SettingsPage' })
+
+type SectionKey = 'auth' | 'connection' | 'system' | 'routes'
 
 const route = useRoute()
 const router = useRouter()
@@ -31,25 +35,28 @@ const vpn = useVpnStore()
 const ui = useUiStore()
 const isDesktop = typeof window !== 'undefined' && !!window.ecnuVpn
 
-const sections: Array<{ key: SectionKey; label: string }> = [
-  { key: 'auth', label: '认证' },
-  { key: 'system', label: '系统' },
-  { key: 'routes', label: '路由' },
+const sections: Array<{ key: SectionKey; label: string; icon: Component }> = [
+  { key: 'auth', label: '认证', icon: Shield },
+  { key: 'connection', label: '连接', icon: EthernetPort },
+  { key: 'system', label: '系统', icon: Settings },
+  { key: 'routes', label: '路由', icon: RouteIcon },
 ]
 
 const scrollRoot = ref<HTMLElement | null>(null)
 const authSection = ref<HTMLElement | null>(null)
+const connectionSection = ref<HTMLElement | null>(null)
 const systemSection = ref<HTMLElement | null>(null)
 const routesSection = ref<HTMLElement | null>(null)
 const activeSection = ref<SectionKey>('auth')
+const savedScrollTop = ref(0)
 
 const authSaving = ref(false)
 const systemSaving = ref(false)
 const routesBusy = ref(false)
 const busyDriver = ref<'wintun' | 'tap' | null>(null)
-const authMessage = ref<{ type: 'success' | 'error'; text: string } | null>(null)
-const systemMessage = ref<{ type: 'success' | 'error'; text: string } | null>(null)
-const routeMessage = ref<{ type: 'success' | 'error'; text: string } | null>(null)
+const authMessage = ref<{ text: string } | null>(null)
+const systemMessage = ref<{ text: string } | null>(null)
+const routeMessage = ref<{ text: string } | null>(null)
 const installFeedback = ref<{ driver: 'wintun' | 'tap'; takes_effect: string } | null>(null)
 
 const serverOptions = [
@@ -77,9 +84,14 @@ const settingsForm = ref<SettingsConfig>({
   webui_port: 18080,
   webui_host: '127.0.0.1',
   webui_enabled: true,
+  vpn_engine: 'native',
   openconnect_runtime: 'bundled',
   windows_tunnel_driver: 'auto',
   windows_tap_interface: '',
+  auto_reconnect: true,
+  minimal_mode: false,
+  service_install_prompt_seen: false,
+  minimal_install_service_before_connect: true,
 })
 
 const routes = ref<string[]>([])
@@ -93,15 +105,67 @@ const passwordPlaceholder = computed(() =>
 
 const driverSupported = computed(() => !!config.driverStatus?.supported)
 const tapAdapters = computed(() => config.driverStatus?.tap_adapters || [])
-const runtimeMissing = computed(() => config.runtimeStatus && !config.runtimeStatus.available)
-const wintunMissing = computed(() => config.driverStatus?.wintun_missing)
-const tapMissing = computed(() => config.driverStatus?.tap_missing)
-const driverReadiness = computed(() => config.driverStatus?.effective_driver_status ?? 'unavailable')
-const runtimeReady = computed(() => config.runtimeStatus?.available ?? true)
+const nativeEngineSelected = computed(() => settingsForm.value.vpn_engine === 'native')
+const activeRuntimeStatus = computed(() => config.runtimeStatus)
+const showLegacyOpenConnectRuntimeSelector = computed(() =>
+  settingsForm.value.vpn_engine === 'legacy_openconnect' ||
+  (import.meta.env.DEV && !!config.runtimeStatus?.legacy_openconnect),
+)
+const runtimeMissing = computed(() =>
+  !nativeEngineSelected.value && !!activeRuntimeStatus.value && !activeRuntimeStatus.value.available,
+)
+const wintunReady = computed(() => {
+  const status = config.driverStatus
+  if (!status) return false
+  return status.wintun_missing === false ||
+    status.wintun_bundled === true ||
+    (status.wintun_adapters?.length ?? 0) > 0
+})
+const tapReady = computed(() => {
+  const status = config.driverStatus
+  if (!status) return false
+  return status.tap_missing === false ||
+    status.tap_available === true ||
+    (status.tap_adapters?.length ?? 0) > 0
+})
+const wintunStatusText = computed(() => {
+  const status = config.driverStatus
+  if (!status) return '未检测到 Wintun'
+  if (status.wintun_bundled) return '已检测到内置 wintun.dll'
+  if ((status.wintun_adapters?.length ?? 0) > 0) return '已检测到 Wintun 适配器'
+  return '未检测到内置 wintun.dll'
+})
+const wintunMissing = computed(() => config.driverStatus?.wintun_missing ?? !wintunReady.value)
+const tapMissing = computed(() => config.driverStatus?.tap_missing ?? !tapReady.value)
+const driverReadiness = computed(() => {
+  const status = config.driverStatus
+  if (!status) return 'unavailable'
+  if (status.effective_driver_status) return status.effective_driver_status
+  return wintunReady.value || tapReady.value ? 'ready' : 'unavailable'
+})
+const runtimeReady = computed(() => nativeEngineSelected.value || (activeRuntimeStatus.value?.available ?? true))
+const runtimeSourceText = computed(() => {
+  const status = activeRuntimeStatus.value
+  if (nativeEngineSelected.value) return 'native'
+  if (!status) return '未知'
+  if (status.source === 'native') return 'native'
+  return status.available ? (status.source || '未知') : '缺失'
+})
+const runtimePathText = computed(() => {
+  const status = activeRuntimeStatus.value
+  if (status?.path) return status.path
+  if (nativeEngineSelected.value || status?.source === 'native') return '原生引擎由应用内置提供'
+  return '未找到 OpenConnect 二进制文件'
+})
+const runtimeDirectoryText = computed(() => {
+  const status = activeRuntimeStatus.value
+  if (status?.bundled_runtime_dir) return status.bundled_runtime_dir
+  return nativeEngineSelected.value ? '原生引擎随应用提供' : '未检测到运行时目录'
+})
 
 const anyDriverAvailable = computed(() => {
   if (!config.driverStatus) return false
-  return !wintunMissing.value || !!config.driverStatus.tap_available
+  return wintunReady.value || tapReady.value
 })
 
 const driverReadinessLabel = computed(() => {
@@ -148,6 +212,7 @@ const cliButtonInstalled = computed(() => {
 
 function sectionElement(key: SectionKey) {
   if (key === 'auth') return authSection.value
+  if (key === 'connection') return connectionSection.value
   if (key === 'system') return systemSection.value
   return routesSection.value
 }
@@ -158,6 +223,7 @@ function sectionHash(key: SectionKey) {
 
 function sectionFromHash(hash: unknown): SectionKey | null {
   if (hash === '#settings-auth' || hash === '#auth') return 'auth'
+  if (hash === '#settings-connection' || hash === '#connection') return 'connection'
   if (hash === '#settings-system' || hash === '#system') return 'system'
   if (hash === '#settings-routes' || hash === '#routes') return 'routes'
   return null
@@ -165,7 +231,7 @@ function sectionFromHash(hash: unknown): SectionKey | null {
 
 function sectionFromQuery(value: unknown): SectionKey | null {
   const section = Array.isArray(value) ? value[0] : value
-  return section === 'auth' || section === 'system' || section === 'routes'
+  return section === 'auth' || section === 'connection' || section === 'system' || section === 'routes'
     ? section
     : null
 }
@@ -191,17 +257,36 @@ function updateActiveSection() {
   activeSection.value = next
 }
 
-async function scrollToSection(key: SectionKey, updateRoute = true) {
+let scrollListenerAttached = false
+
+function explicitSection(): SectionKey | null {
+  return sectionFromHash(route.hash) || sectionFromQuery(route.query.section)
+}
+
+function attachScrollListener() {
+  if (scrollListenerAttached) return
+  if (!scrollRoot.value) return
+  scrollRoot.value.addEventListener('scroll', updateActiveSection, { passive: true })
+  scrollListenerAttached = true
+}
+
+function detachScrollListener() {
+  if (!scrollListenerAttached) return
+  scrollRoot.value?.removeEventListener('scroll', updateActiveSection)
+  scrollListenerAttached = false
+}
+
+async function scrollToSection(
+  key: SectionKey,
+  updateRoute = true,
+  behavior: ScrollBehavior = 'smooth',
+) {
   await nextTick()
-  sectionElement(key)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  sectionElement(key)?.scrollIntoView({ behavior, block: 'start' })
   activeSection.value = key
   if (updateRoute) {
     router.replace({ path: '/settings', hash: sectionHash(key) })
   }
-}
-
-function initialSection(): SectionKey {
-  return sectionFromHash(route.hash) || sectionFromQuery(route.query.section) || 'auth'
 }
 
 function applyServerChoice(server: string) {
@@ -263,24 +348,49 @@ onMounted(async () => {
     try {
       await refreshRuntime()
     } catch (error) {
-      systemMessage.value = { type: 'error', text: normalizeError(error).message }
+      ui.requestError({ title: '刷新运行时失败', message: normalizeError(error).message })
     }
   }
 
-  scrollRoot.value?.addEventListener('scroll', updateActiveSection, { passive: true })
-  await scrollToSection(initialSection(), false)
+  attachScrollListener()
+  const section = explicitSection()
+  if (section) {
+    await scrollToSection(section, false, 'auto')
+  } else {
+    activeSection.value = 'auth'
+    scrollRoot.value?.scrollTo({ top: 0, behavior: 'auto' })
+  }
   updateActiveSection()
 })
 
+onActivated(() => {
+  attachScrollListener()
+  void nextTick(() => {
+    if (explicitSection()) return
+    if (scrollRoot.value) {
+      scrollRoot.value.scrollTop = savedScrollTop.value
+      updateActiveSection()
+    }
+  })
+})
+
+onDeactivated(() => {
+  savedScrollTop.value = scrollRoot.value?.scrollTop ?? savedScrollTop.value
+  detachScrollListener()
+})
+
 onBeforeUnmount(() => {
-  scrollRoot.value?.removeEventListener('scroll', updateActiveSection)
+  detachScrollListener()
 })
 
 watch(
   () => [route.hash, route.query.section],
   () => {
-    const section = initialSection()
-    scrollToSection(section, false)
+    if (route.path !== '/settings') return
+    const section = explicitSection()
+    if (section) {
+      scrollToSection(section, false, 'auto')
+    }
   },
 )
 
@@ -306,9 +416,9 @@ async function saveAuth() {
     await config.saveAuthConfig(authForm.value)
     authForm.value.password = ''
     authForm.value.password_stored = config.authConfig.password_stored ?? authForm.value.password_stored
-    authMessage.value = { type: 'success', text: '认证设置已保存' }
+    authMessage.value = { text: '认证设置已保存' }
   } catch (e: any) {
-    authMessage.value = { type: 'error', text: extractErrorText(e) }
+    ui.requestError({ title: '保存认证设置失败', message: extractErrorText(e) })
   } finally {
     authSaving.value = false
   }
@@ -322,9 +432,9 @@ async function saveSystem() {
     if (isDesktop) {
       await refreshRuntime()
     }
-    systemMessage.value = { type: 'success', text: '设置已保存' }
+    systemMessage.value = { text: '设置已保存' }
   } catch (error) {
-    systemMessage.value = { type: 'error', text: normalizeError(error).message }
+    ui.requestError({ title: '保存设置失败', message: normalizeError(error).message })
   } finally {
     systemSaving.value = false
   }
@@ -379,13 +489,12 @@ async function installDriver(driver: 'wintun' | 'tap') {
     const takesEffect = result.takes_effect || (driver === 'wintun' ? 'next_connect' : 'immediately')
     installFeedback.value = { driver, takes_effect: takesEffect }
     systemMessage.value = {
-      type: 'success',
       text: takesEffect === 'next_connect'
         ? 'Wintun 运行时已就绪，下次连接时生效'
         : 'TAP 安装完成，立即生效。如已连接 VPN，建议断开重连。',
     }
   } catch (error) {
-    systemMessage.value = { type: 'error', text: normalizeError(error).message }
+    ui.requestError({ title: '安装驱动失败', message: normalizeError(error).message })
   } finally {
     busyDriver.value = null
   }
@@ -406,9 +515,9 @@ async function addRoute() {
     await vpn.addRoute(cidr)
     routes.value = vpn.routes.map((entry) => entry.cidr)
     newRoute.value = ''
-    routeMessage.value = { type: 'success', text: '路由已添加' }
+    routeMessage.value = { text: '路由已添加' }
   } catch (e: any) {
-    routeMessage.value = { type: 'error', text: e?.message || '添加失败' }
+    ui.requestError({ title: '添加路由失败', message: e?.message || '添加失败' })
   } finally {
     routesBusy.value = false
   }
@@ -424,9 +533,9 @@ async function removeRoute(index: number) {
   try {
     await vpn.removeRoute(cidr)
     routes.value = vpn.routes.map((entry) => entry.cidr)
-    routeMessage.value = { type: 'success', text: '路由已删除' }
+    routeMessage.value = { text: '路由已删除' }
   } catch (e: any) {
-    routeMessage.value = { type: 'error', text: e?.message || '删除失败' }
+    ui.requestError({ title: '删除路由失败', message: e?.message || '删除失败' })
   } finally {
     routesBusy.value = false
   }
@@ -545,13 +654,77 @@ async function removeRoute(index: number) {
               v-if="authMessage"
               :class="[
                 'rounded-lg px-4 py-2.5 text-sm',
-                authMessage.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400',
+                'bg-green-500/10 text-green-400',
               ]"
             >
               {{ authMessage.text }}
             </div>
           </div>
         </form>
+      </section>
+
+      <section
+        id="settings-connection"
+        ref="connectionSection"
+        class="scroll-mt-4 rounded-xl border border-border bg-surface p-5"
+      >
+        <h2 class="mb-4 flex items-center gap-2 text-base font-semibold text-foreground">
+          <EthernetPort class="h-5 w-5 text-accent" />
+          连接
+        </h2>
+
+        <div class="space-y-5">
+          <div>
+            <label class="mb-1.5 block text-xs font-medium text-muted">MTU</label>
+            <input
+              v-model.number="settingsForm.mtu"
+              type="number"
+              min="576"
+              max="1500"
+              class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
+            />
+          </div>
+
+          <div class="flex items-center justify-between rounded-lg border border-border bg-bg/40 px-4 py-3">
+            <div>
+              <p class="text-sm text-foreground">DTLS</p>
+              <p class="text-xs text-muted">运行时支持时启用 DTLS 加密</p>
+            </div>
+            <ToggleSwitch
+              v-model="settingsForm.dtls"
+            />
+          </div>
+
+          <div class="flex items-center justify-between rounded-lg border border-border bg-bg/40 px-4 py-3">
+            <div>
+              <p class="text-sm text-foreground">断线重连</p>
+              <p class="text-xs text-muted">连接进程意外退出后自动尝试重新连接</p>
+            </div>
+            <ToggleSwitch
+              v-model="settingsForm.auto_reconnect"
+            />
+          </div>
+
+          <div class="flex items-center gap-3 pt-1">
+            <button
+              :disabled="systemSaving"
+              class="flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+              @click="saveSystem"
+            >
+              <Save class="h-4 w-4" />
+              {{ systemSaving ? '保存中...' : '保存连接设置' }}
+            </button>
+            <div
+              v-if="systemMessage"
+              :class="[
+                'rounded-lg px-4 py-2.5 text-sm',
+                'bg-green-500/10 text-green-400',
+              ]"
+            >
+              {{ systemMessage.text }}
+            </div>
+          </div>
+        </div>
       </section>
 
       <section
@@ -575,37 +748,13 @@ async function removeRoute(index: number) {
         </div>
 
         <div class="space-y-5">
-          <div class="grid gap-4 md:grid-cols-2">
-            <div>
-              <label class="mb-1.5 block text-xs font-medium text-muted">MTU</label>
-              <input
-                v-model.number="settingsForm.mtu"
-                type="number"
-                min="576"
-                max="1500"
-                class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label class="mb-1.5 block text-xs font-medium text-muted">日志文件路径</label>
-              <input
-                v-model="settingsForm.log_path"
-                type="text"
-                placeholder="~/.ecnuvpn/ecnuvpn.log"
-                class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <div class="flex items-center justify-between rounded-lg border border-border bg-bg/40 px-4 py-3">
-            <div>
-              <p class="text-sm text-foreground">DTLS</p>
-              <p class="text-xs text-muted">运行时支持时启用 DTLS 加密</p>
-            </div>
+          <div>
+            <label class="mb-1.5 block text-xs font-medium text-muted">日志文件路径</label>
             <input
-              v-model="settingsForm.dtls"
-              type="checkbox"
-              class="h-4 w-4 rounded border-border accent-accent"
+              v-model="settingsForm.log_path"
+              type="text"
+              placeholder="~/.ecnuvpn/ecnuvpn.log"
+              class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none"
             />
           </div>
 
@@ -614,9 +763,13 @@ async function removeRoute(index: number) {
             <input
               v-model="settingsForm.extra_args"
               type="text"
-              placeholder="openconnect 附加参数"
-              class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none"
+              :disabled="nativeEngineSelected"
+              :placeholder="nativeEngineSelected ? '原生引擎不使用额外命令行参数' : 'OpenConnect 附加参数'"
+              class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
             />
+            <p v-if="nativeEngineSelected" class="mt-1 text-xs text-muted">
+              原生模式由内置引擎管理连接，不读取额外命令行参数。
+            </p>
           </div>
 
           <div class="border-t border-border pt-4">
@@ -687,7 +840,7 @@ async function removeRoute(index: number) {
             </div>
 
             <div class="space-y-4">
-              <div>
+              <div v-if="showLegacyOpenConnectRuntimeSelector">
                 <label class="mb-1.5 block text-xs font-medium text-muted">OpenConnect 运行时</label>
                 <select
                   v-model="settingsForm.openconnect_runtime"
@@ -701,12 +854,12 @@ async function removeRoute(index: number) {
 
               <div class="grid gap-4 text-sm md:grid-cols-2">
                 <div class="rounded-lg border border-border bg-bg p-4">
-                  <p class="mb-2 text-xs text-muted">当前运行时</p>
+                  <p class="mb-2 text-xs text-muted">当前 VPN 引擎</p>
                   <p class="font-medium text-foreground">
-                    {{ config.runtimeStatus?.available ? (config.runtimeStatus.source || '未知') : '缺失' }}
+                    {{ runtimeSourceText }}
                   </p>
                   <p class="mt-2 break-all text-xs text-muted">
-                    {{ config.runtimeStatus?.path || '未找到 openconnect 二进制文件' }}
+                    {{ runtimePathText }}
                   </p>
                 </div>
                 <div class="rounded-lg border border-border bg-bg p-4">
@@ -715,7 +868,7 @@ async function removeRoute(index: number) {
                     {{ config.runtimeStatus?.version || '未知' }}
                   </p>
                   <p class="mt-2 break-all text-xs text-muted">
-                    {{ config.runtimeStatus?.bundled_runtime_dir || '未检测到运行时目录' }}
+                    {{ runtimeDirectoryText }}
                   </p>
                 </div>
               </div>
@@ -791,9 +944,7 @@ async function removeRoute(index: number) {
                       <span v-if="!wintunMissing" class="rounded bg-green-500/10 px-2 py-0.5 text-xs text-green-400">就绪</span>
                       <span v-else class="rounded bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">缺失</span>
                     </div>
-                    <p class="font-medium text-foreground">
-                      {{ config.driverStatus?.wintun_bundled ? '已检测到内置 wintun.dll' : '未检测到内置 wintun.dll' }}
-                    </p>
+                    <p class="font-medium text-foreground">{{ wintunStatusText }}</p>
                     <p v-if="wintunMissing && config.driverStatus?.wintun_recommended_action" class="mt-2 text-xs text-yellow-400/80">
                       {{ config.driverStatus.wintun_recommended_action }}
                     </p>
@@ -859,7 +1010,7 @@ async function removeRoute(index: number) {
               v-if="systemMessage"
               :class="[
                 'rounded-lg px-4 py-2.5 text-sm',
-                systemMessage.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400',
+                'bg-green-500/10 text-green-400',
               ]"
             >
               {{ systemMessage.text }}
@@ -921,7 +1072,7 @@ async function removeRoute(index: number) {
           v-if="routeMessage"
           :class="[
             'mt-4 rounded-lg px-4 py-2.5 text-sm',
-            routeMessage.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400',
+            'bg-green-500/10 text-green-400',
           ]"
         >
           {{ routeMessage.text }}
@@ -947,11 +1098,11 @@ async function removeRoute(index: number) {
         ]"
         @click="scrollToSection(section.key)"
       >
-        <span
+        <component
+          :is="section.icon"
           :class="[
-            'rounded-full transition-all duration-200',
-            activeSection === section.key ? 'h-3 w-3' : 'h-2 w-2',
-            activeSection === section.key ? 'bg-accent' : 'bg-muted',
+            'shrink-0 transition-all duration-200',
+            activeSection === section.key ? 'h-4 w-4 text-accent' : 'h-3.5 w-3.5 text-muted group-hover:text-foreground',
           ]"
         />
         <span
@@ -966,3 +1117,14 @@ async function removeRoute(index: number) {
     </nav>
   </div>
 </template>
+
+<style scoped>
+.settings-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.settings-scroll::-webkit-scrollbar {
+  display: none;
+}
+</style>

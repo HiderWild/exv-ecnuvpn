@@ -768,7 +768,16 @@ void show(const Config &cfg) {
             << cfg.webui_bind << std::endl;
   std::cout << utils::BOLD << "  WebUI Enabled   : " << utils::RESET
             << (cfg.webui_enabled ? "true" : "false") << std::endl;
-  std::cout << utils::BOLD << "  Runtime Mode    : " << utils::RESET
+  std::cout << utils::BOLD << "  Auto Reconnect  : " << utils::RESET
+            << (cfg.auto_reconnect ? "true" : "false") << std::endl;
+  std::cout << utils::BOLD << "  Minimal Mode    : " << utils::RESET
+            << (cfg.minimal_mode ? "true" : "false") << std::endl;
+  std::cout << utils::BOLD << "  Minimal Install Service: " << utils::RESET
+            << (cfg.minimal_install_service_before_connect ? "true" : "false")
+            << std::endl;
+  std::cout << utils::BOLD << "  VPN Engine      : " << utils::RESET
+            << cfg.vpn_engine << std::endl;
+  std::cout << utils::BOLD << "  OpenConnect Runtime: " << utils::RESET
             << cfg.openconnect_runtime << std::endl;
 #ifdef _WIN32
   std::cout << utils::BOLD << "  Tunnel Driver   : " << utils::RESET
@@ -867,6 +876,8 @@ Config import_from(const std::string &path) {
       cfg.webui_bind = j["webui_bind"].get<std::string>();
     if (j.contains("webui_enabled"))
       cfg.webui_enabled = j["webui_enabled"].get<bool>();
+    if (j.contains("vpn_engine"))
+      cfg.vpn_engine = j["vpn_engine"].get<std::string>();
     if (j.contains("openconnect_runtime"))
       cfg.openconnect_runtime = j["openconnect_runtime"].get<std::string>();
     if (j.contains("windows_tunnel_driver"))
@@ -875,6 +886,16 @@ Config import_from(const std::string &path) {
     if (j.contains("windows_tap_interface"))
       cfg.windows_tap_interface =
           j["windows_tap_interface"].get<std::string>();
+    if (j.contains("auto_reconnect"))
+      cfg.auto_reconnect = j["auto_reconnect"].get<bool>();
+    if (j.contains("minimal_mode"))
+      cfg.minimal_mode = j["minimal_mode"].get<bool>();
+    if (j.contains("service_install_prompt_seen"))
+      cfg.service_install_prompt_seen =
+          j["service_install_prompt_seen"].get<bool>();
+    if (j.contains("minimal_install_service_before_connect"))
+      cfg.minimal_install_service_before_connect =
+          j["minimal_install_service_before_connect"].get<bool>();
 
     if (j.contains("password")) {
       std::string pw = j["password"].get<std::string>();
@@ -970,8 +991,10 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     if (input.empty())
       input = "y";
     cfg.remember_password = (input[0] == 'y' || input[0] == 'Y');
-    if (!cfg.remember_password)
+    if (!cfg.remember_password) {
       cfg.password = "";
+      crypto::delete_key_file();
+    }
     if (save(cfg)) {
       utils::print_success(std::string("remember_password = ") +
                            (cfg.remember_password ? "true" : "false"));
@@ -986,6 +1009,58 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     if (save(cfg)) {
       utils::print_success(std::string("disable_dtls = ") +
                            (cfg.disable_dtls ? "true" : "false"));
+      return true;
+    }
+    return false;
+  }
+
+  auto handle_bool = [&](const std::string &k, bool &field,
+                         const std::string &prompt,
+                         bool default_yes) -> bool {
+    if (key != k)
+      return false;
+    std::string input = read_value(prompt);
+    if (input.empty())
+      input = default_yes ? "y" : "n";
+    if (input == "true" || input == "1") {
+      field = true;
+    } else if (input == "false" || input == "0") {
+      field = false;
+    } else {
+      field = (input[0] == 'y' || input[0] == 'Y');
+    }
+    if (save(cfg)) {
+      utils::print_success(k + " = " + (field ? "true" : "false"));
+      return true;
+    }
+    return false;
+  };
+
+  if (handle_bool("auto_reconnect", cfg.auto_reconnect,
+                  "  Enable auto reconnect? [Y/n]: ", true))
+    return true;
+  if (handle_bool("minimal_mode", cfg.minimal_mode,
+                  "  Enable minimal desktop mode? [Y/n]: ", true))
+    return true;
+  if (handle_bool("service_install_prompt_seen",
+                  cfg.service_install_prompt_seen,
+                  "  Mark service install prompt as seen? [y/N]: ", false))
+    return true;
+  if (handle_bool("minimal_install_service_before_connect",
+                  cfg.minimal_install_service_before_connect,
+                  "  Install service before minimal-mode connect? [Y/n]: ",
+                  true))
+    return true;
+
+  if (key == "vpn_engine") {
+    std::string input = read_value("  VPN engine [native/legacy_openconnect]: ");
+    if (input != "native" && input != "legacy_openconnect") {
+      utils::print_error("Invalid VPN engine.");
+      return false;
+    }
+    cfg.vpn_engine = input;
+    if (save(cfg)) {
+      utils::print_success("Set vpn_engine = " + input);
       return true;
     }
     return false;
@@ -1064,8 +1139,12 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
   utils::print_error("Unknown config key: " + key);
   utils::print_info("Valid keys: server, username, password, mtu, useragent, "
                     "log_file, remember_password, disable_dtls, "
-                    "openconnect_runtime, windows_tunnel_driver, "
-                    "windows_tap_interface");
+                    "auto_reconnect, minimal_mode, "
+                    "service_install_prompt_seen, "
+                    "minimal_install_service_before_connect, "
+                    "vpn_engine, "
+                    "openconnect_runtime, "
+                    "windows_tunnel_driver, windows_tap_interface");
   return false;
 }
 

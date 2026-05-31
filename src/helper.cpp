@@ -9,6 +9,7 @@
 #include "utils.hpp"
 #include "vpn.hpp"
 #include "virtual_network.hpp"
+#include "vpn_engine/native_session_store.hpp"
 
 #include <cerrno>
 #include <cctype>
@@ -81,6 +82,7 @@ private:
 struct SessionState {
   uid_t uid = static_cast<uid_t>(-1);
   gid_t gid = static_cast<gid_t>(-1);
+  std::string engine = "legacy_openconnect";
   std::string username;
   std::string home;
   std::string config_dir;
@@ -114,6 +116,10 @@ std::string route_ready_path_for(const SessionState &state) {
   return state.config_dir + "/route-ready";
 }
 
+bool is_native_session(const SessionState &state) {
+  return state.engine == "native";
+}
+
 void remove_file_if_exists(const std::string &path) {
   if (utils::file_exists(path)) {
     std::remove(path.c_str());
@@ -125,7 +131,11 @@ void clear_runtime_state(const SessionState &state) {
     return;
   remove_file_if_exists(pid_path_for(state));
   remove_file_if_exists(supervisor_pid_path_for(state));
-  remove_file_if_exists(route_ready_path_for(state));
+  if (is_native_session(state)) {
+    vpn_engine::clear_native_session_state(state.config_dir);
+  } else {
+    remove_file_if_exists(route_ready_path_for(state));
+  }
 }
 
 pid_t read_pid_file(const std::string &path) {
@@ -172,6 +182,7 @@ bool read_route_ready(const SessionState &state, std::string *interface_name,
 nlohmann::json to_json(const SessionState &state) {
   return nlohmann::json{{"uid", static_cast<unsigned int>(state.uid)},
                         {"gid", static_cast<unsigned int>(state.gid)},
+                        {"engine", state.engine},
                         {"username", state.username},
                         {"home", state.home},
                         {"config_dir", state.config_dir},
@@ -186,6 +197,7 @@ bool from_json(const nlohmann::json &j, SessionState *state) {
   try {
     state->uid = static_cast<uid_t>(j.at("uid").get<unsigned int>());
     state->gid = static_cast<gid_t>(j.at("gid").get<unsigned int>());
+    state->engine = j.value("engine", std::string("legacy_openconnect"));
     state->username = j.at("username").get<std::string>();
     state->home = j.at("home").get<std::string>();
     state->config_dir = j.at("config_dir").get<std::string>();
@@ -226,10 +238,40 @@ void clear_session_state() {
   remove_file_if_exists(platform::helper_platform_config().session_state_path);
 }
 
+void clear_native_session_state_for_known_config_dirs(uid_t peer_uid) {
+  std::vector<std::string> config_dirs;
+  const std::string peer_config_dir = utils::get_config_dir_for_uid(peer_uid);
+  if (!peer_config_dir.empty())
+    config_dirs.push_back(peer_config_dir);
+
+  const std::string helper_config_dir = utils::get_config_dir();
+  if (!helper_config_dir.empty() && helper_config_dir != peer_config_dir)
+    config_dirs.push_back(helper_config_dir);
+
+  vpn_engine::clear_native_session_states(config_dirs);
+}
+
 RuntimeSnapshot inspect_runtime(const SessionState &state) {
   RuntimeSnapshot snapshot;
   if (state.config_dir.empty())
     return snapshot;
+
+  if (is_native_session(state)) {
+    vpn_engine::NativeSessionProbe probe;
+    probe.is_process_alive = [](int pid) { return is_process_alive(pid); };
+    vpn_engine::NativeSessionSnapshot native =
+        vpn_engine::read_native_session_snapshot(state.config_dir, probe);
+
+    snapshot.running = native.running;
+    snapshot.pid = static_cast<pid_t>(native.pid);
+    snapshot.supervisor_pid = static_cast<pid_t>(native.supervisor_pid);
+    snapshot.network_ready = native.network_ready;
+    snapshot.interface_name = native.interface_name;
+    snapshot.internal_ip = native.internal_ip;
+    if (snapshot.running)
+      snapshot.interfaces_output = platform::get_interfaces_output();
+    return snapshot;
+  }
 
   snapshot.supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
   if (!is_process_alive(snapshot.supervisor_pid))
@@ -388,6 +430,7 @@ nlohmann::json make_status_response(const SessionState &state,
                           {"internal_ip", snapshot.internal_ip},
                           {"rx_bytes", snapshot.rx_bytes},
                           {"tx_bytes", snapshot.tx_bytes},
+                          {"engine", state.engine},
                           {"server", state.server},
                           {"route_count", state.route_count},
                           {"retry_limit", state.retry_limit},
@@ -433,6 +476,57 @@ nlohmann::json handle_status(uid_t peer_uid) {
 }
 
 bool stop_managed_session(const SessionState &state, std::string *message) {
+  if (is_native_session(state)) {
+    RuntimeSnapshot snapshot = inspect_runtime(state);
+    if (!snapshot.running) {
+      platform::cleanup_routes();
+      platform::kill_all_supervisors();
+      clear_runtime_state(state);
+      if (message)
+        *message = "No native VPN session found. VPN is not running.";
+      return false;
+    }
+
+    platform::cleanup_routes();
+
+    if (snapshot.supervisor_pid > 0)
+      platform::terminate_process(static_cast<int>(snapshot.supervisor_pid));
+    if (snapshot.pid > 0)
+      platform::terminate_process(static_cast<int>(snapshot.pid));
+
+    for (int i = 0; i < 10; ++i) {
+      platform::sleep_ms(300);
+      if ((snapshot.pid <= 0 || !is_process_alive(snapshot.pid)) &&
+          (snapshot.supervisor_pid <= 0 ||
+           !is_process_alive(snapshot.supervisor_pid))) {
+        break;
+      }
+    }
+
+    if (snapshot.pid > 0 && is_process_alive(snapshot.pid))
+      platform::force_terminate_process(static_cast<int>(snapshot.pid));
+    if (snapshot.supervisor_pid > 0 &&
+        is_process_alive(snapshot.supervisor_pid))
+      platform::force_terminate_process(
+          static_cast<int>(snapshot.supervisor_pid));
+
+    platform::sleep_ms(500);
+
+    if ((snapshot.pid > 0 && is_process_alive(snapshot.pid)) ||
+        (snapshot.supervisor_pid > 0 &&
+         is_process_alive(snapshot.supervisor_pid))) {
+      if (message)
+        *message = "Failed to stop native VPN session!";
+      return false;
+    }
+
+    platform::kill_all_supervisors();
+    clear_runtime_state(state);
+    if (message)
+      *message = "VPN connection stopped successfully! 🎉";
+    return true;
+  }
+
   pid_t supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
   if (!is_process_alive(supervisor_pid))
     supervisor_pid = -1;
@@ -504,9 +598,10 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
 nlohmann::json handle_stop(uid_t peer_uid) {
   SessionState state;
   if (!load_session_state(&state)) {
-    // No session state — still clean up any orphaned routes/supervisors
-  platform::cleanup_routes();
-  platform::kill_all_supervisors();
+    // No session state: still clean up orphaned native/legacy runtime state.
+    platform::cleanup_routes();
+    platform::kill_all_supervisors();
+    clear_native_session_state_for_known_config_dirs(peer_uid);
     return make_error("No openconnect process found. VPN is not running.");
   }
 
@@ -586,12 +681,24 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
   state.config_dir =
       requested_config_dir.empty() ? utils::get_config_dir_for_uid(peer_uid)
                                    : requested_config_dir;
+  state.engine = cfg.vpn_engine.empty() ? std::string("legacy_openconnect")
+                                        : cfg.vpn_engine;
   state.server = cfg.server;
   state.route_count = static_cast<int>(cfg.routes.size());
   state.retry_limit = retry_limit;
   timing.mark("session_prepared",
               "server=" + state.server +
                   " routes=" + std::to_string(state.route_count));
+
+  if (is_native_session(state)) {
+    pid_t supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
+    if (supervisor_pid <= 0 || !is_process_alive(supervisor_pid)) {
+      timing.finish(false, "reason=native_session_not_durable");
+      return make_error(
+          "Native VPN helper-managed sessions are not available in this build yet.",
+          "native_session_not_durable");
+    }
+  }
 
   nlohmann::json worker_request{{"uid", static_cast<unsigned int>(state.uid)},
                                 {"gid", static_cast<unsigned int>(state.gid)},
@@ -639,7 +746,12 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
         "VPN process started, but network routes are not ready yet.");
   }
 
-  clear_runtime_state(state);
+  if (is_native_session(state)) {
+    remove_file_if_exists(pid_path_for(state));
+    remove_file_if_exists(supervisor_pid_path_for(state));
+  } else {
+    clear_runtime_state(state);
+  }
   clear_session_state();
   if (active_daemon_options.oneshot) {
     daemon_stop_requested = 1;

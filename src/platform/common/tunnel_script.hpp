@@ -7,6 +7,7 @@ namespace ecnuvpn {
 namespace platform {
 
 struct TunnelScriptContext {
+  std::string vpn_engine = "legacy_openconnect";
   std::string route_ready_path;
   std::vector<std::string> custom_routes;
   std::vector<std::string> server_route_exceptions;
@@ -16,10 +17,16 @@ struct TunnelScriptContext {
   unsigned int runtime_owner_gid = 0;
 };
 
+struct OpenconnectLogConfigureResult {
+  bool ok = false;
+  std::string code;
+};
+
 std::string generate_tunnel_script(const TunnelScriptContext &context);
 int run_tunnel_script(const TunnelScriptContext &context);
-bool configure_from_openconnect_log(const TunnelScriptContext &context,
-                                    const std::string &log_path);
+OpenconnectLogConfigureResult
+configure_from_openconnect_log(const TunnelScriptContext &context,
+                               const std::string &log_path);
 void cleanup_tunnel_routes(const TunnelScriptContext &context);
 
 } // namespace platform

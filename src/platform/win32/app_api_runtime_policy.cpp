@@ -60,10 +60,12 @@ std::string helper_unavailable_disconnect_message() {
 nlohmann::json preflight_connect_platform_checks(const Config &cfg) {
   nlohmann::json drivers = driver_status_json(cfg);
   std::string effective = drivers.value("effective_driver", std::string("wintun"));
+  bool wintun_missing = drivers.value(
+      "wintun_missing", !drivers.value("wintun_bundled", false));
   if (cfg.windows_tunnel_driver == "wintun" &&
-      !drivers.value("wintun_bundled", false)) {
+      wintun_missing) {
     return nlohmann::json{{"ok", false},
-                          {"error", "Wintun is selected but bundled wintun.dll is missing."}};
+                          {"error", "Wintun is selected but no bundled wintun.dll or existing Wintun adapter was detected."}};
   }
   if (effective == "tap" && cfg.windows_tunnel_driver == "tap" &&
       cfg.windows_tap_interface.empty()) {

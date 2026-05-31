@@ -15,6 +15,7 @@
 #include "platform/common/service_status.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
+#include "vpn_engine/native_engine.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -49,6 +50,8 @@ bool helper_unavailable(const nlohmann::json &response) {
   return json_string(response, "code") == platform::kHelperUnavailableCode ||
          json_string(response, "message") == "Helper daemon not available";
 }
+
+int desktop_retry_limit(const Config &cfg) { return cfg.auto_reconnect ? -1 : 0; }
 
 class StageTimer {
 public:
@@ -141,11 +144,6 @@ nlohmann::json helper_error(const nlohmann::json &response,
 
 config::ConfigManager make_config_manager() {
   utils::ensure_dir(utils::get_config_dir());
-  // The desktop / RPC entrypoint does not go through the CLI wizard, so we
-  // have to make sure the encryption key file exists before any password
-  // operation. Without this, config_set_password would always fail with
-  // "Encryption key is missing" on a fresh install.
-  crypto::init_key_if_needed();
   logger::init();
   return config::ConfigManager(utils::get_config_dir());
 }
@@ -297,9 +295,16 @@ nlohmann::json settings_config(const Config &cfg) {
                         {"webui_port", cfg.webui_port},
                         {"webui_host", cfg.webui_bind},
                         {"webui_enabled", cfg.webui_enabled},
+                        {"vpn_engine", cfg.vpn_engine},
                         {"openconnect_runtime", cfg.openconnect_runtime},
                         {"windows_tunnel_driver", cfg.windows_tunnel_driver},
-                        {"windows_tap_interface", cfg.windows_tap_interface}};
+                        {"windows_tap_interface", cfg.windows_tap_interface},
+                        {"auto_reconnect", cfg.auto_reconnect},
+                        {"minimal_mode", cfg.minimal_mode},
+                        {"service_install_prompt_seen",
+                         cfg.service_install_prompt_seen},
+                        {"minimal_install_service_before_connect",
+                         cfg.minimal_install_service_before_connect}};
 }
 
 nlohmann::json routes_json(const Config &cfg) {
@@ -366,6 +371,12 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
   if (password.empty())
     return error("VPN password is not configured.");
 
+  if (cfg.vpn_engine == "native") {
+    auto native_validation = vpn_engine::validate_native_config(cfg);
+    if (!native_validation.ok)
+      return error(native_validation.message, native_validation.code);
+  }
+
   if (!allow_direct_fallback) {
     platform::BackendResolveOptions options;
     options.preferred_mode = "service";
@@ -380,7 +391,7 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
 
   nlohmann::json runtime = runtime_status_json(cfg);
   if (!runtime.value("available", false)) {
-    return error("OpenConnect runtime is not available. The desktop bundle is missing openconnect and its native dependencies.");
+    return error("VPN runtime is not available. The desktop bundle is missing the selected VPN engine dependencies.");
   }
 
   nlohmann::json platform_err = platform::preflight_connect_platform_checks(cfg);
@@ -517,7 +528,7 @@ nlohmann::json handle_action(const std::string &action,
                 nlohmann::json request{{"action", "start"},
                                        {"config", cfg},
                                        {"password", password},
-                                       {"retry_limit", 0},
+                                       {"retry_limit", desktop_retry_limit(cfg)},
                                        {"home", utils::get_effective_home()},
                                        {"config_dir", utils::get_config_dir()}};
                  add_desktop_owner_context(request);
@@ -548,7 +559,7 @@ nlohmann::json handle_action(const std::string &action,
       nlohmann::json start_request{{"action", "start"},
                                    {"config", cfg},
                                    {"password", password},
-                                   {"retry_limit", 0},
+                                   {"retry_limit", desktop_retry_limit(cfg)},
                                    {"home", utils::get_effective_home()},
                                    {"config_dir", utils::get_config_dir()}};
       add_desktop_owner_context(start_request);
@@ -622,22 +633,30 @@ nlohmann::json handle_action(const std::string &action,
         std::string err = config_api::config_set(mgr, "username", payload["username"].get<std::string>());
         if (!err.empty()) return error(err);
       }
-      // Update remember_password BEFORE password so that the password setter
-      // sees the correct toggle state. The UI treats an empty password field
-      // as "keep the existing password" while a non-empty value means update.
-      if (payload.contains("remember_password") &&
-          payload["remember_password"].is_boolean()) {
-        std::string err = config_api::config_set(mgr, "remember_password",
-                               payload["remember_password"].get<bool>() ? "true"
-                                                                         : "false");
+      bool remember_payload = payload.contains("remember_password") &&
+                              payload["remember_password"].is_boolean();
+      bool remember_password =
+          remember_payload ? payload["remember_password"].get<bool>()
+                           : mgr.load().remember_password;
+      std::string submitted_password =
+          payload.contains("password") && payload["password"].is_string()
+              ? payload["password"].get<std::string>()
+              : std::string();
+
+      if (remember_payload && !remember_password) {
+        std::string err = config_api::config_clear_password_and_key(mgr);
         if (!err.empty()) return error(err);
-      }
-      if (payload.contains("password") && payload["password"].is_string()) {
-        std::string password = payload["password"].get<std::string>();
-        if (!password.empty()) {
-          std::string err = config_api::config_set_password(mgr, password);
-          if (!err.empty())
-            return error(err);
+      } else if (remember_password) {
+        if (!submitted_password.empty()) {
+          std::string err = config_api::config_set_password(mgr, submitted_password);
+          if (!err.empty()) return error(err);
+        } else {
+          Config current = mgr.load();
+          if (remember_payload && current.password.empty()) {
+            return error("Password is required to enable remember_password.");
+          }
+          std::string err = config_api::config_set(mgr, "remember_password", "true");
+          if (!err.empty()) return error(err);
         }
       }
       if (payload.contains("user_agent") && payload["user_agent"].is_string()) {
@@ -689,6 +708,44 @@ nlohmann::json handle_action(const std::string &action,
       if (payload.contains("webui_enabled") && payload["webui_enabled"].is_boolean()) {
         std::string err = config_api::config_set(mgr, "webui_enabled",
                                payload["webui_enabled"].get<bool>() ? "true" : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("vpn_engine") && payload["vpn_engine"].is_string()) {
+        std::string err =
+            config_api::config_set(mgr, "vpn_engine",
+                                   payload["vpn_engine"].get<std::string>());
+        if (!err.empty())
+          return error(err);
+      }
+      if (payload.contains("auto_reconnect") &&
+          payload["auto_reconnect"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "auto_reconnect",
+            payload["auto_reconnect"].get<bool>() ? "true" : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("minimal_mode") &&
+          payload["minimal_mode"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "minimal_mode",
+            payload["minimal_mode"].get<bool>() ? "true" : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("service_install_prompt_seen") &&
+          payload["service_install_prompt_seen"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "service_install_prompt_seen",
+            payload["service_install_prompt_seen"].get<bool>() ? "true"
+                                                               : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("minimal_install_service_before_connect") &&
+          payload["minimal_install_service_before_connect"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "minimal_install_service_before_connect",
+            payload["minimal_install_service_before_connect"].get<bool>()
+                ? "true"
+                : "false");
         if (!err.empty()) return error(err);
       }
       if (payload.contains("openconnect_runtime") &&

@@ -8,8 +8,11 @@ import {
   type DesktopCliCommand,
   type DesktopDriverInstallTarget,
   type DesktopEventType,
+  type DesktopModalPayload,
   type DesktopRpcAction,
   type DesktopServiceCommand,
+  type DesktopServiceInstallPromptResult,
+  type DesktopWindowMode,
 } from '../shared/desktop-contract.js'
 
 type EventHandler = (event: { type: DesktopEventType; data: unknown }) => void
@@ -73,6 +76,23 @@ const api = {
   drivers: {
     status: () => rpc('drivers.status'),
     install: (driver: DesktopDriverInstallTarget) => ipcRenderer.invoke(desktopIpcChannels.driverInstall, driver),
+  },
+  window: {
+    setMode: (mode: DesktopWindowMode) => ipcRenderer.invoke(desktopIpcChannels.windowMode, mode),
+    resolveClosePrompt: (result: unknown) =>
+      ipcRenderer.invoke(desktopIpcChannels.closePromptResult, result),
+  },
+  modal: {
+    serviceInstallPrompt: () =>
+      ipcRenderer.invoke(desktopIpcChannels.serviceInstallPrompt) as Promise<DesktopServiceInstallPromptResult>,
+    passwordPrompt: (message: string) =>
+      ipcRenderer.invoke(desktopIpcChannels.passwordPrompt, message) as Promise<string | null>,
+    confirmPrompt: (message: string) =>
+      ipcRenderer.invoke(desktopIpcChannels.confirmPrompt, message) as Promise<boolean>,
+    getPayload: () =>
+      ipcRenderer.invoke(desktopIpcChannels.modalPayload) as Promise<DesktopModalPayload | null>,
+    resolve: (result: unknown) =>
+      ipcRenderer.invoke(desktopIpcChannels.modalResult, result),
   },
   events: {
     subscribe: (handler: EventHandler) => {

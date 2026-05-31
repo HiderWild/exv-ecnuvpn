@@ -8,8 +8,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($env:ECNUVPN_LEGACY_OPENCONNECT_RUNTIME -ne "1") {
+  throw "OpenConnect runtime staging is legacy diagnostic-only. Set ECNUVPN_LEGACY_OPENCONNECT_RUNTIME=1 to run this script."
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$runtimeDir = Join-Path $repoRoot ("runtime\win32-" + $Arch)
+$runtimeDir = Join-Path $repoRoot ("runtime\legacy-openconnect\win32-" + $Arch)
 
 if (-not (Test-Path $SourceDir)) {
   throw "SourceDir does not exist: $SourceDir"
@@ -52,4 +56,4 @@ Get-ChildItem -Path $SourceDir -Include LICENSE*,COPYING* -File | ForEach-Object
   Copy-Item $_.FullName -Destination (Join-Path $runtimeDir $_.Name) -Force
 }
 
-Write-Host "Staged OpenConnect runtime to $runtimeDir"
+Write-Host "Staged legacy diagnostic OpenConnect runtime to $runtimeDir"

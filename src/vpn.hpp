@@ -2,6 +2,7 @@
 
 #include "config.hpp"
 
+#include <functional>
 #include <string>
 
 namespace ecnuvpn {
@@ -13,13 +14,23 @@ struct RuntimeStatusSnapshot {
     bool running = false;
     int pid = -1;
     int supervisor_pid = -1;
+    bool pid_from_openconnect_scan = false;
     bool network_ready = false;
     std::string interface_name;
     std::string internal_ip;
     std::string interfaces_output;
 };
 
+struct RuntimeStatusProbe {
+    std::function<bool(int)> is_process_alive;
+    std::function<int()> find_openconnect_pid;
+    std::function<std::string()> interfaces_output;
+};
+
 RuntimeStatusSnapshot read_runtime_status_snapshot();
+RuntimeStatusSnapshot read_runtime_status_snapshot(const Config &cfg);
+RuntimeStatusSnapshot read_runtime_status_snapshot(const Config &cfg,
+                                                   const RuntimeStatusProbe &probe);
 bool stop_direct_session();
 
 // Start the VPN connection using openconnect

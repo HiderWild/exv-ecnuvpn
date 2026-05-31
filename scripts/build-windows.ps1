@@ -30,7 +30,7 @@ function Invoke-CppBuild {
   Push-Location $repoRoot
   try {
     Invoke-Step cmake --preset windows-release
-    Invoke-Step cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test
+    Invoke-Step cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test
   }
   finally {
     Pop-Location
@@ -40,7 +40,7 @@ function Invoke-CppBuild {
 function Invoke-CppTests {
   Push-Location $repoRoot
   try {
-    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test'
+    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test'
   }
   finally {
     Pop-Location

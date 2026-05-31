@@ -1,6 +1,9 @@
 import type {
   DesktopDriverInstallTarget,
   DesktopEventType,
+  DesktopModalPayload,
+  DesktopServiceInstallPromptResult,
+  DesktopWindowMode,
 } from '../../desktop/shared/desktop-contract'
 import type {
   AuthConfig,
@@ -87,6 +90,17 @@ export interface EcnuVpnApi {
   drivers: {
     status(): Promise<DriverStatus>
     install(driver: DesktopDriverInstallTarget): Promise<DriverStatus>
+  }
+  window: {
+    setMode(mode: DesktopWindowMode): Promise<{ ok: true; mode: DesktopWindowMode }>
+    resolveClosePrompt(result: unknown): Promise<{ ok: true }>
+  }
+  modal: {
+    serviceInstallPrompt(): Promise<DesktopServiceInstallPromptResult>
+    passwordPrompt(message: string): Promise<string | null>
+    confirmPrompt(message: string): Promise<boolean>
+    getPayload(): Promise<DesktopModalPayload | null>
+    resolve(result: unknown): Promise<{ ok: true }>
   }
   events: {
     subscribe(handler: (event: EcnuVpnEvent) => void): () => void

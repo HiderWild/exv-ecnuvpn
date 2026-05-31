@@ -6,19 +6,26 @@
 #include "platform/common/openconnect_process.hpp"
 #include "platform/common/process_control.hpp"
 #include "platform/common/vpn_supervisor_process.hpp"
+#include "openconnect_log.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
+#include "vpn_engine/native_engine.hpp"
+#include "vpn_engine/native_session_store.hpp"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 #ifndef _WIN32
@@ -80,6 +87,100 @@ private:
   Clock::time_point started_;
   Clock::time_point last_;
   bool finished_ = false;
+};
+
+class RuntimeLogTail {
+public:
+  using ChunkHandler = std::function<void(const std::string &)>;
+
+  RuntimeLogTail(std::string log_path, ChunkHandler on_chunk)
+      : log_path_(std::move(log_path)), on_chunk_(std::move(on_chunk)),
+        offset_(current_size()) {
+    running_ = true;
+    worker_ = std::thread([this]() { run(); });
+  }
+
+  ~RuntimeLogTail() { stop(); }
+
+  RuntimeLogTail(const RuntimeLogTail &) = delete;
+  RuntimeLogTail &operator=(const RuntimeLogTail &) = delete;
+
+  void stop() {
+    bool expected = true;
+    if (!running_.compare_exchange_strong(expected, false))
+      return;
+    if (worker_.joinable())
+      worker_.join();
+  }
+
+private:
+  std::uintmax_t current_size() const {
+    std::error_code ec;
+    std::uintmax_t size = std::filesystem::file_size(log_path_, ec);
+    return ec ? 0 : size;
+  }
+
+  void run() {
+    while (running_) {
+      read_available();
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    read_available();
+  }
+
+  void read_available() {
+    std::error_code ec;
+    std::uintmax_t size = std::filesystem::file_size(log_path_, ec);
+    if (ec)
+      return;
+    if (size < offset_)
+      offset_ = 0;
+    if (size == offset_)
+      return;
+
+    std::ifstream in(log_path_, std::ios::binary);
+    if (!in.is_open())
+      return;
+    in.seekg(static_cast<std::streamoff>(offset_));
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    std::string chunk = buffer.str();
+    offset_ += static_cast<std::uintmax_t>(chunk.size());
+    if (!chunk.empty() && on_chunk_)
+      on_chunk_(chunk);
+  }
+
+  std::string log_path_;
+  ChunkHandler on_chunk_;
+  std::uintmax_t offset_ = 0;
+  std::atomic<bool> running_{false};
+  std::thread worker_;
+};
+
+class AuthFailureWatch {
+public:
+  explicit AuthFailureWatch(const Config &cfg)
+      : tail_(utils::expand_home(cfg.log_file),
+              [this](const std::string &chunk) { observe(chunk); }) {}
+
+  bool failed() const { return failed_.load(); }
+
+  void stop() { tail_.stop(); }
+
+private:
+  void observe(const std::string &chunk) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    buffer_ += chunk;
+    if (buffer_.size() > 8192)
+      buffer_.erase(0, buffer_.size() - 8192);
+    if (openconnect_log::contains_auth_failure_text(buffer_))
+      failed_ = true;
+  }
+
+  std::atomic<bool> failed_{false};
+  std::mutex buffer_mutex_;
+  std::string buffer_;
+  RuntimeLogTail tail_;
 };
 
 class ConnectionDiagnostics {
@@ -186,6 +287,14 @@ static void remove_route_ready() {
   remove_pid_file(utils::get_route_ready_path());
 }
 
+static pid_t current_process_pid() {
+#ifdef _WIN32
+  return static_cast<pid_t>(GetCurrentProcessId());
+#else
+  return static_cast<pid_t>(getpid());
+#endif
+}
+
 static bool read_route_ready(std::string *interface_name = nullptr,
                              std::string *internal_ip = nullptr) {
   std::string path = utils::get_route_ready_path();
@@ -230,6 +339,18 @@ static void terminate_process(pid_t pid, bool force) {
 
 static void sleep_ms(unsigned int milliseconds) {
   platform::sleep_ms(milliseconds);
+}
+
+static void append_openconnect_attempt_marker(const Config &cfg) {
+  std::filesystem::path log_path = utils::expand_home(cfg.log_file);
+  std::error_code ec;
+  if (log_path.has_parent_path())
+    std::filesystem::create_directories(log_path.parent_path(), ec);
+  std::ofstream out(log_path, std::ios::app);
+  if (out.is_open()) {
+    out << "Starting VPN: " << cfg.server << " user=" << cfg.username
+        << std::endl;
+  }
 }
 
 static void handle_supervisor_signal(int) {
@@ -290,6 +411,8 @@ static int run_supervisor(const Config &cfg, const std::string &password,
 
     pid_t child_pid = -1;
     platform::OpenconnectProcess child_process;
+    append_openconnect_attempt_marker(cfg);
+    AuthFailureWatch auth_watch(cfg);
     if (!platform::spawn_openconnect_process(cfg, password, &child_process)) {
       timing.finish(false, "reason=spawn_openconnect_failed");
       timing_finished = true;
@@ -310,6 +433,7 @@ static int run_supervisor(const Config &cfg, const std::string &password,
 
     int wait_status = 0;
     bool route_ready_logged = false;
+    bool auth_failed_logged = false;
 #ifndef _WIN32
     while (true) {
       pid_t wait_result = waitpid(child_pid, &wait_status, WNOHANG);
@@ -341,6 +465,14 @@ static int run_supervisor(const Config &cfg, const std::string &password,
           timing_finished = true;
           route_ready_logged = true;
         }
+      }
+
+      if (!route_ready_logged && !auth_failed_logged &&
+          (auth_watch.failed() || tunnel::runtime_log_has_auth_failure(cfg))) {
+        auth_failed_logged = true;
+        logger::error("OpenConnect reported authentication failure before network readiness");
+        timing.mark("auth_failed");
+        terminate_process(child_pid, true);
       }
 
       usleep(250000);
@@ -382,6 +514,14 @@ static int run_supervisor(const Config &cfg, const std::string &password,
           route_ready_logged = true;
         }
       }
+
+      if (!route_ready_logged && !auth_failed_logged &&
+          (auth_watch.failed() || tunnel::runtime_log_has_auth_failure(cfg))) {
+        auth_failed_logged = true;
+        logger::error("OpenConnect reported authentication failure before network readiness");
+        timing.mark("auth_failed");
+        terminate_process(child_pid, true);
+      }
     }
     if (hChild) {
       GetExitCodeProcess(hChild, &child_exit_code);
@@ -412,6 +552,12 @@ static int run_supervisor(const Config &cfg, const std::string &password,
     supervisor_child_pid = -1;
     remove_pid();
     remove_route_ready();
+
+    if (auth_failed_logged) {
+      clear_runtime_state();
+      timing.finish(false, "reason=auth_failed");
+      return first_attempt ? kVpnInitialConnectFailedExitCode : 1;
+    }
 
     if (supervisor_stop_requested)
       break;
@@ -472,7 +618,14 @@ int start(const Config &cfg, int retry_limit) {
   utils::print_header("EXV Starting");
 
   // ── Pre-flight checks ──────────────────────────────────────
-  if (!utils::check_openconnect(cfg.openconnect_runtime)) {
+  if (cfg.vpn_engine == "native") {
+    auto validation = vpn_engine::validate_native_config(cfg);
+    if (!validation.ok) {
+      utils::print_error(validation.message);
+      logger::error("Native VPN engine config invalid: " + validation.code);
+      return 1;
+    }
+  } else if (!utils::check_openconnect(cfg.openconnect_runtime)) {
 #ifdef _WIN32
     if (cfg.openconnect_runtime != "system") {
       utils::print_error("Bundled OpenConnect runtime is missing from this installation.");
@@ -666,6 +819,68 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
                         int retry_limit) {
   ConnectTiming timing(retry_limit == 0 ? "vpn.start.direct"
                                         : "vpn.start.supervised");
+  if (cfg.vpn_engine == "native") {
+    auto validation = vpn_engine::validate_native_config(cfg);
+    if (!validation.ok) {
+      utils::print_error(validation.message);
+      logger::error("Native VPN engine config invalid: " + validation.code);
+      timing.finish(false, "reason=" + validation.code);
+      return 1;
+    }
+
+    const pid_t process_pid = current_process_pid();
+    pid_t supervisor_pid = read_supervisor_pid();
+    if (supervisor_pid <= 0 || supervisor_pid == process_pid ||
+        !is_process_alive(supervisor_pid)) {
+      supervisor_pid = -1;
+    }
+
+    vpn_engine::NativeSessionRecord native_record;
+    native_record.pid = -1;
+    native_record.supervisor_pid = static_cast<int>(supervisor_pid);
+    native_record.server = cfg.server;
+    native_record.route_count = static_cast<int>(cfg.routes.size());
+    native_record.retry_limit = retry_limit;
+
+    if (!vpn_engine::native_session_identity_can_outlive_process(
+            native_record, static_cast<int>(process_pid))) {
+      utils::print_error(
+          "Native VPN helper-managed sessions are not available in this build yet.");
+      logger::error(
+          "Native VPN engine start refused: no durable managed session PID");
+      timing.finish(false, "reason=native_session_not_durable");
+      return 1;
+    }
+
+    vpn_engine::NativeSessionEventRecorder recorder(utils::get_config_dir(),
+                                                    native_record);
+    vpn_engine::NativeVpnEngineDependencies dependencies =
+        vpn_engine::default_native_engine_dependencies();
+    dependencies.event_sink = &recorder;
+
+    vpn_engine::NativeVpnEngineSession session(
+        vpn_engine::make_native_config(cfg, plaintext_password), dependencies);
+    auto result = session.start();
+    if (!result.ok) {
+      utils::print_error(result.message);
+      logger::error("Native VPN engine start failed: " + result.code);
+      timing.finish(false, "reason=" + result.code);
+      return 1;
+    }
+
+    const vpn_engine::VpnEngineStatus status = session.status();
+    if (!status.running) {
+      recorder.mark_stopped();
+      utils::print_error("Native VPN engine exited before a managed session was established.");
+      logger::error("Native VPN engine exited before a managed session was established");
+      timing.finish(false, "reason=native_session_not_running");
+      return 1;
+    }
+
+    timing.finish(true, "engine=native");
+    return 0;
+  }
+
   std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
   timing.mark("resolve_openconnect",
               openconnect_path.empty() ? "result=missing" : "result=ok");
@@ -707,6 +922,8 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
 
   utils::print_info("Connecting to " + cfg.server + " ...");
   logger::info("Starting VPN: " + cfg.server + " user=" + cfg.username);
+  append_openconnect_attempt_marker(cfg);
+  AuthFailureWatch auth_watch(cfg);
 
   clear_runtime_state();
   timing.mark("clear_runtime_state");
@@ -761,6 +978,17 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
                     route_ready ? "result=ready" : "result=pending");
       }
 #endif
+      if (!route_ready &&
+          (auth_watch.failed() || tunnel::runtime_log_has_auth_failure(cfg))) {
+        diagnostics.event("auth_failed");
+        diagnostics.flush_summary(false);
+        terminate_process(child_pid, true);
+        clear_runtime_state();
+        utils::print_error("VPN authentication failed or the server rejected the connection.");
+        logger::error("OpenConnect reported authentication failure before network readiness");
+        timing.finish(false, "reason=auth_failed");
+        return kVpnInitialConnectFailedExitCode;
+      }
 
       if (vpn_pid > 0 && !is_process_alive(vpn_pid)) {
         diagnostics.mark_process_exited_before_ready();
@@ -811,12 +1039,20 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
       return 0;
     }
 
-    utils::print_error("VPN process started, but network configuration did not complete.");
-    utils::print_info("Check logs with: exv logs");
     if (vpn_pid > 0 && is_process_alive(vpn_pid)) {
       terminate_process(vpn_pid, true);
     }
     clear_runtime_state();
+    if (auth_watch.failed() || tunnel::runtime_log_has_auth_failure(cfg)) {
+      utils::print_error("VPN authentication failed or the server rejected the connection.");
+      logger::error("OpenConnect authentication failure detected after route-ready timeout");
+      timing.finish(false, "reason=auth_failed_after_route_ready_timeout");
+      diagnostics.event("auth_failed_after_timeout");
+      diagnostics.flush_summary(false);
+      return kVpnInitialConnectFailedExitCode;
+    }
+    utils::print_error("VPN process started, but network configuration did not complete.");
+    utils::print_info("Check logs with: exv logs");
     logger::error("VPN start aborted because route-ready marker was not detected");
     timing.finish(false, "reason=route_ready_timeout");
     diagnostics.event("route_ready_timeout");
@@ -862,6 +1098,18 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
                   route_ready ? "result=ready" : "result=pending");
     }
 #endif
+    if (!route_ready &&
+        (auth_watch.failed() || tunnel::runtime_log_has_auth_failure(cfg))) {
+      if (vpn_pid > 0 && is_process_alive(vpn_pid))
+        terminate_process(vpn_pid, true);
+      if (supervisor_pid > 0 && is_process_alive(supervisor_pid))
+        terminate_process(supervisor_pid, true);
+      clear_runtime_state();
+      utils::print_error("VPN authentication failed or the server rejected the connection.");
+      logger::error("OpenConnect reported authentication failure before initial network readiness");
+      timing.finish(false, "reason=auth_failed");
+      return kVpnInitialConnectFailedExitCode;
+    }
     if (vpn_pid > 0 && is_process_alive(vpn_pid) && route_ready) {
       timing.mark("route_ready",
                   "pid=" + std::to_string(vpn_pid) + " interface=" +
@@ -997,35 +1245,6 @@ bool stop_direct_session() {
   return true;
 }
 
-RuntimeStatusSnapshot read_runtime_status_snapshot() {
-  RuntimeStatusSnapshot snapshot;
-
-  pid_t supervisor_pid = read_supervisor_pid();
-  if (supervisor_pid > 0 && !is_process_alive(supervisor_pid)) {
-    remove_supervisor_pid();
-    supervisor_pid = -1;
-  }
-
-  pid_t pid = read_pid();
-  if (pid <= 0 || !is_process_alive(pid)) {
-    remove_pid();
-    pid = find_openconnect_pid();
-  }
-
-  std::string interface_name;
-  std::string internal_ip;
-  bool route_ready = read_route_ready(&interface_name, &internal_ip);
-
-  snapshot.running = pid > 0 || supervisor_pid > 0;
-  snapshot.pid = static_cast<int>(pid);
-  snapshot.supervisor_pid = static_cast<int>(supervisor_pid);
-  snapshot.network_ready = snapshot.running && route_ready;
-  snapshot.interface_name = interface_name;
-  snapshot.internal_ip = internal_ip;
-  snapshot.interfaces_output = platform::get_interfaces_output();
-  return snapshot;
-}
-
 int stop() {
   utils::print_header("EXV Stopping");
 
@@ -1138,65 +1357,38 @@ int status() {
     return helper::show_status_via_helper() ? 0 : 1;
   }
 
-  pid_t supervisor_pid = read_supervisor_pid();
-  bool supervisor_from_pidfile = true;
-  if (supervisor_pid <= 0 || !is_process_alive(supervisor_pid)) {
-    supervisor_pid = -1;
-    supervisor_from_pidfile = false;
-  }
+  Config cfg = config::load();
+  RuntimeStatusSnapshot snapshot = read_runtime_status_snapshot(cfg);
 
-  pid_t pid = read_pid();
-  bool from_pidfile = true;
-  if (pid <= 0 || !is_process_alive(pid)) {
-    pid = find_openconnect_pid();
-    from_pidfile = false;
-  }
-
-  std::string vpn_interface;
-  std::string internal_ip;
-  bool route_ready = read_route_ready(&vpn_interface, &internal_ip);
-
-  if (pid > 0 || supervisor_pid > 0) {
+  if (snapshot.running) {
     std::cout << utils::GREEN << utils::BOLD << "  ● VPN is RUNNING"
               << utils::RESET << std::endl;
     std::cout << std::endl;
-    if (pid > 0) {
-      std::cout << "  PID            : " << pid;
-      if (!from_pidfile)
+    if (snapshot.pid > 0) {
+      std::cout << "  PID            : " << snapshot.pid;
+      if (snapshot.pid_from_openconnect_scan)
         std::cout << "  (detected via pgrep)";
       std::cout << std::endl;
     }
-    if (supervisor_pid > 0) {
-      std::cout << "  Supervisor PID : " << supervisor_pid;
-      if (!supervisor_from_pidfile)
-        std::cout << "  (detected outside pidfile)";
-      std::cout << std::endl;
-    }
+    if (snapshot.supervisor_pid > 0)
+      std::cout << "  Supervisor PID : " << snapshot.supervisor_pid
+                << std::endl;
     std::cout << "  Network Ready  : "
-              << (route_ready ? "yes" : "no (waiting for tunnel script)")
+              << (snapshot.network_ready ? "yes"
+                                          : "no (waiting for tunnel script)")
               << std::endl;
-    if (route_ready) {
-      std::cout << "  Interface      : " << vpn_interface << std::endl;
-      std::cout << "  Internal IP    : " << internal_ip << std::endl;
+    if (snapshot.network_ready) {
+      std::cout << "  Interface      : " << snapshot.interface_name
+                << std::endl;
+      std::cout << "  Internal IP    : " << snapshot.internal_ip
+                << std::endl;
     }
 
-    // Try to get tunnel interface info
-#ifdef __APPLE__
-    std::string ifconfig_out =
-        utils::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
-#elif defined(_WIN32)
-    std::string ifconfig_out =
-        utils::run_command_output("netsh interface show interface 2>nul");
-#else
-    std::string ifconfig_out =
-        utils::run_command_output("ip addr show type tun 2>/dev/null | head -20");
-#endif
-    if (!ifconfig_out.empty()) {
+    if (!snapshot.interfaces_output.empty()) {
       std::cout << std::endl;
       std::cout << utils::DIM << "  Network Interfaces:" << utils::RESET
                 << std::endl;
-      // Print each line indented
-      std::istringstream iss(ifconfig_out);
+      std::istringstream iss(snapshot.interfaces_output);
       std::string line;
       while (std::getline(iss, line)) {
         std::cout << "    " << line << std::endl;

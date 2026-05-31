@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # stage-openconnect-runtime-mac.sh
 # Collect openconnect and all its dynamic library dependencies into
-# runtime/darwin-$ARCH/ for bundling with the Electron desktop app.
+# runtime/legacy-openconnect/darwin-$ARCH/ for explicit legacy diagnostic runs.
+# This script is not part of production packaging.
 #
 # Usage:
 #   ./scripts/stage-openconnect-runtime-mac.sh [openconnect-path] [arch]
@@ -9,10 +10,14 @@
 #   openconnect-path  Path to the openconnect binary (default: auto-detect via `which`)
 #   arch              x64 or arm64 (default: auto-detect from running system)
 #
-# The staged layout is flat: runtime/darwin-$ARCH/openconnect + *.dylib
-# This matches the layout expected by prepare-native.cjs and the exv binary,
-# which looks for openconnect in the same directory as itself (exec_dir).
+# The legacy diagnostic layout is flat:
+# runtime/legacy-openconnect/darwin-$ARCH/openconnect + *.dylib.
 set -euo pipefail
+
+if [[ "${ECNUVPN_LEGACY_OPENCONNECT_RUNTIME:-}" != "1" ]]; then
+  echo "Error: OpenConnect runtime staging is legacy diagnostic-only. Set ECNUVPN_LEGACY_OPENCONNECT_RUNTIME=1 to run this script." >&2
+  exit 1
+fi
 
 OPENCONNECT="${1:-$(which openconnect 2>/dev/null || true)}"
 ARCH="${2:-}"
@@ -39,12 +44,12 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="$PROJECT_ROOT/runtime/darwin-$ARCH"
+OUT_DIR="$PROJECT_ROOT/runtime/legacy-openconnect/darwin-$ARCH"
 COPIED_LIST=$(mktemp)
 
 trap 'rm -f "$COPIED_LIST"' EXIT
 
-echo "Staging openconnect runtime for darwin-$ARCH..."
+echo "Staging legacy diagnostic openconnect runtime for darwin-$ARCH..."
 echo "  Source: $OPENCONNECT"
 echo "  Output: $OUT_DIR"
 
@@ -142,5 +147,5 @@ find "$OUT_DIR" -type f | sort | while read -r f; do
 done
 
 echo ""
-echo "Done. Runtime staged to $OUT_DIR"
-echo "Next: cd webui && npm run desktop:build"
+echo "Done. Legacy diagnostic runtime staged to $OUT_DIR"
+echo "Production packaging denies these legacy payloads from extraResources/bin."

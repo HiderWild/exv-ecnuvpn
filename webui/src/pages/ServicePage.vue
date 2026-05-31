@@ -90,7 +90,10 @@ async function runServiceAction(action: 'install' | 'uninstall', disconnectFirst
     ui.addToast(action === 'install' ? '辅助服务安装完成' : '辅助服务卸载完成', 'success')
     return
   }
-  ui.addToast(action === 'install' ? '辅助服务安装未完成，请查看输出' : '辅助服务卸载未完成，请查看输出', 'error')
+  ui.requestError({
+    title: action === 'install' ? '辅助服务安装未完成' : '辅助服务卸载未完成',
+    message: '请查看操作输出或日志后重试。',
+  })
 }
 </script>
 

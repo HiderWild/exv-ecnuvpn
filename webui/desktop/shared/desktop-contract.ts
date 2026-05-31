@@ -4,6 +4,13 @@ export const desktopIpcChannels = {
   serviceCommand: 'ecnu-vpn:service-command',
   cliCommand: 'ecnu-vpn:cli-command',
   driverInstall: 'ecnu-vpn:driver-install',
+  windowMode: 'ecnu-vpn:window-mode',
+  serviceInstallPrompt: 'ecnu-vpn:service-install-prompt',
+  passwordPrompt: 'ecnu-vpn:password-prompt',
+  confirmPrompt: 'ecnu-vpn:confirm-prompt',
+  modalPayload: 'ecnu-vpn:modal-payload',
+  modalResult: 'ecnu-vpn:modal-result',
+  closePromptResult: 'ecnu-vpn:close-prompt-result',
   event: 'ecnu-vpn:event',
 } as const
 
@@ -57,6 +64,7 @@ export const desktopEventTypes = [
   'status',
   'heartbeat',
   'service-progress',
+  'close-request',
 ] as const
 
 export const desktopServiceCommands = ['install', 'uninstall'] as const
@@ -83,3 +91,10 @@ export type DesktopDriverInstallTarget =
   (typeof desktopDriverInstallTargets)[number]
 export type DesktopRpcErrorCode =
   (typeof desktopRpcErrorCodes)[keyof typeof desktopRpcErrorCodes]
+export type DesktopWindowMode = 'minimal' | 'advanced'
+export type DesktopServiceInstallPromptResult = 'install' | 'dismiss'
+export type DesktopModalKind = 'service-install' | 'password' | 'confirm' | 'close-app'
+export interface DesktopModalPayload {
+  kind: DesktopModalKind
+  message?: string
+}

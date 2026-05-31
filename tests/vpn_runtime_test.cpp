@@ -1,8 +1,18 @@
 #include "utils.hpp"
 #include "vpn.hpp"
+#include "vpn_engine/native_session_store.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+
+namespace ecnuvpn {
+Config g_runtime_test_config;
+
+namespace config {
+Config load() { return g_runtime_test_config; }
+} // namespace config
+} // namespace ecnuvpn
 
 #ifdef _WIN32
 #include <windows.h>
@@ -45,7 +55,7 @@ DummyProcess spawn_dummy_process() {
   STARTUPINFOA startup_info{};
   startup_info.cb = sizeof(startup_info);
   PROCESS_INFORMATION process_info{};
-  char command_line[] = "cmd.exe /C ping -n 60 127.0.0.1 > nul";
+  char command_line[] = "cmd.exe /C ping -n 5 127.0.0.1 > nul";
 
   if (!CreateProcessA(nullptr, command_line, nullptr, nullptr, FALSE, 0,
                       nullptr, nullptr, &startup_info, &process_info)) {
@@ -115,10 +125,49 @@ void cleanup_dummy_process(DummyProcess *process) {
   process->pid = -1;
 }
 
+void write_text(const std::string &path, const std::string &content) {
+  std::ofstream out(path, std::ios::binary);
+  out << content;
+}
+
+ecnuvpn::vpn_engine::NativeSessionRecord native_ready_record() {
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "utun-native";
+  metadata.internal_ip4_address = "10.44.0.8";
+  metadata.internal_ip4_netmask = "255.255.255.255";
+  metadata.routes = {"59.78.176.0/20"};
+
+  ecnuvpn::vpn_engine::NativeSessionRecord record;
+  record.session.tunnel_configured(metadata);
+  record.session.packet_loop_started();
+  record.pid = current_process_id();
+  record.server = "vpn.example.edu";
+  record.route_count = 1;
+  return record;
+}
+
+ecnuvpn::vpn_engine::NativeSessionRecord native_configuring_record() {
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "utun-native";
+  metadata.internal_ip4_address = "10.44.0.8";
+  metadata.internal_ip4_netmask = "255.255.255.255";
+  metadata.routes = {"59.78.176.0/20"};
+
+  ecnuvpn::vpn_engine::NativeSessionRecord record;
+  record.session.tunnel_configured(metadata);
+  record.pid = current_process_id();
+  record.server = "vpn.example.edu";
+  record.route_count = 1;
+  return record;
+}
+
 } // namespace
 
 int main() {
   namespace fs = std::filesystem;
+
+  ecnuvpn::g_runtime_test_config = ecnuvpn::Config{};
+  ecnuvpn::g_runtime_test_config.vpn_engine = "legacy_openconnect";
 
   const fs::path temp_root = fs::temp_directory_path() /
                              ("ecnuvpn-runtime-test-" +
@@ -186,6 +235,138 @@ int main() {
     ok = expect(stale_dummy_snapshot.supervisor_pid == -1,
                 "snapshot should clear stale dummy supervisor pid values") && ok;
   }
+
+  ecnuvpn::Config native_cfg;
+  native_cfg.vpn_engine = "native";
+
+  int openconnect_fallback_calls = 0;
+  ecnuvpn::vpn::RuntimeStatusProbe native_probe;
+  native_probe.is_process_alive = [](int pid) {
+    return pid == current_process_id();
+  };
+  native_probe.find_openconnect_pid = [&openconnect_fallback_calls]() {
+    ++openconnect_fallback_calls;
+    return current_process_id();
+  };
+  native_probe.interfaces_output = []() { return std::string("native-ifaces"); };
+
+  ecnuvpn::vpn_engine::clear_native_session_state(temp_root.string());
+  ok = expect(ecnuvpn::vpn_engine::save_native_session_state(
+                  temp_root.string(), native_ready_record()),
+              "native ready state should be saved for runtime status") &&
+       ok;
+
+  const auto native_snapshot =
+      ecnuvpn::vpn::read_runtime_status_snapshot(native_cfg, native_probe);
+  ok = expect(native_snapshot.running,
+              "native runtime snapshot should use persisted native running state") &&
+       ok;
+  ok = expect(native_snapshot.network_ready,
+              "native runtime snapshot should use persisted native network readiness") &&
+       ok;
+  ok = expect(native_snapshot.pid == current_process_id(),
+              "native runtime snapshot should use persisted native pid") &&
+       ok;
+  ok = expect(native_snapshot.interface_name == "utun-native",
+              "native runtime snapshot should expose native interface metadata") &&
+       ok;
+  ok = expect(native_snapshot.internal_ip == "10.44.0.8",
+              "native runtime snapshot should expose native internal IP metadata") &&
+       ok;
+  ok = expect(openconnect_fallback_calls == 0,
+              "native runtime snapshot must not call OpenConnect pid fallback") &&
+       ok;
+
+  ecnuvpn::g_runtime_test_config.vpn_engine = "native";
+  const auto native_no_arg_snapshot =
+      ecnuvpn::vpn::read_runtime_status_snapshot();
+  ok = expect(native_no_arg_snapshot.running,
+              "no-arg runtime snapshot should use loaded native config") &&
+       ok;
+  ok = expect(native_no_arg_snapshot.interface_name == "utun-native",
+              "no-arg runtime snapshot should expose native metadata") &&
+       ok;
+
+  ecnuvpn::vpn_engine::clear_native_session_state(temp_root.string());
+  ok = expect(ecnuvpn::vpn_engine::save_native_session_state(
+                  temp_root.string(), native_configuring_record()),
+              "native configuring state should be saved for runtime status") &&
+       ok;
+
+  const auto native_configuring_snapshot =
+      ecnuvpn::vpn::read_runtime_status_snapshot(native_cfg, native_probe);
+  ok = expect(native_configuring_snapshot.running,
+              "native runtime snapshot should treat live pre-packet-loop state as running") &&
+       ok;
+  ok = expect(!native_configuring_snapshot.network_ready,
+              "native runtime snapshot must not treat pre-packet-loop state as network-ready") &&
+       ok;
+  ok = expect(openconnect_fallback_calls == 0,
+              "native pre-packet-loop status must still avoid OpenConnect fallback") &&
+       ok;
+
+  ecnuvpn::vpn_engine::clear_native_session_state(temp_root.string());
+  ok = expect(ecnuvpn::vpn_engine::save_native_session_state(
+                  temp_root.string(), native_ready_record()),
+              "native ready state should be saved for conservative probe check") &&
+       ok;
+  ecnuvpn::vpn::RuntimeStatusProbe missing_liveness_probe;
+  missing_liveness_probe.find_openconnect_pid = [&openconnect_fallback_calls]() {
+    ++openconnect_fallback_calls;
+    return current_process_id();
+  };
+  const auto native_without_liveness =
+      ecnuvpn::vpn::read_runtime_status_snapshot(native_cfg,
+                                                 missing_liveness_probe);
+  ok = expect(!native_without_liveness.running,
+              "native runtime snapshot must not trust pid without liveness probe") &&
+       ok;
+  ok = expect(openconnect_fallback_calls == 0,
+              "native missing-liveness status must not use OpenConnect fallback") &&
+       ok;
+
+  ecnuvpn::vpn_engine::clear_native_session_state(temp_root.string());
+  write_text(ecnuvpn::utils::get_route_ready_path(), "utun-marker\n10.0.0.99\n");
+  const auto native_marker_only =
+      ecnuvpn::vpn::read_runtime_status_snapshot(native_cfg, native_probe);
+  ok = expect(!native_marker_only.running,
+              "native marker-only status should stay disconnected") &&
+       ok;
+  ok = expect(openconnect_fallback_calls == 0,
+              "native marker-only status must still avoid OpenConnect fallback") &&
+       ok;
+
+  ecnuvpn::Config legacy_cfg;
+  legacy_cfg.vpn_engine = "legacy_openconnect";
+  int legacy_fallback_calls = 0;
+  ecnuvpn::vpn::RuntimeStatusProbe legacy_probe;
+  legacy_probe.is_process_alive = [](int) { return false; };
+  legacy_probe.find_openconnect_pid = [&legacy_fallback_calls]() {
+    ++legacy_fallback_calls;
+    return current_process_id();
+  };
+  legacy_probe.interfaces_output = []() { return std::string("legacy-ifaces"); };
+  std::filesystem::remove(ecnuvpn::utils::get_pid_path());
+  std::filesystem::remove(ecnuvpn::utils::get_supervisor_pid_path());
+  write_text(ecnuvpn::utils::get_route_ready_path(), "utun-legacy\n10.0.0.7\n");
+
+  const auto legacy_snapshot =
+      ecnuvpn::vpn::read_runtime_status_snapshot(legacy_cfg, legacy_probe);
+  ok = expect(legacy_snapshot.running,
+              "legacy runtime snapshot should keep OpenConnect pid fallback") &&
+       ok;
+  ok = expect(legacy_snapshot.network_ready,
+              "legacy runtime snapshot should keep route-ready compatibility") &&
+       ok;
+  ok = expect(legacy_snapshot.pid == current_process_id(),
+              "legacy runtime snapshot should use OpenConnect fallback pid") &&
+       ok;
+  ok = expect(legacy_snapshot.pid_from_openconnect_scan,
+              "legacy runtime snapshot should mark OpenConnect fallback pid source") &&
+       ok;
+  ok = expect(legacy_fallback_calls == 1,
+              "legacy runtime snapshot should call OpenConnect pid fallback") &&
+       ok;
 
   ecnuvpn::utils::clear_runtime_path_override();
   cleanup_dummy_process(&process);

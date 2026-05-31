@@ -1,31 +1,29 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import {
-  AlertOctagon,
-  AlertTriangle,
   Cloud,
   EthernetPort,
-  FileText,
   LockKeyhole,
   Power,
-  RefreshCw,
   Server,
-  Settings,
-  XCircle,
 } from 'lucide-vue-next'
-import { useSSE } from '../composables/useSSE'
+import ToggleSwitch from '../components/ToggleSwitch.vue'
+import { useConfigStore } from '../stores/config'
 import { useVpnStore } from '../stores/vpn'
 
+defineOptions({ name: 'DashboardPage' })
+
 const vpn = useVpnStore()
-const router = useRouter()
-const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
+const config = useConfigStore()
 
 const installServiceBeforeConnect = ref(true)
 
+function switchToMinimalMode() {
+  void config.saveSettings({ minimal_mode: true })
+}
+
 onMounted(() => {
   vpn.fetchAppShellState()
-  sseConnect()
 })
 
 onUnmounted(() => {
@@ -34,7 +32,6 @@ onUnmounted(() => {
     nodeTweenFrame = 0
   }
   clearReadySegmentTimers()
-  sseDisconnect()
 })
 
 const connected = computed(() => Boolean(vpn.status?.connected))
@@ -47,7 +44,14 @@ const adapterStageStarted = computed(() => connecting.value && ['adapter', 'rout
 const showExvAdapter = computed(() => connected.value || disconnecting.value || adapterStageStarted.value)
 const vpnServerStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && ['adapter', 'routes', 'network-ready'].includes(progressKey.value)))
 const routeStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && progressKey.value === 'network-ready'))
-const showInstallServiceChoice = computed(() => !connected.value && !vpn.serviceAvailable)
+const showInstallServiceChoice = computed(() => (
+  !connected.value &&
+  !connecting.value &&
+  !disconnecting.value &&
+  !vpn.loading &&
+  !vpn.serviceBusy &&
+  !vpn.serviceAvailable
+))
 const installServiceChoiceDisabled = computed(() => connecting.value || disconnecting.value || vpn.loading || vpn.serviceBusy)
 
 const statusLabel = computed(() => {
@@ -58,37 +62,13 @@ const statusLabel = computed(() => {
   return '未连接'
 })
 
-function summarizeDisplayError(message: string, maxLength = 96) {
-  const normalized = message
-    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
-    .replace(/^Error:\s*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  if (/VPN username is not configured/i.test(normalized)) {
-    return '用户名未配置，请先在设置中填写用户名。'
-  }
-  if (/VPN server is not configured/i.test(normalized)) {
-    return '服务器未配置，请先在设置中填写服务器地址。'
-  }
-  if (/VPN password is not configured/i.test(normalized)) {
-    return '密码未配置，请先在设置中填写密码。'
-  }
-  if (!normalized) return '操作失败，请查看日志。'
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
-}
-
-const lastErrorSummary = computed(() => {
-  return vpn.lastError ? summarizeDisplayError(vpn.lastError) : ''
-})
-
 const statusDescription = computed(() => {
   if (disconnecting.value) return '正在关闭隧道并恢复本机网络状态。'
   if (connecting.value) return vpn.connectionProgress.description
   if (connected.value) {
     return vpn.status?.network_ready ? '隧道接口和路由已写入，正在通过 EXV 转发校园网流量。' : 'VPN 进程已启动，正在等待网络就绪。'
   }
-  if (vpn.lastError) return lastErrorSummary.value
+  if (vpn.lastError) return '请在弹窗中处理本次操作失败。'
   if (vpn.serviceAvailable) return '服务可用，点击电源按钮即可连接。'
   if (vpn.serviceInstalled && vpn.serviceRunning) return '服务需要修复，点击电源按钮会先更新服务再连接。'
   return installServiceBeforeConnect.value
@@ -121,66 +101,9 @@ const upstreamVirtualCaption = computed(() => {
   return upstreamVirtualNames.value || vpn.status?.upstream_virtual_message || '已检测到'
 })
 
-const errorDisplayInfo = computed(() => {
-  if (!vpn.lastErrorType) return null
-  switch (vpn.lastErrorType) {
-    case 'elevation_denied':
-      return {
-        icon: AlertOctagon,
-        title: '授权被拒绝',
-        description: vpn.lastError || '系统授权失败，无法继续执行需要管理员权限的操作。',
-        color: 'warning' as const,
-      }
-    case 'runtime_missing':
-      return {
-        icon: XCircle,
-        title: '缺少 OpenConnect 运行时',
-        description: '请重新安装桌面客户端以修复运行时组件。',
-        color: 'destructive' as const,
-      }
-    case 'config_invalid':
-      return {
-        icon: AlertTriangle,
-        title: '配置不完整',
-        description: vpn.lastError || '请检查服务器、用户名和密码设置。',
-        color: 'warning' as const,
-      }
-    case 'auth_failed':
-      return {
-        icon: AlertTriangle,
-        title: '密码错误',
-        description: vpn.lastError || 'VPN 认证失败，请重新输入密码。',
-        color: 'warning' as const,
-      }
-    case 'native_failure':
-    case 'parse_failure':
-      return {
-        icon: AlertOctagon,
-        title: '操作失败',
-        description: vpn.lastError || '原生操作执行失败。',
-        color: 'destructive' as const,
-      }
-    default:
-      return {
-        icon: AlertOctagon,
-        title: '发生错误',
-        description: vpn.lastError || '未知错误。',
-        color: 'destructive' as const,
-      }
-  }
-})
-
 function handlePowerClick() {
   if (vpn.loading || vpn.serviceBusy) return
   vpn.connectFromDashboard(installServiceBeforeConnect.value)
-}
-
-function handleErrorAction() {
-  if (vpn.lastErrorType === 'config_invalid') {
-    router.push('/settings')
-    return
-  }
-  vpn.retryLastAction()
 }
 
 const arcViewBox = {
@@ -602,6 +525,13 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
         <div class="min-w-0">
           <h1 class="text-xl font-semibold text-foreground">主面板</h1>
         </div>
+        <label class="flex items-center gap-2 text-xs text-muted">
+          <span>高级</span>
+          <ToggleSwitch
+            :model-value="true"
+            @update:model-value="switchToMinimalMode"
+          />
+        </label>
       </div>
 
       <div class="arc-stage">
@@ -738,40 +668,6 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
         </div>
       </div>
 
-      <div
-        v-if="vpn.lastError && errorDisplayInfo"
-        :class="[
-          'error-strip',
-          errorDisplayInfo.color === 'warning' ? 'is-warning' : 'is-error',
-        ]"
-      >
-        <component :is="errorDisplayInfo.icon" class="h-4 w-4 shrink-0" />
-        <span class="error-title">{{ errorDisplayInfo.title }}</span>
-        <span class="error-message" :title="vpn.lastError">{{ lastErrorSummary }}</span>
-        <button
-          class="error-action primary"
-          @click="handleErrorAction"
-        >
-          <Settings v-if="vpn.lastErrorType === 'config_invalid'" class="h-3.5 w-3.5" />
-          <RefreshCw v-else class="h-3.5 w-3.5" />
-          {{ vpn.lastErrorType === 'config_invalid' ? '设置' : '重试' }}
-        </button>
-        <router-link
-          :to="{ path: '/logs', query: { from: 'dashboard' } }"
-          class="error-action"
-        >
-          <FileText class="h-3.5 w-3.5" />
-          日志
-        </router-link>
-        <button
-          class="error-action icon-only"
-          title="关闭"
-          @click="vpn.clearError()"
-        >
-          <XCircle class="h-3.5 w-3.5" />
-        </button>
-      </div>
-
     </section>
   </div>
 </template>
@@ -853,7 +749,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.25rem;
+  gap: 0.0625rem;
   border-radius: 9999px;
   isolation: isolate;
   padding: 0.45rem 0.5rem;
@@ -895,14 +791,14 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 .arc-node::after {
   content: '';
   position: absolute;
-  inset: 0.18rem;
+  inset: 0.49rem;
   border-radius: 9999px;
   pointer-events: none;
 }
 
 .arc-node::before {
   z-index: -1;
-  border: 1px solid rgba(148, 163, 184, 0.34);
+  border: 4px solid rgba(148, 163, 184, 0.34);
   background: transparent;
   box-shadow: none;
   transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
@@ -940,7 +836,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   position: relative;
   display: flex;
   justify-content: center;
-  margin-top: -15rem;
+  margin-top: -10rem;
   transform: translateY(0);
   transition: transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform;
@@ -954,7 +850,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.3rem;
   width: min(34rem, 100%);
 }
 
@@ -1145,76 +1041,6 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   }
 }
 
-.error-strip {
-  position: absolute;
-  right: 1.25rem;
-  bottom: 1rem;
-  left: 1.25rem;
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 0.55rem;
-  border-radius: 0.75rem;
-  border: 1px solid;
-  padding: 0.55rem 0.65rem;
-  font-size: 0.78rem;
-  box-shadow: 0 0.75rem 1.5rem rgba(0, 0, 0, 0.18);
-}
-
-.error-strip.is-warning {
-  border-color: rgba(245, 158, 11, 0.34);
-  background: rgba(245, 158, 11, 0.12);
-  color: rgb(251, 191, 36);
-}
-
-.error-strip.is-error {
-  border-color: rgba(239, 68, 68, 0.28);
-  background: rgba(127, 29, 29, 0.3);
-  color: rgb(252, 165, 165);
-}
-
-.error-title {
-  flex: 0 0 auto;
-  font-weight: 600;
-  color: currentColor;
-}
-
-.error-message {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  color: rgba(226, 232, 240, 0.86);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.error-action {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.3rem;
-  border-radius: 0.5rem;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  padding: 0.32rem 0.55rem;
-  color: rgb(226, 232, 240);
-  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
-}
-
-.error-action:hover {
-  border-color: rgba(148, 163, 184, 0.42);
-  background: rgba(15, 23, 42, 0.45);
-  color: rgb(248, 250, 252);
-}
-
-.error-action.primary {
-  border-color: rgba(34, 197, 94, 0.34);
-  background: rgba(34, 197, 94, 0.14);
-}
-
-.error-action.icon-only {
-  padding-inline: 0.42rem;
-}
-
 .topology-node {
   min-height: 112px;
   display: flex;
@@ -1243,7 +1069,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   height: 2.9rem;
   place-items: center;
   flex: 0 0 auto;
-  transform: translateY(-0.04rem);
+  transform: translateY(-0.16rem);
 }
 
 .node-icon-shell::before {
@@ -1265,6 +1091,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 }
 
 .node-title {
+  transform: translateY(-0.1rem);
   color: rgb(248 250 252);
   font-size: 0.78rem;
   font-weight: 600;

@@ -1,9 +1,12 @@
 # Release Hardening Queue
 
-> Status: DRAFT (pending develop merge).
+> Status: CLOSED FOR NATIVE REPLACEMENT LANE / HISTORICAL RELEASE HARDENING QUEUE.
+> Closure date: 2026-05-31.
 > Date: 2026-05-22.
 > Branch: `integration/platform-convergence-next`.
 > Prerequisite: this queue activates after the `develop` merge gate (R4) in `docs/superpowers/plans/2026-05-22-develop-merge-and-release-readiness.md` passes.
+> Native successor: `docs/superpowers/plans/2026-05-31-native-openconnect-replacement-phase3-production-readiness.md`.
+> Closure summary: OpenConnect runtime packaging requirements in this historical queue are superseded for the native replacement lane. Keep this queue only for historical release hardening context and legacy fallback diagnostics.
 
 ## 1. Purpose
 

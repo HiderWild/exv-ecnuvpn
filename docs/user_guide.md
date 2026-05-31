@@ -1,8 +1,8 @@
 # EXV User Guide
 
-> Smart VPN client wrapping openconnect with split tunneling, encrypted credential management, privileged helper service, and desktop/WebUI interfaces.
+> Native ECNU VPN client with split tunneling, encrypted credential management, privileged helper service, and desktop/WebUI interfaces.
 >
-> Current version: **v3.3.0** | macOS / Windows / Linux | Requires openconnect | Service installation recommended for daily use
+> Current version: **v3.3.0** | macOS / Windows / Linux | Native production runtime | Service installation recommended for daily use
 
 ---
 
@@ -32,31 +32,47 @@ cd webui
 npm install
 npm run build
 cd ..
+```
 
-# 2. Build the native binary
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+Then build the native binary with the preset for your platform.
 
-# 3. Install to system path
-sudo cmake --install build    # macOS / Linux
+macOS:
+
+```bash
+cmake --preset macos-release
+cmake --build --preset macos-release
+```
+
+Windows:
+
+```powershell
+cmake --preset windows-release
+cmake --build --preset windows-release
+```
+
+Linux:
+
+```bash
+cmake --preset linux-release
+cmake --build --preset linux-release
 ```
 
 #### Platform-Specific Prerequisites
 
 | Platform | Prerequisites |
 |----------|--------------|
-| macOS | `brew install openconnect` |
-| Linux (Ubuntu/Debian) | `sudo apt install openconnect libssl-dev cmake build-essential` |
-| Linux (Fedora/RHEL) | `sudo dnf install openconnect openssl-devel cmake gcc-c++` |
-| Windows | Install [openconnect-gui](https://github.com/openconnect/openconnect-gui/releases); build with `cmake -B build && cmake --build build --config Release` |
+| macOS | Xcode command line tools, CMake, Node.js; Homebrew OpenConnect is not required for native production packages |
+| Linux (Ubuntu/Debian) | `sudo apt install libssl-dev cmake build-essential` |
+| Linux (Fedora/RHEL) | `sudo dnf install openssl-devel cmake gcc-c++` |
+| Windows | CMake, a supported compiler toolchain, Node.js; openconnect-gui is not required for native production packages |
 
-All platforms also require **Node.js** (v18+) for the frontend build step.
+All platforms also require **Node.js** (v18+) for the frontend build step. OpenConnect may be installed separately only when you are developing or diagnosing the legacy fallback backend; it is not part of the production runtime path.
 
 ### Build Directory Convention
 
 To reduce artifact conflicts between the `windows` and `macos` branches before merge, build output is separated into:
 
-- `build/windows/cpp`
+- `build-windows/cpp`
 - `build/windows/electron/*`
 - `build/macos/cpp`
 - `build/macos/electron/*`
@@ -251,10 +267,7 @@ npm run desktop:dev
 The Electron desktop app can be packaged for Windows in two flavours:
 
 ```powershell
-# 1. Stage the openconnect runtime once (DLLs + wintun.dll + optional TAP assets)
-powershell -ExecutionPolicy Bypass -File scripts\stage-openconnect-runtime-win.ps1 -SourceDir <openconnect-gui install dir>
-
-# 2. Build the Electron desktop bundle (produces both targets in webui/release/)
+# Build the Electron desktop bundle (produces both targets in webui/release/)
 cd webui
 npm install
 npm run desktop:build
@@ -266,6 +279,8 @@ Artifacts (under `webui/release/`):
 - `ECNU VPN Setup <version>.exe` — NSIS installer; offers per-machine install and automatically registers the `exv-helper` Windows service.
 
 Neither Windows artifact adds `exv` to PATH by default. Use Settings -> Terminal CLI to install or remove the global command explicitly.
+
+Windows native production packages include the native `exv`/`exv-helper` binaries, required MinGW runtime DLLs, and `wintun.dll`. `wintun.dll` is the Windows native runtime asset. Production packaging no longer requires staging legacy OpenConnect runtime files.
 
 ### Desktop App VPN Modes
 
@@ -312,7 +327,6 @@ Config file location: `~/.ecnuvpn/config.json` on macOS/Linux, `%APPDATA%\ecnuvp
         "49.52.4.0/25",
         "59.78.176.0/20"
     ],
-    "extra_args": [],
     "log_file": "~/.ecnuvpn/ecnuvpn.log",
     "webui_port": 18080,
     "webui_bind": "127.0.0.1",
@@ -321,6 +335,8 @@ Config file location: `~/.ecnuvpn/config.json` on macOS/Linux, `%APPDATA%\ecnuvp
 ```
 
 When importing via `config import`, the `password` field can be plaintext — the program will encrypt it automatically.
+
+Native production mode does not support arbitrary OpenConnect-style `extra_args`. Configure EXV through the documented keys above and the route management commands. Legacy OpenConnect arguments are only relevant when explicitly running development or diagnostic fallback flows.
 
 ---
 
@@ -353,7 +369,7 @@ exv config set password # Set password again
 | `~/.ecnuvpn/config.json` (or `%APPDATA%\ecnuvpn\config.json`) | Config (password is ciphertext) |
 | `~/.ecnuvpn/.key` (or `%APPDATA%\ecnuvpn\.key`) | AES-256 encryption key (0600) |
 | `~/.ecnuvpn/tunnel.sh` | Tunnel script (auto-generated on each start) |
-| `~/.ecnuvpn/ecnuvpn.pid` | openconnect process PID |
+| `~/.ecnuvpn/ecnuvpn.pid` | VPN session process PID |
 | `~/.ecnuvpn/ecnuvpn-supervisor.pid` | Auto-reconnect supervisor PID |
 | `~/.ecnuvpn/route-ready` | Route configuration completion marker (interface name + internal IP) |
 | `~/.ecnuvpn/ecnuvpn.log` | Timestamped runtime log |
@@ -378,9 +394,9 @@ exv config set password # Set password again
 
 ## FAQ
 
-**Q: VPN fails to start, says openconnect not installed?**
+**Q: A legacy diagnostic fallback says OpenConnect is not installed?**
 
-On macOS, the program will ask: `Install openconnect now? [Y/n]` — press Enter to install via Homebrew. On other platforms, install openconnect manually.
+Native production mode does not require OpenConnect. Install OpenConnect only if you are intentionally running a development or diagnostic fallback comparison.
 
 **Q: VPN is connected but campus resources are inaccessible?**
 
@@ -396,4 +412,4 @@ Run `sudo exv service install` to install the helper. After installation, `exv` 
 
 **Q: `exv stop` says process not found?**
 
-The PID file may be lost; the helper falls back to `pgrep` to find it. If that also fails, you can manually run `sudo killall openconnect` (macOS/Linux) or stop the process via Task Manager (Windows).
+The PID file may be lost; the helper falls back to platform process discovery. If that also fails, stop the native VPN session from the desktop app, service manager, or Task Manager. For legacy diagnostic fallback sessions only, stop the OpenConnect process manually.
