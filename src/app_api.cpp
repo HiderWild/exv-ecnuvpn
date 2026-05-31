@@ -15,14 +15,17 @@
 #include "platform/common/service_status.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
+#include "vpn_engine/native_engine.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -47,6 +50,53 @@ bool helper_unavailable(const nlohmann::json &response) {
   return json_string(response, "code") == platform::kHelperUnavailableCode ||
          json_string(response, "message") == "Helper daemon not available";
 }
+
+int desktop_retry_limit(const Config &cfg) { return cfg.auto_reconnect ? -1 : 0; }
+
+class StageTimer {
+public:
+  explicit StageTimer(std::string scope)
+      : scope_(std::move(scope)), started_(Clock::now()), last_(started_) {
+    logger::info("[connect-timing] scope=" + scope_ +
+                 " stage=begin delta_ms=0 total_ms=0");
+  }
+
+  void mark(const std::string &stage, const std::string &detail = "") {
+    auto now = Clock::now();
+    long long delta_ms = elapsed_ms(last_, now);
+    long long total_ms = elapsed_ms(started_, now);
+    last_ = now;
+
+    std::string message = "[connect-timing] scope=" + scope_ +
+                          " stage=" + stage +
+                          " delta_ms=" + std::to_string(delta_ms) +
+                          " total_ms=" + std::to_string(total_ms);
+    if (!detail.empty())
+      message += " " + detail;
+    logger::info(message);
+  }
+
+  void finish(bool ok, const std::string &detail = "") {
+    if (finished_)
+      return;
+    finished_ = true;
+    mark(ok ? "finish.ok" : "finish.error", detail);
+  }
+
+private:
+  using Clock = std::chrono::steady_clock;
+
+  static long long elapsed_ms(const Clock::time_point &from,
+                              const Clock::time_point &to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
+        .count();
+  }
+
+  std::string scope_;
+  Clock::time_point started_;
+  Clock::time_point last_;
+  bool finished_ = false;
+};
 
 bool json_bool(const nlohmann::json &object, const char *key, bool fallback) {
   if (!object.is_object() || !object.contains(key) || object[key].is_null())
@@ -94,11 +144,6 @@ nlohmann::json helper_error(const nlohmann::json &response,
 
 config::ConfigManager make_config_manager() {
   utils::ensure_dir(utils::get_config_dir());
-  // The desktop / RPC entrypoint does not go through the CLI wizard, so we
-  // have to make sure the encryption key file exists before any password
-  // operation. Without this, config_set_password would always fail with
-  // "Encryption key is missing" on a fresh install.
-  crypto::init_key_if_needed();
   logger::init();
   return config::ConfigManager(utils::get_config_dir());
 }
@@ -250,9 +295,16 @@ nlohmann::json settings_config(const Config &cfg) {
                         {"webui_port", cfg.webui_port},
                         {"webui_host", cfg.webui_bind},
                         {"webui_enabled", cfg.webui_enabled},
+                        {"vpn_engine", cfg.vpn_engine},
                         {"openconnect_runtime", cfg.openconnect_runtime},
                         {"windows_tunnel_driver", cfg.windows_tunnel_driver},
-                        {"windows_tap_interface", cfg.windows_tap_interface}};
+                        {"windows_tap_interface", cfg.windows_tap_interface},
+                        {"auto_reconnect", cfg.auto_reconnect},
+                        {"minimal_mode", cfg.minimal_mode},
+                        {"service_install_prompt_seen",
+                         cfg.service_install_prompt_seen},
+                        {"minimal_install_service_before_connect",
+                         cfg.minimal_install_service_before_connect}};
 }
 
 nlohmann::json routes_json(const Config &cfg) {
@@ -319,6 +371,12 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
   if (password.empty())
     return error("VPN password is not configured.");
 
+  if (cfg.vpn_engine == "native") {
+    auto native_validation = vpn_engine::validate_native_config(cfg);
+    if (!native_validation.ok)
+      return error(native_validation.message, native_validation.code);
+  }
+
   if (!allow_direct_fallback) {
     platform::BackendResolveOptions options;
     options.preferred_mode = "service";
@@ -333,7 +391,7 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
 
   nlohmann::json runtime = runtime_status_json(cfg);
   if (!runtime.value("available", false)) {
-    return error("OpenConnect runtime is not available. The desktop bundle is missing openconnect and its native dependencies.");
+    return error("VPN runtime is not available. The desktop bundle is missing the selected VPN engine dependencies.");
   }
 
   nlohmann::json platform_err = platform::preflight_connect_platform_checks(cfg);
@@ -406,6 +464,7 @@ nlohmann::json handle_action(const std::string &action,
     }
 
     if (action == "vpn.connect") {
+      StageTimer timing("desktop.connect");
       std::string password = payload.value("password", std::string());
       bool allow_direct_fallback =
           payload.value("allow_direct_fallback", false);
@@ -414,13 +473,28 @@ nlohmann::json handle_action(const std::string &action,
         if (!key.empty())
           password = crypto::decrypt(cfg.password, key);
       }
+      timing.mark("password_resolved",
+                  password.empty() ? "source=missing" : "source=available");
       nlohmann::json preflight =
           preflight_connect(cfg, password, allow_direct_fallback);
-      if (preflight.is_object() && preflight.value("ok", true) == false)
+      if (preflight.is_object() && preflight.value("ok", true) == false) {
+        timing.finish(false, "stage=preflight error=" +
+                                 json_string(preflight, "error"));
         return preflight;
+      }
+      timing.mark("preflight", "result=ok allow_direct_fallback=" +
+                                   std::string(allow_direct_fallback ? "true"
+                                                                     : "false"));
 
-      if (allow_direct_fallback && !helper::is_available()) {
+      bool helper_available = helper::is_available();
+      timing.mark("helper_availability",
+                  helper_available ? "available=true" : "available=false");
+
+      if (allow_direct_fallback && !helper_available) {
         nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
+        timing.mark("direct_fallback_status",
+                    json_bool(fallback, "_running", false) ? "running=true"
+                                                           : "running=false");
         if (json_bool(fallback, "_snapshot", false) &&
             json_bool(fallback, "_running", false)) {
           nlohmann::json status = frontend_status_from_snapshot_json(
@@ -429,11 +503,12 @@ nlohmann::json handle_action(const std::string &action,
                   : nlohmann::json::object(),
               cfg);
           status["mode"] = "elevated";
+          timing.finish(true, "mode=elevated existing=true");
           return status;
         }
       }
 
-      if (!helper::is_available() && allow_direct_fallback) {
+      if (!helper_available && allow_direct_fallback) {
         platform::BackendResolveOptions options;
         options.preferred_mode = "oneshot";
         options.helper_path = helper_binary_next_to_exv();
@@ -441,6 +516,8 @@ nlohmann::json handle_action(const std::string &action,
         options.allow_service_start = false;
         options.start_oneshot = true;
         nlohmann::json backend = platform::resolve_backend(options);
+        timing.mark("oneshot_backend",
+                    backend.value("ok", false) ? "result=ok" : "result=failed");
         if (backend.value("ok", false)) {
           platform::HelperEndpoint endpoint{
               backend.value("endpoint", std::string()),
@@ -451,20 +528,30 @@ nlohmann::json handle_action(const std::string &action,
                 nlohmann::json request{{"action", "start"},
                                        {"config", cfg},
                                        {"password", password},
-                                       {"retry_limit", 0},
+                                       {"retry_limit", desktop_retry_limit(cfg)},
                                        {"home", utils::get_effective_home()},
                                        {"config_dir", utils::get_config_dir()}};
-                add_desktop_owner_context(request);
-                return request;
-              }());
+                 add_desktop_owner_context(request);
+                 return request;
+               }());
+          timing.mark("oneshot_helper_request",
+                      helper_resp.value("ok", false) ? "result=ok"
+                                                     : "result=failed");
           if (!helper_resp.value("ok", false)) {
+            timing.finish(false, "stage=oneshot_helper_request");
             return helper_error(helper_resp, "Failed to start VPN");
           }
           nlohmann::json status = frontend_status_from_helper(helper_resp, cfg);
           status["mode"] = "elevated";
           status["backend"] = backend;
+          timing.finish(true,
+                        "mode=elevated network_ready=" +
+                            std::string(status.value("network_ready", false)
+                                            ? "true"
+                                            : "false"));
           return status;
         }
+        timing.finish(false, "stage=oneshot_backend");
         return platform::backend_unavailable_error(
             backend, "Failed to start one-shot helper.");
       }
@@ -472,15 +559,25 @@ nlohmann::json handle_action(const std::string &action,
       nlohmann::json start_request{{"action", "start"},
                                    {"config", cfg},
                                    {"password", password},
-                                   {"retry_limit", 0},
+                                   {"retry_limit", desktop_retry_limit(cfg)},
                                    {"home", utils::get_effective_home()},
                                    {"config_dir", utils::get_config_dir()}};
       add_desktop_owner_context(start_request);
       auto helper_resp = platform::send_helper_request(start_request);
+      timing.mark("service_helper_request",
+                  helper_resp.value("ok", false) ? "result=ok"
+                                                 : "result=failed");
       if (!helper_resp.value("ok", false)) {
+        timing.finish(false, "stage=service_helper_request");
         return helper_error(helper_resp, "Failed to start VPN");
       }
-      return frontend_status_from_helper(helper_resp, cfg);
+      nlohmann::json status = frontend_status_from_helper(helper_resp, cfg);
+      timing.finish(true,
+                    "mode=helper network_ready=" +
+                        std::string(status.value("network_ready", false)
+                                        ? "true"
+                                        : "false"));
+      return status;
     }
 
     if (action == "vpn.disconnect") {
@@ -536,22 +633,30 @@ nlohmann::json handle_action(const std::string &action,
         std::string err = config_api::config_set(mgr, "username", payload["username"].get<std::string>());
         if (!err.empty()) return error(err);
       }
-      // Update remember_password BEFORE password so that the password setter
-      // sees the correct toggle state. The UI treats an empty password field
-      // as "keep the existing password" while a non-empty value means update.
-      if (payload.contains("remember_password") &&
-          payload["remember_password"].is_boolean()) {
-        std::string err = config_api::config_set(mgr, "remember_password",
-                               payload["remember_password"].get<bool>() ? "true"
-                                                                         : "false");
+      bool remember_payload = payload.contains("remember_password") &&
+                              payload["remember_password"].is_boolean();
+      bool remember_password =
+          remember_payload ? payload["remember_password"].get<bool>()
+                           : mgr.load().remember_password;
+      std::string submitted_password =
+          payload.contains("password") && payload["password"].is_string()
+              ? payload["password"].get<std::string>()
+              : std::string();
+
+      if (remember_payload && !remember_password) {
+        std::string err = config_api::config_clear_password_and_key(mgr);
         if (!err.empty()) return error(err);
-      }
-      if (payload.contains("password") && payload["password"].is_string()) {
-        std::string password = payload["password"].get<std::string>();
-        if (!password.empty()) {
-          std::string err = config_api::config_set_password(mgr, password);
-          if (!err.empty())
-            return error(err);
+      } else if (remember_password) {
+        if (!submitted_password.empty()) {
+          std::string err = config_api::config_set_password(mgr, submitted_password);
+          if (!err.empty()) return error(err);
+        } else {
+          Config current = mgr.load();
+          if (remember_payload && current.password.empty()) {
+            return error("Password is required to enable remember_password.");
+          }
+          std::string err = config_api::config_set(mgr, "remember_password", "true");
+          if (!err.empty()) return error(err);
         }
       }
       if (payload.contains("user_agent") && payload["user_agent"].is_string()) {
@@ -603,6 +708,44 @@ nlohmann::json handle_action(const std::string &action,
       if (payload.contains("webui_enabled") && payload["webui_enabled"].is_boolean()) {
         std::string err = config_api::config_set(mgr, "webui_enabled",
                                payload["webui_enabled"].get<bool>() ? "true" : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("vpn_engine") && payload["vpn_engine"].is_string()) {
+        std::string err =
+            config_api::config_set(mgr, "vpn_engine",
+                                   payload["vpn_engine"].get<std::string>());
+        if (!err.empty())
+          return error(err);
+      }
+      if (payload.contains("auto_reconnect") &&
+          payload["auto_reconnect"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "auto_reconnect",
+            payload["auto_reconnect"].get<bool>() ? "true" : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("minimal_mode") &&
+          payload["minimal_mode"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "minimal_mode",
+            payload["minimal_mode"].get<bool>() ? "true" : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("service_install_prompt_seen") &&
+          payload["service_install_prompt_seen"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "service_install_prompt_seen",
+            payload["service_install_prompt_seen"].get<bool>() ? "true"
+                                                               : "false");
+        if (!err.empty()) return error(err);
+      }
+      if (payload.contains("minimal_install_service_before_connect") &&
+          payload["minimal_install_service_before_connect"].is_boolean()) {
+        std::string err = config_api::config_set(
+            mgr, "minimal_install_service_before_connect",
+            payload["minimal_install_service_before_connect"].get<bool>()
+                ? "true"
+                : "false");
         if (!err.empty()) return error(err);
       }
       if (payload.contains("openconnect_runtime") &&

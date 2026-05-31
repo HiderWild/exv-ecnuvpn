@@ -83,6 +83,7 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
         } else if (value == "false" || value == "0") {
             cfg.remember_password = false;
             cfg.password = "";
+            crypto::delete_key_file();
         } else {
             return "Invalid boolean value for remember_password";
         }
@@ -101,6 +102,44 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
             cfg.webui_enabled = false;
         } else {
             return "Invalid boolean value for webui_enabled";
+        }
+    } else if (key == "auto_reconnect") {
+        if (value == "true" || value == "1") {
+            cfg.auto_reconnect = true;
+        } else if (value == "false" || value == "0") {
+            cfg.auto_reconnect = false;
+        } else {
+            return "Invalid boolean value for auto_reconnect";
+        }
+    } else if (key == "minimal_mode") {
+        if (value == "true" || value == "1") {
+            cfg.minimal_mode = true;
+        } else if (value == "false" || value == "0") {
+            cfg.minimal_mode = false;
+        } else {
+            return "Invalid boolean value for minimal_mode";
+        }
+    } else if (key == "service_install_prompt_seen") {
+        if (value == "true" || value == "1") {
+            cfg.service_install_prompt_seen = true;
+        } else if (value == "false" || value == "0") {
+            cfg.service_install_prompt_seen = false;
+        } else {
+            return "Invalid boolean value for service_install_prompt_seen";
+        }
+    } else if (key == "minimal_install_service_before_connect") {
+        if (value == "true" || value == "1") {
+            cfg.minimal_install_service_before_connect = true;
+        } else if (value == "false" || value == "0") {
+            cfg.minimal_install_service_before_connect = false;
+        } else {
+            return "Invalid boolean value for minimal_install_service_before_connect";
+        }
+    } else if (key == "vpn_engine") {
+        if (value == "native" || value == "legacy_openconnect") {
+            cfg.vpn_engine = value;
+        } else {
+            return "vpn_engine must be native or legacy_openconnect";
         }
     } else if (key == "openconnect_runtime") {
         if (value == "bundled" || value == "system" || value == "auto") {
@@ -125,6 +164,21 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
                utils::get_config_path();
     }
     logger::info("Config key set via config_api: " + key);
+    return "";
+}
+
+std::string config_clear_password_and_key(config::ConfigManager& mgr) {
+    Config cfg = mgr.load();
+    cfg.remember_password = false;
+    cfg.password.clear();
+    if (!mgr.save(cfg)) {
+        return "Failed to write config file. Check disk permissions for " +
+               utils::get_config_path();
+    }
+    if (!crypto::delete_key_file()) {
+        return "Failed to delete encryption key file: " + crypto::key_path();
+    }
+    logger::info("Stored password and encryption key cleared via config_api");
     return "";
 }
 
@@ -194,9 +248,14 @@ std::string config_import(config::ConfigManager& mgr, const std::string& json_st
     if (j.contains("extra_args")) cfg.extra_args = j["extra_args"].get<std::vector<std::string>>();
     if (j.contains("log_file")) cfg.log_file = j["log_file"].get<std::string>();
     if (j.contains("remember_password")) cfg.remember_password = j["remember_password"].get<bool>();
+    if (j.contains("vpn_engine")) cfg.vpn_engine = j["vpn_engine"].get<std::string>();
     if (j.contains("openconnect_runtime")) cfg.openconnect_runtime = j["openconnect_runtime"].get<std::string>();
     if (j.contains("windows_tunnel_driver")) cfg.windows_tunnel_driver = j["windows_tunnel_driver"].get<std::string>();
     if (j.contains("windows_tap_interface")) cfg.windows_tap_interface = j["windows_tap_interface"].get<std::string>();
+    if (j.contains("auto_reconnect")) cfg.auto_reconnect = j["auto_reconnect"].get<bool>();
+    if (j.contains("minimal_mode")) cfg.minimal_mode = j["minimal_mode"].get<bool>();
+    if (j.contains("service_install_prompt_seen")) cfg.service_install_prompt_seen = j["service_install_prompt_seen"].get<bool>();
+    if (j.contains("minimal_install_service_before_connect")) cfg.minimal_install_service_before_connect = j["minimal_install_service_before_connect"].get<bool>();
 
     if (j.contains("password")) {
         std::string pw = j["password"].get<std::string>();

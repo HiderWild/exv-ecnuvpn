@@ -10,18 +10,19 @@ const router = createRouter({
     },
     {
       path: '/auth',
-      name: 'auth',
-      component: () => import('../pages/AuthPage.vue'),
+      redirect: { path: '/settings', hash: '#settings-auth' },
     },
     {
       path: '/routes',
-      name: 'routes',
-      component: () => import('../pages/RoutesPage.vue'),
+      redirect: { path: '/settings', hash: '#settings-routes' },
     },
     {
       path: '/service',
-      name: 'service',
-      component: () => import('../pages/ServicePage.vue'),
+      redirect: { path: '/settings', hash: '#settings-system' },
+    },
+    {
+      path: '/connection',
+      redirect: { path: '/settings', hash: '#settings-connection' },
     },
     {
       path: '/logs',
@@ -32,6 +33,26 @@ const router = createRouter({
       path: '/settings',
       name: 'settings',
       component: () => import('../pages/SettingsPage.vue'),
+    },
+    {
+      path: '/modal/service-install',
+      name: 'modal-service-install',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
+    },
+    {
+      path: '/modal/password',
+      name: 'modal-password',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
+    },
+    {
+      path: '/modal/confirm',
+      name: 'modal-confirm',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
+    },
+    {
+      path: '/modal/close-app',
+      name: 'modal-close-app',
+      component: () => import('../pages/ServiceInstallPromptModal.vue'),
     },
   ],
 })

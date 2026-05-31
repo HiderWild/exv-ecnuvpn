@@ -22,6 +22,9 @@ bool validate_key(const std::string &hex_key);
 // Ensure key exists — generate and save if not. Returns the key.
 std::string init_key_if_needed();
 
+// Delete the local encryption key file if it exists.
+bool delete_key_file();
+
 // Regenerate key, clear encrypted password from config.json.
 // Returns false if user cancels.
 bool reset_key();

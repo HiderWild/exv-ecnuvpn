@@ -6,6 +6,7 @@
 
 #include <sys/stat.h>
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -70,15 +71,28 @@ int install_helper_service(const std::string &executable_path,
     return 1;
   }
 
-  if (exec_path != platform_config.stable_install_path) {
-    return platform::copy_self_to_stable_path_and_reexec(exec_path);
+  std::filesystem::path helper_source =
+      std::filesystem::path(exec_path).parent_path() / "exv-helper";
+  if (helper_source.string() != platform_config.default_service_binary_path &&
+      std::filesystem::exists(helper_source)) {
+    std::error_code copy_error;
+    std::filesystem::copy_file(
+        helper_source, platform_config.default_service_binary_path,
+        std::filesystem::copy_options::overwrite_existing, copy_error);
+    if (copy_error) {
+      utils::print_error("Failed to copy exv-helper to " +
+                         std::string(platform_config.default_service_binary_path) +
+                         ": " + copy_error.message());
+      return 1;
+    }
+    chmod(platform_config.default_service_binary_path, 0755);
   }
 
   if (!utils::file_exists(platform_config.default_service_binary_path)) {
     utils::print_error("Stable exv-helper binary is missing: " +
                        std::string(platform_config.default_service_binary_path));
     utils::print_info(
-        "Build or install exv-helper next to exv, then re-run 'exv service install'.");
+        "Install the CLI separately from Settings if you want a global exv command.");
     return 1;
   }
 

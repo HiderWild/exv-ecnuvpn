@@ -18,10 +18,12 @@
 body {
   @apply bg-bg text-foreground font-sans antialiased;
   margin: 0;
+  overflow: hidden;
 }
 
 #app {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 /* Scrollbar styling */

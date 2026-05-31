@@ -1,12 +1,21 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useConfigStore, type AuthConfig } from '../stores/config'
-import { Shield, User, Key, Fingerprint } from 'lucide-vue-next'
+import { useUiStore } from '../stores/ui'
+import { Shield, User, Key, Fingerprint, Server } from 'lucide-vue-next'
 
 const config = useConfigStore()
+const ui = useUiStore()
 
 const saving = ref(false)
-const message = ref<{ type: 'success' | 'error'; text: string } | null>(null)
+const message = ref<{ text: string } | null>(null)
+const serverOptions = [
+  'vpn-ct.ecnu.edu.cn',
+  'vpn-cn.ecnu.edu.cn',
+  'vpn-lt.ecnu.edu.cn',
+]
+const serverChoice = ref(serverOptions[0])
+const customServer = ref('')
 
 const form = ref<AuthConfig>({
   server: '',
@@ -25,7 +34,25 @@ onMounted(async () => {
     ...config.authConfig,
     password: '',
   }
+  if (serverOptions.includes(form.value.server)) {
+    serverChoice.value = form.value.server
+    customServer.value = ''
+  } else if (form.value.server) {
+    serverChoice.value = 'custom'
+    customServer.value = form.value.server
+  } else {
+    serverChoice.value = serverOptions[0]
+  }
 })
+
+watch(
+  () => form.value.remember_password,
+  (remember) => {
+    if (!remember) {
+      form.value.password = ''
+    }
+  },
+)
 
 const passwordPlaceholder = computed(() =>
   form.value.password_stored
@@ -46,14 +73,20 @@ async function save() {
   saving.value = true
   message.value = null
   try {
+    form.value.server = serverChoice.value === 'custom'
+      ? customServer.value.trim()
+      : serverChoice.value
+    if (!form.value.remember_password) {
+      form.value.password = ''
+    }
     // Always send the form values; the backend treats an empty password as
     // "keep the existing one" and an empty user_agent as "no change".
     await config.saveAuthConfig(form.value)
     form.value.password = ''
     form.value.password_stored = config.authConfig.password_stored ?? form.value.password_stored
-    message.value = { type: 'success', text: '认证设置已保存' }
+    message.value = { text: '认证设置已保存' }
   } catch (e: any) {
-    message.value = { type: 'error', text: extractErrorText(e) }
+    ui.requestError({ title: '保存认证设置失败', message: extractErrorText(e) })
   } finally {
     saving.value = false
   }
@@ -61,25 +94,43 @@ async function save() {
 </script>
 
 <template>
-  <div class="py-8">
-    <h1 class="text-xl font-semibold text-foreground mb-6 flex items-center gap-2">
+  <div class="h-full overflow-hidden py-4">
+    <h1 class="text-xl font-semibold text-foreground mb-4 flex items-center gap-2">
       <Shield class="w-5 h-5 text-accent" />
       认证设置
     </h1>
 
-    <div class="bg-surface border border-border rounded-xl p-6 max-w-2xl">
-      <form @submit.prevent="save" class="space-y-5">
+    <div class="bg-surface border border-border rounded-xl p-5">
+      <form @submit.prevent="save" class="grid grid-cols-2 gap-4">
         <!-- Server -->
         <div>
           <label class="block text-sm text-muted mb-1.5">VPN 服务器</label>
-          <div class="relative">
-            <User class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
-            <input
-              v-model="form.server"
-              type="text"
-              placeholder="vpn.ecnu.edu.cn"
-              class="w-full bg-background border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
-            />
+          <div class="space-y-2">
+            <div class="relative">
+              <Server class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
+              <select
+                v-model="serverChoice"
+                class="w-full appearance-none bg-background border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
+              >
+                <option
+                  v-for="server in serverOptions"
+                  :key="server"
+                  :value="server"
+                >
+                  {{ server }}
+                </option>
+                <option value="custom">自定义</option>
+              </select>
+            </div>
+            <div v-if="serverChoice === 'custom'" class="relative">
+              <Server class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
+              <input
+                v-model="customServer"
+                type="text"
+                placeholder="请输入 VPN 服务器地址"
+                class="w-full bg-background border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
+              />
+            </div>
           </div>
         </div>
 
@@ -98,7 +149,7 @@ async function save() {
         </div>
 
         <!-- Password -->
-        <div>
+        <div v-if="form.remember_password">
           <label class="block text-sm text-muted mb-1.5">密码</label>
           <div class="relative">
             <Key class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
@@ -116,7 +167,7 @@ async function save() {
         </div>
 
         <!-- Remember Password -->
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-3 self-end">
           <input
             v-model="form.remember_password"
             type="checkbox"
@@ -130,7 +181,7 @@ async function save() {
 
         <!-- User Agent -->
         <div>
-          <label class="block text-sm text-muted mb-1.5">用户代理</label>
+          <label class="block text-sm text-muted mb-1.5">客户端标识</label>
           <div class="relative">
             <Fingerprint class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
             <input
@@ -144,7 +195,7 @@ async function save() {
         </div>
 
         <!-- Save -->
-        <div class="pt-2">
+        <div class="col-span-2 flex items-center gap-3 pt-1">
           <button
             type="submit"
             :disabled="saving"
@@ -152,17 +203,17 @@ async function save() {
           >
             {{ saving ? '保存中...' : '保存认证设置' }}
           </button>
-        </div>
 
         <!-- Message -->
         <div
           v-if="message"
           :class="[
             'text-sm rounded-lg px-4 py-2.5',
-            message.type === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+          'bg-green-500/10 text-green-400'
           ]"
         >
           {{ message.text }}
+        </div>
         </div>
       </form>
     </div>

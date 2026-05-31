@@ -4,7 +4,6 @@ import { useVpnStore } from '../stores/vpn'
 import { useUiStore } from '../stores/ui'
 import { useSSE } from '../composables/useSSE'
 import StatusBadge from '../components/StatusBadge.vue'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { Download, RefreshCw, Terminal, Trash2 } from 'lucide-vue-next'
 
 const vpn = useVpnStore()
@@ -26,6 +25,16 @@ const serviceBadgeStatus = computed(() => {
   return vpn.serviceStatus.running ? 'running' : 'stopped'
 })
 
+const showInstallButton = computed(() => {
+  return vpn.serviceOperation === 'install' ||
+    (!vpn.serviceStatus?.installed && vpn.serviceOperation !== 'uninstall')
+})
+
+const showUninstallButton = computed(() => {
+  return vpn.serviceOperation === 'uninstall' ||
+    (Boolean(vpn.serviceStatus?.installed) && vpn.serviceOperation !== 'install')
+})
+
 const serviceHeadline = computed(() => {
   if (!vpn.serviceStatus?.installed) return '辅助服务'
   return vpn.serviceStatus.label || '辅助服务'
@@ -45,43 +54,55 @@ onUnmounted(() => {
 })
 
 function install() {
+  if (vpn.status?.connected) {
+    ui.requestConfirm(
+      '当前 VPN 连接已建立。安装 helper 服务前会先断开连接，然后继续安装。',
+      () => { void runServiceAction('install', true) },
+    )
+    return
+  }
   ui.requestConfirm(
     '将安装 VPN 辅助服务。系统可能会请求管理员权限。',
-    async () => {
-      try {
-        await vpn.installService()
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务安装完成', 'success')
-      } catch {
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务安装未完成，请查看输出', 'error')
-      }
-    },
+    () => { void runServiceAction('install') },
   )
 }
 
 function uninstall() {
+  if (vpn.status?.connected) {
+    ui.requestConfirm(
+      '当前 VPN 连接已建立。卸载 helper 服务前会先断开连接，然后继续卸载。',
+      () => { void runServiceAction('uninstall', true) },
+    )
+    return
+  }
   ui.requestConfirm(
     '将卸载 VPN 辅助服务。系统可能会请求管理员权限。',
-    async () => {
-      try {
-        await vpn.uninstallService()
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务卸载完成', 'success')
-      } catch {
-        await vpn.fetchServiceStatus()
-        ui.addToast('辅助服务卸载未完成，请查看输出', 'error')
-      }
-    },
+    () => { void runServiceAction('uninstall') },
   )
+}
+
+async function runServiceAction(action: 'install' | 'uninstall', disconnectFirst = false) {
+  const ok = action === 'install'
+    ? await vpn.installService({ disconnectFirst })
+    : await vpn.uninstallService({ disconnectFirst })
+  await vpn.fetchServiceStatus()
+  if (ok) {
+    ui.addToast(action === 'install' ? '辅助服务安装完成' : '辅助服务卸载完成', 'success')
+    return
+  }
+  ui.requestError({
+    title: action === 'install' ? '辅助服务安装未完成' : '辅助服务卸载未完成',
+    message: '请查看操作输出或日志后重试。',
+  })
 }
 </script>
 
 <template>
-  <div class="py-8">
-    <h1 class="text-xl font-semibold text-foreground mb-6">服务管理</h1>
+  <div class="h-full overflow-hidden py-4">
+    <h1 class="text-xl font-semibold text-foreground mb-4">服务管理</h1>
 
-    <div class="bg-surface border border-border rounded-xl p-6">
+    <div class="grid h-[calc(100%-3rem)] grid-cols-2 gap-4">
+    <div class="bg-surface border border-border rounded-xl p-5">
       <div class="flex items-center justify-between mb-6">
         <div class="flex items-center gap-3">
           <Terminal class="w-5 h-5 text-muted" />
@@ -127,23 +148,23 @@ function uninstall() {
 
       <div class="flex flex-wrap items-center gap-3 border-t border-border pt-5 mt-5">
         <button
-          v-if="!vpn.serviceStatus?.installed"
+          v-if="showInstallButton"
           :disabled="vpn.serviceBusy"
           class="flex items-center gap-2 bg-accent text-white rounded-md px-5 py-2 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
           @click="install"
         >
           <Download class="w-4 h-4" />
-          {{ vpn.serviceBusy ? '安装中...' : '安装服务' }}
+          {{ vpn.serviceOperation === 'install' ? '安装中...' : '安装服务' }}
         </button>
 
         <button
-          v-else
+          v-if="showUninstallButton"
           :disabled="vpn.serviceBusy"
           class="flex items-center gap-2 bg-destructive text-white rounded-md px-5 py-2 text-sm font-medium hover:bg-destructive/90 disabled:opacity-50 transition-colors"
           @click="uninstall"
         >
           <Trash2 class="w-4 h-4" />
-          {{ vpn.serviceBusy ? '处理中...' : '卸载服务' }}
+          {{ vpn.serviceOperation === 'uninstall' ? '卸载中...' : '卸载服务' }}
         </button>
 
         <button
@@ -159,7 +180,7 @@ function uninstall() {
 
     <div
       v-if="vpn.serviceProgress.length"
-      class="bg-surface border border-border rounded-lg p-6 mt-4"
+      class="bg-surface border border-border rounded-lg p-5"
     >
       <h2 class="text-sm font-medium text-foreground mb-3">操作输出</h2>
       <div class="bg-bg rounded-md p-4 font-mono text-xs text-foreground space-y-1 max-h-64 overflow-auto">
@@ -170,19 +191,24 @@ function uninstall() {
       </div>
     </div>
 
-    <div class="bg-surface border border-border rounded-lg p-6 mt-4">
+    <div v-else class="bg-surface border border-border rounded-lg p-5">
+      <h2 class="text-sm font-medium text-foreground mb-3">操作输出</h2>
+      <p class="text-sm text-muted">暂无服务操作输出。</p>
+    </div>
+
+    <div class="col-span-2 bg-surface border border-border rounded-lg p-5">
       <h2 class="text-sm font-medium text-foreground mb-3 flex items-center gap-2">
         <Terminal class="w-4 h-4" />
         终端命令
       </h2>
       <div class="bg-bg rounded-md p-4 font-mono text-xs text-foreground space-y-2">
         <div>
-          <span class="text-muted"># 安装服务</span>
+          <span class="text-muted"># 安装 helper 服务</span>
           <br />
           {{ installCommand }}
         </div>
         <div>
-          <span class="text-muted"># 卸载服务</span>
+          <span class="text-muted"># 卸载 helper 服务</span>
           <br />
           {{ uninstallCommand }}
         </div>
@@ -193,7 +219,6 @@ function uninstall() {
         </div>
       </div>
     </div>
-
-    <ConfirmDialog />
+    </div>
   </div>
 </template>

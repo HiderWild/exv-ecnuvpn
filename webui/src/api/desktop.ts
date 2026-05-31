@@ -1,4 +1,3 @@
-import httpApi from './client'
 import {
   desktopApiPaths,
 } from '../../desktop/shared/desktop-contract'
@@ -7,6 +6,12 @@ type ApiResponse<T> = Promise<{ data: T }>
 
 function desktopAvailable() {
   return typeof window !== 'undefined' && !!window.ecnuVpn
+}
+
+function requireDesktop() {
+  if (!desktopAvailable()) {
+    throw new Error('Desktop API is only available inside the Electron app.')
+  }
 }
 
 async function wrap<T>(promise: Promise<T>): ApiResponse<T> {
@@ -24,7 +29,7 @@ function plainPayload<T>(value: T): T {
 
 const desktopApi = {
   get<T = unknown>(path: string): ApiResponse<T> {
-    if (!desktopAvailable()) return httpApi.get(path)
+    requireDesktop()
 
     switch (path) {
       case desktopApiPaths.status:
@@ -40,6 +45,8 @@ const desktopApi = {
         return wrap(window.ecnuVpn!.routes.list()) as ApiResponse<T>
       case desktopApiPaths.service:
         return wrap(window.ecnuVpn!.service.status()) as ApiResponse<T>
+      case desktopApiPaths.cli:
+        return wrap(window.ecnuVpn!.cli.status()) as ApiResponse<T>
       case desktopApiPaths.runtime:
         return wrap(window.ecnuVpn!.runtime.status()) as ApiResponse<T>
       case desktopApiPaths.drivers:
@@ -52,7 +59,7 @@ const desktopApi = {
   },
 
   post<T = unknown>(path: string, body?: any): ApiResponse<T> {
-    if (!desktopAvailable()) return httpApi.post(path, body)
+    requireDesktop()
 
     switch (path) {
       case desktopApiPaths.connect:
@@ -73,6 +80,10 @@ const desktopApi = {
         return wrap(window.ecnuVpn!.service.install()) as ApiResponse<T>
       case desktopApiPaths.serviceUninstall:
         return wrap(window.ecnuVpn!.service.uninstall()) as ApiResponse<T>
+      case desktopApiPaths.cliInstall:
+        return wrap(window.ecnuVpn!.cli.install()) as ApiResponse<T>
+      case desktopApiPaths.cliUninstall:
+        return wrap(window.ecnuVpn!.cli.uninstall()) as ApiResponse<T>
       case desktopApiPaths.driversInstall:
         return wrap(window.ecnuVpn!.drivers.install(plainPayload(body)?.driver)) as ApiResponse<T>
       default:
@@ -81,7 +92,7 @@ const desktopApi = {
   },
 
   put<T = unknown>(path: string, body?: any): ApiResponse<T> {
-    if (!desktopAvailable()) return httpApi.put(path, body)
+    requireDesktop()
 
     switch (path) {
       case desktopApiPaths.configAuth:
@@ -94,7 +105,7 @@ const desktopApi = {
   },
 
   delete<T = unknown>(path: string, options?: { data?: any }): ApiResponse<T> {
-    if (!desktopAvailable()) return httpApi.delete(path, options)
+    requireDesktop()
 
     switch (path) {
       case desktopApiPaths.routes:

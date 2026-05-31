@@ -1,11 +1,16 @@
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { defineStore } from 'pinia'
 import api from '../api/desktop'
 import { useUiStore } from './ui'
+import { useConfigStore } from './config'
 
 export interface UpstreamVirtualAdapter {
   name: string
   detail: string
+  kind?: string
+  role?: string
+  if_index?: string
+  route_reason?: string
 }
 
 export interface VpnStatus {
@@ -68,10 +73,22 @@ export interface ServiceProgressEntry {
   timestamp: string
 }
 
+export interface CliInstallStatus {
+  installed: boolean
+  installPath: string
+  targetPath: string
+  availableInPath: boolean
+  warning?: string
+}
+
 export interface ConnectionProgressStage {
   key: string
   label: string
   description: string
+}
+
+type ServiceChangeOptions = {
+  disconnectFirst?: boolean
 }
 
 export type VpnErrorType =
@@ -81,6 +98,7 @@ export type VpnErrorType =
   | 'runtime_missing'
   | 'config_invalid'
   | 'service_missing'
+  | 'auth_failed'
   | 'native_failure'
   | 'parse_failure'
   | 'unknown_action'
@@ -132,6 +150,15 @@ function isElevationCancelledMessage(message: string) {
     message.includes('(-128)')
 }
 
+function isAuthFailureMessage(message: string) {
+  const normalized = message.toLowerCase()
+  return normalized.includes('auth_failed') ||
+    normalized.includes('login failed') ||
+    normalized.includes('authentication failed') ||
+    normalized.includes('invalid password') ||
+    normalized.includes('password is incorrect')
+}
+
 export function normalizeError(raw: unknown): VpnError {
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
@@ -143,6 +170,16 @@ export function normalizeError(raw: unknown): VpnError {
         recoverable: obj.recoverable !== undefined ? !!obj.recoverable : true,
         recommended_action: String(obj.recommended_action || ''),
         timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : undefined,
+      }
+    }
+    if (typeof obj.code === 'string' && obj.code === 'auth_failed') {
+      return {
+        ok: false,
+        error_type: 'auth_failed',
+        message: String(obj.message || obj.error || 'VPN authentication failed. Please check your password.'),
+        recoverable: true,
+        recommended_action: 'retry_password',
+        timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
       }
     }
     if (obj.ok === false && obj.message) {
@@ -168,6 +205,16 @@ export function normalizeError(raw: unknown): VpnError {
       timestamp: Date.now(),
     }
   }
+  if (isAuthFailureMessage(message)) {
+    return {
+      ok: false,
+      error_type: 'auth_failed',
+      message: 'VPN 密码错误，请重新输入密码。',
+      recoverable: true,
+      recommended_action: 'retry_password',
+      timestamp: Date.now(),
+    }
+  }
   return {
     ok: false,
     error_type: message.includes('elevation_denied') ? 'elevation_denied' : 'native_failure',
@@ -178,16 +225,31 @@ export function normalizeError(raw: unknown): VpnError {
   }
 }
 
+function summarizeError(message: string) {
+  const normalized = message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+  if (!normalized) return '操作失败，请查看日志。'
+  return normalized.length > 96 ? `${normalized.slice(0, 96)}...` : normalized
+}
+
 export const useVpnStore = defineStore('vpn', () => {
   let progressTimer: ReturnType<typeof setInterval> | null = null
+  let uptimeTimer: ReturnType<typeof setInterval> | null = null
   const ui = useUiStore()
+  const config = useConfigStore()
 
   const status = ref<VpnStatus | null>(null)
   const routes = ref<RouteEntry[]>([])
   const logs = ref<LogEntry[]>([])
   const serviceStatus = ref<ServiceStatus | null>(null)
+  const cliStatus = ref<CliInstallStatus | null>(null)
   const serviceProgress = ref<ServiceProgressEntry[]>([])
   const serviceBusy = ref(false)
+  const serviceOverlayOperation = ref<'install' | 'uninstall' | null>(null)
+  const serviceOperation = ref<'install' | 'uninstall' | null>(null)
+  const cliOperation = ref<'install' | 'uninstall' | null>(null)
   const loading = ref(false)
   const lastError = ref<string | null>(null)
   const lastErrorType = ref<VpnErrorType | null>(null)
@@ -195,10 +257,18 @@ export const useVpnStore = defineStore('vpn', () => {
   const lastRecommendedAction = ref('')
   const lastErrorTime = ref<number | null>(null)
   const lastActionWasElevatedConnect = ref(false)
-  const lastMutatingAction = ref<(() => Promise<void>) | null>(null)
+  const lastFailedConnectMode = ref<'helper' | 'elevated' | null>(null)
+  const lastMutatingAction = ref<(() => Promise<unknown>) | null>(null)
   const activeTemporaryBackend = ref<unknown | null>(null)
+  const connectInFlight = ref(false)
+  const disconnectInFlight = ref(false)
   const connectionProgressStartedAt = ref<number | null>(null)
+  const connectionProgressStageOffset = ref(0)
+  const connectionProgressMaxIndex = ref(0)
   const progressTick = ref(0)
+  const uptimeBaseSeconds = ref(0)
+  const uptimeStartedAt = ref<number | null>(null)
+  const uptimeTick = ref(0)
 
   const connectionProgressStages: ConnectionProgressStage[] = [
     {
@@ -214,7 +284,7 @@ export const useVpnStore = defineStore('vpn', () => {
     {
       key: 'vpn-server',
       label: '正在连接 VPN 服务器',
-      description: '正在启动 OpenConnect 并完成 VPN 认证握手',
+      description: '正在启动 VPN 引擎并完成认证握手',
     },
     {
       key: 'adapter',
@@ -235,6 +305,7 @@ export const useVpnStore = defineStore('vpn', () => {
 
   const serviceInstalled = computed(() => serviceStatus.value?.installed ?? false)
   const serviceRunning = computed(() => serviceStatus.value?.running ?? false)
+  const serviceAvailable = computed(() => serviceStatus.value?.available ?? false)
   const isDesktop = computed(() => typeof window !== 'undefined' && !!window.ecnuVpn)
   const canUseElevatedFallback = computed(() => {
     const capabilities = serviceStatus.value?.capabilities
@@ -243,7 +314,7 @@ export const useVpnStore = defineStore('vpn', () => {
     )
   })
   const recommendedConnectMode = computed<ConnectMode>(() => {
-    if (serviceInstalled.value && serviceRunning.value) return 'helper'
+    if (serviceAvailable.value) return 'helper'
     if (canUseElevatedFallback.value) return 'elevated'
     return 'helper'
   })
@@ -254,22 +325,84 @@ export const useVpnStore = defineStore('vpn', () => {
     return 'helper'
   })
 
+  async function showServiceOverlay(operation: 'install' | 'uninstall') {
+    serviceOverlayOperation.value = operation
+    await nextTick()
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve())
+      } else {
+        setTimeout(resolve, 0)
+      }
+    })
+  }
+
+  const displayUptimeSeconds = computed(() => {
+    void uptimeTick.value
+    if (!status.value?.connected || !uptimeStartedAt.value) return 0
+    const elapsed = Math.max(0, Math.floor((Date.now() - uptimeStartedAt.value) / 1000))
+    return uptimeBaseSeconds.value + elapsed
+  })
+
+  function startUptimeTimer() {
+    if (uptimeTimer) return
+    uptimeTimer = setInterval(() => {
+      uptimeTick.value++
+    }, 1000)
+  }
+
+  function stopUptimeTimer() {
+    if (uptimeTimer) {
+      clearInterval(uptimeTimer)
+      uptimeTimer = null
+    }
+  }
+
+  function syncUptime(nextStatus: VpnStatus) {
+    if (!nextStatus.connected) {
+      uptimeBaseSeconds.value = 0
+      uptimeStartedAt.value = null
+      stopUptimeTimer()
+      return
+    }
+
+    const reported = Math.max(0, nextStatus.uptime_seconds || 0)
+    if (!uptimeStartedAt.value) {
+      uptimeBaseSeconds.value = reported
+      uptimeStartedAt.value = Date.now()
+    } else if (reported > displayUptimeSeconds.value) {
+      uptimeBaseSeconds.value = reported
+      uptimeStartedAt.value = Date.now()
+    }
+    startUptimeTimer()
+  }
+
+  function applyStatus(nextStatus: VpnStatus) {
+    status.value = nextStatus
+    syncUptime(nextStatus)
+  }
+
   const connectionProgress = computed<ConnectionProgressStage>(() => {
     void progressTick.value
     if (!connectionProgressStartedAt.value) return connectionProgressStages[0]
 
     const elapsed = Date.now() - connectionProgressStartedAt.value
-    const stageIndex = elapsed < 1500
+    const elapsedStage = elapsed < 1500
       ? 0
-      : elapsed < 3000
+      : elapsed < 3500
         ? 1
-        : elapsed < 5000
+        : elapsed < 5500
           ? 2
-          : elapsed < 7000
+          : elapsed < 7500
             ? 3
-            : elapsed < 9000
+            : elapsed < 9500
               ? 4
               : 5
+    const stageIndex = Math.min(
+      connectionProgressStages.length - 1,
+      connectionProgressMaxIndex.value,
+      connectionProgressStageOffset.value + elapsedStage,
+    )
     return connectionProgressStages[stageIndex]
   })
 
@@ -281,7 +414,7 @@ export const useVpnStore = defineStore('vpn', () => {
       }
     }
 
-    if (loading.value && lastActionWasElevatedConnect.value) return 'elevated connecting'
+    if (connectInFlight.value) return 'elevated connecting'
 
     if (status.value?.connected) {
       const mode = currentSessionMode.value
@@ -290,7 +423,7 @@ export const useVpnStore = defineStore('vpn', () => {
       return 'direct connected'
     }
 
-    if (serviceInstalled.value && serviceRunning.value) return 'service-ready disconnected'
+    if (serviceAvailable.value) return 'service-ready disconnected'
     return 'service-missing disconnected'
   })
 
@@ -300,6 +433,8 @@ export const useVpnStore = defineStore('vpn', () => {
         return { label: '安装服务', action: () => installService(), variant: 'primary' }
       case 'config_invalid':
         return { label: '前往设置', action: () => {}, variant: 'primary' }
+      case 'auth_failed':
+        return { label: '重新输入密码', action: () => retryLastAction(), variant: 'primary' }
       case 'native_failure':
       case 'parse_failure':
         return { label: '重试', action: () => retryLastAction(), variant: 'primary' }
@@ -346,6 +481,47 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   })
 
+  function errorPresentation(err: VpnError) {
+    switch (err.error_type) {
+      case 'auth_failed':
+        return {
+          title: '密码错误',
+          primaryLabel: '重新输入密码',
+          onPrimary: () => retryConnectAfterAuthFailure(lastFailedConnectMode.value ?? 'helper'),
+        }
+      case 'config_invalid':
+        return {
+          title: '配置不完整',
+          primaryLabel: '前往设置',
+          onPrimary: () => {
+            clearError()
+            window.location.hash = '#/settings'
+          },
+        }
+      case 'runtime_missing':
+        return {
+          title: '缺少运行时',
+          primaryLabel: '打开设置',
+          onPrimary: () => {
+            clearError()
+            window.location.hash = '#/settings#settings-system'
+          },
+        }
+      case 'elevation_denied':
+        return {
+          title: '授权被拒绝',
+          primaryLabel: '重试',
+          onPrimary: () => retryLastAction(),
+        }
+      default:
+        return {
+          title: err.recoverable ? '操作失败' : '严重错误',
+          primaryLabel: err.recoverable ? '重试' : '知道了',
+          onPrimary: err.recoverable ? () => retryLastAction() : undefined,
+        }
+    }
+  }
+
   function setError(err: VpnError) {
     if (err.error_type === 'elevation_cancelled') {
       clearError()
@@ -361,6 +537,15 @@ export const useVpnStore = defineStore('vpn', () => {
     lastRecoverable.value = err.recoverable
     lastRecommendedAction.value = err.recommended_action
     lastErrorTime.value = Date.now()
+    const presentation = errorPresentation(err)
+    ui.requestError({
+      title: presentation.title,
+      message: summarizeError(err.message),
+      primaryLabel: presentation.primaryLabel,
+      secondaryLabel: err.recoverable ? '取消' : '知道了',
+      onPrimary: presentation.onPrimary,
+      onClose: () => clearError(),
+    })
   }
 
   function clearError() {
@@ -369,6 +554,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastRecoverable.value = true
     lastRecommendedAction.value = ''
     lastErrorTime.value = null
+    lastFailedConnectMode.value = null
   }
 
   function retryLastAction() {
@@ -376,7 +562,9 @@ export const useVpnStore = defineStore('vpn', () => {
     lastMutatingAction.value?.()
   }
 
-  function startConnectionProgress() {
+  function startConnectionProgress(stageOffset = 0, maxStageIndex = 2) {
+    connectionProgressStageOffset.value = stageOffset
+    connectionProgressMaxIndex.value = Math.max(stageOffset, Math.min(connectionProgressStages.length - 1, maxStageIndex))
     connectionProgressStartedAt.value = Date.now()
     progressTick.value++
     if (progressTimer) clearInterval(progressTimer)
@@ -387,6 +575,8 @@ export const useVpnStore = defineStore('vpn', () => {
 
   function stopConnectionProgress() {
     connectionProgressStartedAt.value = null
+    connectionProgressStageOffset.value = 0
+    connectionProgressMaxIndex.value = 0
     if (progressTimer) {
       clearInterval(progressTimer)
       progressTimer = null
@@ -400,11 +590,11 @@ export const useVpnStore = defineStore('vpn', () => {
       const inferredMode = data.mode
         ?? (data.connected && previous?.connected ? previous.mode : undefined)
         ?? (data.connected && (activeTemporaryBackend.value || !serviceRunning.value) ? 'elevated' : undefined)
-      status.value = {
+      applyStatus({
         ...data,
         mode: inferredMode,
         backend: data.backend ?? (data.connected ? activeTemporaryBackend.value ?? previous?.backend : undefined),
-      }
+      })
       if (data.connected) clearError()
     } catch (e) {
       console.error('[vpn] fetchStatus failed:', e)
@@ -415,67 +605,154 @@ export const useVpnStore = defineStore('vpn', () => {
     await Promise.allSettled([fetchStatus(), fetchServiceStatus()])
   }
 
-  async function connect() {
+  function buildPasswordPromptMessage(prefix = '') {
+    const auth = config.authConfig
+    const username = auth.username || status.value?.username
+    const base = username ? `请输入用户 ${username} 的密码` : '请输入 VPN 密码'
+    return prefix ? `${prefix}${base}` : base
+  }
+
+  async function resolveConnectPassword(messagePrefix = ''): Promise<string | undefined | null> {
+    await config.fetchAuthConfig()
+    const auth = config.authConfig
+    if (auth.remember_password && auth.password_stored) return undefined
+
+    return ui.requestPassword(buildPasswordPromptMessage(messagePrefix))
+  }
+
+  async function retryConnectAfterAuthFailure(mode: 'helper' | 'elevated'): Promise<boolean> {
+    await config.fetchAuthConfig()
+    const password = await ui.requestPassword(
+      buildPasswordPromptMessage('密码不正确，请重新输入。'),
+    )
+    if (password === null) return false
+    clearError()
+    return mode === 'helper' ? connect(password) : connectElevated(password)
+  }
+
+  async function connect(providedPassword?: string): Promise<boolean> {
+    const password = providedPassword !== undefined
+      ? providedPassword
+      : await resolveConnectPassword()
+    if (password === null) return false
+
     loading.value = true
     clearError()
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = connect
+    connectInFlight.value = true
+    startConnectionProgress(2)
     try {
-      const { data } = await api.post<VpnStatus>('/connect')
-      status.value = data
+      const { data } = await api.post<VpnStatus>(
+        '/connect',
+        password === undefined ? undefined : { password },
+      )
+      applyStatus(data)
       await fetchAppShellState()
+      return true
     } catch (error) {
-      setError(normalizeError(error))
+      const normalized = normalizeError(error)
+      if (normalized.error_type === 'auth_failed') lastFailedConnectMode.value = 'helper'
+      setError(normalized)
     } finally {
+      connectInFlight.value = false
+      stopConnectionProgress()
       loading.value = false
     }
+
+    return false
   }
 
   async function disconnect() {
     loading.value = true
+    disconnectInFlight.value = true
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = disconnect
     try {
       const { data } = await api.post<VpnStatus>('/disconnect')
-      status.value = data
+      applyStatus(data)
       clearError()
       await fetchAppShellState()
     } catch (error) {
       setError(normalizeError(error))
     } finally {
+      disconnectInFlight.value = false
       loading.value = false
     }
   }
 
-  async function connectElevated() {
+  async function connectElevated(providedPassword?: string): Promise<boolean> {
+    const password = providedPassword !== undefined
+      ? providedPassword
+      : await resolveConnectPassword()
+    if (password === null) return false
+
     loading.value = true
     clearError()
     lastActionWasElevatedConnect.value = true
     lastMutatingAction.value = connectElevated
-    startConnectionProgress()
+    connectInFlight.value = true
+    startConnectionProgress(0, 2)
     try {
-      const { data } = await api.post<VpnStatus | VpnError>('/connect/elevated')
+      const { data } = await api.post<VpnStatus | VpnError>(
+        '/connect/elevated',
+        password === undefined ? undefined : { password },
+      )
       if (isVpnError(data)) {
+        if (data.error_type === 'auth_failed') lastFailedConnectMode.value = 'elevated'
         setError(data)
       } else {
-        status.value = { ...data, mode: data.mode ?? 'elevated' }
-        activeTemporaryBackend.value = status.value.backend ?? null
+        const elevatedStatus = { ...data, mode: data.mode ?? 'elevated' }
+        applyStatus(elevatedStatus)
+        activeTemporaryBackend.value = elevatedStatus.backend ?? null
         await fetchAppShellState()
         if (status.value?.connected && !status.value.mode) {
-          status.value = { ...status.value, mode: 'elevated', backend: activeTemporaryBackend.value }
+          applyStatus({ ...status.value, mode: 'elevated', backend: activeTemporaryBackend.value })
         }
+        return true
       }
     } catch (error) {
-      setError(normalizeError(error))
+      const normalized = normalizeError(error)
+      if (normalized.error_type === 'auth_failed') lastFailedConnectMode.value = 'elevated'
+      setError(normalized)
     } finally {
       lastActionWasElevatedConnect.value = false
+      connectInFlight.value = false
       stopConnectionProgress()
       loading.value = false
     }
+
+    return false
+  }
+
+  async function connectFromDashboard(installServiceFirst: boolean) {
+    if (status.value?.connected) {
+      if (currentSessionMode.value === 'helper') {
+        await disconnect()
+      } else {
+        await disconnectElevated()
+      }
+      return
+    }
+
+    if (serviceAvailable.value) {
+      await connect()
+      return
+    }
+
+    if (installServiceFirst) {
+      const installed = await installService()
+      if (!installed) return
+      await connect()
+      return
+    }
+
+    await connectElevated()
   }
 
   async function disconnectElevated() {
     loading.value = true
+    disconnectInFlight.value = true
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = disconnectElevated
     try {
@@ -485,7 +762,7 @@ export const useVpnStore = defineStore('vpn', () => {
       if (isVpnError(data)) {
         setError(data)
       } else {
-        status.value = data
+        applyStatus(data)
         activeTemporaryBackend.value = null
         clearError()
         await fetchAppShellState()
@@ -493,8 +770,41 @@ export const useVpnStore = defineStore('vpn', () => {
     } catch (error) {
       setError(normalizeError(error))
     } finally {
+      disconnectInFlight.value = false
       loading.value = false
     }
+  }
+
+  async function ensureDisconnectedForServiceChange(options: ServiceChangeOptions = {}) {
+    if (!status.value?.connected) return true
+    if (!options.disconnectFirst) {
+      setError({
+        ok: false,
+        error_type: 'native_failure',
+        message: 'VPN 连接已建立，请先断开连接再变更 helper 服务。',
+        recoverable: true,
+        recommended_action: 'disconnect_first',
+        timestamp: Date.now(),
+      })
+      return false
+    }
+
+    if (currentSessionMode.value === 'helper') {
+      await disconnect()
+    } else {
+      await disconnectElevated()
+    }
+    await fetchStatus()
+    if (!status.value?.connected) return true
+    setError({
+      ok: false,
+      error_type: 'native_failure',
+      message: '变更 helper 服务前未能断开 VPN 连接。',
+      recoverable: true,
+      recommended_action: 'disconnect_first',
+      timestamp: Date.now(),
+    })
+    return false
   }
 
   async function fetchRoutes() {
@@ -530,41 +840,100 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
-  async function installService() {
-    serviceBusy.value = true
-    serviceProgress.value = []
-    clearError()
-    lastMutatingAction.value = installService
+  async function fetchCliStatus() {
     try {
-      const { data } = await api.post<ServiceStatus>('/service/install')
-      serviceStatus.value = data
-      if (data.warning || !data.available) {
-        throw new Error(data.warning || 'Helper service is not available after install.')
-      }
-      await fetchAppShellState()
-    } catch (error) {
-      setError(normalizeError(error))
-    } finally {
-      serviceBusy.value = false
+      const { data } = await api.get<CliInstallStatus>('/cli')
+      cliStatus.value = data
+    } catch (e) {
+      console.error('[vpn] fetchCliStatus failed:', e)
     }
   }
 
-  async function uninstallService() {
-    serviceBusy.value = true
-    serviceProgress.value = []
-    clearError()
-    lastMutatingAction.value = uninstallService
+  async function installService(options: ServiceChangeOptions = {}) {
+    await showServiceOverlay('install')
     try {
-      const { data } = await api.post<ServiceStatus>('/service/uninstall')
-      serviceStatus.value = data
-      if (data.warning || data.installed) {
-        throw new Error(data.warning || 'Helper service is still installed after uninstall.')
+      if (!await ensureDisconnectedForServiceChange(options)) return false
+      serviceBusy.value = true
+      serviceOperation.value = 'install'
+      serviceProgress.value = []
+      clearError()
+      lastMutatingAction.value = installService
+      try {
+        const { data } = await api.post<ServiceStatus>('/service/install')
+        serviceStatus.value = data
+        if (data.warning || !data.available) {
+          throw new Error(data.warning || 'Helper service is not available after install.')
+        }
+        await fetchAppShellState()
+        return true
+      } catch (error) {
+        setError(normalizeError(error))
+        return false
+      } finally {
+        serviceOperation.value = null
+        serviceBusy.value = false
       }
-      await fetchAppShellState()
+    } finally {
+      serviceOverlayOperation.value = null
+    }
+  }
+
+  async function uninstallService(options: ServiceChangeOptions = {}) {
+    await showServiceOverlay('uninstall')
+    try {
+      if (!await ensureDisconnectedForServiceChange(options)) return false
+      serviceBusy.value = true
+      serviceOperation.value = 'uninstall'
+      serviceProgress.value = []
+      clearError()
+      lastMutatingAction.value = uninstallService
+      try {
+        const { data } = await api.post<ServiceStatus>('/service/uninstall')
+        serviceStatus.value = data
+        if (data.warning || data.installed) {
+          throw new Error(data.warning || 'Helper service is still installed after uninstall.')
+        }
+        await fetchAppShellState()
+        return true
+      } catch (error) {
+        setError(normalizeError(error))
+        return false
+      } finally {
+        serviceOperation.value = null
+        serviceBusy.value = false
+      }
+    } finally {
+      serviceOverlayOperation.value = null
+    }
+  }
+
+  async function installCli() {
+    cliOperation.value = 'install'
+    clearError()
+    try {
+      const { data } = await api.post<CliInstallStatus>('/cli/install')
+      cliStatus.value = data
+      return true
     } catch (error) {
       setError(normalizeError(error))
+      return false
     } finally {
-      serviceBusy.value = false
+      cliOperation.value = null
+    }
+  }
+
+  async function uninstallCli() {
+    cliOperation.value = 'uninstall'
+    clearError()
+    try {
+      const { data } = await api.post<CliInstallStatus>('/cli/uninstall')
+      cliStatus.value = data
+      return true
+    } catch (error) {
+      setError(normalizeError(error))
+      return false
+    } finally {
+      cliOperation.value = null
     }
   }
 
@@ -589,15 +958,18 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   return {
-    status, loading, routes, logs, serviceStatus, serviceProgress, serviceBusy,
+    status, loading, routes, logs, serviceStatus, cliStatus, serviceProgress, serviceBusy,
+    serviceOverlayOperation,
+    serviceOperation, cliOperation,
     lastError, lastErrorType, lastRecoverable, lastRecommendedAction, lastErrorTime,
-    serviceInstalled, serviceRunning, canUseElevatedFallback,
-    recommendedConnectMode, currentSessionMode,
+    serviceInstalled, serviceRunning, serviceAvailable, canUseElevatedFallback,
+    recommendedConnectMode, currentSessionMode, displayUptimeSeconds,
+    connectInFlight, disconnectInFlight,
     connectionProgress,
     isDesktop, dashboardState, dashboardPrimaryAction, dashboardSecondaryAction,
-    fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated,
+    fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated, connectFromDashboard,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
-    fetchServiceStatus, installService, uninstallService,
+    fetchServiceStatus, fetchCliStatus, installService, uninstallService, installCli, uninstallCli,
     addLog, clearLogs, setLogs, addServiceProgress, clearError, retryLastAction,
   }
 })

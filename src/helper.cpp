@@ -9,17 +9,20 @@
 #include "utils.hpp"
 #include "vpn.hpp"
 #include "virtual_network.hpp"
+#include "vpn_engine/native_session_store.hpp"
 
 #include <cerrno>
 #include <cctype>
 #include <csignal>
 #include <cstring>
 #include <cstdio>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 
@@ -31,9 +34,55 @@ namespace {
 volatile sig_atomic_t daemon_stop_requested = 0;
 DaemonOptions active_daemon_options;
 
+class StageTimer {
+public:
+  explicit StageTimer(std::string scope)
+      : scope_(std::move(scope)), started_(Clock::now()), last_(started_) {
+    logger::info("[connect-timing] scope=" + scope_ +
+                 " stage=begin delta_ms=0 total_ms=0");
+  }
+
+  void mark(const std::string &stage, const std::string &detail = "") {
+    auto now = Clock::now();
+    long long delta_ms = elapsed_ms(last_, now);
+    long long total_ms = elapsed_ms(started_, now);
+    last_ = now;
+
+    std::string message = "[connect-timing] scope=" + scope_ +
+                          " stage=" + stage +
+                          " delta_ms=" + std::to_string(delta_ms) +
+                          " total_ms=" + std::to_string(total_ms);
+    if (!detail.empty())
+      message += " " + detail;
+    logger::info(message);
+  }
+
+  void finish(bool ok, const std::string &detail = "") {
+    if (finished_)
+      return;
+    finished_ = true;
+    mark(ok ? "finish.ok" : "finish.error", detail);
+  }
+
+private:
+  using Clock = std::chrono::steady_clock;
+
+  static long long elapsed_ms(const Clock::time_point &from,
+                              const Clock::time_point &to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
+        .count();
+  }
+
+  std::string scope_;
+  Clock::time_point started_;
+  Clock::time_point last_;
+  bool finished_ = false;
+};
+
 struct SessionState {
   uid_t uid = static_cast<uid_t>(-1);
   gid_t gid = static_cast<gid_t>(-1);
+  std::string engine = "legacy_openconnect";
   std::string username;
   std::string home;
   std::string config_dir;
@@ -67,6 +116,10 @@ std::string route_ready_path_for(const SessionState &state) {
   return state.config_dir + "/route-ready";
 }
 
+bool is_native_session(const SessionState &state) {
+  return state.engine == "native";
+}
+
 void remove_file_if_exists(const std::string &path) {
   if (utils::file_exists(path)) {
     std::remove(path.c_str());
@@ -78,7 +131,11 @@ void clear_runtime_state(const SessionState &state) {
     return;
   remove_file_if_exists(pid_path_for(state));
   remove_file_if_exists(supervisor_pid_path_for(state));
-  remove_file_if_exists(route_ready_path_for(state));
+  if (is_native_session(state)) {
+    vpn_engine::clear_native_session_state(state.config_dir);
+  } else {
+    remove_file_if_exists(route_ready_path_for(state));
+  }
 }
 
 pid_t read_pid_file(const std::string &path) {
@@ -125,6 +182,7 @@ bool read_route_ready(const SessionState &state, std::string *interface_name,
 nlohmann::json to_json(const SessionState &state) {
   return nlohmann::json{{"uid", static_cast<unsigned int>(state.uid)},
                         {"gid", static_cast<unsigned int>(state.gid)},
+                        {"engine", state.engine},
                         {"username", state.username},
                         {"home", state.home},
                         {"config_dir", state.config_dir},
@@ -139,6 +197,7 @@ bool from_json(const nlohmann::json &j, SessionState *state) {
   try {
     state->uid = static_cast<uid_t>(j.at("uid").get<unsigned int>());
     state->gid = static_cast<gid_t>(j.at("gid").get<unsigned int>());
+    state->engine = j.value("engine", std::string("legacy_openconnect"));
     state->username = j.at("username").get<std::string>();
     state->home = j.at("home").get<std::string>();
     state->config_dir = j.at("config_dir").get<std::string>();
@@ -179,10 +238,40 @@ void clear_session_state() {
   remove_file_if_exists(platform::helper_platform_config().session_state_path);
 }
 
+void clear_native_session_state_for_known_config_dirs(uid_t peer_uid) {
+  std::vector<std::string> config_dirs;
+  const std::string peer_config_dir = utils::get_config_dir_for_uid(peer_uid);
+  if (!peer_config_dir.empty())
+    config_dirs.push_back(peer_config_dir);
+
+  const std::string helper_config_dir = utils::get_config_dir();
+  if (!helper_config_dir.empty() && helper_config_dir != peer_config_dir)
+    config_dirs.push_back(helper_config_dir);
+
+  vpn_engine::clear_native_session_states(config_dirs);
+}
+
 RuntimeSnapshot inspect_runtime(const SessionState &state) {
   RuntimeSnapshot snapshot;
   if (state.config_dir.empty())
     return snapshot;
+
+  if (is_native_session(state)) {
+    vpn_engine::NativeSessionProbe probe;
+    probe.is_process_alive = [](int pid) { return is_process_alive(pid); };
+    vpn_engine::NativeSessionSnapshot native =
+        vpn_engine::read_native_session_snapshot(state.config_dir, probe);
+
+    snapshot.running = native.running;
+    snapshot.pid = static_cast<pid_t>(native.pid);
+    snapshot.supervisor_pid = static_cast<pid_t>(native.supervisor_pid);
+    snapshot.network_ready = native.network_ready;
+    snapshot.interface_name = native.interface_name;
+    snapshot.internal_ip = native.internal_ip;
+    if (snapshot.running)
+      snapshot.interfaces_output = platform::get_interfaces_output();
+    return snapshot;
+  }
 
   snapshot.supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
   if (!is_process_alive(snapshot.supervisor_pid))
@@ -270,8 +359,12 @@ void reap_finished_request_handlers() {
   platform::reap_children();
 }
 
-nlohmann::json make_error(const std::string &message) {
-  return nlohmann::json{{"ok", false}, {"message", message}};
+nlohmann::json make_error(const std::string &message,
+                          const std::string &code = std::string()) {
+  nlohmann::json result{{"ok", false}, {"message", message}};
+  if (!code.empty())
+    result["code"] = code;
+  return result;
 }
 
 nlohmann::json make_helper_capabilities() {
@@ -337,6 +430,7 @@ nlohmann::json make_status_response(const SessionState &state,
                           {"internal_ip", snapshot.internal_ip},
                           {"rx_bytes", snapshot.rx_bytes},
                           {"tx_bytes", snapshot.tx_bytes},
+                          {"engine", state.engine},
                           {"server", state.server},
                           {"route_count", state.route_count},
                           {"retry_limit", state.retry_limit},
@@ -382,6 +476,57 @@ nlohmann::json handle_status(uid_t peer_uid) {
 }
 
 bool stop_managed_session(const SessionState &state, std::string *message) {
+  if (is_native_session(state)) {
+    RuntimeSnapshot snapshot = inspect_runtime(state);
+    if (!snapshot.running) {
+      platform::cleanup_routes();
+      platform::kill_all_supervisors();
+      clear_runtime_state(state);
+      if (message)
+        *message = "No native VPN session found. VPN is not running.";
+      return false;
+    }
+
+    platform::cleanup_routes();
+
+    if (snapshot.supervisor_pid > 0)
+      platform::terminate_process(static_cast<int>(snapshot.supervisor_pid));
+    if (snapshot.pid > 0)
+      platform::terminate_process(static_cast<int>(snapshot.pid));
+
+    for (int i = 0; i < 10; ++i) {
+      platform::sleep_ms(300);
+      if ((snapshot.pid <= 0 || !is_process_alive(snapshot.pid)) &&
+          (snapshot.supervisor_pid <= 0 ||
+           !is_process_alive(snapshot.supervisor_pid))) {
+        break;
+      }
+    }
+
+    if (snapshot.pid > 0 && is_process_alive(snapshot.pid))
+      platform::force_terminate_process(static_cast<int>(snapshot.pid));
+    if (snapshot.supervisor_pid > 0 &&
+        is_process_alive(snapshot.supervisor_pid))
+      platform::force_terminate_process(
+          static_cast<int>(snapshot.supervisor_pid));
+
+    platform::sleep_ms(500);
+
+    if ((snapshot.pid > 0 && is_process_alive(snapshot.pid)) ||
+        (snapshot.supervisor_pid > 0 &&
+         is_process_alive(snapshot.supervisor_pid))) {
+      if (message)
+        *message = "Failed to stop native VPN session!";
+      return false;
+    }
+
+    platform::kill_all_supervisors();
+    clear_runtime_state(state);
+    if (message)
+      *message = "VPN connection stopped successfully! 🎉";
+    return true;
+  }
+
   pid_t supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
   if (!is_process_alive(supervisor_pid))
     supervisor_pid = -1;
@@ -453,9 +598,10 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
 nlohmann::json handle_stop(uid_t peer_uid) {
   SessionState state;
   if (!load_session_state(&state)) {
-    // No session state — still clean up any orphaned routes/supervisors
-  platform::cleanup_routes();
-  platform::kill_all_supervisors();
+    // No session state: still clean up orphaned native/legacy runtime state.
+    platform::cleanup_routes();
+    platform::kill_all_supervisors();
+    clear_native_session_state_for_known_config_dirs(peer_uid);
     return make_error("No openconnect process found. VPN is not running.");
   }
 
@@ -481,13 +627,18 @@ nlohmann::json handle_stop(uid_t peer_uid) {
 
 nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
                             const nlohmann::json &request) {
+  StageTimer timing("helper.start");
   SessionState existing;
   if (load_session_state(&existing)) {
     RuntimeSnapshot current = inspect_runtime(existing);
+    timing.mark("existing_session_checked",
+                current.running ? "running=true" : "running=false");
     if (current.running) {
       if (!ensure_same_owner(existing, peer_uid)) {
+        timing.finish(false, "reason=owned_by_another_user");
         return make_error("VPN session belongs to another local user.");
       }
+      timing.finish(false, "reason=already_running");
       return nlohmann::json{{"ok", false},
                             {"message", "VPN is already running."},
                             {"running", true},
@@ -496,6 +647,8 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
     }
     clear_runtime_state(existing);
     clear_session_state();
+  } else {
+    timing.mark("existing_session_checked", "running=false");
   }
 
   Config cfg;
@@ -510,8 +663,12 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
     requested_home = request.value("home", std::string());
     requested_config_dir = request.value("config_dir", std::string());
   } catch (...) {
+    timing.finish(false, "reason=invalid_payload");
     return make_error("Invalid start request payload.");
   }
+  timing.mark("request_parsed",
+              "routes=" + std::to_string(cfg.routes.size()) +
+                  " retry_limit=" + std::to_string(retry_limit));
 
   SessionState state;
   state.uid = static_cast<uid_t>(request.value(
@@ -524,9 +681,24 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
   state.config_dir =
       requested_config_dir.empty() ? utils::get_config_dir_for_uid(peer_uid)
                                    : requested_config_dir;
+  state.engine = cfg.vpn_engine.empty() ? std::string("legacy_openconnect")
+                                        : cfg.vpn_engine;
   state.server = cfg.server;
   state.route_count = static_cast<int>(cfg.routes.size());
   state.retry_limit = retry_limit;
+  timing.mark("session_prepared",
+              "server=" + state.server +
+                  " routes=" + std::to_string(state.route_count));
+
+  if (is_native_session(state)) {
+    pid_t supervisor_pid = read_pid_file(supervisor_pid_path_for(state));
+    if (supervisor_pid <= 0 || !is_process_alive(supervisor_pid)) {
+      timing.finish(false, "reason=native_session_not_durable");
+      return make_error(
+          "Native VPN helper-managed sessions are not available in this build yet.",
+          "native_session_not_durable");
+    }
+  }
 
   nlohmann::json worker_request{{"uid", static_cast<unsigned int>(state.uid)},
                                 {"gid", static_cast<unsigned int>(state.gid)},
@@ -538,34 +710,57 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
 
   std::string request_path;
   if (!create_request_file(worker_request, &request_path)) {
+    timing.finish(false, "reason=request_file_failed");
     return make_error("Failed to prepare helper request file.");
   }
+  timing.mark("worker_request_file_created");
 
   std::string executable_path = utils::get_executable_path();
   int status = platform::spawn_worker_process(executable_path, request_path);
+  timing.mark("worker_process_finished", "exit_status=" + std::to_string(status));
   if (status < 0) {
     remove_file_if_exists(request_path);
+    timing.finish(false, "reason=worker_spawn_failed");
     return make_error("Failed to launch EXV helper worker.");
   }
 
   remove_file_if_exists(request_path);
 
   RuntimeSnapshot snapshot = inspect_runtime(state);
+  timing.mark("runtime_inspected",
+              "running=" + std::string(snapshot.running ? "true" : "false") +
+                  " network_ready=" +
+                  std::string(snapshot.network_ready ? "true" : "false") +
+                  " pid=" + std::to_string(snapshot.pid));
   if (status == 0 && snapshot.running) {
     save_session_state(state);
+    timing.mark("session_state_saved");
     if (snapshot.network_ready) {
+      timing.finish(true, "network_ready=true");
       return make_status_response(state, snapshot, true,
                                   "VPN connected successfully!");
     }
+    timing.finish(true, "network_ready=false");
     return make_status_response(
         state, snapshot, true,
         "VPN process started, but network routes are not ready yet.");
   }
 
-  clear_runtime_state(state);
+  if (is_native_session(state)) {
+    remove_file_if_exists(pid_path_for(state));
+    remove_file_if_exists(supervisor_pid_path_for(state));
+  } else {
+    clear_runtime_state(state);
+  }
   clear_session_state();
   if (active_daemon_options.oneshot) {
     daemon_stop_requested = 1;
+  }
+  timing.finish(false, "reason=worker_failed");
+  if (status == vpn::kVpnInitialConnectFailedExitCode) {
+    logger::warn("Initial VPN connection failed before network was ready");
+    return make_error("VPN authentication failed or the server rejected the connection.",
+                      "auth_failed");
   }
   return make_error("Failed to establish the VPN connection. Check logs with: exv logs");
 }
@@ -681,20 +876,25 @@ bool is_available() {
 
 bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
                       int retry_limit) {
+  StageTimer timing("helper.client.start");
   nlohmann::json response;
   std::string error_message;
   if (!send_request(nlohmann::json{{"action", "start"},
                                    {"config", cfg},
                                    {"password", plaintext_password},
                                    {"retry_limit", retry_limit},
-                                   {"home", utils::get_effective_home()},
-                                   {"config_dir", utils::get_config_dir()}},
+                                    {"home", utils::get_effective_home()},
+                                    {"config_dir", utils::get_config_dir()}},
                     &response, &error_message, 120)) {
+    timing.finish(false, "stage=send_request");
     utils::print_error(error_message);
     return false;
   }
+  timing.mark("send_request",
+              response.value("ok", false) ? "result=ok" : "result=failed");
 
   if (!response.value("ok", false)) {
+    timing.finish(false, "stage=helper_response");
     std::string message = response.value("message", std::string("Start failed."));
     if (message.find("already running") != std::string::npos) {
       utils::print_warning(message);
@@ -710,6 +910,9 @@ bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
   }
 
   bool network_ready = response.value("network_ready", false);
+  timing.finish(true,
+                "network_ready=" +
+                    std::string(network_ready ? "true" : "false"));
   std::cout << std::endl;
   if (network_ready) {
     utils::print_success("VPN connected successfully!");

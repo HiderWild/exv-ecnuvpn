@@ -1,426 +1,1138 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { useRouter } from 'vue-router'
-import { useVpnStore } from '../stores/vpn'
-import { useSSE } from '../composables/useSSE'
-import StatusBadge from '../components/StatusBadge.vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
-  Plug, PlugZap, ArrowDownToLine, ArrowUpToLine, Clock, Wifi, WifiOff, Route,
-  Shield, AlertTriangle, XCircle, AlertOctagon, Settings, RefreshCw, FileText
+  Cloud,
+  EthernetPort,
+  LockKeyhole,
+  Power,
+  Server,
 } from 'lucide-vue-next'
+import ToggleSwitch from '../components/ToggleSwitch.vue'
+import { useConfigStore } from '../stores/config'
+import { useVpnStore } from '../stores/vpn'
+
+defineOptions({ name: 'DashboardPage' })
 
 const vpn = useVpnStore()
-const router = useRouter()
-const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
+const config = useConfigStore()
 
-const elapsed = ref(0)
-let timer: ReturnType<typeof setInterval> | null = null
+const installServiceBeforeConnect = ref(true)
+
+function switchToMinimalMode() {
+  void config.saveSettings({ minimal_mode: true })
+}
 
 onMounted(() => {
   vpn.fetchAppShellState()
-  sseConnect()
-  timer = setInterval(() => {
-    if (vpn.status?.connected) elapsed.value++
-  }, 1000)
 })
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer)
-  sseDisconnect()
+  if (nodeTweenFrame) {
+    cancelAnimationFrame(nodeTweenFrame)
+    nodeTweenFrame = 0
+  }
+  clearReadySegmentTimers()
 })
 
-const uptimeFormatted = computed(() => {
-  const h = Math.floor(elapsed.value / 3600)
-  const m = Math.floor((elapsed.value % 3600) / 60)
-  const s = elapsed.value % 60
-  return `${h}h ${m}m ${s}s`
+const connected = computed(() => Boolean(vpn.status?.connected))
+const connecting = computed(() => vpn.connectInFlight)
+const disconnecting = computed(() => vpn.disconnectInFlight)
+const upstreamAdapters = computed(() => vpn.status?.upstream_virtual_adapters || [])
+const hasUpstreamVirtual = computed(() => Boolean(vpn.status?.upstream_virtual_detected || upstreamAdapters.value.length > 0))
+const progressKey = computed(() => connecting.value ? vpn.connectionProgress.key : '')
+const adapterStageStarted = computed(() => connecting.value && ['adapter', 'routes', 'network-ready'].includes(progressKey.value))
+const showExvAdapter = computed(() => connected.value || disconnecting.value || adapterStageStarted.value)
+const vpnServerStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && ['adapter', 'routes', 'network-ready'].includes(progressKey.value)))
+const routeStageComplete = computed(() => connected.value || disconnecting.value || (connecting.value && progressKey.value === 'network-ready'))
+const showInstallServiceChoice = computed(() => (
+  !connected.value &&
+  !connecting.value &&
+  !disconnecting.value &&
+  !vpn.loading &&
+  !vpn.serviceBusy &&
+  !vpn.serviceAvailable
+))
+const installServiceChoiceDisabled = computed(() => connecting.value || disconnecting.value || vpn.loading || vpn.serviceBusy)
+
+const statusLabel = computed(() => {
+  if (disconnecting.value) return '正在断开'
+  if (connecting.value) return vpn.connectionProgress.label
+  if (connected.value) return '连接已建立'
+  if (vpn.lastError) return '需要处理'
+  return '未连接'
 })
 
-const bytesFormatted = (bytes: number) => {
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let i = 0
-  let val = bytes
-  while (val >= 1024 && i < units.length - 1) { val /= 1024; i++ }
-  return `${val.toFixed(1)} ${units[i]}`
-}
+const statusDescription = computed(() => {
+  if (disconnecting.value) return '正在关闭隧道并恢复本机网络状态。'
+  if (connecting.value) return vpn.connectionProgress.description
+  if (connected.value) {
+    return vpn.status?.network_ready ? '隧道接口和路由已写入，正在通过 EXV 转发校园网流量。' : 'VPN 进程已启动，正在等待网络就绪。'
+  }
+  if (vpn.lastError) return '请在弹窗中处理本次操作失败。'
+  if (vpn.serviceAvailable) return '服务可用，点击电源按钮即可连接。'
+  if (vpn.serviceInstalled && vpn.serviceRunning) return '服务需要修复，点击电源按钮会先更新服务再连接。'
+  return installServiceBeforeConnect.value
+    ? '点击电源按钮会先安装服务，然后自动建立连接。'
+    : '点击电源按钮会为本次连接请求临时授权。'
+})
+
+const powerButtonLabel = computed(() => {
+  if (vpn.loading || vpn.serviceBusy) return '处理中'
+  if (connected.value) return '断开连接'
+  return '连接'
+})
+
+const powerButtonClass = computed(() => {
+  if (powerAnimating.value) return 'bg-warning text-white hover:bg-warning/90 shadow-warning/20'
+  if (connected.value) return 'bg-accent text-white hover:bg-accent/90 shadow-accent/20'
+  return 'bg-destructive text-white hover:bg-destructive/90 shadow-destructive/20'
+})
+const powerAnimating = computed(() => vpn.loading || disconnecting.value)
+
+const vpnPathActive = computed(() => connected.value && Boolean(vpn.status?.network_ready))
+const vpnPathPending = computed(() => connecting.value || (connected.value && !vpn.status?.network_ready))
+const internetPathReady = computed(() => true)
 
 const upstreamVirtualNames = computed(() => {
-  const adapters = vpn.status?.upstream_virtual_adapters || []
-  return adapters.map((adapter) => adapter.name).filter(Boolean).join('、')
+  return upstreamAdapters.value.map((adapter) => adapter.name).filter(Boolean).join('、')
 })
 
-// ── Dashboard state machine helpers ──────────────────────────────────
-
-const dashboardState = computed(() => vpn.dashboardState)
-
-const isTransientConnected = computed(() => {
-  return dashboardState.value === 'direct connected' || dashboardState.value === 'elevated connected'
+const upstreamVirtualCaption = computed(() => {
+  return upstreamVirtualNames.value || vpn.status?.upstream_virtual_message || '已检测到'
 })
 
-const sessionModeLabel = computed(() => {
-  const mode = vpn.currentSessionMode
-  switch (mode) {
-    case 'helper': return '通过服务'
-    case 'elevated': return '临时提权'
-    case 'direct': return '直接连接'
-    default: return ''
-  }
-})
-
-// Error-specific display info
-const errorDisplayInfo = computed(() => {
-  if (!vpn.lastErrorType) return null
-  switch (vpn.lastErrorType) {
-    case 'elevation_denied':
-      return {
-        icon: AlertOctagon,
-        title: '用户拒绝了授权请求',
-        description: vpn.lastError || '提权授权被用户取消，VPN 无法建立连接。',
-        color: 'warning' as const,
-      }
-    case 'runtime_missing':
-      return {
-        icon: XCircle,
-        title: '缺少 OpenConnect 运行时',
-        description: '请重新安装桌面客户端以修复运行时组件。',
-        color: 'destructive' as const,
-      }
-    case 'config_invalid':
-      return {
-        icon: AlertTriangle,
-        title: '配置不完整',
-        description: vpn.lastError || '请检查连接设置是否完整。',
-        color: 'warning' as const,
-      }
-    case 'native_failure':
-      return {
-        icon: AlertOctagon,
-        title: '操作失败',
-        description: vpn.lastError || '原生操作执行失败。',
-        color: 'destructive' as const,
-      }
-    case 'parse_failure':
-      return {
-        icon: AlertOctagon,
-        title: '解析失败',
-        description: vpn.lastError || '无法解析服务端响应。',
-        color: 'destructive' as const,
-      }
-    default:
-      return {
-        icon: AlertOctagon,
-        title: '发生错误',
-        description: vpn.lastError || '未知错误。',
-        color: 'destructive' as const,
-      }
-  }
-})
-
-// Primary action handler — wraps the store action to support router navigation
-function handlePrimaryAction() {
-  const action = vpn.dashboardPrimaryAction
-  if (!action) return
-
-  const state = dashboardState.value
-  if (state === 'error recoverable' && vpn.lastErrorType) {
-    if (vpn.lastErrorType === 'config_invalid') {
-      router.push('/settings')
-      return
-    }
-  }
-
-  action.action()
+function handlePowerClick() {
+  if (vpn.loading || vpn.serviceBusy) return
+  vpn.connectFromDashboard(installServiceBeforeConnect.value)
 }
 
-// Status badge state derived from dashboard state
-const badgeStatus = computed<'connected' | 'disconnected' | 'connecting' | 'error'>(() => {
-  const state = dashboardState.value
-  if (state === 'helper connected' || state === 'direct connected' || state === 'elevated connected') return 'connected'
-  if (state === 'elevated connecting') return 'connecting'
-  if (state === 'error recoverable' || state === 'error blocking') return 'error'
-  return 'disconnected'
+const arcViewBox = {
+  width: 760,
+  height: 360,
+  centerX: 380,
+  centerY: 318,
+  radius: 305,
+  startAngle: 175,
+  endAngle: 365,
+}
+const NODE_EXCLUSION_RADIUS = 58
+const NODE_EXCLUSION_ANGLE = (NODE_EXCLUSION_RADIUS / arcViewBox.radius) * (180 / Math.PI)
+
+type TopologyNode = {
+  key: string
+  title: string
+  caption: string
+  icon?: unknown
+  tone?: string
+  pulseKeys: string[]
+}
+
+const topologyNodes = computed(() => {
+  const nodes: TopologyNode[] = [
+    { key: 'traffic', title: '本地流量', caption: 'Local', pulseKeys: ['authorization'] },
+  ]
+  if (showExvAdapter.value) {
+    nodes.push({
+      key: 'exv',
+      title: 'EXV 虚拟网卡',
+      caption: vpn.status?.internal_ip || '准备中',
+      icon: EthernetPort,
+      tone: vpnPathActive.value ? 'accent' : 'warning',
+      pulseKeys: ['oneshot-helper', 'adapter'],
+    })
+  }
+  if (hasUpstreamVirtual.value) {
+    nodes.push({
+      key: 'upstream',
+      title: '代理 TUN',
+      caption: upstreamVirtualCaption.value,
+      icon: EthernetPort,
+      tone: 'accent',
+      pulseKeys: ['routes'],
+    })
+  }
+  nodes.push(
+    {
+      key: 'physical',
+      title: '物理网卡',
+      caption: '出口接口',
+      icon: EthernetPort,
+      tone: 'accent',
+      pulseKeys: ['routes'],
+    },
+    {
+      key: 'internet',
+      title: '互联网',
+      caption: '默认出口',
+      icon: Cloud,
+      tone: 'accent',
+      pulseKeys: ['vpn-server'],
+    },
+    {
+      key: 'server',
+      title: 'VPN 服务器',
+      caption: vpn.status?.server || '未配置',
+      icon: Server,
+      tone: vpnPathActive.value ? 'accent' : vpnPathPending.value ? 'warning' : 'muted',
+      pulseKeys: ['vpn-server'],
+    },
+    {
+      key: 'lock',
+      title: '内网资源',
+      caption: 'Campus',
+      icon: LockKeyhole,
+      tone: vpnPathActive.value ? 'accent' : vpnPathPending.value ? 'warning' : 'muted',
+      pulseKeys: ['network-ready'],
+    },
+  )
+  return nodes
 })
+
+type ArcNodeTarget = TopologyNode & {
+  x: number
+  y: number
+  angle: number
+}
+
+type AnimatedArcNode = ArcNodeTarget & {
+  opacity: number
+  scale: number
+  leaving?: boolean
+  style: Record<string, string | number>
+}
+
+const NODE_TWEEN_MS = 500
+const animatedArcNodes = ref<AnimatedArcNode[]>([])
+let nodeTweenFrame = 0
+
+function easeOutCubic(t: number) {
+  return 1 - Math.pow(1 - t, 3)
+}
+
+function positionForAngle(angle: number) {
+  const rad = (angle * Math.PI) / 180
+  return {
+    x: arcViewBox.centerX + arcViewBox.radius * Math.cos(rad),
+    y: arcViewBox.centerY + arcViewBox.radius * Math.sin(rad),
+  }
+}
+
+function nodeWithStyle(node: ArcNodeTarget & { opacity: number; scale: number; leaving?: boolean }): AnimatedArcNode {
+  return {
+    ...node,
+    style: {
+      left: `${(node.x / arcViewBox.width) * 100}%`,
+      top: `${(node.y / arcViewBox.height) * 100}%`,
+      opacity: node.opacity,
+      transform: `translate(-50%, -50%) scale(${node.scale})`,
+    },
+  }
+}
+
+const targetArcNodes = computed<ArcNodeTarget[]>(() => {
+  const nodes = topologyNodes.value
+  const range = arcViewBox.endAngle - arcViewBox.startAngle
+  return nodes.map((node, index) => {
+    const angle = nodes.length === 1
+      ? 270
+      : arcViewBox.startAngle + (range * index) / (nodes.length - 1)
+    const { x, y } = positionForAngle(angle)
+    return {
+      ...node,
+      x,
+      y,
+      angle,
+    }
+  })
+})
+
+watch(
+  targetArcNodes,
+  (targets) => {
+    if (nodeTweenFrame) {
+      cancelAnimationFrame(nodeTweenFrame)
+      nodeTweenFrame = 0
+    }
+
+    const currentByKey = new Map(animatedArcNodes.value.map((node) => [node.key, node]))
+    const targetKeys = new Set(targets.map((node) => node.key))
+    const tweens = [
+      ...targets.map((target) => {
+        const current = currentByKey.get(target.key)
+        return {
+          target,
+          fromAngle: current?.angle ?? target.angle,
+          toAngle: target.angle,
+          fromOpacity: current?.opacity ?? 0,
+          toOpacity: 1,
+          fromScale: current?.scale ?? 0.72,
+          toScale: 1,
+          leaving: false,
+        }
+      }),
+      ...animatedArcNodes.value
+        .filter((node) => !targetKeys.has(node.key))
+        .map((node) => ({
+          target: node,
+          fromAngle: node.angle,
+          toAngle: node.angle,
+          fromOpacity: node.opacity,
+          toOpacity: 0,
+          fromScale: node.scale,
+          toScale: 0.72,
+          leaving: true,
+        })),
+    ]
+
+    if (tweens.length === 0) {
+      animatedArcNodes.value = []
+      return
+    }
+
+    const startedAt = performance.now()
+    const step = (now: number) => {
+      const raw = Math.min(1, (now - startedAt) / NODE_TWEEN_MS)
+      const eased = easeOutCubic(raw)
+      animatedArcNodes.value = tweens.map((tween) => {
+        const angle = tween.fromAngle + (tween.toAngle - tween.fromAngle) * eased
+        const { x, y } = positionForAngle(angle)
+        return nodeWithStyle({
+          ...tween.target,
+          angle,
+          x,
+          y,
+          opacity: tween.fromOpacity + (tween.toOpacity - tween.fromOpacity) * eased,
+          scale: tween.fromScale + (tween.toScale - tween.fromScale) * eased,
+          leaving: tween.leaving,
+        })
+      })
+
+      if (raw < 1) {
+        nodeTweenFrame = requestAnimationFrame(step)
+        return
+      }
+
+      animatedArcNodes.value = targets.map((target) => nodeWithStyle({
+        ...target,
+        opacity: 1,
+        scale: 1,
+      }))
+      nodeTweenFrame = 0
+    }
+
+    nodeTweenFrame = requestAnimationFrame(step)
+  },
+  { immediate: true },
+)
+
+function segmentPath(from: ArcNodeTarget, to: ArcNodeTarget) {
+  const direction = to.angle >= from.angle ? 1 : -1
+  const startAngle = from.angle + direction * NODE_EXCLUSION_ANGLE
+  const endAngle = to.angle - direction * NODE_EXCLUSION_ANGLE
+  if ((endAngle - startAngle) * direction <= 0) {
+    const midpointAngle = from.angle + ((to.angle - from.angle) / 2)
+    const midpoint = positionForAngle(midpointAngle)
+    return `M ${midpoint.x.toFixed(2)} ${midpoint.y.toFixed(2)}`
+  }
+  const start = positionForAngle(startAngle)
+  const end = positionForAngle(endAngle)
+  const largeArc = Math.abs(endAngle - startAngle) > 180 ? 1 : 0
+  const sweep = direction > 0 ? 1 : 0
+  return `M ${start.x.toFixed(2)} ${start.y.toFixed(2)} A ${arcViewBox.radius} ${arcViewBox.radius} 0 ${largeArc} ${sweep} ${end.x.toFixed(2)} ${end.y.toFixed(2)}`
+}
+
+const arcSegments = computed(() => {
+  const nodes = animatedArcNodes.value.filter((node) => !node.leaving)
+  return nodes.slice(0, -1).map((node, index) => {
+    const next = nodes[index + 1]
+    return {
+      key: `${node.key}-${next.key}`,
+      from: node.key,
+      to: next.key,
+      d: segmentPath(node, next),
+    }
+  })
+})
+
+const readySegmentKeys = computed(() => {
+  const ready = new Set<string>()
+  if (internetPathReady.value) {
+    if (hasUpstreamVirtual.value) {
+      ready.add(showExvAdapter.value ? 'upstream-physical' : 'traffic-upstream')
+      ready.add('upstream-physical')
+    } else if (!showExvAdapter.value) {
+      ready.add('traffic-physical')
+    }
+    ready.add('physical-internet')
+  }
+  if (vpnServerStageComplete.value) {
+    ready.add('internet-server')
+  }
+  if (routeStageComplete.value) {
+    if (showExvAdapter.value) {
+      ready.add('traffic-exv')
+      ready.add(hasUpstreamVirtual.value ? 'exv-upstream' : 'exv-physical')
+      if (hasUpstreamVirtual.value) ready.add('upstream-physical')
+    } else {
+      ready.add('traffic-physical')
+    }
+  }
+  if (vpnPathActive.value || disconnecting.value) {
+    ready.add('server-lock')
+  }
+  return ready
+})
+
+const activePulseKeys = computed(() => {
+  if (!connecting.value) return []
+  const key = progressKey.value
+  if (['authorization', 'oneshot-helper'].includes(key)) return []
+  if (key === 'adapter') {
+    return ['traffic-exv']
+  }
+  if (key === 'routes') {
+    if (!showExvAdapter.value) return ['traffic-physical']
+    return hasUpstreamVirtual.value ? ['traffic-exv', 'exv-upstream'] : ['traffic-exv', 'exv-physical']
+  }
+  if (key === 'vpn-server') return ['internet-server']
+  if (key === 'network-ready') return ['server-lock']
+  return []
+})
+
+type ReadySegmentPhase = 'entering' | 'steady' | 'disconnecting' | 'leaving'
+type VisibleReadySegment = {
+  key: string
+  d: string
+  phase: ReadySegmentPhase
+}
+
+const READY_SEGMENT_MS = 720
+const visibleReadySegments = ref<VisibleReadySegment[]>([])
+const readySegmentTimers = new Map<string, number>()
+
+function setReadySegmentTimer(key: string, callback: () => void) {
+  const current = readySegmentTimers.get(key)
+  if (current) window.clearTimeout(current)
+  readySegmentTimers.set(key, window.setTimeout(() => {
+    readySegmentTimers.delete(key)
+    callback()
+  }, READY_SEGMENT_MS))
+}
+
+function clearReadySegmentTimer(key: string) {
+  const current = readySegmentTimers.get(key)
+  if (!current) return
+  window.clearTimeout(current)
+  readySegmentTimers.delete(key)
+}
+
+function clearReadySegmentTimers() {
+  readySegmentTimers.forEach((timer) => window.clearTimeout(timer))
+  readySegmentTimers.clear()
+}
+
+watch(
+  () => ({
+    ready: Array.from(readySegmentKeys.value).sort().join(','),
+    segments: arcSegments.value.map((segment) => `${segment.key}:${segment.d}`).join('|'),
+  }),
+  () => {
+    const segmentMap = new Map(arcSegments.value.map((segment) => [segment.key, segment.d]))
+    const ready = readySegmentKeys.value
+    const previousByKey = new Map(visibleReadySegments.value.map((segment) => [segment.key, segment]))
+    const next: VisibleReadySegment[] = []
+
+    previousByKey.forEach((segment, key) => {
+      const d = segmentMap.get(key) || segment.d
+      if (ready.has(key)) {
+        clearReadySegmentTimer(`leave-${key}`)
+        const phase = disconnecting.value
+          ? 'disconnecting'
+          : segment.phase === 'leaving' || segment.phase === 'disconnecting'
+            ? 'entering'
+            : segment.phase
+        next.push({ ...segment, d, phase })
+        return
+      }
+      if (segment.phase !== 'leaving') {
+        next.push({ key, d, phase: 'leaving' })
+        setReadySegmentTimer(`leave-${key}`, () => {
+          visibleReadySegments.value = visibleReadySegments.value.filter((item) => item.key !== key)
+        })
+      } else {
+        next.push({ ...segment, d })
+      }
+    })
+
+    ready.forEach((key) => {
+      if (previousByKey.has(key)) return
+      const d = segmentMap.get(key)
+      if (!d) return
+      next.push({ key, d, phase: disconnecting.value ? 'disconnecting' : 'entering' })
+      setReadySegmentTimer(`enter-${key}`, () => {
+        visibleReadySegments.value = visibleReadySegments.value.map((segment) => (
+          segment.key === key && segment.phase === 'entering'
+            ? { ...segment, phase: 'steady' }
+            : segment
+        ))
+      })
+    })
+
+    visibleReadySegments.value = next
+  },
+  { immediate: true },
+)
+
+function nodeToneClass(tone?: string) {
+  if (tone === 'accent') return 'text-accent'
+  if (tone === 'warning') return 'text-warning'
+  if (tone === 'muted') return 'text-muted'
+  return 'text-foreground'
+}
+
+function nodeActive(node: { key: string; pulseKeys?: string[] }) {
+  if (!connecting.value) return false
+  const key = progressKey.value
+  if (['authorization', 'oneshot-helper'].includes(key)) return node.key === 'traffic'
+  if (key === 'adapter') return ['traffic', 'exv'].includes(node.key)
+  if (key === 'routes') return ['traffic', 'exv', 'upstream', 'physical'].includes(node.key)
+  if (key === 'vpn-server') return ['internet', 'server'].includes(node.key)
+  if (key === 'network-ready') return ['server', 'lock'].includes(node.key)
+  return Boolean(node.pulseKeys?.includes(key))
+}
+
+function nodeReady(nodeKey: string) {
+  return visibleReadySegments.value.some((segment) => {
+    if (segment.phase === 'leaving') return false
+    const [from, to] = segment.key.split('-')
+    return from === nodeKey || to === nodeKey
+  })
+}
+
+function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[] }) {
+  if (nodeActive(node) || (node.key === 'exv' && node.tone === 'warning')) return 'node-warning'
+  if (nodeReady(node.key) || node.tone === 'accent') return 'node-success'
+  if (node.tone === 'warning') return 'node-warning'
+  if (node.tone === 'muted') return 'node-muted'
+  return ''
+}
 </script>
 
 <template>
-  <div>
-    <!-- Hero card -->
-    <div class="bg-surface border border-border rounded-xl p-8 mb-6">
-      <div class="flex items-center justify-between mb-6">
-        <div>
-          <h1 class="text-xl font-semibold text-foreground mb-1">VPN 状态</h1>
-          <p class="text-sm text-muted">
-            {{ vpn.status?.server || '未配置' }}
-          </p>
+  <div class="h-full">
+    <section class="dashboard-card h-full rounded-lg border border-border bg-surface p-5 shadow-lg shadow-black/10">
+      <div class="mb-5 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h1 class="text-xl font-semibold text-foreground">主面板</h1>
         </div>
-        <StatusBadge :status="badgeStatus" />
+        <label class="flex items-center gap-2 text-xs text-muted">
+          <span>高级</span>
+          <ToggleSwitch
+            :model-value="true"
+            @update:model-value="switchToMinimalMode"
+          />
+        </label>
       </div>
 
-      <!-- ── State: elevated connecting ──────────────────────────────── -->
-      <div v-if="dashboardState === 'elevated connecting'" class="flex items-center gap-4">
-        <div class="flex items-center gap-2 text-warning">
-          <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-          </svg>
-          <span class="text-sm font-medium">{{ vpn.connectionProgress.label }}...</span>
-        </div>
-        <p class="text-xs text-muted">{{ vpn.connectionProgress.description }}</p>
-      </div>
+      <div class="arc-stage">
+        <svg
+          class="arc-svg"
+          :viewBox="`0 0 ${arcViewBox.width} ${arcViewBox.height}`"
+          preserveAspectRatio="xMidYMid meet"
+          aria-hidden="true"
+        >
+          <path
+            v-for="segment in arcSegments"
+            :key="`track-${segment.key}`"
+            :d="segment.d"
+            pathLength="100"
+            class="arc-track"
+          />
+          <path
+            v-for="segment in visibleReadySegments"
+            :key="`ready-${segment.key}`"
+            :d="segment.d"
+            pathLength="100"
+            :class="[
+              'ready-segment',
+              `is-${segment.phase}`,
+            ]"
+          />
+          <path
+            v-for="segment in arcSegments"
+            v-show="activePulseKeys.includes(segment.key)"
+            :key="`pulse-${segment.key}`"
+            :d="segment.d"
+            pathLength="100"
+            class="arc-pulse"
+          />
+        </svg>
 
-      <!-- ── State: error recoverable ────────────────────────────────── -->
-      <div v-else-if="dashboardState === 'error recoverable'" class="space-y-4">
         <div
-          class="flex items-start gap-3 rounded-lg border px-4 py-3 text-sm"
-          :class="errorDisplayInfo?.color === 'warning'
-            ? 'border-warning/30 bg-warning/10 text-warning'
-            : 'border-red-500/20 bg-red-500/10 text-red-300'"
+          v-for="node in animatedArcNodes"
+          :key="node.key"
+          :class="[
+            'arc-node',
+            nodeReady(node.key) ? 'node-ready' : '',
+            nodeActive(node) ? 'stage-active' : '',
+            nodeVisualClass(node),
+          ]"
+          :style="node.style"
         >
-          <component :is="errorDisplayInfo?.icon" class="mt-0.5 h-4 w-4 shrink-0" />
-          <div class="min-w-0">
-            <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
-            <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
-            <p v-if="vpn.lastRecommendedAction" class="mt-1 opacity-80 leading-5">{{ vpn.lastRecommendedAction }}</p>
-            <router-link
-              :to="{ path: '/logs', query: { from: 'dashboard' } }"
-              class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
-            >
-              <FileText class="w-3 h-3" />
-              查看日志 →
-            </router-link>
-          </div>
-        </div>
-        <div class="flex items-center gap-3">
-          <button
-            class="flex items-center gap-2 bg-accent text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-accent/90 transition-colors"
-            @click="handlePrimaryAction"
+          <div
+            v-if="node.key === 'traffic'"
+            :class="[
+              'node-icon-shell',
+              'node-traffic-shell',
+              nodeToneClass(node.tone),
+            ]"
+            aria-hidden="true"
           >
-            <RefreshCw v-if="vpn.lastErrorType === 'native_failure' || vpn.lastErrorType === 'parse_failure'" class="w-4 h-4" />
-            <Shield v-else-if="vpn.lastErrorType === 'elevation_denied'" class="w-4 h-4" />
-            <Settings v-else-if="vpn.lastErrorType === 'config_invalid'" class="w-4 h-4" />
-            {{ vpn.dashboardPrimaryAction?.label }}
-          </button>
-          <button
-            class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 transition-colors"
-            @click="vpn.clearError()"
-          >
-            {{ vpn.dashboardSecondaryAction?.label }}
-          </button>
-        </div>
-      </div>
-
-      <!-- ── State: error blocking ───────────────────────────────────── -->
-      <div v-else-if="dashboardState === 'error blocking'" class="space-y-4">
-        <div class="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-          <component :is="errorDisplayInfo?.icon" class="mt-0.5 h-4 w-4 shrink-0" />
-          <div class="min-w-0">
-            <p class="font-medium leading-5">{{ errorDisplayInfo?.title }}</p>
-            <p class="mt-1 opacity-80 leading-5">{{ errorDisplayInfo?.description }}</p>
-            <p v-if="vpn.lastRecommendedAction" class="mt-1 opacity-80 leading-5">{{ vpn.lastRecommendedAction }}</p>
-            <router-link
-              :to="{ path: '/logs', query: { from: 'dashboard' } }"
-              class="inline-flex items-center gap-1 mt-1.5 text-xs opacity-70 hover:opacity-100 underline underline-offset-2"
-            >
-              <FileText class="w-3 h-3" />
-              查看日志 →
-            </router-link>
+            <div class="photon-field">
+              <span class="photon photon-a" />
+              <span class="photon photon-b" />
+              <span class="photon photon-c" />
+              <span class="photon photon-d" />
+            </div>
           </div>
+          <div
+            v-else
+            :class="[
+              'node-icon-shell',
+              nodeToneClass(node.tone),
+            ]"
+            aria-hidden="true"
+          >
+            <component
+              :is="node.icon"
+              class="node-icon"
+            />
+          </div>
+          <p
+            class="node-title"
+            :title="node.title"
+          >
+            {{ node.title }}
+          </p>
         </div>
-        <button
-          class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 transition-colors"
-          @click="vpn.clearError()"
-        >
-          {{ vpn.dashboardPrimaryAction?.label }}
-        </button>
       </div>
 
-      <!-- ── State: service-ready disconnected ───────────────────────── -->
-      <div v-else-if="dashboardState === 'service-ready disconnected'" class="flex items-center gap-4">
-        <button
-          :disabled="vpn.loading"
-          class="flex items-center gap-2 bg-accent text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
-          @click="vpn.connect()"
-        >
-          <PlugZap class="w-4 h-4" />
-          {{ vpn.loading ? '连接中...' : '连接' }}
-        </button>
-      </div>
-
-      <!-- ── State: service-missing disconnected ─────────────────────── -->
-      <div v-else-if="dashboardState === 'service-missing disconnected'" class="space-y-3">
-        <button
-          :disabled="vpn.loading"
-          class="flex items-center gap-2 bg-accent text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
-          @click="handlePrimaryAction"
-        >
-          <Shield class="w-4 h-4" />
-          安装服务（推荐）
-        </button>
-        <p class="text-xs text-muted">
-          安装后 VPN 可开机自启、无需每次授权
-        </p>
-        <button
-          v-if="vpn.canUseElevatedFallback"
-          :disabled="vpn.loading"
-          class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 disabled:opacity-50 transition-colors"
-          @click="vpn.connectElevated()"
-        >
-          <PlugZap class="w-4 h-4" />
-          仅本次连接
-        </button>
-      </div>
-
-      <!-- ── State: helper connected ─────────────────────────────────── -->
-      <div v-else-if="dashboardState === 'helper connected'" class="flex items-center gap-4">
-        <button
-          :disabled="vpn.loading"
-          class="flex items-center gap-2 bg-destructive text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-destructive/90 disabled:opacity-50 transition-colors"
-          @click="vpn.disconnect()"
-        >
-          <Plug class="w-4 h-4" />
-          {{ vpn.loading ? '断开中...' : '断开连接' }}
-        </button>
-      </div>
-
-      <!-- ── State: direct connected / elevated connected ────────────── -->
-      <div v-else-if="isTransientConnected" class="space-y-3">
-        <button
-          :disabled="vpn.loading"
-          class="flex items-center gap-2 bg-destructive text-white rounded-lg px-6 py-3 text-sm font-medium hover:bg-destructive/90 disabled:opacity-50 transition-colors"
-          @click="vpn.disconnectElevated()"
-        >
-          <Plug class="w-4 h-4" />
-          {{ vpn.loading ? '断开中...' : '断开连接' }}
-        </button>
-        <button
-          class="flex items-center gap-2 border border-border text-muted rounded-lg px-5 py-2.5 text-sm hover:text-foreground hover:border-accent/50 transition-colors"
-          @click="$router.push('/service')"
-        >
-          <Shield class="w-4 h-4" />
-          安装服务
-        </button>
-      </div>
-
-      <!-- ── Transient mode warning banner ───────────────────────────── -->
       <div
-        v-if="isTransientConnected"
-        class="mt-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
+        :class="[
+          'control-zone',
+          (connected || connecting) ? 'is-lifted' : '',
+        ]"
       >
-        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
-        <div class="min-w-0">
-          <p class="leading-5">
-            当前为临时连接模式，重启后将失效。建议安装服务以获得持久连接。
-          </p>
+        <div class="control-center">
+          <div
+            :class="[
+              'power-button-shell',
+              powerAnimating ? 'is-busy' : '',
+              connected && !powerAnimating ? 'is-connected' : '',
+            ]"
+          >
+            <span v-if="powerAnimating" class="power-satellite" aria-hidden="true" />
+            <template v-if="connected && !powerAnimating">
+              <span class="power-ripple-ring ring-a" aria-hidden="true" />
+              <span class="power-ripple-ring ring-b" aria-hidden="true" />
+              <span class="power-ripple-ring ring-c" aria-hidden="true" />
+            </template>
+            <button
+              :disabled="vpn.loading || vpn.serviceBusy"
+              :class="[
+                'power-button relative z-10 grid h-28 w-28 place-items-center rounded-full transition-all duration-500 disabled:cursor-not-allowed disabled:opacity-95',
+                powerButtonClass,
+              ]"
+              :title="powerButtonLabel"
+              @click="handlePowerClick"
+            >
+              <Power class="h-11 w-11 drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)]" />
+            </button>
+          </div>
+          <div class="text-center">
+            <p class="text-lg font-semibold text-foreground">{{ statusLabel }}</p>
+            <p class="mx-auto mt-1 max-w-xl text-sm text-muted">{{ statusDescription }}</p>
+          </div>
+          <label
+            v-if="showInstallServiceChoice"
+            class="inline-flex items-center gap-2 rounded-full border border-border bg-bg/40 px-3 py-1.5 text-xs text-muted"
+          >
+            <input
+              v-model="installServiceBeforeConnect"
+              type="checkbox"
+              :disabled="installServiceChoiceDisabled"
+              class="h-3.5 w-3.5 accent-accent"
+            />
+            连接前安装服务（推荐）
+          </label>
         </div>
       </div>
 
-      <!-- ── Upstream virtual adapter warning ─────────────────────────── -->
-      <div
-        v-if="vpn.status?.connected && vpn.status?.upstream_virtual_detected"
-        class="mt-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning"
-      >
-        <Route class="mt-0.5 h-4 w-4 shrink-0" />
-        <div class="min-w-0">
-          <p class="leading-5">
-            {{ vpn.status.upstream_virtual_message || '发现其他虚拟网卡，正在把 EXV 串联到它们前面提前路由校园流量。' }}
-          </p>
-          <p v-if="upstreamVirtualNames" class="mt-1 text-xs opacity-80 break-words">
-            {{ upstreamVirtualNames }}
-          </p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Info cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-      <div class="bg-surface border border-border rounded-xl p-4">
-        <div class="flex items-center gap-2 text-muted text-xs mb-2">
-          <Clock class="w-3.5 h-3.5" />
-          运行时长
-        </div>
-        <p class="text-lg font-mono text-foreground">
-          {{ vpn.status?.connected ? uptimeFormatted : '--' }}
-        </p>
-      </div>
-
-      <div class="bg-surface border border-border rounded-xl p-4">
-        <div class="flex items-center gap-2 text-muted text-xs mb-2">
-          <ArrowDownToLine class="w-3.5 h-3.5" />
-          已接收
-        </div>
-        <p class="text-lg font-mono text-foreground">
-          {{ vpn.status ? bytesFormatted(vpn.status.rx_bytes) : '--' }}
-        </p>
-      </div>
-
-      <div class="bg-surface border border-border rounded-xl p-4">
-        <div class="flex items-center gap-2 text-muted text-xs mb-2">
-          <ArrowUpToLine class="w-3.5 h-3.5" />
-          已发送
-        </div>
-        <p class="text-lg font-mono text-foreground">
-          {{ vpn.status ? bytesFormatted(vpn.status.tx_bytes) : '--' }}
-        </p>
-      </div>
-
-      <div class="bg-surface border border-border rounded-xl p-4">
-        <div class="flex items-center gap-2 text-muted text-xs mb-2">
-          <Wifi class="w-3.5 h-3.5" />
-          MTU
-        </div>
-        <p class="text-lg font-mono text-foreground">
-          {{ vpn.status?.mtu || '--' }}
-        </p>
-      </div>
-    </div>
-
-    <!-- Status details -->
-    <div v-if="vpn.status" class="bg-surface border border-border rounded-xl p-6">
-      <h2 class="text-sm font-medium text-foreground mb-4">连接详情</h2>
-      <div class="grid grid-cols-2 gap-3 text-sm">
-        <div>
-          <span class="text-muted">服务器：</span>
-          <span class="text-foreground ml-2">{{ vpn.status.server }}</span>
-        </div>
-        <div>
-          <span class="text-muted">用户名：</span>
-          <span class="text-foreground ml-2">{{ vpn.status.username }}</span>
-        </div>
-        <div v-if="vpn.status.internal_ip">
-          <span class="text-muted">内网 IP：</span>
-          <span class="text-foreground ml-2">{{ vpn.status.internal_ip }}</span>
-        </div>
-        <div v-if="vpn.status.interface">
-          <span class="text-muted">接口：</span>
-          <span class="text-foreground ml-2">{{ vpn.status.interface }}</span>
-        </div>
-        <div v-if="vpn.status.pid > 0">
-          <span class="text-muted">PID：</span>
-          <span class="text-foreground ml-2">{{ vpn.status.pid }}</span>
-        </div>
-        <div>
-          <span class="text-muted">网络就绪：</span>
-          <span class="text-foreground ml-2">{{ vpn.status.network_ready ? '是' : '否' }}</span>
-        </div>
-        <div v-if="vpn.status.connected">
-          <span class="text-muted">连接模式：</span>
-          <span class="text-foreground ml-2">{{ sessionModeLabel }}</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Empty state — context-appropriate message -->
-    <div v-if="!vpn.status && !vpn.loading && !vpn.lastError" class="flex items-center justify-center py-16">
-      <div class="text-center">
-        <WifiOff class="w-12 h-12 text-muted mx-auto mb-4" />
-        <p class="text-muted text-sm">
-          {{ vpn.isDesktop ? '无法连接到本地服务' : '无法获取 VPN 状态' }}
-        </p>
-        <p class="text-muted text-xs mt-1">
-          {{ vpn.isDesktop ? '请确保应用已正确启动' : '请确保 VPN 服务正在运行' }}
-        </p>
-      </div>
-    </div>
+    </section>
   </div>
 </template>
+
+<style scoped>
+.dashboard-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 4.25rem;
+}
+
+.arc-stage {
+  position: relative;
+  aspect-ratio: 760 / 360;
+  flex: 0 0 auto;
+  height: auto;
+  margin: -0.35rem auto 0;
+  width: min(100%, 760px);
+}
+
+.arc-svg {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  width: 100%;
+  overflow: visible;
+}
+
+.arc-track {
+  fill: none;
+  stroke: rgba(148, 163, 184, 0.28);
+  stroke-linecap: round;
+  stroke-width: 2;
+  transition: stroke 180ms ease, stroke-width 180ms ease;
+}
+
+.ready-segment {
+  fill: none;
+  stroke: rgba(34, 197, 94, 0.78);
+  stroke-linecap: round;
+  stroke-width: 4;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 0;
+  filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.2));
+}
+
+.ready-segment.is-entering {
+  animation: ready-segment-draw 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.ready-segment.is-disconnecting {
+  stroke: rgba(245, 158, 11, 0.9);
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.24));
+}
+
+.ready-segment.is-leaving {
+  stroke: rgba(245, 158, 11, 0.9);
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.24));
+  animation: ready-segment-retract 720ms cubic-bezier(0.64, 0, 0.78, 0) both;
+}
+
+.arc-pulse {
+  fill: none;
+  stroke: rgb(245, 158, 11);
+  stroke-dasharray: 34 260;
+  stroke-linecap: round;
+  stroke-width: 4;
+  filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.78));
+  animation: arc-pulse-run 1.05s ease-in-out infinite;
+}
+
+.arc-node {
+  position: absolute;
+  display: flex;
+  height: 7.5rem;
+  width: 7.5rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.0625rem;
+  border-radius: 9999px;
+  isolation: isolate;
+  padding: 0.45rem 0.5rem;
+  text-align: center;
+  transform: translate(-50%, -50%);
+  transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  contain: paint;
+}
+
+.arc-node.stage-active {
+  z-index: 2;
+}
+
+.arc-node.node-success .node-icon-shell,
+.arc-node.node-success .node-icon,
+.arc-node.node-success .node-title {
+  color: rgb(134 239 172);
+}
+
+.arc-node.node-warning .node-icon-shell,
+.arc-node.node-warning .node-icon,
+.arc-node.node-warning .node-title {
+  color: rgb(251 191 36);
+}
+
+.arc-node.node-muted .node-icon-shell,
+.arc-node.node-muted .node-icon,
+.arc-node.node-muted .node-title {
+  color: rgb(148 163 184);
+}
+
+.arc-node.node-warning .photon {
+  background: rgb(245 158 11);
+  box-shadow: -0.8rem 0 0 -0.18rem rgba(245, 158, 11, 0.55),
+    -1.45rem 0 0 -0.28rem rgba(245, 158, 11, 0.25);
+}
+
+.arc-node::before,
+.arc-node::after {
+  content: '';
+  position: absolute;
+  inset: 0.49rem;
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+.arc-node::before {
+  z-index: -1;
+  border: 4px solid rgba(148, 163, 184, 0.34);
+  background: transparent;
+  box-shadow: none;
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.arc-node::after {
+  z-index: -2;
+  background: transparent;
+  filter: blur(9px);
+  opacity: 0;
+  transform: translateZ(0) scale(0.92);
+  transition: opacity 180ms ease, background 180ms ease;
+  will-change: opacity, transform;
+}
+
+.arc-node.node-success::before {
+  border-color: rgba(34, 197, 94, 0.68);
+  box-shadow: 0 0 0.65rem rgba(34, 197, 94, 0.16);
+}
+
+.arc-node.stage-active::before {
+  border-color: rgba(245, 158, 11, 0.72);
+  background: rgba(245, 158, 11, 0.14);
+  box-shadow:
+    inset 0 0 1rem rgba(245, 158, 11, 0.13),
+    0 0 1rem rgba(245, 158, 11, 0.24);
+}
+
+.arc-node.stage-active::after {
+  background: rgba(245, 158, 11, 0.34);
+  opacity: 0.52;
+}
+
+.control-zone {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  margin-top: -10rem;
+  transform: translateY(0);
+  transition: transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.control-zone.is-lifted {
+  transform: translateY(-1.15rem);
+}
+
+.control-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  width: min(34rem, 100%);
+}
+
+@keyframes arc-pulse-run {
+  0% {
+    stroke-dashoffset: 52;
+    opacity: 0;
+  }
+
+  14% {
+    opacity: 1;
+  }
+
+  78% {
+    opacity: 1;
+  }
+
+  100% {
+    stroke-dashoffset: -230;
+    opacity: 0;
+  }
+}
+
+@keyframes ready-segment-draw {
+  0% {
+    stroke-dashoffset: 100;
+    opacity: 0.15;
+  }
+
+  18% {
+    opacity: 1;
+  }
+
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes ready-segment-retract {
+  0% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+
+  100% {
+    stroke-dashoffset: -100;
+    opacity: 0.12;
+  }
+}
+
+.power-button-shell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 9.8rem;
+  height: 9.8rem;
+  perspective: 24rem;
+}
+
+.power-button {
+  box-shadow:
+    0 1.35rem 2.6rem rgba(0, 0, 0, 0.34),
+    0 0.45rem 0.9rem rgba(0, 0, 0, 0.22),
+    inset 0 0.45rem 0.65rem rgba(255, 255, 255, 0.2),
+    inset 0 -0.7rem 1.1rem rgba(0, 0, 0, 0.2);
+  transform: translateY(-0.12rem);
+}
+
+.power-button::before {
+  content: '';
+  position: absolute;
+  inset: 0.35rem;
+  border-radius: 9999px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0));
+  pointer-events: none;
+}
+
+.power-button:hover:not(:disabled) {
+  transform: translateY(-0.22rem);
+  box-shadow:
+    0 1.55rem 2.9rem rgba(0, 0, 0, 0.38),
+    0 0.55rem 1rem rgba(0, 0, 0, 0.24),
+    inset 0 0.5rem 0.7rem rgba(255, 255, 255, 0.22),
+    inset 0 -0.75rem 1.15rem rgba(0, 0, 0, 0.22);
+}
+
+.power-button:active:not(:disabled) {
+  transform: translateY(0.08rem) scale(0.985);
+  box-shadow:
+    0 0.65rem 1.4rem rgba(0, 0, 0, 0.28),
+    inset 0 0.25rem 0.45rem rgba(255, 255, 255, 0.16),
+    inset 0 -0.45rem 0.75rem rgba(0, 0, 0, 0.26);
+}
+
+.power-ripple-ring {
+  position: absolute;
+  inset: 0.12rem;
+  border-radius: 9999px;
+  border: 2px solid rgba(34, 197, 94, 0.68);
+  opacity: 0;
+  animation: power-ripple 3.9s ease-out infinite;
+}
+
+.power-ripple-ring.ring-a {
+  animation-delay: 0s;
+}
+
+.power-ripple-ring.ring-b {
+  animation-delay: 1.1s;
+}
+
+.power-ripple-ring.ring-c {
+  animation-delay: 2.4s;
+}
+
+.power-button-shell.is-busy::before {
+  content: '';
+  position: absolute;
+  inset: 0.18rem;
+  border-radius: 9999px;
+  border: 2px solid rgba(245, 158, 11, 0.38);
+}
+
+.power-satellite {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  animation: power-orbit 1.05s linear infinite;
+}
+
+.power-satellite::after {
+  content: '';
+  position: absolute;
+  inset: 0.1rem;
+  border-radius: 9999px;
+  background: conic-gradient(
+    from 276deg,
+    rgba(245, 158, 11, 0) 0deg,
+    rgba(245, 158, 11, 0) 246deg,
+    rgba(245, 158, 11, 0.08) 255deg,
+    rgba(245, 158, 11, 0.34) 268deg,
+    rgba(245, 158, 11, 0.74) 284deg,
+    rgba(245, 158, 11, 0) 304deg,
+    rgba(245, 158, 11, 0) 360deg
+  );
+  mask: radial-gradient(circle, transparent 0 41%, #000 42% 48%, transparent 49%);
+}
+
+.power-satellite::before {
+  content: '';
+  position: absolute;
+  top: 0.18rem;
+  left: 50%;
+  width: 0.62rem;
+  height: 0.62rem;
+  border-radius: 9999px;
+  background: rgb(245, 158, 11);
+  box-shadow: 0 0 0.55rem rgba(245, 158, 11, 0.7);
+  z-index: 1;
+}
+
+@keyframes power-orbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes power-ripple {
+  0% {
+    opacity: 0;
+    transform: scale(0.74);
+  }
+
+  7% {
+    opacity: 0.78;
+    transform: scale(0.82);
+  }
+
+  68% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+.topology-node {
+  min-height: 112px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  text-align: center;
+  border-radius: 0.75rem;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.topology-node.stage-active {
+  background: rgba(245, 158, 11, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.35);
+}
+
+.topology-node.compact {
+  min-height: 86px;
+}
+
+.node-icon-shell {
+  position: relative;
+  display: grid;
+  width: 2.9rem;
+  height: 2.9rem;
+  place-items: center;
+  flex: 0 0 auto;
+  transform: translateY(-0.16rem);
+}
+
+.node-icon-shell::before {
+  display: none;
+}
+
+.node-icon-shell::after {
+  display: none;
+}
+
+.node-icon {
+  position: relative;
+  z-index: 1;
+  width: 2.05rem;
+  height: 2.05rem;
+  stroke-width: 2.25;
+  color: currentColor;
+  filter: drop-shadow(0 0.16rem 0.22rem rgba(0, 0, 0, 0.38));
+}
+
+.node-title {
+  transform: translateY(-0.1rem);
+  color: rgb(248 250 252);
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.1rem;
+}
+
+.photon-field {
+  position: relative;
+  z-index: 1;
+  width: 2.3rem;
+  height: 1.7rem;
+}
+
+.photon {
+  position: absolute;
+  display: block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 9999px;
+  background: rgb(34 197 94);
+  box-shadow: -0.8rem 0 0 -0.18rem rgba(34, 197, 94, 0.55),
+    -1.45rem 0 0 -0.28rem rgba(34, 197, 94, 0.25);
+}
+
+.photon-a {
+  left: 1.55rem;
+  top: 0.06rem;
+}
+
+.photon-b {
+  left: 0.78rem;
+  top: 0.58rem;
+}
+
+.photon-c {
+  left: 1.82rem;
+  top: 1.02rem;
+}
+
+.photon-d {
+  left: 0.34rem;
+  top: 1.18rem;
+}
+</style>

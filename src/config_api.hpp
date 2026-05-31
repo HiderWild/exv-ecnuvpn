@@ -18,6 +18,10 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
 std::string config_set_password(config::ConfigManager& mgr,
                                 const std::string& plaintext);
 
+// Clear stored password, disable remember_password, and delete the key file.
+// Returns empty string on success, error message on failure.
+std::string config_clear_password_and_key(config::ConfigManager& mgr);
+
 // Reset config to defaults (preserves key file)
 void config_reset(config::ConfigManager& mgr);
 

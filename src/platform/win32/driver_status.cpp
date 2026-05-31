@@ -31,16 +31,32 @@ std::vector<std::string> list_windows_adapters(const std::string &kind) {
 
 std::string effective_windows_driver(const Config &cfg,
                                      const std::vector<std::string> &tap_adapters,
-                                     bool has_bundled_wintun) {
+                                     bool wintun_available) {
   if (cfg.windows_tunnel_driver == "tap")
     return "tap";
   if (cfg.windows_tunnel_driver == "wintun")
     return "wintun";
-  if (has_bundled_wintun)
+  if (wintun_available)
     return "wintun";
   if (!cfg.windows_tap_interface.empty() || !tap_adapters.empty())
     return "tap";
   return "wintun";
+}
+
+std::string effective_driver_status(const Config &cfg,
+                                    const std::string &effective,
+                                    bool wintun_available,
+                                    bool tap_available) {
+  bool effective_available =
+      (effective == "wintun" && wintun_available) ||
+      (effective == "tap" && tap_available);
+  if (effective_available)
+    return "ready";
+
+  if (cfg.windows_tunnel_driver == "auto" && (wintun_available || tap_available))
+    return "degraded";
+
+  return "unavailable";
 }
 
 } // namespace
@@ -54,17 +70,40 @@ nlohmann::json driver_status_json(const Config &cfg) {
   std::string tap_installer_path = utils::get_bundled_tap_installer_path();
   std::vector<std::string> wintun_adapters = list_windows_adapters("wintun");
   std::vector<std::string> tap_adapters = list_windows_adapters("tap");
+  bool wintun_bundled = !wintun_path.empty();
+  bool wintun_available = wintun_bundled || !wintun_adapters.empty();
+  bool tap_available = !tap_adapters.empty();
   std::string effective =
-      effective_windows_driver(cfg, tap_adapters, !wintun_path.empty());
+      effective_windows_driver(cfg, tap_adapters, wintun_available);
 
   json["effective_driver"] = effective;
-  json["wintun_bundled"] = !wintun_path.empty();
+  json["effective_driver_status"] =
+      effective_driver_status(cfg, effective, wintun_available, tap_available);
+  json["wintun_bundled"] = wintun_bundled;
   json["wintun_path"] = wintun_path;
   json["wintun_adapters"] = wintun_adapters;
+  json["wintun_missing"] = !wintun_available;
+  json["wintun_missing_reason"] =
+      wintun_available
+          ? ""
+          : "No bundled wintun.dll or existing Wintun adapter was detected.";
+  json["wintun_recommended_action"] =
+      wintun_available
+          ? ""
+          : "Stage wintun.dll in the runtime directory or install a Wintun adapter.";
   json["tap_installer_path"] = tap_installer_path;
   json["tap_can_install"] = !tap_installer_path.empty();
   json["tap_adapters"] = tap_adapters;
-  json["tap_available"] = !tap_adapters.empty();
+  json["tap_available"] = tap_available;
+  json["tap_missing"] = !tap_available;
+  json["tap_missing_reason"] =
+      tap_available ? "" : "No TAP-Windows adapter was detected.";
+  json["tap_recommended_action"] =
+      tap_available
+          ? ""
+          : (!tap_installer_path.empty()
+                 ? "Install the bundled TAP driver from Settings."
+                 : "Provide TAP installer assets in the runtime directory or use Wintun.");
   return json;
 }
 

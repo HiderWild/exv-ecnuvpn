@@ -1,6 +1,7 @@
 #include "tunnel.hpp"
 
 #include "logger.hpp"
+#include "openconnect_log.hpp"
 #include "platform/common/tunnel_script.hpp"
 #include "utils.hpp"
 
@@ -13,6 +14,7 @@
 #include <ws2tcpip.h>
 #endif
 
+#include <cstdlib>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -131,9 +133,11 @@ std::vector<std::string> find_server_route_exceptions(const Config &cfg) {
 
 platform::TunnelScriptContext make_tunnel_script_context(const Config &cfg) {
   platform::TunnelScriptContext context;
+  context.vpn_engine = cfg.vpn_engine;
   context.route_ready_path = utils::get_route_ready_path();
   context.custom_routes = cfg.routes;
   context.server_route_exceptions = find_server_route_exceptions(cfg);
+  context.configured_mtu = cfg.mtu;
   context.has_runtime_owner = utils::has_runtime_owner();
   context.runtime_owner_uid =
       static_cast<unsigned int>(utils::get_runtime_owner_uid());
@@ -178,6 +182,15 @@ bool write_script(const Config &cfg) {
 }
 
 int run_script_hook() {
+#ifdef _WIN32
+  const char *home = std::getenv("ECNUVPN_HOME");
+  const char *config_dir = std::getenv("ECNUVPN_CONFIG_DIR");
+  if ((home && *home) || (config_dir && *config_dir)) {
+    utils::set_runtime_path_override(home ? home : "",
+                                     config_dir ? config_dir : "");
+  }
+#endif
+  logger::init();
   Config cfg = config::load();
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
   return platform::run_tunnel_script(context);
@@ -185,8 +198,19 @@ int run_script_hook() {
 
 bool configure_from_runtime_log(const Config &cfg) {
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
-  return platform::configure_from_openconnect_log(context,
-                                                 utils::expand_home(cfg.log_file));
+  return platform::configure_from_openconnect_log(
+             context, utils::expand_home(cfg.log_file))
+      .ok;
+}
+
+bool runtime_log_has_auth_failure(const Config &cfg) {
+  if (cfg.vpn_engine != "legacy_openconnect")
+    return false;
+
+  std::string log_path = utils::expand_home(cfg.log_file);
+  if (!utils::file_exists(log_path))
+    return false;
+  return openconnect_log::parse_evidence(utils::read_file(log_path)).auth_failed;
 }
 
 void cleanup_routes() {

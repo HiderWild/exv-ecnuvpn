@@ -6,7 +6,10 @@ namespace platform {
 nlohmann::json driver_status_json(const Config &cfg) {
   return nlohmann::json{{"preferred", cfg.windows_tunnel_driver},
                         {"tap_interface", cfg.windows_tap_interface},
-                        {"supported", false}};
+                        {"supported", false},
+                        {"wintun_missing", true},
+                        {"tap_missing", true},
+                        {"effective_driver_status", "unavailable"}};
 }
 
 nlohmann::json install_driver(const Config &cfg,

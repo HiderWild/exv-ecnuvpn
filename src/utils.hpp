@@ -96,6 +96,10 @@ std::string trim(const std::string &s);
 
 // Windows console: enable ANSI escape code processing and UTF-8 codepage
 #ifdef _WIN32
+std::wstring wide_from_utf8(const std::string &value);
+std::string utf8_from_wide(const std::wstring &value);
+std::string windows_error_message(unsigned long error_code);
+
 inline void enable_windows_ansi() {
   SetConsoleOutputCP(CP_UTF8);
   SetConsoleCP(CP_UTF8);

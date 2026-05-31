@@ -136,6 +136,11 @@ nlohmann::json build_settings_config(const Config& cfg) {
     j["webui_port"] = cfg.webui_port;
     j["webui_host"] = cfg.webui_bind;
     j["webui_enabled"] = cfg.webui_enabled;
+    j["auto_reconnect"] = cfg.auto_reconnect;
+    j["minimal_mode"] = cfg.minimal_mode;
+    j["service_install_prompt_seen"] = cfg.service_install_prompt_seen;
+    j["minimal_install_service_before_connect"] =
+        cfg.minimal_install_service_before_connect;
     return j;
 }
 
@@ -229,7 +234,8 @@ void WebUIServer::setup_routes() {
 
         auto task = std::make_shared<std::packaged_task<void()>>(
             [this, cfg, password]() {
-                helper::start_via_helper(cfg, password, 0);
+                helper::start_via_helper(cfg, password,
+                                         cfg.auto_reconnect ? -1 : 0);
                 vpn_connecting_ = false;
             });
 
@@ -300,18 +306,29 @@ void WebUIServer::setup_routes() {
                 config_mgr_, "username", body["username"].get<std::string>());
             if (!err.empty()) { respond_error(400, err); return; }
         }
-        // Update remember_password first so that a fresh enable also unlocks
-        // the subsequent password setter in the same request.
-        if (body.contains("remember_password") && body["remember_password"].is_boolean()) {
-            std::string err = config_api::config_set(
-                config_mgr_, "remember_password",
-                body["remember_password"].get<bool>() ? "true" : "false");
+        bool remember_payload = body.contains("remember_password") &&
+                                body["remember_password"].is_boolean();
+        bool remember_password =
+            remember_payload ? body["remember_password"].get<bool>()
+                             : config_mgr_.load().remember_password;
+        std::string pw = body.contains("password") && body["password"].is_string()
+                             ? body["password"].get<std::string>()
+                             : std::string();
+
+        if (remember_payload && !remember_password) {
+            std::string err = config_api::config_clear_password_and_key(config_mgr_);
             if (!err.empty()) { respond_error(400, err); return; }
-        }
-        if (body.contains("password") && body["password"].is_string()) {
-            std::string pw = body["password"].get<std::string>();
+        } else if (remember_password) {
             if (!pw.empty()) {
                 std::string err = config_api::config_set_password(config_mgr_, pw);
+                if (!err.empty()) { respond_error(400, err); return; }
+            } else {
+                Config current = config_mgr_.load();
+                if (remember_payload && current.password.empty()) {
+                    respond_error(400, "Password is required to enable remember_password.");
+                    return;
+                }
+                std::string err = config_api::config_set(config_mgr_, "remember_password", "true");
                 if (!err.empty()) { respond_error(400, err); return; }
             }
         }
@@ -384,6 +401,24 @@ void WebUIServer::setup_routes() {
         if (body.contains("webui_enabled") && body["webui_enabled"].is_boolean()) {
             config_api::config_set(config_mgr_, "webui_enabled",
                                    body["webui_enabled"].get<bool>() ? "true" : "false");
+        }
+        if (body.contains("auto_reconnect") && body["auto_reconnect"].is_boolean()) {
+            config_api::config_set(config_mgr_, "auto_reconnect",
+                                   body["auto_reconnect"].get<bool>() ? "true" : "false");
+        }
+        if (body.contains("minimal_mode") && body["minimal_mode"].is_boolean()) {
+            config_api::config_set(config_mgr_, "minimal_mode",
+                                   body["minimal_mode"].get<bool>() ? "true" : "false");
+        }
+        if (body.contains("service_install_prompt_seen") && body["service_install_prompt_seen"].is_boolean()) {
+            config_api::config_set(config_mgr_, "service_install_prompt_seen",
+                                   body["service_install_prompt_seen"].get<bool>() ? "true" : "false");
+        }
+        if (body.contains("minimal_install_service_before_connect") &&
+            body["minimal_install_service_before_connect"].is_boolean()) {
+            config_api::config_set(
+                config_mgr_, "minimal_install_service_before_connect",
+                body["minimal_install_service_before_connect"].get<bool>() ? "true" : "false");
         }
 
         Config updated = config_mgr_.load();

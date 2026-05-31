@@ -25,8 +25,8 @@ void finalize_detection(Detection *detection) {
   detection->detected = !detection->adapters.empty();
   if (detection->detected) {
     detection->message =
-        "发现其他虚拟网卡（" + join_adapter_names(detection->adapters) +
-        "），正在把 EXV 串联到它们前面提前路由校园流量；其他流量继续按系统默认出口处理。";
+        "发现代理 TUN（" + join_adapter_names(detection->adapters) +
+        "），EXV 会插入到代理出口前方转发校园内网流量；其他流量继续按系统默认出口处理。";
   }
 }
 
@@ -42,13 +42,22 @@ Detection detect_upstream_virtual_network(const std::string &exv_interface) {
 nlohmann::json to_json(const Detection &detection) {
   nlohmann::json adapters = nlohmann::json::array();
   for (const auto &adapter : detection.adapters) {
-    adapters.push_back({{"name", adapter.name}, {"detail", adapter.detail}});
+    nlohmann::json item{{"name", adapter.name}, {"detail", adapter.detail}};
+    if (!adapter.kind.empty())
+      item["kind"] = adapter.kind;
+    if (!adapter.role.empty())
+      item["role"] = adapter.role;
+    if (!adapter.if_index.empty())
+      item["if_index"] = adapter.if_index;
+    if (!adapter.route_reason.empty())
+      item["route_reason"] = adapter.route_reason;
+    adapters.push_back(item);
   }
   return nlohmann::json{{"detected", detection.detected},
                         {"adapters", adapters},
                         {"message", detection.message},
                         {"route_policy", detection.detected
-                                             ? "exv-campus-routes-first"
+                                             ? "exv-before-proxy-tun"
                                              : "normal"}};
 }
 

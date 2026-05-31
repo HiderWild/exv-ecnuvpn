@@ -7,6 +7,7 @@
 #endif
 #include <windows.h>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,19 @@ ServiceStatusSnapshot current_service_status() {
   CloseServiceHandle(svc);
   CloseServiceHandle(scm);
   status.available = status.running && helper::is_available();
+  if (status.installed && !status.path.empty()) {
+    std::filesystem::path service_path(status.path);
+    std::filesystem::path runtime_path =
+        service_path.parent_path() / "openconnect.exe";
+    if (!std::filesystem::exists(runtime_path)) {
+      status.available = false;
+      status.warning =
+          "Helper service is installed from a directory without bundled "
+          "OpenConnect runtime assets. Reinstall the helper service from the "
+          "desktop package.";
+      status.capabilities["service_mode"] = false;
+    }
+  }
   return status;
 }
 

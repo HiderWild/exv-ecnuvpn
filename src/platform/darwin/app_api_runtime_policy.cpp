@@ -40,7 +40,13 @@ nlohmann::json preflight_connect_platform_checks(const Config & /*cfg*/) {
 nlohmann::json try_connect_direct_fallback(const Config &cfg,
                                             const std::string &password) {
   prepare_direct_fallback_runtime();
-  if (vpn::start_with_password(cfg, password, 0) != 0) {
+  int result = vpn::start_with_password(cfg, password, 0);
+  if (result != 0) {
+    if (result == vpn::kVpnInitialConnectFailedExitCode) {
+      return nlohmann::json{{"ok", false},
+                            {"code", "auth_failed"},
+                            {"error", "VPN authentication failed or the server rejected the connection."}};
+    }
     return nlohmann::json{{"ok", false}, {"error", "Failed to start VPN"}};
   }
   vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();

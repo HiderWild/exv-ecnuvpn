@@ -4,8 +4,11 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include "logger.hpp"
+#include "openconnect_log.hpp"
 #include "utils.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -19,6 +22,46 @@
 namespace ecnuvpn {
 namespace platform {
 namespace {
+
+class TunnelTiming {
+public:
+  TunnelTiming() : started_(Clock::now()), last_(started_) {
+    logger::info("[connect-timing] scope=tunnel.windows stage=begin delta_ms=0 total_ms=0");
+  }
+
+  void mark(const std::string &stage, const std::string &detail = "") {
+    auto now = Clock::now();
+    auto delta_ms = elapsed_ms(last_, now);
+    auto total_ms = elapsed_ms(started_, now);
+    last_ = now;
+    std::string message = "[connect-timing] scope=tunnel.windows stage=" +
+                          stage + " delta_ms=" + std::to_string(delta_ms) +
+                          " total_ms=" + std::to_string(total_ms);
+    if (!detail.empty())
+      message += " " + detail;
+    logger::info(message);
+  }
+
+  void finish(bool ok, const std::string &detail = "") {
+    if (finished_)
+      return;
+    finished_ = true;
+    mark(ok ? "finish.ok" : "finish.error", detail);
+  }
+
+private:
+  using Clock = std::chrono::steady_clock;
+
+  static long long elapsed_ms(const Clock::time_point &from,
+                              const Clock::time_point &to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
+        .count();
+  }
+
+  Clock::time_point started_;
+  Clock::time_point last_;
+  bool finished_ = false;
+};
 
 std::string js_quote(const std::string &value) {
   std::string quoted = "\"";
@@ -100,6 +143,21 @@ bool run_with_retry(const std::string &ready_path, const std::string &cmd,
   return ignore_failure;
 }
 
+std::string effective_mtu(const std::string &reported_mtu, int configured_mtu) {
+  int reported = 0;
+  try {
+    reported = reported_mtu.empty() ? 0 : std::stoi(reported_mtu);
+  } catch (...) {
+    reported = 0;
+  }
+
+  if (reported >= 1200)
+    return std::to_string(reported);
+  if (configured_mtu >= 1200)
+    return std::to_string(configured_mtu);
+  return "";
+}
+
 std::string get_default_gateway4() {
   std::string output = utils::run_command_output("route.exe print 0.0.0.0");
   std::regex route_regex(R"(0\.0\.0\.0\s+(?:0|128)\.0\.0\.0\s+([0-9.]+))");
@@ -131,11 +189,13 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
                               const std::string &internal_ip,
                               const std::string &netmask,
                               const std::string &mtu) {
+  TunnelTiming timing;
   const std::string &ready_path = context.route_ready_path;
   delete_ready_file(ready_path);
 
   if (tunidx.empty() || internal_ip.empty()) {
     debug_log(ready_path, "missing openconnect tunnel metadata");
+    timing.finish(false, "reason=missing_metadata");
     return false;
   }
 
@@ -145,8 +205,14 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
       is_numeric(adapter) ? adapter : "name=" + cmd_quote_arg(adapter);
   const std::string subinterface_target =
       is_numeric(adapter) ? adapter : cmd_quote_arg(adapter);
+  timing.mark("resolve_adapter",
+              "adapter=" + adapter + " if_index=" + if_index +
+                  " internal_ip=" + internal_ip);
 
   const std::string default_gateway = get_default_gateway4();
+  timing.mark("default_gateway",
+              default_gateway.empty() ? "result=missing"
+                                      : "gateway=" + default_gateway);
   if (!default_gateway.empty()) {
     for (const auto &ip : context.server_route_exceptions) {
       run_exit(ready_path,
@@ -159,16 +225,25 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
       }
     }
   }
+  timing.mark("preserve_server_routes",
+              "count=" + std::to_string(context.server_route_exceptions.size()));
 
   bool ok = true;
-  if (!mtu.empty()) {
+  std::string adapter_mtu = effective_mtu(mtu, context.configured_mtu);
+  if (!adapter_mtu.empty()) {
+    if (adapter_mtu != mtu) {
+      debug_log(ready_path, "ignoring low reported MTU=" + mtu +
+                                ", using configured MTU=" + adapter_mtu);
+    }
     ok = run_with_retry(
              ready_path,
              "netsh.exe interface ipv4 set subinterface " +
-                 subinterface_target + " mtu=" + mtu + " store=active",
+                 subinterface_target + " mtu=" + adapter_mtu + " store=active",
              3, 1000, false) &&
          ok;
   }
+  timing.mark("set_mtu", adapter_mtu.empty() ? "result=skipped"
+                                             : "mtu=" + adapter_mtu);
 
   ok = run_with_retry(ready_path,
                       "netsh.exe interface ipv4 set address " +
@@ -176,8 +251,10 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
                           netmask,
                       5, 1000, false) &&
        ok;
+  timing.mark("set_address", ok ? "result=ok" : "result=failed");
 
   Sleep(3000);
+  timing.mark("wait_interface_registration", "sleep_ms=3000");
 
   for (const auto &cidr : context.custom_routes) {
     auto [network, mask] = cidr_to_network_and_mask(cidr);
@@ -189,19 +266,26 @@ bool configure_tunnel_network(const TunnelScriptContext &context,
     route_cmd += " metric 1";
     ok = run_with_retry(ready_path, route_cmd, 5, 1000, false) && ok;
   }
+  timing.mark("add_split_routes",
+              "count=" + std::to_string(context.custom_routes.size()) +
+                  (ok ? " result=ok" : " result=failed"));
 
   if (!ok) {
     debug_log(ready_path, "native network configuration incomplete");
+    timing.finish(false, "reason=network_configuration_incomplete");
     return false;
   }
 
   if (!write_ready_file(ready_path, adapter, internal_ip)) {
     debug_log(ready_path, "failed to write route-ready marker");
+    timing.finish(false, "reason=write_route_ready_failed");
     return false;
   }
 
   debug_log(ready_path,
             "writeReadyFile tundev=" + adapter + " ip=" + internal_ip);
+  timing.mark("write_route_ready", "interface=" + adapter);
+  timing.finish(true, "interface=" + adapter + " internal_ip=" + internal_ip);
   return true;
 }
 
@@ -272,6 +356,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
   ss << "var fs = WScript.CreateObject(\"Scripting.FileSystemObject\");\n";
   ss << "var readyFile = " << js_quote(context.route_ready_path) << ";\n";
   ss << "var debugFile = readyFile + '.debug.log';\n";
+  ss << "var configuredMtu = " << context.configured_mtu << ";\n";
   append_windows_route_array(ss, "customRoutes", context.custom_routes);
   append_windows_string_array(ss, "serverRouteExceptions",
                               context.server_route_exceptions);
@@ -303,6 +388,17 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
   ss << "function isNumeric(value) {\n";
   ss << "  return /^[0-9]+$/.test(String(value));\n";
+  ss << "}\n\n";
+
+  ss << "function effectiveMtu(reportedMtu) {\n";
+  ss << "  var reported = parseInt(reportedMtu || '0', 10);\n";
+  ss << "  if (reported >= 1200) return String(reported);\n";
+  ss << "  if (configuredMtu >= 1200) {\n";
+  ss << "    if (reportedMtu)\n";
+  ss << "      debugLog('ignoring low reported MTU=' + reportedMtu + ', using configured MTU=' + configuredMtu);\n";
+  ss << "    return String(configuredMtu);\n";
+  ss << "  }\n";
+  ss << "  return '';\n";
   ss << "}\n\n";
 
   ss << "function quoteArg(value) {\n";
@@ -465,7 +561,7 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
   ss << "  preserveBypassRoutes(defaultGateway);\n\n";
 
-  ss << "  var mtu = envValue('INTERNAL_IP4_MTU', '');\n";
+  ss << "  var mtu = effectiveMtu(envValue('INTERNAL_IP4_MTU', ''));\n";
   ss << "  if (mtu && subinterfaceTarget)\n";
   ss << "    runWithRetry('netsh.exe interface ipv4 set subinterface ' + subinterfaceTarget + ' mtu=' + mtu + ' store=active', 3, 1000, false);\n\n";
 
@@ -581,37 +677,31 @@ int run_tunnel_script(const TunnelScriptContext &context) {
              : 1;
 }
 
-bool configure_from_openconnect_log(const TunnelScriptContext &context,
-                                    const std::string &log_path) {
+OpenconnectLogConfigureResult
+configure_from_openconnect_log(const TunnelScriptContext &context,
+                               const std::string &log_path) {
+  if (context.vpn_engine == "native")
+    return {false, "native_log_scraping_disabled"};
+
   std::ifstream in(log_path);
   if (!in.is_open())
-    return false;
+    return {false, ""};
   std::string content((std::istreambuf_iterator<char>(in)),
                       std::istreambuf_iterator<char>());
 
-  std::size_t start = content.rfind("Starting VPN:");
-  if (start != std::string::npos)
-    content = content.substr(start);
-
-  std::regex ip_regex(R"(Configured as ([0-9.]+), with)");
-  std::regex adapter_regex(R"(Using Wintun device '([^']+)', index ([0-9]+))");
-  std::smatch ip_match;
-  std::smatch adapter_match;
-  if (!std::regex_search(content, ip_match, ip_regex) ||
-      !std::regex_search(content, adapter_match, adapter_regex) ||
-      ip_match.size() < 2 || adapter_match.size() < 3) {
-    return false;
+  openconnect_log::Evidence evidence = openconnect_log::parse_evidence(content);
+  if (evidence.auth_failed || !evidence.has_tunnel_metadata) {
+    return {false, ""};
   }
 
-  std::string internal_ip = ip_match[1].str();
-  std::string adapter = adapter_match[1].str();
-  std::string if_index = adapter_match[2].str();
-
   debug_log(context.route_ready_path,
-            "fallback from log TUNIDX=" + if_index + " TUNDEV=" + adapter +
-                " IP=" + internal_ip);
-  return configure_tunnel_network(context, if_index, adapter, internal_ip,
-                                  "255.255.240.0", "");
+            "fallback from log TUNIDX=" + evidence.if_index +
+                " TUNDEV=" + evidence.adapter + " IP=" +
+                evidence.internal_ip);
+  bool ok = configure_tunnel_network(context, evidence.if_index,
+                                     evidence.adapter, evidence.internal_ip,
+                                     "255.255.240.0", "");
+  return {ok, ""};
 }
 
 void cleanup_tunnel_routes(const TunnelScriptContext &) {}
