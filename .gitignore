@@ -36,6 +36,9 @@ runtime/*
 .omc/
 .claude/
 
+# Sync conflict artifacts
+*sync-conflict*
+
 # Legacy
 bash/
 cminst.sh
