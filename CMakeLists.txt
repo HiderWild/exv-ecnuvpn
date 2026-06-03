@@ -884,17 +884,6 @@ target_include_directories(helper_cleanup_registry_test PRIVATE
 
 add_test(NAME helper_cleanup_registry_test COMMAND helper_cleanup_registry_test)
 
-# MinGW DLL fix: tests that link against exv-core (which pulls in nlohmann/json
-# and other headers) need the MinGW runtime DLLs on PATH.  On CI runners the
-# toolchain bin dir is usually already on PATH, but local developer machines may
-# not have it.  We inject the exv-core build directory (which contains the
-# MinGW DLLs next to the test binaries) via the ENVIRONMENT test property.
-if(WIN32 AND NOT MSVC)
-    set_tests_properties(helper_cleanup_registry_test PROPERTIES
-        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
-    )
-endif()
-
 add_executable(helper_v2_contract_test
     tests/helper_v2_contract_test.cpp
     tests/support/fake_helper.cpp
@@ -912,13 +901,6 @@ target_include_directories(helper_v2_contract_test PRIVATE
 )
 
 add_test(NAME helper_v2_contract_test COMMAND helper_v2_contract_test)
-
-# MinGW DLL fix for helper_v2_contract_test (see helper_cleanup_registry_test above)
-if(WIN32 AND NOT MSVC)
-    set_tests_properties(helper_v2_contract_test PROPERTIES
-        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
-    )
-endif()
 
 add_executable(app_api_rpc_dispatcher_test
     tests/app_api_rpc_dispatcher_test.cpp
@@ -1008,14 +990,6 @@ target_include_directories(error_contract_test PRIVATE
 
 add_test(NAME error_contract_test COMMAND error_contract_test)
 
-# MinGW DLL fix for core_api tests
-if(WIN32 AND NOT MSVC)
-    get_filename_component(MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    set_tests_properties(vpn_actions_test PROPERTIES
-        ENVIRONMENT "PATH=${MINGW_BIN_DIR};$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
-    )
-endif()
-
 add_executable(native_core_connect_flow_test
     tests/integration/native_core_connect_flow_test.cpp
     tests/support/fake_helper.cpp
@@ -1099,13 +1073,6 @@ target_include_directories(helper_messages_connector_test PRIVATE
 )
 
 add_test(NAME helper_messages_connector_test COMMAND helper_messages_connector_test)
-
-# MinGW DLL fix for helper_messages_connector_test (see helper_cleanup_registry_test above)
-if(WIN32 AND NOT MSVC)
-    set_tests_properties(helper_messages_connector_test PROPERTIES
-        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
-    )
-endif()
 
 # ===========================================================================
 # Additional test targets (Phase 4-7: protocol, auth, integration)
@@ -1205,7 +1172,7 @@ add_test(NAME helper_lost_test COMMAND helper_lost_test)
 # ===========================================================================
 
 # --- Release-blocking: core logic tests (must pass in CI) ---
-set_property(TEST
+set(_release_blocking_tests
     vpn_runtime_test
     platform_status_models_test
     platform_network_ops_model_test
@@ -1249,8 +1216,23 @@ set_property(TEST
     route_actions_test
     error_contract_test
     helper_messages_connector_test
-    APPEND PROPERTY LABELS "release-blocking"
 )
+set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
+
+# Global MinGW DLL fix: ensure all release-blocking tests can find MinGW
+# runtime DLLs.  On CI runners the toolchain bin dir is usually already on
+# PATH, but local developer machines may not have it.  We inject both the
+# MinGW compiler bin directory and the exv-core build directory (which
+# contains the MinGW DLLs next to the test binaries) via the ENVIRONMENT
+# test property.
+if(WIN32 AND NOT MSVC)
+    get_filename_component(MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(_test IN LISTS _release_blocking_tests)
+        set_tests_properties(${_test} PROPERTIES
+            ENVIRONMENT "PATH=${MINGW_BIN_DIR};$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
+        )
+    endforeach()
+endif()
 
 # --- Env-sensitive: platform/DLL-dependent tests (informational in CI) ---
 # These tests depend on platform-specific DLLs (WinTun, SChannel, etc.) or
