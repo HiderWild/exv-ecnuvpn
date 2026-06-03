@@ -397,6 +397,9 @@ private:
 };
 
 // Durable owner for native-engine sessions. The native packet loop runs on a
+// LEGACY: Only used by legacy_openconnect engine. Native engine uses
+// TunnelController (Core-owned mode).
+//
 // background thread that lives inside the *process* hosting the
 // NativeVpnEngineSession, so the session must be owned by this long-lived
 // supervisor (not the short-lived CLI/RPC invocation that requested the
@@ -491,6 +494,8 @@ static int run_native_supervisor(const Config &cfg, const std::string &password,
   return 0;
 }
 
+// LEGACY: Only used by legacy_openconnect engine. Native engine uses
+// TunnelController (Core-owned mode).
 static int run_supervisor(const Config &cfg, const std::string &password,
                           int retry_limit) {
   if (cfg.vpn_engine == "native") {
