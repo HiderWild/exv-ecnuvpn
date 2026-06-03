@@ -1016,6 +1016,17 @@ target_include_directories(app_api_rpc_dispatcher_test PRIVATE
 
 add_test(NAME app_api_rpc_dispatcher_test COMMAND app_api_rpc_dispatcher_test)
 
+add_executable(app_api_status_contract_test
+    tests/app_api_status_contract_test.cpp
+)
+
+target_include_directories(app_api_status_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME app_api_status_contract_test COMMAND app_api_status_contract_test)
+
 # --- Phase 4-6: core_api action tests ---
 
 add_executable(vpn_actions_test
@@ -1357,6 +1368,7 @@ set(_release_blocking_tests
     core_process_test
     core_process_lifecycle_test
     helper_delegating_network_ops_test
+    app_api_status_contract_test
 )
 set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
 
@@ -1455,6 +1467,7 @@ set_property(TEST
     core_process_test
     core_process_lifecycle_test
     helper_delegating_network_ops_test
+    app_api_status_contract_test
     APPEND PROPERTY LABELS "architecture"
 )
 
@@ -1507,6 +1520,7 @@ set_property(TEST
     error_contract_test
     core_process_test
     core_process_lifecycle_test
+    app_api_status_contract_test
     APPEND PROPERTY LABELS "ui-contract"
 )
 

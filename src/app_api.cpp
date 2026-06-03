@@ -3,6 +3,7 @@
 #include "config.hpp"
 #include "config_api.hpp"
 #include "config_manager.hpp"
+#include "connection_attempt.hpp"
 #include "crypto.hpp"
 #include "feedback/feedback.hpp"
 #include "helper.hpp"
@@ -12,12 +13,16 @@
 #include "platform/common/helper_client.hpp"
 #include "platform/common/driver_status.hpp"
 #include "platform/common/oneshot_bootstrap.hpp"
+#include "platform/common/process_control.hpp"
 #include "platform/common/runtime_status.hpp"
 #include "platform/common/service_status.hpp"
 #include "runtime/runtime_context.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
 #include "vpn_engine/native_engine.hpp"
+#include "core/tunnel_controller.hpp"
+#include "helper_common/helper_connector.hpp"
+#include "platform/common/helper_delegating_network_ops.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -361,6 +366,121 @@ nlohmann::json runtime_status_json(const Config &cfg) {
   return platform::runtime_status_json(cfg);
 }
 
+// =========================================================================
+// TunnelController singleton — lazily initialized on first VPN action.
+// Holds the HelperClient, PlatformNetworkOps, and TunnelController as a
+// single unit so their lifetimes are correctly managed.
+// =========================================================================
+
+struct TunnelControllerHolder {
+  std::unique_ptr<exv::helper::HelperConnector> connector;
+  std::shared_ptr<exv::helper::HelperClient> client;
+  std::shared_ptr<exv::platform::HelperDelegatingPlatformNetworkOps> net_ops;
+  std::shared_ptr<exv::core::TunnelController> controller;
+  bool init_attempted = false;
+  std::string init_error;
+};
+
+TunnelControllerHolder &tunnel_holder() {
+  static TunnelControllerHolder holder;
+  return holder;
+}
+
+/// Lazily create and connect the TunnelController. Returns nullptr if the
+/// helper daemon cannot be reached. Subsequent calls after a failure will
+/// retry (the helper may have been installed or started in the meantime).
+std::shared_ptr<exv::core::TunnelController> ensure_tunnel_controller() {
+  auto &h = tunnel_holder();
+  if (h.controller)
+    return h.controller;
+
+  h.init_attempted = true;
+  try {
+    h.connector = exv::helper::HelperConnector::create();
+    exv::helper::HelperConnectorConfig cc;
+    cc.mode = exv::helper::ConnectorMode::Transient;
+    cc.helper_executable_path = helper_binary_next_to_exv();
+    h.client = h.connector->connect(cc);
+    if (!h.client) {
+      h.init_error = "Failed to connect to helper daemon";
+      return nullptr;
+    }
+    h.net_ops =
+        std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(
+            h.client.get());
+    h.controller = std::make_shared<exv::core::TunnelController>(h.client,
+                                                                  h.net_ops);
+    return h.controller;
+  } catch (const std::exception &e) {
+    h.init_error = e.what();
+    return nullptr;
+  }
+}
+
+/// Return the existing TunnelController if already initialized, or nullptr
+/// without attempting to create one.
+std::shared_ptr<exv::core::TunnelController> get_tunnel_controller_if_exists() {
+  return tunnel_holder().controller;
+}
+
+/// Map a TunnelStatusSnapshot to the frontend-compatible JSON format that
+/// the WebUI expects. Field names and types match the legacy helper response.
+nlohmann::json frontend_status_from_controller_snapshot(
+    const exv::core::TunnelStatusSnapshot &snap, const Config &cfg) {
+  bool running = snap.phase != exv::core::TunnelPhase::Idle &&
+                 snap.phase != exv::core::TunnelPhase::Failed;
+  bool connected = running && snap.network_ready;
+
+  nlohmann::json j;
+  j["connected"] = connected;
+  j["process_running"] = running;
+  j["server"] = snap.server.empty() ? cfg.server : snap.server;
+  j["username"] = cfg.username;
+  j["pid"] = -1;           // TunnelController does not expose raw PIDs
+  j["supervisor_pid"] = -1;
+  j["network_ready"] = snap.network_ready;
+  j["interface"] = snap.interface_name;
+  j["internal_ip"] = "";
+  j["route_count"] = static_cast<int>(cfg.routes.size());
+  j["mtu"] = cfg.mtu;
+  j["uptime_seconds"] = 0;
+  j["rx_bytes"] = 0;
+  j["tx_bytes"] = 0;
+  if (snap.last_error.has_value()) {
+    j["error"] = snap.last_error->message;
+    j["error_code"] = snap.last_error->code;
+    j["error_recoverable"] = snap.last_error->recoverable;
+  }
+  if (snap.reconnect.has_value()) {
+    j["reconnect_attempt"] = snap.reconnect->attempt;
+    j["reconnect_next_retry_ms"] = snap.reconnect->next_retry_ms;
+  }
+  j["auto_reconnect"] = snap.auto_reconnect;
+  j["phase"] = [snap]() -> std::string {
+    switch (snap.phase) {
+    case exv::core::TunnelPhase::Idle: return "idle";
+    case exv::core::TunnelPhase::PreparingHelper: return "preparing_helper";
+    case exv::core::TunnelPhase::Authenticating: return "authenticating";
+    case exv::core::TunnelPhase::ConnectingCstp: return "connecting_cstp";
+    case exv::core::TunnelPhase::ApplyingNetworkConfig:
+      return "applying_network_config";
+    case exv::core::TunnelPhase::OpeningPacketDevice:
+      return "opening_packet_device";
+    case exv::core::TunnelPhase::Connected: return "connected";
+    case exv::core::TunnelPhase::Reconnecting: return "reconnecting";
+    case exv::core::TunnelPhase::Disconnecting: return "disconnecting";
+    case exv::core::TunnelPhase::CleaningUp: return "cleaning_up";
+    case exv::core::TunnelPhase::Failed: return "failed";
+    default: return "unknown";
+    }
+  }();
+  try {
+    virtual_network::add_status_fields(j, snap.interface_name);
+  } catch (...) {
+  }
+  return j;
+}
+
 nlohmann::json driver_status_json(const Config &cfg) {
   return platform::driver_status_json(cfg);
 }
@@ -457,22 +577,17 @@ nlohmann::json handle_action(const std::string &action,
     Config cfg = mgr.load();
 
     if (action == "status.get") {
-      auto helper_resp = platform::send_helper_request({{"action", "status"}});
-      if (!json_bool(helper_resp, "ok", false) && helper_unavailable(helper_resp)) {
-        nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
-        if (json_bool(fallback, "_snapshot", false)) {
-          if (json_bool(fallback, "_running", false)) {
-            return frontend_status_from_snapshot_json(
-                fallback.contains("_snapshot_data")
-                    ? fallback["_snapshot_data"]
-                    : nlohmann::json::object(),
-                cfg);
-          }
-          return disconnected_status(cfg);
-        }
-        return disconnected_status(cfg);
+      auto controller = get_tunnel_controller_if_exists();
+      if (!controller) {
+        // Lazy init — try to connect to the helper on first status poll.
+        controller = ensure_tunnel_controller();
       }
-      return frontend_status_from_helper(helper_resp, cfg);
+      if (controller) {
+        auto snap = controller->status();
+        return frontend_status_from_controller_snapshot(snap, cfg);
+      }
+      // No controller available (helper not running) — return disconnected.
+      return disconnected_status(cfg);
     }
 
     if (action == "vpn.connect") {
@@ -498,137 +613,105 @@ nlohmann::json handle_action(const std::string &action,
                                    std::string(allow_direct_fallback ? "true"
                                                                      : "false"));
 
-      bool helper_available = helper::is_available();
-      timing.mark("helper_availability",
-                  helper_available ? "available=true" : "available=false");
+      // ── Connection attempt guard ──────────────────────────────────────
+      namespace conn_attempt = ecnuvpn::connection_attempt;
+      conn_attempt::AcquireOptions attempt_opts;
+      attempt_opts.config_dir = utils::get_config_dir();
+      attempt_opts.mode = "native";
+      attempt_opts.owner_pid = conn_attempt::current_process_id();
+      conn_attempt::AcquireResult attempt_result = conn_attempt::try_acquire(attempt_opts);
+      timing.mark("connection_attempt",
+                  attempt_result.acquired ? "acquired=true" : ("acquired=false code=" + attempt_result.code));
 
-      if (allow_direct_fallback && !helper_available) {
-        nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
-        timing.mark("direct_fallback_status",
-                    json_bool(fallback, "_running", false) ? "running=true"
-                                                           : "running=false");
-        if (json_bool(fallback, "_snapshot", false) &&
-            json_bool(fallback, "_running", false)) {
-          nlohmann::json status = frontend_status_from_snapshot_json(
-              fallback.contains("_snapshot_data")
-                  ? fallback["_snapshot_data"]
-                  : nlohmann::json::object(),
-              cfg);
-          status["mode"] = "elevated";
-          timing.finish(true, "mode=elevated existing=true");
-          return status;
+      if (!attempt_result.acquired) {
+        // Build enriched error with diagnostics for the UI.
+        nlohmann::json details;
+        details["lock_path"] = utils::get_config_dir() + "/connect-attempt.lock";
+        details["owner_pid"] = attempt_result.record.owner_pid;
+        details["attempt_id"] = attempt_result.record.attempt_id;
+        details["created_at_unix_ms"] = attempt_result.record.created_at_unix_ms;
+        details["state"] = attempt_result.record.state;
+        details["mode"] = attempt_result.record.mode;
+
+        // Check if the owner process is still alive for diagnostics.
+        bool owner_alive = false;
+        if (attempt_result.record.owner_pid > 0) {
+          owner_alive = platform::is_process_alive(attempt_result.record.owner_pid);
         }
-      }
+        details["owner_alive"] = owner_alive;
 
-      if (!helper_available && allow_direct_fallback) {
-        platform::BackendResolveOptions options;
-        options.preferred_mode = "oneshot";
-        options.helper_path = helper_binary_next_to_exv();
-        options.allow_oneshot = true;
-        options.allow_service_start = false;
-        options.start_oneshot = true;
-        nlohmann::json backend = platform::resolve_backend(options);
-        timing.mark("oneshot_backend",
-                    backend.value("ok", false) ? "result=ok" : "result=failed");
-        if (backend.value("ok", false)) {
-          platform::HelperEndpoint endpoint{
-              backend.value("endpoint", std::string()),
-              backend.value("auth_token", std::string())};
-          nlohmann::json helper_resp = platform::send_helper_request(
-              endpoint,
-              [&] {
-                nlohmann::json request{{"action", "start"},
-                                       {"config", cfg},
-                                       {"password", password},
-                                       {"retry_limit", desktop_retry_limit(cfg)},
-                                       {"home", utils::get_effective_home()},
-                                       {"config_dir", utils::get_config_dir()}};
-                 add_desktop_owner_context(request);
-                 return request;
-               }());
-          timing.mark("oneshot_helper_request",
-                      helper_resp.value("ok", false) ? "result=ok"
-                                                     : "result=failed");
-          if (!helper_resp.value("ok", false)) {
-            timing.finish(false, "stage=oneshot_helper_request");
-            return helper_error(helper_resp, "Failed to start VPN");
+        // Stale detection: if owner PID is dead, this is a stale lock.
+        bool stale_detected = !owner_alive && attempt_result.record.owner_pid > 0;
+        details["stale_attempt_detected"] = stale_detected;
+
+        // Age calculation.
+        if (attempt_result.record.created_at_unix_ms > 0) {
+          auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count();
+          details["owner_age_ms"] = now_ms - attempt_result.record.created_at_unix_ms;
+        }
+
+        std::string user_message = attempt_result.message;
+        if (stale_detected) {
+          user_message = "检测到上次连接尝试异常残留（进程已退出）。正在自动清理...";
+          // Auto-retry once after stale cleanup.
+          conn_attempt::mark_terminal(utils::get_config_dir(), "stale_auto_cleanup");
+          conn_attempt::AcquireResult retry = conn_attempt::try_acquire(attempt_opts);
+          if (retry.acquired) {
+            timing.mark("connection_attempt_retry", "acquired=true stale_cleanup=true");
+            attempt_result = std::move(retry);
+            // Fall through to continue the connect flow.
+          } else {
+            timing.finish(false, "stage=connection_attempt retry_failed");
+            nlohmann::json resp = error(user_message, attempt_result.code);
+            resp["current_attempt"] = details;
+            return resp;
           }
-          nlohmann::json status = frontend_status_from_helper(helper_resp, cfg);
-          status["mode"] = "elevated";
-          status["backend"] = backend;
-          timing.finish(true,
-                        "mode=elevated network_ready=" +
-                            std::string(status.value("network_ready", false)
-                                            ? "true"
-                                            : "false"));
-          return status;
+        } else {
+          timing.finish(false, "stage=connection_attempt");
+          nlohmann::json resp = error(user_message, attempt_result.code);
+          resp["current_attempt"] = details;
+          return resp;
         }
-        timing.finish(false, "stage=oneshot_backend");
-        return platform::backend_unavailable_error(
-            backend, "Failed to start one-shot helper.");
       }
 
-      nlohmann::json start_request{{"action", "start"},
-                                   {"config", cfg},
-                                   {"password", password},
-                                   {"retry_limit", desktop_retry_limit(cfg)},
-                                   {"home", utils::get_effective_home()},
-                                   {"config_dir", utils::get_config_dir()}};
-      add_desktop_owner_context(start_request);
-      auto helper_resp = platform::send_helper_request(start_request);
-      timing.mark("service_helper_request",
-                  helper_resp.value("ok", false) ? "result=ok"
-                                                 : "result=failed");
-      if (!helper_resp.value("ok", false)) {
-        timing.finish(false, "stage=service_helper_request");
-        return helper_error(helper_resp, "Failed to start VPN");
+      // RAII cleanup: mark attempt terminal on scope exit unless dismissed.
+      conn_attempt::TerminalAttemptScope attempt_cleanup(
+          utils::get_config_dir(), attempt_result.record.attempt_id, "scope_exit");
+
+      // ── TunnelController connect ──────────────────────────────────────
+      auto controller = ensure_tunnel_controller();
+      timing.mark("tunnel_controller",
+                  controller ? "initialized=true" : "initialized=false");
+
+      if (!controller) {
+        timing.finish(false, "stage=tunnel_controller_init");
+        return error("Failed to initialize VPN controller: " +
+                         tunnel_holder().init_error,
+                     platform::kHelperUnavailableCode);
       }
-      nlohmann::json status = frontend_status_from_helper(helper_resp, cfg);
-      timing.finish(true,
-                    "mode=helper network_ready=" +
-                        std::string(status.value("network_ready", false)
-                                        ? "true"
-                                        : "false"));
+
+      controller->set_vpn_config(cfg, password);
+      exv::core::UserIntent intent;
+      intent.desired_connected = true;
+      intent.auto_reconnect = cfg.auto_reconnect;
+      intent.profile_id.value = cfg.server;
+      controller->connect(intent);
+
+      auto snap = controller->status();
+      nlohmann::json status =
+          frontend_status_from_controller_snapshot(snap, cfg);
+      timing.finish(
+          true, "phase=" + std::to_string(static_cast<int>(snap.phase)));
+      attempt_cleanup.dismiss();
       return status;
     }
 
     if (action == "vpn.disconnect") {
-      bool allow_direct_fallback =
-          payload.value("allow_direct_fallback", false);
-      nlohmann::json backend =
-          payload.value("backend", nlohmann::json::object());
-      if (backend.is_object() &&
-          backend.value("backend", std::string()) == "oneshot") {
-        platform::HelperEndpoint endpoint{
-            backend.value("endpoint", std::string()),
-            backend.value("auth_token", std::string())};
-        auto helper_resp =
-            platform::send_helper_request(endpoint, {{"action", "stop"}});
-        if (!helper_resp.value("ok", false)) {
-          return helper_error(helper_resp, "Failed to stop VPN");
-        }
-        return disconnected_status(cfg);
-      }
-
-      auto helper_resp = platform::send_helper_request({{"action", "stop"}});
-      if (!helper_resp.value("ok", false) && helper_unavailable(helper_resp)) {
-        if (!allow_direct_fallback) {
-          return error(platform::helper_unavailable_disconnect_message(),
-                       platform::kHelperUnavailableCode);
-        }
-        nlohmann::json fallback =
-            platform::try_disconnect_direct_fallback(allow_direct_fallback);
-        if (fallback.is_object() && !fallback.empty()) {
-          if (!fallback.value("ok", false)) {
-            return error(fallback.value("error", "Failed to stop VPN"));
-          }
-          return disconnected_status(cfg);
-        }
-        return error("One-shot helper is no longer running.",
-                     platform::kHelperUnavailableCode);
-      }
-      if (!helper_resp.value("ok", false)) {
-        return helper_error(helper_resp, "Failed to stop VPN");
+      auto controller = get_tunnel_controller_if_exists();
+      if (controller) {
+        controller->disconnect(exv::core::DisconnectReason::UserRequested);
       }
       return disconnected_status(cfg);
     }
