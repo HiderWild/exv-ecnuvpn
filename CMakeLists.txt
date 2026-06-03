@@ -1108,13 +1108,197 @@ if(WIN32 AND NOT MSVC)
 endif()
 
 # ===========================================================================
+# Additional test targets (Phase 4-7: protocol, auth, integration)
+# ===========================================================================
+
+add_executable(native_authenticator_test
+    tests/native_authenticator_test.cpp
+    src/vpn_engine/protocol/native_authenticator.cpp
+    src/vpn_engine/protocol/auth.cpp
+    src/vpn_engine/protocol/http.cpp
+    src/vpn_engine/session_state.cpp
+)
+
+target_include_directories(native_authenticator_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME native_authenticator_test COMMAND native_authenticator_test)
+
+add_executable(native_auth_session_json_test
+    tests/native_auth_session_json_test.cpp
+    src/vpn_engine/protocol/native_auth_session_json.cpp
+)
+
+target_include_directories(native_auth_session_json_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME native_auth_session_json_test COMMAND native_auth_session_json_test)
+
+add_executable(vpn_supervisor_payload_test
+    tests/vpn_supervisor_payload_test.cpp
+    src/vpn_engine/protocol/native_auth_session_json.cpp
+    src/platform/common/vpn_supervisor_process.cpp
+)
+
+target_include_directories(vpn_supervisor_payload_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME vpn_supervisor_payload_test COMMAND vpn_supervisor_payload_test)
+
+# NOTE: connection_attempt_test, app_api_logs_test, and
+# app_api_native_orchestration_test depend on the full app_api build chain
+# (WebUI assets, SSE broadcaster, etc.) and cannot be compiled as standalone
+# test targets.  They are tested as part of the exv integration build.
+
+add_executable(auth_failure_test
+    tests/integration/auth_failure_test.cpp
+    src/core/reconnect_policy.cpp
+    tests/support/fake_helper.cpp
+)
+
+target_include_directories(auth_failure_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+add_test(NAME auth_failure_test COMMAND auth_failure_test)
+
+add_executable(helper_lost_test
+    tests/integration/helper_lost_test.cpp
+    src/core/reconnect_policy.cpp
+    tests/support/fake_helper.cpp
+    tests/support/fake_platform_network_ops.cpp
+)
+
+target_include_directories(helper_lost_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+add_test(NAME helper_lost_test COMMAND helper_lost_test)
+
+# ===========================================================================
 # Test labels for selective test runs
-# Usage: ctest -L architecture  |  ctest -L core  |  ctest -L helper
+# ===========================================================================
+#
+# Label taxonomy (CI release gate):
+#   release-blocking  -- core logic, must pass for PR merge
+#   env-sensitive     -- platform/DLL-dependent, informational in CI
+#   integration       -- cross-module, may need helper/network
+#   elevated-manual   -- requires admin/root, skipped in CI
+#   legacy            -- pre-existing tests with known issues
+#
+# Functional labels (for local dev filtering):
+#   architecture, security, core, helper, platform, ui-contract
 #
 # NOTE: We use set_property(TEST ... APPEND PROPERTY LABELS ...) so that a
-# test can carry multiple labels (e.g. both "architecture" and "security").
+# test can carry multiple labels (e.g. both "release-blocking" and "core").
 # Plain set_tests_properties(... LABELS ...) would overwrite prior labels.
 # ===========================================================================
+
+# --- Release-blocking: core logic tests (must pass in CI) ---
+set_property(TEST
+    vpn_runtime_test
+    platform_status_models_test
+    platform_network_ops_model_test
+    feedback_test
+    runtime_status_native_test
+    backend_resolver_test
+    openconnect_log_test
+    native_session_state_test
+    native_helper_session_test
+    native_engine_contract_test
+    native_event_sink_test
+    tunnel_script_contract_test
+    proxy_tun_detector_test
+    app_api_runtime_policy_test
+    native_packaging_policy_test
+    crypto_roundtrip_test
+    native_url_test
+    native_cstp_frame_test
+    native_tls_stream_contract_test
+    native_auth_parser_test
+    native_protocol_session_test
+    native_production_transport_test
+    native_authenticator_test
+    native_auth_session_json_test
+    vpn_supervisor_payload_test
+    reconnect_policy_test
+    reconnect_deterministic_test
+    startup_failure_test
+    core_error_mapper_test
+    tunnel_controller_state_machine_test
+    helper_lease_manager_test
+    helper_cleanup_registry_test
+    helper_v2_contract_test
+    no_secret_in_argv_test
+    no_secret_in_logs_test
+    credential_store_model_test
+    app_api_rpc_dispatcher_test
+    vpn_actions_test
+    config_actions_test
+    service_actions_test
+    route_actions_test
+    error_contract_test
+    helper_messages_connector_test
+    APPEND PROPERTY LABELS "release-blocking"
+)
+
+# --- Env-sensitive: platform/DLL-dependent tests (informational in CI) ---
+# These tests depend on platform-specific DLLs (WinTun, SChannel, etc.) or
+# MinGW runtime DLLs that may not be available in all CI environments.
+# On Windows+MinGW they may fail with 0xc0000139 (DLL not found).
+set_property(TEST
+    native_fake_anyconnect_server_test
+    APPEND PROPERTY LABELS "env-sensitive"
+)
+
+if(WIN32)
+    set_property(TEST
+        win32_native_wintun_test
+        win32_native_ip_config_test
+        win32_native_packet_device_test
+        win32_native_tls_stream_test
+        APPEND PROPERTY LABELS "env-sensitive"
+    )
+endif()
+
+if(APPLE)
+    set_property(TEST
+        darwin_native_utun_test
+        darwin_native_route_config_test
+        darwin_native_packet_device_test
+        darwin_native_tls_stream_test
+        APPEND PROPERTY LABELS "env-sensitive"
+    )
+endif()
+
+# --- Integration tests ---
+set_property(TEST
+    tunnel_controller_integration_test
+    native_core_connect_flow_test
+    helper_timeout_cleanup_test
+    auth_failure_test
+    helper_lost_test
+    APPEND PROPERTY LABELS "integration"
+)
+
+# --- Legacy: pre-existing tests with known issues ---
+# app_api_native_orchestration_test has hardcoded test passwords and depends
+# on the full native engine build chain.  Isolated until migrated.
+if(TARGET app_api_native_orchestration_test)
+    set_property(TEST app_api_native_orchestration_test APPEND PROPERTY LABELS "legacy")
+endif()
+
+# --- Functional labels (for local dev filtering) ---
 
 # All Phase 1+ architecture tests
 set_property(TEST
@@ -1138,6 +1322,10 @@ set_property(TEST
     service_actions_test
     route_actions_test
     error_contract_test
+    auth_failure_test
+    helper_lost_test
+    native_authenticator_test
+    native_auth_session_json_test
     APPEND PROPERTY LABELS "architecture"
 )
 
@@ -1175,14 +1363,6 @@ set_property(TEST
     APPEND PROPERTY LABELS "platform"
 )
 
-# Integration tests (cross-module)
-set_property(TEST
-    native_core_connect_flow_test
-    tunnel_controller_integration_test
-    helper_timeout_cleanup_test
-    APPEND PROPERTY LABELS "integration"
-)
-
 # UI / RPC contract tests
 set_property(TEST
     app_api_rpc_dispatcher_test
@@ -1192,14 +1372,6 @@ set_property(TEST
     route_actions_test
     error_contract_test
     APPEND PROPERTY LABELS "ui-contract"
-)
-
-# Tests that crash due to MinGW DLL loading issue (0xc0000139).
-# Skip these on broken toolchains: ctest -LE env-sensitive
-set_property(TEST
-    helper_cleanup_registry_test
-    helper_v2_contract_test
-    APPEND PROPERTY LABELS "env-sensitive"
 )
 
 # Install target

@@ -24,11 +24,25 @@ jobs:
         run: cmake --preset windows-release
       - name: Build
         run: cmake --build --preset windows-release
-      - name: Test
-        run: ctest --preset windows-release --output-on-failure
+      - name: Architecture guardrails
+        shell: pwsh
+        run: scripts/architecture-guardrails.ps1
+      - name: DLL dependency diagnostic
+        if: always()
+        shell: pwsh
+        run: scripts/diagnose-mingw-dlls.ps1 -BuildDir build-windows/cpp
+      - name: Test (release-blocking gate)
+        run: ctest --preset windows-release --output-on-failure -L release-blocking
+      - name: Test (env-sensitive, informational)
+        if: always()
         continue-on-error: true
+        run: ctest --preset windows-release --output-on-failure -L env-sensitive
+      - name: Test (integration, informational)
+        if: always()
+        continue-on-error: true
+        run: ctest --preset windows-release --output-on-failure -L integration
       - name: Upload test logs
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-test-logs
@@ -58,11 +72,20 @@ jobs:
         run: cmake --preset linux-release
       - name: Build
         run: cmake --build --preset linux-release
-      - name: Test
-        run: ctest --preset linux-release --output-on-failure
+      - name: Architecture guardrails
+        run: bash scripts/architecture-guardrails.sh
+      - name: Test (release-blocking gate)
+        run: ctest --preset linux-release --output-on-failure -L release-blocking
+      - name: Test (env-sensitive, informational)
+        if: always()
         continue-on-error: true
+        run: ctest --preset linux-release --output-on-failure -L env-sensitive
+      - name: Test (integration, informational)
+        if: always()
+        continue-on-error: true
+        run: ctest --preset linux-release --output-on-failure -L integration
       - name: Upload test logs
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: linux-test-logs
@@ -95,11 +118,20 @@ jobs:
         run: cmake --preset macos-release
       - name: Build
         run: cmake --build --preset macos-release
-      - name: Test
-        run: ctest --preset macos-release --output-on-failure
+      - name: Architecture guardrails
+        run: bash scripts/architecture-guardrails.sh
+      - name: Test (release-blocking gate)
+        run: ctest --preset macos-release --output-on-failure -L release-blocking
+      - name: Test (env-sensitive, informational)
+        if: always()
         continue-on-error: true
+        run: ctest --preset macos-release --output-on-failure -L env-sensitive
+      - name: Test (integration, informational)
+        if: always()
+        continue-on-error: true
+        run: ctest --preset macos-release --output-on-failure -L integration
       - name: Upload test logs
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: macos-test-logs-${{ matrix.label }}
