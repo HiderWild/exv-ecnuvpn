@@ -949,12 +949,15 @@ add_executable(tunnel_controller_integration_test
     tests/support/fake_helper.cpp
     tests/support/fake_platform_network_ops.cpp
     tests/support/fake_core_ui_client.cpp
-    src/core/reconnect_policy.cpp
 )
 
 target_include_directories(tunnel_controller_integration_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(tunnel_controller_integration_test PRIVATE
+    exv-core Threads::Threads ${EXV_PLATFORM_LIBS}
 )
 
 add_test(NAME tunnel_controller_integration_test COMMAND tunnel_controller_integration_test)
