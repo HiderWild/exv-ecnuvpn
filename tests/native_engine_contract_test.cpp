@@ -997,11 +997,11 @@ int main() {
        ok;
 
   ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg =
-      ecnuvpn::vpn_engine::make_native_config(cfg, "secret");
+      ecnuvpn::vpn_engine::make_native_config(cfg, MOCK_PASSWORD);
   ok = expect(engine_cfg.server == cfg.server,
               "native engine config should carry server") &&
        ok;
-  ok = expect(engine_cfg.password == "secret",
+  ok = expect(engine_cfg.password == MOCK_PASSWORD,
               "native engine config should carry per-session password") &&
        ok;
   ok = expect(engine_cfg.disable_dtls == true,

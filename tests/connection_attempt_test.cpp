@@ -12,6 +12,8 @@
 
 namespace {
 
+static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -523,7 +525,7 @@ bool app_api_native_connect_reports_active_attempt_before_bootstrap() {
 
   const nlohmann::json payload{{"home", dir.string()},
                                {"config_dir", dir.string()},
-                               {"password", "plaintext-secret"},
+                               {"password", MOCK_PASSWORD},
                                {"allow_direct_fallback", true}};
   const auto response =
       ecnuvpn::app_api::handle_action("vpn.connect", payload);

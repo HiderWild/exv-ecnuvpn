@@ -12,7 +12,7 @@ Author: Agent 4 -- Legacy Guardrail Cleanup / Security Closure
 
 **File:** `tests/app_api_native_orchestration_test.cpp`
 
-All 11 instances of hardcoded password strings (`"stored-config-password-secret"`, `"top-level-password-secret"`, `"plaintext-secret"`) were replaced with a single test-only constant:
+All 14 instances of hardcoded password strings across test fixtures were replaced with a test-only constant (`"stored-config-password-secret"`, `"top-level-password-secret"`, `"plaintext-secret"`, `"secret"`):
 
 ```cpp
 static const char *MOCK_PASSWORD = "test-mock-password-placeholder";

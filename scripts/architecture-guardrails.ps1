@@ -151,6 +151,13 @@ Check-Pattern -Description "Checking new UI path for retry_limit" `
 Write-Host -NoNewline "Checking test fixtures for secrets... "
 
 $secretFound = $false
+$secretPatterns = @(
+    '(?i)password\s*=\s*[''"]',            # password = "secret"
+    'password\s*,\s*[''"]',                 # {"password", "secret"}
+    'password\s*==\s*[''"]',                # password == "secret"
+    '"secret"'                               # bare "secret" literal
+)
+
 $secretExclude = @(
     "no_secret",
     "forbidden",
@@ -164,18 +171,43 @@ $secretExclude = @(
     "example\.invalid",
     "\.find\(",
     "contains_secret",
-    "EXPECT FAILED"
+    "EXPECT FAILED",
+    "secret_name",
+    "secret_value",
+    "secret_like",
+    "diagnostic",
+    "no-secret"
+)
+
+# Known security test files that legitimately test for secret-leak prevention
+$securityTestPatterns = @(
+    "no_secret_in_argv_test",
+    "no_secret_in_logs_test",
+    "helper_v2_contract_test"
 )
 
 if (Test-Path "tests") {
     $testFiles = Get-ChildItem -Path "tests" -Recurse -File -ErrorAction SilentlyContinue
     foreach ($file in $testFiles) {
+        $isSecurityTest = $false
+        foreach ($stp in $securityTestPatterns) {
+            if ($file.Name -match $stp) { $isSecurityTest = $true; break }
+        }
+
         $content = Get-Content $file.FullName -ErrorAction SilentlyContinue
         foreach ($line in $content) {
-            if ($line -match '(?i)password\s*=\s*[''"]') {
+            $matched = $false
+            foreach ($pat in $secretPatterns) {
+                if ($line -match $pat) { $matched = $true; break }
+            }
+            if ($matched) {
                 $excluded = $false
-                foreach ($ex in $secretExclude) {
-                    if ($line -match $ex) { $excluded = $true; break }
+                # Skip known security test files for all patterns
+                if ($isSecurityTest) { $excluded = $true }
+                if (-not $excluded) {
+                    foreach ($ex in $secretExclude) {
+                        if ($line -match $ex) { $excluded = $true; break }
+                    }
                 }
                 if (-not $excluded) {
                     $secretFound = $true

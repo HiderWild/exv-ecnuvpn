@@ -115,10 +115,17 @@ fi
 # ---------------------------------------------------------------------------
 echo -n "Checking test fixtures for secrets... "
 secret_found=0
+
+# Known security test files that legitimately test for secret-leak prevention
+security_test_pattern="no_secret_in_argv_test|no_secret_in_logs_test|helper_v2_contract_test"
+
 while IFS= read -r match; do
     [ -z "$match" ] && continue
+    file_path=$(echo "$match" | cut -d: -f1)
     line_content=$(echo "$match" | cut -d: -f2-)
     skip=0
+    # Skip known security test files
+    echo "$file_path" | grep -qE "$security_test_pattern" && skip=1
     echo "$line_content" | grep -q "no_secret" && skip=1
     echo "$line_content" | grep -q "forbidden" && skip=1
     echo "$line_content" | grep -q "should_not" && skip=1
@@ -132,12 +139,17 @@ while IFS= read -r match; do
     echo "$line_content" | grep -q '\.find(' && skip=1
     echo "$line_content" | grep -q "contains_secret" && skip=1
     echo "$line_content" | grep -q "EXPECT FAILED" && skip=1
+    echo "$line_content" | grep -q "secret_name" && skip=1
+    echo "$line_content" | grep -q "secret_value" && skip=1
+    echo "$line_content" | grep -q "secret_like" && skip=1
+    echo "$line_content" | grep -q "diagnostic" && skip=1
+    echo "$line_content" | grep -q "no-secret" && skip=1
     if [ $skip -eq 0 ]; then
         echo ""
         echo "  $match"
         secret_found=1
     fi
-done < <(grep -rinP "password\s*=\s*['\"]" tests/ 2>/dev/null || true)
+done < <(grep -rinE "password\s*=\s*['\"]|password\s*,\s*['\"]|password\s*==\s*['\"]|\"secret\"" tests/ 2>/dev/null || true)
 if [ $secret_found -eq 1 ]; then
     echo "FAIL"
     FAILURES=$((FAILURES + 1))
