@@ -77,8 +77,11 @@ public:
     std::string raw;
     char buffer[1024];
     ssize_t n = 0;
+    // Read until newline (not EOF) to support persistent connections.
     while ((n = read(client_fd_, buffer, sizeof(buffer))) > 0) {
       raw.append(buffer, buffer + n);
+      if (raw.find('\n') != std::string::npos)
+        break;
     }
     return raw;
   }
@@ -87,8 +90,8 @@ public:
     std::string payload = response;
     payload.push_back('\n');
     ssize_t written = write(client_fd_, payload.data(), payload.size());
-    ::close(client_fd_);
-    client_fd_ = -1;
+    // Do NOT close client_fd_ here -- keep connection open for persistent IPC.
+    // The caller is responsible for calling close_client() when done.
     return written == static_cast<ssize_t>(payload.size());
   }
 

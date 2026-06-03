@@ -11,17 +11,24 @@ std::unique_ptr<AppRpcDispatcher> create_dispatcher(
 ) {
     auto dispatcher = std::make_unique<AppRpcDispatcher>();
 
-    auto vpn = std::make_unique<VpnActions>(controller);
+    // All action objects are heap-allocated and retained by the dispatcher.
+    // Their handlers capture `this`, so the action objects must outlive the
+    // dispatcher.  retain_action() stores them as type-erased shared_ptrs.
+    auto vpn = std::make_shared<VpnActions>(controller);
     vpn->register_handlers(*dispatcher);
+    dispatcher->retain_action(vpn);
 
-    ConfigActions config;
-    config.register_handlers(*dispatcher);
+    auto config = std::make_shared<ConfigActions>();
+    config->register_handlers(*dispatcher);
+    dispatcher->retain_action(config);
 
-    ServiceActions service;
-    service.register_handlers(*dispatcher);
+    auto service = std::make_shared<ServiceActions>();
+    service->register_handlers(*dispatcher);
+    dispatcher->retain_action(service);
 
-    RouteActions route;
-    route.register_handlers(*dispatcher);
+    auto route = std::make_shared<RouteActions>();
+    route->register_handlers(*dispatcher);
+    dispatcher->retain_action(route);
 
     return dispatcher;
 }

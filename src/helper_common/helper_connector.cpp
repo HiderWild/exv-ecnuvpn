@@ -2,12 +2,75 @@
 #include "helper_client.hpp"
 #include "helper_messages.hpp"
 #include "helper_error.hpp"
+#include "pipe_helper_client.hpp"
+
+#include <stdexcept>
 
 namespace exv::helper {
 
 // ---------------------------------------------------------------------------
-// StubHelperClient -- temporary stub for Phase 2 testing.
-// Real implementation will use named pipes / unix sockets in Phase 3.
+// PlatformHelperConnector -- production connector using named pipes / Unix sockets
+// ---------------------------------------------------------------------------
+
+class PlatformHelperConnector : public HelperConnector {
+public:
+    std::unique_ptr<HelperClient> connect(const HelperConnectorConfig& config) override {
+        PipeClientConfig pc;
+        pc.pipe_path = resolve_endpoint(config);
+        pc.connect_timeout_ms = config.connect_timeout_ms;
+
+        auto client = std::make_unique<PipeHelperClient>(pc);
+        if (!client->connect()) {
+            return nullptr;
+        }
+        return client;
+    }
+
+    bool is_helper_available() const override {
+        // Best-effort: try connecting to the default endpoint.
+        // Returns false if the daemon is not running.
+        PipeClientConfig pc;
+        pc.pipe_path = default_endpoint();
+        pc.connect_timeout_ms = 500;  // quick probe
+        PipeHelperClient probe(pc);
+        return probe.connect();
+    }
+
+private:
+    /// Determine the pipe / socket endpoint from the connector config.
+    static std::string resolve_endpoint(const HelperConnectorConfig& config) {
+        // If caller explicitly provided a path via helper_executable_path
+        // that looks like a pipe/socket endpoint, use it directly.
+        // (This allows override for testing.)
+        if (!config.helper_executable_path.empty()) {
+            const auto& p = config.helper_executable_path;
+#ifdef _WIN32
+            // On Windows, named pipes start with \\.\pipe\
+            if (p.find("\\\\.\\pipe\\") == 0 || p.find("\\\\?\\pipe\\") == 0)
+                return p;
+#else
+            // On POSIX, absolute paths are socket paths
+            if (!p.empty() && p[0] == '/')
+                return p;
+#endif
+        }
+        return default_endpoint();
+    }
+
+    /// Platform-specific default endpoint for the Helper daemon.
+    static std::string default_endpoint() {
+#ifdef _WIN32
+        return "\\\\.\\pipe\\exv-helper";
+#elif defined(__APPLE__)
+        return "/var/run/exv-helper.sock";
+#else
+        return "/var/run/exv-helper.sock";
+#endif
+    }
+};
+
+// ---------------------------------------------------------------------------
+// StubHelperClient -- kept for unit testing only (no real IPC).
 // ---------------------------------------------------------------------------
 
 class StubHelperClient : public HelperClient {
@@ -86,7 +149,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// StubHelperConnector -- platform factory returns a stub for now.
+// StubHelperConnector -- for unit testing only.
 // ---------------------------------------------------------------------------
 
 class StubHelperConnector : public HelperConnector {
@@ -107,6 +170,10 @@ public:
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<HelperConnector> HelperConnector::create() {
+    return std::make_unique<PlatformHelperConnector>();
+}
+
+std::unique_ptr<HelperConnector> HelperConnector::create_stub() {
     return std::make_unique<StubHelperConnector>();
 }
 

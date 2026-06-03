@@ -6,7 +6,9 @@ cmake-build-*/
 dbg/
 *.o
 *.d
+*.a
 exv
+Testing/
 
 # Generated files
 src/webui_assets.hpp
@@ -38,6 +40,9 @@ runtime/*
 
 # Sync conflict artifacts
 *sync-conflict*
+
+# Screenshots / dev artifacts
+webui/electron-shot*.png
 
 # Legacy
 bash/
