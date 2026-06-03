@@ -17,6 +17,7 @@
     "desktop:package:dir": "electron-builder --dir --config electron-builder.config.cjs",
     "desktop:debug": "npm run desktop:compile && npm run desktop:package:dir",
     "desktop:build": "npm run desktop:compile && npm run desktop:package",
+    "test:rpc": "npx tsx desktop/main/__tests__/core-rpc-client.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {
