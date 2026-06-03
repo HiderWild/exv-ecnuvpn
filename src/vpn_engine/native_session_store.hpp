@@ -39,6 +39,11 @@ struct NativeSessionSnapshot {
   std::string failure_message;
 };
 
+// D3: NativeSessionEventRecorder is LEGACY-ONLY — used by run_native_supervisor()
+// in vpn.cpp (the fallback path when TunnelController is unavailable).
+// The new TunnelController architecture uses EngineEventBridge and manages state
+// in-memory via TunnelStatusSnapshot.  load/read functions are preserved for
+// crash recovery but the new architecture never creates this recorder.
 class NativeSessionEventRecorder final : public EventSink {
 public:
   NativeSessionEventRecorder(std::string config_dir,

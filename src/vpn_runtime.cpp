@@ -110,6 +110,11 @@ RuntimeStatusSnapshot read_runtime_status_snapshot(const Config &cfg,
   RuntimeStatusSnapshot snapshot;
 
   if (cfg.vpn_engine == "native") {
+    // D3: This path reads native-session-state.json for status when the
+    // legacy supervisor fallback is active.  The TunnelController path
+    // (app_api.cpp status.get) reads from in-memory TunnelStatusSnapshot
+    // instead.  This code path is used by: CLI 'exv status', direct fallback
+    // connect (linux/darwin), and status_fallback_without_helper.
     vpn_engine::NativeSessionProbe native_probe;
     native_probe.is_process_alive = probe.is_process_alive;
     vpn_engine::NativeSessionSnapshot native =
