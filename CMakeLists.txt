@@ -50,8 +50,13 @@ set(EXV_COMMON_SOURCES
     src/config_api.cpp
     src/crypto.cpp
     src/platform/common/backend_resolver.cpp
+    src/platform/common/credential_store.cpp
+    src/platform/common/dns_model.cpp
     src/platform/common/oneshot_bootstrap.cpp
+    src/platform/common/packet_device_factory.cpp
+    src/platform/common/platform_network_ops.cpp
     src/platform/common/proxy_tun_detector.cpp
+    src/platform/common/route_model.cpp
     src/openconnect_log.cpp
     src/vpn_engine/native_engine.cpp
     src/vpn_engine/native_session_store.cpp
@@ -69,6 +74,10 @@ set(EXV_COMMON_SOURCES
 
 set(EXV_HELPER_RUNTIME_SOURCES
     src/helper.cpp
+    src/helper_common/helper_messages.cpp
+    src/helper_runtime/helper_request_dispatcher.cpp
+    src/helper_runtime/helper_server.cpp
+    src/helper_v2_handler.cpp
 )
 
 set(EXV_PLATFORM_SOURCES)
@@ -110,6 +119,7 @@ if(APPLE)
         src/platform/darwin/vpn_supervisor_process.cpp
         src/platform/darwin/path_utils.cpp
         src/platform/darwin/service_status.cpp
+        src/platform/darwin/darwin_keychain_store.cpp
         src/platform/common/driver_status_stub.cpp
     )
 elseif(UNIX AND NOT APPLE)
@@ -161,6 +171,8 @@ elseif(WIN32)
         src/platform/win32/path_utils.cpp
         src/platform/win32/service_status.cpp
         src/platform/win32/driver_status.cpp
+        src/platform/win32/win_route_ops.cpp
+        src/platform/win32/win_credential_store.cpp
     )
 else()
     message(FATAL_ERROR "Unsupported platform. Supported: macOS, Linux, Windows.")
@@ -273,6 +285,19 @@ target_include_directories(platform_status_models_test PRIVATE
 )
 
 add_test(NAME platform_status_models_test COMMAND platform_status_models_test)
+
+add_executable(platform_network_ops_model_test
+    tests/platform_network_ops_model_test.cpp
+    src/platform/common/route_model.cpp
+    src/platform/common/dns_model.cpp
+)
+
+target_include_directories(platform_network_ops_model_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME platform_network_ops_model_test COMMAND platform_network_ops_model_test)
 
 add_executable(feedback_test
     tests/feedback_test.cpp
@@ -756,6 +781,426 @@ if(APPLE)
 
     add_test(NAME darwin_native_tls_stream_test COMMAND darwin_native_tls_stream_test)
 endif()
+
+# ===========================================================================
+# Phase 1 architecture tests
+# ===========================================================================
+
+add_executable(reconnect_policy_test
+    tests/reconnect_policy_test.cpp
+    src/core/reconnect_policy.cpp
+)
+
+target_include_directories(reconnect_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME reconnect_policy_test COMMAND reconnect_policy_test)
+
+add_executable(reconnect_deterministic_test
+    tests/reconnect_deterministic_test.cpp
+    src/core/reconnect_policy.cpp
+)
+
+target_include_directories(reconnect_deterministic_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME reconnect_deterministic_test COMMAND reconnect_deterministic_test)
+
+add_executable(startup_failure_test
+    tests/startup_failure_test.cpp
+    src/core/native_startup_failure.cpp
+)
+
+target_include_directories(startup_failure_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME startup_failure_test COMMAND startup_failure_test)
+
+add_executable(core_error_mapper_test
+    tests/core_error_mapper_test.cpp
+    src/core/core_error_mapper.cpp
+)
+
+target_include_directories(core_error_mapper_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME core_error_mapper_test COMMAND core_error_mapper_test)
+
+add_executable(tunnel_controller_state_machine_test
+    tests/tunnel_controller_state_machine_test.cpp
+)
+
+target_include_directories(tunnel_controller_state_machine_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME tunnel_controller_state_machine_test COMMAND tunnel_controller_state_machine_test)
+
+add_executable(tunnel_controller_integration_test
+    tests/tunnel_controller_integration_test.cpp
+    tests/support/fake_helper.cpp
+    tests/support/fake_platform_network_ops.cpp
+    tests/support/fake_core_ui_client.cpp
+    src/core/reconnect_policy.cpp
+)
+
+target_include_directories(tunnel_controller_integration_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME tunnel_controller_integration_test COMMAND tunnel_controller_integration_test)
+
+add_executable(helper_lease_manager_test
+    tests/helper_lease_manager_test.cpp
+    src/helper_runtime/session_lease_manager.cpp
+)
+
+target_include_directories(helper_lease_manager_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME helper_lease_manager_test COMMAND helper_lease_manager_test)
+
+add_executable(helper_cleanup_registry_test
+    tests/helper_cleanup_registry_test.cpp
+    src/helper_runtime/cleanup_registry.cpp
+)
+
+target_include_directories(helper_cleanup_registry_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME helper_cleanup_registry_test COMMAND helper_cleanup_registry_test)
+
+# MinGW DLL fix: tests that link against exv-core (which pulls in nlohmann/json
+# and other headers) need the MinGW runtime DLLs on PATH.  On CI runners the
+# toolchain bin dir is usually already on PATH, but local developer machines may
+# not have it.  We inject the exv-core build directory (which contains the
+# MinGW DLLs next to the test binaries) via the ENVIRONMENT test property.
+if(WIN32 AND NOT MSVC)
+    set_tests_properties(helper_cleanup_registry_test PROPERTIES
+        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
+    )
+endif()
+
+add_executable(helper_v2_contract_test
+    tests/helper_v2_contract_test.cpp
+    tests/support/fake_helper.cpp
+    src/helper_common/helper_messages.cpp
+    src/helper_runtime/session_lease_manager.cpp
+    src/helper_runtime/cleanup_registry.cpp
+    src/helper_runtime/command_validator.cpp
+    src/helper_runtime/helper_lifecycle_policy.cpp
+)
+
+target_include_directories(helper_v2_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+add_test(NAME helper_v2_contract_test COMMAND helper_v2_contract_test)
+
+# MinGW DLL fix for helper_v2_contract_test (see helper_cleanup_registry_test above)
+if(WIN32 AND NOT MSVC)
+    set_tests_properties(helper_v2_contract_test PROPERTIES
+        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
+    )
+endif()
+
+add_executable(app_api_rpc_dispatcher_test
+    tests/app_api_rpc_dispatcher_test.cpp
+    src/core_api/app_rpc_dispatcher.cpp
+)
+
+target_include_directories(app_api_rpc_dispatcher_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME app_api_rpc_dispatcher_test COMMAND app_api_rpc_dispatcher_test)
+
+# --- Phase 4-6: core_api action tests ---
+
+add_executable(vpn_actions_test
+    tests/core_api/vpn_actions_test.cpp
+    src/core_api/app_rpc_dispatcher.cpp
+    src/core_api/vpn_actions.cpp
+    src/core/tunnel_controller.cpp
+    src/core/timing.cpp
+    src/core/core_error_mapper.cpp
+    src/core/reconnect_policy.cpp
+    src/helper_common/helper_messages.cpp
+    tests/support/fake_helper.cpp
+    tests/support/fake_platform_network_ops.cpp
+)
+
+target_include_directories(vpn_actions_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+target_link_libraries(vpn_actions_test PRIVATE Threads::Threads)
+
+add_test(NAME vpn_actions_test COMMAND vpn_actions_test)
+
+add_executable(config_actions_test
+    tests/core_api/config_actions_test.cpp
+    src/core_api/app_rpc_dispatcher.cpp
+    src/core_api/config_actions.cpp
+)
+
+target_include_directories(config_actions_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME config_actions_test COMMAND config_actions_test)
+
+add_executable(service_actions_test
+    tests/core_api/service_actions_test.cpp
+    src/core_api/app_rpc_dispatcher.cpp
+    src/core_api/service_actions.cpp
+)
+
+target_include_directories(service_actions_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME service_actions_test COMMAND service_actions_test)
+
+add_executable(route_actions_test
+    tests/core_api/route_actions_test.cpp
+    src/core_api/app_rpc_dispatcher.cpp
+    src/core_api/route_actions.cpp
+)
+
+target_include_directories(route_actions_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME route_actions_test COMMAND route_actions_test)
+
+add_executable(error_contract_test
+    tests/core_api/error_contract_test.cpp
+    src/feedback/error_contract.cpp
+)
+
+target_include_directories(error_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME error_contract_test COMMAND error_contract_test)
+
+# MinGW DLL fix for core_api tests
+if(WIN32 AND NOT MSVC)
+    get_filename_component(MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set_tests_properties(vpn_actions_test PROPERTIES
+        ENVIRONMENT "PATH=${MINGW_BIN_DIR};$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
+    )
+endif()
+
+add_executable(native_core_connect_flow_test
+    tests/integration/native_core_connect_flow_test.cpp
+    tests/support/fake_helper.cpp
+    tests/support/fake_platform_network_ops.cpp
+)
+
+target_include_directories(native_core_connect_flow_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+add_test(NAME native_core_connect_flow_test COMMAND native_core_connect_flow_test)
+
+add_executable(helper_timeout_cleanup_test
+    tests/integration/helper_timeout_cleanup_test.cpp
+    src/helper_runtime/session_lease_manager.cpp
+    src/helper_runtime/helper_lifecycle_policy.cpp
+)
+
+target_include_directories(helper_timeout_cleanup_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME helper_timeout_cleanup_test COMMAND helper_timeout_cleanup_test)
+
+add_executable(no_secret_in_argv_test
+    tests/security/no_secret_in_argv_test.cpp
+)
+
+target_include_directories(no_secret_in_argv_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME no_secret_in_argv_test COMMAND no_secret_in_argv_test)
+
+add_executable(no_secret_in_logs_test
+    tests/security/no_secret_in_logs_test.cpp
+    src/core/core_error_mapper.cpp
+)
+
+
+target_include_directories(no_secret_in_logs_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME no_secret_in_logs_test COMMAND no_secret_in_logs_test)
+
+add_executable(credential_store_model_test
+    tests/credential_store_model_test.cpp
+    src/platform/common/credential_store.cpp
+)
+
+if(WIN32)
+    target_sources(credential_store_model_test PRIVATE src/platform/win32/win_credential_store.cpp)
+    target_link_libraries(credential_store_model_test PRIVATE advapi32)
+elseif(APPLE)
+    target_sources(credential_store_model_test PRIVATE src/platform/darwin/darwin_keychain_store.cpp)
+    target_link_libraries(credential_store_model_test PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
+
+target_include_directories(credential_store_model_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME credential_store_model_test COMMAND credential_store_model_test)
+
+add_executable(helper_messages_connector_test
+    tests/helper_messages_connector_test.cpp
+    src/helper_common/helper_messages.cpp
+    src/helper_common/helper_connector.cpp
+)
+
+target_include_directories(helper_messages_connector_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME helper_messages_connector_test COMMAND helper_messages_connector_test)
+
+# MinGW DLL fix for helper_messages_connector_test (see helper_cleanup_registry_test above)
+if(WIN32 AND NOT MSVC)
+    set_tests_properties(helper_messages_connector_test PROPERTIES
+        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:exv-core>;$ENV{PATH}"
+    )
+endif()
+
+# ===========================================================================
+# Test labels for selective test runs
+# Usage: ctest -L architecture  |  ctest -L core  |  ctest -L helper
+#
+# NOTE: We use set_property(TEST ... APPEND PROPERTY LABELS ...) so that a
+# test can carry multiple labels (e.g. both "architecture" and "security").
+# Plain set_tests_properties(... LABELS ...) would overwrite prior labels.
+# ===========================================================================
+
+# All Phase 1+ architecture tests
+set_property(TEST
+    reconnect_policy_test
+    core_error_mapper_test
+    tunnel_controller_state_machine_test
+    tunnel_controller_integration_test
+    helper_lease_manager_test
+    helper_cleanup_registry_test
+    helper_v2_contract_test
+    app_api_rpc_dispatcher_test
+    native_core_connect_flow_test
+    helper_timeout_cleanup_test
+    no_secret_in_argv_test
+    no_secret_in_logs_test
+    credential_store_model_test
+    helper_messages_connector_test
+    platform_network_ops_model_test
+    vpn_actions_test
+    config_actions_test
+    service_actions_test
+    route_actions_test
+    error_contract_test
+    APPEND PROPERTY LABELS "architecture"
+)
+
+# Security-focused tests
+set_property(TEST
+    no_secret_in_argv_test
+    no_secret_in_logs_test
+    credential_store_model_test
+    APPEND PROPERTY LABELS "security"
+)
+
+# Core module tests
+set_property(TEST
+    reconnect_policy_test
+    core_error_mapper_test
+    tunnel_controller_state_machine_test
+    tunnel_controller_integration_test
+    APPEND PROPERTY LABELS "core"
+)
+
+# Helper subsystem tests
+set_property(TEST
+    helper_lease_manager_test
+    helper_cleanup_registry_test
+    helper_v2_contract_test
+    helper_messages_connector_test
+    helper_timeout_cleanup_test
+    APPEND PROPERTY LABELS "helper"
+)
+
+# Platform abstraction tests
+set_property(TEST
+    platform_network_ops_model_test
+    credential_store_model_test
+    APPEND PROPERTY LABELS "platform"
+)
+
+# Integration tests (cross-module)
+set_property(TEST
+    native_core_connect_flow_test
+    tunnel_controller_integration_test
+    helper_timeout_cleanup_test
+    APPEND PROPERTY LABELS "integration"
+)
+
+# UI / RPC contract tests
+set_property(TEST
+    app_api_rpc_dispatcher_test
+    vpn_actions_test
+    config_actions_test
+    service_actions_test
+    route_actions_test
+    error_contract_test
+    APPEND PROPERTY LABELS "ui-contract"
+)
+
+# Tests that crash due to MinGW DLL loading issue (0xc0000139).
+# Skip these on broken toolchains: ctest -LE env-sensitive
+set_property(TEST
+    helper_cleanup_registry_test
+    helper_v2_contract_test
+    APPEND PROPERTY LABELS "env-sensitive"
+)
 
 # Install target
 if(WIN32)
