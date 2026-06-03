@@ -49,10 +49,12 @@ set(EXV_COMMON_SOURCES
     src/config_manager.cpp
     src/config_api.cpp
     src/core/core_process.cpp
+    src/core/engine_event_bridge.cpp
     src/core/tunnel_controller.cpp
     src/core/timing.cpp
     src/core/core_error_mapper.cpp
     src/core/reconnect_policy.cpp
+    src/core/timer_scheduler.cpp
     src/core_api/app_rpc_dispatcher.cpp
     src/core_api/vpn_actions.cpp
     src/core_api/config_actions.cpp
@@ -813,6 +815,20 @@ target_include_directories(reconnect_policy_test PRIVATE
 
 add_test(NAME reconnect_policy_test COMMAND reconnect_policy_test)
 
+add_executable(timer_scheduler_test
+    tests/timer_scheduler_test.cpp
+    src/core/timer_scheduler.cpp
+)
+
+target_include_directories(timer_scheduler_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(timer_scheduler_test PRIVATE Threads::Threads)
+
+add_test(NAME timer_scheduler_test COMMAND timer_scheduler_test)
+
 add_executable(reconnect_deterministic_test
     tests/reconnect_deterministic_test.cpp
     src/core/reconnect_policy.cpp
@@ -848,6 +864,18 @@ target_include_directories(core_error_mapper_test PRIVATE
 )
 
 add_test(NAME core_error_mapper_test COMMAND core_error_mapper_test)
+
+add_executable(engine_event_bridge_test
+    tests/engine_event_bridge_test.cpp
+    src/core/engine_event_bridge.cpp
+)
+
+target_include_directories(engine_event_bridge_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME engine_event_bridge_test COMMAND engine_event_bridge_test)
 
 add_executable(tunnel_controller_state_machine_test
     tests/tunnel_controller_state_machine_test.cpp
@@ -1270,9 +1298,11 @@ set(_release_blocking_tests
     native_auth_session_json_test
     vpn_supervisor_payload_test
     reconnect_policy_test
+    timer_scheduler_test
     reconnect_deterministic_test
     startup_failure_test
     core_error_mapper_test
+    engine_event_bridge_test
     tunnel_controller_state_machine_test
     helper_lease_manager_test
     helper_cleanup_registry_test
@@ -1358,7 +1388,9 @@ endif()
 # All Phase 1+ architecture tests
 set_property(TEST
     reconnect_policy_test
+    timer_scheduler_test
     core_error_mapper_test
+    engine_event_bridge_test
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
     helper_lease_manager_test
@@ -1397,6 +1429,7 @@ set_property(TEST
 # Core module tests
 set_property(TEST
     reconnect_policy_test
+    timer_scheduler_test
     core_error_mapper_test
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
