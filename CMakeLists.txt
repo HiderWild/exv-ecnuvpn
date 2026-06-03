@@ -927,6 +927,23 @@ target_link_libraries(core_process_test PRIVATE Threads::Threads)
 
 add_test(NAME core_process_test COMMAND core_process_test)
 
+add_executable(core_process_lifecycle_test
+    tests/core_process_lifecycle_test.cpp
+)
+
+target_include_directories(core_process_lifecycle_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(core_process_lifecycle_test PRIVATE exv-core Threads::Threads)
+
+target_compile_definitions(core_process_lifecycle_test PRIVATE
+    ECNUVPN_VERSION="${PROJECT_VERSION}"
+)
+
+add_test(NAME core_process_lifecycle_test COMMAND core_process_lifecycle_test)
+
 add_executable(tunnel_controller_integration_test
     tests/tunnel_controller_integration_test.cpp
     tests/support/fake_helper.cpp
@@ -1335,6 +1352,7 @@ set(_release_blocking_tests
     error_contract_test
     helper_messages_connector_test
     core_process_test
+    core_process_lifecycle_test
     helper_delegating_network_ops_test
 )
 set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
@@ -1432,6 +1450,7 @@ set_property(TEST
     native_authenticator_test
     native_auth_session_json_test
     core_process_test
+    core_process_lifecycle_test
     helper_delegating_network_ops_test
     APPEND PROPERTY LABELS "architecture"
 )
@@ -1453,6 +1472,7 @@ set_property(TEST
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
     core_process_test
+    core_process_lifecycle_test
     APPEND PROPERTY LABELS "core"
 )
 
@@ -1483,6 +1503,7 @@ set_property(TEST
     route_actions_test
     error_contract_test
     core_process_test
+    core_process_lifecycle_test
     APPEND PROPERTY LABELS "ui-contract"
 )
 

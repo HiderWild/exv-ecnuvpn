@@ -9,6 +9,7 @@
 // Forward declarations — the real interfaces live in helper / platform.
 namespace exv::helper { class HelperClient; }
 namespace exv::platform { class PlatformNetworkOps; }
+namespace ecnuvpn { struct Config; }
 
 namespace exv::core {
 
@@ -20,6 +21,11 @@ public:
         ReconnectConfig reconnect_config = {}
     );
     ~TunnelController();
+
+    /// Provide the VPN config and plaintext password used by the native
+    /// engine.  Must be called before connect() when using the real engine.
+    void set_vpn_config(const ecnuvpn::Config& cfg,
+                        const std::string& plaintext_password);
 
     // User intent interface
     void connect(UserIntent intent);
