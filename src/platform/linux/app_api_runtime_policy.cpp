@@ -42,6 +42,11 @@ nlohmann::json try_connect_direct_fallback(const Config &cfg,
   prepare_direct_fallback_runtime();
   int result = vpn::start_with_password(cfg, password, 0);
   if (result != 0) {
+    if (result == vpn::kUseTunnelController) {
+      return nlohmann::json{{"ok", false},
+                            {"code", "use_tunnel_controller"},
+                            {"error", "Native engine requires TunnelController. Use the desktop app to connect."}};
+    }
     if (result == vpn::kVpnInitialConnectFailedExitCode) {
       return nlohmann::json{{"ok", false},
                             {"code", "auth_failed"},

@@ -20,6 +20,7 @@
 #include "utils.hpp"
 #include "virtual_network.hpp"
 #include "vpn_engine/native_engine.hpp"
+#include "vpn_engine/native_session_store.hpp"
 #include "core/tunnel_controller.hpp"
 #include "helper_common/helper_connector.hpp"
 #include "platform/common/helper_delegating_network_ops.hpp"
@@ -367,6 +368,29 @@ nlohmann::json runtime_status_json(const Config &cfg) {
 }
 
 // =========================================================================
+// D3: Legacy state-file cleanup for TunnelController path.
+//
+// When connecting via TunnelController (Core-owned mode), the in-memory
+// TunnelStatusSnapshot replaces file-based persistence.  Any leftover
+// native-session-state.json or ecnuvpn-supervisor.pid from a previous
+// legacy-supervisor session must be cleaned up so crash recovery does not
+// misinterpret stale state.  The read-side functions (load_native_session_state,
+// read_native_session_snapshot) are preserved for crash recovery but the
+// new architecture never writes these files.
+// =========================================================================
+
+void cleanup_legacy_supervisor_state_files() {
+  const std::string config_dir = utils::get_config_dir();
+  // Remove native-session-state.json and route-ready marker left by the
+  // legacy NativeSessionEventRecorder.
+  vpn_engine::clear_native_session_state(config_dir);
+  // Remove ecnuvpn-supervisor.pid left by the legacy write_supervisor_pid().
+  std::string supervisor_pid = utils::get_supervisor_pid_path();
+  if (utils::file_exists(supervisor_pid))
+    std::remove(supervisor_pid.c_str());
+}
+
+// =========================================================================
 // TunnelController singleton — lazily initialized on first VPN action.
 // Holds the HelperClient, PlatformNetworkOps, and TunnelController as a
 // single unit so their lifetimes are correctly managed.
@@ -693,6 +717,14 @@ nlohmann::json handle_action(const std::string &action,
       }
 
       controller->set_vpn_config(cfg, password);
+
+      // D3: Remove any legacy supervisor state files (native-session-state.json,
+      // ecnuvpn-supervisor.pid) from a previous legacy-supervisor session so
+      // crash recovery does not misinterpret stale state.  The new architecture
+      // uses TunnelController's in-memory TunnelStatusSnapshot exclusively.
+      cleanup_legacy_supervisor_state_files();
+      timing.mark("cleanup_legacy_state");
+
       exv::core::UserIntent intent;
       intent.desired_connected = true;
       intent.auto_reconnect = cfg.auto_reconnect;
@@ -713,6 +745,8 @@ nlohmann::json handle_action(const std::string &action,
       if (controller) {
         controller->disconnect(exv::core::DisconnectReason::UserRequested);
       }
+      // D3: Ensure no legacy state files remain after disconnect.
+      cleanup_legacy_supervisor_state_files();
       return disconnected_status(cfg);
     }
 

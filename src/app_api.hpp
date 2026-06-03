@@ -12,5 +12,11 @@ namespace app_api {
 nlohmann::json handle_action(const std::string &action,
                              const nlohmann::json &payload = nlohmann::json::object());
 
+// Returns true if a TunnelController has been initialized (i.e., the
+// Core-owned mode is active). When true, vpn::start_with_password() should
+// skip the native-engine supervisor path — the TunnelController manages the
+// NativeVpnEngineSession lifecycle via CoreSessionRunner.
+bool is_tunnel_controller_active();
+
 } // namespace app_api
 } // namespace ecnuvpn
