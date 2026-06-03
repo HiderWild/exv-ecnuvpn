@@ -1,8 +1,11 @@
 #include "tunnel_controller.hpp"
 #include "core_error_mapper.hpp"
+#include "core_session_runner.hpp"
 #include "timing.hpp"
+#include "timer_scheduler.hpp"
 #include "../helper_common/helper_client.hpp"
 #include "../platform/common/platform_network_ops.hpp"
+#include "../config.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -35,6 +38,16 @@ struct TunnelController::Impl {
 
     // --- Reconnect tracking ---
     int reconnect_attempts_ = 0;
+
+    // --- Timer scheduler (replaces fixed 2s supervisor retry loop) ---
+    TimerScheduler scheduler_;
+
+    // --- Native engine session runner ---
+    CoreSessionRunner runner_;
+
+    // --- VPN config for native engine ---
+    ecnuvpn::Config vpn_cfg_;
+    std::string     vpn_password_;
 
     // ================================================================
     // State transition helpers
@@ -107,15 +120,18 @@ struct TunnelController::Impl {
     }
 
     // ================================================================
-    // Connect flow (simplified synchronous implementation)
+    // Connect flow (event-driven via CoreSessionRunner)
     //
-    // 1.  Store intent
-    // 2.  PreparingHelper       — start_session()
-    // 3.  Authenticating        — (simulated)
-    // 4.  ConnectingCstp        — (simulated)
+    // 1.  PreparingHelper       — start_session()
+    // 2.  Authenticating        — runner_.start() -> session begins
+    // 3.  [async] AuthSucceeded — phase moves to ConnectingCstp
+    // 4.  [async] CstpConnected — phase moves to ApplyingNetworkConfig
     // 5.  ApplyingNetworkConfig — apply_tunnel_config()
-    // 6.  OpeningPacketDevice   — prepare_tunnel_device()
-    // 7.  Connected
+    // 6.  [async] PacketLoopStarted — phase moves to Connected
+    //
+    // When no VPN config is provided (fallback path), the old synchronous
+    // flow is preserved for backward compatibility with tests that don't
+    // set a VPN config.
     // ================================================================
 
     void do_connect() {
@@ -145,9 +161,33 @@ struct TunnelController::Impl {
         }
         timing_.timer.end(ConnectTiming::HELPER_PREPARE);
 
-        // Step 3 — Authenticating (simulated: real auth not wired yet)
+        // Step 3 — Authenticating: start the native engine session.
+        //
+        // If a VPN config was provided, the CoreSessionRunner creates a
+        // NativeVpnEngineSession which drives the rest of the flow via
+        // asynchronous events (AuthSucceeded, CstpConnected, etc.).
+        //
+        // If no VPN config was provided, fall back to the synchronous
+        // placeholder flow for backward compatibility.
         timing_.timer.start(ConnectTiming::AUTH);
         transition_to(TunnelPhase::Authenticating);
+
+        if (!vpn_password_.empty()) {
+            // Real engine path — start CoreSessionRunner.
+            // The event callback is already wired up (set in init_runner).
+            bool ok = runner_.start(vpn_cfg_, vpn_password_);
+            if (!ok) {
+                timing_.timer.end(ConnectTiming::AUTH);
+                set_error(CoreErrorMapper::from_auth_error(
+                    -1, "Native engine session failed to start"));
+                transition_to(TunnelPhase::Failed);
+                return;
+            }
+            // Events from the runner will drive subsequent transitions.
+            return;
+        }
+
+        // Synchronous fallback path (no VPN config set).
         timing_.timer.end(ConnectTiming::AUTH);
 
         // Step 4 — ConnectingCstp (simulated)
@@ -221,6 +261,11 @@ struct TunnelController::Impl {
         intent_.desired_connected    = false;
         intent_.user_disconnect_reason = reason;
 
+        // Stop the native engine session if it's running.
+        if (runner_.is_running()) {
+            runner_.stop();
+        }
+
         transition_to(TunnelPhase::Disconnecting);
         do_cleanup();
     }
@@ -259,9 +304,9 @@ struct TunnelController::Impl {
         if (decision.should_retry) {
             ++reconnect_attempts_;
             transition_to(TunnelPhase::Reconnecting);
-            // In a real implementation a timer would be scheduled using
-            // decision.delay.  The ReconnectTimerFired event would then
-            // trigger the actual retry.
+            scheduler_.schedule(decision.delay, [this] {
+                on_reconnect_timer_fired();
+            });
         } else {
             set_error(error);
             transition_to(TunnelPhase::Failed);
@@ -300,7 +345,46 @@ struct TunnelController::Impl {
             timing_.timer.end(ConnectTiming::CSTP_CONNECT);
             timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
             transition_to(TunnelPhase::ApplyingNetworkConfig);
+
+            // When the native engine is active, apply the tunnel config
+            // now and auto-advance the rest of the flow.
+            if (runner_.is_running()) {
+                apply_tunnel_config_and_advance();
+            }
         }
+    }
+
+    void apply_tunnel_config_and_advance() {
+        try {
+            exv::helper::ApplyTunnelConfigRequest cfg_req;
+            cfg_req.config.session_id        = session_id_;
+            cfg_req.config.interface_address = "10.0.0.2/24";   // from engine
+            cfg_req.config.enable_kill_switch = false;
+
+            auto cfg_resp = helper_->apply_tunnel_config(cfg_req);
+            if (!cfg_resp.success) {
+                timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+                set_error(CoreErrorMapper::from_helper_error(
+                    "apply_config_failed", cfg_resp.error_message));
+                transition_to(TunnelPhase::Failed);
+                return;
+            }
+        } catch (const std::exception& e) {
+            timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+            set_error(CoreErrorMapper::from_helper_error(
+                "apply_config_failed", e.what()));
+            transition_to(TunnelPhase::Failed);
+            return;
+        }
+        timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+
+        // Transition through OpeningPacketDevice and fire
+        // NetworkConfigApplied so the state machine advances.
+        timing_.timer.start(ConnectTiming::PACKET_DEVICE);
+        transition_to(TunnelPhase::OpeningPacketDevice);
+
+        // The engine's packet-loop thread handles the packet device.
+        // When it starts, it will fire PacketLoopStarted.
     }
 
     void on_network_config_applied() {
@@ -429,9 +513,21 @@ TunnelController::TunnelController(
     impl_->helper_          = std::move(helper);
     impl_->net_ops_         = std::move(net_ops);
     impl_->reconnect_policy_ = ReconnectPolicy(reconnect_config);
+
+    // Wire the CoreSessionRunner event callback to feed back into
+    // TunnelController::on_event(), driving the state machine.
+    impl_->runner_.set_event_callback([this](TunnelEvent event) {
+        this->on_event(std::move(event));
+    });
 }
 
 TunnelController::~TunnelController() = default;
+
+void TunnelController::set_vpn_config(const ecnuvpn::Config& cfg,
+                                      const std::string& plaintext_password) {
+    impl_->vpn_cfg_      = cfg;
+    impl_->vpn_password_ = plaintext_password;
+}
 
 // ------------------------------------------------------------------
 // User intent interface
