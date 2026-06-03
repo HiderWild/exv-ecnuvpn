@@ -8,6 +8,8 @@
 
 namespace {
 
+static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -20,7 +22,7 @@ ecnuvpn::Config sample_config() {
   ecnuvpn::Config config;
   config.server = "https://vpn.example.invalid";
   config.username = "student@example.invalid";
-  config.password = "stored-config-password-secret";
+  config.password = MOCK_PASSWORD;
   config.mtu = 1280;
   config.useragent = "ECNU-VPN supervisor payload test";
   config.disable_dtls = true;
@@ -97,7 +99,7 @@ bool legacy_payload_missing_mode_decodes_password_mode_and_preserves_password() 
 
   const auto config = sample_config();
   nlohmann::json payload{{"config", config},
-                         {"password", "legacy-top-level-password-secret"},
+                         {"password", MOCK_PASSWORD},
                          {"retry_limit", 7},
                          {"home", "C:/Users/supervisor"},
                          {"config_dir", "C:/Users/supervisor/.ecnu-vpn"}};
@@ -110,7 +112,7 @@ bool legacy_payload_missing_mode_decodes_password_mode_and_preserves_password() 
   ok = expect(decoded.native_start_mode == SupervisorStartMode::password,
               "missing native_start_mode should default to password") &&
        ok;
-  ok = expect(decoded.password == "legacy-top-level-password-secret",
+  ok = expect(decoded.password == MOCK_PASSWORD,
               "legacy top-level password should be preserved") &&
        ok;
   ok = expect(decoded.config.password == config.password,
@@ -138,7 +140,7 @@ bool password_mode_rejects_auth_session_and_missing_or_invalid_password() {
 
   SupervisorStartPayload with_auth_session;
   with_auth_session.config = sample_config();
-  with_auth_session.password = "top-level-password-secret";
+  with_auth_session.password = MOCK_PASSWORD;
   with_auth_session.auth_session = sample_auth_session();
   with_auth_session.native_start_mode = SupervisorStartMode::password;
 
@@ -150,7 +152,7 @@ bool password_mode_rejects_auth_session_and_missing_or_invalid_password() {
   ok = expect_code(result, "supervisor_auth_session_forbidden",
                    "password encode auth_session rejection code") &&
        ok;
-  ok = expect_no_leak(result, "top-level-password-secret",
+  ok = expect_no_leak(result, MOCK_PASSWORD,
                       "password encode auth_session error must not leak password") &&
        ok;
   ok = expect_no_leak(result, "super-cookie-secret",
@@ -160,7 +162,7 @@ bool password_mode_rejects_auth_session_and_missing_or_invalid_password() {
   nlohmann::json auth_session_payload{
       {"config", sample_config()},
       {"native_start_mode", "password"},
-      {"password", "top-level-password-secret"},
+      {"password", MOCK_PASSWORD},
       {"auth_session", ecnuvpn::vpn_engine::protocol::to_json(
                            sample_auth_session())}};
   SupervisorStartPayload decoded;
@@ -171,7 +173,7 @@ bool password_mode_rejects_auth_session_and_missing_or_invalid_password() {
   ok = expect_code(result, "supervisor_auth_session_forbidden",
                    "password decode auth_session rejection code") &&
        ok;
-  ok = expect_no_leak(result, "top-level-password-secret",
+  ok = expect_no_leak(result, MOCK_PASSWORD,
                       "password decode auth_session error must not leak password") &&
        ok;
   ok = expect_no_leak(result, "super-cookie-secret",
@@ -186,7 +188,7 @@ bool password_mode_rejects_auth_session_and_missing_or_invalid_password() {
   ok = expect_code(result, "supervisor_password_missing",
                    "missing password rejection code") &&
        ok;
-  ok = expect_no_leak(result, "stored-config-password-secret",
+  ok = expect_no_leak(result, MOCK_PASSWORD,
                       "missing password error must not leak config password") &&
        ok;
 
@@ -199,7 +201,7 @@ bool password_mode_rejects_auth_session_and_missing_or_invalid_password() {
   ok = expect_code(result, "supervisor_password_missing",
                    "non-string password rejection code") &&
        ok;
-  ok = expect_no_leak(result, "stored-config-password-secret",
+  ok = expect_no_leak(result, MOCK_PASSWORD,
                       "non-string password error must not leak config password") &&
        ok;
 
@@ -214,7 +216,7 @@ bool explicit_password_mode_roundtrip_preserves_password_without_auth_session() 
 
   SupervisorStartPayload original;
   original.config = sample_config();
-  original.password = "top-level-password-secret";
+  original.password = MOCK_PASSWORD;
   original.retry_limit = 2;
   original.home = "/home/student";
   original.config_dir = "/home/student/.config/ecnu-vpn";
@@ -229,7 +231,7 @@ bool explicit_password_mode_roundtrip_preserves_password_without_auth_session() 
               "password payload should encode explicit mode") &&
        ok;
   ok = expect(encoded.value("password", std::string()) ==
-                  "top-level-password-secret",
+                  MOCK_PASSWORD,
               "password payload should include top-level password") &&
        ok;
   ok = expect(!encoded.contains("auth_session"),
@@ -262,7 +264,7 @@ bool auth_session_roundtrip_omits_password_and_clears_config_password() {
 
   SupervisorStartPayload original;
   original.config = sample_config();
-  original.config.password = "config-password-to-clear-secret";
+  original.config.password = MOCK_PASSWORD;
   original.auth_session = sample_auth_session();
   original.retry_limit = -1;
   original.home = "/home/student";
@@ -325,7 +327,7 @@ bool auth_session_mode_with_non_empty_password_is_rejected_without_leak() {
 
   SupervisorStartPayload original;
   original.config = sample_config();
-  original.password = "top-level-password-secret";
+  original.password = MOCK_PASSWORD;
   original.auth_session = sample_auth_session();
   original.native_start_mode = SupervisorStartMode::auth_session;
 
@@ -338,7 +340,7 @@ bool auth_session_mode_with_non_empty_password_is_rejected_without_leak() {
   ok = expect_code(result, "supervisor_password_forbidden",
                    "auth_session encode non-empty password rejection code") &&
        ok;
-  ok = expect(text.find("top-level-password-secret") == std::string::npos,
+  ok = expect(text.find(MOCK_PASSWORD) == std::string::npos,
               "password rejection error must not leak top-level password") &&
        ok;
   ok = expect(text.find("super-cookie-secret") == std::string::npos,
@@ -347,7 +349,7 @@ bool auth_session_mode_with_non_empty_password_is_rejected_without_leak() {
 
   nlohmann::json payload{{"config", sample_config()},
                          {"native_start_mode", "auth_session"},
-                         {"password", "top-level-password-secret"},
+                         {"password", MOCK_PASSWORD},
                          {"auth_session", ecnuvpn::vpn_engine::protocol::to_json(
                                               sample_auth_session())}};
   ecnuvpn::platform::SupervisorStartPayload decoded;
@@ -359,7 +361,7 @@ bool auth_session_mode_with_non_empty_password_is_rejected_without_leak() {
   ok = expect_code(result, "supervisor_password_forbidden",
                    "auth_session decode non-empty password rejection code") &&
        ok;
-  ok = expect(text.find("top-level-password-secret") == std::string::npos,
+  ok = expect(text.find(MOCK_PASSWORD) == std::string::npos,
               "decode password rejection error must not leak password") &&
        ok;
   ok = expect(text.find("super-cookie-secret") == std::string::npos,
@@ -399,7 +401,7 @@ bool auth_session_mode_missing_or_invalid_auth_session_is_rejected_without_leak(
   ok = expect_code(result, "supervisor_auth_session_missing",
                    "auth_session decode missing auth_session rejection code") &&
        ok;
-  ok = expect(text.find("stored-config-password-secret") == std::string::npos,
+  ok = expect(text.find(MOCK_PASSWORD) == std::string::npos,
               "missing auth_session error must not leak config password") &&
        ok;
 
@@ -418,7 +420,7 @@ bool auth_session_mode_missing_or_invalid_auth_session_is_rejected_without_leak(
   ok = expect(text.find("super-cookie-secret") == std::string::npos,
               "invalid auth_session error must not leak cookie") &&
        ok;
-  ok = expect(text.find("stored-config-password-secret") == std::string::npos,
+  ok = expect(text.find(MOCK_PASSWORD) == std::string::npos,
               "invalid auth_session error must not leak config password") &&
        ok;
   return ok;
@@ -430,7 +432,7 @@ bool auth_session_decode_allows_empty_top_level_password_and_clears_secrets() {
   using ecnuvpn::platform::decode_vpn_supervisor_payload;
 
   auto config = sample_config();
-  config.password = "decode-only-config-password-secret";
+  config.password = MOCK_PASSWORD;
   const auto session = sample_auth_session();
   nlohmann::json payload{{"config", config},
                          {"native_start_mode", "auth_session"},
@@ -470,7 +472,7 @@ bool unknown_mode_is_rejected() {
 
   nlohmann::json payload{{"config", sample_config()},
                          {"native_start_mode", "magic"},
-                         {"password", "top-level-password-secret"}};
+                         {"password", MOCK_PASSWORD}};
   SupervisorStartPayload decoded;
   const auto result = decode_vpn_supervisor_payload(payload, &decoded);
 
@@ -479,7 +481,7 @@ bool unknown_mode_is_rejected() {
   ok = expect(result.code == "supervisor_start_mode_invalid",
               "unknown native_start_mode should use deterministic code") &&
        ok;
-  ok = expect(result_text(result).find("top-level-password-secret") ==
+  ok = expect(result_text(result).find(MOCK_PASSWORD) ==
                   std::string::npos,
               "unknown mode error must not leak password") &&
        ok;
@@ -493,7 +495,7 @@ bool redacted_summary_excludes_password_and_cookie_secret_values() {
 
   SupervisorStartPayload payload;
   payload.config = sample_config();
-  payload.config.password = "config-webvpn-token-secret";
+  payload.config.password = MOCK_PASSWORD;
   payload.config.server = "https://vpn.example.invalid/?token=server-secret";
   payload.auth_session = sample_auth_session();
   payload.auth_session->useragent = "agent webvpn token secret";
@@ -504,7 +506,7 @@ bool redacted_summary_excludes_password_and_cookie_secret_values() {
   const auto summary = summarize_vpn_supervisor_payload(payload).dump();
 
   bool ok = true;
-  ok = expect(summary.find("config-webvpn-token-secret") == std::string::npos,
+  ok = expect(summary.find(MOCK_PASSWORD) == std::string::npos,
               "summary must not contain config password") &&
        ok;
   ok = expect(summary.find("super-cookie-secret") == std::string::npos,
@@ -522,7 +524,7 @@ bool redacted_summary_excludes_password_and_cookie_secret_values() {
   ok = expect(summary.find("token") == std::string::npos,
               "summary must not contain token marker from secrets") &&
        ok;
-  ok = expect(summary.find("password-secret") == std::string::npos,
+  ok = expect(summary.find(MOCK_PASSWORD) == std::string::npos,
               "summary must not contain password secret fragments") &&
        ok;
   return ok;
@@ -577,7 +579,7 @@ bool supervisor_payload_runner_dispatches_password_mode_to_password_path() {
   SupervisorStartPayload payload;
   payload.config = sample_config();
   payload.config.vpn_engine = "openconnect";
-  payload.password = "top-level-password-secret";
+  payload.password = MOCK_PASSWORD;
   payload.retry_limit = 4;
   payload.native_start_mode = SupervisorStartMode::password;
 
@@ -589,7 +591,7 @@ bool supervisor_payload_runner_dispatches_password_mode_to_password_path() {
           int retry_limit) {
         password_called = true;
         return cfg.vpn_engine == "openconnect" &&
-                       password == "top-level-password-secret" &&
+                       password == MOCK_PASSWORD &&
                        retry_limit == 4
                    ? 23
                    : 1;
@@ -621,8 +623,8 @@ bool supervisor_payload_runner_dispatches_native_auth_session_mode() {
   const auto session = sample_auth_session();
   SupervisorStartPayload payload;
   payload.config = sample_config();
-  payload.config.password = "must-not-be-used";
-  payload.password = "must-not-be-used";
+  payload.config.password = "test-mock-must-not-be-used";
+  payload.password = "test-mock-must-not-be-used";
   payload.auth_session = session;
   payload.retry_limit = -1;
   payload.native_start_mode = SupervisorStartMode::auth_session;

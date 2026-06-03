@@ -1,0 +1,36 @@
+# Guardrail Allowlist
+#
+# Managed exceptions for architecture guardrail checks. Each entry documents
+# why the exception exists and when it should be removed.
+#
+# Format:
+#   - file: <relative path from repo root>
+#     rule: <guardrail rule name>
+#     owner: <team or person responsible>
+#     reason: <why this exception is acceptable>
+#     removal_phase: <when this entry should be deleted>
+
+allowlist:
+  - file: src/app_api_native_orchestration.hpp
+    rule: protocol_include_in_non_protocol
+    owner: core-team
+    reason: "Legacy orchestration path -- bridges core API to native auth. The header needs NativeAuthSession and NativeAuthRequest types to wire the orchestration flow."
+    removal_phase: "Phase 8 -- when legacy adapter is extracted into a separate module"
+
+  - file: src/platform/win32/native_tls_stream.hpp
+    rule: protocol_include_in_platform
+    owner: platform-team
+    reason: "Win32 NativeTlsStream implements the TlsStream interface defined in vpn_engine/protocol. The class inherits from TlsStream and must include its definition."
+    removal_phase: "Phase 8 -- when platform TLS is abstracted behind a platform-neutral interface"
+
+  - file: src/platform/darwin/native_tls_stream.hpp
+    rule: protocol_include_in_platform
+    owner: platform-team
+    reason: "Darwin NativeTlsStream implements the TlsStream interface defined in vpn_engine/protocol. The class inherits from TlsStream and must include its definition."
+    removal_phase: "Phase 8 -- when platform TLS is abstracted behind a platform-neutral interface"
+
+  - file: src/platform/common/vpn_supervisor_process.cpp
+    rule: protocol_include_in_platform
+    owner: platform-team
+    reason: "Supervisor process needs NativeAuthSession JSON serialization to pass auth session data to the helper via IPC. Uses native_auth_session_json.hpp for serialization only."
+    removal_phase: "Phase 8 -- when auth session serialization is moved to a shared utility"

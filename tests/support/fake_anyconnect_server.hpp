@@ -20,7 +20,7 @@ namespace support {
 
 struct FakeAnyConnectCredentials {
   std::string username = "alice";
-  std::string password = "correct-password";
+  std::string password = "test-mock-password-placeholder";
 };
 
 struct FakeAnyConnectServerOptions {

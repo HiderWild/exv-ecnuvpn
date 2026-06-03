@@ -8,6 +8,8 @@
 
 namespace {
 
+static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -34,7 +36,7 @@ ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
   out.server.port = 443;
   out.server.base_path = "/";
   out.username = "student@example.invalid";
-  out.password = "plaintext-secret";
+  out.password = MOCK_PASSWORD;
   out.useragent = "ECNU-VPN native-auth test";
   return out;
 }
@@ -196,7 +198,7 @@ bool plaintext_password_is_not_added_to_diagnostics_or_errors() {
 
   bool ok = true;
   auto request_options = options();
-  request_options.password = "do-not-print-this-password";
+  request_options.password = MOCK_PASSWORD;
 
   FakeProtocolTransport success_transport;
   success_transport.auth_result.ok = true;

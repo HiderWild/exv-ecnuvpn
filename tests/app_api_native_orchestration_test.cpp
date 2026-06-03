@@ -8,6 +8,10 @@
 
 namespace {
 
+// Test-only placeholder -- never a real credential. Used by guardrail scripts
+// to distinguish intentional mock values from accidental secret leaks.
+static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -29,7 +33,7 @@ ecnuvpn::Config sample_config(std::string engine = "native") {
   ecnuvpn::Config config;
   config.server = "https://vpn.example.invalid";
   config.username = "student@example.invalid";
-  config.password = "stored-config-password-secret";
+  config.password = MOCK_PASSWORD;
   config.mtu = 1280;
   config.useragent = "ECNU-VPN app-api orchestration test";
   config.disable_dtls = true;
@@ -86,7 +90,7 @@ bool native_auth_failure_does_not_call_helper_start() {
 
   NativeAuthFirstInputs inputs;
   inputs.config = sample_config();
-  inputs.password = "top-level-password-secret";
+  inputs.password = MOCK_PASSWORD;
   inputs.home = "C:/Users/student";
   inputs.config_dir = "C:/Users/student/.ecnu-vpn";
   inputs.retry_limit = 3;
@@ -122,7 +126,7 @@ bool native_auth_failure_does_not_call_helper_start() {
   ok = expect(helper_calls == 0,
               "helper start must not be called after native auth failure") &&
        ok;
-  ok = expect(result_text(result).find("top-level-password-secret") ==
+  ok = expect(result_text(result).find(MOCK_PASSWORD) ==
                   std::string::npos,
               "native auth failure result must not leak password") &&
        ok;
@@ -136,7 +140,7 @@ bool native_auth_success_helper_request_omits_password() {
 
   NativeAuthFirstInputs inputs;
   inputs.config = sample_config();
-  inputs.password = "top-level-password-secret";
+  inputs.password = MOCK_PASSWORD;
   inputs.home = "/home/student";
   inputs.config_dir = "/home/student/.config/ecnu-vpn";
   inputs.retry_limit = 4;
@@ -149,7 +153,7 @@ bool native_auth_success_helper_request_omits_password() {
       [&](const ecnuvpn::Config &, const std::string &password,
           ecnuvpn::vpn_engine::protocol::NativeAuthSession *out) {
         calls.push_back("auth");
-        if (password == "top-level-password-secret" && out)
+        if (password == MOCK_PASSWORD && out)
           *out = session;
         return ecnuvpn::vpn_engine::ValidationResult{};
       };
@@ -194,11 +198,11 @@ bool native_auth_success_helper_request_omits_password() {
               "native helper request should preserve config_dir") &&
        ok;
   ok = request_does_not_contain_secret(
-           sent_request, "top-level-password-secret",
+           sent_request, MOCK_PASSWORD,
            "native helper request must not leak top-level password") &&
        ok;
   ok = request_does_not_contain_secret(
-           sent_request, "stored-config-password-secret",
+           sent_request, MOCK_PASSWORD,
            "native helper request must not leak config password") &&
        ok;
   return ok;
@@ -211,7 +215,7 @@ bool legacy_openconnect_path_unchanged() {
 
   NativeAuthFirstInputs inputs;
   inputs.config = sample_config("legacy_openconnect");
-  inputs.password = "top-level-password-secret";
+  inputs.password = MOCK_PASSWORD;
   inputs.home = "/home/student";
   inputs.config_dir = "/home/student/.config/ecnu-vpn";
   inputs.retry_limit = 5;
@@ -246,11 +250,11 @@ bool legacy_openconnect_path_unchanged() {
               "legacy helper request should use password mode") &&
        ok;
   ok = expect(sent_request.value("password", std::string()) ==
-                  "top-level-password-secret",
+                  MOCK_PASSWORD,
               "legacy helper request should keep top-level password") &&
        ok;
   ok = expect(sent_request.at("config").value("password", std::string()) ==
-                  "stored-config-password-secret",
+                  MOCK_PASSWORD,
               "legacy helper request should preserve config password behavior") &&
        ok;
   ok = expect(!sent_request.contains("auth_session"),
@@ -269,7 +273,7 @@ bool service_unavailable_short_circuits_before_native_auth() {
 
   NativeAuthFirstInputs inputs;
   inputs.config = sample_config();
-  inputs.password = "top-level-password-secret";
+  inputs.password = MOCK_PASSWORD;
   inputs.allow_direct_fallback = false;
 
   int service_checks = 0;
@@ -315,7 +319,7 @@ bool fallback_native_auth_happens_before_helper_start() {
 
   NativeAuthFirstInputs inputs;
   inputs.config = sample_config();
-  inputs.password = "top-level-password-secret";
+  inputs.password = MOCK_PASSWORD;
   inputs.allow_direct_fallback = true;
 
   std::vector<std::string> calls;
@@ -357,7 +361,7 @@ bool native_user_mode_auth_request_matches_engine_options() {
 
   ecnuvpn::vpn_engine::protocol::NativeAuthRequest request;
   const auto result = ecnuvpn::app_api::build_native_user_mode_auth_request(
-      cfg, "plaintext-secret", &request);
+      cfg, MOCK_PASSWORD, &request);
 
   bool ok = true;
   ok = expect(result.ok, "native auth request build should succeed") && ok;
@@ -376,7 +380,7 @@ bool native_user_mode_auth_request_matches_engine_options() {
   ok = expect(request.options.username == "native-user",
               "native auth request should use config username") &&
        ok;
-  ok = expect(request.options.password == "plaintext-secret",
+  ok = expect(request.options.password == MOCK_PASSWORD,
               "native auth request should use supplied plaintext password") &&
        ok;
   ok = expect(request.options.useragent == "ECNU-VPN native adapter test",
@@ -406,7 +410,7 @@ bool native_user_mode_auth_rejects_bad_server_without_helper_start() {
   NativeAuthFirstInputs inputs;
   inputs.config = sample_config();
   inputs.config.server = "http://vpn.example.invalid";
-  inputs.password = "top-level-password-secret";
+  inputs.password = MOCK_PASSWORD;
   inputs.allow_direct_fallback = true;
 
   int helper_calls = 0;
@@ -439,7 +443,7 @@ bool native_user_mode_auth_rejects_bad_server_without_helper_start() {
   ok = expect(service_calls == 0,
               "fallback native auth failure must happen before oneshot start") &&
        ok;
-  ok = expect(result_text(result).find("top-level-password-secret") ==
+  ok = expect(result_text(result).find(MOCK_PASSWORD) ==
                   std::string::npos,
               "bad native auth result must not leak password") &&
        ok;

@@ -52,7 +52,7 @@ bool test_password_auth_failure() {
   FakeAnyConnectServer server;
 
   FakeAnyConnectCredentials credentials;
-  credentials.password = "wrong-password";
+  credentials.password = "test-mock-wrong-password";
 
   const auto result = server.password_authenticate(credentials);
   ok = expect(!result.ok, "password auth should reject bad credentials") && ok;

@@ -20,6 +20,8 @@
 
 namespace {
 
+static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -476,7 +478,7 @@ ecnuvpn::vpn_engine::VpnEngineConfig engine_config() {
   ecnuvpn::vpn_engine::VpnEngineConfig cfg;
   cfg.server = "https://vpn.example.invalid/+CSCOE+/logon.html";
   cfg.username = "alice";
-  cfg.password = "correct-password";
+  cfg.password = MOCK_PASSWORD;
   cfg.useragent = "ECNU-VPN native test";
   cfg.disable_dtls = true;
   cfg.auto_reconnect = false;

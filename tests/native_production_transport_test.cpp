@@ -12,6 +12,11 @@
 
 namespace {
 
+// General-purpose mock password for tests.
+static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
+// Mock password with special characters for percent-encoding tests.
+static const char *MOCK_PASSWORD_SPECIAL = "test-mock pass%!";
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -173,7 +178,7 @@ ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
   out.server.port = 443;
   out.server.base_path = "/";
   out.username = "student@example.invalid";
-  out.password = "s e%cret!";
+  out.password = MOCK_PASSWORD_SPECIAL;
   out.useragent = "ECNU-VPN native test";
   return out;
 }
@@ -252,7 +257,7 @@ bool authenticate_success_sends_login_get_post_and_returns_cookie() {
               "login submit should send preflight cookie") &&
        ok;
   ok = expect(contains(post_request,
-                       "\r\n\r\nusername=student%40example.invalid&password=s+e%25cret%21"),
+                       "\r\n\r\nusername=student%40example.invalid&password=test-mock+pass%25%21"),
               "login submit should percent-encode credentials") &&
        ok;
 
@@ -268,7 +273,7 @@ bool bad_credentials_return_auth_failed_without_secret_text() {
   stream.push_read_text(login_post_failed());
 
   auto opts = options();
-  opts.password = "never-print-this-password";
+  opts.password = MOCK_PASSWORD;
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(opts);
@@ -680,18 +685,18 @@ bool write_errors_redact_password_and_cookie_values() {
   stream.push_read_text(login_get_ok("webvpn_session=SECRET_COOKIE"));
 
   auto opts = options();
-  opts.password = "printable-password";
+  opts.password = MOCK_PASSWORD;
   stream.fail_write(2,
                     invalid("tls_write_failed",
-                            "request failed: password=printable-password, "
-                            "password=printable-password, "
+                            "request failed: password=test-mock-password-placeholder, "
+                            "password=test-mock-password-placeholder, "
                             "Cookie: webvpn_session=SECRET_COOKIE"));
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(opts);
 
   ok = expect(!auth.ok, "write error should fail authentication") && ok;
-  ok = expect(auth.error_message.find("printable-password") == std::string::npos,
+  ok = expect(auth.error_message.find(MOCK_PASSWORD) == std::string::npos,
               "write error should redact raw password") &&
        ok;
   ok = expect(auth.error_message.find("SECRET_COOKIE") == std::string::npos,

@@ -14,6 +14,8 @@
 
 namespace {
 
+static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -441,7 +443,7 @@ ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions session_options() {
   options.server.port = 443;
   options.server.base_path = "/";
   options.username = "alice";
-  options.password = "correct-password";
+  options.password = MOCK_PASSWORD;
   options.useragent = "ECNU-VPN test";
   options.disable_dtls = true;
   return options;
@@ -485,7 +487,7 @@ bool test_auth_failure_never_reconnects() {
   FakeProtocolTransport transport(server);
 
   auto options = session_options();
-  options.password = "wrong-password";
+  options.password = "test-mock-wrong-password";
   options.auto_reconnect = true;
   options.max_reconnects = 3;
 
@@ -546,7 +548,7 @@ bool test_packet_echo() {
   ok = expect(contains_event(events, "packet.inbound"),
               "packet loop should emit packet.inbound") &&
        ok;
-  ok = expect(!events_contain_password(events, "correct-password"),
+  ok = expect(!events_contain_password(events, MOCK_PASSWORD),
               "event stream must not include password") &&
        ok;
 
