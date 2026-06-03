@@ -21,4 +21,8 @@ RpcResponse AppRpcDispatcher::dispatch(const RpcRequest& request) {
     return resp;
 }
 
+void AppRpcDispatcher::retain_action(std::shared_ptr<void> action) {
+    retained_actions_.push_back(std::move(action));
+}
+
 } // namespace exv::core_api

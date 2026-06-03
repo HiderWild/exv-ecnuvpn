@@ -68,6 +68,7 @@ set(EXV_COMMON_SOURCES
     src/platform/common/oneshot_bootstrap.cpp
     src/platform/common/packet_device_factory.cpp
     src/platform/common/platform_network_ops.cpp
+    src/platform/common/helper_delegating_network_ops.cpp
     src/platform/common/proxy_tun_detector.cpp
     src/platform/common/route_model.cpp
     src/openconnect_log.cpp
@@ -1207,6 +1208,21 @@ target_include_directories(helper_lost_test PRIVATE
 
 add_test(NAME helper_lost_test COMMAND helper_lost_test)
 
+add_executable(helper_delegating_network_ops_test
+    tests/helper_delegating_network_ops_test.cpp
+    tests/support/fake_helper.cpp
+    src/helper_common/helper_messages.cpp
+    src/platform/common/helper_delegating_network_ops.cpp
+)
+
+target_include_directories(helper_delegating_network_ops_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+add_test(NAME helper_delegating_network_ops_test COMMAND helper_delegating_network_ops_test)
+
 # ===========================================================================
 # Test labels for selective test runs
 # ===========================================================================
@@ -1272,6 +1288,7 @@ set(_release_blocking_tests
     error_contract_test
     helper_messages_connector_test
     core_process_test
+    helper_delegating_network_ops_test
 )
 set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
 
@@ -1365,6 +1382,7 @@ set_property(TEST
     native_authenticator_test
     native_auth_session_json_test
     core_process_test
+    helper_delegating_network_ops_test
     APPEND PROPERTY LABELS "architecture"
 )
 
@@ -1400,6 +1418,7 @@ set_property(TEST
 set_property(TEST
     platform_network_ops_model_test
     credential_store_model_test
+    helper_delegating_network_ops_test
     APPEND PROPERTY LABELS "platform"
 )
 

@@ -1,6 +1,7 @@
 #include "app_api.hpp"
 #include "config.hpp"
 #include "config_manager.hpp"
+#include "core/core_process.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
 #include "runtime/runtime_context.hpp"
@@ -375,6 +376,19 @@ int main(int argc, char *argv[]) {
     return vpn::supervisor_main();
   }
 #endif
+  // --mode=core: long-running JSON-RPC process for Electron / CLI backend
+  if (raw_args.size() > 1 && raw_args[1] == "--mode=core") {
+    std::string config_dir;
+    std::string home_dir;
+    for (size_t i = 2; i < raw_args.size(); ++i) {
+      if (raw_args[i] == "--config-dir" && i + 1 < raw_args.size()) {
+        config_dir = raw_args[++i];
+      } else if (raw_args[i] == "--home" && i + 1 < raw_args.size()) {
+        home_dir = raw_args[++i];
+      }
+    }
+    return exv::core::core_process_main(config_dir, home_dir);
+  }
   if (raw_args.size() > 2 &&
       (raw_args[1] == "desktop-rpc" || raw_args[1] == "desktop-rpc-file" ||
        raw_args[1] == "desktop-rpc-file-output")) {
