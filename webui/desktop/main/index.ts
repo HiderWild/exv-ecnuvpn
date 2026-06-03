@@ -1,9 +1,10 @@
 import { app, BrowserWindow, ipcMain, Menu, nativeImage, Tray } from 'electron'
-import { execFile } from 'node:child_process'
+import { execFile, type ChildProcess, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { createInterface } from 'node:readline'
 
 import {
   desktopIpcChannels,
@@ -35,6 +36,7 @@ let trayConnectionConnected = false
 let trayConnectionBusy = false
 let forceQuit = false
 let closePromptOpen = false
+const connectInFlight = new Map<string, Promise<unknown>>()
 let currentWindowMode: DesktopWindowMode = 'advanced'
 let closePromptResolver: ((result: unknown) => void) | null = null
 let activeModal: {
@@ -43,6 +45,8 @@ let activeModal: {
   window: BrowserWindow
   resolve: (result: unknown) => void
 } | null = null
+
+let coreProcessManager: CoreProcessManager | null = null
 
 type CloseAppChoice = 'tray' | 'quit'
 
@@ -145,6 +149,318 @@ function nativeExecOptions(exv: string, extra: { maxBuffer?: number } = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// CoreProcessManager – manages the long-lived `exv --mode=core` child process
+// ---------------------------------------------------------------------------
+
+interface RpcRequest {
+  id: number
+  action: string
+  payload: unknown
+}
+
+interface RpcResponse {
+  id?: number
+  ok?: boolean
+  event?: string
+  data?: unknown
+  code?: string
+  message?: string
+}
+
+type EventListener = (event: string, data: unknown) => void
+
+const CORE_RESTART_DELAY_MS = 2000
+const CORE_MAX_RESTART_DELAY_MS = 30_000
+const CORE_REQUEST_TIMEOUT_MS = 30_000
+
+class CoreProcessManager {
+  private process: ChildProcess | null = null
+  private rpcClient: CoreRpcClient | null = null
+  private restartDelay = CORE_RESTART_DELAY_MS
+  private restartTimer: NodeJS.Timeout | null = null
+  private stopped = false
+  private exvPath: string
+  private configDir: string
+  private eventListeners: EventListener[] = []
+
+  constructor(exvPath: string, configDir: string) {
+    this.exvPath = exvPath
+    this.configDir = configDir
+  }
+
+  /** Register a listener for events pushed by the core process. */
+  onEvent(listener: EventListener) {
+    this.eventListeners.push(listener)
+  }
+
+  /** Ensure the core process is running; starts it if not. */
+  async ensureRunning(): Promise<CoreRpcClient> {
+    if (this.rpcClient && this.rpcClient.isAlive()) {
+      return this.rpcClient
+    }
+    await this.start()
+    if (!this.rpcClient) {
+      throw new Error('Core process failed to start')
+    }
+    return this.rpcClient
+  }
+
+  private async start(): Promise<void> {
+    if (this.stopped) return
+
+    this.stop()
+
+    const exv = this.exvPath
+    const args = ['--mode=core', '--config-dir', this.configDir]
+    const env = nativeEnv(exv)
+
+    this.process = spawn(exv, args, {
+      windowsHide: true,
+      cwd: dirname(exv),
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+
+    this.rpcClient = new CoreRpcClient(this.process)
+    this.rpcClient.onEvent((event, data) => {
+      for (const listener of this.eventListeners) {
+        listener(event, data)
+      }
+    })
+
+    this.process.on('exit', (code, signal) => {
+      this.rpcClient = null
+      this.process = null
+      if (!this.stopped) {
+        console.error(
+          `[CoreProcessManager] core process exited (code=${code}, signal=${signal}), restarting in ${this.restartDelay}ms`,
+        )
+        this.scheduleRestart()
+      }
+    })
+
+    this.process.on('error', (err) => {
+      console.error(`[CoreProcessManager] core process error: ${err.message}`)
+      this.rpcClient = null
+      this.process = null
+      if (!this.stopped) {
+        this.scheduleRestart()
+      }
+    })
+
+    // Wait briefly for the process to be ready and for the first response.
+    try {
+      await this.rpcClient.waitForReady(5000)
+    } catch {
+      // If the process doesn't respond quickly, fall back to retry logic.
+    }
+  }
+
+  private scheduleRestart() {
+    if (this.stopped) return
+    if (this.restartTimer) return
+    this.restartTimer = setTimeout(async () => {
+      this.restartTimer = null
+      await this.start()
+    }, this.restartDelay)
+    // Exponential back-off capped at CORE_MAX_RESTART_DELAY_MS.
+    this.restartDelay = Math.min(this.restartDelay * 2, CORE_MAX_RESTART_DELAY_MS)
+  }
+
+  stop() {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
+    if (this.rpcClient) {
+      this.rpcClient.close()
+      this.rpcClient = null
+    }
+    if (this.process) {
+      try {
+        this.process.kill()
+      } catch {
+        // Process may already be gone.
+      }
+      this.process = null
+    }
+  }
+
+  shutdown() {
+    this.stopped = true
+    this.stop()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CoreRpcClient – JSON-RPC over stdin/stdout for a single core process
+// ---------------------------------------------------------------------------
+
+interface PendingRequest {
+  resolve: (value: unknown) => void
+  reject: (reason: Error) => void
+  timer: NodeJS.Timeout
+}
+
+class CoreRpcClient {
+  private process: ChildProcess
+  private nextId = 1
+  private pending = new Map<number, PendingRequest>()
+  private eventListeners: EventListener[] = []
+  private closed = false
+  private ready: Promise<void> | null = null
+
+  constructor(process: ChildProcess) {
+    this.process = process
+    this.setupReadline()
+  }
+
+  onEvent(listener: EventListener) {
+    this.eventListeners.push(listener)
+  }
+
+  isAlive(): boolean {
+    if (this.closed) return false
+    if (!this.process.stdin || this.process.stdin.destroyed) return false
+    if (!this.process.stdout || this.process.stdout.destroyed) return false
+    return this.process.exitCode === null
+  }
+
+  /** Wait until the process is alive and can respond to a ping. */
+  waitForReady(timeoutMs: number): Promise<void> {
+    if (this.ready) return this.ready
+    this.ready = new Promise<void>((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        reject(new Error('Core process not ready within timeout'))
+      }, timeoutMs)
+      const attempt = async () => {
+        try {
+          // Send a lightweight status.get as a readiness probe.
+          await this.request('status.get', {})
+          clearTimeout(deadline)
+          resolve()
+        } catch {
+          // The process may still be starting up – retry once after a short delay.
+          setTimeout(async () => {
+            try {
+              await this.request('status.get', {})
+              clearTimeout(deadline)
+              resolve()
+            } catch (err) {
+              clearTimeout(deadline)
+              reject(err instanceof Error ? err : new Error(String(err)))
+            }
+          }, 500)
+        }
+      }
+      void attempt()
+    })
+    return this.ready
+  }
+
+  /** Send a JSON-RPC request and return a promise for the response data. */
+  request(action: string, payload: unknown): Promise<unknown> {
+    if (this.closed) {
+      return Promise.reject(new Error('CoreRpcClient is closed'))
+    }
+    if (!this.process.stdin || this.process.stdin.destroyed) {
+      return Promise.reject(new Error('Core process stdin is unavailable'))
+    }
+
+    const id = this.nextId++
+    const message: RpcRequest = { id, action, payload }
+
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`RPC request ${action} (id=${id}) timed out after ${CORE_REQUEST_TIMEOUT_MS}ms`))
+      }, CORE_REQUEST_TIMEOUT_MS)
+
+      this.pending.set(id, { resolve, reject, timer })
+
+      const line = JSON.stringify(message) + '\n'
+      this.process.stdin!.write(line, (err) => {
+        if (err) {
+          clearTimeout(timer)
+          this.pending.delete(id)
+          reject(new Error(`Failed to write to core stdin: ${err.message}`))
+        }
+      })
+    })
+  }
+
+  close() {
+    this.closed = true
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error('CoreRpcClient closed'))
+    }
+    this.pending.clear()
+  }
+
+  private setupReadline() {
+    if (!this.process.stdout) return
+    const rl = createInterface({ input: this.process.stdout })
+    rl.on('line', (line: string) => {
+      this.handleLine(line)
+    })
+
+    // Also capture stderr for logging.
+    if (this.process.stderr) {
+      const errRl = createInterface({ input: this.process.stderr })
+      errRl.on('line', (line: string) => {
+        if (line.trim()) {
+          console.error(`[core:stderr] ${line}`)
+        }
+      })
+    }
+  }
+
+  private handleLine(raw: string) {
+    const line = raw.trim()
+    if (!line) return
+
+    let parsed: RpcResponse
+    try {
+      parsed = JSON.parse(line) as RpcResponse
+    } catch {
+      // Non-JSON line – log and ignore.
+      console.error(`[CoreRpcClient] non-JSON line: ${line.slice(0, 200)}`)
+      return
+    }
+
+    // Event push: {"event": "...", "data": {...}}
+    if (parsed.event) {
+      for (const listener of this.eventListeners) {
+        listener(parsed.event, parsed.data)
+      }
+      return
+    }
+
+    // Response: must have an id that matches a pending request.
+    if (typeof parsed.id === 'number' && this.pending.has(parsed.id)) {
+      const pending = this.pending.get(parsed.id)!
+      this.pending.delete(parsed.id)
+      clearTimeout(pending.timer)
+
+      if (parsed.ok === false) {
+        const code = typeof parsed.code === 'string' ? parsed.code : undefined
+        const message = parsed.message || 'Core RPC returned ok=false'
+        const error = new Error(code ? `${code}: ${message}` : message) as Error & { code?: string }
+        if (code) error.code = code
+        pending.reject(error)
+      } else {
+        pending.resolve(parsed)
+      }
+      return
+    }
+
+    // Unknown message – log and discard.
+    console.error(`[CoreRpcClient] unhandled message: ${line.slice(0, 200)}`)
+  }
+}
+
 function withDesktopRuntimeContext(payload: unknown) {
   const context = {
     home: app.getPath('home'),
@@ -234,6 +550,41 @@ async function runDesktopRpc(action: DesktopRpcAction, payload: unknown = {}) {
     throw new Error(`Unknown desktop RPC action: ${action}`)
   }
 
+  // Single-flight guard: prevent duplicate vpn.connect calls from any caller
+  // (renderer IPC, tray, or internal). The C++ backend has its own mutex, but
+  // this avoids spawning unnecessary child processes.
+  if (action === 'vpn.connect') {
+    const existing = connectInFlight.get('vpn.connect')
+    if (existing) {
+      return existing
+    }
+    const promise = runDesktopRpcInner(action, payload).finally(() => {
+      connectInFlight.delete('vpn.connect')
+    })
+    connectInFlight.set('vpn.connect', promise)
+    return promise
+  }
+
+  return runDesktopRpcInner(action, payload)
+}
+
+async function runDesktopRpcInner(action: DesktopRpcAction, payload: unknown = {}) {
+  // Prefer the long-lived core process connection when available.
+  if (coreProcessManager) {
+    try {
+      const client = await coreProcessManager.ensureRunning()
+      const result = await client.request(action, withDesktopRuntimeContext(payload))
+      return result
+    } catch (rpcError) {
+      const message = rpcError instanceof Error ? rpcError.message : String(rpcError)
+      console.warn(
+        `[CoreRpc] long connection failed for ${action}: ${message}; falling back to execFile`,
+      )
+      // Fall through to the legacy execFile path below.
+    }
+  }
+
+  // Legacy fallback: spawn a new process per invocation.
   const exv = resolveExvPath()
   try {
     const { stdout } = await execFileAsync(
@@ -605,6 +956,16 @@ async function initialWindowMode(): Promise<DesktopWindowMode> {
 }
 
 async function createWindow() {
+  // Initialize the core process manager for long-lived JSON-RPC communication.
+  if (!coreProcessManager) {
+    const exv = resolveExvPath()
+    coreProcessManager = new CoreProcessManager(exv, resolveStateDir())
+    coreProcessManager.onEvent((event: string, data: unknown) => {
+      // Forward core-pushed status/log events to the renderer.
+      emitEvent(event as DesktopEventType, data)
+    })
+  }
+
   const mode = await initialWindowMode()
   currentWindowMode = mode
   const bounds = boundsForWindowMode(mode)
@@ -786,6 +1147,10 @@ app.whenReady().then(createWindow)
 
 app.on('before-quit', () => {
   forceQuit = true
+  if (coreProcessManager) {
+    coreProcessManager.shutdown()
+    coreProcessManager = null
+  }
 })
 
 app.on('window-all-closed', () => {
