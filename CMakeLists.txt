@@ -52,6 +52,7 @@ set(EXV_COMMON_SOURCES
     src/core/engine_event_bridge.cpp
     src/core/core_session_runner.cpp
     src/core/tunnel_controller.cpp
+    src/core/tunnel_controller_active.cpp
     src/core/timing.cpp
     src/core/core_error_mapper.cpp
     src/core/reconnect_policy.cpp
@@ -905,6 +906,7 @@ add_test(NAME tunnel_controller_state_machine_test COMMAND tunnel_controller_sta
 add_executable(core_process_test
     tests/core_process_test.cpp
     src/core/tunnel_controller.cpp
+    src/core/core_session_runner.cpp
     src/core/timing.cpp
     src/core/core_error_mapper.cpp
     src/core/reconnect_policy.cpp
@@ -1034,6 +1036,7 @@ add_executable(vpn_actions_test
     src/core_api/app_rpc_dispatcher.cpp
     src/core_api/vpn_actions.cpp
     src/core/tunnel_controller.cpp
+    src/core/core_session_runner.cpp
     src/core/timing.cpp
     src/core/core_error_mapper.cpp
     src/core/reconnect_policy.cpp
@@ -1369,6 +1372,7 @@ set(_release_blocking_tests
     core_process_lifecycle_test
     helper_delegating_network_ops_test
     app_api_status_contract_test
+    tunnel_controller_integration_test
 )
 set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
 
