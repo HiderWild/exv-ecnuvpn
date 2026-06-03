@@ -227,14 +227,14 @@ static void test_helper_request_response_roundtrip() {
 // ---- HelperConnector / StubHelperClient tests ----
 
 static void test_stub_connector_create() {
-    auto connector = HelperConnector::create();
+    auto connector = HelperConnector::create_stub();
     assert(connector != nullptr);
     assert(connector->is_helper_available());
     std::cout << "  PASS stub_connector_create\n";
 }
 
 static void test_stub_connector_connect() {
-    auto connector = HelperConnector::create();
+    auto connector = HelperConnector::create_stub();
     HelperConnectorConfig config;
     auto client = connector->connect(config);
     assert(client != nullptr);
@@ -243,7 +243,7 @@ static void test_stub_connector_connect() {
 }
 
 static void test_stub_client_hello() {
-    auto connector = HelperConnector::create();
+    auto connector = HelperConnector::create_stub();
     HelperConnectorConfig config;
     auto client = connector->connect(config);
 
@@ -257,7 +257,7 @@ static void test_stub_client_hello() {
 }
 
 static void test_stub_client_session_lifecycle() {
-    auto connector = HelperConnector::create();
+    auto connector = HelperConnector::create_stub();
     HelperConnectorConfig config;
     auto client = connector->connect(config);
 

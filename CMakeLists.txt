@@ -48,7 +48,20 @@ set(EXV_COMMON_SOURCES
     src/config.cpp
     src/config_manager.cpp
     src/config_api.cpp
+    src/core/core_process.cpp
+    src/core/tunnel_controller.cpp
+    src/core/timing.cpp
+    src/core/core_error_mapper.cpp
+    src/core/reconnect_policy.cpp
+    src/core_api/app_rpc_dispatcher.cpp
+    src/core_api/vpn_actions.cpp
+    src/core_api/config_actions.cpp
+    src/core_api/service_actions.cpp
+    src/core_api/route_actions.cpp
+    src/core_api/core_api_setup.cpp
     src/crypto.cpp
+    src/helper_common/helper_connector.cpp
+    src/helper_common/pipe_helper_client.cpp
     src/platform/common/backend_resolver.cpp
     src/platform/common/credential_store.cpp
     src/platform/common/dns_model.cpp
@@ -68,6 +81,7 @@ set(EXV_COMMON_SOURCES
     src/virtual_network.cpp
     src/runtime/runtime_context.cpp
     src/feedback/feedback.cpp
+    src/connection_attempt.cpp
     src/logger.cpp
     src/utils.cpp
 )
@@ -845,6 +859,30 @@ target_include_directories(tunnel_controller_state_machine_test PRIVATE
 
 add_test(NAME tunnel_controller_state_machine_test COMMAND tunnel_controller_state_machine_test)
 
+add_executable(core_process_test
+    tests/core_process_test.cpp
+    src/core/tunnel_controller.cpp
+    src/core/timing.cpp
+    src/core/core_error_mapper.cpp
+    src/core/reconnect_policy.cpp
+    src/core_api/app_rpc_dispatcher.cpp
+    src/core_api/vpn_actions.cpp
+    src/core_api/config_actions.cpp
+    src/core_api/service_actions.cpp
+    src/core_api/route_actions.cpp
+    src/core_api/core_api_setup.cpp
+    src/helper_common/helper_messages.cpp
+)
+
+target_include_directories(core_process_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(core_process_test PRIVATE Threads::Threads)
+
+add_test(NAME core_process_test COMMAND core_process_test)
+
 add_executable(tunnel_controller_integration_test
     tests/tunnel_controller_integration_test.cpp
     tests/support/fake_helper.cpp
@@ -1065,6 +1103,7 @@ add_executable(helper_messages_connector_test
     tests/helper_messages_connector_test.cpp
     src/helper_common/helper_messages.cpp
     src/helper_common/helper_connector.cpp
+    src/helper_common/pipe_helper_client.cpp
 )
 
 target_include_directories(helper_messages_connector_test PRIVATE
@@ -1073,6 +1112,22 @@ target_include_directories(helper_messages_connector_test PRIVATE
 )
 
 add_test(NAME helper_messages_connector_test COMMAND helper_messages_connector_test)
+
+# IPC transport test: PipeHelperClient <-> raw platform server (no daemon deps)
+add_executable(pipe_helper_client_test
+    tests/pipe_helper_client_test.cpp
+    src/helper_common/helper_messages.cpp
+    src/helper_common/helper_connector.cpp
+    src/helper_common/pipe_helper_client.cpp
+)
+
+target_include_directories(pipe_helper_client_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(pipe_helper_client_test PRIVATE Threads::Threads)
+
+add_test(NAME pipe_helper_client_test COMMAND pipe_helper_client_test)
 
 # ===========================================================================
 # Additional test targets (Phase 4-7: protocol, auth, integration)
@@ -1216,6 +1271,7 @@ set(_release_blocking_tests
     route_actions_test
     error_contract_test
     helper_messages_connector_test
+    core_process_test
 )
 set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
 
@@ -1308,6 +1364,7 @@ set_property(TEST
     helper_lost_test
     native_authenticator_test
     native_auth_session_json_test
+    core_process_test
     APPEND PROPERTY LABELS "architecture"
 )
 
@@ -1325,6 +1382,7 @@ set_property(TEST
     core_error_mapper_test
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
+    core_process_test
     APPEND PROPERTY LABELS "core"
 )
 
@@ -1353,6 +1411,7 @@ set_property(TEST
     service_actions_test
     route_actions_test
     error_contract_test
+    core_process_test
     APPEND PROPERTY LABELS "ui-contract"
 )
 
