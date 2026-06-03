@@ -878,6 +878,19 @@ target_include_directories(engine_event_bridge_test PRIVATE
 
 add_test(NAME engine_event_bridge_test COMMAND engine_event_bridge_test)
 
+add_executable(core_session_runner_test
+    tests/core_session_runner_test.cpp
+)
+
+target_include_directories(core_session_runner_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(core_session_runner_test PRIVATE exv-core Threads::Threads ${EXV_PLATFORM_LIBS})
+
+add_test(NAME core_session_runner_test COMMAND core_session_runner_test)
+
 add_executable(tunnel_controller_state_machine_test
     tests/tunnel_controller_state_machine_test.cpp
 )
@@ -1306,6 +1319,7 @@ set(_release_blocking_tests
     startup_failure_test
     core_error_mapper_test
     engine_event_bridge_test
+    core_session_runner_test
     tunnel_controller_state_machine_test
     helper_lease_manager_test
     helper_cleanup_registry_test
@@ -1394,6 +1408,7 @@ set_property(TEST
     timer_scheduler_test
     core_error_mapper_test
     engine_event_bridge_test
+    core_session_runner_test
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
     helper_lease_manager_test
@@ -1434,6 +1449,7 @@ set_property(TEST
     reconnect_policy_test
     timer_scheduler_test
     core_error_mapper_test
+    core_session_runner_test
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
     core_process_test
