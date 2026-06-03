@@ -50,6 +50,7 @@ set(EXV_COMMON_SOURCES
     src/config_api.cpp
     src/core/core_process.cpp
     src/core/engine_event_bridge.cpp
+    src/core/core_session_runner.cpp
     src/core/tunnel_controller.cpp
     src/core/timing.cpp
     src/core/core_error_mapper.cpp
@@ -894,6 +895,7 @@ add_executable(core_process_test
     src/core/timing.cpp
     src/core/core_error_mapper.cpp
     src/core/reconnect_policy.cpp
+    src/core/timer_scheduler.cpp
     src/core_api/app_rpc_dispatcher.cpp
     src/core_api/vpn_actions.cpp
     src/core_api/config_actions.cpp
@@ -991,6 +993,7 @@ add_executable(vpn_actions_test
     src/core/timing.cpp
     src/core/core_error_mapper.cpp
     src/core/reconnect_policy.cpp
+    src/core/timer_scheduler.cpp
     src/helper_common/helper_messages.cpp
     tests/support/fake_helper.cpp
     tests/support/fake_platform_network_ops.cpp
