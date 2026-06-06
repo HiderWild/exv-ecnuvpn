@@ -85,7 +85,7 @@ bool PipeHelperClient::connect() {
     std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
                   config_.pipe_path.c_str());
 
-    if (connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         ::close(socket_fd_);
         socket_fd_ = -1;
         return false;

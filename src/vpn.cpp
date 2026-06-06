@@ -1,5 +1,7 @@
 #include "vpn.hpp"
+#include "app_api.hpp"
 #include "config.hpp"
+#include "core/tunnel_controller_active.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
 #include "runtime/runtime_context.hpp"
@@ -396,16 +398,16 @@ private:
   vpn_engine::EventSink *inner_;
 };
 
-// Durable owner for native-engine sessions. The native packet loop runs on a
-// LEGACY: Only used by legacy_openconnect engine. Native engine uses
-// TunnelController (Core-owned mode).
+// LEGACY: Durable owner for native-engine sessions. Only reached when
+// TunnelController is NOT available (helper worker, CLI fallback).
+// Native engine uses TunnelController (Core-owned mode) via app_api.
 //
-// background thread that lives inside the *process* hosting the
-// NativeVpnEngineSession, so the session must be owned by this long-lived
-// supervisor (not the short-lived CLI/RPC invocation that requested the
-// connection). This process records itself as the durable supervisor PID in
-// native-session-state.json and holds the session open until a stop is
-// requested or the retry budget is exhausted.
+// The native packet loop runs on a background thread that lives inside the
+// *process* hosting the NativeVpnEngineSession, so the session must be owned
+// by this long-lived supervisor (not the short-lived CLI/RPC invocation that
+// requested the connection). This process records itself as the durable
+// supervisor PID in native-session-state.json and holds the session open
+// until a stop is requested or the retry budget is exhausted.
 static int run_native_supervisor(const Config &cfg, const std::string &password,
                                  int retry_limit) {
   signal(SIGTERM, handle_supervisor_signal);
@@ -494,8 +496,10 @@ static int run_native_supervisor(const Config &cfg, const std::string &password,
   return 0;
 }
 
-// LEGACY: Only used by legacy_openconnect engine. Native engine uses
-// TunnelController (Core-owned mode).
+// LEGACY: Reconnect supervisor for legacy_openconnect engine and native-engine
+// fallback path. Native engine uses TunnelController (Core-owned mode) via
+// app_api when available; this function is only reached when TunnelController
+// is not initialized (helper worker, CLI fallback).
 static int run_supervisor(const Config &cfg, const std::string &password,
                           int retry_limit) {
   if (cfg.vpn_engine == "native") {
@@ -954,6 +958,34 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   ConnectTiming timing(retry_limit == 0 ? "vpn.start.direct"
                                         : "vpn.start.supervised");
   if (cfg.vpn_engine == "native") {
+    // ── D1: Native engine supervisor bypass ─────────────────────────────
+    //
+    // Post-C1 architecture: the primary native-engine connect flow uses
+    // TunnelController (Core-owned mode) which manages the
+    // NativeVpnEngineSession via CoreSessionRunner in the core process.
+    // The app_api path (vpn.connect) uses TunnelController directly and
+    // does NOT call this function.
+    //
+    // This supervisor path remains as a fallback for:
+    //   - Helper worker process (worker_main -> vpn::start_with_password)
+    //   - CLI invocations (exv start when helper is unavailable)
+    //   - Direct fallback paths (darwin/linux try_connect_direct_fallback)
+    //
+    // When TunnelController IS active (e.g., if this function were called
+    // while the desktop app is connected), we skip the supervisor and tell
+    // the caller to use TunnelController instead.
+    if (exv::core::is_tunnel_controller_active()) {
+      logger::info("Native engine: TunnelController is active, skipping "
+                   "supervisor spawn (caller should use Core-owned path)");
+      timing.finish(false, "reason=tunnel_controller_active");
+      return kUseTunnelController;
+    }
+
+    // TunnelController is not available — fall through to the legacy
+    // supervisor path which owns the NativeVpnEngineSession lifecycle.
+    logger::info("Native engine: TunnelController not available, using "
+                 "supervisor fallback (legacy path)");
+
     auto validation = vpn_engine::validate_native_config(cfg);
     if (!validation.ok) {
       utils::print_error(validation.message);
@@ -973,9 +1005,10 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
       return 1;
     }
 
-    // The native packet loop runs on a background thread owned by the process
-    // that hosts NativeVpnEngineSession. Spawn a durable supervisor process to
-    // own the session so it outlives this short-lived CLI/RPC invocation.
+    // LEGACY PATH: The native packet loop runs on a background thread owned
+    // by the process hosting NativeVpnEngineSession. Spawn a durable
+    // supervisor process to own the session so it outlives this short-lived
+    // CLI/RPC invocation.
     int spawned_supervisor_pid = -1;
     if (!platform::spawn_vpn_supervisor_process(cfg, plaintext_password,
                                                 retry_limit, run_supervisor,

@@ -24,6 +24,7 @@ public:
     RpcResponse disconnect(const RpcRequest& req);
     RpcResponse status(const RpcRequest& req);
     RpcResponse set_auto_reconnect(const RpcRequest& req);
+    RpcResponse get_legacy_status(const RpcRequest& req);
 
 private:
     std::shared_ptr<exv::core::TunnelController> controller_;

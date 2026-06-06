@@ -273,6 +273,11 @@ void write_route_ready_marker(const std::string &config_dir,
 
 } // namespace
 
+// D3: NativeSessionEventRecorder is used ONLY in the legacy supervisor path
+// (run_native_supervisor in vpn.cpp).  The new TunnelController architecture
+// uses EngineEventBridge -> TunnelController's in-memory state machine and
+// never writes native-session-state.json.  load_native_session_state() and
+// read_native_session_snapshot() are preserved for crash recovery.
 NativeSessionEventRecorder::NativeSessionEventRecorder(
     std::string config_dir, NativeSessionRecord record)
     : config_dir_(std::move(config_dir)), record_(std::move(record)) {

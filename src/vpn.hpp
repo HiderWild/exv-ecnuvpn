@@ -9,6 +9,9 @@ namespace ecnuvpn {
 namespace vpn {
 
 inline constexpr int kVpnInitialConnectFailedExitCode = 2;
+// Returned when native engine should use TunnelController (Core-owned mode)
+// instead of spawning a supervisor process.
+inline constexpr int kUseTunnelController = 3;
 
 struct RuntimeStatusSnapshot {
     bool running = false;
