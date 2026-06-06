@@ -1,6 +1,7 @@
 #include "vpn.hpp"
 #include "app_api.hpp"
 #include "config.hpp"
+#include "core/tunnel_controller_active.hpp"
 #include "helper.hpp"
 #include "logger.hpp"
 #include "runtime/runtime_context.hpp"
@@ -973,7 +974,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
     // When TunnelController IS active (e.g., if this function were called
     // while the desktop app is connected), we skip the supervisor and tell
     // the caller to use TunnelController instead.
-    if (app_api::is_tunnel_controller_active()) {
+    if (exv::core::is_tunnel_controller_active()) {
       logger::info("Native engine: TunnelController is active, skipping "
                    "supervisor spawn (caller should use Core-owned path)");
       timing.finish(false, "reason=tunnel_controller_active");

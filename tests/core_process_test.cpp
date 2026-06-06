@@ -89,14 +89,10 @@ static void register_core_exclusive_actions(
     AppRpcDispatcher& dispatcher,
     std::shared_ptr<TunnelController> controller)
 {
-    dispatcher.register_handler("status.get",
-        [controller](const RpcRequest&) -> RpcResponse {
-            RpcResponse resp;
-            auto snap = controller->status();
-            resp.success = true;
-            resp.payload_json = snapshot_to_json(snap).dump();
-            return resp;
-        });
+    // NOTE: status.get is already registered by VpnActions::get_legacy_status
+    //   via create_dispatcher().  Do NOT re-register it here — register_handler
+    //   silently overwrites, which would replace the frontend-compatible shape
+    //   with a raw TunnelStatusSnapshot.
 
     dispatcher.register_handler("runtime.status",
         [](const RpcRequest&) -> RpcResponse {
@@ -155,8 +151,10 @@ int main() {
         auto data = json::parse(resp.payload_json);
         ok = expect(data.value("phase", "") == "idle",
                     "initial phase should be idle") && ok;
-        ok = expect(data.value("desired_connected", true) == false,
-                    "desired_connected should be false initially") && ok;
+        ok = expect(data.value("connected", true) == false,
+                    "connected should be false initially") && ok;
+        ok = expect(data.value("process_running", true) == false,
+                    "process_running should be false initially") && ok;
         ok = expect(data.value("auto_reconnect", false) == true,
                     "auto_reconnect should be true initially") && ok;
     }

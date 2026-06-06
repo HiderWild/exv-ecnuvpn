@@ -17,6 +17,7 @@
 #include "platform/common/runtime_status.hpp"
 #include "platform/common/service_status.hpp"
 #include "runtime/runtime_context.hpp"
+#include "core/tunnel_controller_active.hpp"
 #include "utils.hpp"
 #include "virtual_network.hpp"
 #include "vpn_engine/native_engine.hpp"
@@ -963,6 +964,10 @@ nlohmann::json handle_action(const std::string &action,
   } catch (...) {
     return error("Unknown desktop API error");
   }
+}
+
+bool is_tunnel_controller_active() {
+  return exv::core::is_tunnel_controller_active();
 }
 
 } // namespace app_api

@@ -119,15 +119,15 @@ static void register_core_exclusive_actions(
     AppRpcDispatcher& dispatcher,
     std::shared_ptr<TunnelController> controller)
 {
-    // status.get — returns the TunnelStatusSnapshot as JSON
-    dispatcher.register_handler("status.get",
-        [controller](const RpcRequest&) -> RpcResponse {
-            RpcResponse resp;
-            auto snap = controller->status();
-            resp.success = true;
-            resp.payload_json = snapshot_to_json(snap).dump();
-            return resp;
-        });
+    // NOTE: The following actions are already registered by
+    //   create_dispatcher() (core_api_setup.cpp) and must NOT be
+    //   re-registered here, because register_handler() silently
+    //   overwrites the previous handler:
+    //
+    //   status.get         — VpnActions::get_legacy_status (frontend-compatible shape)
+    //   logs.list          — centralized in core_api_setup.cpp
+    //   config.getAuth     — ConfigActions::get_auth (reads real config)
+    //   config.getSettings — ConfigActions::get_settings (returns settings fields)
 
     // runtime.status — returns basic runtime information
     dispatcher.register_handler("runtime.status",
@@ -160,44 +160,6 @@ static void register_core_exclusive_actions(
             return dispatcher.dispatch(aliased);
         });
 
-    // logs.list — return recent log lines
-    dispatcher.register_handler("logs.list",
-        [](const RpcRequest& req) -> RpcResponse {
-            RpcResponse resp;
-            int count = 50;
-            try {
-                auto payload = json::parse(req.payload_json);
-                if (payload.contains("count")) {
-                    count = payload["count"].get<int>();
-                }
-            } catch (...) {}
-            auto lines = ecnuvpn::logger::tail(count);
-            json result = {{"lines", lines}};
-            resp.success = true;
-            resp.payload_json = result.dump();
-            return resp;
-        });
-
-    // config.getAuth — stub (credentials are stored encrypted, not exposed raw)
-    dispatcher.register_handler("config.getAuth",
-        [](const RpcRequest&) -> RpcResponse {
-            RpcResponse resp;
-            resp.success = true;
-            resp.payload_json = json{
-                {"has_username", false},
-                {"has_password", false},
-                {"note", "Credentials are stored encrypted. Use config.get for general settings."}
-            }.dump();
-            return resp;
-        });
-
-    // config.getSettings — alias for config.get
-    dispatcher.register_handler("config.getSettings",
-        [&dispatcher](const RpcRequest& req) -> RpcResponse {
-            RpcRequest aliased = req;
-            aliased.action = "config.get";
-            return dispatcher.dispatch(aliased);
-        });
 }
 
 // ------------------------------------------------------------------

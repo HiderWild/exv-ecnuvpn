@@ -1,6 +1,9 @@
 #include "vpn_actions.hpp"
 #include <nlohmann/json.hpp>
 #include <core/tunnel_controller.hpp>
+#include "config_manager.hpp"
+#include "runtime/runtime_context.hpp"
+#include "utils.hpp"
 
 using json = nlohmann::json;
 
@@ -18,6 +21,8 @@ void VpnActions::register_handlers(AppRpcDispatcher& dispatcher) {
         [this](const RpcRequest& req) { return status(req); });
     dispatcher.register_handler("vpn.set_auto_reconnect",
         [this](const RpcRequest& req) { return set_auto_reconnect(req); });
+    dispatcher.register_handler("status.get",
+        [this](const RpcRequest& req) { return get_legacy_status(req); });
 }
 
 RpcResponse VpnActions::connect(const RpcRequest& req) {
@@ -127,6 +132,67 @@ RpcResponse VpnActions::set_auto_reconnect(const RpcRequest& req) {
     } catch (const std::exception& e) {
         resp.success = false;
         resp.error_code = "invalid_payload";
+        resp.error_message = e.what();
+    }
+    return resp;
+}
+
+RpcResponse VpnActions::get_legacy_status(const RpcRequest& req) {
+    RpcResponse resp;
+    try {
+        ecnuvpn::Config cfg;
+        if (ecnuvpn::runtime::is_bootstrapped()) {
+            ecnuvpn::config::ConfigManager mgr(ecnuvpn::utils::get_config_dir());
+            cfg = mgr.load();
+        } else {
+            cfg = ecnuvpn::Config{};
+        }
+
+        auto snap = controller_ ? controller_->status() : exv::core::TunnelStatusSnapshot{};
+
+        json result;
+        // Inline phase_to_string (same as core_process.cpp)
+        const char* phase_str = "unknown";
+        switch (snap.phase) {
+            case exv::core::TunnelPhase::Idle:                phase_str = "idle"; break;
+            case exv::core::TunnelPhase::PreparingHelper:     phase_str = "preparing_helper"; break;
+            case exv::core::TunnelPhase::Authenticating:      phase_str = "authenticating"; break;
+            case exv::core::TunnelPhase::ConnectingCstp:      phase_str = "connecting_cstp"; break;
+            case exv::core::TunnelPhase::ApplyingNetworkConfig: phase_str = "applying_network_config"; break;
+            case exv::core::TunnelPhase::OpeningPacketDevice:  phase_str = "opening_packet_device"; break;
+            case exv::core::TunnelPhase::Connected:           phase_str = "connected"; break;
+            case exv::core::TunnelPhase::Reconnecting:        phase_str = "reconnecting"; break;
+            case exv::core::TunnelPhase::Disconnecting:       phase_str = "disconnecting"; break;
+            case exv::core::TunnelPhase::CleaningUp:          phase_str = "cleaning_up"; break;
+            case exv::core::TunnelPhase::Failed:              phase_str = "failed"; break;
+        }
+        result["phase"] = phase_str;
+        result["connected"] = snap.phase == exv::core::TunnelPhase::Connected;
+        result["process_running"] = snap.phase != exv::core::TunnelPhase::Idle &&
+                                    snap.phase != exv::core::TunnelPhase::Failed;
+        result["auto_reconnect"] = snap.auto_reconnect;
+        result["server"] = !snap.server.empty() ? snap.server : cfg.server;
+
+        if (snap.last_error.has_value()) {
+            const auto& err = snap.last_error.value();
+            result["last_error"] = {
+                {"message", err.message},
+                {"recoverable", err.recoverable},
+                {"recommended_action", err.recommended_action}
+            };
+            if (err.native_code.has_value()) {
+                result["last_error"]["native_code"] = err.native_code.value();
+            }
+            if (!err.native_api.empty()) {
+                result["last_error"]["native_api"] = err.native_api;
+            }
+        }
+
+        resp.success = true;
+        resp.payload_json = result.dump();
+    } catch (const std::exception& e) {
+        resp.success = false;
+        resp.error_code = "status_failed";
         resp.error_message = e.what();
     }
     return resp;
