@@ -51,665 +51,6 @@ static volatile sig_atomic_t supervisor_child_pid = -1;
 
 using ConnectTiming = exv::core::ConnectStageTimer;
 
-class RuntimeLogTail {
-public:
-  using ChunkHandler = std::function<void(const std::string &)>;
-
-  RuntimeLogTail(std::string log_path, ChunkHandler on_chunk)
-      : log_path_(std::move(log_path)), on_chunk_(std::move(on_chunk)),
-        offset_(current_size()) {
-    running_ = true;
-    worker_ = std::thread([this]() { run(); });
-  }
-
-  ~RuntimeLogTail() { stop(); }
-
-  RuntimeLogTail(const RuntimeLogTail &) = delete;
-  RuntimeLogTail &operator=(const RuntimeLogTail &) = delete;
-
-  void stop() {
-    bool expected = true;
-    if (!running_.compare_exchange_strong(expected, false))
-      return;
-    if (worker_.joinable())
-      worker_.join();
-  }
-
-private:
-  std::uintmax_t current_size() const {
-    std::error_code ec;
-    std::uintmax_t size = std::filesystem::file_size(log_path_, ec);
-    return ec ? 0 : size;
-  }
-
-  void run() {
-    while (running_) {
-      read_available();
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    read_available();
-  }
-
-  void read_available() {
-    std::error_code ec;
-    std::uintmax_t size = std::filesystem::file_size(log_path_, ec);
-    if (ec)
-      return;
-    if (size < offset_)
-      offset_ = 0;
-    if (size == offset_)
-      return;
-
-    std::ifstream in(log_path_, std::ios::binary);
-    if (!in.is_open())
-      return;
-    in.seekg(static_cast<std::streamoff>(offset_));
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    std::string chunk = buffer.str();
-    offset_ += static_cast<std::uintmax_t>(chunk.size());
-    if (!chunk.empty() && on_chunk_)
-      on_chunk_(chunk);
-  }
-
-  std::string log_path_;
-  ChunkHandler on_chunk_;
-  std::uintmax_t offset_ = 0;
-  std::atomic<bool> running_{false};
-  std::thread worker_;
-};
-
-class AuthFailureWatch {
-public:
-  explicit AuthFailureWatch(const Config &cfg)
-      : tail_(utils::expand_home(cfg.log_file),
-              [this](const std::string &chunk) { observe(chunk); }) {}
-
-  bool failed() const { return failed_.load(); }
-
-  void stop() { tail_.stop(); }
-
-private:
-  void observe(const std::string &chunk) {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    buffer_ += chunk;
-    if (buffer_.size() > 8192)
-      buffer_.erase(0, buffer_.size() - 8192);
-    if (openconnect_log::contains_auth_failure_text(buffer_))
-      failed_ = true;
-  }
-
-  std::atomic<bool> failed_{false};
-  std::mutex buffer_mutex_;
-  std::string buffer_;
-  RuntimeLogTail tail_;
-};
-
-class ConnectionDiagnostics {
-public:
-  explicit ConnectionDiagnostics(std::string scope) : scope_(std::move(scope)) {}
-
-  void event(const std::string &name, const std::string &detail = "") {
-    std::string item = name;
-    if (!detail.empty())
-      item += "(" + detail + ")";
-    events_.push_back(item);
-    if (events_.size() > 24)
-      events_.erase(events_.begin());
-  }
-
-  void mark_route_ready(const std::string &interface_name,
-                        const std::string &internal_ip) {
-    route_ready_ = true;
-    event("route_ready", interface_name + "," + internal_ip);
-  }
-
-  void mark_process_exited_before_ready() {
-    process_exited_before_ready_ = true;
-    event("openconnect_exited_before_route_ready");
-  }
-
-  bool initial_connection_failed() const {
-    return process_exited_before_ready_ && !route_ready_;
-  }
-
-  void flush_summary(bool ok) const {
-    std::string summary = "[connect-diagnostics] scope=" + scope_ +
-                          " result=" + (ok ? "ok" : "failed") +
-                          " route_ready=" + (route_ready_ ? "true" : "false") +
-                          " process_exited_before_ready=" +
-                          (process_exited_before_ready_ ? "true" : "false") +
-                          " events=";
-    for (std::size_t i = 0; i < events_.size(); ++i) {
-      if (i)
-        summary += ">";
-      summary += events_[i];
-    }
-    if (ok)
-      logger::info(summary);
-    else
-      logger::warn(summary);
-  }
-
-private:
-  std::string scope_;
-  std::vector<std::string> events_;
-  bool route_ready_ = false;
-  bool process_exited_before_ready_ = false;
-};
-
-static void write_pid_file(const std::string &path, pid_t pid) {
-  std::ofstream ofs(path);
-  if (ofs.is_open()) {
-    ofs << pid;
-    ofs.flush();
-    utils::sync_owner(path);
-  }
-}
-
-static pid_t read_pid_file(const std::string &path) {
-  if (!utils::file_exists(path))
-    return -1;
-  std::string content = utils::read_file(path);
-  content = utils::trim(content);
-  if (content.empty())
-    return -1;
-  try {
-    return static_cast<pid_t>(std::stoi(content));
-  } catch (...) {
-    return -1;
-  }
-}
-
-static void remove_pid_file(const std::string &path) {
-  if (utils::file_exists(path)) {
-    std::remove(path.c_str());
-  }
-}
-
-static void write_pid(pid_t pid) { write_pid_file(utils::get_pid_path(), pid); }
-
-static pid_t read_pid() { return read_pid_file(utils::get_pid_path()); }
-
-static void remove_pid() { remove_pid_file(utils::get_pid_path()); }
-
-static void write_supervisor_pid(pid_t pid) {
-  write_pid_file(utils::get_supervisor_pid_path(), pid);
-}
-
-static pid_t read_supervisor_pid() {
-  return read_pid_file(utils::get_supervisor_pid_path());
-}
-
-static void remove_supervisor_pid() {
-  remove_pid_file(utils::get_supervisor_pid_path());
-}
-
-static void remove_route_ready() {
-  remove_pid_file(utils::get_route_ready_path());
-}
-
-static pid_t current_process_pid() {
-#ifdef _WIN32
-  return static_cast<pid_t>(GetCurrentProcessId());
-#else
-  return static_cast<pid_t>(getpid());
-#endif
-}
-
-static bool read_route_ready(std::string *interface_name = nullptr,
-                             std::string *internal_ip = nullptr) {
-  std::string path = utils::get_route_ready_path();
-  if (!utils::file_exists(path))
-    return false;
-
-  std::istringstream iss(utils::read_file(path));
-  std::string tun;
-  std::string ip;
-  if (!std::getline(iss, tun) || !std::getline(iss, ip))
-    return false;
-
-  tun = utils::trim(tun);
-  ip = utils::trim(ip);
-  if (tun.empty() || ip.empty())
-    return false;
-
-  if (interface_name)
-    *interface_name = tun;
-  if (internal_ip)
-    *internal_ip = ip;
-  return true;
-}
-
-static void clear_runtime_state() {
-  remove_pid();
-  remove_supervisor_pid();
-  remove_route_ready();
-}
-
-static bool is_process_alive(pid_t pid) {
-  return platform::is_process_alive(static_cast<int>(pid));
-}
-
-static pid_t find_openconnect_pid() {
-  return static_cast<pid_t>(platform::find_openconnect_pid());
-}
-
-static void terminate_process(pid_t pid, bool force) {
-  platform::terminate_process(static_cast<int>(pid), force);
-}
-
-static void sleep_ms(unsigned int milliseconds) {
-  platform::sleep_ms(milliseconds);
-}
-
-static void append_openconnect_attempt_marker(const Config &cfg) {
-  std::filesystem::path log_path = utils::expand_home(cfg.log_file);
-  std::error_code ec;
-  if (log_path.has_parent_path())
-    std::filesystem::create_directories(log_path.parent_path(), ec);
-  std::ofstream out(log_path, std::ios::app);
-  if (out.is_open()) {
-    out << "Starting VPN: " << cfg.server << " user=" << cfg.username
-        << std::endl;
-  }
-}
-
-static void handle_supervisor_signal(int) {
-  supervisor_stop_requested = 1;
-  pid_t child_pid = supervisor_child_pid;
-  if (child_pid > 0) {
-    terminate_process(child_pid, false);
-  }
-}
-
-static std::string describe_retry_policy(int retry_limit) {
-  return retry_limit < 0 ? std::string("infinite")
-                         : std::to_string(retry_limit) + " retries";
-}
-
-class LoggingEventSink final : public vpn_engine::EventSink {
-public:
-  explicit LoggingEventSink(vpn_engine::EventSink *inner) : inner_(inner) {}
-
-  void emit(const vpn_engine::VpnEngineEvent &event) override {
-    std::string message = "[native-engine] " + event.type;
-    if (!event.message.empty())
-      message += ": " + event.message;
-
-    const auto code = event.fields.find("code");
-    if (code != event.fields.end() && !code->second.empty())
-      message += " (code=" + code->second + ")";
-
-    if (event.level == "error")
-      logger::error(message);
-    else if (event.level == "warn")
-      logger::warn(message);
-    else
-      logger::info(message);
-
-    if (inner_)
-      inner_->emit(event);
-  }
-
-private:
-  vpn_engine::EventSink *inner_;
-};
-
-// LEGACY: Durable owner for native-engine sessions. Only reached when
-// TunnelController is NOT available (helper worker, CLI fallback).
-// Native engine uses TunnelController (Core-owned mode) via app_api.
-//
-// The native packet loop runs on a background thread that lives inside the
-// *process* hosting the NativeVpnEngineSession, so the session must be owned
-// by this long-lived supervisor (not the short-lived CLI/RPC invocation that
-// requested the connection). This process records itself as the durable
-// supervisor PID in native-session-state.json and holds the session open
-// until a stop is requested or the retry budget is exhausted.
-static int run_native_supervisor(const Config &cfg, const std::string &password,
-                                 int retry_limit) {
-  signal(SIGTERM, handle_supervisor_signal);
-  signal(SIGINT, handle_supervisor_signal);
-
-  logger::info("Native VPN supervisor started, retry policy: " +
-               describe_retry_policy(retry_limit));
-
-  const std::string config_dir = utils::get_config_dir();
-  const pid_t own_pid = current_process_pid();
-  int reconnect_attempts_used = 0;
-  bool first_attempt = true;
-
-  while (!supervisor_stop_requested) {
-    if (!first_attempt) {
-      if (retry_limit == 0)
-        break;
-      if (retry_limit > -1 && reconnect_attempts_used >= retry_limit) {
-        logger::warn("Native VPN supervisor reached retry limit: " +
-                     std::to_string(retry_limit));
-        break;
-      }
-      ++reconnect_attempts_used;
-      logger::warn("Native VPN session ended; reconnect attempt " +
-                   std::to_string(reconnect_attempts_used) +
-                   (retry_limit > -1 ? ("/" + std::to_string(retry_limit))
-                                     : " (infinite mode)"));
-      sleep_ms(2000);
-      if (supervisor_stop_requested)
-        break;
-    }
-
-    vpn_engine::NativeSessionRecord record;
-    record.pid = -1;
-    record.supervisor_pid = static_cast<int>(own_pid);
-    record.server = cfg.server;
-    record.route_count = static_cast<int>(cfg.routes.size());
-    record.retry_limit = retry_limit;
-
-    vpn_engine::NativeSessionEventRecorder recorder(config_dir, record);
-  LoggingEventSink logging_sink(&recorder);
-    vpn_engine::NativeVpnEngineDependencies dependencies =
-        vpn_engine::default_native_engine_dependencies();
-  dependencies.event_sink = &logging_sink;
-
-    vpn_engine::NativeVpnEngineSession session(
-        vpn_engine::make_native_config(cfg, password), dependencies);
-
-    auto result = session.start();
-    if (!result.ok) {
-      logger::error("Native VPN engine start failed: " + result.code);
-      recorder.mark_stopped();
-      first_attempt = false;
-      continue;
-    }
-
-    logger::info("Native VPN session established under durable supervisor, PID: " +
-                 std::to_string(own_pid));
-
-    // Own the session for the lifetime of this process: hold it open until the
-    // session stops on its own (transport failure) or a stop is requested.
-    while (!supervisor_stop_requested) {
-      vpn_engine::VpnEngineStatus status = session.status();
-      if (!status.running)
-        break;
-      sleep_ms(250);
-    }
-
-    session.stop();
-    recorder.mark_stopped();
-
-    if (supervisor_stop_requested)
-      break;
-
-    first_attempt = false;
-  }
-
-  clear_runtime_state();
-  // Do NOT clear native session state here. When the engine fails to reach a
-  // network-ready state, the recorder has just persisted the real failure_code
-  // to native-session-state.json. handle_start() reads that code after the
-  // worker process exits and is responsible for clearing the file afterwards.
-  // Clearing here destroys the failure code before the desktop can see it,
-  // producing a generic "Failed to establish the VPN connection" error.
-  logger::info("Native VPN supervisor stopped");
-  return 0;
-}
-
-// LEGACY: Reconnect supervisor for legacy_openconnect engine and native-engine
-// fallback path. Native engine uses TunnelController (Core-owned mode) via
-// app_api when available; this function is only reached when TunnelController
-// is not initialized (helper worker, CLI fallback).
-static int run_supervisor(const Config &cfg, const std::string &password,
-                          int retry_limit) {
-  if (cfg.vpn_engine == "native") {
-    return run_native_supervisor(cfg, password, retry_limit);
-  }
-
-  signal(SIGTERM, handle_supervisor_signal);
-  signal(SIGINT, handle_supervisor_signal);
-
-  logger::info("Reconnect supervisor started, retry policy: " +
-               describe_retry_policy(retry_limit));
-
-  bool first_attempt = true;
-  int reconnect_attempts_used = 0;
-  bool retry_limit_reached = false;
-
-  while (!supervisor_stop_requested) {
-    ConnectTiming timing(first_attempt ? "vpn.supervisor.initial"
-                                       : "vpn.supervisor.reconnect");
-    bool timing_finished = false;
-    if (!first_attempt) {
-      if (retry_limit == 0) {
-        timing.finish(false, "reason=reconnect_disabled");
-        break;
-      }
-      if (retry_limit > -1 && reconnect_attempts_used >= retry_limit) {
-        retry_limit_reached = true;
-        timing.finish(false, "reason=retry_limit_reached");
-        break;
-      }
-
-      ++reconnect_attempts_used;
-      logger::warn("VPN disconnected, attempting reconnect " +
-                   std::to_string(reconnect_attempts_used) +
-                   (retry_limit > -1 ? ("/" + std::to_string(retry_limit))
-                                     : " (infinite mode)"));
-#ifndef _WIN32
-      sleep(2);
-#else
-      Sleep(2000);
-#endif
-      if (supervisor_stop_requested)
-        break;
-      timing.mark("reconnect_delay_complete",
-                  "attempt=" + std::to_string(reconnect_attempts_used));
-    }
-
-    pid_t child_pid = -1;
-    platform::OpenconnectProcess child_process;
-    append_openconnect_attempt_marker(cfg);
-    AuthFailureWatch auth_watch(cfg);
-    if (!platform::spawn_openconnect_process(cfg, password, &child_process)) {
-      timing.finish(false, "reason=spawn_openconnect_failed");
-      timing_finished = true;
-      if (first_attempt) {
-        clear_runtime_state();
-        return 1;
-      }
-      continue;
-    }
-    child_pid = static_cast<pid_t>(child_process.pid);
-    timing.mark("spawn_openconnect", "pid=" + std::to_string(child_pid));
-
-    supervisor_child_pid = child_pid;
-    write_pid(child_pid);
-    timing.mark("write_pid", "pid=" + std::to_string(child_pid));
-    logger::info(std::string(first_attempt ? "Starting" : "Reconnect attempt") +
-                 " openconnect, PID: " + std::to_string(child_pid));
-
-    int wait_status = 0;
-    bool route_ready_logged = false;
-    bool auth_failed_logged = false;
-#ifndef _WIN32
-    while (true) {
-      pid_t wait_result = waitpid(child_pid, &wait_status, WNOHANG);
-      if (wait_result == child_pid)
-        break;
-      if (wait_result < 0) {
-        if (errno == EINTR)
-          continue;
-        logger::error("waitpid failed while supervising openconnect");
-        break;
-      }
-
-      if (!route_ready_logged) {
-        pid_t vpn_pid = read_pid();
-        std::string vpn_interface;
-        std::string internal_ip;
-        if (vpn_pid > 0 && is_process_alive(vpn_pid) &&
-            read_route_ready(&vpn_interface, &internal_ip)) {
-          logger::info(std::string(first_attempt
-                                       ? "VPN connection ready under reconnect supervisor"
-                                       : "VPN reconnect succeeded") +
-                       ", PID: " + std::to_string(vpn_pid) +
-                       ", interface: " + vpn_interface +
-                       ", internal IP: " + internal_ip);
-          timing.mark("route_ready",
-                      "pid=" + std::to_string(vpn_pid) + " interface=" +
-                          vpn_interface + " internal_ip=" + internal_ip);
-          timing.finish(true, "pid=" + std::to_string(vpn_pid));
-          timing_finished = true;
-          route_ready_logged = true;
-        }
-      }
-
-      if (!route_ready_logged && !auth_failed_logged &&
-          (auth_watch.failed() || tunnel::runtime_log_has_auth_failure(cfg))) {
-        auth_failed_logged = true;
-        logger::error("OpenConnect reported authentication failure before network readiness");
-        timing.mark("auth_failed");
-        terminate_process(child_pid, true);
-      }
-
-      usleep(250000);
-    }
-#else
-    DWORD child_exit_code = 1;
-    HANDLE hChild = static_cast<HANDLE>(child_process.wait_handle);
-    while (true) {
-      if (!hChild) {
-        logger::error("Invalid Windows openconnect process handle while supervising.");
-        break;
-      }
-      DWORD wait_result = WaitForSingleObject(hChild, 250);
-      if (wait_result == WAIT_OBJECT_0) {
-        break;
-      }
-      if (wait_result == WAIT_FAILED) {
-        logger::error("WaitForSingleObject failed while supervising openconnect");
-        break;
-      }
-
-      if (!route_ready_logged) {
-        pid_t vpn_pid = read_pid();
-        std::string vpn_interface;
-        std::string internal_ip;
-        if (vpn_pid > 0 && is_process_alive(vpn_pid) &&
-            read_route_ready(&vpn_interface, &internal_ip)) {
-          logger::info(std::string(first_attempt
-                                       ? "VPN connection ready under reconnect supervisor"
-                                       : "VPN reconnect succeeded") +
-                       ", PID: " + std::to_string(vpn_pid) +
-                       ", interface: " + vpn_interface +
-                       ", internal IP: " + internal_ip);
-          timing.mark("route_ready",
-                      "pid=" + std::to_string(vpn_pid) + " interface=" +
-                          vpn_interface + " internal_ip=" + internal_ip);
-          timing.finish(true, "pid=" + std::to_string(vpn_pid));
-          timing_finished = true;
-          route_ready_logged = true;
-        }
-      }
-
-      if (!route_ready_logged && !auth_failed_logged &&
-          (auth_watch.failed() || tunnel::runtime_log_has_auth_failure(cfg))) {
-        auth_failed_logged = true;
-        logger::error("OpenConnect reported authentication failure before network readiness");
-        timing.mark("auth_failed");
-        terminate_process(child_pid, true);
-      }
-    }
-    if (hChild) {
-      GetExitCodeProcess(hChild, &child_exit_code);
-    }
-    platform::close_openconnect_process(&child_process);
-#endif
-
-    if (!route_ready_logged) {
-      std::string vpn_interface;
-      std::string internal_ip;
-      pid_t vpn_pid = read_pid();
-      if (vpn_pid > 0 && is_process_alive(vpn_pid) &&
-          read_route_ready(&vpn_interface, &internal_ip)) {
-        logger::info(std::string(first_attempt
-                                     ? "VPN connection ready under reconnect supervisor"
-                                     : "VPN reconnect succeeded") +
-                     ", PID: " + std::to_string(vpn_pid) +
-                     ", interface: " + vpn_interface +
-                     ", internal IP: " + internal_ip);
-        timing.mark("route_ready",
-                    "pid=" + std::to_string(vpn_pid) + " interface=" +
-                        vpn_interface + " internal_ip=" + internal_ip);
-        timing.finish(true, "pid=" + std::to_string(vpn_pid));
-        timing_finished = true;
-      }
-    }
-
-    supervisor_child_pid = -1;
-    remove_pid();
-    remove_route_ready();
-
-    if (auth_failed_logged) {
-      clear_runtime_state();
-      timing.finish(false, "reason=auth_failed");
-      return first_attempt ? kVpnInitialConnectFailedExitCode : 1;
-    }
-
-    if (supervisor_stop_requested)
-      break;
-
-#ifndef _WIN32
-    if (WIFEXITED(wait_status)) {
-      logger::warn("openconnect exited with code: " +
-                   std::to_string(WEXITSTATUS(wait_status)));
-    } else if (WIFSIGNALED(wait_status)) {
-      logger::warn("openconnect terminated by signal: " +
-                   std::to_string(WTERMSIG(wait_status)));
-    }
-#else
-    logger::warn("openconnect exited with code: " +
-                 std::to_string(child_exit_code));
-#endif
-    if (!timing_finished) {
-      timing.finish(false, "reason=openconnect_exited_before_route_ready");
-    }
-
-    first_attempt = false;
-  }
-
-  if (retry_limit_reached) {
-    logger::warn("Reconnect supervisor stopped after reaching retry limit: " +
-                 std::to_string(retry_limit));
-  } else if (supervisor_stop_requested) {
-    logger::info("Reconnect supervisor stop requested");
-  }
-
-  clear_runtime_state();
-  return 0;
-}
-
-#ifdef _WIN32
-int supervisor_main() {
-  try {
-    std::ostringstream payload;
-    payload << std::cin.rdbuf();
-    nlohmann::json request = nlohmann::json::parse(payload.str());
-    std::string home = request.value("home", std::string());
-    std::string config_dir = request.value("config_dir", std::string());
-    runtime::bootstrap(config_dir, home, /*force=*/true);
-    logger::init();
-    write_supervisor_pid(static_cast<pid_t>(GetCurrentProcessId()));
-    Config cfg = request.at("config").get<Config>();
-    std::string password = request.at("password").get<std::string>();
-    int retry_limit = request.value("retry_limit", 0);
-    return run_supervisor(cfg, password, retry_limit);
-  } catch (...) {
-    clear_runtime_state();
-    return 1;
-  }
-}
-#endif
-
 int start(const Config &cfg, int retry_limit) {
   utils::print_header("EXV Starting");
 
@@ -773,7 +114,7 @@ int start(const Config &cfg, int retry_limit) {
       return 1;
     }
 
-    // Homebrew found â€” attempt to install openconnect
+    // Homebrew found â€?attempt to install openconnect
     utils::print_info("Running: brew install openconnect ...");
     std::cout << std::endl;
     int ret = utils::run_command("brew install openconnect");
@@ -824,7 +165,7 @@ int start(const Config &cfg, int retry_limit) {
 #endif
   }
 
-  // Prefer helper daemon even when running as root â€” it manages session state
+  // Prefer helper daemon even when running as root â€?it manages session state
   // and the reconnect supervisor, and ensures stop works correctly.
   if (helper::is_available()) {
     Config validated_cfg = cfg;
@@ -942,7 +283,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
       return kUseTunnelController;
     }
 
-    // TunnelController is not available â€” fall through to the legacy
+    // TunnelController is not available â€?fall through to the legacy
     // supervisor path which owns the NativeVpnEngineSession lifecycle.
     logger::info("Native engine: TunnelController not available, using "
                  "supervisor fallback (legacy path)");
@@ -1362,7 +703,7 @@ bool stop_direct_session() {
     return true;
   }
 
-// Clean up routes before killing openconnect â€” while the tunnel
+// Clean up routes before killing openconnect â€?while the tunnel
   // interface is still valid, route deletion is more reliable.
   // On Windows, tunnel::cleanup_routes() is a no-op.
   tunnel::cleanup_routes();
@@ -1397,13 +738,13 @@ bool stop_direct_session() {
 int stop() {
   utils::print_header("EXV Stopping");
 
-  // Prefer helper daemon even when running as root â€” it manages session state
+  // Prefer helper daemon even when running as root â€?it manages session state
   // and the reconnect supervisor. Direct kills leave stale state and the
   // supervisor respawns openconnect immediately.
   if (helper::is_available()) {
     bool ok = helper::stop_via_helper();
     if (ok) return 0;
-    // Helper said not running â€” check for orphaned processes before giving up
+    // Helper said not running â€?check for orphaned processes before giving up
   }
 
   if (!utils::check_root()) {
@@ -1446,7 +787,7 @@ int stop() {
   logger::info("Stopping VPN, PID: " + std::to_string(pid) +
                ", supervisor PID: " + std::to_string(supervisor_pid));
 
-  // Clean up routes before killing openconnect â€” while the tunnel
+  // Clean up routes before killing openconnect â€?while the tunnel
   // interface is still valid, route deletion is more reliable.
   // On Windows, tunnel::cleanup_routes() is a no-op.
   tunnel::cleanup_routes();
@@ -1510,7 +851,7 @@ int status() {
   RuntimeStatusSnapshot snapshot = read_runtime_status_snapshot(cfg);
 
   if (snapshot.running) {
-    std::cout << utils::GREEN << utils::BOLD << "  â— VPN is RUNNING"
+    std::cout << utils::GREEN << utils::BOLD << "  â—?VPN is RUNNING"
               << utils::RESET << std::endl;
     std::cout << std::endl;
     if (snapshot.pid > 0) {
@@ -1544,7 +885,7 @@ int status() {
       }
     }
   } else {
-    std::cout << utils::RED << utils::BOLD << "  â— VPN is NOT RUNNING"
+    std::cout << utils::RED << utils::BOLD << "  â—?VPN is NOT RUNNING"
               << utils::RESET << std::endl;
     clear_runtime_state();
   }
