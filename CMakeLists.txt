@@ -250,34 +250,6 @@ target_compile_definitions(exv PRIVATE
     ECNUVPN_VERSION="${PROJECT_VERSION}"
 )
 
-# Embedded WebUI assets
-#
-# Build dependency chain: frontend must be built before the C++ build can
-# succeed.  The custom command below runs scripts/embed_assets.py, which reads
-# webui/dist/ (the Vite build output) and generates src/webui_assets.hpp.
-# If webui/dist/ does not exist, embed_assets.py will fail with instructions
-# to build the frontend first:
-#
-#   cd webui && npm install && npm run build
-#
-# Then re-run the C++ build.  The full ordering is:
-#   1. Frontend build (webui/dist/)
-#   2. Native build    (this step â€?consumes webui/dist/)
-#   3. Desktop build   (optional â€?packages native binary + Electron shell)
-#
-add_custom_command(
-    OUTPUT ${CMAKE_SOURCE_DIR}/src/webui_assets.hpp
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/embed_assets.py
-    DEPENDS ${CMAKE_SOURCE_DIR}/scripts/embed_assets.py
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Embedding webui assets into C++ header..."
-)
-
-add_custom_target(embed_assets DEPENDS ${CMAKE_SOURCE_DIR}/src/webui_assets.hpp)
-add_dependencies(exv embed_assets)
-
-target_compile_definitions(exv PRIVATE EMBEDDED_ASSETS)
-
 add_executable(vpn_runtime_test
         tests/vpn_runtime_test.cpp
     src/vpn_engine/session_state.cpp
