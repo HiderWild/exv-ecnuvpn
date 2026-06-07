@@ -80,5 +80,5 @@ None - all new files, no existing files modified.
 - `docs/CORE_STATE_MACHINE.md` - TunnelController state machine specification
 - `docs/DESKTOP_RPC_V2.md` - Desktop RPC V2 contract specification
 - `docs/INTERFACE_CHANGELOG.md` - This file
-- `docs/MIGRATION_CHECKLIST.md` - Phase-by-phase migration verification
-- `docs/REGRESSION_MATRIX.md` - Regression test matrix
+- `docs/archive/2026-06/checklists/MIGRATION_CHECKLIST.md` - Archived phase-by-phase migration verification
+- `docs/archive/2026-06/checklists/REGRESSION_MATRIX.md` - Archived regression test matrix

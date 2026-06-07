@@ -170,10 +170,10 @@ ECNU-VPN/                              (项目根, 321 git-tracked files)
 │
 └── docs/                              文档
     ├── architecture/                  架构文档
-    ├── merge-playbooks/               合并剧本
+    ├── archive/                       历史计划/报告/验证归档
     ├── security/                      安全审查
-    ├── validation/                    验证报告
-    └── superpowers/plans/             开发计划
+    ├── validation/                    当前验证文档（历史材料已归档）
+    └── superpowers/                   当前 superpowers 文档入口（历史计划已归档）
 ```
 
 ## 2.2 目录职责说明
