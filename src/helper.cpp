@@ -406,7 +406,7 @@ nlohmann::json make_status_response(const SessionState &state,
 bool ensure_same_owner(const SessionState &state, uid_t peer_uid) {
   // Any local user who can reach the helper socket may manage the VPN session.
   // Any local user who can reach the helper socket may manage the VPN session.
-  // Socket is mode 0660, group staff (gid 20) â€” access controlled at OS level.
+  // Socket is mode 0660, group staff (gid 20) â€?access controlled at OS level.
   (void)state;
   (void)peer_uid;
   return true;
@@ -509,7 +509,7 @@ bool stop_managed_session(const SessionState &state, std::string *message) {
     return false;
   }
 
-  // Clean up routes before killing openconnect â€” while the tunnel
+  // Clean up routes before killing openconnect â€?while the tunnel
   // interface is still valid, route deletion is more reliable.
   platform::cleanup_routes();
 
@@ -578,7 +578,7 @@ nlohmann::json handle_stop(uid_t peer_uid) {
     return nlohmann::json{{"ok", true}, {"message", message}};
   }
 
-  // stop_managed_session failed â€” belt-and-suspenders cleanup
+  // stop_managed_session failed â€?belt-and-suspenders cleanup
   platform::cleanup_routes();
   platform::kill_all_supervisors();
   RuntimeSnapshot snapshot = inspect_runtime(state);
@@ -785,13 +785,13 @@ nlohmann::json handle_request(uid_t peer_uid, gid_t peer_gid,
 bool print_running_status(const nlohmann::json &response) {
   bool running = response.value("running", false);
   if (!running) {
-    std::cout << utils::RED << utils::BOLD << "  â— VPN is NOT RUNNING"
+    std::cout << utils::RED << utils::BOLD << "  â—?VPN is NOT RUNNING"
               << utils::RESET << std::endl;
     std::cout << std::endl;
     return true;
   }
 
-  std::cout << utils::GREEN << utils::BOLD << "  â— VPN is RUNNING"
+  std::cout << utils::GREEN << utils::BOLD << "  â—?VPN is RUNNING"
             << utils::RESET << std::endl;
   std::cout << std::endl;
 
