@@ -115,7 +115,7 @@ set(EXV_PLATFORM_LIBS)
 set(SOURCES
     src/main.cpp
     src/app_api.cpp
-    src/webui.cpp
+    src/cli/pipe_client.cpp
     src/platform/common/status_models.cpp
     src/platform/common/runtime_status.cpp
 )
