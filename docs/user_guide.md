@@ -29,8 +29,8 @@ cd ECNU-VPN
 
 # 1. Build the frontend first
 cd webui
-npm install
-npm run build
+pnpm install
+pnpm run build
 cd ..
 ```
 
@@ -247,19 +247,19 @@ The desktop shell communicates with the native `exv desktop-rpc` JSON interface 
 
 ```bash
 cd webui
-npm install
-npm run build
-npm run build:electron
+pnpm install
+pnpm run build
+pnpm run build:electron
 
 # Package the desktop app (after building the native C++ binary)
-npm run desktop:build
+pnpm run desktop:build
 ```
 
 For live development, build the native binary first or set `EXV_PATH`:
 
 ```bash
 cd webui
-npm run desktop:dev
+pnpm run desktop:dev
 ```
 
 ### Windows Desktop Packaging
@@ -269,8 +269,8 @@ The Electron desktop app can be packaged for Windows in two flavours:
 ```powershell
 # Build the Electron desktop bundle (produces both targets in webui/release/)
 cd webui
-npm install
-npm run desktop:build
+pnpm install
+pnpm run desktop:build
 ```
 
 Artifacts (under `webui/release/`):

@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "preinstall": "node -e \"const ua = process.env.npm_config_user_agent || ''; if (!ua.startsWith('pnpm/')) { console.error('Use pnpm instead of npm for this project.'); process.exit(1); }\"",
     "dev": "vite",
     "dev:desktop": "vite --port 5176 --strictPort",
     "desktop:dev": "npm-run-all --parallel dev:desktop electron:dev electron:start",
@@ -12,12 +13,12 @@
     "build": "vue-tsc -b && vite build",
     "build:electron": "node scripts/build-electron.cjs",
     "prepare:native": "node scripts/prepare-native.cjs",
-    "desktop:compile": "npm run build && npm run build:electron && npm run prepare:native",
+    "desktop:compile": "pnpm run build && pnpm run build:electron && pnpm run prepare:native",
     "desktop:package": "electron-builder --config electron-builder.config.cjs",
     "desktop:package:dir": "electron-builder --dir --config electron-builder.config.cjs",
-    "desktop:debug": "npm run desktop:compile && npm run desktop:package:dir",
-    "desktop:build": "npm run desktop:compile && npm run desktop:package",
-    "test:rpc": "npx tsx desktop/main/__tests__/core-rpc-client.test.ts",
+    "desktop:debug": "pnpm run desktop:compile && pnpm run desktop:package:dir",
+    "desktop:build": "pnpm run desktop:compile && pnpm run desktop:package",
+    "test:rpc": "pnpm exec tsx desktop/main/__tests__/core-rpc-client.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {
@@ -43,5 +44,6 @@
     "vue-tsc": "^3.2.7",
     "wait-on": "^9.0.3"
   },
-  "main": "dist-electron/main/index.js"
+  "main": "dist-electron/main/index.js",
+  "packageManager": "pnpm@10.33.2"
 }

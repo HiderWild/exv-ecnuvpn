@@ -11,7 +11,7 @@ serialization.
 
 The practical goal was:
 
-- `npm run desktop:dev` can launch a real Electron UI against the current native
+- `pnpm run desktop:dev` can launch a real Electron UI against the current native
   binaries.
 - The packaged desktop app can stage the same native runtime.
 - A normal logged-in user can connect through a one-time installed helper
@@ -312,14 +312,14 @@ $env:EXV_PATH="D:\Development\Projects\cpp\ECNU-VPN\build\exv.exe"
 $env:EXV_HELPER_PATH="D:\Development\Projects\cpp\ECNU-VPN\build\exv-helper.exe"
 $env:ECNUVPN_RUNTIME_DIR="D:\Development\Projects\cpp\ECNU-VPN\runtime\win32-x64"
 
-npm run desktop:dev
+pnpm run desktop:dev
 ```
 
 For packaged UI testing:
 
 ```powershell
 cd "D:\Development\Projects\cpp\ECNU-VPN\webui"
-npm run desktop:build
+pnpm run desktop:build
 & "D:\Development\Projects\cpp\ECNU-VPN\webui\release\win-unpacked\ECNU-VPN.exe"
 ```
 

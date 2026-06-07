@@ -203,16 +203,6 @@ bool configure_from_runtime_log(const Config &cfg) {
       .ok;
 }
 
-bool runtime_log_has_auth_failure(const Config &cfg) {
-  if (cfg.vpn_engine != "legacy_openconnect")
-    return false;
-
-  std::string log_path = utils::expand_home(cfg.log_file);
-  if (!utils::file_exists(log_path))
-    return false;
-  return openconnect_log::parse_evidence(utils::read_file(log_path)).auth_failed;
-}
-
 void cleanup_routes() {
 #ifndef _WIN32
   Config cfg = config::load();

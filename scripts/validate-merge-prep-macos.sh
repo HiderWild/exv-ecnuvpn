@@ -28,7 +28,7 @@ cd "$REPO_ROOT"
 echo "[merge-prep] Build frontend assets for native embedding..."
 (
   cd "$REPO_ROOT/webui"
-  npm run build
+  pnpm run build
 )
 
 echo "[merge-prep] Configure and build native targets..."
@@ -42,8 +42,8 @@ if [[ "$SKIP_DESKTOP" -eq 0 ]]; then
   echo "[merge-prep] Compile Electron main/preload and native staging..."
   (
     cd "$REPO_ROOT/webui"
-    npm run build:electron
-    npm run prepare:native
+    pnpm run build:electron
+    pnpm run prepare:native
   )
 fi
 

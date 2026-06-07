@@ -219,12 +219,12 @@ ECNU-VPN/                              (项目根, 321 git-tracked files)
 | C++ 可执行文件 exv | `cmake --build --preset {platform}-release --target exv` | `exv` / `exv.exe` | 全平台 | 主应用 + 内嵌 WebUI | `CMakeLists.txt:203-204` |
 | C++ 可执行文件 exv-helper | `cmake --build --preset {platform}-release --target exv-helper` | `exv-helper` / `exv-helper.exe` | 全平台 | 特权 Helper | `CMakeLists.txt:206-212` |
 | WebUI 资源嵌入 | `python3 scripts/embed_assets.py` | `src/webui_assets.hpp` | 全平台 | 嵌入 SPA 到 C++ 头文件 | `CMakeLists.txt:234-243` |
-| Vue 渲染进程 | `cd webui && npm run build` | `webui/dist/` | 全平台 | Vite + Vue 3 | `webui/package.json:8` |
-| Electron 主进程 | `cd webui && npm run build:electron` | `webui/dist-electron/` | 全平台 | TypeScript 编译 | `webui/scripts/build-electron.cjs` |
-| Native 二进制暂存 | `cd webui && npm run prepare:native` | `webui/native/bin/` | 全平台 | 复制 exv/exv-helper + DLL | `webui/scripts/prepare-native.cjs` |
-| NSIS installer | `cd webui && npm run desktop:package` | `release/ECNU-VPN-*-Setup.exe` | Windows x64 | 含服务注册提示 | `webui/electron-builder.config.cjs:107-132` |
+| Vue 渲染进程 | `cd webui && pnpm run build` | `webui/dist/` | 全平台 | Vite + Vue 3 | `webui/package.json:8` |
+| Electron 主进程 | `cd webui && pnpm run build:electron` | `webui/dist-electron/` | 全平台 | TypeScript 编译 | `webui/scripts/build-electron.cjs` |
+| Native 二进制暂存 | `cd webui && pnpm run prepare:native` | `webui/native/bin/` | 全平台 | 复制 exv/exv-helper + DLL | `webui/scripts/prepare-native.cjs` |
+| NSIS installer | `cd webui && pnpm run desktop:package` | `release/ECNU-VPN-*-Setup.exe` | Windows x64 | 含服务注册提示 | `webui/electron-builder.config.cjs:107-132` |
 | Portable EXE | 同上 | `release/ECNU-VPN-*-portable.exe` | Windows x64 | 免安装 | `webui/electron-builder.config.cjs:133-135` |
-| DMG | `cd webui && npm run desktop:package` | `release/ECNU-VPN-*-mac-{arch}.dmg` | macOS x64+arm64 | Hardened Runtime | `webui/electron-builder.config.cjs:136-158` |
+| DMG | `cd webui && pnpm run desktop:package` | `release/ECNU-VPN-*-mac-{arch}.dmg` | macOS x64+arm64 | Hardened Runtime | `webui/electron-builder.config.cjs:136-158` |
 | Windows 全流程 | `scripts/build-windows.ps1 -Action desktop` | NSIS + portable | Windows | WebUI→C++→测试→Electron→打包 | `scripts/build-windows.ps1:143-149` |
 | macOS 全流程 | `scripts/build-macos.sh desktop` | DMG | macOS | 同上 | `scripts/build-macos.sh:131-137` |
 | Windows 安装 | `scripts/install-windows.bat` | 服务注册 | Windows | 复制到 Program Files + 注册服务 | `scripts/install-windows.bat:48-55` |
@@ -267,7 +267,7 @@ exv-core (static lib) <-- exv-helper-runtime (static lib) <-- exv (executable)
 
 | Job | Runner | 产物 | 特殊步骤 |
 |-----|--------|------|----------|
-| build-macos (intel) | macos-13 | `exv-macos-intel` | Node 20, npm, cmake |
+| build-macos (intel) | macos-13 | `exv-macos-intel` | Node 20, pnpm, cmake |
 | build-macos (arm64) | macos-latest | `exv-macos-arm64` | 同上 |
 | build-linux | ubuntu-latest | `exv-linux-amd64` | `apt-get install libssl-dev` |
 | build-windows | windows-latest | `exv-windows-amd64` | 无 OpenSSL (CNG) |

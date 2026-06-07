@@ -50,7 +50,7 @@ function Invoke-CppTests {
 function Invoke-WebuiRendererBuild {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step npm run build
+    Invoke-Step pnpm run build
   }
   finally {
     Pop-Location
@@ -60,8 +60,8 @@ function Invoke-WebuiRendererBuild {
 function Invoke-ElectronCompile {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step npm run build:electron
-    Invoke-Step npm run prepare:native
+    Invoke-Step pnpm run build:electron
+    Invoke-Step pnpm run prepare:native
   }
   finally {
     Pop-Location
@@ -71,7 +71,7 @@ function Invoke-ElectronCompile {
 function Invoke-DesktopPackage {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step npm run desktop:package
+    Invoke-Step pnpm run desktop:package
   }
   finally {
     Pop-Location
@@ -81,7 +81,7 @@ function Invoke-DesktopPackage {
 function Invoke-DesktopDebugBuild {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step npm run desktop:package:dir
+    Invoke-Step pnpm run desktop:package:dir
   }
   finally {
     Pop-Location

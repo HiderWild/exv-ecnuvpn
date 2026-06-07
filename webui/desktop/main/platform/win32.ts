@@ -365,14 +365,17 @@ const runner: DesktopPlatformRunner = {
     } catch (error) {
       if (existsSync(outputPath)) {
         const stdout = readFileSync(outputPath, 'utf8')
+        let result: unknown
         try {
-          const result = context.parseJsonOutput(stdout)
+          result = context.parseJsonOutput(stdout)
+        } catch {
+          result = undefined
+        }
+        if (result !== undefined) {
           if (result && typeof result === 'object' && (result as RpcErrorResult).ok === false) {
             context.throwRpcResultError(result as RpcErrorResult)
           }
           return result
-        } catch {
-          // Preserve the elevated process failure below.
         }
       }
       if (existsSync(logPath)) {

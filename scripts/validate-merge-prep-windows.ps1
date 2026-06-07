@@ -27,7 +27,7 @@ try {
   Write-Host '[merge-prep] Build frontend assets for native embedding...'
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step npm run build
+    Invoke-Step pnpm run build
   }
   finally {
     Pop-Location
@@ -48,8 +48,8 @@ if (-not $SkipDesktop) {
   Write-Host '[merge-prep] Compile Electron main/preload and native staging...'
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step npm run build:electron
-    Invoke-Step npm run prepare:native
+    Invoke-Step pnpm run build:electron
+    Invoke-Step pnpm run prepare:native
   }
   finally {
     Pop-Location

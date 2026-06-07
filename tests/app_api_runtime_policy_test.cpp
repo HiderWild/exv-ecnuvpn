@@ -1,6 +1,7 @@
 #include "platform/common/app_api_runtime_policy.hpp"
 #include "platform/common/helper_client.hpp"
 #include "utils.hpp"
+#include "vpn.hpp"
 
 #include <iostream>
 #include <string>
@@ -19,10 +20,23 @@ bool g_checked_root = false;
 bool g_runtime_owner_updated = false;
 bool g_runtime_path_overridden = false;
 bool g_fix_config_dir_ownership_called = false;
+#ifdef _WIN32
+int g_start_with_password_result = 0;
+ecnuvpn::vpn::RuntimeStatusSnapshot g_runtime_snapshot;
+#endif
 
 } // namespace
 
 namespace ecnuvpn {
+namespace platform {
+
+const ConfigDefaults &config_defaults() {
+  static const ConfigDefaults defaults{false, "test-agent", "test.log", false};
+  return defaults;
+}
+
+} // namespace platform
+
 namespace utils {
 
 bool check_root() {
@@ -65,6 +79,20 @@ bool terminate_process(int, bool) { return true; }
 void sleep_ms(unsigned int) {}
 
 } // namespace platform
+
+namespace vpn {
+
+int start_with_password(const Config &, const std::string &, int) {
+  return g_start_with_password_result;
+}
+
+RuntimeStatusSnapshot read_runtime_status_snapshot() {
+  return g_runtime_snapshot;
+}
+
+bool stop_direct_session() { return true; }
+
+} // namespace vpn
 } // namespace ecnuvpn
 #endif
 
@@ -114,10 +142,29 @@ int main() {
   ecnuvpn::platform::prepare_direct_fallback_runtime();
 
   #ifdef _WIN32
-    ok = expect(!g_checked_root,
+  ok = expect(!g_checked_root,
       "Windows runtime policy should remain an explicit no-op") &&
     ok;
-  #else
+
+  g_start_with_password_result = 0;
+  g_runtime_snapshot = {};
+  g_runtime_snapshot.running = true;
+  g_runtime_snapshot.network_ready = true;
+  g_runtime_snapshot.pid = 101;
+  g_runtime_snapshot.interface_name = "ECNU-VPN";
+  g_runtime_snapshot.internal_ip = "10.0.0.2";
+  nlohmann::json direct = ecnuvpn::platform::try_connect_direct_fallback(
+      ecnuvpn::Config{}, "secret");
+  ok = expect(direct.value("ok", false),
+              "Windows direct fallback should return success when vpn start succeeds") &&
+       ok;
+  ok = expect(direct.value("_direct_fallback", false),
+              "Windows direct fallback should mark direct fallback responses") &&
+       ok;
+  ok = expect(direct["_snapshot_data"].value("pid", -1) == 101,
+              "Windows direct fallback should expose runtime snapshot pid") &&
+       ok;
+#else
   ok = expect(g_checked_root,
               "runtime policy should consult the runtime owner preflight hook") &&
        ok;

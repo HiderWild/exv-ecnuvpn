@@ -45,21 +45,21 @@ platform selection.
 
 ```bash
 cd webui
-npm run desktop:compile
+pnpm run desktop:compile
 ```
 
 ### Package desktop artifacts
 
 ```bash
 cd webui
-npm run desktop:build
+pnpm run desktop:build
 ```
 
 ### Create an unpacked debug desktop build
 
 ```bash
 cd webui
-npm run desktop:debug
+pnpm run desktop:debug
 ```
 
 ## Platform Wrapper Scripts

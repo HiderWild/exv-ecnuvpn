@@ -1,7 +1,6 @@
 #pragma once
 
 #include "config_manager.hpp"
-#include "sse_broadcaster.hpp"
 
 #include <atomic>
 #include <future>

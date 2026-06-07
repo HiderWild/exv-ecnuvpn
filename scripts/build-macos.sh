@@ -43,29 +43,29 @@ run_tests() {
 run_webui_renderer() {
   (
     cd "$REPO_ROOT/webui"
-    npm run build
+    pnpm run build
   )
 }
 
 compile_electron() {
   (
     cd "$REPO_ROOT/webui"
-    npm run build:electron
-    npm run prepare:native
+    pnpm run build:electron
+    pnpm run prepare:native
   )
 }
 
 package_desktop() {
   (
     cd "$REPO_ROOT/webui"
-    npm run desktop:package
+    pnpm run desktop:package
   )
 }
 
 package_desktop_debug() {
   (
     cd "$REPO_ROOT/webui"
-    npm run desktop:package:dir
+    pnpm run desktop:package:dir
   )
 }
 

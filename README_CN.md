@@ -196,7 +196,7 @@ macOS 上，桌面端支持：
 ./scripts/build-macos.sh desktop
 ```
 
-开发模式：先构建 native binary 或设置 `EXV_PATH`，然后运行 `npm run desktop:dev`。
+开发模式：先构建 native binary 或设置 `EXV_PATH`，然后运行 `pnpm run desktop:dev`。
 
 浏览器 WebUI 保留为兼容入口，可通过 `exv -f` 在前台模式启用。
 

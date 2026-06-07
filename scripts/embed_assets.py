@@ -235,7 +235,7 @@ def main():
         print("Error: dist directory not found in any expected location:", file=sys.stderr)
         for path in candidate_dist_dirs():
             print(f"  - {path}", file=sys.stderr)
-        print("Build the frontend first: cd webui && npm run build", file=sys.stderr)
+        print("Build the frontend first: cd webui && pnpm run build", file=sys.stderr)
         sys.exit(1)
 
     files = collect_files(dist_dir)

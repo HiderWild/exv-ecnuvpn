@@ -11,18 +11,23 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
       - name: Install webui deps
         working-directory: webui
-        run: npm install
+        run: pnpm install --frozen-lockfile
       - name: WebUI typecheck
         working-directory: webui
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
       - name: Build webui
         working-directory: webui
-        run: npm run build
+        run: pnpm run build
       - name: Configure
         run: cmake --preset windows-release
       - name: Build
@@ -60,22 +65,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libssl-dev
       - name: Install webui deps
         working-directory: webui
-        run: npm install
+        run: pnpm install --frozen-lockfile
       - name: WebUI typecheck
         working-directory: webui
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
       - name: Build webui
         working-directory: webui
-        run: npm run build
+        run: pnpm run build
       - name: Configure
         run: cmake --preset linux-release
       - name: Build
@@ -115,18 +125,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
       - name: Install webui deps
         working-directory: webui
-        run: npm install
+        run: pnpm install --frozen-lockfile
       - name: WebUI typecheck
         working-directory: webui
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
       - name: Build webui
         working-directory: webui
-        run: npm run build
+        run: pnpm run build
       - name: Configure
         run: cmake --preset macos-release
       - name: Build

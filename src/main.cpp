@@ -5,7 +5,6 @@
 #include "helper.hpp"
 #include "logger.hpp"
 #include "runtime/runtime_context.hpp"
-#include "sse_broadcaster.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"

@@ -116,7 +116,6 @@ set(EXV_PLATFORM_LIBS)
 set(SOURCES
     src/main.cpp
     src/app_api.cpp
-    src/sse_broadcaster.cpp
     src/webui.cpp
     src/platform/common/status_models.cpp
     src/platform/common/runtime_status.cpp
