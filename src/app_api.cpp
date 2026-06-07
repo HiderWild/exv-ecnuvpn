@@ -340,17 +340,6 @@ nlohmann::json runtime_status_json(const Config &cfg) {
 // new architecture never writes these files.
 // =========================================================================
 
-void cleanup_legacy_supervisor_state_files() {
-  const std::string config_dir = utils::get_config_dir();
-  // Remove native-session-state.json and route-ready marker left by the
-  // legacy NativeSessionEventRecorder.
-  vpn_engine::clear_native_session_state(config_dir);
-  // Remove ecnuvpn-supervisor.pid left by the legacy write_supervisor_pid().
-  std::string supervisor_pid = utils::get_supervisor_pid_path();
-  if (utils::file_exists(supervisor_pid))
-    std::remove(supervisor_pid.c_str());
-}
-
 // =========================================================================
 // TunnelController singleton — lazily initialized on first VPN action.
 // Holds the HelperClient, PlatformNetworkOps, and TunnelController as a

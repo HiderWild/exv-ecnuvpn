@@ -16,7 +16,6 @@
 #include "virtual_network.hpp"
 #include "vpn_engine/event_sink.hpp"
 #include "vpn_engine/native_engine.hpp"
-#include "vpn_engine/native_session_store.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -54,7 +53,7 @@ using ConnectTiming = exv::core::ConnectStageTimer;
 int start(const Config &cfg, int retry_limit) {
   utils::print_header("EXV Starting");
 
-  // ── Pre-flight checks ──────────────────────────────────────
+  // ┢�┢� Pre-flight checks ┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
   if (cfg.vpn_engine == "native") {
     auto validation = vpn_engine::validate_native_config(cfg);
     if (!validation.ok) {
@@ -243,7 +242,7 @@ int start(const Config &cfg, int retry_limit) {
     return 1;
   }
 
-  // ── Decrypt / prompt password ───────────────────────────────
+  // ┢�┢� Decrypt / prompt password ┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
   std::string plaintext_password = config::get_plaintext_password(cfg);
   if (plaintext_password.empty()) {
     return 1; // error already printed by get_plaintext_password
@@ -260,7 +259,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
   ConnectTiming timing(retry_limit == 0 ? "vpn.start.direct"
                                         : "vpn.start.supervised");
   if (cfg.vpn_engine == "native") {
-    // ── D1: Native engine supervisor bypass ─────────────────────────────
+    // ┢�┢� D1: Native engine supervisor bypass ┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
     //
     // Post-C1 architecture: the primary native-engine connect flow uses
     // TunnelController (Core-owned mode) which manages the
@@ -386,7 +385,7 @@ int start_with_password(const Config &cfg, const std::string &plaintext_password
     return 1;
   }
 
-  // ── Generate tunnel script ─────────────────────────────────
+  // ┢�┢� Generate tunnel script ┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
   utils::print_info("Generating tunnel script...");
   if (!tunnel::write_script(cfg)) {
     timing.finish(false, "reason=tunnel_script_write_failed");

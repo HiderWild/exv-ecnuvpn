@@ -79,7 +79,6 @@ set(EXV_COMMON_SOURCES
     src/platform/common/route_model.cpp
     src/openconnect_log.cpp
     src/vpn_engine/native_engine.cpp
-    src/vpn_engine/native_session_store.cpp
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
     src/vpn.cpp
@@ -281,7 +280,6 @@ target_compile_definitions(exv PRIVATE EMBEDDED_ASSETS)
 
 add_executable(vpn_runtime_test
         tests/vpn_runtime_test.cpp
-    src/vpn_engine/native_session_store.cpp
     src/vpn_engine/session_state.cpp
     src/vpn_runtime.cpp
         src/utils.cpp
@@ -400,7 +398,6 @@ add_test(NAME native_session_state_test COMMAND native_session_state_test)
 
 add_executable(native_helper_session_test
     tests/native_helper_session_test.cpp
-    src/vpn_engine/native_session_store.cpp
     src/vpn_engine/session_state.cpp
 )
 
