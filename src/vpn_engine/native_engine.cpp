@@ -91,6 +91,11 @@ public:
 
 class UnsupportedPacketDevice final : public PacketDevice {
 public:
+  ValidationResult open(const DeviceConfig & /*config*/) override {
+    return invalid("native_packet_device_unavailable",
+                   "Native engine platform packet device is not available on this platform.");
+  }
+
   ValidationResult open(const TunnelMetadata & /*metadata*/) override {
     return invalid("native_packet_device_unavailable",
                    "Native engine platform packet device is not available on this platform.");

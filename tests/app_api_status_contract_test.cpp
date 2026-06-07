@@ -9,7 +9,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 using json = nlohmann::json;
@@ -285,6 +288,83 @@ bool frontend_json_has_required_fields() {
   return ok;
 }
 
+bool app_api_activates_core_owned_native_mode() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const auto app_api_path =
+      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "app_api.cpp";
+  std::ifstream in(app_api_path);
+  const std::string source((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+
+  const auto create_controller = source.find(
+      "h.controller = std::make_shared<exv::core::TunnelController>");
+  const auto mark_active =
+      source.find("exv::core::set_tunnel_controller_active(true)",
+                  create_controller == std::string::npos ? 0 : create_controller);
+  const auto return_controller = source.find("return h.controller", mark_active);
+
+  bool ok = true;
+  ok = expect(create_controller != std::string::npos,
+              "app_api should create the TunnelController") &&
+       ok;
+  ok = expect(mark_active != std::string::npos,
+              "app_api should mark TunnelController active after creation") &&
+       ok;
+  ok = expect(return_controller != std::string::npos,
+              "app_api should return the active TunnelController") &&
+       ok;
+  if (create_controller != std::string::npos &&
+      mark_active != std::string::npos && return_controller != std::string::npos) {
+    ok = expect(create_controller < mark_active,
+                "active mark should occur after controller creation") &&
+         ok;
+    ok = expect(mark_active < return_controller,
+                "active mark should occur before returning controller") &&
+         ok;
+  }
+  return ok;
+#endif
+}
+
+bool desktop_native_connect_ignores_direct_fallback_payload() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const auto app_api_path =
+      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "app_api.cpp";
+  std::ifstream in(app_api_path);
+  const std::string source((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+  const auto connect_handler = source.find("adapter.register_legacy_handler(\"vpn.connect\"");
+  const auto disconnect_handler = source.find("adapter.register_legacy_handler(\"vpn.disconnect\"",
+                                               connect_handler);
+  const std::string handler_source =
+      connect_handler == std::string::npos
+          ? std::string()
+          : source.substr(connect_handler,
+                          disconnect_handler == std::string::npos
+                              ? std::string::npos
+                              : disconnect_handler - connect_handler);
+
+  bool ok = true;
+  ok = expect(connect_handler != std::string::npos,
+              "app_api should register vpn.connect handler") &&
+       ok;
+  ok = expect(handler_source.find("allow_direct_fallback") == std::string::npos,
+              "desktop native vpn.connect must ignore allow_direct_fallback") &&
+       ok;
+  ok = expect(handler_source.find("preflight_connect(cfg, password)") !=
+                  std::string::npos,
+              "desktop native vpn.connect should preflight without fallback flag") &&
+       ok;
+  return ok;
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -295,5 +375,7 @@ int main() {
   ok = reconnecting_snapshot_maps_correctly() && ok;
   ok = all_phases_map_to_valid_strings() && ok;
   ok = frontend_json_has_required_fields() && ok;
+  ok = app_api_activates_core_owned_native_mode() && ok;
+  ok = desktop_native_connect_ignores_direct_fallback_payload() && ok;
   return ok ? 0 : 1;
 }

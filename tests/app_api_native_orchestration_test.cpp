@@ -83,7 +83,7 @@ bool request_does_not_contain_secret(const nlohmann::json &request,
   return expect(request.dump().find(secret) == std::string::npos, message);
 }
 
-bool native_auth_failure_does_not_call_helper_start() {
+bool native_path_rejects_legacy_orchestration() {
   using ecnuvpn::app_api::NativeAuthFirstDeps;
   using ecnuvpn::app_api::NativeAuthFirstInputs;
   using ecnuvpn::app_api::orchestrate_native_auth_first;
@@ -97,16 +97,18 @@ bool native_auth_failure_does_not_call_helper_start() {
 
   int auth_calls = 0;
   int helper_calls = 0;
+  int service_calls = 0;
   NativeAuthFirstDeps deps;
   deps.authenticate =
-      [&](const ecnuvpn::Config &cfg, const std::string &password,
-          ecnuvpn::vpn_engine::protocol::NativeAuthSession *session) {
+      [&](const ecnuvpn::Config &, const std::string &,
+          ecnuvpn::vpn_engine::protocol::NativeAuthSession *) {
         ++auth_calls;
-        (void)cfg;
-        (void)password;
-        (void)session;
-        return invalid("native_auth_failed", "native auth rejected");
+        return ecnuvpn::vpn_engine::ValidationResult{};
       };
+  deps.ensure_service_available_or_start_oneshot = [&] {
+    ++service_calls;
+    return ecnuvpn::vpn_engine::ValidationResult{};
+  };
   deps.send_helper_start = [&](const nlohmann::json &) {
     ++helper_calls;
     return ecnuvpn::vpn_engine::ValidationResult{};
@@ -115,95 +117,21 @@ bool native_auth_failure_does_not_call_helper_start() {
   const auto result = orchestrate_native_auth_first(inputs, deps);
 
   bool ok = true;
-  ok = expect(!result.ok, "native auth failure should fail orchestration") && ok;
-  ok = expect(result.code == "native_auth_failed",
-              "native auth failure code should be preserved") &&
+  ok = expect(!result.ok, "native orchestration should be rejected") && ok;
+  ok = expect(result.code == "native_controller_required",
+              "native rejection should require TunnelController") &&
        ok;
-  ok = expect(result.message == "native auth rejected",
-              "native auth failure message should be preserved") &&
+  ok = expect(auth_calls == 0,
+              "native legacy orchestration must not authenticate") &&
        ok;
-  ok = expect(auth_calls == 1, "native auth should be attempted once") && ok;
+  ok = expect(service_calls == 0,
+              "native legacy orchestration must not start/check service") &&
+       ok;
   ok = expect(helper_calls == 0,
-              "helper start must not be called after native auth failure") &&
+              "native legacy orchestration must not call helper start") &&
        ok;
-  ok = expect(result_text(result).find(MOCK_PASSWORD) ==
-                  std::string::npos,
-              "native auth failure result must not leak password") &&
-       ok;
-  return ok;
-}
-
-bool native_auth_success_helper_request_omits_password() {
-  using ecnuvpn::app_api::NativeAuthFirstDeps;
-  using ecnuvpn::app_api::NativeAuthFirstInputs;
-  using ecnuvpn::app_api::orchestrate_native_auth_first;
-
-  NativeAuthFirstInputs inputs;
-  inputs.config = sample_config();
-  inputs.password = MOCK_PASSWORD;
-  inputs.home = "/home/student";
-  inputs.config_dir = "/home/student/.config/ecnu-vpn";
-  inputs.retry_limit = 4;
-
-  const auto session = sample_auth_session();
-  nlohmann::json sent_request;
-  std::vector<std::string> calls;
-  NativeAuthFirstDeps deps;
-  deps.authenticate =
-      [&](const ecnuvpn::Config &, const std::string &password,
-          ecnuvpn::vpn_engine::protocol::NativeAuthSession *out) {
-        calls.push_back("auth");
-        if (password == MOCK_PASSWORD && out)
-          *out = session;
-        return ecnuvpn::vpn_engine::ValidationResult{};
-      };
-  deps.send_helper_start = [&](const nlohmann::json &request) {
-    calls.push_back("helper");
-    sent_request = request;
-    return ecnuvpn::vpn_engine::ValidationResult{};
-  };
-
-  const auto result = orchestrate_native_auth_first(inputs, deps);
-
-  bool ok = true;
-  ok = expect(result.ok, "native auth success should send helper request") && ok;
-  ok = expect(calls == std::vector<std::string>({"auth", "helper"}),
-              "native auth should happen before helper start") &&
-       ok;
-  ok = expect(sent_request.value("action", std::string()) == "start",
-              "helper request should be a start action") &&
-       ok;
-  ok = expect(sent_request.value("native_start_mode", std::string()) ==
-                  "auth_session",
-              "native helper request should use auth_session mode") &&
-       ok;
-  ok = expect(sent_request.contains("auth_session") &&
-                  sent_request.at("auth_session").is_object(),
-              "native helper request should include auth_session object") &&
-       ok;
-  ok = expect(!sent_request.contains("password"),
-              "native helper request must omit top-level password") &&
-       ok;
-  ok = expect(!sent_request.at("config").contains("password"),
-              "native helper request config must omit password") &&
-       ok;
-  ok = expect(sent_request.value("retry_limit", 0) == 4,
-              "native helper request should preserve retry limit") &&
-       ok;
-  ok = expect(sent_request.value("home", std::string()) == "/home/student",
-              "native helper request should preserve home") &&
-       ok;
-  ok = expect(sent_request.value("config_dir", std::string()) ==
-                  "/home/student/.config/ecnu-vpn",
-              "native helper request should preserve config_dir") &&
-       ok;
-  ok = request_does_not_contain_secret(
-           sent_request, MOCK_PASSWORD,
-           "native helper request must not leak top-level password") &&
-       ok;
-  ok = request_does_not_contain_secret(
-           sent_request, MOCK_PASSWORD,
-           "native helper request must not leak config password") &&
+  ok = expect(result_text(result).find(MOCK_PASSWORD) == std::string::npos,
+              "native rejection result must not leak password") &&
        ok;
   return ok;
 }
@@ -262,91 +190,6 @@ bool legacy_openconnect_path_unchanged() {
        ok;
   ok = expect(sent_request.value("retry_limit", 0) == 5,
               "legacy helper request should preserve retry limit") &&
-       ok;
-  return ok;
-}
-
-bool service_unavailable_short_circuits_before_native_auth() {
-  using ecnuvpn::app_api::NativeAuthFirstDeps;
-  using ecnuvpn::app_api::NativeAuthFirstInputs;
-  using ecnuvpn::app_api::orchestrate_native_auth_first;
-
-  NativeAuthFirstInputs inputs;
-  inputs.config = sample_config();
-  inputs.password = MOCK_PASSWORD;
-  inputs.allow_direct_fallback = false;
-
-  int service_checks = 0;
-  int auth_calls = 0;
-  int helper_calls = 0;
-  NativeAuthFirstDeps deps;
-  deps.ensure_service_available_or_start_oneshot = [&] {
-    ++service_checks;
-    return invalid("helper_unavailable", "helper service unavailable");
-  };
-  deps.authenticate =
-      [&](const ecnuvpn::Config &, const std::string &,
-          ecnuvpn::vpn_engine::protocol::NativeAuthSession *) {
-        ++auth_calls;
-        return ecnuvpn::vpn_engine::ValidationResult{};
-      };
-  deps.send_helper_start = [&](const nlohmann::json &) {
-    ++helper_calls;
-    return ecnuvpn::vpn_engine::ValidationResult{};
-  };
-
-  const auto result = orchestrate_native_auth_first(inputs, deps);
-
-  bool ok = true;
-  ok = expect(!result.ok, "service unavailable should fail orchestration") && ok;
-  ok = expect(result.code == "helper_unavailable",
-              "service unavailable code should be preserved") &&
-       ok;
-  ok = expect(service_checks == 1, "service should be checked once") && ok;
-  ok = expect(auth_calls == 0,
-              "non-fallback service failure should short-circuit before auth") &&
-       ok;
-  ok = expect(helper_calls == 0,
-              "service failure should not call helper start") &&
-       ok;
-  return ok;
-}
-
-bool fallback_native_auth_happens_before_helper_start() {
-  using ecnuvpn::app_api::NativeAuthFirstDeps;
-  using ecnuvpn::app_api::NativeAuthFirstInputs;
-  using ecnuvpn::app_api::orchestrate_native_auth_first;
-
-  NativeAuthFirstInputs inputs;
-  inputs.config = sample_config();
-  inputs.password = MOCK_PASSWORD;
-  inputs.allow_direct_fallback = true;
-
-  std::vector<std::string> calls;
-  NativeAuthFirstDeps deps;
-  deps.ensure_service_available_or_start_oneshot = [&] {
-    calls.push_back("service");
-    return ecnuvpn::vpn_engine::ValidationResult{};
-  };
-  deps.authenticate =
-      [&](const ecnuvpn::Config &, const std::string &,
-          ecnuvpn::vpn_engine::protocol::NativeAuthSession *out) {
-        calls.push_back("auth");
-        if (out)
-          *out = sample_auth_session();
-        return ecnuvpn::vpn_engine::ValidationResult{};
-      };
-  deps.send_helper_start = [&](const nlohmann::json &) {
-    calls.push_back("helper");
-    return ecnuvpn::vpn_engine::ValidationResult{};
-  };
-
-  const auto result = orchestrate_native_auth_first(inputs, deps);
-
-  bool ok = true;
-  ok = expect(result.ok, "fallback native path should start helper") && ok;
-  ok = expect(calls == std::vector<std::string>({"auth", "service", "helper"}),
-              "fallback path should authenticate before oneshot/helper start") &&
        ok;
   return ok;
 }
@@ -411,7 +254,6 @@ bool native_user_mode_auth_rejects_bad_server_without_helper_start() {
   inputs.config = sample_config();
   inputs.config.server = "http://vpn.example.invalid";
   inputs.password = MOCK_PASSWORD;
-  inputs.allow_direct_fallback = true;
 
   int helper_calls = 0;
   int service_calls = 0;
@@ -455,11 +297,8 @@ bool native_user_mode_auth_rejects_bad_server_without_helper_start() {
 int main() {
   bool ok = true;
 
-  ok = native_auth_failure_does_not_call_helper_start() && ok;
-  ok = native_auth_success_helper_request_omits_password() && ok;
+  ok = native_path_rejects_legacy_orchestration() && ok;
   ok = legacy_openconnect_path_unchanged() && ok;
-  ok = service_unavailable_short_circuits_before_native_auth() && ok;
-  ok = fallback_native_auth_happens_before_helper_start() && ok;
   ok = native_user_mode_auth_request_matches_engine_options() && ok;
   ok = native_user_mode_auth_rejects_bad_server_without_helper_start() && ok;
 

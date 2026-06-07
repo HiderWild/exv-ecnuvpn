@@ -1,4 +1,5 @@
 #include "timing.hpp"
+#include "logger.hpp"
 
 namespace exv::core {
 
@@ -45,6 +46,41 @@ std::map<std::string, std::chrono::milliseconds> StageTimer::all_stages() const 
 void StageTimer::reset() {
     stages_.clear();
     overall_start_ = {};
+}
+
+ConnectStageTimer::ConnectStageTimer(std::string scope)
+    : scope_(std::move(scope)), started_(Clock::now()), last_(started_) {
+    ecnuvpn::logger::info("[connect-timing] scope=" + scope_ +
+                          " stage=begin delta_ms=0 total_ms=0");
+}
+
+void ConnectStageTimer::mark(const std::string& stage,
+                              const std::string& detail) {
+    auto now = Clock::now();
+    auto delta_ms = elapsed_ms(last_, now);
+    auto total_ms = elapsed_ms(started_, now);
+    last_ = now;
+
+    std::string message = "[connect-timing] scope=" + scope_ +
+                          " stage=" + stage +
+                          " delta_ms=" + std::to_string(delta_ms) +
+                          " total_ms=" + std::to_string(total_ms);
+    if (!detail.empty())
+        message += " " + detail;
+    ecnuvpn::logger::info(message);
+}
+
+void ConnectStageTimer::finish(bool ok, const std::string& detail) {
+    if (finished_)
+        return;
+    finished_ = true;
+    mark(ok ? "finish.ok" : "finish.error", detail);
+}
+
+long long ConnectStageTimer::elapsed_ms(const Clock::time_point& from,
+                                         const Clock::time_point& to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
+        .count();
 }
 
 } // namespace exv::core

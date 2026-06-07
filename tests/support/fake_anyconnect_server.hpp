@@ -99,6 +99,8 @@ public:
       std::vector<std::vector<std::uint8_t>> packets = {});
 
   vpn_engine::ValidationResult
+  open(const vpn_engine::DeviceConfig &config) override;
+  vpn_engine::ValidationResult
   open(const vpn_engine::TunnelMetadata &metadata) override;
   vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override;

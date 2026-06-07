@@ -58,6 +58,7 @@ set(EXV_COMMON_SOURCES
     src/core/reconnect_policy.cpp
     src/core/timer_scheduler.cpp
     src/core_api/app_rpc_dispatcher.cpp
+    src/core_api/desktop_rpc_adapter.cpp
     src/core_api/vpn_actions.cpp
     src/core_api/config_actions.cpp
     src/core_api/service_actions.cpp
@@ -81,6 +82,7 @@ set(EXV_COMMON_SOURCES
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
     src/vpn.cpp
+    src/vpn_legacy_adapter.cpp
     src/vpn_runtime.cpp
     src/tunnel.cpp
     src/virtual_network.cpp
@@ -96,6 +98,11 @@ set(EXV_HELPER_RUNTIME_SOURCES
     src/helper_common/helper_messages.cpp
     src/helper_runtime/helper_request_dispatcher.cpp
     src/helper_runtime/helper_server.cpp
+    src/helper_runtime/session_lease_manager.cpp
+    src/helper_runtime/cleanup_registry.cpp
+    src/helper_runtime/command_validator.cpp
+    src/helper_runtime/helper_lifecycle_policy.cpp
+    src/helper_runtime/helper_session_store.cpp
     src/helper_v2_handler.cpp
 )
 
@@ -905,19 +912,6 @@ add_test(NAME tunnel_controller_state_machine_test COMMAND tunnel_controller_sta
 
 add_executable(core_process_test
     tests/core_process_test.cpp
-    src/core/tunnel_controller.cpp
-    src/core/core_session_runner.cpp
-    src/core/timing.cpp
-    src/core/core_error_mapper.cpp
-    src/core/reconnect_policy.cpp
-    src/core/timer_scheduler.cpp
-    src/core_api/app_rpc_dispatcher.cpp
-    src/core_api/vpn_actions.cpp
-    src/core_api/config_actions.cpp
-    src/core_api/service_actions.cpp
-    src/core_api/route_actions.cpp
-    src/core_api/core_api_setup.cpp
-    src/helper_common/helper_messages.cpp
 )
 
 target_include_directories(core_process_test PRIVATE
@@ -925,7 +919,7 @@ target_include_directories(core_process_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_link_libraries(core_process_test PRIVATE Threads::Threads)
+target_link_libraries(core_process_test PRIVATE exv-core)
 
 add_test(NAME core_process_test COMMAND core_process_test)
 
@@ -1027,21 +1021,16 @@ target_include_directories(app_api_status_contract_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_compile_definitions(app_api_status_contract_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 add_test(NAME app_api_status_contract_test COMMAND app_api_status_contract_test)
 
 # --- Phase 4-6: core_api action tests ---
 
 add_executable(vpn_actions_test
     tests/core_api/vpn_actions_test.cpp
-    src/core_api/app_rpc_dispatcher.cpp
-    src/core_api/vpn_actions.cpp
-    src/core/tunnel_controller.cpp
-    src/core/core_session_runner.cpp
-    src/core/timing.cpp
-    src/core/core_error_mapper.cpp
-    src/core/reconnect_policy.cpp
-    src/core/timer_scheduler.cpp
-    src/helper_common/helper_messages.cpp
     tests/support/fake_helper.cpp
     tests/support/fake_platform_network_ops.cpp
 )
@@ -1052,7 +1041,7 @@ target_include_directories(vpn_actions_test PRIVATE
     ${CMAKE_SOURCE_DIR}/tests
 )
 
-target_link_libraries(vpn_actions_test PRIVATE Threads::Threads)
+target_link_libraries(vpn_actions_test PRIVATE exv-core)
 
 add_test(NAME vpn_actions_test COMMAND vpn_actions_test)
 
@@ -1244,6 +1233,14 @@ add_executable(vpn_supervisor_payload_test
     src/vpn_engine/protocol/native_auth_session_json.cpp
     src/platform/common/vpn_supervisor_process.cpp
 )
+
+if(APPLE)
+    target_sources(vpn_supervisor_payload_test PRIVATE src/platform/darwin/config_defaults.cpp)
+elseif(UNIX AND NOT APPLE)
+    target_sources(vpn_supervisor_payload_test PRIVATE src/platform/common/config_defaults_linux.cpp)
+elseif(WIN32)
+    target_sources(vpn_supervisor_payload_test PRIVATE src/platform/win32/config_defaults.cpp)
+endif()
 
 target_include_directories(vpn_supervisor_payload_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include

@@ -33,6 +33,11 @@ bool expect(bool condition, const char *message) {
 class MockPacketDevice final : public ecnuvpn::vpn_engine::PacketDevice {
 public:
   ecnuvpn::vpn_engine::ValidationResult open(
+      const ecnuvpn::vpn_engine::DeviceConfig & /*config*/) override {
+    opened_ = true;
+    return {};
+  }
+  ecnuvpn::vpn_engine::ValidationResult open(
       const ecnuvpn::vpn_engine::TunnelMetadata & /*metadata*/) override {
     opened_ = true;
     return {};
@@ -282,6 +287,16 @@ public:
       : state_(std::move(state)), packets_(std::move(packets)) {}
 
   ecnuvpn::vpn_engine::ValidationResult
+  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+    const std::lock_guard<std::mutex> lock(state_->mu);
+    state_->last_open_metadata.interface_name = config.interface_name;
+    state_->last_open_metadata.mtu = config.mtu;
+    state_->open = true;
+    ++state_->open_count;
+    return {};
+  }
+
+  ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
@@ -335,6 +350,16 @@ public:
       : state_(std::move(state)) {}
 
   ecnuvpn::vpn_engine::ValidationResult
+  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+    const std::lock_guard<std::mutex> lock(state_->mu);
+    state_->last_open_metadata.interface_name = config.interface_name;
+    state_->last_open_metadata.mtu = config.mtu;
+    state_->open = true;
+    ++state_->open_count;
+    return {};
+  }
+
+  ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
@@ -378,6 +403,16 @@ class FailingOpenPacketDevice final : public ecnuvpn::vpn_engine::PacketDevice {
 public:
   explicit FailingOpenPacketDevice(std::shared_ptr<PacketDeviceState> state)
       : state_(std::move(state)) {}
+
+  ecnuvpn::vpn_engine::ValidationResult
+  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+    const std::lock_guard<std::mutex> lock(state_->mu);
+    state_->last_open_metadata.interface_name = config.interface_name;
+    state_->last_open_metadata.mtu = config.mtu;
+    ++state_->open_count;
+    return {false, "packet_device_open_failed",
+            "packet device refused to open"};
+  }
 
   ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {

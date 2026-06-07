@@ -4,6 +4,8 @@
 #include "config_api.hpp"
 #include "config_manager.hpp"
 #include "connection_attempt.hpp"
+#include "core/timing.hpp"
+#include "core_api/desktop_rpc_adapter.hpp"
 #include "crypto.hpp"
 #include "feedback/feedback.hpp"
 #include "helper.hpp"
@@ -65,52 +67,7 @@ bool helper_unavailable(const nlohmann::json &response) {
          json_string(response, "message") == "Helper daemon not available";
 }
 
-int desktop_retry_limit(const Config &cfg) { return cfg.auto_reconnect ? -1 : 0; }
-
-class StageTimer {
-public:
-  explicit StageTimer(std::string scope)
-      : scope_(std::move(scope)), started_(Clock::now()), last_(started_) {
-    logger::info("[connect-timing] scope=" + scope_ +
-                 " stage=begin delta_ms=0 total_ms=0");
-  }
-
-  void mark(const std::string &stage, const std::string &detail = "") {
-    auto now = Clock::now();
-    long long delta_ms = elapsed_ms(last_, now);
-    long long total_ms = elapsed_ms(started_, now);
-    last_ = now;
-
-    std::string message = "[connect-timing] scope=" + scope_ +
-                          " stage=" + stage +
-                          " delta_ms=" + std::to_string(delta_ms) +
-                          " total_ms=" + std::to_string(total_ms);
-    if (!detail.empty())
-      message += " " + detail;
-    logger::info(message);
-  }
-
-  void finish(bool ok, const std::string &detail = "") {
-    if (finished_)
-      return;
-    finished_ = true;
-    mark(ok ? "finish.ok" : "finish.error", detail);
-  }
-
-private:
-  using Clock = std::chrono::steady_clock;
-
-  static long long elapsed_ms(const Clock::time_point &from,
-                              const Clock::time_point &to) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
-        .count();
-  }
-
-  std::string scope_;
-  Clock::time_point started_;
-  Clock::time_point last_;
-  bool finished_ = false;
-};
+using StageTimer = exv::core::ConnectStageTimer;
 
 bool json_bool(const nlohmann::json &object, const char *key, bool fallback) {
   if (!object.is_object() || !object.contains(key) || object[key].is_null())
@@ -416,8 +373,10 @@ TunnelControllerHolder &tunnel_holder() {
 /// retry (the helper may have been installed or started in the meantime).
 std::shared_ptr<exv::core::TunnelController> ensure_tunnel_controller() {
   auto &h = tunnel_holder();
-  if (h.controller)
+  if (h.controller) {
+    exv::core::set_tunnel_controller_active(true);
     return h.controller;
+  }
 
   h.init_attempted = true;
   try {
@@ -435,6 +394,7 @@ std::shared_ptr<exv::core::TunnelController> ensure_tunnel_controller() {
             h.client.get());
     h.controller = std::make_shared<exv::core::TunnelController>(h.client,
                                                                   h.net_ops);
+    exv::core::set_tunnel_controller_active(true);
     return h.controller;
   } catch (const std::exception &e) {
     h.init_error = e.what();
@@ -514,8 +474,7 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
   return platform::install_driver(cfg, payload);
 }
 
-nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
-                                bool allow_direct_fallback = false) {
+nlohmann::json preflight_connect(const Config &cfg, const std::string &password) {
   if (cfg.server.empty())
     return error("VPN server is not configured.");
   if (cfg.username.empty())
@@ -529,16 +488,14 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
       return error(native_validation.message, native_validation.code);
   }
 
-  if (!allow_direct_fallback) {
-    platform::BackendResolveOptions options;
-    options.preferred_mode = "service";
-    options.allow_oneshot = false;
-    options.allow_service_start = false;
-    nlohmann::json backend = platform::resolve_backend(options);
-    if (!backend.value("ok", false)) {
-      return platform::backend_unavailable_error(
-          backend, platform::helper_unavailable_connect_message());
-    }
+  platform::BackendResolveOptions options;
+  options.preferred_mode = "service";
+  options.allow_oneshot = false;
+  options.allow_service_start = false;
+  nlohmann::json backend = platform::resolve_backend(options);
+  if (!backend.value("ok", false)) {
+    return platform::backend_unavailable_error(
+        backend, platform::helper_unavailable_connect_message());
   }
 
   nlohmann::json runtime = runtime_status_json(cfg);
@@ -593,33 +550,43 @@ nlohmann::json logs_json(const nlohmann::json &payload) {
 
 } // namespace
 
-nlohmann::json handle_action(const std::string &action,
-                             const nlohmann::json &payload) {
-  try {
-    apply_desktop_runtime_context(payload);
+// =========================================================================
+// DesktopRpcAdapter — registers all action handlers and delegates
+// handle_action() through the AppRpcDispatcher.  This replaces the
+// previous giant if/else chain, making app_api.cpp a thin shim.
+// =========================================================================
 
-    config::ConfigManager mgr = make_config_manager();
-    Config cfg = mgr.load();
+exv::core_api::DesktopRpcAdapter &desktop_adapter() {
+  static exv::core_api::DesktopRpcAdapter adapter;
+  static bool initialized = false;
+  if (!initialized) {
+    initialized = true;
 
-    if (action == "status.get") {
+    // --- status.get ---
+    adapter.register_legacy_handler("status.get",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       auto controller = get_tunnel_controller_if_exists();
       if (!controller) {
-        // Lazy init — try to connect to the helper on first status poll.
         controller = ensure_tunnel_controller();
       }
       if (controller) {
         auto snap = controller->status();
         return frontend_status_from_controller_snapshot(snap, cfg);
       }
-      // No controller available (helper not running) — return disconnected.
       return disconnected_status(cfg);
-    }
+    });
 
-    if (action == "vpn.connect") {
+    // --- vpn.connect ---
+    adapter.register_legacy_handler("vpn.connect",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       StageTimer timing("desktop.connect");
       std::string password = payload.value("password", std::string());
-      bool allow_direct_fallback =
-          payload.value("allow_direct_fallback", false);
       if (password.empty() && !cfg.password.empty()) {
         std::string key = crypto::load_key();
         if (!key.empty())
@@ -627,16 +594,13 @@ nlohmann::json handle_action(const std::string &action,
       }
       timing.mark("password_resolved",
                   password.empty() ? "source=missing" : "source=available");
-      nlohmann::json preflight =
-          preflight_connect(cfg, password, allow_direct_fallback);
+      nlohmann::json preflight = preflight_connect(cfg, password);
       if (preflight.is_object() && preflight.value("ok", true) == false) {
         timing.finish(false, "stage=preflight error=" +
                                  json_string(preflight, "error"));
         return preflight;
       }
-      timing.mark("preflight", "result=ok allow_direct_fallback=" +
-                                   std::string(allow_direct_fallback ? "true"
-                                                                     : "false"));
+      timing.mark("preflight", "result=ok");
 
       // ── Connection attempt guard ──────────────────────────────────────
       namespace conn_attempt = ecnuvpn::connection_attempt;
@@ -649,7 +613,6 @@ nlohmann::json handle_action(const std::string &action,
                   attempt_result.acquired ? "acquired=true" : ("acquired=false code=" + attempt_result.code));
 
       if (!attempt_result.acquired) {
-        // Build enriched error with diagnostics for the UI.
         nlohmann::json details;
         details["lock_path"] = utils::get_config_dir() + "/connect-attempt.lock";
         details["owner_pid"] = attempt_result.record.owner_pid;
@@ -658,18 +621,15 @@ nlohmann::json handle_action(const std::string &action,
         details["state"] = attempt_result.record.state;
         details["mode"] = attempt_result.record.mode;
 
-        // Check if the owner process is still alive for diagnostics.
         bool owner_alive = false;
         if (attempt_result.record.owner_pid > 0) {
           owner_alive = platform::is_process_alive(attempt_result.record.owner_pid);
         }
         details["owner_alive"] = owner_alive;
 
-        // Stale detection: if owner PID is dead, this is a stale lock.
         bool stale_detected = !owner_alive && attempt_result.record.owner_pid > 0;
         details["stale_attempt_detected"] = stale_detected;
 
-        // Age calculation.
         if (attempt_result.record.created_at_unix_ms > 0) {
           auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::system_clock::now().time_since_epoch())
@@ -680,13 +640,11 @@ nlohmann::json handle_action(const std::string &action,
         std::string user_message = attempt_result.message;
         if (stale_detected) {
           user_message = "检测到上次连接尝试异常残留（进程已退出）。正在自动清理...";
-          // Auto-retry once after stale cleanup.
           conn_attempt::mark_terminal(utils::get_config_dir(), "stale_auto_cleanup");
           conn_attempt::AcquireResult retry = conn_attempt::try_acquire(attempt_opts);
           if (retry.acquired) {
             timing.mark("connection_attempt_retry", "acquired=true stale_cleanup=true");
             attempt_result = std::move(retry);
-            // Fall through to continue the connect flow.
           } else {
             timing.finish(false, "stage=connection_attempt retry_failed");
             nlohmann::json resp = error(user_message, attempt_result.code);
@@ -701,7 +659,6 @@ nlohmann::json handle_action(const std::string &action,
         }
       }
 
-      // RAII cleanup: mark attempt terminal on scope exit unless dismissed.
       conn_attempt::TerminalAttemptScope attempt_cleanup(
           utils::get_config_dir(), attempt_result.record.attempt_id, "scope_exit");
 
@@ -718,11 +675,6 @@ nlohmann::json handle_action(const std::string &action,
       }
 
       controller->set_vpn_config(cfg, password);
-
-      // D3: Remove any legacy supervisor state files (native-session-state.json,
-      // ecnuvpn-supervisor.pid) from a previous legacy-supervisor session so
-      // crash recovery does not misinterpret stale state.  The new architecture
-      // uses TunnelController's in-memory TunnelStatusSnapshot exclusively.
       cleanup_legacy_supervisor_state_files();
       timing.mark("cleanup_legacy_state");
 
@@ -739,22 +691,36 @@ nlohmann::json handle_action(const std::string &action,
           true, "phase=" + std::to_string(static_cast<int>(snap.phase)));
       attempt_cleanup.dismiss();
       return status;
-    }
+    });
 
-    if (action == "vpn.disconnect") {
+    // --- vpn.disconnect ---
+    adapter.register_legacy_handler("vpn.disconnect",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       auto controller = get_tunnel_controller_if_exists();
       if (controller) {
         controller->disconnect(exv::core::DisconnectReason::UserRequested);
       }
-      // D3: Ensure no legacy state files remain after disconnect.
       cleanup_legacy_supervisor_state_files();
       return disconnected_status(cfg);
-    }
+    });
 
-    if (action == "config.getAuth")
+    // --- config.getAuth ---
+    adapter.register_legacy_handler("config.getAuth",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       return auth_config(cfg);
+    });
 
-    if (action == "config.saveAuth") {
+    // --- config.saveAuth ---
+    adapter.register_legacy_handler("config.saveAuth",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
       if (payload.contains("server") && payload["server"].is_string()) {
         std::string err = config_api::config_set(mgr, "server", payload["server"].get<std::string>());
         if (!err.empty()) return error(err);
@@ -791,20 +757,28 @@ nlohmann::json handle_action(const std::string &action,
       }
       if (payload.contains("user_agent") && payload["user_agent"].is_string()) {
         std::string value = payload["user_agent"].get<std::string>();
-        // Treat empty / whitespace user_agent as "no change" so the UI cannot
-        // accidentally overwrite the platform default.
         if (!utils::trim(value).empty()) {
           std::string err = config_api::config_set(mgr, "useragent", value);
           if (!err.empty()) return error(err);
         }
       }
       return auth_config(mgr.load());
-    }
+    });
 
-    if (action == "config.getSettings")
+    // --- config.getSettings ---
+    adapter.register_legacy_handler("config.getSettings",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       return settings_config(cfg);
+    });
 
-    if (action == "config.saveSettings") {
+    // --- config.saveSettings ---
+    adapter.register_legacy_handler("config.saveSettings",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
       if (payload.contains("mtu") && payload["mtu"].is_number_integer()) {
         std::string err = config_api::config_set(mgr, "mtu", std::to_string(payload["mtu"].get<int>()));
         if (!err.empty()) return error(err);
@@ -812,7 +786,7 @@ nlohmann::json handle_action(const std::string &action,
       if (payload.contains("dtls") && payload["dtls"].is_boolean()) {
         std::string err = config_api::config_set(mgr, "disable_dtls",
                                payload["dtls"].get<bool>() ? "false" : "true");
-     if (!err.empty()) return error(err);
+        if (!err.empty()) return error(err);
       }
       if (payload.contains("extra_args") && payload["extra_args"].is_string()) {
         Config updated = mgr.load();
@@ -897,38 +871,66 @@ nlohmann::json handle_action(const std::string &action,
         if (!err.empty()) return error(err);
       }
       return settings_config(mgr.load());
-    }
+    });
 
-    if (action == "config.getKey")
+    // --- config.getKey ---
+    adapter.register_legacy_handler("config.getKey",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
       return key_status_json();
+    });
 
-    if (action == "routes.list")
+    // --- routes.list ---
+    adapter.register_legacy_handler("routes.list",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       return routes_json(cfg);
+    });
 
-    if (action == "routes.add") {
+    // --- routes.add ---
+    adapter.register_legacy_handler("routes.add",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
       std::string err = config_api::route_add(mgr, payload.value("cidr", ""));
       if (!err.empty())
         return error(err);
       return routes_json(mgr.load());
-    }
+    });
 
-    if (action == "routes.remove") {
+    // --- routes.remove ---
+    adapter.register_legacy_handler("routes.remove",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
       std::string err = config_api::route_remove(mgr, payload.value("cidr", ""));
       if (!err.empty())
         return error(err);
       return routes_json(mgr.load());
-    }
+    });
 
-    if (action == "routes.reset") {
+    // --- routes.reset ---
+    adapter.register_legacy_handler("routes.reset",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
       config_api::route_reset_defaults(mgr);
       return routes_json(mgr.load());
-    }
+    });
 
-    if (action == "service.status")
+    // --- service.status ---
+    adapter.register_legacy_handler("service.status",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
       return service_status_json();
+    });
 
-    if (action == "helper.status")
-    {
+    // --- helper.status ---
+    adapter.register_legacy_handler("helper.status",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
       platform::BackendResolveOptions options;
       options.preferred_mode = "auto";
       options.allow_oneshot = true;
@@ -944,21 +946,49 @@ nlohmann::json handle_action(const std::string &action,
         resolved["resolved"] = true;
       }
       return resolved;
-    }
+    });
 
-    if (action == "runtime.status")
+    // --- runtime.status ---
+    adapter.register_legacy_handler("runtime.status",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       return runtime_status_json(cfg);
+    });
 
-    if (action == "drivers.status")
+    // --- drivers.status ---
+    adapter.register_legacy_handler("drivers.status",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       return driver_status_json(cfg);
+    });
 
-    if (action == "drivers.install")
+    // --- drivers.install ---
+    adapter.register_legacy_handler("drivers.install",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
+      config::ConfigManager mgr = make_config_manager();
+      Config cfg = mgr.load();
       return install_driver(cfg, payload);
+    });
 
-    if (action == "logs.list")
+    // --- logs.list ---
+    adapter.register_legacy_handler("logs.list",
+        [](const nlohmann::json &payload) -> nlohmann::json {
+      apply_desktop_runtime_context(payload);
       return logs_json(payload);
+    });
+  }
+  return adapter;
+}
 
-    return error("Unknown desktop action: " + action);
+nlohmann::json handle_action(const std::string &action,
+                             const nlohmann::json &payload) {
+  try {
+    return desktop_adapter().dispatch(action, payload);
   } catch (const std::exception &ex) {
     return error(ex.what());
   } catch (...) {

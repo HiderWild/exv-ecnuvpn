@@ -15,7 +15,6 @@ namespace app_api {
 struct NativeAuthFirstInputs {
   Config config;
   std::string password;
-  bool allow_direct_fallback = false;
   std::string home;
   std::string config_dir;
   int retry_limit = 0;

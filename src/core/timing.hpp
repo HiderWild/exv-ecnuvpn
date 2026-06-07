@@ -34,4 +34,27 @@ struct ConnectTiming {
     static constexpr const char* FIRST_PACKET = "first_packet";
 };
 
+/// Logging stage timer that emits [connect-timing] log lines at each mark()
+/// and finish() call.  Replaces the duplicate ConnectTiming / StageTimer
+/// classes that were previously defined inline in vpn.cpp, helper.cpp, and
+/// app_api.cpp.
+class ConnectStageTimer {
+public:
+    explicit ConnectStageTimer(std::string scope);
+
+    void mark(const std::string& stage, const std::string& detail = "");
+    void finish(bool ok, const std::string& detail = "");
+
+private:
+    using Clock = std::chrono::steady_clock;
+
+    static long long elapsed_ms(const Clock::time_point& from,
+                                const Clock::time_point& to);
+
+    std::string scope_;
+    Clock::time_point started_;
+    Clock::time_point last_;
+    bool finished_ = false;
+};
+
 } // namespace exv::core

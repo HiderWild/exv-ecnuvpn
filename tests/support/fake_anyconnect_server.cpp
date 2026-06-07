@@ -315,6 +315,16 @@ ScriptedPacketDevice::ScriptedPacketDevice(
     : packets_(packets.begin(), packets.end()) {}
 
 vpn_engine::ValidationResult
+ScriptedPacketDevice::open(const vpn_engine::DeviceConfig &config) {
+  const std::lock_guard<std::mutex> lock(device_mu_);
+  last_open_metadata_.interface_name = config.interface_name;
+  last_open_metadata_.mtu = config.mtu;
+  open_ = true;
+  ++open_count_;
+  return vpn_engine::ValidationResult{};
+}
+
+vpn_engine::ValidationResult
 ScriptedPacketDevice::open(const vpn_engine::TunnelMetadata &metadata) {
   const std::lock_guard<std::mutex> lock(device_mu_);
   last_open_metadata_ = metadata;

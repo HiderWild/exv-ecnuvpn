@@ -429,6 +429,213 @@ int main() {
                     "initial desired_connected should be false") && ok;
     }
 
+    // ============================================================
+    // HARDENED INVARIANT TESTS
+    // ============================================================
+
+    // --- connect() is the sole entry point: only Idle/Failed -> PreparingHelper ---
+    {
+        TestTunnelController ctrl;
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        // Already in PreparingHelper; second connect() must be a no-op
+        ctrl.connect(intent);
+        ok = expect(ctrl.phase() == TunnelPhase::PreparingHelper,
+                    "connect() while PreparingHelper must not re-enter PreparingHelper") && ok;
+    }
+
+    // --- connect() from Failed state restarts cleanly ---
+    {
+        TestTunnelController ctrl;
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.on_event({TunnelEventType::HelperLost});
+        ok = expect(ctrl.phase() == TunnelPhase::Failed,
+                    "HelperLost should reach Failed") && ok;
+
+        ctrl.connect(intent);
+        ok = expect(ctrl.phase() == TunnelPhase::PreparingHelper,
+                    "connect() from Failed must transition to PreparingHelper") && ok;
+    }
+
+    // --- disconnect() is the sole exit point: any non-Idle phase -> Disconnecting ---
+    {
+        TestTunnelController ctrl;
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.on_event({TunnelEventType::HelperReady});
+        // Now in Authenticating
+        ctrl.disconnect();
+        ok = expect(ctrl.phase() == TunnelPhase::Disconnecting,
+                    "disconnect() from Authenticating must reach Disconnecting") && ok;
+    }
+
+    // --- disconnect() from Idle is a no-op ---
+    {
+        TestTunnelController ctrl;
+        ctrl.disconnect();
+        ok = expect(ctrl.phase() == TunnelPhase::Idle,
+                    "disconnect() from Idle must remain Idle") && ok;
+    }
+
+    // --- disconnect() from Disconnecting is a no-op (idempotent) ---
+    {
+        TestTunnelController ctrl;
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.disconnect();
+        ok = expect(ctrl.phase() == TunnelPhase::Disconnecting,
+                    "disconnect() enters Disconnecting") && ok;
+        ctrl.disconnect();
+        ok = expect(ctrl.phase() == TunnelPhase::Disconnecting,
+                    "second disconnect() while Disconnecting must be a no-op") && ok;
+    }
+
+    // --- reconnect lifecycle: TransportClosed + auto_reconnect -> Reconnecting -> Authenticating ---
+    {
+        TestTunnelController ctrl;
+        ctrl.set_auto_reconnect(true);
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.on_event({TunnelEventType::HelperReady});
+        ctrl.on_event({TunnelEventType::AuthSucceeded});
+        ctrl.on_event({TunnelEventType::CstpConnected});
+        ctrl.on_event({TunnelEventType::NetworkConfigApplied});
+        ctrl.on_event({TunnelEventType::PacketLoopStarted});
+        ok = expect(ctrl.phase() == TunnelPhase::Connected,
+                    "should reach Connected before reconnect test") && ok;
+
+        ctrl.on_event({TunnelEventType::TransportClosed});
+        ok = expect(ctrl.phase() == TunnelPhase::Reconnecting,
+                    "TransportClosed with auto_reconnect=true must go to Reconnecting") && ok;
+
+        ctrl.on_event({TunnelEventType::ReconnectTimerFired});
+        ok = expect(ctrl.phase() == TunnelPhase::Authenticating,
+                    "ReconnectTimerFired must go to Authenticating to retry") && ok;
+    }
+
+    // --- AuthFailed must NEVER trigger reconnect; must go to Failed ---
+    {
+        TestTunnelController ctrl;
+        ctrl.set_auto_reconnect(true);
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.on_event({TunnelEventType::HelperReady});
+        ctrl.on_event({TunnelEventType::AuthFailed});
+        ok = expect(ctrl.phase() == TunnelPhase::Failed,
+                    "AuthFailed must always go to Failed, never Reconnecting") && ok;
+        ok = expect(ctrl.phase() != TunnelPhase::Reconnecting,
+                    "AuthFailed must not trigger reconnect") && ok;
+    }
+
+    // --- UserDisconnect event clears desired_connected and goes to Disconnecting ---
+    {
+        TestTunnelController ctrl;
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.on_event({TunnelEventType::HelperReady});
+        ctrl.on_event({TunnelEventType::UserDisconnect});
+        ok = expect(ctrl.phase() == TunnelPhase::Disconnecting,
+                    "UserDisconnect event must go to Disconnecting") && ok;
+        ok = expect(!ctrl.status().desired_connected,
+                    "UserDisconnect must clear desired_connected") && ok;
+    }
+
+    // --- UserDisconnect does NOT reconnect even when auto_reconnect=true ---
+    {
+        TestTunnelController ctrl;
+        ctrl.set_auto_reconnect(true);
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.on_event({TunnelEventType::HelperReady});
+        ctrl.on_event({TunnelEventType::AuthSucceeded});
+        ctrl.on_event({TunnelEventType::CstpConnected});
+        ctrl.on_event({TunnelEventType::NetworkConfigApplied});
+        ctrl.on_event({TunnelEventType::PacketLoopStarted});
+        ctrl.on_event({TunnelEventType::UserDisconnect});
+        ok = expect(ctrl.phase() == TunnelPhase::Disconnecting,
+                    "UserDisconnect from Connected must go to Disconnecting, not Reconnecting") && ok;
+    }
+
+    // --- CleanupSucceeded after disconnect returns to Idle ---
+    {
+        TestTunnelController ctrl;
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.disconnect();
+        ctrl.on_event({TunnelEventType::CleanupSucceeded});
+        ok = expect(ctrl.phase() == TunnelPhase::Idle,
+                    "CleanupSucceeded must return to Idle") && ok;
+    }
+
+    // --- CleanupFailed after disconnect also returns to Idle ---
+    {
+        TestTunnelController ctrl;
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.disconnect();
+        ctrl.on_event({TunnelEventType::CleanupFailed});
+        ok = expect(ctrl.phase() == TunnelPhase::Idle,
+                    "CleanupFailed must also return to Idle") && ok;
+    }
+
+    // --- Status snapshot: reconnect info tracks attempt count ---
+    {
+        TestTunnelController ctrl;
+        ctrl.set_auto_reconnect(true);
+        UserIntent intent;
+        intent.desired_connected = true;
+        ctrl.connect(intent);
+        ctrl.on_event({TunnelEventType::HelperReady});
+        ctrl.on_event({TunnelEventType::AuthSucceeded});
+        ctrl.on_event({TunnelEventType::CstpConnected});
+        ctrl.on_event({TunnelEventType::NetworkConfigApplied});
+        ctrl.on_event({TunnelEventType::PacketLoopStarted});
+
+        ctrl.on_event({TunnelEventType::TransportClosed});
+        auto snap = ctrl.status();
+        ok = expect(snap.reconnect.has_value(),
+                    "status should include reconnect info during Reconnecting") && ok;
+        ok = expect(snap.reconnect->attempt >= 1,
+                    "reconnect attempt count should be >= 1 after first TransportClosed") && ok;
+    }
+
+    // --- PacketLoopStarted resets attempt count to 0 ---
+    {
+        TestTunnelController ctrl;
+        ctrl.set_auto_reconnect(true);
+        UserIntent intent;
+        intent.desired_connected = true;
+
+        auto full_connect = [&]() {
+            ctrl.on_event({TunnelEventType::HelperReady});
+            ctrl.on_event({TunnelEventType::AuthSucceeded});
+            ctrl.on_event({TunnelEventType::CstpConnected});
+            ctrl.on_event({TunnelEventType::NetworkConfigApplied});
+            ctrl.on_event({TunnelEventType::PacketLoopStarted});
+        };
+
+        ctrl.connect(intent);
+        full_connect();
+        ctrl.on_event({TunnelEventType::TransportClosed}); // attempt++ -> 1
+        ctrl.on_event({TunnelEventType::ReconnectTimerFired});
+        full_connect(); // PacketLoopStarted resets to 0
+
+        auto snap = ctrl.status();
+        ok = expect(snap.reconnect->attempt == 0,
+                    "PacketLoopStarted must reset attempt count to 0") && ok;
+    }
+
     if (ok) {
         std::cout << "tunnel_controller_state_machine_test: all assertions passed\n";
     } else {

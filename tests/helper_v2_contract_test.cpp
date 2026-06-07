@@ -1034,6 +1034,144 @@ int test_helper_request_envelope_no_credentials() {
     return ok ? 0 : 1;
 }
 
+// ============================================================
+// 8. HARDENED: Field-name introspection for Helper V2 messages
+// ============================================================
+
+// Collect every JSON key (recursively) from a serialized message
+void collect_keys(const nlohmann::json& node, std::vector<std::string>& keys) {
+    if (node.is_object()) {
+        for (auto it = node.begin(); it != node.end(); ++it) {
+            keys.push_back(it.key());
+            collect_keys(it.value(), keys);
+        }
+    } else if (node.is_array()) {
+        for (const auto& item : node) {
+            collect_keys(item, keys);
+        }
+    }
+}
+
+bool key_matches_credential_pattern(const std::string& key) {
+    std::string lower = key;
+    for (auto& c : lower) c = static_cast<char>(std::tolower(c));
+    // Substring match on credential-like patterns
+    static const char* patterns[] = {
+        "password", "passwd", "secret", "cookie",
+        "auth_token", "auth_key", "credential", "bearer",
+        "api_key", "apikey", "session_cookie", "csrf",
+        nullptr
+    };
+    for (const char** p = patterns; *p; ++p) {
+        if (lower.find(*p) != std::string::npos) return true;
+    }
+    // "token" alone is too broad (could be "session_token" - which is OK
+    // because it's not a credential). But auth_token / cookie_token must fail.
+    // We check exact "token" as a standalone segment.
+    if (lower == "token" || lower == "auth_token") return true;
+    return false;
+}
+
+int test_helper_v2_request_field_names_no_credentials() {
+    std::cout << "  [Security/Hardened] Helper V2 request field names contain no credentials\n";
+    bool ok = true;
+
+    auto check_struct = [&](const nlohmann::json& j, const char* name) {
+        std::vector<std::string> keys;
+        collect_keys(j, keys);
+        for (const auto& k : keys) {
+            if (key_matches_credential_pattern(k)) {
+                std::cerr << "FAIL: " << name << " contains credential-like key: " << k << "\n";
+                ok = false;
+            }
+        }
+    };
+
+    { exv::helper::HelloRequest r; r.client_version = 2;
+      check_struct(nlohmann::json(r), "HelloRequest"); }
+    { exv::helper::StartSessionRequest r; r.profile_id.value = "p";
+      check_struct(nlohmann::json(r), "StartSessionRequest"); }
+    { exv::helper::PrepareTunnelDeviceRequest r; r.session_id.value = "s"; r.adapter_name = "a";
+      check_struct(nlohmann::json(r), "PrepareTunnelDeviceRequest"); }
+    { exv::helper::ApplyTunnelConfigRequest r; r.config.session_id.value = "s";
+      check_struct(nlohmann::json(r), "ApplyTunnelConfigRequest"); }
+    { exv::helper::HeartbeatRequest r; r.session_id.value = "s"; r.core_phase = "Connected";
+      check_struct(nlohmann::json(r), "HeartbeatRequest"); }
+    { exv::helper::CleanupRequest r; r.session_id.value = "s";
+      check_struct(nlohmann::json(r), "CleanupRequest"); }
+    { exv::helper::EndSessionRequest r; r.session_id.value = "s";
+      check_struct(nlohmann::json(r), "EndSessionRequest"); }
+
+    return ok ? 0 : 1;
+}
+
+int test_helper_v2_response_field_names_no_credentials() {
+    std::cout << "  [Security/Hardened] Helper V2 response field names contain no credentials\n";
+    bool ok = true;
+
+    auto check_struct = [&](const nlohmann::json& j, const char* name) {
+        std::vector<std::string> keys;
+        collect_keys(j, keys);
+        for (const auto& k : keys) {
+            if (key_matches_credential_pattern(k)) {
+                std::cerr << "FAIL: " << name << " contains credential-like key: " << k << "\n";
+                ok = false;
+            }
+        }
+    };
+
+    { exv::helper::HelloResponse r; r.server_version = 2;
+      check_struct(nlohmann::json(r), "HelloResponse"); }
+    { exv::helper::StartSessionResponse r; r.session_id.value = "s";
+      check_struct(nlohmann::json(r), "StartSessionResponse"); }
+    { exv::helper::PrepareTunnelDeviceResponse r; r.device_path = "/dev/tun0"; r.mtu = 1400;
+      check_struct(nlohmann::json(r), "PrepareTunnelDeviceResponse"); }
+    { exv::helper::ApplyTunnelConfigResponse r; r.success = true;
+      check_struct(nlohmann::json(r), "ApplyTunnelConfigResponse"); }
+    { exv::helper::HeartbeatResponse r; r.ok = true;
+      check_struct(nlohmann::json(r), "HeartbeatResponse"); }
+    { exv::helper::CleanupResponse r; r.success = true;
+      check_struct(nlohmann::json(r), "CleanupResponse"); }
+    { exv::helper::EndSessionResponse r; r.success = true;
+      check_struct(nlohmann::json(r), "EndSessionResponse"); }
+
+    return ok ? 0 : 1;
+}
+
+int test_helper_v2_no_auth_token_field_specifically() {
+    std::cout << "  [Security/Hardened] V2 must reject auth_token field anywhere\n";
+    bool ok = true;
+
+    // Build serializations and explicitly check for known credential field
+    // names that prior versions might have included.
+    std::vector<std::string> banned_field_names = {
+        "\"password\":", "\"Password\":", "\"PASSWORD\":",
+        "\"cookie\":", "\"Cookie\":",
+        "\"auth_token\":", "\"authToken\":",
+        "\"session_cookie\":", "\"webvpn_cookie\":",
+        "\"csrf_token\":", "\"bearer_token\":",
+    };
+
+    auto check_serialized = [&](const std::string& s, const char* name) {
+        for (const auto& banned : banned_field_names) {
+            if (s.find(banned) != std::string::npos) {
+                std::cerr << "FAIL: " << name << " contains banned field: " << banned << "\n";
+                ok = false;
+            }
+        }
+    };
+
+    { exv::helper::StartSessionRequest r; r.profile_id.value = "p"; r.mode = exv::helper::HelperMode::Transient;
+      check_serialized(nlohmann::json(r).dump(), "StartSessionRequest"); }
+    { exv::helper::ApplyTunnelConfigRequest r; r.config.session_id.value = "s";
+      r.config.interface_address = "10.0.0.2/24";
+      check_serialized(nlohmann::json(r).dump(), "ApplyTunnelConfigRequest"); }
+    { exv::helper::HelperRequest r; r.op = exv::helper::HelperOp::StartSession; r.payload_json = "{}";
+      check_serialized(nlohmann::json(r).dump(), "HelperRequest envelope"); }
+
+    return ok ? 0 : 1;
+}
+
 } // anonymous namespace
 
 // ============================================================
@@ -1099,6 +1237,12 @@ int main() {
     failures += test_no_credentials_in_start_session();
     failures += test_no_credentials_in_response_types();
     failures += test_helper_request_envelope_no_credentials();
+
+    // 8. Security/Hardened (new invariant tests)
+    std::cout << "\n--- Security/Hardened ---\n";
+    failures += test_helper_v2_request_field_names_no_credentials();
+    failures += test_helper_v2_response_field_names_no_credentials();
+    failures += test_helper_v2_no_auth_token_field_specifically();
 
     std::cout << "\n=== Results ===\n";
     if (failures == 0) {

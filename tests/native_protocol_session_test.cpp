@@ -116,6 +116,14 @@ public:
       : cancel_(cancel), cancel_after_reads_(cancel_after_reads) {}
 
   ecnuvpn::vpn_engine::ValidationResult
+  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+    last_open_metadata_.interface_name = config.interface_name;
+    last_open_metadata_.mtu = config.mtu;
+    open_ = true;
+    ++open_count_;
+    return {};
+  }
+  ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     last_open_metadata_ = metadata;
     open_ = true;
@@ -301,6 +309,14 @@ public:
       : end_when_(std::move(end_when)) {}
 
   ecnuvpn::vpn_engine::ValidationResult
+  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+    last_open_metadata_.interface_name = config.interface_name;
+    last_open_metadata_.mtu = config.mtu;
+    open_ = true;
+    ++open_count_;
+    return {};
+  }
+  ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     last_open_metadata_ = metadata;
     open_ = true;
@@ -348,6 +364,16 @@ private:
 // drains cleanly, letting the reconnected session finish gracefully.
 class DeadPeerThenDrainDevice final : public ecnuvpn::vpn_engine::PacketDevice {
 public:
+  ecnuvpn::vpn_engine::ValidationResult
+  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+    last_open_metadata_.interface_name = config.interface_name;
+    last_open_metadata_.mtu = config.mtu;
+    open_ = true;
+    ++open_count_;
+    session_read_index_ = 0;
+    return {};
+  }
+
   ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     last_open_metadata_ = metadata;
@@ -400,6 +426,12 @@ private:
 // session reach dead-peer detection so reconnect exhaustion can be exercised.
 class SilentNoDataDevice final : public ecnuvpn::vpn_engine::PacketDevice {
 public:
+  ecnuvpn::vpn_engine::ValidationResult
+  open(const ecnuvpn::vpn_engine::DeviceConfig & /*config*/) override {
+    open_ = true;
+    ++open_count_;
+    return {};
+  }
   ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata & /*metadata*/) override {
     open_ = true;

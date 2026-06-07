@@ -1,6 +1,9 @@
 #include "helper.hpp"
 #include "helper_ipc.hpp"
 
+#include "core/timing.hpp"
+#include "helper_common/helper_messages.hpp"
+#include "helper_v2_handler.hpp"
 #include "logger.hpp"
 #include "runtime/runtime_context.hpp"
 #include "feedback/feedback.hpp"
@@ -37,50 +40,7 @@ namespace {
 volatile sig_atomic_t daemon_stop_requested = 0;
 DaemonOptions active_daemon_options;
 
-class StageTimer {
-public:
-  explicit StageTimer(std::string scope)
-      : scope_(std::move(scope)), started_(Clock::now()), last_(started_) {
-    logger::info("[connect-timing] scope=" + scope_ +
-                 " stage=begin delta_ms=0 total_ms=0");
-  }
-
-  void mark(const std::string &stage, const std::string &detail = "") {
-    auto now = Clock::now();
-    long long delta_ms = elapsed_ms(last_, now);
-    long long total_ms = elapsed_ms(started_, now);
-    last_ = now;
-
-    std::string message = "[connect-timing] scope=" + scope_ +
-                          " stage=" + stage +
-                          " delta_ms=" + std::to_string(delta_ms) +
-                          " total_ms=" + std::to_string(total_ms);
-    if (!detail.empty())
-      message += " " + detail;
-    logger::info(message);
-  }
-
-  void finish(bool ok, const std::string &detail = "") {
-    if (finished_)
-      return;
-    finished_ = true;
-    mark(ok ? "finish.ok" : "finish.error", detail);
-  }
-
-private:
-  using Clock = std::chrono::steady_clock;
-
-  static long long elapsed_ms(const Clock::time_point &from,
-                              const Clock::time_point &to) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
-        .count();
-  }
-
-  std::string scope_;
-  Clock::time_point started_;
-  Clock::time_point last_;
-  bool finished_ = false;
-};
+using StageTimer = exv::core::ConnectStageTimer;
 
 struct SessionState {
   uid_t uid = static_cast<uid_t>(-1);
@@ -91,7 +51,7 @@ struct SessionState {
   std::string config_dir;
   std::string server;
   int route_count = 0;
-  int retry_limit = 0;
+  int retry_limit = 0; // DEPRECATED: V1 legacy. ReconnectPolicy in Core owns this.
 };
 
 struct RuntimeSnapshot {
@@ -668,6 +628,20 @@ nlohmann::json handle_start(uid_t peer_uid, gid_t peer_gid,
     timing.finish(false, "reason=invalid_payload");
     return make_error("Invalid start request payload.");
   }
+
+  // Native engine must use TunnelController + HelperClient V2 session-based
+  // API, not the legacy V1 start path that leaks plaintext password.
+  if (cfg.vpn_engine == "native") {
+    timing.finish(false, "reason=native_engine_rejected");
+    return nlohmann::json{{"ok", false},
+                          {"code", "native_engine_not_supported"},
+                          {"message",
+                           "Native engine connections must use the V2 helper "
+                           "session API (TunnelController). The legacy V1 "
+                           "\"start\" action does not accept native engine "
+                           "requests."}};
+  }
+
   timing.mark("request_parsed",
               "routes=" + std::to_string(cfg.routes.size()) +
                   " retry_limit=" + std::to_string(retry_limit));
@@ -1083,8 +1057,14 @@ int daemon_main(const DaemonOptions &options) {
     return 1;
   }
 
+  // V2 handler for structured privileged control-plane API.
+  exv::helper::HelperV2Handler v2_handler;
+
   while (!daemon_stop_requested) {
     reap_finished_request_handlers();
+
+    // Periodic V2 maintenance (session timeouts, cleanup).
+    v2_handler.tick();
 
     if (!ipc->accept_client()) {
       if (daemon_stop_requested)
@@ -1101,10 +1081,28 @@ int daemon_main(const DaemonOptions &options) {
     unsigned int peer_uid = ipc->peer_uid();
     unsigned int peer_gid = ipc->peer_gid();
 
+    // Route V2 vs V1 requests.  V2 requests carry an "op" field (numeric
+    // HelperOp enum), while V1 requests carry an "action" string field.
     platform::dispatch_request_background(
         *ipc, raw, peer_uid, peer_gid,
-        [](unsigned int uid, unsigned int gid,
+        [&v2_handler](unsigned int uid, unsigned int gid,
            const nlohmann::json &req) -> nlohmann::json {
+          // V2 protocol detection: "op" field present and numeric.
+          if (req.contains("op") && req["op"].is_number_unsigned()) {
+            try {
+              exv::helper::HelperRequest v2_req =
+                  exv::helper::helper_request_from_json(req);
+              exv::helper::HelperResponse v2_resp = v2_handler.handle(v2_req);
+              nlohmann::json out;
+              exv::helper::to_json(out, v2_resp);
+              return out;
+            } catch (const std::exception &e) {
+              return nlohmann::json{{"ok", false},
+                                    {"code", "v2_protocol_error"},
+                                    {"message", std::string("V2 handler error: ") + e.what()}};
+            }
+          }
+          // V1 legacy dispatch.
           return handle_request(uid, gid, req);
         });
 

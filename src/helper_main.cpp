@@ -150,6 +150,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (arg == "__helper-exec" && argc > 2) {
+      // DEPRECATED: V1 legacy worker entry.  Receives plaintext password
+      // from file.  Native engine must use TunnelController + HelperClient
+      // V2 session-based API.  This entry point will be removed in a future
+      // release.
+      std::cerr << "[DEPRECATED] __helper-exec is a legacy V1 worker entry. "
+                << "Use HelperClient V2 session API instead.\n";
       return ecnuvpn::helper::worker_main(argv[2]);
     }
 
