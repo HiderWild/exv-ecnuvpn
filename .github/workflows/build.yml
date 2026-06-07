@@ -36,6 +36,8 @@ jobs:
         run: scripts/diagnose-mingw-dlls.ps1 -BuildDir build-windows/cpp
       - name: Test (release-blocking gate)
         run: ctest --preset windows-release --output-on-failure -L release-blocking
+      - name: Test (architecture invariants gate)
+        run: ctest --test-dir build-windows/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_v2_contract_test|no_secret_in_argv_test|no_secret_in_logs_test)"
       - name: Test (env-sensitive, informational)
         if: always()
         continue-on-error: true
@@ -82,6 +84,8 @@ jobs:
         run: bash scripts/architecture-guardrails.sh
       - name: Test (release-blocking gate)
         run: ctest --preset linux-release --output-on-failure -L release-blocking
+      - name: Test (architecture invariants gate)
+        run: ctest --test-dir build/linux/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_v2_contract_test|no_secret_in_argv_test|no_secret_in_logs_test)"
       - name: Test (env-sensitive, informational)
         if: always()
         continue-on-error: true
@@ -131,6 +135,8 @@ jobs:
         run: bash scripts/architecture-guardrails.sh
       - name: Test (release-blocking gate)
         run: ctest --preset macos-release --output-on-failure -L release-blocking
+      - name: Test (architecture invariants gate)
+        run: ctest --test-dir build/macos/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_v2_contract_test|no_secret_in_argv_test|no_secret_in_logs_test)"
       - name: Test (env-sensitive, informational)
         if: always()
         continue-on-error: true
