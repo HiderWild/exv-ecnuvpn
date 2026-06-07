@@ -49,6 +49,7 @@ set(EXV_COMMON_SOURCES
     src/config_manager.cpp
     src/config_api.cpp
     src/core/core_process.cpp
+    src/core/pipe_ipc.cpp
     src/core/engine_event_bridge.cpp
     src/core/core_session_runner.cpp
     src/core/tunnel_controller.cpp
@@ -90,6 +91,8 @@ set(EXV_COMMON_SOURCES
     src/feedback/feedback.cpp
     src/connection_attempt.cpp
     src/logger.cpp
+    src/log_event_bus.cpp
+    src/log_renderer.cpp
     src/utils.cpp
 )
 
@@ -261,8 +264,8 @@ target_compile_definitions(exv PRIVATE
 #
 # Then re-run the C++ build.  The full ordering is:
 #   1. Frontend build (webui/dist/)
-#   2. Native build    (this step â€” consumes webui/dist/)
-#   3. Desktop build   (optional â€” packages native binary + Electron shell)
+#   2. Native build    (this step â€?consumes webui/dist/)
+#   3. Desktop build   (optional â€?packages native binary + Electron shell)
 #
 add_custom_command(
     OUTPUT ${CMAKE_SOURCE_DIR}/src/webui_assets.hpp

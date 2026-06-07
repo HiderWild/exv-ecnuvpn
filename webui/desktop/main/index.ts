@@ -120,8 +120,8 @@ function resolveRuntimeDir(exv = resolveExvPath()) {
 }
 
 // Canonical state/log directory, resolved on the (non-elevated) desktop process
-// so every exv invocation — including UAC-elevated ones whose ambient %APPDATA%
-// differs — writes config, state and logs to the same place. Mirrors the C++
+// so every exv invocation �?including UAC-elevated ones whose ambient %APPDATA%
+// differs �?writes config, state and logs to the same place. Mirrors the C++
 // platform defaults exactly so the CLI (`exv logs`) and the app agree.
 function resolveStateDir() {
   if (process.platform === 'win32') {
@@ -150,17 +150,12 @@ function nativeExecOptions(exv: string, extra: { maxBuffer?: number } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// CoreProcessManager – manages the long-lived `exv --mode=core` child process
+// CoreProcessManager �?manages the long-lived `exv --mode=core` child process
 // ---------------------------------------------------------------------------
-
-const CORE_RESTART_DELAY_MS = 2000
-const CORE_MAX_RESTART_DELAY_MS = 30_000
 
 class CoreProcessManager {
   private process: ChildProcess | null = null
   private rpcClient: CoreRpcClient | null = null
-  private restartDelay = CORE_RESTART_DELAY_MS
-  private restartTimer: NodeJS.Timeout | null = null
   private stopped = false
   private exvPath: string
   private configDir: string
@@ -216,9 +211,12 @@ class CoreProcessManager {
       this.process = null
       if (!this.stopped) {
         console.error(
-          `[CoreProcessManager] core process exited (code=${code}, signal=${signal}), restarting in ${this.restartDelay}ms`,
+          `[CoreProcessManager] core process exited (code=${code}, signal=${signal})`,
         )
-        this.scheduleRestart()
+        // Push crash event to renderer �?user decides whether to restart or quit.
+        for (const listener of this.eventListeners) {
+          listener('core-crashed', { exitCode: code, signal })
+        }
       }
     })
 
@@ -227,7 +225,9 @@ class CoreProcessManager {
       this.rpcClient = null
       this.process = null
       if (!this.stopped) {
-        this.scheduleRestart()
+        for (const listener of this.eventListeners) {
+          listener('core-crashed', { exitCode: null, signal: null, error: err.message })
+        }
       }
     })
 
@@ -239,22 +239,13 @@ class CoreProcessManager {
     }
   }
 
-  private scheduleRestart() {
-    if (this.stopped) return
-    if (this.restartTimer) return
-    this.restartTimer = setTimeout(async () => {
-      this.restartTimer = null
-      await this.start()
-    }, this.restartDelay)
-    // Exponential back-off capped at CORE_MAX_RESTART_DELAY_MS.
-    this.restartDelay = Math.min(this.restartDelay * 2, CORE_MAX_RESTART_DELAY_MS)
+  /** Manually restart the core process after a crash. */
+  async restart(): Promise<void> {
+    this.stopped = false
+    await this.start()
   }
 
   stop() {
-    if (this.restartTimer) {
-      clearTimeout(this.restartTimer)
-      this.restartTimer = null
-    }
     if (this.rpcClient) {
       this.rpcClient.close()
       this.rpcClient = null
@@ -650,7 +641,7 @@ function refreshTrayMenu(connected = trayConnectionConnected) {
       click: () => { void toggleTrayConnection() },
     },
     { type: 'separator' },
-    { label: '退出', click: () => { void disconnectThenQuit() } },
+    { label: '退�?, click: () => { void disconnectThenQuit() } },
   ]))
 }
 
@@ -693,7 +684,7 @@ async function toggleTrayConnection() {
     const message = error instanceof Error ? error.message : String(error)
     await openModal('confirm', {
       kind: 'confirm',
-      message: `托盘${action}失败。${message}`,
+      message: `托盘${action}失败�?{message}`,
     })
   } finally {
     trayConnectionBusy = false
@@ -721,7 +712,7 @@ async function disconnectThenQuit() {
     const message = error instanceof Error ? error.message : String(error)
     await openModal('confirm', {
       kind: 'confirm',
-      message: `断开 VPN 失败，程序仍保持打开。${message}`,
+      message: `断开 VPN 失败，程序仍保持打开�?{message}`,
     })
   }
 }
@@ -956,6 +947,10 @@ ipcMain.handle(desktopIpcChannels.closePromptResult, async (_event, result: unkn
   resolveRendererClosePrompt(result)
   return { ok: true }
 })
+
+// Core crash recovery IPC
+ipcMain.handle('core:restart', async () => { if (coreProcessManager) { try { await coreProcessManager.restart() } catch (e) { /* handled by crash event */ } } return { ok: true } })
+ipcMain.handle('core:quit', async () => { forceQuit = true; app.quit(); return { ok: true } })
 
 app.whenReady().then(createWindow)
 
