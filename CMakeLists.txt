@@ -79,7 +79,6 @@ set(EXV_COMMON_SOURCES
     src/platform/common/route_model.cpp
     src/openconnect_log.cpp
     src/vpn_engine/native_engine.cpp
-    src/vpn_engine/native_session_store.cpp
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
     src/vpn.cpp
@@ -116,8 +115,6 @@ set(EXV_PLATFORM_LIBS)
 set(SOURCES
     src/main.cpp
     src/app_api.cpp
-    src/sse_broadcaster.cpp
-    src/webui.cpp
     src/platform/common/status_models.cpp
     src/platform/common/runtime_status.cpp
 )
@@ -267,22 +264,10 @@ target_compile_definitions(exv PRIVATE
 #   2. Native build    (this step â€?consumes webui/dist/)
 #   3. Desktop build   (optional â€?packages native binary + Electron shell)
 #
-add_custom_command(
-    OUTPUT ${CMAKE_SOURCE_DIR}/src/webui_assets.hpp
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/embed_assets.py
-    DEPENDS ${CMAKE_SOURCE_DIR}/scripts/embed_assets.py
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Embedding webui assets into C++ header..."
-)
-
-add_custom_target(embed_assets DEPENDS ${CMAKE_SOURCE_DIR}/src/webui_assets.hpp)
-add_dependencies(exv embed_assets)
-
-target_compile_definitions(exv PRIVATE EMBEDDED_ASSETS)
+# WebUI removed ¡ª Electron is the sole GUI entry point
 
 add_executable(vpn_runtime_test
         tests/vpn_runtime_test.cpp
-    src/vpn_engine/native_session_store.cpp
     src/vpn_engine/session_state.cpp
     src/vpn_runtime.cpp
         src/utils.cpp
@@ -401,7 +386,6 @@ add_test(NAME native_session_state_test COMMAND native_session_state_test)
 
 add_executable(native_helper_session_test
     tests/native_helper_session_test.cpp
-    src/vpn_engine/native_session_store.cpp
     src/vpn_engine/session_state.cpp
 )
 
