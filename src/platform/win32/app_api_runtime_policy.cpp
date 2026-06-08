@@ -3,7 +3,6 @@
 #include "platform/common/driver_status.hpp"
 #include "platform/common/process_control.hpp"
 #include "utils.hpp"
-#include "vpn.hpp"
 
 #include <cstdlib>
 #include <cstdio>
@@ -76,33 +75,10 @@ nlohmann::json preflight_connect_platform_checks(const Config &cfg) {
   return nlohmann::json{};
 }
 
-nlohmann::json try_connect_direct_fallback(const Config &cfg,
-                                            const std::string &password) {
-  int result = vpn::start_with_password(cfg, password, 0);
-  if (result != 0) {
-    if (result == vpn::kUseTunnelController) {
-      return nlohmann::json{{"ok", false},
-                            {"code", "use_tunnel_controller"},
-                            {"error", "Native engine requires TunnelController. Use the desktop app to connect."}};
-    }
-    if (result == vpn::kVpnInitialConnectFailedExitCode) {
-      return nlohmann::json{{"ok", false},
-                            {"code", "auth_failed"},
-                            {"error", "VPN authentication failed or the server rejected the connection."}};
-    }
-    return nlohmann::json{{"ok", false}, {"error", "Failed to start VPN"}};
-  }
-
-  vpn::RuntimeStatusSnapshot snapshot = vpn::read_runtime_status_snapshot();
-  return nlohmann::json{{"ok", true},
-                        {"_direct_fallback", true},
-                        {"_snapshot_data",
-                         nlohmann::json{{"running", snapshot.running},
-                                        {"pid", snapshot.pid},
-                                        {"supervisor_pid", snapshot.supervisor_pid},
-                                        {"network_ready", snapshot.network_ready},
-                                        {"interface", snapshot.interface_name},
-                                        {"internal_ip", snapshot.internal_ip}}}};
+nlohmann::json try_connect_direct_fallback(const Config & /*cfg*/,
+                                            const std::string & /*password*/) {
+  // Windows always requires the helper service; no direct fallback.
+  return nlohmann::json{};
 }
 
 nlohmann::json try_disconnect_direct_fallback(bool allow_direct_fallback) {

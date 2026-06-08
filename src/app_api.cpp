@@ -63,10 +63,7 @@ std::string json_string(const nlohmann::json &object, const char *key,
                         const std::string &fallback = std::string());
 
 bool helper_unavailable(const nlohmann::json &response) {
-  const std::string code = json_string(response, "code");
-  return code == platform::kHelperUnavailableCode ||
-         code == platform::kServiceNotInstalledCode ||
-         code == platform::kServiceInstalledNotRunningCode ||
+  return json_string(response, "code") == platform::kHelperUnavailableCode ||
          json_string(response, "message") == "Helper daemon not available";
 }
 
@@ -340,6 +337,17 @@ nlohmann::json runtime_status_json(const Config &cfg) {
 // new architecture never writes these files.
 // =========================================================================
 
+void cleanup_legacy_supervisor_state_files() {
+  const std::string config_dir = utils::get_config_dir();
+  // Remove native-session-state.json and route-ready marker left by the
+  // legacy NativeSessionEventRecorder.
+  vpn_engine::clear_native_session_state(config_dir);
+  // Remove ecnuvpn-supervisor.pid left by the legacy write_supervisor_pid().
+  std::string supervisor_pid = utils::get_supervisor_pid_path();
+  if (utils::file_exists(supervisor_pid))
+    std::remove(supervisor_pid.c_str());
+}
+
 // =========================================================================
 // TunnelController singleton — lazily initialized on first VPN action.
 // Holds the HelperClient, PlatformNetworkOps, and TunnelController as a
@@ -466,8 +474,7 @@ nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) 
   return platform::install_driver(cfg, payload);
 }
 
-nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
-                                bool allow_direct_fallback = false) {
+nlohmann::json preflight_connect(const Config &cfg, const std::string &password) {
   if (cfg.server.empty())
     return error("VPN server is not configured.");
   if (cfg.username.empty())
@@ -487,11 +494,8 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password,
   options.allow_service_start = false;
   nlohmann::json backend = platform::resolve_backend(options);
   if (!backend.value("ok", false)) {
-    nlohmann::json unavailable = platform::backend_unavailable_error(
+    return platform::backend_unavailable_error(
         backend, platform::helper_unavailable_connect_message());
-    if (!allow_direct_fallback || !helper_unavailable(unavailable)) {
-      return unavailable;
-    }
   }
 
   nlohmann::json runtime = runtime_status_json(cfg);
@@ -572,11 +576,6 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
         auto snap = controller->status();
         return frontend_status_from_controller_snapshot(snap, cfg);
       }
-      nlohmann::json fallback = platform::status_fallback_without_helper(cfg);
-      if (fallback.is_object() && fallback.value("_snapshot", false)) {
-        return frontend_status_from_snapshot_json(
-            fallback.value("_snapshot_data", nlohmann::json::object()), cfg);
-      }
       return disconnected_status(cfg);
     });
 
@@ -595,10 +594,7 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
       }
       timing.mark("password_resolved",
                   password.empty() ? "source=missing" : "source=available");
-      const bool allow_direct_fallback =
-          payload.value("allow_direct_fallback", false);
-      nlohmann::json preflight =
-          preflight_connect(cfg, password, allow_direct_fallback);
+      nlohmann::json preflight = preflight_connect(cfg, password);
       if (preflight.is_object() && preflight.value("ok", true) == false) {
         timing.finish(false, "stage=preflight error=" +
                                  json_string(preflight, "error"));
@@ -672,19 +668,6 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
                   controller ? "initialized=true" : "initialized=false");
 
       if (!controller) {
-        nlohmann::json fallback =
-            platform::try_connect_direct_fallback(cfg, password);
-        if (allow_direct_fallback && fallback.is_object() &&
-            !fallback.empty()) {
-          if (fallback.value("ok", false)) {
-            timing.finish(true, "stage=direct_fallback");
-            return frontend_status_from_snapshot_json(
-                fallback.value("_snapshot_data", nlohmann::json::object()), cfg);
-          }
-          timing.finish(false, "stage=direct_fallback error=" +
-                                   json_string(fallback, "error"));
-          return fallback;
-        }
         timing.finish(false, "stage=tunnel_controller_init");
         return error("Failed to initialize VPN controller: " +
                          tunnel_holder().init_error,
@@ -719,13 +702,6 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
       auto controller = get_tunnel_controller_if_exists();
       if (controller) {
         controller->disconnect(exv::core::DisconnectReason::UserRequested);
-      } else {
-        nlohmann::json fallback = platform::try_disconnect_direct_fallback(
-            payload.value("allow_direct_fallback", false));
-        if (fallback.is_object() && !fallback.empty()) {
-          if (!fallback.value("ok", false))
-            return fallback;
-        }
       }
       cleanup_legacy_supervisor_state_files();
       return disconnected_status(cfg);

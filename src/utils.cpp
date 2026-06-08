@@ -217,12 +217,24 @@ std::string get_config_path() {
   return platform::config_path(get_config_dir());
 }
 
+std::string get_pid_path() {
+  return platform::pid_path(get_config_dir());
+}
+
 std::string get_log_path() {
   return platform::log_path(get_config_dir());
 }
 
 std::string get_tunnel_path() {
   return platform::tunnel_path(get_config_dir());
+}
+
+std::string get_supervisor_pid_path() {
+  return platform::supervisor_pid_path(get_config_dir());
+}
+
+std::string get_route_ready_path() {
+  return platform::route_ready_path(get_config_dir());
 }
 
 // ── File utilities ──────────────────────────────────────────────
