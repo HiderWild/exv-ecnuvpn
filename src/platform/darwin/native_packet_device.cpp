@@ -470,6 +470,42 @@ NativePacketDevice::NativePacketDevice(
 NativePacketDevice::~NativePacketDevice() { close(); }
 
 vpn_engine::ValidationResult
+NativePacketDevice::open(const vpn_engine::DeviceConfig &config) {
+  vpn_engine::ValidationResult closed = close_resources();
+  if (!closed.ok)
+    return closed;
+
+  if (!dependencies_.create_utun_session) {
+    return invalid("packet_device_api_missing",
+                   "native Darwin packet device dependencies are incomplete");
+  }
+
+  // Build a minimal TunnelMetadata for the utun factory (it only needs
+  // interface_name and mtu for device creation, not routes/DNS).
+  vpn_engine::TunnelMetadata device_meta;
+  device_meta.interface_name = config.interface_name;
+  device_meta.mtu = config.mtu;
+
+  std::unique_ptr<NativePacketDeviceUtunSession> utun =
+      dependencies_.create_utun_session(device_meta);
+  if (!utun)
+    return invalid("packet_device_api_missing",
+                   "native utun packet session factory returned null");
+
+  NativeUtunStartResult started = utun->start();
+  if (!started.ok())
+    return utun_start_failure_result(started);
+
+  // NOTE: No route_config is created or applied here.
+  // Network routes and DNS should be applied separately via
+  // PlatformNetworkOps::apply_tunnel_config() by the caller.
+
+  utun_session_ = std::move(utun);
+  open_ = true;
+  return {};
+}
+
+vpn_engine::ValidationResult
 NativePacketDevice::open(const vpn_engine::TunnelMetadata &metadata) {
   vpn_engine::ValidationResult closed = close_resources();
   if (!closed.ok)

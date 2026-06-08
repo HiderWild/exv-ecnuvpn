@@ -394,6 +394,35 @@ NativePacketDevice::NativePacketDevice(
 NativePacketDevice::~NativePacketDevice() { close(); }
 
 vpn_engine::ValidationResult
+NativePacketDevice::open(const vpn_engine::DeviceConfig &config) {
+  vpn_engine::ValidationResult closed = close_resources();
+  if (!closed.ok)
+    return closed;
+
+  if (!dependencies_.create_wintun_session)
+    return invalid("packet_device_api_missing",
+                   "native packet device dependencies are incomplete");
+
+  std::unique_ptr<NativePacketDeviceWintunSession> wintun =
+      dependencies_.create_wintun_session();
+  if (!wintun)
+    return invalid("packet_device_api_missing",
+                   "native Wintun packet session factory returned null");
+
+  NativeWintunStartResult started = wintun->start();
+  if (!started.ok())
+    return wintun_start_failure_result(started);
+
+  // NOTE: No IP config is applied here.
+  // Network address, routes, and DNS should be applied separately via
+  // PlatformNetworkOps::apply_tunnel_config() by the caller.
+
+  wintun_session_ = std::move(wintun);
+  open_ = true;
+  return {};
+}
+
+vpn_engine::ValidationResult
 NativePacketDevice::open(const vpn_engine::TunnelMetadata &metadata) {
   vpn_engine::ValidationResult closed = close_resources();
   if (!closed.ok)

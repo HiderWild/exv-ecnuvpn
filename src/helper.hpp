@@ -16,6 +16,9 @@ struct DaemonOptions {
 };
 
 bool is_available();
+// DEPRECATED: V1 legacy client-side helper start.  Leaks plaintext password
+// and retry_limit to helper.  New code should use TunnelController which
+// delegates privileged ops via HelperClient V2 session-based API.
 bool start_via_helper(const Config &cfg, const std::string &plaintext_password,
                       int retry_limit);
 bool stop_via_helper();
@@ -28,6 +31,7 @@ int show_service_status();
 int daemon_main(const DaemonOptions &options);
 int daemon_main();
 void request_daemon_stop();
+// DEPRECATED: V1 legacy worker entry.  Receives plaintext password from file.
 int worker_main(const std::string &request_path);
 
 } // namespace helper

@@ -4,6 +4,8 @@
 #include "core_api/app_rpc_dispatcher.hpp"
 #include "core_api/core_api_setup.hpp"
 #include "logger.hpp"
+#include "log_renderer.hpp"
+#include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
 #include "config.hpp"
 #include "utils.hpp"
@@ -174,6 +176,11 @@ int core_process_main(const std::string& config_dir,
 
     // 2. Initialize logger
     ecnuvpn::logger::init();
+
+    // 2b. Instantiate LogRenderer so typed events reach the disk file.
+    // Must live for the lifetime of the core process.
+    ecnuvpn::LogRenderer log_renderer;
+
     ecnuvpn::logger::info("Core process starting (mode=core)");
 
     // 3. Install signal handlers for graceful shutdown
@@ -211,9 +218,17 @@ int core_process_main(const std::string& config_dir,
     // 7. Register core-process-specific actions
     register_core_exclusive_actions(*dispatcher, controller);
 
-    ecnuvpn::logger::info("Core process ready — reading JSON-RPC from stdin");
+    // 7b. Create pipe listener for CLI connections (also serves as single-instance guard).
+    auto pipe_listener = std::make_unique<PipeIpcListener>(core_pipe_path());
+    if (!pipe_listener->start()) {
+        std::cerr << "fatal: another core process is already running (pipe '"
+                  << core_pipe_path() << "' is in use)" << std::endl;
+        return 1;
+    }
 
-    // 8. Main event loop: read JSON-RPC requests from stdin, one per line
+    ecnuvpn::logger::info("Core process ready — reading JSON-RPC from stdin and pipe");
+
+    // 8. Main event loop: read JSON-RPC requests from stdin and pipe, one per line
     std::string line;
     while (!g_stop_requested.load()) {
         if (!std::getline(std::cin, line)) {
@@ -298,6 +313,36 @@ int core_process_main(const std::string& config_dir,
         }
 
         write_json_line(response);
+
+        // Process CLI pipe connections (non-blocking)
+        pipe_listener->accept_one([&dispatcher](const std::string& request_line) -> std::string {
+            try {
+                json req = json::parse(request_line);
+                int id = req.value("id", 0);
+                std::string action = req.value("action", "");
+                if (action.empty()) {
+                    json err = {{"id", id}, {"ok", false}, {"code", "missing_action"}, {"message", "Request must contain an 'action' field"}};
+                    return err.dump();
+                }
+                std::string payload_json = req.contains("payload") ? req["payload"].dump() : "{}";
+                core_api::RpcRequest rpc_req;
+                rpc_req.action = action;
+                rpc_req.payload_json = payload_json;
+                rpc_req.request_id = std::to_string(id);
+                core_api::RpcResponse rpc_resp = dispatcher->dispatch(rpc_req);
+                if (rpc_resp.success) {
+                    json data = json::parse(rpc_resp.payload_json);
+                    json resp = {{"id", id}, {"ok", true}, {"data", data}};
+                    return resp.dump();
+                } else {
+                    json resp = {{"id", id}, {"ok", false}, {"code", rpc_resp.error_code}, {"message", rpc_resp.error_message}};
+                    return resp.dump();
+                }
+            } catch (const std::exception& e) {
+                json err = {{"id", 0}, {"ok", false}, {"code", "parse_error"}, {"message", std::string("Invalid JSON: ") + e.what()}};
+                return err.dump();
+            }
+        });
     }
 
     ecnuvpn::logger::info("Core process shutting down");

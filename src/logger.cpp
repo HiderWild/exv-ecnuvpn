@@ -1,4 +1,5 @@
 #include "logger.hpp"
+#include "log_event_bus.hpp"
 #include "utils.hpp"
 
 #include <ctime>
@@ -13,51 +14,49 @@
 namespace ecnuvpn {
 namespace logger {
 
-static std::string get_timestamp() {
-  auto now = std::time(nullptr);
-  auto *tm = std::localtime(&now);
-  std::ostringstream ss;
-  ss << std::put_time(tm, "%Y-%m-%d %H:%M:%S");
-  return ss.str();
-}
-
 void init() { utils::ensure_dir(utils::get_config_dir()); }
 
-static void write_log(const std::string &level, const std::string &msg) {
+void write(const std::string &level, const std::string &text) {
   std::string log_path = utils::get_log_path();
   std::ofstream ofs(log_path, std::ios::app);
   if (ofs.is_open()) {
-    ofs << "[" << get_timestamp() << "] [" << level << "] " << msg << std::endl;
+    ofs << text << std::endl;
     ofs.flush();
     utils::sync_owner(log_path);
   }
 }
 
-void info(const std::string &msg) { write_log("INFO", msg); }
+void info(const std::string &msg) {
+  TypedLogEvent ev;
+  ev.level = "INFO";
+  ev.message = msg;
+  LogEventBus::instance().publish(ev);
+}
 
-void error(const std::string &msg) { write_log("ERROR", msg); }
+void error(const std::string &msg) {
+  TypedLogEvent ev;
+  ev.level = "ERROR";
+  ev.message = msg;
+  LogEventBus::instance().publish(ev);
+}
 
-void warn(const std::string &msg) { write_log("WARN", msg); }
+void warn(const std::string &msg) {
+  TypedLogEvent ev;
+  ev.level = "WARN";
+  ev.message = msg;
+  LogEventBus::instance().publish(ev);
+}
 
 void event(const std::string &level, const std::string &component,
            const std::string &code, const std::string &message,
            const std::vector<std::pair<std::string, std::string>> &fields) {
-  std::ostringstream ss;
-  if (!component.empty()) {
-    ss << "[" << component << "] ";
-  }
-  if (!code.empty()) {
-    ss << "code=" << code << " ";
-  }
-  ss << message;
-  for (const auto &field : fields) {
-    ss << " " << field.first << "=" << field.second;
-  }
-  std::string normalized = level;
-  if (normalized != "INFO" && normalized != "WARN" && normalized != "ERROR") {
-    normalized = "INFO";
-  }
-  write_log(normalized, ss.str());
+  TypedLogEvent ev;
+  ev.level = level;
+  ev.component = component;
+  ev.code = code;
+  ev.message = message;
+  ev.fields = fields;
+  LogEventBus::instance().publish(ev);
 }
 
 std::vector<std::string> tail(int lines) {

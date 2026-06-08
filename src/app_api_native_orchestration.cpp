@@ -96,30 +96,9 @@ orchestrate_native_auth_first(const NativeAuthFirstInputs &inputs,
     return send_helper(request, deps);
   }
 
-  if (!inputs.allow_direct_fallback) {
-    const auto service = maybe_ensure_service(deps);
-    if (!service.ok)
-      return service;
-  }
-
-  vpn_engine::protocol::NativeAuthSession session;
-  const auto authenticated = authenticate_native(inputs, deps, &session);
-  if (!authenticated.ok)
-    return authenticated;
-
-  if (inputs.allow_direct_fallback) {
-    const auto service = maybe_ensure_service(deps);
-    if (!service.ok)
-      return service;
-  }
-
-  nlohmann::json request;
-  auto built = build_helper_start_request_for_connect(
-      inputs.config, std::string(), &session, inputs.home, inputs.config_dir,
-      inputs.retry_limit, &request);
-  if (!built.ok)
-    return built;
-  return send_helper(request, deps);
+  (void)deps;
+  return invalid("native_controller_required",
+                 "Native engine connections must use TunnelController and Helper V2.");
 }
 
 vpn_engine::ValidationResult build_native_user_mode_auth_request(
