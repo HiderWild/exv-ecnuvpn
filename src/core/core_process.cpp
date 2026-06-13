@@ -1,14 +1,10 @@
 #include "core_process.hpp"
-#include "tunnel_controller.hpp"
-#include "reconnect_policy.hpp"
-#include "core_api/app_rpc_dispatcher.hpp"
-#include "core_api/core_api_setup.hpp"
 #include "logger.hpp"
 #include "log_renderer.hpp"
+#include "log_event_bus.hpp"
 #include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
-#include "config.hpp"
-#include "utils.hpp"
+#include "app_api.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -17,11 +13,18 @@
 #include <iostream>
 #include <string>
 #include <mutex>
+#include <thread>
+#include <chrono>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 using json = nlohmann::json;
-using exv::core_api::AppRpcDispatcher;
-using exv::core_api::RpcRequest;
-using exv::core_api::RpcResponse;
 
 namespace exv::core {
 
@@ -36,132 +39,100 @@ static void core_signal_handler(int) {
 }
 
 // ------------------------------------------------------------------
-// Helper: convert TunnelPhase enum to string
-// ------------------------------------------------------------------
-
-static const char* phase_to_string(TunnelPhase p) {
-    switch (p) {
-        case TunnelPhase::Idle:                return "idle";
-        case TunnelPhase::PreparingHelper:     return "preparing_helper";
-        case TunnelPhase::Authenticating:      return "authenticating";
-        case TunnelPhase::ConnectingCstp:      return "connecting_cstp";
-        case TunnelPhase::ApplyingNetworkConfig: return "applying_network_config";
-        case TunnelPhase::OpeningPacketDevice: return "opening_packet_device";
-        case TunnelPhase::Connected:           return "connected";
-        case TunnelPhase::Reconnecting:        return "reconnecting";
-        case TunnelPhase::Disconnecting:       return "disconnecting";
-        case TunnelPhase::CleaningUp:          return "cleaning_up";
-        case TunnelPhase::Failed:              return "failed";
-        default:                               return "unknown";
-    }
-}
-
-// ------------------------------------------------------------------
-// Helper: build status JSON from TunnelStatusSnapshot
-// ------------------------------------------------------------------
-
-static json snapshot_to_json(const TunnelStatusSnapshot& s) {
-    json result = {
-        {"phase",           phase_to_string(s.phase)},
-        {"desired_connected", s.desired_connected},
-        {"auto_reconnect",  s.auto_reconnect},
-        {"helper_mode",     s.helper_mode},
-        {"helper_status",   s.helper_status},
-        {"network_ready",   s.network_ready},
-        {"server",          s.server},
-        {"interface_name",  s.interface_name}
-    };
-
-    if (s.last_error.has_value()) {
-        auto& err = s.last_error.value();
-        json err_json = {
-            {"domain",             err.domain},
-            {"code",               err.code},
-            {"message",            err.message},
-            {"recoverable",        err.recoverable},
-            {"recommended_action", err.recommended_action}
-        };
-        if (err.native_code.has_value()) {
-            err_json["native_code"] = err.native_code.value();
-        }
-        if (!err.native_api.empty()) {
-            err_json["native_api"] = err.native_api;
-        }
-        result["last_error"] = std::move(err_json);
-    }
-
-    if (s.reconnect.has_value()) {
-        result["reconnect"] = {
-            {"attempt",       s.reconnect->attempt},
-            {"next_retry_ms", s.reconnect->next_retry_ms}
-        };
-    }
-
-    return result;
-}
-
-// ------------------------------------------------------------------
 // Helper: write a JSON line to stdout (thread-safe)
 // ------------------------------------------------------------------
 
 static std::mutex g_stdout_mutex;
+static std::mutex g_desktop_dispatch_mutex;
 
 static void write_json_line(const json& obj) {
     std::string line = obj.dump();
     std::lock_guard<std::mutex> lock(g_stdout_mutex);
-    std::cout << line << std::endl;
+    std::cout << line << '\n' << std::flush;
 }
 
 // ------------------------------------------------------------------
-// Register additional core-process-specific actions that go beyond
-// what create_dispatcher() provides.
+// Helper: dispatch an Electron-facing desktop action through the real
+// app_api handlers and convert the legacy result to core JSON-RPC wire.
 // ------------------------------------------------------------------
 
-static void register_core_exclusive_actions(
-    AppRpcDispatcher& dispatcher,
-    std::shared_ptr<TunnelController> controller)
-{
-    // NOTE: The following actions are already registered by
-    //   create_dispatcher() (core_api_setup.cpp) and must NOT be
-    //   re-registered here, because register_handler() silently
-    //   overwrites the previous handler:
-    //
-    //   status.get         — VpnActions::get_legacy_status (frontend-compatible shape)
-    //   logs.list          — centralized in core_api_setup.cpp
-    //   config.getAuth     — ConfigActions::get_auth (reads real config)
-    //   config.getSettings — ConfigActions::get_settings (returns settings fields)
+static json desktop_action_response(int id,
+                                    const std::string& action,
+                                    const json& payload) {
+    json result;
+    {
+        std::lock_guard<std::mutex> lock(g_desktop_dispatch_mutex);
+        result = ecnuvpn::app_api::handle_action(action, payload);
+    }
 
-    // runtime.status — returns basic runtime information
-    dispatcher.register_handler("runtime.status",
-        [](const RpcRequest&) -> RpcResponse {
-            RpcResponse resp;
-            json info;
-            info["version"] = ECNUVPN_VERSION;
-            info["bootstrapped"] = ecnuvpn::runtime::is_bootstrapped();
-            auto paths = ecnuvpn::runtime::paths();
-            info["state_dir"] = paths.state_dir;
-            info["log_path"] = paths.log_path;
-            resp.success = true;
-            resp.payload_json = info.dump();
-            return resp;
-        });
+    if (result.is_object() && result.value("ok", true) == false) {
+        std::string message = result.value("error", std::string());
+        if (message.empty()) {
+            message = result.value("message", std::string());
+        }
+        if (message.empty()) {
+            message = "Desktop action failed";
+        }
 
-    // service.status — alias for helper_status for convenience
-    dispatcher.register_handler("service.status",
-        [&dispatcher](const RpcRequest& req) -> RpcResponse {
-            RpcRequest aliased = req;
-            aliased.action = "service.helper_status";
-            return dispatcher.dispatch(aliased);
-        });
+        json response = {
+            {"id", id},
+            {"ok", false},
+            {"code", result.value("code", std::string())},
+            {"message", message}
+        };
+        return response;
+    }
 
-    // drivers.status — alias for service.driver_status
-    dispatcher.register_handler("drivers.status",
-        [&dispatcher](const RpcRequest& req) -> RpcResponse {
-            RpcRequest aliased = req;
-            aliased.action = "service.driver_status";
-            return dispatcher.dispatch(aliased);
-        });
+    json data = result;
+    if (data.is_object() && data.value("ok", false) == true) {
+        data.erase("ok");
+    }
 
+    return {
+        {"id", id},
+        {"ok", true},
+        {"data", data}
+    };
+}
+
+static json handle_desktop_request_json(const json& request) {
+    int id = request.value("id", 0);
+    std::string action = request.value("action", std::string());
+    if (action.empty()) {
+        return {
+            {"id", id},
+            {"ok", false},
+            {"code", "missing_action"},
+            {"message", "Request must contain an 'action' field"}
+        };
+    }
+
+    const json payload = request.contains("payload")
+        ? request.at("payload")
+        : json::object();
+    return desktop_action_response(id, action, payload);
+}
+
+static std::string handle_desktop_request_line(const std::string& request_line) {
+    try {
+        return handle_desktop_request_json(json::parse(request_line)).dump();
+    } catch (const json::parse_error& e) {
+        json err = {
+            {"id", 0},
+            {"ok", false},
+            {"code", "parse_error"},
+            {"message", std::string("Invalid JSON: ") + e.what()}
+        };
+        return err.dump();
+    } catch (const std::exception& e) {
+        json err = {
+            {"id", 0},
+            {"ok", false},
+            {"code", "internal_error"},
+            {"message", e.what()}
+        };
+        return err.dump();
+    }
 }
 
 // ------------------------------------------------------------------
@@ -169,8 +140,26 @@ static void register_core_exclusive_actions(
 // ------------------------------------------------------------------
 
 int core_process_main(const std::string& config_dir,
-                      const std::string& home_dir)
+                      const std::string& home_dir,
+                      bool use_stdin)
 {
+    g_stop_requested.store(false);
+
+    // 0. Ensure stdout/stdin are in text mode and unbuffered for pipe communication
+#ifdef _WIN32
+    // Use text mode (not binary) for proper line handling with Node.js pipes
+    _setmode(_fileno(stdout), _O_TEXT);
+    _setmode(_fileno(stdin), _O_TEXT);
+    // Also set stderr to text mode for debug output
+    _setmode(_fileno(stderr), _O_TEXT);
+#endif
+    // Keep the current C++ stream buffers intact; lifecycle tests replace
+    // std::cin/std::cout rdbufs to exercise core_process_main() in-process.
+    // Enable unbuffered output - critical for real-time pipe communication
+    std::cout.setf(std::ios::unitbuf);
+    // Also unbuffer stderr for immediate debug output
+    std::cerr.setf(std::ios::unitbuf);
+
     // 1. Bootstrap runtime paths
     ecnuvpn::runtime::bootstrap(config_dir, home_dir);
 
@@ -181,7 +170,7 @@ int core_process_main(const std::string& config_dir,
     // Must live for the lifetime of the core process.
     ecnuvpn::LogRenderer log_renderer;
 
-    ecnuvpn::logger::info("Core process starting (mode=core)");
+    ecnuvpn::logger::info("Core process starting (mode=core, use_stdin=" + std::string(use_stdin ? "true" : "false") + ")");
 
     // 3. Install signal handlers for graceful shutdown
     std::signal(SIGINT,  core_signal_handler);
@@ -191,34 +180,36 @@ int core_process_main(const std::string& config_dir,
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 
-    // 4. Create stub dependencies for TunnelController.
-    //
-    //    For now we use nullptr for both HelperClient and
-    //    PlatformNetworkOps.  TunnelController already handles null
-    //    gracefully (it checks helper_ && helper_->is_connected()).
-    //    A future iteration will inject real platform implementations.
-    auto helper   = std::shared_ptr<exv::helper::HelperClient>(nullptr);
-    auto net_ops  = std::shared_ptr<exv::platform::PlatformNetworkOps>(nullptr);
+    // 4. Subscribe to LogEventBus and push log events to stdout
+    auto log_subscription = ecnuvpn::LogEventBus::instance().subscribe(
+        [](const ecnuvpn::TypedLogEvent& log_event) {
+            json log_data = {
+                {"level", log_event.level},
+                {"message", log_event.message},
+                {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}
+            };
+            if (!log_event.component.empty()) {
+                log_data["component"] = log_event.component;
+            }
+            if (!log_event.code.empty()) {
+                log_data["code"] = log_event.code;
+            }
+            if (!log_event.fields.empty()) {
+                json fields = json::object();
+                for (const auto& [key, value] : log_event.fields) {
+                    fields[key] = value;
+                }
+                log_data["fields"] = fields;
+            }
+            json event = {
+                {"event", "log"},
+                {"data", log_data}
+            };
+            write_json_line(event);
+        }
+    );
 
-    auto controller = std::make_shared<TunnelController>(
-        helper, net_ops, ReconnectConfig{});
-
-    // 5. Register status callback — pushes events to stdout
-    controller->set_status_callback([](const TunnelStatusSnapshot& snap) {
-        json event = {
-            {"event", "status"},
-            {"data",  snapshot_to_json(snap)}
-        };
-        write_json_line(event);
-    });
-
-    // 6. Create the RPC dispatcher with all handlers
-    auto dispatcher = core_api::create_dispatcher(controller);
-
-    // 7. Register core-process-specific actions
-    register_core_exclusive_actions(*dispatcher, controller);
-
-    // 7b. Create pipe listener for CLI connections (also serves as single-instance guard).
+    // 5. Create pipe listener for CLI connections (also serves as single-instance guard).
     auto pipe_listener = std::make_unique<PipeIpcListener>(core_pipe_path());
     if (!pipe_listener->start()) {
         std::cerr << "fatal: another core process is already running (pipe '"
@@ -230,15 +221,43 @@ int core_process_main(const std::string& config_dir,
 
     // 8. Main event loop: read JSON-RPC requests from stdin and pipe, one per line
     std::string line;
+
+    // Daemon mode (pipe-only) when use_stdin=false
+    bool stdin_available = use_stdin;
+
+    std::atomic<bool> pipe_worker_stop{false};
+    std::thread pipe_worker;
+
+    if (!stdin_available) {
+        ecnuvpn::logger::info("Core process: running in daemon mode (pipe-only)");
+    } else {
+        pipe_worker = std::thread([&] {
+            while (!pipe_worker_stop.load() && !g_stop_requested.load()) {
+                pipe_listener->accept_one(handle_desktop_request_line);
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
+    }
+
     while (!g_stop_requested.load()) {
+        // In daemon mode, just process pipe connections in a loop
+        if (!stdin_available) {
+            pipe_listener->accept_one(handle_desktop_request_line);
+            // Sleep briefly to avoid busy-waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
         if (!std::getline(std::cin, line)) {
-            // stdin closed (EOF) — clean exit
             ecnuvpn::logger::info("Core process: stdin EOF, shutting down");
             break;
         }
 
+
         // Skip empty lines
         if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos) {
+            // Process pipe connections even on empty lines
+            pipe_listener->accept_one(handle_desktop_request_line);
             continue;
         }
 
@@ -246,56 +265,7 @@ int core_process_main(const std::string& config_dir,
 
         try {
             json request = json::parse(line);
-
-            // Extract fields
-            int id = 0;
-            if (request.contains("id")) {
-                id = request["id"].get<int>();
-            }
-
-            std::string action;
-            if (request.contains("action")) {
-                action = request["action"].get<std::string>();
-            } else {
-                response = {
-                    {"id",      id},
-                    {"ok",      false},
-                    {"code",    "missing_action"},
-                    {"message", "Request must contain an 'action' field"}
-                };
-                write_json_line(response);
-                continue;
-            }
-
-            std::string payload_json = "{}";
-            if (request.contains("payload")) {
-                payload_json = request["payload"].dump();
-            }
-
-            // Dispatch
-            core_api::RpcRequest rpc_req;
-            rpc_req.action = action;
-            rpc_req.payload_json = payload_json;
-            rpc_req.request_id = std::to_string(id);
-
-            core_api::RpcResponse rpc_resp = dispatcher->dispatch(rpc_req);
-
-            // Build wire response
-            if (rpc_resp.success) {
-                json data = json::parse(rpc_resp.payload_json);
-                response = {
-                    {"id",   id},
-                    {"ok",   true},
-                    {"data", data}
-                };
-            } else {
-                response = {
-                    {"id",      id},
-                    {"ok",      false},
-                    {"code",    rpc_resp.error_code},
-                    {"message", rpc_resp.error_message}
-                };
-            }
+            response = handle_desktop_request_json(request);
         } catch (const json::parse_error& e) {
             response = {
                 {"id",      0},
@@ -314,38 +284,19 @@ int core_process_main(const std::string& config_dir,
 
         write_json_line(response);
 
-        // Process CLI pipe connections (non-blocking)
-        pipe_listener->accept_one([&dispatcher](const std::string& request_line) -> std::string {
-            try {
-                json req = json::parse(request_line);
-                int id = req.value("id", 0);
-                std::string action = req.value("action", "");
-                if (action.empty()) {
-                    json err = {{"id", id}, {"ok", false}, {"code", "missing_action"}, {"message", "Request must contain an 'action' field"}};
-                    return err.dump();
-                }
-                std::string payload_json = req.contains("payload") ? req["payload"].dump() : "{}";
-                core_api::RpcRequest rpc_req;
-                rpc_req.action = action;
-                rpc_req.payload_json = payload_json;
-                rpc_req.request_id = std::to_string(id);
-                core_api::RpcResponse rpc_resp = dispatcher->dispatch(rpc_req);
-                if (rpc_resp.success) {
-                    json data = json::parse(rpc_resp.payload_json);
-                    json resp = {{"id", id}, {"ok", true}, {"data", data}};
-                    return resp.dump();
-                } else {
-                    json resp = {{"id", id}, {"ok", false}, {"code", rpc_resp.error_code}, {"message", rpc_resp.error_message}};
-                    return resp.dump();
-                }
-            } catch (const std::exception& e) {
-                json err = {{"id", 0}, {"ok", false}, {"code", "parse_error"}, {"message", std::string("Invalid JSON: ") + e.what()}};
-                return err.dump();
-            }
-        });
+        // Note: In stdin mode, we don't process pipe connections here.
+        // Pipe processing is only needed in daemon mode (handled above in the !stdin_available block).
+        // Calling accept_one() here would block the stdin read loop.
     }
 
+    pipe_worker_stop.store(true);
+    if (pipe_worker.joinable()) {
+        pipe_worker.join();
+    }
+    pipe_listener->stop();
+
     ecnuvpn::logger::info("Core process shutting down");
+    ecnuvpn::LogEventBus::instance().unsubscribe(log_subscription);
     return 0;
 }
 

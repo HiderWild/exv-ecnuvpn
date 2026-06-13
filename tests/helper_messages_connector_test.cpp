@@ -6,9 +6,28 @@
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace exv::helper;
 using json = nlohmann::json;
+
+namespace ecnuvpn {
+namespace logger {
+
+void init() {}
+void write(const std::string &, const std::string &) {}
+void info(const std::string &) {}
+void error(const std::string &) {}
+void warn(const std::string &) {}
+void event(const std::string &, const std::string &, const std::string &,
+           const std::string &,
+           const std::vector<std::pair<std::string, std::string>> &) {}
+void show_logs(int) {}
+std::vector<std::string> tail(int) { return {}; }
+
+} // namespace logger
+} // namespace ecnuvpn
 
 // ---- Serialization round-trip tests ----
 

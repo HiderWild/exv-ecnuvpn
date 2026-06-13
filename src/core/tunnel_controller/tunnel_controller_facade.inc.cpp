@@ -1,0 +1,139 @@
+// =========================================================================
+// TunnelController — pimpl delegation
+// =========================================================================
+
+TunnelController::TunnelController(
+    std::shared_ptr<exv::helper::HelperClient> helper,
+    std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
+    ReconnectConfig reconnect_config)
+    : impl_(std::make_unique<Impl>())
+{
+    impl_->helper_          = std::move(helper);
+    impl_->net_ops_         = std::move(net_ops);
+    impl_->reconnect_policy_ = ReconnectPolicy(reconnect_config);
+
+    // Wire the CoreSessionRunner event callback to feed back into
+    // TunnelController::on_event(), driving the state machine.
+    impl_->runner_.set_event_callback([this](TunnelEvent event) {
+        this->on_event(std::move(event));
+    });
+}
+
+TunnelController::~TunnelController() = default;
+
+void TunnelController::set_vpn_config(const ecnuvpn::Config& cfg,
+                                      const std::string& plaintext_password) {
+    impl_->vpn_cfg_      = cfg;
+    impl_->vpn_password_ = plaintext_password;
+}
+
+// ------------------------------------------------------------------
+// User intent interface
+// ------------------------------------------------------------------
+
+void TunnelController::connect(UserIntent intent) {
+    if (!impl_->can_start_connect()) {
+        return;   // reject — already connecting / connected / disconnecting
+    }
+    impl_->intent_ = std::move(intent);
+    impl_->do_connect();
+}
+
+void TunnelController::disconnect(DisconnectReason reason) {
+    if (!impl_->can_disconnect()) {
+        return;   // nothing to disconnect from
+    }
+    impl_->do_disconnect(reason);
+}
+
+void TunnelController::set_auto_reconnect(bool enabled) {
+    impl_->intent_.auto_reconnect = enabled;
+    impl_->update_snapshot();
+    impl_->notify_status();
+}
+
+// ------------------------------------------------------------------
+// Status
+// ------------------------------------------------------------------
+
+TunnelStatusSnapshot TunnelController::status() const {
+    return impl_->snapshot_;
+}
+
+TunnelPhase TunnelController::phase() const {
+    return impl_->phase_;
+}
+
+// ------------------------------------------------------------------
+// Event processing
+// ------------------------------------------------------------------
+
+void TunnelController::on_event(TunnelEvent event) {
+    switch (event.type) {
+
+    // --- Connect-flow events ---
+    case TunnelEventType::HelperReady:
+        impl_->on_helper_ready();
+        break;
+    case TunnelEventType::AuthSucceeded:
+        impl_->on_auth_succeeded();
+        break;
+    case TunnelEventType::AuthFailed:
+        impl_->on_auth_failed();
+        break;
+    case TunnelEventType::CstpConnected:
+        impl_->on_cstp_connected();
+        break;
+    case TunnelEventType::NetworkConfigApplied:
+        impl_->on_network_config_applied();
+        break;
+    case TunnelEventType::PacketLoopStarted:
+        impl_->on_packet_loop_started();
+        break;
+
+    // --- Failure / disconnect events ---
+    case TunnelEventType::TransportClosed:
+        impl_->on_transport_closed();
+        break;
+    case TunnelEventType::PacketDeviceFailed:
+        impl_->on_packet_device_failed();
+        break;
+    case TunnelEventType::LeaseExpired:
+        impl_->on_lease_expired();
+        break;
+
+    // --- Reconnect ---
+    case TunnelEventType::ReconnectTimerFired:
+        impl_->on_reconnect_timer_fired();
+        break;
+
+    // --- Helper lifecycle ---
+    case TunnelEventType::HelperLost:
+        impl_->on_helper_lost();
+        break;
+
+    // --- Cleanup ---
+    case TunnelEventType::CleanupSucceeded:
+        impl_->on_cleanup_succeeded();
+        break;
+    case TunnelEventType::CleanupFailed:
+        impl_->on_cleanup_failed();
+        break;
+
+    // --- User intent events (handled by connect/disconnect/set_auto_reconnect) ---
+    case TunnelEventType::UserConnect:
+    case TunnelEventType::UserDisconnect:
+    case TunnelEventType::SetAutoReconnect:
+        // These are dispatched through the dedicated methods, not on_event.
+        break;
+    }
+}
+
+// ------------------------------------------------------------------
+// Callback
+// ------------------------------------------------------------------
+
+void TunnelController::set_status_callback(StatusCallback cb) {
+    impl_->status_callback_ = std::move(cb);
+}
+

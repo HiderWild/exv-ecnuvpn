@@ -12,12 +12,15 @@
 
 #include "core/tunnel_controller.hpp"
 #include "core/tunnel_intent.hpp"
+#include "config.hpp"
 #include "core/tunnel_state.hpp"
 #include "core/tunnel_events.hpp"
 #include "core/reconnect_policy.hpp"
+#include "log_event_bus.hpp"
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 #include "support/fake_core_ui_client.hpp"
+#include "platform/common/helper_delegating_network_ops.hpp"
 
 #include <iostream>
 #include <string>
@@ -91,6 +94,31 @@ bool phases_in_order(const std::vector<exv::core::TunnelStatusSnapshot>& snapsho
         }
     }
     return idx == expected_phases.size();
+}
+
+// Check whether a captured structured log has the expected component/code.
+bool has_log_event(const std::vector<ecnuvpn::TypedLogEvent>& logs,
+                   const std::string& component,
+                   const std::string& code) {
+    for (const auto& event : logs) {
+        if (event.component == component && event.code == code) return true;
+    }
+    return false;
+}
+
+// Check whether any captured structured log contains sensitive text.
+bool logs_contain_text(const std::vector<ecnuvpn::TypedLogEvent>& logs,
+                       const std::string& needle) {
+    for (const auto& event : logs) {
+        if (event.message.find(needle) != std::string::npos) return true;
+        if (event.component.find(needle) != std::string::npos) return true;
+        if (event.code.find(needle) != std::string::npos) return true;
+        for (const auto& field : event.fields) {
+            if (field.first.find(needle) != std::string::npos ||
+                field.second.find(needle) != std::string::npos) return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -552,6 +580,95 @@ bool test_multiple_reconnect_attempts() {
     return ok;
 }
 
+// --- Test 9: Connect Milestone Logs ---
+bool test_connect_milestone_logs() {
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    std::vector<ecnuvpn::TypedLogEvent> logs;
+    auto subscription = ecnuvpn::LogEventBus::instance().subscribe(
+        [&](const ecnuvpn::TypedLogEvent& event) { logs.push_back(event); });
+
+    ctrl.connect(make_intent(true, true, "test-profile"));
+
+    ecnuvpn::LogEventBus::instance().unsubscribe(subscription);
+
+    bool ok = true;
+    ok = expect(has_log_event(logs, "tunnel", "connect.start"),
+                "9: connect entry should log") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "vpn.config.missing"),
+                "9: missing VPN config/password should log") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "helper.session.started"),
+                "9: helper session start should log") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "network.config.applying"),
+                "9: applying network config should log") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "packet.loop.started"),
+                "9: packet loop started should log") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "connect.connected"),
+                "9: connected milestone should log") && ok;
+    ok = expect(!logs_contain_text(logs, "password"),
+                "9: logs should not include password field names") && ok;
+    return ok;
+}
+
+// --- Test 10: Native Runner Failure Log ---
+bool test_native_runner_failure_log() {
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    ecnuvpn::Config cfg;
+    cfg.server.clear();
+    cfg.username.clear();
+    ctrl.set_vpn_config(cfg, "super-secret-password");
+
+    std::vector<ecnuvpn::TypedLogEvent> logs;
+    auto subscription = ecnuvpn::LogEventBus::instance().subscribe(
+        [&](const ecnuvpn::TypedLogEvent& event) { logs.push_back(event); });
+
+    ctrl.connect(make_intent(true, true, "native-failure-profile"));
+
+    ecnuvpn::LogEventBus::instance().unsubscribe(subscription);
+
+    bool ok = true;
+    ok = expect(ctrl.phase() == exv::core::TunnelPhase::Failed,
+                "10: invalid native config should fail") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "native.runner.failed"),
+                "10: native runner start failure should log") && ok;
+    ok = expect(!logs_contain_text(logs, "super-secret-password"),
+                "10: logs should not include plaintext password") && ok;
+    return ok;
+}
+
+// --- Test 11: HelperDelegatingPlatformNetworkOps receives controller session ---
+bool test_delegated_network_ops_receives_helper_session() {
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(helper.get());
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    bool ok = true;
+    ok = expect(net_ops->session_id().value.empty(),
+                "11: delegated net ops session should start empty") && ok;
+
+    ctrl.connect(make_intent(true, true, "delegated-session-profile"));
+    ok = expect(ctrl.phase() == exv::core::TunnelPhase::Connected,
+                "11: delegated net ops should reach Connected") && ok;
+
+    auto sessions = helper->active_sessions();
+    ok = expect(sessions.size() == 1,
+                "11: helper should have exactly one active session") && ok;
+    if (!sessions.empty()) {
+        ok = expect(net_ops->session_id().value == sessions.front().value,
+                    "11: delegated net ops should use helper start_session id") && ok;
+    }
+
+    ctrl.disconnect();
+    ok = expect(net_ops->session_id().value.empty(),
+                "11: delegated net ops session should clear after cleanup") && ok;
+    return ok;
+}
+
 // ===========================================================================
 // main
 // ===========================================================================
@@ -581,6 +698,15 @@ int main() {
 
     std::cout << "--- Test 8: Multiple Reconnect Attempts ---\n";
     ok = test_multiple_reconnect_attempts() && ok;
+
+    std::cout << "--- Test 9: Connect Milestone Logs ---\n";
+    ok = test_connect_milestone_logs() && ok;
+
+    std::cout << "--- Test 10: Native Runner Failure Log ---\n";
+    ok = test_native_runner_failure_log() && ok;
+
+    std::cout << "--- Test 11: Delegated Network Ops Session Propagation ---\n";
+    ok = test_delegated_network_ops_receives_helper_session() && ok;
 
     if (ok) {
         std::cout << "tunnel_controller_integration_test: all tests passed\n";

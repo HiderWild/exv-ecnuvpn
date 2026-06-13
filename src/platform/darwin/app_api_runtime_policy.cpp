@@ -40,9 +40,9 @@ nlohmann::json preflight_connect_platform_checks(const Config & /*cfg*/) {
 nlohmann::json try_connect_direct_fallback(const Config &cfg,
                                             const std::string &password) {
   prepare_direct_fallback_runtime();
-  int result = vpn::start_with_password(cfg, password, 0);
+  int result = vpn::start(cfg, password, 0);
   if (result != 0) {
-    if (result == vpn::kUseTunnelController) {
+    if (result == vpn::kVpnInitialConnectFailedExitCode) {
       return nlohmann::json{{"ok", false},
                             {"code", "use_tunnel_controller"},
                             {"error", "Native engine requires TunnelController. Use the desktop app to connect."}};
@@ -60,7 +60,6 @@ nlohmann::json try_connect_direct_fallback(const Config &cfg,
                         {"_snapshot_data",
                          nlohmann::json{{"running", snapshot.running},
                                         {"pid", snapshot.pid},
-                                        {"supervisor_pid", snapshot.supervisor_pid},
                                         {"network_ready", snapshot.network_ready},
                                         {"interface", snapshot.interface_name},
                                         {"internal_ip", snapshot.internal_ip}}}};
@@ -88,7 +87,6 @@ nlohmann::json status_fallback_without_helper(const Config & /*cfg*/) {
   result["_snapshot_data"] = nlohmann::json{
       {"running", snapshot.running},
       {"pid", snapshot.pid},
-      {"supervisor_pid", snapshot.supervisor_pid},
       {"network_ready", snapshot.network_ready},
       {"interface", snapshot.interface_name},
       {"internal_ip", snapshot.internal_ip},

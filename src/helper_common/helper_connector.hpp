@@ -13,7 +13,8 @@ enum class ConnectorMode {
 
 struct HelperConnectorConfig {
     ConnectorMode mode = ConnectorMode::Transient;
-    std::string helper_executable_path;
+    std::string helper_executable_path;   // Path to exv-helper binary (for oneshot launch)
+    std::string pipe_endpoint;            // Explicit pipe/socket endpoint (overrides resolution)
     int connect_timeout_ms = 5000;
     int heartbeat_interval_ms = 10000;
 };

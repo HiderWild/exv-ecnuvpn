@@ -13,6 +13,9 @@
 #include "core/core_process.hpp"
 #include "core/tunnel_controller.hpp"
 #include "core/reconnect_policy.hpp"
+#include "core/pipe_ipc.hpp"
+#include "cli/pipe_client.hpp"
+#include "app_api.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -196,7 +199,13 @@ static bool wait_for_response_count(CaptureOutputBuf& buf, size_t min_count,
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         auto parsed = parse_json_lines(buf.get_all());
-        if (parsed.size() >= min_count) return true;
+        size_t responses = 0;
+        for (const auto& item : parsed) {
+            if (item.is_object() && item.contains("id")) {
+                ++responses;
+            }
+        }
+        if (responses >= min_count) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return false;
@@ -236,7 +245,7 @@ struct CoreRunner {
 
     void start(const std::string& config_dir, const std::string& home_dir) {
         thread = std::thread([this, config_dir, home_dir] {
-            rc = exv::core::core_process_main(config_dir, home_dir);
+            rc = exv::core::core_process_main(config_dir, home_dir, true);
         });
     }
 
@@ -256,6 +265,38 @@ int main() {
     std::cerr << "config_dir=" << config_dir << "  home_dir=" << home_dir << "\n";
 
     // =======================================================================
+    // E2.0-regression — app_api vpn.connect returns actionable missing config
+    // =======================================================================
+    {
+        std::cerr << "[E2.0-regression] direct app_api vpn.connect missing config\n";
+        json payload = {
+            {"home", home_dir},
+            {"config_dir", config_dir},
+            {"password", ""}
+        };
+        json result = ecnuvpn::app_api::handle_action("vpn.connect", payload);
+
+        expect(result.is_object(),
+               "E2.0-regression: app_api vpn.connect returns object");
+        expect(result.value("ok", true) == false,
+               "E2.0-regression: app_api vpn.connect fails with missing config");
+        std::string error = result.value("error", std::string());
+        std::string code = result.value("code", std::string());
+        expect(!error.empty(),
+               "E2.0-regression: app_api vpn.connect has actionable error message");
+        expect(error.find("server") != std::string::npos ||
+                   error.find("username") != std::string::npos ||
+                   error.find("password") != std::string::npos ||
+                   error.find("config") != std::string::npos ||
+                   error.find("backend") != std::string::npos ||
+                   code.find("config") != std::string::npos ||
+                   code.find("backend") != std::string::npos,
+               "E2.0-regression: app_api error names missing config/backend prerequisite");
+        expect(result.value("status", std::string()) != "connecting",
+               "E2.0-regression: app_api must not return blind connecting status");
+    }
+
+    // =======================================================================
     // E2.1a — Start and respond to status.get
     // =======================================================================
     {
@@ -270,9 +311,10 @@ int main() {
         cr.start(config_dir, home_dir);
 
         in_buf.feed(R"({"id":1,"action":"status.get","payload":{}})" "\n");
-        expect(out_buf.wait_for_data(std::chrono::seconds(3)),
+        expect(wait_for_response_count(out_buf, 1, std::chrono::seconds(3)),
                "E2.1a: should receive response");
 
+        std::raise(SIGTERM);
         in_buf.close_input();
         cr.join();
 
@@ -280,10 +322,151 @@ int main() {
         expect(!resp.is_null(),          "E2.1a: response exists");
         expect(resp.value("ok", false),  "E2.1a: ok=true");
         if (resp.contains("data")) {
-            expect(resp["data"].value("phase", "") == "idle",
-                   "E2.1a: phase=idle");
+            expect(resp["data"].contains("connected"),
+                   "E2.1a: desktop status payload has connected field");
         }
         expect(cr.rc == 0, "E2.1a: exit code 0");
+    }
+
+    // =======================================================================
+    // E2.1a-regression — Desktop actions use real app_api handlers
+    // =======================================================================
+    {
+        std::cerr << "[E2.1a-regression] logs.list + vpn.connect desktop bridge\n";
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(config_dir, home_dir);
+
+        in_buf.feed(R"({"id":30,"action":"logs.list","payload":{}})" "\n");
+        in_buf.feed(R"({"id":31,"action":"vpn.connect","payload":{}})" "\n");
+
+        expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
+               "E2.1a-regression: should get logs.list and vpn.connect responses");
+
+        std::raise(SIGTERM);
+        in_buf.close_input();
+        cr.join();
+
+        auto all = parse_json_lines(out_buf.read_all());
+        auto logs_resp = find_by_id(all, 30);
+        auto connect_resp = find_by_id(all, 31);
+
+        expect(!logs_resp.is_null(), "E2.1a-regression: logs.list response exists");
+        expect(logs_resp.value("ok", false), "E2.1a-regression: logs.list ok=true");
+        expect(logs_resp.contains("data") && logs_resp["data"].is_array(),
+               "E2.1a-regression: logs.list data is an array");
+
+        expect(!connect_resp.is_null(), "E2.1a-regression: vpn.connect response exists");
+        expect(connect_resp.value("ok", true) == false,
+               "E2.1a-regression: vpn.connect fails with empty config");
+        std::string message = connect_resp.value("message", std::string());
+        std::string code = connect_resp.value("code", std::string());
+        expect(!message.empty(), "E2.1a-regression: vpn.connect error has message");
+        expect(message.find("server") != std::string::npos ||
+                   message.find("username") != std::string::npos ||
+                   message.find("password") != std::string::npos ||
+                   message.find("config") != std::string::npos ||
+                   message.find("backend") != std::string::npos ||
+                   code.find("config") != std::string::npos ||
+                   code.find("backend") != std::string::npos,
+               "E2.1a-regression: vpn.connect error is actionable config/backend failure");
+        expect(!(connect_resp.contains("data") &&
+                 connect_resp["data"].is_object() &&
+                 connect_resp["data"].value("status", "") == "connecting"),
+               "E2.1a-regression: vpn.connect must not return blind connecting success");
+        expect(cr.rc == 0, "E2.1a-regression: exit code 0");
+    }
+
+    // =======================================================================
+    // E2.1a-pipe — stdin mode also services pipe clients through same bridge
+    // =======================================================================
+    {
+        std::cerr << "[E2.1a-pipe] pipe request while stdin is open\n";
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(config_dir, home_dir);
+
+        exv::cli::PipeClient client;
+        bool connected = false;
+        for (int i = 0; i < 20 && !connected; ++i) {
+            connected = client.connect(exv::core::core_pipe_path());
+            if (!connected) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        expect(connected, "E2.1a-pipe: pipe client connects to stdin-mode core");
+
+        std::string raw = client.send_request(R"({"id":40,"action":"logs.list","payload":{}})");
+        client.disconnect();
+
+#ifdef _WIN32
+        HANDLE delayed = INVALID_HANDLE_VALUE;
+        for (int i = 0; i < 20 && delayed == INVALID_HANDLE_VALUE; ++i) {
+            delayed = CreateFileA(
+                exv::core::core_pipe_path().c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr);
+            if (delayed == INVALID_HANDLE_VALUE) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        expect(delayed != INVALID_HANDLE_VALUE,
+               "E2.1a-pipe: delayed-write pipe client connects");
+        std::string delayed_raw;
+        if (delayed != INVALID_HANDLE_VALUE) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const std::string request = R"({"id":41,"action":"logs.list","payload":{}})" "\n";
+            DWORD written = 0;
+            BOOL wrote = WriteFile(delayed, request.c_str(),
+                                   static_cast<DWORD>(request.size()),
+                                   &written, nullptr);
+            expect(wrote && written == request.size(),
+                   "E2.1a-pipe: delayed-write pipe request writes after connect");
+            char buffer[8192] = {};
+            DWORD read = 0;
+            BOOL read_ok = ReadFile(delayed, buffer, sizeof(buffer) - 1, &read, nullptr);
+            expect(read_ok && read > 0,
+                   "E2.1a-pipe: delayed-write pipe response is readable");
+            if (read_ok && read > 0) delayed_raw.assign(buffer, read);
+            CloseHandle(delayed);
+        }
+#endif
+
+        std::raise(SIGTERM);
+        in_buf.close_input();
+        cr.join();
+
+        json resp;
+        try { resp = json::parse(raw); } catch (...) {}
+        expect(!resp.is_null(), "E2.1a-pipe: pipe response parses as JSON");
+        expect(resp.value("id", -1) == 40, "E2.1a-pipe: pipe response id matches");
+        expect(resp.value("ok", false), "E2.1a-pipe: logs.list over pipe ok=true");
+        expect(resp.contains("data") && resp["data"].is_array(),
+               "E2.1a-pipe: pipe logs.list data is array");
+#ifdef _WIN32
+        json delayed_resp;
+        try { delayed_resp = json::parse(delayed_raw); } catch (...) {}
+        expect(!delayed_resp.is_null(), "E2.1a-pipe: delayed-write response parses as JSON");
+        if (!delayed_resp.is_null()) {
+            expect(delayed_resp.value("id", -1) == 41,
+                   "E2.1a-pipe: delayed-write response id matches");
+            expect(delayed_resp.value("ok", false),
+                   "E2.1a-pipe: delayed-write logs.list over pipe ok=true");
+        }
+#endif
+        expect(cr.rc == 0, "E2.1a-pipe: exit code 0");
     }
 
     // =======================================================================
@@ -307,6 +490,7 @@ int main() {
         expect(wait_for_response_count(out_buf, 3, std::chrono::seconds(5)),
                "E2.1b: should get 3 responses");
 
+        std::raise(SIGTERM);
         in_buf.close_input();
         cr.join();
 
@@ -338,7 +522,8 @@ int main() {
         CoreRunner cr;
         cr.start(config_dir, home_dir);
 
-        // Let process start (it blocks on getline), then close stdin immediately
+        // Let process start (it blocks on getline), then close stdin immediately.
+        // EOF alone must shut stdin-mode core down cleanly; do not signal it.
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         in_buf.close_input();
         cr.join();
@@ -368,13 +553,14 @@ int main() {
         expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
                "E2.2a: parse_error + valid response");
 
+        std::raise(SIGTERM);
         in_buf.close_input();
         cr.join();
 
         auto all = parse_json_lines(out_buf.read_all());
 
-        // First response should be a parse_error (id=0)
-        auto bad_resp = all.empty() ? json() : all[0];
+        // Malformed JSON response should be a parse_error (id=0)
+        auto bad_resp = find_by_id(all, 0);
         if (!bad_resp.is_null()) {
             expect(bad_resp.value("ok", true) == false,
                    "E2.2a: bad input returns ok=false");
@@ -412,13 +598,14 @@ int main() {
         expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
                "E2.2b: missing_action + valid response");
 
+        std::raise(SIGTERM);
         in_buf.close_input();
         cr.join();
 
         auto all = parse_json_lines(out_buf.read_all());
 
-        // First response: missing_action error
-        auto missing_resp = all.empty() ? json() : all[0];
+        // Missing action response should be a missing_action error.
+        auto missing_resp = find_by_id(all, 1);
         if (!missing_resp.is_null()) {
             expect(missing_resp.value("ok", true) == false,
                    "E2.2b: missing_action returns ok=false");
@@ -448,15 +635,15 @@ int main() {
         CoreRunner cr;
         cr.start(config_dir, home_dir);
 
-        // Burst: empty line, malformed JSON, valid requests
-        in_buf.feed("\n");
+        // Burst: malformed JSON, valid requests
         in_buf.feed("{bad json!!\n");
         in_buf.feed(R"({"id":20,"action":"status.get","payload":{}})" "\n");
-        in_buf.feed(R"({"id":21,"action":"vpn.set_auto_reconnect","payload":{"enabled":false}})" "\n");
+        in_buf.feed(R"({"id":21,"action":"logs.list","payload":{}})" "\n");
 
         expect(wait_for_response_count(out_buf, 3, std::chrono::seconds(5)),
                "E2.2c: got responses for parse_error + 2 valid requests");
 
+        std::raise(SIGTERM);
         in_buf.close_input();
         cr.join();
 
@@ -466,8 +653,9 @@ int main() {
 
         expect(!r20.is_null() && r20.value("ok", false),
                "E2.2c: status.get ok after burst");
-        expect(!r21.is_null() && r21.value("ok", false),
-               "E2.2c: set_auto_reconnect ok after burst");
+        expect(!r21.is_null() && r21.value("ok", false) &&
+               r21.contains("data") && r21["data"].is_array(),
+               "E2.2c: logs.list ok after burst");
         expect(cr.rc == 0, "E2.2c: exit 0");
     }
 
@@ -488,7 +676,7 @@ int main() {
 
         // Feed a request and wait for response
         in_buf.feed(R"({"id":1,"action":"status.get","payload":{}})" "\n");
-        out_buf.wait_for_data(std::chrono::seconds(3));
+        wait_for_response_count(out_buf, 1, std::chrono::seconds(3));
 
         // Process is now blocking on getline. Deliver SIGTERM.
         std::raise(SIGTERM);

@@ -44,15 +44,12 @@ void print_header(const std::string &msg);
 
 // Path utilities
 std::string expand_home(const std::string &path);
-std::string get_redirect_path(); // ~/.ecnuvpn_home (redirect file)
+std::string get_redirect_path();
 std::string get_config_dir();
-bool set_config_dir(const std::string &dir); // write redirect + create dir
+bool set_config_dir(const std::string &dir);
 std::string get_config_path();
-std::string get_pid_path();
 std::string get_log_path();
 std::string get_tunnel_path();
-std::string get_supervisor_pid_path();
-std::string get_route_ready_path();
 std::string get_effective_home();
 std::string get_home_for_uid(uid_t uid);
 std::string get_username_for_uid(uid_t uid);
@@ -94,7 +91,6 @@ std::vector<std::string> split_lines(const std::string &text);
 // String utilities
 std::string trim(const std::string &s);
 
-// Windows console: enable ANSI escape code processing and UTF-8 codepage
 #ifdef _WIN32
 std::wstring wide_from_utf8(const std::string &value);
 std::string utf8_from_wide(const std::wstring &value);

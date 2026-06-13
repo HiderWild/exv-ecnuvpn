@@ -1,5 +1,7 @@
 #include "core/engine_event_bridge.hpp"
+#include "log_event_bus.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -167,6 +169,72 @@ int main() {
         ev.type = "auth.succeeded";
         bridge.emit(ev);  // Should not crash
         ok = expect(true, "null callback does not crash") && ok;
+    }
+
+    // ---------------------------------------------------------------
+    // 7. emit(): lifecycle events publish user-facing engine logs,
+    //    while packet/DPD noise is filtered out.
+    // ---------------------------------------------------------------
+
+    {
+        std::vector<ecnuvpn::TypedLogEvent> logs;
+        auto subscription = ecnuvpn::LogEventBus::instance().subscribe(
+            [&](const ecnuvpn::TypedLogEvent& event) { logs.push_back(event); });
+
+        exv::core::EngineEventBridge bridge(nullptr);
+        const char* log_worthy_types[] = {
+            "native.starting",
+            "auth.started",
+            "auth.succeeded",
+            "auth.failed",
+            "cstp.connected",
+            "cstp.failed",
+            "packet.loop.started",
+            "packet_device.failed",
+            "transport.closed",
+            "packet.loop.stopped",
+            "reconnect.scheduled",
+            "reconnect.started"
+        };
+        for (const char* t : log_worthy_types) {
+            ecnuvpn::vpn_engine::VpnEngineEvent ev;
+            ev.type = t;
+            ev.message = std::string("message for ") + t;
+            ev.fields.emplace("phase", "test_phase");
+            bridge.emit(ev);
+        }
+
+        const char* noisy_types[] = {
+            "packet.inbound",
+            "packet.outbound",
+            "dpd.sent",
+            "dpd.received",
+            "dpd.timeout"
+        };
+        for (const char* t : noisy_types) {
+            ecnuvpn::vpn_engine::VpnEngineEvent ev;
+            ev.type = t;
+            bridge.emit(ev);
+        }
+
+        ecnuvpn::LogEventBus::instance().unsubscribe(subscription);
+
+        ok = expect(logs.size() == 12,
+                    "lifecycle events should log and noisy events should not") && ok;
+        for (const char* t : log_worthy_types) {
+            const bool found = std::any_of(logs.begin(), logs.end(),
+                [&](const ecnuvpn::TypedLogEvent& event) {
+                    return event.component == "engine" && event.code == t;
+                });
+            ok = expect(found, (std::string("engine log emitted for ") + t).c_str()) && ok;
+        }
+        const bool noisy_logged = std::any_of(logs.begin(), logs.end(),
+            [](const ecnuvpn::TypedLogEvent& event) {
+                return event.code == "packet.inbound" ||
+                       event.code == "packet.outbound" ||
+                       event.code.rfind("dpd.", 0) == 0;
+            });
+        ok = expect(!noisy_logged, "packet and DPD events should not log") && ok;
     }
 
     return ok ? 0 : 1;

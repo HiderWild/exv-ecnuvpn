@@ -155,14 +155,8 @@ int main() {
   g_runtime_snapshot.internal_ip = "10.0.0.2";
   nlohmann::json direct = ecnuvpn::platform::try_connect_direct_fallback(
       ecnuvpn::Config{}, "secret");
-  ok = expect(direct.value("ok", false),
-              "Windows direct fallback should return success when vpn start succeeds") &&
-       ok;
-  ok = expect(direct.value("_direct_fallback", false),
-              "Windows direct fallback should mark direct fallback responses") &&
-       ok;
-  ok = expect(direct["_snapshot_data"].value("pid", -1) == 101,
-              "Windows direct fallback should expose runtime snapshot pid") &&
+  ok = expect(direct.empty(),
+              "Windows direct connect fallback should remain disabled") &&
        ok;
 #else
   ok = expect(g_checked_root,

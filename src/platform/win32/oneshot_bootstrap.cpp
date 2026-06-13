@@ -1,6 +1,7 @@
 #include "platform/common/oneshot_bootstrap.hpp"
 
 #include "platform/common/backend_resolver.hpp"
+#include "logger.hpp"
 #include "utils.hpp"
 
 #include <chrono>
@@ -112,6 +113,9 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   std::string args = "--oneshot --pipe \"" + backend.endpoint +
                      "\" --auth-token \"" + backend.auth_token + "\"";
 
+  logger::info("Oneshot: Generated endpoint=" + backend.endpoint + " session_id=" + session_id);
+  logger::info("Oneshot: Starting helper - is_admin=" + std::string(utils::check_root() ? "true" : "false"));
+
   if (utils::check_root()) {
     if (!start_helper_direct(request.helper_path, args, &backend.pid)) {
       backend.code = kServiceStartFailedCode;
@@ -150,6 +154,7 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
     return backend;
   }
 
+  logger::info("Oneshot: Helper started successfully - endpoint=" + backend.endpoint + " pid=" + std::to_string(backend.pid));
   backend.ok = true;
   return backend;
 }

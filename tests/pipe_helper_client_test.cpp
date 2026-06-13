@@ -13,10 +13,13 @@
 #include <nlohmann/json.hpp>
 
 #include <cassert>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
-#include <chrono>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -31,6 +34,30 @@
 
 using namespace exv::helper;
 using json = nlohmann::json;
+
+static void expect_true(bool condition, const char* message) {
+    if (!condition) {
+        std::cerr << "EXPECT FAILED: " << message << std::endl;
+        std::exit(1);
+    }
+}
+
+namespace ecnuvpn {
+namespace logger {
+
+void init() {}
+void write(const std::string &, const std::string &) {}
+void info(const std::string &) {}
+void error(const std::string &) {}
+void warn(const std::string &) {}
+void event(const std::string &, const std::string &, const std::string &,
+           const std::string &,
+           const std::vector<std::pair<std::string, std::string>> &) {}
+void show_logs(int) {}
+std::vector<std::string> tail(int) { return {}; }
+
+} // namespace logger
+} // namespace ecnuvpn
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -502,6 +529,40 @@ static void test_disconnect_callback() {
     std::cout << " PASS\n";
 }
 
+static void test_rejects_regular_file_path_on_windows() {
+#ifdef _WIN32
+    std::cout << "  test_rejects_regular_file_path_on_windows...";
+
+    const auto temp_dir = std::filesystem::temp_directory_path();
+    const auto regular_file = temp_dir /
+        ("exv-helper-regular-file-" + std::to_string(GetCurrentProcessId()) + ".exe");
+
+    {
+        std::ofstream out(regular_file, std::ios::binary);
+        out << "not a pipe";
+    }
+
+    PipeClientConfig config;
+    config.pipe_path = regular_file.string();
+    config.connect_timeout_ms = 100;
+
+    PipeHelperClient client(config);
+    const bool connected = client.connect();
+    if (connected)
+        client.disconnect();
+
+    std::filesystem::remove(regular_file);
+
+    expect_true(!connected,
+                "regular Windows file path must not be treated as a successful pipe connection");
+    expect_true(!client.is_connected(),
+                "client should remain disconnected for regular file paths");
+    std::cout << " PASS\n";
+#else
+    std::cout << "  test_rejects_regular_file_path_on_windows... SKIPPED\n";
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Test: connector factory creates real PipeHelperClient
 // ---------------------------------------------------------------------------
@@ -549,14 +610,24 @@ static void test_stub_connector_still_works() {
 // main
 // ---------------------------------------------------------------------------
 
-int main() {
+int main(int argc, char** argv) {
     std::cout << "=== PipeHelperClient IPC transport tests ===\n";
 
-    test_single_hello();
-    test_persistent_connection();
-    test_disconnect_callback();
-    test_connector_factory();
-    test_stub_connector_still_works();
+    const std::string filter = argc > 1 ? argv[1] : "";
+    const bool run_all = filter.empty();
+
+    if (run_all || filter == "test_single_hello")
+        test_single_hello();
+    if (run_all || filter == "test_persistent_connection")
+        test_persistent_connection();
+    if (run_all || filter == "test_disconnect_callback")
+        test_disconnect_callback();
+    if (run_all || filter == "test_rejects_regular_file_path_on_windows")
+        test_rejects_regular_file_path_on_windows();
+    if (run_all || filter == "test_connector_factory")
+        test_connector_factory();
+    if (run_all || filter == "test_stub_connector_still_works")
+        test_stub_connector_still_works();
 
     std::cout << "\nAll pipe helper client tests passed.\n";
     return 0;

@@ -116,11 +116,13 @@ int main(int argc, char *argv[]) {
 
   if (raw_args.size() > 1 && raw_args[1] == "--mode=core") {
     std::string config_dir, home_dir;
+    bool use_stdin = true;  // Default: stdin/stdout mode for Electron
     for (size_t i = 2; i < raw_args.size(); ++i) {
       if (raw_args[i] == "--config-dir" && i + 1 < raw_args.size()) config_dir = raw_args[++i];
       else if (raw_args[i] == "--home" && i + 1 < raw_args.size()) home_dir = raw_args[++i];
+      else if (raw_args[i] == "--daemon") use_stdin = false;  // Daemon mode: pipe-only
     }
-    return exv::core::core_process_main(config_dir, home_dir);
+    return exv::core::core_process_main(config_dir, home_dir, use_stdin);
   }
 
   if (raw_args.size() > 2 && (raw_args[1] == "desktop-rpc" || raw_args[1] == "desktop-rpc-file" || raw_args[1] == "desktop-rpc-file-output")) {
@@ -165,7 +167,7 @@ int main(int argc, char *argv[]) {
   if (cmd == "status" || cmd == "-t") return vpn::status();
   if (cmd == "config" || cmd == "-c") { logger::init(); return handle_config(args); }
   if (cmd == "service") return handle_service(args);
-  if (cmd == "logs" || cmd == "-l") { logger::init(); logger::show_logs(); return 0; }
+  if (cmd == "logs" || cmd == "-l") { logger::init(); logger::show_logs(50); return 0; }
 
   utils::print_error("Unknown command: " + cmd);
   utils::print_info("Run 'exv help' for usage information.");

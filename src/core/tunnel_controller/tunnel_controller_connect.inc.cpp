@@ -1,0 +1,189 @@
+    // ================================================================
+    // Guards
+    // ================================================================
+
+    bool can_start_connect() const {
+        return phase_ == TunnelPhase::Idle
+            || phase_ == TunnelPhase::Failed;
+    }
+
+    bool can_disconnect() const {
+        return phase_ != TunnelPhase::Idle
+            && phase_ != TunnelPhase::Disconnecting
+            && phase_ != TunnelPhase::CleaningUp
+            && phase_ != TunnelPhase::Failed;
+    }
+
+    // ================================================================
+    // Connect flow (event-driven via CoreSessionRunner)
+    //
+    // 1.  PreparingHelper       — start_session()
+    // 2.  Authenticating        — runner_.start() -> session begins
+    // 3.  [async] AuthSucceeded — phase moves to ConnectingCstp
+    // 4.  [async] CstpConnected — phase moves to ApplyingNetworkConfig
+    // 5.  ApplyingNetworkConfig — apply_tunnel_config()
+    // 6.  [async] PacketLoopStarted — phase moves to Connected
+    //
+    // When no VPN config is provided (fallback path), the old synchronous
+    // flow is preserved for backward compatibility with tests that don't
+    // set a VPN config.
+    // ================================================================
+    void do_connect() {
+        log_tunnel_event("INFO", "connect.start", "Connect requested",
+                         {{"server", intent_.profile_id.value},
+                          {"auto_reconnect", intent_.auto_reconnect ? "true" : "false"}});
+
+        // Step 1 — bookkeeping
+        intent_.desired_connected = true;
+        clear_error();
+        timing_.timer.reset();
+        reconnect_attempts_ = 0;
+
+        if (!helper_) {
+            log_tunnel_event("ERROR", "helper.missing", "Helper client unavailable");
+            set_error(CoreErrorMapper::from_helper_error(
+                "helper_missing", "Helper client unavailable"));
+            transition_to(TunnelPhase::Failed);
+            return;
+        }
+        if (!net_ops_) {
+            log_tunnel_event("ERROR", "network.ops.missing", "Network operations unavailable");
+            auto err = CoreErrorMapper::from_platform_error(
+                "network", -1, "network_ops");
+            err.message = "Network operations unavailable";
+            set_error(err);
+            transition_to(TunnelPhase::Failed);
+            return;
+        }
+        if (vpn_password_.empty()) {
+            log_tunnel_event("WARN", "vpn.config.missing",
+                             "Native engine credentials unavailable; using fallback connect flow");
+        }
+
+        // Step 2 — PreparingHelper: start helper session
+        timing_.timer.start(ConnectTiming::HELPER_PREPARE);
+        transition_to(TunnelPhase::PreparingHelper);
+
+        try {
+            exv::helper::StartSessionRequest req;
+            req.profile_id.value = intent_.profile_id.value;
+            req.mode = exv::helper::HelperMode::Transient;
+
+            auto resp = helper_->start_session(req);
+            session_id_ = resp.session_id;
+            if (auto delegated_ops = as_helper_delegating_ops(net_ops_)) {
+                delegated_ops->set_session(session_id_);
+            }
+            log_tunnel_event("INFO", "helper.session.started", "Helper session started",
+                             {{"session_id", session_id_.value}});
+        } catch (const std::exception& e) {
+            timing_.timer.end(ConnectTiming::HELPER_PREPARE);
+            set_error(CoreErrorMapper::from_helper_error(
+                "start_session_failed", e.what()));
+            transition_to(TunnelPhase::Failed);
+            return;
+        }
+        timing_.timer.end(ConnectTiming::HELPER_PREPARE);
+
+        // Step 3 — Authenticating: start the native engine session.
+        //
+        // If a VPN config was provided, the CoreSessionRunner creates a
+        // NativeVpnEngineSession which drives the rest of the flow via
+        // asynchronous events (AuthSucceeded, CstpConnected, etc.).
+        //
+        // If no VPN config was provided, fall back to the synchronous
+        // placeholder flow for backward compatibility.
+        timing_.timer.start(ConnectTiming::AUTH);
+        transition_to(TunnelPhase::Authenticating);
+
+        if (!vpn_password_.empty()) {
+            // Real engine path — start CoreSessionRunner.
+            // The event callback is already wired up (set in init_runner).
+            bool ok = runner_.start(vpn_cfg_, vpn_password_);
+            if (!ok) {
+                log_tunnel_event("ERROR", "native.runner.failed",
+                                 "Native engine session failed to start");
+                timing_.timer.end(ConnectTiming::AUTH);
+                set_error(CoreErrorMapper::from_auth_error(
+                    -1, "Native engine session failed to start"));
+                transition_to(TunnelPhase::Failed);
+                return;
+            }
+            log_tunnel_event("INFO", "native.runner.started",
+                             "Native engine session started");
+            // Events from the runner will drive subsequent transitions.
+            return;
+        }
+
+        // Synchronous fallback path (no VPN config set).
+        timing_.timer.end(ConnectTiming::AUTH);
+
+        // Step 4 — ConnectingCstp (simulated)
+        timing_.timer.start(ConnectTiming::CSTP_CONNECT);
+        transition_to(TunnelPhase::ConnectingCstp);
+        timing_.timer.end(ConnectTiming::CSTP_CONNECT);
+
+        // Step 5 — ApplyingNetworkConfig: ask helper to push routes / DNS
+        timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
+        transition_to(TunnelPhase::ApplyingNetworkConfig);
+        log_tunnel_event("INFO", "network.config.applying", "Applying network config",
+                         {{"session_id", session_id_.value}});
+
+        try {
+            exv::helper::ApplyTunnelConfigRequest cfg_req;
+            cfg_req.config.session_id        = session_id_;
+            cfg_req.config.interface_address = "10.0.0.2/24";   // placeholder
+            cfg_req.config.enable_kill_switch = false;
+
+            auto cfg_resp = helper_->apply_tunnel_config(cfg_req);
+            if (!cfg_resp.success) {
+                timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+                set_error(CoreErrorMapper::from_helper_error(
+                    "apply_config_failed", cfg_resp.error_message));
+                transition_to(TunnelPhase::Failed);
+                return;
+            }
+        } catch (const std::exception& e) {
+            timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+            set_error(CoreErrorMapper::from_helper_error(
+                "apply_config_failed", e.what()));
+            transition_to(TunnelPhase::Failed);
+            return;
+        }
+        timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+
+        // Step 6 — OpeningPacketDevice: create the tunnel adapter
+        timing_.timer.start(ConnectTiming::PACKET_DEVICE);
+        transition_to(TunnelPhase::OpeningPacketDevice);
+
+        try {
+            auto device = net_ops_->prepare_tunnel_device(adapter_name_);
+            if (device.path.empty()) {
+                timing_.timer.end(ConnectTiming::PACKET_DEVICE);
+                auto err = CoreErrorMapper::from_platform_error(
+                    "packet", -1, "prepare_tunnel_device");
+                err.message = "Tunnel device returned empty path";
+                set_error(err);
+                transition_to(TunnelPhase::Failed);
+                return;
+            }
+        } catch (const std::exception& e) {
+            timing_.timer.end(ConnectTiming::PACKET_DEVICE);
+            auto err = CoreErrorMapper::from_platform_error(
+                "packet", -1, "prepare_tunnel_device");
+            err.message = std::string("prepare_tunnel_device: ") + e.what();
+            set_error(err);
+            transition_to(TunnelPhase::Failed);
+            return;
+        }
+        timing_.timer.end(ConnectTiming::PACKET_DEVICE);
+
+        // Step 7 — Connected
+        log_tunnel_event("INFO", "packet.loop.started", "Packet loop started",
+                         {{"session_id", session_id_.value}});
+        transition_to(TunnelPhase::Connected);
+        log_tunnel_event("INFO", "connect.connected", "Tunnel connected",
+                         {{"session_id", session_id_.value}});
+        reconnect_policy_.reset();
+        start_heartbeat();
+    }

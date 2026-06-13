@@ -1,6 +1,7 @@
 // Tests for AppRpcDispatcher: handler registration, dispatch, error handling.
 
 #include "core_api/app_rpc_dispatcher.hpp"
+#include "core_api/desktop_rpc_adapter.hpp"
 
 #include <iostream>
 #include <string>
@@ -173,6 +174,27 @@ int main() {
                     "handler should receive request_id") && ok;
         ok = expect(resp.request_id == "trace-abc-123",
                     "response should carry request_id from dispatcher") && ok;
+    }
+
+    // --- dispatch preserves legacy array payloads ---
+    {
+        using exv::core_api::DesktopRpcAdapter;
+
+        DesktopRpcAdapter adapter;
+        adapter.register_legacy_handler("logs.list", [](const nlohmann::json&) {
+            return nlohmann::json::array({
+                { {"level", "info"}, {"message", "first"} },
+                { {"level", "error"}, {"message", "second"} },
+            });
+        });
+
+        const auto result = adapter.dispatch("logs.list", nlohmann::json::object());
+        ok = expect(result.is_array(),
+                    "legacy array payloads should remain arrays after dispatch") && ok;
+        ok = expect(result.size() == 2,
+                    "legacy array payload should preserve entry count") && ok;
+        ok = expect(result[0].value("message", std::string()) == "first",
+                    "legacy array payload should preserve entry contents") && ok;
     }
 
     // --- action prefix constants are defined ---

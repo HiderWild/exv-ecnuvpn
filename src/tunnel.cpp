@@ -134,7 +134,6 @@ std::vector<std::string> find_server_route_exceptions(const Config &cfg) {
 platform::TunnelScriptContext make_tunnel_script_context(const Config &cfg) {
   platform::TunnelScriptContext context;
   context.vpn_engine = cfg.vpn_engine;
-  context.route_ready_path = utils::get_route_ready_path();
   context.custom_routes = cfg.routes;
   context.server_route_exceptions = find_server_route_exceptions(cfg);
   context.configured_mtu = cfg.mtu;
@@ -201,16 +200,6 @@ bool configure_from_runtime_log(const Config &cfg) {
   return platform::configure_from_openconnect_log(
              context, utils::expand_home(cfg.log_file))
       .ok;
-}
-
-bool runtime_log_has_auth_failure(const Config &cfg) {
-  if (cfg.vpn_engine != "legacy_openconnect")
-    return false;
-
-  std::string log_path = utils::expand_home(cfg.log_file);
-  if (!utils::file_exists(log_path))
-    return false;
-  return openconnect_log::parse_evidence(utils::read_file(log_path)).auth_failed;
 }
 
 void cleanup_routes() {

@@ -24,25 +24,12 @@ LocalRuntimeSnapshot read_local_runtime_snapshot() {
   LocalRuntimeSnapshot snapshot;
   snapshot.pid = find_openconnect_pid();
   snapshot.running = snapshot.pid > 0;
-
-  std::string route_ready_path = utils::get_route_ready_path();
-  if (utils::file_exists(route_ready_path)) {
-    std::istringstream input(utils::read_file(route_ready_path));
-    std::getline(input, snapshot.interface_name);
-    std::getline(input, snapshot.internal_ip);
-    snapshot.interface_name = utils::trim(snapshot.interface_name);
-    snapshot.internal_ip = utils::trim(snapshot.internal_ip);
-    snapshot.network_ready =
-        snapshot.running && !snapshot.interface_name.empty() &&
-        !snapshot.internal_ip.empty();
-  }
+  // route-ready file removed — status is now queried from Core Process
   return snapshot;
 }
 
 void clear_local_runtime_state() {
-  std::remove(utils::get_pid_path().c_str());
-  std::remove(utils::get_supervisor_pid_path().c_str());
-  std::remove(utils::get_route_ready_path().c_str());
+  // PID/route-ready files removed — no local state to clear
 }
 
 } // namespace
@@ -77,7 +64,6 @@ nlohmann::json preflight_connect_platform_checks(const Config &cfg) {
 
 nlohmann::json try_connect_direct_fallback(const Config & /*cfg*/,
                                             const std::string & /*password*/) {
-  // Windows always requires the helper service; no direct fallback.
   return nlohmann::json{};
 }
 
@@ -111,7 +97,6 @@ nlohmann::json status_fallback_without_helper(const Config & /*cfg*/) {
   result["_snapshot_data"] = nlohmann::json{
       {"running", snapshot.running},
       {"pid", snapshot.pid},
-      {"supervisor_pid", -1},
       {"network_ready", snapshot.network_ready},
       {"interface", snapshot.interface_name},
       {"internal_ip", snapshot.internal_ip},

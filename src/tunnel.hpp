@@ -19,13 +19,7 @@ int run_script_hook();
 // configured script hook reliably.
 bool configure_from_runtime_log(const Config &cfg);
 
-// Returns true when the latest OpenConnect attempt log contains a clear
-// authentication failure marker.
-bool runtime_log_has_auth_failure(const Config &cfg);
-
 // Delete all VPN split-tunnel routes from the OS routing table.
-// Uses the route-ready file for interface name and config for route list.
-// Safe to call even if routes were already removed (errors are suppressed).
 void cleanup_routes();
 
 } // namespace tunnel

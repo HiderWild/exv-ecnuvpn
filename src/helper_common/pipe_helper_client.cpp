@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -21,6 +22,17 @@
 namespace exv::helper {
 
 using json = nlohmann::json;
+
+#ifdef _WIN32
+namespace {
+
+bool is_windows_named_pipe_path(const std::string& path) {
+    return path.rfind("\\\\.\\pipe\\", 0) == 0 ||
+           path.rfind("\\\\?\\pipe\\", 0) == 0;
+}
+
+} // namespace
+#endif
 
 // ---------------------------------------------------------------------------
 // Construction / destruction
@@ -42,6 +54,15 @@ bool PipeHelperClient::connect() {
         return true;
 
 #ifdef _WIN32
+    if (!is_windows_named_pipe_path(config_.pipe_path)) {
+        std::cerr << "[DEBUG] PipeHelperClient rejected non-pipe path: "
+                  << config_.pipe_path << std::endl;
+        return false;
+    }
+
+    // Debug: log the exact pipe path being connected to
+    std::cerr << "[DEBUG] PipeHelperClient connecting to: " << config_.pipe_path << std::endl;
+
     const DWORD start_tick = GetTickCount();
     const DWORD deadline = start_tick + static_cast<DWORD>(config_.connect_timeout_ms);
     HANDLE hPipe = INVALID_HANDLE_VALUE;
@@ -58,17 +79,22 @@ bool PipeHelperClient::connect() {
         if (err == ERROR_PIPE_BUSY) {
             WaitNamedPipeA(config_.pipe_path.c_str(), 250);
         } else if (err == ERROR_FILE_NOT_FOUND) {
-            // Pipe not yet available; retry briefly
-            if (GetTickCount() >= deadline)
+            // Pipe not yet available; retry with shorter interval for faster startup
+            DWORD elapsed = GetTickCount() - start_tick;
+            if (elapsed >= static_cast<DWORD>(config_.connect_timeout_ms))
                 break;
-            Sleep(100);
+            Sleep(50);  // More aggressive retry interval (was 100ms)
         } else {
             break;
         }
     }
 
-    if (hPipe == INVALID_HANDLE_VALUE)
+    if (hPipe == INVALID_HANDLE_VALUE) {
+        std::cerr << "[DEBUG] PipeHelperClient connect failed, last error: " << GetLastError() << std::endl;
         return false;
+    }
+
+    std::cerr << "[DEBUG] PipeHelperClient connected successfully!" << std::endl;
 
     // Set pipe to byte-read mode (matches server's PIPE_READMODE_BYTE)
     DWORD mode = PIPE_READMODE_BYTE;

@@ -68,13 +68,16 @@ CleanupRegistry& HelperV2Handler::cleanup_registry() {
 // --- Handler implementations ---
 
 HelperResponse HelperV2Handler::handle_hello(const HelperRequest& req) {
-    nlohmann::json payload;
-    payload["server_version"] = PROTOCOL_VERSION;
-    payload["capabilities"] = nlohmann::json::array({
+    HelloResponse hello;
+    hello.server_version = PROTOCOL_VERSION;
+    hello.capabilities = {
         "tunnel_device", "tunnel_config", "session_management",
         "heartbeat", "cleanup", "snapshot"
-    });
-    payload["mode"] = "transient";
+    };
+    hello.mode = HelperMode::Transient;
+
+    nlohmann::json payload;
+    to_json(payload, hello);
 
     HelperResponse resp;
     resp.op = req.op;

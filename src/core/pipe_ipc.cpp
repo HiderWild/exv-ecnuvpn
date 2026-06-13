@@ -45,8 +45,8 @@ bool PipeIpcListener::start() {
   impl_->pipe_handle = CreateNamedPipeA(
       impl_->path.c_str(),
       PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-      1,        // max instances
+      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+      PIPE_UNLIMITED_INSTANCES, // Allow multiple simultaneous connections
       8192,     // out buffer size
       8192,     // in buffer size
       0,        // default timeout
@@ -80,9 +80,15 @@ bool PipeIpcListener::accept_one(PipeRequestHandler handler) {
   char buffer[8192] = {};
   DWORD bytes_read = 0;
   if (!ReadFile(impl_->pipe_handle, buffer, sizeof(buffer) - 1,
-                &bytes_read, nullptr) ||
-      bytes_read == 0) {
+                &bytes_read, nullptr)) {
+    DWORD err = GetLastError();
+    if (err == ERROR_NO_DATA) {
+      return false; // client connected but has not written yet
+    }
     DisconnectNamedPipe(impl_->pipe_handle);
+    return false;
+  }
+  if (bytes_read == 0) {
     return false;
   }
   std::string request(buffer, bytes_read);

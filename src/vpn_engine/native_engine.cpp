@@ -2,14 +2,6 @@
 
 #include "vpn_engine/protocol/production_transport.hpp"
 
-#if defined(_WIN32)
-#include "platform/win32/native_packet_device.hpp"
-#include "platform/win32/native_tls_stream.hpp"
-#elif defined(__APPLE__)
-#include "platform/darwin/native_packet_device.hpp"
-#include "platform/darwin/native_tls_stream.hpp"
-#endif
-
 #include <exception>
 #include <map>
 #include <memory>
@@ -48,72 +40,6 @@ ValidationResult native_packet_device_unimplemented() {
   return invalid("native_packet_device_unimplemented",
                  "Native engine packet device factory is not configured.");
 }
-
-class UnsupportedProtocolTransport final
-    : public protocol::ProtocolTransport {
-public:
-  protocol::AuthResult
-  authenticate(const protocol::ProtocolSessionOptions & /*options*/) override {
-    protocol::AuthResult result;
-    result.ok = false;
-    result.error_code = "native_transport_unavailable";
-    result.error_message =
-        "Native engine production TLS transport is not available on this platform.";
-    return result;
-  }
-
-  ValidationResult connect_cstp(const std::string & /*cookie*/,
-                                TunnelMetadata * /*metadata*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  ValidationResult
-  send_packet(const std::vector<std::uint8_t> & /*packet*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  ValidationResult
-  send_control(protocol::InboundFrameKind /*kind*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  ValidationResult receive_frame(protocol::InboundFrame * /*out*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  void disconnect() override {}
-  void reset_for_reconnect() override {}
-};
-
-class UnsupportedPacketDevice final : public PacketDevice {
-public:
-  ValidationResult open(const DeviceConfig & /*config*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  ValidationResult open(const TunnelMetadata & /*metadata*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  ValidationResult read_packet(std::vector<std::uint8_t> * /*packet*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  ValidationResult
-  write_packet(const std::vector<std::uint8_t> & /*packet*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  void close() override {}
-};
 
 } // namespace
 
@@ -164,31 +90,6 @@ nlohmann::json status_to_json(const VpnEngineStatus &status) {
                         {"internal_ip", status.internal_ip},
                         {"error_code", status.error_code},
                         {"error_message", status.error_message}};
-}
-
-NativeVpnEngineDependencies default_native_engine_dependencies() {
-  NativeVpnEngineDependencies deps;
-
-#if defined(_WIN32) || defined(__APPLE__)
-  deps.transport_factory = [] {
-    std::unique_ptr<protocol::TlsStream> stream(new platform::NativeTlsStream());
-    return std::unique_ptr<protocol::ProtocolTransport>(
-        new protocol::ProductionProtocolTransport(std::move(stream)));
-  };
-  deps.packet_device_factory = [] {
-    return platform::create_native_packet_device();
-  };
-#else
-  deps.transport_factory = [] {
-    return std::unique_ptr<protocol::ProtocolTransport>(
-        new UnsupportedProtocolTransport());
-  };
-  deps.packet_device_factory = [] {
-    return std::unique_ptr<PacketDevice>(new UnsupportedPacketDevice());
-  };
-#endif
-
-  return deps;
 }
 
 class NativeVpnEngineSession::LoopEventSink final : public EventSink {

@@ -28,6 +28,13 @@ ecnuvpn::platform::ServiceStatusSnapshot unavailable_service() {
 } // namespace
 
 namespace ecnuvpn {
+namespace logger {
+
+void info(const std::string &) {}
+void warn(const std::string &) {}
+void error(const std::string &) {}
+
+} // namespace logger
 namespace platform {
 
 ServiceStatusSnapshot current_service_status() { return unavailable_service(); }

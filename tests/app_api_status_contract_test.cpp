@@ -82,6 +82,35 @@ json map_snapshot_to_frontend(const exv::core::TunnelStatusSnapshot &snap,
   return j;
 }
 
+std::string read_source_file(const std::filesystem::path &path) {
+  std::ifstream in(path);
+  return std::string((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+}
+
+std::string app_api_source_text() {
+#ifndef ECNUVPN_SOURCE_DIR
+  return std::string();
+#else
+  const auto app_api_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" /
+                           "core" / "app_api";
+  const char *files[] = {
+      "app_api.cpp",
+      "app_api_json_helpers.inc.cpp",
+      "app_api_controller_helpers.inc.cpp",
+      "app_api_desktop_handlers.inc.cpp",
+  };
+  std::string source;
+  for (const char *file : files) {
+    source += "\n// ---- ";
+    source += file;
+    source += " ----\n";
+    source += read_source_file(app_api_dir / file);
+  }
+  return source;
+#endif
+}
+
 // -----------------------------------------------------------------------
 // Test cases
 // -----------------------------------------------------------------------
@@ -293,11 +322,7 @@ bool app_api_activates_core_owned_native_mode() {
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
-  const auto app_api_path =
-      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "app_api.cpp";
-  std::ifstream in(app_api_path);
-  const std::string source((std::istreambuf_iterator<char>(in)),
-                           std::istreambuf_iterator<char>());
+  const std::string source = app_api_source_text();
 
   const auto create_controller = source.find(
       "h.controller = std::make_shared<exv::core::TunnelController>");
@@ -329,20 +354,15 @@ bool app_api_activates_core_owned_native_mode() {
 #endif
 }
 
-bool desktop_native_connect_supports_direct_fallback_payload() {
+bool desktop_native_connect_uses_core_owned_controller_pipeline() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
-  const auto app_api_path =
-      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "app_api.cpp";
-  std::ifstream in(app_api_path);
-  const std::string source((std::istreambuf_iterator<char>(in)),
-                           std::istreambuf_iterator<char>());
+  const std::string source = app_api_source_text();
   const auto connect_handler = source.find("adapter.register_legacy_handler(\"vpn.connect\"");
   const auto disconnect_handler = source.find("adapter.register_legacy_handler(\"vpn.disconnect\"",
                                                connect_handler);
-  const auto status_handler = source.find("adapter.register_legacy_handler(\"status.get\"");
   const auto connect_source =
       connect_handler == std::string::npos
           ? std::string()
@@ -350,36 +370,46 @@ bool desktop_native_connect_supports_direct_fallback_payload() {
                           disconnect_handler == std::string::npos
                               ? std::string::npos
                               : disconnect_handler - connect_handler);
-  const auto disconnect_source =
-      disconnect_handler == std::string::npos
-          ? std::string()
-          : source.substr(disconnect_handler,
-                          status_handler == std::string::npos
-                              ? std::string::npos
-                              : status_handler - disconnect_handler);
 
   bool ok = true;
   ok = expect(connect_handler != std::string::npos,
               "app_api should register vpn.connect handler") &&
        ok;
-  ok = expect(connect_source.find("allow_direct_fallback") != std::string::npos,
-              "desktop native vpn.connect should read allow_direct_fallback") &&
-       ok;
-  ok = expect(connect_source.find("preflight_connect(cfg, password") !=
+  ok = expect(connect_source.find("Config cfg = mgr.load()") !=
                   std::string::npos,
-              "desktop native vpn.connect should pass fallback awareness into preflight") &&
+              "desktop vpn.connect should load persisted config") &&
        ok;
-  ok = expect(connect_source.find("platform::try_connect_direct_fallback") !=
+  ok = expect(connect_source.find("password = crypto::decrypt") !=
                   std::string::npos,
-              "desktop native vpn.connect should attempt platform direct fallback") &&
+              "desktop vpn.connect should resolve stored password before preflight") &&
        ok;
-  ok = expect(disconnect_source.find("platform::try_disconnect_direct_fallback") !=
+  ok = expect(connect_source.find("preflight_connect(cfg, password)") !=
                   std::string::npos,
-              "desktop native vpn.disconnect should attempt platform direct fallback") &&
+              "desktop vpn.connect should use preflight_connect as prerequisite gate") &&
        ok;
-  ok = expect(source.find("platform::status_fallback_without_helper") !=
+  ok = expect(source.find("platform::resolve_backend(options)") !=
                   std::string::npos,
-              "status.get should use platform helper-unavailable fallback") &&
+              "preflight_connect should resolve helper backend") &&
+       ok;
+  ok = expect(connect_source.find("try_acquire(attempt_opts)") !=
+                  std::string::npos,
+              "desktop vpn.connect should acquire the connection-attempt guard") &&
+       ok;
+  ok = expect(connect_source.find("ensure_tunnel_controller(helper_endpoint)") !=
+                  std::string::npos,
+              "desktop vpn.connect should initialize controller with resolved helper endpoint") &&
+       ok;
+  ok = expect(connect_source.find("controller->set_vpn_config(cfg, password)") !=
+                  std::string::npos,
+              "desktop vpn.connect should pass config and password into TunnelController") &&
+       ok;
+  ok = expect(connect_source.find("controller->connect(intent)") !=
+                  std::string::npos,
+              "desktop vpn.connect should delegate connection to TunnelController") &&
+       ok;
+  ok = expect(connect_source.find("platform::try_connect_direct_fallback") ==
+                  std::string::npos,
+              "desktop vpn.connect should not bypass controller with direct fallback") &&
        ok;
   return ok;
 #endif
@@ -396,6 +426,6 @@ int main() {
   ok = all_phases_map_to_valid_strings() && ok;
   ok = frontend_json_has_required_fields() && ok;
   ok = app_api_activates_core_owned_native_mode() && ok;
-  ok = desktop_native_connect_supports_direct_fallback_payload() && ok;
+  ok = desktop_native_connect_uses_core_owned_controller_pipeline() && ok;
   return ok ? 0 : 1;
 }
