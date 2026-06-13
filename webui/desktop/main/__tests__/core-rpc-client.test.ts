@@ -14,6 +14,7 @@ import { PassThrough } from 'node:stream'
 import type { ChildProcess } from 'node:child_process'
 
 import { CoreRpcClient } from '../core-rpc-client.js'
+import { normalizeRpcSuccessResult } from '../rpc-result.js'
 
 // Mock child process factory
 
@@ -73,6 +74,23 @@ function readLine(stream: PassThrough, timeoutMs = 2000): Promise<string> {
     stream.on('data', onData)
   })
 }
+describe('RPC result normalization', () => {
+  it('unwraps future JSON-RPC data envelopes for fallback parity', () => {
+    const result = normalizeRpcSuccessResult({ ok: true, data: { connected: true, phase: 'connected' } })
+    assert.deepEqual(result, { connected: true, phase: 'connected' })
+  })
+
+  it('strips only the transport ok marker from legacy success objects', () => {
+    const result = normalizeRpcSuccessResult({ ok: true, connected: false, phase: 'idle' })
+    assert.deepEqual(result, { connected: false, phase: 'idle' })
+  })
+
+  it('preserves non-envelope payloads unchanged', () => {
+    const result = normalizeRpcSuccessResult([{ message: 'hello' }])
+    assert.deepEqual(result, [{ message: 'hello' }])
+  })
+})
+
 // Tests
 
 describe('CoreRpcClient', () => {
@@ -137,8 +155,8 @@ describe('CoreRpcClient', () => {
       sendResponse(mock.stdout, { id: r1.id, ok: true, data: 'a-done' })
 
       const [res1, res2] = await Promise.all([p1, p2])
-      assert.deepEqual(res1, { id: r1.id, ok: true, data: 'a-done' })
-      assert.deepEqual(res2, { id: r2.id, ok: true, data: 'b-done' })
+      assert.equal(res1, 'a-done')
+      assert.equal(res2, 'b-done')
     })
   })
 
@@ -295,6 +313,66 @@ describe('CoreRpcClient', () => {
       } finally {
         freshClient.close()
         freshMock.cleanup()
+      }
+    })
+  })
+
+  describe('payload contract', () => {
+    it('resolves to inner data object when response has data property', async () => {
+      const line = readLine(mock.stdin)
+      const p = client.request('vpn.connect', {})
+      const req = JSON.parse(await line)
+
+      sendResponse(mock.stdout, {
+        id: req.id,
+        ok: true,
+        data: { connected: true, phase: 'connected' },
+      })
+
+      const result = await p
+      assert.deepEqual(result, { connected: true, phase: 'connected' })
+    })
+
+    it('event messages with event property still go only to listeners, not response', async () => {
+      const events: Array<{ event: string; data: unknown }> = []
+      client.onEvent((event, data) => events.push({ event, data }))
+
+      const line = readLine(mock.stdin)
+      const p = client.request('status.get', {})
+      const req = JSON.parse(await line)
+
+      sendResponse(mock.stdout, { event: 'log', data: { msg: 'connecting' } })
+      sendResponse(mock.stdout, {
+        id: req.id,
+        ok: true,
+        data: { connected: false, phase: 'idle' },
+      })
+
+      const result = await p
+      assert.deepEqual(result, { connected: false, phase: 'idle' })
+      assert.equal(events.length, 1)
+      assert.equal(events[0].event, 'log')
+    })
+
+    it('rejects error responses with code/message, not data', async () => {
+      const line = readLine(mock.stdin)
+      const p = client.request('vpn.connect', {})
+      const req = JSON.parse(await line)
+
+      sendResponse(mock.stdout, {
+        id: req.id,
+        ok: false,
+        code: 'no_config',
+        message: 'VPN config not found',
+      })
+
+      try {
+        await p
+        assert.fail('Expected rejection')
+      } catch (err) {
+        assert.ok(err instanceof Error)
+        assert.match(err.message, /no_config: VPN config not found/)
+        assert.equal((err as Error & { code?: string }).code, 'no_config')
       }
     })
   })

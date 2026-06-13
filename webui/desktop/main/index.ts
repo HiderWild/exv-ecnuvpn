@@ -19,6 +19,7 @@ import {
   type DesktopWindowMode,
 } from '../shared/desktop-contract.js'
 import { CoreRpcClient, type EventListener } from './core-rpc-client.js'
+import { normalizeRpcSuccessResult } from './rpc-result.js'
 import { platformRunner } from './platform/index.js'
 import type { RpcErrorResult } from './platform/base.js'
 
@@ -84,7 +85,13 @@ function windowIconPath() {
 }
 
 function repoRoot() {
-  return resolve(__dirname, '..', '..', '..')
+  // When running from build/windows/electron/dist-electron/main/index.js,
+  // we need to go up 5 levels to reach the repo root.
+  // But when running from webui/dist-electron/main/index.js (dev mode),
+  // we need to go up 3 levels.
+  // Detect which case we're in by checking the path.
+  const isDev = __dirname.includes(join('webui', 'dist-electron'))
+  return isDev ? resolve(__dirname, '..', '..', '..') : resolve(__dirname, '..', '..', '..', '..', '..')
 }
 
 function resolveExvPath() {
@@ -120,8 +127,8 @@ function resolveRuntimeDir(exv = resolveExvPath()) {
 }
 
 // Canonical state/log directory, resolved on the (non-elevated) desktop process
-// so every exv invocation �?including UAC-elevated ones whose ambient %APPDATA%
-// differs �?writes config, state and logs to the same place. Mirrors the C++
+// so every exv invocation �?including UAC-elevated ones whose ambient %APPDATA%
+// differs �?writes config, state and logs to the same place. Mirrors the C++
 // platform defaults exactly so the CLI (`exv logs`) and the app agree.
 function resolveStateDir() {
   if (process.platform === 'win32') {
@@ -150,7 +157,7 @@ function nativeExecOptions(exv: string, extra: { maxBuffer?: number } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// CoreProcessManager �?manages the long-lived `exv --mode=core` child process
+// CoreProcessManager �?manages the long-lived `exv --mode=core` child process
 // ---------------------------------------------------------------------------
 
 class CoreProcessManager {
@@ -213,7 +220,7 @@ class CoreProcessManager {
         console.error(
           `[CoreProcessManager] core process exited (code=${code}, signal=${signal})`,
         )
-        // Push crash event to renderer �?user decides whether to restart or quit.
+        // Push crash event to renderer �?user decides whether to restart or quit.
         for (const listener of this.eventListeners) {
           listener('core-crashed', { exitCode: code, signal })
         }
@@ -401,7 +408,7 @@ async function runDesktopRpcInner(action: DesktopRpcAction, payload: unknown = {
     if (result && result.ok === false) {
       throwRpcResultError(result)
     }
-    return result
+    return normalizeRpcSuccessResult(result)
   } catch (error) {
     const execError = error as Error & { stdout?: string; stderr?: string }
     if (execError.stdout) {
@@ -410,7 +417,7 @@ async function runDesktopRpcInner(action: DesktopRpcAction, payload: unknown = {
         if (result && result.ok === false) {
           throwRpcResultError(result)
         }
-        return result
+        return normalizeRpcSuccessResult(result)
       } catch (parseError) {
         if (parseError instanceof Error && parseError.message !== execError.message) {
           throw parseError
@@ -641,7 +648,7 @@ function refreshTrayMenu(connected = trayConnectionConnected) {
       click: () => { void toggleTrayConnection() },
     },
     { type: 'separator' },
-    { label: '退�?, click: () => { void disconnectThenQuit() } },
+    { label: '退出', click: () => { void disconnectThenQuit() } },
   ]))
 }
 
@@ -684,7 +691,7 @@ async function toggleTrayConnection() {
     const message = error instanceof Error ? error.message : String(error)
     await openModal('confirm', {
       kind: 'confirm',
-      message: `托盘${action}失败�?{message}`,
+      message: `托盘${action}失败�?{message}`,
     })
   } finally {
     trayConnectionBusy = false
@@ -712,7 +719,7 @@ async function disconnectThenQuit() {
     const message = error instanceof Error ? error.message : String(error)
     await openModal('confirm', {
       kind: 'confirm',
-      message: `断开 VPN 失败，程序仍保持打开�?{message}`,
+      message: `断开 VPN 失败，程序仍保持打开�?{message}`,
     })
   }
 }
@@ -808,6 +815,14 @@ async function createWindow() {
   startEventPump()
 }
 
+function nextLogEntries(logs: unknown[], seenCount: number) {
+  const normalizedSeenCount = logs.length < seenCount ? 0 : seenCount
+  return {
+    entries: logs.slice(normalizedSeenCount),
+    seenCount: logs.length,
+  }
+}
+
 function startEventPump() {
   if (statusTimer || logTimer) return
 
@@ -828,9 +843,9 @@ function startEventPump() {
     try {
       const logs = await runDesktopRpc('logs.list', { lines: 500 })
       if (Array.isArray(logs)) {
-        const next = logs.slice(seenLogCount)
-        seenLogCount = logs.length
-        for (const entry of next) {
+        const nextLogs = nextLogEntries(logs, seenLogCount)
+        seenLogCount = nextLogs.seenCount
+        for (const entry of nextLogs.entries) {
           emitEvent('log', entry)
         }
       }
@@ -883,7 +898,7 @@ ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: Deskto
     const message = error instanceof Error ? error.message : String(error)
     try {
       const status = await runDesktopRpc('service.status')
-      if (status && typeof status === 'object' && status.installed) {
+      if (status && typeof status === 'object' && (status as { installed?: unknown }).installed) {
         return { ...status, warning: message }
       }
     } catch {

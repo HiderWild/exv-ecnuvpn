@@ -103,6 +103,10 @@ const api = {
       return () => ipcRenderer.removeListener(desktopIpcChannels.event, listener)
     },
   },
+  core: {
+    restart: () => ipcRenderer.invoke('core:restart'),
+    quit: () => ipcRenderer.invoke('core:quit'),
+  },
 }
 
 contextBridge.exposeInMainWorld('ecnuVpn', api)

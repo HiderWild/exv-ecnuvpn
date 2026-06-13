@@ -65,6 +65,7 @@ export const desktopEventTypes = [
   'heartbeat',
   'service-progress',
   'close-request',
+  'core-crashed',
 ] as const
 
 export const desktopServiceCommands = ['install', 'uninstall'] as const

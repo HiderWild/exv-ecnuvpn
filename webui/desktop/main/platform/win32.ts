@@ -242,6 +242,7 @@ const runner: DesktopPlatformRunner = {
 
   resolveExvCandidates(root: string) {
     return [
+      join(root, 'build', 'windows', 'electron', 'bin', 'exv.exe'),
       join(root, 'build', 'windows', 'electron', 'native', 'bin', 'exv.exe'),
       join(root, 'webui', 'native', 'bin', 'exv.exe'),
       join(root, 'build', 'windows', 'electron', 'release', 'win-unpacked', 'resources', 'bin', 'exv.exe'),
