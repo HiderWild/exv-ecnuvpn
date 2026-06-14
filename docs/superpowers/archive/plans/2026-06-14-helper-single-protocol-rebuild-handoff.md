@@ -1,4 +1,11 @@
-# Helper Single Protocol Rebuild Handoff Plan
+# Archived: Helper Single Protocol Rebuild Handoff Plan
+
+Archived on 2026-06-15 because Claude continued this work in
+`.claude/worktrees/helper-config-contract-pilot-continuation` after this handoff.
+Use `docs/superpowers/plans/2026-06-15-helper-single-protocol-rebuild-continuation-plan.md`
+as the current coordination document.
+
+Original title: Helper Single Protocol Rebuild Handoff Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
