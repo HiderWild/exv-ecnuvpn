@@ -33,27 +33,29 @@ std::vector<std::string> tail(int) { return {}; }
 
 static void test_hello_request_roundtrip() {
     HelloRequest req;
-    req.client_version = 42;
     json j = req;
-    assert(j["client_version"] == 42);
+    assert(j.is_object());
+    assert(!j.contains("client_version"));
     auto parsed = hello_request_from_json(j);
-    assert(parsed.client_version == 42);
+    (void)parsed;
     std::cout << "  PASS hello_request_roundtrip\n";
 }
 
 static void test_hello_response_roundtrip() {
     HelloResponse resp;
-    resp.server_version = 2;
     resp.capabilities = {"tunnel_device_create", "route_apply"};
     resp.mode = HelperMode::Resident;
+    resp.startup_context.launch_mode = "service";
+    resp.session_state.active = false;
     json j = resp;
-    assert(j["server_version"] == 2);
+    assert(!j.contains("server_version"));
     assert(j["capabilities"].size() == 2);
     assert(j["mode"] == static_cast<uint32_t>(HelperMode::Resident));
+    assert(j["startup_context"]["launch_mode"] == "service");
     auto parsed = hello_response_from_json(j);
-    assert(parsed.server_version == 2);
     assert(parsed.capabilities.size() == 2);
     assert(parsed.mode == HelperMode::Resident);
+    assert(parsed.startup_context.launch_mode == "service");
     std::cout << "  PASS hello_response_roundtrip\n";
 }
 
@@ -200,21 +202,27 @@ static void test_snapshot_roundtrip() {
     std::cout << "  PASS snapshot_roundtrip\n";
 }
 
-static void test_end_session_roundtrip() {
-    EndSessionRequest req;
-    req.session_id.value = "end-sess";
+static void test_shutdown_roundtrip() {
+    ShutdownRequest req;
+    req.session_id.value = "shutdown-sess";
+    req.policy.remove_adapter = true;
     json j = req;
-    assert(j["session_id"] == "end-sess");
-    auto parsed = end_session_request_from_json(j);
-    assert(parsed.session_id.value == "end-sess");
+    assert(j["session_id"] == "shutdown-sess");
+    assert(j["policy"]["remove_adapter"] == true);
+    auto parsed = shutdown_request_from_json(j);
+    assert(parsed.session_id.value == "shutdown-sess");
+    assert(parsed.policy.remove_adapter == true);
 
-    EndSessionResponse resp;
-    resp.success = true;
+    ShutdownResponse resp;
+    resp.cleanup_success = true;
+    resp.exiting = true;
     json j2 = resp;
-    assert(j2["success"] == true);
-    auto parsed2 = end_session_response_from_json(j2);
-    assert(parsed2.success == true);
-    std::cout << "  PASS end_session_roundtrip\n";
+    assert(j2["cleanup_success"] == true);
+    assert(j2["exiting"] == true);
+    auto parsed2 = shutdown_response_from_json(j2);
+    assert(parsed2.cleanup_success == true);
+    assert(parsed2.exiting == true);
+    std::cout << "  PASS shutdown_roundtrip\n";
 }
 
 static void test_helper_request_response_roundtrip() {
@@ -243,87 +251,10 @@ static void test_helper_request_response_roundtrip() {
     std::cout << "  PASS helper_request_response_roundtrip\n";
 }
 
-// ---- HelperConnector / StubHelperClient tests ----
-
-static void test_stub_connector_create() {
-    auto connector = HelperConnector::create_stub();
+static void test_connector_factory_create() {
+    auto connector = HelperConnector::create();
     assert(connector != nullptr);
-    assert(connector->is_helper_available());
-    std::cout << "  PASS stub_connector_create\n";
-}
-
-static void test_stub_connector_connect() {
-    auto connector = HelperConnector::create_stub();
-    HelperConnectorConfig config;
-    auto client = connector->connect(config);
-    assert(client != nullptr);
-    assert(client->is_connected());
-    std::cout << "  PASS stub_connector_connect\n";
-}
-
-static void test_stub_client_hello() {
-    auto connector = HelperConnector::create_stub();
-    HelperConnectorConfig config;
-    auto client = connector->connect(config);
-
-    HelloRequest req;
-    req.client_version = PROTOCOL_VERSION;
-    auto resp = client->hello(req);
-    assert(resp.server_version == PROTOCOL_VERSION);
-    assert(resp.capabilities.size() == 4);
-    assert(resp.mode == HelperMode::Transient);
-    std::cout << "  PASS stub_client_hello\n";
-}
-
-static void test_stub_client_session_lifecycle() {
-    auto connector = HelperConnector::create_stub();
-    HelperConnectorConfig config;
-    auto client = connector->connect(config);
-
-    // Start session
-    StartSessionRequest start_req;
-    start_req.profile_id.value = "test-profile";
-    auto start_resp = client->start_session(start_req);
-    assert(!start_resp.session_id.value.empty());
-
-    // Prepare tunnel device
-    PrepareTunnelDeviceRequest prep_req;
-    prep_req.session_id = start_resp.session_id;
-    prep_req.adapter_name = "Wintun";
-    auto prep_resp = client->prepare_tunnel_device(prep_req);
-    assert(!prep_resp.device_path.empty());
-    assert(prep_resp.mtu == 1400);
-
-    // Apply tunnel config
-    ApplyTunnelConfigRequest cfg_req;
-    cfg_req.config.session_id = start_resp.session_id;
-    cfg_req.config.interface_address = "10.0.0.2/24";
-    auto cfg_resp = client->apply_tunnel_config(cfg_req);
-    assert(cfg_resp.success);
-
-    // Heartbeat
-    HeartbeatRequest hb_req;
-    hb_req.session_id = start_resp.session_id;
-    hb_req.core_phase = "Connected";
-    auto hb_resp = client->heartbeat(hb_req);
-    assert(hb_resp.ok);
-
-    // Get snapshot
-    GetSnapshotRequest snap_req;
-    auto snap_resp = client->get_snapshot(snap_req);
-    (void)snap_resp;
-
-    // End session
-    EndSessionRequest end_req;
-    end_req.session_id = start_resp.session_id;
-    auto end_resp = client->end_session(end_req);
-    assert(end_resp.success);
-
-    // Disconnect
-    client->disconnect();
-    assert(!client->is_connected());
-
-    std::cout << "  PASS stub_client_session_lifecycle\n";
+    std::cout << "  PASS connector_factory_create\n";
 }
 
 int main() {
@@ -337,14 +268,11 @@ int main() {
     test_heartbeat_roundtrip();
     test_cleanup_roundtrip();
     test_snapshot_roundtrip();
-    test_end_session_roundtrip();
+    test_shutdown_roundtrip();
     test_helper_request_response_roundtrip();
 
-    std::cout << "\n=== HelperConnector / StubHelperClient tests ===\n";
-    test_stub_connector_create();
-    test_stub_connector_connect();
-    test_stub_client_hello();
-    test_stub_client_session_lifecycle();
+    std::cout << "\n=== HelperConnector factory tests ===\n";
+    test_connector_factory_create();
 
     std::cout << "\nAll tests passed.\n";
     return 0;

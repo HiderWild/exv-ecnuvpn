@@ -98,7 +98,7 @@ orchestrate_native_auth_first(const NativeAuthFirstInputs &inputs,
 
   (void)deps;
   return invalid("native_controller_required",
-                 "Native engine connections must use TunnelController and Helper V2.");
+                 "Native engine connections must use TunnelController and the helper protocol.");
 }
 
 vpn_engine::ValidationResult build_native_user_mode_auth_request(

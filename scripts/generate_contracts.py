@@ -109,8 +109,6 @@ def validate_config(config: dict[str, Any]) -> None:
 
 
 def validate_helper(helper: dict[str, Any]) -> None:
-    if helper.get("protocol_version") != 2:
-        raise ContractError("modules.helper.protocol_version must be 2")
     validate_string_list(helper.get("messages"), "modules.helper.messages")
     validate_string_list(helper.get("capabilities"), "modules.helper.capabilities")
     validate_string_list(helper.get("errors"), "modules.helper.errors")
@@ -247,17 +245,17 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         cpp_array("DESKTOP_RPC_ERROR_CODES", desktop_error_codes(manifest)),
         cpp_array("CONFIG_ACTIONS", config_actions(manifest)),
         cpp_array("CONFIG_LEGACY_ALIASES", [alias for alias, _ in aliases]),
-        cpp_array("HELPER_V2_OPS", helper_ops(manifest)),
+        cpp_array("HELPER_OPS", helper_ops(manifest)),
         cpp_array("HELPER_FORBIDDEN_CREDENTIAL_FIELDS",
                   manifest["modules"]["helper"]["security"]["forbidden_fields"]),
         "",
-        "struct HelperV2OpContract {",
+        "struct HelperOpContract {",
         "    std::string_view name;",
         "    std::uint32_t code;",
         "    bool requires_session;",
         "};",
         "",
-        f"inline constexpr std::array<HelperV2OpContract, {len(manifest['modules']['helper']['ops'])}> HELPER_V2_OP_CONTRACTS = {{{{",
+        f"inline constexpr std::array<HelperOpContract, {len(manifest['modules']['helper']['ops'])}> HELPER_OP_CONTRACTS = {{{{",
         *[
             f"    {{{cpp_string(op['name'])}, {op['code']}, {'true' if op['requires_session'] else 'false'}}},"
             for op in manifest["modules"]["helper"]["ops"]
@@ -295,8 +293,8 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         "    return contains(CONFIG_LEGACY_ALIASES, alias);",
         "}",
         "",
-        "constexpr bool is_helper_v2_op(std::string_view op) {",
-        "    return contains(HELPER_V2_OPS, op);",
+        "constexpr bool is_helper_op(std::string_view op) {",
+        "    return contains(HELPER_OPS, op);",
         "}",
         "",
         "constexpr bool is_helper_forbidden_credential_field(std::string_view field) {",
@@ -333,13 +331,13 @@ def render_ts(manifest: dict[str, Any]) -> str:
         f"export const CONFIG_ACTIONS = {ts_literal(config_actions(manifest))} as const",
         f"export const CONFIG_ALIASES = {ts_literal(aliases)} as const",
         "",
-        f"export const HELPER_V2_OPS = {ts_literal(helper_ops(manifest))} as const",
-        f"export const HELPER_V2_OP_CONTRACTS = {ts_literal(helper['ops'])} as const",
+        f"export const HELPER_OPS = {ts_literal(helper_ops(manifest))} as const",
+        f"export const HELPER_OP_CONTRACTS = {ts_literal(helper['ops'])} as const",
         f"export const HELPER_FORBIDDEN_CREDENTIAL_FIELDS = {ts_literal(helper['security']['forbidden_fields'])} as const",
         "",
         "export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]",
         "export type ConfigAction = (typeof CONFIG_ACTIONS)[number]",
-        "export type HelperV2Op = (typeof HELPER_V2_OPS)[number]",
+        "export type HelperOp = (typeof HELPER_OPS)[number]",
         "",
     ])
 

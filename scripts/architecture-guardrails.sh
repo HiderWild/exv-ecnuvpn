@@ -52,7 +52,7 @@ is_allowlisted() {
 }
 
 # ---------------------------------------------------------------------------
-# Rule 1: Helper V2 must not contain password/cookie/token
+# Rule 1: Helper protocol must not contain password/cookie/token
 # ---------------------------------------------------------------------------
 echo -n "Checking helper for forbidden fields... "
 found=0
@@ -76,7 +76,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Rule 2: Helper V2 must not include vpn_engine/protocol
+# Rule 2: Helper protocol must not include vpn_engine/protocol
 # ---------------------------------------------------------------------------
 echo -n "Checking helper for protocol includes... "
 if grep -r "vpn_engine/protocol" src/helper_common/ src/helper_runtime/ 2>/dev/null; then
@@ -117,7 +117,7 @@ echo -n "Checking test fixtures for secrets... "
 secret_found=0
 
 # Known security test files that legitimately test for secret-leak prevention
-security_test_pattern="no_secret_in_argv_test|no_secret_in_logs_test|helper_v2_contract_test"
+security_test_pattern="no_secret_in_argv_test|no_secret_in_logs_test|helper_contract_test"
 
 while IFS= read -r match; do
     [ -z "$match" ] && continue

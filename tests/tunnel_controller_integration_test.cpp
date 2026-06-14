@@ -218,6 +218,27 @@ bool test_disconnect_flow() {
     return ok;
 }
 
+// --- Test 2b: Heartbeat Starts Immediately After StartSession ---
+bool test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() {
+    using exv::core::TunnelPhase;
+
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    bool ok = true;
+    ok = expect(helper->connect(), "2b: helper should connect before controller flow") && ok;
+    helper->set_apply_config_fail(true);
+
+    ctrl.connect(make_intent(true));
+    ok = expect(ctrl.phase() == TunnelPhase::Failed,
+                "2b: apply_config failure should transition to Failed") && ok;
+    ok = expect(helper->heartbeat_count() == 1,
+                "2b: core should send one heartbeat immediately after StartSession") && ok;
+
+    return ok;
+}
+
 // --- Test 3: Reconnect Flow (auto_reconnect=true) ---
 //
 // After TransportClosed, the real TC goes to Reconnecting. When the
@@ -680,6 +701,9 @@ int main() {
 
     std::cout << "--- Test 2: Disconnect Flow ---\n";
     ok = test_disconnect_flow() && ok;
+
+    std::cout << "--- Test 2b: Immediate Heartbeat After StartSession ---\n";
+    ok = test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() && ok;
 
     std::cout << "--- Test 3: Reconnect Flow ---\n";
     ok = test_reconnect_flow() && ok;

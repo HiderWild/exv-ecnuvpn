@@ -20,16 +20,16 @@ inline constexpr std::array<std::string_view, 6> DESKTOP_RPC_EVENT_TYPES = {{"lo
 inline constexpr std::array<std::string_view, 18> DESKTOP_RPC_ERROR_CODES = {{"helper_unavailable", "service_not_installed", "service_installed_not_running", "service_start_failed", "oneshot_not_supported", "oneshot_elevation_denied", "helper_rpc_failed", "auth_failed", "tls_verify_failed", "wintun_missing", "utun_permission_denied", "unsupported_dtls", "permission_denied", "network_unreachable", "user_cancelled", "invalid_request", "connection_failed", "vpn_start_failed"}};
 inline constexpr std::array<std::string_view, 7> CONFIG_ACTIONS = {{"config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "config.profile.get", "config.profile.save"}};
 inline constexpr std::array<std::string_view, 4> CONFIG_LEGACY_ALIASES = {{"config.get", "config.save", "config.get_profile", "config.save_profile"}};
-inline constexpr std::array<std::string_view, 8> HELPER_V2_OPS = {{"Hello", "StartSession", "PrepareTunnelDevice", "ApplyTunnelConfig", "Heartbeat", "Cleanup", "GetSnapshot", "EndSession"}};
+inline constexpr std::array<std::string_view, 8> HELPER_OPS = {{"Hello", "StartSession", "PrepareTunnelDevice", "ApplyTunnelConfig", "Heartbeat", "Cleanup", "GetSnapshot", "Shutdown"}};
 inline constexpr std::array<std::string_view, 14> HELPER_FORBIDDEN_CREDENTIAL_FIELDS = {{"password", "passwd", "cookie", "token", "secret", "credential", "auth_key", "auth_token", "session_cookie", "webvpn_cookie", "csrf_token", "bearer_token", "api_key", "apikey"}};
 
-struct HelperV2OpContract {
+struct HelperOpContract {
     std::string_view name;
     std::uint32_t code;
     bool requires_session;
 };
 
-inline constexpr std::array<HelperV2OpContract, 8> HELPER_V2_OP_CONTRACTS = {{
+inline constexpr std::array<HelperOpContract, 8> HELPER_OP_CONTRACTS = {{
     {"Hello", 1, false},
     {"StartSession", 2, false},
     {"PrepareTunnelDevice", 3, true},
@@ -37,7 +37,7 @@ inline constexpr std::array<HelperV2OpContract, 8> HELPER_V2_OP_CONTRACTS = {{
     {"Heartbeat", 5, true},
     {"Cleanup", 6, true},
     {"GetSnapshot", 7, false},
-    {"EndSession", 8, true},
+    {"Shutdown", 8, true},
 }};
 
 struct ConfigAlias {
@@ -74,8 +74,8 @@ constexpr bool is_config_alias(std::string_view alias) {
     return contains(CONFIG_LEGACY_ALIASES, alias);
 }
 
-constexpr bool is_helper_v2_op(std::string_view op) {
-    return contains(HELPER_V2_OPS, op);
+constexpr bool is_helper_op(std::string_view op) {
+    return contains(HELPER_OPS, op);
 }
 
 constexpr bool is_helper_forbidden_credential_field(std::string_view field) {

@@ -60,23 +60,9 @@ std::string create_temp_request_file(const std::string &payload) {
 
 int spawn_worker_process(const std::string &executable_path,
                          const std::string &request_path) {
-  std::string cmdline =
-      "\"" + executable_path + "\" __helper-exec \"" + request_path + "\"";
-  std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
-  mutable_cmd.push_back('\0');
-  STARTUPINFOA si = {};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi = {};
-  if (!CreateProcessA(executable_path.c_str(), mutable_cmd.data(), NULL, NULL, TRUE,
-                       CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-    return -1;
-  }
-  CloseHandle(pi.hThread);
-  WaitForSingleObject(pi.hProcess, INFINITE);
-  DWORD exitCode = 1;
-  GetExitCodeProcess(pi.hProcess, &exitCode);
-  CloseHandle(pi.hProcess);
-  return static_cast<int>(exitCode);
+  (void)executable_path;
+  (void)request_path;
+  return 1;
 }
 
 void terminate_process(int pid) {

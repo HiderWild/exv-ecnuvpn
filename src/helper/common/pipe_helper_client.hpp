@@ -13,8 +13,8 @@ struct PipeClientConfig {
 };
 
 /// Platform-specific HelperClient that communicates over Windows named pipes
-/// or Unix domain sockets. Maintains a persistent connection for the V2
-/// protocol session lifecycle (hello -> start_session -> ... -> end_session).
+/// or Unix domain sockets. Maintains a persistent connection for the helper
+/// protocol session lifecycle (hello -> start_session -> ... -> shutdown).
 ///
 /// This is the production implementation used by the Core process to talk to
 /// the Helper daemon (which runs with elevated privileges).
@@ -28,7 +28,7 @@ public:
     void disconnect() override;
     bool is_connected() const override;
 
-    // V2 protocol methods
+    // Helper protocol methods
     HelloResponse hello(const HelloRequest& req) override;
     StartSessionResponse start_session(const StartSessionRequest& req) override;
     PrepareTunnelDeviceResponse prepare_tunnel_device(const PrepareTunnelDeviceRequest& req) override;
@@ -36,12 +36,12 @@ public:
     HeartbeatResponse heartbeat(const HeartbeatRequest& req) override;
     CleanupResponse cleanup(const CleanupRequest& req) override;
     GetSnapshotResponse get_snapshot(const GetSnapshotRequest& req) override;
-    EndSessionResponse end_session(const EndSessionRequest& req) override;
+    ShutdownResponse shutdown(const ShutdownRequest& req) override;
 
     void set_disconnect_callback(DisconnectCallback cb) override;
 
 private:
-    /// Send a V2 envelope request and receive the response.
+    /// Send a helper envelope request and receive the response.
     /// Handles serialization, transport, and deserialization.
     HelperResponse send_request(HelperOp op, const nlohmann::json& payload);
 

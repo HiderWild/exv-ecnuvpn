@@ -6,7 +6,7 @@
         if (heartbeat_active_) return;
         if (!helper_ || !helper_->is_connected()) return;
         heartbeat_active_ = true;
-        schedule_next_heartbeat();
+        do_heartbeat();
     }
 
     void stop_heartbeat() {
@@ -33,10 +33,13 @@
             req.session_id = session_id_;
             // Map current phase to a string the helper understands.
             switch (phase_) {
+                case TunnelPhase::PreparingHelper: req.core_phase = "PreparingHelper"; break;
                 case TunnelPhase::Connected:     req.core_phase = "Connected"; break;
                 case TunnelPhase::Reconnecting:  req.core_phase = "Reconnecting"; break;
                 case TunnelPhase::Authenticating: req.core_phase = "Authenticating"; break;
                 case TunnelPhase::ConnectingCstp: req.core_phase = "ConnectingCstp"; break;
+                case TunnelPhase::ApplyingNetworkConfig: req.core_phase = "ApplyingNetworkConfig"; break;
+                case TunnelPhase::OpeningPacketDevice: req.core_phase = "OpeningPacketDevice"; break;
                 default:                          req.core_phase = "Idle"; break;
             }
 

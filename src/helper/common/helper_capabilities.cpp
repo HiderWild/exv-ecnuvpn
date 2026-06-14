@@ -11,8 +11,7 @@ static const std::map<Capability, std::string> capability_strings = {
     {Capability::DnsApply,           "dns_apply"},
     {Capability::DnsCleanup,         "dns_cleanup"},
     {Capability::FirewallRules,      "firewall_rules"},
-    {Capability::KillSwitch,         "kill_switch"},
-    {Capability::LegacyProtocol,     "legacy_protocol"}
+    {Capability::KillSwitch,         "kill_switch"}
 };
 
 void CapabilitySet::add(Capability cap) {

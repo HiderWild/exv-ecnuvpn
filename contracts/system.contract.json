@@ -158,7 +158,6 @@
           "structured helper errors"
         ]
       },
-      "protocol_version": 2,
       "wire_format": "helper-request-response-json",
       "ops": [
         { "name": "Hello", "code": 1, "request": "HelloRequest", "response": "HelloResponse", "requires_session": false },
@@ -168,13 +167,7 @@
         { "name": "Heartbeat", "code": 5, "request": "HeartbeatRequest", "response": "HeartbeatResponse", "requires_session": true },
         { "name": "Cleanup", "code": 6, "request": "CleanupRequest", "response": "CleanupResponse", "requires_session": true },
         { "name": "GetSnapshot", "code": 7, "request": "GetSnapshotRequest", "response": "GetSnapshotResponse", "requires_session": false },
-        { "name": "EndSession", "code": 8, "request": "EndSessionRequest", "response": "EndSessionResponse", "requires_session": true }
-      ],
-      "legacy_ops": [
-        { "name": "LegacyStart", "code": 100, "action": "start" },
-        { "name": "LegacyStop", "code": 101, "action": "stop" },
-        { "name": "LegacyStatus", "code": 102, "action": "status" },
-        { "name": "LegacyHeartbeat", "code": 103, "action": "heartbeat" }
+        { "name": "Shutdown", "code": 8, "request": "ShutdownRequest", "response": "ShutdownResponse", "requires_session": true }
       ],
       "messages": [
         "HelloRequest",
@@ -191,8 +184,8 @@
         "CleanupResponse",
         "GetSnapshotRequest",
         "GetSnapshotResponse",
-        "EndSessionRequest",
-        "EndSessionResponse"
+        "ShutdownRequest",
+        "ShutdownResponse"
       ],
       "capabilities": [
         "tunnel_device_create",
@@ -212,8 +205,8 @@
       "errors": [
         "none",
         "unsupported_op",
-        "version_mismatch",
         "invalid_session",
+        "session_conflict",
         "permission_denied",
         "device_not_found",
         "device_busy",

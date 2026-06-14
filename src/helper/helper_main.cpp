@@ -1,8 +1,9 @@
 #include "helper/helper.hpp"
-#include "tunnel.hpp"
+#include "helper/platform/helper_platform.hpp"
 #include "utils.hpp"
 
 #include <iostream>
+#include <optional>
 #include <string>
 
 #if defined(ECNUVPN_PLATFORM_WINDOWS)
@@ -58,7 +59,10 @@ void WINAPI service_main(DWORD, LPSTR *) {
 
   report_service_status(SERVICE_START_PENDING, NO_ERROR, 3000);
   report_service_status(SERVICE_RUNNING);
-  int rc = ecnuvpn::helper::daemon_main();
+  ecnuvpn::helper::DaemonOptions options;
+  options.mode = "service";
+  options.endpoint = ecnuvpn::platform::helper_platform_config().endpoint;
+  int rc = ecnuvpn::helper::daemon_main(options);
   report_service_status(SERVICE_STOPPED,
                         rc == 0 ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR);
 }
@@ -72,9 +76,6 @@ int run_windows_service() {
   if (StartServiceCtrlDispatcherA(table))
     return 0;
 
-  if (GetLastError() == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
-    return ecnuvpn::helper::daemon_main();
-
   return 1;
 }
 
@@ -86,8 +87,7 @@ namespace {
 int print_usage() {
   std::cerr << "Usage:\n"
             << "  exv-helper --service\n"
-            << "  exv-helper --foreground\n"
-            << "  exv-helper --oneshot --endpoint <endpoint> --auth-token <token>\n";
+            << "  exv-helper --oneshot --endpoint <endpoint> --owner <uid-or-sid> --parent-pid <pid>\n";
   return 2;
 }
 
@@ -96,6 +96,18 @@ bool read_option_value(int argc, char *argv[], int *index, std::string *value) {
     return false;
   *value = argv[++(*index)];
   return true;
+}
+
+std::optional<int> parse_positive_int(const std::string &value) {
+  try {
+    size_t parsed = 0;
+    int result = std::stoi(value, &parsed);
+    if (parsed != value.size() || result <= 0)
+      return std::nullopt;
+    return result;
+  } catch (...) {
+    return std::nullopt;
+  }
 }
 
 } // namespace
@@ -107,24 +119,20 @@ int main(int argc, char *argv[]) {
     std::string arg = argv[1];
 
     if (arg == "--service") {
+      ecnuvpn::helper::DaemonOptions options;
+      options.mode = "service";
+      options.endpoint = ecnuvpn::platform::helper_platform_config().endpoint;
 #if defined(ECNUVPN_PLATFORM_WINDOWS)
       return run_windows_service();
 #else
-      return ecnuvpn::helper::daemon_main();
-#endif
-    }
-
-    if (arg == "--foreground") {
-      ecnuvpn::helper::DaemonOptions options;
-      options.mode = "foreground";
       return ecnuvpn::helper::daemon_main(options);
+#endif
     }
 
     if (arg == "--oneshot") {
       ecnuvpn::helper::DaemonOptions options;
       options.mode = "oneshot";
       options.oneshot = true;
-      options.auth_required = true;
 
       for (int i = 2; i < argc; ++i) {
         std::string option = argv[i];
@@ -134,37 +142,34 @@ int main(int argc, char *argv[]) {
             return print_usage();
           continue;
         }
-        if (option == "--auth-token") {
-          if (!read_option_value(argc, argv, &i, &options.auth_token))
+        if (option == "--owner") {
+          if (!read_option_value(argc, argv, &i, &options.owner))
             return print_usage();
+          continue;
+        }
+        if (option == "--parent-pid") {
+          std::string value;
+          if (!read_option_value(argc, argv, &i, &value))
+            return print_usage();
+          auto parsed = parse_positive_int(value);
+          if (!parsed.has_value())
+            return print_usage();
+          options.parent_pid = *parsed;
           continue;
         }
         return print_usage();
       }
 
-      if (options.endpoint.empty() || options.auth_token.empty()) {
+      if (options.endpoint.empty() || options.owner.empty() ||
+          options.parent_pid <= 0) {
         return print_usage();
       }
 
       return ecnuvpn::helper::daemon_main(options);
     }
 
-    if (arg == "__helper-exec" && argc > 2) {
-      // DEPRECATED: V1 legacy worker entry.  Receives plaintext password
-      // from file.  Native engine must use TunnelController + HelperClient
-      // V2 session-based API.  This entry point will be removed in a future
-      // release.
-      std::cerr << "[DEPRECATED] __helper-exec is a legacy V1 worker entry. "
-                << "Use HelperClient V2 session API instead.\n";
-      return ecnuvpn::helper::worker_main(argv[2]);
-    }
-
-    if (arg == "__tunnel-script") {
-      return ecnuvpn::tunnel::run_script_hook();
-    }
-
     return print_usage();
   }
 
-  return ecnuvpn::helper::daemon_main();
+  return print_usage();
 }

@@ -120,13 +120,19 @@ int main() {
               "legacy config.get must be declared as an alias") &&
        ok;
 
-  ok = expect(exv::contracts::generated::is_helper_v2_op("StartSession"),
+  ok = expect(exv::contracts::generated::is_helper_op("StartSession"),
               "helper StartSession op must be generated") &&
        ok;
-  ok = expect(exv::contracts::generated::is_helper_v2_op("ApplyTunnelConfig"),
+  ok = expect(exv::contracts::generated::is_helper_op("ApplyTunnelConfig"),
               "helper ApplyTunnelConfig op must be generated") &&
        ok;
-  for (const auto &op : exv::contracts::generated::HELPER_V2_OP_CONTRACTS) {
+  ok = expect(exv::contracts::generated::is_helper_op("Shutdown"),
+              "helper Shutdown op must be generated") &&
+       ok;
+  ok = expect(!exv::contracts::generated::is_helper_op("EndSession"),
+              "helper EndSession op must not be generated") &&
+       ok;
+  for (const auto &op : exv::contracts::generated::HELPER_OP_CONTRACTS) {
     if (op.name == "StartSession") {
       ok = expect(op.code == 2, "StartSession op code must be generated") && ok;
       ok = expect(!op.requires_session,

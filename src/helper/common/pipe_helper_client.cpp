@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <iostream>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -55,13 +54,8 @@ bool PipeHelperClient::connect() {
 
 #ifdef _WIN32
     if (!is_windows_named_pipe_path(config_.pipe_path)) {
-        std::cerr << "[DEBUG] PipeHelperClient rejected non-pipe path: "
-                  << config_.pipe_path << std::endl;
         return false;
     }
-
-    // Debug: log the exact pipe path being connected to
-    std::cerr << "[DEBUG] PipeHelperClient connecting to: " << config_.pipe_path << std::endl;
 
     const DWORD start_tick = GetTickCount();
     const DWORD deadline = start_tick + static_cast<DWORD>(config_.connect_timeout_ms);
@@ -90,11 +84,8 @@ bool PipeHelperClient::connect() {
     }
 
     if (hPipe == INVALID_HANDLE_VALUE) {
-        std::cerr << "[DEBUG] PipeHelperClient connect failed, last error: " << GetLastError() << std::endl;
         return false;
     }
-
-    std::cerr << "[DEBUG] PipeHelperClient connected successfully!" << std::endl;
 
     // Set pipe to byte-read mode (matches server's PIPE_READMODE_BYTE)
     DWORD mode = PIPE_READMODE_BYTE;
@@ -238,7 +229,7 @@ std::string PipeHelperClient::recv_raw() {
 }
 
 // ---------------------------------------------------------------------------
-// V2 envelope: send_request
+// Helper envelope: send_request
 // ---------------------------------------------------------------------------
 
 HelperResponse PipeHelperClient::send_request(HelperOp op,
@@ -253,7 +244,7 @@ HelperResponse PipeHelperClient::send_request(HelperOp op,
         return resp;
     }
 
-    // Build V2 envelope
+    // Build helper envelope
     HelperRequest req;
     req.op = op;
     req.payload_json = payload.dump();
@@ -290,7 +281,7 @@ HelperResponse PipeHelperClient::send_request(HelperOp op,
 }
 
 // ---------------------------------------------------------------------------
-// V2 protocol methods
+// Helper protocol methods
 // ---------------------------------------------------------------------------
 
 HelloResponse PipeHelperClient::hello(const HelloRequest& req) {
@@ -298,7 +289,6 @@ HelloResponse PipeHelperClient::hello(const HelloRequest& req) {
     auto resp = send_request(HelperOp::Hello, payload);
     if (!resp.success) {
         HelloResponse hr;
-        hr.server_version = 0;
         return hr;
     }
     return hello_response_from_json(json::parse(resp.payload_json));
@@ -369,15 +359,16 @@ GetSnapshotResponse PipeHelperClient::get_snapshot(const GetSnapshotRequest& req
     return get_snapshot_response_from_json(json::parse(resp.payload_json));
 }
 
-EndSessionResponse PipeHelperClient::end_session(const EndSessionRequest& req) {
+ShutdownResponse PipeHelperClient::shutdown(const ShutdownRequest& req) {
     json payload = req;
-    auto resp = send_request(HelperOp::EndSession, payload);
+    auto resp = send_request(HelperOp::Shutdown, payload);
     if (!resp.success) {
-        EndSessionResponse er;
-        er.success = false;
-        return er;
+        ShutdownResponse sr;
+        sr.cleanup_success = false;
+        sr.errors.push_back(resp.error_message);
+        return sr;
     }
-    return end_session_response_from_json(json::parse(resp.payload_json));
+    return shutdown_response_from_json(json::parse(resp.payload_json));
 }
 
 } // namespace exv::helper

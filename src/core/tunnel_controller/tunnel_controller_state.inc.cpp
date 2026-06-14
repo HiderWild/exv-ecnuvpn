@@ -3,6 +3,11 @@
     // ================================================================
 
     void transition_to(TunnelPhase new_phase) {
+        if (new_phase == TunnelPhase::Idle ||
+            new_phase == TunnelPhase::Failed ||
+            new_phase == TunnelPhase::CleaningUp) {
+            stop_heartbeat();
+        }
         phase_ = new_phase;
         update_snapshot();
         notify_status();

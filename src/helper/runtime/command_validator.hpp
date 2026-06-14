@@ -20,8 +20,7 @@ public:
     static bool contains_path_traversal(const std::string& input);
 
 private:
-    // Whitelist of allowed V2 ops
-    static const std::set<HelperOp> allowed_v2_ops_;
+    static const std::set<HelperOp> allowed_ops_;
 };
 
 } // namespace exv::helper

@@ -90,4 +90,14 @@ size_t SessionLeaseManager::active_session_count() const {
     return leases_.size();
 }
 
+std::vector<SessionId> SessionLeaseManager::active_session_ids() const {
+    std::vector<SessionId> ids;
+    ids.reserve(leases_.size());
+    for (const auto& [id, lease] : leases_) {
+        (void)lease;
+        ids.push_back(id);
+    }
+    return ids;
+}
+
 } // namespace exv::helper

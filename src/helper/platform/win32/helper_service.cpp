@@ -1,4 +1,5 @@
 #include "helper/helper.hpp"
+#include "helper/platform/helper_platform.hpp"
 #include "utils.hpp"
 
 #include <string>
@@ -53,7 +54,10 @@ void WINAPI service_main(DWORD, LPSTR *) {
 
   report_service_status(SERVICE_START_PENDING, NO_ERROR, 3000);
   report_service_status(SERVICE_RUNNING);
-  int rc = ecnuvpn::helper::daemon_main();
+  ecnuvpn::helper::DaemonOptions options;
+  options.mode = "service";
+  options.endpoint = ecnuvpn::platform::helper_platform_config().endpoint;
+  int rc = ecnuvpn::helper::daemon_main(options);
   report_service_status(SERVICE_STOPPED, rc == 0 ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR);
 }
 
@@ -66,9 +70,6 @@ int run_service() {
   if (StartServiceCtrlDispatcherA(table))
     return 0;
 
-  if (GetLastError() == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) {
-    return ecnuvpn::helper::daemon_main();
-  }
   return 1;
 }
 
@@ -83,10 +84,8 @@ int main(int argc, char *argv[]) {
     std::string arg = argv[1];
     if (arg == "--service")
       return run_service();
-    if (arg == "__helper-exec" && argc > 2)
-      return ecnuvpn::helper::worker_main(argv[2]);
   }
-  return ecnuvpn::helper::daemon_main();
+  return 2;
 #else
   (void)argc;
   (void)argv;

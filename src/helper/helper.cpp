@@ -2,7 +2,7 @@
 #include "helper/helper_ipc.hpp"
 
 #include "helper/common/helper_messages.hpp"
-#include "helper/helper_v2_handler.hpp"
+#include "helper/helper_handler.hpp"
 #include "logger.hpp"
 #include "runtime/runtime_context.hpp"
 #include "feedback/feedback.hpp"
@@ -17,10 +17,11 @@
 #include <csignal>
 #include <cstring>
 #include <chrono>
-#include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -71,7 +72,8 @@ nlohmann::json make_helper_descriptor() {
                         {"platform_service_mode", platform_config.service_mode},
                         {"mode", active_daemon_options.mode},
                         {"endpoint", active_daemon_options.endpoint},
-                        {"auth_required", active_daemon_options.auth_required},
+                        {"owner", active_daemon_options.owner},
+                        {"parent_pid", active_daemon_options.parent_pid},
                         {"platform", std::string(kHelperPlatformName)},
                         {"transport", std::string(kHelperTransportName)},
                         {"capabilities", make_helper_capabilities()}};
@@ -81,6 +83,15 @@ nlohmann::json make_hello_response() {
   nlohmann::json descriptor = make_helper_descriptor();
   descriptor["ok"] = true;
   return descriptor;
+}
+
+exv::helper::CleanupPolicy full_cleanup_policy() {
+  exv::helper::CleanupPolicy policy;
+  policy.remove_routes = true;
+  policy.remove_dns = true;
+  policy.remove_adapter = true;
+  policy.remove_firewall_rules = true;
+  return policy;
 }
 
 void add_helper_descriptor_fields(nlohmann::json &response) {
@@ -118,7 +129,11 @@ bool wait_until_available(int attempts = 1, unsigned int delay_us = 0) {
   for (int i = 0; i < attempts; ++i) {
     nlohmann::json response;
     std::string error_message;
-    if (send_request(nlohmann::json{{"action", "status"}}, &response, &error_message)) {
+    exv::helper::HelperRequest hello_req;
+    hello_req.op = exv::helper::HelperOp::Hello;
+    hello_req.payload_json = nlohmann::json(exv::helper::HelloRequest{}).dump();
+    nlohmann::json request_json = hello_req;
+    if (send_request(request_json, &response, &error_message)) {
       return true;
     }
     if (i + 1 < attempts && delay_us > 0) {
@@ -177,27 +192,6 @@ int show_service_status() {
       make_helper_service_manager_context());
 }
 
-int worker_main(const std::string &request_path) {
-  // V1 legacy worker: reads request from file, delegates to vpn::start_with_password.
-  // Preserved for backward compatibility with legacy_openconnect engine.
-  try {
-    std::string content = utils::read_file(request_path);
-    nlohmann::json request = nlohmann::json::parse(content);
-    Config cfg = request.at("config").get<Config>();
-    std::string password = request.at("password").get<std::string>();
-    int retry_limit = request.value("retry_limit", 0);
-
-    runtime::bootstrap(request.value("config_dir", std::string()),
-                       request.value("home", std::string()), true);
-    logger::init();
-
-    return vpn::start(cfg, retry_limit);
-  } catch (const std::exception &e) {
-    logger::error(std::string("worker_main failed: ") + e.what());
-    return 1;
-  }
-}
-
 int daemon_main(const DaemonOptions &options) {
   daemon_stop_requested = 0;
   active_daemon_options = options;
@@ -207,17 +201,44 @@ int daemon_main(const DaemonOptions &options) {
 
   logger::info("Helper daemon starting (mode=" + options.mode + ")");
 
-  // Debug: log the exact endpoint being listened on
-  std::cerr << "[DEBUG] Helper listening on: " << options.endpoint << std::endl;
-
   auto ipc = helper::create_ipc_server();
   if (!ipc || !ipc->start(options.endpoint)) {
     logger::error("Failed to open helper IPC endpoint: " + options.endpoint);
     return 1;
   }
 
-  // Create V2 handler
-  auto v2_handler = std::make_unique<exv::helper::HelperV2Handler>();
+  auto handler = std::make_unique<exv::helper::HelperHandler>();
+  exv::helper::HelperStartupContext startup_context;
+  startup_context.launch_mode = options.mode;
+  startup_context.endpoint = options.endpoint;
+  startup_context.owner = options.owner;
+  startup_context.parent_pid = options.parent_pid;
+  handler->set_startup_context(std::move(startup_context));
+  std::mutex handler_mutex;
+  std::thread maintenance_thread([&] {
+    while (!daemon_stop_requested) {
+      for (int i = 0; i < 150 && !daemon_stop_requested; ++i) {
+        platform::sleep_ms(100);
+      }
+      if (daemon_stop_requested)
+        break;
+
+      std::lock_guard<std::mutex> lock(handler_mutex);
+      handler->tick();
+      if (options.oneshot && options.parent_pid > 0 &&
+          !platform::is_process_alive(options.parent_pid)) {
+        logger::info("Helper oneshot parent disappeared; cleaning up and exiting");
+        handler->cleanup_all_sessions(full_cleanup_policy());
+        daemon_stop_requested = 1;
+      }
+      if (handler->should_stop()) {
+        daemon_stop_requested = 1;
+      }
+      if (daemon_stop_requested) {
+        platform::wake_helper_daemon_for_shutdown();
+      }
+    }
+  });
 
   logger::info("Helper daemon ready, accepting connections");
 
@@ -226,7 +247,13 @@ int daemon_main(const DaemonOptions &options) {
       if (daemon_stop_requested)
         break;
       reap_finished_request_handlers();
-      v2_handler->tick();
+      {
+        std::lock_guard<std::mutex> lock(handler_mutex);
+        handler->tick();
+        if (handler->should_stop()) {
+          daemon_stop_requested = 1;
+        }
+      }
       continue;
     }
 
@@ -245,22 +272,19 @@ int daemon_main(const DaemonOptions &options) {
         nlohmann::json req = nlohmann::json::parse(raw);
 
         if (req.contains("op")) {
-          exv::helper::HelperRequest v2_req = exv::helper::helper_request_from_json(req);
-          exv::helper::HelperResponse v2_resp = v2_handler->handle(v2_req);
-          nlohmann::json resp_json = v2_resp;
+          exv::helper::HelperRequest helper_req = exv::helper::helper_request_from_json(req);
+          std::lock_guard<std::mutex> lock(handler_mutex);
+          exv::helper::HelperResponse helper_resp = handler->handle(helper_req);
+          nlohmann::json resp_json = helper_resp;
           ipc->send_response(resp_json.dump());
+          if (handler->should_stop()) {
+            daemon_stop_requested = 1;
+          }
         } else {
           std::string action = req.value("action", std::string());
-          if (action == "hello") {
-            ipc->send_response(make_hello_response().dump());
-          } else if (action == "status") {
-            nlohmann::json resp = make_hello_response();
-            resp["running"] = true;
-            ipc->send_response(resp.dump());
-          } else {
-            nlohmann::json err = make_error("Unknown action: " + action, "unknown_action");
-            ipc->send_response(err.dump());
-          }
+          nlohmann::json err =
+              make_error("Unsupported helper request: " + action, "unsupported_op");
+          ipc->send_response(err.dump());
         }
       } catch (const std::exception &e) {
         nlohmann::json err = make_error(std::string("Parse error: ") + e.what());
@@ -268,25 +292,39 @@ int daemon_main(const DaemonOptions &options) {
       }
 
       reap_finished_request_handlers();
-      v2_handler->tick();
+      {
+        std::lock_guard<std::mutex> lock(handler_mutex);
+        handler->tick();
+        if (handler->should_stop()) {
+          daemon_stop_requested = 1;
+        }
+      }
     }
 
     ipc->close_client();
+    if (options.oneshot) {
+      std::lock_guard<std::mutex> lock(handler_mutex);
+      handler->cleanup_all_sessions(full_cleanup_policy());
+      daemon_stop_requested = 1;
+    }
     reap_finished_request_handlers();
-    v2_handler->tick();
+    {
+      std::lock_guard<std::mutex> lock(handler_mutex);
+      handler->tick();
+      if (handler->should_stop()) {
+        daemon_stop_requested = 1;
+      }
+    }
   }
 
   logger::info("Helper daemon shutting down");
+  daemon_stop_requested = 1;
+  if (maintenance_thread.joinable()) {
+    maintenance_thread.join();
+  }
   ipc->close();
   platform::cleanup_daemon_endpoint(active_daemon_options.endpoint);
   return 0;
-}
-
-int daemon_main() {
-  DaemonOptions options;
-  options.mode = "service";
-  options.endpoint = platform::helper_platform_config().endpoint;
-  return daemon_main(options);
 }
 
 } // namespace helper

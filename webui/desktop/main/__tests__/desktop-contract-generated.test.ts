@@ -14,9 +14,9 @@ import {
   DESKTOP_RPC_EVENT_TYPES,
   DESKTOP_RPC_REQUEST_FIELDS,
   DESKTOP_RPC_RESPONSE_FIELDS,
-  HELPER_V2_OP_CONTRACTS,
+  HELPER_OP_CONTRACTS,
   HELPER_FORBIDDEN_CREDENTIAL_FIELDS,
-  HELPER_V2_OPS,
+  HELPER_OPS,
 } from '../../shared/generated/system-contract.js'
 import {
   desktopRpcActions,
@@ -87,16 +87,17 @@ describe('generated system contract', () => {
     assert.equal(CONFIG_ALIASES['config.save_profile'], 'config.profile.save')
   })
 
-  it('keeps helper V2 privileged contract credential-free', () => {
+  it('keeps helper privileged contract credential-free', () => {
     const helper = manifest().modules.helper
-    assert.deepEqual(HELPER_V2_OPS, helper.ops.map((op: { name: string }) => op.name))
-    assert.deepEqual(HELPER_V2_OP_CONTRACTS, helper.ops)
+    assert.deepEqual(HELPER_OPS, helper.ops.map((op: { name: string }) => op.name))
+    assert.deepEqual(HELPER_OP_CONTRACTS, helper.ops)
     assert.deepEqual(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, helper.security.forbidden_fields)
 
-    expectContains(HELPER_V2_OPS, 'Hello')
-    expectContains(HELPER_V2_OPS, 'StartSession')
-    expectContains(HELPER_V2_OPS, 'ApplyTunnelConfig')
-    expectContains(HELPER_V2_OPS, 'Cleanup')
+    expectContains(HELPER_OPS, 'Hello')
+    expectContains(HELPER_OPS, 'StartSession')
+    expectContains(HELPER_OPS, 'ApplyTunnelConfig')
+    expectContains(HELPER_OPS, 'Cleanup')
+    expectContains(HELPER_OPS, 'Shutdown')
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'password')
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'cookie')
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'auth_token')

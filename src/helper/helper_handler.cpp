@@ -1,16 +1,18 @@
-#include "helper/helper_v2_handler.hpp"
+#include "helper/helper_handler.hpp"
 #include "logger.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <utility>
 
 namespace exv::helper {
 
-HelperV2Handler::HelperV2Handler() {
+HelperHandler::HelperHandler(HelperLifecyclePolicy policy)
+    : policy_(std::move(policy)) {
     register_handlers();
 }
 
-void HelperV2Handler::register_handlers() {
+void HelperHandler::register_handlers() {
     dispatcher_.register_handler(HelperOp::Hello,
         [this](const HelperRequest& req) { return handle_hello(req); });
     dispatcher_.register_handler(HelperOp::StartSession,
@@ -25,11 +27,11 @@ void HelperV2Handler::register_handlers() {
         [this](const HelperRequest& req) { return handle_cleanup(req); });
     dispatcher_.register_handler(HelperOp::GetSnapshot,
         [this](const HelperRequest& req) { return handle_get_snapshot(req); });
-    dispatcher_.register_handler(HelperOp::EndSession,
-        [this](const HelperRequest& req) { return handle_end_session(req); });
+    dispatcher_.register_handler(HelperOp::Shutdown,
+        [this](const HelperRequest& req) { return handle_shutdown(req); });
 }
 
-HelperResponse HelperV2Handler::handle(const HelperRequest& request) {
+HelperResponse HelperHandler::handle(const HelperRequest& request) {
     // Validate the request before dispatching
     auto validation_error = validator_.validate(request);
     if (validation_error.has_value()) {
@@ -44,37 +46,60 @@ HelperResponse HelperV2Handler::handle(const HelperRequest& request) {
     return dispatcher_.dispatch(request);
 }
 
-void HelperV2Handler::tick() {
+void HelperHandler::tick() {
     auto now = std::chrono::steady_clock::now();
-    auto expired = leases_.find_expired_sessions(now);
-    for (const auto& id : expired) {
+    auto active_ids = leases_.active_session_ids();
+    for (const auto& id : active_ids) {
         auto lease = leases_.get_session(id);
-        if (lease.has_value()) {
-            ecnuvpn::logger::info("[v2-handler] Cleaning up expired session: " + id.value);
-            cleanup_.remove_session(id);
-            leases_.remove_session(id);
+        if (lease.has_value() && policy_.should_cleanup_stale(*lease, now)) {
+            ecnuvpn::logger::info("[helper] Heartbeat timed out; cleaning session: "
+                                  + id.value);
+            CleanupPolicy full_policy;
+            full_policy.remove_routes = true;
+            full_policy.remove_dns = true;
+            full_policy.remove_adapter = true;
+            full_policy.remove_firewall_rules = true;
+            cleanup_session(id, full_policy);
+            if (startup_context_.launch_mode == "oneshot") {
+                shutdown_requested_ = true;
+            }
         }
     }
 }
 
-SessionLeaseManager& HelperV2Handler::lease_manager() {
+SessionLeaseManager& HelperHandler::lease_manager() {
     return leases_;
 }
 
-CleanupRegistry& HelperV2Handler::cleanup_registry() {
+CleanupRegistry& HelperHandler::cleanup_registry() {
     return cleanup_;
+}
+
+bool HelperHandler::should_stop() const {
+    return shutdown_requested_;
+}
+
+void HelperHandler::set_startup_context(HelperStartupContext context) {
+    startup_context_ = std::move(context);
+}
+
+void HelperHandler::cleanup_all_sessions(const CleanupPolicy& policy) {
+    auto active_ids = leases_.active_session_ids();
+    for (const auto& id : active_ids) {
+        cleanup_session(id, policy);
+    }
 }
 
 // --- Handler implementations ---
 
-HelperResponse HelperV2Handler::handle_hello(const HelperRequest& req) {
+HelperResponse HelperHandler::handle_hello(const HelperRequest& req) {
     HelloResponse hello;
-    hello.server_version = PROTOCOL_VERSION;
     hello.capabilities = {
-        "tunnel_device", "tunnel_config", "session_management",
-        "heartbeat", "cleanup", "snapshot"
+        "session", "heartbeat", "cleanup", "snapshot", "shutdown"
     };
     hello.mode = HelperMode::Transient;
+    hello.startup_context = startup_context_;
+    hello.session_state.active = leases_.active_session_count() > 0;
 
     nlohmann::json payload;
     to_json(payload, hello);
@@ -86,7 +111,7 @@ HelperResponse HelperV2Handler::handle_hello(const HelperRequest& req) {
     return resp;
 }
 
-HelperResponse HelperV2Handler::handle_start_session(const HelperRequest& req) {
+HelperResponse HelperHandler::handle_start_session(const HelperRequest& req) {
     StartSessionRequest start_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
@@ -100,6 +125,15 @@ HelperResponse HelperV2Handler::handle_start_session(const HelperRequest& req) {
         return resp;
     }
 
+    if (leases_.active_session_count() > 0) {
+        HelperResponse resp;
+        resp.op = req.op;
+        resp.success = false;
+        resp.error_code = "session_conflict";
+        resp.error_message = "An active helper session already exists";
+        return resp;
+    }
+
     CleanupPolicy default_policy;
     SessionId session_id = leases_.create_session(
         start_req.profile_id, start_req.mode, default_policy);
@@ -110,7 +144,7 @@ HelperResponse HelperV2Handler::handle_start_session(const HelperRequest& req) {
     record.created_at = std::chrono::system_clock::now();
     cleanup_.register_session(record);
 
-    ecnuvpn::logger::info("[v2-handler] Session started: " + session_id.value);
+    ecnuvpn::logger::info("[helper] Session started: " + session_id.value);
 
     StartSessionResponse start_resp;
     start_resp.session_id = session_id;
@@ -125,7 +159,7 @@ HelperResponse HelperV2Handler::handle_start_session(const HelperRequest& req) {
     return resp;
 }
 
-HelperResponse HelperV2Handler::handle_prepare_tunnel_device(const HelperRequest& req) {
+HelperResponse HelperHandler::handle_prepare_tunnel_device(const HelperRequest& req) {
     PrepareTunnelDeviceRequest device_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
@@ -148,26 +182,15 @@ HelperResponse HelperV2Handler::handle_prepare_tunnel_device(const HelperRequest
         return resp;
     }
 
-    ecnuvpn::logger::info("[v2-handler] PrepareTunnelDevice (stub) for session: "
-                          + device_req.session_id.value
-                          + " adapter=" + device_req.adapter_name);
-
-    // Stub: return a placeholder device path
-    PrepareTunnelDeviceResponse device_resp;
-    device_resp.device_path = "\\\\.\\Wintun\\ecnuvpn";
-    device_resp.mtu = 1400;
-
-    nlohmann::json payload;
-    to_json(payload, device_resp);
-
     HelperResponse resp;
     resp.op = req.op;
-    resp.success = true;
-    resp.payload_json = payload.dump();
+    resp.success = false;
+    resp.error_code = "network_ops_unavailable";
+    resp.error_message = "Helper network operations are not available";
     return resp;
 }
 
-HelperResponse HelperV2Handler::handle_apply_tunnel_config(const HelperRequest& req) {
+HelperResponse HelperHandler::handle_apply_tunnel_config(const HelperRequest& req) {
     ApplyTunnelConfigRequest config_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
@@ -190,34 +213,15 @@ HelperResponse HelperV2Handler::handle_apply_tunnel_config(const HelperRequest& 
         return resp;
     }
 
-    ecnuvpn::logger::info("[v2-handler] ApplyTunnelConfig (stub) for session: "
-                          + config_req.config.session_id.value
-                          + " address=" + config_req.config.interface_address
-                          + " routes=" + std::to_string(config_req.config.routes.size()));
-
-    // Track routes in cleanup registry
-    for (const auto& route : config_req.config.routes) {
-        cleanup_.add_resource(config_req.config.session_id,
-            {"route", route.destination + " via " + route.gateway});
-    }
-    for (const auto& dns_server : config_req.config.dns.servers) {
-        cleanup_.add_resource(config_req.config.session_id, {"dns", dns_server});
-    }
-
-    ApplyTunnelConfigResponse config_resp;
-    config_resp.success = true;
-
-    nlohmann::json payload;
-    to_json(payload, config_resp);
-
     HelperResponse resp;
     resp.op = req.op;
-    resp.success = true;
-    resp.payload_json = payload.dump();
+    resp.success = false;
+    resp.error_code = "network_ops_unavailable";
+    resp.error_message = "Helper network operations are not available";
     return resp;
 }
 
-HelperResponse HelperV2Handler::handle_heartbeat(const HelperRequest& req) {
+HelperResponse HelperHandler::handle_heartbeat(const HelperRequest& req) {
     HeartbeatRequest hb_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
@@ -262,7 +266,27 @@ HelperResponse HelperV2Handler::handle_heartbeat(const HelperRequest& req) {
     return resp;
 }
 
-HelperResponse HelperV2Handler::handle_cleanup(const HelperRequest& req) {
+CleanupResponse HelperHandler::cleanup_session(const SessionId& session_id,
+                                               const CleanupPolicy& policy) {
+    (void)policy;
+    auto resources = cleanup_.get_resources(session_id);
+    std::vector<std::string> errors;
+
+    for (const auto& res : resources) {
+        ecnuvpn::logger::info("[helper] Cleaning managed resource: type=" + res.type
+                              + " detail=" + res.detail);
+    }
+
+    cleanup_.remove_session(session_id);
+    leases_.remove_session(session_id);
+
+    CleanupResponse cleanup_resp;
+    cleanup_resp.success = errors.empty();
+    cleanup_resp.errors = errors;
+    return cleanup_resp;
+}
+
+HelperResponse HelperHandler::handle_cleanup(const HelperRequest& req) {
     CleanupRequest cleanup_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
@@ -285,24 +309,10 @@ HelperResponse HelperV2Handler::handle_cleanup(const HelperRequest& req) {
         return resp;
     }
 
-    ecnuvpn::logger::info("[v2-handler] Cleaning up session: " + cleanup_req.session_id.value);
+    ecnuvpn::logger::info("[helper] Cleaning up session: " + cleanup_req.session_id.value);
 
-    auto resources = cleanup_.get_resources(cleanup_req.session_id);
-    std::vector<std::string> errors;
-
-    // Stub: log what would be cleaned up
-    for (const auto& res : resources) {
-        ecnuvpn::logger::info("[v2-handler] Would clean up resource: type=" + res.type
-                              + " detail=" + res.detail);
-    }
-
-    // Remove from tracking
-    cleanup_.remove_session(cleanup_req.session_id);
-    leases_.remove_session(cleanup_req.session_id);
-
-    CleanupResponse cleanup_resp;
-    cleanup_resp.success = true;
-    cleanup_resp.errors = errors;
+    CleanupResponse cleanup_resp =
+        cleanup_session(cleanup_req.session_id, cleanup_req.policy);
 
     nlohmann::json payload;
     to_json(payload, cleanup_resp);
@@ -314,7 +324,7 @@ HelperResponse HelperV2Handler::handle_cleanup(const HelperRequest& req) {
     return resp;
 }
 
-HelperResponse HelperV2Handler::handle_get_snapshot(const HelperRequest& /*req*/) {
+HelperResponse HelperHandler::handle_get_snapshot(const HelperRequest& /*req*/) {
     auto now = std::chrono::steady_clock::now();
 
     GetSnapshotResponse snap_resp;
@@ -348,39 +358,42 @@ HelperResponse HelperV2Handler::handle_get_snapshot(const HelperRequest& /*req*/
     return resp;
 }
 
-HelperResponse HelperV2Handler::handle_end_session(const HelperRequest& req) {
-    EndSessionRequest end_req;
+HelperResponse HelperHandler::handle_shutdown(const HelperRequest& req) {
+    ShutdownRequest shutdown_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
-        end_req = end_session_request_from_json(j);
+        shutdown_req = shutdown_request_from_json(j);
     } catch (const std::exception& e) {
         HelperResponse resp;
         resp.op = req.op;
         resp.success = false;
         resp.error_code = "invalid_payload";
-        resp.error_message = std::string("Failed to parse EndSession request: ") + e.what();
+        resp.error_message = std::string("Failed to parse Shutdown request: ") + e.what();
         return resp;
     }
 
-    if (!leases_.has_session(end_req.session_id)) {
+    if (!leases_.has_session(shutdown_req.session_id)) {
         HelperResponse resp;
         resp.op = req.op;
         resp.success = false;
         resp.error_code = "invalid_session";
-        resp.error_message = "Session not found: " + end_req.session_id.value;
+        resp.error_message = "Session not found: " + shutdown_req.session_id.value;
         return resp;
     }
 
-    ecnuvpn::logger::info("[v2-handler] Ending session: " + end_req.session_id.value);
+    ecnuvpn::logger::info("[helper] Shutting down session: " + shutdown_req.session_id.value);
 
-    cleanup_.remove_session(end_req.session_id);
-    leases_.remove_session(end_req.session_id);
+    CleanupResponse cleanup_resp =
+        cleanup_session(shutdown_req.session_id, shutdown_req.policy);
 
-    EndSessionResponse end_resp;
-    end_resp.success = true;
+    ShutdownResponse shutdown_resp;
+    shutdown_resp.cleanup_success = cleanup_resp.success;
+    shutdown_resp.errors = cleanup_resp.errors;
+    shutdown_resp.exiting = startup_context_.launch_mode == "oneshot";
+    shutdown_requested_ = shutdown_resp.exiting;
 
     nlohmann::json payload;
-    to_json(payload, end_resp);
+    to_json(payload, shutdown_resp);
 
     HelperResponse resp;
     resp.op = req.op;

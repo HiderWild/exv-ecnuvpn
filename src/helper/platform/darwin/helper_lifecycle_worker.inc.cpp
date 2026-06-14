@@ -17,33 +17,8 @@ std::string create_temp_request_file(const std::string &payload) {
 
 int spawn_worker_process(const std::string &executable_path,
                          const std::string &request_path) {
-  pid_t worker_pid = fork();
-  if (worker_pid < 0)
-    return -1;
-
-  if (worker_pid == 0) {
-    int devnull = open("/dev/null", O_WRONLY);
-    if (devnull >= 0) {
-      dup2(devnull, STDOUT_FILENO);
-      dup2(devnull, STDERR_FILENO);
-      close(devnull);
-    }
-    execl(executable_path.c_str(), executable_path.c_str(), "__helper-exec",
-          request_path.c_str(), static_cast<char *>(nullptr));
-    _exit(127);
-  }
-
-  int status = 0;
-  while (waitpid(worker_pid, &status, 0) < 0) {
-    if (errno != EINTR) {
-      status = -1;
-      break;
-    }
-  }
-  if (status < 0)
-    return -1;
-  if (WIFEXITED(status))
-    return WEXITSTATUS(status);
+  (void)executable_path;
+  (void)request_path;
   return 1;
 }
 

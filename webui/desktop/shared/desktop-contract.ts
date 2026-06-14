@@ -71,7 +71,7 @@ export interface DesktopModalPayload {
 }
 
 // =========================================================================
-// RPC V2 Contract Types (Phase 4-6 hardening)
+// RPC Contract Types
 //
 // These types mirror the C++ JSON payloads produced by core_api action
 // handlers.  Field names and value conventions MUST stay in sync with:
@@ -156,8 +156,8 @@ export interface CredentialStoreStatus {
   error?: ErrorInfo
 }
 
-// HelperV2Status matches the stub returned by service_actions::helper_status().
-export interface HelperV2Status {
+// HelperStatus matches the payload returned by service_actions::helper_status().
+export interface HelperStatus {
   installed: boolean
   status: string
   version: string

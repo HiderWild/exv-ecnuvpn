@@ -5,6 +5,7 @@
 #include "utils.hpp"
 
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
@@ -30,23 +31,9 @@ bool send_helper_request(const HelperServiceManagerContext &context,
 
 void print_runtime_status_if_available(const HelperServiceManagerContext &context,
                                        bool available) {
+  (void)context;
   if (!available)
     return;
-
-  nlohmann::json response;
-  std::string error_message;
-  if (send_helper_request(context, nlohmann::json{{"action", "status"}},
-                          &response, &error_message) &&
-      response.value("ok", false)) {
-    std::cout << "  VPN Running     : "
-              << (response.value("running", false) ? "yes" : "no")
-              << std::endl;
-    if (response.value("running", false)) {
-      std::cout << "  Session Owner   : "
-                << response.value("owner_username", std::string())
-                << std::endl;
-    }
-  }
 }
 
 } // namespace
@@ -66,6 +53,18 @@ int install_helper_service(const std::string &executable_path,
     utils::print_error("Failed to resolve the exv executable path.");
     return 1;
   }
+  std::filesystem::path exec_fs_path(exec_path);
+  std::filesystem::path helper_path =
+      exec_fs_path.parent_path() / "exv-helper";
+  std::string service_binary;
+  if (exec_fs_path.filename() == "exv-helper") {
+    service_binary = exec_path;
+  } else if (std::filesystem::exists(helper_path)) {
+    service_binary = helper_path.string();
+  } else {
+    utils::print_error("Dedicated exv-helper binary was not found next to exv.");
+    return 1;
+  }
 
   std::ofstream ofs(platform_config.service_definition_path);
   if (!ofs.is_open()) {
@@ -77,8 +76,8 @@ int install_helper_service(const std::string &executable_path,
   ofs << "Description=ECNU VPN Helper Daemon\n";
   ofs << "After=network.target\n\n";
   ofs << "[Service]\n";
-  ofs << "Type=forking\n";
-  ofs << "ExecStart=" << exec_path << " __helper-daemon\n";
+  ofs << "Type=simple\n";
+  ofs << "ExecStart=" << service_binary << " --service\n";
   ofs << "Restart=on-failure\n";
   ofs << "RestartSec=5\n\n";
   ofs << "[Install]\n";
@@ -123,11 +122,6 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
     utils::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
-
-  nlohmann::json response;
-  std::string error_message;
-  send_helper_request(context, nlohmann::json{{"action", "stop"}}, &response,
-                      &error_message);
 
   platform::cleanup_routes();
   platform::kill_all_supervisors();

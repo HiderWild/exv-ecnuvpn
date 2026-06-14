@@ -121,7 +121,7 @@ set(EXV_HELPER_RUNTIME_SOURCES
     src/helper/runtime/command_validator.cpp
     src/helper/runtime/helper_lifecycle_policy.cpp
     src/helper/runtime/helper_session_store.cpp
-    src/helper/helper_v2_handler.cpp
+    src/helper/helper_handler.cpp
 )
 
 set(EXV_CLI_SOURCES
@@ -1007,23 +1007,29 @@ target_include_directories(helper_cleanup_registry_test PRIVATE
 
 add_test(NAME helper_cleanup_registry_test COMMAND helper_cleanup_registry_test)
 
-add_executable(helper_v2_contract_test
-    tests/helper_v2_contract_test.cpp
+add_executable(helper_contract_test
+    tests/helper_contract_test.cpp
     tests/support/fake_helper.cpp
     src/helper/common/helper_messages.cpp
     src/helper/runtime/session_lease_manager.cpp
     src/helper/runtime/cleanup_registry.cpp
     src/helper/runtime/command_validator.cpp
     src/helper/runtime/helper_lifecycle_policy.cpp
+    src/helper/runtime/helper_request_dispatcher.cpp
+    src/helper/helper_handler.cpp
 )
 
-target_include_directories(helper_v2_contract_test PRIVATE
+target_include_directories(helper_contract_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests
 )
 
-add_test(NAME helper_v2_contract_test COMMAND helper_v2_contract_test)
+target_compile_definitions(helper_contract_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME helper_contract_test COMMAND helper_contract_test)
 
 add_executable(app_api_rpc_dispatcher_test
     tests/app_api_rpc_dispatcher_test.cpp
@@ -1394,7 +1400,7 @@ set(_release_blocking_tests
     tunnel_controller_state_machine_test
     helper_lease_manager_test
     helper_cleanup_registry_test
-    helper_v2_contract_test
+    helper_contract_test
     no_secret_in_argv_test
     no_secret_in_logs_test
     credential_store_model_test
@@ -1489,7 +1495,7 @@ set_property(TEST
     tunnel_controller_integration_test
     helper_lease_manager_test
     helper_cleanup_registry_test
-    helper_v2_contract_test
+    helper_contract_test
     app_api_rpc_dispatcher_test
     native_core_connect_flow_test
     helper_timeout_cleanup_test
@@ -1541,7 +1547,7 @@ set_property(TEST
 set_property(TEST
     helper_lease_manager_test
     helper_cleanup_registry_test
-    helper_v2_contract_test
+    helper_contract_test
     helper_messages_connector_test
     helper_timeout_cleanup_test
     APPEND PROPERTY LABELS "helper"

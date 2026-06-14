@@ -2,8 +2,7 @@
 
 namespace exv::helper {
 
-// V2 ops whitelist: all non-legacy ops
-const std::set<HelperOp> CommandValidator::allowed_v2_ops_ = {
+const std::set<HelperOp> CommandValidator::allowed_ops_ = {
     HelperOp::Hello,
     HelperOp::StartSession,
     HelperOp::PrepareTunnelDevice,
@@ -11,7 +10,7 @@ const std::set<HelperOp> CommandValidator::allowed_v2_ops_ = {
     HelperOp::Heartbeat,
     HelperOp::Cleanup,
     HelperOp::GetSnapshot,
-    HelperOp::EndSession,
+    HelperOp::Shutdown,
 };
 
 std::optional<HelperError> CommandValidator::validate(const HelperRequest& request) const {
@@ -33,7 +32,7 @@ std::optional<HelperError> CommandValidator::validate(const HelperRequest& reque
 }
 
 bool CommandValidator::is_op_allowed(HelperOp op) const {
-    return allowed_v2_ops_.count(op) > 0;
+    return allowed_ops_.count(op) > 0;
 }
 
 bool CommandValidator::is_session_valid(const SessionId& /*id*/) const {

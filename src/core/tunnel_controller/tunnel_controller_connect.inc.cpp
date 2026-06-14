@@ -74,6 +74,7 @@
             if (auto delegated_ops = as_helper_delegating_ops(net_ops_)) {
                 delegated_ops->set_session(session_id_);
             }
+            start_heartbeat();
             log_tunnel_event("INFO", "helper.session.started", "Helper session started",
                              {{"session_id", session_id_.value}});
         } catch (const std::exception& e) {

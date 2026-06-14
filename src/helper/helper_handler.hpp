@@ -9,11 +9,10 @@
 
 namespace exv::helper {
 
-class HelperV2Handler {
+class HelperHandler {
 public:
-    HelperV2Handler();
+    explicit HelperHandler(HelperLifecyclePolicy policy = HelperLifecyclePolicy());
 
-    // Handle a V2 request
     HelperResponse handle(const HelperRequest& request);
 
     // Periodic maintenance (check timeouts, cleanup stale sessions)
@@ -22,9 +21,14 @@ public:
     // Access internals for testing
     SessionLeaseManager& lease_manager();
     CleanupRegistry& cleanup_registry();
+    bool should_stop() const;
+    void set_startup_context(HelperStartupContext context);
+    void cleanup_all_sessions(const CleanupPolicy& policy);
 
 private:
     void register_handlers();
+    CleanupResponse cleanup_session(const SessionId& session_id,
+                                    const CleanupPolicy& policy);
 
     HelperResponse handle_hello(const HelperRequest& req);
     HelperResponse handle_start_session(const HelperRequest& req);
@@ -33,13 +37,15 @@ private:
     HelperResponse handle_heartbeat(const HelperRequest& req);
     HelperResponse handle_cleanup(const HelperRequest& req);
     HelperResponse handle_get_snapshot(const HelperRequest& req);
-    HelperResponse handle_end_session(const HelperRequest& req);
+    HelperResponse handle_shutdown(const HelperRequest& req);
 
     HelperRequestDispatcher dispatcher_;
     SessionLeaseManager leases_;
     CleanupRegistry cleanup_;
     HelperLifecyclePolicy policy_;
     CommandValidator validator_;
+    HelperStartupContext startup_context_;
+    bool shutdown_requested_ = false;
 };
 
 } // namespace exv::helper

@@ -13,8 +13,7 @@ enum class Capability : uint32_t {
     DnsApply = 5,
     DnsCleanup = 6,
     FirewallRules = 7,
-    KillSwitch = 8,
-    LegacyProtocol = 100
+    KillSwitch = 8
 };
 
 class CapabilitySet {

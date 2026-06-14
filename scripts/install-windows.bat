@@ -51,7 +51,7 @@ echo Installing helper service...
 if %errorlevel% neq 0 (
     echo WARNING: Service install returned error. The service may need manual setup.
     echo You can install manually with:
-    echo   sc create %SERVICE_NAME% binPath= "%INSTALL_DIR%\%EXE_NAME% __helper-daemon" start= auto DisplayName= "%SERVICE_DISPLAY%"
+    echo   sc create %SERVICE_NAME% binPath= "%INSTALL_DIR%\exv-helper.exe --service" start= auto DisplayName= "%SERVICE_DISPLAY%"
 )
 
 echo.

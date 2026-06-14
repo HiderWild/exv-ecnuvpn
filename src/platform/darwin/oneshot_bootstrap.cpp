@@ -1,5 +1,6 @@
 #include "platform/common/oneshot_bootstrap.hpp"
 
+#include "helper/common/helper_messages.hpp"
 #include "platform/common/backend_resolver.hpp"
 #include "utils.hpp"
 
@@ -28,8 +29,11 @@ std::string random_hex(size_t bytes) {
 
 bool wait_for_helper_hello(const HelperEndpoint &endpoint) {
   for (int i = 0; i < 40; ++i) {
-    nlohmann::json hello = send_helper_request(endpoint, {{"action", "hello"}});
-    if (hello.value("ok", false))
+    exv::helper::HelperRequest request;
+    request.op = exv::helper::HelperOp::Hello;
+    request.payload_json = nlohmann::json(exv::helper::HelloRequest{}).dump();
+    nlohmann::json hello = send_helper_request(endpoint, nlohmann::json(request));
+    if (hello.value("success", false))
       return true;
     usleep(100000);
   }
@@ -60,15 +64,18 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   }
 
   std::string session_id = random_hex(8);
-  backend.auth_token = random_hex(32);
   backend.endpoint = "/tmp/exv-" + std::to_string(getuid()) + "-" +
                      session_id + ".sock";
+  backend.owner = std::to_string(getuid());
+  backend.parent_pid = static_cast<int>(getpid());
 
   std::string command = utils::shell_quote(request.helper_path) +
                         " --oneshot --socket " +
                         utils::shell_quote(backend.endpoint) +
-                        " --auth-token " +
-                        utils::shell_quote(backend.auth_token) +
+                        " --owner " +
+                        utils::shell_quote(backend.owner) +
+                        " --parent-pid " +
+                        std::to_string(backend.parent_pid) +
                         " >/dev/null 2>&1 &";
   std::string osascript =
       "osascript -e " +
@@ -82,8 +89,7 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
     return backend;
   }
 
-  if (!wait_for_helper_hello(
-          HelperEndpoint{backend.endpoint, backend.auth_token})) {
+  if (!wait_for_helper_hello(HelperEndpoint{backend.endpoint})) {
     backend.code = kHelperRpcFailedCode;
     backend.message = "One-shot helper did not become ready.";
     return backend;

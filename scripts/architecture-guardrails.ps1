@@ -114,7 +114,7 @@ function Check-Pattern {
 }
 
 # ---------------------------------------------------------------------------
-# Rule 1: Helper V2 must not contain password/cookie/token
+# Rule 1: Helper protocol must not contain password/cookie/token
 # ---------------------------------------------------------------------------
 Check-Pattern -Description "Checking helper for forbidden fields" `
     -Paths "src/helper_common", "src/helper_runtime" `
@@ -122,7 +122,7 @@ Check-Pattern -Description "Checking helper for forbidden fields" `
     -ExcludePatterns "^\\s*//", "test", "\.md"
 
 # ---------------------------------------------------------------------------
-# Rule 2: Helper V2 must not include vpn_engine/protocol
+# Rule 2: Helper protocol must not include vpn_engine/protocol
 # ---------------------------------------------------------------------------
 Check-Pattern -Description "Checking helper for protocol includes" `
     -Paths "src/helper_common", "src/helper_runtime" `
@@ -183,7 +183,7 @@ $secretExclude = @(
 $securityTestPatterns = @(
     "no_secret_in_argv_test",
     "no_secret_in_logs_test",
-    "helper_v2_contract_test"
+    "helper_contract_test"
 )
 
 if (Test-Path "tests") {

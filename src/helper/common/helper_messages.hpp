@@ -27,16 +27,26 @@ struct ProfileId {
     std::string value;
 };
 
-// --- V2 Messages ---
+struct HelloRequest {};
 
-struct HelloRequest {
-    uint32_t client_version = PROTOCOL_VERSION;
+struct HelperStartupContext {
+    std::string launch_mode;
+    std::string endpoint;
+    std::string owner;
+    int parent_pid = 0;
+};
+
+struct HelperSessionState {
+    bool active = false;
+    SessionId session_id;
+    std::string core_phase;
 };
 
 struct HelloResponse {
-    uint32_t server_version = PROTOCOL_VERSION;
     std::vector<std::string> capabilities;
     HelperMode mode = HelperMode::Transient;
+    HelperStartupContext startup_context;
+    HelperSessionState session_state;
 };
 
 struct StartSessionRequest {
@@ -127,12 +137,15 @@ struct GetSnapshotResponse {
     std::vector<SessionSnapshot> sessions;
 };
 
-struct EndSessionRequest {
+struct ShutdownRequest {
     SessionId session_id;
+    CleanupPolicy policy;
 };
 
-struct EndSessionResponse {
-    bool success = false;
+struct ShutdownResponse {
+    bool cleanup_success = false;
+    bool exiting = false;
+    std::vector<std::string> errors;
 };
 
 // --- Unified Request/Response ---
@@ -162,6 +175,10 @@ void from_json(const json& j, ProfileId& id);
 // Hello
 void to_json(json& j, const HelloRequest& req);
 HelloRequest hello_request_from_json(const json& j);
+void to_json(json& j, const HelperStartupContext& ctx);
+HelperStartupContext helper_startup_context_from_json(const json& j);
+void to_json(json& j, const HelperSessionState& state);
+HelperSessionState helper_session_state_from_json(const json& j);
 void to_json(json& j, const HelloResponse& resp);
 HelloResponse hello_response_from_json(const json& j);
 
@@ -213,11 +230,11 @@ SessionSnapshot session_snapshot_from_json(const json& j);
 void to_json(json& j, const GetSnapshotResponse& resp);
 GetSnapshotResponse get_snapshot_response_from_json(const json& j);
 
-// EndSession
-void to_json(json& j, const EndSessionRequest& req);
-EndSessionRequest end_session_request_from_json(const json& j);
-void to_json(json& j, const EndSessionResponse& resp);
-EndSessionResponse end_session_response_from_json(const json& j);
+// Shutdown
+void to_json(json& j, const ShutdownRequest& req);
+ShutdownRequest shutdown_request_from_json(const json& j);
+void to_json(json& j, const ShutdownResponse& resp);
+ShutdownResponse shutdown_response_from_json(const json& j);
 
 // Unified envelope
 void to_json(json& j, const HelperRequest& req);

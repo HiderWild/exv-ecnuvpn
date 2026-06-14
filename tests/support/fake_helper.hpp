@@ -24,7 +24,7 @@ public:
     helper::HeartbeatResponse heartbeat(const helper::HeartbeatRequest& req) override;
     helper::CleanupResponse cleanup(const helper::CleanupRequest& req) override;
     helper::GetSnapshotResponse get_snapshot(const helper::GetSnapshotRequest& req) override;
-    helper::EndSessionResponse end_session(const helper::EndSessionRequest& req) override;
+    helper::ShutdownResponse shutdown(const helper::ShutdownRequest& req) override;
 
     void set_disconnect_callback(DisconnectCallback cb) override;
 
@@ -35,7 +35,6 @@ public:
     void set_heartbeat_fail_after(int count);
     void set_start_session_fail(bool fail);
     void set_apply_config_fail(bool fail);
-    void set_version_mismatch(bool mismatch);
 
     // Inspection
     int connect_count() const;
@@ -49,7 +48,6 @@ private:
     bool fail_next_ = false;
     bool start_session_fail_ = false;
     bool apply_config_fail_ = false;
-    bool version_mismatch_ = false;
     bool ipc_lost_ = false;
     int heartbeat_count_ = 0;
     int heartbeat_fail_after_ = -1;

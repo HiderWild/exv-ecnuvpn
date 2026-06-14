@@ -18,7 +18,6 @@ nlohmann::json descriptor_from_service(const ServiceStatusSnapshot &service) {
                              ? "named-pipe"
                              : "unix-socket"},
                         {"endpoint", service.endpoint},
-                        {"auth_required", false},
                         {"pid", nullptr},
                         {"service", service_status_to_json(service)},
                         {"capabilities", service.capabilities}};

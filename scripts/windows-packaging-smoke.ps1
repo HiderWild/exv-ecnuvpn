@@ -165,7 +165,7 @@ if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
     try {
         $helloOutput = & $exvExe helper hello 2>&1
         $helloExit = $LASTEXITCODE
-        if ($helloExit -eq 0 -and $helloOutput -match "Hello|capabilities|server_version") {
+        if ($helloExit -eq 0 -and $helloOutput -match "Hello|capabilities") {
             Write-Check "S07" "Helper Hello handshake (IPC)" "PASS" "Output: $helloOutput"
         } else {
             Write-Check "S07" "Helper Hello handshake (IPC)" "FAIL" "Exit: $helloExit, Output: $helloOutput"
@@ -177,10 +177,10 @@ if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
     Write-Check "S07" "Helper Hello handshake (IPC)" "SKIP" "Helper service not running"
 }
 
-# ── 7. Helper V2 capabilities ────────────────────────────────────────────────
+# ── 7. Helper protocol capabilities ─────────────────────────────────────────
 
 Write-Host ""
-Write-Host "--- Helper V2 Capabilities ---" -ForegroundColor Yellow
+Write-Host "--- Helper Protocol Capabilities ---" -ForegroundColor Yellow
 
 if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
     try {
@@ -194,18 +194,18 @@ if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
                 if ($capsText -notmatch $cap) { $missing += $cap }
             }
             if ($missing.Count -eq 0) {
-                Write-Check "S08" "Helper V2 capabilities" "PASS" "All expected capabilities present"
+                Write-Check "S08" "Helper protocol capabilities" "PASS" "All expected capabilities present"
             } else {
-                Write-Check "S08" "Helper V2 capabilities" "FAIL" "Missing: $($missing -join ', ')"
+                Write-Check "S08" "Helper protocol capabilities" "FAIL" "Missing: $($missing -join ', ')"
             }
         } else {
-            Write-Check "S08" "Helper V2 capabilities" "FAIL" "Exit: $capsExit, Output: $capsOutput"
+            Write-Check "S08" "Helper protocol capabilities" "FAIL" "Exit: $capsExit, Output: $capsOutput"
         }
     } catch {
-        Write-Check "S08" "Helper V2 capabilities" "FAIL" "Exception: $_"
+        Write-Check "S08" "Helper protocol capabilities" "FAIL" "Exception: $_"
     }
 } else {
-    Write-Check "S08" "Helper V2 capabilities" "SKIP" "Helper service not running"
+    Write-Check "S08" "Helper protocol capabilities" "SKIP" "Helper service not running"
 }
 
 # ── 8. desktop-rpc status ────────────────────────────────────────────────────

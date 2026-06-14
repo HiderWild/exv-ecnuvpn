@@ -15,7 +15,7 @@ public:
     virtual void disconnect() = 0;
     virtual bool is_connected() const = 0;
 
-    // V2 protocol
+    // Helper protocol
     virtual HelloResponse hello(const HelloRequest& req) = 0;
     virtual StartSessionResponse start_session(const StartSessionRequest& req) = 0;
     virtual PrepareTunnelDeviceResponse prepare_tunnel_device(const PrepareTunnelDeviceRequest& req) = 0;
@@ -23,7 +23,7 @@ public:
     virtual HeartbeatResponse heartbeat(const HeartbeatRequest& req) = 0;
     virtual CleanupResponse cleanup(const CleanupRequest& req) = 0;
     virtual GetSnapshotResponse get_snapshot(const GetSnapshotRequest& req) = 0;
-    virtual EndSessionResponse end_session(const EndSessionRequest& req) = 0;
+    virtual ShutdownResponse shutdown(const ShutdownRequest& req) = 0;
 
     // Callback for helper disconnection
     using DisconnectCallback = std::function<void()>;

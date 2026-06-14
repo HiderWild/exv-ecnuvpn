@@ -162,20 +162,20 @@ else
   skip "Helper IPC hello" "Helper socket not found at $HELPER_SOCK (helper may not be installed)"
 fi
 
-# ---------- 4. Helper V2 capabilities ----------
+# ---------- 4. Helper protocol capabilities ----------
 
-section "4. Helper V2 capabilities"
+section "4. Helper protocol capabilities"
 
 if [[ -S "$HELPER_SOCK" ]]; then
-  CAPS_RESPONSE=$(echo '{"action":"hello","protocol_version":2}' | nc -U "$HELPER_SOCK" 2>/dev/null || true)
-  if echo "$CAPS_RESPONSE" | grep -qiE '(capabilities|protocol_version|server_version)'; then
-    pass "Helper V2 capabilities returned"
+  CAPS_RESPONSE=$(echo '{"op":1,"payload_json":"{}"}' | nc -U "$HELPER_SOCK" 2>/dev/null || true)
+  if echo "$CAPS_RESPONSE" | grep -qiE '(capabilities|success)'; then
+    pass "Helper protocol capabilities returned"
     echo "    Response: $CAPS_RESPONSE"
   else
-    skip "Helper V2 capabilities" "V2 protocol may not be active yet or response format differs"
+    skip "Helper protocol capabilities" "Helper protocol may not be active yet or response format differs"
   fi
 else
-  skip "Helper V2 capabilities" "Helper socket not found"
+  skip "Helper protocol capabilities" "Helper socket not found"
 fi
 
 # ---------- 5. desktop-rpc status ----------

@@ -45,28 +45,62 @@ void from_json(const json& j, ProfileId& id) {
 // ---- HelloRequest / HelloResponse ----
 
 void to_json(json& j, const HelloRequest& req) {
-    j = json{{"client_version", req.client_version}};
+    (void)req;
+    j = json::object();
 }
 
 HelloRequest hello_request_from_json(const json& j) {
-    HelloRequest req;
-    req.client_version = j.value("client_version", PROTOCOL_VERSION);
-    return req;
+    (void)j;
+    return {};
+}
+
+void to_json(json& j, const HelperStartupContext& ctx) {
+    j = json{{"launch_mode", ctx.launch_mode},
+             {"endpoint", ctx.endpoint},
+             {"owner", ctx.owner},
+             {"parent_pid", ctx.parent_pid}};
+}
+
+HelperStartupContext helper_startup_context_from_json(const json& j) {
+    HelperStartupContext ctx;
+    ctx.launch_mode = j.value("launch_mode", "");
+    ctx.endpoint = j.value("endpoint", "");
+    ctx.owner = j.value("owner", "");
+    ctx.parent_pid = j.value("parent_pid", 0);
+    return ctx;
+}
+
+void to_json(json& j, const HelperSessionState& state) {
+    j = json{{"active", state.active},
+             {"session_id", state.session_id},
+             {"core_phase", state.core_phase}};
+}
+
+HelperSessionState helper_session_state_from_json(const json& j) {
+    HelperSessionState state;
+    state.active = j.value("active", false);
+    if (j.contains("session_id")) from_json(j["session_id"], state.session_id);
+    state.core_phase = j.value("core_phase", "");
+    return state;
 }
 
 void to_json(json& j, const HelloResponse& resp) {
-    j = json{{"server_version", resp.server_version},
-             {"capabilities", resp.capabilities},
-             {"mode", mode_to_uint(resp.mode)}};
+    j = json{{"capabilities", resp.capabilities},
+             {"mode", mode_to_uint(resp.mode)},
+             {"startup_context", resp.startup_context},
+             {"session_state", resp.session_state}};
 }
 
 HelloResponse hello_response_from_json(const json& j) {
     HelloResponse resp;
-    resp.server_version = j.value("server_version", PROTOCOL_VERSION);
     if (j.contains("capabilities"))
         resp.capabilities = j["capabilities"].get<std::vector<std::string>>();
     if (j.contains("mode"))
         resp.mode = uint_to_mode(j["mode"].get<uint32_t>());
+    if (j.contains("startup_context"))
+        resp.startup_context = helper_startup_context_from_json(j["startup_context"]);
+    if (j.contains("session_state"))
+        resp.session_state = helper_session_state_from_json(j["session_state"]);
     return resp;
 }
 
@@ -310,25 +344,30 @@ GetSnapshotResponse get_snapshot_response_from_json(const json& j) {
     return resp;
 }
 
-// ---- EndSessionRequest / EndSessionResponse ----
+// ---- ShutdownRequest / ShutdownResponse ----
 
-void to_json(json& j, const EndSessionRequest& req) {
-    j = json{{"session_id", req.session_id}};
+void to_json(json& j, const ShutdownRequest& req) {
+    j = json{{"session_id", req.session_id}, {"policy", req.policy}};
 }
 
-EndSessionRequest end_session_request_from_json(const json& j) {
-    EndSessionRequest req;
+ShutdownRequest shutdown_request_from_json(const json& j) {
+    ShutdownRequest req;
     if (j.contains("session_id")) from_json(j["session_id"], req.session_id);
+    if (j.contains("policy")) req.policy = cleanup_policy_from_json(j["policy"]);
     return req;
 }
 
-void to_json(json& j, const EndSessionResponse& resp) {
-    j = json{{"success", resp.success}};
+void to_json(json& j, const ShutdownResponse& resp) {
+    j = json{{"cleanup_success", resp.cleanup_success},
+             {"exiting", resp.exiting},
+             {"errors", resp.errors}};
 }
 
-EndSessionResponse end_session_response_from_json(const json& j) {
-    EndSessionResponse resp;
-    resp.success = j.value("success", false);
+ShutdownResponse shutdown_response_from_json(const json& j) {
+    ShutdownResponse resp;
+    resp.cleanup_success = j.value("cleanup_success", false);
+    resp.exiting = j.value("exiting", false);
+    if (j.contains("errors")) resp.errors = j["errors"].get<std::vector<std::string>>();
     return resp;
 }
 

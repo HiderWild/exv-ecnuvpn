@@ -25,11 +25,7 @@ public:
     virtual std::unique_ptr<HelperClient> connect(const HelperConnectorConfig& config) = 0;
     virtual bool is_helper_available() const = 0;
 
-    // Platform factory -- returns a real connector using named pipes / Unix sockets
     static std::unique_ptr<HelperConnector> create();
-
-    // Test factory -- returns a stub connector (no real IPC)
-    static std::unique_ptr<HelperConnector> create_stub();
 };
 
 } // namespace exv::helper

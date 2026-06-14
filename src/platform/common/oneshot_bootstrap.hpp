@@ -20,7 +20,8 @@ struct OneshotBackend {
   std::string mode = "oneshot";
   std::string transport;
   std::string endpoint;
-  std::string auth_token;
+  std::string owner;
+  int parent_pid = -1;
   int pid = -1;
 };
 

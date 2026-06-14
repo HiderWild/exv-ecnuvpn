@@ -25,9 +25,6 @@ ServiceStatusSnapshot current_service_status() {
   bool helper_service_declared =
       contains_token(plist_content, config.default_service_binary_path) &&
       contains_token(plist_content, "--service");
-  bool legacy_service_declared =
-      contains_token(plist_content, config.stable_install_path) &&
-      contains_token(plist_content, "__helper-daemon");
 
   status.installed =
       plist_exists && helper_service_declared && helper_binary_exists;
@@ -39,15 +36,8 @@ ServiceStatusSnapshot current_service_status() {
   status.label = config.service_label;
   if (helper_service_declared)
     status.binary_path = config.default_service_binary_path;
-  else if (legacy_service_declared)
-    status.binary_path = config.stable_install_path;
 
-  if (plist_exists && legacy_service_declared) {
-    status.warning =
-        "Detected legacy launchd service pointing to /usr/local/bin/exv "
-        "__helper-daemon. Reinstall the service to migrate to "
-        "/usr/local/bin/exv-helper --service.";
-  } else if (plist_exists && !helper_service_declared) {
+  if (plist_exists && !helper_service_declared) {
     status.warning =
         "LaunchDaemon exists, but it does not point to "
         "/usr/local/bin/exv-helper --service.";

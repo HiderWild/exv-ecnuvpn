@@ -21,7 +21,11 @@ bool expect(bool condition, const char *message) {
 }
 
 bool expect_json_ok(const nlohmann::json &value, const char *message) {
-  if (value.value("ok", false))
+  if (!value.is_object()) {
+    std::cerr << "DETAIL: " << value.dump() << std::endl;
+    return expect(false, message);
+  }
+  if (value.value("success", false))
     return true;
 
   std::cerr << "DETAIL: " << value.dump() << std::endl;
@@ -42,45 +46,46 @@ void wake_acceptor_once(const std::string &endpoint) {
   }
 }
 
-bool run_oneshot_daemon_hello_sequence(const char *token,
-                                       int request_count,
+exv::helper::HelperRequest make_hello_request() {
+  exv::helper::HelperRequest request;
+  request.op = exv::helper::HelperOp::Hello;
+  request.payload_json = nlohmann::json(exv::helper::HelloRequest{}).dump();
+  return request;
+}
+
+bool run_oneshot_daemon_hello_sequence(int request_count,
                                        const char *description) {
   const std::string endpoint = random_endpoint();
 
   ecnuvpn::helper::DaemonOptions options;
   options.mode = "oneshot";
   options.endpoint = endpoint;
-  options.auth_token = token;
-  options.auth_required = true;
+  options.owner = "test-owner";
+  options.parent_pid = static_cast<int>(GetCurrentProcessId());
   options.oneshot = true;
 
   int daemon_rc = -1;
   std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
 
-  const ecnuvpn::platform::HelperEndpoint helper_endpoint{endpoint,
-                                                          options.auth_token};
+  const ecnuvpn::platform::HelperEndpoint helper_endpoint{endpoint};
 
   bool ok = true;
   bool last_request_ok = false;
   for (int i = 0; i < request_count; ++i) {
     const auto hello = ecnuvpn::platform::send_helper_request(
-        helper_endpoint, {{"action", "hello"}});
-    last_request_ok = hello.value("ok", false);
+        helper_endpoint, nlohmann::json(make_hello_request()));
+    last_request_ok = hello.value("success", false);
     ok = expect_json_ok(hello, description) && ok;
-    ok = expect(hello.value("mode", std::string()) == "oneshot",
-                "one-shot helper hello should report mode=oneshot") &&
-         ok;
-    ok = expect(hello.contains("capabilities") &&
-                    hello["capabilities"].value("oneshot_mode", false),
-                "one-shot helper hello should report capabilities.oneshot_mode=true") &&
-         ok;
+    const auto payload = nlohmann::json::parse(hello.value("payload_json", "{}"));
+    ok = expect(payload["startup_context"].value("launch_mode", std::string()) ==
+                    "oneshot",
+                "one-shot helper hello should report launch_mode=oneshot") && ok;
+    ok = expect(payload.contains("capabilities"),
+                "one-shot helper hello should report capabilities") && ok;
   }
 
-  ecnuvpn::helper::request_daemon_stop();
-  if (last_request_ok) {
-    (void)ecnuvpn::platform::send_helper_request(helper_endpoint,
-                                                 {{"action", "hello"}});
-  } else {
+  if (!last_request_ok) {
+    ecnuvpn::helper::request_daemon_stop();
     wake_acceptor_once(endpoint);
   }
 
@@ -89,26 +94,20 @@ bool run_oneshot_daemon_hello_sequence(const char *token,
   return ok;
 }
 
-bool oneshot_helper_responds_to_hello() {
+bool oneshot_helper_responds_to_hello_and_exits_after_disconnect() {
   return run_oneshot_daemon_hello_sequence(
-      "oneshot-test-token", 1,
-      "one-shot helper should answer hello after startup");
+      1,
+      "one-shot helper should answer hello and exit after connection close");
 }
 
-bool oneshot_helper_accepts_second_connection_after_hello() {
-  return run_oneshot_daemon_hello_sequence(
-      "oneshot-second-hello-token", 2,
-      "one-shot helper should accept a fresh connection after responding to hello");
-}
-
-bool oneshot_helper_preserves_v2_persistent_connection() {
+bool oneshot_helper_preserves_persistent_connection_and_shutdown() {
   const std::string endpoint = random_endpoint();
 
   ecnuvpn::helper::DaemonOptions options;
   options.mode = "oneshot";
   options.endpoint = endpoint;
-  options.auth_token = "oneshot-v2-persistent-token";
-  options.auth_required = true;
+  options.owner = "test-owner";
+  options.parent_pid = static_cast<int>(GetCurrentProcessId());
   options.oneshot = true;
 
   int daemon_rc = -1;
@@ -121,27 +120,39 @@ bool oneshot_helper_preserves_v2_persistent_connection() {
 
   bool ok = true;
   ok = expect(client.connect(),
-              "V2 PipeHelperClient should connect to one-shot helper") &&
+              "PipeHelperClient should connect to one-shot helper") &&
        ok;
 
   exv::helper::HelloRequest req;
-  req.client_version = exv::helper::PROTOCOL_VERSION;
   const auto first = client.hello(req);
-  ok = expect(first.server_version == exv::helper::PROTOCOL_VERSION,
-              "one-shot helper should answer first V2 hello") &&
+  ok = expect(!first.capabilities.empty(),
+              "one-shot helper should answer first hello") &&
        ok;
 
   const auto second = client.hello(req);
-  ok = expect(second.server_version == exv::helper::PROTOCOL_VERSION,
-              "one-shot helper should answer second V2 hello on same connection") &&
+  ok = expect(!second.capabilities.empty(),
+              "one-shot helper should answer second hello on same connection") &&
+       ok;
+
+  exv::helper::StartSessionRequest start_req;
+  start_req.profile_id.value = "test-profile";
+  const auto start = client.start_session(start_req);
+  ok = expect(!start.session_id.value.empty(),
+              "one-shot helper should start a session") &&
+       ok;
+
+  exv::helper::ShutdownRequest shutdown_req;
+  shutdown_req.session_id = start.session_id;
+  shutdown_req.policy.remove_adapter = true;
+  const auto shutdown = client.shutdown(shutdown_req);
+  ok = expect(shutdown.cleanup_success,
+              "one-shot helper should accept active shutdown") &&
        ok;
 
   client.disconnect();
-  ecnuvpn::helper::request_daemon_stop();
-  wake_acceptor_once(endpoint);
   daemon.join();
   ok = expect(daemon_rc == 0,
-              "one-shot helper should exit with rc=0 after V2 persistent test") &&
+              "one-shot helper should exit with rc=0 after persistent test") &&
        ok;
   return ok;
 }
@@ -150,8 +161,7 @@ bool oneshot_helper_preserves_v2_persistent_connection() {
 
 int main() {
   bool ok = true;
-  ok = oneshot_helper_responds_to_hello() && ok;
-  ok = oneshot_helper_accepts_second_connection_after_hello() && ok;
-  ok = oneshot_helper_preserves_v2_persistent_connection() && ok;
+  ok = oneshot_helper_responds_to_hello_and_exits_after_disconnect() && ok;
+  ok = oneshot_helper_preserves_persistent_connection_and_shutdown() && ok;
   return ok ? 0 : 1;
 }

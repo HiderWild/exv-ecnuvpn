@@ -4,8 +4,6 @@
 
 namespace exv::helper {
 
-constexpr uint32_t PROTOCOL_VERSION = 2;
-
 enum class HelperOp : uint32_t {
     Hello = 1,
     StartSession = 2,
@@ -14,12 +12,7 @@ enum class HelperOp : uint32_t {
     Heartbeat = 5,
     Cleanup = 6,
     GetSnapshot = 7,
-    EndSession = 8,
-    // Legacy ops (backward compat)
-    LegacyStart = 100,
-    LegacyStop = 101,
-    LegacyStatus = 102,
-    LegacyHeartbeat = 103
+    Shutdown = 8
 };
 
 enum class HelperMode : uint32_t {

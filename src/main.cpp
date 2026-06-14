@@ -110,9 +110,7 @@ int main(int argc, char *argv[]) {
   std::vector<std::string> raw_args;
   for (int i = 0; i < argc; ++i) raw_args.emplace_back(argv[i]);
 
-  if (raw_args.size() > 1 && raw_args[1] == "__helper-daemon") return helper::daemon_main();
   if (raw_args.size() > 1 && raw_args[1] == "__tunnel-script") return tunnel::run_script_hook();
-  if (raw_args.size() > 2 && raw_args[1] == "__helper-exec") return helper::worker_main(raw_args[2]);
 
   if (raw_args.size() > 1 && raw_args[1] == "--mode=core") {
     std::string config_dir, home_dir;

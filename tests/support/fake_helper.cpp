@@ -22,8 +22,8 @@ bool FakeHelper::is_connected() const {
 }
 
 helper::HelloResponse FakeHelper::hello(const helper::HelloRequest& req) {
+    (void)req;
     helper::HelloResponse resp;
-    resp.server_version = version_mismatch_ ? (helper::PROTOCOL_VERSION + 99) : helper::PROTOCOL_VERSION;
     resp.capabilities = {"tunnel_device_create", "route_apply", "dns_apply", "route_cleanup"};
     resp.mode = helper::HelperMode::Transient;
     return resp;
@@ -86,9 +86,9 @@ helper::GetSnapshotResponse FakeHelper::get_snapshot(const helper::GetSnapshotRe
     return resp;
 }
 
-helper::EndSessionResponse FakeHelper::end_session(const helper::EndSessionRequest& req) {
-    helper::EndSessionResponse resp;
-    resp.success = true;
+helper::ShutdownResponse FakeHelper::shutdown(const helper::ShutdownRequest& req) {
+    helper::ShutdownResponse resp;
+    resp.cleanup_success = true;
     sessions_.erase(req.session_id);
     return resp;
 }
@@ -122,10 +122,6 @@ void FakeHelper::set_start_session_fail(bool fail) {
 
 void FakeHelper::set_apply_config_fail(bool fail) {
     apply_config_fail_ = fail;
-}
-
-void FakeHelper::set_version_mismatch(bool mismatch) {
-    version_mismatch_ = mismatch;
 }
 
 int FakeHelper::connect_count() const { return connect_count_; }

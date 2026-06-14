@@ -3,6 +3,7 @@
 #include <map>
 #include <optional>
 #include <functional>
+#include <vector>
 
 namespace exv::helper {
 
@@ -25,6 +26,7 @@ public:
     void scan_stale_sessions(CleanupHandler cleanup_handler);
 
     size_t active_session_count() const;
+    std::vector<SessionId> active_session_ids() const;
 
 private:
     std::map<SessionId, SessionLease> leases_;

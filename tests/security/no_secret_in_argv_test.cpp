@@ -64,7 +64,7 @@ int main() {
     using exv::helper::ApplyTunnelConfigRequest;
     using exv::helper::HeartbeatRequest;
     using exv::helper::CleanupRequest;
-    using exv::helper::EndSessionRequest;
+    using exv::helper::ShutdownRequest;
     using exv::helper::HelloRequest;
     using exv::helper::GetSnapshotRequest;
     using exv::helper::TunnelConfig;
@@ -170,21 +170,20 @@ int main() {
                     "CleanupRequest fields must not contain secrets") && ok;
     }
 
-    // === EndSessionRequest: no credentials ===
+    // === ShutdownRequest: no credentials ===
     {
-        EndSessionRequest req;
+        ShutdownRequest req;
         req.session_id.value = "test-session";
 
         ok = expect(!contains_secret_keyword(req.session_id.value),
-                    "EndSessionRequest fields must not contain secrets") && ok;
+                    "ShutdownRequest fields must not contain secrets") && ok;
     }
 
     // === HelloRequest: no credentials ===
     {
         HelloRequest req;
-        // Only field is client_version (uint32_t)
-        ok = expect(sizeof(req) >= sizeof(uint32_t),
-                    "HelloRequest should contain at least client_version") && ok;
+        (void)req;
+        ok = expect(true, "HelloRequest is credential-free") && ok;
     }
 
     // === GetSnapshotRequest: no credentials ===

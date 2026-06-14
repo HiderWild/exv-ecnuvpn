@@ -112,7 +112,7 @@ export const CONFIG_ALIASES = {
   "config.save_profile": "config.profile.save"
 } as const
 
-export const HELPER_V2_OPS = [
+export const HELPER_OPS = [
   "Hello",
   "StartSession",
   "PrepareTunnelDevice",
@@ -120,9 +120,9 @@ export const HELPER_V2_OPS = [
   "Heartbeat",
   "Cleanup",
   "GetSnapshot",
-  "EndSession"
+  "Shutdown"
 ] as const
-export const HELPER_V2_OP_CONTRACTS = [
+export const HELPER_OP_CONTRACTS = [
   {
     "name": "Hello",
     "code": 1,
@@ -173,10 +173,10 @@ export const HELPER_V2_OP_CONTRACTS = [
     "requires_session": false
   },
   {
-    "name": "EndSession",
+    "name": "Shutdown",
     "code": 8,
-    "request": "EndSessionRequest",
-    "response": "EndSessionResponse",
+    "request": "ShutdownRequest",
+    "response": "ShutdownResponse",
     "requires_session": true
   }
 ] as const
@@ -199,4 +199,4 @@ export const HELPER_FORBIDDEN_CREDENTIAL_FIELDS = [
 
 export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]
 export type ConfigAction = (typeof CONFIG_ACTIONS)[number]
-export type HelperV2Op = (typeof HELPER_V2_OPS)[number]
+export type HelperOp = (typeof HELPER_OPS)[number]

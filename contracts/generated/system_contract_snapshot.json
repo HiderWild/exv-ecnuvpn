@@ -229,8 +229,8 @@
       "errors": [
         "none",
         "unsupported_op",
-        "version_mismatch",
         "invalid_session",
+        "session_conflict",
         "permission_denied",
         "device_not_found",
         "device_busy",
@@ -239,28 +239,6 @@
         "cleanup_partial",
         "internal_error",
         "invalid_payload"
-      ],
-      "legacy_ops": [
-        {
-          "action": "start",
-          "code": 100,
-          "name": "LegacyStart"
-        },
-        {
-          "action": "stop",
-          "code": 101,
-          "name": "LegacyStop"
-        },
-        {
-          "action": "status",
-          "code": 102,
-          "name": "LegacyStatus"
-        },
-        {
-          "action": "heartbeat",
-          "code": 103,
-          "name": "LegacyHeartbeat"
-        }
       ],
       "messages": [
         "HelloRequest",
@@ -277,8 +255,8 @@
         "CleanupResponse",
         "GetSnapshotRequest",
         "GetSnapshotResponse",
-        "EndSessionRequest",
-        "EndSessionResponse"
+        "ShutdownRequest",
+        "ShutdownResponse"
       ],
       "ops": [
         {
@@ -332,13 +310,12 @@
         },
         {
           "code": 8,
-          "name": "EndSession",
-          "request": "EndSessionRequest",
+          "name": "Shutdown",
+          "request": "ShutdownRequest",
           "requires_session": true,
-          "response": "EndSessionResponse"
+          "response": "ShutdownResponse"
         }
       ],
-      "protocol_version": 2,
       "security": {
         "forbidden_fields": [
           "password",

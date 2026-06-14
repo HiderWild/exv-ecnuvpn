@@ -34,23 +34,9 @@ bool send_helper_request(const HelperServiceManagerContext &context,
 
 void print_runtime_status_if_available(const HelperServiceManagerContext &context,
                                        bool available) {
+  (void)context;
   if (!available)
     return;
-
-  nlohmann::json response;
-  std::string error_message;
-  if (send_helper_request(context, nlohmann::json{{"action", "status"}},
-                          &response, &error_message) &&
-      response.value("ok", false)) {
-    std::cout << "  VPN Running     : "
-              << (response.value("running", false) ? "yes" : "no")
-              << std::endl;
-    if (response.value("running", false)) {
-      std::cout << "  Session Owner   : "
-                << response.value("owner_username", std::string())
-                << std::endl;
-    }
-  }
 }
 
 } // namespace
@@ -167,11 +153,6 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
     utils::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
-
-  nlohmann::json response;
-  std::string error_message;
-  send_helper_request(context, nlohmann::json{{"action", "stop"}}, &response,
-                      &error_message);
 
   platform::cleanup_routes();
   platform::kill_all_supervisors();
