@@ -27,6 +27,7 @@ struct MockWintun {
   int adapters_closed = 0;
   int adapter = 0;
   int session = 0;
+  std::vector<std::string> *ops = nullptr;
 };
 
 ecnuvpn::platform::NativeWintunApi make_wintun_api(MockWintun &mock) {
@@ -55,6 +56,8 @@ ecnuvpn::platform::NativeWintunApi make_wintun_api(MockWintun &mock) {
   api.end_session = [&mock](auto) { ++mock.sessions_ended; };
   api.delete_adapter = [&mock](auto) {
     ++mock.adapters_deleted;
+    if (mock.ops)
+      mock.ops->push_back("adapter:delete");
     return true;
   };
   return api;
@@ -79,7 +82,14 @@ struct MockIpHelper {
   std::vector<int> mtus;
   std::vector<ecnuvpn::platform::NativeIpRoute> routes;
   std::vector<ecnuvpn::platform::NativeIpRoute> deleted_routes;
+  std::vector<std::uint32_t> dns_read_interfaces;
+  std::vector<ecnuvpn::platform::NativeDnsSettings> dns_writes;
+  ecnuvpn::platform::NativeDnsSettings current_dns;
   int fail_route_after = -1;
+  std::uint32_t delete_route_error = 0;
+  std::uint32_t get_dns_error = 0;
+  std::uint32_t set_dns_error = 0;
+  std::vector<std::string> *ops = nullptr;
 };
 
 ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
@@ -104,6 +114,8 @@ ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
   api.create_ip_forward_entry2 =
       [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
         mock.routes.push_back(route);
+        if (mock.ops)
+          mock.ops->push_back("route:create");
         if (mock.fail_route_after >= 0 &&
             static_cast<int>(mock.routes.size()) > mock.fail_route_after) {
           return std::uint32_t{87};
@@ -113,9 +125,38 @@ ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
   api.delete_ip_forward_entry2 =
       [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
         mock.deleted_routes.push_back(route);
+        if (mock.ops)
+          mock.ops->push_back("route:delete");
+        return mock.delete_route_error;
+      };
+  api.get_interface_dns_settings =
+      [&mock](std::uint32_t interface_index,
+              ecnuvpn::platform::NativeDnsSettings &settings) {
+        mock.dns_read_interfaces.push_back(interface_index);
+        if (mock.get_dns_error != 0)
+          return mock.get_dns_error;
+        settings = mock.current_dns;
         return std::uint32_t{0};
       };
+  api.set_interface_dns_settings =
+      [&mock](std::uint32_t,
+              const ecnuvpn::platform::NativeDnsSettings &settings) {
+        mock.dns_writes.push_back(settings);
+        if (mock.ops)
+          mock.ops->push_back("dns:set");
+        return mock.set_dns_error;
+      };
   return api;
+}
+
+std::size_t find_nth(const std::vector<std::string> &values,
+                     const std::string &needle, int occurrence) {
+  int seen = 0;
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (values[i] == needle && ++seen == occurrence)
+      return i;
+  }
+  return values.size();
 }
 
 bool win32_platform_ops_apply_routes_and_cleanup_in_order() {
@@ -169,23 +210,61 @@ bool win32_platform_ops_apply_routes_and_cleanup_in_order() {
   return ok;
 }
 
-bool win32_platform_ops_reject_dns_until_real_dns_backend_exists() {
+bool win32_platform_ops_apply_dns_and_restore_on_cleanup() {
   bool ok = true;
   MockWintun wintun;
   MockIpHelper ip;
+  std::vector<std::string> ops_log;
+  wintun.ops = &ops_log;
+  ip.ops = &ops_log;
+  ip.current_dns.servers = {"192.0.2.53"};
+  ip.current_dns.search_domain = "corp.example";
+  ip.current_dns.suffixes = {"corp.example"};
+
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
   auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
-  config.dns.servers = {"10.0.0.53"};
+  config.routes.push_back({"10.0.0.0/8", "", 10, false});
+  config.dns.servers = {"10.0.0.53", "10.0.0.54"};
+  config.dns.search_domain = "vpn.example";
+  config.dns.suffixes = {"vpn.example", "ecnu.edu.cn"};
 
-  ok = expect(!ops->apply_tunnel_config(device, config),
-              "apply must not report success for unimplemented DNS changes") &&
+  ok = expect(ops->apply_tunnel_config(device, config),
+              "apply should configure DNS through the native Windows DNS API") &&
        ok;
-  ok = expect(ip.addresses.empty() && ip.routes.empty(),
-              "DNS rejection should happen before partial network mutation") &&
+  ok = expect(ip.dns_read_interfaces.size() == 1 &&
+                  ip.dns_read_interfaces[0] == 42,
+              "apply should capture original DNS before changing it") &&
+       ok;
+  ok = expect(ip.dns_writes.size() == 1 &&
+                  ip.dns_writes[0].servers.size() == 2 &&
+                  ip.dns_writes[0].servers[0] == "10.0.0.53" &&
+                  ip.dns_writes[0].search_domain == "vpn.example" &&
+                  ip.dns_writes[0].suffixes.size() == 2,
+              "apply should write requested DNS servers and suffixes") &&
+       ok;
+
+  auto cleanup = ops->cleanup(device.adapter_name,
+                              exv::platform::CleanupPolicy::Full);
+  ok = expect(cleanup.success, "cleanup should restore DNS successfully") && ok;
+  ok = expect(cleanup.dns_removed,
+              "cleanup result should report DNS restoration") &&
+       ok;
+  ok = expect(ip.dns_writes.size() == 2 &&
+                  ip.dns_writes[1].servers.size() == 1 &&
+                  ip.dns_writes[1].servers[0] == "192.0.2.53" &&
+                  ip.dns_writes[1].search_domain == "corp.example",
+              "cleanup should restore the captured original DNS settings") &&
+       ok;
+
+  const std::size_t route_delete = find_nth(ops_log, "route:delete", 1);
+  const std::size_t dns_restore = find_nth(ops_log, "dns:set", 2);
+  const std::size_t adapter_delete = find_nth(ops_log, "adapter:delete", 1);
+  ok = expect(route_delete < dns_restore && dns_restore < adapter_delete,
+              "cleanup should remove routes, then DNS, then adapter") &&
        ok;
   return ok;
 }
@@ -217,12 +296,85 @@ bool win32_platform_ops_rolls_back_routes_when_apply_fails() {
   return ok;
 }
 
+bool win32_platform_ops_rolls_back_routes_when_dns_apply_fails() {
+  bool ok = true;
+  MockWintun wintun;
+  MockIpHelper ip;
+  ip.set_dns_error = 87;
+  ip.current_dns.servers = {"192.0.2.53"};
+  auto ops = exv::platform::create_win32_platform_network_ops(
+      make_wintun_deps(wintun), make_ip_api(ip));
+
+  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  exv::platform::TunnelConfig config;
+  config.interface_address = "10.255.0.10/24";
+  config.routes.push_back({"10.0.0.0/8", "", 10, false});
+  config.dns.servers = {"10.0.0.53"};
+
+  ok = expect(!ops->apply_tunnel_config(device, config),
+              "apply should fail when DNS application fails") &&
+       ok;
+  ok = expect(ip.routes.size() == 1 && ip.dns_writes.size() == 2,
+              "apply should attempt the failing DNS write and restore original DNS") &&
+       ok;
+  ok = expect(ip.dns_writes.size() == 2 &&
+                  ip.dns_writes[1].servers.size() == 1 &&
+                  ip.dns_writes[1].servers[0] == "192.0.2.53",
+              "DNS failure should restore captured original DNS settings") &&
+       ok;
+  ok = expect(ip.deleted_routes.size() == 1 &&
+                  ip.deleted_routes[0].cidr == "10.0.0.0/8",
+              "DNS failure should roll back routes created earlier") &&
+       ok;
+  return ok;
+}
+
+bool win32_platform_ops_restores_dns_when_route_cleanup_fails() {
+  bool ok = true;
+  MockWintun wintun;
+  MockIpHelper ip;
+  ip.current_dns.servers = {"192.0.2.53"};
+  ip.delete_route_error = 1234;
+  auto ops = exv::platform::create_win32_platform_network_ops(
+      make_wintun_deps(wintun), make_ip_api(ip));
+
+  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  exv::platform::TunnelConfig config;
+  config.interface_address = "10.255.0.10/24";
+  config.routes.push_back({"10.0.0.0/8", "", 10, false});
+  config.dns.servers = {"10.0.0.53"};
+
+  ok = expect(ops->apply_tunnel_config(device, config),
+              "apply should succeed before cleanup failure scenario") &&
+       ok;
+
+  auto cleanup = ops->cleanup(device.adapter_name,
+                              exv::platform::CleanupPolicy::Full);
+  ok = expect(!cleanup.success,
+              "cleanup should report failure when route deletion fails") &&
+       ok;
+  ok = expect(cleanup.dns_removed,
+              "cleanup should still restore DNS after route deletion failure") &&
+       ok;
+  ok = expect(ip.dns_writes.size() == 2 &&
+                  ip.dns_writes[1].servers.size() == 1 &&
+                  ip.dns_writes[1].servers[0] == "192.0.2.53",
+              "route cleanup failure should not leave VPN DNS active") &&
+       ok;
+  ok = expect(wintun.adapters_deleted == 0,
+              "cleanup should not delete adapter after route cleanup failure") &&
+       ok;
+  return ok;
+}
+
 } // namespace
 
 int main() {
   bool ok = true;
   ok = win32_platform_ops_apply_routes_and_cleanup_in_order() && ok;
-  ok = win32_platform_ops_reject_dns_until_real_dns_backend_exists() && ok;
+  ok = win32_platform_ops_apply_dns_and_restore_on_cleanup() && ok;
   ok = win32_platform_ops_rolls_back_routes_when_apply_fails() && ok;
+  ok = win32_platform_ops_rolls_back_routes_when_dns_apply_fails() && ok;
+  ok = win32_platform_ops_restores_dns_when_route_cleanup_fails() && ok;
   return ok ? 0 : 1;
 }

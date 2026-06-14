@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -77,6 +78,39 @@ bool split_ipv4_cidr(const std::string &cidr, std::string *address,
   return true;
 }
 
+bool has_dns_config(const DnsConfig &dns) {
+  return !dns.servers.empty() || !dns.search_domain.empty() ||
+         !dns.suffixes.empty();
+}
+
+bool is_blank(const std::string &value) {
+  for (char ch : value) {
+    if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+      return false;
+  }
+  return true;
+}
+
+bool to_native_dns_settings(const DnsConfig &dns,
+                            ecnuvpn::platform::NativeDnsSettings *settings) {
+  if (!settings)
+    return false;
+
+  for (const auto &server : dns.servers) {
+    if (is_blank(server))
+      return false;
+  }
+  for (const auto &suffix : dns.suffixes) {
+    if (is_blank(suffix))
+      return false;
+  }
+
+  settings->servers = dns.servers;
+  settings->search_domain = dns.search_domain;
+  settings->suffixes = dns.suffixes;
+  return true;
+}
+
 class Win32PlatformNetworkOps final : public PlatformNetworkOps {
 public:
   Win32PlatformNetworkOps(
@@ -121,13 +155,30 @@ public:
                            const TunnelConfig &config) override {
     if (!wintun_ || !device.is_open || interface_index_ == 0)
       return false;
-    if (!config.dns.servers.empty() || !config.dns.search_domain.empty())
-      return false;
 
     std::string address;
     std::string netmask;
     if (!split_ipv4_cidr(config.interface_address, &address, &netmask))
       return false;
+
+    ecnuvpn::platform::NativeDnsSettings desired_dns;
+    const bool configure_dns = has_dns_config(config.dns);
+    if (configure_dns) {
+      if (!to_native_dns_settings(config.dns, &desired_dns))
+        return false;
+      if (!ip_helper_api_.get_interface_dns_settings ||
+          !ip_helper_api_.set_interface_dns_settings)
+        return false;
+    }
+
+    ecnuvpn::platform::NativeDnsSettings previous_dns;
+    if (configure_dns) {
+      ecnuvpn::platform::NativeIpHelperApi::ErrorCode dns_error =
+          ip_helper_api_.get_interface_dns_settings(interface_index_,
+                                                    previous_dns);
+      if (dns_error != 0)
+        return false;
+    }
 
     ecnuvpn::vpn_engine::TunnelMetadata metadata;
     metadata.interface_name = device.adapter_name;
@@ -152,6 +203,22 @@ public:
       return false;
     }
 
+    if (configure_dns) {
+      ecnuvpn::platform::NativeIpHelperApi::ErrorCode dns_error =
+          ip_helper_api_.set_interface_dns_settings(interface_index_,
+                                                    desired_dns);
+      if (dns_error != 0) {
+        (void)ip_helper_api_.set_interface_dns_settings(interface_index_,
+                                                        previous_dns);
+        auto rollback = ip_config->cleanup();
+        if (!rollback.ok())
+          ip_config_ = std::move(ip_config);
+        return false;
+      }
+      original_dns_ = previous_dns;
+      dns_configured_ = true;
+    }
+
     ip_config_ = std::move(ip_config);
     return true;
   }
@@ -169,12 +236,42 @@ public:
       auto cleaned = ip_config_->cleanup();
       if (!cleaned.ok()) {
         result.success = false;
-        result.error_message = cleaned.message;
+        result.error_message = cleaned.message.empty()
+                                   ? "native route cleanup failed"
+                                   : cleaned.message;
+      } else {
+        result.routes_removed = owned_route_count;
+        ip_config_.reset();
+      }
+    }
+
+    if (dns_configured_ && original_dns_ &&
+        (policy == CleanupPolicy::Full || policy == CleanupPolicy::KeepAdapter ||
+         policy == CleanupPolicy::DnsOnly)) {
+      if (!ip_helper_api_.set_interface_dns_settings) {
+        result.success = false;
+        result.error_message = "native DNS settings API is missing";
         return result;
       }
-      result.routes_removed = owned_route_count;
-      ip_config_.reset();
+      ecnuvpn::platform::NativeIpHelperApi::ErrorCode dns_error =
+          ip_helper_api_.set_interface_dns_settings(interface_index_,
+                                                    *original_dns_);
+      if (dns_error != 0) {
+        result.success = false;
+        if (result.error_message.empty()) {
+          result.error_message =
+              "SetInterfaceDnsSettings restore failed: " +
+              std::to_string(dns_error);
+        }
+      } else {
+        result.dns_removed = true;
+        dns_configured_ = false;
+        original_dns_.reset();
+      }
     }
+
+    if (!result.success)
+      return result;
 
     if (policy == CleanupPolicy::Full && wintun_) {
       (void)adapter_name;
@@ -203,8 +300,10 @@ private:
   ecnuvpn::platform::NativeIpHelperApi ip_helper_api_;
   std::unique_ptr<ecnuvpn::platform::NativeWintun> wintun_;
   std::unique_ptr<ecnuvpn::platform::NativeIpConfig> ip_config_;
+  std::optional<ecnuvpn::platform::NativeDnsSettings> original_dns_;
   TunnelDeviceDescriptor last_device_;
   std::uint32_t interface_index_ = 0;
+  bool dns_configured_ = false;
 };
 
 } // namespace
