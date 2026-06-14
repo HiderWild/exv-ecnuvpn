@@ -46,28 +46,13 @@ public:
 
 private:
     /// Determine the pipe / socket endpoint from the connector config.
-    /// Priority: 1) explicit pipe_endpoint, 2) helper_executable_path if it
-    /// looks like a pipe/socket, 3) platform default endpoint.
+    /// Priority: 1) explicit pipe_endpoint, 2) platform default endpoint.
     static std::string resolve_endpoint(const HelperConnectorConfig& config) {
         // 1) Explicit pipe endpoint takes highest priority.
         if (!config.pipe_endpoint.empty()) {
             return config.pipe_endpoint;
         }
 
-        // 2) helper_executable_path may carry a pipe/socket endpoint
-        //    (legacy callers that don't set pipe_endpoint separately).
-        if (!config.helper_executable_path.empty()) {
-            const auto& p = config.helper_executable_path;
-#ifdef _WIN32
-            // On Windows, named pipes start with \\.\pipe\ or \\?\pipe\
-            if (p.find("\\\\.\\pipe\\") == 0 || p.find("\\\\?\\pipe\\") == 0)
-                return p;
-#else
-            // On POSIX, absolute paths are socket paths
-            if (!p.empty() && p[0] == '/')
-                return p;
-#endif
-        }
         return default_endpoint();
     }
 

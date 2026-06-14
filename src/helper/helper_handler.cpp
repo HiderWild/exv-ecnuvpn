@@ -8,7 +8,12 @@
 namespace exv::helper {
 
 HelperHandler::HelperHandler(HelperLifecyclePolicy policy)
-    : policy_(std::move(policy)) {
+    : HelperHandler(std::move(policy), nullptr) {
+}
+
+HelperHandler::HelperHandler(HelperLifecyclePolicy policy,
+                             std::shared_ptr<HelperNetworkOps> network_ops)
+    : policy_(std::move(policy)), network_ops_(std::move(network_ops)) {
     register_handlers();
 }
 
@@ -59,8 +64,9 @@ void HelperHandler::tick() {
             full_policy.remove_dns = true;
             full_policy.remove_adapter = true;
             full_policy.remove_firewall_rules = true;
-            cleanup_session(id, full_policy);
-            if (startup_context_.launch_mode == "oneshot") {
+            CleanupResponse cleanup_resp = cleanup_session(id, full_policy);
+            if (cleanup_resp.success &&
+                startup_context_.launch_mode == "oneshot") {
                 shutdown_requested_ = true;
             }
         }
@@ -83,11 +89,20 @@ void HelperHandler::set_startup_context(HelperStartupContext context) {
     startup_context_ = std::move(context);
 }
 
-void HelperHandler::cleanup_all_sessions(const CleanupPolicy& policy) {
+CleanupResponse HelperHandler::cleanup_all_sessions(const CleanupPolicy& policy) {
+    CleanupResponse aggregate;
+    aggregate.success = true;
     auto active_ids = leases_.active_session_ids();
     for (const auto& id : active_ids) {
-        cleanup_session(id, policy);
+        CleanupResponse cleanup_resp = cleanup_session(id, policy);
+        if (!cleanup_resp.success) {
+            aggregate.success = false;
+            aggregate.errors.insert(aggregate.errors.end(),
+                                    cleanup_resp.errors.begin(),
+                                    cleanup_resp.errors.end());
+        }
     }
+    return aggregate;
 }
 
 // --- Handler implementations ---
@@ -185,11 +200,33 @@ HelperResponse HelperHandler::handle_prepare_tunnel_device(const HelperRequest& 
         return resp;
     }
 
+    if (!network_ops_) {
+        HelperResponse resp;
+        resp.op = req.op;
+        resp.success = false;
+        resp.error_code = "network_ops_unavailable";
+        resp.error_message = "Helper network operations are not available";
+        return resp;
+    }
+
+    std::vector<ManagedResource> created_resources;
+    PrepareTunnelDeviceResponse device_resp =
+        network_ops_->prepare_tunnel_device(device_req, &created_resources);
+    for (const auto& resource : created_resources) {
+        cleanup_.add_resource(device_req.session_id, resource);
+    }
+
+    nlohmann::json payload;
+    to_json(payload, device_resp);
+
     HelperResponse resp;
     resp.op = req.op;
-    resp.success = false;
-    resp.error_code = "network_ops_unavailable";
-    resp.error_message = "Helper network operations are not available";
+    resp.success = !device_resp.device_path.empty();
+    if (!resp.success) {
+        resp.error_code = "device_not_found";
+        resp.error_message = "Helper network operations did not return a device";
+    }
+    resp.payload_json = payload.dump();
     return resp;
 }
 
@@ -216,11 +253,37 @@ HelperResponse HelperHandler::handle_apply_tunnel_config(const HelperRequest& re
         return resp;
     }
 
+    if (!network_ops_) {
+        HelperResponse resp;
+        resp.op = req.op;
+        resp.success = false;
+        resp.error_code = "network_ops_unavailable";
+        resp.error_message = "Helper network operations are not available";
+        return resp;
+    }
+
+    std::vector<ManagedResource> created_resources;
+    ApplyTunnelConfigResponse config_resp =
+        network_ops_->apply_tunnel_config(config_req, &created_resources);
+    if (config_resp.success) {
+        for (const auto& resource : created_resources) {
+            cleanup_.add_resource(config_req.config.session_id, resource);
+        }
+    }
+
+    nlohmann::json payload;
+    to_json(payload, config_resp);
+
     HelperResponse resp;
     resp.op = req.op;
-    resp.success = false;
-    resp.error_code = "network_ops_unavailable";
-    resp.error_message = "Helper network operations are not available";
+    resp.success = config_resp.success;
+    if (!resp.success) {
+        resp.error_code = "network_ops_failed";
+        resp.error_message = config_resp.error_message.empty()
+                                 ? "Helper network operations failed"
+                                 : config_resp.error_message;
+    }
+    resp.payload_json = payload.dump();
     return resp;
 }
 
@@ -278,13 +341,20 @@ CleanupResponse HelperHandler::cleanup_session(const SessionId& session_id,
         ecnuvpn::logger::info("[helper] Cleaning managed resource: type=" + res.type
                               + " detail=" + res.detail);
     }
-    if (!resources.empty()) {
+    if (!resources.empty() && !network_ops_) {
         (void)policy;
         errors.push_back("Platform cleanup operations are not available");
         CleanupResponse cleanup_resp;
         cleanup_resp.success = false;
         cleanup_resp.errors = errors;
         return cleanup_resp;
+    }
+    if (!resources.empty()) {
+        CleanupResponse cleanup_resp =
+            network_ops_->cleanup(session_id, policy, resources);
+        if (!cleanup_resp.success) {
+            return cleanup_resp;
+        }
     }
 
     cleanup_.remove_session(session_id);

@@ -136,8 +136,7 @@ int main(int argc, char *argv[]) {
 
       for (int i = 2; i < argc; ++i) {
         std::string option = argv[i];
-        if (option == "--endpoint" || option == "--pipe" ||
-            option == "--socket") {
+        if (option == "--endpoint") {
           if (!read_option_value(argc, argv, &i, &options.endpoint))
             return print_usage();
           continue;

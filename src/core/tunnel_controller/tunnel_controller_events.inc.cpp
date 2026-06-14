@@ -29,53 +29,38 @@
     void on_cstp_connected() {
         if (phase_ == TunnelPhase::ConnectingCstp) {
             timing_.timer.end(ConnectTiming::CSTP_CONNECT);
-            timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
-            transition_to(TunnelPhase::ApplyingNetworkConfig);
 
             // When the native engine is active, apply the tunnel config
             // now and auto-advance the rest of the flow.
             if (runner_.is_running()) {
                 apply_tunnel_config_and_advance();
+            } else {
+                timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
+                transition_to(TunnelPhase::ApplyingNetworkConfig);
             }
         }
     }
 
     void apply_tunnel_config_and_advance() {
-        log_tunnel_event("INFO", "network.config.applying", "Applying network config",
-                         {{"session_id", session_id_.value}});
-        try {
-            exv::helper::ApplyTunnelConfigRequest cfg_req;
-            cfg_req.config.session_id        = session_id_;
+        // Use the real IP address assigned by the VPN gateway, falling
+        // back to a safe default only when the engine hasn't reported one.
+        auto engine_status = runner_.status();
+        std::string ip = engine_status.internal_ip;
+        if (ip.empty()) {
+            ip = "10.0.0.2/24";  // safe fallback
+        } else if (ip.find('/') == std::string::npos) {
+            // The engine reports a bare IP; append a sensible prefix.
+            ip += "/24";
+        }
 
-            // Use the real IP address assigned by the VPN gateway, falling
-            // back to a safe default only when the engine hasn't reported one.
-            auto engine_status = runner_.status();
-            std::string ip = engine_status.internal_ip;
-            if (ip.empty()) {
-                ip = "10.0.0.2/24";  // safe fallback
-            } else if (ip.find('/') == std::string::npos) {
-                // The engine reports a bare IP; append a sensible prefix.
-                ip += "/24";
-            }
-            cfg_req.config.interface_address = ip;
-            cfg_req.config.enable_kill_switch = false;
-
-            auto cfg_resp = helper_->apply_tunnel_config(cfg_req);
-            if (!cfg_resp.success) {
-                timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
-                set_error(CoreErrorMapper::from_helper_error(
-                    "apply_config_failed", cfg_resp.error_message));
-                transition_to(TunnelPhase::Failed);
-                return;
-            }
-        } catch (const std::exception& e) {
-            timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
-            set_error(CoreErrorMapper::from_helper_error(
-                "apply_config_failed", e.what()));
+        exv::platform::TunnelDeviceDescriptor device;
+        if (!prepare_tunnel_device_for_session(&device)) {
+            return;
+        }
+        if (!apply_tunnel_config_for_session(device, ip)) {
             transition_to(TunnelPhase::Failed);
             return;
         }
-        timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
 
         // Transition through OpeningPacketDevice and fire
         // NetworkConfigApplied so the state machine advances.

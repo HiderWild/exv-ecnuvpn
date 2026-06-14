@@ -48,6 +48,8 @@ helper::StartSessionResponse FakeHelper::start_session(const helper::StartSessio
 }
 
 helper::PrepareTunnelDeviceResponse FakeHelper::prepare_tunnel_device(const helper::PrepareTunnelDeviceRequest& req) {
+    prepare_count_++;
+    prepared_sessions_[req.session_id] = true;
     helper::PrepareTunnelDeviceResponse resp;
     resp.device_path = "//./FakeTun/" + req.session_id.value;
     resp.mtu = 1400;
@@ -55,10 +57,18 @@ helper::PrepareTunnelDeviceResponse FakeHelper::prepare_tunnel_device(const help
 }
 
 helper::ApplyTunnelConfigResponse FakeHelper::apply_tunnel_config(const helper::ApplyTunnelConfigRequest& req) {
+    apply_count_++;
     helper::ApplyTunnelConfigResponse resp;
-    resp.success = !fail_next_ && !apply_config_fail_;
+    const bool missing_prepare =
+        require_prepare_before_apply_ &&
+        prepared_sessions_.find(req.config.session_id) == prepared_sessions_.end();
+    resp.success = !fail_next_ && !apply_config_fail_ && !missing_prepare;
     if (!resp.success) {
-        resp.error_message = apply_config_fail_ ? "Simulated apply_config failure" : "Simulated fail_next";
+        if (missing_prepare) {
+            resp.error_message = "Tunnel device has not been prepared";
+        } else {
+            resp.error_message = apply_config_fail_ ? "Simulated apply_config failure" : "Simulated fail_next";
+        }
     }
     fail_next_ = false;
     return resp;
@@ -79,6 +89,7 @@ helper::CleanupResponse FakeHelper::cleanup(const helper::CleanupRequest& req) {
     helper::CleanupResponse resp;
     resp.success = true;
     sessions_.erase(req.session_id);
+    prepared_sessions_.erase(req.session_id);
     return resp;
 }
 
@@ -91,6 +102,7 @@ helper::ShutdownResponse FakeHelper::shutdown(const helper::ShutdownRequest& req
     helper::ShutdownResponse resp;
     resp.cleanup_success = true;
     sessions_.erase(req.session_id);
+    prepared_sessions_.erase(req.session_id);
     return resp;
 }
 
@@ -125,8 +137,14 @@ void FakeHelper::set_apply_config_fail(bool fail) {
     apply_config_fail_ = fail;
 }
 
+void FakeHelper::set_require_prepare_before_apply(bool require) {
+    require_prepare_before_apply_ = require;
+}
+
 int FakeHelper::connect_count() const { return connect_count_; }
 int FakeHelper::hello_count() const { return hello_count_; }
+int FakeHelper::prepare_count() const { return prepare_count_; }
+int FakeHelper::apply_count() const { return apply_count_; }
 int FakeHelper::heartbeat_count() const { return heartbeat_count_; }
 bool FakeHelper::ipc_lost() const { return ipc_lost_; }
 

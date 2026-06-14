@@ -1,4 +1,5 @@
 #include "helper/helper.hpp"
+#include "helper/helper_daemon_context.hpp"
 #include "helper/helper_ipc.hpp"
 
 #include "helper/common/helper_messages.hpp"
@@ -109,10 +110,25 @@ bool peer_matches_expected_owner(const IpcServer &ipc,
   if (!peer_uid.empty() && peer_uid == options.owner)
     return true;
 
-  if (options.owner.rfind("pid:", 0) == 0 && ipc.peer_pid() > 0) {
-    return options.owner == "pid:" + std::to_string(ipc.peer_pid());
+  return false;
+}
+
+bool cleanup_all_sessions_or_keep_running(
+    exv::helper::HelperHandler &handler,
+    const std::string &reason) {
+  exv::helper::CleanupResponse cleanup =
+      handler.cleanup_all_sessions(full_cleanup_policy());
+  if (cleanup.success) {
+    return true;
   }
 
+  std::ostringstream message;
+  message << "Helper cleanup failed during " << reason
+          << "; keeping daemon alive for retry";
+  for (const auto &error : cleanup.errors) {
+    message << "; " << error;
+  }
+  logger::warn(message.str());
   return false;
 }
 
@@ -229,13 +245,7 @@ int daemon_main(const DaemonOptions &options) {
     return 1;
   }
 
-  auto handler = std::make_unique<exv::helper::HelperHandler>();
-  exv::helper::HelperStartupContext startup_context;
-  startup_context.launch_mode = options.mode;
-  startup_context.endpoint = options.endpoint;
-  startup_context.owner = options.owner;
-  startup_context.parent_pid = options.parent_pid;
-  handler->set_startup_context(std::move(startup_context));
+  auto handler = create_helper_handler_for_daemon(options);
   std::mutex handler_mutex;
   std::thread maintenance_thread([&] {
     while (!daemon_stop_requested) {
@@ -250,8 +260,9 @@ int daemon_main(const DaemonOptions &options) {
       if (options.oneshot && options.parent_pid > 0 &&
           !platform::is_process_alive(options.parent_pid)) {
         logger::info("Helper oneshot parent disappeared; cleaning up and exiting");
-        handler->cleanup_all_sessions(full_cleanup_policy());
-        daemon_stop_requested = 1;
+        if (cleanup_all_sessions_or_keep_running(*handler, "parent exit")) {
+          daemon_stop_requested = 1;
+        }
       }
       if (handler->should_stop()) {
         daemon_stop_requested = 1;
@@ -290,8 +301,9 @@ int daemon_main(const DaemonOptions &options) {
       ipc->close_client();
       if (options.oneshot) {
         std::lock_guard<std::mutex> lock(handler_mutex);
-        handler->cleanup_all_sessions(full_cleanup_policy());
-        daemon_stop_requested = 1;
+        if (cleanup_all_sessions_or_keep_running(*handler, "owner mismatch")) {
+          daemon_stop_requested = 1;
+        }
       }
       continue;
     }
@@ -323,8 +335,9 @@ int daemon_main(const DaemonOptions &options) {
             ipc->send_response(resp_json.dump());
             if (options.oneshot) {
               std::lock_guard<std::mutex> lock(handler_mutex);
-              handler->cleanup_all_sessions(full_cleanup_policy());
-              daemon_stop_requested = 1;
+              if (cleanup_all_sessions_or_keep_running(*handler, "invalid first request")) {
+                daemon_stop_requested = 1;
+              }
             }
             break;
           }
@@ -345,8 +358,9 @@ int daemon_main(const DaemonOptions &options) {
           ipc->send_response(err.dump());
           if (first_request && options.oneshot) {
             std::lock_guard<std::mutex> lock(handler_mutex);
-            handler->cleanup_all_sessions(full_cleanup_policy());
-            daemon_stop_requested = 1;
+            if (cleanup_all_sessions_or_keep_running(*handler, "invalid envelope")) {
+              daemon_stop_requested = 1;
+            }
           }
           break;
         }
@@ -355,8 +369,9 @@ int daemon_main(const DaemonOptions &options) {
         ipc->send_response(err.dump());
         if (first_request && options.oneshot) {
           std::lock_guard<std::mutex> lock(handler_mutex);
-          handler->cleanup_all_sessions(full_cleanup_policy());
-          daemon_stop_requested = 1;
+          if (cleanup_all_sessions_or_keep_running(*handler, "parse error")) {
+            daemon_stop_requested = 1;
+          }
         }
         break;
       }
@@ -374,8 +389,9 @@ int daemon_main(const DaemonOptions &options) {
     ipc->close_client();
     if (options.oneshot) {
       std::lock_guard<std::mutex> lock(handler_mutex);
-      handler->cleanup_all_sessions(full_cleanup_policy());
-      daemon_stop_requested = 1;
+      if (cleanup_all_sessions_or_keep_running(*handler, "client disconnect")) {
+        daemon_stop_requested = 1;
+      }
     }
     reap_finished_request_handlers();
     {

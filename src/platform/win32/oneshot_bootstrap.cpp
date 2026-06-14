@@ -143,10 +143,13 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   backend.endpoint = "\\\\.\\pipe\\exv-oneshot-" + session_id;
   backend.owner = current_owner_sid();
   backend.parent_pid = static_cast<int>(GetCurrentProcessId());
-  if (backend.owner.empty())
-    backend.owner = "pid:" + std::to_string(backend.parent_pid);
+  if (backend.owner.empty()) {
+    backend.code = kServiceStartFailedCode;
+    backend.message = "Unable to determine the current Windows owner SID.";
+    return backend;
+  }
 
-  std::string args = "--oneshot --pipe \"" + backend.endpoint +
+  std::string args = "--oneshot --endpoint \"" + backend.endpoint +
                      "\" --owner \"" + backend.owner +
                      "\" --parent-pid " + std::to_string(backend.parent_pid);
 

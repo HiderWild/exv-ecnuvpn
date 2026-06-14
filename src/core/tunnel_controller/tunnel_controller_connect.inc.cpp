@@ -21,13 +21,80 @@
     // 2.  Authenticating        — runner_.start() -> session begins
     // 3.  [async] AuthSucceeded — phase moves to ConnectingCstp
     // 4.  [async] CstpConnected — phase moves to ApplyingNetworkConfig
-    // 5.  ApplyingNetworkConfig — apply_tunnel_config()
-    // 6.  [async] PacketLoopStarted — phase moves to Connected
+    // 5.  OpeningPacketDevice — prepare_tunnel_device()
+    // 6.  ApplyingNetworkConfig — apply_tunnel_config()
+    // 7.  [async] PacketLoopStarted — phase moves to Connected
     //
     // When no VPN config is provided (fallback path), the old synchronous
     // flow is preserved for backward compatibility with tests that don't
     // set a VPN config.
     // ================================================================
+    bool prepare_tunnel_device_for_session(
+        exv::platform::TunnelDeviceDescriptor* device) {
+        if (!device) return false;
+
+        timing_.timer.start(ConnectTiming::PACKET_DEVICE);
+        transition_to(TunnelPhase::OpeningPacketDevice);
+
+        try {
+            *device = net_ops_->prepare_tunnel_device(adapter_name_);
+            if (device->path.empty() || !device->is_open) {
+                timing_.timer.end(ConnectTiming::PACKET_DEVICE);
+                auto err = CoreErrorMapper::from_platform_error(
+                    "packet", -1, "prepare_tunnel_device");
+                err.message = "Tunnel device returned empty path";
+                set_error(err);
+                transition_to(TunnelPhase::Failed);
+                return false;
+            }
+        } catch (const std::exception& e) {
+            timing_.timer.end(ConnectTiming::PACKET_DEVICE);
+            auto err = CoreErrorMapper::from_platform_error(
+                "packet", -1, "prepare_tunnel_device");
+            err.message = std::string("prepare_tunnel_device: ") + e.what();
+            set_error(err);
+            transition_to(TunnelPhase::Failed);
+            return false;
+        }
+
+        timing_.timer.end(ConnectTiming::PACKET_DEVICE);
+        return true;
+    }
+
+    bool apply_tunnel_config_for_session(
+        const exv::platform::TunnelDeviceDescriptor& device,
+        const std::string& interface_address) {
+        timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
+        transition_to(TunnelPhase::ApplyingNetworkConfig);
+        log_tunnel_event("INFO", "network.config.applying", "Applying network config",
+                         {{"session_id", session_id_.value}});
+
+        try {
+            exv::platform::TunnelConfig config;
+            config.interface_address = interface_address;
+            config.interface_name = device.adapter_name;
+            config.mtu = device.mtu;
+            config.enable_kill_switch = false;
+
+            if (!net_ops_->apply_tunnel_config(device, config)) {
+                timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+                set_error(CoreErrorMapper::from_helper_error(
+                    "apply_config_failed", "Failed to apply tunnel config"));
+                transition_to(TunnelPhase::Failed);
+                return false;
+            }
+        } catch (const std::exception& e) {
+            timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+            set_error(CoreErrorMapper::from_helper_error(
+                "apply_config_failed", e.what()));
+            transition_to(TunnelPhase::Failed);
+            return false;
+        }
+
+        timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+        return true;
+    }
+
     void do_connect() {
         log_tunnel_event("INFO", "connect.start", "Connect requested",
                          {{"server", intent_.profile_id.value},
@@ -134,60 +201,16 @@
         transition_to(TunnelPhase::ConnectingCstp);
         timing_.timer.end(ConnectTiming::CSTP_CONNECT);
 
-        // Step 5 — ApplyingNetworkConfig: ask helper to push routes / DNS
-        timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
-        transition_to(TunnelPhase::ApplyingNetworkConfig);
-        log_tunnel_event("INFO", "network.config.applying", "Applying network config",
-                         {{"session_id", session_id_.value}});
-
-        try {
-            exv::helper::ApplyTunnelConfigRequest cfg_req;
-            cfg_req.config.session_id        = session_id_;
-            cfg_req.config.interface_address = "10.0.0.2/24";   // placeholder
-            cfg_req.config.enable_kill_switch = false;
-
-            auto cfg_resp = helper_->apply_tunnel_config(cfg_req);
-            if (!cfg_resp.success) {
-                timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
-                set_error(CoreErrorMapper::from_helper_error(
-                    "apply_config_failed", cfg_resp.error_message));
-                transition_to(TunnelPhase::Failed);
-                return;
-            }
-        } catch (const std::exception& e) {
-            timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
-            set_error(CoreErrorMapper::from_helper_error(
-                "apply_config_failed", e.what()));
-            transition_to(TunnelPhase::Failed);
+        // Step 5/6 — create the tunnel adapter before pushing routes/DNS.
+        exv::platform::TunnelDeviceDescriptor device;
+        if (!prepare_tunnel_device_for_session(&device)) {
             return;
         }
-        timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+        if (!apply_tunnel_config_for_session(device, "10.0.0.2/24")) {
+            return;
+        }
 
-        // Step 6 — OpeningPacketDevice: create the tunnel adapter
-        timing_.timer.start(ConnectTiming::PACKET_DEVICE);
         transition_to(TunnelPhase::OpeningPacketDevice);
-
-        try {
-            auto device = net_ops_->prepare_tunnel_device(adapter_name_);
-            if (device.path.empty()) {
-                timing_.timer.end(ConnectTiming::PACKET_DEVICE);
-                auto err = CoreErrorMapper::from_platform_error(
-                    "packet", -1, "prepare_tunnel_device");
-                err.message = "Tunnel device returned empty path";
-                set_error(err);
-                transition_to(TunnelPhase::Failed);
-                return;
-            }
-        } catch (const std::exception& e) {
-            timing_.timer.end(ConnectTiming::PACKET_DEVICE);
-            auto err = CoreErrorMapper::from_platform_error(
-                "packet", -1, "prepare_tunnel_device");
-            err.message = std::string("prepare_tunnel_device: ") + e.what();
-            set_error(err);
-            transition_to(TunnelPhase::Failed);
-            return;
-        }
-        timing_.timer.end(ConnectTiming::PACKET_DEVICE);
 
         // Step 7 — Connected
         log_tunnel_event("INFO", "packet.loop.started", "Packet loop started",

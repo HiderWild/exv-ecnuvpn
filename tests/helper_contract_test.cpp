@@ -4,6 +4,7 @@
 #include "helper/common/helper_messages.hpp"
 #include "helper/common/helper_protocol.hpp"
 #include "helper/helper_handler.hpp"
+#include "helper/helper_network_ops.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -14,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <memory>
 
 using json = nlohmann::json;
 
@@ -37,6 +39,14 @@ json read_json_file(const std::filesystem::path &path) {
   json parsed;
   in >> parsed;
   return parsed;
+}
+
+std::string read_text_file(const std::filesystem::path &path) {
+  std::ifstream in(path);
+  if (!in)
+    throw std::runtime_error("failed to open " + path.string());
+  return std::string(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
 }
 
 template <typename Range>
@@ -90,6 +100,64 @@ exv::helper::HelperResponse dispatch_json(exv::helper::HelperHandler &handler,
   req.payload_json = payload.dump();
   return handler.handle(req);
 }
+
+class RecordingHelperNetworkOps final : public exv::helper::HelperNetworkOps {
+public:
+  exv::helper::PrepareTunnelDeviceResponse
+  prepare_tunnel_device(
+      const exv::helper::PrepareTunnelDeviceRequest &request,
+      std::vector<exv::helper::ManagedResource> *created_resources) override {
+    prepare_count++;
+    last_prepare_session = request.session_id.value;
+    exv::helper::PrepareTunnelDeviceResponse response;
+    response.device_path = "helper-device://" + request.adapter_name;
+    response.mtu = 1280;
+    created_resources->push_back({"adapter", request.adapter_name});
+    return response;
+  }
+
+  exv::helper::ApplyTunnelConfigResponse
+  apply_tunnel_config(
+      const exv::helper::ApplyTunnelConfigRequest &request,
+      std::vector<exv::helper::ManagedResource> *created_resources) override {
+    apply_count++;
+    last_apply_session = request.config.session_id.value;
+    for (const auto &route : request.config.routes) {
+      created_resources->push_back({"route", route.destination});
+    }
+    for (const auto &server : request.config.dns.servers) {
+      created_resources->push_back({"dns", server});
+    }
+    exv::helper::ApplyTunnelConfigResponse response;
+    response.success = true;
+    return response;
+  }
+
+  exv::helper::CleanupResponse cleanup(
+      const exv::helper::SessionId &session_id,
+      const exv::helper::CleanupPolicy &policy,
+      const std::vector<exv::helper::ManagedResource> &resources) override {
+    (void)policy;
+    cleanup_count++;
+    last_cleanup_session = session_id.value;
+    last_cleanup_resource_count = resources.size();
+    exv::helper::CleanupResponse response;
+    response.success = cleanup_success;
+    if (!response.success) {
+      response.errors.push_back("recording cleanup failure");
+    }
+    return response;
+  }
+
+  bool cleanup_success = true;
+  int prepare_count = 0;
+  int apply_count = 0;
+  int cleanup_count = 0;
+  std::size_t last_cleanup_resource_count = 0;
+  std::string last_prepare_session;
+  std::string last_apply_session;
+  std::string last_cleanup_session;
+};
 
 int test_manifest_declares_single_helper_protocol() {
   bool ok = true;
@@ -166,6 +234,121 @@ int test_generated_contract_matches_helper_manifest() {
   check("Cleanup", exv::helper::HelperOp::Cleanup, true);
   check("GetSnapshot", exv::helper::HelperOp::GetSnapshot, false);
   check("Shutdown", exv::helper::HelperOp::Shutdown, true);
+
+  return ok ? 0 : 1;
+}
+
+int test_daemon_uses_network_ops_handler_factory() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto helper_source = read_text_file(source_dir / "src" / "helper" /
+                                           "helper.cpp");
+
+  ok = expect(helper_source.find("create_helper_handler_for_daemon(options)") !=
+                  std::string::npos,
+              "helper daemon must construct handler through daemon factory") &&
+       ok;
+  ok = expect(helper_source.find(
+                  "std::make_unique<exv::helper::HelperHandler>()") ==
+                  std::string::npos,
+              "helper daemon must not default-construct an unavailable handler") &&
+       ok;
+
+  return ok ? 0 : 1;
+}
+
+int test_legacy_helper_internal_header_removed() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto header_path = source_dir / "src" / "helper" /
+                           "helper_internal.hpp";
+  ok = expect(!std::filesystem::exists(header_path),
+              "unused legacy helper_internal.hpp must be removed") &&
+       ok;
+  return ok ? 0 : 1;
+}
+
+int test_unused_helper_server_stub_removed() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "helper" /
+                                       "runtime" / "helper_server.hpp"),
+              "unused helper_server.hpp production stub must be removed") &&
+       ok;
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "helper" /
+                                       "runtime" / "helper_server.cpp"),
+              "unused helper_server.cpp production stub must be removed") &&
+       ok;
+  return ok ? 0 : 1;
+}
+
+int test_oneshot_owner_is_uid_or_sid_not_pid_alias() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const std::vector<std::filesystem::path> files = {
+      source_dir / "src" / "helper" / "helper.cpp",
+      source_dir / "src" / "platform" / "win32" / "oneshot_bootstrap.cpp",
+      source_dir / "src" / "platform" / "darwin" / "oneshot_bootstrap.cpp",
+      source_dir / "src" / "platform" / "linux" / "oneshot_bootstrap.cpp"};
+
+  for (const auto &file : files) {
+    const auto text = read_text_file(file);
+    ok = expect(text.find("pid:") == std::string::npos,
+                "oneshot owner must not use pid: alias") &&
+         ok;
+  }
+  return ok ? 0 : 1;
+}
+
+int test_windows_helper_has_no_second_service_entrypoint() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "helper" /
+                                       "platform" / "win32" /
+                                       "helper_service.cpp"),
+              "Windows helper must not retain a second service entrypoint") &&
+       ok;
+  return ok ? 0 : 1;
+}
+
+int test_oneshot_entrypoint_uses_only_endpoint_argument() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const std::vector<std::filesystem::path> files = {
+      source_dir / "src" / "helper" / "helper_main.cpp",
+      source_dir / "src" / "platform" / "win32" / "oneshot_bootstrap.cpp",
+      source_dir / "src" / "platform" / "darwin" / "oneshot_bootstrap.cpp",
+      source_dir / "src" / "platform" / "linux" / "oneshot_bootstrap.cpp"};
+
+  for (const auto &file : files) {
+    const auto text = read_text_file(file);
+    ok = expect(text.find("--endpoint") != std::string::npos,
+                "oneshot startup code must use --endpoint") &&
+         ok;
+    ok = expect(text.find("--pipe") == std::string::npos,
+                "oneshot startup code must not accept --pipe alias") &&
+         ok;
+    ok = expect(text.find("--socket") == std::string::npos,
+                "oneshot startup code must not accept --socket alias") &&
+         ok;
+  }
+
+  return ok ? 0 : 1;
+}
+
+int test_helper_connector_requires_explicit_endpoint_field() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto connector_source = read_text_file(
+      source_dir / "src" / "helper" / "common" / "helper_connector.cpp");
+
+  ok = expect(connector_source.find("config.helper_executable_path") ==
+                  std::string::npos,
+              "connector must not treat helper_executable_path as endpoint") &&
+       ok;
+  ok = expect(connector_source.find("legacy callers") == std::string::npos,
+              "connector must not retain legacy endpoint resolution aliases") &&
+       ok;
 
   return ok ? 0 : 1;
 }
@@ -338,6 +521,111 @@ int test_cleanup_retains_resources_when_platform_cleanup_unavailable() {
   return ok ? 0 : 1;
 }
 
+int test_handler_delegates_network_ops_and_cleans_registered_resources() {
+  bool ok = true;
+  auto network_ops = std::make_shared<RecordingHelperNetworkOps>();
+  exv::helper::HelperHandler handler{
+      exv::helper::HelperLifecyclePolicy{}, network_ops};
+
+  exv::helper::StartSessionRequest start_req;
+  start_req.profile_id.value = "profile-a";
+  auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                             json(start_req));
+  ok = expect(start.success, "StartSession should succeed before network ops") &&
+       ok;
+  const auto start_resp =
+      exv::helper::start_session_response_from_json(json::parse(start.payload_json));
+
+  exv::helper::PrepareTunnelDeviceRequest prepare_req;
+  prepare_req.session_id = start_resp.session_id;
+  prepare_req.adapter_name = "ECNU-VPN";
+  auto prepare = dispatch_json(handler,
+                               exv::helper::HelperOp::PrepareTunnelDevice,
+                               json(prepare_req));
+  ok = expect(prepare.success, "PrepareTunnelDevice should use network ops") &&
+       ok;
+  const auto prepare_resp = exv::helper::prepare_tunnel_device_response_from_json(
+      json::parse(prepare.payload_json));
+  ok = expect(prepare_resp.device_path == "helper-device://ECNU-VPN",
+              "PrepareTunnelDevice should return network ops device path") &&
+       ok;
+
+  exv::helper::ApplyTunnelConfigRequest apply_req;
+  apply_req.config.session_id = start_resp.session_id;
+  apply_req.config.interface_address = "10.0.0.2/24";
+  apply_req.config.routes.push_back({"10.0.0.0/8", "10.0.0.1", 10});
+  apply_req.config.dns.servers = {"10.0.0.53"};
+  auto apply = dispatch_json(handler, exv::helper::HelperOp::ApplyTunnelConfig,
+                             json(apply_req));
+  ok = expect(apply.success, "ApplyTunnelConfig should use network ops") && ok;
+
+  auto resources = handler.cleanup_registry().get_resources(start_resp.session_id);
+  ok = expect(resources.size() == 3,
+              "Prepare/Apply should register adapter, route, and DNS resources") &&
+       ok;
+
+  exv::helper::CleanupRequest cleanup_req;
+  cleanup_req.session_id = start_resp.session_id;
+  auto cleanup = dispatch_json(handler, exv::helper::HelperOp::Cleanup,
+                               json(cleanup_req));
+  ok = expect(cleanup.success, "Cleanup should use network ops") && ok;
+  ok = expect(handler.lease_manager().active_session_count() == 0,
+              "successful cleanup should remove the active lease") &&
+       ok;
+  ok = expect(handler.cleanup_registry().all_records().empty(),
+              "successful cleanup should remove registry records") &&
+       ok;
+  ok = expect(network_ops->prepare_count == 1,
+              "network ops prepare should be called once") &&
+       ok;
+  ok = expect(network_ops->apply_count == 1,
+              "network ops apply should be called once") &&
+       ok;
+  ok = expect(network_ops->cleanup_count == 1,
+              "network ops cleanup should be called once") &&
+       ok;
+  ok = expect(network_ops->last_cleanup_resource_count == 3,
+              "network ops cleanup should receive all tracked resources") &&
+       ok;
+
+  return ok ? 0 : 1;
+}
+
+int test_cleanup_all_sessions_reports_failure_and_keeps_retry_state() {
+  bool ok = true;
+  auto network_ops = std::make_shared<RecordingHelperNetworkOps>();
+  network_ops->cleanup_success = false;
+  exv::helper::HelperHandler handler{
+      exv::helper::HelperLifecyclePolicy{}, network_ops};
+
+  exv::helper::StartSessionRequest start_req;
+  start_req.profile_id.value = "profile-a";
+  auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                             json(start_req));
+  ok = expect(start.success, "StartSession should succeed before failed cleanup") &&
+       ok;
+  const auto start_resp =
+      exv::helper::start_session_response_from_json(json::parse(start.payload_json));
+
+  handler.cleanup_registry().add_resource(start_resp.session_id,
+                                          {"adapter", "ECNU-VPN"});
+
+  exv::helper::CleanupPolicy policy;
+  policy.remove_adapter = true;
+  auto cleanup = handler.cleanup_all_sessions(policy);
+  ok = expect(!cleanup.success,
+              "cleanup_all_sessions must report managed cleanup failure") &&
+       ok;
+  ok = expect(handler.lease_manager().active_session_count() == 1,
+              "failed cleanup_all_sessions must keep lease for retry") &&
+       ok;
+  ok = expect(handler.cleanup_registry().all_records().size() == 1,
+              "failed cleanup_all_sessions must keep registry for retry") &&
+       ok;
+
+  return ok ? 0 : 1;
+}
+
 int test_network_ops_do_not_report_fake_success() {
   bool ok = true;
   exv::helper::HelperHandler handler;
@@ -492,11 +780,20 @@ int main() {
   std::cout << "=== Helper Contract Tests ===\n";
   failures += test_manifest_declares_single_helper_protocol();
   failures += test_generated_contract_matches_helper_manifest();
+  failures += test_daemon_uses_network_ops_handler_factory();
+  failures += test_legacy_helper_internal_header_removed();
+  failures += test_unused_helper_server_stub_removed();
+  failures += test_oneshot_owner_is_uid_or_sid_not_pid_alias();
+  failures += test_windows_helper_has_no_second_service_entrypoint();
+  failures += test_oneshot_entrypoint_uses_only_endpoint_argument();
+  failures += test_helper_connector_requires_explicit_endpoint_field();
   failures += test_hello_has_no_version_fields();
   failures += test_hello_mode_matches_startup_context();
   failures += test_start_session_rejects_second_active_session();
   failures += test_shutdown_cleans_active_session();
   failures += test_cleanup_retains_resources_when_platform_cleanup_unavailable();
+  failures += test_handler_delegates_network_ops_and_cleans_registered_resources();
+  failures += test_cleanup_all_sessions_reports_failure_and_keeps_retry_state();
   failures += test_network_ops_do_not_report_fake_success();
   failures += test_oneshot_heartbeat_timeout_cleans_and_requests_exit();
   failures += test_service_heartbeat_timeout_cleans_without_exit();

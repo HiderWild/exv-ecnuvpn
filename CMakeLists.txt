@@ -113,9 +113,10 @@ set(EXV_COMMON_SOURCES
 
 set(EXV_HELPER_RUNTIME_SOURCES
     src/helper/helper.cpp
+    src/helper/helper_daemon_context.cpp
+    src/helper/helper_network_ops.cpp
     src/helper/common/helper_messages.cpp
     src/helper/runtime/helper_request_dispatcher.cpp
-    src/helper/runtime/helper_server.cpp
     src/helper/runtime/session_lease_manager.cpp
     src/helper/runtime/cleanup_registry.cpp
     src/helper/runtime/command_validator.cpp
@@ -211,6 +212,7 @@ elseif(WIN32)
         src/platform/win32/default_engine_deps.cpp
         src/platform/win32/native_wintun.cpp
         src/platform/win32/native_ip_config.cpp
+        src/platform/win32/platform_network_ops_win32.cpp
         src/platform/win32/openconnect_process.cpp
         src/platform/win32/oneshot_bootstrap.cpp
         src/platform/win32/process_control.cpp
@@ -1031,6 +1033,19 @@ target_compile_definitions(helper_contract_test PRIVATE
 
 add_test(NAME helper_contract_test COMMAND helper_contract_test)
 
+add_executable(helper_network_ops_adapter_test
+    tests/helper_network_ops_adapter_test.cpp
+    src/helper/helper_network_ops.cpp
+    src/platform/common/platform_network_ops.cpp
+)
+
+target_include_directories(helper_network_ops_adapter_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME helper_network_ops_adapter_test COMMAND helper_network_ops_adapter_test)
+
 add_executable(app_api_rpc_dispatcher_test
     tests/app_api_rpc_dispatcher_test.cpp
     src/core/rpc/app_rpc_dispatcher.cpp
@@ -1263,6 +1278,22 @@ if(WIN32)
     target_link_libraries(win32_helper_oneshot_test PRIVATE exv-helper-runtime)
 
     add_test(NAME win32_helper_oneshot_test COMMAND win32_helper_oneshot_test)
+
+    add_executable(win32_platform_network_ops_test
+        tests/win32_platform_network_ops_test.cpp
+        src/platform/win32/platform_network_ops_win32.cpp
+        src/platform/win32/native_wintun.cpp
+        src/platform/win32/native_ip_config.cpp
+    )
+
+    target_include_directories(win32_platform_network_ops_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(win32_platform_network_ops_test PRIVATE iphlpapi ws2_32)
+
+    add_test(NAME win32_platform_network_ops_test COMMAND win32_platform_network_ops_test)
 endif()
 
 # ===========================================================================
@@ -1401,6 +1432,7 @@ set(_release_blocking_tests
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
+    helper_network_ops_adapter_test
     no_secret_in_argv_test
     no_secret_in_logs_test
     credential_store_model_test
@@ -1419,6 +1451,11 @@ set(_release_blocking_tests
     app_api_status_contract_test
     tunnel_controller_integration_test
 )
+if(WIN32)
+    list(APPEND _release_blocking_tests
+        win32_platform_network_ops_test
+    )
+endif()
 set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
 
 # Global MinGW DLL fix: ensure all release-blocking tests can find MinGW
@@ -1496,6 +1533,7 @@ set_property(TEST
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
+    helper_network_ops_adapter_test
     app_api_rpc_dispatcher_test
     native_core_connect_flow_test
     helper_timeout_cleanup_test
@@ -1548,6 +1586,7 @@ set_property(TEST
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
+    helper_network_ops_adapter_test
     helper_messages_connector_test
     helper_timeout_cleanup_test
     APPEND PROPERTY LABELS "helper"
@@ -1557,9 +1596,16 @@ set_property(TEST
 set_property(TEST
     platform_network_ops_model_test
     credential_store_model_test
+    helper_network_ops_adapter_test
     helper_delegating_network_ops_test
     APPEND PROPERTY LABELS "platform"
 )
+if(WIN32)
+    set_property(TEST
+        win32_platform_network_ops_test
+        APPEND PROPERTY LABELS "platform" "architecture"
+    )
+endif()
 
 # UI / RPC contract tests
 set_property(TEST

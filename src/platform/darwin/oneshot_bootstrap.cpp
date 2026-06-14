@@ -70,7 +70,7 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   backend.parent_pid = static_cast<int>(getpid());
 
   std::string command = utils::shell_quote(request.helper_path) +
-                        " --oneshot --socket " +
+                        " --oneshot --endpoint " +
                         utils::shell_quote(backend.endpoint) +
                         " --owner " +
                         utils::shell_quote(backend.owner) +

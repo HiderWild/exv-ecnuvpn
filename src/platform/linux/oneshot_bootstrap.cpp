@@ -49,11 +49,11 @@ pid_t spawn_helper(const std::string &helper_path, const std::string &endpoint,
     return pid;
 
   if (geteuid() == 0) {
-    execl(helper_path.c_str(), helper_path.c_str(), "--oneshot", "--socket",
+    execl(helper_path.c_str(), helper_path.c_str(), "--oneshot", "--endpoint",
           endpoint.c_str(), "--owner", owner.c_str(), "--parent-pid",
           parent.c_str(), static_cast<char *>(nullptr));
   } else {
-    execlp("pkexec", "pkexec", helper_path.c_str(), "--oneshot", "--socket",
+    execlp("pkexec", "pkexec", helper_path.c_str(), "--oneshot", "--endpoint",
            endpoint.c_str(), "--owner", owner.c_str(), "--parent-pid",
            parent.c_str(), static_cast<char *>(nullptr));
   }

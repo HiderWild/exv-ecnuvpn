@@ -230,7 +230,7 @@ bool test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() {
 
     bool ok = true;
     ok = expect(helper->connect(), "2b: helper should connect before controller flow") && ok;
-    helper->set_apply_config_fail(true);
+    net_ops->set_apply_should_fail(true);
 
     ctrl.connect(make_intent(true));
     ok = expect(ctrl.phase() == TunnelPhase::Failed,
@@ -393,10 +393,10 @@ bool test_auth_failure() {
 
     bool ok = true;
 
-    // Configure the helper to fail at apply_tunnel_config. The synchronous
-    // fallback path calls apply_tunnel_config during connect(), and a
+    // Configure network ops to fail at apply_tunnel_config. The synchronous
+    // fallback path now applies config through PlatformNetworkOps, and a
     // failure causes the TC to transition to Failed.
-    helper->set_apply_config_fail(true);
+    net_ops->set_apply_should_fail(true);
     ctrl.connect(make_intent(true));
     ok = expect(ctrl.phase() == TunnelPhase::Failed,
                 "5: apply_config failure should transition to Failed") && ok;
@@ -714,6 +714,25 @@ bool test_delegated_network_ops_receives_helper_session() {
     return ok;
 }
 
+// --- Test 12: Delegated Network Ops Prepare Before Apply ---
+bool test_delegated_network_ops_prepares_before_apply() {
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    helper->set_require_prepare_before_apply(true);
+    auto net_ops = std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(helper.get());
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    bool ok = true;
+    ctrl.connect(make_intent(true, true, "delegated-prepare-before-apply"));
+    ok = expect(ctrl.phase() == exv::core::TunnelPhase::Connected,
+                "12: delegated net ops must prepare before applying config") && ok;
+    ok = expect(helper->prepare_count() == 1,
+                "12: helper PrepareTunnelDevice should run once") && ok;
+    ok = expect(helper->apply_count() == 1,
+                "12: helper ApplyTunnelConfig should run once") && ok;
+
+    return ok;
+}
+
 // ===========================================================================
 // main
 // ===========================================================================
@@ -758,6 +777,9 @@ int main() {
 
     std::cout << "--- Test 11: Delegated Network Ops Session Propagation ---\n";
     ok = test_delegated_network_ops_receives_helper_session() && ok;
+
+    std::cout << "--- Test 12: Delegated Network Ops Prepare Before Apply ---\n";
+    ok = test_delegated_network_ops_prepares_before_apply() && ok;
 
     if (ok) {
         std::cout << "tunnel_controller_integration_test: all tests passed\n";

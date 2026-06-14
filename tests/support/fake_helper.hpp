@@ -35,10 +35,13 @@ public:
     void set_heartbeat_fail_after(int count);
     void set_start_session_fail(bool fail);
     void set_apply_config_fail(bool fail);
+    void set_require_prepare_before_apply(bool require);
 
     // Inspection
     int connect_count() const;
     int hello_count() const;
+    int prepare_count() const;
+    int apply_count() const;
     int heartbeat_count() const;
     bool ipc_lost() const;
     std::vector<helper::SessionId> active_sessions() const;
@@ -49,13 +52,17 @@ private:
     bool fail_next_ = false;
     bool start_session_fail_ = false;
     bool apply_config_fail_ = false;
+    bool require_prepare_before_apply_ = false;
     bool ipc_lost_ = false;
+    int prepare_count_ = 0;
+    int apply_count_ = 0;
     int heartbeat_count_ = 0;
     int hello_count_ = 0;
     int heartbeat_fail_after_ = -1;
     int connect_count_ = 0;
     DisconnectCallback disconnect_cb_;
     std::map<helper::SessionId, helper::SessionLease> sessions_;
+    std::map<helper::SessionId, bool> prepared_sessions_;
     std::vector<helper::CleanupRequest> cleanup_requests_;
 };
 

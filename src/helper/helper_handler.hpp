@@ -1,5 +1,6 @@
 #pragma once
 #include "helper/common/helper_messages.hpp"
+#include "helper/helper_network_ops.hpp"
 #include "helper/runtime/helper_request_dispatcher.hpp"
 #include "helper/runtime/session_lease_manager.hpp"
 #include "helper/runtime/cleanup_registry.hpp"
@@ -12,6 +13,8 @@ namespace exv::helper {
 class HelperHandler {
 public:
     explicit HelperHandler(HelperLifecyclePolicy policy = HelperLifecyclePolicy());
+    HelperHandler(HelperLifecyclePolicy policy,
+                  std::shared_ptr<HelperNetworkOps> network_ops);
 
     HelperResponse handle(const HelperRequest& request);
 
@@ -23,7 +26,7 @@ public:
     CleanupRegistry& cleanup_registry();
     bool should_stop() const;
     void set_startup_context(HelperStartupContext context);
-    void cleanup_all_sessions(const CleanupPolicy& policy);
+    CleanupResponse cleanup_all_sessions(const CleanupPolicy& policy);
 
 private:
     void register_handlers();
@@ -45,6 +48,7 @@ private:
     HelperLifecyclePolicy policy_;
     CommandValidator validator_;
     HelperStartupContext startup_context_;
+    std::shared_ptr<HelperNetworkOps> network_ops_;
     bool shutdown_requested_ = false;
 };
 
