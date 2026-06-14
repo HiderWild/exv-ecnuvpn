@@ -42,10 +42,12 @@ public:
     int hello_count() const;
     int prepare_count() const;
     int apply_count() const;
+    int shutdown_count() const;
     int heartbeat_count() const;
     bool ipc_lost() const;
     std::vector<helper::SessionId> active_sessions() const;
     std::vector<helper::CleanupRequest> cleanup_requests() const;
+    std::vector<helper::ShutdownRequest> shutdown_requests() const;
 
 private:
     bool connected_ = false;
@@ -56,6 +58,7 @@ private:
     bool ipc_lost_ = false;
     int prepare_count_ = 0;
     int apply_count_ = 0;
+    int shutdown_count_ = 0;
     int heartbeat_count_ = 0;
     int hello_count_ = 0;
     int heartbeat_fail_after_ = -1;
@@ -64,6 +67,7 @@ private:
     std::map<helper::SessionId, helper::SessionLease> sessions_;
     std::map<helper::SessionId, bool> prepared_sessions_;
     std::vector<helper::CleanupRequest> cleanup_requests_;
+    std::vector<helper::ShutdownRequest> shutdown_requests_;
 };
 
 } // namespace exv::test

@@ -219,4 +219,4 @@ bool plan_routes(const vpn_engine::TunnelMetadata &metadata,
   return true;
 }
 
-#if defined(__APPLE__)
+int unsupported_native_api_error() { return ENOSYS; }

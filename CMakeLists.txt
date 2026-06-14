@@ -159,6 +159,7 @@ if(APPLE)
         src/platform/darwin/default_engine_deps.cpp
         src/platform/darwin/native_route_config.cpp
         src/platform/darwin/native_utun.cpp
+        src/platform/darwin/platform_network_ops_darwin.cpp
         src/platform/darwin/openconnect_process.cpp
         src/platform/darwin/oneshot_bootstrap.cpp
         src/platform/darwin/process_control.cpp
@@ -336,6 +337,9 @@ add_executable(platform_network_ops_model_test
 target_include_directories(platform_network_ops_model_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(platform_network_ops_model_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME platform_network_ops_model_test COMMAND platform_network_ops_model_test)
@@ -1265,6 +1269,20 @@ target_link_libraries(pipe_helper_client_test PRIVATE Threads::Threads)
 
 add_test(NAME pipe_helper_client_test COMMAND pipe_helper_client_test)
 
+add_executable(darwin_platform_network_ops_test
+    tests/darwin_platform_network_ops_test.cpp
+    src/platform/darwin/platform_network_ops_darwin.cpp
+    src/platform/darwin/native_utun.cpp
+    src/platform/darwin/native_route_config.cpp
+)
+
+target_include_directories(darwin_platform_network_ops_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME darwin_platform_network_ops_test COMMAND darwin_platform_network_ops_test)
+
 if(WIN32)
     add_executable(win32_helper_oneshot_test
         tests/win32_helper_oneshot_test.cpp
@@ -1433,6 +1451,7 @@ set(_release_blocking_tests
     helper_cleanup_registry_test
     helper_contract_test
     helper_network_ops_adapter_test
+    darwin_platform_network_ops_test
     no_secret_in_argv_test
     no_secret_in_logs_test
     credential_store_model_test
@@ -1534,6 +1553,7 @@ set_property(TEST
     helper_cleanup_registry_test
     helper_contract_test
     helper_network_ops_adapter_test
+    darwin_platform_network_ops_test
     app_api_rpc_dispatcher_test
     native_core_connect_flow_test
     helper_timeout_cleanup_test
@@ -1597,6 +1617,7 @@ set_property(TEST
     platform_network_ops_model_test
     credential_store_model_test
     helper_network_ops_adapter_test
+    darwin_platform_network_ops_test
     helper_delegating_network_ops_test
     APPEND PROPERTY LABELS "platform"
 )

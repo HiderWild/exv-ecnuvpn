@@ -31,7 +31,9 @@ constexpr int kMinimumUsableMtu = 1200;
 constexpr int kMaximumMtu = 1500;
 
 #include "platform/darwin/native_route_config_model.inc.cpp"
+#if defined(__APPLE__)
 #include "platform/darwin/native_route_config_socket.inc.cpp"
+#endif
 
 } // namespace
 

@@ -22,16 +22,16 @@
         transition_to(TunnelPhase::CleaningUp);
 
         try {
-            exv::helper::CleanupRequest req;
+            exv::helper::ShutdownRequest req;
             req.session_id = session_id_;
             req.policy.remove_routes       = true;
             req.policy.remove_dns          = true;
-            req.policy.remove_adapter      = false;   // keep for reconnect
+            req.policy.remove_adapter      = true;
             req.policy.remove_firewall_rules = true;
 
-            auto resp = helper_->cleanup(req);
+            auto resp = helper_->shutdown(req);
 
-            if (!resp.success) {
+            if (!resp.cleanup_success) {
                 // Log per-resource errors but still move to Idle (best effort)
             }
         } catch (const std::exception&) {

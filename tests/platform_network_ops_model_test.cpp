@@ -1,7 +1,10 @@
 #include "platform/common/route_model.hpp"
 #include "platform/common/dns_model.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -11,6 +14,14 @@ bool expect(bool condition, const char* message) {
         return true;
     std::cerr << "EXPECT FAILED: " << message << std::endl;
     return false;
+}
+
+std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in)
+        throw std::runtime_error("failed to open " + path.string());
+    return std::string(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
 }
 
 } // namespace
@@ -133,6 +144,22 @@ int main() {
         ok = expect(cfg.apply(apply_settings),
                     "stub apply should return true") && ok;
         ok = expect(cfg.restore("eth0"), "stub restore should return true") && ok;
+    }
+
+    // --- PlatformNetworkOps factory wiring ---
+    {
+        const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+        const auto source =
+            read_text_file(source_dir / "src" / "platform" / "common" /
+                           "platform_network_ops.cpp");
+        ok = expect(source.find("platform/darwin/platform_network_ops_darwin.hpp") !=
+                        std::string::npos,
+                    "factory source should include the Darwin backend") &&
+             ok;
+        ok = expect(source.find("return create_darwin_platform_network_ops();") !=
+                        std::string::npos,
+                    "Darwin PlatformNetworkOps::create must return a real backend") &&
+             ok;
     }
 
     return ok ? 0 : 1;

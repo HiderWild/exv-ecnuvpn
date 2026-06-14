@@ -254,7 +254,3 @@ int update_route_native(int message_type, const NativeDarwinRoute &route) {
   close(route_socket);
   return result;
 }
-#endif
-
-
-int unsupported_native_api_error() { return ENOSYS; }

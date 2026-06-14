@@ -203,9 +203,16 @@ bool test_disconnect_flow() {
     ok = expect(ctrl.phase() == TunnelPhase::Idle,
                 "2: after disconnect() should be Idle") && ok;
 
-    // Verify helper received cleanup
-    ok = expect(helper->cleanup_requests().size() >= 1,
-                "2: helper should have received cleanup request") && ok;
+    // Verify helper received active Shutdown, not only passive Cleanup.
+    ok = expect(helper->shutdown_count() == 1,
+                "2: user disconnect should actively Shutdown helper session") && ok;
+    auto shutdowns = helper->shutdown_requests();
+    ok = expect(shutdowns.size() == 1 &&
+                    shutdowns[0].policy.remove_routes &&
+                    shutdowns[0].policy.remove_dns &&
+                    shutdowns[0].policy.remove_adapter &&
+                    shutdowns[0].policy.remove_firewall_rules,
+                "2: Shutdown should request full cleanup") && ok;
 
     // Verify status transitions include Disconnecting and CleaningUp
     // Real TC: Connected -> Disconnecting -> CleaningUp -> Idle
@@ -458,9 +465,9 @@ bool test_user_disconnect_during_reconnecting() {
     ok = expect(ctrl.phase() == TunnelPhase::Idle,
                 "6: disconnect during Reconnecting should reach Idle") && ok;
 
-    // Verify helper received cleanup
-    ok = expect(helper->cleanup_requests().size() >= 1,
-                "6: helper should have received cleanup") && ok;
+    // Verify helper received active Shutdown, not only passive Cleanup.
+    ok = expect(helper->shutdown_count() == 1,
+                "6: disconnect during Reconnecting should Shutdown helper session") && ok;
 
     // Verify transitions: Disconnecting -> CleaningUp -> Idle
     auto snapshots = ui.received_snapshots();

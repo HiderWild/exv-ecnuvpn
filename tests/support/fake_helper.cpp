@@ -99,6 +99,8 @@ helper::GetSnapshotResponse FakeHelper::get_snapshot(const helper::GetSnapshotRe
 }
 
 helper::ShutdownResponse FakeHelper::shutdown(const helper::ShutdownRequest& req) {
+    shutdown_count_++;
+    shutdown_requests_.push_back(req);
     helper::ShutdownResponse resp;
     resp.cleanup_success = true;
     sessions_.erase(req.session_id);
@@ -145,6 +147,7 @@ int FakeHelper::connect_count() const { return connect_count_; }
 int FakeHelper::hello_count() const { return hello_count_; }
 int FakeHelper::prepare_count() const { return prepare_count_; }
 int FakeHelper::apply_count() const { return apply_count_; }
+int FakeHelper::shutdown_count() const { return shutdown_count_; }
 int FakeHelper::heartbeat_count() const { return heartbeat_count_; }
 bool FakeHelper::ipc_lost() const { return ipc_lost_; }
 
@@ -156,6 +159,10 @@ std::vector<helper::SessionId> FakeHelper::active_sessions() const {
 
 std::vector<helper::CleanupRequest> FakeHelper::cleanup_requests() const {
     return cleanup_requests_;
+}
+
+std::vector<helper::ShutdownRequest> FakeHelper::shutdown_requests() const {
+    return shutdown_requests_;
 }
 
 } // namespace exv::test
