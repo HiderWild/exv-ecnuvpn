@@ -55,6 +55,7 @@ struct TunnelController::Impl {
     // --- Session bookkeeping ---
     exv::helper::SessionId session_id_;
     std::string            adapter_name_{"ECNU-VPN"};
+    bool                   network_config_applied_ = false;
 
     // --- Reconnect tracking ---
     int reconnect_attempts_ = 0;

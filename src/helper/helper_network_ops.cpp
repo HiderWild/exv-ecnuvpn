@@ -116,6 +116,7 @@ public:
     for (const auto &route : request.config.routes) {
       config.routes.push_back(to_platform_route(route));
     }
+    config.server_bypass_ips = request.config.server_bypass_ips;
     config.dns = to_platform_dns(request.config.dns);
 
     response.success =

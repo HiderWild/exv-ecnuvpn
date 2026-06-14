@@ -63,7 +63,8 @@
 
     bool apply_tunnel_config_for_session(
         const exv::platform::TunnelDeviceDescriptor& device,
-        const std::string& interface_address) {
+        const std::string& interface_address,
+        const ecnuvpn::vpn_engine::TunnelMetadata* metadata = nullptr) {
         timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
         transition_to(TunnelPhase::ApplyingNetworkConfig);
         log_tunnel_event("INFO", "network.config.applying", "Applying network config",
@@ -75,6 +76,14 @@
             config.interface_name = device.adapter_name;
             config.mtu = device.mtu;
             config.enable_kill_switch = false;
+            if (metadata) {
+                for (const auto& destination : metadata->routes) {
+                    exv::platform::RouteEntry route;
+                    route.destination = destination;
+                    config.routes.push_back(route);
+                }
+                config.server_bypass_ips = metadata->server_bypass_ips;
+            }
 
             if (!net_ops_->apply_tunnel_config(device, config)) {
                 timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
@@ -92,7 +101,46 @@
         }
 
         timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
+        network_config_applied_ = true;
         return true;
+    }
+
+    ErrorInfo current_native_failure(
+        const std::string& fallback_code,
+        const std::string& fallback_message) const {
+        auto status = runner_.status();
+        ErrorInfo err;
+        err.code = status.error_code.empty() ? fallback_code : status.error_code;
+        err.message = status.error_message.empty()
+            ? fallback_message
+            : status.error_message;
+        err.native_code = -1;
+        err.recoverable = false;
+
+        if (err.code == "auth_failed" || err.code == "unsupported_auth_flow") {
+            err.domain = "auth";
+            err.recommended_action = "Check credentials and try again";
+        } else if (err.code.rfind("packet", 0) == 0 ||
+                   err.code.rfind("native_packet", 0) == 0) {
+            err.domain = "packet";
+            err.native_api = "packet_device";
+            err.recommended_action = "Check system configuration";
+        } else if (err.code.find("transport") != std::string::npos ||
+                   err.code.rfind("cstp", 0) == 0) {
+            err.domain = "transport";
+            err.native_api = "native_start";
+            err.recommended_action = "Check network connectivity";
+        } else if (err.code.find("config") != std::string::npos) {
+            err.domain = "config";
+            err.native_api = "native_start";
+            err.recommended_action = "Check VPN configuration";
+        } else {
+            err.domain = "native";
+            err.native_api = "native_start";
+            err.recommended_action = "Check native engine logs";
+        }
+
+        return err;
     }
 
     ecnuvpn::vpn_engine::ValidationResult current_network_failure(
@@ -136,7 +184,7 @@
         }
 
         if (!apply_tunnel_config_for_session(
-                device, interface_address_from_metadata(metadata))) {
+                device, interface_address_from_metadata(metadata), &metadata)) {
             return current_network_failure(
                 "apply_config_failed",
                 "Failed to apply tunnel config");
@@ -161,6 +209,7 @@
         // Step 1 — bookkeeping
         intent_.desired_connected = true;
         clear_error();
+        network_config_applied_ = false;
         timing_.timer.reset();
         reconnect_attempts_ = 0;
 
@@ -240,10 +289,21 @@
                 log_tunnel_event("ERROR", "native.runner.failed",
                                  "Native engine session failed to start");
                 timing_.timer.end(ConnectTiming::AUTH);
-                if (!snapshot_.last_error) {
-                    set_error(CoreErrorMapper::from_auth_error(
-                        -1, "Native engine session failed to start"));
+
+                const bool should_replace_error =
+                    !snapshot_.last_error ||
+                    snapshot_.last_error->code == "auth_failed" ||
+                    snapshot_.last_error->code == "packet_device_failed";
+                if (should_replace_error) {
+                    set_error(current_native_failure(
+                        "native_start_failed",
+                        "Native engine session failed to start"));
                 }
+
+                if (network_config_applied_) {
+                    cleanup_after_failed_startup();
+                }
+
                 transition_to(TunnelPhase::Failed);
                 return;
             }

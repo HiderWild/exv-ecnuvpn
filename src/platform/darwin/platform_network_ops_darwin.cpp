@@ -126,6 +126,7 @@ public:
     metadata.mtu = config.mtu > 0 ? config.mtu : device.mtu;
     for (const auto &route : config.routes)
       metadata.routes.push_back(route.destination);
+    metadata.server_bypass_ips = config.server_bypass_ips;
 
     ecnuvpn::platform::NativeDarwinRouteConfigOptions options;
     options.interface_name = device.adapter_name;

@@ -26,6 +26,9 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
 
     // Build VpnEngineConfig from the application Config.
     auto engine_config = ecnuvpn::vpn_engine::make_native_config(cfg, password);
+    // TunnelController owns helper/network reconnect, so the native engine must
+    // report transport closure instead of reconnecting internally.
+    engine_config.auto_reconnect = false;
 
     // Create the event bridge — it translates VpnEngineEvents to TunnelEvents
     // and invokes the callback.
@@ -68,20 +71,31 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
 
     lock.lock();
     if (!validation.ok) {
+        cached_status_ = session_ ? session_->status()
+                                  : ecnuvpn::vpn_engine::VpnEngineStatus{};
+
+        TunnelEvent te;
+        if (validation.code.rfind("packet", 0) == 0 ||
+            validation.code.rfind("native_packet", 0) == 0) {
+            te.type = TunnelEventType::PacketDeviceFailed;
+        } else if (validation.code == "auth_failed" ||
+                   validation.code == "unsupported_auth_flow") {
+            te.type = TunnelEventType::AuthFailed;
+        } else {
+            te.type = TunnelEventType::TransportClosed;
+        }
+
         // Fire the failure event outside the lock.
         EventCallback cb = event_callback_;
         lock.unlock();
 
         if (cb) {
-            TunnelEvent te;
-            te.type = TunnelEventType::AuthFailed;
             cb(te);
         }
 
         lock.lock();
         session_.reset();
         bridge_.reset();
-        cached_status_ = {};
         return false;
     }
 

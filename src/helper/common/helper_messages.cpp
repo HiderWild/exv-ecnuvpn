@@ -188,6 +188,7 @@ void to_json(json& j, const TunnelConfig& cfg) {
     j = json{{"session_id", cfg.session_id},
              {"interface_address", cfg.interface_address},
              {"routes", routes},
+             {"server_bypass_ips", cfg.server_bypass_ips},
              {"dns", cfg.dns},
              {"enable_kill_switch", cfg.enable_kill_switch}};
 }
@@ -200,6 +201,8 @@ TunnelConfig tunnel_config_from_json(const json& j) {
         for (const auto& rj : j["routes"])
             cfg.routes.push_back(route_entry_from_json(rj));
     }
+    if (j.contains("server_bypass_ips"))
+        cfg.server_bypass_ips = j["server_bypass_ips"].get<std::vector<std::string>>();
     if (j.contains("dns")) cfg.dns = dns_config_from_json(j["dns"]);
     cfg.enable_kill_switch = j.value("enable_kill_switch", false);
     return cfg;

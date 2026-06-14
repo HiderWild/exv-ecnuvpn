@@ -94,8 +94,10 @@
     }
 
     void on_transport_closed() {
-        if (phase_ != TunnelPhase::Connected
-            && phase_ != TunnelPhase::Reconnecting) {
+        if (phase_ == TunnelPhase::Reconnecting) {
+            return;
+        }
+        if (phase_ != TunnelPhase::Connected) {
             return;
         }
 
@@ -119,10 +121,15 @@
 
         stop_heartbeat();
 
-        auto err = CoreErrorMapper::from_platform_error(
-            "packet", -1, "packet_device");
-        err.code = "packet_device_failed";
-        err.recoverable = false;
+        auto err = current_native_failure(
+            "packet_device_failed",
+            "Packet device failed");
+        if (err.domain != "packet") {
+            err = CoreErrorMapper::from_platform_error(
+                "packet", -1, "packet_device");
+            err.code = "packet_device_failed";
+            err.recoverable = false;
+        }
 
         set_error(err);
         transition_to(TunnelPhase::Failed);
@@ -150,10 +157,27 @@
             return;
         }
 
-        // Retry the connect flow starting from Authenticating.
-        // In a real implementation this would re-initiate the auth/CSTP
-        // negotiation.  For the simplified version we just move to
-        // Authenticating and let subsequent events drive the flow.
+        if (!vpn_password_.empty()) {
+            scheduler_.cancel_all();
+            stop_heartbeat();
+            runner_.stop();
+
+            if ((network_config_applied_ || !session_id_.value.empty()) && helper_) {
+                shutdown_helper_session_for_cleanup();
+            } else {
+                if (auto delegated_ops = as_helper_delegating_ops(net_ops_)) {
+                    delegated_ops->clear_session();
+                }
+                session_id_ = exv::helper::SessionId{};
+                network_config_applied_ = false;
+            }
+
+            do_connect();
+            return;
+        }
+
+        // Retry the fallback connect flow starting from Authenticating.
+        // Tests without native VPN credentials manually drive subsequent events.
         timing_.timer.start(ConnectTiming::AUTH);
         transition_to(TunnelPhase::Authenticating);
     }

@@ -109,6 +109,7 @@ int test_platform_backed_helper_ops_delegate_and_track_resources() {
   apply_req.config.session_id = session;
   apply_req.config.interface_address = "10.0.0.2/24";
   apply_req.config.routes.push_back({"10.0.0.0/8", "10.0.0.1", 10});
+  apply_req.config.server_bypass_ips = {"192.0.2.10", "192.0.2.11/32"};
   apply_req.config.dns.servers = {"10.0.0.53"};
   apply_req.config.enable_kill_switch = true;
   std::vector<exv::helper::ManagedResource> apply_resources;
@@ -130,6 +131,13 @@ int test_platform_backed_helper_ops_delegate_and_track_resources() {
                   recording->last_apply_config.routes[0].destination ==
                       "10.0.0.0/8",
               "apply should forward routes") &&
+       ok;
+  ok = expect(recording->last_apply_config.server_bypass_ips.size() == 2 &&
+                  recording->last_apply_config.server_bypass_ips[0] ==
+                      "192.0.2.10" &&
+                  recording->last_apply_config.server_bypass_ips[1] ==
+                      "192.0.2.11/32",
+              "apply should forward all server bypass IPs") &&
        ok;
   ok = expect(recording->last_apply_config.dns.servers.size() == 1 &&
                   recording->last_apply_config.dns.servers[0] == "10.0.0.53",

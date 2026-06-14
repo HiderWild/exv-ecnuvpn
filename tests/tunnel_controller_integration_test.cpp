@@ -31,6 +31,8 @@
 #include <memory>
 #include <chrono>
 #include <cassert>
+#include <atomic>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -124,8 +126,20 @@ bool logs_contain_text(const std::vector<ecnuvpn::TypedLogEvent>& logs,
     return false;
 }
 
+template <typename Predicate>
+bool wait_until(Predicate predicate,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds(1000)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return predicate();
+}
+
 struct ControllerTransportState {
-    int disconnect_count = 0;
+    std::atomic<int> disconnect_count{0};
+    std::atomic<int> reset_count{0};
 };
 
 class ControllerFakeTransport final
@@ -152,7 +166,7 @@ public:
         metadata->internal_ip4_netmask = "255.255.255.0";
         metadata->mtu = 1400;
         metadata->routes = {"198.51.100.0/24"};
-        metadata->server_bypass_ips = {"192.0.2.10"};
+        metadata->server_bypass_ips = {"192.0.2.10", "192.0.2.11/32"};
         return {};
     }
 
@@ -175,10 +189,95 @@ public:
         ++state_->disconnect_count;
     }
 
-    void reset_for_reconnect() override {}
+    void reset_for_reconnect() override {
+        ++state_->reset_count;
+    }
 
 private:
     std::shared_ptr<ControllerTransportState> state_;
+};
+
+class ControllerDrainedPacketDevice final
+    : public ecnuvpn::vpn_engine::PacketDevice {
+public:
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::DeviceConfig&) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::TunnelMetadata&) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    read_packet(std::vector<std::uint8_t>* packet) override {
+        if (packet) packet->clear();
+        return {false, "packet_device_empty", "packet device drained"};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    write_packet(const std::vector<std::uint8_t>&) override {
+        return {};
+    }
+
+    void close() override {}
+};
+
+class ControllerNoDataPacketDevice final
+    : public ecnuvpn::vpn_engine::PacketDevice {
+public:
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::DeviceConfig&) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::TunnelMetadata&) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    read_packet(std::vector<std::uint8_t>* packet) override {
+        if (packet) packet->clear();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return {false, "no_data", "no packet available"};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    write_packet(const std::vector<std::uint8_t>&) override {
+        return {};
+    }
+
+    void close() override {}
+};
+
+class ControllerFailingOpenPacketDevice final
+    : public ecnuvpn::vpn_engine::PacketDevice {
+public:
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::DeviceConfig&) override {
+        return {false, "packet_open_failed",
+                "packet open failed after network apply"};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::TunnelMetadata&) override {
+        return {false, "packet_open_failed",
+                "packet open failed after network apply"};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    read_packet(std::vector<std::uint8_t>*) override {
+        return {false, "unexpected_read", "packet device should not read"};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    write_packet(const std::vector<std::uint8_t>&) override {
+        return {false, "unexpected_write", "packet device should not write"};
+    }
+
+    void close() override {}
 };
 
 ecnuvpn::Config native_controller_config() {
@@ -381,6 +480,172 @@ bool test_native_network_config_failure_preserves_error() {
         ok = expect(snap.last_error->domain == "helper",
                     "2d: network apply error domain should remain helper/platform boundary") && ok;
     }
+
+    return ok;
+}
+
+// --- Test 2e: Native network config preserves CSTP routes and bypass ---
+bool test_native_network_config_preserves_routes_and_bypass() {
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    auto transport_state = std::make_shared<ControllerTransportState>();
+
+    exv::core::TunnelController ctrl(
+        helper, net_ops, exv::core::ReconnectConfig{},
+        [transport_state]() {
+            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            deps.transport_factory = [transport_state]() {
+                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                    new ControllerFakeTransport(transport_state));
+            };
+            deps.packet_device_factory = []() {
+                return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                    new ControllerDrainedPacketDevice());
+            };
+            return deps;
+        });
+    ctrl.set_vpn_config(native_controller_config(), "test-password");
+
+    bool ok = true;
+    ctrl.connect(make_intent(true));
+    ok = expect(ctrl.phase() == exv::core::TunnelPhase::Connected,
+                "2e: route preservation path should reach Connected") && ok;
+
+    auto configs = net_ops->applied_configs();
+    ok = expect(configs.size() == 1,
+                "2e: native path should apply exactly one platform tunnel config") && ok;
+    if (!configs.empty()) {
+        bool has_cstp_route = false;
+        for (const auto& route : configs[0].routes) {
+            if (route.destination == "198.51.100.0/24") {
+                has_cstp_route = true;
+                break;
+            }
+        }
+        ok = expect(has_cstp_route,
+                    "2e: platform tunnel config should preserve CSTP route destination") && ok;
+        ok = expect(configs[0].server_bypass_ips.size() == 2 &&
+                        configs[0].server_bypass_ips[0] == "192.0.2.10" &&
+                        configs[0].server_bypass_ips[1] == "192.0.2.11/32",
+                    "2e: platform tunnel config should preserve all CSTP server bypass IPs") && ok;
+    }
+
+    return ok;
+}
+
+// --- Test 2f: Native packet startup failure cleans privileged network state ---
+bool test_native_packet_startup_failure_cleans_network_state() {
+    using exv::core::TunnelPhase;
+
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    auto transport_state = std::make_shared<ControllerTransportState>();
+
+    exv::core::TunnelController ctrl(
+        helper, net_ops, exv::core::ReconnectConfig{},
+        [transport_state]() {
+            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            deps.transport_factory = [transport_state]() {
+                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                    new ControllerFakeTransport(transport_state));
+            };
+            deps.packet_device_factory = []() {
+                return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                    new ControllerFailingOpenPacketDevice());
+            };
+            return deps;
+        });
+    ctrl.set_vpn_config(native_controller_config(), "test-password");
+
+    bool ok = true;
+    ctrl.connect(make_intent(true));
+
+    auto snap = ctrl.status();
+    ok = expect(net_ops->apply_count() == 1,
+                "2f: network config should be applied before packet startup fails") && ok;
+    ok = expect(helper->shutdown_count() == 1,
+                "2f: post-network packet startup failure should shutdown helper session") && ok;
+    auto shutdowns = helper->shutdown_requests();
+    ok = expect(shutdowns.size() == 1 &&
+                    shutdowns[0].policy.remove_routes &&
+                    shutdowns[0].policy.remove_dns &&
+                    shutdowns[0].policy.remove_adapter &&
+                    shutdowns[0].policy.remove_firewall_rules,
+                "2f: startup failure cleanup should request full cleanup policy") && ok;
+    ok = expect(helper->active_sessions().empty(),
+                "2f: startup failure cleanup should clear helper active session") && ok;
+    ok = expect(ctrl.phase() == TunnelPhase::Failed,
+                "2f: controller should expose packet startup failure as Failed") && ok;
+    ok = expect(snap.last_error.has_value(),
+                "2f: packet startup failure should leave a last_error") && ok;
+    if (snap.last_error) {
+        ok = expect(snap.last_error->code == "packet_open_failed",
+                    "2f: packet startup error code should be preserved") && ok;
+        ok = expect(snap.last_error->code != "auth_failed",
+                    "2f: packet startup failure must not be classified as auth_failed") && ok;
+    }
+
+    return ok;
+}
+
+// --- Test 2g: Native transport reconnect is controller-owned ---
+bool test_native_transport_reconnect_is_controller_owned() {
+    using exv::core::TunnelEventType;
+    using exv::core::TunnelPhase;
+
+    exv::core::ReconnectConfig config;
+    config.base_delay = std::chrono::milliseconds(5000);
+    config.max_delay = std::chrono::milliseconds(5000);
+    config.jitter_factor = 0.0;
+
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    auto transport_state = std::make_shared<ControllerTransportState>();
+
+    exv::core::TunnelController ctrl(
+        helper, net_ops, config,
+        [transport_state]() {
+            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            deps.transport_factory = [transport_state]() {
+                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                    new ControllerFakeTransport(transport_state));
+            };
+            deps.packet_device_factory = []() {
+                return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                    new ControllerNoDataPacketDevice());
+            };
+            return deps;
+        });
+
+    ecnuvpn::Config cfg = native_controller_config();
+    cfg.auto_reconnect = true;
+    ctrl.set_vpn_config(cfg, "test-password");
+
+    bool ok = true;
+    ctrl.connect(make_intent(true, true, "native-controller-owned-reconnect"));
+
+    ok = expect(wait_until([&ctrl]() {
+                    return ctrl.phase() == TunnelPhase::Reconnecting;
+                }),
+                "2g: native transport closure should surface to controller Reconnecting") && ok;
+    ok = expect(net_ops->apply_count() == 1,
+                "2g: initial native connect should apply network config once") && ok;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ok = expect(transport_state->reset_count == 0,
+                "2g: native ProtocolSession must not reset transport for internal reconnect") && ok;
+
+    ctrl.on_event({TunnelEventType::ReconnectTimerFired});
+    ok = expect(wait_until([&net_ops]() {
+                    return net_ops->apply_count() >= 2;
+                }),
+                "2g: controller reconnect should re-enter helper/platform network setup") && ok;
+    ok = expect(helper->hello_count() >= 2,
+                "2g: controller reconnect should start a fresh helper setup flow") && ok;
+    ok = expect(helper->shutdown_count() >= 1,
+                "2g: controller reconnect should cleanup previous helper/network session") && ok;
+    ok = expect(transport_state->reset_count == 0,
+                "2g: native reset_for_reconnect must remain unused after controller retry") && ok;
 
     return ok;
 }
@@ -875,6 +1140,15 @@ int main() {
 
     std::cout << "--- Test 2d: Native Network Config Failure Preserves Error ---\n";
     ok = test_native_network_config_failure_preserves_error() && ok;
+
+    std::cout << "--- Test 2e: Native Network Config Preserves Routes And Bypass ---\n";
+    ok = test_native_network_config_preserves_routes_and_bypass() && ok;
+
+    std::cout << "--- Test 2f: Native Packet Startup Failure Cleans Network State ---\n";
+    ok = test_native_packet_startup_failure_cleans_network_state() && ok;
+
+    std::cout << "--- Test 2g: Native Transport Reconnect Is Controller-Owned ---\n";
+    ok = test_native_transport_reconnect_is_controller_owned() && ok;
 
     std::cout << "--- Test 3: Reconnect Flow ---\n";
     ok = test_reconnect_flow() && ok;

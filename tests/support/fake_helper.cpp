@@ -58,6 +58,7 @@ helper::PrepareTunnelDeviceResponse FakeHelper::prepare_tunnel_device(const help
 
 helper::ApplyTunnelConfigResponse FakeHelper::apply_tunnel_config(const helper::ApplyTunnelConfigRequest& req) {
     apply_count_++;
+    apply_requests_.push_back(req);
     helper::ApplyTunnelConfigResponse resp;
     const bool missing_prepare =
         require_prepare_before_apply_ &&
@@ -163,6 +164,10 @@ std::vector<helper::CleanupRequest> FakeHelper::cleanup_requests() const {
 
 std::vector<helper::ShutdownRequest> FakeHelper::shutdown_requests() const {
     return shutdown_requests_;
+}
+
+std::vector<helper::ApplyTunnelConfigRequest> FakeHelper::apply_requests() const {
+    return apply_requests_;
 }
 
 } // namespace exv::test

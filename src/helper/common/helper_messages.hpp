@@ -84,6 +84,7 @@ struct TunnelConfig {
     SessionId session_id;
     std::string interface_address;  // e.g. "10.0.0.2/24"
     std::vector<RouteEntry> routes;
+    std::vector<std::string> server_bypass_ips;
     DnsConfig dns;
     bool enable_kill_switch = false;
 };
