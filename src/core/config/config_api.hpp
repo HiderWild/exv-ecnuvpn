@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config_manager.hpp"
+#include "core/config/config_manager.hpp"
 
 #include <string>
 

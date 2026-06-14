@@ -1,6 +1,6 @@
 #pragma once
 
-#include "platform/common/helper_client.hpp"
+#include "helper/platform/helper_client.hpp"
 
 #include <nlohmann/json.hpp>
 

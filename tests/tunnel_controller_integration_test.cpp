@@ -12,7 +12,7 @@
 
 #include "core/tunnel_controller.hpp"
 #include "core/tunnel_intent.hpp"
-#include "config.hpp"
+#include "core/config/config.hpp"
 #include "core/tunnel_state.hpp"
 #include "core/tunnel_events.hpp"
 #include "core/reconnect_policy.hpp"
@@ -20,7 +20,7 @@
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 #include "support/fake_core_ui_client.hpp"
-#include "platform/common/helper_delegating_network_ops.hpp"
+#include "helper/platform/helper_delegating_network_ops.hpp"
 
 #include <iostream>
 #include <string>

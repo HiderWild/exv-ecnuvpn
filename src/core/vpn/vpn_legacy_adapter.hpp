@@ -7,7 +7,7 @@
 // solely to keep the legacy CLI path (exv start/stop/status) working
 // during the migration period.
 
-#include "config.hpp"
+#include "core/config/config.hpp"
 #include <string>
 
 namespace ecnuvpn {

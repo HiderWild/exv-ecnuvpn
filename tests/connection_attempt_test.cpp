@@ -1,5 +1,5 @@
 #include "app_api.hpp"
-#include "config.hpp"
+#include "core/config/config.hpp"
 #include "connection_attempt.hpp"
 #include "utils.hpp"
 

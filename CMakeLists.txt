@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 project(exv VERSION 3.3.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -78,15 +78,15 @@ set(EXV_COMMON_SOURCES
     src/core/rpc/route_actions.cpp
     src/core/rpc/core_api_setup.cpp
     src/core/crypto/crypto.cpp
-    src/helper_common/helper_connector.cpp
-    src/helper_common/pipe_helper_client.cpp
+    src/helper/common/helper_connector.cpp
+    src/helper/common/pipe_helper_client.cpp
     src/platform/common/backend_resolver.cpp
     src/platform/common/credential_store.cpp
     src/platform/common/dns_model.cpp
     src/platform/common/oneshot_bootstrap.cpp
     src/platform/common/packet_device_factory.cpp
     src/platform/common/platform_network_ops.cpp
-    src/platform/common/helper_delegating_network_ops.cpp
+    src/helper/platform/helper_delegating_network_ops.cpp
     src/platform/common/proxy_tun_detector.cpp
     src/platform/common/route_model.cpp
     src/platform/common/status_models.cpp
@@ -111,16 +111,16 @@ set(EXV_COMMON_SOURCES
 )
 
 set(EXV_HELPER_RUNTIME_SOURCES
-    src/helper.cpp
-    src/helper_common/helper_messages.cpp
-    src/helper_runtime/helper_request_dispatcher.cpp
-    src/helper_runtime/helper_server.cpp
-    src/helper_runtime/session_lease_manager.cpp
-    src/helper_runtime/cleanup_registry.cpp
-    src/helper_runtime/command_validator.cpp
-    src/helper_runtime/helper_lifecycle_policy.cpp
-    src/helper_runtime/helper_session_store.cpp
-    src/helper_v2_handler.cpp
+    src/helper/helper.cpp
+    src/helper/common/helper_messages.cpp
+    src/helper/runtime/helper_request_dispatcher.cpp
+    src/helper/runtime/helper_server.cpp
+    src/helper/runtime/session_lease_manager.cpp
+    src/helper/runtime/cleanup_registry.cpp
+    src/helper/runtime/command_validator.cpp
+    src/helper/runtime/helper_lifecycle_policy.cpp
+    src/helper/runtime/helper_session_store.cpp
+    src/helper/helper_v2_handler.cpp
 )
 
 set(EXV_CLI_SOURCES
@@ -129,6 +129,7 @@ set(EXV_CLI_SOURCES
 
 set(EXV_PLATFORM_SOURCES)
 set(EXV_PLATFORM_LIBS)
+set(EXV_PLATFORM_DEFINITIONS)
 
 # Source files
 set(SOURCES
@@ -140,16 +141,17 @@ find_package(Threads REQUIRED)
 # Platform-specific dependencies
 if(APPLE)
     # CommonCrypto links implicitly on macOS
+    list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_DARWIN=1)
     list(APPEND EXV_PLATFORM_LIBS "-framework Security" "-framework CoreFoundation")
     list(APPEND EXV_PLATFORM_SOURCES
-        src/helper_daemon_mac.cpp
+        src/helper/platform/darwin/helper_daemon.cpp
         src/platform/darwin/app_api_runtime_policy.cpp
         src/platform/darwin/crypto_backend.cpp
-        src/platform/darwin/config_defaults.cpp
-        src/platform/darwin/helper_client.cpp
-        src/platform/darwin/helper_lifecycle.cpp
-        src/platform/darwin/helper_platform.cpp
-        src/platform/darwin/helper_service_manager.cpp
+        src/core/config/platform/darwin/config_defaults.cpp
+        src/helper/platform/darwin/helper_client.cpp
+        src/helper/platform/darwin/helper_lifecycle.cpp
+        src/helper/platform/darwin/helper_platform.cpp
+        src/helper/platform/darwin/helper_service_manager.cpp
         src/platform/darwin/native_tls_stream.cpp
         src/platform/darwin/native_packet_device.cpp
         src/platform/darwin/default_engine_deps.cpp
@@ -167,16 +169,17 @@ if(APPLE)
     )
 elseif(UNIX AND NOT APPLE)
     find_package(OpenSSL 1.1.1 REQUIRED)
+    list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_LINUX=1)
     list(APPEND EXV_PLATFORM_LIBS OpenSSL::SSL OpenSSL::Crypto)
     list(APPEND EXV_PLATFORM_SOURCES
-        src/helper_daemon_linux.cpp
+        src/helper/platform/linux/helper_daemon.cpp
         src/platform/linux/app_api_runtime_policy.cpp
         src/platform/linux/crypto_backend.cpp
-        src/platform/common/config_defaults_linux.cpp
-        src/platform/linux/helper_client.cpp
-        src/platform/linux/helper_lifecycle.cpp
-        src/platform/linux/helper_platform.cpp
-        src/platform/linux/helper_service_manager.cpp
+        src/core/config/platform/linux/config_defaults.cpp
+        src/helper/platform/linux/helper_client.cpp
+        src/helper/platform/linux/helper_lifecycle.cpp
+        src/helper/platform/linux/helper_platform.cpp
+        src/helper/platform/linux/helper_service_manager.cpp
         src/platform/linux/openconnect_process.cpp
         src/platform/linux/oneshot_bootstrap.cpp
         src/platform/linux/process_control.cpp
@@ -191,16 +194,17 @@ elseif(WIN32)
     # AES-256-CBC and CSPRNG come from Windows CNG (bcrypt) so we no longer
     # need OpenSSL on this platform. The ~7MB libssl/libcrypto DLLs can be
     # dropped from the desktop bundle entirely.
+    list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_WINDOWS=1)
     list(APPEND EXV_PLATFORM_LIBS bcrypt advapi32 iphlpapi ws2_32 secur32 crypt32)
     list(APPEND EXV_PLATFORM_SOURCES
-        src/helper_daemon_win.cpp
+        src/helper/platform/win32/helper_daemon.cpp
         src/platform/win32/app_api_runtime_policy.cpp
         src/platform/win32/crypto_backend.cpp
-        src/platform/win32/config_defaults.cpp
-        src/platform/win32/helper_client.cpp
-        src/platform/win32/helper_lifecycle.cpp
-        src/platform/win32/helper_platform.cpp
-        src/platform/win32/helper_service_manager.cpp
+        src/core/config/platform/win32/config_defaults.cpp
+        src/helper/platform/win32/helper_client.cpp
+        src/helper/platform/win32/helper_lifecycle.cpp
+        src/helper/platform/win32/helper_platform.cpp
+        src/helper/platform/win32/helper_service_manager.cpp
         src/platform/win32/native_tls_stream.cpp
         src/platform/win32/native_packet_device.cpp
         src/platform/win32/default_engine_deps.cpp
@@ -236,6 +240,7 @@ target_include_directories(exv-core PUBLIC
 target_link_libraries(exv-core PUBLIC Threads::Threads ${EXV_PLATFORM_LIBS})
 target_compile_definitions(exv-core PUBLIC
     ECNUVPN_VERSION="${PROJECT_VERSION}"
+    ${EXV_PLATFORM_DEFINITIONS}
 )
 
 add_library(exv-helper-runtime STATIC
@@ -248,13 +253,14 @@ target_include_directories(exv-helper-runtime PUBLIC
 target_link_libraries(exv-helper-runtime PUBLIC exv-core)
 target_compile_definitions(exv-helper-runtime PUBLIC
     ECNUVPN_VERSION="${PROJECT_VERSION}"
+    ${EXV_PLATFORM_DEFINITIONS}
 )
 
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
 
 add_executable(exv-helper
-    src/helper_main.cpp
+    src/helper/helper_main.cpp
 )
 target_link_libraries(exv-helper PRIVATE exv-helper-runtime)
 target_compile_definitions(exv-helper PRIVATE
@@ -292,11 +298,11 @@ target_compile_definitions(exv PRIVATE
 # )
 #
 # if(APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/darwin/path_utils.cpp src/platform/darwin/process_control.cpp src/platform/darwin/config_defaults.cpp)
+#     target_sources(vpn_runtime_test PRIVATE src/platform/darwin/path_utils.cpp src/platform/darwin/process_control.cpp src/core/config/platform/darwin/config_defaults.cpp)
 # elseif(UNIX AND NOT APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/linux/path_utils.cpp src/platform/linux/process_control.cpp src/platform/common/config_defaults_linux.cpp)
+#     target_sources(vpn_runtime_test PRIVATE src/platform/linux/path_utils.cpp src/platform/linux/process_control.cpp src/core/config/platform/linux/config_defaults.cpp)
 # elseif(WIN32)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/win32/path_utils.cpp src/platform/win32/process_control.cpp src/platform/win32/config_defaults.cpp)
+#     target_sources(vpn_runtime_test PRIVATE src/platform/win32/path_utils.cpp src/platform/win32/process_control.cpp src/core/config/platform/win32/config_defaults.cpp)
 # endif()
 #
 # target_include_directories(vpn_runtime_test PRIVATE
@@ -350,11 +356,11 @@ add_executable(runtime_status_native_test
 )
 
 if(APPLE)
-    target_sources(runtime_status_native_test PRIVATE src/platform/darwin/config_defaults.cpp)
+    target_sources(runtime_status_native_test PRIVATE src/core/config/platform/darwin/config_defaults.cpp)
 elseif(UNIX AND NOT APPLE)
-    target_sources(runtime_status_native_test PRIVATE src/platform/common/config_defaults_linux.cpp)
+    target_sources(runtime_status_native_test PRIVATE src/core/config/platform/linux/config_defaults.cpp)
 elseif(WIN32)
-    target_sources(runtime_status_native_test PRIVATE src/platform/win32/config_defaults.cpp)
+    target_sources(runtime_status_native_test PRIVATE src/core/config/platform/win32/config_defaults.cpp)
 endif()
 
 target_include_directories(runtime_status_native_test PRIVATE
@@ -430,7 +436,7 @@ add_executable(native_engine_contract_test
 
 if(APPLE)
     target_sources(native_engine_contract_test PRIVATE
-        src/platform/darwin/config_defaults.cpp
+        src/core/config/platform/darwin/config_defaults.cpp
         src/platform/darwin/default_engine_deps.cpp
         src/platform/darwin/native_tls_stream.cpp
         src/platform/darwin/native_packet_device.cpp
@@ -439,12 +445,12 @@ if(APPLE)
     )
 elseif(UNIX AND NOT APPLE)
     target_sources(native_engine_contract_test PRIVATE
-        src/platform/common/config_defaults_linux.cpp
+        src/core/config/platform/linux/config_defaults.cpp
         src/platform/linux/default_engine_deps.cpp
     )
 elseif(WIN32)
     target_sources(native_engine_contract_test PRIVATE
-        src/platform/win32/config_defaults.cpp
+        src/core/config/platform/win32/config_defaults.cpp
         src/platform/win32/default_engine_deps.cpp
         src/platform/win32/native_tls_stream.cpp
         src/platform/win32/native_packet_device.cpp
@@ -480,7 +486,7 @@ add_executable(native_event_sink_test
 
 if(APPLE)
     target_sources(native_event_sink_test PRIVATE
-        src/platform/darwin/config_defaults.cpp
+        src/core/config/platform/darwin/config_defaults.cpp
         src/platform/darwin/default_engine_deps.cpp
         src/platform/darwin/native_tls_stream.cpp
         src/platform/darwin/native_packet_device.cpp
@@ -489,12 +495,12 @@ if(APPLE)
     )
 elseif(UNIX AND NOT APPLE)
     target_sources(native_event_sink_test PRIVATE
-        src/platform/common/config_defaults_linux.cpp
+        src/core/config/platform/linux/config_defaults.cpp
         src/platform/linux/default_engine_deps.cpp
     )
 elseif(WIN32)
     target_sources(native_event_sink_test PRIVATE
-        src/platform/win32/config_defaults.cpp
+        src/core/config/platform/win32/config_defaults.cpp
         src/platform/win32/default_engine_deps.cpp
         src/platform/win32/native_tls_stream.cpp
         src/platform/win32/native_packet_device.cpp
@@ -978,7 +984,7 @@ add_test(NAME tunnel_controller_integration_test COMMAND tunnel_controller_integ
 
 add_executable(helper_lease_manager_test
     tests/helper_lease_manager_test.cpp
-    src/helper_runtime/session_lease_manager.cpp
+    src/helper/runtime/session_lease_manager.cpp
 )
 
 target_include_directories(helper_lease_manager_test PRIVATE
@@ -990,7 +996,7 @@ add_test(NAME helper_lease_manager_test COMMAND helper_lease_manager_test)
 
 add_executable(helper_cleanup_registry_test
     tests/helper_cleanup_registry_test.cpp
-    src/helper_runtime/cleanup_registry.cpp
+    src/helper/runtime/cleanup_registry.cpp
 )
 
 target_include_directories(helper_cleanup_registry_test PRIVATE
@@ -1003,11 +1009,11 @@ add_test(NAME helper_cleanup_registry_test COMMAND helper_cleanup_registry_test)
 add_executable(helper_v2_contract_test
     tests/helper_v2_contract_test.cpp
     tests/support/fake_helper.cpp
-    src/helper_common/helper_messages.cpp
-    src/helper_runtime/session_lease_manager.cpp
-    src/helper_runtime/cleanup_registry.cpp
-    src/helper_runtime/command_validator.cpp
-    src/helper_runtime/helper_lifecycle_policy.cpp
+    src/helper/common/helper_messages.cpp
+    src/helper/runtime/session_lease_manager.cpp
+    src/helper/runtime/cleanup_registry.cpp
+    src/helper/runtime/command_validator.cpp
+    src/helper/runtime/helper_lifecycle_policy.cpp
 )
 
 target_include_directories(helper_v2_contract_test PRIVATE
@@ -1115,6 +1121,7 @@ target_include_directories(error_contract_test PRIVATE
 
 add_test(NAME error_contract_test COMMAND error_contract_test)
 
+
 add_executable(native_core_connect_flow_test
     tests/integration/native_core_connect_flow_test.cpp
     tests/support/fake_helper.cpp
@@ -1131,8 +1138,8 @@ add_test(NAME native_core_connect_flow_test COMMAND native_core_connect_flow_tes
 
 add_executable(helper_timeout_cleanup_test
     tests/integration/helper_timeout_cleanup_test.cpp
-    src/helper_runtime/session_lease_manager.cpp
-    src/helper_runtime/helper_lifecycle_policy.cpp
+    src/helper/runtime/session_lease_manager.cpp
+    src/helper/runtime/helper_lifecycle_policy.cpp
 )
 
 target_include_directories(helper_timeout_cleanup_test PRIVATE
@@ -1188,9 +1195,9 @@ add_test(NAME credential_store_model_test COMMAND credential_store_model_test)
 
 add_executable(helper_messages_connector_test
     tests/helper_messages_connector_test.cpp
-    src/helper_common/helper_messages.cpp
-    src/helper_common/helper_connector.cpp
-    src/helper_common/pipe_helper_client.cpp
+    src/helper/common/helper_messages.cpp
+    src/helper/common/helper_connector.cpp
+    src/helper/common/pipe_helper_client.cpp
 )
 
 target_include_directories(helper_messages_connector_test PRIVATE
@@ -1203,9 +1210,9 @@ add_test(NAME helper_messages_connector_test COMMAND helper_messages_connector_t
 # IPC transport test: PipeHelperClient <-> raw platform server (no daemon deps)
 add_executable(pipe_helper_client_test
     tests/pipe_helper_client_test.cpp
-    src/helper_common/helper_messages.cpp
-    src/helper_common/helper_connector.cpp
-    src/helper_common/pipe_helper_client.cpp
+    src/helper/common/helper_messages.cpp
+    src/helper/common/helper_connector.cpp
+    src/helper/common/pipe_helper_client.cpp
 )
 
 target_include_directories(pipe_helper_client_test PRIVATE
@@ -1299,8 +1306,8 @@ add_test(NAME helper_lost_test COMMAND helper_lost_test)
 add_executable(helper_delegating_network_ops_test
     tests/helper_delegating_network_ops_test.cpp
     tests/support/fake_helper.cpp
-    src/helper_common/helper_messages.cpp
-    src/platform/common/helper_delegating_network_ops.cpp
+    src/helper/common/helper_messages.cpp
+    src/helper/platform/helper_delegating_network_ops.cpp
 )
 
 target_include_directories(helper_delegating_network_ops_test PRIVATE

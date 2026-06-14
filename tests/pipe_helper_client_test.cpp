@@ -5,10 +5,10 @@
 /// transport with a persistent connection, which is the path the Core process
 /// will use to talk to the Helper daemon.
 
-#include "helper_common/pipe_helper_client.hpp"
-#include "helper_common/helper_connector.hpp"
-#include "helper_common/helper_messages.hpp"
-#include "helper_common/helper_protocol.hpp"
+#include "helper/common/pipe_helper_client.hpp"
+#include "helper/common/helper_connector.hpp"
+#include "helper/common/helper_messages.hpp"
+#include "helper/common/helper_protocol.hpp"
 
 #include <nlohmann/json.hpp>
 

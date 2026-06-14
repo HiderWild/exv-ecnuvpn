@@ -3,10 +3,10 @@
 #include "core/tunnel_controller/core_session_runner.hpp"
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/timer_scheduler.hpp"
-#include "helper_common/helper_client.hpp"
+#include "helper/common/helper_client.hpp"
 #include "platform/common/platform_network_ops.hpp"
-#include "platform/common/helper_delegating_network_ops.hpp"
-#include "config.hpp"
+#include "helper/platform/helper_delegating_network_ops.hpp"
+#include "core/config/config.hpp"
 
 #include <stdexcept>
 #include "logger.hpp"

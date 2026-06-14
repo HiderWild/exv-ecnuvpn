@@ -5,13 +5,13 @@
 // This test validates the data-layer contracts that prevent credential
 // leakage through the helper IPC channel or process arguments.
 
-#include "helper_common/helper_messages.hpp"
-#include "helper_common/helper_protocol.hpp"
-#include "helper_common/helper_client.hpp"
-#include "helper_common/helper_connector.hpp"
-#include "helper_common/helper_error.hpp"
-#include "helper_common/helper_capabilities.hpp"
-#include "helper_common/helper_session_lease.hpp"
+#include "helper/common/helper_messages.hpp"
+#include "helper/common/helper_protocol.hpp"
+#include "helper/common/helper_client.hpp"
+#include "helper/common/helper_connector.hpp"
+#include "helper/common/helper_error.hpp"
+#include "helper/common/helper_capabilities.hpp"
+#include "helper/common/helper_session_lease.hpp"
 #include "core/tunnel_intent.hpp"
 #include "core/tunnel_state.hpp"
 

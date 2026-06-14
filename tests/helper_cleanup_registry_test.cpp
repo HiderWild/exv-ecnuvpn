@@ -1,7 +1,7 @@
 // Tests for CleanupRegistry: resource tracking, persistence.
 
-#include "helper_runtime/cleanup_registry.hpp"
-#include "helper_common/helper_messages.hpp"
+#include "helper/runtime/cleanup_registry.hpp"
+#include "helper/common/helper_messages.hpp"
 
 #include <iostream>
 #include <string>

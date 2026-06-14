@@ -1,6 +1,6 @@
-#include "helper_common/helper_messages.hpp"
-#include "helper_common/helper_connector.hpp"
-#include "helper_common/helper_client.hpp"
+#include "helper/common/helper_messages.hpp"
+#include "helper/common/helper_connector.hpp"
+#include "helper/common/helper_client.hpp"
 
 #include <nlohmann/json.hpp>
 #include <cassert>

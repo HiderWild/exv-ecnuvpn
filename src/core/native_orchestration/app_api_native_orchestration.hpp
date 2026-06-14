@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config.hpp"
+#include "core/config/config.hpp"
 #include "vpn_engine/engine.hpp"
 #include "vpn_engine/protocol/native_authenticator.hpp"
 

@@ -2,16 +2,16 @@
 // Covers: Hello protocol, session lifecycle, error handling, lease timeout,
 // cleanup registry, command validation, and security (no credentials in messages).
 
-#include "helper_common/helper_protocol.hpp"
-#include "helper_common/helper_capabilities.hpp"
-#include "helper_common/helper_error.hpp"
-#include "helper_common/helper_messages.hpp"
-#include "helper_common/helper_session_lease.hpp"
-#include "helper_common/helper_client.hpp"
-#include "helper_runtime/session_lease_manager.hpp"
-#include "helper_runtime/cleanup_registry.hpp"
-#include "helper_runtime/command_validator.hpp"
-#include "helper_runtime/helper_lifecycle_policy.hpp"
+#include "helper/common/helper_protocol.hpp"
+#include "helper/common/helper_capabilities.hpp"
+#include "helper/common/helper_error.hpp"
+#include "helper/common/helper_messages.hpp"
+#include "helper/common/helper_session_lease.hpp"
+#include "helper/common/helper_client.hpp"
+#include "helper/runtime/session_lease_manager.hpp"
+#include "helper/runtime/cleanup_registry.hpp"
+#include "helper/runtime/command_validator.hpp"
+#include "helper/runtime/helper_lifecycle_policy.hpp"
 #include "support/fake_helper.hpp"
 
 #include <nlohmann/json.hpp>
@@ -1243,6 +1243,7 @@ int main() {
     failures += test_helper_v2_request_field_names_no_credentials();
     failures += test_helper_v2_response_field_names_no_credentials();
     failures += test_helper_v2_no_auth_token_field_specifically();
+
 
     std::cout << "\n=== Results ===\n";
     if (failures == 0) {

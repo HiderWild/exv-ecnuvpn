@@ -1,6 +1,6 @@
 #include "core/app_api/app_api.hpp"
 
-#include "config.hpp"
+#include "core/config/config.hpp"
 #include "core/config/config_api.hpp"
 #include "core/config/config_manager.hpp"
 #include "connection_attempt.hpp"
@@ -8,11 +8,11 @@
 #include "core/rpc/desktop_rpc_adapter.hpp"
 #include "crypto.hpp"
 #include "feedback/feedback.hpp"
-#include "helper.hpp"
+#include "helper/helper.hpp"
 #include "logger.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
 #include "platform/common/backend_resolver.hpp"
-#include "platform/common/helper_client.hpp"
+#include "helper/platform/helper_client.hpp"
 #include "platform/common/driver_status.hpp"
 #include "platform/common/oneshot_bootstrap.hpp"
 #include "platform/common/path_utils.hpp"
@@ -25,8 +25,8 @@
 #include "virtual_network.hpp"
 #include "vpn_engine/native_engine.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
-#include "helper_common/helper_connector.hpp"
-#include "platform/common/helper_delegating_network_ops.hpp"
+#include "helper/common/helper_connector.hpp"
+#include "helper/platform/helper_delegating_network_ops.hpp"
 
 #include <algorithm>
 #include <cstdio>

@@ -1,4 +1,4 @@
-#include "config.hpp"
+#include "core/config/config.hpp"
 #include "vpn_engine/native_engine.hpp"
 #include "vpn_engine/packet_device.hpp"
 #include "vpn_engine/protocol/production_transport.hpp"

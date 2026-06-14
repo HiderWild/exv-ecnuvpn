@@ -1,7 +1,7 @@
 #pragma once
-#include "../../src/helper_common/helper_client.hpp"
-#include "../../src/helper_common/helper_messages.hpp"
-#include "../../src/helper_common/helper_session_lease.hpp"
+#include "helper/common/helper_client.hpp"
+#include "helper/common/helper_messages.hpp"
+#include "helper/common/helper_session_lease.hpp"
 #include <queue>
 #include <map>
 

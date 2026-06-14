@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config.hpp"
+#include "core/config/config.hpp"
 #include "vpn_engine/event_sink.hpp"
 #include "vpn_engine/engine.hpp"
 #include "vpn_engine/packet_device.hpp"
