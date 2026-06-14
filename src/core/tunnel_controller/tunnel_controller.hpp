@@ -5,6 +5,7 @@
 #include "tunnel_state.hpp"
 #include "tunnel_events.hpp"
 #include "reconnect_policy.hpp"
+#include "core/tunnel_controller/core_session_runner.hpp"
 
 // Forward declarations — the real interfaces live in helper / platform.
 namespace exv::helper { class HelperClient; }
@@ -19,6 +20,12 @@ public:
         std::shared_ptr<exv::helper::HelperClient> helper,
         std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
         ReconnectConfig reconnect_config = {}
+    );
+    TunnelController(
+        std::shared_ptr<exv::helper::HelperClient> helper,
+        std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
+        ReconnectConfig reconnect_config,
+        CoreSessionRunner::NativeDependenciesFactory deps_factory
     );
     ~TunnelController();
 

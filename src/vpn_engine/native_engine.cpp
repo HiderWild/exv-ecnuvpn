@@ -41,6 +41,13 @@ ValidationResult native_packet_device_unimplemented() {
                  "Native engine packet device factory is not configured.");
 }
 
+DeviceConfig device_config_from_metadata(const TunnelMetadata &metadata) {
+  DeviceConfig config;
+  config.interface_name = metadata.interface_name;
+  config.mtu = metadata.mtu;
+  return config;
+}
+
 } // namespace
 
 ValidationResult validate_native_config(const Config &cfg) {
@@ -210,9 +217,33 @@ ValidationResult NativeVpnEngineSession::start() {
     return fail(cstp);
   }
 
+  {
+    const std::lock_guard<std::mutex> lock(mu_);
+    status_.pid = -1;
+    status_.interface_name = metadata.interface_name;
+    status_.internal_ip = metadata.internal_ip4_address;
+    status_.error_code.clear();
+    status_.error_message.clear();
+  }
+
   emit_event("cstp.connected", "info", "CSTP connect succeeded",
              {{"interface", metadata.interface_name},
               {"internal_ip", metadata.internal_ip4_address}});
+
+  DeviceConfig packet_device_config = device_config_from_metadata(metadata);
+  if (dependencies_.network_configurator) {
+    ValidationResult network =
+        dependencies_.network_configurator(metadata, &packet_device_config);
+    if (!network.ok) {
+      transport->disconnect();
+      return fail(network);
+    }
+  }
+
+  if (packet_device_config.interface_name.empty())
+    packet_device_config.interface_name = metadata.interface_name;
+  if (packet_device_config.mtu <= 0)
+    packet_device_config.mtu = metadata.mtu;
 
   if (!dependencies_.packet_device_factory) {
     transport->disconnect();
@@ -238,12 +269,7 @@ ValidationResult NativeVpnEngineSession::start() {
 
   {
     const std::lock_guard<std::mutex> lock(mu_);
-    status_.pid = -1;
-    status_.interface_name = metadata.interface_name;
-    status_.internal_ip = metadata.internal_ip4_address;
-    status_.error_code.clear();
-    status_.error_message.clear();
-
+    packet_device_config_ = packet_device_config;
     transport_ = std::move(transport);
     protocol_session_ = std::move(protocol_session);
     packet_device_ = std::move(packet_device);
@@ -340,19 +366,22 @@ void NativeVpnEngineSession::run_packet_loop() {
   std::unique_ptr<protocol::ProtocolSession> session;
   std::unique_ptr<PacketDevice> device;
   std::unique_ptr<LoopEventSink> events;
+  DeviceConfig packet_device_config;
   {
     const std::lock_guard<std::mutex> lock(mu_);
     transport = std::move(transport_);
     session = std::move(protocol_session_);
     device = std::move(packet_device_);
     events = std::move(loop_event_sink_);
+    packet_device_config = packet_device_config_;
   }
 
   if (!session || !device) {
     result = invalid("packet_loop_missing_dependency",
                      "Native packet loop dependency is missing.");
   } else {
-    result = session->run_packet_loop(device.get(), events.get(), this);
+    result = session->run_packet_loop(device.get(), events.get(), this,
+                                      &packet_device_config);
   }
 
   if (session) {

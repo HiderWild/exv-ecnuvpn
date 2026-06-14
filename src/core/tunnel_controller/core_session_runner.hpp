@@ -27,8 +27,15 @@ namespace exv::core {
 class CoreSessionRunner {
 public:
     using EventCallback = std::function<void(TunnelEvent)>;
+    using NativeDependenciesFactory =
+        std::function<ecnuvpn::vpn_engine::NativeVpnEngineDependencies()>;
+    using NetworkConfigCallback =
+        std::function<ecnuvpn::vpn_engine::ValidationResult(
+            const ecnuvpn::vpn_engine::TunnelMetadata&,
+            ecnuvpn::vpn_engine::DeviceConfig*)>;
 
     CoreSessionRunner();
+    explicit CoreSessionRunner(NativeDependenciesFactory deps_factory);
     ~CoreSessionRunner();
 
     CoreSessionRunner(const CoreSessionRunner&) = delete;
@@ -52,6 +59,7 @@ public:
 
     /// Register the callback that receives translated TunnelEvents.
     void set_event_callback(EventCallback cb);
+    void set_network_config_callback(NetworkConfigCallback cb);
 
 private:
     mutable std::mutex mu_;
@@ -59,6 +67,8 @@ private:
     std::unique_ptr<EngineEventBridge> bridge_;
     std::thread monitor_thread_;
     EventCallback event_callback_;
+    NetworkConfigCallback network_config_callback_;
+    NativeDependenciesFactory deps_factory_;
     std::atomic<bool> running_{false};
     ecnuvpn::vpn_engine::VpnEngineStatus cached_status_;
 };

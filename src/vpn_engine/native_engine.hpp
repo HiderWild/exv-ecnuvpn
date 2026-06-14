@@ -27,6 +27,8 @@ struct NativeVpnEngineDependencies {
   std::function<std::unique_ptr<protocol::ProtocolTransport>()>
       transport_factory;
   std::function<std::unique_ptr<PacketDevice>()> packet_device_factory;
+  std::function<ValidationResult(const TunnelMetadata &, DeviceConfig *)>
+      network_configurator;
   // Optional observer owned by the caller. It must outlive the session and its
   // emit() implementation must be safe from both the caller thread and the
   // packet-loop thread.
@@ -66,6 +68,7 @@ private:
   std::unique_ptr<protocol::ProtocolSession> protocol_session_;
   std::unique_ptr<PacketDevice> packet_device_;
   std::unique_ptr<LoopEventSink> loop_event_sink_;
+  DeviceConfig packet_device_config_;
   VpnEngineStatus status_;
 
   mutable std::mutex mu_;

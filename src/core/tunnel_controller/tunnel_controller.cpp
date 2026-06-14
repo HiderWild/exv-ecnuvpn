@@ -34,6 +34,9 @@ as_helper_delegating_ops(const std::shared_ptr<exv::platform::PlatformNetworkOps
 // =========================================================================
 
 struct TunnelController::Impl {
+    Impl() = default;
+    explicit Impl(CoreSessionRunner::NativeDependenciesFactory deps_factory)
+        : runner_(std::move(deps_factory)) {}
 
     // --- Dependencies (injected) ---
     std::shared_ptr<exv::helper::HelperClient>  helper_;

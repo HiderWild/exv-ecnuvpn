@@ -9,12 +9,19 @@
 #include "core/engine_event_bridge.hpp"
 #include "core/tunnel_events.hpp"
 #include "core/tunnel_state.hpp"
+#include "core/config/config.hpp"
+#include "vpn_engine/packet_device.hpp"
+#include "vpn_engine/protocol/session.hpp"
 
 #include <iostream>
 #include <string>
 #include <vector>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <cassert>
 
@@ -24,6 +31,121 @@ bool expect(bool condition, const char* message) {
     if (condition) return true;
     std::cerr << "EXPECT FAILED: " << message << std::endl;
     return false;
+}
+
+class RunnerFakeTransport final
+    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+public:
+    ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
+        const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions&) override {
+        ecnuvpn::vpn_engine::protocol::AuthResult result;
+        result.ok = true;
+        result.cookie = "runner-cookie";
+        return result;
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    connect_cstp(const std::string&, ecnuvpn::vpn_engine::TunnelMetadata* metadata) override {
+        if (!metadata) {
+            return {false, "metadata_missing", "metadata output is null"};
+        }
+        metadata->interface_name = "fake-cstp0";
+        metadata->internal_ip4_address = "10.255.0.10";
+        metadata->internal_ip4_netmask = "255.255.255.0";
+        metadata->mtu = 1400;
+        metadata->routes = {"198.51.100.0/24"};
+        metadata->server_bypass_ips = {"192.0.2.10"};
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    send_packet(const std::vector<std::uint8_t>&) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame*) override {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait(lock, [&] { return closed_; });
+        return {false, "transport_closed", "transport closed"};
+    }
+
+    void disconnect() override {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            closed_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    void reset_for_reconnect() override {
+        std::lock_guard<std::mutex> lock(mu_);
+        closed_ = false;
+    }
+
+private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool closed_ = false;
+};
+
+struct RunnerPacketDeviceState {
+    mutable std::mutex mu;
+    int open_count = 0;
+    bool metadata_open_used = false;
+    ecnuvpn::vpn_engine::DeviceConfig last_config;
+};
+
+class RunnerFakePacketDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+public:
+    explicit RunnerFakePacketDevice(std::shared_ptr<RunnerPacketDeviceState> state)
+        : state_(std::move(state)) {}
+
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::DeviceConfig& config) override {
+        const std::lock_guard<std::mutex> lock(state_->mu);
+        state_->last_config = config;
+        ++state_->open_count;
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    open(const ecnuvpn::vpn_engine::TunnelMetadata&) override {
+        const std::lock_guard<std::mutex> lock(state_->mu);
+        state_->metadata_open_used = true;
+        ++state_->open_count;
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    read_packet(std::vector<std::uint8_t>* packet) override {
+        if (packet) packet->clear();
+        return {false, "packet_device_empty", "packet device drained"};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    write_packet(const std::vector<std::uint8_t>&) override {
+        return {};
+    }
+
+    void close() override {}
+
+private:
+    std::shared_ptr<RunnerPacketDeviceState> state_;
+};
+
+ecnuvpn::Config runner_config() {
+    ecnuvpn::Config cfg;
+    cfg.server = "https://vpn.example.invalid";
+    cfg.username = "alice";
+    cfg.useragent = "ECNU-VPN runner test";
+    cfg.mtu = 1290;
+    return cfg;
 }
 
 // =========================================================================
@@ -255,6 +377,82 @@ bool test_runner_concurrent_access() {
     return ok;
 }
 
+// =========================================================================
+// Test 9: CoreSessionRunner forwards network configurator to native engine
+// =========================================================================
+bool test_runner_network_configurator_supplies_packet_device_config() {
+    using exv::core::CoreSessionRunner;
+
+    bool ok = true;
+    auto packet_state = std::make_shared<RunnerPacketDeviceState>();
+    bool configurator_called = false;
+
+    CoreSessionRunner runner([packet_state]() {
+        ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+        deps.transport_factory = []() {
+            return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                new RunnerFakeTransport());
+        };
+        deps.packet_device_factory = [packet_state]() {
+            return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                new RunnerFakePacketDevice(packet_state));
+        };
+        return deps;
+    });
+
+    runner.set_network_config_callback(
+        [packet_state, &configurator_called](
+            const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
+            ecnuvpn::vpn_engine::DeviceConfig* config) {
+            configurator_called = true;
+            if (!config) {
+                return ecnuvpn::vpn_engine::ValidationResult{
+                    false, "device_config_missing", "device config output is null"};
+            }
+            {
+                const std::lock_guard<std::mutex> lock(packet_state->mu);
+                if (packet_state->open_count != 0) {
+                    return ecnuvpn::vpn_engine::ValidationResult{
+                        false, "packet_opened_too_early",
+                        "packet device opened before network config"};
+                }
+            }
+            if (metadata.routes.empty() || metadata.server_bypass_ips.empty()) {
+                return ecnuvpn::vpn_engine::ValidationResult{
+                    false, "metadata_incomplete",
+                    "network configurator should see CSTP route metadata"};
+            }
+            config->interface_name = "helper-runner0";
+            config->mtu = 1320;
+            return ecnuvpn::vpn_engine::ValidationResult{};
+        });
+
+    ok = expect(runner.start(runner_config(), "test-password"),
+                "runner start should succeed with fake native dependencies") && ok;
+    runner.stop();
+
+    ecnuvpn::vpn_engine::DeviceConfig opened;
+    bool metadata_open_used = false;
+    int open_count = 0;
+    {
+        const std::lock_guard<std::mutex> lock(packet_state->mu);
+        opened = packet_state->last_config;
+        metadata_open_used = packet_state->metadata_open_used;
+        open_count = packet_state->open_count;
+    }
+
+    ok = expect(configurator_called,
+                "network configurator should be called by runner start") && ok;
+    ok = expect(open_count == 1,
+                "packet device should open exactly once") && ok;
+    ok = expect(opened.interface_name == "helper-runner0" && opened.mtu == 1320,
+                "packet device should use callback-supplied DeviceConfig") && ok;
+    ok = expect(!metadata_open_used,
+                "runner packet path should not use TunnelMetadata open") && ok;
+
+    return ok;
+}
+
 } // namespace
 
 // =========================================================================
@@ -286,6 +484,9 @@ int main() {
 
     std::cout << "--- Test 8: Runner concurrent access ---\n";
     ok = test_runner_concurrent_access() && ok;
+
+    std::cout << "--- Test 9: Runner network configurator ---\n";
+    ok = test_runner_network_configurator_supplies_packet_device_config() && ok;
 
     if (ok) {
         std::cout << "core_session_runner_test: all tests passed\n";

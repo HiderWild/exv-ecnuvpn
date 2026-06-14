@@ -16,6 +16,8 @@
 #include "core/tunnel_state.hpp"
 #include "core/tunnel_events.hpp"
 #include "core/reconnect_policy.hpp"
+#include "vpn_engine/native_engine.hpp"
+#include "vpn_engine/protocol/session.hpp"
 #include "log_event_bus.hpp"
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
@@ -29,6 +31,7 @@
 #include <memory>
 #include <chrono>
 #include <cassert>
+#include <vector>
 
 namespace {
 
@@ -119,6 +122,72 @@ bool logs_contain_text(const std::vector<ecnuvpn::TypedLogEvent>& logs,
         }
     }
     return false;
+}
+
+struct ControllerTransportState {
+    int disconnect_count = 0;
+};
+
+class ControllerFakeTransport final
+    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+public:
+    explicit ControllerFakeTransport(std::shared_ptr<ControllerTransportState> state)
+        : state_(std::move(state)) {}
+
+    ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
+        const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions&) override {
+        ecnuvpn::vpn_engine::protocol::AuthResult result;
+        result.ok = true;
+        result.cookie = "controller-cookie";
+        return result;
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    connect_cstp(const std::string&, ecnuvpn::vpn_engine::TunnelMetadata* metadata) override {
+        if (!metadata) {
+            return {false, "metadata_missing", "metadata output is null"};
+        }
+        metadata->interface_name = "fake-cstp0";
+        metadata->internal_ip4_address = "10.255.0.12";
+        metadata->internal_ip4_netmask = "255.255.255.0";
+        metadata->mtu = 1400;
+        metadata->routes = {"198.51.100.0/24"};
+        metadata->server_bypass_ips = {"192.0.2.10"};
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    send_packet(const std::vector<std::uint8_t>&) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame*) override {
+        return {false, "transport_closed", "transport closed"};
+    }
+
+    void disconnect() override {
+        ++state_->disconnect_count;
+    }
+
+    void reset_for_reconnect() override {}
+
+private:
+    std::shared_ptr<ControllerTransportState> state_;
+};
+
+ecnuvpn::Config native_controller_config() {
+    ecnuvpn::Config cfg;
+    cfg.server = "https://vpn.example.invalid";
+    cfg.username = "alice";
+    cfg.useragent = "ECNU-VPN controller integration test";
+    cfg.mtu = 1290;
+    return cfg;
 }
 
 } // namespace
@@ -266,6 +335,52 @@ bool test_start_session_failure_stops_connect() {
                 "2c: heartbeat must not start without a helper session") && ok;
     ok = expect(net_ops->prepare_count() == 0,
                 "2c: network ops must not run without a helper session") && ok;
+
+    return ok;
+}
+
+// --- Test 2d: Native network config failure keeps helper/platform error ---
+bool test_native_network_config_failure_preserves_error() {
+    using exv::core::TunnelPhase;
+
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    auto transport_state = std::make_shared<ControllerTransportState>();
+
+    net_ops->set_apply_should_fail(true);
+
+    exv::core::TunnelController ctrl(
+        helper, net_ops, exv::core::ReconnectConfig{},
+        [transport_state]() {
+            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            deps.transport_factory = [transport_state]() {
+                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                    new ControllerFakeTransport(transport_state));
+            };
+            return deps;
+        });
+    ctrl.set_vpn_config(native_controller_config(), "test-password");
+
+    bool ok = true;
+    ctrl.connect(make_intent(true));
+
+    auto snap = ctrl.status();
+    ok = expect(ctrl.phase() == TunnelPhase::Failed,
+                "2d: apply_config failure in native path should transition to Failed") && ok;
+    ok = expect(net_ops->prepare_count() == 1,
+                "2d: native path should prepare tunnel device through controller callback") && ok;
+    ok = expect(net_ops->apply_count() == 1,
+                "2d: native path should attempt network apply through controller callback") && ok;
+    ok = expect(transport_state->disconnect_count == 1,
+                "2d: native transport should be disconnected after network config failure") && ok;
+    ok = expect(snap.last_error.has_value(),
+                "2d: failed native network config should leave a last_error") && ok;
+    if (snap.last_error) {
+        ok = expect(snap.last_error->code == "apply_config_failed",
+                    "2d: network apply error code should not be overwritten by auth_failed") && ok;
+        ok = expect(snap.last_error->domain == "helper",
+                    "2d: network apply error domain should remain helper/platform boundary") && ok;
+    }
 
     return ok;
 }
@@ -757,6 +872,9 @@ int main() {
 
     std::cout << "--- Test 2c: StartSession Failure Stops Connect ---\n";
     ok = test_start_session_failure_stops_connect() && ok;
+
+    std::cout << "--- Test 2d: Native Network Config Failure Preserves Error ---\n";
+    ok = test_native_network_config_failure_preserves_error() && ok;
 
     std::cout << "--- Test 3: Reconnect Flow ---\n";
     ok = test_reconnect_flow() && ok;

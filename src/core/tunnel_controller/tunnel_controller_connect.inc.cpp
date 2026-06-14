@@ -95,6 +95,64 @@
         return true;
     }
 
+    ecnuvpn::vpn_engine::ValidationResult current_network_failure(
+        const std::string& fallback_code,
+        const std::string& fallback_message) const {
+        ecnuvpn::vpn_engine::ValidationResult result;
+        result.ok = false;
+        result.code = fallback_code;
+        result.message = fallback_message;
+        if (snapshot_.last_error) {
+            if (!snapshot_.last_error->code.empty()) {
+                result.code = snapshot_.last_error->code;
+            }
+            if (!snapshot_.last_error->message.empty()) {
+                result.message = snapshot_.last_error->message;
+            }
+        }
+        return result;
+    }
+
+    std::string interface_address_from_metadata(
+        const ecnuvpn::vpn_engine::TunnelMetadata& metadata) const {
+        std::string ip = metadata.internal_ip4_address;
+        if (ip.empty()) {
+            return "10.0.0.2/24";
+        }
+        if (ip.find('/') == std::string::npos) {
+            ip += "/24";
+        }
+        return ip;
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult configure_network_for_engine(
+        const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
+        ecnuvpn::vpn_engine::DeviceConfig* device_config) {
+        exv::platform::TunnelDeviceDescriptor device;
+        if (!prepare_tunnel_device_for_session(&device)) {
+            return current_network_failure(
+                "prepare_tunnel_device_failed",
+                "Failed to prepare tunnel device");
+        }
+
+        if (!apply_tunnel_config_for_session(
+                device, interface_address_from_metadata(metadata))) {
+            return current_network_failure(
+                "apply_config_failed",
+                "Failed to apply tunnel config");
+        }
+
+        if (device_config) {
+            device_config->interface_name =
+                device.adapter_name.empty() ? metadata.interface_name
+                                            : device.adapter_name;
+            device_config->mtu = device.mtu > 0 ? device.mtu : metadata.mtu;
+        }
+
+        transition_to(TunnelPhase::OpeningPacketDevice);
+        return {};
+    }
+
     void do_connect() {
         log_tunnel_event("INFO", "connect.start", "Connect requested",
                          {{"server", intent_.profile_id.value},
@@ -182,8 +240,10 @@
                 log_tunnel_event("ERROR", "native.runner.failed",
                                  "Native engine session failed to start");
                 timing_.timer.end(ConnectTiming::AUTH);
-                set_error(CoreErrorMapper::from_auth_error(
-                    -1, "Native engine session failed to start"));
+                if (!snapshot_.last_error) {
+                    set_error(CoreErrorMapper::from_auth_error(
+                        -1, "Native engine session failed to start"));
+                }
                 transition_to(TunnelPhase::Failed);
                 return;
             }

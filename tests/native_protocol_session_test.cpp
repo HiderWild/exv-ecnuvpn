@@ -126,6 +126,7 @@ public:
   ecnuvpn::vpn_engine::ValidationResult
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     last_open_metadata_ = metadata;
+    metadata_open_used_ = true;
     open_ = true;
     ++open_count_;
     return {};
@@ -163,11 +164,13 @@ public:
   const ecnuvpn::vpn_engine::TunnelMetadata &last_open_metadata() const {
     return last_open_metadata_;
   }
+  bool metadata_open_used() const { return metadata_open_used_; }
 
 private:
   ManualCancellationToken &cancel_;
   int cancel_after_reads_ = 0;
   ecnuvpn::vpn_engine::TunnelMetadata last_open_metadata_;
+  bool metadata_open_used_ = false;
   bool open_ = false;
   int open_count_ = 0;
   int close_count_ = 0;
@@ -724,7 +727,14 @@ bool test_active_loop_cancellation_during_no_data_poll_exits() {
               "active cancellation should close the packet device") &&
        ok;
   ok = expect(device.last_open_metadata().interface_name == "fake-cstp0",
-              "active loop should pass tunnel metadata to packet device") &&
+              "active loop should pass tunnel interface name to packet device") &&
+       ok;
+  ok = expect(device.last_open_metadata().routes.empty() &&
+                  device.last_open_metadata().server_bypass_ips.empty(),
+              "active loop should not pass route ownership into packet device") &&
+       ok;
+  ok = expect(!device.metadata_open_used(),
+              "active loop should open packet device with DeviceConfig") &&
        ok;
   ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::stopped,
               "active cancellation should mark session stopped") &&

@@ -277,6 +277,7 @@ struct PacketDeviceState {
   std::thread::id close_thread_id;
   std::vector<std::vector<std::uint8_t>> written_packets;
   ecnuvpn::vpn_engine::TunnelMetadata last_open_metadata;
+  bool metadata_open_used = false;
 };
 
 class ScriptedEnginePacketDevice final
@@ -300,6 +301,7 @@ public:
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
+    state_->metadata_open_used = true;
     state_->open = true;
     ++state_->open_count;
     return {};
@@ -363,6 +365,7 @@ public:
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
+    state_->metadata_open_used = true;
     state_->open = true;
     ++state_->open_count;
     return {};
@@ -418,6 +421,7 @@ public:
   open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
+    state_->metadata_open_used = true;
     ++state_->open_count;
     return {false, "packet_device_open_failed",
             "packet device refused to open"};
@@ -486,6 +490,11 @@ ecnuvpn::vpn_engine::TunnelMetadata
 last_open_metadata(const std::shared_ptr<PacketDeviceState> &state) {
   const std::lock_guard<std::mutex> lock(state->mu);
   return state->last_open_metadata;
+}
+
+bool metadata_open_used(const std::shared_ptr<PacketDeviceState> &state) {
+  const std::lock_guard<std::mutex> lock(state->mu);
+  return state->metadata_open_used;
 }
 
 std::unique_ptr<FakeProtocolTransport>
@@ -579,13 +588,14 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
   ok = expect(opened_metadata.mtu == 1400,
               "negotiated tunnel MTU should reach the packet device") &&
        ok;
-  ok = expect(opened_metadata.routes ==
-                  std::vector<std::string>{"198.51.100.0/24"},
-              "split-include routes should reach the packet device") &&
+  ok = expect(opened_metadata.routes.empty(),
+              "split-include routes must not reach the packet device") &&
        ok;
-  ok = expect(opened_metadata.server_bypass_ips ==
-                  std::vector<std::string>{"192.0.2.10"},
-              "server-bypass IPs should reach the packet device") &&
+  ok = expect(opened_metadata.server_bypass_ips.empty(),
+              "server-bypass IPs must not reach the packet device") &&
+       ok;
+  ok = expect(!metadata_open_used(device),
+              "native engine packet loop should use DeviceConfig open") &&
        ok;
 
   ok = expect(wait_until([&device]() {
@@ -631,6 +641,70 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
               "stop after clean packet loop exit must not close device again") &&
        ok;
 
+  return ok;
+}
+
+bool test_network_configurator_runs_before_packet_open() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  auto device = std::make_shared<PacketDeviceState>();
+  bool configurator_called = false;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = [&device]() {
+    return make_scripted_device(device);
+  };
+  deps.network_configurator =
+      [&device, &configurator_called](
+          const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
+          ecnuvpn::vpn_engine::DeviceConfig *device_config) {
+        configurator_called = true;
+        if (!device_config)
+          return ecnuvpn::vpn_engine::ValidationResult{
+              false, "device_config_missing",
+              "device config output must not be null"};
+        if (open_count(device) != 0)
+          return ecnuvpn::vpn_engine::ValidationResult{
+              false, "packet_opened_too_early",
+              "packet device opened before helper network config"};
+        if (metadata.routes.empty() || metadata.server_bypass_ips.empty())
+          return ecnuvpn::vpn_engine::ValidationResult{
+              false, "metadata_incomplete",
+              "network configurator should receive CSTP route metadata"};
+
+        device_config->interface_name = "helper-wintun0";
+        device_config->mtu = 1320;
+        return ecnuvpn::vpn_engine::ValidationResult{};
+      };
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+
+  ok = expect(started.ok,
+              "start should succeed with injected network configurator") &&
+       ok;
+  ok = expect(configurator_called,
+              "network configurator should run after CSTP and before packet open") &&
+       ok;
+
+  const ecnuvpn::vpn_engine::TunnelMetadata opened_metadata =
+      last_open_metadata(device);
+  ok = expect(opened_metadata.interface_name == "helper-wintun0",
+              "packet device should open using helper-prepared adapter name") &&
+       ok;
+  ok = expect(opened_metadata.mtu == 1320,
+              "packet device should open using helper-prepared MTU") &&
+       ok;
+  ok = expect(opened_metadata.routes.empty() &&
+                  opened_metadata.server_bypass_ips.empty(),
+              "packet device should still receive only device config") &&
+       ok;
+
+  session.stop();
   return ok;
 }
 
@@ -1063,6 +1137,7 @@ int main() {
        ok;
 
   ok = test_injected_fake_start_runs_packet_loop_and_cleans_up() && ok;
+  ok = test_network_configurator_runs_before_packet_open() && ok;
   ok = test_dtls_config_flag_does_not_block_native_engine() && ok;
   ok = test_auth_failure_maps_error_without_device() && ok;
   ok = test_cstp_failure_maps_error_without_device_open() && ok;

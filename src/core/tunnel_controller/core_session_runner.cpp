@@ -6,7 +6,13 @@ namespace exv::core {
 // CoreSessionRunner
 // =========================================================================
 
-CoreSessionRunner::CoreSessionRunner() = default;
+CoreSessionRunner::CoreSessionRunner()
+    : CoreSessionRunner([] {
+          return ecnuvpn::vpn_engine::default_native_engine_dependencies();
+      }) {}
+
+CoreSessionRunner::CoreSessionRunner(NativeDependenciesFactory deps_factory)
+    : deps_factory_(std::move(deps_factory)) {}
 
 CoreSessionRunner::~CoreSessionRunner() {
     stop();
@@ -41,8 +47,10 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
 
     // Create NativeVpnEngineSession with default dependencies and the bridge
     // as the event sink.
-    auto deps = ecnuvpn::vpn_engine::default_native_engine_dependencies();
+    auto deps = deps_factory_ ? deps_factory_()
+                              : ecnuvpn::vpn_engine::default_native_engine_dependencies();
     deps.event_sink = bridge_.get();
+    deps.network_configurator = network_config_callback_;
 
     session_ = std::make_unique<ecnuvpn::vpn_engine::NativeVpnEngineSession>(
         engine_config, deps);
@@ -162,6 +170,11 @@ ecnuvpn::vpn_engine::VpnEngineStatus CoreSessionRunner::status() const {
 void CoreSessionRunner::set_event_callback(EventCallback cb) {
     std::lock_guard<std::mutex> lock(mu_);
     event_callback_ = std::move(cb);
+}
+
+void CoreSessionRunner::set_network_config_callback(NetworkConfigCallback cb) {
+    std::lock_guard<std::mutex> lock(mu_);
+    network_config_callback_ = std::move(cb);
 }
 
 } // namespace exv::core

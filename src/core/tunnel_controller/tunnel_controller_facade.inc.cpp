@@ -6,7 +6,18 @@ TunnelController::TunnelController(
     std::shared_ptr<exv::helper::HelperClient> helper,
     std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
     ReconnectConfig reconnect_config)
-    : impl_(std::make_unique<Impl>())
+    : TunnelController(std::move(helper),
+                       std::move(net_ops),
+                       reconnect_config,
+                       CoreSessionRunner::NativeDependenciesFactory{})
+{}
+
+TunnelController::TunnelController(
+    std::shared_ptr<exv::helper::HelperClient> helper,
+    std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
+    ReconnectConfig reconnect_config,
+    CoreSessionRunner::NativeDependenciesFactory deps_factory)
+    : impl_(std::make_unique<Impl>(std::move(deps_factory)))
 {
     impl_->helper_          = std::move(helper);
     impl_->net_ops_         = std::move(net_ops);
@@ -17,6 +28,11 @@ TunnelController::TunnelController(
     impl_->runner_.set_event_callback([this](TunnelEvent event) {
         this->on_event(std::move(event));
     });
+    impl_->runner_.set_network_config_callback(
+        [this](const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
+               ecnuvpn::vpn_engine::DeviceConfig* device_config) {
+            return impl_->configure_network_for_engine(metadata, device_config);
+        });
 }
 
 TunnelController::~TunnelController() = default;

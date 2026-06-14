@@ -98,7 +98,8 @@ public:
   ValidationResult authenticate();
   ValidationResult connect_cstp(TunnelMetadata *metadata);
   ValidationResult run_packet_loop(PacketDevice *device, EventSink *events,
-                                   CancellationToken *cancel);
+                                   CancellationToken *cancel,
+                                   const DeviceConfig *device_config = nullptr);
   void disconnect();
 
   const SessionState &state() const;
@@ -114,7 +115,8 @@ private:
   };
 
   ValidationResult reconnect(PacketDevice *device, EventSink *events,
-                             CancellationToken *cancel);
+                             CancellationToken *cancel,
+                             const DeviceConfig &device_config);
   ForwardingOutcome run_forwarding(PacketDevice *device, EventSink *events,
                                    CancellationToken *cancel);
   ValidationResult stop_cancelled(PacketDevice *device, EventSink *events);
