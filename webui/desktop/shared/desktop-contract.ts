@@ -1,3 +1,9 @@
+import {
+  DESKTOP_RPC_ACTIONS,
+  DESKTOP_RPC_ERROR_CODE_MAP,
+  DESKTOP_RPC_EVENT_TYPES,
+} from './generated/system-contract.js'
+
 export const desktopIpcChannels = {
   rpc: 'ecnu-vpn:rpc',
   rpcElevated: 'ecnu-vpn:rpc-elevated',
@@ -38,60 +44,15 @@ export const desktopApiPaths = {
   logs: '/logs',
 } as const
 
-export const desktopRpcActions = [
-  'status.get',
-  'vpn.connect',
-  'vpn.disconnect',
-  'config.getAuth',
-  'config.saveAuth',
-  'config.getSettings',
-  'config.saveSettings',
-  'config.getKey',
-  'routes.list',
-  'routes.add',
-  'routes.remove',
-  'routes.reset',
-  'service.status',
-  'helper.status',
-  'runtime.status',
-  'drivers.status',
-  'drivers.install',
-  'logs.list',
-] as const
+export const desktopRpcActions = DESKTOP_RPC_ACTIONS
 
-export const desktopEventTypes = [
-  'log',
-  'status',
-  'heartbeat',
-  'service-progress',
-  'close-request',
-  'core-crashed',
-] as const
+export const desktopEventTypes = DESKTOP_RPC_EVENT_TYPES
 
 export const desktopServiceCommands = ['install', 'uninstall'] as const
 export const desktopCliCommands = ['status', 'install', 'uninstall'] as const
 export const desktopDriverInstallTargets = ['wintun', 'tap'] as const
 
-export const desktopRpcErrorCodes = {
-  helperUnavailable: 'helper_unavailable',
-  serviceNotInstalled: 'service_not_installed',
-  serviceInstalledNotRunning: 'service_installed_not_running',
-  serviceStartFailed: 'service_start_failed',
-  oneshotNotSupported: 'oneshot_not_supported',
-  oneshotElevationDenied: 'oneshot_elevation_denied',
-  helperRpcFailed: 'helper_rpc_failed',
-  authFailed: 'auth_failed',
-  tlsVerifyFailed: 'tls_verify_failed',
-  wintunMissing: 'wintun_missing',
-  utunPermissionDenied: 'utun_permission_denied',
-  unsupportedDtls: 'unsupported_dtls',
-  permissionDenied: 'permission_denied',
-  networkUnreachable: 'network_unreachable',
-  userCancelled: 'user_cancelled',
-  invalidRequest: 'invalid_request',
-  connectionFailed: 'connection_failed',
-  vpnStartFailed: 'vpn_start_failed',
-} as const
+export const desktopRpcErrorCodes = DESKTOP_RPC_ERROR_CODE_MAP
 
 export type DesktopRpcAction = (typeof desktopRpcActions)[number]
 export type DesktopEventType = (typeof desktopEventTypes)[number]

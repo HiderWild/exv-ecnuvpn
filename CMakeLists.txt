@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 enable_testing()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # Release builds optimise for size and strip debug symbols. The MinGW
 # toolchain we ship on Windows links against the gcc/g++ runtime DLLs, so
@@ -1121,6 +1122,26 @@ target_include_directories(error_contract_test PRIVATE
 
 add_test(NAME error_contract_test COMMAND error_contract_test)
 
+add_executable(contract_manifest_test
+    tests/contract_manifest_test.cpp
+)
+
+target_include_directories(contract_manifest_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(contract_manifest_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME contract_manifest_test COMMAND contract_manifest_test)
+
+add_test(
+    NAME contract_generation_check
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate_contracts.py --check
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
 
 add_executable(native_core_connect_flow_test
     tests/integration/native_core_connect_flow_test.cpp
@@ -1383,6 +1404,8 @@ set(_release_blocking_tests
     service_actions_test
     route_actions_test
     error_contract_test
+    contract_manifest_test
+    contract_generation_check
     helper_messages_connector_test
     core_process_test
     core_process_lifecycle_test
@@ -1480,6 +1503,8 @@ set_property(TEST
     service_actions_test
     route_actions_test
     error_contract_test
+    contract_manifest_test
+    contract_generation_check
     auth_failure_test
     helper_lost_test
     native_authenticator_test
@@ -1538,6 +1563,8 @@ set_property(TEST
     service_actions_test
     route_actions_test
     error_contract_test
+    contract_manifest_test
+    contract_generation_check
     core_process_test
     core_process_lifecycle_test
     app_api_status_contract_test

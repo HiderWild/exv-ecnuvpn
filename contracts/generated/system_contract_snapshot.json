@@ -1,0 +1,527 @@
+{
+  "contract_id": "ecnu-vpn.system",
+  "envelopes": {
+    "core_rpc": {
+      "request": {
+        "fields": [
+          {
+            "name": "action",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "payload_json",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "request_id",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      },
+      "response": {
+        "fields": [
+          {
+            "name": "success",
+            "required": true,
+            "type": "boolean"
+          },
+          {
+            "name": "payload_json",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "error_code",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "error_message",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "request_id",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "desktop_rpc": {
+      "request": {
+        "fields": [
+          {
+            "name": "id",
+            "required": true,
+            "type": "number"
+          },
+          {
+            "name": "action",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "payload",
+            "required": true,
+            "type": "unknown"
+          }
+        ]
+      },
+      "response": {
+        "fields": [
+          {
+            "name": "ok",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "name": "data",
+            "required": false,
+            "type": "unknown"
+          },
+          {
+            "name": "code",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "message",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "event",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      }
+    }
+  },
+  "modules": {
+    "config": {
+      "actions": [
+        {
+          "name": "config.getAuth",
+          "request": "empty",
+          "response": "ConfigAuth",
+          "surface": "desktop"
+        },
+        {
+          "name": "config.saveAuth",
+          "request": "ConfigAuthUpdate",
+          "response": "ConfigAuth",
+          "surface": "desktop"
+        },
+        {
+          "name": "config.getSettings",
+          "request": "empty",
+          "response": "ConfigSettings",
+          "surface": "desktop"
+        },
+        {
+          "name": "config.saveSettings",
+          "request": "ConfigSettingsUpdate",
+          "response": "ConfigSettings",
+          "surface": "desktop"
+        },
+        {
+          "name": "config.getKey",
+          "request": "empty",
+          "response": "CredentialStoreStatus",
+          "surface": "desktop"
+        },
+        {
+          "name": "config.profile.get",
+          "request": "ConfigProfileGetRequest",
+          "response": "ConfigProfile",
+          "surface": "core"
+        },
+        {
+          "name": "config.profile.save",
+          "request": "ConfigProfileSaveRequest",
+          "response": "ConfigProfileSaveResult",
+          "surface": "core"
+        }
+      ],
+      "aliases": [
+        {
+          "alias": "config.get",
+          "surface": "core_api_legacy",
+          "target": "config.getSettings"
+        },
+        {
+          "alias": "config.save",
+          "surface": "core_api_legacy",
+          "target": "config.saveSettings"
+        },
+        {
+          "alias": "config.get_profile",
+          "surface": "core_api_legacy",
+          "target": "config.profile.get"
+        },
+        {
+          "alias": "config.save_profile",
+          "surface": "core_api_legacy",
+          "target": "config.profile.save"
+        }
+      ],
+      "boundary": {
+        "accepts": [
+          "configuration read requests",
+          "configuration field update requests",
+          "route preference update requests",
+          "credential persistence state requests"
+        ],
+        "emits": [
+          "configuration snapshots",
+          "updated configuration sections",
+          "configuration validation errors"
+        ],
+        "rejects": [
+          "vpn session lifecycle requests",
+          "privileged helper operations",
+          "runtime tunnel state ownership"
+        ]
+      },
+      "errors": [
+        "invalid_payload",
+        "invalid_config",
+        "profile_not_found",
+        "credential_store_unavailable"
+      ]
+    },
+    "helper": {
+      "boundary": {
+        "accepts": [
+          "credential-free privileged network requests",
+          "session lease requests",
+          "tunnel device preparation requests",
+          "network route and DNS application requests",
+          "heartbeat and cleanup requests"
+        ],
+        "emits": [
+          "helper capability snapshots",
+          "session identifiers",
+          "device preparation results",
+          "network application results",
+          "structured helper errors"
+        ],
+        "rejects": [
+          "password fields",
+          "cookie fields",
+          "token fields",
+          "user configuration persistence",
+          "vpn authentication ownership"
+        ]
+      },
+      "capabilities": [
+        "tunnel_device_create",
+        "route_apply",
+        "dns_apply",
+        "firewall_rules",
+        "kill_switch"
+      ],
+      "errors": [
+        "none",
+        "unsupported_op",
+        "version_mismatch",
+        "invalid_session",
+        "permission_denied",
+        "device_not_found",
+        "device_busy",
+        "route_apply_failed",
+        "dns_apply_failed",
+        "cleanup_partial",
+        "internal_error",
+        "invalid_payload"
+      ],
+      "legacy_ops": [
+        {
+          "action": "start",
+          "code": 100,
+          "name": "LegacyStart"
+        },
+        {
+          "action": "stop",
+          "code": 101,
+          "name": "LegacyStop"
+        },
+        {
+          "action": "status",
+          "code": 102,
+          "name": "LegacyStatus"
+        },
+        {
+          "action": "heartbeat",
+          "code": 103,
+          "name": "LegacyHeartbeat"
+        }
+      ],
+      "messages": [
+        "HelloRequest",
+        "HelloResponse",
+        "StartSessionRequest",
+        "StartSessionResponse",
+        "PrepareTunnelDeviceRequest",
+        "PrepareTunnelDeviceResponse",
+        "ApplyTunnelConfigRequest",
+        "ApplyTunnelConfigResponse",
+        "HeartbeatRequest",
+        "HeartbeatResponse",
+        "CleanupRequest",
+        "CleanupResponse",
+        "GetSnapshotRequest",
+        "GetSnapshotResponse",
+        "EndSessionRequest",
+        "EndSessionResponse"
+      ],
+      "ops": [
+        {
+          "code": 1,
+          "name": "Hello",
+          "request": "HelloRequest",
+          "requires_session": false,
+          "response": "HelloResponse"
+        },
+        {
+          "code": 2,
+          "name": "StartSession",
+          "request": "StartSessionRequest",
+          "requires_session": false,
+          "response": "StartSessionResponse"
+        },
+        {
+          "code": 3,
+          "name": "PrepareTunnelDevice",
+          "request": "PrepareTunnelDeviceRequest",
+          "requires_session": true,
+          "response": "PrepareTunnelDeviceResponse"
+        },
+        {
+          "code": 4,
+          "name": "ApplyTunnelConfig",
+          "request": "ApplyTunnelConfigRequest",
+          "requires_session": true,
+          "response": "ApplyTunnelConfigResponse"
+        },
+        {
+          "code": 5,
+          "name": "Heartbeat",
+          "request": "HeartbeatRequest",
+          "requires_session": true,
+          "response": "HeartbeatResponse"
+        },
+        {
+          "code": 6,
+          "name": "Cleanup",
+          "request": "CleanupRequest",
+          "requires_session": true,
+          "response": "CleanupResponse"
+        },
+        {
+          "code": 7,
+          "name": "GetSnapshot",
+          "request": "GetSnapshotRequest",
+          "requires_session": false,
+          "response": "GetSnapshotResponse"
+        },
+        {
+          "code": 8,
+          "name": "EndSession",
+          "request": "EndSessionRequest",
+          "requires_session": true,
+          "response": "EndSessionResponse"
+        }
+      ],
+      "protocol_version": 2,
+      "security": {
+        "forbidden_fields": [
+          "password",
+          "passwd",
+          "cookie",
+          "token",
+          "secret",
+          "credential",
+          "auth_key",
+          "auth_token",
+          "session_cookie",
+          "webvpn_cookie",
+          "csrf_token",
+          "bearer_token",
+          "api_key",
+          "apikey"
+        ],
+        "no_credentials": true
+      },
+      "session": {
+        "id_field": "session_id",
+        "max_reconnect_window_seconds": 300,
+        "modes": [
+          "transient",
+          "resident"
+        ],
+        "profile_id_field": "profile_id",
+        "resident_heartbeat_timeout_seconds": 60,
+        "transient_heartbeat_timeout_seconds": 30
+      },
+      "wire_format": "helper-request-response-json"
+    },
+    "logs": {
+      "actions": [
+        "logs.list"
+      ],
+      "namespace": "logs.",
+      "shallow": true
+    },
+    "routes": {
+      "actions": [
+        "routes.list",
+        "routes.add",
+        "routes.remove",
+        "routes.reset"
+      ],
+      "namespace": "routes.",
+      "shallow": true
+    },
+    "runtime": {
+      "actions": [
+        "runtime.status"
+      ],
+      "namespace": "runtime.",
+      "shallow": true
+    },
+    "service": {
+      "actions": [
+        "service.helper_status",
+        "service.install",
+        "service.uninstall",
+        "service.driver_status"
+      ],
+      "namespace": "service.",
+      "shallow": true
+    },
+    "vpn": {
+      "actions": [
+        "vpn.connect",
+        "vpn.disconnect",
+        "vpn.status",
+        "vpn.set_auto_reconnect"
+      ],
+      "namespace": "vpn.",
+      "shallow": true
+    }
+  },
+  "schema_version": 1,
+  "surfaces": {
+    "desktop_rpc": {
+      "actions": [
+        "status.get",
+        "vpn.connect",
+        "vpn.disconnect",
+        "config.getAuth",
+        "config.saveAuth",
+        "config.getSettings",
+        "config.saveSettings",
+        "config.getKey",
+        "routes.list",
+        "routes.add",
+        "routes.remove",
+        "routes.reset",
+        "service.status",
+        "helper.status",
+        "runtime.status",
+        "drivers.status",
+        "drivers.install",
+        "logs.list"
+      ],
+      "error_codes": [
+        {
+          "code": "helper_unavailable",
+          "key": "helperUnavailable"
+        },
+        {
+          "code": "service_not_installed",
+          "key": "serviceNotInstalled"
+        },
+        {
+          "code": "service_installed_not_running",
+          "key": "serviceInstalledNotRunning"
+        },
+        {
+          "code": "service_start_failed",
+          "key": "serviceStartFailed"
+        },
+        {
+          "code": "oneshot_not_supported",
+          "key": "oneshotNotSupported"
+        },
+        {
+          "code": "oneshot_elevation_denied",
+          "key": "oneshotElevationDenied"
+        },
+        {
+          "code": "helper_rpc_failed",
+          "key": "helperRpcFailed"
+        },
+        {
+          "code": "auth_failed",
+          "key": "authFailed"
+        },
+        {
+          "code": "tls_verify_failed",
+          "key": "tlsVerifyFailed"
+        },
+        {
+          "code": "wintun_missing",
+          "key": "wintunMissing"
+        },
+        {
+          "code": "utun_permission_denied",
+          "key": "utunPermissionDenied"
+        },
+        {
+          "code": "unsupported_dtls",
+          "key": "unsupportedDtls"
+        },
+        {
+          "code": "permission_denied",
+          "key": "permissionDenied"
+        },
+        {
+          "code": "network_unreachable",
+          "key": "networkUnreachable"
+        },
+        {
+          "code": "user_cancelled",
+          "key": "userCancelled"
+        },
+        {
+          "code": "invalid_request",
+          "key": "invalidRequest"
+        },
+        {
+          "code": "connection_failed",
+          "key": "connectionFailed"
+        },
+        {
+          "code": "vpn_start_failed",
+          "key": "vpnStartFailed"
+        }
+      ],
+      "event_types": [
+        "log",
+        "status",
+        "heartbeat",
+        "service-progress",
+        "close-request",
+        "core-crashed"
+      ]
+    }
+  },
+  "version": "2026-06-14.config-helper-contract.v1"
+}

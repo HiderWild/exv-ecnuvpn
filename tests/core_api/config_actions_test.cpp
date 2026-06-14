@@ -2,6 +2,7 @@
 
 #include "core_api/config_actions.hpp"
 #include "core_api/app_rpc_dispatcher.hpp"
+#include "contracts/generated/system_contract.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -128,6 +129,21 @@ int main() {
         auto resp = fix.dispatcher.dispatch(req);
         ok = expect(resp.request_id == "trace-config-99",
                     "request_id should be propagated") && ok;
+    }
+
+    // --- contract manifest declares config actions and aliases ---
+    {
+        using namespace exv::contracts::generated;
+        ok = expect(is_config_action("config.getAuth"),
+                    "manifest should declare config.getAuth") && ok;
+        ok = expect(is_config_action("config.saveSettings"),
+                    "manifest should declare config.saveSettings") && ok;
+        ok = expect(is_config_action("config.profile.get"),
+                    "manifest should declare config.profile.get") && ok;
+        ok = expect(is_config_alias("config.get"),
+                    "manifest should declare legacy config.get alias") && ok;
+        ok = expect(is_config_alias("config.save_profile"),
+                    "manifest should declare legacy config.save_profile alias") && ok;
     }
 
     if (ok) {

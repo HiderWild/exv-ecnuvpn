@@ -18,7 +18,8 @@
     "desktop:package:dir": "electron-builder --dir --config electron-builder.config.cjs",
     "desktop:debug": "pnpm run desktop:compile && pnpm run desktop:package:dir",
     "desktop:build": "pnpm run desktop:compile && pnpm run desktop:package",
-    "test:rpc": "pnpm exec tsx desktop/main/__tests__/core-rpc-client.test.ts",
+    "test:rpc": "node scripts/run-electron-test.cjs desktop/main/__tests__/core-rpc-client.test.ts",
+    "test:contract": "node scripts/run-electron-test.cjs desktop/main/__tests__/desktop-contract-generated.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {

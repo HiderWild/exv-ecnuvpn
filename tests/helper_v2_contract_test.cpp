@@ -12,6 +12,7 @@
 #include "helper/runtime/cleanup_registry.hpp"
 #include "helper/runtime/command_validator.hpp"
 #include "helper/runtime/helper_lifecycle_policy.hpp"
+#include "contracts/generated/system_contract.hpp"
 #include "support/fake_helper.hpp"
 
 #include <nlohmann/json.hpp>
@@ -1172,6 +1173,82 @@ int test_helper_v2_no_auth_token_field_specifically() {
     return ok ? 0 : 1;
 }
 
+int test_manifest_lists_helper_v2_ops() {
+    std::cout << "  [Manifest] Helper V2 ops are generated\n";
+    bool ok = true;
+
+    using namespace exv::contracts::generated;
+    ok = expect(is_helper_v2_op("Hello"), "manifest should list Hello") && ok;
+    ok = expect(is_helper_v2_op("StartSession"),
+                "manifest should list StartSession") && ok;
+    ok = expect(is_helper_v2_op("PrepareTunnelDevice"),
+                "manifest should list PrepareTunnelDevice") && ok;
+    ok = expect(is_helper_v2_op("ApplyTunnelConfig"),
+                "manifest should list ApplyTunnelConfig") && ok;
+    ok = expect(is_helper_v2_op("Heartbeat"),
+                "manifest should list Heartbeat") && ok;
+    ok = expect(is_helper_v2_op("Cleanup"),
+                "manifest should list Cleanup") && ok;
+    ok = expect(is_helper_v2_op("GetSnapshot"),
+                "manifest should list GetSnapshot") && ok;
+    ok = expect(is_helper_v2_op("EndSession"),
+                "manifest should list EndSession") && ok;
+
+    return ok ? 0 : 1;
+}
+
+int test_manifest_helper_v2_op_codes_match_wire_enum() {
+    std::cout << "  [Manifest] Helper V2 op codes match wire enum\n";
+    bool ok = true;
+
+    using namespace exv::contracts::generated;
+
+    auto check = [&](std::string_view name, exv::helper::HelperOp expected,
+                     bool requires_session) {
+        for (const auto& item : HELPER_V2_OP_CONTRACTS) {
+            if (item.name == name) {
+                ok = expect(item.code == static_cast<std::uint32_t>(expected),
+                            "manifest op code should match HelperOp enum") && ok;
+                ok = expect(item.requires_session == requires_session,
+                            "manifest requires_session should match lifecycle contract") && ok;
+                return;
+            }
+        }
+        std::cerr << "FAIL: manifest missing helper op: " << name << "\n";
+        ok = false;
+    };
+
+    check("Hello", exv::helper::HelperOp::Hello, false);
+    check("StartSession", exv::helper::HelperOp::StartSession, false);
+    check("PrepareTunnelDevice", exv::helper::HelperOp::PrepareTunnelDevice, true);
+    check("ApplyTunnelConfig", exv::helper::HelperOp::ApplyTunnelConfig, true);
+    check("Heartbeat", exv::helper::HelperOp::Heartbeat, true);
+    check("Cleanup", exv::helper::HelperOp::Cleanup, true);
+    check("GetSnapshot", exv::helper::HelperOp::GetSnapshot, false);
+    check("EndSession", exv::helper::HelperOp::EndSession, true);
+
+    return ok ? 0 : 1;
+}
+
+int test_manifest_lists_forbidden_helper_credential_fields() {
+    std::cout << "  [Manifest] Helper forbidden credential fields are generated\n";
+    bool ok = true;
+
+    using namespace exv::contracts::generated;
+    ok = expect(is_helper_forbidden_credential_field("password"),
+                "manifest should forbid password") && ok;
+    ok = expect(is_helper_forbidden_credential_field("cookie"),
+                "manifest should forbid cookie") && ok;
+    ok = expect(is_helper_forbidden_credential_field("token"),
+                "manifest should forbid token") && ok;
+    ok = expect(is_helper_forbidden_credential_field("auth_token"),
+                "manifest should forbid auth_token") && ok;
+    ok = expect(is_helper_forbidden_credential_field("credential"),
+                "manifest should forbid credential") && ok;
+
+    return ok ? 0 : 1;
+}
+
 } // anonymous namespace
 
 // ============================================================
@@ -1244,6 +1321,11 @@ int main() {
     failures += test_helper_v2_response_field_names_no_credentials();
     failures += test_helper_v2_no_auth_token_field_specifically();
 
+    // 9. Generated manifest alignment
+    std::cout << "\n--- Manifest Alignment ---\n";
+    failures += test_manifest_lists_helper_v2_ops();
+    failures += test_manifest_helper_v2_op_codes_match_wire_enum();
+    failures += test_manifest_lists_forbidden_helper_credential_fields();
 
     std::cout << "\n=== Results ===\n";
     if (failures == 0) {
