@@ -125,7 +125,7 @@ export interface VpnStatusResponse {
   desired_connected: boolean
   auto_reconnect: boolean
   helper_mode: string
-  helper_status: string // connected|unavailable|version_mismatch
+  helper_status: string // connected|unavailable|permission_denied
   network_ready: boolean
   server: string
   interface_name: string

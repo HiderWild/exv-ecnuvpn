@@ -38,6 +38,7 @@ public:
 
     // Inspection
     int connect_count() const;
+    int hello_count() const;
     int heartbeat_count() const;
     bool ipc_lost() const;
     std::vector<helper::SessionId> active_sessions() const;
@@ -50,6 +51,7 @@ private:
     bool apply_config_fail_ = false;
     bool ipc_lost_ = false;
     int heartbeat_count_ = 0;
+    int hello_count_ = 0;
     int heartbeat_fail_after_ = -1;
     int connect_count_ = 0;
     DisconnectCallback disconnect_cb_;

@@ -219,8 +219,7 @@ IIpcTransport
 
 ```bash
 exv-helper --service
-exv-helper --oneshot --endpoint <endpoint> --auth-token <token>
-exv-helper --foreground
+exv-helper --oneshot --endpoint <endpoint> --owner <uid-or-sid> --parent-pid <pid>
 ```
 
 - 将 `helper::daemon_main()` 收敛为共同入口。
@@ -346,7 +345,7 @@ vpn_start_failed
 
 ## Phase 3：Service 模式统一
 
-### D2. macOS 从 exv __helper-daemon 迁移到 exv-helper --service
+### D2. macOS 统一到 exv-helper --service
 
 目标：
 
@@ -359,10 +358,6 @@ macOS launchd 不再启动 exv 主程序内部隐藏模式。
 - 修改 service install：
 
 ```text
-旧：
-  /usr/local/bin/exv __helper-daemon
-
-新：
   /usr/local/bin/exv-helper --service
 ```
 
@@ -378,23 +373,23 @@ macOS launchd 不再启动 exv 主程序内部隐藏模式。
 
 - D1
 
-### D3. 保留兼容 shim
+### D3. 清理旧 daemon 入口
 
 目标：
 
 ```text
-避免老版本用户升级时直接断裂。
+旧入口不能继续进入生产 helper daemon。
 ```
 
 实施：
 
-- `exv __helper-daemon` 短期保留。
-- 内部只转发或提示使用 `exv-helper`。
-- 日志标记 deprecated。
+- 旧入口返回结构化错误或迁移提示。
+- service install 和 launchd plist 只写 `exv-helper --service`。
+- 测试禁止旧入口被当作合法 helper 启动。
 
 验收：
 
-- 旧命令不崩溃。
+- 旧命令不会启动生产 helper daemon。
 - 新安装不再生成旧 plist。
 
 依赖：
@@ -445,17 +440,16 @@ service install/uninstall/start/stop 只管理系统服务，不执行连接。
 - Electron main / CLI 生成：
   - `session_id`
   - `pipe_path`
-  - `auth_token`
 - 通过 UAC 启动：
 
 ```bash
-exv-helper.exe --oneshot --pipe <pipe> --auth-token <token>
+exv-helper.exe --oneshot --pipe <pipe> --owner <sid> --parent-pid <pid>
 ```
 
 注意：
 
 - 不依赖 elevated 进程 stdout 返回 pipe 信息。
-- endpoint 和 auth token 由普通用户进程预先生成。
+- endpoint 由普通用户进程预先生成，合法性由随机 endpoint、OS peer、owner 和 parent pid 校验。
 
 验收：
 
@@ -486,7 +480,7 @@ exv-helper --oneshot 创建临时 named pipe 并提供 RPC。
 - 启动后：
   - create pipe
   - wait client
-  - validate auth token
+  - validate OS peer and require first Hello
   - serve RPC
   - after disconnect/shutdown cleanup and exit
 
@@ -541,7 +535,7 @@ exv-helper --oneshot 创建临时 named pipe 并提供 RPC。
 osascript -> exv desktop-rpc vpn.connect allow_direct_fallback -> vpn::start_with_password
 
 新：
-osascript -> exv-helper --oneshot --socket <path> --auth-token <token>
+osascript -> exv-helper --oneshot --socket <path> --owner <uid> --parent-pid <pid>
 UI/CLI -> socket RPC -> vpn.connect
 ```
 
@@ -816,7 +810,7 @@ vpn.connectOneshot
 
 通过标准：
 
-- 不再依赖 `exv __helper-daemon`。
+- 不再依赖旧 helper daemon 入口。
 - socket 正常创建。
 - 权限正确。
 

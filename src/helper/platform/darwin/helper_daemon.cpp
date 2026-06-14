@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdio>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -17,6 +18,7 @@ class MacIpcServer : public IpcServer {
   int client_fd_ = -1;
   unsigned int peer_uid_ = 0;
   unsigned int peer_gid_ = 0;
+  int peer_pid_ = 0;
 
 public:
   ~MacIpcServer() override { close(); }
@@ -74,7 +76,18 @@ public:
     return true;
   }
 
-  std::string read_request() override {
+  std::string read_request(int timeout_ms = -1) override {
+    if (timeout_ms >= 0) {
+      pollfd fd {};
+      fd.fd = client_fd_;
+      fd.events = POLLIN;
+      const int ready = poll(&fd, 1, timeout_ms);
+      if (ready <= 0 || (fd.revents & (POLLERR | POLLHUP | POLLNVAL)) ||
+          !(fd.revents & POLLIN)) {
+        return "";
+      }
+    }
+
     std::string raw;
     char buffer[1024];
     ssize_t n = 0;
@@ -119,6 +132,7 @@ public:
 
   unsigned int peer_uid() const override { return peer_uid_; }
   unsigned int peer_gid() const override { return peer_gid_; }
+  int peer_pid() const override { return peer_pid_; }
 };
 
 std::unique_ptr<IpcServer> create_ipc_server() {

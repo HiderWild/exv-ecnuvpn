@@ -94,6 +94,28 @@ exv::helper::CleanupPolicy full_cleanup_policy() {
   return policy;
 }
 
+bool peer_matches_expected_owner(const IpcServer &ipc,
+                                 const DaemonOptions &options) {
+  if (!options.oneshot)
+    return true;
+  if (options.owner.empty())
+    return false;
+
+  const std::string peer_owner = ipc.peer_owner();
+  if (!peer_owner.empty() && peer_owner == options.owner)
+    return true;
+
+  const std::string peer_uid = std::to_string(ipc.peer_uid());
+  if (!peer_uid.empty() && peer_uid == options.owner)
+    return true;
+
+  if (options.owner.rfind("pid:", 0) == 0 && ipc.peer_pid() > 0) {
+    return options.owner == "pid:" + std::to_string(ipc.peer_pid());
+  }
+
+  return false;
+}
+
 void add_helper_descriptor_fields(nlohmann::json &response) {
   nlohmann::json descriptor = make_helper_descriptor();
   response["helper"] = descriptor;
@@ -261,11 +283,29 @@ int daemon_main(const DaemonOptions &options) {
       ipc->close_client();
       continue;
     }
+    if (!peer_matches_expected_owner(*ipc, options)) {
+      logger::warn("Helper client owner mismatch; rejecting connection");
+      ipc->send_response(
+          make_error("Helper client owner mismatch", "permission_denied").dump());
+      ipc->close_client();
+      if (options.oneshot) {
+        std::lock_guard<std::mutex> lock(handler_mutex);
+        handler->cleanup_all_sessions(full_cleanup_policy());
+        daemon_stop_requested = 1;
+      }
+      continue;
+    }
 
+    bool first_request = true;
     while (!daemon_stop_requested) {
-      std::string raw = ipc->read_request();
-      if (raw.empty())
+      std::string raw =
+          ipc->read_request(first_request ? options.first_request_timeout_ms : -1);
+      if (raw.empty()) {
+        if (first_request) {
+          logger::warn("Helper client did not send initial Hello before timeout");
+        }
         break;
+      }
 
       // Parse and dispatch
       try {
@@ -273,22 +313,52 @@ int daemon_main(const DaemonOptions &options) {
 
         if (req.contains("op")) {
           exv::helper::HelperRequest helper_req = exv::helper::helper_request_from_json(req);
+          if (first_request && helper_req.op != exv::helper::HelperOp::Hello) {
+            exv::helper::HelperResponse helper_resp;
+            helper_resp.op = helper_req.op;
+            helper_resp.success = false;
+            helper_resp.error_code = "hello_required";
+            helper_resp.error_message = "First helper request must be Hello";
+            nlohmann::json resp_json = helper_resp;
+            ipc->send_response(resp_json.dump());
+            if (options.oneshot) {
+              std::lock_guard<std::mutex> lock(handler_mutex);
+              handler->cleanup_all_sessions(full_cleanup_policy());
+              daemon_stop_requested = 1;
+            }
+            break;
+          }
+
           std::lock_guard<std::mutex> lock(handler_mutex);
           exv::helper::HelperResponse helper_resp = handler->handle(helper_req);
           nlohmann::json resp_json = helper_resp;
           ipc->send_response(resp_json.dump());
+          first_request = false;
           if (handler->should_stop()) {
             daemon_stop_requested = 1;
           }
         } else {
-          std::string action = req.value("action", std::string());
           nlohmann::json err =
-              make_error("Unsupported helper request: " + action, "unsupported_op");
+              make_error(first_request ? "First helper request must be Hello"
+                                       : "Helper request envelope must include op",
+                         first_request ? "hello_required" : "invalid_envelope");
           ipc->send_response(err.dump());
+          if (first_request && options.oneshot) {
+            std::lock_guard<std::mutex> lock(handler_mutex);
+            handler->cleanup_all_sessions(full_cleanup_policy());
+            daemon_stop_requested = 1;
+          }
+          break;
         }
       } catch (const std::exception &e) {
         nlohmann::json err = make_error(std::string("Parse error: ") + e.what());
         ipc->send_response(err.dump());
+        if (first_request && options.oneshot) {
+          std::lock_guard<std::mutex> lock(handler_mutex);
+          handler->cleanup_all_sessions(full_cleanup_policy());
+          daemon_stop_requested = 1;
+        }
+        break;
       }
 
       reap_finished_request_handlers();

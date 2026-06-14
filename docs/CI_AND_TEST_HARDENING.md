@@ -39,7 +39,7 @@ loading error: the MinGW runtime DLLs (`libgcc_s_seh-1.dll`,
 ### Affected Tests
 
 - `helper_cleanup_registry_test`
-- `helper_v2_contract_test`
+- `helper_contract_test`
 - `helper_messages_connector_test`
 
 ### Fix
@@ -76,12 +76,12 @@ All Phase 1+ architecture tests carry one or more labels for selective running:
 |---|---|---|
 | `architecture` | All 13 Phase 1+ tests | Run all new architecture tests |
 | `core` | `reconnect_policy_test`, `core_error_mapper_test`, `tunnel_controller_state_machine_test`, `tunnel_controller_integration_test` | Core module tests |
-| `helper` | `helper_lease_manager_test`, `helper_cleanup_registry_test`, `helper_v2_contract_test`, `helper_messages_connector_test`, `helper_timeout_cleanup_test` | Helper subsystem tests |
+| `helper` | `helper_lease_manager_test`, `helper_cleanup_registry_test`, `helper_contract_test`, `helper_messages_connector_test`, `helper_timeout_cleanup_test` | Helper subsystem tests |
 | `platform` | `platform_network_ops_model_test` | Platform abstraction tests |
 | `integration` | `native_core_connect_flow_test`, `tunnel_controller_integration_test`, `helper_timeout_cleanup_test` | Cross-module integration tests |
 | `ui-contract` | `app_api_rpc_dispatcher_test` | UI/RPC contract tests |
 | `security` | `no_secret_in_argv_test` | Security-focused tests |
-| `env-sensitive` | `helper_cleanup_registry_test`, `helper_v2_contract_test` | MinGW DLL-dependent; skip on broken toolchains |
+| `env-sensitive` | `helper_cleanup_registry_test`, `helper_contract_test` | MinGW DLL-dependent; skip on broken toolchains |
 
 ### Running Labelled Tests
 

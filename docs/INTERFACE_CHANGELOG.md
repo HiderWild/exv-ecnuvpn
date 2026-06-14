@@ -19,8 +19,8 @@ Other agents review this file before starting work.
 - `core_error_mapper.hpp` - CoreErrorMapper (maps platform/protocol errors to ErrorInfo)
 - `timing.hpp` - StageTimer, ConnectTiming
 
-**Helper protocol V2 (`src/helper_common/`):**
-- `helper_protocol.hpp` - Protocol version, HelperOp enum, HelperMode enum
+**Helper protocol (`src/helper_common/`):**
+- `helper_protocol.hpp` - HelperOp enum, HelperMode enum
 - `helper_messages.hpp` - All request/response message types
 - `helper_capabilities.hpp` - Capability constants
 - `helper_error.hpp` - HelperError, helper error codes
@@ -30,7 +30,7 @@ Other agents review this file before starting work.
 
 **Helper runtime (`src/helper_runtime/`):**
 - `helper_server.hpp` - HelperServer (listens for Core connections)
-- `helper_request_dispatcher.hpp` - Dispatches V2 ops to handlers
+- `helper_request_dispatcher.hpp` - Dispatches helper ops to handlers
 - `helper_lifecycle_policy.hpp` - Transient vs Resident lifecycle rules
 - `session_lease_manager.hpp` - Manages active session leases
 - `cleanup_registry.hpp` - Tracks OS artifacts for crash-safe cleanup
@@ -66,7 +66,7 @@ Other agents review this file before starting work.
 - `exv::core::UserIntent` - Replaces `retry_limit`. UI expresses desired state, Core computes strategy.
 - `exv::core::TunnelPhase` - Unified 11-state connection lifecycle.
 - `exv::core::ErrorInfo` - Structured error with domain, code, recoverability, recommended action.
-- `exv::helper::HelperOp` - V2 protocol operations (Hello, StartSession, ..., EndSession).
+- `exv::helper::HelperOp` - Helper protocol operations (Hello, StartSession, ..., Shutdown).
 - `exv::platform::PlatformNetworkOps` - Control-plane abstraction for privileged network operations.
 - `exv::feedback::ErrorInfo` - Error contract for UI serialization (mirrors core::ErrorInfo).
 
@@ -76,7 +76,7 @@ None - all new files, no existing files modified.
 
 ### Documentation added
 
-- `docs/HELPER_PROTOCOL_V2.md` - Helper V2 protocol specification
+- `docs/HELPER_PROTOCOL.md` - Helper protocol specification
 - `docs/CORE_STATE_MACHINE.md` - TunnelController state machine specification
 - `docs/DESKTOP_RPC_V2.md` - Desktop RPC V2 contract specification
 - `docs/INTERFACE_CHANGELOG.md` - This file

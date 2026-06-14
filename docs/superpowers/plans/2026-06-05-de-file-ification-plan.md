@@ -4,7 +4,7 @@
 
 **Goal:** Eliminate all file-based runtime communication. Replace with typed in-process events (LogEventBus), JSON-RPC over stdin/stdout (Electron) and named pipe/Unix socket (CLI). Remove legacy supervisor, WebUI, SSE broadcaster, and all PID/route-ready/session-state files.
 
-**Architecture:** Three-process topology — Electron (long-lived GUI) and CLI (short-lived, disposable) are equal frontends connecting to a single-instance Core Process (`exv --mode=core`) via JSON-RPC. Core holds all state in-memory (TunnelController). Helper daemon is a pure V2 privileged operation executor. Logger is write-only; LogEventBus carries typed events internally.
+**Architecture:** Three-process topology — Electron (long-lived GUI) and CLI (short-lived, disposable) are equal frontends connecting to a single-instance Core Process (`exv --mode=core`) via JSON-RPC. Core holds all state in-memory (TunnelController). Helper daemon is a pure privileged operation executor. Logger is write-only; LogEventBus carries typed events internally.
 
 **Tech Stack:** C++17 (CMake, nlohmann/json), TypeScript (Electron + Vue 3 + Vite), pnpm for Node workflows.
 
@@ -185,13 +185,13 @@
 
 - [ ] **Step 1: Delete V1 functions from `src/helper.cpp`** — Remove: `pid_path_for()`, `supervisor_pid_path_for()`, `route_ready_path_for()`, `clear_runtime_state()`, `read_pid_file()`, `read_route_ready()`, `is_process_alive()`, `find_openconnect_pid()`, `inspect_runtime()`, `save_session_state()`, `load_session_state()`, `clear_session_state()`, `clear_native_session_state_for_known_config_dirs()`, `stop_managed_session()`, `handle_start()`, `handle_stop()`, `handle_status()`, `make_status_response()`, `print_running_status()`, `create_request_file()`.
 
-- [ ] **Step 2: Remove V1 dispatch from `handle_request()`** — Delete start/stop/status action branches. Keep only V2 dispatch.
+- [ ] **Step 2: Remove old JSON dispatch from `handle_request()`** — Delete start/stop/status action branches. Keep only helper protocol dispatch.
 
-- [ ] **Step 3: Clean up `daemon_main()` accept loop** — Remove V1 request handling. Keep V2 handler dispatch (`helper_v2_handler.hpp`).
+- [ ] **Step 3: Clean up `daemon_main()` accept loop** — Remove V1 request handling. Keep helper handler dispatch (`helper_handler.hpp`).
 
 - [ ] **Step 4: Update `src/helper.hpp`** — Remove `start_via_helper()`, `stop_via_helper()`, `status_via_helper()` if present. Keep `is_available()`, `daemon_main()`, `worker_main()`, `install_service()`, `uninstall_service()`.
 
-- [ ] **Step 5: Build and verify** — `cmake --build build --target exv-helper`. Helper daemon starts and responds to V2 Hello/StartSession. No references to PID files, route-ready, native-session-state.json in helper.cpp.
+- [ ] **Step 5: Build and verify** — `cmake --build build --target exv-helper`. Helper daemon starts and responds to Hello/StartSession. No references to PID files, route-ready, native-session-state.json in helper.cpp.
 
 - [ ] **Step 6: Commit** — `git add src/helper.cpp src/helper.hpp`, commit `"refactor: remove V1 file-based state from helper daemon"`.
 
@@ -215,7 +215,7 @@
   2. If connect fails: spawn `exv --mode=core` as detached child, poll pipe up to 5s, retry connect
   3. Sends JSON-RPC request, receives response, formats output, exits
   4. Remove `desktop-rpc`/`desktop-rpc-file`/`desktop-rpc-file-output` entry points
-  5. Remove `__helper-daemon`, `__tunnel-script`, `__helper-exec`, `__vpn-supervisor` entry points
+  5. Remove old hidden helper, tunnel-script, worker, and VPN supervisor entry points
   6. Remove all WebUI foreground/background mode logic (`--foreground`, `-f`, fork/daemonize)
 
 - [ ] **Step 5: Build and verify** — `cmake --build build --target exv`. `exv status` works (auto-spawns core if needed). `exv start` sends connect and exits immediately. `exv logs` shows log lines.

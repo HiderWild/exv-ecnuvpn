@@ -30,7 +30,7 @@ ErrorInfo CoreErrorMapper::from_helper_error(const std::string& code, const std:
     info.domain = "helper";
     info.code = code;
     info.message = message;
-    info.recoverable = (code != "helper_version_mismatch");
+    info.recoverable = (code != "permission_denied");
     info.recommended_action = "Check helper service status";
     return info;
 }

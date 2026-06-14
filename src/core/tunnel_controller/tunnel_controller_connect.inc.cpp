@@ -65,11 +65,21 @@
         transition_to(TunnelPhase::PreparingHelper);
 
         try {
+            (void)helper_->hello(exv::helper::HelloRequest{});
+
             exv::helper::StartSessionRequest req;
             req.profile_id.value = intent_.profile_id.value;
             req.mode = exv::helper::HelperMode::Transient;
 
             auto resp = helper_->start_session(req);
+            if (resp.session_id.value.empty()) {
+                timing_.timer.end(ConnectTiming::HELPER_PREPARE);
+                set_error(CoreErrorMapper::from_helper_error(
+                    "start_session_failed",
+                    "Helper StartSession returned empty session_id"));
+                transition_to(TunnelPhase::Failed);
+                return;
+            }
             session_id_ = resp.session_id;
             if (auto delegated_ops = as_helper_delegating_ops(net_ops_)) {
                 delegated_ops->set_session(session_id_);

@@ -79,8 +79,7 @@ exv CLI -> BackendResolver / service manager / helper RPC -> exv-helper
 
 ```bash
 exv-helper --service
-exv-helper --oneshot --endpoint <endpoint> --auth-token <token>
-exv-helper --foreground
+exv-helper --oneshot --endpoint <endpoint> --owner <uid-or-sid> --parent-pid <pid>
 ```
 
 验收：
@@ -299,17 +298,17 @@ service.install -> administrator authorization
 
 验收：
 
-- plist 不再启动 `exv __helper-daemon`。
+- plist 不再启动旧的隐藏 helper daemon 入口。
 - UI / CLI 均可连接 `/var/run/exv-helper.sock`。
 - 旧 plist 可迁移或重装。
 
-### R3.3 兼容 shim
+### R3.3 旧 daemon 入口清理
 
-`exv __helper-daemon` 可以短期保留，但只能作为兼容 shim，并明确记录 deprecated。
+旧的隐藏 helper daemon 入口不再是合法生产入口。
 
 验收：
 
-- 旧命令不崩溃。
+- 旧命令不会进入 helper daemon。
 - 新安装不再生成旧 plist。
 
 ## Phase 4：One-shot 模式补齐
@@ -319,17 +318,17 @@ service.install -> administrator authorization
 Windows 必须实现：
 
 ```bash
-exv-helper.exe --oneshot --pipe <pipe> --auth-token <token>
+exv-helper.exe --oneshot --pipe <pipe> --owner <sid> --parent-pid <pid>
 ```
 
 目标流程：
 
 ```text
 BackendResolver detects no service
-  -> Electron main / CLI generates session_id, named_pipe_path, auth_token
+  -> Electron main / CLI generates session_id and named_pipe_path
   -> PowerShell Start-Process -Verb RunAs exv-helper.exe --oneshot ...
-  -> helper creates named pipe
-  -> UI/CLI connects pipe and sends auth token
+  -> helper creates named pipe and verifies peer owner
+  -> UI/CLI connects pipe and sends Hello first
   -> vpn.connect
   -> disconnect cleanup
   -> helper exits
@@ -347,7 +346,7 @@ BackendResolver detects no service
 macOS 必须迁移为：
 
 ```bash
-exv-helper --oneshot --socket <path> --auth-token <token>
+exv-helper --oneshot --socket <path> --owner <uid> --parent-pid <pid>
 ```
 
 目标流程：

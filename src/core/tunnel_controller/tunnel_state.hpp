@@ -39,7 +39,7 @@ struct TunnelStatusSnapshot {
     bool desired_connected = false;
     bool auto_reconnect = true;
     std::string helper_mode;      // transient|resident
-    std::string helper_status;    // connected|unavailable|version_mismatch
+    std::string helper_status;    // connected|unavailable|permission_denied
     bool network_ready = false;
     std::string server;
     std::string interface_name;

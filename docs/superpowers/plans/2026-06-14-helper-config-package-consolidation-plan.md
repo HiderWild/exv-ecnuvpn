@@ -43,8 +43,8 @@
 - Move `src/helper_internal.hpp` to `src/helper/helper_internal.hpp`
 - Move `src/helper_main.cpp` to `src/helper/helper_main.cpp`
 - Move `src/helper_ipc.hpp` to `src/helper/helper_ipc.hpp`
-- Move `src/helper_v2_handler.hpp` to `src/helper/helper_v2_handler.hpp`
-- Move `src/helper_v2_handler.cpp` to `src/helper/helper_v2_handler.cpp`
+- Move `src/helper_handler.hpp` to `src/helper/helper_handler.hpp`
+- Move `src/helper_handler.cpp` to `src/helper/helper_handler.cpp`
 - Move `src/helper_service_win.cpp` to `src/helper/platform/win32/helper_service.cpp`
 - Move `src/helper_daemon_linux.cpp` to `src/helper/platform/linux/helper_daemon.cpp`
 - Move `src/helper_daemon_mac.cpp` to `src/helper/platform/darwin/helper_daemon.cpp`
@@ -87,7 +87,7 @@ Canonical include replacements:
 | `#include "helper.hpp"` | `#include "helper/helper.hpp"` |
 | `#include "helper_internal.hpp"` | `#include "helper/helper_internal.hpp"` |
 | `#include "helper_ipc.hpp"` | `#include "helper/helper_ipc.hpp"` |
-| `#include "helper_v2_handler.hpp"` | `#include "helper/helper_v2_handler.hpp"` |
+| `#include "helper_handler.hpp"` | `#include "helper/helper_handler.hpp"` |
 | `helper_common/` | `helper/common/` |
 | `helper_runtime/` | `helper/runtime/` |
 | `platform/common/config_defaults.hpp` | `core/config/platform/config_defaults.hpp` |
@@ -121,7 +121,7 @@ Canonical include replacements:
 Run from repository root in PowerShell:
 
 ```powershell
-git grep -n -E '#include "(config\.hpp|config_api\.hpp|config_manager\.hpp|helper\.hpp|helper_internal\.hpp|helper_ipc\.hpp|helper_v2_handler\.hpp|helper_common/|helper_runtime/|platform/common/helper_|platform/common/config_defaults\.hpp)' -- src tests
+git grep -n -E '#include "(config\.hpp|config_api\.hpp|config_manager\.hpp|helper\.hpp|helper_internal\.hpp|helper_ipc\.hpp|helper_handler\.hpp|helper_common/|helper_runtime/|platform/common/helper_|platform/common/config_defaults\.hpp)' -- src tests
 ```
 
 Expected: output includes existing stale references such as `src/helper.cpp`, `src/main.cpp`, `src/core/app_api/app_api.cpp`, and helper tests. This confirms the verification gate can catch the old layout.
@@ -270,8 +270,8 @@ Expected: a config package checkpoint commit is created. If commits are not auth
 - Create: `src/helper/helper_internal.hpp`
 - Create: `src/helper/helper_main.cpp`
 - Create: `src/helper/helper_ipc.hpp`
-- Create: `src/helper/helper_v2_handler.hpp`
-- Create: `src/helper/helper_v2_handler.cpp`
+- Create: `src/helper/helper_handler.hpp`
+- Create: `src/helper/helper_handler.cpp`
 - Create: `src/helper/common/*`
 - Create: `src/helper/runtime/*`
 - Create: `src/helper/platform/*`
@@ -303,8 +303,8 @@ Move-Item "src\helper.cpp" "src\helper\helper.cpp"
 Move-Item "src\helper_internal.hpp" "src\helper\helper_internal.hpp"
 Move-Item "src\helper_main.cpp" "src\helper\helper_main.cpp"
 Move-Item "src\helper_ipc.hpp" "src\helper\helper_ipc.hpp"
-Move-Item "src\helper_v2_handler.hpp" "src\helper\helper_v2_handler.hpp"
-Move-Item "src\helper_v2_handler.cpp" "src\helper\helper_v2_handler.cpp"
+Move-Item "src\helper_handler.hpp" "src\helper\helper_handler.hpp"
+Move-Item "src\helper_handler.cpp" "src\helper\helper_handler.cpp"
 Move-Item "src\helper_service_win.cpp" "src\helper\platform\win32\helper_service.cpp"
 Move-Item "src\helper_daemon_linux.cpp" "src\helper\platform\linux\helper_daemon.cpp"
 Move-Item "src\helper_daemon_mac.cpp" "src\helper\platform\darwin\helper_daemon.cpp"
@@ -402,7 +402,7 @@ $map = [ordered]@{
   '#include "helper.hpp"' = '#include "helper/helper.hpp"'
   '#include "helper_internal.hpp"' = '#include "helper/helper_internal.hpp"'
   '#include "helper_ipc.hpp"' = '#include "helper/helper_ipc.hpp"'
-  '#include "helper_v2_handler.hpp"' = '#include "helper/helper_v2_handler.hpp"'
+  '#include "helper_handler.hpp"' = '#include "helper/helper_handler.hpp"'
   'helper_common/' = 'helper/common/'
   'helper_runtime/' = 'helper/runtime/'
   'platform/common/helper_client.hpp' = 'helper/platform/helper_client.hpp'
@@ -431,7 +431,7 @@ Expected: helper includes now use `helper/...` canonical paths.
 Run:
 
 ```powershell
-git grep -n -E '#include "(helper\.hpp|helper_internal\.hpp|helper_ipc\.hpp|helper_v2_handler\.hpp|helper_common/|helper_runtime/|platform/common/helper_)' -- src tests
+git grep -n -E '#include "(helper\.hpp|helper_internal\.hpp|helper_ipc\.hpp|helper_handler\.hpp|helper_common/|helper_runtime/|platform/common/helper_)' -- src tests
 if ($LASTEXITCODE -eq 0) { throw "stale helper include references remain" }
 ```
 
@@ -697,7 +697,7 @@ $map = [ordered]@{
   'src/helper_runtime/helper_lifecycle_policy.cpp' = 'src/helper/runtime/helper_lifecycle_policy.cpp'
   'src/helper_runtime/helper_session_store.cpp' = 'src/helper/runtime/helper_session_store.cpp'
   'src/helper.cpp' = 'src/helper/helper.cpp'
-  'src/helper_v2_handler.cpp' = 'src/helper/helper_v2_handler.cpp'
+  'src/helper_handler.cpp' = 'src/helper/helper_handler.cpp'
   'src/helper_main.cpp' = 'src/helper/helper_main.cpp'
   'src/helper_daemon_mac.cpp' = 'src/helper/platform/darwin/helper_daemon.cpp'
   'src/helper_daemon_linux.cpp' = 'src/helper/platform/linux/helper_daemon.cpp'
@@ -758,7 +758,7 @@ $required = @(
   'src/core/config/platform/darwin/config_defaults.cpp',
   'src/helper/helper.cpp',
   'src/helper/helper_main.cpp',
-  'src/helper/helper_v2_handler.cpp',
+  'src/helper/helper_handler.cpp',
   'src/helper/common/helper_messages.cpp',
   'src/helper/common/helper_connector.cpp',
   'src/helper/common/pipe_helper_client.cpp',
@@ -807,7 +807,7 @@ Expected: a CMake wiring checkpoint commit is created. If commits are not author
 Run:
 
 ```powershell
-git grep -n -E '#include "(config\.hpp|config_api\.hpp|config_manager\.hpp|helper\.hpp|helper_internal\.hpp|helper_ipc\.hpp|helper_v2_handler\.hpp|helper_common/|helper_runtime/|platform/common/helper_|platform/common/config_defaults\.hpp)' -- src tests
+git grep -n -E '#include "(config\.hpp|config_api\.hpp|config_manager\.hpp|helper\.hpp|helper_internal\.hpp|helper_ipc\.hpp|helper_handler\.hpp|helper_common/|helper_runtime/|platform/common/helper_|platform/common/config_defaults\.hpp)' -- src tests
 if ($LASTEXITCODE -eq 0) { throw "stale include references remain" }
 ```
 
@@ -850,7 +850,7 @@ $targets = @(
   "platform_network_ops_model_test",
   "helper_lease_manager_test",
   "helper_cleanup_registry_test",
-  "helper_v2_contract_test",
+  "helper_contract_test",
   "helper_messages_connector_test",
   "helper_delegating_network_ops_test",
   "pipe_helper_client_test"
@@ -869,7 +869,7 @@ Run:
 
 ```powershell
 $buildDir = Join-Path $env:TEMP "ecnu-vpn-helper-config-consolidation-build"
-ctest --test-dir $buildDir -C Debug -R "platform_status_models_test|platform_network_ops_model_test|helper_lease_manager_test|helper_cleanup_registry_test|helper_v2_contract_test|helper_messages_connector_test|helper_delegating_network_ops_test|pipe_helper_client_test" --output-on-failure
+ctest --test-dir $buildDir -C Debug -R "platform_status_models_test|platform_network_ops_model_test|helper_lease_manager_test|helper_cleanup_registry_test|helper_contract_test|helper_messages_connector_test|helper_delegating_network_ops_test|pipe_helper_client_test" --output-on-failure
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 

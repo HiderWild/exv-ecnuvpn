@@ -52,16 +52,16 @@ int main() {
                     "auth error message should include detail") && ok;
     }
 
-    // --- from_helper_error: version_mismatch is not recoverable ---
+    // --- from_helper_error: permission_denied is not recoverable ---
     {
         ErrorInfo err = CoreErrorMapper::from_helper_error(
-            "helper_version_mismatch", "helper version too old");
+            "permission_denied", "helper rejected the client identity");
         ok = expect(err.domain == "helper",
                     "helper error domain should be helper") && ok;
-        ok = expect(err.code == "helper_version_mismatch",
+        ok = expect(err.code == "permission_denied",
                     "error code should match") && ok;
         ok = expect(!err.recoverable,
-                    "version_mismatch should not be recoverable") && ok;
+                    "permission_denied should not be recoverable") && ok;
     }
 
     // --- from_helper_error: other helper errors are recoverable ---

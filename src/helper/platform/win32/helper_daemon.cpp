@@ -16,6 +16,8 @@ class WinIpcServer : public IpcServer {
 #endif
   unsigned int peer_uid_ = 0;
   unsigned int peer_gid_ = 0;
+  int peer_pid_ = 0;
+  std::string peer_owner_;
 
 public:
   ~WinIpcServer() override { close(); }
@@ -76,67 +78,73 @@ public:
 
   bool verify_client() override {
 #ifdef _WIN32
-    // Access is controlled by the named pipe DACL. Avoid failing legitimate
-    // interactive clients because of token impersonation level differences.
+    peer_owner_.clear();
     peer_uid_ = 0;
     peer_gid_ = 0;
+    peer_pid_ = 0;
+
+    ULONG client_pid = 0;
+    if (GetNamedPipeClientProcessId(hPipe_, &client_pid)) {
+      peer_pid_ = static_cast<int>(client_pid);
+    }
+
+    HANDLE process = nullptr;
+    if (peer_pid_ > 0) {
+      process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                            static_cast<DWORD>(peer_pid_));
+    }
+    if (process) {
+      HANDLE token = nullptr;
+      if (OpenProcessToken(process, TOKEN_QUERY, &token)) {
+        DWORD sid_size = 0;
+        GetTokenInformation(token, TokenUser, NULL, 0, &sid_size);
+        if (sid_size > 0) {
+          std::vector<BYTE> sid_buf(sid_size);
+          auto *token_user = reinterpret_cast<TOKEN_USER *>(sid_buf.data());
+          if (GetTokenInformation(token, TokenUser, token_user, sid_size,
+                                  &sid_size)) {
+            LPSTR sid_string = nullptr;
+            if (ConvertSidToStringSidA(token_user->User.Sid, &sid_string)) {
+              peer_owner_ = sid_string;
+              LocalFree(sid_string);
+            }
+          }
+        }
+        CloseHandle(token);
+      }
+      CloseHandle(process);
+    }
+
+    // Access is controlled by the named pipe DACL. The daemon-level owner
+    // check decides whether a oneshot client is allowed.
     return true;
-#if 0
-    // Impersonate to get client identity
-    if (!ImpersonateNamedPipeClient(hPipe_)) {
-      logger::error("Helper: ImpersonateNamedPipeClient failed");
-      return false;
-    }
-
-    // Get the impersonated token and extract user SID
-    HANDLE hToken = NULL;
-    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken)) {
-      RevertToSelf();
-      return false;
-    }
-
-    // Get the user SID from the token
-    DWORD sid_size = 0;
-    GetTokenInformation(hToken, TokenUser, NULL, 0, &sid_size);
-    if (sid_size == 0) {
-      CloseHandle(hToken);
-      RevertToSelf();
-      return false;
-    }
-
-    std::vector<BYTE> sid_buf(sid_size);
-    TOKEN_USER *tu = reinterpret_cast<TOKEN_USER *>(sid_buf.data());
-    if (!GetTokenInformation(hToken, TokenUser, tu, sid_size, &sid_size)) {
-      CloseHandle(hToken);
-      RevertToSelf();
-      return false;
-    }
-
-    // Convert SID to a numeric hash for uid/gid (Windows has no uid/gid concept)
-    // Use the RID (Relative ID) from the SID as a pseudo-uid
-    PSID sid = tu->User.Sid;
-    SID_IDENTIFIER_AUTHORITY *auth = GetSidIdentifierAuthority(sid);
-    BYTE rid_count = *GetSidSubAuthorityCount(sid);
-    DWORD rid = rid_count > 0 ? *GetSidSubAuthority(sid, rid_count - 1) : 0;
-
-    // For Administrators group (RID 544), use uid=0; otherwise use the RID
-    peer_uid_ = (rid == 544) ? 0 : rid;
-    peer_gid_ = peer_uid_;
-
-    CloseHandle(hToken);
-    RevertToSelf();
-    return true;
-#endif
 #else
     return false;
 #endif
   }
 
-  std::string read_request() override {
+  std::string read_request(int timeout_ms = -1) override {
 #ifdef _WIN32
     std::string raw;
     char buffer[4096];
     DWORD bytesRead = 0;
+
+    if (timeout_ms >= 0) {
+      const DWORD start = GetTickCount();
+      while (true) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(hPipe_, NULL, 0, NULL, &available, NULL)) {
+          return "";
+        }
+        if (available > 0) {
+          break;
+        }
+        if (static_cast<int>(GetTickCount() - start) >= timeout_ms) {
+          return "";
+        }
+        Sleep(25);
+      }
+    }
 
     while (true) {
       BOOL success = ReadFile(hPipe_, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
@@ -148,6 +156,7 @@ public:
     }
     return raw;
 #else
+    (void)timeout_ms;
     return "";
 #endif
   }
@@ -186,6 +195,8 @@ public:
 
   unsigned int peer_uid() const override { return peer_uid_; }
   unsigned int peer_gid() const override { return peer_gid_; }
+  std::string peer_owner() const override { return peer_owner_; }
+  int peer_pid() const override { return peer_pid_; }
 };
 
 std::unique_ptr<IpcServer> create_ipc_server() {

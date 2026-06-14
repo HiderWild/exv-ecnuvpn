@@ -7,7 +7,7 @@ namespace exv::helper {
 enum class HelperErrorCode {
     None = 0,
     UnsupportedOp = 1,
-    VersionMismatch = 2,
+    ProtocolRejected = 2,
     InvalidSession = 3,
     PermissionDenied = 4,
     DeviceNotFound = 5,

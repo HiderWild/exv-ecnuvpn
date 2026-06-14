@@ -23,6 +23,7 @@ bool FakeHelper::is_connected() const {
 
 helper::HelloResponse FakeHelper::hello(const helper::HelloRequest& req) {
     (void)req;
+    hello_count_++;
     helper::HelloResponse resp;
     resp.capabilities = {"tunnel_device_create", "route_apply", "dns_apply", "route_cleanup"};
     resp.mode = helper::HelperMode::Transient;
@@ -125,6 +126,7 @@ void FakeHelper::set_apply_config_fail(bool fail) {
 }
 
 int FakeHelper::connect_count() const { return connect_count_; }
+int FakeHelper::hello_count() const { return hello_count_; }
 int FakeHelper::heartbeat_count() const { return heartbeat_count_; }
 bool FakeHelper::ipc_lost() const { return ipc_lost_; }
 

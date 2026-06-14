@@ -20,8 +20,9 @@ public:
   // Returns true if the client is authorized
   virtual bool verify_client() = 0;
 
-  // Read the full request from the current client (newline-delimited JSON)
-  virtual std::string read_request() = 0;
+  // Read the full request from the current client (newline-delimited JSON).
+  // timeout_ms < 0 waits indefinitely; timeout_ms >= 0 returns empty on timeout.
+  virtual std::string read_request(int timeout_ms = -1) = 0;
 
   // Send a response to the current client
   virtual bool send_response(const std::string &response) = 0;
@@ -41,9 +42,11 @@ public:
   // Used by signal handlers to interrupt accept()
   virtual int server_fd() const { return -1; }
 
-  // Get the peer uid/gid after verify_client (POSIX only; Windows returns 0)
+  // Get the peer identity after verify_client().
   virtual unsigned int peer_uid() const = 0;
   virtual unsigned int peer_gid() const = 0;
+  virtual std::string peer_owner() const { return std::to_string(peer_uid()); }
+  virtual int peer_pid() const { return 0; }
 };
 
 // Factory: creates the platform-appropriate IpcServer

@@ -100,8 +100,8 @@ src/helper/
   helper_internal.hpp
   helper_main.cpp
   helper_ipc.hpp
-  helper_v2_handler.hpp
-  helper_v2_handler.cpp
+  helper_handler.hpp
+  helper_handler.cpp
 
   common/
     helper_protocol.hpp
@@ -171,7 +171,7 @@ Move helper files as follows:
 
 | Current path/pattern | New path/pattern |
 |----------------------|------------------|
-| `src/helper.hpp`, `src/helper.cpp`, `src/helper_internal.hpp`, `src/helper_main.cpp`, `src/helper_ipc.hpp`, `src/helper_v2_handler.*` | `src/helper/` |
+| `src/helper.hpp`, `src/helper.cpp`, `src/helper_internal.hpp`, `src/helper_main.cpp`, `src/helper_ipc.hpp`, `src/helper_handler.*` | `src/helper/` |
 | `src/helper_common/*` | `src/helper/common/*` |
 | `src/helper_runtime/*` | `src/helper/runtime/*` |
 | `src/helper_daemon_mac.cpp` | `src/helper/platform/darwin/helper_daemon.cpp` |
@@ -216,7 +216,7 @@ Use canonical helper includes:
 ```cpp
 #include "helper/helper.hpp"
 #include "helper/helper_ipc.hpp"
-#include "helper/helper_v2_handler.hpp"
+#include "helper/helper_handler.hpp"
 #include "helper/common/helper_messages.hpp"
 #include "helper/common/helper_connector.hpp"
 #include "helper/runtime/helper_server.hpp"
@@ -231,7 +231,7 @@ Do not use:
 ```cpp
 #include "helper.hpp"
 #include "helper_ipc.hpp"
-#include "helper_v2_handler.hpp"
+#include "helper_handler.hpp"
 #include "helper_common/..."
 #include "helper_runtime/..."
 #include "platform/common/helper_..."
@@ -304,7 +304,7 @@ set(EXV_HELPER_PLATFORM_SHARED_SOURCES
 
 set(EXV_HELPER_RUNTIME_SOURCES
     src/helper/helper.cpp
-    src/helper/helper_v2_handler.cpp
+    src/helper/helper_handler.cpp
     src/helper/runtime/helper_request_dispatcher.cpp
     src/helper/runtime/helper_server.cpp
     src/helper/runtime/session_lease_manager.cpp
@@ -393,7 +393,7 @@ Minimum verification after implementation:
    - `#include "helper.hpp"`
    - `#include "helper_internal.hpp"`
    - `#include "helper_ipc.hpp"`
-   - `#include "helper_v2_handler.hpp"`
+   - `#include "helper_handler.hpp"`
    - `helper_common/`
    - `helper_runtime/`
    - `platform/common/helper_`
@@ -407,7 +407,7 @@ Minimum verification after implementation:
 
 This consolidation does not aim to:
 
-- Redesign helper protocol V2.
+- Redesign helper protocol.
 - Change runtime daemon behavior.
 - Change config file format or JSON schema.
 - Split the build into new long-lived CMake libraries unless required to preserve link correctness.

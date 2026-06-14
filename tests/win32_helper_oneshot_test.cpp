@@ -7,8 +7,10 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <windows.h>
+#include <sddl.h>
 
 namespace {
 
@@ -38,6 +40,46 @@ std::string random_endpoint() {
          std::to_string(GetTickCount64());
 }
 
+std::string current_owner_sid() {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    return "";
+
+  DWORD needed = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+  if (needed == 0) {
+    CloseHandle(token);
+    return "";
+  }
+
+  std::vector<unsigned char> buffer(needed);
+  if (!GetTokenInformation(token, TokenUser, buffer.data(), needed, &needed)) {
+    CloseHandle(token);
+    return "";
+  }
+  CloseHandle(token);
+
+  auto *user = reinterpret_cast<TOKEN_USER *>(buffer.data());
+  LPSTR sid = nullptr;
+  if (!ConvertSidToStringSidA(user->User.Sid, &sid))
+    return "";
+
+  std::string result = sid;
+  LocalFree(sid);
+  return result;
+}
+
+ecnuvpn::helper::DaemonOptions make_oneshot_options(
+    const std::string &endpoint, const std::string &owner = std::string()) {
+  ecnuvpn::helper::DaemonOptions options;
+  options.mode = "oneshot";
+  options.endpoint = endpoint;
+  options.owner = owner.empty() ? current_owner_sid() : owner;
+  options.parent_pid = static_cast<int>(GetCurrentProcessId());
+  options.oneshot = true;
+  return options;
+}
+
 void wake_acceptor_once(const std::string &endpoint) {
   HANDLE pipe = CreateFileA(endpoint.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
                             NULL, OPEN_EXISTING, 0, NULL);
@@ -57,12 +99,7 @@ bool run_oneshot_daemon_hello_sequence(int request_count,
                                        const char *description) {
   const std::string endpoint = random_endpoint();
 
-  ecnuvpn::helper::DaemonOptions options;
-  options.mode = "oneshot";
-  options.endpoint = endpoint;
-  options.owner = "test-owner";
-  options.parent_pid = static_cast<int>(GetCurrentProcessId());
-  options.oneshot = true;
+  ecnuvpn::helper::DaemonOptions options = make_oneshot_options(endpoint);
 
   int daemon_rc = -1;
   std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
@@ -103,12 +140,7 @@ bool oneshot_helper_responds_to_hello_and_exits_after_disconnect() {
 bool oneshot_helper_preserves_persistent_connection_and_shutdown() {
   const std::string endpoint = random_endpoint();
 
-  ecnuvpn::helper::DaemonOptions options;
-  options.mode = "oneshot";
-  options.endpoint = endpoint;
-  options.owner = "test-owner";
-  options.parent_pid = static_cast<int>(GetCurrentProcessId());
-  options.oneshot = true;
+  ecnuvpn::helper::DaemonOptions options = make_oneshot_options(endpoint);
 
   int daemon_rc = -1;
   std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
@@ -157,11 +189,80 @@ bool oneshot_helper_preserves_persistent_connection_and_shutdown() {
   return ok;
 }
 
+bool oneshot_helper_rejects_first_packet_that_is_not_hello() {
+  const std::string endpoint = random_endpoint();
+
+  ecnuvpn::helper::DaemonOptions options = make_oneshot_options(endpoint);
+
+  int daemon_rc = -1;
+  std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
+
+  const ecnuvpn::platform::HelperEndpoint helper_endpoint{endpoint};
+  exv::helper::StartSessionRequest start_req;
+  start_req.profile_id.value = "test-profile";
+  exv::helper::HelperRequest request;
+  request.op = exv::helper::HelperOp::StartSession;
+  request.payload_json = nlohmann::json(start_req).dump();
+
+  const auto response = ecnuvpn::platform::send_helper_request(
+      helper_endpoint, nlohmann::json(request));
+
+  bool ok = true;
+  ok = expect(response.is_object(),
+              "one-shot helper should return an object for illegal first packet") &&
+       ok;
+  ok = expect(!response.value("success", true),
+              "one-shot helper must reject non-Hello first packet") &&
+       ok;
+  ok = expect(response.value("error_code", std::string()) == "hello_required",
+              "one-shot helper should report hello_required") &&
+       ok;
+
+  daemon.join();
+  ok = expect(daemon_rc == 0,
+              "one-shot helper should exit after illegal first packet") &&
+       ok;
+  return ok;
+}
+
+bool oneshot_helper_rejects_non_owner_client() {
+  const std::string endpoint = random_endpoint();
+
+  ecnuvpn::helper::DaemonOptions options =
+      make_oneshot_options(endpoint, "S-1-0-0");
+
+  int daemon_rc = -1;
+  std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
+
+  const auto response = ecnuvpn::platform::send_helper_request(
+      ecnuvpn::platform::HelperEndpoint{endpoint},
+      nlohmann::json(make_hello_request()));
+
+  bool ok = true;
+  ok = expect(response.is_object(),
+              "one-shot helper should return an object for owner mismatch") &&
+       ok;
+  ok = expect(!response.value("ok", true),
+              "one-shot helper must reject a non-owner client") &&
+       ok;
+  ok = expect(response.value("code", std::string()) == "permission_denied",
+              "one-shot helper should report permission_denied") &&
+       ok;
+
+  daemon.join();
+  ok = expect(daemon_rc == 0,
+              "one-shot helper should exit after owner mismatch") &&
+       ok;
+  return ok;
+}
+
 } // namespace
 
 int main() {
   bool ok = true;
   ok = oneshot_helper_responds_to_hello_and_exits_after_disconnect() && ok;
   ok = oneshot_helper_preserves_persistent_connection_and_shutdown() && ok;
+  ok = oneshot_helper_rejects_first_packet_that_is_not_hello() && ok;
+  ok = oneshot_helper_rejects_non_owner_client() && ok;
   return ok ? 0 : 1;
 }

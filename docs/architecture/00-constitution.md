@@ -147,8 +147,7 @@ CLI 和 Electron main 必须使用同一套 BackendResolver 逻辑：
 
 ```bash
 exv-helper --service
-exv-helper --oneshot --endpoint <pipe-or-socket> --auth-token <token>
-exv-helper --foreground
+exv-helper --oneshot --endpoint <pipe-or-socket> --owner <uid-or-sid> --parent-pid <pid>
 ```
 
 ### 3.1 Service 模式
@@ -169,13 +168,9 @@ Service 模式用于开机自启、断线重连、崩溃恢复、UI 关闭后连
 
 One-shot helper 在连接期间存在，断开后清理路由、DNS、虚拟网卡并退出。
 
-### 3.3 Foreground 模式
+### 3.3 非法启动
 
-开发者调试模式：
-
-- 不注册服务。
-- 不脱离当前 shell。
-- 日志直接输出到终端。
+缺少 `--service` 或完整 `--oneshot` 参数的 helper 进程必须立即退出，不得进入生产 daemon。
 
 ## 4. 平台决策
 
@@ -204,7 +199,6 @@ macOS 当前 direct fallback 可作为短期兼容，但目标必须迁移为：
 需要逐步废弃：
 
 ```text
-/usr/local/bin/exv __helper-daemon
 exv desktop-rpc vpn.connect {"allow_direct_fallback": true}
 ```
 

@@ -211,6 +211,40 @@ int test_hello_has_no_version_fields() {
   return ok ? 0 : 1;
 }
 
+int test_hello_mode_matches_startup_context() {
+  bool ok = true;
+  exv::helper::HelperHandler service_handler;
+
+  exv::helper::HelperStartupContext service_context;
+  service_context.launch_mode = "service";
+  service_handler.set_startup_context(service_context);
+
+  auto service_hello =
+      dispatch_json(service_handler, exv::helper::HelperOp::Hello, json::object());
+  ok = expect(service_hello.success, "service Hello should succeed") && ok;
+  auto service_payload =
+      exv::helper::hello_response_from_json(json::parse(service_hello.payload_json));
+  ok = expect(service_payload.mode == exv::helper::HelperMode::Resident,
+              "service Hello should report Resident mode") &&
+       ok;
+
+  exv::helper::HelperHandler oneshot_handler;
+  exv::helper::HelperStartupContext oneshot_context;
+  oneshot_context.launch_mode = "oneshot";
+  oneshot_handler.set_startup_context(oneshot_context);
+
+  auto oneshot_hello =
+      dispatch_json(oneshot_handler, exv::helper::HelperOp::Hello, json::object());
+  ok = expect(oneshot_hello.success, "oneshot Hello should succeed") && ok;
+  auto oneshot_payload =
+      exv::helper::hello_response_from_json(json::parse(oneshot_hello.payload_json));
+  ok = expect(oneshot_payload.mode == exv::helper::HelperMode::Transient,
+              "oneshot Hello should report Transient mode") &&
+       ok;
+
+  return ok ? 0 : 1;
+}
+
 int test_start_session_rejects_second_active_session() {
   bool ok = true;
   exv::helper::HelperHandler handler;
@@ -263,6 +297,42 @@ int test_shutdown_cleans_active_session() {
       exv::helper::shutdown_response_from_json(json::parse(shutdown.payload_json));
   ok = expect(shutdown_resp.cleanup_success,
               "Shutdown response must report cleanup success") &&
+       ok;
+
+  return ok ? 0 : 1;
+}
+
+int test_cleanup_retains_resources_when_platform_cleanup_unavailable() {
+  bool ok = true;
+  exv::helper::HelperHandler handler;
+
+  exv::helper::StartSessionRequest start_req;
+  start_req.profile_id.value = "profile-a";
+  auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                             json(start_req));
+  ok = expect(start.success, "StartSession should succeed before cleanup test") &&
+       ok;
+  const auto start_resp =
+      exv::helper::start_session_response_from_json(json::parse(start.payload_json));
+
+  handler.cleanup_registry().add_resource(start_resp.session_id,
+                                          {"route", "0.0.0.0/0"});
+
+  exv::helper::CleanupRequest cleanup_req;
+  cleanup_req.session_id = start_resp.session_id;
+  auto cleanup = dispatch_json(handler, exv::helper::HelperOp::Cleanup,
+                               json(cleanup_req));
+  ok = expect(!cleanup.success,
+              "Cleanup must fail when managed resources cannot be cleaned") &&
+       ok;
+  ok = expect(cleanup.error_code == "cleanup_partial",
+              "Cleanup failure should report cleanup_partial") &&
+       ok;
+  ok = expect(handler.lease_manager().active_session_count() == 1,
+              "failed cleanup must keep the active session for retry") &&
+       ok;
+  ok = expect(handler.cleanup_registry().all_records().size() == 1,
+              "failed cleanup must keep registry records for retry") &&
        ok;
 
   return ok ? 0 : 1;
@@ -423,8 +493,10 @@ int main() {
   failures += test_manifest_declares_single_helper_protocol();
   failures += test_generated_contract_matches_helper_manifest();
   failures += test_hello_has_no_version_fields();
+  failures += test_hello_mode_matches_startup_context();
   failures += test_start_session_rejects_second_active_session();
   failures += test_shutdown_cleans_active_session();
+  failures += test_cleanup_retains_resources_when_platform_cleanup_unavailable();
   failures += test_network_ops_do_not_report_fake_success();
   failures += test_oneshot_heartbeat_timeout_cleans_and_requests_exit();
   failures += test_service_heartbeat_timeout_cleans_without_exit();

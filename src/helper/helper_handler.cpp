@@ -97,7 +97,10 @@ HelperResponse HelperHandler::handle_hello(const HelperRequest& req) {
     hello.capabilities = {
         "session", "heartbeat", "cleanup", "snapshot", "shutdown"
     };
-    hello.mode = HelperMode::Transient;
+    hello.mode = (startup_context_.launch_mode == "service" ||
+                  startup_context_.launch_mode == "resident")
+                     ? HelperMode::Resident
+                     : HelperMode::Transient;
     hello.startup_context = startup_context_;
     hello.session_state.active = leases_.active_session_count() > 0;
 
@@ -268,13 +271,20 @@ HelperResponse HelperHandler::handle_heartbeat(const HelperRequest& req) {
 
 CleanupResponse HelperHandler::cleanup_session(const SessionId& session_id,
                                                const CleanupPolicy& policy) {
-    (void)policy;
     auto resources = cleanup_.get_resources(session_id);
     std::vector<std::string> errors;
 
     for (const auto& res : resources) {
         ecnuvpn::logger::info("[helper] Cleaning managed resource: type=" + res.type
                               + " detail=" + res.detail);
+    }
+    if (!resources.empty()) {
+        (void)policy;
+        errors.push_back("Platform cleanup operations are not available");
+        CleanupResponse cleanup_resp;
+        cleanup_resp.success = false;
+        cleanup_resp.errors = errors;
+        return cleanup_resp;
     }
 
     cleanup_.remove_session(session_id);
@@ -319,7 +329,11 @@ HelperResponse HelperHandler::handle_cleanup(const HelperRequest& req) {
 
     HelperResponse resp;
     resp.op = req.op;
-    resp.success = true;
+    resp.success = cleanup_resp.success;
+    if (!cleanup_resp.success) {
+        resp.error_code = "cleanup_partial";
+        resp.error_message = "Cleanup could not remove all managed resources";
+    }
     resp.payload_json = payload.dump();
     return resp;
 }
@@ -389,7 +403,8 @@ HelperResponse HelperHandler::handle_shutdown(const HelperRequest& req) {
     ShutdownResponse shutdown_resp;
     shutdown_resp.cleanup_success = cleanup_resp.success;
     shutdown_resp.errors = cleanup_resp.errors;
-    shutdown_resp.exiting = startup_context_.launch_mode == "oneshot";
+    shutdown_resp.exiting =
+        cleanup_resp.success && startup_context_.launch_mode == "oneshot";
     shutdown_requested_ = shutdown_resp.exiting;
 
     nlohmann::json payload;
@@ -397,7 +412,11 @@ HelperResponse HelperHandler::handle_shutdown(const HelperRequest& req) {
 
     HelperResponse resp;
     resp.op = req.op;
-    resp.success = true;
+    resp.success = cleanup_resp.success;
+    if (!cleanup_resp.success) {
+        resp.error_code = "cleanup_partial";
+        resp.error_message = "Shutdown cleanup could not remove all managed resources";
+    }
     resp.payload_json = payload.dump();
     return resp;
 }

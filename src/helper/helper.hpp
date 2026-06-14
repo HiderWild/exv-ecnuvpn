@@ -13,6 +13,7 @@ struct DaemonOptions {
   std::string owner;
   int parent_pid = 0;
   bool oneshot = false;
+  int first_request_timeout_ms = 5000;
 };
 
 bool is_available();

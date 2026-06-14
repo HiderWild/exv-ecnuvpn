@@ -153,6 +153,8 @@ bool test_full_connect_flow() {
     // Verify helper received start_session
     ok = expect(helper->active_sessions().size() >= 1,
                 "1: helper should have at least one active session") && ok;
+    ok = expect(helper->hello_count() == 1,
+                "1: controller should send Hello before StartSession") && ok;
 
     // Verify platform ops received prepare_tunnel_device
     ok = expect(net_ops->prepare_count() >= 1,
@@ -235,6 +237,28 @@ bool test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() {
                 "2b: apply_config failure should transition to Failed") && ok;
     ok = expect(helper->heartbeat_count() == 1,
                 "2b: core should send one heartbeat immediately after StartSession") && ok;
+
+    return ok;
+}
+
+// --- Test 2c: StartSession Failure Stops Connect ---
+bool test_start_session_failure_stops_connect() {
+    using exv::core::TunnelPhase;
+
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    bool ok = true;
+    helper->set_start_session_fail(true);
+
+    ctrl.connect(make_intent(true));
+    ok = expect(ctrl.phase() == TunnelPhase::Failed,
+                "2c: empty StartSession response should transition to Failed") && ok;
+    ok = expect(helper->heartbeat_count() == 0,
+                "2c: heartbeat must not start without a helper session") && ok;
+    ok = expect(net_ops->prepare_count() == 0,
+                "2c: network ops must not run without a helper session") && ok;
 
     return ok;
 }
@@ -704,6 +728,9 @@ int main() {
 
     std::cout << "--- Test 2b: Immediate Heartbeat After StartSession ---\n";
     ok = test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() && ok;
+
+    std::cout << "--- Test 2c: StartSession Failure Stops Connect ---\n";
+    ok = test_start_session_failure_stops_connect() && ok;
 
     std::cout << "--- Test 3: Reconnect Flow ---\n";
     ok = test_reconnect_flow() && ok;

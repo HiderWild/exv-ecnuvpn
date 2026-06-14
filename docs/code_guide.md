@@ -154,21 +154,20 @@ int helper::install_service(const std::string& executable_path);
 int helper::uninstall_service();
 int helper::show_service_status();
 int helper::daemon_main();
-int helper::worker_main(const std::string& request_path);
 ```
 
 设计要点：
 - 安装 helper 时仅需一次 sudo
 - 日常 `exv` / `exv stop` 以普通用户运行
 - Socket `/var/run/exv-helper.sock` 权限 root:staff 0660，所有 macOS 用户可达
-- 明文密码仅在用户侧解密，通过 root-only 临时文件传给 worker
-- `send_request()` 带 select() 超时（默认 15s，start 用 120s）
+- helper 不接收密码、cookie 或 token 字段
+- `send_request()` 带超时；helper 首包必须是 `Hello`
 
 运行模型：
 1. `sudo exv service install` → 写 plist + `launchctl bootstrap`
-2. launchd 以 root 拉起 `exv __helper-daemon`
-3. 用户 `exv` → connect socket → JSON 请求
-4. daemon fork `exv __helper-exec <request-file>` → worker 调用 `vpn::start_with_password()`
+2. launchd 以 root 拉起 `exv-helper --service`
+3. 用户 `exv` → connect socket → `Hello` → helper protocol request
+4. daemon 在当前 helper 进程内处理无凭据的特权网络请求
 
 ---
 
