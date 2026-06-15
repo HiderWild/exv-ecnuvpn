@@ -384,6 +384,34 @@ set_target_properties(exv-core-tunnel-module PROPERTIES
     CXX_SCAN_FOR_MODULES ON
 )
 
+add_library(exv-utils-strings STATIC
+    src/utils/strings.cpp
+)
+target_include_directories(exv-utils-strings PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(exv-utils-strings PUBLIC cxx_std_20)
+
+add_library(exv-utils-strings-module STATIC)
+target_sources(exv-utils-strings-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/utils/modules/strings.cppm
+)
+target_compile_features(exv-utils-strings-module PUBLIC cxx_std_20)
+target_include_directories(exv-utils-strings-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(exv-utils-strings-module PUBLIC
+    exv-utils-strings
+)
+set_target_properties(exv-utils-strings-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
 
@@ -1295,6 +1323,40 @@ set_target_properties(config_module_smoke_test PROPERTIES
 
 add_test(NAME config_module_smoke_test COMMAND config_module_smoke_test)
 
+add_executable(utils_strings_test
+    tests/utils_strings_test.cpp
+)
+
+target_include_directories(utils_strings_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(utils_strings_test PRIVATE
+    exv-utils-strings
+)
+
+add_test(NAME utils_strings_test COMMAND utils_strings_test)
+
+add_executable(utils_strings_module_smoke_test
+    tests/utils_strings_module_smoke_test.cpp
+)
+
+target_include_directories(utils_strings_module_smoke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(utils_strings_module_smoke_test PRIVATE
+    exv-utils-strings-module
+)
+
+set_target_properties(utils_strings_module_smoke_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_test(NAME utils_strings_module_smoke_test COMMAND utils_strings_module_smoke_test)
+
 add_executable(helper_network_ops_adapter_test
     tests/helper_network_ops_adapter_test.cpp
     src/helper/helper_network_ops.cpp
@@ -1713,6 +1775,8 @@ set(_release_blocking_tests
     helper_contract_test
     helper_module_smoke_test
     config_module_smoke_test
+    utils_strings_test
+    utils_strings_module_smoke_test
     helper_network_ops_adapter_test
     darwin_platform_network_ops_test
     no_secret_in_argv_test
@@ -1819,6 +1883,8 @@ set_property(TEST
     helper_contract_test
     helper_module_smoke_test
     config_module_smoke_test
+    utils_strings_test
+    utils_strings_module_smoke_test
     helper_network_ops_adapter_test
     darwin_platform_network_ops_test
     app_api_rpc_dispatcher_test
@@ -1913,6 +1979,8 @@ set_property(TEST
     contract_generation_check
     tunnel_module_smoke_test
     tunnel_public_module_smoke_test
+    utils_strings_test
+    utils_strings_module_smoke_test
     core_process_test
     core_process_lifecycle_test
     app_api_status_contract_test
