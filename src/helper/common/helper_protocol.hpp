@@ -12,7 +12,16 @@ enum class HelperOp : uint32_t {
     Heartbeat = 5,
     Cleanup = 6,
     GetSnapshot = 7,
-    Shutdown = 8
+    Shutdown = 8,
+    Inspect = 9,
+    AcquireCoreLease = 10,
+    KeepAlive = 11,
+    ReleaseCoreLease = 12,
+    InstallService = 13,
+    UninstallService = 14,
+    ExportCleanupLease = 15,
+    HandoffSession = 16,
+    FinalizeHandoff = 17
 };
 
 enum class HelperMode : uint32_t {

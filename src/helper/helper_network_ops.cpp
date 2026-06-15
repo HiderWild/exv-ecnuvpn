@@ -52,6 +52,46 @@ std::string adapter_from_resources(
   return {};
 }
 
+std::vector<platform::ManagedNetworkResource> to_platform_resources(
+    const std::vector<ManagedResource> &resources) {
+  std::vector<platform::ManagedNetworkResource> converted;
+  converted.reserve(resources.size());
+  for (const auto &resource : resources) {
+    converted.push_back({resource.type, resource.detail});
+  }
+  return converted;
+}
+
+ManagedResource to_helper_resource(
+    const platform::ManagedNetworkResource &resource) {
+  return {resource.type, resource.detail};
+}
+
+void append_unique_resource(std::vector<ManagedResource> *resources,
+                            const ManagedResource &resource) {
+  if (!resources)
+    return;
+  for (const auto &existing : *resources) {
+    if (existing.type == resource.type && existing.detail == resource.detail)
+      return;
+  }
+  resources->push_back(resource);
+}
+
+bool append_platform_resources(
+    platform::PlatformNetworkOps *platform_ops,
+    std::vector<ManagedResource> *created_resources) {
+  if (!platform_ops || !created_resources)
+    return false;
+  auto platform_resources = platform_ops->managed_resources();
+  if (platform_resources.empty())
+    return false;
+  for (const auto &resource : platform_resources) {
+    append_unique_resource(created_resources, to_helper_resource(resource));
+  }
+  return true;
+}
+
 void register_config_resources(
     const ApplyTunnelConfigRequest &request,
     std::vector<ManagedResource> *created_resources) {
@@ -85,10 +125,12 @@ public:
     response.device_path = descriptor.path;
     response.mtu = descriptor.mtu;
     session_devices_[request.session_id.value] = descriptor;
-    if (created_resources) {
-      created_resources->push_back({"adapter", descriptor.adapter_name.empty()
-                                                   ? request.adapter_name
-                                                   : descriptor.adapter_name});
+    if (created_resources &&
+        !append_platform_resources(platform_ops_.get(), created_resources)) {
+      append_unique_resource(created_resources,
+                             {"adapter", descriptor.adapter_name.empty()
+                                             ? request.adapter_name
+                                             : descriptor.adapter_name});
     }
     return response;
   }
@@ -126,7 +168,9 @@ public:
       return response;
     }
 
-    register_config_resources(request, created_resources);
+    if (!append_platform_resources(platform_ops_.get(), created_resources)) {
+      register_config_resources(request, created_resources);
+    }
     return response;
   }
 
@@ -156,8 +200,8 @@ public:
       return response;
     }
 
-    platform::CleanupResult result = platform_ops_->cleanup(
-        adapter_name, *platform_policy);
+    platform::CleanupResult result = platform_ops_->cleanup_resources(
+        to_platform_resources(resources), *platform_policy);
     response.success = result.success;
     if (!result.success) {
       response.errors.push_back(

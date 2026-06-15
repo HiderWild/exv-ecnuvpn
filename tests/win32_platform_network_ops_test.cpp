@@ -269,6 +269,74 @@ bool win32_platform_ops_apply_dns_and_restore_on_cleanup() {
   return ok;
 }
 
+bool win32_platform_ops_cleans_imported_resource_facts() {
+  bool ok = true;
+  MockWintun wintun;
+  MockIpHelper ip;
+  ip.current_dns.servers = {"192.0.2.53"};
+  ip.current_dns.search_domain = "corp.example";
+
+  std::vector<exv::platform::ManagedNetworkResource> resources;
+  {
+    auto ops = exv::platform::create_win32_platform_network_ops(
+        make_wintun_deps(wintun), make_ip_api(ip));
+
+    auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+    exv::platform::TunnelConfig config;
+    config.interface_address = "10.255.0.10/24";
+    config.routes.push_back({"10.0.0.0/8", "", 10, false});
+    config.dns.servers = {"10.0.0.53"};
+
+    ok = expect(ops->apply_tunnel_config(device, config),
+                "apply should succeed before exporting cleanup facts") &&
+         ok;
+    resources = ops->managed_resources();
+  }
+
+  bool saw_adapter = false;
+  bool saw_route = false;
+  bool saw_dns = false;
+  for (const auto &resource : resources) {
+    saw_adapter = saw_adapter || resource.type == "adapter";
+    saw_route = saw_route || resource.type == "win32_route";
+    saw_dns = saw_dns || resource.type == "win32_dns_original";
+  }
+  ok = expect(saw_adapter && saw_route && saw_dns,
+              "managed_resources should expose adapter, route, and original DNS facts") &&
+       ok;
+
+  auto fresh_ops = exv::platform::create_win32_platform_network_ops(
+      make_wintun_deps(wintun), make_ip_api(ip));
+  auto cleanup = fresh_ops->cleanup_resources(
+      resources, exv::platform::CleanupPolicy::Full);
+
+  ok = expect(cleanup.success,
+              "fresh backend should cleanup using imported resource facts") &&
+       ok;
+  ok = expect(cleanup.routes_removed == 1,
+              "fresh cleanup should delete the exported route fact") &&
+       ok;
+  ok = expect(cleanup.dns_removed,
+              "fresh cleanup should restore the exported original DNS fact") &&
+       ok;
+  ok = expect(cleanup.adapter_removed,
+              "fresh cleanup should delete the exported adapter fact") &&
+       ok;
+  ok = expect(!ip.deleted_routes.empty() &&
+                  ip.deleted_routes.back().cidr == "10.0.0.0/8",
+              "fresh cleanup should reconstruct the native route row") &&
+       ok;
+  ok = expect(ip.dns_writes.size() >= 2 &&
+                  ip.dns_writes.back().servers.size() == 1 &&
+                  ip.dns_writes.back().servers[0] == "192.0.2.53",
+              "fresh cleanup should restore the original DNS settings") &&
+       ok;
+  ok = expect(wintun.adapters_deleted >= 1,
+              "fresh cleanup should delete the Wintun adapter") &&
+       ok;
+  return ok;
+}
+
 bool win32_platform_ops_rolls_back_routes_when_apply_fails() {
   bool ok = true;
   MockWintun wintun;
@@ -373,6 +441,7 @@ int main() {
   bool ok = true;
   ok = win32_platform_ops_apply_routes_and_cleanup_in_order() && ok;
   ok = win32_platform_ops_apply_dns_and_restore_on_cleanup() && ok;
+  ok = win32_platform_ops_cleans_imported_resource_facts() && ok;
   ok = win32_platform_ops_rolls_back_routes_when_apply_fails() && ok;
   ok = win32_platform_ops_rolls_back_routes_when_dns_apply_fails() && ok;
   ok = win32_platform_ops_restores_dns_when_route_cleanup_fails() && ok;

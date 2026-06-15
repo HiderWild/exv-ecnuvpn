@@ -69,4 +69,54 @@ void TunnelController::Impl::do_heartbeat() {
         schedule_next_heartbeat();
     }
 
+void TunnelController::Impl::start_core_lease_keepalive() {
+        if (core_lease_keepalive_active_) return;
+        if (core_lease_id_.empty()) return;
+        core_lease_keepalive_active_ = true;
+        do_core_lease_keepalive();
+    }
+
+void TunnelController::Impl::stop_core_lease_keepalive() {
+        core_lease_keepalive_active_ = false;
+}
+
+void TunnelController::Impl::schedule_next_core_lease_keepalive() {
+        if (!core_lease_keepalive_active_) return;
+        scheduler_.schedule(kCoreLeaseKeepAliveInterval, [this] {
+            do_core_lease_keepalive();
+        });
+}
+
+void TunnelController::Impl::do_core_lease_keepalive() {
+        if (!core_lease_keepalive_active_) return;
+        if (!helper_ || core_lease_id_.empty()) {
+            stop_core_lease_keepalive();
+            return;
+        }
+
+        try {
+            exv::helper::KeepAliveRequest req;
+            req.lease_id = core_lease_id_;
+            req.state = tunnel_phase_wire_name(phase_);
+
+            auto resp = helper_->keep_alive(req);
+            if (!resp.ok) {
+                log_tunnel_event("WARN", "core_lease.keep_alive.failed",
+                                 "Core lease keepalive response not ok",
+                                 {{"warning", resp.warning.value_or("")}});
+            }
+        } catch (const std::exception& e) {
+            log_tunnel_event("ERROR", "core_lease.keep_alive.error",
+                             "Core lease keepalive send failed",
+                             {{"error", e.what()}});
+            stop_core_lease_keepalive();
+            helper_status_override_ = "unavailable";
+            update_snapshot();
+            notify_status();
+            return;
+        }
+
+        schedule_next_core_lease_keepalive();
+    }
+
 } // namespace exv::core

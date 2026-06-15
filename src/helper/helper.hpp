@@ -18,8 +18,6 @@ struct DaemonOptions {
 
 bool is_available();
 
-int install_service(const std::string &executable_path);
-int uninstall_service();
 int show_service_status();
 
 int daemon_main(const DaemonOptions &options);

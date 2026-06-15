@@ -6,12 +6,17 @@
 
 namespace exv::helper {
 
+struct HelperRequestContext;
+
 class HelperRequestDispatcher {
 public:
-    using Handler = std::function<HelperResponse(const HelperRequest&)>;
+    using Handler =
+        std::function<HelperResponse(const HelperRequest&,
+                                     const HelperRequestContext&)>;
 
     void register_handler(HelperOp op, Handler handler);
-    HelperResponse dispatch(const HelperRequest& request);
+    HelperResponse dispatch(const HelperRequest& request,
+                            const HelperRequestContext& context);
 
 private:
     std::map<HelperOp, Handler> handlers_;

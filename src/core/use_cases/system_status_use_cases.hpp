@@ -19,8 +19,8 @@ public:
   UseCaseResult runtime_status();
   UseCaseResult driver_status();
   UseCaseResult install_driver(const nlohmann::json &payload);
-  UseCaseResult install_helper_unsupported();
-  UseCaseResult uninstall_helper_unsupported();
+  UseCaseResult install_helper();
+  UseCaseResult uninstall_helper();
 
 private:
   ecnuvpn::config::ConfigManager manager_;

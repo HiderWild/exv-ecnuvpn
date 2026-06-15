@@ -2,8 +2,9 @@
 
 namespace exv::helper {
 
-HelperLifecyclePolicy::HelperLifecyclePolicy(LeaseTimeoutConfig config)
-    : config_(config) {}
+HelperLifecyclePolicy::HelperLifecyclePolicy(
+    LeaseTimeoutConfig config, std::chrono::seconds core_lease_timeout)
+    : config_(config), core_lease_timeout_(core_lease_timeout) {}
 
 bool HelperLifecyclePolicy::should_exit_after_cleanup(HelperMode mode) const {
     // Transient helpers exit after cleanup; Resident helpers stay alive
@@ -30,6 +31,16 @@ std::chrono::seconds HelperLifecyclePolicy::heartbeat_timeout(HelperMode mode) c
         default:
             return config_.transient_heartbeat_timeout;
     }
+}
+
+std::chrono::seconds HelperLifecyclePolicy::core_lease_timeout() const {
+    return core_lease_timeout_;
+}
+
+bool HelperLifecyclePolicy::is_core_lease_expired(
+    std::chrono::steady_clock::time_point last_seen,
+    std::chrono::steady_clock::time_point now) const {
+    return (now - last_seen) >= core_lease_timeout_;
 }
 
 } // namespace exv::helper

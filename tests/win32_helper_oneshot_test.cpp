@@ -166,6 +166,17 @@ bool oneshot_helper_preserves_persistent_connection_and_shutdown() {
               "one-shot helper should answer second hello on same connection") &&
        ok;
 
+  exv::helper::AcquireCoreLeaseRequest acquire_req;
+  acquire_req.core_pid = static_cast<int>(GetCurrentProcessId());
+  acquire_req.purpose = "connect";
+  const auto acquired = client.acquire_core_lease(acquire_req);
+  ok = expect(acquired.accepted,
+              "one-shot helper should acquire a core lease") &&
+       ok;
+  ok = expect(!acquired.lease_id.empty(),
+              "one-shot helper should return a core lease id") &&
+       ok;
+
   exv::helper::StartSessionRequest start_req;
   start_req.profile_id.value = "test-profile";
   const auto start = client.start_session(start_req);
@@ -179,6 +190,31 @@ bool oneshot_helper_preserves_persistent_connection_and_shutdown() {
   const auto shutdown = client.shutdown(shutdown_req);
   ok = expect(shutdown.cleanup_success,
               "one-shot helper should accept active shutdown") &&
+       ok;
+  ok = expect(!shutdown.exiting,
+              "one-shot helper should keep running after VPN shutdown while core lease is active") &&
+       ok;
+
+  const auto inspect = client.inspect(exv::helper::InspectRequest{});
+  ok = expect(inspect.core_lease.active,
+              "one-shot helper should answer Inspect after VPN shutdown") &&
+       ok;
+  ok = expect(inspect.core_lease.lease_id == acquired.lease_id,
+              "Inspect should report the active core lease") &&
+       ok;
+  ok = expect(!inspect.session_state.active,
+              "Inspect should report no active VPN session after Shutdown") &&
+       ok;
+
+  exv::helper::ReleaseCoreLeaseRequest release_req;
+  release_req.lease_id = acquired.lease_id;
+  release_req.exit_if_oneshot = true;
+  const auto released = client.release_core_lease(release_req);
+  ok = expect(released.released,
+              "one-shot helper should release the core lease") &&
+       ok;
+  ok = expect(released.exiting,
+              "ReleaseCoreLease should request one-shot helper exit") &&
        ok;
 
   client.disconnect();

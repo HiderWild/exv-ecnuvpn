@@ -37,6 +37,15 @@ public:
     CleanupResponse cleanup(const CleanupRequest& req) override;
     GetSnapshotResponse get_snapshot(const GetSnapshotRequest& req) override;
     ShutdownResponse shutdown(const ShutdownRequest& req) override;
+    InspectResponse inspect(const InspectRequest& req) override;
+    AcquireCoreLeaseResponse acquire_core_lease(const AcquireCoreLeaseRequest& req) override;
+    KeepAliveResponse keep_alive(const KeepAliveRequest& req) override;
+    ReleaseCoreLeaseResponse release_core_lease(const ReleaseCoreLeaseRequest& req) override;
+    InstallServiceResponse install_service(const InstallServiceRequest& req) override;
+    UninstallServiceResponse uninstall_service(const UninstallServiceRequest& req) override;
+    ExportCleanupLeaseResponse export_cleanup_lease(const ExportCleanupLeaseRequest& req) override;
+    HandoffSessionResponse handoff_session(const HandoffSessionRequest& req) override;
+    FinalizeHandoffResponse finalize_handoff(const FinalizeHandoffRequest& req) override;
 
     void set_disconnect_callback(DisconnectCallback cb) override;
 

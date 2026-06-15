@@ -37,6 +37,14 @@ SessionId SessionLeaseManager::create_session(
     return id;
 }
 
+bool SessionLeaseManager::import_session(const SessionLease& lease) {
+    if (lease.session_id.value.empty() || has_session(lease.session_id)) {
+        return false;
+    }
+    leases_.emplace(lease.session_id, lease);
+    return true;
+}
+
 bool SessionLeaseManager::has_session(const SessionId& id) const {
     return leases_.count(id) > 0;
 }

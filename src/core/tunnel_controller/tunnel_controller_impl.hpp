@@ -46,6 +46,18 @@ struct TunnelController::Impl {
   void stop_heartbeat();
   void schedule_next_heartbeat();
   void do_heartbeat();
+  void start_core_lease_keepalive();
+  void stop_core_lease_keepalive();
+  void schedule_next_core_lease_keepalive();
+  void do_core_lease_keepalive();
+  bool acquire_core_lease();
+  void release_core_lease();
+  bool replace_helper_for_handoff(
+      std::shared_ptr<exv::helper::HelperClient> helper,
+      std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
+      std::string core_lease_id,
+      std::string helper_mode,
+      std::string helper_endpoint);
 
   bool prepare_tunnel_device_for_session(
       exv::platform::TunnelDeviceDescriptor *device);
@@ -107,7 +119,15 @@ struct TunnelController::Impl {
   TimerScheduler scheduler_;
 
   bool heartbeat_active_ = false;
+  bool core_lease_keepalive_active_ = false;
   static constexpr auto kHeartbeatInterval = std::chrono::seconds(10);
+  static constexpr auto kCoreLeaseKeepAliveInterval = std::chrono::seconds(10);
+
+  bool helper_connected_seen_ = false;
+  std::string helper_mode_ = "unknown";
+  std::string helper_status_override_;
+  std::string helper_endpoint_;
+  std::string core_lease_id_;
 
   CoreSessionRunner runner_;
 

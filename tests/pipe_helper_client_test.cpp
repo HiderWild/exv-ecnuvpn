@@ -221,6 +221,91 @@ static bool handle_persistent_requests_win32(const std::string& pipe_name,
             json payload;
             to_json(payload, esr);
             resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::Inspect) {
+            InspectResponse ir;
+            ir.capabilities = {"core_lease"};
+            ir.mode = HelperMode::Transient;
+            ir.core_lease.active = true;
+            ir.core_lease.lease_id = "lease-inspect";
+            ir.task_queue.idle = true;
+            json payload;
+            to_json(payload, ir);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::AcquireCoreLease) {
+            auto payload_req =
+                acquire_core_lease_request_from_json(json::parse(req.payload_json));
+            AcquireCoreLeaseResponse acr;
+            acr.accepted = payload_req.core_pid == 2468;
+            acr.lease_id = "lease-acquired";
+            acr.mode = "oneshot";
+            json payload;
+            to_json(payload, acr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::KeepAlive) {
+            auto payload_req =
+                keep_alive_request_from_json(json::parse(req.payload_json));
+            KeepAliveResponse kar;
+            kar.ok = payload_req.lease_id == "lease-acquired";
+            json payload;
+            to_json(payload, kar);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::ReleaseCoreLease) {
+            auto payload_req =
+                release_core_lease_request_from_json(json::parse(req.payload_json));
+            ReleaseCoreLeaseResponse rcr;
+            rcr.released = payload_req.lease_id == "lease-acquired";
+            rcr.exiting = payload_req.exit_if_oneshot;
+            json payload;
+            to_json(payload, rcr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::InstallService) {
+            InstallServiceResponse isr;
+            isr.success = true;
+            isr.exit_code = 0;
+            isr.message = "installed";
+            json payload;
+            to_json(payload, isr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::UninstallService) {
+            UninstallServiceResponse usr;
+            usr.success = true;
+            usr.exit_code = 0;
+            usr.message = "uninstalled";
+            json payload;
+            to_json(payload, usr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::ExportCleanupLease) {
+            ExportCleanupLeaseResponse ecr;
+            ecr.has_active_session = true;
+            ecr.lease.cleanup_lease_id = "cleanup-lease-pipe";
+            CleanupLeaseSession session;
+            session.session_id.value = "pipe-session";
+            session.profile_id.value = "pipe-profile";
+            session.managed_resources.push_back({"adapter", "ECNU-VPN"});
+            ecr.lease.sessions.push_back(session);
+            json payload;
+            to_json(payload, ecr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::HandoffSession) {
+            auto payload_req =
+                handoff_session_request_from_json(json::parse(req.payload_json));
+            HandoffSessionResponse hsr;
+            hsr.adopted = !payload_req.lease.sessions.empty();
+            hsr.message = "adopted";
+            for (const auto& session : payload_req.lease.sessions)
+                hsr.session_ids.push_back(session.session_id);
+            json payload;
+            to_json(payload, hsr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::FinalizeHandoff) {
+            auto payload_req =
+                finalize_handoff_request_from_json(json::parse(req.payload_json));
+            FinalizeHandoffResponse fhr;
+            fhr.finalized = true;
+            fhr.exiting = payload_req.exit;
+            json payload;
+            to_json(payload, fhr);
+            resp.payload_json = payload.dump();
         } else {
             resp.success = false;
             resp.error_code = "unsupported_op";
@@ -378,6 +463,91 @@ static bool handle_persistent_requests_posix(const std::string& socket_path,
             json payload;
             to_json(payload, esr);
             resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::Inspect) {
+            InspectResponse ir;
+            ir.capabilities = {"core_lease"};
+            ir.mode = HelperMode::Transient;
+            ir.core_lease.active = true;
+            ir.core_lease.lease_id = "lease-inspect";
+            ir.task_queue.idle = true;
+            json payload;
+            to_json(payload, ir);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::AcquireCoreLease) {
+            auto payload_req =
+                acquire_core_lease_request_from_json(json::parse(req.payload_json));
+            AcquireCoreLeaseResponse acr;
+            acr.accepted = payload_req.core_pid == 2468;
+            acr.lease_id = "lease-acquired";
+            acr.mode = "oneshot";
+            json payload;
+            to_json(payload, acr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::KeepAlive) {
+            auto payload_req =
+                keep_alive_request_from_json(json::parse(req.payload_json));
+            KeepAliveResponse kar;
+            kar.ok = payload_req.lease_id == "lease-acquired";
+            json payload;
+            to_json(payload, kar);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::ReleaseCoreLease) {
+            auto payload_req =
+                release_core_lease_request_from_json(json::parse(req.payload_json));
+            ReleaseCoreLeaseResponse rcr;
+            rcr.released = payload_req.lease_id == "lease-acquired";
+            rcr.exiting = payload_req.exit_if_oneshot;
+            json payload;
+            to_json(payload, rcr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::InstallService) {
+            InstallServiceResponse isr;
+            isr.success = true;
+            isr.exit_code = 0;
+            isr.message = "installed";
+            json payload;
+            to_json(payload, isr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::UninstallService) {
+            UninstallServiceResponse usr;
+            usr.success = true;
+            usr.exit_code = 0;
+            usr.message = "uninstalled";
+            json payload;
+            to_json(payload, usr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::ExportCleanupLease) {
+            ExportCleanupLeaseResponse ecr;
+            ecr.has_active_session = true;
+            ecr.lease.cleanup_lease_id = "cleanup-lease-pipe";
+            CleanupLeaseSession session;
+            session.session_id.value = "pipe-session";
+            session.profile_id.value = "pipe-profile";
+            session.managed_resources.push_back({"adapter", "ECNU-VPN"});
+            ecr.lease.sessions.push_back(session);
+            json payload;
+            to_json(payload, ecr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::HandoffSession) {
+            auto payload_req =
+                handoff_session_request_from_json(json::parse(req.payload_json));
+            HandoffSessionResponse hsr;
+            hsr.adopted = !payload_req.lease.sessions.empty();
+            hsr.message = "adopted";
+            for (const auto& session : payload_req.lease.sessions)
+                hsr.session_ids.push_back(session.session_id);
+            json payload;
+            to_json(payload, hsr);
+            resp.payload_json = payload.dump();
+        } else if (req.op == HelperOp::FinalizeHandoff) {
+            auto payload_req =
+                finalize_handoff_request_from_json(json::parse(req.payload_json));
+            FinalizeHandoffResponse fhr;
+            fhr.finalized = true;
+            fhr.exiting = payload_req.exit;
+            json payload;
+            to_json(payload, fhr);
+            resp.payload_json = payload.dump();
         } else {
             resp.success = false;
             resp.error_code = "unsupported_op";
@@ -498,6 +668,144 @@ static void test_persistent_connection() {
     std::cout << " PASS\n";
 }
 
+static void test_core_lease_protocol_methods() {
+    std::cout << "  test_core_lease_protocol_methods...";
+
+    std::string pipe = test_pipe_name();
+    int num_requests = 4;
+#ifdef _WIN32
+    std::thread server_thread(handle_persistent_requests_win32, pipe, num_requests);
+#else
+    std::thread server_thread(handle_persistent_requests_posix, pipe, num_requests);
+#endif
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    PipeClientConfig config;
+    config.pipe_path = pipe;
+    config.connect_timeout_ms = 3000;
+
+    PipeHelperClient client(config);
+    expect_true(client.connect(), "client should connect for core lease protocol test");
+
+    auto inspect_resp = client.inspect(InspectRequest{});
+    expect_true(inspect_resp.core_lease.active,
+                "Inspect should return core lease state");
+    expect_true(inspect_resp.core_lease.lease_id == "lease-inspect",
+                "Inspect should return lease id from helper");
+    expect_true(inspect_resp.task_queue.idle,
+                "Inspect should return task queue state");
+
+    AcquireCoreLeaseRequest acquire_req;
+    acquire_req.core_pid = 2468;
+    acquire_req.purpose = "connect";
+    auto acquire_resp = client.acquire_core_lease(acquire_req);
+    expect_true(acquire_resp.accepted,
+                "AcquireCoreLease should return accepted");
+    expect_true(acquire_resp.lease_id == "lease-acquired",
+                "AcquireCoreLease should return lease id");
+
+    KeepAliveRequest keep_alive_req;
+    keep_alive_req.lease_id = acquire_resp.lease_id;
+    keep_alive_req.state = "connected";
+    auto keep_alive_resp = client.keep_alive(keep_alive_req);
+    expect_true(keep_alive_resp.ok, "KeepAlive should succeed");
+
+    ReleaseCoreLeaseRequest release_req;
+    release_req.lease_id = acquire_resp.lease_id;
+    release_req.exit_if_oneshot = true;
+    auto release_resp = client.release_core_lease(release_req);
+    expect_true(release_resp.released, "ReleaseCoreLease should release lease");
+    expect_true(release_resp.exiting,
+                "ReleaseCoreLease should preserve exiting flag");
+
+    client.disconnect();
+    server_thread.join();
+    std::cout << " PASS\n";
+}
+
+static void test_service_maintenance_protocol_methods() {
+    std::cout << "  test_service_maintenance_protocol_methods...";
+
+    std::string pipe = test_pipe_name();
+    int num_requests = 2;
+#ifdef _WIN32
+    std::thread server_thread(handle_persistent_requests_win32, pipe, num_requests);
+#else
+    std::thread server_thread(handle_persistent_requests_posix, pipe, num_requests);
+#endif
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    PipeClientConfig config;
+    config.pipe_path = pipe;
+    config.connect_timeout_ms = 3000;
+
+    PipeHelperClient client(config);
+    expect_true(client.connect(),
+                "client should connect for service maintenance protocol test");
+
+    auto install_resp = client.install_service(InstallServiceRequest{});
+    expect_true(install_resp.success, "InstallService should succeed");
+    expect_true(install_resp.exit_code == 0,
+                "InstallService should preserve exit code");
+    expect_true(install_resp.message == "installed",
+                "InstallService should preserve status message");
+
+    auto uninstall_resp = client.uninstall_service(UninstallServiceRequest{});
+    expect_true(uninstall_resp.success, "UninstallService should succeed");
+    expect_true(uninstall_resp.message == "uninstalled",
+                "UninstallService should preserve status message");
+
+    client.disconnect();
+    server_thread.join();
+    std::cout << " PASS\n";
+}
+
+static void test_cleanup_lease_handoff_protocol_methods() {
+    std::cout << "  test_cleanup_lease_handoff_protocol_methods...";
+
+    std::string pipe = test_pipe_name();
+    int num_requests = 3;
+#ifdef _WIN32
+    std::thread server_thread(handle_persistent_requests_win32, pipe, num_requests);
+#else
+    std::thread server_thread(handle_persistent_requests_posix, pipe, num_requests);
+#endif
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    PipeClientConfig config;
+    config.pipe_path = pipe;
+    config.connect_timeout_ms = 3000;
+
+    PipeHelperClient client(config);
+    expect_true(client.connect(),
+                "client should connect for cleanup handoff protocol test");
+
+    auto export_resp = client.export_cleanup_lease(ExportCleanupLeaseRequest{});
+    expect_true(export_resp.has_active_session,
+                "ExportCleanupLease should report active session");
+    expect_true(export_resp.lease.sessions.size() == 1,
+                "ExportCleanupLease should carry sessions");
+
+    HandoffSessionRequest handoff_req;
+    handoff_req.lease = export_resp.lease;
+    auto handoff_resp = client.handoff_session(handoff_req);
+    expect_true(handoff_resp.adopted, "HandoffSession should adopt lease");
+    expect_true(handoff_resp.session_ids[0].value == "pipe-session",
+                "HandoffSession should return adopted session id");
+
+    FinalizeHandoffRequest finalize_req;
+    finalize_req.exit = true;
+    auto finalize_resp = client.finalize_handoff(finalize_req);
+    expect_true(finalize_resp.finalized,
+                "FinalizeHandoff should report finalized");
+    expect_true(finalize_resp.exiting,
+                "FinalizeHandoff should preserve exiting flag");
+
+    client.disconnect();
+    server_thread.join();
+    std::cout << " PASS\n";
+}
+
 // ---------------------------------------------------------------------------
 // Test: disconnect callback fires
 // ---------------------------------------------------------------------------
@@ -609,6 +917,12 @@ int main(int argc, char** argv) {
         test_single_hello();
     if (run_all || filter == "test_persistent_connection")
         test_persistent_connection();
+    if (run_all || filter == "test_core_lease_protocol_methods")
+        test_core_lease_protocol_methods();
+    if (run_all || filter == "test_service_maintenance_protocol_methods")
+        test_service_maintenance_protocol_methods();
+    if (run_all || filter == "test_cleanup_lease_handoff_protocol_methods")
+        test_cleanup_lease_handoff_protocol_methods();
     if (run_all || filter == "test_disconnect_callback")
         test_disconnect_callback();
 #endif

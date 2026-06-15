@@ -2,6 +2,10 @@
 
 #include "core/rpc/app_rpc_dispatcher.hpp"
 #include "core/rpc/service_actions.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "../support/fake_helper.hpp"
+#include "../support/fake_platform_network_ops.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -47,6 +51,14 @@ struct ServiceActionsFixture {
   }
 };
 
+exv::core::UserIntent make_active_intent() {
+  exv::core::UserIntent intent;
+  intent.desired_connected = true;
+  intent.auto_reconnect = true;
+  intent.profile_id.value = "service-actions-active";
+  return intent;
+}
+
 } // namespace
 
 int main() {
@@ -81,16 +93,31 @@ int main() {
   }
 
   {
-    ServiceActionsFixture fix;
-    auto resp = fix.dispatch("service.install");
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    helper->connect();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    auto controller =
+        std::make_shared<exv::core::TunnelController>(helper, net_ops);
+    controller->connect(make_active_intent());
+
+    exv::core_api::AppRpcDispatcher dispatcher;
+    exv::core_api::ServiceActions service(
+        unique_temp_dir("exv-service-active-install-test"), controller);
+    service.register_handlers(dispatcher);
+
+    exv::core_api::RpcRequest req;
+    req.action = "service.install";
+    req.payload_json = "{}";
+    req.request_id = "active-install";
+    auto resp = dispatcher.dispatch(req);
     ok = expect(!resp.success,
-                "service.install should return explicit unsupported action") &&
+                "service.install should use the active helper IPC path") &&
          ok;
-    ok = expect(resp.error_code == "unsupported_action",
-                "service.install should return unsupported_action") &&
+    ok = expect(resp.error_code == "service_install_failed",
+                "service.install active helper failure should not fall back to platform service manager") &&
          ok;
-    ok = expect(!resp.error_message.empty(),
-                "error message should not be empty") &&
+    ok = expect(resp.error_code != "helper_unavailable",
+                "service.install should not ignore the current helper client") &&
          ok;
   }
 
@@ -98,13 +125,40 @@ int main() {
     ServiceActionsFixture fix;
     auto resp = fix.dispatch("service.uninstall");
     ok = expect(!resp.success,
-                "service.uninstall should return explicit unsupported action") &&
+                "service.uninstall should fail when no helper instance is available") &&
          ok;
-    ok = expect(resp.error_code == "unsupported_action",
-                "service.uninstall should return unsupported_action") &&
+    ok = expect(resp.error_code == "service_not_installed" ||
+                    resp.error_code == "service_installed_not_running" ||
+                    resp.error_code == "helper_unavailable",
+                "service.uninstall should route through helper/backend resolution before privileged maintenance") &&
          ok;
     ok = expect(!resp.error_message.empty(),
                 "error message should not be empty") &&
+         ok;
+  }
+
+  {
+    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    auto controller =
+        std::make_shared<exv::core::TunnelController>(helper, net_ops);
+    controller->connect(make_active_intent());
+
+    exv::core_api::AppRpcDispatcher dispatcher;
+    exv::core_api::ServiceActions service(
+        unique_temp_dir("exv-service-active-test"), controller);
+    service.register_handlers(dispatcher);
+
+    exv::core_api::RpcRequest req;
+    req.action = "service.uninstall";
+    req.payload_json = "{}";
+    req.request_id = "active-uninstall";
+    auto resp = dispatcher.dispatch(req);
+    ok = expect(!resp.success,
+                "service.uninstall should reject active VPN sessions") &&
+         ok;
+    ok = expect(resp.error_code == "vpn_session_active",
+                "service.uninstall active rejection should use vpn_session_active") &&
          ok;
   }
 

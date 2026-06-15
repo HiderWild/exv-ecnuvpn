@@ -24,14 +24,17 @@ void TunnelController::Impl::update_snapshot() {
         snapshot_.server           = intent_.profile_id.value;
         snapshot_.interface_name   = adapter_name_;
 
-        // Helper status — in the real implementation this would query the
-        // helper; here we derive it from the client connection state.
-        if (helper_ && helper_->is_connected()) {
+        if (!helper_status_override_.empty()) {
+            snapshot_.helper_status = helper_status_override_;
+        } else if (helper_ && (helper_->is_connected() || helper_connected_seen_)) {
             snapshot_.helper_status = "connected";
         } else {
             snapshot_.helper_status = "unavailable";
         }
-        snapshot_.helper_mode = "transient";
+        snapshot_.helper_mode = helper_mode_;
+        snapshot_.helper_endpoint = helper_endpoint_;
+        snapshot_.core_lease_active = !core_lease_id_.empty();
+        snapshot_.session_active = !session_id_.value.empty();
 
         // Network-ready is true once we have fully connected.
         snapshot_.network_ready = (phase_ == TunnelPhase::Connected);

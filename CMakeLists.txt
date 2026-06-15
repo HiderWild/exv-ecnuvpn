@@ -154,6 +154,7 @@ set(EXV_HELPER_RUNTIME_SOURCES
     src/helper/helper.cpp
     src/helper/helper_daemon_context.cpp
     src/helper/helper_network_ops.cpp
+    src/helper/helper_service_ops.cpp
     src/helper/common/helper_messages.cpp
     src/helper/runtime/helper_request_dispatcher.cpp
     src/helper/runtime/session_lease_manager.cpp
@@ -161,6 +162,7 @@ set(EXV_HELPER_RUNTIME_SOURCES
     src/helper/runtime/command_validator.cpp
     src/helper/runtime/helper_lifecycle_policy.cpp
     src/helper/runtime/helper_session_store.cpp
+    src/helper/runtime/privileged_task_queue.cpp
     src/helper/helper_handler.cpp
 )
 
@@ -224,6 +226,7 @@ elseif(UNIX AND NOT APPLE)
         src/platform/linux/helper_service_manager.cpp
         src/platform/linux/openconnect_process.cpp
         src/platform/linux/oneshot_bootstrap.cpp
+        src/platform/linux/platform_network_ops_linux.cpp
         src/platform/linux/process_control.cpp
         src/platform/linux/tunnel_script.cpp
         src/platform/linux/virtual_network_probe.cpp
@@ -1393,6 +1396,20 @@ target_include_directories(helper_cleanup_registry_test PRIVATE
 
 add_test(NAME helper_cleanup_registry_test COMMAND helper_cleanup_registry_test)
 
+add_executable(privileged_task_queue_test
+    tests/privileged_task_queue_test.cpp
+    src/helper/runtime/privileged_task_queue.cpp
+)
+
+target_include_directories(privileged_task_queue_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(privileged_task_queue_test PRIVATE Threads::Threads)
+
+add_test(NAME privileged_task_queue_test COMMAND privileged_task_queue_test)
+
 add_executable(helper_contract_test
     tests/helper_contract_test.cpp
     tests/support/fake_helper.cpp
@@ -1402,6 +1419,7 @@ add_executable(helper_contract_test
     src/helper/runtime/command_validator.cpp
     src/helper/runtime/helper_lifecycle_policy.cpp
     src/helper/runtime/helper_request_dispatcher.cpp
+    src/helper/runtime/privileged_task_queue.cpp
     src/helper/helper_handler.cpp
     ${EXV_OBSERVABILITY_SOURCES}
 )
@@ -1645,6 +1663,8 @@ add_test(NAME config_actions_test COMMAND config_actions_test)
 
 add_executable(service_actions_test
     tests/core_api/service_actions_test.cpp
+    tests/support/fake_helper.cpp
+    tests/support/fake_platform_network_ops.cpp
 )
 
 target_include_directories(service_actions_test PRIVATE
@@ -1842,6 +1862,7 @@ add_executable(darwin_platform_network_ops_test
     src/platform/darwin/platform_network_ops_darwin.cpp
     src/platform/darwin/native_utun.cpp
     src/platform/darwin/native_route_config.cpp
+    src/platform/common/process_utils.cpp
 )
 
 target_include_directories(darwin_platform_network_ops_test PRIVATE
@@ -1952,6 +1973,7 @@ add_executable(helper_delegating_network_ops_test
     tests/support/fake_helper.cpp
     src/helper/common/helper_messages.cpp
     src/platform/common/helper_delegating_network_ops.cpp
+    src/platform/common/platform_network_ops.cpp
 )
 
 target_include_directories(helper_delegating_network_ops_test PRIVATE

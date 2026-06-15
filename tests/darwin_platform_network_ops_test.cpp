@@ -56,6 +56,16 @@ struct MockRouteApi {
   std::vector<int> mtu_values;
 };
 
+struct MockDnsApi {
+  std::vector<std::string> applied_interfaces;
+  std::vector<exv::platform::NativeDarwinDnsSettings> applied_settings;
+  std::vector<std::string> restored_interfaces;
+  std::vector<std::string> disabled_interfaces;
+  int apply_error = 0;
+  int restore_error = 0;
+  int disable_error = 0;
+};
+
 ecnuvpn::platform::NativeDarwinRouteApi make_route_api(MockRouteApi &mock) {
   ecnuvpn::platform::NativeDarwinRouteApi api;
   api.set_interface_mtu = [&mock](const std::string &, int mtu) {
@@ -85,6 +95,26 @@ ecnuvpn::platform::NativeDarwinRouteApi make_route_api(MockRouteApi &mock) {
       };
   api.interface_index_from_name = [](const std::string &) {
     return std::uint32_t{77};
+  };
+  return api;
+}
+
+exv::platform::NativeDarwinDnsApi make_dns_api(MockDnsApi &mock) {
+  exv::platform::NativeDarwinDnsApi api;
+  api.apply_dns =
+      [&mock](const std::string &interface_name,
+              const exv::platform::NativeDarwinDnsSettings &settings) {
+        mock.applied_interfaces.push_back(interface_name);
+        mock.applied_settings.push_back(settings);
+        return mock.apply_error;
+      };
+  api.restore_dns = [&mock](const std::string &interface_name) {
+    mock.restored_interfaces.push_back(interface_name);
+    return mock.restore_error;
+  };
+  api.disable_interface = [&mock](const std::string &interface_name) {
+    mock.disabled_interfaces.push_back(interface_name);
+    return mock.disable_error;
   };
   return api;
 }
@@ -161,23 +191,109 @@ bool darwin_platform_ops_rolls_back_routes_when_apply_fails() {
   return ok;
 }
 
-bool darwin_platform_ops_rejects_dns_before_mutation() {
+bool darwin_platform_ops_applies_dns_and_restores_on_cleanup() {
   bool ok = true;
   MockUtun utun;
   MockRouteApi routes;
+  MockDnsApi dns;
   auto ops = exv::platform::create_darwin_platform_network_ops(
-      make_utun_api(utun), make_route_api(routes));
+      make_utun_api(utun), make_route_api(routes), make_dns_api(dns));
 
   auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
+  config.routes.push_back({"10.0.0.0/8", "", 10, false});
   config.dns.servers = {"10.0.0.53"};
+  config.dns.search_domain = "vpn.example";
+  config.dns.suffixes = {"ecnu.edu.cn"};
 
-  ok = expect(!ops->apply_tunnel_config(device, config),
-              "apply must not report success for unimplemented DNS changes") &&
+  ok = expect(ops->apply_tunnel_config(device, config),
+              "apply should configure Darwin DNS through the native DNS API") &&
        ok;
-  ok = expect(routes.added_routes.empty() && routes.mtu_values.empty(),
-              "DNS rejection should happen before partial Darwin mutation") &&
+  ok = expect(dns.applied_interfaces.size() == 1 &&
+                  dns.applied_interfaces[0] == "utun7",
+              "DNS apply should target the utun interface") &&
+       ok;
+  ok = expect(dns.applied_settings.size() == 1 &&
+                  dns.applied_settings[0].servers.size() == 1 &&
+                  dns.applied_settings[0].search_domain == "vpn.example" &&
+                  dns.applied_settings[0].suffixes.size() == 1,
+              "DNS apply should preserve servers, search domain, and suffixes") &&
+       ok;
+
+  auto resources = ops->managed_resources();
+  bool saw_route = false;
+  bool saw_dns = false;
+  bool saw_adapter = false;
+  for (const auto &resource : resources) {
+    saw_adapter = saw_adapter || resource.type == "adapter";
+    saw_route = saw_route || resource.type == "darwin_route";
+    saw_dns = saw_dns || resource.type == "darwin_dns";
+  }
+  ok = expect(saw_adapter && saw_route && saw_dns,
+              "managed_resources should expose adapter, route, and DNS facts") &&
+       ok;
+
+  auto cleanup =
+      ops->cleanup(device.adapter_name, exv::platform::CleanupPolicy::Full);
+  ok = expect(cleanup.success, "full cleanup should succeed") && ok;
+  ok = expect(cleanup.dns_removed, "cleanup should report DNS restoration") &&
+       ok;
+  ok = expect(dns.restored_interfaces.size() == 1 &&
+                  dns.restored_interfaces[0] == "utun7",
+              "cleanup should restore DNS on the utun interface") &&
+       ok;
+  return ok;
+}
+
+bool darwin_platform_ops_fresh_backend_cleans_imported_resource_facts() {
+  bool ok = true;
+  std::vector<exv::platform::ManagedNetworkResource> resources;
+  {
+    MockUtun utun;
+    MockRouteApi routes;
+    MockDnsApi dns;
+    auto ops = exv::platform::create_darwin_platform_network_ops(
+        make_utun_api(utun), make_route_api(routes), make_dns_api(dns));
+
+    auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+    exv::platform::TunnelConfig config;
+    config.interface_address = "10.255.0.10/24";
+    config.routes.push_back({"10.0.0.0/8", "", 10, false});
+    config.dns.servers = {"10.0.0.53"};
+
+    ok = expect(ops->apply_tunnel_config(device, config),
+                "initial backend should apply route and DNS") &&
+         ok;
+    resources = ops->managed_resources();
+  }
+
+  MockUtun fresh_utun;
+  MockRouteApi fresh_routes;
+  MockDnsApi fresh_dns;
+  auto fresh_ops = exv::platform::create_darwin_platform_network_ops(
+      make_utun_api(fresh_utun), make_route_api(fresh_routes),
+      make_dns_api(fresh_dns));
+
+  auto cleanup =
+      fresh_ops->cleanup_resources(resources, exv::platform::CleanupPolicy::Full);
+  ok = expect(cleanup.success,
+              "fresh backend should clean imported Darwin resource facts") &&
+       ok;
+  ok = expect(cleanup.routes_removed == 1 &&
+                  fresh_routes.deleted_routes.size() == 1 &&
+                  fresh_routes.deleted_routes[0].cidr == "10.0.0.0/8",
+              "fresh backend should reconstruct and delete imported route") &&
+       ok;
+  ok = expect(cleanup.dns_removed &&
+                  fresh_dns.restored_interfaces.size() == 1 &&
+                  fresh_dns.restored_interfaces[0] == "utun7",
+              "fresh backend should restore imported DNS fact") &&
+       ok;
+  ok = expect(cleanup.adapter_removed &&
+                  fresh_dns.disabled_interfaces.size() == 1 &&
+                  fresh_dns.disabled_interfaces[0] == "utun7",
+              "fresh backend should disable imported adapter fact") &&
        ok;
   return ok;
 }
@@ -188,6 +304,7 @@ int main() {
   bool ok = true;
   ok = darwin_platform_ops_apply_routes_and_cleanup_in_order() && ok;
   ok = darwin_platform_ops_rolls_back_routes_when_apply_fails() && ok;
-  ok = darwin_platform_ops_rejects_dns_before_mutation() && ok;
+  ok = darwin_platform_ops_applies_dns_and_restores_on_cleanup() && ok;
+  ok = darwin_platform_ops_fresh_backend_cleans_imported_resource_facts() && ok;
   return ok ? 0 : 1;
 }

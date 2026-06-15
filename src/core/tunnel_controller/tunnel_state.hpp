@@ -57,6 +57,9 @@ struct TunnelStatusSnapshot {
     bool auto_reconnect = true;
     std::string helper_mode;      // transient|resident
     std::string helper_status;    // connected|unavailable|permission_denied
+    std::string helper_endpoint;
+    bool core_lease_active = false;
+    bool session_active = false;
     bool network_ready = false;
     std::string server;
     std::string interface_name;

@@ -14,7 +14,6 @@ import {
   type DesktopModalKind,
   type DesktopModalPayload,
   type DesktopRpcAction,
-  type DesktopServiceCommand,
   type DesktopServiceInstallPromptResult,
   type DesktopWindowMode,
 } from '../shared/desktop-contract.js'
@@ -313,50 +312,6 @@ function throwRpcResultError(result: RpcErrorResult): never {
   throw error
 }
 
-function isServiceUsable(status: unknown) {
-  return Boolean(
-    status &&
-      typeof status === 'object' &&
-      'installed' in status &&
-      'running' in status &&
-      'available' in status &&
-      (status as { installed?: unknown }).installed === true &&
-      (status as { running?: unknown }).running === true &&
-      (status as { available?: unknown }).available === true,
-  )
-}
-
-function isServiceUninstalled(status: unknown) {
-  return Boolean(
-    status &&
-      typeof status === 'object' &&
-      'installed' in status &&
-      (status as { installed?: unknown }).installed !== true,
-  )
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function waitForServiceCommandStatus(command: 'install' | 'uninstall') {
-  const deadline = Date.now() + 8000
-  let lastStatus: unknown = null
-
-  while (Date.now() < deadline) {
-    lastStatus = await runDesktopRpc('service.status')
-    if (command === 'install' && isServiceUsable(lastStatus)) {
-      return lastStatus
-    }
-    if (command === 'uninstall' && isServiceUninstalled(lastStatus)) {
-      return lastStatus
-    }
-    await delay(250)
-  }
-
-  return lastStatus ?? runDesktopRpc('service.status')
-}
-
 async function runDesktopRpc(action: DesktopRpcAction, payload: unknown = {}) {
   if (!validRpcActions.has(action)) {
     throw new Error(`Unknown desktop RPC action: ${action}`)
@@ -435,14 +390,6 @@ function emitEvent(type: DesktopEventType, data: unknown) {
   mainWindow.webContents.send(desktopIpcChannels.event, { type, data })
 }
 
-function emitServiceProgress(command: 'install' | 'uninstall', line: string) {
-  emitEvent('service-progress', {
-    command,
-    message: line.replace(/\[[0-9;]*m/g, ''),
-    timestamp: new Date().toISOString(),
-  })
-}
-
 function desktopPlatformContext() {
   return {
     execFileAsync,
@@ -453,7 +400,6 @@ function desktopPlatformContext() {
     parseJsonOutput,
     throwRpcResultError,
     runDesktopRpc,
-    emitServiceProgress,
   }
 }
 
@@ -877,36 +823,6 @@ ipcMain.handle(
     )
   },
 )
-
-ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: DesktopServiceCommand) => {
-  try {
-    await platformRunner.runServiceCommandElevated(desktopPlatformContext(), command)
-    const status = await waitForServiceCommandStatus(command)
-    if (command === 'install' && !isServiceUsable(status)) {
-      throw new Error('Helper service was installed but is not available to the desktop client.')
-    }
-    if (
-      command === 'uninstall' &&
-      status &&
-      typeof status === 'object' &&
-      (status as { installed?: unknown }).installed === true
-    ) {
-      throw new Error('Helper service uninstall completed, but the service is still registered.')
-    }
-    return status
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    try {
-      const status = await runDesktopRpc('service.status')
-      if (status && typeof status === 'object' && (status as { installed?: unknown }).installed) {
-        return { ...status, warning: message }
-      }
-    } catch {
-      // Preserve the original elevated command error below.
-    }
-    throw error
-  }
-})
 
 ipcMain.handle(desktopIpcChannels.cliCommand, async (_event, command: DesktopCliCommand) => {
   return platformRunner.runCliCommand(desktopPlatformContext(), command)

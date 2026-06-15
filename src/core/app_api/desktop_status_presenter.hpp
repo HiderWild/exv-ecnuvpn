@@ -21,6 +21,8 @@ nlohmann::json service_status_json();
 nlohmann::json runtime_status_json(const Config &cfg);
 nlohmann::json frontend_status_from_controller_snapshot(
     const exv::core::TunnelStatusSnapshot &snap, const Config &cfg);
+nlohmann::json helper_current_instance_from_controller_snapshot(
+    const exv::core::TunnelStatusSnapshot &snap);
 nlohmann::json driver_status_json(const Config &cfg);
 nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload);
 

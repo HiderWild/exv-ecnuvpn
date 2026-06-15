@@ -371,4 +371,106 @@ ShutdownResponse PipeHelperClient::shutdown(const ShutdownRequest& req) {
     return shutdown_response_from_json(json::parse(resp.payload_json));
 }
 
+InspectResponse PipeHelperClient::inspect(const InspectRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::Inspect, payload);
+    if (!resp.success) {
+        return InspectResponse{};
+    }
+    return inspect_response_from_json(json::parse(resp.payload_json));
+}
+
+AcquireCoreLeaseResponse PipeHelperClient::acquire_core_lease(
+    const AcquireCoreLeaseRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::AcquireCoreLease, payload);
+    if (!resp.success) {
+        return AcquireCoreLeaseResponse{};
+    }
+    return acquire_core_lease_response_from_json(json::parse(resp.payload_json));
+}
+
+KeepAliveResponse PipeHelperClient::keep_alive(const KeepAliveRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::KeepAlive, payload);
+    if (!resp.success) {
+        KeepAliveResponse kr;
+        kr.ok = false;
+        kr.warning = resp.error_message;
+        return kr;
+    }
+    return keep_alive_response_from_json(json::parse(resp.payload_json));
+}
+
+ReleaseCoreLeaseResponse PipeHelperClient::release_core_lease(
+    const ReleaseCoreLeaseRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::ReleaseCoreLease, payload);
+    if (!resp.success) {
+        return ReleaseCoreLeaseResponse{};
+    }
+    return release_core_lease_response_from_json(json::parse(resp.payload_json));
+}
+
+InstallServiceResponse PipeHelperClient::install_service(
+    const InstallServiceRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::InstallService, payload);
+    if (!resp.success) {
+        InstallServiceResponse result;
+        result.success = false;
+        result.exit_code = 1;
+        result.message = resp.error_message;
+        return result;
+    }
+    return install_service_response_from_json(json::parse(resp.payload_json));
+}
+
+UninstallServiceResponse PipeHelperClient::uninstall_service(
+    const UninstallServiceRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::UninstallService, payload);
+    if (!resp.success) {
+        UninstallServiceResponse result;
+        result.success = false;
+        result.exit_code = 1;
+        result.message = resp.error_message;
+        return result;
+    }
+    return uninstall_service_response_from_json(json::parse(resp.payload_json));
+}
+
+ExportCleanupLeaseResponse PipeHelperClient::export_cleanup_lease(
+    const ExportCleanupLeaseRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::ExportCleanupLease, payload);
+    if (!resp.success) {
+        return ExportCleanupLeaseResponse{};
+    }
+    return export_cleanup_lease_response_from_json(json::parse(resp.payload_json));
+}
+
+HandoffSessionResponse PipeHelperClient::handoff_session(
+    const HandoffSessionRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::HandoffSession, payload);
+    if (!resp.success) {
+        HandoffSessionResponse result;
+        result.adopted = false;
+        result.message = resp.error_message;
+        return result;
+    }
+    return handoff_session_response_from_json(json::parse(resp.payload_json));
+}
+
+FinalizeHandoffResponse PipeHelperClient::finalize_handoff(
+    const FinalizeHandoffRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::FinalizeHandoff, payload);
+    if (!resp.success) {
+        return FinalizeHandoffResponse{};
+    }
+    return finalize_handoff_response_from_json(json::parse(resp.payload_json));
+}
+
 } // namespace exv::helper

@@ -84,11 +84,53 @@ HelperSessionState helper_session_state_from_json(const json& j) {
     return state;
 }
 
+void to_json(json& j, const CoreLeaseState& state) {
+    j = json{{"active", state.active},
+             {"lease_id", state.lease_id},
+             {"core_pid", state.core_pid},
+             {"purpose", state.purpose},
+             {"last_seen_state", state.last_seen_state}};
+}
+
+void from_json(const json& j, CoreLeaseState& state) {
+    state = core_lease_state_from_json(j);
+}
+
+CoreLeaseState core_lease_state_from_json(const json& j) {
+    CoreLeaseState state;
+    state.active = j.value("active", false);
+    state.lease_id = j.value("lease_id", "");
+    state.core_pid = j.value("core_pid", 0);
+    state.purpose = j.value("purpose", "");
+    state.last_seen_state = j.value("last_seen_state", "");
+    return state;
+}
+
+void to_json(json& j, const TaskQueueState& state) {
+    j = json{{"idle", state.idle},
+             {"current_job_id", state.current_job_id},
+             {"pending_jobs", state.pending_jobs}};
+}
+
+void from_json(const json& j, TaskQueueState& state) {
+    state = task_queue_state_from_json(j);
+}
+
+TaskQueueState task_queue_state_from_json(const json& j) {
+    TaskQueueState state;
+    state.idle = j.value("idle", true);
+    state.current_job_id = j.value("current_job_id", "");
+    state.pending_jobs = j.value("pending_jobs", 0);
+    return state;
+}
+
 void to_json(json& j, const HelloResponse& resp) {
     j = json{{"capabilities", resp.capabilities},
              {"mode", mode_to_uint(resp.mode)},
              {"startup_context", resp.startup_context},
-             {"session_state", resp.session_state}};
+             {"session_state", resp.session_state},
+             {"core_lease", resp.core_lease},
+             {"task_queue", resp.task_queue}};
 }
 
 HelloResponse hello_response_from_json(const json& j) {
@@ -101,6 +143,10 @@ HelloResponse hello_response_from_json(const json& j) {
         resp.startup_context = helper_startup_context_from_json(j["startup_context"]);
     if (j.contains("session_state"))
         resp.session_state = helper_session_state_from_json(j["session_state"]);
+    if (j.contains("core_lease"))
+        resp.core_lease = core_lease_state_from_json(j["core_lease"]);
+    if (j.contains("task_queue"))
+        resp.task_queue = task_queue_state_from_json(j["task_queue"]);
     return resp;
 }
 
@@ -371,6 +417,376 @@ ShutdownResponse shutdown_response_from_json(const json& j) {
     resp.cleanup_success = j.value("cleanup_success", false);
     resp.exiting = j.value("exiting", false);
     if (j.contains("errors")) resp.errors = j["errors"].get<std::vector<std::string>>();
+    return resp;
+}
+
+// ---- Inspect / Core lease control ----
+
+void to_json(json& j, const InspectRequest& req) {
+    (void)req;
+    j = json::object();
+}
+
+void from_json(const json& j, InspectRequest& req) {
+    req = inspect_request_from_json(j);
+}
+
+InspectRequest inspect_request_from_json(const json& j) {
+    (void)j;
+    return {};
+}
+
+void to_json(json& j, const InspectResponse& resp) {
+    j = json{{"capabilities", resp.capabilities},
+             {"mode", mode_to_uint(resp.mode)},
+             {"startup_context", resp.startup_context},
+             {"session_state", resp.session_state},
+             {"core_lease", resp.core_lease},
+             {"task_queue", resp.task_queue}};
+}
+
+void from_json(const json& j, InspectResponse& resp) {
+    resp = inspect_response_from_json(j);
+}
+
+InspectResponse inspect_response_from_json(const json& j) {
+    InspectResponse resp;
+    if (j.contains("capabilities"))
+        resp.capabilities = j["capabilities"].get<std::vector<std::string>>();
+    if (j.contains("mode"))
+        resp.mode = uint_to_mode(j["mode"].get<uint32_t>());
+    if (j.contains("startup_context"))
+        resp.startup_context = helper_startup_context_from_json(j["startup_context"]);
+    if (j.contains("session_state"))
+        resp.session_state = helper_session_state_from_json(j["session_state"]);
+    if (j.contains("core_lease"))
+        resp.core_lease = core_lease_state_from_json(j["core_lease"]);
+    if (j.contains("task_queue"))
+        resp.task_queue = task_queue_state_from_json(j["task_queue"]);
+    return resp;
+}
+
+void to_json(json& j, const AcquireCoreLeaseRequest& req) {
+    j = json{{"core_pid", req.core_pid}, {"purpose", req.purpose}};
+}
+
+void from_json(const json& j, AcquireCoreLeaseRequest& req) {
+    req = acquire_core_lease_request_from_json(j);
+}
+
+AcquireCoreLeaseRequest acquire_core_lease_request_from_json(const json& j) {
+    AcquireCoreLeaseRequest req;
+    req.core_pid = j.value("core_pid", 0);
+    req.purpose = j.value("purpose", "");
+    return req;
+}
+
+void to_json(json& j, const AcquireCoreLeaseResponse& resp) {
+    j = json{{"accepted", resp.accepted},
+             {"lease_id", resp.lease_id},
+             {"mode", resp.mode}};
+}
+
+void from_json(const json& j, AcquireCoreLeaseResponse& resp) {
+    resp = acquire_core_lease_response_from_json(j);
+}
+
+AcquireCoreLeaseResponse acquire_core_lease_response_from_json(const json& j) {
+    AcquireCoreLeaseResponse resp;
+    resp.accepted = j.value("accepted", false);
+    resp.lease_id = j.value("lease_id", "");
+    resp.mode = j.value("mode", "");
+    return resp;
+}
+
+void to_json(json& j, const KeepAliveRequest& req) {
+    j = json{{"lease_id", req.lease_id}, {"state", req.state}};
+}
+
+void from_json(const json& j, KeepAliveRequest& req) {
+    req = keep_alive_request_from_json(j);
+}
+
+KeepAliveRequest keep_alive_request_from_json(const json& j) {
+    KeepAliveRequest req;
+    req.lease_id = j.value("lease_id", "");
+    req.state = j.value("state", "");
+    return req;
+}
+
+void to_json(json& j, const KeepAliveResponse& resp) {
+    j = json{{"ok", resp.ok}};
+    if (resp.warning.has_value()) j["warning"] = resp.warning.value();
+}
+
+void from_json(const json& j, KeepAliveResponse& resp) {
+    resp = keep_alive_response_from_json(j);
+}
+
+KeepAliveResponse keep_alive_response_from_json(const json& j) {
+    KeepAliveResponse resp;
+    resp.ok = j.value("ok", true);
+    if (j.contains("warning")) resp.warning = j["warning"].get<std::string>();
+    return resp;
+}
+
+void to_json(json& j, const ReleaseCoreLeaseRequest& req) {
+    j = json{{"lease_id", req.lease_id},
+             {"exit_if_oneshot", req.exit_if_oneshot}};
+}
+
+void from_json(const json& j, ReleaseCoreLeaseRequest& req) {
+    req = release_core_lease_request_from_json(j);
+}
+
+ReleaseCoreLeaseRequest release_core_lease_request_from_json(const json& j) {
+    ReleaseCoreLeaseRequest req;
+    req.lease_id = j.value("lease_id", "");
+    req.exit_if_oneshot = j.value("exit_if_oneshot", true);
+    return req;
+}
+
+void to_json(json& j, const ReleaseCoreLeaseResponse& resp) {
+    j = json{{"released", resp.released}, {"exiting", resp.exiting}};
+}
+
+void from_json(const json& j, ReleaseCoreLeaseResponse& resp) {
+    resp = release_core_lease_response_from_json(j);
+}
+
+ReleaseCoreLeaseResponse release_core_lease_response_from_json(const json& j) {
+    ReleaseCoreLeaseResponse resp;
+    resp.released = j.value("released", false);
+    resp.exiting = j.value("exiting", false);
+    return resp;
+}
+
+void to_json(json& j, const ManagedResource& resource) {
+    j = json{{"type", resource.type}, {"detail", resource.detail}};
+}
+
+void from_json(const json& j, ManagedResource& resource) {
+    resource = managed_resource_from_json(j);
+}
+
+ManagedResource managed_resource_from_json(const json& j) {
+    ManagedResource resource;
+    resource.type = j.value("type", "");
+    resource.detail = j.value("detail", "");
+    return resource;
+}
+
+void to_json(json& j, const InstallServiceRequest& req) {
+    (void)req;
+    j = json::object();
+}
+
+void from_json(const json& j, InstallServiceRequest& req) {
+    req = install_service_request_from_json(j);
+}
+
+InstallServiceRequest install_service_request_from_json(const json& j) {
+    (void)j;
+    return {};
+}
+
+void to_json(json& j, const InstallServiceResponse& resp) {
+    j = json{{"success", resp.success},
+             {"exit_code", resp.exit_code},
+             {"message", resp.message}};
+}
+
+void from_json(const json& j, InstallServiceResponse& resp) {
+    resp = install_service_response_from_json(j);
+}
+
+InstallServiceResponse install_service_response_from_json(const json& j) {
+    InstallServiceResponse resp;
+    resp.success = j.value("success", false);
+    resp.exit_code = j.value("exit_code", 1);
+    resp.message = j.value("message", "");
+    return resp;
+}
+
+void to_json(json& j, const UninstallServiceRequest& req) {
+    (void)req;
+    j = json::object();
+}
+
+void from_json(const json& j, UninstallServiceRequest& req) {
+    req = uninstall_service_request_from_json(j);
+}
+
+UninstallServiceRequest uninstall_service_request_from_json(const json& j) {
+    (void)j;
+    return {};
+}
+
+void to_json(json& j, const UninstallServiceResponse& resp) {
+    j = json{{"success", resp.success},
+             {"exit_code", resp.exit_code},
+             {"message", resp.message}};
+}
+
+void from_json(const json& j, UninstallServiceResponse& resp) {
+    resp = uninstall_service_response_from_json(j);
+}
+
+UninstallServiceResponse uninstall_service_response_from_json(const json& j) {
+    UninstallServiceResponse resp;
+    resp.success = j.value("success", false);
+    resp.exit_code = j.value("exit_code", 1);
+    resp.message = j.value("message", "");
+    return resp;
+}
+
+void to_json(json& j, const CleanupLeaseSession& session) {
+    j = json{{"session_id", session.session_id},
+             {"profile_id", session.profile_id},
+             {"mode", mode_to_uint(session.mode)},
+             {"core_phase", session.core_phase},
+             {"cleanup_policy", session.cleanup_policy},
+             {"managed_resources", session.managed_resources}};
+}
+
+void from_json(const json& j, CleanupLeaseSession& session) {
+    session = cleanup_lease_session_from_json(j);
+}
+
+CleanupLeaseSession cleanup_lease_session_from_json(const json& j) {
+    CleanupLeaseSession session;
+    if (j.contains("session_id")) from_json(j["session_id"], session.session_id);
+    if (j.contains("profile_id")) from_json(j["profile_id"], session.profile_id);
+    if (j.contains("mode")) session.mode = uint_to_mode(j["mode"].get<uint32_t>());
+    session.core_phase = j.value("core_phase", "");
+    if (j.contains("cleanup_policy"))
+        session.cleanup_policy = cleanup_policy_from_json(j["cleanup_policy"]);
+    if (j.contains("managed_resources")) {
+        for (const auto& resource : j["managed_resources"]) {
+            session.managed_resources.push_back(
+                managed_resource_from_json(resource));
+        }
+    }
+    return session;
+}
+
+void to_json(json& j, const CleanupLease& lease) {
+    j = json{{"cleanup_lease_id", lease.cleanup_lease_id},
+             {"sessions", lease.sessions}};
+}
+
+void from_json(const json& j, CleanupLease& lease) {
+    lease = cleanup_lease_from_json(j);
+}
+
+CleanupLease cleanup_lease_from_json(const json& j) {
+    CleanupLease lease;
+    lease.cleanup_lease_id = j.value("cleanup_lease_id", "");
+    if (j.contains("sessions")) {
+        for (const auto& session : j["sessions"]) {
+            lease.sessions.push_back(cleanup_lease_session_from_json(session));
+        }
+    }
+    return lease;
+}
+
+void to_json(json& j, const ExportCleanupLeaseRequest& req) {
+    (void)req;
+    j = json::object();
+}
+
+void from_json(const json& j, ExportCleanupLeaseRequest& req) {
+    req = export_cleanup_lease_request_from_json(j);
+}
+
+ExportCleanupLeaseRequest export_cleanup_lease_request_from_json(const json& j) {
+    (void)j;
+    return {};
+}
+
+void to_json(json& j, const ExportCleanupLeaseResponse& resp) {
+    j = json{{"lease", resp.lease},
+             {"has_active_session", resp.has_active_session}};
+}
+
+void from_json(const json& j, ExportCleanupLeaseResponse& resp) {
+    resp = export_cleanup_lease_response_from_json(j);
+}
+
+ExportCleanupLeaseResponse export_cleanup_lease_response_from_json(
+    const json& j) {
+    ExportCleanupLeaseResponse resp;
+    if (j.contains("lease"))
+        resp.lease = cleanup_lease_from_json(j["lease"]);
+    resp.has_active_session = j.value("has_active_session", false);
+    return resp;
+}
+
+void to_json(json& j, const HandoffSessionRequest& req) {
+    j = json{{"lease", req.lease}};
+}
+
+void from_json(const json& j, HandoffSessionRequest& req) {
+    req = handoff_session_request_from_json(j);
+}
+
+HandoffSessionRequest handoff_session_request_from_json(const json& j) {
+    HandoffSessionRequest req;
+    if (j.contains("lease"))
+        req.lease = cleanup_lease_from_json(j["lease"]);
+    return req;
+}
+
+void to_json(json& j, const HandoffSessionResponse& resp) {
+    j = json{{"adopted", resp.adopted},
+             {"session_ids", resp.session_ids},
+             {"message", resp.message}};
+}
+
+void from_json(const json& j, HandoffSessionResponse& resp) {
+    resp = handoff_session_response_from_json(j);
+}
+
+HandoffSessionResponse handoff_session_response_from_json(const json& j) {
+    HandoffSessionResponse resp;
+    resp.adopted = j.value("adopted", false);
+    if (j.contains("session_ids")) {
+        for (const auto& id : j["session_ids"]) {
+            SessionId session_id;
+            from_json(id, session_id);
+            resp.session_ids.push_back(session_id);
+        }
+    }
+    resp.message = j.value("message", "");
+    return resp;
+}
+
+void to_json(json& j, const FinalizeHandoffRequest& req) {
+    j = json{{"exit", req.exit}};
+}
+
+void from_json(const json& j, FinalizeHandoffRequest& req) {
+    req = finalize_handoff_request_from_json(j);
+}
+
+FinalizeHandoffRequest finalize_handoff_request_from_json(const json& j) {
+    FinalizeHandoffRequest req;
+    req.exit = j.value("exit", true);
+    return req;
+}
+
+void to_json(json& j, const FinalizeHandoffResponse& resp) {
+    j = json{{"finalized", resp.finalized}, {"exiting", resp.exiting}};
+}
+
+void from_json(const json& j, FinalizeHandoffResponse& resp) {
+    resp = finalize_handoff_response_from_json(j);
+}
+
+FinalizeHandoffResponse finalize_handoff_response_from_json(const json& j) {
+    FinalizeHandoffResponse resp;
+    resp.finalized = j.value("finalized", false);
+    resp.exiting = j.value("exiting", false);
     return resp;
 }
 

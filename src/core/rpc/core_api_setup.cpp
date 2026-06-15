@@ -22,7 +22,7 @@ std::unique_ptr<AppRpcDispatcher> create_dispatcher(
     config->register_handlers(*dispatcher);
     dispatcher->retain_action(config);
 
-    auto service = std::make_shared<ServiceActions>();
+    auto service = std::make_shared<ServiceActions>(controller);
     service->register_handlers(*dispatcher);
     dispatcher->retain_action(service);
 

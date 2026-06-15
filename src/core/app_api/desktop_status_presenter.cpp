@@ -192,6 +192,18 @@ nlohmann::json frontend_status_from_controller_snapshot(
   return j;
 }
 
+nlohmann::json helper_current_instance_from_controller_snapshot(
+    const exv::core::TunnelStatusSnapshot &snap) {
+  nlohmann::json j;
+  j["mode"] = snap.helper_mode;
+  j["status"] = snap.helper_status;
+  j["lease_active"] = snap.core_lease_active;
+  j["session_active"] = snap.session_active;
+  j["endpoint"] = snap.helper_endpoint;
+  j["phase"] = exv::core::tunnel_phase_wire_name(snap.phase);
+  return j;
+}
+
 nlohmann::json driver_status_json(const Config &cfg) {
   return platform::driver_status_json(config::to_platform_config_view(cfg));
 }

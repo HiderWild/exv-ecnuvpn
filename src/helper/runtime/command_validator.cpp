@@ -11,6 +11,15 @@ const std::set<HelperOp> CommandValidator::allowed_ops_ = {
     HelperOp::Cleanup,
     HelperOp::GetSnapshot,
     HelperOp::Shutdown,
+    HelperOp::Inspect,
+    HelperOp::AcquireCoreLease,
+    HelperOp::KeepAlive,
+    HelperOp::ReleaseCoreLease,
+    HelperOp::InstallService,
+    HelperOp::UninstallService,
+    HelperOp::ExportCleanupLease,
+    HelperOp::HandoffSession,
+    HelperOp::FinalizeHandoff,
 };
 
 std::optional<HelperError> CommandValidator::validate(const HelperRequest& request) const {

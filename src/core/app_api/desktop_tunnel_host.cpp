@@ -93,6 +93,38 @@ get_tunnel_controller_if_exists() {
   return tunnel_holder().controller;
 }
 
+std::shared_ptr<exv::helper::HelperClient>
+get_current_helper_client_if_exists() {
+  return tunnel_holder().client;
+}
+
+bool replace_tunnel_controller_helper_for_handoff(
+    std::unique_ptr<exv::helper::HelperConnector> connector,
+    std::shared_ptr<exv::helper::HelperClient> client,
+    std::string core_lease_id,
+    std::string helper_mode,
+    std::string helper_endpoint) {
+  auto &h = tunnel_holder();
+  if (!h.controller || !connector || !client || !client->is_connected()) {
+    return false;
+  }
+
+  auto net_ops =
+      std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(
+          client.get());
+  if (!h.controller->replace_helper_for_handoff(
+          client, net_ops, std::move(core_lease_id), std::move(helper_mode),
+          std::move(helper_endpoint))) {
+    return false;
+  }
+
+  h.connector = std::move(connector);
+  h.client = std::move(client);
+  h.net_ops = std::move(net_ops);
+  exv::core::set_tunnel_controller_active(true);
+  return true;
+}
+
 void reset_tunnel_controller() {
   auto &h = tunnel_holder();
   h.controller.reset();

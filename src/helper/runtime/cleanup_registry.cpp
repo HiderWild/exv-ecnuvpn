@@ -50,6 +50,11 @@ nlohmann::json cleanup_record_to_json(const CleanupRecord& rec) {
     nlohmann::json fw = nlohmann::json::array();
     for (const auto& f : rec.firewall_rules) fw.push_back(f);
 
+    nlohmann::json managed_resources = nlohmann::json::array();
+    for (const auto& resource : rec.managed_resources) {
+        managed_resources.push_back(managed_resource_to_json(resource));
+    }
+
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         rec.created_at.time_since_epoch()).count();
 
@@ -58,6 +63,7 @@ nlohmann::json cleanup_record_to_json(const CleanupRecord& rec) {
             {"routes", routes},
             {"dns", dns_config_to_json(rec.dns)},
             {"firewall_rules", fw},
+            {"managed_resources", managed_resources},
             {"created_at_ms", ms}};
 }
 
@@ -72,6 +78,11 @@ CleanupRecord json_to_cleanup_record(const nlohmann::json& j) {
     if (j.contains("dns")) rec.dns = json_to_dns_config(j["dns"]);
     if (j.contains("firewall_rules"))
         rec.firewall_rules = j["firewall_rules"].get<std::vector<std::string>>();
+    if (j.contains("managed_resources")) {
+        for (const auto& resource : j["managed_resources"]) {
+            rec.managed_resources.push_back(json_to_managed_resource(resource));
+        }
+    }
     if (j.contains("created_at_ms")) {
         auto ms = j["created_at_ms"].get<int64_t>();
         rec.created_at = std::chrono::system_clock::time_point(
@@ -89,20 +100,7 @@ void CleanupRegistry::register_session(const CleanupRecord& record) {
 void CleanupRegistry::add_resource(const SessionId& id, const ManagedResource& resource) {
     auto it = records_.find(id);
     if (it == records_.end()) return;
-    // Store resources in the routes vector is not the intent; we just keep
-    // ManagedResource in the cleanup record's firewall_rules is not right either.
-    // The ManagedResource is a lightweight tag; store it by extending the record.
-    // We use a parallel map approach: since CleanupRecord doesn't have a
-    // ManagedResource vector, we store resources in the detail field of routes
-    // or firewall_rules. For simplicity, encode as firewall_rules entries.
-    // Actually, looking at the header, get_resources returns vector<ManagedResource>,
-    // but CleanupRecord doesn't store them. We need to store them ourselves.
-    // We'll store them as a side-channel by appending to firewall_rules with a prefix.
-    // This is a pragmatic approach given the existing struct layout.
-    // Better: just keep a separate map. But the header only has records_.
-    // We'll encode managed resources as "type:detail" strings in firewall_rules
-    // with a magic prefix.
-    it->second.firewall_rules.push_back("__managed__:" + resource.type + ":" + resource.detail);
+    it->second.managed_resources.push_back(resource);
 }
 
 std::vector<ManagedResource> CleanupRegistry::get_resources(const SessionId& id) const {
@@ -117,20 +115,14 @@ std::vector<ManagedResource> CleanupRegistry::get_resources(const SessionId& id)
         result.push_back({"dns", s});
     }
     for (const auto& f : it->second.firewall_rules) {
-        if (f.rfind("__managed__:", 0) == 0) {
-            // Parse back: __managed__:type:detail
-            auto first_colon = f.find(':', 12);
-            if (first_colon != std::string::npos) {
-                result.push_back({f.substr(12, first_colon - 12),
-                                  f.substr(first_colon + 1)});
-            }
-        } else {
-            result.push_back({"firewall_rule", f});
-        }
+        result.push_back({"firewall_rule", f});
     }
     if (!it->second.adapter_name.empty()) {
         result.push_back({"adapter", it->second.adapter_name});
     }
+    result.insert(result.end(),
+                  it->second.managed_resources.begin(),
+                  it->second.managed_resources.end());
     return result;
 }
 

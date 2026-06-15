@@ -74,6 +74,9 @@ RpcResponse VpnActions::status(const RpcRequest& req) {
         {"auto_reconnect", s.auto_reconnect},
         {"helper_mode", s.helper_mode},
         {"helper_status", s.helper_status},
+        {"helper_endpoint", s.helper_endpoint},
+        {"core_lease_active", s.core_lease_active},
+        {"session_active", s.session_active},
         {"network_ready", s.network_ready},
         {"server", s.server},
         {"interface_name", s.interface_name}

@@ -11,6 +11,7 @@ class SessionLeaseManager {
 public:
     // Session lifecycle
     SessionId create_session(ProfileId profile_id, HelperMode mode, CleanupPolicy policy);
+    bool import_session(const SessionLease& lease);
     bool has_session(const SessionId& id) const;
     std::optional<SessionLease> get_session(const SessionId& id) const;
     void remove_session(const SessionId& id);

@@ -15,6 +15,15 @@ enum class HelperOp : std::uint32_t {
   Cleanup = 6,
   GetSnapshot = 7,
   Shutdown = 8,
+  Inspect = 9,
+  AcquireCoreLease = 10,
+  KeepAlive = 11,
+  ReleaseCoreLease = 12,
+  InstallService = 13,
+  UninstallService = 14,
+  ExportCleanupLease = 15,
+  HandoffSession = 16,
+  FinalizeHandoff = 17,
 };
 
 enum class HelperMode : std::uint32_t {
@@ -27,7 +36,7 @@ constexpr std::uint32_t helper_op_code(HelperOp op) noexcept {
 }
 
 constexpr std::uint32_t helper_op_count() noexcept {
-  return 8;
+  return 17;
 }
 
 constexpr std::uint32_t helper_mode_code(HelperMode mode) noexcept {
@@ -39,6 +48,15 @@ constexpr bool helper_op_requires_session(HelperOp op) noexcept {
   case HelperOp::Hello:
   case HelperOp::StartSession:
   case HelperOp::GetSnapshot:
+  case HelperOp::Inspect:
+  case HelperOp::AcquireCoreLease:
+  case HelperOp::KeepAlive:
+  case HelperOp::ReleaseCoreLease:
+  case HelperOp::InstallService:
+  case HelperOp::UninstallService:
+  case HelperOp::ExportCleanupLease:
+  case HelperOp::HandoffSession:
+  case HelperOp::FinalizeHandoff:
     return false;
   case HelperOp::PrepareTunnelDevice:
   case HelperOp::ApplyTunnelConfig:

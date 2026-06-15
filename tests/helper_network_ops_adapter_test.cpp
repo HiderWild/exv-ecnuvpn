@@ -57,6 +57,16 @@ public:
     return result;
   }
 
+  exv::platform::CleanupResult cleanup_resources(
+      const std::vector<exv::platform::ManagedNetworkResource> &resources,
+      exv::platform::CleanupPolicy policy) override {
+    ++cleanup_resources_count;
+    last_cleanup_resources = resources;
+    last_cleanup_policy = policy;
+    return cleanup(resources.empty() ? std::string() : resources.front().detail,
+                   policy);
+  }
+
   bool device_exists(const std::string &adapter_name) const override {
     return adapter_name == last_prepare_adapter;
   }
@@ -64,6 +74,7 @@ public:
   int prepare_count = 0;
   int apply_count = 0;
   int cleanup_count = 0;
+  int cleanup_resources_count = 0;
   int last_prepare_mtu = 0;
   std::string last_prepare_adapter;
   std::string last_cleanup_adapter;
@@ -71,6 +82,7 @@ public:
       exv::platform::CleanupPolicy::RoutesOnly;
   exv::platform::TunnelDeviceDescriptor last_apply_device;
   exv::platform::TunnelConfig last_apply_config;
+  std::vector<exv::platform::ManagedNetworkResource> last_cleanup_resources;
 };
 
 int test_platform_backed_helper_ops_delegate_and_track_resources() {
@@ -157,7 +169,13 @@ int test_platform_backed_helper_ops_delegate_and_track_resources() {
 
   ok = expect(cleanup.success, "cleanup should report platform success") && ok;
   ok = expect(recording->cleanup_count == 1,
-              "platform cleanup should be called once") &&
+              "platform cleanup fallback should be called once") &&
+       ok;
+  ok = expect(recording->cleanup_resources_count == 1,
+              "helper cleanup should call platform resource-aware cleanup") &&
+       ok;
+  ok = expect(recording->last_cleanup_resources.size() == 3,
+              "resource-aware cleanup should receive all managed resources") &&
        ok;
   ok = expect(recording->last_cleanup_adapter == "ECNU-VPN",
               "cleanup should use tracked adapter") &&

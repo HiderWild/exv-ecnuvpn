@@ -2,7 +2,35 @@
 
 #include <exception>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace exv::core {
+
+namespace {
+
+int current_process_id() {
+#ifdef _WIN32
+        return static_cast<int>(GetCurrentProcessId());
+#else
+        return static_cast<int>(getpid());
+#endif
+    }
+
+std::string helper_mode_wire_name(exv::helper::HelperMode mode) {
+        switch (mode) {
+        case exv::helper::HelperMode::Resident:
+            return "resident";
+        case exv::helper::HelperMode::Transient:
+        default:
+            return "oneshot";
+        }
+    }
+
+} // namespace
 
 // ================================================================
 // Guards
@@ -217,6 +245,7 @@ void TunnelController::Impl::do_connect() {
         // Step 1 — bookkeeping
         intent_.desired_connected = true;
         clear_error();
+        helper_status_override_.clear();
         network_config_applied_ = false;
         timing_.timer.reset();
         reconnect_attempts_ = 0;
@@ -247,7 +276,17 @@ void TunnelController::Impl::do_connect() {
         transition_to(TunnelPhase::PreparingHelper);
 
         try {
-            (void)helper_->hello(exv::helper::HelloRequest{});
+            auto hello = helper_->hello(exv::helper::HelloRequest{});
+            helper_connected_seen_ = true;
+            helper_mode_ = helper_mode_wire_name(hello.mode);
+            helper_endpoint_ = hello.startup_context.endpoint;
+            update_snapshot();
+
+            if (!acquire_core_lease()) {
+                timing_.timer.end(ConnectTiming::HELPER_PREPARE);
+                transition_to(TunnelPhase::Failed);
+                return;
+            }
 
             exv::helper::StartSessionRequest req;
             req.profile_id.value = intent_.profile_id.value;
@@ -348,6 +387,46 @@ void TunnelController::Impl::do_connect() {
                          {{"session_id", session_id_.value}});
         reconnect_policy_.reset();
         start_heartbeat();
+    }
+
+bool TunnelController::Impl::acquire_core_lease() {
+        if (!core_lease_id_.empty()) {
+            return true;
+        }
+
+        exv::helper::AcquireCoreLeaseRequest req;
+        req.core_pid = current_process_id();
+        req.purpose = "vpn.connect";
+
+        try {
+            auto resp = helper_->acquire_core_lease(req);
+            if (!resp.accepted || resp.lease_id.empty()) {
+                helper_status_override_ = "core_lease_failed";
+                auto err = CoreErrorMapper::from_helper_error(
+                    "core_lease_failed",
+                    "Helper rejected CoreLease acquisition");
+                err.recoverable = false;
+                set_error(err);
+                update_snapshot();
+                return false;
+            }
+
+            core_lease_id_ = resp.lease_id;
+            if (!resp.mode.empty()) {
+                helper_mode_ = resp.mode;
+            }
+            helper_status_override_.clear();
+            start_core_lease_keepalive();
+            update_snapshot();
+            return true;
+        } catch (const std::exception& e) {
+            helper_status_override_ = "core_lease_failed";
+            auto err = CoreErrorMapper::from_helper_error("core_lease_failed", e.what());
+            err.recoverable = false;
+            set_error(err);
+            update_snapshot();
+            return false;
+        }
     }
 
 } // namespace exv::core

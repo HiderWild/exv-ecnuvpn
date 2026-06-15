@@ -1,9 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs'
-
 import type {
   DesktopCliCommand,
   DesktopRpcAction,
-  DesktopServiceCommand,
 } from '../../shared/desktop-contract.js'
 
 export type RpcErrorResult = {
@@ -41,7 +38,6 @@ export type DesktopPlatformContext = {
   parseJsonOutput: (stdout: string) => unknown
   throwRpcResultError: (result: RpcErrorResult) => never
   runDesktopRpc: (action: DesktopRpcAction, payload?: unknown) => Promise<unknown>
-  emitServiceProgress: (command: DesktopServiceCommand, line: string) => void
 }
 
 export interface DesktopPlatformRunner {
@@ -50,10 +46,6 @@ export interface DesktopPlatformRunner {
   resolveRuntimeBinaryName: () => string
   resolveRuntimeCandidates: (root: string, resourcesPath: string, isPackaged: boolean, exv: string, runtimeBinaryName: string) => string[]
   shouldQuitOnWindowClose: () => boolean
-  runServiceCommandElevated: (
-    context: DesktopPlatformContext,
-    command: DesktopServiceCommand,
-  ) => Promise<void>
   runCliCommand: (
     context: DesktopPlatformContext,
     command: DesktopCliCommand,
@@ -80,17 +72,4 @@ export function psArray(values: string[]) {
 
 export function psRuntimeEnvPrefix(runtimeDir: string | undefined) {
   return runtimeDir ? `$env:ECNUVPN_RUNTIME_DIR = ${psQuote(runtimeDir)}; ` : ''
-}
-
-export function readNewLogLines(logPath: string, offset: number) {
-  if (!existsSync(logPath)) {
-    return { offset, lines: [] as string[] }
-  }
-  const content = readFileSync(logPath, 'utf8')
-  const chunk = content.slice(offset)
-  const lines = chunk
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-  return { offset: content.length, lines }
 }

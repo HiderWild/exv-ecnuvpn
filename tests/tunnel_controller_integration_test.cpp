@@ -38,6 +38,7 @@
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -309,6 +310,93 @@ public:
     void close() override {}
 };
 
+class CoreLeaseRecordingHelper final : public exv::test::FakeHelper {
+public:
+    void set_hello_mode(exv::helper::HelperMode mode) {
+        hello_mode_ = mode;
+    }
+
+    void set_acquire_response(bool accepted, std::string lease_id) {
+        acquire_accepted_ = accepted;
+        acquire_lease_id_ = std::move(lease_id);
+    }
+
+    exv::helper::HelloResponse hello(const exv::helper::HelloRequest& req) override {
+        calls_.push_back("hello");
+        auto resp = exv::test::FakeHelper::hello(req);
+        resp.mode = hello_mode_;
+        resp.startup_context.endpoint = "test-helper-endpoint";
+        resp.startup_context.launch_mode =
+            hello_mode_ == exv::helper::HelperMode::Resident ? "service" : "oneshot";
+        return resp;
+    }
+
+    exv::helper::AcquireCoreLeaseResponse acquire_core_lease(
+        const exv::helper::AcquireCoreLeaseRequest& req) override {
+        calls_.push_back("acquire_core_lease");
+        acquire_requests_.push_back(req);
+        exv::helper::AcquireCoreLeaseResponse resp;
+        resp.accepted = acquire_accepted_;
+        resp.lease_id = acquire_lease_id_;
+        resp.mode = hello_mode_ == exv::helper::HelperMode::Resident ? "resident" : "oneshot";
+        return resp;
+    }
+
+    exv::helper::StartSessionResponse start_session(
+        const exv::helper::StartSessionRequest& req) override {
+        calls_.push_back("start_session");
+        ++start_session_count_;
+        return exv::test::FakeHelper::start_session(req);
+    }
+
+    exv::helper::KeepAliveResponse keep_alive(
+        const exv::helper::KeepAliveRequest& req) override {
+        calls_.push_back("keep_alive");
+        keep_alive_requests_.push_back(req);
+        return {};
+    }
+
+    exv::helper::ReleaseCoreLeaseResponse release_core_lease(
+        const exv::helper::ReleaseCoreLeaseRequest& req) override {
+        calls_.push_back("release_core_lease");
+        release_requests_.push_back(req);
+        exv::helper::ReleaseCoreLeaseResponse resp;
+        resp.released = true;
+        resp.exiting = req.exit_if_oneshot;
+        return resp;
+    }
+
+    int start_session_count() const { return start_session_count_; }
+    int acquire_count() const { return static_cast<int>(acquire_requests_.size()); }
+    int keep_alive_count() const { return static_cast<int>(keep_alive_requests_.size()); }
+    int release_count() const { return static_cast<int>(release_requests_.size()); }
+
+    const std::vector<exv::helper::AcquireCoreLeaseRequest>& acquire_requests() const {
+        return acquire_requests_;
+    }
+
+    const std::vector<exv::helper::ReleaseCoreLeaseRequest>& release_requests() const {
+        return release_requests_;
+    }
+
+    int call_index(const std::string& name) const {
+        for (std::size_t i = 0; i < calls_.size(); ++i) {
+            if (calls_[i] == name) return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+private:
+    exv::helper::HelperMode hello_mode_ = exv::helper::HelperMode::Transient;
+    bool acquire_accepted_ = true;
+    std::string acquire_lease_id_ = "core-lease-1";
+    int start_session_count_ = 0;
+    std::vector<std::string> calls_;
+    std::vector<exv::helper::AcquireCoreLeaseRequest> acquire_requests_;
+    std::vector<exv::helper::KeepAliveRequest> keep_alive_requests_;
+    std::vector<exv::helper::ReleaseCoreLeaseRequest> release_requests_;
+};
+
 ecnuvpn::Config native_controller_config() {
     ecnuvpn::Config cfg;
     cfg.server = "https://vpn.example.invalid";
@@ -329,7 +417,7 @@ bool test_full_connect_flow() {
     using exv::core::TunnelPhase;
     using exv::core::TunnelEventType;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -352,6 +440,17 @@ bool test_full_connect_flow() {
                 "1: helper should have at least one active session") && ok;
     ok = expect(helper->hello_count() == 1,
                 "1: controller should send Hello before StartSession") && ok;
+    ok = expect(helper->acquire_count() == 1,
+                "1: controller should acquire a CoreLease before StartSession") && ok;
+    ok = expect(helper->call_index("hello") >= 0 &&
+                    helper->call_index("acquire_core_lease") > helper->call_index("hello") &&
+                    helper->call_index("start_session") > helper->call_index("acquire_core_lease"),
+                "1: helper calls should be Hello -> AcquireCoreLease -> StartSession") && ok;
+    auto lease_requests = helper->acquire_requests();
+    ok = expect(!lease_requests.empty() &&
+                    lease_requests[0].core_pid > 0 &&
+                    lease_requests[0].purpose == "vpn.connect",
+                "1: CoreLease acquire request should include core pid and vpn.connect purpose") && ok;
 
     // Verify platform ops received prepare_tunnel_device
     ok = expect(net_ops->prepare_count() >= 1,
@@ -380,7 +479,7 @@ bool test_disconnect_flow() {
     using exv::core::TunnelPhase;
     using exv::core::TunnelEventType;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -403,6 +502,8 @@ bool test_disconnect_flow() {
     // Verify helper received active Shutdown, not only passive Cleanup.
     ok = expect(helper->shutdown_count() == 1,
                 "2: user disconnect should actively Shutdown helper session") && ok;
+    ok = expect(helper->release_count() == 0,
+                "2: user disconnect should not release the CoreLease") && ok;
     auto shutdowns = helper->shutdown_requests();
     ok = expect(shutdowns.size() == 1 &&
                     shutdowns[0].policy.remove_routes &&
@@ -424,11 +525,39 @@ bool test_disconnect_flow() {
     return ok;
 }
 
+// --- Test 2a: CoreLease Acquisition Failure Stops Connect ---
+bool test_core_lease_acquisition_failure_stops_connect() {
+    using exv::core::TunnelPhase;
+
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
+    helper->set_acquire_response(false, "");
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    bool ok = true;
+    ctrl.connect(make_intent(true));
+    ok = expect(ctrl.phase() == TunnelPhase::Failed,
+                "2a: rejected CoreLease should transition to Failed") && ok;
+    ok = expect(helper->acquire_count() == 1,
+                "2a: controller should attempt CoreLease acquisition") && ok;
+    ok = expect(helper->start_session_count() == 0,
+                "2a: controller must not StartSession without a CoreLease") && ok;
+    ok = expect(helper->heartbeat_count() == 0,
+                "2a: session heartbeat must not start without helper session") && ok;
+    auto snap = ctrl.status();
+    ok = expect(snap.helper_status == "core_lease_failed",
+                "2a: helper_status should expose core_lease_failed") && ok;
+    ok = expect(snap.last_error.has_value() &&
+                    snap.last_error->code == "core_lease_failed",
+                "2a: status should expose core_lease_failed error code") && ok;
+    return ok;
+}
+
 // --- Test 2b: Heartbeat Starts Immediately After StartSession ---
 bool test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() {
     using exv::core::TunnelPhase;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::core::TunnelController ctrl(helper, net_ops);
 
@@ -449,7 +578,7 @@ bool test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() {
 bool test_start_session_failure_stops_connect() {
     using exv::core::TunnelPhase;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::core::TunnelController ctrl(helper, net_ops);
 
@@ -471,7 +600,7 @@ bool test_start_session_failure_stops_connect() {
 bool test_native_network_config_failure_preserves_error() {
     using exv::core::TunnelPhase;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
 
@@ -516,9 +645,10 @@ bool test_native_network_config_failure_preserves_error() {
 
 // --- Test 2e: Native network config preserves CSTP routes and bypass ---
 bool test_native_network_config_preserves_routes_and_bypass() {
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
+    exv::test::FakeCoreUiClient ui;
 
     auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{},
@@ -535,11 +665,15 @@ bool test_native_network_config_preserves_routes_and_bypass() {
             return deps;
         });
     auto& ctrl = *ctrl_owner;
+    ctrl.set_status_callback([&](const exv::core::TunnelStatusSnapshot& snap) {
+        ui.on_status_update(snap);
+    });
     ctrl.set_vpn_config(native_controller_config(), "test-password");
 
     bool ok = true;
     ctrl.connect(make_intent(true));
-    ok = expect(ctrl.phase() == exv::core::TunnelPhase::Connected,
+    ok = expect(any_has_phase(ui.received_snapshots(),
+                              exv::core::TunnelPhase::Connected),
                 "2e: route preservation path should reach Connected") && ok;
 
     auto configs = net_ops->applied_configs();
@@ -568,7 +702,7 @@ bool test_native_network_config_preserves_routes_and_bypass() {
 bool test_native_packet_startup_failure_cleans_network_state() {
     using exv::core::TunnelPhase;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
 
@@ -630,7 +764,7 @@ bool test_native_transport_reconnect_is_controller_owned() {
     config.max_delay = std::chrono::milliseconds(5000);
     config.jitter_factor = 0.0;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
 
@@ -683,6 +817,94 @@ bool test_native_transport_reconnect_is_controller_owned() {
     return ok;
 }
 
+// --- Test 2h: CoreLease Released On Controller Destruction ---
+bool test_core_lease_released_on_controller_destruction() {
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+
+    bool ok = true;
+    {
+        exv::core::TunnelController ctrl(helper, net_ops);
+        ctrl.connect(make_intent(true));
+        ok = expect(ctrl.phase() == exv::core::TunnelPhase::Connected,
+                    "2h: controller should connect before destruction") && ok;
+        ctrl.disconnect();
+        ok = expect(helper->release_count() == 0,
+                    "2h: disconnect before destruction should not release CoreLease") && ok;
+    }
+
+    ok = expect(helper->release_count() == 1,
+                "2h: controller destruction should release CoreLease once") && ok;
+    auto releases = helper->release_requests();
+    ok = expect(!releases.empty() &&
+                    releases[0].lease_id == "core-lease-1" &&
+                    releases[0].exit_if_oneshot,
+                "2h: release should use acquired lease id and exit_if_oneshot=true") && ok;
+    return ok;
+}
+
+// --- Test 2i: Handoff Replaces Helper Without Dropping Session ---
+bool test_handoff_replaces_helper_and_preserves_session() {
+    auto oneshot = std::make_shared<CoreLeaseRecordingHelper>();
+    auto original_ops =
+        std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(
+            oneshot.get());
+    exv::core::TunnelController ctrl(oneshot, original_ops);
+
+    ctrl.connect(make_intent(true));
+    const auto original_session = original_ops->session_id();
+
+    auto service = std::make_shared<CoreLeaseRecordingHelper>();
+    service->set_hello_mode(exv::helper::HelperMode::Resident);
+    service->connect();
+    auto service_ops =
+        std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(
+            service.get());
+
+    const bool replaced = ctrl.replace_helper_for_handoff(
+        service, service_ops, "service-core-lease", "resident",
+        "service-endpoint");
+
+    auto snap = ctrl.status();
+
+    bool ok = true;
+    ok = expect(replaced, "2i: controller should accept handoff helper") && ok;
+    ok = expect(snap.session_active,
+                "2i: handoff should preserve active helper session") && ok;
+    ok = expect(snap.core_lease_active,
+                "2i: handoff should keep core lease active") && ok;
+    ok = expect(snap.helper_mode == "resident",
+                "2i: handoff should switch helper mode to resident") && ok;
+    ok = expect(snap.helper_endpoint == "service-endpoint",
+                "2i: handoff should switch helper endpoint") && ok;
+    ok = expect(service_ops->session_id() == original_session,
+                "2i: new delegated network ops should keep session id") && ok;
+    ok = expect(oneshot->release_count() == 0,
+                "2i: controller should not release old oneshot lease during handoff") && ok;
+    ok = expect(service->keep_alive_count() >= 1,
+                "2i: controller should start service core lease keepalive") && ok;
+    return ok;
+}
+
+// --- Test 2j: Hello Resident Mode Propagates To Status ---
+bool test_hello_resident_mode_propagates_to_status() {
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
+    helper->set_hello_mode(exv::helper::HelperMode::Resident);
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+
+    bool ok = true;
+    ctrl.connect(make_intent(true));
+    auto snap = ctrl.status();
+    ok = expect(ctrl.phase() == exv::core::TunnelPhase::Connected,
+                "2j: resident helper flow should connect") && ok;
+    ok = expect(snap.helper_mode == "resident",
+                "2j: helper_mode should reflect Hello mode=Resident") && ok;
+    ok = expect(snap.helper_status == "connected",
+                "2j: helper_status should show connected after successful Hello") && ok;
+    return ok;
+}
+
 // --- Test 3: Reconnect Flow (auto_reconnect=true) ---
 //
 // After TransportClosed, the real TC goes to Reconnecting. When the
@@ -696,7 +918,7 @@ bool test_reconnect_flow() {
     config.base_delay = std::chrono::milliseconds(100);
     config.max_delay = std::chrono::milliseconds(5000);
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -755,7 +977,7 @@ bool test_auto_reconnect_disabled() {
     using exv::core::TunnelPhase;
     using exv::core::TunnelEventType;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -802,7 +1024,7 @@ bool test_auth_failure() {
     using exv::core::TunnelPhase;
     using exv::core::TunnelEventType;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -853,7 +1075,7 @@ bool test_user_disconnect_during_reconnecting() {
     exv::core::ReconnectConfig config;
     config.base_delay = std::chrono::milliseconds(100);
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -897,7 +1119,7 @@ bool test_status_callback() {
     using exv::core::TunnelPhase;
     using exv::core::TunnelEventType;
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -954,7 +1176,7 @@ bool test_multiple_reconnect_attempts() {
     config.base_delay = std::chrono::milliseconds(100);
     config.max_delay = std::chrono::milliseconds(5000);
 
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::test::FakeCoreUiClient ui;
 
@@ -1047,7 +1269,7 @@ bool test_multiple_reconnect_attempts() {
 
 // --- Test 9: Connect Milestone Logs ---
 bool test_connect_milestone_logs() {
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::core::TunnelController ctrl(helper, net_ops);
 
@@ -1079,7 +1301,7 @@ bool test_connect_milestone_logs() {
 
 // --- Test 10: Native Runner Failure Log ---
 bool test_native_runner_failure_log() {
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::core::TunnelController ctrl(helper, net_ops);
 
@@ -1108,7 +1330,7 @@ bool test_native_runner_failure_log() {
 
 // --- Test 11: HelperDelegatingPlatformNetworkOps receives controller session ---
 bool test_delegated_network_ops_receives_helper_session() {
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(helper.get());
     exv::core::TunnelController ctrl(helper, net_ops);
 
@@ -1136,7 +1358,7 @@ bool test_delegated_network_ops_receives_helper_session() {
 
 // --- Test 12: Delegated Network Ops Prepare Before Apply ---
 bool test_delegated_network_ops_prepares_before_apply() {
-    auto helper = std::make_shared<exv::test::FakeHelper>();
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     helper->set_require_prepare_before_apply(true);
     auto net_ops = std::make_shared<exv::platform::HelperDelegatingPlatformNetworkOps>(helper.get());
     exv::core::TunnelController ctrl(helper, net_ops);
@@ -1165,6 +1387,9 @@ int main() {
     std::cout << "--- Test 2: Disconnect Flow ---\n";
     ok = test_disconnect_flow() && ok;
 
+    std::cout << "--- Test 2a: CoreLease Acquisition Failure Stops Connect ---\n";
+    ok = test_core_lease_acquisition_failure_stops_connect() && ok;
+
     std::cout << "--- Test 2b: Immediate Heartbeat After StartSession ---\n";
     ok = test_start_session_immediately_sends_heartbeat_on_pre_connected_failure() && ok;
 
@@ -1182,6 +1407,15 @@ int main() {
 
     std::cout << "--- Test 2g: Native Transport Reconnect Is Controller-Owned ---\n";
     ok = test_native_transport_reconnect_is_controller_owned() && ok;
+
+    std::cout << "--- Test 2h: CoreLease Released On Controller Destruction ---\n";
+    ok = test_core_lease_released_on_controller_destruction() && ok;
+
+    std::cout << "--- Test 2i: Handoff Replaces Helper Without Dropping Session ---\n";
+    ok = test_handoff_replaces_helper_and_preserves_session() && ok;
+
+    std::cout << "--- Test 2j: Hello Resident Mode Propagates To Status ---\n";
+    ok = test_hello_resident_mode_propagates_to_status() && ok;
 
     std::cout << "--- Test 3: Reconnect Flow ---\n";
     ok = test_reconnect_flow() && ok;

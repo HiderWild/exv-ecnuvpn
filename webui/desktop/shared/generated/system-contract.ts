@@ -45,6 +45,8 @@ export const DESKTOP_RPC_ACTIONS = [
   "runtime.status",
   "drivers.status",
   "drivers.install",
+  "service.install",
+  "service.uninstall",
   "logs.list"
 ] as const
 export const DESKTOP_RPC_EVENT_TYPES = [
@@ -120,7 +122,16 @@ export const HELPER_OPS = [
   "Heartbeat",
   "Cleanup",
   "GetSnapshot",
-  "Shutdown"
+  "Shutdown",
+  "Inspect",
+  "AcquireCoreLease",
+  "KeepAlive",
+  "ReleaseCoreLease",
+  "InstallService",
+  "UninstallService",
+  "ExportCleanupLease",
+  "HandoffSession",
+  "FinalizeHandoff"
 ] as const
 export const HELPER_OP_CONTRACTS = [
   {
@@ -178,6 +189,69 @@ export const HELPER_OP_CONTRACTS = [
     "request": "ShutdownRequest",
     "response": "ShutdownResponse",
     "requires_session": true
+  },
+  {
+    "name": "Inspect",
+    "code": 9,
+    "request": "InspectRequest",
+    "response": "InspectResponse",
+    "requires_session": false
+  },
+  {
+    "name": "AcquireCoreLease",
+    "code": 10,
+    "request": "AcquireCoreLeaseRequest",
+    "response": "AcquireCoreLeaseResponse",
+    "requires_session": false
+  },
+  {
+    "name": "KeepAlive",
+    "code": 11,
+    "request": "KeepAliveRequest",
+    "response": "KeepAliveResponse",
+    "requires_session": false
+  },
+  {
+    "name": "ReleaseCoreLease",
+    "code": 12,
+    "request": "ReleaseCoreLeaseRequest",
+    "response": "ReleaseCoreLeaseResponse",
+    "requires_session": false
+  },
+  {
+    "name": "InstallService",
+    "code": 13,
+    "request": "InstallServiceRequest",
+    "response": "InstallServiceResponse",
+    "requires_session": false
+  },
+  {
+    "name": "UninstallService",
+    "code": 14,
+    "request": "UninstallServiceRequest",
+    "response": "UninstallServiceResponse",
+    "requires_session": false
+  },
+  {
+    "name": "ExportCleanupLease",
+    "code": 15,
+    "request": "ExportCleanupLeaseRequest",
+    "response": "ExportCleanupLeaseResponse",
+    "requires_session": false
+  },
+  {
+    "name": "HandoffSession",
+    "code": 16,
+    "request": "HandoffSessionRequest",
+    "response": "HandoffSessionResponse",
+    "requires_session": false
+  },
+  {
+    "name": "FinalizeHandoff",
+    "code": 17,
+    "request": "FinalizeHandoffRequest",
+    "response": "FinalizeHandoffResponse",
+    "requires_session": false
   }
 ] as const
 export const HELPER_FORBIDDEN_CREDENTIAL_FIELDS = [
@@ -328,12 +402,14 @@ export const TUNNEL_STATUS_FIELDS = [
 ] as const
 export const SRC_ALLOWED_TOP_LEVEL_DIRS = [
   "app",
+  "base",
   "cli",
   "common",
   "contracts",
   "core",
   "feedback",
   "helper",
+  "observability",
   "platform",
   "runtime",
   "utils",

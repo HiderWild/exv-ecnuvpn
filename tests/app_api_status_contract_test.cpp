@@ -96,7 +96,9 @@ std::string app_api_source_text() {
                            "core" / "app_api";
   const char *files[] = {"app_api.cpp", "desktop_action_registry.cpp",
                          "desktop_tunnel_host.cpp",
-                         "desktop_vpn_actions.cpp"};
+                         "desktop_vpn_actions.cpp",
+                         "desktop_system_actions.cpp",
+                         "desktop_status_presenter.cpp"};
   std::string source;
   for (const char *file : files) {
     source += "\n// ---- ";
@@ -105,6 +107,18 @@ std::string app_api_source_text() {
     source += read_source_file(app_api_dir / file);
   }
   return source;
+#endif
+}
+
+std::string source_text_at(std::initializer_list<const char *> parts) {
+#ifndef ECNUVPN_SOURCE_DIR
+  return std::string();
+#else
+  std::filesystem::path path = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  for (const char *part : parts) {
+    path /= part;
+  }
+  return read_source_file(path);
 #endif
 }
 
@@ -412,6 +426,154 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
 #endif
 }
 
+bool desktop_helper_status_includes_current_instance_contract() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto helper_status_handler = source.find("\"helper.status\"");
+  const auto runtime_status_handler = source.find("\"runtime.status\"",
+                                                   helper_status_handler);
+  const auto helper_status_source =
+      helper_status_handler == std::string::npos
+          ? std::string()
+          : source.substr(helper_status_handler,
+                          runtime_status_handler == std::string::npos
+                              ? std::string::npos
+                              : runtime_status_handler - helper_status_handler);
+
+  bool ok = true;
+  ok = expect(helper_status_handler != std::string::npos,
+              "desktop API should register helper.status") &&
+       ok;
+  ok = expect(helper_status_source.find("helper_status_with_current_instance") !=
+                  std::string::npos,
+              "desktop helper.status should enrich backend status with current instance") &&
+       ok;
+  ok = expect(source.find("\"current_instance\"") != std::string::npos,
+              "desktop helper.status response should include current_instance") &&
+       ok;
+  ok = expect(source.find("\"service_status\"") != std::string::npos,
+              "desktop helper.status should preserve service_status field") &&
+       ok;
+  ok = expect(source.find("get_tunnel_controller_if_exists()") !=
+                  std::string::npos,
+              "desktop helper.status should inspect active TunnelController") &&
+       ok;
+  return ok;
+#endif
+}
+
+bool desktop_service_actions_use_helper_owned_maintenance_contract() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto service_install_handler = source.find("\"service.install\"");
+  const auto service_uninstall_handler = source.find("\"service.uninstall\"");
+
+  bool ok = true;
+  ok = expect(service_install_handler != std::string::npos,
+              "desktop API should register service.install") &&
+       ok;
+  ok = expect(service_uninstall_handler != std::string::npos,
+              "desktop API should register service.uninstall") &&
+       ok;
+  ok = expect(source.find("get_current_helper_client_if_exists()") !=
+                  std::string::npos,
+              "desktop service actions should reuse the current helper client") &&
+       ok;
+  ok = expect(source.find("client->install_service") != std::string::npos,
+              "desktop service.install should call helper InstallService") &&
+       ok;
+  ok = expect(source.find("export_cleanup_lease") != std::string::npos,
+              "desktop service.install should export cleanup lease for oneshot handoff") &&
+       ok;
+  ok = expect(source.find("handoff_session") != std::string::npos,
+              "desktop service.install should ask service helper to adopt cleanup lease") &&
+       ok;
+  ok = expect(source.find("replace_tunnel_controller_helper_for_handoff") !=
+                  std::string::npos,
+              "desktop service.install should switch controller to service helper") &&
+       ok;
+  ok = expect(source.find("finalize_handoff") != std::string::npos,
+              "desktop service.install should finalize oneshot handoff") &&
+       ok;
+  ok = expect(source.find("client->uninstall_service") != std::string::npos,
+              "desktop service.uninstall should call helper UninstallService") &&
+       ok;
+  ok = expect(source.find("\"vpn_session_active\"") != std::string::npos,
+              "desktop service.uninstall should reject active VPN sessions") &&
+       ok;
+  return ok;
+#endif
+}
+
+bool cli_service_actions_use_core_helper_maintenance_contract() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string main_source =
+      source_text_at({"src", "app", "main.cpp"});
+  const std::string use_case_source =
+      source_text_at({"src", "core", "use_cases",
+                      "system_status_use_cases.cpp"});
+  const auto service_handler = main_source.find("static int handle_service");
+  const auto config_handler = main_source.find("static int handle_config",
+                                               service_handler);
+  const auto service_source =
+      service_handler == std::string::npos
+          ? std::string()
+          : main_source.substr(service_handler,
+                               config_handler == std::string::npos
+                                   ? std::string::npos
+                                   : config_handler - service_handler);
+
+  bool ok = true;
+  ok = expect(service_handler != std::string::npos,
+              "CLI should keep a service subcommand handler") &&
+       ok;
+  ok = expect(main_source.find("app_api::handle_action") !=
+                  std::string::npos,
+              "CLI service install/uninstall should route through core action dispatch") &&
+       ok;
+  ok = expect(service_source.find("helper::install_service") ==
+                  std::string::npos,
+              "CLI service install must not call helper::install_service directly") &&
+       ok;
+  ok = expect(service_source.find("helper::uninstall_service") ==
+                  std::string::npos,
+              "CLI service uninstall must not call helper::uninstall_service directly") &&
+       ok;
+  ok = expect(use_case_source.find("start_oneshot = true") !=
+                  std::string::npos,
+              "first service.install should explicitly bootstrap a one-shot helper") &&
+       ok;
+  ok = expect(use_case_source.find("client->hello") <
+                  use_case_source.find("client->acquire_core_lease"),
+              "service maintenance should send Hello before acquiring the core lease") &&
+       ok;
+  ok = expect(use_case_source.find("client.install_service") !=
+                  std::string::npos,
+              "service.install should call helper InstallService through IPC") &&
+       ok;
+  ok = expect(use_case_source.find("client.uninstall_service") !=
+                  std::string::npos,
+              "service.uninstall should call helper UninstallService through IPC") &&
+       ok;
+  ok = expect(use_case_source.find("read_runtime_status_snapshot") !=
+                  std::string::npos &&
+                  use_case_source.find("\"vpn_session_active\"") !=
+                      std::string::npos,
+              "CLI/shared service.uninstall should reject active VPN runtime state") &&
+       ok;
+  return ok;
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -424,5 +586,8 @@ int main() {
   ok = frontend_json_has_required_fields() && ok;
   ok = app_api_activates_core_owned_native_mode() && ok;
   ok = desktop_native_connect_uses_core_owned_controller_pipeline() && ok;
+  ok = desktop_helper_status_includes_current_instance_contract() && ok;
+  ok = desktop_service_actions_use_helper_owned_maintenance_contract() && ok;
+  ok = cli_service_actions_use_core_helper_maintenance_contract() && ok;
   return ok ? 0 : 1;
 }

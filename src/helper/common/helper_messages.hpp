@@ -42,11 +42,27 @@ struct HelperSessionState {
     std::string core_phase;
 };
 
+struct CoreLeaseState {
+    bool active = false;
+    std::string lease_id;
+    int core_pid = 0;
+    std::string purpose;
+    std::string last_seen_state;
+};
+
+struct TaskQueueState {
+    bool idle = true;
+    std::string current_job_id;
+    int pending_jobs = 0;
+};
+
 struct HelloResponse {
     std::vector<std::string> capabilities;
     HelperMode mode = HelperMode::Transient;
     HelperStartupContext startup_context;
     HelperSessionState session_state;
+    CoreLeaseState core_lease;
+    TaskQueueState task_queue;
 };
 
 struct StartSessionRequest {
@@ -149,6 +165,109 @@ struct ShutdownResponse {
     std::vector<std::string> errors;
 };
 
+struct InspectRequest {};
+
+struct InspectResponse {
+    std::vector<std::string> capabilities;
+    HelperMode mode = HelperMode::Transient;
+    HelperStartupContext startup_context;
+    HelperSessionState session_state;
+    CoreLeaseState core_lease;
+    TaskQueueState task_queue;
+};
+
+struct AcquireCoreLeaseRequest {
+    int core_pid = 0;
+    std::string purpose;
+};
+
+struct AcquireCoreLeaseResponse {
+    bool accepted = false;
+    std::string lease_id;
+    std::string mode;
+};
+
+struct KeepAliveRequest {
+    std::string lease_id;
+    std::string state;
+};
+
+struct KeepAliveResponse {
+    bool ok = true;
+    std::optional<std::string> warning;
+};
+
+struct ReleaseCoreLeaseRequest {
+    std::string lease_id;
+    bool exit_if_oneshot = true;
+};
+
+struct ReleaseCoreLeaseResponse {
+    bool released = false;
+    bool exiting = false;
+};
+
+struct ManagedResource {
+    std::string type;
+    std::string detail;
+};
+
+struct InstallServiceRequest {};
+
+struct InstallServiceResponse {
+    bool success = false;
+    int exit_code = 1;
+    std::string message;
+};
+
+struct UninstallServiceRequest {};
+
+struct UninstallServiceResponse {
+    bool success = false;
+    int exit_code = 1;
+    std::string message;
+};
+
+struct CleanupLeaseSession {
+    SessionId session_id;
+    ProfileId profile_id;
+    HelperMode mode = HelperMode::Transient;
+    std::string core_phase;
+    CleanupPolicy cleanup_policy;
+    std::vector<ManagedResource> managed_resources;
+};
+
+struct CleanupLease {
+    std::string cleanup_lease_id;
+    std::vector<CleanupLeaseSession> sessions;
+};
+
+struct ExportCleanupLeaseRequest {};
+
+struct ExportCleanupLeaseResponse {
+    CleanupLease lease;
+    bool has_active_session = false;
+};
+
+struct HandoffSessionRequest {
+    CleanupLease lease;
+};
+
+struct HandoffSessionResponse {
+    bool adopted = false;
+    std::vector<SessionId> session_ids;
+    std::string message;
+};
+
+struct FinalizeHandoffRequest {
+    bool exit = true;
+};
+
+struct FinalizeHandoffResponse {
+    bool finalized = false;
+    bool exiting = false;
+};
+
 // --- Unified Request/Response ---
 
 struct HelperRequest {
@@ -180,6 +299,12 @@ void to_json(json& j, const HelperStartupContext& ctx);
 HelperStartupContext helper_startup_context_from_json(const json& j);
 void to_json(json& j, const HelperSessionState& state);
 HelperSessionState helper_session_state_from_json(const json& j);
+void to_json(json& j, const CoreLeaseState& state);
+void from_json(const json& j, CoreLeaseState& state);
+CoreLeaseState core_lease_state_from_json(const json& j);
+void to_json(json& j, const TaskQueueState& state);
+void from_json(const json& j, TaskQueueState& state);
+TaskQueueState task_queue_state_from_json(const json& j);
 void to_json(json& j, const HelloResponse& resp);
 HelloResponse hello_response_from_json(const json& j);
 
@@ -236,6 +361,71 @@ void to_json(json& j, const ShutdownRequest& req);
 ShutdownRequest shutdown_request_from_json(const json& j);
 void to_json(json& j, const ShutdownResponse& resp);
 ShutdownResponse shutdown_response_from_json(const json& j);
+
+// Inspect / Core lease control
+void to_json(json& j, const InspectRequest& req);
+void from_json(const json& j, InspectRequest& req);
+InspectRequest inspect_request_from_json(const json& j);
+void to_json(json& j, const InspectResponse& resp);
+void from_json(const json& j, InspectResponse& resp);
+InspectResponse inspect_response_from_json(const json& j);
+void to_json(json& j, const AcquireCoreLeaseRequest& req);
+void from_json(const json& j, AcquireCoreLeaseRequest& req);
+AcquireCoreLeaseRequest acquire_core_lease_request_from_json(const json& j);
+void to_json(json& j, const AcquireCoreLeaseResponse& resp);
+void from_json(const json& j, AcquireCoreLeaseResponse& resp);
+AcquireCoreLeaseResponse acquire_core_lease_response_from_json(const json& j);
+void to_json(json& j, const KeepAliveRequest& req);
+void from_json(const json& j, KeepAliveRequest& req);
+KeepAliveRequest keep_alive_request_from_json(const json& j);
+void to_json(json& j, const KeepAliveResponse& resp);
+void from_json(const json& j, KeepAliveResponse& resp);
+KeepAliveResponse keep_alive_response_from_json(const json& j);
+void to_json(json& j, const ReleaseCoreLeaseRequest& req);
+void from_json(const json& j, ReleaseCoreLeaseRequest& req);
+ReleaseCoreLeaseRequest release_core_lease_request_from_json(const json& j);
+void to_json(json& j, const ReleaseCoreLeaseResponse& resp);
+void from_json(const json& j, ReleaseCoreLeaseResponse& resp);
+ReleaseCoreLeaseResponse release_core_lease_response_from_json(const json& j);
+void to_json(json& j, const ManagedResource& resource);
+void from_json(const json& j, ManagedResource& resource);
+ManagedResource managed_resource_from_json(const json& j);
+void to_json(json& j, const InstallServiceRequest& req);
+void from_json(const json& j, InstallServiceRequest& req);
+InstallServiceRequest install_service_request_from_json(const json& j);
+void to_json(json& j, const InstallServiceResponse& resp);
+void from_json(const json& j, InstallServiceResponse& resp);
+InstallServiceResponse install_service_response_from_json(const json& j);
+void to_json(json& j, const UninstallServiceRequest& req);
+void from_json(const json& j, UninstallServiceRequest& req);
+UninstallServiceRequest uninstall_service_request_from_json(const json& j);
+void to_json(json& j, const UninstallServiceResponse& resp);
+void from_json(const json& j, UninstallServiceResponse& resp);
+UninstallServiceResponse uninstall_service_response_from_json(const json& j);
+void to_json(json& j, const CleanupLeaseSession& session);
+void from_json(const json& j, CleanupLeaseSession& session);
+CleanupLeaseSession cleanup_lease_session_from_json(const json& j);
+void to_json(json& j, const CleanupLease& lease);
+void from_json(const json& j, CleanupLease& lease);
+CleanupLease cleanup_lease_from_json(const json& j);
+void to_json(json& j, const ExportCleanupLeaseRequest& req);
+void from_json(const json& j, ExportCleanupLeaseRequest& req);
+ExportCleanupLeaseRequest export_cleanup_lease_request_from_json(const json& j);
+void to_json(json& j, const ExportCleanupLeaseResponse& resp);
+void from_json(const json& j, ExportCleanupLeaseResponse& resp);
+ExportCleanupLeaseResponse export_cleanup_lease_response_from_json(const json& j);
+void to_json(json& j, const HandoffSessionRequest& req);
+void from_json(const json& j, HandoffSessionRequest& req);
+HandoffSessionRequest handoff_session_request_from_json(const json& j);
+void to_json(json& j, const HandoffSessionResponse& resp);
+void from_json(const json& j, HandoffSessionResponse& resp);
+HandoffSessionResponse handoff_session_response_from_json(const json& j);
+void to_json(json& j, const FinalizeHandoffRequest& req);
+void from_json(const json& j, FinalizeHandoffRequest& req);
+FinalizeHandoffRequest finalize_handoff_request_from_json(const json& j);
+void to_json(json& j, const FinalizeHandoffResponse& resp);
+void from_json(const json& j, FinalizeHandoffResponse& resp);
+FinalizeHandoffResponse finalize_handoff_response_from_json(const json& j);
 
 // Unified envelope
 void to_json(json& j, const HelperRequest& req);

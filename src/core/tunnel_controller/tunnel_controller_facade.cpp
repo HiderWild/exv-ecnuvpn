@@ -28,7 +28,11 @@ TunnelController::TunnelController(
         });
 }
 
-TunnelController::~TunnelController() = default;
+TunnelController::~TunnelController() {
+    if (impl_) {
+        impl_->release_core_lease();
+    }
+}
 
 void TunnelController::set_vpn_config(const ecnuvpn::Config& cfg,
                                       const std::string& plaintext_password) {
@@ -59,6 +63,22 @@ void TunnelController::set_auto_reconnect(bool enabled) {
     impl_->intent_.auto_reconnect = enabled;
     impl_->update_snapshot();
     impl_->notify_status();
+}
+
+bool TunnelController::replace_helper_for_handoff(
+    std::shared_ptr<exv::helper::HelperClient> helper,
+    std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
+    std::string core_lease_id,
+    std::string helper_mode,
+    std::string helper_endpoint) {
+    return impl_->replace_helper_for_handoff(
+        std::move(helper), std::move(net_ops), std::move(core_lease_id),
+        std::move(helper_mode), std::move(helper_endpoint));
+}
+
+std::shared_ptr<exv::helper::HelperClient>
+TunnelController::helper_client_for_maintenance() const {
+    return impl_->helper_;
 }
 
 // ------------------------------------------------------------------

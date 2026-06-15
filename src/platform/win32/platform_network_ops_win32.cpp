@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace exv::platform {
 namespace {
@@ -111,6 +112,98 @@ bool to_native_dns_settings(const DnsConfig &dns,
   return true;
 }
 
+std::vector<std::string> split(const std::string &value, char delimiter) {
+  std::vector<std::string> parts;
+  std::size_t start = 0;
+  while (start <= value.size()) {
+    const std::size_t pos = value.find(delimiter, start);
+    if (pos == std::string::npos) {
+      parts.push_back(value.substr(start));
+      break;
+    }
+    parts.push_back(value.substr(start, pos - start));
+    start = pos + 1;
+  }
+  return parts;
+}
+
+std::string join(const std::vector<std::string> &values, char delimiter) {
+  std::string out;
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i > 0)
+      out.push_back(delimiter);
+    out += values[i];
+  }
+  return out;
+}
+
+std::string encode_route_resource(
+    const ecnuvpn::platform::NativeIpRoute &route) {
+  return route.cidr + "|" + route.destination + "|" +
+         std::to_string(route.prefix_length) + "|" +
+         std::to_string(route.interface_index) + "|" + route.next_hop + "|" +
+         (route.server_bypass ? "1" : "0");
+}
+
+std::optional<ecnuvpn::platform::NativeIpRoute>
+decode_route_resource(const std::string &detail) {
+  auto parts = split(detail, '|');
+  if (parts.size() != 6)
+    return std::nullopt;
+  ecnuvpn::platform::NativeIpRoute route;
+  route.cidr = parts[0];
+  route.destination = parts[1];
+  try {
+    route.prefix_length = std::stoi(parts[2]);
+    route.interface_index = static_cast<std::uint32_t>(std::stoul(parts[3]));
+  } catch (...) {
+    return std::nullopt;
+  }
+  route.next_hop = parts[4];
+  route.server_bypass = parts[5] == "1";
+  if (route.destination.empty() || route.prefix_length < 0 ||
+      route.prefix_length > 32 || route.interface_index == 0)
+    return std::nullopt;
+  return route;
+}
+
+std::string encode_dns_resource(
+    std::uint32_t interface_index,
+    const ecnuvpn::platform::NativeDnsSettings &settings) {
+  return std::to_string(interface_index) + "|" + join(settings.servers, ',') +
+         "|" + settings.search_domain + "|" + join(settings.suffixes, ',');
+}
+
+std::optional<std::pair<std::uint32_t, ecnuvpn::platform::NativeDnsSettings>>
+decode_dns_resource(const std::string &detail) {
+  auto parts = split(detail, '|');
+  if (parts.size() != 4)
+    return std::nullopt;
+  std::uint32_t interface_index = 0;
+  try {
+    interface_index = static_cast<std::uint32_t>(std::stoul(parts[0]));
+  } catch (...) {
+    return std::nullopt;
+  }
+  ecnuvpn::platform::NativeDnsSettings settings;
+  if (!parts[1].empty())
+    settings.servers = split(parts[1], ',');
+  settings.search_domain = parts[2];
+  if (!parts[3].empty())
+    settings.suffixes = split(parts[3], ',');
+  return std::make_pair(interface_index, settings);
+}
+
+std::optional<std::string> first_resource_detail(
+    const std::vector<ManagedNetworkResource> &resources,
+    const std::string &type) {
+  for (const auto &resource : resources) {
+    if (resource.type == type && !resource.detail.empty())
+      return resource.detail;
+  }
+  return std::nullopt;
+}
+
 class Win32PlatformNetworkOps final : public PlatformNetworkOps {
 public:
   Win32PlatformNetworkOps(
@@ -133,6 +226,7 @@ public:
 
     interface_index_ = started.metadata.if_index;
     wintun_ = std::move(wintun);
+    managed_resources_.clear();
 
     TunnelDeviceDescriptor descriptor;
     descriptor.path = "wintun://" + narrow_ascii(started.metadata.adapter_name);
@@ -140,6 +234,11 @@ public:
     descriptor.mtu = mtu > 0 ? mtu : 1400;
     descriptor.is_open = true;
     last_device_ = descriptor;
+    managed_resources_.push_back({"adapter", descriptor.adapter_name});
+    managed_resources_.push_back(
+        {"win32_adapter_if_index", std::to_string(interface_index_)});
+    managed_resources_.push_back(
+        {"win32_adapter_luid", std::to_string(started.metadata.luid)});
     return descriptor;
   }
 
@@ -221,6 +320,14 @@ public:
     }
 
     ip_config_ = std::move(ip_config);
+    for (const auto &route : ip_config_->owned_routes()) {
+      managed_resources_.push_back({"win32_route", encode_route_resource(route)});
+    }
+    if (configure_dns) {
+      managed_resources_.push_back(
+          {"win32_dns_original",
+           encode_dns_resource(interface_index_, previous_dns)});
+    }
     return true;
   }
 
@@ -285,10 +392,100 @@ public:
       wintun_.reset();
       interface_index_ = 0;
       last_device_ = {};
+      managed_resources_.clear();
       result.adapter_removed = true;
     }
 
     return result;
+  }
+
+  CleanupResult cleanup_resources(
+      const std::vector<ManagedNetworkResource> &resources,
+      CleanupPolicy policy) override {
+    if (ip_config_ || dns_configured_ || wintun_) {
+      return cleanup(first_resource_detail(resources, "adapter").value_or({}),
+                     policy);
+    }
+
+    CleanupResult result;
+    result.success = true;
+
+    const bool remove_routes =
+        policy == CleanupPolicy::Full || policy == CleanupPolicy::KeepAdapter ||
+        policy == CleanupPolicy::RoutesOnly;
+    if (remove_routes) {
+      for (const auto &resource : resources) {
+        if (resource.type != "win32_route")
+          continue;
+        auto route = decode_route_resource(resource.detail);
+        if (!route.has_value())
+          continue;
+        if (!ip_helper_api_.delete_ip_forward_entry2 ||
+            ip_helper_api_.delete_ip_forward_entry2(*route) != 0) {
+          result.success = false;
+          if (result.error_message.empty())
+            result.error_message = "Windows route cleanup from facts failed";
+        } else {
+          ++result.routes_removed;
+        }
+      }
+    }
+
+    const bool remove_dns =
+        policy == CleanupPolicy::Full || policy == CleanupPolicy::KeepAdapter ||
+        policy == CleanupPolicy::DnsOnly;
+    if (remove_dns) {
+      for (const auto &resource : resources) {
+        if (resource.type != "win32_dns_original")
+          continue;
+        auto dns = decode_dns_resource(resource.detail);
+        if (!dns.has_value())
+          continue;
+        if (!ip_helper_api_.set_interface_dns_settings ||
+            ip_helper_api_.set_interface_dns_settings(dns->first,
+                                                      dns->second) != 0) {
+          result.success = false;
+          if (result.error_message.empty())
+            result.error_message = "Windows DNS restore from facts failed";
+        } else {
+          result.dns_removed = true;
+        }
+      }
+    }
+
+    if (!result.success)
+      return result;
+
+    if (policy == CleanupPolicy::Full) {
+      auto adapter = first_resource_detail(resources, "adapter");
+      if (adapter.has_value()) {
+        ecnuvpn::platform::NativeWintunConfig config;
+        config.adapter_name_prefix = widen_ascii(*adapter);
+        auto wintun = std::make_unique<ecnuvpn::platform::NativeWintun>(
+            wintun_dependencies_, config);
+        auto started = wintun->start();
+        if (!started.ok()) {
+          result.success = false;
+          result.error_message = started.detail.empty()
+                                     ? "failed to open Wintun adapter for cleanup"
+                                     : started.detail;
+          return result;
+        }
+        auto deleted = wintun->delete_adapter();
+        if (!deleted.ok()) {
+          result.success = false;
+          result.error_message = deleted.detail;
+          return result;
+        }
+        result.adapter_removed = true;
+      }
+    }
+
+    return result;
+  }
+
+  std::vector<ManagedNetworkResource> managed_resources() const override {
+    return managed_resources_;
   }
 
   bool device_exists(const std::string &adapter_name) const override {
@@ -305,6 +502,7 @@ private:
   TunnelDeviceDescriptor last_device_;
   std::uint32_t interface_index_ = 0;
   bool dns_configured_ = false;
+  std::vector<ManagedNetworkResource> managed_resources_;
 };
 
 } // namespace

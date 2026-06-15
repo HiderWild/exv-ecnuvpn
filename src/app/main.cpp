@@ -122,11 +122,29 @@ static void show_logs(int lines = 50) {
   std::cout << std::endl;
 }
 
+static int run_service_action(const std::string &action) {
+  nlohmann::json result = app_api::handle_action(action, nlohmann::json::object());
+  if (result.is_object() && result.value("ok", true) == false) {
+    cli::print_error(result.value("message",
+                                  result.value("error",
+                                               "Service maintenance failed.")));
+    return 1;
+  }
+
+  const auto operation = result.value("operation", nlohmann::json::object());
+  const std::string message = operation.value("message", std::string());
+  if (!message.empty()) {
+    cli::print_info(message);
+  }
+  std::cout << result.dump(2) << std::endl;
+  return 0;
+}
+
 static int handle_service(const std::vector<std::string> &args) {
   if (args.size() <= 2 || args[2] == "status") return helper::show_service_status();
   std::string subcmd = args[2];
-  if (subcmd == "install") return helper::install_service(platform::get_executable_path());
-  if (subcmd == "uninstall") return helper::uninstall_service();
+  if (subcmd == "install") return run_service_action("service.install");
+  if (subcmd == "uninstall") return run_service_action("service.uninstall");
   cli::print_error("Unknown service subcommand: " + subcmd); return 1;
 }
 

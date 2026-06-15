@@ -6,7 +6,8 @@ void HelperRequestDispatcher::register_handler(HelperOp op, Handler handler) {
     handlers_[op] = std::move(handler);
 }
 
-HelperResponse HelperRequestDispatcher::dispatch(const HelperRequest& request) {
+HelperResponse HelperRequestDispatcher::dispatch(
+    const HelperRequest& request, const HelperRequestContext& context) {
     auto it = handlers_.find(request.op);
     if (it == handlers_.end()) {
         HelperResponse resp;
@@ -16,7 +17,7 @@ HelperResponse HelperRequestDispatcher::dispatch(const HelperRequest& request) {
         resp.error_message = "No handler registered for this operation";
         return resp;
     }
-    return it->second(request);
+    return it->second(request, context);
 }
 
 } // namespace exv::helper

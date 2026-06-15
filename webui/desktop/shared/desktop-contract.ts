@@ -7,7 +7,6 @@ import {
 export const desktopIpcChannels = {
   rpc: 'ecnu-vpn:rpc',
   rpcElevated: 'ecnu-vpn:rpc-elevated',
-  serviceCommand: 'ecnu-vpn:service-command',
   cliCommand: 'ecnu-vpn:cli-command',
   driverInstall: 'ecnu-vpn:driver-install',
   windowMode: 'ecnu-vpn:window-mode',
@@ -48,7 +47,6 @@ export const desktopRpcActions = DESKTOP_RPC_ACTIONS
 
 export const desktopEventTypes = DESKTOP_RPC_EVENT_TYPES
 
-export const desktopServiceCommands = ['install', 'uninstall'] as const
 export const desktopCliCommands = ['status', 'install', 'uninstall'] as const
 export const desktopDriverInstallTargets = ['wintun', 'tap'] as const
 
@@ -56,7 +54,6 @@ export const desktopRpcErrorCodes = DESKTOP_RPC_ERROR_CODE_MAP
 
 export type DesktopRpcAction = (typeof desktopRpcActions)[number]
 export type DesktopEventType = (typeof desktopEventTypes)[number]
-export type DesktopServiceCommand = (typeof desktopServiceCommands)[number]
 export type DesktopCliCommand = (typeof desktopCliCommands)[number]
 export type DesktopDriverInstallTarget =
   (typeof desktopDriverInstallTargets)[number]

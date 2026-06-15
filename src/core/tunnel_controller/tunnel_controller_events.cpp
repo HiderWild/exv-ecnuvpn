@@ -166,6 +166,9 @@ void TunnelController::Impl::on_reconnect_timer_fired() {
         if (!vpn_password_.empty()) {
             scheduler_.cancel_all();
             stop_heartbeat();
+            if (core_lease_keepalive_active_) {
+                schedule_next_core_lease_keepalive();
+            }
             runner_.stop();
 
             if ((network_config_applied_ || !session_id_.value.empty()) && helper_) {
@@ -195,6 +198,8 @@ void TunnelController::Impl::on_helper_lost() {
         }
 
         stop_heartbeat();
+        helper_connected_seen_ = false;
+        helper_status_override_ = "unavailable";
 
         auto err = CoreErrorMapper::from_helper_error(
             "helper_lost", "Helper process disconnected unexpectedly");

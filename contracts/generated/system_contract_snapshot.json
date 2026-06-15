@@ -224,7 +224,11 @@
         "route_apply",
         "dns_apply",
         "firewall_rules",
-        "kill_switch"
+        "kill_switch",
+        "service_install",
+        "service_uninstall",
+        "cleanup_lease_export",
+        "session_handoff"
       ],
       "errors": [
         "none",
@@ -237,6 +241,10 @@
         "route_apply_failed",
         "dns_apply_failed",
         "cleanup_partial",
+        "service_install_failed",
+        "service_uninstall_failed",
+        "handoff_failed",
+        "handoff_wrong_mode",
         "internal_error",
         "invalid_payload"
       ],
@@ -256,7 +264,28 @@
         "GetSnapshotRequest",
         "GetSnapshotResponse",
         "ShutdownRequest",
-        "ShutdownResponse"
+        "ShutdownResponse",
+        "InspectRequest",
+        "InspectResponse",
+        "AcquireCoreLeaseRequest",
+        "AcquireCoreLeaseResponse",
+        "KeepAliveRequest",
+        "KeepAliveResponse",
+        "ReleaseCoreLeaseRequest",
+        "ReleaseCoreLeaseResponse",
+        "InstallServiceRequest",
+        "InstallServiceResponse",
+        "UninstallServiceRequest",
+        "UninstallServiceResponse",
+        "ManagedResource",
+        "CleanupLeaseSession",
+        "CleanupLease",
+        "ExportCleanupLeaseRequest",
+        "ExportCleanupLeaseResponse",
+        "HandoffSessionRequest",
+        "HandoffSessionResponse",
+        "FinalizeHandoffRequest",
+        "FinalizeHandoffResponse"
       ],
       "ops": [
         {
@@ -314,6 +343,69 @@
           "request": "ShutdownRequest",
           "requires_session": true,
           "response": "ShutdownResponse"
+        },
+        {
+          "code": 9,
+          "name": "Inspect",
+          "request": "InspectRequest",
+          "requires_session": false,
+          "response": "InspectResponse"
+        },
+        {
+          "code": 10,
+          "name": "AcquireCoreLease",
+          "request": "AcquireCoreLeaseRequest",
+          "requires_session": false,
+          "response": "AcquireCoreLeaseResponse"
+        },
+        {
+          "code": 11,
+          "name": "KeepAlive",
+          "request": "KeepAliveRequest",
+          "requires_session": false,
+          "response": "KeepAliveResponse"
+        },
+        {
+          "code": 12,
+          "name": "ReleaseCoreLease",
+          "request": "ReleaseCoreLeaseRequest",
+          "requires_session": false,
+          "response": "ReleaseCoreLeaseResponse"
+        },
+        {
+          "code": 13,
+          "name": "InstallService",
+          "request": "InstallServiceRequest",
+          "requires_session": false,
+          "response": "InstallServiceResponse"
+        },
+        {
+          "code": 14,
+          "name": "UninstallService",
+          "request": "UninstallServiceRequest",
+          "requires_session": false,
+          "response": "UninstallServiceResponse"
+        },
+        {
+          "code": 15,
+          "name": "ExportCleanupLease",
+          "request": "ExportCleanupLeaseRequest",
+          "requires_session": false,
+          "response": "ExportCleanupLeaseResponse"
+        },
+        {
+          "code": 16,
+          "name": "HandoffSession",
+          "request": "HandoffSessionRequest",
+          "requires_session": false,
+          "response": "HandoffSessionResponse"
+        },
+        {
+          "code": 17,
+          "name": "FinalizeHandoff",
+          "request": "FinalizeHandoffRequest",
+          "requires_session": false,
+          "response": "FinalizeHandoffResponse"
         }
       ],
       "security": {
@@ -385,12 +477,14 @@
     "src_organization": {
       "allowed_top_level_dirs": [
         "app",
+        "base",
         "cli",
         "common",
         "contracts",
         "core",
         "feedback",
         "helper",
+        "observability",
         "platform",
         "runtime",
         "utils",
@@ -637,6 +731,8 @@
         "runtime.status",
         "drivers.status",
         "drivers.install",
+        "service.install",
+        "service.uninstall",
         "logs.list"
       ],
       "error_codes": [

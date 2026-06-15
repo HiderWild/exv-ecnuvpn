@@ -27,6 +27,13 @@ helper::HelloResponse FakeHelper::hello(const helper::HelloRequest& req) {
     helper::HelloResponse resp;
     resp.capabilities = {"tunnel_device_create", "route_apply", "dns_apply", "route_cleanup"};
     resp.mode = helper::HelperMode::Transient;
+    resp.startup_context.launch_mode = "oneshot";
+    resp.startup_context.endpoint = "fake-helper-endpoint";
+    resp.core_lease.active = core_lease_active_;
+    resp.core_lease.lease_id = core_lease_id_;
+    resp.core_lease.core_pid = core_lease_pid_;
+    resp.core_lease.purpose = core_lease_purpose_;
+    resp.core_lease.last_seen_state = core_lease_last_seen_state_;
     return resp;
 }
 
@@ -109,6 +116,74 @@ helper::ShutdownResponse FakeHelper::shutdown(const helper::ShutdownRequest& req
     return resp;
 }
 
+helper::InspectResponse FakeHelper::inspect(const helper::InspectRequest& req) {
+    (void)req;
+    helper::InspectResponse resp;
+    resp.capabilities = {"tunnel_device_create", "route_apply", "dns_apply", "route_cleanup"};
+    resp.mode = helper::HelperMode::Transient;
+    resp.startup_context.launch_mode = "oneshot";
+    resp.startup_context.endpoint = "fake-helper-endpoint";
+    resp.core_lease.active = core_lease_active_;
+    resp.core_lease.lease_id = core_lease_id_;
+    resp.core_lease.core_pid = core_lease_pid_;
+    resp.core_lease.purpose = core_lease_purpose_;
+    resp.core_lease.last_seen_state = core_lease_last_seen_state_;
+    resp.session_state.active = !sessions_.empty();
+    if (!sessions_.empty()) {
+        resp.session_state.session_id = sessions_.begin()->first;
+    }
+    return resp;
+}
+
+helper::AcquireCoreLeaseResponse FakeHelper::acquire_core_lease(
+    const helper::AcquireCoreLeaseRequest& req) {
+    acquire_core_lease_count_++;
+    helper::AcquireCoreLeaseResponse resp;
+    if (req.core_pid <= 0 || req.purpose.empty()) {
+        resp.accepted = false;
+        return resp;
+    }
+
+    core_lease_active_ = true;
+    core_lease_pid_ = req.core_pid;
+    core_lease_purpose_ = req.purpose;
+    core_lease_last_seen_state_.clear();
+    core_lease_id_ = "fake-core-lease-" + std::to_string(acquire_core_lease_count_);
+
+    resp.accepted = true;
+    resp.lease_id = core_lease_id_;
+    resp.mode = "oneshot";
+    return resp;
+}
+
+helper::KeepAliveResponse FakeHelper::keep_alive(const helper::KeepAliveRequest& req) {
+    keep_alive_count_++;
+    helper::KeepAliveResponse resp;
+    resp.ok = core_lease_active_ && req.lease_id == core_lease_id_;
+    if (resp.ok) {
+        core_lease_last_seen_state_ = req.state;
+    } else {
+        resp.warning = "unknown core lease";
+    }
+    return resp;
+}
+
+helper::ReleaseCoreLeaseResponse FakeHelper::release_core_lease(
+    const helper::ReleaseCoreLeaseRequest& req) {
+    release_core_lease_count_++;
+    helper::ReleaseCoreLeaseResponse resp;
+    resp.released = core_lease_active_ && req.lease_id == core_lease_id_;
+    resp.exiting = resp.released && req.exit_if_oneshot;
+    if (resp.released) {
+        core_lease_active_ = false;
+        core_lease_pid_ = 0;
+        core_lease_purpose_.clear();
+        core_lease_last_seen_state_.clear();
+        core_lease_id_.clear();
+    }
+    return resp;
+}
+
 void FakeHelper::set_disconnect_callback(DisconnectCallback cb) {
     disconnect_cb_ = std::move(cb);
 }
@@ -150,6 +225,9 @@ int FakeHelper::prepare_count() const { return prepare_count_; }
 int FakeHelper::apply_count() const { return apply_count_; }
 int FakeHelper::shutdown_count() const { return shutdown_count_; }
 int FakeHelper::heartbeat_count() const { return heartbeat_count_; }
+int FakeHelper::acquire_core_lease_count() const { return acquire_core_lease_count_; }
+int FakeHelper::keep_alive_count() const { return keep_alive_count_; }
+int FakeHelper::release_core_lease_count() const { return release_core_lease_count_; }
 bool FakeHelper::ipc_lost() const { return ipc_lost_; }
 
 std::vector<helper::SessionId> FakeHelper::active_sessions() const {
