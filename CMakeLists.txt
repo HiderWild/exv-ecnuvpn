@@ -52,6 +52,12 @@ set(EXV_PROTOCOL_SOURCES
     src/vpn_engine/protocol/url.cpp
 )
 
+set(EXV_OBSERVABILITY_SOURCES
+    src/observability/log_queue.cpp
+    src/observability/log_service.cpp
+    src/observability/log_facade.cpp
+)
+
 set(EXV_CORE_SOURCES
     src/core/config/config_manager.cpp
     src/core/config/config_api.cpp
@@ -133,6 +139,7 @@ set(EXV_CORE_SOURCES
     src/common/diagnostics/logger.cpp
     src/common/diagnostics/log_event_bus.cpp
     src/common/diagnostics/log_renderer.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
     src/cli/console.cpp
 )
 
@@ -1434,6 +1441,34 @@ set_target_properties(base_module_smoke_test PROPERTIES
 )
 
 add_test(NAME base_module_smoke_test COMMAND base_module_smoke_test)
+
+add_executable(log_queue_test
+    tests/log_queue_test.cpp
+    src/observability/log_queue.cpp
+)
+
+target_include_directories(log_queue_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(log_queue_test PRIVATE Threads::Threads)
+
+add_test(NAME log_queue_test COMMAND log_queue_test)
+
+add_executable(log_service_test
+    tests/log_service_test.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
+)
+
+target_include_directories(log_service_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(log_service_test PRIVATE Threads::Threads)
+
+add_test(NAME log_service_test COMMAND log_service_test)
 
 add_executable(utils_strings_test
     tests/utils_strings_test.cpp
