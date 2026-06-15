@@ -879,6 +879,18 @@ target_include_directories(ui_shell_contract_test PRIVATE
 
 add_test(NAME ui_shell_contract_test COMMAND ui_shell_contract_test)
 
+add_executable(ui_shell_core_rpc_client_test
+    tests/ui_shell_core_rpc_client_test.cpp
+    src/app/ui_shell/core_rpc_client.cpp
+    src/app/ui_shell/core_process_manager.cpp
+)
+
+target_include_directories(ui_shell_core_rpc_client_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME ui_shell_core_rpc_client_test COMMAND ui_shell_core_rpc_client_test)
+
 add_executable(crypto_roundtrip_test
     tests/crypto_roundtrip_test.cpp
     src/core/crypto/crypto.cpp
@@ -2045,6 +2057,7 @@ set(_release_blocking_tests
     native_packaging_policy_test
     repository_hygiene_test
     ui_shell_contract_test
+    ui_shell_core_rpc_client_test
     crypto_roundtrip_test
     native_url_test
     native_cstp_frame_test
