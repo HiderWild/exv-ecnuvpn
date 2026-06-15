@@ -53,7 +53,6 @@ set(EXV_PROTOCOL_SOURCES
 )
 
 set(EXV_CORE_SOURCES
-    src/core/config/config_original.cpp
     src/core/config/config_manager.cpp
     src/core/config/config_api.cpp
     src/core/config/config_persistence.cpp

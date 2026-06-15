@@ -87,10 +87,14 @@ int main() {
       root / "src" / "core" / "app_api" / "app_api.cpp";
   const auto desktop_action_registry_cpp =
       root / "src" / "core" / "app_api" / "desktop_action_registry.cpp";
+  const auto cmake_lists = root / "CMakeLists.txt";
+  const auto config_original_cpp =
+      root / "src" / "core" / "config" / "config_original.cpp";
   bool ok = true;
 
   ok &= expect_exists(app_api_cpp);
   ok &= expect_exists(desktop_action_registry_cpp);
+  ok &= expect_exists(cmake_lists);
   ok &= expect_exists(root / "src" / "core" / "rpc" /
                       "app_rpc_dispatcher.cpp");
   ok &= expect_exists(root / "src" / "core" / "config" /
@@ -173,6 +177,15 @@ int main() {
   ok &= expect_tree_does_not_contain(
       core_rpc_dir, "user_routes_",
       "core/rpc route actions must use persisted config routes");
+
+  ok &= expect(!std::filesystem::exists(config_original_cpp),
+               "src/core/config/config_original.cpp must be removed");
+  if (std::filesystem::exists(cmake_lists)) {
+    const std::string cmake = read_file(cmake_lists);
+    ok &= expect(cmake.find("src/core/config/config_original.cpp") ==
+                     std::string::npos,
+                 "CMakeLists.txt must not compile config_original.cpp");
+  }
 
   if (!ok) {
     std::cerr << "core_architecture_contract_test: FAILED\n";
