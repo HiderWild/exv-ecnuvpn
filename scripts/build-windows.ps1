@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('cpp', 'test', 'electron', 'debug', 'debug-run', 'desktop', 'all', 'clean')]
+  [ValidateSet('cpp', 'test', 'webview', 'electron', 'debug', 'debug-run', 'desktop', 'all', 'clean')]
   [string]$Action = 'all'
 )
 
@@ -10,7 +10,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 $buildRoot = Join-Path $repoRoot 'build\windows'
 $cppBuildRoot = Join-Path $repoRoot 'build-windows'
 $env:ECNUVPN_BUILD_PLATFORM = 'windows'
-$env:ECNUVPN_WEBUI_DIST_DIR = Join-Path $buildRoot 'electron\dist'
+$env:ECNUVPN_WEBUI_DIST_DIR = Join-Path $buildRoot 'webview\dist'
 
 function Invoke-Step {
   param(
@@ -30,7 +30,7 @@ function Invoke-CppBuild {
   Push-Location $repoRoot
   try {
     Invoke-Step cmake --preset windows-release
-    Invoke-Step cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test
+    Invoke-Step cmake --build --preset windows-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test win32_webview2_runtime_test
   }
   finally {
     Pop-Location
@@ -40,7 +40,7 @@ function Invoke-CppBuild {
 function Invoke-CppTests {
   Push-Location $repoRoot
   try {
-    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test'
+    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test|ui_shell_contract_test|ui_shell_core_rpc_client_test|ui_shell_cmake_policy_test|win32_webview2_runtime_test'
   }
   finally {
     Pop-Location
@@ -50,7 +50,7 @@ function Invoke-CppTests {
 function Invoke-WebuiRendererBuild {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step pnpm run build
+    Invoke-Step pnpm run webview:compile
   }
   finally {
     Pop-Location
@@ -60,18 +60,17 @@ function Invoke-WebuiRendererBuild {
 function Invoke-ElectronCompile {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step pnpm run build:electron
-    Invoke-Step pnpm run prepare:native
+    Invoke-Step pnpm run desktop:compile
   }
   finally {
     Pop-Location
   }
 }
 
-function Invoke-DesktopPackage {
+function Invoke-WebViewPackage {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
-    Invoke-Step pnpm run desktop:package
+    Invoke-Step pnpm run webview:package
   }
   finally {
     Pop-Location
@@ -120,11 +119,15 @@ switch ($Action) {
     Invoke-CppTests
   }
   'electron' {
-    Invoke-WebuiRendererBuild
     Invoke-ElectronCompile
   }
-  'debug' {
+  'webview' {
     Invoke-WebuiRendererBuild
+    Invoke-CppBuild
+    Invoke-CppTests
+    Invoke-WebViewPackage
+  }
+  'debug' {
     Invoke-CppBuild
     Invoke-CppTests
     Invoke-ElectronCompile
@@ -132,7 +135,6 @@ switch ($Action) {
     Invoke-DesktopDebugBuild
   }
   'debug-run' {
-    Invoke-WebuiRendererBuild
     Invoke-CppBuild
     Invoke-CppTests
     Invoke-ElectronCompile
@@ -144,14 +146,13 @@ switch ($Action) {
     Invoke-WebuiRendererBuild
     Invoke-CppBuild
     Invoke-CppTests
-    Invoke-ElectronCompile
-    Invoke-DesktopPackage
+    Invoke-WebViewPackage
   }
   'all' {
     Invoke-WebuiRendererBuild
     Invoke-CppBuild
     Invoke-CppTests
-    Invoke-ElectronCompile
+    Invoke-WebViewPackage
   }
   'clean' {
     if (Test-Path $buildRoot) {

@@ -8,19 +8,20 @@ BUILD_ROOT="$REPO_ROOT/build/macos"
 ACTION="${1:-all}"
 
 export ECNUVPN_BUILD_PLATFORM=macos
-export ECNUVPN_WEBUI_DIST_DIR="$BUILD_ROOT/electron/dist"
+export ECNUVPN_WEBUI_DIST_DIR="$BUILD_ROOT/webview/dist"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [cpp|test|electron|debug|debug-run|desktop|all|clean]
+Usage: $(basename "$0") [cpp|test|webview|electron|debug|debug-run|desktop|all|clean]
 
   cpp      Configure and build the native macOS targets into build/macos/cpp
   test     Run the focused native regression tests from build/macos/cpp
-  electron Build the Electron renderer/main outputs into build/macos/electron
-  debug    Build native targets, run tests, then create an unpacked debug app
+  webview  Build native targets, run tests, then package the native WebView shell
+  electron Build the Electron migration adapter outputs into build/macos/electron
+  debug    Build native targets, run tests, then create an unpacked Electron debug app
   debug-run Build the unpacked debug app, then launch the Electron UI
-  desktop  Build native targets, run tests, then package the macOS desktop app
-  all      Build native targets, run tests, then stage Electron artifacts
+  desktop  Build native targets, run tests, then package the native WebView shell
+  all      Build native targets, run tests, then package the native WebView shell
   clean    Remove build/macos
 EOF
 }
@@ -29,36 +30,35 @@ build_cpp() {
   (
     cd "$REPO_ROOT"
     cmake --preset macos-release
-    cmake --build --preset macos-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test
+    cmake --build --preset macos-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test darwin_wkwebview_runtime_test
   )
 }
 
 run_tests() {
   (
     cd "$REPO_ROOT"
-    ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test'
+    ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test|ui_shell_contract_test|ui_shell_core_rpc_client_test|ui_shell_cmake_policy_test|darwin_wkwebview_runtime_test'
   )
 }
 
 run_webui_renderer() {
   (
     cd "$REPO_ROOT/webui"
-    pnpm run build
+    pnpm run webview:compile
   )
 }
 
 compile_electron() {
   (
     cd "$REPO_ROOT/webui"
-    pnpm run build:electron
-    pnpm run prepare:native
+    pnpm run desktop:compile
   )
 }
 
-package_desktop() {
+package_webview() {
   (
     cd "$REPO_ROOT/webui"
-    pnpm run desktop:package
+    pnpm run webview:package
   )
 }
 
@@ -108,11 +108,15 @@ case "$ACTION" in
     run_tests
     ;;
   electron)
-    run_webui_renderer
     compile_electron
     ;;
-  debug)
+  webview)
     run_webui_renderer
+    build_cpp
+    run_tests
+    package_webview
+    ;;
+  debug)
     build_cpp
     run_tests
     compile_electron
@@ -120,7 +124,6 @@ case "$ACTION" in
     package_desktop_debug
     ;;
   debug-run)
-    run_webui_renderer
     build_cpp
     run_tests
     compile_electron
@@ -132,14 +135,13 @@ case "$ACTION" in
     run_webui_renderer
     build_cpp
     run_tests
-    compile_electron
-    package_desktop
+    package_webview
     ;;
   all)
     run_webui_renderer
     build_cpp
     run_tests
-    compile_electron
+    package_webview
     ;;
   clean)
     rm -rf "$BUILD_ROOT"

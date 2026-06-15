@@ -13,8 +13,7 @@ webui/
   host/              Neutral desktop host contract shared by all shells
   desktop/           Temporary Electron main process + preload adapter
   dist/              Vite build output (consumed by embed_assets.py)
-  dist-electron/     Compiled Electron main/preload (consumed by electron-builder)
-  release/           Packaged desktop app artifacts (after desktop:build)
+  dist-electron/     Compiled Electron main/preload for the migration adapter
 ```
 
 The Vue frontend is the same codebase in both modes:
@@ -55,12 +54,13 @@ This produces `dist/` which is consumed by `scripts/embed_assets.py` during the 
 ### Desktop app (native WebView shell)
 
 ```bash
-cd webui
-pnpm run webview:compile
-pnpm run webview:package
+scripts/build-windows.ps1 desktop   # Windows
+scripts/build-macos.sh desktop       # macOS
 ```
 
-`webview:package` creates a native package layout under
+The platform build scripts compile native targets, run focused native/UI shell
+tests, build the Vue renderer for the WebView target, and create a native
+package layout under
 `build/<platform>/webview/package/ECNU VPN/`:
 
 - `exv-ui` or `exv-ui.exe`
@@ -72,21 +72,26 @@ pnpm run webview:package
 The package script rejects Electron/Chromium payloads such as `electron.exe`,
 `Electron Framework.framework`, and `chromium.pak`.
 
+For renderer/package-only iteration:
+
+```bash
+cd webui
+pnpm run webview:compile
+pnpm run webview:package
+```
+
 ### Desktop app (Electron migration adapter)
 
 ```bash
 cd webui
-npm install
-npm run build          # Build the Vue frontend first
-npm run build:electron # Compile the Electron main/preload TypeScript
-npm run prepare:native # Copy the native exv binary into native/bin/
-npm run desktop:build  # Package with electron-builder
+pnpm install
+pnpm run desktop:compile      # Build renderer/main/preload and stage native binaries
+pnpm run desktop:package:dir  # Create an unpacked Electron debug app
 ```
 
-`desktop:build` runs all four steps above in sequence. Artifacts go to `webui/release/`:
-
-- **Windows**: `ECNU-VPN-<version>-portable.exe` (single-file portable) and `ECNU VPN Setup <version>.exe` (NSIS installer)
-- **macOS**: `ECNU VPN-<version>.dmg`
+Electron package scripts remain available only as an explicit migration adapter
+while platform WebView hosts reach parity. They are not the default production
+desktop package path.
 
 ### Development (live reload)
 
@@ -94,7 +99,7 @@ For desktop development (requires the native `exv` binary already built, or set 
 
 ```bash
 cd webui
-npm run desktop:dev    # Vite dev server + Electron with hot reload
+pnpm run desktop:dev   # Vite dev server + Electron with hot reload
 ```
 
 ## Desktop API Routing
