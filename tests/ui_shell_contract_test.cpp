@@ -99,6 +99,40 @@ int main() {
     return 1;
   }
 
+  char *no_arg_argv[] = {program};
+  UiShellOptions no_arg_resolved = resolve_ui_shell_options(
+      1, no_arg_argv, package_root / "exv-ui.exe");
+  if (!validate_ui_shell_options(no_arg_resolved).empty()) {
+    return 1;
+  }
+  if (fs::path(no_arg_resolved.exv_path) != package_root / "bin/exv.exe") {
+    return 1;
+  }
+  if (fs::path(no_arg_resolved.packaged_renderer_index) !=
+      package_root / "webui/index.html") {
+    return 1;
+  }
+
+  char *missing_exv_argv[] = {program, renderer_arg, renderer_url};
+  UiShellOptions explicit_invalid_resolved = resolve_ui_shell_options(
+      3, missing_exv_argv, package_root / "exv-ui.exe");
+  if (validate_ui_shell_options(explicit_invalid_resolved) !=
+      "missing required --exv path") {
+    return 1;
+  }
+
+  UiShellOptions explicit_resolved = resolve_ui_shell_options(
+      6, argv, package_root / "exv-ui.exe");
+  if (explicit_resolved.renderer_dev_server_url != "http://127.0.0.1:8288") {
+    return 1;
+  }
+  if (explicit_resolved.exv_path != "C:/app/bin/exv.exe") {
+    return 1;
+  }
+  if (!explicit_resolved.enable_dev_tools) {
+    return 1;
+  }
+
   UiShellOptions explicit_options = parse_ui_shell_options(6, argv);
   if (explicit_options.renderer_dev_server_url != "http://127.0.0.1:8288") {
     return 1;

@@ -88,6 +88,21 @@ UiShellOptions load_packaged_ui_shell_options(
   return parse_ui_shell_args_file(package_root / "exv-ui.args");
 }
 
+UiShellOptions resolve_ui_shell_options(
+    int argc, char **argv, const std::filesystem::path &executable_path) {
+  UiShellOptions options = parse_ui_shell_options(argc, argv);
+  if (argc > 1 || validate_ui_shell_options(options).empty()) {
+    return options;
+  }
+
+  UiShellOptions packaged_options =
+      load_packaged_ui_shell_options(executable_path);
+  if (validate_ui_shell_options(packaged_options).empty()) {
+    return packaged_options;
+  }
+  return options;
+}
+
 std::string validate_ui_shell_options(const UiShellOptions &options) {
   if (options.exv_path.empty()) {
     return "missing required --exv path";

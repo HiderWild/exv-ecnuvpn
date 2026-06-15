@@ -65,18 +65,10 @@ int run_webkitgtk_host(const ecnuvpn::ui_shell::UiWindowConfig &config);
 #endif
 
 int main(int argc, char **argv) {
-  auto options = ecnuvpn::ui_shell::parse_ui_shell_options(argc, argv);
-  std::string validation_error =
+  auto options = ecnuvpn::ui_shell::resolve_ui_shell_options(
+      argc, argv, current_executable_path());
+  const std::string validation_error =
       ecnuvpn::ui_shell::validate_ui_shell_options(options);
-  if (!validation_error.empty()) {
-    const auto packaged_options =
-        ecnuvpn::ui_shell::load_packaged_ui_shell_options(
-            current_executable_path());
-    if (ecnuvpn::ui_shell::validate_ui_shell_options(packaged_options).empty()) {
-      options = packaged_options;
-      validation_error.clear();
-    }
-  }
   if (!validation_error.empty()) {
     std::cerr << "exv-ui: " << validation_error << '\n';
     return 64;
