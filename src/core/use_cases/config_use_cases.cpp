@@ -165,12 +165,18 @@ UseCaseResult ConfigUseCases::save_auth(const nlohmann::json &payload) {
     }
   }
   if (payload.contains("user_agent") && payload["user_agent"].is_string()) {
-    std::string err = ecnuvpn::config_api::config_set(
-        manager_, "useragent", payload["user_agent"].get<std::string>());
-    if (!err.empty()) {
-      return error_from_config_api(err);
+    const std::string user_agent = payload["user_agent"].get<std::string>();
+    if (!user_agent.empty()) {
+      std::string err =
+          ecnuvpn::config_api::config_set(manager_, "useragent", user_agent);
+      if (!err.empty()) {
+        return error_from_config_api(err);
+      }
     }
   }
+  const bool has_submitted_password =
+      payload.contains("password") && payload["password"].is_string() &&
+      !payload["password"].get<std::string>().empty();
   if (payload.contains("remember_password") &&
       payload["remember_password"].is_boolean()) {
     const bool remember = payload["remember_password"].get<bool>();
@@ -181,6 +187,12 @@ UseCaseResult ConfigUseCases::save_auth(const nlohmann::json &payload) {
         return error_from_config_api(err);
       }
     } else {
+      Config current = manager_.load();
+      if (!has_submitted_password && current.password.empty()) {
+        return UseCaseResult::fail(
+            "invalid_payload",
+            "Password is required to enable remember_password.");
+      }
       std::string err = ecnuvpn::config_api::config_set(
           manager_, "remember_password", "true");
       if (!err.empty()) {
@@ -188,8 +200,7 @@ UseCaseResult ConfigUseCases::save_auth(const nlohmann::json &payload) {
       }
     }
   }
-  if (payload.contains("password") && payload["password"].is_string() &&
-      !payload["password"].get<std::string>().empty()) {
+  if (has_submitted_password) {
     std::string err = ecnuvpn::config_api::config_set_password(
         manager_, payload["password"].get<std::string>());
     if (!err.empty()) {
