@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <functional>
 #include <string>
 
@@ -32,6 +33,7 @@ public:
   virtual ~CoreRpcTransport() = default;
   virtual bool write_line(const std::string &line) = 0;
   virtual bool read_line(std::string &line) = 0;
+  virtual bool read_available_line(std::string &line) { return false; }
 };
 
 enum class CoreRpcWireMode {
@@ -48,12 +50,14 @@ public:
       CoreRpcWireMode wire_mode = CoreRpcWireMode::Desktop);
 
   CoreRpcResponse invoke(const CoreRpcRequest &request);
+  void pump_events();
   void set_event_handler(CoreRpcEventHandler handler);
 
 private:
   CoreRpcTransport &transport_;
   CoreRpcWireMode wire_mode_ = CoreRpcWireMode::Desktop;
   CoreRpcEventHandler event_handler_;
+  std::deque<std::string> buffered_response_lines_;
 };
 
 std::string serialize_core_rpc_request(const CoreRpcRequest &request);

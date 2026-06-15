@@ -72,7 +72,10 @@ CoreRpcResponse CoreRpcClient::invoke(const CoreRpcRequest &request) {
 
   for (;;) {
     std::string response_line;
-    if (!transport_.read_line(response_line)) {
+    if (!buffered_response_lines_.empty()) {
+      response_line = buffered_response_lines_.front();
+      buffered_response_lines_.pop_front();
+    } else if (!transport_.read_line(response_line)) {
       return transport_error(request, "transport_closed",
                              "Core RPC transport is closed");
     }
@@ -94,6 +97,28 @@ CoreRpcResponse CoreRpcClient::invoke(const CoreRpcRequest &request) {
 
 void CoreRpcClient::set_event_handler(CoreRpcEventHandler handler) {
   event_handler_ = std::move(handler);
+}
+
+void CoreRpcClient::pump_events() {
+  for (;;) {
+    std::string line;
+    if (!transport_.read_available_line(line)) {
+      return;
+    }
+
+    try {
+      const auto parsed = nlohmann::json::parse(line);
+      if (parsed.is_object() && parsed.contains("event")) {
+        if (event_handler_) {
+          event_handler_(parse_core_rpc_event_line(line));
+        }
+        continue;
+      }
+      buffered_response_lines_.push_back(line);
+    } catch (const nlohmann::json::exception &) {
+      buffered_response_lines_.push_back(line);
+    }
+  }
 }
 
 std::string serialize_core_rpc_request(const CoreRpcRequest &request) {

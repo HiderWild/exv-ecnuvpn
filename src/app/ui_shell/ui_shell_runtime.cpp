@@ -76,6 +76,11 @@ int run_ui_shell_window(UiWindow &window,
   });
   CoreEventHandlerGuard event_guard(client);
 
+  UiWindowConfig runtime_config = config;
+  runtime_config.pump_core_events = [&client]() {
+    client.pump_events();
+  };
+
   window.set_message_handler([&client](const std::string &message_json) {
     try {
       return handle_host_request(message_json, [&client](const CoreRpcRequest &request) {
@@ -88,7 +93,7 @@ int run_ui_shell_window(UiWindow &window,
     }
   });
   WindowMessageHandlerGuard handler_guard(window);
-  return window.run(config);
+  return window.run(runtime_config);
 }
 
 } // namespace ecnuvpn::ui_shell

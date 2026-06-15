@@ -13,6 +13,7 @@ struct UiWindowConfig {
   RendererAssets renderer;
   std::string exv_path;
   bool enable_dev_tools = false;
+  std::function<void()> pump_core_events;
 };
 
 class UiWindow {

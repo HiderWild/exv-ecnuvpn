@@ -33,11 +33,21 @@ public:
     return true;
   }
 
+  bool read_available_line(std::string &line) override {
+    if (next_available_line_ >= available_lines.size()) {
+      return false;
+    }
+    line = available_lines[next_available_line_++];
+    return true;
+  }
+
   std::vector<std::string> writes;
+  std::vector<std::string> available_lines;
 
 private:
   std::vector<std::string> responses_;
   std::vector<std::string>::size_type next_response_ = 0;
+  std::vector<std::string>::size_type next_available_line_ = 0;
 };
 
 class FakeWindow final : public ecnuvpn::ui_shell::UiWindow {
@@ -50,6 +60,9 @@ public:
     observed_config = config;
     if (throw_on_run) {
       throw std::runtime_error("window failed");
+    }
+    if (pump_core_events_before_request && observed_config.pump_core_events) {
+      observed_config.pump_core_events();
     }
     if (!handler_) {
       return 91;
@@ -66,6 +79,7 @@ public:
   std::string message_json =
       R"({"id":11,"action":"config.getAuth","payload":{"profile":"default"}})";
   bool throw_on_run = false;
+  bool pump_core_events_before_request = false;
   std::string observed_response;
   std::vector<std::string> emitted_events;
 
@@ -159,6 +173,32 @@ int main() {
                 "runtime should map core event to renderer envelope") &&
          ok;
   }
+
+  FakeTransport unsolicited_event_transport(
+      R"({"id":11,"ok":true,"data":{"username":"alice"}})");
+  unsolicited_event_transport.available_lines.push_back(
+      R"({"event":"vpn.connected","data":{"profile":"default"}})");
+  CoreRpcClient unsolicited_event_client(unsolicited_event_transport);
+  FakeWindow unsolicited_event_window;
+  unsolicited_event_window.pump_core_events_before_request = true;
+  const int unsolicited_event_exit_code =
+      run_ui_shell_window(unsolicited_event_window, config,
+                          unsolicited_event_client);
+  ok = expect(unsolicited_event_exit_code == 12,
+              "runtime should preserve exit code when pumping events") &&
+       ok;
+  ok = expect(unsolicited_event_window.emitted_events.size() == 1,
+              "runtime should emit unsolicited core event before renderer request") &&
+       ok;
+  if (unsolicited_event_window.emitted_events.size() == 1) {
+    ok = expect(unsolicited_event_window.emitted_events[0] ==
+                    R"({"type":"vpn.connected","data":{"profile":"default"}})",
+                "runtime should map pumped core event to renderer envelope") &&
+         ok;
+  }
+  ok = expect(unsolicited_event_transport.writes.size() == 1,
+              "runtime should still forward renderer request after pumping events") &&
+       ok;
 
   FakeTransport empty_event_data_transport(
       std::vector<std::string>{R"({"event":"heartbeat"})",
