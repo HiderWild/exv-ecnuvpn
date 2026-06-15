@@ -304,6 +304,70 @@ set_target_properties(exv-core-tunnel-contract-module PROPERTIES
     CXX_SCAN_FOR_MODULES ON
 )
 
+add_library(exv-core-tunnel-reconnect-module STATIC)
+target_sources(exv-core-tunnel-reconnect-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/core/tunnel_controller/modules/tunnel_reconnect.cppm
+)
+target_compile_features(exv-core-tunnel-reconnect-module PUBLIC cxx_std_20)
+target_include_directories(exv-core-tunnel-reconnect-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-core-tunnel-reconnect-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_library(exv-core-tunnel-errors-module STATIC)
+target_sources(exv-core-tunnel-errors-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/core/tunnel_controller/modules/tunnel_errors.cppm
+)
+target_compile_features(exv-core-tunnel-errors-module PUBLIC cxx_std_20)
+target_include_directories(exv-core-tunnel-errors-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-core-tunnel-errors-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_library(exv-core-tunnel-events-module STATIC)
+target_sources(exv-core-tunnel-events-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/core/tunnel_controller/modules/tunnel_events.cppm
+)
+target_compile_features(exv-core-tunnel-events-module PUBLIC cxx_std_20)
+target_include_directories(exv-core-tunnel-events-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-core-tunnel-events-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_library(exv-core-tunnel-timing-module STATIC)
+target_sources(exv-core-tunnel-timing-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/core/tunnel_controller/modules/tunnel_timing.cppm
+)
+target_compile_features(exv-core-tunnel-timing-module PUBLIC cxx_std_20)
+target_include_directories(exv-core-tunnel-timing-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-core-tunnel-timing-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
 
@@ -895,6 +959,14 @@ target_include_directories(reconnect_policy_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_link_libraries(reconnect_policy_test PRIVATE
+    exv-core-tunnel-reconnect-module
+)
+
+set_target_properties(reconnect_policy_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_test(NAME reconnect_policy_test COMMAND reconnect_policy_test)
 
 add_executable(timer_scheduler_test
@@ -907,7 +979,14 @@ target_include_directories(timer_scheduler_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_link_libraries(timer_scheduler_test PRIVATE Threads::Threads)
+target_link_libraries(timer_scheduler_test PRIVATE
+    exv-core-tunnel-timing-module
+    Threads::Threads
+)
+
+set_target_properties(timer_scheduler_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
 
 add_test(NAME timer_scheduler_test COMMAND timer_scheduler_test)
 
@@ -919,6 +998,14 @@ add_executable(reconnect_deterministic_test
 target_include_directories(reconnect_deterministic_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(reconnect_deterministic_test PRIVATE
+    exv-core-tunnel-reconnect-module
+)
+
+set_target_properties(reconnect_deterministic_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
 )
 
 add_test(NAME reconnect_deterministic_test COMMAND reconnect_deterministic_test)
@@ -945,6 +1032,14 @@ target_include_directories(core_error_mapper_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_link_libraries(core_error_mapper_test PRIVATE
+    exv-core-tunnel-errors-module
+)
+
+set_target_properties(core_error_mapper_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_test(NAME core_error_mapper_test COMMAND core_error_mapper_test)
 
 add_executable(engine_event_bridge_test
@@ -956,7 +1051,16 @@ target_include_directories(engine_event_bridge_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_link_libraries(engine_event_bridge_test PRIVATE exv-core Threads::Threads ${EXV_PLATFORM_LIBS})
+target_link_libraries(engine_event_bridge_test PRIVATE
+    exv-core
+    exv-core-tunnel-events-module
+    Threads::Threads
+    ${EXV_PLATFORM_LIBS}
+)
+
+set_target_properties(engine_event_bridge_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
 
 add_test(NAME engine_event_bridge_test COMMAND engine_event_bridge_test)
 

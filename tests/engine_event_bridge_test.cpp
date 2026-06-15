@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+import exv.core.tunnel.events;
+
+namespace events = exv::core::tunnel::events;
+
 namespace {
 
 bool expect(bool condition, const char* message) {
@@ -25,39 +29,39 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("auth.succeeded", &out) &&
-                    out == exv::core::TunnelEventType::AuthSucceeded,
+                    out == events::TunnelEventType::AuthSucceeded,
                     "auth.succeeded -> AuthSucceeded") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("auth.failed", &out) &&
-                    out == exv::core::TunnelEventType::AuthFailed,
+                    out == events::TunnelEventType::AuthFailed,
                     "auth.failed -> AuthFailed") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("cstp.connected", &out) &&
-                    out == exv::core::TunnelEventType::CstpConnected,
+                    out == events::TunnelEventType::CstpConnected,
                     "cstp.connected -> CstpConnected") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("packet.loop.started", &out) &&
-                    out == exv::core::TunnelEventType::PacketLoopStarted,
+                    out == events::TunnelEventType::PacketLoopStarted,
                     "packet.loop.started -> PacketLoopStarted") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("transport.closed", &out) &&
-                    out == exv::core::TunnelEventType::TransportClosed,
+                    out == events::TunnelEventType::TransportClosed,
                     "transport.closed -> TransportClosed") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("packet_device.failed", &out) &&
-                    out == exv::core::TunnelEventType::PacketDeviceFailed,
+                    out == events::TunnelEventType::PacketDeviceFailed,
                     "packet_device.failed -> PacketDeviceFailed") && ok;
     }
 
@@ -66,17 +70,17 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(!exv::core::EngineEventBridge::map_event("unknown.event", &out),
                     "unknown.event -> false") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(!exv::core::EngineEventBridge::map_event("auth.started", &out),
                     "auth.started -> false (not mapped)") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(!exv::core::EngineEventBridge::map_event("packet.inbound", &out),
                     "packet.inbound -> false (not mapped)") && ok;
     }
@@ -86,9 +90,9 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        std::vector<exv::core::TunnelEventType> received;
+        std::vector<events::TunnelEventType> received;
         exv::core::EngineEventBridge bridge(
-            [&](exv::core::TunnelEvent e) { received.push_back(e.type); });
+            [&](events::TunnelEvent e) { received.push_back(e.type); });
 
         ecnuvpn::vpn_engine::VpnEngineEvent ev1;
         ev1.type = "auth.succeeded";
@@ -99,9 +103,9 @@ int main() {
         bridge.emit(ev2);
 
         ok = expect(received.size() == 2, "callback invoked twice") && ok;
-        ok = expect(received[0] == exv::core::TunnelEventType::AuthSucceeded,
+        ok = expect(received[0] == events::TunnelEventType::AuthSucceeded,
                     "first event is AuthSucceeded") && ok;
-        ok = expect(received[1] == exv::core::TunnelEventType::CstpConnected,
+        ok = expect(received[1] == events::TunnelEventType::CstpConnected,
                     "second event is CstpConnected") && ok;
     }
 
@@ -112,7 +116,7 @@ int main() {
     {
         int call_count = 0;
         exv::core::EngineEventBridge bridge(
-            [&](exv::core::TunnelEvent) { ++call_count; });
+            [&](events::TunnelEvent) { ++call_count; });
 
         ecnuvpn::vpn_engine::VpnEngineEvent ev;
         ev.type = "native.starting";
@@ -126,9 +130,9 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        std::vector<exv::core::TunnelEventType> received;
+        std::vector<events::TunnelEventType> received;
         exv::core::EngineEventBridge bridge(
-            [&](exv::core::TunnelEvent e) { received.push_back(e.type); });
+            [&](events::TunnelEvent e) { received.push_back(e.type); });
 
         const char* types[] = {
             "auth.succeeded",
@@ -145,17 +149,17 @@ int main() {
         }
 
         ok = expect(received.size() == 6, "all 6 mapped types received") && ok;
-        ok = expect(received[0] == exv::core::TunnelEventType::AuthSucceeded,
+        ok = expect(received[0] == events::TunnelEventType::AuthSucceeded,
                     "index 0: AuthSucceeded") && ok;
-        ok = expect(received[1] == exv::core::TunnelEventType::AuthFailed,
+        ok = expect(received[1] == events::TunnelEventType::AuthFailed,
                     "index 1: AuthFailed") && ok;
-        ok = expect(received[2] == exv::core::TunnelEventType::CstpConnected,
+        ok = expect(received[2] == events::TunnelEventType::CstpConnected,
                     "index 2: CstpConnected") && ok;
-        ok = expect(received[3] == exv::core::TunnelEventType::PacketLoopStarted,
+        ok = expect(received[3] == events::TunnelEventType::PacketLoopStarted,
                     "index 3: PacketLoopStarted") && ok;
-        ok = expect(received[4] == exv::core::TunnelEventType::TransportClosed,
+        ok = expect(received[4] == events::TunnelEventType::TransportClosed,
                     "index 4: TransportClosed") && ok;
-        ok = expect(received[5] == exv::core::TunnelEventType::PacketDeviceFailed,
+        ok = expect(received[5] == events::TunnelEventType::PacketDeviceFailed,
                     "index 5: PacketDeviceFailed") && ok;
     }
 

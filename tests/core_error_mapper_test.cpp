@@ -1,10 +1,9 @@
 // Tests for CoreErrorMapper: verifies error classification and recoverability.
 
-#include "core/core_error_mapper.hpp"
-#include "core/tunnel_state.hpp"
-
 #include <iostream>
 #include <string>
+
+import exv.core.tunnel.errors;
 
 namespace {
 
@@ -19,8 +18,9 @@ bool expect(bool condition, const char* message) {
 int main() {
     bool ok = true;
 
-    using exv::core::CoreErrorMapper;
-    using exv::core::ErrorInfo;
+    namespace errors = exv::core::tunnel::errors;
+    using errors::CoreErrorMapper;
+    using errors::ErrorInfo;
 
     // --- from_transport_error: creates recoverable transport error ---
     {
