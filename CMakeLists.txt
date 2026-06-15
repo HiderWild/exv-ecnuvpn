@@ -896,6 +896,21 @@ target_include_directories(ui_shell_core_rpc_client_test PRIVATE
 
 add_test(NAME ui_shell_core_rpc_client_test COMMAND ui_shell_core_rpc_client_test)
 
+add_executable(ui_shell_runtime_test
+    tests/ui_shell_runtime_test.cpp
+    src/app/ui_shell/core_rpc_client.cpp
+    src/app/ui_shell/host_bridge.cpp
+    src/app/ui_shell/renderer_assets.cpp
+    src/app/ui_shell/ui_shell_runtime.cpp
+    src/app/ui_shell/ui_window.cpp
+)
+
+target_include_directories(ui_shell_runtime_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME ui_shell_runtime_test COMMAND ui_shell_runtime_test)
+
 add_executable(ui_shell_cmake_policy_test
     tests/ui_shell_cmake_policy_test.cpp
 )
@@ -2206,6 +2221,7 @@ set(_release_blocking_tests
     repository_hygiene_test
     ui_shell_contract_test
     ui_shell_core_rpc_client_test
+    ui_shell_runtime_test
     ui_shell_cmake_policy_test
     crypto_roundtrip_test
     native_url_test
