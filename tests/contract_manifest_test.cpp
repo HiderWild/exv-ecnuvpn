@@ -131,6 +131,12 @@ int main() {
   const auto tunnel_controller_cpp =
       read_text_file(source_dir / "src" / "core" / "tunnel_controller" /
                      "tunnel_controller.cpp");
+  const auto tunnel_controller_header =
+      read_text_file(source_dir / "src" / "core" / "tunnel_controller" /
+                     "tunnel_controller.hpp");
+  const auto tunnel_public_module_path =
+      source_dir / "src" / "core" / "tunnel_controller" / "modules" /
+      "tunnel.cppm";
   const auto tunnel_state_machine_test =
       read_text_file(source_dir / "tests" /
                      "tunnel_controller_state_machine_test.cpp");
@@ -191,6 +197,40 @@ int main() {
               "tunnel_controller_state_machine_test must exercise the real "
               "TunnelController, not a mirror state machine") &&
        ok;
+  ok = expect(tunnel_controller_header.find("NativeDependenciesFactory") ==
+                  std::string::npos,
+              "public TunnelController header must not expose native dependency "
+              "test seams") &&
+       ok;
+  ok = expect(tunnel_controller_header.find("core_session_runner") ==
+                  std::string::npos,
+              "public TunnelController header must not include native session "
+              "runner internals") &&
+       ok;
+  ok = expect(std::filesystem::exists(tunnel_public_module_path),
+              "public tunnel module exv.core.tunnel must exist") &&
+       ok;
+  if (std::filesystem::exists(tunnel_public_module_path)) {
+    const auto tunnel_public_module = read_text_file(tunnel_public_module_path);
+    ok = expect(tunnel_public_module.find("NativeDependenciesFactory") ==
+                    std::string::npos,
+                "public tunnel module must not export native dependency test "
+                "seams") &&
+         ok;
+    ok = expect(tunnel_public_module.find("native_engine") ==
+                    std::string::npos,
+                "public tunnel module must not include native engine details") &&
+         ok;
+    ok = expect(tunnel_public_module.find("helper/common") ==
+                    std::string::npos,
+                "public tunnel module must not include helper wire details") &&
+         ok;
+    ok = expect(tunnel_public_module.find("platform/common") ==
+                    std::string::npos,
+                "public tunnel module must not include platform implementation "
+                "details") &&
+         ok;
+  }
 
   ok = expect(std::string(exv::contracts::generated::CONTRACT_VERSION) ==
                   manifest.at("version").get<std::string>(),

@@ -11,6 +11,7 @@
 // Events are still needed for async failures and reconnect scenarios.
 
 #include "core/tunnel_controller.hpp"
+#include "core/tunnel_controller/tunnel_controller_test_access.hpp"
 #include "core/tunnel_intent.hpp"
 #include "core/config/config.hpp"
 #include "core/tunnel_state.hpp"
@@ -448,7 +449,7 @@ bool test_native_network_config_failure_preserves_error() {
 
     net_ops->set_apply_should_fail(true);
 
-    exv::core::TunnelController ctrl(
+    auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{},
         [transport_state]() {
             ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
@@ -458,6 +459,7 @@ bool test_native_network_config_failure_preserves_error() {
             };
             return deps;
         });
+    auto& ctrl = *ctrl_owner;
     ctrl.set_vpn_config(native_controller_config(), "test-password");
 
     bool ok = true;
@@ -490,7 +492,7 @@ bool test_native_network_config_preserves_routes_and_bypass() {
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
 
-    exv::core::TunnelController ctrl(
+    auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{},
         [transport_state]() {
             ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
@@ -504,6 +506,7 @@ bool test_native_network_config_preserves_routes_and_bypass() {
             };
             return deps;
         });
+    auto& ctrl = *ctrl_owner;
     ctrl.set_vpn_config(native_controller_config(), "test-password");
 
     bool ok = true;
@@ -541,7 +544,7 @@ bool test_native_packet_startup_failure_cleans_network_state() {
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
 
-    exv::core::TunnelController ctrl(
+    auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{},
         [transport_state]() {
             ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
@@ -555,6 +558,7 @@ bool test_native_packet_startup_failure_cleans_network_state() {
             };
             return deps;
         });
+    auto& ctrl = *ctrl_owner;
     ctrl.set_vpn_config(native_controller_config(), "test-password");
 
     bool ok = true;
@@ -602,7 +606,7 @@ bool test_native_transport_reconnect_is_controller_owned() {
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
 
-    exv::core::TunnelController ctrl(
+    auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, config,
         [transport_state]() {
             ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
@@ -616,6 +620,7 @@ bool test_native_transport_reconnect_is_controller_owned() {
             };
             return deps;
         });
+    auto& ctrl = *ctrl_owner;
 
     ecnuvpn::Config cfg = native_controller_config();
     cfg.auto_reconnect = true;

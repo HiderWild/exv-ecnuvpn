@@ -10,18 +10,7 @@ TunnelController::TunnelController(
     std::shared_ptr<exv::helper::HelperClient> helper,
     std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
     ReconnectConfig reconnect_config)
-    : TunnelController(std::move(helper),
-                       std::move(net_ops),
-                       reconnect_config,
-                       CoreSessionRunner::NativeDependenciesFactory{})
-{}
-
-TunnelController::TunnelController(
-    std::shared_ptr<exv::helper::HelperClient> helper,
-    std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
-    ReconnectConfig reconnect_config,
-    CoreSessionRunner::NativeDependenciesFactory deps_factory)
-    : impl_(std::make_unique<Impl>(std::move(deps_factory)))
+    : impl_(std::make_unique<Impl>())
 {
     impl_->helper_          = std::move(helper);
     impl_->net_ops_         = std::move(net_ops);

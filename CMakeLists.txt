@@ -368,6 +368,22 @@ set_target_properties(exv-core-tunnel-timing-module PROPERTIES
     CXX_SCAN_FOR_MODULES ON
 )
 
+add_library(exv-core-tunnel-module STATIC)
+target_sources(exv-core-tunnel-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/core/tunnel_controller/modules/tunnel.cppm
+)
+target_compile_features(exv-core-tunnel-module PUBLIC cxx_std_20)
+target_include_directories(exv-core-tunnel-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-core-tunnel-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
 
@@ -1125,6 +1141,25 @@ set_target_properties(tunnel_module_smoke_test PROPERTIES
 
 add_test(NAME tunnel_module_smoke_test COMMAND tunnel_module_smoke_test)
 
+add_executable(tunnel_public_module_smoke_test
+    tests/tunnel_public_module_smoke_test.cpp
+)
+
+target_include_directories(tunnel_public_module_smoke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(tunnel_public_module_smoke_test PRIVATE
+    exv-core-tunnel-module
+)
+
+set_target_properties(tunnel_public_module_smoke_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_test(NAME tunnel_public_module_smoke_test COMMAND tunnel_public_module_smoke_test)
+
 add_executable(core_process_test
     tests/core_process_test.cpp
 )
@@ -1161,6 +1196,7 @@ add_executable(tunnel_controller_integration_test
     tests/support/fake_helper.cpp
     tests/support/fake_platform_network_ops.cpp
     tests/support/fake_core_ui_client.cpp
+    src/core/tunnel_controller/tunnel_controller_test_access.cpp
 )
 
 target_include_directories(tunnel_controller_integration_test PRIVATE
@@ -1671,6 +1707,7 @@ set(_release_blocking_tests
     tunnel_controller_state_machine_test
     tunnel_contract_test
     tunnel_module_smoke_test
+    tunnel_public_module_smoke_test
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
@@ -1776,6 +1813,7 @@ set_property(TEST
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
     tunnel_contract_test
+    tunnel_public_module_smoke_test
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
@@ -1829,6 +1867,7 @@ set_property(TEST
     core_process_lifecycle_test
     tunnel_contract_test
     tunnel_module_smoke_test
+    tunnel_public_module_smoke_test
     APPEND PROPERTY LABELS "core"
 )
 
@@ -1873,6 +1912,7 @@ set_property(TEST
     contract_manifest_test
     contract_generation_check
     tunnel_module_smoke_test
+    tunnel_public_module_smoke_test
     core_process_test
     core_process_lifecycle_test
     app_api_status_contract_test
