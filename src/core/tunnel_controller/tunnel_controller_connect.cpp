@@ -1,35 +1,41 @@
-    // ================================================================
-    // Guards
-    // ================================================================
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
-    bool can_start_connect() const {
+#include <exception>
+
+namespace exv::core {
+
+// ================================================================
+// Guards
+// ================================================================
+
+bool TunnelController::Impl::can_start_connect() const {
         return phase_ == TunnelPhase::Idle
             || phase_ == TunnelPhase::Failed;
     }
 
-    bool can_disconnect() const {
+bool TunnelController::Impl::can_disconnect() const {
         return phase_ != TunnelPhase::Idle
             && phase_ != TunnelPhase::Disconnecting
             && phase_ != TunnelPhase::CleaningUp
             && phase_ != TunnelPhase::Failed;
     }
 
-    // ================================================================
-    // Connect flow (event-driven via CoreSessionRunner)
-    //
-    // 1.  PreparingHelper       — start_session()
-    // 2.  Authenticating        — runner_.start() -> session begins
-    // 3.  [async] AuthSucceeded — phase moves to ConnectingCstp
-    // 4.  [async] CstpConnected — phase moves to ApplyingNetworkConfig
-    // 5.  OpeningPacketDevice — prepare_tunnel_device()
-    // 6.  ApplyingNetworkConfig — apply_tunnel_config()
-    // 7.  [async] PacketLoopStarted — phase moves to Connected
-    //
-    // When no VPN config is provided (fallback path), the old synchronous
-    // flow is preserved for backward compatibility with tests that don't
-    // set a VPN config.
-    // ================================================================
-    bool prepare_tunnel_device_for_session(
+// ================================================================
+// Connect flow (event-driven via CoreSessionRunner)
+//
+// 1.  PreparingHelper       — start_session()
+// 2.  Authenticating        — runner_.start() -> session begins
+// 3.  [async] AuthSucceeded — phase moves to ConnectingCstp
+// 4.  [async] CstpConnected — phase moves to ApplyingNetworkConfig
+// 5.  OpeningPacketDevice — prepare_tunnel_device()
+// 6.  ApplyingNetworkConfig — apply_tunnel_config()
+// 7.  [async] PacketLoopStarted — phase moves to Connected
+//
+// When no VPN config is provided (fallback path), the old synchronous
+// flow is preserved for backward compatibility with tests that don't
+// set a VPN config.
+// ================================================================
+bool TunnelController::Impl::prepare_tunnel_device_for_session(
         exv::platform::TunnelDeviceDescriptor* device) {
         if (!device) return false;
 
@@ -61,10 +67,10 @@
         return true;
     }
 
-    bool apply_tunnel_config_for_session(
+bool TunnelController::Impl::apply_tunnel_config_for_session(
         const exv::platform::TunnelDeviceDescriptor& device,
         const std::string& interface_address,
-        const ecnuvpn::vpn_engine::TunnelMetadata* metadata = nullptr) {
+        const ecnuvpn::vpn_engine::TunnelMetadata* metadata) {
         timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
         transition_to(TunnelPhase::ApplyingNetworkConfig);
         log_tunnel_event("INFO", "network.config.applying", "Applying network config",
@@ -105,7 +111,7 @@
         return true;
     }
 
-    ErrorInfo current_native_failure(
+ErrorInfo TunnelController::Impl::current_native_failure(
         const std::string& fallback_code,
         const std::string& fallback_message) const {
         auto status = runner_.status();
@@ -143,7 +149,8 @@
         return err;
     }
 
-    ecnuvpn::vpn_engine::ValidationResult current_network_failure(
+ecnuvpn::vpn_engine::ValidationResult
+TunnelController::Impl::current_network_failure(
         const std::string& fallback_code,
         const std::string& fallback_message) const {
         ecnuvpn::vpn_engine::ValidationResult result;
@@ -161,7 +168,7 @@
         return result;
     }
 
-    std::string interface_address_from_metadata(
+std::string TunnelController::Impl::interface_address_from_metadata(
         const ecnuvpn::vpn_engine::TunnelMetadata& metadata) const {
         std::string ip = metadata.internal_ip4_address;
         if (ip.empty()) {
@@ -173,7 +180,8 @@
         return ip;
     }
 
-    ecnuvpn::vpn_engine::ValidationResult configure_network_for_engine(
+ecnuvpn::vpn_engine::ValidationResult
+TunnelController::Impl::configure_network_for_engine(
         const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
         ecnuvpn::vpn_engine::DeviceConfig* device_config) {
         exv::platform::TunnelDeviceDescriptor device;
@@ -201,7 +209,7 @@
         return {};
     }
 
-    void do_connect() {
+void TunnelController::Impl::do_connect() {
         log_tunnel_event("INFO", "connect.start", "Connect requested",
                          {{"server", intent_.profile_id.value},
                           {"auto_reconnect", intent_.auto_reconnect ? "true" : "false"}});
@@ -341,3 +349,5 @@
         reconnect_policy_.reset();
         start_heartbeat();
     }
+
+} // namespace exv::core

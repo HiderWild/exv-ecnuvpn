@@ -1,8 +1,12 @@
-    // ================================================================
-    // State transition helpers
-    // ================================================================
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
-    void transition_to(TunnelPhase new_phase) {
+namespace exv::core {
+
+// ================================================================
+// State transition helpers
+// ================================================================
+
+void TunnelController::Impl::transition_to(TunnelPhase new_phase) {
         if (new_phase == TunnelPhase::Idle ||
             new_phase == TunnelPhase::Failed ||
             new_phase == TunnelPhase::CleaningUp) {
@@ -13,7 +17,7 @@
         notify_status();
     }
 
-    void update_snapshot() {
+void TunnelController::Impl::update_snapshot() {
         snapshot_.phase            = phase_;
         snapshot_.desired_connected = intent_.desired_connected;
         snapshot_.auto_reconnect   = intent_.auto_reconnect;
@@ -43,16 +47,18 @@
         }
     }
 
-    void notify_status() {
+void TunnelController::Impl::notify_status() {
         if (status_callback_) {
             status_callback_(snapshot_);
         }
     }
 
-    void set_error(const ErrorInfo& error) {
+void TunnelController::Impl::set_error(const ErrorInfo& error) {
         snapshot_.last_error = error;
     }
 
-    void clear_error() {
+void TunnelController::Impl::clear_error() {
         snapshot_.last_error = std::nullopt;
     }
+
+} // namespace exv::core

@@ -1,8 +1,14 @@
-    // ================================================================
-    // Disconnect flow
-    // ================================================================
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
-    void do_disconnect(DisconnectReason reason) {
+#include <exception>
+
+namespace exv::core {
+
+// ================================================================
+// Disconnect flow
+// ================================================================
+
+void TunnelController::Impl::do_disconnect(DisconnectReason reason) {
         intent_.desired_connected    = false;
         intent_.user_disconnect_reason = reason;
 
@@ -17,7 +23,7 @@
         do_cleanup();
     }
 
-    void shutdown_helper_session_for_cleanup() {
+void TunnelController::Impl::shutdown_helper_session_for_cleanup() {
         try {
             exv::helper::ShutdownRequest req;
             req.session_id = session_id_;
@@ -42,12 +48,12 @@
         network_config_applied_ = false;
     }
 
-    void cleanup_after_failed_startup() {
+void TunnelController::Impl::cleanup_after_failed_startup() {
         stop_heartbeat();
         shutdown_helper_session_for_cleanup();
     }
 
-    void do_cleanup() {
+void TunnelController::Impl::do_cleanup() {
         stop_heartbeat();
         transition_to(TunnelPhase::CleaningUp);
 
@@ -55,3 +61,5 @@
 
         transition_to(TunnelPhase::Idle);
     }
+
+} // namespace exv::core

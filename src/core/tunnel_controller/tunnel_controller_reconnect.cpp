@@ -1,8 +1,12 @@
-    // ================================================================
-    // Reconnect decision
-    // ================================================================
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
-    void attempt_reconnect(const ErrorInfo& error) {
+namespace exv::core {
+
+// ================================================================
+// Reconnect decision
+// ================================================================
+
+void TunnelController::Impl::attempt_reconnect(const ErrorInfo& error) {
         auto decision = reconnect_policy_.decide(
             error, intent_, phase_, reconnect_attempts_);
 
@@ -17,3 +21,5 @@
             transition_to(TunnelPhase::Failed);
         }
     }
+
+} // namespace exv::core

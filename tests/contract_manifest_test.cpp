@@ -93,6 +93,29 @@ bool tree_contains_any(const std::filesystem::path &root,
   return false;
 }
 
+bool tree_contains_matching_filename(const std::filesystem::path &root,
+                                     std::string_view prefix,
+                                     std::string_view suffix) {
+  if (!std::filesystem::exists(root)) {
+    return false;
+  }
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const auto filename = entry.path().filename().string();
+    if (filename.rfind(prefix, 0) == 0 &&
+        filename.size() >= suffix.size() &&
+        filename.compare(filename.size() - suffix.size(), suffix.size(),
+                         suffix) == 0) {
+      std::cerr << "Forbidden tunnel controller include-unit source: "
+                << entry.path().string() << '\n';
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 int main() {
@@ -105,6 +128,12 @@ int main() {
       read_json_file(source_dir / "contracts" / "generated" /
                      "system_contract_snapshot.json");
   const auto cmake_lists = read_text_file(source_dir / "CMakeLists.txt");
+  const auto tunnel_controller_cpp =
+      read_text_file(source_dir / "src" / "core" / "tunnel_controller" /
+                     "tunnel_controller.cpp");
+  const auto tunnel_state_machine_test =
+      read_text_file(source_dir / "tests" /
+                     "tunnel_controller_state_machine_test.cpp");
 
   ok = expect(manifest == snapshot,
               "generated snapshot must match canonical manifest") &&
@@ -146,6 +175,21 @@ int main() {
                                  "helper must not depend on tunnel controller "
                                  "runtime internals"),
               "helper must not include tunnel controller runtime internals") &&
+       ok;
+  ok = expect(!tree_contains_matching_filename(
+                  source_dir / "src" / "core" / "tunnel_controller",
+                  "tunnel_controller_", ".inc.cpp"),
+              "tunnel controller runtime must use normal private implementation "
+              "units, not .inc.cpp include units") &&
+       ok;
+  ok = expect(tunnel_controller_cpp.find(".inc.cpp") == std::string::npos,
+              "tunnel_controller.cpp must not include implementation .inc.cpp "
+              "files") &&
+       ok;
+  ok = expect(tunnel_state_machine_test.find("TestTunnelController") ==
+                  std::string::npos,
+              "tunnel_controller_state_machine_test must exercise the real "
+              "TunnelController, not a mirror state machine") &&
        ok;
 
   ok = expect(std::string(exv::contracts::generated::CONTRACT_VERSION) ==

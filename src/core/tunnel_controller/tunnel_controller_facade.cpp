@@ -1,3 +1,7 @@
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
+
+namespace exv::core {
+
 // =========================================================================
 // TunnelController — pimpl delegation
 // =========================================================================
@@ -153,3 +157,4 @@ void TunnelController::set_status_callback(StatusCallback cb) {
     impl_->status_callback_ = std::move(cb);
 }
 
+} // namespace exv::core

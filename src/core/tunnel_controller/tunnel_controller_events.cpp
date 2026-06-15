@@ -1,15 +1,21 @@
-    // ================================================================
-    // Event handlers (called from on_event)
-    // ================================================================
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
-    void on_helper_ready() {
+#include <exception>
+
+namespace exv::core {
+
+// ================================================================
+// Event handlers (called from on_event)
+// ================================================================
+
+void TunnelController::Impl::on_helper_ready() {
         if (phase_ == TunnelPhase::PreparingHelper) {
             timing_.timer.start(ConnectTiming::AUTH);
             transition_to(TunnelPhase::Authenticating);
         }
     }
 
-    void on_auth_succeeded() {
+void TunnelController::Impl::on_auth_succeeded() {
         if (phase_ == TunnelPhase::Authenticating) {
             timing_.timer.end(ConnectTiming::AUTH);
             timing_.timer.start(ConnectTiming::CSTP_CONNECT);
@@ -17,7 +23,7 @@
         }
     }
 
-    void on_auth_failed() {
+void TunnelController::Impl::on_auth_failed() {
         if (phase_ == TunnelPhase::Authenticating) {
             timing_.timer.end(ConnectTiming::AUTH);
             stop_heartbeat();
@@ -26,7 +32,7 @@
         }
     }
 
-    void on_cstp_connected() {
+void TunnelController::Impl::on_cstp_connected() {
         if (phase_ == TunnelPhase::ConnectingCstp) {
             timing_.timer.end(ConnectTiming::CSTP_CONNECT);
 
@@ -41,7 +47,7 @@
         }
     }
 
-    void apply_tunnel_config_and_advance() {
+void TunnelController::Impl::apply_tunnel_config_and_advance() {
         // Use the real IP address assigned by the VPN gateway, falling
         // back to a safe default only when the engine hasn't reported one.
         auto engine_status = runner_.status();
@@ -71,7 +77,7 @@
         // When it starts, it will fire PacketLoopStarted.
     }
 
-    void on_network_config_applied() {
+void TunnelController::Impl::on_network_config_applied() {
         if (phase_ == TunnelPhase::ApplyingNetworkConfig) {
             timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
             timing_.timer.start(ConnectTiming::PACKET_DEVICE);
@@ -79,7 +85,7 @@
         }
     }
 
-    void on_packet_loop_started() {
+void TunnelController::Impl::on_packet_loop_started() {
         if (phase_ == TunnelPhase::OpeningPacketDevice) {
             log_tunnel_event("INFO", "packet.loop.started", "Packet loop started",
                              {{"session_id", session_id_.value}});
@@ -93,7 +99,7 @@
         }
     }
 
-    void on_transport_closed() {
+void TunnelController::Impl::on_transport_closed() {
         if (phase_ == TunnelPhase::Reconnecting) {
             return;
         }
@@ -113,7 +119,7 @@
         }
     }
 
-    void on_packet_device_failed() {
+void TunnelController::Impl::on_packet_device_failed() {
         if (phase_ != TunnelPhase::OpeningPacketDevice
             && phase_ != TunnelPhase::Connected) {
             return;
@@ -135,7 +141,7 @@
         transition_to(TunnelPhase::Failed);
     }
 
-    void on_lease_expired() {
+void TunnelController::Impl::on_lease_expired() {
         if (phase_ != TunnelPhase::Connected) {
             return;
         }
@@ -152,7 +158,7 @@
         }
     }
 
-    void on_reconnect_timer_fired() {
+void TunnelController::Impl::on_reconnect_timer_fired() {
         if (phase_ != TunnelPhase::Reconnecting) {
             return;
         }
@@ -182,7 +188,7 @@
         transition_to(TunnelPhase::Authenticating);
     }
 
-    void on_helper_lost() {
+void TunnelController::Impl::on_helper_lost() {
         // Nothing to lose if we're already idle or failed.
         if (phase_ == TunnelPhase::Idle || phase_ == TunnelPhase::Failed) {
             return;
@@ -209,11 +215,13 @@
         transition_to(TunnelPhase::Failed);
     }
 
-    void on_cleanup_succeeded() {
+void TunnelController::Impl::on_cleanup_succeeded() {
         transition_to(TunnelPhase::Idle);
     }
 
-    void on_cleanup_failed() {
+void TunnelController::Impl::on_cleanup_failed() {
         // Best-effort: still move to Idle.
         transition_to(TunnelPhase::Idle);
     }
+
+} // namespace exv::core

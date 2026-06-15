@@ -1,27 +1,33 @@
-    // ================================================================
-    // Heartbeat — keeps the helper session alive
-    // ================================================================
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
-    void start_heartbeat() {
+#include <exception>
+
+namespace exv::core {
+
+// ================================================================
+// Heartbeat — keeps the helper session alive
+// ================================================================
+
+void TunnelController::Impl::start_heartbeat() {
         if (heartbeat_active_) return;
         if (!helper_ || !helper_->is_connected()) return;
         heartbeat_active_ = true;
         do_heartbeat();
     }
 
-    void stop_heartbeat() {
+void TunnelController::Impl::stop_heartbeat() {
         heartbeat_active_ = false;
         // No need to cancel scheduler — the callback checks heartbeat_active_.
     }
 
-    void schedule_next_heartbeat() {
+void TunnelController::Impl::schedule_next_heartbeat() {
         if (!heartbeat_active_) return;
         scheduler_.schedule(kHeartbeatInterval, [this] {
             do_heartbeat();
         });
     }
 
-    void do_heartbeat() {
+void TunnelController::Impl::do_heartbeat() {
         if (!heartbeat_active_) return;
         if (!helper_ || !helper_->is_connected()) {
             stop_heartbeat();
@@ -62,3 +68,5 @@
         // Schedule the next heartbeat.
         schedule_next_heartbeat();
     }
+
+} // namespace exv::core

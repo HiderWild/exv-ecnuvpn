@@ -67,6 +67,13 @@ set(EXV_COMMON_SOURCES
     src/core/tunnel_controller/engine_event_bridge.cpp
     src/core/tunnel_controller/core_session_runner.cpp
     src/core/tunnel_controller/tunnel_controller.cpp
+    src/core/tunnel_controller/tunnel_controller_state.cpp
+    src/core/tunnel_controller/tunnel_controller_heartbeat.cpp
+    src/core/tunnel_controller/tunnel_controller_connect.cpp
+    src/core/tunnel_controller/tunnel_controller_disconnect.cpp
+    src/core/tunnel_controller/tunnel_controller_reconnect.cpp
+    src/core/tunnel_controller/tunnel_controller_events.cpp
+    src/core/tunnel_controller/tunnel_controller_facade.cpp
     src/core/tunnel_controller/tunnel_controller_active.cpp
     src/core/tunnel_controller/timing.cpp
     src/core/tunnel_controller/core_error_mapper.cpp
@@ -968,11 +975,18 @@ add_test(NAME core_session_runner_test COMMAND core_session_runner_test)
 
 add_executable(tunnel_controller_state_machine_test
     tests/tunnel_controller_state_machine_test.cpp
+    tests/support/fake_helper.cpp
+    tests/support/fake_platform_network_ops.cpp
 )
 
 target_include_directories(tunnel_controller_state_machine_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+target_link_libraries(tunnel_controller_state_machine_test PRIVATE
+    exv-core Threads::Threads ${EXV_PLATFORM_LIBS}
 )
 
 add_test(NAME tunnel_controller_state_machine_test COMMAND tunnel_controller_state_machine_test)
