@@ -8,7 +8,7 @@ const projectRoot = path.resolve(__dirname, '..')
 const tests = process.argv.slice(2)
 
 if (tests.length === 0) {
-  console.error('usage: node scripts/run-electron-test.cjs <desktop/test.ts> [...]')
+  console.error('usage: node scripts/run-electron-test.cjs <desktop/test.ts|host/test.ts> [...]')
   process.exit(2)
 }
 
@@ -40,13 +40,16 @@ try {
 
   for (const test of tests) {
     const normalized = test.replace(/\\/g, '/')
-    if (!normalized.startsWith('desktop/') || !normalized.endsWith('.ts')) {
-      console.error(`electron test path must be a desktop/*.ts file: ${test}`)
+    if (
+      (!normalized.startsWith('desktop/') && !normalized.startsWith('host/')) ||
+      !normalized.endsWith('.ts')
+    ) {
+      console.error(`electron test path must be a desktop/*.ts or host/*.ts file: ${test}`)
       process.exit(2)
     }
     const compiled = path.join(
       outDir,
-      normalized.slice('desktop/'.length).replace(/\.ts$/, '.js'),
+      normalized.replace(/\.ts$/, '.js'),
     )
     const run = spawnSync(process.execPath, [compiled], {
       cwd: projectRoot,

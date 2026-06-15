@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { Eye, KeyRound, ShieldCheck, TriangleAlert } from 'lucide-vue-next'
-import type { DesktopModalPayload } from '../../desktop/shared/desktop-contract'
+import type { DesktopModalPayload } from '../../host/shared/host-contract'
 
 const busy = ref(false)
 const payload = ref<DesktopModalPayload | null>(null)

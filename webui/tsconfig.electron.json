@@ -4,12 +4,12 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist-electron",
-    "rootDir": "desktop",
+    "rootDir": ".",
     "strict": true,
     "types": ["node", "electron"],
     "skipLibCheck": true,
     "sourceMap": true
   },
-  "include": ["desktop/**/*.ts"],
-  "exclude": ["desktop/**/*sync-conflict*.ts"]
+  "include": ["desktop/**/*.ts", "host/**/*.ts"],
+  "exclude": ["desktop/**/*sync-conflict*.ts", "host/**/*sync-conflict*.ts"]
 }

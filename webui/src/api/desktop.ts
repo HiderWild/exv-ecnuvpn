@@ -1,6 +1,6 @@
 import {
   desktopApiPaths,
-} from '../../desktop/shared/desktop-contract'
+} from '../../host/shared/host-contract'
 
 type ApiResponse<T> = Promise<{ data: T }>
 

@@ -12,7 +12,10 @@ from typing import Any, Iterable
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "contracts" / "system.contract.json"
 DEFAULT_CPP = REPO_ROOT / "src" / "contracts" / "generated" / "system_contract.hpp"
-DEFAULT_TS = REPO_ROOT / "webui" / "desktop" / "shared" / "generated" / "system-contract.ts"
+TS_CONTRACT_OUTPUTS = [
+    REPO_ROOT / "webui" / "host" / "shared" / "generated" / "system-contract.ts",
+    REPO_ROOT / "webui" / "desktop" / "shared" / "generated" / "system-contract.ts",
+]
 DEFAULT_SNAPSHOT = REPO_ROOT / "contracts" / "generated" / "system_contract_snapshot.json"
 
 
@@ -480,14 +483,16 @@ def write_text(path: Path, content: str, check: bool) -> bool:
     return True
 
 
-def generate(manifest_path: Path, cpp_path: Path, ts_path: Path,
+def generate(manifest_path: Path, cpp_path: Path, ts_paths: Iterable[Path],
              snapshot_path: Path, check: bool) -> list[Path]:
     manifest = load_manifest(manifest_path)
     outputs = {
         cpp_path: render_cpp(manifest),
-        ts_path: render_ts(manifest),
         snapshot_path: render_snapshot(manifest),
     }
+    ts_content = render_ts(manifest)
+    for ts_path in ts_paths:
+        outputs[ts_path] = ts_content
     changed: list[Path] = []
     for path in sorted(outputs):
         if write_text(path, outputs[path], check):
@@ -499,7 +504,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--cpp", type=Path, default=DEFAULT_CPP)
-    parser.add_argument("--ts", type=Path, default=DEFAULT_TS)
+    parser.add_argument(
+        "--ts",
+        type=Path,
+        action="append",
+        default=None,
+        help="TypeScript contract output path. May be passed multiple times.",
+    )
     parser.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT)
     parser.add_argument("--check", action="store_true")
     return parser.parse_args()
@@ -507,8 +518,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    ts_paths = args.ts if args.ts is not None else TS_CONTRACT_OUTPUTS
     try:
-        changed = generate(args.manifest, args.cpp, args.ts, args.snapshot, args.check)
+        changed = generate(args.manifest, args.cpp, ts_paths, args.snapshot, args.check)
     except ContractError as exc:
         print(f"contract generation failed: {exc}")
         return 1

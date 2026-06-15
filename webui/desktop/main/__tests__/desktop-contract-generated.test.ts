@@ -47,7 +47,7 @@ describe('generated system contract', () => {
 
   it('generates desktop RPC action constants from the manifest', () => {
     assert.deepEqual(DESKTOP_RPC_ACTIONS, manifest().surfaces.desktop_rpc.actions)
-    assert.equal(desktopRpcActions, DESKTOP_RPC_ACTIONS)
+    assert.deepEqual(desktopRpcActions, DESKTOP_RPC_ACTIONS)
   })
 
   it('captures desktop and core RPC envelopes', () => {
@@ -113,8 +113,8 @@ describe('generated system contract', () => {
     assert.deepEqual(DESKTOP_RPC_EVENT_TYPES, desktop.event_types)
     assert.deepEqual(DESKTOP_RPC_ERROR_CODES, errorCodes)
     assert.deepEqual(DESKTOP_RPC_ERROR_CODE_MAP, errorCodeMap)
-    assert.equal(desktopEventTypes, DESKTOP_RPC_EVENT_TYPES)
-    assert.equal(desktopRpcErrorCodes, DESKTOP_RPC_ERROR_CODE_MAP)
+    assert.deepEqual(desktopEventTypes, DESKTOP_RPC_EVENT_TYPES)
+    assert.deepEqual(desktopRpcErrorCodes, DESKTOP_RPC_ERROR_CODE_MAP)
     assert.deepEqual(
       [...DESKTOP_RPC_ERROR_CODES].sort(),
       Object.values(desktopRpcErrorCodes).sort(),
