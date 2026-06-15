@@ -71,6 +71,30 @@ bool expect_tree_has_no_forbidden_includes(
   return ok;
 }
 
+bool expect_no_legacy_logger_include_outside_compat(
+    const std::filesystem::path &src_root) {
+  bool ok = true;
+  const auto allowed = src_root / "common" / "diagnostics" / "logger.cpp";
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(src_root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    if (std::filesystem::equivalent(entry.path(), allowed)) {
+      continue;
+    }
+    const auto content = read_file(entry.path());
+    if (content.find("#include \"common/diagnostics/logger.hpp\"") !=
+        std::string::npos) {
+      ok &= expect(false,
+                   "legacy logger include is only allowed in compatibility "
+                   "implementation: " +
+                       entry.path().string());
+    }
+  }
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -104,10 +128,13 @@ int main() {
       "#include \"app/",      "#include <app/",
       "#include \"cli/",      "#include <cli/",
   };
+  auto base_forbidden_includes = upward_includes;
+  base_forbidden_includes.push_back("#include \"observability/");
+  base_forbidden_includes.push_back("#include <observability/");
 
   if (std::filesystem::exists(base_root)) {
     ok &= expect_tree_has_no_forbidden_includes(
-        base_root, upward_includes,
+        base_root, base_forbidden_includes,
         "src/base must not include upward runtime or platform layers");
   }
 
@@ -116,6 +143,8 @@ int main() {
         observability_root, upward_includes,
         "src/observability must not include upward runtime or platform layers");
   }
+
+  ok &= expect_no_legacy_logger_include_outside_compat(src_root);
 
   if (!ok) {
     std::cerr << "base_observability_architecture_test: FAILED\n";

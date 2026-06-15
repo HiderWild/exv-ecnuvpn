@@ -332,6 +332,22 @@ set_target_properties(exv-base-errors-module PROPERTIES
     CXX_SCAN_FOR_MODULES ON
 )
 
+add_library(exv-observability-log-module STATIC)
+target_sources(exv-observability-log-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/observability/modules/log.cppm
+)
+target_compile_features(exv-observability-log-module PUBLIC cxx_std_20)
+target_include_directories(exv-observability-log-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-observability-log-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_library(exv-helper-protocol-module STATIC)
 target_sources(exv-helper-protocol-module
     PUBLIC
@@ -774,6 +790,8 @@ add_executable(tunnel_script_contract_test
     src/core/vpn/openconnect_tunnel_script.cpp
     src/vpn_engine/openconnect/openconnect_log.cpp
     src/cli/console.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
+    ${EXV_PLATFORM_LOGGING_SOURCES}
 )
 
 if(APPLE)
@@ -789,6 +807,8 @@ target_include_directories(tunnel_script_contract_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(tunnel_script_contract_test PRIVATE Threads::Threads)
 
 add_test(NAME tunnel_script_contract_test COMMAND tunnel_script_contract_test)
 
@@ -837,6 +857,7 @@ add_executable(crypto_roundtrip_test
     tests/crypto_roundtrip_test.cpp
     src/core/crypto/crypto.cpp
     src/cli/console.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
 )
 
 if(APPLE)
@@ -855,6 +876,7 @@ target_include_directories(crypto_roundtrip_test PRIVATE
 )
 
 target_link_libraries(crypto_roundtrip_test PRIVATE
+    Threads::Threads
     exv-utils-strings
 )
 
@@ -1495,6 +1517,25 @@ target_include_directories(platform_log_sink_test PRIVATE
 )
 
 add_test(NAME platform_log_sink_test COMMAND platform_log_sink_test)
+
+add_executable(observability_module_smoke_test
+    tests/observability_module_smoke_test.cpp
+)
+
+target_include_directories(observability_module_smoke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(observability_module_smoke_test PRIVATE
+    exv-observability-log-module
+)
+
+set_target_properties(observability_module_smoke_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_test(NAME observability_module_smoke_test COMMAND observability_module_smoke_test)
 
 add_executable(utils_strings_test
     tests/utils_strings_test.cpp
