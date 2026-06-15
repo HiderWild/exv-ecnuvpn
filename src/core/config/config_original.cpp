@@ -1,6 +1,7 @@
 #include "core/config/config.hpp"
 #include "core/crypto/crypto.hpp"
 #include "core/logging/logger.hpp"
+#include "cli/console.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 

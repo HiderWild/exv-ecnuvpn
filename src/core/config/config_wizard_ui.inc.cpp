@@ -11,10 +11,10 @@ static std::string repeat_str(const std::string &s, int n) {
 
 static void wiz_banner() {
   std::cout << std::endl;
-  std::cout << utils::BOLD << utils::CYAN
+  std::cout << cli::BOLD << cli::CYAN
             << "  ╔══════════════════════════════════════════╗" << std::endl
             << "  ║          EXV First-Run Setup             ║" << std::endl
-            << "  ╚══════════════════════════════════════════╝" << utils::RESET
+            << "  ╚══════════════════════════════════════════╝" << cli::RESET
             << std::endl;
   std::cout << std::endl;
 }
@@ -22,18 +22,18 @@ static void wiz_banner() {
 static void wiz_progress(int step, int total) {
   constexpr int BAR = 24;
   int filled = (step * BAR) / total;
-  std::cout << utils::DIM << "  Progress: [" << utils::RESET << utils::CYAN;
+  std::cout << cli::DIM << "  Progress: [" << cli::RESET << cli::CYAN;
   for (int i = 0; i < BAR; ++i)
     std::cout << (i < filled ? "█" : "░");
-  std::cout << utils::RESET << utils::DIM << "]  " << step << "/" << total
-            << utils::RESET << std::endl
+  std::cout << cli::RESET << cli::DIM << "]  " << step << "/" << total
+            << cli::RESET << std::endl
             << std::endl;
 }
 
 static void wiz_step(int step, int total, const std::string &title) {
   std::cout << std::endl;
-  std::cout << utils::BOLD << utils::YELLOW << "  ┌ Step " << step << " / "
-            << total << " ─ " << title << utils::RESET << std::endl;
+  std::cout << cli::BOLD << cli::YELLOW << "  ┌ Step " << step << " / "
+            << total << " ─ " << title << cli::RESET << std::endl;
   wiz_progress(step, total);
 }
 
@@ -41,7 +41,7 @@ static std::string wiz_prompt(const std::string &label,
                               const std::string &default_val) {
   std::cout << "    " << label;
   if (!default_val.empty())
-    std::cout << utils::DIM << " [" << default_val << "]" << utils::RESET;
+    std::cout << cli::DIM << " [" << default_val << "]" << cli::RESET;
   std::cout << ": ";
   std::string input;
   std::getline(std::cin, input);
@@ -236,7 +236,7 @@ struct RouteSelState {
 
   void set_status(const std::string &msg, const std::string &color = "") {
     status = msg;
-    status_color = color.empty() ? std::string(utils::DIM) : color;
+    status_color = color.empty() ? std::string(cli::DIM) : color;
   }
   void clear_status() { status.clear(); }
 };
@@ -251,7 +251,7 @@ static void render_tui(RouteSelState &st) {
 
   // Status line (1 line always)
   if (!st.status.empty())
-    std::cout << "    " << st.status_color << st.status << utils::RESET
+    std::cout << "    " << st.status_color << st.status << cli::RESET
               << std::endl;
   else
     std::cout << std::endl;
@@ -260,14 +260,14 @@ static void render_tui(RouteSelState &st) {
   // Header
   std::string lhdr =
       st.active_col == 0
-          ? (std::string(utils::BOLD) + utils::UNDERLINE + "Default Routes" +
-             utils::RESET)
-          : (std::string(utils::BOLD) + "Default Routes" + utils::RESET);
+          ? (std::string(cli::BOLD) + cli::UNDERLINE + "Default Routes" +
+             cli::RESET)
+          : (std::string(cli::BOLD) + "Default Routes" + cli::RESET);
   std::string rhdr =
       st.active_col == 1
-          ? (std::string(utils::BOLD) + utils::UNDERLINE + "Custom Routes" +
-             utils::RESET)
-          : (std::string(utils::BOLD) + "Custom Routes" + utils::RESET);
+          ? (std::string(cli::BOLD) + cli::UNDERLINE + "Custom Routes" +
+             cli::RESET)
+          : (std::string(cli::BOLD) + "Custom Routes" + cli::RESET);
   // Pad left header to 34 visible chars
   std::cout << "    " << lhdr;
   int lpad = 34 - 14; // "Default Routes" = 14 chars
@@ -285,7 +285,7 @@ static void render_tui(RouteSelState &st) {
     std::cout << "    ";
     if (lup) {
       std::string t = "▲ " + std::to_string(st.scroll_l) + " more above";
-      std::cout << utils::DIM << t << utils::RESET;
+      std::cout << cli::DIM << t << cli::RESET;
       int pad = 34 - static_cast<int>(t.size());
       for (int p = 0; p < pad; ++p)
         std::cout << ' ';
@@ -294,8 +294,8 @@ static void render_tui(RouteSelState &st) {
     }
     std::cout << "│  ";
     if (rup)
-      std::cout << utils::DIM << "▲ " << st.scroll_r << " more above"
-                << utils::RESET;
+      std::cout << cli::DIM << "▲ " << st.scroll_r << " more above"
+                << cli::RESET;
     std::cout << std::endl;
     ++lines;
   }
@@ -318,8 +318,8 @@ static void render_tui(RouteSelState &st) {
     if (li < st.left_size()) {
       bool cur = (st.active_col == 0 && li == st.cursor);
       std::string ck = st.def_sel[li]
-                           ? (std::string(utils::GREEN) + "[x]" + utils::RESET)
-                           : (std::string(utils::DIM) + "[ ]" + utils::RESET);
+                           ? (std::string(cli::GREEN) + "[x]" + cli::RESET)
+                           : (std::string(cli::DIM) + "[ ]" + cli::RESET);
       std::string lb = st.defaults[li];
       int vlen = 4 + static_cast<int>(lb.size());
       int pad = 34 - vlen;
@@ -327,14 +327,14 @@ static void render_tui(RouteSelState &st) {
         pad = 0;
 
       if (cur)
-        std::cout << utils::REVERSE;
+        std::cout << cli::REVERSE;
       std::cout << ck << " " << lb;
       for (int p = 0; p < pad; ++p)
         std::cout << ' ';
       if (cur)
-        std::cout << utils::RESET;
+        std::cout << cli::RESET;
     } else if (li == 0 && st.left_size() == 0) {
-      std::cout << utils::DIM << "(empty)" << utils::RESET
+      std::cout << cli::DIM << "(empty)" << cli::RESET
                 << std::string(27, ' ');
     } else {
       std::cout << std::string(34, ' ');
@@ -346,16 +346,16 @@ static void render_tui(RouteSelState &st) {
     if (ri < st.right_size()) {
       bool cur = (st.active_col == 1 && ri == st.cursor);
       std::string ck = st.cust_sel[ri]
-                           ? (std::string(utils::CYAN) + "[x]" + utils::RESET)
-                           : (std::string(utils::DIM) + "[ ]" + utils::RESET);
+                           ? (std::string(cli::CYAN) + "[x]" + cli::RESET)
+                           : (std::string(cli::DIM) + "[ ]" + cli::RESET);
       std::string lb = st.custom[ri];
       if (cur)
-        std::cout << utils::REVERSE;
+        std::cout << cli::REVERSE;
       std::cout << ck << " " << lb;
       if (cur)
-        std::cout << utils::RESET;
+        std::cout << cli::RESET;
     } else if (ri == 0 && st.right_size() == 0) {
-      std::cout << utils::DIM << "(empty)" << utils::RESET;
+      std::cout << cli::DIM << "(empty)" << cli::RESET;
     }
     std::cout << std::endl;
     ++lines;
@@ -369,7 +369,7 @@ static void render_tui(RouteSelState &st) {
     if (ldown) {
       int rem = st.left_size() - lend;
       std::string t = "▼ " + std::to_string(rem) + " more below";
-      std::cout << utils::DIM << t << utils::RESET;
+      std::cout << cli::DIM << t << cli::RESET;
       int pad = 34 - static_cast<int>(t.size());
       for (int p = 0; p < pad; ++p)
         std::cout << ' ';
@@ -379,7 +379,7 @@ static void render_tui(RouteSelState &st) {
     std::cout << "│  ";
     if (rdown) {
       int rem = st.right_size() - rend;
-      std::cout << utils::DIM << "▼ " << rem << " more below" << utils::RESET;
+      std::cout << cli::DIM << "▼ " << rem << " more below" << cli::RESET;
     }
     std::cout << std::endl;
     ++lines;
@@ -391,10 +391,10 @@ static void render_tui(RouteSelState &st) {
   ++lines;
 
   // Help + input
-  std::cout << utils::DIM << "    ↑↓ Navigate  ←→ Switch column  "
-            << "Space Toggle  Enter Add/Done" << utils::RESET << std::endl;
+  std::cout << cli::DIM << "    ↑↓ Navigate  ←→ Switch column  "
+            << "Space Toggle  Enter Add/Done" << cli::RESET << std::endl;
   ++lines;
-  std::cout << "    " << utils::BOLD << ">" << utils::RESET << " " << st.input
+  std::cout << "    " << cli::BOLD << ">" << cli::RESET << " " << st.input
             << std::flush;
   ++lines;
 

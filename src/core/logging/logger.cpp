@@ -1,5 +1,6 @@
 #include "logger.hpp"
 #include "log_event_bus.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <ctime>
@@ -81,13 +82,13 @@ std::vector<std::string> tail(int lines) {
 void show_logs(int lines) {
   std::string log_path = utils::get_log_path();
   if (!utils::file_exists(log_path)) {
-    utils::print_info("No log file found at: " + log_path);
+    cli::print_info("No log file found at: " + log_path);
     return;
   }
 
   std::ifstream ifs(log_path);
   if (!ifs.is_open()) {
-    utils::print_error("Cannot open log file: " + log_path);
+    cli::print_error("Cannot open log file: " + log_path);
     return;
   }
 
@@ -101,17 +102,17 @@ void show_logs(int lines) {
     }
   }
 
-  utils::print_header("EXV Logs");
-  std::cout << utils::DIM << "Showing last " << log_lines.size()
-            << " lines from: " << log_path << utils::RESET << std::endl;
+  cli::print_header("EXV Logs");
+  std::cout << cli::DIM << "Showing last " << log_lines.size()
+            << " lines from: " << log_path << cli::RESET << std::endl;
   std::cout << std::endl;
 
   for (const auto &l : log_lines) {
     // Color code log lines
     if (l.find("[ERROR]") != std::string::npos) {
-      std::cout << utils::RED << l << utils::RESET << std::endl;
+      std::cout << cli::RED << l << cli::RESET << std::endl;
     } else if (l.find("[WARN]") != std::string::npos) {
-      std::cout << utils::YELLOW << l << utils::RESET << std::endl;
+      std::cout << cli::YELLOW << l << cli::RESET << std::endl;
     } else {
       std::cout << l << std::endl;
     }

@@ -7,10 +7,10 @@ static Config run_wizard() {
   std::cout << "  Let's get you set up." << std::endl << std::endl;
 
   std::cout << "  Choose a setup mode:" << std::endl;
-  std::cout << "    " << utils::GREEN << "[1]" << utils::RESET
-            << " Easy Mode     — quick setup with defaults  " << utils::DIM
-            << "(recommended)" << utils::RESET << std::endl;
-  std::cout << "    " << utils::YELLOW << "[2]" << utils::RESET
+  std::cout << "    " << cli::GREEN << "[1]" << cli::RESET
+            << " Easy Mode     — quick setup with defaults  " << cli::DIM
+            << "(recommended)" << cli::RESET << std::endl;
+  std::cout << "    " << cli::YELLOW << "[2]" << cli::RESET
             << " Advanced Mode — customize all settings" << std::endl;
   std::cout << std::endl << "  Choice [1]: ";
   std::string mode_input;
@@ -26,7 +26,7 @@ static Config run_wizard() {
     cfg.username = wiz_prompt("Username (student ID)", cfg.username);
 
     wiz_step(2, 2, "Password");
-    utils::print_info("Password input is hidden and will not be displayed.");
+    cli::print_info("Password input is hidden and will not be displayed.");
     cfg.password = crypto::read_password_hidden("    Password: ");
     wiz_progress(2, 2);
 
@@ -46,10 +46,10 @@ static Config run_wizard() {
     std::string new_dir = wiz_prompt("Directory", default_dir);
     if (new_dir != default_dir) {
       if (!utils::set_config_dir(new_dir))
-        utils::print_warning("Could not create " + new_dir +
+        cli::print_warning("Could not create " + new_dir +
                              ". Using default.");
       else
-        utils::print_success("Work directory: " + utils::expand_home(new_dir));
+        cli::print_success("Work directory: " + utils::expand_home(new_dir));
     }
     cfg.log_file = new_dir + "/ecnuvpn.log";
 
@@ -74,30 +74,30 @@ static Config run_wizard() {
     std::cout
         << "    Enter an IP or CIDR (e.g. 10.0.0.0/8) to add a custom route."
         << std::endl;
-    std::cout << "    Press " << utils::BOLD << "Enter" << utils::RESET
+    std::cout << "    Press " << cli::BOLD << "Enter" << cli::RESET
               << " on an empty line to confirm." << std::endl;
     cfg.routes = wiz_route_selector(cfg.routes);
     std::cout << std::endl;
-    utils::print_success("Routes configured: " +
+    cli::print_success("Routes configured: " +
                          std::to_string(cfg.routes.size()) + " selected.");
 
     wiz_step(6, TOTAL, "Password");
     if (cfg.remember_password) {
-      utils::print_info("Password input is hidden and will not be displayed.");
+      cli::print_info("Password input is hidden and will not be displayed.");
       std::string pw = crypto::read_password_hidden("    Password: ");
       if (!pw.empty()) {
         std::string key = crypto::load_key();
         cfg.password = crypto::encrypt(pw, key);
       }
     } else {
-      utils::print_info("Password will be prompted each time you connect.");
+      cli::print_info("Password will be prompted each time you connect.");
       cfg.password = "";
     }
     wiz_progress(TOTAL, TOTAL);
   }
 
   std::cout << std::endl;
-  utils::print_success("Setup complete!");
+  cli::print_success("Setup complete!");
   std::cout << std::endl;
   return cfg;
 }

@@ -22,26 +22,6 @@ using gid_t = unsigned int;
 namespace ecnuvpn {
 namespace utils {
 
-// ANSI color codes
-constexpr const char *RESET = "\033[0m";
-constexpr const char *RED = "\033[31m";
-constexpr const char *GREEN = "\033[32m";
-constexpr const char *YELLOW = "\033[33m";
-constexpr const char *BLUE = "\033[34m";
-constexpr const char *MAGENTA = "\033[35m";
-constexpr const char *CYAN = "\033[36m";
-constexpr const char *BOLD = "\033[1m";
-constexpr const char *DIM = "\033[2m";
-constexpr const char *UNDERLINE = "\033[4m";
-constexpr const char *REVERSE = "\033[7m";
-
-// Colored output
-void print_success(const std::string &msg);
-void print_error(const std::string &msg);
-void print_info(const std::string &msg);
-void print_warning(const std::string &msg);
-void print_header(const std::string &msg);
-
 // Path utilities
 std::string expand_home(const std::string &path);
 std::string get_redirect_path();
@@ -95,20 +75,6 @@ std::string trim(const std::string &s);
 std::wstring wide_from_utf8(const std::string &value);
 std::string utf8_from_wide(const std::wstring &value);
 std::string windows_error_message(unsigned long error_code);
-
-inline void enable_windows_ansi() {
-  SetConsoleOutputCP(CP_UTF8);
-  SetConsoleCP(CP_UTF8);
-  HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-  if (hOut != INVALID_HANDLE_VALUE) {
-    DWORD mode = 0;
-    if (GetConsoleMode(hOut, &mode)) {
-      SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    }
-  }
-}
-#else
-inline void enable_windows_ansi() {}
 #endif
 
 } // namespace utils

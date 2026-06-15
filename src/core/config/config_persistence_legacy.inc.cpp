@@ -6,8 +6,8 @@ Config load() {
   utils::ensure_dir(dir);
 
   if (!utils::fix_config_dir_ownership()) {
-    utils::print_error("Configuration directory is owned by another user: " + dir);
-    utils::print_info("Fix with: sudo chown -R $(whoami) " + dir);
+    cli::print_error("Configuration directory is owned by another user: " + dir);
+    cli::print_info("Fix with: sudo chown -R $(whoami) " + dir);
     logger::error("Config dir ownership mismatch: " + dir);
     return Config{};
   }
@@ -15,9 +15,9 @@ Config load() {
   if (!utils::file_exists(path)) {
     Config cfg = run_wizard();
     if (!save(cfg)) {
-      utils::print_error("Failed to save configuration to: " + path);
-      utils::print_warning("Check directory permissions: " + dir);
-      utils::print_info("If ~/.ecnuvpn is owned by root, fix with: sudo chown -R $(whoami) ~/.ecnuvpn");
+      cli::print_error("Failed to save configuration to: " + path);
+      cli::print_warning("Check directory permissions: " + dir);
+      cli::print_info("If ~/.ecnuvpn is owned by root, fix with: sudo chown -R $(whoami) ~/.ecnuvpn");
       logger::error("Config save failed after wizard");
     }
     crypto::init_key_if_needed();
@@ -32,8 +32,8 @@ Config load() {
     auto j = nlohmann::json::parse(content);
     return j.get<Config>();
   } catch (const std::exception &e) {
-    utils::print_error("Failed to parse config: " + std::string(e.what()));
-    utils::print_warning("Using default config.");
+    cli::print_error("Failed to parse config: " + std::string(e.what()));
+    cli::print_warning("Using default config.");
     logger::error("Config parse error: " + std::string(e.what()));
     return Config{};
   }
@@ -50,7 +50,7 @@ bool save(const Config &cfg) {
       return true;
     }
   } catch (const std::exception &e) {
-    utils::print_error("Failed to save config: " + std::string(e.what()));
+    cli::print_error("Failed to save config: " + std::string(e.what()));
     logger::error("Config save error: " + std::string(e.what()));
   }
   return false;

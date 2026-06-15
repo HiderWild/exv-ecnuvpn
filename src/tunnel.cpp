@@ -3,6 +3,7 @@
 #include "logger.hpp"
 #include "openconnect_log.hpp"
 #include "platform/common/tunnel_script.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #ifndef _WIN32
@@ -161,14 +162,14 @@ bool write_script(const Config &cfg) {
   }
 
   if (!utils::write_file(path, content)) {
-    utils::print_error("Failed to write tunnel script: " + path);
+    cli::print_error("Failed to write tunnel script: " + path);
     logger::error("Failed to write tunnel script: " + path);
     return false;
   }
 
 #ifndef _WIN32
   if (chmod(path.c_str(), 0755) != 0) {
-    utils::print_error("Failed to set executable permission on: " + path);
+    cli::print_error("Failed to set executable permission on: " + path);
     logger::error("Failed to chmod tunnel script: " + path);
     return false;
   }

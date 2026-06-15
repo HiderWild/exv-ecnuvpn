@@ -3,6 +3,7 @@
 #include "helper/helper_ipc.hpp"
 #include "logger.hpp"
 #include "platform/common/helper_platform.hpp"
+#include "cli/console.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 

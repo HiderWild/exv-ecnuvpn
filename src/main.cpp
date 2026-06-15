@@ -6,6 +6,7 @@
 #include "logger.hpp"
 #include "runtime/runtime_context.hpp"
 #include "tunnel.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
 #include "virtual_network.hpp"
@@ -55,25 +56,25 @@ static ParsedArgs parse_args(const std::vector<std::string> &args) {
 }
 
 static void print_help() {
-  std::cout << std::endl << utils::BOLD << utils::CYAN << "             EXV Client  v" << ECNUVPN_VERSION << utils::RESET << std::endl << std::endl;
-  std::cout << utils::BOLD << "USAGE:" << utils::RESET << std::endl << "  exv [command] [options]" << std::endl << std::endl;
-  std::cout << utils::BOLD << "COMMANDS:" << utils::RESET << std::endl;
-  std::cout << "  " << utils::GREEN << "start" << utils::RESET << " / " << utils::GREEN << "(default)" << utils::RESET << "         Start VPN connection" << std::endl;
-  std::cout << "  " << utils::GREEN << "stop, -s" << utils::RESET << "                   Stop VPN connection" << std::endl;
-  std::cout << "  " << utils::GREEN << "status, -t" << utils::RESET << "                 Show VPN status" << std::endl;
-  std::cout << "  " << utils::GREEN << "config, -c" << utils::RESET << "                 Manage configuration" << std::endl;
-  std::cout << "  " << utils::GREEN << "service" << utils::RESET << "                    Manage the root helper service" << std::endl;
-  std::cout << "  " << utils::GREEN << "logs, -l" << utils::RESET << "                   View recent logs" << std::endl;
-  std::cout << "  " << utils::GREEN << "help, -h" << utils::RESET << "                   Show this help" << std::endl;
-  std::cout << "  " << utils::GREEN << "version, -v" << utils::RESET << "                Show version" << std::endl;
+  std::cout << std::endl << cli::BOLD << cli::CYAN << "             EXV Client  v" << ECNUVPN_VERSION << cli::RESET << std::endl << std::endl;
+  std::cout << cli::BOLD << "USAGE:" << cli::RESET << std::endl << "  exv [command] [options]" << std::endl << std::endl;
+  std::cout << cli::BOLD << "COMMANDS:" << cli::RESET << std::endl;
+  std::cout << "  " << cli::GREEN << "start" << cli::RESET << " / " << cli::GREEN << "(default)" << cli::RESET << "         Start VPN connection" << std::endl;
+  std::cout << "  " << cli::GREEN << "stop, -s" << cli::RESET << "                   Stop VPN connection" << std::endl;
+  std::cout << "  " << cli::GREEN << "status, -t" << cli::RESET << "                 Show VPN status" << std::endl;
+  std::cout << "  " << cli::GREEN << "config, -c" << cli::RESET << "                 Manage configuration" << std::endl;
+  std::cout << "  " << cli::GREEN << "service" << cli::RESET << "                    Manage the root helper service" << std::endl;
+  std::cout << "  " << cli::GREEN << "logs, -l" << cli::RESET << "                   View recent logs" << std::endl;
+  std::cout << "  " << cli::GREEN << "help, -h" << cli::RESET << "                   Show this help" << std::endl;
+  std::cout << "  " << cli::GREEN << "version, -v" << cli::RESET << "                Show version" << std::endl;
   std::cout << std::endl;
-  std::cout << utils::BOLD << "START OPTIONS:" << utils::RESET << std::endl;
-  std::cout << "  " << utils::YELLOW << "-rt [count]" << utils::RESET << "               Reconnect count after disconnect" << std::endl;
+  std::cout << cli::BOLD << "START OPTIONS:" << cli::RESET << std::endl;
+  std::cout << "  " << cli::YELLOW << "-rt [count]" << cli::RESET << "               Reconnect count after disconnect" << std::endl;
   std::cout << std::endl << "  Note: Desktop app (Electron) is the recommended interface." << std::endl << std::endl;
 }
 
 static void print_version() {
-  std::cout << utils::BOLD << APP_NAME << utils::RESET << " version " << utils::GREEN << ECNUVPN_VERSION << utils::RESET << std::endl;
+  std::cout << cli::BOLD << APP_NAME << cli::RESET << " version " << cli::GREEN << ECNUVPN_VERSION << cli::RESET << std::endl;
 }
 
 static int handle_service(const std::vector<std::string> &args) {
@@ -81,30 +82,30 @@ static int handle_service(const std::vector<std::string> &args) {
   std::string subcmd = args[2];
   if (subcmd == "install") return helper::install_service(utils::get_executable_path());
   if (subcmd == "uninstall") return helper::uninstall_service();
-  utils::print_error("Unknown service subcommand: " + subcmd); return 1;
+  cli::print_error("Unknown service subcommand: " + subcmd); return 1;
 }
 
 static int handle_config(const std::vector<std::string> &args) {
   if (args.size() <= 2) { Config cfg = config::load(); config::show(cfg); return 0; }
   std::string subcmd = args[2];
   if (subcmd == "show") { Config cfg = config::load(); config::show(cfg); return 0; }
-  if (subcmd == "import") { if (args.size() < 4) { utils::print_error("Usage: exv config import <file>"); return 1; } config::import_from(args[3]); return 0; }
-  if (subcmd == "set") { if (args.size() < 4) { utils::print_error("Usage: exv config set <key> [value]"); return 1; } Config cfg = config::load(); std::string v = (args.size() >= 5) ? args[4] : ""; return config::set_value(cfg, args[3], v) ? 0 : 1; }
+  if (subcmd == "import") { if (args.size() < 4) { cli::print_error("Usage: exv config import <file>"); return 1; } config::import_from(args[3]); return 0; }
+  if (subcmd == "set") { if (args.size() < 4) { cli::print_error("Usage: exv config set <key> [value]"); return 1; } Config cfg = config::load(); std::string v = (args.size() >= 5) ? args[4] : ""; return config::set_value(cfg, args[3], v) ? 0 : 1; }
   if (subcmd == "reset") { config::reset(); return 0; }
-  if (subcmd == "key") { if (args.size() < 4) { config::key_show(); return 0; } std::string kc = args[3]; if (kc == "show") { config::key_show(); return 0; } if (kc == "reset") { return config::key_reset() ? 0 : 1; } utils::print_error("Unknown key subcommand: " + kc); return 1; }
+  if (subcmd == "key") { if (args.size() < 4) { config::key_show(); return 0; } std::string kc = args[3]; if (kc == "show") { config::key_show(); return 0; } if (kc == "reset") { return config::key_reset() ? 0 : 1; } cli::print_error("Unknown key subcommand: " + kc); return 1; }
   if (subcmd == "routes") {
     if (args.size() < 4) { Config cfg = config::load(); config::list_routes(cfg); return 0; }
     std::string rc = args[3];
     if (rc == "list") { Config cfg = config::load(); config::list_routes(cfg); return 0; }
-    if (rc == "add") { if (args.size() < 5) { utils::print_error("Usage: exv config routes add <cidr>"); return 1; } Config cfg = config::load(); return config::add_route(cfg, args[4]) ? 0 : 1; }
-    if (rc == "remove") { if (args.size() < 5) { utils::print_error("Usage: exv config routes remove <cidr>"); return 1; } Config cfg = config::load(); return config::remove_route(cfg, args[4]) ? 0 : 1; }
-    utils::print_error("Unknown routes subcommand: " + rc); return 1;
+    if (rc == "add") { if (args.size() < 5) { cli::print_error("Usage: exv config routes add <cidr>"); return 1; } Config cfg = config::load(); return config::add_route(cfg, args[4]) ? 0 : 1; }
+    if (rc == "remove") { if (args.size() < 5) { cli::print_error("Usage: exv config routes remove <cidr>"); return 1; } Config cfg = config::load(); return config::remove_route(cfg, args[4]) ? 0 : 1; }
+    cli::print_error("Unknown routes subcommand: " + rc); return 1;
   }
-  utils::print_error("Unknown config subcommand: " + subcmd); return 1;
+  cli::print_error("Unknown config subcommand: " + subcmd); return 1;
 }
 
 int main(int argc, char *argv[]) {
-  utils::enable_windows_ansi();
+  cli::enable_windows_ansi();
   runtime::bootstrap();
 
   std::vector<std::string> raw_args;
@@ -149,7 +150,7 @@ int main(int argc, char *argv[]) {
   }
 
   ParsedArgs parsed = parse_args(raw_args);
-  if (!parsed.error.empty()) { utils::print_error(parsed.error); return 1; }
+  if (!parsed.error.empty()) { cli::print_error(parsed.error); return 1; }
 
   std::vector<std::string> args;
   args.emplace_back(raw_args[0]);
@@ -157,7 +158,7 @@ int main(int argc, char *argv[]) {
   if (args.size() <= 1) args.push_back("start");
   std::string cmd = args[1];
 
-  if (parsed.retry_specified && cmd != "start") { utils::print_error("-rt can only be used with the default start action or 'start'."); return 1; }
+  if (parsed.retry_specified && cmd != "start") { cli::print_error("-rt can only be used with the default start action or 'start'."); return 1; }
   if (cmd == "help" || cmd == "-h" || cmd == "--help") { print_help(); return 0; }
   if (cmd == "version" || cmd == "-v" || cmd == "--version") { print_version(); return 0; }
   if (cmd == "start") { Config cfg = config::load(); return vpn::start(cfg, parsed.retry_limit); }
@@ -167,7 +168,7 @@ int main(int argc, char *argv[]) {
   if (cmd == "service") return handle_service(args);
   if (cmd == "logs" || cmd == "-l") { logger::init(); logger::show_logs(50); return 0; }
 
-  utils::print_error("Unknown command: " + cmd);
-  utils::print_info("Run 'exv help' for usage information.");
+  cli::print_error("Unknown command: " + cmd);
+  cli::print_info("Run 'exv help' for usage information.");
   return 1;
 }

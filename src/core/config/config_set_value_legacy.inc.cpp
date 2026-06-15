@@ -21,8 +21,8 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
 
   if (key == "password") {
     if (!cfg.remember_password) {
-      utils::print_warning("remember_password is currently disabled.");
-      utils::print_info(
+      cli::print_warning("remember_password is currently disabled.");
+      cli::print_info(
           "To store an encrypted password, it must be enabled first.");
       std::cout << std::endl;
       std::cout << "  Enable remember_password and set a password now? [Y/n]: ";
@@ -30,32 +30,32 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
       std::getline(std::cin, ans);
       ans = utils::trim(ans);
       if (!ans.empty() && ans[0] != 'y' && ans[0] != 'Y') {
-        utils::print_info(
+        cli::print_info(
             "Aborted. Password will continue to be prompted at connect time.");
         return false;
       }
       cfg.remember_password = true;
-      utils::print_success("remember_password enabled.");
+      cli::print_success("remember_password enabled.");
     }
     std::string ks = crypto::key_status();
     if (ks != "valid") {
-      utils::print_error("Encryption key is " + ks + "!");
-      utils::print_info("Run 'exv config key reset' to fix this.");
+      cli::print_error("Encryption key is " + ks + "!");
+      cli::print_info("Run 'exv config key reset' to fix this.");
       return false;
     }
-    utils::print_info("Password input is hidden and will not be displayed.");
+    cli::print_info("Password input is hidden and will not be displayed.");
     std::string pw = crypto::read_password_hidden("  New password: ");
     if (pw.empty()) {
-      utils::print_error("Password cannot be empty.");
+      cli::print_error("Password cannot be empty.");
       return false;
     }
     cfg.password = crypto::encrypt(pw, crypto::load_key());
     if (cfg.password.empty()) {
-      utils::print_error("Encryption failed.");
+      cli::print_error("Encryption failed.");
       return false;
     }
     if (save(cfg)) {
-      utils::print_success("Password set and encrypted.");
+      cli::print_success("Password set and encrypted.");
       logger::info("Password updated (encrypted)");
       return true;
     }
@@ -72,7 +72,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
       crypto::delete_key_file();
     }
     if (save(cfg)) {
-      utils::print_success(std::string("remember_password = ") +
+      cli::print_success(std::string("remember_password = ") +
                            (cfg.remember_password ? "true" : "false"));
       return true;
     }
@@ -83,7 +83,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     std::string input = read_value("  Disable DTLS? [y/N]: ");
     cfg.disable_dtls = (!input.empty() && (input[0] == 'y' || input[0] == 'Y'));
     if (save(cfg)) {
-      utils::print_success(std::string("disable_dtls = ") +
+      cli::print_success(std::string("disable_dtls = ") +
                            (cfg.disable_dtls ? "true" : "false"));
       return true;
     }
@@ -106,7 +106,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
       field = (input[0] == 'y' || input[0] == 'Y');
     }
     if (save(cfg)) {
-      utils::print_success(k + " = " + (field ? "true" : "false"));
+      cli::print_success(k + " = " + (field ? "true" : "false"));
       return true;
     }
     return false;
@@ -131,12 +131,12 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
   if (key == "vpn_engine") {
     std::string input = read_value("  VPN engine [native/legacy_openconnect]: ");
     if (input != "native" && input != "legacy_openconnect") {
-      utils::print_error("Invalid VPN engine.");
+      cli::print_error("Invalid VPN engine.");
       return false;
     }
     cfg.vpn_engine = input;
     if (save(cfg)) {
-      utils::print_success("Set vpn_engine = " + input);
+      cli::print_success("Set vpn_engine = " + input);
       return true;
     }
     return false;
@@ -145,12 +145,12 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
   if (key == "openconnect_runtime") {
     std::string input = read_value("  Runtime mode [bundled/auto/system]: ");
     if (input != "bundled" && input != "auto" && input != "system") {
-      utils::print_error("Invalid runtime mode.");
+      cli::print_error("Invalid runtime mode.");
       return false;
     }
     cfg.openconnect_runtime = input;
     if (save(cfg)) {
-      utils::print_success("Set openconnect_runtime = " + input);
+      cli::print_success("Set openconnect_runtime = " + input);
       return true;
     }
     return false;
@@ -159,12 +159,12 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
   if (key == "windows_tunnel_driver") {
     std::string input = read_value("  Tunnel driver [auto/wintun/tap]: ");
     if (input != "auto" && input != "wintun" && input != "tap") {
-      utils::print_error("Invalid tunnel driver.");
+      cli::print_error("Invalid tunnel driver.");
       return false;
     }
     cfg.windows_tunnel_driver = input;
     if (save(cfg)) {
-      utils::print_success("Set windows_tunnel_driver = " + input);
+      cli::print_success("Set windows_tunnel_driver = " + input);
       return true;
     }
     return false;
@@ -175,12 +175,12 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
       return false;
     std::string val = read_value("  Enter value for " + k + ": ");
     if (val.empty()) {
-      utils::print_error("Value cannot be empty.");
+      cli::print_error("Value cannot be empty.");
       return false;
     }
     field = val;
     if (save(cfg)) {
-      utils::print_success("Set " + k + " = " + val);
+      cli::print_success("Set " + k + " = " + val);
       return true;
     }
     return false;
@@ -202,18 +202,18 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     try {
       cfg.mtu = std::stoi(val);
     } catch (...) {
-      utils::print_error("Invalid MTU.");
+      cli::print_error("Invalid MTU.");
       return false;
     }
     if (save(cfg)) {
-      utils::print_success("Set mtu = " + val);
+      cli::print_success("Set mtu = " + val);
       return true;
     }
     return false;
   }
 
-  utils::print_error("Unknown config key: " + key);
-  utils::print_info("Valid keys: server, username, password, mtu, useragent, "
+  cli::print_error("Unknown config key: " + key);
+  cli::print_info("Valid keys: server, username, password, mtu, useragent, "
                     "log_file, remember_password, disable_dtls, "
                     "auto_reconnect, minimal_mode, "
                     "service_install_prompt_seen, "

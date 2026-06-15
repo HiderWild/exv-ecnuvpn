@@ -2,6 +2,7 @@
 #include "crypto.hpp"
 #include "logger.hpp"
 #include "tunnel.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <algorithm>
@@ -34,7 +35,7 @@ Config load() {
     auto j = nlohmann::json::parse(content);
     return j.get<Config>();
   } catch (const std::exception &e) {
-    utils::print_warning("Failed to parse config.json, using defaults.");
+    cli::print_warning("Failed to parse config.json, using defaults.");
     logger::error("Config parse error: " + std::string(e.what()));
     Config cfg;
     save(cfg);
@@ -64,7 +65,7 @@ bool save(const Config &cfg) {
 
 Config import_from(const std::string &path) {
   if (!utils::file_exists(path)) {
-    utils::print_error("Import file not found: " + path);
+    cli::print_error("Import file not found: " + path);
     return load();
   }
   try {
@@ -117,20 +118,20 @@ Config import_from(const std::string &path) {
         std::string ks = crypto::key_status();
         if (ks == "valid") {
           cfg.password = crypto::encrypt(pw, crypto::load_key());
-          utils::print_info("Password from import file encrypted and stored.");
+          cli::print_info("Password from import file encrypted and stored.");
         } else {
-          utils::print_warning("Key is " + ks +
+          cli::print_warning("Key is " + ks +
                                " — password from import NOT stored.");
         }
       }
     }
 
     save(cfg);
-    utils::print_success("Config imported from: " + path);
+    cli::print_success("Config imported from: " + path);
     logger::info("Config imported from: " + path);
     return cfg;
   } catch (const std::exception &e) {
-    utils::print_error("Failed to import: " + std::string(e.what()));
+    cli::print_error("Failed to import: " + std::string(e.what()));
     logger::error("Config import error: " + std::string(e.what()));
     return load();
   }
@@ -142,8 +143,8 @@ Config reset() {
   Config cfg;
   save(cfg);
   tunnel::write_script(cfg);
-  utils::print_success("Config reset to defaults. Key file preserved.");
-  utils::print_info("Run 'exv config set password' to set a new password.");
+  cli::print_success("Config reset to defaults. Key file preserved.");
+  cli::print_info("Run 'exv config set password' to set a new password.");
   logger::info("Config reset to defaults");
   return cfg;
 }

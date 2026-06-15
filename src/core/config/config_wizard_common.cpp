@@ -1,4 +1,5 @@
 #include "core/config/config.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <algorithm>
@@ -28,34 +29,34 @@ std::string repeat_str(const std::string &s, int n) {
 
 void wiz_banner() {
   std::cout << std::endl;
-  std::cout << utils::BOLD << utils::CYAN
+  std::cout << cli::BOLD << cli::CYAN
             << "  +------------------------------------------+" << std::endl
             << "  |          EXV First-Run Setup             |" << std::endl
-            << "  +------------------------------------------+" << utils::RESET
+            << "  +------------------------------------------+" << cli::RESET
             << std::endl << std::endl;
 }
 
 void wiz_progress(int step, int total) {
   constexpr int BAR = 24;
   int filled = (step * BAR) / total;
-  std::cout << utils::DIM << "  Progress: [" << utils::RESET << utils::CYAN;
+  std::cout << cli::DIM << "  Progress: [" << cli::RESET << cli::CYAN;
   for (int i = 0; i < BAR; ++i)
     std::cout << (i < filled ? "#" : "-");
-  std::cout << utils::RESET << utils::DIM << "]  " << step << "/" << total
-            << utils::RESET << std::endl << std::endl;
+  std::cout << cli::RESET << cli::DIM << "]  " << step << "/" << total
+            << cli::RESET << std::endl << std::endl;
 }
 
 void wiz_step(int step, int total, const std::string &title) {
   std::cout << std::endl;
-  std::cout << utils::BOLD << utils::YELLOW << "  +- Step " << step << " / "
-            << total << " -- " << title << utils::RESET << std::endl;
+  std::cout << cli::BOLD << cli::YELLOW << "  +- Step " << step << " / "
+            << total << " -- " << title << cli::RESET << std::endl;
   wiz_progress(step, total);
 }
 
 std::string wiz_prompt(const std::string &label, const std::string &default_val) {
   std::cout << "    " << label;
   if (!default_val.empty())
-    std::cout << utils::DIM << " [" << default_val << "]" << utils::RESET;
+    std::cout << cli::DIM << " [" << default_val << "]" << cli::RESET;
   std::cout << ": ";
   std::string input;
   std::getline(std::cin, input);

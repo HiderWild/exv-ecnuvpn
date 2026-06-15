@@ -2,6 +2,7 @@
 
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <fstream>
@@ -43,14 +44,14 @@ int install_helper_service(const std::string &executable_path,
   const auto &platform_config = helper_platform_config();
 
   if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
+    cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
   std::string exec_path = executable_path.empty() ? utils::get_executable_path()
                                                   : executable_path;
   if (exec_path.empty()) {
-    utils::print_error("Failed to resolve the exv executable path.");
+    cli::print_error("Failed to resolve the exv executable path.");
     return 1;
   }
   std::filesystem::path exec_fs_path(exec_path);
@@ -62,13 +63,13 @@ int install_helper_service(const std::string &executable_path,
   } else if (std::filesystem::exists(helper_path)) {
     service_binary = helper_path.string();
   } else {
-    utils::print_error("Dedicated exv-helper binary was not found next to exv.");
+    cli::print_error("Dedicated exv-helper binary was not found next to exv.");
     return 1;
   }
 
   std::ofstream ofs(platform_config.service_definition_path);
   if (!ofs.is_open()) {
-    utils::print_error("Failed to write systemd unit file: " +
+    cli::print_error("Failed to write systemd unit file: " +
                        std::string(platform_config.service_definition_path));
     return 1;
   }
@@ -85,33 +86,33 @@ int install_helper_service(const std::string &executable_path,
   ofs.close();
 
   if (utils::run_command("systemctl daemon-reload") != 0) {
-    utils::print_error("Failed to reload systemd daemon.");
+    cli::print_error("Failed to reload systemd daemon.");
     return 1;
   }
 
   std::string enable_cmd =
       "systemctl enable " + std::string(platform_config.service_name);
   if (utils::run_command(enable_cmd) != 0) {
-    utils::print_error("Failed to enable EXV helper service.");
+    cli::print_error("Failed to enable EXV helper service.");
     return 1;
   }
 
   std::string start_cmd =
       "systemctl start " + std::string(platform_config.service_name);
   if (utils::run_command(start_cmd) != 0) {
-    utils::print_error("Failed to start EXV helper service.");
+    cli::print_error("Failed to start EXV helper service.");
     return 1;
   }
 
   bool helper_ready = wait_until_ready(context, 50, 100000);
 
-  utils::print_success("EXV helper service installed.");
+  cli::print_success("EXV helper service installed.");
   if (!helper_ready) {
-    utils::print_warning(
+    cli::print_warning(
         "Helper service was installed, but it has not responded on the socket yet.");
-    utils::print_info("Run 'exv service status' again in a moment if needed.");
+    cli::print_info("Run 'exv service status' again in a moment if needed.");
   }
-  utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
+  cli::print_info("You can now run 'exv' and 'exv stop' without sudo.");
   return 0;
 }
 
@@ -119,7 +120,7 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
   if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
+    cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
@@ -140,14 +141,14 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   if (context.clear_session_state)
     context.clear_session_state();
 
-  utils::print_success("EXV helper service uninstalled.");
+  cli::print_success("EXV helper service uninstalled.");
   return 0;
 }
 
 int show_helper_service_status(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  utils::print_header("EXV Service Status");
+  cli::print_header("EXV Service Status");
 
   bool installed = utils::file_exists(platform_config.service_definition_path);
   bool available = installed ? wait_until_ready(context, 10, 100000) : false;

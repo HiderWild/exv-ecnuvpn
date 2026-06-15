@@ -3,11 +3,11 @@ bool uninstall_existing_stable_exv() {
   if (!utils::file_exists(platform_config.stable_install_path))
     return true;
 
-  utils::print_info(
+  cli::print_info(
       "Running service uninstall using the existing stable exv before replacement...");
   if (utils::run_command(utils::shell_quote(platform_config.stable_install_path) +
                          " service uninstall") != 0) {
-    utils::print_error(
+    cli::print_error(
         "Failed to uninstall the existing helper service before replacing /usr/local/bin/exv.");
     return false;
   }
@@ -150,15 +150,15 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
       parse_semantic_version(ECNUVPN_VERSION, &current_version);
   bool stable_exists = utils::file_exists(platform_config.stable_install_path);
 
-  utils::print_warning(
+  cli::print_warning(
       "EXV helper service should be installed from a stable system path.");
-  std::cout << utils::DIM << "  Current executable: " << current_path
-            << utils::RESET << std::endl;
-  std::cout << utils::DIM << "  Stable target: "
-            << platform_config.stable_install_path << utils::RESET << std::endl;
+  std::cout << cli::DIM << "  Current executable: " << current_path
+            << cli::RESET << std::endl;
+  std::cout << cli::DIM << "  Stable target: "
+            << platform_config.stable_install_path << cli::RESET << std::endl;
   if (current_version_ok) {
-    std::cout << utils::DIM << "  Current version: "
-              << format_semantic_version(current_version) << utils::RESET
+    std::cout << cli::DIM << "  Current version: "
+              << format_semantic_version(current_version) << cli::RESET
               << std::endl;
   }
 
@@ -173,12 +173,12 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
     bool stable_version_ok =
         read_binary_version(platform_config.stable_install_path, &stable_version);
     if (stable_version_ok) {
-      std::cout << utils::DIM << "  Existing stable version: "
-                << format_semantic_version(stable_version) << utils::RESET
+      std::cout << cli::DIM << "  Existing stable version: "
+                << format_semantic_version(stable_version) << cli::RESET
                 << std::endl;
     } else {
-      std::cout << utils::DIM << "  Existing stable version: unknown"
-                << utils::RESET << std::endl;
+      std::cout << cli::DIM << "  Existing stable version: unknown"
+                << cli::RESET << std::endl;
     }
 
     std::cout << std::endl;
@@ -205,7 +205,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
   }
 
   if (!proceed) {
-    utils::print_info("Service installation canceled.");
+    cli::print_info("Service installation canceled.");
     return 1;
   }
 
@@ -214,43 +214,43 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
   }
 
   if (!utils::ensure_dir("/usr/local") || !utils::ensure_dir("/usr/local/bin")) {
-    utils::print_error("Failed to ensure /usr/local/bin exists.");
+    cli::print_error("Failed to ensure /usr/local/bin exists.");
     return 1;
   }
 
-  utils::print_info("Copying current exv binary to /usr/local/bin/exv ...");
+  cli::print_info("Copying current exv binary to /usr/local/bin/exv ...");
   int copy_error = 0;
   if (!copy_file_contents(current_path, platform_config.stable_install_path,
                           &copy_error)) {
-    utils::print_error("Failed to copy exv to /usr/local/bin/exv: " +
+    cli::print_error("Failed to copy exv to /usr/local/bin/exv: " +
                        std::string(std::strerror(copy_error)));
     return 1;
   }
 
-  utils::print_success("Stable exv binary updated at /usr/local/bin/exv.");
+  cli::print_success("Stable exv binary updated at /usr/local/bin/exv.");
   std::string helper_source = helper_binary_next_to(current_path);
   if (!utils::file_exists(helper_source)) {
-    utils::print_error("Expected exv-helper next to the current exv binary: " +
+    cli::print_error("Expected exv-helper next to the current exv binary: " +
                        helper_source);
     return 1;
   }
 
-  utils::print_info("Copying exv-helper binary to /usr/local/bin/exv-helper ...");
+  cli::print_info("Copying exv-helper binary to /usr/local/bin/exv-helper ...");
   if (!copy_file_contents(helper_source,
                           platform_config.default_service_binary_path,
                           &copy_error)) {
-    utils::print_error("Failed to copy exv-helper to /usr/local/bin/exv-helper: " +
+    cli::print_error("Failed to copy exv-helper to /usr/local/bin/exv-helper: " +
                        std::string(std::strerror(copy_error)));
     return 1;
   }
-  utils::print_success(
+  cli::print_success(
       "Stable exv-helper binary updated at /usr/local/bin/exv-helper.");
 
-  utils::print_info("Re-running service installation from the copied binary...");
+  cli::print_info("Re-running service installation from the copied binary...");
   execl(platform_config.stable_install_path, platform_config.stable_install_path,
         "service", "install", static_cast<char *>(nullptr));
 
-  utils::print_error("Failed to launch /usr/local/bin/exv: " +
+  cli::print_error("Failed to launch /usr/local/bin/exv: " +
                      std::string(std::strerror(errno)));
   return 1;
 }

@@ -2,6 +2,7 @@
 
 #include "logger.hpp"
 #include "platform/common/helper_platform.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <filesystem>
@@ -47,12 +48,12 @@ int install_helper_service(const std::string &executable_path,
   const auto &platform_config = helper_platform_config();
 
   if (!utils::check_root()) {
-    utils::print_error(
+    cli::print_error(
         "Administrator privileges required. Please run from an elevated prompt.");
     return 1;
   }
 
-  utils::print_info("Opening Service Control Manager...");
+  cli::print_info("Opening Service Control Manager...");
   SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
   if (!hSCM) {
     logger::error("Cannot open Service Control Manager");
@@ -75,13 +76,13 @@ int install_helper_service(const std::string &executable_path,
   if (std::filesystem::exists(helper_path)) {
     binary_path = "\"" + helper_path.string() + "\" --service";
   } else {
-    utils::print_error(
+    cli::print_error(
         "Dedicated exv-helper.exe was not found next to exv.exe.");
     CloseServiceHandle(hSCM);
     return 1;
   }
 
-  utils::print_info("Registering helper service...");
+  cli::print_info("Registering helper service...");
   SC_HANDLE hService = CreateServiceA(
       hSCM, platform_config.service_name, "ECNU VPN Helper",
       SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
@@ -91,7 +92,7 @@ int install_helper_service(const std::string &executable_path,
   if (!hService) {
     DWORD err = GetLastError();
     if (err == ERROR_SERVICE_EXISTS) {
-      utils::print_info(
+      cli::print_info(
           "Helper service is already installed. Refreshing service configuration...");
       hService = OpenServiceA(hSCM, platform_config.service_name,
                               SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS |
@@ -117,7 +118,7 @@ int install_helper_service(const std::string &executable_path,
       SERVICE_STATUS service_status = {};
       if (QueryServiceStatus(hService, &service_status) &&
           service_status.dwCurrentState != SERVICE_STOPPED) {
-        utils::print_info(
+        cli::print_info(
             "Restarting helper service to apply the new binary path...");
         ControlService(hService, SERVICE_CONTROL_STOP, &service_status);
         for (int i = 0; i < 50; ++i) {
@@ -135,7 +136,7 @@ int install_helper_service(const std::string &executable_path,
     }
   }
 
-  utils::print_info("Starting helper service...");
+  cli::print_info("Starting helper service...");
   if (!StartService(hService, 0, NULL)) {
     DWORD err = GetLastError();
     if (err != ERROR_SERVICE_ALREADY_RUNNING) {
@@ -148,16 +149,16 @@ int install_helper_service(const std::string &executable_path,
   CloseServiceHandle(hService);
   CloseServiceHandle(hSCM);
 
-  utils::print_info("Waiting for helper to become ready...");
+  cli::print_info("Waiting for helper to become ready...");
   bool helper_ready = wait_until_ready(context, 50, 100000);
 
-  utils::print_success("EXV helper service installed.");
+  cli::print_success("EXV helper service installed.");
   if (!helper_ready) {
-    utils::print_warning(
+    cli::print_warning(
         "Helper service was installed, but it has not responded yet.");
-    utils::print_info("Run 'exv service status' again in a moment if needed.");
+    cli::print_info("Run 'exv service status' again in a moment if needed.");
   }
-  utils::print_info("You can now run 'exv' and 'exv stop' without elevation.");
+  cli::print_info("You can now run 'exv' and 'exv stop' without elevation.");
   return 0;
 }
 
@@ -235,7 +236,7 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
 int show_helper_service_status(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  utils::print_header("EXV Service Status");
+  cli::print_header("EXV Service Status");
 
   SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
   if (!hSCM) {

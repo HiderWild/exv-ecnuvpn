@@ -29,7 +29,6 @@
 namespace ecnuvpn {
 namespace utils {
 #include "utils_runtime_paths.inc.cpp"
-#include "utils_terminal.inc.cpp"
 #include "utils_paths.inc.cpp"
 #include "utils_file_io.inc.cpp"
 #include "utils_runtime_discovery.inc.cpp"

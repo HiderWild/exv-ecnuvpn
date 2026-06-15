@@ -116,6 +116,7 @@ set(EXV_COMMON_SOURCES
     src/core/logging/logger.cpp
     src/core/logging/log_event_bus.cpp
     src/core/logging/log_renderer.cpp
+    src/cli/console.cpp
     src/utils.cpp
 )
 
@@ -683,6 +684,7 @@ add_executable(tunnel_script_contract_test
     tests/tunnel_script_contract_test.cpp
     src/tunnel.cpp
     src/openconnect_log.cpp
+    src/cli/console.cpp
 )
 
 if(APPLE)
@@ -745,6 +747,7 @@ add_test(NAME native_packaging_policy_test COMMAND native_packaging_policy_test)
 add_executable(crypto_roundtrip_test
     tests/crypto_roundtrip_test.cpp
     src/core/crypto/crypto.cpp
+    src/cli/console.cpp
 )
 
 if(APPLE)

@@ -2,6 +2,7 @@
 
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <sys/stat.h>
@@ -46,14 +47,14 @@ int install_helper_service(const std::string &executable_path,
   const auto &platform_config = helper_platform_config();
 
   if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
+    cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
   std::string exec_path = executable_path.empty() ? utils::get_executable_path()
                                                   : executable_path;
   if (exec_path.empty()) {
-    utils::print_error("Failed to resolve the exv executable path.");
+    cli::print_error("Failed to resolve the exv executable path.");
     return 1;
   }
 
@@ -66,7 +67,7 @@ int install_helper_service(const std::string &executable_path,
         helper_source, platform_config.default_service_binary_path,
         std::filesystem::copy_options::overwrite_existing, copy_error);
     if (copy_error) {
-      utils::print_error("Failed to copy exv-helper to " +
+      cli::print_error("Failed to copy exv-helper to " +
                          std::string(platform_config.default_service_binary_path) +
                          ": " + copy_error.message());
       return 1;
@@ -75,9 +76,9 @@ int install_helper_service(const std::string &executable_path,
   }
 
   if (!utils::file_exists(platform_config.default_service_binary_path)) {
-    utils::print_error("Stable exv-helper binary is missing: " +
+    cli::print_error("Stable exv-helper binary is missing: " +
                        std::string(platform_config.default_service_binary_path));
-    utils::print_info(
+    cli::print_info(
         "Install the CLI separately from Settings if you want a global exv command.");
     return 1;
   }
@@ -115,7 +116,7 @@ int install_helper_service(const std::string &executable_path,
 
   std::ofstream ofs(platform_config.service_definition_path);
   if (!ofs.is_open()) {
-    utils::print_error("Failed to write LaunchDaemon plist: " +
+    cli::print_error("Failed to write LaunchDaemon plist: " +
                        std::string(platform_config.service_definition_path));
     return 1;
   }
@@ -128,7 +129,7 @@ int install_helper_service(const std::string &executable_path,
                      " >/dev/null 2>&1");
   if (utils::run_command(std::string("launchctl bootstrap system ") +
                          platform_config.service_definition_path) != 0) {
-    utils::print_error("Failed to bootstrap EXV helper LaunchDaemon.");
+    cli::print_error("Failed to bootstrap EXV helper LaunchDaemon.");
     return 1;
   }
 
@@ -136,13 +137,13 @@ int install_helper_service(const std::string &executable_path,
 
   platform::fix_config_dir_ownership();
 
-  utils::print_success("EXV helper service installed.");
+  cli::print_success("EXV helper service installed.");
   if (!helper_ready) {
-    utils::print_warning(
+    cli::print_warning(
         "Helper service was installed, but it has not responded on the socket yet.");
-    utils::print_info("Run 'exv service status' again in a moment if needed.");
+    cli::print_info("Run 'exv service status' again in a moment if needed.");
   }
-  utils::print_info("You can now run 'exv' and 'exv stop' without sudo.");
+  cli::print_info("You can now run 'exv' and 'exv stop' without sudo.");
   return 0;
 }
 
@@ -150,7 +151,7 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
   if (!utils::check_root()) {
-    utils::print_error("Root privileges required. Please run with sudo.");
+    cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
@@ -167,14 +168,14 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   if (context.clear_session_state)
     context.clear_session_state();
 
-  utils::print_success("EXV helper service uninstalled.");
+  cli::print_success("EXV helper service uninstalled.");
   return 0;
 }
 
 int show_helper_service_status(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  utils::print_header("EXV Service Status");
+  cli::print_header("EXV Service Status");
 
   bool installed = utils::file_exists(platform_config.service_definition_path);
   bool available = installed ? wait_until_ready(context, 10, 100000) : false;

@@ -189,6 +189,7 @@ int main() {
   const auto tunnel_controller_header =
       read_text_file(source_dir / "src" / "core" / "tunnel_controller" /
                      "tunnel_controller.hpp");
+  const auto legacy_utils_header_path = source_dir / "src" / "utils.hpp";
   const auto tunnel_public_module_path =
       source_dir / "src" / "core" / "tunnel_controller" / "modules" /
       "tunnel.cppm";
@@ -414,6 +415,23 @@ int main() {
   ok = expect(!std::filesystem::exists(source_dir / "src" / "utils_platform"),
               "utils must not grow a platform subdirectory") &&
        ok;
+  ok = expect(!std::filesystem::exists(source_dir / "src" /
+                                       "utils_terminal.inc.cpp"),
+              "terminal output must live under src/cli, not utils include "
+              "units") &&
+       ok;
+  if (std::filesystem::exists(legacy_utils_header_path)) {
+    ok = expect(!file_contains_any(
+                    legacy_utils_header_path,
+                    {"print_success", "print_error", "print_info",
+                     "print_warning", "print_header", "enable_windows_ansi",
+                     "RESET =", "RED =", "GREEN =", "YELLOW =", "BLUE =",
+                     "MAGENTA =", "CYAN =", "BOLD =", "DIM =",
+                     "UNDERLINE =", "REVERSE ="}),
+                "legacy utils.hpp must not expose terminal output APIs or "
+                "ANSI constants") &&
+         ok;
+  }
 
   if (ok) {
     std::cout << "contract_manifest_test: all assertions passed\n";

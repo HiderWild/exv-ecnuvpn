@@ -1,5 +1,6 @@
 #include "helper/helper.hpp"
 #include "platform/common/helper_platform.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <iostream>
@@ -113,7 +114,7 @@ std::optional<int> parse_positive_int(const std::string &value) {
 } // namespace
 
 int main(int argc, char *argv[]) {
-  ecnuvpn::utils::enable_windows_ansi();
+  ecnuvpn::cli::enable_windows_ansi();
 
   if (argc > 1) {
     std::string arg = argv[1];

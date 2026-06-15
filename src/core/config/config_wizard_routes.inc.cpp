@@ -72,7 +72,7 @@ wiz_route_selector(const std::vector<std::string> &default_routes) {
           if (!is_valid_cidr(route)) {
             st.set_status("Invalid format: " + route +
                               "  (use IP or IP/CIDR e.g. 10.0.0.0/8)",
-                          utils::RED);
+                          cli::RED);
           } else {
             bool dup = false;
             for (auto &r : st.defaults)
@@ -87,14 +87,14 @@ wiz_route_selector(const std::vector<std::string> &default_routes) {
                   break;
                 }
             if (dup) {
-              st.set_status("Route already exists: " + route, utils::YELLOW);
+              st.set_status("Route already exists: " + route, cli::YELLOW);
             } else {
               st.custom.push_back(route);
               st.cust_sel.push_back(true);
               st.active_col = 1;
               st.cursor = st.right_size() - 1;
               st.clamp_cursor();
-              st.set_status("Added: " + route, utils::GREEN);
+              st.set_status("Added: " + route, cli::GREEN);
             }
           }
         }

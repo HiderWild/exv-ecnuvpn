@@ -1,6 +1,7 @@
 #include "crypto.hpp"
 #include "logger.hpp"
 #include "platform/common/crypto_backend.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <algorithm>
@@ -166,23 +167,23 @@ std::string key_status() {
 
 bool reset_key() {
   std::cout << std::endl;
-  utils::print_warning("This will generate a NEW encryption key.");
-  utils::print_warning("The stored encrypted password will be CLEARED.");
-  utils::print_warning(
+  cli::print_warning("This will generate a NEW encryption key.");
+  cli::print_warning("The stored encrypted password will be CLEARED.");
+  cli::print_warning(
       "You will need to run 'exv config set password' again.");
   std::cout << std::endl;
-  std::cout << utils::BOLD << utils::RED << "  Confirm key reset? [y/N] "
-            << utils::RESET;
+  std::cout << cli::BOLD << cli::RED << "  Confirm key reset? [y/N] "
+            << cli::RESET;
   std::string answer;
   std::getline(std::cin, answer);
   if (answer.empty() || (answer[0] != 'y' && answer[0] != 'Y')) {
-    utils::print_info("Key reset cancelled.");
+    cli::print_info("Key reset cancelled.");
     return false;
   }
 
   std::string new_key = generate_key();
   if (!save_key(new_key)) {
-    utils::print_error("Failed to save new key to: " + key_path());
+    cli::print_error("Failed to save new key to: " + key_path());
     logger::error("Key reset: failed to save new key");
     return false;
   }
@@ -198,8 +199,8 @@ bool reset_key() {
     }
   }
 
-  utils::print_success("Key reset successfully. Password cleared.");
-  utils::print_info("Set a new password with: exv config set password");
+  cli::print_success("Key reset successfully. Password cleared.");
+  cli::print_info("Set a new password with: exv config set password");
   logger::info("Encryption key reset performed");
   return true;
 }

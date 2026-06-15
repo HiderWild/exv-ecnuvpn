@@ -1,6 +1,7 @@
 #include "virtual_network.hpp"
 
 #include "platform/common/virtual_network_probe.hpp"
+#include "cli/console.hpp"
 #include "utils.hpp"
 
 #include <string>
@@ -73,7 +74,7 @@ void add_status_fields(nlohmann::json &status, const std::string &exv_interface)
 void print_notice(const Detection &detection) {
   if (!detection.detected)
     return;
-  utils::print_warning(detection.message);
+  cli::print_warning(detection.message);
 }
 
 } // namespace virtual_network
