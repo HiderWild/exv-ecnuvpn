@@ -96,6 +96,18 @@ def write_launch_args(package_dir: Path, platform: str) -> None:
     (package_dir / "exv-ui.args").write_text("\n".join(args) + "\n", encoding="utf-8")
 
 
+def validate_launch_args_targets(package_dir: Path) -> None:
+    args_path = package_dir / "exv-ui.args"
+    args = [line.strip() for line in args_path.read_text(encoding="utf-8").splitlines()]
+    for token in args:
+        if not token or token.startswith("--"):
+            continue
+        target = (package_dir / token).resolve()
+        package_root = package_dir.resolve()
+        if package_root not in (target, *target.parents) or not target.exists():
+            raise SystemExit(f"Launch args target not found: {token}")
+
+
 def build_package(platform: str, output_root: Path) -> Path:
     renderer_dir = first_existing(default_renderer_candidates(platform), "Renderer build directory")
 
@@ -116,6 +128,7 @@ def build_package(platform: str, output_root: Path) -> Path:
 
     copy_tree_contents(renderer_dir, webui_dir)
     write_launch_args(package_dir, platform)
+    validate_launch_args_targets(package_dir)
     assert_no_electron_payload(package_dir)
     return package_dir
 

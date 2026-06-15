@@ -96,7 +96,8 @@ describe('native WebView package policy', () => {
     assert.match(packageScript, /exv-ui\.args/)
     assert.match(packageScript, /--exv/)
     assert.match(packageScript, /--renderer-index/)
-    assert.match(packageScript, /Path\("webui"\)\s*\/\s*"index\.html"/)
+    assert.match(packageScript, /def validate_launch_args_targets\(/)
+    assert.match(packageScript, /Launch args target not found/)
 
     const readme = readFileSync(join(webuiRoot, 'README.md'), 'utf8')
     assert.match(readme, /exv-ui\.args/)
