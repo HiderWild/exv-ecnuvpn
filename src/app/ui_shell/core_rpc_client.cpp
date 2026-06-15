@@ -30,6 +30,13 @@ std::string payload_json_to_string(const nlohmann::json &value) {
   return value.dump();
 }
 
+nlohmann::json payload_json_to_value(const std::string &payload_json) {
+  if (payload_json.empty()) {
+    return nlohmann::json::object();
+  }
+  return nlohmann::json::parse(payload_json);
+}
+
 CoreRpcResponse transport_error(const CoreRpcRequest &request,
                                 std::string code,
                                 std::string message) {
@@ -44,11 +51,21 @@ CoreRpcResponse transport_error(const CoreRpcRequest &request,
 
 } // namespace
 
-CoreRpcClient::CoreRpcClient(CoreRpcTransport &transport)
-    : transport_(transport) {}
+CoreRpcClient::CoreRpcClient(CoreRpcTransport &transport,
+                             CoreRpcWireMode wire_mode)
+    : transport_(transport), wire_mode_(wire_mode) {}
 
 CoreRpcResponse CoreRpcClient::invoke(const CoreRpcRequest &request) {
-  if (!transport_.write_line(serialize_core_rpc_request(request))) {
+  std::string request_line;
+  try {
+    request_line = wire_mode_ == CoreRpcWireMode::Native
+                       ? serialize_core_rpc_request(request)
+                       : serialize_desktop_rpc_request(request);
+  } catch (const nlohmann::json::exception &error) {
+    return transport_error(request, "protocol_error", error.what());
+  }
+
+  if (!transport_.write_line(request_line)) {
     return transport_error(request, "transport_closed",
                            "Core RPC transport is closed");
   }
@@ -73,6 +90,14 @@ std::string serialize_core_rpc_request(const CoreRpcRequest &request) {
                             ? nlohmann::json::object().dump()
                             : request.payload_json;
   out["request_id"] = request.request_id;
+  return out.dump();
+}
+
+std::string serialize_desktop_rpc_request(const CoreRpcRequest &request) {
+  nlohmann::ordered_json out;
+  out["id"] = request_id_to_int(request.request_id);
+  out["action"] = request.action;
+  out["payload"] = payload_json_to_value(request.payload_json);
   return out.dump();
 }
 
