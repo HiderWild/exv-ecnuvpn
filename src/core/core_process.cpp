@@ -1,7 +1,6 @@
 #include "core_process.hpp"
 #include "common/diagnostics/logger.hpp"
 #include "common/diagnostics/log_renderer.hpp"
-#include "common/diagnostics/log_event_bus.hpp"
 #include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
 #include "core/app_api/app_api.hpp"
@@ -247,35 +246,6 @@ int core_process_main(const std::string& config_dir,
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 
-    // 4. Subscribe to LogEventBus and push log events to stdout
-    auto log_subscription = ecnuvpn::LogEventBus::instance().subscribe(
-        [](const ecnuvpn::TypedLogEvent& log_event) {
-            json log_data = {
-                {"level", log_event.level},
-                {"message", log_event.message},
-                {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}
-            };
-            if (!log_event.component.empty()) {
-                log_data["component"] = log_event.component;
-            }
-            if (!log_event.code.empty()) {
-                log_data["code"] = log_event.code;
-            }
-            if (!log_event.fields.empty()) {
-                json fields = json::object();
-                for (const auto& [key, value] : log_event.fields) {
-                    fields[key] = value;
-                }
-                log_data["fields"] = fields;
-            }
-            json event = {
-                {"event", "log"},
-                {"data", log_data}
-            };
-            write_json_line(event);
-        }
-    );
-
     auto controller = std::make_shared<TunnelController>(
         std::shared_ptr<exv::helper::HelperClient>{},
         std::shared_ptr<exv::platform::PlatformNetworkOps>{},
@@ -372,7 +342,6 @@ int core_process_main(const std::string& config_dir,
     pipe_listener->stop();
 
     ecnuvpn::logger::info("Core process shutting down");
-    ecnuvpn::LogEventBus::instance().unsubscribe(log_subscription);
     return 0;
 }
 

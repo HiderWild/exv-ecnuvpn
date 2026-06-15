@@ -1,42 +1,18 @@
 #include "common/diagnostics/log_renderer.hpp"
-#include "common/diagnostics/log_event_bus.hpp"
-#include "common/diagnostics/logger.hpp"
 
-#include <ctime>
-#include <iomanip>
-#include <sstream>
+#include "platform/common/logging/log_runtime.hpp"
 
 namespace ecnuvpn {
 
-static std::string render(const TypedLogEvent& event) {
-  auto now = std::time(nullptr);
-  auto* tm = std::localtime(&now);
-  std::ostringstream ss;
-  ss << "[" << std::put_time(tm, "%Y-%m-%d %H:%M:%S") << "] "
-     << "[" << event.level << "] ";
-  if (!event.component.empty()) {
-    ss << "[" << event.component << "] ";
-  }
-  if (!event.code.empty()) {
-    ss << "code=" << event.code << " ";
-  }
-  ss << event.message;
-  for (const auto& field : event.fields) {
-    ss << " " << field.first << "=" << field.second;
-  }
-  return ss.str();
-}
-
 LogRenderer::LogRenderer() {
-  subscription_id_ = LogEventBus::instance().subscribe(
-    [](const TypedLogEvent& event) {
-      logger::write(event.level, render(event));
-    }
-  );
+  platform::logging::configure_default_logging(true);
+  active_ = true;
 }
 
 LogRenderer::~LogRenderer() {
-  LogEventBus::instance().unsubscribe(subscription_id_);
+  if (active_) {
+    platform::logging::shutdown_default_logging();
+  }
 }
 
 } // namespace ecnuvpn

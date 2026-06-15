@@ -1,11 +1,9 @@
 #pragma once
 
-#include <cstddef>
-
 namespace ecnuvpn {
 
-// Subscribes to LogEventBus and renders TypedLogEvent → text line → logger::write().
-// Must be instantiated once at process startup (lives for process lifetime).
+// Compatibility RAII object that enables default logging for process scopes
+// which need stdout log events in addition to the file sink.
 class LogRenderer {
 public:
   LogRenderer();
@@ -15,7 +13,7 @@ public:
   LogRenderer& operator=(const LogRenderer&) = delete;
 
 private:
-  size_t subscription_id_;
+  bool active_ = false;
 };
 
 } // namespace ecnuvpn

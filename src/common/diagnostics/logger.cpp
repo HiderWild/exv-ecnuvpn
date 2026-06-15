@@ -1,25 +1,60 @@
-#include "platform/common/file_system.hpp"
-#include "platform/common/interface_stats.hpp"
-#include "platform/common/process_utils.hpp"
-#include "platform/common/runtime_discovery.hpp"
-#include "platform/common/runtime_paths.hpp"
 #include "common/diagnostics/logger.hpp"
 #include "common/diagnostics/log_event_bus.hpp"
+#include "observability/log_facade.hpp"
 #include "cli/console.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/logging/log_runtime.hpp"
+#include "platform/common/runtime_paths.hpp"
 
-#include <ctime>
 #include <deque>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <utility>
 #include <vector>
 
 namespace ecnuvpn {
 namespace logger {
+namespace {
 
-void init() { platform::ensure_dir(platform::get_config_dir()); }
+exv::observability::LogLevel log_level_from_string(const std::string &level) {
+  if (level == "TRACE" || level == "trace") {
+    return exv::observability::LogLevel::Trace;
+  }
+  if (level == "DEBUG" || level == "debug") {
+    return exv::observability::LogLevel::Debug;
+  }
+  if (level == "WARN" || level == "warn" || level == "WARNING" ||
+      level == "warning") {
+    return exv::observability::LogLevel::Warn;
+  }
+  if (level == "ERROR" || level == "error") {
+    return exv::observability::LogLevel::Error;
+  }
+  if (level == "FATAL" || level == "fatal") {
+    return exv::observability::LogLevel::Fatal;
+  }
+  return exv::observability::LogLevel::Info;
+}
+
+void publish_compat_event(
+    const std::string &level, const std::string &component,
+    const std::string &code, const std::string &message,
+    const std::vector<std::pair<std::string, std::string>> &fields) {
+  TypedLogEvent ev;
+  ev.level = level;
+  ev.component = component;
+  ev.code = code;
+  ev.message = message;
+  ev.fields = fields;
+  LogEventBus::instance().publish(ev);
+}
+
+} // namespace
+
+void init() {
+  platform::ensure_dir(platform::get_config_dir());
+  platform::logging::configure_default_logging(false);
+}
 
 void write(const std::string &level, const std::string &text) {
   std::string log_path = platform::get_log_path();
@@ -32,36 +67,26 @@ void write(const std::string &level, const std::string &text) {
 }
 
 void info(const std::string &msg) {
-  TypedLogEvent ev;
-  ev.level = "INFO";
-  ev.message = msg;
-  LogEventBus::instance().publish(ev);
+  exv::observability::LogFacade::info(msg);
+  publish_compat_event("INFO", "", "", msg, {});
 }
 
 void error(const std::string &msg) {
-  TypedLogEvent ev;
-  ev.level = "ERROR";
-  ev.message = msg;
-  LogEventBus::instance().publish(ev);
+  exv::observability::LogFacade::error(msg);
+  publish_compat_event("ERROR", "", "", msg, {});
 }
 
 void warn(const std::string &msg) {
-  TypedLogEvent ev;
-  ev.level = "WARN";
-  ev.message = msg;
-  LogEventBus::instance().publish(ev);
+  exv::observability::LogFacade::warn(msg);
+  publish_compat_event("WARN", "", "", msg, {});
 }
 
 void event(const std::string &level, const std::string &component,
            const std::string &code, const std::string &message,
            const std::vector<std::pair<std::string, std::string>> &fields) {
-  TypedLogEvent ev;
-  ev.level = level;
-  ev.component = component;
-  ev.code = code;
-  ev.message = message;
-  ev.fields = fields;
-  LogEventBus::instance().publish(ev);
+  exv::observability::LogFacade::event(log_level_from_string(level), component,
+                                       code, message, fields);
+  publish_compat_event(level, component, code, message, fields);
 }
 
 std::vector<std::string> tail(int lines) {
