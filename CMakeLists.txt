@@ -286,6 +286,38 @@ target_compile_definitions(exv-helper-runtime PUBLIC
     ${EXV_PLATFORM_DEFINITIONS}
 )
 
+add_library(exv-base-types-module STATIC)
+target_sources(exv-base-types-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/base/modules/types.cppm
+)
+target_compile_features(exv-base-types-module PUBLIC cxx_std_20)
+target_include_directories(exv-base-types-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-base-types-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_library(exv-base-errors-module STATIC)
+target_sources(exv-base-errors-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/base/modules/errors.cppm
+)
+target_compile_features(exv-base-errors-module PUBLIC cxx_std_20)
+target_include_directories(exv-base-errors-module PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+set_target_properties(exv-base-errors-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_library(exv-helper-protocol-module STATIC)
 target_sources(exv-helper-protocol-module
     PUBLIC
@@ -1382,6 +1414,26 @@ set_target_properties(config_module_smoke_test PROPERTIES
 )
 
 add_test(NAME config_module_smoke_test COMMAND config_module_smoke_test)
+
+add_executable(base_module_smoke_test
+    tests/base_module_smoke_test.cpp
+)
+
+target_include_directories(base_module_smoke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(base_module_smoke_test PRIVATE
+    exv-base-types-module
+    exv-base-errors-module
+)
+
+set_target_properties(base_module_smoke_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_test(NAME base_module_smoke_test COMMAND base_module_smoke_test)
 
 add_executable(utils_strings_test
     tests/utils_strings_test.cpp
