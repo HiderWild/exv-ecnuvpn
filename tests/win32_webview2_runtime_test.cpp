@@ -1,4 +1,5 @@
 #include "platform/win32/ui_shell/webview2_runtime_win32.hpp"
+#include "platform/win32/ui_shell/webview2_host_win32.hpp"
 
 #include <cassert>
 
@@ -46,6 +47,21 @@ int main() {
       decide_webview2_bootstrap({true, "120.0.2210.91", "HKCU"}, true, true);
   assert(!unnecessary.should_download);
   assert(unnecessary.reason == "installed");
+
+  bool bridge_invoked = false;
+  const std::string bridge_response = dispatch_webview2_host_message(
+      R"({"id":9,"action":"status.get","payload":{}})",
+      [&](const ecnuvpn::ui_shell::CoreRpcRequest &request) {
+        bridge_invoked = true;
+        assert(request.action == "status.get");
+        ecnuvpn::ui_shell::CoreRpcResponse response;
+        response.id = 9;
+        response.ok = true;
+        response.data_json = R"({"phase":"idle"})";
+        return response;
+      });
+  assert(bridge_invoked);
+  assert(bridge_response == R"({"id":9,"ok":true,"data":{"phase":"idle"}})");
 
   (void)detect_webview2_runtime();
 }

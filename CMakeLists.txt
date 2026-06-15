@@ -899,6 +899,8 @@ add_test(NAME ui_shell_core_rpc_client_test COMMAND ui_shell_core_rpc_client_tes
 if(WIN32)
     add_executable(win32_webview2_runtime_test
         tests/win32_webview2_runtime_test.cpp
+        src/app/ui_shell/host_bridge.cpp
+        src/platform/win32/ui_shell/webview2_host_win32.cpp
         src/platform/win32/ui_shell/webview2_runtime_win32.cpp
     )
 
