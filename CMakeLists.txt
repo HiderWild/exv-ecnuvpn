@@ -891,6 +891,21 @@ target_include_directories(ui_shell_core_rpc_client_test PRIVATE
 
 add_test(NAME ui_shell_core_rpc_client_test COMMAND ui_shell_core_rpc_client_test)
 
+if(WIN32)
+    add_executable(win32_webview2_runtime_test
+        tests/win32_webview2_runtime_test.cpp
+        src/platform/win32/ui_shell/webview2_runtime_win32.cpp
+    )
+
+    target_include_directories(win32_webview2_runtime_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(win32_webview2_runtime_test PRIVATE advapi32)
+
+    add_test(NAME win32_webview2_runtime_test COMMAND win32_webview2_runtime_test)
+endif()
+
 add_executable(crypto_roundtrip_test
     tests/crypto_roundtrip_test.cpp
     src/core/crypto/crypto.cpp
@@ -2108,6 +2123,7 @@ set(_release_blocking_tests
 )
 if(WIN32)
     list(APPEND _release_blocking_tests
+        win32_webview2_runtime_test
         win32_platform_network_ops_test
     )
 endif()
