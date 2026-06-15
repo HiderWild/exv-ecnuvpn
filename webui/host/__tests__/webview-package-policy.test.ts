@@ -70,4 +70,10 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(macosDesktop, /compile_electron|package_desktop/)
     assert.doesNotMatch(macosAll, /compile_electron|package_desktop/)
   })
+
+  it('does not let native WebView packages fall back to Electron renderer output', () => {
+    const packageScript = readFileSync(join(repoRoot, 'scripts', 'package_ui_shell.py'), 'utf8')
+    assert.doesNotMatch(packageScript, /build"\s*\/\s*platform\s*\/\s*"electron"\s*\/\s*"dist"/)
+    assert.doesNotMatch(packageScript, /electron"\s*,\s*"dist"/)
+  })
 })

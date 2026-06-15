@@ -55,7 +55,6 @@ def default_renderer_candidates(platform: str) -> list[Path]:
         return [Path(os.environ["ECNUVPN_RENDERER_DIST_DIR"])]
     return [
         REPO_ROOT / "build" / platform / "webview" / "dist",
-        REPO_ROOT / "build" / platform / "electron" / "dist",
         REPO_ROOT / "webui" / "dist",
     ]
 
