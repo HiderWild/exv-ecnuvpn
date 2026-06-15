@@ -27,9 +27,18 @@ function Invoke-Step {
 }
 
 function Invoke-CppBuild {
+  param(
+    [switch]$UiShell
+  )
+
   Push-Location $repoRoot
   try {
-    Invoke-Step cmake --preset windows-release
+    if ($UiShell) {
+      Invoke-Step cmake --preset windows-release -DEXV_BUILD_UI_SHELL=ON
+    }
+    else {
+      Invoke-Step cmake --preset windows-release
+    }
     Invoke-Step cmake --build --preset windows-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test win32_webview2_runtime_test
   }
   finally {
@@ -123,7 +132,7 @@ switch ($Action) {
   }
   'webview' {
     Invoke-WebuiRendererBuild
-    Invoke-CppBuild
+    Invoke-CppBuild -UiShell
     Invoke-CppTests
     Invoke-WebViewPackage
   }
@@ -144,13 +153,13 @@ switch ($Action) {
   }
   'desktop' {
     Invoke-WebuiRendererBuild
-    Invoke-CppBuild
+    Invoke-CppBuild -UiShell
     Invoke-CppTests
     Invoke-WebViewPackage
   }
   'all' {
     Invoke-WebuiRendererBuild
-    Invoke-CppBuild
+    Invoke-CppBuild -UiShell
     Invoke-CppTests
     Invoke-WebViewPackage
   }

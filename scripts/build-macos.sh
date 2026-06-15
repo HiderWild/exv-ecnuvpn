@@ -27,9 +27,14 @@ EOF
 }
 
 build_cpp() {
+  local ui_shell="${1:-off}"
   (
     cd "$REPO_ROOT"
-    cmake --preset macos-release
+    if [[ "$ui_shell" == "on" ]]; then
+      cmake --preset macos-release -DEXV_BUILD_UI_SHELL=ON
+    else
+      cmake --preset macos-release
+    fi
     cmake --build --preset macos-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test darwin_wkwebview_runtime_test
   )
 }
@@ -112,7 +117,7 @@ case "$ACTION" in
     ;;
   webview)
     run_webui_renderer
-    build_cpp
+    build_cpp on
     run_tests
     package_webview
     ;;
@@ -133,13 +138,13 @@ case "$ACTION" in
     ;;
   desktop)
     run_webui_renderer
-    build_cpp
+    build_cpp on
     run_tests
     package_webview
     ;;
   all)
     run_webui_renderer
-    build_cpp
+    build_cpp on
     run_tests
     package_webview
     ;;
