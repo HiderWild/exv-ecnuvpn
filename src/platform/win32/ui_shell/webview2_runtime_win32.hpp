@@ -24,6 +24,7 @@ WebView2BootstrapDecision decide_webview2_bootstrap(
     const WebView2RuntimeStatus &status, bool network_available,
     bool user_consented);
 
+bool is_allowed_webview2_bootstrapper_url(const std::string &download_url);
 bool run_webview2_evergreen_bootstrapper(const std::string &download_url,
                                          const std::string &installer_path);
 

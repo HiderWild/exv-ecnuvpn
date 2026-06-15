@@ -5,8 +5,10 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <string>
+#include <string_view>
 
 namespace ecnuvpn::platform::win32::ui_shell {
 namespace {
@@ -49,6 +51,16 @@ std::string read_registry_string(HKEY root, const wchar_t *subkey,
     return {};
   }
   return utf8_from_wide(value);
+}
+
+std::string lowercase_ascii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+      return static_cast<char>(ch - 'A' + 'a');
+    }
+    return static_cast<char>(ch);
+  });
+  return value;
 }
 
 } // namespace
@@ -103,6 +115,36 @@ WebView2BootstrapDecision decide_webview2_bootstrap(
     return {false, "user_declined", ""};
   }
   return {true, "missing", "/silent /install"};
+}
+
+bool is_allowed_webview2_bootstrapper_url(const std::string &download_url) {
+  constexpr std::string_view kAllowedPrefix = "https://go.microsoft.com";
+  constexpr std::string_view kAllowedPathAndQuery =
+      "/fwlink/?linkid=2124703";
+  constexpr std::string_view kAllowedDocumentedPathAndQuery =
+      "/fwlink/p/?linkid=2124703";
+
+  const std::string normalized = lowercase_ascii(download_url);
+  if (normalized.rfind(kAllowedPrefix, 0) != 0) {
+    return false;
+  }
+
+  const std::string_view path_and_query(
+      normalized.data() + kAllowedPrefix.size(),
+      normalized.size() - kAllowedPrefix.size());
+  return path_and_query == kAllowedPathAndQuery ||
+         path_and_query == kAllowedDocumentedPathAndQuery;
+}
+
+bool run_webview2_evergreen_bootstrapper(const std::string &download_url,
+                                         const std::string &installer_path) {
+  if (!is_allowed_webview2_bootstrapper_url(download_url) ||
+      installer_path.empty()) {
+    return false;
+  }
+
+  // Native download/install execution is intentionally not wired in this slice.
+  return false;
 }
 
 } // namespace ecnuvpn::platform::win32::ui_shell

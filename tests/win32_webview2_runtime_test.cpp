@@ -85,5 +85,50 @@ int main() {
   assert(post_invoked);
   assert(posted_response == R"({"id":11,"ok":true,"data":{"phase":"idle"}})");
 
+  const bool allows_official_bootstrapper_url =
+      is_allowed_webview2_bootstrapper_url(
+          "https://go.microsoft.com/fwlink/?linkid=2124703");
+  const bool allows_case_insensitive_official_bootstrapper_url =
+      is_allowed_webview2_bootstrapper_url(
+          "HTTPS://GO.MICROSOFT.COM/fwlink/?linkid=2124703");
+  const bool allows_documented_official_bootstrapper_url =
+      is_allowed_webview2_bootstrapper_url(
+          "https://go.microsoft.com/fwlink/p/?LinkId=2124703");
+  const bool rejects_arbitrary_bootstrapper_url =
+      !is_allowed_webview2_bootstrapper_url(
+          "https://example.com/MicrosoftEdgeWebview2Setup.exe");
+  const bool rejects_non_https_bootstrapper_url =
+      !is_allowed_webview2_bootstrapper_url(
+          "http://go.microsoft.com/fwlink/?linkid=2124703");
+  const bool rejects_wrong_linkid_bootstrapper_url =
+      !is_allowed_webview2_bootstrapper_url(
+          "https://go.microsoft.com/fwlink/?linkid=9999999");
+  const bool rejects_empty_bootstrapper_url =
+      !is_allowed_webview2_bootstrapper_url("");
+  if (!allows_official_bootstrapper_url ||
+      !allows_case_insensitive_official_bootstrapper_url ||
+      !allows_documented_official_bootstrapper_url ||
+      !rejects_arbitrary_bootstrapper_url || !rejects_non_https_bootstrapper_url ||
+      !rejects_wrong_linkid_bootstrapper_url || !rejects_empty_bootstrapper_url) {
+    return 1;
+  }
+
+  const bool rejects_disallowed_bootstrapper_run =
+      !run_webview2_evergreen_bootstrapper(
+          "https://example.com/MicrosoftEdgeWebview2Setup.exe",
+          "C:/temp/setup.exe");
+  const bool rejects_empty_bootstrapper_installer_path =
+      !run_webview2_evergreen_bootstrapper(
+          "https://go.microsoft.com/fwlink/?linkid=2124703", "");
+  const bool rejects_allowed_bootstrapper_run_without_native_seam =
+      !run_webview2_evergreen_bootstrapper(
+          "https://go.microsoft.com/fwlink/?linkid=2124703",
+          "C:/temp/MicrosoftEdgeWebview2Setup.exe");
+  if (!rejects_disallowed_bootstrapper_run ||
+      !rejects_empty_bootstrapper_installer_path ||
+      !rejects_allowed_bootstrapper_run_without_native_seam) {
+    return 1;
+  }
+
   (void)detect_webview2_runtime();
 }
