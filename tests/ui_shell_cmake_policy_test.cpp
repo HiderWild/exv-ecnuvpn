@@ -46,6 +46,10 @@ int main() {
   expect_contains("pkg_check_modules(WEBKITGTK");
   expect_contains("webkit2gtk-4.1");
   expect_contains("gtk+-3.0");
+  expect_contains("darwin_wkwebview_runtime_test");
+  expect_contains("tests/darwin_wkwebview_runtime_test.cpp");
+  expect_contains("linux_webkitgtk_runtime_test");
+  expect_contains("tests/linux_webkitgtk_runtime_test.cpp");
 
   return failures == 0 ? 0 : 1;
 }

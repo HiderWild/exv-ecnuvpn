@@ -923,6 +923,32 @@ if(WIN32)
     add_test(NAME win32_webview2_runtime_test COMMAND win32_webview2_runtime_test)
 endif()
 
+if(APPLE)
+    add_executable(darwin_wkwebview_runtime_test
+        tests/darwin_wkwebview_runtime_test.cpp
+        src/platform/darwin/ui_shell/wk_webview_host_darwin.mm
+    )
+
+    target_include_directories(darwin_wkwebview_runtime_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+
+    add_test(NAME darwin_wkwebview_runtime_test COMMAND darwin_wkwebview_runtime_test)
+endif()
+
+if(UNIX AND NOT APPLE)
+    add_executable(linux_webkitgtk_runtime_test
+        tests/linux_webkitgtk_runtime_test.cpp
+        src/platform/linux/ui_shell/webkitgtk_host_linux.cpp
+    )
+
+    target_include_directories(linux_webkitgtk_runtime_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+
+    add_test(NAME linux_webkitgtk_runtime_test COMMAND linux_webkitgtk_runtime_test)
+endif()
+
 set(EXV_UI_COMMON_SOURCES
     src/app/ui_shell/ui_shell_main.cpp
     src/app/ui_shell/ui_window.cpp
@@ -2233,6 +2259,16 @@ if(WIN32)
     list(APPEND _release_blocking_tests
         win32_webview2_runtime_test
         win32_platform_network_ops_test
+    )
+endif()
+if(APPLE)
+    list(APPEND _release_blocking_tests
+        darwin_wkwebview_runtime_test
+    )
+endif()
+if(UNIX AND NOT APPLE)
+    list(APPEND _release_blocking_tests
+        linux_webkitgtk_runtime_test
     )
 endif()
 set_property(TEST ${_release_blocking_tests} APPEND PROPERTY LABELS "release-blocking")
