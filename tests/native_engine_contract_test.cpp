@@ -1,4 +1,3 @@
-#include "core/config/config.hpp"
 #include "vpn_engine/native_engine.hpp"
 #include "vpn_engine/packet_device.hpp"
 #include "vpn_engine/protocol/production_transport.hpp"
@@ -1081,41 +1080,21 @@ int main() {
     ok = expect(dev.closed(), "mock close should update state") && ok;
   }
 
-  ecnuvpn::Config cfg;
-  cfg.vpn_engine = "native";
-  cfg.server = "https://vpn-ct.ecnu.edu.cn";
-  cfg.username = "alice";
-  cfg.useragent = "AnyConnect Win_x86_64 4.10.05095";
-  cfg.mtu = 1290;
-  cfg.routes = {"59.78.176.0/20"};
-  cfg.disable_dtls = true;
-  cfg.extra_args = {"--dump-http-traffic"};
-
-  ecnuvpn::vpn_engine::ValidationResult validation =
-      ecnuvpn::vpn_engine::validate_native_config(cfg);
-  ok = expect(!validation.ok,
-              "native engine should reject legacy OpenConnect extra_args") &&
-       ok;
-  ok = expect(validation.code == "unsupported_extra_args",
-              "native extra_args rejection should use a stable code") &&
-       ok;
-
-  cfg.extra_args.clear();
-  validation = ecnuvpn::vpn_engine::validate_native_config(cfg);
-  ok = expect(validation.ok, "native engine should accept v1 ECNU password config") &&
-       ok;
-
   ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg =
-      ecnuvpn::vpn_engine::make_native_config(cfg, MOCK_PASSWORD);
-  ok = expect(engine_cfg.server == cfg.server,
-              "native engine config should carry server") &&
+      engine_config();
+  ecnuvpn::vpn_engine::ValidationResult validation =
+      ecnuvpn::vpn_engine::validate_native_config(engine_cfg);
+  ok = expect(validation.ok,
+              "native engine should accept complete engine config") &&
        ok;
-  ok = expect(engine_cfg.password == MOCK_PASSWORD,
-              "native engine config should carry per-session password") &&
+
+  engine_cfg.password.clear();
+  validation = ecnuvpn::vpn_engine::validate_native_config(engine_cfg);
+  ok = expect(!validation.ok && validation.code == "config_invalid",
+              "native engine should reject engine config without password") &&
        ok;
-  ok = expect(engine_cfg.disable_dtls == true,
-              "native engine config forces disable_dtls=true (CSTP-only; user flag is for OpenConnect)") &&
-       ok;
+
+  engine_cfg = engine_config();
 
   ecnuvpn::vpn_engine::VpnEngineEvent event;
   event.type = "auth";

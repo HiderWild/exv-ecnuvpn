@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/config/config.hpp"
 #include "engine_event_bridge.hpp"
 #include "vpn_engine/engine.hpp"
 #include "vpn_engine/native_engine.hpp"

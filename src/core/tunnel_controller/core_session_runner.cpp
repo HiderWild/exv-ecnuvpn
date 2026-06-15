@@ -1,4 +1,5 @@
 #include "core/tunnel_controller/core_session_runner.hpp"
+#include "core/tunnel_controller/native_engine_config_mapper.hpp"
 
 namespace exv::core {
 
@@ -24,8 +25,11 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
 
     if (running_) return false;
 
-    // Build VpnEngineConfig from the application Config.
-    auto engine_config = ecnuvpn::vpn_engine::make_native_config(cfg, password);
+    // Build VpnEngineConfig from the application Config at the core boundary.
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+    auto config_result =
+        make_native_engine_config(cfg, password, &engine_config);
+    if (!config_result.ok) return false;
     // TunnelController owns helper/network reconnect, so the native engine must
     // report transport closure instead of reconnecting internally.
     engine_config.auto_reconnect = false;

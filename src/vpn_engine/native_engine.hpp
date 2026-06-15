@@ -1,6 +1,5 @@
 #pragma once
 
-#include "core/config/config.hpp"
 #include "vpn_engine/event_sink.hpp"
 #include "vpn_engine/engine.hpp"
 #include "vpn_engine/packet_device.hpp"
@@ -17,9 +16,7 @@
 namespace ecnuvpn {
 namespace vpn_engine {
 
-ValidationResult validate_native_config(const Config &cfg);
-VpnEngineConfig make_native_config(const Config &cfg,
-                                   const std::string &plaintext_password);
+ValidationResult validate_native_config(const VpnEngineConfig &cfg);
 nlohmann::json event_to_json(const VpnEngineEvent &event);
 nlohmann::json status_to_json(const VpnEngineStatus &status);
 

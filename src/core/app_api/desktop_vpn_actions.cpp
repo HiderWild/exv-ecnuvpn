@@ -9,6 +9,7 @@
 #include "core/connection/connection_attempt.hpp"
 #include "core/crypto/crypto.hpp"
 #include "core/rpc/desktop_rpc_adapter.hpp"
+#include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
 #include "common/diagnostics/logger.hpp"
@@ -19,7 +20,6 @@
 #include "platform/common/process_control.hpp"
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_paths.hpp"
-#include "vpn_engine/native_engine.hpp"
 
 #include <chrono>
 #include <string>
@@ -49,7 +49,7 @@ nlohmann::json preflight_connect(const Config &cfg,
   }
 
   if (cfg.vpn_engine == "native") {
-    auto native_validation = vpn_engine::validate_native_config(cfg);
+    auto native_validation = exv::core::validate_native_app_config(cfg);
     if (!native_validation.ok) {
       return error(native_validation.message, native_validation.code);
     }

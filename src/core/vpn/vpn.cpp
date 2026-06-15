@@ -1,12 +1,12 @@
 #include "core/vpn/vpn.hpp"
 #include "core/app_api/app_api.hpp"
 #include "core/config/config.hpp"
+#include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "helper/helper.hpp"
 #include "common/diagnostics/logger.hpp"
 #include "common/diagnostics/log_renderer.hpp"
 #include "runtime/runtime_context.hpp"
 #include "cli/console.hpp"
-#include "vpn_engine/native_engine.hpp"
 
 #include <iostream>
 
@@ -24,7 +24,7 @@ int start(const Config &cfg, int retry_limit) {
 
   if (cfg.vpn_engine == "native") {
     logger::info("VPN CLI: Validating native engine configuration");
-    auto validation = vpn_engine::validate_native_config(cfg);
+    auto validation = exv::core::validate_native_app_config(cfg);
     if (!validation.ok) {
       cli::print_error(validation.message);
       logger::error("VPN CLI: Native engine validation failed - code=" +

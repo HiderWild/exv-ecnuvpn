@@ -90,6 +90,7 @@ int main() {
   const auto cmake_lists = root / "CMakeLists.txt";
   const auto config_original_cpp =
       root / "src" / "core" / "config" / "config_original.cpp";
+  const auto vpn_engine_dir = root / "src" / "vpn_engine";
   bool ok = true;
 
   ok &= expect_exists(app_api_cpp);
@@ -186,6 +187,16 @@ int main() {
                      std::string::npos,
                  "CMakeLists.txt must not compile config_original.cpp");
   }
+
+  ok &= expect_tree_does_not_contain(
+      vpn_engine_dir, "#include \"core/",
+      "vpn_engine must not include higher-level core headers");
+  ok &= expect_tree_does_not_contain(
+      vpn_engine_dir, "#include <core/",
+      "vpn_engine must not include higher-level core headers");
+  ok &= expect_tree_does_not_contain(
+      vpn_engine_dir, "ecnuvpn::Config",
+      "vpn_engine must not depend on the app Config model");
 
   if (!ok) {
     std::cerr << "core_architecture_contract_test: FAILED\n";

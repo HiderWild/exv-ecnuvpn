@@ -76,6 +76,7 @@ set(EXV_CORE_SOURCES
     src/core/tunnel_controller/tunnel_controller_active.cpp
     src/core/tunnel_controller/timing.cpp
     src/core/tunnel_controller/core_error_mapper.cpp
+    src/core/tunnel_controller/native_engine_config_mapper.cpp
     src/core/tunnel_controller/reconnect_policy.cpp
     src/core/tunnel_controller/timer_scheduler.cpp
     src/core/rpc/app_rpc_dispatcher.cpp
@@ -1166,6 +1167,19 @@ target_include_directories(core_session_runner_test PRIVATE
 target_link_libraries(core_session_runner_test PRIVATE exv-core Threads::Threads ${EXV_PLATFORM_LIBS})
 
 add_test(NAME core_session_runner_test COMMAND core_session_runner_test)
+
+add_executable(native_engine_config_mapper_test
+    tests/native_engine_config_mapper_test.cpp
+)
+
+target_include_directories(native_engine_config_mapper_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(native_engine_config_mapper_test PRIVATE exv-core)
+
+add_test(NAME native_engine_config_mapper_test COMMAND native_engine_config_mapper_test)
 
 add_executable(tunnel_controller_state_machine_test
     tests/tunnel_controller_state_machine_test.cpp
