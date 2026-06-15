@@ -12,5 +12,6 @@ struct UiShellOptions {
 };
 
 UiShellOptions parse_ui_shell_options(int argc, char **argv);
+std::string validate_ui_shell_options(const UiShellOptions &options);
 
 } // namespace ecnuvpn::ui_shell

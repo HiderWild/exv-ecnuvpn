@@ -21,4 +21,19 @@ UiShellOptions parse_ui_shell_options(int argc, char **argv) {
   return options;
 }
 
+std::string validate_ui_shell_options(const UiShellOptions &options) {
+  if (options.exv_path.empty()) {
+    return "missing required --exv path";
+  }
+  if (options.renderer_dev_server_url.empty() &&
+      options.packaged_renderer_index.empty()) {
+    return "missing required renderer URL or index path";
+  }
+  if (!options.renderer_dev_server_url.empty() &&
+      !options.packaged_renderer_index.empty()) {
+    return "choose either --renderer-url or --renderer-index, not both";
+  }
+  return {};
+}
+
 } // namespace ecnuvpn::ui_shell

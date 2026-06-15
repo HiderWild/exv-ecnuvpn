@@ -33,6 +33,32 @@ int main() {
   assert(options.renderer_dev_server_url == "http://127.0.0.1:8288");
   assert(options.exv_path == "C:/app/bin/exv.exe");
   assert(options.enable_dev_tools);
+  const std::string valid_options_error = validate_ui_shell_options(options);
+  if (!valid_options_error.empty()) {
+    return 1;
+  }
+
+  UiShellOptions missing_exv;
+  missing_exv.renderer_dev_server_url = "http://127.0.0.1:8288";
+  if (validate_ui_shell_options(missing_exv) != "missing required --exv path") {
+    return 1;
+  }
+
+  UiShellOptions missing_renderer;
+  missing_renderer.exv_path = "C:/app/bin/exv.exe";
+  if (validate_ui_shell_options(missing_renderer) !=
+      "missing required renderer URL or index path") {
+    return 1;
+  }
+
+  UiShellOptions both_renderers;
+  both_renderers.renderer_dev_server_url = "http://127.0.0.1:8288";
+  both_renderers.packaged_renderer_index = "C:/app/dist/index.html";
+  both_renderers.exv_path = "C:/app/bin/exv.exe";
+  if (validate_ui_shell_options(both_renderers) !=
+      "choose either --renderer-url or --renderer-index, not both") {
+    return 1;
+  }
 
   bool invoked = false;
   const std::string accepted = handle_host_request(
