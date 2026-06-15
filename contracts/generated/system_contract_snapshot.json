@@ -533,6 +533,31 @@
         "reconnect"
       ]
     },
+    "utils": {
+      "boundary": {
+        "accepts": [
+          "pure string values",
+          "in-memory value transformations",
+          "deterministic formatting helpers"
+        ],
+        "emits": [
+          "pure return values",
+          "no OS side effects"
+        ],
+        "rejects": [
+          "filesystem access",
+          "process execution",
+          "privilege checks",
+          "runtime path ownership",
+          "terminal output",
+          "network interface inspection",
+          "platform-specific string conversion"
+        ]
+      },
+      "modules": [
+        "exv.utils.strings"
+      ]
+    },
     "vpn": {
       "actions": [
         "vpn.connect",
@@ -651,5 +676,5 @@
       ]
     }
   },
-  "version": "2026-06-15.config-helper-tunnel-contract.v1"
+  "version": "2026-06-15.config-helper-tunnel-utils-contract.v1"
 }

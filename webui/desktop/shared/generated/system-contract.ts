@@ -1,6 +1,6 @@
 // Generated from contracts/system.contract.json. Do not edit manually.
 
-export const CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-contract.v1" as const
+export const CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-utils-contract.v1" as const
 
 export const DESKTOP_RPC_REQUEST_FIELDS = [
   "id",

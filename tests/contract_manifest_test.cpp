@@ -129,6 +129,18 @@ bool file_contains_any(const std::filesystem::path &path,
   return false;
 }
 
+bool json_array_contains(const json &values, std::string_view expected) {
+  if (!values.is_array()) {
+    return false;
+  }
+  for (const auto &value : values) {
+    if (value.is_string() && value.get<std::string>() == expected) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool private_controller_impl_include_leaks(const std::filesystem::path &root) {
   for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
     if (!entry.is_regular_file() || !is_source_file(entry.path())) {
@@ -384,6 +396,23 @@ int main() {
        ok;
   ok = expect(manifest.at("modules").contains("tunnel_controller"),
               "manifest must declare modules.tunnel_controller") &&
+       ok;
+  ok = expect(manifest.at("modules").contains("utils"),
+              "manifest must declare modules.utils") &&
+       ok;
+  if (manifest.at("modules").contains("utils")) {
+    const auto &utils = manifest.at("modules").at("utils");
+    ok = expect(json_array_contains(utils.at("boundary").at("accepts"),
+                                    "pure string values"),
+                "utils boundary must accept only pure values") &&
+         ok;
+    ok = expect(json_array_contains(utils.at("boundary").at("rejects"),
+                                    "filesystem access"),
+                "utils boundary must reject filesystem access") &&
+         ok;
+  }
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "utils_platform"),
+              "utils must not grow a platform subdirectory") &&
        ok;
 
   if (ok) {

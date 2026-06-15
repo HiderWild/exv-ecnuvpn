@@ -8,7 +8,7 @@
 
 namespace exv::contracts::generated {
 
-inline constexpr std::string_view CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-contract.v1";
+inline constexpr std::string_view CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-utils-contract.v1";
 
 inline constexpr std::array<std::string_view, 3> DESKTOP_RPC_REQUEST_FIELDS = {{"id", "action", "payload"}};
 inline constexpr std::array<std::string_view, 5> DESKTOP_RPC_RESPONSE_FIELDS = {{"ok", "data", "code", "message", "event"}};
