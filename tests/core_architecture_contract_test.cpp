@@ -68,6 +68,22 @@ int main() {
   ok &= expect_exists(root / "src" / "core" / "config" /
                       "config_manager.cpp");
   ok &= expect_exists(root / "src" / "vpn_engine" / "native_engine.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_json.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_json.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_runtime_context.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_runtime_context.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_tunnel_host.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_tunnel_host.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_status_presenter.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_status_presenter.cpp");
 
   if (std::filesystem::exists(app_api_cpp)) {
     const std::string app_api = read_file(app_api_cpp);

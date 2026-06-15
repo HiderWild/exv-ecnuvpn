@@ -94,7 +94,8 @@ std::string app_api_source_text() {
 #else
   const auto app_api_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" /
                            "core" / "app_api";
-  const char *files[] = {"app_api.cpp", "desktop_action_registry.cpp"};
+  const char *files[] = {"app_api.cpp", "desktop_action_registry.cpp",
+                         "desktop_tunnel_host.cpp"};
   std::string source;
   for (const char *file : files) {
     source += "\n// ---- ";
@@ -319,8 +320,8 @@ bool app_api_activates_core_owned_native_mode() {
 #else
   const std::string source = app_api_source_text();
 
-  const auto create_controller = source.find(
-      "h.controller = std::make_shared<exv::core::TunnelController>");
+  const auto create_controller =
+      source.find("std::make_shared<exv::core::TunnelController>");
   const auto mark_active =
       source.find("exv::core::set_tunnel_controller_active(true)",
                   create_controller == std::string::npos ? 0 : create_controller);

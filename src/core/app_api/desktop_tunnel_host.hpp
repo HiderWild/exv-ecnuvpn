@@ -1,0 +1,20 @@
+#pragma once
+
+#include "core/tunnel_controller/tunnel_controller_fwd.hpp"
+
+#include <memory>
+#include <string>
+
+namespace ecnuvpn {
+namespace app_api {
+
+std::string helper_binary_next_to_exv();
+std::shared_ptr<exv::core::TunnelController>
+ensure_tunnel_controller(const std::string &endpoint_override = "");
+std::shared_ptr<exv::core::TunnelController>
+get_tunnel_controller_if_exists();
+void reset_tunnel_controller();
+std::string tunnel_controller_init_error();
+
+} // namespace app_api
+} // namespace ecnuvpn
