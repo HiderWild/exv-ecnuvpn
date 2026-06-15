@@ -19,5 +19,7 @@ UiShellOptions load_packaged_ui_shell_options(
 UiShellOptions resolve_ui_shell_options(
     int argc, char **argv, const std::filesystem::path &executable_path);
 std::string validate_ui_shell_options(const UiShellOptions &options);
+std::string validate_packaged_ui_shell_options(
+    const UiShellOptions &options, const std::filesystem::path &package_root);
 
 } // namespace ecnuvpn::ui_shell

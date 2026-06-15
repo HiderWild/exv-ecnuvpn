@@ -25,9 +25,46 @@ std::string resolve_sidecar_path(const std::filesystem::path &package_root,
                                  const std::string &value) {
   const std::filesystem::path path(value);
   if (path.is_absolute()) {
-    return path.string();
+    return path.lexically_normal().string();
   }
   return (package_root / path).lexically_normal().string();
+}
+
+bool is_inside_or_equal(const std::filesystem::path &path,
+                        const std::filesystem::path &root) {
+  const auto normalized_path = path.lexically_normal();
+  const auto normalized_root = root.lexically_normal();
+  if (normalized_path == normalized_root) {
+    return true;
+  }
+  for (auto parent = normalized_path.parent_path(); !parent.empty();
+       parent = parent.parent_path()) {
+    if (parent == normalized_root) {
+      return true;
+    }
+    if (parent == parent.parent_path()) {
+      break;
+    }
+  }
+  return false;
+}
+
+std::string validate_packaged_file(const std::string &value,
+                                   const std::filesystem::path &package_root,
+                                   std::string_view label) {
+  if (value.empty()) {
+    return {};
+  }
+  const std::filesystem::path path(value);
+  if (!is_inside_or_equal(path, package_root)) {
+    return std::string("packaged ") + std::string(label) +
+           " path escapes package root";
+  }
+  if (!std::filesystem::exists(path)) {
+    return std::string("packaged ") + std::string(label) +
+           " path does not exist";
+  }
+  return {};
 }
 
 } // namespace
@@ -95,9 +132,11 @@ UiShellOptions resolve_ui_shell_options(
     return options;
   }
 
+  const std::filesystem::path package_root = executable_path.parent_path();
   UiShellOptions packaged_options =
       load_packaged_ui_shell_options(executable_path);
-  if (validate_ui_shell_options(packaged_options).empty()) {
+  if (validate_ui_shell_options(packaged_options).empty() &&
+      validate_packaged_ui_shell_options(packaged_options, package_root).empty()) {
     return packaged_options;
   }
   return options;
@@ -116,6 +155,17 @@ std::string validate_ui_shell_options(const UiShellOptions &options) {
     return "choose either --renderer-url or --renderer-index, not both";
   }
   return {};
+}
+
+std::string validate_packaged_ui_shell_options(
+    const UiShellOptions &options, const std::filesystem::path &package_root) {
+  std::string error = validate_packaged_file(options.exv_path, package_root,
+                                             "--exv");
+  if (!error.empty()) {
+    return error;
+  }
+  return validate_packaged_file(options.packaged_renderer_index, package_root,
+                                "--renderer-index");
 }
 
 } // namespace ecnuvpn::ui_shell

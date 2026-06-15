@@ -67,6 +67,45 @@ int main() {
     return 1;
   }
 
+  const fs::path bin_dir = package_root / "bin";
+  const fs::path webui_dir = package_root / "webui";
+  fs::create_directories(bin_dir);
+  fs::create_directories(webui_dir);
+  std::ofstream(bin_dir / "exv.exe").close();
+  std::ofstream(webui_dir / "index.html").close();
+  if (!validate_packaged_ui_shell_options(sidecar_options, package_root).empty()) {
+    return 1;
+  }
+
+  {
+    std::ofstream sidecar(args_file, std::ios::trunc);
+    sidecar << "--exv\n"
+            << "../outside-exv.exe\n"
+            << "--renderer-index\n"
+            << "webui/index.html\n";
+  }
+  UiShellOptions escaping_sidecar_options = parse_ui_shell_args_file(args_file);
+  if (validate_packaged_ui_shell_options(escaping_sidecar_options, package_root) !=
+      "packaged --exv path escapes package root") {
+    return 1;
+  }
+
+  fs::remove(bin_dir / "exv.exe");
+  {
+    std::ofstream sidecar(args_file, std::ios::trunc);
+    sidecar << "--exv\n"
+            << "bin/exv.exe\n"
+            << "--renderer-index\n"
+            << "webui/index.html\n";
+  }
+  UiShellOptions missing_target_sidecar_options = parse_ui_shell_args_file(args_file);
+  if (validate_packaged_ui_shell_options(missing_target_sidecar_options,
+                                         package_root) !=
+      "packaged --exv path does not exist") {
+    return 1;
+  }
+  std::ofstream(bin_dir / "exv.exe").close();
+
   fs::remove(args_file);
   UiShellOptions missing_sidecar_options =
       load_packaged_ui_shell_options(package_root / "exv-ui.exe");

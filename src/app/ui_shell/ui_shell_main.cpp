@@ -77,6 +77,7 @@ int main(int argc, char **argv) {
   ecnuvpn::ui_shell::UiWindowConfig config{
       ecnuvpn::ui_shell::resolve_renderer_assets(
           options.renderer_dev_server_url, options.packaged_renderer_index),
+      options.exv_path,
       options.enable_dev_tools,
   };
 

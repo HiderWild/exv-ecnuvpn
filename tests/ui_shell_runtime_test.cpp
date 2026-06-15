@@ -104,6 +104,7 @@ int main() {
 
   UiWindowConfig config;
   config.renderer = resolve_renderer_assets("http://127.0.0.1:8288", "");
+  config.exv_path = "C:/app/bin/exv.exe";
   config.enable_dev_tools = true;
 
   const int exit_code =
@@ -118,6 +119,9 @@ int main() {
        ok;
   ok = expect(window.observed_config.renderer.location == "http://127.0.0.1:8288",
               "runtime should pass renderer config to window") &&
+       ok;
+  ok = expect(window.observed_config.exv_path == "C:/app/bin/exv.exe",
+              "runtime should pass exv path to window") &&
        ok;
   ok = expect(window.observed_config.enable_dev_tools,
               "runtime should pass devtools flag to window") &&

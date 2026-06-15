@@ -11,6 +11,7 @@ using HostMessageHandler = std::function<std::string(const std::string &)>;
 
 struct UiWindowConfig {
   RendererAssets renderer;
+  std::string exv_path;
   bool enable_dev_tools = false;
 };
 
