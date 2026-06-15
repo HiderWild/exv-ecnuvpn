@@ -8,7 +8,7 @@
 
 ```
 ECNU-VPN/
-├── CMakeLists.txt              # C++17 构建，注入版本号 + 嵌入 WebUI 资产
+├── CMakeLists.txt              # C++20 构建，注入版本号 + 嵌入 WebUI 资产
 ├── .gitignore
 ├── scripts/
 │   └── embed_assets.py         # 将 WebUI dist 编译为 C++ header
@@ -22,18 +22,16 @@ ECNU-VPN/
 │   ├── src/                    # SPA 源码
 │   └── dist/                   # 构建产物（嵌入到 C++ binary）
 └── src/
-    ├── main.cpp                # CLI 入口 + WebUI 启动
-    ├── config.hpp/cpp          # 配置管理（含 WebUI 字段）
-    ├── config_api.hpp/cpp      # REST API 处理
-    ├── config_manager.hpp/cpp  # 运行时配置读写
-    ├── crypto.hpp/cpp          # AES-256-CBC 加密 + 密钥管理
-    ├── helper.hpp/cpp          # launchd root helper / IPC / service 管理
-    ├── vpn.hpp/cpp             # VPN 控制（start/stop/status）
-    ├── tunnel.hpp/cpp          # tunnel.sh 动态生成
-    ├── logger.hpp/cpp          # 日志系统
-    ├── sse_broadcaster.hpp/cpp # SSE 实时推送（日志 + 状态）
-    ├── webui.hpp/cpp           # HTTP 服务器 + REST + SSE 路由
-    └── utils.hpp/cpp           # 工具函数
+    ├── main.cpp                # CLI 入口
+    ├── cli/                    # 终端输出、ANSI 展示与 CLI 辅助
+    ├── core/                   # 配置、RPC、VPN 控制、加密、日志等业务层
+    ├── helper/                 # helper 协议、会话、运行时与清理策略
+    ├── platform/               # 文件、路径、进程、权限、网络等平台能力
+    ├── runtime/                # 运行上下文
+    ├── utils/                  # 纯值工具；当前包含 strings 与 C++20 module 试点
+    ├── vpn_engine/             # native VPN engine 与协议栈
+    ├── tunnel.hpp/cpp          # tunnel 脚本上下文与生成入口
+    └── virtual_network.hpp/cpp # 虚拟网络检测与配置入口
 ```
 
 ---
@@ -42,7 +40,9 @@ ECNU-VPN/
 
 ### CMakeLists.txt
 
-- C++17 标准 + pthread（cpp-httplib 需要）
+- C++20 标准 + pthread（cpp-httplib 需要）
+- CMake 3.28+ and a Ninja/Visual Studio generator are required for the helper
+  protocol named-module smoke test.
 - 通过 `target_compile_definitions` 注入 `ECNUVPN_VERSION` 和 `EMBEDDED_ASSETS`
 - 源文件：`src/*.cpp`（12 个文件）
 - 依赖：`include/nlohmann/json.hpp`、`include/httplib.h`（header-only）
@@ -50,7 +50,7 @@ ECNU-VPN/
 - 自定义 target `embed_assets`：运行 `scripts/embed_assets.py` 将 `webui/dist/` 编译为 `src/webui_assets.hpp`
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.ncpu)
 sudo cmake --install build        # 安装到 /usr/local/bin
 sudo exv service install          # 安装 launchd root helper
@@ -154,21 +154,20 @@ int helper::install_service(const std::string& executable_path);
 int helper::uninstall_service();
 int helper::show_service_status();
 int helper::daemon_main();
-int helper::worker_main(const std::string& request_path);
 ```
 
 设计要点：
 - 安装 helper 时仅需一次 sudo
 - 日常 `exv` / `exv stop` 以普通用户运行
 - Socket `/var/run/exv-helper.sock` 权限 root:staff 0660，所有 macOS 用户可达
-- 明文密码仅在用户侧解密，通过 root-only 临时文件传给 worker
-- `send_request()` 带 select() 超时（默认 15s，start 用 120s）
+- helper 不接收密码、cookie 或 token 字段
+- `send_request()` 带超时；helper 首包必须是 `Hello`
 
 运行模型：
 1. `sudo exv service install` → 写 plist + `launchctl bootstrap`
-2. launchd 以 root 拉起 `exv __helper-daemon`
-3. 用户 `exv` → connect socket → JSON 请求
-4. daemon fork `exv __helper-exec <request-file>` → worker 调用 `vpn::start_with_password()`
+2. launchd 以 root 拉起 `exv-helper --service`
+3. 用户 `exv` → connect socket → `Hello` → helper protocol request
+4. daemon 在当前 helper 进程内处理无凭据的特权网络请求
 
 ---
 
@@ -248,11 +247,24 @@ void logger::show_logs(int lines = 50);
 
 ---
 
-### utils — 工具函数
+### utils — 纯值工具
 
-**文件**：`src/utils.hpp` / `src/utils.cpp`
+**文件**：`src/utils/strings.hpp` / `src/utils/strings.cpp`
 
-彩色输出、路径管理、文件 I/O、系统检查、流量统计（`get_interface_traffic`）等。
+`utils` 只承载无副作用、无平台依赖的纯值工具。当前公开能力是字符串处理：
+`trim`、`split_lines`、`join`、`starts_with`、`ends_with`、`to_lower_ascii`。
+
+对应 C++20 named module 试点为 `exv.utils.strings`，模块入口位于
+`src/utils/modules/strings.cppm`。
+
+平台相关能力不属于 `utils`：
+
+- 文件 I/O：`src/platform/common/file_system.hpp`
+- 路径、配置目录、运行时 owner：`src/platform/common/runtime_paths.hpp`
+- 命令执行、shell quote、root 检查：`src/platform/common/process_utils.hpp`
+- bundled runtime / OpenConnect / Wintun 发现：`src/platform/common/runtime_discovery.hpp`
+- 网卡流量统计：`src/platform/common/interface_stats.hpp`
+- 终端彩色输出：`src/cli/console.hpp`
 
 ---
 

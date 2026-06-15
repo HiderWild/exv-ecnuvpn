@@ -26,7 +26,7 @@ constexpr std::size_t kMaximumUtunFrameSize =
 constexpr int kDefaultMtu = 1290;
 constexpr int kUtunIoPollTimeoutMs = 100;
 constexpr int kMaximumTransientWriteRetries = 16;
-
+// Begin inlined from platform/darwin/native_packet_device_helpers include-unit
 vpn_engine::ValidationResult invalid(std::string code, std::string message) {
   vpn_engine::ValidationResult result;
   result.ok = false;
@@ -165,7 +165,8 @@ route_options_from_utun(const NativeUtunMetadata &metadata) {
       metadata.mtu > 0 ? metadata.mtu : static_cast<int>(kDefaultMtu);
   return options;
 }
-
+// End inlined from platform/darwin/native_packet_device_helpers include-unit
+// Begin inlined from platform/darwin/native_packet_device_sessions include-unit
 class RealUtunPacketSession final : public NativePacketDeviceUtunSession {
 public:
   explicit RealUtunPacketSession(const vpn_engine::TunnelMetadata &metadata)
@@ -338,7 +339,8 @@ public:
 private:
   NativeDarwinRouteConfig config_;
 };
-
+// End inlined from platform/darwin/native_packet_device_sessions include-unit
+// Begin inlined from platform/darwin/native_packet_device_errors include-unit
 vpn_engine::ValidationResult
 utun_start_failure_result(const NativeUtunStartResult &start) {
   return invalid(std::string("native_utun_") +
@@ -459,7 +461,8 @@ NativePacketDeviceDependencies default_native_packet_device_dependencies() {
   };
   return deps;
 }
-
+// End inlined from platform/darwin/native_packet_device_errors include-unit
+// Begin inlined from platform/darwin/native_packet_device_public include-unit
 NativePacketDevice::NativePacketDevice()
     : NativePacketDevice(default_native_packet_device_dependencies()) {}
 
@@ -631,6 +634,6 @@ void NativePacketDevice::close() { static_cast<void>(close_resources()); }
 std::unique_ptr<vpn_engine::PacketDevice> create_native_packet_device() {
   return std::unique_ptr<vpn_engine::PacketDevice>(new NativePacketDevice());
 }
-
+// End inlined from platform/darwin/native_packet_device_public include-unit
 } // namespace platform
 } // namespace ecnuvpn

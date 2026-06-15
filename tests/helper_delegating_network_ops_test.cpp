@@ -155,11 +155,21 @@ bool test_apply_tunnel_config_success() {
     config.dns.servers.push_back("8.8.8.8");
     config.dns.servers.push_back("8.8.4.4");
     config.dns.search_domain = "ecnu.edu.cn";
+    config.server_bypass_ips = {"192.0.2.10", "192.0.2.11/32"};
 
     bool result = ops.apply_tunnel_config(device, config);
 
     bool ok = true;
     ok = expect(result, "6: apply_tunnel_config should succeed") && ok;
+    auto requests = helper->apply_requests();
+    ok = expect(requests.size() == 1,
+                "6: helper should receive exactly one apply request") && ok;
+    if (!requests.empty()) {
+        ok = expect(requests[0].config.server_bypass_ips.size() == 2 &&
+                        requests[0].config.server_bypass_ips[0] == "192.0.2.10" &&
+                        requests[0].config.server_bypass_ips[1] == "192.0.2.11/32",
+                    "6: helper request should preserve all server bypass IPs") && ok;
+    }
     return ok;
 }
 

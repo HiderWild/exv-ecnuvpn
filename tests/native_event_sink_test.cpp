@@ -62,8 +62,8 @@ int main() {
   ecnuvpn::vpn_engine::JsonLinesEventSink sink(path);
 
   // Round-trip exact UTF-8 text (no console codepage dependency).
-  const std::string expected = u8"连接成功";
   const std::string expected_bytes = "\xE8\xBF\x9E\xE6\x8E\xA5\xE6\x88\x90\xE5\x8A\x9F";
+  const std::string expected = expected_bytes;
   ok = expect(expected == expected_bytes,
               "expected must be UTF-8 bytes for 连接成功") &&
        ok;

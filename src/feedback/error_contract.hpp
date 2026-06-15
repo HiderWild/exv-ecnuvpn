@@ -33,7 +33,7 @@ namespace error_codes {
 
     // Helper errors
     constexpr const char* HELPER_UNAVAILABLE = "helper_unavailable";
-    constexpr const char* HELPER_VERSION_MISMATCH = "helper_version_mismatch";
+    constexpr const char* HELPER_PROTOCOL_REJECTED = "helper_protocol_rejected";
     constexpr const char* HELPER_TIMEOUT = "helper_timeout";
 
     // OS errors

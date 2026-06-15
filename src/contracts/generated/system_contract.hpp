@@ -1,0 +1,139 @@
+// Generated from contracts/system.contract.json. Do not edit manually.
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+namespace exv::contracts::generated {
+
+inline constexpr std::string_view CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-utils-contract.v1";
+
+inline constexpr std::array<std::string_view, 3> DESKTOP_RPC_REQUEST_FIELDS = {{"id", "action", "payload"}};
+inline constexpr std::array<std::string_view, 5> DESKTOP_RPC_RESPONSE_FIELDS = {{"ok", "data", "code", "message", "event"}};
+inline constexpr std::array<std::string_view, 3> CORE_RPC_REQUEST_FIELDS = {{"action", "payload_json", "request_id"}};
+inline constexpr std::array<std::string_view, 5> CORE_RPC_RESPONSE_FIELDS = {{"success", "payload_json", "error_code", "error_message", "request_id"}};
+
+inline constexpr std::array<std::string_view, 20> DESKTOP_RPC_ACTIONS = {{"status.get", "vpn.connect", "vpn.disconnect", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "routes.list", "routes.add", "routes.remove", "routes.reset", "service.status", "helper.status", "runtime.status", "drivers.status", "drivers.install", "service.install", "service.uninstall", "logs.list"}};
+inline constexpr std::array<std::string_view, 6> DESKTOP_RPC_EVENT_TYPES = {{"log", "status", "heartbeat", "service-progress", "close-request", "core-crashed"}};
+inline constexpr std::array<std::string_view, 18> DESKTOP_RPC_ERROR_CODES = {{"helper_unavailable", "service_not_installed", "service_installed_not_running", "service_start_failed", "oneshot_not_supported", "oneshot_elevation_denied", "helper_rpc_failed", "auth_failed", "tls_verify_failed", "wintun_missing", "utun_permission_denied", "unsupported_dtls", "permission_denied", "network_unreachable", "user_cancelled", "invalid_request", "connection_failed", "vpn_start_failed"}};
+inline constexpr std::array<std::string_view, 7> CONFIG_ACTIONS = {{"config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "config.profile.get", "config.profile.save"}};
+inline constexpr std::array<std::string_view, 4> CONFIG_LEGACY_ALIASES = {{"config.get", "config.save", "config.get_profile", "config.save_profile"}};
+inline constexpr std::array<std::string_view, 17> HELPER_OPS = {{"Hello", "StartSession", "PrepareTunnelDevice", "ApplyTunnelConfig", "Heartbeat", "Cleanup", "GetSnapshot", "Shutdown", "Inspect", "AcquireCoreLease", "KeepAlive", "ReleaseCoreLease", "InstallService", "UninstallService", "ExportCleanupLease", "HandoffSession", "FinalizeHandoff"}};
+inline constexpr std::array<std::string_view, 11> TUNNEL_PHASES = {{"Idle", "PreparingHelper", "Authenticating", "ConnectingCstp", "ApplyingNetworkConfig", "OpeningPacketDevice", "Connected", "Reconnecting", "Disconnecting", "CleaningUp", "Failed"}};
+inline constexpr std::array<std::string_view, 16> TUNNEL_EVENTS = {{"UserConnect", "UserDisconnect", "SetAutoReconnect", "HelperReady", "AuthSucceeded", "AuthFailed", "CstpConnected", "NetworkConfigApplied", "PacketLoopStarted", "TransportClosed", "PacketDeviceFailed", "HelperLost", "LeaseExpired", "ReconnectTimerFired", "CleanupSucceeded", "CleanupFailed"}};
+inline constexpr std::array<std::string_view, 8> TUNNEL_DISCONNECT_REASONS = {{"UserRequested", "AuthFailed", "CertError", "TransportClosed", "HelperLost", "PacketDeviceFailed", "NetworkConfigFailed", "LeaseExpired"}};
+inline constexpr std::array<std::string_view, 8> TUNNEL_ERROR_DOMAINS = {{"transport", "auth", "helper", "os.route", "os.dns", "packet", "config", "native"}};
+inline constexpr std::array<std::string_view, 10> TUNNEL_STATUS_FIELDS = {{"phase", "desired_connected", "auto_reconnect", "helper_mode", "helper_status", "network_ready", "server", "interface_name", "last_error", "reconnect"}};
+inline constexpr std::array<std::string_view, 13> SRC_ALLOWED_TOP_LEVEL_DIRS = {{"app", "base", "cli", "common", "contracts", "core", "feedback", "helper", "observability", "platform", "runtime", "utils", "vpn_engine"}};
+inline constexpr std::array<std::string_view, 12> SRC_FORBIDDEN_PATTERNS = {{"src/*.hpp", "src/*.cpp", "src/core_api", "*.inc.cpp", "#include \"*.inc.cpp\"", "src/webui_assets.hpp", "platform include logger.hpp", "platform include vpn.hpp", "platform include tunnel.hpp", "platform include openconnect_log.hpp", "platform include virtual_network.hpp", "platform include core/*"}};
+inline constexpr std::array<std::string_view, 14> HELPER_FORBIDDEN_CREDENTIAL_FIELDS = {{"password", "passwd", "cookie", "token", "secret", "credential", "auth_key", "auth_token", "session_cookie", "webvpn_cookie", "csrf_token", "bearer_token", "api_key", "apikey"}};
+
+struct HelperOpContract {
+    std::string_view name;
+    std::uint32_t code;
+    bool requires_session;
+};
+
+inline constexpr std::array<HelperOpContract, 17> HELPER_OP_CONTRACTS = {{
+    {"Hello", 1, false},
+    {"StartSession", 2, false},
+    {"PrepareTunnelDevice", 3, true},
+    {"ApplyTunnelConfig", 4, true},
+    {"Heartbeat", 5, true},
+    {"Cleanup", 6, true},
+    {"GetSnapshot", 7, false},
+    {"Shutdown", 8, true},
+    {"Inspect", 9, false},
+    {"AcquireCoreLease", 10, false},
+    {"KeepAlive", 11, false},
+    {"ReleaseCoreLease", 12, false},
+    {"InstallService", 13, false},
+    {"UninstallService", 14, false},
+    {"ExportCleanupLease", 15, false},
+    {"HandoffSession", 16, false},
+    {"FinalizeHandoff", 17, false},
+}};
+
+struct ConfigAlias {
+    std::string_view alias;
+    std::string_view target;
+};
+
+inline constexpr std::array<ConfigAlias, 4> CONFIG_ALIASES = {{
+    {"config.get", "config.getSettings"},
+    {"config.save", "config.saveSettings"},
+    {"config.get_profile", "config.profile.get"},
+    {"config.save_profile", "config.profile.save"},
+}};
+
+struct TunnelPhaseContract {
+    std::string_view name;
+    std::string_view wire_name;
+    bool running;
+    bool connected;
+    bool network_ready;
+};
+
+inline constexpr std::array<TunnelPhaseContract, 11> TUNNEL_PHASE_CONTRACTS = {{
+    {"Idle", "idle", false, false, false},
+    {"PreparingHelper", "preparing_helper", true, false, false},
+    {"Authenticating", "authenticating", true, false, false},
+    {"ConnectingCstp", "connecting_cstp", true, false, false},
+    {"ApplyingNetworkConfig", "applying_network_config", true, false, false},
+    {"OpeningPacketDevice", "opening_packet_device", true, false, false},
+    {"Connected", "connected", true, true, true},
+    {"Reconnecting", "reconnecting", true, false, false},
+    {"Disconnecting", "disconnecting", true, false, false},
+    {"CleaningUp", "cleaning_up", true, false, false},
+    {"Failed", "failed", false, false, false},
+}};
+
+template <std::size_t N>
+constexpr bool contains(const std::array<std::string_view, N>& values, std::string_view value) {
+    for (const auto item : values) {
+        if (item == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr bool is_desktop_rpc_action(std::string_view action) {
+    return contains(DESKTOP_RPC_ACTIONS, action);
+}
+
+constexpr bool is_config_action(std::string_view action) {
+    return contains(CONFIG_ACTIONS, action);
+}
+
+constexpr bool is_config_alias(std::string_view alias) {
+    return contains(CONFIG_LEGACY_ALIASES, alias);
+}
+
+constexpr bool is_helper_op(std::string_view op) {
+    return contains(HELPER_OPS, op);
+}
+
+constexpr bool is_tunnel_phase(std::string_view phase) {
+    return contains(TUNNEL_PHASES, phase);
+}
+
+constexpr bool is_tunnel_event(std::string_view event) {
+    return contains(TUNNEL_EVENTS, event);
+}
+
+constexpr bool is_tunnel_disconnect_reason(std::string_view reason) {
+    return contains(TUNNEL_DISCONNECT_REASONS, reason);
+}
+
+constexpr bool is_tunnel_error_domain(std::string_view domain) {
+    return contains(TUNNEL_ERROR_DOMAINS, domain);
+}
+
+constexpr bool is_helper_forbidden_credential_field(std::string_view field) {
+    return contains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, field);
+}
+
+} // namespace exv::contracts::generated

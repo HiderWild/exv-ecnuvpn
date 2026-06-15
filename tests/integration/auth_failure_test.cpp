@@ -3,10 +3,10 @@
 // Verifies that auth failures are treated as non-recoverable and do NOT
 // trigger reconnection attempts.
 
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
-#include "core/tunnel_events.hpp"
-#include "core/reconnect_policy.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_events.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
 #include "support/fake_helper.hpp"
 
 #include <iostream>
@@ -267,24 +267,6 @@ int main() {
         auto resp2 = helper->start_session(req);
         ok = expect(!resp2.session_id.value.empty(),
                     "start_session after reset should succeed") && ok;
-    }
-
-    // === Test: verify FakeHelper version mismatch mode ===
-    {
-        auto helper = std::make_shared<exv::test::FakeHelper>();
-        helper->connect();
-
-        helper->set_version_mismatch(true);
-        exv::helper::HelloRequest req;
-        auto resp = helper->hello(req);
-        ok = expect(resp.server_version != exv::helper::PROTOCOL_VERSION,
-                    "version mismatch should return different protocol version") && ok;
-
-        // Reset and verify normal version
-        helper->set_version_mismatch(false);
-        auto resp2 = helper->hello(req);
-        ok = expect(resp2.server_version == exv::helper::PROTOCOL_VERSION,
-                    "after reset, should return correct protocol version") && ok;
     }
 
     if (ok) {

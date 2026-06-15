@@ -1,5 +1,9 @@
-#include "utils.hpp"
-#include "vpn.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
+#include "core/vpn/vpn.hpp"
 #include "vpn_engine/native_session_store.hpp"
 
 #include <filesystem>
@@ -176,16 +180,16 @@ int main() {
   fs::remove_all(temp_root);
   fs::create_directories(temp_root);
 
-  ecnuvpn::utils::set_runtime_path_override(temp_root.string(),
+  ecnuvpn::platform::set_runtime_path_override(temp_root.string(),
                                             temp_root.string());
 
   const auto empty_snapshot = ecnuvpn::vpn::read_runtime_status_snapshot();
 
-  ecnuvpn::utils::write_file(ecnuvpn::utils::get_pid_path(),
+  ecnuvpn::platform::write_file(ecnuvpn::platform::get_pid_path(),
                              std::to_string(current_process_id()));
-  ecnuvpn::utils::write_file(ecnuvpn::utils::get_supervisor_pid_path(),
+  ecnuvpn::platform::write_file(ecnuvpn::platform::get_supervisor_pid_path(),
                              std::to_string(current_process_id()));
-  ecnuvpn::utils::write_file(ecnuvpn::utils::get_route_ready_path(),
+  ecnuvpn::platform::write_file(ecnuvpn::platform::get_route_ready_path(),
                              "utun9\n10.0.0.8\n");
 
   const auto snapshot = ecnuvpn::vpn::read_runtime_status_snapshot();
@@ -204,11 +208,11 @@ int main() {
   ok = expect(process.pid > 0, "dummy process should start") && ok;
 
   if (process.pid > 0) {
-    ecnuvpn::utils::write_file(ecnuvpn::utils::get_pid_path(),
+    ecnuvpn::platform::write_file(ecnuvpn::platform::get_pid_path(),
                                std::to_string(process.pid));
-    ecnuvpn::utils::write_file(ecnuvpn::utils::get_supervisor_pid_path(),
+    ecnuvpn::platform::write_file(ecnuvpn::platform::get_supervisor_pid_path(),
                                std::to_string(process.pid));
-    ecnuvpn::utils::write_file(ecnuvpn::utils::get_route_ready_path(),
+    ecnuvpn::platform::write_file(ecnuvpn::platform::get_route_ready_path(),
                                "utun11\n10.0.0.9\n");
 
     const auto live_dummy_snapshot =
@@ -326,7 +330,7 @@ int main() {
        ok;
 
   ecnuvpn::vpn_engine::clear_native_session_state(temp_root.string());
-  write_text(ecnuvpn::utils::get_route_ready_path(), "utun-marker\n10.0.0.99\n");
+  write_text(ecnuvpn::platform::get_route_ready_path(), "utun-marker\n10.0.0.99\n");
   const auto native_marker_only =
       ecnuvpn::vpn::read_runtime_status_snapshot(native_cfg, native_probe);
   ok = expect(!native_marker_only.running,
@@ -346,9 +350,9 @@ int main() {
     return current_process_id();
   };
   legacy_probe.interfaces_output = []() { return std::string("legacy-ifaces"); };
-  std::filesystem::remove(ecnuvpn::utils::get_pid_path());
-  std::filesystem::remove(ecnuvpn::utils::get_supervisor_pid_path());
-  write_text(ecnuvpn::utils::get_route_ready_path(), "utun-legacy\n10.0.0.7\n");
+  std::filesystem::remove(ecnuvpn::platform::get_pid_path());
+  std::filesystem::remove(ecnuvpn::platform::get_supervisor_pid_path());
+  write_text(ecnuvpn::platform::get_route_ready_path(), "utun-legacy\n10.0.0.7\n");
 
   const auto legacy_snapshot =
       ecnuvpn::vpn::read_runtime_status_snapshot(legacy_cfg, legacy_probe);
@@ -368,7 +372,7 @@ int main() {
               "legacy runtime snapshot should call OpenConnect pid fallback") &&
        ok;
 
-  ecnuvpn::utils::clear_runtime_path_override();
+  ecnuvpn::platform::clear_runtime_path_override();
   cleanup_dummy_process(&process);
   fs::remove_all(temp_root);
 

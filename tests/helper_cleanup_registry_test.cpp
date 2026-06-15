@@ -1,11 +1,13 @@
 // Tests for CleanupRegistry: resource tracking, persistence.
 
-#include "helper_runtime/cleanup_registry.hpp"
-#include "helper_common/helper_messages.hpp"
+#include "helper/runtime/cleanup_registry.hpp"
+#include "helper/common/helper_messages.hpp"
 
 #include <iostream>
 #include <string>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,6 +27,13 @@ int current_process_id() {
 #else
     return static_cast<int>(getpid());
 #endif
+}
+
+std::string read_file(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
 }
 
 } // namespace
@@ -98,6 +107,18 @@ int main() {
         res.detail = "ECNU-VPN-kill-switch";
         registry.add_resource(rec.session_id, res);
 
+        auto records = registry.all_records();
+        ok = expect(records.size() == 1,
+                    "add_resource should keep the registered record") && ok;
+        ok = expect(records[0].managed_resources.size() == 1,
+                    "add_resource should persist ManagedResource on CleanupRecord") && ok;
+        ok = expect(records[0].managed_resources[0].type == "firewall_rule",
+                    "stored managed resource type should match") && ok;
+        ok = expect(records[0].managed_resources[0].detail == "ECNU-VPN-kill-switch",
+                    "stored managed resource detail should match") && ok;
+        ok = expect(records[0].firewall_rules.empty(),
+                    "add_resource should not encode managed resources in firewall_rules") && ok;
+
         auto resources = registry.get_resources(rec.session_id);
         bool found = false;
         for (const auto& r : resources) {
@@ -106,6 +127,33 @@ int main() {
             }
         }
         ok = expect(found, "added firewall resource should be in get_resources") && ok;
+    }
+
+    // --- register_session preserves explicit managed resources ---
+    {
+        CleanupRegistry registry;
+        CleanupRecord rec;
+        rec.session_id.value = "ses-explicit";
+        rec.managed_resources.push_back({"adapter", "ECNU-VPN"});
+        rec.managed_resources.push_back({"route", "10.0.0.0/8"});
+
+        registry.register_session(rec);
+
+        auto records = registry.all_records();
+        ok = expect(records.size() == 1,
+                    "explicit managed resource record should be snapshotted") && ok;
+        ok = expect(records[0].managed_resources.size() == 2,
+                    "all_records should preserve explicit managed resources") && ok;
+
+        auto resources = registry.get_resources(rec.session_id);
+        ok = expect(resources.size() == 2,
+                    "get_resources should return explicit managed resources") && ok;
+        ok = expect(resources[0].type == "adapter" &&
+                        resources[0].detail == "ECNU-VPN",
+                    "first explicit managed resource should match") && ok;
+        ok = expect(resources[1].type == "route" &&
+                        resources[1].detail == "10.0.0.0/8",
+                    "second explicit managed resource should match") && ok;
     }
 
     // --- add_resource on unknown session is a no-op ---
@@ -162,10 +210,18 @@ int main() {
             rec.routes.push_back({"0.0.0.0/0", "10.0.0.1", 0});
             rec.dns.servers = {"8.8.8.8"};
             registry.register_session(rec);
+            registry.add_resource(rec.session_id, {"adapter", "ECNU-VPN"});
+            registry.add_resource(rec.session_id, {"route", "10.0.0.0/8"});
 
             bool saved = registry.save_to_disk(path);
             ok = expect(saved, "save_to_disk should succeed") && ok;
             ok = expect(fs::exists(path), "registry file should exist") && ok;
+
+            const auto saved_json = read_file(path);
+            ok = expect(saved_json.find("\"managed_resources\"") != std::string::npos,
+                        "registry file should persist managed_resources") && ok;
+            ok = expect(saved_json.find("__managed__") == std::string::npos,
+                        "registry file should not contain managed resource side-channel") && ok;
         }
 
         {
@@ -184,6 +240,18 @@ int main() {
                         "loaded routes should have 1 entry") && ok;
             ok = expect(records[0].dns.servers.size() == 1,
                         "loaded DNS should have 1 server") && ok;
+            ok = expect(records[0].managed_resources.size() == 2,
+                        "loaded managed_resources should have 2 entries") && ok;
+            ok = expect(records[0].managed_resources[0].type == "adapter" &&
+                            records[0].managed_resources[0].detail == "ECNU-VPN",
+                        "loaded adapter managed_resource should match") && ok;
+            ok = expect(records[0].managed_resources[1].type == "route" &&
+                            records[0].managed_resources[1].detail == "10.0.0.0/8",
+                        "loaded route managed_resource should match") && ok;
+
+            auto resources = registry.get_resources(records[0].session_id);
+            ok = expect(resources.size() == 5,
+                        "loaded get_resources should include legacy fields and explicit managed resources") && ok;
         }
 
         fs::remove_all(root);

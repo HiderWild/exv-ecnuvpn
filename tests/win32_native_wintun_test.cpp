@@ -36,6 +36,7 @@ struct MockWintun {
   std::uint64_t index_requested_luid = 0;
   int sessions_started = 0;
   int sessions_ended = 0;
+  int adapters_deleted = 0;
   int adapters_closed = 0;
 
   int existing_adapter = 0;
@@ -78,6 +79,10 @@ ecnuvpn::platform::NativeWintunApi make_api(MockWintun &mock) {
     return &mock.session;
   };
   api.end_session = [&mock](Api::SessionHandle) { ++mock.sessions_ended; };
+  api.delete_adapter = [&mock](Api::AdapterHandle) {
+    ++mock.adapters_deleted;
+    return true;
+  };
   return api;
 }
 
@@ -276,14 +281,42 @@ bool stop_closes_active_session_once() {
   return ok;
 }
 
+bool delete_adapter_ends_session_deletes_adapter_and_closes_handle_once() {
+  MockWintun mock;
+
+  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"ECNUVPN-D2"));
+  auto result = wintun.start();
+  auto deleted = wintun.delete_adapter();
+  auto second_delete = wintun.delete_adapter();
+
+  bool ok = true;
+  ok = expect(result.ok(), "mocked Wintun lifecycle should start") && ok;
+  ok = expect(deleted.ok(), "delete_adapter should succeed with mocked API") &&
+       ok;
+  ok = expect(second_delete.ok(), "delete_adapter should be idempotent") && ok;
+  ok = expect(mock.sessions_ended == 1,
+              "delete_adapter should end the active Wintun session once") &&
+       ok;
+  ok = expect(mock.adapters_deleted == 1,
+              "delete_adapter should remove the adapter once") &&
+       ok;
+  ok = expect(mock.adapters_closed == 1,
+              "delete_adapter should close the adapter handle once") &&
+       ok;
+  ok = expect(!wintun.running(), "delete_adapter should clear running state") &&
+       ok;
+  return ok;
+}
+
 } // namespace
 
 namespace ecnuvpn {
-namespace utils {
+namespace platform {
 
 std::string get_bundled_wintun_path() { return ""; }
 
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 int main() {
@@ -294,5 +327,6 @@ int main() {
   ok = opens_existing_adapter_without_creating() && ok;
   ok = reports_adapter_luid_and_if_index() && ok;
   ok = stop_closes_active_session_once() && ok;
+  ok = delete_adapter_ends_session_deletes_adapter_and_closes_handle_once() && ok;
   return ok ? 0 : 1;
 }

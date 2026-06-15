@@ -1,6 +1,5 @@
-#include "crypto.hpp"
-#include "logger.hpp"
-#include "utils.hpp"
+#include "core/crypto/crypto.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -41,13 +40,7 @@ void show_logs(int) {}
 
 } // namespace logger
 
-namespace utils {
-
-void print_success(const std::string &) {}
-void print_error(const std::string &) {}
-void print_info(const std::string &) {}
-void print_warning(const std::string &) {}
-void print_header(const std::string &) {}
+namespace platform {
 
 std::string expand_home(const std::string &path) { return path; }
 std::string get_redirect_path() { return ""; }
@@ -60,20 +53,20 @@ std::string get_tunnel_path() { return ""; }
 std::string get_supervisor_pid_path() { return ""; }
 std::string get_route_ready_path() { return ""; }
 std::string get_effective_home() { return temp_root.string(); }
-std::string get_home_for_uid(uid_t) { return temp_root.string(); }
-std::string get_username_for_uid(uid_t) { return ""; }
-std::string get_config_dir_for_uid(uid_t) { return temp_root.string(); }
+std::string get_home_for_uid(unsigned int) { return temp_root.string(); }
+std::string get_username_for_uid(unsigned int) { return ""; }
+std::string get_config_dir_for_uid(unsigned int) { return temp_root.string(); }
 void set_runtime_path_override(const std::string &, const std::string &) {}
 void clear_runtime_path_override() {}
-void set_runtime_owner(uid_t, gid_t) {}
+void set_runtime_owner(unsigned int, unsigned int) {}
 void clear_runtime_owner() {}
 bool has_runtime_owner() { return false; }
-uid_t get_runtime_owner_uid() { return 0; }
-gid_t get_runtime_owner_gid() { return 0; }
+unsigned int get_runtime_owner_uid() { return 0; }
+unsigned int get_runtime_owner_gid() { return 0; }
 bool sync_owner(const std::string &) { return true; }
 std::string get_executable_path() { return ""; }
 
-bool fix_config_dir_ownership() { return true; }
+bool fix_runtime_config_dir_ownership() { return true; }
 
 bool file_exists(const std::string &path) {
   return std::filesystem::exists(path);
@@ -107,11 +100,8 @@ bool get_interface_traffic(const std::string &, uint64_t *, uint64_t *) {
 int run_command(const std::string &) { return 0; }
 std::string run_command_output(const std::string &) { return ""; }
 std::string shell_quote(const std::string &value) { return value; }
-std::vector<std::string> split_lines(const std::string &text) { return {text}; }
 
-std::string trim(const std::string &s) { return trim_copy(s); }
-
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 int main() {

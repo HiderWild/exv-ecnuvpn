@@ -5,10 +5,8 @@ import { dirname, join } from 'node:path'
 import type {
   DesktopCliCommand,
   DesktopRpcAction,
-  DesktopServiceCommand,
 } from '../../shared/desktop-contract.js'
 import {
-  readNewLogLines,
   psQuote,
   type CliInstallStatus,
   type DesktopPlatformContext,
@@ -24,32 +22,6 @@ function writeElevatedScript(prefix: string, body: string) {
   const scriptPath = join(app.getPath('temp'), `${prefix}-${Date.now()}.ps1`)
   writeFileSync(scriptPath, body, 'utf8')
   return scriptPath
-}
-
-async function runPowerShellScriptElevated(
-  context: DesktopPlatformContext,
-  scriptPath: string,
-  workingDirectory: string,
-) {
-  const command = [
-    '$p = Start-Process',
-    '-FilePath', psSingleQuoted('powershell.exe'),
-    '-ArgumentList', `@('-NoProfile','-ExecutionPolicy','Bypass','-File',${psSingleQuoted(scriptPath)})`,
-    '-WorkingDirectory', psSingleQuoted(workingDirectory),
-    '-WindowStyle', 'Hidden',
-    '-Verb', 'RunAs',
-    '-Wait',
-    '-PassThru',
-    '; if ($p.ExitCode -ne 0) { exit $p.ExitCode }',
-  ].join(' ')
-
-  await context.execFileAsync('powershell.exe', [
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-Command',
-    command,
-  ], { windowsHide: true, maxBuffer: 1024 * 1024 * 4 })
 }
 
 async function launchPowerShellScriptElevated(
@@ -242,6 +214,7 @@ const runner: DesktopPlatformRunner = {
 
   resolveExvCandidates(root: string) {
     return [
+      join(root, 'build', 'windows', 'electron', 'bin', 'exv.exe'),
       join(root, 'build', 'windows', 'electron', 'native', 'bin', 'exv.exe'),
       join(root, 'webui', 'native', 'bin', 'exv.exe'),
       join(root, 'build', 'windows', 'electron', 'release', 'win-unpacked', 'resources', 'bin', 'exv.exe'),
@@ -263,60 +236,6 @@ const runner: DesktopPlatformRunner = {
       join(root, 'runtime', process.platform),
       dirname(exv),
     ]
-  },
-
-  async runServiceCommandElevated(
-    context: DesktopPlatformContext,
-    command: DesktopServiceCommand,
-  ) {
-    const exv = context.resolveExvPath()
-    context.emitServiceProgress(command, `Starting service ${command}...`)
-
-    const logPath = join(app.getPath('temp'), `ecnu-vpn-service-${command}-${Date.now()}.log`)
-    const runtimeDir = context.resolveRuntimeDir(exv)
-    const stateDir = context.resolveStateDir()
-    const scriptPath = writeElevatedScript(`ecnu-vpn-service-${command}`, [
-      '$ErrorActionPreference = "Continue"',
-      runtimeDir ? `$env:ECNUVPN_RUNTIME_DIR = ${psSingleQuoted(runtimeDir)}` : '',
-      `$env:ECNUVPN_STATE_DIR = ${psSingleQuoted(stateDir)}`,
-      `Set-Location ${psSingleQuoted(dirname(exv))}`,
-      `& ${psSingleQuoted(exv)} service ${command} *>&1 | ForEach-Object { $_; $_ | Out-File -FilePath ${psSingleQuoted(logPath)} -Append -Encoding utf8 }`,
-      'exit $LASTEXITCODE',
-      '',
-    ].filter(Boolean).join('\n'))
-    context.emitServiceProgress(command, `Elevated script: ${scriptPath}`)
-    context.emitServiceProgress(command, `Progress log: ${logPath}`)
-    let offset = 0
-    const poll = setInterval(() => {
-      const next = readNewLogLines(logPath, offset)
-      offset = next.offset
-      for (const line of next.lines) context.emitServiceProgress(command, line)
-    }, 250)
-
-    try {
-      await runPowerShellScriptElevated(context, scriptPath, dirname(exv))
-    } catch (error) {
-      const next = readNewLogLines(logPath, offset)
-      offset = next.offset
-      for (const line of next.lines) context.emitServiceProgress(command, line)
-      throw error
-    } finally {
-      clearInterval(poll)
-      const next = readNewLogLines(logPath, offset)
-      for (const line of next.lines) context.emitServiceProgress(command, line)
-      try {
-        if (existsSync(logPath)) unlinkSync(logPath)
-      } catch {
-        // Temporary progress logs are best-effort cleanup.
-      }
-      try {
-        if (existsSync(scriptPath)) unlinkSync(scriptPath)
-      } catch {
-        // Temporary elevated script cleanup is best-effort.
-      }
-    }
-
-    context.emitServiceProgress(command, `Service ${command} command completed.`)
   },
 
   runCliCommand(

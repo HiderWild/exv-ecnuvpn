@@ -1,8 +1,8 @@
 // Tests for NativeStartupFailureAnalyzer: verifies failure classification,
 // terminal/recoverable determination, and native error mapping.
 
-#include "core/native_startup_failure.hpp"
-#include "core/tunnel_state.hpp"
+#include "core/tunnel_controller/native_startup_failure.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
 
 #include <iostream>
 #include <string>

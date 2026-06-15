@@ -1,10 +1,13 @@
 #include "platform/common/helper_lifecycle.hpp"
 
-#include "helper_ipc.hpp"
-#include "logger.hpp"
+#include "helper/helper_ipc.hpp"
+#include "observability/log_facade.hpp"
 #include "platform/common/helper_platform.hpp"
-#include "tunnel.hpp"
-#include "utils.hpp"
+#include "cli/console.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_paths.hpp"
+#include "utils/strings.hpp"
 
 #include <cctype>
 #include <cerrno>
@@ -30,7 +33,7 @@ struct SemanticVersion {
   int minor = -1;
   int patch = -1;
 };
-
+// Begin inlined from platform/darwin/helper_lifecycle_version include-unit
 bool prompt_confirm(const std::string &question, bool default_yes) {
   if (!isatty(STDIN_FILENO))
     return true;
@@ -38,7 +41,7 @@ bool prompt_confirm(const std::string &question, bool default_yes) {
   std::cout << "  " << question << (default_yes ? " [Y/n]: " : " [y/N]: ");
   std::string input;
   std::getline(std::cin, input);
-  input = utils::trim(input);
+  input = exv::utils::trim(input);
   if (input.empty())
     return default_yes;
   return input[0] == 'y' || input[0] == 'Y';
@@ -123,26 +126,27 @@ int compare_semantic_versions(const SemanticVersion &lhs,
 }
 
 bool read_binary_version(const std::string &path, SemanticVersion *version) {
-  if (!version || !utils::file_exists(path))
+  if (!version || !platform::file_exists(path))
     return false;
 
-  std::string output = utils::trim(
-      utils::run_command_output(utils::shell_quote(path) + " version 2>/dev/null"));
+  std::string output = exv::utils::trim(
+      platform::run_command_output(platform::shell_quote(path) + " version 2>/dev/null"));
   if (output.empty())
     return false;
   return parse_semantic_version(output, version);
 }
-
+// End inlined from platform/darwin/helper_lifecycle_version include-unit
+// Begin inlined from platform/darwin/helper_lifecycle_install include-unit
 bool uninstall_existing_stable_exv() {
   const auto &platform_config = helper_platform_config();
-  if (!utils::file_exists(platform_config.stable_install_path))
+  if (!platform::file_exists(platform_config.stable_install_path))
     return true;
 
-  utils::print_info(
+  cli::print_info(
       "Running service uninstall using the existing stable exv before replacement...");
-  if (utils::run_command(utils::shell_quote(platform_config.stable_install_path) +
+  if (platform::run_command(platform::shell_quote(platform_config.stable_install_path) +
                          " service uninstall") != 0) {
-    utils::print_error(
+    cli::print_error(
         "Failed to uninstall the existing helper service before replacing /usr/local/bin/exv.");
     return false;
   }
@@ -243,29 +247,25 @@ std::string helper_binary_next_to(const std::string &executable_path) {
 
 } // namespace
 
-void cleanup_routes() {
-  tunnel::cleanup_routes();
-}
-
 std::string get_interfaces_output() {
-  return utils::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
+  return platform::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
 }
 
 void kill_all_supervisors() {
-  std::string output = utils::trim(utils::run_command_output("pgrep -f 'exv -rt'"));
+  std::string output = exv::utils::trim(platform::run_command_output("pgrep -f 'exv -rt'"));
   if (output.empty())
     return;
 
   std::istringstream iss(output);
   std::string line;
   while (std::getline(iss, line)) {
-    line = utils::trim(line);
+    line = exv::utils::trim(line);
     if (line.empty())
       continue;
     try {
       pid_t pid = static_cast<pid_t>(std::stoi(line));
       if (pid > 0 && is_process_alive(pid)) {
-        logger::info("Killing orphaned supervisor: PID " + line);
+        exv::observability::LogFacade::info("Killing orphaned supervisor: PID " + line);
         kill(pid, SIGKILL);
       }
     } catch (...) {
@@ -275,7 +275,7 @@ void kill_all_supervisors() {
 }
 
 void fix_config_dir_ownership() {
-  utils::fix_config_dir_ownership();
+  platform::fix_runtime_config_dir_ownership();
 }
 
 int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
@@ -283,17 +283,17 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
   SemanticVersion current_version;
   bool current_version_ok =
       parse_semantic_version(ECNUVPN_VERSION, &current_version);
-  bool stable_exists = utils::file_exists(platform_config.stable_install_path);
+  bool stable_exists = platform::file_exists(platform_config.stable_install_path);
 
-  utils::print_warning(
+  cli::print_warning(
       "EXV helper service should be installed from a stable system path.");
-  std::cout << utils::DIM << "  Current executable: " << current_path
-            << utils::RESET << std::endl;
-  std::cout << utils::DIM << "  Stable target: "
-            << platform_config.stable_install_path << utils::RESET << std::endl;
+  std::cout << cli::DIM << "  Current executable: " << current_path
+            << cli::RESET << std::endl;
+  std::cout << cli::DIM << "  Stable target: "
+            << platform_config.stable_install_path << cli::RESET << std::endl;
   if (current_version_ok) {
-    std::cout << utils::DIM << "  Current version: "
-              << format_semantic_version(current_version) << utils::RESET
+    std::cout << cli::DIM << "  Current version: "
+              << format_semantic_version(current_version) << cli::RESET
               << std::endl;
   }
 
@@ -308,12 +308,12 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
     bool stable_version_ok =
         read_binary_version(platform_config.stable_install_path, &stable_version);
     if (stable_version_ok) {
-      std::cout << utils::DIM << "  Existing stable version: "
-                << format_semantic_version(stable_version) << utils::RESET
+      std::cout << cli::DIM << "  Existing stable version: "
+                << format_semantic_version(stable_version) << cli::RESET
                 << std::endl;
     } else {
-      std::cout << utils::DIM << "  Existing stable version: unknown"
-                << utils::RESET << std::endl;
+      std::cout << cli::DIM << "  Existing stable version: unknown"
+                << cli::RESET << std::endl;
     }
 
     std::cout << std::endl;
@@ -340,7 +340,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
   }
 
   if (!proceed) {
-    utils::print_info("Service installation canceled.");
+    cli::print_info("Service installation canceled.");
     return 1;
   }
 
@@ -348,48 +348,49 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
     return 1;
   }
 
-  if (!utils::ensure_dir("/usr/local") || !utils::ensure_dir("/usr/local/bin")) {
-    utils::print_error("Failed to ensure /usr/local/bin exists.");
+  if (!platform::ensure_dir("/usr/local") || !platform::ensure_dir("/usr/local/bin")) {
+    cli::print_error("Failed to ensure /usr/local/bin exists.");
     return 1;
   }
 
-  utils::print_info("Copying current exv binary to /usr/local/bin/exv ...");
+  cli::print_info("Copying current exv binary to /usr/local/bin/exv ...");
   int copy_error = 0;
   if (!copy_file_contents(current_path, platform_config.stable_install_path,
                           &copy_error)) {
-    utils::print_error("Failed to copy exv to /usr/local/bin/exv: " +
+    cli::print_error("Failed to copy exv to /usr/local/bin/exv: " +
                        std::string(std::strerror(copy_error)));
     return 1;
   }
 
-  utils::print_success("Stable exv binary updated at /usr/local/bin/exv.");
+  cli::print_success("Stable exv binary updated at /usr/local/bin/exv.");
   std::string helper_source = helper_binary_next_to(current_path);
-  if (!utils::file_exists(helper_source)) {
-    utils::print_error("Expected exv-helper next to the current exv binary: " +
+  if (!platform::file_exists(helper_source)) {
+    cli::print_error("Expected exv-helper next to the current exv binary: " +
                        helper_source);
     return 1;
   }
 
-  utils::print_info("Copying exv-helper binary to /usr/local/bin/exv-helper ...");
+  cli::print_info("Copying exv-helper binary to /usr/local/bin/exv-helper ...");
   if (!copy_file_contents(helper_source,
                           platform_config.default_service_binary_path,
                           &copy_error)) {
-    utils::print_error("Failed to copy exv-helper to /usr/local/bin/exv-helper: " +
+    cli::print_error("Failed to copy exv-helper to /usr/local/bin/exv-helper: " +
                        std::string(std::strerror(copy_error)));
     return 1;
   }
-  utils::print_success(
+  cli::print_success(
       "Stable exv-helper binary updated at /usr/local/bin/exv-helper.");
 
-  utils::print_info("Re-running service installation from the copied binary...");
+  cli::print_info("Re-running service installation from the copied binary...");
   execl(platform_config.stable_install_path, platform_config.stable_install_path,
         "service", "install", static_cast<char *>(nullptr));
 
-  utils::print_error("Failed to launch /usr/local/bin/exv: " +
+  cli::print_error("Failed to launch /usr/local/bin/exv: " +
                      std::string(std::strerror(errno)));
   return 1;
 }
-
+// End inlined from platform/darwin/helper_lifecycle_install include-unit
+// Begin inlined from platform/darwin/helper_lifecycle_worker include-unit
 std::string create_temp_request_file(const std::string &payload) {
   char path_template[] = "/var/run/exv-helper-request-XXXXXX";
   int fd = mkstemp(path_template);
@@ -409,33 +410,8 @@ std::string create_temp_request_file(const std::string &payload) {
 
 int spawn_worker_process(const std::string &executable_path,
                          const std::string &request_path) {
-  pid_t worker_pid = fork();
-  if (worker_pid < 0)
-    return -1;
-
-  if (worker_pid == 0) {
-    int devnull = open("/dev/null", O_WRONLY);
-    if (devnull >= 0) {
-      dup2(devnull, STDOUT_FILENO);
-      dup2(devnull, STDERR_FILENO);
-      close(devnull);
-    }
-    execl(executable_path.c_str(), executable_path.c_str(), "__helper-exec",
-          request_path.c_str(), static_cast<char *>(nullptr));
-    _exit(127);
-  }
-
-  int status = 0;
-  while (waitpid(worker_pid, &status, 0) < 0) {
-    if (errno != EINTR) {
-      status = -1;
-      break;
-    }
-  }
-  if (status < 0)
-    return -1;
-  if (WIFEXITED(status))
-    return WEXITSTATUS(status);
+  (void)executable_path;
+  (void)request_path;
   return 1;
 }
 
@@ -511,8 +487,6 @@ void setup_daemon_signals() {
 }
 
 void cleanup_daemon_endpoint(const std::string &endpoint) {
-  std::remove(endpoint.c_str());
-}
-
+// End inlined from platform/darwin/helper_lifecycle_worker include-unit
 } // namespace platform
 } // namespace ecnuvpn

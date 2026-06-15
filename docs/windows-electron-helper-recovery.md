@@ -59,13 +59,8 @@ Helper daemon is not available. Install the helper service from Settings or run
 'exv service install' as Administrator.
 ```
 
-The original Windows service model registered:
-
-```text
-exv.exe __helper-daemon
-```
-
-as a Windows service. That process did not implement the normal Windows service
+The original Windows service model registered the hidden helper mode in the
+main CLI executable as a Windows service. That process did not implement the normal Windows service
 lifecycle handshake with SCM. A proper Windows service process must call
 `StartServiceCtrlDispatcher`, enter `ServiceMain`, register a control handler,
 and report `SERVICE_RUNNING`. Without that handshake SCM can wait for service
@@ -328,7 +323,7 @@ Electron Builder can replace `release/win-unpacked`.
 
 ## Maintenance Notes
 
-- Do not register `exv.exe __helper-daemon` as the Windows service again. The
+- Do not register the old hidden helper mode in the main CLI executable as the Windows service again. The
   service entry point must remain a proper SCM-compatible executable.
 - If helper availability regresses, check both SCM state and pipe readiness. A
   service can be `RUNNING` while the desktop client still cannot talk to the
@@ -342,4 +337,3 @@ Electron Builder can replace `release/win-unpacked`.
   or class instances across the IPC bridge.
 - Treat log file bytes as untrusted text. Sanitize or decode before JSON
   serialization.
-

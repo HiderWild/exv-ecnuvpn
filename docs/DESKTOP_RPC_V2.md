@@ -197,7 +197,7 @@ Present only when `phase == "Reconnecting"`:
 | `auth` | `cert_error` | false | Certificate validation failed |
 | `auth` | `mfa_timeout` | true | MFA challenge timed out |
 | `helper` | `helper_unavailable` | false | Cannot connect to helper |
-| `helper` | `helper_version_mismatch` | false | Helper protocol version mismatch |
+| `helper` | `permission_denied` | false | Helper rejected the client identity |
 | `helper` | `session_lease_expired` | false | Helper session timed out |
 | `os.route` | `route_apply_failed` | false | OS route table write failed |
 | `os.dns` | `dns_apply_failed` | false | OS DNS config write failed |

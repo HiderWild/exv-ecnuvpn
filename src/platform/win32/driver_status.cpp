@@ -1,6 +1,11 @@
+#include "utils/strings.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/driver_status.hpp"
 
-#include "utils.hpp"
 
 #include <string>
 #include <vector>
@@ -26,10 +31,10 @@ std::vector<std::string> list_windows_adapters(const std::string &kind) {
       filter + " } | ForEach-Object { "
       "if ($_.NetConnectionID) { $_.NetConnectionID } elseif ($_.Name) { $_.Name } }\"";
 
-  return utils::split_lines(utils::run_command_output(command));
+  return exv::utils::split_lines(platform::run_command_output(command));
 }
 
-std::string effective_windows_driver(const Config &cfg,
+std::string effective_windows_driver(const ConfigView &cfg,
                                      const std::vector<std::string> &tap_adapters,
                                      bool wintun_available) {
   if (cfg.windows_tunnel_driver == "tap")
@@ -43,7 +48,7 @@ std::string effective_windows_driver(const Config &cfg,
   return "wintun";
 }
 
-std::string effective_driver_status(const Config &cfg,
+std::string effective_driver_status(const ConfigView &cfg,
                                     const std::string &effective,
                                     bool wintun_available,
                                     bool tap_available) {
@@ -61,13 +66,13 @@ std::string effective_driver_status(const Config &cfg,
 
 } // namespace
 
-nlohmann::json driver_status_json(const Config &cfg) {
+nlohmann::json driver_status_json(const ConfigView &cfg) {
   nlohmann::json json{{"preferred", cfg.windows_tunnel_driver},
                       {"tap_interface", cfg.windows_tap_interface},
                       {"supported", true}};
 
-  std::string wintun_path = utils::get_bundled_wintun_path();
-  std::string tap_installer_path = utils::get_bundled_tap_installer_path();
+  std::string wintun_path = platform::get_bundled_wintun_path();
+  std::string tap_installer_path = platform::get_bundled_tap_installer_path();
   std::vector<std::string> wintun_adapters = list_windows_adapters("wintun");
   std::vector<std::string> tap_adapters = list_windows_adapters("tap");
   bool wintun_bundled = !wintun_path.empty();
@@ -107,11 +112,11 @@ nlohmann::json driver_status_json(const Config &cfg) {
   return json;
 }
 
-nlohmann::json install_driver(const Config &cfg,
+nlohmann::json install_driver(const ConfigView &cfg,
                               const nlohmann::json &payload) {
   std::string driver = payload.value("driver", std::string());
   if (driver == "wintun") {
-    std::string wintun_path = utils::get_bundled_wintun_path();
+    std::string wintun_path = platform::get_bundled_wintun_path();
     if (wintun_path.empty()) {
       return nlohmann::json{{"ok", false},
                             {"error",
@@ -123,7 +128,7 @@ nlohmann::json install_driver(const Config &cfg,
   }
 
   if (driver == "tap") {
-    std::string installer = utils::get_bundled_tap_installer_path();
+    std::string installer = platform::get_bundled_tap_installer_path();
     if (installer.empty()) {
       return nlohmann::json{{"ok", false},
                             {"error",
@@ -133,10 +138,10 @@ nlohmann::json install_driver(const Config &cfg,
     int rc = 0;
     if (installer.size() >= 4 &&
         installer.substr(installer.size() - 4) == ".inf") {
-      rc = utils::run_command("pnputil /add-driver " +
-                              utils::shell_quote(installer) + " /install");
+      rc = platform::run_command("pnputil /add-driver " +
+                              platform::shell_quote(installer) + " /install");
     } else {
-      rc = utils::run_command(utils::shell_quote(installer) + " /S");
+      rc = platform::run_command(platform::shell_quote(installer) + " /S");
     }
     if (rc != 0) {
       return nlohmann::json{{"ok", false},

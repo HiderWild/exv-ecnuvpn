@@ -6,10 +6,10 @@
   "scripts": {
     "preinstall": "node -e \"const ua = process.env.npm_config_user_agent || ''; if (!ua.startsWith('pnpm/')) { console.error('Use pnpm instead of npm for this project.'); process.exit(1); }\"",
     "dev": "vite",
-    "dev:desktop": "vite --port 5176 --strictPort",
+    "dev:desktop": "vite --port 8288 --strictPort",
     "desktop:dev": "npm-run-all --parallel dev:desktop electron:dev electron:start",
     "electron:dev": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
-    "electron:start": "wait-on http://localhost:5176 dist-electron/main/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5176 electron dist-electron/main/index.js",
+    "electron:start": "wait-on http://localhost:8288 dist-electron/main/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:8288 electron dist-electron/main/index.js",
     "build": "vue-tsc -b && vite build",
     "build:electron": "node scripts/build-electron.cjs",
     "prepare:native": "node scripts/prepare-native.cjs",
@@ -18,7 +18,8 @@
     "desktop:package:dir": "electron-builder --dir --config electron-builder.config.cjs",
     "desktop:debug": "pnpm run desktop:compile && pnpm run desktop:package:dir",
     "desktop:build": "pnpm run desktop:compile && pnpm run desktop:package",
-    "test:rpc": "pnpm exec tsx desktop/main/__tests__/core-rpc-client.test.ts",
+    "test:rpc": "node scripts/run-electron-test.cjs desktop/main/__tests__/core-rpc-client.test.ts",
+    "test:contract": "node scripts/run-electron-test.cjs desktop/main/__tests__/desktop-contract-generated.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {
@@ -45,5 +46,11 @@
     "wait-on": "^9.0.3"
   },
   "main": "dist-electron/main/index.js",
-  "packageManager": "pnpm@10.33.2"
+  "packageManager": "pnpm@10.33.2",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-winstaller"
+    ]
+  }
 }

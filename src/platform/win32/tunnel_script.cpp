@@ -1,12 +1,13 @@
 #include "platform/common/tunnel_script.hpp"
 
+#include "platform/common/process_utils.hpp"
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 
-#include "logger.hpp"
-#include "openconnect_log.hpp"
-#include "utils.hpp"
+#include "observability/log_facade.hpp"
+#include "vpn_engine/openconnect/openconnect_log.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -22,11 +23,11 @@
 namespace ecnuvpn {
 namespace platform {
 namespace {
-
+// Begin inlined from platform/win32/tunnel_script_timing include-unit
 class TunnelTiming {
 public:
   TunnelTiming() : started_(Clock::now()), last_(started_) {
-    logger::info("[connect-timing] scope=tunnel.windows stage=begin delta_ms=0 total_ms=0");
+    exv::observability::LogFacade::info("[connect-timing] scope=tunnel.windows stage=begin delta_ms=0 total_ms=0");
   }
 
   void mark(const std::string &stage, const std::string &detail = "") {
@@ -39,7 +40,7 @@ public:
                           " total_ms=" + std::to_string(total_ms);
     if (!detail.empty())
       message += " " + detail;
-    logger::info(message);
+    exv::observability::LogFacade::info(message);
   }
 
   void finish(bool ok, const std::string &detail = "") {
@@ -62,7 +63,8 @@ private:
   Clock::time_point last_;
   bool finished_ = false;
 };
-
+// End inlined from platform/win32/tunnel_script_timing include-unit
+// Begin inlined from platform/win32/tunnel_script_helpers include-unit
 std::string js_quote(const std::string &value) {
   std::string quoted = "\"";
   for (char c : value) {
@@ -125,7 +127,7 @@ void debug_log(const std::string &ready_path, const std::string &message) {
 
 int run_exit(const std::string &ready_path, const std::string &cmd) {
   debug_log(ready_path, "run: " + cmd);
-  int rc = utils::run_command(cmd);
+  int rc = platform::run_command(cmd);
   debug_log(ready_path, "exit " + std::to_string(rc) + ": " + cmd);
   return rc;
 }
@@ -159,7 +161,7 @@ std::string effective_mtu(const std::string &reported_mtu, int configured_mtu) {
 }
 
 std::string get_default_gateway4() {
-  std::string output = utils::run_command_output("route.exe print 0.0.0.0");
+  std::string output = platform::run_command_output("route.exe print 0.0.0.0");
   std::regex route_regex(R"(0\.0\.0\.0\s+(?:0|128)\.0\.0\.0\s+([0-9.]+))");
   std::smatch match;
   if (std::regex_search(output, match, route_regex) && match.size() > 1)
@@ -182,7 +184,8 @@ bool write_ready_file(const std::string &ready_path, const std::string &tundev,
 
 std::pair<std::string, std::string>
 cidr_to_network_and_mask(const std::string &cidr);
-
+// End inlined from platform/win32/tunnel_script_helpers include-unit
+// Begin inlined from platform/win32/tunnel_script_configure include-unit
 bool configure_tunnel_network(const TunnelScriptContext &context,
                               const std::string &tunidx,
                               const std::string &tundev,
@@ -314,7 +317,8 @@ cidr_to_network_and_mask(const std::string &cidr) {
   inet_ntop(AF_INET, &addr, buf, sizeof(buf));
   return {network, std::string(buf)};
 }
-
+// End inlined from platform/win32/tunnel_script_configure include-unit
+// Begin inlined from platform/win32/tunnel_script_generator include-unit
 void append_windows_route_array(std::ostringstream &ss, const char *name,
                                 const std::vector<std::string> &routes) {
   ss << "var " << name << " = [\n";
@@ -630,7 +634,8 @@ std::string generate_tunnel_script(const TunnelScriptContext &context) {
 
   return ss.str();
 }
-
+// End inlined from platform/win32/tunnel_script_generator include-unit
+// Begin inlined from platform/win32/tunnel_script_runtime include-unit
 int run_tunnel_script(const TunnelScriptContext &context) {
   const std::string reason = env_value("reason");
   const std::string &ready_path = context.route_ready_path;
@@ -705,6 +710,6 @@ configure_from_openconnect_log(const TunnelScriptContext &context,
 }
 
 void cleanup_tunnel_routes(const TunnelScriptContext &) {}
-
+// End inlined from platform/win32/tunnel_script_runtime include-unit
 } // namespace platform
 } // namespace ecnuvpn

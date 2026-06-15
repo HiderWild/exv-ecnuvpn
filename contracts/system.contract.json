@@ -1,0 +1,464 @@
+{
+  "contract_id": "ecnu-vpn.system",
+  "schema_version": 1,
+  "version": "2026-06-15.config-helper-tunnel-utils-contract.v1",
+  "envelopes": {
+    "desktop_rpc": {
+      "request": {
+        "fields": [
+          { "name": "id", "type": "number", "required": true },
+          { "name": "action", "type": "string", "required": true },
+          { "name": "payload", "type": "unknown", "required": true }
+        ]
+      },
+      "response": {
+        "fields": [
+          { "name": "ok", "type": "boolean", "required": false },
+          { "name": "data", "type": "unknown", "required": false },
+          { "name": "code", "type": "string", "required": false },
+          { "name": "message", "type": "string", "required": false },
+          { "name": "event", "type": "string", "required": false }
+        ]
+      }
+    },
+    "core_rpc": {
+      "request": {
+        "fields": [
+          { "name": "action", "type": "string", "required": true },
+          { "name": "payload_json", "type": "string", "required": true },
+          { "name": "request_id", "type": "string", "required": false }
+        ]
+      },
+      "response": {
+        "fields": [
+          { "name": "success", "type": "boolean", "required": true },
+          { "name": "payload_json", "type": "string", "required": false },
+          { "name": "error_code", "type": "string", "required": false },
+          { "name": "error_message", "type": "string", "required": false },
+          { "name": "request_id", "type": "string", "required": false }
+        ]
+      }
+    }
+  },
+  "surfaces": {
+    "desktop_rpc": {
+      "actions": [
+        "status.get",
+        "vpn.connect",
+        "vpn.disconnect",
+        "config.getAuth",
+        "config.saveAuth",
+        "config.getSettings",
+        "config.saveSettings",
+        "config.getKey",
+        "routes.list",
+        "routes.add",
+        "routes.remove",
+        "routes.reset",
+        "service.status",
+        "helper.status",
+        "runtime.status",
+        "drivers.status",
+        "drivers.install",
+        "service.install",
+        "service.uninstall",
+        "logs.list"
+      ],
+      "event_types": [
+        "log",
+        "status",
+        "heartbeat",
+        "service-progress",
+        "close-request",
+        "core-crashed"
+      ],
+      "error_codes": [
+        { "key": "helperUnavailable", "code": "helper_unavailable" },
+        { "key": "serviceNotInstalled", "code": "service_not_installed" },
+        { "key": "serviceInstalledNotRunning", "code": "service_installed_not_running" },
+        { "key": "serviceStartFailed", "code": "service_start_failed" },
+        { "key": "oneshotNotSupported", "code": "oneshot_not_supported" },
+        { "key": "oneshotElevationDenied", "code": "oneshot_elevation_denied" },
+        { "key": "helperRpcFailed", "code": "helper_rpc_failed" },
+        { "key": "authFailed", "code": "auth_failed" },
+        { "key": "tlsVerifyFailed", "code": "tls_verify_failed" },
+        { "key": "wintunMissing", "code": "wintun_missing" },
+        { "key": "utunPermissionDenied", "code": "utun_permission_denied" },
+        { "key": "unsupportedDtls", "code": "unsupported_dtls" },
+        { "key": "permissionDenied", "code": "permission_denied" },
+        { "key": "networkUnreachable", "code": "network_unreachable" },
+        { "key": "userCancelled", "code": "user_cancelled" },
+        { "key": "invalidRequest", "code": "invalid_request" },
+        { "key": "connectionFailed", "code": "connection_failed" },
+        { "key": "vpnStartFailed", "code": "vpn_start_failed" }
+      ]
+    }
+  },
+  "modules": {
+    "config": {
+      "boundary": {
+        "accepts": [
+          "configuration read requests",
+          "configuration field update requests",
+          "route preference update requests",
+          "credential persistence state requests"
+        ],
+        "rejects": [
+          "vpn session lifecycle requests",
+          "privileged helper operations",
+          "runtime tunnel state ownership"
+        ],
+        "emits": [
+          "configuration snapshots",
+          "updated configuration sections",
+          "configuration validation errors"
+        ]
+      },
+      "actions": [
+        { "name": "config.getAuth", "surface": "desktop", "request": "empty", "response": "ConfigAuth" },
+        { "name": "config.saveAuth", "surface": "desktop", "request": "ConfigAuthUpdate", "response": "ConfigAuth" },
+        { "name": "config.getSettings", "surface": "desktop", "request": "empty", "response": "ConfigSettings" },
+        { "name": "config.saveSettings", "surface": "desktop", "request": "ConfigSettingsUpdate", "response": "ConfigSettings" },
+        { "name": "config.getKey", "surface": "desktop", "request": "empty", "response": "CredentialStoreStatus" },
+        { "name": "config.profile.get", "surface": "core", "request": "ConfigProfileGetRequest", "response": "ConfigProfile" },
+        { "name": "config.profile.save", "surface": "core", "request": "ConfigProfileSaveRequest", "response": "ConfigProfileSaveResult" }
+      ],
+      "aliases": [
+        { "alias": "config.get", "target": "config.getSettings", "surface": "core_api_legacy" },
+        { "alias": "config.save", "target": "config.saveSettings", "surface": "core_api_legacy" },
+        { "alias": "config.get_profile", "target": "config.profile.get", "surface": "core_api_legacy" },
+        { "alias": "config.save_profile", "target": "config.profile.save", "surface": "core_api_legacy" }
+      ],
+      "errors": [
+        "invalid_payload",
+        "invalid_config",
+        "profile_not_found",
+        "credential_store_unavailable"
+      ]
+    },
+    "helper": {
+      "boundary": {
+        "accepts": [
+          "credential-free privileged network requests",
+          "session lease requests",
+          "tunnel device preparation requests",
+          "network route and DNS application requests",
+          "heartbeat and cleanup requests"
+        ],
+        "rejects": [
+          "password fields",
+          "cookie fields",
+          "token fields",
+          "user configuration persistence",
+          "vpn authentication ownership"
+        ],
+        "emits": [
+          "helper capability snapshots",
+          "session identifiers",
+          "device preparation results",
+          "network application results",
+          "structured helper errors"
+        ]
+      },
+      "wire_format": "helper-request-response-json",
+      "ops": [
+        { "name": "Hello", "code": 1, "request": "HelloRequest", "response": "HelloResponse", "requires_session": false },
+        { "name": "StartSession", "code": 2, "request": "StartSessionRequest", "response": "StartSessionResponse", "requires_session": false },
+        { "name": "PrepareTunnelDevice", "code": 3, "request": "PrepareTunnelDeviceRequest", "response": "PrepareTunnelDeviceResponse", "requires_session": true },
+        { "name": "ApplyTunnelConfig", "code": 4, "request": "ApplyTunnelConfigRequest", "response": "ApplyTunnelConfigResponse", "requires_session": true },
+        { "name": "Heartbeat", "code": 5, "request": "HeartbeatRequest", "response": "HeartbeatResponse", "requires_session": true },
+        { "name": "Cleanup", "code": 6, "request": "CleanupRequest", "response": "CleanupResponse", "requires_session": true },
+        { "name": "GetSnapshot", "code": 7, "request": "GetSnapshotRequest", "response": "GetSnapshotResponse", "requires_session": false },
+        { "name": "Shutdown", "code": 8, "request": "ShutdownRequest", "response": "ShutdownResponse", "requires_session": true },
+        { "name": "Inspect", "code": 9, "request": "InspectRequest", "response": "InspectResponse", "requires_session": false },
+        { "name": "AcquireCoreLease", "code": 10, "request": "AcquireCoreLeaseRequest", "response": "AcquireCoreLeaseResponse", "requires_session": false },
+        { "name": "KeepAlive", "code": 11, "request": "KeepAliveRequest", "response": "KeepAliveResponse", "requires_session": false },
+        { "name": "ReleaseCoreLease", "code": 12, "request": "ReleaseCoreLeaseRequest", "response": "ReleaseCoreLeaseResponse", "requires_session": false },
+        { "name": "InstallService", "code": 13, "request": "InstallServiceRequest", "response": "InstallServiceResponse", "requires_session": false },
+        { "name": "UninstallService", "code": 14, "request": "UninstallServiceRequest", "response": "UninstallServiceResponse", "requires_session": false },
+        { "name": "ExportCleanupLease", "code": 15, "request": "ExportCleanupLeaseRequest", "response": "ExportCleanupLeaseResponse", "requires_session": false },
+        { "name": "HandoffSession", "code": 16, "request": "HandoffSessionRequest", "response": "HandoffSessionResponse", "requires_session": false },
+        { "name": "FinalizeHandoff", "code": 17, "request": "FinalizeHandoffRequest", "response": "FinalizeHandoffResponse", "requires_session": false }
+      ],
+      "messages": [
+        "HelloRequest",
+        "HelloResponse",
+        "StartSessionRequest",
+        "StartSessionResponse",
+        "PrepareTunnelDeviceRequest",
+        "PrepareTunnelDeviceResponse",
+        "ApplyTunnelConfigRequest",
+        "ApplyTunnelConfigResponse",
+        "HeartbeatRequest",
+        "HeartbeatResponse",
+        "CleanupRequest",
+        "CleanupResponse",
+        "GetSnapshotRequest",
+        "GetSnapshotResponse",
+        "ShutdownRequest",
+        "ShutdownResponse",
+        "InspectRequest",
+        "InspectResponse",
+        "AcquireCoreLeaseRequest",
+        "AcquireCoreLeaseResponse",
+        "KeepAliveRequest",
+        "KeepAliveResponse",
+        "ReleaseCoreLeaseRequest",
+        "ReleaseCoreLeaseResponse",
+        "InstallServiceRequest",
+        "InstallServiceResponse",
+        "UninstallServiceRequest",
+        "UninstallServiceResponse",
+        "ManagedResource",
+        "CleanupLeaseSession",
+        "CleanupLease",
+        "ExportCleanupLeaseRequest",
+        "ExportCleanupLeaseResponse",
+        "HandoffSessionRequest",
+        "HandoffSessionResponse",
+        "FinalizeHandoffRequest",
+        "FinalizeHandoffResponse"
+      ],
+      "capabilities": [
+        "tunnel_device_create",
+        "route_apply",
+        "dns_apply",
+        "firewall_rules",
+        "kill_switch",
+        "service_install",
+        "service_uninstall",
+        "cleanup_lease_export",
+        "session_handoff"
+      ],
+      "session": {
+        "id_field": "session_id",
+        "profile_id_field": "profile_id",
+        "modes": ["transient", "resident"],
+        "transient_heartbeat_timeout_seconds": 30,
+        "resident_heartbeat_timeout_seconds": 60,
+        "max_reconnect_window_seconds": 300
+      },
+      "errors": [
+        "none",
+        "unsupported_op",
+        "invalid_session",
+        "session_conflict",
+        "permission_denied",
+        "device_not_found",
+        "device_busy",
+        "route_apply_failed",
+        "dns_apply_failed",
+        "cleanup_partial",
+        "service_install_failed",
+        "service_uninstall_failed",
+        "handoff_failed",
+        "handoff_wrong_mode",
+        "internal_error",
+        "invalid_payload"
+      ],
+      "security": {
+        "no_credentials": true,
+        "forbidden_fields": [
+          "password",
+          "passwd",
+          "cookie",
+          "token",
+          "secret",
+          "credential",
+          "auth_key",
+          "auth_token",
+          "session_cookie",
+          "webvpn_cookie",
+          "csrf_token",
+          "bearer_token",
+          "api_key",
+          "apikey"
+        ]
+      }
+    },
+    "tunnel_controller": {
+      "boundary": {
+        "accepts": [
+          "user connect and disconnect intent",
+          "native engine lifecycle events",
+          "helper lease and heartbeat events",
+          "platform network readiness results"
+        ],
+        "rejects": [
+          "OS-specific route and DNS implementation",
+          "helper wire protocol ownership",
+          "VPN authentication protocol parsing",
+          "configuration persistence ownership"
+        ],
+        "emits": [
+          "tunnel status snapshots",
+          "structured tunnel errors",
+          "reconnect decisions",
+          "status change callbacks"
+        ]
+      },
+      "phases": [
+        { "name": "Idle", "wire_name": "idle", "running": false, "connected": false, "network_ready": false },
+        { "name": "PreparingHelper", "wire_name": "preparing_helper", "running": true, "connected": false, "network_ready": false },
+        { "name": "Authenticating", "wire_name": "authenticating", "running": true, "connected": false, "network_ready": false },
+        { "name": "ConnectingCstp", "wire_name": "connecting_cstp", "running": true, "connected": false, "network_ready": false },
+        { "name": "ApplyingNetworkConfig", "wire_name": "applying_network_config", "running": true, "connected": false, "network_ready": false },
+        { "name": "OpeningPacketDevice", "wire_name": "opening_packet_device", "running": true, "connected": false, "network_ready": false },
+        { "name": "Connected", "wire_name": "connected", "running": true, "connected": true, "network_ready": true },
+        { "name": "Reconnecting", "wire_name": "reconnecting", "running": true, "connected": false, "network_ready": false },
+        { "name": "Disconnecting", "wire_name": "disconnecting", "running": true, "connected": false, "network_ready": false },
+        { "name": "CleaningUp", "wire_name": "cleaning_up", "running": true, "connected": false, "network_ready": false },
+        { "name": "Failed", "wire_name": "failed", "running": false, "connected": false, "network_ready": false }
+      ],
+      "events": [
+        "UserConnect",
+        "UserDisconnect",
+        "SetAutoReconnect",
+        "HelperReady",
+        "AuthSucceeded",
+        "AuthFailed",
+        "CstpConnected",
+        "NetworkConfigApplied",
+        "PacketLoopStarted",
+        "TransportClosed",
+        "PacketDeviceFailed",
+        "HelperLost",
+        "LeaseExpired",
+        "ReconnectTimerFired",
+        "CleanupSucceeded",
+        "CleanupFailed"
+      ],
+      "disconnect_reasons": [
+        "UserRequested",
+        "AuthFailed",
+        "CertError",
+        "TransportClosed",
+        "HelperLost",
+        "PacketDeviceFailed",
+        "NetworkConfigFailed",
+        "LeaseExpired"
+      ],
+      "error_domains": [
+        "transport",
+        "auth",
+        "helper",
+        "os.route",
+        "os.dns",
+        "packet",
+        "config",
+        "native"
+      ],
+      "status_fields": [
+        "phase",
+        "desired_connected",
+        "auto_reconnect",
+        "helper_mode",
+        "helper_status",
+        "network_ready",
+        "server",
+        "interface_name",
+        "last_error",
+        "reconnect"
+      ]
+    },
+    "utils": {
+      "boundary": {
+        "accepts": [
+          "pure string values",
+          "in-memory value transformations",
+          "deterministic formatting helpers"
+        ],
+        "rejects": [
+          "filesystem access",
+          "process execution",
+          "privilege checks",
+          "runtime path ownership",
+          "terminal output",
+          "network interface inspection",
+          "platform-specific string conversion"
+        ],
+        "emits": [
+          "pure return values",
+          "no OS side effects"
+        ]
+      },
+      "modules": [
+        "exv.utils.strings"
+      ]
+    },
+    "src_organization": {
+      "boundary": {
+        "accepts": [
+          "canonical source ownership directories",
+          "domain-level public include paths",
+          "build-tree generated payloads"
+        ],
+        "rejects": [
+          "root-level compatibility shims",
+          "source include-units",
+          "committed generated payloads under src root",
+          "shadow public API directories",
+          "platform dependencies on core/app/helper runtime facades"
+        ],
+        "emits": [
+          "stable cross-platform source layout gates",
+          "module migration readiness signals"
+        ]
+      },
+      "allowed_top_level_dirs": [
+        "app",
+        "base",
+        "cli",
+        "common",
+        "contracts",
+        "core",
+        "feedback",
+        "helper",
+        "observability",
+        "platform",
+        "runtime",
+        "utils",
+        "vpn_engine"
+      ],
+      "forbidden_patterns": [
+        "src/*.hpp",
+        "src/*.cpp",
+        "src/core_api",
+        "*.inc.cpp",
+        "#include \"*.inc.cpp\"",
+        "src/webui_assets.hpp",
+        "platform include logger.hpp",
+        "platform include vpn.hpp",
+        "platform include tunnel.hpp",
+        "platform include openconnect_log.hpp",
+        "platform include virtual_network.hpp",
+        "platform include core/*"
+      ]
+    },
+    "vpn": {
+      "shallow": true,
+      "namespace": "vpn.",
+      "actions": ["vpn.connect", "vpn.disconnect", "vpn.status", "vpn.set_auto_reconnect"]
+    },
+    "service": {
+      "shallow": true,
+      "namespace": "service.",
+      "actions": ["service.helper_status", "service.install", "service.uninstall", "service.driver_status"]
+    },
+    "routes": {
+      "shallow": true,
+      "namespace": "routes.",
+      "actions": ["routes.list", "routes.add", "routes.remove", "routes.reset"]
+    },
+    "runtime": {
+      "shallow": true,
+      "namespace": "runtime.",
+      "actions": ["runtime.status"]
+    },
+    "logs": {
+      "shallow": true,
+      "namespace": "logs.",
+      "actions": ["logs.list"]
+    }
+  }
+}

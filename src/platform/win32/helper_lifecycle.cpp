@@ -1,8 +1,12 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 
-#include "helper_ipc.hpp"
-#include "logger.hpp"
-#include "utils.hpp"
+#include "helper/helper_ipc.hpp"
+#include "observability/log_facade.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -15,8 +19,6 @@
 namespace ecnuvpn {
 namespace platform {
 
-void cleanup_routes() {}
-
 void kill_all_supervisors() {}
 
 void fix_config_dir_ownership() {}
@@ -26,7 +28,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &) {
 }
 
 std::string get_interfaces_output() {
-  return utils::run_command_output("netsh interface show interface 2>nul");
+  return platform::run_command_output("netsh interface show interface 2>nul");
 }
 
 std::string create_temp_request_file(const std::string &payload) {
@@ -60,23 +62,9 @@ std::string create_temp_request_file(const std::string &payload) {
 
 int spawn_worker_process(const std::string &executable_path,
                          const std::string &request_path) {
-  std::string cmdline =
-      "\"" + executable_path + "\" __helper-exec \"" + request_path + "\"";
-  std::vector<char> mutable_cmd(cmdline.begin(), cmdline.end());
-  mutable_cmd.push_back('\0');
-  STARTUPINFOA si = {};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi = {};
-  if (!CreateProcessA(executable_path.c_str(), mutable_cmd.data(), NULL, NULL, TRUE,
-                       CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-    return -1;
-  }
-  CloseHandle(pi.hThread);
-  WaitForSingleObject(pi.hProcess, INFINITE);
-  DWORD exitCode = 1;
-  GetExitCodeProcess(pi.hProcess, &exitCode);
-  CloseHandle(pi.hProcess);
-  return static_cast<int>(exitCode);
+  (void)executable_path;
+  (void)request_path;
+  return 1;
 }
 
 void terminate_process(int pid) {

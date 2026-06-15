@@ -28,6 +28,13 @@ ecnuvpn::platform::ServiceStatusSnapshot unavailable_service() {
 } // namespace
 
 namespace ecnuvpn {
+namespace logger {
+
+void info(const std::string &) {}
+void warn(const std::string &) {}
+void error(const std::string &) {}
+
+} // namespace logger
 namespace platform {
 
 ServiceStatusSnapshot current_service_status() { return unavailable_service(); }
@@ -37,7 +44,8 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   backend.ok = !request.helper_path.empty();
   backend.transport = "test";
   backend.endpoint = "test-endpoint";
-  backend.auth_token = "test-token";
+  backend.owner = "test-owner";
+  backend.parent_pid = 7;
   backend.pid = 42;
   return backend;
 }
@@ -88,7 +96,8 @@ int main() {
         backend.ok = true;
         backend.transport = "unix-socket";
         backend.endpoint = request.helper_path + ".sock";
-        backend.auth_token = "token";
+        backend.owner = "test-owner";
+        backend.parent_pid = 7;
         backend.pid = 123;
         return backend;
       },
@@ -130,8 +139,14 @@ int main() {
                   "/tmp/exv-helper.sock",
               "oneshot bootstrap should receive helper path") &&
        ok;
-  ok = expect(resolved.value("auth_token", std::string()) == "token",
-              "oneshot backend should expose auth token to controller") &&
+  ok = expect(!resolved.contains("auth_token"),
+              "oneshot backend must not expose auth token") &&
+       ok;
+  ok = expect(resolved.value("owner", std::string()) == "test-owner",
+              "oneshot backend should expose owner identity") &&
+       ok;
+  ok = expect(resolved.value("parent_pid", 0) == 7,
+              "oneshot backend should expose parent pid") &&
        ok;
 
   nlohmann::json wrapped =

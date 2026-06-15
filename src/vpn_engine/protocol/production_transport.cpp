@@ -22,7 +22,7 @@ constexpr const char *kCstpPath = "/CSCOT/";
 constexpr const char *kDefaultUserAgent = "ECNU-VPN Native";
 constexpr std::size_t kMaxHttpHeaderBytes = 64 * 1024;
 constexpr std::size_t kMaxHttpBodyBytes = 16 * 1024 * 1024;
-
+// Begin inlined from vpn_engine/protocol/production_transport_redaction include-unit
 ValidationResult invalid(std::string code, std::string message) {
   ValidationResult result;
   result.ok = false;
@@ -126,7 +126,8 @@ AuthResult sanitized_auth_error(
                     sanitized_message(message, password, encoded_password,
                                       cookie_header));
 }
-
+// End inlined from vpn_engine/protocol/production_transport_redaction include-unit
+// Begin inlined from vpn_engine/protocol/production_transport_requests include-unit
 std::string useragent_or_default(const std::string &useragent) {
   return useragent.empty() ? std::string(kDefaultUserAgent) : useragent;
 }
@@ -217,7 +218,8 @@ std::string make_cstp_connect_request(const ParsedVpnUrl &server,
   out << "\r\n";
   return out.str();
 }
-
+// End inlined from vpn_engine/protocol/production_transport_requests include-unit
+// Begin inlined from vpn_engine/protocol/production_transport_response_parse include-unit
 bool find_header_terminator(const std::vector<std::uint8_t> &bytes,
                             std::size_t *header_end,
                             std::size_t *delimiter_size) {
@@ -280,9 +282,9 @@ ValidationResult parse_content_length(const HttpResponse &response,
   *out = parsed;
   return {};
 }
-
+// End inlined from vpn_engine/protocol/production_transport_response_parse include-unit
 } // namespace
-
+// Begin inlined from vpn_engine/protocol/production_transport_auth include-unit
 ProductionProtocolTransport::ProductionProtocolTransport(
     TlsStream *stream, std::string client_hostname)
     : stream_(stream), client_hostname_(std::move(client_hostname)) {}
@@ -402,7 +404,8 @@ AuthResult ProductionProtocolTransport::authenticate(
   result.cookie = cookies_.header();
   return result;
 }
-
+// End inlined from vpn_engine/protocol/production_transport_auth include-unit
+// Begin inlined from vpn_engine/protocol/production_transport_cstp include-unit
 ValidationResult
 ProductionProtocolTransport::connect_cstp(const std::string &cookie,
                                           TunnelMetadata *metadata) {
@@ -579,7 +582,8 @@ void ProductionProtocolTransport::disconnect() {
   current_password_.clear();
   current_password_form_encoded_.clear();
 }
-
+// End inlined from vpn_engine/protocol/production_transport_cstp include-unit
+// Begin inlined from vpn_engine/protocol/production_transport_read_http include-unit
 void ProductionProtocolTransport::reset_for_reconnect() {
   const std::lock_guard<std::mutex> lock(write_mutex_);
   if (stream_ && stream_connected_)
@@ -701,7 +705,7 @@ ValidationResult ProductionProtocolTransport::read_http_response(
   read_buffer_.clear();
   return {};
 }
-
+// End inlined from vpn_engine/protocol/production_transport_read_http include-unit
 } // namespace protocol
 } // namespace vpn_engine
 } // namespace ecnuvpn

@@ -77,7 +77,7 @@ exv doctor --check version
   Last heartbeat: 5s ago (if running)
   IPC channel:  named-pipe / unix-socket
   Version:      3.3.0
-  Protocol:     V2
+  Protocol:     single helper protocol
 ```
 
 **Platform-specific:**

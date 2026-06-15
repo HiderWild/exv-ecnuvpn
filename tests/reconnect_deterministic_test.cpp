@@ -1,12 +1,11 @@
 // Deterministic tests for ReconnectPolicy: uses fake clock and fake random
 // to produce predictable, repeatable results.
 
-#include "core/reconnect_policy.hpp"
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
-
+#include <chrono>
 #include <iostream>
 #include <string>
+
+import exv.core.tunnel.reconnect;
 
 namespace {
 
@@ -16,9 +15,11 @@ bool expect(bool condition, const char* message) {
     return false;
 }
 
-exv::core::ErrorInfo make_error(bool recoverable, const std::string& domain = "test",
+namespace reconnect = exv::core::tunnel::reconnect;
+
+reconnect::ErrorInfo make_error(bool recoverable, const std::string& domain = "test",
                                 const std::string& code = "test_error") {
-    exv::core::ErrorInfo e;
+    reconnect::ErrorInfo e;
     e.domain = domain;
     e.code = code;
     e.message = "test message";
@@ -26,8 +27,8 @@ exv::core::ErrorInfo make_error(bool recoverable, const std::string& domain = "t
     return e;
 }
 
-exv::core::UserIntent make_intent(bool desired, bool auto_reconnect = true) {
-    exv::core::UserIntent intent;
+reconnect::UserIntent make_intent(bool desired, bool auto_reconnect = true) {
+    reconnect::UserIntent intent;
     intent.desired_connected = desired;
     intent.auto_reconnect = auto_reconnect;
     return intent;
@@ -56,9 +57,9 @@ private:
 int main() {
     bool ok = true;
 
-    using exv::core::ReconnectConfig;
-    using exv::core::ReconnectPolicy;
-    using exv::core::TunnelPhase;
+    using reconnect::ReconnectConfig;
+    using reconnect::ReconnectPolicy;
+    using reconnect::TunnelPhase;
 
     // --- auto_reconnect=false -> no retry ---
     {
@@ -80,7 +81,7 @@ int main() {
         config.random = []() { return 0.5; };
         ReconnectPolicy policy(config);
         auto intent = make_intent(true);
-        intent.user_disconnect_reason = exv::core::DisconnectReason::UserRequested;
+        intent.user_disconnect_reason = reconnect::DisconnectReason::UserRequested;
         auto error = make_error(true, "transport", "transport_closed");
         auto decision = policy.decide(error, intent, TunnelPhase::Connected, 0);
         ok = expect(!decision.should_retry,

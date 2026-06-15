@@ -4,6 +4,7 @@ import { RouterView } from 'vue-router'
 import { useRoute } from 'vue-router'
 import NavBar from './components/NavBar.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import CoreCrashed from './components/CoreCrashed.vue'
 import ErrorDialog from './components/ErrorDialog.vue'
 import MinimalModeView from './components/MinimalModeView.vue'
 import PasswordPromptDialog from './components/PasswordPromptDialog.vue'
@@ -17,7 +18,7 @@ import { useVpnStore } from './stores/vpn'
 const config = useConfigStore()
 const vpn = useVpnStore()
 const ui = useUiStore()
-const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
+const { connect: sseConnect, disconnect: sseDisconnect, coreCrashed, coreCrashInfo, resetCrashState } = useSSE()
 const route = useRoute()
 
 const servicePromptVisible = ref(false)
@@ -121,6 +122,25 @@ function confirmClosePrompt() {
     action: closeChoice.value,
     remember: rememberCloseChoice.value,
   })
+}
+
+async function handleCoreRestart() {
+  try {
+    await window.ecnuVpn?.core.restart()
+    resetCrashState()
+    ui.addToast('内核已重启', 'success')
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.addToast(`重启失败: ${message}`, 'error')
+  }
+}
+
+async function handleCoreQuit() {
+  try {
+    await window.ecnuVpn?.core.quit()
+  } catch {
+    // App is quitting, errors expected
+  }
 }
 </script>
 
@@ -253,6 +273,12 @@ function confirmClosePrompt() {
   <ServiceInstallLoadingOverlay
     v-if="vpn.serviceOverlayOperation"
     :message="serviceOverlayMessage"
+  />
+  <CoreCrashed
+    v-if="coreCrashed"
+    :exit-code="coreCrashInfo?.exitCode ?? null"
+    @restart="handleCoreRestart"
+    @quit="handleCoreQuit"
   />
   <ErrorDialog />
   <ConfirmDialog />

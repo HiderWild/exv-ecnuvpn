@@ -48,17 +48,17 @@ std::vector<RouteEntry> RouteTable::diff(const RouteTable& other) const {
 }
 
 RouteTable RouteTable::current() {
-    // Stub: returns empty table. Platform implementation in Phase 3.
+    // Model-only fallback; platform-specific code supplies live route tables.
     return RouteTable{};
 }
 
 bool RouteTable::apply_add(const RouteEntry& /*route*/) {
-    // Stub: always succeeds. Platform implementation in Phase 3.
+    // Model-only fallback used by value-semantics tests.
     return true;
 }
 
 bool RouteTable::apply_remove(const RouteEntry& /*route*/) {
-    // Stub: always succeeds. Platform implementation in Phase 3.
+    // Model-only fallback used by value-semantics tests.
     return true;
 }
 

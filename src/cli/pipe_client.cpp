@@ -12,6 +12,9 @@
 #endif
 
 #include <cstring>
+#include <iostream>
+#include <thread>
+#include <chrono>
 
 namespace exv::cli {
 
@@ -21,14 +24,32 @@ bool PipeClient::connect(const std::string& pipe_path) {
   if (connected_) return true;
 
 #ifdef _WIN32
-  HANDLE hPipe = CreateFileA(
-      pipe_path.c_str(),
-      GENERIC_READ | GENERIC_WRITE,
-      0, nullptr, OPEN_EXISTING, 0, nullptr);
-  if (hPipe == INVALID_HANDLE_VALUE) return false;
-  DWORD mode = PIPE_READMODE_MESSAGE;
-  SetNamedPipeHandleState(hPipe, &mode, nullptr, nullptr);
-  handle_ = hPipe;
+  // Retry up to 5 times with 50ms delay if pipe is busy
+  for (int attempt = 0; attempt < 5; ++attempt) {
+    HANDLE hPipe = CreateFileA(
+        pipe_path.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        0, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    if (hPipe != INVALID_HANDLE_VALUE) {
+      handle_ = hPipe;
+      connected_ = true;
+      return true;
+    }
+
+    DWORD err = GetLastError();
+    if (err == ERROR_PIPE_BUSY && attempt < 4) {
+      // Pipe is busy, wait and retry
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+
+    // Only fail on non-retryable errors
+    if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PIPE_BUSY) {
+      return false;
+    }
+  }
+  return false;
 #else
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) return false;

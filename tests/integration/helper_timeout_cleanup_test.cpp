@@ -3,11 +3,11 @@
 // Tests SessionLeaseManager and HelperLifecyclePolicy using real
 // implementations (session_lease_manager.cpp, helper_lifecycle_policy.cpp).
 
-#include "helper_runtime/session_lease_manager.hpp"
-#include "helper_runtime/helper_lifecycle_policy.hpp"
-#include "helper_common/helper_session_lease.hpp"
-#include "helper_common/helper_messages.hpp"
-#include "helper_common/helper_protocol.hpp"
+#include "helper/runtime/session_lease_manager.hpp"
+#include "helper/runtime/helper_lifecycle_policy.hpp"
+#include "helper/common/helper_session_lease.hpp"
+#include "helper/common/helper_messages.hpp"
+#include "helper/common/helper_protocol.hpp"
 
 #include <iostream>
 #include <string>

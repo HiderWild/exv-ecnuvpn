@@ -1,10 +1,9 @@
-#include "core/reconnect_policy.hpp"
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
-
+#include <chrono>
 #include <iostream>
 #include <set>
 #include <string>
+
+import exv.core.tunnel.reconnect;
 
 namespace {
 
@@ -14,8 +13,10 @@ bool expect(bool condition, const char* message) {
     return false;
 }
 
-exv::core::ErrorInfo make_error(bool recoverable, const std::string& code = "test_error") {
-    exv::core::ErrorInfo e;
+namespace reconnect = exv::core::tunnel::reconnect;
+
+reconnect::ErrorInfo make_error(bool recoverable, const std::string& code = "test_error") {
+    reconnect::ErrorInfo e;
     e.domain = "test";
     e.code = code;
     e.message = "test message";
@@ -23,8 +24,8 @@ exv::core::ErrorInfo make_error(bool recoverable, const std::string& code = "tes
     return e;
 }
 
-exv::core::UserIntent make_intent(bool desired, bool auto_reconnect = true) {
-    exv::core::UserIntent intent;
+reconnect::UserIntent make_intent(bool desired, bool auto_reconnect = true) {
+    reconnect::UserIntent intent;
     intent.desired_connected = desired;
     intent.auto_reconnect = auto_reconnect;
     return intent;
@@ -35,9 +36,9 @@ exv::core::UserIntent make_intent(bool desired, bool auto_reconnect = true) {
 int main() {
     bool ok = true;
 
-    using exv::core::ReconnectConfig;
-    using exv::core::ReconnectPolicy;
-    using exv::core::TunnelPhase;
+    using reconnect::ReconnectConfig;
+    using reconnect::ReconnectPolicy;
+    using reconnect::TunnelPhase;
 
     // --- User not desired -> no retry ---
     {
@@ -55,7 +56,7 @@ int main() {
     {
         ReconnectPolicy policy;
         auto intent = make_intent(true);
-        intent.user_disconnect_reason = exv::core::DisconnectReason::UserRequested;
+        intent.user_disconnect_reason = reconnect::DisconnectReason::UserRequested;
         auto error = make_error(true);
         auto decision = policy.decide(error, intent, TunnelPhase::Connected, 0);
         ok = expect(!decision.should_retry,
@@ -220,7 +221,7 @@ int main() {
     {
         ReconnectPolicy policy;
         // Auth failure is represented as a non-recoverable error with auth domain
-        exv::core::ErrorInfo auth_err;
+        reconnect::ErrorInfo auth_err;
         auth_err.domain = "auth";
         auth_err.code = "auth_failed";
         auth_err.message = "authentication failed";
@@ -234,7 +235,7 @@ int main() {
     // --- AUTH FAILURE invariant: auth error code recognized as non-recoverable ---
     {
         ReconnectPolicy policy;
-        exv::core::ErrorInfo auth_err;
+        reconnect::ErrorInfo auth_err;
         auth_err.domain = "auth";
         auth_err.code = "auth_failed";
         auth_err.message = "401 unauthorized";
@@ -251,8 +252,8 @@ int main() {
     {
         ReconnectPolicy policy;
         auto intent = make_intent(true);
-        intent.user_disconnect_reason = exv::core::DisconnectReason::UserRequested;
-        exv::core::ErrorInfo err;
+        intent.user_disconnect_reason = reconnect::DisconnectReason::UserRequested;
+        reconnect::ErrorInfo err;
         err.domain = "transport";
         err.code = "transport_closed";
         err.message = "user disconnected";
@@ -267,7 +268,7 @@ int main() {
     // --- TRANSPORT CLOSE + auto_reconnect=true invariant: must retry ---
     {
         ReconnectPolicy policy;
-        exv::core::ErrorInfo transport_err;
+        reconnect::ErrorInfo transport_err;
         transport_err.domain = "transport";
         transport_err.code = "transport_closed";
         transport_err.message = "connection reset by peer";
@@ -284,7 +285,7 @@ int main() {
     // --- TRANSPORT CLOSE + auto_reconnect=false: must not retry ---
     {
         ReconnectPolicy policy;
-        exv::core::ErrorInfo transport_err;
+        reconnect::ErrorInfo transport_err;
         transport_err.domain = "transport";
         transport_err.code = "transport_closed";
         transport_err.message = "connection reset by peer";
@@ -300,7 +301,7 @@ int main() {
     // --- reason_code is never empty for any rejection case ---
     {
         ReconnectPolicy policy;
-        auto check_has_reason = [&](const exv::core::ReconnectDecision& d, const char* case_name) {
+        auto check_has_reason = [&](const reconnect::ReconnectDecision& d, const char* case_name) {
             if (!d.should_retry) {
                 ok = expect(!d.reason_code.empty(), case_name) && ok;
             }
@@ -308,14 +309,14 @@ int main() {
 
         // auth failure
         {
-            exv::core::ErrorInfo e; e.domain="auth"; e.code="auth_failed"; e.recoverable=false;
+            reconnect::ErrorInfo e; e.domain="auth"; e.code="auth_failed"; e.recoverable=false;
             auto d = policy.decide(e, make_intent(true), TunnelPhase::Authenticating, 0);
             check_has_reason(d, "auth failure rejection must have reason_code");
         }
         // user disconnect
         {
             auto intent = make_intent(true);
-            intent.user_disconnect_reason = exv::core::DisconnectReason::UserRequested;
+            intent.user_disconnect_reason = reconnect::DisconnectReason::UserRequested;
             auto d = policy.decide(make_error(true), intent, TunnelPhase::Connected, 0);
             check_has_reason(d, "user disconnect rejection must have reason_code");
         }

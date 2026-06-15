@@ -22,10 +22,18 @@ bool FakeHelper::is_connected() const {
 }
 
 helper::HelloResponse FakeHelper::hello(const helper::HelloRequest& req) {
+    (void)req;
+    hello_count_++;
     helper::HelloResponse resp;
-    resp.server_version = version_mismatch_ ? (helper::PROTOCOL_VERSION + 99) : helper::PROTOCOL_VERSION;
     resp.capabilities = {"tunnel_device_create", "route_apply", "dns_apply", "route_cleanup"};
     resp.mode = helper::HelperMode::Transient;
+    resp.startup_context.launch_mode = "oneshot";
+    resp.startup_context.endpoint = "fake-helper-endpoint";
+    resp.core_lease.active = core_lease_active_;
+    resp.core_lease.lease_id = core_lease_id_;
+    resp.core_lease.core_pid = core_lease_pid_;
+    resp.core_lease.purpose = core_lease_purpose_;
+    resp.core_lease.last_seen_state = core_lease_last_seen_state_;
     return resp;
 }
 
@@ -47,6 +55,8 @@ helper::StartSessionResponse FakeHelper::start_session(const helper::StartSessio
 }
 
 helper::PrepareTunnelDeviceResponse FakeHelper::prepare_tunnel_device(const helper::PrepareTunnelDeviceRequest& req) {
+    prepare_count_++;
+    prepared_sessions_[req.session_id] = true;
     helper::PrepareTunnelDeviceResponse resp;
     resp.device_path = "//./FakeTun/" + req.session_id.value;
     resp.mtu = 1400;
@@ -54,10 +64,19 @@ helper::PrepareTunnelDeviceResponse FakeHelper::prepare_tunnel_device(const help
 }
 
 helper::ApplyTunnelConfigResponse FakeHelper::apply_tunnel_config(const helper::ApplyTunnelConfigRequest& req) {
+    apply_count_++;
+    apply_requests_.push_back(req);
     helper::ApplyTunnelConfigResponse resp;
-    resp.success = !fail_next_ && !apply_config_fail_;
+    const bool missing_prepare =
+        require_prepare_before_apply_ &&
+        prepared_sessions_.find(req.config.session_id) == prepared_sessions_.end();
+    resp.success = !fail_next_ && !apply_config_fail_ && !missing_prepare;
     if (!resp.success) {
-        resp.error_message = apply_config_fail_ ? "Simulated apply_config failure" : "Simulated fail_next";
+        if (missing_prepare) {
+            resp.error_message = "Tunnel device has not been prepared";
+        } else {
+            resp.error_message = apply_config_fail_ ? "Simulated apply_config failure" : "Simulated fail_next";
+        }
     }
     fail_next_ = false;
     return resp;
@@ -78,6 +97,7 @@ helper::CleanupResponse FakeHelper::cleanup(const helper::CleanupRequest& req) {
     helper::CleanupResponse resp;
     resp.success = true;
     sessions_.erase(req.session_id);
+    prepared_sessions_.erase(req.session_id);
     return resp;
 }
 
@@ -86,10 +106,81 @@ helper::GetSnapshotResponse FakeHelper::get_snapshot(const helper::GetSnapshotRe
     return resp;
 }
 
-helper::EndSessionResponse FakeHelper::end_session(const helper::EndSessionRequest& req) {
-    helper::EndSessionResponse resp;
-    resp.success = true;
+helper::ShutdownResponse FakeHelper::shutdown(const helper::ShutdownRequest& req) {
+    shutdown_count_++;
+    shutdown_requests_.push_back(req);
+    helper::ShutdownResponse resp;
+    resp.cleanup_success = true;
     sessions_.erase(req.session_id);
+    prepared_sessions_.erase(req.session_id);
+    return resp;
+}
+
+helper::InspectResponse FakeHelper::inspect(const helper::InspectRequest& req) {
+    (void)req;
+    helper::InspectResponse resp;
+    resp.capabilities = {"tunnel_device_create", "route_apply", "dns_apply", "route_cleanup"};
+    resp.mode = helper::HelperMode::Transient;
+    resp.startup_context.launch_mode = "oneshot";
+    resp.startup_context.endpoint = "fake-helper-endpoint";
+    resp.core_lease.active = core_lease_active_;
+    resp.core_lease.lease_id = core_lease_id_;
+    resp.core_lease.core_pid = core_lease_pid_;
+    resp.core_lease.purpose = core_lease_purpose_;
+    resp.core_lease.last_seen_state = core_lease_last_seen_state_;
+    resp.session_state.active = !sessions_.empty();
+    if (!sessions_.empty()) {
+        resp.session_state.session_id = sessions_.begin()->first;
+    }
+    return resp;
+}
+
+helper::AcquireCoreLeaseResponse FakeHelper::acquire_core_lease(
+    const helper::AcquireCoreLeaseRequest& req) {
+    acquire_core_lease_count_++;
+    helper::AcquireCoreLeaseResponse resp;
+    if (req.core_pid <= 0 || req.purpose.empty()) {
+        resp.accepted = false;
+        return resp;
+    }
+
+    core_lease_active_ = true;
+    core_lease_pid_ = req.core_pid;
+    core_lease_purpose_ = req.purpose;
+    core_lease_last_seen_state_.clear();
+    core_lease_id_ = "fake-core-lease-" + std::to_string(acquire_core_lease_count_);
+
+    resp.accepted = true;
+    resp.lease_id = core_lease_id_;
+    resp.mode = "oneshot";
+    return resp;
+}
+
+helper::KeepAliveResponse FakeHelper::keep_alive(const helper::KeepAliveRequest& req) {
+    keep_alive_count_++;
+    helper::KeepAliveResponse resp;
+    resp.ok = core_lease_active_ && req.lease_id == core_lease_id_;
+    if (resp.ok) {
+        core_lease_last_seen_state_ = req.state;
+    } else {
+        resp.warning = "unknown core lease";
+    }
+    return resp;
+}
+
+helper::ReleaseCoreLeaseResponse FakeHelper::release_core_lease(
+    const helper::ReleaseCoreLeaseRequest& req) {
+    release_core_lease_count_++;
+    helper::ReleaseCoreLeaseResponse resp;
+    resp.released = core_lease_active_ && req.lease_id == core_lease_id_;
+    resp.exiting = resp.released && req.exit_if_oneshot;
+    if (resp.released) {
+        core_lease_active_ = false;
+        core_lease_pid_ = 0;
+        core_lease_purpose_.clear();
+        core_lease_last_seen_state_.clear();
+        core_lease_id_.clear();
+    }
     return resp;
 }
 
@@ -124,12 +215,19 @@ void FakeHelper::set_apply_config_fail(bool fail) {
     apply_config_fail_ = fail;
 }
 
-void FakeHelper::set_version_mismatch(bool mismatch) {
-    version_mismatch_ = mismatch;
+void FakeHelper::set_require_prepare_before_apply(bool require) {
+    require_prepare_before_apply_ = require;
 }
 
 int FakeHelper::connect_count() const { return connect_count_; }
+int FakeHelper::hello_count() const { return hello_count_; }
+int FakeHelper::prepare_count() const { return prepare_count_; }
+int FakeHelper::apply_count() const { return apply_count_; }
+int FakeHelper::shutdown_count() const { return shutdown_count_; }
 int FakeHelper::heartbeat_count() const { return heartbeat_count_; }
+int FakeHelper::acquire_core_lease_count() const { return acquire_core_lease_count_; }
+int FakeHelper::keep_alive_count() const { return keep_alive_count_; }
+int FakeHelper::release_core_lease_count() const { return release_core_lease_count_; }
 bool FakeHelper::ipc_lost() const { return ipc_lost_; }
 
 std::vector<helper::SessionId> FakeHelper::active_sessions() const {
@@ -140,6 +238,14 @@ std::vector<helper::SessionId> FakeHelper::active_sessions() const {
 
 std::vector<helper::CleanupRequest> FakeHelper::cleanup_requests() const {
     return cleanup_requests_;
+}
+
+std::vector<helper::ShutdownRequest> FakeHelper::shutdown_requests() const {
+    return shutdown_requests_;
+}
+
+std::vector<helper::ApplyTunnelConfigRequest> FakeHelper::apply_requests() const {
+    return apply_requests_;
 }
 
 } // namespace exv::test

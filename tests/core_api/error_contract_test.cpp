@@ -168,8 +168,8 @@ int main() {
                     "CREDENTIAL_EXPIRED should be 'credential_expired'") && ok;
         ok = expect(std::string(HELPER_UNAVAILABLE) == "helper_unavailable",
                     "HELPER_UNAVAILABLE should be 'helper_unavailable'") && ok;
-        ok = expect(std::string(HELPER_VERSION_MISMATCH) == "helper_version_mismatch",
-                    "HELPER_VERSION_MISMATCH should be 'helper_version_mismatch'") && ok;
+        ok = expect(std::string(HELPER_PROTOCOL_REJECTED) == "helper_protocol_rejected",
+                    "HELPER_PROTOCOL_REJECTED should be 'helper_protocol_rejected'") && ok;
         ok = expect(std::string(HELPER_TIMEOUT) == "helper_timeout",
                     "HELPER_TIMEOUT should be 'helper_timeout'") && ok;
         ok = expect(std::string(ROUTE_FAILED) == "route_failed",

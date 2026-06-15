@@ -1,7 +1,12 @@
+import {
+  DESKTOP_RPC_ACTIONS,
+  DESKTOP_RPC_ERROR_CODE_MAP,
+  DESKTOP_RPC_EVENT_TYPES,
+} from './generated/system-contract.js'
+
 export const desktopIpcChannels = {
   rpc: 'ecnu-vpn:rpc',
   rpcElevated: 'ecnu-vpn:rpc-elevated',
-  serviceCommand: 'ecnu-vpn:service-command',
   cliCommand: 'ecnu-vpn:cli-command',
   driverInstall: 'ecnu-vpn:driver-install',
   windowMode: 'ecnu-vpn:window-mode',
@@ -38,63 +43,17 @@ export const desktopApiPaths = {
   logs: '/logs',
 } as const
 
-export const desktopRpcActions = [
-  'status.get',
-  'vpn.connect',
-  'vpn.disconnect',
-  'config.getAuth',
-  'config.saveAuth',
-  'config.getSettings',
-  'config.saveSettings',
-  'config.getKey',
-  'routes.list',
-  'routes.add',
-  'routes.remove',
-  'routes.reset',
-  'service.status',
-  'helper.status',
-  'runtime.status',
-  'drivers.status',
-  'drivers.install',
-  'logs.list',
-] as const
+export const desktopRpcActions = DESKTOP_RPC_ACTIONS
 
-export const desktopEventTypes = [
-  'log',
-  'status',
-  'heartbeat',
-  'service-progress',
-  'close-request',
-] as const
+export const desktopEventTypes = DESKTOP_RPC_EVENT_TYPES
 
-export const desktopServiceCommands = ['install', 'uninstall'] as const
 export const desktopCliCommands = ['status', 'install', 'uninstall'] as const
 export const desktopDriverInstallTargets = ['wintun', 'tap'] as const
 
-export const desktopRpcErrorCodes = {
-  helperUnavailable: 'helper_unavailable',
-  serviceNotInstalled: 'service_not_installed',
-  serviceInstalledNotRunning: 'service_installed_not_running',
-  serviceStartFailed: 'service_start_failed',
-  oneshotNotSupported: 'oneshot_not_supported',
-  oneshotElevationDenied: 'oneshot_elevation_denied',
-  helperRpcFailed: 'helper_rpc_failed',
-  authFailed: 'auth_failed',
-  tlsVerifyFailed: 'tls_verify_failed',
-  wintunMissing: 'wintun_missing',
-  utunPermissionDenied: 'utun_permission_denied',
-  unsupportedDtls: 'unsupported_dtls',
-  permissionDenied: 'permission_denied',
-  networkUnreachable: 'network_unreachable',
-  userCancelled: 'user_cancelled',
-  invalidRequest: 'invalid_request',
-  connectionFailed: 'connection_failed',
-  vpnStartFailed: 'vpn_start_failed',
-} as const
+export const desktopRpcErrorCodes = DESKTOP_RPC_ERROR_CODE_MAP
 
 export type DesktopRpcAction = (typeof desktopRpcActions)[number]
 export type DesktopEventType = (typeof desktopEventTypes)[number]
-export type DesktopServiceCommand = (typeof desktopServiceCommands)[number]
 export type DesktopCliCommand = (typeof desktopCliCommands)[number]
 export type DesktopDriverInstallTarget =
   (typeof desktopDriverInstallTargets)[number]
@@ -109,16 +68,16 @@ export interface DesktopModalPayload {
 }
 
 // =========================================================================
-// RPC V2 Contract Types (Phase 4-6 hardening)
+// RPC Contract Types
 //
 // These types mirror the C++ JSON payloads produced by core_api action
 // handlers.  Field names and value conventions MUST stay in sync with:
 //   - src/core/tunnel_state.hpp      (TunnelPhase, ErrorInfo, ReconnectInfo, TunnelStatusSnapshot)
 //   - src/feedback/error_contract.hpp (ErrorInfo serialization)
-//   - src/core_api/vpn_actions.cpp   (phase_to_string, status JSON)
-//   - src/core_api/config_actions.cpp
-//   - src/core_api/service_actions.cpp
-//   - src/core_api/route_actions.cpp
+//   - src/core/rpc/vpn_actions.cpp   (phase_to_string, status JSON)
+//   - src/core/rpc/config_actions.cpp
+//   - src/core/rpc/service_actions.cpp
+//   - src/core/rpc/route_actions.cpp
 // =========================================================================
 
 // TunnelPhase values match the C++ phase_to_string() output in vpn_actions.cpp.
@@ -163,7 +122,7 @@ export interface VpnStatusResponse {
   desired_connected: boolean
   auto_reconnect: boolean
   helper_mode: string
-  helper_status: string // connected|unavailable|version_mismatch
+  helper_status: string // connected|unavailable|permission_denied
   network_ready: boolean
   server: string
   interface_name: string
@@ -194,8 +153,8 @@ export interface CredentialStoreStatus {
   error?: ErrorInfo
 }
 
-// HelperV2Status matches the stub returned by service_actions::helper_status().
-export interface HelperV2Status {
+// HelperStatus matches the payload returned by service_actions::helper_status().
+export interface HelperStatus {
   installed: boolean
   status: string
   version: string

@@ -1,0 +1,119 @@
+#include "core/tunnel_controller/tunnel_controller_impl.hpp"
+
+#include <exception>
+
+namespace exv::core {
+
+// ================================================================
+// Disconnect flow
+// ================================================================
+
+void TunnelController::Impl::do_disconnect(DisconnectReason reason) {
+        intent_.desired_connected    = false;
+        intent_.user_disconnect_reason = reason;
+
+        stop_heartbeat();
+
+        // Stop the native engine session if it's running.
+        if (runner_.is_running()) {
+            runner_.stop();
+        }
+
+        transition_to(TunnelPhase::Disconnecting);
+        do_cleanup();
+    }
+
+void TunnelController::Impl::shutdown_helper_session_for_cleanup() {
+        try {
+            exv::helper::ShutdownRequest req;
+            req.session_id = session_id_;
+            req.policy.remove_routes       = true;
+            req.policy.remove_dns          = true;
+            req.policy.remove_adapter      = true;
+            req.policy.remove_firewall_rules = true;
+
+            auto resp = helper_->shutdown(req);
+
+            if (!resp.cleanup_success) {
+                // Log per-resource errors but still finish cleanup (best effort)
+            }
+        } catch (const std::exception&) {
+            // Cleanup threw — nothing we can do; finish best effort.
+        }
+
+        if (auto delegated_ops = as_helper_delegating_ops(net_ops_)) {
+            delegated_ops->clear_session();
+        }
+        session_id_ = exv::helper::SessionId{};
+        network_config_applied_ = false;
+    }
+
+void TunnelController::Impl::cleanup_after_failed_startup() {
+        stop_heartbeat();
+        shutdown_helper_session_for_cleanup();
+    }
+
+void TunnelController::Impl::do_cleanup() {
+        stop_heartbeat();
+        transition_to(TunnelPhase::CleaningUp);
+
+        shutdown_helper_session_for_cleanup();
+
+        transition_to(TunnelPhase::Idle);
+    }
+
+void TunnelController::Impl::release_core_lease() {
+        if (core_lease_id_.empty()) {
+            stop_core_lease_keepalive();
+            return;
+        }
+
+        const auto lease_id = core_lease_id_;
+        try {
+            exv::helper::ReleaseCoreLeaseRequest req;
+            req.lease_id = lease_id;
+            req.exit_if_oneshot = true;
+            (void)helper_->release_core_lease(req);
+        } catch (const std::exception& e) {
+            log_tunnel_event("WARN", "core_lease.release.failed",
+                             "Core lease release failed",
+                             {{"error", e.what()}});
+        }
+
+        core_lease_id_.clear();
+        stop_core_lease_keepalive();
+        update_snapshot();
+    }
+
+bool TunnelController::Impl::replace_helper_for_handoff(
+        std::shared_ptr<exv::helper::HelperClient> helper,
+        std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
+        std::string core_lease_id,
+        std::string helper_mode,
+        std::string helper_endpoint) {
+        if (!helper || !helper->is_connected() || !net_ops ||
+            core_lease_id.empty() || session_id_.value.empty()) {
+            return false;
+        }
+
+        stop_core_lease_keepalive();
+
+        helper_ = std::move(helper);
+        net_ops_ = std::move(net_ops);
+        core_lease_id_ = std::move(core_lease_id);
+        helper_mode_ = std::move(helper_mode);
+        helper_endpoint_ = std::move(helper_endpoint);
+        helper_status_override_.clear();
+        helper_connected_seen_ = true;
+
+        if (auto delegated_ops = as_helper_delegating_ops(net_ops_)) {
+            delegated_ops->set_session(session_id_);
+        }
+
+        start_core_lease_keepalive();
+        update_snapshot();
+        notify_status();
+        return true;
+    }
+
+} // namespace exv::core

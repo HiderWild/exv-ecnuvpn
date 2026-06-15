@@ -1,9 +1,17 @@
 import { ref, onUnmounted } from 'vue'
 import { useVpnStore, type LogEntry, type ServiceProgressEntry, type VpnStatus } from '../stores/vpn'
 
+export interface CoreCrashedEvent {
+  exitCode: number | null
+  signal: string | null
+  error?: string
+}
+
 export function useSSE() {
   const connected = ref(false)
   const error = ref<string | null>(null)
+  const coreCrashed = ref(false)
+  const coreCrashInfo = ref<CoreCrashedEvent | null>(null)
   let unsubscribe: (() => void) | null = null
 
   function connect() {
@@ -34,6 +42,11 @@ export function useSSE() {
           const store = useVpnStore()
           store.addServiceProgress(event.data as ServiceProgressEntry)
         }
+
+        if (event.type === 'core-crashed' && event.data && typeof event.data === 'object') {
+          coreCrashed.value = true
+          coreCrashInfo.value = event.data as CoreCrashedEvent
+        }
       })
       return
     }
@@ -48,9 +61,14 @@ export function useSSE() {
     connected.value = false
   }
 
+  function resetCrashState() {
+    coreCrashed.value = false
+    coreCrashInfo.value = null
+  }
+
   onUnmounted(() => {
     disconnect()
   })
 
-  return { connected, error, connect, disconnect }
+  return { connected, error, connect, disconnect, coreCrashed, coreCrashInfo, resetCrashState }
 }

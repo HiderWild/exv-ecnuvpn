@@ -4,7 +4,6 @@ import { dirname, join } from 'node:path'
 import type {
   DesktopCliCommand,
   DesktopRpcAction,
-  DesktopServiceCommand,
 } from '../../shared/desktop-contract.js'
 import {
   shellQuote,
@@ -108,19 +107,6 @@ const runner: DesktopPlatformRunner = {
       join(root, 'runtime', process.platform),
       dirname(exv),
     ]
-  },
-
-  async runServiceCommandElevated(
-    context: DesktopPlatformContext,
-    command: DesktopServiceCommand,
-  ) {
-    const exv = context.resolveExvPath()
-    const cmd = `${shellQuote(exv)} service ${command}`
-    await context.execFileAsync('osascript', [
-      '-e',
-      `do shell script ${JSON.stringify(cmd)} with administrator privileges`,
-    ])
-    context.emitServiceProgress(command, `Service ${command} command completed.`)
   },
 
   runCliCommand(

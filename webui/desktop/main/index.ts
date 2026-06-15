@@ -14,11 +14,11 @@ import {
   type DesktopModalKind,
   type DesktopModalPayload,
   type DesktopRpcAction,
-  type DesktopServiceCommand,
   type DesktopServiceInstallPromptResult,
   type DesktopWindowMode,
 } from '../shared/desktop-contract.js'
 import { CoreRpcClient, type EventListener } from './core-rpc-client.js'
+import { normalizeRpcSuccessResult } from './rpc-result.js'
 import { platformRunner } from './platform/index.js'
 import type { RpcErrorResult } from './platform/base.js'
 
@@ -84,7 +84,13 @@ function windowIconPath() {
 }
 
 function repoRoot() {
-  return resolve(__dirname, '..', '..', '..')
+  // When running from build/windows/electron/dist-electron/main/index.js,
+  // we need to go up 5 levels to reach the repo root.
+  // But when running from webui/dist-electron/main/index.js (dev mode),
+  // we need to go up 3 levels.
+  // Detect which case we're in by checking the path.
+  const isDev = __dirname.includes(join('webui', 'dist-electron'))
+  return isDev ? resolve(__dirname, '..', '..', '..') : resolve(__dirname, '..', '..', '..', '..', '..')
 }
 
 function resolveExvPath() {
@@ -120,8 +126,8 @@ function resolveRuntimeDir(exv = resolveExvPath()) {
 }
 
 // Canonical state/log directory, resolved on the (non-elevated) desktop process
-// so every exv invocation �?including UAC-elevated ones whose ambient %APPDATA%
-// differs �?writes config, state and logs to the same place. Mirrors the C++
+// so every exv invocation �?including UAC-elevated ones whose ambient %APPDATA%
+// differs �?writes config, state and logs to the same place. Mirrors the C++
 // platform defaults exactly so the CLI (`exv logs`) and the app agree.
 function resolveStateDir() {
   if (process.platform === 'win32') {
@@ -150,7 +156,7 @@ function nativeExecOptions(exv: string, extra: { maxBuffer?: number } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// CoreProcessManager �?manages the long-lived `exv --mode=core` child process
+// CoreProcessManager �?manages the long-lived `exv --mode=core` child process
 // ---------------------------------------------------------------------------
 
 class CoreProcessManager {
@@ -213,7 +219,7 @@ class CoreProcessManager {
         console.error(
           `[CoreProcessManager] core process exited (code=${code}, signal=${signal})`,
         )
-        // Push crash event to renderer �?user decides whether to restart or quit.
+        // Push crash event to renderer �?user decides whether to restart or quit.
         for (const listener of this.eventListeners) {
           listener('core-crashed', { exitCode: code, signal })
         }
@@ -306,50 +312,6 @@ function throwRpcResultError(result: RpcErrorResult): never {
   throw error
 }
 
-function isServiceUsable(status: unknown) {
-  return Boolean(
-    status &&
-      typeof status === 'object' &&
-      'installed' in status &&
-      'running' in status &&
-      'available' in status &&
-      (status as { installed?: unknown }).installed === true &&
-      (status as { running?: unknown }).running === true &&
-      (status as { available?: unknown }).available === true,
-  )
-}
-
-function isServiceUninstalled(status: unknown) {
-  return Boolean(
-    status &&
-      typeof status === 'object' &&
-      'installed' in status &&
-      (status as { installed?: unknown }).installed !== true,
-  )
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function waitForServiceCommandStatus(command: 'install' | 'uninstall') {
-  const deadline = Date.now() + 8000
-  let lastStatus: unknown = null
-
-  while (Date.now() < deadline) {
-    lastStatus = await runDesktopRpc('service.status')
-    if (command === 'install' && isServiceUsable(lastStatus)) {
-      return lastStatus
-    }
-    if (command === 'uninstall' && isServiceUninstalled(lastStatus)) {
-      return lastStatus
-    }
-    await delay(250)
-  }
-
-  return lastStatus ?? runDesktopRpc('service.status')
-}
-
 async function runDesktopRpc(action: DesktopRpcAction, payload: unknown = {}) {
   if (!validRpcActions.has(action)) {
     throw new Error(`Unknown desktop RPC action: ${action}`)
@@ -401,7 +363,7 @@ async function runDesktopRpcInner(action: DesktopRpcAction, payload: unknown = {
     if (result && result.ok === false) {
       throwRpcResultError(result)
     }
-    return result
+    return normalizeRpcSuccessResult(result)
   } catch (error) {
     const execError = error as Error & { stdout?: string; stderr?: string }
     if (execError.stdout) {
@@ -410,7 +372,7 @@ async function runDesktopRpcInner(action: DesktopRpcAction, payload: unknown = {
         if (result && result.ok === false) {
           throwRpcResultError(result)
         }
-        return result
+        return normalizeRpcSuccessResult(result)
       } catch (parseError) {
         if (parseError instanceof Error && parseError.message !== execError.message) {
           throw parseError
@@ -428,14 +390,6 @@ function emitEvent(type: DesktopEventType, data: unknown) {
   mainWindow.webContents.send(desktopIpcChannels.event, { type, data })
 }
 
-function emitServiceProgress(command: 'install' | 'uninstall', line: string) {
-  emitEvent('service-progress', {
-    command,
-    message: line.replace(/\[[0-9;]*m/g, ''),
-    timestamp: new Date().toISOString(),
-  })
-}
-
 function desktopPlatformContext() {
   return {
     execFileAsync,
@@ -446,7 +400,6 @@ function desktopPlatformContext() {
     parseJsonOutput,
     throwRpcResultError,
     runDesktopRpc,
-    emitServiceProgress,
   }
 }
 
@@ -641,7 +594,7 @@ function refreshTrayMenu(connected = trayConnectionConnected) {
       click: () => { void toggleTrayConnection() },
     },
     { type: 'separator' },
-    { label: '退�?, click: () => { void disconnectThenQuit() } },
+    { label: '退出', click: () => { void disconnectThenQuit() } },
   ]))
 }
 
@@ -684,7 +637,7 @@ async function toggleTrayConnection() {
     const message = error instanceof Error ? error.message : String(error)
     await openModal('confirm', {
       kind: 'confirm',
-      message: `托盘${action}失败�?{message}`,
+      message: `托盘${action}失败�?{message}`,
     })
   } finally {
     trayConnectionBusy = false
@@ -712,7 +665,7 @@ async function disconnectThenQuit() {
     const message = error instanceof Error ? error.message : String(error)
     await openModal('confirm', {
       kind: 'confirm',
-      message: `断开 VPN 失败，程序仍保持打开�?{message}`,
+      message: `断开 VPN 失败，程序仍保持打开�?{message}`,
     })
   }
 }
@@ -808,6 +761,14 @@ async function createWindow() {
   startEventPump()
 }
 
+function nextLogEntries(logs: unknown[], seenCount: number) {
+  const normalizedSeenCount = logs.length < seenCount ? 0 : seenCount
+  return {
+    entries: logs.slice(normalizedSeenCount),
+    seenCount: logs.length,
+  }
+}
+
 function startEventPump() {
   if (statusTimer || logTimer) return
 
@@ -828,9 +789,9 @@ function startEventPump() {
     try {
       const logs = await runDesktopRpc('logs.list', { lines: 500 })
       if (Array.isArray(logs)) {
-        const next = logs.slice(seenLogCount)
-        seenLogCount = logs.length
-        for (const entry of next) {
+        const nextLogs = nextLogEntries(logs, seenLogCount)
+        seenLogCount = nextLogs.seenCount
+        for (const entry of nextLogs.entries) {
           emitEvent('log', entry)
         }
       }
@@ -862,36 +823,6 @@ ipcMain.handle(
     )
   },
 )
-
-ipcMain.handle(desktopIpcChannels.serviceCommand, async (_event, command: DesktopServiceCommand) => {
-  try {
-    await platformRunner.runServiceCommandElevated(desktopPlatformContext(), command)
-    const status = await waitForServiceCommandStatus(command)
-    if (command === 'install' && !isServiceUsable(status)) {
-      throw new Error('Helper service was installed but is not available to the desktop client.')
-    }
-    if (
-      command === 'uninstall' &&
-      status &&
-      typeof status === 'object' &&
-      (status as { installed?: unknown }).installed === true
-    ) {
-      throw new Error('Helper service uninstall completed, but the service is still registered.')
-    }
-    return status
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    try {
-      const status = await runDesktopRpc('service.status')
-      if (status && typeof status === 'object' && status.installed) {
-        return { ...status, warning: message }
-      }
-    } catch {
-      // Preserve the original elevated command error below.
-    }
-    throw error
-  }
-})
 
 ipcMain.handle(desktopIpcChannels.cliCommand, async (_event, command: DesktopCliCommand) => {
   return platformRunner.runCliCommand(desktopPlatformContext(), command)

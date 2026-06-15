@@ -1,6 +1,6 @@
 #include "platform/common/service_status.hpp"
 
-#include "helper.hpp"
+#include "helper/helper.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

@@ -5,9 +5,9 @@
 // helper IPC / process-argument boundary; this one covers the logging and
 // diagnostics boundary.
 
-#include "core/core_error_mapper.hpp"
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
+#include "core/tunnel_controller/core_error_mapper.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
 
 #include <iostream>
 #include <string>

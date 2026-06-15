@@ -3,7 +3,6 @@ import { dirname, join } from 'node:path'
 import type {
   DesktopCliCommand,
   DesktopRpcAction,
-  DesktopServiceCommand,
 } from '../../shared/desktop-contract.js'
 import type {
   CliInstallStatus,
@@ -37,15 +36,6 @@ const runner: DesktopPlatformRunner = {
       join(root, 'runtime', process.platform),
       dirname(exv),
     ]
-  },
-
-  async runServiceCommandElevated(
-    context: DesktopPlatformContext,
-    command: DesktopServiceCommand,
-  ) {
-    const exv = context.resolveExvPath()
-    await context.execFileAsync(exv, ['service', command], context.nativeExecOptions(exv))
-    context.emitServiceProgress(command, `Service ${command} command completed.`)
   },
 
   runCliCommand(

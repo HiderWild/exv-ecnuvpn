@@ -41,4 +41,7 @@ export default defineConfig({
     outDir: process.env.ECNUVPN_WEBUI_OUT_DIR ?? defaultOutDir(),
     emptyOutDir: true,
   },
+  server: {
+    host: '127.0.0.1', // Bind to IPv4 only to avoid Windows IPv6 permission issues
+  },
 })

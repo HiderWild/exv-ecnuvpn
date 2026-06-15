@@ -1,7 +1,11 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
+#include "platform/common/config_defaults.hpp"
 #include "platform/common/helper_client.hpp"
-#include "utils.hpp"
-#include "vpn.hpp"
 
 #include <iostream>
 #include <string>
@@ -20,11 +24,6 @@ bool g_checked_root = false;
 bool g_runtime_owner_updated = false;
 bool g_runtime_path_overridden = false;
 bool g_fix_config_dir_ownership_called = false;
-#ifdef _WIN32
-int g_start_with_password_result = 0;
-ecnuvpn::vpn::RuntimeStatusSnapshot g_runtime_snapshot;
-#endif
-
 } // namespace
 
 namespace ecnuvpn {
@@ -37,7 +36,7 @@ const ConfigDefaults &config_defaults() {
 
 } // namespace platform
 
-namespace utils {
+namespace platform {
 
 bool check_root() {
   g_checked_root = true;
@@ -51,24 +50,25 @@ std::string get_supervisor_pid_path() { return ""; }
 std::string get_route_ready_path() { return ""; }
 bool file_exists(const std::string &) { return false; }
 std::string read_file(const std::string &) { return ""; }
-std::string trim(const std::string &value) { return value; }
-void set_runtime_owner(uid_t, gid_t) { g_runtime_owner_updated = true; }
+void set_runtime_owner(unsigned int, unsigned int) {
+  g_runtime_owner_updated = true;
+}
 void set_runtime_path_override(const std::string &, const std::string &) {
   g_runtime_path_overridden = true;
 }
-bool fix_config_dir_ownership() {
+bool fix_runtime_config_dir_ownership() {
   g_fix_config_dir_ownership_called = true;
   return true;
 }
 
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 #ifdef _WIN32
 namespace ecnuvpn {
 namespace platform {
 
-nlohmann::json driver_status_json(const Config &) {
+nlohmann::json driver_status_json(const ConfigView &) {
   return nlohmann::json{{"effective_driver", "wintun"},
                         {"wintun_bundled", true}};
 }
@@ -80,19 +80,6 @@ void sleep_ms(unsigned int) {}
 
 } // namespace platform
 
-namespace vpn {
-
-int start_with_password(const Config &, const std::string &, int) {
-  return g_start_with_password_result;
-}
-
-RuntimeStatusSnapshot read_runtime_status_snapshot() {
-  return g_runtime_snapshot;
-}
-
-bool stop_direct_session() { return true; }
-
-} // namespace vpn
 } // namespace ecnuvpn
 #endif
 
@@ -146,23 +133,10 @@ int main() {
       "Windows runtime policy should remain an explicit no-op") &&
     ok;
 
-  g_start_with_password_result = 0;
-  g_runtime_snapshot = {};
-  g_runtime_snapshot.running = true;
-  g_runtime_snapshot.network_ready = true;
-  g_runtime_snapshot.pid = 101;
-  g_runtime_snapshot.interface_name = "ECNU-VPN";
-  g_runtime_snapshot.internal_ip = "10.0.0.2";
   nlohmann::json direct = ecnuvpn::platform::try_connect_direct_fallback(
-      ecnuvpn::Config{}, "secret");
-  ok = expect(direct.value("ok", false),
-              "Windows direct fallback should return success when vpn start succeeds") &&
-       ok;
-  ok = expect(direct.value("_direct_fallback", false),
-              "Windows direct fallback should mark direct fallback responses") &&
-       ok;
-  ok = expect(direct["_snapshot_data"].value("pid", -1) == 101,
-              "Windows direct fallback should expose runtime snapshot pid") &&
+      ecnuvpn::platform::ConfigView{}, "secret");
+  ok = expect(direct.empty(),
+              "Windows direct connect fallback should remain disabled") &&
        ok;
 #else
   ok = expect(g_checked_root,

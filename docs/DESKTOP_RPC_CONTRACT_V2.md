@@ -84,7 +84,7 @@ and serialized by `vpn_actions.cpp::phase_to_string()`.
 | `'resident'` | `helper::HelperMode::Resident` |
 | `'unknown'` | Fallback / not connected |
 
-### HelperV2Status (service.helper_status response)
+### HelperStatus (service.helper_status response)
 
 | TypeScript field | C++ JSON field | Type |
 |---|---|---|
@@ -327,7 +327,7 @@ All actions return an `RpcResponse` (defined in `src/core_api/app_rpc_dispatcher
 | `auth` | `cert_error` | no | CoreErrorMapper |
 | `auth` | `credential_expired` | no | CoreErrorMapper |
 | `helper` | `helper_unavailable` | no | CoreErrorMapper |
-| `helper` | `helper_version_mismatch` | no | CoreErrorMapper |
+| `helper` | `permission_denied` | no | CoreErrorMapper |
 | `helper` | `helper_timeout` | yes | CoreErrorMapper |
 | `os.route` | `route_failed` | no | CoreErrorMapper |
 | `os.dns` | `dns_failed` | no | CoreErrorMapper |

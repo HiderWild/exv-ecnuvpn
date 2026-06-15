@@ -1,7 +1,7 @@
 #pragma once
-#include "platform_network_ops.hpp"
-#include "helper_common/helper_client.hpp"
-#include "helper_common/helper_messages.hpp"
+#include "platform/common/platform_network_ops.hpp"
+#include "helper/common/helper_client.hpp"
+#include "helper/common/helper_messages.hpp"
 #include <memory>
 #include <string>
 

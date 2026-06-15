@@ -41,17 +41,33 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 
 if (-not $BuildDir)   { $BuildDir   = Join-Path $repoRoot "build" }
-if (-not $RuntimeDir) { $RuntimeDir = Join-Path $repoRoot "runtime" }
-
-$winRuntime = Join-Path $RuntimeDir "win32-x64"
-
 $exvExe        = Join-Path $BuildDir "exv.exe"
 $exvHelperExe  = Join-Path $BuildDir "exv-helper.exe"
+
+$script:RuntimeSearchDirs = New-Object System.Collections.Generic.List[string]
+function Add-RuntimeSearchDir {
+    param([string]$Path)
+    if (-not $Path) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    if (-not $script:RuntimeSearchDirs.Contains($resolved)) {
+        [void]$script:RuntimeSearchDirs.Add($resolved)
+    }
+}
+
+Add-RuntimeSearchDir $BuildDir
+Add-RuntimeSearchDir (Join-Path $BuildDir "windows\electron\bin")
+Add-RuntimeSearchDir (Join-Path $BuildDir "windows\electron\native\bin")
+Add-RuntimeSearchDir (Join-Path $BuildDir "windows\bin")
+if ($RuntimeDir) {
+    Add-RuntimeSearchDir $RuntimeDir
+    Add-RuntimeSearchDir (Join-Path $RuntimeDir "win32-x64")
+}
 
 Write-Host ""
 Write-Host "=== ECNU-VPN Windows Packaging Smoke Tests ===" -ForegroundColor Cyan
 Write-Host "Build dir:   $BuildDir"
-Write-Host "Runtime dir: $winRuntime"
+Write-Host "Runtime dirs: $($script:RuntimeSearchDirs -join '; ')"
 Write-Host ""
 
 # ── 1. Binary presence ───────────────────────────────────────────────────────
@@ -85,14 +101,13 @@ $requiredDlls = @(
 foreach ($dll in $requiredDlls) {
     # Check in build dir first, then runtime dir
     $found = $false
-    $searchPaths = @($BuildDir, $winRuntime)
-    foreach ($sp in $searchPaths) {
+    foreach ($sp in $script:RuntimeSearchDirs) {
         if (Test-Path (Join-Path $sp $dll)) { $found = $true; break }
     }
     if ($found) {
         Write-Check "S03.$dll" "$dll present" "PASS"
     } else {
-        Write-Check "S03.$dll" "$dll present" "FAIL" "Not found in $BuildDir or $winRuntime"
+        Write-Check "S03.$dll" "$dll present" "FAIL" "Not found in runtime search dirs"
     }
 }
 
@@ -165,7 +180,7 @@ if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
     try {
         $helloOutput = & $exvExe helper hello 2>&1
         $helloExit = $LASTEXITCODE
-        if ($helloExit -eq 0 -and $helloOutput -match "Hello|capabilities|server_version") {
+        if ($helloExit -eq 0 -and $helloOutput -match "Hello|capabilities") {
             Write-Check "S07" "Helper Hello handshake (IPC)" "PASS" "Output: $helloOutput"
         } else {
             Write-Check "S07" "Helper Hello handshake (IPC)" "FAIL" "Exit: $helloExit, Output: $helloOutput"
@@ -177,10 +192,10 @@ if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
     Write-Check "S07" "Helper Hello handshake (IPC)" "SKIP" "Helper service not running"
 }
 
-# ── 7. Helper V2 capabilities ────────────────────────────────────────────────
+# ── 7. Helper protocol capabilities ─────────────────────────────────────────
 
 Write-Host ""
-Write-Host "--- Helper V2 Capabilities ---" -ForegroundColor Yellow
+Write-Host "--- Helper Protocol Capabilities ---" -ForegroundColor Yellow
 
 if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
     try {
@@ -194,18 +209,18 @@ if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
                 if ($capsText -notmatch $cap) { $missing += $cap }
             }
             if ($missing.Count -eq 0) {
-                Write-Check "S08" "Helper V2 capabilities" "PASS" "All expected capabilities present"
+                Write-Check "S08" "Helper protocol capabilities" "PASS" "All expected capabilities present"
             } else {
-                Write-Check "S08" "Helper V2 capabilities" "FAIL" "Missing: $($missing -join ', ')"
+                Write-Check "S08" "Helper protocol capabilities" "FAIL" "Missing: $($missing -join ', ')"
             }
         } else {
-            Write-Check "S08" "Helper V2 capabilities" "FAIL" "Exit: $capsExit, Output: $capsOutput"
+            Write-Check "S08" "Helper protocol capabilities" "FAIL" "Exit: $capsExit, Output: $capsOutput"
         }
     } catch {
-        Write-Check "S08" "Helper V2 capabilities" "FAIL" "Exception: $_"
+        Write-Check "S08" "Helper protocol capabilities" "FAIL" "Exception: $_"
     }
 } else {
-    Write-Check "S08" "Helper V2 capabilities" "SKIP" "Helper service not running"
+    Write-Check "S08" "Helper protocol capabilities" "SKIP" "Helper service not running"
 }
 
 # ── 8. desktop-rpc status ────────────────────────────────────────────────────
@@ -229,26 +244,19 @@ if (Test-Path $exvExe) {
     Write-Check "S09" "desktop-rpc status" "SKIP" "exv.exe not found"
 }
 
-# ── 9. Uninstall script exists ───────────────────────────────────────────────
+# ── 9. Built-in uninstall command exists ─────────────────────────────────────
 
 Write-Host ""
-Write-Host "--- Uninstall Script ---" -ForegroundColor Yellow
-
-$uninstallPaths = @(
-    (Join-Path $repoRoot "scripts\install-windows.bat"),
-    (Join-Path $BuildDir "uninstall.bat")
-)
+Write-Host "--- Uninstall Mechanism ---" -ForegroundColor Yellow
 
 $foundUninstall = $false
-foreach ($up in $uninstallPaths) {
-    if (Test-Path $up) { $foundUninstall = $true; break }
-}
 
-# Also check if exv has a built-in uninstall command
-if ((Test-Path $exvExe) -and -not $foundUninstall) {
+if (Test-Path $exvExe) {
     try {
         $uninstallOutput = & $exvExe service uninstall --dry-run 2>&1
-        if ($LASTEXITCODE -eq 0 -or $uninstallOutput -match "uninstall") {
+        $uninstallText = $uninstallOutput -join " "
+        if ($LASTEXITCODE -eq 0 -or
+            ($uninstallText -and $uninstallText -notmatch "Unknown command|Run 'exv help'")) {
             $foundUninstall = $true
         }
     } catch { }
@@ -257,7 +265,7 @@ if ((Test-Path $exvExe) -and -not $foundUninstall) {
 if ($foundUninstall) {
     Write-Check "S10" "Uninstall mechanism available" "PASS"
 } else {
-    Write-Check "S10" "Uninstall mechanism available" "FAIL" "No uninstall script or built-in command found"
+    Write-Check "S10" "Uninstall mechanism available" "FAIL" "Built-in uninstall command is unavailable"
 }
 
 # ── Summary ──────────────────────────────────────────────────────────────────

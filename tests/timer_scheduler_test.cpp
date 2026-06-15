@@ -3,15 +3,21 @@
 // Verifies that the thread-based timer scheduler correctly fires callbacks
 // after the specified delay and honours cancel_all().
 
-#include "core/timer_scheduler.hpp"
+#include "core/tunnel_controller/timer_scheduler.hpp"
+#include "core/tunnel_controller/timing.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <vector>
+
+import exv.core.tunnel.timing;
+
+namespace timing_contract = exv::core::tunnel::timing;
 
 namespace {
 
@@ -25,6 +31,20 @@ bool expect(bool condition, const char* message) {
 
 int main() {
     bool ok = true;
+
+    // --- Timing module facade matches the production ConnectTiming constants ---
+    {
+        ok = expect(timing_contract::connect_stage_count() == 6,
+                    "timing module should export all connect stage constants") && ok;
+        ok = expect(std::string_view{timing_contract::connect_stage_name(0)} ==
+                        exv::core::ConnectTiming::HELPER_PREPARE,
+                    "timing module helper stage should match production constant") && ok;
+        ok = expect(std::string_view{timing_contract::connect_stage_name(5)} ==
+                        exv::core::ConnectTiming::FIRST_PACKET,
+                    "timing module first-packet stage should match production constant") && ok;
+        ok = expect(timing_contract::connect_stage_name(6) == nullptr,
+                    "timing module should reject out-of-range stage indexes") && ok;
+    }
 
     // --- Basic: single timer fires after delay ---
     {

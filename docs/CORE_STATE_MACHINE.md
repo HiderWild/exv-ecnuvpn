@@ -177,7 +177,7 @@ struct ReconnectDecision {
     bool should_retry;           // true = enter Reconnecting phase
     milliseconds delay;          // how long to wait before retry
     string reason_code;          // for logging/diagnostics
-    bool keep_helper_session;    // true = don't EndSession, reuse
+    bool keep_helper_session;    // true = reuse existing helper session
     bool keep_network_config;    // true = don't Cleanup, keep routes/DNS
 };
 ```

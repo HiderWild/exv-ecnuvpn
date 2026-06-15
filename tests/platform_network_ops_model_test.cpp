@@ -1,7 +1,10 @@
 #include "platform/common/route_model.hpp"
 #include "platform/common/dns_model.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -11,6 +14,14 @@ bool expect(bool condition, const char* message) {
         return true;
     std::cerr << "EXPECT FAILED: " << message << std::endl;
     return false;
+}
+
+std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in)
+        throw std::runtime_error("failed to open " + path.string());
+    return std::string(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
 }
 
 } // namespace
@@ -133,6 +144,86 @@ int main() {
         ok = expect(cfg.apply(apply_settings),
                     "stub apply should return true") && ok;
         ok = expect(cfg.restore("eth0"), "stub restore should return true") && ok;
+    }
+
+    // --- PlatformNetworkOps factory wiring ---
+    {
+        const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+        const auto source =
+            read_text_file(source_dir / "src" / "platform" / "common" /
+                           "platform_network_ops.cpp");
+        ok = expect(source.find("platform/darwin/platform_network_ops_darwin.hpp") !=
+                        std::string::npos,
+                    "factory source should include the Darwin backend") &&
+             ok;
+        ok = expect(source.find("return create_darwin_platform_network_ops();") !=
+                        std::string::npos,
+                    "Darwin PlatformNetworkOps::create must return a real backend") &&
+             ok;
+        ok = expect(source.find("platform/linux/platform_network_ops_linux.hpp") !=
+                        std::string::npos,
+                    "factory source should include the Linux backend") &&
+             ok;
+        ok = expect(source.find("return create_linux_platform_network_ops();") !=
+                        std::string::npos,
+                    "Linux PlatformNetworkOps::create must return a real backend") &&
+             ok;
+
+        const auto cmake = read_text_file(source_dir / "CMakeLists.txt");
+        ok = expect(cmake.find("src/platform/linux/platform_network_ops_linux.cpp") !=
+                        std::string::npos,
+                    "Linux PlatformNetworkOps backend must be in Linux platform sources") &&
+             ok;
+    }
+
+    // --- Linux PlatformNetworkOps durable cleanup facts ---
+    {
+        const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+        const auto linux_source =
+            read_text_file(source_dir / "src" / "platform" / "linux" /
+                           "platform_network_ops_linux.cpp");
+
+        ok = expect(linux_source.find("std::vector<ManagedNetworkResource> managed_resources() const override") !=
+                        std::string::npos,
+                    "Linux backend must export managed cleanup facts") &&
+             ok;
+        ok = expect(linux_source.find("\"adapter\"") != std::string::npos &&
+                        linux_source.find("\"linux_interface_config\"") !=
+                            std::string::npos &&
+                        linux_source.find("\"linux_route\"") != std::string::npos &&
+                        linux_source.find("\"linux_server_bypass_route\"") !=
+                            std::string::npos &&
+                        linux_source.find("\"linux_dns\"") != std::string::npos,
+                    "Linux backend must export adapter, interface, route, bypass, and DNS facts") &&
+             ok;
+        ok = expect(linux_source.find("resource.type == \"linux_route\"") !=
+                        std::string::npos,
+                    "Linux cleanup must consume linux_route facts") &&
+             ok;
+        ok = expect(linux_source.find("resource.type == \"linux_server_bypass_route\"") !=
+                        std::string::npos,
+                    "Linux cleanup must consume linux_server_bypass_route facts") &&
+             ok;
+        ok = expect(linux_source.find("resource.type == \"linux_dns\"") !=
+                        std::string::npos,
+                    "Linux cleanup must consume linux_dns facts") &&
+             ok;
+        ok = expect(linux_source.find("resource.type == \"route\"") ==
+                        std::string::npos,
+                    "Linux cleanup must not depend on generic route resource strings") &&
+             ok;
+
+        const auto route_cleanup =
+            linux_source.find("resource.type == \"linux_route\"");
+        const auto dns_cleanup = linux_source.find("resource.type == \"linux_dns\"");
+        const auto adapter_cleanup = linux_source.find("ip tuntap del dev ");
+        ok = expect(route_cleanup != std::string::npos &&
+                        dns_cleanup != std::string::npos &&
+                        adapter_cleanup != std::string::npos &&
+                        route_cleanup < dns_cleanup &&
+                        dns_cleanup < adapter_cleanup,
+                    "Linux cleanup order must be routes, DNS, then tunnel adapter") &&
+             ok;
     }
 
     return ok ? 0 : 1;

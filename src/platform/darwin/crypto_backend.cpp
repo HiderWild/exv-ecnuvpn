@@ -1,6 +1,6 @@
 #include "platform/common/crypto_backend.hpp"
 
-#include "logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <CommonCrypto/CommonCryptor.h>
 #include <CommonCrypto/CommonRandom.h>
@@ -38,7 +38,7 @@ bool encrypt_aes256_cbc(const std::string &plaintext,
       ciphertext->size(), &out_len);
 
   if (status != kCCSuccess) {
-    logger::error("AES encrypt failed, status: " + std::to_string(status));
+    exv::observability::LogFacade::error("AES encrypt failed, status: " + std::to_string(status));
     return false;
   }
 
@@ -61,7 +61,7 @@ bool decrypt_aes256_cbc(const uint8_t *ciphertext,
       iv, ciphertext, ciphertext_len, buffer.data(), buffer.size(), &out_len);
 
   if (status != kCCSuccess) {
-    logger::error("AES decrypt failed, status: " + std::to_string(status));
+    exv::observability::LogFacade::error("AES decrypt failed, status: " + std::to_string(status));
     return false;
   }
 

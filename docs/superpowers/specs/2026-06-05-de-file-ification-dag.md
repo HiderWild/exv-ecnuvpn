@@ -213,18 +213,18 @@ P1D ──┘                          │      │
 
 ### P3C: Clean Up Helper Daemon V1 File-Based State
 
-**Goal:** Helper daemon becomes purely a V2 session-based privileged operation executor. Remove all V1 actions that depend on PID files, route-ready, and native-session-state.json.
+**Goal:** Helper daemon becomes purely a session-based privileged operation executor. Remove old JSON actions that depend on PID files, route-ready, and native-session-state.json.
 
 **Modified files — `src/helper.cpp`:**
 Delete: `pid_path_for()`, `supervisor_pid_path_for()`, `route_ready_path_for()`, `clear_runtime_state()`, `read_pid_file()`, `read_route_ready()`, `is_process_alive()`, `find_openconnect_pid()`, `inspect_runtime()`, `save_session_state()`, `load_session_state()`, `clear_session_state()`, `clear_native_session_state_for_known_config_dirs()`, `stop_managed_session()`, `handle_start()`, `handle_stop()`, `handle_status()`, `make_status_response()`, `print_running_status()`, `create_request_file()`. In `handle_request()`: remove V1 action dispatch (start/stop/status). In `daemon_main()` accept loop: remove V1 request handling.
 
-Keep: V2 handler dispatch (`helper_v2_handler.hpp`), `make_hello_response()`, `make_helper_descriptor()`, `make_helper_capabilities()`, `make_error()`, `daemon_main()` IPC setup.
+Keep: helper handler dispatch (`helper_handler.hpp`), `make_hello_response()`, `make_helper_descriptor()`, `make_helper_capabilities()`, `make_error()`, `daemon_main()` IPC setup.
 
 **Modified files — `src/helper.hpp`:** Remove `start_via_helper()`, `stop_via_helper()`, `status_via_helper()` if present. Keep `is_available()`, `daemon_main()`, `worker_main()`, `install_service()`, `uninstall_service()`.
 
 **Dependencies:** P2A + P2B
 
-**Verification:** Helper daemon starts and responds to V2 Hello/StartSession. V1 actions return error or are removed. No references to PID files, route-ready, native-session-state.json in helper.cpp. Build succeeds.
+**Verification:** Helper daemon starts and responds to Hello/StartSession. Old JSON actions return error or are removed. No references to PID files, route-ready, native-session-state.json in helper.cpp. Build succeeds.
 
 **Files:** `src/helper.cpp`, `src/helper.hpp`
 
@@ -247,7 +247,7 @@ Keep: V2 handler dispatch (`helper_v2_handler.hpp`), `make_hello_response()`, `m
   - `service` subcommands → connect to core pipe → send service.* RPC → display → exit
 - CLI core-lazying: if pipe connect fails → spawn `exv --mode=core` → poll pipe → retry connect → proceed
 - Remove `desktop-rpc` / `desktop-rpc-file` / `desktop-rpc-file-output` entry points (Electron now uses stdin/stdout exclusively)
-- Remove `__helper-daemon`, `__tunnel-script`, `__helper-exec`, `__vpn-supervisor` entry points
+- Remove old hidden helper, tunnel-script, worker, and VPN supervisor entry points
 - Remove all WebUI foreground/background mode logic (`--foreground`, `-f` flag, fork/daemonize, SSE broadcaster instantiation)
 - Remove `webui_enabled`, `webui_port`, `webui_bind` config fields (or deprecate with warning)
 

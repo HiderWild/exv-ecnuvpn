@@ -1,8 +1,18 @@
-#include "core/engine_event_bridge.hpp"
+#include "core/tunnel_controller/engine_event_bridge.hpp"
+#include "observability/log_facade.hpp"
+#include "observability/log_sink.hpp"
+#include "observability/log_service.hpp"
 
+#include <algorithm>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
+
+import exv.core.tunnel.events;
+
+namespace events = exv::core::tunnel::events;
 
 namespace {
 
@@ -11,6 +21,31 @@ bool expect(bool condition, const char* message) {
         return true;
     std::cerr << "EXPECT FAILED: " << message << std::endl;
     return false;
+}
+
+class CapturingLogSink final : public exv::observability::LogSink {
+public:
+    void write(const exv::observability::LogEvent& event) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        logs_.push_back(event);
+    }
+
+    std::vector<exv::observability::LogEvent> logs() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return logs_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<exv::observability::LogEvent> logs_;
+};
+
+std::shared_ptr<CapturingLogSink> install_capturing_log_sink() {
+    auto sink = std::make_shared<CapturingLogSink>();
+    auto service = std::make_shared<exv::observability::LogService>();
+    service->add_sink(sink);
+    exv::observability::LogFacade::configure(service);
+    return sink;
 }
 
 } // namespace
@@ -23,39 +58,39 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("auth.succeeded", &out) &&
-                    out == exv::core::TunnelEventType::AuthSucceeded,
+                    out == events::TunnelEventType::AuthSucceeded,
                     "auth.succeeded -> AuthSucceeded") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("auth.failed", &out) &&
-                    out == exv::core::TunnelEventType::AuthFailed,
+                    out == events::TunnelEventType::AuthFailed,
                     "auth.failed -> AuthFailed") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("cstp.connected", &out) &&
-                    out == exv::core::TunnelEventType::CstpConnected,
+                    out == events::TunnelEventType::CstpConnected,
                     "cstp.connected -> CstpConnected") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("packet.loop.started", &out) &&
-                    out == exv::core::TunnelEventType::PacketLoopStarted,
+                    out == events::TunnelEventType::PacketLoopStarted,
                     "packet.loop.started -> PacketLoopStarted") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("transport.closed", &out) &&
-                    out == exv::core::TunnelEventType::TransportClosed,
+                    out == events::TunnelEventType::TransportClosed,
                     "transport.closed -> TransportClosed") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("packet_device.failed", &out) &&
-                    out == exv::core::TunnelEventType::PacketDeviceFailed,
+                    out == events::TunnelEventType::PacketDeviceFailed,
                     "packet_device.failed -> PacketDeviceFailed") && ok;
     }
 
@@ -64,17 +99,17 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(!exv::core::EngineEventBridge::map_event("unknown.event", &out),
                     "unknown.event -> false") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(!exv::core::EngineEventBridge::map_event("auth.started", &out),
                     "auth.started -> false (not mapped)") && ok;
     }
     {
-        exv::core::TunnelEventType out{};
+        events::TunnelEventType out{};
         ok = expect(!exv::core::EngineEventBridge::map_event("packet.inbound", &out),
                     "packet.inbound -> false (not mapped)") && ok;
     }
@@ -84,9 +119,9 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        std::vector<exv::core::TunnelEventType> received;
+        std::vector<events::TunnelEventType> received;
         exv::core::EngineEventBridge bridge(
-            [&](exv::core::TunnelEvent e) { received.push_back(e.type); });
+            [&](events::TunnelEvent e) { received.push_back(e.type); });
 
         ecnuvpn::vpn_engine::VpnEngineEvent ev1;
         ev1.type = "auth.succeeded";
@@ -97,9 +132,9 @@ int main() {
         bridge.emit(ev2);
 
         ok = expect(received.size() == 2, "callback invoked twice") && ok;
-        ok = expect(received[0] == exv::core::TunnelEventType::AuthSucceeded,
+        ok = expect(received[0] == events::TunnelEventType::AuthSucceeded,
                     "first event is AuthSucceeded") && ok;
-        ok = expect(received[1] == exv::core::TunnelEventType::CstpConnected,
+        ok = expect(received[1] == events::TunnelEventType::CstpConnected,
                     "second event is CstpConnected") && ok;
     }
 
@@ -110,7 +145,7 @@ int main() {
     {
         int call_count = 0;
         exv::core::EngineEventBridge bridge(
-            [&](exv::core::TunnelEvent) { ++call_count; });
+            [&](events::TunnelEvent) { ++call_count; });
 
         ecnuvpn::vpn_engine::VpnEngineEvent ev;
         ev.type = "native.starting";
@@ -124,9 +159,9 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        std::vector<exv::core::TunnelEventType> received;
+        std::vector<events::TunnelEventType> received;
         exv::core::EngineEventBridge bridge(
-            [&](exv::core::TunnelEvent e) { received.push_back(e.type); });
+            [&](events::TunnelEvent e) { received.push_back(e.type); });
 
         const char* types[] = {
             "auth.succeeded",
@@ -143,17 +178,17 @@ int main() {
         }
 
         ok = expect(received.size() == 6, "all 6 mapped types received") && ok;
-        ok = expect(received[0] == exv::core::TunnelEventType::AuthSucceeded,
+        ok = expect(received[0] == events::TunnelEventType::AuthSucceeded,
                     "index 0: AuthSucceeded") && ok;
-        ok = expect(received[1] == exv::core::TunnelEventType::AuthFailed,
+        ok = expect(received[1] == events::TunnelEventType::AuthFailed,
                     "index 1: AuthFailed") && ok;
-        ok = expect(received[2] == exv::core::TunnelEventType::CstpConnected,
+        ok = expect(received[2] == events::TunnelEventType::CstpConnected,
                     "index 2: CstpConnected") && ok;
-        ok = expect(received[3] == exv::core::TunnelEventType::PacketLoopStarted,
+        ok = expect(received[3] == events::TunnelEventType::PacketLoopStarted,
                     "index 3: PacketLoopStarted") && ok;
-        ok = expect(received[4] == exv::core::TunnelEventType::TransportClosed,
+        ok = expect(received[4] == events::TunnelEventType::TransportClosed,
                     "index 4: TransportClosed") && ok;
-        ok = expect(received[5] == exv::core::TunnelEventType::PacketDeviceFailed,
+        ok = expect(received[5] == events::TunnelEventType::PacketDeviceFailed,
                     "index 5: PacketDeviceFailed") && ok;
     }
 
@@ -167,6 +202,72 @@ int main() {
         ev.type = "auth.succeeded";
         bridge.emit(ev);  // Should not crash
         ok = expect(true, "null callback does not crash") && ok;
+    }
+
+    // ---------------------------------------------------------------
+    // 7. emit(): lifecycle events publish user-facing engine logs,
+    //    while packet/DPD noise is filtered out.
+    // ---------------------------------------------------------------
+
+    {
+        auto log_sink = install_capturing_log_sink();
+
+        exv::core::EngineEventBridge bridge(nullptr);
+        const char* log_worthy_types[] = {
+            "native.starting",
+            "auth.started",
+            "auth.succeeded",
+            "auth.failed",
+            "cstp.connected",
+            "cstp.failed",
+            "packet.loop.started",
+            "packet_device.failed",
+            "transport.closed",
+            "packet.loop.stopped",
+            "reconnect.scheduled",
+            "reconnect.started"
+        };
+        for (const char* t : log_worthy_types) {
+            ecnuvpn::vpn_engine::VpnEngineEvent ev;
+            ev.type = t;
+            ev.message = std::string("message for ") + t;
+            ev.fields.emplace("phase", "test_phase");
+            bridge.emit(ev);
+        }
+
+        const char* noisy_types[] = {
+            "packet.inbound",
+            "packet.outbound",
+            "dpd.sent",
+            "dpd.received",
+            "dpd.timeout"
+        };
+        for (const char* t : noisy_types) {
+            ecnuvpn::vpn_engine::VpnEngineEvent ev;
+            ev.type = t;
+            bridge.emit(ev);
+        }
+
+        exv::observability::LogFacade::flush();
+        auto logs = log_sink->logs();
+        exv::observability::LogFacade::shutdown();
+
+        ok = expect(logs.size() == 12,
+                    "lifecycle events should log and noisy events should not") && ok;
+        for (const char* t : log_worthy_types) {
+            const bool found = std::any_of(logs.begin(), logs.end(),
+                [&](const exv::observability::LogEvent& event) {
+                    return event.component == "engine" && event.code == t;
+                });
+            ok = expect(found, (std::string("engine log emitted for ") + t).c_str()) && ok;
+        }
+        const bool noisy_logged = std::any_of(logs.begin(), logs.end(),
+            [](const exv::observability::LogEvent& event) {
+                return event.code == "packet.inbound" ||
+                       event.code == "packet.outbound" ||
+                       event.code.rfind("dpd.", 0) == 0;
+            });
+        ok = expect(!noisy_logged, "packet and DPD events should not log") && ok;
     }
 
     return ok ? 0 : 1;

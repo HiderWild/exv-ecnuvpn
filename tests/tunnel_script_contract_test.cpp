@@ -1,9 +1,13 @@
-#include "config.hpp"
-#include "logger.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
+#include "core/config/config.hpp"
+#include "common/diagnostics/logger.hpp"
 #include "platform/common/tunnel_script.hpp"
 #include "platform/common/config_defaults.hpp"
-#include "tunnel.hpp"
-#include "utils.hpp"
+#include "core/vpn/openconnect_tunnel_script.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -53,13 +57,7 @@ void show_logs(int) {}
 
 } // namespace logger
 
-namespace utils {
-
-void print_success(const std::string &) {}
-void print_error(const std::string &) {}
-void print_info(const std::string &) {}
-void print_warning(const std::string &) {}
-void print_header(const std::string &) {}
+namespace platform {
 
 std::string expand_home(const std::string &path) { return path; }
 std::string get_redirect_path() { return ""; }
@@ -72,20 +70,20 @@ std::string get_tunnel_path() { return ""; }
 std::string get_supervisor_pid_path() { return ""; }
 std::string get_route_ready_path() { return "route-ready"; }
 std::string get_effective_home() { return ""; }
-std::string get_home_for_uid(uid_t) { return ""; }
-std::string get_username_for_uid(uid_t) { return ""; }
-std::string get_config_dir_for_uid(uid_t) { return ""; }
+std::string get_home_for_uid(unsigned int) { return ""; }
+std::string get_username_for_uid(unsigned int) { return ""; }
+std::string get_config_dir_for_uid(unsigned int) { return ""; }
 void set_runtime_path_override(const std::string &, const std::string &) {}
 void clear_runtime_path_override() {}
-void set_runtime_owner(uid_t, gid_t) {}
+void set_runtime_owner(unsigned int, unsigned int) {}
 void clear_runtime_owner() {}
 bool has_runtime_owner() { return false; }
-uid_t get_runtime_owner_uid() { return 0; }
-gid_t get_runtime_owner_gid() { return 0; }
+unsigned int get_runtime_owner_uid() { return 0; }
+unsigned int get_runtime_owner_gid() { return 0; }
 bool sync_owner(const std::string &) { return true; }
 std::string get_executable_path() { return ""; }
 
-bool fix_config_dir_ownership() { return true; }
+bool fix_runtime_config_dir_ownership() { return true; }
 
 bool file_exists(const std::string &) { return false; }
 bool ensure_dir(const std::string &) { return true; }
@@ -108,11 +106,8 @@ int run_command(const std::string &cmd) {
 }
 std::string run_command_output(const std::string &) { return ""; }
 std::string shell_quote(const std::string &value) { return "'" + value + "'"; }
-std::vector<std::string> split_lines(const std::string &) { return {}; }
 
-std::string trim(const std::string &s) { return s; }
-
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 int main() {

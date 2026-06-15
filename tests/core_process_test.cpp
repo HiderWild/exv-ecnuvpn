@@ -2,12 +2,12 @@
 // for `exv --mode=core` correctly handles status.get and other core-exclusive
 // actions, and that status event callbacks produce valid JSON.
 
-#include "core/tunnel_controller.hpp"
-#include "core/tunnel_state.hpp"
-#include "core/tunnel_intent.hpp"
-#include "core/reconnect_policy.hpp"
-#include "core_api/app_rpc_dispatcher.hpp"
-#include "core_api/core_api_setup.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
+#include "core/rpc/app_rpc_dispatcher.hpp"
+#include "core/rpc/core_api_setup.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -105,19 +105,9 @@ static void register_core_exclusive_actions(
             return resp;
         });
 
-    dispatcher.register_handler("service.status",
-        [&dispatcher](const RpcRequest& req) -> RpcResponse {
-            RpcRequest aliased = req;
-            aliased.action = "service.helper_status";
-            return dispatcher.dispatch(aliased);
-        });
-
-    dispatcher.register_handler("drivers.status",
-        [&dispatcher](const RpcRequest& req) -> RpcResponse {
-            RpcRequest aliased = req;
-            aliased.action = "service.driver_status";
-            return dispatcher.dispatch(aliased);
-        });
+    // service.status and drivers.status are registered by core_api_setup.
+    // Do not overwrite them here; the test should exercise production
+    // AppRpcDispatcher wiring.
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +201,8 @@ int main() {
         auto data = json::parse(resp.payload_json);
         ok = expect(data.contains("installed"),
                     "service.status response should contain installed field") && ok;
+        ok = expect(data.contains("running"),
+                    "service.status response should contain running field") && ok;
     }
 
     // ---- Test 5: drivers.status delegates to service.driver_status ----
@@ -223,8 +215,9 @@ int main() {
         ok = expect(resp.success, "drivers.status should succeed") && ok;
 
         auto data = json::parse(resp.payload_json);
-        ok = expect(data.contains("installed"),
-                    "drivers.status response should contain installed field") && ok;
+        ok = expect(data.contains("effective_driver_status") ||
+                    data.contains("supported"),
+                    "drivers.status response should contain real driver status fields") && ok;
     }
 
     // ---- Test 6: status callback produces valid JSON ----

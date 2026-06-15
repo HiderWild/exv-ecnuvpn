@@ -28,6 +28,9 @@ jobs:
       - name: Build webui
         working-directory: webui
         run: pnpm run build
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: Configure
         run: cmake --preset windows-release
       - name: Build
@@ -42,7 +45,7 @@ jobs:
       - name: Test (release-blocking gate)
         run: ctest --preset windows-release --output-on-failure -L release-blocking
       - name: Test (architecture invariants gate)
-        run: ctest --test-dir build-windows/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_v2_contract_test|no_secret_in_argv_test|no_secret_in_logs_test)"
+        run: ctest --test-dir build-windows/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_contract_test|helper_module_smoke_test|no_secret_in_argv_test|no_secret_in_logs_test)"
       - name: Test (env-sensitive, informational)
         if: always()
         continue-on-error: true
@@ -63,6 +66,9 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-latest
+    env:
+      CC: gcc-14
+      CXX: g++-14
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -76,7 +82,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev
+          sudo apt-get install -y build-essential cmake gcc-14 g++-14 libssl-dev ninja-build
       - name: Install webui deps
         working-directory: webui
         run: pnpm install --frozen-lockfile
@@ -95,7 +101,7 @@ jobs:
       - name: Test (release-blocking gate)
         run: ctest --preset linux-release --output-on-failure -L release-blocking
       - name: Test (architecture invariants gate)
-        run: ctest --test-dir build/linux/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_v2_contract_test|no_secret_in_argv_test|no_secret_in_logs_test)"
+        run: ctest --test-dir build/linux/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_contract_test|helper_module_smoke_test|no_secret_in_argv_test|no_secret_in_logs_test)"
       - name: Test (env-sensitive, informational)
         if: always()
         continue-on-error: true
@@ -118,9 +124,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-13
+          - os: macos-15-intel
             label: intel
-          - os: macos-latest
+          - os: macos-15
             label: arm64
     runs-on: ${{ matrix.os }}
     steps:
@@ -142,6 +148,13 @@ jobs:
       - name: Build webui
         working-directory: webui
         run: pnpm run build
+      - name: Install native build dependencies
+        run: brew install llvm ninja
+      - name: Configure native compiler
+        run: |
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> "$GITHUB_ENV"
       - name: Configure
         run: cmake --preset macos-release
       - name: Build
@@ -151,7 +164,7 @@ jobs:
       - name: Test (release-blocking gate)
         run: ctest --preset macos-release --output-on-failure -L release-blocking
       - name: Test (architecture invariants gate)
-        run: ctest --test-dir build/macos/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_v2_contract_test|no_secret_in_argv_test|no_secret_in_logs_test)"
+        run: ctest --test-dir build/macos/cpp --output-on-failure -R "(tunnel_controller_state_machine_test|reconnect_policy_test|helper_contract_test|helper_module_smoke_test|no_secret_in_argv_test|no_secret_in_logs_test)"
       - name: Test (env-sensitive, informational)
         if: always()
         continue-on-error: true

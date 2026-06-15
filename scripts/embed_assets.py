@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Embed webui/dist/ files into a C++ header for self-contained builds.
 
-Generates src/webui_assets.hpp with:
+Generates build/generated/webui_assets.hpp with:
   - constexpr std::string_view for each text file's content
   - unsigned char hex arrays for binary files
   - MIME type map
@@ -15,7 +15,10 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(__file__)
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-OUTPUT = os.path.join(REPO_ROOT, "src", "webui_assets.hpp")
+OUTPUT = os.environ.get(
+    "ECNUVPN_WEBUI_ASSETS_OUTPUT",
+    os.path.join(REPO_ROOT, "build", "generated", "webui_assets.hpp"),
+)
 
 MIME_TYPES = {
     ".html": "text/html",

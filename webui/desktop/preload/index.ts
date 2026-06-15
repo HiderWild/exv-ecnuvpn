@@ -4,13 +4,12 @@ import {
   desktopDriverInstallTargets,
   desktopEventTypes,
   desktopIpcChannels,
-  desktopServiceCommands,
+  SERVICE_ACTIONS,
   type DesktopCliCommand,
   type DesktopDriverInstallTarget,
   type DesktopEventType,
   type DesktopModalPayload,
   type DesktopRpcAction,
-  type DesktopServiceCommand,
   type DesktopServiceInstallPromptResult,
   type DesktopWindowMode,
 } from '../shared/desktop-contract.js'
@@ -20,7 +19,6 @@ type EventHandler = (event: { type: DesktopEventType; data: unknown }) => void
 void desktopDriverInstallTargets
 void desktopCliCommands
 void desktopEventTypes
-void desktopServiceCommands
 
 function rpc(action: DesktopRpcAction, payload?: unknown) {
   return ipcRenderer.invoke(desktopIpcChannels.rpc, action, payload ?? {})
@@ -59,8 +57,8 @@ const api = {
   },
   service: {
     status: () => rpc('service.status'),
-    install: () => ipcRenderer.invoke(desktopIpcChannels.serviceCommand, 'install' satisfies DesktopServiceCommand),
-    uninstall: () => ipcRenderer.invoke(desktopIpcChannels.serviceCommand, 'uninstall' satisfies DesktopServiceCommand),
+    install: () => rpc(SERVICE_ACTIONS.INSTALL),
+    uninstall: () => rpc(SERVICE_ACTIONS.UNINSTALL),
   },
   cli: {
     status: () => ipcRenderer.invoke(desktopIpcChannels.cliCommand, 'status' satisfies DesktopCliCommand),
@@ -102,6 +100,10 @@ const api = {
       ipcRenderer.on(desktopIpcChannels.event, listener)
       return () => ipcRenderer.removeListener(desktopIpcChannels.event, listener)
     },
+  },
+  core: {
+    restart: () => ipcRenderer.invoke('core:restart'),
+    quit: () => ipcRenderer.invoke('core:quit'),
   },
 }
 
