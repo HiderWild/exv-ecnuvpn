@@ -1557,6 +1557,21 @@ target_compile_definitions(core_architecture_contract_test PRIVATE
 
 add_test(NAME core_architecture_contract_test COMMAND core_architecture_contract_test)
 
+add_executable(base_observability_architecture_test
+    tests/base_observability_architecture_test.cpp
+)
+
+target_include_directories(base_observability_architecture_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(base_observability_architecture_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME base_observability_architecture_test COMMAND base_observability_architecture_test)
+
 add_test(
     NAME contract_generation_check
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate_contracts.py --check
