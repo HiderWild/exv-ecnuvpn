@@ -896,6 +896,16 @@ target_include_directories(ui_shell_core_rpc_client_test PRIVATE
 
 add_test(NAME ui_shell_core_rpc_client_test COMMAND ui_shell_core_rpc_client_test)
 
+add_executable(ui_shell_cmake_policy_test
+    tests/ui_shell_cmake_policy_test.cpp
+)
+
+target_compile_definitions(ui_shell_cmake_policy_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME ui_shell_cmake_policy_test COMMAND ui_shell_cmake_policy_test)
+
 if(WIN32)
     add_executable(win32_webview2_runtime_test
         tests/win32_webview2_runtime_test.cpp
@@ -954,6 +964,12 @@ if(WIN32)
             message(FATAL_ERROR "WEBVIEW2_SDK_DIR does not contain a WebView2Loader library")
         endif()
     endif()
+elseif(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(WEBKITGTK REQUIRED webkit2gtk-4.1 gtk+-3.0)
+endif()
+
+if(WIN32)
 
     list(APPEND EXV_UI_PLATFORM_SOURCES
         src/platform/win32/ui_shell/webview2_host_win32.cpp
@@ -986,6 +1002,15 @@ if(WIN32)
         target_include_directories(exv-ui PRIVATE "${WEBVIEW2_INCLUDE_DIR}")
         target_link_libraries(exv-ui PRIVATE "${WEBVIEW2_LOADER_LIBRARY}")
     endif()
+elseif(APPLE AND EXV_BUILD_UI_SHELL)
+    target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
+    target_link_libraries(exv-ui PRIVATE "-framework Cocoa" "-framework WebKit")
+elseif(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)
+    target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
+    target_include_directories(exv-ui PRIVATE ${WEBKITGTK_INCLUDE_DIRS})
+    target_link_directories(exv-ui PRIVATE ${WEBKITGTK_LIBRARY_DIRS})
+    target_compile_options(exv-ui PRIVATE ${WEBKITGTK_CFLAGS_OTHER})
+    target_link_libraries(exv-ui PRIVATE ${WEBKITGTK_LIBRARIES})
 endif()
 
 add_executable(crypto_roundtrip_test
@@ -2155,6 +2180,7 @@ set(_release_blocking_tests
     repository_hygiene_test
     ui_shell_contract_test
     ui_shell_core_rpc_client_test
+    ui_shell_cmake_policy_test
     crypto_roundtrip_test
     native_url_test
     native_cstp_frame_test
