@@ -201,7 +201,8 @@ static bool wait_for_response_count(CaptureOutputBuf& buf, size_t min_count,
         auto parsed = parse_json_lines(buf.get_all());
         size_t responses = 0;
         for (const auto& item : parsed) {
-            if (item.is_object() && item.contains("id")) {
+            if (item.is_object() && (item.contains("id") ||
+                                     item.contains("request_id"))) {
                 ++responses;
             }
         }
@@ -214,6 +215,14 @@ static bool wait_for_response_count(CaptureOutputBuf& buf, size_t min_count,
 static json find_by_id(const std::vector<json>& responses, int id) {
     for (auto& r : responses) {
         if (r.value("id", -1) == id) return r;
+    }
+    return json();
+}
+
+static json find_by_request_id(const std::vector<json>& responses,
+                               const std::string& request_id) {
+    for (auto& r : responses) {
+        if (r.value("request_id", std::string()) == request_id) return r;
     }
     return json();
 }
@@ -326,6 +335,57 @@ int main() {
                    "E2.1a: desktop status payload has connected field");
         }
         expect(cr.rc == 0, "E2.1a: exit code 0");
+    }
+
+    // =======================================================================
+    // E2.1a-native — core native envelope routes through AppRpcDispatcher
+    // =======================================================================
+    {
+        std::cerr << "[E2.1a-native] native core envelope dispatch\n";
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(config_dir, home_dir);
+
+        in_buf.feed(R"({"request_id":"native-1","action":"vpn.status","payload_json":"{}"})" "\n");
+        in_buf.feed(R"({"request_id":"native-2","action":"missing.native","payload_json":"{}"})" "\n");
+
+        expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
+               "E2.1a-native: should receive native responses");
+
+        std::raise(SIGTERM);
+        in_buf.close_input();
+        cr.join();
+
+        auto all = parse_json_lines(out_buf.read_all());
+        auto status_resp = find_by_request_id(all, "native-1");
+        auto unknown_resp = find_by_request_id(all, "native-2");
+
+        expect(!status_resp.is_null(),
+               "E2.1a-native: vpn.status response exists");
+        if (!status_resp.is_null()) {
+            expect(status_resp.value("success", false),
+                   "E2.1a-native: vpn.status success=true");
+        }
+        if (!status_resp.is_null() && status_resp.contains("payload_json")) {
+            auto payload = json::parse(status_resp["payload_json"].get<std::string>());
+            expect(payload.value("phase", std::string()) == "idle",
+                   "E2.1a-native: vpn.status payload phase is idle");
+        }
+
+        expect(!unknown_resp.is_null(),
+               "E2.1a-native: unknown native response exists");
+        if (!unknown_resp.is_null()) {
+            expect(unknown_resp.value("success", true) == false,
+                   "E2.1a-native: unknown native action fails");
+            expect(unknown_resp.value("error_code", std::string()) == "unknown_action",
+                   "E2.1a-native: unknown native action keeps native error code");
+        }
+        expect(cr.rc == 0, "E2.1a-native: exit code 0");
     }
 
     // =======================================================================

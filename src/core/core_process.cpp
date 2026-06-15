@@ -5,6 +5,9 @@
 #include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
 #include "core/app_api/app_api.hpp"
+#include "core/rpc/core_api_setup.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -113,9 +116,73 @@ static json handle_desktop_request_json(const json& request) {
     return desktop_action_response(id, action, payload);
 }
 
-static std::string handle_desktop_request_line(const std::string& request_line) {
+static bool is_native_core_request(const json& request) {
+    return request.contains("request_id") || request.contains("payload_json") ||
+           request.value("envelope", std::string()) == "core";
+}
+
+static json native_core_response(exv::core_api::AppRpcDispatcher& dispatcher,
+                                 const json& request) {
+    std::string action = request.value("action", std::string());
+    std::string request_id = request.value("request_id", std::string());
+    if (action.empty()) {
+        return {
+            {"request_id", request_id},
+            {"success", false},
+            {"error_code", "missing_action"},
+            {"error_message", "Request must contain an 'action' field"}
+        };
+    }
+
+    exv::core_api::RpcRequest rpc_request;
+    rpc_request.action = action;
+    rpc_request.request_id = request_id;
+    if (request.contains("payload_json")) {
+        const json& payload_json = request.at("payload_json");
+        rpc_request.payload_json =
+            payload_json.is_string() ? payload_json.get<std::string>()
+                                     : payload_json.dump();
+    } else if (request.contains("payload")) {
+        rpc_request.payload_json = request.at("payload").dump();
+    } else {
+        rpc_request.payload_json = "{}";
+    }
+
+    exv::core_api::RpcResponse rpc_response =
+        dispatcher.dispatch(rpc_request);
+
+    json response = {
+        {"request_id", rpc_response.request_id},
+        {"success", rpc_response.success}
+    };
+    if (rpc_response.success) {
+        response["payload_json"] =
+            rpc_response.payload_json.empty() ? "{}" : rpc_response.payload_json;
+    } else {
+        response["error_code"] = rpc_response.error_code;
+        response["error_message"] = rpc_response.error_message;
+    }
+    return response;
+}
+
+// Supported request envelopes:
+// - Desktop envelope: id/action/payload -> id/ok/data or id/ok/code/message.
+//   This keeps Electron and CLI pipe clients on the legacy app_api surface.
+// - Core native envelope: action/payload_json/request_id ->
+//   success/payload_json or error_code/error_message.  This routes through
+//   AppRpcDispatcher while sharing the same use-case services as desktop.
+static json handle_request_json(exv::core_api::AppRpcDispatcher& dispatcher,
+                                const json& request) {
+    if (is_native_core_request(request)) {
+        return native_core_response(dispatcher, request);
+    }
+    return handle_desktop_request_json(request);
+}
+
+static std::string handle_request_line(exv::core_api::AppRpcDispatcher& dispatcher,
+                                       const std::string& request_line) {
     try {
-        return handle_desktop_request_json(json::parse(request_line)).dump();
+        return handle_request_json(dispatcher, json::parse(request_line)).dump();
     } catch (const json::parse_error& e) {
         json err = {
             {"id", 0},
@@ -209,6 +276,15 @@ int core_process_main(const std::string& config_dir,
         }
     );
 
+    auto controller = std::make_shared<TunnelController>(
+        std::shared_ptr<exv::helper::HelperClient>{},
+        std::shared_ptr<exv::platform::PlatformNetworkOps>{},
+        ReconnectConfig{});
+    auto native_dispatcher = exv::core_api::create_dispatcher(controller);
+    auto dispatch_line = [&](const std::string& request_line) {
+        return handle_request_line(*native_dispatcher, request_line);
+    };
+
     // 5. Create pipe listener for CLI connections (also serves as single-instance guard).
     auto pipe_listener = std::make_unique<PipeIpcListener>(core_pipe_path());
     if (!pipe_listener->start()) {
@@ -233,7 +309,7 @@ int core_process_main(const std::string& config_dir,
     } else {
         pipe_worker = std::thread([&] {
             while (!pipe_worker_stop.load() && !g_stop_requested.load()) {
-                pipe_listener->accept_one(handle_desktop_request_line);
+                pipe_listener->accept_one(dispatch_line);
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         });
@@ -242,7 +318,7 @@ int core_process_main(const std::string& config_dir,
     while (!g_stop_requested.load()) {
         // In daemon mode, just process pipe connections in a loop
         if (!stdin_available) {
-            pipe_listener->accept_one(handle_desktop_request_line);
+            pipe_listener->accept_one(dispatch_line);
             // Sleep briefly to avoid busy-waiting
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -257,7 +333,7 @@ int core_process_main(const std::string& config_dir,
         // Skip empty lines
         if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos) {
             // Process pipe connections even on empty lines
-            pipe_listener->accept_one(handle_desktop_request_line);
+            pipe_listener->accept_one(dispatch_line);
             continue;
         }
 
@@ -265,7 +341,7 @@ int core_process_main(const std::string& config_dir,
 
         try {
             json request = json::parse(line);
-            response = handle_desktop_request_json(request);
+            response = handle_request_json(*native_dispatcher, request);
         } catch (const json::parse_error& e) {
             response = {
                 {"id",      0},

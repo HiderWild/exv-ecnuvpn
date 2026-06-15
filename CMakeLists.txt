@@ -1257,7 +1257,7 @@ target_include_directories(core_process_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_link_libraries(core_process_test PRIVATE exv-core)
+target_link_libraries(core_process_test PRIVATE exv-core exv-helper-runtime)
 
 add_test(NAME core_process_test COMMAND core_process_test)
 
