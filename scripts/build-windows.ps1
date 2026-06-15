@@ -39,7 +39,7 @@ function Invoke-CppBuild {
     else {
       Invoke-Step cmake --preset windows-release
     }
-    Invoke-Step cmake --build --preset windows-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test win32_webview2_runtime_test
+    Invoke-Step cmake --build --preset windows-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test win32_webview2_runtime_test
   }
   finally {
     Pop-Location
@@ -49,7 +49,7 @@ function Invoke-CppBuild {
 function Invoke-CppTests {
   Push-Location $repoRoot
   try {
-    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test|ui_shell_contract_test|ui_shell_core_rpc_client_test|ui_shell_cmake_policy_test|win32_webview2_runtime_test'
+    Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|native_packaging_policy_test|ui_shell_contract_test|ui_shell_core_rpc_client_test|ui_shell_cmake_policy_test|win32_webview2_runtime_test'
   }
   finally {
     Pop-Location

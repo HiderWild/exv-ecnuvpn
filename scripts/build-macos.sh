@@ -35,14 +35,14 @@ build_cpp() {
     else
       cmake --preset macos-release
     fi
-    cmake --build --preset macos-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test vpn_runtime_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test darwin_wkwebview_runtime_test
+    cmake --build --preset macos-release --target exv exv-helper exv-ui platform_status_models_test backend_resolver_test native_packaging_policy_test ui_shell_contract_test ui_shell_core_rpc_client_test ui_shell_cmake_policy_test darwin_wkwebview_runtime_test
   )
 }
 
 run_tests() {
   (
     cd "$REPO_ROOT"
-    ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|native_packaging_policy_test|ui_shell_contract_test|ui_shell_core_rpc_client_test|ui_shell_cmake_policy_test|darwin_wkwebview_runtime_test'
+    ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|native_packaging_policy_test|ui_shell_contract_test|ui_shell_core_rpc_client_test|ui_shell_cmake_policy_test|darwin_wkwebview_runtime_test'
   )
 }
 

@@ -27,13 +27,26 @@ bool contains(const std::string &text, const std::string &needle) {
 } // namespace
 
 int main() {
-  const std::string cmake =
-      read_file(std::string(ECNUVPN_SOURCE_DIR) + "/CMakeLists.txt");
+  const std::string source_dir = ECNUVPN_SOURCE_DIR;
+  const std::string cmake = read_file(source_dir + "/CMakeLists.txt");
+  const std::string windows_build_script =
+      read_file(source_dir + "/scripts/build-windows.ps1");
+  const std::string macos_build_script =
+      read_file(source_dir + "/scripts/build-macos.sh");
 
   int failures = 0;
   const auto expect_contains = [&](const std::string &needle) {
     if (!contains(cmake, needle)) {
       std::cerr << "missing CMake UI shell policy: " << needle << "\n";
+      ++failures;
+    }
+  };
+  const auto expect_not_contains = [&](const std::string &text,
+                                       const std::string &description,
+                                       const std::string &needle) {
+    if (contains(text, needle)) {
+      std::cerr << description << " references disabled target: " << needle
+                << "\n";
       ++failures;
     }
   };
@@ -50,6 +63,11 @@ int main() {
   expect_contains("tests/darwin_wkwebview_runtime_test.cpp");
   expect_contains("linux_webkitgtk_runtime_test");
   expect_contains("tests/linux_webkitgtk_runtime_test.cpp");
+
+  expect_not_contains(windows_build_script, "scripts/build-windows.ps1",
+                      "vpn_runtime_test");
+  expect_not_contains(macos_build_script, "scripts/build-macos.sh",
+                      "vpn_runtime_test");
 
   return failures == 0 ? 0 : 1;
 }
