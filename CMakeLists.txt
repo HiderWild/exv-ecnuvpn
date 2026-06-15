@@ -1517,6 +1517,21 @@ target_compile_definitions(contract_manifest_test PRIVATE
 
 add_test(NAME contract_manifest_test COMMAND contract_manifest_test)
 
+add_executable(core_architecture_contract_test
+    tests/core_architecture_contract_test.cpp
+)
+
+target_include_directories(core_architecture_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(core_architecture_contract_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME core_architecture_contract_test COMMAND core_architecture_contract_test)
+
 add_test(
     NAME contract_generation_check
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate_contracts.py --check
@@ -1824,6 +1839,7 @@ set(_release_blocking_tests
     route_actions_test
     error_contract_test
     contract_manifest_test
+    core_architecture_contract_test
     contract_generation_check
     helper_messages_connector_test
     core_process_test
@@ -1936,6 +1952,7 @@ set_property(TEST
     route_actions_test
     error_contract_test
     contract_manifest_test
+    core_architecture_contract_test
     contract_generation_check
     auth_failure_test
     helper_lost_test
@@ -2011,6 +2028,7 @@ set_property(TEST
     route_actions_test
     error_contract_test
     contract_manifest_test
+    core_architecture_contract_test
     contract_generation_check
     tunnel_module_smoke_test
     tunnel_public_module_smoke_test
