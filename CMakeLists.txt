@@ -86,6 +86,8 @@ set(EXV_CORE_SOURCES
     src/core/rpc/service_actions.cpp
     src/core/rpc/route_actions.cpp
     src/core/rpc/core_api_setup.cpp
+    src/core/use_cases/config_use_cases.cpp
+    src/core/use_cases/system_status_use_cases.cpp
     src/core/crypto/crypto.cpp
     src/helper/common/helper_connector.cpp
     src/helper/common/pipe_helper_client.cpp
@@ -1463,8 +1465,6 @@ add_test(NAME vpn_actions_test COMMAND vpn_actions_test)
 
 add_executable(config_actions_test
     tests/core_api/config_actions_test.cpp
-    src/core/rpc/app_rpc_dispatcher.cpp
-    src/core/rpc/config_actions.cpp
 )
 
 target_include_directories(config_actions_test PRIVATE
@@ -1472,12 +1472,12 @@ target_include_directories(config_actions_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_link_libraries(config_actions_test PRIVATE exv-core)
+
 add_test(NAME config_actions_test COMMAND config_actions_test)
 
 add_executable(service_actions_test
     tests/core_api/service_actions_test.cpp
-    src/core/rpc/app_rpc_dispatcher.cpp
-    src/core/rpc/service_actions.cpp
 )
 
 target_include_directories(service_actions_test PRIVATE
@@ -1485,18 +1485,20 @@ target_include_directories(service_actions_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_link_libraries(service_actions_test PRIVATE exv-core exv-helper-runtime)
+
 add_test(NAME service_actions_test COMMAND service_actions_test)
 
 add_executable(route_actions_test
     tests/core_api/route_actions_test.cpp
-    src/core/rpc/app_rpc_dispatcher.cpp
-    src/core/rpc/route_actions.cpp
 )
 
 target_include_directories(route_actions_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(route_actions_test PRIVATE exv-core)
 
 add_test(NAME route_actions_test COMMAND route_actions_test)
 

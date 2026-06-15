@@ -2,7 +2,7 @@
 #include "platform/common/interface_stats.hpp"
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_discovery.hpp"
-#include "platform/common/runtime_paths.hpp"
+#include "platform/common/path_utils.hpp"
 #include "core/config/config_manager.hpp"
 #include "common/diagnostics/logger.hpp"
 
@@ -21,7 +21,7 @@ ConfigManager::ConfigManager(const std::string& config_dir)
 Config ConfigManager::load() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    std::string path = platform::get_config_path();
+    std::string path = platform::config_path(config_dir_);
     if (!platform::file_exists(path)) {
         config_ = Config{};
         return config_;
@@ -47,7 +47,7 @@ bool ConfigManager::save(const Config& cfg) {
     std::error_code ec;
     fs::create_directories(fs::u8path(config_dir_), ec);
 
-    std::string final_path = platform::get_config_path();
+    std::string final_path = platform::config_path(config_dir_);
     std::string tmp_path = final_path + ".tmp";
 
     try {

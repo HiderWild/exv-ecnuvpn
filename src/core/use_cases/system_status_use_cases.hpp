@@ -1,0 +1,29 @@
+#pragma once
+
+#include "core/config/config_manager.hpp"
+#include "core/use_cases/use_case_result.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <string>
+
+namespace exv::core {
+
+class SystemStatusUseCases {
+public:
+  SystemStatusUseCases();
+  explicit SystemStatusUseCases(std::string config_dir);
+
+  UseCaseResult service_status();
+  UseCaseResult helper_status();
+  UseCaseResult runtime_status();
+  UseCaseResult driver_status();
+  UseCaseResult install_driver(const nlohmann::json &payload);
+  UseCaseResult install_helper_unsupported();
+  UseCaseResult uninstall_helper_unsupported();
+
+private:
+  ecnuvpn::config::ConfigManager manager_;
+};
+
+} // namespace exv::core

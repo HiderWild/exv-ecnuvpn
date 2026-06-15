@@ -1,19 +1,15 @@
 #pragma once
 #include "app_rpc_dispatcher.hpp"
-#include <vector>
+#include "core/use_cases/config_use_cases.hpp"
 #include <string>
 
 namespace exv::core_api {
 
-struct UserRoute {
-    std::string destination;
-    std::string gateway;
-    int metric = 0;
-    bool enabled = true;
-};
-
 class RouteActions {
 public:
+    RouteActions();
+    explicit RouteActions(std::string config_dir);
+
     void register_handlers(AppRpcDispatcher& dispatcher);
 
     RpcResponse list(const RpcRequest& req);
@@ -24,7 +20,7 @@ public:
     RpcResponse reset(const RpcRequest& req);
 
 private:
-    std::vector<UserRoute> user_routes_;
+    exv::core::ConfigUseCases use_cases_;
 };
 
 } // namespace exv::core_api

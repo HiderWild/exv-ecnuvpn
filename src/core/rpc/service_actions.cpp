@@ -1,12 +1,40 @@
 #include "service_actions.hpp"
+
 #include <nlohmann/json.hpp>
+
+#include <exception>
+#include <utility>
 
 using json = nlohmann::json;
 
 namespace exv::core_api {
+namespace {
+
+RpcResponse to_rpc_response(const exv::core::UseCaseResult &result) {
+    RpcResponse resp;
+    resp.success = result.success;
+    if (result.success) {
+        resp.payload_json = result.payload.dump();
+    } else {
+        resp.error_code = result.error_code;
+        resp.error_message = result.error_message;
+    }
+    return resp;
+}
+
+RpcResponse invalid_payload_response(const std::exception &e) {
+    return to_rpc_response(
+        exv::core::UseCaseResult::fail("invalid_payload", e.what()));
+}
+
+} // namespace
+
+ServiceActions::ServiceActions() = default;
+
+ServiceActions::ServiceActions(std::string config_dir)
+    : use_cases_(std::move(config_dir)) {}
 
 void ServiceActions::register_handlers(AppRpcDispatcher& dispatcher) {
-    // Legacy names
     dispatcher.register_handler("service.helper_status",
         [this](const RpcRequest& req) { return helper_status(req); });
     dispatcher.register_handler("service.install",
@@ -28,53 +56,31 @@ void ServiceActions::register_handlers(AppRpcDispatcher& dispatcher) {
 }
 
 RpcResponse ServiceActions::helper_status(const RpcRequest& req) {
-    RpcResponse resp;
-    // Stub
-    resp.success = true;
-    resp.payload_json = json{
-        {"installed", false},
-        {"status", "unknown"},
-        {"version", ""}
-    }.dump();
-    return resp;
+    if (req.action == "service.status") {
+        return to_rpc_response(use_cases_.service_status());
+    }
+    return to_rpc_response(use_cases_.helper_status());
 }
 
 RpcResponse ServiceActions::install_helper(const RpcRequest& req) {
-    RpcResponse resp;
-    // Stub
-    resp.success = false;
-    resp.error_code = "not_implemented";
-    resp.error_message = "Helper installation not yet implemented";
-    return resp;
+    return to_rpc_response(use_cases_.install_helper_unsupported());
 }
 
 RpcResponse ServiceActions::uninstall_helper(const RpcRequest& req) {
-    RpcResponse resp;
-    // Stub
-    resp.success = false;
-    resp.error_code = "not_implemented";
-    resp.error_message = "Helper uninstallation not yet implemented";
-    return resp;
+    return to_rpc_response(use_cases_.uninstall_helper_unsupported());
 }
 
 RpcResponse ServiceActions::driver_status(const RpcRequest& req) {
-    RpcResponse resp;
-    // Stub
-    resp.success = true;
-    resp.payload_json = json{
-        {"installed", false},
-        {"status", "unknown"}
-    }.dump();
-    return resp;
+    return to_rpc_response(use_cases_.driver_status());
 }
 
 RpcResponse ServiceActions::install_driver(const RpcRequest& req) {
-    RpcResponse resp;
-    // Stub - driver installation not yet implemented
-    resp.success = false;
-    resp.error_code = "not_implemented";
-    resp.error_message = "Driver installation not yet implemented";
-    return resp;
+    try {
+        auto payload = json::parse(req.payload_json);
+        return to_rpc_response(use_cases_.install_driver(payload));
+    } catch (const std::exception& e) {
+        return invalid_payload_response(e);
+    }
 }
 
 } // namespace exv::core_api

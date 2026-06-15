@@ -54,6 +54,31 @@ std::size_t count_occurrences(const std::string &text,
   return count;
 }
 
+bool expect_tree_does_not_contain(const std::filesystem::path &root,
+                                  const std::string &needle,
+                                  const std::string &message) {
+  if (!std::filesystem::exists(root)) {
+    return true;
+  }
+
+  bool ok = true;
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const auto ext = entry.path().extension().string();
+    if (ext != ".cpp" && ext != ".hpp" && ext != ".h") {
+      continue;
+    }
+    const std::string content = read_file(entry.path());
+    if (content.find(needle) != std::string::npos) {
+      ok &= expect(false, message + ": " + entry.path().string());
+    }
+  }
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -134,6 +159,20 @@ int main() {
                      std::string::npos,
                  "desktop action registry must not own VPN behavior");
   }
+
+  const auto core_rpc_dir = root / "src" / "core" / "rpc";
+  ok &= expect_tree_does_not_contain(core_rpc_dir, "Stub",
+                                    "core/rpc must not expose stub actions");
+  ok &= expect_tree_does_not_contain(
+      core_rpc_dir, "not_implemented",
+      "core/rpc must return explicit real or unsupported behavior, not "
+      "not_implemented placeholders");
+  ok &= expect_tree_does_not_contain(
+      core_rpc_dir, "not yet implemented",
+      "core/rpc must not expose not-yet-implemented placeholders");
+  ok &= expect_tree_does_not_contain(
+      core_rpc_dir, "user_routes_",
+      "core/rpc route actions must use persisted config routes");
 
   if (!ok) {
     std::cerr << "core_architecture_contract_test: FAILED\n";
