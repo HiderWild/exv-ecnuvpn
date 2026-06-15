@@ -2,6 +2,8 @@
 #include "platform/win32/ui_shell/webview2_host_win32.hpp"
 
 #include <cassert>
+#include <functional>
+#include <string>
 
 int main() {
   using namespace ecnuvpn::platform::win32::ui_shell;
@@ -62,6 +64,26 @@ int main() {
       });
   assert(bridge_invoked);
   assert(bridge_response == R"({"id":9,"ok":true,"data":{"phase":"idle"}})");
+
+  bool post_invoked = false;
+  std::string posted_response;
+  post_webview2_host_response(
+      R"({"id":11,"action":"status.get","payload":{}})",
+      [&](const ecnuvpn::ui_shell::CoreRpcRequest &request) {
+        post_invoked = true;
+        assert(request.action == "status.get");
+        ecnuvpn::ui_shell::CoreRpcResponse response;
+        response.id = 11;
+        response.request_id = request.request_id;
+        response.ok = true;
+        response.data_json = R"({"phase":"idle"})";
+        return response;
+      },
+      [&](const std::string &response_json) {
+        posted_response = response_json;
+      });
+  assert(post_invoked);
+  assert(posted_response == R"({"id":11,"ok":true,"data":{"phase":"idle"}})");
 
   (void)detect_webview2_runtime();
 }
