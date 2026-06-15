@@ -1,37 +1,17 @@
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-
-function defaultBuildPlatform() {
-  switch (process.env.ECNUVPN_BUILD_PLATFORM ?? process.platform) {
-    case 'win32':
-    case 'windows':
-      return 'windows'
-    case 'darwin':
-    case 'mac':
-    case 'macos':
-      return 'macos'
-    case 'linux':
-      return 'linux'
-    default:
-      return process.env.ECNUVPN_BUILD_PLATFORM ?? process.platform
-  }
+const require = createRequire(import.meta.url)
+const { getBuildLayout } = require('./scripts/build-layout.cjs') as {
+  getBuildLayout: () => { rendererOutDir: string }
 }
 
 function defaultOutDir() {
-  return path.resolve(
-    __dirname,
-    '..',
-    'build',
-    defaultBuildPlatform(),
-    'electron',
-    'dist',
-  )
+  return path.resolve(getBuildLayout().rendererOutDir)
 }
 
 export default defineConfig({
