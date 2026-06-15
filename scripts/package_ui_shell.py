@@ -36,15 +36,15 @@ def first_existing(paths: list[Path], name: str) -> Path:
     raise SystemExit(f"{name} not found. Checked:\n  - {checked}")
 
 
-def default_cpp_build_candidates(platform: str) -> list[Path]:
+def default_cpp_build_dirs(platform: str) -> list[Path]:
     candidates: list[Path] = []
     if os.environ.get("ECNUVPN_CPP_BUILD_DIR"):
         candidates.append(Path(os.environ["ECNUVPN_CPP_BUILD_DIR"]))
     candidates.extend(
         [
-            REPO_ROOT / "build",
             REPO_ROOT / "build" / platform / "cpp",
             REPO_ROOT / "build-windows" / "cpp",
+            REPO_ROOT / "build",
         ]
     )
     return candidates
@@ -70,6 +70,14 @@ def copy_tree_contents(source: Path, target: Path) -> None:
             shutil.copy2(entry, destination)
 
 
+def find_binary(stem: str, platform: str) -> Path:
+    name = executable_name(stem, platform)
+    return first_existing(
+        [candidate / name for candidate in default_cpp_build_dirs(platform)],
+        f"{stem} executable",
+    )
+
+
 def assert_no_electron_payload(package_dir: Path) -> None:
     forbidden = ["electron.exe", "Electron Framework.framework", "chromium.pak"]
     found = [name for name in forbidden if list(package_dir.rglob(name))]
@@ -78,7 +86,6 @@ def assert_no_electron_payload(package_dir: Path) -> None:
 
 
 def build_package(platform: str, output_root: Path) -> Path:
-    cpp_build_dir = first_existing(default_cpp_build_candidates(platform), "C++ build directory")
     renderer_dir = first_existing(default_renderer_candidates(platform), "Renderer build directory")
 
     package_dir = output_root / "ECNU VPN"
@@ -89,23 +96,11 @@ def build_package(platform: str, output_root: Path) -> Path:
     webui_dir = package_dir / "webui"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    ui_binary = first_existing(
-        [
-            cpp_build_dir / executable_name("exv-ui", platform),
-            REPO_ROOT / "build" / executable_name("exv-ui", platform),
-        ],
-        "exv-ui executable",
-    )
+    ui_binary = find_binary("exv-ui", platform)
     shutil.copy2(ui_binary, package_dir / ui_binary.name)
 
     for stem in ("exv", "exv-helper"):
-        binary = first_existing(
-            [
-                cpp_build_dir / executable_name(stem, platform),
-                REPO_ROOT / "build" / executable_name(stem, platform),
-            ],
-            f"{stem} executable",
-        )
+        binary = find_binary(stem, platform)
         shutil.copy2(binary, bin_dir / binary.name)
 
     copy_tree_contents(renderer_dir, webui_dir)
