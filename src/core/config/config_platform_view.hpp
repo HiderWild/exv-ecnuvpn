@@ -1,0 +1,26 @@
+#pragma once
+
+#include "core/config/config.hpp"
+#include "platform/common/config_view.hpp"
+
+namespace ecnuvpn {
+namespace config {
+
+inline platform::ConfigView to_platform_config_view(const Config &cfg) {
+  platform::ConfigView view;
+  view.server = cfg.server;
+  view.username = cfg.username;
+  view.mtu = cfg.mtu;
+  view.useragent = cfg.useragent;
+  view.disable_dtls = cfg.disable_dtls;
+  view.extra_args = cfg.extra_args;
+  view.log_file = cfg.log_file;
+  view.vpn_engine = cfg.vpn_engine;
+  view.openconnect_runtime = cfg.openconnect_runtime;
+  view.windows_tunnel_driver = cfg.windows_tunnel_driver;
+  view.windows_tap_interface = cfg.windows_tap_interface;
+  return view;
+}
+
+} // namespace config
+} // namespace ecnuvpn

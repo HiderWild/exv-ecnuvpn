@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config.hpp"
+#include "platform/common/config_view.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -20,12 +20,12 @@ std::string helper_unavailable_disconnect_message();
 // Validate platform-specific preconditions before a VPN connect attempt.
 // Returns a JSON error object on failure, or an empty object on success.
 // Windows checks driver availability; macOS/Linux return success (no-op).
-nlohmann::json preflight_connect_platform_checks(const Config &cfg);
+nlohmann::json preflight_connect_platform_checks(const ConfigView &cfg);
 
 // Attempt a direct (non-helper) VPN connect when the helper is unavailable.
 // Returns a non-empty JSON result on the direct-fallback path, or an empty
 // object if the platform does not support direct fallback (Windows).
-nlohmann::json try_connect_direct_fallback(const Config &cfg,
+nlohmann::json try_connect_direct_fallback(const ConfigView &cfg,
                                             const std::string &password);
 
 // Attempt a direct (non-helper) VPN disconnect when the helper is unavailable.
@@ -36,7 +36,7 @@ nlohmann::json try_disconnect_direct_fallback(bool allow_direct_fallback);
 // Build a VPN status response when the helper is unavailable.
 // macOS/Linux fall back to the runtime status snapshot; Windows returns
 // an empty object (helper is always expected on Windows).
-nlohmann::json status_fallback_without_helper(const Config &cfg);
+nlohmann::json status_fallback_without_helper(const ConfigView &cfg);
 
 } // namespace platform
 } // namespace ecnuvpn

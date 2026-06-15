@@ -442,26 +442,17 @@ async function saveSystem() {
 
 async function toggleService() {
   systemMessage.value = null
-  if (vpn.status?.connected) {
-    ui.requestConfirm(
-      '当前 VPN 连接已建立。本操作会先断开连接，然后继续变更 helper 服务。',
-      () => { void runServiceToggle(true) },
-    )
+  const installed = vpn.serviceInstalled
+  if (vpn.status?.connected && installed) {
+    ui.requestError({
+      title: '请先断开 VPN',
+      message: '卸载 helper 服务前必须先断开当前 VPN 连接。',
+      primaryLabel: '知道了',
+      secondaryLabel: '取消',
+    })
     return
   }
-  const installed = vpn.serviceInstalled
   const ok = installed ? await vpn.uninstallService() : await vpn.installService()
-  if (ok) {
-    ui.addToast(installed ? '辅助服务已卸载' : '辅助服务已安装', 'success')
-  }
-}
-
-async function runServiceToggle(disconnectFirst = false) {
-  systemMessage.value = null
-  const installed = vpn.serviceInstalled
-  const ok = installed
-    ? await vpn.uninstallService({ disconnectFirst })
-    : await vpn.installService({ disconnectFirst })
   if (ok) {
     ui.addToast(installed ? '辅助服务已卸载' : '辅助服务已安装', 'success')
   }

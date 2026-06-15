@@ -11,7 +11,6 @@ inline constexpr const char *kHelperUnavailableCode = "helper_unavailable";
 
 struct HelperEndpoint {
   std::string endpoint;
-  std::string auth_token;
 };
 
 nlohmann::json send_helper_request(const nlohmann::json &request);

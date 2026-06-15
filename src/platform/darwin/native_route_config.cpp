@@ -29,7 +29,7 @@ namespace {
 constexpr int kNoError = 0;
 constexpr int kMinimumUsableMtu = 1200;
 constexpr int kMaximumMtu = 1500;
-
+// Begin inlined from platform/darwin/native_route_config_model include-unit
 NativeDarwinRouteConfigResult
 failure(NativeDarwinRouteConfigError error, std::string message = {},
         std::string target = {}, int system_error = 0) {
@@ -251,7 +251,10 @@ bool plan_routes(const vpn_engine::TunnelMetadata &metadata,
   return true;
 }
 
+int unsupported_native_api_error() { return ENOSYS; }
+// End inlined from platform/darwin/native_route_config_model include-unit
 #if defined(__APPLE__)
+// Begin inlined from platform/darwin/native_route_config_socket include-unit
 int errno_or_io_error() { return errno == 0 ? EIO : errno; }
 
 std::size_t aligned_sockaddr_length(const sockaddr *address) {
@@ -508,12 +511,11 @@ int update_route_native(int message_type, const NativeDarwinRoute &route) {
   close(route_socket);
   return result;
 }
+// End inlined from platform/darwin/native_route_config_socket include-unit
 #endif
 
-int unsupported_native_api_error() { return ENOSYS; }
-
 } // namespace
-
+// Begin inlined from platform/darwin/native_route_config_public include-unit
 const char *
 native_darwin_route_config_error_code(NativeDarwinRouteConfigError error) {
   switch (error) {
@@ -674,6 +676,6 @@ NativeDarwinRouteConfig::owned_routes() const {
 }
 
 int NativeDarwinRouteConfig::effective_mtu() const { return effective_mtu_; }
-
+// End inlined from platform/darwin/native_route_config_public include-unit
 } // namespace platform
 } // namespace ecnuvpn

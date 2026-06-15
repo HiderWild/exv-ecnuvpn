@@ -9,8 +9,8 @@ nlohmann::json oneshot_backend_to_json(const OneshotBackend &backend) {
                         {"mode", backend.mode},
                         {"transport", backend.transport},
                         {"endpoint", backend.endpoint},
-                        {"auth_required", true},
-                        {"auth_token", backend.auth_token},
+                        {"owner", backend.owner},
+                        {"parent_pid", backend.parent_pid},
                         {"pid", backend.pid}};
   if (!backend.code.empty())
     result["code"] = backend.code;

@@ -1,6 +1,6 @@
 #include "platform/common/crypto_backend.hpp"
 
-#include "logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -31,7 +31,7 @@ bool encrypt_aes256_cbc(const std::string &plaintext,
                         std::vector<uint8_t> *ciphertext) {
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
-    logger::error("AES encrypt: EVP_CIPHER_CTX_new failed");
+    exv::observability::LogFacade::error("AES encrypt: EVP_CIPHER_CTX_new failed");
     return false;
   }
 
@@ -44,7 +44,7 @@ bool encrypt_aes256_cbc(const std::string &plaintext,
                         reinterpret_cast<const uint8_t *>(plaintext.data()),
                         static_cast<int>(plaintext.size())) != 1 ||
       EVP_EncryptFinal_ex(ctx, ciphertext->data() + out_len1, &out_len2) != 1) {
-    logger::error("AES encrypt failed (OpenSSL EVP)");
+    exv::observability::LogFacade::error("AES encrypt failed (OpenSSL EVP)");
     EVP_CIPHER_CTX_free(ctx);
     return false;
   }
@@ -63,7 +63,7 @@ bool decrypt_aes256_cbc(const uint8_t *ciphertext,
                         std::string *plaintext) {
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
-    logger::error("AES decrypt: EVP_CIPHER_CTX_new failed");
+    exv::observability::LogFacade::error("AES decrypt: EVP_CIPHER_CTX_new failed");
     return false;
   }
 
@@ -75,7 +75,7 @@ bool decrypt_aes256_cbc(const uint8_t *ciphertext,
       EVP_DecryptUpdate(ctx, buffer.data(), &out_len1, ciphertext,
                         static_cast<int>(ciphertext_len)) != 1 ||
       EVP_DecryptFinal_ex(ctx, buffer.data() + out_len1, &out_len2) != 1) {
-    logger::error("AES decrypt failed (OpenSSL EVP)");
+    exv::observability::LogFacade::error("AES decrypt failed (OpenSSL EVP)");
     EVP_CIPHER_CTX_free(ctx);
     return false;
   }

@@ -7,6 +7,11 @@ dbg/
 *.o
 *.d
 *.a
+/*.lib
+/*.dll
+/*.dylib
+/*.so
+/*.so.*
 exv
 Testing/
 
@@ -31,8 +36,7 @@ webui/dist-electron/
 webui/native/bin/
 webui/release/
 reference/
-runtime/*
-!runtime/README.md
+/runtime/
 
 # OMC / Claude
 .omc/

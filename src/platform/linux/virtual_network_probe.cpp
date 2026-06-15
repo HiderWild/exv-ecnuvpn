@@ -1,7 +1,12 @@
+#include "utils/strings.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/virtual_network_probe.hpp"
 
 #include "platform/common/proxy_tun_detector.hpp"
-#include "utils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -32,7 +37,7 @@ std::vector<std::string> split_pipe_fields(const std::string &line) {
   std::string field;
   std::istringstream iss(line);
   while (std::getline(iss, field, '|')) {
-    fields.push_back(utils::trim(field));
+    fields.push_back(exv::utils::trim(field));
   }
   return fields;
 }
@@ -61,7 +66,7 @@ detect_virtual_network_adapters(const std::string &exv_interface) {
       "else if ($1 ~ /^198\\.(18|19)\\./ || $0 ~ /198\\.(18|19)\\./) reason=\"fake-ip route \" $1; "
       "if (iface != \"\" && reason != \"\") print \"route|\" iface \"|\" reason \"|\" $0}'";
 
-  for (const auto &line : utils::split_lines(utils::run_command_output(command))) {
+  for (const auto &line : exv::utils::split_lines(platform::run_command_output(command))) {
     std::vector<std::string> fields = split_pipe_fields(line);
     if (fields.size() < 3 || fields[0] != "route" || fields[1].empty())
       continue;

@@ -54,13 +54,6 @@ onUnmounted(() => {
 })
 
 function install() {
-  if (vpn.status?.connected) {
-    ui.requestConfirm(
-      '当前 VPN 连接已建立。安装 helper 服务前会先断开连接，然后继续安装。',
-      () => { void runServiceAction('install', true) },
-    )
-    return
-  }
   ui.requestConfirm(
     '将安装 VPN 辅助服务。系统可能会请求管理员权限。',
     () => { void runServiceAction('install') },
@@ -69,10 +62,12 @@ function install() {
 
 function uninstall() {
   if (vpn.status?.connected) {
-    ui.requestConfirm(
-      '当前 VPN 连接已建立。卸载 helper 服务前会先断开连接，然后继续卸载。',
-      () => { void runServiceAction('uninstall', true) },
-    )
+    ui.requestError({
+      title: '请先断开 VPN',
+      message: '卸载 helper 服务前必须先断开当前 VPN 连接。',
+      primaryLabel: '知道了',
+      secondaryLabel: '取消',
+    })
     return
   }
   ui.requestConfirm(
@@ -81,10 +76,10 @@ function uninstall() {
   )
 }
 
-async function runServiceAction(action: 'install' | 'uninstall', disconnectFirst = false) {
+async function runServiceAction(action: 'install' | 'uninstall') {
   const ok = action === 'install'
-    ? await vpn.installService({ disconnectFirst })
-    : await vpn.uninstallService({ disconnectFirst })
+    ? await vpn.installService()
+    : await vpn.uninstallService()
   await vpn.fetchServiceStatus()
   if (ok) {
     ui.addToast(action === 'install' ? '辅助服务安装完成' : '辅助服务卸载完成', 'success')

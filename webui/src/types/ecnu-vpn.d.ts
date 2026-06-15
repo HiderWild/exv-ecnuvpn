@@ -110,6 +110,10 @@ export interface EcnuVpnApi {
   events: {
     subscribe(handler: (event: EcnuVpnEvent) => void): () => void
   }
+  core: {
+    restart(): Promise<{ ok: true }>
+    quit(): Promise<{ ok: true }>
+  }
 }
 
 declare global {

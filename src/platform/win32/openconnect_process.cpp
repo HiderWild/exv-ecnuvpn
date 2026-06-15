@@ -1,7 +1,12 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
+#include "platform/win32/windows_strings.hpp"
 #include "platform/common/openconnect_process.hpp"
 
-#include "logger.hpp"
-#include "utils.hpp"
+#include "observability/log_facade.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -13,7 +18,7 @@ namespace ecnuvpn {
 namespace platform {
 namespace {
 
-std::string windows_generated_interface_name(const Config &cfg) {
+std::string windows_generated_interface_name(const ConfigView &cfg) {
   std::ostringstream seed;
   seed << cfg.username << "@" << cfg.server;
   std::size_t hash = std::hash<std::string>{}(seed.str());
@@ -23,14 +28,14 @@ std::string windows_generated_interface_name(const Config &cfg) {
   return name.str();
 }
 
-std::string select_windows_interface_name(const Config &cfg) {
+std::string select_windows_interface_name(const ConfigView &cfg) {
   if (cfg.windows_tunnel_driver == "tap")
     return cfg.windows_tap_interface;
 
   if (cfg.windows_tunnel_driver == "wintun")
     return windows_generated_interface_name(cfg);
 
-  if (!utils::get_bundled_wintun_path().empty())
+  if (!platform::get_bundled_wintun_path().empty())
     return windows_generated_interface_name(cfg);
 
   return cfg.windows_tap_interface;
@@ -67,13 +72,13 @@ std::string windows_quote_arg(const std::string &value) {
 
 std::string windows_openconnect_script_command() {
   std::ostringstream cmd;
-  cmd << windows_quote_arg(utils::get_executable_path()) << " __tunnel-script";
+  cmd << windows_quote_arg(platform::get_executable_path()) << " __tunnel-script";
   return cmd.str();
 }
 
-std::string build_openconnect_command_line(const Config &cfg) {
+std::string build_openconnect_command_line(const ConfigView &cfg) {
   std::vector<std::string> args;
-  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
+  std::string openconnect_path = platform::get_openconnect_path(cfg.openconnect_runtime);
   args.push_back(openconnect_path.empty() ? std::string("openconnect.exe")
                                           : openconnect_path);
   args.push_back(cfg.server);
@@ -121,7 +126,7 @@ HANDLE open_inheritable_append_handle(const std::string &path) {
   SECURITY_ATTRIBUTES sa = {};
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
-  std::wstring wide_path = utils::wide_from_utf8(path);
+  std::wstring wide_path = platform::wide_from_utf8(path);
   HANDLE handle = CreateFileW(wide_path.empty() ? L"" : wide_path.c_str(),
                               FILE_APPEND_DATA | GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
@@ -132,8 +137,8 @@ HANDLE open_inheritable_append_handle(const std::string &path) {
 }
 
 void set_child_environment_override(const char *name, const std::string &value) {
-  std::wstring wide_name = utils::wide_from_utf8(name);
-  std::wstring wide_value = utils::wide_from_utf8(value);
+  std::wstring wide_name = platform::wide_from_utf8(name);
+  std::wstring wide_value = platform::wide_from_utf8(value);
   if (!wide_name.empty())
     SetEnvironmentVariableW(wide_name.c_str(),
                             wide_value.empty() ? nullptr : wide_value.c_str());
@@ -141,7 +146,7 @@ void set_child_environment_override(const char *name, const std::string &value) 
 
 } // namespace
 
-bool spawn_openconnect_process(const Config &cfg, const std::string &password,
+bool spawn_openconnect_process(const ConfigView &cfg, const std::string &password,
                                OpenconnectProcess *process) {
   if (process) {
     process->pid = -1;
@@ -154,38 +159,38 @@ bool spawn_openconnect_process(const Config &cfg, const std::string &password,
   HANDLE stdin_read = NULL;
   HANDLE stdin_write = NULL;
   if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
-    logger::error("Failed to create password pipe for openconnect.");
+    exv::observability::LogFacade::error("Failed to create password pipe for openconnect.");
     return false;
   }
   SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
 
-  std::string log_path = utils::expand_home(cfg.log_file);
+  std::string log_path = platform::expand_home(cfg.log_file);
   HANDLE log_handle = open_inheritable_append_handle(log_path);
   if (log_handle == INVALID_HANDLE_VALUE) {
     CloseHandle(stdin_read);
     CloseHandle(stdin_write);
-    logger::error("Failed to open VPN log file for Windows launch: " + log_path);
+    exv::observability::LogFacade::error("Failed to open VPN log file for Windows launch: " + log_path);
     return false;
   }
 
-  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
+  std::string openconnect_path = platform::get_openconnect_path(cfg.openconnect_runtime);
   if (openconnect_path.empty()) {
     CloseHandle(stdin_read);
     CloseHandle(stdin_write);
     CloseHandle(log_handle);
-    logger::error("Bundled/system openconnect binary could not be resolved.");
+    exv::observability::LogFacade::error("Bundled/system openconnect binary could not be resolved.");
     return false;
   }
 
   std::string cmdline = build_openconnect_command_line(cfg);
-  std::wstring wide_cmdline = utils::wide_from_utf8(cmdline);
+  std::wstring wide_cmdline = platform::wide_from_utf8(cmdline);
   std::string current_dir =
       std::filesystem::path(openconnect_path).parent_path().string();
-  std::wstring wide_openconnect_path = utils::wide_from_utf8(openconnect_path);
-  std::wstring wide_current_dir = utils::wide_from_utf8(current_dir);
+  std::wstring wide_openconnect_path = platform::wide_from_utf8(openconnect_path);
+  std::wstring wide_current_dir = platform::wide_from_utf8(current_dir);
 
-  set_child_environment_override("ECNUVPN_HOME", utils::get_effective_home());
-  set_child_environment_override("ECNUVPN_CONFIG_DIR", utils::get_config_dir());
+  set_child_environment_override("ECNUVPN_HOME", platform::get_effective_home());
+  set_child_environment_override("ECNUVPN_CONFIG_DIR", platform::get_config_dir());
   set_child_environment_override("LANG", "C.UTF-8");
   set_child_environment_override("LC_ALL", "C.UTF-8");
 
@@ -206,8 +211,8 @@ bool spawn_openconnect_process(const Config &cfg, const std::string &password,
   if (!created) {
     DWORD error = GetLastError();
     CloseHandle(stdin_write);
-    logger::error("Failed to create openconnect process: " +
-                  utils::windows_error_message(error));
+    exv::observability::LogFacade::error("Failed to create openconnect process: " +
+                  platform::windows_error_message(error));
     return false;
   }
 
@@ -222,7 +227,7 @@ bool spawn_openconnect_process(const Config &cfg, const std::string &password,
     CloseHandle(stdin_write);
     TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hProcess);
-    logger::error("Failed to write password to openconnect stdin.");
+    exv::observability::LogFacade::error("Failed to write password to openconnect stdin.");
     return false;
   }
 

@@ -1,9 +1,13 @@
+#include "utils/strings.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 
-#include "helper_ipc.hpp"
-#include "logger.hpp"
-#include "tunnel.hpp"
-#include "utils.hpp"
+#include "helper/helper_ipc.hpp"
+#include "observability/log_facade.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -18,12 +22,8 @@ namespace {
 
 } // namespace
 
-void cleanup_routes() {
-  tunnel::cleanup_routes();
-}
-
 int find_openconnect_pid() {
-  std::string output = utils::trim(utils::run_command_output("pgrep -x openconnect"));
+  std::string output = exv::utils::trim(platform::run_command_output("pgrep -x openconnect"));
   if (output.empty())
     return -1;
   std::istringstream iss(output);
@@ -37,24 +37,24 @@ int find_openconnect_pid() {
 }
 
 std::string get_interfaces_output() {
-  return utils::run_command_output("ip addr show type tun 2>/dev/null | head -20");
+  return platform::run_command_output("ip addr show type tun 2>/dev/null | head -20");
 }
 
 void kill_all_supervisors() {
-  std::string output = utils::trim(utils::run_command_output("pgrep -f 'exv -rt'"));
+  std::string output = exv::utils::trim(platform::run_command_output("pgrep -f 'exv -rt'"));
   if (output.empty())
     return;
 
   std::istringstream iss(output);
   std::string line;
   while (std::getline(iss, line)) {
-    line = utils::trim(line);
+    line = exv::utils::trim(line);
     if (line.empty())
       continue;
     try {
       pid_t pid = static_cast<pid_t>(std::stoi(line));
       if (pid > 0 && is_process_alive(pid)) {
-        logger::info("Killing orphaned supervisor: PID " + line);
+        exv::observability::LogFacade::info("Killing orphaned supervisor: PID " + line);
         kill(pid, SIGKILL);
       }
     } catch (...) {
@@ -64,7 +64,7 @@ void kill_all_supervisors() {
 }
 
 void fix_config_dir_ownership() {
-  utils::fix_config_dir_ownership();
+  platform::fix_runtime_config_dir_ownership();
 }
 
 int copy_self_to_stable_path_and_reexec(const std::string &) {
@@ -90,33 +90,8 @@ std::string create_temp_request_file(const std::string &payload) {
 
 int spawn_worker_process(const std::string &executable_path,
                          const std::string &request_path) {
-  pid_t worker_pid = fork();
-  if (worker_pid < 0)
-    return -1;
-
-  if (worker_pid == 0) {
-    int devnull = open("/dev/null", O_WRONLY);
-    if (devnull >= 0) {
-      dup2(devnull, STDOUT_FILENO);
-      dup2(devnull, STDERR_FILENO);
-      close(devnull);
-    }
-    execl(executable_path.c_str(), executable_path.c_str(), "__helper-exec",
-          request_path.c_str(), static_cast<char *>(nullptr));
-    _exit(127);
-  }
-
-  int status = 0;
-  while (waitpid(worker_pid, &status, 0) < 0) {
-    if (errno != EINTR) {
-      status = -1;
-      break;
-    }
-  }
-  if (status < 0)
-    return -1;
-  if (WIFEXITED(status))
-    return WEXITSTATUS(status);
+  (void)executable_path;
+  (void)request_path;
   return 1;
 }
 

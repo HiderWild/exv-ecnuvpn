@@ -3,7 +3,7 @@
 namespace ecnuvpn {
 namespace platform {
 
-nlohmann::json driver_status_json(const Config &cfg) {
+nlohmann::json driver_status_json(const ConfigView &cfg) {
   return nlohmann::json{{"preferred", cfg.windows_tunnel_driver},
                         {"tap_interface", cfg.windows_tap_interface},
                         {"supported", false},
@@ -12,7 +12,7 @@ nlohmann::json driver_status_json(const Config &cfg) {
                         {"effective_driver_status", "unavailable"}};
 }
 
-nlohmann::json install_driver(const Config &cfg,
+nlohmann::json install_driver(const ConfigView &cfg,
                               const nlohmann::json &payload) {
   (void)cfg;
   (void)payload;

@@ -28,7 +28,7 @@ namespace {
 constexpr int kConnectTimeoutMs = 15000;
 constexpr std::size_t kPlaintextReadSize = 16 * 1024;
 constexpr int kMaxHandshakeSteps = 128;
-
+// Begin inlined from platform/darwin/native_tls_stream_errors include-unit
 vpn_engine::ValidationResult invalid(std::string code, std::string message) {
   vpn_engine::ValidationResult result;
   result.ok = false;
@@ -76,7 +76,8 @@ bool valid_socket_handle(DarwinNativeTlsSocketHandle socket) {
 bool valid_context_handle(DarwinNativeTlsContextHandle context) {
   return context != kInvalidDarwinNativeTlsContextHandle;
 }
-
+// End inlined from platform/darwin/native_tls_stream_errors include-unit
+// Begin inlined from platform/darwin/native_tls_stream_cf_socket include-unit
 template <typename T> class ScopedCfRef {
 public:
   ScopedCfRef() = default;
@@ -243,7 +244,8 @@ vpn_engine::ValidationResult configure_socket(
 
   return {};
 }
-
+// End inlined from platform/darwin/native_tls_stream_cf_socket include-unit
+// Begin inlined from platform/darwin/native_tls_stream_context include-unit
 struct DarwinTlsIo {
   int socket = -1;
 };
@@ -486,7 +488,8 @@ bool tls_status_is_certificate_failure(OSStatus status) {
     return false;
   }
 }
-
+// End inlined from platform/darwin/native_tls_stream_context include-unit
+// Begin inlined from platform/darwin/native_tls_stream_api include-unit
 class DarwinNativeTlsApiImpl final : public DarwinNativeTlsApi {
 public:
   explicit DarwinNativeTlsApiImpl(DarwinNativeTlsDependencies dependencies)
@@ -727,9 +730,9 @@ public:
 private:
   DarwinNativeTlsDependencies dependencies_;
 };
-
+// End inlined from platform/darwin/native_tls_stream_api include-unit
 } // namespace
-
+// Begin inlined from platform/darwin/native_tls_stream_deps include-unit
 DarwinNativeTlsDependencies default_darwin_native_tls_dependencies() {
   DarwinNativeTlsDependencies dependencies;
 
@@ -819,7 +822,8 @@ make_darwin_native_tls_api(DarwinNativeTlsDependencies dependencies) {
   return std::unique_ptr<DarwinNativeTlsApi>(
       new DarwinNativeTlsApiImpl(std::move(dependencies)));
 }
-
+// End inlined from platform/darwin/native_tls_stream_deps include-unit
+// Begin inlined from platform/darwin/native_tls_stream_public include-unit
 NativeTlsStream::NativeTlsStream()
     : NativeTlsStream(make_darwin_native_tls_api()) {}
 
@@ -950,6 +954,6 @@ NativeTlsStream::fail_connect_and_reset(vpn_engine::ValidationResult result) {
   closed_ = false;
   return result;
 }
-
+// End inlined from platform/darwin/native_tls_stream_public include-unit
 } // namespace platform
 } // namespace ecnuvpn

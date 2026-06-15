@@ -57,6 +57,12 @@ struct NativeIpRoute {
   bool server_bypass = false;
 };
 
+struct NativeDnsSettings {
+  std::vector<std::string> servers;
+  std::string search_domain;
+  std::vector<std::string> suffixes;
+};
+
 struct NativeIpHelperApi {
   using ErrorCode = std::uint32_t;
 
@@ -69,6 +75,10 @@ struct NativeIpHelperApi {
       get_best_route2;
   std::function<ErrorCode(const NativeIpRoute &)> create_ip_forward_entry2;
   std::function<ErrorCode(const NativeIpRoute &)> delete_ip_forward_entry2;
+  std::function<ErrorCode(std::uint32_t, NativeDnsSettings &)>
+      get_interface_dns_settings;
+  std::function<ErrorCode(std::uint32_t, const NativeDnsSettings &)>
+      set_interface_dns_settings;
 };
 
 NativeIpHelperApi default_native_ip_helper_api();

@@ -2,7 +2,6 @@
 
 #include "platform/common/driver_status.hpp"
 #include "platform/common/process_control.hpp"
-#include "utils.hpp"
 
 #include <cstdlib>
 #include <cstdio>
@@ -24,25 +23,12 @@ LocalRuntimeSnapshot read_local_runtime_snapshot() {
   LocalRuntimeSnapshot snapshot;
   snapshot.pid = find_openconnect_pid();
   snapshot.running = snapshot.pid > 0;
-
-  std::string route_ready_path = utils::get_route_ready_path();
-  if (utils::file_exists(route_ready_path)) {
-    std::istringstream input(utils::read_file(route_ready_path));
-    std::getline(input, snapshot.interface_name);
-    std::getline(input, snapshot.internal_ip);
-    snapshot.interface_name = utils::trim(snapshot.interface_name);
-    snapshot.internal_ip = utils::trim(snapshot.internal_ip);
-    snapshot.network_ready =
-        snapshot.running && !snapshot.interface_name.empty() &&
-        !snapshot.internal_ip.empty();
-  }
+  // route-ready file removed — status is now queried from Core Process
   return snapshot;
 }
 
 void clear_local_runtime_state() {
-  std::remove(utils::get_pid_path().c_str());
-  std::remove(utils::get_supervisor_pid_path().c_str());
-  std::remove(utils::get_route_ready_path().c_str());
+  // PID/route-ready files removed — no local state to clear
 }
 
 } // namespace
@@ -57,7 +43,7 @@ std::string helper_unavailable_disconnect_message() {
   return "Helper daemon is not available. Use the elevated desktop action or install the helper service from Settings.";
 }
 
-nlohmann::json preflight_connect_platform_checks(const Config &cfg) {
+nlohmann::json preflight_connect_platform_checks(const ConfigView &cfg) {
   nlohmann::json drivers = driver_status_json(cfg);
   std::string effective = drivers.value("effective_driver", std::string("wintun"));
   bool wintun_missing = drivers.value(
@@ -75,9 +61,8 @@ nlohmann::json preflight_connect_platform_checks(const Config &cfg) {
   return nlohmann::json{};
 }
 
-nlohmann::json try_connect_direct_fallback(const Config & /*cfg*/,
+nlohmann::json try_connect_direct_fallback(const ConfigView & /*cfg*/,
                                             const std::string & /*password*/) {
-  // Windows always requires the helper service; no direct fallback.
   return nlohmann::json{};
 }
 
@@ -103,7 +88,7 @@ nlohmann::json try_disconnect_direct_fallback(bool allow_direct_fallback) {
   return nlohmann::json{{"ok", true}, {"_direct_fallback", true}};
 }
 
-nlohmann::json status_fallback_without_helper(const Config & /*cfg*/) {
+nlohmann::json status_fallback_without_helper(const ConfigView & /*cfg*/) {
   LocalRuntimeSnapshot snapshot = read_local_runtime_snapshot();
   nlohmann::json result;
   result["_snapshot"] = true;
@@ -111,7 +96,6 @@ nlohmann::json status_fallback_without_helper(const Config & /*cfg*/) {
   result["_snapshot_data"] = nlohmann::json{
       {"running", snapshot.running},
       {"pid", snapshot.pid},
-      {"supervisor_pid", -1},
       {"network_ready", snapshot.network_ready},
       {"interface", snapshot.interface_name},
       {"internal_ip", snapshot.internal_ip},

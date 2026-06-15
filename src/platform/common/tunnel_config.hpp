@@ -31,6 +31,7 @@ struct TunnelConfig {
     std::string interface_name;     // e.g. "tun0" or "ECNU-VPN"
     int mtu = 1400;
     std::vector<RouteEntry> routes;
+    std::vector<std::string> server_bypass_ips;
     DnsConfig dns;
     std::vector<FirewallRule> firewall_rules;
     bool enable_kill_switch = false;

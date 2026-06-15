@@ -168,6 +168,7 @@ bool HelperDelegatingPlatformNetworkOps::apply_tunnel_config(
     for (const auto& route : config.routes) {
         req.config.routes.push_back(to_helper_route(route));
     }
+    req.config.server_bypass_ips = config.server_bypass_ips;
     req.config.dns = to_helper_dns(config.dns);
 
     auto resp = helper_->apply_tunnel_config(req);

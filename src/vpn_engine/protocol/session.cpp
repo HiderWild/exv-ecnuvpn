@@ -50,6 +50,13 @@ ValidationResult cancelled() {
   return invalid("session_cancelled", "protocol session is cancelled");
 }
 
+DeviceConfig device_config_from_metadata(const TunnelMetadata &metadata) {
+  DeviceConfig config;
+  config.interface_name = metadata.interface_name;
+  config.mtu = metadata.mtu;
+  return config;
+}
+
 } // namespace
 
 ProtocolSession::ProtocolSession(ProtocolSessionOptions options,
@@ -116,7 +123,8 @@ ValidationResult ProtocolSession::connect_cstp(TunnelMetadata *metadata) {
 
 ValidationResult ProtocolSession::run_packet_loop(PacketDevice *device,
                                                   EventSink *events,
-                                                  CancellationToken *cancel) {
+                                                  CancellationToken *cancel,
+                                                  const DeviceConfig *device_config) {
   if (!device)
     return invalid("packet_device_missing", "packet device is not configured");
   if (!transport_)
@@ -128,8 +136,11 @@ ValidationResult ProtocolSession::run_packet_loop(PacketDevice *device,
     return invalid("cstp_not_connected",
                    "connect_cstp must succeed before packet loop");
 
+  const DeviceConfig active_device_config =
+      device_config ? *device_config : device_config_from_metadata(metadata_);
+
   current_device_ = device;
-  ValidationResult opened = device->open(metadata_);
+  ValidationResult opened = device->open(active_device_config);
   if (!opened.ok) {
     current_device_ = nullptr;
     state_.failed(opened.code, opened.message);
@@ -167,7 +178,8 @@ ValidationResult ProtocolSession::run_packet_loop(PacketDevice *device,
         !cancellation_requested(cancel);
 
     if (can_reconnect) {
-      ValidationResult reconnected = reconnect(device, events, cancel);
+      ValidationResult reconnected =
+          reconnect(device, events, cancel, active_device_config);
       if (reconnected.ok)
         continue;
       current_device_ = nullptr;
@@ -407,8 +419,10 @@ const SessionState &ProtocolSession::state() const { return state_; }
 
 int ProtocolSession::reconnect_attempts() const { return reconnect_attempts_; }
 
-ValidationResult ProtocolSession::reconnect(PacketDevice *device, EventSink *events,
-                                            CancellationToken *cancel) {
+ValidationResult ProtocolSession::reconnect(PacketDevice *device,
+                                            EventSink *events,
+                                            CancellationToken *cancel,
+                                            const DeviceConfig &device_config) {
   ++reconnect_attempts_;
   state_.phase = SessionPhase::reconnecting;
   emit_event(events, "reconnect_started", "info", "reconnect started",
@@ -448,7 +462,7 @@ ValidationResult ProtocolSession::reconnect(PacketDevice *device, EventSink *eve
     return stop_cancelled(nullptr, events);
   }
 
-  ValidationResult opened = device->open(metadata_);
+  ValidationResult opened = device->open(device_config);
   if (!opened.ok) {
     state_.failed(opened.code, opened.message);
     emit_event(events, "packet_device.failed", "error", opened.message,

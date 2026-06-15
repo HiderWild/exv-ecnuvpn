@@ -11,10 +11,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cwctype>
 #include <limits>
 #include <set>
 #include <sstream>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace ecnuvpn {
 namespace platform {
@@ -23,6 +26,29 @@ namespace {
 constexpr std::uint32_t kNoError = 0;
 constexpr int kMinimumUsableMtu = 1200;
 constexpr int kMaximumMtu = 1500;
+constexpr ULONG kDnsInterfaceSettingsVersion1 = 1;
+constexpr ULONG64 kDnsSettingNameServer = 0x0002;
+constexpr ULONG64 kDnsSettingSearchList = 0x0004;
+constexpr ULONG64 kDnsSettingDomain = 0x0020;
+
+struct EcnuDnsInterfaceSettings {
+  ULONG Version;
+  ULONG64 Flags;
+  PWSTR Domain;
+  PWSTR NameServer;
+  PWSTR SearchList;
+  ULONG RegistrationEnabled;
+  ULONG RegisterAdapterName;
+  ULONG EnableLLMNR;
+  ULONG QueryAdapterName;
+  PWSTR ProfileNameServer;
+};
+
+using GetInterfaceDnsSettingsFn =
+    NETIO_STATUS(WINAPI *)(GUID, EcnuDnsInterfaceSettings *);
+using SetInterfaceDnsSettingsFn =
+    NETIO_STATUS(WINAPI *)(GUID, const EcnuDnsInterfaceSettings *);
+using FreeInterfaceDnsSettingsFn = VOID(WINAPI *)(EcnuDnsInterfaceSettings *);
 
 NativeIpConfigResult failure(NativeIpConfigError error,
                              std::string message = {},
@@ -43,6 +69,167 @@ bool has_required_api(const NativeIpHelperApi &api) {
          static_cast<bool>(api.get_best_route2) &&
          static_cast<bool>(api.create_ip_forward_entry2) &&
          static_cast<bool>(api.delete_ip_forward_entry2);
+}
+
+HMODULE iphlpapi_module() {
+  HMODULE module = GetModuleHandleW(L"Iphlpapi.dll");
+  if (module)
+    return module;
+  return LoadLibraryW(L"Iphlpapi.dll");
+}
+
+template <typename Fn> Fn load_iphlpapi_proc(const char *name) {
+  HMODULE module = iphlpapi_module();
+  if (!module)
+    return nullptr;
+  return reinterpret_cast<Fn>(GetProcAddress(module, name));
+}
+
+NativeIpHelperApi::ErrorCode interface_guid_from_index(
+    std::uint32_t interface_index, GUID *guid) {
+  if (interface_index == 0 || !guid)
+    return ERROR_INVALID_PARAMETER;
+
+  NET_LUID luid{};
+  NETIO_STATUS status = ConvertInterfaceIndexToLuid(
+      static_cast<NET_IFINDEX>(interface_index), &luid);
+  if (status != NO_ERROR)
+    return static_cast<NativeIpHelperApi::ErrorCode>(status);
+
+  status = ConvertInterfaceLuidToGuid(&luid, guid);
+  if (status != NO_ERROR)
+    return static_cast<NativeIpHelperApi::ErrorCode>(status);
+
+  return static_cast<NativeIpHelperApi::ErrorCode>(NO_ERROR);
+}
+
+std::wstring utf8_to_wide(const std::string &value) {
+  if (value.empty())
+    return {};
+
+  const int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                           value.c_str(), -1, nullptr, 0);
+  if (required <= 0)
+    return {};
+
+  std::wstring wide(static_cast<std::size_t>(required), L'\0');
+  if (required > 0) {
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.c_str(), -1,
+                        wide.data(), required);
+  }
+  if (!wide.empty() && wide.back() == L'\0')
+    wide.pop_back();
+  return wide;
+}
+
+std::string wide_to_utf8(PCWSTR value) {
+  if (!value || value[0] == L'\0')
+    return {};
+
+  const int required =
+      WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+  if (required <= 0)
+    return {};
+
+  std::string out(static_cast<std::size_t>(required), '\0');
+  if (required > 0) {
+    WideCharToMultiByte(CP_UTF8, 0, value, -1, out.data(), required, nullptr,
+                        nullptr);
+  }
+  if (!out.empty() && out.back() == '\0')
+    out.pop_back();
+  return out;
+}
+
+std::wstring join_wide_list(const std::vector<std::string> &values) {
+  std::wstring joined;
+  for (const std::string &value : values) {
+    if (!joined.empty())
+      joined.push_back(L' ');
+    joined += utf8_to_wide(value);
+  }
+  return joined;
+}
+
+std::vector<std::string> split_wide_dns_list(PCWSTR value) {
+  std::vector<std::string> out;
+  if (!value)
+    return out;
+
+  std::wstring current;
+  for (const wchar_t *cursor = value;; ++cursor) {
+    const wchar_t ch = *cursor;
+    if (ch == L'\0' || ch == L',' || std::iswspace(ch)) {
+      if (!current.empty()) {
+        out.push_back(wide_to_utf8(current.c_str()));
+        current.clear();
+      }
+      if (ch == L'\0')
+        break;
+      continue;
+    }
+    current.push_back(ch);
+  }
+  return out;
+}
+
+NativeIpHelperApi::ErrorCode get_interface_dns_settings_native(
+    std::uint32_t interface_index, NativeDnsSettings &settings) {
+  auto get_dns =
+      load_iphlpapi_proc<GetInterfaceDnsSettingsFn>("GetInterfaceDnsSettings");
+  auto free_dns =
+      load_iphlpapi_proc<FreeInterfaceDnsSettingsFn>("FreeInterfaceDnsSettings");
+  if (!get_dns || !free_dns)
+    return ERROR_PROC_NOT_FOUND;
+
+  GUID guid{};
+  NativeIpHelperApi::ErrorCode error =
+      interface_guid_from_index(interface_index, &guid);
+  if (error != NO_ERROR)
+    return error;
+
+  EcnuDnsInterfaceSettings native{};
+  native.Version = kDnsInterfaceSettingsVersion1;
+  NETIO_STATUS status = get_dns(guid, &native);
+  if (status != NO_ERROR)
+    return static_cast<NativeIpHelperApi::ErrorCode>(status);
+
+  settings.servers = split_wide_dns_list(native.NameServer);
+  settings.search_domain = wide_to_utf8(native.Domain);
+  settings.suffixes = split_wide_dns_list(native.SearchList);
+  free_dns(&native);
+  return static_cast<NativeIpHelperApi::ErrorCode>(NO_ERROR);
+}
+
+NativeIpHelperApi::ErrorCode set_interface_dns_settings_native(
+    std::uint32_t interface_index, const NativeDnsSettings &settings) {
+  auto set_dns =
+      load_iphlpapi_proc<SetInterfaceDnsSettingsFn>("SetInterfaceDnsSettings");
+  if (!set_dns)
+    return ERROR_PROC_NOT_FOUND;
+
+  GUID guid{};
+  NativeIpHelperApi::ErrorCode error =
+      interface_guid_from_index(interface_index, &guid);
+  if (error != NO_ERROR)
+    return error;
+
+  std::wstring name_server = join_wide_list(settings.servers);
+  std::wstring domain = utf8_to_wide(settings.search_domain);
+  std::wstring search_list = join_wide_list(settings.suffixes);
+
+  EcnuDnsInterfaceSettings native{};
+  native.Version = kDnsInterfaceSettingsVersion1;
+  native.Flags =
+      kDnsSettingNameServer | kDnsSettingSearchList | kDnsSettingDomain;
+  native.NameServer = name_server.empty() ? const_cast<PWSTR>(L"")
+                                          : name_server.data();
+  native.Domain = domain.empty() ? const_cast<PWSTR>(L"") : domain.data();
+  native.SearchList =
+      search_list.empty() ? const_cast<PWSTR>(L"") : search_list.data();
+
+  NETIO_STATUS status = set_dns(guid, &native);
+  return static_cast<NativeIpHelperApi::ErrorCode>(status);
 }
 
 std::string trim_ascii(const std::string &value) {
@@ -329,6 +516,8 @@ NativeIpHelperApi default_native_ip_helper_api() {
     return static_cast<NativeIpHelperApi::ErrorCode>(
         DeleteIpForwardEntry2(&row));
   };
+  api.get_interface_dns_settings = get_interface_dns_settings_native;
+  api.set_interface_dns_settings = set_interface_dns_settings_native;
   return api;
 }
 

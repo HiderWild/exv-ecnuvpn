@@ -1,19 +1,25 @@
-#include "platform/common/oneshot_bootstrap.hpp"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#include <sddl.h>
 
+#include "helper/common/helper_messages.hpp"
 #include "platform/common/backend_resolver.hpp"
-#include "utils.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/oneshot_bootstrap.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
+#include "observability/log_facade.hpp"
 
 #include <chrono>
 #include <random>
 #include <sstream>
 #include <string>
 #include <vector>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <shellapi.h>
-#include <windows.h>
 
 namespace ecnuvpn {
 namespace platform {
@@ -34,12 +40,43 @@ std::string random_hex(size_t bytes) {
 
 bool wait_for_helper_hello(const HelperEndpoint &endpoint) {
   for (int i = 0; i < 40; ++i) {
-    nlohmann::json hello = send_helper_request(endpoint, {{"action", "hello"}});
-    if (hello.value("ok", false))
+    exv::helper::HelperRequest request;
+    request.op = exv::helper::HelperOp::Hello;
+    request.payload_json = nlohmann::json(exv::helper::HelloRequest{}).dump();
+    nlohmann::json hello = send_helper_request(endpoint, nlohmann::json(request));
+    if (hello.value("success", false))
       return true;
     Sleep(100);
   }
   return false;
+}
+
+std::string current_owner_sid() {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    return "";
+
+  DWORD needed = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+  if (needed == 0) {
+    CloseHandle(token);
+    return "";
+  }
+
+  std::vector<unsigned char> buffer(needed);
+  if (!GetTokenInformation(token, TokenUser, buffer.data(), needed, &needed)) {
+    CloseHandle(token);
+    return "";
+  }
+  CloseHandle(token);
+
+  auto *user = reinterpret_cast<TOKEN_USER *>(buffer.data());
+  LPSTR sid = nullptr;
+  if (!ConvertSidToStringSidA(user->User.Sid, &sid))
+    return "";
+  std::string result = sid;
+  LocalFree(sid);
+  return result;
 }
 
 std::string quote_arg(const std::string &value) {
@@ -106,13 +143,23 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   }
 
   std::string session_id = random_hex(8);
-  backend.auth_token = random_hex(32);
   backend.endpoint = "\\\\.\\pipe\\exv-oneshot-" + session_id;
+  backend.owner = current_owner_sid();
+  backend.parent_pid = static_cast<int>(GetCurrentProcessId());
+  if (backend.owner.empty()) {
+    backend.code = kServiceStartFailedCode;
+    backend.message = "Unable to determine the current Windows owner SID.";
+    return backend;
+  }
 
-  std::string args = "--oneshot --pipe \"" + backend.endpoint +
-                     "\" --auth-token \"" + backend.auth_token + "\"";
+  std::string args = "--oneshot --endpoint \"" + backend.endpoint +
+                     "\" --owner \"" + backend.owner +
+                     "\" --parent-pid " + std::to_string(backend.parent_pid);
 
-  if (utils::check_root()) {
+  exv::observability::LogFacade::info("Oneshot: Generated endpoint=" + backend.endpoint + " session_id=" + session_id);
+  exv::observability::LogFacade::info("Oneshot: Starting helper - is_admin=" + std::string(platform::check_root() ? "true" : "false"));
+
+  if (platform::check_root()) {
     if (!start_helper_direct(request.helper_path, args, &backend.pid)) {
       backend.code = kServiceStartFailedCode;
       backend.message = "Failed to start elevated one-shot helper.";
@@ -143,13 +190,13 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   }
   }
 
-  if (!wait_for_helper_hello(
-          HelperEndpoint{backend.endpoint, backend.auth_token})) {
+  if (!wait_for_helper_hello(HelperEndpoint{backend.endpoint})) {
     backend.code = kHelperRpcFailedCode;
     backend.message = "One-shot helper did not become ready.";
     return backend;
   }
 
+  exv::observability::LogFacade::info("Oneshot: Helper started successfully - endpoint=" + backend.endpoint + " pid=" + std::to_string(backend.pid));
   backend.ok = true;
   return backend;
 }

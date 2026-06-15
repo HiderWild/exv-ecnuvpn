@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config.hpp"
+#include "platform/common/config_view.hpp"
 
 #include <string>
 
@@ -12,7 +12,7 @@ struct OpenconnectProcess {
   void *wait_handle = nullptr;
 };
 
-bool spawn_openconnect_process(const Config &cfg, const std::string &password,
+bool spawn_openconnect_process(const ConfigView &cfg, const std::string &password,
                                OpenconnectProcess *process);
 void close_openconnect_process(OpenconnectProcess *process);
 

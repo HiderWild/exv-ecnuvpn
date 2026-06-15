@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <memory>
+#include <vector>
 #include "tunnel_config.hpp"
 #include "tunnel_device_descriptor.hpp"
 
@@ -22,6 +23,11 @@ struct CleanupResult {
     std::string error_message;
 };
 
+struct ManagedNetworkResource {
+    std::string type;
+    std::string detail;
+};
+
 class PlatformNetworkOps {
 public:
     virtual ~PlatformNetworkOps() = default;
@@ -37,6 +43,25 @@ public:
 
     // Cleanup resources
     virtual CleanupResult cleanup(const std::string& adapter_name, CleanupPolicy policy) = 0;
+
+    // Cleanup using durable resource facts imported from a helper cleanup lease.
+    virtual CleanupResult cleanup_resources(
+        const std::vector<ManagedNetworkResource>& resources,
+        CleanupPolicy policy) {
+        std::string adapter_name;
+        for (const auto& resource : resources) {
+            if (resource.type == "adapter") {
+                adapter_name = resource.detail;
+                break;
+            }
+        }
+        return cleanup(adapter_name, policy);
+    }
+
+    // Facts describing resources actually created by the platform backend.
+    virtual std::vector<ManagedNetworkResource> managed_resources() const {
+        return {};
+    }
 
     // Check if device exists
     virtual bool device_exists(const std::string& adapter_name) const = 0;

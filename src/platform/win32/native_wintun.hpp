@@ -15,6 +15,7 @@ enum class NativeWintunError {
   api_missing,
   adapter_open_failed,
   session_start_failed,
+  adapter_delete_failed,
   interface_index_failed,
 };
 
@@ -46,6 +47,7 @@ struct NativeWintunApi {
   std::function<bool(std::uint64_t, std::uint32_t &)> get_interface_index;
   std::function<SessionHandle(AdapterHandle, std::uint32_t)> start_session;
   std::function<void(SessionHandle)> end_session;
+  std::function<bool(AdapterHandle)> delete_adapter;
   std::shared_ptr<void> owner;
 };
 
@@ -75,6 +77,7 @@ public:
 
   NativeWintunStartResult start();
   void stop();
+  NativeWintunStartResult delete_adapter();
 
   bool running() const;
   const NativeWintunMetadata &metadata() const;

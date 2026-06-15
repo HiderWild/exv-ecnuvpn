@@ -1,3 +1,8 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #pragma once
 
 #include <string>
@@ -19,7 +24,7 @@ struct RuntimePaths {
 // Pin the runtime paths for this process. Precedence (highest first):
 //   1. explicit_state_dir argument (non-empty)
 //   2. environment variable ECNUVPN_STATE_DIR
-//   3. an override already installed via utils::set_runtime_path_override
+//   3. an override already installed via platform::set_runtime_path_override
 //   4. platform default (derived from the effective home)
 //
 // Safe to call multiple times; the first successful, non-default resolution

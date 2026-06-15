@@ -25,18 +25,13 @@ std::string trim_copy(const std::string &value) {
 } // namespace
 
 nlohmann::json send_helper_request(const nlohmann::json &request) {
-  return send_helper_request(
-      HelperEndpoint{helper_platform_config().endpoint, std::string()},
-      request);
+  return send_helper_request(HelperEndpoint{helper_platform_config().endpoint},
+                             request);
 }
 
 nlohmann::json send_helper_request(const HelperEndpoint &endpoint,
                                    const nlohmann::json &request) {
-  nlohmann::json authed_request = request;
-  if (!endpoint.auth_token.empty())
-    authed_request["auth_token"] = endpoint.auth_token;
-
-  std::string payload = authed_request.dump();
+  std::string payload = request.dump();
   payload.push_back('\n');
   std::string raw;
 

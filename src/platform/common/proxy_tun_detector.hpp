@@ -1,6 +1,6 @@
 #pragma once
 
-#include "virtual_network.hpp"
+#include "platform/common/virtual_network_model.hpp"
 
 #include <string>
 

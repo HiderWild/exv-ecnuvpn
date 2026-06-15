@@ -218,8 +218,7 @@ bool WinRouteOps::set_route_metric(const std::string &destination, int metric) {
 
 #else
 // ---------------------------------------------------------------------------
-// Non-Windows stubs -- the implementation compiles but always fails, which is
-// the correct behaviour for a Windows-only feature on other platforms.
+// Non-Windows unavailable fallback for a Windows-only feature.
 // ---------------------------------------------------------------------------
 
 namespace exv::platform::win32 {

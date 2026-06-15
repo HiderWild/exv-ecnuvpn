@@ -30,7 +30,7 @@ namespace {
 constexpr int kConnectTimeoutMs = 15000;
 constexpr std::size_t kEncryptedReadSize = 16 * 1024;
 constexpr int kMaxHandshakeSteps = 64;
-
+// Begin inlined from platform/win32/native_tls_stream_errors include-unit
 vpn_engine::ValidationResult invalid(std::string code, std::string message) {
   vpn_engine::ValidationResult result;
   result.ok = false;
@@ -101,7 +101,8 @@ std::wstring utf8_to_wide(const std::string &input) {
                       static_cast<int>(input.size()), &output[0], chars);
   return output;
 }
-
+// End inlined from platform/win32/native_tls_stream_errors include-unit
+// Begin inlined from platform/win32/native_tls_stream_socket include-unit
 void append_bytes(std::vector<std::uint8_t> *target,
                   const std::vector<std::uint8_t> &source) {
   target->insert(target->end(), source.begin(), source.end());
@@ -196,7 +197,8 @@ void configure_socket_timeouts(SOCKET socket) {
   setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO,
              reinterpret_cast<const char *>(&timeout), sizeof(timeout));
 }
-
+// End inlined from platform/win32/native_tls_stream_socket include-unit
+// Begin inlined from platform/win32/native_tls_stream_context include-unit
 struct AddrInfoDeleter {
   void operator()(addrinfo *info) const {
     if (info)
@@ -331,7 +333,8 @@ verify_server_certificate(SchannelTlsContext *context,
 
   return {};
 }
-
+// End inlined from platform/win32/native_tls_stream_context include-unit
+// Begin inlined from platform/win32/native_tls_stream_api include-unit
 class WindowsNativeTlsApi final : public NativeTlsApi {
 public:
   vpn_engine::ValidationResult startup() override {
@@ -706,9 +709,9 @@ public:
 
   void shutdown() override { WSACleanup(); }
 };
-
+// End inlined from platform/win32/native_tls_stream_api include-unit
 } // namespace
-
+// Begin inlined from platform/win32/native_tls_stream_public include-unit
 std::unique_ptr<NativeTlsApi> make_windows_native_tls_api() {
   return std::unique_ptr<NativeTlsApi>(new WindowsNativeTlsApi());
 }
@@ -965,6 +968,6 @@ NativeTlsStream::fail_connect_and_reset(vpn_engine::ValidationResult result) {
   closed_ = false;
   return result;
 }
-
+// End inlined from platform/win32/native_tls_stream_public include-unit
 } // namespace platform
 } // namespace ecnuvpn

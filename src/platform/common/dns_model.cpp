@@ -19,17 +19,17 @@ DnsSettings DnsConfig::settings() const {
 }
 
 DnsSettings DnsConfig::current(const std::string& /*interface_name*/) {
-    // Stub: returns empty settings. Platform implementation in Phase 3.
+    // Model-only fallback; platform-specific code supplies live DNS settings.
     return DnsSettings{};
 }
 
 bool DnsConfig::apply(const DnsSettings& /*settings*/) {
-    // Stub: always succeeds. Platform implementation in Phase 3.
+    // Model-only fallback used by value-semantics tests.
     return true;
 }
 
 bool DnsConfig::restore(const std::string& /*interface_name*/) {
-    // Stub: always succeeds. Platform implementation in Phase 3.
+    // Model-only fallback used by value-semantics tests.
     return true;
 }
 

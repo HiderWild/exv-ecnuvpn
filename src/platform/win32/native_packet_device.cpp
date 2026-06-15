@@ -1,6 +1,7 @@
 #include "platform/win32/native_packet_device.hpp"
 
-#include "utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -31,7 +32,7 @@ using WintunReceivePacketFn = BYTE *(WINAPI *)(SessionHandle, DWORD *);
 using WintunReleaseReceivePacketFn = void(WINAPI *)(SessionHandle, BYTE *);
 using WintunAllocateSendPacketFn = BYTE *(WINAPI *)(SessionHandle, DWORD);
 using WintunSendPacketFn = void(WINAPI *)(SessionHandle, BYTE *);
-
+// Begin inlined from platform/win32/native_packet_device_wintun_api include-unit
 struct PacketWintunApi {
   WintunOpenAdapterFn open_adapter = nullptr;
   WintunCreateAdapterFn create_adapter = nullptr;
@@ -158,7 +159,8 @@ std::string packet_error_message(const char *operation, DWORD system_error) {
   return std::string(operation) + " failed with Windows error " +
          std::to_string(static_cast<unsigned long>(system_error));
 }
-
+// End inlined from platform/win32/native_packet_device_wintun_api include-unit
+// Begin inlined from platform/win32/native_packet_device_sessions include-unit
 class RealWintunPacketSession final : public NativePacketDeviceWintunSession {
 public:
   RealWintunPacketSession() = default;
@@ -171,7 +173,7 @@ public:
       return result;
     }
 
-    const std::wstring dll_path = widen_utf8(utils::get_bundled_wintun_path());
+    const std::wstring dll_path = widen_utf8(platform::get_bundled_wintun_path());
     if (!file_exists(dll_path))
       return wintun_failure(NativeWintunError::wintun_missing,
                             "bundled wintun.dll is missing");
@@ -324,7 +326,8 @@ private:
 
   NativeIpConfig config_;
 };
-
+// End inlined from platform/win32/native_packet_device_sessions include-unit
+// Begin inlined from platform/win32/native_packet_device_errors include-unit
 vpn_engine::ValidationResult
 wintun_start_failure_result(const NativeWintunStartResult &start) {
   return invalid(std::string("native_wintun_") +
@@ -383,7 +386,8 @@ NativePacketDeviceDependencies default_native_packet_device_dependencies() {
   };
   return deps;
 }
-
+// End inlined from platform/win32/native_packet_device_errors include-unit
+// Begin inlined from platform/win32/native_packet_device_public include-unit
 NativePacketDevice::NativePacketDevice()
     : NativePacketDevice(default_native_packet_device_dependencies()) {}
 
@@ -524,6 +528,6 @@ void NativePacketDevice::close() {
 std::unique_ptr<vpn_engine::PacketDevice> create_native_packet_device() {
   return std::unique_ptr<vpn_engine::PacketDevice>(new NativePacketDevice());
 }
-
+// End inlined from platform/win32/native_packet_device_public include-unit
 } // namespace platform
 } // namespace ecnuvpn

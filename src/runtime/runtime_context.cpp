@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "runtime/runtime_context.hpp"
 
-#include "utils.hpp"
 
 #include <cstdlib>
 
@@ -33,14 +37,14 @@ void bootstrap(const std::string &explicit_state_dir,
   if (!state_dir.empty()) {
     // Pin both home and config dir so every path getter resolves identically.
     const std::string home =
-        home_hint.empty() ? utils::get_effective_home() : home_hint;
-    utils::set_runtime_path_override(home, state_dir);
+        home_hint.empty() ? platform::get_effective_home() : home_hint;
+    platform::set_runtime_path_override(home, state_dir);
     g_bootstrapped = true;
     return;
   }
 
   if (!home_hint.empty()) {
-    utils::set_runtime_path_override(home_hint, "");
+    platform::set_runtime_path_override(home_hint, "");
     g_bootstrapped = true;
     return;
   }
@@ -54,10 +58,10 @@ void bootstrap(const std::string &explicit_state_dir,
 
 RuntimePaths paths() {
   RuntimePaths p;
-  p.state_dir = utils::get_config_dir();
-  p.home = utils::get_effective_home();
-  p.config_path = utils::get_config_path();
-  p.log_path = utils::get_log_path();
+  p.state_dir = platform::get_config_dir();
+  p.home = platform::get_effective_home();
+  p.config_path = platform::get_config_path();
+  p.log_path = platform::get_log_path();
   return p;
 }
 

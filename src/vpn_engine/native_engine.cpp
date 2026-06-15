@@ -2,14 +2,6 @@
 
 #include "vpn_engine/protocol/production_transport.hpp"
 
-#if defined(_WIN32)
-#include "platform/win32/native_packet_device.hpp"
-#include "platform/win32/native_tls_stream.hpp"
-#elif defined(__APPLE__)
-#include "platform/darwin/native_packet_device.hpp"
-#include "platform/darwin/native_tls_stream.hpp"
-#endif
-
 #include <exception>
 #include <map>
 #include <memory>
@@ -29,16 +21,6 @@ ValidationResult invalid(std::string code, std::string message) {
   return result;
 }
 
-ValidationResult validate_engine_config(const VpnEngineConfig &cfg) {
-  if (cfg.server.empty())
-    return invalid("config_invalid", "VPN server is not configured.");
-  if (cfg.username.empty())
-    return invalid("config_invalid", "VPN username is not configured.");
-  if (cfg.password.empty())
-    return invalid("config_invalid", "VPN password is not configured.");
-  return ValidationResult{};
-}
-
 ValidationResult native_transport_unimplemented() {
   return invalid("native_transport_unimplemented",
                  "Native engine transport factory is not configured.");
@@ -49,104 +31,23 @@ ValidationResult native_packet_device_unimplemented() {
                  "Native engine packet device factory is not configured.");
 }
 
-class UnsupportedProtocolTransport final
-    : public protocol::ProtocolTransport {
-public:
-  protocol::AuthResult
-  authenticate(const protocol::ProtocolSessionOptions & /*options*/) override {
-    protocol::AuthResult result;
-    result.ok = false;
-    result.error_code = "native_transport_unavailable";
-    result.error_message =
-        "Native engine production TLS transport is not available on this platform.";
-    return result;
-  }
-
-  ValidationResult connect_cstp(const std::string & /*cookie*/,
-                                TunnelMetadata * /*metadata*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  ValidationResult
-  send_packet(const std::vector<std::uint8_t> & /*packet*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  ValidationResult
-  send_control(protocol::InboundFrameKind /*kind*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  ValidationResult receive_frame(protocol::InboundFrame * /*out*/) override {
-    return invalid("native_transport_unavailable",
-                   "Native engine production TLS transport is not available on this platform.");
-  }
-
-  void disconnect() override {}
-  void reset_for_reconnect() override {}
-};
-
-class UnsupportedPacketDevice final : public PacketDevice {
-public:
-  ValidationResult open(const DeviceConfig & /*config*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  ValidationResult open(const TunnelMetadata & /*metadata*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  ValidationResult read_packet(std::vector<std::uint8_t> * /*packet*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  ValidationResult
-  write_packet(const std::vector<std::uint8_t> & /*packet*/) override {
-    return invalid("native_packet_device_unavailable",
-                   "Native engine platform packet device is not available on this platform.");
-  }
-
-  void close() override {}
-};
+DeviceConfig device_config_from_metadata(const TunnelMetadata &metadata) {
+  DeviceConfig config;
+  config.interface_name = metadata.interface_name;
+  config.mtu = metadata.mtu;
+  return config;
+}
 
 } // namespace
 
-ValidationResult validate_native_config(const Config &cfg) {
-  if (!cfg.extra_args.empty()) {
-    return invalid("unsupported_extra_args",
-                   "Native VPN engine does not support legacy OpenConnect extra_args.");
-  }
+ValidationResult validate_native_config(const VpnEngineConfig &cfg) {
   if (cfg.server.empty())
     return invalid("config_invalid", "VPN server is not configured.");
   if (cfg.username.empty())
     return invalid("config_invalid", "VPN username is not configured.");
+  if (cfg.password.empty())
+    return invalid("config_invalid", "VPN password is not configured.");
   return ValidationResult{};
-}
-
-VpnEngineConfig make_native_config(const Config &cfg,
-                                   const std::string &plaintext_password) {
-  VpnEngineConfig engine_cfg;
-  engine_cfg.engine = cfg.vpn_engine;
-  engine_cfg.server = cfg.server;
-  engine_cfg.username = cfg.username;
-  engine_cfg.password = plaintext_password;
-  engine_cfg.useragent = cfg.useragent;
-  engine_cfg.mtu = cfg.mtu;
-  engine_cfg.routes = cfg.routes;
-  engine_cfg.windows_tunnel_driver = cfg.windows_tunnel_driver;
-  engine_cfg.windows_tap_interface = cfg.windows_tap_interface;
-  engine_cfg.auto_reconnect = cfg.auto_reconnect;
-  // Native engine v1 is CSTP/TLS-only; the user-facing disable_dtls config flag
-  // applies to the OpenConnect command-line path. Force true here so the engine
-  // always operates in CSTP mode regardless of user config.json.
-  engine_cfg.disable_dtls = true;
-  return engine_cfg;
 }
 
 nlohmann::json event_to_json(const VpnEngineEvent &event) {
@@ -164,31 +65,6 @@ nlohmann::json status_to_json(const VpnEngineStatus &status) {
                         {"internal_ip", status.internal_ip},
                         {"error_code", status.error_code},
                         {"error_message", status.error_message}};
-}
-
-NativeVpnEngineDependencies default_native_engine_dependencies() {
-  NativeVpnEngineDependencies deps;
-
-#if defined(_WIN32) || defined(__APPLE__)
-  deps.transport_factory = [] {
-    std::unique_ptr<protocol::TlsStream> stream(new platform::NativeTlsStream());
-    return std::unique_ptr<protocol::ProtocolTransport>(
-        new protocol::ProductionProtocolTransport(std::move(stream)));
-  };
-  deps.packet_device_factory = [] {
-    return platform::create_native_packet_device();
-  };
-#else
-  deps.transport_factory = [] {
-    return std::unique_ptr<protocol::ProtocolTransport>(
-        new UnsupportedProtocolTransport());
-  };
-  deps.packet_device_factory = [] {
-    return std::unique_ptr<PacketDevice>(new UnsupportedPacketDevice());
-  };
-#endif
-
-  return deps;
 }
 
 class NativeVpnEngineSession::LoopEventSink final : public EventSink {
@@ -241,7 +117,7 @@ ValidationResult NativeVpnEngineSession::start() {
     return failure;
   };
 
-  ValidationResult validated = validate_engine_config(config_);
+  ValidationResult validated = validate_native_config(config_);
   if (!validated.ok)
     return fail(validated);
 
@@ -309,9 +185,33 @@ ValidationResult NativeVpnEngineSession::start() {
     return fail(cstp);
   }
 
+  {
+    const std::lock_guard<std::mutex> lock(mu_);
+    status_.pid = -1;
+    status_.interface_name = metadata.interface_name;
+    status_.internal_ip = metadata.internal_ip4_address;
+    status_.error_code.clear();
+    status_.error_message.clear();
+  }
+
   emit_event("cstp.connected", "info", "CSTP connect succeeded",
              {{"interface", metadata.interface_name},
               {"internal_ip", metadata.internal_ip4_address}});
+
+  DeviceConfig packet_device_config = device_config_from_metadata(metadata);
+  if (dependencies_.network_configurator) {
+    ValidationResult network =
+        dependencies_.network_configurator(metadata, &packet_device_config);
+    if (!network.ok) {
+      transport->disconnect();
+      return fail(network);
+    }
+  }
+
+  if (packet_device_config.interface_name.empty())
+    packet_device_config.interface_name = metadata.interface_name;
+  if (packet_device_config.mtu <= 0)
+    packet_device_config.mtu = metadata.mtu;
 
   if (!dependencies_.packet_device_factory) {
     transport->disconnect();
@@ -337,12 +237,7 @@ ValidationResult NativeVpnEngineSession::start() {
 
   {
     const std::lock_guard<std::mutex> lock(mu_);
-    status_.pid = -1;
-    status_.interface_name = metadata.interface_name;
-    status_.internal_ip = metadata.internal_ip4_address;
-    status_.error_code.clear();
-    status_.error_message.clear();
-
+    packet_device_config_ = packet_device_config;
     transport_ = std::move(transport);
     protocol_session_ = std::move(protocol_session);
     packet_device_ = std::move(packet_device);
@@ -439,19 +334,22 @@ void NativeVpnEngineSession::run_packet_loop() {
   std::unique_ptr<protocol::ProtocolSession> session;
   std::unique_ptr<PacketDevice> device;
   std::unique_ptr<LoopEventSink> events;
+  DeviceConfig packet_device_config;
   {
     const std::lock_guard<std::mutex> lock(mu_);
     transport = std::move(transport_);
     session = std::move(protocol_session_);
     device = std::move(packet_device_);
     events = std::move(loop_event_sink_);
+    packet_device_config = packet_device_config_;
   }
 
   if (!session || !device) {
     result = invalid("packet_loop_missing_dependency",
                      "Native packet loop dependency is missing.");
   } else {
-    result = session->run_packet_loop(device.get(), events.get(), this);
+    result = session->run_packet_loop(device.get(), events.get(), this,
+                                      &packet_device_config);
   }
 
   if (session) {

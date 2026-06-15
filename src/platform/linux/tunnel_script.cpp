@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/tunnel_script.hpp"
 
-#include "utils.hpp"
 
 #include <sstream>
 #include <string>
@@ -169,11 +173,11 @@ configure_from_openconnect_log(const TunnelScriptContext &context,
 
 void cleanup_tunnel_routes(const TunnelScriptContext &context) {
   for (const auto &route : context.custom_routes) {
-    utils::run_command("ip route del " + utils::shell_quote(route) +
+    platform::run_command("ip route del " + platform::shell_quote(route) +
                        " >/dev/null 2>&1");
   }
   for (const auto &ip : context.server_route_exceptions) {
-    utils::run_command("ip route del " + utils::shell_quote(ip) +
+    platform::run_command("ip route del " + platform::shell_quote(ip) +
                        " >/dev/null 2>&1");
   }
 }
