@@ -1,18 +1,18 @@
 # EXV 重构宪法
 
-> 来源：仓库根目录 `new_start_point.md`。
+> 来源：`docs/architecture/new_start_point.md`。
 > 本文是该文档的宪法层拆解，用于裁决架构方向、权限边界和产品原则。
 
 ## 0. 效力与裁决规则
 
-1. `new_start_point.md` 是本轮客户端拆解和 helper 重构的最高指示。
-2. 本目录下三层文档是对 `new_start_point.md` 的结构化拆解：
+1. `docs/architecture/new_start_point.md` 是本轮客户端拆解和 helper 重构的最高指示。
+2. 本目录下三层文档是对 `docs/architecture/new_start_point.md` 的结构化拆解：
    - `00-constitution.md`：不可违背的宪法原则。
    - `10-requirements.md`：按阶段冻结的需求。
    - `20-tasks.md`：按阶段执行的任务。
-3. 仓库中任何旧路线图、旧设计、旧计划或历史实现与 `new_start_point.md` 冲突时，以 `new_start_point.md` 和本三层拆解为准。
+3. 仓库中任何旧路线图、旧设计、旧计划或历史实现与 `docs/architecture/new_start_point.md` 冲突时，以 `docs/architecture/new_start_point.md` 和本三层拆解为准。
 4. 旧文档可作为历史背景，但不能覆盖本宪法的架构边界。
-5. 如果实现中发现本三层文档与 `new_start_point.md` 表达不一致，以 `new_start_point.md` 原文为最终裁决来源，并同步修订本三层文档。
+5. 如果实现中发现本三层文档与 `docs/architecture/new_start_point.md` 表达不一致，以该文档原文为最终裁决来源，并同步修订本三层文档。
 
 ## 1. 核心架构
 

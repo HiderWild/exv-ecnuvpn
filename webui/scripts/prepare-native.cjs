@@ -6,7 +6,6 @@
  *  - It does NOT copy libssl/libcrypto: we now use Windows BCrypt on Win32
  *    and CommonCrypto on macOS.
  *  - It does NOT copy OpenConnect/GnuTLS assets for production packaging.
- *    That runtime is legacy diagnostic-only and must be explicitly gated.
  *  - It does NOT copy debug/dev artifacts like .lib, .pdb, .exp, .a.
  *  - It DOES copy allowed native runtime assets such as wintun.dll.
  */
@@ -18,18 +17,10 @@ const { getBuildLayout } = require('./build-layout.cjs')
 const root = path.resolve(__dirname, '..', '..')
 const layout = getBuildLayout()
 const outDir = layout.nativeBinDir
-const LEGACY_OPENCONNECT_ENV = 'ECNUVPN_LEGACY_OPENCONNECT_RUNTIME'
-const LEGACY_OPENCONNECT_RUNTIME_DIR_ENV = 'ECNUVPN_LEGACY_OPENCONNECT_RUNTIME_DIR'
-const legacyOpenconnectRuntime = process.env[LEGACY_OPENCONNECT_ENV] === '1'
 const productionRuntimeCandidates = [
   process.env.ECNUVPN_RUNTIME_DIR,
   path.join(root, 'runtime', `${process.platform}-${process.arch}`),
   path.join(root, 'runtime', process.platform),
-].filter(Boolean)
-const legacyOpenconnectRuntimeCandidates = [
-  process.env[LEGACY_OPENCONNECT_RUNTIME_DIR_ENV],
-  path.join(root, 'runtime', 'legacy-openconnect', `${process.platform}-${process.arch}`),
-  path.join(root, 'runtime', 'legacy-openconnect', process.platform),
 ].filter(Boolean)
 
 function sleepSync(ms) {
@@ -86,65 +77,12 @@ function resetOutputDirectory(target) {
 resetOutputDirectory(outDir)
 fs.mkdirSync(outDir, { recursive: true })
 
-// Filenames we never want in the desktop bundle.
-const DENY_EXACT = new Set([
-  'libssl-3-x64.dll',
-  'libssl-3.dll',
-  'libcrypto-3-x64.dll',
-  'libcrypto-3.dll',
-])
-const DENY_PATTERNS = [/^libssl-/i, /^libcrypto-/i]
-const DENY_EXTS = new Set(['.lib', '.pdb', '.exp', '.a', '.map'])
 const MINGW_RUNTIME_DLLS = [
   'libgcc_s_seh-1.dll',
   'libstdc++-6.dll',
   'libwinpthread-1.dll',
 ]
 const ALLOWED_NATIVE_RUNTIME_ASSETS = new Set(['wintun.dll'])
-
-function isAllowed(name) {
-  if (DENY_EXACT.has(name)) return false
-  if (DENY_EXTS.has(path.extname(name).toLowerCase())) return false
-  for (const pattern of DENY_PATTERNS) {
-    if (pattern.test(name)) return false
-  }
-  return true
-}
-
-function copyRecursive(source, target) {
-  fs.mkdirSync(target, { recursive: true })
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    const sourcePath = path.join(source, entry.name)
-    const targetPath = path.join(target, entry.name)
-    if (entry.isDirectory()) {
-      copyRecursive(sourcePath, targetPath)
-      continue
-    }
-    if (!isAllowed(entry.name)) {
-      console.log(`Skipping ${entry.name}`)
-      continue
-    }
-    if (MINGW_RUNTIME_DLLS.includes(entry.name) && fs.existsSync(targetPath)) {
-      console.log(`Keeping staged native runtime DLL: ${entry.name}`)
-      continue
-    }
-    fs.copyFileSync(sourcePath, targetPath)
-  }
-}
-
-function copyLegacyRuntimeAssets(source, target) {
-  console.warn(
-    `[legacy diagnostic] ${LEGACY_OPENCONNECT_ENV}=1; copying legacy OpenConnect runtime assets from ${source}`,
-  )
-  copyRecursive(source, target)
-  const bundledOpenconnect = path.join(
-    target,
-    process.platform === 'win32' ? 'openconnect.exe' : 'openconnect',
-  )
-  if (process.platform !== 'win32' && fs.existsSync(bundledOpenconnect)) {
-    fs.chmodSync(bundledOpenconnect, 0o755)
-  }
-}
 
 function copyAllowedNativeRuntimeAssets(source, target) {
   const copied = []
@@ -270,21 +208,6 @@ if (!productionRuntimeSource) {
   copyAllowedNativeRuntimeAssets(productionRuntimeSource, outDir)
 }
 
-if (legacyOpenconnectRuntime) {
-  const legacyRuntimeSource = legacyOpenconnectRuntimeCandidates.find((candidate) =>
-    fs.existsSync(candidate),
-  )
-  if (!legacyRuntimeSource) {
-    throw new Error(
-      `[legacy diagnostic] ${LEGACY_OPENCONNECT_ENV}=1 but no legacy OpenConnect runtime assets were found. ` +
-      `Checked:\n  - ${legacyOpenconnectRuntimeCandidates.join('\n  - ')}`,
-    )
-  }
-
-  copyLegacyRuntimeAssets(legacyRuntimeSource, outDir)
-  console.log(`Copied legacy diagnostic runtime assets: ${legacyRuntimeSource} -> ${outDir}`)
-}
-
 // ---------------------------------------------------------------------------
 // Post-copy validation: ensure critical runtime files are present before
 // packaging. Missing files result in clear warnings so developers know the
@@ -308,7 +231,7 @@ if (process.platform === 'win32') {
     console.warn(
       '[validation] WARNING: wintun.dll not found in output directory.\n' +
       '  Wintun tunnel mode will not work in the packaged app.\n' +
-      '  Provide it via ECNUVPN_RUNTIME_DIR or runtime/win32-x64/wintun.dll.',
+      '  Provide it via ECNUVPN_RUNTIME_DIR or ignored local runtime/win32-x64/wintun.dll.',
     )
   } else {
     console.log('[validation] Wintun DLL present: wintun.dll')

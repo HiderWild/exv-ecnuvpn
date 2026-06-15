@@ -1,6 +1,6 @@
 # EXV 重构任务
 
-> 来源：仓库根目录 `new_start_point.md`。
+> 来源：`docs/architecture/new_start_point.md`。
 > 本文是任务层拆解。任务按阶段组织，并保留 epic 编号，便于分配给不同 agent / lane。
 
 ## 阶段总览
@@ -29,7 +29,7 @@ oneshot 是正式运行模式，不是临时 hack。
 
 实施：
 
-- 将 `new_start_point.md` 设为本轮重构最高指示。
+- 将 `docs/architecture/new_start_point.md` 设为本轮重构最高指示。
 - 在架构文档中明确 service / oneshot / foreground 三种 helper 模式。
 - 明确 Windows one-shot 是产品目标下的 merge blocker。
 

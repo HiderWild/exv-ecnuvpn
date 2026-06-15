@@ -856,6 +856,16 @@ target_compile_definitions(native_packaging_policy_test PRIVATE
 
 add_test(NAME native_packaging_policy_test COMMAND native_packaging_policy_test)
 
+add_executable(repository_hygiene_test
+    tests/repository_hygiene_test.cpp
+)
+
+target_compile_definitions(repository_hygiene_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME repository_hygiene_test COMMAND repository_hygiene_test)
+
 add_executable(crypto_roundtrip_test
     tests/crypto_roundtrip_test.cpp
     src/core/crypto/crypto.cpp
@@ -2020,6 +2030,7 @@ set(_release_blocking_tests
     proxy_tun_detector_test
     app_api_runtime_policy_test
     native_packaging_policy_test
+    repository_hygiene_test
     crypto_roundtrip_test
     native_url_test
     native_cstp_frame_test

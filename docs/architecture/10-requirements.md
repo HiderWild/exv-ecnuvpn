@@ -1,7 +1,7 @@
 # EXV 重构需求
 
-> 来源：仓库根目录 `new_start_point.md`。
-> 本文是需求层拆解。若与旧文档冲突，以 `new_start_point.md` 和 `00-constitution.md` 为准。
+> 来源：`docs/architecture/new_start_point.md`。
+> 本文是需求层拆解。若与旧文档冲突，以 `docs/architecture/new_start_point.md` 和 `00-constitution.md` 为准。
 
 ## 阶段划分
 
@@ -19,7 +19,7 @@
 
 ### R0.1 最高指示
 
-`new_start_point.md` 必须被视为新的最高指示。仓库中旧路线图或旧计划如有冲突，均以该文档为准。
+`docs/architecture/new_start_point.md` 必须被视为新的最高指示。仓库中旧路线图或旧计划如有冲突，均以该文档为准。
 
 验收：
 

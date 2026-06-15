@@ -16,7 +16,6 @@ namespace fs = std::filesystem;
 #endif
 
 const fs::path kRepoRoot = fs::path(ECNUVPN_SOURCE_DIR);
-constexpr const char *kLegacyEnv = "ECNUVPN_LEGACY_OPENCONNECT_RUNTIME";
 
 struct FileText {
   fs::path relative_path;
@@ -185,8 +184,7 @@ bool is_policy_denial_context(const std::string &context) {
 
 bool is_clear_legacy_context(const std::string &context) {
   const std::string lower = to_lower(context);
-  return lower.find(to_lower(kLegacyEnv)) != std::string::npos ||
-         lower.find("legacy diagnostic") != std::string::npos ||
+  return lower.find("legacy diagnostic") != std::string::npos ||
          lower.find("legacy-only") != std::string::npos ||
          lower.find("legacy openconnect") != std::string::npos ||
          lower.find("legacyopenconnectruntime") != std::string::npos ||
@@ -204,12 +202,6 @@ bool is_allowed_production_reference(const FileText &file, const std::string &li
     return true;
   if (is_clear_legacy_context(lower_context))
     return true;
-
-  const std::string path = generic_path(file.relative_path);
-  if (path == "runtime/README.md" &&
-      lower_context.find("diagnostic") != std::string::npos) {
-    return true;
-  }
 
   return false;
 }
@@ -316,7 +308,7 @@ std::vector<fs::path> production_files() {
       "webui/electron-builder.config.cjs",
       "scripts/build-windows.ps1",
       "scripts/build-macos.sh",
-      "runtime/README.md",
+      "docs/runtime-assets.md",
   };
 }
 
@@ -347,17 +339,25 @@ bool check_prepare_native_policy() {
   bool ok = true;
   const FileText prepare = read_file("webui/scripts/prepare-native.cjs");
 
-  ok = expect(contains(prepare, kLegacyEnv),
-              "prepare-native.cjs should gate legacy runtime copying with " +
-                  std::string(kLegacyEnv)) &&
+  ok = expect(!contains(prepare, "ECNUVPN_LEGACY_OPENCONNECT_RUNTIME"),
+              "prepare-native.cjs should not retain legacy OpenConnect runtime "
+              "copying gates") &&
+       ok;
+  ok = expect(!contains(prepare, "copyLegacyRuntimeAssets"),
+              "prepare-native.cjs should not retain legacy OpenConnect runtime "
+              "copying helpers") &&
+       ok;
+  ok = expect(!contains(prepare, "legacy-openconnect"),
+              "prepare-native.cjs should not read legacy-openconnect runtime "
+              "directories") &&
        ok;
   ok = expect(!contains(prepare, "copyRecursive(runtimeSource, outDir)"),
               "prepare-native.cjs must not copy runtime directories wholesale "
               "for production packaging") &&
        ok;
   ok = expect(!contains(prepare, "if (runtimeSource)"),
-              "prepare-native.cjs runtime directory copying should be explicit "
-              "legacy-only, not the production default") &&
+              "prepare-native.cjs runtime directory copying should not use "
+              "implicit production defaults") &&
        ok;
   ok = expect(contains(prepare, "ALLOWED_NATIVE_RUNTIME_ASSETS"),
               "prepare-native.cjs should copy production runtime assets from an "
@@ -397,35 +397,18 @@ bool check_builder_denies_legacy_runtime() {
   return ok;
 }
 
-bool check_legacy_staging_script_gates() {
+bool check_legacy_staging_scripts_removed() {
   bool ok = true;
-  const std::vector<FileText> scripts = {
-      read_file("scripts/stage-openconnect-runtime-win.ps1"),
-      read_file("scripts/stage-openconnect-runtime-mac.sh"),
+  const std::vector<fs::path> removed_scripts = {
+      "scripts/stage-openconnect-runtime-win.ps1",
+      "scripts/stage-openconnect-runtime-mac.sh",
   };
 
-  for (const FileText &script : scripts) {
-    const std::string name = generic_path(script.relative_path);
-    ok = expect(contains(script, kLegacyEnv),
-                name + " should require " + kLegacyEnv + "=1") &&
-         ok;
-    ok = expect(contains_ci(script.text, "legacy diagnostic"),
-                name + " should describe OpenConnect staging as legacy "
-                       "diagnostic-only") &&
-         ok;
-
-    const std::string normalized_text = normalize_path_separators(script.text);
-    ok = expect(contains_text(normalized_text, "runtime/legacy-openconnect"),
-                name + " should stage OpenConnect only under "
-                       "runtime/legacy-openconnect") &&
-         ok;
-    ok = expect(!contains_text(normalized_text, "runtime/win32-"),
-                name + " must not target production runtime/win32-* roots "
-                       "for OpenConnect payload staging") &&
-         ok;
-    ok = expect(!contains_text(normalized_text, "runtime/darwin-"),
-                name + " must not target production runtime/darwin-* roots "
-                       "for OpenConnect payload staging") &&
+  for (const fs::path &script : removed_scripts) {
+    ok = expect(!fs::exists(kRepoRoot / script),
+                generic_path(script) +
+                    " should not exist; legacy runtime staging is not a "
+                    "repository script") &&
          ok;
   }
 
@@ -449,24 +432,24 @@ bool check_production_build_scripts() {
   return ok;
 }
 
-bool check_runtime_readme_policy() {
+bool check_runtime_assets_doc_policy() {
   bool ok = true;
-  const FileText readme = read_file("runtime/README.md");
+  const FileText doc = read_file("docs/runtime-assets.md");
 
-  ok = expect(contains(readme, "Native Production Runtime"),
-              "runtime/README.md should document the native production runtime") &&
+  ok = expect(contains(doc, "Runtime Assets"),
+              "docs/runtime-assets.md should document runtime asset policy") &&
        ok;
-  ok = expect(contains(readme, kLegacyEnv),
-              "runtime/README.md should document the explicit legacy "
-              "OpenConnect gate") &&
+  ok = expect(contains(doc, "runtime/"),
+              "docs/runtime-assets.md should document the ignored runtime "
+              "directory") &&
        ok;
-  ok = expect(contains_ci(readme.text, "legacy diagnostic"),
-              "runtime/README.md should describe OpenConnect runtime assets as "
-              "legacy diagnostic-only") &&
+  ok = expect(contains(doc, "wintun.dll"),
+              "docs/runtime-assets.md should document the Wintun allowlist "
+              "asset") &&
        ok;
-  ok = expect(!contains(readme, "Bundled OpenConnect Runtime"),
-              "runtime/README.md should not present OpenConnect as the bundled "
-              "production runtime") &&
+  ok = expect(!contains_ci(doc.text, "openconnect"),
+              "docs/runtime-assets.md should not keep OpenConnect runtime "
+              "staging instructions") &&
        ok;
 
   return ok;
@@ -608,17 +591,6 @@ bool check_scanner_examples() {
               "production text scanner should allow explicit deny filters") &&
        ok;
 
-  const FileText legacy_note = make_text_file(
-      "runtime/README.md",
-      "## Legacy Diagnostic OpenConnect Runtime\n"
-      "Set ECNUVPN_LEGACY_OPENCONNECT_RUNTIME=1 before invoking diagnostics.\n"
-      "Those scripts may stage openconnect.exe and libopenconnect for "
-      "diagnostics.\n");
-  ok = expect(scan_production_text(legacy_note).empty(),
-              "production text scanner should allow clear legacy diagnostic "
-              "documentation") &&
-       ok;
-
   return ok;
 }
 
@@ -631,9 +603,9 @@ int main() {
   ok = check_production_files_exist_and_scan_cleanly() && ok;
   ok = check_prepare_native_policy() && ok;
   ok = check_builder_denies_legacy_runtime() && ok;
-  ok = check_legacy_staging_script_gates() && ok;
+  ok = check_legacy_staging_scripts_removed() && ok;
   ok = check_production_build_scripts() && ok;
-  ok = check_runtime_readme_policy() && ok;
+  ok = check_runtime_assets_doc_policy() && ok;
   ok = check_cmake_wiring() && ok;
   ok = check_production_runtime_dirs() && ok;
 

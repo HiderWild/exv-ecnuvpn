@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $start = Get-Content -LiteralPath (Join-Path $repoRoot 'start.ps1') -Raw
-$restart = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\restart-debug-electron.ps1') -Raw
+$restartPath = Join-Path $repoRoot 'scripts\restart-debug-electron.ps1'
 
 function Require-Contains {
   param(
@@ -32,12 +32,8 @@ Require-Contains $start 'pnpm run desktop:package' 'start.ps1 must support full 
 Require-Contains $start 'build-windows' 'start.ps1 must target build-windows outputs'
 Require-Contains $start 'Get-FileHash' 'start.ps1 must print binary hashes for consistency checks'
 Require-Contains $start 'desktop-rpc service.status' 'start.ps1 must probe runtime-selected native binary behavior'
-Require-Contains $restart 'start.ps1' 'restart-debug-electron.ps1 must delegate to root start.ps1'
-
-if ($restart.Contains('cmake --preset windows-release') -or
-    $restart.Contains('pnpm run build') -or
-    $restart.Contains('desktop:dev')) {
-  throw 'restart-debug-electron.ps1 must stay a thin wrapper without independent build logic'
+if (Test-Path -LiteralPath $restartPath) {
+  throw 'restart-debug-electron.ps1 has been retired; use root start.ps1 directly'
 }
 
 Write-Output 'start script contract passed.'

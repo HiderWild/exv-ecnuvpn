@@ -7,7 +7,7 @@
 > - 本文 **取代** `native-anyconnect-clean-room-spec.md` 第 1 节中“Unsupported in v1”的范围限制；
 >   该 v1 文档仍作为净室纪律与历史范围的参考保留。
 > - 与 `10-requirements.md` / `00-constitution.md` 的组件边界一致，不引入新的边界违例。
-> - 与 `new_start_point.md` 的最高指示不冲突。
+> - 与 `docs/architecture/new_start_point.md` 的最高指示不冲突。
 >
 > **目标（用户原话）**：“目的不是快速可用，而是从长远角度出发，直接面向长期而深度重构”，
 > 并“确保设置中之前所有与 OpenConnect 相关的功能，在原生引擎中也都能实现”

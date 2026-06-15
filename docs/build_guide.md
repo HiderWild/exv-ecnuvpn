@@ -149,17 +149,6 @@ Production packages use the native VPN implementation by default.
 Native production mode does not support arbitrary OpenConnect-style
 `extra_args`. Use the supported EXV config keys and route commands instead.
 
-### Legacy Diagnostic Fallback
-
-Legacy OpenConnect runtime files are retained only for development and
-diagnostic comparisons with the legacy backend. They are not required before
-production packaging.
-
-- Windows legacy diagnostic assets can be prepared under `runtime/win32-x64/`
-  with `scripts/stage-openconnect-runtime-win.ps1`.
-- macOS legacy diagnostic assets can be prepared under `runtime/darwin-<arch>/`
-  with `scripts/stage-openconnect-runtime-mac.sh`.
-
-Those scripts may copy legacy OpenConnect executables, GnuTLS-related DLLs, and
-other compatibility files used by the old backend. Do not treat those files as
-native production package requirements.
+See `docs/runtime-assets.md` for the local runtime asset policy. The root
+`runtime/` directory is ignored and is only for developer-supplied optional
+assets such as `wintun.dll`.
