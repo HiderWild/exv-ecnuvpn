@@ -10,9 +10,21 @@ struct WebView2RuntimeStatus {
   std::string source;
 };
 
+struct WebView2BootstrapDecision {
+  bool should_download = false;
+  std::string reason;
+  std::string installer_args;
+};
+
 bool is_valid_webview2_version(const std::string &version);
 WebView2RuntimeStatus evaluate_webview2_runtime_versions(
     const std::string &hklm_version, const std::string &hkcu_version);
 WebView2RuntimeStatus detect_webview2_runtime();
+WebView2BootstrapDecision decide_webview2_bootstrap(
+    const WebView2RuntimeStatus &status, bool network_available,
+    bool user_consented);
+
+bool run_webview2_evergreen_bootstrapper(const std::string &download_url,
+                                         const std::string &installer_path);
 
 } // namespace ecnuvpn::platform::win32::ui_shell

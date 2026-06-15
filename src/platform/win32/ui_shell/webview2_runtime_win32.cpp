@@ -90,4 +90,19 @@ WebView2RuntimeStatus detect_webview2_runtime() {
   return evaluate_webview2_runtime_versions(hklm, hkcu);
 }
 
+WebView2BootstrapDecision decide_webview2_bootstrap(
+    const WebView2RuntimeStatus &status, bool network_available,
+    bool user_consented) {
+  if (status.installed) {
+    return {false, "installed", ""};
+  }
+  if (!network_available) {
+    return {false, "offline", ""};
+  }
+  if (!user_consented) {
+    return {false, "user_declined", ""};
+  }
+  return {true, "missing", "/silent /install"};
+}
+
 } // namespace ecnuvpn::platform::win32::ui_shell

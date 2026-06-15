@@ -26,5 +26,26 @@ int main() {
       evaluate_webview2_runtime_versions("0.0.0.0", "");
   assert(!missing.installed);
 
+  WebView2BootstrapDecision denied =
+      decide_webview2_bootstrap({false, "", ""}, false, false);
+  assert(!denied.should_download);
+  assert(denied.reason == "offline");
+
+  WebView2BootstrapDecision declined =
+      decide_webview2_bootstrap({false, "", ""}, true, false);
+  assert(!declined.should_download);
+  assert(declined.reason == "user_declined");
+
+  WebView2BootstrapDecision allowed =
+      decide_webview2_bootstrap({false, "", ""}, true, true);
+  assert(allowed.should_download);
+  assert(allowed.reason == "missing");
+  assert(allowed.installer_args == "/silent /install");
+
+  WebView2BootstrapDecision unnecessary =
+      decide_webview2_bootstrap({true, "120.0.2210.91", "HKCU"}, true, true);
+  assert(!unnecessary.should_download);
+  assert(unnecessary.reason == "installed");
+
   (void)detect_webview2_runtime();
 }
