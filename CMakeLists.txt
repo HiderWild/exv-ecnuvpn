@@ -285,6 +285,18 @@ set_target_properties(exv-config-contract-module PROPERTIES
     CXX_SCAN_FOR_MODULES ON
 )
 
+add_library(exv-core-tunnel-contract-module STATIC)
+target_sources(exv-core-tunnel-contract-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/core/tunnel_controller/modules/tunnel_contract.cppm
+)
+target_compile_features(exv-core-tunnel-contract-module PUBLIC cxx_std_20)
+set_target_properties(exv-core-tunnel-contract-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
 
@@ -976,6 +988,25 @@ target_include_directories(tunnel_contract_test PRIVATE
 
 add_test(NAME tunnel_contract_test COMMAND tunnel_contract_test)
 
+add_executable(tunnel_module_smoke_test
+    tests/tunnel_module_smoke_test.cpp
+)
+
+target_include_directories(tunnel_module_smoke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(tunnel_module_smoke_test PRIVATE
+    exv-core-tunnel-contract-module
+)
+
+set_target_properties(tunnel_module_smoke_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_test(NAME tunnel_module_smoke_test COMMAND tunnel_module_smoke_test)
+
 add_executable(core_process_test
     tests/core_process_test.cpp
 )
@@ -1521,6 +1552,7 @@ set(_release_blocking_tests
     core_session_runner_test
     tunnel_controller_state_machine_test
     tunnel_contract_test
+    tunnel_module_smoke_test
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
@@ -1678,6 +1710,7 @@ set_property(TEST
     core_process_test
     core_process_lifecycle_test
     tunnel_contract_test
+    tunnel_module_smoke_test
     APPEND PROPERTY LABELS "core"
 )
 
@@ -1721,6 +1754,7 @@ set_property(TEST
     error_contract_test
     contract_manifest_test
     contract_generation_check
+    tunnel_module_smoke_test
     core_process_test
     core_process_lifecycle_test
     app_api_status_contract_test
