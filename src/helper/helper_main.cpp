@@ -1,5 +1,5 @@
 #include "helper/helper.hpp"
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "utils.hpp"
 
 #include <iostream>

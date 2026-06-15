@@ -1,6 +1,6 @@
 // Generated from contracts/system.contract.json. Do not edit manually.
 
-export const CONTRACT_VERSION = "2026-06-14.config-helper-contract.v1" as const
+export const CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-contract.v1" as const
 
 export const DESKTOP_RPC_REQUEST_FIELDS = [
   "id",
@@ -197,6 +197,138 @@ export const HELPER_FORBIDDEN_CREDENTIAL_FIELDS = [
   "apikey"
 ] as const
 
+export const TUNNEL_PHASE_CONTRACTS = [
+  {
+    "name": "Idle",
+    "wire_name": "idle",
+    "running": false,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "PreparingHelper",
+    "wire_name": "preparing_helper",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "Authenticating",
+    "wire_name": "authenticating",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "ConnectingCstp",
+    "wire_name": "connecting_cstp",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "ApplyingNetworkConfig",
+    "wire_name": "applying_network_config",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "OpeningPacketDevice",
+    "wire_name": "opening_packet_device",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "Connected",
+    "wire_name": "connected",
+    "running": true,
+    "connected": true,
+    "network_ready": true
+  },
+  {
+    "name": "Reconnecting",
+    "wire_name": "reconnecting",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "Disconnecting",
+    "wire_name": "disconnecting",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "CleaningUp",
+    "wire_name": "cleaning_up",
+    "running": true,
+    "connected": false,
+    "network_ready": false
+  },
+  {
+    "name": "Failed",
+    "wire_name": "failed",
+    "running": false,
+    "connected": false,
+    "network_ready": false
+  }
+] as const
+export const TUNNEL_EVENTS = [
+  "UserConnect",
+  "UserDisconnect",
+  "SetAutoReconnect",
+  "HelperReady",
+  "AuthSucceeded",
+  "AuthFailed",
+  "CstpConnected",
+  "NetworkConfigApplied",
+  "PacketLoopStarted",
+  "TransportClosed",
+  "PacketDeviceFailed",
+  "HelperLost",
+  "LeaseExpired",
+  "ReconnectTimerFired",
+  "CleanupSucceeded",
+  "CleanupFailed"
+] as const
+export const TUNNEL_DISCONNECT_REASONS = [
+  "UserRequested",
+  "AuthFailed",
+  "CertError",
+  "TransportClosed",
+  "HelperLost",
+  "PacketDeviceFailed",
+  "NetworkConfigFailed",
+  "LeaseExpired"
+] as const
+export const TUNNEL_ERROR_DOMAINS = [
+  "transport",
+  "auth",
+  "helper",
+  "os.route",
+  "os.dns",
+  "packet",
+  "config",
+  "native"
+] as const
+export const TUNNEL_STATUS_FIELDS = [
+  "phase",
+  "desired_connected",
+  "auto_reconnect",
+  "helper_mode",
+  "helper_status",
+  "network_ready",
+  "server",
+  "interface_name",
+  "last_error",
+  "reconnect"
+] as const
+
 export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]
 export type ConfigAction = (typeof CONFIG_ACTIONS)[number]
 export type HelperOp = (typeof HELPER_OPS)[number]
+export type TunnelPhase = (typeof TUNNEL_PHASE_CONTRACTS)[number]['name']
+export type TunnelEvent = (typeof TUNNEL_EVENTS)[number]

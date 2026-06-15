@@ -1,6 +1,6 @@
 #include "platform/common/backend_resolver.hpp"
 
-#include "helper/platform/helper_client.hpp"
+#include "platform/common/helper_client.hpp"
 #include "platform/common/oneshot_bootstrap.hpp"
 #include "platform/common/service_status.hpp"
 #include "logger.hpp"

@@ -1,8 +1,8 @@
-#include "helper/platform/helper_lifecycle.hpp"
+#include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
 #include "logger.hpp"
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 
@@ -31,9 +31,9 @@ struct SemanticVersion {
   int patch = -1;
 };
 
-#include "helper/platform/darwin/helper_lifecycle_version.inc.cpp"
-#include "helper/platform/darwin/helper_lifecycle_install.inc.cpp"
-#include "helper/platform/darwin/helper_lifecycle_worker.inc.cpp"
+#include "platform/darwin/helper_lifecycle_version.inc.cpp"
+#include "platform/darwin/helper_lifecycle_install.inc.cpp"
+#include "platform/darwin/helper_lifecycle_worker.inc.cpp"
 
 } // namespace platform
 } // namespace ecnuvpn

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/config/platform/config_defaults.hpp"
+#include "platform/common/config_defaults.hpp"
 
 #include <nlohmann/json.hpp>
 #include <string>

@@ -1,7 +1,7 @@
 {
   "contract_id": "ecnu-vpn.system",
   "schema_version": 1,
-  "version": "2026-06-14.config-helper-contract.v1",
+  "version": "2026-06-15.config-helper-tunnel-contract.v1",
   "envelopes": {
     "desktop_rpc": {
       "request": {
@@ -235,6 +235,91 @@
           "apikey"
         ]
       }
+    },
+    "tunnel_controller": {
+      "boundary": {
+        "accepts": [
+          "user connect and disconnect intent",
+          "native engine lifecycle events",
+          "helper lease and heartbeat events",
+          "platform network readiness results"
+        ],
+        "rejects": [
+          "OS-specific route and DNS implementation",
+          "helper wire protocol ownership",
+          "VPN authentication protocol parsing",
+          "configuration persistence ownership"
+        ],
+        "emits": [
+          "tunnel status snapshots",
+          "structured tunnel errors",
+          "reconnect decisions",
+          "status change callbacks"
+        ]
+      },
+      "phases": [
+        { "name": "Idle", "wire_name": "idle", "running": false, "connected": false, "network_ready": false },
+        { "name": "PreparingHelper", "wire_name": "preparing_helper", "running": true, "connected": false, "network_ready": false },
+        { "name": "Authenticating", "wire_name": "authenticating", "running": true, "connected": false, "network_ready": false },
+        { "name": "ConnectingCstp", "wire_name": "connecting_cstp", "running": true, "connected": false, "network_ready": false },
+        { "name": "ApplyingNetworkConfig", "wire_name": "applying_network_config", "running": true, "connected": false, "network_ready": false },
+        { "name": "OpeningPacketDevice", "wire_name": "opening_packet_device", "running": true, "connected": false, "network_ready": false },
+        { "name": "Connected", "wire_name": "connected", "running": true, "connected": true, "network_ready": true },
+        { "name": "Reconnecting", "wire_name": "reconnecting", "running": true, "connected": false, "network_ready": false },
+        { "name": "Disconnecting", "wire_name": "disconnecting", "running": true, "connected": false, "network_ready": false },
+        { "name": "CleaningUp", "wire_name": "cleaning_up", "running": true, "connected": false, "network_ready": false },
+        { "name": "Failed", "wire_name": "failed", "running": false, "connected": false, "network_ready": false }
+      ],
+      "events": [
+        "UserConnect",
+        "UserDisconnect",
+        "SetAutoReconnect",
+        "HelperReady",
+        "AuthSucceeded",
+        "AuthFailed",
+        "CstpConnected",
+        "NetworkConfigApplied",
+        "PacketLoopStarted",
+        "TransportClosed",
+        "PacketDeviceFailed",
+        "HelperLost",
+        "LeaseExpired",
+        "ReconnectTimerFired",
+        "CleanupSucceeded",
+        "CleanupFailed"
+      ],
+      "disconnect_reasons": [
+        "UserRequested",
+        "AuthFailed",
+        "CertError",
+        "TransportClosed",
+        "HelperLost",
+        "PacketDeviceFailed",
+        "NetworkConfigFailed",
+        "LeaseExpired"
+      ],
+      "error_domains": [
+        "transport",
+        "auth",
+        "helper",
+        "os.route",
+        "os.dns",
+        "packet",
+        "config",
+        "native"
+      ],
+      "status_fields": [
+        "phase",
+        "desired_connected",
+        "auto_reconnect",
+        "helper_mode",
+        "helper_status",
+        "network_ready",
+        "server",
+        "interface_name",
+        "last_error",
+        "reconnect"
+      ]
     },
     "vpn": {
       "shallow": true,

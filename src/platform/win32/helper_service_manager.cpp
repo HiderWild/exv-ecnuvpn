@@ -1,7 +1,7 @@
-#include "helper/platform/helper_service_manager.hpp"
+#include "platform/common/helper_service_manager.hpp"
 
 #include "logger.hpp"
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "utils.hpp"
 
 #include <filesystem>

@@ -1,7 +1,7 @@
 #include "platform/common/oneshot_bootstrap.hpp"
 
 #include "helper/common/helper_messages.hpp"
-#include "helper/platform/helper_client.hpp"
+#include "platform/common/helper_client.hpp"
 #include "platform/common/backend_resolver.hpp"
 
 #include <chrono>

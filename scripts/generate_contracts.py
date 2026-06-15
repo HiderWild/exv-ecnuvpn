@@ -145,6 +145,44 @@ def validate_helper(helper: dict[str, Any]) -> None:
             )
 
 
+def validate_tunnel_controller(tunnel: dict[str, Any]) -> None:
+    phases = require_array(tunnel.get("phases"), "modules.tunnel_controller.phases")
+    seen_phase_names: set[str] = set()
+    seen_wire_names: set[str] = set()
+    for index, value in enumerate(phases):
+        phase = require_object(value, f"modules.tunnel_controller.phases[{index}]")
+        name = require_string(phase.get("name"),
+                              f"modules.tunnel_controller.phases[{index}].name")
+        wire_name = require_string(
+            phase.get("wire_name"),
+            f"modules.tunnel_controller.phases[{index}].wire_name",
+        )
+        for field in ("running", "connected", "network_ready"):
+            if not isinstance(phase.get(field), bool):
+                raise ContractError(
+                    f"modules.tunnel_controller.phases[{index}].{field} must be a boolean"
+                )
+        if name in seen_phase_names:
+            raise ContractError(
+                f"modules.tunnel_controller.phases contains duplicate phase {name!r}"
+            )
+        if wire_name in seen_wire_names:
+            raise ContractError(
+                "modules.tunnel_controller.phases contains duplicate wire name "
+                f"{wire_name!r}"
+            )
+        seen_phase_names.add(name)
+        seen_wire_names.add(wire_name)
+
+    validate_string_list(tunnel.get("events"), "modules.tunnel_controller.events")
+    validate_string_list(tunnel.get("disconnect_reasons"),
+                         "modules.tunnel_controller.disconnect_reasons")
+    validate_string_list(tunnel.get("error_domains"),
+                         "modules.tunnel_controller.error_domains")
+    validate_string_list(tunnel.get("status_fields"),
+                         "modules.tunnel_controller.status_fields")
+
+
 def validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("contract_id") != "ecnu-vpn.system":
         raise ContractError("contract_id must be ecnu-vpn.system")
@@ -166,6 +204,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     modules = require_object(manifest.get("modules"), "modules")
     validate_config(require_object(modules.get("config"), "modules.config"))
     validate_helper(require_object(modules.get("helper"), "modules.helper"))
+    validate_tunnel_controller(require_object(modules.get("tunnel_controller"),
+                                              "modules.tunnel_controller"))
     for name in ("vpn", "service", "routes", "runtime", "logs"):
         module = require_object(modules.get(name), f"modules.{name}")
         if module.get("shallow") is not True:
@@ -199,6 +239,14 @@ def helper_ops(manifest: dict[str, Any]) -> list[str]:
     return [op["name"] for op in manifest["modules"]["helper"]["ops"]]
 
 
+def tunnel_controller(manifest: dict[str, Any]) -> dict[str, Any]:
+    return manifest["modules"]["tunnel_controller"]
+
+
+def tunnel_phase_names(manifest: dict[str, Any]) -> list[str]:
+    return [phase["name"] for phase in tunnel_controller(manifest)["phases"]]
+
+
 def desktop_error_code_map(manifest: dict[str, Any]) -> dict[str, str]:
     return {
         entry["key"]: entry["code"]
@@ -222,6 +270,7 @@ def cpp_array(name: str, values: Iterable[str]) -> str:
 
 def render_cpp(manifest: dict[str, Any]) -> str:
     aliases = config_aliases(manifest)
+    tunnel = tunnel_controller(manifest)
     return "\n".join([
         "// Generated from contracts/system.contract.json. Do not edit manually.",
         "#pragma once",
@@ -246,6 +295,11 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         cpp_array("CONFIG_ACTIONS", config_actions(manifest)),
         cpp_array("CONFIG_LEGACY_ALIASES", [alias for alias, _ in aliases]),
         cpp_array("HELPER_OPS", helper_ops(manifest)),
+        cpp_array("TUNNEL_PHASES", tunnel_phase_names(manifest)),
+        cpp_array("TUNNEL_EVENTS", tunnel["events"]),
+        cpp_array("TUNNEL_DISCONNECT_REASONS", tunnel["disconnect_reasons"]),
+        cpp_array("TUNNEL_ERROR_DOMAINS", tunnel["error_domains"]),
+        cpp_array("TUNNEL_STATUS_FIELDS", tunnel["status_fields"]),
         cpp_array("HELPER_FORBIDDEN_CREDENTIAL_FIELDS",
                   manifest["modules"]["helper"]["security"]["forbidden_fields"]),
         "",
@@ -269,6 +323,27 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         "",
         f"inline constexpr std::array<ConfigAlias, {len(aliases)}> CONFIG_ALIASES = {{{{",
         *[f"    {{{cpp_string(alias)}, {cpp_string(target)}}}," for alias, target in aliases],
+        "}};",
+        "",
+        "struct TunnelPhaseContract {",
+        "    std::string_view name;",
+        "    std::string_view wire_name;",
+        "    bool running;",
+        "    bool connected;",
+        "    bool network_ready;",
+        "};",
+        "",
+        f"inline constexpr std::array<TunnelPhaseContract, {len(tunnel['phases'])}> TUNNEL_PHASE_CONTRACTS = {{{{",
+        *[
+            "    {"
+            f"{cpp_string(phase['name'])}, "
+            f"{cpp_string(phase['wire_name'])}, "
+            f"{'true' if phase['running'] else 'false'}, "
+            f"{'true' if phase['connected'] else 'false'}, "
+            f"{'true' if phase['network_ready'] else 'false'}"
+            "},"
+            for phase in tunnel["phases"]
+        ],
         "}};",
         "",
         "template <std::size_t N>",
@@ -297,6 +372,22 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         "    return contains(HELPER_OPS, op);",
         "}",
         "",
+        "constexpr bool is_tunnel_phase(std::string_view phase) {",
+        "    return contains(TUNNEL_PHASES, phase);",
+        "}",
+        "",
+        "constexpr bool is_tunnel_event(std::string_view event) {",
+        "    return contains(TUNNEL_EVENTS, event);",
+        "}",
+        "",
+        "constexpr bool is_tunnel_disconnect_reason(std::string_view reason) {",
+        "    return contains(TUNNEL_DISCONNECT_REASONS, reason);",
+        "}",
+        "",
+        "constexpr bool is_tunnel_error_domain(std::string_view domain) {",
+        "    return contains(TUNNEL_ERROR_DOMAINS, domain);",
+        "}",
+        "",
         "constexpr bool is_helper_forbidden_credential_field(std::string_view field) {",
         "    return contains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, field);",
         "}",
@@ -313,6 +404,7 @@ def ts_literal(value: Any) -> str:
 def render_ts(manifest: dict[str, Any]) -> str:
     aliases = {alias: target for alias, target in config_aliases(manifest)}
     helper = manifest["modules"]["helper"]
+    tunnel = tunnel_controller(manifest)
     return "\n".join([
         "// Generated from contracts/system.contract.json. Do not edit manually.",
         "",
@@ -335,9 +427,17 @@ def render_ts(manifest: dict[str, Any]) -> str:
         f"export const HELPER_OP_CONTRACTS = {ts_literal(helper['ops'])} as const",
         f"export const HELPER_FORBIDDEN_CREDENTIAL_FIELDS = {ts_literal(helper['security']['forbidden_fields'])} as const",
         "",
+        f"export const TUNNEL_PHASE_CONTRACTS = {ts_literal(tunnel['phases'])} as const",
+        f"export const TUNNEL_EVENTS = {ts_literal(tunnel['events'])} as const",
+        f"export const TUNNEL_DISCONNECT_REASONS = {ts_literal(tunnel['disconnect_reasons'])} as const",
+        f"export const TUNNEL_ERROR_DOMAINS = {ts_literal(tunnel['error_domains'])} as const",
+        f"export const TUNNEL_STATUS_FIELDS = {ts_literal(tunnel['status_fields'])} as const",
+        "",
         "export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]",
         "export type ConfigAction = (typeof CONFIG_ACTIONS)[number]",
         "export type HelperOp = (typeof HELPER_OPS)[number]",
+        "export type TunnelPhase = (typeof TUNNEL_PHASE_CONTRACTS)[number]['name']",
+        "export type TunnelEvent = (typeof TUNNEL_EVENTS)[number]",
         "",
     ])
 

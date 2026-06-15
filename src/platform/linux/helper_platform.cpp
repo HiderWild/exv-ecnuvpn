@@ -1,18 +1,18 @@
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_platform.hpp"
 
 namespace ecnuvpn {
 namespace platform {
 
 const HelperPlatformConfig &helper_platform_config() {
   static const HelperPlatformConfig config{
-      "com.ecnu.exv.helper",
-      "com.ecnu.exv.helper",
-      "/Library/LaunchDaemons/com.ecnu.exv.helper.plist",
+      "exv-helper",
+      "exv-helper.service",
+      "/etc/systemd/system/exv-helper.service",
       "/var/run/exv-helper.sock",
       "/var/run/exv-helper-session.json",
       "/usr/local/bin/exv",
-      "/usr/local/bin/exv-helper",
-      "launchd",
+      "/usr/local/bin/exv",
+      "systemd",
   };
   return config;
 }

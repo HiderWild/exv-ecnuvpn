@@ -1,5 +1,5 @@
 #include "platform/common/app_api_runtime_policy.hpp"
-#include "helper/platform/helper_client.hpp"
+#include "platform/common/helper_client.hpp"
 #include "utils.hpp"
 #include "vpn.hpp"
 

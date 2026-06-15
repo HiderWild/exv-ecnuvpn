@@ -282,6 +282,64 @@ int test_unused_helper_server_stub_removed() {
   return ok ? 0 : 1;
 }
 
+bool is_source_file(const std::filesystem::path &path) {
+  const auto ext = path.extension().string();
+  return ext == ".cpp" || ext == ".hpp" || ext == ".h" || ext == ".inc" ||
+         ext == ".cppm" || ext == ".ixx";
+}
+
+int test_helper_platform_boundary_lives_under_platform() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "helper" /
+                                       "platform"),
+              "helper platform implementation must live under src/platform") &&
+       ok;
+
+  const auto cmake = read_text_file(source_dir / "CMakeLists.txt");
+  ok = expect(cmake.find("src/helper/platform") == std::string::npos,
+              "CMake must not compile src/helper/platform sources") &&
+       ok;
+
+  const std::vector<std::filesystem::path> roots = {
+      source_dir / "src",
+      source_dir / "tests",
+  };
+  for (const auto &root : roots) {
+    for (const auto &entry :
+         std::filesystem::recursive_directory_iterator(root)) {
+      if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+        continue;
+      }
+      const auto text = read_text_file(entry.path());
+      ok = expect(text.find("#include \"helper/platform/") ==
+                      std::string::npos,
+                  "source files must include helper platform APIs from "
+                  "platform/common") &&
+           ok;
+    }
+  }
+
+  const auto platform_root = source_dir / "src" / "platform";
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(platform_root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    const auto text = read_text_file(entry.path());
+    ok = expect(text.find("#include \"helper/runtime/") == std::string::npos,
+                "platform must not include helper runtime internals") &&
+         ok;
+    ok = expect(text.find("#include \"helper/helper_handler") ==
+                    std::string::npos,
+                "platform must not include helper handler internals") &&
+         ok;
+  }
+
+  return ok ? 0 : 1;
+}
+
 int test_oneshot_owner_is_uid_or_sid_not_pid_alias() {
   bool ok = true;
   const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
@@ -783,6 +841,7 @@ int main() {
   failures += test_daemon_uses_network_ops_handler_factory();
   failures += test_legacy_helper_internal_header_removed();
   failures += test_unused_helper_server_stub_removed();
+  failures += test_helper_platform_boundary_lives_under_platform();
   failures += test_oneshot_owner_is_uid_or_sid_not_pid_alias();
   failures += test_windows_helper_has_no_second_service_entrypoint();
   failures += test_oneshot_entrypoint_uses_only_endpoint_argument();

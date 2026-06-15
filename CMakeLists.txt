@@ -1,8 +1,9 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.28)
 project(exv VERSION 3.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 enable_testing()
@@ -87,7 +88,7 @@ set(EXV_COMMON_SOURCES
     src/platform/common/oneshot_bootstrap.cpp
     src/platform/common/packet_device_factory.cpp
     src/platform/common/platform_network_ops.cpp
-    src/helper/platform/helper_delegating_network_ops.cpp
+    src/platform/common/helper_delegating_network_ops.cpp
     src/platform/common/proxy_tun_detector.cpp
     src/platform/common/route_model.cpp
     src/platform/common/status_models.cpp
@@ -146,14 +147,14 @@ if(APPLE)
     list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_DARWIN=1)
     list(APPEND EXV_PLATFORM_LIBS "-framework Security" "-framework CoreFoundation")
     list(APPEND EXV_PLATFORM_SOURCES
-        src/helper/platform/darwin/helper_daemon.cpp
+        src/platform/darwin/helper_daemon.cpp
         src/platform/darwin/app_api_runtime_policy.cpp
         src/platform/darwin/crypto_backend.cpp
-        src/core/config/platform/darwin/config_defaults.cpp
-        src/helper/platform/darwin/helper_client.cpp
-        src/helper/platform/darwin/helper_lifecycle.cpp
-        src/helper/platform/darwin/helper_platform.cpp
-        src/helper/platform/darwin/helper_service_manager.cpp
+        src/platform/darwin/config_defaults.cpp
+        src/platform/darwin/helper_client.cpp
+        src/platform/darwin/helper_lifecycle.cpp
+        src/platform/darwin/helper_platform.cpp
+        src/platform/darwin/helper_service_manager.cpp
         src/platform/darwin/native_tls_stream.cpp
         src/platform/darwin/native_packet_device.cpp
         src/platform/darwin/default_engine_deps.cpp
@@ -175,14 +176,14 @@ elseif(UNIX AND NOT APPLE)
     list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_LINUX=1)
     list(APPEND EXV_PLATFORM_LIBS OpenSSL::SSL OpenSSL::Crypto)
     list(APPEND EXV_PLATFORM_SOURCES
-        src/helper/platform/linux/helper_daemon.cpp
+        src/platform/linux/helper_daemon.cpp
         src/platform/linux/app_api_runtime_policy.cpp
         src/platform/linux/crypto_backend.cpp
-        src/core/config/platform/linux/config_defaults.cpp
-        src/helper/platform/linux/helper_client.cpp
-        src/helper/platform/linux/helper_lifecycle.cpp
-        src/helper/platform/linux/helper_platform.cpp
-        src/helper/platform/linux/helper_service_manager.cpp
+        src/platform/linux/config_defaults.cpp
+        src/platform/linux/helper_client.cpp
+        src/platform/linux/helper_lifecycle.cpp
+        src/platform/linux/helper_platform.cpp
+        src/platform/linux/helper_service_manager.cpp
         src/platform/linux/openconnect_process.cpp
         src/platform/linux/oneshot_bootstrap.cpp
         src/platform/linux/process_control.cpp
@@ -200,14 +201,14 @@ elseif(WIN32)
     list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_WINDOWS=1)
     list(APPEND EXV_PLATFORM_LIBS bcrypt advapi32 iphlpapi ws2_32 secur32 crypt32)
     list(APPEND EXV_PLATFORM_SOURCES
-        src/helper/platform/win32/helper_daemon.cpp
+        src/platform/win32/helper_daemon.cpp
         src/platform/win32/app_api_runtime_policy.cpp
         src/platform/win32/crypto_backend.cpp
-        src/core/config/platform/win32/config_defaults.cpp
-        src/helper/platform/win32/helper_client.cpp
-        src/helper/platform/win32/helper_lifecycle.cpp
-        src/helper/platform/win32/helper_platform.cpp
-        src/helper/platform/win32/helper_service_manager.cpp
+        src/platform/win32/config_defaults.cpp
+        src/platform/win32/helper_client.cpp
+        src/platform/win32/helper_lifecycle.cpp
+        src/platform/win32/helper_platform.cpp
+        src/platform/win32/helper_service_manager.cpp
         src/platform/win32/native_tls_stream.cpp
         src/platform/win32/native_packet_device.cpp
         src/platform/win32/default_engine_deps.cpp
@@ -260,6 +261,30 @@ target_compile_definitions(exv-helper-runtime PUBLIC
     ${EXV_PLATFORM_DEFINITIONS}
 )
 
+add_library(exv-helper-protocol-module STATIC)
+target_sources(exv-helper-protocol-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/helper/modules/helper_protocol.cppm
+)
+target_compile_features(exv-helper-protocol-module PUBLIC cxx_std_20)
+set_target_properties(exv-helper-protocol-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_library(exv-config-contract-module STATIC)
+target_sources(exv-config-contract-module
+    PUBLIC
+        FILE_SET CXX_MODULES
+        FILES
+            src/core/config/modules/config_contract.cppm
+)
+target_compile_features(exv-config-contract-module PUBLIC cxx_std_20)
+set_target_properties(exv-config-contract-module PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
 
@@ -302,11 +327,11 @@ target_compile_definitions(exv PRIVATE
 # )
 #
 # if(APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/darwin/path_utils.cpp src/platform/darwin/process_control.cpp src/core/config/platform/darwin/config_defaults.cpp)
+#     target_sources(vpn_runtime_test PRIVATE src/platform/darwin/path_utils.cpp src/platform/darwin/process_control.cpp src/platform/darwin/config_defaults.cpp)
 # elseif(UNIX AND NOT APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/linux/path_utils.cpp src/platform/linux/process_control.cpp src/core/config/platform/linux/config_defaults.cpp)
+#     target_sources(vpn_runtime_test PRIVATE src/platform/linux/path_utils.cpp src/platform/linux/process_control.cpp src/platform/linux/config_defaults.cpp)
 # elseif(WIN32)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/win32/path_utils.cpp src/platform/win32/process_control.cpp src/core/config/platform/win32/config_defaults.cpp)
+#     target_sources(vpn_runtime_test PRIVATE src/platform/win32/path_utils.cpp src/platform/win32/process_control.cpp src/platform/win32/config_defaults.cpp)
 # endif()
 #
 # target_include_directories(vpn_runtime_test PRIVATE
@@ -363,11 +388,11 @@ add_executable(runtime_status_native_test
 )
 
 if(APPLE)
-    target_sources(runtime_status_native_test PRIVATE src/core/config/platform/darwin/config_defaults.cpp)
+    target_sources(runtime_status_native_test PRIVATE src/platform/darwin/config_defaults.cpp)
 elseif(UNIX AND NOT APPLE)
-    target_sources(runtime_status_native_test PRIVATE src/core/config/platform/linux/config_defaults.cpp)
+    target_sources(runtime_status_native_test PRIVATE src/platform/linux/config_defaults.cpp)
 elseif(WIN32)
-    target_sources(runtime_status_native_test PRIVATE src/core/config/platform/win32/config_defaults.cpp)
+    target_sources(runtime_status_native_test PRIVATE src/platform/win32/config_defaults.cpp)
 endif()
 
 target_include_directories(runtime_status_native_test PRIVATE
@@ -443,7 +468,7 @@ add_executable(native_engine_contract_test
 
 if(APPLE)
     target_sources(native_engine_contract_test PRIVATE
-        src/core/config/platform/darwin/config_defaults.cpp
+        src/platform/darwin/config_defaults.cpp
         src/platform/darwin/default_engine_deps.cpp
         src/platform/darwin/native_tls_stream.cpp
         src/platform/darwin/native_packet_device.cpp
@@ -452,12 +477,12 @@ if(APPLE)
     )
 elseif(UNIX AND NOT APPLE)
     target_sources(native_engine_contract_test PRIVATE
-        src/core/config/platform/linux/config_defaults.cpp
+        src/platform/linux/config_defaults.cpp
         src/platform/linux/default_engine_deps.cpp
     )
 elseif(WIN32)
     target_sources(native_engine_contract_test PRIVATE
-        src/core/config/platform/win32/config_defaults.cpp
+        src/platform/win32/config_defaults.cpp
         src/platform/win32/default_engine_deps.cpp
         src/platform/win32/native_tls_stream.cpp
         src/platform/win32/native_packet_device.cpp
@@ -493,7 +518,7 @@ add_executable(native_event_sink_test
 
 if(APPLE)
     target_sources(native_event_sink_test PRIVATE
-        src/core/config/platform/darwin/config_defaults.cpp
+        src/platform/darwin/config_defaults.cpp
         src/platform/darwin/default_engine_deps.cpp
         src/platform/darwin/native_tls_stream.cpp
         src/platform/darwin/native_packet_device.cpp
@@ -502,12 +527,12 @@ if(APPLE)
     )
 elseif(UNIX AND NOT APPLE)
     target_sources(native_event_sink_test PRIVATE
-        src/core/config/platform/linux/config_defaults.cpp
+        src/platform/linux/config_defaults.cpp
         src/platform/linux/default_engine_deps.cpp
     )
 elseif(WIN32)
     target_sources(native_event_sink_test PRIVATE
-        src/core/config/platform/win32/config_defaults.cpp
+        src/platform/win32/config_defaults.cpp
         src/platform/win32/default_engine_deps.cpp
         src/platform/win32/native_tls_stream.cpp
         src/platform/win32/native_packet_device.cpp
@@ -940,6 +965,17 @@ target_include_directories(tunnel_controller_state_machine_test PRIVATE
 
 add_test(NAME tunnel_controller_state_machine_test COMMAND tunnel_controller_state_machine_test)
 
+add_executable(tunnel_contract_test
+    tests/tunnel_contract_test.cpp
+)
+
+target_include_directories(tunnel_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME tunnel_contract_test COMMAND tunnel_contract_test)
+
 add_executable(core_process_test
     tests/core_process_test.cpp
 )
@@ -1036,6 +1072,43 @@ target_compile_definitions(helper_contract_test PRIVATE
 )
 
 add_test(NAME helper_contract_test COMMAND helper_contract_test)
+
+add_executable(helper_module_smoke_test
+    tests/helper_module_smoke_test.cpp
+)
+
+target_include_directories(helper_module_smoke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(helper_module_smoke_test PRIVATE
+    exv-helper-protocol-module
+)
+set_target_properties(helper_module_smoke_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_test(NAME helper_module_smoke_test COMMAND helper_module_smoke_test)
+
+add_executable(config_module_smoke_test
+    tests/config_module_smoke_test.cpp
+)
+
+target_include_directories(config_module_smoke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(config_module_smoke_test PRIVATE
+    exv-config-contract-module
+)
+
+set_target_properties(config_module_smoke_test PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+)
+
+add_test(NAME config_module_smoke_test COMMAND config_module_smoke_test)
 
 add_executable(helper_network_ops_adapter_test
     tests/helper_network_ops_adapter_test.cpp
@@ -1383,7 +1456,7 @@ add_executable(helper_delegating_network_ops_test
     tests/helper_delegating_network_ops_test.cpp
     tests/support/fake_helper.cpp
     src/helper/common/helper_messages.cpp
-    src/helper/platform/helper_delegating_network_ops.cpp
+    src/platform/common/helper_delegating_network_ops.cpp
 )
 
 target_include_directories(helper_delegating_network_ops_test PRIVATE
@@ -1447,9 +1520,12 @@ set(_release_blocking_tests
     engine_event_bridge_test
     core_session_runner_test
     tunnel_controller_state_machine_test
+    tunnel_contract_test
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
+    helper_module_smoke_test
+    config_module_smoke_test
     helper_network_ops_adapter_test
     darwin_platform_network_ops_test
     no_secret_in_argv_test
@@ -1549,9 +1625,12 @@ set_property(TEST
     core_session_runner_test
     tunnel_controller_state_machine_test
     tunnel_controller_integration_test
+    tunnel_contract_test
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
+    helper_module_smoke_test
+    config_module_smoke_test
     helper_network_ops_adapter_test
     darwin_platform_network_ops_test
     app_api_rpc_dispatcher_test
@@ -1598,6 +1677,7 @@ set_property(TEST
     tunnel_controller_integration_test
     core_process_test
     core_process_lifecycle_test
+    tunnel_contract_test
     APPEND PROPERTY LABELS "core"
 )
 
@@ -1606,6 +1686,7 @@ set_property(TEST
     helper_lease_manager_test
     helper_cleanup_registry_test
     helper_contract_test
+    helper_module_smoke_test
     helper_network_ops_adapter_test
     helper_messages_connector_test
     helper_timeout_cleanup_test
@@ -1633,6 +1714,8 @@ set_property(TEST
     app_api_rpc_dispatcher_test
     vpn_actions_test
     config_actions_test
+    tunnel_contract_test
+    config_module_smoke_test
     service_actions_test
     route_actions_test
     error_contract_test

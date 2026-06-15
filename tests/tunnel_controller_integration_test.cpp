@@ -22,7 +22,7 @@
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 #include "support/fake_core_ui_client.hpp"
-#include "helper/platform/helper_delegating_network_ops.hpp"
+#include "platform/common/helper_delegating_network_ops.hpp"
 
 #include <iostream>
 #include <string>

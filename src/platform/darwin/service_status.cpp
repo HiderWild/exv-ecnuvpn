@@ -1,7 +1,7 @@
 #include "platform/common/service_status.hpp"
 
 #include "helper/helper.hpp"
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "utils.hpp"
 
 namespace ecnuvpn {

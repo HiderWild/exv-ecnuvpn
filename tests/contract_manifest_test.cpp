@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,16 @@ json read_json_file(const std::filesystem::path &path) {
   return parsed;
 }
 
+std::string read_text_file(const std::filesystem::path &path) {
+  std::ifstream in(path);
+  if (!in) {
+    throw std::runtime_error("failed to open " + path.string());
+  }
+  std::ostringstream out;
+  out << in.rdbuf();
+  return out.str();
+}
+
 template <typename Range>
 bool contains(const Range &values, std::string_view value) {
   return std::find(values.begin(), values.end(), value) != values.end();
@@ -54,6 +65,34 @@ bool alias_targets_exist(const json &aliases, const json &actions) {
   return true;
 }
 
+bool is_source_file(const std::filesystem::path &path) {
+  const auto ext = path.extension().string();
+  return ext == ".cpp" || ext == ".hpp" || ext == ".h" || ext == ".cppm";
+}
+
+bool tree_contains_any(const std::filesystem::path &root,
+                       const std::vector<std::string> &needles,
+                       const char *message) {
+  if (!std::filesystem::exists(root)) {
+    return false;
+  }
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    const auto text = read_text_file(entry.path());
+    for (const auto &needle : needles) {
+      if (text.find(needle) != std::string::npos) {
+        std::cerr << "Forbidden dependency in " << entry.path().string()
+                  << ": " << needle << '\n';
+        std::cerr << message << '\n';
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 int main() {
@@ -65,9 +104,48 @@ int main() {
   const auto snapshot =
       read_json_file(source_dir / "contracts" / "generated" /
                      "system_contract_snapshot.json");
+  const auto cmake_lists = read_text_file(source_dir / "CMakeLists.txt");
 
   ok = expect(manifest == snapshot,
               "generated snapshot must match canonical manifest") &&
+       ok;
+
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "core" /
+                                       "config" / "platform"),
+              "config platform files must live under src/platform, not "
+              "src/core/config/platform") &&
+       ok;
+  ok = expect(cmake_lists.find("src/core/config/platform") ==
+                  std::string::npos,
+              "CMake must not reference src/core/config/platform") &&
+       ok;
+  ok = expect(!tree_contains_any(source_dir / "src" / "core" /
+                                     "tunnel_controller",
+                                 {"platform/win32/", "platform/darwin/",
+                                  "platform/linux/"},
+                                 "tunnel controller must depend on platform "
+                                 "common interfaces, not OS-specific paths"),
+              "tunnel controller must not include OS-specific platform paths") &&
+       ok;
+  ok = expect(!tree_contains_any(source_dir / "src" / "platform",
+                                 {"core/tunnel_controller/tunnel_controller",
+                                  "core/tunnel_controller/core_session_runner",
+                                  "core/tunnel_controller/timer_scheduler",
+                                  "core/tunnel_controller/timing",
+                                  "core/tunnel_controller/engine_event_bridge"},
+                                 "platform must not depend on tunnel "
+                                 "controller runtime internals"),
+              "platform must not include tunnel controller runtime internals") &&
+       ok;
+  ok = expect(!tree_contains_any(source_dir / "src" / "helper",
+                                 {"core/tunnel_controller/tunnel_controller",
+                                  "core/tunnel_controller/core_session_runner",
+                                  "core/tunnel_controller/timer_scheduler",
+                                  "core/tunnel_controller/timing",
+                                  "core/tunnel_controller/engine_event_bridge"},
+                                 "helper must not depend on tunnel controller "
+                                 "runtime internals"),
+              "helper must not include tunnel controller runtime internals") &&
        ok;
 
   ok = expect(std::string(exv::contracts::generated::CONTRACT_VERSION) ==
@@ -152,6 +230,9 @@ int main() {
   const auto &config = manifest.at("modules").at("config");
   ok = expect(alias_targets_exist(config.at("aliases"), config.at("actions")),
               "every config alias target must be an action") &&
+       ok;
+  ok = expect(manifest.at("modules").contains("tunnel_controller"),
+              "manifest must declare modules.tunnel_controller") &&
        ok;
 
   if (ok) {

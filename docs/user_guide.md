@@ -61,12 +61,12 @@ cmake --build --preset linux-release
 
 | Platform | Prerequisites |
 |----------|--------------|
-| macOS | Xcode command line tools, CMake, Node.js; Homebrew OpenConnect is not required for native production packages |
-| Linux (Ubuntu/Debian) | `sudo apt install libssl-dev cmake build-essential` |
-| Linux (Fedora/RHEL) | `sudo dnf install openssl-devel cmake gcc-c++` |
-| Windows | CMake, a supported compiler toolchain, Node.js; openconnect-gui is not required for native production packages |
+| macOS | CMake 3.28+, Ninja 1.11+, Homebrew LLVM/Clang, Xcode command line tools, Node.js; Homebrew OpenConnect is not required for native production packages |
+| Linux (Ubuntu/Debian) | CMake 3.28+ plus `sudo apt install libssl-dev ninja-build gcc-14 g++-14 build-essential` |
+| Linux (Fedora/RHEL) | CMake 3.28+ plus `sudo dnf install openssl-devel ninja-build gcc-c++` with a module-capable GCC/Clang toolchain |
+| Windows | CMake 3.28+, Ninja 1.11+, MSVC from Visual Studio 2022 or newer, Node.js; openconnect-gui is not required for native production packages |
 
-All platforms also require **Node.js** (v18+) for the frontend build step. OpenConnect may be installed separately only when you are developing or diagnosing the legacy fallback backend; it is not part of the production runtime path.
+All platforms also require **Node.js** (v18+) for the frontend build step. Native builds use C++20 and include a helper protocol named-module smoke test, so the C++ compiler must support CMake C++ module dependency scanning. OpenConnect may be installed separately only when you are developing or diagnosing the legacy fallback backend; it is not part of the production runtime path.
 
 ### Build Directory Convention
 

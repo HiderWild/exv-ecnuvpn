@@ -1,6 +1,6 @@
 #include "helper/common/pipe_helper_client.hpp"
 #include "helper/helper.hpp"
-#include "helper/platform/helper_client.hpp"
+#include "platform/common/helper_client.hpp"
 
 #include <nlohmann/json.hpp>
 

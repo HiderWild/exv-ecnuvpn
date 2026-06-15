@@ -4,7 +4,7 @@
 // PlatformNetworkOps call to the underlying HelperClient and that
 // type conversions between platform and helper types work properly.
 
-#include "helper/platform/helper_delegating_network_ops.hpp"
+#include "platform/common/helper_delegating_network_ops.hpp"
 #include "support/fake_helper.hpp"
 
 #include <iostream>

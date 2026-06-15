@@ -1,4 +1,4 @@
-#include "helper/platform/helper_lifecycle.hpp"
+#include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
 #include "logger.hpp"

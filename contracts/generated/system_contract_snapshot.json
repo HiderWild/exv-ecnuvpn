@@ -382,6 +382,157 @@
       "namespace": "service.",
       "shallow": true
     },
+    "tunnel_controller": {
+      "boundary": {
+        "accepts": [
+          "user connect and disconnect intent",
+          "native engine lifecycle events",
+          "helper lease and heartbeat events",
+          "platform network readiness results"
+        ],
+        "emits": [
+          "tunnel status snapshots",
+          "structured tunnel errors",
+          "reconnect decisions",
+          "status change callbacks"
+        ],
+        "rejects": [
+          "OS-specific route and DNS implementation",
+          "helper wire protocol ownership",
+          "VPN authentication protocol parsing",
+          "configuration persistence ownership"
+        ]
+      },
+      "disconnect_reasons": [
+        "UserRequested",
+        "AuthFailed",
+        "CertError",
+        "TransportClosed",
+        "HelperLost",
+        "PacketDeviceFailed",
+        "NetworkConfigFailed",
+        "LeaseExpired"
+      ],
+      "error_domains": [
+        "transport",
+        "auth",
+        "helper",
+        "os.route",
+        "os.dns",
+        "packet",
+        "config",
+        "native"
+      ],
+      "events": [
+        "UserConnect",
+        "UserDisconnect",
+        "SetAutoReconnect",
+        "HelperReady",
+        "AuthSucceeded",
+        "AuthFailed",
+        "CstpConnected",
+        "NetworkConfigApplied",
+        "PacketLoopStarted",
+        "TransportClosed",
+        "PacketDeviceFailed",
+        "HelperLost",
+        "LeaseExpired",
+        "ReconnectTimerFired",
+        "CleanupSucceeded",
+        "CleanupFailed"
+      ],
+      "phases": [
+        {
+          "connected": false,
+          "name": "Idle",
+          "network_ready": false,
+          "running": false,
+          "wire_name": "idle"
+        },
+        {
+          "connected": false,
+          "name": "PreparingHelper",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "preparing_helper"
+        },
+        {
+          "connected": false,
+          "name": "Authenticating",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "authenticating"
+        },
+        {
+          "connected": false,
+          "name": "ConnectingCstp",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "connecting_cstp"
+        },
+        {
+          "connected": false,
+          "name": "ApplyingNetworkConfig",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "applying_network_config"
+        },
+        {
+          "connected": false,
+          "name": "OpeningPacketDevice",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "opening_packet_device"
+        },
+        {
+          "connected": true,
+          "name": "Connected",
+          "network_ready": true,
+          "running": true,
+          "wire_name": "connected"
+        },
+        {
+          "connected": false,
+          "name": "Reconnecting",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "reconnecting"
+        },
+        {
+          "connected": false,
+          "name": "Disconnecting",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "disconnecting"
+        },
+        {
+          "connected": false,
+          "name": "CleaningUp",
+          "network_ready": false,
+          "running": true,
+          "wire_name": "cleaning_up"
+        },
+        {
+          "connected": false,
+          "name": "Failed",
+          "network_ready": false,
+          "running": false,
+          "wire_name": "failed"
+        }
+      ],
+      "status_fields": [
+        "phase",
+        "desired_connected",
+        "auto_reconnect",
+        "helper_mode",
+        "helper_status",
+        "network_ready",
+        "server",
+        "interface_name",
+        "last_error",
+        "reconnect"
+      ]
+    },
     "vpn": {
       "actions": [
         "vpn.connect",
@@ -500,5 +651,5 @@
       ]
     }
   },
-  "version": "2026-06-14.config-helper-contract.v1"
+  "version": "2026-06-15.config-helper-tunnel-contract.v1"
 }

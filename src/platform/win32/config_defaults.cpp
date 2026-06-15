@@ -1,4 +1,4 @@
-#include "core/config/platform/config_defaults.hpp"
+#include "platform/common/config_defaults.hpp"
 
 #include <cstdlib>
 

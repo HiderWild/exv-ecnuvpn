@@ -5,7 +5,7 @@
 #include "core/tunnel_controller/timer_scheduler.hpp"
 #include "helper/common/helper_client.hpp"
 #include "platform/common/platform_network_ops.hpp"
-#include "helper/platform/helper_delegating_network_ops.hpp"
+#include "platform/common/helper_delegating_network_ops.hpp"
 #include "core/config/config.hpp"
 
 #include <stdexcept>

@@ -2,7 +2,7 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 15,
+    "minor": 28,
     "patch": 0
   },
   "configurePresets": [
@@ -19,7 +19,7 @@
       "displayName": "Linux release build",
       "description": "Configure the native Linux build under build/linux/cpp.",
       "inherits": "release-base",
-      "generator": "Unix Makefiles",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/linux/cpp",
       "condition": {
         "type": "equals",
@@ -45,7 +45,7 @@
       "displayName": "macOS release build",
       "description": "Configure the native macOS build under build/macos/cpp.",
       "inherits": "release-base",
-      "generator": "Unix Makefiles",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/macos/cpp",
       "condition": {
         "type": "equals",

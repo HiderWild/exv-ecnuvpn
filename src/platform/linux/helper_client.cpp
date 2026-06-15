@@ -1,11 +1,9 @@
-#include "helper/platform/helper_client.hpp"
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_client.hpp"
+#include "platform/common/helper_platform.hpp"
 
 #include <cstdio>
 #include <string>
 
-#include <fcntl.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -46,42 +44,12 @@ nlohmann::json send_helper_request(const HelperEndpoint &endpoint,
   std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
                 endpoint.endpoint.c_str());
 
-  // Non-blocking connect with 2-second timeout to avoid indefinite hangs
-  // when the helper socket is stale or unreachable.
-  int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-  int rc = ::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
-  if (rc != 0 && errno != EINPROGRESS) {
+  if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
     close(fd);
     return nlohmann::json{{"ok", false},
                           {"message", "Helper daemon not available"},
                           {"code", kHelperUnavailableCode}};
   }
-  if (rc != 0) {
-    struct pollfd pfd{};
-    pfd.fd = fd;
-    pfd.events = POLLOUT;
-    rc = poll(&pfd, 1, 2000);
-    if (rc <= 0) {
-      close(fd);
-      return nlohmann::json{{"ok", false},
-                            {"message", "Helper daemon not available"},
-                            {"code", kHelperUnavailableCode}};
-    }
-    int sock_err = 0;
-    socklen_t len = sizeof(sock_err);
-    getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &len);
-    if (sock_err != 0) {
-      close(fd);
-      return nlohmann::json{{"ok", false},
-                            {"message", "Helper daemon not available"},
-                            {"code", kHelperUnavailableCode}};
-    }
-  }
-
-  // Restore blocking mode for subsequent read/write
-  fcntl(fd, F_SETFL, flags);
 
   if (write(fd, payload.data(), payload.size()) !=
       static_cast<ssize_t>(payload.size())) {

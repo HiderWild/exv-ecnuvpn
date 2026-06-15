@@ -1,4 +1,4 @@
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_platform.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

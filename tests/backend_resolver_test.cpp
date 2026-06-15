@@ -1,5 +1,5 @@
 #include "platform/common/backend_resolver.hpp"
-#include "helper/platform/helper_client.hpp"
+#include "platform/common/helper_client.hpp"
 
 #include <iostream>
 #include <string>

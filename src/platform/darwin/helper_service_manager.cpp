@@ -1,12 +1,15 @@
-#include "helper/platform/helper_service_manager.hpp"
+#include "platform/common/helper_service_manager.hpp"
 
-#include "helper/platform/helper_lifecycle.hpp"
-#include "helper/platform/helper_platform.hpp"
+#include "platform/common/helper_lifecycle.hpp"
+#include "platform/common/helper_platform.hpp"
 #include "utils.hpp"
 
-#include <fstream>
+#include <sys/stat.h>
+
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 namespace ecnuvpn {
@@ -53,57 +56,85 @@ int install_helper_service(const std::string &executable_path,
     utils::print_error("Failed to resolve the exv executable path.");
     return 1;
   }
-  std::filesystem::path exec_fs_path(exec_path);
-  std::filesystem::path helper_path =
-      exec_fs_path.parent_path() / "exv-helper";
-  std::string service_binary;
-  if (exec_fs_path.filename() == "exv-helper") {
-    service_binary = exec_path;
-  } else if (std::filesystem::exists(helper_path)) {
-    service_binary = helper_path.string();
-  } else {
-    utils::print_error("Dedicated exv-helper binary was not found next to exv.");
+
+  std::filesystem::path helper_source =
+      std::filesystem::path(exec_path).parent_path() / "exv-helper";
+  if (helper_source.string() != platform_config.default_service_binary_path &&
+      std::filesystem::exists(helper_source)) {
+    std::error_code copy_error;
+    std::filesystem::copy_file(
+        helper_source, platform_config.default_service_binary_path,
+        std::filesystem::copy_options::overwrite_existing, copy_error);
+    if (copy_error) {
+      utils::print_error("Failed to copy exv-helper to " +
+                         std::string(platform_config.default_service_binary_path) +
+                         ": " + copy_error.message());
+      return 1;
+    }
+    chmod(platform_config.default_service_binary_path, 0755);
+  }
+
+  if (!utils::file_exists(platform_config.default_service_binary_path)) {
+    utils::print_error("Stable exv-helper binary is missing: " +
+                       std::string(platform_config.default_service_binary_path));
+    utils::print_info(
+        "Install the CLI separately from Settings if you want a global exv command.");
     return 1;
   }
+
+  std::string shell_command =
+      "if [ ! -x " +
+      utils::shell_quote(platform_config.default_service_binary_path) +
+      " ]; then exit 0; fi; exec " +
+      utils::shell_quote(platform_config.default_service_binary_path) +
+      " --service";
+
+  std::ostringstream plist;
+  plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+  plist << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+           "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
+  plist << "<plist version=\"1.0\">\n";
+  plist << "<dict>\n";
+  plist << "  <key>Label</key>\n";
+  plist << "  <string>" << platform_config.service_label << "</string>\n";
+  plist << "  <key>ProgramArguments</key>\n";
+  plist << "  <array>\n";
+  plist << "    <string>/bin/sh</string>\n";
+  plist << "    <string>-c</string>\n";
+  plist << "    <string>" << shell_command << "</string>\n";
+  plist << "  </array>\n";
+  plist << "  <key>RunAtLoad</key>\n";
+  plist << "  <true/>\n";
+  plist << "  <key>KeepAlive</key>\n";
+  plist << "  <dict>\n";
+  plist << "    <key>SuccessfulExit</key>\n";
+  plist << "    <false/>\n";
+  plist << "  </dict>\n";
+  plist << "</dict>\n";
+  plist << "</plist>\n";
 
   std::ofstream ofs(platform_config.service_definition_path);
   if (!ofs.is_open()) {
-    utils::print_error("Failed to write systemd unit file: " +
+    utils::print_error("Failed to write LaunchDaemon plist: " +
                        std::string(platform_config.service_definition_path));
     return 1;
   }
-  ofs << "[Unit]\n";
-  ofs << "Description=ECNU VPN Helper Daemon\n";
-  ofs << "After=network.target\n\n";
-  ofs << "[Service]\n";
-  ofs << "Type=simple\n";
-  ofs << "ExecStart=" << service_binary << " --service\n";
-  ofs << "Restart=on-failure\n";
-  ofs << "RestartSec=5\n\n";
-  ofs << "[Install]\n";
-  ofs << "WantedBy=multi-user.target\n";
+  ofs << plist.str();
   ofs.close();
+  chmod(platform_config.service_definition_path, 0644);
 
-  if (utils::run_command("systemctl daemon-reload") != 0) {
-    utils::print_error("Failed to reload systemd daemon.");
-    return 1;
-  }
-
-  std::string enable_cmd =
-      "systemctl enable " + std::string(platform_config.service_name);
-  if (utils::run_command(enable_cmd) != 0) {
-    utils::print_error("Failed to enable EXV helper service.");
-    return 1;
-  }
-
-  std::string start_cmd =
-      "systemctl start " + std::string(platform_config.service_name);
-  if (utils::run_command(start_cmd) != 0) {
-    utils::print_error("Failed to start EXV helper service.");
+  utils::run_command(std::string("launchctl bootout system ") +
+                     platform_config.service_definition_path +
+                     " >/dev/null 2>&1");
+  if (utils::run_command(std::string("launchctl bootstrap system ") +
+                         platform_config.service_definition_path) != 0) {
+    utils::print_error("Failed to bootstrap EXV helper LaunchDaemon.");
     return 1;
   }
 
   bool helper_ready = wait_until_ready(context, 50, 100000);
+
+  platform::fix_config_dir_ownership();
 
   utils::print_success("EXV helper service installed.");
   if (!helper_ready) {
@@ -126,17 +157,13 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   platform::cleanup_routes();
   platform::kill_all_supervisors();
 
-  std::string stop_cmd =
-      "systemctl stop " + std::string(platform_config.service_name);
-  utils::run_command(stop_cmd + " >/dev/null 2>&1");
-  std::string disable_cmd =
-      "systemctl disable " + std::string(platform_config.service_name);
-  utils::run_command(disable_cmd + " >/dev/null 2>&1");
+  utils::run_command(std::string("launchctl bootout system ") +
+                     platform_config.service_definition_path +
+                     " >/dev/null 2>&1");
   if (*platform_config.service_definition_path)
     std::remove(platform_config.service_definition_path);
   if (*platform_config.endpoint)
     std::remove(platform_config.endpoint);
-  utils::run_command("systemctl daemon-reload >/dev/null 2>&1");
   if (context.clear_session_state)
     context.clear_session_state();
 

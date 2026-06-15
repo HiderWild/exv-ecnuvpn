@@ -8,7 +8,7 @@
 
 ```
 ECNU-VPN/
-├── CMakeLists.txt              # C++17 构建，注入版本号 + 嵌入 WebUI 资产
+├── CMakeLists.txt              # C++20 构建，注入版本号 + 嵌入 WebUI 资产
 ├── .gitignore
 ├── scripts/
 │   └── embed_assets.py         # 将 WebUI dist 编译为 C++ header
@@ -42,7 +42,9 @@ ECNU-VPN/
 
 ### CMakeLists.txt
 
-- C++17 标准 + pthread（cpp-httplib 需要）
+- C++20 标准 + pthread（cpp-httplib 需要）
+- CMake 3.28+ and a Ninja/Visual Studio generator are required for the helper
+  protocol named-module smoke test.
 - 通过 `target_compile_definitions` 注入 `ECNUVPN_VERSION` 和 `EMBEDDED_ASSETS`
 - 源文件：`src/*.cpp`（12 个文件）
 - 依赖：`include/nlohmann/json.hpp`、`include/httplib.h`（header-only）
@@ -50,7 +52,7 @@ ECNU-VPN/
 - 自定义 target `embed_assets`：运行 `scripts/embed_assets.py` 将 `webui/dist/` 编译为 `src/webui_assets.hpp`
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.ncpu)
 sudo cmake --install build        # 安装到 /usr/local/bin
 sudo exv service install          # 安装 launchd root helper

@@ -8,7 +8,7 @@
 
 namespace exv::contracts::generated {
 
-inline constexpr std::string_view CONTRACT_VERSION = "2026-06-14.config-helper-contract.v1";
+inline constexpr std::string_view CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-contract.v1";
 
 inline constexpr std::array<std::string_view, 3> DESKTOP_RPC_REQUEST_FIELDS = {{"id", "action", "payload"}};
 inline constexpr std::array<std::string_view, 5> DESKTOP_RPC_RESPONSE_FIELDS = {{"ok", "data", "code", "message", "event"}};
@@ -21,6 +21,11 @@ inline constexpr std::array<std::string_view, 18> DESKTOP_RPC_ERROR_CODES = {{"h
 inline constexpr std::array<std::string_view, 7> CONFIG_ACTIONS = {{"config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "config.profile.get", "config.profile.save"}};
 inline constexpr std::array<std::string_view, 4> CONFIG_LEGACY_ALIASES = {{"config.get", "config.save", "config.get_profile", "config.save_profile"}};
 inline constexpr std::array<std::string_view, 8> HELPER_OPS = {{"Hello", "StartSession", "PrepareTunnelDevice", "ApplyTunnelConfig", "Heartbeat", "Cleanup", "GetSnapshot", "Shutdown"}};
+inline constexpr std::array<std::string_view, 11> TUNNEL_PHASES = {{"Idle", "PreparingHelper", "Authenticating", "ConnectingCstp", "ApplyingNetworkConfig", "OpeningPacketDevice", "Connected", "Reconnecting", "Disconnecting", "CleaningUp", "Failed"}};
+inline constexpr std::array<std::string_view, 16> TUNNEL_EVENTS = {{"UserConnect", "UserDisconnect", "SetAutoReconnect", "HelperReady", "AuthSucceeded", "AuthFailed", "CstpConnected", "NetworkConfigApplied", "PacketLoopStarted", "TransportClosed", "PacketDeviceFailed", "HelperLost", "LeaseExpired", "ReconnectTimerFired", "CleanupSucceeded", "CleanupFailed"}};
+inline constexpr std::array<std::string_view, 8> TUNNEL_DISCONNECT_REASONS = {{"UserRequested", "AuthFailed", "CertError", "TransportClosed", "HelperLost", "PacketDeviceFailed", "NetworkConfigFailed", "LeaseExpired"}};
+inline constexpr std::array<std::string_view, 8> TUNNEL_ERROR_DOMAINS = {{"transport", "auth", "helper", "os.route", "os.dns", "packet", "config", "native"}};
+inline constexpr std::array<std::string_view, 10> TUNNEL_STATUS_FIELDS = {{"phase", "desired_connected", "auto_reconnect", "helper_mode", "helper_status", "network_ready", "server", "interface_name", "last_error", "reconnect"}};
 inline constexpr std::array<std::string_view, 14> HELPER_FORBIDDEN_CREDENTIAL_FIELDS = {{"password", "passwd", "cookie", "token", "secret", "credential", "auth_key", "auth_token", "session_cookie", "webvpn_cookie", "csrf_token", "bearer_token", "api_key", "apikey"}};
 
 struct HelperOpContract {
@@ -52,6 +57,28 @@ inline constexpr std::array<ConfigAlias, 4> CONFIG_ALIASES = {{
     {"config.save_profile", "config.profile.save"},
 }};
 
+struct TunnelPhaseContract {
+    std::string_view name;
+    std::string_view wire_name;
+    bool running;
+    bool connected;
+    bool network_ready;
+};
+
+inline constexpr std::array<TunnelPhaseContract, 11> TUNNEL_PHASE_CONTRACTS = {{
+    {"Idle", "idle", false, false, false},
+    {"PreparingHelper", "preparing_helper", true, false, false},
+    {"Authenticating", "authenticating", true, false, false},
+    {"ConnectingCstp", "connecting_cstp", true, false, false},
+    {"ApplyingNetworkConfig", "applying_network_config", true, false, false},
+    {"OpeningPacketDevice", "opening_packet_device", true, false, false},
+    {"Connected", "connected", true, true, true},
+    {"Reconnecting", "reconnecting", true, false, false},
+    {"Disconnecting", "disconnecting", true, false, false},
+    {"CleaningUp", "cleaning_up", true, false, false},
+    {"Failed", "failed", false, false, false},
+}};
+
 template <std::size_t N>
 constexpr bool contains(const std::array<std::string_view, N>& values, std::string_view value) {
     for (const auto item : values) {
@@ -76,6 +103,22 @@ constexpr bool is_config_alias(std::string_view alias) {
 
 constexpr bool is_helper_op(std::string_view op) {
     return contains(HELPER_OPS, op);
+}
+
+constexpr bool is_tunnel_phase(std::string_view phase) {
+    return contains(TUNNEL_PHASES, phase);
+}
+
+constexpr bool is_tunnel_event(std::string_view event) {
+    return contains(TUNNEL_EVENTS, event);
+}
+
+constexpr bool is_tunnel_disconnect_reason(std::string_view reason) {
+    return contains(TUNNEL_DISCONNECT_REASONS, reason);
+}
+
+constexpr bool is_tunnel_error_domain(std::string_view domain) {
+    return contains(TUNNEL_ERROR_DOMAINS, domain);
 }
 
 constexpr bool is_helper_forbidden_credential_field(std::string_view field) {

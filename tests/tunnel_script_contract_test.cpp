@@ -1,7 +1,7 @@
 #include "core/config/config.hpp"
 #include "logger.hpp"
 #include "platform/common/tunnel_script.hpp"
-#include "core/config/platform/config_defaults.hpp"
+#include "platform/common/config_defaults.hpp"
 #include "tunnel.hpp"
 #include "utils.hpp"
 
