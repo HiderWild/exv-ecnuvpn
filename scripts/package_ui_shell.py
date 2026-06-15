@@ -84,6 +84,18 @@ def assert_no_electron_payload(package_dir: Path) -> None:
         raise SystemExit(f"Electron/Chromium payload found: {', '.join(found)}")
 
 
+def write_launch_args(package_dir: Path, platform: str) -> None:
+    exv_path = Path("bin") / executable_name("exv", platform)
+    renderer_index = Path("webui") / "index.html"
+    args = [
+        "--exv",
+        exv_path.as_posix(),
+        "--renderer-index",
+        renderer_index.as_posix(),
+    ]
+    (package_dir / "exv-ui.args").write_text("\n".join(args) + "\n", encoding="utf-8")
+
+
 def build_package(platform: str, output_root: Path) -> Path:
     renderer_dir = first_existing(default_renderer_candidates(platform), "Renderer build directory")
 
@@ -103,6 +115,7 @@ def build_package(platform: str, output_root: Path) -> Path:
         shutil.copy2(binary, bin_dir / binary.name)
 
     copy_tree_contents(renderer_dir, webui_dir)
+    write_launch_args(package_dir, platform)
     assert_no_electron_payload(package_dir)
     return package_dir
 

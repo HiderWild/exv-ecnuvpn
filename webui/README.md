@@ -66,6 +66,7 @@ package layout under
 - `exv-ui` or `exv-ui.exe`
 - `bin/exv`
 - `bin/exv-helper`
+- `exv-ui.args` packaged launch arguments (`--exv` and `--renderer-index`)
 - `webui/index.html`
 - `webui/assets/*`
 

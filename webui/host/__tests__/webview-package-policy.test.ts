@@ -89,4 +89,17 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(packageScript, /build"\s*\/\s*platform\s*\/\s*"electron"\s*\/\s*"dist"/)
     assert.doesNotMatch(packageScript, /electron"\s*,\s*"dist"/)
   })
+
+  it('writes packaged launch arguments for exv-ui', () => {
+    const packageScript = readFileSync(join(repoRoot, 'scripts', 'package_ui_shell.py'), 'utf8')
+    assert.match(packageScript, /def write_launch_args\(/)
+    assert.match(packageScript, /exv-ui\.args/)
+    assert.match(packageScript, /--exv/)
+    assert.match(packageScript, /--renderer-index/)
+    assert.match(packageScript, /Path\("webui"\)\s*\/\s*"index\.html"/)
+
+    const readme = readFileSync(join(webuiRoot, 'README.md'), 'utf8')
+    assert.match(readme, /exv-ui\.args/)
+    assert.match(readme, /--renderer-index/)
+  })
 })
