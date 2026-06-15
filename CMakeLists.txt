@@ -866,6 +866,19 @@ target_compile_definitions(repository_hygiene_test PRIVATE
 
 add_test(NAME repository_hygiene_test COMMAND repository_hygiene_test)
 
+add_executable(ui_shell_contract_test
+    tests/ui_shell_contract_test.cpp
+    src/app/ui_shell/host_bridge.cpp
+    src/app/ui_shell/renderer_assets.cpp
+    src/app/ui_shell/ui_shell_options.cpp
+)
+
+target_include_directories(ui_shell_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME ui_shell_contract_test COMMAND ui_shell_contract_test)
+
 add_executable(crypto_roundtrip_test
     tests/crypto_roundtrip_test.cpp
     src/core/crypto/crypto.cpp
@@ -2031,6 +2044,7 @@ set(_release_blocking_tests
     app_api_runtime_policy_test
     native_packaging_policy_test
     repository_hygiene_test
+    ui_shell_contract_test
     crypto_roundtrip_test
     native_url_test
     native_cstp_frame_test
