@@ -1,8 +1,10 @@
 #include "core/app_api/desktop_action_registry.hpp"
 
 #include "core/app_api/desktop_json.hpp"
+#include "core/app_api/desktop_log_actions.hpp"
 #include "core/app_api/desktop_runtime_context.hpp"
 #include "core/app_api/desktop_status_presenter.hpp"
+#include "core/app_api/desktop_system_actions.hpp"
 #include "core/app_api/desktop_tunnel_host.hpp"
 #include "core/config/config.hpp"
 #include "core/config/config_api.hpp"
@@ -109,43 +111,6 @@ nlohmann::json preflight_connect(const Config &cfg, const std::string &password)
   return result;
 }
 
-nlohmann::json logs_json(const nlohmann::json &payload) {
-  config::ConfigManager mgr = make_config_manager();
-  Config cfg = mgr.load();
-  (void)cfg;
-  // Read from the unified log path pinned by the runtime module, NOT from
-  // cfg.log_file, so the UI sees exactly what every process writes and what
-  // `exv logs` shows. Using cfg.log_file here previously diverged from the
-  // real log location and made logs appear empty in the app.
-  std::string log_path = runtime::paths().log_path;
-  int max_lines = payload.value("lines", 100);
-  if (max_lines < 1)
-    max_lines = 1;
-  if (max_lines > 10000)
-    max_lines = 10000;
-  std::string filter = payload.value("filter", std::string());
-
-  nlohmann::json lines = nlohmann::json::array();
-  std::vector<std::string> all_lines;
-  std::ifstream ifs(log_path);
-  std::string line;
-  while (std::getline(ifs, line)) {
-    if (!line.empty() && line.back() == '\r')
-      line.pop_back();
-    if (filter.empty() || line.find(filter) != std::string::npos)
-      all_lines.push_back(line);
-  }
-
-  size_t start = all_lines.size() > static_cast<size_t>(max_lines)
-                     ? all_lines.size() - static_cast<size_t>(max_lines)
-                     : 0;
-  for (size_t i = start; i < all_lines.size(); ++i) {
-    lines.push_back({{"timestamp", ""},
-                     {"level", "info"},
-                     {"message", json_safe_text(all_lines[i])}});
-  }
-  return lines;
-}
 // End inlined from core/app_api/app_api_controller_helpers include-unit
 } // namespace
 // Begin inlined from core/app_api/app_api_desktop_handlers include-unit
@@ -547,67 +512,8 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
       return routes_json(mgr.load());
     });
 
-    // --- service.status ---
-    adapter.register_legacy_handler("service.status",
-        [](const nlohmann::json &payload) -> nlohmann::json {
-      apply_desktop_runtime_context(payload);
-      return service_status_json();
-    });
-
-    // --- helper.status ---
-    adapter.register_legacy_handler("helper.status",
-        [](const nlohmann::json &payload) -> nlohmann::json {
-      apply_desktop_runtime_context(payload);
-      platform::BackendResolveOptions options;
-      options.preferred_mode = "auto";
-      options.allow_oneshot = true;
-      options.allow_service_start = false;
-      nlohmann::json resolved = platform::resolve_backend(options);
-      if (!resolved.value("ok", false)) {
-        resolved["resolved"] = false;
-        resolved["resolution_code"] = resolved.value("code", std::string());
-        resolved["resolution_message"] =
-            resolved.value("message", std::string());
-        resolved["ok"] = true;
-      } else {
-        resolved["resolved"] = true;
-      }
-      return resolved;
-    });
-
-    // --- runtime.status ---
-    adapter.register_legacy_handler("runtime.status",
-        [](const nlohmann::json &payload) -> nlohmann::json {
-      apply_desktop_runtime_context(payload);
-      config::ConfigManager mgr = make_config_manager();
-      Config cfg = mgr.load();
-      return runtime_status_json(cfg);
-    });
-
-    // --- drivers.status ---
-    adapter.register_legacy_handler("drivers.status",
-        [](const nlohmann::json &payload) -> nlohmann::json {
-      apply_desktop_runtime_context(payload);
-      config::ConfigManager mgr = make_config_manager();
-      Config cfg = mgr.load();
-      return driver_status_json(cfg);
-    });
-
-    // --- drivers.install ---
-    adapter.register_legacy_handler("drivers.install",
-        [](const nlohmann::json &payload) -> nlohmann::json {
-      apply_desktop_runtime_context(payload);
-      config::ConfigManager mgr = make_config_manager();
-      Config cfg = mgr.load();
-      return install_driver(cfg, payload);
-    });
-
-    // --- logs.list ---
-    adapter.register_legacy_handler("logs.list",
-        [](const nlohmann::json &payload) -> nlohmann::json {
-      apply_desktop_runtime_context(payload);
-      return logs_json(payload);
-    });
+    register_desktop_system_actions(adapter);
+    register_desktop_log_actions(adapter);
   }
   return adapter;
 }

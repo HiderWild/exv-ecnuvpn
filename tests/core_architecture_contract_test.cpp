@@ -84,6 +84,14 @@ int main() {
                       "desktop_status_presenter.hpp");
   ok &= expect_exists(root / "src" / "core" / "app_api" /
                       "desktop_status_presenter.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_log_actions.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_log_actions.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_system_actions.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_system_actions.cpp");
 
   if (std::filesystem::exists(app_api_cpp)) {
     const std::string app_api = read_file(app_api_cpp);

@@ -112,8 +112,10 @@ set(EXV_CORE_SOURCES
     src/core/app_api/app_api.cpp
     src/core/app_api/desktop_action_registry.cpp
     src/core/app_api/desktop_json.cpp
+    src/core/app_api/desktop_log_actions.cpp
     src/core/app_api/desktop_runtime_context.cpp
     src/core/app_api/desktop_status_presenter.cpp
+    src/core/app_api/desktop_system_actions.cpp
     src/core/app_api/desktop_tunnel_host.cpp
     src/core/vpn/vpn.cpp
     src/core/vpn/vpn_legacy_adapter.cpp
