@@ -1,8 +1,8 @@
 // Contract test: verifies that the TunnelStatusSnapshot -> frontend JSON
 // mapping produces the fields and types that the WebUI expects.
 //
-// This test replicates the mapping logic from app_api.cpp's anonymous
-// namespace to serve as a regression guard for the JSON contract.
+// This test replicates the mapping logic from the desktop app API
+// implementation to serve as a regression guard for the JSON contract.
 
 #include "core/tunnel_controller/tunnel_state.hpp"
 #include "core/tunnel_controller/tunnel_intent.hpp"
@@ -26,8 +26,8 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-// Replicate the mapping from app_api.cpp frontend_status_from_controller_snapshot.
-// If this test breaks, the mapping in app_api.cpp must be updated to match.
+// Replicate the mapping from frontend_status_from_controller_snapshot.
+// If this test breaks, the desktop status presenter must be updated to match.
 json map_snapshot_to_frontend(const exv::core::TunnelStatusSnapshot &snap,
                               const std::string &server,
                               const std::string &username, int mtu,
@@ -94,7 +94,7 @@ std::string app_api_source_text() {
 #else
   const auto app_api_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" /
                            "core" / "app_api";
-  const char *files[] = {"app_api.cpp"};
+  const char *files[] = {"app_api.cpp", "desktop_action_registry.cpp"};
   std::string source;
   for (const char *file : files) {
     source += "\n// ---- ";

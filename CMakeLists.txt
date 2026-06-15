@@ -110,6 +110,7 @@ set(EXV_CORE_SOURCES
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
     src/core/app_api/app_api.cpp
+    src/core/app_api/desktop_action_registry.cpp
     src/core/vpn/vpn.cpp
     src/core/vpn/vpn_legacy_adapter.cpp
     src/core/vpn/vpn_runtime.cpp
