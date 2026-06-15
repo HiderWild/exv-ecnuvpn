@@ -33,4 +33,30 @@ int main() {
   assert(options.renderer_dev_server_url == "http://127.0.0.1:8288");
   assert(options.exv_path == "C:/app/bin/exv.exe");
   assert(options.enable_dev_tools);
+
+  bool invoked = false;
+  const std::string accepted = handle_host_request(
+      R"({"id":1,"action":"status.get","payload":{"source":"test"}})",
+      [&](const CoreRpcRequest &request) {
+        invoked = true;
+        assert(request.action == "status.get");
+        assert(request.payload_json == R"({"source":"test"})");
+        assert(request.request_id == "1");
+        CoreRpcResponse response;
+        response.id = 1;
+        response.ok = true;
+        response.data_json = R"({"phase":"idle"})";
+        return response;
+      });
+  assert(invoked);
+  assert(accepted == R"({"id":1,"ok":true,"data":{"phase":"idle"}})");
+
+  const std::string rejected = handle_host_request(
+      R"({"id":2,"action":"shell.unknown","payload":{}})",
+      [](const CoreRpcRequest &) {
+        assert(false);
+        return CoreRpcResponse{};
+      });
+  assert(rejected ==
+         R"({"id":2,"ok":false,"code":"unknown_action","message":"Unknown desktop action"})");
 }

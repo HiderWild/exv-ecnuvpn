@@ -9,6 +9,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+option(EXV_BUILD_UI_SHELL
+    "Require real platform WebView shell SDK dependencies instead of stub host builds"
+    OFF
+)
+
 # Release builds optimise for size and strip debug symbols. The MinGW
 # toolchain we ship on Windows links against the gcc/g++ runtime DLLs, so
 # stripping the binary itself gives the bulk of the savings (~3-4MB).
@@ -918,6 +923,36 @@ set(EXV_UI_COMMON_SOURCES
 
 set(EXV_UI_PLATFORM_SOURCES)
 if(WIN32)
+    if(EXV_BUILD_UI_SHELL)
+        if(NOT DEFINED WEBVIEW2_SDK_DIR OR WEBVIEW2_SDK_DIR STREQUAL "")
+            message(FATAL_ERROR "WEBVIEW2_SDK_DIR is required to build the Windows WebView2 shell")
+        endif()
+
+        set(WEBVIEW2_INCLUDE_DIR "${WEBVIEW2_SDK_DIR}/build/native/include")
+        if(NOT EXISTS "${WEBVIEW2_INCLUDE_DIR}/WebView2.h")
+            message(FATAL_ERROR "WEBVIEW2_SDK_DIR does not contain build/native/include/WebView2.h")
+        endif()
+
+        set(WEBVIEW2_LOADER_CANDIDATES
+            "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2LoaderStatic.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2Loader.dll.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/x86/WebView2LoaderStatic.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/x86/WebView2Loader.dll.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/arm64/WebView2LoaderStatic.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/arm64/WebView2Loader.dll.lib"
+        )
+        set(WEBVIEW2_LOADER_LIBRARY "")
+        foreach(_candidate IN LISTS WEBVIEW2_LOADER_CANDIDATES)
+            if(EXISTS "${_candidate}")
+                set(WEBVIEW2_LOADER_LIBRARY "${_candidate}")
+                break()
+            endif()
+        endforeach()
+        if(WEBVIEW2_LOADER_LIBRARY STREQUAL "")
+            message(FATAL_ERROR "WEBVIEW2_SDK_DIR does not contain a WebView2Loader library")
+        endif()
+    endif()
+
     list(APPEND EXV_UI_PLATFORM_SOURCES
         src/platform/win32/ui_shell/webview2_host_win32.cpp
         src/platform/win32/ui_shell/webview2_runtime_win32.cpp
@@ -944,6 +979,11 @@ target_include_directories(exv-ui PRIVATE
 
 if(WIN32)
     target_link_libraries(exv-ui PRIVATE advapi32)
+    if(EXV_BUILD_UI_SHELL)
+        target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
+        target_include_directories(exv-ui PRIVATE "${WEBVIEW2_INCLUDE_DIR}")
+        target_link_libraries(exv-ui PRIVATE "${WEBVIEW2_LOADER_LIBRARY}")
+    endif()
 endif()
 
 add_executable(crypto_roundtrip_test

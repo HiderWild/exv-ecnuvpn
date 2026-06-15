@@ -4,6 +4,12 @@
 
 namespace ecnuvpn::ui_shell {
 
+struct CoreRpcRequest {
+  std::string action;
+  std::string payload_json;
+  std::string request_id;
+};
+
 struct CoreRpcResponse {
   int id = 0;
   bool ok = false;
