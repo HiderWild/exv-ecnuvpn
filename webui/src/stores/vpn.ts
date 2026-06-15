@@ -1,6 +1,6 @@
 import { computed, nextTick, ref } from 'vue'
 import { defineStore } from 'pinia'
-import api from '../api/desktop'
+import api from '../api/host'
 import { useUiStore } from './ui'
 import { useConfigStore } from './config'
 

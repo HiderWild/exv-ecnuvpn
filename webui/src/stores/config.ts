@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import api from '../api/desktop'
+import api from '../api/host'
 
 export interface AuthConfig {
   server: string

@@ -31,6 +31,7 @@ describe('neutral host boundary', () => {
       assert.doesNotMatch(text, /require\(['"]electron['"]\)/)
       assert.doesNotMatch(text, /\bipcRenderer\b/)
       assert.doesNotMatch(text, /\bcontextBridge\b/)
+      assert.doesNotMatch(text, /['"]\.\.\/api\/desktop['"]/)
     }
   })
 })
