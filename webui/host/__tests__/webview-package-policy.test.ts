@@ -31,6 +31,21 @@ function bashCase(script: string, label: string): string {
   return script.slice(start, end)
 }
 
+function assertUnixDesktopScriptPackagesWebView(script: string, platform: string): void {
+  assert.match(script, new RegExp(`ECNUVPN_BUILD_PLATFORM=${platform}`))
+  assert.match(script, new RegExp(`ECNUVPN_WEBUI_DIST_DIR="\\$BUILD_ROOT/webview/dist"`))
+  assert.match(script, /-DEXV_BUILD_UI_SHELL=ON/)
+  assert.match(script, /package_webview\(\)/)
+  const desktopCase = bashCase(script, 'desktop')
+  const allCase = bashCase(script, 'all')
+  assert.match(desktopCase, /build_cpp on/)
+  assert.match(allCase, /build_cpp on/)
+  assert.match(desktopCase, /package_webview/)
+  assert.match(allCase, /package_webview/)
+  assert.doesNotMatch(desktopCase, /compile_electron|package_desktop/)
+  assert.doesNotMatch(allCase, /compile_electron|package_desktop/)
+}
+
 describe('native WebView package policy', () => {
   it('makes WebView renderer output the default neutral build target', () => {
     const layout = getBuildLayout()
@@ -51,6 +66,7 @@ describe('native WebView package policy', () => {
   it('makes platform desktop build scripts package the WebView shell by default', () => {
     const windows = readFileSync(join(repoRoot, 'scripts', 'build-windows.ps1'), 'utf8')
     const macos = readFileSync(join(repoRoot, 'scripts', 'build-macos.sh'), 'utf8')
+    const linux = readFileSync(join(repoRoot, 'scripts', 'build-linux.sh'), 'utf8')
 
     assert.match(windows, /ECNUVPN_WEBUI_DIST_DIR = Join-Path \$buildRoot 'webview\\dist'/)
     assert.match(windows, /-DEXV_BUILD_UI_SHELL=ON/)
@@ -64,17 +80,8 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(windowsDesktop, /Invoke-ElectronCompile|Invoke-DesktopPackage/)
     assert.doesNotMatch(windowsAll, /Invoke-ElectronCompile|Invoke-DesktopPackage/)
 
-    assert.match(macos, /ECNUVPN_WEBUI_DIST_DIR="\$BUILD_ROOT\/webview\/dist"/)
-    assert.match(macos, /-DEXV_BUILD_UI_SHELL=ON/)
-    assert.match(macos, /package_webview\(\)/)
-    const macosDesktop = bashCase(macos, 'desktop')
-    const macosAll = bashCase(macos, 'all')
-    assert.match(macosDesktop, /build_cpp on/)
-    assert.match(macosAll, /build_cpp on/)
-    assert.match(macosDesktop, /package_webview/)
-    assert.match(macosAll, /package_webview/)
-    assert.doesNotMatch(macosDesktop, /compile_electron|package_desktop/)
-    assert.doesNotMatch(macosAll, /compile_electron|package_desktop/)
+    assertUnixDesktopScriptPackagesWebView(macos, 'macos')
+    assertUnixDesktopScriptPackagesWebView(linux, 'linux')
   })
 
   it('does not let native WebView packages fall back to Electron renderer output', () => {
