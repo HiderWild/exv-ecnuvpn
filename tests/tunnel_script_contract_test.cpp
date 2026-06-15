@@ -4,10 +4,10 @@
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "core/config/config.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 #include "platform/common/tunnel_script.hpp"
 #include "platform/common/config_defaults.hpp"
-#include "tunnel.hpp"
+#include "core/vpn/openconnect_tunnel_script.hpp"
 
 #include <cstdio>
 #include <filesystem>

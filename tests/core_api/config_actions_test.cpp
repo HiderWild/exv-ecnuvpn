@@ -1,7 +1,7 @@
 // Tests for ConfigActions: get, save, get_profile, save_profile.
 
-#include "core_api/config_actions.hpp"
-#include "core_api/app_rpc_dispatcher.hpp"
+#include "core/rpc/config_actions.hpp"
+#include "core/rpc/app_rpc_dispatcher.hpp"
 #include "contracts/generated/system_contract.hpp"
 
 #include <nlohmann/json.hpp>

@@ -13,7 +13,7 @@
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <chrono>
 #include <random>

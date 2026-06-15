@@ -34,7 +34,7 @@ std::vector<std::string> list_windows_adapters(const std::string &kind) {
   return exv::utils::split_lines(platform::run_command_output(command));
 }
 
-std::string effective_windows_driver(const Config &cfg,
+std::string effective_windows_driver(const ConfigView &cfg,
                                      const std::vector<std::string> &tap_adapters,
                                      bool wintun_available) {
   if (cfg.windows_tunnel_driver == "tap")
@@ -48,7 +48,7 @@ std::string effective_windows_driver(const Config &cfg,
   return "wintun";
 }
 
-std::string effective_driver_status(const Config &cfg,
+std::string effective_driver_status(const ConfigView &cfg,
                                     const std::string &effective,
                                     bool wintun_available,
                                     bool tap_available) {
@@ -66,7 +66,7 @@ std::string effective_driver_status(const Config &cfg,
 
 } // namespace
 
-nlohmann::json driver_status_json(const Config &cfg) {
+nlohmann::json driver_status_json(const ConfigView &cfg) {
   nlohmann::json json{{"preferred", cfg.windows_tunnel_driver},
                       {"tap_interface", cfg.windows_tap_interface},
                       {"supported", true}};
@@ -112,7 +112,7 @@ nlohmann::json driver_status_json(const Config &cfg) {
   return json;
 }
 
-nlohmann::json install_driver(const Config &cfg,
+nlohmann::json install_driver(const ConfigView &cfg,
                               const nlohmann::json &payload) {
   std::string driver = payload.value("driver", std::string());
   if (driver == "wintun") {

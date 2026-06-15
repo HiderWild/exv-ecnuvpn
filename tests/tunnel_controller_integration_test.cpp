@@ -10,16 +10,16 @@
 // OpeningPacketDevice -> Connected) automatically from connect().
 // Events are still needed for async failures and reconnect scenarios.
 
-#include "core/tunnel_controller.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
 #include "core/tunnel_controller/tunnel_controller_test_access.hpp"
-#include "core/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
 #include "core/config/config.hpp"
-#include "core/tunnel_state.hpp"
-#include "core/tunnel_events.hpp"
-#include "core/reconnect_policy.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_events.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
 #include "vpn_engine/native_engine.hpp"
 #include "vpn_engine/protocol/session.hpp"
-#include "log_event_bus.hpp"
+#include "common/diagnostics/log_event_bus.hpp"
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 #include "support/fake_core_ui_client.hpp"

@@ -3,7 +3,7 @@
 #include "platform/common/helper_client.hpp"
 #include "platform/common/oneshot_bootstrap.hpp"
 #include "platform/common/service_status.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 namespace ecnuvpn {
 namespace platform {
@@ -41,14 +41,14 @@ nlohmann::json resolve_backend(const BackendResolveOptions &options) {
 
 nlohmann::json resolve_backend(const BackendResolveOptions &options,
                                const BackendResolverDeps &deps) {
-  logger::info("Backend resolver: Starting resolution - preferred_mode=" + 
-               options.preferred_mode + " allow_oneshot=" + 
+  logger::info("Backend resolver: Starting resolution - preferred_mode=" +
+               options.preferred_mode + " allow_oneshot=" +
                (options.allow_oneshot ? "true" : "false"));
-  
+
   ServiceStatusSnapshot service = deps.current_service_status();
-  
-  logger::info("Backend resolver: Service status - installed=" + 
-               std::string(service.installed ? "true" : "false") + 
+
+  logger::info("Backend resolver: Service status - installed=" +
+               std::string(service.installed ? "true" : "false") +
                " available=" + std::string(service.available ? "true" : "false") +
                " endpoint=" + service.endpoint);
 
@@ -78,10 +78,10 @@ nlohmann::json resolve_backend(const BackendResolveOptions &options,
     OneshotBackend backend =
         deps.start_oneshot_helper(OneshotBootstrapRequest{options.helper_path});
     if (backend.ok) {
-      logger::info("Backend resolver: Oneshot helper started - endpoint=" + 
+      logger::info("Backend resolver: Oneshot helper started - endpoint=" +
                    backend.endpoint + " pid=" + std::to_string(backend.pid));
     } else {
-      logger::error("Backend resolver: Oneshot helper failed - code=" + 
+      logger::error("Backend resolver: Oneshot helper failed - code=" +
                     backend.code + " message=" + backend.message);
     }
     return oneshot_backend_to_json(backend);

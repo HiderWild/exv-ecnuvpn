@@ -1,5 +1,5 @@
 #include "core/pipe_ipc.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 #include "runtime/runtime_context.hpp"
 
 #ifdef _WIN32

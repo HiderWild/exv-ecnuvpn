@@ -1,4 +1,5 @@
 #include "core/config/config.hpp"
+#include "core/config/config_platform_view.hpp"
 #include "platform/common/runtime_status.hpp"
 
 #include <iostream>
@@ -37,7 +38,8 @@ int main() {
   ecnuvpn::Config native_cfg;
   native_cfg.vpn_engine = "native";
   nlohmann::json native_status =
-      ecnuvpn::platform::runtime_status_json(native_cfg);
+      ecnuvpn::platform::runtime_status_json(
+          ecnuvpn::config::to_platform_config_view(native_cfg));
   ok = expect(native_status.value("engine", std::string()) == "native",
               "runtime status should expose native engine mode") &&
        ok;
@@ -57,7 +59,8 @@ int main() {
   ecnuvpn::Config legacy_cfg;
   legacy_cfg.vpn_engine = "legacy_openconnect";
   nlohmann::json legacy_status =
-      ecnuvpn::platform::runtime_status_json(legacy_cfg);
+      ecnuvpn::platform::runtime_status_json(
+          ecnuvpn::config::to_platform_config_view(legacy_cfg));
   ok = expect(legacy_status.value("engine", std::string()) ==
                   "legacy_openconnect",
               "legacy runtime status should expose legacy engine mode") &&

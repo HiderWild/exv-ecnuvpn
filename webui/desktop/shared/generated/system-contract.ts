@@ -326,6 +326,33 @@ export const TUNNEL_STATUS_FIELDS = [
   "last_error",
   "reconnect"
 ] as const
+export const SRC_ALLOWED_TOP_LEVEL_DIRS = [
+  "app",
+  "cli",
+  "common",
+  "contracts",
+  "core",
+  "feedback",
+  "helper",
+  "platform",
+  "runtime",
+  "utils",
+  "vpn_engine"
+] as const
+export const SRC_FORBIDDEN_PATTERNS = [
+  "src/*.hpp",
+  "src/*.cpp",
+  "src/core_api",
+  "*.inc.cpp",
+  "#include \"*.inc.cpp\"",
+  "src/webui_assets.hpp",
+  "platform include logger.hpp",
+  "platform include vpn.hpp",
+  "platform include tunnel.hpp",
+  "platform include openconnect_log.hpp",
+  "platform include virtual_network.hpp",
+  "platform include core/*"
+] as const
 
 export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]
 export type ConfigAction = (typeof CONFIG_ACTIONS)[number]

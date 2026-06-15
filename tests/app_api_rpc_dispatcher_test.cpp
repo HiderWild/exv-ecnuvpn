@@ -1,7 +1,7 @@
 // Tests for AppRpcDispatcher: handler registration, dispatch, error handling.
 
-#include "core_api/app_rpc_dispatcher.hpp"
-#include "core_api/desktop_rpc_adapter.hpp"
+#include "core/rpc/app_rpc_dispatcher.hpp"
+#include "core/rpc/desktop_rpc_adapter.hpp"
 
 #include <iostream>
 #include <string>

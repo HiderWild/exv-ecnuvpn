@@ -1,4 +1,4 @@
-#include "app_api_native_orchestration.hpp"
+#include "core/native_orchestration/app_api_native_orchestration.hpp"
 
 #include "platform/common/vpn_supervisor_process.hpp"
 #include "vpn_engine/native_engine.hpp"

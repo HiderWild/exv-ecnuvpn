@@ -11,11 +11,11 @@
 //       core_process_main() in the same process would exit immediately.
 
 #include "core/core_process.hpp"
-#include "core/tunnel_controller.hpp"
-#include "core/reconnect_policy.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
 #include "core/pipe_ipc.hpp"
 #include "cli/pipe_client.hpp"
-#include "app_api.hpp"
+#include "core/app_api/app_api.hpp"
 
 #include <nlohmann/json.hpp>
 

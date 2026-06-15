@@ -4,10 +4,10 @@
 // narrow so the state-machine contract is covered without mirroring the
 // implementation in a second standalone controller.
 
-#include "core/tunnel_controller.hpp"
-#include "core/tunnel_events.hpp"
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
+#include "core/tunnel_controller/tunnel_events.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 

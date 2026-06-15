@@ -77,10 +77,10 @@ export interface DesktopModalPayload {
 // handlers.  Field names and value conventions MUST stay in sync with:
 //   - src/core/tunnel_state.hpp      (TunnelPhase, ErrorInfo, ReconnectInfo, TunnelStatusSnapshot)
 //   - src/feedback/error_contract.hpp (ErrorInfo serialization)
-//   - src/core_api/vpn_actions.cpp   (phase_to_string, status JSON)
-//   - src/core_api/config_actions.cpp
-//   - src/core_api/service_actions.cpp
-//   - src/core_api/route_actions.cpp
+//   - src/core/rpc/vpn_actions.cpp   (phase_to_string, status JSON)
+//   - src/core/rpc/config_actions.cpp
+//   - src/core/rpc/service_actions.cpp
+//   - src/core/rpc/route_actions.cpp
 // =========================================================================
 
 // TunnelPhase values match the C++ phase_to_string() output in vpn_actions.cpp.

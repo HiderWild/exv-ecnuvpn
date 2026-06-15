@@ -9,14 +9,13 @@
 
 #include "helper/common/helper_messages.hpp"
 #include "helper/helper_handler.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 #include "runtime/runtime_context.hpp"
 #include "feedback/feedback.hpp"
 #include "platform/common/helper_client.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "platform/common/helper_service_manager.hpp"
-#include "vpn.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -204,6 +203,7 @@ platform::HelperServiceManagerContext make_helper_service_manager_context() {
   return platform::HelperServiceManagerContext{
       wait_until_available_for_platform,
       send_request_for_platform,
+      nullptr,
       nullptr,
   };
 }

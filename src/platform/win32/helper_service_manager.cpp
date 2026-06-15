@@ -5,7 +5,7 @@
 #include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_service_manager.hpp"
 
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "cli/console.hpp"
 

@@ -144,6 +144,154 @@ bool json_array_contains(const json &values, std::string_view expected) {
   return false;
 }
 
+std::string relative_slash(const std::filesystem::path &path,
+                           const std::filesystem::path &root) {
+  return std::filesystem::relative(path, root).generic_string();
+}
+
+std::vector<std::string> json_string_array(const json &values) {
+  std::vector<std::string> result;
+  if (!values.is_array()) {
+    return result;
+  }
+  for (const auto &value : values) {
+    if (value.is_string()) {
+      result.push_back(value.get<std::string>());
+    }
+  }
+  return result;
+}
+
+bool source_root_layout_is_canonical(const std::filesystem::path &source_dir,
+                                     const json &src_organization) {
+  const auto src_root = source_dir / "src";
+  const auto allowed =
+      json_string_array(src_organization.at("allowed_top_level_dirs"));
+  bool ok = true;
+  for (const auto &entry : std::filesystem::directory_iterator(src_root)) {
+    const auto name = entry.path().filename().string();
+    if (entry.is_regular_file()) {
+      std::cerr << "Forbidden root-level src file: "
+                << relative_slash(entry.path(), source_dir) << '\n';
+      ok = false;
+      continue;
+    }
+    if (!entry.is_directory()) {
+      std::cerr << "Unexpected root-level src entry: "
+                << relative_slash(entry.path(), source_dir) << '\n';
+      ok = false;
+      continue;
+    }
+    if (std::find(allowed.begin(), allowed.end(), name) == allowed.end()) {
+      std::cerr << "Unexpected root-level src directory: "
+                << relative_slash(entry.path(), source_dir) << '\n';
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+bool tree_contains_include_unit_file(const std::filesystem::path &root,
+                                     const std::filesystem::path &source_dir) {
+  if (!std::filesystem::exists(root)) {
+    return false;
+  }
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    if (entry.path().filename().extension() != ".cpp") {
+      continue;
+    }
+    const auto filename = entry.path().filename().string();
+    if (filename.size() >= 8 &&
+        filename.compare(filename.size() - 8, 8, ".inc.cpp") == 0) {
+      std::cerr << "Forbidden source include-unit file: "
+                << relative_slash(entry.path(), source_dir) << '\n';
+      return true;
+    }
+  }
+  return false;
+}
+
+bool tree_contains_include_unit_include(const std::filesystem::path &root,
+                                        const std::filesystem::path &source_dir) {
+  if (!std::filesystem::exists(root)) {
+    return false;
+  }
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    if (entry.path().filename().string() == "contract_manifest_test.cpp") {
+      continue;
+    }
+    std::istringstream lines(read_text_file(entry.path()));
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(lines, line)) {
+      ++line_number;
+      const auto first = line.find_first_not_of(" \t");
+      if (first != std::string::npos &&
+          line.compare(first, 8, "#include") == 0 &&
+          line.find(".inc.cpp", first + 8) != std::string::npos) {
+        std::cerr << "Forbidden source include-unit include in "
+                  << relative_slash(entry.path(), source_dir) << ':'
+                  << line_number << '\n';
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool platform_contains_forbidden_boundary_include(
+    const std::filesystem::path &platform_root,
+    const std::filesystem::path &source_dir) {
+  if (!std::filesystem::exists(platform_root)) {
+    return false;
+  }
+  const std::vector<std::string> forbidden_exact = {
+      "app_api.hpp", "vpn.hpp", "tunnel.hpp", "logger.hpp",
+      "openconnect_log.hpp", "virtual_network.hpp"};
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(platform_root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    std::istringstream lines(read_text_file(entry.path()));
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(lines, line)) {
+      ++line_number;
+      if (line.find("#include") == std::string::npos) {
+        continue;
+      }
+      for (const auto &name : forbidden_exact) {
+        if (line.find('"' + name + '"') != std::string::npos ||
+            line.find('<' + name + '>') != std::string::npos) {
+          std::cerr << "Forbidden platform boundary include in "
+                    << relative_slash(entry.path(), source_dir) << ':'
+                    << line_number << ": " << line << '\n';
+          return true;
+        }
+      }
+      if (line.find("\"core/") != std::string::npos ||
+          line.find("<core/") != std::string::npos ||
+          line.find("\"helper/runtime/") != std::string::npos ||
+          line.find("<helper/runtime/") != std::string::npos ||
+          line.find("\"helper/helper_handler") != std::string::npos ||
+          line.find("<helper/helper_handler") != std::string::npos) {
+        std::cerr << "Forbidden platform dependency direction in "
+                  << relative_slash(entry.path(), source_dir) << ':'
+                  << line_number << ": " << line << '\n';
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool private_controller_impl_include_leaks(const std::filesystem::path &root) {
   for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
     if (!entry.is_regular_file() || !is_source_file(entry.path())) {
@@ -265,9 +413,8 @@ int main() {
   const auto tunnel_state_machine_test =
       read_text_file(source_dir / "tests" /
                      "tunnel_controller_state_machine_test.cpp");
-  const auto app_api_controller_helpers =
-      source_dir / "src" / "core" / "app_api" /
-      "app_api_controller_helpers.inc.cpp";
+  const auto app_api_cpp =
+      source_dir / "src" / "core" / "app_api" / "app_api.cpp";
   const auto rpc_vpn_actions =
       source_dir / "src" / "core" / "rpc" / "vpn_actions.cpp";
 
@@ -342,7 +489,7 @@ int main() {
               "src/core/tunnel_controller implementation units") &&
        ok;
   ok = expect(!file_contains_any(
-                  app_api_controller_helpers,
+                  app_api_cpp,
                   {"phase_to_string", "return \"idle\"",
                    "return \"preparing_helper\"",
                    "return \"applying_network_config\""}),
@@ -527,6 +674,73 @@ int main() {
                 "ANSI constants") &&
          ok;
   }
+
+  ok = expect(manifest.at("modules").contains("src_organization"),
+              "manifest must declare modules.src_organization") &&
+       ok;
+  if (manifest.at("modules").contains("src_organization")) {
+    const auto &src_organization = manifest.at("modules").at("src_organization");
+    ok = expect(json_array_contains(src_organization.at("allowed_top_level_dirs"),
+                                    "platform"),
+                "src organization contract must allow platform top-level dir") &&
+         ok;
+    ok = expect(json_array_contains(src_organization.at("forbidden_patterns"),
+                                    "*.inc.cpp"),
+                "src organization contract must forbid include-unit files") &&
+         ok;
+    ok = expect(contains(exv::contracts::generated::SRC_ALLOWED_TOP_LEVEL_DIRS,
+                         "vpn_engine"),
+                "generated contract must expose allowed src top-level dirs") &&
+         ok;
+    ok = expect(contains(exv::contracts::generated::SRC_FORBIDDEN_PATTERNS,
+                         "src/core_api"),
+                "generated contract must expose forbidden src patterns") &&
+         ok;
+    ok = expect(source_root_layout_is_canonical(source_dir, src_organization),
+                "src root must contain only canonical top-level directories") &&
+         ok;
+  }
+
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "webui_assets.hpp"),
+              "webui assets must be generated outside the committed src root") &&
+       ok;
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "core_api"),
+              "core_api compatibility shim directory must be removed") &&
+       ok;
+
+  const std::vector<std::filesystem::path> core_tunnel_shims = {
+      source_dir / "src" / "core" / "core_error_mapper.hpp",
+      source_dir / "src" / "core" / "core_session_runner.hpp",
+      source_dir / "src" / "core" / "engine_event_bridge.hpp",
+      source_dir / "src" / "core" / "native_startup_failure.hpp",
+      source_dir / "src" / "core" / "reconnect_policy.hpp",
+      source_dir / "src" / "core" / "timer_scheduler.hpp",
+      source_dir / "src" / "core" / "tunnel_controller.hpp",
+      source_dir / "src" / "core" / "tunnel_events.hpp",
+      source_dir / "src" / "core" / "tunnel_intent.hpp",
+      source_dir / "src" / "core" / "tunnel_state.hpp",
+  };
+  for (const auto &path : core_tunnel_shims) {
+    ok = expect(!std::filesystem::exists(path),
+                "core root tunnel-controller compatibility shims must be removed") &&
+         ok;
+  }
+
+  ok = expect(!tree_contains_include_unit_file(source_dir / "src", source_dir),
+              "src must not contain .inc.cpp include-unit files") &&
+       ok;
+  ok = expect(!tree_contains_include_unit_include(source_dir / "src", source_dir),
+              "src must not include .inc.cpp implementation units") &&
+       ok;
+  ok = expect(!platform_contains_forbidden_boundary_include(source_dir / "src" /
+                                                               "platform",
+                                                           source_dir),
+              "platform must not include core/app/helper-runtime or high-level "
+              "facade headers") &&
+       ok;
+  ok = expect(cmake_lists.find("EXV_COMMON_SOURCES") == std::string::npos,
+              "CMake must use domain targets instead of EXV_COMMON_SOURCES") &&
+       ok;
 
   if (ok) {
     std::cout << "contract_manifest_test: all assertions passed\n";

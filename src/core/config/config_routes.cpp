@@ -1,5 +1,5 @@
 #include "core/config/config.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 #include "cli/console.hpp"
 
 #include <algorithm>

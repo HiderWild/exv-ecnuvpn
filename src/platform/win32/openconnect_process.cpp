@@ -6,7 +6,7 @@
 #include "platform/win32/windows_strings.hpp"
 #include "platform/common/openconnect_process.hpp"
 
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -18,7 +18,7 @@ namespace ecnuvpn {
 namespace platform {
 namespace {
 
-std::string windows_generated_interface_name(const Config &cfg) {
+std::string windows_generated_interface_name(const ConfigView &cfg) {
   std::ostringstream seed;
   seed << cfg.username << "@" << cfg.server;
   std::size_t hash = std::hash<std::string>{}(seed.str());
@@ -28,7 +28,7 @@ std::string windows_generated_interface_name(const Config &cfg) {
   return name.str();
 }
 
-std::string select_windows_interface_name(const Config &cfg) {
+std::string select_windows_interface_name(const ConfigView &cfg) {
   if (cfg.windows_tunnel_driver == "tap")
     return cfg.windows_tap_interface;
 
@@ -76,7 +76,7 @@ std::string windows_openconnect_script_command() {
   return cmd.str();
 }
 
-std::string build_openconnect_command_line(const Config &cfg) {
+std::string build_openconnect_command_line(const ConfigView &cfg) {
   std::vector<std::string> args;
   std::string openconnect_path = platform::get_openconnect_path(cfg.openconnect_runtime);
   args.push_back(openconnect_path.empty() ? std::string("openconnect.exe")
@@ -146,7 +146,7 @@ void set_child_environment_override(const char *name, const std::string &value) 
 
 } // namespace
 
-bool spawn_openconnect_process(const Config &cfg, const std::string &password,
+bool spawn_openconnect_process(const ConfigView &cfg, const std::string &password,
                                OpenconnectProcess *process) {
   if (process) {
     process->pid = -1;

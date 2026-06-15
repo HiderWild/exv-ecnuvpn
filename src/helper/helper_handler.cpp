@@ -1,5 +1,5 @@
 #include "helper/helper_handler.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sstream>

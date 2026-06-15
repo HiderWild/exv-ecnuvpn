@@ -13,7 +13,7 @@ namespace ecnuvpn {
 namespace platform {
 namespace {
 
-std::string build_openconnect_command(const Config &cfg,
+std::string build_openconnect_command(const ConfigView &cfg,
                                       const std::string &password) {
   std::ostringstream cmd;
   std::string openconnect_path = platform::get_openconnect_path(cfg.openconnect_runtime);
@@ -48,7 +48,7 @@ std::string build_openconnect_command(const Config &cfg,
 
 } // namespace
 
-bool spawn_openconnect_process(const Config &cfg, const std::string &password,
+bool spawn_openconnect_process(const ConfigView &cfg, const std::string &password,
                                OpenconnectProcess *process) {
   if (process) {
     process->pid = -1;

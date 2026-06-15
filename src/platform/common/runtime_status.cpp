@@ -38,7 +38,7 @@ std::string openconnect_version(const std::string &path) {
 
 } // namespace
 
-nlohmann::json runtime_status_json(const Config &cfg) {
+nlohmann::json runtime_status_json(const ConfigView &cfg) {
   std::string bundled_path = platform::get_bundled_openconnect_path();
   std::string system_path = platform::get_openconnect_path("system");
   std::string resolved_path = platform::get_openconnect_path(cfg.openconnect_runtime);

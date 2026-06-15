@@ -1,10 +1,10 @@
 // Integration test: full connect, disconnect, and reconnect flows using
 // FakeHelper + FakePlatformNetworkOps alongside a standalone state machine.
 
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
-#include "core/tunnel_events.hpp"
-#include "core/reconnect_policy.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_events.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 

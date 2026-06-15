@@ -1,6 +1,6 @@
 #include "platform/common/crypto_backend.hpp"
 
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>

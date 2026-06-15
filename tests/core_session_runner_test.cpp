@@ -5,10 +5,10 @@
 // logic to verify event translation, and exercises the runner's start/stop/
 // is_running/status API surface.
 
-#include "core/core_session_runner.hpp"
-#include "core/engine_event_bridge.hpp"
-#include "core/tunnel_events.hpp"
-#include "core/tunnel_state.hpp"
+#include "core/tunnel_controller/core_session_runner.hpp"
+#include "core/tunnel_controller/engine_event_bridge.hpp"
+#include "core/tunnel_controller/tunnel_events.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
 #include "core/config/config.hpp"
 #include "vpn_engine/packet_device.hpp"
 #include "vpn_engine/protocol/session.hpp"

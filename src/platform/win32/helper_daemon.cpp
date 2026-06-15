@@ -1,5 +1,5 @@
 #include "helper/helper_ipc.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #ifdef _WIN32
 #include <windows.h>

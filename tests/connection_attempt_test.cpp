@@ -3,9 +3,9 @@
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
-#include "app_api.hpp"
+#include "core/app_api/app_api.hpp"
 #include "core/config/config.hpp"
-#include "connection_attempt.hpp"
+#include "core/connection/connection_attempt.hpp"
 
 #include <chrono>
 #include <filesystem>

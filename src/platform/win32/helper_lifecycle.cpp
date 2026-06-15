@@ -6,7 +6,7 @@
 #include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -18,8 +18,6 @@
 
 namespace ecnuvpn {
 namespace platform {
-
-void cleanup_routes() {}
 
 void kill_all_supervisors() {}
 

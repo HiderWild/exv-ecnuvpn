@@ -382,6 +382,53 @@
       "namespace": "service.",
       "shallow": true
     },
+    "src_organization": {
+      "allowed_top_level_dirs": [
+        "app",
+        "cli",
+        "common",
+        "contracts",
+        "core",
+        "feedback",
+        "helper",
+        "platform",
+        "runtime",
+        "utils",
+        "vpn_engine"
+      ],
+      "boundary": {
+        "accepts": [
+          "canonical source ownership directories",
+          "domain-level public include paths",
+          "build-tree generated payloads"
+        ],
+        "emits": [
+          "stable cross-platform source layout gates",
+          "module migration readiness signals"
+        ],
+        "rejects": [
+          "root-level compatibility shims",
+          "source include-units",
+          "committed generated payloads under src root",
+          "shadow public API directories",
+          "platform dependencies on core/app/helper runtime facades"
+        ]
+      },
+      "forbidden_patterns": [
+        "src/*.hpp",
+        "src/*.cpp",
+        "src/core_api",
+        "*.inc.cpp",
+        "#include \"*.inc.cpp\"",
+        "src/webui_assets.hpp",
+        "platform include logger.hpp",
+        "platform include vpn.hpp",
+        "platform include tunnel.hpp",
+        "platform include openconnect_log.hpp",
+        "platform include virtual_network.hpp",
+        "platform include core/*"
+      ]
+    },
     "tunnel_controller": {
       "boundary": {
         "accepts": [

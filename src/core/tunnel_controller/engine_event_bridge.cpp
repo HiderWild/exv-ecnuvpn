@@ -1,5 +1,5 @@
 #include "core/tunnel_controller/engine_event_bridge.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <utility>
 #include <vector>

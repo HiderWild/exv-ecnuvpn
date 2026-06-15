@@ -1,5 +1,5 @@
-#include "crypto.hpp"
-#include "logger.hpp"
+#include "core/crypto/crypto.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <filesystem>
 #include <fstream>

@@ -1,10 +1,10 @@
 #include "core_process.hpp"
-#include "logger.hpp"
-#include "log_renderer.hpp"
-#include "log_event_bus.hpp"
+#include "common/diagnostics/logger.hpp"
+#include "common/diagnostics/log_renderer.hpp"
+#include "common/diagnostics/log_event_bus.hpp"
 #include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
-#include "app_api.hpp"
+#include "core/app_api/app_api.hpp"
 
 #include <nlohmann/json.hpp>
 

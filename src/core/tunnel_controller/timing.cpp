@@ -1,5 +1,5 @@
 #include "timing.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 namespace exv::core {
 

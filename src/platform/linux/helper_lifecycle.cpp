@@ -7,8 +7,7 @@
 #include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
-#include "logger.hpp"
-#include "tunnel.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -22,10 +21,6 @@ namespace platform {
 namespace {
 
 } // namespace
-
-void cleanup_routes() {
-  tunnel::cleanup_routes();
-}
 
 int find_openconnect_pid() {
   std::string output = exv::utils::trim(platform::run_command_output("pgrep -x openconnect"));

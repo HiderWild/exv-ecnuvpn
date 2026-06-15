@@ -4,9 +4,9 @@
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "core/config/config.hpp"
-#include "crypto.hpp"
-#include "logger.hpp"
-#include "tunnel.hpp"
+#include "core/crypto/crypto.hpp"
+#include "common/diagnostics/logger.hpp"
+#include "core/vpn/openconnect_tunnel_script.hpp"
 #include "cli/console.hpp"
 
 #include <algorithm>

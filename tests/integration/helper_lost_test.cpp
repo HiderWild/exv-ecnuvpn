@@ -3,10 +3,10 @@
 // Verifies that helper disconnection during various phases produces
 // the correct error domain, error code, and state transitions.
 
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
-#include "core/tunnel_events.hpp"
-#include "core/reconnect_policy.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_events.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 

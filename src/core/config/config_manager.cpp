@@ -4,7 +4,7 @@
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "core/config/config_manager.hpp"
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 #include <nlohmann/json.hpp>
 

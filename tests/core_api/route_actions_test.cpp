@@ -1,7 +1,7 @@
 // Tests for RouteActions: list, add, remove, enable, disable.
 
-#include "core_api/route_actions.hpp"
-#include "core_api/app_rpc_dispatcher.hpp"
+#include "core/rpc/route_actions.hpp"
+#include "core/rpc/app_rpc_dispatcher.hpp"
 
 #include <nlohmann/json.hpp>
 

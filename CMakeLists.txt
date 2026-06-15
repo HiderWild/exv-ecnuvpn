@@ -52,7 +52,7 @@ set(EXV_PROTOCOL_SOURCES
     src/vpn_engine/protocol/url.cpp
 )
 
-set(EXV_COMMON_SOURCES
+set(EXV_CORE_SOURCES
     src/core/config/config_original.cpp
     src/core/config/config_manager.cpp
     src/core/config/config_api.cpp
@@ -105,7 +105,7 @@ set(EXV_COMMON_SOURCES
     src/platform/common/route_model.cpp
     src/platform/common/status_models.cpp
     src/platform/common/runtime_status.cpp
-    src/openconnect_log.cpp
+    src/vpn_engine/openconnect/openconnect_log.cpp
     src/vpn_engine/native_engine.cpp
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
@@ -113,14 +113,14 @@ set(EXV_COMMON_SOURCES
     src/core/vpn/vpn.cpp
     src/core/vpn/vpn_legacy_adapter.cpp
     src/core/vpn/vpn_runtime.cpp
-    src/tunnel.cpp
-    src/virtual_network.cpp
+    src/core/vpn/openconnect_tunnel_script.cpp
+    src/core/network/virtual_network_status.cpp
     src/runtime/runtime_context.cpp
     src/feedback/feedback.cpp
     src/core/connection/connection_attempt.cpp
-    src/core/logging/logger.cpp
-    src/core/logging/log_event_bus.cpp
-    src/core/logging/log_renderer.cpp
+    src/common/diagnostics/logger.cpp
+    src/common/diagnostics/log_event_bus.cpp
+    src/common/diagnostics/log_renderer.cpp
     src/cli/console.cpp
 )
 
@@ -148,7 +148,7 @@ set(EXV_PLATFORM_DEFINITIONS)
 
 # Source files
 set(SOURCES
-    src/main.cpp
+    src/app/main.cpp
     ${EXV_CLI_SOURCES}
 )
 find_package(Threads REQUIRED)
@@ -248,7 +248,7 @@ endif()
 # sources call platform functions directly; C1/C2 will split those adapters
 # behind cleaner interfaces.
 add_library(exv-core STATIC
-    ${EXV_COMMON_SOURCES}
+    ${EXV_CORE_SOURCES}
     ${EXV_PLATFORM_SOURCES}
 )
 target_include_directories(exv-core PUBLIC
@@ -442,7 +442,7 @@ target_compile_definitions(exv PRIVATE
 #
 # Build dependency chain: frontend must be built before the C++ build can
 # succeed.  The custom command below runs scripts/embed_assets.py, which reads
-# webui/dist/ (the Vite build output) and generates src/webui_assets.hpp.
+# webui/dist/ (the Vite build output) and generates a build-tree webui_assets.hpp.
 # If webui/dist/ does not exist, embed_assets.py will fail with instructions
 # to build the frontend first:
 #
@@ -558,7 +558,7 @@ add_test(NAME backend_resolver_test COMMAND backend_resolver_test)
 
 add_executable(openconnect_log_test
     tests/openconnect_log_test.cpp
-    src/openconnect_log.cpp
+    src/vpn_engine/openconnect/openconnect_log.cpp
 )
 
 target_include_directories(openconnect_log_test PRIVATE
@@ -710,8 +710,8 @@ add_test(NAME native_event_sink_test COMMAND native_event_sink_test)
 
 add_executable(tunnel_script_contract_test
     tests/tunnel_script_contract_test.cpp
-    src/tunnel.cpp
-    src/openconnect_log.cpp
+    src/core/vpn/openconnect_tunnel_script.cpp
+    src/vpn_engine/openconnect/openconnect_log.cpp
     src/cli/console.cpp
 )
 

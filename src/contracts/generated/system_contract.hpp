@@ -26,6 +26,8 @@ inline constexpr std::array<std::string_view, 16> TUNNEL_EVENTS = {{"UserConnect
 inline constexpr std::array<std::string_view, 8> TUNNEL_DISCONNECT_REASONS = {{"UserRequested", "AuthFailed", "CertError", "TransportClosed", "HelperLost", "PacketDeviceFailed", "NetworkConfigFailed", "LeaseExpired"}};
 inline constexpr std::array<std::string_view, 8> TUNNEL_ERROR_DOMAINS = {{"transport", "auth", "helper", "os.route", "os.dns", "packet", "config", "native"}};
 inline constexpr std::array<std::string_view, 10> TUNNEL_STATUS_FIELDS = {{"phase", "desired_connected", "auto_reconnect", "helper_mode", "helper_status", "network_ready", "server", "interface_name", "last_error", "reconnect"}};
+inline constexpr std::array<std::string_view, 11> SRC_ALLOWED_TOP_LEVEL_DIRS = {{"app", "cli", "common", "contracts", "core", "feedback", "helper", "platform", "runtime", "utils", "vpn_engine"}};
+inline constexpr std::array<std::string_view, 12> SRC_FORBIDDEN_PATTERNS = {{"src/*.hpp", "src/*.cpp", "src/core_api", "*.inc.cpp", "#include \"*.inc.cpp\"", "src/webui_assets.hpp", "platform include logger.hpp", "platform include vpn.hpp", "platform include tunnel.hpp", "platform include openconnect_log.hpp", "platform include virtual_network.hpp", "platform include core/*"}};
 inline constexpr std::array<std::string_view, 14> HELPER_FORBIDDEN_CREDENTIAL_FIELDS = {{"password", "passwd", "cookie", "token", "secret", "credential", "auth_key", "auth_token", "session_cookie", "webvpn_cookie", "csrf_token", "bearer_token", "api_key", "apikey"}};
 
 struct HelperOpContract {

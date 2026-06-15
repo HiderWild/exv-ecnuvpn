@@ -3,7 +3,7 @@
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
-#include "app_api.hpp"
+#include "core/app_api/app_api.hpp"
 
 #include <chrono>
 #include <filesystem>

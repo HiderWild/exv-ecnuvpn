@@ -12,8 +12,8 @@
 #include "helper/common/helper_error.hpp"
 #include "helper/common/helper_capabilities.hpp"
 #include "helper/common/helper_session_lease.hpp"
-#include "core/tunnel_intent.hpp"
-#include "core/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
 
 #include <iostream>
 #include <string>

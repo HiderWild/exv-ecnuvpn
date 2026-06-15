@@ -43,7 +43,7 @@ std::string helper_unavailable_disconnect_message() {
   return "Helper daemon is not available. Use the elevated desktop action or install the helper service from Settings.";
 }
 
-nlohmann::json preflight_connect_platform_checks(const Config &cfg) {
+nlohmann::json preflight_connect_platform_checks(const ConfigView &cfg) {
   nlohmann::json drivers = driver_status_json(cfg);
   std::string effective = drivers.value("effective_driver", std::string("wintun"));
   bool wintun_missing = drivers.value(
@@ -61,7 +61,7 @@ nlohmann::json preflight_connect_platform_checks(const Config &cfg) {
   return nlohmann::json{};
 }
 
-nlohmann::json try_connect_direct_fallback(const Config & /*cfg*/,
+nlohmann::json try_connect_direct_fallback(const ConfigView & /*cfg*/,
                                             const std::string & /*password*/) {
   return nlohmann::json{};
 }
@@ -88,7 +88,7 @@ nlohmann::json try_disconnect_direct_fallback(bool allow_direct_fallback) {
   return nlohmann::json{{"ok", true}, {"_direct_fallback", true}};
 }
 
-nlohmann::json status_fallback_without_helper(const Config & /*cfg*/) {
+nlohmann::json status_fallback_without_helper(const ConfigView & /*cfg*/) {
   LocalRuntimeSnapshot snapshot = read_local_runtime_snapshot();
   nlohmann::json result;
   result["_snapshot"] = true;

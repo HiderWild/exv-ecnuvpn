@@ -1,7 +1,7 @@
 // Tests for ServiceActions: helper_status, install, uninstall, driver_status.
 
-#include "core_api/service_actions.hpp"
-#include "core_api/app_rpc_dispatcher.hpp"
+#include "core/rpc/service_actions.hpp"
+#include "core/rpc/app_rpc_dispatcher.hpp"
 
 #include <nlohmann/json.hpp>
 

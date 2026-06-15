@@ -3,7 +3,7 @@
 // Verifies that the thread-based timer scheduler correctly fires callbacks
 // after the specified delay and honours cancel_all().
 
-#include "core/timer_scheduler.hpp"
+#include "core/tunnel_controller/timer_scheduler.hpp"
 #include "core/tunnel_controller/timing.hpp"
 
 #include <atomic>

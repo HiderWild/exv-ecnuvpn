@@ -3,10 +3,10 @@
 // Uses FakeHelper + FakePlatformNetworkOps to construct a real TunnelController,
 // then exercises VpnActions through the AppRpcDispatcher.
 
-#include "core_api/vpn_actions.hpp"
-#include "core_api/app_rpc_dispatcher.hpp"
-#include "core/tunnel_controller.hpp"
-#include "core/tunnel_state.hpp"
+#include "core/rpc/vpn_actions.hpp"
+#include "core/rpc/app_rpc_dispatcher.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
 
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"

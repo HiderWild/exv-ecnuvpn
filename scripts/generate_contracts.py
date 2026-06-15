@@ -183,6 +183,21 @@ def validate_tunnel_controller(tunnel: dict[str, Any]) -> None:
                          "modules.tunnel_controller.status_fields")
 
 
+def validate_src_organization(src_organization: dict[str, Any]) -> None:
+    boundary = require_object(src_organization.get("boundary"),
+                              "modules.src_organization.boundary")
+    validate_string_list(boundary.get("accepts"),
+                         "modules.src_organization.boundary.accepts")
+    validate_string_list(boundary.get("rejects"),
+                         "modules.src_organization.boundary.rejects")
+    validate_string_list(boundary.get("emits"),
+                         "modules.src_organization.boundary.emits")
+    validate_string_list(src_organization.get("allowed_top_level_dirs"),
+                         "modules.src_organization.allowed_top_level_dirs")
+    validate_string_list(src_organization.get("forbidden_patterns"),
+                         "modules.src_organization.forbidden_patterns")
+
+
 def validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("contract_id") != "ecnu-vpn.system":
         raise ContractError("contract_id must be ecnu-vpn.system")
@@ -206,6 +221,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     validate_helper(require_object(modules.get("helper"), "modules.helper"))
     validate_tunnel_controller(require_object(modules.get("tunnel_controller"),
                                               "modules.tunnel_controller"))
+    validate_src_organization(require_object(modules.get("src_organization"),
+                                             "modules.src_organization"))
     for name in ("vpn", "service", "routes", "runtime", "logs"):
         module = require_object(modules.get(name), f"modules.{name}")
         if module.get("shallow") is not True:
@@ -300,6 +317,10 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         cpp_array("TUNNEL_DISCONNECT_REASONS", tunnel["disconnect_reasons"]),
         cpp_array("TUNNEL_ERROR_DOMAINS", tunnel["error_domains"]),
         cpp_array("TUNNEL_STATUS_FIELDS", tunnel["status_fields"]),
+        cpp_array("SRC_ALLOWED_TOP_LEVEL_DIRS",
+                  manifest["modules"]["src_organization"]["allowed_top_level_dirs"]),
+        cpp_array("SRC_FORBIDDEN_PATTERNS",
+                  manifest["modules"]["src_organization"]["forbidden_patterns"]),
         cpp_array("HELPER_FORBIDDEN_CREDENTIAL_FIELDS",
                   manifest["modules"]["helper"]["security"]["forbidden_fields"]),
         "",
@@ -432,6 +453,8 @@ def render_ts(manifest: dict[str, Any]) -> str:
         f"export const TUNNEL_DISCONNECT_REASONS = {ts_literal(tunnel['disconnect_reasons'])} as const",
         f"export const TUNNEL_ERROR_DOMAINS = {ts_literal(tunnel['error_domains'])} as const",
         f"export const TUNNEL_STATUS_FIELDS = {ts_literal(tunnel['status_fields'])} as const",
+        f"export const SRC_ALLOWED_TOP_LEVEL_DIRS = {ts_literal(manifest['modules']['src_organization']['allowed_top_level_dirs'])} as const",
+        f"export const SRC_FORBIDDEN_PATTERNS = {ts_literal(manifest['modules']['src_organization']['forbidden_patterns'])} as const",
         "",
         "export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]",
         "export type ConfigAction = (typeof CONFIG_ACTIONS)[number]",

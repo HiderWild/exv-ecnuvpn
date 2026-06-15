@@ -1,6 +1,6 @@
 #include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
-#include "logger.hpp"
+#include "common/diagnostics/logger.hpp"
 
 namespace exv::core {
 

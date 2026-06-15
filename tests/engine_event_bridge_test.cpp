@@ -1,5 +1,5 @@
-#include "core/engine_event_bridge.hpp"
-#include "log_event_bus.hpp"
+#include "core/tunnel_controller/engine_event_bridge.hpp"
+#include "common/diagnostics/log_event_bus.hpp"
 
 #include <algorithm>
 #include <iostream>

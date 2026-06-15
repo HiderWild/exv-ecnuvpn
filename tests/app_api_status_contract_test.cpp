@@ -4,8 +4,8 @@
 // This test replicates the mapping logic from app_api.cpp's anonymous
 // namespace to serve as a regression guard for the JSON contract.
 
-#include "core/tunnel_state.hpp"
-#include "core/tunnel_intent.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -94,12 +94,7 @@ std::string app_api_source_text() {
 #else
   const auto app_api_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" /
                            "core" / "app_api";
-  const char *files[] = {
-      "app_api.cpp",
-      "app_api_json_helpers.inc.cpp",
-      "app_api_controller_helpers.inc.cpp",
-      "app_api_desktop_handlers.inc.cpp",
-  };
+  const char *files[] = {"app_api.cpp"};
   std::string source;
   for (const char *file : files) {
     source += "\n// ---- ";

@@ -12,6 +12,7 @@ struct HelperServiceManagerContext {
   bool (*send_request)(const nlohmann::json &request, nlohmann::json *response,
                        std::string *error_message,
                        int timeout_seconds) = nullptr;
+  void (*cleanup_routes)() = nullptr;
   void (*clear_session_state)() = nullptr;
 };
 

@@ -2,12 +2,12 @@
 // for `exv --mode=core` correctly handles status.get and other core-exclusive
 // actions, and that status event callbacks produce valid JSON.
 
-#include "core/tunnel_controller.hpp"
-#include "core/tunnel_state.hpp"
-#include "core/tunnel_intent.hpp"
-#include "core/reconnect_policy.hpp"
-#include "core_api/app_rpc_dispatcher.hpp"
-#include "core_api/core_api_setup.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
+#include "core/tunnel_controller/tunnel_state.hpp"
+#include "core/tunnel_controller/tunnel_intent.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
+#include "core/rpc/app_rpc_dispatcher.hpp"
+#include "core/rpc/core_api_setup.hpp"
 
 #include <nlohmann/json.hpp>
 

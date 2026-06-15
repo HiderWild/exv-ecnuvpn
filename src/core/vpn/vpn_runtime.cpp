@@ -3,7 +3,7 @@
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
-#include "vpn.hpp"
+#include "core/vpn/vpn.hpp"
 
 #include "platform/common/process_control.hpp"
 

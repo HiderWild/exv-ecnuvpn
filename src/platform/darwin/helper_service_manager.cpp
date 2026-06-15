@@ -159,7 +159,8 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
     return 1;
   }
 
-  platform::cleanup_routes();
+  if (context.cleanup_routes)
+    context.cleanup_routes();
   platform::kill_all_supervisors();
 
   platform::run_command(std::string("launchctl bootout system ") +

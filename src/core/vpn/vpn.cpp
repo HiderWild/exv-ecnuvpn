@@ -1,9 +1,9 @@
 #include "core/vpn/vpn.hpp"
-#include "app_api.hpp"
+#include "core/app_api/app_api.hpp"
 #include "core/config/config.hpp"
 #include "helper/helper.hpp"
-#include "logger.hpp"
-#include "log_renderer.hpp"
+#include "common/diagnostics/logger.hpp"
+#include "common/diagnostics/log_renderer.hpp"
 #include "runtime/runtime_context.hpp"
 #include "cli/console.hpp"
 #include "vpn_engine/native_engine.hpp"
@@ -16,10 +16,10 @@ namespace vpn {
 int start(const Config &cfg, int retry_limit) {
   // Enable log rendering for CLI mode - subscribes to LogEventBus
   ecnuvpn::LogRenderer log_renderer;
-  
-  logger::info("VPN CLI: Connection starting - server=" + cfg.server + 
+
+  logger::info("VPN CLI: Connection starting - server=" + cfg.server +
                " username=" + cfg.username + " engine=" + cfg.vpn_engine);
-  
+
   cli::print_header("EXV Starting");
 
   if (cfg.vpn_engine == "native") {
@@ -27,7 +27,7 @@ int start(const Config &cfg, int retry_limit) {
     auto validation = vpn_engine::validate_native_config(cfg);
     if (!validation.ok) {
       cli::print_error(validation.message);
-      logger::error("VPN CLI: Native engine validation failed - code=" + 
+      logger::error("VPN CLI: Native engine validation failed - code=" +
                     validation.code + " message=" + validation.message);
       return 1;
     }
@@ -37,7 +37,7 @@ int start(const Config &cfg, int retry_limit) {
   nlohmann::json payload;
   payload["password"] = config::get_plaintext_password(cfg);
   payload["retry_limit"] = retry_limit;
-  
+
   logger::info("VPN CLI: Calling app_api::handle_action(vpn.connect)");
   nlohmann::json result = app_api::handle_action("vpn.connect", payload);
 
