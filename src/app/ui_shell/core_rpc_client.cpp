@@ -145,9 +145,8 @@ CoreRpcEvent parse_core_rpc_event_line(const std::string &line) {
   const auto parsed = nlohmann::json::parse(line);
   CoreRpcEvent out;
   out.event = parsed.value("event", "");
-  if (parsed.contains("data")) {
-    out.data_json = parsed.at("data").dump();
-  }
+  out.data_json = parsed.contains("data") ? parsed.at("data").dump()
+                                      : nlohmann::json::object().dump();
   return out;
 }
 

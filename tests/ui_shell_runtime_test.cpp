@@ -156,6 +156,23 @@ int main() {
          ok;
   }
 
+  FakeTransport empty_event_data_transport(
+      std::vector<std::string>{R"({"event":"heartbeat"})",
+                               R"({"id":11,"ok":true,"data":{"username":"alice"}})"});
+  CoreRpcClient empty_event_data_client(empty_event_data_transport);
+  FakeWindow empty_event_data_window;
+  (void)run_ui_shell_window(empty_event_data_window, config,
+                            empty_event_data_client);
+  ok = expect(empty_event_data_window.emitted_events.size() == 1,
+              "runtime should emit event without data") &&
+       ok;
+  if (empty_event_data_window.emitted_events.size() == 1) {
+    ok = expect(empty_event_data_window.emitted_events[0] ==
+                    R"({"type":"heartbeat","data":{}})",
+                "runtime should map missing event data to empty object") &&
+         ok;
+  }
+
   FakeTransport unused_transport(R"({"id":0,"ok":true,"data":{}})");
   CoreRpcClient unused_client(unused_transport);
   FakeWindow bad_message_window;

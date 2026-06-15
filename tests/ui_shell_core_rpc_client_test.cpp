@@ -79,6 +79,15 @@ int main() {
                   "event data should parse") &&
            ok_all;
 
+  CoreRpcEvent empty_event_data =
+      parse_core_rpc_event_line(R"({"event":"heartbeat"})");
+  ok_all = expect(empty_event_data.event == "heartbeat",
+                  "event without data should preserve type") &&
+           ok_all;
+  ok_all = expect(empty_event_data.data_json == R"({})",
+                  "event without data should use empty object data") &&
+           ok_all;
+
   CoreRpcRequest request;
   request.action = "status.get";
   request.payload_json = R"({"source":"ui"})";
