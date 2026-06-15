@@ -9,7 +9,7 @@
 
 #include "helper/common/helper_messages.hpp"
 #include "helper/helper_handler.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 #include "runtime/runtime_context.hpp"
 #include "feedback/feedback.hpp"
 #include "platform/common/helper_client.hpp"
@@ -131,7 +131,7 @@ bool cleanup_all_sessions_or_keep_running(
   for (const auto &error : cleanup.errors) {
     message << "; " << error;
   }
-  logger::warn(message.str());
+  exv::observability::LogFacade::warn(message.str());
   return false;
 }
 
@@ -241,11 +241,11 @@ int daemon_main(const DaemonOptions &options) {
   signal(SIGTERM, daemon_signal_handler);
   signal(SIGINT, daemon_signal_handler);
 
-  logger::info("Helper daemon starting (mode=" + options.mode + ")");
+  exv::observability::LogFacade::info("Helper daemon starting (mode=" + options.mode + ")");
 
   auto ipc = helper::create_ipc_server();
   if (!ipc || !ipc->start(options.endpoint)) {
-    logger::error("Failed to open helper IPC endpoint: " + options.endpoint);
+    exv::observability::LogFacade::error("Failed to open helper IPC endpoint: " + options.endpoint);
     return 1;
   }
 
@@ -263,7 +263,7 @@ int daemon_main(const DaemonOptions &options) {
       handler->tick();
       if (options.oneshot && options.parent_pid > 0 &&
           !platform::is_process_alive(options.parent_pid)) {
-        logger::info("Helper oneshot parent disappeared; cleaning up and exiting");
+        exv::observability::LogFacade::info("Helper oneshot parent disappeared; cleaning up and exiting");
         if (cleanup_all_sessions_or_keep_running(*handler, "parent exit")) {
           daemon_stop_requested = 1;
         }
@@ -277,7 +277,7 @@ int daemon_main(const DaemonOptions &options) {
     }
   });
 
-  logger::info("Helper daemon ready, accepting connections");
+  exv::observability::LogFacade::info("Helper daemon ready, accepting connections");
 
   while (!daemon_stop_requested) {
     if (!ipc->accept_client()) {
@@ -299,7 +299,7 @@ int daemon_main(const DaemonOptions &options) {
       continue;
     }
     if (!peer_matches_expected_owner(*ipc, options)) {
-      logger::warn("Helper client owner mismatch; rejecting connection");
+      exv::observability::LogFacade::warn("Helper client owner mismatch; rejecting connection");
       ipc->send_response(
           make_error("Helper client owner mismatch", "permission_denied").dump());
       ipc->close_client();
@@ -318,7 +318,7 @@ int daemon_main(const DaemonOptions &options) {
           ipc->read_request(first_request ? options.first_request_timeout_ms : -1);
       if (raw.empty()) {
         if (first_request) {
-          logger::warn("Helper client did not send initial Hello before timeout");
+          exv::observability::LogFacade::warn("Helper client did not send initial Hello before timeout");
         }
         break;
       }
@@ -407,7 +407,7 @@ int daemon_main(const DaemonOptions &options) {
     }
   }
 
-  logger::info("Helper daemon shutting down");
+  exv::observability::LogFacade::info("Helper daemon shutting down");
   daemon_stop_requested = 1;
   if (maintenance_thread.joinable()) {
     maintenance_thread.join();

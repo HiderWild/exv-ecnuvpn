@@ -3,7 +3,7 @@
 #include "helper_messages.hpp"
 #include "helper_error.hpp"
 #include "pipe_helper_client.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <stdexcept>
 
@@ -20,17 +20,17 @@ public:
         pc.pipe_path = resolve_endpoint(config);
         pc.connect_timeout_ms = config.connect_timeout_ms;
 
-        ecnuvpn::logger::info("Helper connector: Attempting connection - endpoint=" +
+        exv::observability::LogFacade::info("Helper connector: Attempting connection - endpoint=" +
                               pc.pipe_path + " timeout_ms=" +
                               std::to_string(pc.connect_timeout_ms));
 
         auto client = std::make_unique<PipeHelperClient>(pc);
         if (!client->connect()) {
-            ecnuvpn::logger::error("Helper connector: Connection failed - endpoint=" + pc.pipe_path);
+            exv::observability::LogFacade::error("Helper connector: Connection failed - endpoint=" + pc.pipe_path);
             return nullptr;
         }
 
-        ecnuvpn::logger::info("Helper connector: Connected successfully - endpoint=" + pc.pipe_path);
+        exv::observability::LogFacade::info("Helper connector: Connected successfully - endpoint=" + pc.pipe_path);
         return client;
     }
 

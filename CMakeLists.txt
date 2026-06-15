@@ -1381,6 +1381,7 @@ add_executable(helper_contract_test
     src/helper/runtime/helper_lifecycle_policy.cpp
     src/helper/runtime/helper_request_dispatcher.cpp
     src/helper/helper_handler.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
 )
 
 target_include_directories(helper_contract_test PRIVATE
@@ -1392,6 +1393,8 @@ target_include_directories(helper_contract_test PRIVATE
 target_compile_definitions(helper_contract_test PRIVATE
     ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
+
+target_link_libraries(helper_contract_test PRIVATE Threads::Threads)
 
 add_test(NAME helper_contract_test COMMAND helper_contract_test)
 
@@ -1764,12 +1767,15 @@ add_executable(helper_messages_connector_test
     src/helper/common/helper_messages.cpp
     src/helper/common/helper_connector.cpp
     src/helper/common/pipe_helper_client.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
 )
 
 target_include_directories(helper_messages_connector_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(helper_messages_connector_test PRIVATE Threads::Threads)
 
 add_test(NAME helper_messages_connector_test COMMAND helper_messages_connector_test)
 
@@ -1779,6 +1785,7 @@ add_executable(pipe_helper_client_test
     src/helper/common/helper_messages.cpp
     src/helper/common/helper_connector.cpp
     src/helper/common/pipe_helper_client.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
 )
 
 target_include_directories(pipe_helper_client_test PRIVATE

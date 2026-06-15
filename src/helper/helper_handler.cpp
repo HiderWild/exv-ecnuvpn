@@ -1,5 +1,5 @@
 #include "helper/helper_handler.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -57,7 +57,7 @@ void HelperHandler::tick() {
     for (const auto& id : active_ids) {
         auto lease = leases_.get_session(id);
         if (lease.has_value() && policy_.should_cleanup_stale(*lease, now)) {
-            ecnuvpn::logger::info("[helper] Heartbeat timed out; cleaning session: "
+            exv::observability::LogFacade::info("[helper] Heartbeat timed out; cleaning session: "
                                   + id.value);
             CleanupPolicy full_policy;
             full_policy.remove_routes = true;
@@ -162,7 +162,7 @@ HelperResponse HelperHandler::handle_start_session(const HelperRequest& req) {
     record.created_at = std::chrono::system_clock::now();
     cleanup_.register_session(record);
 
-    ecnuvpn::logger::info("[helper] Session started: " + session_id.value);
+    exv::observability::LogFacade::info("[helper] Session started: " + session_id.value);
 
     StartSessionResponse start_resp;
     start_resp.session_id = session_id;
@@ -338,7 +338,7 @@ CleanupResponse HelperHandler::cleanup_session(const SessionId& session_id,
     std::vector<std::string> errors;
 
     for (const auto& res : resources) {
-        ecnuvpn::logger::info("[helper] Cleaning managed resource: type=" + res.type
+        exv::observability::LogFacade::info("[helper] Cleaning managed resource: type=" + res.type
                               + " detail=" + res.detail);
     }
     if (!resources.empty() && !network_ops_) {
@@ -389,7 +389,7 @@ HelperResponse HelperHandler::handle_cleanup(const HelperRequest& req) {
         return resp;
     }
 
-    ecnuvpn::logger::info("[helper] Cleaning up session: " + cleanup_req.session_id.value);
+    exv::observability::LogFacade::info("[helper] Cleaning up session: " + cleanup_req.session_id.value);
 
     CleanupResponse cleanup_resp =
         cleanup_session(cleanup_req.session_id, cleanup_req.policy);
@@ -465,7 +465,7 @@ HelperResponse HelperHandler::handle_shutdown(const HelperRequest& req) {
         return resp;
     }
 
-    ecnuvpn::logger::info("[helper] Shutting down session: " + shutdown_req.session_id.value);
+    exv::observability::LogFacade::info("[helper] Shutting down session: " + shutdown_req.session_id.value);
 
     CleanupResponse cleanup_resp =
         cleanup_session(shutdown_req.session_id, shutdown_req.policy);
