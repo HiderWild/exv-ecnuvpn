@@ -19,19 +19,19 @@ constexpr bool is_high_severity(LogLevel level) noexcept {
 constexpr const char *to_string(LogLevel level) noexcept {
   switch (level) {
   case LogLevel::Trace:
-    return "trace";
+    return "TRACE";
   case LogLevel::Debug:
-    return "debug";
+    return "DEBUG";
   case LogLevel::Info:
-    return "info";
+    return "INFO";
   case LogLevel::Warn:
-    return "warn";
+    return "WARN";
   case LogLevel::Error:
-    return "error";
+    return "ERROR";
   case LogLevel::Fatal:
-    return "fatal";
+    return "FATAL";
   }
-  return "info";
+  return "INFO";
 }
 
 } // namespace exv::observability

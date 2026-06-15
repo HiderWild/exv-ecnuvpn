@@ -58,6 +58,12 @@ set(EXV_OBSERVABILITY_SOURCES
     src/observability/log_facade.cpp
 )
 
+set(EXV_PLATFORM_LOGGING_SOURCES
+    src/platform/common/logging/file_log_sink.cpp
+    src/platform/common/logging/stdout_log_sink.cpp
+    src/platform/common/logging/log_runtime.cpp
+)
+
 set(EXV_CORE_SOURCES
     src/core/config/config_manager.cpp
     src/core/config/config_api.cpp
@@ -140,6 +146,7 @@ set(EXV_CORE_SOURCES
     src/common/diagnostics/log_event_bus.cpp
     src/common/diagnostics/log_renderer.cpp
     ${EXV_OBSERVABILITY_SOURCES}
+    ${EXV_PLATFORM_LOGGING_SOURCES}
     src/cli/console.cpp
 )
 
@@ -1469,6 +1476,19 @@ target_include_directories(log_service_test PRIVATE
 target_link_libraries(log_service_test PRIVATE Threads::Threads)
 
 add_test(NAME log_service_test COMMAND log_service_test)
+
+add_executable(platform_log_sink_test
+    tests/platform_log_sink_test.cpp
+    src/platform/common/logging/file_log_sink.cpp
+    src/platform/common/logging/stdout_log_sink.cpp
+)
+
+target_include_directories(platform_log_sink_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME platform_log_sink_test COMMAND platform_log_sink_test)
 
 add_executable(utils_strings_test
     tests/utils_strings_test.cpp
