@@ -116,6 +116,49 @@ bool tree_contains_matching_filename(const std::filesystem::path &root,
   return false;
 }
 
+bool file_contains_any(const std::filesystem::path &path,
+                       const std::vector<std::string> &needles) {
+  const auto text = read_text_file(path);
+  for (const auto &needle : needles) {
+    if (text.find(needle) != std::string::npos) {
+      std::cerr << "Forbidden text in " << path.string() << ": " << needle
+                << '\n';
+      return true;
+    }
+  }
+  return false;
+}
+
+bool private_controller_impl_include_leaks(const std::filesystem::path &root) {
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    const auto text = read_text_file(entry.path());
+    const auto quoted_include =
+        std::string{"#include \"core/tunnel_controller/"} +
+        "tunnel_controller_impl.hpp\"";
+    const auto angle_include =
+        std::string{"#include <core/tunnel_controller/"} +
+        "tunnel_controller_impl.hpp>";
+    if (text.find(quoted_include) == std::string::npos &&
+        text.find(angle_include) == std::string::npos) {
+      continue;
+    }
+
+    const auto relative = std::filesystem::relative(entry.path(), root);
+    const auto relative_text = relative.generic_string();
+    if (relative_text.rfind("src/core/tunnel_controller/", 0) == 0) {
+      continue;
+    }
+
+    std::cerr << "Private tunnel controller implementation header leaked into "
+              << entry.path().string() << '\n';
+    return true;
+  }
+  return false;
+}
+
 } // namespace
 
 int main() {
@@ -140,6 +183,11 @@ int main() {
   const auto tunnel_state_machine_test =
       read_text_file(source_dir / "tests" /
                      "tunnel_controller_state_machine_test.cpp");
+  const auto app_api_controller_helpers =
+      source_dir / "src" / "core" / "app_api" /
+      "app_api_controller_helpers.inc.cpp";
+  const auto rpc_vpn_actions =
+      source_dir / "src" / "core" / "rpc" / "vpn_actions.cpp";
 
   ok = expect(manifest == snapshot,
               "generated snapshot must match canonical manifest") &&
@@ -206,6 +254,25 @@ int main() {
                   std::string::npos,
               "public TunnelController header must not include native session "
               "runner internals") &&
+       ok;
+  ok = expect(!private_controller_impl_include_leaks(source_dir),
+              "tunnel_controller_impl.hpp must stay private to "
+              "src/core/tunnel_controller implementation units") &&
+       ok;
+  ok = expect(!file_contains_any(
+                  app_api_controller_helpers,
+                  {"phase_to_string", "return \"idle\"",
+                   "return \"preparing_helper\"",
+                   "return \"applying_network_config\""}),
+              "app_api must use the centralized tunnel phase wire-name helper") &&
+       ok;
+  ok = expect(!file_contains_any(
+                  rpc_vpn_actions,
+                  {"phase_to_string", "phase_str = \"idle\"",
+                   "phase_str = \"preparing_helper\"",
+                   "phase_str = \"applying_network_config\""}),
+              "vpn_actions must use the centralized tunnel phase wire-name "
+              "helper") &&
        ok;
   ok = expect(std::filesystem::exists(tunnel_public_module_path),
               "public tunnel module exv.core.tunnel must exist") &&

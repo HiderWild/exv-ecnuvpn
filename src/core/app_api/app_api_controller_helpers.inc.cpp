@@ -164,24 +164,7 @@ nlohmann::json frontend_status_from_controller_snapshot(
     j["reconnect_next_retry_ms"] = snap.reconnect->next_retry_ms;
   }
   j["auto_reconnect"] = snap.auto_reconnect;
-  j["phase"] = [snap]() -> std::string {
-    switch (snap.phase) {
-    case exv::core::TunnelPhase::Idle: return "idle";
-    case exv::core::TunnelPhase::PreparingHelper: return "preparing_helper";
-    case exv::core::TunnelPhase::Authenticating: return "authenticating";
-    case exv::core::TunnelPhase::ConnectingCstp: return "connecting_cstp";
-    case exv::core::TunnelPhase::ApplyingNetworkConfig:
-      return "applying_network_config";
-    case exv::core::TunnelPhase::OpeningPacketDevice:
-      return "opening_packet_device";
-    case exv::core::TunnelPhase::Connected: return "connected";
-    case exv::core::TunnelPhase::Reconnecting: return "reconnecting";
-    case exv::core::TunnelPhase::Disconnecting: return "disconnecting";
-    case exv::core::TunnelPhase::CleaningUp: return "cleaning_up";
-    case exv::core::TunnelPhase::Failed: return "failed";
-    default: return "unknown";
-    }
-  }();
+  j["phase"] = exv::core::tunnel_phase_wire_name(snap.phase);
   try {
     virtual_network::add_status_fields(j, snap.interface_name);
   } catch (...) {

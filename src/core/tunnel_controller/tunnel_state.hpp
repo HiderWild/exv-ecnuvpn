@@ -19,6 +19,23 @@ enum class TunnelPhase {
     Failed
 };
 
+inline constexpr const char* tunnel_phase_wire_name(TunnelPhase phase) noexcept {
+    switch (phase) {
+    case TunnelPhase::Idle: return "idle";
+    case TunnelPhase::PreparingHelper: return "preparing_helper";
+    case TunnelPhase::Authenticating: return "authenticating";
+    case TunnelPhase::ConnectingCstp: return "connecting_cstp";
+    case TunnelPhase::ApplyingNetworkConfig: return "applying_network_config";
+    case TunnelPhase::OpeningPacketDevice: return "opening_packet_device";
+    case TunnelPhase::Connected: return "connected";
+    case TunnelPhase::Reconnecting: return "reconnecting";
+    case TunnelPhase::Disconnecting: return "disconnecting";
+    case TunnelPhase::CleaningUp: return "cleaning_up";
+    case TunnelPhase::Failed: return "failed";
+    }
+    return "unknown";
+}
+
 struct ErrorInfo {
     std::string domain;    // transport|auth|helper|os.route|os.dns|packet
     std::string code;      // transport_closed, auth_failed, etc.

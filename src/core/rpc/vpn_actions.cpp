@@ -64,25 +64,8 @@ RpcResponse VpnActions::status(const RpcRequest& req) {
     RpcResponse resp;
     auto s = controller_->status();
 
-    auto phase_to_string = [](exv::core::TunnelPhase p) -> const char* {
-        switch (p) {
-            case exv::core::TunnelPhase::Idle: return "idle";
-            case exv::core::TunnelPhase::PreparingHelper: return "preparing_helper";
-            case exv::core::TunnelPhase::Authenticating: return "authenticating";
-            case exv::core::TunnelPhase::ConnectingCstp: return "connecting_cstp";
-            case exv::core::TunnelPhase::ApplyingNetworkConfig: return "applying_network_config";
-            case exv::core::TunnelPhase::OpeningPacketDevice: return "opening_packet_device";
-            case exv::core::TunnelPhase::Connected: return "connected";
-            case exv::core::TunnelPhase::Reconnecting: return "reconnecting";
-            case exv::core::TunnelPhase::Disconnecting: return "disconnecting";
-            case exv::core::TunnelPhase::CleaningUp: return "cleaning_up";
-            case exv::core::TunnelPhase::Failed: return "failed";
-            default: return "unknown";
-        }
-    };
-
     json result = {
-        {"phase", phase_to_string(s.phase)},
+        {"phase", exv::core::tunnel_phase_wire_name(s.phase)},
         {"desired_connected", s.desired_connected},
         {"auto_reconnect", s.auto_reconnect},
         {"helper_mode", s.helper_mode},
@@ -151,22 +134,7 @@ RpcResponse VpnActions::get_legacy_status(const RpcRequest& req) {
         auto snap = controller_ ? controller_->status() : exv::core::TunnelStatusSnapshot{};
 
         json result;
-        // Inline phase_to_string (same as core_process.cpp)
-        const char* phase_str = "unknown";
-        switch (snap.phase) {
-            case exv::core::TunnelPhase::Idle:                phase_str = "idle"; break;
-            case exv::core::TunnelPhase::PreparingHelper:     phase_str = "preparing_helper"; break;
-            case exv::core::TunnelPhase::Authenticating:      phase_str = "authenticating"; break;
-            case exv::core::TunnelPhase::ConnectingCstp:      phase_str = "connecting_cstp"; break;
-            case exv::core::TunnelPhase::ApplyingNetworkConfig: phase_str = "applying_network_config"; break;
-            case exv::core::TunnelPhase::OpeningPacketDevice:  phase_str = "opening_packet_device"; break;
-            case exv::core::TunnelPhase::Connected:           phase_str = "connected"; break;
-            case exv::core::TunnelPhase::Reconnecting:        phase_str = "reconnecting"; break;
-            case exv::core::TunnelPhase::Disconnecting:       phase_str = "disconnecting"; break;
-            case exv::core::TunnelPhase::CleaningUp:          phase_str = "cleaning_up"; break;
-            case exv::core::TunnelPhase::Failed:              phase_str = "failed"; break;
-        }
-        result["phase"] = phase_str;
+        result["phase"] = exv::core::tunnel_phase_wire_name(snap.phase);
         result["connected"] = snap.phase == exv::core::TunnelPhase::Connected;
         result["process_running"] = snap.phase != exv::core::TunnelPhase::Idle &&
                                     snap.phase != exv::core::TunnelPhase::Failed;
