@@ -3,10 +3,13 @@
 #include "app/ui_shell/ui_shell_options.hpp"
 
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 int main() {
   using namespace ecnuvpn::ui_shell;
+  namespace fs = std::filesystem;
 
   assert(is_allowed_host_action("status.get"));
   assert(is_allowed_host_action("vpn.connect"));
@@ -37,6 +40,80 @@ int main() {
   if (!valid_options_error.empty()) {
     return 1;
   }
+
+  const fs::path package_root =
+      fs::temp_directory_path() / "ecnuvpn-ui-shell-contract-package";
+  fs::remove_all(package_root);
+  fs::create_directories(package_root);
+  const fs::path args_file = package_root / "exv-ui.args";
+  {
+    std::ofstream sidecar(args_file);
+    sidecar << "--exv\n"
+            << "bin/exv.exe\n"
+            << "\n"
+            << "--renderer-index\n"
+            << "webui/index.html\n";
+  }
+
+  UiShellOptions sidecar_options = parse_ui_shell_args_file(args_file);
+  if (!validate_ui_shell_options(sidecar_options).empty()) {
+    return 1;
+  }
+  if (fs::path(sidecar_options.exv_path) != package_root / "bin/exv.exe") {
+    return 1;
+  }
+  if (fs::path(sidecar_options.packaged_renderer_index) !=
+      package_root / "webui/index.html") {
+    return 1;
+  }
+
+  fs::remove(args_file);
+  UiShellOptions missing_sidecar_options =
+      load_packaged_ui_shell_options(package_root / "exv-ui.exe");
+  if (validate_ui_shell_options(missing_sidecar_options) !=
+      "missing required --exv path") {
+    return 1;
+  }
+
+  std::ofstream(args_file, std::ios::trunc).close();
+  UiShellOptions empty_sidecar_options = parse_ui_shell_args_file(args_file);
+  if (validate_ui_shell_options(empty_sidecar_options) !=
+      "missing required --exv path") {
+    return 1;
+  }
+
+  std::ofstream(args_file) << "--exv\n"
+                           << "bin/exv.exe\n"
+                           << "--renderer-index\n"
+                           << "webui/index.html\n";
+  UiShellOptions packaged_options =
+      load_packaged_ui_shell_options(package_root / "exv-ui.exe");
+  if (!validate_ui_shell_options(packaged_options).empty()) {
+    return 1;
+  }
+  if (fs::path(packaged_options.exv_path) != package_root / "bin/exv.exe") {
+    return 1;
+  }
+  if (fs::path(packaged_options.packaged_renderer_index) !=
+      package_root / "webui/index.html") {
+    return 1;
+  }
+
+  UiShellOptions explicit_options = parse_ui_shell_options(6, argv);
+  if (explicit_options.renderer_dev_server_url != "http://127.0.0.1:8288") {
+    return 1;
+  }
+  if (explicit_options.exv_path != "C:/app/bin/exv.exe") {
+    return 1;
+  }
+  if (!explicit_options.enable_dev_tools) {
+    return 1;
+  }
+  if (!validate_ui_shell_options(explicit_options).empty()) {
+    return 1;
+  }
+
+  fs::remove_all(package_root);
 
   UiShellOptions missing_exv;
   missing_exv.renderer_dev_server_url = "http://127.0.0.1:8288";

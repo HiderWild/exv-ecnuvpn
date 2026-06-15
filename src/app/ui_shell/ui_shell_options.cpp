@@ -1,8 +1,36 @@
 #include "app/ui_shell/ui_shell_options.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace ecnuvpn::ui_shell {
+
+namespace {
+
+UiShellOptions parse_ui_shell_tokens(const std::vector<std::string> &tokens) {
+  std::vector<char *> argv;
+  argv.reserve(tokens.size() + 1);
+  char program[] = "exv-ui";
+  argv.push_back(program);
+  for (const std::string &token : tokens) {
+    argv.push_back(const_cast<char *>(token.c_str()));
+  }
+  return parse_ui_shell_options(static_cast<int>(argv.size()), argv.data());
+}
+
+std::string resolve_sidecar_path(const std::filesystem::path &package_root,
+                                 const std::string &value) {
+  const std::filesystem::path path(value);
+  if (path.is_absolute()) {
+    return path.string();
+  }
+  return (package_root / path).lexically_normal().string();
+}
+
+} // namespace
 
 UiShellOptions parse_ui_shell_options(int argc, char **argv) {
   UiShellOptions options;
@@ -19,6 +47,45 @@ UiShellOptions parse_ui_shell_options(int argc, char **argv) {
     }
   }
   return options;
+}
+
+UiShellOptions parse_ui_shell_args_file(
+    const std::filesystem::path &args_file) {
+  std::ifstream sidecar(args_file);
+  if (!sidecar) {
+    return {};
+  }
+
+  std::vector<std::string> tokens;
+  std::string line;
+  while (std::getline(sidecar, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (!line.empty()) {
+      tokens.push_back(line);
+    }
+  }
+
+  UiShellOptions options = parse_ui_shell_tokens(tokens);
+  const std::filesystem::path package_root = args_file.parent_path();
+  if (!options.exv_path.empty()) {
+    options.exv_path = resolve_sidecar_path(package_root, options.exv_path);
+  }
+  if (!options.packaged_renderer_index.empty()) {
+    options.packaged_renderer_index =
+        resolve_sidecar_path(package_root, options.packaged_renderer_index);
+  }
+  return options;
+}
+
+UiShellOptions load_packaged_ui_shell_options(
+    const std::filesystem::path &executable_path) {
+  const std::filesystem::path package_root = executable_path.parent_path();
+  if (package_root.empty()) {
+    return {};
+  }
+  return parse_ui_shell_args_file(package_root / "exv-ui.args");
 }
 
 std::string validate_ui_shell_options(const UiShellOptions &options) {
