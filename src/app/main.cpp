@@ -8,7 +8,7 @@
 #include "core/config/config_manager.hpp"
 #include "core/core_process.hpp"
 #include "helper/helper.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "runtime/runtime_context.hpp"
 #include "core/vpn/openconnect_tunnel_script.hpp"
 #include "cli/console.hpp"
@@ -16,6 +16,8 @@
 #include "core/network/virtual_network_status.hpp"
 
 #include <csignal>
+#include <deque>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -79,6 +81,45 @@ static void print_help() {
 
 static void print_version() {
   std::cout << cli::BOLD << APP_NAME << cli::RESET << " version " << cli::GREEN << ECNUVPN_VERSION << cli::RESET << std::endl;
+}
+
+static void show_logs(int lines = 50) {
+  std::string log_path = platform::get_log_path();
+  if (!platform::file_exists(log_path)) {
+    cli::print_info("No log file found at: " + log_path);
+    return;
+  }
+
+  std::ifstream ifs(log_path);
+  if (!ifs.is_open()) {
+    cli::print_error("Cannot open log file: " + log_path);
+    return;
+  }
+
+  std::deque<std::string> log_lines;
+  std::string line;
+  while (std::getline(ifs, line)) {
+    log_lines.push_back(line);
+    if (static_cast<int>(log_lines.size()) > lines) {
+      log_lines.pop_front();
+    }
+  }
+
+  cli::print_header("EXV Logs");
+  std::cout << cli::DIM << "Showing last " << log_lines.size()
+            << " lines from: " << log_path << cli::RESET << std::endl;
+  std::cout << std::endl;
+
+  for (const auto &entry : log_lines) {
+    if (entry.find("[ERROR]") != std::string::npos) {
+      std::cout << cli::RED << entry << cli::RESET << std::endl;
+    } else if (entry.find("[WARN]") != std::string::npos) {
+      std::cout << cli::YELLOW << entry << cli::RESET << std::endl;
+    } else {
+      std::cout << entry << std::endl;
+    }
+  }
+  std::cout << std::endl;
 }
 
 static int handle_service(const std::vector<std::string> &args) {
@@ -168,9 +209,9 @@ int main(int argc, char *argv[]) {
   if (cmd == "start") { Config cfg = config::load(); return vpn::start(cfg, parsed.retry_limit); }
   if (cmd == "stop" || cmd == "-s") return vpn::stop();
   if (cmd == "status" || cmd == "-t") return vpn::status();
-  if (cmd == "config" || cmd == "-c") { logger::init(); return handle_config(args); }
+  if (cmd == "config" || cmd == "-c") { platform::logging::configure_default_logging(false); return handle_config(args); }
   if (cmd == "service") return handle_service(args);
-  if (cmd == "logs" || cmd == "-l") { logger::init(); logger::show_logs(50); return 0; }
+  if (cmd == "logs" || cmd == "-l") { platform::logging::configure_default_logging(false); show_logs(50); return 0; }
 
   cli::print_error("Unknown command: " + cmd);
   cli::print_info("Run 'exv help' for usage information.");

@@ -73,6 +73,14 @@ void LogFacade::event(
   current_or_create_service()->submit(std::move(log_event));
 }
 
+void LogFacade::event(
+    std::string level, std::string component, std::string code,
+    std::string message,
+    std::vector<std::pair<std::string, std::string>> fields) {
+  event(log_level_from_string(level), std::move(component), std::move(code),
+        std::move(message), std::move(fields));
+}
+
 void LogFacade::flush() {
   std::shared_ptr<LogService> service;
   {

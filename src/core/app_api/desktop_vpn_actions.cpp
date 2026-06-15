@@ -12,7 +12,8 @@
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
 #include "platform/common/backend_resolver.hpp"
 #include "platform/common/file_system.hpp"
@@ -32,7 +33,7 @@ using StageTimer = exv::core::ConnectStageTimer;
 
 config::ConfigManager make_config_manager() {
   platform::ensure_dir(platform::get_config_dir());
-  logger::init();
+  ecnuvpn::platform::logging::configure_default_logging(false);
   return config::ConfigManager(platform::get_config_dir());
 }
 
@@ -109,7 +110,7 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         Config cfg = mgr.load();
         StageTimer timing("desktop.connect");
         std::string password = payload.value("password", std::string());
-        logger::info("app_api: vpn.connect entry - password_provided=" +
+        exv::observability::LogFacade::info("app_api: vpn.connect entry - password_provided=" +
                      std::string(password.empty() ? "false" : "true") +
                      " server=" + cfg.server + " username=" + cfg.username);
         if (password.empty() && !cfg.password.empty()) {
@@ -120,7 +121,7 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         }
         timing.mark("password_resolved",
                     password.empty() ? "source=missing" : "source=available");
-        logger::info("app_api: Calling preflight_connect");
+        exv::observability::LogFacade::info("app_api: Calling preflight_connect");
         nlohmann::json preflight = preflight_connect(cfg, password);
         if (preflight.is_object() && preflight.value("ok", true) == false) {
           timing.finish(false, "stage=preflight error=" +
@@ -130,12 +131,12 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         timing.mark("preflight", "result=ok");
         if (preflight.is_object() && preflight.contains("backend")) {
           auto backend = preflight["backend"];
-          logger::info("app_api: Preflight complete - backend_mode=" +
+          exv::observability::LogFacade::info("app_api: Preflight complete - backend_mode=" +
                        backend.value("mode", "unknown"));
         }
         if (preflight.is_object() && preflight.contains("backend")) {
           auto backend = preflight["backend"];
-          logger::info("app_api: Preflight complete - ok=" +
+          exv::observability::LogFacade::info("app_api: Preflight complete - ok=" +
                        std::string(preflight.value("ok", true) ? "true"
                                                                : "false") +
                        " backend_mode=" + backend.value("mode", "unknown") +
@@ -239,13 +240,13 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         reset_tunnel_controller();
         timing.mark("reset_controller", "stale_state_cleared");
 
-        logger::info("app_api: Initializing TunnelController - endpoint=" +
+        exv::observability::LogFacade::info("app_api: Initializing TunnelController - endpoint=" +
                      (helper_endpoint.empty() ? "default" : helper_endpoint));
-        logger::info("app_api: Initializing TunnelController - endpoint=" +
+        exv::observability::LogFacade::info("app_api: Initializing TunnelController - endpoint=" +
                      (helper_endpoint.empty() ? "default" : helper_endpoint));
         auto controller = ensure_tunnel_controller(helper_endpoint);
         if (controller) {
-          logger::info("app_api: TunnelController initialized successfully");
+          exv::observability::LogFacade::info("app_api: TunnelController initialized successfully");
         }
         timing.mark("tunnel_controller",
                     controller ? "initialized=true" : "initialized=false");
@@ -264,9 +265,9 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         intent.desired_connected = true;
         intent.auto_reconnect = cfg.auto_reconnect;
         intent.profile_id.value = cfg.server;
-        logger::info("app_api: Calling TunnelController::connect - server=" +
+        exv::observability::LogFacade::info("app_api: Calling TunnelController::connect - server=" +
                      cfg.server);
-        logger::info("app_api: Calling TunnelController::connect");
+        exv::observability::LogFacade::info("app_api: Calling TunnelController::connect");
         controller->connect(intent);
 
         auto snap = controller->status();

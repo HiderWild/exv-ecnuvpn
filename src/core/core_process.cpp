@@ -1,5 +1,6 @@
 #include "core_process.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "common/diagnostics/log_renderer.hpp"
 #include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
@@ -230,13 +231,13 @@ int core_process_main(const std::string& config_dir,
     ecnuvpn::runtime::bootstrap(config_dir, home_dir);
 
     // 2. Initialize logger
-    ecnuvpn::logger::init();
+    ecnuvpn::platform::logging::configure_default_logging(false);
 
     // 2b. Instantiate LogRenderer so typed events reach the disk file.
     // Must live for the lifetime of the core process.
     ecnuvpn::LogRenderer log_renderer;
 
-    ecnuvpn::logger::info("Core process starting (mode=core, use_stdin=" + std::string(use_stdin ? "true" : "false") + ")");
+    exv::observability::LogFacade::info("Core process starting (mode=core, use_stdin=" + std::string(use_stdin ? "true" : "false") + ")");
 
     // 3. Install signal handlers for graceful shutdown
     std::signal(SIGINT,  core_signal_handler);
@@ -263,7 +264,7 @@ int core_process_main(const std::string& config_dir,
         return 1;
     }
 
-    ecnuvpn::logger::info("Core process ready — reading JSON-RPC from stdin and pipe");
+    exv::observability::LogFacade::info("Core process ready — reading JSON-RPC from stdin and pipe");
 
     // 8. Main event loop: read JSON-RPC requests from stdin and pipe, one per line
     std::string line;
@@ -275,7 +276,7 @@ int core_process_main(const std::string& config_dir,
     std::thread pipe_worker;
 
     if (!stdin_available) {
-        ecnuvpn::logger::info("Core process: running in daemon mode (pipe-only)");
+        exv::observability::LogFacade::info("Core process: running in daemon mode (pipe-only)");
     } else {
         pipe_worker = std::thread([&] {
             while (!pipe_worker_stop.load() && !g_stop_requested.load()) {
@@ -295,7 +296,7 @@ int core_process_main(const std::string& config_dir,
         }
 
         if (!std::getline(std::cin, line)) {
-            ecnuvpn::logger::info("Core process: stdin EOF, shutting down");
+            exv::observability::LogFacade::info("Core process: stdin EOF, shutting down");
             break;
         }
 
@@ -341,7 +342,7 @@ int core_process_main(const std::string& config_dir,
     }
     pipe_listener->stop();
 
-    ecnuvpn::logger::info("Core process shutting down");
+    exv::observability::LogFacade::info("Core process shutting down");
     return 0;
 }
 

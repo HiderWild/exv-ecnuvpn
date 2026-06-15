@@ -1,8 +1,12 @@
 #include "core/tunnel_controller/engine_event_bridge.hpp"
-#include "common/diagnostics/log_event_bus.hpp"
+#include "observability/log_facade.hpp"
+#include "observability/log_sink.hpp"
+#include "observability/log_service.hpp"
 
 #include <algorithm>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -17,6 +21,31 @@ bool expect(bool condition, const char* message) {
         return true;
     std::cerr << "EXPECT FAILED: " << message << std::endl;
     return false;
+}
+
+class CapturingLogSink final : public exv::observability::LogSink {
+public:
+    void write(const exv::observability::LogEvent& event) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        logs_.push_back(event);
+    }
+
+    std::vector<exv::observability::LogEvent> logs() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return logs_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<exv::observability::LogEvent> logs_;
+};
+
+std::shared_ptr<CapturingLogSink> install_capturing_log_sink() {
+    auto sink = std::make_shared<CapturingLogSink>();
+    auto service = std::make_shared<exv::observability::LogService>();
+    service->add_sink(sink);
+    exv::observability::LogFacade::configure(service);
+    return sink;
 }
 
 } // namespace
@@ -181,9 +210,7 @@ int main() {
     // ---------------------------------------------------------------
 
     {
-        std::vector<ecnuvpn::TypedLogEvent> logs;
-        auto subscription = ecnuvpn::LogEventBus::instance().subscribe(
-            [&](const ecnuvpn::TypedLogEvent& event) { logs.push_back(event); });
+        auto log_sink = install_capturing_log_sink();
 
         exv::core::EngineEventBridge bridge(nullptr);
         const char* log_worthy_types[] = {
@@ -221,19 +248,21 @@ int main() {
             bridge.emit(ev);
         }
 
-        ecnuvpn::LogEventBus::instance().unsubscribe(subscription);
+        exv::observability::LogFacade::flush();
+        auto logs = log_sink->logs();
+        exv::observability::LogFacade::shutdown();
 
         ok = expect(logs.size() == 12,
                     "lifecycle events should log and noisy events should not") && ok;
         for (const char* t : log_worthy_types) {
             const bool found = std::any_of(logs.begin(), logs.end(),
-                [&](const ecnuvpn::TypedLogEvent& event) {
+                [&](const exv::observability::LogEvent& event) {
                     return event.component == "engine" && event.code == t;
                 });
             ok = expect(found, (std::string("engine log emitted for ") + t).c_str()) && ok;
         }
         const bool noisy_logged = std::any_of(logs.begin(), logs.end(),
-            [](const ecnuvpn::TypedLogEvent& event) {
+            [](const exv::observability::LogEvent& event) {
                 return event.code == "packet.inbound" ||
                        event.code == "packet.outbound" ||
                        event.code.rfind("dpd.", 0) == 0;

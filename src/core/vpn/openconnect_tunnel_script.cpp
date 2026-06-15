@@ -5,7 +5,8 @@
 #include "platform/common/runtime_paths.hpp"
 #include "core/vpn/openconnect_tunnel_script.hpp"
 
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "vpn_engine/openconnect/openconnect_log.hpp"
 #include "platform/common/tunnel_script.hpp"
 #include "cli/console.hpp"
@@ -162,26 +163,26 @@ bool write_script(const Config &cfg) {
   std::string content = platform::generate_tunnel_script(context);
 
   for (const auto &server_ip : context.server_route_exceptions) {
-    logger::warn("Preserving upstream route for VPN server IP: " + server_ip);
+    exv::observability::LogFacade::warn("Preserving upstream route for VPN server IP: " + server_ip);
   }
 
   if (!platform::write_file(path, content)) {
     cli::print_error("Failed to write tunnel script: " + path);
-    logger::error("Failed to write tunnel script: " + path);
+    exv::observability::LogFacade::error("Failed to write tunnel script: " + path);
     return false;
   }
 
 #ifndef _WIN32
   if (chmod(path.c_str(), 0755) != 0) {
     cli::print_error("Failed to set executable permission on: " + path);
-    logger::error("Failed to chmod tunnel script: " + path);
+    exv::observability::LogFacade::error("Failed to chmod tunnel script: " + path);
     return false;
   }
 #endif
 
   platform::sync_owner(path);
 
-  logger::info("Tunnel script generated: " + path);
+  exv::observability::LogFacade::info("Tunnel script generated: " + path);
   return true;
 }
 
@@ -194,7 +195,7 @@ int run_script_hook() {
                                      config_dir ? config_dir : "");
   }
 #endif
-  logger::init();
+  ecnuvpn::platform::logging::configure_default_logging(false);
   Config cfg = config::load();
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
   return platform::run_tunnel_script(context);
@@ -211,17 +212,17 @@ void cleanup_routes() {
 #ifndef _WIN32
   Config cfg = config::load();
   if (cfg.routes.empty()) {
-    logger::info("No routes configured, skipping route cleanup");
+    exv::observability::LogFacade::info("No routes configured, skipping route cleanup");
     return;
   }
 
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
-  logger::info("Cleaning up VPN routes (" + std::to_string(cfg.routes.size()) +
+  exv::observability::LogFacade::info("Cleaning up VPN routes (" + std::to_string(cfg.routes.size()) +
                " configured)");
 
   platform::cleanup_tunnel_routes(context);
 
-  logger::info("Route cleanup complete (" +
+  exv::observability::LogFacade::info("Route cleanup complete (" +
                std::to_string(cfg.routes.size()) + " routes removed)");
 #endif
 }

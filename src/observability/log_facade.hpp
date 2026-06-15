@@ -22,6 +22,10 @@ public:
       LogLevel level, std::string component, std::string code,
       std::string message,
       std::vector<std::pair<std::string, std::string>> fields = {});
+  static void event(
+      std::string level, std::string component, std::string code,
+      std::string message,
+      std::vector<std::pair<std::string, std::string>> fields = {});
   static void flush();
   static void shutdown();
 };

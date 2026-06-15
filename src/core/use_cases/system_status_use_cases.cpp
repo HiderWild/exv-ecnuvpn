@@ -1,7 +1,8 @@
 #include "core/use_cases/system_status_use_cases.hpp"
 
 #include "core/config/config_platform_view.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/backend_resolver.hpp"
 #include "platform/common/driver_status.hpp"
 #include "platform/common/runtime_paths.hpp"
@@ -18,7 +19,7 @@ SystemStatusUseCases::SystemStatusUseCases()
 
 SystemStatusUseCases::SystemStatusUseCases(std::string config_dir)
     : manager_(std::move(config_dir)) {
-  ecnuvpn::logger::init();
+  ecnuvpn::platform::logging::configure_default_logging(false);
 }
 
 UseCaseResult SystemStatusUseCases::service_status() {

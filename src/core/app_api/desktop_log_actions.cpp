@@ -3,7 +3,8 @@
 #include "core/app_api/desktop_json.hpp"
 #include "core/app_api/desktop_runtime_context.hpp"
 #include "core/rpc/desktop_rpc_adapter.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/file_system.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "runtime/runtime_context.hpp"
@@ -18,7 +19,7 @@ namespace {
 
 nlohmann::json logs_json(const nlohmann::json &payload) {
   platform::ensure_dir(platform::get_config_dir());
-  logger::init();
+  ecnuvpn::platform::logging::configure_default_logging(false);
 
   const std::string log_path = runtime::paths().log_path;
   int max_lines = payload.value("lines", 100);

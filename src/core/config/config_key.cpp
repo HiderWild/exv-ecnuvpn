@@ -1,6 +1,7 @@
 #include "core/config/config.hpp"
 #include "core/crypto/crypto.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "cli/console.hpp"
 
 #include <iostream>
@@ -42,7 +43,7 @@ std::string get_plaintext_password(const Config &cfg) {
   if (ks != "valid") {
     cli::print_warning("Encryption key is " + ks +
                          ". Cannot decrypt stored password.");
-    logger::error("Cannot decrypt password: key status is " + ks);
+    exv::observability::LogFacade::error("Cannot decrypt password: key status is " + ks);
     return "";
   }
 
@@ -51,7 +52,7 @@ std::string get_plaintext_password(const Config &cfg) {
     cli::print_warning("Failed to decrypt stored password.");
     cli::print_info(
         "The encryption key may have changed. Run 'exv config key reset' then re-set password.");
-    logger::error("Password decryption returned empty");
+    exv::observability::LogFacade::error("Password decryption returned empty");
   }
   return plaintext;
 }

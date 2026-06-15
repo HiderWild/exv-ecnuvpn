@@ -5,7 +5,8 @@
 #include "platform/common/runtime_paths.hpp"
 #include "core/config/config_api.hpp"
 #include "core/crypto/crypto.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -159,7 +160,7 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
         return "Failed to write config file. Check disk permissions for " +
                platform::get_config_path();
     }
-    logger::info("Config key set via config_api: " + key);
+    exv::observability::LogFacade::info("Config key set via config_api: " + key);
     return "";
 }
 
@@ -174,7 +175,7 @@ std::string config_clear_password_and_key(config::ConfigManager& mgr) {
     if (!crypto::delete_key_file()) {
         return "Failed to delete encryption key file: " + crypto::key_path();
     }
-    logger::info("Stored password and encryption key cleared via config_api");
+    exv::observability::LogFacade::info("Stored password and encryption key cleared via config_api");
     return "";
 }
 
@@ -211,14 +212,14 @@ std::string config_set_password(config::ConfigManager& mgr,
         return "Failed to write config file. Check disk permissions for " +
                platform::get_config_path();
     }
-    logger::info("Password updated via config_api (encrypted)");
+    exv::observability::LogFacade::info("Password updated via config_api (encrypted)");
     return "";
 }
 
 void config_reset(config::ConfigManager& mgr) {
     Config cfg;
     mgr.save(cfg);
-    logger::info("Config reset to defaults via config_api");
+    exv::observability::LogFacade::info("Config reset to defaults via config_api");
 }
 
 // ── Config import ─────────────────────────────────────────────────
@@ -264,7 +265,7 @@ std::string config_import(config::ConfigManager& mgr, const std::string& json_st
     }
 
     mgr.save(cfg);
-    logger::info("Config imported via config_api");
+    exv::observability::LogFacade::info("Config imported via config_api");
     return "";
 }
 
@@ -285,7 +286,7 @@ std::string route_add(config::ConfigManager& mgr, const std::string& cidr) {
         return "Failed to write config file. Check disk permissions for " +
                platform::get_config_path();
     }
-    logger::info("Route added via config_api: " + cidr);
+    exv::observability::LogFacade::info("Route added via config_api: " + cidr);
     return "";
 }
 
@@ -301,7 +302,7 @@ std::string route_remove(config::ConfigManager& mgr, const std::string& cidr) {
         return "Failed to write config file. Check disk permissions for " +
                platform::get_config_path();
     }
-    logger::info("Route removed via config_api: " + cidr);
+    exv::observability::LogFacade::info("Route removed via config_api: " + cidr);
     return "";
 }
 
@@ -309,7 +310,7 @@ void route_reset_defaults(config::ConfigManager& mgr) {
     Config cfg = mgr.load();
     cfg.routes = Config{}.routes;
     mgr.save(cfg);
-    logger::info("Routes reset to defaults via config_api");
+    exv::observability::LogFacade::info("Routes reset to defaults via config_api");
 }
 
 // ── Key management ────────────────────────────────────────────────
@@ -321,7 +322,7 @@ std::string key_status() {
 void key_reset_noninteractive() {
     std::string new_key = crypto::generate_key();
     if (!crypto::save_key(new_key)) {
-        logger::error("key_reset_noninteractive: failed to save new key");
+        exv::observability::LogFacade::error("key_reset_noninteractive: failed to save new key");
         return;
     }
 
@@ -337,7 +338,7 @@ void key_reset_noninteractive() {
         }
     }
 
-    logger::info("Encryption key reset via config_api (non-interactive)");
+    exv::observability::LogFacade::info("Encryption key reset via config_api (non-interactive)");
 }
 
 } // namespace config_api

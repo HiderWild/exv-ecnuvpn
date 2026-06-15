@@ -1,5 +1,6 @@
 #include "timing.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 
 namespace exv::core {
 
@@ -50,7 +51,7 @@ void StageTimer::reset() {
 
 ConnectStageTimer::ConnectStageTimer(std::string scope)
     : scope_(std::move(scope)), started_(Clock::now()), last_(started_) {
-    ecnuvpn::logger::info("[connect-timing] scope=" + scope_ +
+    exv::observability::LogFacade::info("[connect-timing] scope=" + scope_ +
                           " stage=begin delta_ms=0 total_ms=0");
 }
 
@@ -67,7 +68,7 @@ void ConnectStageTimer::mark(const std::string& stage,
                           " total_ms=" + std::to_string(total_ms);
     if (!detail.empty())
         message += " " + detail;
-    ecnuvpn::logger::info(message);
+    exv::observability::LogFacade::info(message);
 }
 
 void ConnectStageTimer::finish(bool ok, const std::string& detail) {

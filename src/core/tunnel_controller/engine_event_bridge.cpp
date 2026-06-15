@@ -1,5 +1,6 @@
 #include "core/tunnel_controller/engine_event_bridge.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 
 #include <utility>
 #include <vector>
@@ -51,7 +52,7 @@ void log_engine_event(const ecnuvpn::vpn_engine::VpnEngineEvent& event) {
         fields.emplace_back(field.first, field.second);
     }
 
-    ecnuvpn::logger::event(log_level_for_event(event), "engine", event.type,
+    exv::observability::LogFacade::event(log_level_for_event(event), "engine", event.type,
                            event.message.empty() ? event.type : event.message,
                            fields);
 }

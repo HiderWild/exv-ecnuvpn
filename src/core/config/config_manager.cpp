@@ -4,7 +4,8 @@
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/path_utils.hpp"
 #include "core/config/config_manager.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -32,7 +33,7 @@ Config ConfigManager::load() {
         auto j = nlohmann::json::parse(content);
         config_ = j.get<Config>();
     } catch (const std::exception& e) {
-        logger::error("ConfigManager::load parse error: " +
+        exv::observability::LogFacade::error("ConfigManager::load parse error: " +
                       std::string(e.what()));
         config_ = Config{};
     }
@@ -53,7 +54,7 @@ bool ConfigManager::save(const Config& cfg) {
     try {
         nlohmann::json j = cfg;
         if (!platform::write_file(tmp_path, j.dump(4))) {
-            logger::error("ConfigManager::save: failed to write temp file: " +
+            exv::observability::LogFacade::error("ConfigManager::save: failed to write temp file: " +
                           tmp_path);
             return false;
         }
@@ -67,7 +68,7 @@ bool ConfigManager::save(const Config& cfg) {
                           fs::copy_options::overwrite_existing, ec);
             fs::remove(fs::u8path(tmp_path), ec);
             if (ec) {
-                logger::error("ConfigManager::save: rename/copy failed: " +
+                exv::observability::LogFacade::error("ConfigManager::save: rename/copy failed: " +
                               ec.message());
                 fs::remove(fs::u8path(tmp_path), ec);
                 return false;
@@ -75,10 +76,10 @@ bool ConfigManager::save(const Config& cfg) {
         }
 
         config_ = cfg;
-        logger::info("Config saved: " + final_path);
+        exv::observability::LogFacade::info("Config saved: " + final_path);
         return true;
     } catch (const std::exception& e) {
-        logger::error("ConfigManager::save error: " +
+        exv::observability::LogFacade::error("ConfigManager::save error: " +
                       std::string(e.what()));
         fs::remove(fs::u8path(tmp_path), ec);
         return false;

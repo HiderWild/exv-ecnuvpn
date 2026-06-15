@@ -5,7 +5,8 @@
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "core/crypto/crypto.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/crypto_backend.hpp"
 #include "cli/console.hpp"
 
@@ -108,7 +109,7 @@ std::string key_path() { return platform::get_config_dir() + "/.key"; }
 std::string generate_key() {
   uint8_t raw[32];
   if (!platform::fill_random_bytes(raw, sizeof(raw))) {
-    logger::error("generate_key: random source failure");
+    exv::observability::LogFacade::error("generate_key: random source failure");
     return "";
   }
   return bytes_to_hex(raw, sizeof(raw));
@@ -145,7 +146,7 @@ std::string init_key_if_needed() {
   if (!validate_key(key)) {
     key = generate_key();
     save_key(key);
-    logger::info("Generated new encryption key: " + key_path());
+    exv::observability::LogFacade::info("Generated new encryption key: " + key_path());
   }
   return key;
 }
@@ -155,10 +156,10 @@ bool delete_key_file() {
   if (!platform::file_exists(path))
     return true;
   if (std::remove(path.c_str()) == 0) {
-    logger::info("Deleted encryption key: " + path);
+    exv::observability::LogFacade::info("Deleted encryption key: " + path);
     return true;
   }
-  logger::error("Failed to delete encryption key: " + path);
+  exv::observability::LogFacade::error("Failed to delete encryption key: " + path);
   return false;
 }
 
@@ -189,7 +190,7 @@ bool reset_key() {
   std::string new_key = generate_key();
   if (!save_key(new_key)) {
     cli::print_error("Failed to save new key to: " + key_path());
-    logger::error("Key reset: failed to save new key");
+    exv::observability::LogFacade::error("Key reset: failed to save new key");
     return false;
   }
 
@@ -206,7 +207,7 @@ bool reset_key() {
 
   cli::print_success("Key reset successfully. Password cleared.");
   cli::print_info("Set a new password with: exv config set password");
-  logger::info("Encryption key reset performed");
+  exv::observability::LogFacade::info("Encryption key reset performed");
   return true;
 }
 
@@ -221,7 +222,7 @@ std::string encrypt(const std::string &plaintext, const std::string &hex_key) {
   constexpr size_t IV_LEN = 16;
   uint8_t iv[IV_LEN];
   if (!platform::fill_random_bytes(iv, sizeof(iv))) {
-    logger::error("AES encrypt: failed to gather random IV");
+    exv::observability::LogFacade::error("AES encrypt: failed to gather random IV");
     return "";
   }
 
@@ -251,7 +252,7 @@ std::string decrypt(const std::string &ciphertext_b64,
   constexpr size_t IV_LEN = 16;
   auto combined = base64_decode(ciphertext_b64);
   if (combined.size() <= IV_LEN) {
-    logger::error("AES decrypt: ciphertext too short");
+    exv::observability::LogFacade::error("AES decrypt: ciphertext too short");
     return "";
   }
 

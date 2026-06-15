@@ -1,5 +1,6 @@
 #include "core/config/config.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "cli/console.hpp"
 
 #include <algorithm>
@@ -19,7 +20,7 @@ bool add_route(Config &cfg, const std::string &route) {
   cfg.routes.push_back(route);
   save(cfg);
   cli::print_success("Route added: " + route);
-  logger::info("Route added: " + route);
+  exv::observability::LogFacade::info("Route added: " + route);
   return true;
 }
 
@@ -32,7 +33,7 @@ bool remove_route(Config &cfg, const std::string &route) {
   cfg.routes.erase(it);
   save(cfg);
   cli::print_success("Route removed: " + route);
-  logger::info("Route removed: " + route);
+  exv::observability::LogFacade::info("Route removed: " + route);
   return true;
 }
 

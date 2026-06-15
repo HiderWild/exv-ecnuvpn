@@ -5,7 +5,8 @@
 #include "platform/common/runtime_paths.hpp"
 #include "core/config/config.hpp"
 #include "core/crypto/crypto.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "core/vpn/openconnect_tunnel_script.hpp"
 #include "cli/console.hpp"
 
@@ -40,7 +41,7 @@ Config load() {
     return j.get<Config>();
   } catch (const std::exception &e) {
     cli::print_warning("Failed to parse config.json, using defaults.");
-    logger::error("Config parse error: " + std::string(e.what()));
+    exv::observability::LogFacade::error("Config parse error: " + std::string(e.what()));
     Config cfg;
     save(cfg);
     return cfg;
@@ -55,12 +56,12 @@ bool save(const Config &cfg) {
     nlohmann::json j = cfg;
     std::string content = j.dump(2);
     if (!platform::write_file(path, content)) {
-      logger::error("Failed to write config to: " + path);
+      exv::observability::LogFacade::error("Failed to write config to: " + path);
       return false;
     }
     return true;
   } catch (const std::exception &e) {
-    logger::error("Config save error: " + std::string(e.what()));
+    exv::observability::LogFacade::error("Config save error: " + std::string(e.what()));
     return false;
   }
 }
@@ -132,11 +133,11 @@ Config import_from(const std::string &path) {
 
     save(cfg);
     cli::print_success("Config imported from: " + path);
-    logger::info("Config imported from: " + path);
+    exv::observability::LogFacade::info("Config imported from: " + path);
     return cfg;
   } catch (const std::exception &e) {
     cli::print_error("Failed to import: " + std::string(e.what()));
-    logger::error("Config import error: " + std::string(e.what()));
+    exv::observability::LogFacade::error("Config import error: " + std::string(e.what()));
     return load();
   }
 }
@@ -149,7 +150,7 @@ Config reset() {
   tunnel::write_script(cfg);
   cli::print_success("Config reset to defaults. Key file preserved.");
   cli::print_info("Run 'exv config set password' to set a new password.");
-  logger::info("Config reset to defaults");
+  exv::observability::LogFacade::info("Config reset to defaults");
   return cfg;
 }
 

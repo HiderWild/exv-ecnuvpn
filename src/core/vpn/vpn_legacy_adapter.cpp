@@ -1,6 +1,7 @@
 #include "core/vpn/vpn_legacy_adapter.hpp"
 #include "core/vpn/vpn.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 
 namespace ecnuvpn {
 namespace vpn {

@@ -19,7 +19,9 @@
 #include "core/tunnel_controller/reconnect_policy.hpp"
 #include "vpn_engine/native_engine.hpp"
 #include "vpn_engine/protocol/session.hpp"
-#include "common/diagnostics/log_event_bus.hpp"
+#include "observability/log_facade.hpp"
+#include "observability/log_sink.hpp"
+#include "observability/log_service.hpp"
 #include "support/fake_helper.hpp"
 #include "support/fake_platform_network_ops.hpp"
 #include "support/fake_core_ui_client.hpp"
@@ -30,6 +32,7 @@
 #include <vector>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <chrono>
 #include <cassert>
 #include <atomic>
@@ -42,6 +45,31 @@ bool expect(bool condition, const char* message) {
     if (condition) return true;
     std::cerr << "EXPECT FAILED: " << message << std::endl;
     return false;
+}
+
+class CapturingLogSink final : public exv::observability::LogSink {
+public:
+    void write(const exv::observability::LogEvent& event) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        logs_.push_back(event);
+    }
+
+    std::vector<exv::observability::LogEvent> logs() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return logs_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<exv::observability::LogEvent> logs_;
+};
+
+std::shared_ptr<CapturingLogSink> install_capturing_log_sink() {
+    auto sink = std::make_shared<CapturingLogSink>();
+    auto service = std::make_shared<exv::observability::LogService>();
+    service->add_sink(sink);
+    exv::observability::LogFacade::configure(service);
+    return sink;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +131,7 @@ bool phases_in_order(const std::vector<exv::core::TunnelStatusSnapshot>& snapsho
 }
 
 // Check whether a captured structured log has the expected component/code.
-bool has_log_event(const std::vector<ecnuvpn::TypedLogEvent>& logs,
+bool has_log_event(const std::vector<exv::observability::LogEvent>& logs,
                    const std::string& component,
                    const std::string& code) {
     for (const auto& event : logs) {
@@ -113,7 +141,7 @@ bool has_log_event(const std::vector<ecnuvpn::TypedLogEvent>& logs,
 }
 
 // Check whether any captured structured log contains sensitive text.
-bool logs_contain_text(const std::vector<ecnuvpn::TypedLogEvent>& logs,
+bool logs_contain_text(const std::vector<exv::observability::LogEvent>& logs,
                        const std::string& needle) {
     for (const auto& event : logs) {
         if (event.message.find(needle) != std::string::npos) return true;
@@ -1023,13 +1051,13 @@ bool test_connect_milestone_logs() {
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::core::TunnelController ctrl(helper, net_ops);
 
-    std::vector<ecnuvpn::TypedLogEvent> logs;
-    auto subscription = ecnuvpn::LogEventBus::instance().subscribe(
-        [&](const ecnuvpn::TypedLogEvent& event) { logs.push_back(event); });
+    auto log_sink = install_capturing_log_sink();
 
     ctrl.connect(make_intent(true, true, "test-profile"));
 
-    ecnuvpn::LogEventBus::instance().unsubscribe(subscription);
+    exv::observability::LogFacade::flush();
+    auto logs = log_sink->logs();
+    exv::observability::LogFacade::shutdown();
 
     bool ok = true;
     ok = expect(has_log_event(logs, "tunnel", "connect.start"),
@@ -1060,13 +1088,13 @@ bool test_native_runner_failure_log() {
     cfg.username.clear();
     ctrl.set_vpn_config(cfg, "super-secret-password");
 
-    std::vector<ecnuvpn::TypedLogEvent> logs;
-    auto subscription = ecnuvpn::LogEventBus::instance().subscribe(
-        [&](const ecnuvpn::TypedLogEvent& event) { logs.push_back(event); });
+    auto log_sink = install_capturing_log_sink();
 
     ctrl.connect(make_intent(true, true, "native-failure-profile"));
 
-    ecnuvpn::LogEventBus::instance().unsubscribe(subscription);
+    exv::observability::LogFacade::flush();
+    auto logs = log_sink->logs();
+    exv::observability::LogFacade::shutdown();
 
     bool ok = true;
     ok = expect(ctrl.phase() == exv::core::TunnelPhase::Failed,

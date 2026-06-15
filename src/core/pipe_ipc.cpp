@@ -1,5 +1,6 @@
 #include "core/pipe_ipc.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "runtime/runtime_context.hpp"
 
 #ifdef _WIN32

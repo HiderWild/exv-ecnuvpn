@@ -1,6 +1,7 @@
 #include "core/config/config.hpp"
 #include "core/crypto/crypto.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "cli/console.hpp"
 
 #include <iomanip>

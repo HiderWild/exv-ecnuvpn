@@ -3,7 +3,8 @@
 #include "core/config/config.hpp"
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "helper/helper.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "common/diagnostics/log_renderer.hpp"
 #include "runtime/runtime_context.hpp"
 #include "cli/console.hpp"
@@ -17,39 +18,39 @@ int start(const Config &cfg, int retry_limit) {
   // Enable log rendering for CLI mode - subscribes to LogEventBus
   ecnuvpn::LogRenderer log_renderer;
 
-  logger::info("VPN CLI: Connection starting - server=" + cfg.server +
+  exv::observability::LogFacade::info("VPN CLI: Connection starting - server=" + cfg.server +
                " username=" + cfg.username + " engine=" + cfg.vpn_engine);
 
   cli::print_header("EXV Starting");
 
   if (cfg.vpn_engine == "native") {
-    logger::info("VPN CLI: Validating native engine configuration");
+    exv::observability::LogFacade::info("VPN CLI: Validating native engine configuration");
     auto validation = exv::core::validate_native_app_config(cfg);
     if (!validation.ok) {
       cli::print_error(validation.message);
-      logger::error("VPN CLI: Native engine validation failed - code=" +
+      exv::observability::LogFacade::error("VPN CLI: Native engine validation failed - code=" +
                     validation.code + " message=" + validation.message);
       return 1;
     }
-    logger::info("VPN CLI: Native engine configuration validated successfully");
+    exv::observability::LogFacade::info("VPN CLI: Native engine configuration validated successfully");
   }
 
   nlohmann::json payload;
   payload["password"] = config::get_plaintext_password(cfg);
   payload["retry_limit"] = retry_limit;
 
-  logger::info("VPN CLI: Calling app_api::handle_action(vpn.connect)");
+  exv::observability::LogFacade::info("VPN CLI: Calling app_api::handle_action(vpn.connect)");
   nlohmann::json result = app_api::handle_action("vpn.connect", payload);
 
   if (result.is_object() && result.value("ok", true) == false) {
     std::string msg = result.value("error", std::string("Connection failed"));
     std::string code = result.value("code", std::string());
     cli::print_error(msg);
-    logger::error("VPN CLI: Connection failed - code=" + code + " error=" + msg);
+    exv::observability::LogFacade::error("VPN CLI: Connection failed - code=" + code + " error=" + msg);
     return 1;
   }
 
-  logger::info("VPN CLI: Connection initiated successfully");
+  exv::observability::LogFacade::info("VPN CLI: Connection initiated successfully");
   cli::print_success("VPN connection initiated");
   return 0;
 }

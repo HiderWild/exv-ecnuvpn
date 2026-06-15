@@ -1,7 +1,8 @@
 #include "core/use_cases/config_use_cases.hpp"
 
 #include "core/config/config_api.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/file_system.hpp"
 #include "platform/common/runtime_paths.hpp"
 
@@ -106,7 +107,7 @@ ConfigUseCases::ConfigUseCases()
 
 ConfigUseCases::ConfigUseCases(std::string config_dir)
     : manager_(std::move(config_dir)) {
-  ecnuvpn::logger::init();
+  ecnuvpn::platform::logging::configure_default_logging(false);
 }
 
 Config ConfigUseCases::load_config() { return manager_.load(); }

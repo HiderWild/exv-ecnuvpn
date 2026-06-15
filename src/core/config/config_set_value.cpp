@@ -1,7 +1,8 @@
 #include "utils/strings.hpp"
 #include "core/config/config.hpp"
 #include "core/crypto/crypto.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "cli/console.hpp"
 
 #include <iostream>
@@ -72,7 +73,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     }
     if (save(cfg)) {
       cli::print_success("Password set and encrypted.");
-      logger::info("Password updated (encrypted)");
+      exv::observability::LogFacade::info("Password updated (encrypted)");
       return true;
     }
     return false;

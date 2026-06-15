@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string_view>
+
 namespace exv::observability {
 
 enum class LogLevel {
@@ -32,6 +34,26 @@ constexpr const char *to_string(LogLevel level) noexcept {
     return "FATAL";
   }
   return "INFO";
+}
+
+constexpr LogLevel log_level_from_string(std::string_view level) noexcept {
+  if (level == "TRACE" || level == "trace") {
+    return LogLevel::Trace;
+  }
+  if (level == "DEBUG" || level == "debug") {
+    return LogLevel::Debug;
+  }
+  if (level == "WARN" || level == "warn" || level == "WARNING" ||
+      level == "warning") {
+    return LogLevel::Warn;
+  }
+  if (level == "ERROR" || level == "error") {
+    return LogLevel::Error;
+  }
+  if (level == "FATAL" || level == "fatal") {
+    return LogLevel::Fatal;
+  }
+  return LogLevel::Info;
 }
 
 } // namespace exv::observability
