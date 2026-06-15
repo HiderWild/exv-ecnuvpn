@@ -60,9 +60,12 @@ int main() {
   const auto root = std::filesystem::path(ECNUVPN_SOURCE_DIR);
   const auto app_api_cpp =
       root / "src" / "core" / "app_api" / "app_api.cpp";
+  const auto desktop_action_registry_cpp =
+      root / "src" / "core" / "app_api" / "desktop_action_registry.cpp";
   bool ok = true;
 
   ok &= expect_exists(app_api_cpp);
+  ok &= expect_exists(desktop_action_registry_cpp);
   ok &= expect_exists(root / "src" / "core" / "rpc" /
                       "app_rpc_dispatcher.cpp");
   ok &= expect_exists(root / "src" / "core" / "config" /
@@ -92,6 +95,18 @@ int main() {
                       "desktop_system_actions.hpp");
   ok &= expect_exists(root / "src" / "core" / "app_api" /
                       "desktop_system_actions.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_route_actions.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_route_actions.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_config_actions.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_config_actions.cpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_vpn_actions.hpp");
+  ok &= expect_exists(root / "src" / "core" / "app_api" /
+                      "desktop_vpn_actions.cpp");
 
   if (std::filesystem::exists(app_api_cpp)) {
     const std::string app_api = read_file(app_api_cpp);
@@ -103,6 +118,21 @@ int main() {
                      std::string::npos,
                  "src/core/app_api/app_api.cpp must not register desktop "
                  "legacy handlers directly");
+  }
+
+  if (std::filesystem::exists(desktop_action_registry_cpp)) {
+    const std::string desktop_action_registry =
+        read_file(desktop_action_registry_cpp);
+    ok &= expect(count_lines(desktop_action_registry) <= 80,
+                 "src/core/app_api/desktop_action_registry.cpp must stay "
+                 "under 80 lines");
+    ok &= expect(desktop_action_registry.find("register_legacy_handler(") ==
+                     std::string::npos,
+                 "desktop action registry must delegate registration to "
+                 "action group files");
+    ok &= expect(desktop_action_registry.find("preflight_connect(") ==
+                     std::string::npos,
+                 "desktop action registry must not own VPN behavior");
   }
 
   if (!ok) {

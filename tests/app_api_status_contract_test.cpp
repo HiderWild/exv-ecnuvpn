@@ -95,7 +95,8 @@ std::string app_api_source_text() {
   const auto app_api_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" /
                            "core" / "app_api";
   const char *files[] = {"app_api.cpp", "desktop_action_registry.cpp",
-                         "desktop_tunnel_host.cpp"};
+                         "desktop_tunnel_host.cpp",
+                         "desktop_vpn_actions.cpp"};
   std::string source;
   for (const char *file : files) {
     source += "\n// ---- ";
@@ -356,8 +357,8 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
   return false;
 #else
   const std::string source = app_api_source_text();
-  const auto connect_handler = source.find("adapter.register_legacy_handler(\"vpn.connect\"");
-  const auto disconnect_handler = source.find("adapter.register_legacy_handler(\"vpn.disconnect\"",
+  const auto connect_handler = source.find("\"vpn.connect\"");
+  const auto disconnect_handler = source.find("\"vpn.disconnect\"",
                                                connect_handler);
   const auto connect_source =
       connect_handler == std::string::npos
