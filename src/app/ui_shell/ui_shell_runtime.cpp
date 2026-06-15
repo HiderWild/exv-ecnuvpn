@@ -22,6 +22,20 @@ private:
   UiWindow &window_;
 };
 
+class CoreEventHandlerGuard {
+public:
+  explicit CoreEventHandlerGuard(CoreRpcClient &client) : client_(client) {}
+  ~CoreEventHandlerGuard() {
+    client_.set_event_handler({});
+  }
+
+  CoreEventHandlerGuard(const CoreEventHandlerGuard &) = delete;
+  CoreEventHandlerGuard &operator=(const CoreEventHandlerGuard &) = delete;
+
+private:
+  CoreRpcClient &client_;
+};
+
 int request_id_from_message(const std::string &message_json) {
   try {
     const auto parsed = nlohmann::json::parse(message_json);
@@ -43,11 +57,25 @@ std::string callback_error_response(const std::string &message_json,
   return out.dump();
 }
 
+std::string renderer_event_envelope(const CoreRpcEvent &event) {
+  nlohmann::ordered_json out;
+  out["type"] = event.event;
+  out["data"] = event.data_json.empty()
+                    ? nlohmann::json::object()
+                    : nlohmann::json::parse(event.data_json);
+  return out.dump();
+}
+
 } // namespace
 
 int run_ui_shell_window(UiWindow &window,
                         const UiWindowConfig &config,
                         CoreRpcClient &client) {
+  client.set_event_handler([&window](const CoreRpcEvent &event) {
+    window.emit_event(renderer_event_envelope(event));
+  });
+  CoreEventHandlerGuard event_guard(client);
+
   window.set_message_handler([&client](const std::string &message_json) {
     try {
       return handle_host_request(message_json, [&client](const CoreRpcRequest &request) {

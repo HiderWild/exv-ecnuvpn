@@ -10,7 +10,12 @@ namespace {
 
 class FakeTransport final : public ecnuvpn::ui_shell::CoreRpcTransport {
 public:
-  explicit FakeTransport(std::string response) : response_(std::move(response)) {}
+  explicit FakeTransport(std::string response) {
+    responses_.push_back(std::move(response));
+  }
+
+  explicit FakeTransport(std::vector<std::string> responses)
+      : responses_(std::move(responses)) {}
 
   bool write_line(const std::string &line) override {
     writes.push_back(line);
@@ -18,10 +23,10 @@ public:
   }
 
   bool read_line(std::string &line) override {
-    if (!read_ok) {
+    if (!read_ok || next_response_ >= responses_.size()) {
       return false;
     }
-    line = response_;
+    line = responses_[next_response_++];
     return true;
   }
 
@@ -30,7 +35,8 @@ public:
   std::vector<std::string> writes;
 
 private:
-  std::string response_;
+  std::vector<std::string> responses_;
+  std::vector<std::string>::size_type next_response_ = 0;
 };
 
 bool expect(bool condition, const char *message) {
@@ -173,6 +179,33 @@ int main() {
                    serialize_desktop_rpc_request(desktop_request),
                "default CoreRpcClient constructor should use desktop envelope") &&
         ok_all;
+  }
+
+  FakeTransport event_then_response_transport(
+      std::vector<std::string>{R"({"event":"log","data":{"line":"connected"}})",
+                               R"({"id":7,"ok":true,"data":{"phase":"idle"}})"});
+  CoreRpcClient event_client(event_then_response_transport);
+  std::vector<CoreRpcEvent> observed_events;
+  event_client.set_event_handler([&](const CoreRpcEvent &core_event) {
+    observed_events.push_back(core_event);
+  });
+  CoreRpcResponse event_response = event_client.invoke(desktop_request);
+  ok_all = expect(event_response.ok,
+                  "client should keep reading after event until response") &&
+           ok_all;
+  ok_all = expect(event_response.data_json == R"({"phase":"idle"})",
+                  "client should return response after event") &&
+           ok_all;
+  ok_all = expect(observed_events.size() == 1,
+                  "client should dispatch one core event") &&
+           ok_all;
+  if (observed_events.size() == 1) {
+    ok_all = expect(observed_events[0].event == "log",
+                    "client should preserve core event type") &&
+             ok_all;
+    ok_all = expect(observed_events[0].data_json == R"({"line":"connected"})",
+                    "client should preserve core event data") &&
+             ok_all;
   }
 
   FakeTransport empty_payload_transport(

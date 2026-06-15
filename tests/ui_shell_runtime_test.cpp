@@ -13,7 +13,12 @@ namespace {
 
 class FakeTransport final : public ecnuvpn::ui_shell::CoreRpcTransport {
 public:
-  explicit FakeTransport(std::string response) : response_(std::move(response)) {}
+  explicit FakeTransport(std::string response) {
+    responses_.push_back(std::move(response));
+  }
+
+  explicit FakeTransport(std::vector<std::string> responses)
+      : responses_(std::move(responses)) {}
 
   bool write_line(const std::string &line) override {
     writes.push_back(line);
@@ -21,14 +26,18 @@ public:
   }
 
   bool read_line(std::string &line) override {
-    line = response_;
+    if (next_response_ >= responses_.size()) {
+      return false;
+    }
+    line = responses_[next_response_++];
     return true;
   }
 
   std::vector<std::string> writes;
 
 private:
-  std::string response_;
+  std::vector<std::string> responses_;
+  std::vector<std::string>::size_type next_response_ = 0;
 };
 
 class FakeWindow final : public ecnuvpn::ui_shell::UiWindow {
@@ -124,6 +133,26 @@ int main() {
     ok = expect(transport.writes[0] ==
                     R"({"id":11,"action":"config.getAuth","payload":{"profile":"default"}})",
                 "runtime should preserve desktop RPC envelope") &&
+         ok;
+  }
+
+  FakeTransport event_transport(
+      std::vector<std::string>{R"({"event":"log","data":{"line":"connected"}})",
+                               R"({"id":11,"ok":true,"data":{"username":"alice"}})"});
+  CoreRpcClient event_client(event_transport);
+  FakeWindow event_window;
+  const int event_exit_code =
+      run_ui_shell_window(event_window, config, event_client);
+  ok = expect(event_exit_code == 12,
+              "runtime should preserve exit code when forwarding events") &&
+       ok;
+  ok = expect(event_window.emitted_events.size() == 1,
+              "runtime should emit one renderer event") &&
+       ok;
+  if (event_window.emitted_events.size() == 1) {
+    ok = expect(event_window.emitted_events[0] ==
+                    R"({"type":"log","data":{"line":"connected"}})",
+                "runtime should map core event to renderer envelope") &&
          ok;
   }
 

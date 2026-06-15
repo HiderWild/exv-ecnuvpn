@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 
 namespace ecnuvpn::ui_shell {
@@ -24,6 +25,8 @@ struct CoreRpcEvent {
   std::string data_json;
 };
 
+using CoreRpcEventHandler = std::function<void(const CoreRpcEvent &)>;
+
 class CoreRpcTransport {
 public:
   virtual ~CoreRpcTransport() = default;
@@ -45,10 +48,12 @@ public:
       CoreRpcWireMode wire_mode = CoreRpcWireMode::Desktop);
 
   CoreRpcResponse invoke(const CoreRpcRequest &request);
+  void set_event_handler(CoreRpcEventHandler handler);
 
 private:
   CoreRpcTransport &transport_;
   CoreRpcWireMode wire_mode_ = CoreRpcWireMode::Desktop;
+  CoreRpcEventHandler event_handler_;
 };
 
 std::string serialize_core_rpc_request(const CoreRpcRequest &request);
