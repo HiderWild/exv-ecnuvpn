@@ -5,7 +5,7 @@
 #include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_service_manager.hpp"
 
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "cli/console.hpp"
 
@@ -60,14 +60,14 @@ int install_helper_service(const std::string &executable_path,
   cli::print_info("Opening Service Control Manager...");
   SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
   if (!hSCM) {
-    logger::error("Cannot open Service Control Manager");
+    exv::observability::LogFacade::error("Cannot open Service Control Manager");
     return 1;
   }
 
   std::string exec_path = executable_path.empty() ? platform::get_executable_path()
                                                   : executable_path;
   if (exec_path.empty()) {
-    logger::error("Failed to resolve the exv executable path.");
+    exv::observability::LogFacade::error("Failed to resolve the exv executable path.");
     CloseServiceHandle(hSCM);
     return 1;
   }
@@ -102,7 +102,7 @@ int install_helper_service(const std::string &executable_path,
                               SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS |
                                   SERVICE_START | SERVICE_STOP);
       if (!hService) {
-        logger::error("OpenService failed: " +
+        exv::observability::LogFacade::error("OpenService failed: " +
                       std::to_string(GetLastError()));
         CloseServiceHandle(hSCM);
         return 1;
@@ -112,7 +112,7 @@ int install_helper_service(const std::string &executable_path,
                                 SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
                                 binary_path.c_str(), NULL, NULL, NULL, NULL,
                                 NULL, NULL)) {
-        logger::error("ChangeServiceConfig failed: " +
+        exv::observability::LogFacade::error("ChangeServiceConfig failed: " +
                       std::to_string(GetLastError()));
         CloseServiceHandle(hService);
         CloseServiceHandle(hSCM);
@@ -134,7 +134,7 @@ int install_helper_service(const std::string &executable_path,
         }
       }
     } else {
-      logger::error("CreateService failed: " + std::to_string(err));
+      exv::observability::LogFacade::error("CreateService failed: " + std::to_string(err));
       CloseServiceHandle(hSCM);
       return 1;
     }
@@ -144,7 +144,7 @@ int install_helper_service(const std::string &executable_path,
   if (!StartService(hService, 0, NULL)) {
     DWORD err = GetLastError();
     if (err != ERROR_SERVICE_ALREADY_RUNNING) {
-      logger::error("StartService failed: " + std::to_string(err));
+      exv::observability::LogFacade::error("StartService failed: " + std::to_string(err));
       CloseServiceHandle(hService);
       CloseServiceHandle(hSCM);
       return 1;
@@ -203,7 +203,7 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   if (!DeleteService(hService)) {
     DWORD err = GetLastError();
     if (err != ERROR_SERVICE_MARKED_FOR_DELETE) {
-      logger::error("DeleteService failed: " + std::to_string(err));
+      exv::observability::LogFacade::error("DeleteService failed: " + std::to_string(err));
       CloseServiceHandle(hService);
       CloseServiceHandle(hSCM);
       return 1;
@@ -229,7 +229,7 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   CloseServiceHandle(hSCM);
 
   if (!removed) {
-    logger::error("Helper service is still registered after uninstall.");
+    exv::observability::LogFacade::error("Helper service is still registered after uninstall.");
     return 1;
   }
 

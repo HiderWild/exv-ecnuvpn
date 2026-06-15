@@ -605,12 +605,15 @@ add_executable(backend_resolver_test
     src/platform/common/backend_resolver.cpp
     src/platform/common/oneshot_bootstrap.cpp
     src/platform/common/status_models.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
 )
 
 target_include_directories(backend_resolver_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(backend_resolver_test PRIVATE Threads::Threads)
 
 add_test(NAME backend_resolver_test COMMAND backend_resolver_test)
 

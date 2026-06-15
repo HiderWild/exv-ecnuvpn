@@ -3,7 +3,7 @@
 #include "platform/common/helper_client.hpp"
 #include "platform/common/oneshot_bootstrap.hpp"
 #include "platform/common/service_status.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 namespace ecnuvpn {
 namespace platform {
@@ -41,13 +41,13 @@ nlohmann::json resolve_backend(const BackendResolveOptions &options) {
 
 nlohmann::json resolve_backend(const BackendResolveOptions &options,
                                const BackendResolverDeps &deps) {
-  logger::info("Backend resolver: Starting resolution - preferred_mode=" +
+  exv::observability::LogFacade::info("Backend resolver: Starting resolution - preferred_mode=" +
                options.preferred_mode + " allow_oneshot=" +
                (options.allow_oneshot ? "true" : "false"));
 
   ServiceStatusSnapshot service = deps.current_service_status();
 
-  logger::info("Backend resolver: Service status - installed=" +
+  exv::observability::LogFacade::info("Backend resolver: Service status - installed=" +
                std::string(service.installed ? "true" : "false") +
                " available=" + std::string(service.available ? "true" : "false") +
                " endpoint=" + service.endpoint);
@@ -55,17 +55,17 @@ nlohmann::json resolve_backend(const BackendResolveOptions &options,
   if (options.preferred_mode == "service" ||
       options.preferred_mode == "auto") {
     if (service.available) {
-      logger::info("Backend resolver: Using service backend - endpoint=" + service.endpoint);
+      exv::observability::LogFacade::info("Backend resolver: Using service backend - endpoint=" + service.endpoint);
       return descriptor_from_service(service);
     }
 
     if (options.preferred_mode == "service") {
       if (!service.installed) {
-        logger::warn("Backend resolver: Service not installed");
+        exv::observability::LogFacade::warn("Backend resolver: Service not installed");
         return unavailable(kServiceNotInstalledCode,
                            "Helper service is not installed.", service);
       }
-      logger::warn("Backend resolver: Service installed but not running");
+      exv::observability::LogFacade::warn("Backend resolver: Service installed but not running");
       return unavailable(kServiceInstalledNotRunningCode,
                          "Helper service is installed but not running.",
                          service);
@@ -74,32 +74,32 @@ nlohmann::json resolve_backend(const BackendResolveOptions &options,
 
   if ((options.allow_oneshot || options.preferred_mode == "oneshot") &&
       options.start_oneshot) {
-    logger::info("Backend resolver: Starting oneshot helper - path=" + options.helper_path);
+    exv::observability::LogFacade::info("Backend resolver: Starting oneshot helper - path=" + options.helper_path);
     OneshotBackend backend =
         deps.start_oneshot_helper(OneshotBootstrapRequest{options.helper_path});
     if (backend.ok) {
-      logger::info("Backend resolver: Oneshot helper started - endpoint=" +
+      exv::observability::LogFacade::info("Backend resolver: Oneshot helper started - endpoint=" +
                    backend.endpoint + " pid=" + std::to_string(backend.pid));
     } else {
-      logger::error("Backend resolver: Oneshot helper failed - code=" +
+      exv::observability::LogFacade::error("Backend resolver: Oneshot helper failed - code=" +
                     backend.code + " message=" + backend.message);
     }
     return oneshot_backend_to_json(backend);
   }
 
   if (options.allow_oneshot || options.preferred_mode == "oneshot") {
-    logger::warn("Backend resolver: Oneshot not supported without start_oneshot=true");
+    exv::observability::LogFacade::warn("Backend resolver: Oneshot not supported without start_oneshot=true");
     return unavailable(kOneshotNotSupportedCode,
                        "One-shot helper is available only when explicitly requested.",
                        service);
   }
 
   if (!service.installed) {
-    logger::warn("Backend resolver: No backend available - service not installed");
+    exv::observability::LogFacade::warn("Backend resolver: No backend available - service not installed");
     return unavailable(kServiceNotInstalledCode,
                        "Helper service is not installed.", service);
   }
-  logger::warn("Backend resolver: No backend available - service not running");
+  exv::observability::LogFacade::warn("Backend resolver: No backend available - service not running");
   return unavailable(kServiceInstalledNotRunningCode,
                      "Helper service is installed but not running.", service);
 }

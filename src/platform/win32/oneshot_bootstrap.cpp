@@ -13,7 +13,7 @@
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <chrono>
 #include <random>
@@ -156,8 +156,8 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
                      "\" --owner \"" + backend.owner +
                      "\" --parent-pid " + std::to_string(backend.parent_pid);
 
-  logger::info("Oneshot: Generated endpoint=" + backend.endpoint + " session_id=" + session_id);
-  logger::info("Oneshot: Starting helper - is_admin=" + std::string(platform::check_root() ? "true" : "false"));
+  exv::observability::LogFacade::info("Oneshot: Generated endpoint=" + backend.endpoint + " session_id=" + session_id);
+  exv::observability::LogFacade::info("Oneshot: Starting helper - is_admin=" + std::string(platform::check_root() ? "true" : "false"));
 
   if (platform::check_root()) {
     if (!start_helper_direct(request.helper_path, args, &backend.pid)) {
@@ -196,7 +196,7 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
     return backend;
   }
 
-  logger::info("Oneshot: Helper started successfully - endpoint=" + backend.endpoint + " pid=" + std::to_string(backend.pid));
+  exv::observability::LogFacade::info("Oneshot: Helper started successfully - endpoint=" + backend.endpoint + " pid=" + std::to_string(backend.pid));
   backend.ok = true;
   return backend;
 }

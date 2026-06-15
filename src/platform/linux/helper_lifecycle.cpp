@@ -7,7 +7,7 @@
 #include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -54,7 +54,7 @@ void kill_all_supervisors() {
     try {
       pid_t pid = static_cast<pid_t>(std::stoi(line));
       if (pid > 0 && is_process_alive(pid)) {
-        logger::info("Killing orphaned supervisor: PID " + line);
+        exv::observability::LogFacade::info("Killing orphaned supervisor: PID " + line);
         kill(pid, SIGKILL);
       }
     } catch (...) {

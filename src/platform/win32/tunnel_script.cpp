@@ -6,7 +6,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 #include "vpn_engine/openconnect/openconnect_log.hpp"
 
 #include <chrono>
@@ -27,7 +27,7 @@ namespace {
 class TunnelTiming {
 public:
   TunnelTiming() : started_(Clock::now()), last_(started_) {
-    logger::info("[connect-timing] scope=tunnel.windows stage=begin delta_ms=0 total_ms=0");
+    exv::observability::LogFacade::info("[connect-timing] scope=tunnel.windows stage=begin delta_ms=0 total_ms=0");
   }
 
   void mark(const std::string &stage, const std::string &detail = "") {
@@ -40,7 +40,7 @@ public:
                           " total_ms=" + std::to_string(total_ms);
     if (!detail.empty())
       message += " " + detail;
-    logger::info(message);
+    exv::observability::LogFacade::info(message);
   }
 
   void finish(bool ok, const std::string &detail = "") {

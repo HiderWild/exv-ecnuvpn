@@ -1,5 +1,5 @@
 #include "helper/helper_ipc.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -35,7 +35,7 @@ public:
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
             "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)", SDDL_REVISION_1,
             &security_descriptor, NULL)) {
-      logger::error("Helper: failed to build named pipe security descriptor");
+      exv::observability::LogFacade::error("Helper: failed to build named pipe security descriptor");
       return false;
     }
     security_attributes.lpSecurityDescriptor = security_descriptor;
@@ -51,7 +51,7 @@ public:
     }
 
     if (hPipe_ == INVALID_HANDLE_VALUE) {
-      logger::error("Helper: CreateNamedPipe failed");
+      exv::observability::LogFacade::error("Helper: CreateNamedPipe failed");
       return false;
     }
 

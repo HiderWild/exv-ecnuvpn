@@ -6,7 +6,7 @@
 #include "platform/win32/windows_strings.hpp"
 #include "platform/common/openconnect_process.hpp"
 
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -159,7 +159,7 @@ bool spawn_openconnect_process(const ConfigView &cfg, const std::string &passwor
   HANDLE stdin_read = NULL;
   HANDLE stdin_write = NULL;
   if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
-    logger::error("Failed to create password pipe for openconnect.");
+    exv::observability::LogFacade::error("Failed to create password pipe for openconnect.");
     return false;
   }
   SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
@@ -169,7 +169,7 @@ bool spawn_openconnect_process(const ConfigView &cfg, const std::string &passwor
   if (log_handle == INVALID_HANDLE_VALUE) {
     CloseHandle(stdin_read);
     CloseHandle(stdin_write);
-    logger::error("Failed to open VPN log file for Windows launch: " + log_path);
+    exv::observability::LogFacade::error("Failed to open VPN log file for Windows launch: " + log_path);
     return false;
   }
 
@@ -178,7 +178,7 @@ bool spawn_openconnect_process(const ConfigView &cfg, const std::string &passwor
     CloseHandle(stdin_read);
     CloseHandle(stdin_write);
     CloseHandle(log_handle);
-    logger::error("Bundled/system openconnect binary could not be resolved.");
+    exv::observability::LogFacade::error("Bundled/system openconnect binary could not be resolved.");
     return false;
   }
 
@@ -211,7 +211,7 @@ bool spawn_openconnect_process(const ConfigView &cfg, const std::string &passwor
   if (!created) {
     DWORD error = GetLastError();
     CloseHandle(stdin_write);
-    logger::error("Failed to create openconnect process: " +
+    exv::observability::LogFacade::error("Failed to create openconnect process: " +
                   platform::windows_error_message(error));
     return false;
   }
@@ -227,7 +227,7 @@ bool spawn_openconnect_process(const ConfigView &cfg, const std::string &passwor
     CloseHandle(stdin_write);
     TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hProcess);
-    logger::error("Failed to write password to openconnect stdin.");
+    exv::observability::LogFacade::error("Failed to write password to openconnect stdin.");
     return false;
   }
 

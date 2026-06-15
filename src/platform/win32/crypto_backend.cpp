@@ -1,6 +1,6 @@
 #include "platform/common/crypto_backend.hpp"
 
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -41,7 +41,7 @@ bool bcrypt_open_aes_cbc(BCryptAlgRAII *alg) {
   NTSTATUS status = BCryptOpenAlgorithmProvider(
       &alg->handle, BCRYPT_AES_ALGORITHM, nullptr, 0);
   if (!NT_SUCCESS(status)) {
-    logger::error("BCryptOpenAlgorithmProvider failed: 0x" +
+    exv::observability::LogFacade::error("BCryptOpenAlgorithmProvider failed: 0x" +
                   std::to_string(static_cast<unsigned long>(status)));
     return false;
   }
@@ -51,7 +51,7 @@ bool bcrypt_open_aes_cbc(BCryptAlgRAII *alg) {
       reinterpret_cast<PUCHAR>(const_cast<wchar_t *>(BCRYPT_CHAIN_MODE_CBC)),
       chaining_mode_bytes, 0);
   if (!NT_SUCCESS(status)) {
-    logger::error("BCryptSetProperty(CHAINING_MODE) failed: 0x" +
+    exv::observability::LogFacade::error("BCryptSetProperty(CHAINING_MODE) failed: 0x" +
                   std::to_string(static_cast<unsigned long>(status)));
     return false;
   }
@@ -73,7 +73,7 @@ bool import_aes_key(BCryptAlgRAII *alg,
       reinterpret_cast<PUCHAR>(&key_object_len), sizeof(key_object_len),
       &property_len, 0);
   if (!NT_SUCCESS(status)) {
-    logger::error("BCryptGetProperty(OBJECT_LENGTH) failed: 0x" +
+    exv::observability::LogFacade::error("BCryptGetProperty(OBJECT_LENGTH) failed: 0x" +
                   std::to_string(static_cast<unsigned long>(status)));
     return false;
   }
@@ -84,7 +84,7 @@ bool import_aes_key(BCryptAlgRAII *alg,
       static_cast<ULONG>(key_object->size()), const_cast<PUCHAR>(key_bytes),
       static_cast<ULONG>(key_len), 0);
   if (!NT_SUCCESS(status)) {
-    logger::error("BCryptGenerateSymmetricKey failed: 0x" +
+    exv::observability::LogFacade::error("BCryptGenerateSymmetricKey failed: 0x" +
                   std::to_string(static_cast<unsigned long>(status)));
     return false;
   }
@@ -94,7 +94,7 @@ bool import_aes_key(BCryptAlgRAII *alg,
       reinterpret_cast<PUCHAR>(const_cast<wchar_t *>(BCRYPT_CHAIN_MODE_CBC)),
       chaining_mode_bytes, 0);
   if (!NT_SUCCESS(status)) {
-    logger::error("BCryptSetProperty(KEY_CHAINING_MODE) failed: 0x" +
+    exv::observability::LogFacade::error("BCryptSetProperty(KEY_CHAINING_MODE) failed: 0x" +
                   std::to_string(static_cast<unsigned long>(status)));
     return false;
   }
@@ -150,7 +150,7 @@ bool encrypt_aes256_cbc(const std::string &plaintext,
   HCRYPTPROV provider = 0;
   if (!CryptAcquireContextA(&provider, nullptr, nullptr, PROV_RSA_AES,
                             CRYPT_VERIFYCONTEXT)) {
-    logger::error("CryptAcquireContextA failed");
+    exv::observability::LogFacade::error("CryptAcquireContextA failed");
     return false;
   }
 
@@ -169,14 +169,14 @@ bool encrypt_aes256_cbc(const std::string &plaintext,
   HCRYPTKEY key = 0;
   if (!CryptImportKey(provider, reinterpret_cast<const BYTE *>(&blob),
                       sizeof(blob), 0, 0, &key)) {
-    logger::error("CryptImportKey failed");
+    exv::observability::LogFacade::error("CryptImportKey failed");
     CryptReleaseContext(provider, 0);
     return false;
   }
 
   DWORD mode = CRYPT_MODE_CBC;
   if (!CryptSetKeyParam(key, KP_MODE, reinterpret_cast<BYTE *>(&mode), 0)) {
-    logger::error("CryptSetKeyParam(KP_MODE) failed");
+    exv::observability::LogFacade::error("CryptSetKeyParam(KP_MODE) failed");
     CryptDestroyKey(key);
     CryptReleaseContext(provider, 0);
     return false;
@@ -185,7 +185,7 @@ bool encrypt_aes256_cbc(const std::string &plaintext,
   BYTE iv_local[16];
   std::memcpy(iv_local, iv, 16);
   if (!CryptSetKeyParam(key, KP_IV, iv_local, 0)) {
-    logger::error("CryptSetKeyParam(KP_IV) failed");
+    exv::observability::LogFacade::error("CryptSetKeyParam(KP_IV) failed");
     CryptDestroyKey(key);
     CryptReleaseContext(provider, 0);
     return false;
@@ -197,7 +197,7 @@ bool encrypt_aes256_cbc(const std::string &plaintext,
   buffer.resize(max_len);
 
   if (!CryptEncrypt(key, 0, TRUE, 0, buffer.data(), &data_len, max_len)) {
-    logger::error("CryptEncrypt failed");
+    exv::observability::LogFacade::error("CryptEncrypt failed");
     CryptDestroyKey(key);
     CryptReleaseContext(provider, 0);
     return false;
@@ -224,7 +224,7 @@ bool decrypt_aes256_cbc(const uint8_t *ciphertext,
   HCRYPTPROV provider = 0;
   if (!CryptAcquireContextA(&provider, nullptr, nullptr, PROV_RSA_AES,
                             CRYPT_VERIFYCONTEXT)) {
-    logger::error("CryptAcquireContextA failed");
+    exv::observability::LogFacade::error("CryptAcquireContextA failed");
     return false;
   }
 
@@ -243,14 +243,14 @@ bool decrypt_aes256_cbc(const uint8_t *ciphertext,
   HCRYPTKEY key = 0;
   if (!CryptImportKey(provider, reinterpret_cast<const BYTE *>(&blob),
                       sizeof(blob), 0, 0, &key)) {
-    logger::error("CryptImportKey failed");
+    exv::observability::LogFacade::error("CryptImportKey failed");
     CryptReleaseContext(provider, 0);
     return false;
   }
 
   DWORD mode = CRYPT_MODE_CBC;
   if (!CryptSetKeyParam(key, KP_MODE, reinterpret_cast<BYTE *>(&mode), 0)) {
-    logger::error("CryptSetKeyParam(KP_MODE) failed");
+    exv::observability::LogFacade::error("CryptSetKeyParam(KP_MODE) failed");
     CryptDestroyKey(key);
     CryptReleaseContext(provider, 0);
     return false;
@@ -259,7 +259,7 @@ bool decrypt_aes256_cbc(const uint8_t *ciphertext,
   BYTE iv_local[16];
   std::memcpy(iv_local, iv, 16);
   if (!CryptSetKeyParam(key, KP_IV, iv_local, 0)) {
-    logger::error("CryptSetKeyParam(KP_IV) failed");
+    exv::observability::LogFacade::error("CryptSetKeyParam(KP_IV) failed");
     CryptDestroyKey(key);
     CryptReleaseContext(provider, 0);
     return false;
@@ -268,7 +268,7 @@ bool decrypt_aes256_cbc(const uint8_t *ciphertext,
   std::vector<uint8_t> buffer(ciphertext, ciphertext + ciphertext_len);
   DWORD data_len = static_cast<DWORD>(buffer.size());
   if (!CryptDecrypt(key, 0, TRUE, 0, buffer.data(), &data_len)) {
-    logger::error("CryptDecrypt failed");
+    exv::observability::LogFacade::error("CryptDecrypt failed");
     CryptDestroyKey(key);
     CryptReleaseContext(provider, 0);
     return false;

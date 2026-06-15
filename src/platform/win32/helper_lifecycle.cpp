@@ -6,7 +6,7 @@
 #include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
-#include "common/diagnostics/logger.hpp"
+#include "observability/log_facade.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
