@@ -1,9 +1,13 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_service_manager.hpp"
 
 #include "logger.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -47,7 +51,7 @@ int install_helper_service(const std::string &executable_path,
                            const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  if (!utils::check_root()) {
+  if (!platform::check_root()) {
     cli::print_error(
         "Administrator privileges required. Please run from an elevated prompt.");
     return 1;
@@ -60,7 +64,7 @@ int install_helper_service(const std::string &executable_path,
     return 1;
   }
 
-  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
+  std::string exec_path = executable_path.empty() ? platform::get_executable_path()
                                                   : executable_path;
   if (exec_path.empty()) {
     logger::error("Failed to resolve the exv executable path.");

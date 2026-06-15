@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn::utils {
+namespace ecnuvpn::platform {
 std::string get_bundled_wintun_path() { return ""; }
-} // namespace ecnuvpn::utils
+} // namespace ecnuvpn::platform
 
 namespace {
 

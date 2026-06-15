@@ -1,9 +1,13 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "core/rpc/vpn_actions.hpp"
 #include <nlohmann/json.hpp>
 #include "core/tunnel_controller/tunnel_controller.hpp"
 #include "core/config/config_manager.hpp"
 #include "runtime/runtime_context.hpp"
-#include "utils.hpp"
 
 using json = nlohmann::json;
 
@@ -125,7 +129,7 @@ RpcResponse VpnActions::get_legacy_status(const RpcRequest& req) {
     try {
         ecnuvpn::Config cfg;
         if (ecnuvpn::runtime::is_bootstrapped()) {
-            ecnuvpn::config::ConfigManager mgr(ecnuvpn::utils::get_config_dir());
+            ecnuvpn::config::ConfigManager mgr(ecnuvpn::platform::get_config_dir());
             cfg = mgr.load();
         } else {
             cfg = ecnuvpn::Config{};

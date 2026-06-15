@@ -60,7 +60,7 @@ void debug_log(const std::string &ready_path, const std::string &message) {
 
 int run_exit(const std::string &ready_path, const std::string &cmd) {
   debug_log(ready_path, "run: " + cmd);
-  int rc = utils::run_command(cmd);
+  int rc = platform::run_command(cmd);
   debug_log(ready_path, "exit " + std::to_string(rc) + ": " + cmd);
   return rc;
 }
@@ -94,7 +94,7 @@ std::string effective_mtu(const std::string &reported_mtu, int configured_mtu) {
 }
 
 std::string get_default_gateway4() {
-  std::string output = utils::run_command_output("route.exe print 0.0.0.0");
+  std::string output = platform::run_command_output("route.exe print 0.0.0.0");
   std::regex route_regex(R"(0\.0\.0\.0\s+(?:0|128)\.0\.0\.0\s+([0-9.]+))");
   std::smatch match;
   if (std::regex_search(output, match, route_regex) && match.size() > 1)

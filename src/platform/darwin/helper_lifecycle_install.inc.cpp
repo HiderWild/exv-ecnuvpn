@@ -1,11 +1,11 @@
 bool uninstall_existing_stable_exv() {
   const auto &platform_config = helper_platform_config();
-  if (!utils::file_exists(platform_config.stable_install_path))
+  if (!platform::file_exists(platform_config.stable_install_path))
     return true;
 
   cli::print_info(
       "Running service uninstall using the existing stable exv before replacement...");
-  if (utils::run_command(utils::shell_quote(platform_config.stable_install_path) +
+  if (platform::run_command(platform::shell_quote(platform_config.stable_install_path) +
                          " service uninstall") != 0) {
     cli::print_error(
         "Failed to uninstall the existing helper service before replacing /usr/local/bin/exv.");
@@ -113,18 +113,18 @@ void cleanup_routes() {
 }
 
 std::string get_interfaces_output() {
-  return utils::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
+  return platform::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
 }
 
 void kill_all_supervisors() {
-  std::string output = utils::trim(utils::run_command_output("pgrep -f 'exv -rt'"));
+  std::string output = exv::utils::trim(platform::run_command_output("pgrep -f 'exv -rt'"));
   if (output.empty())
     return;
 
   std::istringstream iss(output);
   std::string line;
   while (std::getline(iss, line)) {
-    line = utils::trim(line);
+    line = exv::utils::trim(line);
     if (line.empty())
       continue;
     try {
@@ -140,7 +140,7 @@ void kill_all_supervisors() {
 }
 
 void fix_config_dir_ownership() {
-  utils::fix_config_dir_ownership();
+  platform::fix_runtime_config_dir_ownership();
 }
 
 int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
@@ -148,7 +148,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
   SemanticVersion current_version;
   bool current_version_ok =
       parse_semantic_version(ECNUVPN_VERSION, &current_version);
-  bool stable_exists = utils::file_exists(platform_config.stable_install_path);
+  bool stable_exists = platform::file_exists(platform_config.stable_install_path);
 
   cli::print_warning(
       "EXV helper service should be installed from a stable system path.");
@@ -213,7 +213,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
     return 1;
   }
 
-  if (!utils::ensure_dir("/usr/local") || !utils::ensure_dir("/usr/local/bin")) {
+  if (!platform::ensure_dir("/usr/local") || !platform::ensure_dir("/usr/local/bin")) {
     cli::print_error("Failed to ensure /usr/local/bin exists.");
     return 1;
   }
@@ -229,7 +229,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
 
   cli::print_success("Stable exv binary updated at /usr/local/bin/exv.");
   std::string helper_source = helper_binary_next_to(current_path);
-  if (!utils::file_exists(helper_source)) {
+  if (!platform::file_exists(helper_source)) {
     cli::print_error("Expected exv-helper next to the current exv binary: " +
                        helper_source);
     return 1;

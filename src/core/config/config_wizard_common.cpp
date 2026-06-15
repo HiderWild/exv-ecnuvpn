@@ -1,6 +1,6 @@
+#include "utils/strings.hpp"
 #include "core/config/config.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -60,7 +60,7 @@ std::string wiz_prompt(const std::string &label, const std::string &default_val)
   std::cout << ": ";
   std::string input;
   std::getline(std::cin, input);
-  input = utils::trim(input);
+  input = exv::utils::trim(input);
   return input.empty() ? default_val : input;
 }
 
@@ -68,7 +68,7 @@ bool wiz_confirm(const std::string &question, bool default_yes) {
   std::cout << "    " << question << (default_yes ? " [Y/n]: " : " [y/N]: ");
   std::string input;
   std::getline(std::cin, input);
-  input = utils::trim(input);
+  input = exv::utils::trim(input);
   if (input.empty()) return default_yes;
   return (input[0] == 'y' || input[0] == 'Y');
 }

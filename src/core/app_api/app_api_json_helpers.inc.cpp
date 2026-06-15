@@ -66,9 +66,9 @@ nlohmann::json helper_error(const nlohmann::json &response,
 }
 
 config::ConfigManager make_config_manager() {
-  utils::ensure_dir(utils::get_config_dir());
+  platform::ensure_dir(platform::get_config_dir());
   logger::init();
-  return config::ConfigManager(utils::get_config_dir());
+  return config::ConfigManager(platform::get_config_dir());
 }
 
 void apply_desktop_runtime_context(const nlohmann::json &payload) {
@@ -80,26 +80,26 @@ void apply_desktop_runtime_context(const nlohmann::json &payload) {
   if (home.empty() && config_dir.empty())
     return;
 
-  utils::set_runtime_path_override(home.empty() ? utils::get_effective_home()
+  platform::set_runtime_path_override(home.empty() ? platform::get_effective_home()
                                                 : home,
                                    config_dir);
 #ifndef _WIN32
-  std::string owner_home = home.empty() ? utils::get_effective_home() : home;
+  std::string owner_home = home.empty() ? platform::get_effective_home() : home;
   struct stat home_stat {};
   if (!owner_home.empty() && stat(owner_home.c_str(), &home_stat) == 0) {
-    utils::set_runtime_owner(home_stat.st_uid, home_stat.st_gid);
+    platform::set_runtime_owner(home_stat.st_uid, home_stat.st_gid);
   }
 #endif
 }
 
 void add_desktop_owner_context(nlohmann::json &request) {
 #ifndef _WIN32
-  if (!utils::has_runtime_owner())
+  if (!platform::has_runtime_owner())
     return;
   request["owner_uid"] =
-      static_cast<unsigned int>(utils::get_runtime_owner_uid());
+      static_cast<unsigned int>(platform::get_runtime_owner_uid());
   request["owner_gid"] =
-      static_cast<unsigned int>(utils::get_runtime_owner_gid());
+      static_cast<unsigned int>(platform::get_runtime_owner_gid());
 #else
   (void)request;
 #endif
@@ -164,7 +164,7 @@ nlohmann::json frontend_status_from_snapshot_json(const nlohmann::json &snapshot
   uint64_t rx_bytes = 0;
   uint64_t tx_bytes = 0;
   if (network_ready && !iface.empty()) {
-    utils::get_interface_traffic(iface, &rx_bytes, &tx_bytes);
+    platform::get_interface_traffic(iface, &rx_bytes, &tx_bytes);
   }
 
   nlohmann::json j;
@@ -246,7 +246,7 @@ nlohmann::json service_status_json() {
 }
 
 std::string helper_binary_next_to_exv() {
-  std::filesystem::path exv_path(utils::get_executable_path());
+  std::filesystem::path exv_path(platform::get_executable_path());
 #ifdef _WIN32
   return (exv_path.parent_path() / "exv-helper.exe").string();
 #else

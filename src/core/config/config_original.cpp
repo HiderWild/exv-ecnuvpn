@@ -2,8 +2,10 @@
 #include "core/crypto/crypto.hpp"
 #include "core/logging/logger.hpp"
 #include "cli/console.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "tunnel.hpp"
-#include "utils.hpp"
+#include "utils/strings.hpp"
 
 #include <algorithm>
 #include <cctype>

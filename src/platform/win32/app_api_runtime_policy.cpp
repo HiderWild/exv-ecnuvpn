@@ -2,7 +2,6 @@
 
 #include "platform/common/driver_status.hpp"
 #include "platform/common/process_control.hpp"
-#include "utils.hpp"
 
 #include <cstdlib>
 #include <cstdio>

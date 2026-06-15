@@ -1,22 +1,25 @@
-#include "platform/common/oneshot_bootstrap.hpp"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#include <sddl.h>
 
 #include "helper/common/helper_messages.hpp"
 #include "platform/common/backend_resolver.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/oneshot_bootstrap.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "logger.hpp"
-#include "utils.hpp"
 
 #include <chrono>
 #include <random>
 #include <sstream>
 #include <string>
 #include <vector>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <shellapi.h>
-#include <sddl.h>
-#include <windows.h>
 
 namespace ecnuvpn {
 namespace platform {
@@ -154,9 +157,9 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
                      "\" --parent-pid " + std::to_string(backend.parent_pid);
 
   logger::info("Oneshot: Generated endpoint=" + backend.endpoint + " session_id=" + session_id);
-  logger::info("Oneshot: Starting helper - is_admin=" + std::string(utils::check_root() ? "true" : "false"));
+  logger::info("Oneshot: Starting helper - is_admin=" + std::string(platform::check_root() ? "true" : "false"));
 
-  if (utils::check_root()) {
+  if (platform::check_root()) {
     if (!start_helper_direct(request.helper_path, args, &backend.pid)) {
       backend.code = kServiceStartFailedCode;
       backend.message = "Failed to start elevated one-shot helper.";

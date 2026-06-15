@@ -1,3 +1,8 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "app_api.hpp"
 #include "core/config/config.hpp"
 #include "core/config/config_manager.hpp"
@@ -7,7 +12,6 @@
 #include "runtime/runtime_context.hpp"
 #include "tunnel.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 #include "vpn.hpp"
 #include "virtual_network.hpp"
 
@@ -80,7 +84,7 @@ static void print_version() {
 static int handle_service(const std::vector<std::string> &args) {
   if (args.size() <= 2 || args[2] == "status") return helper::show_service_status();
   std::string subcmd = args[2];
-  if (subcmd == "install") return helper::install_service(utils::get_executable_path());
+  if (subcmd == "install") return helper::install_service(platform::get_executable_path());
   if (subcmd == "uninstall") return helper::uninstall_service();
   cli::print_error("Unknown service subcommand: " + subcmd); return 1;
 }
@@ -130,13 +134,13 @@ int main(int argc, char *argv[]) {
     const std::string output_path = output_is_file && raw_args.size() > 4 ? raw_args[4] : "";
     auto write_rpc_result = [&](const nlohmann::json &result) {
       std::string body = result.dump();
-      if (output_is_file && !output_path.empty()) return utils::write_file(output_path, body + "\n") ? 0 : 1;
+      if (output_is_file && !output_path.empty()) return platform::write_file(output_path, body + "\n") ? 0 : 1;
       std::cout << body << std::endl; return 0;
     };
     nlohmann::json payload = nlohmann::json::object();
     if (raw_args.size() > 3) {
       try {
-        if (payload_is_file) payload = nlohmann::json::parse(utils::read_file(raw_args[3]));
+        if (payload_is_file) payload = nlohmann::json::parse(platform::read_file(raw_args[3]));
         else payload = nlohmann::json::parse(raw_args[3]);
       } catch (const std::exception &ex) {
         write_rpc_result(nlohmann::json{{"ok", false}, {"error", std::string("invalid JSON payload: ") + ex.what()}});

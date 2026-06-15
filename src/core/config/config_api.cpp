@@ -1,7 +1,11 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "core/config/config_api.hpp"
 #include "crypto.hpp"
 #include "logger.hpp"
-#include "utils.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -153,7 +157,7 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
 
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
-               utils::get_config_path();
+               platform::get_config_path();
     }
     logger::info("Config key set via config_api: " + key);
     return "";
@@ -165,7 +169,7 @@ std::string config_clear_password_and_key(config::ConfigManager& mgr) {
     cfg.password.clear();
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
-               utils::get_config_path();
+               platform::get_config_path();
     }
     if (!crypto::delete_key_file()) {
         return "Failed to delete encryption key file: " + crypto::key_path();
@@ -205,7 +209,7 @@ std::string config_set_password(config::ConfigManager& mgr,
     cfg.password = encrypted;
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
-               utils::get_config_path();
+               platform::get_config_path();
     }
     logger::info("Password updated via config_api (encrypted)");
     return "";
@@ -279,7 +283,7 @@ std::string route_add(config::ConfigManager& mgr, const std::string& cidr) {
     cfg.routes.push_back(cidr);
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
-               utils::get_config_path();
+               platform::get_config_path();
     }
     logger::info("Route added via config_api: " + cidr);
     return "";
@@ -295,7 +299,7 @@ std::string route_remove(config::ConfigManager& mgr, const std::string& cidr) {
     cfg.routes.erase(it);
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
-               utils::get_config_path();
+               platform::get_config_path();
     }
     logger::info("Route removed via config_api: " + cidr);
     return "";
@@ -322,13 +326,13 @@ void key_reset_noninteractive() {
     }
 
     // Clear password ciphertext in config.json
-    std::string cfg_path = utils::get_config_path();
-    if (utils::file_exists(cfg_path)) {
-        std::string content = utils::read_file(cfg_path);
+    std::string cfg_path = platform::get_config_path();
+    if (platform::file_exists(cfg_path)) {
+        std::string content = platform::read_file(cfg_path);
         try {
             auto j = nlohmann::json::parse(content);
             j["password"] = "";
-            utils::write_file(cfg_path, j.dump(4));
+            platform::write_file(cfg_path, j.dump(4));
         } catch (...) {
         }
     }

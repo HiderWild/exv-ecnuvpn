@@ -2,7 +2,6 @@
 #include "crypto.hpp"
 #include "logger.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <iomanip>
 #include <iostream>

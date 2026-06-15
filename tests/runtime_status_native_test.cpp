@@ -18,9 +18,8 @@ bool expect(bool condition, const char *message) {
 } // namespace
 
 namespace ecnuvpn {
-namespace utils {
+namespace platform {
 
-std::vector<std::string> split_lines(const std::string &) { return {}; }
 std::string run_command_output(const std::string &) { return ""; }
 std::string shell_quote(const std::string &value) { return value; }
 std::string get_bundled_openconnect_path() { return ""; }
@@ -29,7 +28,7 @@ std::string get_bundled_runtime_dir() { return ""; }
 std::string get_bundled_wintun_path() { return ""; }
 std::string get_bundled_tap_installer_path() { return ""; }
 
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 int main() {

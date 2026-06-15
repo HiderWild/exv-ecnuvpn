@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "core/config/config_manager.hpp"
 #include "logger.hpp"
-#include "utils.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -11,20 +15,20 @@ namespace config {
 
 ConfigManager::ConfigManager(const std::string& config_dir)
     : config_dir_(config_dir) {
-    utils::ensure_dir(config_dir_);
+    platform::ensure_dir(config_dir_);
 }
 
 Config ConfigManager::load() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    std::string path = utils::get_config_path();
-    if (!utils::file_exists(path)) {
+    std::string path = platform::get_config_path();
+    if (!platform::file_exists(path)) {
         config_ = Config{};
         return config_;
     }
 
     try {
-        std::string content = utils::read_file(path);
+        std::string content = platform::read_file(path);
         auto j = nlohmann::json::parse(content);
         config_ = j.get<Config>();
     } catch (const std::exception& e) {
@@ -43,12 +47,12 @@ bool ConfigManager::save(const Config& cfg) {
     std::error_code ec;
     fs::create_directories(fs::u8path(config_dir_), ec);
 
-    std::string final_path = utils::get_config_path();
+    std::string final_path = platform::get_config_path();
     std::string tmp_path = final_path + ".tmp";
 
     try {
         nlohmann::json j = cfg;
-        if (!utils::write_file(tmp_path, j.dump(4))) {
+        if (!platform::write_file(tmp_path, j.dump(4))) {
             logger::error("ConfigManager::save: failed to write temp file: " +
                           tmp_path);
             return false;

@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/openconnect_process.hpp"
 
-#include "utils.hpp"
 
 #include <sstream>
 #include <unistd.h>
@@ -12,32 +16,32 @@ namespace {
 std::string build_openconnect_command(const Config &cfg,
                                       const std::string &password) {
   std::ostringstream cmd;
-  std::string openconnect_path = utils::get_openconnect_path(cfg.openconnect_runtime);
+  std::string openconnect_path = platform::get_openconnect_path(cfg.openconnect_runtime);
   std::string heredoc_marker = "__EXV_PASSWORD_EOF__";
   while (password.find(heredoc_marker) != std::string::npos) {
     heredoc_marker += "_X";
   }
 
   cmd << "exec "
-      << utils::shell_quote(openconnect_path.empty() ? std::string("openconnect")
+      << platform::shell_quote(openconnect_path.empty() ? std::string("openconnect")
                                                      : openconnect_path)
-      << " " << utils::shell_quote(cfg.server)
-      << " --useragent " << utils::shell_quote(cfg.useragent)
-      << " -m " << cfg.mtu << " -u " << utils::shell_quote(cfg.username)
+      << " " << platform::shell_quote(cfg.server)
+      << " --useragent " << platform::shell_quote(cfg.useragent)
+      << " -m " << cfg.mtu << " -u " << platform::shell_quote(cfg.username)
       << " --passwd-on-stdin"
       << " --non-inter"
-      << " --script " << utils::shell_quote(utils::get_tunnel_path());
+      << " --script " << platform::shell_quote(platform::get_tunnel_path());
 
   if (cfg.disable_dtls) {
     cmd << " --no-dtls";
   }
 
   for (const auto &arg : cfg.extra_args) {
-    cmd << " " << utils::shell_quote(arg);
+    cmd << " " << platform::shell_quote(arg);
   }
 
   cmd << " <<'" << heredoc_marker << "' >> "
-      << utils::shell_quote(utils::expand_home(cfg.log_file)) << " 2>&1\n"
+      << platform::shell_quote(platform::expand_home(cfg.log_file)) << " 2>&1\n"
       << password << "\n" << heredoc_marker;
   return cmd.str();
 }

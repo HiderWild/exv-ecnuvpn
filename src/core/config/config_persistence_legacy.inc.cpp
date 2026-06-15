@@ -1,18 +1,18 @@
 // ── Load / Save ──────────────────────────────────────────────────
 
 Config load() {
-  std::string dir = utils::get_config_dir();
-  std::string path = utils::get_config_path();
-  utils::ensure_dir(dir);
+  std::string dir = platform::get_config_dir();
+  std::string path = platform::get_config_path();
+  platform::ensure_dir(dir);
 
-  if (!utils::fix_config_dir_ownership()) {
+  if (!platform::fix_runtime_config_dir_ownership()) {
     cli::print_error("Configuration directory is owned by another user: " + dir);
     cli::print_info("Fix with: sudo chown -R $(whoami) " + dir);
     logger::error("Config dir ownership mismatch: " + dir);
     return Config{};
   }
 
-  if (!utils::file_exists(path)) {
+  if (!platform::file_exists(path)) {
     Config cfg = run_wizard();
     if (!save(cfg)) {
       cli::print_error("Failed to save configuration to: " + path);
@@ -28,7 +28,7 @@ Config load() {
   crypto::init_key_if_needed();
 
   try {
-    std::string content = utils::read_file(path);
+    std::string content = platform::read_file(path);
     auto j = nlohmann::json::parse(content);
     return j.get<Config>();
   } catch (const std::exception &e) {
@@ -40,12 +40,12 @@ Config load() {
 }
 
 bool save(const Config &cfg) {
-  std::string dir = utils::get_config_dir();
-  std::string path = utils::get_config_path();
-  utils::ensure_dir(dir);
+  std::string dir = platform::get_config_dir();
+  std::string path = platform::get_config_path();
+  platform::ensure_dir(dir);
   try {
     nlohmann::json j = cfg;
-    if (utils::write_file(path, j.dump(4))) {
+    if (platform::write_file(path, j.dump(4))) {
       logger::info("Config saved to: " + path);
       return true;
     }

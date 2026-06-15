@@ -84,7 +84,7 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
       // ── Connection attempt guard ──────────────────────────────────────
       namespace conn_attempt = ecnuvpn::connection_attempt;
       conn_attempt::AcquireOptions attempt_opts;
-      attempt_opts.config_dir = utils::get_config_dir();
+      attempt_opts.config_dir = platform::get_config_dir();
       attempt_opts.mode = "native";
       attempt_opts.owner_pid = conn_attempt::current_process_id();
       conn_attempt::AcquireResult attempt_result = conn_attempt::try_acquire(attempt_opts);
@@ -93,7 +93,7 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
 
       if (!attempt_result.acquired) {
         nlohmann::json details;
-        details["lock_path"] = utils::get_config_dir() + "/connect-attempt.lock";
+        details["lock_path"] = platform::get_config_dir() + "/connect-attempt.lock";
         details["owner_pid"] = attempt_result.record.owner_pid;
         details["attempt_id"] = attempt_result.record.attempt_id;
         details["created_at_unix_ms"] = attempt_result.record.created_at_unix_ms;
@@ -119,7 +119,7 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
         std::string user_message = attempt_result.message;
         if (stale_detected) {
           user_message = "检测到上次连接尝试异常残留（进程已退出）。正在自动清理...";
-          conn_attempt::mark_terminal(utils::get_config_dir(), "stale_auto_cleanup");
+          conn_attempt::mark_terminal(platform::get_config_dir(), "stale_auto_cleanup");
           conn_attempt::AcquireResult retry = conn_attempt::try_acquire(attempt_opts);
           if (retry.acquired) {
             timing.mark("connection_attempt_retry", "acquired=true stale_cleanup=true");
@@ -139,7 +139,7 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
       }
 
       conn_attempt::TerminalAttemptScope attempt_cleanup(
-          utils::get_config_dir(), attempt_result.record.attempt_id, "scope_exit");
+          platform::get_config_dir(), attempt_result.record.attempt_id, "scope_exit");
 
       // ── TunnelController connect ──────────────────────────────────────
       // Reset any stale controller state before connecting with new endpoint
@@ -248,7 +248,7 @@ exv::core_api::DesktopRpcAdapter &desktop_adapter() {
       }
       if (payload.contains("user_agent") && payload["user_agent"].is_string()) {
         std::string value = payload["user_agent"].get<std::string>();
-        if (!utils::trim(value).empty()) {
+        if (!exv::utils::trim(value).empty()) {
           std::string err = config_api::config_set(mgr, "useragent", value);
           if (!err.empty()) return error(err);
         }

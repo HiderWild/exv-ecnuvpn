@@ -1,6 +1,7 @@
 #include "platform/win32/native_packet_device.hpp"
 
-#include "utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

@@ -1,12 +1,12 @@
 // ── Import ──────────────────────────────────────────────────────
 
 Config import_from(const std::string &path) {
-  if (!utils::file_exists(path)) {
+  if (!platform::file_exists(path)) {
     cli::print_error("Import file not found: " + path);
     return load();
   }
   try {
-    std::string content = utils::read_file(path);
+    std::string content = platform::read_file(path);
     auto j = nlohmann::json::parse(content);
     Config cfg = load();
 

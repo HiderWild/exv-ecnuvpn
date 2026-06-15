@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
 #include "platform/common/helper_client.hpp"
-#include "utils.hpp"
 #include "vpn.hpp"
 
 #include <iostream>
@@ -37,7 +41,7 @@ const ConfigDefaults &config_defaults() {
 
 } // namespace platform
 
-namespace utils {
+namespace platform {
 
 bool check_root() {
   g_checked_root = true;
@@ -51,17 +55,18 @@ std::string get_supervisor_pid_path() { return ""; }
 std::string get_route_ready_path() { return ""; }
 bool file_exists(const std::string &) { return false; }
 std::string read_file(const std::string &) { return ""; }
-std::string trim(const std::string &value) { return value; }
-void set_runtime_owner(uid_t, gid_t) { g_runtime_owner_updated = true; }
+void set_runtime_owner(unsigned int, unsigned int) {
+  g_runtime_owner_updated = true;
+}
 void set_runtime_path_override(const std::string &, const std::string &) {
   g_runtime_path_overridden = true;
 }
-bool fix_config_dir_ownership() {
+bool fix_runtime_config_dir_ownership() {
   g_fix_config_dir_ownership_called = true;
   return true;
 }
 
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 #ifdef _WIN32

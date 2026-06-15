@@ -1,10 +1,14 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "tunnel.hpp"
 
 #include "logger.hpp"
 #include "openconnect_log.hpp"
 #include "platform/common/tunnel_script.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -138,11 +142,11 @@ platform::TunnelScriptContext make_tunnel_script_context(const Config &cfg) {
   context.custom_routes = cfg.routes;
   context.server_route_exceptions = find_server_route_exceptions(cfg);
   context.configured_mtu = cfg.mtu;
-  context.has_runtime_owner = utils::has_runtime_owner();
+  context.has_runtime_owner = platform::has_runtime_owner();
   context.runtime_owner_uid =
-      static_cast<unsigned int>(utils::get_runtime_owner_uid());
+      static_cast<unsigned int>(platform::get_runtime_owner_uid());
   context.runtime_owner_gid =
-      static_cast<unsigned int>(utils::get_runtime_owner_gid());
+      static_cast<unsigned int>(platform::get_runtime_owner_gid());
   return context;
 }
 
@@ -153,7 +157,7 @@ std::string generate(const Config &cfg) {
 }
 
 bool write_script(const Config &cfg) {
-  std::string path = utils::get_tunnel_path();
+  std::string path = platform::get_tunnel_path();
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
   std::string content = platform::generate_tunnel_script(context);
 
@@ -161,7 +165,7 @@ bool write_script(const Config &cfg) {
     logger::warn("Preserving upstream route for VPN server IP: " + server_ip);
   }
 
-  if (!utils::write_file(path, content)) {
+  if (!platform::write_file(path, content)) {
     cli::print_error("Failed to write tunnel script: " + path);
     logger::error("Failed to write tunnel script: " + path);
     return false;
@@ -175,7 +179,7 @@ bool write_script(const Config &cfg) {
   }
 #endif
 
-  utils::sync_owner(path);
+  platform::sync_owner(path);
 
   logger::info("Tunnel script generated: " + path);
   return true;
@@ -186,7 +190,7 @@ int run_script_hook() {
   const char *home = std::getenv("ECNUVPN_HOME");
   const char *config_dir = std::getenv("ECNUVPN_CONFIG_DIR");
   if ((home && *home) || (config_dir && *config_dir)) {
-    utils::set_runtime_path_override(home ? home : "",
+    platform::set_runtime_path_override(home ? home : "",
                                      config_dir ? config_dir : "");
   }
 #endif
@@ -199,7 +203,7 @@ int run_script_hook() {
 bool configure_from_runtime_log(const Config &cfg) {
   platform::TunnelScriptContext context = make_tunnel_script_context(cfg);
   return platform::configure_from_openconnect_log(
-             context, utils::expand_home(cfg.log_file))
+             context, platform::expand_home(cfg.log_file))
       .ok;
 }
 

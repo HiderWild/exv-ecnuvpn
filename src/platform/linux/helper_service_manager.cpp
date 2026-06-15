@@ -1,9 +1,13 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_service_manager.hpp"
 
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <fstream>
 #include <filesystem>
@@ -43,12 +47,12 @@ int install_helper_service(const std::string &executable_path,
                            const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  if (!utils::check_root()) {
+  if (!platform::check_root()) {
     cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
-  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
+  std::string exec_path = executable_path.empty() ? platform::get_executable_path()
                                                   : executable_path;
   if (exec_path.empty()) {
     cli::print_error("Failed to resolve the exv executable path.");
@@ -85,21 +89,21 @@ int install_helper_service(const std::string &executable_path,
   ofs << "WantedBy=multi-user.target\n";
   ofs.close();
 
-  if (utils::run_command("systemctl daemon-reload") != 0) {
+  if (platform::run_command("systemctl daemon-reload") != 0) {
     cli::print_error("Failed to reload systemd daemon.");
     return 1;
   }
 
   std::string enable_cmd =
       "systemctl enable " + std::string(platform_config.service_name);
-  if (utils::run_command(enable_cmd) != 0) {
+  if (platform::run_command(enable_cmd) != 0) {
     cli::print_error("Failed to enable EXV helper service.");
     return 1;
   }
 
   std::string start_cmd =
       "systemctl start " + std::string(platform_config.service_name);
-  if (utils::run_command(start_cmd) != 0) {
+  if (platform::run_command(start_cmd) != 0) {
     cli::print_error("Failed to start EXV helper service.");
     return 1;
   }
@@ -119,7 +123,7 @@ int install_helper_service(const std::string &executable_path,
 int uninstall_helper_service(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  if (!utils::check_root()) {
+  if (!platform::check_root()) {
     cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
@@ -129,15 +133,15 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
 
   std::string stop_cmd =
       "systemctl stop " + std::string(platform_config.service_name);
-  utils::run_command(stop_cmd + " >/dev/null 2>&1");
+  platform::run_command(stop_cmd + " >/dev/null 2>&1");
   std::string disable_cmd =
       "systemctl disable " + std::string(platform_config.service_name);
-  utils::run_command(disable_cmd + " >/dev/null 2>&1");
+  platform::run_command(disable_cmd + " >/dev/null 2>&1");
   if (*platform_config.service_definition_path)
     std::remove(platform_config.service_definition_path);
   if (*platform_config.endpoint)
     std::remove(platform_config.endpoint);
-  utils::run_command("systemctl daemon-reload >/dev/null 2>&1");
+  platform::run_command("systemctl daemon-reload >/dev/null 2>&1");
   if (context.clear_session_state)
     context.clear_session_state();
 
@@ -150,7 +154,7 @@ int show_helper_service_status(const HelperServiceManagerContext &context) {
 
   cli::print_header("EXV Service Status");
 
-  bool installed = utils::file_exists(platform_config.service_definition_path);
+  bool installed = platform::file_exists(platform_config.service_definition_path);
   bool available = installed ? wait_until_ready(context, 10, 100000) : false;
   std::cout << "  Installed       : " << (installed ? "yes" : "no")
             << std::endl;

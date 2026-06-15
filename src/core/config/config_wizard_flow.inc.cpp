@@ -15,7 +15,7 @@ static Config run_wizard() {
   std::cout << std::endl << "  Choice [1]: ";
   std::string mode_input;
   std::getline(std::cin, mode_input);
-  mode_input = utils::trim(mode_input);
+  mode_input = exv::utils::trim(mode_input);
   bool advanced = (!mode_input.empty() && mode_input[0] == '2');
   std::cout << std::endl;
 
@@ -42,14 +42,14 @@ static Config run_wizard() {
 
     wiz_step(1, TOTAL, "Working Directory");
     std::cout << "    Where should exv store its files?" << std::endl;
-    std::string default_dir = utils::get_config_dir();
+    std::string default_dir = platform::get_config_dir();
     std::string new_dir = wiz_prompt("Directory", default_dir);
     if (new_dir != default_dir) {
-      if (!utils::set_config_dir(new_dir))
+      if (!platform::set_config_dir(new_dir))
         cli::print_warning("Could not create " + new_dir +
                              ". Using default.");
       else
-        cli::print_success("Work directory: " + utils::expand_home(new_dir));
+        cli::print_success("Work directory: " + platform::expand_home(new_dir));
     }
     cfg.log_file = new_dir + "/ecnuvpn.log";
 

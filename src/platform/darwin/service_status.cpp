@@ -1,8 +1,12 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/service_status.hpp"
 
 #include "helper/helper.hpp"
 #include "platform/common/helper_platform.hpp"
-#include "utils.hpp"
 
 namespace ecnuvpn {
 namespace platform {
@@ -17,11 +21,11 @@ bool contains_token(const std::string &text, const std::string &token) {
 ServiceStatusSnapshot current_service_status() {
   const auto &config = helper_platform_config();
   ServiceStatusSnapshot status;
-  bool plist_exists = utils::file_exists(config.service_definition_path);
+  bool plist_exists = platform::file_exists(config.service_definition_path);
   std::string plist_content =
-      plist_exists ? utils::read_file(config.service_definition_path) : "";
+      plist_exists ? platform::read_file(config.service_definition_path) : "";
   bool helper_binary_exists =
-      utils::file_exists(config.default_service_binary_path);
+      platform::file_exists(config.default_service_binary_path);
   bool helper_service_declared =
       contains_token(plist_content, config.default_service_binary_path) &&
       contains_token(plist_content, "--service");

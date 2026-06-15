@@ -1,8 +1,13 @@
+#include "utils/strings.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "crypto.hpp"
 #include "logger.hpp"
 #include "platform/common/crypto_backend.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -98,7 +103,7 @@ bool hex_to_bytes(const std::string &hex, uint8_t *out, size_t expected_len) {
 
 } // namespace
 
-std::string key_path() { return utils::get_config_dir() + "/.key"; }
+std::string key_path() { return platform::get_config_dir() + "/.key"; }
 
 std::string generate_key() {
   uint8_t raw[32];
@@ -118,7 +123,7 @@ bool validate_key(const std::string &hex_key) {
 }
 
 bool save_key(const std::string &hex_key) {
-  utils::ensure_dir(utils::get_config_dir());
+  platform::ensure_dir(platform::get_config_dir());
   std::string path = key_path();
   std::ofstream ofs(path);
   if (!ofs.is_open())
@@ -130,9 +135,9 @@ bool save_key(const std::string &hex_key) {
 
 std::string load_key() {
   std::string path = key_path();
-  if (!utils::file_exists(path))
+  if (!platform::file_exists(path))
     return "";
-  return utils::trim(utils::read_file(path));
+  return exv::utils::trim(platform::read_file(path));
 }
 
 std::string init_key_if_needed() {
@@ -147,7 +152,7 @@ std::string init_key_if_needed() {
 
 bool delete_key_file() {
   std::string path = key_path();
-  if (!utils::file_exists(path))
+  if (!platform::file_exists(path))
     return true;
   if (std::remove(path.c_str()) == 0) {
     logger::info("Deleted encryption key: " + path);
@@ -159,9 +164,9 @@ bool delete_key_file() {
 
 std::string key_status() {
   std::string path = key_path();
-  if (!utils::file_exists(path))
+  if (!platform::file_exists(path))
     return "missing";
-  std::string key = utils::trim(utils::read_file(path));
+  std::string key = exv::utils::trim(platform::read_file(path));
   return validate_key(key) ? "valid" : "corrupt";
 }
 
@@ -188,13 +193,13 @@ bool reset_key() {
     return false;
   }
 
-  std::string cfg_path = utils::get_config_path();
-  if (utils::file_exists(cfg_path)) {
-    std::string content = utils::read_file(cfg_path);
+  std::string cfg_path = platform::get_config_path();
+  if (platform::file_exists(cfg_path)) {
+    std::string content = platform::read_file(cfg_path);
     try {
       auto j = nlohmann::json::parse(content);
       j["password"] = "";
-      utils::write_file(cfg_path, j.dump(4));
+      platform::write_file(cfg_path, j.dump(4));
     } catch (...) {
     }
   }

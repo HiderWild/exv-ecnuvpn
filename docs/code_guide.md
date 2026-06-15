@@ -22,18 +22,16 @@ ECNU-VPN/
 │   ├── src/                    # SPA 源码
 │   └── dist/                   # 构建产物（嵌入到 C++ binary）
 └── src/
-    ├── main.cpp                # CLI 入口 + WebUI 启动
-    ├── config.hpp/cpp          # 配置管理（含 WebUI 字段）
-    ├── config_api.hpp/cpp      # REST API 处理
-    ├── config_manager.hpp/cpp  # 运行时配置读写
-    ├── crypto.hpp/cpp          # AES-256-CBC 加密 + 密钥管理
-    ├── helper.hpp/cpp          # launchd root helper / IPC / service 管理
-    ├── vpn.hpp/cpp             # VPN 控制（start/stop/status）
-    ├── tunnel.hpp/cpp          # tunnel.sh 动态生成
-    ├── logger.hpp/cpp          # 日志系统
-    ├── sse_broadcaster.hpp/cpp # SSE 实时推送（日志 + 状态）
-    ├── webui.hpp/cpp           # HTTP 服务器 + REST + SSE 路由
-    └── utils.hpp/cpp           # 工具函数
+    ├── main.cpp                # CLI 入口
+    ├── cli/                    # 终端输出、ANSI 展示与 CLI 辅助
+    ├── core/                   # 配置、RPC、VPN 控制、加密、日志等业务层
+    ├── helper/                 # helper 协议、会话、运行时与清理策略
+    ├── platform/               # 文件、路径、进程、权限、网络等平台能力
+    ├── runtime/                # 运行上下文
+    ├── utils/                  # 纯值工具；当前包含 strings 与 C++20 module 试点
+    ├── vpn_engine/             # native VPN engine 与协议栈
+    ├── tunnel.hpp/cpp          # tunnel 脚本上下文与生成入口
+    └── virtual_network.hpp/cpp # 虚拟网络检测与配置入口
 ```
 
 ---
@@ -249,11 +247,24 @@ void logger::show_logs(int lines = 50);
 
 ---
 
-### utils — 工具函数
+### utils — 纯值工具
 
-**文件**：`src/utils.hpp` / `src/utils.cpp`
+**文件**：`src/utils/strings.hpp` / `src/utils/strings.cpp`
 
-彩色输出、路径管理、文件 I/O、系统检查、流量统计（`get_interface_traffic`）等。
+`utils` 只承载无副作用、无平台依赖的纯值工具。当前公开能力是字符串处理：
+`trim`、`split_lines`、`join`、`starts_with`、`ends_with`、`to_lower_ascii`。
+
+对应 C++20 named module 试点为 `exv.utils.strings`，模块入口位于
+`src/utils/modules/strings.cppm`。
+
+平台相关能力不属于 `utils`：
+
+- 文件 I/O：`src/platform/common/file_system.hpp`
+- 路径、配置目录、运行时 owner：`src/platform/common/runtime_paths.hpp`
+- 命令执行、shell quote、root 检查：`src/platform/common/process_utils.hpp`
+- bundled runtime / OpenConnect / Wintun 发现：`src/platform/common/runtime_discovery.hpp`
+- 网卡流量统计：`src/platform/common/interface_stats.hpp`
+- 终端彩色输出：`src/cli/console.hpp`
 
 ---
 

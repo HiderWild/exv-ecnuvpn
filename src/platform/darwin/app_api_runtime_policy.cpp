@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
 
-#include "utils.hpp"
 #include "vpn.hpp"
 
 #include <sys/stat.h>
@@ -9,19 +13,19 @@ namespace ecnuvpn {
 namespace platform {
 
 void prepare_direct_fallback_runtime() {
-  if (!utils::check_root())
+  if (!platform::check_root())
     return;
 
-  std::string home = utils::get_effective_home();
+  std::string home = platform::get_effective_home();
   if (home.empty())
     return;
 
   struct stat home_stat {};
   if (stat(home.c_str(), &home_stat) == 0) {
-    utils::set_runtime_owner(home_stat.st_uid, home_stat.st_gid);
-    utils::set_runtime_path_override(home, utils::get_config_dir());
+    platform::set_runtime_owner(home_stat.st_uid, home_stat.st_gid);
+    platform::set_runtime_path_override(home, platform::get_config_dir());
   }
-  utils::fix_config_dir_ownership();
+  platform::fix_runtime_config_dir_ownership();
 }
 
 std::string helper_unavailable_connect_message() {

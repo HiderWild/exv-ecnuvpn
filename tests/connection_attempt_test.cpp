@@ -1,7 +1,11 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "app_api.hpp"
 #include "core/config/config.hpp"
 #include "connection_attempt.hpp"
-#include "utils.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -32,7 +36,7 @@ std::filesystem::path unique_temp_dir(const std::string &name) {
 }
 
 struct RuntimePathGuard {
-  ~RuntimePathGuard() { ecnuvpn::utils::clear_runtime_path_override(); }
+  ~RuntimePathGuard() { ecnuvpn::platform::clear_runtime_path_override(); }
 };
 
 void write_json_file(const std::filesystem::path &path,

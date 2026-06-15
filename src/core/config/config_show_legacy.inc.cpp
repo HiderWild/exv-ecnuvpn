@@ -73,7 +73,7 @@ void show(const Config &cfg) {
   }
 
   std::cout << std::endl;
-  std::cout << cli::DIM << "  Config : " << utils::get_config_path()
+  std::cout << cli::DIM << "  Config : " << platform::get_config_path()
             << cli::RESET << std::endl;
   std::cout << cli::DIM << "  Key    : " << crypto::key_path() << "  ["
             << crypto::key_status() << "]" << cli::RESET << std::endl;

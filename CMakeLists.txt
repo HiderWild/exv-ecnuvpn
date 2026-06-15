@@ -92,9 +92,14 @@ set(EXV_COMMON_SOURCES
     src/platform/common/backend_resolver.cpp
     src/platform/common/credential_store.cpp
     src/platform/common/dns_model.cpp
+    src/platform/common/file_system.cpp
+    src/platform/common/interface_stats.cpp
     src/platform/common/oneshot_bootstrap.cpp
     src/platform/common/packet_device_factory.cpp
+    src/platform/common/process_utils.cpp
     src/platform/common/platform_network_ops.cpp
+    src/platform/common/runtime_discovery.cpp
+    src/platform/common/runtime_paths.cpp
     src/platform/common/helper_delegating_network_ops.cpp
     src/platform/common/proxy_tun_detector.cpp
     src/platform/common/route_model.cpp
@@ -117,7 +122,6 @@ set(EXV_COMMON_SOURCES
     src/core/logging/log_event_bus.cpp
     src/core/logging/log_renderer.cpp
     src/cli/console.cpp
-    src/utils.cpp
 )
 
 set(EXV_HELPER_RUNTIME_SOURCES
@@ -233,6 +237,7 @@ elseif(WIN32)
         src/platform/win32/driver_status.cpp
         src/platform/win32/win_route_ops.cpp
         src/platform/win32/win_credential_store.cpp
+        src/platform/win32/windows_strings.cpp
     )
 else()
     message(FATAL_ERROR "Unsupported platform. Supported: macOS, Linux, Windows.")
@@ -413,6 +418,10 @@ set_target_properties(exv-utils-strings-module PROPERTIES
     CXX_SCAN_FOR_MODULES ON
 )
 
+target_link_libraries(exv-core PUBLIC
+    exv-utils-strings
+)
+
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
 
@@ -451,7 +460,6 @@ target_compile_definitions(exv PRIVATE
 #         tests/vpn_runtime_test.cpp
 #     src/vpn_engine/session_state.cpp
 #     src/vpn_runtime.cpp
-#         src/utils.cpp
 # )
 #
 # if(APPLE)
@@ -526,6 +534,10 @@ endif()
 target_include_directories(runtime_status_native_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(runtime_status_native_test PRIVATE
+    exv-utils-strings
 )
 
 add_test(NAME runtime_status_native_test COMMAND runtime_status_native_test)
@@ -617,7 +629,11 @@ elseif(WIN32)
         src/platform/win32/native_wintun.cpp
         src/platform/win32/native_ip_config.cpp
         src/platform/win32/path_utils.cpp
-        src/utils.cpp
+        src/platform/common/file_system.cpp
+        src/platform/common/process_utils.cpp
+        src/platform/common/runtime_discovery.cpp
+        src/platform/common/runtime_paths.cpp
+        src/platform/win32/windows_strings.cpp
     )
 endif()
 
@@ -626,7 +642,11 @@ target_include_directories(native_engine_contract_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_link_libraries(native_engine_contract_test PRIVATE Threads::Threads ${EXV_PLATFORM_LIBS})
+target_link_libraries(native_engine_contract_test PRIVATE
+    Threads::Threads
+    exv-utils-strings
+    ${EXV_PLATFORM_LIBS}
+)
 
 add_test(NAME native_engine_contract_test COMMAND native_engine_contract_test)
 
@@ -667,7 +687,11 @@ elseif(WIN32)
         src/platform/win32/native_wintun.cpp
         src/platform/win32/native_ip_config.cpp
         src/platform/win32/path_utils.cpp
-        src/utils.cpp
+        src/platform/common/file_system.cpp
+        src/platform/common/process_utils.cpp
+        src/platform/common/runtime_discovery.cpp
+        src/platform/common/runtime_paths.cpp
+        src/platform/win32/windows_strings.cpp
     )
 endif()
 
@@ -676,7 +700,11 @@ target_include_directories(native_event_sink_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_link_libraries(native_event_sink_test PRIVATE Threads::Threads ${EXV_PLATFORM_LIBS})
+target_link_libraries(native_event_sink_test PRIVATE
+    Threads::Threads
+    exv-utils-strings
+    ${EXV_PLATFORM_LIBS}
+)
 
 add_test(NAME native_event_sink_test COMMAND native_event_sink_test)
 
@@ -763,6 +791,10 @@ endif()
 target_include_directories(crypto_roundtrip_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(crypto_roundtrip_test PRIVATE
+    exv-utils-strings
 )
 
 add_test(NAME crypto_roundtrip_test COMMAND crypto_roundtrip_test)

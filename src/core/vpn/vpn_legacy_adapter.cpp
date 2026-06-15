@@ -1,7 +1,6 @@
 #include "vpn_legacy_adapter.hpp"
 #include "vpn.hpp"
 #include "logger.hpp"
-#include "utils.hpp"
 
 namespace ecnuvpn {
 namespace vpn {

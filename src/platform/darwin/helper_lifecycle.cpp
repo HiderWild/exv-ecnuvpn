@@ -4,8 +4,11 @@
 #include "logger.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "cli/console.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "tunnel.hpp"
-#include "utils.hpp"
+#include "utils/strings.hpp"
 
 #include <cctype>
 #include <cerrno>

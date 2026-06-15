@@ -10,7 +10,7 @@ public:
       return result;
     }
 
-    const std::wstring dll_path = widen_utf8(utils::get_bundled_wintun_path());
+    const std::wstring dll_path = widen_utf8(platform::get_bundled_wintun_path());
     if (!file_exists(dll_path))
       return wintun_failure(NativeWintunError::wintun_missing,
                             "bundled wintun.dll is missing");

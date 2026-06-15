@@ -1,5 +1,9 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "app_api.hpp"
-#include "utils.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -23,7 +27,7 @@ void dump_json(const char *label, const nlohmann::json &value) {
 }
 
 struct RuntimePathGuard {
-  ~RuntimePathGuard() { ecnuvpn::utils::clear_runtime_path_override(); }
+  ~RuntimePathGuard() { ecnuvpn::platform::clear_runtime_path_override(); }
 };
 
 bool logs_clear_truncates_runtime_log_file() {

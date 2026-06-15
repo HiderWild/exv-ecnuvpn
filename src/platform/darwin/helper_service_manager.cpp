@@ -1,9 +1,13 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_service_manager.hpp"
 
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <sys/stat.h>
 
@@ -46,12 +50,12 @@ int install_helper_service(const std::string &executable_path,
                            const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  if (!utils::check_root()) {
+  if (!platform::check_root()) {
     cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
 
-  std::string exec_path = executable_path.empty() ? utils::get_executable_path()
+  std::string exec_path = executable_path.empty() ? platform::get_executable_path()
                                                   : executable_path;
   if (exec_path.empty()) {
     cli::print_error("Failed to resolve the exv executable path.");
@@ -75,7 +79,7 @@ int install_helper_service(const std::string &executable_path,
     chmod(platform_config.default_service_binary_path, 0755);
   }
 
-  if (!utils::file_exists(platform_config.default_service_binary_path)) {
+  if (!platform::file_exists(platform_config.default_service_binary_path)) {
     cli::print_error("Stable exv-helper binary is missing: " +
                        std::string(platform_config.default_service_binary_path));
     cli::print_info(
@@ -85,9 +89,9 @@ int install_helper_service(const std::string &executable_path,
 
   std::string shell_command =
       "if [ ! -x " +
-      utils::shell_quote(platform_config.default_service_binary_path) +
+      platform::shell_quote(platform_config.default_service_binary_path) +
       " ]; then exit 0; fi; exec " +
-      utils::shell_quote(platform_config.default_service_binary_path) +
+      platform::shell_quote(platform_config.default_service_binary_path) +
       " --service";
 
   std::ostringstream plist;
@@ -124,10 +128,10 @@ int install_helper_service(const std::string &executable_path,
   ofs.close();
   chmod(platform_config.service_definition_path, 0644);
 
-  utils::run_command(std::string("launchctl bootout system ") +
+  platform::run_command(std::string("launchctl bootout system ") +
                      platform_config.service_definition_path +
                      " >/dev/null 2>&1");
-  if (utils::run_command(std::string("launchctl bootstrap system ") +
+  if (platform::run_command(std::string("launchctl bootstrap system ") +
                          platform_config.service_definition_path) != 0) {
     cli::print_error("Failed to bootstrap EXV helper LaunchDaemon.");
     return 1;
@@ -150,7 +154,7 @@ int install_helper_service(const std::string &executable_path,
 int uninstall_helper_service(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 
-  if (!utils::check_root()) {
+  if (!platform::check_root()) {
     cli::print_error("Root privileges required. Please run with sudo.");
     return 1;
   }
@@ -158,7 +162,7 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   platform::cleanup_routes();
   platform::kill_all_supervisors();
 
-  utils::run_command(std::string("launchctl bootout system ") +
+  platform::run_command(std::string("launchctl bootout system ") +
                      platform_config.service_definition_path +
                      " >/dev/null 2>&1");
   if (*platform_config.service_definition_path)
@@ -177,7 +181,7 @@ int show_helper_service_status(const HelperServiceManagerContext &context) {
 
   cli::print_header("EXV Service Status");
 
-  bool installed = utils::file_exists(platform_config.service_definition_path);
+  bool installed = platform::file_exists(platform_config.service_definition_path);
   bool available = installed ? wait_until_ready(context, 10, 100000) : false;
   std::cout << "  Installed       : " << (installed ? "yes" : "no")
             << std::endl;

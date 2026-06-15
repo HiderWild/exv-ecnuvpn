@@ -1,7 +1,6 @@
 #include "core/config/config.hpp"
 #include "logger.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <algorithm>
 #include <iostream>

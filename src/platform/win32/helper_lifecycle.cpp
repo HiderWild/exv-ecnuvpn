@@ -1,8 +1,12 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
 #include "logger.hpp"
-#include "utils.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -26,7 +30,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &) {
 }
 
 std::string get_interfaces_output() {
-  return utils::run_command_output("netsh interface show interface 2>nul");
+  return platform::run_command_output("netsh interface show interface 2>nul");
 }
 
 std::string create_temp_request_file(const std::string &payload) {

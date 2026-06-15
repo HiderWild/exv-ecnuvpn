@@ -1,9 +1,13 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "core/config/config.hpp"
 #include "crypto.hpp"
 #include "logger.hpp"
 #include "tunnel.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -15,7 +19,7 @@ namespace config {
 namespace {
 
 std::string config_path() {
-  return utils::get_config_dir() + "/config.json";
+  return platform::get_config_dir() + "/config.json";
 }
 
 } // namespace
@@ -24,14 +28,14 @@ std::string config_path() {
 
 Config load() {
   std::string path = config_path();
-  if (!utils::file_exists(path)) {
+  if (!platform::file_exists(path)) {
     Config cfg;
     save(cfg);
     crypto::init_key_if_needed();
     return cfg;
   }
   try {
-    std::string content = utils::read_file(path);
+    std::string content = platform::read_file(path);
     auto j = nlohmann::json::parse(content);
     return j.get<Config>();
   } catch (const std::exception &e) {
@@ -50,7 +54,7 @@ bool save(const Config &cfg) {
   try {
     nlohmann::json j = cfg;
     std::string content = j.dump(2);
-    if (!utils::write_file(path, content)) {
+    if (!platform::write_file(path, content)) {
       logger::error("Failed to write config to: " + path);
       return false;
     }
@@ -64,12 +68,12 @@ bool save(const Config &cfg) {
 // ── Import ──────────────────────────────────────────────────────
 
 Config import_from(const std::string &path) {
-  if (!utils::file_exists(path)) {
+  if (!platform::file_exists(path)) {
     cli::print_error("Import file not found: " + path);
     return load();
   }
   try {
-    std::string content = utils::read_file(path);
+    std::string content = platform::read_file(path);
     auto j = nlohmann::json::parse(content);
     Config cfg = load();
 

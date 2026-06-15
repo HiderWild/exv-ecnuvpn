@@ -408,11 +408,11 @@ bool wintun_start_failure_skips_ip_config() {
 } // namespace
 
 namespace ecnuvpn {
-namespace utils {
+namespace platform {
 
 std::string get_bundled_wintun_path() { return ""; }
 
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 int main() {

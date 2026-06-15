@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/process_control.hpp"
 
-#include "utils.hpp"
 
 #include <string>
 
@@ -28,7 +32,7 @@ bool is_process_alive(int pid) {
 }
 
 int find_openconnect_pid() {
-  std::string output = utils::run_command_output(
+  std::string output = platform::run_command_output(
       "tasklist /FI \"IMAGENAME eq openconnect.exe\" /NH /FO CSV 2>nul");
   auto start = output.find('"', output.find(',') + 1);
   if (start == std::string::npos)

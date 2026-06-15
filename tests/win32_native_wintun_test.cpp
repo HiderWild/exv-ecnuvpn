@@ -312,11 +312,11 @@ bool delete_adapter_ends_session_deletes_adapter_and_closes_handle_once() {
 } // namespace
 
 namespace ecnuvpn {
-namespace utils {
+namespace platform {
 
 std::string get_bundled_wintun_path() { return ""; }
 
-} // namespace utils
+} // namespace platform
 } // namespace ecnuvpn
 
 int main() {

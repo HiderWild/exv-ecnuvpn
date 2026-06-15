@@ -16,7 +16,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     std::cout << prompt;
     std::string val;
     std::getline(std::cin, val);
-    return strip_quotes(utils::trim(val));
+    return strip_quotes(exv::utils::trim(val));
   };
 
   if (key == "password") {
@@ -28,7 +28,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
       std::cout << "  Enable remember_password and set a password now? [Y/n]: ";
       std::string ans;
       std::getline(std::cin, ans);
-      ans = utils::trim(ans);
+      ans = exv::utils::trim(ans);
       if (!ans.empty() && ans[0] != 'y' && ans[0] != 'Y') {
         cli::print_info(
             "Aborted. Password will continue to be prompted at connect time.");

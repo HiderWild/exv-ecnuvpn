@@ -1,3 +1,8 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "helper/helper.hpp"
 #include "helper/helper_daemon_context.hpp"
 #include "helper/helper_ipc.hpp"
@@ -11,7 +16,6 @@
 #include "platform/common/helper_lifecycle.hpp"
 #include "platform/common/helper_platform.hpp"
 #include "platform/common/helper_service_manager.hpp"
-#include "utils.hpp"
 #include "vpn.hpp"
 
 #include <cerrno>

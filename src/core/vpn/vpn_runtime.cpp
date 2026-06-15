@@ -1,7 +1,11 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "vpn.hpp"
 
 #include "platform/common/process_control.hpp"
-#include "utils.hpp"
 
 #include <cerrno>
 #include <fstream>
@@ -13,11 +17,11 @@ namespace {
 
 static std::string read_interfaces_output() {
 #ifdef __APPLE__
-  return utils::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
+  return platform::run_command_output("ifconfig | grep -A 2 'utun' | head -20");
 #elif defined(_WIN32)
-  return utils::run_command_output("netsh interface show interface 2>nul");
+  return platform::run_command_output("netsh interface show interface 2>nul");
 #else
-  return utils::run_command_output("ip addr show type tun 2>/dev/null | head -20");
+  return platform::run_command_output("ip addr show type tun 2>/dev/null | head -20");
 #endif
 }
 

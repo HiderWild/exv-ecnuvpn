@@ -1,6 +1,11 @@
+#include "utils/strings.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/process_control.hpp"
 
-#include "utils.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -19,8 +24,8 @@ bool is_process_alive(int pid) {
 }
 
 int find_openconnect_pid() {
-  std::string output = utils::run_command_output("pgrep -x openconnect");
-  output = utils::trim(output);
+  std::string output = platform::run_command_output("pgrep -x openconnect");
+  output = exv::utils::trim(output);
   if (output.empty())
     return -1;
   try {

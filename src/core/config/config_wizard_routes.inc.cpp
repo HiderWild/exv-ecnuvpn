@@ -66,7 +66,7 @@ wiz_route_selector(const std::vector<std::string> &default_routes) {
       if (st.input.empty()) {
         st.done = true;
       } else {
-        std::string route = utils::trim(st.input);
+        std::string route = exv::utils::trim(st.input);
         st.input.clear();
         if (!route.empty()) {
           if (!is_valid_cidr(route)) {

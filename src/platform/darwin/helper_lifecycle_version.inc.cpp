@@ -5,7 +5,7 @@ bool prompt_confirm(const std::string &question, bool default_yes) {
   std::cout << "  " << question << (default_yes ? " [Y/n]: " : " [y/N]: ");
   std::string input;
   std::getline(std::cin, input);
-  input = utils::trim(input);
+  input = exv::utils::trim(input);
   if (input.empty())
     return default_yes;
   return input[0] == 'y' || input[0] == 'Y';
@@ -90,11 +90,11 @@ int compare_semantic_versions(const SemanticVersion &lhs,
 }
 
 bool read_binary_version(const std::string &path, SemanticVersion *version) {
-  if (!version || !utils::file_exists(path))
+  if (!version || !platform::file_exists(path))
     return false;
 
-  std::string output = utils::trim(
-      utils::run_command_output(utils::shell_quote(path) + " version 2>/dev/null"));
+  std::string output = exv::utils::trim(
+      platform::run_command_output(platform::shell_quote(path) + " version 2>/dev/null"));
   if (output.empty())
     return false;
   return parse_semantic_version(output, version);

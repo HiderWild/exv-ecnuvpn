@@ -1,3 +1,18 @@
+#include "platform/common/file_system.hpp"
+
+#include "platform/common/runtime_paths.hpp"
+
+#include <fstream>
+#include <sstream>
+#ifdef _WIN32
+#include <direct.h>
+#include <sys/stat.h>
+#else
+#include <sys/stat.h>
+#endif
+
+namespace ecnuvpn::platform {
+
 bool file_exists(const std::string &path) {
 #ifndef _WIN32
   struct stat st;
@@ -6,11 +21,6 @@ bool file_exists(const std::string &path) {
   struct _stat st;
   return _stat(path.c_str(), &st) == 0;
 #endif
-}
-
-bool fix_config_dir_ownership() {
-  return platform::fix_config_dir_ownership(get_config_dir(),
-                                            get_effective_home());
 }
 
 bool ensure_dir(const std::string &path) {
@@ -31,8 +41,9 @@ bool ensure_dir(const std::string &path) {
 
 std::string read_file(const std::string &path) {
   std::ifstream ifs(path);
-  if (!ifs.is_open())
+  if (!ifs.is_open()) {
     return "";
+  }
   std::ostringstream ss;
   ss << ifs.rdbuf();
   return ss.str();
@@ -40,8 +51,12 @@ std::string read_file(const std::string &path) {
 
 bool write_file(const std::string &path, const std::string &content) {
   std::ofstream ofs(path);
-  if (!ofs.is_open())
+  if (!ofs.is_open()) {
     return false;
+  }
   ofs << content;
   return ofs.good() && sync_owner(path);
 }
+
+} // namespace ecnuvpn::platform
+

@@ -1,6 +1,10 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/win32/native_wintun.hpp"
 
-#include "utils.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -197,7 +201,7 @@ const char *native_wintun_error_code(NativeWintunError error) {
 NativeWintunDependencies default_native_wintun_dependencies() {
   NativeWintunDependencies dependencies;
   dependencies.path_provider = [] {
-    return widen_utf8(utils::get_bundled_wintun_path());
+    return widen_utf8(platform::get_bundled_wintun_path());
   };
   dependencies.file_exists = default_file_exists;
   dependencies.api_loader = load_real_wintun_api;

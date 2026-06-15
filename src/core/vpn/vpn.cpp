@@ -6,7 +6,6 @@
 #include "log_renderer.hpp"
 #include "runtime/runtime_context.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 #include "vpn_engine/native_engine.hpp"
 
 #include <iostream>

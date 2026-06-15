@@ -80,6 +80,9 @@ bool tree_contains_any(const std::filesystem::path &root,
     if (!entry.is_regular_file() || !is_source_file(entry.path())) {
       continue;
     }
+    if (entry.path().filename().string() == "contract_manifest_test.cpp") {
+      continue;
+    }
     const auto text = read_text_file(entry.path());
     for (const auto &needle : needles) {
       if (text.find(needle) != std::string::npos) {
@@ -146,6 +149,9 @@ bool private_controller_impl_include_leaks(const std::filesystem::path &root) {
     if (!entry.is_regular_file() || !is_source_file(entry.path())) {
       continue;
     }
+    if (entry.path().filename().string() == "contract_manifest_test.cpp") {
+      continue;
+    }
     const auto text = read_text_file(entry.path());
     const auto quoted_include =
         std::string{"#include \"core/tunnel_controller/"} +
@@ -167,6 +173,69 @@ bool private_controller_impl_include_leaks(const std::filesystem::path &root) {
     std::cerr << "Private tunnel controller implementation header leaked into "
               << entry.path().string() << '\n';
     return true;
+  }
+  return false;
+}
+
+bool source_tree_contains_utils_header_include(const std::filesystem::path &root) {
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    if (entry.path().filename().string() == "contract_manifest_test.cpp") {
+      continue;
+    }
+    const auto text = read_text_file(entry.path());
+    if (text.find("#include \"utils.hpp\"") != std::string::npos ||
+        text.find("#include <utils.hpp>") != std::string::npos) {
+      std::cerr << "Forbidden utils.hpp include in " << entry.path().string()
+                << '\n';
+      return true;
+    }
+  }
+  return false;
+}
+
+bool line_contains_forbidden_utils_scope(const std::string &line) {
+  if (line.find("namespace utils") != std::string::npos ||
+      line.find("namespace ecnuvpn::utils") != std::string::npos ||
+      line.find("ecnuvpn::utils::") != std::string::npos) {
+    return true;
+  }
+
+  std::size_t pos = line.find("utils::");
+  while (pos != std::string::npos) {
+    const bool qualified_by_exv =
+        pos >= 5 && line.compare(pos - 5, 5, "exv::") == 0;
+    if (!qualified_by_exv) {
+      return true;
+    }
+    pos = line.find("utils::", pos + 7);
+  }
+  return false;
+}
+
+bool tree_contains_forbidden_utils_scope(const std::filesystem::path &root) {
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
+      continue;
+    }
+    if (entry.path().filename().string() == "contract_manifest_test.cpp") {
+      continue;
+    }
+
+    std::istringstream lines(read_text_file(entry.path()));
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(lines, line)) {
+      ++line_number;
+      if (!line_contains_forbidden_utils_scope(line)) {
+        continue;
+      }
+      std::cerr << "Forbidden legacy utils namespace use in "
+                << entry.path().string() << ':' << line_number << '\n';
+      return true;
+    }
   }
   return false;
 }
@@ -419,6 +488,32 @@ int main() {
                                        "utils_terminal.inc.cpp"),
               "terminal output must live under src/cli, not utils include "
               "units") &&
+       ok;
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "utils.hpp"),
+              "monolithic utils.hpp must be removed") &&
+       ok;
+  ok = expect(!std::filesystem::exists(source_dir / "src" / "utils.cpp"),
+              "monolithic utils.cpp must be removed") &&
+       ok;
+  ok = expect(!tree_contains_matching_filename(source_dir / "src", "utils_",
+                                               ".inc.cpp"),
+              "utils include-unit sources must be removed") &&
+       ok;
+  ok = expect(!source_tree_contains_utils_header_include(source_dir / "src"),
+              "production code must include explicit utils, cli, or platform "
+              "headers instead of utils.hpp") &&
+       ok;
+  ok = expect(!source_tree_contains_utils_header_include(source_dir / "tests"),
+              "tests must include explicit utils, cli, or platform headers "
+              "instead of utils.hpp") &&
+       ok;
+  ok = expect(!tree_contains_forbidden_utils_scope(source_dir / "src"),
+              "production code must not use legacy ecnuvpn::utils or "
+              "unqualified utils:: APIs") &&
+       ok;
+  ok = expect(!tree_contains_forbidden_utils_scope(source_dir / "tests"),
+              "tests must not use legacy ecnuvpn::utils or unqualified "
+              "utils:: APIs") &&
        ok;
   if (std::filesystem::exists(legacy_utils_header_path)) {
     ok = expect(!file_contains_any(

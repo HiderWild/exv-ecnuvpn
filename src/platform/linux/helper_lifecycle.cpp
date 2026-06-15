@@ -1,9 +1,14 @@
+#include "utils/strings.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/helper_lifecycle.hpp"
 
 #include "helper/helper_ipc.hpp"
 #include "logger.hpp"
 #include "tunnel.hpp"
-#include "utils.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -23,7 +28,7 @@ void cleanup_routes() {
 }
 
 int find_openconnect_pid() {
-  std::string output = utils::trim(utils::run_command_output("pgrep -x openconnect"));
+  std::string output = exv::utils::trim(platform::run_command_output("pgrep -x openconnect"));
   if (output.empty())
     return -1;
   std::istringstream iss(output);
@@ -37,18 +42,18 @@ int find_openconnect_pid() {
 }
 
 std::string get_interfaces_output() {
-  return utils::run_command_output("ip addr show type tun 2>/dev/null | head -20");
+  return platform::run_command_output("ip addr show type tun 2>/dev/null | head -20");
 }
 
 void kill_all_supervisors() {
-  std::string output = utils::trim(utils::run_command_output("pgrep -f 'exv -rt'"));
+  std::string output = exv::utils::trim(platform::run_command_output("pgrep -f 'exv -rt'"));
   if (output.empty())
     return;
 
   std::istringstream iss(output);
   std::string line;
   while (std::getline(iss, line)) {
-    line = utils::trim(line);
+    line = exv::utils::trim(line);
     if (line.empty())
       continue;
     try {
@@ -64,7 +69,7 @@ void kill_all_supervisors() {
 }
 
 void fix_config_dir_ownership() {
-  utils::fix_config_dir_ownership();
+  platform::fix_runtime_config_dir_ownership();
 }
 
 int copy_self_to_stable_path_and_reexec(const std::string &) {

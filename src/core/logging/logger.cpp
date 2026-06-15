@@ -1,7 +1,11 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "logger.hpp"
 #include "log_event_bus.hpp"
 #include "cli/console.hpp"
-#include "utils.hpp"
 
 #include <ctime>
 #include <deque>
@@ -15,15 +19,15 @@
 namespace ecnuvpn {
 namespace logger {
 
-void init() { utils::ensure_dir(utils::get_config_dir()); }
+void init() { platform::ensure_dir(platform::get_config_dir()); }
 
 void write(const std::string &level, const std::string &text) {
-  std::string log_path = utils::get_log_path();
+  std::string log_path = platform::get_log_path();
   std::ofstream ofs(log_path, std::ios::app);
   if (ofs.is_open()) {
     ofs << text << std::endl;
     ofs.flush();
-    utils::sync_owner(log_path);
+    platform::sync_owner(log_path);
   }
 }
 
@@ -62,7 +66,7 @@ void event(const std::string &level, const std::string &component,
 
 std::vector<std::string> tail(int lines) {
   std::vector<std::string> result;
-  std::string log_path = utils::get_log_path();
+  std::string log_path = platform::get_log_path();
   std::ifstream ifs(log_path);
   if (!ifs.is_open()) {
     return result;
@@ -80,8 +84,8 @@ std::vector<std::string> tail(int lines) {
 }
 
 void show_logs(int lines) {
-  std::string log_path = utils::get_log_path();
-  if (!utils::file_exists(log_path)) {
+  std::string log_path = platform::get_log_path();
+  if (!platform::file_exists(log_path)) {
     cli::print_info("No log file found at: " + log_path);
     return;
   }

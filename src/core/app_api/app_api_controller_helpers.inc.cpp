@@ -12,7 +12,7 @@
 // =========================================================================
 
 void cleanup_legacy_supervisor_state_files() {
-  const std::string config_dir = utils::get_config_dir();
+  const std::string config_dir = platform::get_config_dir();
   // Remove native-session-state.json and route-ready marker left by the
   // legacy NativeSessionEventRecorder.
   // Note: clear_native_session_state was removed in Phase 3A with the
@@ -20,7 +20,7 @@ void cleanup_legacy_supervisor_state_files() {
 
   // Legacy supervisor PID file cleanup (no longer used).
   std::string supervisor_pid_file = platform::supervisor_pid_path(config_dir);
-  if (utils::file_exists(supervisor_pid_file))
+  if (platform::file_exists(supervisor_pid_file))
     std::remove(supervisor_pid_file.c_str());
 }
 

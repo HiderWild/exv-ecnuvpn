@@ -1,8 +1,12 @@
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
+#include "platform/common/process_utils.hpp"
+#include "platform/common/runtime_discovery.hpp"
+#include "platform/common/runtime_paths.hpp"
 #include "platform/common/oneshot_bootstrap.hpp"
 
 #include "helper/common/helper_messages.hpp"
 #include "platform/common/backend_resolver.hpp"
-#include "utils.hpp"
 
 #include <chrono>
 #include <random>
@@ -69,20 +73,20 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   backend.owner = std::to_string(getuid());
   backend.parent_pid = static_cast<int>(getpid());
 
-  std::string command = utils::shell_quote(request.helper_path) +
+  std::string command = platform::shell_quote(request.helper_path) +
                         " --oneshot --endpoint " +
-                        utils::shell_quote(backend.endpoint) +
+                        platform::shell_quote(backend.endpoint) +
                         " --owner " +
-                        utils::shell_quote(backend.owner) +
+                        platform::shell_quote(backend.owner) +
                         " --parent-pid " +
                         std::to_string(backend.parent_pid) +
                         " >/dev/null 2>&1 &";
   std::string osascript =
       "osascript -e " +
-      utils::shell_quote("do shell script " + apple_script_string(command) +
+      platform::shell_quote("do shell script " + apple_script_string(command) +
                          " with administrator privileges");
 
-  int rc = utils::run_command(osascript);
+  int rc = platform::run_command(osascript);
   if (rc != 0) {
     backend.code = kOneshotElevationDeniedCode;
     backend.message = "Administrator authorization was cancelled or failed.";

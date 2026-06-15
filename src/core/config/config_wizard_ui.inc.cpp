@@ -45,7 +45,7 @@ static std::string wiz_prompt(const std::string &label,
   std::cout << ": ";
   std::string input;
   std::getline(std::cin, input);
-  input = utils::trim(input);
+  input = exv::utils::trim(input);
   return input.empty() ? default_val : input;
 }
 
@@ -53,7 +53,7 @@ static bool wiz_confirm(const std::string &question, bool default_yes = true) {
   std::cout << "    " << question << (default_yes ? " [Y/n]: " : " [y/N]: ");
   std::string input;
   std::getline(std::cin, input);
-  input = utils::trim(input);
+  input = exv::utils::trim(input);
   if (input.empty())
     return default_yes;
   return (input[0] == 'y' || input[0] == 'Y');
