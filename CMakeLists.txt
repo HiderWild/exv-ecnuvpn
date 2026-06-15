@@ -906,6 +906,46 @@ if(WIN32)
     add_test(NAME win32_webview2_runtime_test COMMAND win32_webview2_runtime_test)
 endif()
 
+set(EXV_UI_COMMON_SOURCES
+    src/app/ui_shell/ui_shell_main.cpp
+    src/app/ui_shell/ui_window.cpp
+    src/app/ui_shell/ui_shell_options.cpp
+    src/app/ui_shell/renderer_assets.cpp
+    src/app/ui_shell/host_bridge.cpp
+    src/app/ui_shell/core_rpc_client.cpp
+    src/app/ui_shell/core_process_manager.cpp
+)
+
+set(EXV_UI_PLATFORM_SOURCES)
+if(WIN32)
+    list(APPEND EXV_UI_PLATFORM_SOURCES
+        src/platform/win32/ui_shell/webview2_host_win32.cpp
+        src/platform/win32/ui_shell/webview2_runtime_win32.cpp
+    )
+elseif(APPLE)
+    list(APPEND EXV_UI_PLATFORM_SOURCES
+        src/platform/darwin/ui_shell/wk_webview_host_darwin.mm
+    )
+elseif(UNIX)
+    list(APPEND EXV_UI_PLATFORM_SOURCES
+        src/platform/linux/ui_shell/webkitgtk_host_linux.cpp
+    )
+endif()
+
+add_executable(exv-ui
+    ${EXV_UI_COMMON_SOURCES}
+    ${EXV_UI_PLATFORM_SOURCES}
+)
+
+target_include_directories(exv-ui PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+if(WIN32)
+    target_link_libraries(exv-ui PRIVATE advapi32)
+endif()
+
 add_executable(crypto_roundtrip_test
     tests/crypto_roundtrip_test.cpp
     src/core/crypto/crypto.cpp
