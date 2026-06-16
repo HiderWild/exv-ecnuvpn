@@ -234,6 +234,10 @@ void preserve_quarantined_registry(
 
 } // namespace
 
+nlohmann::json core_registry_to_json(const CoreRegistrySnapshot& snapshot) {
+    return to_json(snapshot);
+}
+
 bool write_core_registry(const CoreRegistrySnapshot& snapshot) {
     return write_core_registry(snapshot, core_registry_path());
 }

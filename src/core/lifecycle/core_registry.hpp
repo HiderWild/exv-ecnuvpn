@@ -64,4 +64,6 @@ void apply_tunnel_status(CoreRegistrySnapshot& snapshot,
 CoreRegistrySnapshot core_registry_snapshot_from_hello(
     const nlohmann::json& hello_payload, const std::string& ipc_path);
 
+nlohmann::json core_registry_to_json(const CoreRegistrySnapshot& snapshot);
+
 } // namespace exv::core::lifecycle

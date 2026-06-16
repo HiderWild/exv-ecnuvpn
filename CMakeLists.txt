@@ -83,6 +83,7 @@ set(EXV_CORE_SOURCES
     src/core/lifecycle/core_paths.cpp
     src/core/lifecycle/core_lock.cpp
     src/core/lifecycle/core_registry.cpp
+    src/platform/common/core_resolver.cpp
     src/core/pipe_ipc.cpp
     src/core/tunnel_controller/engine_event_bridge.cpp
     src/core/tunnel_controller/core_session_runner.cpp
@@ -187,6 +188,7 @@ set(EXV_PLATFORM_DEFINITIONS)
 # Source files
 set(SOURCES
     src/app/main.cpp
+    src/platform/common/core_resolver_platform_deps.cpp
     ${EXV_CLI_SOURCES}
 )
 find_package(Threads REQUIRED)
@@ -893,11 +895,15 @@ add_executable(ui_shell_core_rpc_client_test
     tests/ui_shell_core_rpc_client_test.cpp
     src/app/ui_shell/core_rpc_client.cpp
     src/app/ui_shell/core_process_manager.cpp
+    src/platform/common/core_resolver_platform_deps.cpp
+    ${EXV_CLI_SOURCES}
 )
 
 target_include_directories(ui_shell_core_rpc_client_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(ui_shell_core_rpc_client_test PRIVATE exv-core)
 
 add_test(NAME ui_shell_core_rpc_client_test COMMAND ui_shell_core_rpc_client_test)
 
@@ -908,11 +914,15 @@ add_executable(ui_shell_runtime_test
     src/app/ui_shell/renderer_assets.cpp
     src/app/ui_shell/ui_shell_runtime.cpp
     src/app/ui_shell/ui_window.cpp
+    ${EXV_CLI_SOURCES}
+    src/platform/common/core_resolver_platform_deps.cpp
 )
 
 target_include_directories(ui_shell_runtime_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(ui_shell_runtime_test PRIVATE exv-core)
 
 add_test(NAME ui_shell_runtime_test COMMAND ui_shell_runtime_test)
 
@@ -1021,6 +1031,8 @@ set(EXV_UI_COMMON_SOURCES
     src/app/ui_shell/core_rpc_client.cpp
     src/app/ui_shell/core_process_manager.cpp
     src/app/ui_shell/ui_shell_runtime.cpp
+    ${EXV_CLI_SOURCES}
+    src/platform/common/core_resolver_platform_deps.cpp
 )
 
 set(EXV_UI_PLATFORM_SOURCES)
@@ -1102,7 +1114,7 @@ target_include_directories(exv-ui PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(exv-ui PRIVATE advapi32 urlmon)
+    target_link_libraries(exv-ui PRIVATE advapi32 urlmon exv-core)
     if(EXV_BUILD_UI_SHELL)
         target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
         target_include_directories(exv-ui PRIVATE "${WEBVIEW2_INCLUDE_DIR}")
@@ -1637,6 +1649,23 @@ target_compile_definitions(core_lifecycle_registry_test PRIVATE
 target_link_libraries(core_lifecycle_registry_test PRIVATE exv-core)
 
 add_test(NAME core_lifecycle_registry_test COMMAND core_lifecycle_registry_test)
+
+add_executable(core_resolver_test
+    tests/core_resolver_test.cpp
+)
+
+target_include_directories(core_resolver_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(core_resolver_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(core_resolver_test PRIVATE exv-core)
+
+add_test(NAME core_resolver_test COMMAND core_resolver_test)
 
 add_executable(tunnel_controller_integration_test
     tests/tunnel_controller_integration_test.cpp
@@ -2346,6 +2375,7 @@ set(_release_blocking_tests
     tunnel_public_module_smoke_test
     helper_lease_manager_test
     core_lifecycle_registry_test
+    core_resolver_test
     helper_cleanup_registry_test
     helper_contract_test
     helper_module_smoke_test
@@ -2468,6 +2498,7 @@ set_property(TEST
     tunnel_public_module_smoke_test
     helper_lease_manager_test
     core_lifecycle_registry_test
+    core_resolver_test
     helper_cleanup_registry_test
     helper_contract_test
     helper_module_smoke_test
@@ -2523,6 +2554,7 @@ set_property(TEST
     core_process_test
     core_process_lifecycle_test
     core_lifecycle_registry_test
+    core_resolver_test
     core_hello_actions_test
     tunnel_contract_test
     tunnel_module_smoke_test
@@ -2565,6 +2597,7 @@ set_property(TEST
     config_actions_test
     core_hello_actions_test
     core_lifecycle_registry_test
+    core_resolver_test
     tunnel_contract_test
     config_module_smoke_test
     service_actions_test

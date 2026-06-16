@@ -1,5 +1,9 @@
 #include "app/ui_shell/core_rpc_client.hpp"
 #include "app/ui_shell/core_process_manager.hpp"
+#include "platform/common/core_resolver.hpp"
+#include "contracts/generated/system_contract.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <iostream>
 #include <memory>
@@ -324,6 +328,62 @@ int main() {
              ok_all;
     ok_all = expect(missing_response.code == "transport_closed",
                     "missing core executable error code should be transport_closed") &&
+             ok_all;
+  }
+
+  // ── Resolver integration: classify_core_state with injected deps ──
+  {
+    using namespace exv::core::lifecycle;
+    CoreResolverDeps test_deps;
+    test_deps.try_connect_ipc = [](const std::string &) { return false; };
+    test_deps.send_ipc_request = [](const std::string &, const std::string &) {
+      return std::string();
+    };
+    test_deps.disconnect_ipc = [] {};
+    test_deps.launch_core = [](const std::string &, const std::string &,
+                               const std::string &) { return false; };
+    test_deps.get_frontend_executable_path = []() { return "/no/exv/here"; };
+    test_deps.run_command_output = [](const std::string &) { return std::string(); };
+    test_deps.is_pid_alive = [](int) { return false; };
+    test_deps.get_state_dir = []() { return "/tmp/exv-test"; };
+    test_deps.get_home_dir = []() { return "/tmp"; };
+    test_deps.get_env_var = [](const std::string &) { return std::string(); };
+
+    CoreResolveOptions opts;
+    auto result = ecnuvpn::ui_shell::classify_core_state(opts, test_deps);
+    ok_all = expect(result.status == CoreResolveStatus::CoreNotFound,
+                    "classify_core_state with no core should return CoreNotFound") &&
+             ok_all;
+  }
+
+  // ── Resolver integration: reuse existing core ──
+  {
+    using namespace exv::core::lifecycle;
+    CoreResolverDeps test_deps;
+    test_deps.try_connect_ipc = [](const std::string &) { return true; };
+    test_deps.send_ipc_request = [](const std::string &, const std::string &) {
+      nlohmann::json payload;
+      payload["ipc_protocol_version"] = "ipc-v1";
+      payload["contract_version"] =
+          std::string(exv::contracts::generated::CONTRACT_VERSION);
+      payload["app_version"] = "3.3.0";
+      payload["core_instance_id"] = "test-core";
+      payload["pid"] = 42;
+      payload["core_path"] = "/usr/bin/exv";
+      payload["started_at"] = "2026-06-16T12:00:00.000Z";
+      nlohmann::json response;
+      response["success"] = true;
+      response["payload_json"] = payload.dump();
+      response["request_id"] = "resolver-hello";
+      return response.dump();
+    };
+    test_deps.disconnect_ipc = [] {};
+    test_deps.get_state_dir = []() { return "/tmp/exv-test"; };
+
+    CoreResolveOptions opts;
+    auto result = ecnuvpn::ui_shell::classify_core_state(opts, test_deps);
+    ok_all = expect(result.status == CoreResolveStatus::ReuseExisting,
+                    "classify_core_state with live IPC should return ReuseExisting") &&
              ok_all;
   }
 
