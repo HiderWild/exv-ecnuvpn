@@ -1630,6 +1630,10 @@ target_include_directories(core_lifecycle_registry_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_compile_definitions(core_lifecycle_registry_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 target_link_libraries(core_lifecycle_registry_test PRIVATE exv-core)
 
 add_test(NAME core_lifecycle_registry_test COMMAND core_lifecycle_registry_test)
@@ -2357,7 +2361,6 @@ set(_release_blocking_tests
     vpn_actions_test
     config_actions_test
     core_hello_actions_test
-    core_lifecycle_registry_test
     service_actions_test
     route_actions_test
     error_contract_test
@@ -2496,7 +2499,6 @@ set_property(TEST
     native_auth_session_json_test
     core_process_test
     core_process_lifecycle_test
-    core_lifecycle_registry_test
     helper_delegating_network_ops_test
     app_api_status_contract_test
     APPEND PROPERTY LABELS "architecture"

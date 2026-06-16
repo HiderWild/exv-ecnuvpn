@@ -2,11 +2,13 @@
 
 #include "core/lifecycle/core_paths.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 
 #ifdef _WIN32
@@ -23,6 +25,30 @@ int current_process_id() {
     return static_cast<int>(GetCurrentProcessId());
 #else
     return static_cast<int>(getpid());
+#endif
+}
+
+std::uint64_t next_temp_suffix() {
+    static std::atomic<std::uint64_t> next_suffix{0};
+    return next_suffix.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::filesystem::path unique_temp_path(const std::filesystem::path& final_path) {
+    return final_path.parent_path() /
+        (final_path.filename().string() + ".tmp." +
+         std::to_string(current_process_id()) + "." +
+         std::to_string(next_temp_suffix()));
+}
+
+bool replace_file_atomically(const std::filesystem::path& source_path,
+                             const std::filesystem::path& final_path) {
+#ifdef _WIN32
+    return MoveFileExA(source_path.string().c_str(), final_path.string().c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    std::error_code ec;
+    std::filesystem::rename(source_path, final_path, ec);
+    return !ec;
 #endif
 }
 
@@ -94,14 +120,19 @@ std::optional<CoreRegistrySnapshot> snapshot_from_json(const nlohmann::json& jso
 
 bool write_json_atomic(const std::filesystem::path& final_path,
                        const nlohmann::json& json) {
+    static std::mutex write_mutex;
+    std::lock_guard<std::mutex> lock(write_mutex);
+
     std::error_code ec;
-    std::filesystem::create_directories(final_path.parent_path(), ec);
-    if (ec) {
-        return false;
+    const auto parent_path = final_path.parent_path();
+    if (!parent_path.empty()) {
+        std::filesystem::create_directories(parent_path, ec);
+        if (ec) {
+            return false;
+        }
     }
 
-    const auto tmp_path =
-        final_path.string() + ".tmp." + std::to_string(current_process_id());
+    const auto tmp_path = unique_temp_path(final_path);
 
     {
         std::ofstream out(tmp_path, std::ios::out | std::ios::trunc);
@@ -109,24 +140,19 @@ bool write_json_atomic(const std::filesystem::path& final_path,
             return false;
         }
         out << json.dump(2);
+        out.flush();
         if (!out.good()) {
+            std::filesystem::remove(tmp_path, ec);
             return false;
         }
     }
 
-    std::filesystem::remove(final_path, ec);
-    ec.clear();
-    std::filesystem::rename(tmp_path, final_path, ec);
-    if (!ec) {
+    if (replace_file_atomically(tmp_path, final_path)) {
         return true;
     }
 
-    std::error_code copy_ec;
-    std::filesystem::copy_file(
-        tmp_path, final_path, std::filesystem::copy_options::overwrite_existing,
-        copy_ec);
     std::filesystem::remove(tmp_path, ec);
-    return !copy_ec;
+    return false;
 }
 
 } // namespace
@@ -243,7 +269,8 @@ CoreRegistrySnapshot core_registry_snapshot_from_hello(
     snapshot.last_known_tunnel_phase = "idle";
     snapshot.last_known_connected = false;
     snapshot.last_known_network_ready = false;
-    snapshot.helper_core_lease_id.clear();
+    snapshot.helper_core_lease_id =
+        hello_payload.value("helper_core_lease_id", std::string());
     return snapshot;
 }
 

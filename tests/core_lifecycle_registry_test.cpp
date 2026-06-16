@@ -5,14 +5,21 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <atomic>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <unistd.h>
+#endif
+
+#ifndef ECNUVPN_SOURCE_DIR
+#define ECNUVPN_SOURCE_DIR "."
 #endif
 
 namespace {
@@ -41,6 +48,13 @@ std::filesystem::path make_temp_dir(const std::string& tag) {
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
     return root;
+}
+
+std::string read_file(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
 }
 
 exv::core::lifecycle::CoreRegistrySnapshot make_snapshot(
@@ -145,6 +159,58 @@ int main() {
     }
 
     {
+        const fs::path root = make_temp_dir("ecnuvpn-core-registry-concurrent");
+        const std::string state_dir = root.string();
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(state_dir);
+
+        std::atomic<bool> writes_ok{true};
+        std::vector<std::thread> writers;
+        for (int writer = 0; writer < 8; ++writer) {
+            writers.emplace_back([&, writer] {
+                for (int iteration = 0; iteration < 20; ++iteration) {
+                    auto snapshot = make_snapshot(state_dir);
+                    snapshot.core_instance_id =
+                        "core-instance-" + std::to_string(writer) + "-" +
+                        std::to_string(iteration);
+                    snapshot.pid = 5000 + writer;
+                    snapshot.helper_core_lease_id =
+                        "core-lease-" + std::to_string(iteration);
+                    snapshot.last_known_connected = (iteration % 2) == 0;
+                    if (!exv::core::lifecycle::write_core_registry(
+                            snapshot, registry_path)) {
+                        writes_ok.store(false);
+                    }
+                }
+            });
+        }
+        for (auto& writer : writers) {
+            writer.join();
+        }
+
+        ok = expect(writes_ok.load(),
+                    "concurrent registry writes should all succeed") && ok;
+
+        const auto loaded = exv::core::lifecycle::read_core_registry(registry_path);
+        ok = expect(loaded.state == CoreRegistryReadState::present,
+                    "concurrent registry writes should leave a readable registry") &&
+             ok;
+        ok = expect(loaded.snapshot.has_value(),
+                    "concurrent registry writes should keep a final snapshot") && ok;
+
+        std::vector<fs::path> leftovers;
+        for (const auto& entry : fs::directory_iterator(root)) {
+            const auto name = entry.path().filename().string();
+            if (name.find(".tmp.") != std::string::npos) {
+                leftovers.push_back(entry.path());
+            }
+        }
+        ok = expect(leftovers.empty(),
+                    "concurrent registry writes should not leave temp files behind") &&
+             ok;
+    }
+
+    {
         const fs::path root = make_temp_dir("ecnuvpn-core-registry-missing");
         const auto registry_path =
             exv::core::lifecycle::core_registry_path(root.string());
@@ -221,6 +287,20 @@ int main() {
                     "compare/delete should delete matching registry") && ok;
         ok = expect(!fs::exists(registry_path),
                     "matching compare/delete should remove registry file") && ok;
+    }
+
+    {
+        const auto source_path = fs::path(ECNUVPN_SOURCE_DIR) / "src" / "core" /
+            "lifecycle" / "core_registry.cpp";
+        const auto source = read_file(source_path);
+        ok = expect(!source.empty(),
+                    "core_registry.cpp source should be readable for contract checks") &&
+             ok;
+        ok = expect(source.find("copy_file(") == std::string::npos,
+                    "core registry writes must not fall back to copy_file") && ok;
+        ok = expect(source.find("remove(final_path") == std::string::npos,
+                    "core registry writes must not delete the final path before replace") &&
+             ok;
     }
 
     if (ok) {

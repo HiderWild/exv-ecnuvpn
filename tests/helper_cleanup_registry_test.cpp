@@ -1,9 +1,13 @@
 // Tests for CleanupRegistry: resource tracking, persistence.
 
+#include "helper/helper_handler.hpp"
 #include "helper/runtime/cleanup_registry.hpp"
 #include "helper/common/helper_messages.hpp"
 #include "core/lifecycle/core_paths.hpp"
 #include "core/lifecycle/core_registry.hpp"
+#include "runtime/runtime_context.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <iostream>
 #include <string>
@@ -18,6 +22,8 @@
 #endif
 
 namespace {
+
+using json = nlohmann::json;
 
 bool expect(bool condition, const char* message) {
     if (condition) return true;
@@ -38,6 +44,34 @@ std::string read_file(const std::filesystem::path& path) {
     std::ostringstream contents;
     contents << input.rdbuf();
     return contents.str();
+}
+
+exv::helper::HelperResponse dispatch_json(exv::helper::HelperHandler& handler,
+                                          exv::helper::HelperOp op,
+                                          const json& payload) {
+    exv::helper::HelperRequest request;
+    request.op = op;
+    request.payload_json = payload.dump();
+    return handler.handle(request);
+}
+
+exv::core::lifecycle::CoreRegistrySnapshot make_core_registry_snapshot(
+    const std::filesystem::path& root, int pid, const std::string& lease_id) {
+    exv::core::lifecycle::CoreRegistrySnapshot snapshot;
+    snapshot.core_instance_id = "core-instance-helper";
+    snapshot.pid = pid;
+    snapshot.core_path = "C:/Program Files/ECNU-VPN/exv.exe";
+    snapshot.ipc_path = exv::core::lifecycle::core_ipc_path(root.string());
+    snapshot.ipc_protocol_version = exv::core::lifecycle::ipc_protocol_name();
+    snapshot.app_version = "3.3.0";
+    snapshot.contract_version = "2026-06-16.cli-core-ui-contract.v1";
+    snapshot.started_at = "2026-06-16T12:00:00.000Z";
+    snapshot.last_heartbeat_at = "2026-06-16T12:00:01.000Z";
+    snapshot.last_known_tunnel_phase = "idle";
+    snapshot.last_known_connected = false;
+    snapshot.last_known_network_ready = false;
+    snapshot.helper_core_lease_id = lease_id;
+    return snapshot;
 }
 
 } // namespace
@@ -392,6 +426,148 @@ int main() {
         registry.remove_session(rec.session_id);
         ok = expect(fs::exists(registry_path),
                     "mismatched helper cleanup must keep versioned core registry") && ok;
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- production helper cleanup binds and removes the versioned core registry ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-production-" +
+             std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+
+        exv::helper::HelperHandler handler;
+
+        exv::helper::AcquireCoreLeaseRequest acquire_req;
+        acquire_req.core_pid = 5150;
+        acquire_req.purpose = "connect";
+        auto acquire = dispatch_json(
+            handler, exv::helper::HelperOp::AcquireCoreLease, json(acquire_req));
+        ok = expect(acquire.success,
+                    "AcquireCoreLease should succeed before production cleanup test") &&
+             ok;
+        const auto acquire_resp =
+            exv::helper::acquire_core_lease_response_from_json(
+                json::parse(acquire.payload_json));
+
+        exv::helper::StartSessionRequest start_req;
+        start_req.profile_id.value = "profile-helper";
+        auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                                   json(start_req));
+        ok = expect(start.success,
+                    "StartSession should succeed before production cleanup test") &&
+             ok;
+        const auto start_resp = exv::helper::start_session_response_from_json(
+            json::parse(start.payload_json));
+
+        const auto registry_path = exv::core::lifecycle::core_registry_path(root.string());
+        const auto snapshot =
+            make_core_registry_snapshot(root, acquire_req.core_pid,
+                                        acquire_resp.lease_id);
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot, registry_path),
+                    "production helper cleanup test should write versioned registry") &&
+             ok;
+
+        exv::helper::HeartbeatRequest heartbeat_req;
+        heartbeat_req.session_id = start_resp.session_id;
+        heartbeat_req.core_phase = "connected";
+        auto heartbeat = dispatch_json(handler, exv::helper::HelperOp::Heartbeat,
+                                       json(heartbeat_req));
+        ok = expect(heartbeat.success,
+                    "Heartbeat should succeed before production cleanup test") &&
+             ok;
+
+        const auto records = handler.cleanup_registry().all_records();
+        ok = expect(records.size() == 1,
+                    "production helper cleanup test should keep one cleanup record") &&
+             ok;
+        ok = expect(records.size() == 1 &&
+                        records[0].core_registry_cleanup.has_value(),
+                    "Heartbeat should bind core registry cleanup on the production path") &&
+             ok;
+
+        exv::helper::CleanupRequest cleanup_req;
+        cleanup_req.session_id = start_resp.session_id;
+        auto cleanup = dispatch_json(handler, exv::helper::HelperOp::Cleanup,
+                                     json(cleanup_req));
+        ok = expect(cleanup.success,
+                    "production helper cleanup should succeed without managed resources") &&
+             ok;
+        ok = expect(!fs::exists(registry_path),
+                    "successful production helper cleanup should delete the versioned core registry") &&
+             ok;
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- partial production cleanup must keep the versioned core registry ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-partial-" +
+             std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+
+        exv::helper::HelperHandler handler;
+
+        exv::helper::AcquireCoreLeaseRequest acquire_req;
+        acquire_req.core_pid = 6160;
+        acquire_req.purpose = "connect";
+        auto acquire = dispatch_json(
+            handler, exv::helper::HelperOp::AcquireCoreLease, json(acquire_req));
+        ok = expect(acquire.success,
+                    "AcquireCoreLease should succeed before partial cleanup test") &&
+             ok;
+        const auto acquire_resp =
+            exv::helper::acquire_core_lease_response_from_json(
+                json::parse(acquire.payload_json));
+
+        exv::helper::StartSessionRequest start_req;
+        start_req.profile_id.value = "profile-helper-partial";
+        auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                                   json(start_req));
+        ok = expect(start.success,
+                    "StartSession should succeed before partial cleanup test") && ok;
+        const auto start_resp = exv::helper::start_session_response_from_json(
+            json::parse(start.payload_json));
+
+        const auto registry_path = exv::core::lifecycle::core_registry_path(root.string());
+        const auto snapshot =
+            make_core_registry_snapshot(root, acquire_req.core_pid,
+                                        acquire_resp.lease_id);
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot, registry_path),
+                    "partial cleanup test should write versioned registry") && ok;
+
+        exv::helper::HeartbeatRequest heartbeat_req;
+        heartbeat_req.session_id = start_resp.session_id;
+        heartbeat_req.core_phase = "connected";
+        auto heartbeat = dispatch_json(handler, exv::helper::HelperOp::Heartbeat,
+                                       json(heartbeat_req));
+        ok = expect(heartbeat.success,
+                    "Heartbeat should succeed before partial cleanup test") && ok;
+
+        handler.cleanup_registry().add_resource(start_resp.session_id,
+                                                {"route", "0.0.0.0/0"});
+
+        exv::helper::CleanupRequest cleanup_req;
+        cleanup_req.session_id = start_resp.session_id;
+        auto cleanup = dispatch_json(handler, exv::helper::HelperOp::Cleanup,
+                                     json(cleanup_req));
+        ok = expect(!cleanup.success,
+                    "partial cleanup should fail when managed resources cannot be removed") &&
+             ok;
+        ok = expect(fs::exists(registry_path),
+                    "partial cleanup must keep the versioned core registry") && ok;
 
         fs::remove_all(root, ec);
     }

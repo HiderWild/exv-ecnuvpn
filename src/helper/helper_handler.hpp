@@ -70,6 +70,8 @@ private:
     std::vector<std::string> capabilities() const;
     TaskQueueState task_queue_state() const;
     HelperResponse core_lease_required_response(HelperOp op) const;
+    void bind_core_registry_cleanup_if_possible(const SessionId& session_id);
+    void bind_core_registry_cleanup_for_active_sessions();
 
     HelperResponse handle_hello(const HelperRequest& req,
                                 const HelperRequestContext& context);

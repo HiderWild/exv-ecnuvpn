@@ -27,6 +27,8 @@
 #include <condition_variable>
 #include <csignal>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -783,6 +785,54 @@ int main() {
                r21.contains("data") && r21["data"].is_array(),
                "E2.2c: logs.list ok after burst");
         expect(cr.rc == 0, "E2.2c: exit 0");
+    }
+
+    // =======================================================================
+    // E2.2d — Initial registry write failure aborts startup
+    // =======================================================================
+    {
+        std::cerr << "[E2.2d] initial registry write failure aborts startup\n";
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::remove_all(config_dir, ec);
+        {
+            std::ofstream blocker(config_dir, std::ios::out | std::ios::trunc);
+            blocker << "not-a-directory";
+        }
+
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(config_dir, home_dir);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        exv::cli::PipeClient client;
+        bool connected = false;
+        for (int i = 0; i < 10 && !connected; ++i) {
+            connected = client.connect(exv::core::core_pipe_path());
+            if (!connected) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        expect(!connected,
+               "E2.2d: core must not keep accepting pipe clients after initial registry write failure");
+        if (connected) {
+            client.disconnect();
+        }
+
+        in_buf.close_input();
+        cr.join();
+
+        expect(cr.rc != 0,
+               "E2.2d: initial registry write failure must return non-zero");
+
+        fs::remove(config_dir, ec);
+        fs::create_directories(config_dir, ec);
     }
 
     // =======================================================================

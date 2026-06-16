@@ -2,6 +2,7 @@
 #include "core/lifecycle/core_lock.hpp"
 #include "core/lifecycle/core_paths.hpp"
 #include "core/lifecycle/core_registry.hpp"
+#include "helper/common/helper_client.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/logging/log_runtime.hpp"
 #include "common/diagnostics/log_renderer.hpp"
@@ -306,38 +307,43 @@ int core_process_main(const std::string& config_dir,
         return 1;
     }
 
-    exv::core::lifecycle::apply_tunnel_status(*registry_snapshot,
-                                              controller->status());
-    exv::core::lifecycle::refresh_core_registry_heartbeat(*registry_snapshot);
-
     const auto registry_path = exv::core::lifecycle::core_registry_path();
     std::mutex registry_mutex;
-    auto persist_registry = [&] {
-        exv::core::lifecycle::CoreRegistrySnapshot snapshot_copy;
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex);
-            exv::core::lifecycle::refresh_core_registry_heartbeat(*registry_snapshot);
-            snapshot_copy = *registry_snapshot;
+    auto persist_registry = [&](const std::optional<TunnelStatusSnapshot>& status) {
+        std::lock_guard<std::mutex> lock(registry_mutex);
+        if (status.has_value()) {
+            exv::core::lifecycle::apply_tunnel_status(*registry_snapshot,
+                                                      *status);
         }
-        return exv::core::lifecycle::write_core_registry(snapshot_copy,
+
+        registry_snapshot->helper_core_lease_id.clear();
+        if (auto helper = controller->helper_client_for_maintenance();
+            helper && helper->is_connected()) {
+            try {
+                const auto inspect = helper->inspect(exv::helper::InspectRequest{});
+                if (inspect.core_lease.active) {
+                    registry_snapshot->helper_core_lease_id =
+                        inspect.core_lease.lease_id;
+                }
+            } catch (...) {
+                registry_snapshot->helper_core_lease_id.clear();
+            }
+        }
+
+        exv::core::lifecycle::refresh_core_registry_heartbeat(*registry_snapshot);
+        return exv::core::lifecycle::write_core_registry(*registry_snapshot,
                                                          registry_path);
     };
 
     controller->set_status_callback([&](const TunnelStatusSnapshot& status) {
-        exv::core::lifecycle::CoreRegistrySnapshot snapshot_copy;
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex);
-            exv::core::lifecycle::apply_tunnel_status(*registry_snapshot, status);
-            exv::core::lifecycle::refresh_core_registry_heartbeat(*registry_snapshot);
-            snapshot_copy = *registry_snapshot;
-        }
-        (void)exv::core::lifecycle::write_core_registry(snapshot_copy,
-                                                        registry_path);
+        (void)persist_registry(status);
     });
 
-    if (!persist_registry()) {
+    if (!persist_registry(controller->status())) {
         exv::observability::LogFacade::warn(
-            "Core process could not persist the versioned core registry");
+            "Core process could not persist the versioned core registry; aborting startup");
+        pipe_listener->stop();
+        return 1;
     }
 
     std::atomic<bool> registry_worker_stop{false};
@@ -347,7 +353,7 @@ int core_process_main(const std::string& config_dir,
             if (registry_worker_stop.load() || g_stop_requested.load()) {
                 break;
             }
-            (void)persist_registry();
+            (void)persist_registry(std::nullopt);
         }
     });
 
