@@ -348,6 +348,15 @@ bool check_webview_package_policy() {
               "package_ui_shell.py should package the WebView2 loader on "
               "Windows") &&
        ok;
+  ok = expect(contains(package_script, "MINGW_RUNTIME_DLLS") &&
+                  contains(package_script, "copy_windows_runtime_assets"),
+              "package_ui_shell.py should package required MinGW runtime DLLs "
+              "after Electron staging is removed") &&
+       ok;
+  ok = expect(contains(package_script, "wintun.dll"),
+              "package_ui_shell.py should preserve Wintun as an explicit "
+              "Windows runtime asset") &&
+       ok;
   ok = expect(contains(package_script, "exv-ui.args"),
               "package_ui_shell.py should write launch arguments for exv-ui") &&
        ok;

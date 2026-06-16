@@ -1,5 +1,11 @@
 # Cross-Platform WebView Shell Completion Implementation Plan
 
+> Execution status on 2026-06-16: Phase 1 through Phase 7 have been
+> implemented on branch `codex/ui-framework-webview-shell`. Windows acceptance
+> evidence is recorded in
+> `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
+> macOS/Linux acceptance remains pending execution on their corresponding hosts.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Complete the remaining WebView shell migration so Windows, macOS, and Linux production desktop packages use real platform WebView hosts, Electron is retired from production packaging, and tests prove the final state.

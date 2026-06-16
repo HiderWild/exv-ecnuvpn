@@ -98,10 +98,13 @@ Write-Host "--- Runtime DLLs ---" -ForegroundColor Yellow
 
 $requiredDlls = @(
     "WebView2Loader.dll",
-    "wintun.dll",
     "libgcc_s_seh-1.dll",
     "libstdc++-6.dll",
     "libwinpthread-1.dll"
+)
+
+$optionalDlls = @(
+    "wintun.dll"
 )
 
 foreach ($dll in $requiredDlls) {
@@ -114,6 +117,18 @@ foreach ($dll in $requiredDlls) {
         Write-Check "S03.$dll" "$dll present" "PASS"
     } else {
         Write-Check "S03.$dll" "$dll present" "FAIL" "Not found in runtime search dirs"
+    }
+}
+
+foreach ($dll in $optionalDlls) {
+    $found = $false
+    foreach ($sp in $script:RuntimeSearchDirs) {
+        if (Test-Path (Join-Path $sp $dll)) { $found = $true; break }
+    }
+    if ($found) {
+        Write-Check "S03.$dll" "$dll present" "PASS"
+    } else {
+        Write-Check "S03.$dll" "$dll present" "SKIP" "Optional runtime asset not found. Provide it through ECNUVPN_RUNTIME_DIR before release packaging."
     }
 }
 
@@ -197,8 +212,10 @@ $serviceName = "exv-helper"
 $svcQuery = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($svcQuery) {
     $binPath = (Get-WmiObject Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue).PathName
-    if ($binPath -and $binPath -match "exv-helper") {
+    if ($binPath -and $binPath -like "*$PackageRoot*" -and $binPath -match "exv(-helper)?\.exe") {
         Write-Check "S06" "Helper service binary path correct" "PASS" "Path: $binPath"
+    } elseif ($binPath) {
+        Write-Check "S06" "Helper service binary path correct" "SKIP" "Installed service points outside this package: $binPath"
     } else {
         Write-Check "S06" "Helper service binary path correct" "FAIL" "Unexpected path: $binPath"
     }

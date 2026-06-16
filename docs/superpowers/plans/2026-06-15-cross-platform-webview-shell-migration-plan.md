@@ -1,5 +1,11 @@
 # Cross-Platform WebView Shell Migration Implementation Plan
 
+> Completion note: remaining work is tracked through
+> `docs/superpowers/plans/2026-06-16-webview-shell-completion-plan.md`.
+> Windows packaging acceptance is recorded in
+> `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`;
+> macOS/Linux acceptance remains pending host-specific verification.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Electron as the production desktop shell with platform WebView hosts on Windows, macOS, and Linux while preserving the Vue renderer and native core/helper contracts.

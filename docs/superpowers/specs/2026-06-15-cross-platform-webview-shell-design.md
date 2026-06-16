@@ -1,5 +1,10 @@
 # Cross-Platform WebView Shell Design
 
+> Implementation status: Windows native WebView packaging has been verified in
+> `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
+> macOS and Linux acceptance still require execution on their corresponding
+> hosts before the cross-platform migration can be marked globally accepted.
+
 ## Summary
 
 The desktop UI should move away from Electron as the default packaged shell on

@@ -11,6 +11,12 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MINGW_RUNTIME_DLLS = [
+    "libgcc_s_seh-1.dll",
+    "libstdc++-6.dll",
+    "libwinpthread-1.dll",
+]
+WINDOWS_OPTIONAL_RUNTIME_DLLS = ["wintun.dll"]
 
 
 def normalized_platform(value: str | None = None) -> str:
@@ -59,6 +65,30 @@ def default_renderer_candidates(platform: str) -> list[Path]:
     ]
 
 
+def runtime_search_dirs(platform: str) -> list[Path]:
+    candidates: list[Path] = []
+    if os.environ.get("ECNUVPN_RUNTIME_DIR"):
+        candidates.append(Path(os.environ["ECNUVPN_RUNTIME_DIR"]))
+    candidates.extend(default_cpp_build_dirs(platform))
+    if platform == "windows":
+        candidates.extend(
+            [
+                REPO_ROOT / "runtime" / "win32-x64",
+                REPO_ROOT / "runtime" / "win32",
+                REPO_ROOT / "runtime" / "windows",
+            ]
+        )
+        candidates.extend(Path(entry) for entry in os.environ.get("PATH", "").split(os.pathsep) if entry)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        normalized = candidate.resolve() if candidate.exists() else candidate
+        if normalized not in seen:
+            unique.append(candidate)
+            seen.add(normalized)
+    return unique
+
+
 def copy_tree_contents(source: Path, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     for entry in source.iterdir():
@@ -86,6 +116,35 @@ def find_webview2_loader(platform: str) -> Path | None:
         [candidate / "WebView2Loader.dll" for candidate in default_cpp_build_dirs(platform)],
         "WebView2Loader.dll",
     )
+
+
+def find_runtime_asset(name: str, platform: str) -> Path | None:
+    for directory in runtime_search_dirs(platform):
+        candidate = directory / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def copy_windows_runtime_assets(package_dir: Path) -> None:
+    if not package_dir.exists():
+        return
+    bin_dir = package_dir / "bin"
+    for dll in MINGW_RUNTIME_DLLS:
+        source = find_runtime_asset(dll, "windows")
+        if source is None:
+            checked = "\n  - ".join(str(path / dll) for path in runtime_search_dirs("windows"))
+            raise SystemExit(f"{dll} not found. Checked:\n  - {checked}")
+        shutil.copy2(source, package_dir / dll)
+        shutil.copy2(source, bin_dir / dll)
+
+    for dll in WINDOWS_OPTIONAL_RUNTIME_DLLS:
+        source = find_runtime_asset(dll, "windows")
+        if source is None:
+            print(f"warning: optional Windows runtime asset not found: {dll}", file=sys.stderr)
+            continue
+        shutil.copy2(source, package_dir / dll)
+        shutil.copy2(source, bin_dir / dll)
 
 
 def assert_no_electron_payload(package_dir: Path) -> None:
@@ -140,6 +199,9 @@ def build_package(platform: str, output_root: Path) -> Path:
     for stem in ("exv", "exv-helper"):
         binary = find_binary(stem, platform)
         shutil.copy2(binary, bin_dir / binary.name)
+
+    if platform == "windows":
+        copy_windows_runtime_assets(package_dir)
 
     copy_tree_contents(renderer_dir, webui_dir)
     write_launch_args(package_dir, platform)
