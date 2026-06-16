@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 
 #include <iostream>
+#include <algorithm>
+#include <cctype>
 #include <memory>
 #include <string>
 
@@ -33,6 +35,13 @@ exv::core_api::RpcResponse dispatch(exv::core_api::AppRpcDispatcher& dispatcher,
     req.payload_json = payload;
     req.request_id = "core-hello-test";
     return dispatcher.dispatch(req);
+}
+
+bool is_lower_hex(const std::string& value) {
+    return !value.empty() &&
+           std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+               return std::isdigit(ch) || (ch >= 'a' && ch <= 'f');
+           });
 }
 
 } // namespace
@@ -70,6 +79,20 @@ int main() {
                     "hello returns core path") && ok;
         ok = expect(payload.contains("started_at"),
                     "hello returns started_at") && ok;
+        const std::string instance_id =
+            payload.at("core_instance_id").get<std::string>();
+        ok = expect(instance_id.rfind("core-", 0) == 0,
+                    "hello instance id uses core- prefix") && ok;
+        const std::string suffix = instance_id.substr(5);
+        ok = expect(instance_id.find('-', 5) == std::string::npos,
+                    "hello instance id uses random-success format without timestamp/pid separators") &&
+             ok;
+        ok = expect(suffix.size() == 16,
+                    "hello instance id random-success suffix is 16 hex chars") &&
+             ok;
+        ok = expect(is_lower_hex(suffix),
+                    "hello instance id random-success suffix is lowercase hex") &&
+             ok;
     }
 
     auto bad = dispatch(*dispatcher, "core.hello", R"({"contract_version":"wrong"})");

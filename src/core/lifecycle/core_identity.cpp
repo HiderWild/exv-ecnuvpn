@@ -71,23 +71,26 @@ std::string ipc_protocol_version() {
 
 CoreIdentity make_core_identity() {
     const auto now = std::chrono::system_clock::now();
-    const auto unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             now.time_since_epoch())
-                             .count();
     const int pid = current_process_id();
 
-    std::ostringstream instance_id;
-    instance_id << "core-" << unix_ms << '-' << pid;
-
     std::array<uint8_t, 8> random_bytes = {};
+    std::string core_instance_id;
     if (ecnuvpn::platform::fill_random_bytes(random_bytes.data(),
                                              random_bytes.size())) {
-        instance_id << '-' << bytes_to_hex(random_bytes.data(),
-                                           random_bytes.size());
+        core_instance_id =
+            "core-" + bytes_to_hex(random_bytes.data(), random_bytes.size());
+    } else {
+        const auto unix_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch())
+                .count();
+        std::ostringstream fallback_id;
+        fallback_id << "core-" << unix_ms << '-' << pid;
+        core_instance_id = fallback_id.str();
     }
 
     CoreIdentity identity;
-    identity.core_instance_id = instance_id.str();
+    identity.core_instance_id = std::move(core_instance_id);
     identity.pid = pid;
     identity.core_path = ecnuvpn::platform::get_executable_path();
     if (identity.core_path.empty()) {
