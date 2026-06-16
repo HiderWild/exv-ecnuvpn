@@ -998,12 +998,12 @@ if(WIN32)
         endif()
 
         set(WEBVIEW2_LOADER_CANDIDATES
-            "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2LoaderStatic.lib"
             "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2Loader.dll.lib"
-            "${WEBVIEW2_SDK_DIR}/build/native/x86/WebView2LoaderStatic.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2LoaderStatic.lib"
             "${WEBVIEW2_SDK_DIR}/build/native/x86/WebView2Loader.dll.lib"
-            "${WEBVIEW2_SDK_DIR}/build/native/arm64/WebView2LoaderStatic.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/x86/WebView2LoaderStatic.lib"
             "${WEBVIEW2_SDK_DIR}/build/native/arm64/WebView2Loader.dll.lib"
+            "${WEBVIEW2_SDK_DIR}/build/native/arm64/WebView2LoaderStatic.lib"
         )
         set(WEBVIEW2_LOADER_LIBRARY "")
         foreach(_candidate IN LISTS WEBVIEW2_LOADER_CANDIDATES)

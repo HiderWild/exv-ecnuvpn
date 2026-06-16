@@ -33,6 +33,9 @@ int main() {
       read_file(source_dir + "/scripts/build-windows.ps1");
   const std::string macos_build_script =
       read_file(source_dir + "/scripts/build-macos.sh");
+  const std::string webview2_host =
+      read_file(source_dir +
+                "/src/platform/win32/ui_shell/webview2_host_win32.cpp");
 
   int failures = 0;
   const auto expect_contains = [&](const std::string &needle) {
@@ -63,6 +66,18 @@ int main() {
   expect_contains("tests/darwin_wkwebview_runtime_test.cpp");
   expect_contains("linux_webkitgtk_runtime_test");
   expect_contains("tests/linux_webkitgtk_runtime_test.cpp");
+
+  const auto expect_webview2_host_contains = [&](const std::string &needle) {
+    if (!contains(webview2_host, needle)) {
+      std::cerr << "missing Windows WebView2 host implementation marker: "
+                << needle << "\n";
+      ++failures;
+    }
+  };
+
+  expect_webview2_host_contains("CreateCoreWebView2EnvironmentWithOptions");
+  expect_webview2_host_contains("add_WebMessageReceived");
+  expect_webview2_host_contains("PostWebMessageAsJson");
 
   expect_not_contains(windows_build_script, "scripts/build-windows.ps1",
                       "vpn_runtime_test");
