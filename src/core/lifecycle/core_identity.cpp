@@ -44,7 +44,8 @@ std::string bytes_to_hex(const uint8_t* data, std::size_t len) {
 
 std::string render_started_at(
     const std::chrono::system_clock::time_point& timestamp) {
-    const auto time = std::chrono::system_clock::to_time_t(timestamp);
+    const auto seconds = std::chrono::floor<std::chrono::seconds>(timestamp);
+    const auto time = std::chrono::system_clock::to_time_t(seconds);
     std::tm utc = {};
 #ifdef _WIN32
     gmtime_s(&utc, &time);
@@ -52,9 +53,9 @@ std::string render_started_at(
     gmtime_r(&time, &utc);
 #endif
 
-    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            timestamp.time_since_epoch()) %
-                        1000;
+    const auto millis =
+        std::chrono::duration_cast<std::chrono::milliseconds>(timestamp -
+                                                              seconds);
 
     std::ostringstream out;
     out << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S") << '.'

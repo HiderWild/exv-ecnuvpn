@@ -56,6 +56,8 @@ int main() {
 
     auto dispatcher = exv::core_api::create_dispatcher(controller);
 
+    json first_payload;
+    bool have_first_payload = false;
     auto response = dispatch(
         *dispatcher,
         "core.hello",
@@ -63,7 +65,9 @@ int main() {
     ok = expect(response.success,
                 "core.hello should succeed for accepted contract version") && ok;
     if (response.success) {
-        auto payload = json::parse(response.payload_json);
+        first_payload = json::parse(response.payload_json);
+        have_first_payload = true;
+        const auto& payload = first_payload;
         ok = expect(payload["ipc_protocol_version"] == "ipc-v1",
                     "hello returns protocol version string") && ok;
         ok = expect(payload["contract_version"] ==
@@ -92,6 +96,29 @@ int main() {
              ok;
         ok = expect(is_lower_hex(suffix),
                     "hello instance id random-success suffix is lowercase hex") &&
+             ok;
+    }
+
+    auto repeated = dispatch(
+        *dispatcher,
+        "core.hello",
+        R"({"contract_version":"2026-06-16.cli-core-ui-contract.v1"})");
+    ok = expect(repeated.success,
+                "repeated core.hello should succeed for accepted contract version") &&
+         ok;
+    if (have_first_payload && repeated.success) {
+        auto repeated_payload = json::parse(repeated.payload_json);
+        ok = expect(repeated_payload.value("core_instance_id", std::string()) ==
+                        first_payload.value("core_instance_id", std::string()),
+                    "repeated core.hello keeps core_instance_id stable") &&
+             ok;
+        ok = expect(repeated_payload.value("started_at", std::string()) ==
+                        first_payload.value("started_at", std::string()),
+                    "repeated core.hello keeps started_at stable") &&
+             ok;
+        ok = expect(repeated_payload.value("pid", -1) ==
+                        first_payload.value("pid", -2),
+                    "repeated core.hello keeps pid stable") &&
              ok;
     }
 

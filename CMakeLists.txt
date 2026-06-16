@@ -2499,6 +2499,7 @@ set_property(TEST
     tunnel_controller_integration_test
     core_process_test
     core_process_lifecycle_test
+    core_hello_actions_test
     tunnel_contract_test
     tunnel_module_smoke_test
     tunnel_public_module_smoke_test
