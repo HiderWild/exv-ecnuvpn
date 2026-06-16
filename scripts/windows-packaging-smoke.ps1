@@ -4,12 +4,12 @@
 # and functional before a release candidate is shipped.
 #
 # Usage:
-#   .\scripts\windows-packaging-smoke.ps1 [-BuildDir <path>] [-RuntimeDir <path>]
+#   .\scripts\windows-packaging-smoke.ps1 [-PackageRoot <path>] [-RuntimeDir <path>]
 #
 # Requires: PowerShell 5.1+, optionally exv-helper service installed.
 
 param(
-    [string]$BuildDir = "",
+    [string]$PackageRoot = "",
     [string]$RuntimeDir = ""
 )
 
@@ -40,9 +40,10 @@ function Write-Check {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 
-if (-not $BuildDir)   { $BuildDir   = Join-Path $repoRoot "build" }
-$exvExe        = Join-Path $BuildDir "exv.exe"
-$exvHelperExe  = Join-Path $BuildDir "exv-helper.exe"
+if (-not $PackageRoot) { $PackageRoot = Join-Path $repoRoot "build\windows\webview\package\ECNU VPN" }
+$uiShellExe    = Join-Path $PackageRoot "exv-ui.exe"
+$exvExe        = Join-Path $PackageRoot "bin\exv.exe"
+$exvHelperExe  = Join-Path $PackageRoot "bin\exv-helper.exe"
 
 $script:RuntimeSearchDirs = New-Object System.Collections.Generic.List[string]
 function Add-RuntimeSearchDir {
@@ -55,10 +56,8 @@ function Add-RuntimeSearchDir {
     }
 }
 
-Add-RuntimeSearchDir $BuildDir
-Add-RuntimeSearchDir (Join-Path $BuildDir "windows\electron\bin")
-Add-RuntimeSearchDir (Join-Path $BuildDir "windows\electron\native\bin")
-Add-RuntimeSearchDir (Join-Path $BuildDir "windows\bin")
+Add-RuntimeSearchDir $PackageRoot
+Add-RuntimeSearchDir (Join-Path $PackageRoot "bin")
 if ($RuntimeDir) {
     Add-RuntimeSearchDir $RuntimeDir
     Add-RuntimeSearchDir (Join-Path $RuntimeDir "win32-x64")
@@ -66,13 +65,19 @@ if ($RuntimeDir) {
 
 Write-Host ""
 Write-Host "=== ECNU-VPN Windows Packaging Smoke Tests ===" -ForegroundColor Cyan
-Write-Host "Build dir:   $BuildDir"
+Write-Host "Package root: $PackageRoot"
 Write-Host "Runtime dirs: $($script:RuntimeSearchDirs -join '; ')"
 Write-Host ""
 
 # ── 1. Binary presence ───────────────────────────────────────────────────────
 
 Write-Host "--- Binaries ---" -ForegroundColor Yellow
+
+if (Test-Path $uiShellExe) {
+    Write-Check "S00" "exv-ui.exe present" "PASS"
+} else {
+    Write-Check "S00" "exv-ui.exe present" "FAIL" "Not found at $uiShellExe"
+}
 
 if (Test-Path $exvExe) {
     Write-Check "S01" "exv.exe present" "PASS"
@@ -92,6 +97,7 @@ Write-Host ""
 Write-Host "--- Runtime DLLs ---" -ForegroundColor Yellow
 
 $requiredDlls = @(
+    "WebView2Loader.dll",
     "wintun.dll",
     "libgcc_s_seh-1.dll",
     "libstdc++-6.dll",
@@ -109,6 +115,35 @@ foreach ($dll in $requiredDlls) {
     } else {
         Write-Check "S03.$dll" "$dll present" "FAIL" "Not found in runtime search dirs"
     }
+}
+
+# ── 2b. Package policy ───────────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "--- WebView Package Policy ---" -ForegroundColor Yellow
+
+if (Test-Path -LiteralPath $PackageRoot) {
+    $electronPayload = Get-ChildItem -Path $PackageRoot -Recurse -Include electron.exe,chromium.pak -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($electronPayload) {
+        Write-Check "S03.policy" "No Electron payload in WebView package" "FAIL" "Found $($electronPayload.FullName)"
+    } else {
+        Write-Check "S03.policy" "No Electron payload in WebView package" "PASS"
+    }
+
+    try {
+        $verifyScript = Join-Path $repoRoot "scripts\package_ui_shell.py"
+        $verifyOutput = & python $verifyScript --verify-launch-targets-only --package-dir $PackageRoot 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Check "S03.args" "exv-ui launch arguments target packaged binaries" "PASS" "Output: $verifyOutput"
+        } else {
+            Write-Check "S03.args" "exv-ui launch arguments target packaged binaries" "FAIL" "Exit: $LASTEXITCODE, Output: $verifyOutput"
+        }
+    } catch {
+        Write-Check "S03.args" "exv-ui launch arguments target packaged binaries" "FAIL" "Exception: $_"
+    }
+} else {
+    Write-Check "S03.policy" "No Electron payload in WebView package" "FAIL" "Package root not found at $PackageRoot"
+    Write-Check "S03.args" "exv-ui launch arguments target packaged binaries" "SKIP" "Package root not found"
 }
 
 # ── 3. exv --version ─────────────────────────────────────────────────────────

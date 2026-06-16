@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const webuiRoot = process.cwd()
@@ -105,5 +105,58 @@ describe('native WebView package policy', () => {
     const readme = readFileSync(join(webuiRoot, 'README.md'), 'utf8')
     assert.match(readme, /exv-ui\.args/)
     assert.match(readme, /--renderer-index/)
+  })
+
+  it('keeps active packaging smoke and merge-prep scripts on WebView package paths', () => {
+    const windowsSmoke = readFileSync(join(repoRoot, 'scripts', 'windows-packaging-smoke.ps1'), 'utf8')
+    const macosSmoke = readFileSync(join(repoRoot, 'scripts', 'macos-packaging-smoke.sh'), 'utf8')
+    const windowsMergePrep = readFileSync(join(repoRoot, 'scripts', 'validate-merge-prep-windows.ps1'), 'utf8')
+    const macosMergePrep = readFileSync(join(repoRoot, 'scripts', 'validate-merge-prep-macos.sh'), 'utf8')
+
+    assert.match(windowsSmoke, /build\\windows\\webview\\package\\ECNU VPN/)
+    assert.match(windowsSmoke, /WebView2Loader\.dll/)
+    assert.match(windowsSmoke, /electron\.exe/)
+    assert.doesNotMatch(windowsSmoke, /windows\\electron|dist-electron/i)
+
+    assert.match(macosSmoke, /build\/macos\/webview\/package\/ECNU VPN/)
+    assert.doesNotMatch(macosSmoke, /build\/macos\/electron|Electron \.app|ELECTRON_RELEASE/)
+
+    assert.match(windowsMergePrep, /build-windows\.ps1'.*'desktop'/s)
+    assert.doesNotMatch(windowsMergePrep, /build:electron|prepare:native|Electron main\/preload/)
+    assert.match(macosMergePrep, /build-macos\.sh"\s+desktop/)
+    assert.doesNotMatch(macosMergePrep, /build:electron|prepare:native|Electron main\/preload/)
+  })
+
+  it('keeps start.ps1 desktop flow on native WebView shell paths', () => {
+    const startPs1 = readFileSync(join(repoRoot, 'start.ps1'), 'utf8')
+
+    assert.match(startPs1, /build\\windows\\webview\\package\\ECNU VPN/)
+    assert.match(startPs1, /exv-ui\.exe/)
+    assert.doesNotMatch(startPs1, /build\\windows\\electron|dist-electron|desktop:package|desktop:package:dir|build:electron/i)
+    assert.doesNotMatch(startPs1, /Find-ElectronProcess|Electron process/i)
+  })
+
+  it('documents WebView as the production desktop shell in active docs', () => {
+    const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
+    const buildGuide = readFileSync(join(repoRoot, 'docs', 'build_guide.md'), 'utf8')
+    const userGuide = readFileSync(join(repoRoot, 'docs', 'user_guide.md'), 'utf8')
+
+    for (const [label, text] of [
+      ['README.md', readme],
+      ['docs/build_guide.md', buildGuide],
+      ['docs/user_guide.md', userGuide],
+    ] as const) {
+      assert.match(text, /WebView/)
+      assert.match(text, /build\/<platform>\/webview\/package\/ECNU VPN|build\\windows\\webview\\package\\ECNU VPN|build\/macos\/webview\/package\/ECNU VPN/)
+      assert.doesNotMatch(text, /build\/windows\/electron|build\\windows\\electron|build\/macos\/electron|build\\macos\\electron/)
+      assert.doesNotMatch(text, /Desktop UI \(Electron\)|Electron-based desktop app is the recommended interface|Electron 桌面应用|Electron 桌面端|through Electron IPC/)
+      assert.doesNotMatch(text, /pnpm run desktop:package|pnpm run desktop:build|pnpm run build:electron|pnpm run desktop:dev/)
+    }
+
+    assert.equal(existsSync(join(repoRoot, 'docs', 'windows-electron-helper-recovery.md')), false)
+    assert.equal(
+      existsSync(join(repoRoot, 'docs', 'superpowers', 'archive', 'windows-electron-helper-recovery.md')),
+      true,
+    )
   })
 })

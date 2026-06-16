@@ -1,154 +1,96 @@
 # Build Guide
 
-This repository now routes generated artifacts into platform-specific subtrees
-under `build/` so the `windows` and `macos` branches stop fighting over shared
-outputs before merge.
+This guide describes the active production build path. The desktop UI package is the native WebView shell, not a bundled browser runtime.
 
-## Layout
+## Output Layout
 
-- `build-windows/cpp` — Windows CMake configure/build/test output
-- `build/windows/electron/dist` — Windows renderer bundle
-- `build/windows/electron/dist-electron` — Windows Electron main/preload bundle
-- `build/windows/electron/native/bin` — staged native binaries and runtime assets
-- `build/windows/electron/release` — Windows packaged desktop artifacts
-- `build/macos/cpp` — macOS CMake configure/build/test output
-- `build/macos/electron/dist` — macOS renderer bundle
-- `build/macos/electron/dist-electron` — macOS Electron main/preload bundle
-- `build/macos/electron/native/bin` — staged native binaries and runtime assets
-- `build/macos/electron/release` — macOS packaged desktop artifacts
+All generated desktop packages use the same layout:
 
-## Native C++
+```text
+build/<platform>/webview/package/ECNU VPN
+```
 
-### Windows
+Platform-specific examples:
+
+- Windows: `build\windows\webview\package\ECNU VPN`
+- macOS: `build/macos/webview/package/ECNU VPN`
+- Linux: `build/linux/webview/package/ECNU VPN`
+
+The package root contains:
+
+- `exv-ui` or `exv-ui.exe`
+- `exv-ui.args`
+- `bin/exv`
+- `bin/exv-helper`
+- `webui/index.html`
+- Windows only: `WebView2Loader.dll`
+
+## Windows
 
 ```powershell
-cmake --preset windows-release
-cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test
-ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test'
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 desktop
 ```
 
-### macOS
-
-```bash
-cmake --preset macos-release
-cmake --build --preset macos-release --target exv platform_status_models_test vpn_runtime_test
-ctest --preset macos-release -R 'platform_status_models_test|vpn_runtime_test'
-```
-
-## Electron
-
-The `webui` build scripts now follow the same platform split automatically.
-Set `ECNUVPN_BUILD_PLATFORM` only when you need to override the default host
-platform selection.
-
-### Compile renderer + main/preload + staged native payload
-
-```bash
-cd webui
-pnpm run desktop:compile
-```
-
-### Package desktop artifacts
-
-```bash
-cd webui
-pnpm run desktop:build
-```
-
-### Create an unpacked debug desktop build
-
-```bash
-cd webui
-pnpm run desktop:debug
-```
-
-## Platform Wrapper Scripts
-
-### Windows
+Focused package smoke:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action all
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action debug
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action debug-run
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Action desktop
+powershell -ExecutionPolicy Bypass -File scripts\windows-packaging-smoke.ps1
 ```
 
-Actions:
+Merge-prep validation:
 
-- `cpp` — configure/build native Windows targets into `build-windows/cpp`
-- `test` — run focused native tests from `build-windows/cpp`
-- `electron` — build renderer/main and stage native assets into `build/windows/electron`
-- `debug` — native build + tests + unpacked Electron debug app under `build/windows/electron/release/win-unpacked`
-- `debug-run` — same as `debug`, then launch the unpacked Windows Electron UI
-- `desktop` — native build + tests + packaged Electron output
-- `all` — native build + tests + Electron compile/stage
-- `clean` — remove `build/windows` and `build-windows`
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\validate-merge-prep-windows.ps1
+```
 
-### macOS
+## macOS
 
 ```bash
-./scripts/build-macos.sh all
-./scripts/build-macos.sh debug
-./scripts/build-macos.sh debug-run
 ./scripts/build-macos.sh desktop
 ```
 
-Actions:
+Focused package smoke:
 
-- `cpp` — configure/build native macOS targets into `build/macos/cpp`
-- `test` — run focused native tests from `build/macos/cpp`
-- `electron` — build renderer/main and stage native assets into `build/macos/electron`
-- `debug` — native build + tests + unpacked Electron debug app under `build/macos/electron/release/mac*`
-- `debug-run` — same as `debug`, then launch the unpacked macOS Electron UI
-- `desktop` — native build + tests + packaged Electron output
-- `all` — native build + tests + Electron compile/stage
-- `clean` — remove `build/macos`
-
-The `debug` action now clears the platform release directory before running
-`electron-builder --dir`, so stale DMG / installer artifacts from earlier
-`desktop` runs do not remain mixed into the debug output.
-
-## Merge-Prep Validation Wrappers
-
-Use these wrappers when validating merge-prep lanes so every reviewer runs the
-same focused checks.
-
-### Windows
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\validate-merge-prep-windows.ps1
+```bash
+./scripts/macos-packaging-smoke.sh
 ```
 
-Optional flags:
-
-- `-SkipDesktop` — skip Electron compile + native staging checks
-- `-DesktopSmoke` — run an additional debug-run desktop smoke flow
-
-### macOS
+Merge-prep validation:
 
 ```bash
 ./scripts/validate-merge-prep-macos.sh
 ```
 
-Optional flags:
+## Linux
 
-- `--skip-desktop` — skip Electron compile + native staging checks
-- `--desktop-smoke` — run an additional debug-run desktop smoke flow
+```bash
+./scripts/build-linux.sh desktop
+```
 
-## Native Runtime Assets
+Linux requires WebKitGTK development packages when `EXV_BUILD_UI_SHELL=ON`.
 
-Production packages use the native VPN implementation by default.
+## Native-Only Builds
 
-- Windows production packages stage the native `exv`/`exv-helper` binaries,
-  required MinGW runtime DLLs, and `wintun.dll`. `wintun.dll` is the Windows
-  native runtime asset.
-- macOS production packages stage the native `exv` binary and helper
-  integration. Homebrew OpenConnect is not required for native production
-  packages.
+Use CMake presets for core/helper-only work:
 
-Native production mode does not support arbitrary OpenConnect-style
-`extra_args`. Use the supported EXV config keys and route commands instead.
+```bash
+cmake --preset <platform>-release
+cmake --build --preset <platform>-release
+ctest --preset <platform>-release --output-on-failure
+```
 
-See `docs/runtime-assets.md` for the local runtime asset policy. The root
-`runtime/` directory is ignored and is only for developer-supplied optional
-assets such as `wintun.dll`.
+Use the platform desktop scripts when the renderer, `exv-ui`, core, helper, and package layout all need to be validated together.
+
+## WebView Runtime Notes
+
+- Windows uses Microsoft Edge WebView2 Evergreen Runtime. The native shell detects a missing runtime and offers the controlled Evergreen bootstrap flow.
+- macOS uses WKWebView from the OS.
+- Linux uses WebKitGTK from system packages.
+
+The package script also supports verifying an existing package:
+
+```bash
+python scripts/package_ui_shell.py --verify-launch-targets-only --package-dir "build/<platform>/webview/package/ECNU VPN"
+```
+
+That check validates `exv-ui.args` targets and rejects bundled Electron or Chromium payloads.

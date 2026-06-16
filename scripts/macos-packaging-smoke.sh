@@ -9,6 +9,7 @@
 #   ./scripts/macos-packaging-smoke.sh [BUILD_DIR]
 #
 # BUILD_DIR defaults to build/macos/cpp (the cmake --preset macos-release output).
+# For package validation, set EXV_WEBVIEW_PACKAGE to the native WebView package root.
 # For DMG validation, set EXV_DMG_PATH to the .dmg file.
 #
 # Exit code: 0 if all checks pass, 1 if any check fails.
@@ -19,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="${1:-$REPO_ROOT/build/macos/cpp}"
 DMG_PATH="${EXV_DMG_PATH:-}"
-ELECTRON_RELEASE="${EXV_ELECTRON_RELEASE:-$REPO_ROOT/build/macos/electron/release}"
+PACKAGE_ROOT="${EXV_WEBVIEW_PACKAGE:-$REPO_ROOT/build/macos/webview/package/ECNU VPN}"
 
 # Colors
 RED='\033[0;31m'
@@ -66,11 +67,10 @@ EXV_BIN=""
 EXV_HELPER_BIN=""
 
 find_binary() {
-  # Search order: build dir, electron release staging, /usr/local/bin
+  # Search order: native WebView package, build dir, /usr/local/bin
   local candidates=(
+    "$PACKAGE_ROOT/bin/exv"
     "$BUILD_DIR/exv"
-    "$ELECTRON_RELEASE/mac-arm64/ECNU VPN.app/Contents/Resources/native/bin/exv"
-    "$ELECTRON_RELEASE/mac/ECNU VPN.app/Contents/Resources/native/bin/exv"
     "/usr/local/bin/exv"
   )
   for c in "${candidates[@]}"; do
@@ -84,9 +84,8 @@ find_binary() {
 
 find_helper_binary() {
   local candidates=(
+    "$PACKAGE_ROOT/bin/exv-helper"
     "$BUILD_DIR/exv-helper"
-    "$ELECTRON_RELEASE/mac-arm64/ECNU VPN.app/Contents/Resources/native/bin/exv-helper"
-    "$ELECTRON_RELEASE/mac/ECNU VPN.app/Contents/Resources/native/bin/exv-helper"
     "/usr/local/bin/exv-helper"
   )
   for c in "${candidates[@]}"; do
@@ -100,16 +99,35 @@ find_helper_binary() {
 
 section "Binary Discovery"
 
+if [[ -x "$PACKAGE_ROOT/exv-ui" ]]; then
+  pass "exv-ui found at $PACKAGE_ROOT/exv-ui"
+else
+  fail "exv-ui binary not found" "Expected: $PACKAGE_ROOT/exv-ui"
+fi
+
 if EXV_BIN=$(find_binary); then
   pass "exv binary found at $EXV_BIN"
 else
-  fail "exv binary not found" "Searched: $BUILD_DIR, electron release, /usr/local/bin"
+  fail "exv binary not found" "Searched: $PACKAGE_ROOT/bin, $BUILD_DIR, /usr/local/bin"
 fi
 
 if EXV_HELPER_BIN=$(find_helper_binary); then
   pass "exv-helper binary found at $EXV_HELPER_BIN"
 else
-  fail "exv-helper binary not found" "Searched: $BUILD_DIR, electron release, /usr/local/bin"
+  fail "exv-helper binary not found" "Searched: $PACKAGE_ROOT/bin, $BUILD_DIR, /usr/local/bin"
+fi
+
+section "Package payload policy"
+
+if [[ -d "$PACKAGE_ROOT" ]]; then
+  FORBIDDEN_PAYLOAD=$(find "$PACKAGE_ROOT" \( -name 'Electron Framework.framework' -o -name 'chromium.pak' \) -print -quit)
+  if [[ -n "$FORBIDDEN_PAYLOAD" ]]; then
+    fail "No Electron or Chromium payload in native WebView package" "Found: $FORBIDDEN_PAYLOAD"
+  else
+    pass "No Electron or Chromium payload in native WebView package"
+  fi
+else
+  fail "Native WebView package root exists" "Expected: $PACKAGE_ROOT"
 fi
 
 # ---------- 1. exv --version ----------
@@ -239,8 +257,7 @@ fi
 section "8. Info.plist verification"
 
 PLIST_CANDIDATES=(
-  "$ELECTRON_RELEASE/mac-arm64/ECNU VPN.app/Contents/Info.plist"
-  "$ELECTRON_RELEASE/mac/ECNU VPN.app/Contents/Info.plist"
+  "$PACKAGE_ROOT/ECNU VPN.app/Contents/Info.plist"
 )
 
 PLIST_FOUND=""
@@ -267,7 +284,7 @@ if [[ -n "$PLIST_FOUND" ]]; then
     fail "Info.plist missing keys" "Missing: ${MISSING_KEYS[*]}"
   fi
 else
-  skip "Info.plist verification" "Electron .app bundle not found (run desktop build first)"
+  skip "Info.plist verification" "Native WebView .app bundle not found (run desktop build first)"
 fi
 
 # ---------- 9. Verify codesign status ----------
@@ -275,8 +292,7 @@ fi
 section "9. Codesign verification"
 
 APP_CANDIDATES=(
-  "$ELECTRON_RELEASE/mac-arm64/ECNU VPN.app"
-  "$ELECTRON_RELEASE/mac/ECNU VPN.app"
+  "$PACKAGE_ROOT/ECNU VPN.app"
 )
 
 APP_FOUND=""

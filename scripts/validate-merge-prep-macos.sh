@@ -39,17 +39,13 @@ echo "[merge-prep] Run focused native regression tests..."
 ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|tunnel_script_contract_test|proxy_tun_detector_test|app_api_runtime_policy_test|crypto_roundtrip_test' --output-on-failure
 
 if [[ "$SKIP_DESKTOP" -eq 0 ]]; then
-  echo "[merge-prep] Compile Electron main/preload and native staging..."
-  (
-    cd "$REPO_ROOT/webui"
-    pnpm run build:electron
-    pnpm run prepare:native
-  )
+  echo "[merge-prep] Build native WebView desktop package..."
+  "$SCRIPT_DIR/build-macos.sh" desktop
 fi
 
 if [[ "$DESKTOP_SMOKE" -eq 1 ]]; then
-  echo "[merge-prep] Run desktop debug smoke build and launch..."
-  "$SCRIPT_DIR/build-macos.sh" debug-run
+  echo "[merge-prep] Run native WebView package smoke checks..."
+  "$SCRIPT_DIR/macos-packaging-smoke.sh"
 fi
 
 echo "[merge-prep] macOS validation complete."

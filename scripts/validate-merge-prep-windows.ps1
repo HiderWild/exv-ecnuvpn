@@ -45,20 +45,13 @@ finally {
 }
 
 if (-not $SkipDesktop) {
-  Write-Host '[merge-prep] Compile Electron main/preload and native staging...'
-  Push-Location (Join-Path $repoRoot 'webui')
-  try {
-    Invoke-Step pnpm run build:electron
-    Invoke-Step pnpm run prepare:native
-  }
-  finally {
-    Pop-Location
-  }
+  Write-Host '[merge-prep] Build native WebView desktop package...'
+  Invoke-Step powershell -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'build-windows.ps1') 'desktop'
 }
 
 if ($DesktopSmoke) {
-  Write-Host '[merge-prep] Run desktop debug smoke build and launch...'
-  Invoke-Step powershell -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'build-windows.ps1') -Action debug-run
+  Write-Host '[merge-prep] Run native WebView package smoke checks...'
+  Invoke-Step powershell -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'windows-packaging-smoke.ps1')
 }
 
 Write-Host '[merge-prep] Windows validation complete.'

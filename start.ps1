@@ -11,9 +11,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ── Auto-elevation via UAC ──────────────────────────────────────────────
-# When not running as Administrator, re-launch the script with RunAs (UAC).
-# The user authorises the prompt; the elevated instance inherits all arguments.
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   $scriptPath = $MyInvocation.MyCommand.Path
   $argString = ''
@@ -27,27 +24,25 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     }
   }
 
-  Write-Output "[start] Not running as Administrator — requesting elevation via UAC..."
+  Write-Output '[start] Not running as Administrator; requesting elevation via UAC...'
   $elevated = Start-Process -FilePath 'powershell.exe' `
     -ArgumentList "-NoProfile -NoLogo -ExecutionPolicy Bypass -File `"$scriptPath`"$argString" `
     -Verb RunAs -Wait -PassThru
   exit $elevated.ExitCode
 }
-# ────────────────────────────────────────────────────────────────────────
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$webuiDir = Join-Path $repoRoot 'webui'
+$scriptDir = Join-Path $repoRoot 'scripts'
+$webviewRoot = Join-Path $repoRoot 'build\windows\webview'
+$packageRoot = Join-Path $repoRoot 'build\windows\webview\package\ECNU VPN'
 $cppBuildRoot = Join-Path $repoRoot 'build-windows'
 $cppBuildDir = Join-Path $cppBuildRoot 'cpp'
-$electronRoot = Join-Path $repoRoot 'build\windows\electron'
-$electronNativeBinDir = Join-Path $electronRoot 'native\bin'
-$compatElectronBinDir = Join-Path $electronRoot 'bin'
-$rendererDistDir = Join-Path $electronRoot 'dist'
-$electronDistDir = Join-Path $electronRoot 'dist-electron'
-$electronReleaseDir = Join-Path $electronRoot 'release'
-$legacyWebuiNativeBinDir = Join-Path $webuiDir 'native\bin'
-$desktopOutLog = Join-Path $webuiDir 'start-desktop.out.log'
-$desktopErrLog = Join-Path $webuiDir 'start-desktop.err.log'
+$uiShellExe = Join-Path $packageRoot 'exv-ui.exe'
+$exvExe = Join-Path $packageRoot 'bin\exv.exe'
+$exvHelperExe = Join-Path $packageRoot 'bin\exv-helper.exe'
+$launchArgsFile = Join-Path $packageRoot 'exv-ui.args'
+$desktopOutLog = Join-Path $repoRoot 'build\windows\webview\start-desktop.out.log'
+$desktopErrLog = Join-Path $repoRoot 'build\windows\webview\start-desktop.err.log'
 $protectedProcessIds = @()
 
 function Write-Info([string]$Message) {
@@ -84,17 +79,11 @@ function Get-CurrentProcessAncestorIds {
   $seen = New-Object 'System.Collections.Generic.HashSet[int]'
   $current = [int]$PID
   while ($true) {
-    if (-not $seen.Add($current)) {
-      break
-    }
+    if (-not $seen.Add($current)) { break }
     $ids += $current
-    if (-not $parents.ContainsKey($current)) {
-      break
-    }
+    if (-not $parents.ContainsKey($current)) { break }
     $parent = $parents[$current]
-    if ($parent -le 0) {
-      break
-    }
+    if ($parent -le 0) { break }
     $current = $parent
   }
 
@@ -119,19 +108,18 @@ function Get-ProcessesOnPort {
     Where-Object { $_.ProcessId -in $owners }
 }
 
-function Get-ProjectDebugProcesses {
+function Get-ProjectProcesses {
   $results = @()
-  $alwaysMatchNames = @('exv.exe', 'exv-helper.exe')
-  $conditionalNames = @('node.exe', 'electron.exe', 'pnpm.exe', 'cmd.exe', 'powershell.exe', 'pwsh.exe')
+  $alwaysMatchNames = @('exv.exe', 'exv-helper.exe', 'exv-ui.exe')
+  $conditionalNames = @('node.exe', 'pnpm.exe', 'cmd.exe', 'powershell.exe', 'pwsh.exe')
   $commandPatterns = @(
     "*$repoRoot*",
-    '*desktop:dev*',
-    '*electron:start*',
-    '*dist-electron*main*index.js*',
-    "*localhost:$Port*",
-    "*--port $Port*",
+    "*$packageRoot*",
+    '*exv-ui.exe*',
     '*exv-helper.exe*',
-    '*exv.exe*'
+    '*exv.exe*',
+    "*localhost:$Port*",
+    "*--port $Port*"
   )
 
   $results += Get-ProcessesOnPort -LocalPort $Port
@@ -198,11 +186,7 @@ function Stop-ProcessTreeSafe {
 function Stop-HelperService {
   $serviceName = 'exv-helper'
   $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-  if (-not $service) {
-    return
-  }
-
-  if ($service.Status -eq 'Stopped') {
+  if (-not $service -or $service.Status -eq 'Stopped') {
     return
   }
 
@@ -218,126 +202,45 @@ function Stop-HelperService {
       Write-Info "Failed to stop service ${serviceName}: $($_.Exception.Message)"
     }
   }
-
-  $deadline = (Get-Date).AddSeconds(8)
-  while ((Get-Date) -lt $deadline) {
-    $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-    if (-not $current -or $current.Status -ne 'Running') {
-      return
-    }
-    Start-Sleep -Milliseconds 250
-  }
 }
 
-function Stop-DebugProcesses {
-  Write-Info 'Stopping residual debug processes'
+function Stop-ProjectProcesses {
+  Write-Info 'Stopping residual project processes'
   Stop-HelperService
 
-  foreach ($candidate in Get-ProjectDebugProcesses) {
+  foreach ($candidate in Get-ProjectProcesses) {
     Write-Info "Stopping $($candidate.Name)[$($candidate.ProcessId)]"
     Stop-ProcessTreeSafe -ProcessId ([int]$candidate.ProcessId) -Name $candidate.Name
   }
 
   $deadline = (Get-Date).AddSeconds(5)
   while ((Get-Date) -lt $deadline) {
-    $remaining = Get-ProjectDebugProcesses
+    $remaining = Get-ProjectProcesses
     if (-not $remaining) {
       return
     }
     Start-Sleep -Milliseconds 300
   }
 
-  $remaining = Get-ProjectDebugProcesses
+  $remaining = Get-ProjectProcesses
   if ($remaining) {
     $summary = ($remaining | ForEach-Object { "$($_.Name)[$($_.ProcessId)]" }) -join ', '
-    throw "Residual debug processes still running: $summary. Re-run from an elevated PowerShell terminal so start.ps1 can terminate elevated helper/service processes before rebuilding."
+    throw "Residual project processes still running: $summary. Re-run from an elevated PowerShell terminal before rebuilding."
   }
 }
 
 function Remove-DirectorySafe {
   param([Parameter(Mandatory = $true)][string]$Path)
 
-  if (-not (Test-Path -LiteralPath $Path)) {
-    return
+  if (Test-Path -LiteralPath $Path) {
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
   }
-
-  Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-function Ensure-Pnpm {
-  $command = Get-Command pnpm -ErrorAction SilentlyContinue
-  if (-not $command) {
-    throw 'pnpm is required for this repository. Install pnpm before running start.ps1.'
-  }
-  return $command.Source
-}
-
-function Ensure-PnpmInstall {
-  $nodeModulesDir = Join-Path $webuiDir 'node_modules'
-  if ($Quick -and (Test-Path -LiteralPath $nodeModulesDir)) {
-    return
-  }
-
-  $args = @('install')
-  if (Test-Path -LiteralPath (Join-Path $webuiDir 'pnpm-lock.yaml')) {
-    $args += '--frozen-lockfile'
-  }
-  Invoke-Step -Command (Ensure-Pnpm) -Arguments $args -WorkingDirectory $webuiDir
 }
 
 function Clean-BuildArtifacts {
-  Write-Info 'Removing build and staging artifacts'
+  Write-Info 'Removing native WebView build and package artifacts'
   Remove-DirectorySafe $cppBuildRoot
-  Remove-DirectorySafe $compatElectronBinDir
-  Remove-DirectorySafe $electronNativeBinDir
-  Remove-DirectorySafe $electronReleaseDir
-  Remove-DirectorySafe $legacyWebuiNativeBinDir
-  Remove-DirectorySafe $rendererDistDir
-  Remove-DirectorySafe $electronDistDir
-  if (Test-Path -LiteralPath $desktopOutLog) { Remove-Item -LiteralPath $desktopOutLog -Force -ErrorAction SilentlyContinue }
-  if (Test-Path -LiteralPath $desktopErrLog) { Remove-Item -LiteralPath $desktopErrLog -Force -ErrorAction SilentlyContinue }
-}
-
-function Build-Backend {
-  Write-Info 'Running: cmake --preset windows-release'
-  Invoke-Step -Command 'cmake' -Arguments @('--preset', 'windows-release')
-
-  Write-Info 'Running: cmake --build --preset windows-release --target exv exv-helper backend_resolver_test win32_helper_oneshot_test'
-  Invoke-Step -Command 'cmake' -Arguments @(
-    '--build', '--preset', 'windows-release',
-    '--target', 'exv', 'exv-helper', 'backend_resolver_test', 'win32_helper_oneshot_test'
-  )
-}
-
-function Build-FrontendArtifacts {
-  Ensure-PnpmInstall
-
-  if (-not $NoFrontendBuild) {
-    Write-Info 'Running: pnpm run build'
-    Invoke-Step -Command (Ensure-Pnpm) -Arguments @('run', 'build') -WorkingDirectory $webuiDir
-
-    Write-Info 'Running: pnpm run build:electron'
-    Invoke-Step -Command (Ensure-Pnpm) -Arguments @('run', 'build:electron') -WorkingDirectory $webuiDir
-  }
-  else {
-    Write-Info 'Skipping frontend bundle rebuild because -NoFrontendBuild was provided'
-  }
-
-  Write-Info 'Running: pnpm run prepare:native'
-  Invoke-Step -Command (Ensure-Pnpm) -Arguments @('run', 'prepare:native') -WorkingDirectory $webuiDir
-}
-
-function Copy-CompatibilityBinaries {
-  if (-not (Test-Path -LiteralPath $electronNativeBinDir)) {
-    throw "Native staging directory is missing: $electronNativeBinDir"
-  }
-
-  Remove-DirectorySafe $compatElectronBinDir
-  New-Item -ItemType Directory -Path $compatElectronBinDir -Force | Out-Null
-
-  Get-ChildItem -LiteralPath $electronNativeBinDir -File | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $compatElectronBinDir $_.Name) -Force
-  }
+  Remove-DirectorySafe $webviewRoot
 }
 
 function Show-FileHashIfPresent {
@@ -367,58 +270,80 @@ function Invoke-DesktopRpcProbe {
 }
 
 function Show-Status {
-  Write-Info 'Backend build outputs'
+  Write-Info 'Native CMake outputs'
+  Show-FileHashIfPresent (Join-Path $cppBuildDir 'exv-ui.exe')
   Show-FileHashIfPresent (Join-Path $cppBuildDir 'exv.exe')
   Show-FileHashIfPresent (Join-Path $cppBuildDir 'exv-helper.exe')
 
-  Write-Info 'Electron native staging outputs'
-  Show-FileHashIfPresent (Join-Path $electronNativeBinDir 'exv.exe')
-  Show-FileHashIfPresent (Join-Path $electronNativeBinDir 'exv-helper.exe')
+  Write-Info 'WebView package outputs'
+  Show-FileHashIfPresent $uiShellExe
+  Show-FileHashIfPresent $exvExe
+  Show-FileHashIfPresent $exvHelperExe
 
-  Write-Info 'Compatibility outputs'
-  Show-FileHashIfPresent (Join-Path $compatElectronBinDir 'exv.exe')
-  Show-FileHashIfPresent (Join-Path $compatElectronBinDir 'exv-helper.exe')
-
-  Invoke-DesktopRpcProbe (Join-Path $electronNativeBinDir 'exv.exe')
-  Invoke-DesktopRpcProbe (Join-Path $compatElectronBinDir 'exv.exe')
+  Invoke-DesktopRpcProbe $exvExe
 }
 
-function Find-ElectronProcess {
-  return Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object {
-      $cmd = [string]$_.CommandLine
-      $_.Name -in @('electron.exe', 'node.exe') -and
-      -not [string]::IsNullOrWhiteSpace($cmd) -and
-      $cmd -like '*dist-electron*main*index.js*'
-    } |
-    Select-Object -First 1
-}
-
-function Start-DesktopDev {
-  $pnpm = Ensure-Pnpm
-  $runnerArgs = @('run', 'desktop:dev')
-  $launcherFile = $pnpm
-  $launcherArgs = $runnerArgs
-
-  if ([System.IO.Path]::GetExtension($pnpm) -ieq '.ps1') {
-    $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) {
-      (Get-Command pwsh).Source
-    }
-    else {
-      (Get-Command powershell).Source
-    }
-    $escapedPnpm = $pnpm.Replace("'", "''")
-    $launcherFile = $shell
-    $launcherArgs = @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-Command', "& '$escapedPnpm' run desktop:dev")
+function Build-WebViewPackage {
+  if ($NoFrontendBuild) {
+    Write-Info 'Building native UI shell and packaging existing WebView renderer assets'
+    Invoke-Step -Command 'cmake' -Arguments @('--preset', 'windows-release', '-DEXV_BUILD_UI_SHELL=ON')
+    Invoke-Step -Command 'cmake' -Arguments @(
+      '--build', '--preset', 'windows-release',
+      '--target', 'exv', 'exv-helper', 'exv-ui'
+    )
+    Invoke-Step -Command 'python' -Arguments @(
+      (Join-Path $scriptDir 'package_ui_shell.py'),
+      '--platform', 'windows'
+    )
+    return
   }
+
+  Write-Info 'Running: scripts\build-windows.ps1 desktop'
+  Invoke-Step -Command 'powershell' -Arguments @(
+    '-ExecutionPolicy', 'Bypass',
+    '-File', (Join-Path $scriptDir 'build-windows.ps1'),
+    'desktop'
+  )
+}
+
+function Test-WebViewPackage {
+  $missing = @()
+  foreach ($path in @($uiShellExe, $exvExe, $exvHelperExe, $launchArgsFile)) {
+    if (-not (Test-Path -LiteralPath $path)) {
+      $missing += $path
+    }
+  }
+  if ($missing.Count -gt 0) {
+    throw "WebView package is incomplete. Missing: $($missing -join ', ')"
+  }
+
+  Invoke-Step -Command 'python' -Arguments @(
+    (Join-Path $scriptDir 'package_ui_shell.py'),
+    '--verify-launch-targets-only',
+    '--package-dir', $packageRoot
+  )
+}
+
+function Read-LaunchArgs {
+  if (-not (Test-Path -LiteralPath $launchArgsFile)) {
+    throw "Launch argument file is missing: $launchArgsFile"
+  }
+
+  return Get-Content -LiteralPath $launchArgsFile |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+}
+
+function Start-WebViewShell {
+  Test-WebViewPackage
 
   if (Test-Path -LiteralPath $desktopOutLog) { Remove-Item -LiteralPath $desktopOutLog -Force -ErrorAction SilentlyContinue }
   if (Test-Path -LiteralPath $desktopErrLog) { Remove-Item -LiteralPath $desktopErrLog -Force -ErrorAction SilentlyContinue }
 
-  Write-Info 'Launching desktop dev workflow'
-  $process = Start-Process -FilePath $launcherFile `
-    -ArgumentList $launcherArgs `
-    -WorkingDirectory $webuiDir `
+  $launchArgs = @(Read-LaunchArgs)
+  Write-Info "Launching native WebView shell: $uiShellExe"
+  $process = Start-Process -FilePath $uiShellExe `
+    -ArgumentList $launchArgs `
+    -WorkingDirectory $packageRoot `
     -RedirectStandardOutput $desktopOutLog `
     -RedirectStandardError $desktopErrLog `
     -PassThru
@@ -431,33 +356,10 @@ function Start-DesktopDev {
     if (Test-Path -LiteralPath $desktopErrLog) {
       Get-Content -LiteralPath $desktopErrLog -Tail 120
     }
-    throw "desktop:dev launcher exited early with code $($process.ExitCode)"
+    throw "Native WebView shell exited early with code $($process.ExitCode)"
   }
 
-  $electron = $null
-  $deadline = (Get-Date).AddSeconds(90)
-  while ((Get-Date) -lt $deadline) {
-    $listener = Get-ProcessesOnPort -LocalPort $Port
-    $electron = Find-ElectronProcess
-    if ($listener -and $electron) {
-      break
-    }
-    if ($process.HasExited) {
-      break
-    }
-    Start-Sleep -Milliseconds 500
-  }
-
-  if (-not (Get-ProcessesOnPort -LocalPort $Port)) {
-    throw "Frontend dev server did not open port $Port in time. Check $desktopOutLog and $desktopErrLog."
-  }
-
-  if (-not $electron) {
-    throw "Electron process was not detected in time. Check $desktopOutLog and $desktopErrLog."
-  }
-
-  Write-Info "Desktop dev launcher PID: $($process.Id)"
-  Write-Info "Electron PID: $($electron.ProcessId)"
+  Write-Info "Native WebView shell PID: $($process.Id)"
   Write-Info "Logs: $desktopOutLog and $desktopErrLog"
 }
 
@@ -468,7 +370,7 @@ if ($Status) {
   exit 0
 }
 
-Stop-DebugProcesses
+Stop-ProjectProcesses
 
 if (-not $Quick) {
   Clean-BuildArtifacts
@@ -482,25 +384,18 @@ if ($CleanOnly) {
   exit 0
 }
 
-Build-Backend
-Build-FrontendArtifacts
-Copy-CompatibilityBinaries
-
-if ($PackageDir) {
-  Write-Info 'Running: pnpm run desktop:package:dir'
-  Invoke-Step -Command (Ensure-Pnpm) -Arguments @('run', 'desktop:package:dir') -WorkingDirectory $webuiDir
-}
-
-if ($Package) {
-  Write-Info 'Running: pnpm run desktop:package'
-  Invoke-Step -Command (Ensure-Pnpm) -Arguments @('run', 'desktop:package') -WorkingDirectory $webuiDir
-}
-
+Build-WebViewPackage
+Test-WebViewPackage
 Show-Status
 
-if (-not $NoLaunch -and -not $PackageDir -and -not $Package) {
-  Start-DesktopDev
+if ($PackageDir -or $Package) {
+  Write-Info "WebView package ready at $packageRoot"
+  exit 0
+}
+
+if (-not $NoLaunch) {
+  Start-WebViewShell
 }
 else {
-  Write-Info 'Build completed without launching desktop dev workflow'
+  Write-Info 'Build completed without launching native WebView shell'
 }
