@@ -58,6 +58,8 @@ int main() {
   expect_contains("WEBVIEW2_SDK_DIR is required");
   expect_contains("elseif(APPLE AND EXV_BUILD_UI_SHELL)");
   expect_contains("target_link_libraries(exv-ui PRIVATE \"-framework Cocoa\" \"-framework WebKit\")");
+  expect_contains("WebView2Loader.dll");
+  expect_contains("POST_BUILD");
   expect_contains("if(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)");
   expect_contains("pkg_check_modules(WEBKITGTK");
   expect_contains("webkit2gtk-4.1");

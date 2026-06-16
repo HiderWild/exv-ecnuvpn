@@ -77,6 +77,17 @@ def find_binary(stem: str, platform: str) -> Path:
     )
 
 
+def find_webview2_loader(platform: str) -> Path | None:
+    if platform != "windows":
+        return None
+    if os.environ.get("ECNUVPN_WEBVIEW2_LOADER_DLL"):
+        return Path(os.environ["ECNUVPN_WEBVIEW2_LOADER_DLL"])
+    return first_existing(
+        [candidate / "WebView2Loader.dll" for candidate in default_cpp_build_dirs(platform)],
+        "WebView2Loader.dll",
+    )
+
+
 def assert_no_electron_payload(package_dir: Path) -> None:
     forbidden = ["electron.exe", "Electron Framework.framework", "chromium.pak"]
     found = [name for name in forbidden if list(package_dir.rglob(name))]
@@ -121,6 +132,10 @@ def build_package(platform: str, output_root: Path) -> Path:
 
     ui_binary = find_binary("exv-ui", platform)
     shutil.copy2(ui_binary, package_dir / ui_binary.name)
+
+    webview2_loader = find_webview2_loader(platform)
+    if webview2_loader:
+        shutil.copy2(webview2_loader, package_dir / "WebView2Loader.dll")
 
     for stem in ("exv", "exv-helper"):
         binary = find_binary(stem, platform)

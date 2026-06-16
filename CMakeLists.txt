@@ -1015,6 +1015,25 @@ if(WIN32)
         if(WEBVIEW2_LOADER_LIBRARY STREQUAL "")
             message(FATAL_ERROR "WEBVIEW2_SDK_DIR does not contain a WebView2Loader library")
         endif()
+
+        set(WEBVIEW2_LOADER_DLL_CANDIDATES
+            "${WEBVIEW2_SDK_DIR}/runtimes/win-x64/native/WebView2Loader.dll"
+            "${WEBVIEW2_SDK_DIR}/runtimes/win-x86/native/WebView2Loader.dll"
+            "${WEBVIEW2_SDK_DIR}/runtimes/win-arm64/native/WebView2Loader.dll"
+            "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2Loader.dll"
+            "${WEBVIEW2_SDK_DIR}/build/native/x86/WebView2Loader.dll"
+            "${WEBVIEW2_SDK_DIR}/build/native/arm64/WebView2Loader.dll"
+        )
+        set(WEBVIEW2_LOADER_DLL "")
+        foreach(_candidate IN LISTS WEBVIEW2_LOADER_DLL_CANDIDATES)
+            if(EXISTS "${_candidate}")
+                set(WEBVIEW2_LOADER_DLL "${_candidate}")
+                break()
+            endif()
+        endforeach()
+        if(WEBVIEW2_LOADER_DLL STREQUAL "")
+            message(FATAL_ERROR "WEBVIEW2_SDK_DIR does not contain WebView2Loader.dll")
+        endif()
     endif()
 elseif(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)
     find_package(PkgConfig REQUIRED)
@@ -1053,6 +1072,11 @@ if(WIN32)
         target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
         target_include_directories(exv-ui PRIVATE "${WEBVIEW2_INCLUDE_DIR}")
         target_link_libraries(exv-ui PRIVATE "${WEBVIEW2_LOADER_LIBRARY}")
+        add_custom_command(TARGET exv-ui POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${WEBVIEW2_LOADER_DLL}"
+                    "$<TARGET_FILE_DIR:exv-ui>/WebView2Loader.dll"
+        )
     endif()
 elseif(APPLE AND EXV_BUILD_UI_SHELL)
     target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)

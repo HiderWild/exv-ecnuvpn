@@ -88,6 +88,7 @@ describe('native WebView package policy', () => {
     const packageScript = readFileSync(join(repoRoot, 'scripts', 'package_ui_shell.py'), 'utf8')
     assert.doesNotMatch(packageScript, /build"\s*\/\s*platform\s*\/\s*"electron"\s*\/\s*"dist"/)
     assert.doesNotMatch(packageScript, /electron"\s*,\s*"dist"/)
+    assert.match(packageScript, /WebView2Loader\.dll/)
   })
 
   it('writes packaged launch arguments for exv-ui', () => {
