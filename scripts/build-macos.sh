@@ -12,14 +12,11 @@ export ECNUVPN_WEBUI_DIST_DIR="$BUILD_ROOT/webview/dist"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [cpp|test|webview|electron|debug|debug-run|desktop|all|clean]
+Usage: $(basename "$0") [cpp|test|webview|desktop|all|clean]
 
   cpp      Configure and build the native macOS targets into build/macos/cpp
   test     Run the focused native regression tests from build/macos/cpp
   webview  Build native targets, run tests, then package the native WebView shell
-  electron Build the Electron migration adapter outputs into build/macos/electron
-  debug    Build native targets, run tests, then create an unpacked Electron debug app
-  debug-run Build the unpacked debug app, then launch the Electron UI
   desktop  Build native targets, run tests, then package the native WebView shell
   all      Build native targets, run tests, then package the native WebView shell
   clean    Remove build/macos
@@ -53,56 +50,11 @@ run_webui_renderer() {
   )
 }
 
-compile_electron() {
-  (
-    cd "$REPO_ROOT/webui"
-    pnpm run desktop:compile
-  )
-}
-
 package_webview() {
   (
     cd "$REPO_ROOT/webui"
     pnpm run webview:package
   )
-}
-
-package_desktop_debug() {
-  (
-    cd "$REPO_ROOT/webui"
-    pnpm run desktop:package:dir
-  )
-}
-
-clean_desktop_release() {
-  rm -rf "$BUILD_ROOT/electron/release"
-}
-
-launch_desktop_debug() {
-  local release_root="$BUILD_ROOT/electron/release"
-  local app_path=""
-
-  for candidate in \
-    "$release_root/mac-arm64/ECNU VPN.app" \
-    "$release_root/mac/ECNU VPN.app"
-  do
-    if [[ -d "$candidate" ]]; then
-      app_path="$candidate"
-      break
-    fi
-  done
-
-  if [[ -z "$app_path" ]]; then
-    app_path=$(find "$release_root" -maxdepth 2 -type d -name 'ECNU VPN.app' | head -n 1)
-  fi
-
-  if [[ -z "$app_path" ]]; then
-    echo "Error: unpacked debug app not found under $release_root" >&2
-    exit 1
-  fi
-
-  echo "Launching debug app: $app_path"
-  open -n "$app_path"
 }
 
 case "$ACTION" in
@@ -112,29 +64,11 @@ case "$ACTION" in
   test)
     run_tests
     ;;
-  electron)
-    compile_electron
-    ;;
   webview)
     run_webui_renderer
     build_cpp on
     run_tests
     package_webview
-    ;;
-  debug)
-    build_cpp
-    run_tests
-    compile_electron
-    clean_desktop_release
-    package_desktop_debug
-    ;;
-  debug-run)
-    build_cpp
-    run_tests
-    compile_electron
-    clean_desktop_release
-    package_desktop_debug
-    launch_desktop_debug
     ;;
   desktop)
     run_webui_renderer

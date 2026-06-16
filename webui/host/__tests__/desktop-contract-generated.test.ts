@@ -17,12 +17,12 @@ import {
   HELPER_OP_CONTRACTS,
   HELPER_FORBIDDEN_CREDENTIAL_FIELDS,
   HELPER_OPS,
-} from '../../shared/generated/system-contract.js'
+} from '../../desktop/shared/generated/system-contract.js'
 import {
   desktopRpcActions,
   desktopRpcErrorCodes,
   desktopEventTypes,
-} from '../../shared/desktop-contract.js'
+} from '../../desktop/shared/desktop-contract.js'
 
 function expectContains<T>(values: readonly T[], value: T) {
   assert.ok(values.includes(value), `expected ${String(value)} in ${values.join(', ')}`)

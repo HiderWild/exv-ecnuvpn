@@ -7,8 +7,9 @@
 - Treat these as cleanup-first artifacts unless the user explicitly asks to keep them:
   - `webui/node_modules/`
   - `webui/native/bin/`
-  - `webui/dist-electron/`
-  - temporary Electron/Vite/dev logs under `webui/` (`*.log`)
+  - `build/<platform>/webview/dist/`
+  - `build/<platform>/webview/package/`
+  - temporary WebView/Vite/dev logs under `webui/` (`*.log`)
   - temporary screenshots or debug captures under `webui/` (`*.png`)
   - stale `.claude/worktrees/` directories and other throwaway local build outputs
 - Before finishing a task, check for leftover generated artifacts in synced directories and delete them if they are no longer needed.

@@ -18,11 +18,9 @@ function normalizeBuildPlatform(input = process.env.ECNUVPN_BUILD_PLATFORM || pr
 
 function normalizeRendererTarget(input = process.env.ECNUVPN_RENDERER_TARGET || 'webview') {
   switch ((input || '').toLowerCase()) {
-    case 'electron':
-    case 'desktop':
-      return 'electron'
     case 'webview':
     case 'native':
+    case 'desktop':
     default:
       return 'webview'
   }
@@ -34,10 +32,8 @@ function getBuildLayout() {
   const buildPlatform = normalizeBuildPlatform()
   const rendererTarget = normalizeRendererTarget()
   const buildRoot = path.join(repoRoot, 'build', buildPlatform)
-  const electronRoot = path.join(buildRoot, 'electron')
   const webviewRoot = path.join(buildRoot, 'webview')
   const webviewRendererOutDir = path.join(webviewRoot, 'dist')
-  const electronRendererOutDir = path.join(electronRoot, 'dist')
   const defaultCppBuildDir = buildPlatform === 'windows'
     ? path.join(repoRoot, 'build-windows', 'cpp')
     : path.join(buildRoot, 'cpp')
@@ -49,14 +45,9 @@ function getBuildLayout() {
     rendererTarget,
     buildRoot,
     cppBuildDir: process.env.ECNUVPN_CPP_BUILD_DIR || defaultCppBuildDir,
-    electronRoot,
     webviewRoot,
-    rendererOutDir: rendererTarget === 'electron' ? electronRendererOutDir : webviewRendererOutDir,
+    rendererOutDir: webviewRendererOutDir,
     webviewRendererOutDir,
-    electronRendererOutDir,
-    electronOutDir: path.join(electronRoot, 'dist-electron'),
-    nativeBinDir: path.join(electronRoot, 'native', 'bin'),
-    releaseDir: path.join(electronRoot, 'release'),
     webviewPackageDir: path.join(webviewRoot, 'package'),
   }
 }

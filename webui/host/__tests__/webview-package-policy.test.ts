@@ -12,7 +12,6 @@ const { getBuildLayout } = requireFromWebui('./scripts/build-layout.cjs') as {
     rendererTarget: string
     rendererOutDir: string
     webviewRendererOutDir: string
-    electronRendererOutDir: string
   }
 }
 
@@ -54,13 +53,26 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(layout.rendererOutDir.replace(/\\/g, '/'), /\/electron\/dist$/)
   })
 
-  it('keeps Electron renderer output explicit during migration', () => {
+  it('retires Electron from production package dependencies and scripts', () => {
     const packageJson = JSON.parse(readFileSync(join(webuiRoot, 'package.json'), 'utf8'))
+    assert.equal(packageJson.devDependencies.electron, undefined)
+    assert.equal(packageJson.devDependencies['electron-builder'], undefined)
+    assert.equal(packageJson.devDependencies['@types/electron'], undefined)
+    assert.equal(packageJson.scripts['desktop:dev'], undefined)
+    assert.equal(packageJson.scripts['electron:dev'], undefined)
+    assert.equal(packageJson.scripts['electron:start'], undefined)
+    assert.equal(packageJson.scripts['build:electron'], undefined)
+    assert.equal(packageJson.scripts['desktop:compile'], undefined)
+    assert.equal(packageJson.scripts['desktop:package'], undefined)
+    assert.equal(packageJson.scripts['desktop:package:dir'], undefined)
+    assert.equal(packageJson.scripts['desktop:debug'], undefined)
+    assert.equal(packageJson.scripts['desktop:build'], undefined)
+    assert.equal(packageJson.main, undefined)
+    assert.equal(packageJson.pnpm?.onlyBuiltDependencies?.includes('electron') ?? false, false)
+
     assert.match(packageJson.scripts['webview:compile'], /ECNUVPN_RENDERER_TARGET=webview/)
-    assert.match(packageJson.scripts['desktop:compile'], /ECNUVPN_RENDERER_TARGET=electron/)
-    assert.match(packageJson.scripts['desktop:package'], /ECNUVPN_RENDERER_TARGET=electron/)
-    assert.match(packageJson.scripts['desktop:package:dir'], /ECNUVPN_RENDERER_TARGET=electron/)
     assert.match(packageJson.scripts['webview:package'], /package_ui_shell\.py/)
+    assert.match(packageJson.scripts['test:contract'], /run-host-test\.cjs/)
   })
 
   it('makes platform desktop build scripts package the WebView shell by default', () => {
@@ -79,9 +91,23 @@ describe('native WebView package policy', () => {
     assert.match(windowsAll, /Invoke-WebViewPackage/)
     assert.doesNotMatch(windowsDesktop, /Invoke-ElectronCompile|Invoke-DesktopPackage/)
     assert.doesNotMatch(windowsAll, /Invoke-ElectronCompile|Invoke-DesktopPackage/)
+    assert.doesNotMatch(windows, /desktop:compile|desktop:package|build:electron|electron\\release|electron-builder/i)
 
     assertUnixDesktopScriptPackagesWebView(macos, 'macos')
     assertUnixDesktopScriptPackagesWebView(linux, 'linux')
+    assert.doesNotMatch(macos, /desktop:compile|desktop:package|build:electron|electron\/release|electron-builder/i)
+  })
+
+  it('removes Electron adapter source and config from production webui paths', () => {
+    assert.equal(existsSync(join(webuiRoot, 'scripts', 'run-host-test.cjs')), true)
+    assert.equal(existsSync(join(webuiRoot, 'scripts', 'run-electron-test.cjs')), false)
+    assert.equal(existsSync(join(webuiRoot, 'scripts', 'build-electron.cjs')), false)
+    assert.equal(existsSync(join(webuiRoot, 'scripts', 'prepare-native.cjs')), false)
+    assert.equal(existsSync(join(webuiRoot, 'electron-builder.config.cjs')), false)
+    assert.equal(existsSync(join(webuiRoot, 'tsconfig.electron.json')), false)
+    assert.equal(existsSync(join(webuiRoot, 'desktop', 'main')), false)
+    assert.equal(existsSync(join(webuiRoot, 'desktop', 'preload')), false)
+    assert.equal(existsSync(join(webuiRoot, 'build-resources')), false)
   })
 
   it('does not let native WebView packages fall back to Electron renderer output', () => {

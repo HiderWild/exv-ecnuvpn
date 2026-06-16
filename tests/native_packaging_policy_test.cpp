@@ -303,9 +303,8 @@ std::vector<fs::path> production_files() {
   return {
       "webui/package.json",
       "webui/scripts/build-layout.cjs",
-      "webui/scripts/build-electron.cjs",
-      "webui/scripts/prepare-native.cjs",
-      "webui/electron-builder.config.cjs",
+      "scripts/package_ui_shell.py",
+      "scripts/embed_assets.py",
       "scripts/build-windows.ps1",
       "scripts/build-macos.sh",
       "docs/runtime-assets.md",
@@ -335,62 +334,57 @@ bool check_production_files_exist_and_scan_cleanly() {
   return ok;
 }
 
-bool check_prepare_native_policy() {
+bool check_webview_package_policy() {
   bool ok = true;
-  const FileText prepare = read_file("webui/scripts/prepare-native.cjs");
+  const FileText package_script = read_file("scripts/package_ui_shell.py");
+  const FileText layout = read_file("webui/scripts/build-layout.cjs");
+  const FileText embed = read_file("scripts/embed_assets.py");
 
-  ok = expect(!contains(prepare, "ECNUVPN_LEGACY_OPENCONNECT_RUNTIME"),
-              "prepare-native.cjs should not retain legacy OpenConnect runtime "
-              "copying gates") &&
+  ok = expect(contains(package_script, "assert_no_electron_payload"),
+              "package_ui_shell.py should reject bundled Electron/Chromium "
+              "payloads") &&
        ok;
-  ok = expect(!contains(prepare, "copyLegacyRuntimeAssets"),
-              "prepare-native.cjs should not retain legacy OpenConnect runtime "
-              "copying helpers") &&
+  ok = expect(contains(package_script, "WebView2Loader.dll"),
+              "package_ui_shell.py should package the WebView2 loader on "
+              "Windows") &&
        ok;
-  ok = expect(!contains(prepare, "legacy-openconnect"),
-              "prepare-native.cjs should not read legacy-openconnect runtime "
-              "directories") &&
+  ok = expect(contains(package_script, "exv-ui.args"),
+              "package_ui_shell.py should write launch arguments for exv-ui") &&
        ok;
-  ok = expect(!contains(prepare, "copyRecursive(runtimeSource, outDir)"),
-              "prepare-native.cjs must not copy runtime directories wholesale "
-              "for production packaging") &&
+  ok = expect(contains(package_script, "validate_launch_args_targets"),
+              "package_ui_shell.py should verify packaged launch argument "
+              "targets") &&
        ok;
-  ok = expect(!contains(prepare, "if (runtimeSource)"),
-              "prepare-native.cjs runtime directory copying should not use "
-              "implicit production defaults") &&
+  ok = expect(!contains(layout, "electronRoot") &&
+                  !contains(layout, "dist-electron") &&
+                  !contains(layout, "nativeBinDir"),
+              "build-layout.cjs should expose only WebView package layout "
+              "fields") &&
        ok;
-  ok = expect(contains(prepare, "ALLOWED_NATIVE_RUNTIME_ASSETS"),
-              "prepare-native.cjs should copy production runtime assets from an "
-              "explicit allowlist") &&
-       ok;
-  ok = expect(contains(prepare, "wintun.dll"),
-              "prepare-native.cjs should still preserve Wintun validation and "
-              "copying") &&
-       ok;
-  ok = expect(contains(prepare, "MINGW_RUNTIME_DLLS"),
-              "prepare-native.cjs should still stage required MinGW runtime "
-              "DLLs on Windows") &&
-       ok;
-  ok = expect(contains(prepare, "exv-helper"),
-              "prepare-native.cjs should stage the native helper binary") &&
+  ok = expect(contains(embed, "webview") && !contains(embed, "electron"),
+              "embed_assets.py should default to WebView renderer assets") &&
        ok;
 
   return ok;
 }
 
-bool check_builder_denies_legacy_runtime() {
+bool check_retired_electron_artifacts() {
   bool ok = true;
-  const FileText builder = read_file("webui/electron-builder.config.cjs");
-
-  const std::vector<std::string> denied_filters = {
-      "!openconnect.exe",     "!openconnect",    "!libopenconnect-*",
-      "!libopenconnect*.dylib", "!libgnutls-*",  "!*gnutls*",
+  const std::vector<fs::path> retired_paths = {
+      "webui/electron-builder.config.cjs",
+      "webui/scripts/build-electron.cjs",
+      "webui/scripts/prepare-native.cjs",
+      "webui/scripts/run-electron-test.cjs",
+      "webui/tsconfig.electron.json",
+      "webui/desktop/main",
+      "webui/desktop/preload",
+      "webui/build-resources",
   };
 
-  for (const std::string &filter : denied_filters) {
-    ok = expect(contains(builder, filter),
-                "electron-builder extraResources/bin filter should deny " +
-                    filter) &&
+  for (const fs::path &relative_path : retired_paths) {
+    ok = expect(!fs::exists(kRepoRoot / relative_path),
+                generic_path(relative_path) +
+                    " should not exist in the production WebView UI path") &&
          ok;
   }
 
@@ -426,6 +420,14 @@ bool check_production_build_scripts() {
     const std::string name = generic_path(script.relative_path);
     ok = expect(contains(script, "native_packaging_policy_test"),
                 name + " should build and run native_packaging_policy_test") &&
+         ok;
+    ok = expect(!contains_ci(script.text, "desktop:package") &&
+                    !contains_ci(script.text, "build:electron") &&
+                    !contains_ci(script.text, "electron\\release") &&
+                    !contains_ci(script.text, "electron/release"),
+                name +
+                    " should not call retired Electron package scripts or "
+                    "release paths") &&
          ok;
   }
 
@@ -565,7 +567,7 @@ bool check_production_runtime_dirs() {
 bool check_scanner_examples() {
   bool ok = true;
   const FileText bad_allowlist = make_text_file(
-      "webui/scripts/prepare-native.cjs",
+      "scripts/package_ui_shell.py",
       "const ALLOWED_NATIVE_RUNTIME_ASSETS = new Set([\n"
       "  'wintun.dll',\n"
       "  'openconnect.exe',\n"
@@ -581,7 +583,7 @@ bool check_scanner_examples() {
        ok;
 
   const FileText deny_filter = make_text_file(
-      "webui/electron-builder.config.cjs",
+      "scripts/package_ui_shell.py",
       "filter: [\n"
       "  '!openconnect.exe',\n"
       "  '!libopenconnect-*',\n"
@@ -601,8 +603,8 @@ int main() {
 
   ok = check_scanner_examples() && ok;
   ok = check_production_files_exist_and_scan_cleanly() && ok;
-  ok = check_prepare_native_policy() && ok;
-  ok = check_builder_denies_legacy_runtime() && ok;
+  ok = check_webview_package_policy() && ok;
+  ok = check_retired_electron_artifacts() && ok;
   ok = check_legacy_staging_scripts_removed() && ok;
   ok = check_production_build_scripts() && ok;
   ok = check_runtime_assets_doc_policy() && ok;

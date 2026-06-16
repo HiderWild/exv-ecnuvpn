@@ -56,9 +56,7 @@ def candidate_dist_dirs():
     if override:
         candidates.append(os.path.abspath(override))
 
-    candidates.append(
-        os.path.join(REPO_ROOT, "build", build_platform(), "electron", "dist")
-    )
+    candidates.append(os.path.join(REPO_ROOT, "build", build_platform(), "webview", "dist"))
     candidates.append(os.path.join(REPO_ROOT, "webui", "dist"))
 
     unique_candidates = []

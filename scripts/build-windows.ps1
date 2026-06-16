@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('cpp', 'test', 'webview', 'electron', 'debug', 'debug-run', 'desktop', 'all', 'clean')]
+  [ValidateSet('cpp', 'test', 'webview', 'desktop', 'all', 'clean')]
   [string]$Action = 'all'
 )
 
@@ -66,16 +66,6 @@ function Invoke-WebuiRendererBuild {
   }
 }
 
-function Invoke-ElectronCompile {
-  Push-Location (Join-Path $repoRoot 'webui')
-  try {
-    Invoke-Step pnpm run desktop:compile
-  }
-  finally {
-    Pop-Location
-  }
-}
-
 function Invoke-WebViewPackage {
   Push-Location (Join-Path $repoRoot 'webui')
   try {
@@ -86,40 +76,6 @@ function Invoke-WebViewPackage {
   }
 }
 
-function Invoke-DesktopDebugBuild {
-  Push-Location (Join-Path $repoRoot 'webui')
-  try {
-    Invoke-Step pnpm run desktop:package:dir
-  }
-  finally {
-    Pop-Location
-  }
-}
-
-function Clear-DesktopRelease {
-  $releaseRoot = Join-Path $buildRoot 'electron\release'
-  if (Test-Path $releaseRoot) {
-    Remove-Item -Recurse -Force $releaseRoot
-  }
-}
-
-function Invoke-DesktopDebugLaunch {
-  $releaseRoot = Join-Path $buildRoot 'electron\release'
-  $candidate = Join-Path $releaseRoot 'win-unpacked\ECNU-VPN.exe'
-
-  if (-not (Test-Path $candidate)) {
-    $candidate = Get-ChildItem -Path $releaseRoot -Filter '*.exe' -Recurse -File |
-      Where-Object { $_.FullName -match 'win-unpacked' } |
-      Select-Object -First 1 -ExpandProperty FullName
-  }
-
-  if (-not $candidate) {
-    throw "Unpacked debug executable not found under $releaseRoot"
-  }
-
-  Start-Process -FilePath $candidate
-}
-
 switch ($Action) {
   'cpp' {
     Invoke-CppBuild
@@ -127,29 +83,11 @@ switch ($Action) {
   'test' {
     Invoke-CppTests
   }
-  'electron' {
-    Invoke-ElectronCompile
-  }
   'webview' {
     Invoke-WebuiRendererBuild
     Invoke-CppBuild -UiShell
     Invoke-CppTests
     Invoke-WebViewPackage
-  }
-  'debug' {
-    Invoke-CppBuild
-    Invoke-CppTests
-    Invoke-ElectronCompile
-    Clear-DesktopRelease
-    Invoke-DesktopDebugBuild
-  }
-  'debug-run' {
-    Invoke-CppBuild
-    Invoke-CppTests
-    Invoke-ElectronCompile
-    Clear-DesktopRelease
-    Invoke-DesktopDebugBuild
-    Invoke-DesktopDebugLaunch
   }
   'desktop' {
     Invoke-WebuiRendererBuild
