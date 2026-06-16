@@ -786,9 +786,25 @@ CleanupResponse HelperHandler::cleanup_session_impl(const SessionId& session_id,
         }
     }
 
+    std::optional<CoreRegistryCleanupBinding> registry_cleanup;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        cleanup_.complete_session_cleanup(session_id);
+        registry_cleanup = cleanup_.core_registry_cleanup_binding(session_id);
+    }
+
+    if (registry_cleanup.has_value() &&
+        !exv::core::lifecycle::compare_and_delete_core_registry(
+            registry_cleanup->registry_path, registry_cleanup->delete_match)) {
+        CleanupResponse cleanup_resp;
+        cleanup_resp.success = false;
+        cleanup_resp.errors.push_back(
+            "Core registry cleanup could not remove the versioned registry");
+        return cleanup_resp;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        cleanup_.remove_session(session_id);
         leases_.remove_session(session_id);
     }
 

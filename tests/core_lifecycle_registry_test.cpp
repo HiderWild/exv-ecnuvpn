@@ -10,6 +10,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -30,6 +31,12 @@ using CoreRegistryCompareDeleteHook =
 
 void set_compare_delete_quarantine_hook(
     CoreRegistryCompareDeleteHook hook);
+
+using CoreRegistryExistsHook =
+    std::function<bool(const std::filesystem::path& path,
+                       std::error_code& ec)>;
+
+void set_read_core_registry_exists_hook(CoreRegistryExistsHook hook);
 } // namespace exv::core::lifecycle::testing
 
 namespace {
@@ -263,6 +270,24 @@ int main() {
                     "missing registry should report missing state") && ok;
         ok = expect(!missing.snapshot.has_value(),
                     "missing registry should not return a snapshot") && ok;
+    }
+
+    {
+        exv::core::lifecycle::testing::set_read_core_registry_exists_hook(
+            [](const std::filesystem::path&, std::error_code& ec) {
+                ec = std::make_error_code(std::errc::permission_denied);
+                return false;
+            });
+        const auto loaded =
+            exv::core::lifecycle::read_core_registry("error-is-not-missing");
+        exv::core::lifecycle::testing::set_read_core_registry_exists_hook(
+            nullptr);
+
+        ok = expect(loaded.state == CoreRegistryReadState::unknown_state,
+                    "filesystem errors while probing registry must not be reported as missing") &&
+             ok;
+        ok = expect(!loaded.snapshot.has_value(),
+                    "filesystem probe errors should not return a snapshot") && ok;
     }
 
     {

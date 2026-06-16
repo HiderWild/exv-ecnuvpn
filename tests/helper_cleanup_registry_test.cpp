@@ -9,11 +9,15 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <string>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -75,6 +79,15 @@ exv::core::lifecycle::CoreRegistrySnapshot make_core_registry_snapshot(
 }
 
 } // namespace
+
+namespace exv::core::lifecycle::testing {
+using CoreRegistryCompareDeleteHook =
+    std::function<void(const std::string& final_path,
+                       const std::string& tombstone_path)>;
+
+void set_compare_delete_quarantine_hook(
+    CoreRegistryCompareDeleteHook hook);
+} // namespace exv::core::lifecycle::testing
 
 int main() {
     bool ok = true;
@@ -405,13 +418,26 @@ int main() {
         ok = expect(exv::core::lifecycle::write_core_registry(snapshot, registry_path),
                     "matching helper cleanup test should write core registry") && ok;
 
-        CoreRegistryCleanupBinding binding;
-        binding.registry_path = registry_path;
-        binding.delete_match =
+        CoreRegistryCleanupBinding stored_binding;
+        stored_binding.registry_path = registry_path;
+        stored_binding.delete_match =
             exv::core::lifecycle::core_registry_delete_match(snapshot);
-        registry.bind_core_registry_cleanup(rec.session_id, binding);
+        registry.bind_core_registry_cleanup(rec.session_id, stored_binding);
 
-        registry.complete_session_cleanup(rec.session_id);
+        const auto cleanup_binding =
+            registry.core_registry_cleanup_binding(rec.session_id);
+        ok = expect(cleanup_binding.has_value(),
+                    "successful helper cleanup should expose registry cleanup binding") &&
+             ok;
+        if (cleanup_binding.has_value()) {
+            ok = expect(
+                     exv::core::lifecycle::compare_and_delete_core_registry(
+                         cleanup_binding->registry_path,
+                         cleanup_binding->delete_match),
+                     "successful helper cleanup should compare-delete versioned core registry") &&
+                 ok;
+        }
+        registry.remove_session(rec.session_id);
         ok = expect(!fs::exists(registry_path),
                     "successful helper cleanup should delete versioned core registry") && ok;
 
@@ -540,6 +566,180 @@ int main() {
              ok;
         ok = expect(!fs::exists(registry_path),
                     "successful production helper cleanup should delete the versioned core registry") &&
+             ok;
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- production cleanup keeps record and lease when registry delete fails, then retries ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-delete-retry-" +
+             std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+
+        exv::helper::HelperHandler handler;
+
+        exv::helper::AcquireCoreLeaseRequest acquire_req;
+        acquire_req.core_pid = 8181;
+        acquire_req.purpose = "connect";
+        auto acquire = dispatch_json(
+            handler, exv::helper::HelperOp::AcquireCoreLease, json(acquire_req));
+        ok = expect(acquire.success,
+                    "AcquireCoreLease should succeed before cleanup retry test") &&
+             ok;
+        const auto acquire_resp =
+            exv::helper::acquire_core_lease_response_from_json(
+                json::parse(acquire.payload_json));
+
+        exv::helper::StartSessionRequest start_req;
+        start_req.profile_id.value = "profile-helper-retry";
+        auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                                   json(start_req));
+        ok = expect(start.success,
+                    "StartSession should succeed before cleanup retry test") && ok;
+        const auto start_resp = exv::helper::start_session_response_from_json(
+            json::parse(start.payload_json));
+
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(root.string());
+        const auto snapshot =
+            make_core_registry_snapshot(root, acquire_req.core_pid,
+                                        acquire_resp.lease_id);
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot,
+                                                              registry_path),
+                    "cleanup retry test should write versioned registry") && ok;
+
+        exv::helper::HeartbeatRequest heartbeat_req;
+        heartbeat_req.session_id = start_resp.session_id;
+        heartbeat_req.core_phase = "connected";
+        auto heartbeat = dispatch_json(handler, exv::helper::HelperOp::Heartbeat,
+                                       json(heartbeat_req));
+        ok = expect(heartbeat.success,
+                    "Heartbeat should bind registry cleanup before retry test") &&
+             ok;
+
+        fs::remove(registry_path, ec);
+
+        exv::helper::CleanupRequest cleanup_req;
+        cleanup_req.session_id = start_resp.session_id;
+        auto failed_cleanup = dispatch_json(
+            handler, exv::helper::HelperOp::Cleanup, json(cleanup_req));
+        ok = expect(!failed_cleanup.success,
+                    "cleanup should fail when registry compare-delete cannot run") &&
+             ok;
+        ok = expect(!handler.cleanup_registry().all_records().empty(),
+                    "registry delete failure must keep cleanup record for retry") &&
+             ok;
+        ok = expect(handler.lease_manager().has_session(start_resp.session_id),
+                    "registry delete failure must keep session lease for retry") &&
+             ok;
+
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot,
+                                                              registry_path),
+                    "cleanup retry test should restore versioned registry") && ok;
+
+        auto retry_cleanup = dispatch_json(
+            handler, exv::helper::HelperOp::Cleanup, json(cleanup_req));
+        ok = expect(retry_cleanup.success,
+                    "cleanup retry should succeed after registry is restorable") && ok;
+        ok = expect(handler.cleanup_registry().all_records().empty(),
+                    "successful cleanup retry should remove cleanup record") && ok;
+        ok = expect(!handler.lease_manager().has_session(start_resp.session_id),
+                    "successful cleanup retry should remove session lease") && ok;
+        ok = expect(!fs::exists(registry_path),
+                    "successful cleanup retry should delete versioned registry") && ok;
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- production cleanup must not hold state_mutex while deleting registry ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-delete-unlocked-" +
+             std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+
+        exv::helper::HelperHandler handler;
+
+        exv::helper::AcquireCoreLeaseRequest acquire_req;
+        acquire_req.core_pid = 8282;
+        acquire_req.purpose = "connect";
+        auto acquire = dispatch_json(
+            handler, exv::helper::HelperOp::AcquireCoreLease, json(acquire_req));
+        ok = expect(acquire.success,
+                    "AcquireCoreLease should succeed before unlocked cleanup test") &&
+             ok;
+        const auto acquire_resp =
+            exv::helper::acquire_core_lease_response_from_json(
+                json::parse(acquire.payload_json));
+
+        exv::helper::StartSessionRequest start_req;
+        start_req.profile_id.value = "profile-helper-unlocked";
+        auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                                   json(start_req));
+        ok = expect(start.success,
+                    "StartSession should succeed before unlocked cleanup test") &&
+             ok;
+        const auto start_resp = exv::helper::start_session_response_from_json(
+            json::parse(start.payload_json));
+
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(root.string());
+        const auto snapshot =
+            make_core_registry_snapshot(root, acquire_req.core_pid,
+                                        acquire_resp.lease_id);
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot,
+                                                              registry_path),
+                    "unlocked cleanup test should write versioned registry") &&
+             ok;
+
+        exv::helper::HeartbeatRequest heartbeat_req;
+        heartbeat_req.session_id = start_resp.session_id;
+        heartbeat_req.core_phase = "connected";
+        auto heartbeat = dispatch_json(handler, exv::helper::HelperOp::Heartbeat,
+                                       json(heartbeat_req));
+        ok = expect(heartbeat.success,
+                    "Heartbeat should bind registry cleanup before unlocked test") &&
+             ok;
+
+        std::atomic<bool> probe_returned{false};
+        bool hook_saw_unlocked_state = false;
+        std::thread probe_thread;
+        exv::core::lifecycle::testing::set_compare_delete_quarantine_hook(
+            [&](const std::string&, const std::string&) {
+                probe_thread = std::thread([&] {
+                    (void)handler.has_active_core_lease();
+                    probe_returned.store(true);
+                });
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                hook_saw_unlocked_state = probe_returned.load();
+            });
+
+        exv::helper::CleanupRequest cleanup_req;
+        cleanup_req.session_id = start_resp.session_id;
+        auto cleanup = dispatch_json(handler, exv::helper::HelperOp::Cleanup,
+                                     json(cleanup_req));
+        exv::core::lifecycle::testing::set_compare_delete_quarantine_hook(
+            nullptr);
+        if (probe_thread.joinable()) {
+            probe_thread.join();
+        }
+
+        ok = expect(cleanup.success,
+                    "unlocked cleanup test should cleanup successfully") && ok;
+        ok = expect(hook_saw_unlocked_state,
+                    "registry compare-delete must not run while helper state_mutex_ is held") &&
              ok;
 
         fs::remove_all(root, ec);

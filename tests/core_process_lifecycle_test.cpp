@@ -29,9 +29,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -50,6 +52,25 @@ using json = nlohmann::json;
 #ifndef ECNUVPN_VERSION
 #define ECNUVPN_VERSION "test"
 #endif
+
+namespace exv::core::lifecycle::testing {
+using CoreRegistryWriteHook =
+    std::function<std::optional<bool>(
+        const exv::core::lifecycle::CoreRegistrySnapshot& snapshot,
+        const std::string& registry_path)>;
+
+void set_write_core_registry_hook(CoreRegistryWriteHook hook);
+} // namespace exv::core::lifecycle::testing
+
+namespace exv::core::testing {
+using CoreRegistryPersistCandidateHook =
+    std::function<void(
+        exv::core::lifecycle::CoreRegistrySnapshot& snapshot,
+        int persist_attempt)>;
+
+void set_core_registry_persist_candidate_hook(
+    CoreRegistryPersistCandidateHook hook);
+} // namespace exv::core::testing
 
 static int g_failures = 0;
 
@@ -226,6 +247,19 @@ static bool wait_for_registry_state(
     while (std::chrono::steady_clock::now() < deadline) {
         auto loaded = exv::core::lifecycle::read_core_registry(path);
         if (loaded.state == state) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
+static bool wait_for_atomic_at_least(const std::atomic<int>& value,
+                                     int minimum,
+                                     std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (value.load() >= minimum) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -452,6 +486,70 @@ int main() {
                    exv::core::lifecycle::CoreRegistryReadState::missing,
                "E2.1a-native: registry should be removed on shutdown");
         expect(cr.rc == 0, "E2.1a-native: exit code 0");
+    }
+
+    // =======================================================================
+    // E2.1a-registry-drift — failed post-start writes must not poison shutdown delete
+    // =======================================================================
+    {
+        std::cerr << "[E2.1a-registry-drift] failed heartbeat write keeps persisted delete token\n";
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(config_dir);
+
+        std::atomic<int> persist_attempts{0};
+        std::atomic<bool> fail_future_persist{false};
+        exv::core::testing::set_core_registry_persist_candidate_hook(
+            [&](exv::core::lifecycle::CoreRegistrySnapshot& snapshot,
+                int persist_attempt) {
+                persist_attempts.store(persist_attempt);
+                if (fail_future_persist.load()) {
+                    snapshot.helper_core_lease_id = "drifted-after-failed-write";
+                }
+            });
+        exv::core::lifecycle::testing::set_write_core_registry_hook(
+            [](const exv::core::lifecycle::CoreRegistrySnapshot& snapshot,
+               const std::string&) -> std::optional<bool> {
+                if (snapshot.helper_core_lease_id ==
+                    "drifted-after-failed-write") {
+                    return false;
+                }
+                return std::nullopt;
+            });
+
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin, &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(config_dir, home_dir);
+
+        expect(wait_for_registry_state(
+                   registry_path,
+                   exv::core::lifecycle::CoreRegistryReadState::present,
+                   std::chrono::seconds(5)),
+               "E2.1a-registry-drift: initial registry write should succeed");
+        const int attempts_before_failure = persist_attempts.load();
+        fail_future_persist.store(true);
+        expect(wait_for_atomic_at_least(persist_attempts, 2,
+                                        std::chrono::seconds(5)),
+               "E2.1a-registry-drift: post-start registry write should be attempted");
+        expect(wait_for_atomic_at_least(persist_attempts,
+                                        attempts_before_failure + 1,
+                                        std::chrono::seconds(5)),
+               "E2.1a-registry-drift: post-start failed registry write should be observed");
+
+        in_buf.close_input();
+        cr.join();
+
+        exv::core::testing::set_core_registry_persist_candidate_hook(nullptr);
+        exv::core::lifecycle::testing::set_write_core_registry_hook(nullptr);
+
+        expect(cr.rc == 0, "E2.1a-registry-drift: exit code 0");
+        expect(exv::core::lifecycle::read_core_registry(registry_path).state ==
+                   exv::core::lifecycle::CoreRegistryReadState::missing,
+               "E2.1a-registry-drift: shutdown should delete the last persisted registry");
     }
 
     // =======================================================================

@@ -23,6 +23,13 @@ namespace testing {
 using CoreRegistryCompareDeleteHook =
     std::function<void(const std::string& final_path,
                        const std::string& tombstone_path)>;
+using CoreRegistryExistsHook =
+    std::function<bool(const std::filesystem::path& path,
+                       std::error_code& ec)>;
+using CoreRegistryWriteHook =
+    std::function<std::optional<bool>(
+        const CoreRegistrySnapshot& snapshot,
+        const std::string& registry_path)>;
 } // namespace testing
 
 namespace {
@@ -66,6 +73,25 @@ unique_tombstone_path(const std::filesystem::path& final_path) {
 testing::CoreRegistryCompareDeleteHook& compare_delete_quarantine_hook() {
     static testing::CoreRegistryCompareDeleteHook hook;
     return hook;
+}
+
+testing::CoreRegistryExistsHook& read_core_registry_exists_hook() {
+    static testing::CoreRegistryExistsHook hook;
+    return hook;
+}
+
+testing::CoreRegistryWriteHook& write_core_registry_hook() {
+    static testing::CoreRegistryWriteHook hook;
+    return hook;
+}
+
+bool registry_exists_for_read(const std::filesystem::path& path,
+                              std::error_code& ec) {
+    auto& hook = read_core_registry_exists_hook();
+    if (hook) {
+        return hook(path, ec);
+    }
+    return std::filesystem::exists(path, ec);
 }
 
 bool replace_file_atomically(const std::filesystem::path& source_path,
@@ -214,6 +240,12 @@ bool write_core_registry(const CoreRegistrySnapshot& snapshot) {
 
 bool write_core_registry(const CoreRegistrySnapshot& snapshot,
                          const std::string& registry_path) {
+    auto& hook = write_core_registry_hook();
+    if (hook) {
+        if (auto result = hook(snapshot, registry_path); result.has_value()) {
+            return *result;
+        }
+    }
     return write_json_atomic(registry_path, to_json(snapshot));
 }
 
@@ -226,11 +258,17 @@ CoreRegistryReadResult read_core_registry(const std::string& registry_path) {
 
     CoreRegistryReadResult result;
     std::error_code ec;
-    if (!fs::exists(registry_path, ec)) {
+    const bool exists = registry_exists_for_read(registry_path, ec);
+    if (ec) {
+        result.state = CoreRegistryReadState::unknown_state;
+        return result;
+    }
+    if (!exists) {
         result.state = CoreRegistryReadState::missing;
         return result;
     }
-    if (ec || !fs::is_regular_file(registry_path, ec)) {
+    const bool regular_file = fs::is_regular_file(registry_path, ec);
+    if (ec || !regular_file) {
         result.state = CoreRegistryReadState::unknown_state;
         return result;
     }
@@ -319,6 +357,14 @@ void set_compare_delete_quarantine_hook(
     CoreRegistryCompareDeleteHook hook) {
     std::lock_guard<std::mutex> lock(registry_file_mutex());
     compare_delete_quarantine_hook() = std::move(hook);
+}
+
+void set_read_core_registry_exists_hook(CoreRegistryExistsHook hook) {
+    read_core_registry_exists_hook() = std::move(hook);
+}
+
+void set_write_core_registry_hook(CoreRegistryWriteHook hook) {
+    write_core_registry_hook() = std::move(hook);
 }
 
 } // namespace testing

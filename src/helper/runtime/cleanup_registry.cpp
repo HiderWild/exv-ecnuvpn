@@ -183,17 +183,13 @@ void CleanupRegistry::remove_session(const SessionId& id) {
     records_.erase(it);
 }
 
-void CleanupRegistry::complete_session_cleanup(const SessionId& id) {
+std::optional<CoreRegistryCleanupBinding>
+CleanupRegistry::core_registry_cleanup_binding(const SessionId& id) const {
     auto it = records_.find(id);
     if (it == records_.end()) {
-        return;
+        return std::nullopt;
     }
-    if (it->second.core_registry_cleanup.has_value()) {
-        const auto& binding = *it->second.core_registry_cleanup;
-        (void)exv::core::lifecycle::compare_and_delete_core_registry(
-            binding.registry_path, binding.delete_match);
-    }
-    records_.erase(it);
+    return it->second.core_registry_cleanup;
 }
 
 std::vector<CleanupRecord> CleanupRegistry::all_records() const {

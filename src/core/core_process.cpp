@@ -19,6 +19,7 @@
 #include <csignal>
 #include <iostream>
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -35,6 +36,25 @@
 using json = nlohmann::json;
 
 namespace exv::core {
+
+namespace testing {
+
+using CoreRegistryPersistCandidateHook =
+    std::function<void(
+        exv::core::lifecycle::CoreRegistrySnapshot& snapshot,
+        int persist_attempt)>;
+
+CoreRegistryPersistCandidateHook& core_registry_persist_candidate_hook() {
+    static CoreRegistryPersistCandidateHook hook;
+    return hook;
+}
+
+void set_core_registry_persist_candidate_hook(
+    CoreRegistryPersistCandidateHook hook) {
+    core_registry_persist_candidate_hook() = std::move(hook);
+}
+
+} // namespace testing
 
 // ------------------------------------------------------------------
 // Global signal flag — set by SIGTERM/SIGINT handler
@@ -299,7 +319,8 @@ int core_process_main(const std::string& config_dir,
         return 1;
     }
 
-    auto registry_snapshot = bootstrap_registry_snapshot(*native_dispatcher, pipe_path);
+    auto registry_snapshot =
+        bootstrap_registry_snapshot(*native_dispatcher, pipe_path);
     if (!registry_snapshot.has_value()) {
         std::cerr << "fatal: could not initialize versioned core registry"
                   << std::endl;
@@ -309,34 +330,50 @@ int core_process_main(const std::string& config_dir,
 
     const auto registry_path = exv::core::lifecycle::core_registry_path();
     std::mutex registry_mutex;
+    std::optional<exv::core::lifecycle::CoreRegistrySnapshot>
+        last_persisted_registry_snapshot;
+    int registry_persist_attempt = 0;
     auto persist_registry = [&](const std::optional<TunnelStatusSnapshot>& status) {
         std::lock_guard<std::mutex> lock(registry_mutex);
+        auto candidate = *registry_snapshot;
         if (status.has_value()) {
-            exv::core::lifecycle::apply_tunnel_status(*registry_snapshot,
+            exv::core::lifecycle::apply_tunnel_status(candidate,
                                                       *status);
         }
 
-        registry_snapshot->helper_core_lease_id.clear();
+        candidate.helper_core_lease_id.clear();
         if (auto helper = controller->helper_client_for_maintenance();
             helper && helper->is_connected()) {
             try {
                 const auto inspect = helper->inspect(exv::helper::InspectRequest{});
                 if (inspect.core_lease.active) {
-                    registry_snapshot->helper_core_lease_id =
-                        inspect.core_lease.lease_id;
+                    candidate.helper_core_lease_id = inspect.core_lease.lease_id;
                 }
             } catch (...) {
-                registry_snapshot->helper_core_lease_id.clear();
+                candidate.helper_core_lease_id.clear();
             }
         }
 
-        exv::core::lifecycle::refresh_core_registry_heartbeat(*registry_snapshot);
-        return exv::core::lifecycle::write_core_registry(*registry_snapshot,
-                                                         registry_path);
+        exv::core::lifecycle::refresh_core_registry_heartbeat(candidate);
+        ++registry_persist_attempt;
+        auto& hook = testing::core_registry_persist_candidate_hook();
+        if (hook) {
+            hook(candidate, registry_persist_attempt);
+        }
+        if (!exv::core::lifecycle::write_core_registry(candidate,
+                                                       registry_path)) {
+            return false;
+        }
+        registry_snapshot = candidate;
+        last_persisted_registry_snapshot = candidate;
+        return true;
     };
 
     controller->set_status_callback([&](const TunnelStatusSnapshot& status) {
-        (void)persist_registry(status);
+        if (!persist_registry(status)) {
+            exv::observability::LogFacade::warn(
+                "Core process could not refresh the versioned core registry after status update");
+        }
     });
 
     if (!persist_registry(controller->status())) {
@@ -353,7 +390,10 @@ int core_process_main(const std::string& config_dir,
             if (registry_worker_stop.load() || g_stop_requested.load()) {
                 break;
             }
-            (void)persist_registry(std::nullopt);
+            if (!persist_registry(std::nullopt)) {
+                exv::observability::LogFacade::warn(
+                    "Core process could not refresh the versioned core registry heartbeat");
+            }
         }
     });
 
@@ -442,14 +482,18 @@ int core_process_main(const std::string& config_dir,
     }
     pipe_listener->stop();
 
-    exv::core::lifecycle::CoreRegistryDeleteMatch delete_match;
+    std::optional<exv::core::lifecycle::CoreRegistryDeleteMatch> delete_match;
     {
         std::lock_guard<std::mutex> lock(registry_mutex);
-        delete_match =
-            exv::core::lifecycle::core_registry_delete_match(*registry_snapshot);
+        if (last_persisted_registry_snapshot.has_value()) {
+            delete_match = exv::core::lifecycle::core_registry_delete_match(
+                *last_persisted_registry_snapshot);
+        }
     }
-    (void)exv::core::lifecycle::compare_and_delete_core_registry(
-        registry_path, delete_match);
+    if (delete_match.has_value()) {
+        (void)exv::core::lifecycle::compare_and_delete_core_registry(
+            registry_path, *delete_match);
+    }
 
     exv::observability::LogFacade::info("Core process shutting down");
     return 0;

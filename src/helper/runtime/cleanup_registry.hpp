@@ -40,9 +40,8 @@ public:
     // Remove only the session record.
     void remove_session(const SessionId& id);
 
-    // Complete successful cleanup for a session and then run its bound core
-    // registry compare/delete action.
-    void complete_session_cleanup(const SessionId& id);
+    std::optional<CoreRegistryCleanupBinding> core_registry_cleanup_binding(
+        const SessionId& id) const;
 
     // Bind a versioned core registry compare-and-delete operation to the
     // session's success path.
