@@ -970,15 +970,39 @@ if(APPLE)
     add_test(NAME darwin_wkwebview_runtime_test COMMAND darwin_wkwebview_runtime_test)
 endif()
 
+if(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(WEBKITGTK REQUIRED webkit2gtk-4.1 gtk+-3.0)
+endif()
+
 if(UNIX AND NOT APPLE)
     add_executable(linux_webkitgtk_runtime_test
         tests/linux_webkitgtk_runtime_test.cpp
+        src/app/ui_shell/host_bridge.cpp
         src/platform/linux/ui_shell/webkitgtk_host_linux.cpp
     )
 
     target_include_directories(linux_webkitgtk_runtime_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
     )
+    if(EXV_BUILD_UI_SHELL)
+        target_compile_definitions(linux_webkitgtk_runtime_test PRIVATE
+            EXV_BUILD_UI_SHELL=1
+        )
+        target_include_directories(linux_webkitgtk_runtime_test PRIVATE
+            ${WEBKITGTK_INCLUDE_DIRS}
+        )
+        target_link_directories(linux_webkitgtk_runtime_test PRIVATE
+            ${WEBKITGTK_LIBRARY_DIRS}
+        )
+        target_compile_options(linux_webkitgtk_runtime_test PRIVATE
+            ${WEBKITGTK_CFLAGS_OTHER}
+        )
+        target_link_libraries(linux_webkitgtk_runtime_test PRIVATE
+            ${WEBKITGTK_LIBRARIES}
+        )
+    endif()
 
     add_test(NAME linux_webkitgtk_runtime_test COMMAND linux_webkitgtk_runtime_test)
 endif()
@@ -1044,9 +1068,6 @@ if(WIN32)
             message(FATAL_ERROR "WEBVIEW2_SDK_DIR does not contain WebView2Loader.dll")
         endif()
     endif()
-elseif(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(WEBKITGTK REQUIRED webkit2gtk-4.1 gtk+-3.0)
 endif()
 
 if(WIN32)

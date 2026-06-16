@@ -39,6 +39,9 @@ int main() {
   const std::string wkwebview_host =
       read_file(source_dir +
                 "/src/platform/darwin/ui_shell/wk_webview_host_darwin.mm");
+  const std::string webkitgtk_host =
+      read_file(source_dir +
+                "/src/platform/linux/ui_shell/webkitgtk_host_linux.cpp");
 
   int failures = 0;
   const auto expect_contains = [&](const std::string &needle) {
@@ -74,6 +77,11 @@ int main() {
   expect_contains("\"-framework WebKit\"");
   expect_contains("linux_webkitgtk_runtime_test");
   expect_contains("tests/linux_webkitgtk_runtime_test.cpp");
+  expect_contains("target_compile_definitions(linux_webkitgtk_runtime_test PRIVATE");
+  expect_contains("${WEBKITGTK_INCLUDE_DIRS}");
+  expect_contains("${WEBKITGTK_LIBRARY_DIRS}");
+  expect_contains("${WEBKITGTK_CFLAGS_OTHER}");
+  expect_contains("${WEBKITGTK_LIBRARIES}");
 
   const auto expect_webview2_host_contains = [&](const std::string &needle) {
     if (!contains(webview2_host, needle)) {
@@ -101,6 +109,23 @@ int main() {
   expect_wkwebview_host_contains("WKUserScript");
   expect_wkwebview_host_contains("evaluateJavaScript");
   expect_wkwebview_host_contains("loadFileURL");
+
+  const auto expect_webkitgtk_host_contains = [&](const std::string &needle) {
+    if (!contains(webkitgtk_host, needle)) {
+      std::cerr << "missing Linux WebKitGTK host implementation marker: "
+                << needle << "\n";
+      ++failures;
+    }
+  };
+
+  expect_webkitgtk_host_contains("WebKitWebView");
+  expect_webkitgtk_host_contains("gtk_application_window_new");
+  expect_webkitgtk_host_contains("WebKitUserContentManager");
+  expect_webkitgtk_host_contains("webkit_user_content_manager_register_script_message_handler");
+  expect_webkitgtk_host_contains("script-message-received::ecnuVpnHost");
+  expect_webkitgtk_host_contains("webkit_user_script_new");
+  expect_webkitgtk_host_contains("webkit_web_view_run_javascript");
+  expect_webkitgtk_host_contains("webkit_web_view_load_uri");
 
   expect_not_contains(windows_build_script, "scripts/build-windows.ps1",
                       "vpn_runtime_test");
