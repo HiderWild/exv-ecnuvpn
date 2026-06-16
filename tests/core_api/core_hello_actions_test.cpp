@@ -1,0 +1,87 @@
+#include "contracts/generated/system_contract.hpp"
+#include "core/rpc/core_api_setup.hpp"
+#include "core/tunnel_controller/reconnect_policy.hpp"
+#include "core/tunnel_controller/tunnel_controller.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <iostream>
+#include <memory>
+#include <string>
+
+#ifndef ECNUVPN_VERSION
+#define ECNUVPN_VERSION "test"
+#endif
+
+using json = nlohmann::json;
+
+namespace {
+
+bool expect(bool condition, const char* message) {
+    if (condition) {
+        return true;
+    }
+    std::cerr << "EXPECT FAILED: " << message << std::endl;
+    return false;
+}
+
+exv::core_api::RpcResponse dispatch(exv::core_api::AppRpcDispatcher& dispatcher,
+                                    const std::string& action,
+                                    const std::string& payload = "{}") {
+    exv::core_api::RpcRequest req;
+    req.action = action;
+    req.payload_json = payload;
+    req.request_id = "core-hello-test";
+    return dispatcher.dispatch(req);
+}
+
+} // namespace
+
+int main() {
+    bool ok = true;
+
+    auto helper = std::shared_ptr<exv::helper::HelperClient>(nullptr);
+    auto net_ops = std::shared_ptr<exv::platform::PlatformNetworkOps>(nullptr);
+    auto controller = std::make_shared<exv::core::TunnelController>(
+        helper, net_ops, exv::core::ReconnectConfig{});
+
+    auto dispatcher = exv::core_api::create_dispatcher(controller);
+
+    auto response = dispatch(
+        *dispatcher,
+        "core.hello",
+        R"({"contract_version":"2026-06-16.cli-core-ui-contract.v1"})");
+    ok = expect(response.success,
+                "core.hello should succeed for accepted contract version") && ok;
+    if (response.success) {
+        auto payload = json::parse(response.payload_json);
+        ok = expect(payload["ipc_protocol_version"] == "ipc-v1",
+                    "hello returns protocol version string") && ok;
+        ok = expect(payload["contract_version"] ==
+                        std::string(exv::contracts::generated::CONTRACT_VERSION),
+                    "hello returns contract version") &&
+             ok;
+        ok = expect(payload["app_version"] == ECNUVPN_VERSION,
+                    "hello returns app version") && ok;
+        ok = expect(payload.contains("core_instance_id"),
+                    "hello returns instance id") && ok;
+        ok = expect(payload.contains("pid"), "hello returns pid") && ok;
+        ok = expect(payload.contains("core_path"),
+                    "hello returns core path") && ok;
+        ok = expect(payload.contains("started_at"),
+                    "hello returns started_at") && ok;
+    }
+
+    auto bad = dispatch(*dispatcher, "core.hello", R"({"contract_version":"wrong"})");
+    ok = expect(!bad.success, "core.hello rejects incompatible contract version") && ok;
+    ok = expect(bad.error_code == "unsupported_contract_version",
+                "mismatch uses unsupported_contract_version") &&
+         ok;
+
+    if (ok) {
+        std::cout << "core_hello_actions_test: all assertions passed\n";
+    } else {
+        std::cerr << "core_hello_actions_test: some assertions FAILED\n";
+    }
+    return ok ? 0 : 1;
+}

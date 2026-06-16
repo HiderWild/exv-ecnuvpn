@@ -1,4 +1,5 @@
 #include "core_api_setup.hpp"
+#include "core_actions.hpp"
 #include "vpn_actions.hpp"
 #include "config_actions.hpp"
 #include "service_actions.hpp"
@@ -14,6 +15,10 @@ std::unique_ptr<AppRpcDispatcher> create_dispatcher(
     // All action objects are heap-allocated and retained by the dispatcher.
     // Their handlers capture `this`, so the action objects must outlive the
     // dispatcher.  retain_action() stores them as type-erased shared_ptrs.
+    auto core = std::make_shared<CoreActions>();
+    core->register_handlers(*dispatcher);
+    dispatcher->retain_action(core);
+
     auto vpn = std::make_shared<VpnActions>(controller);
     vpn->register_handlers(*dispatcher);
     dispatcher->retain_action(vpn);

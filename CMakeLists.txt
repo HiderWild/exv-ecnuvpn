@@ -79,6 +79,7 @@ set(EXV_CORE_SOURCES
     src/core/config/config_key.cpp
     src/core/config/config_wizard_common.cpp
     src/core/core_process.cpp
+    src/core/lifecycle/core_identity.cpp
     src/core/pipe_ipc.cpp
     src/core/tunnel_controller/engine_event_bridge.cpp
     src/core/tunnel_controller/core_session_runner.cpp
@@ -97,6 +98,7 @@ set(EXV_CORE_SOURCES
     src/core/tunnel_controller/reconnect_policy.cpp
     src/core/tunnel_controller/timer_scheduler.cpp
     src/core/rpc/app_rpc_dispatcher.cpp
+    src/core/rpc/core_actions.cpp
     src/core/rpc/desktop_rpc_adapter.cpp
     src/core/rpc/vpn_actions.cpp
     src/core/rpc/config_actions.cpp
@@ -1924,6 +1926,19 @@ target_link_libraries(config_actions_test PRIVATE exv-core)
 
 add_test(NAME config_actions_test COMMAND config_actions_test)
 
+add_executable(core_hello_actions_test
+    tests/core_api/core_hello_actions_test.cpp
+)
+
+target_include_directories(core_hello_actions_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(core_hello_actions_test PRIVATE exv-core exv-helper-runtime)
+
+add_test(NAME core_hello_actions_test COMMAND core_hello_actions_test)
+
 add_executable(service_actions_test
     tests/core_api/service_actions_test.cpp
     tests/support/fake_helper.cpp
@@ -2323,6 +2338,7 @@ set(_release_blocking_tests
     app_api_rpc_dispatcher_test
     vpn_actions_test
     config_actions_test
+    core_hello_actions_test
     service_actions_test
     route_actions_test
     error_contract_test
@@ -2447,6 +2463,7 @@ set_property(TEST
     platform_network_ops_model_test
     vpn_actions_test
     config_actions_test
+    core_hello_actions_test
     service_actions_test
     route_actions_test
     error_contract_test
@@ -2521,6 +2538,7 @@ set_property(TEST
     app_api_rpc_dispatcher_test
     vpn_actions_test
     config_actions_test
+    core_hello_actions_test
     tunnel_contract_test
     config_module_smoke_test
     service_actions_test

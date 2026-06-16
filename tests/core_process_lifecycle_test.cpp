@@ -14,6 +14,7 @@
 #include "core/tunnel_controller/tunnel_controller.hpp"
 #include "core/tunnel_controller/reconnect_policy.hpp"
 #include "core/pipe_ipc.hpp"
+#include "contracts/generated/system_contract.hpp"
 #include "cli/pipe_client.hpp"
 #include "core/app_api/app_api.hpp"
 
@@ -353,9 +354,10 @@ int main() {
         cr.start(config_dir, home_dir);
 
         in_buf.feed(R"({"request_id":"native-1","action":"vpn.status","payload_json":"{}"})" "\n");
+        in_buf.feed(R"({"request_id":"native-hello","action":"core.hello","payload_json":"{\"contract_version\":\"2026-06-16.cli-core-ui-contract.v1\"}"})" "\n");
         in_buf.feed(R"({"request_id":"native-2","action":"missing.native","payload_json":"{}"})" "\n");
 
-        expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
+        expect(wait_for_response_count(out_buf, 3, std::chrono::seconds(5)),
                "E2.1a-native: should receive native responses");
 
         std::raise(SIGTERM);
@@ -364,6 +366,7 @@ int main() {
 
         auto all = parse_json_lines(out_buf.read_all());
         auto status_resp = find_by_request_id(all, "native-1");
+        auto hello_resp = find_by_request_id(all, "native-hello");
         auto unknown_resp = find_by_request_id(all, "native-2");
 
         expect(!status_resp.is_null(),
@@ -376,6 +379,27 @@ int main() {
             auto payload = json::parse(status_resp["payload_json"].get<std::string>());
             expect(payload.value("phase", std::string()) == "idle",
                    "E2.1a-native: vpn.status payload phase is idle");
+        }
+
+        expect(!hello_resp.is_null(),
+               "E2.1a-native: core.hello response exists");
+        if (!hello_resp.is_null()) {
+            expect(hello_resp.value("success", false),
+                   "E2.1a-native: core.hello success=true");
+        }
+        if (!hello_resp.is_null() && hello_resp.contains("payload_json")) {
+            auto payload = json::parse(hello_resp["payload_json"].get<std::string>());
+            expect(payload.value("ipc_protocol_version", std::string()) == "ipc-v1",
+                   "E2.1a-native: core.hello payload includes ipc protocol version");
+            expect(payload.value("contract_version", std::string()) ==
+                       std::string(exv::contracts::generated::CONTRACT_VERSION),
+                   "E2.1a-native: core.hello payload includes contract version");
+            expect(payload.value("app_version", std::string()) == ECNUVPN_VERSION,
+                   "E2.1a-native: core.hello payload includes app version");
+            expect(payload.contains("core_instance_id") &&
+                       payload["core_instance_id"].is_string() &&
+                       !payload["core_instance_id"].get<std::string>().empty(),
+                   "E2.1a-native: core.hello payload includes non-empty instance id");
         }
 
         expect(!unknown_resp.is_null(),
