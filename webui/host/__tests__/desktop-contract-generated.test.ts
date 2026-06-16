@@ -23,9 +23,14 @@ import {
   STANDARD_ERROR_CODES,
 } from '../../desktop/shared/generated/system-contract.js'
 import {
+  configAliases,
+  coreRpcActions,
   desktopRpcActions,
   desktopRpcErrorCodes,
   desktopEventTypes,
+  destructiveCoreRpcActions,
+  ipcProtocolMajor,
+  standardErrorCodes,
 } from '../../desktop/shared/desktop-contract.js'
 
 function expectContains<T>(values: readonly T[], value: T) {
@@ -98,13 +103,19 @@ describe('generated system contract', () => {
     assert.equal(CONFIG_ALIASES['config.save_profile'], 'config.profile.save')
   })
 
+  it('re-exports generated core contract metadata through the desktop shared contract', () => {
+    assert.deepEqual(coreRpcActions, CORE_RPC_ACTIONS)
+    assert.deepEqual(destructiveCoreRpcActions, DESTRUCTIVE_CORE_RPC_ACTIONS)
+    assert.deepEqual(configAliases, CONFIG_ALIASES)
+    assert.deepEqual(standardErrorCodes, STANDARD_ERROR_CODES)
+    assert.equal(ipcProtocolMajor, IPC_PROTOCOL_MAJOR)
+  })
+
   it('removes duplicate legacy action maps from host-contract.ts once generated constants exist', () => {
     const source = readFileSync(resolve(process.cwd(), 'host/shared/host-contract.ts'), 'utf8')
 
     assert(!source.includes("export const CONFIG_ACTIONS = {"))
     assert(!source.includes("export const ROUTE_ACTIONS = {"))
-    assert(CORE_RPC_ACTIONS.includes('routes.list'))
-    assert(CONFIG_ALIASES['config.get'] === 'config.getSettings')
   })
 
   it('keeps helper privileged contract credential-free', () => {
