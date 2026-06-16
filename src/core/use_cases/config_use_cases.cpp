@@ -368,4 +368,19 @@ UseCaseResult ConfigUseCases::route_disable_unsupported() {
       "Persisted route disablement is not supported by the config model.");
 }
 
+UseCaseResult ConfigUseCases::reset_config() {
+  ecnuvpn::config_api::config_reset(manager_);
+  Config cfg = manager_.load();
+  return UseCaseResult::ok({{"reset", true},
+                            {"config", full_config_json(cfg)},
+                            {"settings", settings_json(cfg)},
+                            {"routes", route_array_json(cfg)}});
+}
+
+UseCaseResult ConfigUseCases::reset_key() {
+  ecnuvpn::config_api::key_reset_noninteractive();
+  return UseCaseResult::ok({{"reset", true},
+                            {"key", {{"status", "reset"}}}});
+}
+
 } // namespace exv::core

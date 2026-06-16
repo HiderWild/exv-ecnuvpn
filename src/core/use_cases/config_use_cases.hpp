@@ -34,6 +34,9 @@ public:
   UseCaseResult route_enable_unsupported();
   UseCaseResult route_disable_unsupported();
 
+  UseCaseResult reset_config();
+  UseCaseResult reset_key();
+
 private:
   ecnuvpn::config::ConfigManager manager_;
 };
