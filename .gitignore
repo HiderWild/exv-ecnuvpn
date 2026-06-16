@@ -1,4 +1,5 @@
 # Build
+.worktrees/
 build/
 build-*/
 !webui/build-resources/
