@@ -11,6 +11,8 @@
 //       core_process_main() in the same process would exit immediately.
 
 #include "core/core_process.hpp"
+#include "core/lifecycle/core_paths.hpp"
+#include "core/lifecycle/core_registry.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
 #include "core/tunnel_controller/reconnect_policy.hpp"
 #include "core/pipe_ipc.hpp"
@@ -214,6 +216,21 @@ static bool wait_for_response_count(CaptureOutputBuf& buf, size_t min_count,
     return false;
 }
 
+static bool wait_for_registry_state(
+    const std::string& path,
+    exv::core::lifecycle::CoreRegistryReadState state,
+    std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto loaded = exv::core::lifecycle::read_core_registry(path);
+        if (loaded.state == state) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
 static json find_by_id(const std::vector<json>& responses, int id) {
     for (auto& r : responses) {
         if (r.value("id", -1) == id) return r;
@@ -352,6 +369,8 @@ int main() {
 
         CoreRunner cr;
         cr.start(config_dir, home_dir);
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(config_dir);
 
         in_buf.feed(R"({"request_id":"native-1","action":"vpn.status","payload_json":"{}"})" "\n");
         in_buf.feed(R"({"request_id":"native-hello","action":"core.hello","payload_json":"{\"contract_version\":\"2026-06-16.cli-core-ui-contract.v1\"}"})" "\n");
@@ -359,6 +378,23 @@ int main() {
 
         expect(wait_for_response_count(out_buf, 3, std::chrono::seconds(5)),
                "E2.1a-native: should receive native responses");
+        expect(wait_for_registry_state(
+                   registry_path,
+                   exv::core::lifecycle::CoreRegistryReadState::present,
+                   std::chrono::seconds(5)),
+               "E2.1a-native: registry should be written while core is running");
+
+        auto registry = exv::core::lifecycle::read_core_registry(registry_path);
+        expect(registry.state == exv::core::lifecycle::CoreRegistryReadState::present,
+               "E2.1a-native: registry should exist before shutdown cleanup");
+        if (registry.snapshot.has_value()) {
+            expect(registry.snapshot->ipc_protocol_version == "ipc-v1",
+                   "E2.1a-native: registry includes versioned ipc protocol");
+            expect(registry.snapshot->ipc_path == exv::core::core_pipe_path(),
+                   "E2.1a-native: registry uses current core pipe path");
+            expect(registry.snapshot->last_known_tunnel_phase == "idle",
+                   "E2.1a-native: registry starts with idle tunnel phase");
+        }
 
         std::raise(SIGTERM);
         in_buf.close_input();
@@ -410,6 +446,9 @@ int main() {
             expect(unknown_resp.value("error_code", std::string()) == "unknown_action",
                    "E2.1a-native: unknown native action keeps native error code");
         }
+        expect(exv::core::lifecycle::read_core_registry(registry_path).state ==
+                   exv::core::lifecycle::CoreRegistryReadState::missing,
+               "E2.1a-native: registry should be removed on shutdown");
         expect(cr.rc == 0, "E2.1a-native: exit code 0");
     }
 
@@ -482,6 +521,8 @@ int main() {
         cr.start(config_dir, home_dir);
 
         exv::cli::PipeClient client;
+        expect(exv::core::core_pipe_path().find("ipc-v1") != std::string::npos,
+               "E2.1a-pipe: core_pipe_path should use versioned ipc naming");
         bool connected = false;
         for (int i = 0; i < 20 && !connected; ++i) {
             connected = client.connect(exv::core::core_pipe_path());

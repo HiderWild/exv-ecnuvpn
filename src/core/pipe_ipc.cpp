@@ -1,4 +1,5 @@
 #include "core/pipe_ipc.hpp"
+#include "core/lifecycle/core_paths.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/logging/log_runtime.hpp"
 #include "runtime/runtime_context.hpp"
@@ -20,11 +21,7 @@
 namespace exv::core {
 
 std::string core_pipe_path() {
-#ifdef _WIN32
-  return R"(\\.\pipe\exv-core)";
-#else
-  return ecnuvpn::runtime::paths().state_dir + "/exv-core.sock";
-#endif
+  return exv::core::lifecycle::core_ipc_path();
 }
 
 #ifdef _WIN32

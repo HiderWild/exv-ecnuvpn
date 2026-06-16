@@ -43,6 +43,37 @@ ManagedResource json_to_managed_resource(const nlohmann::json& j) {
     return r;
 }
 
+nlohmann::json core_registry_cleanup_to_json(
+    const CoreRegistryCleanupBinding& binding) {
+    return {{"registry_path", binding.registry_path},
+            {"delete_match",
+             {{"core_instance_id", binding.delete_match.core_instance_id},
+              {"pid", binding.delete_match.pid},
+              {"helper_core_lease_id",
+               binding.delete_match.helper_core_lease_id},
+              {"ipc_protocol_version",
+               binding.delete_match.ipc_protocol_version}}}};
+}
+
+std::optional<CoreRegistryCleanupBinding> json_to_core_registry_cleanup(
+    const nlohmann::json& j) {
+    try {
+        CoreRegistryCleanupBinding binding;
+        binding.registry_path = j.at("registry_path").get<std::string>();
+        const auto& match = j.at("delete_match");
+        binding.delete_match.core_instance_id =
+            match.at("core_instance_id").get<std::string>();
+        binding.delete_match.pid = match.at("pid").get<int>();
+        binding.delete_match.helper_core_lease_id =
+            match.at("helper_core_lease_id").get<std::string>();
+        binding.delete_match.ipc_protocol_version =
+            match.at("ipc_protocol_version").get<std::string>();
+        return binding;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 nlohmann::json cleanup_record_to_json(const CleanupRecord& rec) {
     nlohmann::json routes = nlohmann::json::array();
     for (const auto& r : rec.routes) routes.push_back(route_entry_to_json(r));
@@ -64,7 +95,11 @@ nlohmann::json cleanup_record_to_json(const CleanupRecord& rec) {
             {"dns", dns_config_to_json(rec.dns)},
             {"firewall_rules", fw},
             {"managed_resources", managed_resources},
-            {"created_at_ms", ms}};
+            {"created_at_ms", ms},
+            {"core_registry_cleanup",
+             rec.core_registry_cleanup.has_value()
+                 ? core_registry_cleanup_to_json(*rec.core_registry_cleanup)
+                 : nlohmann::json(nullptr)}};
 }
 
 CleanupRecord json_to_cleanup_record(const nlohmann::json& j) {
@@ -88,6 +123,11 @@ CleanupRecord json_to_cleanup_record(const nlohmann::json& j) {
         rec.created_at = std::chrono::system_clock::time_point(
             std::chrono::milliseconds(ms));
     }
+    if (j.contains("core_registry_cleanup") &&
+        !j["core_registry_cleanup"].is_null()) {
+        rec.core_registry_cleanup =
+            json_to_core_registry_cleanup(j["core_registry_cleanup"]);
+    }
     return rec;
 }
 
@@ -101,6 +141,15 @@ void CleanupRegistry::add_resource(const SessionId& id, const ManagedResource& r
     auto it = records_.find(id);
     if (it == records_.end()) return;
     it->second.managed_resources.push_back(resource);
+}
+
+void CleanupRegistry::bind_core_registry_cleanup(
+    const SessionId& id, const CoreRegistryCleanupBinding& binding) {
+    auto it = records_.find(id);
+    if (it == records_.end()) {
+        return;
+    }
+    it->second.core_registry_cleanup = binding;
 }
 
 std::vector<ManagedResource> CleanupRegistry::get_resources(const SessionId& id) const {
@@ -127,7 +176,16 @@ std::vector<ManagedResource> CleanupRegistry::get_resources(const SessionId& id)
 }
 
 void CleanupRegistry::remove_session(const SessionId& id) {
-    records_.erase(id);
+    auto it = records_.find(id);
+    if (it == records_.end()) {
+        return;
+    }
+    if (it->second.core_registry_cleanup.has_value()) {
+        const auto& binding = *it->second.core_registry_cleanup;
+        (void)exv::core::lifecycle::compare_and_delete_core_registry(
+            binding.registry_path, binding.delete_match);
+    }
+    records_.erase(it);
 }
 
 std::vector<CleanupRecord> CleanupRegistry::all_records() const {

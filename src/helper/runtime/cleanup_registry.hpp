@@ -1,12 +1,19 @@
 #pragma once
+#include "core/lifecycle/core_registry.hpp"
 #include "helper/common/helper_messages.hpp"
+
+#include <optional>
 #include <string>
 #include <vector>
 #include <map>
-#include <set>
 #include <chrono>
 
 namespace exv::helper {
+
+struct CoreRegistryCleanupBinding {
+    std::string registry_path;
+    exv::core::lifecycle::CoreRegistryDeleteMatch delete_match;
+};
 
 struct CleanupRecord {
     SessionId session_id;
@@ -16,6 +23,7 @@ struct CleanupRecord {
     std::vector<std::string> firewall_rules;
     std::vector<ManagedResource> managed_resources;
     std::chrono::system_clock::time_point created_at;
+    std::optional<CoreRegistryCleanupBinding> core_registry_cleanup;
 };
 
 class CleanupRegistry {
@@ -31,6 +39,11 @@ public:
 
     // Remove session record (after successful cleanup)
     void remove_session(const SessionId& id);
+
+    // Bind a versioned core registry compare-and-delete operation to the
+    // session's success path.
+    void bind_core_registry_cleanup(const SessionId& id,
+                                    const CoreRegistryCleanupBinding& binding);
 
     // Get all sessions (for stale scan)
     std::vector<CleanupRecord> all_records() const;

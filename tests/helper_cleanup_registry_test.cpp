@@ -2,6 +2,8 @@
 
 #include "helper/runtime/cleanup_registry.hpp"
 #include "helper/common/helper_messages.hpp"
+#include "core/lifecycle/core_paths.hpp"
+#include "core/lifecycle/core_registry.hpp"
 
 #include <iostream>
 #include <string>
@@ -45,6 +47,7 @@ int main() {
 
     using exv::helper::CleanupRegistry;
     using exv::helper::CleanupRecord;
+    using exv::helper::CoreRegistryCleanupBinding;
     using exv::helper::ManagedResource;
     using exv::helper::SessionId;
 
@@ -293,6 +296,104 @@ int main() {
         registry.remove_session(r1.session_id);
         ok = expect(registry.all_records().size() == 1,
                     "should have 1 record after removing one") && ok;
+    }
+
+    // --- matching core registry binding is compare-and-deleted on session removal ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-match-" + std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        CleanupRegistry registry;
+        CleanupRecord rec;
+        rec.session_id.value = "ses-core-match";
+        registry.register_session(rec);
+
+        exv::core::lifecycle::CoreRegistrySnapshot snapshot;
+        snapshot.core_instance_id = "core-instance-helper";
+        snapshot.pid = 5150;
+        snapshot.core_path = "C:/Program Files/ECNU-VPN/exv.exe";
+        snapshot.ipc_path = exv::core::lifecycle::core_ipc_path(root.string());
+        snapshot.ipc_protocol_version = "ipc-v1";
+        snapshot.app_version = "3.3.0";
+        snapshot.contract_version = "2026-06-16.cli-core-ui-contract.v1";
+        snapshot.started_at = "2026-06-16T12:00:00.000Z";
+        snapshot.last_heartbeat_at = "2026-06-16T12:00:01.000Z";
+        snapshot.last_known_tunnel_phase = "idle";
+        snapshot.last_known_connected = false;
+        snapshot.last_known_network_ready = false;
+        snapshot.helper_core_lease_id = "core-lease-match";
+
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(root.string());
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot, registry_path),
+                    "matching helper cleanup test should write core registry") && ok;
+
+        CoreRegistryCleanupBinding binding;
+        binding.registry_path = registry_path;
+        binding.delete_match =
+            exv::core::lifecycle::core_registry_delete_match(snapshot);
+        registry.bind_core_registry_cleanup(rec.session_id, binding);
+
+        registry.remove_session(rec.session_id);
+        ok = expect(!fs::exists(registry_path),
+                    "matching helper cleanup should delete versioned core registry") && ok;
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- mismatched core registry binding must not delete versioned registry ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-mismatch-" + std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        CleanupRegistry registry;
+        CleanupRecord rec;
+        rec.session_id.value = "ses-core-mismatch";
+        registry.register_session(rec);
+
+        exv::core::lifecycle::CoreRegistrySnapshot snapshot;
+        snapshot.core_instance_id = "core-instance-helper";
+        snapshot.pid = 6160;
+        snapshot.core_path = "C:/Program Files/ECNU-VPN/exv.exe";
+        snapshot.ipc_path = exv::core::lifecycle::core_ipc_path(root.string());
+        snapshot.ipc_protocol_version = "ipc-v1";
+        snapshot.app_version = "3.3.0";
+        snapshot.contract_version = "2026-06-16.cli-core-ui-contract.v1";
+        snapshot.started_at = "2026-06-16T12:00:00.000Z";
+        snapshot.last_heartbeat_at = "2026-06-16T12:00:01.000Z";
+        snapshot.last_known_tunnel_phase = "idle";
+        snapshot.last_known_connected = false;
+        snapshot.last_known_network_ready = false;
+        snapshot.helper_core_lease_id = "core-lease-actual";
+
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(root.string());
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot, registry_path),
+                    "mismatch helper cleanup test should write core registry") && ok;
+
+        CoreRegistryCleanupBinding binding;
+        binding.registry_path = registry_path;
+        binding.delete_match =
+            exv::core::lifecycle::core_registry_delete_match(snapshot);
+        binding.delete_match.helper_core_lease_id = "core-lease-other";
+        registry.bind_core_registry_cleanup(rec.session_id, binding);
+
+        ok = expect(fs::exists(registry_path),
+                    "binding setup alone must not delete core registry") && ok;
+
+        registry.remove_session(rec.session_id);
+        ok = expect(fs::exists(registry_path),
+                    "mismatched helper cleanup must keep versioned core registry") && ok;
+
+        fs::remove_all(root, ec);
     }
 
     if (ok) {

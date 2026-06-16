@@ -80,6 +80,9 @@ set(EXV_CORE_SOURCES
     src/core/config/config_wizard_common.cpp
     src/core/core_process.cpp
     src/core/lifecycle/core_identity.cpp
+    src/core/lifecycle/core_paths.cpp
+    src/core/lifecycle/core_lock.cpp
+    src/core/lifecycle/core_registry.cpp
     src/core/pipe_ipc.cpp
     src/core/tunnel_controller/engine_event_bridge.cpp
     src/core/tunnel_controller/core_session_runner.cpp
@@ -1618,6 +1621,19 @@ target_compile_definitions(core_process_lifecycle_test PRIVATE
 
 add_test(NAME core_process_lifecycle_test COMMAND core_process_lifecycle_test)
 
+add_executable(core_lifecycle_registry_test
+    tests/core_lifecycle_registry_test.cpp
+)
+
+target_include_directories(core_lifecycle_registry_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(core_lifecycle_registry_test PRIVATE exv-core)
+
+add_test(NAME core_lifecycle_registry_test COMMAND core_lifecycle_registry_test)
+
 add_executable(tunnel_controller_integration_test
     tests/tunnel_controller_integration_test.cpp
     tests/support/fake_helper.cpp
@@ -1651,13 +1667,14 @@ add_test(NAME helper_lease_manager_test COMMAND helper_lease_manager_test)
 
 add_executable(helper_cleanup_registry_test
     tests/helper_cleanup_registry_test.cpp
-    src/helper/runtime/cleanup_registry.cpp
 )
 
 target_include_directories(helper_cleanup_registry_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
 )
+
+target_link_libraries(helper_cleanup_registry_test PRIVATE exv-helper-runtime)
 
 add_test(NAME helper_cleanup_registry_test COMMAND helper_cleanup_registry_test)
 
@@ -2324,6 +2341,7 @@ set(_release_blocking_tests
     tunnel_module_smoke_test
     tunnel_public_module_smoke_test
     helper_lease_manager_test
+    core_lifecycle_registry_test
     helper_cleanup_registry_test
     helper_contract_test
     helper_module_smoke_test
@@ -2339,6 +2357,7 @@ set(_release_blocking_tests
     vpn_actions_test
     config_actions_test
     core_hello_actions_test
+    core_lifecycle_registry_test
     service_actions_test
     route_actions_test
     error_contract_test
@@ -2445,6 +2464,7 @@ set_property(TEST
     tunnel_contract_test
     tunnel_public_module_smoke_test
     helper_lease_manager_test
+    core_lifecycle_registry_test
     helper_cleanup_registry_test
     helper_contract_test
     helper_module_smoke_test
@@ -2476,6 +2496,7 @@ set_property(TEST
     native_auth_session_json_test
     core_process_test
     core_process_lifecycle_test
+    core_lifecycle_registry_test
     helper_delegating_network_ops_test
     app_api_status_contract_test
     APPEND PROPERTY LABELS "architecture"
@@ -2499,6 +2520,7 @@ set_property(TEST
     tunnel_controller_integration_test
     core_process_test
     core_process_lifecycle_test
+    core_lifecycle_registry_test
     core_hello_actions_test
     tunnel_contract_test
     tunnel_module_smoke_test
@@ -2540,6 +2562,7 @@ set_property(TEST
     vpn_actions_test
     config_actions_test
     core_hello_actions_test
+    core_lifecycle_registry_test
     tunnel_contract_test
     config_module_smoke_test
     service_actions_test
