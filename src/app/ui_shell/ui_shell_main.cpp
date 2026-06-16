@@ -1,10 +1,16 @@
+#include "app/ui_shell/core_process_manager.hpp"
+#include "app/ui_shell/core_rpc_client.hpp"
 #include "app/ui_shell/renderer_assets.hpp"
 #include "app/ui_shell/ui_shell_options.hpp"
+#include "app/ui_shell/ui_shell_runtime.hpp"
 #include "app/ui_shell/ui_window.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -17,6 +23,33 @@
 #endif
 
 namespace {
+
+class PlatformEntrypointWindow final : public ecnuvpn::ui_shell::UiWindow {
+public:
+  using Runner = std::function<int(const ecnuvpn::ui_shell::UiWindowConfig &)>;
+
+  explicit PlatformEntrypointWindow(Runner runner) : runner_(std::move(runner)) {}
+
+  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+    handler_ = std::move(handler);
+  }
+
+  int run(const ecnuvpn::ui_shell::UiWindowConfig &config) override {
+    if (!runner_) {
+      return 70;
+    }
+    return runner_(config);
+  }
+
+  void emit_event(const std::string &event_json) override {
+    last_event_json_ = event_json;
+  }
+
+private:
+  Runner runner_;
+  ecnuvpn::ui_shell::HostMessageHandler handler_;
+  std::string last_event_json_;
+};
 
 std::filesystem::path current_executable_path() {
 #if defined(_WIN32)
@@ -81,13 +114,30 @@ int main(int argc, char **argv) {
       options.enable_dev_tools,
   };
 
+  auto transport = ecnuvpn::ui_shell::create_core_process_transport(
+      ecnuvpn::ui_shell::CoreProcessLaunch{options.exv_path, "", "", true});
+  ecnuvpn::ui_shell::CoreRpcClient client(*transport);
+
 #if defined(_WIN32)
-  return ecnuvpn::platform::win32::ui_shell::run_webview2_host(config);
+  PlatformEntrypointWindow window(
+      [](const ecnuvpn::ui_shell::UiWindowConfig &runtime_config) {
+        return ecnuvpn::platform::win32::ui_shell::run_webview2_host(
+            runtime_config);
+      });
 #elif defined(__APPLE__)
-  return ecnuvpn::platform::darwin::ui_shell::run_wk_webview_host(config);
+  PlatformEntrypointWindow window(
+      [](const ecnuvpn::ui_shell::UiWindowConfig &runtime_config) {
+        return ecnuvpn::platform::darwin::ui_shell::run_wk_webview_host(
+            runtime_config);
+      });
 #elif defined(__linux__)
-  return ecnuvpn::platform::linux::ui_shell::run_webkitgtk_host(config);
+  PlatformEntrypointWindow window(
+      [](const ecnuvpn::ui_shell::UiWindowConfig &runtime_config) {
+        return ecnuvpn::platform::linux::ui_shell::run_webkitgtk_host(
+            runtime_config);
+      });
 #else
   return 70;
 #endif
+  return ecnuvpn::ui_shell::run_ui_shell_window(window, config, client);
 }

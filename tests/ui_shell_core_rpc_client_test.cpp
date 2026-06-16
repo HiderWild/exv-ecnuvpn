@@ -2,6 +2,7 @@
 #include "app/ui_shell/core_process_manager.hpp"
 
 #include <iostream>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -307,6 +308,24 @@ int main() {
   ok_all = expect(args.back() == "--daemon",
                   "daemon core process arguments should include --daemon") &&
            ok_all;
+
+  CoreProcessLaunch missing_launch;
+  missing_launch.exv_path = "Z:/definitely-missing/exv.exe";
+  std::unique_ptr<CoreRpcTransport> missing_transport =
+      create_core_process_transport(missing_launch);
+  ok_all = expect(static_cast<bool>(missing_transport),
+                  "core process transport factory should return a transport object") &&
+           ok_all;
+  if (missing_transport) {
+    CoreRpcResponse missing_response =
+        CoreRpcClient(*missing_transport).invoke(empty_payload_request);
+    ok_all = expect(!missing_response.ok,
+                    "missing core executable should produce transport error") &&
+             ok_all;
+    ok_all = expect(missing_response.code == "transport_closed",
+                    "missing core executable error code should be transport_closed") &&
+             ok_all;
+  }
 
   return ok_all ? 0 : 1;
 }

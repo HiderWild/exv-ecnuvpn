@@ -921,6 +921,16 @@ target_compile_definitions(ui_shell_cmake_policy_test PRIVATE
 
 add_test(NAME ui_shell_cmake_policy_test COMMAND ui_shell_cmake_policy_test)
 
+add_executable(ui_shell_main_wiring_test
+    tests/ui_shell_main_wiring_test.cpp
+)
+
+target_compile_definitions(ui_shell_main_wiring_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME ui_shell_main_wiring_test COMMAND ui_shell_main_wiring_test)
+
 if(WIN32)
     add_executable(win32_webview2_runtime_test
         tests/win32_webview2_runtime_test.cpp
@@ -972,6 +982,7 @@ set(EXV_UI_COMMON_SOURCES
     src/app/ui_shell/host_bridge.cpp
     src/app/ui_shell/core_rpc_client.cpp
     src/app/ui_shell/core_process_manager.cpp
+    src/app/ui_shell/ui_shell_runtime.cpp
 )
 
 set(EXV_UI_PLATFORM_SOURCES)

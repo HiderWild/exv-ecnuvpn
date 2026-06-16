@@ -1,5 +1,8 @@
 #pragma once
 
+#include "app/ui_shell/core_rpc_client.hpp"
+
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -21,6 +24,9 @@ public:
 };
 
 std::vector<std::string> build_core_process_arguments(
+    const CoreProcessLaunch &launch);
+
+std::unique_ptr<CoreRpcTransport> create_core_process_transport(
     const CoreProcessLaunch &launch);
 
 } // namespace ecnuvpn::ui_shell
