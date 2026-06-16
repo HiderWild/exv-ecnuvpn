@@ -165,6 +165,30 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(startPs1, /Find-ElectronProcess|Electron process/i)
   })
 
+  it('keeps cross-platform WebView acceptance gates executable by agents', () => {
+    const windowsAcceptance = readFileSync(join(repoRoot, 'scripts', 'accept-webview-shell-windows.ps1'), 'utf8')
+    const macosAcceptance = readFileSync(join(repoRoot, 'scripts', 'accept-webview-shell-macos.sh'), 'utf8')
+    const linuxAcceptance = readFileSync(join(repoRoot, 'scripts', 'accept-webview-shell-linux.sh'), 'utf8')
+
+    assert.match(windowsAcceptance, /build\\webview-acceptance\\windows/)
+    assert.match(windowsAcceptance, /generate_contracts\.py --check/)
+    assert.match(windowsAcceptance, /-DEXV_BUILD_UI_SHELL=ON/)
+    assert.match(windowsAcceptance, /build-windows\\cpp/)
+    assert.match(windowsAcceptance, /windows-packaging-smoke\.ps1/)
+    assert.match(windowsAcceptance, /git diff --check/)
+
+    assert.match(macosAcceptance, /build\/webview-acceptance\/macos/)
+    assert.match(macosAcceptance, /cmake --preset macos-release -DEXV_BUILD_UI_SHELL=ON/)
+    assert.match(macosAcceptance, /scripts\/build-macos\.sh desktop/)
+    assert.match(macosAcceptance, /scripts\/macos-packaging-smoke\.sh/)
+    assert.match(macosAcceptance, /git diff --check/)
+
+    assert.match(linuxAcceptance, /build\/webview-acceptance\/linux/)
+    assert.match(linuxAcceptance, /cmake --preset linux-release -DEXV_BUILD_UI_SHELL=ON/)
+    assert.match(linuxAcceptance, /scripts\/build-linux\.sh desktop/)
+    assert.match(linuxAcceptance, /git diff --check/)
+  })
+
   it('documents WebView as the production desktop shell in active docs', () => {
     const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
     const buildGuide = readFileSync(join(repoRoot, 'docs', 'build_guide.md'), 'utf8')

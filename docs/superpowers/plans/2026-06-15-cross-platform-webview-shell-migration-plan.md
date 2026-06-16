@@ -4,7 +4,12 @@
 > `docs/superpowers/plans/2026-06-16-webview-shell-completion-plan.md`.
 > Windows packaging acceptance is recorded in
 > `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`;
-> macOS/Linux acceptance remains pending host-specific verification.
+> macOS acceptance must run on SSH host `macmini` at
+> `/Users/tomli/Development/Projects/CPP/ECNU-VPN`; Linux acceptance remains
+> pending host-specific verification. The detailed steps below are the original
+> migration recipe and include historical Electron-adapter paths; use the
+> completion plan and `scripts/accept-webview-shell-*` scripts for current
+> execution.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

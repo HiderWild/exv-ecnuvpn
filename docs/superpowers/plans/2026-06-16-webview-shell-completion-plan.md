@@ -4,13 +4,15 @@
 > implemented on branch `codex/ui-framework-webview-shell`. Windows acceptance
 > evidence is recorded in
 > `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
-> macOS/Linux acceptance remains pending execution on their corresponding hosts.
+> macOS acceptance must run through SSH host `macmini` at
+> `/Users/tomli/Development/Projects/CPP/ECNU-VPN`. Linux acceptance remains
+> pending execution on a Linux host.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Complete the remaining WebView shell migration so Windows, macOS, and Linux production desktop packages use real platform WebView hosts, Electron is retired from production packaging, and tests prove the final state.
 
-**Architecture:** Keep the Vue renderer and generated desktop RPC contract as the UI boundary. The C++ `exv-ui` process owns the native shell lifecycle, launches or connects to `exv` through a real core RPC transport, and delegates only window/WebView details to `src/platform/<os>/ui_shell`. Electron remains only until the final retirement task removes it from production paths.
+**Architecture:** Keep the Vue renderer and generated desktop RPC contract as the UI boundary. The C++ `exv-ui` process owns the native shell lifecycle, launches or connects to `exv` through a real core RPC transport, and delegates only window/WebView details to `src/platform/<os>/ui_shell`. Electron is retired from production packaging; remaining work is platform-host parity and host-specific acceptance.
 
 **Tech Stack:** Vue 3, TypeScript, Vite, C++20, CMake 3.28+, WebView2 Evergreen Runtime, Cocoa/WKWebView, GTK/WebKitGTK, existing generated contract pipeline.
 
@@ -20,55 +22,54 @@
 
 Audit date: 2026-06-16.
 
-Fresh verification run from repository root:
+Implemented and committed evidence:
+
+- `src/app/ui_shell/ui_shell_main.cpp` constructs a core process transport, constructs a platform `UiWindow`, and calls `run_ui_shell_window(...)`.
+- Windows has a real WebView2 host path under `EXV_BUILD_UI_SHELL`, WebView2 runtime detection, and controlled Evergreen bootstrapper policy.
+- Native WebView package scripts now produce `build/<platform>/webview/package/ECNU VPN` layouts.
+- Electron production dependencies, scripts, adapter sources, and package docs have been removed from active production paths.
+- Windows local acceptance passed and is recorded in `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
+
+Reusable acceptance entrypoints:
 
 ```powershell
-ctest --test-dir build -C Debug -R "ui_shell_.*|win32_webview2_runtime_test|native_packaging_policy_test" --output-on-failure
+powershell -ExecutionPolicy Bypass -File scripts\accept-webview-shell-windows.ps1
+ssh macmini "cd /Users/tomli/Development/Projects/CPP/ECNU-VPN && bash scripts/accept-webview-shell-macos.sh"
+bash scripts/accept-webview-shell-linux.sh
 ```
 
-Expected and observed on 2026-06-16: 6/6 tests passed.
-
-Fresh webui verification run:
-
-```powershell
-cd webui
-pnpm exec node scripts/run-electron-test.cjs host/__tests__/host-boundary.test.ts host/__tests__/webview-package-policy.test.ts desktop/main/__tests__/desktop-contract-generated.test.ts
-```
-
-Expected and observed on 2026-06-16: all listed Node test suites passed.
-
-Passing tests prove the neutral host contract, packaging policy checks, sidecar launch-argument validation, and current WebView2 runtime policy helpers. They do not prove real platform WebView parity.
+These scripts write logs under `build/webview-acceptance/<platform>/`.
 
 ## Completion Status Against Original Plan
 
 | Original task | Status | Evidence | Remaining gap |
 | --- | --- | --- | --- |
-| Task 1 Neutral Host Contract | Done | `webui/host`, `webui/host/__tests__/host-boundary.test.ts`, generated desktop contract tests pass. | None for contract extraction. |
-| Task 2 Renderer API Neutrality | Mostly done | Renderer and neutral host code are blocked from Electron imports by `host-boundary.test.ts`. | Dev docs still describe Electron as the primary development path in several places. |
-| Task 3 Common Native UI Shell Skeleton | Partially done | `src/app/ui_shell/*` exists; `exv-ui` target exists; sidecar args are packaged. | `src/app/ui_shell/ui_shell_main.cpp` calls platform host directly and never constructs a real core transport or calls `run_ui_shell_window`. |
-| Task 4 Native Core RPC Client For UI Shell | Partially done | `CoreRpcClient`, event normalization, and unit tests exist. | No production `CoreRpcTransport` backed by an `exv` child process or IPC pipe is wired into `exv-ui`. |
-| Task 5 Windows WebView2 Runtime Detection | Done | `src/platform/win32/ui_shell/webview2_runtime_win32.cpp`; `win32_webview2_runtime_test` passes. | Runtime detection is not yet used by a real WebView2 host startup path. |
-| Task 6 Windows WebView2 Bootstrapper Policy | Partially done | URL allowlist and decision helpers exist. | `run_webview2_evergreen_bootstrapper(...)` intentionally returns `false`; no controlled download/install flow is implemented. |
-| Task 7 Platform WebView Host Interfaces | Partially done | `UiWindow` interface and platform host entrypoints exist. | Platform hosts do not implement `UiWindow`; they are still compile stubs. |
-| Task 8 Windows WebView2 Host Parity | Not done | `src/platform/win32/ui_shell/webview2_host_win32.cpp` returns `70`. | Need real Win32 window, WebView2 controller, script bridge, navigation, event posting, modal/status UX. |
-| Task 9 macOS WKWebView Host Parity | Not done | `src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` returns `70`; test asserts this stub result. | Need real Cocoa/WKWebView host and bridge. |
-| Task 10 Linux WebKitGTK Host Parity | Not done | `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` returns `70`; test asserts this stub result. | Need real GTK/WebKitGTK host and bridge. |
-| Task 11 Packaging Switch | Partially done | `scripts/build-windows.ps1`, `scripts/build-macos.sh`, `scripts/build-linux.sh`, and `scripts/package_ui_shell.py` default desktop packaging to WebView layout. | `start.ps1`, packaging smoke scripts, and active docs still contain production-looking Electron paths. Package smoke tests do not launch the real WebView shell. |
-| Task 12 Electron Retirement | Not done | Electron dependencies, `webui/electron-builder.config.cjs`, `webui/desktop/main`, and `webui/desktop/preload` still exist. | Need remove Electron production scripts/dependencies and move any temporary adapter out of production paths or delete it. |
+| Task 1 Neutral Host Contract | Done | `webui/host`, generated desktop contract tests, `host-boundary.test.ts`. | None for contract extraction. |
+| Task 2 Renderer API Neutrality | Done | Renderer/host tests block Electron and Node desktop imports from renderer paths. | None currently known. |
+| Task 3 Common Native UI Shell Skeleton | Done | `src/app/ui_shell/*`, `exv-ui`, `run_ui_shell_window(...)`, sidecar args. | None currently known. |
+| Task 4 Native Core RPC Client For UI Shell | Done for Windows shell path | `CoreRpcClient`, core process transport factory, production startup wiring tests. | macOS/Linux host verification still pending. |
+| Task 5 Windows WebView2 Runtime Detection | Done | `src/platform/win32/ui_shell/webview2_runtime_win32.cpp`; focused tests pass. | None currently known. |
+| Task 6 Windows WebView2 Bootstrapper Policy | Done | Allowlist, runner seam, and host startup policy are present. | Manual UX validation still belongs to Windows acceptance. |
+| Task 7 Platform WebView Host Interfaces | Done | All platforms expose `UiWindow` factories. | macOS/Linux factory implementations still wrap stub `run(...)` behavior. |
+| Task 8 Windows WebView2 Host Parity | Done with failure-path caveat | Windows host creates native window/WebView2 bridge under `EXV_BUILD_UI_SHELL`; Windows acceptance passed. | Failure paths still return `70` when runtime/bootstrap/COM/window creation cannot proceed. |
+| Task 9 macOS WKWebView Host Parity | Not done | `src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` factory exists. | `WkWebViewWindow::run(...)` still returns `70`; implement real Cocoa/WKWebView bridge and run `macmini` acceptance. |
+| Task 10 Linux WebKitGTK Host Parity | Not done | `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` factory exists. | `WebKitGtkWindow::run(...)` still returns `70`; implement real GTK/WebKitGTK bridge and run Linux acceptance. |
+| Task 11 Packaging Switch | Done | Build scripts, smoke scripts, start script, docs, package verifier use WebView layout. | Need macOS/Linux host-specific package acceptance output. |
+| Task 12 Electron Retirement | Done | Electron production package dependencies/scripts/source paths removed. | None currently known. |
 
 ## Quality Gaps To Fix
 
-1. Platform host tests currently bless stubs. `tests/darwin_wkwebview_runtime_test.cpp` and `tests/linux_webkitgtk_runtime_test.cpp` return success when platform hosts return `70`. This is correct only as a compile-gated migration scaffold, not as host parity.
+1. macOS host parity is still not implemented. `src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` constructs a `UiWindow`, but `run(...)` still returns `70`.
 
-2. `exv-ui` does not run the neutral runtime. `src/app/ui_shell/ui_shell_main.cpp` resolves options and calls `run_webview2_host` / `run_wk_webview_host` / `run_webkitgtk_host` directly. The tested path in `run_ui_shell_window(...)` is not used by production startup.
+2. Linux host parity is still not implemented. `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` constructs a `UiWindow`, but `run(...)` still returns `70`.
 
-3. Core child process transport is not implemented. `src/app/ui_shell/core_process_manager.*` only builds arguments. There is no production process owner that starts `exv --mode=core`, writes request lines, reads response/event lines, and terminates the child with the UI shell.
+3. macOS acceptance must be run on SSH host `macmini` from `/Users/tomli/Development/Projects/CPP/ECNU-VPN` after the current branch syncs there.
 
-4. WebView2 bootstrapper execution is deliberately inert. `run_webview2_evergreen_bootstrapper(...)` validates inputs and returns `false`, so the "download Evergreen if missing" requirement is not complete.
+4. macOS acceptance is currently blocked before WebView host verification by CMake C++20 module scanning: AppleClang on `macmini` does not expose `clang-scan-deps`, so the `macos-release` preset cannot generate module dependency graphs. Repair by installing/selecting an LLVM toolchain with `clang-scan-deps` and wiring the macOS preset or environment to use it.
 
-5. Electron retirement is blocked by active production-looking artifacts: `webui/package.json`, `webui/pnpm-lock.yaml`, `webui/electron-builder.config.cjs`, `webui/desktop/main`, `webui/desktop/preload`, root `README.md`, `docs/build_guide.md`, `start.ps1`, `scripts/macos-packaging-smoke.sh`, `scripts/windows-packaging-smoke.ps1`, and merge-prep scripts still reference Electron.
+5. Linux acceptance still requires a Linux host with WebKitGTK development packages installed.
 
-6. Native WebView package smoke coverage is incomplete. `scripts/package_ui_shell.py` validates layout and rejects Electron payloads, but tests do not launch `exv-ui` against a packaged renderer and a fake or real core process.
+6. Lower phases in this document are the historical implementation recipe. The authoritative remaining gates are the table above and the final acceptance gates at the bottom of this file.
 
 ## Target Boundaries
 
@@ -79,7 +80,7 @@ Passing tests prove the neutral host contract, packaging policy checks, sidecar 
 - `src/platform/darwin/ui_shell`: Cocoa/WKWebView window, script message handler, and macOS-specific UI integration.
 - `src/platform/linux/ui_shell`: GTK/WebKitGTK window, user content manager bridge, and Linux-specific UI integration.
 - `scripts/package_ui_shell.py`: native WebView package layout only; it must never package Electron or Chromium.
-- Electron adapter files are temporary migration inputs only until Task 8-11 are green.
+- Electron adapter files must not exist in active production paths.
 
 ---
 
@@ -856,39 +857,19 @@ Expected: lockfile no longer contains Electron package entries needed only by pr
 Windows:
 
 ```powershell
-New-Item -ItemType Directory -Force build/webview-acceptance/windows | Out-Null
-python scripts/generate_contracts.py --check 2>&1 | Tee-Object build/webview-acceptance/windows/contracts.log
-cmake --preset windows-release -DEXV_BUILD_UI_SHELL=ON -DWEBVIEW2_SDK_DIR=$env:WEBVIEW2_SDK_DIR 2>&1 | Tee-Object build/webview-acceptance/windows/configure.log
-cmake --build build/windows/cpp --config Release 2>&1 | Tee-Object build/webview-acceptance/windows/build.log
-ctest --test-dir build/windows/cpp -C Release --output-on-failure 2>&1 | Tee-Object build/webview-acceptance/windows/ctest.log
-scripts/build-windows.ps1 desktop 2>&1 | Tee-Object build/webview-acceptance/windows/package.log
-scripts/windows-packaging-smoke.ps1 2>&1 | Tee-Object build/webview-acceptance/windows/smoke.log
-git diff --check 2>&1 | Tee-Object build/webview-acceptance/windows/diff-check.log
+powershell -ExecutionPolicy Bypass -File scripts\accept-webview-shell-windows.ps1
 ```
 
 macOS:
 
 ```bash
-mkdir -p build/webview-acceptance/macos
-python3 scripts/generate_contracts.py --check 2>&1 | tee build/webview-acceptance/macos/contracts.log
-cmake --preset macos-release -DEXV_BUILD_UI_SHELL=ON 2>&1 | tee build/webview-acceptance/macos/configure.log
-cmake --build build/macos/cpp --config Release 2>&1 | tee build/webview-acceptance/macos/build.log
-ctest --test-dir build/macos/cpp -C Release --output-on-failure 2>&1 | tee build/webview-acceptance/macos/ctest.log
-scripts/build-macos.sh desktop 2>&1 | tee build/webview-acceptance/macos/package.log
-scripts/macos-packaging-smoke.sh 2>&1 | tee build/webview-acceptance/macos/smoke.log
-git diff --check 2>&1 | tee build/webview-acceptance/macos/diff-check.log
+ssh macmini "cd /Users/tomli/Development/Projects/CPP/ECNU-VPN && bash scripts/accept-webview-shell-macos.sh"
 ```
 
 Linux:
 
 ```bash
-mkdir -p build/webview-acceptance/linux
-python3 scripts/generate_contracts.py --check 2>&1 | tee build/webview-acceptance/linux/contracts.log
-cmake --preset linux-release -DEXV_BUILD_UI_SHELL=ON 2>&1 | tee build/webview-acceptance/linux/configure.log
-cmake --build build/linux/cpp --config Release 2>&1 | tee build/webview-acceptance/linux/build.log
-ctest --test-dir build/linux/cpp -C Release --output-on-failure 2>&1 | tee build/webview-acceptance/linux/ctest.log
-scripts/build-linux.sh desktop 2>&1 | tee build/webview-acceptance/linux/package.log
-git diff --check 2>&1 | tee build/webview-acceptance/linux/diff-check.log
+bash scripts/accept-webview-shell-linux.sh
 ```
 
 - [ ] **Step 2: Write acceptance report**
@@ -925,19 +906,18 @@ If any command exits non-zero, record that row as `FAIL` and do not mark the mig
 
 - [ ] **Step 3: Mark original docs with completion state**
 
-At the top of the original migration plan, add:
+At the top of the original migration plan, keep the current completion pointer:
 
 ```markdown
-> Completion note: the remaining work was tracked and finished through
-> `docs/superpowers/plans/2026-06-16-webview-shell-completion-plan.md` and
-> `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
+> Completion note: remaining work is tracked through
+> `docs/superpowers/plans/2026-06-16-webview-shell-completion-plan.md`.
 ```
 
-At the top of the design doc, add:
+At the top of the design doc, keep the current implementation state:
 
 ```markdown
-> Implementation status: accepted after the cross-platform verification report
-> in `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
+> Implementation status: Windows native WebView packaging has been verified in
+> `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
 ```
 
 - [ ] **Step 4: Commit final acceptance**
@@ -959,4 +939,4 @@ The migration is complete only when all gates below are true:
 - Default desktop package commands build WebView packages and never include Electron or Chromium payloads.
 - `webui/package.json` production scripts and dependencies no longer include Electron or `electron-builder`.
 - Active root and build docs describe WebView as the default desktop shell.
-- Windows, macOS, and Linux verification commands in Phase 8 have fresh passing output.
+- Windows, macOS, and Linux acceptance scripts in Phase 8 have fresh passing output.

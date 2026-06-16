@@ -2,8 +2,10 @@
 
 > Implementation status: Windows native WebView packaging has been verified in
 > `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
-> macOS and Linux acceptance still require execution on their corresponding
-> hosts before the cross-platform migration can be marked globally accepted.
+> macOS acceptance must be run on SSH host `macmini` from
+> `/Users/tomli/Development/Projects/CPP/ECNU-VPN`. Linux acceptance still
+> requires a Linux host. The migration is not globally accepted while the
+> macOS/Linux host implementations still return stub exit code `70`.
 
 ## Summary
 
@@ -16,31 +18,34 @@ runtime behavior. The shell becomes a thin platform-specific WebView host:
 - macOS: WKWebView.
 - Linux: WebKitGTK.
 
-The migration is phased. Electron remains a temporary compatibility and
-development shell until each platform WebView host reaches parity, but it is no
-longer the target architecture. The final release shape does not package a full
-Chromium copy.
+The migration is phased. Electron production packaging has been retired on the
+current branch; the final release shape does not package a full Chromium copy.
+The remaining parity work is macOS WKWebView and Linux WebKitGTK host
+implementation plus host-specific acceptance.
 
 ## Current State
 
-The repository currently has a clean renderer/backend split at the business
-boundary, but the desktop shell is Electron-specific:
+The repository has a clean renderer/backend split at the business boundary and
+now uses a neutral desktop host contract:
 
 - `webui/src` is a Vue 3 SPA.
 - `webui/src/api/desktop.ts` routes renderer requests through
   `window.ecnuVpn`.
-- `webui/desktop/preload/index.ts` exposes the `window.ecnuVpn` bridge with
-  Electron `contextBridge` and `ipcRenderer`.
-- `webui/desktop/main/index.ts` owns the native core process, windows, modal
-  windows, tray, event pumping, and IPC handlers.
-- `webui/desktop/shared/desktop-contract.ts` is the TypeScript contract bridge
-  between renderer, desktop shell, and generated system contract.
-- `electron-builder` packages the renderer, Electron main/preload code, and the
-  native `exv`/`exv-helper` binaries.
+- `webui/host/shared/host-contract.ts` owns the TypeScript host contract.
+- `webui/host/shared/generated/system-contract.ts` is generated from the
+  repository contract manifest.
+- `src/app/ui_shell` owns native shell orchestration, core process transport,
+  renderer asset resolution, and the platform-neutral `UiWindow` runtime.
+- `src/platform/win32/ui_shell` owns the WebView2 host, runtime detection, and
+  Evergreen bootstrapper policy.
+- `src/platform/darwin/ui_shell` and `src/platform/linux/ui_shell` expose
+  `UiWindow` factories, but their `run(...)` implementations still return the
+  migration stub exit code `70`.
+- `scripts/package_ui_shell.py` packages the native WebView shell and native
+  binaries; production packaging no longer uses Electron or `electron-builder`.
 
-The good boundary is that the renderer does not directly execute native code.
-The weak boundary is that the renderer API and shell services are named and
-implemented as Electron concepts instead of a neutral desktop-host contract.
+The remaining weak boundary is not renderer coupling, but platform parity:
+macOS and Linux still need real WebView hosts and host-specific acceptance logs.
 
 ## Goals
 
