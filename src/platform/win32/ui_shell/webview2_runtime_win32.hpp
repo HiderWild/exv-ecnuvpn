@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 
 namespace ecnuvpn::platform::win32::ui_shell {
@@ -25,6 +26,13 @@ WebView2BootstrapDecision decide_webview2_bootstrap(
     bool user_consented);
 
 bool is_allowed_webview2_bootstrapper_url(const std::string &download_url);
+using WebView2BootstrapRunner =
+    std::function<bool(const std::string &installer_path,
+                       const std::string &installer_args)>;
+
+bool run_webview2_evergreen_bootstrapper_with_runner(
+    const std::string &download_url, const std::string &installer_path,
+    const WebView2BootstrapRunner &runner);
 bool run_webview2_evergreen_bootstrapper(const std::string &download_url,
                                          const std::string &installer_path);
 

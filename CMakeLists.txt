@@ -943,7 +943,7 @@ if(WIN32)
         ${CMAKE_SOURCE_DIR}/src
     )
 
-    target_link_libraries(win32_webview2_runtime_test PRIVATE advapi32)
+    target_link_libraries(win32_webview2_runtime_test PRIVATE advapi32 urlmon)
 
     add_test(NAME win32_webview2_runtime_test COMMAND win32_webview2_runtime_test)
 endif()
@@ -1048,7 +1048,7 @@ target_include_directories(exv-ui PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(exv-ui PRIVATE advapi32)
+    target_link_libraries(exv-ui PRIVATE advapi32 urlmon)
     if(EXV_BUILD_UI_SHELL)
         target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
         target_include_directories(exv-ui PRIVATE "${WEBVIEW2_INCLUDE_DIR}")

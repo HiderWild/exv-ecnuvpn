@@ -123,15 +123,38 @@ int main() {
   const bool rejects_empty_bootstrapper_installer_path =
       !run_webview2_evergreen_bootstrapper(
           "https://go.microsoft.com/fwlink/?linkid=2124703", "");
-  const bool rejects_allowed_bootstrapper_run_without_native_seam =
-      !run_webview2_evergreen_bootstrapper(
-          "https://go.microsoft.com/fwlink/?linkid=2124703",
-          "C:/temp/MicrosoftEdgeWebview2Setup.exe");
   if (!rejects_disallowed_bootstrapper_run ||
-      !rejects_empty_bootstrapper_installer_path ||
-      !rejects_allowed_bootstrapper_run_without_native_seam) {
+      !rejects_empty_bootstrapper_installer_path) {
     return 1;
   }
+
+  bool bootstrap_runner_invoked = false;
+  const bool bootstrap_runner_ran =
+      run_webview2_evergreen_bootstrapper_with_runner(
+          "https://go.microsoft.com/fwlink/?linkid=2124703",
+          "C:/temp/MicrosoftEdgeWebview2Setup.exe",
+          [&](const std::string &installer_path,
+              const std::string &installer_args) {
+            bootstrap_runner_invoked = true;
+            assert(installer_path ==
+                   "C:/temp/MicrosoftEdgeWebview2Setup.exe");
+            assert(installer_args == "/silent /install");
+            return true;
+          });
+  assert(bootstrap_runner_ran);
+  assert(bootstrap_runner_invoked);
+
+  bool rejected_runner_invoked = false;
+  const bool rejected_runner_ran =
+      run_webview2_evergreen_bootstrapper_with_runner(
+          "https://example.com/MicrosoftEdgeWebview2Setup.exe",
+          "C:/temp/MicrosoftEdgeWebview2Setup.exe",
+          [&](const std::string &, const std::string &) {
+            rejected_runner_invoked = true;
+            return true;
+          });
+  assert(!rejected_runner_ran);
+  assert(!rejected_runner_invoked);
 
   (void)detect_webview2_runtime();
 }

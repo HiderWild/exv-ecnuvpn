@@ -3,6 +3,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <urlmon.h>
 #include <windows.h>
 
 #include <algorithm>
@@ -61,6 +62,98 @@ std::string lowercase_ascii(std::string value) {
     return static_cast<char>(ch);
   });
   return value;
+}
+
+std::wstring wide_from_utf8(const std::string &value) {
+  if (value.empty()) {
+    return {};
+  }
+  const int required =
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                          static_cast<int>(value.size()), nullptr, 0);
+  if (required <= 0) {
+    return {};
+  }
+  std::wstring out(static_cast<std::size_t>(required), L'\0');
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                      static_cast<int>(value.size()), out.data(), required);
+  return out;
+}
+
+std::wstring quote_windows_argument(const std::string &value) {
+  if (value.empty()) {
+    return L"\"\"";
+  }
+  const bool needs_quotes =
+      value.find_first_of(" \t\n\v\"") != std::string::npos;
+  std::wstring wide = wide_from_utf8(value);
+  if (!needs_quotes) {
+    return wide;
+  }
+
+  std::wstring quoted;
+  quoted.push_back(L'"');
+  std::size_t backslashes = 0;
+  for (wchar_t ch : wide) {
+    if (ch == L'\\') {
+      ++backslashes;
+      continue;
+    }
+    if (ch == L'"') {
+      quoted.append(backslashes * 2 + 1, L'\\');
+      quoted.push_back(ch);
+      backslashes = 0;
+      continue;
+    }
+    quoted.append(backslashes, L'\\');
+    backslashes = 0;
+    quoted.push_back(ch);
+  }
+  quoted.append(backslashes * 2, L'\\');
+  quoted.push_back(L'"');
+  return quoted;
+}
+
+bool download_webview2_bootstrapper(const std::string &download_url,
+                                    const std::string &installer_path) {
+  const std::wstring wide_url = wide_from_utf8(download_url);
+  const std::wstring wide_path = wide_from_utf8(installer_path);
+  if (wide_url.empty() || wide_path.empty()) {
+    return false;
+  }
+  return SUCCEEDED(URLDownloadToFileW(nullptr, wide_url.c_str(),
+                                      wide_path.c_str(), 0, nullptr));
+}
+
+bool run_installer_process(const std::string &installer_path,
+                           const std::string &installer_args) {
+  const std::wstring app_path = wide_from_utf8(installer_path);
+  if (app_path.empty()) {
+    return false;
+  }
+
+  std::wstring command_line = quote_windows_argument(installer_path);
+  if (!installer_args.empty()) {
+    command_line.push_back(L' ');
+    command_line.append(wide_from_utf8(installer_args));
+  }
+
+  STARTUPINFOW startup_info{};
+  startup_info.cb = sizeof(startup_info);
+  PROCESS_INFORMATION process_info{};
+  const BOOL created = CreateProcessW(
+      app_path.c_str(), command_line.data(), nullptr, nullptr, FALSE,
+      CREATE_NO_WINDOW, nullptr, nullptr, &startup_info, &process_info);
+  if (!created) {
+    return false;
+  }
+
+  WaitForSingleObject(process_info.hProcess, INFINITE);
+  DWORD exit_code = 1;
+  GetExitCodeProcess(process_info.hProcess, &exit_code);
+  CloseHandle(process_info.hThread);
+  CloseHandle(process_info.hProcess);
+  return exit_code == 0;
 }
 
 } // namespace
@@ -139,12 +232,22 @@ bool is_allowed_webview2_bootstrapper_url(const std::string &download_url) {
 bool run_webview2_evergreen_bootstrapper(const std::string &download_url,
                                          const std::string &installer_path) {
   if (!is_allowed_webview2_bootstrapper_url(download_url) ||
-      installer_path.empty()) {
+      installer_path.empty() ||
+      !download_webview2_bootstrapper(download_url, installer_path)) {
     return false;
   }
+  return run_webview2_evergreen_bootstrapper_with_runner(
+      download_url, installer_path, run_installer_process);
+}
 
-  // Native download/install execution is intentionally not wired in this slice.
-  return false;
+bool run_webview2_evergreen_bootstrapper_with_runner(
+    const std::string &download_url, const std::string &installer_path,
+    const WebView2BootstrapRunner &runner) {
+  if (!is_allowed_webview2_bootstrapper_url(download_url) ||
+      installer_path.empty() || !runner) {
+    return false;
+  }
+  return runner(installer_path, "/silent /install");
 }
 
 } // namespace ecnuvpn::platform::win32::ui_shell
