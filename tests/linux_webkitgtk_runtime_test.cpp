@@ -4,7 +4,7 @@
 #include <memory>
 #include <string>
 
-namespace ecnuvpn::platform::linux::ui_shell {
+namespace ecnuvpn::platform::linux_ui_shell {
 std::string dispatch_webkitgtk_host_message(
     const std::string &message_json,
     const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core);
@@ -15,7 +15,7 @@ int main() {
   bool invoked = false;
   bool request_valid = false;
   const std::string response =
-      ecnuvpn::platform::linux::ui_shell::dispatch_webkitgtk_host_message(
+      ecnuvpn::platform::linux_ui_shell::dispatch_webkitgtk_host_message(
           R"({"id":9,"action":"status.get","payload":{}})",
           [&](const ecnuvpn::ui_shell::CoreRpcRequest &request) {
             invoked = true;
@@ -44,7 +44,7 @@ int main() {
     return 5;
   }
 
-  auto window = ecnuvpn::platform::linux::ui_shell::create_webkitgtk_window();
+  auto window = ecnuvpn::platform::linux_ui_shell::create_webkitgtk_window();
   if (!window) {
     return 6;
   }

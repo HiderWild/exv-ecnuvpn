@@ -9,11 +9,11 @@ acceptance was executed on SSH host `macmini` using a clean temporary worktree
 at `/tmp/ecnu-vpn-webview-clean-1781576703` with the current branch diff
 applied. The synced macOS workspace at
 `/Users/tomli/Development/Projects/CPP/ECNU-VPN` was intentionally not cleaned
-because it contains unrelated dirty sync state. Linux WebKitGTK host code has
-replaced the stub, but Linux acceptance still needs a Linux host with WebKitGTK
-development packages. A later focused macOS verification on `macmini` also
-covered the POSIX core process transport and `exv-ui` build from a clean
-temporary worktree with Homebrew LLVM.
+because it contains unrelated dirty sync state. A later focused macOS
+verification on `macmini` also covered the POSIX core process transport and
+`exv-ui` build from a clean temporary worktree with Homebrew LLVM. Linux
+acceptance was executed in WSL `Ubuntu-24.04` with Node 22, CMake 3.28,
+Clang 18, and WebKitGTK 4.1 development packages.
 
 Reusable acceptance scripts now live in the repository:
 
@@ -31,7 +31,7 @@ Each script writes logs under `build/webview-acceptance/<platform>/`.
 | --- | --- | --- | --- | --- | --- | --- |
 | Windows | `build/webview-acceptance/windows/configure.log` exit 0 | `build/webview-acceptance/windows/build.log` exit 0 | `build/webview-acceptance/windows/ctest.log` exit 0, 87/87 passed | `build/webview-acceptance/windows/package.log` exit 0 | `build/webview-acceptance/windows/smoke.log` exit 0, 12 pass / 0 fail / 5 skip | PASS_WITH_ENV_SKIPS |
 | macOS | `build/webview-acceptance/macos/configure.log` exit 0 on `macmini` with Homebrew LLVM | `build/webview-acceptance/macos/build.log` exit 0 | `build/webview-acceptance/macos/ctest.log` exit 0, 85/85 passed | `build/webview-acceptance/macos/package.log` exit 0 | `build/webview-acceptance/macos/smoke.log` exit 0, 10 pass / 0 fail / 6 skip | PASS_WITH_ENV_SKIPS |
-| Linux | Not run on this Windows host | Not run on this Windows host | Not run on this Windows host | Not run on this Windows host | Not run on this Windows host | NOT_RUN |
+| Linux | `build/webview-acceptance/linux/configure.log` exit 0 in WSL `Ubuntu-24.04` | `build/webview-acceptance/linux/build.log` exit 0 | `build/webview-acceptance/linux/ctest.log` exit 0, 81/81 passed | `build/webview-acceptance/linux/package.log` exit 0 | `build/webview-acceptance/linux/diff-check.log` exit 0, focused package tests 7/7 passed | PASS |
 
 ## Windows Evidence
 
@@ -96,24 +96,32 @@ Notable environment skips:
 - `openconnect` was absent, which is expected when the native engine is the
   default path and the legacy binary is optional.
 
-## Remaining Platform Gates
+## Linux Evidence
 
-The cross-platform migration is not globally accepted until Linux acceptance
-passes on a Linux host and the result is recorded in a follow-up report:
+Command executed in WSL `Ubuntu-24.04`:
 
-```bash
-# Linux
-bash scripts/accept-webview-shell-linux.sh
+```powershell
+wsl -d Ubuntu-24.04 -u root -- bash -lc "cd /mnt/d/Development/Projects/cpp/ECNU-VPN && bash scripts/accept-webview-shell-linux.sh"
 ```
 
-The scripts prove configure/build/CTest/package-smoke health. macOS now has a
-real WKWebView host implementation. Linux WebKitGTK host implementation has
-replaced the previous stub, but it still needs real Linux configure/build/CTest
-and package-smoke evidence before Linux can be marked accepted.
+Observed result:
 
-`src/app/ui_shell/core_process_manager.cpp` now returns a POSIX
-`CoreRpcTransport` on macOS/Linux through posix_spawn and stdin/stdout JSON lines.
-Focused macOS validation built `exv-ui`, `ui_shell_core_rpc_client_test`,
+- Environment: Node v22.22.3, pnpm 10.33.2, CMake 3.28.3,
+  `clang-scan-deps-18`, WebKitGTK 2.52.3.
+- Full CMake configure/build completed successfully with `EXV_BUILD_UI_SHELL=ON`.
+- Full CTest completed successfully: 81/81 passed.
+- `pnpm --dir webui install --frozen-lockfile` completed successfully.
+- `scripts/build-linux.sh desktop` produced
+  `build/linux/webview/package/ECNU VPN`.
+- Focused package verification inside `scripts/build-linux.sh desktop`
+  completed successfully: 7/7 passed.
+- `git -c core.autocrlf=true diff --check` completed successfully. The
+  explicit EOL setting avoids false positives when the Linux script runs from a
+  Windows-mounted WSL worktree.
+
+`src/app/ui_shell/core_process_manager.cpp` returns a POSIX `CoreRpcTransport`
+on macOS/Linux through posix_spawn and stdin/stdout JSON lines. Focused macOS
+validation built `exv-ui`, `ui_shell_core_rpc_client_test`,
 `ui_shell_cmake_policy_test`, and `darwin_wkwebview_runtime_test` in a clean
 temporary worktree on `macmini`.
 
@@ -126,8 +134,6 @@ temporary worktree on `macmini`.
   shell.
 - macOS native WebView package path is accepted on `macmini` with environment
   skips noted above.
-- Linux scripted acceptance remains pending real host execution.
-- Linux host parity implementation is present but unaccepted until a Linux host
-  runs `scripts/accept-webview-shell-linux.sh`.
-- Non-Windows core process transport is implemented; full Linux acceptance
-  remains the final platform gate.
+- Linux native WebView package path is accepted in WSL `Ubuntu-24.04`.
+- Non-Windows core process transport is implemented and covered by macOS and
+  Linux acceptance.

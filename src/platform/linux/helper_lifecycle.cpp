@@ -13,6 +13,7 @@
 #include <csignal>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -21,20 +22,6 @@ namespace platform {
 namespace {
 
 } // namespace
-
-int find_openconnect_pid() {
-  std::string output = exv::utils::trim(platform::run_command_output("pgrep -x openconnect"));
-  if (output.empty())
-    return -1;
-  std::istringstream iss(output);
-  std::string first;
-  std::getline(iss, first);
-  try {
-    return std::stoi(first);
-  } catch (...) {
-    return -1;
-  }
-}
 
 std::string get_interfaces_output() {
   return platform::run_command_output("ip addr show type tun 2>/dev/null | head -20");

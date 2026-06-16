@@ -63,7 +63,7 @@ namespace ecnuvpn::platform::darwin::ui_shell {
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window();
 }
 #elif defined(__linux__)
-namespace ecnuvpn::platform::linux::ui_shell {
+namespace ecnuvpn::platform::linux_ui_shell {
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window();
 }
 #endif
@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
 #elif defined(__APPLE__)
   auto window = ecnuvpn::platform::darwin::ui_shell::create_wk_webview_window();
 #elif defined(__linux__)
-  auto window = ecnuvpn::platform::linux::ui_shell::create_webkitgtk_window();
+  auto window = ecnuvpn::platform::linux_ui_shell::create_webkitgtk_window();
 #else
   return 70;
 #endif

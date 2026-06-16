@@ -1,11 +1,11 @@
 # Cross-Platform WebView Shell Design
 
-> Implementation status: Windows native WebView packaging has been verified in
+> Implementation status: Windows, macOS, and Linux native WebView packaging has
+> been verified in
 > `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
-> macOS acceptance must be run on SSH host `macmini` from
-> `/Users/tomli/Development/Projects/CPP/ECNU-VPN`. Linux acceptance still
-> requires a Linux host. The migration is not globally accepted while the
-> macOS/Linux host implementations still return stub exit code `70`.
+> macOS acceptance was run on SSH host `macmini`; future macOS verification
+> should continue to use that host at
+> `/Users/tomli/Development/Projects/CPP/ECNU-VPN`.
 
 ## Summary
 
@@ -18,10 +18,10 @@ runtime behavior. The shell becomes a thin platform-specific WebView host:
 - macOS: WKWebView.
 - Linux: WebKitGTK.
 
-The migration is phased. Electron production packaging has been retired on the
+The migration was phased. Electron production packaging has been retired on the
 current branch; the final release shape does not package a full Chromium copy.
-The remaining parity work is macOS WKWebView and Linux WebKitGTK host
-implementation plus host-specific acceptance.
+Windows WebView2, macOS WKWebView, and Linux WebKitGTK host paths have
+host-specific acceptance evidence.
 
 ## Current State
 

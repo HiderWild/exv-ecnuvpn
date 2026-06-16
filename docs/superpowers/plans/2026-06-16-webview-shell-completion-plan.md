@@ -1,14 +1,13 @@
 # Cross-Platform WebView Shell Completion Implementation Plan
 
-> Execution status on 2026-06-16: Phase 1 through Phase 7 have been
-> implemented on branch `codex/ui-framework-webview-shell`. Windows and macOS
-> acceptance evidence is recorded in
+> Execution status on 2026-06-16: Phase 1 through Phase 8 have been
+> implemented on branch `codex/ui-framework-webview-shell`. Windows, macOS,
+> and Linux acceptance evidence is recorded in
 > `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
 > macOS acceptance was run through SSH host `macmini` using a clean temporary
 > worktree because the synced macOS workspace contains unrelated dirty state.
-> Linux WebKitGTK host implementation has replaced the stub, but Linux
-> acceptance remains pending execution on a Linux host with WebKitGTK
-> development packages.
+> Linux acceptance was run in WSL `Ubuntu-24.04` with Node 22, CMake 3.28,
+> Clang 18, and WebKitGTK 4.1 development packages.
 > macOS/Linux core process transport no longer uses the closed fallback:
 > `src/app/ui_shell/core_process_manager.cpp` now has a POSIX
 > posix_spawn/stdin/stdout transport. Focused macOS verification passed on
@@ -34,7 +33,8 @@ Implemented and committed evidence:
 - Windows has a real WebView2 host path under `EXV_BUILD_UI_SHELL`, WebView2 runtime detection, and controlled Evergreen bootstrapper policy.
 - Native WebView package scripts now produce `build/<platform>/webview/package/ECNU VPN` layouts.
 - Electron production dependencies, scripts, adapter sources, and package docs have been removed from active production paths.
-- Windows local acceptance and macOS acceptance on `macmini` passed and are
+- Windows local acceptance, macOS acceptance on `macmini`, and Linux acceptance
+  in WSL `Ubuntu-24.04` passed and are
   recorded in
   `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
 
@@ -55,25 +55,23 @@ These scripts write logs under `build/webview-acceptance/<platform>/`.
 | Task 1 Neutral Host Contract | Done | `webui/host`, generated desktop contract tests, `host-boundary.test.ts`. | None for contract extraction. |
 | Task 2 Renderer API Neutrality | Done | Renderer/host tests block Electron and Node desktop imports from renderer paths. | None currently known. |
 | Task 3 Common Native UI Shell Skeleton | Done | `src/app/ui_shell/*`, `exv-ui`, `run_ui_shell_window(...)`, sidecar args. | None currently known. |
-| Task 4 Native Core RPC Client For UI Shell | Implemented, pending Linux acceptance | `CoreRpcClient`, Windows pipe transport, POSIX posix_spawn/stdin/stdout transport, production startup wiring tests. | Linux still needs full host acceptance. |
+| Task 4 Native Core RPC Client For UI Shell | Done | `CoreRpcClient`, Windows pipe transport, POSIX posix_spawn/stdin/stdout transport, production startup wiring tests, Linux acceptance. | None currently known. |
 | Task 5 Windows WebView2 Runtime Detection | Done | `src/platform/win32/ui_shell/webview2_runtime_win32.cpp`; focused tests pass. | None currently known. |
 | Task 6 Windows WebView2 Bootstrapper Policy | Done | Allowlist, runner seam, and host startup policy are present. | Manual UX validation still belongs to Windows acceptance. |
-| Task 7 Platform WebView Host Interfaces | Done | All platforms expose `UiWindow` factories. | Linux needs real-host compile/acceptance on a Linux machine. |
+| Task 7 Platform WebView Host Interfaces | Done | All platforms expose `UiWindow` factories. | None currently known. |
 | Task 8 Windows WebView2 Host Parity | Done with failure-path caveat | Windows host creates native window/WebView2 bridge under `EXV_BUILD_UI_SHELL`; Windows acceptance passed. | Failure paths still return `70` when runtime/bootstrap/COM/window creation cannot proceed. |
 | Task 9 macOS WKWebView Host Parity | Done | `src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` creates Cocoa/WKWebView, registers script message handling, dispatches host RPC, and macOS acceptance passed on `macmini`. Focused macOS rebuild also covered POSIX core transport plus `exv-ui`. | None currently known. |
-| Task 10 Linux WebKitGTK Host Parity | Implemented, pending Linux acceptance | `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` now creates GTK/WebKitGTK window, registers script message handling, dispatches host RPC, and posts renderer events under `EXV_BUILD_UI_SHELL`. | Run `scripts/accept-webview-shell-linux.sh` on a Linux host with WebKitGTK dev packages. |
-| Task 11 Packaging Switch | Done | Build scripts, smoke scripts, start script, docs, package verifier use WebView layout. | Need Linux host-specific package acceptance output. |
+| Task 10 Linux WebKitGTK Host Parity | Done | `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` creates GTK/WebKitGTK window, registers script message handling, dispatches host RPC, posts renderer events under `EXV_BUILD_UI_SHELL`, and Linux acceptance passed. | None currently known. |
+| Task 11 Packaging Switch | Done | Build scripts, smoke scripts, start script, docs, package verifier use WebView layout; Linux package output passed. | None currently known. |
 | Task 12 Electron Retirement | Done | Electron production package dependencies/scripts/source paths removed. | None currently known. |
 
 ## Quality Gaps To Fix
 
-1. Linux host parity still needs real environment verification. The stub has
-   been replaced, but this Windows workspace cannot compile/link WebKitGTK.
+1. No remaining platform acceptance gap is currently known.
 
-2. Linux acceptance still requires a Linux host with WebKitGTK development
-   packages installed.
-
-3. Lower phases in this document are the historical implementation recipe. The authoritative remaining gates are the table above and the final acceptance gates at the bottom of this file.
+2. Lower phases in this document are the historical implementation recipe. The
+   authoritative completion evidence is the table above and the acceptance
+   report.
 
 ## Target Boundaries
 
@@ -303,7 +301,7 @@ auto window = ecnuvpn::platform::win32::ui_shell::create_webview2_window();
 #elif defined(__APPLE__)
 auto window = ecnuvpn::platform::darwin::ui_shell::create_wk_webview_window();
 #elif defined(__linux__)
-auto window = ecnuvpn::platform::linux::ui_shell::create_webkitgtk_window();
+auto window = ecnuvpn::platform::linux_ui_shell::create_webkitgtk_window();
 #else
 std::cerr << "exv-ui: unsupported platform\n";
 return 70;
@@ -371,7 +369,7 @@ return window ? 0 : 1;
 ```
 
 ```cpp
-auto window = ecnuvpn::platform::linux::ui_shell::create_webkitgtk_window();
+auto window = ecnuvpn::platform::linux_ui_shell::create_webkitgtk_window();
 return window ? 0 : 1;
 ```
 
@@ -618,7 +616,7 @@ Expected: native macOS package contains `exv-ui`, `bin/exv`, `bin/exv-helper`, `
 Extend `tests/linux_webkitgtk_runtime_test.cpp`:
 
 ```cpp
-auto window = ecnuvpn::platform::linux::ui_shell::create_webkitgtk_window();
+auto window = ecnuvpn::platform::linux_ui_shell::create_webkitgtk_window();
 if (!window) {
   return 1;
 }

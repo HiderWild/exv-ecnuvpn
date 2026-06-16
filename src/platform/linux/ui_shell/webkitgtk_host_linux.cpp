@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn::platform::linux::ui_shell {
+namespace ecnuvpn::platform::linux_ui_shell {
 
 namespace {
 
@@ -444,4 +444,4 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window() {
   return std::make_unique<WebKitGtkWindow>();
 }
 
-} // namespace ecnuvpn::platform::linux::ui_shell
+} // namespace ecnuvpn::platform::linux_ui_shell
