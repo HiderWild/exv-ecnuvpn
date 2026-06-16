@@ -10,8 +10,15 @@ TimerScheduler::TimerScheduler() {
 }
 
 TimerScheduler::~TimerScheduler() {
+    shutdown();
+}
+
+void TimerScheduler::shutdown() {
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        if (stopped_) {
+            return;
+        }
         stopped_ = true;
         pending_.clear();
     }
@@ -27,6 +34,9 @@ void TimerScheduler::schedule(std::chrono::milliseconds delay, Callback cb) {
 
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        if (stopped_) {
+            return;
+        }
         pending_.push_back({fire_at, std::move(cb), id});
     }
     cv_.notify_all();
@@ -63,7 +73,7 @@ void TimerScheduler::worker_loop() {
 
         assert(earliest != pending_.end());
 
-        auto now = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
         if (earliest->fire_at <= now) {
             // Ready to fire — move callback out, remove from pending, unlock,
             // then execute outside the lock.
@@ -75,19 +85,21 @@ void TimerScheduler::worker_loop() {
                 cb();
             }
         } else {
-            // Not yet — sleep until the earliest deadline.
-            cv_.wait_until(lk, earliest->fire_at, [this, &earliest] {
-                // Wake if a new timer with an earlier deadline was inserted,
-                // or if we were stopped.
+            // Copy the deadline out of pending_. schedule() may reallocate the
+            // vector while wait_until releases the lock, invalidating iterators
+            // and references into the container.
+            const auto wake_at = earliest->fire_at;
+            cv_.wait_until(lk, wake_at, [this, wake_at] {
                 if (stopped_) return true;
-                // Re-check: pending_ may have been cleared or modified.
+
                 auto it = std::min_element(pending_.begin(), pending_.end(),
                     [](const PendingTimer& a, const PendingTimer& b) {
                         return a.fire_at < b.fire_at;
                     });
-                if (it == pending_.end()) return true;  // all cancelled
-                earliest = it;
-                return std::chrono::steady_clock::now() >= it->fire_at;
+                if (it == pending_.end()) return true;
+
+                return it->fire_at < wake_at ||
+                       std::chrono::steady_clock::now() >= it->fire_at;
             });
         }
     }

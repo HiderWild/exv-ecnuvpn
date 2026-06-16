@@ -5,8 +5,11 @@ Date: 2026-06-16
 ## Summary
 
 Windows acceptance was executed on the current Windows workspace. macOS
-acceptance was attempted on SSH host `macmini` at
-`/Users/tomli/Development/Projects/CPP/ECNU-VPN`. Linux acceptance still needs a
+acceptance was executed on SSH host `macmini` using a clean temporary worktree
+at `/tmp/ecnu-vpn-webview-clean-1781576703` with the current branch diff
+applied. The synced macOS workspace at
+`/Users/tomli/Development/Projects/CPP/ECNU-VPN` was intentionally not cleaned
+because it contains unrelated dirty sync state. Linux acceptance still needs a
 Linux host with WebKitGTK development packages.
 
 Reusable acceptance scripts now live in the repository:
@@ -24,7 +27,7 @@ Each script writes logs under `build/webview-acceptance/<platform>/`.
 | Platform | Configure | Build | CTest | Package | Smoke | Result |
 | --- | --- | --- | --- | --- | --- | --- |
 | Windows | `build/webview-acceptance/windows/configure.log` exit 0 | `build/webview-acceptance/windows/build.log` exit 0 | `build/webview-acceptance/windows/ctest.log` exit 0, 87/87 passed | `build/webview-acceptance/windows/package.log` exit 0 | `build/webview-acceptance/windows/smoke.log` exit 0, 12 pass / 0 fail / 5 skip | PASS_WITH_ENV_SKIPS |
-| macOS | `build/webview-acceptance/macos/configure.log` exit 1 on `macmini` | Not reached | Not reached | Not reached | Not reached | FAIL_TOOLCHAIN |
+| macOS | `build/webview-acceptance/macos/configure.log` exit 0 on `macmini` with Homebrew LLVM | `build/webview-acceptance/macos/build.log` exit 0 | `build/webview-acceptance/macos/ctest.log` exit 0, 85/85 passed | `build/webview-acceptance/macos/package.log` exit 0 | `build/webview-acceptance/macos/smoke.log` exit 0, 10 pass / 0 fail / 6 skip | PASS_WITH_ENV_SKIPS |
 | Linux | Not run on this Windows host | Not run on this Windows host | Not run on this Windows host | Not run on this Windows host | Not run on this Windows host | NOT_RUN |
 
 ## Windows Evidence
@@ -64,60 +67,52 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\start_script_contract.
 
 ## macOS Evidence
 
-Command executed:
+Command executed against the clean macOS validation worktree:
 
 ```powershell
-ssh macmini "cd /Users/tomli/Development/Projects/CPP/ECNU-VPN && bash scripts/accept-webview-shell-macos.sh"
+ssh macmini "cd /tmp/ecnu-vpn-webview-clean-1781576703 && bash scripts/accept-webview-shell-macos.sh"
 ```
 
 Observed result:
 
-- Initial run failed because the `macos-release` CMake preset requires Ninja and
-  `ninja` was not installed.
-- `ninja` was installed on `macmini` with Homebrew.
-- The next run passed contract generation and compiler detection, then failed
-  during CMake generation because AppleClang did not provide C++20 module import
-  graph scanning. `clang-scan-deps` was not present on the host.
-- The acceptance script now preflights this condition and fails early with an
-  actionable `clang-scan-deps` message until the macOS module toolchain is
-  repaired.
+- Homebrew `llvm` is selected by `scripts/accept-webview-shell-macos.sh`, so
+  CMake has both `clang++` and `clang-scan-deps` for C++20 modules.
+- The script installs WebUI dependencies with `pnpm --dir webui install
+  --frozen-lockfile` before packaging, so it works from a clean worktree.
+- CMake configure/build completed successfully.
+- Full CTest completed successfully: 85/85 passed.
+- `build-macos.sh desktop` produced
+  `build/macos/webview/package/ECNU VPN`.
+- `macos-packaging-smoke.sh` reported 10 pass / 0 fail / 6 environment skips.
+- `git diff --check` completed successfully.
 
-Relevant log:
+Notable environment skips:
 
-```text
-CMake Error in CMakeLists.txt:
-  The target named "exv-base-types-module" has C++ sources that may use
-  modules, but the compiler does not provide a way to discover the import graph
-  dependencies.
-```
-
-Required repair before macOS WebView acceptance can continue:
-
-- Install or select an LLVM toolchain that provides `clang-scan-deps`.
-- Update the macOS preset or environment so CMake uses that compiler/module
-  scanner consistently.
-- Re-run `scripts/accept-webview-shell-macos.sh` on `macmini`.
+- No `.app` bundle / codesign / DMG verification was available in this package
+  layout.
+- `openconnect` was absent, which is expected when the native engine is the
+  default path and the legacy binary is optional.
 
 ## Remaining Platform Gates
 
-The cross-platform migration is not globally accepted until these scripts pass
-on the corresponding hosts and results are recorded in a follow-up report:
-
-```bash
-# macOS
-ssh macmini "cd /Users/tomli/Development/Projects/CPP/ECNU-VPN && bash scripts/accept-webview-shell-macos.sh"
-```
+The cross-platform migration is not globally accepted until Linux acceptance
+passes on a Linux host and the result is recorded in a follow-up report:
 
 ```bash
 # Linux
 bash scripts/accept-webview-shell-linux.sh
 ```
 
-The scripts prove configure/build/CTest/package-smoke health. They do not by
-themselves close platform host parity while
-`src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` and
-`src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` still return stub exit
+The scripts prove configure/build/CTest/package-smoke health. macOS now has a
+real WKWebView host implementation. Linux host parity remains open while
+`src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` still returns stub exit
 code `70` from `run(...)`.
+
+Also note that `src/app/ui_shell/core_process_manager.cpp` still returns a
+closed `CoreRpcTransport` on non-Windows platforms. The macOS package and host
+bridge compile and package correctly, but the production core transport path for
+macOS/Linux still needs a follow-up implementation before the interactive UI can
+be called end-to-end equivalent to Windows.
 
 ## Current Acceptance State
 
@@ -126,6 +121,10 @@ code `70` from `run(...)`.
 - Electron production packaging artifacts have been removed from `webui`.
 - Active root/build/user docs describe native WebView as the default desktop
   shell.
-- macOS/Linux scripted acceptance remains pending real host execution.
-- macOS/Linux host parity remains incomplete because the platform `run(...)`
-  methods still return the migration stub exit code `70`.
+- macOS native WebView package path is accepted on `macmini` with environment
+  skips noted above.
+- Linux scripted acceptance remains pending real host execution.
+- Linux host parity remains incomplete because the platform `run(...)` method
+  still returns the migration stub exit code `70`.
+- Non-Windows core process transport remains closed and needs a follow-up
+  production implementation.

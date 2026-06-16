@@ -35,6 +35,8 @@ function assertUnixDesktopScriptPackagesWebView(script: string, platform: string
   assert.match(script, new RegExp(`ECNUVPN_WEBUI_DIST_DIR="\\$BUILD_ROOT/webview/dist"`))
   assert.match(script, /-DEXV_BUILD_UI_SHELL=ON/)
   assert.match(script, /package_webview\(\)/)
+  assert.match(script, /python3 scripts\/package_ui_shell\.py/)
+  assert.doesNotMatch(script, /pnpm run webview:package/)
   const desktopCase = bashCase(script, 'desktop')
   const allCase = bashCase(script, 'all')
   assert.match(desktopCase, /build_cpp on/)
@@ -152,7 +154,7 @@ describe('native WebView package policy', () => {
 
     assert.match(windowsMergePrep, /build-windows\.ps1'.*'desktop'/s)
     assert.doesNotMatch(windowsMergePrep, /build:electron|prepare:native|Electron main\/preload/)
-    assert.match(macosMergePrep, /build-macos\.sh"\s+desktop/)
+    assert.match(macosMergePrep, /bash "\$SCRIPT_DIR\/build-macos\.sh" desktop/)
     assert.doesNotMatch(macosMergePrep, /build:electron|prepare:native|Electron main\/preload/)
   })
 
@@ -178,14 +180,18 @@ describe('native WebView package policy', () => {
     assert.match(windowsAcceptance, /git diff --check/)
 
     assert.match(macosAcceptance, /build\/webview-acceptance\/macos/)
-    assert.match(macosAcceptance, /cmake --preset macos-release -DEXV_BUILD_UI_SHELL=ON/)
-    assert.match(macosAcceptance, /scripts\/build-macos\.sh desktop/)
-    assert.match(macosAcceptance, /scripts\/macos-packaging-smoke\.sh/)
+    assert.match(macosAcceptance, /cmake --fresh --preset macos-release/)
+    assert.match(macosAcceptance, /-DCMAKE_CXX_COMPILER="\$LLVM_PREFIX\/bin\/clang\+\+"/)
+    assert.match(macosAcceptance, /-DEXV_BUILD_UI_SHELL=ON/)
+    assert.match(macosAcceptance, /pnpm --dir webui install --frozen-lockfile/)
+    assert.match(macosAcceptance, /bash scripts\/build-macos\.sh desktop/)
+    assert.match(macosAcceptance, /bash scripts\/macos-packaging-smoke\.sh/)
     assert.match(macosAcceptance, /git diff --check/)
 
     assert.match(linuxAcceptance, /build\/webview-acceptance\/linux/)
     assert.match(linuxAcceptance, /cmake --preset linux-release -DEXV_BUILD_UI_SHELL=ON/)
-    assert.match(linuxAcceptance, /scripts\/build-linux\.sh desktop/)
+    assert.match(linuxAcceptance, /pnpm --dir webui install --frozen-lockfile/)
+    assert.match(linuxAcceptance, /bash scripts\/build-linux\.sh desktop/)
     assert.match(linuxAcceptance, /git diff --check/)
   })
 

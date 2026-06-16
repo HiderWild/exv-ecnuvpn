@@ -36,6 +36,9 @@ int main() {
   const std::string webview2_host =
       read_file(source_dir +
                 "/src/platform/win32/ui_shell/webview2_host_win32.cpp");
+  const std::string wkwebview_host =
+      read_file(source_dir +
+                "/src/platform/darwin/ui_shell/wk_webview_host_darwin.mm");
 
   int failures = 0;
   const auto expect_contains = [&](const std::string &needle) {
@@ -66,6 +69,9 @@ int main() {
   expect_contains("gtk+-3.0");
   expect_contains("darwin_wkwebview_runtime_test");
   expect_contains("tests/darwin_wkwebview_runtime_test.cpp");
+  expect_contains("target_link_libraries(darwin_wkwebview_runtime_test PRIVATE");
+  expect_contains("\"-framework Cocoa\"");
+  expect_contains("\"-framework WebKit\"");
   expect_contains("linux_webkitgtk_runtime_test");
   expect_contains("tests/linux_webkitgtk_runtime_test.cpp");
 
@@ -80,6 +86,21 @@ int main() {
   expect_webview2_host_contains("CreateCoreWebView2EnvironmentWithOptions");
   expect_webview2_host_contains("add_WebMessageReceived");
   expect_webview2_host_contains("PostWebMessageAsJson");
+
+  const auto expect_wkwebview_host_contains = [&](const std::string &needle) {
+    if (!contains(wkwebview_host, needle)) {
+      std::cerr << "missing macOS WKWebView host implementation marker: "
+                << needle << "\n";
+      ++failures;
+    }
+  };
+
+  expect_wkwebview_host_contains("WKWebView");
+  expect_wkwebview_host_contains("WKScriptMessageHandler");
+  expect_wkwebview_host_contains("addScriptMessageHandler");
+  expect_wkwebview_host_contains("WKUserScript");
+  expect_wkwebview_host_contains("evaluateJavaScript");
+  expect_wkwebview_host_contains("loadFileURL");
 
   expect_not_contains(windows_build_script, "scripts/build-windows.ps1",
                       "vpn_runtime_test");

@@ -951,11 +951,20 @@ endif()
 if(APPLE)
     add_executable(darwin_wkwebview_runtime_test
         tests/darwin_wkwebview_runtime_test.cpp
+        src/app/ui_shell/host_bridge.cpp
         src/platform/darwin/ui_shell/wk_webview_host_darwin.mm
     )
 
     target_include_directories(darwin_wkwebview_runtime_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
+    )
+    target_compile_definitions(darwin_wkwebview_runtime_test PRIVATE
+        EXV_BUILD_UI_SHELL=1
+    )
+    target_link_libraries(darwin_wkwebview_runtime_test PRIVATE
+        "-framework Cocoa"
+        "-framework WebKit"
     )
 
     add_test(NAME darwin_wkwebview_runtime_test COMMAND darwin_wkwebview_runtime_test)

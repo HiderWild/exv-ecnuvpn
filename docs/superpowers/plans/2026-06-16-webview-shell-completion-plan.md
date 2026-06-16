@@ -1,12 +1,12 @@
 # Cross-Platform WebView Shell Completion Implementation Plan
 
 > Execution status on 2026-06-16: Phase 1 through Phase 7 have been
-> implemented on branch `codex/ui-framework-webview-shell`. Windows acceptance
-> evidence is recorded in
+> implemented on branch `codex/ui-framework-webview-shell`. Windows and macOS
+> acceptance evidence is recorded in
 > `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
-> macOS acceptance must run through SSH host `macmini` at
-> `/Users/tomli/Development/Projects/CPP/ECNU-VPN`. Linux acceptance remains
-> pending execution on a Linux host.
+> macOS acceptance was run through SSH host `macmini` using a clean temporary
+> worktree because the synced macOS workspace contains unrelated dirty state.
+> Linux acceptance remains pending execution on a Linux host.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -28,7 +28,9 @@ Implemented and committed evidence:
 - Windows has a real WebView2 host path under `EXV_BUILD_UI_SHELL`, WebView2 runtime detection, and controlled Evergreen bootstrapper policy.
 - Native WebView package scripts now produce `build/<platform>/webview/package/ECNU VPN` layouts.
 - Electron production dependencies, scripts, adapter sources, and package docs have been removed from active production paths.
-- Windows local acceptance passed and is recorded in `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
+- Windows local acceptance and macOS acceptance on `macmini` passed and are
+  recorded in
+  `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
 
 Reusable acceptance entrypoints:
 
@@ -47,29 +49,28 @@ These scripts write logs under `build/webview-acceptance/<platform>/`.
 | Task 1 Neutral Host Contract | Done | `webui/host`, generated desktop contract tests, `host-boundary.test.ts`. | None for contract extraction. |
 | Task 2 Renderer API Neutrality | Done | Renderer/host tests block Electron and Node desktop imports from renderer paths. | None currently known. |
 | Task 3 Common Native UI Shell Skeleton | Done | `src/app/ui_shell/*`, `exv-ui`, `run_ui_shell_window(...)`, sidecar args. | None currently known. |
-| Task 4 Native Core RPC Client For UI Shell | Done for Windows shell path | `CoreRpcClient`, core process transport factory, production startup wiring tests. | macOS/Linux host verification still pending. |
+| Task 4 Native Core RPC Client For UI Shell | Done for Windows shell path | `CoreRpcClient`, core process transport factory, production startup wiring tests. | macOS/Linux production core process transport still returns a closed transport and needs follow-up implementation. |
 | Task 5 Windows WebView2 Runtime Detection | Done | `src/platform/win32/ui_shell/webview2_runtime_win32.cpp`; focused tests pass. | None currently known. |
 | Task 6 Windows WebView2 Bootstrapper Policy | Done | Allowlist, runner seam, and host startup policy are present. | Manual UX validation still belongs to Windows acceptance. |
-| Task 7 Platform WebView Host Interfaces | Done | All platforms expose `UiWindow` factories. | macOS/Linux factory implementations still wrap stub `run(...)` behavior. |
+| Task 7 Platform WebView Host Interfaces | Done | All platforms expose `UiWindow` factories. | Linux factory implementation still wraps stub `run(...)` behavior. |
 | Task 8 Windows WebView2 Host Parity | Done with failure-path caveat | Windows host creates native window/WebView2 bridge under `EXV_BUILD_UI_SHELL`; Windows acceptance passed. | Failure paths still return `70` when runtime/bootstrap/COM/window creation cannot proceed. |
-| Task 9 macOS WKWebView Host Parity | Not done | `src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` factory exists. | `WkWebViewWindow::run(...)` still returns `70`; implement real Cocoa/WKWebView bridge and run `macmini` acceptance. |
+| Task 9 macOS WKWebView Host Parity | Done | `src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` creates Cocoa/WKWebView, registers script message handling, dispatches host RPC, and macOS acceptance passed on `macmini`. | Non-Windows core process transport follow-up is still needed for full interactive parity. |
 | Task 10 Linux WebKitGTK Host Parity | Not done | `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` factory exists. | `WebKitGtkWindow::run(...)` still returns `70`; implement real GTK/WebKitGTK bridge and run Linux acceptance. |
-| Task 11 Packaging Switch | Done | Build scripts, smoke scripts, start script, docs, package verifier use WebView layout. | Need macOS/Linux host-specific package acceptance output. |
+| Task 11 Packaging Switch | Done | Build scripts, smoke scripts, start script, docs, package verifier use WebView layout. | Need Linux host-specific package acceptance output. |
 | Task 12 Electron Retirement | Done | Electron production package dependencies/scripts/source paths removed. | None currently known. |
 
 ## Quality Gaps To Fix
 
-1. macOS host parity is still not implemented. `src/platform/darwin/ui_shell/wk_webview_host_darwin.mm` constructs a `UiWindow`, but `run(...)` still returns `70`.
+1. Linux host parity is still not implemented. `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` constructs a `UiWindow`, but `run(...)` still returns `70`.
 
-2. Linux host parity is still not implemented. `src/platform/linux/ui_shell/webkitgtk_host_linux.cpp` constructs a `UiWindow`, but `run(...)` still returns `70`.
+2. macOS/Linux production core transport parity is still incomplete.
+   `src/app/ui_shell/core_process_manager.cpp` returns a closed
+   `CoreRpcTransport` outside Windows.
 
-3. macOS acceptance must be run on SSH host `macmini` from `/Users/tomli/Development/Projects/CPP/ECNU-VPN` after the current branch syncs there.
+3. Linux acceptance still requires a Linux host with WebKitGTK development
+   packages installed.
 
-4. macOS acceptance is currently blocked before WebView host verification by CMake C++20 module scanning: AppleClang on `macmini` does not expose `clang-scan-deps`, so the `macos-release` preset cannot generate module dependency graphs. Repair by installing/selecting an LLVM toolchain with `clang-scan-deps` and wiring the macOS preset or environment to use it.
-
-5. Linux acceptance still requires a Linux host with WebKitGTK development packages installed.
-
-6. Lower phases in this document are the historical implementation recipe. The authoritative remaining gates are the table above and the final acceptance gates at the bottom of this file.
+4. Lower phases in this document are the historical implementation recipe. The authoritative remaining gates are the table above and the final acceptance gates at the bottom of this file.
 
 ## Target Boundaries
 

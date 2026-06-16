@@ -170,6 +170,8 @@ bool wait_until(Predicate predicate,
 struct ControllerTransportState {
     std::atomic<int> disconnect_count{0};
     std::atomic<int> reset_count{0};
+    std::atomic<bool> wait_for_disconnect{false};
+    std::atomic<bool> disconnected{false};
 };
 
 class ControllerFakeTransport final
@@ -212,14 +214,21 @@ public:
 
     ecnuvpn::vpn_engine::ValidationResult
     receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame*) override {
+        if (state_->wait_for_disconnect.load()) {
+            while (!state_->disconnected.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
         return {false, "transport_closed", "transport closed"};
     }
 
     void disconnect() override {
+        state_->disconnected.store(true);
         ++state_->disconnect_count;
     }
 
     void reset_for_reconnect() override {
+        state_->disconnected.store(false);
         ++state_->reset_count;
     }
 
@@ -648,6 +657,7 @@ bool test_native_network_config_preserves_routes_and_bypass() {
     auto helper = std::make_shared<CoreLeaseRecordingHelper>();
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     auto transport_state = std::make_shared<ControllerTransportState>();
+    transport_state->wait_for_disconnect.store(true);
     exv::test::FakeCoreUiClient ui;
 
     auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(

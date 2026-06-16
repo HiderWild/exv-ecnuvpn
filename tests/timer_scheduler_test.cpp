@@ -134,6 +134,24 @@ int main() {
         ok = expect(fired.load(), "timer scheduled from other thread should fire") && ok;
     }
 
+    // --- Scheduling while the worker is waiting must not invalidate its deadline ---
+    {
+        exv::core::TimerScheduler sched;
+        std::atomic<int> fired{0};
+
+        sched.schedule(std::chrono::milliseconds(200), [&] { ++fired; });
+        std::thread caller([&] {
+            for (int i = 0; i < 64; ++i) {
+                sched.schedule(std::chrono::milliseconds(1), [&] { ++fired; });
+            }
+        });
+        caller.join();
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(260));
+        ok = expect(fired.load() == 65,
+                    "timers scheduled while worker waits should all fire") && ok;
+    }
+
     // --- Destructor cancels pending timers without crash ---
     {
         std::atomic<bool> fired{false};
@@ -181,6 +199,20 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         ok = expect(!old_fired.load(), "old cancelled timer should not fire") && ok;
         ok = expect(new_fired.load(), "new timer after cancel should fire") && ok;
+    }
+
+    // --- Explicit shutdown discards pending timers and rejects later schedules ---
+    {
+        exv::core::TimerScheduler sched;
+        std::atomic<int> fired{0};
+
+        sched.schedule(std::chrono::milliseconds(100), [&] { ++fired; });
+        sched.shutdown();
+        sched.schedule(std::chrono::milliseconds(0), [&] { ++fired; });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        ok = expect(fired.load() == 0,
+                    "shutdown should discard pending and future timers") && ok;
     }
 
     if (ok) {

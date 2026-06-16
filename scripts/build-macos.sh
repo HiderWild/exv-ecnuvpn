@@ -52,8 +52,8 @@ run_webui_renderer() {
 
 package_webview() {
   (
-    cd "$REPO_ROOT/webui"
-    pnpm run webview:package
+    cd "$REPO_ROOT"
+    python3 scripts/package_ui_shell.py
   )
 }
 

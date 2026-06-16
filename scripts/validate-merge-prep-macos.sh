@@ -40,12 +40,12 @@ ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_te
 
 if [[ "$SKIP_DESKTOP" -eq 0 ]]; then
   echo "[merge-prep] Build native WebView desktop package..."
-  "$SCRIPT_DIR/build-macos.sh" desktop
+  bash "$SCRIPT_DIR/build-macos.sh" desktop
 fi
 
 if [[ "$DESKTOP_SMOKE" -eq 1 ]]; then
   echo "[merge-prep] Run native WebView package smoke checks..."
-  "$SCRIPT_DIR/macos-packaging-smoke.sh"
+  bash "$SCRIPT_DIR/macos-packaging-smoke.sh"
 fi
 
 echo "[merge-prep] macOS validation complete."

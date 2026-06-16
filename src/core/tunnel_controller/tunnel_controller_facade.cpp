@@ -30,6 +30,10 @@ TunnelController::TunnelController(
 
 TunnelController::~TunnelController() {
     if (impl_) {
+        impl_->stop_heartbeat();
+        impl_->stop_core_lease_keepalive();
+        impl_->scheduler_.shutdown();
+        impl_->runner_.stop();
         impl_->release_core_lease();
     }
 }
