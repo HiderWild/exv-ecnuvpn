@@ -152,6 +152,8 @@ def parse_args() -> argparse.Namespace:
     platform = normalized_platform(os.environ.get("ECNUVPN_BUILD_PLATFORM"))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", default=platform)
+    parser.add_argument("--verify-launch-targets-only", action="store_true")
+    parser.add_argument("--package-dir", type=Path)
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -163,6 +165,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     platform = normalized_platform(args.platform)
+    if args.verify_launch_targets_only:
+        if not args.package_dir:
+            raise SystemExit("--package-dir is required with --verify-launch-targets-only")
+        validate_launch_args_targets(args.package_dir)
+        assert_no_electron_payload(args.package_dir)
+        print(f"verified native WebView shell package: {args.package_dir}")
+        return 0
+
     package_dir = build_package(platform, args.output_root)
     print(f"packaged native WebView shell: {package_dir}")
     return 0
