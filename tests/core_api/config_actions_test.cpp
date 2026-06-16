@@ -279,6 +279,74 @@ int main() {
 
   {
     ConfigActionsFixture fix;
+    auto resp = fix.dispatch("config.export");
+    ok = expect(resp.success, "config.export should succeed") && ok;
+
+    auto payload = json::parse(resp.payload_json);
+    ok = expect(payload["exported"] == true, "export should be confirmed") && ok;
+    ok = expect(payload.contains("export_data"),
+                "export should include export_data") &&
+         ok;
+    ok = expect(payload["export_data"].contains("server"),
+                "export_data should include server") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+
+    // First, modify some settings
+    fix.dispatch("config.saveAuth",
+                 R"({"server":"https://import-test.example","username":"importuser"})");
+    fix.dispatch("config.saveSettings", R"({"mtu":1350,"dtls":false})");
+
+    // Export the config
+    auto export_resp = fix.dispatch("config.export");
+    ok = expect(export_resp.success, "config.export should succeed") && ok;
+    auto export_payload = json::parse(export_resp.payload_json);
+    auto export_data = export_payload["export_data"];
+
+    // Reset to defaults
+    fix.dispatch("config.reset");
+
+    // Verify reset worked
+    auto get_resp = fix.dispatch("config.get");
+    auto get_payload = json::parse(get_resp.payload_json);
+    ok = expect(get_payload["config"]["server"] != "https://import-test.example",
+                "reset should have changed server") &&
+         ok;
+
+    // Import back the saved config
+    auto import_resp = fix.dispatch("config.import", export_data.dump());
+    ok = expect(import_resp.success, "config.import should succeed") && ok;
+
+    // Verify import restored the values
+    auto verify_resp = fix.dispatch("config.get");
+    auto verify_payload = json::parse(verify_resp.payload_json);
+    ok = expect(verify_payload["config"]["server"] == "https://import-test.example",
+                "imported server should be restored") &&
+         ok;
+    ok = expect(verify_payload["config"]["username"] == "importuser",
+                "imported username should be restored") &&
+         ok;
+    ok = expect(verify_payload["settings"]["mtu"] == 1350,
+                "imported mtu should be restored") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    auto resp = fix.dispatch("config.import", "{{invalid}");
+    ok = expect(!resp.success,
+                "config.import with invalid JSON should fail") &&
+         ok;
+    ok = expect(resp.error_code == "invalid_payload",
+                "error code should be invalid_payload") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
     auto resp = fix.dispatch("config.get_profile", R"({"profile_id":"default"})");
     ok = expect(!resp.success,
                 "config.get_profile should report unsupported profiles") &&

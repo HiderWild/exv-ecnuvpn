@@ -78,6 +78,11 @@ void ConfigActions::register_handlers(AppRpcDispatcher& dispatcher) {
       [this](const RpcRequest& req) { return remove_route(req); });
   dispatcher.register_handler("routes.reset",
       [this](const RpcRequest& req) { return reset_routes(req); });
+
+  dispatcher.register_handler("config.import",
+      [this](const RpcRequest& req) { return import_config(req); });
+  dispatcher.register_handler("config.export",
+      [this](const RpcRequest& req) { return export_config(req); });
 }
 
 RpcResponse ConfigActions::get(const RpcRequest& req) {
@@ -180,6 +185,20 @@ RpcResponse ConfigActions::remove_route(const RpcRequest& req) {
 RpcResponse ConfigActions::reset_routes(const RpcRequest& req) {
   (void)req;
   return to_rpc_response(use_cases_.reset_routes());
+}
+
+RpcResponse ConfigActions::import_config(const RpcRequest& req) {
+  try {
+    auto payload = json::parse(req.payload_json);
+    return to_rpc_response(use_cases_.import_config(payload));
+  } catch (const std::exception& e) {
+    return to_rpc_response(invalid_payload(e));
+  }
+}
+
+RpcResponse ConfigActions::export_config(const RpcRequest& req) {
+  (void)req;
+  return to_rpc_response(use_cases_.export_config());
 }
 
 } // namespace exv::core_api

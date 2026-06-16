@@ -29,6 +29,9 @@ public:
   RpcResponse remove_route(const RpcRequest& req);
   RpcResponse reset_routes(const RpcRequest& req);
 
+  RpcResponse import_config(const RpcRequest& req);
+  RpcResponse export_config(const RpcRequest& req);
+
 private:
   exv::core::ConfigUseCases use_cases_;
 };

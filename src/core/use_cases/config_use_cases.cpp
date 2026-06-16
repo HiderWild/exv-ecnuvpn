@@ -383,4 +383,50 @@ UseCaseResult ConfigUseCases::reset_key() {
                             {"key", {{"status", "reset"}}}});
 }
 
+UseCaseResult ConfigUseCases::import_config(const nlohmann::json &payload) {
+  // Import can take either a direct config object or a nested "config" field
+  nlohmann::json config_json;
+  if (payload.contains("config") && payload["config"].is_object()) {
+    config_json = payload["config"];
+  } else if (payload.contains("import_data") && payload["import_data"].is_object()) {
+    config_json = payload["import_data"];
+  } else {
+    config_json = payload;
+  }
+
+  // Convert JSON to string for config_import
+  std::string json_str = config_json.dump();
+  std::string err = ecnuvpn::config_api::config_import(manager_, json_str);
+  if (!err.empty()) {
+    // Check error type and choose appropriate error code
+    if (err.find("tampered") != std::string::npos || err.find("password") != std::string::npos) {
+      return UseCaseResult::fail("config_import_tampered_or_wrong_password", err);
+    }
+    if (err.find("unsupported") != std::string::npos) {
+      return UseCaseResult::fail("config_import_format_unsupported", err);
+    }
+    return UseCaseResult::fail("invalid_config", err);
+  }
+
+  Config cfg = manager_.load();
+  return UseCaseResult::ok({{"imported", true},
+                            {"config", full_config_json(cfg)},
+                            {"settings", settings_json(cfg)},
+                            {"routes", route_array_json(cfg)}});
+}
+
+UseCaseResult ConfigUseCases::export_config() {
+  Config cfg = manager_.load();
+
+  // Export format - clean config object without sensitive data
+  nlohmann::json export_json = full_config_json(cfg);
+
+  // Add export metadata
+  export_json["export_version"] = "1.0";
+  export_json["exported_at"] = ""; // Could be set with timestamp if needed
+
+  return UseCaseResult::ok({{"exported", true},
+                            {"export_data", export_json}});
+}
+
 } // namespace exv::core

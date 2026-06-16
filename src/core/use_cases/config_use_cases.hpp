@@ -37,6 +37,9 @@ public:
   UseCaseResult reset_config();
   UseCaseResult reset_key();
 
+  UseCaseResult import_config(const nlohmann::json &payload);
+  UseCaseResult export_config();
+
 private:
   ecnuvpn::config::ConfigManager manager_;
 };
