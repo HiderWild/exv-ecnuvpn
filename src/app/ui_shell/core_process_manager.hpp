@@ -26,6 +26,8 @@ public:
 std::vector<std::string> build_core_process_arguments(
     const CoreProcessLaunch &launch);
 
+void configure_core_process_transport_signal_policy();
+
 std::unique_ptr<CoreRpcTransport> create_core_process_transport(
     const CoreProcessLaunch &launch);
 

@@ -85,6 +85,7 @@ int main(int argc, char **argv) {
       options.enable_dev_tools,
   };
 
+  ecnuvpn::ui_shell::configure_core_process_transport_signal_policy();
   auto transport = ecnuvpn::ui_shell::create_core_process_transport(
       ecnuvpn::ui_shell::CoreProcessLaunch{options.exv_path, "", "", true});
   ecnuvpn::ui_shell::CoreRpcClient client(*transport);

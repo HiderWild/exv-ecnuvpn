@@ -11,7 +11,9 @@ applied. The synced macOS workspace at
 `/Users/tomli/Development/Projects/CPP/ECNU-VPN` was intentionally not cleaned
 because it contains unrelated dirty sync state. Linux WebKitGTK host code has
 replaced the stub, but Linux acceptance still needs a Linux host with WebKitGTK
-development packages.
+development packages. A later focused macOS verification on `macmini` also
+covered the POSIX core process transport and `exv-ui` build from a clean
+temporary worktree with Homebrew LLVM.
 
 Reusable acceptance scripts now live in the repository:
 
@@ -109,11 +111,11 @@ real WKWebView host implementation. Linux WebKitGTK host implementation has
 replaced the previous stub, but it still needs real Linux configure/build/CTest
 and package-smoke evidence before Linux can be marked accepted.
 
-Also note that `src/app/ui_shell/core_process_manager.cpp` still returns a
-closed `CoreRpcTransport` on non-Windows platforms. The macOS package and host
-bridge compile and package correctly, but the production core transport path for
-macOS/Linux still needs a follow-up implementation before the interactive UI can
-be called end-to-end equivalent to Windows.
+`src/app/ui_shell/core_process_manager.cpp` now returns a POSIX
+`CoreRpcTransport` on macOS/Linux through posix_spawn and stdin/stdout JSON lines.
+Focused macOS validation built `exv-ui`, `ui_shell_core_rpc_client_test`,
+`ui_shell_cmake_policy_test`, and `darwin_wkwebview_runtime_test` in a clean
+temporary worktree on `macmini`.
 
 ## Current Acceptance State
 
@@ -127,5 +129,5 @@ be called end-to-end equivalent to Windows.
 - Linux scripted acceptance remains pending real host execution.
 - Linux host parity implementation is present but unaccepted until a Linux host
   runs `scripts/accept-webview-shell-linux.sh`.
-- Non-Windows core process transport remains closed and needs a follow-up
-  production implementation.
+- Non-Windows core process transport is implemented; full Linux acceptance
+  remains the final platform gate.

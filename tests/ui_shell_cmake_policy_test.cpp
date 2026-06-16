@@ -42,6 +42,8 @@ int main() {
   const std::string webkitgtk_host =
       read_file(source_dir +
                 "/src/platform/linux/ui_shell/webkitgtk_host_linux.cpp");
+  const std::string core_process_manager =
+      read_file(source_dir + "/src/app/ui_shell/core_process_manager.cpp");
 
   int failures = 0;
   const auto expect_contains = [&](const std::string &needle) {
@@ -126,6 +128,23 @@ int main() {
   expect_webkitgtk_host_contains("webkit_user_script_new");
   expect_webkitgtk_host_contains("webkit_web_view_run_javascript");
   expect_webkitgtk_host_contains("webkit_web_view_load_uri");
+
+  const auto expect_core_process_manager_contains =
+      [&](const std::string &needle) {
+        if (!contains(core_process_manager, needle)) {
+          std::cerr << "missing UI shell core process transport marker: "
+                    << needle << "\n";
+          ++failures;
+        }
+      };
+
+  expect_core_process_manager_contains("class PosixCoreProcessTransport");
+  expect_core_process_manager_contains("move_fd_above_stdio");
+  expect_core_process_manager_contains("posix_spawn_file_actions_adddup2");
+  expect_core_process_manager_contains("posix_spawn(&child");
+  expect_core_process_manager_contains("poll(&descriptor, 1, 0)");
+  expect_core_process_manager_contains("configure_core_process_transport_signal_policy");
+  expect_core_process_manager_contains("std::make_unique<PosixCoreProcessTransport>");
 
   expect_not_contains(windows_build_script, "scripts/build-windows.ps1",
                       "vpn_runtime_test");
