@@ -108,6 +108,7 @@ set(EXV_CORE_SOURCES
     src/core/rpc/config_actions.cpp
     src/core/rpc/service_actions.cpp
     src/core/rpc/route_actions.cpp
+    src/core/rpc/maintenance_actions.cpp
     src/core/rpc/core_api_setup.cpp
     src/core/use_cases/config_use_cases.cpp
     src/core/use_cases/system_status_use_cases.cpp
@@ -2017,6 +2018,19 @@ target_link_libraries(route_actions_test PRIVATE exv-core)
 
 add_test(NAME route_actions_test COMMAND route_actions_test)
 
+add_executable(maintenance_actions_test
+    tests/core_api/maintenance_actions_test.cpp
+)
+
+target_include_directories(maintenance_actions_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(maintenance_actions_test PRIVATE exv-core)
+
+add_test(NAME maintenance_actions_test COMMAND maintenance_actions_test)
+
 add_executable(error_contract_test
     tests/core_api/error_contract_test.cpp
     src/feedback/error_contract.cpp
@@ -2393,6 +2407,7 @@ set(_release_blocking_tests
     core_hello_actions_test
     service_actions_test
     route_actions_test
+    maintenance_actions_test
     error_contract_test
     contract_manifest_test
     core_architecture_contract_test
@@ -2520,6 +2535,7 @@ set_property(TEST
     core_hello_actions_test
     service_actions_test
     route_actions_test
+    maintenance_actions_test
     error_contract_test
     contract_manifest_test
     core_architecture_contract_test
@@ -2602,6 +2618,7 @@ set_property(TEST
     config_module_smoke_test
     service_actions_test
     route_actions_test
+    maintenance_actions_test
     error_contract_test
     contract_manifest_test
     core_architecture_contract_test

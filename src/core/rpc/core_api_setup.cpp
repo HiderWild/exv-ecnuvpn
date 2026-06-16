@@ -4,6 +4,7 @@
 #include "config_actions.hpp"
 #include "service_actions.hpp"
 #include "route_actions.hpp"
+#include "maintenance_actions.hpp"
 
 namespace exv::core_api {
 
@@ -34,6 +35,10 @@ std::unique_ptr<AppRpcDispatcher> create_dispatcher(
     auto route = std::make_shared<RouteActions>();
     route->register_handlers(*dispatcher);
     dispatcher->retain_action(route);
+
+    auto maintenance = std::make_shared<MaintenanceActions>();
+    maintenance->register_handlers(*dispatcher);
+    dispatcher->retain_action(maintenance);
 
     return dispatcher;
 }
