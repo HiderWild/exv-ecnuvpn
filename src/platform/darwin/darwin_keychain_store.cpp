@@ -101,7 +101,18 @@ bool DarwinKeychainStore::erase(const std::string& profile_id,
 // ---------------------------------------------------------------------------
 
 bool DarwinKeychainStore::is_available() const {
-    return true;  // Keychain is always present on macOS
+    SecKeychainRef keychain = nullptr;
+    OSStatus status = SecKeychainCopyDefault(&keychain);
+    if (status != errSecSuccess || keychain == nullptr) {
+        return false;
+    }
+
+    SecKeychainStatus keychain_status = 0;
+    status = SecKeychainGetStatus(keychain, &keychain_status);
+    CFRelease(keychain);
+
+    return status == errSecSuccess &&
+           (keychain_status & kSecUnlockStateStatus) != 0;
 }
 
 std::string DarwinKeychainStore::backend_name() const {

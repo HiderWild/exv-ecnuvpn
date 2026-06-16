@@ -36,6 +36,10 @@ public:
     /// executing will be discarded.  Callbacks already in-flight will finish.
     void cancel_all();
 
+    /// Stop the scheduler worker and discard all pending timers. After this,
+    /// schedule() is a no-op. Safe to call more than once.
+    void shutdown();
+
     /// Returns the number of pending (not yet fired) timers.  Useful for
     /// testing.
     std::size_t pending_count() const;

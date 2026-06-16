@@ -23,7 +23,7 @@ const highlightCount = 10 // Number of recent entries to highlight on context ju
 onMounted(async () => {
   sseConnect()
   try {
-    const api = (await import('../api/desktop')).default
+    const api = (await import('../api/host')).default
     const { data } = await api.get<LogEntry[]>('/logs')
     if (Array.isArray(data)) {
       vpn.setLogs(data)

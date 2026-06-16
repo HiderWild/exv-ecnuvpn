@@ -31,6 +31,7 @@ src/webui_assets.hpp
 
 # Dependencies
 node_modules/
+.pnpm-store/
 package-lock.json
 webui/dist-electron/
 webui/native/bin/

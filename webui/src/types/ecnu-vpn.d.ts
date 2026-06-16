@@ -4,7 +4,7 @@ import type {
   DesktopModalPayload,
   DesktopServiceInstallPromptResult,
   DesktopWindowMode,
-} from '../../desktop/shared/desktop-contract'
+} from '../../host/shared/host-contract'
 import type {
   AuthConfig,
   DriverStatus,

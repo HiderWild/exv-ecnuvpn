@@ -487,6 +487,8 @@ void setup_daemon_signals() {
 }
 
 void cleanup_daemon_endpoint(const std::string &endpoint) {
+  std::remove(endpoint.c_str());
+}
 // End inlined from platform/darwin/helper_lifecycle_worker include-unit
 } // namespace platform
 } // namespace ecnuvpn
