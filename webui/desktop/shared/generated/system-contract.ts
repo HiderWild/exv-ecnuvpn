@@ -1,6 +1,7 @@
 // Generated from contracts/system.contract.json. Do not edit manually.
 
-export const CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-utils-contract.v1" as const
+export const CONTRACT_VERSION = "2026-06-16.cli-core-ui-contract.v1" as const
+export const IPC_PROTOCOL_MAJOR = 1 as const
 
 export const DESKTOP_RPC_REQUEST_FIELDS = [
   "id",
@@ -25,6 +26,57 @@ export const CORE_RPC_RESPONSE_FIELDS = [
   "error_code",
   "error_message",
   "request_id"
+] as const
+
+export const CORE_RPC_ACTIONS = [
+  "core.hello",
+  "status.get",
+  "vpn.connect",
+  "vpn.disconnect",
+  "config.get",
+  "config.saveAuth",
+  "config.saveSettings",
+  "config.reset",
+  "config.import",
+  "config.export",
+  "key.status",
+  "key.reset",
+  "routes.list",
+  "routes.add",
+  "routes.remove",
+  "routes.reset",
+  "logs.list",
+  "service.status",
+  "service.install",
+  "service.uninstall",
+  "runtime.status",
+  "drivers.status",
+  "drivers.install",
+  "maintenance.inspectCore",
+  "maintenance.killStaleCore"
+] as const
+export const DESTRUCTIVE_CORE_RPC_ACTIONS = [
+  "config.reset",
+  "key.reset",
+  "maintenance.killStaleCore"
+] as const
+export const STANDARD_ERROR_CODES = [
+  "confirmation_required",
+  "invalid_payload",
+  "invalid_config",
+  "unsupported_contract_version",
+  "core_comm_broken",
+  "core_unresponsive",
+  "core_protocol_mismatch",
+  "core_not_found",
+  "core_launch_failed",
+  "core_version_probe_failed",
+  "config_import_format_unsupported",
+  "config_import_auth_failed",
+  "config_import_tampered_or_wrong_password",
+  "credential_store_unavailable",
+  "key_missing",
+  "key_corrupt"
 ] as const
 
 export const DESKTOP_RPC_ACTIONS = [
@@ -431,7 +483,10 @@ export const SRC_FORBIDDEN_PATTERNS = [
 ] as const
 
 export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]
+export type CoreRpcAction = (typeof CORE_RPC_ACTIONS)[number]
+export type DestructiveCoreRpcAction = (typeof DESTRUCTIVE_CORE_RPC_ACTIONS)[number]
 export type ConfigAction = (typeof CONFIG_ACTIONS)[number]
 export type HelperOp = (typeof HELPER_OPS)[number]
+export type StandardErrorCode = (typeof STANDARD_ERROR_CODES)[number]
 export type TunnelPhase = (typeof TUNNEL_PHASE_CONTRACTS)[number]['name']
 export type TunnelEvent = (typeof TUNNEL_EVENTS)[number]

@@ -33,6 +33,18 @@ bool check_alias(std::string_view alias, std::string_view target) {
                 "config module alias target must match generated contract");
 }
 
+bool generated_alias_matches(std::string_view alias, std::string_view target) {
+  for (const auto &candidate : exv::contracts::generated::CONFIG_ALIASES) {
+    if (candidate.alias == alias) {
+      return expect(candidate.target == target,
+                    "generated config alias target must match expectation");
+    }
+  }
+  std::cerr << "EXPECT FAILED: missing generated config alias " << alias
+            << '\n';
+  return false;
+}
+
 } // namespace
 
 int main() {
@@ -54,6 +66,16 @@ int main() {
   for (const auto &alias : exv::contracts::generated::CONFIG_ALIASES) {
     ok = check_alias(alias.alias, alias.target) && ok;
   }
+
+  ok = expect(exv::config::contract::is_action("config.profile.save"),
+              "config module must include generated config.profile.save action") &&
+       ok;
+  ok = generated_alias_matches("config.get", "config.getSettings") && ok;
+  ok = expect(std::string_view{
+                  exv::config::contract::canonical_action("config.get")} ==
+                  "config.getSettings",
+              "config module config.get alias must match generated target") &&
+       ok;
 
   ok = expect(!exv::config::contract::is_action("vpn.connect"),
               "config module must reject non-config actions") &&

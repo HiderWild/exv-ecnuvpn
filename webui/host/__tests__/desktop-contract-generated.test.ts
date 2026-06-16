@@ -6,8 +6,10 @@ import { resolve } from 'node:path'
 import {
   CONFIG_ACTIONS,
   CONFIG_ALIASES,
+  CORE_RPC_ACTIONS,
   CORE_RPC_REQUEST_FIELDS,
   CORE_RPC_RESPONSE_FIELDS,
+  DESTRUCTIVE_CORE_RPC_ACTIONS,
   DESKTOP_RPC_ACTIONS,
   DESKTOP_RPC_ERROR_CODES,
   DESKTOP_RPC_ERROR_CODE_MAP,
@@ -17,6 +19,8 @@ import {
   HELPER_OP_CONTRACTS,
   HELPER_FORBIDDEN_CREDENTIAL_FIELDS,
   HELPER_OPS,
+  IPC_PROTOCOL_MAJOR,
+  STANDARD_ERROR_CODES,
 } from '../../desktop/shared/generated/system-contract.js'
 import {
   desktopRpcActions,
@@ -66,6 +70,13 @@ describe('generated system contract', () => {
       'error_message',
       'request_id',
     ])
+
+    assert(CORE_RPC_ACTIONS.includes('core.hello'))
+    assert(CORE_RPC_ACTIONS.includes('config.import'))
+    assert(CORE_RPC_ACTIONS.includes('maintenance.inspectCore'))
+    assert(DESTRUCTIVE_CORE_RPC_ACTIONS.includes('key.reset'))
+    assert(STANDARD_ERROR_CODES.includes('config_import_tampered_or_wrong_password'))
+    assert.equal(IPC_PROTOCOL_MAJOR, 1)
   })
 
   it('declares config canonical actions and legacy aliases', () => {
@@ -85,6 +96,15 @@ describe('generated system contract', () => {
     assert.equal(CONFIG_ALIASES['config.save'], 'config.saveSettings')
     assert.equal(CONFIG_ALIASES['config.get_profile'], 'config.profile.get')
     assert.equal(CONFIG_ALIASES['config.save_profile'], 'config.profile.save')
+  })
+
+  it('removes duplicate legacy action maps from host-contract.ts once generated constants exist', () => {
+    const source = readFileSync(resolve(process.cwd(), 'host/shared/host-contract.ts'), 'utf8')
+
+    assert(!source.includes("export const CONFIG_ACTIONS = {"))
+    assert(!source.includes("export const ROUTE_ACTIONS = {"))
+    assert(CORE_RPC_ACTIONS.includes('routes.list'))
+    assert(CONFIG_ALIASES['config.get'] === 'config.getSettings')
   })
 
   it('keeps helper privileged contract credential-free', () => {

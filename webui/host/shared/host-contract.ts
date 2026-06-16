@@ -1,7 +1,12 @@
 import {
+  CONFIG_ALIASES,
+  CORE_RPC_ACTIONS,
+  DESTRUCTIVE_CORE_RPC_ACTIONS,
   DESKTOP_RPC_ACTIONS,
   DESKTOP_RPC_ERROR_CODE_MAP,
   DESKTOP_RPC_EVENT_TYPES,
+  IPC_PROTOCOL_MAJOR,
+  STANDARD_ERROR_CODES,
 } from './generated/system-contract.js'
 
 export const desktopIpcChannels = {
@@ -51,6 +56,11 @@ export const desktopCliCommands = ['status', 'install', 'uninstall'] as const
 export const desktopDriverInstallTargets = ['wintun', 'tap'] as const
 
 export const desktopRpcErrorCodes = DESKTOP_RPC_ERROR_CODE_MAP
+export const coreRpcActions = CORE_RPC_ACTIONS
+export const destructiveCoreRpcActions = DESTRUCTIVE_CORE_RPC_ACTIONS
+export const configAliases = CONFIG_ALIASES
+export const standardErrorCodes = STANDARD_ERROR_CODES
+export const ipcProtocolMajor = IPC_PROTOCOL_MAJOR
 
 export type DesktopRpcAction = (typeof desktopRpcActions)[number]
 export type DesktopEventType = (typeof desktopEventTypes)[number]
@@ -59,6 +69,10 @@ export type DesktopDriverInstallTarget =
   (typeof desktopDriverInstallTargets)[number]
 export type DesktopRpcErrorCode =
   (typeof desktopRpcErrorCodes)[keyof typeof desktopRpcErrorCodes]
+export type CoreRpcAction = (typeof coreRpcActions)[number]
+export type DestructiveCoreRpcAction =
+  (typeof destructiveCoreRpcActions)[number]
+export type StandardErrorCode = (typeof standardErrorCodes)[number]
 export type DesktopWindowMode = 'minimal' | 'advanced'
 export type DesktopServiceInstallPromptResult = 'install' | 'dismiss'
 export type DesktopModalKind = 'service-install' | 'password' | 'confirm' | 'close-app'
@@ -190,36 +204,3 @@ export interface RpcResponse {
   error_message: string
   request_id: string
 }
-
-// VPN action name constants — match handler registrations in vpn_actions.cpp.
-export const VPN_ACTIONS = {
-  CONNECT: 'vpn.connect',
-  DISCONNECT: 'vpn.disconnect',
-  STATUS: 'vpn.status',
-  SET_AUTO_RECONNECT: 'vpn.set_auto_reconnect',
-} as const
-
-// Config action name constants — match handler registrations in config_actions.cpp.
-export const CONFIG_ACTIONS = {
-  GET: 'config.get',
-  SAVE: 'config.save',
-  GET_PROFILE: 'config.get_profile',
-  SAVE_PROFILE: 'config.save_profile',
-} as const
-
-// Service action name constants — match handler registrations in service_actions.cpp.
-export const SERVICE_ACTIONS = {
-  HELPER_STATUS: 'service.helper_status',
-  INSTALL: 'service.install',
-  UNINSTALL: 'service.uninstall',
-  DRIVER_STATUS: 'service.driver_status',
-} as const
-
-// Route action name constants — match handler registrations in route_actions.cpp.
-export const ROUTE_ACTIONS = {
-  LIST: 'route.list',
-  ADD: 'route.add',
-  REMOVE: 'route.remove',
-  ENABLE: 'route.enable',
-  DISABLE: 'route.disable',
-} as const

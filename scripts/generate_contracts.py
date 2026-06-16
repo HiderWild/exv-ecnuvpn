@@ -41,6 +41,12 @@ def require_string(value: Any, path: str) -> str:
     return value
 
 
+def require_positive_int(value: Any, path: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ContractError(f"{path} must be a positive integer")
+    return value
+
+
 def field_names(manifest: dict[str, Any], envelope: str, side: str) -> list[str]:
     fields = manifest["envelopes"][envelope][side]["fields"]
     return [require_string(field.get("name"), f"envelopes.{envelope}.{side}.fields[].name")
@@ -85,6 +91,22 @@ def validate_error_code_entries(values: Any, path: str) -> None:
             raise ContractError(f"{path} contains duplicate code {code!r}")
         seen_keys.add(key)
         seen_codes.add(code)
+
+
+def validate_core_rpc(core_rpc: dict[str, Any]) -> None:
+    actions = validate_string_list(core_rpc.get("actions"), "surfaces.core_rpc.actions")
+    destructive_actions = validate_string_list(
+        core_rpc.get("destructive_actions"),
+        "surfaces.core_rpc.destructive_actions",
+    )
+    validate_string_list(core_rpc.get("error_codes"), "surfaces.core_rpc.error_codes")
+
+    action_names = set(actions)
+    for action in destructive_actions:
+        if action not in action_names:
+            raise ContractError(
+                f"surfaces.core_rpc.destructive_actions contains unknown action {action!r}"
+            )
 
 
 def validate_config(config: dict[str, Any]) -> None:
@@ -205,6 +227,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("contract_id") != "ecnu-vpn.system":
         raise ContractError("contract_id must be ecnu-vpn.system")
     require_string(manifest.get("version"), "version")
+    require_positive_int(manifest.get("ipc_protocol_major"), "ipc_protocol_major")
 
     envelopes = require_object(manifest.get("envelopes"), "envelopes")
     for envelope in ("desktop_rpc", "core_rpc"):
@@ -213,11 +236,12 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             side_obj = require_object(envelope_obj.get(side), f"envelopes.{envelope}.{side}")
             validate_fields(side_obj.get("fields"), f"envelopes.{envelope}.{side}.fields")
 
-    desktop = require_object(require_object(manifest.get("surfaces"), "surfaces").get("desktop_rpc"),
-                             "surfaces.desktop_rpc")
+    surfaces = require_object(manifest.get("surfaces"), "surfaces")
+    desktop = require_object(surfaces.get("desktop_rpc"), "surfaces.desktop_rpc")
     validate_string_list(desktop.get("actions"), "surfaces.desktop_rpc.actions")
     validate_string_list(desktop.get("event_types"), "surfaces.desktop_rpc.event_types")
     validate_error_code_entries(desktop.get("error_codes"), "surfaces.desktop_rpc.error_codes")
+    validate_core_rpc(require_object(surfaces.get("core_rpc"), "surfaces.core_rpc"))
 
     modules = require_object(manifest.get("modules"), "modules")
     validate_config(require_object(modules.get("config"), "modules.config"))
@@ -246,6 +270,22 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 def config_actions(manifest: dict[str, Any]) -> list[str]:
     return [action["name"] for action in manifest["modules"]["config"]["actions"]]
+
+
+def core_rpc(manifest: dict[str, Any]) -> dict[str, Any]:
+    return manifest["surfaces"]["core_rpc"]
+
+
+def core_rpc_actions(manifest: dict[str, Any]) -> list[str]:
+    return core_rpc(manifest)["actions"]
+
+
+def destructive_core_rpc_actions(manifest: dict[str, Any]) -> list[str]:
+    return core_rpc(manifest)["destructive_actions"]
+
+
+def standard_error_codes(manifest: dict[str, Any]) -> list[str]:
+    return core_rpc(manifest)["error_codes"]
 
 
 def config_aliases(manifest: dict[str, Any]) -> list[tuple[str, str]]:
@@ -303,12 +343,16 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         "namespace exv::contracts::generated {",
         "",
         f"inline constexpr std::string_view CONTRACT_VERSION = {cpp_string(manifest['version'])};",
+        f"inline constexpr std::uint32_t IPC_PROTOCOL_MAJOR = {manifest['ipc_protocol_major']};",
         "",
         cpp_array("DESKTOP_RPC_REQUEST_FIELDS", field_names(manifest, "desktop_rpc", "request")),
         cpp_array("DESKTOP_RPC_RESPONSE_FIELDS", field_names(manifest, "desktop_rpc", "response")),
         cpp_array("CORE_RPC_REQUEST_FIELDS", field_names(manifest, "core_rpc", "request")),
         cpp_array("CORE_RPC_RESPONSE_FIELDS", field_names(manifest, "core_rpc", "response")),
         "",
+        cpp_array("CORE_RPC_ACTIONS", core_rpc_actions(manifest)),
+        cpp_array("DESTRUCTIVE_CORE_RPC_ACTIONS", destructive_core_rpc_actions(manifest)),
+        cpp_array("STANDARD_ERROR_CODES", standard_error_codes(manifest)),
         cpp_array("DESKTOP_RPC_ACTIONS", manifest["surfaces"]["desktop_rpc"]["actions"]),
         cpp_array("DESKTOP_RPC_EVENT_TYPES", manifest["surfaces"]["desktop_rpc"]["event_types"]),
         cpp_array("DESKTOP_RPC_ERROR_CODES", desktop_error_codes(manifest)),
@@ -384,6 +428,18 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         "    return contains(DESKTOP_RPC_ACTIONS, action);",
         "}",
         "",
+        "constexpr bool is_core_rpc_action(std::string_view action) {",
+        "    return contains(CORE_RPC_ACTIONS, action);",
+        "}",
+        "",
+        "constexpr bool is_destructive_core_rpc_action(std::string_view action) {",
+        "    return contains(DESTRUCTIVE_CORE_RPC_ACTIONS, action);",
+        "}",
+        "",
+        "constexpr bool is_standard_error_code(std::string_view code) {",
+        "    return contains(STANDARD_ERROR_CODES, code);",
+        "}",
+        "",
         "constexpr bool is_config_action(std::string_view action) {",
         "    return contains(CONFIG_ACTIONS, action);",
         "}",
@@ -433,11 +489,16 @@ def render_ts(manifest: dict[str, Any]) -> str:
         "// Generated from contracts/system.contract.json. Do not edit manually.",
         "",
         f"export const CONTRACT_VERSION = {json.dumps(manifest['version'])} as const",
+        f"export const IPC_PROTOCOL_MAJOR = {manifest['ipc_protocol_major']} as const",
         "",
         f"export const DESKTOP_RPC_REQUEST_FIELDS = {ts_literal(field_names(manifest, 'desktop_rpc', 'request'))} as const",
         f"export const DESKTOP_RPC_RESPONSE_FIELDS = {ts_literal(field_names(manifest, 'desktop_rpc', 'response'))} as const",
         f"export const CORE_RPC_REQUEST_FIELDS = {ts_literal(field_names(manifest, 'core_rpc', 'request'))} as const",
         f"export const CORE_RPC_RESPONSE_FIELDS = {ts_literal(field_names(manifest, 'core_rpc', 'response'))} as const",
+        "",
+        f"export const CORE_RPC_ACTIONS = {ts_literal(core_rpc_actions(manifest))} as const",
+        f"export const DESTRUCTIVE_CORE_RPC_ACTIONS = {ts_literal(destructive_core_rpc_actions(manifest))} as const",
+        f"export const STANDARD_ERROR_CODES = {ts_literal(standard_error_codes(manifest))} as const",
         "",
         f"export const DESKTOP_RPC_ACTIONS = {ts_literal(manifest['surfaces']['desktop_rpc']['actions'])} as const",
         f"export const DESKTOP_RPC_EVENT_TYPES = {ts_literal(manifest['surfaces']['desktop_rpc']['event_types'])} as const",
@@ -460,8 +521,11 @@ def render_ts(manifest: dict[str, Any]) -> str:
         f"export const SRC_FORBIDDEN_PATTERNS = {ts_literal(manifest['modules']['src_organization']['forbidden_patterns'])} as const",
         "",
         "export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]",
+        "export type CoreRpcAction = (typeof CORE_RPC_ACTIONS)[number]",
+        "export type DestructiveCoreRpcAction = (typeof DESTRUCTIVE_CORE_RPC_ACTIONS)[number]",
         "export type ConfigAction = (typeof CONFIG_ACTIONS)[number]",
         "export type HelperOp = (typeof HELPER_OPS)[number]",
+        "export type StandardErrorCode = (typeof STANDARD_ERROR_CODES)[number]",
         "export type TunnelPhase = (typeof TUNNEL_PHASE_CONTRACTS)[number]['name']",
         "export type TunnelEvent = (typeof TUNNEL_EVENTS)[number]",
         "",

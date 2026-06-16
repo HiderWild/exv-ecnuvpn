@@ -44,6 +44,57 @@ std::string read_text_file(const std::filesystem::path &path) {
   return out.str();
 }
 
+bool text_contains_quoted_value(const std::string &text,
+                                std::string_view value) {
+  return text.find('"' + std::string{value} + '"') != std::string::npos;
+}
+
+template <typename Range>
+bool text_contains_all_quoted_values(const std::string &text,
+                                     const Range &values,
+                                     const char *label) {
+  for (const auto value : values) {
+    if (text_contains_quoted_value(text, value)) {
+      continue;
+    }
+    std::cerr << "Missing " << label << " value in module mirror: " << value
+              << '\n';
+    return false;
+  }
+  return true;
+}
+
+bool text_contains_generated_config_aliases(const std::string &text) {
+  for (const auto &alias : exv::contracts::generated::CONFIG_ALIASES) {
+    const auto snippet = std::string{"{\""} + std::string{alias.alias} +
+                         "\", \"" + std::string{alias.target} + "\"}";
+    if (text.find(snippet) != std::string::npos) {
+      continue;
+    }
+    std::cerr << "Missing config alias mirror in module contract: "
+              << alias.alias << " -> " << alias.target << '\n';
+    return false;
+  }
+  return true;
+}
+
+bool text_contains_generated_tunnel_phases(const std::string &text) {
+  for (const auto &phase : exv::contracts::generated::TUNNEL_PHASE_CONTRACTS) {
+    const auto snippet = std::string{"{\""} + std::string{phase.name} +
+                         "\", \"" + std::string{phase.wire_name} + "\", " +
+                         (phase.running ? "true" : "false") + ", " +
+                         (phase.connected ? "true" : "false") + ", " +
+                         (phase.network_ready ? "true" : "false") + "}";
+    if (text.find(snippet) != std::string::npos) {
+      continue;
+    }
+    std::cerr << "Missing tunnel phase mirror in module contract: "
+              << phase.name << '\n';
+    return false;
+  }
+  return true;
+}
+
 template <typename Range>
 bool contains(const Range &values, std::string_view value) {
   return std::find(values.begin(), values.end(), value) != values.end();
@@ -413,6 +464,12 @@ int main() {
   const auto tunnel_state_machine_test =
       read_text_file(source_dir / "tests" /
                      "tunnel_controller_state_machine_test.cpp");
+  const auto config_contract_module =
+      read_text_file(source_dir / "src" / "core" / "config" / "modules" /
+                     "config_contract.cppm");
+  const auto tunnel_contract_module =
+      read_text_file(source_dir / "src" / "core" / "tunnel_controller" /
+                     "modules" / "tunnel_contract.cppm");
   const auto app_api_cpp =
       source_dir / "src" / "core" / "app_api" / "app_api.cpp";
   const auto rpc_vpn_actions =
@@ -571,11 +628,54 @@ int main() {
            exv::contracts::generated::is_desktop_rpc_action("config.saveSettings"),
            "desktop action config.saveSettings must be generated") &&
        ok;
+  ok = expect(exv::contracts::generated::is_core_rpc_action("core.hello"),
+              "core.hello must be generated as a core RPC action") &&
+       ok;
+  ok = expect(exv::contracts::generated::is_core_rpc_action("config.export"),
+              "config.export must be generated as a core RPC action") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_core_rpc_action(
+               "maintenance.killStaleCore"),
+           "maintenance.killStaleCore must be generated as a core RPC action") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_destructive_core_rpc_action(
+               "config.reset"),
+           "config.reset must require explicit confirmation") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_destructive_core_rpc_action(
+               "key.reset"),
+           "key.reset must require explicit confirmation") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_destructive_core_rpc_action(
+               "maintenance.killStaleCore"),
+           "maintenance.killStaleCore must require explicit confirmation") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_standard_error_code(
+               "core_comm_broken"),
+           "core_comm_broken must be a generated standard error") &&
+       ok;
+  ok = expect(exv::contracts::generated::IPC_PROTOCOL_MAJOR == 1,
+              "IPC protocol major must be generated") &&
+       ok;
   ok = expect(exv::contracts::generated::is_config_action("config.getSettings"),
               "config.getSettings must be generated as a config action") &&
        ok;
   ok = expect(exv::contracts::generated::is_config_alias("config.get"),
               "legacy config.get must be declared as an alias") &&
+       ok;
+  ok = expect(text_contains_all_quoted_values(
+                  config_contract_module,
+                  exv::contracts::generated::CONFIG_ACTIONS,
+                  "config action"),
+              "config module mirror must include every generated config action") &&
+       ok;
+  ok = expect(text_contains_generated_config_aliases(config_contract_module),
+              "config module mirror must include every generated config alias") &&
        ok;
 
   ok = expect(exv::contracts::generated::is_helper_op("StartSession"),
@@ -605,6 +705,33 @@ int main() {
   ok = expect(exv::contracts::generated::is_helper_forbidden_credential_field(
                   "auth_token"),
               "helper auth_token field must be forbidden") &&
+       ok;
+  ok = expect(text_contains_generated_tunnel_phases(tunnel_contract_module),
+              "tunnel module mirror must include every generated phase contract") &&
+       ok;
+  ok = expect(text_contains_all_quoted_values(
+                  tunnel_contract_module,
+                  exv::contracts::generated::TUNNEL_EVENTS,
+                  "tunnel event"),
+              "tunnel module mirror must include every generated tunnel event") &&
+       ok;
+  ok = expect(text_contains_all_quoted_values(
+                  tunnel_contract_module,
+                  exv::contracts::generated::TUNNEL_DISCONNECT_REASONS,
+                  "tunnel disconnect reason"),
+              "tunnel module mirror must include every generated disconnect reason") &&
+       ok;
+  ok = expect(text_contains_all_quoted_values(
+                  tunnel_contract_module,
+                  exv::contracts::generated::TUNNEL_ERROR_DOMAINS,
+                  "tunnel error domain"),
+              "tunnel module mirror must include every generated error domain") &&
+       ok;
+  ok = expect(text_contains_all_quoted_values(
+                  tunnel_contract_module,
+                  exv::contracts::generated::TUNNEL_STATUS_FIELDS,
+                  "tunnel status field"),
+              "tunnel module mirror must include every generated status field") &&
        ok;
 
   const auto &config = manifest.at("modules").at("config");

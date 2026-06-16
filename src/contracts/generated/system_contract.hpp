@@ -8,13 +8,17 @@
 
 namespace exv::contracts::generated {
 
-inline constexpr std::string_view CONTRACT_VERSION = "2026-06-15.config-helper-tunnel-utils-contract.v1";
+inline constexpr std::string_view CONTRACT_VERSION = "2026-06-16.cli-core-ui-contract.v1";
+inline constexpr std::uint32_t IPC_PROTOCOL_MAJOR = 1;
 
 inline constexpr std::array<std::string_view, 3> DESKTOP_RPC_REQUEST_FIELDS = {{"id", "action", "payload"}};
 inline constexpr std::array<std::string_view, 5> DESKTOP_RPC_RESPONSE_FIELDS = {{"ok", "data", "code", "message", "event"}};
 inline constexpr std::array<std::string_view, 3> CORE_RPC_REQUEST_FIELDS = {{"action", "payload_json", "request_id"}};
 inline constexpr std::array<std::string_view, 5> CORE_RPC_RESPONSE_FIELDS = {{"success", "payload_json", "error_code", "error_message", "request_id"}};
 
+inline constexpr std::array<std::string_view, 25> CORE_RPC_ACTIONS = {{"core.hello", "status.get", "vpn.connect", "vpn.disconnect", "config.get", "config.saveAuth", "config.saveSettings", "config.reset", "config.import", "config.export", "key.status", "key.reset", "routes.list", "routes.add", "routes.remove", "routes.reset", "logs.list", "service.status", "service.install", "service.uninstall", "runtime.status", "drivers.status", "drivers.install", "maintenance.inspectCore", "maintenance.killStaleCore"}};
+inline constexpr std::array<std::string_view, 3> DESTRUCTIVE_CORE_RPC_ACTIONS = {{"config.reset", "key.reset", "maintenance.killStaleCore"}};
+inline constexpr std::array<std::string_view, 16> STANDARD_ERROR_CODES = {{"confirmation_required", "invalid_payload", "invalid_config", "unsupported_contract_version", "core_comm_broken", "core_unresponsive", "core_protocol_mismatch", "core_not_found", "core_launch_failed", "core_version_probe_failed", "config_import_format_unsupported", "config_import_auth_failed", "config_import_tampered_or_wrong_password", "credential_store_unavailable", "key_missing", "key_corrupt"}};
 inline constexpr std::array<std::string_view, 20> DESKTOP_RPC_ACTIONS = {{"status.get", "vpn.connect", "vpn.disconnect", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "routes.list", "routes.add", "routes.remove", "routes.reset", "service.status", "helper.status", "runtime.status", "drivers.status", "drivers.install", "service.install", "service.uninstall", "logs.list"}};
 inline constexpr std::array<std::string_view, 6> DESKTOP_RPC_EVENT_TYPES = {{"log", "status", "heartbeat", "service-progress", "close-request", "core-crashed"}};
 inline constexpr std::array<std::string_view, 18> DESKTOP_RPC_ERROR_CODES = {{"helper_unavailable", "service_not_installed", "service_installed_not_running", "service_start_failed", "oneshot_not_supported", "oneshot_elevation_denied", "helper_rpc_failed", "auth_failed", "tls_verify_failed", "wintun_missing", "utun_permission_denied", "unsupported_dtls", "permission_denied", "network_unreachable", "user_cancelled", "invalid_request", "connection_failed", "vpn_start_failed"}};
@@ -102,6 +106,18 @@ constexpr bool contains(const std::array<std::string_view, N>& values, std::stri
 
 constexpr bool is_desktop_rpc_action(std::string_view action) {
     return contains(DESKTOP_RPC_ACTIONS, action);
+}
+
+constexpr bool is_core_rpc_action(std::string_view action) {
+    return contains(CORE_RPC_ACTIONS, action);
+}
+
+constexpr bool is_destructive_core_rpc_action(std::string_view action) {
+    return contains(DESTRUCTIVE_CORE_RPC_ACTIONS, action);
+}
+
+constexpr bool is_standard_error_code(std::string_view code) {
+    return contains(STANDARD_ERROR_CODES, code);
 }
 
 constexpr bool is_config_action(std::string_view action) {
