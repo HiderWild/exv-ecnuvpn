@@ -6,11 +6,9 @@
 #include "app/ui_shell/ui_window.hpp"
 
 #include <filesystem>
-#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -23,33 +21,6 @@
 #endif
 
 namespace {
-
-class PlatformEntrypointWindow final : public ecnuvpn::ui_shell::UiWindow {
-public:
-  using Runner = std::function<int(const ecnuvpn::ui_shell::UiWindowConfig &)>;
-
-  explicit PlatformEntrypointWindow(Runner runner) : runner_(std::move(runner)) {}
-
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
-    handler_ = std::move(handler);
-  }
-
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &config) override {
-    if (!runner_) {
-      return 70;
-    }
-    return runner_(config);
-  }
-
-  void emit_event(const std::string &event_json) override {
-    last_event_json_ = event_json;
-  }
-
-private:
-  Runner runner_;
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
-  std::string last_event_json_;
-};
 
 std::filesystem::path current_executable_path() {
 #if defined(_WIN32)
@@ -85,15 +56,15 @@ std::filesystem::path current_executable_path() {
 
 #if defined(_WIN32)
 namespace ecnuvpn::platform::win32::ui_shell {
-int run_webview2_host(const ecnuvpn::ui_shell::UiWindowConfig &config);
+std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window();
 }
 #elif defined(__APPLE__)
 namespace ecnuvpn::platform::darwin::ui_shell {
-int run_wk_webview_host(const ecnuvpn::ui_shell::UiWindowConfig &config);
+std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window();
 }
 #elif defined(__linux__)
 namespace ecnuvpn::platform::linux::ui_shell {
-int run_webkitgtk_host(const ecnuvpn::ui_shell::UiWindowConfig &config);
+std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window();
 }
 #endif
 
@@ -119,25 +90,17 @@ int main(int argc, char **argv) {
   ecnuvpn::ui_shell::CoreRpcClient client(*transport);
 
 #if defined(_WIN32)
-  PlatformEntrypointWindow window(
-      [](const ecnuvpn::ui_shell::UiWindowConfig &runtime_config) {
-        return ecnuvpn::platform::win32::ui_shell::run_webview2_host(
-            runtime_config);
-      });
+  auto window = ecnuvpn::platform::win32::ui_shell::create_webview2_window();
 #elif defined(__APPLE__)
-  PlatformEntrypointWindow window(
-      [](const ecnuvpn::ui_shell::UiWindowConfig &runtime_config) {
-        return ecnuvpn::platform::darwin::ui_shell::run_wk_webview_host(
-            runtime_config);
-      });
+  auto window = ecnuvpn::platform::darwin::ui_shell::create_wk_webview_window();
 #elif defined(__linux__)
-  PlatformEntrypointWindow window(
-      [](const ecnuvpn::ui_shell::UiWindowConfig &runtime_config) {
-        return ecnuvpn::platform::linux::ui_shell::run_webkitgtk_host(
-            runtime_config);
-      });
+  auto window = ecnuvpn::platform::linux::ui_shell::create_webkitgtk_window();
 #else
   return 70;
 #endif
-  return ecnuvpn::ui_shell::run_ui_shell_window(window, config, client);
+  if (!window) {
+    std::cerr << "exv-ui: failed to create platform WebView window\n";
+    return 70;
+  }
+  return ecnuvpn::ui_shell::run_ui_shell_window(*window, config, client);
 }

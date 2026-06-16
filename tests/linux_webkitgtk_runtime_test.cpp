@@ -1,12 +1,12 @@
 #include "app/ui_shell/ui_window.hpp"
 
+#include <memory>
+
 namespace ecnuvpn::platform::linux::ui_shell {
-int run_webkitgtk_host(const ecnuvpn::ui_shell::UiWindowConfig &config);
+std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window();
 }
 
 int main() {
-  ecnuvpn::ui_shell::UiWindowConfig config;
-  const int result =
-      ecnuvpn::platform::linux::ui_shell::run_webkitgtk_host(config);
-  return result == 70 ? 0 : 1;
+  auto window = ecnuvpn::platform::linux::ui_shell::create_webkitgtk_window();
+  return window ? 0 : 1;
 }

@@ -5,6 +5,7 @@
 #include "app/ui_shell/ui_window.hpp"
 
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace ecnuvpn::platform::win32::ui_shell {
@@ -18,6 +19,6 @@ void post_webview2_host_response(
     const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core,
     const std::function<void(const std::string &)> &post_response);
 
-int run_webview2_host(const ecnuvpn::ui_shell::UiWindowConfig &config);
+std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window();
 
 } // namespace ecnuvpn::platform::win32::ui_shell

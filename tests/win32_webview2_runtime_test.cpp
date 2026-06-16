@@ -50,6 +50,9 @@ int main() {
   assert(!unnecessary.should_download);
   assert(unnecessary.reason == "installed");
 
+  auto window = create_webview2_window();
+  assert(window != nullptr);
+
   bool bridge_invoked = false;
   const std::string bridge_response = dispatch_webview2_host_message(
       R"({"id":9,"action":"status.get","payload":{}})",
