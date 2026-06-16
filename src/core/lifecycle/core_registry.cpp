@@ -6,6 +6,7 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
@@ -18,6 +19,12 @@
 #endif
 
 namespace exv::core::lifecycle {
+namespace testing {
+using CoreRegistryCompareDeleteHook =
+    std::function<void(const std::string& final_path,
+                       const std::string& tombstone_path)>;
+} // namespace testing
+
 namespace {
 
 int current_process_id() {
@@ -33,11 +40,32 @@ std::uint64_t next_temp_suffix() {
     return next_suffix.fetch_add(1, std::memory_order_relaxed);
 }
 
+std::mutex& registry_file_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
 std::filesystem::path unique_temp_path(const std::filesystem::path& final_path) {
     return final_path.parent_path() /
         (final_path.filename().string() + ".tmp." +
          std::to_string(current_process_id()) + "." +
          std::to_string(next_temp_suffix()));
+}
+
+std::filesystem::path
+unique_tombstone_path(const std::filesystem::path& final_path) {
+    const auto tick = std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count();
+    return final_path.parent_path() /
+        (final_path.filename().string() + ".delete." +
+         std::to_string(current_process_id()) + "." +
+         std::to_string(tick) + "." + std::to_string(next_temp_suffix()));
+}
+
+testing::CoreRegistryCompareDeleteHook& compare_delete_quarantine_hook() {
+    static testing::CoreRegistryCompareDeleteHook hook;
+    return hook;
 }
 
 bool replace_file_atomically(const std::filesystem::path& source_path,
@@ -120,8 +148,7 @@ std::optional<CoreRegistrySnapshot> snapshot_from_json(const nlohmann::json& jso
 
 bool write_json_atomic(const std::filesystem::path& final_path,
                        const nlohmann::json& json) {
-    static std::mutex write_mutex;
-    std::lock_guard<std::mutex> lock(write_mutex);
+    std::lock_guard<std::mutex> lock(registry_file_mutex());
 
     std::error_code ec;
     const auto parent_path = final_path.parent_path();
@@ -153,6 +180,30 @@ bool write_json_atomic(const std::filesystem::path& final_path,
 
     std::filesystem::remove(tmp_path, ec);
     return false;
+}
+
+bool snapshot_matches_delete_expected(const CoreRegistrySnapshot& snapshot,
+                                      const CoreRegistryDeleteMatch& expected) {
+    return snapshot.core_instance_id == expected.core_instance_id &&
+           snapshot.pid == expected.pid &&
+           snapshot.helper_core_lease_id == expected.helper_core_lease_id &&
+           snapshot.ipc_protocol_version == expected.ipc_protocol_version;
+}
+
+void preserve_quarantined_registry(
+    const std::filesystem::path& final_path,
+    const std::filesystem::path& tombstone_path) {
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    const bool final_exists = fs::exists(final_path, ec);
+    if (!ec && !final_exists) {
+        fs::rename(tombstone_path, final_path, ec);
+        return;
+    }
+    if (!ec && final_exists) {
+        fs::remove(tombstone_path, ec);
+    }
 }
 
 } // namespace
@@ -221,24 +272,56 @@ bool compare_and_delete_core_registry(const CoreRegistryDeleteMatch& expected) {
 
 bool compare_and_delete_core_registry(const std::string& registry_path,
                                       const CoreRegistryDeleteMatch& expected) {
-    const auto loaded = read_core_registry(registry_path);
+    namespace fs = std::filesystem;
+
+    const fs::path final_path(registry_path);
+    std::lock_guard<std::mutex> lock(registry_file_mutex());
+
+    std::error_code ec;
+    if (!fs::exists(final_path, ec) || ec) {
+        return false;
+    }
+    if (!fs::is_regular_file(final_path, ec) || ec) {
+        return false;
+    }
+
+    const fs::path tombstone_path = unique_tombstone_path(final_path);
+    fs::rename(final_path, tombstone_path, ec);
+    if (ec) {
+        return false;
+    }
+
+    auto& hook = compare_delete_quarantine_hook();
+    if (hook) {
+        hook(final_path.string(), tombstone_path.string());
+    }
+
+    const auto loaded = read_core_registry(tombstone_path.string());
     if (loaded.state != CoreRegistryReadState::present ||
         !loaded.snapshot.has_value()) {
+        preserve_quarantined_registry(final_path, tombstone_path);
         return false;
     }
 
     const auto& snapshot = *loaded.snapshot;
-    if (snapshot.core_instance_id != expected.core_instance_id ||
-        snapshot.pid != expected.pid ||
-        snapshot.helper_core_lease_id != expected.helper_core_lease_id ||
-        snapshot.ipc_protocol_version != expected.ipc_protocol_version) {
+    if (!snapshot_matches_delete_expected(snapshot, expected)) {
+        preserve_quarantined_registry(final_path, tombstone_path);
         return false;
     }
 
-    std::error_code ec;
-    const bool removed = std::filesystem::remove(registry_path, ec);
+    const bool removed = fs::remove(tombstone_path, ec);
     return removed && !ec;
 }
+
+namespace testing {
+
+void set_compare_delete_quarantine_hook(
+    CoreRegistryCompareDeleteHook hook) {
+    std::lock_guard<std::mutex> lock(registry_file_mutex());
+    compare_delete_quarantine_hook() = std::move(hook);
+}
+
+} // namespace testing
 
 void refresh_core_registry_heartbeat(CoreRegistrySnapshot& snapshot) {
     snapshot.last_heartbeat_at = iso8601_now();

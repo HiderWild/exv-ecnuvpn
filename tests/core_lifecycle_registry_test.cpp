@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <atomic>
 #include <optional>
@@ -21,6 +22,15 @@
 #ifndef ECNUVPN_SOURCE_DIR
 #define ECNUVPN_SOURCE_DIR "."
 #endif
+
+namespace exv::core::lifecycle::testing {
+using CoreRegistryCompareDeleteHook =
+    std::function<void(const std::string& final_path,
+                       const std::string& tombstone_path)>;
+
+void set_compare_delete_quarantine_hook(
+    CoreRegistryCompareDeleteHook hook);
+} // namespace exv::core::lifecycle::testing
 
 namespace {
 
@@ -55,6 +65,40 @@ std::string read_file(const std::filesystem::path& path) {
     std::ostringstream contents;
     contents << input.rdbuf();
     return contents.str();
+}
+
+bool write_snapshot_directly(
+    const exv::core::lifecycle::CoreRegistrySnapshot& snapshot,
+    const std::filesystem::path& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return false;
+    }
+
+    nlohmann::json payload{
+        {"core_instance_id", snapshot.core_instance_id},
+        {"pid", snapshot.pid},
+        {"core_path", snapshot.core_path},
+        {"ipc_path", snapshot.ipc_path},
+        {"ipc_protocol_version", snapshot.ipc_protocol_version},
+        {"app_version", snapshot.app_version},
+        {"contract_version", snapshot.contract_version},
+        {"started_at", snapshot.started_at},
+        {"last_heartbeat_at", snapshot.last_heartbeat_at},
+        {"last_known_tunnel_phase", snapshot.last_known_tunnel_phase},
+        {"last_known_connected", snapshot.last_known_connected},
+        {"last_known_network_ready", snapshot.last_known_network_ready},
+        {"helper_core_lease_id", snapshot.helper_core_lease_id},
+    };
+
+    std::ofstream out(path, std::ios::out | std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+    out << payload.dump(2);
+    return out.good();
 }
 
 exv::core::lifecycle::CoreRegistrySnapshot make_snapshot(
@@ -290,6 +334,81 @@ int main() {
     }
 
     {
+        const fs::path root =
+            make_temp_dir("ecnuvpn-core-registry-delete-quarantine");
+        const std::string state_dir = root.string();
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(state_dir);
+        const auto old_snapshot = make_snapshot(state_dir);
+        auto replacement_snapshot = make_snapshot(state_dir);
+        replacement_snapshot.core_instance_id = "core-instance-replacement";
+        replacement_snapshot.pid = 9001;
+        replacement_snapshot.helper_core_lease_id = "core-lease-replacement";
+
+        ok = expect(exv::core::lifecycle::write_core_registry(old_snapshot,
+                                                              registry_path),
+                    "quarantine delete test should write old registry") && ok;
+
+        bool hook_called = false;
+        bool hook_ok = true;
+        exv::core::lifecycle::testing::set_compare_delete_quarantine_hook(
+            [&](const std::string& final_path,
+                const std::string& tombstone_path) {
+                hook_called = true;
+                hook_ok =
+                    expect(!fs::exists(final_path),
+                           "quarantine hook should observe final path moved away") &&
+                    hook_ok;
+                hook_ok =
+                    expect(fs::exists(tombstone_path),
+                           "quarantine hook should observe tombstone file") &&
+                    hook_ok;
+                hook_ok =
+                    expect(write_snapshot_directly(replacement_snapshot,
+                                                   final_path),
+                           "quarantine hook should recreate final registry") &&
+                    hook_ok;
+            });
+
+        const bool deleted =
+            exv::core::lifecycle::compare_and_delete_core_registry(
+                registry_path,
+                exv::core::lifecycle::core_registry_delete_match(old_snapshot));
+        exv::core::lifecycle::testing::set_compare_delete_quarantine_hook(
+            nullptr);
+
+        ok = expect(hook_called,
+                    "compare/delete should quarantine before comparing") &&
+             ok;
+        ok = hook_ok && ok;
+        ok = expect(deleted,
+                    "compare/delete should delete the quarantined matching old registry") &&
+             ok;
+
+        const auto loaded =
+            exv::core::lifecycle::read_core_registry(registry_path);
+        ok = expect(loaded.state == CoreRegistryReadState::present,
+                    "replacement registry should remain after compare/delete") &&
+             ok;
+        ok = expect(loaded.snapshot.has_value(),
+                    "replacement registry should still be readable") &&
+             ok;
+        if (loaded.snapshot.has_value()) {
+            ok = expect(loaded.snapshot->core_instance_id ==
+                            replacement_snapshot.core_instance_id,
+                        "compare/delete must not delete replacement core_instance_id") &&
+                 ok;
+            ok = expect(loaded.snapshot->pid == replacement_snapshot.pid,
+                        "compare/delete must not delete replacement pid") &&
+                 ok;
+            ok = expect(loaded.snapshot->helper_core_lease_id ==
+                            replacement_snapshot.helper_core_lease_id,
+                        "compare/delete must not delete replacement lease") &&
+                 ok;
+        }
+    }
+
+    {
         const auto source_path = fs::path(ECNUVPN_SOURCE_DIR) / "src" / "core" /
             "lifecycle" / "core_registry.cpp";
         const auto source = read_file(source_path);
@@ -300,6 +419,10 @@ int main() {
                     "core registry writes must not fall back to copy_file") && ok;
         ok = expect(source.find("remove(final_path") == std::string::npos,
                     "core registry writes must not delete the final path before replace") &&
+             ok;
+        ok = expect(source.find("std::filesystem::remove(registry_path") ==
+                        std::string::npos,
+                    "core registry compare/delete must not remove the final path directly") &&
              ok;
     }
 

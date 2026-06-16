@@ -788,7 +788,7 @@ CleanupResponse HelperHandler::cleanup_session_impl(const SessionId& session_id,
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        cleanup_.remove_session(session_id);
+        cleanup_.complete_session_cleanup(session_id);
         leases_.remove_session(session_id);
     }
 

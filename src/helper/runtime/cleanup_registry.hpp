@@ -37,8 +37,12 @@ public:
     // Get all resources for a session
     std::vector<ManagedResource> get_resources(const SessionId& id) const;
 
-    // Remove session record (after successful cleanup)
+    // Remove only the session record.
     void remove_session(const SessionId& id);
+
+    // Complete successful cleanup for a session and then run its bound core
+    // registry compare/delete action.
+    void complete_session_cleanup(const SessionId& id);
 
     // Bind a versioned core registry compare-and-delete operation to the
     // session's success path.

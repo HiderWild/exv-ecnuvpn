@@ -332,7 +332,46 @@ int main() {
                     "should have 1 record after removing one") && ok;
     }
 
-    // --- matching core registry binding is compare-and-deleted on session removal ---
+    // --- remove_session only removes the record; it must not cleanup core registry ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-remove-only-" +
+             std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        CleanupRegistry registry;
+        CleanupRecord rec;
+        rec.session_id.value = "ses-core-remove-only";
+        registry.register_session(rec);
+
+        const auto snapshot =
+            make_core_registry_snapshot(root, 4141, "core-lease-remove-only");
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(root.string());
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot,
+                                                              registry_path),
+                    "remove-only helper test should write core registry") && ok;
+
+        CoreRegistryCleanupBinding binding;
+        binding.registry_path = registry_path;
+        binding.delete_match =
+            exv::core::lifecycle::core_registry_delete_match(snapshot);
+        registry.bind_core_registry_cleanup(rec.session_id, binding);
+
+        registry.remove_session(rec.session_id);
+        ok = expect(registry.all_records().empty(),
+                    "remove_session should remove the cleanup record") && ok;
+        ok = expect(fs::exists(registry_path),
+                    "remove_session must not delete the versioned core registry") &&
+             ok;
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- matching core registry binding is compare-and-deleted after successful cleanup ---
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
@@ -372,9 +411,9 @@ int main() {
             exv::core::lifecycle::core_registry_delete_match(snapshot);
         registry.bind_core_registry_cleanup(rec.session_id, binding);
 
-        registry.remove_session(rec.session_id);
+        registry.complete_session_cleanup(rec.session_id);
         ok = expect(!fs::exists(registry_path),
-                    "matching helper cleanup should delete versioned core registry") && ok;
+                    "successful helper cleanup should delete versioned core registry") && ok;
 
         fs::remove_all(root, ec);
     }
@@ -501,6 +540,76 @@ int main() {
              ok;
         ok = expect(!fs::exists(registry_path),
                     "successful production helper cleanup should delete the versioned core registry") &&
+             ok;
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- finalize handoff removes records without deleting the core registry ---
+    {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() /
+            ("ecnuvpn-helper-core-registry-finalize-" +
+             std::to_string(current_process_id()));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+
+        exv::helper::HelperHandler handler;
+        exv::helper::HelperStartupContext startup;
+        startup.launch_mode = "oneshot";
+        handler.set_startup_context(startup);
+
+        exv::helper::AcquireCoreLeaseRequest acquire_req;
+        acquire_req.core_pid = 7171;
+        acquire_req.purpose = "handoff";
+        auto acquire = dispatch_json(
+            handler, exv::helper::HelperOp::AcquireCoreLease, json(acquire_req));
+        ok = expect(acquire.success,
+                    "AcquireCoreLease should succeed before finalize handoff test") &&
+             ok;
+        const auto acquire_resp =
+            exv::helper::acquire_core_lease_response_from_json(
+                json::parse(acquire.payload_json));
+
+        exv::helper::StartSessionRequest start_req;
+        start_req.profile_id.value = "profile-helper-finalize";
+        auto start = dispatch_json(handler, exv::helper::HelperOp::StartSession,
+                                   json(start_req));
+        ok = expect(start.success,
+                    "StartSession should succeed before finalize handoff test") &&
+             ok;
+        const auto start_resp = exv::helper::start_session_response_from_json(
+            json::parse(start.payload_json));
+
+        const auto registry_path =
+            exv::core::lifecycle::core_registry_path(root.string());
+        const auto snapshot =
+            make_core_registry_snapshot(root, acquire_req.core_pid,
+                                        acquire_resp.lease_id);
+        ok = expect(exv::core::lifecycle::write_core_registry(snapshot,
+                                                              registry_path),
+                    "finalize handoff test should write versioned registry") &&
+             ok;
+
+        exv::helper::HeartbeatRequest heartbeat_req;
+        heartbeat_req.session_id = start_resp.session_id;
+        heartbeat_req.core_phase = "handoff";
+        auto heartbeat = dispatch_json(handler, exv::helper::HelperOp::Heartbeat,
+                                       json(heartbeat_req));
+        ok = expect(heartbeat.success,
+                    "Heartbeat should bind registry cleanup before finalize") && ok;
+
+        exv::helper::FinalizeHandoffRequest finalize_req;
+        finalize_req.exit = true;
+        auto finalize = dispatch_json(
+            handler, exv::helper::HelperOp::FinalizeHandoff, json(finalize_req));
+        ok = expect(finalize.success,
+                    "FinalizeHandoff should succeed in oneshot mode") && ok;
+        ok = expect(fs::exists(registry_path),
+                    "FinalizeHandoff must preserve the versioned core registry") &&
              ok;
 
         fs::remove_all(root, ec);

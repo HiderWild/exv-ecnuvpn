@@ -180,6 +180,14 @@ void CleanupRegistry::remove_session(const SessionId& id) {
     if (it == records_.end()) {
         return;
     }
+    records_.erase(it);
+}
+
+void CleanupRegistry::complete_session_cleanup(const SessionId& id) {
+    auto it = records_.find(id);
+    if (it == records_.end()) {
+        return;
+    }
     if (it->second.core_registry_cleanup.has_value()) {
         const auto& binding = *it->second.core_registry_cleanup;
         (void)exv::core::lifecycle::compare_and_delete_core_registry(
