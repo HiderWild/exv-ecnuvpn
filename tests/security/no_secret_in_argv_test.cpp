@@ -14,6 +14,7 @@
 #include "helper/common/helper_session_lease.hpp"
 #include "core/tunnel_controller/tunnel_intent.hpp"
 #include "core/tunnel_controller/tunnel_state.hpp"
+#include "cli/core_request_formatter.hpp"
 
 #include <iostream>
 #include <string>
@@ -301,6 +302,20 @@ int main() {
         serialized_check += error.native_api;
         ok = expect(!contains_secret_keyword(serialized_check),
                     "ErrorInfo fields must not contain secrets") && ok;
+    }
+
+    // === CLI IPC requests do not place auth secrets in argv-style command strings ===
+    {
+        std::string request = exv::cli::format_core_request(
+            "config.saveAuth",
+            nlohmann::json{{"server", "https://vpn.example.edu"},
+                           {"username", "alice"}});
+        ok = expect(request.find("password") == std::string::npos,
+                    "CLI config.saveAuth request must not contain password fields") && ok;
+        ok = expect(request.find("cookie") == std::string::npos,
+                    "CLI config.saveAuth request must not contain cookie fields") && ok;
+        ok = expect(request.find("token") == std::string::npos,
+                    "CLI config.saveAuth request must not contain token fields") && ok;
     }
 
     if (ok) {

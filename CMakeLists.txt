@@ -178,8 +178,16 @@ set(EXV_HELPER_RUNTIME_SOURCES
     src/helper/helper_handler.cpp
 )
 
-set(EXV_CLI_SOURCES
+set(EXV_CLI_TRANSPORT_SOURCES
     src/cli/pipe_client.cpp
+)
+
+set(EXV_CLI_FRONTEND_SOURCES
+    src/cli/cli_main.cpp
+    src/cli/cli_commands.cpp
+    src/cli/core_request_formatter.cpp
+    ${EXV_CLI_TRANSPORT_SOURCES}
+    src/platform/common/core_resolver_platform_deps.cpp
 )
 
 set(EXV_PLATFORM_SOURCES)
@@ -189,8 +197,6 @@ set(EXV_PLATFORM_DEFINITIONS)
 # Source files
 set(SOURCES
     src/app/main.cpp
-    src/platform/common/core_resolver_platform_deps.cpp
-    ${EXV_CLI_SOURCES}
 )
 find_package(Threads REQUIRED)
 
@@ -514,6 +520,12 @@ target_link_libraries(exv-core PUBLIC
 
 add_executable(exv ${SOURCES})
 target_link_libraries(exv PRIVATE exv-helper-runtime)
+
+add_executable(exv-cli ${EXV_CLI_FRONTEND_SOURCES})
+target_link_libraries(exv-cli PRIVATE exv-core)
+target_compile_definitions(exv-cli PRIVATE
+    ECNUVPN_VERSION="${PROJECT_VERSION}"
+)
 
 add_executable(exv-helper
     src/helper/helper_main.cpp
@@ -897,7 +909,7 @@ add_executable(ui_shell_core_rpc_client_test
     src/app/ui_shell/core_rpc_client.cpp
     src/app/ui_shell/core_process_manager.cpp
     src/platform/common/core_resolver_platform_deps.cpp
-    ${EXV_CLI_SOURCES}
+    ${EXV_CLI_TRANSPORT_SOURCES}
 )
 
 target_include_directories(ui_shell_core_rpc_client_test PRIVATE
@@ -915,7 +927,7 @@ add_executable(ui_shell_runtime_test
     src/app/ui_shell/renderer_assets.cpp
     src/app/ui_shell/ui_shell_runtime.cpp
     src/app/ui_shell/ui_window.cpp
-    ${EXV_CLI_SOURCES}
+    ${EXV_CLI_TRANSPORT_SOURCES}
     src/platform/common/core_resolver_platform_deps.cpp
 )
 
@@ -1032,7 +1044,7 @@ set(EXV_UI_COMMON_SOURCES
     src/app/ui_shell/core_rpc_client.cpp
     src/app/ui_shell/core_process_manager.cpp
     src/app/ui_shell/ui_shell_runtime.cpp
-    ${EXV_CLI_SOURCES}
+    ${EXV_CLI_TRANSPORT_SOURCES}
     src/platform/common/core_resolver_platform_deps.cpp
 )
 
@@ -2058,6 +2070,19 @@ target_compile_definitions(contract_manifest_test PRIVATE
 
 add_test(NAME contract_manifest_test COMMAND contract_manifest_test)
 
+add_executable(cli_commands_test
+    tests/cli_commands_test.cpp
+    src/cli/cli_commands.cpp
+    src/cli/core_request_formatter.cpp
+)
+
+target_include_directories(cli_commands_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME cli_commands_test COMMAND cli_commands_test)
+
 add_executable(core_architecture_contract_test
     tests/core_architecture_contract_test.cpp
 )
@@ -2123,6 +2148,7 @@ add_test(NAME helper_timeout_cleanup_test COMMAND helper_timeout_cleanup_test)
 
 add_executable(no_secret_in_argv_test
     tests/security/no_secret_in_argv_test.cpp
+    src/cli/core_request_formatter.cpp
 )
 
 target_include_directories(no_secret_in_argv_test PRIVATE
@@ -2411,6 +2437,7 @@ set(_release_blocking_tests
     error_contract_test
     contract_manifest_test
     core_architecture_contract_test
+    cli_commands_test
     contract_generation_check
     helper_messages_connector_test
     core_process_test
@@ -2539,6 +2566,7 @@ set_property(TEST
     error_contract_test
     contract_manifest_test
     core_architecture_contract_test
+    cli_commands_test
     contract_generation_check
     auth_failure_test
     helper_lost_test
@@ -2622,6 +2650,7 @@ set_property(TEST
     error_contract_test
     contract_manifest_test
     core_architecture_contract_test
+    cli_commands_test
     contract_generation_check
     tunnel_module_smoke_test
     tunnel_public_module_smoke_test
@@ -2635,7 +2664,7 @@ set_property(TEST
 
 # Install target
 if(WIN32)
-  install(TARGETS exv exv-helper DESTINATION "C:/Program Files/ECNU-VPN")
+  install(TARGETS exv exv-cli exv-helper DESTINATION "C:/Program Files/ECNU-VPN")
 else()
-  install(TARGETS exv exv-helper DESTINATION /usr/local/bin)
+  install(TARGETS exv exv-cli exv-helper DESTINATION /usr/local/bin)
 endif()

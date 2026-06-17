@@ -91,6 +91,7 @@ int main() {
   const auto config_original_cpp =
       root / "src" / "core" / "config" / "config_original.cpp";
   const auto vpn_engine_dir = root / "src" / "vpn_engine";
+  const auto cli_dir = root / "src" / "cli";
   bool ok = true;
 
   ok &= expect_exists(app_api_cpp);
@@ -197,6 +198,25 @@ int main() {
   ok &= expect_tree_does_not_contain(
       vpn_engine_dir, "ecnuvpn::Config",
       "vpn_engine must not depend on the app Config model");
+
+  ok &= expect_tree_does_not_contain(
+      cli_dir, "core/config/config_api",
+      "src/cli must not include direct config API headers");
+  ok &= expect_tree_does_not_contain(
+      cli_dir, "core/config/config_manager",
+      "src/cli must not include direct config manager headers");
+  ok &= expect_tree_does_not_contain(
+      cli_dir, "core/vpn/vpn.hpp",
+      "src/cli must not include direct VPN headers");
+  ok &= expect_tree_does_not_contain(
+      cli_dir, "core/network/virtual_network_status",
+      "src/cli must not include direct network status headers");
+  ok &= expect_tree_does_not_contain(
+      cli_dir, "helper/helper.hpp",
+      "src/cli must not include direct helper headers");
+  ok &= expect_tree_does_not_contain(
+      cli_dir, "app_api::handle_action",
+      "src/cli must not call app_api::handle_action directly");
 
   if (!ok) {
     std::cerr << "core_architecture_contract_test: FAILED\n";
