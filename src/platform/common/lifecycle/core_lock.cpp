@@ -34,30 +34,41 @@ std::string mutex_name_for_lock_path(const std::string& lock_path) {
 
 } // namespace
 
+struct CoreInstanceLock::Impl {
 #ifdef _WIN32
-CoreInstanceLock::CoreInstanceLock(std::string lock_path, void* handle)
-    : lock_path_(std::move(lock_path)), handle_(handle) {}
+    HANDLE handle = nullptr;
+    std::string lock_path;
+
+    ~Impl() {
+        if (handle != nullptr) {
+            ReleaseMutex(handle);
+            CloseHandle(handle);
+            handle = nullptr;
+        }
+    }
 #else
-CoreInstanceLock::CoreInstanceLock(std::string lock_path, int fd)
-    : lock_path_(std::move(lock_path)), fd_(fd) {}
+    int fd = -1;
+    std::string lock_path;
+
+    ~Impl() {
+        if (fd >= 0) {
+            flock(fd, LOCK_UN);
+            close(fd);
+            fd = -1;
+            std::error_code ec;
+            std::filesystem::remove(lock_path, ec);
+        }
+    }
 #endif
+};
+
+CoreInstanceLock::CoreInstanceLock(std::string lock_path, std::unique_ptr<Impl> impl)
+    : lock_path_(std::move(lock_path)), impl_(std::move(impl)) {}
 
 CoreInstanceLock::~CoreInstanceLock() { release(); }
 
 CoreInstanceLock::CoreInstanceLock(CoreInstanceLock&& other) noexcept
-    : lock_path_(std::move(other.lock_path_))
-#ifdef _WIN32
-    , handle_(other.handle_)
-#else
-    , fd_(other.fd_)
-#endif
-{
-#ifdef _WIN32
-    other.handle_ = nullptr;
-#else
-    other.fd_ = -1;
-#endif
-}
+    : lock_path_(std::move(other.lock_path_)), impl_(std::move(other.impl_)) {}
 
 CoreInstanceLock& CoreInstanceLock::operator=(CoreInstanceLock&& other) noexcept {
     if (this == &other) {
@@ -66,13 +77,7 @@ CoreInstanceLock& CoreInstanceLock::operator=(CoreInstanceLock&& other) noexcept
 
     release();
     lock_path_ = std::move(other.lock_path_);
-#ifdef _WIN32
-    handle_ = other.handle_;
-    other.handle_ = nullptr;
-#else
-    fd_ = other.fd_;
-    other.fd_ = -1;
-#endif
+    impl_ = std::move(other.impl_);
     return *this;
 }
 
@@ -94,7 +99,10 @@ std::optional<CoreInstanceLock> CoreInstanceLock::try_acquire(
         CloseHandle(handle);
         return std::nullopt;
     }
-    return CoreInstanceLock(lock_path, handle);
+    auto impl = std::make_unique<Impl>();
+    impl->handle = handle;
+    impl->lock_path = lock_path;
+    return CoreInstanceLock(lock_path, std::move(impl));
 #else
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(lock_path).parent_path(), ec);
@@ -106,16 +114,15 @@ std::optional<CoreInstanceLock> CoreInstanceLock::try_acquire(
         close(fd);
         return std::nullopt;
     }
-    return CoreInstanceLock(lock_path, fd);
+    auto impl = std::make_unique<Impl>();
+    impl->fd = fd;
+    impl->lock_path = lock_path;
+    return CoreInstanceLock(lock_path, std::move(impl));
 #endif
 }
 
 bool CoreInstanceLock::owns_lock() const noexcept {
-#ifdef _WIN32
-    return handle_ != nullptr;
-#else
-    return fd_ >= 0;
-#endif
+    return impl_ != nullptr;
 }
 
 const std::string& CoreInstanceLock::lock_path() const noexcept {
@@ -123,21 +130,7 @@ const std::string& CoreInstanceLock::lock_path() const noexcept {
 }
 
 void CoreInstanceLock::release() noexcept {
-#ifdef _WIN32
-    if (handle_ != nullptr) {
-        ReleaseMutex(static_cast<HANDLE>(handle_));
-        CloseHandle(static_cast<HANDLE>(handle_));
-        handle_ = nullptr;
-    }
-#else
-    if (fd_ >= 0) {
-        flock(fd_, LOCK_UN);
-        close(fd_);
-        fd_ = -1;
-        std::error_code ec;
-        std::filesystem::remove(lock_path_, ec);
-    }
-#endif
+    impl_.reset();
 }
 
 } // namespace exv::core::lifecycle

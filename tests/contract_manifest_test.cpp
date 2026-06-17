@@ -291,6 +291,13 @@ bool platform_contains_forbidden_boundary_include(
     if (!is_regular_file(entry) || !is_source_file(entry.path())) {
       return false;
     }
+    // Platform implementations of core lifecycle headers (PIMPL split moved
+    // out of src/core/lifecycle/ to keep core platform-clean) legitimately
+    // include their own "core/lifecycle/*.hpp" interface headers.
+    const auto rel = relative_slash(entry.path(), source_dir);
+    if (rel.rfind("src/platform/common/lifecycle/", 0) == 0) {
+      return false;
+    }
     std::istringstream lines(read_text_file(entry.path()));
     std::string line;
     std::size_t line_number = 0;

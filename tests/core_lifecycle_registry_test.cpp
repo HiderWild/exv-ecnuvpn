@@ -434,8 +434,8 @@ int main() {
     }
 
     {
-        const auto source_path = fs::path(ECNUVPN_SOURCE_DIR) / "src" / "core" /
-            "lifecycle" / "core_registry.cpp";
+        const auto source_path = fs::path(ECNUVPN_SOURCE_DIR) / "src" / "platform" /
+            "common" / "lifecycle" / "core_registry.cpp";
         const auto source = read_file(source_path);
         ok = expect(!source.empty(),
                     "core_registry.cpp source should be readable for contract checks") &&

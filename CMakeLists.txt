@@ -79,10 +79,10 @@ set(EXV_CORE_SOURCES
     src/core/config/config_key.cpp
     src/core/config/config_wizard_common.cpp
     src/core/core_process.cpp
-    src/core/lifecycle/core_identity.cpp
-    src/core/lifecycle/core_paths.cpp
-    src/core/lifecycle/core_lock.cpp
-    src/core/lifecycle/core_registry.cpp
+    src/platform/common/lifecycle/core_identity.cpp
+    src/platform/common/lifecycle/core_paths.cpp
+    src/platform/common/lifecycle/core_lock.cpp
+    src/platform/common/lifecycle/core_registry.cpp
     src/platform/common/core_resolver.cpp
     src/core/pipe_ipc.cpp
     src/core/tunnel_controller/engine_event_bridge.cpp

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -23,20 +24,14 @@ public:
     const std::string& lock_path() const noexcept;
 
 private:
-#ifdef _WIN32
-    explicit CoreInstanceLock(std::string lock_path, void* handle);
-#else
-    explicit CoreInstanceLock(std::string lock_path, int fd);
-#endif
+    struct Impl;
+
+    explicit CoreInstanceLock(std::string lock_path, std::unique_ptr<Impl> impl);
 
     void release() noexcept;
 
     std::string lock_path_;
-#ifdef _WIN32
-    void* handle_ = nullptr;
-#else
-    int fd_ = -1;
-#endif
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace exv::core::lifecycle
