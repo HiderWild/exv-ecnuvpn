@@ -16,6 +16,7 @@
 #if defined(EXV_BUILD_UI_SHELL)
 #include <WebView2.h>
 #include <objbase.h>
+#include <shellapi.h>
 #endif
 
 namespace ecnuvpn::platform::win32::ui_shell {
@@ -27,6 +28,10 @@ constexpr wchar_t kPackagedRendererHostWide[] =
     L"appassets.ecnu-vpn.invalid";
 constexpr DWORD kFixedWindowStyle =
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr int kTrayCommandShow = 1001;
+constexpr int kTrayCommandQuit = 1002;
+constexpr UINT kTrayCallbackMessage = WM_APP + 0x42;
+constexpr UINT kTrayIconId = 1;
 
 std::wstring wide_from_utf8(const std::string &value) {
   if (value.empty()) {
@@ -215,6 +220,7 @@ public:
     if (webview_ && web_message_token_.value != 0) {
       webview_->remove_WebMessageReceived(web_message_token_);
     }
+    destroy_tray_icon();
   }
 
   void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
@@ -239,6 +245,8 @@ public:
       }
       return 70;
     }
+
+    create_tray_icon();
 
     running_ = true;
     ShowWindow(hwnd_, SW_SHOW);
@@ -274,6 +282,7 @@ public:
       DestroyWindow(hwnd_);
       hwnd_ = nullptr;
     }
+    destroy_tray_icon();
     if (coinit_ok) {
       CoUninitialize();
     }
@@ -379,6 +388,72 @@ public:
     RECT bounds{};
     GetClientRect(hwnd_, &bounds);
     controller_->put_Bounds(bounds);
+  }
+
+  bool create_tray_icon() {
+    if (!webview2_should_create_tray_on_start() || !hwnd_ || tray_icon_added_) {
+      return true;
+    }
+    tray_icon_.cbSize = sizeof(tray_icon_);
+    tray_icon_.hWnd = hwnd_;
+    tray_icon_.uID = kTrayIconId;
+    tray_icon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    tray_icon_.uCallbackMessage = kTrayCallbackMessage;
+    tray_icon_.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+    wcscpy_s(tray_icon_.szTip, L"ECNU VPN");
+    tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &tray_icon_) == TRUE;
+    return tray_icon_added_;
+  }
+
+  void destroy_tray_icon() {
+    if (!tray_icon_added_) {
+      return;
+    }
+    Shell_NotifyIconW(NIM_DELETE, &tray_icon_);
+    tray_icon_added_ = false;
+  }
+
+  void show_from_tray() {
+    if (!hwnd_) {
+      return;
+    }
+    ShowWindow(hwnd_, SW_SHOW);
+    SetForegroundWindow(hwnd_);
+  }
+
+  void quit_from_tray() {
+    force_quit_ = true;
+    running_ = false;
+    if (hwnd_) {
+      DestroyWindow(hwnd_);
+    }
+  }
+
+  void show_tray_menu() {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+      return;
+    }
+    for (const auto &item : webview2_tray_menu_model()) {
+      if (item.separator) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+      } else if (!item.label.empty()) {
+        AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(item.command_id),
+                    item.label.c_str());
+      }
+    }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    SetForegroundWindow(hwnd_);
+    const UINT command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, hwnd_,
+        nullptr);
+    DestroyMenu(menu);
+    if (command == kTrayCommandShow) {
+      show_from_tray();
+    } else if (command == kTrayCommandQuit) {
+      quit_from_tray();
+    }
   }
 
 private:
@@ -593,6 +668,13 @@ private:
       case WM_DESTROY:
         self->running_ = false;
         return 0;
+      case kTrayCallbackMessage:
+        if (lparam == WM_LBUTTONUP) {
+          self->show_from_tray();
+        } else if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
+          self->show_tray_menu();
+        }
+        return 0;
       default:
         break;
       }
@@ -611,6 +693,9 @@ private:
   ComPtr<ICoreWebView2Controller> controller_;
   ComPtr<ICoreWebView2> webview_;
   std::vector<std::string> pending_events_;
+  NOTIFYICONDATAW tray_icon_{};
+  bool tray_icon_added_ = false;
+  bool force_quit_ = false;
 };
 
 HRESULT EnvironmentCompletedHandler::QueryInterface(REFIID riid, void **object) {
@@ -699,6 +784,18 @@ private:
 
 ecnuvpn::ui_shell::WindowBounds webview2_default_window_bounds() noexcept {
   return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+}
+
+bool webview2_should_create_tray_on_start() {
+  return true;
+}
+
+std::vector<WebView2TrayMenuItem> webview2_tray_menu_model() {
+  return {
+      {L"显示 ECNU VPN", kTrayCommandShow, false},
+      {L"", 0, true},
+      {L"退出", kTrayCommandQuit, false},
+  };
 }
 
 std::wstring webview2_renderer_uri(

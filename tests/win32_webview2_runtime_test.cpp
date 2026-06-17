@@ -5,6 +5,7 @@
 #include <cassert>
 #include <functional>
 #include <string>
+#include <vector>
 
 int main() {
   using namespace ecnuvpn::platform::win32::ui_shell;
@@ -60,6 +61,15 @@ int main() {
 
   auto window = create_webview2_window();
   assert(window != nullptr);
+
+  if (!webview2_should_create_tray_on_start()) {
+    return 1;
+  }
+  const auto tray_menu = webview2_tray_menu_model();
+  if (tray_menu.size() != 3 || tray_menu[0].label != L"显示 ECNU VPN" ||
+      !tray_menu[1].separator || tray_menu[2].label != L"退出") {
+    return 1;
+  }
 
   const ecnuvpn::ui_shell::RendererAssets packaged_renderer{
       ecnuvpn::ui_shell::RendererAssetKind::PackagedFile,
