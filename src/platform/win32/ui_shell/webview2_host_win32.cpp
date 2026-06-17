@@ -25,6 +25,8 @@ namespace {
 constexpr char kPackagedRendererHost[] = "appassets.ecnu-vpn.invalid";
 constexpr wchar_t kPackagedRendererHostWide[] =
     L"appassets.ecnu-vpn.invalid";
+constexpr DWORD kFixedWindowStyle =
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
 std::wstring wide_from_utf8(const std::string &value) {
   if (value.empty()) {
@@ -429,6 +431,7 @@ private:
   }
 
   bool create_window() {
+    const auto bounds = webview2_default_window_bounds();
     instance_ = GetModuleHandleW(nullptr);
     WNDCLASSW window_class{};
     window_class.lpfnWndProc = &WebView2Window::window_proc;
@@ -438,8 +441,9 @@ private:
     RegisterClassW(&window_class);
 
     hwnd_ = CreateWindowExW(0, window_class.lpszClassName, L"ECNU VPN",
-                            WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                            1180, 760, nullptr, nullptr, instance_, this);
+                            kFixedWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT,
+                            bounds.width, bounds.height, nullptr, nullptr,
+                            instance_, this);
     return hwnd_ != nullptr;
   }
 
@@ -692,6 +696,10 @@ private:
 #endif
 
 } // namespace
+
+ecnuvpn::ui_shell::WindowBounds webview2_default_window_bounds() noexcept {
+  return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+}
 
 std::wstring webview2_renderer_uri(
     const ecnuvpn::ui_shell::RendererAssets &renderer) {

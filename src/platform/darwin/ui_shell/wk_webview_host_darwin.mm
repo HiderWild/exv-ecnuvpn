@@ -1,5 +1,6 @@
 #include "app/ui_shell/host_bridge.hpp"
 #include "app/ui_shell/ui_window.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #if defined(EXV_BUILD_UI_SHELL)
 #import <Cocoa/Cocoa.h>
@@ -192,6 +193,9 @@ NSString *bridge_script() {
 
 } // namespace
 
+[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+wkwebview_default_window_bounds() noexcept;
+
 #if defined(EXV_BUILD_UI_SHELL)
 class WkWebViewWindow final : public ecnuvpn::ui_shell::UiWindow {
 public:
@@ -279,13 +283,13 @@ public:
 
 private:
   bool create_window() {
-    const NSRect frame = NSMakeRect(0, 0, 1180, 760);
+    const auto bounds = wkwebview_default_window_bounds();
+    const NSRect frame = NSMakeRect(0, 0, bounds.width, bounds.height);
     window_ = [[NSWindow alloc]
         initWithContentRect:frame
                   styleMask:(NSWindowStyleMaskTitled |
                              NSWindowStyleMaskClosable |
-                             NSWindowStyleMaskMiniaturizable |
-                             NSWindowStyleMaskResizable)
+                             NSWindowStyleMaskMiniaturizable)
                     backing:NSBackingStoreBuffered
                       defer:NO];
     if (window_ == nil) {
@@ -293,6 +297,8 @@ private:
     }
     [window_ setTitle:@"ECNU VPN"];
     [window_ center];
+    [window_ setContentMinSize:NSMakeSize(bounds.width, bounds.height)];
+    [window_ setContentMaxSize:NSMakeSize(bounds.width, bounds.height)];
 
     window_delegate_ = [[EcnuVpnWindowDelegate alloc] initWithOwner:this];
     [window_ setDelegate:window_delegate_];
@@ -427,6 +433,10 @@ private:
   std::string last_event_json_;
 };
 #endif
+
+ecnuvpn::ui_shell::WindowBounds wkwebview_default_window_bounds() noexcept {
+  return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+}
 
 std::string dispatch_wkwebview_host_message(
     const std::string &message_json,

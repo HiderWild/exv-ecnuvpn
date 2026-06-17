@@ -1,5 +1,6 @@
 #include "platform/win32/ui_shell/webview2_runtime_win32.hpp"
 #include "platform/win32/ui_shell/webview2_host_win32.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #include <cassert>
 #include <functional>
@@ -7,6 +8,13 @@
 
 int main() {
   using namespace ecnuvpn::platform::win32::ui_shell;
+  const auto default_bounds = webview2_default_window_bounds();
+  if (default_bounds.width !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+      default_bounds.height !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+    return 1;
+  }
 
   assert(is_valid_webview2_version("120.0.2210.91"));
   assert(!is_valid_webview2_version(""));

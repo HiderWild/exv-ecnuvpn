@@ -1,5 +1,6 @@
 #include "app/ui_shell/host_bridge.hpp"
 #include "app/ui_shell/ui_window.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #include <memory>
 #include <string>
@@ -8,10 +9,20 @@ namespace ecnuvpn::platform::linux_ui_shell {
 std::string dispatch_webkitgtk_host_message(
     const std::string &message_json,
     const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core);
+ecnuvpn::ui_shell::WindowBounds webkitgtk_default_window_bounds() noexcept;
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window();
 }
 
 int main() {
+  const auto default_bounds =
+      ecnuvpn::platform::linux_ui_shell::webkitgtk_default_window_bounds();
+  if (default_bounds.width !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+      default_bounds.height !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+    return 7;
+  }
+
   bool invoked = false;
   bool request_valid = false;
   const std::string response =

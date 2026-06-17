@@ -3,6 +3,7 @@
 #include "app/ui_shell/core_rpc_client.hpp"
 #include "app/ui_shell/host_bridge.hpp"
 #include "app/ui_shell/ui_window.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #include <functional>
 #include <memory>
@@ -24,6 +25,9 @@ std::wstring webview2_renderer_uri(
 
 std::wstring webview2_packaged_renderer_folder(
     const ecnuvpn::ui_shell::RendererAssets &renderer);
+
+[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+webview2_default_window_bounds() noexcept;
 
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window();
 

@@ -1,5 +1,6 @@
 #include "app/ui_shell/ui_window.hpp"
 #include "app/ui_shell/host_bridge.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #include <cassert>
 #include <memory>
@@ -9,10 +10,20 @@ namespace ecnuvpn::platform::darwin::ui_shell {
 std::string dispatch_wkwebview_host_message(
     const std::string &message_json,
     const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core);
+ecnuvpn::ui_shell::WindowBounds wkwebview_default_window_bounds() noexcept;
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window();
 }
 
 int main() {
+  const auto default_bounds =
+      ecnuvpn::platform::darwin::ui_shell::wkwebview_default_window_bounds();
+  if (default_bounds.width !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+      default_bounds.height !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+    return 1;
+  }
+
   bool invoked = false;
   const std::string response =
       ecnuvpn::platform::darwin::ui_shell::dispatch_wkwebview_host_message(
