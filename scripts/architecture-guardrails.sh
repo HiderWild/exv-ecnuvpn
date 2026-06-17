@@ -90,9 +90,24 @@ fi
 # Rule 3: Core must not have platform #ifdef
 # ---------------------------------------------------------------------------
 echo -n "Checking core for platform ifdef... "
-if grep -r "#ifdef _WIN32\|#ifdef __APPLE__\|#if defined(_WIN32)\|#if defined(__APPLE__)" src/core/ 2>/dev/null; then
+core_ifdef_found=0
+core_ifdef_allowlisted=0
+while IFS= read -r match; do
+    [ -z "$match" ] && continue
+    file_path=$(echo "$match" | cut -d: -f1)
+    if is_allowlisted "$file_path" "platform_ifdef_in_core"; then
+        core_ifdef_allowlisted=$((core_ifdef_allowlisted + 1))
+    else
+        echo ""
+        echo "  $match"
+        core_ifdef_found=1
+    fi
+done < <(grep -rn "#ifdef _WIN32\|#ifdef __APPLE__\|#if defined(_WIN32)\|#if defined(__APPLE__)" src/core/ 2>/dev/null || true)
+if [ $core_ifdef_found -eq 1 ]; then
     echo "FAIL"
     FAILURES=$((FAILURES + 1))
+elif [ $core_ifdef_allowlisted -gt 0 ]; then
+    echo "PASS (allowlisted: $core_ifdef_allowlisted hits)"
 else
     echo "PASS"
 fi

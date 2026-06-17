@@ -5,7 +5,7 @@
 
 namespace {
 
-constexpr const char *kPassword = "test-password";
+constexpr const char *kPassword = "test-mock";
 
 bool expect(bool condition, const char *message) {
   if (condition) {

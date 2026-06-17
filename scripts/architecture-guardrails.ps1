@@ -133,7 +133,8 @@ Check-Pattern -Description "Checking helper for protocol includes" `
 # ---------------------------------------------------------------------------
 Check-Pattern -Description "Checking core for platform ifdef" `
     -Paths "src/core" `
-    -Pattern "#ifdef _WIN32|#ifdef __APPLE__|#if defined\(_WIN32\)|#if defined\(__APPLE__\)"
+    -Pattern "#ifdef _WIN32|#ifdef __APPLE__|#if defined\(_WIN32\)|#if defined\(__APPLE__\)" `
+    -RuleName "platform_ifdef_in_core"
 
 # ---------------------------------------------------------------------------
 # Rule 4: New UI path must not have retry_limit

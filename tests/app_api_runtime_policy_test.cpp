@@ -134,7 +134,7 @@ int main() {
     ok;
 
   nlohmann::json direct = ecnuvpn::platform::try_connect_direct_fallback(
-      ecnuvpn::platform::ConfigView{}, "secret");
+      ecnuvpn::platform::ConfigView{}, "test-mock");
   ok = expect(direct.empty(),
               "Windows direct connect fallback should remain disabled") &&
        ok;

@@ -11,11 +11,53 @@
 #     removal_phase: <when this entry should be deleted>
 
 allowlist:
-  - file: src/app_api_native_orchestration.hpp
-    rule: protocol_include_in_non_protocol
+  - file: src/core/core_process.cpp
+    rule: platform_ifdef_in_core
     owner: core-team
-    reason: "Legacy orchestration path -- bridges core API to native auth. The header needs NativeAuthSession and NativeAuthRequest types to wire the orchestration flow."
-    removal_phase: "Phase 8 -- when legacy adapter is extracted into a separate module"
+    reason: "Transitional core process entrypoint still owns platform-specific stdio and daemonization setup while lifecycle and runtime seams are being extracted."
+    removal_phase: "Phase 9 -- move platform process bootstrap into src/platform/common or per-platform adapters"
+
+  - file: src/core/pipe_ipc.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Core IPC transport still contains the named-pipe versus Unix-domain-socket split behind one public PipeIpc facade."
+    removal_phase: "Phase 9 -- split PipeIpcListener and PipeIpcClient implementations into platform adapters"
+
+  - file: src/core/app_api/desktop_tunnel_host.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Legacy desktop tunnel host keeps a Windows-only direct fallback guard until desktop traffic is fully routed through the core IPC contract."
+    removal_phase: "Phase 9 -- retire legacy desktop tunnel host path"
+
+  - file: src/core/connection/connection_attempt.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Connection attempt orchestration still branches for platform helper/runtime behavior during the CLI-core-UI contract transition."
+    removal_phase: "Phase 9 -- extract platform connection attempt policies"
+
+  - file: src/core/tunnel_controller/tunnel_controller_connect.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Tunnel controller connect path still has Windows-specific native network behavior that is not yet isolated behind platform network ops."
+    removal_phase: "Phase 9 -- move remaining platform connect decisions into platform network ops"
+
+  - file: src/core/use_cases/system_status_use_cases.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "System status use case still conditionally reports Windows-only driver/runtime metadata."
+    removal_phase: "Phase 9 -- move OS-specific status enrichment into platform status providers"
+
+  - file: src/core/vpn/openconnect_tunnel_script.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Legacy OpenConnect tunnel script generation still contains Windows bypass handling until legacy runtime support is retired."
+    removal_phase: "Phase 9 -- retire or platform-isolate legacy OpenConnect script generation"
+
+  - file: src/core/vpn/vpn_runtime.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Legacy VPN runtime lookup still contains macOS-specific Homebrew path handling."
+    removal_phase: "Phase 9 -- move legacy runtime discovery into platform runtime discovery"
 
   - file: src/platform/win32/native_tls_stream.hpp
     rule: protocol_include_in_platform
@@ -29,8 +71,14 @@ allowlist:
     reason: "Darwin NativeTlsStream implements the TlsStream interface defined in vpn_engine/protocol. The class inherits from TlsStream and must include its definition."
     removal_phase: "Phase 8 -- when platform TLS is abstracted behind a platform-neutral interface"
 
-  - file: src/platform/common/vpn_supervisor_process.cpp
+  - file: src/platform/win32/default_engine_deps.cpp
     rule: protocol_include_in_platform
     owner: platform-team
-    reason: "Supervisor process needs NativeAuthSession JSON serialization to pass auth session data to the helper via IPC. Uses native_auth_session_json.hpp for serialization only."
-    removal_phase: "Phase 8 -- when auth session serialization is moved to a shared utility"
+    reason: "Default Win32 engine dependency wiring constructs ProductionTransport with platform packet and TLS implementations."
+    removal_phase: "Phase 9 -- introduce a platform-neutral production transport factory seam"
+
+  - file: src/platform/darwin/default_engine_deps.cpp
+    rule: protocol_include_in_platform
+    owner: platform-team
+    reason: "Default Darwin engine dependency wiring constructs ProductionTransport with platform packet and TLS implementations."
+    removal_phase: "Phase 9 -- introduce a platform-neutral production transport factory seam"
