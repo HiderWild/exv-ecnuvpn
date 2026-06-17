@@ -41,6 +41,15 @@ class WkWebViewWindow;
 
 @interface EcnuVpnUIDelegate : NSObject <WKUIDelegate>
 @end
+
+@interface EcnuVpnStatusItemTarget : NSObject {
+  ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *owner_;
+}
+- (instancetype)initWithOwner:
+    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner;
+- (void)showWindow:(id)sender;
+- (void)quitApp:(id)sender;
+@end
 #endif
 
 namespace ecnuvpn::platform::darwin::ui_shell {
@@ -196,6 +205,27 @@ NSString *bridge_script() {
 [[nodiscard]] ecnuvpn::ui_shell::WindowBounds
 wkwebview_default_window_bounds() noexcept;
 
+struct WkWebViewStatusMenuItem {
+  std::string label;
+  int command_id;
+  bool separator;
+};
+
+constexpr int kStatusCommandShow = 2001;
+constexpr int kStatusCommandQuit = 2002;
+
+bool wkwebview_should_create_status_item_on_start() {
+  return true;
+}
+
+std::vector<WkWebViewStatusMenuItem> wkwebview_status_menu_model() {
+  return {
+      {"显示 ECNU VPN", kStatusCommandShow, false},
+      {"", 0, true},
+      {"退出", kStatusCommandQuit, false},
+  };
+}
+
 #if defined(EXV_BUILD_UI_SHELL)
 class WkWebViewWindow final : public ecnuvpn::ui_shell::UiWindow {
 public:
@@ -217,6 +247,7 @@ public:
 
       NSApplication *app = [NSApplication sharedApplication];
       [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+      create_status_item();
 
       if (!create_window() || !load_renderer(config.renderer)) {
         cleanup();
@@ -279,6 +310,20 @@ public:
   void close_from_window() {
     running_ = false;
     exit_code_ = 0;
+  }
+
+  void show_from_status_item() {
+    if (window_ == nil) return;
+    [window_ makeKeyAndOrderFront:nil];
+    [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+  }
+
+  void quit_from_status_item() {
+    force_quit_ = true;
+    running_ = false;
+    if (window_ != nil) {
+      [window_ close];
+    }
   }
 
 private:
@@ -371,7 +416,55 @@ private:
     }
   }
 
+  NSImage *status_icon() {
+    NSImage *image = [[[NSImage alloc] initWithSize:NSMakeSize(18, 18)] autorelease];
+    [image lockFocus];
+    [[NSColor labelColor] setFill];
+    NSBezierPath *circle =
+        [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(3, 3, 12, 12)];
+    [circle fill];
+    [image unlockFocus];
+    [image setTemplate:YES];
+    return image;
+  }
+
+  void create_status_item() {
+    if (!wkwebview_should_create_status_item_on_start() || status_item_ != nil) {
+      return;
+    }
+    status_target_ = [[EcnuVpnStatusItemTarget alloc] initWithOwner:this];
+    status_item_ = [[[NSStatusBar systemStatusBar]
+        statusItemWithLength:NSSquareStatusItemLength] retain];
+    [[status_item_ button] setImage:status_icon()];
+    [[status_item_ button] setToolTip:@"ECNU VPN"];
+
+    status_menu_ = [[NSMenu alloc] initWithTitle:@"ECNU VPN"];
+    [status_menu_ addItemWithTitle:@"显示 ECNU VPN"
+                             action:@selector(showWindow:)
+                      keyEquivalent:@""];
+    [[status_menu_ itemAtIndex:0] setTarget:status_target_];
+    [status_menu_ addItem:[NSMenuItem separatorItem]];
+    [status_menu_ addItemWithTitle:@"退出"
+                             action:@selector(quitApp:)
+                      keyEquivalent:@""];
+    [[status_menu_ itemAtIndex:2] setTarget:status_target_];
+    [status_item_ setMenu:status_menu_];
+  }
+
+  void destroy_status_item() {
+    if (status_item_ != nil) {
+      [[NSStatusBar systemStatusBar] removeStatusItem:status_item_];
+      [status_item_ release];
+      status_item_ = nil;
+    }
+    [status_menu_ release];
+    status_menu_ = nil;
+    [status_target_ release];
+    status_target_ = nil;
+  }
+
   void cleanup() {
+    destroy_status_item();
     if (content_controller_ != nil) {
       [content_controller_ removeScriptMessageHandlerForName:@"ecnuVpnHost"];
     }
@@ -410,9 +503,13 @@ private:
   EcnuVpnWindowDelegate *window_delegate_ = nil;
   EcnuVpnNavigationDelegate *navigation_delegate_ = nil;
   EcnuVpnUIDelegate *ui_delegate_ = nil;
+  NSStatusItem *status_item_ = nil;
+  NSMenu *status_menu_ = nil;
+  EcnuVpnStatusItemTarget *status_target_ = nil;
   std::vector<std::string> pending_events_;
   bool running_ = false;
   bool renderer_ready_ = false;
+  bool force_quit_ = false;
   int exit_code_ = 70;
 };
 #else
@@ -559,6 +656,25 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
   } else {
     completionHandler(nil);
   }
+}
+@end
+
+@implementation EcnuVpnStatusItemTarget
+- (instancetype)initWithOwner:
+    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner {
+  self = [super init];
+  if (self != nil) {
+    owner_ = owner;
+  }
+  return self;
+}
+- (void)showWindow:(id)sender {
+  (void)sender;
+  if (owner_ != nullptr) owner_->show_from_status_item();
+}
+- (void)quitApp:(id)sender {
+  (void)sender;
+  if (owner_ != nullptr) owner_->quit_from_status_item();
 }
 @end
 #endif

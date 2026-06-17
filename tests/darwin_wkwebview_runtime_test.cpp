@@ -5,12 +5,20 @@
 #include <cassert>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ecnuvpn::platform::darwin::ui_shell {
+struct WkWebViewStatusMenuItem {
+  std::string label;
+  int command_id;
+  bool separator;
+};
 std::string dispatch_wkwebview_host_message(
     const std::string &message_json,
     const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core);
 ecnuvpn::ui_shell::WindowBounds wkwebview_default_window_bounds() noexcept;
+std::vector<WkWebViewStatusMenuItem> wkwebview_status_menu_model();
+bool wkwebview_should_create_status_item_on_start();
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window();
 }
 
@@ -21,6 +29,17 @@ int main() {
           ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
       default_bounds.height !=
           ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+    return 1;
+  }
+
+  if (!ecnuvpn::platform::darwin::ui_shell::
+          wkwebview_should_create_status_item_on_start()) {
+    return 1;
+  }
+  const auto status_menu =
+      ecnuvpn::platform::darwin::ui_shell::wkwebview_status_menu_model();
+  if (status_menu.size() != 3 || status_menu[0].label != "显示 ECNU VPN" ||
+      !status_menu[1].separator || status_menu[2].label != "退出") {
     return 1;
   }
 
