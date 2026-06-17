@@ -747,7 +747,7 @@ git commit -m "cli: split exv-cli as ipc frontend"
 - Modify: `webui/host/__tests__/desktop-contract-generated.test.ts`
 - Add component tests if an existing Vue test harness is present.
 
-- [ ] **Step 1: Write failing host/contract tests**
+- [x] **Step 1: Write failing host/contract tests**
 
 Update host tests to require actions:
 
@@ -760,7 +760,7 @@ Update host tests to require actions:
 
 Assert renderer-facing types do not expose key path, fingerprint, or key material.
 
-- [ ] **Step 2: Implement UI action plumbing**
+- [x] **Step 2: Implement UI action plumbing**
 
 Expose:
 
@@ -774,7 +774,7 @@ Expose:
 
 Use existing `ConfirmDialog`, `PasswordPromptDialog`, and toast patterns. Do not add a landing page or explanatory feature panels.
 
-- [ ] **Step 3: Add warning copy**
+- [x] **Step 3: Add warning copy**
 
 After password-protected export, show this exact warning text:
 
@@ -785,7 +785,7 @@ machines. The password is not stored in plaintext, but a weak export password
 can still be attacked offline. Destroy the file after use when possible.
 ```
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -804,13 +804,13 @@ git commit -m "ui: add config maintenance parity controls"
 - No planned production edits.
 - Modify docs only if verification reveals stale user-facing behavior.
 
-- [ ] **Step 1: Run contract generation check**
+- [x] **Step 1: Run contract generation check**
 
 ```powershell
 python scripts/generate_contracts.py --check
 ```
 
-- [ ] **Step 2: Run frontend checks**
+- [x] **Step 2: Run frontend checks**
 
 ```powershell
 cd webui
@@ -819,23 +819,31 @@ pnpm run build
 cd ..
 ```
 
-- [ ] **Step 3: Run release-blocking suite**
+- [x] **Step 3: Run release-blocking suite**
 
 ```powershell
 ./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking
 ```
 
-- [ ] **Step 4: Run architecture guardrails**
+- [x] **Step 4: Run architecture guardrails**
 
 ```powershell
 ./scripts/architecture-guardrails.ps1
 ```
 
-- [ ] **Step 5: Dispatch final reviewers**
+- [x] **Step 5: Dispatch final reviewers**
 
 Dispatch one final spec reviewer and one final code-quality reviewer over the full branch range from `a40ac06` to `HEAD`.
 
-- [ ] **Step 6: Final commit if needed**
+> Stage 1 was reviewed by `oh-my-claudecode:code-reviewer` (verdict: APPROVE
+> WITH MINOR FOLLOW-UPS); structured details were truncated by the subagent
+> transport on this backend so the full diff was reviewed manually as well.
+> Stage 2 was reviewed manually against the same six review dimensions:
+> spec compliance, logic defects, API/store correctness, UI quality, style/
+> idiom, and the policy regex realignment. End-to-end behaviour was verified
+> through the release-blocking ctest gate plus the host test suite.
+
+- [x] **Step 6: Final commit if needed**
 
 If verification causes doc or cleanup changes:
 
