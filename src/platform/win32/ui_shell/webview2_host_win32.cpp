@@ -15,6 +15,7 @@
 
 #if defined(EXV_BUILD_UI_SHELL)
 #include <WebView2.h>
+#include <nlohmann/json.hpp>
 #include <objbase.h>
 #include <shellapi.h>
 #endif
@@ -374,6 +375,69 @@ public:
       return S_OK;
     }
 
+    try {
+      auto parsed = nlohmann::json::parse(request_json);
+      const std::string action = parsed.value("action", "");
+      const int id = parsed.value("id", 0);
+      if (action == "window.setMode") {
+        std::string mode = "advanced";
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("mode") && payload["mode"].is_string()) {
+            mode = payload["mode"].get<std::string>();
+          }
+        }
+        apply_window_mode(mode);
+        nlohmann::ordered_json out;
+        out["id"] = id;
+        out["ok"] = true;
+        nlohmann::ordered_json data;
+        data["mode"] = mode;
+        out["data"] = data;
+        const std::string response_json = out.dump();
+        const std::wstring wide_response = wide_from_utf8(response_json);
+        webview_->PostWebMessageAsJson(wide_response.c_str());
+        return S_OK;
+      }
+      if (action == "window.resolveClosePrompt") {
+        std::string resolved_action = "cancel";
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("result")) {
+            const auto &result = payload["result"];
+            if (result.is_string()) {
+              resolved_action = result.get<std::string>();
+            } else if (result.is_object() && result.contains("action") &&
+                       result["action"].is_string()) {
+              resolved_action = result["action"].get<std::string>();
+            }
+          }
+        }
+        if (resolved_action == "tray") {
+          close_prompt_pending_ = false;
+          if (hwnd_) {
+            ShowWindow(hwnd_, SW_HIDE);
+          }
+        } else if (resolved_action == "quit") {
+          close_prompt_pending_ = false;
+          quit_from_tray();
+        } else {
+          close_prompt_pending_ = false;
+          show_from_tray();
+        }
+        nlohmann::ordered_json out;
+        out["id"] = id;
+        out["ok"] = true;
+        out["data"] = nlohmann::json::object();
+        const std::string response_json = out.dump();
+        const std::wstring wide_response = wide_from_utf8(response_json);
+        webview_->PostWebMessageAsJson(wide_response.c_str());
+        return S_OK;
+      }
+    } catch (const nlohmann::json::exception &) {
+      // Fall through to existing handler_ path on parse failure.
+    }
+
     std::string response_json =
         handler_ ? handler_(request_json)
                  : R"({"id":0,"ok":false,"code":"host_unavailable","message":"Desktop host bridge is not ready"})";
@@ -426,6 +490,26 @@ public:
     running_ = false;
     if (hwnd_) {
       DestroyWindow(hwnd_);
+    }
+  }
+
+  void request_close_decision() {
+    if (close_prompt_pending_) {
+      show_from_tray();
+      return;
+    }
+    close_prompt_pending_ = true;
+    emit_event(R"({"type":"close-request","data":{}})");
+  }
+
+  void apply_window_mode(const std::string &mode) {
+    const auto bounds = mode == "minimal"
+                            ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
+                            : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+    if (hwnd_) {
+      SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
+                   SWP_NOMOVE | SWP_NOZORDER);
+      resize_webview();
     }
   }
 
@@ -604,8 +688,8 @@ private:
       killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
-      setMode: () => Promise.resolve(),
-      resolveClosePrompt: () => Promise.resolve(),
+      setMode: (mode) => rpc('window.setMode', { mode }),
+      resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -663,7 +747,11 @@ private:
         self->resize_webview();
         return 0;
       case WM_CLOSE:
-        DestroyWindow(hwnd);
+        if (self->force_quit_) {
+          DestroyWindow(hwnd);
+        } else {
+          self->request_close_decision();
+        }
         return 0;
       case WM_DESTROY:
         self->running_ = false;
@@ -696,6 +784,7 @@ private:
   NOTIFYICONDATAW tray_icon_{};
   bool tray_icon_added_ = false;
   bool force_quit_ = false;
+  bool close_prompt_pending_ = false;
 };
 
 HRESULT EnvironmentCompletedHandler::QueryInterface(REFIID riid, void **object) {

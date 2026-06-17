@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
 #include <vector>
@@ -173,8 +174,8 @@ NSString *bridge_script() {
       killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
-      setMode: () => Promise.resolve(),
-      resolveClosePrompt: () => Promise.resolve(),
+      setMode: (mode) => rpc('window.setMode', { mode }),
+      resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -296,6 +297,65 @@ public:
       return;
     }
 
+    try {
+      auto parsed = nlohmann::json::parse(request_json);
+      const std::string action = parsed.value("action", "");
+      const int id = parsed.value("id", 0);
+      if (action == "window.setMode") {
+        std::string mode = "advanced";
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("mode") && payload["mode"].is_string()) {
+            mode = payload["mode"].get<std::string>();
+          }
+        }
+        apply_window_mode(mode);
+        nlohmann::ordered_json out;
+        out["id"] = id;
+        out["ok"] = true;
+        nlohmann::ordered_json data;
+        data["mode"] = mode;
+        out["data"] = data;
+        post_json_to_renderer(out.dump());
+        return;
+      }
+      if (action == "window.resolveClosePrompt") {
+        std::string resolved_action = "cancel";
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("result")) {
+            const auto &result = payload["result"];
+            if (result.is_string()) {
+              resolved_action = result.get<std::string>();
+            } else if (result.is_object() && result.contains("action") &&
+                       result["action"].is_string()) {
+              resolved_action = result["action"].get<std::string>();
+            }
+          }
+        }
+        if (resolved_action == "tray") {
+          close_prompt_pending_ = false;
+          if (window_ != nil) {
+            [window_ orderOut:nil];
+          }
+        } else if (resolved_action == "quit") {
+          close_prompt_pending_ = false;
+          quit_from_status_item();
+        } else {
+          close_prompt_pending_ = false;
+          show_from_status_item();
+        }
+        nlohmann::ordered_json out;
+        out["id"] = id;
+        out["ok"] = true;
+        out["data"] = nlohmann::json::object();
+        post_json_to_renderer(out.dump());
+        return;
+      }
+    } catch (const nlohmann::json::exception &) {
+      // Fall through to existing handler_ path on parse failure.
+    }
+
     const std::string response_json =
         handler_ ? handler_(request_json)
                  : R"({"id":0,"ok":false,"code":"host_unavailable","message":"Desktop host bridge is not ready"})";
@@ -305,6 +365,19 @@ public:
   void on_navigation_finished() {
     renderer_ready_ = true;
     flush_pending_events();
+  }
+
+  // Returns true to permit the window close, false to intercept and route
+  // through the renderer-driven close prompt.  Cocoa calls this from the
+  // window delegate's `windowShouldClose:` hook BEFORE the window is
+  // ordered out, so the prompt is shown while the window is still on
+  // screen.  `windowWillClose:` then handles run-loop teardown only.
+  bool should_close_window() {
+    if (force_quit_) {
+      return true;
+    }
+    request_close_decision();
+    return false;
   }
 
   void close_from_window() {
@@ -324,6 +397,27 @@ public:
     if (window_ != nil) {
       [window_ close];
     }
+  }
+
+  void request_close_decision() {
+    if (close_prompt_pending_) {
+      show_from_status_item();
+      return;
+    }
+    close_prompt_pending_ = true;
+    emit_event(R"({"type":"close-request","data":{}})");
+  }
+
+  void apply_window_mode(const std::string &mode) {
+    const auto bounds = mode == "minimal"
+                            ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
+                            : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+    if (window_ == nil) return;
+    NSRect frame = [window_ frame];
+    frame.size = NSMakeSize(bounds.width, bounds.height);
+    [window_ setContentMinSize:NSMakeSize(bounds.width, bounds.height)];
+    [window_ setContentMaxSize:NSMakeSize(bounds.width, bounds.height)];
+    [window_ setFrame:frame display:YES animate:NO];
   }
 
 private:
@@ -510,6 +604,7 @@ private:
   bool running_ = false;
   bool renderer_ready_ = false;
   bool force_quit_ = false;
+  bool close_prompt_pending_ = false;
   int exit_code_ = 70;
 };
 #else
@@ -578,6 +673,14 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
     owner_ = owner;
   }
   return self;
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+  (void)sender;
+  if (owner_ != nullptr) {
+    return owner_->should_close_window() ? YES : NO;
+  }
+  return YES;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {

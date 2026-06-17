@@ -46,6 +46,12 @@ int main() {
   if (!is_allowed_host_action("maintenance.killStaleCore")) {
     return 1;
   }
+  if (!is_allowed_host_action("window.resolveClosePrompt")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("window.setMode")) {
+    return 1;
+  }
 
   RendererAssets dev = resolve_renderer_assets("http://127.0.0.1:8288", "");
   assert(dev.kind == RendererAssetKind::DevServer);
