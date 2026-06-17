@@ -44,11 +44,6 @@ bool CommandValidator::is_op_allowed(HelperOp op) const {
     return allowed_ops_.count(op) > 0;
 }
 
-bool CommandValidator::is_session_valid(const SessionId& /*id*/) const {
-    // Placeholder: always valid for now
-    return true;
-}
-
 bool CommandValidator::contains_shell_injection(const std::string& input) {
     // Check for characters commonly used in shell command injection.
     // Note: '{' and '}' are excluded because they appear in JSON payloads

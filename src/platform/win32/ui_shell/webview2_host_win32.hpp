@@ -19,6 +19,12 @@ void post_webview2_host_response(
     const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core,
     const std::function<void(const std::string &)> &post_response);
 
+std::wstring webview2_renderer_uri(
+    const ecnuvpn::ui_shell::RendererAssets &renderer);
+
+std::wstring webview2_packaged_renderer_folder(
+    const ecnuvpn::ui_shell::RendererAssets &renderer);
+
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window();
 
 } // namespace ecnuvpn::platform::win32::ui_shell

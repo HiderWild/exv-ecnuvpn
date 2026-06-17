@@ -59,6 +59,14 @@ describe('generated system contract', () => {
     assert.deepEqual(desktopRpcActions, DESKTOP_RPC_ACTIONS)
   })
 
+  it('keeps persisted log mutation out of the desktop RPC surface', () => {
+    const desktopActions: readonly string[] = DESKTOP_RPC_ACTIONS
+
+    assert.ok(desktopActions.includes('logs.list'))
+    assert.ok(!desktopActions.includes('logs.clear'))
+    assert.deepEqual(manifest().modules.logs.actions, ['logs.list'])
+  })
+
   it('captures desktop and core RPC envelopes', () => {
     assert.deepEqual(DESKTOP_RPC_REQUEST_FIELDS, ['id', 'action', 'payload'])
     expectContains(DESKTOP_RPC_RESPONSE_FIELDS, 'ok')

@@ -22,6 +22,10 @@ namespace ecnuvpn::platform::win32::ui_shell {
 
 namespace {
 
+constexpr char kPackagedRendererHost[] = "appassets.ecnu-vpn.invalid";
+constexpr wchar_t kPackagedRendererHostWide[] =
+    L"appassets.ecnu-vpn.invalid";
+
 std::wstring wide_from_utf8(const std::string &value) {
   if (value.empty()) {
     return {};
@@ -37,8 +41,6 @@ std::wstring wide_from_utf8(const std::string &value) {
                       static_cast<int>(value.size()), out.data(), required);
   return out;
 }
-
-#if defined(EXV_BUILD_UI_SHELL)
 
 std::string utf8_from_wide(const wchar_t *value) {
   if (!value) {
@@ -58,19 +60,30 @@ std::string utf8_from_wide(const wchar_t *value) {
   return out;
 }
 
-std::wstring renderer_uri(const ecnuvpn::ui_shell::RendererAssets &renderer) {
-  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
-    return wide_from_utf8(renderer.location);
-  }
-
-  std::filesystem::path path =
-      std::filesystem::absolute(std::filesystem::path(renderer.location));
-  std::wstring generic = path.generic_wstring();
-  if (generic.rfind(L"/", 0) == 0) {
-    return L"file://" + generic;
-  }
-  return L"file:///" + generic;
+bool is_file_uri_path_byte_safe(unsigned char value) {
+  return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
+         (value >= '0' && value <= '9') || value == '/' || value == ':' ||
+         value == '-' || value == '_' || value == '.' || value == '~';
 }
+
+std::string percent_encode_file_uri_path(const std::string &value) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+
+  std::string out;
+  out.reserve(value.size());
+  for (unsigned char byte : value) {
+    if (is_file_uri_path_byte_safe(byte)) {
+      out.push_back(static_cast<char>(byte));
+      continue;
+    }
+    out.push_back('%');
+    out.push_back(kHex[byte >> 4]);
+    out.push_back(kHex[byte & 0x0F]);
+  }
+  return out;
+}
+
+#if defined(EXV_BUILD_UI_SHELL)
 
 std::wstring temp_bootstrapper_path() {
   wchar_t temp_dir[MAX_PATH] = {};
@@ -305,6 +318,10 @@ public:
     webview_.attach(raw_webview);
 
     resize_webview();
+    if (!configure_packaged_renderer_origin()) {
+      fail_and_close(L"Unable to map the packaged renderer assets.");
+      return;
+    }
     install_renderer_bridge();
 
     auto *message_handler = new WebMessageReceivedHandler(this);
@@ -316,7 +333,7 @@ public:
       return;
     }
 
-    const std::wstring uri = renderer_uri(active_config_.renderer);
+    const std::wstring uri = webview2_renderer_uri(active_config_.renderer);
     if (uri.empty() || FAILED(webview_->Navigate(uri.c_str()))) {
       fail_and_close(L"Unable to load the packaged renderer.");
       return;
@@ -363,6 +380,29 @@ public:
   }
 
 private:
+  bool configure_packaged_renderer_origin() {
+    if (active_config_.renderer.kind ==
+        ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+      return true;
+    }
+
+    ComPtr<ICoreWebView2_3> webview3;
+    const HRESULT interface_result = webview_->QueryInterface(
+        IID_ICoreWebView2_3, reinterpret_cast<void **>(webview3.put()));
+    if (FAILED(interface_result) || !webview3) {
+      return false;
+    }
+
+    const std::wstring folder =
+        webview2_packaged_renderer_folder(active_config_.renderer);
+    if (folder.empty()) {
+      return false;
+    }
+    return SUCCEEDED(webview3->SetVirtualHostNameToFolderMapping(
+        kPackagedRendererHostWide, folder.c_str(),
+        COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY));
+  }
+
   bool ensure_runtime_available() {
     if (detect_webview2_runtime().installed) {
       return true;
@@ -652,6 +692,35 @@ private:
 #endif
 
 } // namespace
+
+std::wstring webview2_renderer_uri(
+    const ecnuvpn::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    return wide_from_utf8(renderer.location);
+  }
+
+  std::filesystem::path path =
+      std::filesystem::absolute(std::filesystem::path(renderer.location));
+  std::wstring filename = path.filename().generic_wstring();
+  const std::string encoded =
+      percent_encode_file_uri_path(utf8_from_wide(filename.c_str()));
+  if (encoded.empty()) {
+    return {};
+  }
+  return wide_from_utf8(std::string("https://") + kPackagedRendererHost + "/" +
+                        encoded);
+}
+
+std::wstring webview2_packaged_renderer_folder(
+    const ecnuvpn::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    return {};
+  }
+
+  std::filesystem::path path =
+      std::filesystem::absolute(std::filesystem::path(renderer.location));
+  return path.parent_path().wstring();
+}
 
 std::string dispatch_webview2_host_message(
     const std::string &message_json,

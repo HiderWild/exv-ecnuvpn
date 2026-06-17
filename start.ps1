@@ -6,6 +6,8 @@ param(
   [switch]$Package,
   [switch]$CleanOnly,
   [switch]$Status,
+  [switch]$PauseOnError,
+  [string]$WebView2SdkDir = $env:WEBVIEW2_SDK_DIR,
   [int]$Port = 8288
 )
 
@@ -23,6 +25,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
       $argString += " -$key `"$val`""
     }
   }
+  $argString += ' -PauseOnError'
 
   Write-Output '[start] Not running as Administrator; requesting elevation via UAC...'
   $elevated = Start-Process -FilePath 'powershell.exe' `
@@ -47,6 +50,24 @@ $protectedProcessIds = @()
 
 function Write-Info([string]$Message) {
   Write-Output "[start] $Message"
+}
+
+function Resolve-WebView2Sdk {
+  param([string]$RequestedPath)
+
+  if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
+    if (Test-Path -LiteralPath (Join-Path $RequestedPath 'build\native\include\WebView2.h')) {
+      return (Resolve-Path -LiteralPath $RequestedPath).Path
+    }
+    throw "WEBVIEW2_SDK_DIR does not contain build\native\include\WebView2.h: $RequestedPath"
+  }
+
+  $candidate = Join-Path $repoRoot 'build\deps\webview2\1.0.4022.49'
+  if (Test-Path -LiteralPath (Join-Path $candidate 'build\native\include\WebView2.h')) {
+    return (Resolve-Path -LiteralPath $candidate).Path
+  }
+
+  throw 'WEBVIEW2_SDK_DIR is required, or build\deps\webview2\1.0.4022.49 must exist.'
 }
 
 function Invoke-Step {
@@ -284,9 +305,11 @@ function Show-Status {
 }
 
 function Build-WebViewPackage {
+  $resolvedWebView2Sdk = Resolve-WebView2Sdk $WebView2SdkDir
+
   if ($NoFrontendBuild) {
     Write-Info 'Building native UI shell and packaging existing WebView renderer assets'
-    Invoke-Step -Command 'cmake' -Arguments @('--preset', 'windows-release', '-DEXV_BUILD_UI_SHELL=ON')
+    Invoke-Step -Command 'cmake' -Arguments @('--preset', 'windows-release', '-DEXV_BUILD_UI_SHELL=ON', "-DWEBVIEW2_SDK_DIR=$resolvedWebView2Sdk")
     Invoke-Step -Command 'cmake' -Arguments @(
       '--build', '--preset', 'windows-release',
       '--target', 'exv', 'exv-helper', 'exv-ui'
@@ -302,7 +325,8 @@ function Build-WebViewPackage {
   Invoke-Step -Command 'powershell' -Arguments @(
     '-ExecutionPolicy', 'Bypass',
     '-File', (Join-Path $scriptDir 'build-windows.ps1'),
-    'desktop'
+    'desktop',
+    '-WebView2SdkDir', $resolvedWebView2Sdk
   )
 }
 
@@ -363,39 +387,48 @@ function Start-WebViewShell {
   Write-Info "Logs: $desktopOutLog and $desktopErrLog"
 }
 
-$protectedProcessIds = Get-CurrentProcessAncestorIds
+try {
+  $protectedProcessIds = Get-CurrentProcessAncestorIds
 
-if ($Status) {
+  if ($Status) {
+    Show-Status
+    exit 0
+  }
+
+  Stop-ProjectProcesses
+
+  if (-not $Quick) {
+    Clean-BuildArtifacts
+  }
+  else {
+    Write-Info 'Quick mode enabled; skipping artifact cleanup'
+  }
+
+  if ($CleanOnly) {
+    Write-Info 'Clean-only mode complete'
+    exit 0
+  }
+
+  Build-WebViewPackage
+  Test-WebViewPackage
   Show-Status
-  exit 0
-}
 
-Stop-ProjectProcesses
+  if ($PackageDir -or $Package) {
+    Write-Info "WebView package ready at $packageRoot"
+    exit 0
+  }
 
-if (-not $Quick) {
-  Clean-BuildArtifacts
+  if (-not $NoLaunch) {
+    Start-WebViewShell
+  }
+  else {
+    Write-Info 'Build completed without launching native WebView shell'
+  }
 }
-else {
-  Write-Info 'Quick mode enabled; skipping artifact cleanup'
-}
-
-if ($CleanOnly) {
-  Write-Info 'Clean-only mode complete'
-  exit 0
-}
-
-Build-WebViewPackage
-Test-WebViewPackage
-Show-Status
-
-if ($PackageDir -or $Package) {
-  Write-Info "WebView package ready at $packageRoot"
-  exit 0
-}
-
-if (-not $NoLaunch) {
-  Start-WebViewShell
-}
-else {
-  Write-Info 'Build completed without launching native WebView shell'
+catch {
+  Write-Error $_
+  if ($PauseOnError) {
+    Read-Host 'Press Enter to close this elevated window'
+  }
+  exit 1
 }

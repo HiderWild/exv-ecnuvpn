@@ -53,6 +53,27 @@ int main() {
   auto window = create_webview2_window();
   assert(window != nullptr);
 
+  const ecnuvpn::ui_shell::RendererAssets packaged_renderer{
+      ecnuvpn::ui_shell::RendererAssetKind::PackagedFile,
+      "C:/Program Files/ECNU VPN/webui/index.html"};
+  const std::wstring packaged_uri = webview2_renderer_uri(packaged_renderer);
+  if (packaged_uri != L"https://appassets.ecnu-vpn.invalid/index.html") {
+    return 1;
+  }
+  const std::wstring packaged_folder =
+      webview2_packaged_renderer_folder(packaged_renderer);
+  if (packaged_folder.find(L"ECNU VPN") == std::wstring::npos ||
+      packaged_folder.find(L"webui") == std::wstring::npos ||
+      packaged_folder.find(L"index.html") != std::wstring::npos) {
+    return 1;
+  }
+  const std::wstring dev_server_uri = webview2_renderer_uri(
+      {ecnuvpn::ui_shell::RendererAssetKind::DevServer,
+       "http://127.0.0.1:5173/"});
+  if (dev_server_uri != L"http://127.0.0.1:5173/") {
+    return 1;
+  }
+
   bool bridge_invoked = false;
   const std::string bridge_response = dispatch_webview2_host_message(
       R"({"id":9,"action":"status.get","payload":{}})",

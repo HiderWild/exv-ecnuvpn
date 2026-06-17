@@ -84,6 +84,9 @@ describe('native WebView package policy', () => {
 
     assert.match(windows, /ECNUVPN_WEBUI_DIST_DIR = Join-Path \$buildRoot 'webview\\dist'/)
     assert.match(windows, /-DEXV_BUILD_UI_SHELL=ON/)
+    assert.match(windows, /function Resolve-WebView2Sdk/)
+    assert.match(windows, /build\\deps\\webview2\\1\.0\.4022\.49/)
+    assert.match(windows, /-DWEBVIEW2_SDK_DIR=\$resolvedWebView2Sdk/)
     assert.match(windows, /function Invoke-WebViewPackage/)
     const windowsDesktop = powershellCase(windows, 'desktop')
     const windowsAll = powershellCase(windows, 'all')
@@ -163,6 +166,8 @@ describe('native WebView package policy', () => {
 
     assert.match(startPs1, /build\\windows\\webview\\package\\ECNU VPN/)
     assert.match(startPs1, /exv-ui\.exe/)
+    assert.match(startPs1, /function Resolve-WebView2Sdk/)
+    assert.match(startPs1, /-DWEBVIEW2_SDK_DIR=\$resolvedWebView2Sdk/)
     assert.doesNotMatch(startPs1, /build\\windows\\electron|dist-electron|desktop:package|desktop:package:dir|build:electron/i)
     assert.doesNotMatch(startPs1, /Find-ElectronProcess|Electron process/i)
   })
