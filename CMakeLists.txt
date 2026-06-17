@@ -1777,7 +1777,7 @@ target_compile_definitions(helper_contract_test PRIVATE
     ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
-target_link_libraries(helper_contract_test PRIVATE Threads::Threads)
+target_link_libraries(helper_contract_test PRIVATE exv-helper-runtime Threads::Threads)
 
 add_test(NAME helper_contract_test COMMAND helper_contract_test)
 
