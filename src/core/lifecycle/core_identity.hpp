@@ -1,9 +1,10 @@
 #pragma once
 
+#include "platform/common/core_lifecycle_contract.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <string>
-#include <string_view>
 
 namespace exv::core::lifecycle {
 

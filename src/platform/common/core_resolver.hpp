@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/lifecycle/core_registry.hpp"
+#include "platform/common/core_lifecycle_contract.hpp"
 
 #include <nlohmann/json.hpp>
 

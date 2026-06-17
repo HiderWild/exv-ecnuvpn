@@ -70,18 +70,62 @@ bool is_source_file(const std::filesystem::path &path) {
   return ext == ".cpp" || ext == ".hpp" || ext == ".h" || ext == ".cppm";
 }
 
+bool is_regular_file(const std::filesystem::directory_entry &entry) {
+  std::error_code ec;
+  const bool regular = entry.is_regular_file(ec);
+  return !ec && regular;
+}
+
+bool is_transient_tree_entry(const std::filesystem::directory_entry &entry) {
+  std::error_code ec;
+  if (!entry.is_directory(ec) || ec) {
+    return false;
+  }
+
+  const auto name = entry.path().filename().string();
+  return name == ".git" || name == ".reasonix" || name == ".worktrees" ||
+         name == "build" || name == "build-windows" || name == "node_modules";
+}
+
+template <typename Visitor>
+bool scan_tree(const std::filesystem::path &root, Visitor visitor) {
+  std::error_code ec;
+  if (!std::filesystem::exists(root, ec) || ec ||
+      !std::filesystem::is_directory(root, ec) || ec) {
+    return false;
+  }
+
+  std::filesystem::recursive_directory_iterator it(
+      root, std::filesystem::directory_options::skip_permission_denied, ec);
+  const std::filesystem::recursive_directory_iterator end;
+  while (it != end) {
+    if (ec) {
+      ec.clear();
+      it.increment(ec);
+      continue;
+    }
+
+    const auto &entry = *it;
+    if (is_transient_tree_entry(entry)) {
+      it.disable_recursion_pending();
+    } else if (visitor(entry)) {
+      return true;
+    }
+
+    it.increment(ec);
+  }
+  return false;
+}
+
 bool tree_contains_any(const std::filesystem::path &root,
                        const std::vector<std::string> &needles,
                        const char *message) {
-  if (!std::filesystem::exists(root)) {
-    return false;
-  }
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
-      continue;
+  return scan_tree(root, [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry) || !is_source_file(entry.path())) {
+      return false;
     }
     if (entry.path().filename().string() == "contract_manifest_test.cpp") {
-      continue;
+      return false;
     }
     const auto text = read_text_file(entry.path());
     for (const auto &needle : needles) {
@@ -92,19 +136,16 @@ bool tree_contains_any(const std::filesystem::path &root,
         return true;
       }
     }
-  }
-  return false;
+    return false;
+  });
 }
 
 bool tree_contains_matching_filename(const std::filesystem::path &root,
                                      std::string_view prefix,
                                      std::string_view suffix) {
-  if (!std::filesystem::exists(root)) {
-    return false;
-  }
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file()) {
-      continue;
+  return scan_tree(root, [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry)) {
+      return false;
     }
     const auto filename = entry.path().filename().string();
     if (filename.rfind(prefix, 0) == 0 &&
@@ -115,8 +156,8 @@ bool tree_contains_matching_filename(const std::filesystem::path &root,
                 << entry.path().string() << '\n';
       return true;
     }
-  }
-  return false;
+    return false;
+  });
 }
 
 bool file_contains_any(const std::filesystem::path &path,
@@ -193,15 +234,12 @@ bool source_root_layout_is_canonical(const std::filesystem::path &source_dir,
 
 bool tree_contains_include_unit_file(const std::filesystem::path &root,
                                      const std::filesystem::path &source_dir) {
-  if (!std::filesystem::exists(root)) {
-    return false;
-  }
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file()) {
-      continue;
+  return scan_tree(root, [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry)) {
+      return false;
     }
     if (entry.path().filename().extension() != ".cpp") {
-      continue;
+      return false;
     }
     const auto filename = entry.path().filename().string();
     if (filename.size() >= 8 &&
@@ -210,21 +248,18 @@ bool tree_contains_include_unit_file(const std::filesystem::path &root,
                 << relative_slash(entry.path(), source_dir) << '\n';
       return true;
     }
-  }
-  return false;
+    return false;
+  });
 }
 
 bool tree_contains_include_unit_include(const std::filesystem::path &root,
                                         const std::filesystem::path &source_dir) {
-  if (!std::filesystem::exists(root)) {
-    return false;
-  }
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
-      continue;
+  return scan_tree(root, [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry) || !is_source_file(entry.path())) {
+      return false;
     }
     if (entry.path().filename().string() == "contract_manifest_test.cpp") {
-      continue;
+      return false;
     }
     std::istringstream lines(read_text_file(entry.path()));
     std::string line;
@@ -241,23 +276,20 @@ bool tree_contains_include_unit_include(const std::filesystem::path &root,
         return true;
       }
     }
-  }
-  return false;
+    return false;
+  });
 }
 
 bool platform_contains_forbidden_boundary_include(
     const std::filesystem::path &platform_root,
     const std::filesystem::path &source_dir) {
-  if (!std::filesystem::exists(platform_root)) {
-    return false;
-  }
   const std::vector<std::string> forbidden_exact = {
       "app_api.hpp", "vpn.hpp", "tunnel.hpp", "logger.hpp",
       "openconnect_log.hpp", "virtual_network.hpp"};
-  for (const auto &entry :
-       std::filesystem::recursive_directory_iterator(platform_root)) {
-    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
-      continue;
+  return scan_tree(platform_root,
+                   [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry) || !is_source_file(entry.path())) {
+      return false;
     }
     std::istringstream lines(read_text_file(entry.path()));
     std::string line;
@@ -288,17 +320,17 @@ bool platform_contains_forbidden_boundary_include(
         return true;
       }
     }
-  }
-  return false;
+    return false;
+  });
 }
 
 bool private_controller_impl_include_leaks(const std::filesystem::path &root) {
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
-      continue;
+  return scan_tree(root, [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry) || !is_source_file(entry.path())) {
+      return false;
     }
     if (entry.path().filename().string() == "contract_manifest_test.cpp") {
-      continue;
+      return false;
     }
     const auto text = read_text_file(entry.path());
     const auto quoted_include =
@@ -309,29 +341,28 @@ bool private_controller_impl_include_leaks(const std::filesystem::path &root) {
         "tunnel_controller_impl.hpp>";
     if (text.find(quoted_include) == std::string::npos &&
         text.find(angle_include) == std::string::npos) {
-      continue;
+      return false;
     }
 
     const auto relative = std::filesystem::relative(entry.path(), root);
     const auto relative_text = relative.generic_string();
     if (relative_text.rfind("src/core/tunnel_controller/", 0) == 0) {
-      continue;
+      return false;
     }
 
     std::cerr << "Private tunnel controller implementation header leaked into "
               << entry.path().string() << '\n';
     return true;
-  }
-  return false;
+  });
 }
 
 bool source_tree_contains_utils_header_include(const std::filesystem::path &root) {
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
-      continue;
+  return scan_tree(root, [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry) || !is_source_file(entry.path())) {
+      return false;
     }
     if (entry.path().filename().string() == "contract_manifest_test.cpp") {
-      continue;
+      return false;
     }
     const auto text = read_text_file(entry.path());
     if (text.find("#include \"utils.hpp\"") != std::string::npos ||
@@ -340,8 +371,8 @@ bool source_tree_contains_utils_header_include(const std::filesystem::path &root
                 << '\n';
       return true;
     }
-  }
-  return false;
+    return false;
+  });
 }
 
 bool line_contains_forbidden_utils_scope(const std::string &line) {
@@ -364,12 +395,12 @@ bool line_contains_forbidden_utils_scope(const std::string &line) {
 }
 
 bool tree_contains_forbidden_utils_scope(const std::filesystem::path &root) {
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || !is_source_file(entry.path())) {
-      continue;
+  return scan_tree(root, [&](const std::filesystem::directory_entry &entry) {
+    if (!is_regular_file(entry) || !is_source_file(entry.path())) {
+      return false;
     }
     if (entry.path().filename().string() == "contract_manifest_test.cpp") {
-      continue;
+      return false;
     }
 
     std::istringstream lines(read_text_file(entry.path()));
@@ -384,8 +415,8 @@ bool tree_contains_forbidden_utils_scope(const std::filesystem::path &root) {
                 << entry.path().string() << ':' << line_number << '\n';
       return true;
     }
-  }
-  return false;
+    return false;
+  });
 }
 
 } // namespace

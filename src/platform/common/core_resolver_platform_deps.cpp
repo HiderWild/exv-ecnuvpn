@@ -1,7 +1,6 @@
 #include "platform/common/core_resolver_platform_deps.hpp"
 
 #include "cli/pipe_client.hpp"
-#include "core/lifecycle/core_paths.hpp"
 #include "platform/common/process_utils.hpp"
 #include "runtime/runtime_context.hpp"
 

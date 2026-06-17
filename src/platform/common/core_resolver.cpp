@@ -1,9 +1,8 @@
 #include "platform/common/core_resolver.hpp"
 
 #include "contracts/generated/system_contract.hpp"
-#include "core/lifecycle/core_identity.hpp"
-#include "core/lifecycle/core_paths.hpp"
 #include "observability/log_facade.hpp"
+#include "platform/common/core_lifecycle_contract.hpp"
 #include "platform/common/process_utils.hpp"
 #include "runtime/runtime_context.hpp"
 
