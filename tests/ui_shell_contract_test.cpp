@@ -14,6 +14,27 @@ int main() {
   assert(is_allowed_host_action("status.get"));
   assert(is_allowed_host_action("vpn.connect"));
   assert(!is_allowed_host_action("shell.unknown"));
+  if (!is_allowed_host_action("config.import")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("config.export")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("config.reset")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("key.status")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("key.reset")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("maintenance.inspectCore")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("maintenance.killStaleCore")) {
+    return 1;
+  }
 
   RendererAssets dev = resolve_renderer_assets("http://127.0.0.1:8288", "");
   assert(dev.kind == RendererAssetKind::DevServer);
@@ -208,6 +229,28 @@ int main() {
   if (validate_ui_shell_options(both_renderers) !=
       "choose either --renderer-url or --renderer-index, not both") {
     return 1;
+  }
+
+  {
+    bool core_invoked = false;
+    const std::string forwarded = handle_host_request(
+        R"({"id":7,"action":"maintenance.inspectCore","payload":{}})",
+        [&](const CoreRpcRequest &request) {
+          core_invoked = true;
+          assert(request.action == "maintenance.inspectCore");
+          CoreRpcResponse response;
+          response.id = 7;
+          response.ok = true;
+          response.data_json = R"({"state":"normal","risk":"low"})";
+          return response;
+        });
+    if (!core_invoked) {
+      return 1;
+    }
+    if (forwarded !=
+        R"({"id":7,"ok":true,"data":{"risk":"low","state":"normal"}})") {
+      return 1;
+    }
   }
 
   bool invoked = false;

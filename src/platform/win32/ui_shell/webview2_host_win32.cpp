@@ -450,6 +450,9 @@ private:
       getSettings: () => rpc('config.getSettings'),
       saveSettings: (input) => rpc('config.saveSettings', input),
       getKey: () => rpc('config.getKey'),
+      importConfig: (input) => rpc('config.import', input ?? {}),
+      exportConfig: (input) => rpc('config.export', input ?? {}),
+      reset: (confirm) => rpc('config.reset', { confirm }),
     },
     routes: {
       list: () => rpc('routes.list'),
@@ -472,6 +475,14 @@ private:
     drivers: {
       status: () => rpc('drivers.status'),
       install: (driver) => rpc('drivers.install', { driver }),
+    },
+    key: {
+      status: () => rpc('key.status'),
+      reset: (confirm) => rpc('key.reset', { confirm }),
+    },
+    maintenance: {
+      inspectCore: () => rpc('maintenance.inspectCore'),
+      killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
       setMode: () => Promise.resolve(),
