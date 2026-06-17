@@ -96,7 +96,7 @@ These scripts write logs under `build/webview-acceptance/<platform>/`.
 - Create: `tests/ui_shell_main_wiring_test.cpp`
 - Modify: `CMakeLists.txt`
 
-- [ ] **Step 1: Add a failing wiring test for production startup shape**
+- [x] **Step 1: Add a failing wiring test for production startup shape**
 
 Create `tests/ui_shell_main_wiring_test.cpp`:
 
@@ -141,7 +141,7 @@ int main() {
 }
 ```
 
-- [ ] **Step 2: Register and run the failing test**
+- [x] **Step 2: Register and run the failing test**
 
 Modify `CMakeLists.txt` near the other UI shell tests:
 
@@ -164,7 +164,7 @@ ctest --test-dir build -C Debug -R ui_shell_main_wiring_test --output-on-failure
 
 Expected before implementation: FAIL because `ui_shell_main.cpp` bypasses the neutral runtime.
 
-- [ ] **Step 3: Define the production core transport factory**
+- [x] **Step 3: Define the production core transport factory**
 
 Modify `src/app/ui_shell/core_process_manager.hpp`:
 
@@ -203,7 +203,7 @@ std::unique_ptr<CoreRpcTransport> create_core_process_transport(
 } // namespace ecnuvpn::ui_shell
 ```
 
-- [ ] **Step 4: Implement a Windows production transport and a clear non-Windows failure**
+- [x] **Step 4: Implement a Windows production transport and a clear non-Windows failure**
 
 Modify `src/app/ui_shell/core_process_manager.cpp`. Keep `build_core_process_arguments(...)` unchanged and add this implementation at the end of the namespace:
 
@@ -279,7 +279,7 @@ Then replace the method bodies with real pipe/process code before marking this s
 - destructor closes stdin first, drains process shutdown briefly, then terminates only if still running.
 - launch uses `build_core_process_arguments(launch)` and `launch.exv_path`.
 
-- [ ] **Step 5: Wire `ui_shell_main.cpp` through `run_ui_shell_window`**
+- [x] **Step 5: Wire `ui_shell_main.cpp` through `run_ui_shell_window`**
 
 Modify `src/app/ui_shell/ui_shell_main.cpp` so each platform creates a concrete `UiWindow`, then uses one cross-platform runtime path:
 
@@ -310,7 +310,7 @@ return 70;
 return ecnuvpn::ui_shell::run_ui_shell_window(*window, config, client);
 ```
 
-- [ ] **Step 6: Run focused verification and commit**
+- [x] **Step 6: Run focused verification and commit**
 
 Run:
 
@@ -334,7 +334,7 @@ Expected after implementation: all listed tests pass.
 - Modify: `tests/darwin_wkwebview_runtime_test.cpp`
 - Modify: `tests/linux_webkitgtk_runtime_test.cpp`
 
-- [ ] **Step 1: Change platform APIs from run-functions to window factories**
+- [x] **Step 1: Change platform APIs from run-functions to window factories**
 
 Windows header target shape:
 
@@ -359,7 +359,7 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window();
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window();
 ```
 
-- [ ] **Step 2: Update tests so stubs fail**
+- [x] **Step 2: Update tests so stubs fail**
 
 Replace the stub-return assertions in `tests/darwin_wkwebview_runtime_test.cpp` and `tests/linux_webkitgtk_runtime_test.cpp` with factory assertions:
 
@@ -389,7 +389,7 @@ ctest --test-dir build -C Debug -R win32_webview2_runtime_test --output-on-failu
 
 Expected before factory implementation: FAIL to compile.
 
-- [ ] **Step 3: Implement minimal non-stub `UiWindow` classes**
+- [x] **Step 3: Implement minimal non-stub `UiWindow` classes**
 
 Each platform file must define a class derived from `ecnuvpn::ui_shell::UiWindow` with these behaviors:
 
@@ -416,7 +416,7 @@ private:
 
 The final implementation must not return `70` from `run(...)` for supported platforms when SDK dependencies are enabled.
 
-- [ ] **Step 4: Run focused platform compile gates and commit**
+- [x] **Step 4: Run focused platform compile gates and commit**
 
 Windows:
 
@@ -454,7 +454,7 @@ git commit -m "Introduce native WebView window factories"
 - Modify: `src/platform/win32/ui_shell/webview2_host_win32.cpp`
 - Modify: `tests/win32_webview2_runtime_test.cpp`
 
-- [ ] **Step 1: Add failing tests for bootstrapper execution seam**
+- [x] **Step 1: Add failing tests for bootstrapper execution seam**
 
 Extend `tests/win32_webview2_runtime_test.cpp` with:
 
@@ -475,7 +475,7 @@ assert(invoked);
 
 Expected before implementation: FAIL because the seam does not exist.
 
-- [ ] **Step 2: Add controlled bootstrapper runner**
+- [x] **Step 2: Add controlled bootstrapper runner**
 
 Add to `webview2_runtime_win32.hpp`:
 
@@ -507,7 +507,7 @@ bool run_webview2_evergreen_bootstrapper_with_runner(
 
 Then implement `run_webview2_evergreen_bootstrapper(...)` by downloading only the allowlisted Microsoft URL to a temp file and calling `CreateProcessW` with `/silent /install`. If download fails, return `false` and surface an explicit UI error from the host.
 
-- [ ] **Step 3: Implement WebView2 window creation and script bridge**
+- [x] **Step 3: Implement WebView2 window creation and script bridge**
 
 `webview2_host_win32.cpp` must:
 
@@ -534,7 +534,7 @@ The native response posted back must remain:
 {"id":1,"ok":true,"data":{}}
 ```
 
-- [ ] **Step 4: Run Windows verification and commit**
+- [x] **Step 4: Run Windows verification and commit**
 
 ```powershell
 cmake --preset windows-release -DEXV_BUILD_UI_SHELL=ON -DWEBVIEW2_SDK_DIR=$env:WEBVIEW2_SDK_DIR
@@ -554,7 +554,7 @@ Expected: Release configure succeeds with SDK present; tests pass; `exv-ui.exe -
 - Modify: `scripts/build-macos.sh`
 - Modify: `scripts/macos-packaging-smoke.sh`
 
-- [ ] **Step 1: Add compile checks for Cocoa/WKWebView symbols**
+- [x] **Step 1: Add compile checks for Cocoa/WKWebView symbols**
 
 Extend `tests/darwin_wkwebview_runtime_test.cpp`:
 
@@ -575,7 +575,7 @@ return 0;
 
 Expected before implementation: compile or link failure if the factory is not real.
 
-- [ ] **Step 2: Implement Cocoa application and WKWebView bridge**
+- [x] **Step 2: Implement Cocoa application and WKWebView bridge**
 
 `wk_webview_host_darwin.mm` must create:
 
@@ -590,7 +590,7 @@ Expected before implementation: compile or link failure if the factory is not re
 
 The message handler must pass the JSON string to `HostMessageHandler` and return the JSON response to the renderer callback.
 
-- [ ] **Step 3: Run macOS verification and commit**
+- [x] **Step 3: Run macOS verification and commit**
 
 ```bash
 cmake --preset macos-release -DEXV_BUILD_UI_SHELL=ON
@@ -611,7 +611,7 @@ Expected: native macOS package contains `exv-ui`, `bin/exv`, `bin/exv-helper`, `
 - Modify: `tests/linux_webkitgtk_runtime_test.cpp`
 - Modify: `scripts/build-linux.sh`
 
-- [ ] **Step 1: Add compile checks for GTK/WebKitGTK symbols**
+- [x] **Step 1: Add compile checks for GTK/WebKitGTK symbols**
 
 Extend `tests/linux_webkitgtk_runtime_test.cpp`:
 
@@ -627,7 +627,7 @@ window->emit_event(R"({"type":"status","data":{}})");
 return 0;
 ```
 
-- [ ] **Step 2: Implement GTK/WebKitGTK bridge**
+- [x] **Step 2: Implement GTK/WebKitGTK bridge**
 
 `webkitgtk_host_linux.cpp` must:
 
@@ -640,7 +640,7 @@ return 0;
 - call `HostMessageHandler` from the UI thread;
 - post JSON responses and event envelopes back to renderer JavaScript.
 
-- [ ] **Step 3: Run Linux verification and commit**
+- [x] **Step 3: Run Linux verification and commit**
 
 ```bash
 cmake --preset linux-release -DEXV_BUILD_UI_SHELL=ON
@@ -667,7 +667,7 @@ Expected when dependencies are present: configure, build, and focused tests pass
 - Modify: `docs/user_guide.md`
 - Move: `docs/windows-electron-helper-recovery.md` to `docs/superpowers/archive/windows-electron-helper-recovery.md`
 
-- [ ] **Step 1: Add package launch smoke checks**
+- [x] **Step 1: Add package launch smoke checks**
 
 `scripts/package_ui_shell.py` already writes `exv-ui.args`. Add a `--verify-launch-targets-only` mode that validates an existing package without copying files:
 
@@ -688,7 +688,7 @@ if args.verify_launch_targets_only:
     return 0
 ```
 
-- [ ] **Step 2: Update smoke scripts to WebView package layout**
+- [x] **Step 2: Update smoke scripts to WebView package layout**
 
 `scripts/windows-packaging-smoke.ps1` must search:
 
@@ -720,7 +720,7 @@ It must reject:
 find "$PACKAGE_ROOT" \( -name 'Electron Framework.framework' -o -name 'chromium.pak' \) -print -quit
 ```
 
-- [ ] **Step 3: Remove Electron as the documented production path**
+- [x] **Step 3: Remove Electron as the documented production path**
 
 Update `README.md`, `docs/build_guide.md`, and `docs/user_guide.md` so:
 
@@ -735,7 +735,7 @@ Move the Electron recovery document:
 Move-Item -LiteralPath docs/windows-electron-helper-recovery.md -Destination docs/superpowers/archive/windows-electron-helper-recovery.md
 ```
 
-- [ ] **Step 4: Run docs and package policy verification and commit**
+- [x] **Step 4: Run docs and package policy verification and commit**
 
 ```powershell
 cmake --build build --config Debug --target native_packaging_policy_test ui_shell_cmake_policy_test
@@ -761,7 +761,7 @@ Expected: package policy tests pass and active docs no longer describe Electron 
 - Move or delete: `webui/desktop/preload`
 - Modify: `webui/host/__tests__/webview-package-policy.test.ts`
 
-- [ ] **Step 1: Make retirement policy fail while Electron remains**
+- [x] **Step 1: Make retirement policy fail while Electron remains**
 
 Extend `webui/host/__tests__/webview-package-policy.test.ts`:
 
@@ -787,7 +787,7 @@ pnpm exec node scripts/run-electron-test.cjs host/__tests__/webview-package-poli
 
 Expected before cleanup: FAIL because Electron dependencies and scripts still exist.
 
-- [ ] **Step 2: Remove production Electron scripts and dependencies**
+- [x] **Step 2: Remove production Electron scripts and dependencies**
 
 `webui/package.json` should keep:
 
@@ -814,7 +814,7 @@ Remove:
 
 Create `webui/scripts/run-host-test.cjs` as the neutral replacement for `run-electron-test.cjs` and update test commands to use it.
 
-- [ ] **Step 3: Remove or archive Electron adapter source**
+- [x] **Step 3: Remove or archive Electron adapter source**
 
 If the adapter is no longer needed, delete:
 
@@ -833,7 +833,7 @@ webui/dev-electron/
 
 and ensure production scripts do not reference it.
 
-- [ ] **Step 4: Refresh lockfile, run web tests, and commit**
+- [x] **Step 4: Refresh lockfile, run web tests, and commit**
 
 ```powershell
 cd webui
@@ -854,7 +854,7 @@ Expected: lockfile no longer contains Electron package entries needed only by pr
 - Modify: `docs/superpowers/plans/2026-06-15-cross-platform-webview-shell-migration-plan.md`
 - Create: `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`
 
-- [ ] **Step 1: Run repository-level verification**
+- [x] **Step 1: Run repository-level verification**
 
 Windows:
 
@@ -874,7 +874,7 @@ Linux:
 bash scripts/accept-webview-shell-linux.sh
 ```
 
-- [ ] **Step 2: Write acceptance report**
+- [x] **Step 2: Write acceptance report**
 
 Create `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`:
 
@@ -906,7 +906,7 @@ Create `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`:
 
 If any command exits non-zero, record that row as `FAIL` and do not mark the migration accepted.
 
-- [ ] **Step 3: Mark original docs with completion state**
+- [x] **Step 3: Mark original docs with completion state**
 
 At the top of the original migration plan, keep the current completion pointer:
 
@@ -922,7 +922,7 @@ At the top of the design doc, keep the current implementation state:
 > `docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md`.
 ```
 
-- [ ] **Step 4: Commit final acceptance**
+- [x] **Step 4: Commit final acceptance**
 
 ```bash
 git add docs/superpowers/specs/2026-06-15-cross-platform-webview-shell-design.md docs/superpowers/plans/2026-06-15-cross-platform-webview-shell-migration-plan.md docs/superpowers/reports/2026-06-16-webview-shell-acceptance-report.md
