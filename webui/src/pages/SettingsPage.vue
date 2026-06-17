@@ -17,9 +17,10 @@ import {
   Settings,
   Shield,
   Trash2,
+  Upload,
   User,
 } from 'lucide-vue-next'
-import { useConfigStore, type AuthConfig, type SettingsConfig } from '../stores/config'
+import { useConfigStore, type AuthConfig, type SettingsConfig, type CoreInspection } from '../stores/config'
 import { normalizeError, useVpnStore } from '../stores/vpn'
 import { useUiStore } from '../stores/ui'
 import ToggleSwitch from '../components/ToggleSwitch.vue'
@@ -89,6 +90,7 @@ const settingsForm = ref<SettingsConfig>({
   windows_tunnel_driver: 'auto',
   windows_tap_interface: '',
   auto_reconnect: true,
+  retry_limit: -1,
   minimal_mode: false,
   service_install_prompt_seen: false,
   minimal_install_service_before_connect: true,
@@ -96,6 +98,25 @@ const settingsForm = ref<SettingsConfig>({
 
 const routes = ref<string[]>([])
 const newRoute = ref('')
+
+const importFileInput = ref<HTMLInputElement | null>(null)
+const coreInspection = ref<CoreInspection | null>(null)
+const coreMaintenanceBusy = ref(false)
+
+// Warning copy for password-protected export.
+// Original spec text (for traceability):
+//   "Exported config contains the recoverable VPN password and must be treated as
+//    a sensitive file. Do not transfer over untrusted channels or copy to public
+//    machines. The password is stored in non-plaintext form, but a weak export
+//    password can still be brute-forced offline. Destroy the file when done."
+const PROTECTED_EXPORT_WARNING =
+  '导出的配置包含可恢复的 VPN 密码，请将其视为敏感文件。请勿通过不受信任的渠道传输或拷贝到公共计算机。密码以非明文形式存储，但弱导出密码仍可被离线攻击。使用完毕后请尽量销毁该文件。'
+
+const showCoreMaintenanceBanner = computed(() => {
+  const inspection = coreInspection.value
+  if (!inspection) return false
+  return inspection.state === 'broken' || inspection.risk === 'high'
+})
 
 const passwordPlaceholder = computed(() =>
   authForm.value.password_stored
@@ -350,6 +371,7 @@ onMounted(async () => {
     } catch (error) {
       ui.requestError({ title: '刷新运行时失败', message: normalizeError(error).message })
     }
+    void inspectCoreSilently()
   }
 
   attachScrollListener()
@@ -531,6 +553,134 @@ async function removeRoute(index: number) {
     routesBusy.value = false
   }
 }
+
+async function inspectCoreSilently() {
+  try {
+    coreInspection.value = await config.inspectCore()
+  } catch {
+    coreInspection.value = null
+  }
+}
+
+function triggerImportConfig() {
+  importFileInput.value?.click()
+}
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'))
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.readAsText(file)
+  })
+}
+
+async function handleImportFileChange(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  target.value = ''
+  if (!file) return
+  try {
+    const text = await readFileAsText(file)
+    const password = await ui.requestPassword('请输入导入文件的密码（如有）')
+    if (password === null) return
+    const isProtected = password.length > 0
+    await config.importConfig({
+      format: isProtected ? 'protected' : 'unprotected',
+      data: text,
+      password: isProtected ? password : undefined,
+    })
+    ui.addToast('配置已导入', 'success')
+    authForm.value = { ...config.authConfig, password: '' }
+    applyServerChoice(authForm.value.server)
+    settingsForm.value = { ...config.settings }
+  } catch (error) {
+    ui.requestError({ title: '导入配置失败', message: normalizeError(error).message })
+  }
+}
+
+function downloadExport(filename: string, payload: string) {
+  const blob = new Blob([payload], { type: 'application/octet-stream' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+async function exportConfigUnprotected() {
+  try {
+    const result = await config.exportConfig({ protected: false })
+    downloadExport('ecnu-vpn-config.json', result.data)
+    ui.addToast('配置已导出', 'success')
+  } catch (error) {
+    ui.requestError({ title: '导出配置失败', message: normalizeError(error).message })
+  }
+}
+
+async function exportConfigProtected() {
+  try {
+    const password = await ui.requestPassword('设置导出密码')
+    if (password === null) return
+    if (!password) {
+      ui.requestError({ title: '密码不能为空', message: '请提供一个非空的导出密码。' })
+      return
+    }
+    const result = await config.exportConfig({ protected: true, password })
+    downloadExport('ecnu-vpn-config.protected', result.data)
+    ui.requestError({
+      title: '导出已完成',
+      message: PROTECTED_EXPORT_WARNING,
+      primaryLabel: '知道了',
+    })
+  } catch (error) {
+    ui.requestError({ title: '导出配置失败', message: normalizeError(error).message })
+  }
+}
+
+function resetConfigAction() {
+  ui.requestConfirm('此操作会清空所有 VPN 配置，是否继续？', async () => {
+    try {
+      await config.resetConfig(true)
+      ui.addToast('配置已重置', 'success')
+      authForm.value = { ...config.authConfig, password: '' }
+      applyServerChoice(authForm.value.server)
+      settingsForm.value = { ...config.settings }
+    } catch (error) {
+      ui.requestError({ title: '重置配置失败', message: normalizeError(error).message })
+    }
+  })
+}
+
+function resetKeyAction() {
+  ui.requestConfirm('此操作会清除本地保存的加密密码，下次连接需重新输入。是否继续？', async () => {
+    try {
+      await config.resetKey(true)
+      ui.addToast('已重置加密密钥', 'success')
+    } catch (error) {
+      ui.requestError({ title: '重置加密密钥失败', message: normalizeError(error).message })
+    }
+  })
+}
+
+function killStaleCoreAction() {
+  ui.requestConfirm('确认终止该内核进程？此操作不可撤销。', async () => {
+    if (coreMaintenanceBusy.value) return
+    coreMaintenanceBusy.value = true
+    try {
+      await config.killStaleCore(true)
+      ui.addToast('已清理', 'success')
+      await inspectCoreSilently()
+    } catch (error) {
+      ui.requestError({ title: '清理残留进程失败', message: normalizeError(error).message })
+    } finally {
+      coreMaintenanceBusy.value = false
+    }
+  })
+}
 </script>
 
 <template>
@@ -664,6 +814,23 @@ async function removeRoute(index: number) {
           连接
         </h2>
 
+        <div
+          v-if="showCoreMaintenanceBanner"
+          class="mb-4 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300"
+        >
+          <p class="font-medium">检测到残留 / 异常的 VPN 内核进程</p>
+          <p class="mt-1 text-xs text-yellow-300/80">
+            已发现可能无响应或卡死的内核（pid {{ coreInspection?.pid ?? '-' }}）。是否清理？
+          </p>
+          <button
+            :disabled="coreMaintenanceBusy"
+            class="mt-3 rounded-lg border border-yellow-400/50 px-4 py-2 text-xs font-medium text-yellow-200 transition-colors hover:bg-yellow-500/20 disabled:opacity-50"
+            @click="killStaleCoreAction"
+          >
+            清理残留进程
+          </button>
+        </div>
+
         <div class="space-y-5">
           <div>
             <label class="mb-1.5 block text-xs font-medium text-muted">MTU</label>
@@ -694,6 +861,17 @@ async function removeRoute(index: number) {
             <ToggleSwitch
               v-model="settingsForm.auto_reconnect"
             />
+          </div>
+
+          <div>
+            <label class="mb-1.5 block text-xs font-medium text-muted">重连尝试次数</label>
+            <input
+              v-model.number="settingsForm.retry_limit"
+              type="number"
+              min="-1"
+              class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
+            />
+            <p class="mt-1 text-xs text-muted">-1 表示无限重连；0 表示不重连；正整数表示最大次数。</p>
           </div>
 
           <div class="flex items-center gap-3 pt-1">
@@ -780,6 +958,57 @@ async function removeRoute(index: number) {
               <Download v-else class="h-4 w-4" />
               {{ serviceButtonLabel }}
             </button>
+          </div>
+
+          <div class="border-t border-border pt-4">
+            <div class="mb-3">
+              <p class="text-sm font-medium text-foreground">配置导入 / 导出 / 重置</p>
+              <p class="text-xs text-muted">导入或导出 VPN 配置；密码保护导出的文件可在不同设备间安全迁移。</p>
+            </div>
+            <input
+              ref="importFileInput"
+              type="file"
+              class="hidden"
+              accept=".json,.protected,.txt,application/json,application/octet-stream,text/plain"
+              @change="handleImportFileChange"
+            />
+            <div class="flex flex-wrap gap-3">
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+                @click="triggerImportConfig"
+              >
+                <Upload class="h-4 w-4" />
+                导入配置
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+                @click="exportConfigUnprotected"
+              >
+                <Download class="h-4 w-4" />
+                导出配置（不含密码）
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+                @click="exportConfigProtected"
+              >
+                <Download class="h-4 w-4" />
+                导出配置（密码保护）
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-destructive/90"
+                @click="resetConfigAction"
+              >
+                <Trash2 class="h-4 w-4" />
+                重置配置
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-destructive/50 px-4 py-2 text-sm text-destructive transition-colors hover:bg-destructive/10"
+                @click="resetKeyAction"
+              >
+                <Key class="h-4 w-4" />
+                重置加密密钥
+              </button>
+            </div>
           </div>
 
           <div v-if="isDesktop" class="border-t border-border pt-4">

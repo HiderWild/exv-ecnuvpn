@@ -69,6 +69,16 @@ export interface EcnuVpnApi {
     getSettings(): Promise<SettingsConfig>
     saveSettings(input: Partial<SettingsConfig>): Promise<SettingsConfig>
     getKey(): Promise<KeyStatus>
+    importConfig(input: { format: 'protected' | 'unprotected'; data: string; password?: string }): Promise<{ ok: true }>
+    exportConfig(input: { protected: boolean; password?: string }): Promise<{ format: 'protected' | 'unprotected'; data: string }>
+    reset(confirm: boolean): Promise<{ ok: true }>
+  }
+  key: {
+    reset(confirm: boolean): Promise<{ ok: true }>
+  }
+  maintenance: {
+    inspectCore(): Promise<{ state: string; risk: 'unknown' | 'low' | 'medium' | 'high'; pid?: number; ipc_path?: string }>
+    killStaleCore(confirm: boolean): Promise<{ ok: true }>
   }
   routes: {
     list(): Promise<RouteEntry[]>

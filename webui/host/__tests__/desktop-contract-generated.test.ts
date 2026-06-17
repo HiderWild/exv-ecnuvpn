@@ -84,6 +84,20 @@ describe('generated system contract', () => {
     assert.equal(IPC_PROTOCOL_MAJOR, 1)
   })
 
+  it('exposes new core RPC actions for config import/export/reset, key reset, and maintenance', () => {
+    expectContains(CORE_RPC_ACTIONS, 'config.import')
+    expectContains(CORE_RPC_ACTIONS, 'config.export')
+    expectContains(CORE_RPC_ACTIONS, 'config.reset')
+    expectContains(CORE_RPC_ACTIONS, 'key.status')
+    expectContains(CORE_RPC_ACTIONS, 'key.reset')
+    expectContains(CORE_RPC_ACTIONS, 'maintenance.inspectCore')
+    expectContains(CORE_RPC_ACTIONS, 'maintenance.killStaleCore')
+
+    expectContains(DESTRUCTIVE_CORE_RPC_ACTIONS, 'config.reset')
+    expectContains(DESTRUCTIVE_CORE_RPC_ACTIONS, 'key.reset')
+    expectContains(DESTRUCTIVE_CORE_RPC_ACTIONS, 'maintenance.killStaleCore')
+  })
+
   it('declares config canonical actions and legacy aliases', () => {
     const config = manifest().modules.config
     assert.deepEqual(CONFIG_ACTIONS, config.actions.map((action: { name: string }) => action.name))

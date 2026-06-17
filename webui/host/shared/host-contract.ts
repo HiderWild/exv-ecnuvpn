@@ -46,6 +46,12 @@ export const desktopApiPaths = {
   drivers: '/drivers',
   driversInstall: '/drivers/install',
   logs: '/logs',
+  configImport: '/config/import',
+  configExport: '/config/export',
+  configReset: '/config/reset',
+  keyReset: '/key/reset',
+  maintenanceCore: '/maintenance/core',
+  maintenanceCoreKill: '/maintenance/core/kill',
 } as const
 
 export const desktopRpcActions = DESKTOP_RPC_ACTIONS

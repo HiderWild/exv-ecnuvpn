@@ -35,3 +35,19 @@ describe('neutral host boundary', () => {
     }
   })
 })
+
+describe('renderer key status surface', () => {
+  it('does not expose key path, fingerprint, or key material in renderer types', () => {
+    const checked = [
+      ...filesUnder(join(webuiRoot, 'src')),
+      ...filesUnder(join(webuiRoot, 'host', 'shared')),
+    ]
+    for (const file of checked) {
+      const text = readFileSync(file, 'utf8')
+      // Renderer types must not surface key fingerprint or paths.
+      assert.doesNotMatch(text, /\bfingerprint\s*:/i)
+      assert.doesNotMatch(text, /\bkey_path\s*:/i)
+      assert.doesNotMatch(text, /\bkey_material\s*:/i)
+    }
+  })
+})
