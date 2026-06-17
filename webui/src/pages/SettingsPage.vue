@@ -103,14 +103,11 @@ const importFileInput = ref<HTMLInputElement | null>(null)
 const coreInspection = ref<CoreInspection | null>(null)
 const coreMaintenanceBusy = ref(false)
 
-// Warning copy for password-protected export.
-// Original spec text (for traceability):
-//   "Exported config contains the recoverable VPN password and must be treated as
-//    a sensitive file. Do not transfer over untrusted channels or copy to public
-//    machines. The password is stored in non-plaintext form, but a weak export
-//    password can still be brute-forced offline. Destroy the file when done."
+// Warning copy for password-protected export. Verbatim from the plan
+// (docs/superpowers/plans/2026-06-16-cli-core-ui-contract-refactor-plan.md
+// Task 9 Step 3) — keep this string in sync with the plan text exactly.
 const PROTECTED_EXPORT_WARNING =
-  '导出的配置包含可恢复的 VPN 密码，请将其视为敏感文件。请勿通过不受信任的渠道传输或拷贝到公共计算机。密码以非明文形式存储，但弱导出密码仍可被离线攻击。使用完毕后请尽量销毁该文件。'
+  'The exported configuration contains a recoverable VPN password. Treat it as a sensitive file. Do not share it through untrusted channels or copy it to public machines. The password is not stored in plaintext, but a weak export password can still be attacked offline. Destroy the file after use when possible.'
 
 const showCoreMaintenanceBanner = computed(() => {
   const inspection = coreInspection.value
