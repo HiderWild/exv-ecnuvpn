@@ -516,35 +516,28 @@ bool cli_service_actions_use_core_helper_maintenance_contract() {
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
-  const std::string main_source =
-      source_text_at({"src", "app", "main.cpp"});
+  const std::string cli_source =
+      source_text_at({"src", "cli", "cli_commands.cpp"});
   const std::string use_case_source =
       source_text_at({"src", "core", "use_cases",
                       "system_status_use_cases.cpp"});
-  const auto service_handler = main_source.find("static int handle_service");
-  const auto config_handler = main_source.find("static int handle_config",
+  const auto service_handler = cli_source.find("\"service\"");
+  const auto config_handler = cli_source.find("\"config\"",
                                                service_handler);
-  const auto service_source =
-      service_handler == std::string::npos
-          ? std::string()
-          : main_source.substr(service_handler,
-                               config_handler == std::string::npos
-                                   ? std::string::npos
-                                   : config_handler - service_handler);
 
   bool ok = true;
   ok = expect(service_handler != std::string::npos,
               "CLI should keep a service subcommand handler") &&
        ok;
-  ok = expect(main_source.find("app_api::handle_action") !=
+  ok = expect(cli_source.find("format_core_request") !=
                   std::string::npos,
               "CLI service install/uninstall should route through core action dispatch") &&
        ok;
-  ok = expect(service_source.find("helper::install_service") ==
+  ok = expect(cli_source.find("helper::install_service") ==
                   std::string::npos,
               "CLI service install must not call helper::install_service directly") &&
        ok;
-  ok = expect(service_source.find("helper::uninstall_service") ==
+  ok = expect(cli_source.find("helper::uninstall_service") ==
                   std::string::npos,
               "CLI service uninstall must not call helper::uninstall_service directly") &&
        ok;

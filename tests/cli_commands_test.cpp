@@ -236,6 +236,39 @@ int main() {
                 "version should print core version probe output") && ok;
   }
 
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command({"exv-cli", "service", "install"}, deps);
+    ok = expect(rc == 0, "service install should succeed") && ok;
+    ok = expect(fixture.sent.size() == 1, "service install should send one request") && ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "service.install") && ok;
+    }
+  }
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command({"exv-cli", "service", "uninstall"}, deps);
+    ok = expect(rc == 0, "service uninstall should succeed") && ok;
+    ok = expect(fixture.sent.size() == 1, "service uninstall should send one request") && ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "service.uninstall") && ok;
+    }
+  }
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command({"exv-cli", "service", "status"}, deps);
+    ok = expect(rc == 0, "service status should succeed") && ok;
+    ok = expect(fixture.sent.size() == 1, "service status should send one request") && ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "service.status") && ok;
+    }
+  }
+
   if (ok) {
     std::cout << "cli_commands_test: all assertions passed\n";
   } else {

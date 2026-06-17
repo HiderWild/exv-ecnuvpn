@@ -195,7 +195,7 @@ int handle_config(const std::vector<std::string> &args, const CliCommandDeps &de
 
 void print_help(std::ostream &out) {
   out << "Usage: exv-cli [command] [options]\n"
-      << "Commands: start, stop, status, config, version, help\n";
+      << "Commands: start, stop, status, config, service, version, help\n";
 }
 
 } // namespace
@@ -245,6 +245,23 @@ int run_cli_command(const std::vector<std::string> &raw_args, CliCommandDeps dep
   }
   if (cmd == "config" || cmd == "-c") {
     return handle_config(args, deps);
+  }
+  if (cmd == "service") {
+    const std::string subcmd = args.size() > 2 ? args[2] : "status";
+    if (subcmd == "install") {
+      auto core = resolve_or_fail(deps);
+      return core.has_value() ? send_action(deps, *core, "service.install") : 1;
+    }
+    if (subcmd == "uninstall") {
+      auto core = resolve_or_fail(deps);
+      return core.has_value() ? send_action(deps, *core, "service.uninstall") : 1;
+    }
+    if (subcmd == "status") {
+      auto core = resolve_or_fail(deps);
+      return core.has_value() ? send_action(deps, *core, "service.status") : 1;
+    }
+    err_stream(deps) << "Unknown service subcommand: " << subcmd << '\n';
+    return 1;
   }
 
   err_stream(deps) << "Unknown command: " << cmd << '\n';
