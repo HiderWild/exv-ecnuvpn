@@ -519,7 +519,22 @@ target_link_libraries(exv-core PUBLIC
 )
 
 add_executable(exv ${SOURCES})
-target_link_libraries(exv PRIVATE exv-helper-runtime)
+# exv-core and exv-helper-runtime form a circular static-library
+# dependency: core sources (pipe_helper_client, service_status,
+# oneshot_bootstrap) reference helper messages and helper::is_available,
+# while helper-runtime depends on core.  GNU ld resolves archives
+# left-to-right by default, so the group wrapper tells it to make
+# multiple passes.  MSVC and Apple ld64 handle this natively.
+if(MINGW)
+    target_link_libraries(exv PRIVATE
+        "-Wl,--start-group"
+        exv-helper-runtime
+        exv-core
+        "-Wl,--end-group"
+    )
+else()
+    target_link_libraries(exv PRIVATE exv-helper-runtime exv-core)
+endif()
 
 add_executable(exv-cli ${EXV_CLI_FRONTEND_SOURCES})
 target_link_libraries(exv-cli PRIVATE exv-core)
