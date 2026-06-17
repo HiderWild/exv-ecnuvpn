@@ -189,10 +189,11 @@ describe('native WebView package policy', () => {
     assert.match(macosAcceptance, /git diff --check/)
 
     assert.match(linuxAcceptance, /build\/webview-acceptance\/linux/)
-    assert.match(linuxAcceptance, /cmake --preset linux-release -DEXV_BUILD_UI_SHELL=ON/)
+    assert.match(linuxAcceptance, /cmake (?:--fresh )?--preset linux-release/)
+    assert.match(linuxAcceptance, /-DEXV_BUILD_UI_SHELL=ON/)
     assert.match(linuxAcceptance, /pnpm --dir webui install --frozen-lockfile/)
     assert.match(linuxAcceptance, /bash scripts\/build-linux\.sh desktop/)
-    assert.match(linuxAcceptance, /git diff --check/)
+    assert.match(linuxAcceptance, /git (?:-c \S+ )?diff --check/)
   })
 
   it('documents WebView as the production desktop shell in active docs', () => {
