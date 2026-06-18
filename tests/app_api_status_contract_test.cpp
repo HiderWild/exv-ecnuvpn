@@ -509,6 +509,37 @@ bool desktop_native_preflight_reports_substage_timing() {
 #endif
 }
 
+bool desktop_connect_pipeline_reports_branch_timing() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  bool ok = true;
+  ok = expect(source.find("StageTimer branch_timing(\"desktop.connect.backend_helper_ready\")") !=
+                  std::string::npos,
+              "desktop connect pipeline should time backend/helper readiness branch") &&
+       ok;
+  ok = expect(source.find("StageTimer branch_timing(\"desktop.connect.platform_ready\")") !=
+                  std::string::npos,
+              "desktop connect pipeline should time platform readiness branch") &&
+       ok;
+  ok = expect(source.find("StageTimer branch_timing(\"desktop.connect.protocol_handshake\")") !=
+                  std::string::npos,
+              "desktop connect pipeline should time protocol handshake branch") &&
+       ok;
+  ok = expect(source.find("timing.mark(\"first_failure\"") !=
+                  std::string::npos,
+              "desktop connect pipeline should mark first failure timing") &&
+       ok;
+  ok = expect(source.find("timing.mark(\"serial_tail\"") !=
+                  std::string::npos,
+              "desktop connect pipeline should mark serial tail entry") &&
+       ok;
+  return ok;
+#endif
+}
+
 bool desktop_native_connect_releases_attempt_guard_on_failed_status() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
@@ -802,6 +833,7 @@ int main() {
   ok = app_api_activates_core_owned_native_mode() && ok;
   ok = desktop_native_connect_uses_core_owned_controller_pipeline() && ok;
   ok = desktop_native_preflight_reports_substage_timing() && ok;
+  ok = desktop_connect_pipeline_reports_branch_timing() && ok;
   ok = desktop_native_connect_releases_attempt_guard_on_failed_status() && ok;
   ok = tunnel_controller_native_runner_failure_cleans_helper_session() && ok;
   ok = desktop_helper_status_includes_current_instance_contract() && ok;

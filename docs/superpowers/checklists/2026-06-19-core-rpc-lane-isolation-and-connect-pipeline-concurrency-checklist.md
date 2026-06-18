@@ -113,14 +113,16 @@ Verification evidence: `cmake --build --preset windows-release --target win32_dr
 
 ## Phase 6: UI Locality And Guardrails
 
-- [ ] Add frontend test for rapid minimal/advanced toggles while a core RPC is delayed.
-- [ ] Ensure stale backend/status payload cannot overwrite frontend-local mode.
-- [ ] Ensure service-install prompt seen state remains frontend-local.
-- [ ] Ensure Linux host handles `window.setMode` locally.
-- [ ] Add architecture guard rejecting global desktop dispatch serialization.
-- [ ] Add timing/log duplication guard for connect timing events.
-- [ ] Add timing guard for `backend_helper_ready`, `platform_ready`, `protocol_handshake`, `first_failure`, and `serial_tail`.
-- [ ] Commit UI locality and guardrails.
+- [x] Add frontend test for rapid minimal/advanced toggles while a core RPC is delayed.
+- [x] Ensure stale backend/status payload cannot overwrite frontend-local mode.
+- [x] Ensure service-install prompt seen state remains frontend-local.
+- [x] Ensure Linux host handles `window.setMode` locally.
+- [x] Add architecture guard rejecting global desktop dispatch serialization.
+- [x] Add timing/log duplication guard for connect timing events.
+- [x] Add timing guard for `backend_helper_ready`, `platform_ready`, `protocol_handshake`, `first_failure`, and `serial_tail`.
+- [x] Commit UI locality and guardrails.
+
+Verification evidence: `pnpm --dir webui exec node scripts/run-host-test.cjs host/__tests__/webview-package-policy.test.ts`, `pnpm --dir webui exec vue-tsc -b`, `pnpm --dir webui test:host`, `cmake --build --preset windows-release --target exv app_api_status_contract_test`, and `ctest --test-dir build-windows/cpp -R "app_api_status_contract_test" --output-on-failure` passed. `minimal_mode` and `service_install_prompt_seen` are now frontend-local `localStorage` values; remote settings fetches are overlaid with local values, and saves strip those keys before calling `/config/settings`. Existing host-boundary tests continue to cover local `window.setMode` handling and no synchronous WebView callback core dispatch. New timing source guards require backend/helper, platform, protocol-handshake, first-failure, and serial-tail connect timing marks.
 
 ## Phase 7: Verification
 

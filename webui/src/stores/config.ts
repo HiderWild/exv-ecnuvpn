@@ -84,6 +84,48 @@ export interface DriverStatus {
 }
 
 export const useConfigStore = defineStore('config', () => {
+  function readLocalBool(key: 'ecnu-vpn:minimal-mode' | 'ecnu-vpn:service-install-prompt-seen', fallback: boolean) {
+    if (typeof localStorage === 'undefined') return fallback
+    const value = key === 'ecnu-vpn:minimal-mode'
+      ? localStorage.getItem('ecnu-vpn:minimal-mode')
+      : localStorage.getItem('ecnu-vpn:service-install-prompt-seen')
+    if (value === 'true') return true
+    if (value === 'false') return false
+    return fallback
+  }
+
+  function writeLocalBool(key: 'ecnu-vpn:minimal-mode' | 'ecnu-vpn:service-install-prompt-seen', value: boolean) {
+    if (typeof localStorage === 'undefined') return
+    if (key === 'ecnu-vpn:minimal-mode') {
+      localStorage.setItem('ecnu-vpn:minimal-mode', value ? 'true' : 'false')
+      return
+    }
+    localStorage.setItem('ecnu-vpn:service-install-prompt-seen', value ? 'true' : 'false')
+  }
+
+  function applyFrontendLocalSettings(next: SettingsConfig) {
+    return {
+      ...next,
+      minimal_mode: readLocalBool('ecnu-vpn:minimal-mode', next.minimal_mode),
+      service_install_prompt_seen: readLocalBool(
+        'ecnu-vpn:service-install-prompt-seen',
+        next.service_install_prompt_seen,
+      ),
+    }
+  }
+
+  function persistFrontendLocalSettings(s: Partial<SettingsConfig>) {
+    if (Object.prototype.hasOwnProperty.call(s, 'minimal_mode') && s.minimal_mode != null) {
+      writeLocalBool('ecnu-vpn:minimal-mode', s.minimal_mode)
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(s, 'service_install_prompt_seen') &&
+      s.service_install_prompt_seen != null
+    ) {
+      writeLocalBool('ecnu-vpn:service-install-prompt-seen', s.service_install_prompt_seen)
+    }
+  }
+
   const authConfig = ref<AuthConfig>({
     server: '',
     username: '',
@@ -106,8 +148,8 @@ export const useConfigStore = defineStore('config', () => {
     windows_tap_interface: '',
     auto_reconnect: true,
     retry_limit: -1,
-    minimal_mode: false,
-    service_install_prompt_seen: false,
+    minimal_mode: readLocalBool('ecnu-vpn:minimal-mode', false),
+    service_install_prompt_seen: readLocalBool('ecnu-vpn:service-install-prompt-seen', false),
     minimal_install_service_before_connect: true,
   })
 
@@ -137,18 +179,28 @@ export const useConfigStore = defineStore('config', () => {
   async function fetchSettings() {
     try {
       const { data } = await api.get<SettingsConfig>('/config/settings')
-      settings.value = { ...settings.value, ...data }
+      settings.value = applyFrontendLocalSettings({ ...settings.value, ...data })
     } catch (e) { console.error('[config] fetchSettings failed:', e) }
   }
 
   async function saveSettings(s: Partial<SettingsConfig>) {
     const previous = settings.value
     settings.value = { ...settings.value, ...s }
+    persistFrontendLocalSettings(s)
+    const remoteSettings = { ...s }
+    delete remoteSettings.minimal_mode
+    delete remoteSettings.service_install_prompt_seen
+    if (Object.keys(remoteSettings).length === 0) return
+
     try {
-      const { data } = await api.put<SettingsConfig>('/config/settings', { ...s })
-      settings.value = { ...settings.value, ...data }
+      const { data } = await api.put<SettingsConfig>('/config/settings', remoteSettings)
+      settings.value = applyFrontendLocalSettings({ ...settings.value, ...data })
     } catch (error) {
       settings.value = previous
+      persistFrontendLocalSettings({
+        minimal_mode: previous.minimal_mode,
+        service_install_prompt_seen: previous.service_install_prompt_seen,
+      })
       throw error
     }
   }

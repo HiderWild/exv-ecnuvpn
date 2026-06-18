@@ -187,10 +187,23 @@ describe('native WebView package policy', () => {
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
 
     assert.doesNotMatch(configStore, /window\.ecnuVpn\.window\.setMode/)
+    assert.match(configStore, /localStorage\.getItem\('ecnu-vpn:minimal-mode'\)/)
+    assert.match(configStore, /localStorage\.setItem\('ecnu-vpn:minimal-mode'/)
+    assert.match(configStore, /delete remoteSettings\.minimal_mode/)
     assert.match(configStore, /settings\.value = \{ \.\.\.settings\.value, \.\.\.s \}/)
     assert.match(appVue, /watch\(\s*minimalMode/)
     assert.match(appVue, /requestAnimationFrame/)
     assert.match(appVue, /window\.ecnuVpn\?\.window\?\.setMode/)
+  })
+
+  it('keeps service install prompt seen state in frontend storage only', () => {
+    const configStore = readFileSync(join(webuiRoot, 'src', 'stores', 'config.ts'), 'utf8')
+    const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+
+    assert.match(configStore, /localStorage\.getItem\('ecnu-vpn:service-install-prompt-seen'\)/)
+    assert.match(configStore, /localStorage\.setItem\('ecnu-vpn:service-install-prompt-seen'/)
+    assert.match(configStore, /delete remoteSettings\.service_install_prompt_seen/)
+    assert.match(appVue, /await markServicePromptSeen\(\)[\s\S]*servicePromptVisible\.value = true/)
   })
 
   it('marks service install prompts seen before display and keeps dismiss visual-only', () => {

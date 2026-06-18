@@ -266,6 +266,7 @@ void run_desktop_connect_job(Config cfg,
       });
 
   auto backend_branch = []([[maybe_unused]] std::stop_token branch_stop) {
+    StageTimer branch_timing("desktop.connect.backend_helper_ready");
     platform::BackendResolveOptions options;
     options.preferred_mode = "auto";
     options.allow_oneshot = true;
@@ -280,6 +281,10 @@ void run_desktop_connect_job(Config cfg,
         std::string(backend_ok ? "true" : "false") +
         " mode=" + backend.value("mode", std::string("unknown")));
     if (!backend_ok) {
+      branch_timing.finish(false,
+                           "code=" + backend.value(
+                                         "code",
+                                         platform::kHelperUnavailableCode));
       return exv::core::ConnectBranchResult{
           exv::core::ConnectBranch::BackendHelperReady,
           false,
@@ -288,12 +293,16 @@ void run_desktop_connect_job(Config cfg,
                         platform::helper_unavailable_connect_message()),
           backend};
     }
+    branch_timing.finish(true,
+                         "mode=" + backend.value("mode", std::string("unknown")));
     return exv::core::ConnectBranchResult{
         exv::core::ConnectBranch::BackendHelperReady, true, {}, {}, backend};
   };
 
   auto platform_branch = [cfg](std::stop_token branch_stop) {
+    StageTimer branch_timing("desktop.connect.platform_ready");
     if (branch_stop.stop_requested()) {
+      branch_timing.finish(false, "code=cancelled");
       return exv::core::ConnectBranchResult{
           exv::core::ConnectBranch::PlatformReady,
           false,
@@ -304,6 +313,7 @@ void run_desktop_connect_job(Config cfg,
 
     nlohmann::json runtime = runtime_status_json(cfg);
     if (!runtime.value("available", false)) {
+      branch_timing.finish(false, "code=runtime_unavailable");
       return exv::core::ConnectBranchResult{
           exv::core::ConnectBranch::PlatformReady,
           false,
@@ -322,6 +332,10 @@ void run_desktop_connect_job(Config cfg,
         "app_api: preflight platform checks - ok=" +
         std::string(platform_ok ? "true" : "false"));
     if (!platform_ok) {
+      branch_timing.finish(
+          false,
+          "code=" +
+              platform_err.value("code", std::string("platform_checks_failed")));
       return exv::core::ConnectBranchResult{
           exv::core::ConnectBranch::PlatformReady,
           false,
@@ -332,6 +346,7 @@ void run_desktop_connect_job(Config cfg,
           platform_err};
     }
 
+    branch_timing.finish(true, "stage=platform_checks_checked");
     return exv::core::ConnectBranchResult{
         exv::core::ConnectBranch::PlatformReady,
         true,
@@ -342,10 +357,12 @@ void run_desktop_connect_job(Config cfg,
 
   auto protocol_branch = [cfg, password, prepared_handshake](
                              std::stop_token branch_stop) mutable {
+    StageTimer branch_timing("desktop.connect.protocol_handshake");
     ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
     auto mapped =
         exv::core::make_native_engine_config(cfg, password, &engine_config);
     if (!mapped.ok) {
+      branch_timing.finish(false, "code=" + mapped.code);
       return exv::core::ConnectBranchResult{
           exv::core::ConnectBranch::ProtocolHandshake,
           false,
@@ -359,6 +376,7 @@ void run_desktop_connect_job(Config cfg,
     ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config, deps);
     auto result = job.run(branch_stop, &handshake);
     if (!result.ok) {
+      branch_timing.finish(false, "code=" + result.code);
       return exv::core::ConnectBranchResult{
           exv::core::ConnectBranch::ProtocolHandshake,
           false,
@@ -372,6 +390,7 @@ void run_desktop_connect_job(Config cfg,
       } else if (handshake.transport) {
         handshake.transport->disconnect();
       }
+      branch_timing.finish(false, "code=cancelled");
       return exv::core::ConnectBranchResult{
           exv::core::ConnectBranch::ProtocolHandshake,
           false,
@@ -390,6 +409,7 @@ void run_desktop_connect_job(Config cfg,
       prepared_handshake->handshake = std::move(handshake);
       prepared_handshake->ready = true;
     }
+    branch_timing.finish(true, "stage=cstp_connected");
     return exv::core::ConnectBranchResult{
         exv::core::ConnectBranch::ProtocolHandshake, true, {}, {}, payload};
   };
@@ -398,6 +418,9 @@ void run_desktop_connect_job(Config cfg,
       pipeline.run(std::move(backend_branch), std::move(platform_branch),
                    std::move(protocol_branch), stop);
   if (!pipeline_result.ok) {
+    timing.mark("first_failure",
+                "branch=" + pipeline_result.first_failure_branch +
+                    " code=" + pipeline_result.code);
     timing.finish(false, "stage=connect_pipeline branch=" +
                              pipeline_result.first_failure_branch +
                              " code=" + pipeline_result.code);
@@ -412,6 +435,7 @@ void run_desktop_connect_job(Config cfg,
     return;
   }
   timing.mark("connect_pipeline", "result=ok");
+  timing.mark("serial_tail", "entered=true");
 
   if (stop.stop_requested()) {
     return;
