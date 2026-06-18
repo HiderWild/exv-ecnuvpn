@@ -1417,6 +1417,21 @@ if(WIN32)
 
     add_test(NAME win32_native_wintun_test COMMAND win32_native_wintun_test)
 
+    add_executable(win32_driver_status_test
+        tests/win32_driver_status_test.cpp
+        src/platform/win32/driver_status.cpp
+        src/platform/win32/app_api_runtime_policy.cpp
+        src/platform/common/process_utils.cpp
+        src/utils/strings.cpp
+    )
+
+    target_include_directories(win32_driver_status_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src
+    )
+
+    add_test(NAME win32_driver_status_test COMMAND win32_driver_status_test)
+
     add_executable(win32_native_ip_config_test
         tests/win32_native_ip_config_test.cpp
         src/platform/win32/native_ip_config.cpp
@@ -2604,6 +2619,7 @@ set(_release_blocking_tests
 if(WIN32)
     list(APPEND _release_blocking_tests
         win32_webview2_runtime_test
+        win32_driver_status_test
         win32_platform_network_ops_test
     )
 endif()

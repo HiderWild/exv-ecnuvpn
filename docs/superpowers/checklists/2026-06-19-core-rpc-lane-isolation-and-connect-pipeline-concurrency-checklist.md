@@ -101,13 +101,15 @@ Verification evidence: `ctest --test-dir build-windows/cpp -R "connect_intent_te
 
 ## Phase 5: Windows Platform Readiness
 
-- [ ] Add Windows driver status tests with injected adapter enumeration.
-- [ ] Prove preflight does not run separate Wintun and TAP enumeration when one scan is enough.
-- [ ] Replace double PowerShell/CIM scans with one native or single-command adapter snapshot.
-- [ ] Add short-lived driver status cache for connect/status bursts.
-- [ ] Invalidate driver cache after driver install and settings changes affecting Windows tunnel driver selection.
-- [ ] Preserve existing driver status JSON fields.
-- [ ] Commit Windows platform readiness optimization.
+- [x] Add Windows driver status tests with injected adapter enumeration.
+- [x] Prove preflight does not run separate Wintun and TAP enumeration when one scan is enough.
+- [x] Replace double PowerShell/CIM scans with one native or single-command adapter snapshot.
+- [x] Add short-lived driver status cache for connect/status bursts.
+- [x] Invalidate driver cache after driver install and settings changes affecting Windows tunnel driver selection.
+- [x] Preserve existing driver status JSON fields.
+- [x] Commit Windows platform readiness optimization.
+
+Verification evidence: `cmake --build --preset windows-release --target win32_driver_status_test exv` and `ctest --test-dir build-windows/cpp -R "win32_driver_status_test|app_api_runtime_policy_test|runtime_status_native_test|service_actions_test" --output-on-failure` passed. The cache stores only the Windows adapter snapshot; `windows_tunnel_driver` and `windows_tap_interface` remain live inputs to `driver_status_json`, so settings changes are not stale even without clearing the adapter snapshot. Driver installation explicitly invalidates the snapshot cache before and after install work.
 
 ## Phase 6: UI Locality And Guardrails
 

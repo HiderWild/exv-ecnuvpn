@@ -6,32 +6,88 @@
 #include "platform/common/runtime_paths.hpp"
 #include "platform/common/driver_status.hpp"
 
-
+#include <chrono>
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ecnuvpn {
 namespace platform {
 namespace {
 
-std::vector<std::string> list_windows_adapters(const std::string &kind) {
-  std::string filter;
-  if (kind == "wintun") {
-    filter =
-        "($_.NetConnectionID -like '*Wintun*' -or $_.Name -like '*Wintun*' -or $_.Description -like '*Wintun*')";
-  } else {
-    filter =
-        "($_.NetConnectionID -like '*TAP*' -or $_.Name -like '*TAP*' -or $_.Description -like '*TAP-Windows*' -or $_.Description -like '*tap0901*')";
+using Clock = std::chrono::steady_clock;
+
+std::mutex g_snapshot_mutex;
+std::optional<WindowsDriverAdapterSnapshot> g_cached_snapshot;
+Clock::time_point g_cached_snapshot_at{};
+std::function<WindowsDriverAdapterSnapshot()> g_snapshot_provider_for_testing;
+constexpr auto kDriverSnapshotCacheTtl = std::chrono::seconds(2);
+
+void clear_driver_status_cache_locked() {
+  g_cached_snapshot.reset();
+  g_cached_snapshot_at = Clock::time_point{};
+}
+
+void add_adapter_line(WindowsDriverAdapterSnapshot *snapshot,
+                      const std::string &line) {
+  if (!snapshot || line.empty()) {
+    return;
   }
 
+  const std::string wintun_prefix = "wintun\t";
+  const std::string tap_prefix = "tap\t";
+  if (line.rfind(wintun_prefix, 0) == 0) {
+    snapshot->wintun_adapters.push_back(line.substr(wintun_prefix.size()));
+  } else if (line.rfind(tap_prefix, 0) == 0) {
+    snapshot->tap_adapters.push_back(line.substr(tap_prefix.size()));
+  }
+}
+
+WindowsDriverAdapterSnapshot query_windows_adapter_snapshot() {
   std::string command =
       "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
       "\"Get-CimInstance Win32_NetworkAdapter | Where-Object { "
-      "$_.NetEnabled -ne $false -and " +
-      filter + " } | ForEach-Object { "
-      "if ($_.NetConnectionID) { $_.NetConnectionID } elseif ($_.Name) { $_.Name } }\"";
+      "$_.NetEnabled -ne $false } | ForEach-Object { "
+      "$name = if ($_.NetConnectionID) { $_.NetConnectionID } else { $_.Name }; "
+      "$kind = ''; "
+      "if ($_.NetConnectionID -like '*Wintun*' -or $_.Name -like '*Wintun*' -or $_.Description -like '*Wintun*') { $kind = 'wintun' } "
+      "elseif ($_.NetConnectionID -like '*TAP*' -or $_.Name -like '*TAP*' -or $_.Description -like '*TAP-Windows*' -or $_.Description -like '*tap0901*') { $kind = 'tap' }; "
+      "if ($kind -and $name) { $kind + [char]9 + $name } }\"";
 
-  return exv::utils::split_lines(platform::run_command_output(command));
+  WindowsDriverAdapterSnapshot snapshot;
+  for (const auto &line : exv::utils::split_lines(platform::run_command_output(command))) {
+    add_adapter_line(&snapshot, line);
+  }
+  return snapshot;
+}
+
+WindowsDriverAdapterSnapshot adapter_snapshot() {
+  const auto now = Clock::now();
+  {
+    std::lock_guard<std::mutex> lock(g_snapshot_mutex);
+    if (g_cached_snapshot &&
+        now - g_cached_snapshot_at <= kDriverSnapshotCacheTtl) {
+      return *g_cached_snapshot;
+    }
+  }
+
+  WindowsDriverAdapterSnapshot snapshot;
+  std::function<WindowsDriverAdapterSnapshot()> provider;
+  {
+    std::lock_guard<std::mutex> lock(g_snapshot_mutex);
+    provider = g_snapshot_provider_for_testing;
+  }
+  snapshot = provider ? provider() : query_windows_adapter_snapshot();
+
+  {
+    std::lock_guard<std::mutex> lock(g_snapshot_mutex);
+    g_cached_snapshot = snapshot;
+    g_cached_snapshot_at = now;
+  }
+  return snapshot;
 }
 
 std::string effective_windows_driver(const ConfigView &cfg,
@@ -66,6 +122,22 @@ std::string effective_driver_status(const ConfigView &cfg,
 
 } // namespace
 
+void set_driver_status_adapter_snapshot_provider_for_testing(
+    std::function<WindowsDriverAdapterSnapshot()> provider) {
+  std::lock_guard<std::mutex> lock(g_snapshot_mutex);
+  g_snapshot_provider_for_testing = std::move(provider);
+  clear_driver_status_cache_locked();
+}
+
+void invalidate_driver_status_cache() {
+  std::lock_guard<std::mutex> lock(g_snapshot_mutex);
+  clear_driver_status_cache_locked();
+}
+
+void clear_driver_status_cache_for_testing() {
+  invalidate_driver_status_cache();
+}
+
 nlohmann::json driver_status_json(const ConfigView &cfg) {
   nlohmann::json json{{"preferred", cfg.windows_tunnel_driver},
                       {"tap_interface", cfg.windows_tap_interface},
@@ -73,8 +145,9 @@ nlohmann::json driver_status_json(const ConfigView &cfg) {
 
   std::string wintun_path = platform::get_bundled_wintun_path();
   std::string tap_installer_path = platform::get_bundled_tap_installer_path();
-  std::vector<std::string> wintun_adapters = list_windows_adapters("wintun");
-  std::vector<std::string> tap_adapters = list_windows_adapters("tap");
+  WindowsDriverAdapterSnapshot adapters = adapter_snapshot();
+  std::vector<std::string> wintun_adapters = adapters.wintun_adapters;
+  std::vector<std::string> tap_adapters = adapters.tap_adapters;
   bool wintun_bundled = !wintun_path.empty();
   bool wintun_available = wintun_bundled || !wintun_adapters.empty();
   bool tap_available = !tap_adapters.empty();
@@ -114,6 +187,7 @@ nlohmann::json driver_status_json(const ConfigView &cfg) {
 
 nlohmann::json install_driver(const ConfigView &cfg,
                               const nlohmann::json &payload) {
+  invalidate_driver_status_cache();
   std::string driver = payload.value("driver", std::string());
   if (driver == "wintun") {
     std::string wintun_path = platform::get_bundled_wintun_path();
@@ -144,11 +218,13 @@ nlohmann::json install_driver(const ConfigView &cfg,
       rc = platform::run_command(platform::shell_quote(installer) + " /S");
     }
     if (rc != 0) {
+      invalidate_driver_status_cache();
       return nlohmann::json{{"ok", false},
                             {"error",
                              "TAP driver installation failed. Check the bundled installer assets and elevated permissions."}};
     }
 
+    invalidate_driver_status_cache();
     return nlohmann::json{{"ok", true},
                           {"message", "TAP driver installation completed."},
                           {"status", driver_status_json(cfg)}};
