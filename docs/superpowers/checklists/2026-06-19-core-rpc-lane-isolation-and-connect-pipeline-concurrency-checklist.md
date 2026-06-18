@@ -67,23 +67,23 @@ Verification evidence: `ctest --test-dir build-windows/cpp -R "ui_shell_core_rpc
 
 - [ ] Add accepted-job tests for `vpn.connect`.
 - [ ] Add busy-connect coalescing test with `accepted=true`, `coalesced=true`, and `active_job_id`.
-- [ ] Add `connect_intent_test` for latest user intent and epoch reconciliation.
-- [ ] Add user-cancel-during-connect test where `vpn.disconnect` returns `accepted=true`, `cancelling=true`, and `user_cancelled=true`.
-- [ ] Prove user cancellation does not set `last_error` and does not show an error modal.
-- [ ] Prove connect/cancel/connect/cancel while busy results in one active workflow and latest desired intent `Disconnect`.
-- [ ] Prove connect/cancel/connect while busy starts exactly one new connect after cleanup reaches idle.
-- [ ] Prove a non-user connection failure does not retry unless a later user click increments intent epoch.
+- [x] Add `connect_intent_test` for latest user intent and epoch reconciliation.
+- [x] Add user-cancel-during-connect test where `vpn.disconnect` returns `accepted=true`, `cancelling=true`, and `user_cancelled=true`.
+- [x] Prove user cancellation does not set `last_error` and does not show an error modal.
+- [x] Prove connect/cancel/connect/cancel while busy results in one active workflow and latest desired intent `Disconnect`.
+- [x] Prove connect/cancel/connect while busy starts exactly one new connect after cleanup reaches idle.
+- [x] Prove a non-user connection failure does not retry unless a later user click increments intent epoch.
 - [ ] Add disconnect-during-connect responsiveness test.
-- [ ] Add `connect_pipeline_test` for branch concurrency.
-- [ ] Prove backend/helper, platform readiness, and protocol handshake branches run concurrently.
-- [ ] Prove first branch failure returns to UI without waiting for slower branches.
-- [ ] Prove cancellation is requested for losing branches after first failure.
-- [ ] Prove late non-cancel branch failures are logged with job id and discarded reason.
-- [ ] Prove successful late branch results are discarded silently after first failure.
-- [ ] Prove serial network tail starts only after all three branches succeed.
-- [ ] Create `VpnConnectJobOwner`.
-- [ ] Create `connect_intent.hpp/.cpp`.
-- [ ] Create `ConnectPipeline`.
+- [x] Add `connect_pipeline_test` for branch concurrency.
+- [x] Prove backend/helper, platform readiness, and protocol handshake branches run concurrently.
+- [x] Prove first branch failure returns to UI without waiting for slower branches.
+- [x] Prove cancellation is requested for losing branches after first failure.
+- [x] Prove late non-cancel branch failures are logged with job id and discarded reason.
+- [x] Prove successful late branch results are discarded silently after first failure.
+- [x] Prove serial network tail starts only after all three branches succeed.
+- [x] Create `VpnConnectJobOwner`.
+- [x] Create `connect_intent.hpp/.cpp`.
+- [x] Create `ConnectPipeline`.
 - [ ] Create `NativeHandshakeJob`.
 - [ ] Split native auth/CSTP handshake from packet-device and network-config attach.
 - [ ] Move helper/backend readiness out of the RPC request handler.

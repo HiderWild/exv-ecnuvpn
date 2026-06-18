@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/tunnel_controller/connect_intent.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -9,20 +11,6 @@
 #include <thread>
 
 namespace exv::core {
-
-enum class DesiredVpnIntent { Disconnect, Connect };
-
-struct PendingConnectRequest {
-  std::string profile_id;
-  std::string server;
-  bool has_password = false;
-};
-
-struct VpnWorkflowIntent {
-  DesiredVpnIntent desired = DesiredVpnIntent::Disconnect;
-  std::uint64_t epoch = 0;
-  PendingConnectRequest pending_connect;
-};
 
 struct VpnConnectJobState {
   std::string job_id;

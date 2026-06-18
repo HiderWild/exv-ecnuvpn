@@ -98,6 +98,7 @@ set(EXV_CORE_SOURCES
     src/core/tunnel_controller/tunnel_controller_events.cpp
     src/core/tunnel_controller/tunnel_controller_facade.cpp
     src/core/tunnel_controller/tunnel_controller_active.cpp
+    src/core/tunnel_controller/connect_intent.cpp
     src/core/tunnel_controller/vpn_connect_job.cpp
     src/core/tunnel_controller/connect_pipeline.cpp
     src/core/tunnel_controller/timing.cpp
