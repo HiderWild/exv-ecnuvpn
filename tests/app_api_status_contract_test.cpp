@@ -424,9 +424,17 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
                   std::string::npos,
               "desktop vpn.connect should acquire the connection-attempt guard before accepted response") &&
        ok;
-  ok = expect(source.find("preflight_connect(cfg, password)") !=
+  ok = expect(source.find("exv::core::ConnectPipeline") !=
                   std::string::npos,
-              "desktop connect job should use preflight_connect as backend gate") &&
+              "desktop connect job should coordinate backend/platform/protocol branches through ConnectPipeline") &&
+       ok;
+  ok = expect(source.find("ecnuvpn::vpn_engine::NativeHandshakeJob") !=
+                  std::string::npos,
+              "desktop connect job should prepare native protocol handshake before controller serial tail") &&
+       ok;
+  ok = expect(source.find("controller->set_prepared_native_handshake") !=
+                  std::string::npos,
+              "desktop connect job should pass prepared handshake into TunnelController") &&
        ok;
   ok = expect(source.find("ensure_tunnel_controller(helper_endpoint)") !=
                   std::string::npos,
@@ -571,7 +579,11 @@ bool tunnel_controller_native_runner_failure_cleans_helper_session() {
   const std::string source =
       source_text_at({"src", "core", "tunnel_controller",
                       "tunnel_controller_connect.cpp"});
-  const auto runner_start = source.find("bool ok = runner_.start");
+  const auto runner_start = source.find("bool ok = false");
+  const auto prepared_runner_start = source.find("runner_.start_from_handshake",
+                                                 runner_start);
+  const auto direct_runner_start = source.find("runner_.start(vpn_cfg_, vpn_password_)",
+                                               runner_start);
   const auto runner_failed = source.find("if (!ok)", runner_start);
   const auto runner_started =
       source.find("\"native.runner.started\"", runner_failed);
@@ -590,6 +602,12 @@ bool tunnel_controller_native_runner_failure_cleans_helper_session() {
   bool ok = true;
   ok = expect(runner_start != std::string::npos,
               "TunnelController should start the native runner in connect flow") &&
+       ok;
+  ok = expect(prepared_runner_start != std::string::npos,
+              "TunnelController should support prepared native handshake runner start") &&
+       ok;
+  ok = expect(direct_runner_start != std::string::npos,
+              "TunnelController should preserve direct native runner start fallback") &&
        ok;
   ok = expect(runner_failed != std::string::npos,
               "TunnelController should handle native runner start failure") &&

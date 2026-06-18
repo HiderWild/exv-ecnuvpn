@@ -10,6 +10,7 @@
 #include "core/connection/connection_attempt.hpp"
 #include "core/crypto/crypto.hpp"
 #include "core/rpc/desktop_rpc_adapter.hpp"
+#include "core/tunnel_controller/connect_pipeline.hpp"
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
@@ -23,8 +24,10 @@
 #include "platform/common/process_control.hpp"
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_paths.hpp"
+#include "vpn_engine/native_handshake_job.hpp"
 
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -218,6 +221,13 @@ std::optional<nlohmann::json> desktop_connect_error() {
   return g_desktop_connect_error;
 }
 
+struct PreparedHandshakeHolder {
+  std::mutex mutex;
+  ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+  ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
+  bool ready = false;
+};
+
 void apply_desktop_connect_error(nlohmann::json *status) {
   if (!status) return;
   auto failure = desktop_connect_error();
@@ -244,38 +254,172 @@ void run_desktop_connect_job(Config cfg,
   conn_attempt::TerminalAttemptScope attempt_cleanup(
       platform::get_config_dir(), std::move(attempt_id), "scope_exit");
 
-  exv::observability::LogFacade::info("app_api: Calling preflight_connect");
-  nlohmann::json preflight = preflight_connect(cfg, password);
-  if (preflight.is_object() && preflight.value("ok", true) == false) {
-    timing.finish(false, "stage=preflight error=" +
-                             json_string(preflight, "error"));
-    set_desktop_connect_error(preflight);
+  auto prepared_handshake = std::make_shared<PreparedHandshakeHolder>();
+  exv::core::ConnectPipeline pipeline(
+      "desktop-connect",
+      [](const exv::core::ConnectBranchResult &late,
+         std::string_view first_code) {
+        exv::observability::LogFacade::info(
+            "app_api: late connect branch failure - branch=" +
+            std::string(exv::core::connect_branch_name(late.branch)) +
+            " code=" + late.code + " first_code=" + std::string(first_code));
+      });
+
+  auto backend_branch = []([[maybe_unused]] std::stop_token branch_stop) {
+    platform::BackendResolveOptions options;
+    options.preferred_mode = "auto";
+    options.allow_oneshot = true;
+    options.start_oneshot = true;
+    options.allow_service_start = false;
+    options.helper_path = helper_binary_next_to_exv();
+
+    nlohmann::json backend = platform::resolve_backend(options);
+    const bool backend_ok = backend.value("ok", false);
+    exv::observability::LogFacade::info(
+        "app_api: preflight backend resolved - ok=" +
+        std::string(backend_ok ? "true" : "false") +
+        " mode=" + backend.value("mode", std::string("unknown")));
+    if (!backend_ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::BackendHelperReady,
+          false,
+          backend.value("code", platform::kHelperUnavailableCode),
+          backend.value("message",
+                        platform::helper_unavailable_connect_message()),
+          backend};
+    }
+    return exv::core::ConnectBranchResult{
+        exv::core::ConnectBranch::BackendHelperReady, true, {}, {}, backend};
+  };
+
+  auto platform_branch = [cfg](std::stop_token branch_stop) {
+    if (branch_stop.stop_requested()) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::PlatformReady,
+          false,
+          "cancelled",
+          "Platform checks cancelled",
+          nlohmann::json::object()};
+    }
+
+    nlohmann::json runtime = runtime_status_json(cfg);
+    if (!runtime.value("available", false)) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::PlatformReady,
+          false,
+          "runtime_unavailable",
+          "VPN runtime is not available. The desktop bundle is missing the "
+          "selected VPN engine dependencies.",
+          nlohmann::json{{"runtime", runtime}}};
+    }
+
+    nlohmann::json platform_err =
+        platform::preflight_connect_platform_checks(
+            config::to_platform_config_view(cfg));
+    const bool platform_ok =
+        !platform_err.is_object() || platform_err.value("ok", true);
+    exv::observability::LogFacade::info(
+        "app_api: preflight platform checks - ok=" +
+        std::string(platform_ok ? "true" : "false"));
+    if (!platform_ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::PlatformReady,
+          false,
+          platform_err.value("code", std::string("platform_checks_failed")),
+          platform_err.value("message",
+                             platform_err.value("error",
+                                                std::string("Platform checks failed"))),
+          platform_err};
+    }
+
+    return exv::core::ConnectBranchResult{
+        exv::core::ConnectBranch::PlatformReady,
+        true,
+        {},
+        {},
+        nlohmann::json{{"runtime", runtime}, {"platform", platform_err}}};
+  };
+
+  auto protocol_branch = [cfg, password, prepared_handshake](
+                             std::stop_token branch_stop) mutable {
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+    auto mapped =
+        exv::core::make_native_engine_config(cfg, password, &engine_config);
+    if (!mapped.ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::ProtocolHandshake,
+          false,
+          mapped.code,
+          mapped.message,
+          nlohmann::json::object()};
+    }
+
+    auto deps = ecnuvpn::vpn_engine::default_native_engine_dependencies();
+    ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
+    ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config, deps);
+    auto result = job.run(branch_stop, &handshake);
+    if (!result.ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::ProtocolHandshake,
+          false,
+          result.code,
+          result.message,
+          nlohmann::json::object()};
+    }
+    if (branch_stop.stop_requested()) {
+      if (handshake.session) {
+        handshake.session->disconnect();
+      } else if (handshake.transport) {
+        handshake.transport->disconnect();
+      }
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::ProtocolHandshake,
+          false,
+          "cancelled",
+          "Protocol handshake cancelled",
+          nlohmann::json::object()};
+    }
+
+    nlohmann::json payload{
+        {"interface", handshake.metadata.interface_name},
+        {"internal_ip", handshake.metadata.internal_ip4_address},
+        {"mtu", handshake.metadata.mtu}};
+    {
+      std::lock_guard<std::mutex> lock(prepared_handshake->mutex);
+      prepared_handshake->engine_config = std::move(engine_config);
+      prepared_handshake->handshake = std::move(handshake);
+      prepared_handshake->ready = true;
+    }
+    return exv::core::ConnectBranchResult{
+        exv::core::ConnectBranch::ProtocolHandshake, true, {}, {}, payload};
+  };
+
+  auto pipeline_result =
+      pipeline.run(std::move(backend_branch), std::move(platform_branch),
+                   std::move(protocol_branch), stop);
+  if (!pipeline_result.ok) {
+    timing.finish(false, "stage=connect_pipeline branch=" +
+                             pipeline_result.first_failure_branch +
+                             " code=" + pipeline_result.code);
+    if (pipeline_result.code != "cancelled") {
+      set_desktop_connect_error(
+          error(pipeline_result.message.empty()
+                    ? "VPN connect preflight failed."
+                    : pipeline_result.message,
+                pipeline_result.code.empty() ? "connect_pipeline_failed"
+                                             : pipeline_result.code));
+    }
     return;
   }
-  timing.mark("preflight", "result=ok");
-  if (preflight.is_object() && preflight.contains("backend")) {
-    auto backend = preflight["backend"];
-    exv::observability::LogFacade::info(
-        "app_api: Preflight complete - backend_mode=" +
-        backend.value("mode", "unknown"));
-  }
-  if (preflight.is_object() && preflight.contains("backend")) {
-    auto backend = preflight["backend"];
-    exv::observability::LogFacade::info(
-        "app_api: Preflight complete - ok=" +
-        std::string(preflight.value("ok", true) ? "true" : "false") +
-        " backend_mode=" + backend.value("mode", "unknown") +
-        " backend_ok=" +
-        std::string(backend.value("ok", false) ? "true" : "false"));
-  }
+  timing.mark("connect_pipeline", "result=ok");
 
   if (stop.stop_requested()) {
     return;
   }
 
   std::string helper_endpoint;
-  if (preflight.contains("backend") && preflight["backend"].is_object()) {
-    auto backend = preflight["backend"];
+  if (pipeline_result.backend.is_object()) {
+    auto backend = pipeline_result.backend;
     if (!backend.value("ok", false)) {
       timing.finish(false, "stage=backend_resolution error=backend_not_ok");
       auto failure = error("Failed to resolve helper backend: " +
@@ -324,6 +468,19 @@ void run_desktop_connect_job(Config cfg,
   }
 
   controller->set_vpn_config(cfg, password);
+  {
+    std::lock_guard<std::mutex> lock(prepared_handshake->mutex);
+    if (!prepared_handshake->ready) {
+      timing.finish(false, "stage=prepared_handshake_missing");
+      set_desktop_connect_error(
+          error("Native handshake did not produce a prepared session.",
+                "prepared_handshake_missing"));
+      return;
+    }
+    controller->set_prepared_native_handshake(
+        std::move(prepared_handshake->engine_config),
+        std::move(prepared_handshake->handshake));
+  }
   timing.mark("cleanup_legacy_state");
 
   exv::core::UserIntent intent;
