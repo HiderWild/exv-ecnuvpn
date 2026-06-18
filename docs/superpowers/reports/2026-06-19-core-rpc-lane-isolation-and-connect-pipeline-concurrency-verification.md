@@ -32,6 +32,10 @@ The following require interactive local VPN/UI operation and were not executed b
 - Real connect against the VPN gateway.
 - Open logs while a real VPN connect is in progress.
 - Rapidly toggle minimal/advanced mode in the packaged UI and visually confirm the final mode equals the last click.
+- Confirm logs/status/config do not wait for VPN connect completion during real interactive use.
 - Confirm first-failure branch errors reach the visible UI before slower branch cleanup finishes.
 - Confirm user cancellation during a real connect does not show an error modal or failure log.
+- Confirm rapid connect/cancel clicking coalesces to the latest user intent in the packaged UI.
+- Confirm connect failure is visible to the user.
+- Confirm `window.setMode` does not appear in real core RPC traces.
 - Confirm real connect timing output in application logs.
