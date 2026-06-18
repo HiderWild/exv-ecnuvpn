@@ -32,6 +32,8 @@ struct TunnelMetadata {
   int mtu = 1290;
   std::vector<std::string> routes;
   std::vector<std::string> server_bypass_ips;
+  std::string dtls_state = "disabled";
+  std::string dtls_fallback_reason;
 };
 
 // SessionState is a clean-room state model used by the native engine boundary.

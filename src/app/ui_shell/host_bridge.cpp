@@ -21,8 +21,19 @@ std::string error_response(int id, std::string_view code,
 } // namespace
 
 bool is_allowed_host_action(std::string_view action) {
-  const auto &actions = exv::contracts::generated::DESKTOP_RPC_ACTIONS;
-  return std::find(actions.begin(), actions.end(), action) != actions.end();
+  if (action == "window.resolveClosePrompt" || action == "window.setMode") {
+    return true;
+  }
+  const auto &desktop_actions = exv::contracts::generated::DESKTOP_RPC_ACTIONS;
+  if (std::find(desktop_actions.begin(), desktop_actions.end(), action) !=
+      desktop_actions.end()) {
+    return true;
+  }
+  // The exv-ui shell is also a thin frontend over core RPC, so any action
+  // declared in the generated CORE_RPC_ACTIONS surface is forwarded as-is.
+  const auto &core_actions = exv::contracts::generated::CORE_RPC_ACTIONS;
+  return std::find(core_actions.begin(), core_actions.end(), action) !=
+         core_actions.end();
 }
 
 std::string handle_host_request(const std::string &request_json,

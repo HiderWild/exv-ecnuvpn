@@ -13,7 +13,6 @@ inline constexpr int kVpnInitialConnectFailedExitCode = 2;
 struct RuntimeStatusSnapshot {
     bool running = false;
     int pid = -1;
-    bool pid_from_openconnect_scan = false;
     bool network_ready = false;
     std::string interface_name;
     std::string internal_ip;
@@ -21,8 +20,6 @@ struct RuntimeStatusSnapshot {
 };
 
 struct RuntimeStatusProbe {
-    std::function<bool(int)> is_process_alive;
-    std::function<int()> find_openconnect_pid;
     std::function<std::string()> interfaces_output;
 };
 

@@ -53,6 +53,10 @@ const hostApi = {
         return wrap(window.ecnuVpn!.drivers.status()) as ApiResponse<T>
       case desktopApiPaths.logs:
         return wrap(window.ecnuVpn!.logs.list()) as ApiResponse<T>
+      case desktopApiPaths.maintenanceCore:
+        return wrap(window.ecnuVpn!.maintenance.inspectCore()) as ApiResponse<T>
+      case desktopApiPaths.authInteraction:
+        return wrap(window.ecnuVpn!.vpn.authInteraction()) as ApiResponse<T>
       default:
         unsupported(path)
     }
@@ -72,6 +76,12 @@ const hostApi = {
         return wrap(
           window.ecnuVpn!.vpn.disconnectElevated(plainPayload(body)?.backend),
         ) as ApiResponse<T>
+      case desktopApiPaths.authInteractionResponse: {
+        const payload = plainPayload(body ?? {})
+        return wrap(
+          window.ecnuVpn!.vpn.respondAuthInteraction(payload.id ?? '', payload.value ?? ''),
+        ) as ApiResponse<T>
+      }
       case desktopApiPaths.routes:
         return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
       case desktopApiPaths.routesReset:
@@ -86,6 +96,16 @@ const hostApi = {
         return wrap(window.ecnuVpn!.cli.uninstall()) as ApiResponse<T>
       case desktopApiPaths.driversInstall:
         return wrap(window.ecnuVpn!.drivers.install(plainPayload(body)?.driver)) as ApiResponse<T>
+      case desktopApiPaths.configImport:
+        return wrap(window.ecnuVpn!.config.importConfig(plainPayload(body))) as ApiResponse<T>
+      case desktopApiPaths.configExport:
+        return wrap(window.ecnuVpn!.config.exportConfig(plainPayload(body))) as ApiResponse<T>
+      case desktopApiPaths.configReset:
+        return wrap(window.ecnuVpn!.config.reset(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
+      case desktopApiPaths.keyReset:
+        return wrap(window.ecnuVpn!.key.reset(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
+      case desktopApiPaths.maintenanceCoreKill:
+        return wrap(window.ecnuVpn!.maintenance.killStaleCore(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
       default:
         unsupported(path)
     }

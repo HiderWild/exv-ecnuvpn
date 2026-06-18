@@ -1,4 +1,6 @@
 #include "helper/helper_handler.hpp"
+#include "core/lifecycle/core_paths.hpp"
+#include "core/lifecycle/core_registry.hpp"
 #include "observability/log_facade.hpp"
 
 #include <nlohmann/json.hpp>
@@ -386,6 +388,69 @@ TaskQueueState HelperHandler::task_queue_state() const {
     return task_queue_.state();
 }
 
+void HelperHandler::bind_core_registry_cleanup_if_possible(
+    const SessionId& session_id) {
+    std::string active_lease_id;
+    int active_core_pid = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!leases_.has_session(session_id)) {
+            return;
+        }
+        const auto active_lease = core_leases_.active_lease();
+        if (!active_lease.has_value()) {
+            return;
+        }
+        active_lease_id = active_lease->lease_id;
+        active_core_pid = active_lease->core_pid;
+    }
+
+    const auto registry_path = exv::core::lifecycle::core_registry_path();
+    const auto loaded =
+        exv::core::lifecycle::read_core_registry(registry_path);
+    if (loaded.state != exv::core::lifecycle::CoreRegistryReadState::present ||
+        !loaded.snapshot.has_value()) {
+        return;
+    }
+
+    const auto& snapshot = *loaded.snapshot;
+    if (snapshot.helper_core_lease_id.empty() ||
+        snapshot.helper_core_lease_id != active_lease_id ||
+        snapshot.pid != active_core_pid ||
+        snapshot.ipc_protocol_version !=
+            exv::core::lifecycle::ipc_protocol_name()) {
+        return;
+    }
+
+    CoreRegistryCleanupBinding binding;
+    binding.registry_path = registry_path;
+    binding.delete_match =
+        exv::core::lifecycle::core_registry_delete_match(snapshot);
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!leases_.has_session(session_id)) {
+        return;
+    }
+    const auto active_lease = core_leases_.active_lease();
+    if (!active_lease.has_value() ||
+        active_lease->lease_id != active_lease_id ||
+        active_lease->core_pid != active_core_pid) {
+        return;
+    }
+    cleanup_.bind_core_registry_cleanup(session_id, binding);
+}
+
+void HelperHandler::bind_core_registry_cleanup_for_active_sessions() {
+    std::vector<SessionId> active_sessions;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        active_sessions = leases_.active_session_ids();
+    }
+    for (const auto& session_id : active_sessions) {
+        bind_core_registry_cleanup_if_possible(session_id);
+    }
+}
+
 // --- Handler implementations ---
 
 HelperResponse HelperHandler::handle_hello(
@@ -415,6 +480,12 @@ HelperResponse HelperHandler::handle_start_session(const HelperRequest& req) {
     StartSessionRequest start_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
+        if (j.contains("native_start_mode") || j.contains("supervisor_payload") ||
+            j.contains("supervisor_start") || j.contains("vpn_supervisor")) {
+            return make_error_response(
+                req.op, "supervisor_removed",
+                "VPN supervisor startup has been removed; use TunnelController.");
+        }
         start_req = start_session_request_from_json(j);
     } catch (const std::exception& e) {
         HelperResponse resp;
@@ -425,26 +496,31 @@ HelperResponse HelperHandler::handle_start_session(const HelperRequest& req) {
         return resp;
     }
 
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    SessionId session_id;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
 
-    if (leases_.active_session_count() > 0) {
-        HelperResponse resp;
-        resp.op = req.op;
-        resp.success = false;
-        resp.error_code = "session_conflict";
-        resp.error_message = "An active helper session already exists";
-        return resp;
+        if (leases_.active_session_count() > 0) {
+            HelperResponse resp;
+            resp.op = req.op;
+            resp.success = false;
+            resp.error_code = "session_conflict";
+            resp.error_message = "An active helper session already exists";
+            return resp;
+        }
+
+        CleanupPolicy default_policy;
+        session_id = leases_.create_session(
+            start_req.profile_id, start_req.mode, default_policy);
+
+        // Register a cleanup record for the new session
+        CleanupRecord record;
+        record.session_id = session_id;
+        record.created_at = std::chrono::system_clock::now();
+        cleanup_.register_session(record);
     }
 
-    CleanupPolicy default_policy;
-    SessionId session_id = leases_.create_session(
-        start_req.profile_id, start_req.mode, default_policy);
-
-    // Register a cleanup record for the new session
-    CleanupRecord record;
-    record.session_id = session_id;
-    record.created_at = std::chrono::system_clock::now();
-    cleanup_.register_session(record);
+    bind_core_registry_cleanup_if_possible(session_id);
 
     exv::observability::LogFacade::info("[helper] Session started: " + session_id.value);
 
@@ -656,6 +732,8 @@ HelperResponse HelperHandler::handle_heartbeat(const HelperRequest& req) {
         leases_.update_heartbeat(hb_req.session_id, hb_req.core_phase);
     }
 
+    bind_core_registry_cleanup_if_possible(hb_req.session_id);
+
     // Check if heartbeat indicates a concerning phase
     std::optional<std::string> warning;
     if (hb_req.core_phase == "error" || hb_req.core_phase == "disconnecting") {
@@ -712,6 +790,22 @@ CleanupResponse HelperHandler::cleanup_session_impl(const SessionId& session_id,
         if (!cleanup_resp.success) {
             return cleanup_resp;
         }
+    }
+
+    std::optional<CoreRegistryCleanupBinding> registry_cleanup;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        registry_cleanup = cleanup_.core_registry_cleanup_binding(session_id);
+    }
+
+    if (registry_cleanup.has_value() &&
+        !exv::core::lifecycle::compare_and_delete_core_registry(
+            registry_cleanup->registry_path, registry_cleanup->delete_match)) {
+        CleanupResponse cleanup_resp;
+        cleanup_resp.success = false;
+        cleanup_resp.errors.push_back(
+            "Core registry cleanup could not remove the versioned registry");
+        return cleanup_resp;
     }
 
     {
@@ -990,6 +1084,8 @@ HelperResponse HelperHandler::handle_keep_alive(
         }
     }
 
+    bind_core_registry_cleanup_for_active_sessions();
+
     KeepAliveResponse keep_alive_resp;
     keep_alive_resp.ok = true;
 
@@ -1216,6 +1312,7 @@ HelperResponse HelperHandler::handle_handoff_session(const HelperRequest& req) {
     }
 
     HandoffSessionResponse handoff_resp;
+    std::vector<SessionId> imported_session_ids;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (is_oneshot_context(startup_context_)) {
@@ -1259,7 +1356,12 @@ HelperResponse HelperHandler::handle_handoff_session(const HelperRequest& req) {
                 cleanup_.add_resource(exported.session_id, resource);
             }
             handoff_resp.session_ids.push_back(exported.session_id);
+            imported_session_ids.push_back(exported.session_id);
         }
+    }
+
+    for (const auto& session_id : imported_session_ids) {
+        bind_core_registry_cleanup_if_possible(session_id);
     }
 
     handoff_resp.adopted = true;

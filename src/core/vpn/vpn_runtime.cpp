@@ -5,8 +5,6 @@
 #include "platform/common/runtime_paths.hpp"
 #include "core/vpn/vpn.hpp"
 
-#include "platform/common/process_control.hpp"
-
 #include <cerrno>
 #include <fstream>
 #include <sstream>
@@ -27,10 +25,6 @@ static std::string read_interfaces_output() {
 
 RuntimeStatusProbe default_probe() {
   RuntimeStatusProbe probe;
-  probe.is_process_alive = [](int pid) {
-    return platform::is_process_alive(pid);
-  };
-  probe.find_openconnect_pid = []() { return platform::find_openconnect_pid(); };
   probe.interfaces_output = []() { return read_interfaces_output(); };
   return probe;
 }

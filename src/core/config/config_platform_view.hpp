@@ -16,7 +16,6 @@ inline platform::ConfigView to_platform_config_view(const Config &cfg) {
   view.extra_args = cfg.extra_args;
   view.log_file = cfg.log_file;
   view.vpn_engine = cfg.vpn_engine;
-  view.openconnect_runtime = cfg.openconnect_runtime;
   view.windows_tunnel_driver = cfg.windows_tunnel_driver;
   view.windows_tap_interface = cfg.windows_tap_interface;
   return view;

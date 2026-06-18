@@ -14,7 +14,7 @@ nlohmann::json handle_action(const std::string &action,
 
 // Returns true if a TunnelController has been initialized (i.e., the
 // Core-owned mode is active). When true, vpn::start_with_password() should
-// skip the native-engine supervisor path — the TunnelController manages the
+// skip any direct native-engine lifecycle path; the TunnelController manages the
 // NativeVpnEngineSession lifecycle via CoreSessionRunner.
 bool is_tunnel_controller_active();
 

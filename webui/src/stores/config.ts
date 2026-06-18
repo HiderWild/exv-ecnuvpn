@@ -22,30 +22,35 @@ export interface SettingsConfig {
   webui_port: number
   webui_host: string
   webui_enabled: boolean
-  vpn_engine: 'native' | 'legacy_openconnect'
-  openconnect_runtime: 'bundled' | 'system' | 'auto'
+  vpn_engine: 'native'
   windows_tunnel_driver: 'auto' | 'wintun' | 'tap'
   windows_tap_interface: string
   auto_reconnect: boolean
+  retry_limit: number
   minimal_mode: boolean
   service_install_prompt_seen: boolean
   minimal_install_service_before_connect: boolean
 }
 
 export interface KeyStatus {
+  available: boolean
   present: boolean
-  fingerprint: string | null
   status: string
 }
 
+export interface CoreInspection {
+  state: string
+  risk: 'unknown' | 'low' | 'medium' | 'high'
+  pid?: number
+  ipc_path?: string
+}
+
 export interface RuntimeStatus {
-  mode: string
-  engine?: 'native' | 'legacy_openconnect'
+  mode: 'native'
+  engine: 'native'
   available: boolean
-  source: 'native' | 'bundled' | 'system' | 'missing' | 'custom'
+  source: 'native'
   path: string
-  bundled_path?: string
-  system_path?: string
   version: string
   bundled_runtime_dir: string
   wintun_path?: string
@@ -55,7 +60,6 @@ export interface RuntimeStatus {
   effect_on_connect?: string
   wintun_missing?: boolean
   tap_missing?: boolean
-  legacy_openconnect?: RuntimeStatus
 }
 
 export interface DriverStatus {
@@ -98,16 +102,16 @@ export const useConfigStore = defineStore('config', () => {
     webui_host: '127.0.0.1',
     webui_enabled: true,
     vpn_engine: 'native',
-    openconnect_runtime: 'bundled',
     windows_tunnel_driver: 'auto',
     windows_tap_interface: '',
     auto_reconnect: true,
+    retry_limit: -1,
     minimal_mode: false,
     service_install_prompt_seen: false,
     minimal_install_service_before_connect: true,
   })
 
-  const keyStatus = ref<KeyStatus>({ present: false, fingerprint: null, status: 'missing' })
+  const keyStatus = ref<KeyStatus>({ available: false, present: false, status: 'missing' })
   const runtimeStatus = ref<RuntimeStatus | null>(null)
   const driverStatus = ref<DriverStatus | null>(null)
 
@@ -178,11 +182,49 @@ export const useConfigStore = defineStore('config', () => {
     return data
   }
 
+  async function importConfig(payload: { format: 'protected' | 'unprotected'; data: string; password?: string }) {
+    const { data } = await api.post<{ ok: true }>('/config/import', payload)
+    await Promise.all([fetchAuthConfig(), fetchSettings()])
+    return data
+  }
+
+  async function exportConfig(payload: { protected: boolean; password?: string }) {
+    const { data } = await api.post<{ format: 'protected' | 'unprotected'; data: string }>(
+      '/config/export', payload,
+    )
+    return data
+  }
+
+  async function resetConfig(confirm: boolean) {
+    const { data } = await api.post<{ ok: true }>('/config/reset', { confirm })
+    await Promise.all([fetchAuthConfig(), fetchSettings(), fetchKeyStatus()])
+    return data
+  }
+
+  async function resetKey(confirm: boolean) {
+    const { data } = await api.post<{ ok: true }>('/key/reset', { confirm })
+    await fetchKeyStatus()
+    return data
+  }
+
+  async function inspectCore() {
+    const { data } = await api.get<CoreInspection>('/maintenance/core')
+    return data
+  }
+
+  async function killStaleCore(confirm: boolean) {
+    const { data } = await api.post<{ ok: true }>('/maintenance/core/kill', { confirm })
+    return data
+  }
+
   return {
     authConfig, settings, keyStatus, runtimeStatus, driverStatus,
     fetchAuthConfig, saveAuthConfig,
     fetchSettings, saveSettings,
     fetchKeyStatus,
     fetchRuntimeStatus, fetchDriverStatus, installDriver,
+    importConfig, exportConfig, resetConfig,
+    resetKey,
+    inspectCore, killStaleCore,
   }
 })

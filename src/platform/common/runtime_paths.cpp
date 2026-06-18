@@ -141,10 +141,6 @@ std::string get_tunnel_path() { return tunnel_path(get_config_dir()); }
 
 std::string get_pid_path() { return pid_path(get_config_dir()); }
 
-std::string get_supervisor_pid_path() {
-  return supervisor_pid_path(get_config_dir());
-}
-
 std::string get_route_ready_path() { return route_ready_path(get_config_dir()); }
 
 bool fix_runtime_config_dir_ownership() {

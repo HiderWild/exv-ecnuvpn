@@ -130,7 +130,6 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
 
   if (context.cleanup_routes)
     context.cleanup_routes();
-  platform::kill_all_supervisors();
 
   std::string stop_cmd =
       "systemctl stop " + std::string(platform_config.service_name);

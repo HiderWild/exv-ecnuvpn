@@ -1,4 +1,8 @@
 #include "core_process.hpp"
+#include "core/lifecycle/core_lock.hpp"
+#include "core/lifecycle/core_paths.hpp"
+#include "core/lifecycle/core_registry.hpp"
+#include "helper/common/helper_client.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/logging/log_runtime.hpp"
 #include "common/diagnostics/log_renderer.hpp"
@@ -14,10 +18,12 @@
 #include <atomic>
 #include <csignal>
 #include <iostream>
-#include <string>
-#include <mutex>
-#include <thread>
 #include <chrono>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
@@ -30,6 +36,25 @@
 using json = nlohmann::json;
 
 namespace exv::core {
+
+namespace testing {
+
+using CoreRegistryPersistCandidateHook =
+    std::function<void(
+        exv::core::lifecycle::CoreRegistrySnapshot& snapshot,
+        int persist_attempt)>;
+
+CoreRegistryPersistCandidateHook& core_registry_persist_candidate_hook() {
+    static CoreRegistryPersistCandidateHook hook;
+    return hook;
+}
+
+void set_core_registry_persist_candidate_hook(
+    CoreRegistryPersistCandidateHook hook) {
+    core_registry_persist_candidate_hook() = std::move(hook);
+}
+
+} // namespace testing
 
 // ------------------------------------------------------------------
 // Global signal flag — set by SIGTERM/SIGINT handler
@@ -202,6 +227,27 @@ static std::string handle_request_line(exv::core_api::AppRpcDispatcher& dispatch
     }
 }
 
+static std::optional<exv::core::lifecycle::CoreRegistrySnapshot>
+bootstrap_registry_snapshot(exv::core_api::AppRpcDispatcher& dispatcher,
+                            const std::string& pipe_path) {
+    exv::core_api::RpcRequest request;
+    request.action = "core.hello";
+    request.request_id = "core-process-bootstrap";
+    request.payload_json = "{}";
+
+    auto response = dispatcher.dispatch(request);
+    if (!response.success) {
+        return std::nullopt;
+    }
+
+    try {
+        return exv::core::lifecycle::core_registry_snapshot_from_hello(
+            json::parse(response.payload_json), pipe_path);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 // ------------------------------------------------------------------
 // core_process_main
 // ------------------------------------------------------------------
@@ -247,6 +293,13 @@ int core_process_main(const std::string& config_dir,
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 
+    auto core_lock = exv::core::lifecycle::CoreInstanceLock::try_acquire();
+    if (!core_lock.has_value()) {
+        std::cerr << "fatal: another core process already owns the versioned core lock"
+                  << std::endl;
+        return 1;
+    }
+
     auto controller = std::make_shared<TunnelController>(
         std::shared_ptr<exv::helper::HelperClient>{},
         std::shared_ptr<exv::platform::PlatformNetworkOps>{},
@@ -256,15 +309,96 @@ int core_process_main(const std::string& config_dir,
         return handle_request_line(*native_dispatcher, request_line);
     };
 
-    // 5. Create pipe listener for CLI connections (also serves as single-instance guard).
-    auto pipe_listener = std::make_unique<PipeIpcListener>(core_pipe_path());
+    const auto pipe_path = core_pipe_path();
+
+    // 5. Create pipe listener for CLI connections after owning the versioned lock.
+    auto pipe_listener = std::make_unique<PipeIpcListener>(pipe_path);
     if (!pipe_listener->start()) {
         std::cerr << "fatal: another core process is already running (pipe '"
-                  << core_pipe_path() << "' is in use)" << std::endl;
+                  << pipe_path << "' is in use)" << std::endl;
         return 1;
     }
 
-    exv::observability::LogFacade::info("Core process ready — reading JSON-RPC from stdin and pipe");
+    auto registry_snapshot =
+        bootstrap_registry_snapshot(*native_dispatcher, pipe_path);
+    if (!registry_snapshot.has_value()) {
+        std::cerr << "fatal: could not initialize versioned core registry"
+                  << std::endl;
+        pipe_listener->stop();
+        return 1;
+    }
+
+    const auto registry_path = exv::core::lifecycle::core_registry_path();
+    std::mutex registry_mutex;
+    std::optional<exv::core::lifecycle::CoreRegistrySnapshot>
+        last_persisted_registry_snapshot;
+    int registry_persist_attempt = 0;
+    auto persist_registry = [&](const std::optional<TunnelStatusSnapshot>& status) {
+        std::lock_guard<std::mutex> lock(registry_mutex);
+        auto candidate = *registry_snapshot;
+        if (status.has_value()) {
+            exv::core::lifecycle::apply_tunnel_status(candidate,
+                                                      *status);
+        }
+
+        candidate.helper_core_lease_id.clear();
+        if (auto helper = controller->helper_client_for_maintenance();
+            helper && helper->is_connected()) {
+            try {
+                const auto inspect = helper->inspect(exv::helper::InspectRequest{});
+                if (inspect.core_lease.active) {
+                    candidate.helper_core_lease_id = inspect.core_lease.lease_id;
+                }
+            } catch (...) {
+                candidate.helper_core_lease_id.clear();
+            }
+        }
+
+        exv::core::lifecycle::refresh_core_registry_heartbeat(candidate);
+        ++registry_persist_attempt;
+        auto& hook = testing::core_registry_persist_candidate_hook();
+        if (hook) {
+            hook(candidate, registry_persist_attempt);
+        }
+        if (!exv::core::lifecycle::write_core_registry(candidate,
+                                                       registry_path)) {
+            return false;
+        }
+        registry_snapshot = candidate;
+        last_persisted_registry_snapshot = candidate;
+        return true;
+    };
+
+    controller->set_status_callback([&](const TunnelStatusSnapshot& status) {
+        if (!persist_registry(status)) {
+            exv::observability::LogFacade::warn(
+                "Core process could not refresh the versioned core registry after status update");
+        }
+    });
+
+    if (!persist_registry(controller->status())) {
+        exv::observability::LogFacade::warn(
+            "Core process could not persist the versioned core registry; aborting startup");
+        pipe_listener->stop();
+        return 1;
+    }
+
+    std::atomic<bool> registry_worker_stop{false};
+    std::thread registry_worker([&] {
+        while (!registry_worker_stop.load() && !g_stop_requested.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (registry_worker_stop.load() || g_stop_requested.load()) {
+                break;
+            }
+            if (!persist_registry(std::nullopt)) {
+                exv::observability::LogFacade::warn(
+                    "Core process could not refresh the versioned core registry heartbeat");
+            }
+        }
+    });
+
+    exv::observability::LogFacade::info(
+        "Core process ready — reading JSON-RPC from stdin and pipe");
 
     // 8. Main event loop: read JSON-RPC requests from stdin and pipe, one per line
     std::string line;
@@ -336,11 +470,30 @@ int core_process_main(const std::string& config_dir,
         // Calling accept_one() here would block the stdin read loop.
     }
 
+    registry_worker_stop.store(true);
+    controller->set_status_callback({});
+    if (registry_worker.joinable()) {
+        registry_worker.join();
+    }
+
     pipe_worker_stop.store(true);
     if (pipe_worker.joinable()) {
         pipe_worker.join();
     }
     pipe_listener->stop();
+
+    std::optional<exv::core::lifecycle::CoreRegistryDeleteMatch> delete_match;
+    {
+        std::lock_guard<std::mutex> lock(registry_mutex);
+        if (last_persisted_registry_snapshot.has_value()) {
+            delete_match = exv::core::lifecycle::core_registry_delete_match(
+                *last_persisted_registry_snapshot);
+        }
+    }
+    if (delete_match.has_value()) {
+        (void)exv::core::lifecycle::compare_and_delete_core_registry(
+            registry_path, *delete_match);
+    }
 
     exv::observability::LogFacade::info("Core process shutting down");
     return 0;

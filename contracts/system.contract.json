@@ -1,7 +1,8 @@
 {
   "contract_id": "ecnu-vpn.system",
   "schema_version": 1,
-  "version": "2026-06-15.config-helper-tunnel-utils-contract.v1",
+  "version": "2026-06-16.cli-core-ui-contract.v1",
+  "ipc_protocol_major": 1,
   "envelopes": {
     "desktop_rpc": {
       "request": {
@@ -46,6 +47,8 @@
         "status.get",
         "vpn.connect",
         "vpn.disconnect",
+        "vpn.authInteraction.get",
+        "vpn.authInteraction.respond",
         "config.getAuth",
         "config.saveAuth",
         "config.getSettings",
@@ -62,7 +65,8 @@
         "drivers.install",
         "service.install",
         "service.uninstall",
-        "logs.list"
+        "logs.list",
+        "logs.clear"
       ],
       "event_types": [
         "log",
@@ -89,11 +93,119 @@
         { "key": "networkUnreachable", "code": "network_unreachable" },
         { "key": "userCancelled", "code": "user_cancelled" },
         { "key": "invalidRequest", "code": "invalid_request" },
+        { "key": "logClearFailed", "code": "log_clear_failed" },
         { "key": "connectionFailed", "code": "connection_failed" },
         { "key": "vpnStartFailed", "code": "vpn_start_failed" }
       ]
+    },
+    "core_rpc": {
+      "actions": [
+        "core.hello",
+        "status.get",
+        "vpn.connect",
+        "vpn.disconnect",
+        "config.get",
+        "config.save",
+        "config.getAuth",
+        "config.saveAuth",
+        "config.getSettings",
+        "config.saveSettings",
+        "config.reset",
+        "config.import",
+        "config.export",
+        "config.get_profile",
+        "config.save_profile",
+        "key.status",
+        "key.reset",
+        "routes.list",
+        "routes.add",
+        "routes.remove",
+        "routes.reset",
+        "logs.list",
+        "logs.clear",
+        "service.status",
+        "service.install",
+        "service.uninstall",
+        "runtime.status",
+        "drivers.status",
+        "drivers.install",
+        "maintenance.inspectCore",
+        "maintenance.killStaleCore"
+      ],
+      "destructive_actions": [
+        "config.reset",
+        "key.reset",
+        "maintenance.killStaleCore"
+      ],
+      "error_codes": [
+        "confirmation_required",
+        "invalid_payload",
+        "invalid_config",
+        "unsupported_contract_version",
+        "core_comm_broken",
+        "core_unresponsive",
+        "core_protocol_mismatch",
+        "core_not_found",
+        "core_launch_failed",
+        "core_version_probe_failed",
+        "config_import_format_unsupported",
+        "config_import_auth_failed",
+        "config_import_tampered_or_wrong_password",
+        "credential_store_unavailable",
+        "key_missing",
+        "key_corrupt",
+        "log_clear_failed"
+      ]
     }
   },
+  "action_ownership": [
+    { "name": "core.hello", "owner": "core_rpc" },
+    { "name": "status.get", "owner": "core_rpc" },
+    { "name": "vpn.connect", "owner": "core_rpc" },
+    { "name": "vpn.disconnect", "owner": "core_rpc" },
+    { "name": "vpn.status", "owner": "core_rpc" },
+    { "name": "vpn.set_auto_reconnect", "owner": "core_rpc" },
+    { "name": "vpn.authInteraction.get", "owner": "desktop_host_adapter" },
+    { "name": "vpn.authInteraction.respond", "owner": "desktop_host_adapter" },
+    { "name": "config.get", "owner": "compat_alias", "canonical": "config.getSettings" },
+    { "name": "config.save", "owner": "compat_alias", "canonical": "config.saveSettings" },
+    { "name": "config.getAuth", "owner": "core_rpc" },
+    { "name": "config.saveAuth", "owner": "core_rpc" },
+    { "name": "config.getSettings", "owner": "core_rpc" },
+    { "name": "config.saveSettings", "owner": "core_rpc" },
+    { "name": "config.getKey", "owner": "compat_alias", "canonical": "key.status" },
+    { "name": "config.reset", "owner": "core_rpc" },
+    { "name": "config.import", "owner": "core_rpc" },
+    { "name": "config.export", "owner": "core_rpc" },
+    { "name": "config.get_profile", "owner": "compat_alias", "canonical": "config.profile.get" },
+    { "name": "config.save_profile", "owner": "compat_alias", "canonical": "config.profile.save" },
+    { "name": "config.profile.get", "owner": "core_rpc" },
+    { "name": "config.profile.save", "owner": "core_rpc" },
+    { "name": "key.status", "owner": "core_rpc" },
+    { "name": "key.reset", "owner": "core_rpc" },
+    { "name": "routes.list", "owner": "core_rpc" },
+    { "name": "routes.add", "owner": "core_rpc" },
+    { "name": "routes.remove", "owner": "core_rpc" },
+    { "name": "routes.reset", "owner": "core_rpc" },
+    { "name": "route.list", "owner": "core_rpc" },
+    { "name": "route.add", "owner": "core_rpc" },
+    { "name": "route.remove", "owner": "core_rpc" },
+    { "name": "route.enable", "owner": "core_rpc" },
+    { "name": "route.disable", "owner": "core_rpc" },
+    { "name": "logs.list", "owner": "core_rpc" },
+    { "name": "logs.clear", "owner": "core_rpc" },
+    { "name": "service.status", "owner": "core_rpc" },
+    { "name": "service.helper_status", "owner": "core_rpc" },
+    { "name": "helper.status", "owner": "desktop_host_adapter" },
+    { "name": "service.install", "owner": "core_rpc" },
+    { "name": "service.uninstall", "owner": "core_rpc" },
+    { "name": "service.driver_status", "owner": "core_rpc" },
+    { "name": "runtime.status", "owner": "core_rpc" },
+    { "name": "drivers.status", "owner": "core_rpc" },
+    { "name": "drivers.install", "owner": "core_rpc" },
+    { "name": "maintenance.inspectCore", "owner": "core_rpc" },
+    { "name": "maintenance.killStaleCore", "owner": "core_rpc" }
+  ],
   "modules": {
     "config": {
       "boundary": {
@@ -119,7 +231,6 @@
         { "name": "config.saveAuth", "surface": "desktop", "request": "ConfigAuthUpdate", "response": "ConfigAuth" },
         { "name": "config.getSettings", "surface": "desktop", "request": "empty", "response": "ConfigSettings" },
         { "name": "config.saveSettings", "surface": "desktop", "request": "ConfigSettingsUpdate", "response": "ConfigSettings" },
-        { "name": "config.getKey", "surface": "desktop", "request": "empty", "response": "CredentialStoreStatus" },
         { "name": "config.profile.get", "surface": "core", "request": "ConfigProfileGetRequest", "response": "ConfigProfile" },
         { "name": "config.profile.save", "surface": "core", "request": "ConfigProfileSaveRequest", "response": "ConfigProfileSaveResult" }
       ],
@@ -430,7 +541,6 @@
         "platform include logger.hpp",
         "platform include vpn.hpp",
         "platform include tunnel.hpp",
-        "platform include openconnect_log.hpp",
         "platform include virtual_network.hpp",
         "platform include core/*"
       ]
@@ -458,7 +568,7 @@
     "logs": {
       "shallow": true,
       "namespace": "logs.",
-      "actions": ["logs.list"]
+      "actions": ["logs.list", "logs.clear"]
     }
   }
 }

@@ -454,7 +454,7 @@ AuthResult parse_auth_response(const HttpResponse &response) {
   std::string cookie_pair;
   for (const std::string &h : *cookie_headers) {
     const std::string pair = extract_cookie_pair(h);
-    if (starts_with_ci(pair, "webvpn_session=")) {
+    if (starts_with_ci(pair, "webvpn=")) {
       cookie_pair = pair;
       break;
     }
@@ -463,7 +463,7 @@ AuthResult parse_auth_response(const HttpResponse &response) {
   if (cookie_pair.empty()) {
     out.ok = false;
     out.error_code = "protocol_error";
-    out.error_message = "missing webvpn_session cookie";
+    out.error_message = "missing webvpn cookie";
     return out;
   }
 

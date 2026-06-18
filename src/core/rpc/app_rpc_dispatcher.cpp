@@ -1,9 +1,15 @@
 #include "app_rpc_dispatcher.hpp"
 
+#include <stdexcept>
+#include <utility>
+
 namespace exv::core_api {
 
 void AppRpcDispatcher::register_handler(const std::string& action, Handler handler) {
-    handlers_[action] = std::move(handler);
+    if (handlers_.find(action) != handlers_.end()) {
+        throw std::logic_error("Duplicate RPC action handler: " + action);
+    }
+    handlers_.emplace(action, std::move(handler));
 }
 
 RpcResponse AppRpcDispatcher::dispatch(const RpcRequest& request) {

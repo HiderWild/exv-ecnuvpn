@@ -15,12 +15,24 @@
 
 #if defined(EXV_BUILD_UI_SHELL)
 #include <WebView2.h>
+#include <nlohmann/json.hpp>
 #include <objbase.h>
+#include <shellapi.h>
 #endif
 
 namespace ecnuvpn::platform::win32::ui_shell {
 
 namespace {
+
+constexpr char kPackagedRendererHost[] = "appassets.ecnu-vpn.invalid";
+constexpr wchar_t kPackagedRendererHostWide[] =
+    L"appassets.ecnu-vpn.invalid";
+constexpr DWORD kFixedWindowStyle =
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr int kTrayCommandShow = 1001;
+constexpr int kTrayCommandQuit = 1002;
+constexpr UINT kTrayCallbackMessage = WM_APP + 0x42;
+constexpr UINT kTrayIconId = 1;
 
 std::wstring wide_from_utf8(const std::string &value) {
   if (value.empty()) {
@@ -37,8 +49,6 @@ std::wstring wide_from_utf8(const std::string &value) {
                       static_cast<int>(value.size()), out.data(), required);
   return out;
 }
-
-#if defined(EXV_BUILD_UI_SHELL)
 
 std::string utf8_from_wide(const wchar_t *value) {
   if (!value) {
@@ -58,19 +68,30 @@ std::string utf8_from_wide(const wchar_t *value) {
   return out;
 }
 
-std::wstring renderer_uri(const ecnuvpn::ui_shell::RendererAssets &renderer) {
-  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
-    return wide_from_utf8(renderer.location);
-  }
-
-  std::filesystem::path path =
-      std::filesystem::absolute(std::filesystem::path(renderer.location));
-  std::wstring generic = path.generic_wstring();
-  if (generic.rfind(L"/", 0) == 0) {
-    return L"file://" + generic;
-  }
-  return L"file:///" + generic;
+bool is_file_uri_path_byte_safe(unsigned char value) {
+  return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
+         (value >= '0' && value <= '9') || value == '/' || value == ':' ||
+         value == '-' || value == '_' || value == '.' || value == '~';
 }
+
+std::string percent_encode_file_uri_path(const std::string &value) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+
+  std::string out;
+  out.reserve(value.size());
+  for (unsigned char byte : value) {
+    if (is_file_uri_path_byte_safe(byte)) {
+      out.push_back(static_cast<char>(byte));
+      continue;
+    }
+    out.push_back('%');
+    out.push_back(kHex[byte >> 4]);
+    out.push_back(kHex[byte & 0x0F]);
+  }
+  return out;
+}
+
+#if defined(EXV_BUILD_UI_SHELL)
 
 std::wstring temp_bootstrapper_path() {
   wchar_t temp_dir[MAX_PATH] = {};
@@ -200,6 +221,7 @@ public:
     if (webview_ && web_message_token_.value != 0) {
       webview_->remove_WebMessageReceived(web_message_token_);
     }
+    destroy_tray_icon();
   }
 
   void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
@@ -224,6 +246,8 @@ public:
       }
       return 70;
     }
+
+    create_tray_icon();
 
     running_ = true;
     ShowWindow(hwnd_, SW_SHOW);
@@ -259,6 +283,7 @@ public:
       DestroyWindow(hwnd_);
       hwnd_ = nullptr;
     }
+    destroy_tray_icon();
     if (coinit_ok) {
       CoUninitialize();
     }
@@ -305,6 +330,10 @@ public:
     webview_.attach(raw_webview);
 
     resize_webview();
+    if (!configure_packaged_renderer_origin()) {
+      fail_and_close(L"Unable to map the packaged renderer assets.");
+      return;
+    }
     install_renderer_bridge();
 
     auto *message_handler = new WebMessageReceivedHandler(this);
@@ -316,7 +345,7 @@ public:
       return;
     }
 
-    const std::wstring uri = renderer_uri(active_config_.renderer);
+    const std::wstring uri = webview2_renderer_uri(active_config_.renderer);
     if (uri.empty() || FAILED(webview_->Navigate(uri.c_str()))) {
       fail_and_close(L"Unable to load the packaged renderer.");
       return;
@@ -346,6 +375,69 @@ public:
       return S_OK;
     }
 
+    try {
+      auto parsed = nlohmann::json::parse(request_json);
+      const std::string action = parsed.value("action", "");
+      const int id = parsed.value("id", 0);
+      if (action == "window.setMode") {
+        std::string mode = "advanced";
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("mode") && payload["mode"].is_string()) {
+            mode = payload["mode"].get<std::string>();
+          }
+        }
+        apply_window_mode(mode);
+        nlohmann::ordered_json out;
+        out["id"] = id;
+        out["ok"] = true;
+        nlohmann::ordered_json data;
+        data["mode"] = mode;
+        out["data"] = data;
+        const std::string response_json = out.dump();
+        const std::wstring wide_response = wide_from_utf8(response_json);
+        webview_->PostWebMessageAsJson(wide_response.c_str());
+        return S_OK;
+      }
+      if (action == "window.resolveClosePrompt") {
+        std::string resolved_action = "cancel";
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("result")) {
+            const auto &result = payload["result"];
+            if (result.is_string()) {
+              resolved_action = result.get<std::string>();
+            } else if (result.is_object() && result.contains("action") &&
+                       result["action"].is_string()) {
+              resolved_action = result["action"].get<std::string>();
+            }
+          }
+        }
+        if (resolved_action == "tray") {
+          close_prompt_pending_ = false;
+          if (hwnd_) {
+            ShowWindow(hwnd_, SW_HIDE);
+          }
+        } else if (resolved_action == "quit") {
+          close_prompt_pending_ = false;
+          quit_from_tray();
+        } else {
+          close_prompt_pending_ = false;
+          show_from_tray();
+        }
+        nlohmann::ordered_json out;
+        out["id"] = id;
+        out["ok"] = true;
+        out["data"] = nlohmann::json::object();
+        const std::string response_json = out.dump();
+        const std::wstring wide_response = wide_from_utf8(response_json);
+        webview_->PostWebMessageAsJson(wide_response.c_str());
+        return S_OK;
+      }
+    } catch (const nlohmann::json::exception &) {
+      // Fall through to existing handler_ path on parse failure.
+    }
+
     std::string response_json =
         handler_ ? handler_(request_json)
                  : R"({"id":0,"ok":false,"code":"host_unavailable","message":"Desktop host bridge is not ready"})";
@@ -362,7 +454,116 @@ public:
     controller_->put_Bounds(bounds);
   }
 
+  bool create_tray_icon() {
+    if (!webview2_should_create_tray_on_start() || !hwnd_ || tray_icon_added_) {
+      return true;
+    }
+    tray_icon_.cbSize = sizeof(tray_icon_);
+    tray_icon_.hWnd = hwnd_;
+    tray_icon_.uID = kTrayIconId;
+    tray_icon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    tray_icon_.uCallbackMessage = kTrayCallbackMessage;
+    tray_icon_.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+    wcscpy_s(tray_icon_.szTip, L"ECNU VPN");
+    tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &tray_icon_) == TRUE;
+    return tray_icon_added_;
+  }
+
+  void destroy_tray_icon() {
+    if (!tray_icon_added_) {
+      return;
+    }
+    Shell_NotifyIconW(NIM_DELETE, &tray_icon_);
+    tray_icon_added_ = false;
+  }
+
+  void show_from_tray() {
+    if (!hwnd_) {
+      return;
+    }
+    ShowWindow(hwnd_, SW_SHOW);
+    SetForegroundWindow(hwnd_);
+  }
+
+  void quit_from_tray() {
+    force_quit_ = true;
+    running_ = false;
+    if (hwnd_) {
+      DestroyWindow(hwnd_);
+    }
+  }
+
+  void request_close_decision() {
+    if (close_prompt_pending_) {
+      show_from_tray();
+      return;
+    }
+    close_prompt_pending_ = true;
+    emit_event(R"({"type":"close-request","data":{}})");
+  }
+
+  void apply_window_mode(const std::string &mode) {
+    const auto bounds = mode == "minimal"
+                            ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
+                            : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+    if (hwnd_) {
+      SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
+                   SWP_NOMOVE | SWP_NOZORDER);
+      resize_webview();
+    }
+  }
+
+  void show_tray_menu() {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+      return;
+    }
+    for (const auto &item : webview2_tray_menu_model()) {
+      if (item.separator) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+      } else if (!item.label.empty()) {
+        AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(item.command_id),
+                    item.label.c_str());
+      }
+    }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    SetForegroundWindow(hwnd_);
+    const UINT command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, hwnd_,
+        nullptr);
+    DestroyMenu(menu);
+    if (command == kTrayCommandShow) {
+      show_from_tray();
+    } else if (command == kTrayCommandQuit) {
+      quit_from_tray();
+    }
+  }
+
 private:
+  bool configure_packaged_renderer_origin() {
+    if (active_config_.renderer.kind ==
+        ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+      return true;
+    }
+
+    ComPtr<ICoreWebView2_3> webview3;
+    const HRESULT interface_result = webview_->QueryInterface(
+        IID_ICoreWebView2_3, reinterpret_cast<void **>(webview3.put()));
+    if (FAILED(interface_result) || !webview3) {
+      return false;
+    }
+
+    const std::wstring folder =
+        webview2_packaged_renderer_folder(active_config_.renderer);
+    if (folder.empty()) {
+      return false;
+    }
+    return SUCCEEDED(webview3->SetVirtualHostNameToFolderMapping(
+        kPackagedRendererHostWide, folder.c_str(),
+        COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY));
+  }
+
   bool ensure_runtime_available() {
     if (detect_webview2_runtime().installed) {
       return true;
@@ -389,6 +590,7 @@ private:
   }
 
   bool create_window() {
+    const auto bounds = webview2_default_window_bounds();
     instance_ = GetModuleHandleW(nullptr);
     WNDCLASSW window_class{};
     window_class.lpfnWndProc = &WebView2Window::window_proc;
@@ -398,8 +600,9 @@ private:
     RegisterClassW(&window_class);
 
     hwnd_ = CreateWindowExW(0, window_class.lpszClassName, L"ECNU VPN",
-                            WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                            1180, 760, nullptr, nullptr, instance_, this);
+                            kFixedWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT,
+                            bounds.width, bounds.height, nullptr, nullptr,
+                            instance_, this);
     return hwnd_ != nullptr;
   }
 
@@ -443,6 +646,8 @@ private:
       disconnect: () => rpc('vpn.disconnect'),
       connectElevated: (password) => rpc('vpn.connect', { password, allow_direct_fallback: true }),
       disconnectElevated: (backend) => rpc('vpn.disconnect', { backend, allow_direct_fallback: true }),
+      authInteraction: () => rpc('vpn.authInteraction.get'),
+      respondAuthInteraction: (id, value) => rpc('vpn.authInteraction.respond', { id, value }),
     },
     config: {
       getAuth: () => rpc('config.getAuth'),
@@ -450,6 +655,9 @@ private:
       getSettings: () => rpc('config.getSettings'),
       saveSettings: (input) => rpc('config.saveSettings', input),
       getKey: () => rpc('config.getKey'),
+      importConfig: (input) => rpc('config.import', input ?? {}),
+      exportConfig: (input) => rpc('config.export', input ?? {}),
+      reset: (confirm) => rpc('config.reset', { confirm }),
     },
     routes: {
       list: () => rpc('routes.list'),
@@ -473,9 +681,17 @@ private:
       status: () => rpc('drivers.status'),
       install: (driver) => rpc('drivers.install', { driver }),
     },
+    key: {
+      status: () => rpc('key.status'),
+      reset: (confirm) => rpc('key.reset', { confirm }),
+    },
+    maintenance: {
+      inspectCore: () => rpc('maintenance.inspectCore'),
+      killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
+    },
     window: {
-      setMode: () => Promise.resolve(),
-      resolveClosePrompt: () => Promise.resolve(),
+      setMode: (mode) => rpc('window.setMode', { mode }),
+      resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -533,10 +749,21 @@ private:
         self->resize_webview();
         return 0;
       case WM_CLOSE:
-        DestroyWindow(hwnd);
+        if (self->force_quit_) {
+          DestroyWindow(hwnd);
+        } else {
+          self->request_close_decision();
+        }
         return 0;
       case WM_DESTROY:
         self->running_ = false;
+        return 0;
+      case kTrayCallbackMessage:
+        if (lparam == WM_LBUTTONUP) {
+          self->show_from_tray();
+        } else if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
+          self->show_tray_menu();
+        }
         return 0;
       default:
         break;
@@ -556,6 +783,10 @@ private:
   ComPtr<ICoreWebView2Controller> controller_;
   ComPtr<ICoreWebView2> webview_;
   std::vector<std::string> pending_events_;
+  NOTIFYICONDATAW tray_icon_{};
+  bool tray_icon_added_ = false;
+  bool force_quit_ = false;
+  bool close_prompt_pending_ = false;
 };
 
 HRESULT EnvironmentCompletedHandler::QueryInterface(REFIID riid, void **object) {
@@ -641,6 +872,51 @@ private:
 #endif
 
 } // namespace
+
+ecnuvpn::ui_shell::WindowBounds webview2_default_window_bounds() noexcept {
+  return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+}
+
+bool webview2_should_create_tray_on_start() {
+  return true;
+}
+
+std::vector<WebView2TrayMenuItem> webview2_tray_menu_model() {
+  return {
+      {L"显示 ECNU VPN", kTrayCommandShow, false},
+      {L"", 0, true},
+      {L"退出", kTrayCommandQuit, false},
+  };
+}
+
+std::wstring webview2_renderer_uri(
+    const ecnuvpn::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    return wide_from_utf8(renderer.location);
+  }
+
+  std::filesystem::path path =
+      std::filesystem::absolute(std::filesystem::path(renderer.location));
+  std::wstring filename = path.filename().generic_wstring();
+  const std::string encoded =
+      percent_encode_file_uri_path(utf8_from_wide(filename.c_str()));
+  if (encoded.empty()) {
+    return {};
+  }
+  return wide_from_utf8(std::string("https://") + kPackagedRendererHost + "/" +
+                        encoded);
+}
+
+std::wstring webview2_packaged_renderer_folder(
+    const ecnuvpn::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    return {};
+  }
+
+  std::filesystem::path path =
+      std::filesystem::absolute(std::filesystem::path(renderer.location));
+  return path.parent_path().wstring();
+}
 
 std::string dispatch_webview2_host_message(
     const std::string &message_json,

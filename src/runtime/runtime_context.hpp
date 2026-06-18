@@ -11,7 +11,7 @@ namespace ecnuvpn {
 namespace runtime {
 
 // Resolved, process-wide runtime paths. Pinned once by bootstrap() so that
-// every process (CLI, elevated desktop-rpc, helper worker, supervisor) writes
+// every process (CLI, elevated desktop-rpc, helper worker) writes
 // to the same state directory and log file regardless of how its ambient
 // environment resolves %APPDATA% / $HOME.
 struct RuntimePaths {

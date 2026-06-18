@@ -10,8 +10,8 @@ namespace exv::core {
 using PipeRequestHandler = std::function<std::string(const std::string& request_line)>;
 
 // Cross-platform named pipe / Unix socket listener for CLI connections.
-// On Windows: \\.\pipe\exv-core
-// On Unix:    {state_dir}/exv-core.sock
+// On Windows: \\.\pipe\exv-core-ipc-v1
+// On Unix:    {state_dir}/exv-core-ipc-v1.sock
 class PipeIpcListener {
 public:
   explicit PipeIpcListener(const std::string& pipe_path);
@@ -40,6 +40,8 @@ private:
 };
 
 // Canonical pipe path for the current platform.
+// Publicly kept for compatibility; internally this now delegates to the
+// versioned lifecycle IPC path.
 std::string core_pipe_path();
 
 } // namespace exv::core

@@ -34,8 +34,6 @@ void show(const Config &cfg) {
             << (cfg.auto_reconnect ? "yes" : "no") << std::endl;
   std::cout << "  " << cli::BOLD << "VPN Engine" << cli::RESET << "   : "
             << cfg.vpn_engine << std::endl;
-  std::cout << "  " << cli::BOLD << "Runtime" << cli::RESET << "      : "
-            << cfg.openconnect_runtime << std::endl;
   std::cout << "  " << cli::BOLD << "Tunnel Driver" << cli::RESET << ": "
             << cfg.windows_tunnel_driver << std::endl;
   std::cout << "  " << cli::BOLD << "Log File" << cli::RESET << "     : "

@@ -110,4 +110,13 @@ void PipeClient::disconnect() {
 
 bool PipeClient::is_connected() const { return connected_; }
 
+bool PipeClient::probe(const std::string& pipe_path) {
+  PipeClient client;
+  bool ok = client.connect(pipe_path);
+  if (ok) {
+    client.disconnect();
+  }
+  return ok;
+}
+
 } // namespace exv::cli

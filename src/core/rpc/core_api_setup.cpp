@@ -1,8 +1,11 @@
 #include "core_api_setup.hpp"
+#include "core_actions.hpp"
 #include "vpn_actions.hpp"
 #include "config_actions.hpp"
 #include "service_actions.hpp"
 #include "route_actions.hpp"
+#include "log_actions.hpp"
+#include "maintenance_actions.hpp"
 
 namespace exv::core_api {
 
@@ -14,6 +17,10 @@ std::unique_ptr<AppRpcDispatcher> create_dispatcher(
     // All action objects are heap-allocated and retained by the dispatcher.
     // Their handlers capture `this`, so the action objects must outlive the
     // dispatcher.  retain_action() stores them as type-erased shared_ptrs.
+    auto core = std::make_shared<CoreActions>();
+    core->register_handlers(*dispatcher);
+    dispatcher->retain_action(core);
+
     auto vpn = std::make_shared<VpnActions>(controller);
     vpn->register_handlers(*dispatcher);
     dispatcher->retain_action(vpn);
@@ -29,6 +36,14 @@ std::unique_ptr<AppRpcDispatcher> create_dispatcher(
     auto route = std::make_shared<RouteActions>();
     route->register_handlers(*dispatcher);
     dispatcher->retain_action(route);
+
+    auto logs = std::make_shared<LogActions>();
+    logs->register_handlers(*dispatcher);
+    dispatcher->retain_action(logs);
+
+    auto maintenance = std::make_shared<MaintenanceActions>();
+    maintenance->register_handlers(*dispatcher);
+    dispatcher->retain_action(maintenance);
 
     return dispatcher;
 }

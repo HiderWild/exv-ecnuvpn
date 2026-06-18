@@ -4,6 +4,7 @@ import { RouterView } from 'vue-router'
 import { useRoute } from 'vue-router'
 import NavBar from './components/NavBar.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import AuthContinuationDialog from './components/AuthContinuationDialog.vue'
 import CoreCrashed from './components/CoreCrashed.vue'
 import ErrorDialog from './components/ErrorDialog.vue'
 import MinimalModeView from './components/MinimalModeView.vue'
@@ -282,6 +283,7 @@ async function handleCoreQuit() {
   />
   <ErrorDialog />
   <ConfirmDialog />
+  <AuthContinuationDialog />
   <PasswordPromptDialog />
   <ToastStack />
 </template>

@@ -161,6 +161,7 @@ ValidationResult NativeVpnEngineSession::start() {
   // left at their disabled defaults until a live gateway capture validates the
   // timing. Responding to an inbound DPD request is always on inside the
   // forwarding loop, so the gateway still observes us as alive.
+  options.auth_interaction_handler = dependencies_.auth_interaction_handler;
 
   auto protocol_session =
       std::make_unique<protocol::ProtocolSession>(options, transport.get());

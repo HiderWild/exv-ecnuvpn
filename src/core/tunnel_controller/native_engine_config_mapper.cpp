@@ -19,9 +19,14 @@ ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
 ecnuvpn::vpn_engine::ValidationResult
 validate_native_app_config(const ecnuvpn::Config &cfg) {
   if (!cfg.extra_args.empty()) {
-    return invalid(
-        "unsupported_extra_args",
-        "Native VPN engine does not support legacy OpenConnect extra_args.");
+    std::string joined;
+    for (const auto &arg : cfg.extra_args) {
+      if (!joined.empty())
+        joined += " ";
+      joined += arg;
+    }
+    return invalid("unsupported_extra_args",
+                   "Unsupported native extra_args: " + joined);
   }
   if (cfg.server.empty()) {
     return invalid("config_invalid", "VPN server is not configured.");
@@ -56,8 +61,7 @@ ecnuvpn::vpn_engine::ValidationResult make_native_engine_config(
   engine_cfg.windows_tunnel_driver = cfg.windows_tunnel_driver;
   engine_cfg.windows_tap_interface = cfg.windows_tap_interface;
   engine_cfg.auto_reconnect = cfg.auto_reconnect;
-  // Native engine is CSTP/TLS-only. The user-facing disable_dtls flag belongs
-  // to the legacy OpenConnect command-line path, so core forces CSTP here.
+  // Native engine is CSTP/TLS-only until a production DTLS backend is added.
   engine_cfg.disable_dtls = true;
 
   *out = std::move(engine_cfg);

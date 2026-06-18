@@ -7,7 +7,6 @@ inline constexpr const char *ACTIONS[] = {
     "config.saveAuth",
     "config.getSettings",
     "config.saveSettings",
-    "config.getKey",
     "config.profile.get",
     "config.profile.save",
 };

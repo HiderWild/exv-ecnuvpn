@@ -1,5 +1,6 @@
 #include "app/ui_shell/host_bridge.hpp"
 #include "app/ui_shell/ui_window.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #if defined(EXV_BUILD_UI_SHELL)
 #include <gtk/gtk.h>
@@ -56,6 +57,8 @@ const char *bridge_script() {
       disconnect: () => rpc('vpn.disconnect'),
       connectElevated: (password) => rpc('vpn.connect', { password, allow_direct_fallback: true }),
       disconnectElevated: (backend) => rpc('vpn.disconnect', { backend, allow_direct_fallback: true }),
+      authInteraction: () => rpc('vpn.authInteraction.get'),
+      respondAuthInteraction: (id, value) => rpc('vpn.authInteraction.respond', { id, value }),
     },
     config: {
       getAuth: () => rpc('config.getAuth'),
@@ -63,6 +66,9 @@ const char *bridge_script() {
       getSettings: () => rpc('config.getSettings'),
       saveSettings: (input) => rpc('config.saveSettings', input),
       getKey: () => rpc('config.getKey'),
+      importConfig: (input) => rpc('config.import', input ?? {}),
+      exportConfig: (input) => rpc('config.export', input ?? {}),
+      reset: (confirm) => rpc('config.reset', { confirm }),
     },
     routes: {
       list: () => rpc('routes.list'),
@@ -85,6 +91,14 @@ const char *bridge_script() {
     drivers: {
       status: () => rpc('drivers.status'),
       install: (driver) => rpc('drivers.install', { driver }),
+    },
+    key: {
+      status: () => rpc('key.status'),
+      reset: (confirm) => rpc('key.reset', { confirm }),
+    },
+    maintenance: {
+      inspectCore: () => rpc('maintenance.inspectCore'),
+      killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
       setMode: () => Promise.resolve(),
@@ -172,6 +186,9 @@ std::string renderer_uri(const ecnuvpn::ui_shell::RendererAssets &renderer) {
 
 } // namespace
 
+[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+webkitgtk_default_window_bounds() noexcept;
+
 #if defined(EXV_BUILD_UI_SHELL)
 class WebKitGtkWindow final : public ecnuvpn::ui_shell::UiWindow {
 public:
@@ -232,6 +249,7 @@ public:
 
 private:
   bool create_window() {
+    const auto bounds = webkitgtk_default_window_bounds();
     application_ =
         gtk_application_new("cn.ecnu.vpn", G_APPLICATION_FLAGS_NONE);
     if (application_ == nullptr) {
@@ -256,7 +274,9 @@ private:
     }
 
     gtk_window_set_title(GTK_WINDOW(window_), "ECNU VPN");
-    gtk_window_set_default_size(GTK_WINDOW(window_), 1180, 760);
+    gtk_window_set_default_size(GTK_WINDOW(window_), bounds.width,
+                                bounds.height);
+    gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     g_signal_connect(window_, "destroy", G_CALLBACK(&WebKitGtkWindow::on_destroy),
                      this);
 
@@ -433,6 +453,10 @@ private:
   std::string last_event_json_;
 };
 #endif
+
+ecnuvpn::ui_shell::WindowBounds webkitgtk_default_window_bounds() noexcept {
+  return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+}
 
 std::string dispatch_webkitgtk_host_message(
     const std::string &message_json,

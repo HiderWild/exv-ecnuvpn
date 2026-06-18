@@ -4,6 +4,10 @@
 #include <functional>
 #include <string>
 
+namespace exv::core::lifecycle {
+struct CoreResolverDeps;
+}
+
 namespace ecnuvpn::ui_shell {
 
 struct CoreRpcRequest {
@@ -64,5 +68,9 @@ std::string serialize_core_rpc_request(const CoreRpcRequest &request);
 std::string serialize_desktop_rpc_request(const CoreRpcRequest &request);
 CoreRpcResponse parse_core_rpc_line(const std::string &line);
 CoreRpcEvent parse_core_rpc_event_line(const std::string &line);
+
+// Create CoreResolverDeps that use PipeClient for IPC probe/send.
+// This bridges the CLI PipeClient into the shared resolver's DI interface.
+exv::core::lifecycle::CoreResolverDeps make_pipe_resolver_deps();
 
 } // namespace ecnuvpn::ui_shell

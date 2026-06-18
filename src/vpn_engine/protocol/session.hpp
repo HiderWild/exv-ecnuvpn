@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,19 @@ class CancellationToken {
 public:
   virtual ~CancellationToken() = default;
   virtual bool is_cancelled() const = 0;
+};
+
+struct AuthInteractionRequest {
+  std::string id;
+  std::string kind;
+  std::string label;
+  std::string input_type;
+  std::vector<std::string> options;
+};
+
+struct AuthInteractionResponse {
+  bool ok = false;
+  std::string value;
 };
 
 struct ProtocolSessionOptions {
@@ -43,6 +57,9 @@ struct ProtocolSessionOptions {
   int keepalive_idle_poll_interval = 0;
   int dpd_idle_poll_interval = 0;
   int dead_peer_poll_budget = 0;
+
+  std::function<AuthInteractionResponse(const AuthInteractionRequest &)>
+      auth_interaction_handler;
 };
 
 // Classification of a single CSTP frame received from the gateway. This is the

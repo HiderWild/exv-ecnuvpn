@@ -26,6 +26,10 @@ public:
   // Check if connected.
   bool is_connected() const;
 
+  // Probe whether the IPC endpoint is available without staying connected.
+  // Connects and immediately disconnects; returns true if the connect succeeded.
+  static bool probe(const std::string& pipe_path);
+
 private:
   void* handle_ = nullptr; // platform-specific: HANDLE (Win) or int fd (Unix)
   bool connected_ = false;

@@ -23,17 +23,22 @@ int start(const Config &cfg, int retry_limit) {
 
   cli::print_header("EXV Starting");
 
-  if (cfg.vpn_engine == "native") {
-    exv::observability::LogFacade::info("VPN CLI: Validating native engine configuration");
-    auto validation = exv::core::validate_native_app_config(cfg);
-    if (!validation.ok) {
-      cli::print_error(validation.message);
-      exv::observability::LogFacade::error("VPN CLI: Native engine validation failed - code=" +
-                    validation.code + " message=" + validation.message);
-      return 1;
-    }
-    exv::observability::LogFacade::info("VPN CLI: Native engine configuration validated successfully");
+  if (cfg.vpn_engine != "native") {
+    cli::print_error("VPN engine is native-only.");
+    exv::observability::LogFacade::error(
+        "VPN CLI: rejected non-native engine");
+    return 1;
   }
+
+  exv::observability::LogFacade::info("VPN CLI: Validating native engine configuration");
+  auto validation = exv::core::validate_native_app_config(cfg);
+  if (!validation.ok) {
+    cli::print_error(validation.message);
+    exv::observability::LogFacade::error("VPN CLI: Native engine validation failed - code=" +
+                  validation.code + " message=" + validation.message);
+    return 1;
+  }
+  exv::observability::LogFacade::info("VPN CLI: Native engine configuration validated successfully");
 
   nlohmann::json payload;
   payload["password"] = config::get_plaintext_password(cfg);

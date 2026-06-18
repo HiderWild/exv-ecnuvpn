@@ -52,6 +52,7 @@ private:
   std::vector<std::uint8_t> read_buffer_;
   bool stream_connected_ = false;
   bool cstp_connected_ = false;
+  bool dtls_disabled_ = true;
 
   // Serializes outbound writes (send_packet / send_control / disconnect frame)
   // so the inbound read thread and outbound write thread can share one stream.

@@ -58,6 +58,10 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
                               : ecnuvpn::vpn_engine::default_native_engine_dependencies();
     deps.event_sink = bridge_.get();
     deps.network_configurator = network_config_callback_;
+    deps.auth_interaction_handler =
+        [this](const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& req) {
+            return handle_auth_interaction(req);
+        };
 
     session_ = std::make_unique<ecnuvpn::vpn_engine::NativeVpnEngineSession>(
         engine_config, deps);
@@ -157,7 +161,10 @@ void CoreSessionRunner::stop() {
         std::lock_guard<std::mutex> lock(mu_);
         session = std::move(session_);
         running_ = false;
+        pending_auth_interaction_.reset();
+        auth_interaction_response_.reset();
     }
+    auth_interaction_cv_.notify_all();
 
     if (session) {
         session->stop();
@@ -185,6 +192,25 @@ ecnuvpn::vpn_engine::VpnEngineStatus CoreSessionRunner::status() const {
     return cached_status_;
 }
 
+std::optional<CoreSessionRunner::PendingAuthInteraction>
+CoreSessionRunner::pending_auth_interaction() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return pending_auth_interaction_;
+}
+
+bool CoreSessionRunner::provide_auth_interaction_response(
+    const std::string& id, const std::string& value) {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!pending_auth_interaction_ || pending_auth_interaction_->id != id) {
+            return false;
+        }
+        auth_interaction_response_ = AuthInteractionResponseState{id, value};
+    }
+    auth_interaction_cv_.notify_all();
+    return true;
+}
+
 void CoreSessionRunner::set_event_callback(EventCallback cb) {
     std::lock_guard<std::mutex> lock(mu_);
     event_callback_ = std::move(cb);
@@ -193,6 +219,41 @@ void CoreSessionRunner::set_event_callback(EventCallback cb) {
 void CoreSessionRunner::set_network_config_callback(NetworkConfigCallback cb) {
     std::lock_guard<std::mutex> lock(mu_);
     network_config_callback_ = std::move(cb);
+}
+
+ecnuvpn::vpn_engine::protocol::AuthInteractionResponse
+CoreSessionRunner::handle_auth_interaction(
+    const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& request) {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        pending_auth_interaction_ = PendingAuthInteraction{
+            request.id, request.kind, request.label, request.input_type,
+            request.options};
+        auth_interaction_response_.reset();
+    }
+    auth_interaction_cv_.notify_all();
+
+    std::unique_lock<std::mutex> lock(mu_);
+    const bool answered = auth_interaction_cv_.wait_for(
+        lock, std::chrono::seconds(120), [&] {
+            return !pending_auth_interaction_ ||
+                   (auth_interaction_response_ &&
+                    auth_interaction_response_->id == request.id);
+        });
+
+    ecnuvpn::vpn_engine::protocol::AuthInteractionResponse response;
+    if (!answered || !pending_auth_interaction_ || !auth_interaction_response_) {
+        pending_auth_interaction_.reset();
+        auth_interaction_response_.reset();
+        response.ok = false;
+        return response;
+    }
+
+    response.ok = true;
+    response.value = auth_interaction_response_->value;
+    pending_auth_interaction_.reset();
+    auth_interaction_response_.reset();
+    return response;
 }
 
 } // namespace exv::core

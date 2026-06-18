@@ -12,7 +12,6 @@ std::string get_config_path();
 std::string get_log_path();
 std::string get_tunnel_path();
 std::string get_pid_path();
-std::string get_supervisor_pid_path();
 std::string get_route_ready_path();
 std::string get_effective_home();
 std::string get_home_for_uid(unsigned int uid);

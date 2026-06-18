@@ -1,7 +1,9 @@
 #pragma once
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 #include "tunnel_intent.hpp"
 #include "tunnel_state.hpp"
 #include "tunnel_events.hpp"
@@ -18,6 +20,14 @@ class TunnelControllerTestAccess;
 
 class TunnelController {
 public:
+    struct PendingAuthInteraction {
+        std::string id;
+        std::string kind;
+        std::string label;
+        std::string input_type;
+        std::vector<std::string> options;
+    };
+
     TunnelController(
         std::shared_ptr<exv::helper::HelperClient> helper,
         std::shared_ptr<exv::platform::PlatformNetworkOps> net_ops,
@@ -45,6 +55,9 @@ public:
     // Status
     TunnelStatusSnapshot status() const;
     TunnelPhase phase() const;
+    std::optional<PendingAuthInteraction> pending_auth_interaction() const;
+    bool provide_auth_interaction_response(const std::string& id,
+                                           const std::string& value);
 
     // Event processing (called by engine/platform callbacks)
     void on_event(TunnelEvent event);

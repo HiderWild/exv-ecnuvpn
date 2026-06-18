@@ -1,5 +1,7 @@
 #include "app/ui_shell/core_process_manager.hpp"
 
+#include "platform/common/core_resolver_platform_deps.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
@@ -685,6 +687,15 @@ std::unique_ptr<CoreRpcTransport> create_core_process_transport(
   (void)launch;
   return std::make_unique<ClosedCoreProcessTransport>();
 #endif
+}
+
+exv::core::lifecycle::CoreResolveResult classify_core_state(
+    const exv::core::lifecycle::CoreResolveOptions &options,
+    const exv::core::lifecycle::CoreResolverDeps &deps) {
+  auto effective_deps = deps.try_connect_ipc
+                            ? deps
+                            : exv::core::lifecycle::make_platform_core_resolver_deps();
+  return exv::core::lifecycle::resolve_core(options, effective_deps);
 }
 
 } // namespace ecnuvpn::ui_shell

@@ -146,28 +146,14 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     return true;
 
   if (key == "vpn_engine") {
-    std::string input = read_value("  VPN engine [native/legacy_openconnect]: ");
-    if (input != "native" && input != "legacy_openconnect") {
-      cli::print_error("Invalid VPN engine.");
+    std::string input = read_value("  VPN engine [native]: ");
+    if (input != "native") {
+      cli::print_error("VPN engine is native-only.");
       return false;
     }
-    cfg.vpn_engine = input;
+    cfg.vpn_engine = "native";
     if (save(cfg)) {
-      cli::print_success("Set vpn_engine = " + input);
-      return true;
-    }
-    return false;
-  }
-
-  if (key == "openconnect_runtime") {
-    std::string input = read_value("  Runtime mode [bundled/auto/system]: ");
-    if (input != "bundled" && input != "auto" && input != "system") {
-      cli::print_error("Invalid runtime mode.");
-      return false;
-    }
-    cfg.openconnect_runtime = input;
-    if (save(cfg)) {
-      cli::print_success("Set openconnect_runtime = " + input);
+      cli::print_success("Set vpn_engine = native");
       return true;
     }
     return false;
@@ -236,7 +222,6 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
                     "service_install_prompt_seen, "
                     "minimal_install_service_before_connect, "
                     "vpn_engine, "
-                    "openconnect_runtime, "
                     "windows_tunnel_driver, windows_tap_interface");
   return false;
 }

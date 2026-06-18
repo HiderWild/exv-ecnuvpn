@@ -1,6 +1,21 @@
 #include "app/ui_shell/core_rpc_client.hpp"
 
+#include "cli/pipe_client.hpp"
+#include "platform/common/core_resolver.hpp"
+#include "platform/common/process_utils.hpp"
+#include "runtime/runtime_context.hpp"
+
 #include <nlohmann/json.hpp>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/types.h>
+#endif
 
 #include <charconv>
 #include <system_error>
@@ -173,6 +188,68 @@ CoreRpcEvent parse_core_rpc_event_line(const std::string &line) {
   out.data_json = parsed.contains("data") ? parsed.at("data").dump()
                                       : nlohmann::json::object().dump();
   return out;
+}
+
+exv::core::lifecycle::CoreResolverDeps make_pipe_resolver_deps() {
+  using namespace exv::core::lifecycle;
+  CoreResolverDeps deps;
+
+  deps.try_connect_ipc = [](const std::string &ipc_path) {
+    return exv::cli::PipeClient::probe(ipc_path);
+  };
+
+  deps.send_ipc_request = [](const std::string &ipc_path,
+                             const std::string &request_line) -> std::string {
+    exv::cli::PipeClient client;
+    if (!client.connect(ipc_path)) {
+      return {};
+    }
+    std::string response = client.send_request(request_line);
+    client.disconnect();
+    return response;
+  };
+
+  deps.disconnect_ipc = [] {};
+
+  deps.is_pid_alive = [](int pid) -> bool {
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                           FALSE, static_cast<DWORD>(pid));
+    if (!h) return false;
+    DWORD code = 0;
+    if (!GetExitCodeProcess(h, &code) || code != STILL_ACTIVE) {
+      CloseHandle(h);
+      return false;
+    }
+    CloseHandle(h);
+    return true;
+#else
+    return kill(pid, 0) == 0;
+#endif
+  };
+
+  deps.get_frontend_executable_path = []() {
+    return ecnuvpn::platform::get_executable_path();
+  };
+
+  deps.run_command_output = [](const std::string &cmd) {
+    return ecnuvpn::platform::run_command_output(cmd);
+  };
+
+  deps.get_state_dir = []() {
+    return ecnuvpn::runtime::paths().state_dir;
+  };
+
+  deps.get_home_dir = []() {
+    return ecnuvpn::runtime::paths().home;
+  };
+
+  deps.get_env_var = [](const std::string &name) -> std::string {
+    const char *val = std::getenv(name.c_str());
+    return val ? std::string(val) : std::string();
+  };
+
+  return deps;
 }
 
 } // namespace ecnuvpn::ui_shell

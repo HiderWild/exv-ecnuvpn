@@ -17,9 +17,10 @@ import {
   Settings,
   Shield,
   Trash2,
+  Upload,
   User,
 } from 'lucide-vue-next'
-import { useConfigStore, type AuthConfig, type SettingsConfig } from '../stores/config'
+import { useConfigStore, type AuthConfig, type SettingsConfig, type CoreInspection } from '../stores/config'
 import { normalizeError, useVpnStore } from '../stores/vpn'
 import { useUiStore } from '../stores/ui'
 import ToggleSwitch from '../components/ToggleSwitch.vue'
@@ -85,10 +86,10 @@ const settingsForm = ref<SettingsConfig>({
   webui_host: '127.0.0.1',
   webui_enabled: true,
   vpn_engine: 'native',
-  openconnect_runtime: 'bundled',
   windows_tunnel_driver: 'auto',
   windows_tap_interface: '',
   auto_reconnect: true,
+  retry_limit: -1,
   minimal_mode: false,
   service_install_prompt_seen: false,
   minimal_install_service_before_connect: true,
@@ -96,6 +97,22 @@ const settingsForm = ref<SettingsConfig>({
 
 const routes = ref<string[]>([])
 const newRoute = ref('')
+
+const importFileInput = ref<HTMLInputElement | null>(null)
+const coreInspection = ref<CoreInspection | null>(null)
+const coreMaintenanceBusy = ref(false)
+
+// Warning copy for password-protected export. Verbatim from the plan
+// (docs/superpowers/plans/2026-06-16-cli-core-ui-contract-refactor-plan.md
+// Task 9 Step 3) — keep this string in sync with the plan text exactly.
+const PROTECTED_EXPORT_WARNING =
+  'The exported configuration contains a recoverable VPN password. Treat it as a sensitive file. Do not share it through untrusted channels or copy it to public machines. The password is not stored in plaintext, but a weak export password can still be attacked offline. Destroy the file after use when possible.'
+
+const showCoreMaintenanceBanner = computed(() => {
+  const inspection = coreInspection.value
+  if (!inspection) return false
+  return inspection.state === 'broken' || inspection.risk === 'high'
+})
 
 const passwordPlaceholder = computed(() =>
   authForm.value.password_stored
@@ -105,15 +122,8 @@ const passwordPlaceholder = computed(() =>
 
 const driverSupported = computed(() => !!config.driverStatus?.supported)
 const tapAdapters = computed(() => config.driverStatus?.tap_adapters || [])
-const nativeEngineSelected = computed(() => settingsForm.value.vpn_engine === 'native')
 const activeRuntimeStatus = computed(() => config.runtimeStatus)
-const showLegacyOpenConnectRuntimeSelector = computed(() =>
-  settingsForm.value.vpn_engine === 'legacy_openconnect' ||
-  (import.meta.env.DEV && !!config.runtimeStatus?.legacy_openconnect),
-)
-const runtimeMissing = computed(() =>
-  !nativeEngineSelected.value && !!activeRuntimeStatus.value && !activeRuntimeStatus.value.available,
-)
+const runtimeMissing = computed(() => !!activeRuntimeStatus.value && !activeRuntimeStatus.value.available)
 const wintunReady = computed(() => {
   const status = config.driverStatus
   if (!status) return false
@@ -143,24 +153,21 @@ const driverReadiness = computed(() => {
   if (status.effective_driver_status) return status.effective_driver_status
   return wintunReady.value || tapReady.value ? 'ready' : 'unavailable'
 })
-const runtimeReady = computed(() => nativeEngineSelected.value || (activeRuntimeStatus.value?.available ?? true))
+const runtimeReady = computed(() => activeRuntimeStatus.value?.available ?? true)
 const runtimeSourceText = computed(() => {
   const status = activeRuntimeStatus.value
-  if (nativeEngineSelected.value) return 'native'
   if (!status) return '未知'
-  if (status.source === 'native') return 'native'
-  return status.available ? (status.source || '未知') : '缺失'
+  return status.source
 })
 const runtimePathText = computed(() => {
   const status = activeRuntimeStatus.value
   if (status?.path) return status.path
-  if (nativeEngineSelected.value || status?.source === 'native') return '原生引擎由应用内置提供'
-  return '未找到 OpenConnect 二进制文件'
+  return '原生引擎由应用内置提供'
 })
 const runtimeDirectoryText = computed(() => {
   const status = activeRuntimeStatus.value
   if (status?.bundled_runtime_dir) return status.bundled_runtime_dir
-  return nativeEngineSelected.value ? '原生引擎随应用提供' : '未检测到运行时目录'
+  return '原生引擎随应用提供'
 })
 
 const anyDriverAvailable = computed(() => {
@@ -350,6 +357,7 @@ onMounted(async () => {
     } catch (error) {
       ui.requestError({ title: '刷新运行时失败', message: normalizeError(error).message })
     }
+    void inspectCoreSilently()
   }
 
   attachScrollListener()
@@ -491,11 +499,6 @@ async function installDriver(driver: 'wintun' | 'tap') {
   }
 }
 
-async function switchToSystemRuntime() {
-  settingsForm.value.openconnect_runtime = 'system'
-  await saveSystem()
-}
-
 async function addRoute() {
   const cidr = newRoute.value.trim()
   if (!cidr || routes.value.includes(cidr) || routesBusy.value) return
@@ -530,6 +533,134 @@ async function removeRoute(index: number) {
   } finally {
     routesBusy.value = false
   }
+}
+
+async function inspectCoreSilently() {
+  try {
+    coreInspection.value = await config.inspectCore()
+  } catch {
+    coreInspection.value = null
+  }
+}
+
+function triggerImportConfig() {
+  importFileInput.value?.click()
+}
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'))
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.readAsText(file)
+  })
+}
+
+async function handleImportFileChange(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  target.value = ''
+  if (!file) return
+  try {
+    const text = await readFileAsText(file)
+    const password = await ui.requestPassword('请输入导入文件的密码（如有）')
+    if (password === null) return
+    const isProtected = password.length > 0
+    await config.importConfig({
+      format: isProtected ? 'protected' : 'unprotected',
+      data: text,
+      password: isProtected ? password : undefined,
+    })
+    ui.addToast('配置已导入', 'success')
+    authForm.value = { ...config.authConfig, password: '' }
+    applyServerChoice(authForm.value.server)
+    settingsForm.value = { ...config.settings }
+  } catch (error) {
+    ui.requestError({ title: '导入配置失败', message: normalizeError(error).message })
+  }
+}
+
+function downloadExport(filename: string, payload: string) {
+  const blob = new Blob([payload], { type: 'application/octet-stream' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+async function exportConfigUnprotected() {
+  try {
+    const result = await config.exportConfig({ protected: false })
+    downloadExport('ecnu-vpn-config.json', result.data)
+    ui.addToast('配置已导出', 'success')
+  } catch (error) {
+    ui.requestError({ title: '导出配置失败', message: normalizeError(error).message })
+  }
+}
+
+async function exportConfigProtected() {
+  try {
+    const password = await ui.requestPassword('设置导出密码')
+    if (password === null) return
+    if (!password) {
+      ui.requestError({ title: '密码不能为空', message: '请提供一个非空的导出密码。' })
+      return
+    }
+    const result = await config.exportConfig({ protected: true, password })
+    downloadExport('ecnu-vpn-config.protected', result.data)
+    ui.requestError({
+      title: '导出已完成',
+      message: PROTECTED_EXPORT_WARNING,
+      primaryLabel: '知道了',
+    })
+  } catch (error) {
+    ui.requestError({ title: '导出配置失败', message: normalizeError(error).message })
+  }
+}
+
+function resetConfigAction() {
+  ui.requestConfirm('此操作会清空所有 VPN 配置，是否继续？', async () => {
+    try {
+      await config.resetConfig(true)
+      ui.addToast('配置已重置', 'success')
+      authForm.value = { ...config.authConfig, password: '' }
+      applyServerChoice(authForm.value.server)
+      settingsForm.value = { ...config.settings }
+    } catch (error) {
+      ui.requestError({ title: '重置配置失败', message: normalizeError(error).message })
+    }
+  })
+}
+
+function resetKeyAction() {
+  ui.requestConfirm('此操作会清除本地保存的加密密码，下次连接需重新输入。是否继续？', async () => {
+    try {
+      await config.resetKey(true)
+      ui.addToast('已重置加密密钥', 'success')
+    } catch (error) {
+      ui.requestError({ title: '重置加密密钥失败', message: normalizeError(error).message })
+    }
+  })
+}
+
+function killStaleCoreAction() {
+  ui.requestConfirm('确认终止该内核进程？此操作不可撤销。', async () => {
+    if (coreMaintenanceBusy.value) return
+    coreMaintenanceBusy.value = true
+    try {
+      await config.killStaleCore(true)
+      ui.addToast('已清理', 'success')
+      await inspectCoreSilently()
+    } catch (error) {
+      ui.requestError({ title: '清理残留进程失败', message: normalizeError(error).message })
+    } finally {
+      coreMaintenanceBusy.value = false
+    }
+  })
 }
 </script>
 
@@ -664,6 +795,23 @@ async function removeRoute(index: number) {
           连接
         </h2>
 
+        <div
+          v-if="showCoreMaintenanceBanner"
+          class="mb-4 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300"
+        >
+          <p class="font-medium">检测到残留 / 异常的 VPN 内核进程</p>
+          <p class="mt-1 text-xs text-yellow-300/80">
+            已发现可能无响应或卡死的内核（pid {{ coreInspection?.pid ?? '-' }}）。是否清理？
+          </p>
+          <button
+            :disabled="coreMaintenanceBusy"
+            class="mt-3 rounded-lg border border-yellow-400/50 px-4 py-2 text-xs font-medium text-yellow-200 transition-colors hover:bg-yellow-500/20 disabled:opacity-50"
+            @click="killStaleCoreAction"
+          >
+            清理残留进程
+          </button>
+        </div>
+
         <div class="space-y-5">
           <div>
             <label class="mb-1.5 block text-xs font-medium text-muted">MTU</label>
@@ -679,7 +827,7 @@ async function removeRoute(index: number) {
           <div class="flex items-center justify-between rounded-lg border border-border bg-bg/40 px-4 py-3">
             <div>
               <p class="text-sm text-foreground">DTLS</p>
-              <p class="text-xs text-muted">运行时支持时启用 DTLS 加密</p>
+              <p class="text-xs text-muted">当前原生连接使用 CSTP-only；DTLS 后端加入前不会启用。</p>
             </div>
             <ToggleSwitch
               v-model="settingsForm.dtls"
@@ -694,6 +842,17 @@ async function removeRoute(index: number) {
             <ToggleSwitch
               v-model="settingsForm.auto_reconnect"
             />
+          </div>
+
+          <div>
+            <label class="mb-1.5 block text-xs font-medium text-muted">重连尝试次数</label>
+            <input
+              v-model.number="settingsForm.retry_limit"
+              type="number"
+              min="-1"
+              class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
+            />
+            <p class="mt-1 text-xs text-muted">-1 表示无限重连；0 表示不重连；正整数表示最大次数。</p>
           </div>
 
           <div class="flex items-center gap-3 pt-1">
@@ -754,12 +913,11 @@ async function removeRoute(index: number) {
             <input
               v-model="settingsForm.extra_args"
               type="text"
-              :disabled="nativeEngineSelected"
-              :placeholder="nativeEngineSelected ? '原生引擎不使用额外命令行参数' : 'OpenConnect 附加参数'"
-              class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              placeholder="原生兼容参数（不支持的参数会被拒绝）"
+              class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none"
             />
-            <p v-if="nativeEngineSelected" class="mt-1 text-xs text-muted">
-              原生模式由内置引擎管理连接，不读取额外命令行参数。
+            <p class="mt-1 text-xs text-muted">
+              原生模式只接受已支持的兼容参数。
             </p>
           </div>
 
@@ -780,6 +938,57 @@ async function removeRoute(index: number) {
               <Download v-else class="h-4 w-4" />
               {{ serviceButtonLabel }}
             </button>
+          </div>
+
+          <div class="border-t border-border pt-4">
+            <div class="mb-3">
+              <p class="text-sm font-medium text-foreground">配置导入 / 导出 / 重置</p>
+              <p class="text-xs text-muted">导入或导出 VPN 配置；密码保护导出的文件可在不同设备间安全迁移。</p>
+            </div>
+            <input
+              ref="importFileInput"
+              type="file"
+              class="hidden"
+              accept=".json,.protected,.txt,application/json,application/octet-stream,text/plain"
+              @change="handleImportFileChange"
+            />
+            <div class="flex flex-wrap gap-3">
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+                @click="triggerImportConfig"
+              >
+                <Upload class="h-4 w-4" />
+                导入配置
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+                @click="exportConfigUnprotected"
+              >
+                <Download class="h-4 w-4" />
+                导出配置（不含密码）
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+                @click="exportConfigProtected"
+              >
+                <Download class="h-4 w-4" />
+                导出配置（密码保护）
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-destructive/90"
+                @click="resetConfigAction"
+              >
+                <Trash2 class="h-4 w-4" />
+                重置配置
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-lg border border-destructive/50 px-4 py-2 text-sm text-destructive transition-colors hover:bg-destructive/10"
+                @click="resetKeyAction"
+              >
+                <Key class="h-4 w-4" />
+                重置加密密钥
+              </button>
+            </div>
           </div>
 
           <div v-if="isDesktop" class="border-t border-border pt-4">
@@ -831,18 +1040,6 @@ async function removeRoute(index: number) {
             </div>
 
             <div class="space-y-4">
-              <div v-if="showLegacyOpenConnectRuntimeSelector">
-                <label class="mb-1.5 block text-xs font-medium text-muted">OpenConnect 运行时</label>
-                <select
-                  v-model="settingsForm.openconnect_runtime"
-                  class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
-                >
-                  <option value="bundled">内置</option>
-                  <option value="auto">自动</option>
-                  <option value="system">系统</option>
-                </select>
-              </div>
-
               <div class="grid gap-4 text-sm md:grid-cols-2">
                 <div class="rounded-lg border border-border bg-bg p-4">
                   <p class="mb-2 text-xs text-muted">当前 VPN 引擎</p>
@@ -865,9 +1062,9 @@ async function removeRoute(index: number) {
               </div>
 
               <div v-if="runtimeMissing" class="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-                <p class="font-medium">OpenConnect 运行时缺失</p>
+                <p class="font-medium">原生运行时不可用</p>
                 <p class="mt-1 text-xs text-red-300/80">
-                  {{ config.runtimeStatus?.missing_what || 'VPN 连接需要 OpenConnect 运行时。' }}
+                  {{ config.runtimeStatus?.missing_what || 'VPN 连接需要原生运行时组件。' }}
                 </p>
                 <p v-if="config.runtimeStatus?.recommended_action" class="mt-1 text-xs text-red-300/80">
                   {{ config.runtimeStatus.recommended_action }}
@@ -875,13 +1072,6 @@ async function removeRoute(index: number) {
                 <p v-if="config.runtimeStatus?.effect_on_connect" class="mt-1 text-xs text-red-300/60">
                   {{ config.runtimeStatus.effect_on_connect }}
                 </p>
-                <button
-                  :disabled="systemSaving"
-                  class="mt-3 rounded-lg border border-red-400/50 px-4 py-2 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50"
-                  @click="switchToSystemRuntime"
-                >
-                  切换到系统运行时
-                </button>
               </div>
 
               <div v-if="driverSupported" class="space-y-4">
