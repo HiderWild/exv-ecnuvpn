@@ -1,13 +1,11 @@
 #include "platform/common/file_system.hpp"
 #include "platform/common/interface_stats.hpp"
 #include "platform/common/process_utils.hpp"
-#include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "core/config/config.hpp"
 #include "core/crypto/crypto.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/logging/log_runtime.hpp"
-#include "core/vpn/openconnect_tunnel_script.hpp"
 #include "cli/console.hpp"
 
 #include <algorithm>
@@ -31,6 +29,7 @@ Config load() {
   std::string path = config_path();
   if (!platform::file_exists(path)) {
     Config cfg;
+    normalize_native_only(cfg);
     save(cfg);
     crypto::init_key_if_needed();
     return cfg;
@@ -38,11 +37,14 @@ Config load() {
   try {
     std::string content = platform::read_file(path);
     auto j = nlohmann::json::parse(content);
-    return j.get<Config>();
+    Config cfg = j.get<Config>();
+    normalize_native_only(cfg);
+    return cfg;
   } catch (const std::exception &e) {
     cli::print_warning("Failed to parse config.json, using defaults.");
     exv::observability::LogFacade::error("Config parse error: " + std::string(e.what()));
     Config cfg;
+    normalize_native_only(cfg);
     save(cfg);
     return cfg;
   }
@@ -98,8 +100,6 @@ Config import_from(const std::string &path) {
       cfg.remember_password = j["remember_password"].get<bool>();
     if (j.contains("vpn_engine"))
       cfg.vpn_engine = j["vpn_engine"].get<std::string>();
-    if (j.contains("openconnect_runtime"))
-      cfg.openconnect_runtime = j["openconnect_runtime"].get<std::string>();
     if (j.contains("windows_tunnel_driver"))
       cfg.windows_tunnel_driver =
           j["windows_tunnel_driver"].get<std::string>();
@@ -131,6 +131,7 @@ Config import_from(const std::string &path) {
       }
     }
 
+    normalize_native_only(cfg);
     save(cfg);
     cli::print_success("Config imported from: " + path);
     exv::observability::LogFacade::info("Config imported from: " + path);
@@ -146,8 +147,8 @@ Config import_from(const std::string &path) {
 
 Config reset() {
   Config cfg;
+  normalize_native_only(cfg);
   save(cfg);
-  tunnel::write_script(cfg);
   cli::print_success("Config reset to defaults. Key file preserved.");
   cli::print_info("Run 'exv config set password' to set a new password.");
   exv::observability::LogFacade::info("Config reset to defaults");

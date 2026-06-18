@@ -9,6 +9,22 @@
 
 ---
 
+## Evidence Redaction
+
+Before committing this checklist or any related evidence, confirm:
+
+- [ ] Password values and real account or gateway identifiers are redacted.
+- [ ] `webvpn=` values are redacted.
+- [ ] `<session-token>` values are redacted.
+- [ ] Opaque values are redacted.
+- [ ] SAML values are redacted.
+- [ ] Challenge responses are redacted.
+- [ ] Cookies and cookie headers are redacted.
+- [ ] Packet payloads are redacted.
+- [ ] Command output, screenshots, logs, and captures are reduced to redacted summaries.
+
+---
+
 ## Pre-Flight
 
 ### P1. Build Verification
@@ -25,6 +41,22 @@
   ```
   Output: _________________________________
   ```
+
+### P1b. Native-Only Preconditions
+
+```bash
+pgrep -fl openconnect || true
+pgrep -fl 'exv|vpn' || true
+exv desktop-rpc runtime.status '{}'
+```
+
+- [ ] No OpenConnect process is running
+- [ ] No retired supervisor process is running
+- [ ] Runtime status reports `engine=native` and `source=native`
+- [ ] P0: XML auth + CSTP CONNECT reaches success or structured auth/CSD/SAML error
+- [ ] P1: DNS, routes, and liveness work on macOS
+- [ ] P2: challenge/group/CSD/DTLS fallback/reconnect behavior verified or explicitly marked not exercised
+- [ ] P3: native-only process/package evidence captured
 
 ### P2. Baseline System Snapshot
 
@@ -238,7 +270,7 @@ ifconfig > /tmp/exv-ifconfig-before.txt
 ## Test 7: Core Crash Cleanup
 
 - [ ] Connect: `exv start`
-- [ ] Kill supervisor: `sudo kill $(pgrep -f __vpn-supervisor)`
+- [ ] Kill the Core connection owner: `sudo pkill -f "exv.*core"`
 - [ ] Wait 10 seconds
 - [ ] Verify session state cleared: `cat /var/run/exv-helper-session.json 2>/dev/null || echo "File not found"`
   ```
@@ -299,7 +331,9 @@ ifconfig > /tmp/exv-ifconfig-before.txt
 
 ### Notes
 
-(Free-form notes, screenshots, or log excerpts)
+Only include redacted summaries below. Do not paste raw logs, packet captures,
+screenshots, real gateway hostnames, usernames, tokens, cookies, challenge
+responses, or packet payloads.
 
 ```
 _________________________________________________

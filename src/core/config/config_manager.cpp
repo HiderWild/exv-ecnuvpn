@@ -1,7 +1,6 @@
 #include "platform/common/file_system.hpp"
 #include "platform/common/interface_stats.hpp"
 #include "platform/common/process_utils.hpp"
-#include "platform/common/runtime_discovery.hpp"
 #include "platform/common/path_utils.hpp"
 #include "core/config/config_manager.hpp"
 #include "observability/log_facade.hpp"
@@ -32,6 +31,7 @@ Config ConfigManager::load() {
         std::string content = platform::read_file(path);
         auto j = nlohmann::json::parse(content);
         config_ = j.get<Config>();
+        normalize_native_only(config_);
     } catch (const std::exception& e) {
         exv::observability::LogFacade::error("ConfigManager::load parse error: " +
                       std::string(e.what()));
@@ -52,7 +52,9 @@ bool ConfigManager::save(const Config& cfg) {
     std::string tmp_path = final_path + ".tmp";
 
     try {
-        nlohmann::json j = cfg;
+        Config normalized = cfg;
+        normalize_native_only(normalized);
+        nlohmann::json j = normalized;
         if (!platform::write_file(tmp_path, j.dump(4))) {
             exv::observability::LogFacade::error("ConfigManager::save: failed to write temp file: " +
                           tmp_path);
@@ -75,7 +77,7 @@ bool ConfigManager::save(const Config& cfg) {
             }
         }
 
-        config_ = cfg;
+        config_ = normalized;
         exv::observability::LogFacade::info("Config saved: " + final_path);
         return true;
     } catch (const std::exception& e) {

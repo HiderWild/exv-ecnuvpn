@@ -86,7 +86,6 @@ const settingsForm = ref<SettingsConfig>({
   webui_host: '127.0.0.1',
   webui_enabled: true,
   vpn_engine: 'native',
-  openconnect_runtime: 'bundled',
   windows_tunnel_driver: 'auto',
   windows_tap_interface: '',
   auto_reconnect: true,
@@ -123,15 +122,8 @@ const passwordPlaceholder = computed(() =>
 
 const driverSupported = computed(() => !!config.driverStatus?.supported)
 const tapAdapters = computed(() => config.driverStatus?.tap_adapters || [])
-const nativeEngineSelected = computed(() => settingsForm.value.vpn_engine === 'native')
 const activeRuntimeStatus = computed(() => config.runtimeStatus)
-const showLegacyOpenConnectRuntimeSelector = computed(() =>
-  settingsForm.value.vpn_engine === 'legacy_openconnect' ||
-  (import.meta.env.DEV && !!config.runtimeStatus?.legacy_openconnect),
-)
-const runtimeMissing = computed(() =>
-  !nativeEngineSelected.value && !!activeRuntimeStatus.value && !activeRuntimeStatus.value.available,
-)
+const runtimeMissing = computed(() => !!activeRuntimeStatus.value && !activeRuntimeStatus.value.available)
 const wintunReady = computed(() => {
   const status = config.driverStatus
   if (!status) return false
@@ -161,24 +153,21 @@ const driverReadiness = computed(() => {
   if (status.effective_driver_status) return status.effective_driver_status
   return wintunReady.value || tapReady.value ? 'ready' : 'unavailable'
 })
-const runtimeReady = computed(() => nativeEngineSelected.value || (activeRuntimeStatus.value?.available ?? true))
+const runtimeReady = computed(() => activeRuntimeStatus.value?.available ?? true)
 const runtimeSourceText = computed(() => {
   const status = activeRuntimeStatus.value
-  if (nativeEngineSelected.value) return 'native'
   if (!status) return '未知'
-  if (status.source === 'native') return 'native'
-  return status.available ? (status.source || '未知') : '缺失'
+  return status.source
 })
 const runtimePathText = computed(() => {
   const status = activeRuntimeStatus.value
   if (status?.path) return status.path
-  if (nativeEngineSelected.value || status?.source === 'native') return '原生引擎由应用内置提供'
-  return '未找到 OpenConnect 二进制文件'
+  return '原生引擎由应用内置提供'
 })
 const runtimeDirectoryText = computed(() => {
   const status = activeRuntimeStatus.value
   if (status?.bundled_runtime_dir) return status.bundled_runtime_dir
-  return nativeEngineSelected.value ? '原生引擎随应用提供' : '未检测到运行时目录'
+  return '原生引擎随应用提供'
 })
 
 const anyDriverAvailable = computed(() => {
@@ -510,11 +499,6 @@ async function installDriver(driver: 'wintun' | 'tap') {
   }
 }
 
-async function switchToSystemRuntime() {
-  settingsForm.value.openconnect_runtime = 'system'
-  await saveSystem()
-}
-
 async function addRoute() {
   const cidr = newRoute.value.trim()
   if (!cidr || routes.value.includes(cidr) || routesBusy.value) return
@@ -843,7 +827,7 @@ function killStaleCoreAction() {
           <div class="flex items-center justify-between rounded-lg border border-border bg-bg/40 px-4 py-3">
             <div>
               <p class="text-sm text-foreground">DTLS</p>
-              <p class="text-xs text-muted">运行时支持时启用 DTLS 加密</p>
+              <p class="text-xs text-muted">当前原生连接使用 CSTP-only；DTLS 后端加入前不会启用。</p>
             </div>
             <ToggleSwitch
               v-model="settingsForm.dtls"
@@ -929,12 +913,11 @@ function killStaleCoreAction() {
             <input
               v-model="settingsForm.extra_args"
               type="text"
-              :disabled="nativeEngineSelected"
-              :placeholder="nativeEngineSelected ? '原生引擎不使用额外命令行参数' : 'OpenConnect 附加参数'"
-              class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              placeholder="原生兼容参数（不支持的参数会被拒绝）"
+              class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none"
             />
-            <p v-if="nativeEngineSelected" class="mt-1 text-xs text-muted">
-              原生模式由内置引擎管理连接，不读取额外命令行参数。
+            <p class="mt-1 text-xs text-muted">
+              原生模式只接受已支持的兼容参数。
             </p>
           </div>
 
@@ -1057,18 +1040,6 @@ function killStaleCoreAction() {
             </div>
 
             <div class="space-y-4">
-              <div v-if="showLegacyOpenConnectRuntimeSelector">
-                <label class="mb-1.5 block text-xs font-medium text-muted">OpenConnect 运行时</label>
-                <select
-                  v-model="settingsForm.openconnect_runtime"
-                  class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
-                >
-                  <option value="bundled">内置</option>
-                  <option value="auto">自动</option>
-                  <option value="system">系统</option>
-                </select>
-              </div>
-
               <div class="grid gap-4 text-sm md:grid-cols-2">
                 <div class="rounded-lg border border-border bg-bg p-4">
                   <p class="mb-2 text-xs text-muted">当前 VPN 引擎</p>
@@ -1091,9 +1062,9 @@ function killStaleCoreAction() {
               </div>
 
               <div v-if="runtimeMissing" class="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-                <p class="font-medium">OpenConnect 运行时缺失</p>
+                <p class="font-medium">原生运行时不可用</p>
                 <p class="mt-1 text-xs text-red-300/80">
-                  {{ config.runtimeStatus?.missing_what || 'VPN 连接需要 OpenConnect 运行时。' }}
+                  {{ config.runtimeStatus?.missing_what || 'VPN 连接需要原生运行时组件。' }}
                 </p>
                 <p v-if="config.runtimeStatus?.recommended_action" class="mt-1 text-xs text-red-300/80">
                   {{ config.runtimeStatus.recommended_action }}
@@ -1101,13 +1072,6 @@ function killStaleCoreAction() {
                 <p v-if="config.runtimeStatus?.effect_on_connect" class="mt-1 text-xs text-red-300/60">
                   {{ config.runtimeStatus.effect_on_connect }}
                 </p>
-                <button
-                  :disabled="systemSaving"
-                  class="mt-3 rounded-lg border border-red-400/50 px-4 py-2 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50"
-                  @click="switchToSystemRuntime"
-                >
-                  切换到系统运行时
-                </button>
               </div>
 
               <div v-if="driverSupported" class="space-y-4">

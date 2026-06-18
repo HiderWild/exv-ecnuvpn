@@ -285,7 +285,7 @@ bool platform_contains_forbidden_boundary_include(
     const std::filesystem::path &source_dir) {
   const std::vector<std::string> forbidden_exact = {
       "app_api.hpp", "vpn.hpp", "tunnel.hpp", "logger.hpp",
-      "openconnect_log.hpp", "virtual_network.hpp"};
+      "virtual_network.hpp"};
   return scan_tree(platform_root,
                    [&](const std::filesystem::directory_entry &entry) {
     if (!is_regular_file(entry) || !is_source_file(entry.path())) {
@@ -608,6 +608,16 @@ int main() {
   ok = expect(
            exv::contracts::generated::is_desktop_rpc_action("config.saveSettings"),
            "desktop action config.saveSettings must be generated") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_desktop_rpc_action(
+               "vpn.authInteraction.get"),
+           "desktop action vpn.authInteraction.get must be generated") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_desktop_rpc_action(
+               "vpn.authInteraction.respond"),
+           "desktop action vpn.authInteraction.respond must be generated") &&
        ok;
   ok = expect(exv::contracts::generated::is_core_rpc_action("core.hello"),
               "core.hello must be generated as a core RPC action") &&

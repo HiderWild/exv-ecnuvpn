@@ -41,7 +41,7 @@ exv CLI -> BackendResolver / service manager / helper RPC -> exv-helper
 
 - Renderer 不直接执行特权逻辑。
 - CLI 不直接执行 VPN 核心逻辑。
-- Electron 不直接操作网卡、路由、DNS 或 OpenConnect。
+- Electron 不直接操作网卡、路由、DNS 或 native VPN 协议生命周期。
 
 ### R0.3 产品运行模式
 
@@ -65,7 +65,7 @@ exv CLI -> BackendResolver / service manager / helper RPC -> exv-helper
 - 路由 apply / restore。
 - DNS apply / restore。
 - 虚拟网卡 create / remove。
-- OpenConnect 启动、监控和退出。
+- native AnyConnect/CSTP 协议会话启动、监控和退出。
 - 重连和状态机。
 
 验收：
@@ -423,7 +423,7 @@ Renderer 只发 UI 意图，Electron main / Desktop Backend 负责：
 验收：
 
 - Renderer 无 PowerShell / osascript / child_process 特权路径。
-- Electron 不直接操作网卡、路由、DNS 或 OpenConnect。
+- Electron 不直接操作网卡、路由、DNS 或 native VPN 协议生命周期。
 
 ### R5.3 UI 状态模型
 

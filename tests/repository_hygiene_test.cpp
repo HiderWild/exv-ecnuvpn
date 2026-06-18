@@ -1,5 +1,7 @@
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -69,11 +71,41 @@ bool check_root_artifact_policy() {
   return ok;
 }
 
+bool check_no_placeholder_marker() {
+  const std::string marker = "Placeholder: always valid for now";
+  for (const fs::directory_entry &entry : fs::recursive_directory_iterator(kRepoRoot / "src")) {
+    if (!entry.is_regular_file())
+      continue;
+
+    const std::string extension = lower(entry.path().extension().generic_string());
+    if (extension != ".cpp" && extension != ".hpp" && extension != ".h")
+      continue;
+
+    std::ifstream in(entry.path());
+    if (!in)
+      continue;
+
+    std::string line;
+    std::size_t line_no = 0;
+    while (std::getline(in, line)) {
+      ++line_no;
+      if (line.find(marker) != std::string::npos) {
+        return expect(false,
+                      "production placeholder marker must be removed: " +
+                          entry.path().generic_string() + ":" +
+                          std::to_string(line_no));
+      }
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 int main() {
   bool ok = true;
   ok = check_root_markdown_policy() && ok;
   ok = check_root_artifact_policy() && ok;
+  ok = check_no_placeholder_marker() && ok;
   return ok ? 0 : 1;
 }

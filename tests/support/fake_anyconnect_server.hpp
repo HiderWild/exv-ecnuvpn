@@ -27,7 +27,7 @@ struct FakeAnyConnectServerOptions {
   FakeAnyConnectServerOptions();
 
   FakeAnyConnectCredentials expected_credentials;
-  std::string session_cookie = "webvpn_session=FAKE_COOKIE";
+  std::string session_cookie = "webvpn=FAKE_COOKIE";
   vpn_engine::TunnelMetadata tunnel_metadata;
 
   // If non-zero, the fake closes the transport before echoing this data frame

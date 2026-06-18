@@ -14,6 +14,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -42,7 +43,6 @@ json map_snapshot_to_frontend(const exv::core::TunnelStatusSnapshot &snap,
   j["server"] = snap.server.empty() ? server : snap.server;
   j["username"] = username;
   j["pid"] = -1;
-  j["supervisor_pid"] = -1;
   j["network_ready"] = snap.network_ready;
   j["interface"] = snap.interface_name;
   j["internal_ip"] = "";
@@ -120,6 +120,16 @@ std::string source_text_at(std::initializer_list<const char *> parts) {
   }
   return read_source_file(path);
 #endif
+}
+
+std::vector<std::string> removed_public_runtime_fields() {
+  return {
+      std::string("openconnect") + "Binary",
+      std::string("openconnect") + "Path",
+      std::string("openconnect") + "Args",
+      std::string("legacy") + "TunnelScript",
+      std::string("legacy") + "Adapter",
+  };
 }
 
 // -----------------------------------------------------------------------
@@ -313,7 +323,7 @@ bool frontend_json_has_required_fields() {
 
   const char *required_fields[] = {
       "connected",    "process_running", "server",     "username",
-      "pid",          "supervisor_pid",  "network_ready",
+      "pid",          "network_ready",
       "interface",    "internal_ip",     "route_count",
       "mtu",          "uptime_seconds",  "rx_bytes",   "tx_bytes",
       "auto_reconnect", "phase",
@@ -323,6 +333,11 @@ bool frontend_json_has_required_fields() {
   for (const auto &field : required_fields) {
     ok = expect(j.contains(field),
                 (std::string("JSON must contain field: ") + field).c_str()) &&
+         ok;
+  }
+  for (const auto &field : removed_public_runtime_fields()) {
+    ok = expect(!j.contains(field),
+                "frontend status JSON must not expose retired runtime fields") &&
          ok;
   }
   return ok;

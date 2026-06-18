@@ -1,6 +1,5 @@
 #include "core/app_api/app_api.hpp"
 #include "core/core_process.hpp"
-#include "core/vpn/openconnect_tunnel_script.hpp"
 #include "platform/common/file_system.hpp"
 #include "runtime/runtime_context.hpp"
 
@@ -18,7 +17,7 @@ namespace {
 void print_core_help() {
   std::cout << "exv is the ECNU-VPN core executable.\n"
             << "Use exv-cli for user commands.\n"
-            << "Core options: --mode=core, --version, __tunnel-script\n";
+            << "Core options: --mode=core, --version\n";
 }
 
 } // namespace
@@ -29,10 +28,6 @@ int main(int argc, char *argv[]) {
   std::vector<std::string> raw_args;
   for (int i = 0; i < argc; ++i) {
     raw_args.emplace_back(argv[i]);
-  }
-
-  if (raw_args.size() > 1 && raw_args[1] == "__tunnel-script") {
-    return tunnel::run_script_hook();
   }
 
   if (raw_args.size() > 1 && raw_args[1] == "--version") {

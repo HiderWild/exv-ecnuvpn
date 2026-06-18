@@ -97,6 +97,26 @@ TunnelPhase TunnelController::phase() const {
     return impl_->phase_;
 }
 
+std::optional<TunnelController::PendingAuthInteraction>
+TunnelController::pending_auth_interaction() const {
+    auto pending = impl_->runner_.pending_auth_interaction();
+    if (!pending) {
+        return std::nullopt;
+    }
+    return PendingAuthInteraction{
+        pending->id,
+        pending->kind,
+        pending->label,
+        pending->input_type,
+        pending->options,
+    };
+}
+
+bool TunnelController::provide_auth_interaction_response(
+    const std::string& id, const std::string& value) {
+    return impl_->runner_.provide_auth_interaction_response(id, value);
+}
+
 // ------------------------------------------------------------------
 // Event processing
 // ------------------------------------------------------------------

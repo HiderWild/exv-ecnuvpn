@@ -49,6 +49,16 @@ function snapshot() {
   return readRepoJson('contracts/generated/system_contract_snapshot.json')
 }
 
+function removedNativeRuntimeFields() {
+  return [
+    'openconnect' + 'Binary',
+    'openconnect' + 'Path',
+    'openconnect' + 'Args',
+    'legacy' + 'TunnelScript',
+    'legacy' + 'Adapter',
+  ]
+}
+
 describe('generated system contract', () => {
   it('keeps generated snapshot identical to the manifest', () => {
     assert.deepEqual(snapshot(), manifest())
@@ -57,6 +67,16 @@ describe('generated system contract', () => {
   it('generates desktop RPC action constants from the manifest', () => {
     assert.deepEqual(DESKTOP_RPC_ACTIONS, manifest().surfaces.desktop_rpc.actions)
     assert.deepEqual(desktopRpcActions, DESKTOP_RPC_ACTIONS)
+    assert.ok(DESKTOP_RPC_ACTIONS.includes('vpn.authInteraction.get'))
+    assert.ok(DESKTOP_RPC_ACTIONS.includes('vpn.authInteraction.respond'))
+  })
+
+  it('keeps persisted log mutation out of the desktop RPC surface', () => {
+    const desktopActions: readonly string[] = DESKTOP_RPC_ACTIONS
+
+    assert.ok(desktopActions.includes('logs.list'))
+    assert.ok(!desktopActions.includes('logs.clear'))
+    assert.deepEqual(manifest().modules.logs.actions, ['logs.list'])
   })
 
   it('captures desktop and core RPC envelopes', () => {
@@ -146,6 +166,18 @@ describe('generated system contract', () => {
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'password')
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'cookie')
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'auth_token')
+  })
+
+  it('keeps retired native runtime fields out of public contracts and renderer state', () => {
+    const contractText = JSON.stringify(manifest()) + JSON.stringify(snapshot())
+    const rendererConfigStore = readFileSync(resolve(process.cwd(), 'src/stores/config.ts'), 'utf8')
+    const settingsPage = readFileSync(resolve(process.cwd(), 'src/pages/SettingsPage.vue'), 'utf8')
+
+    for (const field of removedNativeRuntimeFields()) {
+      assert.equal(contractText.includes(field), false, `${field} must not be generated`)
+      assert.equal(rendererConfigStore.includes(field), false, `${field} must not be in config store`)
+      assert.equal(settingsPage.includes(field), false, `${field} must not be in settings UI`)
+    }
   })
 
   it('keeps desktop event and error constants aligned with the public desktop contract', () => {

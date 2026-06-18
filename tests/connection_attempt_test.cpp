@@ -49,12 +49,11 @@ void write_json_file(const std::filesystem::path &path,
 void write_registry_record(const std::filesystem::path &dir, int owner_pid,
                            const std::string &attempt_id,
                            const std::string &state = "active",
-                           int helper_pid = -1, int supervisor_pid = -1) {
+                           int helper_pid = -1) {
   write_json_file(dir / "connect-attempt.json",
                   nlohmann::json{{"attempt_id", attempt_id},
                                  {"owner_pid", owner_pid},
                                  {"helper_pid", helper_pid},
-                                 {"supervisor_pid", supervisor_pid},
                                  {"mode", "native_auth"},
                                  {"created_at_unix_ms", 1712345678000LL},
                                  {"state", state},
@@ -69,7 +68,6 @@ void write_lock_owner(const std::filesystem::path &dir, int owner_pid,
                   nlohmann::json{{"attempt_id", attempt_id},
                                  {"owner_pid", owner_pid},
                                  {"helper_pid", -1},
-                                 {"supervisor_pid", -1},
                                  {"mode", "native_auth"},
                                  {"created_at_unix_ms", 1712345679000LL},
                                  {"state", "active"},
@@ -250,55 +248,18 @@ bool dead_owner_live_helper_blocks_stale_cleanup() {
   return ok;
 }
 
-bool dead_owner_live_supervisor_blocks_stale_cleanup() {
-  namespace attempt = ecnuvpn::connection_attempt;
-
-  const auto dir = unique_temp_dir("dead-owner-live-supervisor");
-  write_registry_record(dir, 121, "supervisor-owned-attempt", "active", -1,
-                        232);
-  write_lock_owner(dir, 121, "supervisor-owned-attempt");
-
-  attempt::AcquireOptions contender;
-  contender.config_dir = dir.string();
-  contender.owner_pid = 343;
-  contender.probe_process_liveness = [](int pid) {
-    if (pid == 121)
-      return attempt::ProcessLiveness::dead;
-    if (pid == 232)
-      return attempt::ProcessLiveness::alive;
-    return attempt::ProcessLiveness::unknown;
-  };
-
-  const auto result = attempt::try_acquire(contender);
-
-  bool ok = true;
-  ok = expect(!result.acquired,
-              "dead desktop owner must not clear a live supervisor attempt") &&
-       ok;
-  ok = expect(result.code == attempt::kConnectionAttemptActiveCode,
-              "live supervisor should report active attempt") &&
-       ok;
-  ok = expect(result.record.attempt_id == "supervisor-owned-attempt",
-              "live supervisor should preserve current attempt id") &&
-       ok;
-  ok = expect(result.record.supervisor_pid == 232,
-              "active result should expose recorded supervisor pid") &&
-       ok;
-  return ok;
-}
-
 bool dead_owner_dead_children_allow_stale_cleanup() {
   namespace attempt = ecnuvpn::connection_attempt;
 
   const auto dir = unique_temp_dir("dead-owner-dead-children");
-  write_registry_record(dir, 131, "fully-dead-attempt", "active", 242, 253);
+  write_registry_record(dir, 131, "fully-dead-attempt", "active", 242);
   write_lock_owner(dir, 131, "fully-dead-attempt");
 
   attempt::AcquireOptions contender;
   contender.config_dir = dir.string();
   contender.owner_pid = 464;
   contender.probe_process_liveness = [](int pid) {
-    if (pid == 131 || pid == 242 || pid == 253)
+    if (pid == 131 || pid == 242)
       return attempt::ProcessLiveness::dead;
     return attempt::ProcessLiveness::alive;
   };
@@ -510,7 +471,6 @@ bool app_api_native_connect_reports_active_attempt_before_bootstrap() {
   cfg.password.clear();
   cfg.remember_password = false;
   cfg.vpn_engine = "native";
-  cfg.openconnect_runtime = "bundled";
   cfg.windows_tunnel_driver = "tap";
   cfg.windows_tap_interface = "ECNU VPN TAP";
   cfg.auto_reconnect = false;
@@ -625,7 +585,6 @@ int main() {
   ok = unknown_owner_liveness_keeps_attempt_active() && ok;
   ok = fresh_lock_owner_metadata_wins_over_stale_registry() && ok;
   ok = dead_owner_live_helper_blocks_stale_cleanup() && ok;
-  ok = dead_owner_live_supervisor_blocks_stale_cleanup() && ok;
   ok = dead_owner_dead_children_allow_stale_cleanup() && ok;
   ok = unknown_child_liveness_keeps_attempt_active() && ok;
   ok = record_write_failure_removes_owned_lock_for_retry() && ok;

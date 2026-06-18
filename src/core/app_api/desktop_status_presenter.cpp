@@ -118,7 +118,6 @@ nlohmann::json settings_config(const Config &cfg) {
                         {"extra_args", extra_args},
                         {"log_path", cfg.log_file},
                         {"vpn_engine", cfg.vpn_engine},
-                        {"openconnect_runtime", cfg.openconnect_runtime},
                         {"windows_tunnel_driver", cfg.windows_tunnel_driver},
                         {"windows_tap_interface", cfg.windows_tap_interface},
                         {"auto_reconnect", cfg.auto_reconnect},

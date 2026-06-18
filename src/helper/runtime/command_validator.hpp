@@ -13,7 +13,6 @@ public:
 
     // Security checks
     bool is_op_allowed(HelperOp op) const;
-    bool is_session_valid(const SessionId& id) const;
 
     // Forbidden patterns
     static bool contains_shell_injection(const std::string& input);

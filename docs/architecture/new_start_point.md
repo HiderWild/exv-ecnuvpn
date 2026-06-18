@@ -18,7 +18,7 @@ CLI / Electron Desktop / 其他客户端
 
 ```text
 exv-core
-  只负责 VPN / 虚拟网卡 / 路由 / DNS / OpenConnect / 状态机等核心能力
+  只负责 VPN / 虚拟网卡 / 路由 / DNS / native AnyConnect/CSTP / 状态机等核心能力
 
 exv-helper
   特权后端执行体
@@ -79,7 +79,7 @@ Electron + Vue Desktop
 ┌──────────────────────────────┐
 │          exv-core             │
 │  vpn / route / dns / adapter  │
-│  openconnect / cleanup        │
+│  native AnyConnect / cleanup  │
 │  reconnect / status machine   │
 └──────────────────────────────┘
 ```
@@ -472,7 +472,7 @@ Electron main / renderer
   ↓
 直接创建虚拟网卡
 直接改路由
-直接运行 OpenConnect
+直接运行 native VPN 协议生命周期
 直接写系统 DNS
 ```
 
@@ -530,9 +530,9 @@ Electron UI
 Electron UI Connect
  -> exv.exe desktop-rpc vpn.connect
  -> app_api
- -> named pipe request {"action":"start"}
- -> exv-helper service process
- -> start OpenConnect / route setup
+ -> Core / TunnelController
+ -> exv-helper service process applies privileged network resources
+ -> native AnyConnect/CSTP session
  -> response back to UI
 ```
 
@@ -583,9 +583,9 @@ Electron UI
 Electron UI Connect
  -> exv desktop-rpc vpn.connect
  -> app_api
- -> Unix socket request {"action":"start"}
- -> launchd helper daemon
- -> start OpenConnect / route setup
+ -> Core / TunnelController
+ -> launchd helper daemon applies privileged network resources
+ -> native AnyConnect/CSTP session
  -> response back to UI
 ```
 

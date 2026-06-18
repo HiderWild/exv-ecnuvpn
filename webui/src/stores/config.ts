@@ -22,8 +22,7 @@ export interface SettingsConfig {
   webui_port: number
   webui_host: string
   webui_enabled: boolean
-  vpn_engine: 'native' | 'legacy_openconnect'
-  openconnect_runtime: 'bundled' | 'system' | 'auto'
+  vpn_engine: 'native'
   windows_tunnel_driver: 'auto' | 'wintun' | 'tap'
   windows_tap_interface: string
   auto_reconnect: boolean
@@ -47,13 +46,11 @@ export interface CoreInspection {
 }
 
 export interface RuntimeStatus {
-  mode: string
-  engine?: 'native' | 'legacy_openconnect'
+  mode: 'native'
+  engine: 'native'
   available: boolean
-  source: 'native' | 'bundled' | 'system' | 'missing' | 'custom'
+  source: 'native'
   path: string
-  bundled_path?: string
-  system_path?: string
   version: string
   bundled_runtime_dir: string
   wintun_path?: string
@@ -63,7 +60,6 @@ export interface RuntimeStatus {
   effect_on_connect?: string
   wintun_missing?: boolean
   tap_missing?: boolean
-  legacy_openconnect?: RuntimeStatus
 }
 
 export interface DriverStatus {
@@ -106,7 +102,6 @@ export const useConfigStore = defineStore('config', () => {
     webui_host: '127.0.0.1',
     webui_enabled: true,
     vpn_engine: 'native',
-    openconnect_runtime: 'bundled',
     windows_tunnel_driver: 'auto',
     windows_tap_interface: '',
     auto_reconnect: true,

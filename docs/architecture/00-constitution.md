@@ -28,7 +28,7 @@ CLI / Electron Desktop / other clients
 
 其中：
 
-- `exv-core` 只负责 VPN、虚拟网卡、路由、DNS、OpenConnect、清理、重连、状态机等核心能力。
+- `exv-core` 只负责 VPN、虚拟网卡、路由、DNS、native AnyConnect/CSTP、清理、重连、状态机等核心能力。
 - `exv-helper` 是唯一正式的特权执行体。
 - CLI 是普通用户控制端、service manager client、helper bootstrapper、RPC client。
 - Electron Desktop 是普通用户 UI，renderer 只表达 UI 意图，Electron main / Desktop Backend 负责连接 helper。
@@ -47,7 +47,7 @@ CLI / Electron Desktop / other clients
 - 创建或删除虚拟网卡。
 - 修改路由。
 - 写系统 DNS。
-- 启动和管理 OpenConnect。
+- 运行 native AnyConnect 协议会话。
 - 清理路由、DNS、网卡和连接状态。
 
 CLI 和 Electron 不得作为长期的核心执行体。
@@ -220,7 +220,7 @@ exv desktop-rpc vpn.connect
 
 - 创建虚拟网卡。
 - 修改路由。
-- 运行 OpenConnect。
+- 运行 native AnyConnect 协议会话。
 - 写系统 DNS。
 
 禁止安装 App 时强制安装 service。

@@ -161,7 +161,6 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
 
   if (context.cleanup_routes)
     context.cleanup_routes();
-  platform::kill_all_supervisors();
 
   platform::run_command(std::string("launchctl bootout system ") +
                      platform_config.service_definition_path +

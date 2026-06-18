@@ -1,12 +1,21 @@
 #include "platform/win32/ui_shell/webview2_runtime_win32.hpp"
 #include "platform/win32/ui_shell/webview2_host_win32.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #include <cassert>
 #include <functional>
 #include <string>
+#include <vector>
 
 int main() {
   using namespace ecnuvpn::platform::win32::ui_shell;
+  const auto default_bounds = webview2_default_window_bounds();
+  if (default_bounds.width !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+      default_bounds.height !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+    return 1;
+  }
 
   assert(is_valid_webview2_version("120.0.2210.91"));
   assert(!is_valid_webview2_version(""));
@@ -52,6 +61,36 @@ int main() {
 
   auto window = create_webview2_window();
   assert(window != nullptr);
+
+  if (!webview2_should_create_tray_on_start()) {
+    return 1;
+  }
+  const auto tray_menu = webview2_tray_menu_model();
+  if (tray_menu.size() != 3 || tray_menu[0].label != L"显示 ECNU VPN" ||
+      !tray_menu[1].separator || tray_menu[2].label != L"退出") {
+    return 1;
+  }
+
+  const ecnuvpn::ui_shell::RendererAssets packaged_renderer{
+      ecnuvpn::ui_shell::RendererAssetKind::PackagedFile,
+      "C:/Program Files/ECNU VPN/webui/index.html"};
+  const std::wstring packaged_uri = webview2_renderer_uri(packaged_renderer);
+  if (packaged_uri != L"https://appassets.ecnu-vpn.invalid/index.html") {
+    return 1;
+  }
+  const std::wstring packaged_folder =
+      webview2_packaged_renderer_folder(packaged_renderer);
+  if (packaged_folder.find(L"ECNU VPN") == std::wstring::npos ||
+      packaged_folder.find(L"webui") == std::wstring::npos ||
+      packaged_folder.find(L"index.html") != std::wstring::npos) {
+    return 1;
+  }
+  const std::wstring dev_server_uri = webview2_renderer_uri(
+      {ecnuvpn::ui_shell::RendererAssetKind::DevServer,
+       "http://127.0.0.1:5173/"});
+  if (dev_server_uri != L"http://127.0.0.1:5173/") {
+    return 1;
+  }
 
   bool bridge_invoked = false;
   const std::string bridge_response = dispatch_webview2_host_message(

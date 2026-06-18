@@ -145,9 +145,10 @@ bool parse_server(const nlohmann::json &payload, ParsedVpnUrl *server) {
 }
 
 bool diagnostic_key_is_allowed(const std::string &key) {
-  static constexpr std::array<const char *, 6> kAllowedKeys = {
+  static constexpr std::array<const char *, 7> kAllowedKeys = {
       "cookie_present", "auth_method", "http_status",
-      "content_type", "body_bytes", "selected_group_present"};
+      "content_type", "body_bytes", "selected_group_present",
+      "saml_required"};
 
   for (const char *allowed : kAllowedKeys) {
     if (key == allowed)

@@ -1,6 +1,7 @@
 #include "app/ui_shell/host_bridge.hpp"
 #include "app/ui_shell/renderer_assets.hpp"
 #include "app/ui_shell/ui_shell_options.hpp"
+#include "app/ui_shell/window_layout.hpp"
 
 #include <cassert>
 #include <filesystem>
@@ -11,8 +12,20 @@ int main() {
   using namespace ecnuvpn::ui_shell;
   namespace fs = std::filesystem;
 
+  if (kElectronAdvancedWindowBounds.width != 972 ||
+      kElectronAdvancedWindowBounds.height != 563) {
+    return 1;
+  }
+
+  if (kElectronMinimalWindowBounds.width != 302 ||
+      kElectronMinimalWindowBounds.height != 118) {
+    return 1;
+  }
+
   assert(is_allowed_host_action("status.get"));
   assert(is_allowed_host_action("vpn.connect"));
+  assert(is_allowed_host_action("vpn.authInteraction.get"));
+  assert(is_allowed_host_action("vpn.authInteraction.respond"));
   assert(!is_allowed_host_action("shell.unknown"));
   if (!is_allowed_host_action("config.import")) {
     return 1;
@@ -33,6 +46,12 @@ int main() {
     return 1;
   }
   if (!is_allowed_host_action("maintenance.killStaleCore")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("window.resolveClosePrompt")) {
+    return 1;
+  }
+  if (!is_allowed_host_action("window.setMode")) {
     return 1;
   }
 

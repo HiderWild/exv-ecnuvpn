@@ -201,7 +201,7 @@ std::string redact_secrets(const std::string& input) {
     output = regex_replace(output, R"(password[=:]\s*\S+)", "password=[REDACTED-PASSWORD]");
     output = regex_replace(output, R"(token[=:]\s*\S+)", "token=[REDACTED-TOKEN]");
     output = regex_replace(output, R"(cookie[=:]\s*\S+)", "cookie=[REDACTED-COOKIE]");
-    output = regex_replace(output, R"(webvpn_session[=:]\s*\S+)", "webvpn_session=[REDACTED-TOKEN]");
+    output = regex_replace(output, R"(webvpn[=:]\s*\S+)", "webvpn=[REDACTED-TOKEN]");
     output = regex_replace(output, R"(auth_token[=:]\s*\S+)", "auth_token=[REDACTED-TOKEN]");
     return output;
 }

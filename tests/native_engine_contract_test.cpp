@@ -142,7 +142,7 @@ public:
 
     ecnuvpn::vpn_engine::protocol::AuthResult auth;
     auth.ok = true;
-    auth.cookie = "webvpn_session=FAKE_COOKIE";
+    auth.cookie = "webvpn=FAKE_COOKIE";
     return auth;
   }
 

@@ -906,6 +906,37 @@ int test_start_session_requires_core_lease() {
   return ok ? 0 : 1;
 }
 
+int test_start_session_rejects_supervisor_start_modes() {
+  bool ok = true;
+
+  for (const std::string &mode : {"password", "auth_session"}) {
+    exv::helper::HelperHandler handler;
+    auto acquired = acquire_core_lease(handler);
+    ok = expect(acquired.accepted,
+                "core lease should be acquired before legacy start rejection") &&
+         ok;
+
+    json payload = {
+        {"profile_id", "profile-a"},
+        {"native_start_mode", mode},
+    };
+    auto start =
+        dispatch_json(handler, exv::helper::HelperOp::StartSession, payload);
+
+    ok = expect(!start.success,
+                "StartSession must reject legacy supervisor start modes") &&
+         ok;
+    ok = expect(start.error_code == "supervisor_removed",
+                "legacy supervisor start mode must return supervisor_removed") &&
+         ok;
+    ok = expect(handler.lease_manager().active_session_count() == 0,
+                "rejected supervisor start mode must not create a helper session") &&
+         ok;
+  }
+
+  return ok ? 0 : 1;
+}
+
 int test_acquire_core_lease_allows_start_session() {
   bool ok = true;
   exv::helper::HelperHandler handler;
@@ -2007,6 +2038,7 @@ int main() {
   failures += test_hello_has_no_version_fields();
   failures += test_hello_mode_matches_startup_context();
   failures += test_start_session_requires_core_lease();
+  failures += test_start_session_rejects_supervisor_start_modes();
   failures += test_acquire_core_lease_allows_start_session();
   failures += test_core_lease_rejects_invalid_and_conflicting_acquire();
   failures += test_core_lease_requires_verified_bound_peer();

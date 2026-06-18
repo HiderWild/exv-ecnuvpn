@@ -726,7 +726,7 @@ vpn.connectOneshot
 - 将关键阶段写入日志，便于调试卡点：
   - requesting authorization
   - oneshot helper ready
-  - starting openconnect
+  - starting native CSTP session
   - creating tunnel adapter
   - configuring interface
   - writing routes

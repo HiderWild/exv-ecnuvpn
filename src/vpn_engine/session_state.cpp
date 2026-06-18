@@ -74,7 +74,10 @@ nlohmann::json tunnel_metadata_to_json(const TunnelMetadata &metadata) {
                         {"internal_ip4_netmask", metadata.internal_ip4_netmask},
                         {"mtu", metadata.mtu},
                         {"routes", metadata.routes},
-                        {"server_bypass_ips", metadata.server_bypass_ips}};
+                        {"server_bypass_ips", metadata.server_bypass_ips},
+                        {"dtls_state", metadata.dtls_state},
+                        {"dtls_fallback_reason",
+                         metadata.dtls_fallback_reason}};
 }
 
 nlohmann::json session_state_to_json(const SessionState &state) {

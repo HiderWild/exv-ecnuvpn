@@ -93,8 +93,8 @@ Notable environment skips:
 
 - No `.app` bundle / codesign / DMG verification was available in this package
   layout.
-- `openconnect` was absent, which is expected when the native engine is the
-  default path and the legacy binary is optional.
+- Legacy VPN runtime artifacts were absent, which is expected for the native
+  WebView package path.
 
 ## Linux Evidence
 

@@ -1,4 +1,3 @@
-#include "utils/strings.hpp"
 #include "platform/common/file_system.hpp"
 #include "platform/common/interface_stats.hpp"
 #include "platform/common/process_utils.hpp"
@@ -21,18 +20,6 @@ bool is_process_alive(int pid) {
   if (kill(static_cast<pid_t>(pid), 0) == 0)
     return true;
   return errno == EPERM;
-}
-
-int find_openconnect_pid() {
-  std::string output = platform::run_command_output("pgrep -x openconnect");
-  output = exv::utils::trim(output);
-  if (output.empty())
-    return -1;
-  try {
-    return std::stoi(output);
-  } catch (...) {
-    return -1;
-  }
 }
 
 bool terminate_process(int pid, bool force) {
