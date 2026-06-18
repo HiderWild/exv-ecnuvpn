@@ -364,6 +364,16 @@ public:
     post_renderer_event(event_json);
   }
 
+  void post_host_response(const std::string &response_json) override {
+    {
+      std::lock_guard<std::mutex> lock(host_response_mutex_);
+      host_response_queue_.push(response_json);
+    }
+    if (hwnd_) {
+      PostMessageW(hwnd_, kHostBridgeResponseMessage, 0, 0);
+    }
+  }
+
   void post_renderer_event(const std::string &event_json) {
     if (!webview_) {
       pending_events_.push_back(event_json);
@@ -551,6 +561,9 @@ public:
       std::string response_json =
           handler_ ? handler_(request_json)
                    : R"({"id":0,"ok":false,"code":"host_unavailable","message":"Desktop host bridge is not ready"})";
+      if (response_json.empty()) {
+        continue;
+      }
       {
         std::lock_guard<std::mutex> lock(host_response_mutex_);
         host_response_queue_.push(std::move(response_json));

@@ -23,6 +23,9 @@ public:
   virtual void set_message_handler(HostMessageHandler handler) = 0;
   virtual int run(const UiWindowConfig &config) = 0;
   virtual void emit_event(const std::string &event_json) = 0;
+  virtual void post_host_response(const std::string &response_json) {
+    (void)response_json;
+  }
 };
 
 } // namespace ecnuvpn::ui_shell

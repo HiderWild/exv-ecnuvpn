@@ -1,7 +1,6 @@
 #include "vpn_engine/native_engine.hpp"
 
-#include "vpn_engine/protocol/dtls_transport.hpp"
-#include "vpn_engine/protocol/production_transport.hpp"
+#include "vpn_engine/native_handshake_job.hpp"
 
 #include <exception>
 #include <map>
@@ -22,11 +21,6 @@ ValidationResult invalid(std::string code, std::string message) {
   return result;
 }
 
-ValidationResult native_transport_unimplemented() {
-  return invalid("native_transport_unimplemented",
-                 "Native engine transport factory is not configured.");
-}
-
 ValidationResult native_packet_device_unimplemented() {
   return invalid("native_packet_device_unimplemented",
                  "Native engine packet device factory is not configured.");
@@ -37,32 +31,6 @@ DeviceConfig device_config_from_metadata(const TunnelMetadata &metadata) {
   config.interface_name = metadata.interface_name;
   config.mtu = metadata.mtu;
   return config;
-}
-
-bool make_auth_interaction_event(
-    const ValidationResult &failure, const protocol::AuthResult &auth_result,
-    std::string *type, std::map<std::string, std::string> *fields) {
-  if (!type || !fields)
-    return false;
-
-  if (failure.code == "auth_challenge_required") {
-    *type = "auth.challenge_required";
-  } else if (failure.code == "auth_group_required") {
-    *type = "auth.group_required";
-  } else {
-    return false;
-  }
-
-  fields->clear();
-  fields->emplace("code", failure.code);
-  if (!auth_result.interaction_prompt_label.empty())
-    fields->emplace("label", auth_result.interaction_prompt_label);
-  if (!auth_result.interaction_prompt_type.empty())
-    fields->emplace("input_type", auth_result.interaction_prompt_type);
-  if (!auth_result.interaction_group_options.empty())
-    fields->emplace("options", auth_result.interaction_group_options);
-
-  return true;
 }
 
 } // namespace
@@ -120,9 +88,47 @@ NativeVpnEngineSession::NativeVpnEngineSession(
 NativeVpnEngineSession::~NativeVpnEngineSession() { stop(); }
 
 ValidationResult NativeVpnEngineSession::start() {
+  TunnelMetadata metadata;
+  ValidationResult handshake = start_handshake(&metadata);
+  if (!handshake.ok)
+    return handshake;
+
+  auto fail = [this](const ValidationResult &failure) {
+    std::unique_ptr<protocol::ProtocolTransport> transport;
+    {
+      const std::lock_guard<std::mutex> lock(mu_);
+      set_failure_locked(failure);
+      protocol_session_.reset();
+      transport = std::move(transport_);
+    }
+    if (transport)
+      transport->disconnect();
+    emit_event("native.start.failed", "error", failure.message,
+               {{"code", failure.code}});
+    return failure;
+  };
+
+  DeviceConfig packet_device_config = device_config_from_metadata(metadata);
+  if (dependencies_.network_configurator) {
+    ValidationResult network =
+        dependencies_.network_configurator(metadata, &packet_device_config);
+    if (!network.ok)
+      return fail(network);
+  }
+
+  if (packet_device_config.interface_name.empty())
+    packet_device_config.interface_name = metadata.interface_name;
+  if (packet_device_config.mtu <= 0)
+    packet_device_config.mtu = metadata.mtu;
+
+  return start_packet_loop(packet_device_config);
+}
+
+ValidationResult NativeVpnEngineSession::start_handshake(TunnelMetadata *metadata) {
   {
     const std::lock_guard<std::mutex> lock(mu_);
-    if (status_.running || packet_loop_thread_.joinable()) {
+    if (status_.running || packet_loop_thread_.joinable() || transport_ ||
+        protocol_session_) {
       return invalid("session_already_running",
                      "Native VPN engine session is already running.");
     }
@@ -132,6 +138,7 @@ ValidationResult NativeVpnEngineSession::start() {
     loop_finished_ = false;
     loop_start_result_ = ValidationResult{};
     cancel_requested_.store(false);
+    handshake_metadata_ = TunnelMetadata{};
   }
 
   auto fail = [this](const ValidationResult &failure) {
@@ -144,133 +151,109 @@ ValidationResult NativeVpnEngineSession::start() {
     return failure;
   };
 
-  ValidationResult validated = validate_native_config(config_);
-  if (!validated.ok)
-    return fail(validated);
+  NativeHandshakeResult handshake;
+  NativeHandshakeJob job(config_, dependencies_);
+  ValidationResult result = job.run(std::stop_token{}, &handshake);
+  if (!result.ok)
+    return fail(result);
 
-  protocol::ParsedVpnUrl parsed;
-  ValidationResult parsed_result = protocol::parse_vpn_url(config_.server, &parsed);
-  if (!parsed_result.ok)
-    return fail(parsed_result);
-
-  if (!dependencies_.transport_factory)
-    return fail(native_transport_unimplemented());
-
-  std::unique_ptr<protocol::ProtocolTransport> transport;
-  try {
-    transport = dependencies_.transport_factory();
-  } catch (const std::exception &e) {
-    return fail(invalid("native_transport_factory_failed", e.what()));
-  } catch (...) {
-    return fail(invalid("native_transport_factory_failed",
-                        "Native transport factory failed."));
+  {
+    const std::lock_guard<std::mutex> lock(mu_);
+    handshake_metadata_ = handshake.metadata;
+    status_.pid = -1;
+    status_.interface_name = handshake_metadata_.interface_name;
+    status_.internal_ip = handshake_metadata_.internal_ip4_address;
+    status_.error_code.clear();
+    status_.error_message.clear();
+    transport_ = std::move(handshake.transport);
+    protocol_session_ = std::move(handshake.session);
   }
 
-  if (!transport)
-    return fail(native_transport_unimplemented());
+  if (metadata)
+    *metadata = handshake_metadata_;
 
-  protocol::ProtocolSessionOptions options;
-  options.server = parsed;
-  options.username = config_.username;
-  options.password = config_.password;
-  options.useragent = config_.useragent;
-  options.auth_group = config_.auth_group;
-  options.csd_wrapper = config_.csd_wrapper;
-  options.disable_dtls = config_.disable_dtls;
-  options.auto_reconnect = config_.auto_reconnect;
-  options.max_reconnects = config_.auto_reconnect ? 1 : 0;
+  return {};
+}
 
-  // Documented safe-default MTU used when the gateway omits or negotiates an
-  // out-of-range tunnel MTU. Honor the configured MTU when it is itself valid,
-  // otherwise fall back to the AnyConnect-typical 1290.
-  options.mtu_fallback =
-      (config_.mtu >= 576 && config_.mtu <= 1500) ? config_.mtu : 1290;
-
-  // Liveness timers (keepalive / proactive DPD probe / dead-peer budget) are
-  // left at their disabled defaults until a live gateway capture validates the
-  // timing. Responding to an inbound DPD request is always on inside the
-  // forwarding loop, so the gateway still observes us as alive.
-  options.auth_interaction_handler = dependencies_.auth_interaction_handler;
-  if (dependencies_.protocol_options_configurator)
-    dependencies_.protocol_options_configurator(&options);
-
-  auto protocol_session =
-      std::make_unique<protocol::ProtocolSession>(options, transport.get());
-
-  emit_event("native.starting", "info", "native VPN engine starting",
-             {{"host", parsed.host}, {"port", std::to_string(parsed.port)}});
-  emit_event("auth.started", "info", "password auth started");
-
-  ValidationResult auth = protocol_session->authenticate();
-  if (!auth.ok) {
-    if (auth.code == "csd_required_unsupported") {
-      emit_event("csd.required_unsupported", "warning",
-                 "AnyConnect host-scan is required but unsupported",
-                 {{"code", auth.code}});
+ValidationResult NativeVpnEngineSession::adopt_handshake(
+    NativeHandshakeResult handshake, TunnelMetadata *metadata) {
+  {
+    const std::lock_guard<std::mutex> lock(mu_);
+    if (status_.running || packet_loop_thread_.joinable() || transport_ ||
+        protocol_session_) {
+      return invalid("session_already_running",
+                     "Native VPN engine session is already running.");
     }
-    std::string interaction_type;
-    std::map<std::string, std::string> interaction_fields;
-    if (make_auth_interaction_event(auth, protocol_session->last_auth_result(),
-                                    &interaction_type, &interaction_fields)) {
-      emit_event(std::move(interaction_type), "warning", auth.message,
-                 std::move(interaction_fields));
-    }
-    emit_event("auth.failed", "error", auth.message, {{"code", auth.code}});
-    return fail(auth);
   }
 
-  emit_event("auth.succeeded", "info", "password auth succeeded");
-
-  TunnelMetadata metadata;
-  ValidationResult cstp = protocol_session->connect_cstp(&metadata);
-  if (!cstp.ok) {
-    emit_event("cstp.failed", "error", cstp.message, {{"code", cstp.code}});
-    transport->disconnect();
-    return fail(cstp);
+  if (!handshake.transport || !handshake.session) {
+    ValidationResult failure = invalid(
+        "handshake_incomplete",
+        "Native VPN engine handshake result is missing transport or session.");
+    {
+      const std::lock_guard<std::mutex> lock(mu_);
+      set_failure_locked(failure);
+    }
+    emit_event("native.start.failed", "error", failure.message,
+               {{"code", failure.code}});
+    return failure;
   }
 
   {
     const std::lock_guard<std::mutex> lock(mu_);
+    status_ = VpnEngineStatus{};
+    loop_started_ = false;
+    loop_finished_ = false;
+    loop_start_result_ = ValidationResult{};
+    cancel_requested_.store(false);
+    handshake_metadata_ = handshake.metadata;
     status_.pid = -1;
-    status_.interface_name = metadata.interface_name;
-    status_.internal_ip = metadata.internal_ip4_address;
+    status_.interface_name = handshake_metadata_.interface_name;
+    status_.internal_ip = handshake_metadata_.internal_ip4_address;
     status_.error_code.clear();
     status_.error_message.clear();
+    transport_ = std::move(handshake.transport);
+    protocol_session_ = std::move(handshake.session);
   }
 
-  emit_event("cstp.connected", "info", "CSTP connect succeeded",
-             {{"interface", metadata.interface_name},
-              {"internal_ip", metadata.internal_ip4_address}});
+  if (metadata)
+    *metadata = handshake_metadata_;
 
-  if (!config_.disable_dtls &&
-      metadata.dtls_state !=
-          protocol::dtls_transport_state_to_string(
-              protocol::DtlsTransportState::attempted_and_connected)) {
-    const std::string message =
-        metadata.dtls_fallback_reason.empty()
-            ? "native DTLS backend unavailable; using CSTP/TLS"
-            : metadata.dtls_fallback_reason;
-    emit_event("dtls.unavailable", "warning", message,
-               {{"code", "dtls_unavailable"}, {"state", metadata.dtls_state}});
-  }
+  return {};
+}
 
-  DeviceConfig packet_device_config = device_config_from_metadata(metadata);
-  if (dependencies_.network_configurator) {
-    ValidationResult network =
-        dependencies_.network_configurator(metadata, &packet_device_config);
-    if (!network.ok) {
-      transport->disconnect();
-      return fail(network);
+ValidationResult NativeVpnEngineSession::start_packet_loop(
+    DeviceConfig packet_device_config) {
+  {
+    const std::lock_guard<std::mutex> lock(mu_);
+    if (status_.running || packet_loop_thread_.joinable()) {
+      return invalid("session_already_running",
+                     "Native VPN engine session is already running.");
+    }
+    if (!transport_ || !protocol_session_) {
+      return invalid("handshake_required",
+                     "Native VPN engine handshake has not completed.");
     }
   }
 
-  if (packet_device_config.interface_name.empty())
-    packet_device_config.interface_name = metadata.interface_name;
-  if (packet_device_config.mtu <= 0)
-    packet_device_config.mtu = metadata.mtu;
+  auto fail = [this](const ValidationResult &failure) {
+    std::unique_ptr<protocol::ProtocolTransport> transport;
+    {
+      const std::lock_guard<std::mutex> lock(mu_);
+      set_failure_locked(failure);
+      protocol_session_.reset();
+      packet_device_.reset();
+      loop_event_sink_.reset();
+      transport = std::move(transport_);
+    }
+    if (transport)
+      transport->disconnect();
+    emit_event("native.start.failed", "error", failure.message,
+               {{"code", failure.code}});
+    return failure;
+  };
 
   if (!dependencies_.packet_device_factory) {
-    transport->disconnect();
     return fail(native_packet_device_unimplemented());
   }
 
@@ -278,24 +261,19 @@ ValidationResult NativeVpnEngineSession::start() {
   try {
     packet_device = dependencies_.packet_device_factory();
   } catch (const std::exception &e) {
-    transport->disconnect();
     return fail(invalid("native_packet_device_factory_failed", e.what()));
   } catch (...) {
-    transport->disconnect();
     return fail(invalid("native_packet_device_factory_failed",
                         "Native packet device factory failed."));
   }
 
   if (!packet_device) {
-    transport->disconnect();
     return fail(native_packet_device_unimplemented());
   }
 
   {
     const std::lock_guard<std::mutex> lock(mu_);
     packet_device_config_ = packet_device_config;
-    transport_ = std::move(transport);
-    protocol_session_ = std::move(protocol_session);
     packet_device_ = std::move(packet_device);
     loop_event_sink_ = std::make_unique<LoopEventSink>(this);
   }

@@ -292,6 +292,10 @@ public:
     post_json_to_renderer(event_json);
   }
 
+  void post_host_response(const std::string &response_json) override {
+    post_json_to_renderer(response_json);
+  }
+
   void handle_script_message(NSString *message) {
     const std::string request_json = utf8_from_ns_string(message);
     if (request_json.empty()) {
@@ -337,7 +341,9 @@ public:
     const std::string response_json =
         handler_ ? handler_(request_json)
                  : R"({"id":0,"ok":false,"code":"host_unavailable","message":"Desktop host bridge is not ready"})";
-    post_json_to_renderer(response_json);
+    if (!response_json.empty()) {
+      post_json_to_renderer(response_json);
+    }
   }
 
   void on_navigation_finished() {

@@ -78,6 +78,7 @@ const statusDescription = computed(() => {
 
 const powerButtonLabel = computed(() => {
   if (vpn.loading || vpn.serviceBusy) return '处理中'
+  if (connecting.value) return '取消连接'
   if (connected.value) return '断开连接'
   return '连接'
 })
@@ -87,7 +88,7 @@ const powerButtonClass = computed(() => {
   if (connected.value) return 'bg-accent text-white hover:bg-accent/90 shadow-accent/20'
   return 'bg-destructive text-white hover:bg-destructive/90 shadow-destructive/20'
 })
-const powerAnimating = computed(() => vpn.loading || disconnecting.value)
+const powerAnimating = computed(() => connecting.value || vpn.loading || disconnecting.value)
 
 const vpnPathActive = computed(() => connected.value && Boolean(vpn.status?.network_ready))
 const vpnPathPending = computed(() => connecting.value || (connected.value && !vpn.status?.network_ready))
@@ -102,6 +103,10 @@ const upstreamVirtualCaption = computed(() => {
 })
 
 function handlePowerClick() {
+  if (connecting.value) {
+    void vpn.cancelConnect()
+    return
+  }
   if (vpn.loading || vpn.serviceBusy) return
   vpn.connectFromDashboard(installServiceBeforeConnect.value)
 }
@@ -638,7 +643,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
               <span class="power-ripple-ring ring-c" aria-hidden="true" />
             </template>
             <button
-              :disabled="vpn.loading || vpn.serviceBusy"
+              :disabled="!connecting && (vpn.loading || vpn.serviceBusy)"
               :class="[
                 'power-button relative z-10 grid h-28 w-28 place-items-center rounded-full transition-all duration-500 disabled:cursor-not-allowed disabled:opacity-95',
                 powerButtonClass,

@@ -369,7 +369,16 @@ void TunnelController::Impl::do_connect() {
         if (!vpn_password_.empty()) {
             // Real engine path — start CoreSessionRunner.
             // The event callback is already wired up (set in init_runner).
-            bool ok = runner_.start(vpn_cfg_, vpn_password_);
+            bool ok = false;
+            if (prepared_native_handshake_) {
+                auto prepared = std::move(*prepared_native_handshake_);
+                prepared_native_handshake_.reset();
+                ok = runner_.start_from_handshake(
+                    std::move(prepared.engine_config),
+                    std::move(prepared.handshake));
+            } else {
+                ok = runner_.start(vpn_cfg_, vpn_password_);
+            }
             if (!ok) {
                 log_tunnel_event("ERROR", "native.runner.failed",
                                  "Native engine session failed to start");

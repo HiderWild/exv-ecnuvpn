@@ -16,6 +16,11 @@ namespace exv::core_api {
 VpnActions::VpnActions(std::shared_ptr<exv::core::TunnelController> controller)
     : controller_(std::move(controller)) {}
 
+VpnActions::VpnActions(std::shared_ptr<exv::core::TunnelController> controller,
+                       ConnectJobRunner connect_job_runner)
+    : controller_(std::move(controller)),
+      connect_job_runner_(std::move(connect_job_runner)) {}
+
 void VpnActions::register_handlers(AppRpcDispatcher& dispatcher) {
     dispatcher.register_handler("vpn.connect",
         [this](const RpcRequest& req) { return connect(req); });
@@ -44,10 +49,27 @@ RpcResponse VpnActions::connect(const RpcRequest& req) {
             intent.auto_reconnect = payload["auto_reconnect"].get<bool>();
         }
 
-        controller_->connect(intent);
+        exv::core::PendingConnectRequest pending;
+        pending.profile_id = intent.profile_id.value;
+        pending.server = intent.profile_id.value;
+        pending.has_password = payload.contains("password") &&
+                               payload["password"].is_string() &&
+                               !payload["password"].get<std::string>().empty();
 
+        auto state = connect_jobs_.submit_connect(
+            pending,
+            [this, intent](std::stop_token stop, std::uint64_t epoch) mutable {
+                if (connect_job_runner_) {
+                    connect_job_runner_(stop, epoch);
+                    return;
+                }
+                if (stop.stop_requested()) {
+                    return;
+                }
+                controller_->connect(intent);
+            });
         resp.success = true;
-        resp.payload_json = json{{"status", "connecting"}}.dump();
+        resp.payload_json = connect_state_json(state).dump();
     } catch (const std::exception& e) {
         resp.success = false;
         resp.error_code = "invalid_payload";
@@ -58,6 +80,14 @@ RpcResponse VpnActions::connect(const RpcRequest& req) {
 
 RpcResponse VpnActions::disconnect(const RpcRequest& req) {
     RpcResponse resp;
+    auto active = connect_jobs_.snapshot();
+    if (active.active) {
+        auto state =
+            connect_jobs_.submit_disconnect("user_cancelled_connect");
+        resp.success = true;
+        resp.payload_json = connect_state_json(state).dump();
+        return resp;
+    }
     controller_->disconnect();
     resp.success = true;
     resp.payload_json = json{{"status", "disconnecting"}}.dump();
@@ -171,6 +201,28 @@ RpcResponse VpnActions::get_legacy_status(const RpcRequest& req) {
         resp.error_message = e.what();
     }
     return resp;
+}
+
+nlohmann::json VpnActions::connect_state_json(
+    const exv::core::VpnConnectJobState& state) const {
+    nlohmann::json out;
+    out["accepted"] = state.accepted;
+    out["phase"] = state.phase.empty() ? "connecting" : state.phase;
+    out["job_id"] = state.job_id;
+    out["active_job_id"] = state.job_id;
+    out["active"] = state.active;
+    out["coalesced"] = state.coalesced;
+    out["cancelling"] = state.cancelling;
+    out["user_cancelled"] = state.user_cancelled;
+    out["desired_connected"] = state.desired_connected;
+    out["intent_epoch"] = state.intent_epoch;
+    if (!state.last_error_code.empty()) {
+        out["last_error"] = {
+            {"code", state.last_error_code},
+            {"message", state.last_error_message}
+        };
+    }
+    return out;
 }
 
 } // namespace exv::core_api

@@ -10,9 +10,11 @@
 #include "core/connection/connection_attempt.hpp"
 #include "core/crypto/crypto.hpp"
 #include "core/rpc/desktop_rpc_adapter.hpp"
+#include "core/tunnel_controller/connect_pipeline.hpp"
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
+#include "core/tunnel_controller/vpn_connect_job.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
@@ -22,9 +24,12 @@
 #include "platform/common/process_control.hpp"
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_paths.hpp"
+#include "vpn_engine/native_handshake_job.hpp"
 
 #include <chrono>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -58,6 +63,11 @@ void fire_desktop_vpn_connect_entered_hook() {
 namespace {
 
 using StageTimer = exv::core::ConnectStageTimer;
+
+std::mutex g_desktop_connect_jobs_mutex;
+exv::core::VpnConnectJobOwner g_desktop_connect_jobs;
+std::mutex g_desktop_connect_error_mutex;
+std::optional<nlohmann::json> g_desktop_connect_error;
 
 config::ConfigManager make_config_manager() {
   platform::ensure_dir(platform::get_config_dir());
@@ -156,6 +166,346 @@ nlohmann::json preflight_connect(const Config &cfg,
   return result;
 }
 
+nlohmann::json quick_validate_connect(const Config &cfg,
+                                      const std::string &password) {
+  if (cfg.vpn_engine != "native") {
+    return error("VPN engine is native-only.", "legacy_engine_removed");
+  }
+  if (cfg.server.empty()) {
+    return error("VPN server is not configured.");
+  }
+  if (cfg.username.empty()) {
+    return error("VPN username is not configured.");
+  }
+  if (password.empty()) {
+    return error("VPN password is not configured.");
+  }
+  auto native_validation = exv::core::validate_native_app_config(cfg);
+  if (!native_validation.ok) {
+    return error(native_validation.message, native_validation.code);
+  }
+  return nlohmann::json{{"ok", true}};
+}
+
+nlohmann::json connect_state_json(const exv::core::VpnConnectJobState &state) {
+  nlohmann::json out;
+  out["accepted"] = state.accepted;
+  out["phase"] = state.phase.empty() ? "connecting" : state.phase;
+  out["job_id"] = state.job_id;
+  out["active_job_id"] = state.job_id;
+  out["active"] = state.active;
+  out["coalesced"] = state.coalesced;
+  out["cancelling"] = state.cancelling;
+  out["user_cancelled"] = state.user_cancelled;
+  out["desired_connected"] = state.desired_connected;
+  out["intent_epoch"] = state.intent_epoch;
+  if (!state.last_error_code.empty()) {
+    out["last_error"] = {{"code", state.last_error_code},
+                         {"message", state.last_error_message}};
+  }
+  return out;
+}
+
+void clear_desktop_connect_error() {
+  std::lock_guard<std::mutex> lock(g_desktop_connect_error_mutex);
+  g_desktop_connect_error.reset();
+}
+
+void set_desktop_connect_error(nlohmann::json failure) {
+  std::lock_guard<std::mutex> lock(g_desktop_connect_error_mutex);
+  g_desktop_connect_error = std::move(failure);
+}
+
+std::optional<nlohmann::json> desktop_connect_error() {
+  std::lock_guard<std::mutex> lock(g_desktop_connect_error_mutex);
+  return g_desktop_connect_error;
+}
+
+struct PreparedHandshakeHolder {
+  std::mutex mutex;
+  ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+  ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
+  bool ready = false;
+};
+
+void apply_desktop_connect_error(nlohmann::json *status) {
+  if (!status) return;
+  auto failure = desktop_connect_error();
+  if (!failure || !failure->is_object()) return;
+  (*status)["error"] = json_string(*failure, "error",
+                                   json_string(*failure, "message"));
+  (*status)["error_code"] = json_string(*failure, "code");
+  (*status)["error_recoverable"] = json_bool(*failure, "recoverable", true);
+  (*status)["recommended_action"] =
+      json_string(*failure, "recommended_action");
+}
+
+void run_desktop_connect_job(Config cfg,
+                             std::string password,
+                             std::string attempt_id,
+                             std::stop_token stop) {
+  StageTimer timing("desktop.connect.background");
+  testing::fire_desktop_vpn_connect_entered_hook();
+  if (stop.stop_requested()) {
+    return;
+  }
+
+  namespace conn_attempt = ecnuvpn::connection_attempt;
+  conn_attempt::TerminalAttemptScope attempt_cleanup(
+      platform::get_config_dir(), std::move(attempt_id), "scope_exit");
+
+  auto prepared_handshake = std::make_shared<PreparedHandshakeHolder>();
+  exv::core::ConnectPipeline pipeline(
+      "desktop-connect",
+      [](const exv::core::ConnectBranchResult &late,
+         std::string_view first_code) {
+        exv::observability::LogFacade::info(
+            "app_api: late connect branch failure - branch=" +
+            std::string(exv::core::connect_branch_name(late.branch)) +
+            " code=" + late.code + " first_code=" + std::string(first_code));
+      });
+
+  auto backend_branch = []([[maybe_unused]] std::stop_token branch_stop) {
+    platform::BackendResolveOptions options;
+    options.preferred_mode = "auto";
+    options.allow_oneshot = true;
+    options.start_oneshot = true;
+    options.allow_service_start = false;
+    options.helper_path = helper_binary_next_to_exv();
+
+    nlohmann::json backend = platform::resolve_backend(options);
+    const bool backend_ok = backend.value("ok", false);
+    exv::observability::LogFacade::info(
+        "app_api: preflight backend resolved - ok=" +
+        std::string(backend_ok ? "true" : "false") +
+        " mode=" + backend.value("mode", std::string("unknown")));
+    if (!backend_ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::BackendHelperReady,
+          false,
+          backend.value("code", platform::kHelperUnavailableCode),
+          backend.value("message",
+                        platform::helper_unavailable_connect_message()),
+          backend};
+    }
+    return exv::core::ConnectBranchResult{
+        exv::core::ConnectBranch::BackendHelperReady, true, {}, {}, backend};
+  };
+
+  auto platform_branch = [cfg](std::stop_token branch_stop) {
+    if (branch_stop.stop_requested()) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::PlatformReady,
+          false,
+          "cancelled",
+          "Platform checks cancelled",
+          nlohmann::json::object()};
+    }
+
+    nlohmann::json runtime = runtime_status_json(cfg);
+    if (!runtime.value("available", false)) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::PlatformReady,
+          false,
+          "runtime_unavailable",
+          "VPN runtime is not available. The desktop bundle is missing the "
+          "selected VPN engine dependencies.",
+          nlohmann::json{{"runtime", runtime}}};
+    }
+
+    nlohmann::json platform_err =
+        platform::preflight_connect_platform_checks(
+            config::to_platform_config_view(cfg));
+    const bool platform_ok =
+        !platform_err.is_object() || platform_err.value("ok", true);
+    exv::observability::LogFacade::info(
+        "app_api: preflight platform checks - ok=" +
+        std::string(platform_ok ? "true" : "false"));
+    if (!platform_ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::PlatformReady,
+          false,
+          platform_err.value("code", std::string("platform_checks_failed")),
+          platform_err.value("message",
+                             platform_err.value("error",
+                                                std::string("Platform checks failed"))),
+          platform_err};
+    }
+
+    return exv::core::ConnectBranchResult{
+        exv::core::ConnectBranch::PlatformReady,
+        true,
+        {},
+        {},
+        nlohmann::json{{"runtime", runtime}, {"platform", platform_err}}};
+  };
+
+  auto protocol_branch = [cfg, password, prepared_handshake](
+                             std::stop_token branch_stop) mutable {
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+    auto mapped =
+        exv::core::make_native_engine_config(cfg, password, &engine_config);
+    if (!mapped.ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::ProtocolHandshake,
+          false,
+          mapped.code,
+          mapped.message,
+          nlohmann::json::object()};
+    }
+
+    auto deps = ecnuvpn::vpn_engine::default_native_engine_dependencies();
+    ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
+    ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config, deps);
+    auto result = job.run(branch_stop, &handshake);
+    if (!result.ok) {
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::ProtocolHandshake,
+          false,
+          result.code,
+          result.message,
+          nlohmann::json::object()};
+    }
+    if (branch_stop.stop_requested()) {
+      if (handshake.session) {
+        handshake.session->disconnect();
+      } else if (handshake.transport) {
+        handshake.transport->disconnect();
+      }
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::ProtocolHandshake,
+          false,
+          "cancelled",
+          "Protocol handshake cancelled",
+          nlohmann::json::object()};
+    }
+
+    nlohmann::json payload{
+        {"interface", handshake.metadata.interface_name},
+        {"internal_ip", handshake.metadata.internal_ip4_address},
+        {"mtu", handshake.metadata.mtu}};
+    {
+      std::lock_guard<std::mutex> lock(prepared_handshake->mutex);
+      prepared_handshake->engine_config = std::move(engine_config);
+      prepared_handshake->handshake = std::move(handshake);
+      prepared_handshake->ready = true;
+    }
+    return exv::core::ConnectBranchResult{
+        exv::core::ConnectBranch::ProtocolHandshake, true, {}, {}, payload};
+  };
+
+  auto pipeline_result =
+      pipeline.run(std::move(backend_branch), std::move(platform_branch),
+                   std::move(protocol_branch), stop);
+  if (!pipeline_result.ok) {
+    timing.finish(false, "stage=connect_pipeline branch=" +
+                             pipeline_result.first_failure_branch +
+                             " code=" + pipeline_result.code);
+    if (pipeline_result.code != "cancelled") {
+      set_desktop_connect_error(
+          error(pipeline_result.message.empty()
+                    ? "VPN connect preflight failed."
+                    : pipeline_result.message,
+                pipeline_result.code.empty() ? "connect_pipeline_failed"
+                                             : pipeline_result.code));
+    }
+    return;
+  }
+  timing.mark("connect_pipeline", "result=ok");
+
+  if (stop.stop_requested()) {
+    return;
+  }
+
+  std::string helper_endpoint;
+  if (pipeline_result.backend.is_object()) {
+    auto backend = pipeline_result.backend;
+    if (!backend.value("ok", false)) {
+      timing.finish(false, "stage=backend_resolution error=backend_not_ok");
+      auto failure = error("Failed to resolve helper backend: " +
+                               backend.value(
+                                   "message",
+                                   std::string("Unknown backend error")),
+                           backend.value("code",
+                                         platform::kHelperUnavailableCode));
+      set_desktop_connect_error(failure);
+      return;
+    }
+    helper_endpoint = backend.value("endpoint", std::string());
+    timing.mark("backend_endpoint",
+                helper_endpoint.empty() ? "endpoint=none"
+                                        : "endpoint=extracted");
+  }
+
+  reset_tunnel_controller();
+  timing.mark("reset_controller", "stale_state_cleared");
+
+  exv::observability::LogFacade::info(
+      "app_api: Initializing TunnelController - endpoint=" +
+      (helper_endpoint.empty() ? "default" : helper_endpoint));
+  exv::observability::LogFacade::info(
+      "app_api: Initializing TunnelController - endpoint=" +
+      (helper_endpoint.empty() ? "default" : helper_endpoint));
+  auto controller = ensure_tunnel_controller(helper_endpoint);
+  if (controller) {
+    exv::observability::LogFacade::info(
+        "app_api: TunnelController initialized successfully");
+  }
+  timing.mark("tunnel_controller",
+              controller ? "initialized=true" : "initialized=false");
+
+  if (!controller) {
+    timing.finish(false, "stage=tunnel_controller_init");
+    set_desktop_connect_error(
+        error("Failed to initialize VPN controller: " +
+                  tunnel_controller_init_error(),
+              platform::kHelperUnavailableCode));
+    return;
+  }
+
+  if (stop.stop_requested()) {
+    return;
+  }
+
+  controller->set_vpn_config(cfg, password);
+  {
+    std::lock_guard<std::mutex> lock(prepared_handshake->mutex);
+    if (!prepared_handshake->ready) {
+      timing.finish(false, "stage=prepared_handshake_missing");
+      set_desktop_connect_error(
+          error("Native handshake did not produce a prepared session.",
+                "prepared_handshake_missing"));
+      return;
+    }
+    controller->set_prepared_native_handshake(
+        std::move(prepared_handshake->engine_config),
+        std::move(prepared_handshake->handshake));
+  }
+  timing.mark("cleanup_legacy_state");
+
+  exv::core::UserIntent intent;
+  intent.desired_connected = true;
+  intent.auto_reconnect = cfg.auto_reconnect;
+  intent.profile_id.value = cfg.server;
+  exv::observability::LogFacade::info(
+      "app_api: Calling TunnelController::connect - server=" + cfg.server);
+  exv::observability::LogFacade::info(
+      "app_api: Calling TunnelController::connect");
+  controller->connect(intent);
+
+  auto snap = controller->status();
+  const bool connect_failed = snap.phase == exv::core::TunnelPhase::Failed;
+  timing.finish(!connect_failed,
+                "phase=" + std::to_string(static_cast<int>(snap.phase)));
+  if (connect_failed) {
+    nlohmann::json status = frontend_status_from_controller_snapshot(snap, cfg);
+    set_desktop_connect_error(status);
+    reset_tunnel_controller();
+    return;
+  }
+  attempt_cleanup.dismiss();
+}
+
 nlohmann::json auth_interaction_json(
     const exv::core::TunnelController::PendingAuthInteraction &pending) {
   return nlohmann::json{{"id", pending.id},
@@ -178,7 +528,9 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
           auto snap = controller->status();
           return frontend_status_from_controller_snapshot(snap, cfg);
         }
-        return disconnected_status(cfg);
+        auto status = disconnected_status(cfg);
+        apply_desktop_connect_error(&status);
+        return status;
       });
 
   adapter.register_legacy_handler(
@@ -191,7 +543,6 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         exv::observability::LogFacade::info("app_api: vpn.connect entry - password_provided=" +
                      std::string(password.empty() ? "false" : "true") +
                      " server=" + cfg.server + " username=" + cfg.username);
-        testing::fire_desktop_vpn_connect_entered_hook();
         if (password.empty() && !cfg.password.empty()) {
           std::string key = crypto::load_key();
           if (!key.empty()) {
@@ -200,47 +551,34 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         }
         timing.mark("password_resolved",
                     password.empty() ? "source=missing" : "source=available");
-        exv::observability::LogFacade::info("app_api: Calling preflight_connect");
-        nlohmann::json preflight = preflight_connect(cfg, password);
-        if (preflight.is_object() && preflight.value("ok", true) == false) {
-          timing.finish(false, "stage=preflight error=" +
-                                   json_string(preflight, "error"));
-          return preflight;
-        }
-        timing.mark("preflight", "result=ok");
-        if (preflight.is_object() && preflight.contains("backend")) {
-          auto backend = preflight["backend"];
-          exv::observability::LogFacade::info("app_api: Preflight complete - backend_mode=" +
-                       backend.value("mode", "unknown"));
-        }
-        if (preflight.is_object() && preflight.contains("backend")) {
-          auto backend = preflight["backend"];
-          exv::observability::LogFacade::info("app_api: Preflight complete - ok=" +
-                       std::string(preflight.value("ok", true) ? "true"
-                                                               : "false") +
-                       " backend_mode=" + backend.value("mode", "unknown") +
-                       " backend_ok=" +
-                       std::string(backend.value("ok", false) ? "true"
-                                                               : "false"));
+
+        nlohmann::json validation = quick_validate_connect(cfg, password);
+        if (validation.is_object() && validation.value("ok", true) == false) {
+          timing.finish(false, "stage=quick_validation error=" +
+                                   json_string(validation, "error"));
+          return validation;
         }
 
-        std::string helper_endpoint;
-        if (preflight.contains("backend") && preflight["backend"].is_object()) {
-          auto backend = preflight["backend"];
-          if (!backend.value("ok", false)) {
-            timing.finish(false,
-                          "stage=backend_resolution error=backend_not_ok");
-            return error("Failed to resolve helper backend: " +
-                             backend.value(
-                                 "message",
-                                 std::string("Unknown backend error")),
-                         backend.value("code",
-                                       platform::kHelperUnavailableCode));
+        clear_desktop_connect_error();
+
+        exv::core::PendingConnectRequest pending;
+        pending.profile_id = cfg.server;
+        pending.server = cfg.server;
+        pending.has_password = !password.empty();
+
+        {
+          std::lock_guard<std::mutex> lock(g_desktop_connect_jobs_mutex);
+          auto active = g_desktop_connect_jobs.snapshot();
+          if (active.active) {
+            auto state = g_desktop_connect_jobs.submit_connect(
+                pending,
+                [cfg, password](std::stop_token stop, std::uint64_t) mutable {
+                  if (stop.stop_requested()) return;
+                  run_desktop_connect_job(cfg, password, std::string(), stop);
+                });
+            timing.finish(true, "stage=accepted coalesced=true");
+            return connect_state_json(state);
           }
-          helper_endpoint = backend.value("endpoint", std::string());
-          timing.mark("backend_endpoint",
-                      helper_endpoint.empty() ? "endpoint=none"
-                                              : "endpoint=extracted");
         }
 
         namespace conn_attempt = ecnuvpn::connection_attempt;
@@ -312,57 +650,20 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
           }
         }
 
-        conn_attempt::TerminalAttemptScope attempt_cleanup(
-            platform::get_config_dir(), attempt_result.record.attempt_id,
-            "scope_exit");
-
-        reset_tunnel_controller();
-        timing.mark("reset_controller", "stale_state_cleared");
-
-        exv::observability::LogFacade::info("app_api: Initializing TunnelController - endpoint=" +
-                     (helper_endpoint.empty() ? "default" : helper_endpoint));
-        exv::observability::LogFacade::info("app_api: Initializing TunnelController - endpoint=" +
-                     (helper_endpoint.empty() ? "default" : helper_endpoint));
-        auto controller = ensure_tunnel_controller(helper_endpoint);
-        if (controller) {
-          exv::observability::LogFacade::info("app_api: TunnelController initialized successfully");
+        auto attempt_id = attempt_result.record.attempt_id;
+        exv::core::VpnConnectJobState state;
+        {
+          std::lock_guard<std::mutex> lock(g_desktop_connect_jobs_mutex);
+          state = g_desktop_connect_jobs.submit_connect(
+              pending,
+              [cfg, password, attempt_id](std::stop_token stop,
+                                          std::uint64_t) mutable {
+                if (stop.stop_requested()) return;
+                run_desktop_connect_job(cfg, password, attempt_id, stop);
+              });
         }
-        timing.mark("tunnel_controller",
-                    controller ? "initialized=true" : "initialized=false");
-
-        if (!controller) {
-          timing.finish(false, "stage=tunnel_controller_init");
-          return error("Failed to initialize VPN controller: " +
-                           tunnel_controller_init_error(),
-                       platform::kHelperUnavailableCode);
-        }
-
-        controller->set_vpn_config(cfg, password);
-        timing.mark("cleanup_legacy_state");
-
-        exv::core::UserIntent intent;
-        intent.desired_connected = true;
-        intent.auto_reconnect = cfg.auto_reconnect;
-        intent.profile_id.value = cfg.server;
-        exv::observability::LogFacade::info("app_api: Calling TunnelController::connect - server=" +
-                     cfg.server);
-        exv::observability::LogFacade::info("app_api: Calling TunnelController::connect");
-        controller->connect(intent);
-
-        auto snap = controller->status();
-        nlohmann::json status =
-            frontend_status_from_controller_snapshot(snap, cfg);
-        const bool connect_failed =
-            snap.phase == exv::core::TunnelPhase::Failed;
-        timing.finish(
-            !connect_failed,
-            "phase=" + std::to_string(static_cast<int>(snap.phase)));
-        if (connect_failed) {
-          reset_tunnel_controller();
-          return status;
-        }
-        attempt_cleanup.dismiss();
-        return status;
+        timing.finish(true, "stage=accepted");
+        return connect_state_json(state);
       });
 
   adapter.register_legacy_handler(
@@ -408,6 +709,16 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         config::ConfigManager mgr = make_config_manager();
         Config cfg = mgr.load();
         auto controller = get_tunnel_controller_if_exists();
+        {
+          std::lock_guard<std::mutex> lock(g_desktop_connect_jobs_mutex);
+          auto active = g_desktop_connect_jobs.snapshot();
+          if (active.active) {
+            auto state =
+                g_desktop_connect_jobs.submit_disconnect("user_cancelled_connect");
+            clear_desktop_connect_error();
+            return connect_state_json(state);
+          }
+        }
         if (controller) {
           controller->disconnect(exv::core::DisconnectReason::UserRequested);
         }

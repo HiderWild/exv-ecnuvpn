@@ -18,7 +18,11 @@
 #endif
 
 #include <charconv>
+#include <future>
+#include <map>
+#include <mutex>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace ecnuvpn::ui_shell {
@@ -64,57 +68,91 @@ CoreRpcResponse transport_error(const CoreRpcRequest &request,
   return response;
 }
 
+std::future<CoreRpcResponse> ready_future(CoreRpcResponse response) {
+  std::promise<CoreRpcResponse> promise;
+  auto future = promise.get_future();
+  promise.set_value(std::move(response));
+  return future;
+}
+
+std::string response_key(const CoreRpcResponse &response) {
+  if (!response.request_id.empty()) {
+    return response.request_id;
+  }
+  return std::to_string(response.id);
+}
+
 } // namespace
 
 CoreRpcClient::CoreRpcClient(CoreRpcTransport &transport,
                              CoreRpcWireMode wire_mode)
     : transport_(transport), wire_mode_(wire_mode) {}
 
+CoreRpcClient::~CoreRpcClient() {
+  shutdown();
+}
+
 CoreRpcResponse CoreRpcClient::invoke(const CoreRpcRequest &request) {
+  return invoke_async(request).get();
+}
+
+std::future<CoreRpcResponse> CoreRpcClient::invoke_async(CoreRpcRequest request) {
   std::string request_line;
   try {
     request_line = wire_mode_ == CoreRpcWireMode::Native
                        ? serialize_core_rpc_request(request)
                        : serialize_desktop_rpc_request(request);
   } catch (const nlohmann::json::exception &error) {
-    return transport_error(request, "protocol_error", error.what());
+    return ready_future(transport_error(request, "protocol_error", error.what()));
   }
 
-  if (!transport_.write_line(request_line)) {
-    return transport_error(request, "transport_closed",
-                           "Core RPC transport is closed");
-  }
-
-  for (;;) {
-    std::string response_line;
-    if (!buffered_response_lines_.empty()) {
-      response_line = buffered_response_lines_.front();
-      buffered_response_lines_.pop_front();
-    } else if (!transport_.read_line(response_line)) {
-      return transport_error(request, "transport_closed",
-                             "Core RPC transport is closed");
+  const std::string key = request.request_id;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto unmatched = unmatched_responses_.find(key);
+    if (unmatched != unmatched_responses_.end()) {
+      auto response = std::move(unmatched->second);
+      unmatched_responses_.erase(unmatched);
+      return ready_future(std::move(response));
     }
+  }
 
-    try {
-      const auto parsed = nlohmann::json::parse(response_line);
-      if (parsed.is_object() && parsed.contains("event")) {
-        if (event_handler_) {
-          event_handler_(parse_core_rpc_event_line(response_line));
-        }
-        continue;
+  auto promise = std::make_shared<std::promise<CoreRpcResponse>>();
+  auto future = promise->get_future();
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    if (shutting_down_) {
+      promise->set_value(transport_error(request, "transport_closed",
+                                         "Core RPC transport is closed"));
+      return future;
+    }
+    pending_[key] = promise;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if (!transport_.write_line(request_line)) {
+      {
+        std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+        pending_.erase(key);
       }
-      return parse_core_rpc_line(response_line);
-    } catch (const nlohmann::json::exception &error) {
-      return transport_error(request, "protocol_error", error.what());
+      promise->set_value(transport_error(request, "transport_closed",
+                                         "Core RPC transport is closed"));
+      return future;
     }
   }
+
+  ensure_reader_started();
+  return future;
 }
 
 void CoreRpcClient::set_event_handler(CoreRpcEventHandler handler) {
+  std::lock_guard<std::mutex> lock(event_mutex_);
   event_handler_ = std::move(handler);
 }
 
 void CoreRpcClient::pump_events() {
+  std::lock_guard<std::mutex> read_lock(read_mutex_);
   for (;;) {
     std::string line;
     if (!transport_.read_available_line(line)) {
@@ -124,8 +162,13 @@ void CoreRpcClient::pump_events() {
     try {
       const auto parsed = nlohmann::json::parse(line);
       if (parsed.is_object() && parsed.contains("event")) {
-        if (event_handler_) {
-          event_handler_(parse_core_rpc_event_line(line));
+        CoreRpcEventHandler handler;
+        {
+          std::lock_guard<std::mutex> lock(event_mutex_);
+          handler = event_handler_;
+        }
+        if (handler) {
+          handler(parse_core_rpc_event_line(line));
         }
         continue;
       }
@@ -133,6 +176,108 @@ void CoreRpcClient::pump_events() {
     } catch (const nlohmann::json::exception &) {
       buffered_response_lines_.push_back(line);
     }
+  }
+}
+
+void CoreRpcClient::shutdown() {
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    if (shutting_down_) {
+      return;
+    }
+    shutting_down_ = true;
+  }
+
+  CoreRpcResponse response;
+  response.ok = false;
+  response.code = "transport_closed";
+  response.message = "Core RPC transport is closed";
+  resolve_all_pending(response);
+
+  if (reader_thread_.joinable()) {
+    reader_thread_.join();
+  }
+}
+
+void CoreRpcClient::ensure_reader_started() {
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  if (reader_started_ || shutting_down_) {
+    return;
+  }
+  reader_started_ = true;
+  reader_thread_ = std::thread([this] { reader_loop(); });
+}
+
+void CoreRpcClient::reader_loop() {
+  for (;;) {
+    std::string response_line;
+    {
+      std::lock_guard<std::mutex> read_lock(read_mutex_);
+      if (!buffered_response_lines_.empty()) {
+        response_line = buffered_response_lines_.front();
+        buffered_response_lines_.pop_front();
+      } else if (!transport_.read_line(response_line)) {
+        CoreRpcResponse response;
+        response.ok = false;
+        response.code = "transport_closed";
+        response.message = "Core RPC transport is closed";
+        resolve_all_pending(response);
+        return;
+      }
+    }
+
+    try {
+      const auto parsed = nlohmann::json::parse(response_line);
+      if (parsed.is_object() && parsed.contains("event")) {
+        CoreRpcEventHandler handler;
+        {
+          std::lock_guard<std::mutex> lock(event_mutex_);
+          handler = event_handler_;
+        }
+        if (handler) {
+          handler(parse_core_rpc_event_line(response_line));
+        }
+        continue;
+      }
+      resolve_pending(parse_core_rpc_line(response_line));
+    } catch (const nlohmann::json::exception &error) {
+      CoreRpcResponse response;
+      response.ok = false;
+      response.code = "protocol_error";
+      response.message = error.what();
+      resolve_all_pending(response);
+      return;
+    }
+  }
+}
+
+void CoreRpcClient::resolve_pending(CoreRpcResponse response) {
+  std::shared_ptr<std::promise<CoreRpcResponse>> promise;
+  const std::string key = response_key(response);
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto it = pending_.find(key);
+    if (it == pending_.end()) {
+      unmatched_responses_[key] = std::move(response);
+      return;
+    }
+    promise = std::move(it->second);
+    pending_.erase(it);
+  }
+  promise->set_value(std::move(response));
+}
+
+void CoreRpcClient::resolve_all_pending(CoreRpcResponse response) {
+  std::map<std::string, std::shared_ptr<std::promise<CoreRpcResponse>>> pending;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    pending.swap(pending_);
+  }
+  for (auto &entry : pending) {
+    CoreRpcResponse copy = response;
+    copy.request_id = entry.first;
+    copy.id = request_id_to_int(entry.first);
+    entry.second->set_value(std::move(copy));
   }
 }
 

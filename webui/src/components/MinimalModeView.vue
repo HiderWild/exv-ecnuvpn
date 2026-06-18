@@ -15,7 +15,7 @@ const password = ref('')
 const rememberPassword = ref(false)
 const installServiceBeforeConnect = ref(true)
 
-const busy = computed(() => vpn.loading || vpn.serviceBusy || vpn.connectInFlight || vpn.disconnectInFlight)
+const busy = computed(() => vpn.loading || vpn.serviceBusy || vpn.disconnectInFlight)
 const connected = computed(() => Boolean(vpn.status?.connected))
 const connecting = computed(() => vpn.connectInFlight)
 const connectedLayout = computed(() => connected.value && !vpn.disconnectInFlight)
@@ -30,7 +30,7 @@ const statusText = computed(() => {
 })
 
 const powerClass = computed(() => {
-  if (busy.value) return 'bg-warning text-white shadow-warning/20'
+  if (connecting.value || busy.value) return 'bg-warning text-white shadow-warning/20'
   if (connected.value) return 'bg-accent text-white shadow-accent/20'
   return 'bg-destructive text-white shadow-destructive/20'
 })
@@ -119,6 +119,10 @@ async function saveAuthForConnect() {
 }
 
 async function handlePowerClick() {
+  if (connecting.value) {
+    await vpn.cancelConnect()
+    return
+  }
   if (busy.value) return
   if (connected.value) {
     if (vpn.currentSessionMode === 'helper') {
