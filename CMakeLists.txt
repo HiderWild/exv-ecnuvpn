@@ -680,18 +680,33 @@ target_include_directories(native_session_state_test PRIVATE
 
 add_test(NAME native_session_state_test COMMAND native_session_state_test)
 
-# Disabled: references deleted native_session_store.hpp
-# add_executable(native_helper_session_test
-#     tests/native_helper_session_test.cpp
-#     src/vpn_engine/session_state.cpp
-# )
-#
-# target_include_directories(native_helper_session_test PRIVATE
-#     ${CMAKE_SOURCE_DIR}/include
-#     ${CMAKE_SOURCE_DIR}/src
-# )
-#
-# add_test(NAME native_helper_session_test COMMAND native_helper_session_test)
+add_executable(native_helper_session_test
+    tests/native_helper_session_test.cpp
+    tests/support/fake_helper.cpp
+    src/helper/common/helper_messages.cpp
+    src/helper/runtime/session_lease_manager.cpp
+    src/helper/runtime/cleanup_registry.cpp
+    src/helper/runtime/command_validator.cpp
+    src/helper/runtime/helper_lifecycle_policy.cpp
+    src/helper/runtime/helper_request_dispatcher.cpp
+    src/helper/runtime/privileged_task_queue.cpp
+    src/helper/helper_handler.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
+)
+
+target_include_directories(native_helper_session_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+target_compile_definitions(native_helper_session_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(native_helper_session_test PRIVATE exv-helper-runtime Threads::Threads)
+
+add_test(NAME native_helper_session_test COMMAND native_helper_session_test)
 
 add_executable(native_engine_contract_test
     tests/native_engine_contract_test.cpp
@@ -2392,7 +2407,7 @@ set(_release_blocking_tests
     runtime_status_native_test
     backend_resolver_test
     native_session_state_test
-    # native_helper_session_test  # Disabled: references deleted native_session_store.hpp
+    native_helper_session_test
     native_engine_contract_test
     native_event_sink_test
     proxy_tun_detector_test
@@ -2427,6 +2442,7 @@ set(_release_blocking_tests
     core_lifecycle_registry_test
     core_resolver_test
     helper_cleanup_registry_test
+    native_helper_session_test
     helper_contract_test
     helper_module_smoke_test
     config_module_smoke_test
@@ -2552,6 +2568,7 @@ set_property(TEST
     core_lifecycle_registry_test
     core_resolver_test
     helper_cleanup_registry_test
+    native_helper_session_test
     helper_contract_test
     helper_module_smoke_test
     config_module_smoke_test
@@ -2620,6 +2637,7 @@ set_property(TEST
 set_property(TEST
     helper_lease_manager_test
     helper_cleanup_registry_test
+    native_helper_session_test
     helper_contract_test
     helper_module_smoke_test
     helper_network_ops_adapter_test
