@@ -1,4 +1,5 @@
 #include "vpn_engine/native_engine.hpp"
+#include "vpn_engine/native_handshake_job.hpp"
 #include "vpn_engine/packet_device.hpp"
 #include "vpn_engine/protocol/production_transport.hpp"
 #include "vpn_engine/protocol/session.hpp"
@@ -800,6 +801,75 @@ bool test_native_session_splits_handshake_from_packet_attach() {
   return ok;
 }
 
+bool test_native_session_adopts_prepared_handshake_without_reauth() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies handshake_deps;
+  handshake_deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+
+  ecnuvpn::vpn_engine::NativeHandshakeResult prepared;
+  ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config(), handshake_deps);
+  const auto prepared_result = job.run(std::stop_token{}, &prepared);
+
+  ok = expect(prepared_result.ok, "prepared handshake should succeed") && ok;
+  ok = expect(transport->auth_count == 1,
+              "preparing handshake should authenticate exactly once") &&
+       ok;
+  ok = expect(transport->cstp_count == 1,
+              "preparing handshake should connect CSTP exactly once") &&
+       ok;
+
+  auto device = std::make_shared<PacketDeviceState>();
+  int unexpected_transport_factory_calls = 0;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies attach_deps;
+  attach_deps.transport_factory = [&]() {
+    ++unexpected_transport_factory_calls;
+    return make_fake_transport(transport);
+  };
+  attach_deps.packet_device_factory = [&]() {
+    return make_scripted_device(device);
+  };
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(),
+                                                      attach_deps);
+  ecnuvpn::vpn_engine::TunnelMetadata adopted_metadata;
+  const auto adopted = session.adopt_handshake(std::move(prepared),
+                                               &adopted_metadata);
+
+  ok = expect(adopted.ok, "native session should adopt prepared handshake") &&
+       ok;
+  ok = expect(adopted_metadata.internal_ip4_address == "10.255.0.10",
+              "adopted handshake should expose CSTP metadata") &&
+       ok;
+
+  ecnuvpn::vpn_engine::DeviceConfig device_config;
+  device_config.interface_name = "adopted-wintun0";
+  device_config.mtu = 1300;
+  const auto attached = session.start_packet_loop(device_config);
+
+  ok = expect(attached.ok, "adopted handshake should start packet loop") && ok;
+  ok = expect(unexpected_transport_factory_calls == 0,
+              "adopting handshake must not create a new transport") &&
+       ok;
+  ok = expect(transport->auth_count == 1,
+              "adopting handshake must not authenticate again") &&
+       ok;
+  ok = expect(transport->cstp_count == 1,
+              "adopting handshake must not reconnect CSTP") &&
+       ok;
+  ok = expect(last_open_metadata(device).interface_name == "adopted-wintun0",
+              "packet attach should use serial-tail device config") &&
+       ok;
+
+  session.stop();
+  return ok;
+}
+
 bool test_dtls_config_flag_does_not_block_native_engine() {
   // The native engine v1 is CSTP/TLS-only by design. Historically the engine
   // had a run-time guard that rejected configs with disable_dtls=false.
@@ -1396,6 +1466,7 @@ int main() {
   ok = test_injected_fake_start_runs_packet_loop_and_cleans_up() && ok;
   ok = test_network_configurator_runs_before_packet_open() && ok;
   ok = test_native_session_splits_handshake_from_packet_attach() && ok;
+  ok = test_native_session_adopts_prepared_handshake_without_reauth() && ok;
   ok = test_dtls_config_flag_does_not_block_native_engine() && ok;
   ok = test_dtls_enabled_emits_unavailable_and_continues_cstp() && ok;
   ok = test_auth_failure_maps_error_without_device() && ok;

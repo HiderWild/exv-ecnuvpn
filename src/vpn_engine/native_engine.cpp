@@ -175,6 +175,53 @@ ValidationResult NativeVpnEngineSession::start_handshake(TunnelMetadata *metadat
   return {};
 }
 
+ValidationResult NativeVpnEngineSession::adopt_handshake(
+    NativeHandshakeResult handshake, TunnelMetadata *metadata) {
+  {
+    const std::lock_guard<std::mutex> lock(mu_);
+    if (status_.running || packet_loop_thread_.joinable() || transport_ ||
+        protocol_session_) {
+      return invalid("session_already_running",
+                     "Native VPN engine session is already running.");
+    }
+  }
+
+  if (!handshake.transport || !handshake.session) {
+    ValidationResult failure = invalid(
+        "handshake_incomplete",
+        "Native VPN engine handshake result is missing transport or session.");
+    {
+      const std::lock_guard<std::mutex> lock(mu_);
+      set_failure_locked(failure);
+    }
+    emit_event("native.start.failed", "error", failure.message,
+               {{"code", failure.code}});
+    return failure;
+  }
+
+  {
+    const std::lock_guard<std::mutex> lock(mu_);
+    status_ = VpnEngineStatus{};
+    loop_started_ = false;
+    loop_finished_ = false;
+    loop_start_result_ = ValidationResult{};
+    cancel_requested_.store(false);
+    handshake_metadata_ = handshake.metadata;
+    status_.pid = -1;
+    status_.interface_name = handshake_metadata_.interface_name;
+    status_.internal_ip = handshake_metadata_.internal_ip4_address;
+    status_.error_code.clear();
+    status_.error_message.clear();
+    transport_ = std::move(handshake.transport);
+    protocol_session_ = std::move(handshake.session);
+  }
+
+  if (metadata)
+    *metadata = handshake_metadata_;
+
+  return {};
+}
+
 ValidationResult NativeVpnEngineSession::start_packet_loop(
     DeviceConfig packet_device_config) {
   {

@@ -16,6 +16,8 @@
 namespace ecnuvpn {
 namespace vpn_engine {
 
+struct NativeHandshakeResult;
+
 ValidationResult validate_native_config(const VpnEngineConfig &cfg);
 nlohmann::json event_to_json(const VpnEngineEvent &event);
 nlohmann::json status_to_json(const VpnEngineStatus &status);
@@ -52,6 +54,8 @@ public:
 
   ValidationResult start() override;
   ValidationResult start_handshake(TunnelMetadata *metadata = nullptr);
+  ValidationResult adopt_handshake(NativeHandshakeResult handshake,
+                                   TunnelMetadata *metadata = nullptr);
   ValidationResult start_packet_loop(DeviceConfig packet_device_config);
   void stop() override;
   VpnEngineStatus status() const override;
