@@ -110,6 +110,7 @@ set(EXV_CORE_SOURCES
     src/core/rpc/config_actions.cpp
     src/core/rpc/service_actions.cpp
     src/core/rpc/route_actions.cpp
+    src/core/rpc/log_actions.cpp
     src/core/rpc/maintenance_actions.cpp
     src/core/rpc/core_api_setup.cpp
     src/core/use_cases/config_use_cases.cpp
@@ -185,8 +186,22 @@ set(EXV_CLI_FRONTEND_SOURCES
     src/cli/cli_main.cpp
     src/cli/cli_commands.cpp
     src/cli/core_request_formatter.cpp
+    src/cli/console.cpp
     ${EXV_CLI_TRANSPORT_SOURCES}
+    src/platform/common/core_resolver.cpp
     src/platform/common/core_resolver_platform_deps.cpp
+    src/platform/common/file_system.cpp
+    src/platform/common/lifecycle/core_identity.cpp
+    src/platform/common/lifecycle/core_lock.cpp
+    src/platform/common/lifecycle/core_paths.cpp
+    src/platform/common/lifecycle/core_registry.cpp
+    src/platform/common/process_utils.cpp
+    src/platform/common/runtime_paths.cpp
+    src/runtime/runtime_context.cpp
+    src/observability/log_facade.cpp
+    src/observability/log_queue.cpp
+    src/observability/log_service.cpp
+    src/utils/strings.cpp
 )
 
 set(EXV_PLATFORM_SOURCES)
@@ -227,6 +242,10 @@ if(APPLE)
         src/platform/darwin/darwin_keychain_store.cpp
         src/platform/common/driver_status_stub.cpp
     )
+    list(APPEND EXV_CLI_FRONTEND_SOURCES
+        src/platform/darwin/crypto_backend.cpp
+        src/platform/darwin/path_utils.cpp
+    )
 elseif(UNIX AND NOT APPLE)
     find_package(OpenSSL 1.1.1 REQUIRED)
     list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_LINUX=1)
@@ -248,6 +267,10 @@ elseif(UNIX AND NOT APPLE)
         src/platform/linux/default_engine_deps.cpp
         src/platform/common/service_status_linux.cpp
         src/platform/common/driver_status_stub.cpp
+    )
+    list(APPEND EXV_CLI_FRONTEND_SOURCES
+        src/platform/linux/crypto_backend.cpp
+        src/platform/linux/path_utils.cpp
     )
 elseif(WIN32)
     # AES-256-CBC and CSPRNG come from Windows CNG (bcrypt) so we no longer
@@ -279,6 +302,10 @@ elseif(WIN32)
         src/platform/win32/win_route_ops.cpp
         src/platform/win32/win_credential_store.cpp
         src/platform/win32/windows_strings.cpp
+    )
+    list(APPEND EXV_CLI_FRONTEND_SOURCES
+        src/platform/win32/crypto_backend.cpp
+        src/platform/win32/path_utils.cpp
     )
 else()
     message(FATAL_ERROR "Unsupported platform. Supported: macOS, Linux, Windows.")
@@ -530,9 +557,10 @@ else()
 endif()
 
 add_executable(exv-cli ${EXV_CLI_FRONTEND_SOURCES})
-target_link_libraries(exv-cli PRIVATE exv-core)
+target_link_libraries(exv-cli PRIVATE Threads::Threads ${EXV_PLATFORM_LIBS})
 target_compile_definitions(exv-cli PRIVATE
     ECNUVPN_VERSION="${PROJECT_VERSION}"
+    ${EXV_PLATFORM_DEFINITIONS}
 )
 
 add_executable(exv-helper

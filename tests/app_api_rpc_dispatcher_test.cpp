@@ -4,6 +4,7 @@
 #include "core/rpc/desktop_rpc_adapter.hpp"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -131,7 +132,7 @@ int main() {
                     "error code should be preserved") && ok;
     }
 
-    // --- handler overwrite ---
+    // --- duplicate handler registration is rejected ---
     {
         AppRpcDispatcher dispatcher;
 
@@ -142,18 +143,25 @@ int main() {
             return resp;
         });
 
-        dispatcher.register_handler("vpn.status", [](const RpcRequest&) {
-            RpcResponse resp;
-            resp.success = true;
-            resp.payload_json = R"({"version":2})";
-            return resp;
-        });
+        bool duplicate_rejected = false;
+        try {
+            dispatcher.register_handler("vpn.status", [](const RpcRequest&) {
+                RpcResponse resp;
+                resp.success = true;
+                resp.payload_json = R"({"version":2})";
+                return resp;
+            });
+        } catch (const std::logic_error&) {
+            duplicate_rejected = true;
+        }
 
         RpcRequest req;
         req.action = "vpn.status";
         auto resp = dispatcher.dispatch(req);
-        ok = expect(resp.payload_json.find("version\":2") != std::string::npos,
-                    "overwritten handler should be used") && ok;
+        ok = expect(duplicate_rejected,
+                    "duplicate handler registration should be rejected") && ok;
+        ok = expect(resp.payload_json.find("version\":1") != std::string::npos,
+                    "original handler should remain registered") && ok;
     }
 
     // --- request_id is propagated through handler ---
