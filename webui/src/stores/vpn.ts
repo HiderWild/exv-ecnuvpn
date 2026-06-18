@@ -457,6 +457,7 @@ export const useVpnStore = defineStore('vpn', () => {
   let progressTimer: ReturnType<typeof setInterval> | null = null
   let uptimeTimer: ReturnType<typeof setInterval> | null = null
   let authInteractionPollTimer: ReturnType<typeof setInterval> | null = null
+  let connectStatusPollTimer: ReturnType<typeof setInterval> | null = null
   const ui = useUiStore()
   const config = useConfigStore()
 
@@ -605,6 +606,7 @@ export const useVpnStore = defineStore('vpn', () => {
     if (connectInFlight.value && (nextStatus.connected || nextStatus.process_running === false)) {
       connectInFlight.value = false
       loading.value = false
+      stopConnectStatusPolling()
       stopAuthInteractionPolling()
       stopConnectionProgress()
     }
@@ -932,6 +934,21 @@ export const useVpnStore = defineStore('vpn', () => {
     await Promise.allSettled([fetchStatus(), fetchServiceStatus()])
   }
 
+  function startConnectStatusPolling() {
+    void fetchStatus()
+    if (connectStatusPollTimer) return
+    connectStatusPollTimer = setInterval(() => {
+      void fetchStatus()
+    }, 1000)
+  }
+
+  function stopConnectStatusPolling() {
+    if (connectStatusPollTimer) {
+      clearInterval(connectStatusPollTimer)
+      connectStatusPollTimer = null
+    }
+  }
+
   async function fetchAuthInteraction() {
     try {
       const { data } = await api.get<AuthInteractionPollResponse>('/vpn/auth-interaction')
@@ -1024,6 +1041,7 @@ export const useVpnStore = defineStore('vpn', () => {
       if (isVpnConnectAccepted(data)) {
         acceptedByBackend = true
         connectInFlight.value = true
+        startConnectStatusPolling()
         loading.value = false
         return true
       }
@@ -1037,6 +1055,7 @@ export const useVpnStore = defineStore('vpn', () => {
     } finally {
       if (!acceptedByBackend) {
         connectInFlight.value = false
+        stopConnectStatusPolling()
         stopAuthInteractionPolling()
         stopConnectionProgress()
       }
@@ -1051,6 +1070,7 @@ export const useVpnStore = defineStore('vpn', () => {
     connectInFlight.value = false
     disconnectInFlight.value = false
     loading.value = false
+    stopConnectStatusPolling()
     stopAuthInteractionPolling()
     stopConnectionProgress()
     clearError()
@@ -1075,6 +1095,7 @@ export const useVpnStore = defineStore('vpn', () => {
       connectInFlight.value = false
       disconnectInFlight.value = false
       loading.value = false
+      stopConnectStatusPolling()
       stopAuthInteractionPolling()
       stopConnectionProgress()
     }
