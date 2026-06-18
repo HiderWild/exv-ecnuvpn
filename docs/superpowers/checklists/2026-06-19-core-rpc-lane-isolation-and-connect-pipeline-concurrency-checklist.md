@@ -34,15 +34,17 @@ Verification evidence: `ctest --test-dir build-windows/cpp -R "core_rpc_lane_sch
 
 ## Phase 2: Core Process Front Door
 
-- [ ] Refactor `core_process_main()` so stdin/pipe threads parse and enqueue work instead of running business handlers inline.
-- [ ] Route native and desktop envelopes through the same lane scheduler.
-- [ ] Preserve response envelope shape for desktop RPC.
-- [ ] Preserve response envelope shape for native core RPC.
-- [ ] Remove global all-action desktop dispatch mutex from `core_process.cpp`.
-- [ ] Keep `write_json_line()` as the only stdout writer.
-- [ ] Add deterministic desktop VPN connect blocking hook.
-- [ ] Verify `logs.list` can complete while blocked `vpn.connect` is still pending.
-- [ ] Commit core process lane routing.
+- [x] Refactor `core_process_main()` so stdin/pipe threads parse and enqueue work instead of running business handlers inline.
+- [x] Route native and desktop envelopes through the same lane scheduler.
+- [x] Preserve response envelope shape for desktop RPC.
+- [x] Preserve response envelope shape for native core RPC.
+- [x] Remove global all-action desktop dispatch mutex from `core_process.cpp`.
+- [x] Keep `write_json_line()` as the only stdout writer.
+- [x] Add deterministic desktop VPN connect blocking hook.
+- [x] Verify `logs.list` can complete while blocked `vpn.connect` is still pending.
+- [x] Commit core process lane routing.
+
+Verification evidence: after stopping the stale local `exv.exe` that owned `\\.\pipe\exv-core-ipc-v1`, `ctest --test-dir build-windows/cpp -R "core_process_lifecycle_test|core_rpc_lane_scheduler_test|app_api_rpc_dispatcher_test" --output-on-failure` passed. Commits: `a4b4790` for the deterministic hook and `9bdc571` for scheduler routing.
 
 ## Phase 3: Host And Client Async Bridge
 
