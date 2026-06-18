@@ -9,9 +9,11 @@
 #include "helper/common/helper_client.hpp"
 #include "platform/common/helper_delegating_network_ops.hpp"
 #include "platform/common/platform_network_ops.hpp"
+#include "vpn_engine/native_handshake_job.hpp"
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +31,11 @@ as_helper_delegating_ops(
     const std::shared_ptr<exv::platform::PlatformNetworkOps> &ops);
 
 struct TunnelController::Impl {
+  struct PreparedNativeHandshake {
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+    ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
+  };
+
   Impl() = default;
   explicit Impl(CoreSessionRunner::NativeDependenciesFactory deps_factory)
       : runner_(std::move(deps_factory)) {}
@@ -133,6 +140,7 @@ struct TunnelController::Impl {
 
   ecnuvpn::Config vpn_cfg_;
   std::string vpn_password_;
+  std::optional<PreparedNativeHandshake> prepared_native_handshake_;
 };
 
 } // namespace exv::core

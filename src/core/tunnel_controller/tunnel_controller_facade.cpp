@@ -42,6 +42,15 @@ void TunnelController::set_vpn_config(const ecnuvpn::Config& cfg,
                                       const std::string& plaintext_password) {
     impl_->vpn_cfg_      = cfg;
     impl_->vpn_password_ = plaintext_password;
+    impl_->prepared_native_handshake_.reset();
+}
+
+void TunnelController::set_prepared_native_handshake(
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_config,
+    ecnuvpn::vpn_engine::NativeHandshakeResult handshake) {
+    impl_->prepared_native_handshake_ =
+        Impl::PreparedNativeHandshake{std::move(engine_config),
+                                      std::move(handshake)};
 }
 
 // ------------------------------------------------------------------
