@@ -1,4 +1,5 @@
 #include "vpn_engine/protocol/production_transport.hpp"
+#include "vpn_engine/protocol/dtls_transport.hpp"
 
 #include <cstdint>
 #include <deque>
@@ -117,15 +118,78 @@ ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
       "https://vpn.example.invalid", &out.server);
   (void)parsed;
   out.username = "student";
-  out.password = "password";
+  out.password = "MOCK_PASSWORD";
   out.disable_dtls = false;
   return out;
+}
+
+bool test_dtls_state_classification() {
+  using ecnuvpn::vpn_engine::protocol::DtlsNegotiationInput;
+  using ecnuvpn::vpn_engine::protocol::DtlsTransportState;
+  using ecnuvpn::vpn_engine::protocol::classify_dtls_negotiation;
+  using ecnuvpn::vpn_engine::protocol::dtls_transport_state_to_string;
+
+  bool ok = true;
+
+  DtlsNegotiationInput disabled;
+  disabled.disabled_by_config = true;
+  auto disabled_status = classify_dtls_negotiation(disabled);
+  ok = expect(disabled_status.state == DtlsTransportState::disabled,
+              "disabled config should classify DTLS as disabled") &&
+       ok;
+  ok = expect(std::string(dtls_transport_state_to_string(
+                  disabled_status.state)) == "disabled",
+              "disabled state should have stable public string") &&
+       ok;
+
+  DtlsNegotiationInput connected;
+  connected.disabled_by_config = false;
+  connected.gateway_advertised = true;
+  connected.backend_available = true;
+  connected.handshake_succeeded = true;
+  auto connected_status = classify_dtls_negotiation(connected);
+  ok = expect(connected_status.state ==
+                  DtlsTransportState::attempted_and_connected,
+              "successful backend handshake should classify as connected") &&
+       ok;
+
+  DtlsNegotiationInput fallback;
+  fallback.disabled_by_config = false;
+  fallback.gateway_advertised = true;
+  fallback.backend_available = false;
+  fallback.tls_fallback_allowed = true;
+  auto fallback_status = classify_dtls_negotiation(fallback);
+  ok = expect(fallback_status.state ==
+                  DtlsTransportState::attempted_and_fell_back_to_tls,
+              "missing backend with fallback should report TLS fallback") &&
+       ok;
+  ok = expect(fallback_status.cstp_tls_active,
+              "fallback state should keep CSTP/TLS active") &&
+       ok;
+
+  DtlsNegotiationInput failed;
+  failed.disabled_by_config = false;
+  failed.gateway_advertised = true;
+  failed.backend_available = true;
+  failed.handshake_succeeded = false;
+  failed.tls_fallback_allowed = false;
+  auto failed_status = classify_dtls_negotiation(failed);
+  ok = expect(failed_status.state ==
+                  DtlsTransportState::attempted_and_failed_without_tls_fallback,
+              "failed handshake without fallback should be explicit") &&
+       ok;
+  ok = expect(!failed_status.cstp_tls_active,
+              "no-fallback failed state should not claim CSTP/TLS is active") &&
+       ok;
+
+  return ok;
 }
 
 } // namespace
 
 int main() {
   bool ok = true;
+  ok = test_dtls_state_classification() && ok;
 
   MockTlsStream stream;
   stream.push_read_text(aggregate_init_ok());
@@ -140,6 +204,12 @@ int main() {
   auto connected = transport.connect_cstp(auth.cookie, &metadata);
   ok = expect(connected.ok,
               "CSTP should remain connected when DTLS metadata is advertised") &&
+       ok;
+  ok = expect(metadata.dtls_state == "attempted_and_fell_back_to_tls",
+              "advertised DTLS should report explicit CSTP/TLS fallback") &&
+       ok;
+  ok = expect(!metadata.dtls_fallback_reason.empty(),
+              "DTLS fallback should include public reason") &&
        ok;
 
   const std::string connect_request = as_text(stream.writes().back());

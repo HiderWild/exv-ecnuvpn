@@ -215,26 +215,31 @@ fi
 
 section "6. Native-only runtime artifact policy"
 
-LEGACY_RUNTIME_ARTIFACTS=(
-  "$BUILD_DIR/openconnect"
-  "$BUILD_DIR/openconnect.exe"
-  "$BUILD_DIR/libopenconnect.dylib"
-  "$BUILD_DIR/vpnc-script"
-  "$REPO_ROOT/runtime/darwin-x64/openconnect"
-  "$REPO_ROOT/runtime/darwin-x64/libopenconnect.dylib"
-  "$REPO_ROOT/runtime/darwin-x64/vpnc-script"
+DENIED_RUNTIME_PATTERNS=(
+  '*connect'
+  '*connect.exe'
+  'lib*connect*.dylib'
+  '*vpn*-script'
 )
 
-LEGACY_RUNTIME_FOUND=""
-for artifact_path in "${LEGACY_RUNTIME_ARTIFACTS[@]}"; do
-  if [[ -e "$artifact_path" ]]; then
-    LEGACY_RUNTIME_FOUND="$artifact_path"
-    break
-  fi
+DENIED_RUNTIME_FOUND=""
+for search_root in "$BUILD_DIR" "$REPO_ROOT/runtime/darwin-x64" "$PACKAGE_ROOT"; do
+  [[ -e "$search_root" ]] || continue
+  for pattern in "${DENIED_RUNTIME_PATTERNS[@]}"; do
+    if [[ "$search_root" == "$BUILD_DIR" || "$search_root" == "$REPO_ROOT/runtime/darwin-x64" ]]; then
+      found_path=$(find "$search_root" -maxdepth 1 -name "$pattern" -print -quit)
+    else
+      found_path=$(find "$search_root" -name "$pattern" -print -quit)
+    fi
+    if [[ -n "$found_path" ]]; then
+      DENIED_RUNTIME_FOUND="$found_path"
+      break 2
+    fi
+  done
 done
 
-if [[ -n "$LEGACY_RUNTIME_FOUND" ]]; then
-  fail "native-only package must not include legacy runtime artifacts" "$LEGACY_RUNTIME_FOUND"
+if [[ -n "$DENIED_RUNTIME_FOUND" ]]; then
+  fail "native-only package must not include legacy runtime artifacts" "$DENIED_RUNTIME_FOUND"
 else
   pass "native-only package contains no legacy runtime artifacts"
 fi

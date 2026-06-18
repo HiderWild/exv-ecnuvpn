@@ -682,8 +682,10 @@ bool test_native_network_config_preserves_routes_and_bypass() {
 
     bool ok = true;
     ctrl.connect(make_intent(true));
-    ok = expect(any_has_phase(ui.received_snapshots(),
-                              exv::core::TunnelPhase::Connected),
+    ok = expect(wait_until([&]() {
+                    return any_has_phase(ui.received_snapshots(),
+                                         exv::core::TunnelPhase::Connected);
+                }),
                 "2e: route preservation path should reach Connected") && ok;
 
     auto configs = net_ops->applied_configs();

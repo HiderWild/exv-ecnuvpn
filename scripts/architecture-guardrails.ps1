@@ -253,6 +253,15 @@ Check-Pattern -Description "Checking app_api for protocol includes" `
     -RuleName "protocol_include_in_non_protocol"
 
 # ---------------------------------------------------------------------------
+# Rule 9: Native-only cutover paths must not retain removed OpenConnect tokens
+#           Allowlisted entries are policy tests that own denied-token fixtures.
+# ---------------------------------------------------------------------------
+Check-Pattern -Description "Checking native-only paths for legacy OpenConnect tokens" `
+    -Paths "src", "tests", "scripts", "webui/src", "CMakeLists.txt" `
+    -Pattern "__vpn-supervisor|legacy_openconnect|openconnect_process|spawn_openconnect_process|openconnect_tunnel_script|openconnect_log|configure_from_openconnect_log|openconnect_runtime|openconnectBinary|openconnectPath|openconnectArgs|legacyTunnelScript|legacyAdapter|stage-openconnect-runtime" `
+    -RuleName "legacy_openconnect_token"
+
+# ---------------------------------------------------------------------------
 # Allowlist summary
 # ---------------------------------------------------------------------------
 Write-Host ""

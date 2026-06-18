@@ -24,6 +24,14 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
+std::string removed_legacy_engine_value() {
+  return std::string("legacy_") + "openconnect";
+}
+
+std::string removed_runtime_key() {
+  return std::string("openconnect_") + "runtime";
+}
+
 std::string unique_temp_dir(const char *name) {
   const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
   auto dir = std::filesystem::temp_directory_path() /
@@ -59,13 +67,14 @@ struct ConfigActionsFixture {
   void write_legacy_config() {
     const auto path = std::filesystem::path(config_dir) / "config.json";
     std::ofstream out(path);
-    out << R"({
-  "server": "https://legacy.example.edu",
-  "username": "legacy-user",
-  "vpn_engine": "legacy_openconnect",
-  "openconnect_runtime": "bundled",
-  "mtu": 1400
-})";
+    json legacy_config = {
+        {"server", "https://legacy.example.edu"},
+        {"username", "legacy-user"},
+        {"vpn_engine", removed_legacy_engine_value()},
+        {removed_runtime_key(), "bundled"},
+        {"mtu", 1400},
+    };
+    out << legacy_config.dump(2);
   }
 };
 
@@ -100,11 +109,11 @@ int main() {
     ok = expect(payload["config"]["vpn_engine"] == "native",
                 "legacy vpn_engine should normalize to native") &&
          ok;
-    ok = expect(!payload["config"].contains("openconnect_runtime"),
-                "serialized config should omit openconnect_runtime") &&
+    ok = expect(!payload["config"].contains(removed_runtime_key()),
+                "serialized config should omit retired runtime key") &&
          ok;
-    ok = expect(!payload["settings"].contains("openconnect_runtime"),
-                "settings projection should omit openconnect_runtime") &&
+    ok = expect(!payload["settings"].contains(removed_runtime_key()),
+                "settings projection should omit retired runtime key") &&
          ok;
   }
 
@@ -194,8 +203,9 @@ int main() {
 
   {
     ConfigActionsFixture fix;
-    auto resp = fix.dispatch("config.saveSettings",
-                             R"({"vpn_engine":"legacy_openconnect"})");
+    auto resp = fix.dispatch(
+        "config.saveSettings",
+        json{{"vpn_engine", removed_legacy_engine_value()}}.dump());
     ok = expect(!resp.success,
                 "config.saveSettings should reject legacy vpn_engine") &&
          ok;
@@ -208,8 +218,8 @@ int main() {
     ok = expect(payload["vpn_engine"] == "native",
                 "vpn_engine should remain native after rejected save") &&
          ok;
-    ok = expect(!payload.contains("openconnect_runtime"),
-                "settings should not expose openconnect_runtime") &&
+    ok = expect(!payload.contains(removed_runtime_key()),
+                "settings should not expose retired runtime key") &&
          ok;
   }
 

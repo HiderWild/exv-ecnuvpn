@@ -27,6 +27,7 @@ load_allowlist() {
     local current_file=""
     local current_rule=""
     while IFS= read -r line; do
+        line="${line%$'\r'}"
         if echo "$line" | grep -qE '^\s+- file:'; then
             current_file=$(echo "$line" | sed 's/.*file:\s*//' | xargs)
         elif echo "$line" | grep -qE '^\s+rule:'; then
@@ -234,6 +235,34 @@ if [ $appapi_found -eq 1 ]; then
     FAILURES=$((FAILURES + 1))
 elif [ $appapi_allowlisted -gt 0 ]; then
     echo "PASS (allowlisted: $appapi_allowlisted hits)"
+else
+    echo "PASS"
+fi
+
+# ---------------------------------------------------------------------------
+# Rule 9: Native-only cutover paths must not retain removed OpenConnect tokens
+#           Allowlisted entries are policy tests that own denied-token fixtures.
+# ---------------------------------------------------------------------------
+echo -n "Checking native-only paths for legacy OpenConnect tokens... "
+native_legacy_found=0
+native_legacy_allowlisted=0
+native_legacy_pattern="__vpn-supervisor|legacy_openconnect|openconnect_process|spawn_openconnect_process|openconnect_tunnel_script|openconnect_log|configure_from_openconnect_log|openconnect_runtime|openconnectBinary|openconnectPath|openconnectArgs|legacyTunnelScript|legacyAdapter|stage-openconnect-runtime"
+while IFS= read -r match; do
+    [ -z "$match" ] && continue
+    file_path=$(echo "$match" | cut -d: -f1)
+    if is_allowlisted "$file_path" "legacy_openconnect_token"; then
+        native_legacy_allowlisted=$((native_legacy_allowlisted + 1))
+    else
+        echo ""
+        echo "  $match"
+        native_legacy_found=1
+    fi
+done < <(grep -RInE "$native_legacy_pattern" src tests scripts webui/src CMakeLists.txt 2>/dev/null || true)
+if [ $native_legacy_found -eq 1 ]; then
+    echo "FAIL"
+    FAILURES=$((FAILURES + 1))
+elif [ $native_legacy_allowlisted -gt 0 ]; then
+    echo "PASS (allowlisted: $native_legacy_allowlisted hits)"
 else
     echo "PASS"
 fi

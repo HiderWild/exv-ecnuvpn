@@ -70,3 +70,33 @@ allowlist:
     owner: platform-team
     reason: "Default Darwin engine dependency wiring constructs ProductionTransport with platform packet and TLS implementations."
     removal_phase: "Phase 9 -- introduce a platform-neutral production transport factory seam"
+
+  - file: src/core/vpn/vpn_runtime.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Legacy runtime status snapshot still shells out to platform-specific interface probes until runtime status is fully owned by platform status providers."
+    removal_phase: "Phase 9 -- move interface probing into platform status providers"
+
+  - file: tests/native_packaging_policy_test.cpp
+    rule: legacy_openconnect_token
+    owner: native-engine-team
+    reason: "Policy scanner test intentionally contains denied legacy runtime token fixtures to prove production package scans catch them."
+    removal_phase: "After the policy scanner reads denied token fixtures from external test data instead of inline source text"
+
+  - file: tests/native_only_cutover_contract_test.cpp
+    rule: legacy_openconnect_token
+    owner: native-engine-team
+    reason: "Native-only contract test owns the denied token list and is the only active test source allowed to spell those removed identifiers."
+    removal_phase: "After denied native-only tokens move into external test fixture data"
+
+  - file: scripts/architecture-guardrails.ps1
+    rule: legacy_openconnect_token
+    owner: architecture-team
+    reason: "PowerShell guardrail script owns the denied native-only token regex used to block removed identifiers elsewhere."
+    removal_phase: "After guardrail rules move into external data files"
+
+  - file: scripts/architecture-guardrails.sh
+    rule: legacy_openconnect_token
+    owner: architecture-team
+    reason: "POSIX guardrail script owns the denied native-only token regex used to block removed identifiers elsewhere."
+    removal_phase: "After guardrail rules move into external data files"

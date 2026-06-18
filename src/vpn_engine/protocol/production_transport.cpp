@@ -2,6 +2,7 @@
 
 #include "vpn_engine/protocol/aggregate_auth.hpp"
 #include "vpn_engine/protocol/cstp.hpp"
+#include "vpn_engine/protocol/dtls_transport.hpp"
 #include "vpn_engine/protocol/http.hpp"
 
 #include <cctype>
@@ -207,6 +208,12 @@ std::string make_cstp_connect_request(const ParsedVpnUrl &server,
   out << "\r\n";
   return out.str();
 }
+
+bool response_advertises_dtls(const HttpResponse &response) {
+  return response.header_ci("X-DTLS-Session-ID") ||
+         response.header_ci("X-DTLS12-CipherSuite") ||
+         response.header_ci("X-DTLS-CipherSuite");
+}
 // End inlined from vpn_engine/protocol/production_transport_requests include-unit
 // Begin inlined from vpn_engine/protocol/production_transport_response_parse include-unit
 bool find_header_terminator(const std::vector<std::uint8_t> &bytes,
@@ -289,6 +296,7 @@ AuthResult ProductionProtocolTransport::authenticate(
   useragent_ = options.useragent;
   current_password_ = options.password;
   current_password_form_encoded_ = form_url_encode(options.password);
+  dtls_disabled_ = options.disable_dtls;
   cookies_.clear();
   read_buffer_.clear();
   cstp_connected_ = false;
@@ -488,6 +496,16 @@ ProductionProtocolTransport::connect_cstp(const std::string &cookie,
                             current_password_form_encoded_, cookies_.header(),
                             effective_cookie);
   }
+
+  DtlsNegotiationInput dtls;
+  dtls.disabled_by_config = dtls_disabled_;
+  dtls.gateway_advertised = response_advertises_dtls(response);
+  dtls.backend_available = false;
+  dtls.handshake_succeeded = false;
+  dtls.tls_fallback_allowed = true;
+  DtlsNegotiationStatus dtls_status = classify_dtls_negotiation(dtls);
+  metadata->dtls_state = dtls_transport_state_to_string(dtls_status.state);
+  metadata->dtls_fallback_reason = dtls_status.reason;
 
   cstp_connected_ = true;
   return {};

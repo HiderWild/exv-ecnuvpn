@@ -51,6 +51,7 @@ set(EXV_PROTOCOL_SOURCES
     src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/session.cpp
@@ -692,6 +693,7 @@ add_executable(native_engine_contract_test
     src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/session.cpp
@@ -751,6 +753,7 @@ add_executable(native_event_sink_test
     src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/session.cpp
@@ -1243,6 +1246,7 @@ add_executable(native_production_transport_test
     src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/production_transport.cpp
 )
 
@@ -1260,6 +1264,7 @@ add_executable(native_dtls_transport_test
     src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/url.cpp
 )

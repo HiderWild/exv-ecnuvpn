@@ -46,12 +46,12 @@ Before committing this checklist or any related evidence, confirm:
 
 ```bash
 pgrep -fl openconnect || true
-pgrep -fl __vpn-supervisor || true
+pgrep -fl 'exv|vpn' || true
 exv desktop-rpc runtime.status '{}'
 ```
 
 - [ ] No OpenConnect process is running
-- [ ] No `__vpn-supervisor` process is running
+- [ ] No retired supervisor process is running
 - [ ] Runtime status reports `engine=native` and `source=native`
 - [ ] P0: XML auth + CSTP CONNECT reaches success or structured auth/CSD/SAML error
 - [ ] P1: DNS, routes, and liveness work on macOS

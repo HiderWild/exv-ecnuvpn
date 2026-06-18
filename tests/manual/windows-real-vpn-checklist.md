@@ -91,14 +91,14 @@ ipconfig /all > "before-test-dns.txt"
 
 ```powershell
 Get-Process openconnect -ErrorAction SilentlyContinue
-Get-Process __vpn-supervisor -ErrorAction SilentlyContinue
+Get-Process | Where-Object { $_.ProcessName -match 'exv|vpn' }
 .\exv.exe desktop-rpc runtime.status '{}'
 ```
 
-**Expected:** No OpenConnect or `__vpn-supervisor` process. Runtime status reports `engine=native` and `source=native`.
+**Expected:** No retired supervisor process. Runtime status reports `engine=native` and `source=native`.
 
 - [ ] No OpenConnect process running
-- [ ] No `__vpn-supervisor` process running
+- [ ] No retired supervisor process running
 - [ ] Runtime status is native-only
 
 **1f. Native-only phase gates to record during this run:**

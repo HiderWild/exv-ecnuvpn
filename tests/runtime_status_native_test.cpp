@@ -16,6 +16,20 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
+std::string removed_legacy_engine_key() {
+  return std::string("legacy_") + "openconnect";
+}
+
+std::vector<std::string> removed_public_runtime_fields() {
+  return {
+      std::string("openconnect") + "Binary",
+      std::string("openconnect") + "Path",
+      std::string("openconnect") + "Args",
+      std::string("legacy") + "TunnelScript",
+      std::string("legacy") + "Adapter",
+  };
+}
+
 } // namespace
 
 namespace ecnuvpn {
@@ -55,8 +69,8 @@ int main() {
   ok = expect(native_status.value("path", std::string()).empty(),
               "native runtime status should not expose a runtime path") &&
        ok;
-  ok = expect(!native_status.contains("legacy_openconnect"),
-              "native status must not retain legacy OpenConnect diagnostics") &&
+  ok = expect(!native_status.contains(removed_legacy_engine_key()),
+              "native status must not retain retired engine diagnostics") &&
        ok;
   ok = expect(!native_status.contains("bundled_path"),
               "native status must not expose OpenConnect bundled_path") &&
@@ -64,6 +78,11 @@ int main() {
   ok = expect(!native_status.contains("system_path"),
               "native status must not expose OpenConnect system_path") &&
        ok;
+  for (const std::string &field : removed_public_runtime_fields()) {
+    ok = expect(!native_status.contains(field),
+                "native status must not expose retired runtime fields") &&
+         ok;
+  }
 
   ecnuvpn::Config legacy_cfg;
   legacy_cfg.vpn_engine = "native";

@@ -188,6 +188,94 @@ AggregateAuthResult error(std::string code, std::string message) {
   return result;
 }
 
+std::string attribute_value(std::string_view tag, std::string_view name) {
+  std::size_t pos = 0;
+  while ((pos = find_ci(tag, name, pos)) != std::string_view::npos) {
+    const bool left_ok =
+        pos == 0 || is_ascii_space(static_cast<unsigned char>(tag[pos - 1]));
+    const std::size_t after_name = pos + name.size();
+    if (!left_ok || after_name >= tag.size()) {
+      pos = after_name;
+      continue;
+    }
+
+    std::size_t cursor = after_name;
+    while (cursor < tag.size() &&
+           is_ascii_space(static_cast<unsigned char>(tag[cursor]))) {
+      ++cursor;
+    }
+    if (cursor >= tag.size() || tag[cursor] != '=') {
+      pos = after_name;
+      continue;
+    }
+    ++cursor;
+    while (cursor < tag.size() &&
+           is_ascii_space(static_cast<unsigned char>(tag[cursor]))) {
+      ++cursor;
+    }
+    if (cursor >= tag.size() || (tag[cursor] != '"' && tag[cursor] != '\'')) {
+      pos = after_name;
+      continue;
+    }
+
+    const char quote = tag[cursor++];
+    const std::size_t value_end = tag.find(quote, cursor);
+    if (value_end == std::string_view::npos)
+      return {};
+    return xml_unescape(std::string(tag.substr(cursor, value_end - cursor)));
+  }
+  return {};
+}
+
+struct AuthInput {
+  std::string name;
+  std::string type;
+  std::string label;
+};
+
+std::vector<AuthInput> input_fields(std::string_view body) {
+  std::vector<AuthInput> fields;
+  std::size_t pos = 0;
+  while ((pos = find_ci(body, "<input", pos)) != std::string_view::npos) {
+    const std::size_t tag_end = body.find('>', pos);
+    if (tag_end == std::string_view::npos)
+      break;
+
+    const std::string_view tag = body.substr(pos, tag_end - pos);
+    AuthInput field;
+    field.name = attribute_value(tag, "name");
+    field.type = attribute_value(tag, "type");
+    field.label = attribute_value(tag, "label");
+    if (field.type.empty())
+      field.type = "text";
+    if (!field.name.empty())
+      fields.push_back(std::move(field));
+    pos = tag_end + 1;
+  }
+  return fields;
+}
+
+bool is_challenge_input(const AuthInput &field) {
+  const std::string name = to_ascii_lower(field.name);
+  return name != "username" && name != "group";
+}
+
+AggregateAuthResult challenge_from_inputs(const std::vector<AuthInput> &fields) {
+  for (const AuthInput &field : fields) {
+    if (!is_challenge_input(field))
+      continue;
+
+    auto result = error("auth_challenge_required",
+                        "authentication challenge response is required");
+    result.prompt.kind = "challenge";
+    result.prompt.label =
+        field.label.empty() ? "Authentication challenge" : field.label;
+    result.prompt.input_type = field.type.empty() ? "text" : field.type;
+    return result;
+  }
+  return {};
+}
+
 } // namespace
 
 std::string make_aggregate_auth_init_xml() {
@@ -235,7 +323,9 @@ AggregateAuthResult parse_aggregate_auth_response(const HttpResponse &response) 
   const std::string body_lower = to_ascii_lower(response.body);
   if (body_lower.find("saml") != std::string::npos ||
       body_lower.find("sso") != std::string::npos) {
-    return error("unsupported_auth_flow", "unsupported authentication flow");
+    return error("saml_required_unsupported",
+                 "SAML authentication is required but browser-based SSO is "
+                 "not supported by the native engine");
   }
 
   if (body_lower.find("host-scan") != std::string::npos ||
@@ -253,17 +343,6 @@ AggregateAuthResult parse_aggregate_auth_response(const HttpResponse &response) 
     return result;
   }
 
-  if (body_lower.find("secondary_password") != std::string::npos ||
-      body_lower.find("tokencode") != std::string::npos ||
-      body_lower.find("challenge") != std::string::npos) {
-    auto result = error("auth_challenge_required",
-                        "authentication challenge response is required");
-    result.prompt.kind = "challenge";
-    result.prompt.label = "Authentication challenge";
-    result.prompt.input_type = "password";
-    return result;
-  }
-
   if (body_lower.find("group_list") != std::string::npos ||
       body_lower.find("name=\"group\"") != std::string::npos ||
       body_lower.find("name='group'") != std::string::npos) {
@@ -272,6 +351,22 @@ AggregateAuthResult parse_aggregate_auth_response(const HttpResponse &response) 
     result.prompt.label = "VPN group";
     result.prompt.input_type = "select";
     result.prompt.options = option_values(response.body);
+    return result;
+  }
+
+  const std::vector<AuthInput> inputs = input_fields(response.body);
+  AggregateAuthResult input_challenge = challenge_from_inputs(inputs);
+  if (!input_challenge.error_code.empty())
+    return input_challenge;
+
+  if (body_lower.find("secondary_password") != std::string::npos ||
+      body_lower.find("tokencode") != std::string::npos ||
+      body_lower.find("challenge") != std::string::npos) {
+    auto result = error("auth_challenge_required",
+                        "authentication challenge response is required");
+    result.prompt.kind = "challenge";
+    result.prompt.label = "Authentication challenge";
+    result.prompt.input_type = "password";
     return result;
   }
 

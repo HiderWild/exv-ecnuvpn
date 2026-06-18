@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 namespace exv::core {
 
 enum class TunnelEventType {
@@ -23,7 +25,9 @@ enum class TunnelEventType {
 
 struct TunnelEvent {
     TunnelEventType type;
-    // Payload will be added in Phase 2
+    std::string code;
+    std::string message;
+    bool recoverable = false;
 };
 
 } // namespace exv::core

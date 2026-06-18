@@ -113,6 +113,77 @@ int main() {
          ok;
   }
 
+  {
+    const std::string xml =
+        ecnuvpn::vpn_engine::protocol::make_aggregate_auth_reply_xml(
+            "student", "primary", "staff", "654321");
+    ok = expect(xml.find("<group>staff</group>") != std::string::npos,
+                "follow-up auth reply should preserve selected group") &&
+         ok;
+    ok = expect(xml.find("<secondary_password>654321</secondary_password>") !=
+                    std::string::npos,
+                "follow-up auth reply should include challenge response") &&
+         ok;
+  }
+
+  {
+    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
+        response(200,
+                 "<config-auth><auth>"
+                 "<input name=\"secondary_password\" type=\"password\" "
+                 "label=\"Duo passcode\"/>"
+                 "</auth></config-auth>"));
+    ok = expect(!parsed.ok && parsed.error_code == "auth_challenge_required",
+                "password-plus-token form should be reported as challenge") &&
+         ok;
+    ok = expect(parsed.prompt.kind == "challenge",
+                "token prompt should expose challenge kind") &&
+         ok;
+    ok = expect(parsed.prompt.label == "Duo passcode",
+                "token prompt should use structured input label") &&
+         ok;
+    ok = expect(parsed.prompt.input_type == "password",
+                "token prompt should use structured input type") &&
+         ok;
+  }
+
+  {
+    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
+        response(200,
+                 "<config-auth><auth>"
+                 "<input name=\"answer\" type=\"text\" "
+                 "label=\"Security answer\"/>"
+                 "</auth></config-auth>"));
+    ok = expect(!parsed.ok && parsed.error_code == "auth_challenge_required",
+                "informational text prompt should be reported as challenge") &&
+         ok;
+    ok = expect(parsed.prompt.label == "Security answer",
+                "text prompt should use structured input label") &&
+         ok;
+    ok = expect(parsed.prompt.input_type == "text",
+                "text prompt should use structured input type") &&
+         ok;
+  }
+
+  {
+    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
+        response(200,
+                 "<config-auth><saml-auth "
+                 "url=\"https://idp.example.invalid/sso?SAMLRequest=SECRET\"/>"
+                 "</config-auth>"));
+    ok = expect(!parsed.ok &&
+                    parsed.error_code == "saml_required_unsupported",
+                "SAML auth should use public SAML diagnostic code") &&
+         ok;
+    ok = expect(parsed.error_message.find("idp.example.invalid") ==
+                    std::string::npos,
+                "SAML error must not include identity provider URL") &&
+         ok;
+    ok = expect(parsed.error_message.find("SECRET") == std::string::npos,
+                "SAML error must not include SAML request secrets") &&
+         ok;
+  }
+
   if (ok) {
     std::cout << "native_aggregate_auth_test: all assertions passed\n";
   } else {
