@@ -52,7 +52,7 @@ public:
 
   ValidationResult start() override;
   ValidationResult start_handshake(TunnelMetadata *metadata = nullptr);
-  ValidationResult start_packet_loop();
+  ValidationResult start_packet_loop(DeviceConfig packet_device_config);
   void stop() override;
   VpnEngineStatus status() const override;
 

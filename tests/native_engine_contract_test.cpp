@@ -781,13 +781,16 @@ bool test_native_session_splits_handshake_from_packet_attach() {
               "split handshake must not apply network config") &&
        ok;
 
-  const auto attached = session.start_packet_loop();
+  ecnuvpn::vpn_engine::DeviceConfig device_config;
+  device_config.interface_name = "split-wintun0";
+  device_config.mtu = 1310;
+  const auto attached = session.start_packet_loop(device_config);
   ok = expect(attached.ok, "split packet attach should succeed") && ok;
   ok = expect(packet_devices_created == 1,
               "packet attach creates packet device") &&
        ok;
-  ok = expect(network_config_calls == 1,
-              "packet attach applies network config") &&
+  ok = expect(network_config_calls == 0,
+              "packet attach must not apply network config") &&
        ok;
   ok = expect(last_open_metadata(device).interface_name == "split-wintun0",
               "packet attach uses configured adapter") &&

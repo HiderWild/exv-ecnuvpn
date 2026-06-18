@@ -88,10 +88,40 @@ NativeVpnEngineSession::NativeVpnEngineSession(
 NativeVpnEngineSession::~NativeVpnEngineSession() { stop(); }
 
 ValidationResult NativeVpnEngineSession::start() {
-  ValidationResult handshake = start_handshake(nullptr);
+  TunnelMetadata metadata;
+  ValidationResult handshake = start_handshake(&metadata);
   if (!handshake.ok)
     return handshake;
-  return start_packet_loop();
+
+  auto fail = [this](const ValidationResult &failure) {
+    std::unique_ptr<protocol::ProtocolTransport> transport;
+    {
+      const std::lock_guard<std::mutex> lock(mu_);
+      set_failure_locked(failure);
+      protocol_session_.reset();
+      transport = std::move(transport_);
+    }
+    if (transport)
+      transport->disconnect();
+    emit_event("native.start.failed", "error", failure.message,
+               {{"code", failure.code}});
+    return failure;
+  };
+
+  DeviceConfig packet_device_config = device_config_from_metadata(metadata);
+  if (dependencies_.network_configurator) {
+    ValidationResult network =
+        dependencies_.network_configurator(metadata, &packet_device_config);
+    if (!network.ok)
+      return fail(network);
+  }
+
+  if (packet_device_config.interface_name.empty())
+    packet_device_config.interface_name = metadata.interface_name;
+  if (packet_device_config.mtu <= 0)
+    packet_device_config.mtu = metadata.mtu;
+
+  return start_packet_loop(packet_device_config);
 }
 
 ValidationResult NativeVpnEngineSession::start_handshake(TunnelMetadata *metadata) {
@@ -145,8 +175,8 @@ ValidationResult NativeVpnEngineSession::start_handshake(TunnelMetadata *metadat
   return {};
 }
 
-ValidationResult NativeVpnEngineSession::start_packet_loop() {
-  TunnelMetadata metadata;
+ValidationResult NativeVpnEngineSession::start_packet_loop(
+    DeviceConfig packet_device_config) {
   {
     const std::lock_guard<std::mutex> lock(mu_);
     if (status_.running || packet_loop_thread_.joinable()) {
@@ -157,7 +187,6 @@ ValidationResult NativeVpnEngineSession::start_packet_loop() {
       return invalid("handshake_required",
                      "Native VPN engine handshake has not completed.");
     }
-    metadata = handshake_metadata_;
   }
 
   auto fail = [this](const ValidationResult &failure) {
@@ -176,20 +205,6 @@ ValidationResult NativeVpnEngineSession::start_packet_loop() {
                {{"code", failure.code}});
     return failure;
   };
-
-  DeviceConfig packet_device_config = device_config_from_metadata(metadata);
-  if (dependencies_.network_configurator) {
-    ValidationResult network =
-        dependencies_.network_configurator(metadata, &packet_device_config);
-    if (!network.ok) {
-      return fail(network);
-    }
-  }
-
-  if (packet_device_config.interface_name.empty())
-    packet_device_config.interface_name = metadata.interface_name;
-  if (packet_device_config.mtu <= 0)
-    packet_device_config.mtu = metadata.mtu;
 
   if (!dependencies_.packet_device_factory) {
     return fail(native_packet_device_unimplemented());
