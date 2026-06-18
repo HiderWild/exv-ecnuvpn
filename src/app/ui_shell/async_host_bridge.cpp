@@ -120,11 +120,7 @@ void AsyncHostBridge::shutdown() {
 }
 
 std::string accepted_host_response() {
-  nlohmann::ordered_json out;
-  out["id"] = 0;
-  out["ok"] = true;
-  out["data"] = {{"accepted", true}};
-  return out.dump();
+  return {};
 }
 
 } // namespace ecnuvpn::ui_shell

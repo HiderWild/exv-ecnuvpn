@@ -203,9 +203,8 @@ int main() {
   ok = expect(window.observed_config.enable_dev_tools,
               "runtime should pass devtools flag to window") &&
        ok;
-  ok = expect(window.observed_response ==
-                  R"({"id":0,"ok":true,"data":{"accepted":true}})",
-              "runtime should accept window messages immediately") &&
+  ok = expect(window.observed_response.empty(),
+              "runtime should accept window messages without returning a renderer response") &&
        ok;
   ok = expect(window.posted_host_responses.size() == 1,
               "runtime should post the eventual core response") &&
@@ -311,9 +310,8 @@ int main() {
                     std::future_status::ready,
                 "host message dispatch should return before core response is available") &&
          ok;
-    ok = expect(delayed_window.observed_response ==
-                    R"({"id":0,"ok":true,"data":{"accepted":true}})",
-                "async host bridge should return only an accepted response") &&
+    ok = expect(delayed_window.observed_response.empty(),
+                "async host bridge should not return a synchronous core response") &&
          ok;
     ok = expect(delayed_window.posted_host_responses.empty(),
                 "async host bridge should not post before core response is available") &&
