@@ -105,6 +105,7 @@ set(EXV_CORE_SOURCES
     src/core/tunnel_controller/timer_scheduler.cpp
     src/core/rpc/app_rpc_dispatcher.cpp
     src/core/rpc/rpc_action_metadata.cpp
+    src/core/rpc/lane_scheduler.cpp
     src/core/rpc/core_actions.cpp
     src/core/rpc/desktop_rpc_adapter.cpp
     src/core/rpc/vpn_actions.cpp

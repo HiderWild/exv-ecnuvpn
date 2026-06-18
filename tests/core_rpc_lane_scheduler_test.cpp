@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -66,6 +67,20 @@ private:
   std::vector<std::string> items_;
 };
 
+bool schedule_work(exv::core_api::LaneScheduler &scheduler,
+                   exv::core_api::RpcLane lane,
+                   exv::core_api::RpcRequest request,
+                   std::function<exv::core_api::RpcResponse(
+                       const exv::core_api::RpcRequest &)> handler,
+                   exv::core_api::RpcResponseCallback respond) {
+  exv::core_api::LaneWorkItem item;
+  item.request = std::move(request);
+  item.metadata.lane = lane;
+  item.handler = std::move(handler);
+  item.respond = std::move(respond);
+  return scheduler.schedule(std::move(item));
+}
+
 } // namespace
 
 int main() {
@@ -78,6 +93,7 @@ int main() {
 
   {
     LaneScheduler scheduler;
+    scheduler.start();
     EventLog events;
     ManualGate first_can_finish;
     std::atomic<bool> first_started{false};
@@ -89,7 +105,7 @@ int main() {
     second.action = "vpn.disconnect";
     second.request_id = "fifo-b";
 
-    ok = expect(scheduler.schedule(RpcLane::VpnControl, first,
+    ok = expect(schedule_work(scheduler, RpcLane::VpnControl, first,
                                    [&](const RpcRequest &) {
                                      first_started.store(true);
                                      events.push("a-start");
@@ -100,7 +116,7 @@ int main() {
                                    [](RpcResponse) {}),
                 "same-lane first work should be accepted") &&
          ok;
-    ok = expect(scheduler.schedule(RpcLane::VpnControl, second,
+    ok = expect(schedule_work(scheduler, RpcLane::VpnControl, second,
                                    [&](const RpcRequest &) {
                                      events.push("b-run");
                                      return RpcResponse{true, "{}", "", "", ""};
@@ -130,6 +146,7 @@ int main() {
 
   {
     LaneScheduler scheduler;
+    scheduler.start();
     EventLog events;
     ManualGate vpn_can_finish;
 
@@ -140,7 +157,7 @@ int main() {
     logs.action = "logs.list";
     logs.request_id = "logs";
 
-    ok = expect(scheduler.schedule(RpcLane::VpnControl, vpn,
+    ok = expect(schedule_work(scheduler, RpcLane::VpnControl, vpn,
                                    [&](const RpcRequest &) {
                                      events.push("vpn-start");
                                      vpn_can_finish.wait();
@@ -153,7 +170,7 @@ int main() {
     ok = expect(events.wait_for_size(1, std::chrono::milliseconds(500)),
                 "vpn lane work should start") &&
          ok;
-    ok = expect(scheduler.schedule(RpcLane::Diagnostics, logs,
+    ok = expect(schedule_work(scheduler, RpcLane::Diagnostics, logs,
                                    [&](const RpcRequest &) {
                                      events.push("logs-run");
                                      return RpcResponse{true, "[]", "", "", ""};
@@ -174,6 +191,7 @@ int main() {
 
   {
     LaneScheduler scheduler;
+    scheduler.start();
     EventLog events;
     ManualGate first_can_finish;
 
@@ -184,7 +202,7 @@ int main() {
     update.action = "vpn.connect";
     update.request_id = "intent-update";
 
-    ok = expect(scheduler.schedule(RpcLane::VpnControl, connect,
+    ok = expect(schedule_work(scheduler, RpcLane::VpnControl, connect,
                                    [&](const RpcRequest &) {
                                      events.push("connect-start");
                                      first_can_finish.wait();
@@ -194,7 +212,7 @@ int main() {
                                    [](RpcResponse) {}),
                 "first vpn control request should be accepted") &&
          ok;
-    ok = expect(scheduler.schedule(RpcLane::VpnControl, update,
+    ok = expect(schedule_work(scheduler, RpcLane::VpnControl, update,
                                    [&](const RpcRequest &) {
                                      events.push("intent-update");
                                      return RpcResponse{true, "{}", "", "", ""};
@@ -223,11 +241,12 @@ int main() {
 
   {
     LaneScheduler scheduler;
+    scheduler.start();
     RpcRequest req;
     req.action = "logs.list";
     req.request_id = "after-stop";
     scheduler.stop();
-    ok = expect(!scheduler.schedule(RpcLane::Diagnostics, req,
+    ok = expect(!schedule_work(scheduler, RpcLane::Diagnostics, req,
                                     [](const RpcRequest &) {
                                       return RpcResponse{true, "[]", "", "", ""};
                                     },
