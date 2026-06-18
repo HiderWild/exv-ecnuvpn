@@ -9,6 +9,7 @@
 #include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
 #include "core/app_api/app_api.hpp"
+#include "core/rpc/lane_scheduler.hpp"
 #include "core/rpc/core_api_setup.hpp"
 #include "core/tunnel_controller/reconnect_policy.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
@@ -20,6 +21,7 @@
 #include <iostream>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -71,7 +73,6 @@ static void core_signal_handler(int) {
 // ------------------------------------------------------------------
 
 static std::mutex g_stdout_mutex;
-static std::mutex g_desktop_dispatch_mutex;
 
 static void write_json_line(const json& obj) {
     std::string line = obj.dump();
@@ -87,11 +88,7 @@ static void write_json_line(const json& obj) {
 static json desktop_action_response(int id,
                                     const std::string& action,
                                     const json& payload) {
-    json result;
-    {
-        std::lock_guard<std::mutex> lock(g_desktop_dispatch_mutex);
-        result = ecnuvpn::app_api::handle_action(action, payload);
-    }
+    json result = ecnuvpn::app_api::handle_action(action, payload);
 
     if (result.is_object() && result.value("ok", true) == false) {
         std::string message = result.value("error", std::string());
@@ -139,6 +136,43 @@ static json handle_desktop_request_json(const json& request) {
         ? request.at("payload")
         : json::object();
     return desktop_action_response(id, action, payload);
+}
+
+static exv::core_api::RpcResponse dispatch_desktop_as_rpc(
+    const exv::core_api::RpcRequest& request) {
+    exv::core_api::RpcResponse response;
+    response.request_id = request.request_id;
+
+    json payload = json::object();
+    try {
+        if (!request.payload_json.empty()) {
+            payload = json::parse(request.payload_json);
+        }
+    } catch (const json::exception& error) {
+        response.success = false;
+        response.error_code = "invalid_payload";
+        response.error_message = error.what();
+        return response;
+    }
+
+    json result = ecnuvpn::app_api::handle_action(request.action, payload);
+    if (result.is_object() && result.value("ok", true) == false) {
+        response.success = false;
+        response.error_message = result.value("error", std::string());
+        if (response.error_message.empty()) {
+            response.error_message = result.value("message", std::string());
+        }
+        if (response.error_message.empty()) {
+            response.error_message = "Desktop action failed";
+        }
+        response.error_code = result.value("code", std::string());
+        response.payload_json = result.dump();
+        return response;
+    }
+
+    response.success = true;
+    response.payload_json = result.dump();
+    return response;
 }
 
 static bool is_native_core_request(const json& request) {
@@ -190,6 +224,155 @@ static json native_core_response(exv::core_api::AppRpcDispatcher& dispatcher,
     return response;
 }
 
+struct ScheduledRequest {
+    bool is_desktop = true;
+    int desktop_id = 0;
+    exv::core_api::RpcRequest rpc;
+};
+
+static ScheduledRequest make_scheduled_request(const json& request) {
+    ScheduledRequest out;
+    out.is_desktop = !is_native_core_request(request);
+    out.rpc.action = request.value("action", std::string());
+
+    if (out.is_desktop) {
+        out.desktop_id = request.value("id", 0);
+        out.rpc.request_id = std::to_string(out.desktop_id);
+        const json payload = request.contains("payload")
+            ? request.at("payload")
+            : json::object();
+        out.rpc.payload_json = payload.dump();
+    } else {
+        out.rpc.request_id = request.value("request_id", std::string());
+        if (request.contains("payload_json")) {
+            const json& payload_json = request.at("payload_json");
+            out.rpc.payload_json =
+                payload_json.is_string() ? payload_json.get<std::string>()
+                                         : payload_json.dump();
+        } else if (request.contains("payload")) {
+            out.rpc.payload_json = request.at("payload").dump();
+        } else {
+            out.rpc.payload_json = "{}";
+        }
+    }
+
+    return out;
+}
+
+static json desktop_wire_response(int id,
+                                  const exv::core_api::RpcResponse& response) {
+    if (!response.success) {
+        return {
+            {"id", id},
+            {"ok", false},
+            {"code", response.error_code},
+            {"message", response.error_message.empty()
+                            ? std::string("Desktop action failed")
+                            : response.error_message}
+        };
+    }
+
+    json data = json::object();
+    if (!response.payload_json.empty()) {
+        try {
+            data = json::parse(response.payload_json);
+        } catch (...) {
+            data = response.payload_json;
+        }
+    }
+    if (data.is_object() && data.value("ok", false) == true) {
+        data.erase("ok");
+    }
+    return {
+        {"id", id},
+        {"ok", true},
+        {"data", data}
+    };
+}
+
+static json native_wire_response(const exv::core_api::RpcResponse& response) {
+    json out = {
+        {"request_id", response.request_id},
+        {"success", response.success}
+    };
+    if (response.success) {
+        out["payload_json"] =
+            response.payload_json.empty() ? "{}" : response.payload_json;
+    } else {
+        out["error_code"] = response.error_code;
+        out["error_message"] = response.error_message;
+    }
+    return out;
+}
+
+static json missing_action_response(const ScheduledRequest& request) {
+    if (request.is_desktop) {
+        return {
+            {"id", request.desktop_id},
+            {"ok", false},
+            {"code", "missing_action"},
+            {"message", "Request must contain an 'action' field"}
+        };
+    }
+    return {
+        {"request_id", request.rpc.request_id},
+        {"success", false},
+        {"error_code", "missing_action"},
+        {"error_message", "Request must contain an 'action' field"}
+    };
+}
+
+static bool schedule_request_json(
+    exv::core_api::AppRpcDispatcher& dispatcher,
+    exv::core_api::LaneScheduler& scheduler,
+    const json& request,
+    std::function<void(json)> respond) {
+    ScheduledRequest scheduled = make_scheduled_request(request);
+    if (scheduled.rpc.action.empty()) {
+        respond(missing_action_response(scheduled));
+        return true;
+    }
+
+    exv::core_api::LaneWorkItem item;
+    item.request = scheduled.rpc;
+    item.metadata = scheduled.is_desktop
+        ? exv::core_api::default_metadata_for_action(item.request.action)
+        : dispatcher.metadata_for(item.request.action)
+              .value_or(exv::core_api::default_metadata_for_action(
+                  item.request.action));
+
+    const bool is_desktop = scheduled.is_desktop;
+    const int desktop_id = scheduled.desktop_id;
+    item.handler = [&dispatcher, is_desktop](
+                       const exv::core_api::RpcRequest& rpc_request) {
+        if (is_desktop) {
+            return dispatch_desktop_as_rpc(rpc_request);
+        }
+        return dispatcher.dispatch(rpc_request);
+    };
+    item.respond = [respond = std::move(respond), is_desktop, desktop_id](
+                       exv::core_api::RpcResponse response) mutable {
+        respond(is_desktop ? desktop_wire_response(desktop_id, response)
+                           : native_wire_response(response));
+    };
+
+    if (scheduler.schedule(std::move(item))) {
+        return true;
+    }
+
+    json error = scheduled.is_desktop
+        ? json{{"id", scheduled.desktop_id},
+               {"ok", false},
+               {"code", "scheduler_stopped"},
+               {"message", "Core RPC scheduler is stopped"}}
+        : json{{"request_id", scheduled.rpc.request_id},
+               {"success", false},
+               {"error_code", "scheduler_stopped"},
+               {"error_message", "Core RPC scheduler is stopped"}};
+    respond(error);
+    return false;
+}
+
 // Supported request envelopes:
 // - Desktop envelope: id/action/payload -> id/ok/data or id/ok/code/message.
 //   This keeps Electron and CLI pipe clients on the legacy app_api surface.
@@ -208,6 +391,44 @@ static std::string handle_request_line(exv::core_api::AppRpcDispatcher& dispatch
                                        const std::string& request_line) {
     try {
         return handle_request_json(dispatcher, json::parse(request_line)).dump();
+    } catch (const json::parse_error& e) {
+        json err = {
+            {"id", 0},
+            {"ok", false},
+            {"code", "parse_error"},
+            {"message", std::string("Invalid JSON: ") + e.what()}
+        };
+        return err.dump();
+    } catch (const std::exception& e) {
+        json err = {
+            {"id", 0},
+            {"ok", false},
+            {"code", "internal_error"},
+            {"message", e.what()}
+        };
+        return err.dump();
+    }
+}
+
+static std::string handle_request_line_sync(
+    exv::core_api::AppRpcDispatcher& dispatcher,
+    const std::string& request_line) {
+    return handle_request_line(dispatcher, request_line);
+}
+
+static std::string schedule_request_line_sync(
+    exv::core_api::AppRpcDispatcher& dispatcher,
+    exv::core_api::LaneScheduler& scheduler,
+    const std::string& request_line) {
+    try {
+        std::promise<std::string> response_promise;
+        auto response_future = response_promise.get_future();
+        schedule_request_json(
+            dispatcher, scheduler, json::parse(request_line),
+            [&response_promise](json response) mutable {
+                response_promise.set_value(response.dump());
+            });
+        return response_future.get();
     } catch (const json::parse_error& e) {
         json err = {
             {"id", 0},
@@ -305,8 +526,11 @@ int core_process_main(const std::string& config_dir,
         std::shared_ptr<exv::platform::PlatformNetworkOps>{},
         ReconnectConfig{});
     auto native_dispatcher = exv::core_api::create_dispatcher(controller);
+    exv::core_api::LaneScheduler lane_scheduler;
+    lane_scheduler.start();
     auto dispatch_line = [&](const std::string& request_line) {
-        return handle_request_line(*native_dispatcher, request_line);
+        return schedule_request_line_sync(*native_dispatcher, lane_scheduler,
+                                          request_line);
     };
 
     const auto pipe_path = core_pipe_path();
@@ -446,7 +670,11 @@ int core_process_main(const std::string& config_dir,
 
         try {
             json request = json::parse(line);
-            response = handle_request_json(*native_dispatcher, request);
+            schedule_request_json(
+                *native_dispatcher, lane_scheduler, request,
+                [](json scheduled_response) {
+                    write_json_line(scheduled_response);
+                });
         } catch (const json::parse_error& e) {
             response = {
                 {"id",      0},
@@ -454,6 +682,7 @@ int core_process_main(const std::string& config_dir,
                 {"code",    "parse_error"},
                 {"message", std::string("Invalid JSON: ") + e.what()}
             };
+            write_json_line(response);
         } catch (const std::exception& e) {
             response = {
                 {"id",      0},
@@ -461,9 +690,8 @@ int core_process_main(const std::string& config_dir,
                 {"code",    "internal_error"},
                 {"message", e.what()}
             };
+            write_json_line(response);
         }
-
-        write_json_line(response);
 
         // Note: In stdin mode, we don't process pipe connections here.
         // Pipe processing is only needed in daemon mode (handled above in the !stdin_available block).
@@ -480,6 +708,7 @@ int core_process_main(const std::string& config_dir,
     if (pipe_worker.joinable()) {
         pipe_worker.join();
     }
+    lane_scheduler.stop();
     pipe_listener->stop();
 
     std::optional<exv::core::lifecycle::CoreRegistryDeleteMatch> delete_match;
