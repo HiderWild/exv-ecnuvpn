@@ -126,11 +126,11 @@ Verification evidence: `pnpm --dir webui exec node scripts/run-host-test.cjs hos
 
 ## Phase 7: Verification
 
-- [ ] Run focused C++ test set from Task 13.
-- [ ] Run `pnpm --dir webui test:host`.
-- [ ] Run `pnpm --dir webui exec vue-tsc -b`.
-- [ ] Run `pnpm --dir webui run build`.
-- [ ] Run `./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking`.
+- [x] Run focused C++ test set from Task 13.
+- [x] Run `pnpm --dir webui test:host`.
+- [x] Run `pnpm --dir webui exec vue-tsc -b`.
+- [x] Run `pnpm --dir webui run build`.
+- [x] Run `./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking`.
 - [ ] Manually reproduce: connect, open logs during connect, rapid mode toggles.
 - [ ] Confirm logs/status/config do not wait for VPN connect completion.
 - [ ] Confirm first-failure branch errors reach the UI before slower branch cleanup finishes.
@@ -140,5 +140,7 @@ Verification evidence: `pnpm --dir webui exec node scripts/run-host-test.cjs hos
 - [ ] Confirm final UI mode equals the last click.
 - [ ] Confirm connect failure is visible to the user.
 - [ ] Confirm `window.setMode` does not appear in core RPC traces.
-- [ ] Write verification report under `docs/superpowers/reports/`.
+- [x] Write verification report under `docs/superpowers/reports/`.
 - [ ] Commit verification report.
+
+Verification report: `docs/superpowers/reports/2026-06-19-core-rpc-lane-isolation-and-connect-pipeline-concurrency-verification.md`. Manual UI/VPN reproduction remains unchecked because it requires interactive local VPN operation.
