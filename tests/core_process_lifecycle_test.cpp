@@ -207,6 +207,23 @@ static std::string make_temp_dir() {
 #endif
 }
 
+static void write_valid_native_config(const std::string& config_dir) {
+    json cfg = {
+        {"server", "https://vpn.example.invalid"},
+        {"username", "student@example.invalid"},
+        {"password", ""},
+        {"remember_password", false},
+        {"vpn_engine", "native"},
+        {"windows_tunnel_driver", "tap"},
+        {"windows_tap_interface", "ECNU VPN TAP"},
+        {"auto_reconnect", false},
+        {"extra_args", json::array()}
+    };
+    std::ofstream out(std::filesystem::path(config_dir) / "config.json",
+                      std::ios::out | std::ios::trunc);
+    out << cfg.dump(2);
+}
+
 static std::vector<json> parse_json_lines(const std::string& output) {
     std::vector<json> results;
     std::istringstream iss(output);
@@ -953,6 +970,8 @@ int main() {
     // =======================================================================
     {
         std::cerr << "[E2.3-lanes] logs.list while vpn.connect is blocked\n";
+        write_valid_native_config(config_dir);
+
         BlockingInputBuf in_buf;
         CaptureOutputBuf out_buf;
         ScopedRdbuf sci(std::cin,  &in_buf);
@@ -981,7 +1000,9 @@ int main() {
         in_buf.feed(R"({"id":50,"action":"vpn.connect","payload":{"password":"x"}})" "\n");
         expect(connect_entered.wait_for(std::chrono::seconds(3)) ==
                    std::future_status::ready,
-               "E2.3-lanes: vpn.connect should enter blocking hook");
+               "E2.3-lanes: vpn.connect background job should enter blocking hook");
+        expect(wait_for_response_id(out_buf, 50, std::chrono::milliseconds(500)),
+               "E2.3-lanes: vpn.connect should return accepted while background job remains blocked");
 
         in_buf.feed(R"({"id":51,"action":"logs.list","payload":{}})" "\n");
         expect(wait_for_response_id(out_buf, 51, std::chrono::milliseconds(500)),
@@ -989,7 +1010,7 @@ int main() {
 
         release_connect_promise.set_value();
         expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
-               "E2.3-lanes: blocked vpn.connect should eventually respond after release");
+               "E2.3-lanes: accepted vpn.connect and logs.list responses should both exist");
 
         ecnuvpn::app_api::testing::set_desktop_vpn_connect_entered_hook(nullptr);
         in_buf.close_input();
@@ -1002,6 +1023,14 @@ int main() {
                "E2.3-lanes: logs.list response should be successful");
         expect(!connect_resp.is_null(),
                "E2.3-lanes: vpn.connect response should eventually exist");
+        expect(connect_resp.value("ok", false),
+               "E2.3-lanes: vpn.connect accepted response should be successful");
+        if (!connect_resp.is_null() && connect_resp.contains("data")) {
+            expect(connect_resp["data"].value("accepted", false),
+                   "E2.3-lanes: vpn.connect data should mark accepted=true");
+            expect(connect_resp["data"].value("phase", std::string()) == "connecting",
+                   "E2.3-lanes: vpn.connect accepted phase should be connecting");
+        }
         expect(cr.rc == 0, "E2.3-lanes: exit code 0");
     }
 

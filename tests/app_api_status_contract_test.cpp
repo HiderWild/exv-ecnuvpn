@@ -409,9 +409,12 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
                   std::string::npos,
               "desktop vpn.connect should resolve stored password before preflight") &&
        ok;
-  ok = expect(connect_source.find("preflight_connect(cfg, password)") !=
+  ok = expect(connect_source.find("submit_connect") != std::string::npos,
+              "desktop vpn.connect should submit an accepted connect job") &&
+       ok;
+  ok = expect(connect_source.find("return connect_state_json(state)") !=
                   std::string::npos,
-              "desktop vpn.connect should use preflight_connect as prerequisite gate") &&
+              "desktop vpn.connect should return accepted job state promptly") &&
        ok;
   ok = expect(source.find("platform::resolve_backend(options)") !=
                   std::string::npos,
@@ -419,19 +422,23 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
        ok;
   ok = expect(connect_source.find("try_acquire(attempt_opts)") !=
                   std::string::npos,
-              "desktop vpn.connect should acquire the connection-attempt guard") &&
+              "desktop vpn.connect should acquire the connection-attempt guard before accepted response") &&
        ok;
-  ok = expect(connect_source.find("ensure_tunnel_controller(helper_endpoint)") !=
+  ok = expect(source.find("preflight_connect(cfg, password)") !=
                   std::string::npos,
-              "desktop vpn.connect should initialize controller with resolved helper endpoint") &&
+              "desktop connect job should use preflight_connect as backend gate") &&
        ok;
-  ok = expect(connect_source.find("controller->set_vpn_config(cfg, password)") !=
+  ok = expect(source.find("ensure_tunnel_controller(helper_endpoint)") !=
                   std::string::npos,
-              "desktop vpn.connect should pass config and password into TunnelController") &&
+              "desktop connect job should initialize controller with resolved helper endpoint") &&
        ok;
-  ok = expect(connect_source.find("controller->connect(intent)") !=
+  ok = expect(source.find("controller->set_vpn_config(cfg, password)") !=
                   std::string::npos,
-              "desktop vpn.connect should delegate connection to TunnelController") &&
+              "desktop connect job should pass config and password into TunnelController") &&
+       ok;
+  ok = expect(source.find("controller->connect(intent)") !=
+                  std::string::npos,
+              "desktop connect job should delegate connection to TunnelController") &&
        ok;
   ok = expect(connect_source.find("platform::try_connect_direct_fallback") ==
                   std::string::npos,
@@ -511,50 +518,45 @@ bool desktop_native_connect_releases_attempt_guard_on_failed_status() {
                               ? std::string::npos
                               : disconnect_handler - connect_handler);
 
-  const auto status_snapshot = connect_source.find("auto snap = controller->status()");
-  const auto failed_guard =
-      connect_source.find("snap.phase == exv::core::TunnelPhase::Failed",
-                          status_snapshot == std::string::npos ? 0
-                                                               : status_snapshot);
-  const auto failed_reset =
-      connect_source.find("reset_tunnel_controller()", failed_guard);
-  const auto return_failed_status = connect_source.find("return status", failed_guard);
+  const auto accepted_return =
+      connect_source.find("return connect_state_json(state)");
+  const auto synchronous_status =
+      connect_source.find("auto snap = controller->status()");
+  const auto synchronous_failed_status =
+      connect_source.find("snap.phase == exv::core::TunnelPhase::Failed");
+  const auto background_job =
+      source.find("void run_desktop_connect_job");
+  const auto failed_cleanup =
+      source.find("reset_tunnel_controller()", background_job);
   const auto dismiss_attempt =
-      connect_source.find("attempt_cleanup.dismiss()", status_snapshot);
+      source.find("attempt_cleanup.dismiss()", background_job);
 
   bool ok = true;
   ok = expect(connect_handler != std::string::npos,
               "app_api should register vpn.connect handler") &&
        ok;
-  ok = expect(status_snapshot != std::string::npos,
-              "desktop vpn.connect should inspect controller status after connect") &&
+  ok = expect(accepted_return != std::string::npos,
+              "desktop vpn.connect should return accepted job state") &&
        ok;
-  ok = expect(failed_guard != std::string::npos,
-              "desktop vpn.connect should detect failed controller status before dismissing the attempt guard") &&
+  ok = expect(synchronous_status == std::string::npos,
+              "desktop vpn.connect handler must not synchronously inspect controller status after accepted job submission") &&
        ok;
-  ok = expect(failed_reset != std::string::npos,
-              "desktop vpn.connect should release the failed TunnelController helper lease before returning failed status") &&
+  ok = expect(synchronous_failed_status == std::string::npos,
+              "desktop vpn.connect handler must not synchronously wait for failed controller status") &&
        ok;
-  ok = expect(return_failed_status != std::string::npos,
-              "desktop vpn.connect should return failed status while allowing TerminalAttemptScope cleanup") &&
+  ok = expect(background_job != std::string::npos,
+              "desktop vpn.connect should move heavy work into a background job") &&
+       ok;
+  ok = expect(failed_cleanup != std::string::npos,
+              "desktop connect job should reset failed controller state in background") &&
        ok;
   ok = expect(dismiss_attempt != std::string::npos,
-              "desktop vpn.connect should still dismiss the attempt guard for non-terminal connect attempts") &&
+              "desktop connect job should dismiss the attempt guard only after non-terminal startup") &&
        ok;
-  if (failed_guard != std::string::npos && failed_reset != std::string::npos &&
-      return_failed_status != std::string::npos &&
+  if (background_job != std::string::npos && failed_cleanup != std::string::npos &&
       dismiss_attempt != std::string::npos) {
-    ok = expect(failed_guard < failed_reset,
-                "failed connect should reset the controller after detecting failed phase") &&
-         ok;
-    ok = expect(failed_reset < return_failed_status,
-                "failed connect should release helper state before returning failed status") &&
-         ok;
-    ok = expect(failed_guard < return_failed_status,
-                "failed-status branch should return after checking the failed phase") &&
-         ok;
-    ok = expect(return_failed_status < dismiss_attempt,
-                "failed connect must return before attempt_cleanup.dismiss() so stale connect-attempt files are removed") &&
+    ok = expect(failed_cleanup < dismiss_attempt,
+                "failed background connect must reset controller before dismissing attempt guard") &&
          ok;
   }
   return ok;
