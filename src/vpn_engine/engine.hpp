@@ -13,6 +13,8 @@ struct VpnEngineConfig {
   std::string username;
   std::string password;
   std::string useragent;
+  std::string auth_group;
+  std::string csd_wrapper;
   int mtu = 1290;
   std::vector<std::string> routes;
   std::vector<std::string> server_bypass_ips;

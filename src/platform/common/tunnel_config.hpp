@@ -33,6 +33,7 @@ struct TunnelConfig {
     std::vector<RouteEntry> routes;
     std::vector<std::string> server_bypass_ips;
     DnsConfig dns;
+    std::vector<std::string> exclude_routes;
     std::vector<FirewallRule> firewall_rules;
     bool enable_kill_switch = false;
     std::optional<std::string> exclude_route;  // Route to exclude (e.g. VPN server)

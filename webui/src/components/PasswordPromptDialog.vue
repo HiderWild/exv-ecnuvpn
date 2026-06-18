@@ -28,7 +28,7 @@ watch(
 
 function submit() {
   if (!password.value) {
-    error.value = '请输入密码'
+    error.value = '请输入验证内容'
     return
   }
   const value = password.value
@@ -67,7 +67,7 @@ function hidePassword() {
           <KeyRound class="mt-0.5 h-5 w-5 shrink-0 text-primary" />
           <div class="min-w-0">
             <p class="text-sm font-semibold text-foreground">{{ ui.passwordPromptMessage }}</p>
-            <p class="mt-1 text-xs text-muted">密码仅用于本次连接，不会写入设置。</p>
+            <p class="mt-1 text-xs text-muted">输入内容仅用于本次验证，不会写入设置。</p>
           </div>
         </div>
 
@@ -76,9 +76,9 @@ function hidePassword() {
             ref="inputRef"
             v-model="password"
             :type="revealing ? 'text' : 'password'"
-            autocomplete="current-password"
+            autocomplete="one-time-code"
             class="w-full rounded-lg border border-border bg-bg px-3 py-2 pr-11 text-sm text-foreground outline-none transition-colors focus:border-primary"
-            placeholder="密码"
+            placeholder="密码或验证码"
             @input="error = ''"
             @keydown.esc.prevent="cancel"
           />

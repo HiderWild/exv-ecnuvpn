@@ -142,14 +142,15 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function saveSettings(s: Partial<SettingsConfig>) {
-    if (typeof s.minimal_mode === 'boolean') {
-      settings.value = { ...settings.value, minimal_mode: s.minimal_mode }
-      if (typeof window !== 'undefined' && window.ecnuVpn?.window) {
-        void window.ecnuVpn.window.setMode(s.minimal_mode ? 'minimal' : 'advanced')
-      }
+    const previous = settings.value
+    settings.value = { ...settings.value, ...s }
+    try {
+      const { data } = await api.put<SettingsConfig>('/config/settings', { ...s })
+      settings.value = { ...settings.value, ...data }
+    } catch (error) {
+      settings.value = previous
+      throw error
     }
-    const { data } = await api.put<SettingsConfig>('/config/settings', { ...s })
-    settings.value = { ...settings.value, ...data }
   }
 
   async function fetchKeyStatus() {

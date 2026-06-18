@@ -114,14 +114,17 @@ export type VpnErrorType =
   | 'auth_group_required'
   | 'auth_expired'
   | 'csd_required_unsupported'
+  | 'dtls_unavailable'
+  | 'tunnel_disconnected'
+  | 'session_timeout'
+  | 'idle_timeout'
+  | 'rekey_unsupported'
+  | 'cstp_compressed_unsupported'
+  | 'unsupported_extra_args'
   | 'tls_verify_failed'
   | 'wintun_missing'
   | 'utun_permission_denied'
-  | 'dtls_unavailable'
   | 'unsupported_dtls'
-  | 'session_timeout'
-  | 'idle_timeout'
-  | 'unsupported_extra_args'
   | 'permission_denied'
   | 'helper_unavailable'
   | 'network_unreachable'
@@ -190,6 +193,10 @@ function isAuthFailureMessage(message: string) {
     normalized.includes('password is incorrect')
 }
 
+function isCredentialFailureType(type: VpnErrorType) {
+  return type === 'auth_failed' || type === 'auth_rejected'
+}
+
 type NativeErrorDescriptor = {
   error_type: VpnErrorType
   message: string
@@ -244,6 +251,48 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
     recommended_action: 'view_logs',
     recoverable: false,
   },
+  dtls_unavailable: {
+    error_type: 'dtls_unavailable',
+    message: '网关提供了 DTLS 信息，但当前原生连接会继续使用 CSTP-only。',
+    recommended_action: 'continue_with_cstp',
+    recoverable: true,
+  },
+  tunnel_disconnected: {
+    error_type: 'tunnel_disconnected',
+    message: 'VPN 服务器主动断开了隧道连接。',
+    recommended_action: 'retry_connection',
+    recoverable: true,
+  },
+  session_timeout: {
+    error_type: 'session_timeout',
+    message: 'VPN 会话已超时，请重新认证后连接。',
+    recommended_action: 'retry_password',
+    recoverable: true,
+  },
+  idle_timeout: {
+    error_type: 'idle_timeout',
+    message: 'VPN 会话因空闲超时断开，请重试连接。',
+    recommended_action: 'retry_connection',
+    recoverable: true,
+  },
+  rekey_unsupported: {
+    error_type: 'rekey_unsupported',
+    message: 'VPN 服务器要求重新协商隧道，请重新连接。',
+    recommended_action: 'retry_connection',
+    recoverable: true,
+  },
+  cstp_compressed_unsupported: {
+    error_type: 'cstp_compressed_unsupported',
+    message: 'VPN 服务器发送了当前不支持的压缩 CSTP 帧。',
+    recommended_action: 'view_logs',
+    recoverable: false,
+  },
+  unsupported_extra_args: {
+    error_type: 'unsupported_extra_args',
+    message: '当前原生引擎不支持部分额外参数，请在设置中移除后重试。',
+    recommended_action: 'open_settings',
+    recoverable: true,
+  },
   tls_verify_failed: {
     error_type: 'tls_verify_failed',
     message: '无法验证 VPN 服务器证书，连接已中止。',
@@ -267,30 +316,6 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
     message: '当前原生连接使用 CSTP-only，DTLS 后端尚未启用。',
     recommended_action: 'retry_connection',
     recoverable: false,
-  },
-  dtls_unavailable: {
-    error_type: 'dtls_unavailable',
-    message: '网关提供了 DTLS 信息，但当前原生连接会继续使用 CSTP-only。',
-    recommended_action: 'continue_with_cstp',
-    recoverable: true,
-  },
-  session_timeout: {
-    error_type: 'session_timeout',
-    message: 'VPN 会话已超时，请重新认证后连接。',
-    recommended_action: 'retry_password',
-    recoverable: true,
-  },
-  idle_timeout: {
-    error_type: 'idle_timeout',
-    message: 'VPN 会话因空闲超时断开，请重试连接。',
-    recommended_action: 'retry_connection',
-    recoverable: true,
-  },
-  unsupported_extra_args: {
-    error_type: 'unsupported_extra_args',
-    message: '当前原生引擎不支持部分额外参数，请在设置中移除后重试。',
-    recommended_action: 'open_settings',
-    recoverable: true,
   },
   permission_denied: {
     error_type: 'permission_denied',
@@ -614,7 +639,21 @@ export const useVpnStore = defineStore('vpn', () => {
       case 'auth_failed':
       case 'auth_rejected':
       case 'auth_expired':
-        return { label: '重新输入密码', action: () => retryLastAction(), variant: 'primary' }
+        return {
+          label: '重新输入密码',
+          action: () => retryConnectAfterAuthFailure(lastFailedConnectMode.value ?? 'helper'),
+          variant: 'primary',
+        }
+      case 'auth_challenge_required':
+      case 'auth_group_required':
+        return {
+          label: '继续',
+          action: () => {
+            clearError()
+            startAuthInteractionPolling()
+          },
+          variant: 'primary',
+        }
       case 'native_failure':
       case 'parse_failure':
         return { label: '重试', action: () => retryLastAction(), variant: 'primary' }
@@ -696,17 +735,26 @@ export const useVpnStore = defineStore('vpn', () => {
           },
         }
       case 'csd_required_unsupported':
+      case 'cstp_compressed_unsupported':
         return {
-          title: 'Host-scan 不受支持',
+          title: err.error_type === 'csd_required_unsupported' ? 'Host-scan 不受支持' : '协议能力不足',
           primaryLabel: '查看日志',
           onPrimary: () => {
             clearError()
             window.location.hash = '#/logs'
           },
         }
-      case 'config_invalid':
+      case 'tunnel_disconnected':
+      case 'rekey_unsupported':
         return {
-          title: '配置不完整',
+          title: '连接已中断',
+          primaryLabel: '重试',
+          onPrimary: () => retryLastAction(),
+        }
+      case 'config_invalid':
+      case 'unsupported_extra_args':
+        return {
+          title: err.error_type === 'unsupported_extra_args' ? '参数不支持' : '配置不完整',
           primaryLabel: '前往设置',
           onPrimary: () => {
             clearError()
@@ -759,15 +807,6 @@ export const useVpnStore = defineStore('vpn', () => {
           title: err.error_type === 'session_timeout' ? '会话已超时' : '连接空闲超时',
           primaryLabel: '重试',
           onPrimary: () => retryLastAction(),
-        }
-      case 'unsupported_extra_args':
-        return {
-          title: '参数不受支持',
-          primaryLabel: '前往设置',
-          onPrimary: () => {
-            clearError()
-            window.location.hash = '#/settings'
-          },
         }
       default:
         return {
@@ -932,11 +971,6 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   async function connect(providedPassword?: string): Promise<boolean> {
-    const password = providedPassword !== undefined
-      ? providedPassword
-      : await resolveConnectPassword()
-    if (password === null) return false
-
     loading.value = true
     clearError()
     lastActionWasElevatedConnect.value = false
@@ -945,6 +979,11 @@ export const useVpnStore = defineStore('vpn', () => {
     startConnectionProgress(2)
     startAuthInteractionPolling()
     try {
+      const password = providedPassword !== undefined
+        ? providedPassword
+        : await resolveConnectPassword()
+      if (password === null) return false
+
       const { data } = await api.post<VpnStatus>(
         '/connect',
         password === undefined ? undefined : { password },
@@ -954,7 +993,7 @@ export const useVpnStore = defineStore('vpn', () => {
       return true
     } catch (error) {
       const normalized = normalizeError(error)
-      if (normalized.error_type === 'auth_failed') lastFailedConnectMode.value = 'helper'
+      if (isCredentialFailureType(normalized.error_type)) lastFailedConnectMode.value = 'helper'
       setError(normalized)
     } finally {
       connectInFlight.value = false
@@ -985,11 +1024,6 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   async function connectElevated(providedPassword?: string): Promise<boolean> {
-    const password = providedPassword !== undefined
-      ? providedPassword
-      : await resolveConnectPassword()
-    if (password === null) return false
-
     loading.value = true
     clearError()
     lastActionWasElevatedConnect.value = true
@@ -998,12 +1032,17 @@ export const useVpnStore = defineStore('vpn', () => {
     startConnectionProgress(0, 2)
     startAuthInteractionPolling()
     try {
+      const password = providedPassword !== undefined
+        ? providedPassword
+        : await resolveConnectPassword()
+      if (password === null) return false
+
       const { data } = await api.post<VpnStatus | VpnError>(
         '/connect/elevated',
         password === undefined ? undefined : { password },
       )
       if (isVpnError(data)) {
-        if (data.error_type === 'auth_failed') lastFailedConnectMode.value = 'elevated'
+        if (isCredentialFailureType(data.error_type)) lastFailedConnectMode.value = 'elevated'
         setError(data)
       } else {
         const elevatedStatus = { ...data, mode: data.mode ?? 'elevated' }
@@ -1017,7 +1056,7 @@ export const useVpnStore = defineStore('vpn', () => {
       }
     } catch (error) {
       const normalized = normalizeError(error)
-      if (normalized.error_type === 'auth_failed') lastFailedConnectMode.value = 'elevated'
+      if (isCredentialFailureType(normalized.error_type)) lastFailedConnectMode.value = 'elevated'
       setError(normalized)
     } finally {
       lastActionWasElevatedConnect.value = false

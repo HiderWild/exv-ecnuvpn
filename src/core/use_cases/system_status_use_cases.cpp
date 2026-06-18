@@ -42,9 +42,10 @@ UseCaseResult service_op_result(const ServiceResponse &response,
 template <typename Fn>
 UseCaseResult with_helper_service_lease(const std::string &purpose,
                                         bool bootstrap_oneshot,
+                                        const std::string &preferred_mode,
                                         Fn &&fn) {
   ecnuvpn::platform::BackendResolveOptions options;
-  options.preferred_mode = "auto";
+  options.preferred_mode = preferred_mode;
   options.allow_oneshot = bootstrap_oneshot;
   options.allow_service_start = false;
   if (bootstrap_oneshot) {
@@ -165,7 +166,7 @@ SystemStatusUseCases::install_driver(const nlohmann::json &payload) {
 }
 
 UseCaseResult SystemStatusUseCases::install_helper() {
-  return with_helper_service_lease("service.install", true, [](auto &client) {
+  return with_helper_service_lease("service.install", true, "auto", [](auto &client) {
     return service_op_result(
         client.install_service(exv::helper::InstallServiceRequest{}),
         "service_install_failed", "Helper service installation failed.");
@@ -180,7 +181,7 @@ UseCaseResult SystemStatusUseCases::uninstall_helper() {
         "vpn_session_active",
         "Disconnect the VPN session before uninstalling the helper service.");
   }
-  return with_helper_service_lease("service.uninstall", false, [](auto &client) {
+  return with_helper_service_lease("service.uninstall", true, "oneshot", [](auto &client) {
     return service_op_result(
         client.uninstall_service(exv::helper::UninstallServiceRequest{}),
         "service_uninstall_failed", "Helper service uninstallation failed.");

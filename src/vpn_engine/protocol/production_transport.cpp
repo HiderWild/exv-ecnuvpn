@@ -8,10 +8,12 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <sstream>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace ecnuvpn {
 namespace vpn_engine {
@@ -19,7 +21,6 @@ namespace protocol {
 
 namespace {
 
-constexpr const char *kAggregateAuthPath = "/";
 constexpr const char *kCstpPath = "/CSCOSSLC/tunnel";
 constexpr const char *kDefaultUserAgent = "ECNU-VPN Native";
 constexpr std::size_t kMaxHttpHeaderBytes = 64 * 1024;
@@ -167,26 +168,33 @@ std::string form_url_encode(const std::string &value) {
   return out;
 }
 
+std::string aggregate_auth_server_url(const ParsedVpnUrl &server) {
+  std::ostringstream out;
+  out << "https://" << host_header(server);
+  if (server.base_path.empty()) {
+    out << "/";
+  } else {
+    out << server.base_path;
+  }
+  return out.str();
+}
+
 std::vector<std::uint8_t> to_bytes(const std::string &text) {
   return std::vector<std::uint8_t>(text.begin(), text.end());
 }
 
 std::string make_aggregate_auth_post_request(const ParsedVpnUrl &server,
                                              const std::string &useragent,
-                                             const std::string &body,
-                                             const std::string &cookie_header) {
+                                             const std::string &body) {
   std::ostringstream out;
-  out << "POST " << kAggregateAuthPath << " HTTP/1.1\r\n";
+  out << "POST / HTTP/1.1\r\n";
   out << "Host: " << host_header(server) << "\r\n";
   out << "User-Agent: " << useragent_or_default(useragent) << "\r\n";
+  out << "Content-Type: application/xml; charset=utf-8\r\n";
+  out << "Accept-Encoding: identity\r\n";
   out << "X-Transcend-Version: 1\r\n";
   out << "X-Aggregate-Auth: 1\r\n";
-  out << "Accept: */*\r\n";
-  out << "Accept-Encoding: identity\r\n";
-  out << "Content-Type: text/xml; charset=utf-8\r\n";
   out << "Content-Length: " << body.size() << "\r\n";
-  if (!cookie_header.empty())
-    out << "Cookie: " << cookie_header << "\r\n";
   out << "Connection: keep-alive\r\n";
   out << "\r\n";
   out << body;
@@ -196,7 +204,11 @@ std::string make_aggregate_auth_post_request(const ParsedVpnUrl &server,
 std::string make_cstp_connect_request(const ParsedVpnUrl &server,
                                       const std::string &useragent,
                                       const std::string &client_hostname,
-                                      const std::string &cookie_header) {
+                                      const std::string &cookie_header,
+                                      int requested_mtu) {
+  if (requested_mtu < 576 || requested_mtu > 1500)
+    requested_mtu = 1290;
+
   std::ostringstream out;
   out << "CONNECT " << kCstpPath << " HTTP/1.1\r\n";
   out << "Host: " << host_header(server) << "\r\n";
@@ -204,7 +216,12 @@ std::string make_cstp_connect_request(const ParsedVpnUrl &server,
   out << "Cookie: " << cookie_header << "\r\n";
   out << "X-CSTP-Version: 1\r\n";
   out << "X-CSTP-Hostname: " << client_hostname << "\r\n";
-  out << "X-CSTP-Address-Type: IPv4\r\n";
+  out << "X-CSTP-Address-Type: IPv6,IPv4\r\n";
+  out << "X-CSTP-Base-MTU: " << requested_mtu << "\r\n";
+  out << "X-CSTP-MTU: " << requested_mtu << "\r\n";
+  out << "X-CSTP-Accept-Encoding: identity\r\n";
+  out << "X-Transcend-Version: 1\r\n";
+  out << "X-Aggregate-Auth: 1\r\n";
   out << "\r\n";
   return out.str();
 }
@@ -213,6 +230,221 @@ bool response_advertises_dtls(const HttpResponse &response) {
   return response.header_ci("X-DTLS-Session-ID") ||
          response.header_ci("X-DTLS12-CipherSuite") ||
          response.header_ci("X-DTLS-CipherSuite");
+}
+
+const AggregateAuthField *field_named(const AggregateAuthResponse &response,
+                                      const std::string &name) {
+  for (const AggregateAuthField &field : response.fields) {
+    if (field.name == name)
+      return &field;
+  }
+  return nullptr;
+}
+
+std::string selected_group_from_response(const AggregateAuthResponse &response) {
+  if (const AggregateAuthField *field = field_named(response, "group_list"))
+    return field->value;
+  return {};
+}
+
+std::string lower_ascii_copy(std::string_view value) {
+  std::string out;
+  out.reserve(value.size());
+  for (unsigned char ch : value)
+    out.push_back(static_cast<char>(std::tolower(ch)));
+  return out;
+}
+
+bool is_challenge_field(const AggregateAuthField &field) {
+  const std::string name = lower_ascii_copy(field.name);
+  return name.find("secondary") != std::string::npos ||
+         name.find("challenge") != std::string::npos ||
+         name.find("token") != std::string::npos ||
+         name.find("passcode") != std::string::npos;
+}
+
+const AggregateAuthField *
+first_challenge_field(const AggregateAuthResponse &response) {
+  for (const AggregateAuthField &field : response.fields) {
+    if (is_challenge_field(field))
+      return &field;
+  }
+  return nullptr;
+}
+
+const AggregateAuthField *
+group_field(const AggregateAuthResponse &response) {
+  return field_named(response, "group_list");
+}
+
+bool group_selection_requires_user_choice(
+    const AggregateAuthResponse &response) {
+  const AggregateAuthField *field = group_field(response);
+  if (!field)
+    return false;
+  return field->value.empty() || field->options.size() > 1;
+}
+
+void append_json_string(std::string *out, std::string_view value) {
+  if (!out)
+    return;
+
+  static constexpr char kHex[] = "0123456789abcdef";
+  out->push_back('"');
+  for (unsigned char ch : value) {
+    switch (ch) {
+    case '"':
+      *out += "\\\"";
+      break;
+    case '\\':
+      *out += "\\\\";
+      break;
+    case '\b':
+      *out += "\\b";
+      break;
+    case '\f':
+      *out += "\\f";
+      break;
+    case '\n':
+      *out += "\\n";
+      break;
+    case '\r':
+      *out += "\\r";
+      break;
+    case '\t':
+      *out += "\\t";
+      break;
+    default:
+      if (ch < 0x20) {
+        *out += "\\u00";
+        out->push_back(kHex[(ch >> 4) & 0x0f]);
+        out->push_back(kHex[ch & 0x0f]);
+      } else {
+        out->push_back(static_cast<char>(ch));
+      }
+      break;
+    }
+  }
+  out->push_back('"');
+}
+
+std::string group_options_json(const AggregateAuthField &field) {
+  std::string out = "[";
+  bool first = true;
+  for (const AggregateAuthChoice &choice : field.options) {
+    if (!first)
+      out.push_back(',');
+    first = false;
+    out += "{\"value\":";
+    append_json_string(&out, choice.value);
+    out += ",\"label\":";
+    append_json_string(&out, choice.label);
+    out.push_back('}');
+  }
+  out.push_back(']');
+  return out;
+}
+
+std::vector<std::string> group_option_values(
+    const AggregateAuthResponse &response) {
+  std::vector<std::string> values;
+  const AggregateAuthField *field = group_field(response);
+  if (!field)
+    return values;
+
+  values.reserve(field->options.size());
+  for (const AggregateAuthChoice &choice : field->options) {
+    if (!choice.value.empty())
+      values.push_back(choice.value);
+  }
+  return values;
+}
+
+AuthResult aggregate_auth_error(const AggregateAuthResponse &response,
+                                const std::string &fallback_code,
+                                const std::string &fallback_message,
+                                const std::string &password,
+                                const std::string &encoded_password,
+                                const std::string &cookie_header) {
+  std::string code = response.error_code.empty() ? fallback_code
+                                                 : response.error_code;
+  std::string message = response.error_message.empty()
+                            ? (response.message.empty() ? fallback_message
+                                                        : response.message)
+                            : response.error_message;
+  return sanitized_auth_error(std::move(code), std::move(message), password,
+                              encoded_password, cookie_header);
+}
+
+AuthResult challenge_auth_error(const AggregateAuthResponse &response,
+                                const std::string &password,
+                                const std::string &encoded_password,
+                                const std::string &cookie_header) {
+  AuthResult result =
+      aggregate_auth_error(response, "auth_challenge_required",
+                           "aggregate-auth challenge requires user input",
+                           password, encoded_password, cookie_header);
+  const AggregateAuthField *field = first_challenge_field(response);
+  if (field) {
+    result.interaction_prompt_label = field->label.empty()
+                                          ? response.message
+                                          : field->label;
+    result.interaction_prompt_type =
+        field->type.empty() ? std::string("password") : field->type;
+  } else {
+    result.interaction_prompt_label = response.message;
+    result.interaction_prompt_type = "password";
+  }
+  return result;
+}
+
+AuthResult group_auth_error(const AggregateAuthResponse &response,
+                            const std::string &password,
+                            const std::string &encoded_password,
+                            const std::string &cookie_header) {
+  AuthResult result =
+      aggregate_auth_error(response, "auth_group_required",
+                           "aggregate-auth group selection requires user input",
+                           password, encoded_password, cookie_header);
+  const AggregateAuthField *field = group_field(response);
+  if (field) {
+    result.interaction_prompt_label =
+        field->label.empty() ? std::string("VPN group") : field->label;
+    result.interaction_prompt_type = "select";
+    result.interaction_group_options = group_options_json(*field);
+  } else {
+    result.interaction_prompt_label = response.message;
+    result.interaction_prompt_type = "select";
+  }
+  return result;
+}
+
+bool resolve_auth_interaction(const ProtocolSessionOptions &options,
+                              std::string kind,
+                              const AuthResult &interaction,
+                              std::vector<std::string> request_options,
+                              std::string *value) {
+  if (!value || !options.auth_interaction_handler)
+    return false;
+
+  AuthInteractionRequest request;
+  request.kind = kind;
+  request.id = "auth-" + std::move(kind) + "-continuation";
+  request.label = interaction.interaction_prompt_label;
+  request.input_type = interaction.interaction_prompt_type;
+  request.options = std::move(request_options);
+
+  try {
+    AuthInteractionResponse response = options.auth_interaction_handler(request);
+    if (!response.ok || response.value.empty())
+      return false;
+    *value = std::move(response.value);
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  } catch (...) {
+    return false;
+  }
 }
 // End inlined from vpn_engine/protocol/production_transport_requests include-unit
 // Begin inlined from vpn_engine/protocol/production_transport_response_parse include-unit
@@ -294,9 +526,11 @@ AuthResult ProductionProtocolTransport::authenticate(
     const ProtocolSessionOptions &options) {
   server_ = options.server;
   useragent_ = options.useragent;
+  requested_mtu_ = options.mtu_fallback;
   current_password_ = options.password;
   current_password_form_encoded_ = form_url_encode(options.password);
   dtls_disabled_ = options.disable_dtls;
+  auth_cookie_.clear();
   cookies_.clear();
   read_buffer_.clear();
   cstp_connected_ = false;
@@ -316,77 +550,120 @@ AuthResult ProductionProtocolTransport::authenticate(
       return sanitized_auth_error(connected.code, connected.message,
                                   current_password_,
                                   current_password_form_encoded_,
-                                  cookies_.header());
+                                  auth_cookie_);
     }
     stream_connected_ = true;
   }
 
   {
-    const std::string body = make_aggregate_auth_init_xml();
-    ValidationResult written = stream_->write_all(to_bytes(
-        make_aggregate_auth_post_request(server_, useragent_, body, {})));
+    AggregateAuthInitRequest init;
+    init.server_url = aggregate_auth_server_url(server_);
+    init.device_id = client_hostname_;
+    init.version = useragent_or_default(useragent_);
+    const std::string body = build_aggregate_auth_init_xml(init);
+    ValidationResult written =
+        stream_->write_all(
+            to_bytes(make_aggregate_auth_post_request(server_, useragent_, body)));
     if (!written.ok) {
       ValidationResult sanitized =
           sanitized_result(written, current_password_,
-                           current_password_form_encoded_, cookies_.header());
+                           current_password_form_encoded_, auth_cookie_);
       return auth_error(sanitized.code, sanitized.message);
     }
   }
 
-  HttpResponse preflight;
+  HttpResponse init_http;
   {
-    ValidationResult read = read_http_response(false, &preflight);
+    ValidationResult read = read_http_response(false, &init_http);
     if (!read.ok) {
-      return auth_error(read.code, read.message);
+      ValidationResult sanitized =
+          sanitized_result(read, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      return auth_error(sanitized.code, sanitized.message);
     }
   }
 
-  if (preflight.status < 200 || preflight.status >= 300) {
-    AuthResult parsed = parse_auth_response(preflight);
-    if (!parsed.ok) {
-      parsed.error_message =
-          sanitized_message(parsed.error_message, current_password_,
-                            current_password_form_encoded_, cookies_.header());
-      return parsed;
-    }
-    return sanitized_auth_error("protocol_error",
-                                "unexpected HTTP status in aggregate-auth init",
+  if (init_http.status < 200 || init_http.status >= 300) {
+    return sanitized_auth_error("auth_protocol_error",
+                                "aggregate-auth init returned HTTP status " +
+                                    std::to_string(init_http.status),
                                 current_password_,
-                                current_password_form_encoded_,
-                                cookies_.header());
+                                current_password_form_encoded_, auth_cookie_);
   }
 
-  cookies_.collect_from_response(preflight);
+  AggregateAuthResponse init_response;
   {
-    AggregateAuthResult parsed_init =
-        parse_aggregate_auth_response(preflight);
-    if (parsed_init.ok) {
-      AuthResult result;
-      result.ok = true;
-      result.cookie = parsed_init.cookie;
-      return result;
-    }
-    if (parsed_init.error_code == "csd_required_unsupported" ||
-        parsed_init.error_code == "unsupported_auth_flow" ||
-        parsed_init.error_code == "auth_failed") {
-      return sanitized_auth_error(parsed_init.error_code,
-                                  parsed_init.error_message,
-                                  current_password_,
-                                  current_password_form_encoded_,
-                                  cookies_.header());
+    ValidationResult parsed =
+        parse_aggregate_auth_response(init_http.body, &init_response);
+    if (!parsed.ok) {
+      ValidationResult sanitized =
+          sanitized_result(parsed, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      return auth_error(sanitized.code, sanitized.message);
     }
   }
 
+  if (init_response.type == AggregateAuthResponseType::error) {
+    return aggregate_auth_error(init_response, "auth_rejected",
+                                "aggregate-auth init rejected credentials",
+                                current_password_,
+                                current_password_form_encoded_, auth_cookie_);
+  }
+  std::string selected_group = options.auth_group;
+  std::string challenge_value;
+  if (init_response.type == AggregateAuthResponseType::challenge) {
+    AuthResult interaction =
+        challenge_auth_error(init_response, current_password_,
+                             current_password_form_encoded_, auth_cookie_);
+    if (!resolve_auth_interaction(options, "challenge", interaction, {},
+                                  &challenge_value)) {
+      return interaction;
+    }
+  }
+  if (init_response.type == AggregateAuthResponseType::group_select &&
+      selected_group.empty() &&
+      group_selection_requires_user_choice(init_response)) {
+    AuthResult interaction =
+        group_auth_error(init_response, current_password_,
+                         current_password_form_encoded_, auth_cookie_);
+    if (!resolve_auth_interaction(options, "group", interaction,
+                                  group_option_values(init_response),
+                                  &selected_group)) {
+      return interaction;
+    }
+  } else if (selected_group.empty()) {
+    selected_group = selected_group_from_response(init_response);
+  }
+  if (init_response.type == AggregateAuthResponseType::host_scan) {
+    return sanitized_auth_error("csd_required_unsupported",
+                                "AnyConnect host-scan is required",
+                                current_password_,
+                                current_password_form_encoded_, auth_cookie_);
+  }
+  if (init_response.type != AggregateAuthResponseType::auth_request &&
+      init_response.type != AggregateAuthResponseType::group_select &&
+      init_response.type != AggregateAuthResponseType::challenge) {
+    return sanitized_auth_error("auth_protocol_error",
+                                "aggregate-auth init did not request credentials",
+                                current_password_,
+                                current_password_form_encoded_, auth_cookie_);
+  }
+
   {
-    const std::string body =
-        make_aggregate_auth_reply_xml(options.username, options.password);
-    ValidationResult written = stream_->write_all(to_bytes(
-        make_aggregate_auth_post_request(server_, useragent_, body,
-                                         cookies_.header())));
+    AggregateAuthReplyRequest reply;
+    reply.username = options.username;
+    reply.password = current_password_;
+    reply.selected_group = selected_group;
+    reply.challenge_value = challenge_value;
+    reply.opaque_xml = init_response.opaque_xml;
+    const std::string body = build_aggregate_auth_reply_xml(reply);
+    ValidationResult written =
+        stream_->write_all(
+            to_bytes(make_aggregate_auth_post_request(server_, useragent_, body)));
     if (!written.ok) {
       ValidationResult sanitized =
           sanitized_result(written, current_password_,
-                           current_password_form_encoded_, cookies_.header());
+                           current_password_form_encoded_, auth_cookie_);
       return auth_error(sanitized.code, sanitized.message);
     }
   }
@@ -396,61 +673,134 @@ AuthResult ProductionProtocolTransport::authenticate(
     ValidationResult read =
         read_http_response(false, &submitted);
     if (!read.ok) {
-      return auth_error(read.code, read.message);
+      ValidationResult sanitized =
+          sanitized_result(read, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      return auth_error(sanitized.code, sanitized.message);
     }
   }
 
-  cookies_.collect_from_response(submitted);
+  if (submitted.status < 200 || submitted.status >= 300) {
+    return sanitized_auth_error("auth_protocol_error",
+                                "aggregate-auth reply returned HTTP status " +
+                                    std::to_string(submitted.status),
+                                current_password_,
+                                current_password_form_encoded_, auth_cookie_);
+  }
 
-  AggregateAuthResult parsed = parse_aggregate_auth_response(submitted);
-  if (!parsed.ok &&
-      (parsed.error_code == "auth_challenge_required" ||
-       parsed.error_code == "auth_group_required") &&
-      options.auth_interaction_handler) {
-    AuthInteractionRequest request;
-    request.id = "auth-continuation-1";
-    request.kind = parsed.prompt.kind;
-    request.label = parsed.prompt.label;
-    request.input_type = parsed.prompt.input_type;
-    request.options = parsed.prompt.options;
+  AggregateAuthResponse submitted_auth;
+  {
+    ValidationResult parsed =
+        parse_aggregate_auth_response(submitted.body, &submitted_auth);
+    if (!parsed.ok) {
+      ValidationResult sanitized =
+          sanitized_result(parsed, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      return auth_error(sanitized.code, sanitized.message);
+    }
+  }
 
-    AuthInteractionResponse response = options.auth_interaction_handler(request);
-    if (response.ok && !response.value.empty()) {
-      const std::string group =
-          parsed.prompt.kind == "group" ? response.value : std::string();
-      const std::string secondary =
-          parsed.prompt.kind == "challenge" ? response.value : std::string();
-      const std::string body = make_aggregate_auth_reply_xml(
-          options.username, options.password, group, secondary);
-      ValidationResult written = stream_->write_all(to_bytes(
-          make_aggregate_auth_post_request(server_, useragent_, body,
-                                           cookies_.header())));
-      if (!written.ok) {
-        ValidationResult sanitized =
-            sanitized_result(written, current_password_,
-                             current_password_form_encoded_, cookies_.header());
-        return auth_error(sanitized.code, sanitized.message);
+  for (int followup = 0; followup < 3; ++followup) {
+    if (submitted_auth.type == AggregateAuthResponseType::error) {
+      return aggregate_auth_error(submitted_auth, "auth_rejected",
+                                  "aggregate-auth rejected credentials",
+                                  current_password_,
+                                  current_password_form_encoded_, auth_cookie_);
+    }
+    if (submitted_auth.type == AggregateAuthResponseType::host_scan) {
+      return sanitized_auth_error("csd_required_unsupported",
+                                  "AnyConnect host-scan is required",
+                                  current_password_,
+                                  current_password_form_encoded_, auth_cookie_);
+    }
+    if (submitted_auth.type != AggregateAuthResponseType::challenge &&
+        submitted_auth.type != AggregateAuthResponseType::group_select) {
+      break;
+    }
+
+    AggregateAuthReplyRequest reply;
+    reply.opaque_xml = submitted_auth.opaque_xml;
+    if (submitted_auth.type == AggregateAuthResponseType::challenge) {
+      AuthResult interaction =
+          challenge_auth_error(submitted_auth, current_password_,
+                               current_password_form_encoded_, auth_cookie_);
+      if (!resolve_auth_interaction(options, "challenge", interaction, {},
+                                    &reply.challenge_value)) {
+        return interaction;
       }
+    } else {
+      AuthResult interaction =
+          group_auth_error(submitted_auth, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      if (!resolve_auth_interaction(options, "group", interaction,
+                                    group_option_values(submitted_auth),
+                                    &reply.selected_group)) {
+        return interaction;
+      }
+    }
 
-      HttpResponse continued;
-      ValidationResult read = read_http_response(false, &continued);
-      if (!read.ok)
-        return auth_error(read.code, read.message);
-      cookies_.collect_from_response(continued);
-      parsed = parse_aggregate_auth_response(continued);
+    const std::string body = build_aggregate_auth_reply_xml(reply);
+    ValidationResult written =
+        stream_->write_all(
+            to_bytes(make_aggregate_auth_post_request(server_, useragent_, body)));
+    if (!written.ok) {
+      ValidationResult sanitized =
+          sanitized_result(written, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      return auth_error(sanitized.code, sanitized.message);
+    }
+
+    HttpResponse followup_http;
+    ValidationResult read = read_http_response(false, &followup_http);
+    if (!read.ok) {
+      ValidationResult sanitized =
+          sanitized_result(read, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      return auth_error(sanitized.code, sanitized.message);
+    }
+    if (followup_http.status < 200 || followup_http.status >= 300) {
+      return sanitized_auth_error("auth_protocol_error",
+                                  "aggregate-auth follow-up returned HTTP status " +
+                                      std::to_string(followup_http.status),
+                                  current_password_,
+                                  current_password_form_encoded_, auth_cookie_);
+    }
+
+    ValidationResult parsed =
+        parse_aggregate_auth_response(followup_http.body, &submitted_auth);
+    if (!parsed.ok) {
+      ValidationResult sanitized =
+          sanitized_result(parsed, current_password_,
+                           current_password_form_encoded_, auth_cookie_);
+      return auth_error(sanitized.code, sanitized.message);
     }
   }
 
-  if (!parsed.ok) {
-    return sanitized_auth_error(parsed.error_code, parsed.error_message,
+  if (submitted_auth.type == AggregateAuthResponseType::challenge) {
+    return challenge_auth_error(submitted_auth, current_password_,
+                                current_password_form_encoded_, auth_cookie_);
+  }
+  if (submitted_auth.type == AggregateAuthResponseType::group_select) {
+    return group_auth_error(submitted_auth, current_password_,
+                            current_password_form_encoded_, auth_cookie_);
+  }
+
+  const std::string token = !submitted_auth.session_token.empty()
+                                ? submitted_auth.session_token
+                                : submitted_auth.session_id;
+  if (submitted_auth.type != AggregateAuthResponseType::success ||
+      token.empty()) {
+    return sanitized_auth_error("protocol_error",
+                                "missing session token in aggregate-auth response",
                                 current_password_,
                                 current_password_form_encoded_,
-                                cookies_.header());
+                                auth_cookie_);
   }
 
+  auth_cookie_ = "webvpn=" + token;
   AuthResult result;
   result.ok = true;
-  result.cookie = parsed.cookie;
+  result.cookie = auth_cookie_;
   return result;
 }
 // End inlined from vpn_engine/protocol/production_transport_auth include-unit
@@ -465,15 +815,15 @@ ProductionProtocolTransport::connect_cstp(const std::string &cookie,
   if (!stream_connected_)
     return invalid("transport_closed", "TLS stream is not connected");
 
-  const std::string effective_cookie = cookie.empty() ? cookies_.header() : cookie;
+  const std::string effective_cookie = cookie.empty() ? auth_cookie_ : cookie;
   if (effective_cookie.empty())
     return invalid("auth_cookie_missing", "CSTP connect requires auth cookie");
 
   ValidationResult written = stream_->write_all(to_bytes(make_cstp_connect_request(
-      server_, useragent_, client_hostname_, effective_cookie)));
+      server_, useragent_, client_hostname_, effective_cookie, requested_mtu_)));
   if (!written.ok) {
     return sanitized_result(written, current_password_,
-                            current_password_form_encoded_, cookies_.header(),
+                            current_password_form_encoded_, auth_cookie_,
                             effective_cookie);
   }
 
@@ -484,7 +834,7 @@ ProductionProtocolTransport::connect_cstp(const std::string &cookie,
     cstp_connected_ = false;
     read_buffer_.clear();
     return sanitized_result(read, current_password_,
-                            current_password_form_encoded_, cookies_.header(),
+                            current_password_form_encoded_, auth_cookie_,
                             effective_cookie);
   }
 
@@ -493,7 +843,7 @@ ProductionProtocolTransport::connect_cstp(const std::string &cookie,
     cstp_connected_ = false;
     read_buffer_.clear();
     return sanitized_result(parsed, current_password_,
-                            current_password_form_encoded_, cookies_.header(),
+                            current_password_form_encoded_, auth_cookie_,
                             effective_cookie);
   }
 
@@ -520,7 +870,7 @@ ValidationResult ProductionProtocolTransport::write_frame_locked(
   ValidationResult written = stream_->write_all(wire);
   if (!written.ok) {
     return sanitized_result(written, current_password_,
-                            current_password_form_encoded_, cookies_.header());
+                            current_password_form_encoded_, auth_cookie_);
   }
   return {};
 }
@@ -557,6 +907,8 @@ ProductionProtocolTransport::send_control(InboundFrameKind kind) {
     break;
   case InboundFrameKind::data:
   case InboundFrameKind::none:
+  case InboundFrameKind::compressed:
+  case InboundFrameKind::terminate:
   default:
     return invalid("cstp_control_invalid",
                    "send_control requires a control frame kind");
@@ -605,6 +957,12 @@ ProductionProtocolTransport::receive_frame(InboundFrame *out) {
       case CstpFrameType::disconnect:
         out->kind = InboundFrameKind::disconnect;
         break;
+      case CstpFrameType::compressed:
+        out->kind = InboundFrameKind::compressed;
+        break;
+      case CstpFrameType::terminate:
+        out->kind = InboundFrameKind::terminate;
+        break;
       }
       out->payload = std::move(inbound.payload);
       return {};
@@ -612,7 +970,7 @@ ProductionProtocolTransport::receive_frame(InboundFrame *out) {
 
     if (decoded.code != "cstp_frame_incomplete") {
       return sanitized_result(decoded, current_password_,
-                              current_password_form_encoded_, cookies_.header());
+                              current_password_form_encoded_, auth_cookie_);
     }
 
     ValidationResult read = read_more();
@@ -638,6 +996,7 @@ void ProductionProtocolTransport::disconnect() {
   cstp_connected_ = false;
   read_buffer_.clear();
   cookies_.clear();
+  auth_cookie_.clear();
   current_password_.clear();
   current_password_form_encoded_.clear();
 }
@@ -652,6 +1011,7 @@ void ProductionProtocolTransport::reset_for_reconnect() {
   cstp_connected_ = false;
   read_buffer_.clear();
   cookies_.clear();
+  auth_cookie_.clear();
   current_password_.clear();
   current_password_form_encoded_.clear();
 }
@@ -661,7 +1021,7 @@ ValidationResult ProductionProtocolTransport::read_more() {
   ValidationResult read = stream_->read_some(&chunk);
   if (!read.ok) {
     return sanitized_result(read, current_password_,
-                            current_password_form_encoded_, cookies_.header());
+                            current_password_form_encoded_, auth_cookie_);
   }
   if (chunk.empty())
     return invalid("transport_closed", "TLS stream closed during CSTP read");

@@ -29,6 +29,8 @@ struct NativeVpnEngineDependencies {
   std::function<protocol::AuthInteractionResponse(
       const protocol::AuthInteractionRequest &)>
       auth_interaction_handler;
+  std::function<void(protocol::ProtocolSessionOptions *)>
+      protocol_options_configurator;
   // Optional observer owned by the caller. It must outlive the session and its
   // emit() implementation must be safe from both the caller thread and the
   // packet-loop thread.

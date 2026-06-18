@@ -1,5 +1,7 @@
 #include "platform/win32/ui_shell/webview2_host_win32.hpp"
 
+#include "app/ui_shell/close_preference.hpp"
+#include "platform/win32/ui_shell/resource.hpp"
 #include "platform/win32/ui_shell/webview2_runtime_win32.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -9,7 +11,12 @@
 
 #include <filesystem>
 #include <memory>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -32,7 +39,11 @@ constexpr DWORD kFixedWindowStyle =
 constexpr int kTrayCommandShow = 1001;
 constexpr int kTrayCommandQuit = 1002;
 constexpr UINT kTrayCallbackMessage = WM_APP + 0x42;
+constexpr UINT kApplyWindowModeMessage = WM_APP + 0x43;
+constexpr UINT kHostBridgeResponseMessage = WM_APP + 0x44;
+constexpr UINT kRendererEventMessage = WM_APP + 0x45;
 constexpr UINT kTrayIconId = 1;
+constexpr UINT kDefaultDpi = 96;
 
 std::wstring wide_from_utf8(const std::string &value) {
   if (value.empty()) {
@@ -92,6 +103,51 @@ std::string percent_encode_file_uri_path(const std::string &value) {
 }
 
 #if defined(EXV_BUILD_UI_SHELL)
+
+using GetDpiForSystemFn = UINT(WINAPI *)();
+using GetDpiForWindowFn = UINT(WINAPI *)(HWND);
+
+FARPROC user32_proc(const char *name) {
+  HMODULE user32 = GetModuleHandleW(L"user32.dll");
+  return user32 ? GetProcAddress(user32, name) : nullptr;
+}
+
+UINT initial_window_dpi() {
+  auto *get_dpi_for_system =
+      reinterpret_cast<GetDpiForSystemFn>(user32_proc("GetDpiForSystem"));
+  if (get_dpi_for_system) {
+    const UINT dpi = get_dpi_for_system();
+    if (dpi != 0) {
+      return dpi;
+    }
+  }
+
+  HDC screen = GetDC(nullptr);
+  if (!screen) {
+    return kDefaultDpi;
+  }
+  const int dpi = GetDeviceCaps(screen, LOGPIXELSX);
+  ReleaseDC(nullptr, screen);
+  return dpi > 0 ? static_cast<UINT>(dpi) : kDefaultDpi;
+}
+
+UINT dpi_for_window(HWND hwnd) {
+  auto *get_dpi_for_window =
+      reinterpret_cast<GetDpiForWindowFn>(user32_proc("GetDpiForWindow"));
+  if (get_dpi_for_window && hwnd) {
+    const UINT dpi = get_dpi_for_window(hwnd);
+    if (dpi != 0) {
+      return dpi;
+    }
+  }
+  return initial_window_dpi();
+}
+
+HICON load_shared_app_icon(HINSTANCE instance, int width, int height) {
+  return static_cast<HICON>(LoadImageW(
+      instance, MAKEINTRESOURCEW(IDI_ECNUVPN_APP), IMAGE_ICON, width, height,
+      LR_DEFAULTCOLOR | LR_SHARED));
+}
 
 std::wstring temp_bootstrapper_path() {
   wchar_t temp_dir[MAX_PATH] = {};
@@ -218,6 +274,7 @@ private:
 class WebView2Window final : public ecnuvpn::ui_shell::UiWindow {
 public:
   ~WebView2Window() override {
+    stop_host_bridge_worker();
     if (webview_ && web_message_token_.value != 0) {
       webview_->remove_WebMessageReceived(web_message_token_);
     }
@@ -229,6 +286,7 @@ public:
   }
 
   int run(const ecnuvpn::ui_shell::UiWindowConfig &config) override {
+    ui_thread_id_ = GetCurrentThreadId();
     active_config_ = config;
     if (!ensure_runtime_available()) {
       return 70;
@@ -248,6 +306,7 @@ public:
     }
 
     create_tray_icon();
+    start_host_bridge_worker();
 
     running_ = true;
     ShowWindow(hwnd_, SW_SHOW);
@@ -279,6 +338,7 @@ public:
       Sleep(15);
     }
 
+    stop_host_bridge_worker();
     if (hwnd_) {
       DestroyWindow(hwnd_);
       hwnd_ = nullptr;
@@ -291,12 +351,38 @@ public:
   }
 
   void emit_event(const std::string &event_json) override {
+    if (ui_thread_id_ != 0 && GetCurrentThreadId() != ui_thread_id_) {
+      {
+        std::lock_guard<std::mutex> lock(renderer_event_mutex_);
+        renderer_event_queue_.push(event_json);
+      }
+      if (hwnd_) {
+        PostMessageW(hwnd_, kRendererEventMessage, 0, 0);
+      }
+      return;
+    }
+    post_renderer_event(event_json);
+  }
+
+  void post_renderer_event(const std::string &event_json) {
     if (!webview_) {
       pending_events_.push_back(event_json);
       return;
     }
     const std::wstring wide_event = wide_from_utf8(event_json);
     webview_->PostWebMessageAsJson(wide_event.c_str());
+  }
+
+  void flush_renderer_events() {
+    std::queue<std::string> events;
+    {
+      std::lock_guard<std::mutex> lock(renderer_event_mutex_);
+      events.swap(renderer_event_queue_);
+    }
+    while (!events.empty()) {
+      post_renderer_event(events.front());
+      events.pop();
+    }
   }
 
   void on_environment_created(HRESULT error_code,
@@ -387,7 +473,8 @@ public:
             mode = payload["mode"].get<std::string>();
           }
         }
-        apply_window_mode(mode);
+        mode = mode == "minimal" ? "minimal" : "advanced";
+        defer_window_mode(mode);
         nlohmann::ordered_json out;
         out["id"] = id;
         out["ok"] = true;
@@ -400,31 +487,8 @@ public:
         return S_OK;
       }
       if (action == "window.resolveClosePrompt") {
-        std::string resolved_action = "cancel";
-        if (parsed.contains("payload") && parsed["payload"].is_object()) {
-          const auto &payload = parsed["payload"];
-          if (payload.contains("result")) {
-            const auto &result = payload["result"];
-            if (result.is_string()) {
-              resolved_action = result.get<std::string>();
-            } else if (result.is_object() && result.contains("action") &&
-                       result["action"].is_string()) {
-              resolved_action = result["action"].get<std::string>();
-            }
-          }
-        }
-        if (resolved_action == "tray") {
-          close_prompt_pending_ = false;
-          if (hwnd_) {
-            ShowWindow(hwnd_, SW_HIDE);
-          }
-        } else if (resolved_action == "quit") {
-          close_prompt_pending_ = false;
-          quit_from_tray();
-        } else {
-          close_prompt_pending_ = false;
-          show_from_tray();
-        }
+        apply_close_resolution(
+            ecnuvpn::ui_shell::parse_close_prompt_resolution(request_json));
         nlohmann::ordered_json out;
         out["id"] = id;
         out["ok"] = true;
@@ -435,14 +499,81 @@ public:
         return S_OK;
       }
     } catch (const nlohmann::json::exception &) {
-      // Fall through to existing handler_ path on parse failure.
+      // Fall through to the worker-backed handler path on parse failure.
     }
 
-    std::string response_json =
-        handler_ ? handler_(request_json)
-                 : R"({"id":0,"ok":false,"code":"host_unavailable","message":"Desktop host bridge is not ready"})";
-    const std::wstring wide_response = wide_from_utf8(response_json);
-    return webview_->PostWebMessageAsJson(wide_response.c_str());
+    enqueue_host_request(request_json);
+    return S_OK;
+  }
+
+  void enqueue_host_request(std::string request_json) {
+    {
+      std::lock_guard<std::mutex> lock(host_request_mutex_);
+      host_request_queue_.push(std::move(request_json));
+    }
+    host_request_cv_.notify_one();
+  }
+
+  void start_host_bridge_worker() {
+    {
+      std::lock_guard<std::mutex> lock(host_request_mutex_);
+      host_request_stop_ = false;
+    }
+    host_request_thread_ = std::thread([this]() { host_bridge_worker_loop(); });
+  }
+
+  void stop_host_bridge_worker() {
+    {
+      std::lock_guard<std::mutex> lock(host_request_mutex_);
+      host_request_stop_ = true;
+    }
+    host_request_cv_.notify_all();
+    if (host_request_thread_.joinable()) {
+      host_request_thread_.join();
+    }
+  }
+
+  void host_bridge_worker_loop() {
+    for (;;) {
+      std::string request_json;
+      {
+        std::unique_lock<std::mutex> lock(host_request_mutex_);
+        host_request_cv_.wait(lock, [this]() {
+          return host_request_stop_ || !host_request_queue_.empty();
+        });
+        if (host_request_stop_ && host_request_queue_.empty()) {
+          return;
+        }
+        request_json = std::move(host_request_queue_.front());
+        host_request_queue_.pop();
+      }
+
+      std::string response_json =
+          handler_ ? handler_(request_json)
+                   : R"({"id":0,"ok":false,"code":"host_unavailable","message":"Desktop host bridge is not ready"})";
+      {
+        std::lock_guard<std::mutex> lock(host_response_mutex_);
+        host_response_queue_.push(std::move(response_json));
+      }
+      if (hwnd_) {
+        PostMessageW(hwnd_, kHostBridgeResponseMessage, 0, 0);
+      }
+    }
+  }
+
+  void flush_host_bridge_responses() {
+    std::queue<std::string> responses;
+    {
+      std::lock_guard<std::mutex> lock(host_response_mutex_);
+      responses.swap(host_response_queue_);
+    }
+    while (!responses.empty()) {
+      const std::wstring wide_response = wide_from_utf8(responses.front());
+      if (webview_) {
+        webview_->PostWebMessageAsJson(wide_response.c_str());
+      }
+      responses.pop();
+    }
   }
 
   void resize_webview() {
@@ -463,7 +594,12 @@ public:
     tray_icon_.uID = kTrayIconId;
     tray_icon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     tray_icon_.uCallbackMessage = kTrayCallbackMessage;
-    tray_icon_.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+    tray_icon_.hIcon =
+        load_shared_app_icon(instance_, GetSystemMetrics(SM_CXSMICON),
+                             GetSystemMetrics(SM_CYSMICON));
+    if (!tray_icon_.hIcon) {
+      return false;
+    }
     wcscpy_s(tray_icon_.szTip, L"ECNU VPN");
     tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &tray_icon_) == TRUE;
     return tray_icon_added_;
@@ -475,6 +611,14 @@ public:
     }
     Shell_NotifyIconW(NIM_DELETE, &tray_icon_);
     tray_icon_added_ = false;
+  }
+
+  void recreate_tray_icon() {
+    if (!hwnd_) {
+      return;
+    }
+    tray_icon_added_ = false;
+    create_tray_icon();
   }
 
   void show_from_tray() {
@@ -498,19 +642,74 @@ public:
       show_from_tray();
       return;
     }
+    if (const auto remembered_action =
+            ecnuvpn::ui_shell::read_close_preference(active_config_.state_dir)) {
+      apply_close_resolution({*remembered_action, false});
+      return;
+    }
     close_prompt_pending_ = true;
     emit_event(R"({"type":"close-request","data":{}})");
   }
 
+  void apply_close_resolution(
+      const ecnuvpn::ui_shell::ClosePromptResolution &resolution) {
+    close_prompt_pending_ = false;
+    if (resolution.remember) {
+      ecnuvpn::ui_shell::write_close_preference(active_config_.state_dir,
+                                                resolution.action);
+    }
+
+    if (resolution.action == "tray") {
+      if (hwnd_) {
+        ShowWindow(hwnd_, SW_HIDE);
+      }
+    } else if (resolution.action == "quit") {
+      quit_from_tray();
+    } else {
+      show_from_tray();
+    }
+  }
+
+  void defer_window_mode(const std::string &mode) {
+    pending_window_mode_ = mode == "minimal" ? "minimal" : "advanced";
+    if (!hwnd_ || !PostMessageW(hwnd_, kApplyWindowModeMessage, 0, 0)) {
+      apply_deferred_window_mode();
+    }
+  }
+
+  void apply_deferred_window_mode() {
+    std::string mode = pending_window_mode_.empty() ? current_window_mode_
+                                                    : pending_window_mode_;
+    pending_window_mode_.clear();
+    apply_window_mode(mode);
+  }
+
   void apply_window_mode(const std::string &mode) {
-    const auto bounds = mode == "minimal"
-                            ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
-                            : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+    current_window_mode_ = mode == "minimal" ? "minimal" : "advanced";
+    const UINT dpi = hwnd_ ? dpi_for_window(hwnd_) : kDefaultDpi;
+    const auto bounds =
+        webview2_window_mode_bounds_for_dpi(current_window_mode_, dpi);
     if (hwnd_) {
       SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
                    SWP_NOMOVE | SWP_NOZORDER);
       resize_webview();
     }
+  }
+
+  void apply_dpi_changed_bounds(UINT dpi, const RECT *suggested_rect) {
+    if (!hwnd_) {
+      return;
+    }
+    const auto bounds =
+        webview2_window_mode_bounds_for_dpi(current_window_mode_, dpi);
+    if (suggested_rect) {
+      SetWindowPos(hwnd_, nullptr, suggested_rect->left, suggested_rect->top,
+                   bounds.width, bounds.height, SWP_NOZORDER | SWP_NOACTIVATE);
+    } else {
+      SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    resize_webview();
   }
 
   void show_tray_menu() {
@@ -590,14 +789,24 @@ private:
   }
 
   bool create_window() {
-    const auto bounds = webview2_default_window_bounds();
+    const auto bounds =
+        webview2_window_mode_bounds_for_dpi("advanced", initial_window_dpi());
     instance_ = GetModuleHandleW(nullptr);
-    WNDCLASSW window_class{};
+    taskbar_created_message_ =
+        RegisterWindowMessageW(webview2_taskbar_created_message_name().c_str());
+    WNDCLASSEXW window_class{};
+    window_class.cbSize = sizeof(window_class);
     window_class.lpfnWndProc = &WebView2Window::window_proc;
     window_class.hInstance = instance_;
     window_class.lpszClassName = L"ECNUVPNWebViewShellWindow";
     window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-    RegisterClassW(&window_class);
+    window_class.hIcon =
+        load_shared_app_icon(instance_, GetSystemMetrics(SM_CXICON),
+                             GetSystemMetrics(SM_CYICON));
+    window_class.hIconSm =
+        load_shared_app_icon(instance_, GetSystemMetrics(SM_CXSMICON),
+                             GetSystemMetrics(SM_CYSMICON));
+    RegisterClassExW(&window_class);
 
     hwnd_ = CreateWindowExW(0, window_class.lpszClassName, L"ECNU VPN",
                             kFixedWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -744,9 +953,19 @@ private:
     }
 
     if (self) {
+      if (self->taskbar_created_message_ != 0 &&
+          message == self->taskbar_created_message_) {
+        self->recreate_tray_icon();
+        return 0;
+      }
       switch (message) {
       case WM_SIZE:
         self->resize_webview();
+        return 0;
+      case WM_DPICHANGED:
+        self->apply_dpi_changed_bounds(
+            static_cast<UINT>(HIWORD(wparam)),
+            reinterpret_cast<const RECT *>(lparam));
         return 0;
       case WM_CLOSE:
         if (self->force_quit_) {
@@ -764,6 +983,15 @@ private:
         } else if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
           self->show_tray_menu();
         }
+        return 0;
+      case kApplyWindowModeMessage:
+        self->apply_deferred_window_mode();
+        return 0;
+      case kHostBridgeResponseMessage:
+        self->flush_host_bridge_responses();
+        return 0;
+      case kRendererEventMessage:
+        self->flush_renderer_events();
         return 0;
       default:
         break;
@@ -783,7 +1011,20 @@ private:
   ComPtr<ICoreWebView2Controller> controller_;
   ComPtr<ICoreWebView2> webview_;
   std::vector<std::string> pending_events_;
+  std::mutex renderer_event_mutex_;
+  std::queue<std::string> renderer_event_queue_;
+  std::mutex host_request_mutex_;
+  std::condition_variable host_request_cv_;
+  std::queue<std::string> host_request_queue_;
+  std::mutex host_response_mutex_;
+  std::queue<std::string> host_response_queue_;
+  std::thread host_request_thread_;
   NOTIFYICONDATAW tray_icon_{};
+  DWORD ui_thread_id_ = 0;
+  UINT taskbar_created_message_ = 0;
+  std::string current_window_mode_ = "advanced";
+  std::string pending_window_mode_;
+  bool host_request_stop_ = false;
   bool tray_icon_added_ = false;
   bool force_quit_ = false;
   bool close_prompt_pending_ = false;
@@ -877,8 +1118,28 @@ ecnuvpn::ui_shell::WindowBounds webview2_default_window_bounds() noexcept {
   return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
 }
 
+ecnuvpn::ui_shell::WindowBounds
+webview2_window_mode_bounds_for_dpi(std::string_view mode,
+                                    unsigned int dpi) noexcept {
+  const auto bounds = mode == "minimal"
+                          ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
+                          : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+  const int effective_dpi =
+      dpi == 0 ? static_cast<int>(kDefaultDpi) : static_cast<int>(dpi);
+  return {MulDiv(bounds.width, effective_dpi, static_cast<int>(kDefaultDpi)),
+          MulDiv(bounds.height, effective_dpi, static_cast<int>(kDefaultDpi))};
+}
+
 bool webview2_should_create_tray_on_start() {
   return true;
+}
+
+int webview2_app_icon_resource_id() noexcept {
+  return IDI_ECNUVPN_APP;
+}
+
+std::wstring webview2_taskbar_created_message_name() {
+  return L"TaskbarCreated";
 }
 
 std::vector<WebView2TrayMenuItem> webview2_tray_menu_model() {

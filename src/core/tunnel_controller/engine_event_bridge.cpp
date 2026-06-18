@@ -25,6 +25,10 @@ bool is_log_worthy_event(const std::string& type) {
            type == "auth.started" ||
            type == "auth.succeeded" ||
            type == "auth.failed" ||
+           type == "auth.challenge_required" ||
+           type == "auth.group_required" ||
+           type == "csd.required_unsupported" ||
+           type == "dtls.unavailable" ||
            type == "cstp.connected" ||
            type == "cstp.failed" ||
            type == "packet.loop.started" ||
@@ -158,6 +162,14 @@ bool EngineEventBridge::map_event(const std::string& engine_type,
     }
     if (engine_type == "auth.failed") {
         *out = TunnelEventType::AuthFailed;
+        return true;
+    }
+    if (engine_type == "auth.challenge_required") {
+        *out = TunnelEventType::AuthChallengeRequired;
+        return true;
+    }
+    if (engine_type == "auth.group_required") {
+        *out = TunnelEventType::AuthGroupRequired;
         return true;
     }
     if (engine_type == "cstp.connected") {

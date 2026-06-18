@@ -5,7 +5,6 @@
 #include <shellapi.h>
 #include <sddl.h>
 
-#include "helper/common/helper_messages.hpp"
 #include "platform/common/backend_resolver.hpp"
 #include "platform/common/file_system.hpp"
 #include "platform/common/interface_stats.hpp"
@@ -38,14 +37,15 @@ std::string random_hex(size_t bytes) {
   return out.str();
 }
 
-bool wait_for_helper_hello(const HelperEndpoint &endpoint) {
+bool wait_for_helper_pipe_available(const std::string &endpoint,
+                                    DWORD *last_error) {
   for (int i = 0; i < 40; ++i) {
-    exv::helper::HelperRequest request;
-    request.op = exv::helper::HelperOp::Hello;
-    request.payload_json = nlohmann::json(exv::helper::HelloRequest{}).dump();
-    nlohmann::json hello = send_helper_request(endpoint, nlohmann::json(request));
-    if (hello.value("success", false))
+    if (WaitNamedPipeA(endpoint.c_str(), 100)) {
       return true;
+    }
+    if (last_error) {
+      *last_error = GetLastError();
+    }
     Sleep(100);
   }
   return false;
@@ -190,7 +190,11 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   }
   }
 
-  if (!wait_for_helper_hello(HelperEndpoint{backend.endpoint})) {
+  DWORD wait_error = ERROR_SUCCESS;
+  if (!wait_for_helper_pipe_available(backend.endpoint, &wait_error)) {
+    exv::observability::LogFacade::error(
+        "Oneshot: Helper pipe did not become available - endpoint=" +
+        backend.endpoint + " last_error=" + std::to_string(wait_error));
     backend.code = kHelperRpcFailedCode;
     backend.message = "One-shot helper did not become ready.";
     return backend;

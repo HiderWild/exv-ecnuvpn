@@ -134,6 +134,11 @@ void TunnelController::on_event(TunnelEvent event) {
     case TunnelEventType::AuthFailed:
         impl_->on_auth_failed();
         break;
+    case TunnelEventType::AuthChallengeRequired:
+    case TunnelEventType::AuthGroupRequired:
+        // Interaction metadata is surfaced through the native engine event log;
+        // the subsequent auth failure event drives the existing state change.
+        break;
     case TunnelEventType::CstpConnected:
         impl_->on_cstp_connected();
         break;

@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <exception>
+#include <mutex>
 #include <string_view>
 
 namespace ecnuvpn::ui_shell {
@@ -77,13 +78,19 @@ int run_ui_shell_window(UiWindow &window,
   CoreEventHandlerGuard event_guard(client);
 
   UiWindowConfig runtime_config = config;
-  runtime_config.pump_core_events = [&client]() {
+  std::mutex client_mutex;
+  runtime_config.pump_core_events = [&client, &client_mutex]() {
+    if (!client_mutex.try_lock()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(client_mutex, std::adopt_lock);
     client.pump_events();
   };
 
-  window.set_message_handler([&client](const std::string &message_json) {
+  window.set_message_handler([&client, &client_mutex](const std::string &message_json) {
     try {
-      return handle_host_request(message_json, [&client](const CoreRpcRequest &request) {
+      return handle_host_request(message_json, [&client, &client_mutex](const CoreRpcRequest &request) {
+        std::lock_guard<std::mutex> lock(client_mutex);
         return client.invoke(request);
       });
     } catch (const std::exception &error) {

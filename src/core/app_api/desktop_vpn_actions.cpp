@@ -39,23 +39,31 @@ config::ConfigManager make_config_manager() {
 
 nlohmann::json preflight_connect(const Config &cfg,
                                  const std::string &password) {
+  StageTimer timing("desktop.preflight_connect");
   if (cfg.vpn_engine != "native") {
+    timing.finish(false, "stage=config_validation code=legacy_engine_removed");
     return error("VPN engine is native-only.", "legacy_engine_removed");
   }
   if (cfg.server.empty()) {
+    timing.finish(false, "stage=config_validation code=server_missing");
     return error("VPN server is not configured.");
   }
   if (cfg.username.empty()) {
+    timing.finish(false, "stage=config_validation code=username_missing");
     return error("VPN username is not configured.");
   }
   if (password.empty()) {
+    timing.finish(false, "stage=config_validation code=password_missing");
     return error("VPN password is not configured.");
   }
 
   auto native_validation = exv::core::validate_native_app_config(cfg);
   if (!native_validation.ok) {
+    timing.finish(false, "stage=config_validation code=" +
+                             native_validation.code);
     return error(native_validation.message, native_validation.code);
   }
+  timing.mark("config_validated", "engine=" + cfg.vpn_engine);
 
   platform::BackendResolveOptions options;
   options.preferred_mode = "auto";
@@ -63,14 +71,35 @@ nlohmann::json preflight_connect(const Config &cfg,
   options.start_oneshot = true;
   options.allow_service_start = false;
   options.helper_path = helper_binary_next_to_exv();
+  timing.mark("backend_resolve_started", "mode=auto");
   nlohmann::json backend = platform::resolve_backend(options);
+  const bool backend_ok = backend.value("ok", false);
+  const std::string backend_mode = backend.value("mode", "unknown");
+  timing.mark("backend_resolved",
+              "ok=" + std::string(backend_ok ? "true" : "false") +
+                  " mode=" + backend_mode);
+  exv::observability::LogFacade::info(
+      "app_api: preflight backend resolved - ok=" +
+      std::string(backend_ok ? "true" : "false") +
+      " mode=" + backend_mode);
   if (!backend.value("ok", false)) {
+    timing.finish(false,
+                  "stage=backend_resolved code=" +
+                      backend.value("code", platform::kHelperUnavailableCode));
     return platform::backend_unavailable_error(
         backend, platform::helper_unavailable_connect_message());
   }
 
   nlohmann::json runtime = runtime_status_json(cfg);
-  if (!runtime.value("available", false)) {
+  const bool runtime_available = runtime.value("available", false);
+  timing.mark("runtime_status_checked",
+              "available=" +
+                  std::string(runtime_available ? "true" : "false"));
+  exv::observability::LogFacade::info(
+      "app_api: preflight runtime status - available=" +
+      std::string(runtime_available ? "true" : "false"));
+  if (!runtime_available) {
+    timing.finish(false, "stage=runtime_status_checked");
     return error("VPN runtime is not available. The desktop bundle is missing "
                  "the selected VPN engine dependencies.");
   }
@@ -78,13 +107,24 @@ nlohmann::json preflight_connect(const Config &cfg,
   nlohmann::json platform_err =
       platform::preflight_connect_platform_checks(
           config::to_platform_config_view(cfg));
-  if (platform_err.is_object() && platform_err.value("ok", true) == false) {
+  const bool platform_ok =
+      !platform_err.is_object() || platform_err.value("ok", true);
+  timing.mark("platform_checks_checked",
+              "ok=" + std::string(platform_ok ? "true" : "false"));
+  exv::observability::LogFacade::info(
+      "app_api: preflight platform checks - ok=" +
+      std::string(platform_ok ? "true" : "false"));
+  if (!platform_ok) {
+    timing.finish(false,
+                  "stage=platform_checks_checked code=" +
+                      platform_err.value("code", std::string("unknown")));
     return platform_err;
   }
 
   nlohmann::json result;
   result["ok"] = true;
   result["backend"] = backend;
+  timing.finish(true, "stage=preflight_complete");
   return result;
 }
 
@@ -283,8 +323,15 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         auto snap = controller->status();
         nlohmann::json status =
             frontend_status_from_controller_snapshot(snap, cfg);
+        const bool connect_failed =
+            snap.phase == exv::core::TunnelPhase::Failed;
         timing.finish(
-            true, "phase=" + std::to_string(static_cast<int>(snap.phase)));
+            !connect_failed,
+            "phase=" + std::to_string(static_cast<int>(snap.phase)));
+        if (connect_failed) {
+          reset_tunnel_controller();
+          return status;
+        }
         attempt_cleanup.dismiss();
         return status;
       });

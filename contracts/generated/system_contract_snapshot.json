@@ -757,6 +757,8 @@
         "HelperReady",
         "AuthSucceeded",
         "AuthFailed",
+        "AuthChallengeRequired",
+        "AuthGroupRequired",
         "CstpConnected",
         "NetworkConfigApplied",
         "PacketLoopStarted",
@@ -1015,6 +1017,58 @@
         {
           "code": "auth_failed",
           "key": "authFailed"
+        },
+        {
+          "code": "auth_protocol_mismatch",
+          "key": "authProtocolMismatch"
+        },
+        {
+          "code": "auth_rejected",
+          "key": "authRejected"
+        },
+        {
+          "code": "auth_challenge_required",
+          "key": "authChallengeRequired"
+        },
+        {
+          "code": "auth_group_required",
+          "key": "authGroupRequired"
+        },
+        {
+          "code": "auth_expired",
+          "key": "authExpired"
+        },
+        {
+          "code": "csd_required_unsupported",
+          "key": "csdRequiredUnsupported"
+        },
+        {
+          "code": "dtls_unavailable",
+          "key": "dtlsUnavailable"
+        },
+        {
+          "code": "tunnel_disconnected",
+          "key": "tunnelDisconnected"
+        },
+        {
+          "code": "session_timeout",
+          "key": "sessionTimeout"
+        },
+        {
+          "code": "idle_timeout",
+          "key": "idleTimeout"
+        },
+        {
+          "code": "rekey_unsupported",
+          "key": "rekeyUnsupported"
+        },
+        {
+          "code": "cstp_compressed_unsupported",
+          "key": "cstpCompressedUnsupported"
+        },
+        {
+          "code": "unsupported_extra_args",
+          "key": "unsupportedExtraArgs"
         },
         {
           "code": "tls_verify_failed",

@@ -28,7 +28,21 @@ bool is_canonical(const std::string &value) {
          value == code::kUnsupportedDtls || value == code::kPermissionDenied ||
          value == code::kHelperUnavailable ||
          value == code::kNetworkUnreachable || value == code::kUserCancelled ||
-         value == code::kInvalidRequest || value == code::kConnectionFailed;
+         value == code::kInvalidRequest ||
+         value == code::kAuthProtocolMismatch ||
+         value == code::kAuthRejected ||
+         value == code::kAuthChallengeRequired ||
+         value == code::kAuthGroupRequired ||
+         value == code::kAuthExpired ||
+         value == code::kCsdRequiredUnsupported ||
+         value == code::kDtlsUnavailable ||
+         value == code::kTunnelDisconnected ||
+         value == code::kSessionTimeout ||
+         value == code::kIdleTimeout ||
+         value == code::kRekeyUnsupported ||
+         value == code::kCstpCompressedUnsupported ||
+         value == code::kUnsupportedExtraArgs ||
+         value == code::kConnectionFailed;
 }
 
 ErrorInfo info_for(const std::string &canonical) {
@@ -60,6 +74,45 @@ ErrorInfo info_for(const std::string &canonical) {
     return {canonical, true, ""};
   if (canonical == code::kInvalidRequest)
     return {canonical, false, ""};
+  if (canonical == code::kAuthProtocolMismatch)
+    return {canonical, false,
+            "The VPN gateway returned an unexpected auth response; retry or contact support."};
+  if (canonical == code::kAuthRejected)
+    return {canonical, true,
+            "Check your username and password, then connect again."};
+  if (canonical == code::kAuthChallengeRequired)
+    return {canonical, true,
+            "Complete the VPN verification prompt to continue."};
+  if (canonical == code::kAuthGroupRequired)
+    return {canonical, true,
+            "Choose the required VPN group and connect again."};
+  if (canonical == code::kAuthExpired)
+    return {canonical, true,
+            "The VPN authentication session expired; reconnect and authenticate again."};
+  if (canonical == code::kCsdRequiredUnsupported)
+    return {canonical, false,
+            "This gateway requires host-scan, which the native engine does not support yet."};
+  if (canonical == code::kDtlsUnavailable)
+    return {canonical, true,
+            "Continue with CSTP-only mode or retry the connection."};
+  if (canonical == code::kTunnelDisconnected)
+    return {canonical, true,
+            "The VPN gateway disconnected the tunnel; reconnect if needed."};
+  if (canonical == code::kSessionTimeout)
+    return {canonical, false,
+            "The VPN session expired; reconnect and authenticate again."};
+  if (canonical == code::kIdleTimeout)
+    return {canonical, true,
+            "The VPN session was idle too long; reconnect when needed."};
+  if (canonical == code::kRekeyUnsupported)
+    return {canonical, true,
+            "Reconnect the tunnel; this gateway requested an unsupported rekey mode."};
+  if (canonical == code::kCstpCompressedUnsupported)
+    return {canonical, false,
+            "The gateway enabled CSTP compression, which is not supported yet."};
+  if (canonical == code::kUnsupportedExtraArgs)
+    return {canonical, true,
+            "Remove unsupported native extra_args or use a supported compatibility flag."};
   return {code::kConnectionFailed, true,
           "Open the logs (exv logs) to see the underlying failure, then retry."};
 }

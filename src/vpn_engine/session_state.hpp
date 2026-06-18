@@ -29,11 +29,35 @@ struct TunnelMetadata {
   int interface_index = -1;
   std::string internal_ip4_address;
   std::string internal_ip4_netmask;
+  std::string ip6_address;
+  int ip6_prefix = 0;
   int mtu = 1290;
   std::vector<std::string> routes;
+  std::vector<std::string> split_include_routes;
+  std::vector<std::string> split_exclude_routes;
   std::vector<std::string> server_bypass_ips;
   std::string dtls_state = "disabled";
   std::string dtls_fallback_reason;
+  std::vector<std::string> dns_servers;
+  std::vector<std::string> nbns_servers;
+  std::string default_domain;
+  std::vector<std::string> search_domains;
+  bool tunnel_all_dns = false;
+  std::string banner;
+  int keepalive_seconds = 0;
+  int dpd_seconds = 0;
+  int rekey_seconds = 0;
+  std::string rekey_method;
+  int lease_duration_seconds = 0;
+  int idle_timeout_seconds = 0;
+  int session_timeout_seconds = 0;
+  int disconnected_timeout_seconds = 0;
+  int dtls_mtu = 0;
+  int dtls_port = 0;
+  std::string dtls_session_id;
+  std::string dtls_cipher_suite;
+  std::string dtls12_cipher_suite;
+  std::string content_encoding;
 };
 
 // SessionState is a clean-room state model used by the native engine boundary.

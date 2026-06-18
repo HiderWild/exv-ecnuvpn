@@ -246,13 +246,6 @@ exv::core::UseCaseResult uninstall_helper_service_with_current_instance() {
         "vpn_session_active",
         "Disconnect the VPN session before uninstalling the helper service.");
   }
-  if (auto client = get_current_helper_client_if_exists()) {
-    if (client->is_connected()) {
-      return helper_service_result(
-          client->uninstall_service(exv::helper::UninstallServiceRequest{}),
-          "service_uninstall_failed", "Helper service uninstallation failed.");
-    }
-  }
   return make_system_status_use_cases().uninstall_helper();
 }
 

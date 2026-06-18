@@ -94,6 +94,7 @@ const settingsForm = ref<SettingsConfig>({
   service_install_prompt_seen: false,
   minimal_install_service_before_connect: true,
 })
+const nativeEngineSelected = computed(() => settingsForm.value.vpn_engine === 'native')
 
 const routes = ref<string[]>([])
 const newRoute = ref('')
@@ -913,11 +914,11 @@ function killStaleCoreAction() {
             <input
               v-model="settingsForm.extra_args"
               type="text"
-              placeholder="原生兼容参数（不支持的参数会被拒绝）"
+              :placeholder="nativeEngineSelected ? '--no-dtls --authgroup=students' : '额外兼容参数'"
               class="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted transition-colors focus:border-accent/50 focus:outline-none"
             />
-            <p class="mt-1 text-xs text-muted">
-              原生模式只接受已支持的兼容参数。
+            <p v-if="nativeEngineSelected" class="mt-1 text-xs text-muted">
+              原生模式仅支持 --no-dtls、--useragent=...、--authgroup=...、--csd-wrapper=...；其他参数会在连接前明确拒绝。
             </p>
           </div>
 

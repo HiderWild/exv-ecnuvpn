@@ -2,73 +2,54 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 namespace ecnuvpn {
 namespace vpn_engine {
 namespace protocol {
-
 namespace {
 
-bool is_ascii_space(unsigned char ch) {
+constexpr std::size_t kMaxAggregateAuthResponseBytes = 1024 * 1024;
+
+ValidationResult invalid(std::string code, std::string message) {
+  ValidationResult result;
+  result.ok = false;
+  result.code = std::move(code);
+  result.message = std::move(message);
+  return result;
+}
+
+bool is_space(unsigned char ch) {
   return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
 }
 
-std::string_view trim_ascii(std::string_view s) {
-  while (!s.empty() && is_ascii_space(static_cast<unsigned char>(s.front())))
-    s.remove_prefix(1);
-  while (!s.empty() && is_ascii_space(static_cast<unsigned char>(s.back())))
-    s.remove_suffix(1);
-  return s;
+std::string trim(std::string_view value) {
+  while (!value.empty() && is_space(static_cast<unsigned char>(value.front())))
+    value.remove_prefix(1);
+  while (!value.empty() && is_space(static_cast<unsigned char>(value.back())))
+    value.remove_suffix(1);
+  return std::string(value);
 }
 
-std::string to_ascii_lower(std::string_view s) {
+std::string lower_ascii(std::string_view value) {
   std::string out;
-  out.reserve(s.size());
-  for (unsigned char ch : s)
+  out.reserve(value.size());
+  for (unsigned char ch : value)
     out.push_back(static_cast<char>(std::tolower(ch)));
   return out;
 }
 
-bool starts_with_ci(std::string_view value, std::string_view prefix) {
-  if (value.size() < prefix.size())
-    return false;
-  for (std::size_t i = 0; i < prefix.size(); ++i) {
-    const unsigned char a = static_cast<unsigned char>(value[i]);
-    const unsigned char b = static_cast<unsigned char>(prefix[i]);
-    if (std::tolower(a) != std::tolower(b))
-      return false;
-  }
-  return true;
-}
-
-std::string extract_cookie_pair(std::string_view set_cookie_value) {
-  const std::size_t semi = set_cookie_value.find(';');
-  std::string_view pair = semi == std::string_view::npos
-                              ? set_cookie_value
-                              : set_cookie_value.substr(0, semi);
-  pair = trim_ascii(pair);
-  return std::string(pair);
-}
-
-std::string webvpn_cookie_from_headers(const HttpResponse &response) {
-  const auto *values = response.header_values_ci("set-cookie");
-  if (!values)
-    return {};
-
-  for (const std::string &raw : *values) {
-    const std::string pair = extract_cookie_pair(raw);
-    if (starts_with_ci(pair, "webvpn="))
-      return pair;
-  }
-  return {};
+bool contains_ci(std::string_view haystack, std::string_view needle) {
+  return lower_ascii(haystack).find(lower_ascii(needle)) != std::string::npos;
 }
 
 std::string xml_escape(std::string_view value) {
   std::string out;
   out.reserve(value.size());
-  for (const char ch : value) {
+  for (char ch : value) {
     switch (ch) {
     case '&':
       out += "&amp;";
@@ -93,288 +74,367 @@ std::string xml_escape(std::string_view value) {
   return out;
 }
 
-std::string xml_unescape(std::string value) {
-  auto replace_all = [](std::string *text, const std::string &needle,
-                        const std::string &replacement) {
-    std::size_t pos = 0;
-    while ((pos = text->find(needle, pos)) != std::string::npos) {
-      text->replace(pos, needle.size(), replacement);
-      pos += replacement.size();
-    }
+std::string xml_unescape(std::string_view value) {
+  std::string out(value);
+  const std::pair<const char *, const char *> entities[] = {
+      {"&quot;", "\""}, {"&apos;", "'"}, {"&lt;", "<"},
+      {"&gt;", ">"},     {"&amp;", "&"},
   };
-
-  replace_all(&value, "&lt;", "<");
-  replace_all(&value, "&gt;", ">");
-  replace_all(&value, "&quot;", "\"");
-  replace_all(&value, "&apos;", "'");
-  replace_all(&value, "&amp;", "&");
-  return value;
-}
-
-std::size_t find_ci(std::string_view haystack, std::string_view needle,
-                    std::size_t start = 0) {
-  if (needle.empty())
-    return start;
-  if (start > haystack.size() || needle.size() > haystack.size())
-    return std::string_view::npos;
-
-  for (std::size_t i = start; i + needle.size() <= haystack.size(); ++i) {
-    bool match = true;
-    for (std::size_t j = 0; j < needle.size(); ++j) {
-      const unsigned char a = static_cast<unsigned char>(haystack[i + j]);
-      const unsigned char b = static_cast<unsigned char>(needle[j]);
-      if (std::tolower(a) != std::tolower(b)) {
-        match = false;
-        break;
-      }
+  for (const auto &[from, to] : entities) {
+    std::size_t pos = 0;
+    while ((pos = out.find(from, pos)) != std::string::npos) {
+      out.replace(pos, std::char_traits<char>::length(from), to);
+      pos += std::char_traits<char>::length(to);
     }
-    if (match)
-      return i;
   }
-  return std::string_view::npos;
+  return out;
 }
 
-std::string tag_text(std::string_view body, std::string_view tag) {
-  const std::string open = "<" + std::string(tag);
-  const std::string close = "</" + std::string(tag) + ">";
-  const std::size_t open_pos = find_ci(body, open);
-  if (open_pos == std::string_view::npos)
+std::string attr_value(std::string_view tag, std::string_view name) {
+  const std::string key = std::string(name) + "=";
+  std::size_t pos = tag.find(key);
+  if (pos == std::string_view::npos)
     return {};
-
-  const std::size_t open_end = body.find('>', open_pos);
-  if (open_end == std::string_view::npos)
+  pos += key.size();
+  if (pos >= tag.size())
     return {};
-
-  const std::size_t close_pos = find_ci(body, close, open_end + 1);
-  if (close_pos == std::string_view::npos || close_pos < open_end + 1)
+  const char quote = tag[pos];
+  if (quote != '"' && quote != '\'')
     return {};
-
-  std::string_view text = body.substr(open_end + 1, close_pos - (open_end + 1));
-  text = trim_ascii(text);
-  return xml_unescape(std::string(text));
+  ++pos;
+  const std::size_t end = tag.find(quote, pos);
+  if (end == std::string_view::npos)
+    return {};
+  return xml_unescape(tag.substr(pos, end - pos));
 }
 
-std::vector<std::string> option_values(std::string_view body) {
-  std::vector<std::string> values;
-  std::size_t pos = 0;
-  while ((pos = find_ci(body, "<option", pos)) != std::string_view::npos) {
-    const std::size_t tag_end = body.find('>', pos);
-    if (tag_end == std::string_view::npos)
-      break;
-    const std::string_view tag = body.substr(pos, tag_end - pos);
-    const std::size_t value_pos = find_ci(tag, "value=");
-    if (value_pos != std::string_view::npos) {
-      const std::size_t quote_pos = value_pos + 6;
-      if (quote_pos < tag.size() && (tag[quote_pos] == '"' || tag[quote_pos] == '\'')) {
-        const char quote = tag[quote_pos];
-        const std::size_t value_start = quote_pos + 1;
-        const std::size_t value_end = tag.find(quote, value_start);
-        if (value_end != std::string_view::npos) {
-          values.push_back(xml_unescape(std::string(
-              tag.substr(value_start, value_end - value_start))));
-        }
-      }
-    }
-    pos = tag_end + 1;
-  }
-  return values;
+std::string first_tag(std::string_view xml, std::string_view name) {
+  const std::string open = "<" + std::string(name);
+  const std::size_t start = xml.find(open);
+  if (start == std::string_view::npos)
+    return {};
+  const std::size_t end = xml.find('>', start);
+  if (end == std::string_view::npos)
+    return {};
+  return std::string(xml.substr(start, end - start + 1));
 }
 
-AggregateAuthResult error(std::string code, std::string message) {
-  AggregateAuthResult result;
-  result.ok = false;
-  result.error_code = std::move(code);
-  result.error_message = std::move(message);
-  return result;
-}
-
-std::string attribute_value(std::string_view tag, std::string_view name) {
-  std::size_t pos = 0;
-  while ((pos = find_ci(tag, name, pos)) != std::string_view::npos) {
-    const bool left_ok =
-        pos == 0 || is_ascii_space(static_cast<unsigned char>(tag[pos - 1]));
-    const std::size_t after_name = pos + name.size();
-    if (!left_ok || after_name >= tag.size()) {
-      pos = after_name;
-      continue;
-    }
-
-    std::size_t cursor = after_name;
-    while (cursor < tag.size() &&
-           is_ascii_space(static_cast<unsigned char>(tag[cursor]))) {
-      ++cursor;
-    }
-    if (cursor >= tag.size() || tag[cursor] != '=') {
-      pos = after_name;
-      continue;
-    }
-    ++cursor;
-    while (cursor < tag.size() &&
-           is_ascii_space(static_cast<unsigned char>(tag[cursor]))) {
-      ++cursor;
-    }
-    if (cursor >= tag.size() || (tag[cursor] != '"' && tag[cursor] != '\'')) {
-      pos = after_name;
-      continue;
-    }
-
-    const char quote = tag[cursor++];
-    const std::size_t value_end = tag.find(quote, cursor);
-    if (value_end == std::string_view::npos)
-      return {};
-    return xml_unescape(std::string(tag.substr(cursor, value_end - cursor)));
-  }
-  return {};
-}
-
-struct AuthInput {
-  std::string name;
-  std::string type;
-  std::string label;
+struct XmlElement {
+  std::string tag;
+  std::string body;
 };
 
-std::vector<AuthInput> input_fields(std::string_view body) {
-  std::vector<AuthInput> fields;
+XmlElement first_element(std::string_view xml, std::string_view name) {
+  const std::string open = "<" + std::string(name);
+  const std::size_t start = xml.find(open);
+  if (start == std::string_view::npos)
+    return {};
+  const std::size_t tag_end = xml.find('>', start);
+  if (tag_end == std::string_view::npos)
+    return {};
+
+  XmlElement element;
+  element.tag = std::string(xml.substr(start, tag_end - start + 1));
+  const bool self_closing =
+      element.tag.size() >= 2 && element.tag[element.tag.size() - 2] == '/';
+  if (self_closing)
+    return element;
+
+  const std::string close = "</" + std::string(name) + ">";
+  const std::size_t close_start = xml.find(close, tag_end + 1);
+  if (close_start == std::string_view::npos)
+    return element;
+  element.body =
+      std::string(xml.substr(tag_end + 1, close_start - tag_end - 1));
+  return element;
+}
+
+std::string node_text(std::string_view xml, std::string_view name) {
+  const std::string open = "<" + std::string(name);
+  const std::string close = "</" + std::string(name) + ">";
+  const std::size_t start = xml.find(open);
+  if (start == std::string_view::npos)
+    return {};
+  const std::size_t open_end = xml.find('>', start);
+  if (open_end == std::string_view::npos)
+    return {};
+  const std::size_t close_start = xml.find(close, open_end + 1);
+  if (close_start == std::string_view::npos)
+    return {};
+  return xml_unescape(trim(xml.substr(open_end + 1, close_start - open_end - 1)));
+}
+
+std::vector<std::string> opaque_nodes(std::string_view xml) {
+  std::vector<std::string> nodes;
+  const std::string open = "<opaque";
+  const std::string close = "</opaque>";
   std::size_t pos = 0;
-  while ((pos = find_ci(body, "<input", pos)) != std::string_view::npos) {
-    const std::size_t tag_end = body.find('>', pos);
+  while ((pos = xml.find(open, pos)) != std::string_view::npos) {
+    const std::size_t close_start = xml.find(close, pos);
+    if (close_start == std::string_view::npos)
+      break;
+    const std::size_t end = close_start + close.size();
+    nodes.emplace_back(xml.substr(pos, end - pos));
+    pos = end;
+  }
+  return nodes;
+}
+
+std::vector<AggregateAuthField> input_fields(std::string_view xml) {
+  std::vector<AggregateAuthField> fields;
+  const std::string open = "<input";
+  std::size_t pos = 0;
+  while ((pos = xml.find(open, pos)) != std::string_view::npos) {
+    const std::size_t tag_end = xml.find('>', pos);
     if (tag_end == std::string_view::npos)
       break;
 
-    const std::string_view tag = body.substr(pos, tag_end - pos);
-    AuthInput field;
-    field.name = attribute_value(tag, "name");
-    field.type = attribute_value(tag, "type");
-    field.label = attribute_value(tag, "label");
-    if (field.type.empty())
-      field.type = "text";
+    const std::string tag(xml.substr(pos, tag_end - pos + 1));
+    AggregateAuthField field;
+    field.name = attr_value(tag, "name");
+    field.type = attr_value(tag, "type");
+    field.label = attr_value(tag, "label");
+    field.value = attr_value(tag, "value");
+
+    const bool self_closing =
+        tag.size() >= 2 && tag[tag.size() - 2] == '/';
+    if (!self_closing) {
+      const std::string close = "</input>";
+      const std::size_t close_start = xml.find(close, tag_end + 1);
+      if (close_start != std::string_view::npos && field.value.empty()) {
+        field.value =
+            xml_unescape(trim(xml.substr(tag_end + 1, close_start - tag_end - 1)));
+        pos = close_start + close.size();
+      } else {
+        pos = tag_end + 1;
+      }
+    } else {
+      pos = tag_end + 1;
+    }
+
     if (!field.name.empty())
       fields.push_back(std::move(field));
-    pos = tag_end + 1;
   }
   return fields;
 }
 
-bool is_challenge_input(const AuthInput &field) {
-  const std::string name = to_ascii_lower(field.name);
-  return name != "username" && name != "group";
+std::vector<AggregateAuthChoice> option_nodes(std::string_view select_body) {
+  std::vector<AggregateAuthChoice> options;
+  const std::string open = "<option";
+  const std::string close = "</option>";
+  std::size_t pos = 0;
+  while ((pos = select_body.find(open, pos)) != std::string_view::npos) {
+    const std::size_t tag_end = select_body.find('>', pos);
+    if (tag_end == std::string_view::npos)
+      break;
+    const std::size_t close_start = select_body.find(close, tag_end + 1);
+    if (close_start == std::string_view::npos)
+      break;
+
+    const std::string tag(select_body.substr(pos, tag_end - pos + 1));
+    AggregateAuthChoice choice;
+    choice.value = attr_value(tag, "value");
+    choice.label =
+        xml_unescape(trim(select_body.substr(tag_end + 1, close_start - tag_end - 1)));
+    if (choice.label.empty())
+      choice.label = choice.value;
+    if (!choice.value.empty())
+      options.push_back(std::move(choice));
+    pos = close_start + close.size();
+  }
+  return options;
 }
 
-AggregateAuthResult challenge_from_inputs(const std::vector<AuthInput> &fields) {
-  for (const AuthInput &field : fields) {
-    if (!is_challenge_input(field))
-      continue;
+std::vector<AggregateAuthField> select_fields(std::string_view xml) {
+  std::vector<AggregateAuthField> fields;
+  const std::string open = "<select";
+  const std::string close = "</select>";
+  std::size_t pos = 0;
+  while ((pos = xml.find(open, pos)) != std::string_view::npos) {
+    const std::size_t tag_end = xml.find('>', pos);
+    if (tag_end == std::string_view::npos)
+      break;
+    const std::size_t close_start = xml.find(close, tag_end + 1);
+    if (close_start == std::string_view::npos)
+      break;
 
-    auto result = error("auth_challenge_required",
-                        "authentication challenge response is required");
-    result.prompt.kind = "challenge";
-    result.prompt.label =
-        field.label.empty() ? "Authentication challenge" : field.label;
-    result.prompt.input_type = field.type.empty() ? "text" : field.type;
-    return result;
+    const std::string tag(xml.substr(pos, tag_end - pos + 1));
+    AggregateAuthField field;
+    field.name = attr_value(tag, "name");
+    field.type = "select";
+    field.label = attr_value(tag, "label");
+    const std::string_view body =
+        xml.substr(tag_end + 1, close_start - tag_end - 1);
+    field.options = option_nodes(body);
+    if (!field.options.empty())
+      field.value = field.options.front().value;
+    if (!field.name.empty())
+      fields.push_back(std::move(field));
+    pos = close_start + close.size();
   }
-  return {};
+  return fields;
+}
+
+bool has_field(const std::vector<AggregateAuthField> &fields,
+               std::string_view name) {
+  return std::any_of(fields.begin(), fields.end(),
+                     [name](const AggregateAuthField &field) {
+                       return field.name == name;
+                     });
+}
+
+bool has_challenge_field(const std::vector<AggregateAuthField> &fields) {
+  return std::any_of(fields.begin(), fields.end(),
+                     [](const AggregateAuthField &field) {
+                       const std::string name = lower_ascii(field.name);
+                       return name.find("secondary") != std::string::npos ||
+                              name.find("challenge") != std::string::npos ||
+                              name.find("token") != std::string::npos ||
+                              name.find("passcode") != std::string::npos;
+                     });
+}
+
+std::string first_non_empty(std::string a, std::string b,
+                            std::string c = {}, std::string d = {}) {
+  if (!a.empty())
+    return a;
+  if (!b.empty())
+    return b;
+  if (!c.empty())
+    return c;
+  return d;
+}
+
+AggregateAuthHostScan host_scan_metadata(std::string_view xml) {
+  AggregateAuthHostScan metadata;
+  const XmlElement element = first_element(xml, "host-scan");
+  if (element.tag.empty())
+    return metadata;
+
+  metadata.ticket = first_non_empty(attr_value(element.tag, "ticket"),
+                                    node_text(element.body, "ticket"));
+  metadata.token = first_non_empty(attr_value(element.tag, "token"),
+                                   node_text(element.body, "token"));
+  metadata.base_uri =
+      first_non_empty(attr_value(element.tag, "base-uri"),
+                      node_text(element.body, "base-uri"),
+                      attr_value(element.tag, "base-url"),
+                      node_text(element.body, "base-url"));
+  metadata.wait_uri =
+      first_non_empty(attr_value(element.tag, "wait-uri"),
+                      node_text(element.body, "wait-uri"),
+                      attr_value(element.tag, "wait-url"),
+                      node_text(element.body, "wait-url"));
+  return metadata;
+}
+
+void append_input(std::ostringstream &out, const std::string &name,
+                  const std::string &value) {
+  if (value.empty())
+    return;
+  out << "      <input name=\"" << xml_escape(name) << "\">"
+      << xml_escape(value) << "</input>\n";
 }
 
 } // namespace
 
-std::string make_aggregate_auth_init_xml() {
-  return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-         "<config-auth client=\"vpn\" type=\"init\">"
-         "<version who=\"vpn\">4.10</version>"
-         "</config-auth>";
-}
-
-std::string make_aggregate_auth_reply_xml(const std::string &username,
-                                          const std::string &password,
-                                          const std::string &group,
-                                          const std::string &secondary) {
+std::string build_aggregate_auth_init_xml(
+    const AggregateAuthInitRequest &request) {
   std::ostringstream out;
-  out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-      << "<config-auth client=\"vpn\" type=\"auth-reply\">"
-      << "<auth>"
-      << "<username>" << xml_escape(username) << "</username>"
-      << "<password>" << xml_escape(password) << "</password>";
-  if (!group.empty())
-    out << "<group>" << xml_escape(group) << "</group>";
-  if (!secondary.empty())
-    out << "<secondary_password>" << xml_escape(secondary)
-        << "</secondary_password>";
-  out << "</auth></config-auth>";
+  out << "<config-auth client=\"vpn\" type=\"init\">\n";
+  out << "  <version who=\"vpn\">" << xml_escape(request.version)
+      << "</version>\n";
+  out << "  <device-id>" << xml_escape(request.device_id) << "</device-id>\n";
+  out << "  <group-access>" << xml_escape(request.server_url)
+      << "</group-access>\n";
+  out << "  <capabilities>\n";
+  out << "    <capability>auth-method=password</capability>\n";
+  out << "    <capability>transport=cstp</capability>\n";
+  out << "  </capabilities>\n";
+  out << "</config-auth>";
   return out.str();
 }
 
-AggregateAuthResult parse_aggregate_auth_response(const HttpResponse &response) {
-  if (response.status == 401 || response.status == 403) {
-    return error("auth_failed", "authentication failed");
-  }
-  if (response.status < 200 || response.status >= 300) {
-    return error("protocol_error", "unexpected HTTP status in auth response");
-  }
+std::string build_aggregate_auth_reply_xml(
+    const AggregateAuthReplyRequest &request) {
+  std::ostringstream out;
+  out << "<config-auth client=\"vpn\" type=\"auth-reply\">\n";
+  out << "  <auth id=\"main\">\n";
+  out << "    <form>\n";
+  append_input(out, "username", request.username);
+  append_input(out, "password", request.password);
+  append_input(out, "group_list", request.selected_group);
+  append_input(out, "secondary_password", request.challenge_value);
+  out << "    </form>\n";
+  out << "  </auth>\n";
+  for (const std::string &opaque : request.opaque_xml)
+    out << "  " << opaque << "\n";
+  out << "</config-auth>";
+  return out.str();
+}
 
-  const std::string header_cookie = webvpn_cookie_from_headers(response);
-  if (!header_cookie.empty()) {
-    AggregateAuthResult result;
-    result.ok = true;
-    result.cookie = header_cookie;
-    return result;
-  }
-
-  const std::string body_lower = to_ascii_lower(response.body);
-  if (body_lower.find("saml") != std::string::npos ||
-      body_lower.find("sso") != std::string::npos) {
-    return error("saml_required_unsupported",
-                 "SAML authentication is required but browser-based SSO is "
-                 "not supported by the native engine");
-  }
-
-  if (body_lower.find("host-scan") != std::string::npos ||
-      body_lower.find("hostscan") != std::string::npos ||
-      body_lower.find("<csd") != std::string::npos ||
-      body_lower.find(" csd") != std::string::npos) {
-    return error("csd_required_unsupported", "AnyConnect host-scan is required");
+ValidationResult parse_aggregate_auth_response(const std::string &xml,
+                                               AggregateAuthResponse *out) {
+  if (!out)
+    return invalid("auth_response_invalid", "aggregate auth output is null");
+  if (xml.size() > kMaxAggregateAuthResponseBytes) {
+    return invalid("auth_response_too_large",
+                   "aggregate auth response exceeds maximum size");
   }
 
-  const std::string token = tag_text(response.body, "session-token");
-  if (!token.empty()) {
-    AggregateAuthResult result;
-    result.ok = true;
-    result.cookie = "webvpn=" + token;
-    return result;
+  const std::string trimmed = trim(xml);
+  if (trimmed.empty())
+    return invalid("auth_response_invalid", "aggregate auth response is empty");
+  if (contains_ci(trimmed, "<html")) {
+    return invalid("auth_protocol_mismatch",
+                   "server returned HTML instead of aggregate-auth XML");
+  }
+  if (!contains_ci(trimmed, "<config-auth")) {
+    return invalid("auth_response_invalid",
+                   "aggregate auth response missing config-auth root");
   }
 
-  if (body_lower.find("group_list") != std::string::npos ||
-      body_lower.find("name=\"group\"") != std::string::npos ||
-      body_lower.find("name='group'") != std::string::npos) {
-    auto result = error("auth_group_required", "VPN group selection is required");
-    result.prompt.kind = "group";
-    result.prompt.label = "VPN group";
-    result.prompt.input_type = "select";
-    result.prompt.options = option_values(response.body);
-    return result;
+  AggregateAuthResponse parsed;
+  const std::string root = first_tag(trimmed, "config-auth");
+  const std::string root_type = attr_value(root, "type");
+  const std::string auth = first_tag(trimmed, "auth");
+  parsed.auth_id = attr_value(auth, "id");
+  parsed.message = node_text(trimmed, "message");
+  parsed.fields = input_fields(trimmed);
+  {
+    std::vector<AggregateAuthField> selects = select_fields(trimmed);
+    parsed.fields.insert(parsed.fields.end(),
+                         std::make_move_iterator(selects.begin()),
+                         std::make_move_iterator(selects.end()));
+  }
+  parsed.opaque_xml = opaque_nodes(trimmed);
+  parsed.session_token = node_text(trimmed, "session-token");
+  parsed.session_id = node_text(trimmed, "session-id");
+  parsed.host_scan = host_scan_metadata(trimmed);
+
+  if (!parsed.session_token.empty() || !parsed.session_id.empty() ||
+      parsed.auth_id == "success" || root_type == "complete") {
+    parsed.type = AggregateAuthResponseType::success;
+  } else if (contains_ci(trimmed, "<host-scan")) {
+    parsed.type = AggregateAuthResponseType::host_scan;
+  } else if (parsed.auth_id == "error" || contains_ci(trimmed, "<error")) {
+    parsed.type = AggregateAuthResponseType::error;
+    parsed.error_code = "auth_rejected";
+    parsed.error_message = node_text(trimmed, "error");
+    if (parsed.error_message.empty())
+      parsed.error_message = parsed.message;
+  } else if (has_challenge_field(parsed.fields)) {
+    parsed.type = AggregateAuthResponseType::challenge;
+  } else if (has_field(parsed.fields, "group_list") &&
+             !has_field(parsed.fields, "username") &&
+             !has_field(parsed.fields, "password")) {
+    parsed.type = AggregateAuthResponseType::group_select;
+  } else {
+    parsed.type = AggregateAuthResponseType::auth_request;
   }
 
-  const std::vector<AuthInput> inputs = input_fields(response.body);
-  AggregateAuthResult input_challenge = challenge_from_inputs(inputs);
-  if (!input_challenge.error_code.empty())
-    return input_challenge;
-
-  if (body_lower.find("secondary_password") != std::string::npos ||
-      body_lower.find("tokencode") != std::string::npos ||
-      body_lower.find("challenge") != std::string::npos) {
-    auto result = error("auth_challenge_required",
-                        "authentication challenge response is required");
-    result.prompt.kind = "challenge";
-    result.prompt.label = "Authentication challenge";
-    result.prompt.input_type = "password";
-    return result;
-  }
-
-  const std::string message = tag_text(response.body, "message");
-  if (!message.empty())
-    return error("auth_failed", message);
-
-  return error("protocol_error", "missing session token in auth response");
+  *out = std::move(parsed);
+  return ValidationResult{};
 }
 
 } // namespace protocol
