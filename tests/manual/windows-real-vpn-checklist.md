@@ -74,6 +74,27 @@ ipconfig /all > "before-test-dns.txt"
 
 - [ ] Baseline DNS snapshot saved
 
+**1e. Native-only preconditions:**
+
+```powershell
+Get-Process openconnect -ErrorAction SilentlyContinue
+Get-Process __vpn-supervisor -ErrorAction SilentlyContinue
+.\exv.exe desktop-rpc runtime.status '{}'
+```
+
+**Expected:** No OpenConnect or `__vpn-supervisor` process. Runtime status reports `engine=native` and `source=native`.
+
+- [ ] No OpenConnect process running
+- [ ] No `__vpn-supervisor` process running
+- [ ] Runtime status is native-only
+
+**1f. Native-only phase gates to record during this run:**
+
+- [ ] P0: XML auth + CSTP CONNECT reaches success or structured auth/CSD/SAML error
+- [ ] P1: DNS, routes, and liveness work on Windows
+- [ ] P2: challenge/group/CSD/DTLS fallback/reconnect behavior verified or explicitly marked not exercised
+- [ ] P3: native-only process/package evidence captured
+
 ---
 
 ## Connection Test

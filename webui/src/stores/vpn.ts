@@ -19,7 +19,6 @@ export interface VpnStatus {
   server: string
   username: string
   pid: number
-  supervisor_pid: number
   network_ready: boolean
   interface: string
   internal_ip: string
@@ -85,6 +84,20 @@ export interface ConnectionProgressStage {
   key: string
   label: string
   description: string
+}
+
+export interface AuthInteraction {
+  id: string
+  kind: string
+  label: string
+  input_type: string
+  options: string[]
+}
+
+export interface AuthInteractionPollResponse {
+  ok: true
+  pending: boolean
+  interaction?: AuthInteraction
 }
 
 export type VpnErrorType =
@@ -203,7 +216,7 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
   },
   unsupported_dtls: {
     error_type: 'unsupported_dtls',
-    message: '服务器要求的 DTLS 模式暂不受支持，已回退到 TLS。',
+    message: '当前原生连接使用 CSTP-only，DTLS 后端尚未启用。',
     recommended_action: 'retry_connection',
     recoverable: false,
   },
@@ -327,6 +340,7 @@ function summarizeError(message: string) {
 export const useVpnStore = defineStore('vpn', () => {
   let progressTimer: ReturnType<typeof setInterval> | null = null
   let uptimeTimer: ReturnType<typeof setInterval> | null = null
+  let authInteractionPollTimer: ReturnType<typeof setInterval> | null = null
   const ui = useUiStore()
   const config = useConfigStore()
 
@@ -352,6 +366,8 @@ export const useVpnStore = defineStore('vpn', () => {
   const activeTemporaryBackend = ref<unknown | null>(null)
   const connectInFlight = ref(false)
   const disconnectInFlight = ref(false)
+  const pendingAuthInteraction = ref<AuthInteraction | null>(null)
+  const authInteractionBusy = ref(false)
   const connectionProgressStartedAt = ref<number | null>(null)
   const connectionProgressStageOffset = ref(0)
   const connectionProgressMaxIndex = ref(0)
@@ -719,6 +735,51 @@ export const useVpnStore = defineStore('vpn', () => {
     await Promise.allSettled([fetchStatus(), fetchServiceStatus()])
   }
 
+  async function fetchAuthInteraction() {
+    try {
+      const { data } = await api.get<AuthInteractionPollResponse>('/vpn/auth-interaction')
+      pendingAuthInteraction.value = data.pending ? data.interaction ?? null : null
+    } catch (e) {
+      console.error('[vpn] fetchAuthInteraction failed:', e)
+    }
+  }
+
+  function startAuthInteractionPolling() {
+    void fetchAuthInteraction()
+    if (authInteractionPollTimer) return
+    authInteractionPollTimer = setInterval(() => {
+      void fetchAuthInteraction()
+    }, 1000)
+  }
+
+  function stopAuthInteractionPolling() {
+    if (authInteractionPollTimer) {
+      clearInterval(authInteractionPollTimer)
+      authInteractionPollTimer = null
+    }
+    pendingAuthInteraction.value = null
+    authInteractionBusy.value = false
+  }
+
+  async function respondAuthInteraction(value: string): Promise<boolean> {
+    const interaction = pendingAuthInteraction.value
+    if (!interaction || authInteractionBusy.value) return false
+    authInteractionBusy.value = true
+    try {
+      await api.post('/vpn/auth-interaction/response', {
+        id: interaction.id,
+        value,
+      })
+      pendingAuthInteraction.value = null
+      return true
+    } catch (error) {
+      setError(normalizeError(error))
+      return false
+    } finally {
+      authInteractionBusy.value = false
+    }
+  }
+
   function buildPasswordPromptMessage(prefix = '') {
     const auth = config.authConfig
     const username = auth.username || status.value?.username
@@ -756,6 +817,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastMutatingAction.value = connect
     connectInFlight.value = true
     startConnectionProgress(2)
+    startAuthInteractionPolling()
     try {
       const { data } = await api.post<VpnStatus>(
         '/connect',
@@ -770,6 +832,7 @@ export const useVpnStore = defineStore('vpn', () => {
       setError(normalized)
     } finally {
       connectInFlight.value = false
+      stopAuthInteractionPolling()
       stopConnectionProgress()
       loading.value = false
     }
@@ -807,6 +870,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastMutatingAction.value = connectElevated
     connectInFlight.value = true
     startConnectionProgress(0, 2)
+    startAuthInteractionPolling()
     try {
       const { data } = await api.post<VpnStatus | VpnError>(
         '/connect/elevated',
@@ -832,6 +896,7 @@ export const useVpnStore = defineStore('vpn', () => {
     } finally {
       lastActionWasElevatedConnect.value = false
       connectInFlight.value = false
+      stopAuthInteractionPolling()
       stopConnectionProgress()
       loading.value = false
     }
@@ -1059,9 +1124,11 @@ export const useVpnStore = defineStore('vpn', () => {
     serviceInstalled, serviceRunning, serviceAvailable, canUseElevatedFallback,
     recommendedConnectMode, currentSessionMode, displayUptimeSeconds,
     connectInFlight, disconnectInFlight,
+    pendingAuthInteraction, authInteractionBusy,
     connectionProgress,
     isDesktop, dashboardState, dashboardPrimaryAction, dashboardSecondaryAction,
     fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated, connectFromDashboard,
+    fetchAuthInteraction, respondAuthInteraction,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
     fetchServiceStatus, fetchCliStatus, installService, uninstallService, installCli, uninstallCli,
     addLog, clearLogs, setLogs, addServiceProgress, clearError, retryLastAction,

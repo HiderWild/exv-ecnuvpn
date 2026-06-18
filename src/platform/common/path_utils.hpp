@@ -15,7 +15,6 @@ std::string config_path(const std::string &config_dir);
 std::string pid_path(const std::string &config_dir);
 std::string log_path(const std::string &config_dir);
 std::string tunnel_path(const std::string &config_dir);
-std::string supervisor_pid_path(const std::string &config_dir);
 std::string route_ready_path(const std::string &config_dir);
 bool sync_owner(const std::string &path, unsigned int uid, unsigned int gid);
 bool fix_config_dir_ownership(const std::string &dir,

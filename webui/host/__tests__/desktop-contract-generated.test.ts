@@ -57,6 +57,8 @@ describe('generated system contract', () => {
   it('generates desktop RPC action constants from the manifest', () => {
     assert.deepEqual(DESKTOP_RPC_ACTIONS, manifest().surfaces.desktop_rpc.actions)
     assert.deepEqual(desktopRpcActions, DESKTOP_RPC_ACTIONS)
+    assert.ok(DESKTOP_RPC_ACTIONS.includes('vpn.authInteraction.get'))
+    assert.ok(DESKTOP_RPC_ACTIONS.includes('vpn.authInteraction.respond'))
   })
 
   it('keeps persisted log mutation out of the desktop RPC surface', () => {

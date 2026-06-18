@@ -83,6 +83,8 @@ export const DESKTOP_RPC_ACTIONS = [
   "status.get",
   "vpn.connect",
   "vpn.disconnect",
+  "vpn.authInteraction.get",
+  "vpn.authInteraction.respond",
   "config.getAuth",
   "config.saveAuth",
   "config.getSettings",
@@ -477,7 +479,6 @@ export const SRC_FORBIDDEN_PATTERNS = [
   "platform include logger.hpp",
   "platform include vpn.hpp",
   "platform include tunnel.hpp",
-  "platform include openconnect_log.hpp",
   "platform include virtual_network.hpp",
   "platform include core/*"
 ] as const

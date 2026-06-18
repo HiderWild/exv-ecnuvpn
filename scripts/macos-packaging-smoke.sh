@@ -211,28 +211,32 @@ else
   skip "desktop-rpc status" "exv binary not found"
 fi
 
-# ---------- 6. Verify openconnect binary ----------
+# ---------- 6. Native-only runtime artifact policy ----------
 
-section "6. OpenConnect binary"
+section "6. Native-only runtime artifact policy"
 
-OPENCONNECT_PATHS=(
+LEGACY_RUNTIME_ARTIFACTS=(
   "$BUILD_DIR/openconnect"
-  "/usr/local/bin/openconnect"
+  "$BUILD_DIR/openconnect.exe"
+  "$BUILD_DIR/libopenconnect.dylib"
+  "$BUILD_DIR/vpnc-script"
   "$REPO_ROOT/runtime/darwin-x64/openconnect"
+  "$REPO_ROOT/runtime/darwin-x64/libopenconnect.dylib"
+  "$REPO_ROOT/runtime/darwin-x64/vpnc-script"
 )
 
-OPENCONNECT_FOUND=""
-for oc_path in "${OPENCONNECT_PATHS[@]}"; do
-  if [[ -x "$oc_path" ]]; then
-    OPENCONNECT_FOUND="$oc_path"
+LEGACY_RUNTIME_FOUND=""
+for artifact_path in "${LEGACY_RUNTIME_ARTIFACTS[@]}"; do
+  if [[ -e "$artifact_path" ]]; then
+    LEGACY_RUNTIME_FOUND="$artifact_path"
     break
   fi
 done
 
-if [[ -n "$OPENCONNECT_FOUND" ]]; then
-  pass "openconnect binary found at $OPENCONNECT_FOUND"
+if [[ -n "$LEGACY_RUNTIME_FOUND" ]]; then
+  fail "native-only package must not include legacy runtime artifacts" "$LEGACY_RUNTIME_FOUND"
 else
-  skip "openconnect binary" "Not found (expected if native engine is default; legacy path only)"
+  pass "native-only package contains no legacy runtime artifacts"
 fi
 
 # ---------- 7. Verify helper binary present ----------

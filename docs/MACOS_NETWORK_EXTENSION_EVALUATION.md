@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-The current macOS architecture uses a privileged helper daemon (`exv-helper`) running as root via launchd, with a utun-based tunnel interface and route/DNS configuration performed directly by the helper and supervisor processes. This architecture works for **direct DMG distribution** but is **incompatible with Mac App Store distribution**, which requires Apple's Network Extension framework.
+The current macOS architecture uses a privileged helper daemon (`exv-helper`) running as root via launchd for packet-device and network-configuration operations. The native protocol lifecycle is owned by Core and `TunnelController`. This architecture works for **direct DMG distribution** but is **incompatible with Mac App Store distribution**, which requires Apple's Network Extension framework.
 
 This document evaluates:
 1. The current architecture's fitness for non-App Store distribution
@@ -25,10 +25,10 @@ This document evaluates:
 | Component | Role | Privilege Level |
 |---|---|---|
 | `exv` (Electron + CLI) | User-facing UI, config management | User (unprivileged) |
-| `exv-helper` (launchd daemon) | IPC server, spawns supervisor/worker | Root (`/Library/LaunchDaemons/`) |
-| `__vpn-supervisor` (forked child) | Holds VPN session, packet loop, reconnection | Root (inherited from helper) |
-| utun interface | Kernel tunnel adapter | Created by supervisor process |
-| Route/DNS config | Applied via `route` CLI and `scutil` | Root (inherited) |
+| `exv-helper` (launchd daemon) | IPC server and privileged network-resource broker | Root (`/Library/LaunchDaemons/`) |
+| Core / `TunnelController` | Holds VPN session, packet loop, reconnection | User/Core process |
+| utun interface | Kernel tunnel adapter | Prepared by helper, driven by native packet device |
+| Route/DNS config | Applied via native platform network operations | Root helper broker |
 
 ### 2.2 Strengths for DMG Distribution
 
@@ -79,7 +79,7 @@ For AnyConnect-style VPN: **`NETunnelProviderManager`** (PacketTunnel) is the on
 | Current Component | NE Incompatibility | Severity |
 |---|---|---|
 | `exv-helper` as root launchd daemon | NE runs as sandboxed extension, not root | **Breaking** |
-| `fork()` + `setsid()` for supervisor | `fork()` prohibited in sandboxed extensions | **Breaking** |
+| Any forked VPN protocol owner | `fork()` prohibited in sandboxed extensions | **Breaking** |
 | Direct utun `ioctl()` | Must use `PacketTunnelProvider` to create tunnel | **Breaking** |
 | `route` CLI for routing | Must use `NEPacketTunnelNetworkSettings` routes | **Breaking** |
 | `scutil` for DNS | Must use `NEPacketTunnelNetworkSettings` DNS | **Breaking** |
@@ -122,10 +122,10 @@ For AnyConnect-style VPN: **`NETunnelProviderManager`** (PacketTunnel) is the on
 | `config_manager.hpp/.cpp` | Yes (with path change) | Atomic writes work in sandbox |
 | `crypto.hpp/.cpp` | Yes | AES encryption; platform-independent |
 | `logger.hpp/.cpp` | Partial | File logging needs App Group path |
-| `vpn.hpp/.cpp` | Significant rewrite | Supervisor model incompatible with NE |
+| `vpn.hpp/.cpp` | Significant rewrite | Process-owned tunnel lifecycle differs from NE |
 | `helper.hpp/.cpp` | **Not reusable** | Entire helper daemon concept replaced by NE extension |
 | `helper_ipc.hpp` | **Not reusable** | IPC replaced by App Group or extension communication |
-| `tunnel.hpp/.cpp` | **Not reusable** | Route scripts replaced by NE network settings |
+| Retired route-script code | **Not reusable** | Route scripts replaced by NE network settings |
 | `app_api.hpp/.cpp` | Partial | RPC dispatch logic reusable; helper calls need rewrite |
 | `webui.hpp/.cpp` | Yes | HTTP server; no platform dependency |
 | `sse_broadcaster.hpp/.cpp` | Yes | SSE push; no platform dependency |
@@ -146,8 +146,8 @@ For AnyConnect-style VPN: **`NETunnelProviderManager`** (PacketTunnel) is the on
 | `helper_lifecycle.cpp` | **No** | Daemon lifecycle replaced by extension lifecycle |
 | `helper_platform.cpp` | **No** | Platform config not applicable |
 | `helper_client.cpp` | **No** | Unix socket IPC replaced by extension communication |
-| `vpn_supervisor_process.cpp` | **No** | fork+setsid prohibited in sandbox |
-| `openconnect_process.cpp` | **No** | External process spawning prohibited in sandbox |
+| Retired VPN child-process launcher | **No** | fork+setsid prohibited in sandbox |
+| Retired external VPN runtime launcher | **No** | External process spawning prohibited in sandbox |
 | `virtual_network_probe.cpp` | **Yes** | Network interface detection; App Group accessible |
 | `path_utils.cpp` | **Partial** | Paths need App Group prefix |
 
@@ -164,7 +164,7 @@ For AnyConnect-style VPN: **`NETunnelProviderManager`** (PacketTunnel) is the on
 | `config_defaults.hpp` | Yes | Default values; platform-independent |
 | `backend_resolver.hpp` | Partial | Service resolution logic; NE mode needs new resolver |
 | `runtime_status.hpp` | Yes | Status JSON; platform-independent |
-| `vpn_supervisor_process.hpp` | No | Supervisor model replaced |
+| Retired VPN child-process payload headers | No | Process-launch model replaced |
 | `driver_status.hpp` | No | WinTun/utun detection replaced |
 | `virtual_network_probe.hpp` | Yes | Network detection; platform-independent |
 

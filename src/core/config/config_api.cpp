@@ -1,7 +1,6 @@
 #include "platform/common/file_system.hpp"
 #include "platform/common/interface_stats.hpp"
 #include "platform/common/process_utils.hpp"
-#include "platform/common/runtime_discovery.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "core/config/config_api.hpp"
 #include "core/crypto/crypto.hpp"
@@ -133,17 +132,10 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
             return "Invalid boolean value for minimal_install_service_before_connect";
         }
     } else if (key == "vpn_engine") {
-        if (value == "native" || value == "legacy_openconnect") {
-            cfg.vpn_engine = value;
-        } else {
-            return "vpn_engine must be native or legacy_openconnect";
+        if (value != "native") {
+            return "vpn_engine is native-only; legacy engine has been removed";
         }
-    } else if (key == "openconnect_runtime") {
-        if (value == "bundled" || value == "system" || value == "auto") {
-            cfg.openconnect_runtime = value;
-        } else {
-            return "openconnect_runtime must be bundled, system, or auto";
-        }
+        cfg.vpn_engine = "native";
     } else if (key == "windows_tunnel_driver") {
         if (value == "auto" || value == "wintun" || value == "tap") {
             cfg.windows_tunnel_driver = value;
@@ -156,6 +148,7 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
         return "Unknown config key: " + key;
     }
 
+    normalize_native_only(cfg);
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
                platform::get_config_path();
@@ -168,6 +161,7 @@ std::string config_clear_password_and_key(config::ConfigManager& mgr) {
     Config cfg = mgr.load();
     cfg.remember_password = false;
     cfg.password.clear();
+    normalize_native_only(cfg);
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
                platform::get_config_path();
@@ -208,6 +202,7 @@ std::string config_set_password(config::ConfigManager& mgr,
     }
 
     cfg.password = encrypted;
+    normalize_native_only(cfg);
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
                platform::get_config_path();
@@ -218,6 +213,7 @@ std::string config_set_password(config::ConfigManager& mgr,
 
 void config_reset(config::ConfigManager& mgr) {
     Config cfg;
+    normalize_native_only(cfg);
     mgr.save(cfg);
     exv::observability::LogFacade::info("Config reset to defaults via config_api");
 }
@@ -246,7 +242,6 @@ std::string config_import(config::ConfigManager& mgr, const std::string& json_st
     if (j.contains("log_file")) cfg.log_file = j["log_file"].get<std::string>();
     if (j.contains("remember_password")) cfg.remember_password = j["remember_password"].get<bool>();
     if (j.contains("vpn_engine")) cfg.vpn_engine = j["vpn_engine"].get<std::string>();
-    if (j.contains("openconnect_runtime")) cfg.openconnect_runtime = j["openconnect_runtime"].get<std::string>();
     if (j.contains("windows_tunnel_driver")) cfg.windows_tunnel_driver = j["windows_tunnel_driver"].get<std::string>();
     if (j.contains("windows_tap_interface")) cfg.windows_tap_interface = j["windows_tap_interface"].get<std::string>();
     if (j.contains("auto_reconnect")) cfg.auto_reconnect = j["auto_reconnect"].get<bool>();
@@ -264,6 +259,7 @@ std::string config_import(config::ConfigManager& mgr, const std::string& json_st
         }
     }
 
+    normalize_native_only(cfg);
     mgr.save(cfg);
     exv::observability::LogFacade::info("Config imported via config_api");
     return "";

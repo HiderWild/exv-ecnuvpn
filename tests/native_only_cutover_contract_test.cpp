@@ -28,6 +28,10 @@ bool allowed_path(const fs::path &path) {
   const std::string s = "/" + generic_relative_path(path);
   return contains(s, "/docs/archive/") || contains(s, "/reference/") ||
          contains(s, "/tests/") ||
+         contains(s,
+                  "/docs/handoffs/native-anyconnect-v2-live-validation-template.md") ||
+         (contains(s, "/docs/handoffs/") &&
+          contains(s, "native-only-live-validation.md")) ||
          contains(s, "/docs/superpowers/plans/") ||
          contains(s, "/docs/superpowers/checklists/");
 }

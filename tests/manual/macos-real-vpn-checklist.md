@@ -26,6 +26,22 @@
   Output: _________________________________
   ```
 
+### P1b. Native-Only Preconditions
+
+```bash
+pgrep -fl openconnect || true
+pgrep -fl __vpn-supervisor || true
+exv desktop-rpc runtime.status '{}'
+```
+
+- [ ] No OpenConnect process is running
+- [ ] No `__vpn-supervisor` process is running
+- [ ] Runtime status reports `engine=native` and `source=native`
+- [ ] P0: XML auth + CSTP CONNECT reaches success or structured auth/CSD/SAML error
+- [ ] P1: DNS, routes, and liveness work on macOS
+- [ ] P2: challenge/group/CSD/DTLS fallback/reconnect behavior verified or explicitly marked not exercised
+- [ ] P3: native-only process/package evidence captured
+
 ### P2. Baseline System Snapshot
 
 Capture system state BEFORE any VPN operations.
@@ -238,7 +254,7 @@ ifconfig > /tmp/exv-ifconfig-before.txt
 ## Test 7: Core Crash Cleanup
 
 - [ ] Connect: `exv start`
-- [ ] Kill supervisor: `sudo kill $(pgrep -f __vpn-supervisor)`
+- [ ] Kill the Core connection owner: `sudo pkill -f "exv.*core"`
 - [ ] Wait 10 seconds
 - [ ] Verify session state cleared: `cat /var/run/exv-helper-session.json 2>/dev/null || echo "File not found"`
   ```

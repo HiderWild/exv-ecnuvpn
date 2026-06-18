@@ -89,8 +89,8 @@ int main() {
 
     AuthResult ar = parse_auth_response(resp);
     ok = expect(ar.ok, "auth success should be ok") && ok;
-    ok = expect(ar.cookie == "webvpn_session=REDACTED_COOKIE",
-                "auth success should extract webvpn_session cookie") &&
+    ok = expect(ar.cookie == "webvpn=REDACTED_COOKIE",
+                "auth success should extract webvpn cookie") &&
          ok;
   }
 
@@ -103,7 +103,7 @@ int main() {
     const std::string submitted_raw =
         "HTTP/1.1 200 OK\r\n"
         "Set-Cookie: route=new; Path=/; Secure\r\n"
-        "Set-Cookie: webvpn_session=SESSION; Path=/; Secure; HttpOnly\r\n"
+        "Set-Cookie: webvpn=SESSION; Path=/; Secure; HttpOnly\r\n"
         "\r\n";
 
     HttpResponse preflight;
@@ -122,7 +122,7 @@ int main() {
 
     cookies.collect_from_response(submitted);
     ok = expect(cookies.header() ==
-                    "webvpn_prelogin=PRELOGIN; route=new; webvpn_session=SESSION",
+                    "webvpn_prelogin=PRELOGIN; route=new; webvpn=SESSION",
                 "cookie jar should update existing names without moving them") &&
          ok;
   }

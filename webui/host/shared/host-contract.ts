@@ -30,6 +30,8 @@ export const desktopApiPaths = {
   connectElevated: '/connect/elevated',
   disconnect: '/disconnect',
   disconnectElevated: '/disconnect/elevated',
+  authInteraction: '/vpn/auth-interaction',
+  authInteractionResponse: '/vpn/auth-interaction/response',
   configAuth: '/config/auth',
   configSettings: '/config/settings',
   configKey: '/config/key',

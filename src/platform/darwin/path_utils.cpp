@@ -84,10 +84,6 @@ std::string tunnel_path(const std::string &config_dir) {
   return join_path(config_dir, "tunnel.sh");
 }
 
-std::string supervisor_pid_path(const std::string &config_dir) {
-  return join_path(config_dir, "ecnuvpn-supervisor.pid");
-}
-
 std::string route_ready_path(const std::string &config_dir) {
   return join_path(config_dir, "route-ready");
 }

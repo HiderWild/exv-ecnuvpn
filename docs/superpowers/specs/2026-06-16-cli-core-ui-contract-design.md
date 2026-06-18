@@ -288,7 +288,6 @@ advanced key writes.
 - `extra_args`
 - `log_path`
 - `vpn_engine`
-- `openconnect_runtime`
 - `windows_tunnel_driver`
 - `windows_tap_interface`
 - `auto_reconnect`

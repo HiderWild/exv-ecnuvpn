@@ -48,6 +48,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
 set(EXV_PROTOCOL_SOURCES
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
     src/vpn_engine/protocol/http.cpp
@@ -131,7 +132,6 @@ set(EXV_CORE_SOURCES
     src/platform/common/route_model.cpp
     src/platform/common/status_models.cpp
     src/platform/common/runtime_status.cpp
-    src/vpn_engine/openconnect/openconnect_log.cpp
     src/vpn_engine/native_engine.cpp
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
@@ -147,9 +147,7 @@ set(EXV_CORE_SOURCES
     src/core/app_api/desktop_tunnel_host.cpp
     src/core/app_api/desktop_vpn_actions.cpp
     src/core/vpn/vpn.cpp
-    src/core/vpn/vpn_legacy_adapter.cpp
     src/core/vpn/vpn_runtime.cpp
-    src/core/vpn/openconnect_tunnel_script.cpp
     src/core/network/virtual_network_status.cpp
     src/runtime/runtime_context.cpp
     src/feedback/feedback.cpp
@@ -220,10 +218,8 @@ if(APPLE)
         src/platform/darwin/native_route_config.cpp
         src/platform/darwin/native_utun.cpp
         src/platform/darwin/platform_network_ops_darwin.cpp
-        src/platform/darwin/openconnect_process.cpp
         src/platform/darwin/oneshot_bootstrap.cpp
         src/platform/darwin/process_control.cpp
-        src/platform/darwin/tunnel_script.cpp
         src/platform/darwin/virtual_network_probe.cpp
         src/platform/darwin/path_utils.cpp
         src/platform/darwin/service_status.cpp
@@ -243,11 +239,9 @@ elseif(UNIX AND NOT APPLE)
         src/platform/linux/helper_lifecycle.cpp
         src/platform/linux/helper_platform.cpp
         src/platform/linux/helper_service_manager.cpp
-        src/platform/linux/openconnect_process.cpp
         src/platform/linux/oneshot_bootstrap.cpp
         src/platform/linux/platform_network_ops_linux.cpp
         src/platform/linux/process_control.cpp
-        src/platform/linux/tunnel_script.cpp
         src/platform/linux/virtual_network_probe.cpp
         src/platform/linux/path_utils.cpp
         src/platform/linux/default_engine_deps.cpp
@@ -275,10 +269,8 @@ elseif(WIN32)
         src/platform/win32/native_wintun.cpp
         src/platform/win32/native_ip_config.cpp
         src/platform/win32/platform_network_ops_win32.cpp
-        src/platform/win32/openconnect_process.cpp
         src/platform/win32/oneshot_bootstrap.cpp
         src/platform/win32/process_control.cpp
-        src/platform/win32/tunnel_script.cpp
         src/platform/win32/virtual_network_probe.cpp
         src/platform/win32/path_utils.cpp
         src/platform/win32/service_status.cpp
@@ -676,18 +668,6 @@ target_link_libraries(backend_resolver_test PRIVATE Threads::Threads)
 
 add_test(NAME backend_resolver_test COMMAND backend_resolver_test)
 
-add_executable(openconnect_log_test
-    tests/openconnect_log_test.cpp
-    src/vpn_engine/openconnect/openconnect_log.cpp
-)
-
-target_include_directories(openconnect_log_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME openconnect_log_test COMMAND openconnect_log_test)
-
 add_executable(native_session_state_test
     tests/native_session_state_test.cpp
     src/vpn_engine/session_state.cpp
@@ -716,6 +696,7 @@ add_test(NAME native_session_state_test COMMAND native_session_state_test)
 add_executable(native_engine_contract_test
     tests/native_engine_contract_test.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
     src/vpn_engine/protocol/http.cpp
@@ -774,6 +755,7 @@ add_executable(native_event_sink_test
     tests/native_event_sink_test.cpp
     src/vpn_engine/event_sink.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
     src/vpn_engine/protocol/http.cpp
@@ -827,33 +809,6 @@ target_link_libraries(native_event_sink_test PRIVATE
 )
 
 add_test(NAME native_event_sink_test COMMAND native_event_sink_test)
-
-add_executable(tunnel_script_contract_test
-    tests/tunnel_script_contract_test.cpp
-    src/core/vpn/openconnect_tunnel_script.cpp
-    src/vpn_engine/openconnect/openconnect_log.cpp
-    src/cli/console.cpp
-    ${EXV_OBSERVABILITY_SOURCES}
-    ${EXV_PLATFORM_LOGGING_SOURCES}
-)
-
-if(APPLE)
-    target_sources(tunnel_script_contract_test PRIVATE src/platform/darwin/tunnel_script.cpp)
-elseif(UNIX AND NOT APPLE)
-    target_sources(tunnel_script_contract_test PRIVATE src/platform/linux/tunnel_script.cpp)
-elseif(WIN32)
-    target_sources(tunnel_script_contract_test PRIVATE src/platform/win32/tunnel_script.cpp)
-    target_link_libraries(tunnel_script_contract_test PRIVATE ws2_32)
-endif()
-
-target_include_directories(tunnel_script_contract_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-target_link_libraries(tunnel_script_contract_test PRIVATE Threads::Threads)
-
-add_test(NAME tunnel_script_contract_test COMMAND tunnel_script_contract_test)
 
 add_executable(proxy_tun_detector_test
     tests/proxy_tun_detector_test.cpp
@@ -1258,6 +1213,19 @@ target_include_directories(native_auth_parser_test PRIVATE
 
 add_test(NAME native_auth_parser_test COMMAND native_auth_parser_test)
 
+add_executable(native_aggregate_auth_test
+    tests/native_aggregate_auth_test.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
+    src/vpn_engine/protocol/http.cpp
+)
+
+target_include_directories(native_aggregate_auth_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME native_aggregate_auth_test COMMAND native_aggregate_auth_test)
+
 add_executable(native_protocol_session_test
     tests/native_protocol_session_test.cpp
     tests/support/fake_anyconnect_server.cpp
@@ -1279,6 +1247,7 @@ add_test(NAME native_protocol_session_test COMMAND native_protocol_session_test)
 add_executable(native_production_transport_test
     tests/native_production_transport_test.cpp
     src/vpn_engine/protocol/http.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
     src/vpn_engine/protocol/production_transport.cpp
@@ -1291,6 +1260,24 @@ target_include_directories(native_production_transport_test PRIVATE
 )
 
 add_test(NAME native_production_transport_test COMMAND native_production_transport_test)
+
+add_executable(native_dtls_transport_test
+    tests/native_dtls_transport_test.cpp
+    src/vpn_engine/protocol/http.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
+    src/vpn_engine/protocol/auth.cpp
+    src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/production_transport.cpp
+    src/vpn_engine/protocol/url.cpp
+)
+
+target_include_directories(native_dtls_transport_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+add_test(NAME native_dtls_transport_test COMMAND native_dtls_transport_test)
 
 add_executable(native_fake_anyconnect_server_test
     tests/native_fake_anyconnect_server_test.cpp
@@ -2404,12 +2391,10 @@ set(_release_blocking_tests
     feedback_test
     runtime_status_native_test
     backend_resolver_test
-    openconnect_log_test
     native_session_state_test
     # native_helper_session_test  # Disabled: references deleted native_session_store.hpp
     native_engine_contract_test
     native_event_sink_test
-    tunnel_script_contract_test
     proxy_tun_detector_test
     app_api_runtime_policy_test
     native_packaging_policy_test

@@ -40,7 +40,7 @@ Rejected utilities:
 - file existence, read, write, or directory creation
 - runtime owner or ownership synchronization
 - process execution, shell quoting, privilege checks, or executable lookup
-- openconnect or bundled runtime discovery
+- native runtime discovery
 - network-interface traffic counters
 - Windows wide/UTF-8 conversion and Windows error formatting
 - terminal printing or ANSI console mutation
@@ -59,8 +59,7 @@ Planned platform units:
   paths, runtime owner overrides, redirect files, and ownership sync.
 - `platform/common/process_utils.hpp` for command execution, shell quoting,
   executable path lookup, and privilege checks.
-- `platform/common/runtime_discovery.hpp` for bundled runtime and openconnect
-  discovery.
+- `platform/common/runtime_discovery.hpp` for native bundled-runtime discovery.
 - `platform/common/interface_stats.hpp` for interface traffic counters with
   platform-specific implementations.
 - `platform/win32/windows_strings.hpp` for Windows-only UTF-8/wide conversion

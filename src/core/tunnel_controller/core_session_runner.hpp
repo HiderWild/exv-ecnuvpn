@@ -8,11 +8,14 @@
 #include "tunnel_state.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace exv::core {
 
@@ -34,6 +37,14 @@ public:
         std::function<ecnuvpn::vpn_engine::ValidationResult(
             const ecnuvpn::vpn_engine::TunnelMetadata&,
             ecnuvpn::vpn_engine::DeviceConfig*)>;
+
+    struct PendingAuthInteraction {
+        std::string id;
+        std::string kind;
+        std::string label;
+        std::string input_type;
+        std::vector<std::string> options;
+    };
 
     CoreSessionRunner();
     explicit CoreSessionRunner(NativeDependenciesFactory deps_factory);
@@ -57,19 +68,34 @@ public:
 
     /// Current VpnEngineStatus snapshot (thread-safe).
     ecnuvpn::vpn_engine::VpnEngineStatus status() const;
+    std::optional<PendingAuthInteraction> pending_auth_interaction() const;
+    bool provide_auth_interaction_response(const std::string& id,
+                                           const std::string& value);
 
     /// Register the callback that receives translated TunnelEvents.
     void set_event_callback(EventCallback cb);
     void set_network_config_callback(NetworkConfigCallback cb);
 
 private:
+    struct AuthInteractionResponseState {
+        std::string id;
+        std::string value;
+    };
+
+    ecnuvpn::vpn_engine::protocol::AuthInteractionResponse
+    handle_auth_interaction(
+        const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& request);
+
     mutable std::mutex mu_;
+    std::condition_variable auth_interaction_cv_;
     std::unique_ptr<ecnuvpn::vpn_engine::NativeVpnEngineSession> session_;
     std::unique_ptr<EngineEventBridge> bridge_;
     std::thread monitor_thread_;
     EventCallback event_callback_;
     NetworkConfigCallback network_config_callback_;
     NativeDependenciesFactory deps_factory_;
+    std::optional<PendingAuthInteraction> pending_auth_interaction_;
+    std::optional<AuthInteractionResponseState> auth_interaction_response_;
     std::atomic<bool> running_{false};
     ecnuvpn::vpn_engine::VpnEngineStatus cached_status_;
 };

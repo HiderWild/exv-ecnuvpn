@@ -55,6 +55,18 @@ struct ConfigActionsFixture {
     req.request_id = "test-req";
     return dispatcher.dispatch(req);
   }
+
+  void write_legacy_config() {
+    const auto path = std::filesystem::path(config_dir) / "config.json";
+    std::ofstream out(path);
+    out << R"({
+  "server": "https://legacy.example.edu",
+  "username": "legacy-user",
+  "vpn_engine": "legacy_openconnect",
+  "openconnect_runtime": "bundled",
+  "mtu": 1400
+})";
+  }
 };
 
 } // namespace
@@ -72,6 +84,27 @@ int main() {
          ok;
     ok = expect(payload.contains("settings"),
                 "response should contain settings projection") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    fix.write_legacy_config();
+
+    auto resp = fix.dispatch("config.get");
+    ok = expect(resp.success,
+                "config.get should load older legacy config files") &&
+         ok;
+
+    auto payload = json::parse(resp.payload_json);
+    ok = expect(payload["config"]["vpn_engine"] == "native",
+                "legacy vpn_engine should normalize to native") &&
+         ok;
+    ok = expect(!payload["config"].contains("openconnect_runtime"),
+                "serialized config should omit openconnect_runtime") &&
+         ok;
+    ok = expect(!payload["settings"].contains("openconnect_runtime"),
+                "settings projection should omit openconnect_runtime") &&
          ok;
   }
 
@@ -157,6 +190,27 @@ int main() {
     auto payload = json::parse(get_resp.payload_json);
     ok = expect(payload["mtu"] == 1500, "saved mtu should be 1500") && ok;
     ok = expect(payload["dtls"] == true, "saved dtls should be true") && ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    auto resp = fix.dispatch("config.saveSettings",
+                             R"({"vpn_engine":"legacy_openconnect"})");
+    ok = expect(!resp.success,
+                "config.saveSettings should reject legacy vpn_engine") &&
+         ok;
+    ok = expect(resp.error_code == "invalid_payload",
+                "legacy vpn_engine should be an invalid payload") &&
+         ok;
+
+    auto get_resp = fix.dispatch("config.getSettings");
+    auto payload = json::parse(get_resp.payload_json);
+    ok = expect(payload["vpn_engine"] == "native",
+                "vpn_engine should remain native after rejected save") &&
+         ok;
+    ok = expect(!payload.contains("openconnect_runtime"),
+                "settings should not expose openconnect_runtime") &&
+         ok;
   }
 
   {

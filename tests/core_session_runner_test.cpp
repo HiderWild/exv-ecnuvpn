@@ -33,6 +33,16 @@ bool expect(bool condition, const char* message) {
     return false;
 }
 
+template <typename Predicate>
+bool wait_until(Predicate predicate, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return predicate();
+}
+
 class RunnerFakeTransport final
     : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
 public:
@@ -87,6 +97,75 @@ public:
         std::lock_guard<std::mutex> lock(mu_);
         closed_ = false;
     }
+
+private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool closed_ = false;
+};
+
+class RunnerChallengeTransport final
+    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+public:
+    ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
+        const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions& options) override {
+        ecnuvpn::vpn_engine::protocol::AuthInteractionRequest request;
+        request.id = "runner-challenge";
+        request.kind = "challenge";
+        request.label = "Token";
+        request.input_type = "password";
+
+        auto response = options.auth_interaction_handler
+            ? options.auth_interaction_handler(request)
+            : ecnuvpn::vpn_engine::protocol::AuthInteractionResponse{};
+
+        ecnuvpn::vpn_engine::protocol::AuthResult result;
+        result.ok = response.ok && response.value == "123456";
+        if (result.ok) {
+            result.cookie = "runner-cookie";
+        } else {
+            result.error_code = "auth_challenge_required";
+            result.error_message = "authentication challenge response is required";
+        }
+        return result;
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    connect_cstp(const std::string&, ecnuvpn::vpn_engine::TunnelMetadata* metadata) override {
+        if (!metadata) {
+            return {false, "metadata_missing", "metadata output is null"};
+        }
+        metadata->interface_name = "fake-cstp0";
+        metadata->internal_ip4_address = "10.255.0.10";
+        metadata->internal_ip4_netmask = "255.255.255.0";
+        metadata->mtu = 1400;
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    send_packet(const std::vector<std::uint8_t>&) override { return {}; }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind) override {
+        return {};
+    }
+
+    ecnuvpn::vpn_engine::ValidationResult
+    receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame*) override {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait(lock, [&] { return closed_; });
+        return {false, "transport_closed", "transport closed"};
+    }
+
+    void disconnect() override {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            closed_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    void reset_for_reconnect() override {}
 
 private:
     std::mutex mu_;
@@ -453,6 +532,69 @@ bool test_runner_network_configurator_supplies_packet_device_config() {
     return ok;
 }
 
+// =========================================================================
+// Test 10: CoreSessionRunner exposes and answers auth continuation prompts
+// =========================================================================
+bool test_runner_auth_interaction_response_unblocks_start() {
+    using exv::core::CoreSessionRunner;
+
+    bool ok = true;
+    auto packet_state = std::make_shared<RunnerPacketDeviceState>();
+
+    CoreSessionRunner runner([packet_state]() {
+        ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+        deps.transport_factory = []() {
+            return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                new RunnerChallengeTransport());
+        };
+        deps.packet_device_factory = [packet_state]() {
+            return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                new RunnerFakePacketDevice(packet_state));
+        };
+        return deps;
+    });
+
+    std::atomic<bool> start_done{false};
+    std::atomic<bool> start_ok{false};
+    std::thread start_thread([&] {
+        start_ok.store(runner.start(runner_config(), "test-password"));
+        start_done.store(true);
+    });
+
+    bool pending_seen = wait_until([&] {
+        return runner.pending_auth_interaction().has_value();
+    }, std::chrono::seconds(2));
+    ok = expect(pending_seen,
+                "runner should expose pending auth interaction while start waits") &&
+         ok;
+
+    auto pending = runner.pending_auth_interaction();
+    ok = expect(pending && pending->kind == "challenge",
+                "pending auth interaction should preserve challenge kind") &&
+         ok;
+    ok = expect(!runner.provide_auth_interaction_response("wrong-id", "123456"),
+                "runner should reject response for mismatched interaction id") &&
+         ok;
+    if (pending) {
+        ok = expect(runner.provide_auth_interaction_response(pending->id, "123456"),
+                    "runner should accept matching auth interaction response") &&
+             ok;
+    }
+
+    if (start_thread.joinable())
+        start_thread.join();
+
+    ok = expect(start_done.load() && start_ok.load(),
+                "runner start should continue after auth interaction response") &&
+         ok;
+    ok = expect(!runner.pending_auth_interaction().has_value(),
+                "pending auth interaction should clear after response") &&
+         ok;
+
+    runner.stop();
+    return ok;
+}
+
 } // namespace
 
 // =========================================================================
@@ -487,6 +629,9 @@ int main() {
 
     std::cout << "--- Test 9: Runner network configurator ---\n";
     ok = test_runner_network_configurator_supplies_packet_device_config() && ok;
+
+    std::cout << "--- Test 10: Runner auth interaction response ---\n";
+    ok = test_runner_auth_interaction_response_unblocks_start() && ok;
 
     if (ok) {
         std::cout << "core_session_runner_test: all tests passed\n";

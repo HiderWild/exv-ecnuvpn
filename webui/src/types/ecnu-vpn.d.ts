@@ -18,6 +18,7 @@ import type {
   RouteEntry,
   ServiceStatus,
   ServiceProgressEntry,
+  AuthInteractionPollResponse,
   VpnStatus,
 } from '../stores/vpn'
 
@@ -62,6 +63,8 @@ export interface EcnuVpnApi {
     disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
     connectElevated(password?: string): Promise<VpnStatus | VpnError>
     disconnectElevated(backend?: unknown): Promise<VpnStatus | VpnError>
+    authInteraction(): Promise<AuthInteractionPollResponse>
+    respondAuthInteraction(id: string, value: string): Promise<{ ok: true }>
   }
   config: {
     getAuth(): Promise<AuthConfig>

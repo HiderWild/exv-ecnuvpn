@@ -37,8 +37,8 @@ bool test_password_auth_success() {
 
   const auto result = server.password_authenticate(FakeAnyConnectCredentials{});
   ok = expect(result.ok, "password auth should succeed with expected credentials") && ok;
-  ok = expect(result.cookie == "webvpn_session=FAKE_COOKIE",
-              "password auth should return the webvpn_session cookie") &&
+  ok = expect(result.cookie == "webvpn=FAKE_COOKIE",
+              "password auth should return the webvpn cookie") &&
        ok;
   ok = expect(server.auth_attempts() == 1, "auth attempt count should increment") && ok;
 

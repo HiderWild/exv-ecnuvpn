@@ -1,5 +1,6 @@
 #include "vpn_engine/protocol/production_transport.hpp"
 
+#include "vpn_engine/protocol/aggregate_auth.hpp"
 #include "vpn_engine/protocol/cstp.hpp"
 #include "vpn_engine/protocol/http.hpp"
 
@@ -17,8 +18,8 @@ namespace protocol {
 
 namespace {
 
-constexpr const char *kLoginPath = "/+CSCOE+/logon.html";
-constexpr const char *kCstpPath = "/CSCOT/";
+constexpr const char *kAggregateAuthPath = "/";
+constexpr const char *kCstpPath = "/CSCOSSLC/tunnel";
 constexpr const char *kDefaultUserAgent = "ECNU-VPN Native";
 constexpr std::size_t kMaxHttpHeaderBytes = 64 * 1024;
 constexpr std::size_t kMaxHttpBodyBytes = 16 * 1024 * 1024;
@@ -169,31 +170,19 @@ std::vector<std::uint8_t> to_bytes(const std::string &text) {
   return std::vector<std::uint8_t>(text.begin(), text.end());
 }
 
-std::string make_login_get_request(const ParsedVpnUrl &server,
-                                   const std::string &useragent) {
+std::string make_aggregate_auth_post_request(const ParsedVpnUrl &server,
+                                             const std::string &useragent,
+                                             const std::string &body,
+                                             const std::string &cookie_header) {
   std::ostringstream out;
-  out << "GET " << kLoginPath << " HTTP/1.1\r\n";
+  out << "POST " << kAggregateAuthPath << " HTTP/1.1\r\n";
   out << "Host: " << host_header(server) << "\r\n";
   out << "User-Agent: " << useragent_or_default(useragent) << "\r\n";
-  out << "Accept: text/html, */*\r\n";
-  out << "Connection: keep-alive\r\n";
-  out << "\r\n";
-  return out.str();
-}
-
-std::string make_login_post_request(const ParsedVpnUrl &server,
-                                    const std::string &useragent,
-                                    const std::string &username,
-                                    const std::string &encoded_password,
-                                    const std::string &cookie_header) {
-  const std::string body = "username=" + form_url_encode(username) +
-                           "&password=" + encoded_password;
-
-  std::ostringstream out;
-  out << "POST " << kLoginPath << " HTTP/1.1\r\n";
-  out << "Host: " << host_header(server) << "\r\n";
-  out << "User-Agent: " << useragent_or_default(useragent) << "\r\n";
-  out << "Content-Type: application/x-www-form-urlencoded; charset=utf-8\r\n";
+  out << "X-Transcend-Version: 1\r\n";
+  out << "X-Aggregate-Auth: 1\r\n";
+  out << "Accept: */*\r\n";
+  out << "Accept-Encoding: identity\r\n";
+  out << "Content-Type: text/xml; charset=utf-8\r\n";
   out << "Content-Length: " << body.size() << "\r\n";
   if (!cookie_header.empty())
     out << "Cookie: " << cookie_header << "\r\n";
@@ -325,8 +314,9 @@ AuthResult ProductionProtocolTransport::authenticate(
   }
 
   {
-    ValidationResult written =
-        stream_->write_all(to_bytes(make_login_get_request(server_, useragent_)));
+    const std::string body = make_aggregate_auth_init_xml();
+    ValidationResult written = stream_->write_all(to_bytes(
+        make_aggregate_auth_post_request(server_, useragent_, body, {})));
     if (!written.ok) {
       ValidationResult sanitized =
           sanitized_result(written, current_password_,
@@ -352,18 +342,39 @@ AuthResult ProductionProtocolTransport::authenticate(
       return parsed;
     }
     return sanitized_auth_error("protocol_error",
-                                "unexpected HTTP status in login preflight",
+                                "unexpected HTTP status in aggregate-auth init",
                                 current_password_,
                                 current_password_form_encoded_,
                                 cookies_.header());
   }
 
   cookies_.collect_from_response(preflight);
+  {
+    AggregateAuthResult parsed_init =
+        parse_aggregate_auth_response(preflight);
+    if (parsed_init.ok) {
+      AuthResult result;
+      result.ok = true;
+      result.cookie = parsed_init.cookie;
+      return result;
+    }
+    if (parsed_init.error_code == "csd_required_unsupported" ||
+        parsed_init.error_code == "unsupported_auth_flow" ||
+        parsed_init.error_code == "auth_failed") {
+      return sanitized_auth_error(parsed_init.error_code,
+                                  parsed_init.error_message,
+                                  current_password_,
+                                  current_password_form_encoded_,
+                                  cookies_.header());
+    }
+  }
 
   {
-    ValidationResult written = stream_->write_all(to_bytes(make_login_post_request(
-        server_, useragent_, options.username, current_password_form_encoded_,
-        cookies_.header())));
+    const std::string body =
+        make_aggregate_auth_reply_xml(options.username, options.password);
+    ValidationResult written = stream_->write_all(to_bytes(
+        make_aggregate_auth_post_request(server_, useragent_, body,
+                                         cookies_.header())));
     if (!written.ok) {
       ValidationResult sanitized =
           sanitized_result(written, current_password_,
@@ -383,17 +394,47 @@ AuthResult ProductionProtocolTransport::authenticate(
 
   cookies_.collect_from_response(submitted);
 
-  AuthResult parsed = parse_auth_response(submitted);
-  if (!parsed.ok) {
-    parsed.error_message =
-        sanitized_message(parsed.error_message, current_password_,
-                          current_password_form_encoded_, cookies_.header());
-    return parsed;
+  AggregateAuthResult parsed = parse_aggregate_auth_response(submitted);
+  if (!parsed.ok &&
+      (parsed.error_code == "auth_challenge_required" ||
+       parsed.error_code == "auth_group_required") &&
+      options.auth_interaction_handler) {
+    AuthInteractionRequest request;
+    request.id = "auth-continuation-1";
+    request.kind = parsed.prompt.kind;
+    request.label = parsed.prompt.label;
+    request.input_type = parsed.prompt.input_type;
+    request.options = parsed.prompt.options;
+
+    AuthInteractionResponse response = options.auth_interaction_handler(request);
+    if (response.ok && !response.value.empty()) {
+      const std::string group =
+          parsed.prompt.kind == "group" ? response.value : std::string();
+      const std::string secondary =
+          parsed.prompt.kind == "challenge" ? response.value : std::string();
+      const std::string body = make_aggregate_auth_reply_xml(
+          options.username, options.password, group, secondary);
+      ValidationResult written = stream_->write_all(to_bytes(
+          make_aggregate_auth_post_request(server_, useragent_, body,
+                                           cookies_.header())));
+      if (!written.ok) {
+        ValidationResult sanitized =
+            sanitized_result(written, current_password_,
+                             current_password_form_encoded_, cookies_.header());
+        return auth_error(sanitized.code, sanitized.message);
+      }
+
+      HttpResponse continued;
+      ValidationResult read = read_http_response(false, &continued);
+      if (!read.ok)
+        return auth_error(read.code, read.message);
+      cookies_.collect_from_response(continued);
+      parsed = parse_aggregate_auth_response(continued);
+    }
   }
 
-  if (cookies_.empty()) {
-    return sanitized_auth_error("protocol_error",
-                                "missing Set-Cookie in auth response",
+  if (!parsed.ok) {
+    return sanitized_auth_error(parsed.error_code, parsed.error_message,
                                 current_password_,
                                 current_password_form_encoded_,
                                 cookies_.header());
@@ -401,7 +442,7 @@ AuthResult ProductionProtocolTransport::authenticate(
 
   AuthResult result;
   result.ok = true;
-  result.cookie = cookies_.header();
+  result.cookie = parsed.cookie;
   return result;
 }
 // End inlined from vpn_engine/protocol/production_transport_auth include-unit

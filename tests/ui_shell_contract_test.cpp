@@ -24,6 +24,8 @@ int main() {
 
   assert(is_allowed_host_action("status.get"));
   assert(is_allowed_host_action("vpn.connect"));
+  assert(is_allowed_host_action("vpn.authInteraction.get"));
+  assert(is_allowed_host_action("vpn.authInteraction.respond"));
   assert(!is_allowed_host_action("shell.unknown"));
   if (!is_allowed_host_action("config.import")) {
     return 1;

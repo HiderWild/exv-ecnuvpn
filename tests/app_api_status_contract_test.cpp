@@ -42,7 +42,6 @@ json map_snapshot_to_frontend(const exv::core::TunnelStatusSnapshot &snap,
   j["server"] = snap.server.empty() ? server : snap.server;
   j["username"] = username;
   j["pid"] = -1;
-  j["supervisor_pid"] = -1;
   j["network_ready"] = snap.network_ready;
   j["interface"] = snap.interface_name;
   j["internal_ip"] = "";
@@ -313,7 +312,7 @@ bool frontend_json_has_required_fields() {
 
   const char *required_fields[] = {
       "connected",    "process_running", "server",     "username",
-      "pid",          "supervisor_pid",  "network_ready",
+      "pid",          "network_ready",
       "interface",    "internal_ip",     "route_count",
       "mtu",          "uptime_seconds",  "rx_bytes",   "tx_bytes",
       "auto_reconnect", "phase",

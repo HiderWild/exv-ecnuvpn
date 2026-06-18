@@ -27,29 +27,6 @@ std::string get_interfaces_output() {
   return platform::run_command_output("ip addr show type tun 2>/dev/null | head -20");
 }
 
-void kill_all_supervisors() {
-  std::string output = exv::utils::trim(platform::run_command_output("pgrep -f 'exv -rt'"));
-  if (output.empty())
-    return;
-
-  std::istringstream iss(output);
-  std::string line;
-  while (std::getline(iss, line)) {
-    line = exv::utils::trim(line);
-    if (line.empty())
-      continue;
-    try {
-      pid_t pid = static_cast<pid_t>(std::stoi(line));
-      if (pid > 0 && is_process_alive(pid)) {
-        exv::observability::LogFacade::info("Killing orphaned supervisor: PID " + line);
-        kill(pid, SIGKILL);
-      }
-    } catch (...) {
-    }
-  }
-  usleep(500000);
-}
-
 void fix_config_dir_ownership() {
   platform::fix_runtime_config_dir_ownership();
 }
