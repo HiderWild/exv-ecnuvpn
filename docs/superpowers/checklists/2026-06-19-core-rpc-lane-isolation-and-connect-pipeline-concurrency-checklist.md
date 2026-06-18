@@ -18,17 +18,19 @@ RED evidence: commit `4ed6f86` adds the failing regression tests. `cmake --build
 
 ## Phase 1: Metadata And Scheduler
 
-- [ ] Add `RpcLane`, `RpcConflictClass`, and `RpcActionMetadata`.
-- [ ] Classify all desktop/core actions into `control`, `read_model`, `vpn_control`, `config_store`, `diagnostics`, or `platform_admin`.
-- [ ] Add metadata registration overload to `AppRpcDispatcher`.
-- [ ] Preserve existing two-argument handler registration.
-- [ ] Update `DesktopRpcAdapter` to carry metadata.
-- [ ] Implement fixed lane scheduler with one worker per lane.
-- [ ] Prove same-lane FIFO.
-- [ ] Prove different-lane concurrency.
-- [ ] Prove repeated `vpn.connect` on the VPN lane is serialized and later coalesced by the workflow owner.
-- [ ] Prove scheduler shutdown behavior.
-- [ ] Commit metadata and scheduler.
+- [x] Add `RpcLane`, `RpcConflictClass`, and `RpcActionMetadata`.
+- [x] Classify all desktop/core actions into `control`, `read_model`, `vpn_control`, `config_store`, `diagnostics`, or `platform_admin`.
+- [x] Add metadata registration overload to `AppRpcDispatcher`.
+- [x] Preserve existing two-argument handler registration.
+- [x] Update `DesktopRpcAdapter` to carry metadata.
+- [x] Implement fixed lane scheduler with one worker per lane.
+- [x] Prove same-lane FIFO.
+- [x] Prove different-lane concurrency.
+- [x] Prove repeated `vpn.connect` on the VPN lane is serialized and later coalesced by the workflow owner.
+- [x] Prove scheduler shutdown behavior.
+- [x] Commit metadata and scheduler.
+
+Verification evidence: `ctest --test-dir build-windows/cpp -R "core_rpc_lane_scheduler_test|app_api_rpc_dispatcher_test" --output-on-failure` passed after commits `5b7e19b` and `8ad1371`.
 
 ## Phase 2: Core Process Front Door
 
