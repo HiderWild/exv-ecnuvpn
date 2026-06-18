@@ -733,6 +733,70 @@ bool test_network_configurator_runs_before_packet_open() {
   return ok;
 }
 
+bool test_native_session_splits_handshake_from_packet_attach() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  auto device = std::make_shared<PacketDeviceState>();
+  int packet_devices_created = 0;
+  int network_config_calls = 0;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = [&]() {
+    ++packet_devices_created;
+    return make_scripted_device(device);
+  };
+  deps.network_configurator =
+      [&](const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
+          ecnuvpn::vpn_engine::DeviceConfig *device_config) {
+        ++network_config_calls;
+        if (metadata.internal_ip4_address != "10.255.0.10") {
+          return ecnuvpn::vpn_engine::ValidationResult{
+              false, "metadata_missing", "handshake metadata missing"};
+        }
+        if (!device_config) {
+          return ecnuvpn::vpn_engine::ValidationResult{
+              false, "device_config_missing", "device config missing"};
+        }
+        device_config->interface_name = "split-wintun0";
+        device_config->mtu = 1310;
+        return ecnuvpn::vpn_engine::ValidationResult{};
+      };
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  const auto handshake = session.start_handshake(&metadata);
+
+  ok = expect(handshake.ok, "split handshake should succeed") && ok;
+  ok = expect(metadata.internal_ip4_address == "10.255.0.10",
+              "split handshake returns CSTP metadata") &&
+       ok;
+  ok = expect(packet_devices_created == 0,
+              "split handshake must not create packet device") &&
+       ok;
+  ok = expect(network_config_calls == 0,
+              "split handshake must not apply network config") &&
+       ok;
+
+  const auto attached = session.start_packet_loop();
+  ok = expect(attached.ok, "split packet attach should succeed") && ok;
+  ok = expect(packet_devices_created == 1,
+              "packet attach creates packet device") &&
+       ok;
+  ok = expect(network_config_calls == 1,
+              "packet attach applies network config") &&
+       ok;
+  ok = expect(last_open_metadata(device).interface_name == "split-wintun0",
+              "packet attach uses configured adapter") &&
+       ok;
+
+  session.stop();
+  return ok;
+}
+
 bool test_dtls_config_flag_does_not_block_native_engine() {
   // The native engine v1 is CSTP/TLS-only by design. Historically the engine
   // had a run-time guard that rejected configs with disable_dtls=false.
@@ -1328,6 +1392,7 @@ int main() {
 
   ok = test_injected_fake_start_runs_packet_loop_and_cleans_up() && ok;
   ok = test_network_configurator_runs_before_packet_open() && ok;
+  ok = test_native_session_splits_handshake_from_packet_attach() && ok;
   ok = test_dtls_config_flag_does_not_block_native_engine() && ok;
   ok = test_dtls_enabled_emits_unavailable_and_continues_cstp() && ok;
   ok = test_auth_failure_maps_error_without_device() && ok;

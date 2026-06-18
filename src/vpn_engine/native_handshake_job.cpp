@@ -1,5 +1,6 @@
 #include "vpn_engine/native_handshake_job.hpp"
 
+#include "vpn_engine/protocol/dtls_transport.hpp"
 #include "vpn_engine/protocol/url.hpp"
 
 #include <exception>
@@ -24,6 +25,35 @@ ValidationResult cancelled() {
 ValidationResult native_transport_unimplemented() {
   return invalid("native_transport_unimplemented",
                  "Native transport is not available on this platform.");
+}
+
+bool make_auth_interaction_event(
+    const ValidationResult &failure, const protocol::AuthResult &auth_result,
+    std::string *type, std::map<std::string, std::string> *fields) {
+  if (!type || !fields) {
+    return false;
+  }
+
+  if (failure.code == "auth_challenge_required") {
+    *type = "auth.challenge_required";
+  } else if (failure.code == "auth_group_required") {
+    *type = "auth.group_required";
+  } else {
+    return false;
+  }
+
+  fields->clear();
+  fields->emplace("code", failure.code);
+  if (!auth_result.interaction_prompt_label.empty()) {
+    fields->emplace("label", auth_result.interaction_prompt_label);
+  }
+  if (!auth_result.interaction_prompt_type.empty()) {
+    fields->emplace("input_type", auth_result.interaction_prompt_type);
+  }
+  if (!auth_result.interaction_group_options.empty()) {
+    fields->emplace("options", auth_result.interaction_group_options);
+  }
+  return true;
 }
 
 protocol::ProtocolSessionOptions make_protocol_options(
@@ -106,6 +136,18 @@ ValidationResult NativeHandshakeJob::run(std::stop_token stop,
 
   ValidationResult auth = protocol_session->authenticate();
   if (!auth.ok) {
+    if (auth.code == "csd_required_unsupported") {
+      emit_event("csd.required_unsupported", "warning",
+                 "AnyConnect host-scan is required but unsupported",
+                 {{"code", auth.code}});
+    }
+    std::string interaction_type;
+    std::map<std::string, std::string> interaction_fields;
+    if (make_auth_interaction_event(auth, protocol_session->last_auth_result(),
+                                    &interaction_type, &interaction_fields)) {
+      emit_event(std::move(interaction_type), "warning", auth.message,
+                 std::move(interaction_fields));
+    }
     emit_event("auth.failed", "error", auth.message, {{"code", auth.code}});
     return auth;
   }
@@ -127,6 +169,18 @@ ValidationResult NativeHandshakeJob::run(std::stop_token stop,
   emit_event("cstp.connected", "info", "CSTP connect succeeded",
              {{"interface", metadata.interface_name},
               {"internal_ip", metadata.internal_ip4_address}});
+
+  if (!config_.disable_dtls &&
+      metadata.dtls_state !=
+          protocol::dtls_transport_state_to_string(
+              protocol::DtlsTransportState::attempted_and_connected)) {
+    const std::string message =
+        metadata.dtls_fallback_reason.empty()
+            ? "native DTLS backend unavailable; using CSTP/TLS"
+            : metadata.dtls_fallback_reason;
+    emit_event("dtls.unavailable", "warning", message,
+               {{"code", "dtls_unavailable"}, {"state", metadata.dtls_state}});
+  }
 
   if (out) {
     out->metadata = std::move(metadata);

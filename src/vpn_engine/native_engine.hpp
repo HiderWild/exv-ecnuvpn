@@ -51,6 +51,8 @@ public:
   NativeVpnEngineSession &operator=(const NativeVpnEngineSession &) = delete;
 
   ValidationResult start() override;
+  ValidationResult start_handshake(TunnelMetadata *metadata = nullptr);
+  ValidationResult start_packet_loop();
   void stop() override;
   VpnEngineStatus status() const override;
 
@@ -71,6 +73,7 @@ private:
   std::unique_ptr<PacketDevice> packet_device_;
   std::unique_ptr<LoopEventSink> loop_event_sink_;
   DeviceConfig packet_device_config_;
+  TunnelMetadata handshake_metadata_;
   VpnEngineStatus status_;
 
   mutable std::mutex mu_;

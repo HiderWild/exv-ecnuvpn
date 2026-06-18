@@ -724,6 +724,7 @@ add_test(NAME native_helper_session_test COMMAND native_helper_session_test)
 add_executable(native_engine_contract_test
     tests/native_engine_contract_test.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/native_handshake_job.cpp
     src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
@@ -844,6 +845,7 @@ add_executable(native_event_sink_test
     tests/native_event_sink_test.cpp
     src/vpn_engine/event_sink.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/native_handshake_job.cpp
     src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
