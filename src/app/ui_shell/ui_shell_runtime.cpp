@@ -1,5 +1,7 @@
 #include "app/ui_shell/ui_shell_runtime.hpp"
 
+#include "app/ui_shell/async_host_bridge.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <exception>
@@ -87,12 +89,14 @@ int run_ui_shell_window(UiWindow &window,
     client.pump_events();
   };
 
-  window.set_message_handler([&client, &client_mutex](const std::string &message_json) {
+  AsyncHostBridge bridge(client, [&window](std::string response_json) {
+    window.post_host_response(response_json);
+  });
+
+  window.set_message_handler([&bridge](const std::string &message_json) {
     try {
-      return handle_host_request(message_json, [&client, &client_mutex](const CoreRpcRequest &request) {
-        std::lock_guard<std::mutex> lock(client_mutex);
-        return client.invoke(request);
-      });
+      bridge.accept_message(message_json);
+      return accepted_host_response();
     } catch (const std::exception &error) {
       return callback_error_response(message_json, error.what());
     } catch (...) {
@@ -100,7 +104,9 @@ int run_ui_shell_window(UiWindow &window,
     }
   });
   WindowMessageHandlerGuard handler_guard(window);
-  return window.run(runtime_config);
+  const int exit_code = window.run(runtime_config);
+  bridge.shutdown();
+  return exit_code;
 }
 
 } // namespace ecnuvpn::ui_shell

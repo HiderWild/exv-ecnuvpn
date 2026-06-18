@@ -92,15 +92,26 @@ public:
       on_before_dispatch();
     }
     observed_response = dispatch(message_json);
+    if (on_after_dispatch) {
+      on_after_dispatch();
+    }
     return 12;
   }
 
   void emit_event(const std::string &event_json) override {
-    emitted_events.push_back(event_json);
+    {
+      std::lock_guard<std::mutex> lock(observed_mutex);
+      emitted_events.push_back(event_json);
+    }
+    observed_cv.notify_all();
   }
 
   void post_host_response(const std::string &response_json) override {
-    posted_host_responses.push_back(response_json);
+    {
+      std::lock_guard<std::mutex> lock(observed_mutex);
+      posted_host_responses.push_back(response_json);
+    }
+    observed_cv.notify_all();
   }
 
   ecnuvpn::ui_shell::UiWindowConfig observed_config;
@@ -109,9 +120,28 @@ public:
   bool throw_on_run = false;
   bool pump_core_events_before_request = false;
   std::function<void()> on_before_dispatch;
+  std::function<void()> on_after_dispatch;
   std::string observed_response;
   std::vector<std::string> emitted_events;
   std::vector<std::string> posted_host_responses;
+  mutable std::mutex observed_mutex;
+  std::condition_variable observed_cv;
+
+  bool wait_for_posted_count(std::size_t count,
+                             std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(observed_mutex);
+    return observed_cv.wait_for(lock, timeout, [&] {
+      return posted_host_responses.size() >= count;
+    });
+  }
+
+  bool wait_for_emitted_count(std::size_t count,
+                              std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(observed_mutex);
+    return observed_cv.wait_for(lock, timeout, [&] {
+      return emitted_events.size() >= count;
+    });
+  }
 
   bool has_message_handler() const {
     return static_cast<bool>(handler_);
@@ -150,6 +180,9 @@ int main() {
   config.renderer = resolve_renderer_assets("http://127.0.0.1:8288", "");
   config.exv_path = "C:/app/bin/exv.exe";
   config.enable_dev_tools = true;
+  window.on_after_dispatch = [&window]() {
+    (void)window.wait_for_posted_count(1, std::chrono::milliseconds(500));
+  };
 
   const int exit_code =
       run_ui_shell_window(window, config, client);
@@ -171,9 +204,18 @@ int main() {
               "runtime should pass devtools flag to window") &&
        ok;
   ok = expect(window.observed_response ==
-                  R"({"id":11,"ok":true,"data":{"username":"alice"}})",
-              "runtime should route window message through host bridge") &&
+                  R"({"id":0,"ok":true,"data":{"accepted":true}})",
+              "runtime should accept window messages immediately") &&
        ok;
+  ok = expect(window.posted_host_responses.size() == 1,
+              "runtime should post the eventual core response") &&
+       ok;
+  if (window.posted_host_responses.size() == 1) {
+    ok = expect(window.posted_host_responses[0] ==
+                    R"({"id":11,"ok":true,"data":{"username":"alice"}})",
+                "runtime should route core response through async host bridge") &&
+         ok;
+  }
   ok = expect(transport.writes.size() == 1,
               "runtime should forward one request to core") &&
        ok;
@@ -189,6 +231,9 @@ int main() {
                                R"({"id":11,"ok":true,"data":{"username":"alice"}})"});
   CoreRpcClient event_client(event_transport);
   FakeWindow event_window;
+  event_window.on_after_dispatch = [&event_window]() {
+    (void)event_window.wait_for_emitted_count(1, std::chrono::milliseconds(500));
+  };
   const int event_exit_code =
       run_ui_shell_window(event_window, config, event_client);
   ok = expect(event_exit_code == 12,
@@ -241,8 +286,17 @@ int main() {
 
     std::promise<void> run_entered;
     std::future<void> run_entered_future = run_entered.get_future();
+    std::promise<void> dispatch_returned;
+    std::future<void> dispatch_returned_future = dispatch_returned.get_future();
+    std::promise<void> allow_run_finish;
+    std::shared_future<void> allow_run_finish_future =
+        allow_run_finish.get_future().share();
     delayed_window.on_before_dispatch = [&run_entered]() {
       run_entered.set_value();
+    };
+    delayed_window.on_after_dispatch = [&]() {
+      dispatch_returned.set_value();
+      allow_run_finish_future.wait();
     };
 
     std::future<int> run_future = std::async(std::launch::async, [&]() {
@@ -253,18 +307,20 @@ int main() {
                     std::future_status::ready,
                 "runtime non-blocking test should enter window dispatch") &&
          ok;
-    ok = expect(run_future.wait_for(std::chrono::milliseconds(100)) ==
+    ok = expect(dispatch_returned_future.wait_for(std::chrono::milliseconds(100)) ==
                     std::future_status::ready,
                 "host message dispatch should return before core response is available") &&
          ok;
-    ok = expect(delayed_window.observed_response.empty(),
-                "async host bridge should not return a synchronous core response") &&
+    ok = expect(delayed_window.observed_response ==
+                    R"({"id":0,"ok":true,"data":{"accepted":true}})",
+                "async host bridge should return only an accepted response") &&
+         ok;
+    ok = expect(delayed_window.posted_host_responses.empty(),
+                "async host bridge should not post before core response is available") &&
          ok;
     delayed_transport.release_reads();
-    ok = expect(run_future.get() == 12,
-                "runtime should preserve window exit code after async dispatch") &&
-         ok;
-    ok = expect(delayed_window.posted_host_responses.size() == 1,
+    ok = expect(delayed_window.wait_for_posted_count(
+                    1, std::chrono::milliseconds(500)),
                 "async host bridge should post the eventual core response") &&
          ok;
     if (delayed_window.posted_host_responses.size() == 1) {
@@ -273,6 +329,10 @@ int main() {
                   "async host bridge should post response by original id") &&
            ok;
     }
+    allow_run_finish.set_value();
+    ok = expect(run_future.get() == 12,
+                "runtime should preserve window exit code after async dispatch") &&
+         ok;
   }
 
   FakeTransport empty_event_data_transport(
@@ -280,6 +340,10 @@ int main() {
                                R"({"id":11,"ok":true,"data":{"username":"alice"}})"});
   CoreRpcClient empty_event_data_client(empty_event_data_transport);
   FakeWindow empty_event_data_window;
+  empty_event_data_window.on_after_dispatch = [&empty_event_data_window]() {
+    (void)empty_event_data_window.wait_for_emitted_count(
+        1, std::chrono::milliseconds(500));
+  };
   (void)run_ui_shell_window(empty_event_data_window, config,
                             empty_event_data_client);
   ok = expect(empty_event_data_window.emitted_events.size() == 1,
@@ -296,13 +360,17 @@ int main() {
   CoreRpcClient unused_client(unused_transport);
   FakeWindow bad_message_window;
   bad_message_window.message_json = R"({"id":[],"action":"status.get","payload":{}})";
+  bad_message_window.on_after_dispatch = [&bad_message_window]() {
+    (void)bad_message_window.wait_for_posted_count(
+        1, std::chrono::milliseconds(500));
+  };
   const int bad_message_exit =
       run_ui_shell_window(bad_message_window, config, unused_client);
   ok = expect(bad_message_exit == 12,
               "runtime should keep window exit code after callback error") &&
        ok;
   const auto bad_message_response =
-      nlohmann::json::parse(bad_message_window.observed_response);
+      nlohmann::json::parse(bad_message_window.posted_host_responses.at(0));
   ok = expect(bad_message_response.value("id", -1) == 0,
               "runtime callback error should keep a numeric id") &&
        ok;

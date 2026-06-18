@@ -930,6 +930,7 @@ add_test(NAME ui_shell_core_rpc_client_test COMMAND ui_shell_core_rpc_client_tes
 add_executable(ui_shell_runtime_test
     tests/ui_shell_runtime_test.cpp
     src/app/ui_shell/core_rpc_client.cpp
+    src/app/ui_shell/async_host_bridge.cpp
     src/app/ui_shell/host_bridge.cpp
     src/app/ui_shell/renderer_assets.cpp
     src/app/ui_shell/ui_shell_runtime.cpp
@@ -1050,6 +1051,7 @@ set(EXV_UI_COMMON_SOURCES
     src/app/ui_shell/renderer_assets.cpp
     src/app/ui_shell/close_preference.cpp
     src/app/ui_shell/host_bridge.cpp
+    src/app/ui_shell/async_host_bridge.cpp
     src/app/ui_shell/core_rpc_client.cpp
     src/app/ui_shell/core_process_manager.cpp
     src/app/ui_shell/ui_shell_runtime.cpp
