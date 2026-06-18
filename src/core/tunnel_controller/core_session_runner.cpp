@@ -1,5 +1,6 @@
 #include "core/tunnel_controller/core_session_runner.hpp"
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
+#include "vpn_engine/native_handshake_job.hpp"
 
 #include <string>
 
@@ -126,13 +127,106 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
     cached_status_ = session_->status();
     running_ = true;
 
+    start_monitor_thread();
+
+    return true;
+}
+
+bool CoreSessionRunner::start_from_handshake(
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_config,
+    ecnuvpn::vpn_engine::NativeHandshakeResult handshake) {
+    std::unique_lock<std::mutex> lock(mu_);
+
+    if (running_) return false;
+    engine_config.auto_reconnect = false;
+
+    bridge_ = std::make_unique<EngineEventBridge>(
+        [this](TunnelEvent te) {
+            EventCallback cb;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                if (session_) {
+                    cached_status_ = session_->status();
+                }
+                cb = event_callback_;
+            }
+            if (cb) cb(te);
+        });
+
+    auto deps = deps_factory_ ? deps_factory_()
+                              : ecnuvpn::vpn_engine::default_native_engine_dependencies();
+    deps.event_sink = bridge_.get();
+    deps.auth_interaction_handler =
+        [this](const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& req) {
+            return handle_auth_interaction(req);
+        };
+
+    auto network_config_callback = network_config_callback_;
+
+    session_ = std::make_unique<ecnuvpn::vpn_engine::NativeVpnEngineSession>(
+        std::move(engine_config), deps);
+
+    lock.unlock();
+
+    ecnuvpn::vpn_engine::TunnelMetadata metadata;
+    auto validation = session_->adopt_handshake(std::move(handshake), &metadata);
+    if (validation.ok) {
+        ecnuvpn::vpn_engine::DeviceConfig device_config;
+        device_config.interface_name = metadata.interface_name;
+        device_config.mtu = metadata.mtu;
+        if (network_config_callback) {
+            validation = network_config_callback(metadata, &device_config);
+        }
+        if (validation.ok) {
+            if (device_config.interface_name.empty())
+                device_config.interface_name = metadata.interface_name;
+            if (device_config.mtu <= 0)
+                device_config.mtu = metadata.mtu;
+            validation = session_->start_packet_loop(device_config);
+        }
+    }
+
+    lock.lock();
+    if (!validation.ok) {
+        cached_status_ = session_ ? session_->status()
+                                  : ecnuvpn::vpn_engine::VpnEngineStatus{};
+
+        TunnelEvent te;
+        if (validation.code.rfind("packet", 0) == 0 ||
+            validation.code.rfind("native_packet", 0) == 0) {
+            te.type = TunnelEventType::PacketDeviceFailed;
+        } else if (is_auth_failure_code(validation.code)) {
+            te.type = TunnelEventType::AuthFailed;
+        } else {
+            te.type = TunnelEventType::TransportClosed;
+        }
+
+        EventCallback cb = event_callback_;
+        lock.unlock();
+
+        if (cb) {
+            cb(te);
+        }
+
+        lock.lock();
+        session_.reset();
+        bridge_.reset();
+        return false;
+    }
+
+    cached_status_ = session_->status();
+    running_ = true;
+    start_monitor_thread();
+    return true;
+}
+
+void CoreSessionRunner::start_monitor_thread() {
     // Spawn a monitoring thread that waits for the session to finish and
     // then fires a TunnelEvent to notify the controller.
     monitor_thread_ = std::thread([this]() {
         while (true) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-            // Check session status under lock.
             EventCallback cb;
             bool session_finished = false;
             bool has_error = false;
@@ -158,7 +252,6 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
             }
 
             if (session_finished) {
-                // Fire the event outside the lock.
                 if (has_error && cb) {
                     cb(error_event);
                 }
@@ -166,8 +259,6 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
             }
         }
     });
-
-    return true;
 }
 
 void CoreSessionRunner::stop() {

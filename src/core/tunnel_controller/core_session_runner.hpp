@@ -58,6 +58,9 @@ public:
     /// NativeVpnEngineSession.  The session runs its own packet-loop thread.
     /// Returns false if start() fails immediately (e.g. validation error).
     bool start(const ecnuvpn::Config& cfg, const std::string& password);
+    bool start_from_handshake(
+        ecnuvpn::vpn_engine::VpnEngineConfig engine_config,
+        ecnuvpn::vpn_engine::NativeHandshakeResult handshake);
 
     /// Stop the running session (graceful, then join monitoring thread).
     void stop();
@@ -85,6 +88,7 @@ private:
     ecnuvpn::vpn_engine::protocol::AuthInteractionResponse
     handle_auth_interaction(
         const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& request);
+    void start_monitor_thread();
 
     mutable std::mutex mu_;
     std::condition_variable auth_interaction_cv_;
