@@ -111,6 +111,13 @@ int main() {
                 "first_failure: branch name is reported") && ok;
     ok = expect(elapsed < std::chrono::milliseconds(200),
                 "first_failure: returns before slow branches release") && ok;
+    const auto cancel_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < cancel_deadline &&
+           !backend_cancel_requested.load() &&
+           !handshake_cancel_requested.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     ok = expect(backend_cancel_requested.load() ||
                     handshake_cancel_requested.load(),
                 "first_failure: cancellation is requested for losing branches") && ok;

@@ -140,6 +140,7 @@ set(EXV_CORE_SOURCES
     src/platform/common/status_models.cpp
     src/platform/common/runtime_status.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/native_handshake_job.cpp
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
     src/core/app_api/app_api.cpp
@@ -778,6 +779,66 @@ target_link_libraries(native_engine_contract_test PRIVATE
 )
 
 add_test(NAME native_engine_contract_test COMMAND native_engine_contract_test)
+
+add_executable(native_handshake_job_test
+    tests/native_handshake_job_test.cpp
+    src/vpn_engine/native_engine.cpp
+    src/vpn_engine/native_handshake_job.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
+    src/vpn_engine/protocol/auth.cpp
+    src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
+    src/vpn_engine/protocol/http.cpp
+    src/vpn_engine/protocol/production_transport.cpp
+    src/vpn_engine/protocol/session.cpp
+    src/vpn_engine/protocol/tls_stream.cpp
+    src/vpn_engine/protocol/url.cpp
+    src/vpn_engine/session_state.cpp
+)
+
+if(APPLE)
+    target_sources(native_handshake_job_test PRIVATE
+        src/platform/darwin/config_defaults.cpp
+        src/platform/darwin/default_engine_deps.cpp
+        src/platform/darwin/native_tls_stream.cpp
+        src/platform/darwin/native_packet_device.cpp
+        src/platform/darwin/native_route_config.cpp
+        src/platform/darwin/native_utun.cpp
+    )
+elseif(UNIX AND NOT APPLE)
+    target_sources(native_handshake_job_test PRIVATE
+        src/platform/linux/config_defaults.cpp
+        src/platform/linux/default_engine_deps.cpp
+    )
+elseif(WIN32)
+    target_sources(native_handshake_job_test PRIVATE
+        src/platform/win32/config_defaults.cpp
+        src/platform/win32/default_engine_deps.cpp
+        src/platform/win32/native_tls_stream.cpp
+        src/platform/win32/native_packet_device.cpp
+        src/platform/win32/native_wintun.cpp
+        src/platform/win32/native_ip_config.cpp
+        src/platform/win32/path_utils.cpp
+        src/platform/common/file_system.cpp
+        src/platform/common/process_utils.cpp
+        src/platform/common/runtime_discovery.cpp
+        src/platform/common/runtime_paths.cpp
+        src/platform/win32/windows_strings.cpp
+    )
+endif()
+
+target_include_directories(native_handshake_job_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(native_handshake_job_test PRIVATE
+    Threads::Threads
+    exv-utils-strings
+    ${EXV_PLATFORM_LIBS}
+)
+
+add_test(NAME native_handshake_job_test COMMAND native_handshake_job_test)
 
 add_executable(native_event_sink_test
     tests/native_event_sink_test.cpp
