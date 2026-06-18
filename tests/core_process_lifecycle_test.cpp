@@ -19,6 +19,7 @@
 #include "contracts/generated/system_contract.hpp"
 #include "cli/pipe_client.hpp"
 #include "core/app_api/app_api.hpp"
+#include "core/app_api/desktop_vpn_test_hooks.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -72,13 +73,6 @@ using CoreRegistryPersistCandidateHook =
 void set_core_registry_persist_candidate_hook(
     CoreRegistryPersistCandidateHook hook);
 } // namespace exv::core::testing
-
-namespace ecnuvpn::app_api::testing {
-using DesktopActionGateHook =
-    std::function<void(const std::string& action)>;
-
-void set_desktop_action_gate_hook(DesktopActionGateHook hook);
-} // namespace ecnuvpn::app_api::testing
 
 static int g_failures = 0;
 
@@ -973,11 +967,8 @@ int main() {
             release_connect_promise.get_future().share();
         std::atomic<bool> connect_entered_once{false};
 
-        ecnuvpn::app_api::testing::set_desktop_action_gate_hook(
-            [&](const std::string& action) {
-                if (action != "vpn.connect") {
-                    return;
-                }
+        ecnuvpn::app_api::testing::set_desktop_vpn_connect_entered_hook(
+            [&] {
                 if (!connect_entered_once.exchange(true)) {
                     connect_entered_promise.set_value();
                 }
@@ -1000,7 +991,7 @@ int main() {
         expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
                "E2.3-lanes: blocked vpn.connect should eventually respond after release");
 
-        ecnuvpn::app_api::testing::set_desktop_action_gate_hook(nullptr);
+        ecnuvpn::app_api::testing::set_desktop_vpn_connect_entered_hook(nullptr);
         in_buf.close_input();
         cr.join();
 
