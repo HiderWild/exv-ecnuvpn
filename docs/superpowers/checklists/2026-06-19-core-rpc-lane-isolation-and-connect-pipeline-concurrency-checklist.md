@@ -141,6 +141,6 @@ Verification evidence: `pnpm --dir webui exec node scripts/run-host-test.cjs hos
 - [ ] Confirm connect failure is visible to the user.
 - [ ] Confirm `window.setMode` does not appear in core RPC traces.
 - [x] Write verification report under `docs/superpowers/reports/`.
-- [ ] Commit verification report.
+- [x] Commit verification report.
 
 Verification report: `docs/superpowers/reports/2026-06-19-core-rpc-lane-isolation-and-connect-pipeline-concurrency-verification.md`. Manual UI/VPN reproduction remains unchecked because it requires interactive local VPN operation.
