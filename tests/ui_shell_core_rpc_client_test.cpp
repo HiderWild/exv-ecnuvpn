@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <iostream>
+#include <future>
 #include <memory>
 #include <string>
 #include <utility>
@@ -219,6 +220,47 @@ int main() {
              ok_all;
     ok_all = expect(observed_events[0].data_json == R"({"line":"connected"})",
                     "client should preserve core event data") &&
+             ok_all;
+  }
+
+  {
+    FakeTransport out_of_order_transport(
+        std::vector<std::string>{R"({"id":102,"ok":true,"data":{"connected":false}})",
+                                 R"({"id":101,"ok":true,"data":[]})"});
+    CoreRpcClient out_of_order_client(out_of_order_transport);
+
+    CoreRpcRequest logs_request;
+    logs_request.action = "logs.list";
+    logs_request.payload_json = "{}";
+    logs_request.request_id = "101";
+
+    CoreRpcRequest status_request;
+    status_request.action = "status.get";
+    status_request.payload_json = "{}";
+    status_request.request_id = "102";
+
+    std::future<CoreRpcResponse> logs_future =
+        out_of_order_client.invoke_async(logs_request);
+    std::future<CoreRpcResponse> status_future =
+        out_of_order_client.invoke_async(status_request);
+
+    CoreRpcResponse status_response = status_future.get();
+    CoreRpcResponse logs_response = logs_future.get();
+
+    ok_all = expect(status_response.id == 102,
+                    "invoke_async should resolve status response by id") &&
+             ok_all;
+    ok_all = expect(status_response.ok,
+                    "invoke_async status response should be ok") &&
+             ok_all;
+    ok_all = expect(logs_response.id == 101,
+                    "invoke_async should resolve logs response by id even when responses arrive later") &&
+             ok_all;
+    ok_all = expect(logs_response.data_json == "[]",
+                    "invoke_async should preserve logs payload") &&
+             ok_all;
+    ok_all = expect(out_of_order_transport.writes.size() == 2,
+                    "invoke_async should write both requests without waiting for the first response") &&
              ok_all;
   }
 

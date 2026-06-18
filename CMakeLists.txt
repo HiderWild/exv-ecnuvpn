@@ -1676,6 +1676,19 @@ target_link_libraries(core_process_test PRIVATE exv-core exv-helper-runtime)
 
 add_test(NAME core_process_test COMMAND core_process_test)
 
+add_executable(core_rpc_lane_scheduler_test
+    tests/core_rpc_lane_scheduler_test.cpp
+)
+
+target_include_directories(core_rpc_lane_scheduler_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(core_rpc_lane_scheduler_test PRIVATE exv-core Threads::Threads)
+
+add_test(NAME core_rpc_lane_scheduler_test COMMAND core_rpc_lane_scheduler_test)
+
 add_executable(core_process_lifecycle_test
     tests/core_process_lifecycle_test.cpp
     src/cli/pipe_client.cpp

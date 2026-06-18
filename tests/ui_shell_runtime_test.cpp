@@ -3,9 +3,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,6 +31,10 @@ public:
   }
 
   bool read_line(std::string &line) override {
+    if (block_reads) {
+      std::unique_lock<std::mutex> lock(read_mutex);
+      read_cv.wait(lock, [this] { return reads_released; });
+    }
     if (next_response_ >= responses_.size()) {
       return false;
     }
@@ -43,6 +52,18 @@ public:
 
   std::vector<std::string> writes;
   std::vector<std::string> available_lines;
+  bool block_reads = false;
+  bool reads_released = false;
+  std::mutex read_mutex;
+  std::condition_variable read_cv;
+
+  void release_reads() {
+    {
+      std::lock_guard<std::mutex> lock(read_mutex);
+      reads_released = true;
+    }
+    read_cv.notify_all();
+  }
 
 private:
   std::vector<std::string> responses_;
@@ -67,6 +88,9 @@ public:
     if (!handler_) {
       return 91;
     }
+    if (on_before_dispatch) {
+      on_before_dispatch();
+    }
     observed_response = dispatch(message_json);
     return 12;
   }
@@ -75,13 +99,19 @@ public:
     emitted_events.push_back(event_json);
   }
 
+  void post_host_response(const std::string &response_json) override {
+    posted_host_responses.push_back(response_json);
+  }
+
   ecnuvpn::ui_shell::UiWindowConfig observed_config;
   std::string message_json =
       R"({"id":11,"action":"config.getAuth","payload":{"profile":"default"}})";
   bool throw_on_run = false;
   bool pump_core_events_before_request = false;
+  std::function<void()> on_before_dispatch;
   std::string observed_response;
   std::vector<std::string> emitted_events;
+  std::vector<std::string> posted_host_responses;
 
   bool has_message_handler() const {
     return static_cast<bool>(handler_);
@@ -199,6 +229,51 @@ int main() {
   ok = expect(unsolicited_event_transport.writes.size() == 1,
               "runtime should still forward renderer request after pumping events") &&
        ok;
+
+  {
+    FakeTransport delayed_transport(
+        R"({"id":44,"ok":true,"data":{"items":[]}})");
+    delayed_transport.block_reads = true;
+    CoreRpcClient delayed_client(delayed_transport);
+    FakeWindow delayed_window;
+    delayed_window.message_json =
+        R"({"id":44,"action":"logs.list","payload":{}})";
+
+    std::promise<void> run_entered;
+    std::future<void> run_entered_future = run_entered.get_future();
+    delayed_window.on_before_dispatch = [&run_entered]() {
+      run_entered.set_value();
+    };
+
+    std::future<int> run_future = std::async(std::launch::async, [&]() {
+      return run_ui_shell_window(delayed_window, config, delayed_client);
+    });
+
+    ok = expect(run_entered_future.wait_for(std::chrono::milliseconds(500)) ==
+                    std::future_status::ready,
+                "runtime non-blocking test should enter window dispatch") &&
+         ok;
+    ok = expect(run_future.wait_for(std::chrono::milliseconds(100)) ==
+                    std::future_status::ready,
+                "host message dispatch should return before core response is available") &&
+         ok;
+    ok = expect(delayed_window.observed_response.empty(),
+                "async host bridge should not return a synchronous core response") &&
+         ok;
+    delayed_transport.release_reads();
+    ok = expect(run_future.get() == 12,
+                "runtime should preserve window exit code after async dispatch") &&
+         ok;
+    ok = expect(delayed_window.posted_host_responses.size() == 1,
+                "async host bridge should post the eventual core response") &&
+         ok;
+    if (delayed_window.posted_host_responses.size() == 1) {
+      ok = expect(delayed_window.posted_host_responses[0] ==
+                      R"({"id":44,"ok":true,"data":{"items":[]}})",
+                  "async host bridge should post response by original id") &&
+           ok;
+    }
+  }
 
   FakeTransport empty_event_data_transport(
       std::vector<std::string>{R"({"event":"heartbeat"})",

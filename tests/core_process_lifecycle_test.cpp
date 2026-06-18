@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -71,6 +72,13 @@ using CoreRegistryPersistCandidateHook =
 void set_core_registry_persist_candidate_hook(
     CoreRegistryPersistCandidateHook hook);
 } // namespace exv::core::testing
+
+namespace ecnuvpn::app_api::testing {
+using DesktopActionGateHook =
+    std::function<void(const std::string& action)>;
+
+void set_desktop_action_gate_hook(DesktopActionGateHook hook);
+} // namespace ecnuvpn::app_api::testing
 
 static int g_failures = 0;
 
@@ -280,6 +288,19 @@ static json find_by_request_id(const std::vector<json>& responses,
         if (r.value("request_id", std::string()) == request_id) return r;
     }
     return json();
+}
+
+static bool wait_for_response_id(CaptureOutputBuf& buf, int id,
+                                 std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto parsed = parse_json_lines(buf.get_all());
+        if (!find_by_id(parsed, id).is_null()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -931,6 +952,66 @@ int main() {
 
         fs::remove(config_dir, ec);
         fs::create_directories(config_dir, ec);
+    }
+
+    // =======================================================================
+    // E2.3-lanes — long vpn.connect does not block logs.list
+    // =======================================================================
+    {
+        std::cerr << "[E2.3-lanes] logs.list while vpn.connect is blocked\n";
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        std::promise<void> connect_entered_promise;
+        std::shared_future<void> connect_entered =
+            connect_entered_promise.get_future().share();
+        std::promise<void> release_connect_promise;
+        std::shared_future<void> release_connect =
+            release_connect_promise.get_future().share();
+        std::atomic<bool> connect_entered_once{false};
+
+        ecnuvpn::app_api::testing::set_desktop_action_gate_hook(
+            [&](const std::string& action) {
+                if (action != "vpn.connect") {
+                    return;
+                }
+                if (!connect_entered_once.exchange(true)) {
+                    connect_entered_promise.set_value();
+                }
+                release_connect.wait();
+            });
+
+        CoreRunner cr;
+        cr.start(config_dir, home_dir);
+
+        in_buf.feed(R"({"id":50,"action":"vpn.connect","payload":{"password":"x"}})" "\n");
+        expect(connect_entered.wait_for(std::chrono::seconds(3)) ==
+                   std::future_status::ready,
+               "E2.3-lanes: vpn.connect should enter blocking hook");
+
+        in_buf.feed(R"({"id":51,"action":"logs.list","payload":{}})" "\n");
+        expect(wait_for_response_id(out_buf, 51, std::chrono::milliseconds(500)),
+               "E2.3-lanes: logs.list should respond while vpn.connect remains blocked");
+
+        release_connect_promise.set_value();
+        expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
+               "E2.3-lanes: blocked vpn.connect should eventually respond after release");
+
+        ecnuvpn::app_api::testing::set_desktop_action_gate_hook(nullptr);
+        in_buf.close_input();
+        cr.join();
+
+        auto all = parse_json_lines(out_buf.read_all());
+        auto logs_resp = find_by_id(all, 51);
+        auto connect_resp = find_by_id(all, 50);
+        expect(!logs_resp.is_null() && logs_resp.value("ok", false),
+               "E2.3-lanes: logs.list response should be successful");
+        expect(!connect_resp.is_null(),
+               "E2.3-lanes: vpn.connect response should eventually exist");
+        expect(cr.rc == 0, "E2.3-lanes: exit code 0");
     }
 
     // =======================================================================
