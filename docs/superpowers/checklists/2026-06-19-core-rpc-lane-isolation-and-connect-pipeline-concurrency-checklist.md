@@ -65,15 +65,15 @@ Verification evidence: `ctest --test-dir build-windows/cpp -R "ui_shell_core_rpc
 
 ## Phase 4: Parallel VPN Connect Pipeline
 
-- [ ] Add accepted-job tests for `vpn.connect`.
-- [ ] Add busy-connect coalescing test with `accepted=true`, `coalesced=true`, and `active_job_id`.
+- [x] Add accepted-job tests for `vpn.connect`.
+- [x] Add busy-connect coalescing test with `accepted=true`, `coalesced=true`, and `active_job_id`.
 - [x] Add `connect_intent_test` for latest user intent and epoch reconciliation.
 - [x] Add user-cancel-during-connect test where `vpn.disconnect` returns `accepted=true`, `cancelling=true`, and `user_cancelled=true`.
 - [x] Prove user cancellation does not set `last_error` and does not show an error modal.
 - [x] Prove connect/cancel/connect/cancel while busy results in one active workflow and latest desired intent `Disconnect`.
 - [x] Prove connect/cancel/connect while busy starts exactly one new connect after cleanup reaches idle.
 - [x] Prove a non-user connection failure does not retry unless a later user click increments intent epoch.
-- [ ] Add disconnect-during-connect responsiveness test.
+- [x] Add disconnect-during-connect responsiveness test.
 - [x] Add `connect_pipeline_test` for branch concurrency.
 - [x] Prove backend/helper, platform readiness, and protocol handshake branches run concurrently.
 - [x] Prove first branch failure returns to UI without waiting for slower branches.
