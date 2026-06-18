@@ -10,8 +10,21 @@
 Step-by-step manual checklist for verifying ECNU-VPN on real Windows hardware
 with a live VPN gateway. Each step has expected output and a sign-off field.
 
-**Do not commit real credentials, tokens, or cookies.** All placeholder values
-use `*.example.invalid`.
+**Do not commit real credentials, tokens, cookies, raw logs, packet captures,
+screenshots, or packet payloads.** All placeholder values use
+`*.example.invalid`.
+
+Before committing this checklist or any related evidence, confirm:
+
+- [ ] Password values and real account or gateway identifiers are redacted.
+- [ ] `webvpn=` values are redacted.
+- [ ] `<session-token>` values are redacted.
+- [ ] Opaque values are redacted.
+- [ ] SAML values are redacted.
+- [ ] Challenge responses are redacted.
+- [ ] Cookies and cookie headers are redacted.
+- [ ] Packet payloads are redacted.
+- [ ] Command output, screenshots, logs, and captures are reduced to redacted summaries.
 
 ---
 
@@ -464,6 +477,10 @@ diff before-test-dns.txt final-dns.txt
 ---
 
 ## Sign-Off
+
+Only enter redacted summaries in the Notes column. Do not paste raw logs,
+packet captures, screenshots, real gateway hostnames, usernames, tokens,
+cookies, challenge responses, or packet payloads.
 
 | Step | Description | Pass/Fail | Notes |
 |------|-------------|-----------|-------|

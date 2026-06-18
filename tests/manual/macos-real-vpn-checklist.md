@@ -9,6 +9,22 @@
 
 ---
 
+## Evidence Redaction
+
+Before committing this checklist or any related evidence, confirm:
+
+- [ ] Password values and real account or gateway identifiers are redacted.
+- [ ] `webvpn=` values are redacted.
+- [ ] `<session-token>` values are redacted.
+- [ ] Opaque values are redacted.
+- [ ] SAML values are redacted.
+- [ ] Challenge responses are redacted.
+- [ ] Cookies and cookie headers are redacted.
+- [ ] Packet payloads are redacted.
+- [ ] Command output, screenshots, logs, and captures are reduced to redacted summaries.
+
+---
+
 ## Pre-Flight
 
 ### P1. Build Verification
@@ -315,7 +331,9 @@ ifconfig > /tmp/exv-ifconfig-before.txt
 
 ### Notes
 
-(Free-form notes, screenshots, or log excerpts)
+Only include redacted summaries below. Do not paste raw logs, packet captures,
+screenshots, real gateway hostnames, usernames, tokens, cookies, challenge
+responses, or packet payloads.
 
 ```
 _________________________________________________
