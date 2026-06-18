@@ -2,6 +2,7 @@
 
 #include "core/rpc/app_rpc_dispatcher.hpp"
 #include "core/rpc/desktop_rpc_adapter.hpp"
+#include "core/rpc/rpc_action_metadata.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -21,6 +22,9 @@ int main() {
     bool ok = true;
 
     using exv::core_api::AppRpcDispatcher;
+    using exv::core_api::RpcActionMetadata;
+    using exv::core_api::RpcConflictClass;
+    using exv::core_api::RpcLane;
     using exv::core_api::RpcRequest;
     using exv::core_api::RpcResponse;
 
@@ -203,6 +207,81 @@ int main() {
                     "legacy array payload should preserve entry count") && ok;
         ok = expect(result[0].value("message", std::string()) == "first",
                     "legacy array payload should preserve entry contents") && ok;
+    }
+
+    // --- explicit action metadata is retained ---
+    {
+        AppRpcDispatcher dispatcher;
+        dispatcher.register_handler(
+            "logs.list",
+            [](const RpcRequest&) {
+                RpcResponse resp;
+                resp.success = true;
+                resp.payload_json = "[]";
+                return resp;
+            },
+            RpcActionMetadata{RpcLane::Diagnostics, RpcConflictClass::None});
+
+        auto meta = dispatcher.metadata_for("logs.list");
+        ok = expect(meta.has_value(), "logs.list metadata should be registered") && ok;
+        if (meta.has_value()) {
+            ok = expect(meta->lane == RpcLane::Diagnostics,
+                        "logs.list lane should be diagnostics") && ok;
+            ok = expect(meta->conflict == RpcConflictClass::None,
+                        "logs.list conflict should be none") && ok;
+        }
+        ok = expect(!dispatcher.metadata_for("missing.action").has_value(),
+                    "missing action should have no metadata") && ok;
+    }
+
+    // --- default action metadata classifies known business lanes ---
+    {
+        AppRpcDispatcher dispatcher;
+        dispatcher.register_handler("vpn.connect", [](const RpcRequest&) {
+            RpcResponse resp;
+            resp.success = true;
+            return resp;
+        });
+        dispatcher.register_handler("config.saveAuth", [](const RpcRequest&) {
+            RpcResponse resp;
+            resp.success = true;
+            return resp;
+        });
+        dispatcher.register_handler("service.install", [](const RpcRequest&) {
+            RpcResponse resp;
+            resp.success = true;
+            return resp;
+        });
+
+        auto vpn_meta = dispatcher.metadata_for("vpn.connect");
+        auto config_meta = dispatcher.metadata_for("config.saveAuth");
+        auto admin_meta = dispatcher.metadata_for("service.install");
+
+        ok = expect(vpn_meta.has_value() &&
+                        vpn_meta->lane == RpcLane::VpnControl &&
+                        vpn_meta->conflict == RpcConflictClass::VpnWorkflowIntent,
+                    "vpn.connect should default to vpn_control intent metadata") && ok;
+        ok = expect(config_meta.has_value() &&
+                        config_meta->lane == RpcLane::ConfigStore &&
+                        config_meta->conflict == RpcConflictClass::ConfigWrite,
+                    "config.saveAuth should default to config_store write metadata") && ok;
+        ok = expect(admin_meta.has_value() &&
+                        admin_meta->lane == RpcLane::PlatformAdmin &&
+                        admin_meta->conflict == RpcConflictClass::PlatformAdminWrite,
+                    "service.install should default to platform_admin write metadata") && ok;
+    }
+
+    // --- desktop adapter exposes metadata for legacy handlers ---
+    {
+        using exv::core_api::DesktopRpcAdapter;
+
+        DesktopRpcAdapter adapter;
+        adapter.register_legacy_handler("logs.list", [](const nlohmann::json&) {
+            return nlohmann::json::array();
+        });
+        auto meta = adapter.dispatcher().metadata_for("logs.list");
+        ok = expect(meta.has_value() && meta->lane == RpcLane::Diagnostics,
+                    "legacy logs.list handler should keep default diagnostics metadata") && ok;
     }
 
     // --- action prefix constants are defined ---

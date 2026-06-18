@@ -1,8 +1,11 @@
 #pragma once
+#include "core/rpc/rpc_action_metadata.hpp"
+
 #include <string>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace exv::core_api {
@@ -26,7 +29,11 @@ public:
     using Handler = std::function<RpcResponse(const RpcRequest&)>;
 
     void register_handler(const std::string& action, Handler handler);
+    void register_handler(const std::string& action,
+                          Handler handler,
+                          RpcActionMetadata metadata);
     RpcResponse dispatch(const RpcRequest& request);
+    std::optional<RpcActionMetadata> metadata_for(std::string_view action) const;
 
     // Store an action object whose lifetime must match the dispatcher's.
     // Handlers registered by action classes capture `this`; the action object
@@ -42,6 +49,7 @@ public:
 
 private:
     std::map<std::string, Handler> handlers_;
+    std::map<std::string, RpcActionMetadata, std::less<>> metadata_;
     std::vector<std::shared_ptr<void>> retained_actions_;
 };
 

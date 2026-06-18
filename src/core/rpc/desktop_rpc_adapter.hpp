@@ -2,6 +2,7 @@
 #include "app_rpc_dispatcher.hpp"
 #include <nlohmann/json.hpp>
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace exv::core_api {
@@ -22,7 +23,10 @@ public:
 
     /// Register a legacy handler that takes (action, payload) and returns json.
     /// The adapter wraps it into the RpcRequest/RpcResponse convention.
-    void register_legacy_handler(const std::string& action, LegacyHandler handler);
+    void register_legacy_handler(
+        const std::string& action,
+        LegacyHandler handler,
+        std::optional<RpcActionMetadata> metadata = std::nullopt);
 
     /// Dispatch a desktop action through the registered handlers.
     /// Returns the JSON response in the legacy format (for backward compat).

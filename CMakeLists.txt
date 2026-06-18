@@ -104,6 +104,7 @@ set(EXV_CORE_SOURCES
     src/core/tunnel_controller/reconnect_policy.cpp
     src/core/tunnel_controller/timer_scheduler.cpp
     src/core/rpc/app_rpc_dispatcher.cpp
+    src/core/rpc/rpc_action_metadata.cpp
     src/core/rpc/core_actions.cpp
     src/core/rpc/desktop_rpc_adapter.cpp
     src/core/rpc/vpn_actions.cpp
@@ -1994,6 +1995,7 @@ add_test(NAME helper_network_ops_adapter_test COMMAND helper_network_ops_adapter
 add_executable(app_api_rpc_dispatcher_test
     tests/app_api_rpc_dispatcher_test.cpp
     src/core/rpc/app_rpc_dispatcher.cpp
+    src/core/rpc/rpc_action_metadata.cpp
     src/core/rpc/desktop_rpc_adapter.cpp
 )
 
