@@ -48,18 +48,20 @@ Verification evidence: after stopping the stale local `exv.exe` that owned `\\.\
 
 ## Phase 3: Host And Client Async Bridge
 
-- [ ] Add `CoreRpcClient::invoke_async()`.
-- [ ] Add id/request_id pending map.
-- [ ] Add one reader pump that demultiplexes responses and events.
-- [ ] Preserve blocking `invoke()` as wrapper for compatibility.
-- [ ] Resolve all pending requests on transport close.
-- [ ] Add `AsyncHostBridge`.
-- [ ] Keep `window.setMode` and `window.resolveClosePrompt` local to shell.
-- [ ] Ensure host message acceptance does not wait for core.
-- [ ] Wire Windows WebView2 posting callback.
-- [ ] Wire macOS WKWebView main-thread posting callback.
-- [ ] Wire Linux WebKitGTK main-thread posting callback.
-- [ ] Commit host/client async bridge.
+- [x] Add `CoreRpcClient::invoke_async()`.
+- [x] Add id/request_id pending map.
+- [x] Add one reader pump that demultiplexes responses and events.
+- [x] Preserve blocking `invoke()` as wrapper for compatibility.
+- [x] Resolve all pending requests on transport close.
+- [x] Add `AsyncHostBridge`.
+- [x] Keep `window.setMode` and `window.resolveClosePrompt` local to shell.
+- [x] Ensure host message acceptance does not wait for core.
+- [x] Wire Windows WebView2 posting callback.
+- [x] Wire macOS WKWebView main-thread posting callback.
+- [x] Wire Linux WebKitGTK main-thread posting callback.
+- [x] Commit host/client async bridge.
+
+Verification evidence: `ctest --test-dir build-windows/cpp -R "ui_shell_core_rpc_client_test|ui_shell_runtime_test|win32_webview2_runtime_test" --output-on-failure` passed, and `cmake --build --preset windows-release --target exv-ui` passed. macOS/Linux post hooks were source-wired in their platform hosts but not compiled on this Windows runner.
 
 ## Phase 4: Parallel VPN Connect Pipeline
 
