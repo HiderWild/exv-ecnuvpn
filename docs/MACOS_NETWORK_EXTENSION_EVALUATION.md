@@ -107,7 +107,6 @@ For AnyConnect-style VPN: **`NETunnelProviderManager`** (PacketTunnel) is the on
 | `protocol/url.hpp/.cpp` | Yes | URL parsing; pure protocol |
 | `native_engine.hpp/.cpp` | Partial | Session lifecycle reusable; packet loop needs adaptation |
 | `session_state.hpp/.cpp` | Yes | State machine; no platform dependency |
-| `native_session_store.hpp/.cpp` | Partial | File-based storage; need App Group path |
 | `event_sink.hpp/.cpp` | Yes | Event system; platform-independent |
 | `packet_device.hpp` | Interface only | Need NE `PacketTunnelProvider` implementation |
 | `native_error_contract.hpp` | Yes | Error codes; platform-independent |

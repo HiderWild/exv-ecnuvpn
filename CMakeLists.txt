@@ -564,28 +564,6 @@ target_compile_definitions(exv PRIVATE
 #
 # WebUI removed �� Electron is the sole GUI entry point
 
-# Disabled: references deleted native_session_store.hpp
-# add_executable(vpn_runtime_test
-#         tests/vpn_runtime_test.cpp
-#     src/vpn_engine/session_state.cpp
-#     src/vpn_runtime.cpp
-# )
-#
-# if(APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/darwin/path_utils.cpp src/platform/darwin/process_control.cpp src/platform/darwin/config_defaults.cpp)
-# elseif(UNIX AND NOT APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/linux/path_utils.cpp src/platform/linux/process_control.cpp src/platform/linux/config_defaults.cpp)
-# elseif(WIN32)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/win32/path_utils.cpp src/platform/win32/process_control.cpp src/platform/win32/config_defaults.cpp)
-# endif()
-#
-# target_include_directories(vpn_runtime_test PRIVATE
-#         ${CMAKE_SOURCE_DIR}/include
-#         ${CMAKE_SOURCE_DIR}/src
-# )
-#
-# add_test(NAME vpn_runtime_test COMMAND vpn_runtime_test)
-
 add_executable(platform_status_models_test
     tests/platform_status_models_test.cpp
     src/platform/common/status_models.cpp
@@ -2329,10 +2307,9 @@ target_include_directories(native_auth_session_json_test PRIVATE
 
 add_test(NAME native_auth_session_json_test COMMAND native_auth_session_json_test)
 
-# NOTE: connection_attempt_test, app_api_logs_test, and
-# app_api_native_orchestration_test depend on the full app_api build chain
-# (WebUI assets, SSE broadcaster, etc.) and cannot be compiled as standalone
-# test targets.  They are tested as part of the exv integration build.
+# NOTE: connection_attempt_test and app_api_logs_test depend on the full app_api
+# build chain (WebUI assets, SSE broadcaster, etc.) and cannot be compiled as
+# standalone test targets.  They are tested as part of the exv integration build.
 
 add_executable(auth_failure_test
     tests/integration/auth_failure_test.cpp
@@ -2400,7 +2377,6 @@ add_test(NAME helper_delegating_network_ops_test COMMAND helper_delegating_netwo
 
 # --- Release-blocking: core logic tests (must pass in CI) ---
 set(_release_blocking_tests
-    # vpn_runtime_test  # Disabled: references deleted native_session_store.hpp
     platform_status_models_test
     platform_network_ops_model_test
     feedback_test
@@ -2543,13 +2519,6 @@ set_property(TEST
     helper_lost_test
     APPEND PROPERTY LABELS "integration"
 )
-
-# --- Legacy: pre-existing tests with known issues ---
-# app_api_native_orchestration_test has hardcoded test passwords and depends
-# on the full native engine build chain.  Isolated until migrated.
-if(TARGET app_api_native_orchestration_test)
-    set_property(TEST app_api_native_orchestration_test APPEND PROPERTY LABELS "legacy")
-endif()
 
 # --- Functional labels (for local dev filtering) ---
 
