@@ -16,6 +16,11 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <stop_token>
+#include <thread>
 
 using json = nlohmann::json;
 
@@ -27,6 +32,18 @@ bool expect(bool condition, const char* message) {
     return false;
 }
 
+bool wait_until(const std::function<bool()> &predicate,
+                std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+}
+
 // Helper: build a VpnActions instance wired to a fake TunnelController.
 struct VpnActionsFixture {
     std::shared_ptr<exv::test::FakeHelper> helper =
@@ -36,12 +53,34 @@ struct VpnActionsFixture {
     std::shared_ptr<exv::core::TunnelController> controller;
     std::unique_ptr<exv::core_api::VpnActions> vpn;
     exv::core_api::AppRpcDispatcher dispatcher;
+    std::mutex job_mutex;
+    std::condition_variable_any job_cv;
+    bool release_job = false;
+    std::atomic<int> job_starts{0};
 
     VpnActionsFixture() {
         controller = std::make_shared<exv::core::TunnelController>(
             helper, net_ops);
-        vpn = std::make_unique<exv::core_api::VpnActions>(controller);
+        vpn = std::make_unique<exv::core_api::VpnActions>(
+            controller,
+            [&](std::stop_token stop, std::uint64_t) {
+                ++job_starts;
+                std::unique_lock<std::mutex> lock(job_mutex);
+                job_cv.wait(lock, stop, [&] { return release_job; });
+            });
         vpn->register_handlers(dispatcher);
+    }
+
+    ~VpnActionsFixture() {
+        release();
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(job_mutex);
+            release_job = true;
+        }
+        job_cv.notify_all();
     }
 
     exv::core_api::RpcResponse dispatch(const std::string& action,
@@ -59,7 +98,7 @@ struct VpnActionsFixture {
 int main() {
     bool ok = true;
 
-    // --- connect with valid UserIntent JSON ---
+    // --- connect with valid UserIntent JSON returns accepted job ---
     {
         VpnActionsFixture fix;
         auto resp = fix.dispatch("vpn.connect", R"({
@@ -67,46 +106,62 @@ int main() {
             "auto_reconnect": true
         })");
 
-        ok = expect(resp.success, "vpn.connect should succeed") && ok;
+        ok = expect(resp.success, "vpn.connect should accept a valid connection job") && ok;
         ok = expect(resp.error_code.empty(), "vpn.connect should have no error_code") && ok;
 
         auto payload = json::parse(resp.payload_json);
-        ok = expect(payload.contains("status"), "connect response should contain status") && ok;
-        ok = expect(payload["status"] == "connecting",
-                    "connect status should be 'connecting'") && ok;
+        ok = expect(payload.value("accepted", false),
+                    "vpn.connect returns accepted=true") && ok;
+        ok = expect(payload.value("phase", std::string()) == "connecting",
+                    "vpn.connect returns connecting phase") && ok;
+        ok = expect(payload.contains("job_id"),
+                    "vpn.connect returns job_id") && ok;
+        fix.release();
     }
 
-    // --- connect sets controller to non-Idle phase ---
+    // --- busy connect coalesces into latest desired intent ---
     {
         VpnActionsFixture fix;
-        fix.dispatch("vpn.connect", R"({"profile_id":"test","auto_reconnect":false})");
-
-        // After connect, controller should have transitioned through the
-        // connect flow.  status() should reflect non-Idle state.
-        auto status_resp = fix.dispatch("vpn.status");
-        ok = expect(status_resp.success, "vpn.status after connect should succeed") && ok;
-
-        auto s = json::parse(status_resp.payload_json);
-        ok = expect(s.contains("phase"), "status should contain phase") && ok;
-        // The phase depends on how far the connect flow got; at minimum
-        // it should not be "idle" (the connect flow ran).
-        ok = expect(s["phase"] != "idle",
-                    "phase after connect should not be idle") && ok;
+        auto first = fix.dispatch("vpn.connect", R"({"profile_id":"test","auto_reconnect":false})");
+        auto payload = json::parse(first.payload_json);
+        ok = expect(wait_until([&] { return fix.job_starts.load() == 1; },
+                               std::chrono::milliseconds(500)),
+                    "busy vpn.connect: first job should start") && ok;
+        auto second = fix.dispatch("vpn.connect", R"({"profile_id":"test","auto_reconnect":false})");
+        ok = expect(second.success, "busy vpn.connect should be accepted as intent update") && ok;
+        auto second_payload = json::parse(second.payload_json);
+        ok = expect(second_payload.value("accepted", false),
+                    "busy vpn.connect returns accepted=true") && ok;
+        ok = expect(second_payload.value("coalesced", false),
+                    "busy vpn.connect returns coalesced=true") && ok;
+        ok = expect(second_payload.value("desired_connected", false),
+                    "busy vpn.connect keeps desired_connected=true") && ok;
+        ok = expect(second_payload.value("active_job_id", std::string()) ==
+                        payload.value("job_id", std::string()),
+                    "busy vpn.connect references active job instead of starting a duplicate") && ok;
+        ok = expect(fix.job_starts.load() == 1,
+                    "busy vpn.connect should not start a duplicate job") && ok;
+        fix.release();
     }
 
-    // --- disconnect ---
+    // --- disconnect while connect job is active cancels without error ---
     {
         VpnActionsFixture fix;
-        // First connect so there is something to disconnect from.
         fix.dispatch("vpn.connect", R"({"profile_id":"default","auto_reconnect":true})");
 
         auto resp = fix.dispatch("vpn.disconnect");
         ok = expect(resp.success, "vpn.disconnect should succeed") && ok;
 
         auto payload = json::parse(resp.payload_json);
-        ok = expect(payload.contains("status"), "disconnect response should contain status") && ok;
-        ok = expect(payload["status"] == "disconnecting",
-                    "disconnect status should be 'disconnecting'") && ok;
+        ok = expect(payload.value("accepted", false),
+                    "disconnect during connect returns accepted=true") && ok;
+        ok = expect(payload.value("cancelling", false),
+                    "disconnect during connect returns cancelling=true") && ok;
+        ok = expect(payload.value("user_cancelled", false),
+                    "disconnect during connect returns user_cancelled=true") && ok;
+        ok = expect(!payload.value("desired_connected", true),
+                    "disconnect during connect clears desired_connected") && ok;
+        fix.release();
     }
 
     // --- status returns all expected fields ---
@@ -139,11 +194,9 @@ int main() {
         auto resp = fix.dispatch("vpn.status");
         auto s = json::parse(resp.payload_json);
 
-        // The helper's start_session succeeds (FakeHelper), so the flow
-        // proceeds past PreparingHelper.  The exact phase depends on the
-        // fake helper behavior, but the status should be well-formed.
         ok = expect(s.contains("phase"), "status should have phase") && ok;
         ok = expect(s["phase"].is_string(), "phase should be a string") && ok;
+        fix.release();
     }
 
     // --- set_auto_reconnect ---
