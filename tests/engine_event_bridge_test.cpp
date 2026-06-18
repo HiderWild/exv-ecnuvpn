@@ -193,7 +193,35 @@ int main() {
     }
 
     // ---------------------------------------------------------------
-    // 6. emit(): null callback does not crash
+    // 6. mapped failure events preserve native code/message payloads.
+    // ---------------------------------------------------------------
+
+    {
+        std::vector<events::TunnelEvent> received;
+        exv::core::EngineEventBridge bridge(
+            [&](events::TunnelEvent e) { received.push_back(e); });
+
+        ecnuvpn::vpn_engine::VpnEngineEvent ev;
+        ev.type = "auth.failed";
+        ev.message = "SAML authentication is required";
+        ev.fields.emplace("code", "saml_required_unsupported");
+        ev.fields.emplace("recoverable", "false");
+        bridge.emit(ev);
+
+        ok = expect(received.size() == 1,
+                    "auth.failed should emit one tunnel event") && ok;
+        ok = expect(received[0].type == events::TunnelEventType::AuthFailed,
+                    "auth.failed event type should be preserved") && ok;
+        ok = expect(received[0].code == "saml_required_unsupported",
+                    "native event code should be preserved") && ok;
+        ok = expect(received[0].message == "SAML authentication is required",
+                    "native event message should be preserved") && ok;
+        ok = expect(!received[0].recoverable,
+                    "native event recoverable flag should be parsed") && ok;
+    }
+
+    // ---------------------------------------------------------------
+    // 7. emit(): null callback does not crash
     // ---------------------------------------------------------------
 
     {
@@ -205,7 +233,7 @@ int main() {
     }
 
     // ---------------------------------------------------------------
-    // 7. emit(): lifecycle events publish user-facing engine logs,
+    // 8. emit(): lifecycle events publish user-facing engine logs,
     //    while packet/DPD noise is filtered out.
     // ---------------------------------------------------------------
 
@@ -268,6 +296,45 @@ int main() {
                        event.code.rfind("dpd.", 0) == 0;
             });
         ok = expect(!noisy_logged, "packet and DPD events should not log") && ok;
+    }
+
+    // ---------------------------------------------------------------
+    // 9. emit(): engine logs redact secret-bearing message and fields.
+    // ---------------------------------------------------------------
+
+    {
+        auto log_sink = install_capturing_log_sink();
+
+        exv::core::EngineEventBridge bridge(nullptr);
+        ecnuvpn::vpn_engine::VpnEngineEvent ev;
+        ev.type = "auth.failed";
+        ev.level = "error";
+        ev.message = "failed with password=SECRET_PASSWORD webvpn=SECRET_COOKIE";
+        ev.fields.emplace("cookie", "webvpn=SECRET_COOKIE");
+        ev.fields.emplace("auth_token", "SECRET_TOKEN");
+        ev.fields.emplace("code", "auth_failed");
+        bridge.emit(ev);
+
+        exv::observability::LogFacade::flush();
+        auto logs = log_sink->logs();
+        exv::observability::LogFacade::shutdown();
+
+        ok = expect(!logs.empty(), "auth.failed should log") && ok;
+        std::string dumped;
+        for (const auto& log : logs) {
+            dumped += log.message;
+            dumped += log.code;
+            for (const auto& field : log.fields) {
+                dumped += field.first;
+                dumped += field.second;
+            }
+        }
+        ok = expect(dumped.find("SECRET_PASSWORD") == std::string::npos,
+                    "engine logs should redact password values") && ok;
+        ok = expect(dumped.find("SECRET_COOKIE") == std::string::npos,
+                    "engine logs should redact cookie values") && ok;
+        ok = expect(dumped.find("SECRET_TOKEN") == std::string::npos,
+                    "engine logs should redact token values") && ok;
     }
 
     return ok ? 0 : 1;

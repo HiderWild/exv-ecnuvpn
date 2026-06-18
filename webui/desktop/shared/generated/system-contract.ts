@@ -34,11 +34,16 @@ export const CORE_RPC_ACTIONS = [
   "vpn.connect",
   "vpn.disconnect",
   "config.get",
+  "config.save",
+  "config.getAuth",
   "config.saveAuth",
+  "config.getSettings",
   "config.saveSettings",
   "config.reset",
   "config.import",
   "config.export",
+  "config.get_profile",
+  "config.save_profile",
   "key.status",
   "key.reset",
   "routes.list",
@@ -46,6 +51,7 @@ export const CORE_RPC_ACTIONS = [
   "routes.remove",
   "routes.reset",
   "logs.list",
+  "logs.clear",
   "service.status",
   "service.install",
   "service.uninstall",
@@ -76,13 +82,16 @@ export const STANDARD_ERROR_CODES = [
   "config_import_tampered_or_wrong_password",
   "credential_store_unavailable",
   "key_missing",
-  "key_corrupt"
+  "key_corrupt",
+  "log_clear_failed"
 ] as const
 
 export const DESKTOP_RPC_ACTIONS = [
   "status.get",
   "vpn.connect",
   "vpn.disconnect",
+  "vpn.authInteraction.get",
+  "vpn.authInteraction.respond",
   "config.getAuth",
   "config.saveAuth",
   "config.getSettings",
@@ -99,7 +108,8 @@ export const DESKTOP_RPC_ACTIONS = [
   "drivers.install",
   "service.install",
   "service.uninstall",
-  "logs.list"
+  "logs.list",
+  "logs.clear"
 ] as const
 export const DESKTOP_RPC_EVENT_TYPES = [
   "log",
@@ -126,6 +136,7 @@ export const DESKTOP_RPC_ERROR_CODES = [
   "network_unreachable",
   "user_cancelled",
   "invalid_request",
+  "log_clear_failed",
   "connection_failed",
   "vpn_start_failed"
 ] as const
@@ -146,6 +157,7 @@ export const DESKTOP_RPC_ERROR_CODE_MAP = {
   "networkUnreachable": "network_unreachable",
   "userCancelled": "user_cancelled",
   "invalidRequest": "invalid_request",
+  "logClearFailed": "log_clear_failed",
   "connectionFailed": "connection_failed",
   "vpnStartFailed": "vpn_start_failed"
 } as const
@@ -155,13 +167,258 @@ export const CONFIG_ACTIONS = [
   "config.saveAuth",
   "config.getSettings",
   "config.saveSettings",
-  "config.getKey",
   "config.profile.get",
   "config.profile.save"
 ] as const
 export const CONFIG_ALIASES = {
   "config.get": "config.getSettings",
   "config.save": "config.saveSettings",
+  "config.get_profile": "config.profile.get",
+  "config.save_profile": "config.profile.save"
+} as const
+export const ACTION_OWNERS = [
+  {
+    "name": "core.hello",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "status.get",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "vpn.connect",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "vpn.disconnect",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "vpn.status",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "vpn.set_auto_reconnect",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "vpn.authInteraction.get",
+    "owner": "desktop_host_adapter"
+  },
+  {
+    "name": "vpn.authInteraction.respond",
+    "owner": "desktop_host_adapter"
+  },
+  {
+    "name": "config.get",
+    "owner": "compat_alias",
+    "canonical": "config.getSettings"
+  },
+  {
+    "name": "config.save",
+    "owner": "compat_alias",
+    "canonical": "config.saveSettings"
+  },
+  {
+    "name": "config.getAuth",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.saveAuth",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.getSettings",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.saveSettings",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.getKey",
+    "owner": "compat_alias",
+    "canonical": "key.status"
+  },
+  {
+    "name": "config.reset",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.import",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.export",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.get_profile",
+    "owner": "compat_alias",
+    "canonical": "config.profile.get"
+  },
+  {
+    "name": "config.save_profile",
+    "owner": "compat_alias",
+    "canonical": "config.profile.save"
+  },
+  {
+    "name": "config.profile.get",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "config.profile.save",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "key.status",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "key.reset",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "routes.list",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "routes.add",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "routes.remove",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "routes.reset",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "route.list",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "route.add",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "route.remove",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "route.enable",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "route.disable",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "logs.list",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "logs.clear",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "service.status",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "service.helper_status",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "helper.status",
+    "owner": "desktop_host_adapter"
+  },
+  {
+    "name": "service.install",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "service.uninstall",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "service.driver_status",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "runtime.status",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "drivers.status",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "drivers.install",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "maintenance.inspectCore",
+    "owner": "core_rpc"
+  },
+  {
+    "name": "maintenance.killStaleCore",
+    "owner": "core_rpc"
+  }
+] as const
+export const ACTION_OWNER_MAP = {
+  "core.hello": "core_rpc",
+  "status.get": "core_rpc",
+  "vpn.connect": "core_rpc",
+  "vpn.disconnect": "core_rpc",
+  "vpn.status": "core_rpc",
+  "vpn.set_auto_reconnect": "core_rpc",
+  "vpn.authInteraction.get": "desktop_host_adapter",
+  "vpn.authInteraction.respond": "desktop_host_adapter",
+  "config.get": "compat_alias",
+  "config.save": "compat_alias",
+  "config.getAuth": "core_rpc",
+  "config.saveAuth": "core_rpc",
+  "config.getSettings": "core_rpc",
+  "config.saveSettings": "core_rpc",
+  "config.getKey": "compat_alias",
+  "config.reset": "core_rpc",
+  "config.import": "core_rpc",
+  "config.export": "core_rpc",
+  "config.get_profile": "compat_alias",
+  "config.save_profile": "compat_alias",
+  "config.profile.get": "core_rpc",
+  "config.profile.save": "core_rpc",
+  "key.status": "core_rpc",
+  "key.reset": "core_rpc",
+  "routes.list": "core_rpc",
+  "routes.add": "core_rpc",
+  "routes.remove": "core_rpc",
+  "routes.reset": "core_rpc",
+  "route.list": "core_rpc",
+  "route.add": "core_rpc",
+  "route.remove": "core_rpc",
+  "route.enable": "core_rpc",
+  "route.disable": "core_rpc",
+  "logs.list": "core_rpc",
+  "logs.clear": "core_rpc",
+  "service.status": "core_rpc",
+  "service.helper_status": "core_rpc",
+  "helper.status": "desktop_host_adapter",
+  "service.install": "core_rpc",
+  "service.uninstall": "core_rpc",
+  "service.driver_status": "core_rpc",
+  "runtime.status": "core_rpc",
+  "drivers.status": "core_rpc",
+  "drivers.install": "core_rpc",
+  "maintenance.inspectCore": "core_rpc",
+  "maintenance.killStaleCore": "core_rpc"
+} as const
+export const COMPAT_ACTION_ALIASES = {
+  "config.get": "config.getSettings",
+  "config.save": "config.saveSettings",
+  "config.getKey": "key.status",
   "config.get_profile": "config.profile.get",
   "config.save_profile": "config.profile.save"
 } as const
@@ -477,7 +734,6 @@ export const SRC_FORBIDDEN_PATTERNS = [
   "platform include logger.hpp",
   "platform include vpn.hpp",
   "platform include tunnel.hpp",
-  "platform include openconnect_log.hpp",
   "platform include virtual_network.hpp",
   "platform include core/*"
 ] as const
@@ -486,6 +742,7 @@ export type DesktopRpcAction = (typeof DESKTOP_RPC_ACTIONS)[number]
 export type CoreRpcAction = (typeof CORE_RPC_ACTIONS)[number]
 export type DestructiveCoreRpcAction = (typeof DESTRUCTIVE_CORE_RPC_ACTIONS)[number]
 export type ConfigAction = (typeof CONFIG_ACTIONS)[number]
+export type ActionOwner = (typeof ACTION_OWNERS)[number]['owner']
 export type HelperOp = (typeof HELPER_OPS)[number]
 export type StandardErrorCode = (typeof STANDARD_ERROR_CODES)[number]
 export type TunnelPhase = (typeof TUNNEL_PHASE_CONTRACTS)[number]['name']

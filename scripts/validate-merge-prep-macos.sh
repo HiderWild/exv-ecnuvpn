@@ -33,10 +33,10 @@ echo "[merge-prep] Build frontend assets for native embedding..."
 
 echo "[merge-prep] Configure and build native targets..."
 cmake --preset macos-release
-cmake --build --preset macos-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test tunnel_script_contract_test proxy_tun_detector_test app_api_runtime_policy_test crypto_roundtrip_test
+cmake --build --preset macos-release --target exv exv-helper platform_status_models_test backend_resolver_test runtime_status_native_test native_session_state_test native_helper_session_test native_only_cutover_contract_test native_packaging_policy_test proxy_tun_detector_test app_api_runtime_policy_test crypto_roundtrip_test
 
 echo "[merge-prep] Run focused native regression tests..."
-ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|tunnel_script_contract_test|proxy_tun_detector_test|app_api_runtime_policy_test|crypto_roundtrip_test' --output-on-failure
+ctest --preset macos-release -R 'platform_status_models_test|backend_resolver_test|runtime_status_native_test|native_session_state_test|native_helper_session_test|native_only_cutover_contract_test|native_packaging_policy_test|proxy_tun_detector_test|app_api_runtime_policy_test|crypto_roundtrip_test' --output-on-failure
 
 if [[ "$SKIP_DESKTOP" -eq 0 ]]; then
   echo "[merge-prep] Build native WebView desktop package..."

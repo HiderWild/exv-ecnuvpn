@@ -4,6 +4,9 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import {
+  ACTION_OWNER_MAP,
+  ACTION_OWNERS,
+  COMPAT_ACTION_ALIASES,
   CONFIG_ACTIONS,
   CONFIG_ALIASES,
   CORE_RPC_ACTIONS,
@@ -24,6 +27,8 @@ import {
 } from '../../desktop/shared/generated/system-contract.js'
 import {
   configAliases,
+  actionOwnerMap,
+  compatActionAliases,
   coreRpcActions,
   desktopRpcActions,
   desktopRpcErrorCodes,
@@ -49,6 +54,16 @@ function snapshot() {
   return readRepoJson('contracts/generated/system_contract_snapshot.json')
 }
 
+function removedNativeRuntimeFields() {
+  return [
+    'openconnect' + 'Binary',
+    'openconnect' + 'Path',
+    'openconnect' + 'Args',
+    'legacy' + 'TunnelScript',
+    'legacy' + 'Adapter',
+  ]
+}
+
 describe('generated system contract', () => {
   it('keeps generated snapshot identical to the manifest', () => {
     assert.deepEqual(snapshot(), manifest())
@@ -57,14 +72,17 @@ describe('generated system contract', () => {
   it('generates desktop RPC action constants from the manifest', () => {
     assert.deepEqual(DESKTOP_RPC_ACTIONS, manifest().surfaces.desktop_rpc.actions)
     assert.deepEqual(desktopRpcActions, DESKTOP_RPC_ACTIONS)
+    assert.ok(DESKTOP_RPC_ACTIONS.includes('vpn.authInteraction.get'))
+    assert.ok(DESKTOP_RPC_ACTIONS.includes('vpn.authInteraction.respond'))
   })
 
   it('keeps persisted log mutation out of the desktop RPC surface', () => {
     const desktopActions: readonly string[] = DESKTOP_RPC_ACTIONS
 
     assert.ok(desktopActions.includes('logs.list'))
-    assert.ok(!desktopActions.includes('logs.clear'))
-    assert.deepEqual(manifest().modules.logs.actions, ['logs.list'])
+    assert.ok(desktopActions.includes('logs.clear'))
+    assert.deepEqual(manifest().modules.logs.actions, ['logs.list', 'logs.clear'])
+    assert.equal(ACTION_OWNER_MAP['logs.clear'], 'core_rpc')
   })
 
   it('captures desktop and core RPC envelopes', () => {
@@ -96,8 +114,10 @@ describe('generated system contract', () => {
     expectContains(CORE_RPC_ACTIONS, 'config.import')
     expectContains(CORE_RPC_ACTIONS, 'config.export')
     expectContains(CORE_RPC_ACTIONS, 'config.reset')
+    expectContains(CORE_RPC_ACTIONS, 'config.getSettings')
     expectContains(CORE_RPC_ACTIONS, 'key.status')
     expectContains(CORE_RPC_ACTIONS, 'key.reset')
+    expectContains(CORE_RPC_ACTIONS, 'logs.clear')
     expectContains(CORE_RPC_ACTIONS, 'maintenance.inspectCore')
     expectContains(CORE_RPC_ACTIONS, 'maintenance.killStaleCore')
 
@@ -119,6 +139,7 @@ describe('generated system contract', () => {
     expectContains(CONFIG_ACTIONS, 'config.getAuth')
     expectContains(CONFIG_ACTIONS, 'config.saveSettings')
     expectContains(CONFIG_ACTIONS, 'config.profile.get')
+    assert.equal((CONFIG_ACTIONS as readonly string[]).includes('config.getKey'), false)
     assert.equal(CONFIG_ALIASES['config.get'], 'config.getSettings')
     assert.equal(CONFIG_ALIASES['config.save'], 'config.saveSettings')
     assert.equal(CONFIG_ALIASES['config.get_profile'], 'config.profile.get')
@@ -129,8 +150,30 @@ describe('generated system contract', () => {
     assert.deepEqual(coreRpcActions, CORE_RPC_ACTIONS)
     assert.deepEqual(destructiveCoreRpcActions, DESTRUCTIVE_CORE_RPC_ACTIONS)
     assert.deepEqual(configAliases, CONFIG_ALIASES)
+    assert.deepEqual(actionOwnerMap, ACTION_OWNER_MAP)
+    assert.deepEqual(compatActionAliases, COMPAT_ACTION_ALIASES)
     assert.deepEqual(standardErrorCodes, STANDARD_ERROR_CODES)
     assert.equal(ipcProtocolMajor, IPC_PROTOCOL_MAJOR)
+  })
+
+  it('generates a single canonical owner for every public action', () => {
+    const publicActions = new Set<string>([
+      ...manifest().surfaces.desktop_rpc.actions,
+      ...manifest().surfaces.core_rpc.actions,
+      ...manifest().modules.config.actions.map((action: { name: string }) => action.name),
+      ...manifest().modules.config.aliases.map((alias: { alias: string }) => alias.alias),
+      ...manifest().modules.logs.actions,
+    ])
+    const ownerNames = new Set<string>(ACTION_OWNERS.map((entry) => entry.name))
+
+    for (const action of publicActions) {
+      assert.ok(ownerNames.has(action), `${action} must have generated ownership`)
+    }
+
+    assert.equal(ACTION_OWNER_MAP['key.status'], 'core_rpc')
+    assert.equal(ACTION_OWNER_MAP['config.getKey'], 'compat_alias')
+    assert.equal(COMPAT_ACTION_ALIASES['config.getKey'], 'key.status')
+    assert.equal(COMPAT_ACTION_ALIASES['config.get'], 'config.getSettings')
   })
 
   it('removes duplicate legacy action maps from host-contract.ts once generated constants exist', () => {
@@ -154,6 +197,18 @@ describe('generated system contract', () => {
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'password')
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'cookie')
     expectContains(HELPER_FORBIDDEN_CREDENTIAL_FIELDS, 'auth_token')
+  })
+
+  it('keeps retired native runtime fields out of public contracts and renderer state', () => {
+    const contractText = JSON.stringify(manifest()) + JSON.stringify(snapshot())
+    const rendererConfigStore = readFileSync(resolve(process.cwd(), 'src/stores/config.ts'), 'utf8')
+    const settingsPage = readFileSync(resolve(process.cwd(), 'src/pages/SettingsPage.vue'), 'utf8')
+
+    for (const field of removedNativeRuntimeFields()) {
+      assert.equal(contractText.includes(field), false, `${field} must not be generated`)
+      assert.equal(rendererConfigStore.includes(field), false, `${field} must not be in config store`)
+      assert.equal(settingsPage.includes(field), false, `${field} must not be in settings UI`)
+    }
   })
 
   it('keeps desktop event and error constants aligned with the public desktop contract', () => {

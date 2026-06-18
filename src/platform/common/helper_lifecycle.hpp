@@ -12,15 +12,11 @@ class IpcServer;
 
 namespace platform {
 
-void kill_all_supervisors();
 void fix_config_dir_ownership();
 int copy_self_to_stable_path_and_reexec(const std::string &current_path);
 
 // Check if a process with the given PID is still alive.
 bool is_process_alive(int pid);
-
-// Find the PID of the openconnect process. Returns -1 if not found.
-int find_openconnect_pid();
 
 // Get the network interfaces output string for the current platform.
 std::string get_interfaces_output();
@@ -34,7 +30,7 @@ std::string create_temp_request_file(const std::string &payload);
 int spawn_worker_process(const std::string &executable_path,
                          const std::string &request_path);
 
-// Terminate a process by PID. Used for stopping VPN/supervisor processes.
+// Terminate a process by PID. Used for process lifecycle cleanup.
 void terminate_process(int pid);
 void force_terminate_process(int pid);
 

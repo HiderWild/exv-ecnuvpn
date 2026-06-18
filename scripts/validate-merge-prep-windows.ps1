@@ -35,10 +35,10 @@ try {
 
   Write-Host '[merge-prep] Configure and build native targets...'
   Invoke-Step cmake --preset windows-release
-  Invoke-Step cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test vpn_runtime_test tunnel_script_contract_test proxy_tun_detector_test app_api_runtime_policy_test crypto_roundtrip_test
+  Invoke-Step cmake --build --preset windows-release --target exv exv-helper platform_status_models_test backend_resolver_test runtime_status_native_test native_session_state_test native_helper_session_test native_only_cutover_contract_test native_packaging_policy_test proxy_tun_detector_test app_api_runtime_policy_test crypto_roundtrip_test
 
   Write-Host '[merge-prep] Run focused native regression tests...'
-  Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|vpn_runtime_test|tunnel_script_contract_test|proxy_tun_detector_test|app_api_runtime_policy_test|crypto_roundtrip_test' --output-on-failure
+  Invoke-Step ctest --preset windows-release -R 'platform_status_models_test|backend_resolver_test|runtime_status_native_test|native_session_state_test|native_helper_session_test|native_only_cutover_contract_test|native_packaging_policy_test|proxy_tun_detector_test|app_api_runtime_policy_test|crypto_roundtrip_test' --output-on-failure
 }
 finally {
   Pop-Location

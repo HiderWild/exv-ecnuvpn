@@ -23,6 +23,14 @@ class ContractError(ValueError):
     pass
 
 
+ACTION_OWNER_VALUES = {
+    "core_rpc",
+    "desktop_host_adapter",
+    "renderer_only",
+    "compat_alias",
+}
+
+
 def require_object(value: Any, path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ContractError(f"{path} must be an object")
@@ -106,6 +114,81 @@ def validate_core_rpc(core_rpc: dict[str, Any]) -> None:
         if action not in action_names:
             raise ContractError(
                 f"surfaces.core_rpc.destructive_actions contains unknown action {action!r}"
+            )
+
+
+def required_public_actions(manifest: dict[str, Any]) -> set[str]:
+    surfaces = require_object(manifest.get("surfaces"), "surfaces")
+    required = set(validate_string_list(
+        require_object(surfaces.get("desktop_rpc"), "surfaces.desktop_rpc").get("actions"),
+        "surfaces.desktop_rpc.actions",
+    ))
+    required.update(validate_string_list(
+        require_object(surfaces.get("core_rpc"), "surfaces.core_rpc").get("actions"),
+        "surfaces.core_rpc.actions",
+    ))
+
+    modules = require_object(manifest.get("modules"), "modules")
+    config = require_object(modules.get("config"), "modules.config")
+    for action in require_array(config.get("actions"), "modules.config.actions"):
+        required.add(require_string(
+            require_object(action, "modules.config.actions[]").get("name"),
+            "modules.config.actions[].name",
+        ))
+    for alias in require_array(config.get("aliases"), "modules.config.aliases"):
+        required.add(require_string(
+            require_object(alias, "modules.config.aliases[]").get("alias"),
+            "modules.config.aliases[].alias",
+        ))
+
+    for name, value in modules.items():
+        if isinstance(value, dict) and value.get("shallow") is True:
+            required.update(validate_string_list(value.get("actions"), f"modules.{name}.actions"))
+    return required
+
+
+def validate_action_ownership(manifest: dict[str, Any]) -> None:
+    entries = require_array(manifest.get("action_ownership"), "action_ownership")
+    owners: dict[str, str] = {}
+    for index, value in enumerate(entries):
+        entry = require_object(value, f"action_ownership[{index}]")
+        name = require_string(entry.get("name"), f"action_ownership[{index}].name")
+        owner = require_string(entry.get("owner"), f"action_ownership[{index}].owner")
+        if owner not in ACTION_OWNER_VALUES:
+            raise ContractError(
+                f"action_ownership[{index}].owner has unsupported value {owner!r}"
+            )
+        if name in owners:
+            raise ContractError(f"action_ownership contains duplicate action {name!r}")
+        owners[name] = owner
+
+        if owner == "compat_alias":
+            require_string(entry.get("canonical"),
+                           f"action_ownership[{index}].canonical")
+        elif "canonical" in entry:
+            raise ContractError(
+                f"action_ownership[{index}].canonical is only valid for compat_alias"
+            )
+
+    missing = sorted(required_public_actions(manifest) - set(owners))
+    if missing:
+        raise ContractError(
+            "action_ownership missing public action(s): " + ", ".join(missing)
+        )
+
+    for index, value in enumerate(entries):
+        entry = require_object(value, f"action_ownership[{index}]")
+        if entry.get("owner") != "compat_alias":
+            continue
+        canonical = require_string(entry.get("canonical"),
+                                   f"action_ownership[{index}].canonical")
+        if canonical not in owners:
+            raise ContractError(
+                f"action_ownership[{index}].canonical targets unknown action {canonical!r}"
+            )
+        if owners[canonical] == "compat_alias":
+            raise ContractError(
+                f"action_ownership[{index}].canonical must not target another alias"
             )
 
 
@@ -255,6 +338,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if module.get("shallow") is not True:
             raise ContractError(f"modules.{name}.shallow must be true")
         validate_string_list(module.get("actions"), f"modules.{name}.actions")
+    validate_action_ownership(manifest)
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -295,6 +379,18 @@ def config_aliases(manifest: dict[str, Any]) -> list[tuple[str, str]]:
     ]
 
 
+def action_ownership(manifest: dict[str, Any]) -> list[dict[str, str]]:
+    return manifest["action_ownership"]
+
+
+def compat_action_aliases(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    return [
+        (entry["name"], entry["canonical"])
+        for entry in action_ownership(manifest)
+        if entry["owner"] == "compat_alias"
+    ]
+
+
 def helper_ops(manifest: dict[str, Any]) -> list[str]:
     return [op["name"] for op in manifest["modules"]["helper"]["ops"]]
 
@@ -330,6 +426,7 @@ def cpp_array(name: str, values: Iterable[str]) -> str:
 
 def render_cpp(manifest: dict[str, Any]) -> str:
     aliases = config_aliases(manifest)
+    owners = action_ownership(manifest)
     tunnel = tunnel_controller(manifest)
     return "\n".join([
         "// Generated from contracts/system.contract.json. Do not edit manually.",
@@ -370,6 +467,23 @@ def render_cpp(manifest: dict[str, Any]) -> str:
                   manifest["modules"]["src_organization"]["forbidden_patterns"]),
         cpp_array("HELPER_FORBIDDEN_CREDENTIAL_FIELDS",
                   manifest["modules"]["helper"]["security"]["forbidden_fields"]),
+        "",
+        "struct ActionOwnerContract {",
+        "    std::string_view name;",
+        "    std::string_view owner;",
+        "    std::string_view canonical;",
+        "};",
+        "",
+        f"inline constexpr std::array<ActionOwnerContract, {len(owners)}> ACTION_OWNERS = {{{{",
+        *[
+            "    {"
+            f"{cpp_string(entry['name'])}, "
+            f"{cpp_string(entry['owner'])}, "
+            f"{cpp_string(entry.get('canonical', ''))}"
+            "},"
+            for entry in owners
+        ],
+        "}};",
         "",
         "struct HelperOpContract {",
         "    std::string_view name;",
@@ -428,6 +542,40 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         "    return contains(DESKTOP_RPC_ACTIONS, action);",
         "}",
         "",
+        "constexpr std::string_view action_owner_for(std::string_view action) {",
+        "    for (const auto item : ACTION_OWNERS) {",
+        "        if (item.name == action) {",
+        "            return item.owner;",
+        "        }",
+        "    }",
+        "    return {};",
+        "}",
+        "",
+        "constexpr bool action_has_owner(std::string_view action, std::string_view owner) {",
+        "    return action_owner_for(action) == owner;",
+        "}",
+        "",
+        "constexpr bool is_core_owned_action(std::string_view action) {",
+        "    return action_has_owner(action, \"core_rpc\");",
+        "}",
+        "",
+        "constexpr bool is_desktop_host_adapter_action(std::string_view action) {",
+        "    return action_has_owner(action, \"desktop_host_adapter\");",
+        "}",
+        "",
+        "constexpr bool is_compat_alias(std::string_view action) {",
+        "    return action_has_owner(action, \"compat_alias\");",
+        "}",
+        "",
+        "constexpr std::string_view canonical_action_for(std::string_view action) {",
+        "    for (const auto item : ACTION_OWNERS) {",
+        "        if (item.name == action) {",
+        "            return item.canonical.empty() ? item.name : item.canonical;",
+        "        }",
+        "    }",
+        "    return {};",
+        "}",
+        "",
         "constexpr bool is_core_rpc_action(std::string_view action) {",
         "    return contains(CORE_RPC_ACTIONS, action);",
         "}",
@@ -483,6 +631,8 @@ def ts_literal(value: Any) -> str:
 
 def render_ts(manifest: dict[str, Any]) -> str:
     aliases = {alias: target for alias, target in config_aliases(manifest)}
+    action_aliases = {alias: target for alias, target in compat_action_aliases(manifest)}
+    owner_map = {entry["name"]: entry["owner"] for entry in action_ownership(manifest)}
     helper = manifest["modules"]["helper"]
     tunnel = tunnel_controller(manifest)
     return "\n".join([
@@ -507,6 +657,9 @@ def render_ts(manifest: dict[str, Any]) -> str:
         "",
         f"export const CONFIG_ACTIONS = {ts_literal(config_actions(manifest))} as const",
         f"export const CONFIG_ALIASES = {ts_literal(aliases)} as const",
+        f"export const ACTION_OWNERS = {ts_literal(action_ownership(manifest))} as const",
+        f"export const ACTION_OWNER_MAP = {ts_literal(owner_map)} as const",
+        f"export const COMPAT_ACTION_ALIASES = {ts_literal(action_aliases)} as const",
         "",
         f"export const HELPER_OPS = {ts_literal(helper_ops(manifest))} as const",
         f"export const HELPER_OP_CONTRACTS = {ts_literal(helper['ops'])} as const",
@@ -524,6 +677,7 @@ def render_ts(manifest: dict[str, Any]) -> str:
         "export type CoreRpcAction = (typeof CORE_RPC_ACTIONS)[number]",
         "export type DestructiveCoreRpcAction = (typeof DESTRUCTIVE_CORE_RPC_ACTIONS)[number]",
         "export type ConfigAction = (typeof CONFIG_ACTIONS)[number]",
+        "export type ActionOwner = (typeof ACTION_OWNERS)[number]['owner']",
         "export type HelperOp = (typeof HELPER_OPS)[number]",
         "export type StandardErrorCode = (typeof STANDARD_ERROR_CODES)[number]",
         "export type TunnelPhase = (typeof TUNNEL_PHASE_CONTRACTS)[number]['name']",

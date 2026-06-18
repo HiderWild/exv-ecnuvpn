@@ -370,6 +370,50 @@ bool secret_like_diagnostics_are_not_serialized_or_summarized() {
   return ok;
 }
 
+bool public_saml_diagnostic_roundtrips_without_secrets() {
+  using ecnuvpn::vpn_engine::protocol::from_json;
+  using ecnuvpn::vpn_engine::protocol::summarize_native_auth_session;
+  using ecnuvpn::vpn_engine::protocol::to_json;
+
+  bool ok = true;
+  auto session = sample_session();
+  session.diagnostics["saml_required"] = "true";
+  session.diagnostics["http_status"] = "200";
+  session.diagnostics["content_type"] = "text/html";
+  session.diagnostics["body_bytes"] = "512";
+
+  const auto payload = to_json(session);
+  const auto summary = summarize_native_auth_session(session);
+
+  ok = expect(payload.at("diagnostics").value("saml_required",
+                                              std::string()) == "true",
+              "safe SAML diagnostic should be serialized") &&
+       ok;
+  ok = expect(summary.at("diagnostics").value("saml_required",
+                                              std::string()) == "true",
+              "safe SAML diagnostic should be summarized") &&
+       ok;
+
+  ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+  const auto result = from_json(payload, &parsed);
+  ok = expect(result.ok, "safe SAML diagnostic should parse") && ok;
+  ok = expect(parsed.diagnostics.at("saml_required") == "true",
+              "safe SAML diagnostic should roundtrip") &&
+       ok;
+
+  auto unsafe_payload = payload;
+  unsafe_payload["diagnostics"]["saml_url"] =
+      "https://idp.example.invalid/sso?SAMLRequest=SECRET";
+  const auto unsafe = from_json(unsafe_payload, &parsed);
+  ok = expect(!unsafe.ok,
+              "SAML URL diagnostic should be rejected as unsafe") &&
+       ok;
+  ok = expect(unsafe.message.find("idp.example.invalid") == std::string::npos,
+              "unsafe SAML diagnostic error must not leak URL") &&
+       ok;
+  return ok;
+}
+
 bool unsafe_or_malformed_diagnostics_are_rejected_on_parse() {
   using ecnuvpn::vpn_engine::protocol::from_json;
   using ecnuvpn::vpn_engine::protocol::to_json;
@@ -494,6 +538,7 @@ int main() {
   ok = malformed_server_is_rejected() && ok;
   ok = summary_redacts_secret_like_free_form_fields() && ok;
   ok = secret_like_diagnostics_are_not_serialized_or_summarized() && ok;
+  ok = public_saml_diagnostic_roundtrips_without_secrets() && ok;
   ok = unsafe_or_malformed_diagnostics_are_rejected_on_parse() && ok;
   ok = malformed_required_fields_are_rejected() && ok;
   ok = server_port_boundaries_are_rejected() && ok;

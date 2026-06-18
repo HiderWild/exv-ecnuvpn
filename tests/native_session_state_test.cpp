@@ -48,6 +48,8 @@ int main() {
   meta.mtu = 1290;
   meta.routes = {"59.78.176.0/20"};
   meta.server_bypass_ips = {"1.2.3.4"};
+  meta.dtls_state = "attempted_and_fell_back_to_tls";
+  meta.dtls_fallback_reason = "native DTLS backend unavailable; using CSTP/TLS";
 
   state.tunnel_configured(meta);
   ok = expect(state.phase == SessionPhase::configuring_network,
@@ -83,6 +85,15 @@ int main() {
        ok;
   ok = expect(j.value("last_event_message", std::string()) == "连接成功",
               "session_state_to_json should preserve UTF-8 event text") &&
+       ok;
+  ok = expect(j["tunnel_metadata"].value("dtls_state", std::string()) ==
+                  "attempted_and_fell_back_to_tls",
+              "session_state_to_json should expose native DTLS state") &&
+       ok;
+  ok = expect(j["tunnel_metadata"]
+                  .value("dtls_fallback_reason", std::string())
+                  .find("CSTP/TLS") != std::string::npos,
+              "session_state_to_json should expose DTLS fallback reason") &&
        ok;
   ok = expect(!j.contains("pid"),
               "session_state JSON must not require an OpenConnect PID") &&

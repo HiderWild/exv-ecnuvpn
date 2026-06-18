@@ -55,6 +55,8 @@ const hostApi = {
         return wrap(window.ecnuVpn!.logs.list()) as ApiResponse<T>
       case desktopApiPaths.maintenanceCore:
         return wrap(window.ecnuVpn!.maintenance.inspectCore()) as ApiResponse<T>
+      case desktopApiPaths.authInteraction:
+        return wrap(window.ecnuVpn!.vpn.authInteraction()) as ApiResponse<T>
       default:
         unsupported(path)
     }
@@ -74,6 +76,12 @@ const hostApi = {
         return wrap(
           window.ecnuVpn!.vpn.disconnectElevated(plainPayload(body)?.backend),
         ) as ApiResponse<T>
+      case desktopApiPaths.authInteractionResponse: {
+        const payload = plainPayload(body ?? {})
+        return wrap(
+          window.ecnuVpn!.vpn.respondAuthInteraction(payload.id ?? '', payload.value ?? ''),
+        ) as ApiResponse<T>
+      }
       case desktopApiPaths.routes:
         return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
       case desktopApiPaths.routesReset:

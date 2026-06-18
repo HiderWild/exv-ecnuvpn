@@ -183,14 +183,17 @@ int main() {
     ctrl.is_ipc_available = [ipc_available](const std::string &) -> bool {
       return ipc_available;
     };
-    fix.actions = std::make_shared<exv::core_api::MaintenanceActions>(
+    exv::core_api::AppRpcDispatcher dispatcher;
+    auto actions = std::make_shared<exv::core_api::MaintenanceActions>(
         fix.state_dir, ctrl);
-    fix.actions->register_handlers(fix.dispatcher);
+    actions->register_handlers(dispatcher);
 
     fix.write_registry("connected", true, true);
 
-    auto resp = fix.dispatch("maintenance.killStaleCore",
-                             R"({"confirm":true})");
+    exv::core_api::RpcRequest req;
+    req.action = "maintenance.killStaleCore";
+    req.payload_json = R"({"confirm":true})";
+    auto resp = dispatcher.dispatch(req);
     ok = expect(resp.success,
                 "5.3: confirmed killStaleCore with IPC should succeed") &&
          ok;

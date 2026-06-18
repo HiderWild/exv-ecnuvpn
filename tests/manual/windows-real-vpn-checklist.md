@@ -10,8 +10,21 @@
 Step-by-step manual checklist for verifying ECNU-VPN on real Windows hardware
 with a live VPN gateway. Each step has expected output and a sign-off field.
 
-**Do not commit real credentials, tokens, or cookies.** All placeholder values
-use `*.example.invalid`.
+**Do not commit real credentials, tokens, cookies, raw logs, packet captures,
+screenshots, or packet payloads.** All placeholder values use
+`*.example.invalid`.
+
+Before committing this checklist or any related evidence, confirm:
+
+- [ ] Password values and real account or gateway identifiers are redacted.
+- [ ] `webvpn=` values are redacted.
+- [ ] `<session-token>` values are redacted.
+- [ ] Opaque values are redacted.
+- [ ] SAML values are redacted.
+- [ ] Challenge responses are redacted.
+- [ ] Cookies and cookie headers are redacted.
+- [ ] Packet payloads are redacted.
+- [ ] Command output, screenshots, logs, and captures are reduced to redacted summaries.
 
 ---
 
@@ -73,6 +86,27 @@ ipconfig /all > "before-test-dns.txt"
 **Expected:** File created.
 
 - [ ] Baseline DNS snapshot saved
+
+**1e. Native-only preconditions:**
+
+```powershell
+Get-Process openconnect -ErrorAction SilentlyContinue
+Get-Process | Where-Object { $_.ProcessName -match 'exv|vpn' }
+.\exv.exe desktop-rpc runtime.status '{}'
+```
+
+**Expected:** No retired supervisor process. Runtime status reports `engine=native` and `source=native`.
+
+- [ ] No OpenConnect process running
+- [ ] No retired supervisor process running
+- [ ] Runtime status is native-only
+
+**1f. Native-only phase gates to record during this run:**
+
+- [ ] P0: XML auth + CSTP CONNECT reaches success or structured auth/CSD/SAML error
+- [ ] P1: DNS, routes, and liveness work on Windows
+- [ ] P2: challenge/group/CSD/DTLS fallback/reconnect behavior verified or explicitly marked not exercised
+- [ ] P3: native-only process/package evidence captured
 
 ---
 
@@ -443,6 +477,10 @@ diff before-test-dns.txt final-dns.txt
 ---
 
 ## Sign-Off
+
+Only enter redacted summaries in the Notes column. Do not paste raw logs,
+packet captures, screenshots, real gateway hostnames, usernames, tokens,
+cookies, challenge responses, or packet payloads.
 
 | Step | Description | Pass/Fail | Notes |
 |------|-------------|-----------|-------|

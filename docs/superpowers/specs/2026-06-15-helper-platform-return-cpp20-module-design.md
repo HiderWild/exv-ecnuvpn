@@ -14,7 +14,7 @@ details needed by core/helper:
 - helper endpoint configuration and launch metadata
 - service install/uninstall/status integration
 - service and oneshot daemon entrypoints
-- process, parent-pid, owner, and supervisor lifecycle checks
+- process, parent-pid, owner, and helper lifecycle checks
 - platform IPC client used to reach the privileged helper
 - adapter from core `PlatformNetworkOps` to helper network messages
 

@@ -285,7 +285,7 @@ bool platform_contains_forbidden_boundary_include(
     const std::filesystem::path &source_dir) {
   const std::vector<std::string> forbidden_exact = {
       "app_api.hpp", "vpn.hpp", "tunnel.hpp", "logger.hpp",
-      "openconnect_log.hpp", "virtual_network.hpp"};
+      "virtual_network.hpp"};
   return scan_tree(platform_root,
                    [&](const std::filesystem::directory_entry &entry) {
     if (!is_regular_file(entry) || !is_source_file(entry.path())) {
@@ -609,11 +609,28 @@ int main() {
            exv::contracts::generated::is_desktop_rpc_action("config.saveSettings"),
            "desktop action config.saveSettings must be generated") &&
        ok;
+  ok = expect(
+           exv::contracts::generated::is_desktop_rpc_action(
+               "vpn.authInteraction.get"),
+           "desktop action vpn.authInteraction.get must be generated") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_desktop_rpc_action(
+               "vpn.authInteraction.respond"),
+           "desktop action vpn.authInteraction.respond must be generated") &&
+       ok;
   ok = expect(exv::contracts::generated::is_core_rpc_action("core.hello"),
               "core.hello must be generated as a core RPC action") &&
        ok;
   ok = expect(exv::contracts::generated::is_core_rpc_action("config.export"),
               "config.export must be generated as a core RPC action") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_core_rpc_action("config.getSettings"),
+           "config.getSettings must be generated as a core RPC action") &&
+       ok;
+  ok = expect(exv::contracts::generated::is_core_rpc_action("logs.clear"),
+              "logs.clear must be generated as a core RPC action") &&
        ok;
   ok = expect(
            exv::contracts::generated::is_core_rpc_action(
@@ -646,9 +663,44 @@ int main() {
   ok = expect(exv::contracts::generated::is_config_action("config.getSettings"),
               "config.getSettings must be generated as a config action") &&
        ok;
+  ok = expect(!exv::contracts::generated::is_config_action("config.getKey"),
+              "config.getKey must not be a second config action owner") &&
+       ok;
   ok = expect(exv::contracts::generated::is_config_alias("config.get"),
               "legacy config.get must be declared as an alias") &&
        ok;
+  ok = expect(exv::contracts::generated::is_core_owned_action("key.status"),
+              "key.status must be core owned") &&
+       ok;
+  ok = expect(exv::contracts::generated::is_compat_alias("config.getKey"),
+              "config.getKey must be an alias, not a second owner") &&
+       ok;
+  ok = expect(exv::contracts::generated::canonical_action_for("config.getKey") ==
+                  std::string_view("key.status"),
+              "config.getKey must route to key.status") &&
+       ok;
+  ok = expect(exv::contracts::generated::is_core_owned_action("logs.clear"),
+              "logs.clear must have a canonical core owner") &&
+       ok;
+  for (std::size_t i = 0;
+       i < exv::contracts::generated::ACTION_OWNERS.size(); ++i) {
+    const auto &left = exv::contracts::generated::ACTION_OWNERS[i];
+    for (std::size_t j = i + 1;
+         j < exv::contracts::generated::ACTION_OWNERS.size(); ++j) {
+      const auto &right = exv::contracts::generated::ACTION_OWNERS[j];
+      ok = expect(left.name != right.name,
+                  "generated action ownership must contain each action once") &&
+           ok;
+    }
+    if (left.owner == std::string_view("compat_alias")) {
+      ok = expect(!left.canonical.empty(),
+                  "compat aliases must declare a canonical target") &&
+           ok;
+      ok = expect(!exv::contracts::generated::is_compat_alias(left.canonical),
+                  "compat aliases must not point to another compat alias") &&
+           ok;
+    }
+  }
 
   ok = expect(exv::contracts::generated::is_helper_op("StartSession"),
               "helper StartSession op must be generated") &&

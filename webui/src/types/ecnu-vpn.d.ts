@@ -18,6 +18,7 @@ import type {
   RouteEntry,
   ServiceStatus,
   ServiceProgressEntry,
+  AuthInteractionPollResponse,
   VpnStatus,
 } from '../stores/vpn'
 
@@ -33,11 +34,27 @@ export type VpnErrorType =
   | 'runtime_missing'
   | 'config_invalid'
   | 'service_missing'
+  | 'auth_protocol_mismatch'
   | 'auth_failed'
+  | 'auth_rejected'
+  | 'auth_challenge_required'
+  | 'auth_group_required'
+  | 'auth_expired'
+  | 'csd_required_unsupported'
   | 'tls_verify_failed'
   | 'wintun_missing'
   | 'utun_permission_denied'
+  | 'dtls_unavailable'
   | 'unsupported_dtls'
+  | 'session_timeout'
+  | 'idle_timeout'
+  | 'unsupported_extra_args'
+  | 'permission_denied'
+  | 'helper_unavailable'
+  | 'network_unreachable'
+  | 'user_cancelled'
+  | 'invalid_request'
+  | 'connection_failed'
   | 'native_failure'
   | 'parse_failure'
   | 'unknown_action'
@@ -62,6 +79,8 @@ export interface EcnuVpnApi {
     disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
     connectElevated(password?: string): Promise<VpnStatus | VpnError>
     disconnectElevated(backend?: unknown): Promise<VpnStatus | VpnError>
+    authInteraction(): Promise<AuthInteractionPollResponse>
+    respondAuthInteraction(id: string, value: string): Promise<{ ok: true }>
   }
   config: {
     getAuth(): Promise<AuthConfig>

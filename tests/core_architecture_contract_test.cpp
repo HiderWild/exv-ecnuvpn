@@ -54,6 +54,20 @@ std::size_t count_occurrences(const std::string &text,
   return count;
 }
 
+std::string cmake_section(const std::string &cmake,
+                          const std::string &section_name) {
+  const std::string marker = "set(" + section_name;
+  const auto start = cmake.find(marker);
+  if (start == std::string::npos) {
+    return {};
+  }
+  const auto end = cmake.find("\n)", start);
+  if (end == std::string::npos) {
+    return cmake.substr(start);
+  }
+  return cmake.substr(start, end - start);
+}
+
 bool expect_tree_does_not_contain(const std::filesystem::path &root,
                                   const std::string &needle,
                                   const std::string &message) {
@@ -187,6 +201,20 @@ int main() {
     ok &= expect(cmake.find("src/core/config/config_original.cpp") ==
                      std::string::npos,
                  "CMakeLists.txt must not compile config_original.cpp");
+    const auto cli_sources = cmake_section(cmake, "EXV_CLI_FRONTEND_SOURCES");
+    ok &= expect(!cli_sources.empty(),
+                 "CMakeLists.txt must declare EXV_CLI_FRONTEND_SOURCES");
+    ok &= expect(cmake.find("target_link_libraries(exv-cli PRIVATE exv-core)") ==
+                     std::string::npos,
+                 "exv-cli must not link the full exv-core implementation target");
+    ok &= expect(cli_sources.find("src/core/app_api/") == std::string::npos,
+                 "exv-cli sources must not include desktop App API implementations");
+    ok &= expect(cli_sources.find("src/app/ui_shell/") == std::string::npos,
+                 "exv-cli sources must not include UI shell implementations");
+    ok &= expect(cli_sources.find("src/vpn_engine/") == std::string::npos,
+                 "exv-cli sources must not include native engine implementations");
+    ok &= expect(cli_sources.find("src/core/rpc/") == std::string::npos,
+                 "exv-cli sources must not link core RPC handler implementations");
   }
 
   ok &= expect_tree_does_not_contain(

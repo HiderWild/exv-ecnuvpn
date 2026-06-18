@@ -33,6 +33,10 @@ int main() {
       read_file(source_dir + "/scripts/build-windows.ps1");
   const std::string macos_build_script =
       read_file(source_dir + "/scripts/build-macos.sh");
+  const std::string windows_merge_prep_script =
+      read_file(source_dir + "/scripts/validate-merge-prep-windows.ps1");
+  const std::string macos_merge_prep_script =
+      read_file(source_dir + "/scripts/validate-merge-prep-macos.sh");
   const std::string webview2_host =
       read_file(source_dir +
                 "/src/platform/win32/ui_shell/webview2_host_win32.cpp");
@@ -150,6 +154,18 @@ int main() {
                       "vpn_runtime_test");
   expect_not_contains(macos_build_script, "scripts/build-macos.sh",
                       "vpn_runtime_test");
+  expect_not_contains(windows_merge_prep_script,
+                      "scripts/validate-merge-prep-windows.ps1",
+                      "vpn_runtime_test");
+  expect_not_contains(macos_merge_prep_script,
+                      "scripts/validate-merge-prep-macos.sh",
+                      "vpn_runtime_test");
+  expect_not_contains(windows_merge_prep_script,
+                      "scripts/validate-merge-prep-windows.ps1",
+                      "tunnel_script_contract_test");
+  expect_not_contains(macos_merge_prep_script,
+                      "scripts/validate-merge-prep-macos.sh",
+                      "tunnel_script_contract_test");
 
   return failures == 0 ? 0 : 1;
 }

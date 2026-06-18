@@ -1,5 +1,7 @@
 import {
+  ACTION_OWNER_MAP,
   CONFIG_ALIASES,
+  COMPAT_ACTION_ALIASES,
   CORE_RPC_ACTIONS,
   DESTRUCTIVE_CORE_RPC_ACTIONS,
   DESKTOP_RPC_ACTIONS,
@@ -30,6 +32,8 @@ export const desktopApiPaths = {
   connectElevated: '/connect/elevated',
   disconnect: '/disconnect',
   disconnectElevated: '/disconnect/elevated',
+  authInteraction: '/vpn/auth-interaction',
+  authInteractionResponse: '/vpn/auth-interaction/response',
   configAuth: '/config/auth',
   configSettings: '/config/settings',
   configKey: '/config/key',
@@ -65,6 +69,8 @@ export const desktopRpcErrorCodes = DESKTOP_RPC_ERROR_CODE_MAP
 export const coreRpcActions = CORE_RPC_ACTIONS
 export const destructiveCoreRpcActions = DESTRUCTIVE_CORE_RPC_ACTIONS
 export const configAliases = CONFIG_ALIASES
+export const actionOwnerMap = ACTION_OWNER_MAP
+export const compatActionAliases = COMPAT_ACTION_ALIASES
 export const standardErrorCodes = STANDARD_ERROR_CODES
 export const ipcProtocolMajor = IPC_PROTOCOL_MAJOR
 

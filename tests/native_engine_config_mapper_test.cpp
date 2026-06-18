@@ -64,6 +64,18 @@ int main() {
 
   {
     ecnuvpn::Config cfg = app_config();
+    cfg.extra_args = {"--csd-wrapper", "C:\\secret\\wrapper.cmd"};
+    auto result = exv::core::validate_native_app_config(cfg);
+    ok = expect(!result.ok && result.code == "unsupported_extra_args",
+                "reserved CSD wrapper arg should be rejected before engine start") &&
+         ok;
+    ok = expect(result.message.find("--csd-wrapper") != std::string::npos,
+                "unsupported extra_args message should identify rejected arg") &&
+         ok;
+  }
+
+  {
+    ecnuvpn::Config cfg = app_config();
     ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
     auto result =
         exv::core::make_native_engine_config(cfg, kPassword, &engine_cfg);

@@ -47,18 +47,6 @@ allowlist:
     reason: "System status use case still conditionally reports Windows-only driver/runtime metadata."
     removal_phase: "Phase 9 -- move OS-specific status enrichment into platform status providers"
 
-  - file: src/core/vpn/openconnect_tunnel_script.cpp
-    rule: platform_ifdef_in_core
-    owner: core-team
-    reason: "Legacy OpenConnect tunnel script generation still contains Windows bypass handling until legacy runtime support is retired."
-    removal_phase: "Phase 9 -- retire or platform-isolate legacy OpenConnect script generation"
-
-  - file: src/core/vpn/vpn_runtime.cpp
-    rule: platform_ifdef_in_core
-    owner: core-team
-    reason: "Legacy VPN runtime lookup still contains macOS-specific Homebrew path handling."
-    removal_phase: "Phase 9 -- move legacy runtime discovery into platform runtime discovery"
-
   - file: src/platform/win32/native_tls_stream.hpp
     rule: protocol_include_in_platform
     owner: platform-team
@@ -82,3 +70,33 @@ allowlist:
     owner: platform-team
     reason: "Default Darwin engine dependency wiring constructs ProductionTransport with platform packet and TLS implementations."
     removal_phase: "Phase 9 -- introduce a platform-neutral production transport factory seam"
+
+  - file: src/core/vpn/vpn_runtime.cpp
+    rule: platform_ifdef_in_core
+    owner: core-team
+    reason: "Legacy runtime status snapshot still shells out to platform-specific interface probes until runtime status is fully owned by platform status providers."
+    removal_phase: "Phase 9 -- move interface probing into platform status providers"
+
+  - file: tests/native_packaging_policy_test.cpp
+    rule: legacy_openconnect_token
+    owner: native-engine-team
+    reason: "Policy scanner test intentionally contains denied legacy runtime token fixtures to prove production package scans catch them."
+    removal_phase: "After the policy scanner reads denied token fixtures from external test data instead of inline source text"
+
+  - file: tests/native_only_cutover_contract_test.cpp
+    rule: legacy_openconnect_token
+    owner: native-engine-team
+    reason: "Native-only contract test owns the denied token list and is the only active test source allowed to spell those removed identifiers."
+    removal_phase: "After denied native-only tokens move into external test fixture data"
+
+  - file: scripts/architecture-guardrails.ps1
+    rule: legacy_openconnect_token
+    owner: architecture-team
+    reason: "PowerShell guardrail script owns the denied native-only token regex used to block removed identifiers elsewhere."
+    removal_phase: "After guardrail rules move into external data files"
+
+  - file: scripts/architecture-guardrails.sh
+    rule: legacy_openconnect_token
+    owner: architecture-team
+    reason: "POSIX guardrail script owns the denied native-only token regex used to block removed identifiers elsewhere."
+    removal_phase: "After guardrail rules move into external data files"

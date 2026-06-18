@@ -112,6 +112,61 @@ int main() {
                     "recommended_action should not be empty") && ok;
     }
 
+    // --- native engine errors preserve stable public codes and redact secrets ---
+    {
+        ErrorInfo err = CoreErrorMapper::from_native_error(
+            "saml_required_unsupported",
+            "SSO redirect https://idp.example.invalid/login?SAMLRequest=SECRET_TOKEN");
+        ok = expect(err.domain == "auth",
+                    "SAML native error domain should be auth") && ok;
+        ok = expect(err.code == "saml_required_unsupported",
+                    "SAML native error code should be preserved") && ok;
+        ok = expect(err.message.find("idp.example.invalid") == std::string::npos,
+                    "SAML native error should redact URL host") && ok;
+        ok = expect(err.message.find("SECRET_TOKEN") == std::string::npos,
+                    "SAML native error should redact SAML request") && ok;
+        ok = expect(!err.recoverable,
+                    "SAML unsupported browser flow should not be recoverable") && ok;
+        ok = expect(!err.recommended_action.empty(),
+                    "SAML native error should include remediation") && ok;
+    }
+
+    {
+        ErrorInfo err = CoreErrorMapper::from_native_error(
+            "dns_resolution_failed", "failed to resolve vpn.example.invalid");
+        ok = expect(err.domain == "transport",
+                    "DNS native error domain should be transport") && ok;
+        ok = expect(err.code == "network_unreachable",
+                    "DNS native error should map to public network code") && ok;
+        ok = expect(err.recoverable,
+                    "DNS native error should be recoverable") && ok;
+    }
+
+    {
+        ErrorInfo err = CoreErrorMapper::from_native_error(
+            "dtls_fell_back_to_tls",
+            "native DTLS backend unavailable; using CSTP/TLS");
+        ok = expect(err.domain == "transport",
+                    "DTLS fallback domain should be transport") && ok;
+        ok = expect(err.code == "dtls_fell_back_to_tls",
+                    "DTLS fallback code should be stable") && ok;
+        ok = expect(err.recoverable,
+                    "DTLS fallback should be informational/recoverable") && ok;
+    }
+
+    {
+        ErrorInfo err = CoreErrorMapper::from_native_error(
+            "protocol_error", "bad XML token SECRET_COOKIE webvpn=SECRET");
+        ok = expect(err.domain == "protocol",
+                    "protocol parser native error domain should be protocol") && ok;
+        ok = expect(err.code == "protocol_error",
+                    "protocol parser native error code should be stable") && ok;
+        ok = expect(err.message.find("SECRET_COOKIE") == std::string::npos,
+                    "protocol parser error should redact secret token") && ok;
+        ok = expect(err.message.find("webvpn=SECRET") == std::string::npos,
+                    "protocol parser error should redact cookie text") && ok;
+    }
+
     if (ok) {
         std::cout << "core_error_mapper_test: all assertions passed\n";
     } else {

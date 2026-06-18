@@ -211,28 +211,37 @@ else
   skip "desktop-rpc status" "exv binary not found"
 fi
 
-# ---------- 6. Verify openconnect binary ----------
+# ---------- 6. Native-only runtime artifact policy ----------
 
-section "6. OpenConnect binary"
+section "6. Native-only runtime artifact policy"
 
-OPENCONNECT_PATHS=(
-  "$BUILD_DIR/openconnect"
-  "/usr/local/bin/openconnect"
-  "$REPO_ROOT/runtime/darwin-x64/openconnect"
+DENIED_RUNTIME_PATTERNS=(
+  '*connect'
+  '*connect.exe'
+  'lib*connect*.dylib'
+  '*vpn*-script'
 )
 
-OPENCONNECT_FOUND=""
-for oc_path in "${OPENCONNECT_PATHS[@]}"; do
-  if [[ -x "$oc_path" ]]; then
-    OPENCONNECT_FOUND="$oc_path"
-    break
-  fi
+DENIED_RUNTIME_FOUND=""
+for search_root in "$BUILD_DIR" "$REPO_ROOT/runtime/darwin-x64" "$PACKAGE_ROOT"; do
+  [[ -e "$search_root" ]] || continue
+  for pattern in "${DENIED_RUNTIME_PATTERNS[@]}"; do
+    if [[ "$search_root" == "$BUILD_DIR" || "$search_root" == "$REPO_ROOT/runtime/darwin-x64" ]]; then
+      found_path=$(find "$search_root" -maxdepth 1 -name "$pattern" -print -quit)
+    else
+      found_path=$(find "$search_root" -name "$pattern" -print -quit)
+    fi
+    if [[ -n "$found_path" ]]; then
+      DENIED_RUNTIME_FOUND="$found_path"
+      break 2
+    fi
+  done
 done
 
-if [[ -n "$OPENCONNECT_FOUND" ]]; then
-  pass "openconnect binary found at $OPENCONNECT_FOUND"
+if [[ -n "$DENIED_RUNTIME_FOUND" ]]; then
+  fail "native-only package must not include legacy runtime artifacts" "$DENIED_RUNTIME_FOUND"
 else
-  skip "openconnect binary" "Not found (expected if native engine is default; legacy path only)"
+  pass "native-only package contains no legacy runtime artifacts"
 fi
 
 # ---------- 7. Verify helper binary present ----------

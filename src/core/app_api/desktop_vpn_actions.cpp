@@ -39,6 +39,9 @@ config::ConfigManager make_config_manager() {
 
 nlohmann::json preflight_connect(const Config &cfg,
                                  const std::string &password) {
+  if (cfg.vpn_engine != "native") {
+    return error("VPN engine is native-only.", "legacy_engine_removed");
+  }
   if (cfg.server.empty()) {
     return error("VPN server is not configured.");
   }
@@ -49,11 +52,9 @@ nlohmann::json preflight_connect(const Config &cfg,
     return error("VPN password is not configured.");
   }
 
-  if (cfg.vpn_engine == "native") {
-    auto native_validation = exv::core::validate_native_app_config(cfg);
-    if (!native_validation.ok) {
-      return error(native_validation.message, native_validation.code);
-    }
+  auto native_validation = exv::core::validate_native_app_config(cfg);
+  if (!native_validation.ok) {
+    return error(native_validation.message, native_validation.code);
   }
 
   platform::BackendResolveOptions options;
@@ -85,6 +86,15 @@ nlohmann::json preflight_connect(const Config &cfg,
   result["ok"] = true;
   result["backend"] = backend;
   return result;
+}
+
+nlohmann::json auth_interaction_json(
+    const exv::core::TunnelController::PendingAuthInteraction &pending) {
+  return nlohmann::json{{"id", pending.id},
+                        {"kind", pending.kind},
+                        {"label", pending.label},
+                        {"input_type", pending.input_type},
+                        {"options", pending.options}};
 }
 
 } // namespace
@@ -277,6 +287,43 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
             true, "phase=" + std::to_string(static_cast<int>(snap.phase)));
         attempt_cleanup.dismiss();
         return status;
+      });
+
+  adapter.register_legacy_handler(
+      "vpn.authInteraction.get",
+      [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        auto controller = get_tunnel_controller_if_exists();
+        if (!controller) {
+          return nlohmann::json{{"ok", true}, {"pending", false}};
+        }
+        auto pending = controller->pending_auth_interaction();
+        if (!pending) {
+          return nlohmann::json{{"ok", true}, {"pending", false}};
+        }
+        return nlohmann::json{{"ok", true},
+                              {"pending", true},
+                              {"interaction", auth_interaction_json(*pending)}};
+      });
+
+  adapter.register_legacy_handler(
+      "vpn.authInteraction.respond",
+      [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        auto controller = get_tunnel_controller_if_exists();
+        if (!controller) {
+          return error("No active VPN controller.", "invalid_request");
+        }
+        const std::string id = payload.value("id", std::string());
+        const std::string value = payload.value("value", std::string());
+        if (id.empty()) {
+          return error("Missing auth interaction id.", "invalid_request");
+        }
+        if (!controller->provide_auth_interaction_response(id, value)) {
+          return error("Auth interaction is no longer pending.",
+                       "invalid_request");
+        }
+        return nlohmann::json{{"ok", true}};
       });
 
   adapter.register_legacy_handler(

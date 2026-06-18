@@ -70,15 +70,6 @@ void ConfigActions::register_handlers(AppRpcDispatcher& dispatcher) {
   dispatcher.register_handler("key.reset",
       [this](const RpcRequest& req) { return reset_key(req); });
 
-  dispatcher.register_handler("routes.list",
-      [this](const RpcRequest& req) { return list_routes(req); });
-  dispatcher.register_handler("routes.add",
-      [this](const RpcRequest& req) { return add_route(req); });
-  dispatcher.register_handler("routes.remove",
-      [this](const RpcRequest& req) { return remove_route(req); });
-  dispatcher.register_handler("routes.reset",
-      [this](const RpcRequest& req) { return reset_routes(req); });
-
   dispatcher.register_handler("config.import",
       [this](const RpcRequest& req) { return import_config(req); });
   dispatcher.register_handler("config.export",

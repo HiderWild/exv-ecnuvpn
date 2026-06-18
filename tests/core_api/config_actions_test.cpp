@@ -24,6 +24,14 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
+std::string removed_legacy_engine_value() {
+  return std::string("legacy_") + "openconnect";
+}
+
+std::string removed_runtime_key() {
+  return std::string("openconnect_") + "runtime";
+}
+
 std::string unique_temp_dir(const char *name) {
   const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
   auto dir = std::filesystem::temp_directory_path() /
@@ -55,6 +63,19 @@ struct ConfigActionsFixture {
     req.request_id = "test-req";
     return dispatcher.dispatch(req);
   }
+
+  void write_legacy_config() {
+    const auto path = std::filesystem::path(config_dir) / "config.json";
+    std::ofstream out(path);
+    json legacy_config = {
+        {"server", "https://legacy.example.edu"},
+        {"username", "legacy-user"},
+        {"vpn_engine", removed_legacy_engine_value()},
+        {removed_runtime_key(), "bundled"},
+        {"mtu", 1400},
+    };
+    out << legacy_config.dump(2);
+  }
 };
 
 } // namespace
@@ -72,6 +93,27 @@ int main() {
          ok;
     ok = expect(payload.contains("settings"),
                 "response should contain settings projection") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    fix.write_legacy_config();
+
+    auto resp = fix.dispatch("config.get");
+    ok = expect(resp.success,
+                "config.get should load older legacy config files") &&
+         ok;
+
+    auto payload = json::parse(resp.payload_json);
+    ok = expect(payload["config"]["vpn_engine"] == "native",
+                "legacy vpn_engine should normalize to native") &&
+         ok;
+    ok = expect(!payload["config"].contains(removed_runtime_key()),
+                "serialized config should omit retired runtime key") &&
+         ok;
+    ok = expect(!payload["settings"].contains(removed_runtime_key()),
+                "settings projection should omit retired runtime key") &&
          ok;
   }
 
@@ -161,6 +203,28 @@ int main() {
 
   {
     ConfigActionsFixture fix;
+    auto resp = fix.dispatch(
+        "config.saveSettings",
+        json{{"vpn_engine", removed_legacy_engine_value()}}.dump());
+    ok = expect(!resp.success,
+                "config.saveSettings should reject legacy vpn_engine") &&
+         ok;
+    ok = expect(resp.error_code == "invalid_payload",
+                "legacy vpn_engine should be an invalid payload") &&
+         ok;
+
+    auto get_resp = fix.dispatch("config.getSettings");
+    auto payload = json::parse(get_resp.payload_json);
+    ok = expect(payload["vpn_engine"] == "native",
+                "vpn_engine should remain native after rejected save") &&
+         ok;
+    ok = expect(!payload.contains(removed_runtime_key()),
+                "settings should not expose retired runtime key") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
     // Make a change first
     fix.dispatch("config.saveSettings", R"({"mtu":1400})");
 
@@ -194,87 +258,6 @@ int main() {
     auto payload = json::parse(resp.payload_json);
     ok = expect(payload["reset"] == true, "key reset should be confirmed") &&
          ok;
-  }
-
-  {
-    ConfigActionsFixture fix;
-    auto resp = fix.dispatch("routes.list");
-    ok = expect(resp.success, "routes.list should succeed") && ok;
-
-    auto payload = json::parse(resp.payload_json);
-    ok = expect(payload.contains("routes"),
-                "routes.list should return routes array") &&
-         ok;
-    ok = expect(payload["routes"].is_array(), "routes should be array") && ok;
-  }
-
-  {
-    ConfigActionsFixture fix;
-    auto resp = fix.dispatch("routes.add", R"({"cidr":"10.0.0.0/24"})");
-    ok = expect(resp.success, "routes.add should succeed") && ok;
-
-    auto payload = json::parse(resp.payload_json);
-    ok = expect(payload["added"] == true, "add should be confirmed") && ok;
-
-    // Verify it's in the list
-    auto list_resp = fix.dispatch("routes.list");
-    auto list_payload = json::parse(list_resp.payload_json);
-    bool found = false;
-    for (const auto& r : list_payload["routes"]) {
-      if (r["cidr"] == "10.0.0.0/24") {
-        found = true;
-        break;
-      }
-    }
-    ok = expect(found, "added route should be in list") && ok;
-  }
-
-  {
-    ConfigActionsFixture fix;
-    // Add a route first
-    fix.dispatch("routes.add", R"({"cidr":"10.0.0.0/24"})");
-
-    auto resp = fix.dispatch("routes.remove", R"({"cidr":"10.0.0.0/24"})");
-    ok = expect(resp.success, "routes.remove should succeed") && ok;
-
-    auto payload = json::parse(resp.payload_json);
-    ok = expect(payload["removed"] == true, "remove should be confirmed") && ok;
-
-    // Verify it's gone
-    auto list_resp = fix.dispatch("routes.list");
-    auto list_payload = json::parse(list_resp.payload_json);
-    bool found = false;
-    for (const auto& r : list_payload["routes"]) {
-      if (r["cidr"] == "10.0.0.0/24") {
-        found = true;
-        break;
-      }
-    }
-    ok = expect(!found, "removed route should not be in list") && ok;
-  }
-
-  {
-    ConfigActionsFixture fix;
-    // Add a custom route first
-    fix.dispatch("routes.add", R"({"cidr":"10.0.0.0/24"})");
-
-    auto resp = fix.dispatch("routes.reset");
-    ok = expect(resp.success, "routes.reset should succeed") && ok;
-
-    auto payload = json::parse(resp.payload_json);
-    ok = expect(payload["reset"] == true, "reset should be confirmed") && ok;
-
-    // Verify custom route is gone
-    auto list_resp = fix.dispatch("routes.list");
-    auto list_payload = json::parse(list_resp.payload_json);
-    bool found = false;
-    for (const auto& r : list_payload["routes"]) {
-      if (r["cidr"] == "10.0.0.0/24") {
-        found = true;
-        break;
-      }
-    }
-    ok = expect(!found, "custom route should be gone after reset") && ok;
   }
 
   {

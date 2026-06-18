@@ -480,6 +480,12 @@ HelperResponse HelperHandler::handle_start_session(const HelperRequest& req) {
     StartSessionRequest start_req;
     try {
         auto j = nlohmann::json::parse(req.payload_json);
+        if (j.contains("native_start_mode") || j.contains("supervisor_payload") ||
+            j.contains("supervisor_start") || j.contains("vpn_supervisor")) {
+            return make_error_response(
+                req.op, "supervisor_removed",
+                "VPN supervisor startup has been removed; use TunnelController.");
+        }
         start_req = start_session_request_from_json(j);
     } catch (const std::exception& e) {
         HelperResponse resp;

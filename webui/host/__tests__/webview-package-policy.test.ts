@@ -220,7 +220,7 @@ describe('native WebView package policy', () => {
 
     assert.equal(existsSync(join(repoRoot, 'docs', 'windows-electron-helper-recovery.md')), false)
     assert.equal(
-      existsSync(join(repoRoot, 'docs', 'superpowers', 'archive', 'windows-electron-helper-recovery.md')),
+      existsSync(join(repoRoot, 'docs', 'archive', '2026-06', 'windows-electron-helper-recovery.md')),
       true,
     )
   })

@@ -132,12 +132,12 @@ int vpn::status();
 ```
 
 `start()` 流程：
-1. openconnect 检查（未安装则提示 Homebrew 安装）
-2. 配置验证
-3. 密码解密
-4. 优先走 helper（`helper::is_available()`）
-5. root 直连或 helper worker → `start_with_password()`
-6. 生成 tunnel.sh → fork openconnect → 可选 supervisor → 轮询 route-ready
+1. 配置验证，并强制 `vpn_engine=native`
+2. 密码解密或读取桌面传入的本次连接密码
+3. 初始化 Core / `TunnelController`
+4. `CoreSessionRunner` 启动 `NativeVpnEngineSession`
+5. helper 只处理虚拟网卡、路由和 DNS 等特权网络操作
+6. native AnyConnect/CSTP 会话进入 packet forwarding 和状态上报
 
 ---
 
@@ -262,7 +262,7 @@ void logger::show_logs(int lines = 50);
 - 文件 I/O：`src/platform/common/file_system.hpp`
 - 路径、配置目录、运行时 owner：`src/platform/common/runtime_paths.hpp`
 - 命令执行、shell quote、root 检查：`src/platform/common/process_utils.hpp`
-- bundled runtime / OpenConnect / Wintun 发现：`src/platform/common/runtime_discovery.hpp`
+- bundled native runtime / Wintun 发现：`src/platform/common/runtime_discovery.hpp`
 - 网卡流量统计：`src/platform/common/interface_stats.hpp`
 - 终端彩色输出：`src/cli/console.hpp`
 
@@ -276,13 +276,12 @@ void logger::show_logs(int lines = 50);
 exv
     → config::load()
     → vpn::start(cfg)
-        → helper::is_available() ?
-            helper::start_via_helper(cfg, password, retry)
-                → send_request({"action":"start"}, timeout=120s)
-                → daemon fork worker → vpn::start_with_password()
-            : vpn::start_with_password(cfg, password, retry)
-                → tunnel::write_script(cfg)
-                → openconnect + optional supervisor
+        → app_api::handle_action("vpn.connect")
+            → Core / TunnelController
+            → CoreSessionRunner
+            → NativeVpnEngineSession
+            → helper applies privileged network resources
+            → native AnyConnect/CSTP packet forwarding
     → WebUI fork (background) or foreground
         → WebUIServer.start()
         → SseBroadcaster.start() (log + status)

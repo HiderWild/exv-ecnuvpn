@@ -1,7 +1,6 @@
 #include "platform/common/app_api_runtime_policy.hpp"
 
 #include "platform/common/driver_status.hpp"
-#include "platform/common/process_control.hpp"
 
 #include <cstdlib>
 #include <cstdio>
@@ -13,7 +12,6 @@ namespace {
 
 struct LocalRuntimeSnapshot {
   bool running = false;
-  int pid = -1;
   bool network_ready = false;
   std::string interface_name;
   std::string internal_ip;
@@ -21,9 +19,6 @@ struct LocalRuntimeSnapshot {
 
 LocalRuntimeSnapshot read_local_runtime_snapshot() {
   LocalRuntimeSnapshot snapshot;
-  snapshot.pid = find_openconnect_pid();
-  snapshot.running = snapshot.pid > 0;
-  // route-ready file removed — status is now queried from Core Process
   return snapshot;
 }
 
@@ -74,17 +69,7 @@ nlohmann::json try_disconnect_direct_fallback(bool allow_direct_fallback) {
   if (!snapshot.running)
     return nlohmann::json{{"ok", true}, {"_not_running", true}};
 
-  if (!terminate_process(snapshot.pid, false)) {
-    terminate_process(snapshot.pid, true);
-  }
-  for (int i = 0; i < 10 && is_process_alive(snapshot.pid); ++i) {
-    sleep_ms(250);
-  }
-  if (is_process_alive(snapshot.pid)) {
-    return nlohmann::json{{"ok", false}, {"error", "Failed to stop VPN"}};
-  }
   clear_local_runtime_state();
-  std::system("taskkill /F /IM exv-helper.exe /T >nul 2>nul");
   return nlohmann::json{{"ok", true}, {"_direct_fallback", true}};
 }
 
@@ -95,7 +80,6 @@ nlohmann::json status_fallback_without_helper(const ConfigView & /*cfg*/) {
   result["_running"] = snapshot.running;
   result["_snapshot_data"] = nlohmann::json{
       {"running", snapshot.running},
-      {"pid", snapshot.pid},
       {"network_ready", snapshot.network_ready},
       {"interface", snapshot.interface_name},
       {"internal_ip", snapshot.internal_ip},

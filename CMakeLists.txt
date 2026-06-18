@@ -48,8 +48,10 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
 set(EXV_PROTOCOL_SOURCES
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/session.cpp
@@ -108,6 +110,7 @@ set(EXV_CORE_SOURCES
     src/core/rpc/config_actions.cpp
     src/core/rpc/service_actions.cpp
     src/core/rpc/route_actions.cpp
+    src/core/rpc/log_actions.cpp
     src/core/rpc/maintenance_actions.cpp
     src/core/rpc/core_api_setup.cpp
     src/core/use_cases/config_use_cases.cpp
@@ -131,7 +134,6 @@ set(EXV_CORE_SOURCES
     src/platform/common/route_model.cpp
     src/platform/common/status_models.cpp
     src/platform/common/runtime_status.cpp
-    src/vpn_engine/openconnect/openconnect_log.cpp
     src/vpn_engine/native_engine.cpp
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
@@ -147,9 +149,7 @@ set(EXV_CORE_SOURCES
     src/core/app_api/desktop_tunnel_host.cpp
     src/core/app_api/desktop_vpn_actions.cpp
     src/core/vpn/vpn.cpp
-    src/core/vpn/vpn_legacy_adapter.cpp
     src/core/vpn/vpn_runtime.cpp
-    src/core/vpn/openconnect_tunnel_script.cpp
     src/core/network/virtual_network_status.cpp
     src/runtime/runtime_context.cpp
     src/feedback/feedback.cpp
@@ -186,8 +186,22 @@ set(EXV_CLI_FRONTEND_SOURCES
     src/cli/cli_main.cpp
     src/cli/cli_commands.cpp
     src/cli/core_request_formatter.cpp
+    src/cli/console.cpp
     ${EXV_CLI_TRANSPORT_SOURCES}
+    src/platform/common/core_resolver.cpp
     src/platform/common/core_resolver_platform_deps.cpp
+    src/platform/common/file_system.cpp
+    src/platform/common/lifecycle/core_identity.cpp
+    src/platform/common/lifecycle/core_lock.cpp
+    src/platform/common/lifecycle/core_paths.cpp
+    src/platform/common/lifecycle/core_registry.cpp
+    src/platform/common/process_utils.cpp
+    src/platform/common/runtime_paths.cpp
+    src/runtime/runtime_context.cpp
+    src/observability/log_facade.cpp
+    src/observability/log_queue.cpp
+    src/observability/log_service.cpp
+    src/utils/strings.cpp
 )
 
 set(EXV_PLATFORM_SOURCES)
@@ -220,15 +234,17 @@ if(APPLE)
         src/platform/darwin/native_route_config.cpp
         src/platform/darwin/native_utun.cpp
         src/platform/darwin/platform_network_ops_darwin.cpp
-        src/platform/darwin/openconnect_process.cpp
         src/platform/darwin/oneshot_bootstrap.cpp
         src/platform/darwin/process_control.cpp
-        src/platform/darwin/tunnel_script.cpp
         src/platform/darwin/virtual_network_probe.cpp
         src/platform/darwin/path_utils.cpp
         src/platform/darwin/service_status.cpp
         src/platform/darwin/darwin_keychain_store.cpp
         src/platform/common/driver_status_stub.cpp
+    )
+    list(APPEND EXV_CLI_FRONTEND_SOURCES
+        src/platform/darwin/crypto_backend.cpp
+        src/platform/darwin/path_utils.cpp
     )
 elseif(UNIX AND NOT APPLE)
     find_package(OpenSSL 1.1.1 REQUIRED)
@@ -243,16 +259,18 @@ elseif(UNIX AND NOT APPLE)
         src/platform/linux/helper_lifecycle.cpp
         src/platform/linux/helper_platform.cpp
         src/platform/linux/helper_service_manager.cpp
-        src/platform/linux/openconnect_process.cpp
         src/platform/linux/oneshot_bootstrap.cpp
         src/platform/linux/platform_network_ops_linux.cpp
         src/platform/linux/process_control.cpp
-        src/platform/linux/tunnel_script.cpp
         src/platform/linux/virtual_network_probe.cpp
         src/platform/linux/path_utils.cpp
         src/platform/linux/default_engine_deps.cpp
         src/platform/common/service_status_linux.cpp
         src/platform/common/driver_status_stub.cpp
+    )
+    list(APPEND EXV_CLI_FRONTEND_SOURCES
+        src/platform/linux/crypto_backend.cpp
+        src/platform/linux/path_utils.cpp
     )
 elseif(WIN32)
     # AES-256-CBC and CSPRNG come from Windows CNG (bcrypt) so we no longer
@@ -275,10 +293,8 @@ elseif(WIN32)
         src/platform/win32/native_wintun.cpp
         src/platform/win32/native_ip_config.cpp
         src/platform/win32/platform_network_ops_win32.cpp
-        src/platform/win32/openconnect_process.cpp
         src/platform/win32/oneshot_bootstrap.cpp
         src/platform/win32/process_control.cpp
-        src/platform/win32/tunnel_script.cpp
         src/platform/win32/virtual_network_probe.cpp
         src/platform/win32/path_utils.cpp
         src/platform/win32/service_status.cpp
@@ -286,6 +302,10 @@ elseif(WIN32)
         src/platform/win32/win_route_ops.cpp
         src/platform/win32/win_credential_store.cpp
         src/platform/win32/windows_strings.cpp
+    )
+    list(APPEND EXV_CLI_FRONTEND_SOURCES
+        src/platform/win32/crypto_backend.cpp
+        src/platform/win32/path_utils.cpp
     )
 else()
     message(FATAL_ERROR "Unsupported platform. Supported: macOS, Linux, Windows.")
@@ -537,9 +557,10 @@ else()
 endif()
 
 add_executable(exv-cli ${EXV_CLI_FRONTEND_SOURCES})
-target_link_libraries(exv-cli PRIVATE exv-core)
+target_link_libraries(exv-cli PRIVATE Threads::Threads ${EXV_PLATFORM_LIBS})
 target_compile_definitions(exv-cli PRIVATE
     ECNUVPN_VERSION="${PROJECT_VERSION}"
+    ${EXV_PLATFORM_DEFINITIONS}
 )
 
 add_executable(exv-helper
@@ -571,28 +592,6 @@ target_compile_definitions(exv PRIVATE
 #   3. Desktop build   (optional �?packages native binary + Electron shell)
 #
 # WebUI removed �� Electron is the sole GUI entry point
-
-# Disabled: references deleted native_session_store.hpp
-# add_executable(vpn_runtime_test
-#         tests/vpn_runtime_test.cpp
-#     src/vpn_engine/session_state.cpp
-#     src/vpn_runtime.cpp
-# )
-#
-# if(APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/darwin/path_utils.cpp src/platform/darwin/process_control.cpp src/platform/darwin/config_defaults.cpp)
-# elseif(UNIX AND NOT APPLE)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/linux/path_utils.cpp src/platform/linux/process_control.cpp src/platform/linux/config_defaults.cpp)
-# elseif(WIN32)
-#     target_sources(vpn_runtime_test PRIVATE src/platform/win32/path_utils.cpp src/platform/win32/process_control.cpp src/platform/win32/config_defaults.cpp)
-# endif()
-#
-# target_include_directories(vpn_runtime_test PRIVATE
-#         ${CMAKE_SOURCE_DIR}/include
-#         ${CMAKE_SOURCE_DIR}/src
-# )
-#
-# add_test(NAME vpn_runtime_test COMMAND vpn_runtime_test)
 
 add_executable(platform_status_models_test
     tests/platform_status_models_test.cpp
@@ -676,18 +675,6 @@ target_link_libraries(backend_resolver_test PRIVATE Threads::Threads)
 
 add_test(NAME backend_resolver_test COMMAND backend_resolver_test)
 
-add_executable(openconnect_log_test
-    tests/openconnect_log_test.cpp
-    src/vpn_engine/openconnect/openconnect_log.cpp
-)
-
-target_include_directories(openconnect_log_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME openconnect_log_test COMMAND openconnect_log_test)
-
 add_executable(native_session_state_test
     tests/native_session_state_test.cpp
     src/vpn_engine/session_state.cpp
@@ -700,24 +687,41 @@ target_include_directories(native_session_state_test PRIVATE
 
 add_test(NAME native_session_state_test COMMAND native_session_state_test)
 
-# Disabled: references deleted native_session_store.hpp
-# add_executable(native_helper_session_test
-#     tests/native_helper_session_test.cpp
-#     src/vpn_engine/session_state.cpp
-# )
-#
-# target_include_directories(native_helper_session_test PRIVATE
-#     ${CMAKE_SOURCE_DIR}/include
-#     ${CMAKE_SOURCE_DIR}/src
-# )
-#
-# add_test(NAME native_helper_session_test COMMAND native_helper_session_test)
+add_executable(native_helper_session_test
+    tests/native_helper_session_test.cpp
+    tests/support/fake_helper.cpp
+    src/helper/common/helper_messages.cpp
+    src/helper/runtime/session_lease_manager.cpp
+    src/helper/runtime/cleanup_registry.cpp
+    src/helper/runtime/command_validator.cpp
+    src/helper/runtime/helper_lifecycle_policy.cpp
+    src/helper/runtime/helper_request_dispatcher.cpp
+    src/helper/runtime/privileged_task_queue.cpp
+    src/helper/helper_handler.cpp
+    ${EXV_OBSERVABILITY_SOURCES}
+)
+
+target_include_directories(native_helper_session_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+target_compile_definitions(native_helper_session_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(native_helper_session_test PRIVATE exv-helper-runtime Threads::Threads)
+
+add_test(NAME native_helper_session_test COMMAND native_helper_session_test)
 
 add_executable(native_engine_contract_test
     tests/native_engine_contract_test.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/session.cpp
@@ -774,8 +778,10 @@ add_executable(native_event_sink_test
     tests/native_event_sink_test.cpp
     src/vpn_engine/event_sink.cpp
     src/vpn_engine/native_engine.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/production_transport.cpp
     src/vpn_engine/protocol/session.cpp
@@ -828,33 +834,6 @@ target_link_libraries(native_event_sink_test PRIVATE
 
 add_test(NAME native_event_sink_test COMMAND native_event_sink_test)
 
-add_executable(tunnel_script_contract_test
-    tests/tunnel_script_contract_test.cpp
-    src/core/vpn/openconnect_tunnel_script.cpp
-    src/vpn_engine/openconnect/openconnect_log.cpp
-    src/cli/console.cpp
-    ${EXV_OBSERVABILITY_SOURCES}
-    ${EXV_PLATFORM_LOGGING_SOURCES}
-)
-
-if(APPLE)
-    target_sources(tunnel_script_contract_test PRIVATE src/platform/darwin/tunnel_script.cpp)
-elseif(UNIX AND NOT APPLE)
-    target_sources(tunnel_script_contract_test PRIVATE src/platform/linux/tunnel_script.cpp)
-elseif(WIN32)
-    target_sources(tunnel_script_contract_test PRIVATE src/platform/win32/tunnel_script.cpp)
-    target_link_libraries(tunnel_script_contract_test PRIVATE ws2_32)
-endif()
-
-target_include_directories(tunnel_script_contract_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-target_link_libraries(tunnel_script_contract_test PRIVATE Threads::Threads)
-
-add_test(NAME tunnel_script_contract_test COMMAND tunnel_script_contract_test)
-
 add_executable(proxy_tun_detector_test
     tests/proxy_tun_detector_test.cpp
     src/platform/common/proxy_tun_detector.cpp
@@ -895,6 +874,16 @@ target_compile_definitions(native_packaging_policy_test PRIVATE
 )
 
 add_test(NAME native_packaging_policy_test COMMAND native_packaging_policy_test)
+
+add_executable(native_only_cutover_contract_test
+    tests/native_only_cutover_contract_test.cpp
+)
+
+target_compile_definitions(native_only_cutover_contract_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME native_only_cutover_contract_test COMMAND native_only_cutover_contract_test)
 
 add_executable(repository_hygiene_test
     tests/repository_hygiene_test.cpp
@@ -1248,6 +1237,19 @@ target_include_directories(native_auth_parser_test PRIVATE
 
 add_test(NAME native_auth_parser_test COMMAND native_auth_parser_test)
 
+add_executable(native_aggregate_auth_test
+    tests/native_aggregate_auth_test.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
+    src/vpn_engine/protocol/http.cpp
+)
+
+target_include_directories(native_aggregate_auth_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME native_aggregate_auth_test COMMAND native_aggregate_auth_test)
+
 add_executable(native_protocol_session_test
     tests/native_protocol_session_test.cpp
     tests/support/fake_anyconnect_server.cpp
@@ -1269,8 +1271,10 @@ add_test(NAME native_protocol_session_test COMMAND native_protocol_session_test)
 add_executable(native_production_transport_test
     tests/native_production_transport_test.cpp
     src/vpn_engine/protocol/http.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
     src/vpn_engine/protocol/production_transport.cpp
 )
 
@@ -1281,6 +1285,25 @@ target_include_directories(native_production_transport_test PRIVATE
 )
 
 add_test(NAME native_production_transport_test COMMAND native_production_transport_test)
+
+add_executable(native_dtls_transport_test
+    tests/native_dtls_transport_test.cpp
+    src/vpn_engine/protocol/http.cpp
+    src/vpn_engine/protocol/aggregate_auth.cpp
+    src/vpn_engine/protocol/auth.cpp
+    src/vpn_engine/protocol/cstp.cpp
+    src/vpn_engine/protocol/dtls_transport.cpp
+    src/vpn_engine/protocol/production_transport.cpp
+    src/vpn_engine/protocol/url.cpp
+)
+
+target_include_directories(native_dtls_transport_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+add_test(NAME native_dtls_transport_test COMMAND native_dtls_transport_test)
 
 add_executable(native_fake_anyconnect_server_test
     tests/native_fake_anyconnect_server_test.cpp
@@ -2317,10 +2340,9 @@ target_include_directories(native_auth_session_json_test PRIVATE
 
 add_test(NAME native_auth_session_json_test COMMAND native_auth_session_json_test)
 
-# NOTE: connection_attempt_test, app_api_logs_test, and
-# app_api_native_orchestration_test depend on the full app_api build chain
-# (WebUI assets, SSE broadcaster, etc.) and cannot be compiled as standalone
-# test targets.  They are tested as part of the exv integration build.
+# NOTE: connection_attempt_test and app_api_logs_test depend on the full app_api
+# build chain (WebUI assets, SSE broadcaster, etc.) and cannot be compiled as
+# standalone test targets.  They are tested as part of the exv integration build.
 
 add_executable(auth_failure_test
     tests/integration/auth_failure_test.cpp
@@ -2388,18 +2410,15 @@ add_test(NAME helper_delegating_network_ops_test COMMAND helper_delegating_netwo
 
 # --- Release-blocking: core logic tests (must pass in CI) ---
 set(_release_blocking_tests
-    # vpn_runtime_test  # Disabled: references deleted native_session_store.hpp
     platform_status_models_test
     platform_network_ops_model_test
     feedback_test
     runtime_status_native_test
     backend_resolver_test
-    openconnect_log_test
     native_session_state_test
-    # native_helper_session_test  # Disabled: references deleted native_session_store.hpp
+    native_helper_session_test
     native_engine_contract_test
     native_event_sink_test
-    tunnel_script_contract_test
     proxy_tun_detector_test
     app_api_runtime_policy_test
     native_packaging_policy_test
@@ -2432,6 +2451,7 @@ set(_release_blocking_tests
     core_lifecycle_registry_test
     core_resolver_test
     helper_cleanup_registry_test
+    native_helper_session_test
     helper_contract_test
     helper_module_smoke_test
     config_module_smoke_test
@@ -2533,13 +2553,6 @@ set_property(TEST
     APPEND PROPERTY LABELS "integration"
 )
 
-# --- Legacy: pre-existing tests with known issues ---
-# app_api_native_orchestration_test has hardcoded test passwords and depends
-# on the full native engine build chain.  Isolated until migrated.
-if(TARGET app_api_native_orchestration_test)
-    set_property(TEST app_api_native_orchestration_test APPEND PROPERTY LABELS "legacy")
-endif()
-
 # --- Functional labels (for local dev filtering) ---
 
 # All Phase 1+ architecture tests
@@ -2557,6 +2570,7 @@ set_property(TEST
     core_lifecycle_registry_test
     core_resolver_test
     helper_cleanup_registry_test
+    native_helper_session_test
     helper_contract_test
     helper_module_smoke_test
     config_module_smoke_test
@@ -2625,6 +2639,7 @@ set_property(TEST
 set_property(TEST
     helper_lease_manager_test
     helper_cleanup_registry_test
+    native_helper_session_test
     helper_contract_test
     helper_module_smoke_test
     helper_network_ops_adapter_test

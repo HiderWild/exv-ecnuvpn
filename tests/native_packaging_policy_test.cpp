@@ -481,6 +481,55 @@ bool check_cmake_wiring() {
   return ok;
 }
 
+bool check_active_cmake_legacy_sources_absent() {
+  bool ok = true;
+  const FileText cmake = read_file("CMakeLists.txt");
+  const std::vector<std::string> denied_sources = {
+      "openconnect_process",
+      "openconnect_log",
+      "vpn_legacy_adapter",
+      "openconnect_tunnel_script",
+  };
+
+  for (const std::string &source : denied_sources) {
+    ok = expect(!contains(cmake, source),
+                "CMakeLists.txt should not keep active legacy OpenConnect "
+                "source/test target references") &&
+         ok;
+  }
+
+  return ok;
+}
+
+bool check_validation_scripts_do_not_name_legacy_payloads() {
+  bool ok = true;
+  const std::vector<fs::path> scripts = {
+      "scripts/validate-merge-prep-windows.ps1",
+      "scripts/validate-merge-prep-macos.sh",
+      "scripts/macos-packaging-smoke.sh",
+  };
+  const std::vector<std::string> denied_payload_names = {
+      "openconnect",
+      "openconnect.exe",
+      "libopenconnect",
+      "vpnc-script",
+      "stage-openconnect-runtime",
+  };
+
+  for (const fs::path &script_path : scripts) {
+    const FileText script = read_file(script_path);
+    for (const std::string &payload : denied_payload_names) {
+      ok = expect(!contains_ci(script.text, payload),
+                  generic_path(script_path) +
+                      " should not hard-code legacy OpenConnect runtime "
+                      "payload names") &&
+           ok;
+    }
+  }
+
+  return ok;
+}
+
 bool is_legacy_runtime_path(const fs::path &relative_path) {
   fs::path parent = relative_path.parent_path();
   for (const fs::path &part : parent) {
@@ -618,6 +667,8 @@ int main() {
   ok = check_production_build_scripts() && ok;
   ok = check_runtime_assets_doc_policy() && ok;
   ok = check_cmake_wiring() && ok;
+  ok = check_active_cmake_legacy_sources_absent() && ok;
+  ok = check_validation_scripts_do_not_name_legacy_payloads() && ok;
   ok = check_production_runtime_dirs() && ok;
 
   return ok ? 0 : 1;

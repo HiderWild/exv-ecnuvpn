@@ -57,6 +57,8 @@ const char *bridge_script() {
       disconnect: () => rpc('vpn.disconnect'),
       connectElevated: (password) => rpc('vpn.connect', { password, allow_direct_fallback: true }),
       disconnectElevated: (backend) => rpc('vpn.disconnect', { backend, allow_direct_fallback: true }),
+      authInteraction: () => rpc('vpn.authInteraction.get'),
+      respondAuthInteraction: (id, value) => rpc('vpn.authInteraction.respond', { id, value }),
     },
     config: {
       getAuth: () => rpc('config.getAuth'),
