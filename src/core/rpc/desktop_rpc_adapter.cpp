@@ -6,7 +6,8 @@ namespace exv::core_api {
 DesktopRpcAdapter::DesktopRpcAdapter() = default;
 
 void DesktopRpcAdapter::register_legacy_handler(const std::string& action,
-                                                  LegacyHandler handler) {
+                                                  LegacyHandler handler,
+                                                  std::optional<RpcActionMetadata> metadata) {
     // Wrap the legacy handler into the RpcRequest/RpcResponse convention.
     dispatcher_.register_handler(action,
         [h = std::move(handler)](const RpcRequest& req) -> RpcResponse {
@@ -32,7 +33,8 @@ void DesktopRpcAdapter::register_legacy_handler(const std::string& action,
                 resp.error_message = e.what();
             }
             return resp;
-        });
+        },
+        metadata.value_or(default_metadata_for_action(action)));
 }
 
 nlohmann::json DesktopRpcAdapter::dispatch(const std::string& action,

@@ -4,6 +4,7 @@
 #include "core/app_api/desktop_runtime_context.hpp"
 #include "core/app_api/desktop_status_presenter.hpp"
 #include "core/app_api/desktop_tunnel_host.hpp"
+#include "core/app_api/desktop_vpn_test_hooks.hpp"
 #include "core/config/config_manager.hpp"
 #include "core/config/config_platform_view.hpp"
 #include "core/connection/connection_attempt.hpp"
@@ -23,10 +24,37 @@
 #include "platform/common/runtime_paths.hpp"
 
 #include <chrono>
+#include <mutex>
 #include <string>
+#include <utility>
 
 namespace ecnuvpn {
 namespace app_api {
+
+namespace testing {
+namespace {
+std::mutex g_hook_mutex;
+DesktopVpnConnectEnteredHook g_connect_entered_hook;
+} // namespace
+
+void set_desktop_vpn_connect_entered_hook(DesktopVpnConnectEnteredHook hook) {
+  std::lock_guard<std::mutex> lock(g_hook_mutex);
+  g_connect_entered_hook = std::move(hook);
+}
+
+void fire_desktop_vpn_connect_entered_hook() {
+  DesktopVpnConnectEnteredHook hook;
+  {
+    std::lock_guard<std::mutex> lock(g_hook_mutex);
+    hook = g_connect_entered_hook;
+  }
+  if (hook) {
+    hook();
+  }
+}
+
+} // namespace testing
+
 namespace {
 
 using StageTimer = exv::core::ConnectStageTimer;
@@ -163,6 +191,7 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         exv::observability::LogFacade::info("app_api: vpn.connect entry - password_provided=" +
                      std::string(password.empty() ? "false" : "true") +
                      " server=" + cfg.server + " username=" + cfg.username);
+        testing::fire_desktop_vpn_connect_entered_hook();
         if (password.empty() && !cfg.password.empty()) {
           std::string key = crypto::load_key();
           if (!key.empty()) {
