@@ -870,6 +870,36 @@ bool test_native_session_adopts_prepared_handshake_without_reauth() {
   return ok;
 }
 
+bool test_native_session_stop_disconnects_adopted_handshake_before_attach() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies handshake_deps;
+  handshake_deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+
+  ecnuvpn::vpn_engine::NativeHandshakeResult prepared;
+  ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config(), handshake_deps);
+  const auto prepared_result = job.run(std::stop_token{}, &prepared);
+
+  ok = expect(prepared_result.ok, "prepared handshake should succeed") && ok;
+  ok = expect(transport->disconnect_count == 0,
+              "prepared handshake should still be connected before adoption") &&
+       ok;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config());
+  const auto adopted = session.adopt_handshake(std::move(prepared));
+  ok = expect(adopted.ok, "adopting prepared handshake should succeed") && ok;
+
+  session.stop();
+  ok = expect(transport->disconnect_count == 1,
+              "stop should explicitly disconnect adopted handshake transport") &&
+       ok;
+  return ok;
+}
+
 bool test_dtls_config_flag_does_not_block_native_engine() {
   // The native engine v1 is CSTP/TLS-only by design. Historically the engine
   // had a run-time guard that rejected configs with disable_dtls=false.
@@ -1467,6 +1497,7 @@ int main() {
   ok = test_network_configurator_runs_before_packet_open() && ok;
   ok = test_native_session_splits_handshake_from_packet_attach() && ok;
   ok = test_native_session_adopts_prepared_handshake_without_reauth() && ok;
+  ok = test_native_session_stop_disconnects_adopted_handshake_before_attach() && ok;
   ok = test_dtls_config_flag_does_not_block_native_engine() && ok;
   ok = test_dtls_enabled_emits_unavailable_and_continues_cstp() && ok;
   ok = test_auth_failure_maps_error_without_device() && ok;

@@ -11,6 +11,8 @@ Passed:
 - `pnpm --dir webui exec vue-tsc -b`
 - `pnpm --dir webui run build`
 - `./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking`
+- Post-review resource cleanup fix: `cmake --build --preset windows-release --target connect_pipeline_test native_engine_contract_test exv app_api_status_contract_test`
+- Post-review resource cleanup fix: `ctest --test-dir build-windows/cpp -R "app_api_status_contract_test|connect_pipeline_test|native_engine_contract_test|native_handshake_job_test|core_session_runner_test|tunnel_controller_integration_test" --output-on-failure`
 
 Release-blocking result: 72/72 tests passed.
 
@@ -24,6 +26,7 @@ Release-blocking result: 72/72 tests passed.
 - Windows driver readiness uses one cached adapter snapshot for burst status/preflight calls instead of separate Wintun and TAP adapter scans.
 - `minimal_mode` and `service_install_prompt_seen` are frontend-local values backed by `localStorage`; remote settings payloads cannot overwrite them.
 - Connect timing source guards cover backend/helper, platform, protocol handshake, first failure, and serial tail markers.
+- Post-review: adopted/prepared native handshake resources are explicitly disconnected if stopped before packet attach or discarded before controller handoff.
 
 ## Manual Verification Not Run
 

@@ -222,6 +222,21 @@ std::optional<nlohmann::json> desktop_connect_error() {
 }
 
 struct PreparedHandshakeHolder {
+  ~PreparedHandshakeHolder() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!ready) return;
+    if (handshake.session) {
+      handshake.session->disconnect();
+    } else if (handshake.transport) {
+      handshake.transport->disconnect();
+    }
+  }
+
+  ecnuvpn::vpn_engine::NativeHandshakeResult take_handshake() {
+    ready = false;
+    return std::move(handshake);
+  }
+
   std::mutex mutex;
   ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
   ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
@@ -503,7 +518,7 @@ void run_desktop_connect_job(Config cfg,
     }
     controller->set_prepared_native_handshake(
         std::move(prepared_handshake->engine_config),
-        std::move(prepared_handshake->handshake));
+        prepared_handshake->take_handshake());
   }
   timing.mark("cleanup_legacy_state");
 
