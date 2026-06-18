@@ -84,7 +84,7 @@ Verification evidence: `ctest --test-dir build-windows/cpp -R "ui_shell_core_rpc
 - [x] Create `VpnConnectJobOwner`.
 - [x] Create `connect_intent.hpp/.cpp`.
 - [x] Create `ConnectPipeline`.
-- [ ] Create `NativeHandshakeJob`.
+- [x] Create `NativeHandshakeJob`.
 - [ ] Split native auth/CSTP handshake from packet-device and network-config attach.
 - [ ] Move helper/backend readiness out of the RPC request handler.
 - [ ] Move platform/runtime readiness out of the RPC request handler.
@@ -97,7 +97,7 @@ Verification evidence: `ctest --test-dir build-windows/cpp -R "ui_shell_core_rpc
 - [x] Update frontend connect state to rely on status/events after accepted response.
 - [ ] Commit parallel connect pipeline conversion.
 
-Verification evidence: `ctest --test-dir build-windows/cpp -R "connect_intent_test|connect_pipeline_test|vpn_actions_test|core_rpc_lane_scheduler_test|core_process_lifecycle_test" --output-on-failure` passed for the core accepted-job/cancel primitives. `pnpm --dir webui exec node scripts/run-host-test.cjs host/__tests__/webview-package-policy.test.ts`, `pnpm --dir webui test:host`, and `pnpm --dir webui exec vue-tsc -b` passed for the frontend accepted-job/cancel UI slice.
+Verification evidence: `ctest --test-dir build-windows/cpp -R "connect_intent_test|connect_pipeline_test|vpn_actions_test|core_rpc_lane_scheduler_test|core_process_lifecycle_test" --output-on-failure` passed for the core accepted-job/cancel primitives. `pnpm --dir webui exec node scripts/run-host-test.cjs host/__tests__/webview-package-policy.test.ts`, `pnpm --dir webui test:host`, and `pnpm --dir webui exec vue-tsc -b` passed for the frontend accepted-job/cancel UI slice. `ctest --test-dir build-windows/cpp -R "native_handshake_job_test|native_engine_contract_test|connect_pipeline_test|connect_intent_test|vpn_actions_test" --output-on-failure` and `cmake --build --preset windows-release --target native_handshake_job_test connect_pipeline_test exv` passed for the native handshake boundary slice.
 
 ## Phase 5: Windows Platform Readiness
 
