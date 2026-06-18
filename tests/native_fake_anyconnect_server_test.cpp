@@ -1,7 +1,10 @@
 #include "support/fake_anyconnect_server.hpp"
 
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -27,6 +30,22 @@ bool contains_event(
       return true;
   }
   return false;
+}
+
+std::string fixture_text(const std::filesystem::path &relative) {
+  std::filesystem::path cursor = std::filesystem::current_path();
+  for (int i = 0; i < 8; ++i) {
+    const std::filesystem::path candidate = cursor / relative;
+    if (std::filesystem::exists(candidate)) {
+      std::ifstream in(candidate, std::ios::binary);
+      return std::string(std::istreambuf_iterator<char>(in),
+                         std::istreambuf_iterator<char>());
+    }
+    if (!cursor.has_parent_path() || cursor == cursor.parent_path())
+      break;
+    cursor = cursor.parent_path();
+  }
+  return {};
 }
 
 bool test_password_auth_success() {
@@ -217,6 +236,136 @@ bool test_reconnect_after_close() {
   return ok;
 }
 
+bool test_v2_aggregate_auth_sequence_accepts_only_xml_and_cstp_tunnel() {
+  using namespace ecnuvpn::tests::support;
+
+  bool ok = true;
+
+  FakeAnyConnectServerOptions server_options;
+  server_options.protocol_mode = FakeAnyConnectProtocolMode::aggregate_auth_v2;
+  server_options.expected_credentials.username = "student@example.invalid";
+  FakeAnyConnectServer server(server_options);
+
+  const std::string init_request =
+      "POST / HTTP/1.1\r\n"
+      "Host: vpn.example.invalid\r\n"
+      "User-Agent: AnyConnect-compatible-test\r\n"
+      "Content-Type: application/xml; charset=utf-8\r\n"
+      "Accept-Encoding: identity\r\n"
+      "X-Transcend-Version: 1\r\n"
+      "X-Aggregate-Auth: 1\r\n"
+      "\r\n"
+      "<config-auth client=\"vpn\" type=\"init\">"
+      "<version who=\"vpn\">v2-test</version>"
+      "<group-access>https://vpn.example.invalid/</group-access>"
+      "</config-auth>";
+
+  auto init = server.handle_http_request(init_request);
+  ok = expect(init.result.ok, "v2 fake should accept XML init POST") && ok;
+  ok = expect(init.response.find("<opaque>OPAQUE_ONE</opaque>") !=
+                  std::string::npos,
+              "v2 init response should include deterministic opaque") &&
+       ok;
+
+  const std::string auth_reply_request =
+      "POST / HTTP/1.1\r\n"
+      "Host: vpn.example.invalid\r\n"
+      "User-Agent: AnyConnect-compatible-test\r\n"
+      "Content-Type: application/xml; charset=utf-8\r\n"
+      "Accept-Encoding: identity\r\n"
+      "X-Transcend-Version: 1\r\n"
+      "X-Aggregate-Auth: 1\r\n"
+      "\r\n"
+      "<config-auth client=\"vpn\" type=\"auth-reply\">"
+      "<auth id=\"main\">"
+      "<form>"
+      "<input name=\"username\">student@example.invalid</input>"
+      "<input name=\"password\">test-mock-password-placeholder</input>"
+      "</form>"
+      "</auth>"
+      "<opaque>OPAQUE_ONE</opaque>"
+      "</config-auth>";
+
+  auto auth = server.handle_http_request(auth_reply_request);
+  ok = expect(auth.result.ok, "v2 fake should accept XML auth-reply POST") && ok;
+  ok = expect(auth.response.find("<session-token>V2_SESSION_TOKEN</session-token>") !=
+                  std::string::npos,
+              "v2 auth success should return deterministic session token") &&
+       ok;
+
+  const std::string connect_request =
+      "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\n"
+      "Host: vpn.example.invalid\r\n"
+      "User-Agent: AnyConnect-compatible-test\r\n"
+      "Cookie: webvpn=V2_SESSION_TOKEN\r\n"
+      "X-CSTP-Version: 1\r\n"
+      "X-CSTP-Address-Type: IPv6,IPv4\r\n"
+      "X-Transcend-Version: 1\r\n"
+      "X-Aggregate-Auth: 1\r\n"
+      "\r\n";
+
+  auto cstp = server.handle_http_request(connect_request);
+  ok = expect(cstp.result.ok, "v2 fake should accept CSCOSSLC tunnel CONNECT") &&
+       ok;
+  ok = expect(cstp.response.find("X-CSTP-DNS: 10.10.10.10") !=
+                  std::string::npos,
+              "v2 CSTP fixture should include DNS metadata") &&
+       ok;
+  ok = expect(cstp.response ==
+                  fixture_text("tests/fixtures/native_anyconnect_v2/"
+                               "cstp_connect_success.http"),
+              "v2 CSTP response should be served from the deterministic fixture") &&
+       ok;
+  ok = expect(server.auth_attempts() == 1,
+              "v2 auth-reply should increment auth attempts") &&
+       ok;
+  ok = expect(server.cstp_connects() == 1,
+              "v2 CONNECT should increment CSTP connect count") &&
+       ok;
+
+  return ok;
+}
+
+bool test_v2_rejects_legacy_login_and_cstp_paths() {
+  using namespace ecnuvpn::tests::support;
+
+  bool ok = true;
+
+  FakeAnyConnectServerOptions server_options;
+  server_options.protocol_mode = FakeAnyConnectProtocolMode::aggregate_auth_v2;
+  FakeAnyConnectServer server(server_options);
+
+  auto login = server.handle_http_request(
+      "GET /+CSCOE+/logon.html HTTP/1.1\r\n"
+      "Host: vpn.example.invalid\r\n"
+      "\r\n");
+  ok = expect(!login.result.ok, "v2 fake should reject legacy HTML login") && ok;
+  ok = expect(login.result.code == "unexpected_v1_path",
+              "legacy login should fail with stable code") &&
+       ok;
+  ok = expect(login.response.find("unexpected_v1_path") != std::string::npos,
+              "legacy login rejection should include stable body") &&
+       ok;
+
+  auto cscot = server.handle_http_request(
+      "CONNECT /CSCOT/ HTTP/1.1\r\n"
+      "Host: vpn.example.invalid\r\n"
+      "\r\n");
+  ok = expect(!cscot.result.ok, "v2 fake should reject legacy CSCOT tunnel") &&
+       ok;
+  ok = expect(cscot.result.code == "unexpected_v1_path",
+              "legacy CSTP path should fail with stable code") &&
+       ok;
+  ok = expect(server.auth_attempts() == 0,
+              "rejected v1 paths should not advance auth attempts") &&
+       ok;
+  ok = expect(server.cstp_connects() == 0,
+              "rejected v1 paths should not advance CSTP connects") &&
+       ok;
+
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -225,6 +374,8 @@ int main() {
   ok = test_password_auth_success() && ok;
   ok = test_password_auth_failure() && ok;
   ok = test_cstp_connect_success() && ok;
+  ok = test_v2_aggregate_auth_sequence_accepts_only_xml_and_cstp_tunnel() && ok;
+  ok = test_v2_rejects_legacy_login_and_cstp_paths() && ok;
   ok = test_packet_echo() && ok;
   ok = test_server_close_during_packet_loop() && ok;
   ok = test_reconnect_after_close() && ok;

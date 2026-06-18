@@ -1,5 +1,6 @@
 #include "vpn_engine/native_engine.hpp"
 
+#include "vpn_engine/protocol/dtls_transport.hpp"
 #include "vpn_engine/protocol/production_transport.hpp"
 
 #include <exception>
@@ -36,6 +37,32 @@ DeviceConfig device_config_from_metadata(const TunnelMetadata &metadata) {
   config.interface_name = metadata.interface_name;
   config.mtu = metadata.mtu;
   return config;
+}
+
+bool make_auth_interaction_event(
+    const ValidationResult &failure, const protocol::AuthResult &auth_result,
+    std::string *type, std::map<std::string, std::string> *fields) {
+  if (!type || !fields)
+    return false;
+
+  if (failure.code == "auth_challenge_required") {
+    *type = "auth.challenge_required";
+  } else if (failure.code == "auth_group_required") {
+    *type = "auth.group_required";
+  } else {
+    return false;
+  }
+
+  fields->clear();
+  fields->emplace("code", failure.code);
+  if (!auth_result.interaction_prompt_label.empty())
+    fields->emplace("label", auth_result.interaction_prompt_label);
+  if (!auth_result.interaction_prompt_type.empty())
+    fields->emplace("input_type", auth_result.interaction_prompt_type);
+  if (!auth_result.interaction_group_options.empty())
+    fields->emplace("options", auth_result.interaction_group_options);
+
+  return true;
 }
 
 } // namespace
@@ -147,6 +174,8 @@ ValidationResult NativeVpnEngineSession::start() {
   options.username = config_.username;
   options.password = config_.password;
   options.useragent = config_.useragent;
+  options.auth_group = config_.auth_group;
+  options.csd_wrapper = config_.csd_wrapper;
   options.disable_dtls = config_.disable_dtls;
   options.auto_reconnect = config_.auto_reconnect;
   options.max_reconnects = config_.auto_reconnect ? 1 : 0;
@@ -162,6 +191,8 @@ ValidationResult NativeVpnEngineSession::start() {
   // timing. Responding to an inbound DPD request is always on inside the
   // forwarding loop, so the gateway still observes us as alive.
   options.auth_interaction_handler = dependencies_.auth_interaction_handler;
+  if (dependencies_.protocol_options_configurator)
+    dependencies_.protocol_options_configurator(&options);
 
   auto protocol_session =
       std::make_unique<protocol::ProtocolSession>(options, transport.get());
@@ -172,6 +203,18 @@ ValidationResult NativeVpnEngineSession::start() {
 
   ValidationResult auth = protocol_session->authenticate();
   if (!auth.ok) {
+    if (auth.code == "csd_required_unsupported") {
+      emit_event("csd.required_unsupported", "warning",
+                 "AnyConnect host-scan is required but unsupported",
+                 {{"code", auth.code}});
+    }
+    std::string interaction_type;
+    std::map<std::string, std::string> interaction_fields;
+    if (make_auth_interaction_event(auth, protocol_session->last_auth_result(),
+                                    &interaction_type, &interaction_fields)) {
+      emit_event(std::move(interaction_type), "warning", auth.message,
+                 std::move(interaction_fields));
+    }
     emit_event("auth.failed", "error", auth.message, {{"code", auth.code}});
     return fail(auth);
   }
@@ -198,6 +241,18 @@ ValidationResult NativeVpnEngineSession::start() {
   emit_event("cstp.connected", "info", "CSTP connect succeeded",
              {{"interface", metadata.interface_name},
               {"internal_ip", metadata.internal_ip4_address}});
+
+  if (!config_.disable_dtls &&
+      metadata.dtls_state !=
+          protocol::dtls_transport_state_to_string(
+              protocol::DtlsTransportState::attempted_and_connected)) {
+    const std::string message =
+        metadata.dtls_fallback_reason.empty()
+            ? "native DTLS backend unavailable; using CSTP/TLS"
+            : metadata.dtls_fallback_reason;
+    emit_event("dtls.unavailable", "warning", message,
+               {{"code", "dtls_unavailable"}, {"state", metadata.dtls_state}});
+  }
 
   DeviceConfig packet_device_config = device_config_from_metadata(metadata);
   if (dependencies_.network_configurator) {

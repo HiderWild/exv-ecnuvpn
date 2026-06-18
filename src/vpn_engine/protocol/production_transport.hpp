@@ -48,6 +48,8 @@ private:
   std::string useragent_;
   std::string current_password_;
   std::string current_password_form_encoded_;
+  std::string auth_cookie_;
+  int requested_mtu_ = 1290;
   AuthCookieJar cookies_;
   std::vector<std::uint8_t> read_buffer_;
   bool stream_connected_ = false;

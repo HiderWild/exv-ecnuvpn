@@ -1,6 +1,8 @@
 #include "core/tunnel_controller/tunnel_controller_impl.hpp"
 
+#include <algorithm>
 #include <exception>
+#include <sstream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -28,6 +30,58 @@ std::string helper_mode_wire_name(exv::helper::HelperMode mode) {
         default:
             return "oneshot";
         }
+    }
+
+bool parse_ipv4_octets(const std::string& value, int octets[4]) {
+        std::istringstream input(value);
+        std::string part;
+        int index = 0;
+        while (std::getline(input, part, '.')) {
+            if (index >= 4 || part.empty()) return false;
+            int octet = 0;
+            for (char ch : part) {
+                if (ch < '0' || ch > '9') return false;
+                octet = octet * 10 + (ch - '0');
+                if (octet > 255) return false;
+            }
+            octets[index++] = octet;
+        }
+        return index == 4;
+    }
+
+int prefix_from_ipv4_netmask(const std::string& netmask) {
+        int octets[4] = {};
+        if (!parse_ipv4_octets(netmask, octets)) return 24;
+
+        int prefix = 0;
+        bool saw_zero = false;
+        for (int octet : octets) {
+            for (int bit = 7; bit >= 0; --bit) {
+                const bool one = ((octet >> bit) & 1) != 0;
+                if (one) {
+                    if (saw_zero) return 24;
+                    ++prefix;
+                } else {
+                    saw_zero = true;
+                }
+            }
+        }
+        return prefix;
+    }
+
+void add_route_once(std::vector<exv::platform::RouteEntry>* routes,
+                    const std::string& destination) {
+        if (!routes || destination.empty()) return;
+        const auto found = std::find_if(
+            routes->begin(), routes->end(),
+            [&destination](const exv::platform::RouteEntry& route) {
+                return route.destination == destination;
+            });
+        if (found != routes->end()) return;
+
+        exv::platform::RouteEntry route;
+        route.destination = destination;
+        routes->push_back(route);
     }
 
 } // namespace
@@ -111,12 +165,21 @@ bool TunnelController::Impl::apply_tunnel_config_for_session(
             config.mtu = device.mtu;
             config.enable_kill_switch = false;
             if (metadata) {
-                for (const auto& destination : metadata->routes) {
-                    exv::platform::RouteEntry route;
-                    route.destination = destination;
-                    config.routes.push_back(route);
-                }
+                const auto& gateway_routes =
+                    metadata->split_include_routes.empty()
+                        ? metadata->routes
+                        : metadata->split_include_routes;
+                for (const auto& destination : gateway_routes)
+                    add_route_once(&config.routes, destination);
+                for (const auto& destination : vpn_cfg_.routes)
+                    add_route_once(&config.routes, destination);
                 config.server_bypass_ips = metadata->server_bypass_ips;
+                config.dns.servers = metadata->dns_servers;
+                config.dns.search_domain = metadata->default_domain;
+                config.dns.suffixes = metadata->search_domains;
+                config.exclude_routes = metadata->split_exclude_routes;
+                if (!config.exclude_routes.empty())
+                    config.exclude_route = config.exclude_routes.front();
             }
 
             if (!net_ops_->apply_tunnel_config(device, config)) {
@@ -143,38 +206,12 @@ ErrorInfo TunnelController::Impl::current_native_failure(
         const std::string& fallback_code,
         const std::string& fallback_message) const {
         auto status = runner_.status();
-        ErrorInfo err;
-        err.code = status.error_code.empty() ? fallback_code : status.error_code;
-        err.message = status.error_message.empty()
+        const std::string code =
+            status.error_code.empty() ? fallback_code : status.error_code;
+        const std::string message = status.error_message.empty()
             ? fallback_message
             : status.error_message;
-        err.native_code = -1;
-        err.recoverable = false;
-
-        if (err.code == "auth_failed" || err.code == "unsupported_auth_flow") {
-            err.domain = "auth";
-            err.recommended_action = "Check credentials and try again";
-        } else if (err.code.rfind("packet", 0) == 0 ||
-                   err.code.rfind("native_packet", 0) == 0) {
-            err.domain = "packet";
-            err.native_api = "packet_device";
-            err.recommended_action = "Check system configuration";
-        } else if (err.code.find("transport") != std::string::npos ||
-                   err.code.rfind("cstp", 0) == 0) {
-            err.domain = "transport";
-            err.native_api = "native_start";
-            err.recommended_action = "Check network connectivity";
-        } else if (err.code.find("config") != std::string::npos) {
-            err.domain = "config";
-            err.native_api = "native_start";
-            err.recommended_action = "Check VPN configuration";
-        } else {
-            err.domain = "native";
-            err.native_api = "native_start";
-            err.recommended_action = "Check native engine logs";
-        }
-
-        return err;
+        return CoreErrorMapper::from_native_error(code, message);
     }
 
 ecnuvpn::vpn_engine::ValidationResult
@@ -203,7 +240,8 @@ std::string TunnelController::Impl::interface_address_from_metadata(
             return "10.0.0.2/24";
         }
         if (ip.find('/') == std::string::npos) {
-            ip += "/24";
+            ip += "/" + std::to_string(
+                prefix_from_ipv4_netmask(metadata.internal_ip4_netmask));
         }
         return ip;
     }
@@ -347,7 +385,7 @@ void TunnelController::Impl::do_connect() {
                         "Native engine session failed to start"));
                 }
 
-                if (network_config_applied_) {
+                if (!session_id_.value.empty() || network_config_applied_) {
                     cleanup_after_failed_startup();
                 }
 

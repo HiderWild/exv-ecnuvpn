@@ -14,7 +14,7 @@ namespace {
 
 // General-purpose mock password for tests.
 static const char *MOCK_PASSWORD = "test-mock-password-placeholder";
-// Mock password with special characters for XML auth tests.
+// Mock password with special characters for percent-encoding tests.
 static const char *MOCK_PASSWORD_SPECIAL = "test-mock pass%!";
 
 bool expect(bool condition, const char *message) {
@@ -63,6 +63,22 @@ std::string http_response(int status, const std::string &reason,
   out += "\r\n\r\n";
   out += body;
   return out;
+}
+
+std::string token_from_cookie_fixture(const std::string &cookie) {
+  const std::size_t eq = cookie.find('=');
+  if (eq == std::string::npos)
+    return cookie;
+  const std::size_t semi = cookie.find(';', eq + 1);
+  return cookie.substr(eq + 1, semi == std::string::npos ? std::string::npos
+                                                         : semi - eq - 1);
+}
+
+std::string aggregate_auth_http_response(const std::string &body) {
+  return http_response(200, "OK",
+                       {"Content-Type: text/xml; charset=utf-8",
+                        "Cache-Control: no-store"},
+                       body);
 }
 
 std::vector<std::uint8_t> encoded_frame(
@@ -184,48 +200,69 @@ ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
 }
 
 std::string login_get_ok(const std::string &cookie = "") {
-  std::vector<std::string> headers = {"Content-Type: text/xml; charset=utf-8"};
-  if (!cookie.empty())
-    headers.push_back("Set-Cookie: " + cookie + "; Path=/; Secure; HttpOnly");
-  return http_response(200, "OK", headers,
-                       "<config-auth client=\"vpn\" type=\"init\"/>");
+  (void)cookie;
+  return aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"auth-request\">"
+      "<auth id=\"main\"><form>"
+      "<input type=\"text\" name=\"username\" label=\"Username\" />"
+      "<input type=\"password\" name=\"password\" label=\"Password\" />"
+      "<input type=\"hidden\" name=\"group_list\" value=\"students\" />"
+      "</form></auth>"
+      "<opaque>OPAQUE_ONE</opaque>"
+      "</config-auth>");
+}
+
+std::string login_get_group_select() {
+  return aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"auth-request\">"
+      "<auth id=\"main\"><message>Select VPN group.</message><form>"
+      "<select name=\"group_list\" label=\"VPN group\">"
+      "<option value=\"students\">Students</option>"
+      "<option value=\"staff\">Faculty and staff</option>"
+      "</select>"
+      "</form></auth>"
+      "<opaque>OPAQUE_ONE</opaque>"
+      "</config-auth>");
 }
 
 std::string login_post_ok(const std::string &cookie) {
-  std::string token = cookie;
-  const std::size_t eq = token.find('=');
-  if (eq != std::string::npos)
-    token = token.substr(eq + 1);
-  return http_response(
-      200, "OK",
-      {"Content-Type: text/xml; charset=utf-8",
-       "Set-Cookie: " + cookie + "; Path=/; Secure; HttpOnly"},
+  return aggregate_auth_http_response(
       "<config-auth client=\"vpn\" type=\"complete\">"
+      "<auth id=\"success\"><message>Login successful</message></auth>"
       "<session-token>" +
-          token +
-          "</session-token></config-auth>");
-}
-
-std::string aggregate_challenge_required() {
-  return http_response(200, "OK", {"Content-Type: text/xml; charset=utf-8"},
-                       "<config-auth client=\"vpn\" type=\"auth\">"
-                       "<auth><message>Token required</message>"
-                       "<input name=\"secondary_password\" type=\"password\"/>"
-                       "</auth></config-auth>");
-}
-
-std::string aggregate_csd_required() {
-  return http_response(200, "OK", {"Content-Type: text/xml; charset=utf-8"},
-                       "<config-auth client=\"vpn\" type=\"auth\">"
-                       "<host-scan><ticket>SECRET-CSD-TICKET</ticket></host-scan>"
-                       "</config-auth>");
+      token_from_cookie_fixture(cookie) +
+      "</session-token>"
+      "<opaque>OPAQUE_ONE</opaque>"
+      "</config-auth>");
 }
 
 std::string login_post_failed() {
-  return http_response(401, "Unauthorized",
-                       {"Content-Type: application/json; charset=utf-8",
-                        "Cache-Control: no-store"},
-                       "{\"error\":\"auth_failed\",\"message\":\"invalid username or password\"}");
+  return aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"auth-reply\">"
+      "<auth id=\"error\"><message>invalid username or password</message></auth>"
+      "<error>invalid username or password</error>"
+      "</config-auth>");
+}
+
+std::string login_post_challenge() {
+  return aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"auth-reply\">"
+      "<auth id=\"main\"><message>Enter verification code</message><form>"
+      "<input type=\"password\" name=\"secondary_password\" "
+      "label=\"Verification code\" />"
+      "</form></auth>"
+      "<opaque>OPAQUE_TWO</opaque>"
+      "</config-auth>");
+}
+
+std::string login_post_host_scan_required() {
+  return aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"auth-reply\">"
+      "<auth id=\"main\"><message>Host scan required</message></auth>"
+      "<host-scan ticket=\"CSD_TICKET_SEED\" token=\"CSD_TOKEN_SEED\" "
+      "base-uri=\"/+CSCOE+/sdesktop/\" "
+      "wait-uri=\"/+CSCOE+/sdesktop/wait.html\" />"
+      "</config-auth>");
 }
 
 std::string cstp_connect_ok() {
@@ -239,20 +276,20 @@ std::string cstp_connect_ok() {
          "\r\n";
 }
 
-bool authenticate_success_sends_aggregate_auth_and_returns_cookie() {
+bool authenticate_success_sends_login_get_post_and_returns_cookie() {
   using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok("webvpn_prelogin=PRELOGIN"));
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
 
   ok = expect(auth.ok, "authentication should succeed") && ok;
   ok = expect(auth.cookie == "webvpn=SESSION",
-              "auth should return webvpn cookie from aggregate-auth success") &&
+              "auth should map session-token to webvpn cookie") &&
        ok;
   ok = expect(stream.connect_count() == 1, "authenticate should open TLS once") && ok;
   ok = expect(stream.last_endpoint().host == "vpn.example.invalid",
@@ -268,31 +305,137 @@ bool authenticate_success_sends_aggregate_auth_and_returns_cookie() {
   const std::string init_request = as_text(stream.writes()[0]);
   const std::string post_request = as_text(stream.writes()[1]);
   ok = expect(contains(init_request, "POST / HTTP/1.1\r\n"),
-              "aggregate-auth init should POST /") &&
+              "auth init should POST to gateway root") &&
+       ok;
+  ok = expect(contains(init_request, "Content-Type: application/xml; charset=utf-8\r\n"),
+              "auth init should use XML content type") &&
+       ok;
+  ok = expect(contains(init_request, "Accept-Encoding: identity\r\n"),
+              "auth init should request identity encoding") &&
+       ok;
+  ok = expect(contains(init_request, "X-Transcend-Version: 1\r\n"),
+              "auth init should send transcend header") &&
        ok;
   ok = expect(contains(init_request, "X-Aggregate-Auth: 1\r\n"),
-              "aggregate-auth init should advertise aggregate auth") &&
+              "auth init should send aggregate-auth header") &&
+       ok;
+  ok = expect(contains(init_request,
+                       "<config-auth client=\"vpn\" type=\"init\">"),
+              "auth init should send config-auth init XML") &&
        ok;
   ok = expect(contains(post_request, "POST / HTTP/1.1\r\n"),
-              "aggregate-auth credentials should POST /") &&
+              "auth reply should POST to gateway root") &&
        ok;
-  ok = expect(contains(post_request, "Content-Type: text/xml; charset=utf-8\r\n"),
-              "aggregate-auth credentials should use XML content type") &&
+  ok = expect(contains(post_request,
+                       "<config-auth client=\"vpn\" type=\"auth-reply\">"),
+              "auth reply should send aggregate-auth XML") &&
        ok;
-  ok = expect(contains(post_request, "Cookie: webvpn_prelogin=PRELOGIN\r\n"),
-              "aggregate-auth credentials should send init cookie") &&
+  ok = expect(contains(post_request, "<opaque>OPAQUE_ONE</opaque>"),
+              "auth reply should echo opaque XML") &&
        ok;
-  ok = expect(contains(post_request, "<username>student@example.invalid</username>"),
-              "aggregate-auth XML should include username") &&
+  ok = expect(contains(post_request, "student@example.invalid"),
+              "auth reply should include username") &&
        ok;
-  ok = expect(contains(post_request, "<password>test-mock pass%!</password>"),
-              "aggregate-auth XML should include escaped password field") &&
+  ok = expect(!contains(init_request, "/+CSCOE+/logon.html") &&
+                  !contains(post_request, "/+CSCOE+/logon.html"),
+              "aggregate-auth flow must not use legacy HTML login path") &&
+       ok;
+  ok = expect(!contains(post_request,
+                        "application/x-www-form-urlencoded") &&
+                  !contains(post_request, "username=student%40example.invalid"),
+              "auth reply must not send form-urlencoded credentials") &&
        ok;
 
   return ok;
 }
 
-bool bad_credentials_return_auth_failed_without_secret_text() {
+bool challenge_handler_can_continue_aggregate_auth() {
+  using ecnuvpn::vpn_engine::protocol::AuthInteractionRequest;
+  using ecnuvpn::vpn_engine::protocol::AuthInteractionResponse;
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  MockTlsStream stream;
+  stream.push_read_text(login_get_ok());
+  stream.push_read_text(login_post_challenge());
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION_AFTER_2FA"));
+
+  auto opts = options();
+  int handler_calls = 0;
+  opts.auth_interaction_handler =
+      [&](const AuthInteractionRequest &request) -> AuthInteractionResponse {
+    ++handler_calls;
+    ok = expect(request.kind == "challenge",
+                "challenge handler should receive challenge kind") && ok;
+    ok = expect(request.label == "Verification code",
+                "challenge handler should receive prompt label") && ok;
+    ok = expect(request.input_type == "password",
+                "challenge handler should receive prompt input type") && ok;
+    AuthInteractionResponse response;
+    response.ok = true;
+    response.value = "654321";
+    return response;
+  };
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(opts);
+
+  ok = expect(auth.ok, "challenge continuation should authenticate") && ok;
+  ok = expect(auth.cookie == "webvpn=SESSION_AFTER_2FA",
+              "challenge continuation should return final webvpn cookie") &&
+       ok;
+  ok = expect(handler_calls == 1,
+              "challenge continuation should prompt exactly once") &&
+       ok;
+  ok = expect(stream.writes().size() == 3,
+              "challenge continuation should send one follow-up auth-reply") &&
+       ok;
+
+  const std::string challenge_reply = as_text(stream.writes()[2]);
+  ok = expect(contains(challenge_reply, "654321"),
+              "challenge follow-up should include handler response") &&
+       ok;
+  ok = expect(contains(challenge_reply, "<opaque>OPAQUE_TWO</opaque>"),
+              "challenge follow-up should echo challenge opaque XML") &&
+       ok;
+  ok = expect(!contains(challenge_reply, MOCK_PASSWORD_SPECIAL),
+              "challenge follow-up should not resend the primary password") &&
+       ok;
+
+  return ok;
+}
+
+bool configured_auth_group_answers_group_select_without_prompt() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  MockTlsStream stream;
+  stream.push_read_text(login_get_group_select());
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
+
+  auto opts = options();
+  opts.auth_group = "staff";
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(opts);
+
+  ok = expect(auth.ok, "configured auth group should authenticate") && ok;
+  ok = expect(auth.cookie == "webvpn=SESSION",
+              "configured auth group should return final cookie") &&
+       ok;
+  ok = expect(stream.writes().size() == 2,
+              "configured auth group should not require follow-up prompt") &&
+       ok;
+
+  const std::string auth_reply = as_text(stream.writes()[1]);
+  ok = expect(contains(auth_reply, "<input name=\"group_list\">staff</input>"),
+              "auth reply should include configured auth group") &&
+       ok;
+
+  return ok;
+}
+
+bool bad_credentials_return_auth_rejected_without_secret_text() {
   using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
@@ -307,11 +450,36 @@ bool bad_credentials_return_auth_failed_without_secret_text() {
   auto auth = transport.authenticate(opts);
 
   ok = expect(!auth.ok, "bad credentials should fail authentication") && ok;
-  ok = expect(auth.error_code == "auth_failed",
-              "bad credentials should return auth_failed") &&
+  ok = expect(auth.error_code == "auth_rejected",
+              "bad credentials should return auth_rejected") &&
        ok;
   ok = expect(auth.error_message.find(opts.password) == std::string::npos,
               "auth error message must not include password") &&
+       ok;
+
+  return ok;
+}
+
+bool host_scan_required_returns_unsupported_without_secret_text() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  MockTlsStream stream;
+  stream.push_read_text(login_get_ok());
+  stream.push_read_text(login_post_host_scan_required());
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(!auth.ok, "host-scan response should fail authentication") && ok;
+  ok = expect(auth.error_code == "csd_required_unsupported",
+              "host-scan response should return csd_required_unsupported") &&
+       ok;
+  ok = expect(auth.error_message.find("CSD_TICKET_SEED") == std::string::npos,
+              "host-scan auth error must not include ticket value") &&
+       ok;
+  ok = expect(auth.error_message.find("CSD_TOKEN_SEED") == std::string::npos,
+              "host-scan auth error must not include token value") &&
        ok;
 
   return ok;
@@ -323,9 +491,10 @@ bool missing_cookie_is_protocol_error() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(http_response(200, "OK",
-                                      {"Content-Type: text/html; charset=utf-8"},
-                                      "<html><body>Login OK</body></html>"));
+  stream.push_read_text(aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"complete\">"
+      "<auth id=\"success\"><message>Login successful</message></auth>"
+      "</config-auth>"));
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
@@ -344,20 +513,21 @@ bool preflight_cookie_without_post_session_is_protocol_error() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok("webvpn_prelogin=PRELOGIN"));
-  stream.push_read_text(http_response(200, "OK",
-                                      {"Content-Type: text/html; charset=utf-8"},
-                                      "<html><body>Login OK</body></html>"));
+  stream.push_read_text(aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"complete\">"
+      "<auth id=\"success\"><message>Login successful</message></auth>"
+      "</config-auth>"));
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
 
   ok = expect(!auth.ok,
-              "preflight-only cookie must not satisfy authentication") &&
+              "tokenless success must not satisfy authentication") &&
        ok;
   ok = expect(auth.error_code == "protocol_error",
               "missing POST session cookie should be a protocol error") &&
        ok;
-  ok = expect(auth.error_message == "missing session token in auth response",
+  ok = expect(auth.error_message == "missing session token in aggregate-auth response",
               "transport should return parser's missing-token error") &&
        ok;
   ok = expect(stream.writes().size() == 2,
@@ -373,7 +543,7 @@ bool connect_cstp_sends_connect_and_parses_metadata() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
   stream.push_read_text(cstp_connect_ok());
 
   ProductionProtocolTransport transport(&stream);
@@ -389,16 +559,40 @@ bool connect_cstp_sends_connect_and_parses_metadata() {
        ok;
   const std::string connect_request = as_text(stream.writes()[2]);
   ok = expect(contains(connect_request, "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\n"),
-              "CSTP should use CONNECT /CSCOSSLC/tunnel") &&
+              "CSTP should use AnyConnect v2 tunnel path") &&
+       ok;
+  ok = expect(!contains(connect_request, "CONNECT /CSCOT/ HTTP/1.1\r\n"),
+              "CSTP must not use legacy CSCOT path") &&
        ok;
   ok = expect(contains(connect_request, "Cookie: webvpn=SESSION\r\n"),
               "CSTP should send auth cookie") &&
        ok;
+  ok = expect(contains(connect_request, "User-Agent: ECNU-VPN native test\r\n"),
+              "CSTP should use configured User-Agent") &&
+       ok;
   ok = expect(contains(connect_request, "X-CSTP-Version: 1\r\n"),
               "CSTP should send version header") &&
        ok;
-  ok = expect(contains(connect_request, "X-CSTP-Address-Type: IPv4\r\n"),
-              "CSTP should request IPv4") &&
+  ok = expect(contains(connect_request, "X-CSTP-Address-Type: IPv6,IPv4\r\n"),
+              "CSTP should request IPv6 and IPv4") &&
+       ok;
+  ok = expect(contains(connect_request, "X-CSTP-Base-MTU: 1290\r\n"),
+              "CSTP should send configured base MTU") &&
+       ok;
+  ok = expect(contains(connect_request, "X-CSTP-MTU: 1290\r\n"),
+              "CSTP should send configured MTU") &&
+       ok;
+  ok = expect(contains(connect_request, "X-CSTP-Accept-Encoding: identity\r\n"),
+              "CSTP should request identity payload encoding") &&
+       ok;
+  ok = expect(contains(connect_request, "X-Transcend-Version: 1\r\n"),
+              "CSTP should send transcend header") &&
+       ok;
+  ok = expect(contains(connect_request, "X-Aggregate-Auth: 1\r\n"),
+              "CSTP should send aggregate-auth header") &&
+       ok;
+  ok = expect(!contains(connect_request, "X-DTLS-"),
+              "CSTP-only request should not advertise DTLS headers") &&
        ok;
   ok = expect(metadata.internal_ip4_address == "10.255.0.10",
               "CSTP metadata should include tunnel address") &&
@@ -407,69 +601,49 @@ bool connect_cstp_sends_connect_and_parses_metadata() {
   ok = expect(metadata.routes.size() == 2,
               "CSTP metadata should include split routes") &&
        ok;
+  ok = expect(metadata.dtls_state == "disabled",
+              "CSTP metadata should expose disabled DTLS state") &&
+       ok;
+  ok = expect(metadata.dtls_fallback_reason ==
+                  "DTLS disabled by native engine policy",
+              "CSTP metadata should explain DTLS policy fallback") &&
+       ok;
 
   return ok;
 }
 
-bool auth_challenge_handler_posts_secondary_password() {
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionRequest;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionResponse;
+bool connect_cstp_with_dtls_enabled_still_avoids_unimplemented_headers() {
   using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(aggregate_challenge_required());
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
+  stream.push_read_text(cstp_connect_ok());
 
   auto opts = options();
-  bool handler_called = false;
-  opts.auth_interaction_handler =
-      [&](const AuthInteractionRequest &request) {
-        handler_called = true;
-        ok = expect(request.kind == "challenge",
-                    "challenge response should call challenge handler") &&
-             ok;
-        AuthInteractionResponse response;
-        response.ok = true;
-        response.value = "123456";
-        return response;
-      };
+  opts.disable_dtls = false;
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(opts);
-
-  ok = expect(auth.ok, "challenge continuation should complete auth") && ok;
-  ok = expect(handler_called, "challenge handler should be called") && ok;
-  ok = expect(stream.writes().size() == 3,
-              "challenge continuation should submit a third aggregate-auth POST") &&
-       ok;
-  const std::string final_request = as_text(stream.writes().back());
-  ok = expect(contains(final_request,
-                       "<secondary_password>123456</secondary_password>"),
-              "challenge continuation should include secondary_password") &&
+  ok = expect(auth.ok, "auth should succeed before DTLS-enabled CSTP connect") &&
        ok;
 
-  return ok;
-}
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  auto connected = transport.connect_cstp(auth.cookie, &metadata);
 
-bool csd_requirement_is_explicitly_unsupported_and_redacted() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
-
-  bool ok = true;
-  MockTlsStream stream;
-  stream.push_read_text(login_get_ok());
-  stream.push_read_text(aggregate_csd_required());
-
-  ProductionProtocolTransport transport(&stream);
-  auto auth = transport.authenticate(options());
-
-  ok = expect(!auth.ok, "CSD requirement should fail authentication") && ok;
-  ok = expect(auth.error_code == "csd_required_unsupported",
-              "CSD requirement should use stable unsupported code") &&
+  ok = expect(connected.ok, "DTLS-enabled CSTP connect should still succeed") &&
        ok;
-  ok = expect(auth.error_message.find("SECRET-CSD-TICKET") == std::string::npos,
-              "CSD error must not include ticket values") &&
+  const std::string connect_request = as_text(stream.writes()[2]);
+  ok = expect(!contains(connect_request, "X-DTLS-"),
+              "DTLS-enabled pre-A14 request must not advertise DTLS headers") &&
+       ok;
+  ok = expect(metadata.dtls_state == "disabled",
+              "DTLS-enabled CSTP without gateway advert should remain TLS") &&
+       ok;
+  ok = expect(metadata.dtls_fallback_reason ==
+                  "gateway did not advertise DTLS",
+              "DTLS-enabled CSTP should record missing gateway advert") &&
        ok;
 
   return ok;
@@ -481,7 +655,7 @@ bool cstp_non_2xx_fails_without_cookie_text() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=SECRET_COOKIE"));
+  stream.push_read_text(login_post_ok("webvpn_session=SECRET_COOKIE"));
   stream.push_read_text(http_response(403, "Forbidden",
                                       {"Content-Type: text/plain; charset=utf-8"},
                                       "CSTP CONNECT rejected"));
@@ -499,6 +673,35 @@ bool cstp_non_2xx_fails_without_cookie_text() {
        ok;
   ok = expect(connected.message.find("SECRET_COOKIE") == std::string::npos,
               "CSTP error message must not include cookie") &&
+       ok;
+
+  return ok;
+}
+
+bool cstp_401_maps_to_auth_expired() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  MockTlsStream stream;
+  stream.push_read_text(login_get_ok());
+  stream.push_read_text(login_post_ok("webvpn_session=SECRET_COOKIE"));
+  stream.push_read_text(http_response(401, "Unauthorized",
+                                      {"Content-Type: text/plain; charset=utf-8"},
+                                      "expired"));
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+  ok = expect(auth.ok, "auth should succeed before expired CSTP cookie") && ok;
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  auto connected = transport.connect_cstp(auth.cookie, &metadata);
+
+  ok = expect(!connected.ok, "expired CSTP cookie should fail") && ok;
+  ok = expect(connected.code == "auth_expired",
+              "CSTP 401 should map to auth_expired") &&
+       ok;
+  ok = expect(connected.message.find("SECRET_COOKIE") == std::string::npos,
+              "auth_expired message must not include cookie") &&
        ok;
 
   return ok;
@@ -568,7 +771,7 @@ bool failed_cstp_connect_body_is_not_reused_by_retry() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
   stream.push_read_text(http_response(403, "Forbidden",
                                       {"Content-Type: text/plain; charset=utf-8"},
                                       "CSTP CONNECT rejected"));
@@ -605,7 +808,7 @@ bool failed_cstp_connect_read_clears_stale_bytes_before_retry() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
@@ -648,7 +851,7 @@ bool exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
   stream.push_read_text(cstp_connect_ok());
 
   const auto inbound = encoded_frame(CstpFrameType::data, bytes({0x45, 0x00, 0x00, 0x14}));
@@ -696,7 +899,7 @@ bool eof_during_cstp_exchange_returns_transport_closed() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
   stream.push_read_text(cstp_connect_ok());
 
   ProductionProtocolTransport transport(&stream);
@@ -727,7 +930,7 @@ bool reset_for_reconnect_closes_stream_and_clears_cookie_state() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=OLD_COOKIE"));
+  stream.push_read_text(login_post_ok("webvpn_session=OLD_COOKIE"));
 
   ProductionProtocolTransport transport(&stream);
   auto first = transport.authenticate(options());
@@ -742,7 +945,7 @@ bool reset_for_reconnect_closes_stream_and_clears_cookie_state() {
        ok;
 
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=NEW_COOKIE"));
+  stream.push_read_text(login_post_ok("webvpn_session=NEW_COOKIE"));
   stream.push_read_text(cstp_connect_ok());
 
   auto second = transport.authenticate(options());
@@ -774,15 +977,14 @@ bool write_errors_redact_password_and_cookie_values() {
 
   bool ok = true;
   MockTlsStream stream;
-  stream.push_read_text(login_get_ok("webvpn_prelogin=SECRET_COOKIE"));
+  stream.push_read_text(login_get_ok());
 
   auto opts = options();
   opts.password = MOCK_PASSWORD;
   stream.fail_write(2,
                     invalid("tls_write_failed",
                             "request failed: password=test-mock-password-placeholder, "
-                            "password=test-mock-password-placeholder, "
-                            "Cookie: webvpn=SECRET_COOKIE"));
+                            "password=test-mock-password-placeholder"));
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(opts);
@@ -791,10 +993,6 @@ bool write_errors_redact_password_and_cookie_values() {
   ok = expect(auth.error_message.find(MOCK_PASSWORD) == std::string::npos,
               "write error should redact raw password") &&
        ok;
-  ok = expect(auth.error_message.find("SECRET_COOKIE") == std::string::npos,
-              "write error should redact cookie value") &&
-       ok;
-
   return ok;
 }
 
@@ -807,7 +1005,7 @@ bool disconnect_sends_best_effort_disconnect_frame_and_closes_stream() {
   bool ok = true;
   MockTlsStream stream;
   stream.push_read_text(login_get_ok());
-  stream.push_read_text(login_post_ok("webvpn=SESSION"));
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
   stream.push_read_text(cstp_connect_ok());
 
   ProductionProtocolTransport transport(&stream);
@@ -841,14 +1039,17 @@ bool disconnect_sends_best_effort_disconnect_frame_and_closes_stream() {
 int main() {
   bool ok = true;
 
-  ok = authenticate_success_sends_aggregate_auth_and_returns_cookie() && ok;
-  ok = bad_credentials_return_auth_failed_without_secret_text() && ok;
+  ok = authenticate_success_sends_login_get_post_and_returns_cookie() && ok;
+  ok = challenge_handler_can_continue_aggregate_auth() && ok;
+  ok = configured_auth_group_answers_group_select_without_prompt() && ok;
+  ok = bad_credentials_return_auth_rejected_without_secret_text() && ok;
+  ok = host_scan_required_returns_unsupported_without_secret_text() && ok;
   ok = missing_cookie_is_protocol_error() && ok;
   ok = preflight_cookie_without_post_session_is_protocol_error() && ok;
   ok = connect_cstp_sends_connect_and_parses_metadata() && ok;
-  ok = auth_challenge_handler_posts_secondary_password() && ok;
-  ok = csd_requirement_is_explicitly_unsupported_and_redacted() && ok;
+  ok = connect_cstp_with_dtls_enabled_still_avoids_unimplemented_headers() && ok;
   ok = cstp_non_2xx_fails_without_cookie_text() && ok;
+  ok = cstp_401_maps_to_auth_expired() && ok;
   ok = oversized_http_header_fails_before_unbounded_read() && ok;
   ok = oversized_http_body_fails_before_body_read() && ok;
   ok = overflowing_http_content_length_fails_before_target_calculation() && ok;

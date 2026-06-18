@@ -31,6 +31,8 @@ inline constexpr const char *EVENTS[] = {
     "HelperReady",
     "AuthSucceeded",
     "AuthFailed",
+    "AuthChallengeRequired",
+    "AuthGroupRequired",
     "CstpConnected",
     "NetworkConfigApplied",
     "PacketLoopStarted",

@@ -364,6 +364,11 @@ bool check_webview_package_policy() {
               "package_ui_shell.py should verify packaged launch argument "
               "targets") &&
        ok;
+  ok = expect(contains(package_script, "APP_ICON_ASSETS") &&
+                  contains(package_script, "verify_app_icon_assets"),
+              "package_ui_shell.py should fail packaging when shared app "
+              "icon assets are missing") &&
+       ok;
   ok = expect(!contains(layout, "electronRoot") &&
                   !contains(layout, "dist-electron") &&
                   !contains(layout, "nativeBinDir"),
@@ -372,6 +377,38 @@ bool check_webview_package_policy() {
        ok;
   ok = expect(contains(embed, "webview") && !contains(embed, "electron"),
               "embed_assets.py should default to WebView renderer assets") &&
+       ok;
+
+  return ok;
+}
+
+bool check_webview_shell_icon_assets() {
+  bool ok = true;
+  const std::vector<fs::path> icon_assets = {
+      "assets/icons/icon.ico",
+      "assets/icons/icon.icns",
+      "assets/icons/icon.png",
+      "assets/icons/icon.svg",
+  };
+
+  for (const fs::path &relative_path : icon_assets) {
+    ok = expect(fs::is_regular_file(kRepoRoot / relative_path),
+                "native WebView shell icon asset should exist: " +
+                    generic_path(relative_path)) &&
+         ok;
+  }
+
+  const FileText cmake = read_file("CMakeLists.txt");
+  ok = expect(contains(cmake, "${CMAKE_SOURCE_DIR}/assets/icons"),
+              "CMake should expose the shared app icon assets to the Windows "
+              "resource compiler") &&
+       ok;
+
+  const FileText rc =
+      read_file("src/platform/win32/ui_shell/exv_ui_win32.rc");
+  ok = expect(contains(rc, "IDI_ECNUVPN_APP ICON \"icon.ico\""),
+              "Windows resource script should embed the shared ECNU VPN app "
+              "icon") &&
        ok;
 
   return ok;
@@ -662,6 +699,7 @@ int main() {
   ok = check_scanner_examples() && ok;
   ok = check_production_files_exist_and_scan_cleanly() && ok;
   ok = check_webview_package_policy() && ok;
+  ok = check_webview_shell_icon_assets() && ok;
   ok = check_retired_electron_artifacts() && ok;
   ok = check_legacy_staging_scripts_removed() && ok;
   ok = check_production_build_scripts() && ok;

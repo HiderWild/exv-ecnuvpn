@@ -11,7 +11,15 @@ namespace ecnuvpn {
 namespace vpn_engine {
 namespace protocol {
 
-enum class CstpFrameType { data, keepalive, dpd_request, dpd_response, disconnect };
+enum class CstpFrameType {
+  data,
+  keepalive,
+  dpd_request,
+  dpd_response,
+  disconnect,
+  compressed,
+  terminate,
+};
 
 struct CstpFrame {
   CstpFrameType type = CstpFrameType::data;

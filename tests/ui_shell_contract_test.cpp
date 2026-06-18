@@ -1,3 +1,4 @@
+#include "app/ui_shell/close_preference.hpp"
 #include "app/ui_shell/host_bridge.hpp"
 #include "app/ui_shell/renderer_assets.hpp"
 #include "app/ui_shell/ui_shell_options.hpp"
@@ -54,6 +55,47 @@ int main() {
   if (!is_allowed_host_action("window.setMode")) {
     return 1;
   }
+
+  const ClosePromptResolution remembered_close =
+      parse_close_prompt_resolution(
+          R"({"id":4,"action":"window.resolveClosePrompt","payload":{"result":{"action":"tray","remember":true}}})");
+  if (remembered_close.action != "tray" || !remembered_close.remember) {
+    return 1;
+  }
+  const ClosePromptResolution cancelled_close =
+      parse_close_prompt_resolution(
+          R"({"id":5,"action":"window.resolveClosePrompt","payload":{"result":"cancel"}})");
+  if (cancelled_close.action != "cancel" || cancelled_close.remember) {
+    return 1;
+  }
+  const ClosePromptResolution invalid_close =
+      parse_close_prompt_resolution(
+          R"({"id":6,"action":"window.resolveClosePrompt","payload":{"result":{"action":"bogus","remember":true}}})");
+  if (invalid_close.action != "cancel" || !invalid_close.remember) {
+    return 1;
+  }
+
+  const fs::path close_pref_root =
+      fs::temp_directory_path() / "ecnuvpn-ui-shell-close-pref";
+  fs::remove_all(close_pref_root);
+  if (close_preference_path(close_pref_root).filename() !=
+      "close-preference.json") {
+    return 1;
+  }
+  if (read_close_preference(close_pref_root).has_value()) {
+    return 1;
+  }
+  if (!write_close_preference(close_pref_root, "quit")) {
+    return 1;
+  }
+  const auto stored_close_preference = read_close_preference(close_pref_root);
+  if (!stored_close_preference || *stored_close_preference != "quit") {
+    return 1;
+  }
+  if (write_close_preference(close_pref_root, "cancel")) {
+    return 1;
+  }
+  fs::remove_all(close_pref_root);
 
   RendererAssets dev = resolve_renderer_assets("http://127.0.0.1:8288", "");
   assert(dev.kind == RendererAssetKind::DevServer);

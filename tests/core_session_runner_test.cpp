@@ -241,6 +241,8 @@ bool test_engine_event_bridge_mapping() {
     struct { std::string engine_type; TunnelEventType expected; } cases[] = {
         {"auth.succeeded",         TunnelEventType::AuthSucceeded},
         {"auth.failed",            TunnelEventType::AuthFailed},
+        {"auth.challenge_required", TunnelEventType::AuthChallengeRequired},
+        {"auth.group_required",     TunnelEventType::AuthGroupRequired},
         {"cstp.connected",         TunnelEventType::CstpConnected},
         {"packet.loop.started",    TunnelEventType::PacketLoopStarted},
         {"transport.closed",       TunnelEventType::TransportClosed},

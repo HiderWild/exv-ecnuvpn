@@ -124,6 +124,12 @@ int main() {
   ok = check_event("AuthSucceeded", exv::core::TunnelEventType::AuthSucceeded) &&
        ok;
   ok = check_event("AuthFailed", exv::core::TunnelEventType::AuthFailed) && ok;
+  ok = check_event("AuthChallengeRequired",
+                   exv::core::TunnelEventType::AuthChallengeRequired) &&
+       ok;
+  ok = check_event("AuthGroupRequired",
+                   exv::core::TunnelEventType::AuthGroupRequired) &&
+       ok;
   ok = check_event("CstpConnected",
                    exv::core::TunnelEventType::CstpConnected) &&
        ok;

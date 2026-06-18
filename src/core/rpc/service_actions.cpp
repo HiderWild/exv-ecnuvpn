@@ -4,6 +4,7 @@
 #include "core/tunnel_controller/tunnel_controller.hpp"
 #include "helper/common/helper_client.hpp"
 #include "helper/common/helper_connector.hpp"
+#include "platform/common/backend_resolver.hpp"
 #include "platform/common/helper_delegating_network_ops.hpp"
 
 #include <nlohmann/json.hpp>
@@ -245,6 +246,18 @@ RpcResponse ServiceActions::uninstall_helper(const RpcRequest& req) {
         return to_rpc_response(exv::core::UseCaseResult::fail(
             "vpn_session_active",
             "Disconnect the VPN session before uninstalling the helper service."));
+    }
+    ecnuvpn::platform::BackendResolveOptions options;
+    options.preferred_mode = "service";
+    options.allow_oneshot = false;
+    options.allow_service_start = false;
+    auto backend = ecnuvpn::platform::resolve_backend(options);
+    if (!backend.value("ok", false)) {
+        return to_rpc_response(exv::core::UseCaseResult::fail(
+            backend.value("code", std::string("helper_unavailable")),
+            backend.value(
+                "message",
+                std::string("No helper instance is available for privileged service maintenance."))));
     }
     return to_rpc_response(use_cases_.uninstall_helper());
 }

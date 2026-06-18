@@ -897,6 +897,7 @@ add_test(NAME repository_hygiene_test COMMAND repository_hygiene_test)
 
 add_executable(ui_shell_contract_test
     tests/ui_shell_contract_test.cpp
+    src/app/ui_shell/close_preference.cpp
     src/app/ui_shell/host_bridge.cpp
     src/app/ui_shell/renderer_assets.cpp
     src/app/ui_shell/ui_shell_options.cpp
@@ -983,6 +984,7 @@ endif()
 if(APPLE)
     add_executable(darwin_wkwebview_runtime_test
         tests/darwin_wkwebview_runtime_test.cpp
+        src/app/ui_shell/close_preference.cpp
         src/app/ui_shell/host_bridge.cpp
         src/platform/darwin/ui_shell/wk_webview_host_darwin.mm
     )
@@ -1044,6 +1046,7 @@ set(EXV_UI_COMMON_SOURCES
     src/app/ui_shell/ui_window.cpp
     src/app/ui_shell/ui_shell_options.cpp
     src/app/ui_shell/renderer_assets.cpp
+    src/app/ui_shell/close_preference.cpp
     src/app/ui_shell/host_bridge.cpp
     src/app/ui_shell/core_rpc_client.cpp
     src/app/ui_shell/core_process_manager.cpp
@@ -1107,6 +1110,7 @@ endif()
 if(WIN32)
 
     list(APPEND EXV_UI_PLATFORM_SOURCES
+        src/platform/win32/ui_shell/exv_ui_win32.rc
         src/platform/win32/ui_shell/webview2_host_win32.cpp
         src/platform/win32/ui_shell/webview2_runtime_win32.cpp
     )
@@ -1132,6 +1136,10 @@ target_include_directories(exv-ui PRIVATE
 
 if(WIN32)
     target_link_libraries(exv-ui PRIVATE advapi32 urlmon shell32 exv-core)
+    target_include_directories(exv-ui PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/platform/win32/ui_shell
+        ${CMAKE_SOURCE_DIR}/assets/icons
+    )
     if(EXV_BUILD_UI_SHELL)
         target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
         target_include_directories(exv-ui PRIVATE "${WEBVIEW2_INCLUDE_DIR}")
@@ -1144,12 +1152,14 @@ if(WIN32)
     endif()
 elseif(APPLE AND EXV_BUILD_UI_SHELL)
     target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
+    target_link_libraries(exv-ui PRIVATE exv-core)
     target_link_libraries(exv-ui PRIVATE "-framework Cocoa" "-framework WebKit")
 elseif(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)
     target_compile_definitions(exv-ui PRIVATE EXV_BUILD_UI_SHELL=1)
     target_include_directories(exv-ui PRIVATE ${WEBKITGTK_INCLUDE_DIRS})
     target_link_directories(exv-ui PRIVATE ${WEBKITGTK_LIBRARY_DIRS})
     target_compile_options(exv-ui PRIVATE ${WEBKITGTK_CFLAGS_OTHER})
+    target_link_libraries(exv-ui PRIVATE exv-core)
     target_link_libraries(exv-ui PRIVATE ${WEBKITGTK_LIBRARIES})
 endif()
 
@@ -1270,8 +1280,8 @@ add_test(NAME native_protocol_session_test COMMAND native_protocol_session_test)
 
 add_executable(native_production_transport_test
     tests/native_production_transport_test.cpp
-    src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/aggregate_auth.cpp
+    src/vpn_engine/protocol/http.cpp
     src/vpn_engine/protocol/auth.cpp
     src/vpn_engine/protocol/cstp.cpp
     src/vpn_engine/protocol/dtls_transport.cpp

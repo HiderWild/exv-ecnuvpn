@@ -163,8 +163,9 @@ bool diagnostic_value_is_secret_like(const std::string &key,
   if (key == "auth_method" && lower == "password")
     return false;
 
-  static constexpr std::array<const char *, 7> kSecretMarkers = {
-      "cookie", "password", "token", "secret", "saml", "csrf", "webvpn="};
+  static constexpr std::array<const char *, 8> kSecretMarkers = {
+      "cookie", "password", "token", "secret", "saml", "csrf",
+      "challenge", "webvpn="};
 
   for (const char *marker : kSecretMarkers) {
     if (lower.find(marker) != std::string::npos)

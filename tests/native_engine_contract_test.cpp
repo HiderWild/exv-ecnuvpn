@@ -4,6 +4,7 @@
 #include "vpn_engine/protocol/session.hpp"
 #include "vpn_engine/session_state.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -103,6 +104,19 @@ public:
     return matches;
   }
 
+  bool contains_field(const std::string &type, const std::string &key,
+                      const std::string &value) const {
+    const std::lock_guard<std::mutex> lock(mu_);
+    for (const auto &event : events_) {
+      if (event.type != type)
+        continue;
+      const auto found = event.fields.find(key);
+      if (found != event.fields.end() && found->second == value)
+        return true;
+    }
+    return false;
+  }
+
 private:
   mutable std::mutex mu_;
   std::vector<ecnuvpn::vpn_engine::VpnEngineEvent> events_;
@@ -114,12 +128,19 @@ public:
   struct State {
     bool auth_ok = true;
     bool cstp_ok = true;
+    std::string auth_error_code = "auth_failed";
+    std::string auth_error_message = "invalid username or password";
+    std::string auth_prompt_label;
+    std::string auth_prompt_type;
+    std::string auth_group_options;
     int auth_count = 0;
     int cstp_count = 0;
     int exchange_count = 0;
     int disconnect_count = 0;
     int reset_count = 0;
     int cstp_mtu = 1400;
+    int keepalive_seconds = 0;
+    std::atomic<int> keepalive_control_count{0};
     std::string last_cookie;
     ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions last_options;
   };
@@ -135,8 +156,11 @@ public:
     if (!state_->auth_ok) {
       ecnuvpn::vpn_engine::protocol::AuthResult auth;
       auth.ok = false;
-      auth.error_code = "auth_failed";
-      auth.error_message = "invalid username or password";
+      auth.error_code = state_->auth_error_code;
+      auth.error_message = state_->auth_error_message;
+      auth.interaction_prompt_label = state_->auth_prompt_label;
+      auth.interaction_prompt_type = state_->auth_prompt_type;
+      auth.interaction_group_options = state_->auth_group_options;
       return auth;
     }
 
@@ -161,6 +185,7 @@ public:
     metadata->internal_ip4_address = "10.255.0.10";
     metadata->internal_ip4_netmask = "255.255.255.0";
     metadata->mtu = state_->cstp_mtu;
+    metadata->keepalive_seconds = state_->keepalive_seconds;
     metadata->routes = {"198.51.100.0/24"};
     metadata->server_bypass_ips = {"192.0.2.10"};
     return {};
@@ -178,11 +203,12 @@ public:
   }
 
   ecnuvpn::vpn_engine::ValidationResult
-  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind /*kind*/)
-      override {
+  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind kind) override {
     std::unique_lock<std::mutex> lock(transport_mu_);
     if (transport_closed_)
       return {false, "transport_closed", "fake transport is closed"};
+    if (kind == ecnuvpn::vpn_engine::protocol::InboundFrameKind::keepalive)
+      ++state_->keepalive_control_count;
     return {};
   }
 
@@ -748,6 +774,48 @@ bool test_dtls_config_flag_does_not_block_native_engine() {
   return ok;
 }
 
+bool test_dtls_enabled_emits_unavailable_and_continues_cstp() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  auto device = std::make_shared<PacketDeviceState>();
+  RecordingEventSink events;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = [&device]() {
+    return make_scripted_device(
+        device,
+        std::vector<std::vector<std::uint8_t>>{{0x45, 0x00, 0x00, 0x2a}});
+  };
+  deps.event_sink = &events;
+
+  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
+  cfg.disable_dtls = false;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg, deps);
+  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+
+  ok = expect(started.ok,
+              "DTLS-enabled native start should continue over CSTP") &&
+       ok;
+  ok = expect(events.contains("dtls.unavailable"),
+              "DTLS-enabled pre-A14 start should emit dtls.unavailable") &&
+       ok;
+  ok = expect(events.contains_field("dtls.unavailable", "code",
+                                    "dtls_unavailable"),
+              "DTLS unavailable event should carry stable code") &&
+       ok;
+  ok = expect(events.contains("packet.loop.started"),
+              "DTLS unavailable must not block packet loop startup") &&
+       ok;
+
+  session.stop();
+  return ok;
+}
+
 bool test_auth_failure_maps_error_without_device() {
   bool ok = true;
 
@@ -786,6 +854,109 @@ bool test_auth_failure_maps_error_without_device() {
        ok;
   ok = expect(!status.running && !status.network_ready,
               "auth failure must not leave session running") &&
+       ok;
+
+  return ok;
+}
+
+bool test_auth_challenge_emits_interaction_event_without_device() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  transport->auth_ok = false;
+  transport->auth_error_code = "auth_challenge_required";
+  transport->auth_error_message = "verification required";
+  transport->auth_prompt_label = "Verification code";
+  transport->auth_prompt_type = "password";
+  RecordingEventSink events;
+  int packet_devices_created = 0;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = [&packet_devices_created]() {
+    ++packet_devices_created;
+    return make_scripted_device(std::make_shared<PacketDeviceState>());
+  };
+  deps.event_sink = &events;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+
+  ok = expect(!started.ok,
+              "auth challenge should stop native start until UI response path exists") &&
+       ok;
+  ok = expect(started.code == "auth_challenge_required",
+              "auth challenge should preserve stable error code") &&
+       ok;
+  ok = expect(status.error_code == "auth_challenge_required",
+              "status should retain auth challenge code") &&
+       ok;
+  ok = expect(events.contains("auth.challenge_required"),
+              "auth challenge should emit interaction event") &&
+       ok;
+  ok = expect(events.contains_field("auth.challenge_required", "label",
+                                    "Verification code"),
+              "challenge event should include prompt label") &&
+       ok;
+  ok = expect(events.contains_field("auth.challenge_required", "input_type",
+                                    "password"),
+              "challenge event should include prompt input type") &&
+       ok;
+  ok = expect(packet_devices_created == 0,
+              "auth challenge must not create packet device") &&
+       ok;
+
+  return ok;
+}
+
+bool test_csd_required_emits_unsupported_event_without_device() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  transport->auth_ok = false;
+  transport->auth_error_code = "csd_required_unsupported";
+  transport->auth_error_message = "AnyConnect host-scan is required";
+  RecordingEventSink events;
+  int packet_devices_created = 0;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = [&packet_devices_created]() {
+    ++packet_devices_created;
+    return make_scripted_device(std::make_shared<PacketDeviceState>());
+  };
+  deps.event_sink = &events;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+
+  ok = expect(!started.ok,
+              "host-scan requirement should stop native start") &&
+       ok;
+  ok = expect(started.code == "csd_required_unsupported",
+              "host-scan requirement should preserve stable error code") &&
+       ok;
+  ok = expect(status.error_code == "csd_required_unsupported",
+              "status should retain host-scan unsupported code") &&
+       ok;
+  ok = expect(events.contains("csd.required_unsupported"),
+              "host-scan requirement should emit CSD unsupported event") &&
+       ok;
+  ok = expect(events.contains_field("csd.required_unsupported", "code",
+                                    "csd_required_unsupported"),
+              "CSD unsupported event should carry stable code") &&
+       ok;
+  ok = expect(events.contains("auth.failed"),
+              "host-scan requirement should still emit auth.failed") &&
+       ok;
+  ok = expect(packet_devices_created == 0,
+              "host-scan requirement must not create packet device") &&
        ok;
 
   return ok;
@@ -918,6 +1089,46 @@ bool test_stop_cancels_packet_loop_and_closes_device() {
               "stop should clear running and network_ready status") &&
        ok;
 
+  return ok;
+}
+
+bool test_gateway_keepalive_metadata_drives_native_session_timer() {
+  bool ok = true;
+
+  auto transport = std::make_shared<FakeProtocolTransport::State>();
+  transport->keepalive_seconds = 1;
+  auto device = std::make_shared<PacketDeviceState>();
+  RecordingEventSink events;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  deps.transport_factory = [&transport]() {
+    return make_fake_transport(transport);
+  };
+  deps.packet_device_factory = [&device]() {
+    return make_polling_device(device);
+  };
+  deps.protocol_options_configurator =
+      [](ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions *options) {
+        if (options)
+          options->liveness_idle_polls_per_second = 2;
+      };
+  deps.event_sink = &events;
+
+  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+
+  ok = expect(started.ok,
+              "native start should succeed before keepalive metadata test") &&
+       ok;
+  ok = expect(wait_until([&events]() { return events.contains("keepalive.sent"); },
+                         std::chrono::milliseconds(1500)),
+              "gateway keepalive metadata should emit keepalive.sent") &&
+       ok;
+  ok = expect(transport->keepalive_control_count.load() >= 1,
+              "gateway keepalive metadata should send a keepalive control frame") &&
+       ok;
+
+  session.stop();
   return ok;
 }
 
@@ -1118,10 +1329,14 @@ int main() {
   ok = test_injected_fake_start_runs_packet_loop_and_cleans_up() && ok;
   ok = test_network_configurator_runs_before_packet_open() && ok;
   ok = test_dtls_config_flag_does_not_block_native_engine() && ok;
+  ok = test_dtls_enabled_emits_unavailable_and_continues_cstp() && ok;
   ok = test_auth_failure_maps_error_without_device() && ok;
+  ok = test_auth_challenge_emits_interaction_event_without_device() && ok;
+  ok = test_csd_required_emits_unsupported_event_without_device() && ok;
   ok = test_cstp_failure_maps_error_without_device_open() && ok;
   ok = test_packet_loop_start_failure_emits_native_start_failed() && ok;
   ok = test_stop_cancels_packet_loop_and_closes_device() && ok;
+  ok = test_gateway_keepalive_metadata_drives_native_session_timer() && ok;
   ok = test_default_dependencies_expose_factories() && ok;
   ok = test_default_tls_only_start_does_not_report_missing_transport_factory() &&
        ok;

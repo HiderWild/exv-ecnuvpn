@@ -47,9 +47,33 @@ int main() {
   meta.internal_ip4_netmask = "255.255.255.255";
   meta.mtu = 1290;
   meta.routes = {"59.78.176.0/20"};
+  meta.split_include_routes = {"59.78.176.0/20"};
+  meta.split_exclude_routes = {"203.0.113.0/24"};
   meta.server_bypass_ips = {"1.2.3.4"};
   meta.dtls_state = "attempted_and_fell_back_to_tls";
   meta.dtls_fallback_reason = "native DTLS backend unavailable; using CSTP/TLS";
+  meta.ip6_address = "2001:db8::2";
+  meta.ip6_prefix = 64;
+  meta.dns_servers = {"10.10.10.10"};
+  meta.nbns_servers = {"10.10.20.10"};
+  meta.default_domain = "ecnu.example.invalid";
+  meta.search_domains = {"campus.example.invalid"};
+  meta.tunnel_all_dns = true;
+  meta.banner = "Welcome student";
+  meta.keepalive_seconds = 20;
+  meta.dpd_seconds = 30;
+  meta.rekey_seconds = 3600;
+  meta.rekey_method = "new-tunnel";
+  meta.lease_duration_seconds = 7200;
+  meta.idle_timeout_seconds = 1800;
+  meta.session_timeout_seconds = 28800;
+  meta.disconnected_timeout_seconds = 60;
+  meta.dtls_mtu = 1360;
+  meta.dtls_port = 443;
+  meta.dtls_session_id = "DTLS_SESSION";
+  meta.dtls_cipher_suite = "AES256-SHA";
+  meta.dtls12_cipher_suite = "TLS_PSK_WITH_AES_256_GCM_SHA384";
+  meta.content_encoding = "lzs";
 
   state.tunnel_configured(meta);
   ok = expect(state.phase == SessionPhase::configuring_network,
@@ -97,6 +121,33 @@ int main() {
        ok;
   ok = expect(!j.contains("pid"),
               "session_state JSON must not require an OpenConnect PID") &&
+       ok;
+  const auto tunnel = j["tunnel_metadata"];
+  ok = expect(tunnel.value("ip6_address", std::string()) == "2001:db8::2",
+              "tunnel metadata JSON should expose IPv6 address") &&
+       ok;
+  ok = expect(tunnel.value("ip6_prefix", 0) == 64,
+              "tunnel metadata JSON should expose IPv6 prefix") &&
+       ok;
+  ok = expect(tunnel["dns_servers"].size() == 1 &&
+                  tunnel["dns_servers"][0] == "10.10.10.10",
+              "tunnel metadata JSON should expose DNS servers") &&
+       ok;
+  ok = expect(tunnel["split_exclude_routes"].size() == 1 &&
+                  tunnel["split_exclude_routes"][0] == "203.0.113.0/24",
+              "tunnel metadata JSON should expose split exclude routes") &&
+       ok;
+  ok = expect(tunnel.value("tunnel_all_dns", false),
+              "tunnel metadata JSON should expose tunnel-all-DNS") &&
+       ok;
+  ok = expect(tunnel.value("banner", std::string()) == "Welcome student",
+              "tunnel metadata JSON should expose banner") &&
+       ok;
+  ok = expect(tunnel.value("keepalive_seconds", 0) == 20,
+              "tunnel metadata JSON should expose keepalive") &&
+       ok;
+  ok = expect(tunnel.value("dtls_session_id", std::string()) == "DTLS_SESSION",
+              "tunnel metadata JSON should expose DTLS session id") &&
        ok;
 
   state.stopped();

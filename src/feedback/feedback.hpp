@@ -23,6 +23,21 @@ inline constexpr const char *kHelperUnavailable = "helper_unavailable";
 inline constexpr const char *kNetworkUnreachable = "network_unreachable";
 inline constexpr const char *kUserCancelled = "user_cancelled";
 inline constexpr const char *kInvalidRequest = "invalid_request";
+inline constexpr const char *kAuthProtocolMismatch = "auth_protocol_mismatch";
+inline constexpr const char *kAuthRejected = "auth_rejected";
+inline constexpr const char *kAuthChallengeRequired = "auth_challenge_required";
+inline constexpr const char *kAuthGroupRequired = "auth_group_required";
+inline constexpr const char *kAuthExpired = "auth_expired";
+inline constexpr const char *kCsdRequiredUnsupported =
+    "csd_required_unsupported";
+inline constexpr const char *kDtlsUnavailable = "dtls_unavailable";
+inline constexpr const char *kTunnelDisconnected = "tunnel_disconnected";
+inline constexpr const char *kSessionTimeout = "session_timeout";
+inline constexpr const char *kIdleTimeout = "idle_timeout";
+inline constexpr const char *kRekeyUnsupported = "rekey_unsupported";
+inline constexpr const char *kCstpCompressedUnsupported =
+    "cstp_compressed_unsupported";
+inline constexpr const char *kUnsupportedExtraArgs = "unsupported_extra_args";
 // Named generic fallback. INVARIANT: a failed result never carries an empty
 // code, so the frontend never has to render a context-free "Failed..." popup.
 inline constexpr const char *kConnectionFailed = "connection_failed";

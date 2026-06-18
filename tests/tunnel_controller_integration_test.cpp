@@ -195,10 +195,16 @@ public:
         }
         metadata->interface_name = "fake-cstp0";
         metadata->internal_ip4_address = "10.255.0.12";
-        metadata->internal_ip4_netmask = "255.255.255.0";
+        metadata->internal_ip4_netmask = "255.255.255.128";
         metadata->mtu = 1400;
-        metadata->routes = {"198.51.100.0/24"};
+        metadata->split_include_routes = {"198.51.100.0/24"};
+        metadata->routes = metadata->split_include_routes;
+        metadata->split_exclude_routes = {"203.0.113.0/24"};
         metadata->server_bypass_ips = {"192.0.2.10", "192.0.2.11/32"};
+        metadata->dns_servers = {"10.10.10.10", "10.10.10.11"};
+        metadata->default_domain = "ecnu.example.invalid";
+        metadata->search_domains = {"campus.example.invalid"};
+        metadata->tunnel_all_dns = true;
         return {};
     }
 
@@ -412,6 +418,7 @@ ecnuvpn::Config native_controller_config() {
     cfg.username = "alice";
     cfg.useragent = "ECNU-VPN controller integration test";
     cfg.mtu = 1290;
+    cfg.routes = {"198.51.100.0/24", "198.51.101.0/24"};
     return cfg;
 }
 
@@ -692,19 +699,45 @@ bool test_native_network_config_preserves_routes_and_bypass() {
     ok = expect(configs.size() == 1,
                 "2e: native path should apply exactly one platform tunnel config") && ok;
     if (!configs.empty()) {
+        ok = expect(configs[0].interface_address == "10.255.0.12/25",
+                    "2e: platform tunnel config should derive prefix from CSTP netmask") && ok;
         bool has_cstp_route = false;
+        bool has_manual_route = false;
+        int duplicate_count = 0;
         for (const auto& route : configs[0].routes) {
             if (route.destination == "198.51.100.0/24") {
                 has_cstp_route = true;
-                break;
+                ++duplicate_count;
+            }
+            if (route.destination == "198.51.101.0/24") {
+                has_manual_route = true;
             }
         }
         ok = expect(has_cstp_route,
                     "2e: platform tunnel config should preserve CSTP route destination") && ok;
+        ok = expect(has_manual_route,
+                    "2e: platform tunnel config should merge manual configured routes") && ok;
+        ok = expect(duplicate_count == 1,
+                    "2e: platform tunnel config should de-duplicate route destinations") && ok;
         ok = expect(configs[0].server_bypass_ips.size() == 2 &&
                         configs[0].server_bypass_ips[0] == "192.0.2.10" &&
                         configs[0].server_bypass_ips[1] == "192.0.2.11/32",
                     "2e: platform tunnel config should preserve all CSTP server bypass IPs") && ok;
+        ok = expect(configs[0].dns.servers.size() == 2 &&
+                        configs[0].dns.servers[0] == "10.10.10.10" &&
+                        configs[0].dns.servers[1] == "10.10.10.11",
+                    "2e: platform tunnel config should map CSTP DNS servers") && ok;
+        ok = expect(configs[0].dns.search_domain == "ecnu.example.invalid",
+                    "2e: platform tunnel config should map default domain") && ok;
+        ok = expect(configs[0].dns.suffixes.size() == 1 &&
+                        configs[0].dns.suffixes[0] == "campus.example.invalid",
+                    "2e: platform tunnel config should map search domains") && ok;
+        ok = expect(configs[0].exclude_routes.size() == 1 &&
+                        configs[0].exclude_routes[0] == "203.0.113.0/24",
+                    "2e: platform tunnel config should map split exclude routes") && ok;
+        ok = expect(configs[0].exclude_route.has_value() &&
+                        configs[0].exclude_route.value() == "203.0.113.0/24",
+                    "2e: platform tunnel config should keep first exclude route in legacy field") && ok;
     }
 
     return ok;

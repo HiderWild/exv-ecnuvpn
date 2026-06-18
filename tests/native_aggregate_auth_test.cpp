@@ -1,193 +1,299 @@
 #include "vpn_engine/protocol/aggregate_auth.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
-#include <vector>
 
 namespace {
 
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
-  std::cerr << "EXPECT FAILED: " << message << '\n';
+  std::cerr << "EXPECT FAILED: " << message << std::endl;
   return false;
 }
 
-ecnuvpn::vpn_engine::protocol::HttpResponse response(
-    int status, std::string body,
-    std::vector<std::string> set_cookies = {}) {
-  ecnuvpn::vpn_engine::protocol::HttpResponse out;
-  out.status = status;
-  out.body = std::move(body);
-  if (!set_cookies.empty()) {
-    out.header_values["set-cookie"] = set_cookies;
-    std::string flattened;
-    for (const auto &cookie : set_cookies) {
-      if (!flattened.empty())
-        flattened += ", ";
-      flattened += cookie;
+std::string fixture_text(const std::filesystem::path &relative) {
+  std::filesystem::path cursor = std::filesystem::current_path();
+  for (int i = 0; i < 8; ++i) {
+    const std::filesystem::path candidate = cursor / relative;
+    if (std::filesystem::exists(candidate)) {
+      std::ifstream in(candidate, std::ios::binary);
+      return std::string(std::istreambuf_iterator<char>(in),
+                         std::istreambuf_iterator<char>());
     }
-    out.headers["set-cookie"] = flattened;
+    if (!cursor.has_parent_path() || cursor == cursor.parent_path())
+      break;
+    cursor = cursor.parent_path();
   }
-  return out;
+  return {};
+}
+
+bool has_field(const ecnuvpn::vpn_engine::protocol::AggregateAuthResponse &r,
+               const std::string &name) {
+  for (const auto &field : r.fields) {
+    if (field.name == name)
+      return true;
+  }
+  return false;
+}
+
+const ecnuvpn::vpn_engine::protocol::AggregateAuthField *
+field_named(const ecnuvpn::vpn_engine::protocol::AggregateAuthResponse &r,
+            const std::string &name) {
+  for (const auto &field : r.fields) {
+    if (field.name == name)
+      return &field;
+  }
+  return nullptr;
+}
+
+bool test_builds_deterministic_init_xml() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  AggregateAuthInitRequest request;
+  request.server_url = "https://vpn.example.invalid/";
+  request.device_id = "ECNUVPN-TEST-DEVICE";
+  request.version = "ECNUVPN-NATIVE-TEST";
+
+  const std::string xml = build_aggregate_auth_init_xml(request);
+
+  bool ok = true;
+  ok = expect(xml.find("<config-auth client=\"vpn\" type=\"init\">") !=
+                  std::string::npos,
+              "init XML should use AnyConnect aggregate-auth root") &&
+       ok;
+  ok = expect(xml.find("<version who=\"vpn\">ECNUVPN-NATIVE-TEST</version>") !=
+                  std::string::npos,
+              "init XML should include deterministic VPN version") &&
+       ok;
+  ok = expect(xml.find("<device-id>ECNUVPN-TEST-DEVICE</device-id>") !=
+                  std::string::npos,
+              "init XML should include device id") &&
+       ok;
+  ok = expect(xml.find("<group-access>https://vpn.example.invalid/</group-access>") !=
+                  std::string::npos,
+              "init XML should include group-access server URL") &&
+       ok;
+  return ok;
+}
+
+bool test_parses_auth_request_and_echoes_opaque() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  AggregateAuthResponse response;
+  const auto parsed = parse_aggregate_auth_response(
+      fixture_text("tests/fixtures/native_anyconnect_v2/auth_init_response.xml"),
+      &response);
+
+  bool ok = true;
+  ok = expect(parsed.ok, "auth-request fixture should parse") && ok;
+  ok = expect(response.type == AggregateAuthResponseType::auth_request,
+              "init fixture should parse as auth_request") &&
+       ok;
+  ok = expect(has_field(response, "username"),
+              "auth-request should expose username field") &&
+       ok;
+  ok = expect(has_field(response, "password"),
+              "auth-request should expose password field") &&
+       ok;
+  ok = expect(has_field(response, "group_list"),
+              "auth-request should expose group field") &&
+       ok;
+  ok = expect(response.opaque_xml.size() == 1 &&
+                  response.opaque_xml[0] == "<opaque>OPAQUE_ONE</opaque>",
+              "parser should preserve opaque XML for byte-stable echo") &&
+       ok;
+
+  AggregateAuthReplyRequest reply;
+  reply.username = "student@example.invalid";
+  reply.password = "test-mock-password-placeholder";
+  reply.selected_group = "students";
+  reply.opaque_xml = response.opaque_xml;
+
+  const std::string xml = build_aggregate_auth_reply_xml(reply);
+  ok = expect(xml.find("<config-auth client=\"vpn\" type=\"auth-reply\">") !=
+                  std::string::npos,
+              "auth reply should use aggregate-auth root") &&
+       ok;
+  ok = expect(xml.find("<opaque>OPAQUE_ONE</opaque>") != std::string::npos,
+              "auth reply should echo opaque XML") &&
+       ok;
+  ok = expect(xml.find("student@example.invalid") != std::string::npos,
+              "auth reply should include username") &&
+       ok;
+  return ok;
+}
+
+bool test_parses_success_token_without_formatting_cookie() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  AggregateAuthResponse response;
+  const auto parsed = parse_aggregate_auth_response(
+      fixture_text("tests/fixtures/native_anyconnect_v2/auth_success_response.xml"),
+      &response);
+
+  bool ok = true;
+  ok = expect(parsed.ok, "success fixture should parse") && ok;
+  ok = expect(response.type == AggregateAuthResponseType::success,
+              "success fixture should parse as success") &&
+       ok;
+  ok = expect(response.session_token == "V2_SESSION_TOKEN",
+              "success fixture should expose session token") &&
+       ok;
+  ok = expect(response.session_cookie.empty(),
+              "aggregate parser should not format webvpn cookie") &&
+       ok;
+  return ok;
+}
+
+bool test_parses_challenge_and_error_shapes() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  AggregateAuthResponse challenge;
+  const auto parsed_challenge = parse_aggregate_auth_response(
+      fixture_text("tests/fixtures/native_anyconnect_v2/auth_challenge_response.xml"),
+      &challenge);
+
+  const std::string error_xml =
+      "<config-auth client=\"vpn\" type=\"auth-reply\">"
+      "<auth id=\"error\"><message>Invalid credentials</message></auth>"
+      "<error>Login failed</error>"
+      "</config-auth>";
+
+  AggregateAuthResponse error;
+  const auto parsed_error = parse_aggregate_auth_response(error_xml, &error);
+
+  bool ok = true;
+  ok = expect(parsed_challenge.ok, "challenge fixture should parse") && ok;
+  ok = expect(challenge.type == AggregateAuthResponseType::challenge,
+              "secondary password fixture should parse as challenge") &&
+       ok;
+  ok = expect(has_field(challenge, "secondary_password"),
+              "challenge fixture should expose secondary password field") &&
+       ok;
+  const auto *challenge_field = field_named(challenge, "secondary_password");
+  ok = expect(challenge_field && challenge_field->label == "Verification code",
+              "challenge fixture should expose prompt label") &&
+       ok;
+  ok = expect(parsed_error.ok, "error XML should parse as structured response") &&
+       ok;
+  ok = expect(error.type == AggregateAuthResponseType::error,
+              "error XML should map to error response type") &&
+       ok;
+  ok = expect(error.error_code == "auth_rejected",
+              "auth error should map to stable auth_rejected code") &&
+       ok;
+  return ok;
+}
+
+bool test_parses_group_select_options() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  const std::string group_xml =
+      "<config-auth client=\"vpn\" type=\"auth-request\">"
+      "<auth id=\"main\"><message>Select VPN group.</message><form>"
+      "<select name=\"group_list\" label=\"VPN group\">"
+      "<option value=\"students\">Students</option>"
+      "<option value=\"staff\">Faculty and staff</option>"
+      "</select>"
+      "</form></auth><opaque>OPAQUE_ONE</opaque></config-auth>";
+
+  AggregateAuthResponse group;
+  const auto parsed = parse_aggregate_auth_response(group_xml, &group);
+
+  bool ok = true;
+  ok = expect(parsed.ok, "group-select XML should parse") && ok;
+  ok = expect(group.type == AggregateAuthResponseType::group_select,
+              "select-only group response should parse as group_select") &&
+       ok;
+  const auto *group_field = field_named(group, "group_list");
+  ok = expect(group_field != nullptr, "group field should be present") && ok;
+  ok = expect(group_field && group_field->label == "VPN group",
+              "group field should expose label") &&
+       ok;
+  ok = expect(group_field && group_field->options.size() == 2,
+              "group field should expose visible choices") &&
+       ok;
+  ok = expect(group_field && group_field->options[0].value == "students" &&
+                  group_field->options[0].label == "Students",
+              "first group option should preserve value and label") &&
+       ok;
+  ok = expect(group_field && group_field->options[1].value == "staff" &&
+                  group_field->options[1].label == "Faculty and staff",
+              "second group option should preserve value and label") &&
+       ok;
+  return ok;
+}
+
+bool test_parses_host_scan_metadata() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  const std::string host_scan_xml =
+      "<config-auth client=\"vpn\" type=\"auth-reply\">"
+      "<auth id=\"main\"><message>Host scan required</message></auth>"
+      "<host-scan ticket=\"CSD_TICKET_SEED\" token=\"CSD_TOKEN_SEED\" "
+      "base-uri=\"/+CSCOE+/sdesktop/\" wait-uri=\"/+CSCOE+/sdesktop/wait.html\" />"
+      "<opaque>OPAQUE_ONE</opaque>"
+      "</config-auth>";
+
+  AggregateAuthResponse response;
+  const auto parsed = parse_aggregate_auth_response(host_scan_xml, &response);
+
+  bool ok = true;
+  ok = expect(parsed.ok, "host-scan XML should parse") && ok;
+  ok = expect(response.type == AggregateAuthResponseType::host_scan,
+              "host-scan XML should map to host_scan response type") &&
+       ok;
+  ok = expect(response.host_scan.ticket == "CSD_TICKET_SEED",
+              "host-scan parser should expose ticket metadata") &&
+       ok;
+  ok = expect(response.host_scan.token == "CSD_TOKEN_SEED",
+              "host-scan parser should expose token metadata") &&
+       ok;
+  ok = expect(response.host_scan.base_uri == "/+CSCOE+/sdesktop/",
+              "host-scan parser should expose base URI") &&
+       ok;
+  ok = expect(response.host_scan.wait_uri == "/+CSCOE+/sdesktop/wait.html",
+              "host-scan parser should expose wait URI") &&
+       ok;
+  return ok;
+}
+
+bool test_rejects_html_and_oversized_responses() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  AggregateAuthResponse response;
+  const auto html =
+      parse_aggregate_auth_response("<html><form></form></html>", &response);
+  const auto too_large =
+      parse_aggregate_auth_response(std::string(1024 * 1024 + 1, 'x'),
+                                    &response);
+
+  bool ok = true;
+  ok = expect(!html.ok, "HTML response should fail") && ok;
+  ok = expect(html.code == "auth_protocol_mismatch",
+              "HTML should map to auth_protocol_mismatch") &&
+       ok;
+  ok = expect(!too_large.ok, "oversized XML response should fail") && ok;
+  ok = expect(too_large.code == "auth_response_too_large",
+              "oversized XML should map to stable code") &&
+       ok;
+  return ok;
 }
 
 } // namespace
 
 int main() {
   bool ok = true;
-
-  {
-    const std::string xml =
-        ecnuvpn::vpn_engine::protocol::make_aggregate_auth_reply_xml(
-            "alice&bob", "p<ass&word", "students", "123456");
-    ok = expect(xml.find("<config-auth client=\"vpn\" type=\"auth-reply\">") !=
-                    std::string::npos,
-                "auth reply should use aggregate-auth root") &&
-         ok;
-    ok = expect(xml.find("<username>alice&amp;bob</username>") !=
-                    std::string::npos,
-                "username should be XML-escaped") &&
-         ok;
-    ok = expect(xml.find("<password>p&lt;ass&amp;word</password>") !=
-                    std::string::npos,
-                "password should be XML-escaped") &&
-         ok;
-    ok = expect(xml.find("<secondary_password>123456</secondary_password>") !=
-                    std::string::npos,
-                "secondary password should be included when provided") &&
-         ok;
-  }
-
-  {
-    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
-        response(200,
-                 "<config-auth><session-token>SESSION&amp;TOKEN</session-token>"
-                 "</config-auth>"));
-    ok = expect(parsed.ok, "session-token response should parse") && ok;
-    ok = expect(parsed.cookie == "webvpn=SESSION&TOKEN",
-                "session-token should map to webvpn cookie") &&
-         ok;
-  }
-
-  {
-    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
-        response(200, "<config-auth/>",
-                 {"webvpn=COOKIE_FROM_HEADER; Path=/; Secure"}));
-    ok = expect(parsed.ok, "webvpn Set-Cookie should parse") && ok;
-    ok = expect(parsed.cookie == "webvpn=COOKIE_FROM_HEADER",
-                "Set-Cookie should map to cookie pair") &&
-         ok;
-  }
-
-  {
-    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
-        response(200,
-                 "<config-auth><host-scan><ticket>SECRET-TICKET</ticket>"
-                 "</host-scan></config-auth>"));
-    ok = expect(!parsed.ok && parsed.error_code == "csd_required_unsupported",
-                "host-scan should be explicitly unsupported") &&
-         ok;
-    ok = expect(parsed.error_message.find("SECRET-TICKET") == std::string::npos,
-                "host-scan error should not include ticket values") &&
-         ok;
-  }
-
-  {
-    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
-        response(200,
-                 "<config-auth><auth><select name=\"group\">"
-                 "<option value=\"students\">Students</option>"
-                 "<option value=\"staff\">Staff</option>"
-                 "</select></auth></config-auth>"));
-    ok = expect(!parsed.ok && parsed.error_code == "auth_group_required",
-                "group selection should be reported as continuation") &&
-         ok;
-    ok = expect(parsed.prompt.kind == "group",
-                "group prompt should expose group kind") &&
-         ok;
-    ok = expect(parsed.prompt.options.size() == 2 &&
-                    parsed.prompt.options[0] == "students" &&
-                    parsed.prompt.options[1] == "staff",
-                "group prompt should parse option values") &&
-         ok;
-  }
-
-  {
-    const std::string xml =
-        ecnuvpn::vpn_engine::protocol::make_aggregate_auth_reply_xml(
-            "student", "primary", "staff", "654321");
-    ok = expect(xml.find("<group>staff</group>") != std::string::npos,
-                "follow-up auth reply should preserve selected group") &&
-         ok;
-    ok = expect(xml.find("<secondary_password>654321</secondary_password>") !=
-                    std::string::npos,
-                "follow-up auth reply should include challenge response") &&
-         ok;
-  }
-
-  {
-    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
-        response(200,
-                 "<config-auth><auth>"
-                 "<input name=\"secondary_password\" type=\"password\" "
-                 "label=\"Duo passcode\"/>"
-                 "</auth></config-auth>"));
-    ok = expect(!parsed.ok && parsed.error_code == "auth_challenge_required",
-                "password-plus-token form should be reported as challenge") &&
-         ok;
-    ok = expect(parsed.prompt.kind == "challenge",
-                "token prompt should expose challenge kind") &&
-         ok;
-    ok = expect(parsed.prompt.label == "Duo passcode",
-                "token prompt should use structured input label") &&
-         ok;
-    ok = expect(parsed.prompt.input_type == "password",
-                "token prompt should use structured input type") &&
-         ok;
-  }
-
-  {
-    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
-        response(200,
-                 "<config-auth><auth>"
-                 "<input name=\"answer\" type=\"text\" "
-                 "label=\"Security answer\"/>"
-                 "</auth></config-auth>"));
-    ok = expect(!parsed.ok && parsed.error_code == "auth_challenge_required",
-                "informational text prompt should be reported as challenge") &&
-         ok;
-    ok = expect(parsed.prompt.label == "Security answer",
-                "text prompt should use structured input label") &&
-         ok;
-    ok = expect(parsed.prompt.input_type == "text",
-                "text prompt should use structured input type") &&
-         ok;
-  }
-
-  {
-    auto parsed = ecnuvpn::vpn_engine::protocol::parse_aggregate_auth_response(
-        response(200,
-                 "<config-auth><saml-auth "
-                 "url=\"https://idp.example.invalid/sso?SAMLRequest=SECRET\"/>"
-                 "</config-auth>"));
-    ok = expect(!parsed.ok &&
-                    parsed.error_code == "saml_required_unsupported",
-                "SAML auth should use public SAML diagnostic code") &&
-         ok;
-    ok = expect(parsed.error_message.find("idp.example.invalid") ==
-                    std::string::npos,
-                "SAML error must not include identity provider URL") &&
-         ok;
-    ok = expect(parsed.error_message.find("SECRET") == std::string::npos,
-                "SAML error must not include SAML request secrets") &&
-         ok;
-  }
-
-  if (ok) {
-    std::cout << "native_aggregate_auth_test: all assertions passed\n";
-  } else {
-    std::cerr << "native_aggregate_auth_test: some assertions FAILED\n";
-  }
+  ok = test_builds_deterministic_init_xml() && ok;
+  ok = test_parses_auth_request_and_echoes_opaque() && ok;
+  ok = test_parses_success_token_without_formatting_cookie() && ok;
+  ok = test_parses_challenge_and_error_shapes() && ok;
+  ok = test_parses_group_select_options() && ok;
+  ok = test_parses_host_scan_metadata() && ok;
+  ok = test_rejects_html_and_oversized_responses() && ok;
   return ok ? 0 : 1;
 }

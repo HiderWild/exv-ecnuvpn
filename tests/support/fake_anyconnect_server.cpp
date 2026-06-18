@@ -3,6 +3,9 @@
 #include "vpn_engine/protocol/cstp.hpp"
 #include "vpn_engine/protocol/http.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 #include <utility>
 
@@ -18,6 +21,65 @@ vpn_engine::ValidationResult invalid(std::string code, std::string message) {
   result.code = std::move(code);
   result.message = std::move(message);
   return result;
+}
+
+FakeAnyConnectHttpResult http_invalid(std::string code, std::string message,
+                                      std::string response_body = {}) {
+  FakeAnyConnectHttpResult out;
+  out.result = invalid(std::move(code), std::move(message));
+  if (response_body.empty())
+    response_body = out.result.code;
+  out.response = "HTTP/1.1 400 Bad Request\r\n"
+                 "Content-Type: text/plain\r\n"
+                 "\r\n" +
+                 response_body;
+  return out;
+}
+
+std::string read_fixture_file(const std::filesystem::path &relative) {
+  std::filesystem::path cursor = std::filesystem::current_path();
+  for (int i = 0; i < 8; ++i) {
+    const std::filesystem::path candidate = cursor / relative;
+    if (std::filesystem::exists(candidate)) {
+      std::ifstream in(candidate, std::ios::binary);
+      return std::string(std::istreambuf_iterator<char>(in),
+                         std::istreambuf_iterator<char>());
+    }
+    if (!cursor.has_parent_path() || cursor == cursor.parent_path())
+      break;
+    cursor = cursor.parent_path();
+  }
+  return {};
+}
+
+std::string anyconnect_v2_fixture(const std::string &name) {
+  return read_fixture_file(std::filesystem::path("tests") / "fixtures" /
+                           "native_anyconnect_v2" / name);
+}
+
+std::string xml_http_response(const std::string &body) {
+  return "HTTP/1.1 200 OK\r\n"
+         "Content-Type: text/xml; charset=utf-8\r\n"
+         "Cache-Control: no-store\r\n"
+         "\r\n" +
+         body;
+}
+
+std::string request_line(const std::string &request) {
+  const std::size_t end = request.find('\n');
+  std::string line = end == std::string::npos ? request : request.substr(0, end);
+  if (!line.empty() && line.back() == '\r')
+    line.pop_back();
+  return line;
+}
+
+bool request_contains(const std::string &request, const std::string &needle) {
+  return request.find(needle) != std::string::npos;
+}
+
+bool request_has_v1_path(const std::string &request) {
+  return request_contains(request, "/+CSCOE+/logon.html") ||
+         request_contains(request, "/CSCOT/");
 }
 
 vpn_engine::TunnelMetadata default_tunnel_metadata() {
@@ -161,6 +223,86 @@ vpn_engine::protocol::AuthResult FakeAnyConnectServer::password_authenticate(
     return auth_parse_error(parsed);
 
   return vpn_engine::protocol::parse_auth_response(response);
+}
+
+FakeAnyConnectHttpResult
+FakeAnyConnectServer::handle_http_request(const std::string &request) {
+  if (options_.protocol_mode != FakeAnyConnectProtocolMode::aggregate_auth_v2) {
+    return http_invalid("unsupported_fake_mode",
+                        "HTTP script is only available in aggregate-auth v2 mode");
+  }
+
+  if (request_has_v1_path(request)) {
+    return http_invalid("unexpected_v1_path",
+                        "aggregate-auth v2 fake rejects legacy AnyConnect path",
+                        "unexpected_v1_path");
+  }
+
+  const std::string line = request_line(request);
+  if (v2_http_stage_ == 0) {
+    if (line != "POST / HTTP/1.1" ||
+        !request_contains(request, "X-Aggregate-Auth: 1") ||
+        !request_contains(request, "X-Transcend-Version: 1") ||
+        !request_contains(request, "Accept-Encoding: identity") ||
+        !request_contains(request, "<config-auth") ||
+        !request_contains(request, "client=\"vpn\"") ||
+        !request_contains(request, "type=\"init\"")) {
+      return http_invalid("unexpected_v2_auth_init",
+                          "expected aggregate-auth init POST");
+    }
+
+    ++v2_http_stage_;
+    FakeAnyConnectHttpResult out;
+    out.response = xml_http_response(anyconnect_v2_fixture("auth_init_response.xml"));
+    return out;
+  }
+
+  if (v2_http_stage_ == 1) {
+    if (line != "POST / HTTP/1.1" ||
+        !request_contains(request, "X-Aggregate-Auth: 1") ||
+        !request_contains(request, "X-Transcend-Version: 1") ||
+        !request_contains(request, "<config-auth") ||
+        !request_contains(request, "type=\"auth-reply\"") ||
+        !request_contains(request, "<opaque>OPAQUE_ONE</opaque>")) {
+      return http_invalid("unexpected_v2_auth_reply",
+                          "expected aggregate-auth auth-reply POST");
+    }
+
+    ++auth_attempts_;
+    const bool accepted =
+        request_contains(request, options_.expected_credentials.username) &&
+        request_contains(request, options_.expected_credentials.password);
+    if (!accepted) {
+      return http_invalid("auth_failed", "invalid username or password",
+                          "auth_failed");
+    }
+
+    ++v2_http_stage_;
+    FakeAnyConnectHttpResult out;
+    out.response =
+        xml_http_response(anyconnect_v2_fixture("auth_success_response.xml"));
+    return out;
+  }
+
+  if (v2_http_stage_ == 2) {
+    if (line != "CONNECT /CSCOSSLC/tunnel HTTP/1.1" ||
+        !request_contains(request, "Cookie: webvpn=V2_SESSION_TOKEN") ||
+        !request_contains(request, "X-CSTP-Version: 1") ||
+        !request_contains(request, "X-Transcend-Version: 1") ||
+        !request_contains(request, "X-Aggregate-Auth: 1")) {
+      return http_invalid("unexpected_v2_cstp_connect",
+                          "expected aggregate-auth CSTP CONNECT");
+    }
+
+    ++cstp_connects_;
+    ++v2_http_stage_;
+    FakeAnyConnectHttpResult out;
+    out.response = anyconnect_v2_fixture("cstp_connect_success.http");
+    return out;
+  }
+
+  return http_invalid("unexpected_v2_request",
+                      "aggregate-auth v2 sequence is already complete");
 }
 
 vpn_engine::ValidationResult FakeAnyConnectServer::connect_cstp(

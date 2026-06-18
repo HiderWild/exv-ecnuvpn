@@ -108,7 +108,62 @@ int main() {
                 "auto_reconnect should map") &&
          ok;
     ok = expect(engine_cfg.disable_dtls,
-                "native CSTP mode should force disable_dtls=true") &&
+                "native mapper should force CSTP/TLS until production DTLS exists") &&
+         ok;
+  }
+
+  {
+    ecnuvpn::Config cfg = app_config();
+    cfg.extra_args = {"--cookie=SECRET_COOKIE_SEED"};
+    auto result = exv::core::validate_native_app_config(cfg);
+    ok = expect(!result.ok && result.code == "unsupported_extra_args",
+                "unsupported native extra_args should be rejected") &&
+         ok;
+    ok = expect(result.message.find("SECRET_COOKIE_SEED") == std::string::npos,
+                "unsupported extra_args error must not expose argument value") &&
+         ok;
+    ok = expect(result.message.find("--cookie") != std::string::npos,
+                "unsupported extra_args error should name unsupported flag") &&
+         ok;
+  }
+
+  {
+    ecnuvpn::Config cfg = app_config();
+    cfg.extra_args = {
+        "--no-dtls",
+        "--useragent=ECNU-VPN custom native UA",
+        "--authgroup=students",
+        "--csd-wrapper=C:/Tools/csd-wrapper.bat",
+    };
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+    auto result =
+        exv::core::make_native_engine_config(cfg, kPassword, &engine_cfg);
+    ok = expect(result.ok,
+                "whitelisted native extra_args should map successfully") &&
+         ok;
+    ok = expect(engine_cfg.disable_dtls,
+                "--no-dtls should set disable_dtls=true") &&
+         ok;
+    ok = expect(engine_cfg.useragent == "ECNU-VPN custom native UA",
+                "--useragent should override useragent") &&
+         ok;
+    ok = expect(engine_cfg.auth_group == "students",
+                "--authgroup should map to auth_group") &&
+         ok;
+    ok = expect(engine_cfg.csd_wrapper == "C:/Tools/csd-wrapper.bat",
+                "--csd-wrapper should be retained for controlled future CSD handling") &&
+         ok;
+  }
+
+  {
+    ecnuvpn::Config cfg = app_config();
+    cfg.disable_dtls = true;
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+    auto result =
+        exv::core::make_native_engine_config(cfg, kPassword, &engine_cfg);
+    ok = expect(result.ok, "valid disabled-DTLS config should map") && ok;
+    ok = expect(engine_cfg.disable_dtls,
+                "disable_dtls=true should map to engine config") &&
          ok;
   }
 

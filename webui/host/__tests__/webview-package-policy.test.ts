@@ -172,6 +172,85 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(startPs1, /Find-ElectronProcess|Electron process/i)
   })
 
+  it('shows service install prompts only when the helper service is not installed', () => {
+    const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+    const dashboardVue = readFileSync(join(webuiRoot, 'src', 'pages', 'DashboardPage.vue'), 'utf8')
+
+    assert.match(appVue, /!config\.settings\.service_install_prompt_seen && !vpn\.serviceInstalled/)
+    assert.doesNotMatch(appVue, /!config\.settings\.service_install_prompt_seen && !vpn\.serviceAvailable/)
+    assert.match(dashboardVue, /!vpn\.serviceInstalled/)
+    assert.match(dashboardVue, /服务已安装但未运行/)
+  })
+
+  it('keeps window mode resizing out of the settings persistence path', () => {
+    const configStore = readFileSync(join(webuiRoot, 'src', 'stores', 'config.ts'), 'utf8')
+    const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+
+    assert.doesNotMatch(configStore, /window\.ecnuVpn\.window\.setMode/)
+    assert.match(configStore, /settings\.value = \{ \.\.\.settings\.value, \.\.\.s \}/)
+    assert.match(appVue, /watch\(\s*minimalMode/)
+    assert.match(appVue, /requestAnimationFrame/)
+    assert.match(appVue, /window\.ecnuVpn\?\.window\?\.setMode/)
+  })
+
+  it('marks service install prompts seen before display and keeps dismiss visual-only', () => {
+    const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+    const promptGateStart = appVue.indexOf('if (!config.settings.service_install_prompt_seen && !vpn.serviceInstalled)')
+    const dismissStart = appVue.indexOf('function dismissServicePrompt')
+    const installStart = appVue.indexOf('async function installServiceFromPrompt')
+    const closeStart = appVue.indexOf('async function resolveClosePrompt')
+    assert.notEqual(promptGateStart, -1)
+    assert.notEqual(dismissStart, -1)
+    assert.notEqual(installStart, -1)
+    assert.notEqual(closeStart, -1)
+
+    const promptGate = appVue.slice(promptGateStart, dismissStart)
+    const dismissBlock = appVue.slice(dismissStart, installStart)
+    const installBlock = appVue.slice(installStart, closeStart)
+    assert.match(promptGate, /await markServicePromptSeen\(\)[\s\S]*servicePromptVisible\.value = true/)
+    assert.doesNotMatch(dismissBlock, /await markServicePromptSeen\(\)/)
+    assert.match(dismissBlock, /function dismissServicePrompt\(\)[\s\S]*servicePromptVisible\.value = false/)
+    assert.doesNotMatch(installBlock, /await markServicePromptSeen\(\)/)
+    assert.match(installBlock, /servicePromptVisible\.value = false[\s\S]*await vpn\.installService\(\)/)
+  })
+
+  it('defers native WebView window mode resizing outside the WebMessage callback', () => {
+    const win32Host = readFileSync(
+      join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
+      'utf8',
+    )
+    const setModeBranchStart = win32Host.indexOf('if (action == "window.setMode")')
+    assert.notEqual(setModeBranchStart, -1)
+    const resolveCloseBranchStart = win32Host.indexOf('if (action == "window.resolveClosePrompt")', setModeBranchStart)
+    assert.notEqual(resolveCloseBranchStart, -1)
+    const setModeBranch = win32Host.slice(setModeBranchStart, resolveCloseBranchStart)
+
+    assert.match(setModeBranch, /defer_window_mode\(mode\)/)
+    assert.doesNotMatch(setModeBranch, /apply_window_mode\(mode\)/)
+    assert.match(win32Host, /kApplyWindowModeMessage/)
+    assert.match(win32Host, /PostMessageW\(hwnd_, kApplyWindowModeMessage/)
+  })
+
+  it('keeps core RPC work off the Win32 WebView message callback thread', () => {
+    const win32Host = readFileSync(
+      join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
+      'utf8',
+    )
+    const runtime = readFileSync(join(repoRoot, 'src', 'app', 'ui_shell', 'ui_shell_runtime.cpp'), 'utf8')
+    const onMessageStart = win32Host.indexOf('HRESULT on_web_message')
+    const enqueueStart = win32Host.indexOf('void enqueue_host_request', onMessageStart)
+    assert.notEqual(onMessageStart, -1)
+    assert.notEqual(enqueueStart, -1)
+    const onMessage = win32Host.slice(onMessageStart, enqueueStart)
+
+    assert.match(onMessage, /enqueue_host_request\(request_json\)/)
+    assert.doesNotMatch(onMessage, /handler_\s*\?\s*handler_\(request_json\)/)
+    assert.match(win32Host, /kHostBridgeResponseMessage/)
+    assert.match(win32Host, /std::thread/)
+    assert.match(runtime, /std::mutex client_mutex/)
+    assert.match(runtime, /try_lock\(\)/)
+  })
+
   it('keeps cross-platform WebView acceptance gates executable by agents', () => {
     const windowsAcceptance = readFileSync(join(repoRoot, 'scripts', 'accept-webview-shell-windows.ps1'), 'utf8')
     const macosAcceptance = readFileSync(join(repoRoot, 'scripts', 'accept-webview-shell-macos.sh'), 'utf8')

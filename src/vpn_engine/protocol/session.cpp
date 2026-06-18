@@ -1,8 +1,10 @@
 #include "vpn_engine/protocol/session.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
@@ -46,6 +48,17 @@ bool is_retryable_packet_read(const ValidationResult &result) {
          result.code == "would_block";
 }
 
+bool is_reconnect_trigger(const ValidationResult &result) {
+  return result.code == "transport_closed" ||
+         result.code == "rekey_unsupported";
+}
+
+bool is_cached_cookie_rejected(const ValidationResult &result) {
+  return result.code == "auth_expired" ||
+         result.code == "auth_cookie_invalid" ||
+         result.code == "auth_required";
+}
+
 ValidationResult cancelled() {
   return invalid("session_cancelled", "protocol session is cancelled");
 }
@@ -55,6 +68,24 @@ DeviceConfig device_config_from_metadata(const TunnelMetadata &metadata) {
   config.interface_name = metadata.interface_name;
   config.mtu = metadata.mtu;
   return config;
+}
+
+int seconds_to_idle_polls(int seconds, int polls_per_second) {
+  if (seconds <= 0)
+    return 0;
+  if (polls_per_second <= 0)
+    polls_per_second = 1000;
+  if (seconds > std::numeric_limits<int>::max() / polls_per_second)
+    return std::numeric_limits<int>::max();
+  return seconds * polls_per_second;
+}
+
+std::string lower_ascii(const std::string &value) {
+  std::string out;
+  out.reserve(value.size());
+  for (unsigned char ch : value)
+    out.push_back(static_cast<char>(std::tolower(ch)));
+  return out;
 }
 
 } // namespace
@@ -72,6 +103,9 @@ ValidationResult ProtocolSession::authenticate() {
   state_.auth_started();
 
   AuthResult auth = transport_->authenticate(options_);
+  last_auth_result_ = auth;
+  if (last_auth_result_.ok)
+    last_auth_result_.cookie.clear();
   if (!auth.ok) {
     authenticated_ = false;
     cookie_.clear();
@@ -116,10 +150,50 @@ ValidationResult ProtocolSession::connect_cstp(TunnelMetadata *metadata) {
   }
 
   metadata_ = connected_metadata;
+  cstp_connected_at_ = monotonic_now();
+  cookie_session_timeout_seconds_ = connected_metadata.session_timeout_seconds;
   *metadata = connected_metadata;
   cstp_connected_ = true;
   state_.tunnel_configured(connected_metadata);
-  return ValidationResult{};}
+  apply_gateway_liveness_metadata(connected_metadata);
+  return ValidationResult{};
+}
+
+void ProtocolSession::apply_gateway_liveness_metadata(
+    const TunnelMetadata &metadata) {
+  const int polls_per_second = options_.liveness_idle_polls_per_second > 0
+                                   ? options_.liveness_idle_polls_per_second
+                                   : 1000;
+
+  const int keepalive =
+      seconds_to_idle_polls(metadata.keepalive_seconds, polls_per_second);
+  if (keepalive > 0)
+    options_.keepalive_idle_poll_interval = keepalive;
+
+  const int dpd = seconds_to_idle_polls(metadata.dpd_seconds, polls_per_second);
+  if (dpd > 0) {
+    options_.dpd_idle_poll_interval = dpd;
+    if (options_.dead_peer_poll_budget <= 0)
+      options_.dead_peer_poll_budget = dpd;
+  }
+
+  const int rekey =
+      seconds_to_idle_polls(metadata.rekey_seconds, polls_per_second);
+  if (rekey > 0)
+    options_.rekey_idle_poll_interval = rekey;
+  if (!metadata.rekey_method.empty())
+    options_.rekey_method = metadata.rekey_method;
+
+  const int idle_timeout =
+      seconds_to_idle_polls(metadata.idle_timeout_seconds, polls_per_second);
+  if (idle_timeout > 0)
+    options_.idle_timeout_idle_poll_limit = idle_timeout;
+
+  const int session_timeout =
+      seconds_to_idle_polls(metadata.session_timeout_seconds, polls_per_second);
+  if (session_timeout > 0)
+    options_.session_timeout_idle_poll_limit = session_timeout;
+}
 
 ValidationResult ProtocolSession::run_packet_loop(PacketDevice *device,
                                                   EventSink *events,
@@ -173,13 +247,14 @@ ValidationResult ProtocolSession::run_packet_loop(PacketDevice *device,
                {{"code", failed.code}});
 
     const bool can_reconnect =
-        failed.code == "transport_closed" && options_.auto_reconnect &&
+        is_reconnect_trigger(failed) && options_.auto_reconnect &&
         reconnect_attempts_ < options_.max_reconnects &&
         !cancellation_requested(cancel);
 
     if (can_reconnect) {
       ValidationResult reconnected =
-          reconnect(device, events, cancel, active_device_config);
+          reconnect(device, events, cancel, active_device_config,
+                    device_config != nullptr);
       if (reconnected.ok)
         continue;
       current_device_ = nullptr;
@@ -265,8 +340,24 @@ ProtocolSession::run_forwarding(PacketDevice *device, EventSink *events,
         continue;
       }
 
+      if (frame.kind == InboundFrameKind::compressed) {
+        set_reason(3,
+                   invalid("cstp_compressed_unsupported",
+                           "CSTP compressed frame is not supported"));
+        break;
+      }
+
       if (frame.kind == InboundFrameKind::disconnect) {
-        set_reason(3, invalid("transport_closed", "CSTP peer disconnected"));
+        set_reason(3,
+                   invalid("tunnel_disconnected",
+                           "CSTP peer requested disconnect"));
+        break;
+      }
+
+      if (frame.kind == InboundFrameKind::terminate) {
+        set_reason(3,
+                   invalid("tunnel_disconnected",
+                           "CSTP peer requested tunnel termination"));
         break;
       }
 
@@ -291,12 +382,39 @@ ProtocolSession::run_forwarding(PacketDevice *device, EventSink *events,
   bool dpd_probe_outstanding = false;
   std::uint64_t dpd_probe_baseline = 0;
   int dpd_wait_polls = 0;
+  bool rekey_due = false;
 
   // Services keepalive/DPD timers on each idle outbound poll. Returns a non-ok
   // result to terminate forwarding (transport_closed for a dead peer, or a
   // propagated control-write failure). `idle_polls` is the current count of
   // consecutive idle polls.
   auto service_liveness = [&](int idle_polls) -> ValidationResult {
+    if (options_.session_timeout_idle_poll_limit > 0 &&
+        idle_polls >= options_.session_timeout_idle_poll_limit) {
+      return invalid("session_timeout", "CSTP session timeout elapsed");
+    }
+
+    if (options_.idle_timeout_idle_poll_limit > 0 &&
+        idle_polls >= options_.idle_timeout_idle_poll_limit) {
+      return invalid("idle_timeout", "CSTP idle timeout elapsed");
+    }
+
+    if (!rekey_due && options_.rekey_idle_poll_interval > 0 &&
+        idle_polls >= options_.rekey_idle_poll_interval) {
+      rekey_due = true;
+      const std::string method = lower_ascii(options_.rekey_method);
+      emit_event(events, "rekey.due", "warning", "CSTP rekey is due",
+                 {{"method", options_.rekey_method.empty()
+                                  ? std::string("new-tunnel")
+                                  : options_.rekey_method}});
+      if (method == "ssl") {
+        return invalid("rekey_unsupported",
+                       "CSTP SSL rekey is unsupported; reconnect required");
+      }
+      return invalid("transport_closed",
+                     "CSTP new-tunnel rekey requested reconnect");
+    }
+
     // Dead-peer detection: if a DPD probe is outstanding and no inbound frame
     // has arrived since it was sent, count down the budget.
     if (dpd_probe_outstanding) {
@@ -307,6 +425,8 @@ ProtocolSession::run_forwarding(PacketDevice *device, EventSink *events,
       } else if (options_.dead_peer_poll_budget > 0) {
         ++dpd_wait_polls;
         if (dpd_wait_polls >= options_.dead_peer_poll_budget) {
+          emit_event(events, "dpd.dead", "error",
+                     "dead peer detected: no response to DPD probe");
           return invalid("transport_closed",
                          "dead peer detected: no response to DPD probe");
         }
@@ -318,7 +438,7 @@ ProtocolSession::run_forwarding(PacketDevice *device, EventSink *events,
       ValidationResult sent = transport_->send_control(InboundFrameKind::keepalive);
       if (!sent.ok)
         return sent;
-      emit_event(events, "dpd.keepalive", "info", "keepalive sent");
+      emit_event(events, "keepalive.sent", "info", "keepalive sent");
     }
 
     if (options_.dpd_idle_poll_interval > 0 && !dpd_probe_outstanding &&
@@ -417,52 +537,104 @@ void ProtocolSession::disconnect() {
 
 const SessionState &ProtocolSession::state() const { return state_; }
 
+const AuthResult &ProtocolSession::last_auth_result() const {
+  return last_auth_result_;
+}
+
 int ProtocolSession::reconnect_attempts() const { return reconnect_attempts_; }
 
 ValidationResult ProtocolSession::reconnect(PacketDevice *device,
                                             EventSink *events,
                                             CancellationToken *cancel,
-                                            const DeviceConfig &device_config) {
+                                            const DeviceConfig &device_config,
+                                            bool explicit_device_config) {
   ++reconnect_attempts_;
   state_.phase = SessionPhase::reconnecting;
   emit_event(events, "reconnect_started", "info", "reconnect started",
              {{"attempt", std::to_string(reconnect_attempts_)}});
 
+  const std::string cached_cookie = cookie_;
+  const bool cached_cookie_lifecycle_valid =
+      !cached_cookie.empty() && cached_cookie_within_session_timeout();
+
   device->close();
   transport_->disconnect();
   transport_->reset_for_reconnect();
 
-  authenticated_ = false;
+  authenticated_ = cached_cookie_lifecycle_valid;
   cstp_connected_ = false;
-  cookie_.clear();
+  cookie_ = cached_cookie_lifecycle_valid ? cached_cookie : std::string();
   metadata_ = TunnelMetadata{};
 
   if (cancellation_requested(cancel)) {
     return stop_cancelled(nullptr, events);
   }
 
-  ValidationResult auth = authenticate();
-  if (!auth.ok) {
-    emit_event(events, "reconnect_failed", "error", auth.message,
-               {{"code", auth.code},
+  TunnelMetadata metadata;
+  bool connected_with_cached_cookie = false;
+  if (!cached_cookie.empty() && !cached_cookie_lifecycle_valid) {
+    emit_event(events, "reconnect.cookie_expired", "warning",
+               "cached AnyConnect cookie exceeded session timeout",
+               {{"code", "session_timeout"},
                 {"attempt", std::to_string(reconnect_attempts_)}});
-    return auth;
   }
 
-  TunnelMetadata metadata;
-  ValidationResult connected = connect_cstp(&metadata);
-  if (!connected.ok) {
-    emit_event(events, "reconnect_failed", "error", connected.message,
-               {{"code", connected.code},
-                {"attempt", std::to_string(reconnect_attempts_)}});
-    return connected;
+  if (!cookie_.empty()) {
+    ValidationResult cached_connected = connect_cstp(&metadata);
+    if (cached_connected.ok) {
+      connected_with_cached_cookie = true;
+      emit_event(events, "reconnect.cookie_reused", "info",
+                 "reconnect reused cached AnyConnect cookie",
+                 {{"attempt", std::to_string(reconnect_attempts_)}});
+    } else if (is_cached_cookie_rejected(cached_connected)) {
+      authenticated_ = false;
+      cstp_connected_ = false;
+      cookie_.clear();
+      metadata_ = TunnelMetadata{};
+      state_.phase = SessionPhase::reconnecting;
+      state_.failure_code.clear();
+      state_.failure_message.clear();
+      emit_event(events, "reconnect.cookie_expired", "warning",
+                 "cached AnyConnect cookie was rejected",
+                 {{"code", cached_connected.code},
+                  {"attempt", std::to_string(reconnect_attempts_)}});
+    } else {
+      emit_event(events, "reconnect_failed", "error", cached_connected.message,
+                 {{"code", cached_connected.code},
+                  {"attempt", std::to_string(reconnect_attempts_)}});
+      return cached_connected;
+    }
+  }
+
+  if (!connected_with_cached_cookie) {
+    ValidationResult auth = authenticate();
+    if (!auth.ok) {
+      emit_event(events, "reconnect_failed", "error", auth.message,
+                 {{"code", auth.code},
+                  {"attempt", std::to_string(reconnect_attempts_)}});
+      return auth;
+    }
+
+    ValidationResult connected = connect_cstp(&metadata);
+    if (!connected.ok) {
+      emit_event(events, "reconnect_failed", "error", connected.message,
+                 {{"code", connected.code},
+                  {"attempt", std::to_string(reconnect_attempts_)}});
+      return connected;
+    }
   }
 
   if (cancellation_requested(cancel)) {
     return stop_cancelled(nullptr, events);
   }
 
-  ValidationResult opened = device->open(device_config);
+  DeviceConfig reconnect_device_config = device_config_from_metadata(metadata_);
+  if (explicit_device_config && !device_config.interface_name.empty())
+    reconnect_device_config.interface_name = device_config.interface_name;
+  if (reconnect_device_config.mtu <= 0)
+    reconnect_device_config.mtu = device_config.mtu;
+
+  ValidationResult opened = device->open(reconnect_device_config);
   if (!opened.ok) {
     state_.failed(opened.code, opened.message);
     emit_event(events, "packet_device.failed", "error", opened.message,
@@ -493,6 +665,21 @@ ValidationResult ProtocolSession::stop_cancelled(PacketDevice *device,
 bool ProtocolSession::cancellation_requested(
     const CancellationToken *cancel) const {
   return disconnect_requested_.load() || (cancel && cancel->is_cancelled());
+}
+
+std::chrono::steady_clock::time_point ProtocolSession::monotonic_now() const {
+  if (options_.monotonic_clock)
+    return options_.monotonic_clock();
+  return std::chrono::steady_clock::now();
+}
+
+bool ProtocolSession::cached_cookie_within_session_timeout() const {
+  if (cookie_session_timeout_seconds_ <= 0)
+    return true;
+
+  const auto timeout =
+      std::chrono::seconds(cookie_session_timeout_seconds_);
+  return monotonic_now() - cstp_connected_at_ < timeout;
 }
 
 } // namespace protocol

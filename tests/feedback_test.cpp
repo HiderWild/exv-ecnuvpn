@@ -44,6 +44,29 @@ void test_canonical_codes_pass_through() {
   expect(feedback::resolve_error_code("unsupported_auth_flow", "") ==
              feedback::code::kAuthFailed,
          "legacy unsupported_auth_flow maps to auth_failed");
+
+  const char *anyconnect_v2_codes[] = {
+      "auth_protocol_mismatch",
+      "auth_rejected",
+      "auth_challenge_required",
+      "auth_group_required",
+      "auth_expired",
+      "csd_required_unsupported",
+      "dtls_unavailable",
+      "tunnel_disconnected",
+      "session_timeout",
+      "idle_timeout",
+      "rekey_unsupported",
+      "cstp_compressed_unsupported",
+      "unsupported_extra_args",
+  };
+  for (const char *code : anyconnect_v2_codes) {
+    expect(feedback::resolve_error_code(code, "") == code,
+           std::string("AnyConnect v2 code passes through: ") + code);
+    auto info = feedback::lookup_error(code, "");
+    expect(!info.code.empty(),
+           std::string("AnyConnect v2 code has lookup info: ") + code);
+  }
 }
 
 void test_message_heuristics() {

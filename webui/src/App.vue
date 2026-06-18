@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRoute } from 'vue-router'
 import NavBar from './components/NavBar.vue'
@@ -40,6 +40,39 @@ const modalRoute = computed(() =>
   route.path.startsWith('/modal/') ||
   (typeof window !== 'undefined' && window.location.hash.startsWith('#/modal/')),
 )
+let windowModeRequest = 0
+
+function afterNextPaint() {
+  return new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve())
+    } else {
+      setTimeout(resolve, 0)
+    }
+  })
+}
+
+async function applyWindowMode() {
+  if (modalRoute.value) return
+  const request = ++windowModeRequest
+  const mode = config.settings.minimal_mode ? 'minimal' : 'advanced'
+  await nextTick()
+  await afterNextPaint()
+  if (request !== windowModeRequest || modalRoute.value) return
+  try {
+    await window.ecnuVpn?.window?.setMode(mode)
+  } catch (error) {
+    console.error('[window] setMode failed:', error)
+  }
+}
+
+watch(
+  minimalMode,
+  () => {
+    void applyWindowMode()
+  },
+  { flush: 'post' },
+)
 
 onMounted(async () => {
   if (modalRoute.value) return
@@ -55,11 +88,11 @@ onMounted(async () => {
     config.fetchAuthConfig(),
     vpn.fetchAppShellState(),
   ])
-  await window.ecnuVpn?.window?.setMode(config.settings.minimal_mode ? 'minimal' : 'advanced')
-  if (!config.settings.service_install_prompt_seen && !vpn.serviceAvailable) {
+  await applyWindowMode()
+  if (!config.settings.service_install_prompt_seen && !vpn.serviceInstalled) {
+    await markServicePromptSeen()
     if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
       const result = await window.ecnuVpn.modal.serviceInstallPrompt()
-      await markServicePromptSeen()
       if (result === 'install') {
         const installed = await vpn.installService()
         if (installed) {
@@ -80,24 +113,23 @@ onUnmounted(() => {
 
 async function markServicePromptSeen() {
   if (config.settings.service_install_prompt_seen) return
-  await config.saveSettings({ service_install_prompt_seen: true })
-}
-
-async function dismissServicePrompt() {
-  servicePromptBusy.value = true
   try {
-    await markServicePromptSeen()
-    servicePromptVisible.value = false
-  } finally {
-    servicePromptBusy.value = false
+    await config.saveSettings({ service_install_prompt_seen: true })
+  } catch (error) {
+    console.error('[service-prompt] failed to persist prompt state:', error)
   }
 }
 
+function dismissServicePrompt() {
+  if (servicePromptBusy.value) return
+  servicePromptVisible.value = false
+}
+
 async function installServiceFromPrompt() {
+  if (servicePromptBusy.value) return
   servicePromptBusy.value = true
+  servicePromptVisible.value = false
   try {
-    await markServicePromptSeen()
-    servicePromptVisible.value = false
     const installed = await vpn.installService()
     if (installed) {
       ui.addToast('辅助服务已安装', 'success')
@@ -110,9 +142,9 @@ async function installServiceFromPrompt() {
 async function resolveClosePrompt(result: 'cancel' | { action: 'tray' | 'quit'; remember: boolean }) {
   if (closePromptBusy.value) return
   closePromptBusy.value = true
+  closePromptVisible.value = false
   try {
     await window.ecnuVpn?.window.resolveClosePrompt(result)
-    closePromptVisible.value = false
   } finally {
     closePromptBusy.value = false
   }

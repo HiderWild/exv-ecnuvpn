@@ -115,6 +115,89 @@ int main() {
                 "non-2xx CSTP response should fail with stable code") && ok;
   }
 
+  // Header parsing (AnyConnect v2 metadata fixture).
+  {
+    const std::string raw =
+        load_fixture("fixtures/native_anyconnect_v2/cstp_connect_success.http");
+    ok = expect(!raw.empty(), "v2 CSTP fixture should be loadable") && ok;
+
+    HttpResponse resp;
+    auto r = parse_http_response(raw, &resp);
+    ok = expect(r.ok, "v2 fixture HTTP should parse") && ok;
+
+    TunnelMetadata meta;
+    auto c = parse_cstp_headers(resp, &meta);
+    ok = expect(c.ok, "v2 CSTP headers should parse") && ok;
+    ok = expect(meta.ip6_address == "2001:db8:100::10",
+                "IPv6 address should parse") &&
+         ok;
+    ok = expect(meta.ip6_prefix == 64, "IPv6 prefix should parse") && ok;
+    ok = expect(meta.dns_servers.size() == 2 &&
+                    meta.dns_servers[0] == "10.10.10.10" &&
+                    meta.dns_servers[1] == "10.10.10.11",
+                "repeated DNS headers should parse") &&
+         ok;
+    ok = expect(meta.nbns_servers.size() == 1 &&
+                    meta.nbns_servers[0] == "10.10.20.10",
+                "NBNS headers should parse") &&
+         ok;
+    ok = expect(meta.default_domain == "ecnu.example.invalid",
+                "default domain should parse") &&
+         ok;
+    ok = expect(meta.search_domains.size() == 1 &&
+                    meta.search_domains[0] == "campus.example.invalid",
+                "split DNS/search domain should parse") &&
+         ok;
+    ok = expect(meta.split_include_routes.size() == 1 &&
+                    meta.split_include_routes[0] == "198.51.100.0/24",
+                "split include routes should parse into explicit field") &&
+         ok;
+    ok = expect(meta.routes == meta.split_include_routes,
+                "legacy routes field should mirror split include routes") &&
+         ok;
+    ok = expect(meta.split_exclude_routes.size() == 1 &&
+                    meta.split_exclude_routes[0] == "203.0.113.0/24",
+                "split exclude routes should parse") &&
+         ok;
+    ok = expect(meta.tunnel_all_dns, "tunnel-all-DNS should parse") && ok;
+    ok = expect(meta.banner == "Welcome student",
+                "URL-encoded CSTP banner should decode") &&
+         ok;
+    ok = expect(meta.keepalive_seconds == 20, "keepalive should parse") && ok;
+    ok = expect(meta.dpd_seconds == 30, "DPD should parse") && ok;
+    ok = expect(meta.rekey_seconds == 3600, "rekey time should parse") && ok;
+    ok = expect(meta.rekey_method == "new-tunnel",
+                "rekey method should parse") &&
+         ok;
+    ok = expect(meta.lease_duration_seconds == 7200,
+                "lease duration should parse") &&
+         ok;
+    ok = expect(meta.idle_timeout_seconds == 1800,
+                "idle timeout should parse") &&
+         ok;
+    ok = expect(meta.session_timeout_seconds == 28800,
+                "session timeout should parse") &&
+         ok;
+    ok = expect(meta.disconnected_timeout_seconds == 60,
+                "disconnected timeout should parse") &&
+         ok;
+    ok = expect(meta.dtls_mtu == 1360, "DTLS MTU should parse") && ok;
+    ok = expect(meta.dtls_port == 443, "DTLS port should parse") && ok;
+    ok = expect(meta.dtls_session_id == "DTLS_SESSION",
+                "DTLS session id should parse") &&
+         ok;
+    ok = expect(meta.dtls_cipher_suite == "AES256-SHA",
+                "legacy DTLS cipher should parse") &&
+         ok;
+    ok = expect(meta.dtls12_cipher_suite ==
+                    "TLS_PSK_WITH_AES_256_GCM_SHA384",
+                "DTLS 1.2 cipher should parse") &&
+         ok;
+    ok = expect(meta.content_encoding == "lzs",
+                "CSTP content encoding should parse") &&
+         ok;
+  }
+
   // Encode keepalive frame.
   {
     CstpFrame f;
@@ -144,6 +227,8 @@ int main() {
         {CstpFrameType::dpd_response, 0x04, "dpd_response"},
         {CstpFrameType::disconnect, 0x05, "disconnect"},
         {CstpFrameType::keepalive, 0x07, "keepalive"},
+        {CstpFrameType::compressed, 0x08, "compressed"},
+        {CstpFrameType::terminate, 0x09, "terminate"},
     };
     for (const Case &c : cases) {
       CstpFrame f;

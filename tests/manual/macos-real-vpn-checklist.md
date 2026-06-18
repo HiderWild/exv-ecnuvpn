@@ -315,6 +315,75 @@ ifconfig > /tmp/exv-ifconfig-before.txt
 
 ---
 
+## Native AnyConnect v2 Live Gates
+
+Use this section only on a machine with valid ECNU credentials and administrator
+rights. Attach the final evidence in a dated copy of
+`docs/handoffs/native-anyconnect-v2-live-validation-template.md`; do not paste
+raw logs, screenshots with secrets, packet captures, or session JSON into this
+checklist.
+
+### Redaction Checklist
+
+Before committing evidence, confirm all of these have been removed or replaced:
+
+- [ ] password values and password prompts with entered values
+- [ ] `webvpn=` cookie values
+- [ ] `<session-token>` values
+- [ ] opaque values
+- [ ] SAML values, assertions, redirects, and relay state
+- [ ] challenge values and challenge responses
+- [ ] cookies and cookie headers
+- [ ] packet payloads and raw tunneled application data
+- [ ] gateway hostnames, internal hostnames, and user identifiers unless approved
+
+### Required Redacted Log Snippets
+
+- [ ] Preflight substage timings
+- [ ] Auth protocol stage
+- [ ] CSTP CONNECT status
+- [ ] Metadata summary
+- [ ] Platform apply summary
+- [ ] Liveness summary
+
+### Phase P0: Auth and CSTP
+
+| Check | Pass/Fail | Notes |
+|-------|-----------|-------|
+| Aggregate-auth init uses XML POST and AnyConnect headers | | |
+| Username/password auth succeeds or returns a structured error | | |
+| Group selection succeeds or returns `auth_group_required` | | |
+| Challenge flow succeeds or returns `auth_challenge_required` | | |
+| Successful auth maps the session token to a redacted `webvpn=` cookie | | |
+| CSTP connects to `/CSCOSSLC/tunnel` with HTTP 200 | | |
+| Failure is classified, not reported as a generic transport close | | |
+
+### Phase P1: DNS, Routes, and Liveness
+
+| Check | Pass/Fail | Notes |
+|-------|-----------|-------|
+| Metadata summary contains tunnel address, MTU, DNS, and route counts | | |
+| utun address and MTU are applied | | |
+| DNS servers and search domains are applied or explicitly unsupported | | |
+| Split include and split exclude routes are applied deterministically | | |
+| VPN gateway endpoint remains routed outside utun | | |
+| Keepalive and DPD events appear when gateway timers are present | | |
+| Disconnect restores baseline DNS and route state | | |
+
+### Phase P2: DTLS, Challenge, CSD, and Reconnect
+
+| Check | Pass/Fail | Notes |
+|-------|-----------|-------|
+| DTLS enabled path reports established, unavailable, or failed with fallback | | |
+| CSTP-only fallback remains connected after DTLS is unavailable | | |
+| Challenge or tokencode prompt is surfaced without leaking response values | | |
+| CSD or host-scan requirement reports `csd_required_unsupported` | | |
+| Reconnect first attempts cached cookie reuse when allowed | | |
+| Expired cookie clears state and performs one full re-auth attempt | | |
+| User disconnect prevents automatic reconnect | | |
+
+---
+
 ## Sign-Off
 
 | Field | Value |

@@ -441,6 +441,179 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
 #endif
 }
 
+bool desktop_native_preflight_reports_substage_timing() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto preflight_start = source.find("nlohmann::json preflight_connect");
+  const auto preflight_end =
+      source.find("void register_desktop_vpn_actions", preflight_start);
+  const std::string preflight_source =
+      preflight_start == std::string::npos
+          ? std::string()
+          : source.substr(preflight_start,
+                          preflight_end == std::string::npos
+                              ? std::string::npos
+                              : preflight_end - preflight_start);
+
+  bool ok = true;
+  ok = expect(preflight_start != std::string::npos,
+              "desktop app API should keep preflight_connect") &&
+       ok;
+  ok = expect(preflight_source.find("StageTimer timing(\"desktop.preflight_connect\")") !=
+                  std::string::npos,
+              "preflight_connect should own a substage timing scope") &&
+       ok;
+  ok = expect(preflight_source.find("timing.mark(\"config_validated\"") !=
+                  std::string::npos,
+              "preflight_connect should mark config validation separately") &&
+       ok;
+  ok = expect(preflight_source.find("timing.mark(\"backend_resolve_started\"") !=
+                  std::string::npos,
+              "preflight_connect should mark backend resolution start") &&
+       ok;
+  ok = expect(preflight_source.find("timing.mark(\"backend_resolved\"") !=
+                  std::string::npos,
+              "preflight_connect should mark backend resolution completion") &&
+       ok;
+  ok = expect(preflight_source.find("timing.mark(\"runtime_status_checked\"") !=
+                  std::string::npos,
+              "preflight_connect should mark runtime status separately") &&
+       ok;
+  ok = expect(preflight_source.find("timing.mark(\"platform_checks_checked\"") !=
+                  std::string::npos,
+              "preflight_connect should mark platform checks separately") &&
+       ok;
+  ok = expect(preflight_source.find("timing.finish(true, \"stage=preflight_complete\"") !=
+                  std::string::npos,
+              "preflight_connect should finish successful preflight timing") &&
+       ok;
+  return ok;
+#endif
+}
+
+bool desktop_native_connect_releases_attempt_guard_on_failed_status() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto connect_handler = source.find("\"vpn.connect\"");
+  const auto disconnect_handler = source.find("\"vpn.disconnect\"",
+                                               connect_handler);
+  const auto connect_source =
+      connect_handler == std::string::npos
+          ? std::string()
+          : source.substr(connect_handler,
+                          disconnect_handler == std::string::npos
+                              ? std::string::npos
+                              : disconnect_handler - connect_handler);
+
+  const auto status_snapshot = connect_source.find("auto snap = controller->status()");
+  const auto failed_guard =
+      connect_source.find("snap.phase == exv::core::TunnelPhase::Failed",
+                          status_snapshot == std::string::npos ? 0
+                                                               : status_snapshot);
+  const auto failed_reset =
+      connect_source.find("reset_tunnel_controller()", failed_guard);
+  const auto return_failed_status = connect_source.find("return status", failed_guard);
+  const auto dismiss_attempt =
+      connect_source.find("attempt_cleanup.dismiss()", status_snapshot);
+
+  bool ok = true;
+  ok = expect(connect_handler != std::string::npos,
+              "app_api should register vpn.connect handler") &&
+       ok;
+  ok = expect(status_snapshot != std::string::npos,
+              "desktop vpn.connect should inspect controller status after connect") &&
+       ok;
+  ok = expect(failed_guard != std::string::npos,
+              "desktop vpn.connect should detect failed controller status before dismissing the attempt guard") &&
+       ok;
+  ok = expect(failed_reset != std::string::npos,
+              "desktop vpn.connect should release the failed TunnelController helper lease before returning failed status") &&
+       ok;
+  ok = expect(return_failed_status != std::string::npos,
+              "desktop vpn.connect should return failed status while allowing TerminalAttemptScope cleanup") &&
+       ok;
+  ok = expect(dismiss_attempt != std::string::npos,
+              "desktop vpn.connect should still dismiss the attempt guard for non-terminal connect attempts") &&
+       ok;
+  if (failed_guard != std::string::npos && failed_reset != std::string::npos &&
+      return_failed_status != std::string::npos &&
+      dismiss_attempt != std::string::npos) {
+    ok = expect(failed_guard < failed_reset,
+                "failed connect should reset the controller after detecting failed phase") &&
+         ok;
+    ok = expect(failed_reset < return_failed_status,
+                "failed connect should release helper state before returning failed status") &&
+         ok;
+    ok = expect(failed_guard < return_failed_status,
+                "failed-status branch should return after checking the failed phase") &&
+         ok;
+    ok = expect(return_failed_status < dismiss_attempt,
+                "failed connect must return before attempt_cleanup.dismiss() so stale connect-attempt files are removed") &&
+         ok;
+  }
+  return ok;
+#endif
+}
+
+bool tunnel_controller_native_runner_failure_cleans_helper_session() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source =
+      source_text_at({"src", "core", "tunnel_controller",
+                      "tunnel_controller_connect.cpp"});
+  const auto runner_start = source.find("bool ok = runner_.start");
+  const auto runner_failed = source.find("if (!ok)", runner_start);
+  const auto runner_started =
+      source.find("\"native.runner.started\"", runner_failed);
+  const auto failure_source =
+      runner_failed == std::string::npos
+          ? std::string()
+          : source.substr(runner_failed,
+                          runner_started == std::string::npos
+                              ? std::string::npos
+                              : runner_started - runner_failed);
+  const auto session_gate = failure_source.find("!session_id_.value.empty()");
+  const auto cleanup_call = failure_source.find("cleanup_after_failed_startup()");
+  const auto failed_transition =
+      failure_source.find("transition_to(TunnelPhase::Failed)");
+
+  bool ok = true;
+  ok = expect(runner_start != std::string::npos,
+              "TunnelController should start the native runner in connect flow") &&
+       ok;
+  ok = expect(runner_failed != std::string::npos,
+              "TunnelController should handle native runner start failure") &&
+       ok;
+  ok = expect(session_gate != std::string::npos,
+              "native runner failure cleanup should run when a helper session was already started") &&
+       ok;
+  ok = expect(cleanup_call != std::string::npos,
+              "native runner failure should shut down the helper session before returning failed status") &&
+       ok;
+  ok = expect(failed_transition != std::string::npos,
+              "native runner failure should still transition to Failed") &&
+       ok;
+  if (session_gate != std::string::npos && cleanup_call != std::string::npos &&
+      failed_transition != std::string::npos) {
+    ok = expect(session_gate < cleanup_call,
+                "helper-session gate should guard failed-startup cleanup") &&
+         ok;
+    ok = expect(cleanup_call < failed_transition,
+                "helper session should be cleaned before Failed snapshot is emitted") &&
+         ok;
+  }
+  return ok;
+#endif
+}
+
 bool desktop_helper_status_includes_current_instance_contract() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
@@ -516,8 +689,12 @@ bool desktop_service_actions_use_helper_owned_maintenance_contract() {
   ok = expect(source.find("finalize_handoff") != std::string::npos,
               "desktop service.install should finalize oneshot handoff") &&
        ok;
-  ok = expect(source.find("client->uninstall_service") != std::string::npos,
-              "desktop service.uninstall should call helper UninstallService") &&
+  ok = expect(source.find("client->uninstall_service") == std::string::npos,
+              "desktop service.uninstall must not ask the running service helper to uninstall itself") &&
+       ok;
+  ok = expect(source.find("make_system_status_use_cases().uninstall_helper()") !=
+                  std::string::npos,
+              "desktop service.uninstall should delegate to the shared one-shot helper maintenance path") &&
        ok;
   ok = expect(source.find("\"vpn_session_active\"") != std::string::npos,
               "desktop service.uninstall should reject active VPN sessions") &&
@@ -572,6 +749,16 @@ bool cli_service_actions_use_core_helper_maintenance_contract() {
                   std::string::npos,
               "service.uninstall should call helper UninstallService through IPC") &&
        ok;
+  ok = expect(use_case_source.find(
+                  "with_helper_service_lease(\"service.uninstall\", true") !=
+                  std::string::npos,
+              "service.uninstall should bootstrap a one-shot helper when the installed service is stopped") &&
+       ok;
+  ok = expect(use_case_source.find(
+                  "with_helper_service_lease(\"service.uninstall\", true, \"oneshot\"") !=
+                  std::string::npos,
+              "service.uninstall must force oneshot backend instead of asking the running service to uninstall itself") &&
+       ok;
   ok = expect(use_case_source.find("read_runtime_status_snapshot") !=
                   std::string::npos &&
                   use_case_source.find("\"vpn_session_active\"") !=
@@ -594,6 +781,9 @@ int main() {
   ok = frontend_json_has_required_fields() && ok;
   ok = app_api_activates_core_owned_native_mode() && ok;
   ok = desktop_native_connect_uses_core_owned_controller_pipeline() && ok;
+  ok = desktop_native_preflight_reports_substage_timing() && ok;
+  ok = desktop_native_connect_releases_attempt_guard_on_failed_status() && ok;
+  ok = tunnel_controller_native_runner_failure_cleans_helper_session() && ok;
   ok = desktop_helper_status_includes_current_instance_contract() && ok;
   ok = desktop_service_actions_use_helper_owned_maintenance_contract() && ok;
   ok = cli_service_actions_use_core_helper_maintenance_contract() && ok;

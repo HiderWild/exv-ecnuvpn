@@ -4,6 +4,7 @@
 #include "app/ui_shell/ui_shell_options.hpp"
 #include "app/ui_shell/ui_shell_runtime.hpp"
 #include "app/ui_shell/ui_window.hpp"
+#include "runtime/runtime_context.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -84,6 +85,8 @@ int main(int argc, char **argv) {
       options.exv_path,
       options.enable_dev_tools,
   };
+  ecnuvpn::runtime::bootstrap();
+  config.state_dir = ecnuvpn::runtime::paths().state_dir;
 
   ecnuvpn::ui_shell::configure_core_process_transport_signal_policy();
   auto transport = ecnuvpn::ui_shell::create_core_process_transport(

@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -34,6 +35,8 @@ constexpr std::uint8_t kPktDpdRequest = 0x03;
 constexpr std::uint8_t kPktDpdResponse = 0x04;
 constexpr std::uint8_t kPktDisconnect = 0x05;
 constexpr std::uint8_t kPktKeepalive = 0x07;
+constexpr std::uint8_t kPktCompressed = 0x08;
+constexpr std::uint8_t kPktTerminate = 0x09;
 
 ValidationResult invalid(std::string code, std::string message) {
   ValidationResult r;
@@ -142,6 +145,86 @@ ValidationResult append_header_values(const HttpResponse &response,
   return ValidationResult{};
 }
 
+std::string header_string(const HttpResponse &response,
+                          const char *header_name) {
+  const std::string *value = response.header_ci(header_name);
+  if (!value)
+    return {};
+  std::string_view trimmed = trim_ascii(*value);
+  if (trimmed.empty())
+    return {};
+  return std::string(trimmed);
+}
+
+ValidationResult parse_optional_int_header(const HttpResponse &response,
+                                           const char *header_name,
+                                           int *out) {
+  if (!out)
+    return invalid("cstp_null_out", "output pointer is null");
+  const std::string value = header_string(response, header_name);
+  if (value.empty())
+    return ValidationResult{};
+
+  std::uint32_t parsed = 0;
+  ValidationResult result = parse_u32_decimal(value, &parsed);
+  if (!result.ok) {
+    return invalid("cstp_invalid_number",
+                   std::string("invalid ") + header_name + " value");
+  }
+  if (parsed > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+    return invalid("cstp_invalid_number",
+                   std::string(header_name) + " value out of range");
+  }
+  *out = static_cast<int>(parsed);
+  return ValidationResult{};
+}
+
+std::string lower_ascii(std::string_view value) {
+  std::string out;
+  out.reserve(value.size());
+  for (unsigned char ch : value)
+    out.push_back(static_cast<char>(std::tolower(ch)));
+  return out;
+}
+
+bool parse_bool_header(const HttpResponse &response, const char *header_name) {
+  const std::string value = lower_ascii(header_string(response, header_name));
+  return value == "1" || value == "true" || value == "yes";
+}
+
+int hex_value(unsigned char ch) {
+  if (ch >= '0' && ch <= '9')
+    return ch - '0';
+  if (ch >= 'a' && ch <= 'f')
+    return 10 + ch - 'a';
+  if (ch >= 'A' && ch <= 'F')
+    return 10 + ch - 'A';
+  return -1;
+}
+
+std::string url_decode(std::string_view value) {
+  std::string out;
+  out.reserve(value.size());
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    const unsigned char ch = static_cast<unsigned char>(value[i]);
+    if (ch == '%' && i + 2 < value.size()) {
+      const int hi = hex_value(static_cast<unsigned char>(value[i + 1]));
+      const int lo = hex_value(static_cast<unsigned char>(value[i + 2]));
+      if (hi >= 0 && lo >= 0) {
+        out.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+        continue;
+      }
+    }
+    if (ch == '+') {
+      out.push_back(' ');
+    } else {
+      out.push_back(static_cast<char>(ch));
+    }
+  }
+  return out;
+}
+
 std::uint32_t read_be_u32_raw(const std::uint8_t *p) {
   return (static_cast<std::uint32_t>(p[0]) << 24) |
          (static_cast<std::uint32_t>(p[1]) << 16) |
@@ -242,6 +325,12 @@ ValidationResult type_to_wire(CstpFrameType t, std::uint8_t *out) {
   case CstpFrameType::disconnect:
     *out = kPktDisconnect;
     return ValidationResult{};
+  case CstpFrameType::compressed:
+    *out = kPktCompressed;
+    return ValidationResult{};
+  case CstpFrameType::terminate:
+    *out = kPktTerminate;
+    return ValidationResult{};
   }
 
   return invalid("cstp_unknown_type", "unknown frame type");
@@ -268,6 +357,12 @@ ValidationResult wire_to_type(std::uint8_t t, CstpFrameType *out) {
   case kPktDisconnect:
     *out = CstpFrameType::disconnect;
     return ValidationResult{};
+  case kPktCompressed:
+    *out = CstpFrameType::compressed;
+    return ValidationResult{};
+  case kPktTerminate:
+    *out = CstpFrameType::terminate;
+    return ValidationResult{};
   default:
     return invalid("cstp_unknown_type", "unknown frame type tag");
   }
@@ -280,6 +375,8 @@ ValidationResult parse_cstp_headers(const HttpResponse &response,
   if (!metadata)
     return invalid("cstp_null_metadata", "metadata output must not be null");
 
+  if (response.status == 401)
+    return invalid("auth_expired", "CSTP CONNECT authentication expired");
   if (response.status < 200 || response.status > 299)
     return invalid("cstp_connect_failed", "CSTP CONNECT response status is not 2xx");
 
@@ -318,18 +415,131 @@ ValidationResult parse_cstp_headers(const HttpResponse &response,
   metadata->internal_ip4_netmask = std::string(trim_ascii(*mask));
   metadata->mtu = static_cast<int>(mtu_value);
 
+  metadata->ip6_address = header_string(response, "X-CSTP-Address-IP6");
+  {
+    ValidationResult v = parse_optional_int_header(
+        response, "X-CSTP-Netmask-IP6", &metadata->ip6_prefix);
+    if (!v.ok)
+      return v;
+  }
+  metadata->default_domain =
+      header_string(response, "X-CSTP-Default-Domain");
+  metadata->tunnel_all_dns =
+      parse_bool_header(response, "X-CSTP-Tunnel-All-DNS");
+  metadata->banner = url_decode(header_string(response, "X-CSTP-Banner"));
+  metadata->rekey_method = header_string(response, "X-CSTP-Rekey-Method");
+  metadata->content_encoding =
+      header_string(response, "X-CSTP-Content-Encoding");
+  metadata->dtls_session_id = header_string(response, "X-DTLS-Session-ID");
+  metadata->dtls_cipher_suite = header_string(response, "X-DTLS-CipherSuite");
+  metadata->dtls12_cipher_suite =
+      header_string(response, "X-DTLS12-CipherSuite");
+
+  {
+    ValidationResult v =
+        parse_optional_int_header(response, "X-CSTP-Keepalive",
+                                  &metadata->keepalive_seconds);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v =
+        parse_optional_int_header(response, "X-CSTP-DPD",
+                                  &metadata->dpd_seconds);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v =
+        parse_optional_int_header(response, "X-CSTP-Rekey-Time",
+                                  &metadata->rekey_seconds);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v = parse_optional_int_header(
+        response, "X-CSTP-Lease-Duration",
+        &metadata->lease_duration_seconds);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v = parse_optional_int_header(
+        response, "X-CSTP-Idle-Timeout", &metadata->idle_timeout_seconds);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v = parse_optional_int_header(
+        response, "X-CSTP-Session-Timeout",
+        &metadata->session_timeout_seconds);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v = parse_optional_int_header(
+        response, "X-CSTP-Disconnected-Timeout",
+        &metadata->disconnected_timeout_seconds);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v =
+        parse_optional_int_header(response, "X-DTLS-MTU",
+                                  &metadata->dtls_mtu);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v =
+        parse_optional_int_header(response, "X-DTLS-Port",
+                                  &metadata->dtls_port);
+    if (!v.ok)
+      return v;
+  }
+
   metadata->routes.clear();
+  metadata->split_include_routes.clear();
+  metadata->split_exclude_routes.clear();
   metadata->server_bypass_ips.clear();
+  metadata->dns_servers.clear();
+  metadata->nbns_servers.clear();
+  metadata->search_domains.clear();
 
   {
     ValidationResult v = append_header_values(response, "X-CSTP-Split-Include",
-                                             &metadata->routes);
+                                             &metadata->split_include_routes);
+    if (!v.ok)
+      return v;
+    metadata->routes = metadata->split_include_routes;
+  }
+  {
+    ValidationResult v = append_header_values(response, "X-CSTP-Split-Exclude",
+                                             &metadata->split_exclude_routes);
     if (!v.ok)
       return v;
   }
   {
     ValidationResult v = append_header_values(response, "X-CSTP-Bypass-Route",
                                              &metadata->server_bypass_ips);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v = append_header_values(response, "X-CSTP-DNS",
+                                             &metadata->dns_servers);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v = append_header_values(response, "X-CSTP-NBNS",
+                                             &metadata->nbns_servers);
+    if (!v.ok)
+      return v;
+  }
+  {
+    ValidationResult v = append_header_values(response, "X-CSTP-Split-DNS",
+                                             &metadata->search_domains);
     if (!v.ok)
       return v;
   }

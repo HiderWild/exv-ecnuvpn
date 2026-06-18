@@ -71,6 +71,18 @@ int main() {
     }
     {
         events::TunnelEventType out{};
+        ok = expect(exv::core::EngineEventBridge::map_event("auth.challenge_required", &out) &&
+                    out == events::TunnelEventType::AuthChallengeRequired,
+                    "auth.challenge_required -> AuthChallengeRequired") && ok;
+    }
+    {
+        events::TunnelEventType out{};
+        ok = expect(exv::core::EngineEventBridge::map_event("auth.group_required", &out) &&
+                    out == events::TunnelEventType::AuthGroupRequired,
+                    "auth.group_required -> AuthGroupRequired") && ok;
+    }
+    {
+        events::TunnelEventType out{};
         ok = expect(exv::core::EngineEventBridge::map_event("cstp.connected", &out) &&
                     out == events::TunnelEventType::CstpConnected,
                     "cstp.connected -> CstpConnected") && ok;
@@ -166,6 +178,8 @@ int main() {
         const char* types[] = {
             "auth.succeeded",
             "auth.failed",
+            "auth.challenge_required",
+            "auth.group_required",
             "cstp.connected",
             "packet.loop.started",
             "transport.closed",
@@ -177,19 +191,23 @@ int main() {
             bridge.emit(ev);
         }
 
-        ok = expect(received.size() == 6, "all 6 mapped types received") && ok;
+        ok = expect(received.size() == 8, "all 8 mapped types received") && ok;
         ok = expect(received[0] == events::TunnelEventType::AuthSucceeded,
                     "index 0: AuthSucceeded") && ok;
         ok = expect(received[1] == events::TunnelEventType::AuthFailed,
                     "index 1: AuthFailed") && ok;
-        ok = expect(received[2] == events::TunnelEventType::CstpConnected,
-                    "index 2: CstpConnected") && ok;
-        ok = expect(received[3] == events::TunnelEventType::PacketLoopStarted,
-                    "index 3: PacketLoopStarted") && ok;
-        ok = expect(received[4] == events::TunnelEventType::TransportClosed,
-                    "index 4: TransportClosed") && ok;
-        ok = expect(received[5] == events::TunnelEventType::PacketDeviceFailed,
-                    "index 5: PacketDeviceFailed") && ok;
+        ok = expect(received[2] == events::TunnelEventType::AuthChallengeRequired,
+                    "index 2: AuthChallengeRequired") && ok;
+        ok = expect(received[3] == events::TunnelEventType::AuthGroupRequired,
+                    "index 3: AuthGroupRequired") && ok;
+        ok = expect(received[4] == events::TunnelEventType::CstpConnected,
+                    "index 4: CstpConnected") && ok;
+        ok = expect(received[5] == events::TunnelEventType::PacketLoopStarted,
+                    "index 5: PacketLoopStarted") && ok;
+        ok = expect(received[6] == events::TunnelEventType::TransportClosed,
+                    "index 6: TransportClosed") && ok;
+        ok = expect(received[7] == events::TunnelEventType::PacketDeviceFailed,
+                    "index 7: PacketDeviceFailed") && ok;
     }
 
     // ---------------------------------------------------------------
@@ -246,6 +264,10 @@ int main() {
             "auth.started",
             "auth.succeeded",
             "auth.failed",
+            "auth.challenge_required",
+            "auth.group_required",
+            "csd.required_unsupported",
+            "dtls.unavailable",
             "cstp.connected",
             "cstp.failed",
             "packet.loop.started",
@@ -280,7 +302,7 @@ int main() {
         auto logs = log_sink->logs();
         exv::observability::LogFacade::shutdown();
 
-        ok = expect(logs.size() == 12,
+        ok = expect(logs.size() == 16,
                     "lifecycle events should log and noisy events should not") && ok;
         for (const char* t : log_worthy_types) {
             const bool found = std::any_of(logs.begin(), logs.end(),

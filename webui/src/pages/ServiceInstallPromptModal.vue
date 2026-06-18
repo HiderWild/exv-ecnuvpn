@@ -12,6 +12,7 @@ const error = ref('')
 const revealing = ref(false)
 const closeChoice = ref<'tray' | 'quit'>('tray')
 const rememberCloseChoice = ref(false)
+const resolved = ref(false)
 
 const kind = computed(() => payload.value?.kind ?? 'service-install')
 const message = computed(() => payload.value?.message ?? '')
@@ -33,6 +34,7 @@ onMounted(async () => {
 async function resolvePrompt(result: unknown) {
   if (busy.value) return
   busy.value = true
+  resolved.value = true
   try {
     await window.ecnuVpn?.modal.resolve(result)
   } finally {
@@ -58,6 +60,7 @@ function submitCloseChoice() {
 
 <template>
   <main
+    v-if="!resolved"
     class="grid h-screen place-items-stretch bg-transparent text-foreground"
     :class="isCloseApp ? 'p-0' : 'p-1'"
   >

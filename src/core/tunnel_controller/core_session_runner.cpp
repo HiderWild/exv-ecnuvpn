@@ -1,7 +1,24 @@
 #include "core/tunnel_controller/core_session_runner.hpp"
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
 
+#include <string>
+
 namespace exv::core {
+
+namespace {
+
+bool is_auth_failure_code(const std::string& code) {
+    return code == "auth_failed" ||
+           code == "unsupported_auth_flow" ||
+           code == "auth_protocol_mismatch" ||
+           code == "auth_rejected" ||
+           code == "auth_challenge_required" ||
+           code == "auth_group_required" ||
+           code == "auth_expired" ||
+           code == "csd_required_unsupported";
+}
+
+} // namespace
 
 // =========================================================================
 // CoreSessionRunner
@@ -86,8 +103,7 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
         if (validation.code.rfind("packet", 0) == 0 ||
             validation.code.rfind("native_packet", 0) == 0) {
             te.type = TunnelEventType::PacketDeviceFailed;
-        } else if (validation.code == "auth_failed" ||
-                   validation.code == "unsupported_auth_flow") {
+        } else if (is_auth_failure_code(validation.code)) {
             te.type = TunnelEventType::AuthFailed;
         } else {
             te.type = TunnelEventType::TransportClosed;

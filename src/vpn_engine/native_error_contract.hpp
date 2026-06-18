@@ -5,16 +5,39 @@
 namespace ecnuvpn {
 namespace vpn_engine {
 
-// Canonical native failure codes surfaced to the desktop RPC contract. The
-// desktop UI distinguishes exactly these five native error classes; everything
-// else collapses to a generic native failure handled by the frontend's
-// catch-all path.
+// Canonical native failure codes surfaced to the desktop RPC contract. Keep
+// protocol-specific AnyConnect outcomes stable so the UI and logs can
+// distinguish auth interaction, gateway disconnect, timeout, and CSTP feature
+// gaps from generic transport failure.
 inline constexpr const char *kNativeContractTlsVerifyFailed = "tls_verify_failed";
 inline constexpr const char *kNativeContractWintunMissing = "wintun_missing";
 inline constexpr const char *kNativeContractUtunPermissionDenied =
     "utun_permission_denied";
 inline constexpr const char *kNativeContractAuthFailed = "auth_failed";
 inline constexpr const char *kNativeContractUnsupportedDtls = "unsupported_dtls";
+inline constexpr const char *kNativeContractAuthProtocolMismatch =
+    "auth_protocol_mismatch";
+inline constexpr const char *kNativeContractAuthRejected = "auth_rejected";
+inline constexpr const char *kNativeContractAuthChallengeRequired =
+    "auth_challenge_required";
+inline constexpr const char *kNativeContractAuthGroupRequired =
+    "auth_group_required";
+inline constexpr const char *kNativeContractAuthExpired = "auth_expired";
+inline constexpr const char *kNativeContractCsdRequiredUnsupported =
+    "csd_required_unsupported";
+inline constexpr const char *kNativeContractDtlsUnavailable =
+    "dtls_unavailable";
+inline constexpr const char *kNativeContractTunnelDisconnected =
+    "tunnel_disconnected";
+inline constexpr const char *kNativeContractSessionTimeout =
+    "session_timeout";
+inline constexpr const char *kNativeContractIdleTimeout = "idle_timeout";
+inline constexpr const char *kNativeContractRekeyUnsupported =
+    "rekey_unsupported";
+inline constexpr const char *kNativeContractCstpCompressedUnsupported =
+    "cstp_compressed_unsupported";
+inline constexpr const char *kNativeContractUnsupportedExtraArgs =
+    "unsupported_extra_args";
 
 namespace detail {
 
@@ -47,6 +70,21 @@ map_native_error_to_contract_code(const std::string &code,
     return kNativeContractTlsVerifyFailed;
   if (code == kNativeContractUnsupportedDtls)
     return kNativeContractUnsupportedDtls;
+  if (code == kNativeContractAuthProtocolMismatch ||
+      code == kNativeContractAuthRejected ||
+      code == kNativeContractAuthChallengeRequired ||
+      code == kNativeContractAuthGroupRequired ||
+      code == kNativeContractAuthExpired ||
+      code == kNativeContractCsdRequiredUnsupported ||
+      code == kNativeContractDtlsUnavailable ||
+      code == kNativeContractTunnelDisconnected ||
+      code == kNativeContractSessionTimeout ||
+      code == kNativeContractIdleTimeout ||
+      code == kNativeContractRekeyUnsupported ||
+      code == kNativeContractCstpCompressedUnsupported ||
+      code == kNativeContractUnsupportedExtraArgs) {
+    return code;
+  }
   if (code == kNativeContractWintunMissing)
     return kNativeContractWintunMissing;
   if (code == kNativeContractUtunPermissionDenied)

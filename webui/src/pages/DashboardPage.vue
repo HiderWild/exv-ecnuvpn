@@ -50,7 +50,7 @@ const showInstallServiceChoice = computed(() => (
   !disconnecting.value &&
   !vpn.loading &&
   !vpn.serviceBusy &&
-  !vpn.serviceAvailable
+  !vpn.serviceInstalled
 ))
 const installServiceChoiceDisabled = computed(() => connecting.value || disconnecting.value || vpn.loading || vpn.serviceBusy)
 
@@ -70,7 +70,7 @@ const statusDescription = computed(() => {
   }
   if (vpn.lastError) return '请在弹窗中处理本次操作失败。'
   if (vpn.serviceAvailable) return '服务可用，点击电源按钮即可连接。'
-  if (vpn.serviceInstalled && vpn.serviceRunning) return '服务需要修复，点击电源按钮会先更新服务再连接。'
+  if (vpn.serviceInstalled) return '服务已安装但未运行，点击电源按钮会先修复并启动服务。'
   return installServiceBeforeConnect.value
     ? '点击电源按钮会先安装服务，然后自动建立连接。'
     : '点击电源按钮会为本次连接请求临时授权。'

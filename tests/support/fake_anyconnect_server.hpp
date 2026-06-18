@@ -23,10 +23,22 @@ struct FakeAnyConnectCredentials {
   std::string password = "test-mock-password-placeholder";
 };
 
+enum class FakeAnyConnectProtocolMode {
+  legacy_html,
+  aggregate_auth_v2,
+};
+
+struct FakeAnyConnectHttpResult {
+  vpn_engine::ValidationResult result;
+  std::string response;
+};
+
 struct FakeAnyConnectServerOptions {
   FakeAnyConnectServerOptions();
 
   FakeAnyConnectCredentials expected_credentials;
+  FakeAnyConnectProtocolMode protocol_mode =
+      FakeAnyConnectProtocolMode::legacy_html;
   std::string session_cookie = "webvpn=FAKE_COOKIE";
   vpn_engine::TunnelMetadata tunnel_metadata;
 
@@ -43,6 +55,8 @@ public:
 
   vpn_engine::protocol::AuthResult
   password_authenticate(const FakeAnyConnectCredentials &credentials);
+
+  FakeAnyConnectHttpResult handle_http_request(const std::string &request);
 
   vpn_engine::ValidationResult
   connect_cstp(const std::string &cookie,
@@ -80,6 +94,7 @@ private:
   int cstp_connects_ = 0;
   int data_frames_received_ = 0;
   std::size_t data_frames_on_transport_ = 0;
+  int v2_http_stage_ = 0;
 };
 
 class RecordingEventSink final : public vpn_engine::EventSink {

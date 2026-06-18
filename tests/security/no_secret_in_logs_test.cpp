@@ -40,6 +40,24 @@ bool contains_secret_keyword(const std::string& s) {
     return false;
 }
 
+bool contains_seed_secret(const std::string& s) {
+    static const char* seeds[] = {
+        "p@ssw0rd-seed",
+        "V2_SESSION_TOKEN_SEED",
+        "webvpn=COOKIE_SEED",
+        "OPAQUE_SEED",
+        "SAML_SEED",
+        "CSD_TICKET_SEED",
+        "CSD_TOKEN_SEED",
+        "654321",
+        nullptr
+    };
+    for (const char** seed = seeds; *seed; ++seed) {
+        if (s.find(*seed) != std::string::npos) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -103,6 +121,40 @@ int main() {
         check += mapped.message;
         expect(!contains_secret_keyword(check),
                "auth error must not contain secrets");
+    }
+
+    // ---------------------------------------------------------------
+    // 4a. Seeded AnyConnect secrets are redacted from mapped errors
+    // ---------------------------------------------------------------
+    {
+        const std::string seeded =
+            "password=p@ssw0rd-seed token=V2_SESSION_TOKEN_SEED "
+            "cookie webvpn=COOKIE_SEED opaque=OPAQUE_SEED "
+            "SAML=SAML_SEED challenge=654321";
+
+        exv::core::ErrorInfo auth = exv::core::CoreErrorMapper::from_auth_error(
+            401, seeded);
+        exv::core::ErrorInfo helper =
+            exv::core::CoreErrorMapper::from_helper_error("helper_failed", seeded);
+        exv::core::ErrorInfo native =
+            exv::core::CoreErrorMapper::from_native_error(
+                "auth_challenge_required", seeded);
+        exv::core::ErrorInfo csd =
+            exv::core::CoreErrorMapper::from_native_error(
+                "csd_required_unsupported",
+                "hostscan-ticket=CSD_TICKET_SEED");
+
+        std::string check;
+        check += auth.message;
+        check += helper.message;
+        check += native.message;
+        check += native.recommended_action;
+        check += csd.message;
+        check += csd.recommended_action;
+        expect(!contains_secret_keyword(check),
+               "seeded mapped errors must not contain secret keywords");
+        expect(!contains_seed_secret(check),
+               "seeded mapped errors must not contain secret values");
     }
 
     // ---------------------------------------------------------------

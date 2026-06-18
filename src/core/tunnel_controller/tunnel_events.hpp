@@ -11,6 +11,8 @@ enum class TunnelEventType {
     HelperReady,
     AuthSucceeded,
     AuthFailed,
+    AuthChallengeRequired,
+    AuthGroupRequired,
     CstpConnected,
     NetworkConfigApplied,
     PacketLoopStarted,

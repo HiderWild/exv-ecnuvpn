@@ -23,6 +23,9 @@ struct AuthResult {
   std::string cookie;
   std::string error_code;
   std::string error_message;
+  std::string interaction_prompt_label;
+  std::string interaction_prompt_type;
+  std::string interaction_group_options;
 };
 
 class AuthCookieJar {

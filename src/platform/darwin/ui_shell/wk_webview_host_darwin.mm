@@ -1,3 +1,4 @@
+#include "app/ui_shell/close_preference.hpp"
 #include "app/ui_shell/host_bridge.hpp"
 #include "app/ui_shell/ui_window.hpp"
 #include "app/ui_shell/window_layout.hpp"
@@ -320,31 +321,8 @@ public:
         return;
       }
       if (action == "window.resolveClosePrompt") {
-        std::string resolved_action = "cancel";
-        if (parsed.contains("payload") && parsed["payload"].is_object()) {
-          const auto &payload = parsed["payload"];
-          if (payload.contains("result")) {
-            const auto &result = payload["result"];
-            if (result.is_string()) {
-              resolved_action = result.get<std::string>();
-            } else if (result.is_object() && result.contains("action") &&
-                       result["action"].is_string()) {
-              resolved_action = result["action"].get<std::string>();
-            }
-          }
-        }
-        if (resolved_action == "tray") {
-          close_prompt_pending_ = false;
-          if (window_ != nil) {
-            [window_ orderOut:nil];
-          }
-        } else if (resolved_action == "quit") {
-          close_prompt_pending_ = false;
-          quit_from_status_item();
-        } else {
-          close_prompt_pending_ = false;
-          show_from_status_item();
-        }
+        apply_close_resolution(
+            ecnuvpn::ui_shell::parse_close_prompt_resolution(request_json));
         nlohmann::ordered_json out;
         out["id"] = id;
         out["ok"] = true;
@@ -404,8 +382,32 @@ public:
       show_from_status_item();
       return;
     }
+    if (const auto remembered_action =
+            ecnuvpn::ui_shell::read_close_preference(active_config_.state_dir)) {
+      apply_close_resolution({*remembered_action, false});
+      return;
+    }
     close_prompt_pending_ = true;
     emit_event(R"({"type":"close-request","data":{}})");
+  }
+
+  void apply_close_resolution(
+      const ecnuvpn::ui_shell::ClosePromptResolution &resolution) {
+    close_prompt_pending_ = false;
+    if (resolution.remember) {
+      ecnuvpn::ui_shell::write_close_preference(active_config_.state_dir,
+                                                resolution.action);
+    }
+
+    if (resolution.action == "tray") {
+      if (window_ != nil) {
+        [window_ orderOut:nil];
+      }
+    } else if (resolution.action == "quit") {
+      quit_from_status_item();
+    } else {
+      show_from_status_item();
+    }
   }
 
   void apply_window_mode(const std::string &mode) {

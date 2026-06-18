@@ -8,6 +8,7 @@
 #include "vpn_engine/session_state.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -41,6 +42,8 @@ struct ProtocolSessionOptions {
   std::string username;
   std::string password;
   std::string useragent;
+  std::string auth_group;
+  std::string csd_wrapper;
   bool disable_dtls = true;
   bool auto_reconnect = false;
   int max_reconnects = 1;
@@ -54,12 +57,25 @@ struct ProtocolSessionOptions {
   // Liveness servicing (DPD / keepalive). These are expressed in consecutive
   // idle outbound-poll counts (one idle poll is ~1ms). 0 disables that timer.
   // Responding to an inbound DPD request is always on and not gated by these.
+  int liveness_idle_polls_per_second = 1000;
   int keepalive_idle_poll_interval = 0;
   int dpd_idle_poll_interval = 0;
   int dead_peer_poll_budget = 0;
+  int rekey_idle_poll_interval = 0;
+  int idle_timeout_idle_poll_limit = 0;
+  int session_timeout_idle_poll_limit = 0;
+  std::string rekey_method;
 
+  // Optional synchronous continuation hook for aggregate-auth group selection
+  // or challenge prompts. Production UI wiring is intentionally outside the
+  // wire protocol layer; when this hook is absent, the transport returns the
+  // stable *_required error instead.
   std::function<AuthInteractionResponse(const AuthInteractionRequest &)>
       auth_interaction_handler;
+
+  // Optional test seam for lifecycle policy decisions. Production uses
+  // steady_clock so cookie reuse is bounded by gateway session-timeout metadata.
+  std::function<std::chrono::steady_clock::time_point()> monotonic_clock;
 };
 
 // Classification of a single CSTP frame received from the gateway. This is the
@@ -71,6 +87,8 @@ enum class InboundFrameKind {
   dpd_response,
   keepalive,
   disconnect,
+  compressed,
+  terminate,
 };
 
 struct InboundFrame {
@@ -101,7 +119,8 @@ public:
   virtual ValidationResult send_control(InboundFrameKind kind) = 0;
 
   // Inbound path: block until the next complete CSTP frame is available,
-  // decode and classify it. Returns a transport_closed error on peer EOF.
+  // decode and classify it. Returns a transport_closed error only on underlying
+  // stream EOF/interruption; peer control frames are returned as frame kinds.
   virtual ValidationResult receive_frame(InboundFrame *out) = 0;
 
   virtual void disconnect() = 0;
@@ -120,6 +139,7 @@ public:
   void disconnect();
 
   const SessionState &state() const;
+  const AuthResult &last_auth_result() const;
   int reconnect_attempts() const;
 
 private:
@@ -133,17 +153,24 @@ private:
 
   ValidationResult reconnect(PacketDevice *device, EventSink *events,
                              CancellationToken *cancel,
-                             const DeviceConfig &device_config);
+                             const DeviceConfig &device_config,
+                             bool explicit_device_config);
+  void apply_gateway_liveness_metadata(const TunnelMetadata &metadata);
   ForwardingOutcome run_forwarding(PacketDevice *device, EventSink *events,
                                    CancellationToken *cancel);
   ValidationResult stop_cancelled(PacketDevice *device, EventSink *events);
   bool cancellation_requested(const CancellationToken *cancel) const;
+  std::chrono::steady_clock::time_point monotonic_now() const;
+  bool cached_cookie_within_session_timeout() const;
 
   ProtocolSessionOptions options_;
   ProtocolTransport *transport_ = nullptr;
   SessionState state_;
+  AuthResult last_auth_result_;
   std::string cookie_;
   TunnelMetadata metadata_;
+  std::chrono::steady_clock::time_point cstp_connected_at_{};
+  int cookie_session_timeout_seconds_ = 0;
   bool authenticated_ = false;
   bool cstp_connected_ = false;
   int reconnect_attempts_ = 0;

@@ -748,6 +748,31 @@ int test_oneshot_entrypoint_uses_only_endpoint_argument() {
   return ok ? 0 : 1;
 }
 
+int test_windows_oneshot_bootstrap_does_not_consume_helper_connection() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto win32_bootstrap = read_text_file(
+      source_dir / "src" / "platform" / "win32" / "oneshot_bootstrap.cpp");
+
+  ok = expect(win32_bootstrap.find("wait_for_helper_hello") ==
+                  std::string::npos,
+              "Windows oneshot bootstrap must not use a Hello readiness probe "
+              "that consumes the first helper connection") &&
+       ok;
+  ok = expect(win32_bootstrap.find("send_helper_request") ==
+                  std::string::npos,
+              "Windows oneshot bootstrap must wait for the named pipe without "
+              "opening a helper RPC client") &&
+       ok;
+  ok = expect(win32_bootstrap.find("WaitNamedPipeA") !=
+                  std::string::npos,
+              "Windows oneshot bootstrap should wait for pipe availability "
+              "without consuming the one-shot helper session") &&
+       ok;
+
+  return ok ? 0 : 1;
+}
+
 int test_helper_connector_requires_explicit_endpoint_field() {
   bool ok = true;
   const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
@@ -2034,6 +2059,7 @@ int main() {
   failures += test_oneshot_owner_is_uid_or_sid_not_pid_alias();
   failures += test_windows_helper_has_no_second_service_entrypoint();
   failures += test_oneshot_entrypoint_uses_only_endpoint_argument();
+  failures += test_windows_oneshot_bootstrap_does_not_consume_helper_connection();
   failures += test_helper_connector_requires_explicit_endpoint_field();
   failures += test_hello_has_no_version_fields();
   failures += test_hello_mode_matches_startup_context();

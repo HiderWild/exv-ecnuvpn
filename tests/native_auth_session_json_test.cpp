@@ -348,6 +348,7 @@ bool secret_like_diagnostics_are_not_serialized_or_summarized() {
   session.diagnostics["secret"] = "diagnostic-secret";
   session.diagnostics["saml"] = "diagnostic-saml";
   session.diagnostics["csrf"] = "diagnostic-csrf";
+  session.diagnostics["challenge"] = "diagnostic-challenge-response";
   session.diagnostics["http_status"] = "200";
 
   const auto payload = to_json(session);
@@ -359,7 +360,8 @@ bool secret_like_diagnostics_are_not_serialized_or_summarized() {
        ok;
   for (const std::string needle :
        {"diagnostic-cookie", "diagnostic-password", "diagnostic-token",
-        "diagnostic-secret", "diagnostic-saml", "diagnostic-csrf"}) {
+        "diagnostic-secret", "diagnostic-saml", "diagnostic-csrf",
+        "diagnostic-challenge-response"}) {
     ok = expect(serialized.find(needle) == std::string::npos,
                 "serialized JSON must not contain secret-like diagnostics") &&
          ok;
@@ -425,6 +427,7 @@ bool unsafe_or_malformed_diagnostics_are_rejected_on_parse() {
       nlohmann::json{{"cookie", "webvpn=diagnostic-cookie"}},
       nlohmann::json{{"auth_method", "contains token value"}},
       nlohmann::json{{"csrf", "diagnostic-csrf"}},
+      nlohmann::json{{"challenge", "diagnostic-challenge-response"}},
   };
 
   for (const auto &diagnostics : bad_diagnostics) {

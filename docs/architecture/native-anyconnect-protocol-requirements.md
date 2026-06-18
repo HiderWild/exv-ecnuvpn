@@ -17,6 +17,19 @@
 > 实现时 **禁止** 转写 `reference/openconnect-upstream/` 的源代码、解析器结构、状态机结构、
 > 常量表或注释。OpenConnect 仅作为“行为参照点”。本文引用 upstream 文件:行号
 > 仅用于 **行为核对**，不得照抄实现。
+>
+> **执行计划**：DAG、阶段门禁、任务依赖、并行 lane 与验证命令见
+> `docs/superpowers/plans/2026-06-18-native-anyconnect-v2-dag-plan.md`。
+>
+> **现场验证证据索引**：真实 ECNU 验证通过后，仅在下表追加已脱敏的 dated handoff
+> 链接；不要把原始日志、截图、抓包或 session JSON 贴入本文。证据模板见
+> `docs/handoffs/native-anyconnect-v2-live-validation-template.md`。
+>
+> | 阶段 | 状态 | 证据 |
+> |------|------|------|
+> | P0 auth/CSTP | 待真机验证 | |
+> | P1 DNS/routes/liveness | 待真机验证 | |
+> | P2 DTLS/challenge/CSD/reconnect | 待真机验证 | |
 
 ---
 

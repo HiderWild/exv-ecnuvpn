@@ -16,6 +16,24 @@ int main() {
           ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
     return 1;
   }
+  const auto scaled_advanced =
+      webview2_window_mode_bounds_for_dpi("advanced", 120);
+  if (scaled_advanced.width != 1215 || scaled_advanced.height != 704) {
+    return 1;
+  }
+  const auto scaled_minimal =
+      webview2_window_mode_bounds_for_dpi("minimal", 120);
+  if (scaled_minimal.width != 378 || scaled_minimal.height != 148) {
+    return 1;
+  }
+  const auto invalid_dpi_bounds =
+      webview2_window_mode_bounds_for_dpi("advanced", 0);
+  if (invalid_dpi_bounds.width !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+      invalid_dpi_bounds.height !=
+          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+    return 1;
+  }
 
   assert(is_valid_webview2_version("120.0.2210.91"));
   assert(!is_valid_webview2_version(""));
@@ -68,6 +86,13 @@ int main() {
   const auto tray_menu = webview2_tray_menu_model();
   if (tray_menu.size() != 3 || tray_menu[0].label != L"显示 ECNU VPN" ||
       !tray_menu[1].separator || tray_menu[2].label != L"退出") {
+    return 1;
+  }
+  if (webview2_taskbar_created_message_name() != L"TaskbarCreated") {
+    return 1;
+  }
+  if (webview2_app_icon_resource_id() <= 0 ||
+      webview2_app_icon_resource_id() == 32512) {
     return 1;
   }
 

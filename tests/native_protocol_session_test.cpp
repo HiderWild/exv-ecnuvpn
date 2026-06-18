@@ -3,6 +3,7 @@
 #include "vpn_engine/protocol/session.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -184,7 +185,11 @@ private:
 class LivenessTransport final
     : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
 public:
-  explicit LivenessTransport(bool echo_data = false) : echo_data_(echo_data) {}
+  explicit LivenessTransport(bool echo_data = false) : echo_data_(echo_data) {
+    metadata_.interface_name = "fake-cstp0";
+    metadata_.internal_ip4_address = "10.0.0.2";
+    metadata_.mtu = 1290;
+  }
 
   ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
       const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions
@@ -198,14 +203,17 @@ public:
   }
 
   ecnuvpn::vpn_engine::ValidationResult
-  connect_cstp(const std::string & /*cookie*/,
+  connect_cstp(const std::string &cookie,
                ecnuvpn::vpn_engine::TunnelMetadata *metadata) override {
     std::lock_guard<std::mutex> lock(mu_);
     ++cstp_connects_;
+    last_connect_cookies_.push_back(cookie);
+    if (auth_expired_connects_ > 0) {
+      --auth_expired_connects_;
+      return {false, "auth_expired", "cached cookie expired"};
+    }
     if (metadata) {
-      metadata->interface_name = "fake-cstp0";
-      metadata->internal_ip4_address = "10.0.0.2";
-      metadata->mtu = 1290;
+      *metadata = metadata_;
     }
     return {};
   }
@@ -273,9 +281,24 @@ public:
     cv_.notify_all();
   }
 
+  void set_connect_metadata(ecnuvpn::vpn_engine::TunnelMetadata metadata) {
+    std::lock_guard<std::mutex> lock(mu_);
+    metadata_ = std::move(metadata);
+  }
+
+  void expire_next_connect_cookie() {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++auth_expired_connects_;
+  }
+
   int auth_attempts() const {
     std::lock_guard<std::mutex> lock(mu_);
     return auth_attempts_;
+  }
+
+  int cstp_connects() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return cstp_connects_;
   }
 
   int control_send_count(
@@ -294,8 +317,11 @@ private:
   std::condition_variable cv_;
   std::deque<ecnuvpn::vpn_engine::protocol::InboundFrame> inbound_;
   std::vector<ecnuvpn::vpn_engine::protocol::InboundFrameKind> control_sends_;
+  ecnuvpn::vpn_engine::TunnelMetadata metadata_;
+  std::vector<std::string> last_connect_cookies_;
   bool echo_data_ = false;
   bool closed_ = false;
+  int auth_expired_connects_ = 0;
   int auth_attempts_ = 0;
   int cstp_connects_ = 0;
   int data_sends_ = 0;
@@ -415,6 +441,9 @@ public:
   }
 
   int open_count() const { return open_count_; }
+  const ecnuvpn::vpn_engine::TunnelMetadata &last_open_metadata() const {
+    return last_open_metadata_;
+  }
 
 private:
   ecnuvpn::vpn_engine::TunnelMetadata last_open_metadata_;
@@ -625,8 +654,8 @@ bool test_reconnect_after_transport_close() {
   ok = expect(session.reconnect_attempts() == 1,
               "one reconnect should be attempted") &&
        ok;
-  ok = expect(server.auth_attempts() == 2,
-              "reconnect should re-authenticate") &&
+  ok = expect(server.auth_attempts() == 1,
+              "reconnect should reuse cached cookie before re-authentication") &&
        ok;
   ok = expect(server.cstp_connects() == 2,
               "reconnect should repeat CSTP connect") &&
@@ -644,6 +673,9 @@ bool test_reconnect_after_transport_close() {
        ok;
   ok = expect(contains_event(events, "reconnect_started"),
               "reconnect should emit reconnect_started") &&
+       ok;
+  ok = expect(contains_event(events, "reconnect.cookie_reused"),
+              "reconnect should emit cached cookie reuse") &&
        ok;
   ok = expect(contains_event(events, "reconnect_succeeded"),
               "reconnect should emit reconnect_succeeded") &&
@@ -816,6 +848,111 @@ bool test_inbound_dpd_request_is_answered() {
   return ok;
 }
 
+bool test_peer_disconnect_is_not_generic_transport_eof() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/false);
+  RecordingEventSink events;
+  SilentNoDataDevice device;
+  ManualCancellationToken cancel;
+
+  transport.inject(InboundFrameKind::disconnect);
+
+  ProtocolSession session(session_options(), &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before disconnect frame test") &&
+       ok;
+  ok = expect(session.connect_cstp(&metadata).ok,
+              "CSTP should succeed before disconnect frame test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(!loop.ok && loop.code == "tunnel_disconnected",
+              "peer disconnect frame should not be generic transport_closed") &&
+       ok;
+  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+              "peer disconnect should mark session failed") &&
+       ok;
+
+  return ok;
+}
+
+bool test_terminate_frame_is_not_generic_transport_eof() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/false);
+  RecordingEventSink events;
+  SilentNoDataDevice device;
+  ManualCancellationToken cancel;
+
+  transport.inject(InboundFrameKind::terminate);
+
+  ProtocolSession session(session_options(), &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before terminate frame test") &&
+       ok;
+  ok = expect(session.connect_cstp(&metadata).ok,
+              "CSTP should succeed before terminate frame test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(!loop.ok && loop.code == "tunnel_disconnected",
+              "terminate frame should not be generic transport_closed") &&
+       ok;
+  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+              "terminate frame should mark session failed") &&
+       ok;
+
+  return ok;
+}
+
+bool test_compressed_frame_fails_with_explicit_unsupported_code() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/false);
+  RecordingEventSink events;
+  SilentNoDataDevice device;
+  ManualCancellationToken cancel;
+
+  transport.inject(InboundFrameKind::compressed);
+
+  ProtocolSession session(session_options(), &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before compressed frame test") &&
+       ok;
+  ok = expect(session.connect_cstp(&metadata).ok,
+              "CSTP should succeed before compressed frame test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(!loop.ok && loop.code == "cstp_compressed_unsupported",
+              "compressed frame should fail with explicit unsupported code") &&
+       ok;
+  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+              "compressed frame should mark session failed") &&
+       ok;
+
+  return ok;
+}
+
 bool test_idle_keepalive_is_emitted() {
   using namespace ecnuvpn::tests::support;
   using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
@@ -848,8 +985,54 @@ bool test_idle_keepalive_is_emitted() {
   ok = expect(transport.control_send_count(InboundFrameKind::keepalive) >= 1,
               "idle loop should emit at least one keepalive") &&
        ok;
-  ok = expect(contains_event(events, "dpd.keepalive"),
-              "idle keepalive should emit dpd.keepalive") &&
+  ok = expect(contains_event(events, "keepalive.sent"),
+              "idle keepalive should emit keepalive.sent") &&
+       ok;
+
+  return ok;
+}
+
+bool test_metadata_keepalive_drives_idle_timer() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/false);
+  RecordingEventSink events;
+  ManualCancellationToken cancel;
+  NoDataCancellingPacketDevice device(cancel, 5);
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "fake-cstp0";
+  metadata.internal_ip4_address = "10.0.0.2";
+  metadata.mtu = 1290;
+  metadata.keepalive_seconds = 1;
+  transport.set_connect_metadata(metadata);
+
+  auto options = session_options();
+  options.liveness_idle_polls_per_second = 2;
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before metadata keepalive test") &&
+       ok;
+  ok = expect(session.connect_cstp(&connected).ok,
+              "CSTP should succeed before metadata keepalive test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(!loop.ok && loop.code == "session_cancelled",
+              "metadata keepalive loop should end via cancellation") &&
+       ok;
+  ok = expect(transport.control_send_count(InboundFrameKind::keepalive) >= 1,
+              "metadata keepalive should schedule control keepalive") &&
+       ok;
+  ok = expect(contains_event(events, "keepalive.sent"),
+              "metadata keepalive should emit keepalive.sent") &&
        ok;
 
   return ok;
@@ -890,11 +1073,14 @@ bool test_dead_peer_triggers_reconnect() {
   ok = expect(session.reconnect_attempts() == 1,
               "dead peer should trigger exactly one reconnect") &&
        ok;
-  ok = expect(transport.auth_attempts() == 2,
-              "dead-peer reconnect should re-authenticate") &&
+  ok = expect(transport.auth_attempts() == 1,
+              "dead-peer reconnect should reuse cached cookie") &&
        ok;
   ok = expect(transport.control_send_count(InboundFrameKind::dpd_request) >= 1,
               "idle loop should send a DPD probe before declaring dead peer") &&
+       ok;
+  ok = expect(contains_event(events, "dpd.dead"),
+              "dead peer detection should emit dpd.dead") &&
        ok;
   ok = expect(device.open_count() == 2,
               "dead-peer reconnect should reopen the packet device") &&
@@ -902,8 +1088,343 @@ bool test_dead_peer_triggers_reconnect() {
   ok = expect(contains_event(events, "reconnect_started"),
               "dead-peer reconnect should emit reconnect_started") &&
        ok;
+  ok = expect(contains_event(events, "reconnect.cookie_reused"),
+              "dead-peer reconnect should emit cached cookie reuse") &&
+       ok;
   ok = expect(contains_event(events, "reconnect_succeeded"),
               "dead-peer reconnect should emit reconnect_succeeded") &&
+       ok;
+
+  return ok;
+}
+
+bool test_reconnect_reauthenticates_when_cached_cookie_expires() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/true);
+  RecordingEventSink events;
+  DeadPeerThenDrainDevice device;
+  ManualCancellationToken cancel;
+
+  auto options = session_options();
+  options.dpd_idle_poll_interval = 2;
+  options.dead_peer_poll_budget = 3;
+  options.auto_reconnect = true;
+  options.max_reconnects = 1;
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before cookie-expiry reconnect test") &&
+       ok;
+  ok = expect(session.connect_cstp(&metadata).ok,
+              "CSTP should succeed before cookie-expiry reconnect test") &&
+       ok;
+
+  transport.expire_next_connect_cookie();
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(loop.ok,
+              "cookie-expiry reconnect should re-authenticate and recover") &&
+       ok;
+  ok = expect(session.reconnect_attempts() == 1,
+              "cookie expiry should still use one reconnect attempt") &&
+       ok;
+  ok = expect(transport.auth_attempts() == 2,
+              "expired cached cookie should trigger one full re-authentication") &&
+       ok;
+  ok = expect(transport.cstp_connects() == 3,
+              "expired cached cookie should attempt cached CSTP then full-auth CSTP") &&
+       ok;
+  ok = expect(contains_event(events, "reconnect.cookie_expired"),
+              "cookie-expiry reconnect should emit expiration event") &&
+       ok;
+  ok = expect(contains_event(events, "reconnect_succeeded"),
+              "cookie-expiry reconnect should still succeed") &&
+       ok;
+
+  return ok;
+}
+
+bool test_reconnect_skips_cached_cookie_after_session_timeout() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/true);
+  RecordingEventSink events;
+  DeadPeerThenDrainDevice device;
+  ManualCancellationToken cancel;
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "fake-cstp0";
+  metadata.internal_ip4_address = "10.0.0.2";
+  metadata.mtu = 1290;
+  metadata.session_timeout_seconds = 60;
+  transport.set_connect_metadata(metadata);
+
+  std::chrono::steady_clock::time_point now{};
+  auto options = session_options();
+  options.liveness_idle_polls_per_second = 2;
+  options.dpd_idle_poll_interval = 2;
+  options.dead_peer_poll_budget = 3;
+  options.auto_reconnect = true;
+  options.max_reconnects = 1;
+  options.monotonic_clock = [&now]() { return now; };
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before session-timeout reconnect test") &&
+       ok;
+  ok = expect(session.connect_cstp(&connected).ok,
+              "CSTP should succeed before session-timeout reconnect test") &&
+       ok;
+
+  now += std::chrono::seconds(61);
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(loop.ok,
+              "session-timeout reconnect should re-authenticate and recover") &&
+       ok;
+  ok = expect(session.reconnect_attempts() == 1,
+              "session-timeout reconnect should use one reconnect attempt") &&
+       ok;
+  ok = expect(transport.auth_attempts() == 2,
+              "elapsed session timeout should force one full re-authentication") &&
+       ok;
+  ok = expect(transport.cstp_connects() == 2,
+              "elapsed session timeout should skip cached-cookie CSTP attempt") &&
+       ok;
+  ok = expect(contains_event(events, "reconnect.cookie_expired"),
+              "session-timeout reconnect should emit cookie expiry event") &&
+       ok;
+  ok = expect(!contains_event(events, "reconnect.cookie_reused"),
+              "session-timeout reconnect should not report cookie reuse") &&
+       ok;
+
+  return ok;
+}
+
+bool test_reconnect_reopens_device_with_updated_metadata() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/true);
+  RecordingEventSink events;
+  DeadPeerThenDrainDevice device;
+  ManualCancellationToken cancel;
+
+  auto options = session_options();
+  options.dpd_idle_poll_interval = 2;
+  options.dead_peer_poll_budget = 3;
+  options.auto_reconnect = true;
+  options.max_reconnects = 1;
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before metadata-refresh reconnect test") &&
+       ok;
+  ok = expect(session.connect_cstp(&metadata).ok,
+              "CSTP should succeed before metadata-refresh reconnect test") &&
+       ok;
+
+  ecnuvpn::vpn_engine::TunnelMetadata refreshed;
+  refreshed.interface_name = "fake-cstp1";
+  refreshed.internal_ip4_address = "10.0.0.3";
+  refreshed.mtu = 1400;
+  transport.set_connect_metadata(refreshed);
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(loop.ok,
+              "metadata-refresh reconnect should recover and finish cleanly") &&
+       ok;
+  ok = expect(device.open_count() == 2,
+              "metadata-refresh reconnect should reopen the packet device") &&
+       ok;
+  ok = expect(device.last_open_metadata().interface_name == "fake-cstp1",
+              "reconnect should use refreshed interface metadata") &&
+       ok;
+  ok = expect(device.last_open_metadata().mtu == 1400,
+              "reconnect should use refreshed MTU metadata") &&
+       ok;
+
+  return ok;
+}
+
+bool test_metadata_new_tunnel_rekey_triggers_reconnect() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/true);
+  RecordingEventSink events;
+  DeadPeerThenDrainDevice device;
+  ManualCancellationToken cancel;
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "fake-cstp0";
+  metadata.internal_ip4_address = "10.0.0.2";
+  metadata.mtu = 1290;
+  metadata.rekey_seconds = 1;
+  metadata.rekey_method = "new-tunnel";
+  transport.set_connect_metadata(metadata);
+
+  auto options = session_options();
+  options.liveness_idle_polls_per_second = 2;
+  options.auto_reconnect = true;
+  options.max_reconnects = 1;
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before metadata rekey test") &&
+       ok;
+  ok = expect(session.connect_cstp(&connected).ok,
+              "CSTP should succeed before metadata rekey test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(loop.ok,
+              "new-tunnel rekey should reconnect and finish cleanly") &&
+       ok;
+  ok = expect(session.reconnect_attempts() == 1,
+              "new-tunnel rekey should use the existing reconnect path") &&
+       ok;
+  ok = expect(contains_event(events, "rekey.due"),
+              "new-tunnel rekey should emit rekey.due") &&
+       ok;
+
+  return ok;
+}
+
+bool test_metadata_ssl_rekey_reports_unsupported_when_reconnect_disabled() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/false);
+  RecordingEventSink events;
+  SilentNoDataDevice device;
+  ManualCancellationToken cancel;
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "fake-cstp0";
+  metadata.internal_ip4_address = "10.0.0.2";
+  metadata.mtu = 1290;
+  metadata.rekey_seconds = 1;
+  metadata.rekey_method = "ssl";
+  transport.set_connect_metadata(metadata);
+
+  auto options = session_options();
+  options.liveness_idle_polls_per_second = 2;
+  options.auto_reconnect = false;
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before SSL rekey test") &&
+       ok;
+  ok = expect(session.connect_cstp(&connected).ok,
+              "CSTP should succeed before SSL rekey test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(!loop.ok && loop.code == "rekey_unsupported",
+              "SSL rekey should report explicit unsupported code") &&
+       ok;
+  ok = expect(contains_event(events, "rekey.due"),
+              "SSL rekey should still emit rekey.due") &&
+       ok;
+
+  return ok;
+}
+
+bool test_metadata_idle_timeout_has_specific_code() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/false);
+  RecordingEventSink events;
+  SilentNoDataDevice device;
+  ManualCancellationToken cancel;
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "fake-cstp0";
+  metadata.internal_ip4_address = "10.0.0.2";
+  metadata.mtu = 1290;
+  metadata.idle_timeout_seconds = 1;
+  transport.set_connect_metadata(metadata);
+
+  auto options = session_options();
+  options.liveness_idle_polls_per_second = 2;
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before idle timeout test") &&
+       ok;
+  ok = expect(session.connect_cstp(&connected).ok,
+              "CSTP should succeed before idle timeout test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(!loop.ok && loop.code == "idle_timeout",
+              "idle timeout should report explicit idle_timeout code") &&
+       ok;
+
+  return ok;
+}
+
+bool test_metadata_session_timeout_has_specific_code() {
+  using namespace ecnuvpn::tests::support;
+  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+
+  bool ok = true;
+  LivenessTransport transport(/*echo_data=*/false);
+  RecordingEventSink events;
+  SilentNoDataDevice device;
+  ManualCancellationToken cancel;
+
+  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  metadata.interface_name = "fake-cstp0";
+  metadata.internal_ip4_address = "10.0.0.2";
+  metadata.mtu = 1290;
+  metadata.session_timeout_seconds = 1;
+  transport.set_connect_metadata(metadata);
+
+  auto options = session_options();
+  options.liveness_idle_polls_per_second = 2;
+
+  ProtocolSession session(options, &transport);
+
+  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  ok = expect(session.authenticate().ok,
+              "auth should succeed before session timeout test") &&
+       ok;
+  ok = expect(session.connect_cstp(&connected).ok,
+              "CSTP should succeed before session timeout test") &&
+       ok;
+
+  auto loop = session.run_packet_loop(&device, &events, &cancel);
+
+  ok = expect(!loop.ok && loop.code == "session_timeout",
+              "session timeout should report explicit session_timeout code") &&
        ok;
 
   return ok;
@@ -943,8 +1464,8 @@ bool test_reconnect_exhaustion_fails_with_stable_code() {
   ok = expect(session.reconnect_attempts() == 1,
               "exhaustion should stop after max_reconnects attempts") &&
        ok;
-  ok = expect(transport.auth_attempts() == 2,
-              "exhaustion should re-authenticate exactly once") &&
+  ok = expect(transport.auth_attempts() == 1,
+              "exhaustion should not re-authenticate while cached cookie works") &&
        ok;
   ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
               "exhausted reconnect should mark session failed") &&
@@ -966,8 +1487,19 @@ int main() {
   ok = test_active_loop_cancellation_during_no_data_poll_exits() && ok;
   ok = test_disconnect_stops_before_packet_loop() && ok;
   ok = test_inbound_dpd_request_is_answered() && ok;
+  ok = test_peer_disconnect_is_not_generic_transport_eof() && ok;
+  ok = test_terminate_frame_is_not_generic_transport_eof() && ok;
+  ok = test_compressed_frame_fails_with_explicit_unsupported_code() && ok;
   ok = test_idle_keepalive_is_emitted() && ok;
+  ok = test_metadata_keepalive_drives_idle_timer() && ok;
   ok = test_dead_peer_triggers_reconnect() && ok;
+  ok = test_reconnect_reauthenticates_when_cached_cookie_expires() && ok;
+  ok = test_reconnect_skips_cached_cookie_after_session_timeout() && ok;
+  ok = test_reconnect_reopens_device_with_updated_metadata() && ok;
+  ok = test_metadata_new_tunnel_rekey_triggers_reconnect() && ok;
+  ok = test_metadata_ssl_rekey_reports_unsupported_when_reconnect_disabled() && ok;
+  ok = test_metadata_idle_timeout_has_specific_code() && ok;
+  ok = test_metadata_session_timeout_has_specific_code() && ok;
   ok = test_reconnect_exhaustion_fails_with_stable_code() && ok;
 
   return ok ? 0 : 1;

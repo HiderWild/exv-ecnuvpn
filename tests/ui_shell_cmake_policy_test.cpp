@@ -40,6 +40,13 @@ int main() {
   const std::string webview2_host =
       read_file(source_dir +
                 "/src/platform/win32/ui_shell/webview2_host_win32.cpp");
+  const std::string win32_manifest =
+      read_file(source_dir +
+                "/src/platform/win32/ui_shell/exv_ui_win32.manifest");
+  const std::string win32_resources =
+      read_file(source_dir + "/src/platform/win32/ui_shell/resource.hpp");
+  const std::string win32_resource_script =
+      read_file(source_dir + "/src/platform/win32/ui_shell/exv_ui_win32.rc");
   const std::string wkwebview_host =
       read_file(source_dir +
                 "/src/platform/darwin/ui_shell/wk_webview_host_darwin.mm");
@@ -72,6 +79,8 @@ int main() {
   expect_contains("target_link_libraries(exv-ui PRIVATE \"-framework Cocoa\" \"-framework WebKit\")");
   expect_contains("WebView2Loader.dll");
   expect_contains("POST_BUILD");
+  expect_contains("src/platform/win32/ui_shell/exv_ui_win32.rc");
+  expect_contains("${CMAKE_SOURCE_DIR}/assets/icons");
   expect_contains("if(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)");
   expect_contains("pkg_check_modules(WEBKITGTK");
   expect_contains("webkit2gtk-4.1");
@@ -100,6 +109,33 @@ int main() {
   expect_webview2_host_contains("CreateCoreWebView2EnvironmentWithOptions");
   expect_webview2_host_contains("add_WebMessageReceived");
   expect_webview2_host_contains("PostWebMessageAsJson");
+  expect_webview2_host_contains("WM_DPICHANGED");
+  expect_webview2_host_contains("GetDpiForWindow");
+  expect_webview2_host_contains("webview2_app_icon_resource_id");
+  expect_webview2_host_contains("IDI_ECNUVPN_APP");
+  expect_webview2_host_contains("window_class.hIcon");
+  expect_webview2_host_contains("window_class.hIconSm");
+  if (contains(webview2_host, "LoadIconW(nullptr")) {
+    std::cerr << "Windows WebView shell must not use the default application icon\n";
+    ++failures;
+  }
+
+  if (!contains(win32_manifest, "PerMonitorV2")) {
+    std::cerr << "Windows WebView shell manifest must declare PerMonitorV2 DPI awareness\n";
+    ++failures;
+  }
+  if (!contains(win32_manifest, "dpiAwareness")) {
+    std::cerr << "Windows WebView shell manifest must declare dpiAwareness\n";
+    ++failures;
+  }
+  if (!contains(win32_resources, "#define IDI_ECNUVPN_APP")) {
+    std::cerr << "Windows WebView shell must define a stable ECNU VPN app icon resource id\n";
+    ++failures;
+  }
+  if (!contains(win32_resource_script, "IDI_ECNUVPN_APP ICON \"icon.ico\"")) {
+    std::cerr << "Windows WebView shell resource script must embed the ECNU VPN app icon\n";
+    ++failures;
+  }
 
   const auto expect_wkwebview_host_contains = [&](const std::string &needle) {
     if (!contains(wkwebview_host, needle)) {

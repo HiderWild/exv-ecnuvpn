@@ -13,6 +13,12 @@ bool expect(bool condition, const char* message) {
     return false;
 }
 
+bool expect_named(bool condition, const char* name, const char* message) {
+    if (condition) return true;
+    std::cerr << "EXPECT FAILED: " << name << ": " << message << std::endl;
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -101,6 +107,43 @@ int main() {
         non_recoverable.recoverable = false;
         ok = expect(!CoreErrorMapper::is_recoverable(non_recoverable),
                     "should report non-recoverable errors as not recoverable") && ok;
+    }
+
+    // --- from_native_error: preserves AnyConnect v2 protocol codes ---
+    {
+        struct Case {
+            const char* code;
+            const char* domain;
+            bool recoverable;
+        };
+        const Case cases[] = {
+            {"auth_protocol_mismatch", "auth", false},
+            {"auth_rejected", "auth", false},
+            {"auth_challenge_required", "auth", true},
+            {"auth_group_required", "auth", true},
+            {"auth_expired", "auth", true},
+            {"csd_required_unsupported", "auth", false},
+            {"dtls_unavailable", "transport", true},
+            {"tunnel_disconnected", "transport", true},
+            {"session_timeout", "transport", false},
+            {"idle_timeout", "transport", true},
+            {"rekey_unsupported", "transport", true},
+            {"cstp_compressed_unsupported", "transport", false},
+            {"unsupported_extra_args", "config", true},
+        };
+
+        for (const Case& c : cases) {
+            ErrorInfo err = CoreErrorMapper::from_native_error(
+                c.code, "native protocol failure");
+            ok = expect(err.code == c.code,
+                        "native protocol code should be preserved") && ok;
+            ok = expect(err.domain == c.domain,
+                        "native protocol domain should be classified") && ok;
+            ok = expect_named(err.recoverable == c.recoverable, c.code,
+                              "native protocol recoverability should be stable") && ok;
+            ok = expect(!err.recommended_action.empty(),
+                        "native protocol action should be populated") && ok;
+        }
     }
 
     // --- ErrorInfo fields are properly set ---

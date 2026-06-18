@@ -17,6 +17,7 @@ MINGW_RUNTIME_DLLS = [
     "libwinpthread-1.dll",
 ]
 WINDOWS_OPTIONAL_RUNTIME_DLLS = ["wintun.dll"]
+APP_ICON_ASSETS = ["icon.ico", "icon.icns", "icon.png", "icon.svg"]
 
 
 def normalized_platform(value: str | None = None) -> str:
@@ -126,6 +127,15 @@ def find_runtime_asset(name: str, platform: str) -> Path | None:
     return None
 
 
+def verify_app_icon_assets() -> None:
+    icon_dir = REPO_ROOT / "assets" / "icons"
+    missing = [name for name in APP_ICON_ASSETS if not (icon_dir / name).is_file()]
+    if missing:
+        raise SystemExit(
+            "App icon asset(s) missing from assets/icons: " + ", ".join(missing)
+        )
+
+
 def copy_windows_runtime_assets(package_dir: Path) -> None:
     if not package_dir.exists():
         return
@@ -179,6 +189,7 @@ def validate_launch_args_targets(package_dir: Path) -> None:
 
 
 def build_package(platform: str, output_root: Path) -> Path:
+    verify_app_icon_assets()
     renderer_dir = first_existing(default_renderer_candidates(platform), "Renderer build directory")
 
     package_dir = output_root / "ECNU VPN"
@@ -230,6 +241,7 @@ def main() -> int:
     if args.verify_launch_targets_only:
         if not args.package_dir:
             raise SystemExit("--package-dir is required with --verify-launch-targets-only")
+        verify_app_icon_assets()
         validate_launch_args_targets(args.package_dir)
         assert_no_electron_payload(args.package_dir)
         print(f"verified native WebView shell package: {args.package_dir}")

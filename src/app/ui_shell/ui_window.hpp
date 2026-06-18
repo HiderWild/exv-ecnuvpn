@@ -14,6 +14,7 @@ struct UiWindowConfig {
   std::string exv_path;
   bool enable_dev_tools = false;
   std::function<void()> pump_core_events;
+  std::string state_dir;
 };
 
 class UiWindow {

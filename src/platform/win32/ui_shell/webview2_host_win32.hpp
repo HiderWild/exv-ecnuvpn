@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ecnuvpn::platform::win32::ui_shell {
@@ -30,6 +31,10 @@ std::wstring webview2_packaged_renderer_folder(
 [[nodiscard]] ecnuvpn::ui_shell::WindowBounds
 webview2_default_window_bounds() noexcept;
 
+[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+webview2_window_mode_bounds_for_dpi(std::string_view mode,
+                                    unsigned int dpi) noexcept;
+
 struct WebView2TrayMenuItem {
   std::wstring label;
   int command_id;
@@ -38,6 +43,8 @@ struct WebView2TrayMenuItem {
 
 std::vector<WebView2TrayMenuItem> webview2_tray_menu_model();
 bool webview2_should_create_tray_on_start();
+std::wstring webview2_taskbar_created_message_name();
+int webview2_app_icon_resource_id() noexcept;
 
 std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window();
 
