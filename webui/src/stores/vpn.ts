@@ -107,11 +107,21 @@ export type VpnErrorType =
   | 'runtime_missing'
   | 'config_invalid'
   | 'service_missing'
+  | 'auth_protocol_mismatch'
   | 'auth_failed'
+  | 'auth_rejected'
+  | 'auth_challenge_required'
+  | 'auth_group_required'
+  | 'auth_expired'
+  | 'csd_required_unsupported'
   | 'tls_verify_failed'
   | 'wintun_missing'
   | 'utun_permission_denied'
+  | 'dtls_unavailable'
   | 'unsupported_dtls'
+  | 'session_timeout'
+  | 'idle_timeout'
+  | 'unsupported_extra_args'
   | 'permission_denied'
   | 'helper_unavailable'
   | 'network_unreachable'
@@ -172,6 +182,8 @@ function isElevationCancelledMessage(message: string) {
 function isAuthFailureMessage(message: string) {
   const normalized = message.toLowerCase()
   return normalized.includes('auth_failed') ||
+    normalized.includes('auth_rejected') ||
+    normalized.includes('auth_expired') ||
     normalized.includes('login failed') ||
     normalized.includes('authentication failed') ||
     normalized.includes('invalid password') ||
@@ -190,11 +202,47 @@ type NativeErrorDescriptor = {
 // and `recommended_action`; this table supplies the localized label and a
 // sensible default action when the backend omits one.
 const contractErrorMap: Record<string, NativeErrorDescriptor> = {
+  auth_protocol_mismatch: {
+    error_type: 'auth_protocol_mismatch',
+    message: 'VPN 网关返回了不支持的认证协议响应，请查看日志确认服务器入口是否正确。',
+    recommended_action: 'view_logs',
+    recoverable: false,
+  },
   auth_failed: {
     error_type: 'auth_failed',
     message: 'VPN 密码错误，请重新输入密码。',
     recommended_action: 'retry_password',
     recoverable: true,
+  },
+  auth_rejected: {
+    error_type: 'auth_rejected',
+    message: 'VPN 认证被服务器拒绝，请检查账号、密码或二次认证信息后重试。',
+    recommended_action: 'retry_password',
+    recoverable: true,
+  },
+  auth_challenge_required: {
+    error_type: 'auth_challenge_required',
+    message: 'VPN 需要继续完成二次认证。',
+    recommended_action: 'complete_auth_challenge',
+    recoverable: true,
+  },
+  auth_group_required: {
+    error_type: 'auth_group_required',
+    message: 'VPN 需要选择认证组。',
+    recommended_action: 'complete_group_selection',
+    recoverable: true,
+  },
+  auth_expired: {
+    error_type: 'auth_expired',
+    message: '认证会话已过期，请重新输入凭据后连接。',
+    recommended_action: 'retry_password',
+    recoverable: true,
+  },
+  csd_required_unsupported: {
+    error_type: 'csd_required_unsupported',
+    message: 'VPN 网关要求 AnyConnect host-scan，本版本不会执行网关下载的脚本。',
+    recommended_action: 'view_logs',
+    recoverable: false,
   },
   tls_verify_failed: {
     error_type: 'tls_verify_failed',
@@ -219,6 +267,30 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
     message: '当前原生连接使用 CSTP-only，DTLS 后端尚未启用。',
     recommended_action: 'retry_connection',
     recoverable: false,
+  },
+  dtls_unavailable: {
+    error_type: 'dtls_unavailable',
+    message: '网关提供了 DTLS 信息，但当前原生连接会继续使用 CSTP-only。',
+    recommended_action: 'continue_with_cstp',
+    recoverable: true,
+  },
+  session_timeout: {
+    error_type: 'session_timeout',
+    message: 'VPN 会话已超时，请重新认证后连接。',
+    recommended_action: 'retry_password',
+    recoverable: true,
+  },
+  idle_timeout: {
+    error_type: 'idle_timeout',
+    message: 'VPN 会话因空闲超时断开，请重试连接。',
+    recommended_action: 'retry_connection',
+    recoverable: true,
+  },
+  unsupported_extra_args: {
+    error_type: 'unsupported_extra_args',
+    message: '当前原生引擎不支持部分额外参数，请在设置中移除后重试。',
+    recommended_action: 'open_settings',
+    recoverable: true,
   },
   permission_denied: {
     error_type: 'permission_denied',
@@ -540,10 +612,17 @@ export const useVpnStore = defineStore('vpn', () => {
       case 'config_invalid':
         return { label: '前往设置', action: () => {}, variant: 'primary' }
       case 'auth_failed':
+      case 'auth_rejected':
+      case 'auth_expired':
         return { label: '重新输入密码', action: () => retryLastAction(), variant: 'primary' }
       case 'native_failure':
       case 'parse_failure':
         return { label: '重试', action: () => retryLastAction(), variant: 'primary' }
+      case 'unsupported_extra_args':
+        return { label: '前往设置', action: () => { window.location.hash = '#/settings' }, variant: 'primary' }
+      case 'auth_protocol_mismatch':
+      case 'csd_required_unsupported':
+        return { label: '查看日志', action: () => { window.location.hash = '#/logs' }, variant: 'primary' }
       default:
         return { label: '重试', action: () => retryLastAction(), variant: 'primary' }
     }
@@ -589,11 +668,41 @@ export const useVpnStore = defineStore('vpn', () => {
 
   function errorPresentation(err: VpnError) {
     switch (err.error_type) {
-      case 'auth_failed':
+      case 'auth_protocol_mismatch':
         return {
-          title: '密码错误',
+          title: '认证协议不匹配',
+          primaryLabel: '查看日志',
+          onPrimary: () => {
+            clearError()
+            window.location.hash = '#/logs'
+          },
+        }
+      case 'auth_failed':
+      case 'auth_rejected':
+      case 'auth_expired':
+        return {
+          title: err.error_type === 'auth_expired' ? '认证已过期' : '认证失败',
           primaryLabel: '重新输入密码',
           onPrimary: () => retryConnectAfterAuthFailure(lastFailedConnectMode.value ?? 'helper'),
+        }
+      case 'auth_challenge_required':
+      case 'auth_group_required':
+        return {
+          title: err.error_type === 'auth_group_required' ? '请选择认证组' : '需要继续认证',
+          primaryLabel: '继续',
+          onPrimary: () => {
+            clearError()
+            startAuthInteractionPolling()
+          },
+        }
+      case 'csd_required_unsupported':
+        return {
+          title: 'Host-scan 不受支持',
+          primaryLabel: '查看日志',
+          onPrimary: () => {
+            clearError()
+            window.location.hash = '#/logs'
+          },
         }
       case 'config_invalid':
         return {
@@ -638,10 +747,27 @@ export const useVpnStore = defineStore('vpn', () => {
           onPrimary: () => retryLastAction(),
         }
       case 'unsupported_dtls':
+      case 'dtls_unavailable':
         return {
-          title: '协议不受支持',
+          title: 'DTLS 不可用',
           primaryLabel: '重试',
           onPrimary: () => retryLastAction(),
+        }
+      case 'session_timeout':
+      case 'idle_timeout':
+        return {
+          title: err.error_type === 'session_timeout' ? '会话已超时' : '连接空闲超时',
+          primaryLabel: '重试',
+          onPrimary: () => retryLastAction(),
+        }
+      case 'unsupported_extra_args':
+        return {
+          title: '参数不受支持',
+          primaryLabel: '前往设置',
+          onPrimary: () => {
+            clearError()
+            window.location.hash = '#/settings'
+          },
         }
       default:
         return {
