@@ -33,9 +33,7 @@ export function useSSE() {
 
         if (event.type === 'status' && event.data && typeof event.data === 'object') {
           const store = useVpnStore()
-          store.status = store.status
-            ? { ...store.status, ...(event.data as Partial<VpnStatus>) }
-            : (event.data as VpnStatus)
+          store.updateStatusFromEvent(event.data as Partial<VpnStatus>)
         }
 
         if (event.type === 'service-progress' && event.data && typeof event.data === 'object') {

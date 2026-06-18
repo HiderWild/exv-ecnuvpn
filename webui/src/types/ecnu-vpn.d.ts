@@ -68,6 +68,19 @@ export interface VpnError {
   timestamp?: number
 }
 
+export interface VpnConnectAccepted {
+  accepted: true
+  phase?: string
+  job_id?: string
+  active_job_id?: string
+  active?: boolean
+  coalesced?: boolean
+  cancelling?: boolean
+  user_cancelled?: boolean
+  desired_connected?: boolean
+  intent_epoch?: number
+}
+
 export type ConnectMode = 'helper' | 'elevated' | 'direct'
 
 export interface EcnuVpnApi {
@@ -75,8 +88,8 @@ export interface EcnuVpnApi {
     get(): Promise<VpnStatus>
   }
   vpn: {
-    connect(password?: string): Promise<VpnStatus | { status: 'connecting' }>
-    disconnect(): Promise<VpnStatus | { status: 'disconnecting' }>
+    connect(password?: string): Promise<VpnStatus | VpnConnectAccepted>
+    disconnect(): Promise<VpnStatus | VpnConnectAccepted>
     connectElevated(password?: string): Promise<VpnStatus | VpnError>
     disconnectElevated(backend?: unknown): Promise<VpnStatus | VpnError>
     authInteraction(): Promise<AuthInteractionPollResponse>

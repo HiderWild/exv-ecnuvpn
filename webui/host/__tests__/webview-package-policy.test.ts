@@ -251,6 +251,33 @@ describe('native WebView package policy', () => {
     assert.match(runtime, /try_lock\(\)/)
   })
 
+  it('treats accepted VPN connect jobs as cancellable frontend state', () => {
+    const store = readFileSync(join(webuiRoot, 'src', 'stores', 'vpn.ts'), 'utf8')
+    const dashboard = readFileSync(join(webuiRoot, 'src', 'pages', 'DashboardPage.vue'), 'utf8')
+    const minimal = readFileSync(join(webuiRoot, 'src', 'components', 'MinimalModeView.vue'), 'utf8')
+    const types = readFileSync(join(webuiRoot, 'src', 'types', 'ecnu-vpn.d.ts'), 'utf8')
+    const sse = readFileSync(join(webuiRoot, 'src', 'composables', 'useSSE.ts'), 'utf8')
+
+    assert.match(store, /interface VpnConnectAccepted/)
+    assert.match(store, /function isVpnConnectAccepted/)
+    assert.match(store, /function updateStatusFromEvent/)
+    assert.match(store, /if \(isVpnConnectAccepted\(data\)\)/)
+    assert.match(store, /connectInFlight\.value = true[\s\S]*loading\.value = false/)
+    assert.match(store, /if \(connectInFlight\.value && \(nextStatus\.connected \|\| nextStatus\.process_running === false\)\)/)
+    assert.match(store, /async function cancelConnect\(\)/)
+    assert.match(store, /api\.post<[^>]+>\('\/disconnect'\)/)
+    assert.match(store, /user_cancelled/)
+    assert.match(store, /cancelConnect, connectElevated/)
+    assert.match(store, /updateStatusFromEvent,/)
+
+    assert.match(dashboard, /if \(connecting\.value\) \{[\s\S]*vpn\.cancelConnect\(\)/)
+    assert.match(minimal, /if \(connecting\.value\) \{[\s\S]*vpn\.cancelConnect\(\)/)
+    assert.doesNotMatch(minimal, /const busy = computed\(\(\) => vpn\.loading \|\| vpn\.serviceBusy \|\| vpn\.connectInFlight/)
+    assert.match(types, /interface VpnConnectAccepted/)
+    assert.match(types, /connect\(password\?: string\): Promise<VpnStatus \| VpnConnectAccepted>/)
+    assert.match(sse, /store\.updateStatusFromEvent\(event\.data as Partial<VpnStatus>\)/)
+  })
+
   it('keeps cross-platform WebView acceptance gates executable by agents', () => {
     const windowsAcceptance = readFileSync(join(repoRoot, 'scripts', 'accept-webview-shell-windows.ps1'), 'utf8')
     const macosAcceptance = readFileSync(join(repoRoot, 'scripts', 'accept-webview-shell-macos.sh'), 'utf8')

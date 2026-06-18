@@ -36,6 +36,19 @@ export interface VpnStatus {
   backend?: unknown
 }
 
+export interface VpnConnectAccepted {
+  accepted: true
+  phase?: string
+  job_id?: string
+  active_job_id?: string
+  active?: boolean
+  coalesced?: boolean
+  cancelling?: boolean
+  user_cancelled?: boolean
+  desired_connected?: boolean
+  intent_epoch?: number
+}
+
 export interface RouteEntry {
   cidr: string
 }
@@ -165,6 +178,12 @@ export interface DashboardAction {
 
 export function isVpnError(data: unknown): data is VpnError {
   return data != null && typeof data === 'object' && 'error_type' in (data as object)
+}
+
+function isVpnConnectAccepted(data: unknown): data is VpnConnectAccepted {
+  return data != null &&
+    typeof data === 'object' &&
+    (data as Record<string, unknown>).accepted === true
 }
 
 function isElevationCancelledMessage(message: string) {
@@ -583,6 +602,19 @@ export const useVpnStore = defineStore('vpn', () => {
   function applyStatus(nextStatus: VpnStatus) {
     status.value = nextStatus
     syncUptime(nextStatus)
+    if (connectInFlight.value && (nextStatus.connected || nextStatus.process_running === false)) {
+      connectInFlight.value = false
+      loading.value = false
+      stopAuthInteractionPolling()
+      stopConnectionProgress()
+    }
+  }
+
+  function updateStatusFromEvent(partialStatus: Partial<VpnStatus>) {
+    const nextStatus = status.value
+      ? { ...status.value, ...partialStatus }
+      : (partialStatus as VpnStatus)
+    applyStatus(nextStatus)
   }
 
   const connectionProgress = computed<ConnectionProgressStage>(() => {
@@ -978,16 +1010,23 @@ export const useVpnStore = defineStore('vpn', () => {
     connectInFlight.value = true
     startConnectionProgress(2)
     startAuthInteractionPolling()
+    let acceptedByBackend = false
     try {
       const password = providedPassword !== undefined
         ? providedPassword
         : await resolveConnectPassword()
       if (password === null) return false
 
-      const { data } = await api.post<VpnStatus>(
+      const { data } = await api.post<VpnStatus | VpnConnectAccepted>(
         '/connect',
         password === undefined ? undefined : { password },
       )
+      if (isVpnConnectAccepted(data)) {
+        acceptedByBackend = true
+        connectInFlight.value = true
+        loading.value = false
+        return true
+      }
       applyStatus(data)
       await fetchAppShellState()
       return true
@@ -996,16 +1035,56 @@ export const useVpnStore = defineStore('vpn', () => {
       if (isCredentialFailureType(normalized.error_type)) lastFailedConnectMode.value = 'helper'
       setError(normalized)
     } finally {
-      connectInFlight.value = false
-      stopAuthInteractionPolling()
-      stopConnectionProgress()
+      if (!acceptedByBackend) {
+        connectInFlight.value = false
+        stopAuthInteractionPolling()
+        stopConnectionProgress()
+      }
       loading.value = false
     }
 
     return false
   }
 
+  async function cancelConnect(): Promise<boolean> {
+    if (!connectInFlight.value) return false
+    connectInFlight.value = false
+    disconnectInFlight.value = false
+    loading.value = false
+    stopAuthInteractionPolling()
+    stopConnectionProgress()
+    clearError()
+
+    try {
+      const { data } = await api.post<VpnStatus | VpnConnectAccepted | VpnError>('/disconnect')
+      if (isVpnError(data)) {
+        if (data.error_type !== 'user_cancelled') setError(data)
+        return data.error_type === 'user_cancelled'
+      }
+      if (isVpnConnectAccepted(data)) {
+        return true
+      }
+      applyStatus(data)
+      await fetchAppShellState()
+      return true
+    } catch (error) {
+      const normalized = normalizeError(error)
+      if (normalized.error_type !== 'user_cancelled') setError(normalized)
+      return normalized.error_type === 'user_cancelled'
+    } finally {
+      connectInFlight.value = false
+      disconnectInFlight.value = false
+      loading.value = false
+      stopAuthInteractionPolling()
+      stopConnectionProgress()
+    }
+  }
+
   async function disconnect() {
+    if (connectInFlight.value) {
+      await cancelConnect()
+      return
+    }
     loading.value = true
     disconnectInFlight.value = true
     lastActionWasElevatedConnect.value = false
@@ -1292,7 +1371,7 @@ export const useVpnStore = defineStore('vpn', () => {
     pendingAuthInteraction, authInteractionBusy,
     connectionProgress,
     isDesktop, dashboardState, dashboardPrimaryAction, dashboardSecondaryAction,
-    fetchStatus, fetchAppShellState, connect, disconnect, connectElevated, disconnectElevated, connectFromDashboard,
+    fetchStatus, fetchAppShellState, updateStatusFromEvent, connect, disconnect, cancelConnect, connectElevated, disconnectElevated, connectFromDashboard,
     fetchAuthInteraction, respondAuthInteraction,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
     fetchServiceStatus, fetchCliStatus, installService, uninstallService, installCli, uninstallCli,
