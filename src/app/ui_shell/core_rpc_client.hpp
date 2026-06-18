@@ -2,7 +2,12 @@
 
 #include <deque>
 #include <functional>
+#include <future>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 namespace exv::core::lifecycle {
 struct CoreResolverDeps;
@@ -52,16 +57,33 @@ public:
   explicit CoreRpcClient(
       CoreRpcTransport &transport,
       CoreRpcWireMode wire_mode = CoreRpcWireMode::Desktop);
+  ~CoreRpcClient();
 
   CoreRpcResponse invoke(const CoreRpcRequest &request);
+  std::future<CoreRpcResponse> invoke_async(CoreRpcRequest request);
   void pump_events();
+  void shutdown();
   void set_event_handler(CoreRpcEventHandler handler);
 
 private:
+  void ensure_reader_started();
+  void reader_loop();
+  void resolve_pending(CoreRpcResponse response);
+  void resolve_all_pending(CoreRpcResponse response);
+
   CoreRpcTransport &transport_;
   CoreRpcWireMode wire_mode_ = CoreRpcWireMode::Desktop;
   CoreRpcEventHandler event_handler_;
   std::deque<std::string> buffered_response_lines_;
+  std::mutex write_mutex_;
+  std::mutex read_mutex_;
+  std::mutex pending_mutex_;
+  std::mutex event_mutex_;
+  std::map<std::string, std::shared_ptr<std::promise<CoreRpcResponse>>> pending_;
+  std::map<std::string, CoreRpcResponse> unmatched_responses_;
+  std::thread reader_thread_;
+  bool reader_started_ = false;
+  bool shutting_down_ = false;
 };
 
 std::string serialize_core_rpc_request(const CoreRpcRequest &request);
