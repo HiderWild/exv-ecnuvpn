@@ -896,6 +896,16 @@ target_compile_definitions(native_packaging_policy_test PRIVATE
 
 add_test(NAME native_packaging_policy_test COMMAND native_packaging_policy_test)
 
+add_executable(native_only_cutover_contract_test
+    tests/native_only_cutover_contract_test.cpp
+)
+
+target_compile_definitions(native_only_cutover_contract_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_test(NAME native_only_cutover_contract_test COMMAND native_only_cutover_contract_test)
+
 add_executable(repository_hygiene_test
     tests/repository_hygiene_test.cpp
 )
