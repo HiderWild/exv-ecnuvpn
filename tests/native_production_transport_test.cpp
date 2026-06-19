@@ -81,6 +81,67 @@ std::string aggregate_auth_http_response(const std::string &body) {
                        body);
 }
 
+// Hex representation of a chunk size, lowercase, no leading zeros (rfc7230).
+std::string hex_chunk_size(std::size_t value) {
+  if (value == 0) return std::string("0");
+  std::string out;
+  while (value > 0) {
+    char c = "0123456789abcdef"[value & 0xF];
+    out.insert(out.begin(), c);
+    value >>= 4;
+  }
+  return out;
+}
+
+// Raw HTTP/1.1 response framed with Transfer-Encoding: chunked. Each entry of
+// `chunks` becomes one chunk; the trailing "0\r\n\r\n" terminator is appended
+// automatically. Used by aggregate-auth framing tests.
+std::string chunked_xml_response(const std::vector<std::string> &chunks) {
+  std::string out = "HTTP/1.1 200 OK\r\n";
+  out += "Content-Type: text/xml; charset=utf-8\r\n";
+  out += "Transfer-Encoding: chunked\r\n";
+  out += "\r\n";
+  for (const std::string &chunk : chunks) {
+    out += hex_chunk_size(chunk.size());
+    out += "\r\n";
+    out += chunk;
+    out += "\r\n";
+  }
+  out += "0\r\n\r\n";
+  return out;
+}
+
+// HTTP/1.1 response without Content-Length and without Transfer-Encoding —
+// the gateway closes the TCP connection to delimit the body. Aggregate-auth
+// init responses on legacy AnyConnect deployments occasionally use this
+// framing; the read path must keep reading until EOF rather than treating
+// an unterminated header as an empty body.
+std::string close_delimited_xml_response(const std::string &body) {
+  std::string out = "HTTP/1.1 200 OK\r\n";
+  out += "Content-Type: text/xml; charset=utf-8\r\n";
+  out += "Connection: close\r\n";
+  out += "\r\n";
+  out += body;
+  return out;
+}
+
+// HTTP/1.1 200 OK with Content-Length: 0 — gateway accepted the request but
+// returned no body. Should NOT be parsed as XML (would surface as a generic
+// "aggregate auth response is empty"); the auth call site must short-circuit
+// to auth_protocol_mismatch with framing diagnostics.
+std::string empty_aggregate_auth_response() {
+  return "HTTP/1.1 200 OK\r\n"
+         "Content-Type: text/xml; charset=utf-8\r\n"
+         "Content-Length: 0\r\n"
+         "\r\n";
+}
+
+const char *aggregate_auth_error_body() {
+  return "<config-auth client=\"vpn\" type=\"error\">"
+         "<error>backend rejected the credentials for tests</error>"
+         "</config-auth>";
+}
+
 std::vector<std::uint8_t> encoded_frame(
     ecnuvpn::vpn_engine::protocol::CstpFrameType type,
     std::vector<std::uint8_t> payload = {}) {
@@ -1034,6 +1095,144 @@ bool disconnect_sends_best_effort_disconnect_frame_and_closes_stream() {
   return ok;
 }
 
+// ---------------------------------------------------------------------------
+// HTTP body framing — chunked, close-delimited, empty-Content-Length.
+//
+// These tests pin the read_http_response() contract that aggregate-auth
+// depends on. Without them, a gateway that returns Transfer-Encoding: chunked
+// or close-delimited bodies surfaces to the user as "aggregate auth response
+// is empty", and an empty 200 OK is mis-classified as a credential failure.
+// See docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §3.
+// ---------------------------------------------------------------------------
+
+bool chunked_aggregate_auth_response_split_across_tls_reads() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  // Single chunked response, but pushed in two halves so the read path
+  // exercises read_more() between the chunk-size line and the chunk body.
+  const std::string body = aggregate_auth_error_body();
+  const std::string framed = chunked_xml_response({body.substr(0, 30),
+                                                   body.substr(30)});
+  // Split the framed response after the headers so the chunked decoder has
+  // to call read_more() to fetch the second chunk.
+  const std::size_t header_split =
+      framed.find("\r\n\r\n") + 4 /* through delimiter */ +
+      hex_chunk_size(30).size() + 2 /* "\r\n" */ + 30 + 2 /* chunk + CRLF */;
+  MockTlsStream stream;
+  stream.push_read_text(framed.substr(0, header_split));
+  stream.push_read_text(framed.substr(header_split));
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(!auth.ok,
+              "chunked-error response should fail authenticate") && ok;
+  ok = expect(auth.error_code == "auth_rejected",
+              "chunked-error body must decode through chunk framing and "
+              "produce auth_rejected, not a generic empty-response error") &&
+       ok;
+  ok = expect(auth.error_message.find("0\r\n") == std::string::npos,
+              "auth error message must not leak the chunked terminator") &&
+       ok;
+  return ok;
+}
+
+bool chunked_aggregate_auth_response_in_single_tls_read() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  // Same response, but headers + every chunk arrive in one TLS read. The
+  // decoder must still strip chunk-size lines from the body so the XML
+  // parser does not see "1c\r\n<config-auth..." as garbage.
+  const std::string body = aggregate_auth_error_body();
+  const std::string framed = chunked_xml_response({body.substr(0, 28),
+                                                   body.substr(28, 28),
+                                                   body.substr(56)});
+
+  MockTlsStream stream;
+  stream.push_read_text(framed);
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(!auth.ok,
+              "single-read chunked-error should fail authenticate") && ok;
+  ok = expect(auth.error_code == "auth_rejected",
+              "single-read chunked-error must produce auth_rejected, "
+              "proving chunk-size framing was stripped from body") &&
+       ok;
+  return ok;
+}
+
+bool connection_close_aggregate_auth_response_reads_until_eof() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  // No Content-Length, no Transfer-Encoding, Connection: close. The body is
+  // delivered in two TLS reads, then the stream EOFs. The read path must
+  // accumulate the body across reads and treat EOF as the body terminator
+  // instead of returning the partial buffer or a transport_closed error.
+  const std::string body = aggregate_auth_error_body();
+  const std::string framed = close_delimited_xml_response(body);
+  const std::size_t mid = framed.find("\r\n\r\n") + 4 + body.size() / 2;
+
+  MockTlsStream stream;
+  stream.push_read_text(framed.substr(0, mid));
+  stream.push_read_text(framed.substr(mid));
+  // Empty read_chunks_ now → next read_some returns empty out → EOF.
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(!auth.ok,
+              "close-delimited error response should fail authenticate") &&
+       ok;
+  ok = expect(auth.error_code == "auth_rejected",
+              "close-delimited body must be read until EOF and parsed, "
+              "producing auth_rejected rather than transport_closed or "
+              "auth_protocol_mismatch") &&
+       ok;
+  return ok;
+}
+
+bool content_length_zero_aggregate_auth_response_reports_protocol_mismatch() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  // 200 OK with Content-Length: 0 — body is empty. The auth call site must
+  // detect this BEFORE feeding "" to the XML parser and emit a protocol
+  // mismatch error carrying status / content-type / content-length /
+  // transfer-encoding / body_bytes for operators to triage from logs.
+  MockTlsStream stream;
+  stream.push_read_text(empty_aggregate_auth_response());
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(!auth.ok,
+              "Content-Length: 0 must fail authenticate") && ok;
+  ok = expect(auth.error_code == "auth_protocol_mismatch",
+              "Content-Length: 0 must surface as auth_protocol_mismatch, "
+              "not auth_failed or auth_response_invalid leaking through "
+              "the keyword fallback") &&
+       ok;
+  ok = expect(auth.error_message.find("status=200") != std::string::npos,
+              "auth_protocol_mismatch message must include status= for "
+              "operator triage") &&
+       ok;
+  ok = expect(auth.error_message.find("content-length=0") != std::string::npos,
+              "auth_protocol_mismatch message must include content-length=") &&
+       ok;
+  ok = expect(auth.error_message.find("body_bytes=0") != std::string::npos,
+              "auth_protocol_mismatch message must include body_bytes=") &&
+       ok;
+  ok = expect(auth.error_message.find(MOCK_PASSWORD_SPECIAL) == std::string::npos,
+              "auth_protocol_mismatch message must not leak the password") &&
+       ok;
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -1057,6 +1256,11 @@ int main() {
   ok = failed_cstp_connect_read_clears_stale_bytes_before_retry() && ok;
   ok = exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() && ok;
   ok = eof_during_cstp_exchange_returns_transport_closed() && ok;
+  // HTTP body framing — see docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §3.
+  ok = chunked_aggregate_auth_response_split_across_tls_reads() && ok;
+  ok = chunked_aggregate_auth_response_in_single_tls_read() && ok;
+  ok = connection_close_aggregate_auth_response_reads_until_eof() && ok;
+  ok = content_length_zero_aggregate_auth_response_reports_protocol_mismatch() && ok;
   ok = reset_for_reconnect_closes_stream_and_clears_cookie_state() && ok;
   ok = write_errors_redact_password_and_cookie_values() && ok;
   ok = disconnect_sends_best_effort_disconnect_frame_and_closes_stream() && ok;

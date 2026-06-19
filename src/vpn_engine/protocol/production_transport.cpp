@@ -511,6 +511,34 @@ ValidationResult parse_content_length(const HttpResponse &response,
   return {};
 }
 // End inlined from vpn_engine/protocol/production_transport_response_parse include-unit
+
+// Build a non-sensitive single-line summary of an HTTP response's framing for
+// inclusion in an aggregate-auth protocol-mismatch error message. Only
+// includes status, content-type, content-length, transfer-encoding and
+// body_bytes — never cookies, set-cookie, server identifiers, opaque tokens
+// or body content. Used when the gateway returns an empty body and the auth
+// path needs to surface a diagnostic without leaking secret material. See
+// docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §3.
+std::string body_diagnostics_summary(const HttpResponse &response) {
+  std::string out;
+  out += "status=";
+  out += std::to_string(response.status);
+  if (const std::string *ct = response.header_ci("content-type"); ct) {
+    out += " content-type=";
+    out += *ct;
+  }
+  if (const std::string *cl = response.header_ci("content-length"); cl) {
+    out += " content-length=";
+    out += *cl;
+  }
+  if (const std::string *te = response.header_ci("transfer-encoding"); te) {
+    out += " transfer-encoding=";
+    out += *te;
+  }
+  out += " body_bytes=";
+  out += std::to_string(response.body.size());
+  return out;
+}
 } // namespace
 // Begin inlined from vpn_engine/protocol/production_transport_auth include-unit
 ProductionProtocolTransport::ProductionProtocolTransport(
@@ -589,6 +617,20 @@ AuthResult ProductionProtocolTransport::authenticate(
                                     std::to_string(init_http.status),
                                 current_password_,
                                 current_password_form_encoded_, auth_cookie_);
+  }
+
+  // The XML parser would surface an empty body as "auth_response_invalid:
+  // aggregate auth response is empty", which Fix #2 maps to
+  // auth_protocol_mismatch. Short-circuit here so operators get a richer
+  // (still-redacted) framing summary in the error message and so the
+  // error_code is set up-front rather than via the keyword fallback.
+  if (init_http.body.empty()) {
+    return sanitized_auth_error(
+        "auth_protocol_mismatch",
+        "aggregate-auth init response had empty body — " +
+            body_diagnostics_summary(init_http),
+        current_password_,
+        current_password_form_encoded_, auth_cookie_);
   }
 
   AggregateAuthResponse init_response;
@@ -688,6 +730,15 @@ AuthResult ProductionProtocolTransport::authenticate(
                                 current_password_form_encoded_, auth_cookie_);
   }
 
+  if (submitted.body.empty()) {
+    return sanitized_auth_error(
+        "auth_protocol_mismatch",
+        "aggregate-auth reply response had empty body — " +
+            body_diagnostics_summary(submitted),
+        current_password_,
+        current_password_form_encoded_, auth_cookie_);
+  }
+
   AggregateAuthResponse submitted_auth;
   {
     ValidationResult parsed =
@@ -764,6 +815,15 @@ AuthResult ProductionProtocolTransport::authenticate(
                                       std::to_string(followup_http.status),
                                   current_password_,
                                   current_password_form_encoded_, auth_cookie_);
+    }
+
+    if (followup_http.body.empty()) {
+      return sanitized_auth_error(
+          "auth_protocol_mismatch",
+          "aggregate-auth follow-up response had empty body — " +
+              body_diagnostics_summary(followup_http),
+          current_password_,
+          current_password_form_encoded_, auth_cookie_);
     }
 
     ValidationResult parsed =
@@ -1080,6 +1140,155 @@ ValidationResult ProductionProtocolTransport::read_http_response(
   if (!length_result.ok)
     return length_result;
 
+  // Transfer-Encoding wins over Content-Length per RFC 7230 §3.3.3. The
+  // existing aggregate-auth gateway has been observed to return chunked
+  // responses for some edge paths; treating those bytes as the body wholesale
+  // would feed "1c\r\n<config-auth..." to the XML parser and surface as
+  // "aggregate auth response is empty" once the chunk-size lines fail to
+  // match. See docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §3.
+  const std::string *transfer_encoding =
+      header_response.header_ci("transfer-encoding");
+  bool is_chunked = false;
+  if (transfer_encoding) {
+    std::string lowered;
+    lowered.reserve(transfer_encoding->size());
+    for (char c : *transfer_encoding) {
+      lowered.push_back(static_cast<char>(
+          std::tolower(static_cast<unsigned char>(c))));
+    }
+    is_chunked = lowered.find("chunked") != std::string::npos;
+  }
+
+  if (is_chunked) {
+    // RFC 7230 §4.1 chunked decoding. Each chunk is "<hex-size>[;ext]\r\n",
+    // followed by exactly <hex-size> bytes, followed by "\r\n". A zero-size
+    // chunk plus a single trailing "\r\n" terminates the body. We accept an
+    // empty trailer line and stop; spec-strict trailer header parsing is not
+    // needed because the gateway never emits trailer fields.
+    std::string decoded;
+    std::size_t cursor = body_start;
+    while (true) {
+      // Read until we have a complete chunk-size line.
+      std::size_t crlf_at = std::string::npos;
+      while (crlf_at == std::string::npos) {
+        for (std::size_t i = cursor; i + 1 < read_buffer_.size(); ++i) {
+          if (read_buffer_[i] == '\r' && read_buffer_[i + 1] == '\n') {
+            crlf_at = i;
+            break;
+          }
+        }
+        if (crlf_at != std::string::npos) break;
+        // Cap the chunk-size line so a malformed gateway can not keep us
+        // reading forever.
+        if (read_buffer_.size() - cursor > 256) {
+          return invalid("http_invalid",
+                         "chunk size line exceeds 256 bytes");
+        }
+        ValidationResult r = read_more();
+        if (!r.ok) return r;
+      }
+
+      // Parse "<hex>[;extension]" up to crlf_at. Strip ASCII whitespace.
+      std::string size_line(read_buffer_.begin() +
+                                static_cast<std::ptrdiff_t>(cursor),
+                            read_buffer_.begin() +
+                                static_cast<std::ptrdiff_t>(crlf_at));
+      const std::size_t semi = size_line.find(';');
+      if (semi != std::string::npos) size_line.resize(semi);
+      while (!size_line.empty() &&
+             (size_line.back() == ' ' || size_line.back() == '\t')) {
+        size_line.pop_back();
+      }
+      while (!size_line.empty() &&
+             (size_line.front() == ' ' || size_line.front() == '\t')) {
+        size_line.erase(size_line.begin());
+      }
+      if (size_line.empty()) {
+        return invalid("http_invalid", "empty chunk size line");
+      }
+      std::size_t chunk_size = 0;
+      for (char c : size_line) {
+        int digit;
+        if (c >= '0' && c <= '9') digit = c - '0';
+        else if (c >= 'a' && c <= 'f') digit = 10 + (c - 'a');
+        else if (c >= 'A' && c <= 'F') digit = 10 + (c - 'A');
+        else {
+          return invalid("http_invalid",
+                         "non-hex digit in chunk size line");
+        }
+        if (chunk_size >
+            (std::numeric_limits<std::size_t>::max() -
+             static_cast<std::size_t>(digit)) / 16) {
+          return invalid("http_chunk_too_large",
+                         "chunk size overflows size_t");
+        }
+        chunk_size = chunk_size * 16 + static_cast<std::size_t>(digit);
+      }
+      cursor = crlf_at + 2;
+
+      if (chunk_size == 0) {
+        // Drain the trailer-terminating CRLF (no trailer fields expected
+        // from production AnyConnect gateways).
+        std::size_t end_at = std::string::npos;
+        while (end_at == std::string::npos) {
+          for (std::size_t i = cursor; i + 1 < read_buffer_.size(); ++i) {
+            if (read_buffer_[i] == '\r' && read_buffer_[i + 1] == '\n') {
+              end_at = i;
+              break;
+            }
+          }
+          if (end_at != std::string::npos) break;
+          if (read_buffer_.size() - cursor > kMaxHttpHeaderBytes) {
+            return invalid("http_header_too_large",
+                           "trailer fields exceed maximum size");
+          }
+          ValidationResult r = read_more();
+          if (!r.ok) {
+            // Be permissive: some gateways close the connection after the
+            // zero-chunk without sending a final CRLF. Treat that as the end
+            // of the body, but only if no trailer bytes were seen.
+            if (r.code == "transport_closed" && cursor == read_buffer_.size()) {
+              break;
+            }
+            return r;
+          }
+        }
+        if (end_at != std::string::npos) {
+          cursor = end_at + 2;
+        }
+        break;
+      }
+
+      if (chunk_size > kMaxHttpBodyBytes - decoded.size()) {
+        return invalid("http_body_too_large",
+                       "decoded chunked body exceeds maximum size");
+      }
+
+      // Read exactly chunk_size bytes plus the trailing "\r\n".
+      while (read_buffer_.size() < cursor + chunk_size + 2) {
+        ValidationResult r = read_more();
+        if (!r.ok) return r;
+      }
+      decoded.append(reinterpret_cast<const char *>(read_buffer_.data() +
+                                                    cursor),
+                     chunk_size);
+      cursor += chunk_size;
+      if (read_buffer_[cursor] != '\r' ||
+          read_buffer_[cursor + 1] != '\n') {
+        return invalid("http_invalid",
+                       "missing CRLF terminator after chunk data");
+      }
+      cursor += 2;
+    }
+
+    header_response.body = std::move(decoded);
+    *response = std::move(header_response);
+    read_buffer_.erase(read_buffer_.begin(),
+                       read_buffer_.begin() +
+                           static_cast<std::ptrdiff_t>(cursor));
+    return {};
+  }
+
   if (has_content_length) {
     if (content_length >
         std::numeric_limits<std::size_t>::max() - body_start) {
@@ -1111,9 +1320,24 @@ ValidationResult ProductionProtocolTransport::read_http_response(
     return {};
   }
 
-  if (read_buffer_.size() - body_start > kMaxHttpBodyBytes) {
-    return invalid("http_body_too_large",
-                   "HTTP response body exceeds maximum size");
+  // No Content-Length and not chunked → "Connection: close" / HTTP/1.0
+  // close-delimited framing per RFC 7230 §3.3.3 (#7). The body terminates
+  // when the TLS stream EOFs. Previously we returned whatever bytes had
+  // already arrived in the buffer and cleared it, which surfaced as an
+  // empty body whenever the gateway hadn't delivered the full payload yet.
+  while (true) {
+    if (read_buffer_.size() - body_start > kMaxHttpBodyBytes) {
+      return invalid("http_body_too_large",
+                     "HTTP response body exceeds maximum size");
+    }
+    ValidationResult read = read_more();
+    if (!read.ok) {
+      if (read.code == "transport_closed") {
+        // EOF — close-delimited body is complete.
+        break;
+      }
+      return read;
+    }
   }
 
   std::string raw(read_buffer_.begin(), read_buffer_.end());
