@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRoute } from 'vue-router'
+import AppWindowFrame from './components/AppWindowFrame.vue'
 import NavBar from './components/NavBar.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import AuthContinuationDialog from './components/AuthContinuationDialog.vue'
@@ -212,19 +213,24 @@ async function handleCoreQuit() {
 
 <template>
   <RouterView v-if="modalRoute" />
-  <MinimalModeView v-else-if="minimalMode" />
-  <div v-else class="flex h-screen overflow-hidden bg-bg text-foreground font-sans">
-    <NavBar />
-    <main class="min-w-0 flex-1 overflow-hidden pl-44">
-      <div class="mx-auto h-full w-full max-w-5xl overflow-hidden px-6 py-6">
-        <RouterView v-slot="{ Component, route: viewRoute }">
-          <KeepAlive :include="keptAlivePages">
-            <component :is="Component" :key="viewRoute.name" />
-          </KeepAlive>
-        </RouterView>
-      </div>
-    </main>
-  </div>
+  <AppWindowFrame
+    v-else
+    :mode="minimalMode ? 'minimal' : 'advanced'"
+  >
+    <MinimalModeView v-if="minimalMode" />
+    <div v-else class="app-advanced-shell flex h-full overflow-hidden bg-bg text-foreground font-sans">
+      <NavBar />
+      <main class="min-w-0 flex-1 overflow-hidden pl-44">
+        <div class="mx-auto h-full w-full max-w-5xl overflow-hidden px-6 py-6">
+          <RouterView v-slot="{ Component, route: viewRoute }">
+            <KeepAlive :include="keptAlivePages">
+              <component :is="Component" :key="viewRoute.name" />
+            </KeepAlive>
+          </RouterView>
+        </div>
+      </main>
+    </div>
+  </AppWindowFrame>
 
   <div
     v-if="modeTransitionVisible"
@@ -364,6 +370,10 @@ async function handleCoreQuit() {
 </template>
 
 <style scoped>
+.app-advanced-shell {
+  min-height: calc(100vh - 34px);
+}
+
 .mode-transition-overlay {
   position: fixed;
   inset: 0;

@@ -267,6 +267,22 @@ describe('native WebView package policy', () => {
     assert.match(darwinHost, /requestClose: \(\) => rpc\('window\.requestClose'\)/)
   })
 
+  it('wraps advanced and minimal content in the shared transparent app frame', () => {
+    const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+    const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
+
+    assert.match(appVue, /import AppWindowFrame from '\.\/components\/AppWindowFrame\.vue'/)
+    assert.match(appVue, /<AppWindowFrame[\s\S]*:mode="minimalMode \? 'minimal' : 'advanced'"/)
+    assert.match(appVue, /<MinimalModeView v-if="minimalMode" \/>/)
+    assert.match(appVue, /<div v-else class="app-advanced-shell/)
+    assert.match(frameVue, /<header[\s\S]*class="app-window-titlebar/)
+    assert.match(frameVue, /<slot \/>/)
+    assert.match(frameVue, /isWindows/)
+    assert.match(frameVue, /isMac/)
+    assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.minimize/)
+    assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.requestClose/)
+  })
+
   it('keeps core RPC work off the Win32 WebView message callback thread', () => {
     const win32Host = readFileSync(
       join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
