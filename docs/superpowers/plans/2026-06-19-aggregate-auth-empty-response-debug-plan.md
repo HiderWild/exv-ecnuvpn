@@ -1,5 +1,8 @@
 # Aggregate-Auth Empty Response Debug Plan
 
+> **⚠️ Superseded by [`docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md`](../../AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md).**
+> 该文件早期把若干“代码事实”表述成了“已证实根因”（例如“服务端返回空 200 OK”、“TLS 读到 0 但当成 ok”等），并建议提交可能含 cookie/opaque/token 的 raw 响应字节。这些判断与采集方式已被修复计划修正。后续 agent **不要**把本文档里的“已证实”表述直接当事实使用，请以 `FIX_PLAN` 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILLS: `superpowers:systematic-debugging`, `superpowers:test-driven-development`. Steps use checkbox (`- [ ]`) syntax for tracking. **Iron law:** no fix without root-cause evidence; no production code without a failing test first.
 
 **Goal:** Locate the precise layer that turns a real ECNU AnyConnect aggregate-auth handshake into the user-visible failure `auth_response_invalid: "aggregate auth response is empty"`, prove the cause with reproducible evidence, then fix the root cause without re-introducing the bug.
