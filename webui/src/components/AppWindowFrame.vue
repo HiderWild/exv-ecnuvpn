@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { Minus, X } from 'lucide-vue-next'
+import appIconUrl from '../assets/app-icon.svg'
 
 type WindowMode = 'advanced' | 'minimal'
 type TransitionPhase = 'idle' | 'native-resize-before-animation' | 'preview-animating' | 'native-resize-after-animation' | 'settling'
@@ -156,7 +157,7 @@ onMounted(() => {
             v-if="visualMode === 'minimal'"
             class="app-window-titlebar__identity"
           >
-            <img class="app-window-titlebar__icon" src="/favicon.svg" alt="" />
+            <img class="app-window-titlebar__icon" :src="appIconUrl" alt="" />
             <span class="app-window-titlebar__title">{{ titlebarTitle }}</span>
           </div>
           <div
@@ -194,7 +195,7 @@ onMounted(() => {
           class="mode-transition-overlay"
           aria-hidden="true"
         >
-          <img class="mode-transition-icon" src="/favicon.svg" alt="" />
+          <img class="mode-transition-icon" :src="appIconUrl" alt="" />
         </div>
       </div>
     </div>
@@ -209,7 +210,6 @@ onMounted(() => {
   --minimal-width: 302px;
   --minimal-height: 118px;
   --mac-traffic-light-inset: 78px;
-  --advanced-sidebar-width: 11rem;
   --window-radius: 16px;
   min-height: 100vh;
   overflow: hidden;
@@ -263,8 +263,9 @@ onMounted(() => {
 }
 
 .app-window-frame--advanced .app-window-titlebar {
-  left: var(--advanced-sidebar-width);
-  border-bottom: 1px solid rgba(15, 23, 42, 0.82);
+  left: 0;
+  right: 0;
+  justify-content: flex-end;
   padding: 0 4px 0 0;
 }
 
@@ -359,7 +360,7 @@ onMounted(() => {
   display: grid;
   place-items: center;
   border-radius: inherit;
-  background: rgba(10, 18, 35, 0.96);
+  background: #0a1223;
   backdrop-filter: blur(18px) saturate(1.1);
   pointer-events: auto;
 }

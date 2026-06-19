@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import {
   LayoutDashboard, Settings, FileText
 } from 'lucide-vue-next'
+import appIconUrl from '../assets/app-icon.svg'
 import { useVpnStore } from '../stores/vpn'
 
 const router = useRouter()
@@ -72,7 +73,7 @@ const sidebarStatusItems = computed(() => [
           class="flex min-w-0 items-center gap-2.5 text-left transition-colors hover:text-accent"
           @click="router.push('/')"
         >
-          <img src="/favicon.svg" alt="" class="h-9 w-9 shrink-0" />
+          <img :src="appIconUrl" alt="" class="h-9 w-9 shrink-0" />
           <span class="min-w-0 leading-tight">
             <span class="block text-xl font-bold text-foreground">EXV</span>
             <span class="block text-sm font-semibold text-muted">for ECNU</span>

@@ -30,6 +30,14 @@ function bashCase(script: string, label: string): string {
   return script.slice(start, end)
 }
 
+function cssRule(source: string, selector: string): string {
+  const start = source.indexOf(`${selector} {`)
+  assert.notEqual(start, -1, `missing CSS rule ${selector}`)
+  const end = source.indexOf('\n}', start)
+  assert.notEqual(end, -1, `missing CSS rule terminator ${selector}`)
+  return source.slice(start, end + 2)
+}
+
 function assertUnixDesktopScriptPackagesWebView(script: string, platform: string): void {
   assert.match(script, new RegExp(`ECNUVPN_BUILD_PLATFORM=${platform}`))
   assert.match(script, new RegExp(`ECNUVPN_WEBUI_DIST_DIR="\\$BUILD_ROOT/webview/dist"`))
@@ -278,19 +286,31 @@ describe('native WebView package policy', () => {
   it('wraps advanced and minimal content in the shared transparent app frame', () => {
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
     const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
+    const navBarVue = readFileSync(join(webuiRoot, 'src', 'components', 'NavBar.vue'), 'utf8')
+    const appIconSvg = readFileSync(join(webuiRoot, 'src', 'assets', 'app-icon.svg'), 'utf8')
+    const advancedTitlebarRule = cssRule(frameVue, '.app-window-frame--advanced .app-window-titlebar')
 
     assert.match(appVue, /import AppWindowFrame from '\.\/components\/AppWindowFrame\.vue'/)
     assert.match(appVue, /<AppWindowFrame[\s\S]*:mode="minimalMode \? 'minimal' : 'advanced'"/)
     assert.match(appVue, /<MinimalModeView v-if="minimalMode" \/>/)
     assert.match(appVue, /<div v-else class="app-advanced-shell/)
     assert.match(appVue, /app-advanced-content-titlebar-spacer/)
+    assert.match(appVue, /<main class="min-w-0 flex-1 overflow-hidden pl-44">[\s\S]*app-advanced-content-titlebar-spacer/)
     assert.match(appVue, /h-\[34px\][\s\S]*border-b[\s\S]*border-border/)
     assert.match(frameVue, /<header[\s\S]*class="app-window-titlebar/)
     assert.match(frameVue, /@pointerdown="startWindowDrag"/)
     assert.match(frameVue, /EXV for ECNU/)
     assert.match(frameVue, /v-if="visualMode === 'minimal'"/)
-    assert.match(frameVue, /--advanced-sidebar-width: 11rem;/)
-    assert.match(frameVue, /\.app-window-frame--advanced \.app-window-titlebar \{[\s\S]*left: var\(--advanced-sidebar-width\);[\s\S]*border-bottom:/)
+    assert.match(frameVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
+    assert.match(navBarVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
+    assert.match(frameVue, /:src="appIconUrl"/)
+    assert.match(navBarVue, /:src="appIconUrl"/)
+    assert.match(appIconSvg, /<svg[\s\S]*viewBox="0 0 1024 1024"/)
+    assert.match(advancedTitlebarRule, /left: 0;/)
+    assert.match(advancedTitlebarRule, /right: 0;/)
+    assert.match(advancedTitlebarRule, /justify-content: flex-end;/)
+    assert.doesNotMatch(advancedTitlebarRule, /var\(--advanced-sidebar-width\)/)
+    assert.doesNotMatch(advancedTitlebarRule, /border-bottom:/)
     assert.match(frameVue, /\.app-window-frame--advanced \.app-window-titlebar__identity \{[\s\S]*display: none;/)
     assert.match(frameVue, /\.app-window-frame--advanced \.app-window-content-shell \{[\s\S]*height: 100%;/)
     assert.match(frameVue, /\.app-window-frame--minimal \.app-window-titlebar \{[\s\S]*position: relative;/)
@@ -307,6 +327,9 @@ describe('native WebView package policy', () => {
   it('coordinates direction-specific transparent shell mode transitions in the renderer', () => {
     const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+    const transparentHostRule = cssRule(frameVue, '.app-window-transparent-host')
+    const transitionSurfaceRule = cssRule(frameVue, '.mode-transition-surface')
+    const transitionOverlayRule = cssRule(frameVue, '.mode-transition-overlay')
 
     assert.match(frameVue, /const MODE_TRANSITION_MS = 300/)
     assert.match(frameVue, /const POST_RESIZE_SETTLE_MS = 50/)
@@ -320,8 +343,11 @@ describe('native WebView package policy', () => {
     assert.match(frameVue, /request !== windowModeRequest/)
     assert.match(frameVue, /mode-transition-overlay/)
     assert.match(frameVue, /backdrop-filter: blur/)
-    assert.match(frameVue, /background: rgba\(10, 18, 35, 0\.96\)/)
     assert.match(frameVue, /mode-transition-surface/)
+    assert.match(transparentHostRule, /background: transparent;/)
+    assert.match(transitionSurfaceRule, /background: transparent;/)
+    assert.match(transitionOverlayRule, /background: #0a1223;/)
+    assert.doesNotMatch(transitionOverlayRule, /background: rgba\(10, 18, 35, 0\.\d+\)/)
     assert.doesNotMatch(appVue, /modeTransitionVisible/)
     assert.doesNotMatch(appVue, /applyWindowMode/)
   })
@@ -376,6 +402,21 @@ describe('native WebView package policy', () => {
     assert.match(types, /interface VpnConnectAccepted/)
     assert.match(types, /connect\(password\?: string\): Promise<VpnStatus \| VpnConnectAccepted>/)
     assert.match(sse, /store\.updateStatusFromEvent\(event\.data as Partial<VpnStatus>\)/)
+  })
+
+  it('uses the packaged app icon during mode resize masking', () => {
+    const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
+    const navBarVue = readFileSync(join(webuiRoot, 'src', 'components', 'NavBar.vue'), 'utf8')
+    const appIconSvg = readFileSync(join(webuiRoot, 'src', 'assets', 'app-icon.svg'), 'utf8')
+
+    assert.match(frameVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
+    assert.match(navBarVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
+    assert.match(frameVue, /<img[\s\S]*class="mode-transition-icon"[\s\S]*:src="appIconUrl"/)
+    assert.match(navBarVue, /<img[\s\S]*:src="appIconUrl"[\s\S]*class="h-9 w-9 shrink-0"/)
+    assert.match(appIconSvg, /<svg[\s\S]*aria-label="ECNU VPN logo"/)
+    assert.doesNotMatch(frameVue, /<div class="mode-transition-icon">EXV<\/div>/)
+    assert.doesNotMatch(frameVue, /src="\/favicon\.svg"/)
+    assert.doesNotMatch(navBarVue, /src="\/favicon\.svg"/)
   })
 
   it('keeps cross-platform WebView acceptance gates executable by agents', () => {
