@@ -44,6 +44,9 @@ void test_canonical_codes_pass_through() {
   expect(feedback::resolve_error_code("unsupported_auth_flow", "") ==
              feedback::code::kAuthFailed,
          "legacy unsupported_auth_flow maps to auth_failed");
+  expect(feedback::resolve_error_code("connection_attempt_active", "") ==
+             feedback::code::kConnectionAttemptActive,
+         "connection_attempt_active passes through");
 
   const char *anyconnect_v2_codes[] = {
       "auth_protocol_mismatch",
@@ -59,6 +62,7 @@ void test_canonical_codes_pass_through() {
       "rekey_unsupported",
       "cstp_compressed_unsupported",
       "unsupported_extra_args",
+      "connection_attempt_active",
   };
   for (const char *code : anyconnect_v2_codes) {
     expect(feedback::resolve_error_code(code, "") == code,

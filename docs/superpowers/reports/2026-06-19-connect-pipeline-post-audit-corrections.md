@@ -46,3 +46,29 @@ Verification:
 Commit:
 
 - `c5fbbec docs: list all pending manual verification items`
+
+## Correction 3: Missing Plan-Referenced Test Entrypoints
+
+Finding:
+
+- The plan and checklist referenced `ui_shell_async_host_bridge_test`, but the repository only had async-host coverage embedded inside `ui_shell_runtime_test`; the named CMake/CTest target did not exist.
+- The plan referenced `webui/host/__tests__/ui-mode-and-connect-failure.test.ts`, but no such host test existed and `pnpm --dir webui test:host` could not exercise that named acceptance gate.
+- The plan's focused Phase 13 command referenced `connection_attempt_test`, but `tests/connection_attempt_test.cpp` was not registered as a CMake/CTest target. Once registered, it exposed stale test code and a real feedback-code regression where `connection_attempt_active` collapsed to `connection_failed`.
+
+Resolution:
+
+- Added standalone `tests/ui_shell_async_host_bridge_test.cpp`, registered it in CMake, and included it in release-blocking tests.
+- Added `webui/host/__tests__/ui-mode-and-connect-failure.test.ts` and included it in `pnpm --dir webui test:host`.
+- Reworked that host test from brittle exact source-fragment matching to TypeScript AST/structural checks while keeping it as a lightweight host-contract gate.
+- Registered `connection_attempt_test` as a CMake/CTest target, fixed its stale helper-pid and source-path assumptions, and updated its static guard for the current accepted-job connect flow.
+- Added `connection_attempt_active` as a canonical feedback code and synchronized the frontend VPN error type/presentation map.
+
+Verification:
+
+- `cmake --build --preset windows-release --target core_rpc_lane_scheduler_test connect_intent_test connect_pipeline_test core_process_lifecycle_test ui_shell_core_rpc_client_test ui_shell_runtime_test ui_shell_async_host_bridge_test app_api_rpc_dispatcher_test core_architecture_contract_test vpn_actions_test connection_attempt_test win32_driver_status_test feedback_test`
+- `ctest --test-dir build-windows/cpp -R "core_rpc_lane_scheduler_test|connect_intent_test|connect_pipeline_test|core_process_lifecycle_test|ui_shell_core_rpc_client_test|ui_shell_runtime_test|ui_shell_async_host_bridge_test|app_api_rpc_dispatcher_test|core_architecture_contract_test|vpn_actions_test|connection_attempt_test|win32_driver_status_test|feedback_test" --output-on-failure`
+- `pnpm --dir webui test:host`
+
+Commit:
+
+- Pending until commit is created.

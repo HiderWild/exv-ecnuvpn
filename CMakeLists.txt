@@ -1013,6 +1013,23 @@ target_link_libraries(ui_shell_runtime_test PRIVATE exv-core)
 
 add_test(NAME ui_shell_runtime_test COMMAND ui_shell_runtime_test)
 
+add_executable(ui_shell_async_host_bridge_test
+    tests/ui_shell_async_host_bridge_test.cpp
+    src/app/ui_shell/core_rpc_client.cpp
+    src/app/ui_shell/async_host_bridge.cpp
+    src/app/ui_shell/host_bridge.cpp
+    ${EXV_CLI_TRANSPORT_SOURCES}
+    src/platform/common/core_resolver_platform_deps.cpp
+)
+
+target_include_directories(ui_shell_async_host_bridge_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(ui_shell_async_host_bridge_test PRIVATE exv-core)
+
+add_test(NAME ui_shell_async_host_bridge_test COMMAND ui_shell_async_host_bridge_test)
+
 add_executable(ui_shell_cmake_policy_test
     tests/ui_shell_cmake_policy_test.cpp
 )
@@ -2475,9 +2492,29 @@ target_include_directories(native_auth_session_json_test PRIVATE
 
 add_test(NAME native_auth_session_json_test COMMAND native_auth_session_json_test)
 
-# NOTE: connection_attempt_test and app_api_logs_test depend on the full app_api
-# build chain (WebUI assets, SSE broadcaster, etc.) and cannot be compiled as
-# standalone test targets.  They are tested as part of the exv integration build.
+add_executable(connection_attempt_test
+    tests/connection_attempt_test.cpp
+)
+
+target_include_directories(connection_attempt_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(connection_attempt_test PRIVATE
+    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(connection_attempt_test PRIVATE
+    exv-core
+    exv-helper-runtime
+    Threads::Threads
+)
+
+add_test(NAME connection_attempt_test COMMAND connection_attempt_test)
+
+# NOTE: app_api_logs_test depends on the full app_api build chain (WebUI assets,
+# SSE broadcaster, etc.) and is tested as part of the exv integration build.
 
 add_executable(auth_failure_test
     tests/integration/auth_failure_test.cpp
@@ -2561,6 +2598,7 @@ set(_release_blocking_tests
     ui_shell_contract_test
     ui_shell_core_rpc_client_test
     ui_shell_runtime_test
+    ui_shell_async_host_bridge_test
     ui_shell_cmake_policy_test
     crypto_roundtrip_test
     native_url_test
@@ -2612,6 +2650,7 @@ set(_release_blocking_tests
     helper_messages_connector_test
     core_process_test
     core_process_lifecycle_test
+    connection_attempt_test
     helper_delegating_network_ops_test
     app_api_status_contract_test
     tunnel_controller_integration_test

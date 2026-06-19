@@ -42,6 +42,7 @@ bool is_canonical(const std::string &value) {
          value == code::kRekeyUnsupported ||
          value == code::kCstpCompressedUnsupported ||
          value == code::kUnsupportedExtraArgs ||
+         value == code::kConnectionAttemptActive ||
          value == code::kConnectionFailed;
 }
 
@@ -113,6 +114,9 @@ ErrorInfo info_for(const std::string &canonical) {
   if (canonical == code::kUnsupportedExtraArgs)
     return {canonical, true,
             "Remove unsupported native extra_args or use a supported compatibility flag."};
+  if (canonical == code::kConnectionAttemptActive)
+    return {canonical, true,
+            "Wait for the active connection attempt to finish or cancel it, then retry."};
   return {code::kConnectionFailed, true,
           "Open the logs (exv logs) to see the underlying failure, then retry."};
 }

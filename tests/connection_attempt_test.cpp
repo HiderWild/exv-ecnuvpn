@@ -216,7 +216,7 @@ bool dead_owner_live_helper_blocks_stale_cleanup() {
   namespace attempt = ecnuvpn::connection_attempt;
 
   const auto dir = unique_temp_dir("dead-owner-live-helper");
-  write_registry_record(dir, 111, "helper-owned-attempt", "active", 222, -1);
+  write_registry_record(dir, 111, "helper-owned-attempt", "active", 222);
   write_lock_owner(dir, 111, "helper-owned-attempt");
 
   attempt::AcquireOptions contender;
@@ -283,7 +283,7 @@ bool unknown_child_liveness_keeps_attempt_active() {
   namespace attempt = ecnuvpn::connection_attempt;
 
   const auto dir = unique_temp_dir("unknown-child-liveness");
-  write_registry_record(dir, 141, "unknown-child-attempt", "active", 252, -1);
+  write_registry_record(dir, 141, "unknown-child-attempt", "active", 252);
   write_lock_owner(dir, 141, "unknown-child-attempt");
 
   attempt::AcquireOptions contender;
@@ -528,22 +528,26 @@ bool app_api_native_connect_reports_active_attempt_before_bootstrap() {
   return ok;
 }
 
-bool app_api_constructs_attempt_cleanup_before_timing_mark() {
+bool app_api_acquires_attempt_before_submitting_connect_job() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const auto app_api_path =
-      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "app_api.cpp";
+      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "core" /
+      "app_api" / "desktop_vpn_actions.cpp";
   std::ifstream in(app_api_path);
   const std::string source((std::istreambuf_iterator<char>(in)),
                            std::istreambuf_iterator<char>());
 
   const auto acquire =
-      source.find("connection_attempt::AcquireResult attempt =");
+      source.find("conn_attempt::AcquireResult attempt_result =");
   const auto cleanup =
-      source.find("connection_attempt::TerminalAttemptScope attempt_cleanup");
+      source.find("conn_attempt::TerminalAttemptScope attempt_cleanup");
   const auto timing = source.find("timing.mark(\"connection_attempt\"");
+  const auto submit = source.find("g_desktop_connect_jobs.submit_connect(",
+                                  timing == std::string::npos ? 0 : timing);
+  const auto attempt_id_capture = source.find("[cfg, password, attempt_id]");
 
   bool ok = true;
   ok = expect(acquire != std::string::npos,
@@ -555,13 +559,22 @@ bool app_api_constructs_attempt_cleanup_before_timing_mark() {
   ok = expect(timing != std::string::npos,
               "app_api should keep connection attempt timing mark") &&
        ok;
-  if (acquire != std::string::npos && cleanup != std::string::npos &&
-      timing != std::string::npos) {
-    ok = expect(acquire < cleanup,
-                "cleanup scope should be after successful acquire") &&
+  ok = expect(submit != std::string::npos,
+              "app_api should submit connect work after guard acquisition") &&
+       ok;
+  ok = expect(attempt_id_capture != std::string::npos,
+              "connect job should capture attempt id for terminal cleanup") &&
+       ok;
+  if (acquire != std::string::npos && timing != std::string::npos &&
+      submit != std::string::npos && attempt_id_capture != std::string::npos) {
+    ok = expect(acquire < timing,
+                "attempt guard should be acquired before timing mark") &&
          ok;
-    ok = expect(cleanup < timing,
-                "cleanup scope should be constructed before timing mark") &&
+    ok = expect(timing < submit,
+                "connect job should be submitted after attempt timing mark") &&
+         ok;
+    ok = expect(submit < attempt_id_capture,
+                "connect job lambda should capture attempt id") &&
          ok;
   }
   return ok;
@@ -592,6 +605,6 @@ int main() {
   ok = terminal_attempt_releases_guard_and_preserves_reason() && ok;
   ok = scope_exit_marks_current_attempt_terminal_on_exception() && ok;
   ok = app_api_native_connect_reports_active_attempt_before_bootstrap() && ok;
-  ok = app_api_constructs_attempt_cleanup_before_timing_mark() && ok;
+  ok = app_api_acquires_attempt_before_submitting_connect_job() && ok;
   return ok ? 0 : 1;
 }

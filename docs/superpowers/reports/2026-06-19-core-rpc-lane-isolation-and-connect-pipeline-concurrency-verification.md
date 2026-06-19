@@ -13,6 +13,9 @@ Passed:
 - `./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking`
 - Post-review resource cleanup fix: `cmake --build --preset windows-release --target connect_pipeline_test native_engine_contract_test exv app_api_status_contract_test`
 - Post-review resource cleanup fix: `ctest --test-dir build-windows/cpp -R "app_api_status_contract_test|connect_pipeline_test|native_engine_contract_test|native_handshake_job_test|core_session_runner_test|tunnel_controller_integration_test" --output-on-failure`
+- Post-review test-entry correction: `cmake --build --preset windows-release --target core_rpc_lane_scheduler_test connect_intent_test connect_pipeline_test core_process_lifecycle_test ui_shell_core_rpc_client_test ui_shell_runtime_test ui_shell_async_host_bridge_test app_api_rpc_dispatcher_test core_architecture_contract_test vpn_actions_test connection_attempt_test win32_driver_status_test feedback_test`
+- Post-review test-entry correction: `ctest --test-dir build-windows/cpp -R "core_rpc_lane_scheduler_test|connect_intent_test|connect_pipeline_test|core_process_lifecycle_test|ui_shell_core_rpc_client_test|ui_shell_runtime_test|ui_shell_async_host_bridge_test|app_api_rpc_dispatcher_test|core_architecture_contract_test|vpn_actions_test|connection_attempt_test|win32_driver_status_test|feedback_test" --output-on-failure`
+- Post-review frontend contract correction: `pnpm --dir webui test:host`
 
 Release-blocking result: 72/72 tests passed.
 
@@ -27,6 +30,19 @@ Release-blocking result: 72/72 tests passed.
 - `minimal_mode` and `service_install_prompt_seen` are frontend-local values backed by `localStorage`; remote settings payloads cannot overwrite them.
 - Connect timing source guards cover backend/helper, platform, protocol handshake, first failure, and serial tail markers.
 - Post-review: adopted/prepared native handshake resources are explicitly disconnected if stopped before packet attach or discarded before controller handoff.
+- Post-review: `ui_shell_async_host_bridge_test` is now a real CMake/CTest target covering non-blocking host dispatch, local `window.setMode`, invalid host requests, and shutdown suppression of late core replies.
+- Post-review: `ui-mode-and-connect-failure.test.ts` is now part of `pnpm --dir webui test:host`, covering frontend-owned mode/prompt storage, stale mode-write suppression, visible connect failures, and in-progress cancellation wiring through AST/structural checks rather than exact source-fragment matching.
+- Post-review: `connection_attempt_test` is now a real CMake/CTest target, and `connection_attempt_active` is preserved as a canonical backend/frontend error code instead of collapsing to `connection_failed`.
+
+## Implementation Commits
+
+Base reviewed commit before latest post-audit corrections:
+
+- `355964b docs: record post-audit connect corrections`
+
+Latest post-audit test-entry correction commit:
+
+- Pending until commit is created.
 
 ## Manual Verification Not Run
 

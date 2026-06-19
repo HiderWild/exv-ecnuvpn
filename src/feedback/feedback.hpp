@@ -38,6 +38,8 @@ inline constexpr const char *kRekeyUnsupported = "rekey_unsupported";
 inline constexpr const char *kCstpCompressedUnsupported =
     "cstp_compressed_unsupported";
 inline constexpr const char *kUnsupportedExtraArgs = "unsupported_extra_args";
+inline constexpr const char *kConnectionAttemptActive =
+    "connection_attempt_active";
 // Named generic fallback. INVARIANT: a failed result never carries an empty
 // code, so the frontend never has to render a context-free "Failed..." popup.
 inline constexpr const char *kConnectionFailed = "connection_failed";

@@ -141,6 +141,7 @@ export type VpnErrorType =
   | 'permission_denied'
   | 'helper_unavailable'
   | 'network_unreachable'
+  | 'connection_attempt_active'
   | 'user_cancelled'
   | 'invalid_request'
   | 'connection_failed'
@@ -352,6 +353,12 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
     error_type: 'network_unreachable',
     message: '无法连接到 VPN 服务器，请检查网络连接或服务器地址。',
     recommended_action: 'check_network',
+    recoverable: true,
+  },
+  connection_attempt_active: {
+    error_type: 'connection_attempt_active',
+    message: '已有连接流程正在进行，请等待完成或取消后重试。',
+    recommended_action: 'cancel_or_wait',
     recoverable: true,
   },
   user_cancelled: {
