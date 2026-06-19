@@ -1408,6 +1408,7 @@ In `scripts/manual-phase7-vpn-verification.ps1`, append this text to the generat
 - [ ] macOS: traffic-light controls remain native and embedded in the app frame.
 - [ ] macOS: the same direction-specific resize timing is visible.
 - [ ] macOS: during the transition mask, the area outside the mask but inside the physical window is fully transparent.
+- [ ] macOS: app icon mask remains visible through transition settle.
 "@
 ```
 
