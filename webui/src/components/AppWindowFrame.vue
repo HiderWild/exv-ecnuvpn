@@ -1,12 +1,23 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { Minus, X } from 'lucide-vue-next'
 
 type WindowMode = 'advanced' | 'minimal'
+type TransitionPhase = 'idle' | 'native-resize-before-animation' | 'preview-animating' | 'native-resize-after-animation' | 'settling'
+
+const MODE_TRANSITION_MS = 300
+const POST_RESIZE_SETTLE_MS = 50
+const HOST_RESIZE_TIMEOUT_MS = 1200
 
 const props = defineProps<{
   mode: WindowMode
 }>()
+
+const appliedMode = ref<WindowMode>(props.mode)
+const visualMode = ref<WindowMode>(props.mode)
+const transitionPhase = ref<TransitionPhase>('idle')
+const previewAnimating = ref(false)
+let windowModeRequest = 0
 
 const isMac = computed(() => {
   if (typeof navigator === 'undefined') return false
@@ -14,66 +25,204 @@ const isMac = computed(() => {
 })
 
 const isWindows = computed(() => !isMac.value)
+const transitionActive = computed(() => transitionPhase.value !== 'idle')
 const frameClass = computed(() => [
   'app-window-frame',
-  `app-window-frame--${props.mode}`,
+  `app-window-frame--${visualMode.value}`,
   isMac.value ? 'app-window-frame--mac' : 'app-window-frame--windows',
+  transitionActive.value ? 'app-window-frame--transitioning' : '',
+  previewAnimating.value ? 'app-window-frame--preview-animating' : '',
 ])
 
+function wait(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms))
+}
+
+function afterNextPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+}
+
+async function waitForPreviewAnimation() {
+  previewAnimating.value = true
+  await afterNextPaint()
+  await wait(MODE_TRANSITION_MS)
+  previewAnimating.value = false
+}
+
+async function resizeNativeWindow(mode: WindowMode, request: number) {
+  const resize = window.ecnuVpn?.window?.resizeForMode ?? window.ecnuVpn?.window?.setMode
+  if (!resize) return
+  await Promise.race([
+    resize(mode, request),
+    wait(HOST_RESIZE_TIMEOUT_MS).then(() => {
+      throw new Error('window resize timed out')
+    }),
+  ])
+}
+
+async function runModeTransition(nextMode: WindowMode) {
+  const request = ++windowModeRequest
+  if (appliedMode.value === nextMode) {
+    visualMode.value = nextMode
+    transitionPhase.value = 'idle'
+    return
+  }
+
+  try {
+    if (appliedMode.value === 'minimal' && nextMode === 'advanced') {
+      transitionPhase.value = 'native-resize-before-animation'
+      visualMode.value = 'minimal'
+      await resizeNativeWindow(nextMode, request)
+      if (request !== windowModeRequest) return
+      transitionPhase.value = 'preview-animating'
+      visualMode.value = 'advanced'
+      await waitForPreviewAnimation()
+    } else if (appliedMode.value === 'advanced' && nextMode === 'minimal') {
+      transitionPhase.value = 'preview-animating'
+      visualMode.value = 'minimal'
+      await waitForPreviewAnimation()
+      if (request !== windowModeRequest) return
+      transitionPhase.value = 'native-resize-after-animation'
+      await resizeNativeWindow(nextMode, request)
+    } else {
+      transitionPhase.value = 'native-resize-before-animation'
+      visualMode.value = nextMode
+      await resizeNativeWindow(nextMode, request)
+    }
+
+    if (request !== windowModeRequest) return
+    transitionPhase.value = 'settling'
+    await wait(POST_RESIZE_SETTLE_MS)
+    if (request !== windowModeRequest) return
+    appliedMode.value = nextMode
+    visualMode.value = nextMode
+  } catch (error) {
+    console.error('[window] mode transition failed:', error)
+    visualMode.value = appliedMode.value
+  } finally {
+    if (request === windowModeRequest) {
+      previewAnimating.value = false
+      transitionPhase.value = 'idle'
+    }
+  }
+}
+
 async function minimizeWindow() {
+  if (transitionActive.value) return
   await window.ecnuVpn?.window?.minimize()
 }
 
 async function requestWindowClose() {
+  if (transitionActive.value) return
   await window.ecnuVpn?.window?.requestClose()
 }
+
+watch(
+  () => props.mode,
+  (nextMode) => {
+    void runModeTransition(nextMode)
+  },
+)
+
+onMounted(() => {
+  appliedMode.value = props.mode
+  visualMode.value = props.mode
+})
 </script>
 
 <template>
   <div :class="frameClass">
-    <header class="app-window-titlebar" data-window-drag-region="true">
-      <div class="app-window-titlebar__identity">
-        <img class="app-window-titlebar__icon" src="/favicon.svg" alt="" />
-        <span class="app-window-titlebar__title">ECNU VPN</span>
-      </div>
-      <div
-        v-if="isWindows"
-        class="app-window-titlebar__controls"
-        data-window-control-region="true"
-      >
-        <button
-          type="button"
-          class="app-window-titlebar__button"
-          aria-label="最小化"
-          @click="minimizeWindow"
-        >
-          <Minus class="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          class="app-window-titlebar__button app-window-titlebar__button--close"
-          aria-label="关闭"
-          @click="requestWindowClose"
-        >
-          <X class="h-3.5 w-3.5" />
-        </button>
-      </div>
-    </header>
+    <div class="app-window-transparent-host">
+      <div class="mode-transition-surface">
+        <header class="app-window-titlebar" data-window-drag-region="true">
+          <div class="app-window-titlebar__identity">
+            <img class="app-window-titlebar__icon" src="/favicon.svg" alt="" />
+            <span class="app-window-titlebar__title">ECNU VPN</span>
+          </div>
+          <div
+            v-if="isWindows"
+            class="app-window-titlebar__controls"
+            data-window-control-region="true"
+          >
+            <button
+              type="button"
+              class="app-window-titlebar__button"
+              aria-label="最小化"
+              :disabled="transitionActive"
+              @click="minimizeWindow"
+            >
+              <Minus class="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              class="app-window-titlebar__button app-window-titlebar__button--close"
+              aria-label="关闭"
+              :disabled="transitionActive"
+              @click="requestWindowClose"
+            >
+              <X class="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </header>
 
-    <section class="app-window-content-shell">
-      <slot />
-    </section>
+        <section class="app-window-content-shell">
+          <slot />
+        </section>
+
+        <div
+          v-if="transitionActive"
+          class="mode-transition-overlay"
+          aria-hidden="true"
+        >
+          <img class="mode-transition-icon" src="/favicon.svg" alt="" />
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .app-window-frame {
   --titlebar-height: 34px;
+  --advanced-width: 972px;
+  --advanced-height: 563px;
+  --minimal-width: 302px;
+  --minimal-height: 118px;
   --mac-traffic-light-inset: 78px;
   min-height: 100vh;
   overflow: hidden;
   background: transparent;
   color: inherit;
+}
+
+.app-window-transparent-host {
+  min-height: 100vh;
+  overflow: hidden;
+  background: transparent;
+}
+
+.mode-transition-surface {
+  position: relative;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
+  background: rgb(10 18 35);
+  transform-origin: top left;
+  transition:
+    width 300ms cubic-bezier(0.16, 1, 0.3, 1),
+    height 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app-window-frame--minimal.app-window-frame--transitioning .mode-transition-surface {
+  width: var(--minimal-width);
+  height: var(--minimal-height);
+}
+
+.app-window-frame--advanced.app-window-frame--transitioning .mode-transition-surface {
+  width: var(--advanced-width);
+  height: var(--advanced-height);
 }
 
 .app-window-titlebar {
@@ -126,19 +275,41 @@ async function requestWindowClose() {
   transition: background-color 120ms ease, color 120ms ease;
 }
 
-.app-window-titlebar__button:hover {
+.app-window-titlebar__button:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
   color: white;
 }
 
-.app-window-titlebar__button--close:hover {
+.app-window-titlebar__button--close:hover:not(:disabled) {
   background: #dc2626;
   color: white;
 }
 
+.app-window-titlebar__button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .app-window-content-shell {
-  min-height: calc(100vh - var(--titlebar-height));
+  height: calc(100% - var(--titlebar-height));
   overflow: hidden;
   background: transparent;
+}
+
+.mode-transition-overlay {
+  position: absolute;
+  inset: var(--titlebar-height) 0 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 18, 35, 0.82);
+  pointer-events: auto;
+}
+
+.mode-transition-icon {
+  width: 3.4rem;
+  height: 3.4rem;
+  display: block;
+  filter: drop-shadow(0 0.45rem 0.9rem rgba(0, 0, 0, 0.24));
 }
 </style>

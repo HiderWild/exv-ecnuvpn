@@ -185,15 +185,17 @@ describe('native WebView package policy', () => {
   it('keeps window mode resizing out of the settings persistence path', () => {
     const configStore = readFileSync(join(webuiRoot, 'src', 'stores', 'config.ts'), 'utf8')
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+    const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
 
     assert.doesNotMatch(configStore, /window\.ecnuVpn\.window\.setMode/)
     assert.match(configStore, /localStorage\.getItem\('ecnu-vpn:minimal-mode'\)/)
     assert.match(configStore, /localStorage\.setItem\('ecnu-vpn:minimal-mode'/)
     assert.match(configStore, /delete remoteSettings\.minimal_mode/)
     assert.match(configStore, /settings\.value = \{ \.\.\.settings\.value, \.\.\.s \}/)
-    assert.match(appVue, /watch\(\s*minimalMode/)
-    assert.match(appVue, /requestAnimationFrame/)
-    assert.match(appVue, /window\.ecnuVpn\?\.window\?\.setMode/)
+    assert.doesNotMatch(appVue, /window\.ecnuVpn\?\.window\?\.setMode/)
+    assert.match(frameVue, /watch\(\s*\(\) => props\.mode/)
+    assert.match(frameVue, /requestAnimationFrame/)
+    assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.resizeForMode/)
   })
 
   it('keeps service install prompt seen state in frontend storage only', () => {
@@ -281,6 +283,26 @@ describe('native WebView package policy', () => {
     assert.match(frameVue, /isMac/)
     assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.minimize/)
     assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.requestClose/)
+  })
+
+  it('coordinates direction-specific transparent shell mode transitions in the renderer', () => {
+    const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
+    const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+
+    assert.match(frameVue, /const MODE_TRANSITION_MS = 300/)
+    assert.match(frameVue, /const POST_RESIZE_SETTLE_MS = 50/)
+    assert.match(frameVue, /type TransitionPhase = 'idle' \| 'native-resize-before-animation' \| 'preview-animating' \| 'native-resize-after-animation' \| 'settling'/)
+    assert.match(frameVue, /async function runModeTransition\(nextMode: WindowMode\)/)
+    assert.match(frameVue, /if \(appliedMode\.value === 'minimal' && nextMode === 'advanced'\)/)
+    assert.match(frameVue, /transitionPhase\.value = 'native-resize-before-animation'[\s\S]*await resizeNativeWindow\(nextMode, request\)[\s\S]*transitionPhase\.value = 'preview-animating'/)
+    assert.match(frameVue, /if \(appliedMode\.value === 'advanced' && nextMode === 'minimal'\)/)
+    assert.match(frameVue, /transitionPhase\.value = 'preview-animating'[\s\S]*await waitForPreviewAnimation\(\)[\s\S]*transitionPhase\.value = 'native-resize-after-animation'[\s\S]*await resizeNativeWindow\(nextMode, request\)/)
+    assert.match(frameVue, /await wait\(POST_RESIZE_SETTLE_MS\)/)
+    assert.match(frameVue, /request !== windowModeRequest/)
+    assert.match(frameVue, /mode-transition-overlay/)
+    assert.match(frameVue, /mode-transition-surface/)
+    assert.doesNotMatch(appVue, /modeTransitionVisible/)
+    assert.doesNotMatch(appVue, /applyWindowMode/)
   })
 
   it('keeps core RPC work off the Win32 WebView message callback thread', () => {
