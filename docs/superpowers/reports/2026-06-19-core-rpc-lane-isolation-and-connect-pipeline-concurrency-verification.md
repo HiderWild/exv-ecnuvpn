@@ -16,8 +16,14 @@ Passed:
 - Post-review test-entry correction: `cmake --build --preset windows-release --target core_rpc_lane_scheduler_test connect_intent_test connect_pipeline_test core_process_lifecycle_test ui_shell_core_rpc_client_test ui_shell_runtime_test ui_shell_async_host_bridge_test app_api_rpc_dispatcher_test core_architecture_contract_test vpn_actions_test connection_attempt_test win32_driver_status_test feedback_test`
 - Post-review test-entry correction: `ctest --test-dir build-windows/cpp -R "core_rpc_lane_scheduler_test|connect_intent_test|connect_pipeline_test|core_process_lifecycle_test|ui_shell_core_rpc_client_test|ui_shell_runtime_test|ui_shell_async_host_bridge_test|app_api_rpc_dispatcher_test|core_architecture_contract_test|vpn_actions_test|connection_attempt_test|win32_driver_status_test|feedback_test" --output-on-failure`
 - Post-review frontend contract correction: `pnpm --dir webui test:host`
+- Current HEAD refresh: `cmake --build --preset windows-release --target core_rpc_lane_scheduler_test connect_intent_test connect_pipeline_test core_process_lifecycle_test ui_shell_core_rpc_client_test ui_shell_runtime_test ui_shell_async_host_bridge_test app_api_rpc_dispatcher_test core_architecture_contract_test vpn_actions_test connection_attempt_test win32_driver_status_test feedback_test`
+- Current HEAD refresh: `ctest --test-dir build-windows/cpp -R "core_rpc_lane_scheduler_test|connect_intent_test|connect_pipeline_test|core_process_lifecycle_test|ui_shell_core_rpc_client_test|ui_shell_runtime_test|ui_shell_async_host_bridge_test|app_api_rpc_dispatcher_test|core_architecture_contract_test|vpn_actions_test|connection_attempt_test|win32_driver_status_test|feedback_test" --output-on-failure`
+- Current HEAD refresh: `pnpm --dir webui test:host`
+- Current HEAD refresh: `pnpm --dir webui exec vue-tsc -b`
+- Current HEAD refresh: `pnpm --dir webui run build`
+- Current HEAD refresh: `./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking`
 
-Release-blocking result: 72/72 tests passed.
+Release-blocking result: 74/74 tests passed after clearing stale local `exv-ui`/`exv-helper` processes that were locking `build-windows/cpp/exv-helper.exe` during the first build attempt.
 
 ## Verified Behaviors
 
