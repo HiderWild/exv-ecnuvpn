@@ -232,16 +232,30 @@ describe('native WebView package policy', () => {
       join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
       'utf8',
     )
+    const appVue = readFileSync(join(repoRoot, 'webui', 'src', 'App.vue'), 'utf8')
     const setModeBranchStart = win32Host.indexOf('if (action == "window.setMode")')
     assert.notEqual(setModeBranchStart, -1)
     const resolveCloseBranchStart = win32Host.indexOf('if (action == "window.resolveClosePrompt")', setModeBranchStart)
     assert.notEqual(resolveCloseBranchStart, -1)
     const setModeBranch = win32Host.slice(setModeBranchStart, resolveCloseBranchStart)
 
-    assert.match(setModeBranch, /defer_window_mode\(mode\)/)
+    assert.match(setModeBranch, /defer_window_mode\(mode,\s*mode_request\)/)
     assert.doesNotMatch(setModeBranch, /apply_window_mode\(mode\)/)
+    assert.match(setModeBranch, /mode_request/)
+    assert.ok(
+      setModeBranch.indexOf('webview_->PostWebMessageAsJson') <
+        setModeBranch.indexOf('defer_window_mode(mode, mode_request)'),
+    )
     assert.match(win32Host, /kApplyWindowModeMessage/)
     assert.match(win32Host, /PostMessageW\(hwnd_, kApplyWindowModeMessage/)
+    assert.match(win32Host, /latest_window_mode_request_/)
+    assert.match(win32Host, /request < latest_window_mode_request_/)
+    assert.match(appVue, /mode-transition-overlay/)
+    assert.match(appVue, /340/)
+    assert.match(win32Host, /kWindowModeAnimationMs/)
+    assert.match(win32Host, /ease_out_expo/)
+    assert.match(win32Host, /target_width == current_width/)
+    assert.match(win32Host, /SetTimer\(hwnd_, kWindowModeAnimationTimer/)
   })
 
   it('keeps core RPC work off the Win32 WebView message callback thread', () => {
@@ -260,8 +274,10 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(onMessage, /handler_\s*\?\s*handler_\(request_json\)/)
     assert.match(win32Host, /kHostBridgeResponseMessage/)
     assert.match(win32Host, /std::thread/)
-    assert.match(runtime, /std::mutex client_mutex/)
-    assert.match(runtime, /try_lock\(\)/)
+    assert.match(runtime, /std::thread event_pump_thread/)
+    assert.match(runtime, /client\.pump_events\(\)/)
+    assert.match(runtime, /runtime_config\.pump_core_events = \[\]\(\) \{\}/)
+    assert.match(runtime, /event_pump_thread\.join\(\)/)
   })
 
   it('treats accepted VPN connect jobs as cancellable frontend state', () => {

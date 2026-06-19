@@ -8,6 +8,7 @@
 #import <WebKit/WebKit.h>
 #endif
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -175,7 +176,7 @@ NSString *bridge_script() {
       killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
-      setMode: (mode) => rpc('window.setMode', { mode }),
+      setMode: (mode, request) => rpc('window.setMode', { mode, request }),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
     },
     modal: {
@@ -308,13 +309,35 @@ public:
       const int id = parsed.value("id", 0);
       if (action == "window.setMode") {
         std::string mode = "advanced";
+        std::uint64_t mode_request = 0;
         if (parsed.contains("payload") && parsed["payload"].is_object()) {
           const auto &payload = parsed["payload"];
           if (payload.contains("mode") && payload["mode"].is_string()) {
             mode = payload["mode"].get<std::string>();
           }
+          if (payload.contains("request") &&
+              payload["request"].is_number_unsigned()) {
+            mode_request = payload["request"].get<std::uint64_t>();
+          } else if (payload.contains("request") &&
+                     payload["request"].is_number_integer()) {
+            const auto request_value = payload["request"].get<std::int64_t>();
+            if (request_value > 0) {
+              mode_request = static_cast<std::uint64_t>(request_value);
+            }
+          }
         }
-        apply_window_mode(mode);
+        bool stale_window_mode_request = false;
+        if (mode_request > 0) {
+          if (mode_request < latest_window_mode_request_) {
+            stale_window_mode_request = true;
+          } else {
+            latest_window_mode_request_ = mode_request;
+          }
+        }
+        mode = mode == "minimal" ? "minimal" : "advanced";
+        if (!stale_window_mode_request) {
+          apply_window_mode(mode);
+        }
         nlohmann::ordered_json out;
         out["id"] = id;
         out["ok"] = true;
@@ -613,6 +636,7 @@ private:
   bool renderer_ready_ = false;
   bool force_quit_ = false;
   bool close_prompt_pending_ = false;
+  std::uint64_t latest_window_mode_request_ = 0;
   int exit_code_ = 70;
 };
 #else

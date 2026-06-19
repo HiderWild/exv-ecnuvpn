@@ -9,6 +9,8 @@
 #endif
 #include <windows.h>
 
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <condition_variable>
@@ -43,6 +45,9 @@ constexpr UINT kApplyWindowModeMessage = WM_APP + 0x43;
 constexpr UINT kHostBridgeResponseMessage = WM_APP + 0x44;
 constexpr UINT kRendererEventMessage = WM_APP + 0x45;
 constexpr UINT kTrayIconId = 1;
+constexpr UINT_PTR kWindowModeAnimationTimer = 0xEC41;
+constexpr int kWindowModeAnimationMs = 300;
+constexpr UINT kWindowModeAnimationFrameMs = 16;
 constexpr UINT kDefaultDpi = 96;
 
 std::wstring wide_from_utf8(const std::string &value) {
@@ -477,14 +482,24 @@ public:
       const int id = parsed.value("id", 0);
       if (action == "window.setMode") {
         std::string mode = "advanced";
+        std::uint64_t mode_request = 0;
         if (parsed.contains("payload") && parsed["payload"].is_object()) {
           const auto &payload = parsed["payload"];
           if (payload.contains("mode") && payload["mode"].is_string()) {
             mode = payload["mode"].get<std::string>();
           }
+          if (payload.contains("request") &&
+              payload["request"].is_number_unsigned()) {
+            mode_request = payload["request"].get<std::uint64_t>();
+          } else if (payload.contains("request") &&
+                     payload["request"].is_number_integer()) {
+            const auto request_value = payload["request"].get<std::int64_t>();
+            if (request_value > 0) {
+              mode_request = static_cast<std::uint64_t>(request_value);
+            }
+          }
         }
         mode = mode == "minimal" ? "minimal" : "advanced";
-        defer_window_mode(mode);
         nlohmann::ordered_json out;
         out["id"] = id;
         out["ok"] = true;
@@ -494,6 +509,7 @@ public:
         const std::string response_json = out.dump();
         const std::wstring wide_response = wide_from_utf8(response_json);
         webview_->PostWebMessageAsJson(wide_response.c_str());
+        defer_window_mode(mode, mode_request);
         return S_OK;
       }
       if (action == "window.resolveClosePrompt") {
@@ -683,7 +699,13 @@ public:
     }
   }
 
-  void defer_window_mode(const std::string &mode) {
+  void defer_window_mode(const std::string &mode, std::uint64_t request) {
+    if (request > 0) {
+      if (request < latest_window_mode_request_) {
+        return;
+      }
+      latest_window_mode_request_ = request;
+    }
     pending_window_mode_ = mode == "minimal" ? "minimal" : "advanced";
     if (!hwnd_ || !PostMessageW(hwnd_, kApplyWindowModeMessage, 0, 0)) {
       apply_deferred_window_mode();
@@ -703,7 +725,90 @@ public:
     const auto bounds =
         webview2_window_mode_bounds_for_dpi(current_window_mode_, dpi);
     if (hwnd_) {
-      SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
+      start_window_mode_animation(bounds.width, bounds.height);
+    }
+  }
+
+  static double ease_out_expo(double progress) {
+    if (progress >= 1.0) {
+      return 1.0;
+    }
+    if (progress <= 0.0) {
+      return 0.0;
+    }
+    return 1.0 - std::pow(2.0, -10.0 * progress);
+  }
+
+  void cancel_window_mode_animation() {
+    if (!window_mode_animation_active_ || !hwnd_) {
+      window_mode_animation_active_ = false;
+      return;
+    }
+    KillTimer(hwnd_, kWindowModeAnimationTimer);
+    window_mode_animation_active_ = false;
+  }
+
+  void start_window_mode_animation(int target_width, int target_height) {
+    if (!hwnd_) {
+      return;
+    }
+    RECT current{};
+    if (!GetWindowRect(hwnd_, &current)) {
+      SetWindowPos(hwnd_, nullptr, 0, 0, target_width, target_height,
+                   SWP_NOMOVE | SWP_NOZORDER);
+      resize_webview();
+      return;
+    }
+
+    const int current_width = current.right - current.left;
+    const int current_height = current.bottom - current.top;
+    if (target_width == current_width && target_height == current_height) {
+      cancel_window_mode_animation();
+      resize_webview();
+      return;
+    }
+
+    cancel_window_mode_animation();
+    window_mode_animation_start_width_ = current_width;
+    window_mode_animation_start_height_ = current_height;
+    window_mode_animation_target_width_ = target_width;
+    window_mode_animation_target_height_ = target_height;
+    window_mode_animation_started_at_ = GetTickCount64();
+    window_mode_animation_active_ = true;
+    SetTimer(hwnd_, kWindowModeAnimationTimer, kWindowModeAnimationFrameMs,
+             nullptr);
+    step_window_mode_animation();
+  }
+
+  void step_window_mode_animation() {
+    if (!window_mode_animation_active_ || !hwnd_) {
+      return;
+    }
+    const ULONGLONG elapsed =
+        GetTickCount64() - window_mode_animation_started_at_;
+    const double raw_progress =
+        static_cast<double>(elapsed) / static_cast<double>(kWindowModeAnimationMs);
+    const double progress = raw_progress >= 1.0 ? 1.0 : raw_progress;
+    const double eased = ease_out_expo(progress);
+    const int width = static_cast<int>(
+        std::lround(window_mode_animation_start_width_ +
+                   (window_mode_animation_target_width_ -
+                    window_mode_animation_start_width_) *
+                       eased));
+    const int height = static_cast<int>(
+        std::lround(window_mode_animation_start_height_ +
+                   (window_mode_animation_target_height_ -
+                    window_mode_animation_start_height_) *
+                       eased));
+    SetWindowPos(hwnd_, nullptr, 0, 0, width, height,
+                 SWP_NOMOVE | SWP_NOZORDER);
+    resize_webview();
+
+    if (progress >= 1.0) {
+      KillTimer(hwnd_, kWindowModeAnimationTimer);
+      window_mode_animation_active_ = false;
+      SetWindowPos(hwnd_, nullptr, 0, 0, window_mode_animation_target_width_,
+                   window_mode_animation_target_height_,
                    SWP_NOMOVE | SWP_NOZORDER);
       resize_webview();
     }
@@ -713,6 +818,7 @@ public:
     if (!hwnd_) {
       return;
     }
+    cancel_window_mode_animation();
     const auto bounds =
         webview2_window_mode_bounds_for_dpi(current_window_mode_, dpi);
     if (suggested_rect) {
@@ -912,7 +1018,7 @@ private:
       killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
-      setMode: (mode) => rpc('window.setMode', { mode }),
+      setMode: (mode, request) => rpc('window.setMode', { mode, request }),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
     },
     modal: {
@@ -980,6 +1086,12 @@ private:
             static_cast<UINT>(HIWORD(wparam)),
             reinterpret_cast<const RECT *>(lparam));
         return 0;
+      case WM_TIMER:
+        if (wparam == kWindowModeAnimationTimer) {
+          self->step_window_mode_animation();
+          return 0;
+        }
+        break;
       case WM_CLOSE:
         if (self->force_quit_) {
           DestroyWindow(hwnd);
@@ -988,6 +1100,7 @@ private:
         }
         return 0;
       case WM_DESTROY:
+        self->cancel_window_mode_animation();
         self->running_ = false;
         return 0;
       case kTrayCallbackMessage:
@@ -1037,6 +1150,13 @@ private:
   UINT taskbar_created_message_ = 0;
   std::string current_window_mode_ = "advanced";
   std::string pending_window_mode_;
+  std::uint64_t latest_window_mode_request_ = 0;
+  bool window_mode_animation_active_ = false;
+  int window_mode_animation_start_width_ = 0;
+  int window_mode_animation_start_height_ = 0;
+  int window_mode_animation_target_width_ = 0;
+  int window_mode_animation_target_height_ = 0;
+  ULONGLONG window_mode_animation_started_at_ = 0;
   bool host_request_stop_ = false;
   bool tray_icon_added_ = false;
   bool force_quit_ = false;

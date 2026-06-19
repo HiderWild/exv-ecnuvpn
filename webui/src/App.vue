@@ -28,6 +28,7 @@ const closePromptVisible = ref(false)
 const closePromptBusy = ref(false)
 const closeChoice = ref<'tray' | 'quit'>('tray')
 const rememberCloseChoice = ref(false)
+const modeTransitionVisible = ref(false)
 let closeEventUnsubscribe: (() => void) | null = null
 const minimalMode = computed(() => config.settings.minimal_mode)
 const keptAlivePages = ['DashboardPage', 'SettingsPage', 'LogsPage']
@@ -41,6 +42,8 @@ const modalRoute = computed(() =>
   (typeof window !== 'undefined' && window.location.hash.startsWith('#/modal/')),
 )
 let windowModeRequest = 0
+let modeTransitionTimer: number | null = null
+let appliedWindowMode: 'advanced' | 'minimal' = 'advanced'
 
 function afterNextPaint() {
   return new Promise<void>((resolve) => {
@@ -56,14 +59,40 @@ async function applyWindowMode() {
   if (modalRoute.value) return
   const request = ++windowModeRequest
   const mode = config.settings.minimal_mode ? 'minimal' : 'advanced'
+  if (mode === appliedWindowMode) {
+    modeTransitionVisible.value = false
+    return
+  }
+  modeTransitionVisible.value = true
+  if (modeTransitionTimer != null) {
+    window.clearTimeout(modeTransitionTimer)
+  }
+  modeTransitionTimer = window.setTimeout(() => {
+    if (request === windowModeRequest) {
+      modeTransitionVisible.value = false
+    }
+    modeTransitionTimer = null
+  }, 340)
   await nextTick()
   await afterNextPaint()
   if (request !== windowModeRequest || modalRoute.value) return
   try {
-    await window.ecnuVpn?.window?.setMode(mode)
+    await window.ecnuVpn?.window?.setMode(mode, request)
+    if (request === windowModeRequest) {
+      appliedWindowMode = mode
+    }
   } catch (error) {
     console.error('[window] setMode failed:', error)
   }
+}
+
+function syncInitialWindowMode() {
+  if (config.settings.minimal_mode) {
+    void applyWindowMode()
+    return
+  }
+  appliedWindowMode = 'advanced'
+  modeTransitionVisible.value = false
 }
 
 watch(
@@ -88,7 +117,7 @@ onMounted(async () => {
     config.fetchAuthConfig(),
     vpn.fetchAppShellState(),
   ])
-  await applyWindowMode()
+  syncInitialWindowMode()
   if (!config.settings.service_install_prompt_seen && !vpn.serviceInstalled) {
     await markServicePromptSeen()
     if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
@@ -107,6 +136,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   sseDisconnect()
+  if (modeTransitionTimer != null) {
+    window.clearTimeout(modeTransitionTimer)
+    modeTransitionTimer = null
+  }
   closeEventUnsubscribe?.()
   closeEventUnsubscribe = null
 })
@@ -191,6 +224,16 @@ async function handleCoreQuit() {
         </RouterView>
       </div>
     </main>
+  </div>
+
+  <div
+    v-if="modeTransitionVisible"
+    class="mode-transition-overlay"
+    aria-hidden="true"
+  >
+    <div class="mode-transition-mark">
+      <div class="mode-transition-icon">EXV</div>
+    </div>
   </div>
 
   <div
@@ -319,3 +362,39 @@ async function handleCoreQuit() {
   <PasswordPromptDialog />
   <ToastStack />
 </template>
+
+<style scoped>
+.mode-transition-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  background: rgb(10 18 35);
+  pointer-events: auto;
+}
+
+.mode-transition-mark {
+  display: grid;
+  place-items: center;
+  width: 5rem;
+  height: 5rem;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 1rem 2.5rem rgba(0, 0, 0, 0.32);
+}
+
+.mode-transition-icon {
+  display: grid;
+  place-items: center;
+  width: 3.4rem;
+  height: 3.4rem;
+  border-radius: 9999px;
+  background: rgb(190 18 60);
+  color: white;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+</style>

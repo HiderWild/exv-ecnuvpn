@@ -4,9 +4,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <exception>
 #include <mutex>
 #include <string_view>
+#include <thread>
 
 namespace ecnuvpn::ui_shell {
 namespace {
@@ -79,15 +82,16 @@ int run_ui_shell_window(UiWindow &window,
   });
   CoreEventHandlerGuard event_guard(client);
 
-  UiWindowConfig runtime_config = config;
-  std::mutex client_mutex;
-  runtime_config.pump_core_events = [&client, &client_mutex]() {
-    if (!client_mutex.try_lock()) {
-      return;
+  std::atomic<bool> stop_event_pump{false};
+  std::thread event_pump_thread([&client, &stop_event_pump]() {
+    while (!stop_event_pump.load()) {
+      client.pump_events();
+      std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
-    std::lock_guard<std::mutex> lock(client_mutex, std::adopt_lock);
-    client.pump_events();
-  };
+  });
+
+  UiWindowConfig runtime_config = config;
+  runtime_config.pump_core_events = []() {};
 
   AsyncHostBridge bridge(client, [&window](std::string response_json) {
     window.post_host_response(response_json);
@@ -105,6 +109,10 @@ int run_ui_shell_window(UiWindow &window,
   });
   WindowMessageHandlerGuard handler_guard(window);
   const int exit_code = window.run(runtime_config);
+  stop_event_pump.store(true);
+  if (event_pump_thread.joinable()) {
+    event_pump_thread.join();
+  }
   bridge.shutdown();
   return exit_code;
 }

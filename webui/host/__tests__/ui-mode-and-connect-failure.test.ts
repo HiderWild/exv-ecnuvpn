@@ -82,6 +82,19 @@ function hasPropertyCall(text: string, propertyName: string) {
   }).some(Boolean)
 }
 
+function hasSetModeCallWithRequest(text: string) {
+  return collect(sourceFile('source.ts', text), (node) => {
+    if (!ts.isCallExpression(node)) return undefined
+    const expression = node.expression
+    if (!ts.isPropertyAccessExpression(expression) || expression.name.text !== 'setMode') return false
+    return node.arguments.length >= 2 &&
+      ts.isIdentifier(node.arguments[0]) &&
+      node.arguments[0].text === 'mode' &&
+      ts.isIdentifier(node.arguments[1]) &&
+      node.arguments[1].text === 'request'
+  }).some(Boolean)
+}
+
 function hasIdentifier(text: string, name: string) {
   return collect(sourceFile('source.ts', text), (node) =>
     ts.isIdentifier(node) && node.text === name ? true : undefined,
@@ -231,6 +244,14 @@ describe('frontend-owned UI mode state', () => {
     assert.ok(hasInequality(script, 'request', 'windowModeRequest'))
     assert.ok(hasCallNamed(script, 'watch'))
     assert.ok(hasPropertyCall(script, 'setMode'))
+    assert.ok(hasSetModeCallWithRequest(script))
+    assert.ok(hasIdentifier(script, 'modeTransitionVisible'))
+    assert.ok(hasIdentifier(script, 'modeTransitionTimer'))
+    assert.ok(hasIdentifier(script, 'appliedWindowMode'))
+    assert.ok(hasIdentifier(script, 'syncInitialWindowMode'))
+    assert.match(appText, /if \(mode === appliedWindowMode\)/)
+    assert.match(appText, /if \(config\.settings\.minimal_mode\)[\s\S]*void applyWindowMode\(\)/)
+    assert.ok(appText.includes('mode-transition-overlay'))
   })
 })
 

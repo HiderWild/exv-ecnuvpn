@@ -27,6 +27,13 @@ Passed:
 - Windows IPC probe correction: `./build-windows/cpp/exv-cli.exe status` returned exit code 0 with no `core_comm_broken` output.
 - Windows IPC probe correction: `./build-windows/cpp/exv-cli.exe service status` returned exit code 0 with no `core_comm_broken` output.
 - Windows IPC probe correction: `./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking`
+- Packaged Windows WebView smoke: `./scripts/windows-packaging-smoke.ps1` passed with 13 PASS, 0 FAIL, and 4 SKIP for optional/not-running service-helper checks.
+- UI responsiveness correction: `pnpm --dir webui test:host`
+- UI responsiveness correction: `pnpm --dir webui exec vue-tsc -b`
+- UI responsiveness correction: `ctest --test-dir build-windows/cpp -R "win32_webview2_runtime_test|ui_shell_async_host_bridge_test|ui_shell_core_rpc_client_test|core_process_lifecycle_test" --output-on-failure`
+- UI responsiveness correction: `powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 desktop`
+- UI responsiveness correction: packaged `exv-ui.exe` launch stayed `Responding=True` for an 8-second Windows process probe.
+- UI responsiveness correction: `powershell -ExecutionPolicy Bypass -File scripts\windows-packaging-smoke.ps1` passed with 13 PASS, 0 FAIL, and 4 SKIP.
 
 Release-blocking result: 75/75 tests passed after adding `pipe_ipc_test`. An earlier 74/74 refresh also passed after clearing stale local `exv-ui`/`exv-helper` processes that were locking `build-windows/cpp/exv-helper.exe` during the first build attempt.
 
@@ -48,6 +55,13 @@ Verification note: two intermediate full release-blocking reruns failed before t
 - Post-review: `connection_attempt_test` is now a real CMake/CTest target, and `connection_attempt_active` is preserved as a canonical backend/frontend error code instead of collapsing to `connection_failed`.
 - Post-review: Windows core resolver IPC probes now use strict `WaitNamedPipeA()` readiness instead of opening an empty pipe client connection, so `exv-cli status` and UI core resolution do not poison the next real named-pipe request.
 - Post-review: resolver-launched daemon cores no longer inherit caller pipe handles, avoiding redirected CLI/stdout waiters being held open by the background core.
+- Packaged Windows WebView shell launched from `build/windows/webview/package/ECNU VPN/exv-ui.exe` and created an `ECNU VPN` main window.
+- Earlier four-click packaged UI mode switching was manually exercised successfully, but later 8+ click bursts reproduced delayed mode bounce, so the four-click result is no longer treated as sufficient final-click parity evidence.
+- Rapid packaged UI stress before the correction reproduced delayed bounce at 8x@150 ms and 12x@120 ms bursts from advanced mode.
+- The packaged shell also entered a Windows non-responsive state during investigation. A/B testing isolated the cause to `CoreRpcClient::pump_events()` running from the Win32 UI loop; when that pump was moved off the UI thread, the same packaged launch probe stayed `Responding=True`.
+- Core event pumping now runs on a background thread and emits renderer events through the existing UI-thread `emit_event()` path. The Win32 UI loop no longer performs core event reads directly.
+- `window.setMode` now carries a renderer request sequence into native hosts; stale native writes are ignored, Win32 posts the renderer response before queuing resize, and the frontend displays a 340 ms resize shield with the EXV mark while mode changes settle.
+- `rg -n "window\\.setMode" $env:APPDATA\\ecnuvpn\\ecnuvpn.log $env:APPDATA\\ecnuvpn\\exv-core-ipc-v1.registry.json build\\webview-acceptance -S` returned no matches after the packaged UI mode switching pass.
 
 ## Implementation Commits
 
@@ -69,17 +83,23 @@ Follow-up correction after `ebfd09d`:
 - Added `pipe_ipc_test`, changed the Windows resolver probe to avoid consuming a named-pipe connection before the real request, and prevented resolver-launched daemon cores from inheriting caller handles.
 - Commit: recorded by the commit containing this verification update.
 
-## Manual Verification Not Run
+## Manual Verification
 
-The following require interactive local VPN/UI operation and were not executed by this agent:
+Partially run:
+
+- Packaged Windows WebView shell launch.
+- Packaged Windows WebView shell launch responsiveness, with `exv-ui` staying `Responding=True` for 8 seconds after the UI-thread event-pump correction.
+- Rapid packaged UI mode toggling automation after the correction showed no late mode bounce and `Responding=True`, but the coordinate-based automation did not reliably hit the WebView toggle, so it does not prove final-click parity.
+- Core/user trace search for `window.setMode`, with zero matches in current app log, core IPC registry, and acceptance artifact folder.
+
+The following still require interactive local VPN/UI operation with a real in-progress connection and were not executed by this agent:
 
 - Real connect against the VPN gateway.
 - Open logs while a real VPN connect is in progress.
-- Rapidly toggle minimal/advanced mode in the packaged UI and visually confirm the final mode equals the last click.
 - Confirm logs/status/config do not wait for VPN connect completion during real interactive use.
 - Confirm first-failure branch errors reach the visible UI before slower branch cleanup finishes.
 - Confirm user cancellation during a real connect does not show an error modal or failure log.
 - Confirm rapid connect/cancel clicking coalesces to the latest user intent in the packaged UI.
+- Confirm rapid 8+ minimal/advanced clicks interactively, including final mode matching the last accepted click.
 - Confirm connect failure is visible to the user.
-- Confirm `window.setMode` does not appear in real core RPC traces.
 - Confirm real connect timing output in application logs.
