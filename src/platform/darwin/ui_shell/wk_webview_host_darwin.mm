@@ -176,7 +176,10 @@ NSString *bridge_script() {
       killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
-      setMode: (mode, request) => rpc('window.setMode', { mode, request }),
+      setMode: (mode, request) => rpc('window.resizeForMode', { mode, request }),
+      resizeForMode: (mode, request) => rpc('window.resizeForMode', { mode, request }),
+      minimize: () => rpc('window.minimize'),
+      requestClose: () => rpc('window.requestClose'),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
     },
     modal: {
@@ -297,6 +300,14 @@ public:
     post_json_to_renderer(response_json);
   }
 
+  void post_bridge_success(int id, const nlohmann::ordered_json &data) {
+    nlohmann::ordered_json out;
+    out["id"] = id;
+    out["ok"] = true;
+    out["data"] = data;
+    post_json_to_renderer(out.dump());
+  }
+
   void handle_script_message(NSString *message) {
     const std::string request_json = utf8_from_ns_string(message);
     if (request_json.empty()) {
@@ -342,9 +353,63 @@ public:
         out["id"] = id;
         out["ok"] = true;
         nlohmann::ordered_json data;
-        data["mode"] = mode;
+        data["ok"] = true;
+        data["mode"] = current_window_mode_;
         out["data"] = data;
         post_json_to_renderer(out.dump());
+        return;
+      }
+      if (action == "window.resizeForMode") {
+        std::string mode = "advanced";
+        std::uint64_t mode_request = 0;
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("mode") && payload["mode"].is_string()) {
+            mode = payload["mode"].get<std::string>();
+          }
+          if (payload.contains("request") &&
+              payload["request"].is_number_unsigned()) {
+            mode_request = payload["request"].get<std::uint64_t>();
+          } else if (payload.contains("request") &&
+                     payload["request"].is_number_integer()) {
+            const auto request_value = payload["request"].get<std::int64_t>();
+            if (request_value > 0) {
+              mode_request = static_cast<std::uint64_t>(request_value);
+            }
+          }
+        }
+        mode = mode == "minimal" ? "minimal" : "advanced";
+        if (mode_request > 0) {
+          if (mode_request < latest_window_mode_request_) {
+            nlohmann::ordered_json data;
+            data["ok"] = true;
+            data["mode"] = current_window_mode_;
+            post_bridge_success(id, data);
+            return;
+          }
+          latest_window_mode_request_ = mode_request;
+        }
+        apply_window_mode_once(mode);
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        data["mode"] = current_window_mode_;
+        post_bridge_success(id, data);
+        return;
+      }
+      if (action == "window.minimize") {
+        if (window_ != nil) {
+          [window_ miniaturize:nil];
+        }
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return;
+      }
+      if (action == "window.requestClose") {
+        request_close_decision();
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
         return;
       }
       if (action == "window.resolveClosePrompt") {
@@ -439,16 +504,23 @@ public:
     }
   }
 
-  void apply_window_mode(const std::string &mode) {
-    const auto bounds = mode == "minimal"
+  void apply_window_mode_once(const std::string &mode) {
+    current_window_mode_ = mode == "minimal" ? "minimal" : "advanced";
+    if (window_ == nil) {
+      return;
+    }
+    const auto bounds = current_window_mode_ == "minimal"
                             ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
                             : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
-    if (window_ == nil) return;
     NSRect frame = [window_ frame];
     frame.size = NSMakeSize(bounds.width, bounds.height);
     [window_ setContentMinSize:NSMakeSize(bounds.width, bounds.height)];
     [window_ setContentMaxSize:NSMakeSize(bounds.width, bounds.height)];
     [window_ setFrame:frame display:YES animate:NO];
+  }
+
+  void apply_window_mode(const std::string &mode) {
+    apply_window_mode_once(mode);
   }
 
 private:
@@ -459,13 +531,19 @@ private:
         initWithContentRect:frame
                   styleMask:(NSWindowStyleMaskTitled |
                              NSWindowStyleMaskClosable |
-                             NSWindowStyleMaskMiniaturizable)
+                             NSWindowStyleMaskMiniaturizable |
+                             NSWindowStyleMaskFullSizeContentView)
                     backing:NSBackingStoreBuffered
                       defer:NO];
     if (window_ == nil) {
       return false;
     }
     [window_ setTitle:@"ECNU VPN"];
+    [window_ setTitlebarAppearsTransparent:YES];
+    [window_ setTitleVisibility:NSWindowTitleHidden];
+    [window_ setMovableByWindowBackground:YES];
+    [window_ setOpaque:NO];
+    [window_ setBackgroundColor:[NSColor clearColor]];
     [window_ center];
     [window_ setContentMinSize:NSMakeSize(bounds.width, bounds.height)];
     [window_ setContentMaxSize:NSMakeSize(bounds.width, bounds.height)];
@@ -637,6 +715,7 @@ private:
   bool force_quit_ = false;
   bool close_prompt_pending_ = false;
   std::uint64_t latest_window_mode_request_ = 0;
+  std::string current_window_mode_ = "advanced";
   int exit_code_ = 70;
 };
 #else

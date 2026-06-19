@@ -1100,6 +1100,7 @@ if(APPLE)
     )
     target_compile_definitions(darwin_wkwebview_runtime_test PRIVATE
         EXV_BUILD_UI_SHELL=1
+        ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     )
     target_link_libraries(darwin_wkwebview_runtime_test PRIVATE
         "-framework Cocoa"

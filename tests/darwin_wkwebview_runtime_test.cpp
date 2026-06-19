@@ -3,6 +3,8 @@
 #include "app/ui_shell/window_layout.hpp"
 
 #include <cassert>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -40,6 +42,26 @@ int main() {
       ecnuvpn::platform::darwin::ui_shell::wkwebview_status_menu_model();
   if (status_menu.size() != 3 || status_menu[0].label != "显示 ECNU VPN" ||
       !status_menu[1].separator || status_menu[2].label != "退出") {
+    return 1;
+  }
+  const std::string host_source_path =
+      std::string(ECNUVPN_SOURCE_DIR) +
+      "/src/platform/darwin/ui_shell/wk_webview_host_darwin.mm";
+  std::ifstream host_source_file(host_source_path);
+  const std::string host_source(
+      (std::istreambuf_iterator<char>(host_source_file)),
+      std::istreambuf_iterator<char>());
+  const auto source_contains = [&](const std::string &needle) {
+    return host_source.find(needle) != std::string::npos;
+  };
+  if (!source_contains("if (action == \"window.resizeForMode\")") ||
+      !source_contains("if (action == \"window.minimize\")") ||
+      !source_contains("if (action == \"window.requestClose\")") ||
+      !source_contains("apply_window_mode_once") ||
+      !source_contains("NSWindowStyleMaskFullSizeContentView") ||
+      !source_contains("setTitlebarAppearsTransparent:YES") ||
+      !source_contains("setTitleVisibility:NSWindowTitleHidden") ||
+      !source_contains("setOpaque:NO")) {
     return 1;
   }
 
