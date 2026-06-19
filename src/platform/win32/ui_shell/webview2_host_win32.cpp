@@ -956,7 +956,21 @@ private:
                             kFixedWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                             bounds.width, bounds.height, nullptr, nullptr,
                             instance_, this);
+    if (hwnd_) {
+      install_custom_frame_style();
+    }
     return hwnd_ != nullptr;
+  }
+
+  void install_custom_frame_style() {
+    if (!hwnd_) {
+      return;
+    }
+    const LONG_PTR style = GetWindowLongPtrW(hwnd_, GWL_STYLE);
+    SetWindowLongPtrW(hwnd_, GWL_STYLE, style & ~WS_CAPTION);
+    SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE);
   }
 
   void install_renderer_bridge() {
@@ -1107,10 +1121,7 @@ private:
       }
       switch (message) {
       case WM_NCCALCSIZE:
-        if (wparam == TRUE) {
-          return 0;
-        }
-        break;
+        return 0;
       case WM_NCHITTEST: {
         const LRESULT hit = self->hit_test_custom_frame(lparam);
         if (hit != HTCLIENT) {

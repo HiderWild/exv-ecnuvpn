@@ -115,6 +115,9 @@ int main() {
       !source_contains("WM_NCHITTEST") ||
       !source_contains("HTCAPTION") ||
       !source_contains("HTMINBUTTON") ||
+      !source_contains("GWL_STYLE") ||
+      !source_contains("~WS_CAPTION") ||
+      !source_contains("SWP_FRAMECHANGED") ||
       source_contains("kWindowModeAnimationTimer") ||
       source_contains("SetTimer(hwnd_, kWindowModeAnimationTimer")) {
     return 1;
