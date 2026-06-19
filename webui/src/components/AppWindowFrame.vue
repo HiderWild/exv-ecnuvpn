@@ -152,7 +152,10 @@ onMounted(() => {
           data-window-drag-region="true"
           @pointerdown="startWindowDrag"
         >
-          <div class="app-window-titlebar__identity">
+          <div
+            v-if="visualMode === 'minimal'"
+            class="app-window-titlebar__identity"
+          >
             <img class="app-window-titlebar__icon" src="/favicon.svg" alt="" />
             <span class="app-window-titlebar__title">{{ titlebarTitle }}</span>
           </div>
@@ -206,6 +209,7 @@ onMounted(() => {
   --minimal-width: 302px;
   --minimal-height: 118px;
   --mac-traffic-light-inset: 78px;
+  --advanced-sidebar-width: 11rem;
   --window-radius: 16px;
   min-height: 100vh;
   overflow: hidden;
@@ -258,6 +262,26 @@ onMounted(() => {
   color: #f8fafc;
 }
 
+.app-window-frame--advanced .app-window-titlebar {
+  left: var(--advanced-sidebar-width);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.82);
+  padding: 0 4px 0 0;
+}
+
+.app-window-frame--advanced .app-window-titlebar__identity {
+  display: none;
+}
+
+.app-window-frame--minimal .app-window-titlebar {
+  position: relative;
+  top: auto;
+  right: auto;
+  left: auto;
+  padding: 0 0 0 10px;
+  border-bottom: 0;
+  background: rgba(9, 16, 30, 0.92);
+}
+
 .app-window-frame--mac .app-window-titlebar {
   padding-left: var(--mac-traffic-light-inset);
 }
@@ -265,13 +289,9 @@ onMounted(() => {
 .app-window-titlebar__identity {
   display: inline-flex;
   min-width: 0;
-  height: 26px;
+  height: 100%;
   align-items: center;
   gap: 8px;
-  border-radius: 999px;
-  background: rgba(9, 16, 30, 0.58);
-  padding: 0 10px 0 8px;
-  backdrop-filter: blur(12px);
 }
 
 .app-window-titlebar__icon {
@@ -290,12 +310,9 @@ onMounted(() => {
 
 .app-window-titlebar__controls {
   display: flex;
-  height: 26px;
+  height: 100%;
   align-items: stretch;
   overflow: hidden;
-  border-radius: 999px;
-  background: rgba(9, 16, 30, 0.58);
-  backdrop-filter: blur(12px);
 }
 
 .app-window-titlebar__button {
@@ -325,6 +342,14 @@ onMounted(() => {
   height: 100%;
   overflow: hidden;
   background: transparent;
+}
+
+.app-window-frame--advanced .app-window-content-shell {
+  height: 100%;
+}
+
+.app-window-frame--minimal .app-window-content-shell {
+  height: calc(100% - var(--titlebar-height));
 }
 
 .mode-transition-overlay {

@@ -155,12 +155,15 @@ async function handleCoreQuit() {
     <div v-else class="app-advanced-shell flex h-full overflow-hidden bg-bg text-foreground font-sans">
       <NavBar />
       <main class="min-w-0 flex-1 overflow-hidden pl-44">
-        <div class="mx-auto h-full w-full max-w-5xl overflow-hidden px-6 py-6">
-          <RouterView v-slot="{ Component, route: viewRoute }">
-            <KeepAlive :include="keptAlivePages">
-              <component :is="Component" :key="viewRoute.name" />
-            </KeepAlive>
-          </RouterView>
+        <div class="flex h-full min-w-0 flex-col">
+          <div class="app-advanced-content-titlebar-spacer h-[34px] shrink-0 border-b border-border/80" aria-hidden="true" />
+          <div class="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-hidden px-6 py-6">
+            <RouterView v-slot="{ Component, route: viewRoute }">
+              <KeepAlive :include="keptAlivePages">
+                <component :is="Component" :key="viewRoute.name" />
+              </KeepAlive>
+            </RouterView>
+          </div>
         </div>
       </main>
     </div>
