@@ -475,8 +475,11 @@ $observationTemplate = @'
 - [ ] Windows: click minimize during idle; the window minimizes.
 - [ ] Windows: click close during idle; the existing close-confirmation flow opens.
 - [ ] Windows: close and minimize still work after transitions.
+- [ ] macOS: advanced -> minimal shows app icon mask immediately.
 - [ ] macOS: traffic-light controls remain native and embedded in the app frame.
 - [ ] macOS: the same direction-specific resize timing is visible.
+- [ ] macOS: transparent shell area is not painted as an opaque full-window panel.
+- [ ] macOS: app icon mask remains visible through transition settle.
 
 Notes:
 

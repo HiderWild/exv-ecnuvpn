@@ -327,9 +327,13 @@ describe('native WebView package policy', () => {
   it('coordinates direction-specific transparent shell mode transitions in the renderer', () => {
     const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+    const styleCss = readFileSync(join(webuiRoot, 'src', 'style.css'), 'utf8')
     const transparentHostRule = cssRule(frameVue, '.app-window-transparent-host')
     const transitionSurfaceRule = cssRule(frameVue, '.mode-transition-surface')
     const transitionOverlayRule = cssRule(frameVue, '.mode-transition-overlay')
+    const htmlRule = cssRule(styleCss, 'html')
+    const bodyRule = cssRule(styleCss, 'body')
+    const appRootRule = cssRule(styleCss, '#app')
 
     assert.match(frameVue, /const MODE_TRANSITION_MS = 300/)
     assert.match(frameVue, /const POST_RESIZE_SETTLE_MS = 50/)
@@ -348,6 +352,10 @@ describe('native WebView package policy', () => {
     assert.match(transitionSurfaceRule, /background: transparent;/)
     assert.match(transitionOverlayRule, /background: #0a1223;/)
     assert.doesNotMatch(transitionOverlayRule, /background: rgba\(10, 18, 35, 0\.\d+\)/)
+    assert.match(htmlRule, /background: transparent;/)
+    assert.match(bodyRule, /background: transparent;/)
+    assert.match(appRootRule, /background: transparent;/)
+    assert.doesNotMatch(bodyRule, /@apply [^;]*bg-bg/)
     assert.doesNotMatch(appVue, /modeTransitionVisible/)
     assert.doesNotMatch(appVue, /applyWindowMode/)
   })
@@ -470,8 +478,11 @@ describe('native WebView package policy', () => {
     assert.match(manualPhase7, /Windows: click minimize during idle; the window minimizes/)
     assert.match(manualPhase7, /Windows: click close during idle; the existing close-confirmation flow opens/)
     assert.match(manualPhase7, /Windows: close and minimize still work after transitions/)
+    assert.match(manualPhase7, /macOS: advanced -> minimal shows app icon mask immediately/)
     assert.match(manualPhase7, /macOS: traffic-light controls remain native and embedded in the app frame/)
     assert.match(manualPhase7, /macOS: the same direction-specific resize timing is visible/)
+    assert.match(manualPhase7, /macOS: transparent shell area is not painted as an opaque full-window panel/)
+    assert.match(manualPhase7, /macOS: app icon mask remains visible through transition settle/)
   })
 
   it('documents WebView as the production desktop shell in active docs', () => {

@@ -15,8 +15,13 @@
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
+html {
+  background: transparent;
+}
+
 body {
-  @apply bg-bg text-foreground font-sans antialiased;
+  @apply text-foreground font-sans antialiased;
+  background: transparent;
   margin: 0;
   overflow: hidden;
 }
@@ -24,6 +29,7 @@ body {
 #app {
   height: 100vh;
   overflow: hidden;
+  background: transparent;
 }
 
 /* Scrollbar styling */
