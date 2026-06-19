@@ -343,6 +343,39 @@ bool frontend_json_has_required_fields() {
   return ok;
 }
 
+bool disconnected_status_skips_windows_platform_probe_contract() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source =
+      source_text_at({"src", "core", "app_api", "desktop_status_presenter.cpp"});
+  const auto fn = source.find("nlohmann::json disconnected_status(");
+  const auto next_fn =
+      source.find("nlohmann::json frontend_status_from_snapshot_json", fn);
+  const std::string disconnected_source =
+      (fn == std::string::npos || next_fn == std::string::npos)
+          ? std::string()
+          : source.substr(fn, next_fn - fn);
+
+  bool ok = true;
+  ok = expect(fn != std::string::npos,
+              "disconnected_status function should exist") &&
+       ok;
+  ok = expect(disconnected_source.find("virtual_network::add_status_fields") ==
+                  std::string::npos,
+              "disconnected status.get must not run Windows virtual network platform probes") &&
+       ok;
+  ok = expect(disconnected_source.find("\"upstream_virtual_detected\"") !=
+                  std::string::npos &&
+                  disconnected_source.find("\"upstream_virtual_adapters\"") !=
+                      std::string::npos,
+              "disconnected status should keep stable upstream virtual fields without probing") &&
+       ok;
+  return ok;
+#endif
+}
+
 bool app_api_activates_core_owned_native_mode() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
@@ -912,6 +945,7 @@ int main() {
   ok = reconnecting_snapshot_maps_correctly() && ok;
   ok = all_phases_map_to_valid_strings() && ok;
   ok = frontend_json_has_required_fields() && ok;
+  ok = disconnected_status_skips_windows_platform_probe_contract() && ok;
   ok = app_api_activates_core_owned_native_mode() && ok;
   ok = desktop_native_connect_uses_core_owned_controller_pipeline() && ok;
   ok = desktop_native_preflight_reports_substage_timing() && ok;

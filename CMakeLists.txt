@@ -2163,6 +2163,31 @@ target_compile_definitions(app_api_status_contract_test PRIVATE
 
 add_test(NAME app_api_status_contract_test COMMAND app_api_status_contract_test)
 
+add_executable(desktop_status_presenter_test
+    tests/desktop_status_presenter_test.cpp
+)
+
+target_include_directories(desktop_status_presenter_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+if(MINGW)
+    target_link_libraries(desktop_status_presenter_test PRIVATE
+        "-Wl,--start-group"
+        exv-helper-runtime
+        exv-core
+        "-Wl,--end-group"
+    )
+else()
+    target_link_libraries(desktop_status_presenter_test PRIVATE
+        exv-helper-runtime
+        exv-core
+    )
+endif()
+
+add_test(NAME desktop_status_presenter_test COMMAND desktop_status_presenter_test)
+
 # --- Phase 4-6: core_api action tests ---
 
 add_executable(vpn_actions_test
@@ -2669,6 +2694,7 @@ set(_release_blocking_tests
     connection_attempt_test
     helper_delegating_network_ops_test
     app_api_status_contract_test
+    desktop_status_presenter_test
     tunnel_controller_integration_test
 )
 if(WIN32)
@@ -2796,6 +2822,7 @@ set_property(TEST
     core_process_lifecycle_test
     helper_delegating_network_ops_test
     app_api_status_contract_test
+    desktop_status_presenter_test
     APPEND PROPERTY LABELS "architecture"
 )
 
@@ -2880,6 +2907,7 @@ set_property(TEST
     core_process_test
     core_process_lifecycle_test
     app_api_status_contract_test
+    desktop_status_presenter_test
     APPEND PROPERTY LABELS "ui-contract"
 )
 

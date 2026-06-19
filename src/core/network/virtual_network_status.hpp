@@ -21,5 +21,12 @@ nlohmann::json to_json(const Detection &detection);
 void add_status_fields(nlohmann::json &status, const std::string &exv_interface = "");
 void print_notice(const Detection &detection);
 
+namespace testing {
+using VirtualNetworkProbeProvider =
+    std::vector<AdapterInfo> (*)(const std::string &exv_interface);
+void set_virtual_network_probe_provider_for_testing(
+    VirtualNetworkProbeProvider provider);
+} // namespace testing
+
 } // namespace virtual_network
 } // namespace ecnuvpn

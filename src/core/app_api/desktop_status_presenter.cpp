@@ -11,6 +11,30 @@
 
 namespace ecnuvpn {
 namespace app_api {
+namespace {
+
+void add_default_virtual_network_fields(nlohmann::json &status) {
+  status["upstream_virtual_detected"] = false;
+  status["upstream_virtual_adapters"] = nlohmann::json::array();
+  status["upstream_virtual_message"] = "";
+  status["route_policy"] = "normal";
+}
+
+void add_virtual_network_fields_if_ready(nlohmann::json &status,
+                                         const std::string &interface_name,
+                                         bool network_ready) {
+  if (!network_ready || interface_name.empty()) {
+    add_default_virtual_network_fields(status);
+    return;
+  }
+  try {
+    virtual_network::add_status_fields(status, interface_name);
+  } catch (...) {
+    add_default_virtual_network_fields(status);
+  }
+}
+
+} // namespace
 
 nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
                                            const Config &cfg) {
@@ -31,10 +55,8 @@ nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
   j["uptime_seconds"] = 0;
   j["rx_bytes"] = json_u64(helper_resp, "rx_bytes", 0);
   j["tx_bytes"] = json_u64(helper_resp, "tx_bytes", 0);
-  try {
-    virtual_network::add_status_fields(j, json_string(j, "interface"));
-  } catch (...) {
-  }
+  add_virtual_network_fields_if_ready(j, json_string(j, "interface"),
+                                      network_ready);
   return j;
 }
 
@@ -56,10 +78,6 @@ nlohmann::json disconnected_status(const Config &cfg) {
                    {"upstream_virtual_adapters", nlohmann::json::array()},
                    {"upstream_virtual_message", ""},
                    {"route_policy", "normal"}};
-  try {
-    virtual_network::add_status_fields(j, "");
-  } catch (...) {
-  }
   return j;
 }
 
@@ -88,10 +106,7 @@ nlohmann::json frontend_status_from_snapshot_json(
   j["uptime_seconds"] = 0;
   j["rx_bytes"] = rx_bytes;
   j["tx_bytes"] = tx_bytes;
-  try {
-    virtual_network::add_status_fields(j, iface);
-  } catch (...) {
-  }
+  add_virtual_network_fields_if_ready(j, iface, network_ready);
   return j;
 }
 
@@ -184,10 +199,7 @@ nlohmann::json frontend_status_from_controller_snapshot(
   }
   j["auto_reconnect"] = snap.auto_reconnect;
   j["phase"] = exv::core::tunnel_phase_wire_name(snap.phase);
-  try {
-    virtual_network::add_status_fields(j, snap.interface_name);
-  } catch (...) {
-  }
+  add_virtual_network_fields_if_ready(j, snap.interface_name, connected);
   return j;
 }
 
