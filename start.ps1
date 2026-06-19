@@ -43,6 +43,7 @@ $cppBuildDir = Join-Path $cppBuildRoot 'cpp'
 $uiShellExe = Join-Path $packageRoot 'exv-ui.exe'
 $exvExe = Join-Path $packageRoot 'bin\exv.exe'
 $exvHelperExe = Join-Path $packageRoot 'bin\exv-helper.exe'
+$helperServiceName = 'exv-helper'
 $launchArgsFile = Join-Path $packageRoot 'exv-ui.args'
 $desktopOutLog = Join-Path $repoRoot 'build\windows\webview\start-desktop.out.log'
 $desktopErrLog = Join-Path $repoRoot 'build\windows\webview\start-desktop.err.log'
@@ -50,6 +51,93 @@ $protectedProcessIds = @()
 
 function Write-Info([string]$Message) {
   Write-Output "[start] $Message"
+}
+
+function Convert-ServicePathNameToExecutablePath {
+  param([string]$PathName)
+
+  if ([string]::IsNullOrWhiteSpace($PathName)) {
+    return $null
+  }
+
+  $trimmed = $PathName.Trim()
+  if ($trimmed -match '^"([^"]+)"') {
+    return $Matches[1]
+  }
+  if ($trimmed -match '^(.+?\.exe)(?:\s|$)') {
+    return $Matches[1]
+  }
+
+  return $trimmed
+}
+
+function Get-HelperServiceSnapshot {
+  $service = Get-CimInstance Win32_Service -Filter "Name='$helperServiceName'" -ErrorAction SilentlyContinue
+  if (-not $service) {
+    return $null
+  }
+
+  $binaryPath = Convert-ServicePathNameToExecutablePath $service.PathName
+  $binaryExists = $false
+  if (-not [string]::IsNullOrWhiteSpace($binaryPath)) {
+    $binaryExists = Test-Path -LiteralPath $binaryPath
+  }
+
+  return [pscustomobject]@{
+    Name = $service.Name
+    State = $service.State
+    Status = $service.Status
+    StartMode = $service.StartMode
+    ProcessId = [int]$service.ProcessId
+    PathName = $service.PathName
+    BinaryPath = $binaryPath
+    BinaryExists = $binaryExists
+  }
+}
+
+function Write-HelperServiceSnapshot {
+  param($Snapshot)
+
+  if (-not $Snapshot) {
+    Write-Info "Service $helperServiceName is not installed"
+    return
+  }
+
+  $binarySummary = 'unknown'
+  if (-not [string]::IsNullOrWhiteSpace($Snapshot.BinaryPath)) {
+    $binarySummary = "$($Snapshot.BinaryPath) (exists=$($Snapshot.BinaryExists))"
+  }
+
+  Write-Info "Service ${helperServiceName}: state=$($Snapshot.State), start=$($Snapshot.StartMode), pid=$($Snapshot.ProcessId), binary=$binarySummary"
+}
+
+function Wait-HelperServiceStopped {
+  param([int]$TimeoutSeconds = 10)
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    $snapshot = Get-HelperServiceSnapshot
+    if (-not $snapshot -or $snapshot.State -eq 'Stopped') {
+      return $true
+    }
+    Start-Sleep -Milliseconds 300
+  }
+
+  return $false
+}
+
+function Wait-HelperServiceAbsent {
+  param([int]$TimeoutSeconds = 10)
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    if (-not (Get-HelperServiceSnapshot)) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 300
+  }
+
+  return $false
 }
 
 function Resolve-WebView2Sdk {
@@ -205,24 +293,66 @@ function Stop-ProcessTreeSafe {
 }
 
 function Stop-HelperService {
-  $serviceName = 'exv-helper'
-  $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-  if (-not $service -or $service.Status -eq 'Stopped') {
+  $snapshot = Get-HelperServiceSnapshot
+  if (-not $snapshot) {
     return
   }
 
-  Write-Info "Stopping service $serviceName"
+  Write-HelperServiceSnapshot $snapshot
+  if ($snapshot.State -eq 'Stopped') {
+    return
+  }
+
+  Write-Info "Stopping service $helperServiceName"
   try {
-    Stop-Service -Name $serviceName -Force -ErrorAction Stop
+    Stop-Service -Name $helperServiceName -Force -ErrorAction Stop
   }
   catch {
     try {
-      sc.exe stop $serviceName | Out-Null
+      sc.exe stop $helperServiceName | Out-Null
     }
     catch {
-      Write-Info "Failed to stop service ${serviceName}: $($_.Exception.Message)"
+      Write-Info "Failed to stop service ${helperServiceName}: $($_.Exception.Message)"
     }
   }
+
+  if (-not (Wait-HelperServiceStopped -TimeoutSeconds 10)) {
+    $remaining = Get-HelperServiceSnapshot
+    Write-HelperServiceSnapshot $remaining
+    throw "Service $helperServiceName did not stop before rebuild."
+  }
+}
+
+function Uninstall-HelperService {
+  $snapshot = Get-HelperServiceSnapshot
+  if (-not $snapshot) {
+    Write-Info "Service $helperServiceName is not installed; uninstall skipped"
+    return
+  }
+
+  Stop-HelperService
+
+  Write-Info "Deleting service $helperServiceName"
+  $deleteOutput = & sc.exe delete $helperServiceName 2>&1
+  $deleteExitCode = $LASTEXITCODE
+  if ($deleteExitCode -ne 0 -and (Get-HelperServiceSnapshot)) {
+    $deleteText = ($deleteOutput | Out-String).Trim()
+    throw "Failed to delete service $helperServiceName with exit code $deleteExitCode. $deleteText"
+  }
+
+  if (-not (Wait-HelperServiceAbsent -TimeoutSeconds 10)) {
+    $remaining = Get-HelperServiceSnapshot
+    Write-HelperServiceSnapshot $remaining
+    throw "Service $helperServiceName is still registered after delete request. Close service management tools and rerun start.ps1."
+  }
+
+  Write-Info "Service $helperServiceName registration removed"
+}
+
+function Invoke-HelperServicePrepackageCleanup {
+  Write-Info 'Checking helper service before package cleanup'
+  Write-HelperServiceSnapshot (Get-HelperServiceSnapshot)
+  Uninstall-HelperService
 }
 
 function Stop-ProjectProcesses {
@@ -291,6 +421,9 @@ function Invoke-DesktopRpcProbe {
 }
 
 function Show-Status {
+  Write-Info 'Helper service registration'
+  Write-HelperServiceSnapshot (Get-HelperServiceSnapshot)
+
   Write-Info 'Native CMake outputs'
   Show-FileHashIfPresent (Join-Path $cppBuildDir 'exv-ui.exe')
   Show-FileHashIfPresent (Join-Path $cppBuildDir 'exv.exe')
@@ -396,6 +529,7 @@ try {
   }
 
   Stop-ProjectProcesses
+  Invoke-HelperServicePrepackageCleanup
 
   if (-not $Quick) {
     Clean-BuildArtifacts

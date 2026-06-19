@@ -32,6 +32,14 @@ Require-Contains $start 'exv-ui.exe' 'start.ps1 must launch the native WebView s
 Require-Contains $start 'build-windows' 'start.ps1 must target build-windows outputs'
 Require-Contains $start 'Get-FileHash' 'start.ps1 must print binary hashes for consistency checks'
 Require-Contains $start 'desktop-rpc service.status' 'start.ps1 must probe runtime-selected native binary behavior'
+Require-Contains $start 'Get-CimInstance Win32_Service' 'start.ps1 must detect the installed helper service through SCM'
+Require-Contains $start 'Stop-Service -Name $helperServiceName' 'start.ps1 must stop the helper service before rebuilding'
+Require-Contains $start 'sc.exe delete $helperServiceName' 'start.ps1 must uninstall the helper service before rebuilding'
+Require-Contains $start 'Wait-HelperServiceAbsent' 'start.ps1 must wait for service deletion before deleting packaged binaries'
+Require-Contains $start 'Invoke-HelperServicePrepackageCleanup' 'start.ps1 must expose a pre-package service cleanup step'
+if ($start -notmatch 'Stop-ProjectProcesses\s+Invoke-HelperServicePrepackageCleanup\s+if \(-not \$Quick\)') {
+  throw 'start.ps1 must run helper service cleanup after process cleanup and before deleting build artifacts'
+}
 if ($start -match 'desktop:package|build:electron|dist-electron|Find-ElectronProcess') {
   throw 'start.ps1 must not use retired Electron package or process paths'
 }
