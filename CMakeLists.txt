@@ -1077,6 +1077,10 @@ if(WIN32)
         ${CMAKE_SOURCE_DIR}/src
     )
 
+    target_compile_definitions(win32_webview2_runtime_test PRIVATE
+        ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    )
+
     target_link_libraries(win32_webview2_runtime_test PRIVATE advapi32 urlmon shell32)
 
     add_test(NAME win32_webview2_runtime_test COMMAND win32_webview2_runtime_test)

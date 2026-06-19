@@ -3,7 +3,9 @@
 #include "app/ui_shell/window_layout.hpp"
 
 #include <cassert>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -93,6 +95,28 @@ int main() {
   }
   if (webview2_app_icon_resource_id() <= 0 ||
       webview2_app_icon_resource_id() == 32512) {
+    return 1;
+  }
+  const std::string host_source_path =
+      std::string(ECNUVPN_SOURCE_DIR) +
+      "/src/platform/win32/ui_shell/webview2_host_win32.cpp";
+  std::ifstream host_source_file(host_source_path);
+  const std::string host_source(
+      (std::istreambuf_iterator<char>(host_source_file)),
+      std::istreambuf_iterator<char>());
+  const auto source_contains = [&](const std::string &needle) {
+    return host_source.find(needle) != std::string::npos;
+  };
+  if (!source_contains("apply_window_mode_once") ||
+      !source_contains("if (action == \"window.resizeForMode\")") ||
+      !source_contains("if (action == \"window.minimize\")") ||
+      !source_contains("if (action == \"window.requestClose\")") ||
+      !source_contains("WM_NCCALCSIZE") ||
+      !source_contains("WM_NCHITTEST") ||
+      !source_contains("HTCAPTION") ||
+      !source_contains("HTMINBUTTON") ||
+      source_contains("kWindowModeAnimationTimer") ||
+      source_contains("SetTimer(hwnd_, kWindowModeAnimationTimer")) {
     return 1;
   }
 
