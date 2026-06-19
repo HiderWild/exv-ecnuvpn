@@ -355,7 +355,7 @@ Write-Host 'During the monitor window, perform the manual checks:'
 Write-Host '  1. Click Connect and open Logs while connect is in progress.'
 Write-Host '  2. Click the yellow in-progress cancel button.'
 Write-Host '  3. Rapidly click connect/cancel several times.'
-Write-Host '  4. Rapidly toggle minimal/advanced mode, including 8+ clicks.'
+Write-Host '  4. Toggle advanced -> minimal 10 times at moderate speed, advanced -> minimal 10 times rapidly, and minimal -> advanced 10 times rapidly.'
 Write-Host '  5. If a real connect failure occurs, verify the visible UI error.'
 Write-Host ''
 if ($IncludeRawLogDelta) {

@@ -86,3 +86,50 @@ Run after corrections:
 - `git diff --check`
 
 Then rerun focused Spark audits on the corrected Win32 host, Darwin response shape, and acceptance checklist.
+
+## Follow-Up Audit Corrections
+
+After commit `403e35c`, three narrower Spark audits were run and reviewed by
+GPT-5.4 before accepting more changes.
+
+### B4: Operator guidance still used the old 8+ click wording
+
+Status: accepted.
+
+The manual checklist had the corrected 10-count direction-specific checks, but
+the script's operator guidance still asked for "8+ clicks".
+
+Correction:
+
+- Update the operator guidance to match the three 10-count toggle checks.
+- Add a host static test assertion for the operator guidance text.
+
+### B5: Checklist test did not cover two existing transparent-shell checks
+
+Status: accepted.
+
+The checklist already included visual shrink and transparent-shell paint checks,
+but the host static test did not lock those exact items.
+
+Correction:
+
+- Add host static test assertions for both checklist lines.
+
+## Follow-Up Rejected Or Deferred Findings
+
+### A1: Direct behavioral Win32 `resolveClosePrompt` response assertion
+
+Status: rejected for this plan.
+
+The plan's current verification model intentionally uses static host contract
+tests for bridge shape, and the direct Win32/Darwin handlers are already locked
+to `data.ok = true`.
+
+### D3: Generic async host bridge `resolveClosePrompt` empty response
+
+Status: deferred.
+
+The generic async host bridge still returns an empty data object for local window
+actions, but Win32 and Darwin transparent-shell hosts intercept the normal
+`resolveClosePrompt` path directly. This is broader bridge-contract cleanup, not
+a current transparent-shell regression.
