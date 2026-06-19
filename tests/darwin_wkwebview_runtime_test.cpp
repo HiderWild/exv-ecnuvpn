@@ -61,7 +61,8 @@ int main() {
       !source_contains("NSWindowStyleMaskFullSizeContentView") ||
       !source_contains("setTitlebarAppearsTransparent:YES") ||
       !source_contains("setTitleVisibility:NSWindowTitleHidden") ||
-      !source_contains("setOpaque:NO")) {
+      !source_contains("setOpaque:NO") ||
+      !source_contains("drawsBackground")) {
     return 1;
   }
 

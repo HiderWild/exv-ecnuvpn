@@ -570,6 +570,7 @@ private:
     if (webview_ == nil) {
       return false;
     }
+    [webview_ setValue:@NO forKey:@"drawsBackground"];
     [webview_ setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
 
     navigation_delegate_ =
