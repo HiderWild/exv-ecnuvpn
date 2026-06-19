@@ -140,6 +140,9 @@ export interface EcnuVpnApi {
   }
   window: {
     setMode(mode: DesktopWindowMode, request?: number): Promise<{ ok: true; mode: DesktopWindowMode }>
+    resizeForMode(mode: DesktopWindowMode, request?: number): Promise<{ ok: true; mode: DesktopWindowMode }>
+    minimize(): Promise<{ ok: true }>
+    requestClose(): Promise<{ ok: true }>
     resolveClosePrompt(result: unknown): Promise<{ ok: true }>
   }
   modal: {

@@ -232,7 +232,6 @@ describe('native WebView package policy', () => {
       join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
       'utf8',
     )
-    const appVue = readFileSync(join(repoRoot, 'webui', 'src', 'App.vue'), 'utf8')
     const setModeBranchStart = win32Host.indexOf('if (action == "window.setMode")')
     assert.notEqual(setModeBranchStart, -1)
     const resolveCloseBranchStart = win32Host.indexOf('if (action == "window.resolveClosePrompt")', setModeBranchStart)
@@ -240,22 +239,32 @@ describe('native WebView package policy', () => {
     const setModeBranch = win32Host.slice(setModeBranchStart, resolveCloseBranchStart)
 
     assert.match(setModeBranch, /defer_window_mode\(mode,\s*mode_request\)/)
-    assert.doesNotMatch(setModeBranch, /apply_window_mode\(mode\)/)
-    assert.match(setModeBranch, /mode_request/)
-    assert.ok(
-      setModeBranch.indexOf('webview_->PostWebMessageAsJson') <
-        setModeBranch.indexOf('defer_window_mode(mode, mode_request)'),
+    assert.match(win32Host, /if \(action == "window\.resizeForMode"\)/)
+    assert.match(win32Host, /apply_window_mode_once\(mode\)/)
+    assert.doesNotMatch(win32Host, /SetTimer\(hwnd_, kWindowModeAnimationTimer/)
+    assert.doesNotMatch(win32Host, /step_window_mode_animation/)
+  })
+
+  it('exposes one-shot native window actions for transparent shell transitions', () => {
+    const types = readFileSync(join(webuiRoot, 'src', 'types', 'ecnu-vpn.d.ts'), 'utf8')
+    const win32Host = readFileSync(
+      join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
+      'utf8',
     )
-    assert.match(win32Host, /kApplyWindowModeMessage/)
-    assert.match(win32Host, /PostMessageW\(hwnd_, kApplyWindowModeMessage/)
-    assert.match(win32Host, /latest_window_mode_request_/)
-    assert.match(win32Host, /request < latest_window_mode_request_/)
-    assert.match(appVue, /mode-transition-overlay/)
-    assert.match(appVue, /340/)
-    assert.match(win32Host, /kWindowModeAnimationMs/)
-    assert.match(win32Host, /ease_out_expo/)
-    assert.match(win32Host, /target_width == current_width/)
-    assert.match(win32Host, /SetTimer\(hwnd_, kWindowModeAnimationTimer/)
+    const darwinHost = readFileSync(
+      join(repoRoot, 'src', 'platform', 'darwin', 'ui_shell', 'wk_webview_host_darwin.mm'),
+      'utf8',
+    )
+
+    assert.match(types, /resizeForMode\(mode: DesktopWindowMode, request\?: number\): Promise<\{ ok: true; mode: DesktopWindowMode \}>/)
+    assert.match(types, /minimize\(\): Promise<\{ ok: true \}>/)
+    assert.match(types, /requestClose\(\): Promise<\{ ok: true \}>/)
+    assert.match(win32Host, /resizeForMode: \(mode, request\) => rpc\('window\.resizeForMode', \{ mode, request \}\)/)
+    assert.match(win32Host, /minimize: \(\) => rpc\('window\.minimize'\)/)
+    assert.match(win32Host, /requestClose: \(\) => rpc\('window\.requestClose'\)/)
+    assert.match(darwinHost, /resizeForMode: \(mode, request\) => rpc\('window\.resizeForMode', \{ mode, request \}\)/)
+    assert.match(darwinHost, /minimize: \(\) => rpc\('window\.minimize'\)/)
+    assert.match(darwinHost, /requestClose: \(\) => rpc\('window\.requestClose'\)/)
   })
 
   it('keeps core RPC work off the Win32 WebView message callback thread', () => {
