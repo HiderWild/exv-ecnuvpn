@@ -11,6 +11,7 @@
 #include "core/crypto/crypto.hpp"
 #include "core/rpc/desktop_rpc_adapter.hpp"
 #include "core/tunnel_controller/connect_pipeline.hpp"
+#include "core/tunnel_controller/engine_event_bridge.hpp"
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
@@ -457,6 +458,17 @@ void run_desktop_connect_job(Config cfg,
     }
 
     auto deps = ecnuvpn::vpn_engine::default_native_engine_dependencies();
+    // Reuse EngineEventBridge as a log-only sink: the prepared-handshake job
+    // still emits auth.started / auth.failed / cstp.failed events even though
+    // we are not adopting a runner yet. Without a sink they vanish, leaving
+    // operators with no log trail for the most common failure layer of a real
+    // connect attempt. The bridge already filters noisy events, classifies
+    // severity, and redacts secret-bearing message and field text — passing
+    // nullptr as the TunnelEvent callback turns it into a pure log emitter
+    // without any controller coupling. See
+    // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §5.
+    exv::core::EngineEventBridge protocol_event_logger(nullptr);
+    deps.event_sink = &protocol_event_logger;
     ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
     ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config, deps);
     branch_timing.mark("native_handshake_started");

@@ -593,6 +593,45 @@ bool desktop_connect_pipeline_reports_branch_timing() {
                   std::string::npos,
               "desktop connect should log before invoking TunnelController::connect") &&
        ok;
+  // Prepared-handshake event sink: the protocol_branch must wire
+  // NativeHandshakeJob's event_sink to a real log-emitting sink, otherwise
+  // auth.started / auth.failed / cstp.failed events from the most common
+  // failure layer of a real connect attempt are silently dropped. We reuse
+  // EngineEventBridge as a log-only sink (nullptr TunnelEvent callback) so
+  // the prepared-handshake path emits the same engine.* log line shape as
+  // the runner-driven path. See
+  // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §5.
+  ok = expect(source.find("EngineEventBridge") != std::string::npos,
+              "desktop connect protocol branch should reuse EngineEventBridge "
+              "for log-only engine event redaction") &&
+       ok;
+  {
+    const auto protocol_branch_start =
+        source.find("StageTimer branch_timing(\"desktop.connect.protocol_handshake\")");
+    const auto protocol_branch_end =
+        protocol_branch_start == std::string::npos
+            ? std::string::npos
+            : source.find("auto pipeline_result", protocol_branch_start);
+    const std::string protocol_branch_source =
+        (protocol_branch_start == std::string::npos ||
+         protocol_branch_end == std::string::npos)
+            ? std::string()
+            : source.substr(protocol_branch_start,
+                            protocol_branch_end - protocol_branch_start);
+    ok = expect(!protocol_branch_source.empty(),
+                "protocol_handshake branch source slice should be locatable") &&
+         ok;
+    ok = expect(protocol_branch_source.find("EngineEventBridge") !=
+                    std::string::npos,
+                "protocol_branch should construct EngineEventBridge before "
+                "running NativeHandshakeJob") &&
+         ok;
+    ok = expect(protocol_branch_source.find("deps.event_sink =") !=
+                    std::string::npos,
+                "protocol_branch should assign deps.event_sink so handshake "
+                "events are not dropped") &&
+         ok;
+  }
   return ok;
 #endif
 }
