@@ -47,6 +47,7 @@ Latest post-audit test-entry correction commit:
 Follow-up correction after `d030038`:
 
 - Removed remaining exact source-fragment assertions from `ui-mode-and-connect-failure.test.ts`; the host test now uses AST/structural checks for the frontend-local and cancellation contracts.
+- Commit: `dc18d2b test: harden frontend mode contract gate`
 
 ## Manual Verification Not Run
 

@@ -77,3 +77,4 @@ Follow-up review:
 
 - A later `gpt-5.3-codex-spark` pass found the new host test still retained several exact source-fragment regex assertions.
 - Those remaining assertions were replaced with AST/structural checks for remote-settings short-circuiting, stale window-mode guards, `user_cancelled` error suppression, in-progress state, and `/disconnect` posting.
+- Commit: `dc18d2b test: harden frontend mode contract gate`
