@@ -569,6 +569,30 @@ bool desktop_connect_pipeline_reports_branch_timing() {
                   std::string::npos,
               "desktop connect pipeline should mark serial tail entry") &&
        ok;
+  ok = expect(source.find("timing.mark(\"background_job_started\"") !=
+                  std::string::npos,
+              "desktop connect background job should log before doing work") &&
+       ok;
+  ok = expect(source.find("branch_timing.mark(\"backend_resolve_started\"") !=
+                  std::string::npos,
+              "desktop connect should log before backend resolution") &&
+       ok;
+  ok = expect(source.find("branch_timing.mark(\"runtime_status_check_started\"") !=
+                  std::string::npos,
+              "desktop connect should log before runtime status checks") &&
+       ok;
+  ok = expect(source.find("branch_timing.mark(\"native_config_mapping_started\"") !=
+                  std::string::npos,
+              "desktop connect should log before native config mapping") &&
+       ok;
+  ok = expect(source.find("branch_timing.mark(\"native_handshake_started\"") !=
+                  std::string::npos,
+              "desktop connect should log before native handshake") &&
+       ok;
+  ok = expect(source.find("timing.mark(\"tunnel_controller_connect_start\"") !=
+                  std::string::npos,
+              "desktop connect should log before invoking TunnelController::connect") &&
+       ok;
   return ok;
 #endif
 }

@@ -1331,8 +1331,16 @@ bool test_connect_milestone_logs() {
                 "9: connect entry should log") && ok;
     ok = expect(has_log_event(logs, "tunnel", "vpn.config.missing"),
                 "9: missing VPN config/password should log") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "helper.hello.starting"),
+                "9: helper hello should log before the request") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "core_lease.acquire.starting"),
+                "9: core lease acquisition should log before the request") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "helper.session.starting"),
+                "9: helper session start should log before the request") && ok;
     ok = expect(has_log_event(logs, "tunnel", "helper.session.started"),
                 "9: helper session start should log") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "tunnel.device.preparing"),
+                "9: tunnel device preparation should log before the request") && ok;
     ok = expect(has_log_event(logs, "tunnel", "network.config.applying"),
                 "9: applying network config should log") && ok;
     ok = expect(has_log_event(logs, "tunnel", "packet.loop.started"),
@@ -1366,6 +1374,8 @@ bool test_native_runner_failure_log() {
     bool ok = true;
     ok = expect(ctrl.phase() == exv::core::TunnelPhase::Failed,
                 "10: invalid native config should fail") && ok;
+    ok = expect(has_log_event(logs, "tunnel", "native.runner.starting"),
+                "10: native runner start attempt should log before execution") && ok;
     ok = expect(has_log_event(logs, "tunnel", "native.runner.failed"),
                 "10: native runner start failure should log") && ok;
     ok = expect(!logs_contain_text(logs, "super-secret-password"),

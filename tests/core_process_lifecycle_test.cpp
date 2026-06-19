@@ -1043,6 +1043,12 @@ int main() {
             expect(connect_resp["data"].value("phase", std::string()) == "connecting",
                    "E2.3-lanes: vpn.connect accepted phase should be connecting");
         }
+        if (!status_resp.is_null() && status_resp.contains("data")) {
+            expect(status_resp["data"].value("process_running", false),
+                   "E2.3-lanes: status.get should report accepted connect job as running before controller init");
+            expect(status_resp["data"].value("phase", std::string()) == "connecting",
+                   "E2.3-lanes: status.get should expose connecting phase for accepted connect job");
+        }
         expect(cr.rc == 0, "E2.3-lanes: exit code 0");
     }
 
