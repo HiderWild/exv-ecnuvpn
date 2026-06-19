@@ -15,6 +15,8 @@
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
 #include "core/tunnel_controller/vpn_connect_job.hpp"
+#include "helper/common/helper_client.hpp"
+#include "helper/common/helper_connector.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/app_api_runtime_policy.hpp"
@@ -255,6 +257,38 @@ void apply_desktop_connect_error(nlohmann::json *status) {
       json_string(*failure, "recommended_action");
 }
 
+void cleanup_unused_oneshot_backend(const nlohmann::json &backend) {
+  if (!backend.is_object() || backend.value("mode", std::string()) != "oneshot") {
+    return;
+  }
+  const std::string endpoint = backend.value("endpoint", std::string());
+  if (endpoint.empty()) {
+    return;
+  }
+
+  try {
+    auto connector = exv::helper::HelperConnector::create();
+    exv::helper::HelperConnectorConfig config;
+    config.mode = exv::helper::ConnectorMode::Transient;
+    config.pipe_endpoint = endpoint;
+    config.connect_timeout_ms = 1000;
+    auto client = connector->connect(config);
+    if (!client) {
+      exv::observability::LogFacade::warn(
+          "app_api: unused oneshot helper cleanup could not connect");
+      return;
+    }
+    (void)client->hello(exv::helper::HelloRequest{});
+    client->disconnect();
+    exv::observability::LogFacade::info(
+        "app_api: unused oneshot helper cleanup requested");
+  } catch (const std::exception &e) {
+    exv::observability::LogFacade::warn(
+        std::string("app_api: unused oneshot helper cleanup failed - ") +
+        e.what());
+  }
+}
+
 void run_desktop_connect_job(Config cfg,
                              std::string password,
                              std::string attempt_id,
@@ -267,7 +301,7 @@ void run_desktop_connect_job(Config cfg,
 
   namespace conn_attempt = ecnuvpn::connection_attempt;
   conn_attempt::TerminalAttemptScope attempt_cleanup(
-      platform::get_config_dir(), std::move(attempt_id), "scope_exit");
+      platform::get_config_dir(), attempt_id, "scope_exit");
 
   auto prepared_handshake = std::make_shared<PreparedHandshakeHolder>();
   exv::core::ConnectPipeline pipeline(
@@ -280,7 +314,8 @@ void run_desktop_connect_job(Config cfg,
             " code=" + late.code + " first_code=" + std::string(first_code));
       });
 
-  auto backend_branch = []([[maybe_unused]] std::stop_token branch_stop) {
+  auto backend_branch = [attempt_id](
+                            [[maybe_unused]] std::stop_token branch_stop) {
     StageTimer branch_timing("desktop.connect.backend_helper_ready");
     platform::BackendResolveOptions options;
     options.preferred_mode = "auto";
@@ -307,6 +342,18 @@ void run_desktop_connect_job(Config cfg,
           backend.value("message",
                         platform::helper_unavailable_connect_message()),
           backend};
+    }
+    conn_attempt::update_pids_if_current(
+        platform::get_config_dir(), attempt_id, backend.value("pid", -1));
+    if (branch_stop.stop_requested()) {
+      cleanup_unused_oneshot_backend(backend);
+      branch_timing.finish(false, "code=cancelled");
+      return exv::core::ConnectBranchResult{
+          exv::core::ConnectBranch::BackendHelperReady,
+          false,
+          "cancelled",
+          "Backend helper readiness cancelled",
+          nlohmann::json::object()};
     }
     branch_timing.finish(true,
                          "mode=" + backend.value("mode", std::string("unknown")));
@@ -439,6 +486,7 @@ void run_desktop_connect_job(Config cfg,
     timing.finish(false, "stage=connect_pipeline branch=" +
                              pipeline_result.first_failure_branch +
                              " code=" + pipeline_result.code);
+    cleanup_unused_oneshot_backend(pipeline_result.backend);
     if (pipeline_result.code != "cancelled") {
       set_desktop_connect_error(
           error(pipeline_result.message.empty()
@@ -453,6 +501,7 @@ void run_desktop_connect_job(Config cfg,
   timing.mark("serial_tail", "entered=true");
 
   if (stop.stop_requested()) {
+    cleanup_unused_oneshot_backend(pipeline_result.backend);
     return;
   }
 
@@ -503,6 +552,7 @@ void run_desktop_connect_job(Config cfg,
   }
 
   if (stop.stop_requested()) {
+    reset_tunnel_controller();
     return;
   }
 

@@ -540,6 +540,88 @@ bool desktop_connect_pipeline_reports_branch_timing() {
 #endif
 }
 
+bool desktop_connect_pipeline_tracks_and_reaps_unused_oneshot_helper() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto background_job = source.find("void run_desktop_connect_job");
+  const auto pipeline_failure = source.find("if (!pipeline_result.ok)",
+                                            background_job);
+  const auto failure_error = source.find("set_desktop_connect_error",
+                                         pipeline_failure);
+  const auto helper_pid_update =
+      source.find("conn_attempt::update_pids_if_current", background_job);
+  const auto helper_cleanup =
+      source.find("cleanup_unused_oneshot_backend", pipeline_failure);
+  const auto controller_init =
+      source.find("auto controller = ensure_tunnel_controller(helper_endpoint);",
+                  background_job);
+  const auto controller_config =
+      source.find("controller->set_vpn_config(cfg, password)", controller_init);
+  const std::string controller_init_to_config =
+      controller_init == std::string::npos
+          ? std::string()
+          : source.substr(controller_init,
+                          controller_config == std::string::npos
+                              ? std::string::npos
+                              : controller_config - controller_init);
+  const auto moved_attempt_id = source.find("std::move(attempt_id)",
+                                            background_job);
+  const auto backend_branch =
+      source.find("StageTimer branch_timing(\"desktop.connect.backend_helper_ready\")",
+                  background_job);
+  const auto backend_branch_end =
+      source.find("StageTimer branch_timing(\"desktop.connect.platform_ready\")",
+                  backend_branch);
+  const std::string backend_source =
+      backend_branch == std::string::npos
+          ? std::string()
+          : source.substr(backend_branch,
+                          backend_branch_end == std::string::npos
+                              ? std::string::npos
+                              : backend_branch_end - backend_branch);
+
+  bool ok = true;
+  ok = expect(background_job != std::string::npos,
+              "desktop connect job should run heavy work in background") &&
+       ok;
+  ok = expect(helper_pid_update != std::string::npos,
+              "desktop connect backend branch should persist the started oneshot helper pid into the active attempt record") &&
+       ok;
+  ok = expect(moved_attempt_id == std::string::npos,
+              "desktop connect job must not move attempt_id before backend branch records helper pid") &&
+       ok;
+  ok = expect(backend_source.find("branch_stop.stop_requested()") !=
+                  std::string::npos &&
+                  backend_source.find("cleanup_unused_oneshot_backend(backend)") !=
+                      std::string::npos,
+              "backend branch should cleanup its own started oneshot helper if another branch already cancelled the pipeline") &&
+       ok;
+  ok = expect(pipeline_failure != std::string::npos,
+              "desktop connect job should handle first-failure pipeline result") &&
+       ok;
+  ok = expect(helper_cleanup != std::string::npos,
+              "desktop connect pipeline failure should cleanup an unused oneshot helper before returning") &&
+       ok;
+  if (pipeline_failure != std::string::npos &&
+      helper_cleanup != std::string::npos && failure_error != std::string::npos) {
+    ok = expect(pipeline_failure < helper_cleanup &&
+                    helper_cleanup < failure_error,
+                "unused oneshot helper cleanup should run before surfacing pipeline failure") &&
+         ok;
+  }
+  ok = expect(controller_init_to_config.find("if (stop.stop_requested())") ==
+                  std::string::npos ||
+                  controller_init_to_config.find("reset_tunnel_controller()") !=
+                      std::string::npos,
+              "stop after controller initialization should reset the unused controller/helper before returning") &&
+       ok;
+  return ok;
+#endif
+}
+
 bool desktop_native_connect_releases_attempt_guard_on_failed_status() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
@@ -834,6 +916,7 @@ int main() {
   ok = desktop_native_connect_uses_core_owned_controller_pipeline() && ok;
   ok = desktop_native_preflight_reports_substage_timing() && ok;
   ok = desktop_connect_pipeline_reports_branch_timing() && ok;
+  ok = desktop_connect_pipeline_tracks_and_reaps_unused_oneshot_helper() && ok;
   ok = desktop_native_connect_releases_attempt_guard_on_failed_status() && ok;
   ok = tunnel_controller_native_runner_failure_cleans_helper_session() && ok;
   ok = desktop_helper_status_includes_current_instance_contract() && ok;
