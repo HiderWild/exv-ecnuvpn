@@ -593,9 +593,11 @@ public:
         apply_close_resolution(
             ecnuvpn::ui_shell::parse_close_prompt_resolution(request_json));
         nlohmann::ordered_json out;
+        nlohmann::ordered_json data;
+        data["ok"] = true;
         out["id"] = id;
         out["ok"] = true;
-        out["data"] = nlohmann::json::object();
+        out["data"] = data;
         const std::string response_json = out.dump();
         const std::wstring wide_response = wide_from_utf8(response_json);
         webview_->PostWebMessageAsJson(wide_response.c_str());
@@ -848,8 +850,7 @@ public:
         MulDiv(kWindowControlWidthPx, dpi, kDefaultDpi);
     if (y >= 0 && y < titlebar_height) {
       if (x >= width - controls_width && x < width) {
-        const int control_midpoint = width - (controls_width / 2);
-        return x < control_midpoint ? HTMINBUTTON : HTCLOSE;
+        return HTCLIENT;
       }
       return HTCAPTION;
     }

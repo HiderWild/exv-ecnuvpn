@@ -416,9 +416,11 @@ public:
         apply_close_resolution(
             ecnuvpn::ui_shell::parse_close_prompt_resolution(request_json));
         nlohmann::ordered_json out;
+        nlohmann::ordered_json data;
+        data["ok"] = true;
         out["id"] = id;
         out["ok"] = true;
-        out["data"] = nlohmann::json::object();
+        out["data"] = data;
         post_json_to_renderer(out.dump());
         return;
       }

@@ -2,6 +2,7 @@
 #include "platform/win32/ui_shell/webview2_host_win32.hpp"
 #include "app/ui_shell/window_layout.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <fstream>
 #include <functional>
@@ -104,9 +105,17 @@ int main() {
   const std::string host_source(
       (std::istreambuf_iterator<char>(host_source_file)),
       std::istreambuf_iterator<char>());
+  std::string normalized_host_source = host_source;
+  normalized_host_source.erase(std::remove(normalized_host_source.begin(),
+                                           normalized_host_source.end(), '\r'),
+                               normalized_host_source.end());
   const auto source_contains = [&](const std::string &needle) {
-    return host_source.find(needle) != std::string::npos;
+    return normalized_host_source.find(needle) != std::string::npos;
   };
+  const std::string renderer_control_hit_test =
+      "if (x >= width - controls_width && x < width) {\n"
+      "        return HTCLIENT;\n"
+      "      }";
   if (!source_contains("apply_window_mode_once") ||
       !source_contains("if (action == \"window.resizeForMode\")") ||
       !source_contains("if (action == \"window.minimize\")") ||
@@ -114,10 +123,12 @@ int main() {
       !source_contains("WM_NCCALCSIZE") ||
       !source_contains("WM_NCHITTEST") ||
       !source_contains("HTCAPTION") ||
-      !source_contains("HTMINBUTTON") ||
+      !source_contains(renderer_control_hit_test) ||
       !source_contains("GWL_STYLE") ||
       !source_contains("~WS_CAPTION") ||
       !source_contains("SWP_FRAMECHANGED") ||
+      source_contains("HTMINBUTTON") ||
+      source_contains("HTCLOSE") ||
       source_contains("kWindowModeAnimationTimer") ||
       source_contains("SetTimer(hwnd_, kWindowModeAnimationTimer")) {
     return 1;

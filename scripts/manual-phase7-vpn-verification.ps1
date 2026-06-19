@@ -469,9 +469,12 @@ $observationTemplate = @'
 - [ ] Windows: advanced -> minimal visually shrinks inside the old physical window, then performs one final physical resize.
 - [ ] Windows: minimal -> advanced performs one physical resize first, then visually expands content.
 - [ ] Windows: transparent shell area is not painted as an opaque full-window panel.
-- [ ] Windows: minimize button minimizes the window.
-- [ ] Windows: close button opens the existing close-confirmation flow.
-- [ ] Windows: rapid repeated mode toggles end in the last requested mode.
+- [ ] Windows: toggle advanced -> minimal 10 times at moderate speed; final mode matches the last click.
+- [ ] Windows: toggle advanced -> minimal 10 times rapidly; final mode matches the last click.
+- [ ] Windows: toggle minimal -> advanced 10 times rapidly; final mode matches the last click.
+- [ ] Windows: click minimize during idle; the window minimizes.
+- [ ] Windows: click close during idle; the existing close-confirmation flow opens.
+- [ ] Windows: close and minimize still work after transitions.
 - [ ] macOS: traffic-light controls remain native and embedded in the app frame.
 - [ ] macOS: the same direction-specific resize timing is visible.
 
