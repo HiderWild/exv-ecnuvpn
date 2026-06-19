@@ -217,6 +217,21 @@ function objectLiteralPropertyNames(text: string, objectName: string) {
   return names
 }
 
+function interfacePropertyNames(text: string, interfaceName: string) {
+  const names = new Set<string>()
+  collect(sourceFile('source.ts', text), (node) => {
+    if (!ts.isInterfaceDeclaration(node) || node.name.text !== interfaceName) return undefined
+    for (const member of node.members) {
+      if (!ts.isPropertySignature(member) || !member.name) continue
+      if (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) {
+        names.add(member.name.text)
+      }
+    }
+    return true
+  })
+  return names
+}
+
 describe('frontend-owned UI mode state', () => {
   it('keeps minimal mode and first-run service prompt state in renderer localStorage', () => {
     const literals = stringLiterals(configStoreText)
@@ -256,6 +271,16 @@ describe('frontend-owned UI mode state', () => {
 })
 
 describe('connection failure presentation contract', () => {
+  it('maps asynchronous failed status snapshots into the user-facing error dialog', () => {
+    const statusFields = interfacePropertyNames(vpnStoreText, 'VpnStatus')
+    assert.ok(statusFields.has('error'))
+    assert.ok(statusFields.has('error_code'))
+    assert.ok(statusFields.has('error_recoverable'))
+    assert.match(vpnStoreText, /connectInFlight\.value[\s\S]*nextStatus\.process_running === false/)
+    assert.match(vpnStoreText, /nextStatus\.error_code[\s\S]*setError\(normalizeError/)
+    assert.match(vpnStoreText, /lastFailedConnectMode\.value = 'helper'/)
+  })
+
   it('keeps backend connection failures visible while suppressing user-cancelled errors', () => {
     const errorTypes = unionStringMembers(vpnStoreText, 'VpnErrorType')
     assert.ok(errorTypes.has('connection_failed'))

@@ -34,6 +34,9 @@ export interface VpnStatus {
   log_path?: string
   mode?: 'helper' | 'direct' | 'elevated' | 'disconnected'
   backend?: unknown
+  error?: string
+  error_code?: string
+  error_recoverable?: boolean
 }
 
 export interface VpnConnectAccepted {
@@ -611,6 +614,20 @@ export const useVpnStore = defineStore('vpn', () => {
     status.value = nextStatus
     syncUptime(nextStatus)
     if (connectInFlight.value && (nextStatus.connected || nextStatus.process_running === false)) {
+      if (
+        !nextStatus.connected &&
+        nextStatus.process_running === false &&
+        nextStatus.error_code &&
+        nextStatus.error_code !== 'user_cancelled'
+      ) {
+        lastFailedConnectMode.value = 'helper'
+        setError(normalizeError({
+          ok: false,
+          code: nextStatus.error_code,
+          message: nextStatus.error || '连接失败，请打开日志查看详细原因后重试。',
+          recoverable: nextStatus.error_recoverable ?? true,
+        }))
+      }
       connectInFlight.value = false
       loading.value = false
       stopConnectStatusPolling()
