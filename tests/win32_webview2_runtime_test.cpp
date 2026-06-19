@@ -120,6 +120,9 @@ int main() {
       !source_contains("if (action == \"window.resizeForMode\")") ||
       !source_contains("if (action == \"window.minimize\")") ||
       !source_contains("if (action == \"window.requestClose\")") ||
+      !source_contains("if (action == \"window.startDrag\")") ||
+      !source_contains("ReleaseCapture()") ||
+      !source_contains("WM_NCLBUTTONDOWN") ||
       !source_contains("WM_NCCALCSIZE") ||
       !source_contains("WM_NCHITTEST") ||
       !source_contains("HTCAPTION") ||
@@ -127,6 +130,11 @@ int main() {
       !source_contains("GWL_STYLE") ||
       !source_contains("~WS_CAPTION") ||
       !source_contains("SWP_FRAMECHANGED") ||
+      !source_contains("restore_or_focus_window()") ||
+      !source_contains("IsIconic(hwnd_)") ||
+      !source_contains("GetForegroundWindow() != hwnd_") ||
+      !source_contains("CreateRoundRectRgn") ||
+      !source_contains("SetWindowRgn") ||
       source_contains("HTMINBUTTON") ||
       source_contains("HTCLOSE") ||
       source_contains("kWindowModeAnimationTimer") ||

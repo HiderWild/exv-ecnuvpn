@@ -181,6 +181,7 @@ NSString *bridge_script() {
       minimize: () => rpc('window.minimize'),
       requestClose: () => rpc('window.requestClose'),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
+      startDrag: () => rpc('window.startDrag'),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -399,6 +400,16 @@ public:
       if (action == "window.minimize") {
         if (window_ != nil) {
           [window_ miniaturize:nil];
+        }
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return;
+      }
+      if (action == "window.startDrag") {
+        NSEvent *event = [[NSApplication sharedApplication] currentEvent];
+        if (window_ != nil && event != nil) {
+          [window_ performWindowDragWithEvent:event];
         }
         nlohmann::ordered_json data;
         data["ok"] = true;

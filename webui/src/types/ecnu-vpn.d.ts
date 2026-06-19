@@ -144,6 +144,7 @@ export interface EcnuVpnApi {
     minimize(): Promise<{ ok: true }>
     requestClose(): Promise<{ ok: true }>
     resolveClosePrompt(result: unknown): Promise<{ ok: true }>
+    startDrag(): Promise<{ ok: true }>
   }
   modal: {
     serviceInstallPrompt(): Promise<DesktopServiceInstallPromptResult>

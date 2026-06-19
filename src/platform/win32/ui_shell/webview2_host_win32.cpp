@@ -47,6 +47,7 @@ constexpr UINT kRendererEventMessage = WM_APP + 0x45;
 constexpr UINT kTrayIconId = 1;
 constexpr int kCustomTitlebarHeightPx = 34;
 constexpr int kWindowControlWidthPx = 88;
+constexpr int kWindowCornerRadiusPx = 16;
 constexpr UINT kDefaultDpi = 96;
 
 std::wstring wide_from_utf8(const std::string &value) {
@@ -582,6 +583,13 @@ public:
         post_bridge_success(id, data);
         return S_OK;
       }
+      if (action == "window.startDrag") {
+        start_window_drag();
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return S_OK;
+      }
       if (action == "window.requestClose") {
         request_close_decision();
         nlohmann::ordered_json data;
@@ -693,6 +701,30 @@ public:
     controller_->put_Bounds(bounds);
   }
 
+  void apply_rounded_window_region() {
+    if (!hwnd_) {
+      return;
+    }
+    RECT window{};
+    if (!GetWindowRect(hwnd_, &window)) {
+      return;
+    }
+    const int width = window.right - window.left;
+    const int height = window.bottom - window.top;
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    const UINT dpi = dpi_for_window(hwnd_);
+    const int radius = MulDiv(kWindowCornerRadiusPx, dpi, kDefaultDpi);
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius);
+    if (!region) {
+      return;
+    }
+    if (SetWindowRgn(hwnd_, region, TRUE) == 0) {
+      DeleteObject(region);
+    }
+  }
+
   bool create_tray_icon() {
     if (!webview2_should_create_tray_on_start() || !hwnd_ || tray_icon_added_) {
       return true;
@@ -729,12 +761,35 @@ public:
     create_tray_icon();
   }
 
-  void show_from_tray() {
+  void restore_or_focus_window() {
     if (!hwnd_) {
       return;
     }
-    ShowWindow(hwnd_, SW_SHOW);
-    SetForegroundWindow(hwnd_);
+    if (IsIconic(hwnd_)) {
+      ShowWindow(hwnd_, SW_RESTORE);
+    } else if (!IsWindowVisible(hwnd_)) {
+      ShowWindow(hwnd_, SW_SHOW);
+    } else {
+      ShowWindow(hwnd_, SW_SHOW);
+    }
+    if (GetForegroundWindow() != hwnd_) {
+      SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+      SetForegroundWindow(hwnd_);
+    }
+  }
+
+  void show_from_tray() {
+    restore_or_focus_window();
+  }
+
+  void start_window_drag() {
+    if (!hwnd_) {
+      return;
+    }
+    ReleaseCapture();
+    SendMessageW(hwnd_, WM_NCLBUTTONDOWN, HTCAPTION,
+                 static_cast<LPARAM>(GetMessagePos()));
   }
 
   void quit_from_tray() {
@@ -812,6 +867,7 @@ public:
     }
     SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    apply_rounded_window_region();
     resize_webview();
   }
 
@@ -828,6 +884,7 @@ public:
       SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    apply_rounded_window_region();
     resize_webview();
   }
 
@@ -959,6 +1016,7 @@ private:
                             instance_, this);
     if (hwnd_) {
       install_custom_frame_style();
+      apply_rounded_window_region();
     }
     return hwnd_ != nullptr;
   }
@@ -1063,6 +1121,7 @@ private:
       minimize: () => rpc('window.minimize'),
       requestClose: () => rpc('window.requestClose'),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
+      startDrag: () => rpc('window.startDrag'),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -1131,6 +1190,7 @@ private:
         break;
       }
       case WM_SIZE:
+        self->apply_rounded_window_region();
         self->resize_webview();
         return 0;
       case WM_DPICHANGED:

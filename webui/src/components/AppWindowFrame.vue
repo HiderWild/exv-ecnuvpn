@@ -26,6 +26,7 @@ const isMac = computed(() => {
 
 const isWindows = computed(() => !isMac.value)
 const transitionActive = computed(() => transitionPhase.value !== 'idle')
+const titlebarTitle = computed(() => visualMode.value === 'minimal' ? 'EXV for ECNU' : 'ECNU VPN')
 const frameClass = computed(() => [
   'app-window-frame',
   `app-window-frame--${visualMode.value}`,
@@ -119,6 +120,16 @@ async function requestWindowClose() {
   await window.ecnuVpn?.window?.requestClose()
 }
 
+function startWindowDrag(event: PointerEvent) {
+  if (event.button !== 0) return
+  const target = event.target instanceof Element ? event.target : null
+  if (target?.closest('[data-window-control-region="true"], button, a, input, textarea, select')) {
+    return
+  }
+  event.preventDefault()
+  void window.ecnuVpn?.window?.startDrag?.()
+}
+
 watch(
   () => props.mode,
   (nextMode) => {
@@ -136,10 +147,14 @@ onMounted(() => {
   <div :class="frameClass">
     <div class="app-window-transparent-host">
       <div class="mode-transition-surface">
-        <header class="app-window-titlebar" data-window-drag-region="true">
+        <header
+          class="app-window-titlebar"
+          data-window-drag-region="true"
+          @pointerdown="startWindowDrag"
+        >
           <div class="app-window-titlebar__identity">
             <img class="app-window-titlebar__icon" src="/favicon.svg" alt="" />
-            <span class="app-window-titlebar__title">ECNU VPN</span>
+            <span class="app-window-titlebar__title">{{ titlebarTitle }}</span>
           </div>
           <div
             v-if="isWindows"
@@ -191,6 +206,7 @@ onMounted(() => {
   --minimal-width: 302px;
   --minimal-height: 118px;
   --mac-traffic-light-inset: 78px;
+  --window-radius: 16px;
   min-height: 100vh;
   overflow: hidden;
   background: transparent;
@@ -208,7 +224,8 @@ onMounted(() => {
   overflow: hidden;
   width: 100vw;
   height: 100vh;
-  background: rgb(10 18 35);
+  border-radius: var(--window-radius);
+  background: transparent;
   transform-origin: top left;
   transition:
     width 300ms cubic-bezier(0.16, 1, 0.3, 1),
@@ -226,13 +243,18 @@ onMounted(() => {
 }
 
 .app-window-titlebar {
+  position: absolute;
+  z-index: 60;
+  top: 0;
+  right: 0;
+  left: 0;
   display: flex;
   height: var(--titlebar-height);
   align-items: center;
   justify-content: space-between;
-  padding: 0 0 0 10px;
+  padding: 4px 4px 4px 10px;
   user-select: none;
-  background: rgba(9, 16, 30, 0.92);
+  background: transparent;
   color: #f8fafc;
 }
 
@@ -243,8 +265,13 @@ onMounted(() => {
 .app-window-titlebar__identity {
   display: inline-flex;
   min-width: 0;
+  height: 26px;
   align-items: center;
   gap: 8px;
+  border-radius: 999px;
+  background: rgba(9, 16, 30, 0.58);
+  padding: 0 10px 0 8px;
+  backdrop-filter: blur(12px);
 }
 
 .app-window-titlebar__icon {
@@ -263,8 +290,12 @@ onMounted(() => {
 
 .app-window-titlebar__controls {
   display: flex;
-  height: 100%;
+  height: 26px;
   align-items: stretch;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(9, 16, 30, 0.58);
+  backdrop-filter: blur(12px);
 }
 
 .app-window-titlebar__button {
@@ -291,18 +322,20 @@ onMounted(() => {
 }
 
 .app-window-content-shell {
-  height: calc(100% - var(--titlebar-height));
+  height: 100%;
   overflow: hidden;
   background: transparent;
 }
 
 .mode-transition-overlay {
   position: absolute;
-  inset: var(--titlebar-height) 0 0;
+  inset: 0;
   z-index: 80;
   display: grid;
   place-items: center;
-  background: rgba(10, 18, 35, 0.82);
+  border-radius: inherit;
+  background: rgba(10, 18, 35, 0.96);
+  backdrop-filter: blur(18px) saturate(1.1);
   pointer-events: auto;
 }
 
