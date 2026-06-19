@@ -42,7 +42,7 @@ Base reviewed commit before latest post-audit corrections:
 
 Latest post-audit test-entry correction commit:
 
-- Pending until commit is created.
+- `d030038 test: restore connect pipeline acceptance gates`
 
 ## Manual Verification Not Run
 

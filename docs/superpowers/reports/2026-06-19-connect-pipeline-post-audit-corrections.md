@@ -71,4 +71,4 @@ Verification:
 
 Commit:
 
-- Pending until commit is created.
+- `d030038 test: restore connect pipeline acceptance gates`
