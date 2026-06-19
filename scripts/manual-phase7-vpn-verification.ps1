@@ -463,6 +463,18 @@ $observationTemplate = @'
 - [ ] Any unresponsive interval is visible in process-samples.csv.
 - [ ] If -ProbeRpc was used, rpc-probes.csv shows status.get/logs.list latency and any status error_code observed during the run.
 
+## Transparent Shell Mode Transition Checks
+
+- [ ] Windows: advanced -> minimal shows app icon mask immediately.
+- [ ] Windows: advanced -> minimal visually shrinks inside the old physical window, then performs one final physical resize.
+- [ ] Windows: minimal -> advanced performs one physical resize first, then visually expands content.
+- [ ] Windows: transparent shell area is not painted as an opaque full-window panel.
+- [ ] Windows: minimize button minimizes the window.
+- [ ] Windows: close button opens the existing close-confirmation flow.
+- [ ] Windows: rapid repeated mode toggles end in the last requested mode.
+- [ ] macOS: traffic-light controls remain native and embedded in the app frame.
+- [ ] macOS: the same direction-specific resize timing is visible.
+
 Notes:
 
 '@

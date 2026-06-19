@@ -396,6 +396,12 @@ describe('native WebView package policy', () => {
     assert.match(manualPhase7, /logs\.list/)
     assert.match(manualPhase7, /rpc_timeout_ms/)
     assert.match(manualPhase7, /error_code/)
+    assert.match(manualPhase7, /Transparent Shell Mode Transition Checks/)
+    assert.match(manualPhase7, /Windows: advanced -> minimal shows app icon mask immediately/)
+    assert.match(manualPhase7, /Windows: minimal -> advanced performs one physical resize first/)
+    assert.match(manualPhase7, /Windows: rapid repeated mode toggles end in the last requested mode/)
+    assert.match(manualPhase7, /macOS: traffic-light controls remain native and embedded in the app frame/)
+    assert.match(manualPhase7, /macOS: the same direction-specific resize timing is visible/)
   })
 
   it('documents WebView as the production desktop shell in active docs', () => {
