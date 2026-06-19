@@ -126,6 +126,14 @@ if [[ -d "$PACKAGE_ROOT" ]]; then
   else
     pass "No Electron or Chromium payload in native WebView package"
   fi
+
+  VERIFY_COMMAND='package_ui_shell.py --verify-launch-targets-only --package-dir "$PACKAGE_ROOT"'
+  if VERIFY_OUTPUT=$(python3 "$REPO_ROOT/scripts/package_ui_shell.py" --verify-launch-targets-only --package-dir "$PACKAGE_ROOT" 2>&1); then
+    pass "exv-ui launch arguments target packaged binaries"
+    echo "    Command: $VERIFY_COMMAND"
+  else
+    fail "exv-ui launch arguments target packaged binaries" "$VERIFY_OUTPUT"
+  fi
 else
   fail "Native WebView package root exists" "Expected: $PACKAGE_ROOT"
 fi

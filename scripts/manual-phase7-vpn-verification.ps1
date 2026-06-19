@@ -469,6 +469,7 @@ $observationTemplate = @'
 - [ ] Windows: advanced -> minimal visually shrinks inside the old physical window, then performs one final physical resize.
 - [ ] Windows: minimal -> advanced performs one physical resize first, then visually expands content.
 - [ ] Windows: transparent shell area is not painted as an opaque full-window panel.
+- [ ] Windows: during the transition mask, the area outside the mask but inside the physical window is fully transparent.
 - [ ] Windows: toggle advanced -> minimal 10 times at moderate speed; final mode matches the last click.
 - [ ] Windows: toggle advanced -> minimal 10 times rapidly; final mode matches the last click.
 - [ ] Windows: toggle minimal -> advanced 10 times rapidly; final mode matches the last click.
@@ -479,6 +480,7 @@ $observationTemplate = @'
 - [ ] macOS: traffic-light controls remain native and embedded in the app frame.
 - [ ] macOS: the same direction-specific resize timing is visible.
 - [ ] macOS: transparent shell area is not painted as an opaque full-window panel.
+- [ ] macOS: during the transition mask, the area outside the mask but inside the physical window is fully transparent.
 - [ ] macOS: app icon mask remains visible through transition settle.
 
 Notes:
