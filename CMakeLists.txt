@@ -144,6 +144,7 @@ set(EXV_CORE_SOURCES
     ${EXV_PROTOCOL_SOURCES}
     src/vpn_engine/session_state.cpp
     src/core/app_api/app_api.cpp
+    src/core/app_api/auth_interaction_coordinator.cpp
     src/core/app_api/desktop_action_registry.cpp
     src/core/app_api/desktop_config_actions.cpp
     src/core/app_api/desktop_json.cpp
@@ -2167,6 +2168,30 @@ target_compile_definitions(app_api_status_contract_test PRIVATE
 )
 
 add_test(NAME app_api_status_contract_test COMMAND app_api_status_contract_test)
+
+# Auth-interaction coordinator unit test — exercises the prepared-handshake
+# group_select / challenge round-trip path published by run_desktop_connect_job.
+# See docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
+add_executable(auth_interaction_coordinator_test
+    tests/auth_interaction_coordinator_test.cpp
+    src/core/app_api/auth_interaction_coordinator.cpp
+)
+
+target_include_directories(auth_interaction_coordinator_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(auth_interaction_coordinator_test PRIVATE
+    Threads::Threads
+)
+
+set_target_properties(auth_interaction_coordinator_test PROPERTIES
+    LABELS "release-blocking;core"
+)
+
+add_test(NAME auth_interaction_coordinator_test
+         COMMAND auth_interaction_coordinator_test)
 
 add_executable(desktop_status_presenter_test
     tests/desktop_status_presenter_test.cpp

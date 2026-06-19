@@ -631,7 +631,36 @@ bool desktop_connect_pipeline_reports_branch_timing() {
                 "protocol_branch should assign deps.event_sink so handshake "
                 "events are not dropped") &&
          ok;
+    // Auth-interaction coordinator: aggregate-auth may demand group_select
+    // or challenge during the prepared handshake, before the runner exists.
+    // The connect job must publish a coordinator into the global slot so
+    // vpn.authInteraction.get / respond can drive the prompt to completion.
+    // See docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
+    ok = expect(protocol_branch_source.find("AuthInteractionCoordinator") !=
+                    std::string::npos,
+                "protocol_branch should construct AuthInteractionCoordinator "
+                "for prepared-handshake group/challenge prompts") &&
+         ok;
+    ok = expect(protocol_branch_source.find("set_active_connect_auth_coordinator") !=
+                    std::string::npos,
+                "protocol_branch should publish the coordinator into the "
+                "active-connect global slot") &&
+         ok;
+    ok = expect(protocol_branch_source.find("deps.auth_interaction_handler =") !=
+                    std::string::npos,
+                "protocol_branch should wire deps.auth_interaction_handler so "
+                "the handshake job can route prompts to the coordinator") &&
+         ok;
   }
+  // RPC handlers must consult the connect-job coordinator before the
+  // controller — during prepared-handshake the controller has no pending
+  // interaction, so the controller-only path would always say "no pending"
+  // and the user could not answer a group_select / challenge prompt.
+  ok = expect(source.find("get_active_connect_auth_coordinator") !=
+                  std::string::npos,
+              "vpn.authInteraction.get/respond must consult the connect-job "
+              "coordinator before the controller") &&
+       ok;
   return ok;
 #endif
 }
