@@ -4,9 +4,13 @@ param(
   [string]$StateDir = "",
   [int]$MonitorSeconds = 90,
   [int]$SampleIntervalMs = 500,
+  [string]$ExvPath = "",
+  [int]$ProbeIntervalMs = 2000,
+  [int]$RpcTimeoutMs = 5000,
   [switch]$NoLaunch,
   [switch]$IncludeRawLogDelta,
-  [switch]$CaptureScreenshot
+  [switch]$CaptureScreenshot,
+  [switch]$ProbeRpc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -185,6 +189,115 @@ function Capture-PrimaryScreen {
   }
 }
 
+function Invoke-DesktopRpcProbe {
+  param(
+    [string]$ExePath,
+    [string]$Action,
+    [int]$TimeoutMs
+  )
+
+  $started = Get-Date
+  $watch = [System.Diagnostics.Stopwatch]::StartNew()
+  $stdout = ''
+  $stderr = ''
+  $timedOut = $false
+  $exitCode = ''
+  $ok = ''
+  $code = ''
+  $message = ''
+  $statusErrorCode = ''
+  $statusError = ''
+  $itemCount = ''
+
+  try {
+    if (-not (Test-Path -LiteralPath $ExePath)) {
+      throw "exv executable not found: $ExePath"
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ExePath
+    $psi.Arguments = "desktop-rpc $Action {}"
+    $psi.WorkingDirectory = Split-Path -Parent $ExePath
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutMs)) {
+      $timedOut = $true
+      try {
+        $process.Kill()
+      }
+      catch {
+      }
+      $process.WaitForExit()
+    }
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
+    $exitCode = $process.ExitCode
+
+    if ($stdout) {
+      try {
+        $parsed = $stdout | ConvertFrom-Json
+        if ($parsed -is [array]) {
+          $itemCount = [string]$parsed.Count
+        }
+        else {
+          if ($null -ne $parsed.ok) {
+            $ok = [string]$parsed.ok
+          }
+          if ($parsed.code) {
+            $code = [string]$parsed.code
+          }
+          if ($parsed.message) {
+            $message = [string]$parsed.message
+          }
+          if ($parsed.error_code) {
+            $statusErrorCode = [string]$parsed.error_code
+          }
+          if ($parsed.error) {
+            $statusError = [string]$parsed.error
+          }
+          if ($parsed.data -is [array]) {
+            $itemCount = [string]$parsed.data.Count
+          }
+        }
+      }
+      catch {
+        $message = 'Probe returned non-JSON output.'
+      }
+    }
+  }
+  catch {
+    $code = 'probe_error'
+    $message = $_.Exception.Message
+  }
+  finally {
+    $watch.Stop()
+  }
+
+  return [pscustomobject]@{
+    timestamp = $started.ToString('o')
+    action = $Action
+    duration_ms = $watch.ElapsedMilliseconds
+    rpc_timeout_ms = $TimeoutMs
+    timed_out = $timedOut
+    exit_code = $exitCode
+    ok = $ok
+    code = $code
+    message = Redact-LogLine -Line $message
+    error_code = $statusErrorCode
+    error = Redact-LogLine -Line $statusError
+    item_count = $itemCount
+    stderr = Redact-LogLine -Line ($stderr.Trim())
+  }
+}
+
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
 $sessionDir = Join-Path $OutputRoot "phase7-vpn-$timestamp"
 New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
@@ -197,6 +310,12 @@ if (Test-Path -LiteralPath $logPath) {
 }
 
 $uiShellExe = Join-Path $PackageRoot 'exv-ui.exe'
+if (-not $ExvPath) {
+  $ExvPath = Join-Path $PackageRoot 'exv.exe'
+  if (-not (Test-Path -LiteralPath $ExvPath)) {
+    $ExvPath = Join-Path $repoRoot 'build-windows\cpp\exv.exe'
+  }
+}
 $startedProcessId = ''
 if (-not $NoLaunch) {
   if (-not (Test-Path -LiteralPath $uiShellExe)) {
@@ -217,6 +336,10 @@ $metadata = [ordered]@{
   started_process_id = $startedProcessId
   monitor_seconds = $MonitorSeconds
   sample_interval_ms = $SampleIntervalMs
+  exv_path = $ExvPath
+  probe_rpc = [bool]$ProbeRpc
+  probe_interval_ms = $ProbeIntervalMs
+  rpc_timeout_ms = $RpcTimeoutMs
   include_raw_log_delta = [bool]$IncludeRawLogDelta
   screenshot_requested = [bool]$CaptureScreenshot
 }
@@ -242,10 +365,16 @@ else {
   Write-Host 'Raw log-delta capture is disabled. Only a redacted connect-stage summary will be written.'
 }
 Write-Host "Monitoring process responsiveness for $MonitorSeconds seconds..."
+if ($ProbeRpc) {
+  Write-Host "Read-only RPC probes enabled: status.get and logs.list every $ProbeIntervalMs ms with $RpcTimeoutMs ms timeout."
+}
 
 $samplesPath = Join-Path $sessionDir 'process-samples.csv'
+$rpcProbesPath = Join-Path $sessionDir 'rpc-probes.csv'
 $samples = @()
+$rpcProbes = @()
 $deadline = (Get-Date).AddSeconds($MonitorSeconds)
+$nextProbeAt = Get-Date
 while ((Get-Date) -lt $deadline) {
   $now = Get-Date
   $processes = Get-Process -ErrorAction SilentlyContinue |
@@ -274,10 +403,40 @@ while ((Get-Date) -lt $deadline) {
     }
   }
 
+  if ($ProbeRpc -and $now -ge $nextProbeAt) {
+    foreach ($action in @('status.get', 'logs.list')) {
+      $rpcProbes += Invoke-DesktopRpcProbe `
+        -ExePath $ExvPath `
+        -Action $action `
+        -TimeoutMs $RpcTimeoutMs
+    }
+    $nextProbeAt = (Get-Date).AddMilliseconds($ProbeIntervalMs)
+  }
+
   Start-Sleep -Milliseconds $SampleIntervalMs
 }
 
 $samples | Export-Csv -LiteralPath $samplesPath -NoTypeInformation -Encoding UTF8
+if ($ProbeRpc) {
+  $rpcProbes | Export-Csv -LiteralPath $rpcProbesPath -NoTypeInformation -Encoding UTF8
+}
+else {
+  [pscustomobject]@{
+    timestamp = (Get-Date).ToString('o')
+    action = 'disabled'
+    duration_ms = ''
+    rpc_timeout_ms = $RpcTimeoutMs
+    timed_out = ''
+    exit_code = ''
+    ok = ''
+    code = ''
+    message = 'Run with -ProbeRpc to record read-only status.get/logs.list responsiveness.'
+    error_code = ''
+    error = ''
+    item_count = ''
+    stderr = ''
+  } | Export-Csv -LiteralPath $rpcProbesPath -NoTypeInformation -Encoding UTF8
+}
 Write-ProcessSnapshot -OutPath (Join-Path $sessionDir 'process-final.csv')
 Write-LogEvidence `
   -Path $logPath `
@@ -302,6 +461,7 @@ $observationTemplate = @'
 - [ ] Final mode matched the last accepted user click.
 - [ ] Real connect failure, if produced, was visible in the UI.
 - [ ] Any unresponsive interval is visible in process-samples.csv.
+- [ ] If -ProbeRpc was used, rpc-probes.csv shows status.get/logs.list latency and any status error_code observed during the run.
 
 Notes:
 

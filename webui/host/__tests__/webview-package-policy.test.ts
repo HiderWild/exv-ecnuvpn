@@ -339,6 +339,18 @@ describe('native WebView package policy', () => {
     assert.match(linuxAcceptance, /git (?:-c \S+ )?diff --check/)
   })
 
+  it('keeps manual Phase 7 capture able to probe read-only RPC responsiveness', () => {
+    const manualPhase7 = readFileSync(join(repoRoot, 'scripts', 'manual-phase7-vpn-verification.ps1'), 'utf8')
+
+    assert.match(manualPhase7, /\[switch\]\$ProbeRpc/)
+    assert.match(manualPhase7, /rpc-probes\.csv/)
+    assert.match(manualPhase7, /desktop-rpc/)
+    assert.match(manualPhase7, /status\.get/)
+    assert.match(manualPhase7, /logs\.list/)
+    assert.match(manualPhase7, /rpc_timeout_ms/)
+    assert.match(manualPhase7, /error_code/)
+  })
+
   it('documents WebView as the production desktop shell in active docs', () => {
     const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
     const buildGuide = readFileSync(join(repoRoot, 'docs', 'build_guide.md'), 'utf8')
