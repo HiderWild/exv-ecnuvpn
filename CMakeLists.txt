@@ -914,6 +914,21 @@ target_include_directories(proxy_tun_detector_test PRIVATE
 
 add_test(NAME proxy_tun_detector_test COMMAND proxy_tun_detector_test)
 
+add_executable(pipe_ipc_test
+    tests/pipe_ipc_test.cpp
+    src/platform/common/core_resolver_platform_deps.cpp
+    ${EXV_CLI_TRANSPORT_SOURCES}
+)
+
+target_include_directories(pipe_ipc_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(pipe_ipc_test PRIVATE exv-core)
+
+add_test(NAME pipe_ipc_test COMMAND pipe_ipc_test)
+
 add_executable(app_api_runtime_policy_test
     tests/app_api_runtime_policy_test.cpp
 )
@@ -2623,6 +2638,7 @@ set(_release_blocking_tests
     helper_lease_manager_test
     core_lifecycle_registry_test
     core_resolver_test
+    pipe_ipc_test
     helper_cleanup_registry_test
     native_helper_session_test
     helper_contract_test

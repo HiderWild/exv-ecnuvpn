@@ -78,3 +78,31 @@ Follow-up review:
 - A later `gpt-5.3-codex-spark` pass found the new host test still retained several exact source-fragment regex assertions.
 - Those remaining assertions were replaced with AST/structural checks for remote-settings short-circuiting, stale window-mode guards, `user_cancelled` error suppression, in-progress state, and `/disconnect` posting.
 - Commit: `dc18d2b test: harden frontend mode contract gate`
+
+## Correction 4: Windows IPC Resolver Probe Must Not Consume A Pipe Connection
+
+Finding:
+
+- Manual CLI preflight on Windows showed `exv-cli status` and `exv-cli service status` could report `core_comm_broken` even when a core process was running and the IPC registry pointed at the expected named pipe.
+- `resolve_core()` first called `try_connect_ipc()` to probe the pipe, then sent the real request. On Windows the probe used `PipeClient` to connect and immediately disconnect without sending a JSON line.
+- `PipeIpcListener::accept_one()` could observe that empty probe connection as a failed accept cycle, leaving the subsequent real request without a response.
+
+Resolution:
+
+- Changed the Windows resolver probe to use `WaitNamedPipeA()` instead of opening a client connection, so readiness checks no longer consume a pipe instance or create an empty request.
+- Kept the probe strict: `try_connect_ipc()` only succeeds when `WaitNamedPipeA()` reports an available pipe instance; timeout/busy is not treated as a successful connection.
+- Prevented resolver-launched daemon cores from inheriting caller stdout/stderr/pipe handles by passing `bInheritHandles=FALSE` to `CreateProcessA()`.
+- Added `pipe_ipc_test`, proving a resolver probe does not poison the next real named-pipe request and guarding the Windows probe/launch contract.
+- Added `pipe_ipc_test` to the release-blocking test label.
+
+Verification:
+
+- `cmake --build --preset windows-release --target pipe_ipc_test core_process_lifecycle_test core_resolver_test ui_shell_core_rpc_client_test exv-cli`
+- `ctest --test-dir build-windows/cpp -R "pipe_ipc_test|core_process_lifecycle_test|core_resolver_test|ui_shell_core_rpc_client_test" --output-on-failure`
+- `./build-windows/cpp/exv-cli.exe status` returned exit code 0 with no `core_comm_broken` output.
+- `./build-windows/cpp/exv-cli.exe service status` returned exit code 0 with no `core_comm_broken` output.
+- `./scripts/run-tests.ps1 -Preset windows-release -Label release-blocking` passed 75/75.
+
+Commit:
+
+- Recorded by the commit containing this correction entry.

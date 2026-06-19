@@ -19,12 +19,16 @@ namespace exv::core::lifecycle {
 namespace {
 
 bool platform_try_connect_ipc(const std::string &ipc_path) {
+#ifdef _WIN32
+  return WaitNamedPipeA(ipc_path.c_str(), 50) != 0;
+#else
   exv::cli::PipeClient client;
   bool ok = client.connect(ipc_path);
   if (ok) {
     client.disconnect();
   }
   return ok;
+#endif
 }
 
 std::string platform_send_ipc_request(const std::string &ipc_path,
@@ -81,9 +85,9 @@ bool platform_launch_core(const std::string &core_path,
   PROCESS_INFORMATION pi = {};
   char cmd_buf[4096] = {};
   std::strncpy(cmd_buf, cmd.c_str(), sizeof(cmd_buf) - 1);
-  if (!CreateProcessA(nullptr, cmd_buf, nullptr, nullptr, TRUE,
-                       CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr,
-                       &si, &pi)) {
+  if (!CreateProcessA(nullptr, cmd_buf, nullptr, nullptr, FALSE,
+                      CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr,
+                      &si, &pi)) {
     return false;
   }
   CloseHandle(pi.hProcess);
