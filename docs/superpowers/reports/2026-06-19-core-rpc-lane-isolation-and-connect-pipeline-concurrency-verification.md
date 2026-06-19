@@ -34,6 +34,12 @@ Passed:
 - UI responsiveness correction: `powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 desktop`
 - UI responsiveness correction: packaged `exv-ui.exe` launch stayed `Responding=True` for an 8-second Windows process probe.
 - UI responsiveness correction: `powershell -ExecutionPolicy Bypass -File scripts\windows-packaging-smoke.ps1` passed with 13 PASS, 0 FAIL, and 4 SKIP.
+- UI mode accepted-click partial correction: calibrated Win32 `SendInput` stress artifact `build/webview-acceptance/windows/mode-toggle-sendinput-calibrated.csv` recorded 1x/2x at 900 ms and 8x/9x at 450 ms with final mode matching the expected last accepted toggle and `Responding=True`.
+- UI mode idle stability correction: `build/webview-acceptance/windows/post-stress-idle-stability.csv` recorded 30 consecutive 100 ms samples at `378x148`, `Responding=True`, with zero size changes after the stress pass.
+- Connect failure visibility partial correction: `pnpm --dir webui exec node scripts/run-host-test.cjs host/__tests__/ui-mode-and-connect-failure.test.ts` passed 5/5.
+- Connect quick-validation correction: `./build-windows/cpp/exv.exe desktop-rpc vpn.connect "{}"` returned `ok=false`, `code=auth_failed`, and `error="VPN password is not configured."`; the runtime log recorded `connect-timing` `finish.error stage=quick_validation`.
+- Lane isolation refresh: `cmake --build --preset windows-release --target core_process_lifecycle_test` passed, and `ctest --test-dir build-windows/cpp -R "core_process_lifecycle_test" --output-on-failure` passed after extending E2.3 to cover `logs.list`, `status.get`, and `config.getSettings` while `vpn.connect` remains blocked.
+- Connect workflow contract refresh: `cmake --build --preset windows-release --target connect_pipeline_test connect_intent_test vpn_actions_test app_api_status_contract_test` passed, and `ctest --test-dir build-windows/cpp -R "connect_pipeline_test|connect_intent_test|vpn_actions_test|app_api_status_contract_test" --output-on-failure` passed.
 
 Release-blocking result: 75/75 tests passed after adding `pipe_ipc_test`. An earlier 74/74 refresh also passed after clearing stale local `exv-ui`/`exv-helper` processes that were locking `build-windows/cpp/exv-helper.exe` during the first build attempt.
 
@@ -51,7 +57,7 @@ Verification note: two intermediate full release-blocking reruns failed before t
 - Connect timing source guards cover backend/helper, platform, protocol handshake, first failure, and serial tail markers.
 - Post-review: adopted/prepared native handshake resources are explicitly disconnected if stopped before packet attach or discarded before controller handoff.
 - Post-review: `ui_shell_async_host_bridge_test` is now a real CMake/CTest target covering non-blocking host dispatch, local `window.setMode`, invalid host requests, and shutdown suppression of late core replies.
-- Post-review: `ui-mode-and-connect-failure.test.ts` is now part of `pnpm --dir webui test:host`, covering frontend-owned mode/prompt storage, stale mode-write suppression, visible connect failures, and in-progress cancellation wiring through AST/structural checks rather than exact source-fragment matching.
+- Post-review: `ui-mode-and-connect-failure.test.ts` is now part of `pnpm --dir webui test:host`, covering frontend-owned mode/prompt storage, stale mode-write suppression, connection failure presentation contracts, and in-progress cancellation wiring through AST/structural checks rather than exact source-fragment matching.
 - Post-review: `connection_attempt_test` is now a real CMake/CTest target, and `connection_attempt_active` is preserved as a canonical backend/frontend error code instead of collapsing to `connection_failed`.
 - Post-review: Windows core resolver IPC probes now use strict `WaitNamedPipeA()` readiness instead of opening an empty pipe client connection, so `exv-cli status` and UI core resolution do not poison the next real named-pipe request.
 - Post-review: resolver-launched daemon cores no longer inherit caller pipe handles, avoiding redirected CLI/stdout waiters being held open by the background core.
@@ -62,6 +68,14 @@ Verification note: two intermediate full release-blocking reruns failed before t
 - Core event pumping now runs on a background thread and emits renderer events through the existing UI-thread `emit_event()` path. The Win32 UI loop no longer performs core event reads directly.
 - `window.setMode` now carries a renderer request sequence into native hosts; stale native writes are ignored, Win32 posts the renderer response before queuing resize, and the frontend displays a 340 ms resize shield with the EXV mark while mode changes settle.
 - `rg -n "window\\.setMode" $env:APPDATA\\ecnuvpn\\ecnuvpn.log $env:APPDATA\\ecnuvpn\\exv-core-ipc-v1.registry.json build\\webview-acceptance -S` returned no matches after the packaged UI mode switching pass.
+- UIA automation is not accepted as evidence for compact-mode toggle parity because the WebView accessibility tree can expose only pane nodes and traversal can block. Calibrated Win32 mouse input is the current accepted evidence source for packaged mode toggling.
+- Calibrated Win32 mouse input proved final mode equals the last accepted toggle for 1x/2x 900 ms and 8x/9x 450 ms sequences. Faster 220 ms, 120 ms, and 60 ms physical bursts cannot be evaluated by raw click-count parity because the 340 ms resize shield intentionally captures input while the window is settling; full interactive rapid-toggle parity remains unchecked.
+- A post-stress idle probe showed no delayed bounce: every 100 ms sample for 2.9 seconds remained `378x148` and the shell process remained `Responding=True`.
+- Frontend failure presentation is partially covered by `ui-mode-and-connect-failure.test.ts`: backend connection failures remain visible and `user_cancelled` is guarded from `setError`. A concrete desktop quick-validation failure produces the canonical `auth_failed` envelope and timing log, but this does not prove behavior for a real gateway-authentication failure.
+- Read-only lane isolation is covered by `core_process_lifecycle_test` E2.3: with a deterministic hook blocking the background `vpn.connect` job, `logs.list`, `status.get`, and `config.getSettings` each respond within 500 ms before the hook is released.
+- First-failure behavior is covered by `connect_pipeline_test`: the first failing branch returns before slow branches release, losing branches receive cancellation, late non-cancel failures are logged once with the first-failure reason, and successful late branch results are discarded silently.
+- User cancellation and latest-intent coalescing are covered by `connect_intent_test` and `vpn_actions_test`: user-cancelled disconnects do not set `last_error`, repeated connect/cancel clicks maintain one active workflow, a newer connect starts once after cleanup, and failed jobs do not retry without a later user epoch.
+- Connect timing branch visibility is covered by `app_api_status_contract_test`: source guards require `desktop.connect.backend_helper_ready`, `desktop.connect.platform_ready`, `desktop.connect.protocol_handshake`, `first_failure`, and `serial_tail` timing markers.
 
 ## Implementation Commits
 
@@ -89,17 +103,17 @@ Partially run:
 
 - Packaged Windows WebView shell launch.
 - Packaged Windows WebView shell launch responsiveness, with `exv-ui` staying `Responding=True` for 8 seconds after the UI-thread event-pump correction.
-- Rapid packaged UI mode toggling automation after the correction showed no late mode bounce and `Responding=True`, but the coordinate-based automation did not reliably hit the WebView toggle, so it does not prove final-click parity.
+- Rapid packaged UI mode toggling automation after the correction showed no late mode bounce and `Responding=True`. The earlier coordinate-based pass was discarded because it missed the advanced WebView toggle; the later calibrated Win32 `SendInput` pass is retained as evidence for last accepted toggle parity at 450 ms and slower.
 - Core/user trace search for `window.setMode`, with zero matches in current app log, core IPC registry, and acceptance artifact folder.
 
 The following still require interactive local VPN/UI operation with a real in-progress connection and were not executed by this agent:
 
 - Real connect against the VPN gateway.
 - Open logs while a real VPN connect is in progress.
-- Confirm logs/status/config do not wait for VPN connect completion during real interactive use.
-- Confirm first-failure branch errors reach the visible UI before slower branch cleanup finishes.
-- Confirm user cancellation during a real connect does not show an error modal or failure log.
-- Confirm rapid connect/cancel clicking coalesces to the latest user intent in the packaged UI.
-- Confirm rapid 8+ minimal/advanced clicks interactively, including final mode matching the last accepted click.
-- Confirm connect failure is visible to the user.
-- Confirm real connect timing output in application logs.
+- Confirm logs/status/config do not wait for VPN connect completion during real interactive use. Automated core isolation for all three request families is verified.
+- Confirm first-failure branch errors reach the visible UI before slower branch cleanup finishes during real interactive use. Automated pipeline first-failure behavior is verified.
+- Confirm user cancellation during a real connect does not show an error modal or failure log. Automated cancellation contract is verified.
+- Confirm rapid connect/cancel clicking coalesces to the latest user intent in the packaged UI. Automated intent coalescing is verified.
+- Confirm rapid 8+ minimal/advanced clicks interactively, especially whether physical clicks during the 340 ms resize shield should be ignored or queued for a later accepted state change.
+- Confirm real gateway-authentication failure is visible to the user. The automated frontend-visible failure contract and missing-password quick-validation envelope are verified, but a real VPN gateway failure was not exercised.
+- Confirm real connect timing output in application logs. Automated source guards for branch timing markers are verified.

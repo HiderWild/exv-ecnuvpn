@@ -966,10 +966,10 @@ int main() {
     }
 
     // =======================================================================
-    // E2.3-lanes — long vpn.connect does not block logs.list
+    // E2.3-lanes — long vpn.connect does not block read-only lanes
     // =======================================================================
     {
-        std::cerr << "[E2.3-lanes] logs.list while vpn.connect is blocked\n";
+        std::cerr << "[E2.3-lanes] logs/status/config while vpn.connect is blocked\n";
         write_valid_native_config(config_dir);
 
         BlockingInputBuf in_buf;
@@ -1007,10 +1007,16 @@ int main() {
         in_buf.feed(R"({"id":51,"action":"logs.list","payload":{}})" "\n");
         expect(wait_for_response_id(out_buf, 51, std::chrono::milliseconds(500)),
                "E2.3-lanes: logs.list should respond while vpn.connect remains blocked");
+        in_buf.feed(R"({"id":52,"action":"status.get","payload":{}})" "\n");
+        expect(wait_for_response_id(out_buf, 52, std::chrono::milliseconds(500)),
+               "E2.3-lanes: status.get should respond while vpn.connect remains blocked");
+        in_buf.feed(R"({"id":53,"action":"config.getSettings","payload":{}})" "\n");
+        expect(wait_for_response_id(out_buf, 53, std::chrono::milliseconds(500)),
+               "E2.3-lanes: config.getSettings should respond while vpn.connect remains blocked");
 
         release_connect_promise.set_value();
-        expect(wait_for_response_count(out_buf, 2, std::chrono::seconds(5)),
-               "E2.3-lanes: accepted vpn.connect and logs.list responses should both exist");
+        expect(wait_for_response_count(out_buf, 4, std::chrono::seconds(5)),
+               "E2.3-lanes: accepted vpn.connect and read-only responses should all exist");
 
         ecnuvpn::app_api::testing::set_desktop_vpn_connect_entered_hook(nullptr);
         in_buf.close_input();
@@ -1018,9 +1024,15 @@ int main() {
 
         auto all = parse_json_lines(out_buf.read_all());
         auto logs_resp = find_by_id(all, 51);
+        auto status_resp = find_by_id(all, 52);
+        auto settings_resp = find_by_id(all, 53);
         auto connect_resp = find_by_id(all, 50);
         expect(!logs_resp.is_null() && logs_resp.value("ok", false),
                "E2.3-lanes: logs.list response should be successful");
+        expect(!status_resp.is_null() && status_resp.value("ok", false),
+               "E2.3-lanes: status.get response should be successful");
+        expect(!settings_resp.is_null() && settings_resp.value("ok", false),
+               "E2.3-lanes: config.getSettings response should be successful");
         expect(!connect_resp.is_null(),
                "E2.3-lanes: vpn.connect response should eventually exist");
         expect(connect_resp.value("ok", false),
