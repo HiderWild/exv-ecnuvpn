@@ -44,6 +44,10 @@ Latest post-audit test-entry correction commit:
 
 - `d030038 test: restore connect pipeline acceptance gates`
 
+Follow-up correction after `d030038`:
+
+- Removed remaining exact source-fragment assertions from `ui-mode-and-connect-failure.test.ts`; the host test now uses AST/structural checks for the frontend-local and cancellation contracts.
+
 ## Manual Verification Not Run
 
 The following require interactive local VPN/UI operation and were not executed by this agent:

@@ -82,6 +82,92 @@ function hasPropertyCall(text: string, propertyName: string) {
   }).some(Boolean)
 }
 
+function hasIdentifier(text: string, name: string) {
+  return collect(sourceFile('source.ts', text), (node) =>
+    ts.isIdentifier(node) && node.text === name ? true : undefined,
+  ).some(Boolean)
+}
+
+function hasPrefixIncrement(text: string, name: string) {
+  return collect(sourceFile('source.ts', text), (node) =>
+    ts.isPrefixUnaryExpression(node) &&
+    node.operator === ts.SyntaxKind.PlusPlusToken &&
+    ts.isIdentifier(node.operand) &&
+    node.operand.text === name ? true : undefined,
+  ).some(Boolean)
+}
+
+function hasInequality(text: string, leftName: string, rightName: string) {
+  return collect(sourceFile('source.ts', text), (node) => {
+    if (!ts.isBinaryExpression(node)) return undefined
+    const isInequality =
+      node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+      node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken
+    return isInequality &&
+      ts.isIdentifier(node.left) &&
+      ts.isIdentifier(node.right) &&
+      node.left.text === leftName &&
+      node.right.text === rightName
+  }).some(Boolean)
+}
+
+function hasObjectKeysLengthZeroReturn(text: string, objectName: string) {
+  return collect(sourceFile('source.ts', text), (node) => {
+    if (!ts.isIfStatement(node)) return undefined
+    if (!ts.isReturnStatement(node.thenStatement)) return false
+    const expression = node.expression
+    if (!ts.isBinaryExpression(expression)) return false
+    if (expression.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken) return false
+    if (!ts.isNumericLiteral(expression.right) || expression.right.text !== '0') return false
+    const left = expression.left
+    if (!ts.isPropertyAccessExpression(left) || left.name.text !== 'length') return false
+    const call = left.expression
+    if (!ts.isCallExpression(call)) return false
+    const callee = call.expression
+    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'keys') return false
+    if (!ts.isIdentifier(callee.expression) || callee.expression.text !== 'Object') return false
+    return call.arguments.length === 1 &&
+      ts.isIdentifier(call.arguments[0]) &&
+      call.arguments[0].text === objectName
+  }).some(Boolean)
+}
+
+function hasSwitchCase(text: string, literal: string) {
+  return collect(sourceFile('source.ts', text), (node) =>
+    ts.isCaseClause(node) &&
+    ts.isStringLiteralLike(node.expression) &&
+    node.expression.text === literal ? true : undefined,
+  ).some(Boolean)
+}
+
+function hasApiPostToLiteral(text: string, path: string) {
+  return collect(sourceFile('source.ts', text), (node) => {
+    if (!ts.isCallExpression(node)) return undefined
+    const expression = node.expression
+    if (!ts.isPropertyAccessExpression(expression) || expression.name.text !== 'post') return false
+    if (!ts.isIdentifier(expression.expression) || expression.expression.text !== 'api') return false
+    const first = node.arguments[0]
+    return first != null && ts.isStringLiteralLike(first) && first.text === path
+  }).some(Boolean)
+}
+
+function hasGuardedSetError(text: string, skippedErrorType: string) {
+  return collect(sourceFile('source.ts', text), (node) => {
+    if (!ts.isIfStatement(node)) return undefined
+    const expression = node.expression
+    if (!ts.isBinaryExpression(expression)) return false
+    const isInequality =
+      expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+      expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken
+    if (!isInequality) return false
+    if (!ts.isStringLiteralLike(expression.right) || expression.right.text !== skippedErrorType) return false
+    return collect(node.thenStatement, (child) => {
+      if (!ts.isCallExpression(child)) return undefined
+      return ts.isIdentifier(child.expression) && child.expression.text === 'setError'
+    }).some(Boolean)
+  }).some(Boolean)
+}
+
 function unionStringMembers(text: string, aliasName: string) {
   const values = new Set<string>()
   const file = sourceFile('source.ts', text)
@@ -135,14 +221,14 @@ describe('frontend-owned UI mode state', () => {
     const deleted = deletePropertyNames(configStoreText)
     assert.ok(deleted.has('minimal_mode'))
     assert.ok(deleted.has('service_install_prompt_seen'))
-    assert.match(configStoreText, /Object\.keys\(remoteSettings\)\.length\s*===\s*0/)
+    assert.ok(hasObjectKeysLengthZeroReturn(configStoreText, 'remoteSettings'))
   })
 
   it('suppresses stale asynchronous window mode writes after rapid toggles', () => {
     const script = vueScriptSetup(appText)
-    assert.match(script, /\bwindowModeRequest\b/)
-    assert.match(script, /\+\+\s*windowModeRequest/)
-    assert.match(script, /request\s*!==\s*windowModeRequest/)
+    assert.ok(hasIdentifier(script, 'windowModeRequest'))
+    assert.ok(hasPrefixIncrement(script, 'windowModeRequest'))
+    assert.ok(hasInequality(script, 'request', 'windowModeRequest'))
     assert.ok(hasCallNamed(script, 'watch'))
     assert.ok(hasPropertyCall(script, 'setMode'))
   })
@@ -159,13 +245,13 @@ describe('connection failure presentation contract', () => {
     assert.ok(contractErrors.has('connection_failed'))
     assert.ok(contractErrors.has('connection_attempt_active'))
 
-    assert.match(vpnStoreText, /error_type\s*!==\s*'user_cancelled'[\s\S]{0,80}setError/)
+    assert.ok(hasGuardedSetError(vpnStoreText, 'user_cancelled'))
   })
 
   it('routes the in-progress yellow button to cancellation instead of a second connect', () => {
-    assert.match(vpnStoreText, /case\s+'elevated connecting':/)
+    assert.ok(hasSwitchCase(vpnStoreText, 'elevated connecting'))
     assert.ok(hasCallNamed(vpnStoreText, 'cancelConnect'))
-    assert.match(vpnStoreText, /api\.post[\s\S]{0,120}'\/disconnect'/)
+    assert.ok(hasApiPostToLiteral(vpnStoreText, '/disconnect'))
 
     const dashboardScript = vueScriptSetup(dashboardPageText)
     const minimalScript = vueScriptSetup(minimalModeViewText)
