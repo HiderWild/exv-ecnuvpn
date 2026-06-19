@@ -121,8 +121,12 @@ int main() {
       !source_contains("if (action == \"window.minimize\")") ||
       !source_contains("if (action == \"window.requestClose\")") ||
       !source_contains("if (action == \"window.startDrag\")") ||
+      !source_contains("GetCursorPos(&cursor)") ||
       !source_contains("ReleaseCapture()") ||
       !source_contains("WM_NCLBUTTONDOWN") ||
+      !source_contains("MAKELPARAM(cursor.x, cursor.y)") ||
+      !source_contains("case WM_MOUSEACTIVATE:") ||
+      !source_contains("return MA_ACTIVATE;") ||
       !source_contains("WM_NCCALCSIZE") ||
       !source_contains("WM_NCHITTEST") ||
       !source_contains("HTCAPTION") ||
@@ -135,6 +139,9 @@ int main() {
       !source_contains("GetForegroundWindow() != hwnd_") ||
       !source_contains("CreateRoundRectRgn") ||
       !source_contains("SetWindowRgn") ||
+      source_contains("GetMessagePos()") ||
+      source_contains("SetCapture(hwnd_)") ||
+      source_contains("void update_window_drag()") ||
       source_contains("HTMINBUTTON") ||
       source_contains("HTCLOSE") ||
       source_contains("kWindowModeAnimationTimer") ||
