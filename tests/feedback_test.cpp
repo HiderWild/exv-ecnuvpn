@@ -73,6 +73,32 @@ void test_canonical_codes_pass_through() {
   }
 }
 
+void test_protocol_response_aliases() {
+  // INVARIANT: aggregate-auth raw codes that signal a malformed gateway
+  // response must surface as a protocol mismatch, never as a credential
+  // failure. The body of an empty/oversized response includes the substring
+  // "auth", which previously slipped into the generic auth-keyword fallback
+  // and rendered as "VPN 密码错误" — that misleads users who actually have
+  // the right password.
+  expect(feedback::resolve_error_code("auth_response_invalid",
+                                      "aggregate auth response is empty") ==
+             feedback::code::kAuthProtocolMismatch,
+         "auth_response_invalid resolves to auth_protocol_mismatch");
+  expect(feedback::resolve_error_code("auth_response_invalid",
+                                      "aggregate auth response missing "
+                                      "config-auth root") ==
+             feedback::code::kAuthProtocolMismatch,
+         "auth_response_invalid (missing root) resolves to auth_protocol_mismatch");
+  expect(feedback::resolve_error_code("auth_response_too_large",
+                                      "aggregate auth response exceeds "
+                                      "maximum size") ==
+             feedback::code::kAuthProtocolMismatch,
+         "auth_response_too_large resolves to auth_protocol_mismatch");
+  expect(feedback::resolve_error_code("auth_response_invalid", "") !=
+             feedback::code::kAuthFailed,
+         "auth_response_invalid never collapses to auth_failed");
+}
+
 void test_message_heuristics() {
   expect(feedback::resolve_error_code("", "Wintun adapter not found") ==
              feedback::code::kWintunMissing,
@@ -102,6 +128,7 @@ void test_normalize_error() {
 int main() {
   test_error_code_is_never_empty();
   test_canonical_codes_pass_through();
+  test_protocol_response_aliases();
   test_message_heuristics();
   test_normalize_error();
   if (failures == 0) {

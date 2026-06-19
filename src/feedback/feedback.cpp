@@ -135,6 +135,17 @@ std::string resolve_error_code(const std::string &raw_code,
     return code::kUserCancelled;
   if (raw_code == "helper_not_running" || raw_code == "helper_missing")
     return code::kHelperUnavailable;
+  // Aggregate-auth response framing codes describe a malformed gateway
+  // response, not a credential failure. They must collapse to
+  // auth_protocol_mismatch BEFORE the keyword fallback below — otherwise the
+  // accompanying message ("aggregate auth response is empty", "...exceeds
+  // maximum size") trips the broad "auth" heuristic and the renderer shows
+  // "VPN 密码错误，请重新输入密码", which is misleading for users whose
+  // password is in fact correct. See
+  // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §4.
+  if (raw_code == "auth_response_invalid" ||
+      raw_code == "auth_response_too_large")
+    return code::kAuthProtocolMismatch;
 
   const std::string hint = to_lower_ascii(raw_code + " " + message);
   if (hint.find_first_not_of(" ") == std::string::npos)

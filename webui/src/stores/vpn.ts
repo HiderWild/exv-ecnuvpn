@@ -407,6 +407,23 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
   },
 }
 
+// Raw backend codes that historically have not gone through
+// feedback::resolve_error_code — or that we want the renderer to defend
+// against even if the backend mapping regresses. Each entry rewrites the raw
+// code to a canonical key in `contractErrorMap` so the descriptor lookup
+// produces the right view (e.g. view_logs) instead of falling through to a
+// credential prompt. See docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §4.
+const rawCodeAliases: Record<string, string> = {
+  // aggregate-auth framing failures: the gateway response is malformed,
+  // not the password.
+  auth_response_invalid: 'auth_protocol_mismatch',
+  auth_response_too_large: 'auth_protocol_mismatch',
+}
+
+function canonicalizeRawCode(code: string): string {
+  return rawCodeAliases[code] ?? code
+}
+
 export function normalizeError(raw: unknown): VpnError {
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
@@ -423,15 +440,18 @@ export function normalizeError(raw: unknown): VpnError {
     // Canonical backend code is the single source of truth. The feedback module
     // guarantees a non-empty code plus recoverable/recommended_action; this
     // table only supplies a localized label and default action fallback.
-    if (typeof obj.code === 'string' && obj.code in contractErrorMap) {
-      const descriptor = contractErrorMap[obj.code]
-      return {
-        ok: false,
-        error_type: descriptor.error_type,
-        message: String(obj.message || obj.error || descriptor.message),
-        recoverable: obj.recoverable !== undefined ? !!obj.recoverable : descriptor.recoverable,
-        recommended_action: String(obj.recommended_action || descriptor.recommended_action),
-        timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
+    if (typeof obj.code === 'string') {
+      const canonical = canonicalizeRawCode(obj.code)
+      if (canonical in contractErrorMap) {
+        const descriptor = contractErrorMap[canonical]
+        return {
+          ok: false,
+          error_type: descriptor.error_type,
+          message: String(obj.message || obj.error || descriptor.message),
+          recoverable: obj.recoverable !== undefined ? !!obj.recoverable : descriptor.recoverable,
+          recommended_action: String(obj.recommended_action || descriptor.recommended_action),
+          timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
+        }
       }
     }
     if (obj.ok === false && obj.message) {

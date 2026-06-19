@@ -197,6 +197,35 @@ int main() {
                     "DTLS fallback should be informational/recoverable") && ok;
     }
 
+    // --- aggregate-auth response framing errors collapse to protocol mismatch ---
+    // Raw aggregate-auth codes signal a malformed gateway response, not a
+    // password failure. They must leave the mapper as auth_protocol_mismatch
+    // so the renderer shows "查看日志" rather than "请重新输入密码".
+    {
+        ErrorInfo err = CoreErrorMapper::from_native_error(
+            "auth_response_invalid", "aggregate auth response is empty");
+        ok = expect(err.code == "auth_protocol_mismatch",
+                    "auth_response_invalid should map to auth_protocol_mismatch") && ok;
+        ok = expect(err.domain == "auth",
+                    "auth_response_invalid should stay in auth domain") && ok;
+        ok = expect(!err.recoverable,
+                    "auth_response_invalid should not be recoverable") && ok;
+        ok = expect(!err.recommended_action.empty(),
+                    "auth_response_invalid should carry a recommended action") && ok;
+    }
+
+    {
+        ErrorInfo err = CoreErrorMapper::from_native_error(
+            "auth_response_too_large",
+            "aggregate auth response exceeds maximum size");
+        ok = expect(err.code == "auth_protocol_mismatch",
+                    "auth_response_too_large should map to auth_protocol_mismatch") && ok;
+        ok = expect(err.domain == "auth",
+                    "auth_response_too_large should stay in auth domain") && ok;
+        ok = expect(!err.recoverable,
+                    "auth_response_too_large should not be recoverable") && ok;
+    }
+
     {
         ErrorInfo err = CoreErrorMapper::from_native_error(
             "protocol_error", "bad XML token SECRET_COOKIE webvpn=SECRET");

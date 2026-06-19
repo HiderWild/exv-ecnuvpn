@@ -253,6 +253,17 @@ ErrorInfo CoreErrorMapper::from_native_error(const std::string& code, const std:
         return native_error("auth", normalized_code, message, false,
                             "Use a supported browser-based SSO flow or administrator-provided native profile");
     }
+    // Aggregate-auth response framing codes signal a malformed gateway
+    // response (empty body, oversize body, missing config-auth root) — not a
+    // credential failure. Map them to auth_protocol_mismatch BEFORE the
+    // generic auth_/auth-keyword branch below, so the renderer shows
+    // "view_logs" instead of "retry_password". See
+    // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §4.
+    if (normalized_code == "auth_response_invalid" ||
+        normalized_code == "auth_response_too_large") {
+        return native_error("auth", "auth_protocol_mismatch", message, false,
+                            "Capture sanitized protocol diagnostics and report the gateway response shape");
+    }
     if (is_auth_native_code(normalized_code) ||
         normalized_code.rfind("auth_", 0) == 0 || contains_ci(hint, "auth")) {
         return native_error("auth", normalized_code, message,
