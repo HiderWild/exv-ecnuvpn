@@ -159,10 +159,7 @@ onMounted(() => {
             :aria-label="titlebarTitle"
           >
             <img class="app-window-titlebar__icon" :src="appIconUrl" alt="" />
-            <span class="app-window-titlebar__title" aria-hidden="true">
-              <span class="app-window-titlebar__title-line">EXV</span>
-              <span class="app-window-titlebar__title-line app-window-titlebar__title-line--muted">for ECNU</span>
-            </span>
+            <span class="app-window-titlebar__title" aria-hidden="true">EXV for ECNU</span>
           </div>
           <div
             v-if="isWindows"
@@ -288,14 +285,11 @@ onMounted(() => {
 }
 
 .app-window-titlebar__identity {
-  display: grid;
-  grid-template-columns: 18px minmax(0, auto);
-  grid-template-rows: repeat(2, max-content);
+  display: flex;
   min-width: 0;
   height: 100%;
-  column-gap: 8px;
   align-items: center;
-  align-content: center;
+  gap: 8px;
 }
 
 .app-window-frame--advanced .app-window-titlebar__identity {
@@ -303,34 +297,20 @@ onMounted(() => {
 }
 
 .app-window-titlebar__icon {
-  grid-row: 1 / span 2;
+  flex: 0 0 auto;
   height: 18px;
   width: 18px;
 }
 
 .app-window-titlebar__title {
-  grid-row: 1 / span 2;
-  display: flex;
   min-width: 0;
-  flex-direction: column;
-  justify-content: center;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   line-height: 1;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
-}
-
-.app-window-titlebar__title-line {
-  display: block;
-}
-
-.app-window-titlebar__title-line--muted {
-  margin-top: 2px;
-  color: #94a3b8;
-  font-size: 10px;
-  font-weight: 600;
 }
 
 .app-window-titlebar__controls {

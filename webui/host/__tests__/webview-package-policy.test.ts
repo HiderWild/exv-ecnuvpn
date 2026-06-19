@@ -190,7 +190,7 @@ describe('native WebView package policy', () => {
     assert.match(appVue, /!config\.settings\.service_install_prompt_seen && !vpn\.serviceInstalled/)
     assert.doesNotMatch(appVue, /!config\.settings\.service_install_prompt_seen && !vpn\.serviceAvailable/)
     assert.match(dashboardVue, /!vpn\.serviceInstalled/)
-    assert.match(dashboardVue, /服务已安装但未运行/)
+    assert.match(dashboardVue, /服务已安装但当前不可用/)
   })
 
   it('keeps window mode resizing out of the settings persistence path', () => {
@@ -307,8 +307,8 @@ describe('native WebView package policy', () => {
     assert.match(frameVue, /EXV for ECNU/)
     assert.match(frameVue, /v-if="visualMode === 'minimal'"/)
     assert.match(frameVue, /:aria-label="titlebarTitle"/)
-    assert.match(frameVue, /class="app-window-titlebar__title-line">EXV<\/span>/)
-    assert.match(frameVue, /class="app-window-titlebar__title-line app-window-titlebar__title-line--muted">for ECNU<\/span>/)
+    assert.match(frameVue, /<span class="app-window-titlebar__title" aria-hidden="true">EXV for ECNU<\/span>/)
+    assert.doesNotMatch(frameVue, /app-window-titlebar__title-line/)
     assert.match(frameVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
     assert.match(navBarVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
     assert.match(frameVue, /:src="appIconUrl"/)
@@ -319,10 +319,11 @@ describe('native WebView package policy', () => {
     assert.match(advancedTitlebarRule, /justify-content: flex-end;/)
     assert.doesNotMatch(advancedTitlebarRule, /var\(--advanced-sidebar-width\)/)
     assert.doesNotMatch(advancedTitlebarRule, /border-bottom:/)
-    assert.match(titlebarIdentityRule, /display: grid;/)
-    assert.match(titlebarIdentityRule, /grid-template-rows: repeat\(2, max-content\);/)
-    assert.match(titlebarTitleRule, /flex-direction: column;/)
-    assert.doesNotMatch(titlebarTitleRule, /white-space: nowrap;/)
+    assert.match(titlebarIdentityRule, /display: flex;/)
+    assert.match(titlebarIdentityRule, /align-items: center;/)
+    assert.doesNotMatch(titlebarIdentityRule, /grid-template-rows:/)
+    assert.match(titlebarTitleRule, /white-space: nowrap;/)
+    assert.doesNotMatch(titlebarTitleRule, /flex-direction: column;/)
     assert.match(frameVue, /\.app-window-frame--advanced \.app-window-titlebar__identity \{[\s\S]*display: none;/)
     assert.match(frameVue, /\.app-window-frame--advanced \.app-window-content-shell \{[\s\S]*height: 100%;/)
     assert.match(frameVue, /\.app-window-frame--minimal \.app-window-titlebar \{[\s\S]*position: relative;/)
@@ -407,6 +408,27 @@ describe('native WebView package policy', () => {
     assert.match(runtime, /event_pump_thread\.join\(\)/)
   })
 
+  it('starts the Win32 system titlebar move loop with the current cursor position', () => {
+    const win32Host = readFileSync(
+      join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
+      'utf8',
+    )
+    const startDragStart = win32Host.indexOf('void start_window_drag()')
+    assert.notEqual(startDragStart, -1)
+    const quitFromTrayStart = win32Host.indexOf('void quit_from_tray()', startDragStart)
+    assert.notEqual(quitFromTrayStart, -1)
+    const startDragBlock = win32Host.slice(startDragStart, quitFromTrayStart)
+
+    assert.match(startDragBlock, /GetCursorPos\(&cursor\)/)
+    assert.match(startDragBlock, /ReleaseCapture\(\)/)
+    assert.match(startDragBlock, /SendMessageW\(hwnd_, WM_NCLBUTTONDOWN, HTCAPTION/)
+    assert.match(startDragBlock, /MAKELPARAM\(cursor\.x, cursor\.y\)/)
+    assert.match(win32Host, /case WM_MOUSEACTIVATE:[\s\S]*return MA_ACTIVATE;/)
+    assert.doesNotMatch(startDragBlock, /GetMessagePos\(\)/)
+    assert.doesNotMatch(startDragBlock, /SetCapture\(hwnd_\)/)
+    assert.doesNotMatch(win32Host, /void update_window_drag\(\)/)
+  })
+
   it('treats accepted VPN connect jobs as cancellable frontend state', () => {
     const store = readFileSync(join(webuiRoot, 'src', 'stores', 'vpn.ts'), 'utf8')
     const dashboard = readFileSync(join(webuiRoot, 'src', 'pages', 'DashboardPage.vue'), 'utf8')
@@ -421,7 +443,8 @@ describe('native WebView package policy', () => {
     assert.match(store, /function stopConnectStatusPolling/)
     assert.match(store, /if \(isVpnConnectAccepted\(data\)\)/)
     assert.match(store, /connectInFlight\.value = true[\s\S]*startConnectStatusPolling\(\)[\s\S]*loading\.value = false/)
-    assert.match(store, /if \(connectInFlight\.value && \(nextStatus\.connected \|\| nextStatus\.process_running === false\)\)/)
+    assert.match(store, /function isTerminalConnectStatus\(nextStatus: VpnStatus\)/)
+    assert.match(store, /if \(connectInFlight\.value && isTerminalConnectStatus\(nextStatus\)\)/)
     assert.match(store, /stopConnectStatusPolling\(\)[\s\S]*stopAuthInteractionPolling\(\)/)
     assert.match(store, /async function cancelConnect\(\)/)
     assert.match(store, /api\.post<[^>]+>\('\/disconnect'\)/)
@@ -434,7 +457,23 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(minimal, /const busy = computed\(\(\) => vpn\.loading \|\| vpn\.serviceBusy \|\| vpn\.connectInFlight/)
     assert.match(types, /interface VpnConnectAccepted/)
     assert.match(types, /connect\(password\?: string\): Promise<VpnStatus \| VpnConnectAccepted>/)
+    assert.match(types, /connectElevated\(password\?: string\): Promise<VpnStatus \| VpnConnectAccepted \| VpnError>/)
+    assert.match(store, /api\.post<VpnStatus \| VpnConnectAccepted \| VpnError>\(\s*'\/connect\/elevated'/)
+    assert.match(store, /async function connectElevated[\s\S]*if \(isVpnConnectAccepted\(data\)\)/)
     assert.match(sse, /store\.updateStatusFromEvent\(event\.data as Partial<VpnStatus>\)/)
+  })
+
+  it('normalizes helper service maintenance results before chaining connect', () => {
+    const store = readFileSync(join(webuiRoot, 'src', 'stores', 'vpn.ts'), 'utf8')
+    const dashboard = readFileSync(join(webuiRoot, 'src', 'pages', 'DashboardPage.vue'), 'utf8')
+
+    assert.match(store, /interface ServiceOperationResult/)
+    assert.match(store, /function serviceStatusFromOperationResult\(data: ServiceStatus \| ServiceOperationResult\)/)
+    assert.match(store, /const nextStatus = serviceStatusFromOperationResult\(data\)/)
+    assert.match(store, /serviceStatus\.value = nextStatus[\s\S]*if \(nextStatus\.warning \|\| !nextStatus\.available\)/)
+    assert.doesNotMatch(store, /serviceStatus\.value = data[\s\S]*if \(data\.warning \|\| !data\.available\)/)
+    assert.match(store, /const installed = await installService\(\)[\s\S]*await fetchServiceStatus\(\)[\s\S]*await connect\(\)/)
+    assert.match(dashboard, /!vpn\.serviceAvailable[\s\S]*!vpn\.serviceInstalled/)
   })
 
   it('uses the packaged app icon during mode resize masking', () => {
