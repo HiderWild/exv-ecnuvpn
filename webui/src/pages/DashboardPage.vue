@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import {
   Cloud,
   EthernetPort,
@@ -21,10 +21,6 @@ const installServiceBeforeConnect = ref(true)
 function switchToMinimalMode() {
   void config.saveSettings({ minimal_mode: true })
 }
-
-onMounted(() => {
-  vpn.fetchAppShellState()
-})
 
 onUnmounted(() => {
   if (nodeTweenFrame) {

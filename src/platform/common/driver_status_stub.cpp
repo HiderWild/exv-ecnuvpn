@@ -21,5 +21,14 @@ nlohmann::json install_driver(const ConfigView &cfg,
                          "Driver installation is only supported on Windows."}};
 }
 
+void set_driver_status_adapter_snapshot_provider_for_testing(
+    std::function<WindowsDriverAdapterSnapshot()> /*provider*/) {}
+
+void invalidate_driver_status_cache() {}
+
+void clear_driver_status_cache_for_testing() {
+  invalidate_driver_status_cache();
+}
+
 } // namespace platform
 } // namespace ecnuvpn

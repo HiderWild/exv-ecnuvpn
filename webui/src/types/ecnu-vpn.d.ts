@@ -139,8 +139,12 @@ export interface EcnuVpnApi {
     install(driver: DesktopDriverInstallTarget): Promise<DriverStatus>
   }
   window: {
-    setMode(mode: DesktopWindowMode): Promise<{ ok: true; mode: DesktopWindowMode }>
+    setMode(mode: DesktopWindowMode, request?: number): Promise<{ ok: true; mode: DesktopWindowMode }>
+    resizeForMode(mode: DesktopWindowMode, request?: number): Promise<{ ok: true; mode: DesktopWindowMode }>
+    minimize(): Promise<{ ok: true }>
+    requestClose(): Promise<{ ok: true }>
     resolveClosePrompt(result: unknown): Promise<{ ok: true }>
+    startDrag(): Promise<{ ok: true }>
   }
   modal: {
     serviceInstallPrompt(): Promise<DesktopServiceInstallPromptResult>

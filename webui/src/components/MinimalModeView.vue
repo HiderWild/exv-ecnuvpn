@@ -151,7 +151,7 @@ async function handlePowerClick() {
 </script>
 
 <template>
-  <main class="flex h-screen bg-bg px-2.5 py-2.5 text-foreground">
+  <main class="flex h-full bg-bg px-2.5 py-2.5 text-foreground">
     <div
       v-if="connectedLayout"
       class="relative flex min-h-0 w-full items-center justify-center"

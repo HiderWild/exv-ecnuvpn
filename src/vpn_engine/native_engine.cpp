@@ -307,17 +307,25 @@ void NativeVpnEngineSession::stop() {
   if (packet_loop_thread_.joinable())
     packet_loop_thread_.join();
 
+  std::unique_ptr<protocol::ProtocolSession> session;
+  std::unique_ptr<protocol::ProtocolTransport> transport;
   {
     const std::lock_guard<std::mutex> lock(mu_);
     status_.running = false;
     status_.network_ready = false;
     status_.pid = -1;
-    protocol_session_.reset();
-    transport_.reset();
+    session = std::move(protocol_session_);
+    transport = std::move(transport_);
     packet_device_.reset();
     loop_event_sink_.reset();
     loop_started_ = false;
     loop_finished_ = true;
+  }
+
+  if (session) {
+    session->disconnect();
+  } else if (transport) {
+    transport->disconnect();
   }
 }
 

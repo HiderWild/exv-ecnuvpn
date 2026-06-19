@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRoute } from 'vue-router'
+import AppWindowFrame from './components/AppWindowFrame.vue'
 import NavBar from './components/NavBar.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import AuthContinuationDialog from './components/AuthContinuationDialog.vue'
@@ -40,39 +41,6 @@ const modalRoute = computed(() =>
   route.path.startsWith('/modal/') ||
   (typeof window !== 'undefined' && window.location.hash.startsWith('#/modal/')),
 )
-let windowModeRequest = 0
-
-function afterNextPaint() {
-  return new Promise<void>((resolve) => {
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => resolve())
-    } else {
-      setTimeout(resolve, 0)
-    }
-  })
-}
-
-async function applyWindowMode() {
-  if (modalRoute.value) return
-  const request = ++windowModeRequest
-  const mode = config.settings.minimal_mode ? 'minimal' : 'advanced'
-  await nextTick()
-  await afterNextPaint()
-  if (request !== windowModeRequest || modalRoute.value) return
-  try {
-    await window.ecnuVpn?.window?.setMode(mode)
-  } catch (error) {
-    console.error('[window] setMode failed:', error)
-  }
-}
-
-watch(
-  minimalMode,
-  () => {
-    void applyWindowMode()
-  },
-  { flush: 'post' },
-)
 
 onMounted(async () => {
   if (modalRoute.value) return
@@ -88,7 +56,7 @@ onMounted(async () => {
     config.fetchAuthConfig(),
     vpn.fetchAppShellState(),
   ])
-  await applyWindowMode()
+  // AppWindowFrame owns native window sizing after initial settings load.
   if (!config.settings.service_install_prompt_seen && !vpn.serviceInstalled) {
     await markServicePromptSeen()
     if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
@@ -179,19 +147,27 @@ async function handleCoreQuit() {
 
 <template>
   <RouterView v-if="modalRoute" />
-  <MinimalModeView v-else-if="minimalMode" />
-  <div v-else class="flex h-screen overflow-hidden bg-bg text-foreground font-sans">
-    <NavBar />
-    <main class="min-w-0 flex-1 overflow-hidden pl-44">
-      <div class="mx-auto h-full w-full max-w-5xl overflow-hidden px-6 py-6">
-        <RouterView v-slot="{ Component, route: viewRoute }">
-          <KeepAlive :include="keptAlivePages">
-            <component :is="Component" :key="viewRoute.name" />
-          </KeepAlive>
-        </RouterView>
-      </div>
-    </main>
-  </div>
+  <AppWindowFrame
+    v-else
+    :mode="minimalMode ? 'minimal' : 'advanced'"
+  >
+    <MinimalModeView v-if="minimalMode" />
+    <div v-else class="app-advanced-shell flex h-full overflow-hidden bg-bg text-foreground font-sans">
+      <NavBar />
+      <main class="min-w-0 flex-1 overflow-hidden pl-44">
+        <div class="flex h-full min-w-0 flex-col">
+          <div class="app-advanced-content-titlebar-spacer h-[34px] shrink-0 border-b border-border/80" aria-hidden="true" />
+          <div class="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-hidden px-6 py-6">
+            <RouterView v-slot="{ Component, route: viewRoute }">
+              <KeepAlive :include="keptAlivePages">
+                <component :is="Component" :key="viewRoute.name" />
+              </KeepAlive>
+            </RouterView>
+          </div>
+        </div>
+      </main>
+    </div>
+  </AppWindowFrame>
 
   <div
     v-if="servicePromptVisible"
@@ -319,3 +295,10 @@ async function handleCoreQuit() {
   <PasswordPromptDialog />
   <ToastStack />
 </template>
+
+<style scoped>
+.app-advanced-shell {
+  min-height: calc(100vh - 34px);
+}
+
+</style>

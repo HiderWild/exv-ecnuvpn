@@ -8,10 +8,12 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <windowsx.h>
 
+#include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
-#include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -35,7 +37,7 @@ constexpr char kPackagedRendererHost[] = "appassets.ecnu-vpn.invalid";
 constexpr wchar_t kPackagedRendererHostWide[] =
     L"appassets.ecnu-vpn.invalid";
 constexpr DWORD kFixedWindowStyle =
-    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    WS_OVERLAPPED | WS_SYSMENU | WS_MINIMIZEBOX;
 constexpr int kTrayCommandShow = 1001;
 constexpr int kTrayCommandQuit = 1002;
 constexpr UINT kTrayCallbackMessage = WM_APP + 0x42;
@@ -43,6 +45,9 @@ constexpr UINT kApplyWindowModeMessage = WM_APP + 0x43;
 constexpr UINT kHostBridgeResponseMessage = WM_APP + 0x44;
 constexpr UINT kRendererEventMessage = WM_APP + 0x45;
 constexpr UINT kTrayIconId = 1;
+constexpr int kCustomTitlebarHeightPx = 34;
+constexpr int kWindowControlWidthPx = 88;
+constexpr int kWindowCornerRadiusPx = 16;
 constexpr UINT kDefaultDpi = 96;
 
 std::wstring wide_from_utf8(const std::string &value) {
@@ -395,6 +400,18 @@ public:
     }
   }
 
+  void post_bridge_success(int id, const nlohmann::ordered_json &data) {
+    if (!webview_) {
+      return;
+    }
+    nlohmann::ordered_json out;
+    out["id"] = id;
+    out["ok"] = true;
+    out["data"] = data;
+    const std::wstring wide_response = wide_from_utf8(out.dump());
+    webview_->PostWebMessageAsJson(wide_response.c_str());
+  }
+
   void on_environment_created(HRESULT error_code,
                               ICoreWebView2Environment *environment) {
     if (FAILED(error_code) || !environment || !hwnd_) {
@@ -424,6 +441,19 @@ public:
       return;
     }
     webview_.attach(raw_webview);
+
+    ComPtr<ICoreWebView2Controller2> controller2;
+    const HRESULT controller2_result = controller_->QueryInterface(
+        IID_ICoreWebView2Controller2,
+        reinterpret_cast<void **>(controller2.put()));
+    if (SUCCEEDED(controller2_result) && controller2) {
+      COREWEBVIEW2_COLOR transparent{};
+      transparent.A = 0;
+      transparent.R = 0;
+      transparent.G = 0;
+      transparent.B = 0;
+      controller2->put_DefaultBackgroundColor(transparent);
+    }
 
     resize_webview();
     if (!configure_packaged_renderer_origin()) {
@@ -477,14 +507,24 @@ public:
       const int id = parsed.value("id", 0);
       if (action == "window.setMode") {
         std::string mode = "advanced";
+        std::uint64_t mode_request = 0;
         if (parsed.contains("payload") && parsed["payload"].is_object()) {
           const auto &payload = parsed["payload"];
           if (payload.contains("mode") && payload["mode"].is_string()) {
             mode = payload["mode"].get<std::string>();
           }
+          if (payload.contains("request") &&
+              payload["request"].is_number_unsigned()) {
+            mode_request = payload["request"].get<std::uint64_t>();
+          } else if (payload.contains("request") &&
+                     payload["request"].is_number_integer()) {
+            const auto request_value = payload["request"].get<std::int64_t>();
+            if (request_value > 0) {
+              mode_request = static_cast<std::uint64_t>(request_value);
+            }
+          }
         }
         mode = mode == "minimal" ? "minimal" : "advanced";
-        defer_window_mode(mode);
         nlohmann::ordered_json out;
         out["id"] = id;
         out["ok"] = true;
@@ -494,15 +534,78 @@ public:
         const std::string response_json = out.dump();
         const std::wstring wide_response = wide_from_utf8(response_json);
         webview_->PostWebMessageAsJson(wide_response.c_str());
+        defer_window_mode(mode, mode_request);
+        return S_OK;
+      }
+      if (action == "window.resizeForMode") {
+        std::string mode = "advanced";
+        std::uint64_t mode_request = 0;
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("mode") && payload["mode"].is_string()) {
+            mode = payload["mode"].get<std::string>();
+          }
+          if (payload.contains("request") &&
+              payload["request"].is_number_unsigned()) {
+            mode_request = payload["request"].get<std::uint64_t>();
+          } else if (payload.contains("request") &&
+                     payload["request"].is_number_integer()) {
+            const auto request_value = payload["request"].get<std::int64_t>();
+            if (request_value > 0) {
+              mode_request = static_cast<std::uint64_t>(request_value);
+            }
+          }
+        }
+        mode = mode == "minimal" ? "minimal" : "advanced";
+        if (mode_request > 0) {
+          if (mode_request < latest_window_mode_request_) {
+            nlohmann::ordered_json data;
+            data["ok"] = true;
+            data["mode"] = current_window_mode_;
+            post_bridge_success(id, data);
+            return S_OK;
+          }
+          latest_window_mode_request_ = mode_request;
+        }
+        apply_window_mode_once(mode);
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        data["mode"] = current_window_mode_;
+        post_bridge_success(id, data);
+        return S_OK;
+      }
+      if (action == "window.minimize") {
+        if (hwnd_) {
+          ShowWindow(hwnd_, SW_MINIMIZE);
+        }
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return S_OK;
+      }
+      if (action == "window.startDrag") {
+        start_window_drag();
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return S_OK;
+      }
+      if (action == "window.requestClose") {
+        request_close_decision();
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
         return S_OK;
       }
       if (action == "window.resolveClosePrompt") {
         apply_close_resolution(
             ecnuvpn::ui_shell::parse_close_prompt_resolution(request_json));
         nlohmann::ordered_json out;
+        nlohmann::ordered_json data;
+        data["ok"] = true;
         out["id"] = id;
         out["ok"] = true;
-        out["data"] = nlohmann::json::object();
+        out["data"] = data;
         const std::string response_json = out.dump();
         const std::wstring wide_response = wide_from_utf8(response_json);
         webview_->PostWebMessageAsJson(wide_response.c_str());
@@ -598,6 +701,30 @@ public:
     controller_->put_Bounds(bounds);
   }
 
+  void apply_rounded_window_region() {
+    if (!hwnd_) {
+      return;
+    }
+    RECT window{};
+    if (!GetWindowRect(hwnd_, &window)) {
+      return;
+    }
+    const int width = window.right - window.left;
+    const int height = window.bottom - window.top;
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    const UINT dpi = dpi_for_window(hwnd_);
+    const int radius = MulDiv(kWindowCornerRadiusPx, dpi, kDefaultDpi);
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius);
+    if (!region) {
+      return;
+    }
+    if (SetWindowRgn(hwnd_, region, TRUE) == 0) {
+      DeleteObject(region);
+    }
+  }
+
   bool create_tray_icon() {
     if (!webview2_should_create_tray_on_start() || !hwnd_ || tray_icon_added_) {
       return true;
@@ -634,12 +761,35 @@ public:
     create_tray_icon();
   }
 
-  void show_from_tray() {
+  void restore_or_focus_window() {
     if (!hwnd_) {
       return;
     }
-    ShowWindow(hwnd_, SW_SHOW);
-    SetForegroundWindow(hwnd_);
+    if (IsIconic(hwnd_)) {
+      ShowWindow(hwnd_, SW_RESTORE);
+    } else if (!IsWindowVisible(hwnd_)) {
+      ShowWindow(hwnd_, SW_SHOW);
+    } else {
+      ShowWindow(hwnd_, SW_SHOW);
+    }
+    if (GetForegroundWindow() != hwnd_) {
+      SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+      SetForegroundWindow(hwnd_);
+    }
+  }
+
+  void show_from_tray() {
+    restore_or_focus_window();
+  }
+
+  void start_window_drag() {
+    if (!hwnd_) {
+      return;
+    }
+    ReleaseCapture();
+    SendMessageW(hwnd_, WM_NCLBUTTONDOWN, HTCAPTION,
+                 static_cast<LPARAM>(GetMessagePos()));
   }
 
   void quit_from_tray() {
@@ -683,7 +833,13 @@ public:
     }
   }
 
-  void defer_window_mode(const std::string &mode) {
+  void defer_window_mode(const std::string &mode, std::uint64_t request) {
+    if (request > 0) {
+      if (request < latest_window_mode_request_) {
+        return;
+      }
+      latest_window_mode_request_ = request;
+    }
     pending_window_mode_ = mode == "minimal" ? "minimal" : "advanced";
     if (!hwnd_ || !PostMessageW(hwnd_, kApplyWindowModeMessage, 0, 0)) {
       apply_deferred_window_mode();
@@ -698,15 +854,21 @@ public:
   }
 
   void apply_window_mode(const std::string &mode) {
+    apply_window_mode_once(mode);
+  }
+
+  void apply_window_mode_once(const std::string &mode) {
     current_window_mode_ = mode == "minimal" ? "minimal" : "advanced";
     const UINT dpi = hwnd_ ? dpi_for_window(hwnd_) : kDefaultDpi;
     const auto bounds =
         webview2_window_mode_bounds_for_dpi(current_window_mode_, dpi);
-    if (hwnd_) {
-      SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
-                   SWP_NOMOVE | SWP_NOZORDER);
-      resize_webview();
+    if (!hwnd_) {
+      return;
     }
+    SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    apply_rounded_window_region();
+    resize_webview();
   }
 
   void apply_dpi_changed_bounds(UINT dpi, const RECT *suggested_rect) {
@@ -722,7 +884,34 @@ public:
       SetWindowPos(hwnd_, nullptr, 0, 0, bounds.width, bounds.height,
                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    apply_rounded_window_region();
     resize_webview();
+  }
+
+  LRESULT hit_test_custom_frame(LPARAM lparam) const {
+    if (!hwnd_) {
+      return HTCLIENT;
+    }
+    POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    RECT window{};
+    if (!GetWindowRect(hwnd_, &window)) {
+      return HTCLIENT;
+    }
+    const int x = point.x - window.left;
+    const int y = point.y - window.top;
+    const int width = window.right - window.left;
+    const UINT dpi = dpi_for_window(hwnd_);
+    const int titlebar_height =
+        MulDiv(kCustomTitlebarHeightPx, dpi, kDefaultDpi);
+    const int controls_width =
+        MulDiv(kWindowControlWidthPx, dpi, kDefaultDpi);
+    if (y >= 0 && y < titlebar_height) {
+      if (x >= width - controls_width && x < width) {
+        return HTCLIENT;
+      }
+      return HTCAPTION;
+    }
+    return HTCLIENT;
   }
 
   void show_tray_menu() {
@@ -825,7 +1014,22 @@ private:
                             kFixedWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                             bounds.width, bounds.height, nullptr, nullptr,
                             instance_, this);
+    if (hwnd_) {
+      install_custom_frame_style();
+      apply_rounded_window_region();
+    }
     return hwnd_ != nullptr;
+  }
+
+  void install_custom_frame_style() {
+    if (!hwnd_) {
+      return;
+    }
+    const LONG_PTR style = GetWindowLongPtrW(hwnd_, GWL_STYLE);
+    SetWindowLongPtrW(hwnd_, GWL_STYLE, style & ~WS_CAPTION);
+    SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE);
   }
 
   void install_renderer_bridge() {
@@ -912,8 +1116,12 @@ private:
       killStaleCore: (confirm) => rpc('maintenance.killStaleCore', { confirm }),
     },
     window: {
-      setMode: (mode) => rpc('window.setMode', { mode }),
+      setMode: (mode, request) => rpc('window.resizeForMode', { mode, request }),
+      resizeForMode: (mode, request) => rpc('window.resizeForMode', { mode, request }),
+      minimize: () => rpc('window.minimize'),
+      requestClose: () => rpc('window.requestClose'),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
+      startDrag: () => rpc('window.startDrag'),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -972,7 +1180,17 @@ private:
         return 0;
       }
       switch (message) {
+      case WM_NCCALCSIZE:
+        return 0;
+      case WM_NCHITTEST: {
+        const LRESULT hit = self->hit_test_custom_frame(lparam);
+        if (hit != HTCLIENT) {
+          return hit;
+        }
+        break;
+      }
       case WM_SIZE:
+        self->apply_rounded_window_region();
         self->resize_webview();
         return 0;
       case WM_DPICHANGED:
@@ -1037,6 +1255,7 @@ private:
   UINT taskbar_created_message_ = 0;
   std::string current_window_mode_ = "advanced";
   std::string pending_window_mode_;
+  std::uint64_t latest_window_mode_request_ = 0;
   bool host_request_stop_ = false;
   bool tray_icon_added_ = false;
   bool force_quit_ = false;

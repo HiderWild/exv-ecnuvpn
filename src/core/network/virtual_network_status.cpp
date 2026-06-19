@@ -14,6 +14,11 @@ namespace ecnuvpn {
 namespace virtual_network {
 namespace {
 
+testing::VirtualNetworkProbeProvider &probe_provider_for_testing() {
+  static testing::VirtualNetworkProbeProvider provider = nullptr;
+  return provider;
+}
+
 std::string join_adapter_names(const std::vector<AdapterInfo> &adapters) {
   std::string joined;
   for (size_t i = 0; i < adapters.size(); ++i) {
@@ -39,7 +44,11 @@ void finalize_detection(Detection *detection) {
 
 Detection detect_upstream_virtual_network(const std::string &exv_interface) {
   Detection detection;
-  detection.adapters = platform::detect_virtual_network_adapters(exv_interface);
+  if (auto provider = probe_provider_for_testing()) {
+    detection.adapters = provider(exv_interface);
+  } else {
+    detection.adapters = platform::detect_virtual_network_adapters(exv_interface);
+  }
   finalize_detection(&detection);
   return detection;
 }
@@ -80,6 +89,15 @@ void print_notice(const Detection &detection) {
     return;
   cli::print_warning(detection.message);
 }
+
+namespace testing {
+
+void set_virtual_network_probe_provider_for_testing(
+    VirtualNetworkProbeProvider provider) {
+  probe_provider_for_testing() = provider;
+}
+
+} // namespace testing
 
 } // namespace virtual_network
 } // namespace ecnuvpn
