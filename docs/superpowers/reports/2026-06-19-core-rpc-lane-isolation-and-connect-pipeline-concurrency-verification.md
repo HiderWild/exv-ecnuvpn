@@ -101,6 +101,10 @@ Follow-up correction after `ebfd09d`:
 
 ## Manual Verification
 
+Support tool:
+
+- `scripts/manual-phase7-vpn-verification.ps1` captures the remaining interactive Phase 7 evidence without changing VPN configuration or collecting credentials. It can launch the packaged Windows UI, or run with `-NoLaunch` while an existing UI is already open, sample `exv-ui`/`exv`/`exv-helper` process responsiveness without process command lines, save a redacted connect-stage log summary by default, and create `manual-observation.md` under `build/manual-verification/`. Raw current-session log delta capture is opt-in via `-IncludeRawLogDelta` and is redacted before writing. Use this when reproducing the reported stuck/non-responsive state so the process samples and log summary are attached to the observation.
+
 Partially run:
 
 - Packaged Windows WebView shell launch.
