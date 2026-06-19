@@ -17,6 +17,7 @@ import type {
   LogEntry,
   RouteEntry,
   ServiceStatus,
+  ServiceOperationResult,
   ServiceProgressEntry,
   AuthInteractionPollResponse,
   VpnStatus,
@@ -90,7 +91,7 @@ export interface EcnuVpnApi {
   vpn: {
     connect(password?: string): Promise<VpnStatus | VpnConnectAccepted>
     disconnect(): Promise<VpnStatus | VpnConnectAccepted>
-    connectElevated(password?: string): Promise<VpnStatus | VpnError>
+    connectElevated(password?: string): Promise<VpnStatus | VpnConnectAccepted | VpnError>
     disconnectElevated(backend?: unknown): Promise<VpnStatus | VpnError>
     authInteraction(): Promise<AuthInteractionPollResponse>
     respondAuthInteraction(id: string, value: string): Promise<{ ok: true }>
@@ -120,8 +121,8 @@ export interface EcnuVpnApi {
   }
   service: {
     status(): Promise<ServiceStatus>
-    install(): Promise<ServiceStatus>
-    uninstall(): Promise<ServiceStatus>
+    install(): Promise<ServiceStatus | ServiceOperationResult>
+    uninstall(): Promise<ServiceStatus | ServiceOperationResult>
   }
   cli: {
     status(): Promise<CliInstallStatus>

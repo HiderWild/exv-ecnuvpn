@@ -34,6 +34,7 @@ export interface VpnStatus {
   log_path?: string
   mode?: 'helper' | 'direct' | 'elevated' | 'disconnected'
   backend?: unknown
+  phase?: string
   error?: string
   error_code?: string
   error_recoverable?: boolean
@@ -80,6 +81,16 @@ export interface ServiceStatus {
   binary_path?: string
   service_state?: number
   warning?: string
+}
+
+export interface ServiceOperationResult {
+  operation?: {
+    success?: boolean
+    exit_code?: number
+    message?: string
+  }
+  service_status?: ServiceStatus
+  handoff?: unknown
 }
 
 export interface ServiceProgressEntry {
@@ -188,6 +199,18 @@ function isVpnConnectAccepted(data: unknown): data is VpnConnectAccepted {
   return data != null &&
     typeof data === 'object' &&
     (data as Record<string, unknown>).accepted === true
+}
+
+function serviceStatusFromOperationResult(data: ServiceStatus | ServiceOperationResult) {
+  if (
+    data &&
+    typeof data === 'object' &&
+    'service_status' in data &&
+    (data as ServiceOperationResult).service_status
+  ) {
+    return (data as ServiceOperationResult).service_status as ServiceStatus
+  }
+  return data as ServiceStatus
 }
 
 function isElevationCancelledMessage(message: string) {
@@ -384,6 +407,23 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
   },
 }
 
+// Raw backend codes that historically have not gone through
+// feedback::resolve_error_code — or that we want the renderer to defend
+// against even if the backend mapping regresses. Each entry rewrites the raw
+// code to a canonical key in `contractErrorMap` so the descriptor lookup
+// produces the right view (e.g. view_logs) instead of falling through to a
+// credential prompt. See docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §4.
+const rawCodeAliases: Record<string, string> = {
+  // aggregate-auth framing failures: the gateway response is malformed,
+  // not the password.
+  auth_response_invalid: 'auth_protocol_mismatch',
+  auth_response_too_large: 'auth_protocol_mismatch',
+}
+
+function canonicalizeRawCode(code: string): string {
+  return rawCodeAliases[code] ?? code
+}
+
 export function normalizeError(raw: unknown): VpnError {
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
@@ -400,15 +440,18 @@ export function normalizeError(raw: unknown): VpnError {
     // Canonical backend code is the single source of truth. The feedback module
     // guarantees a non-empty code plus recoverable/recommended_action; this
     // table only supplies a localized label and default action fallback.
-    if (typeof obj.code === 'string' && obj.code in contractErrorMap) {
-      const descriptor = contractErrorMap[obj.code]
-      return {
-        ok: false,
-        error_type: descriptor.error_type,
-        message: String(obj.message || obj.error || descriptor.message),
-        recoverable: obj.recoverable !== undefined ? !!obj.recoverable : descriptor.recoverable,
-        recommended_action: String(obj.recommended_action || descriptor.recommended_action),
-        timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
+    if (typeof obj.code === 'string') {
+      const canonical = canonicalizeRawCode(obj.code)
+      if (canonical in contractErrorMap) {
+        const descriptor = contractErrorMap[canonical]
+        return {
+          ok: false,
+          error_type: descriptor.error_type,
+          message: String(obj.message || obj.error || descriptor.message),
+          recoverable: obj.recoverable !== undefined ? !!obj.recoverable : descriptor.recoverable,
+          recommended_action: String(obj.recommended_action || descriptor.recommended_action),
+          timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
+        }
       }
     }
     if (obj.ok === false && obj.message) {
@@ -493,6 +536,7 @@ export const useVpnStore = defineStore('vpn', () => {
   const activeTemporaryBackend = ref<unknown | null>(null)
   const connectInFlight = ref(false)
   const disconnectInFlight = ref(false)
+  const activeConnectMode = ref<'helper' | 'elevated' | null>(null)
   const pendingAuthInteraction = ref<AuthInteraction | null>(null)
   const authInteractionBusy = ref(false)
   const connectionProgressStartedAt = ref<number | null>(null)
@@ -610,17 +654,24 @@ export const useVpnStore = defineStore('vpn', () => {
     startUptimeTimer()
   }
 
+  function isTerminalConnectStatus(nextStatus: VpnStatus) {
+    return Boolean(
+      nextStatus.connected ||
+      nextStatus.error_code ||
+      nextStatus.phase === 'failed',
+    )
+  }
+
   function applyStatus(nextStatus: VpnStatus) {
     status.value = nextStatus
     syncUptime(nextStatus)
-    if (connectInFlight.value && (nextStatus.connected || nextStatus.process_running === false)) {
+    if (connectInFlight.value && isTerminalConnectStatus(nextStatus)) {
       if (
         !nextStatus.connected &&
-        nextStatus.process_running === false &&
         nextStatus.error_code &&
         nextStatus.error_code !== 'user_cancelled'
       ) {
-        lastFailedConnectMode.value = 'helper'
+        lastFailedConnectMode.value = activeConnectMode.value ?? 'helper'
         setError(normalizeError({
           ok: false,
           code: nextStatus.error_code,
@@ -629,6 +680,7 @@ export const useVpnStore = defineStore('vpn', () => {
         }))
       }
       connectInFlight.value = false
+      activeConnectMode.value = null
       loading.value = false
       stopConnectStatusPolling()
       stopAuthInteractionPolling()
@@ -1049,6 +1101,7 @@ export const useVpnStore = defineStore('vpn', () => {
     lastActionWasElevatedConnect.value = false
     lastMutatingAction.value = connect
     connectInFlight.value = true
+    activeConnectMode.value = 'helper'
     startConnectionProgress(2)
     startAuthInteractionPolling()
     let acceptedByBackend = false
@@ -1079,6 +1132,7 @@ export const useVpnStore = defineStore('vpn', () => {
     } finally {
       if (!acceptedByBackend) {
         connectInFlight.value = false
+        activeConnectMode.value = null
         stopConnectStatusPolling()
         stopAuthInteractionPolling()
         stopConnectionProgress()
@@ -1092,6 +1146,7 @@ export const useVpnStore = defineStore('vpn', () => {
   async function cancelConnect(): Promise<boolean> {
     if (!connectInFlight.value) return false
     connectInFlight.value = false
+    activeConnectMode.value = null
     disconnectInFlight.value = false
     loading.value = false
     stopConnectStatusPolling()
@@ -1117,6 +1172,7 @@ export const useVpnStore = defineStore('vpn', () => {
       return normalized.error_type === 'user_cancelled'
     } finally {
       connectInFlight.value = false
+      activeConnectMode.value = null
       disconnectInFlight.value = false
       loading.value = false
       stopConnectStatusPolling()
@@ -1153,21 +1209,29 @@ export const useVpnStore = defineStore('vpn', () => {
     lastActionWasElevatedConnect.value = true
     lastMutatingAction.value = connectElevated
     connectInFlight.value = true
+    activeConnectMode.value = 'elevated'
     startConnectionProgress(0, 2)
     startAuthInteractionPolling()
+    let acceptedByBackend = false
     try {
       const password = providedPassword !== undefined
         ? providedPassword
         : await resolveConnectPassword()
       if (password === null) return false
 
-      const { data } = await api.post<VpnStatus | VpnError>(
+      const { data } = await api.post<VpnStatus | VpnConnectAccepted | VpnError>(
         '/connect/elevated',
         password === undefined ? undefined : { password },
       )
       if (isVpnError(data)) {
         if (isCredentialFailureType(data.error_type)) lastFailedConnectMode.value = 'elevated'
         setError(data)
+      } else if (isVpnConnectAccepted(data)) {
+        acceptedByBackend = true
+        connectInFlight.value = true
+        startConnectStatusPolling()
+        loading.value = false
+        return true
       } else {
         const elevatedStatus = { ...data, mode: data.mode ?? 'elevated' }
         applyStatus(elevatedStatus)
@@ -1184,9 +1248,13 @@ export const useVpnStore = defineStore('vpn', () => {
       setError(normalized)
     } finally {
       lastActionWasElevatedConnect.value = false
-      connectInFlight.value = false
-      stopAuthInteractionPolling()
-      stopConnectionProgress()
+      if (!acceptedByBackend) {
+        connectInFlight.value = false
+        activeConnectMode.value = null
+        stopConnectStatusPolling()
+        stopAuthInteractionPolling()
+        stopConnectionProgress()
+      }
       loading.value = false
     }
 
@@ -1208,9 +1276,11 @@ export const useVpnStore = defineStore('vpn', () => {
       return
     }
 
-    if (installServiceFirst) {
+    const shouldInstallService = installServiceFirst && !serviceInstalled.value && !serviceAvailable.value
+    if (shouldInstallService) {
       const installed = await installService()
       if (!installed) return
+      await fetchServiceStatus()
       await connect()
       return
     }
@@ -1307,10 +1377,11 @@ export const useVpnStore = defineStore('vpn', () => {
       clearError()
       lastMutatingAction.value = installService
       try {
-        const { data } = await api.post<ServiceStatus>('/service/install')
-        serviceStatus.value = data
-        if (data.warning || !data.available) {
-          throw new Error(data.warning || 'Helper service is not available after install.')
+        const { data } = await api.post<ServiceStatus | ServiceOperationResult>('/service/install')
+        const nextStatus = serviceStatusFromOperationResult(data)
+        serviceStatus.value = nextStatus
+        if (nextStatus.warning || !nextStatus.available) {
+          throw new Error(nextStatus.warning || 'Helper service is not available after install.')
         }
         await fetchAppShellState()
         return true
@@ -1336,10 +1407,11 @@ export const useVpnStore = defineStore('vpn', () => {
       clearError()
       lastMutatingAction.value = uninstallService
       try {
-        const { data } = await api.post<ServiceStatus>('/service/uninstall')
-        serviceStatus.value = data
-        if (data.warning || data.installed) {
-          throw new Error(data.warning || 'Helper service is still installed after uninstall.')
+        const { data } = await api.post<ServiceStatus | ServiceOperationResult>('/service/uninstall')
+        const nextStatus = serviceStatusFromOperationResult(data)
+        serviceStatus.value = nextStatus
+        if (nextStatus.warning || nextStatus.installed) {
+          throw new Error(nextStatus.warning || 'Helper service is still installed after uninstall.')
         }
         await fetchAppShellState()
         return true

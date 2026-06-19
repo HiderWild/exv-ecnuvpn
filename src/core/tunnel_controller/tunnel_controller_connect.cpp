@@ -122,6 +122,8 @@ bool TunnelController::Impl::prepare_tunnel_device_for_session(
         if (!device) return false;
 
         timing_.timer.start(ConnectTiming::PACKET_DEVICE);
+        log_tunnel_event("INFO", "tunnel.device.preparing", "Preparing tunnel device",
+                         {{"adapter", adapter_name_}});
         transition_to(TunnelPhase::OpeningPacketDevice);
 
         try {
@@ -314,6 +316,8 @@ void TunnelController::Impl::do_connect() {
         transition_to(TunnelPhase::PreparingHelper);
 
         try {
+            log_tunnel_event("INFO", "helper.hello.starting",
+                             "Requesting helper status");
             auto hello = helper_->hello(exv::helper::HelloRequest{});
             helper_connected_seen_ = true;
             helper_mode_ = helper_mode_wire_name(hello.mode);
@@ -330,6 +334,9 @@ void TunnelController::Impl::do_connect() {
             req.profile_id.value = intent_.profile_id.value;
             req.mode = exv::helper::HelperMode::Transient;
 
+            log_tunnel_event("INFO", "helper.session.starting",
+                             "Starting helper session",
+                             {{"profile_id", req.profile_id.value}});
             auto resp = helper_->start_session(req);
             if (resp.session_id.value.empty()) {
                 timing_.timer.end(ConnectTiming::HELPER_PREPARE);
@@ -370,6 +377,11 @@ void TunnelController::Impl::do_connect() {
             // Real engine path — start CoreSessionRunner.
             // The event callback is already wired up (set in init_runner).
             bool ok = false;
+            log_tunnel_event("INFO", "native.runner.starting",
+                             "Starting native engine session",
+                             {{"source", prepared_native_handshake_
+                                             ? "prepared_handshake"
+                                             : "direct"}});
             if (prepared_native_handshake_) {
                 auto prepared = std::move(*prepared_native_handshake_);
                 prepared_native_handshake_.reset();
@@ -446,6 +458,9 @@ bool TunnelController::Impl::acquire_core_lease() {
         req.purpose = "vpn.connect";
 
         try {
+            log_tunnel_event("INFO", "core_lease.acquire.starting",
+                             "Acquiring helper core lease",
+                             {{"purpose", req.purpose}});
             auto resp = helper_->acquire_core_lease(req);
             if (!resp.accepted || resp.lease_id.empty()) {
                 helper_status_override_ = "core_lease_failed";

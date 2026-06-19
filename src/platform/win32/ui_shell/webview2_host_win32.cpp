@@ -787,9 +787,20 @@ public:
     if (!hwnd_) {
       return;
     }
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) {
+      return;
+    }
+
+    if (GetForegroundWindow() != hwnd_) {
+      SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+      SetForegroundWindow(hwnd_);
+    }
+
     ReleaseCapture();
     SendMessageW(hwnd_, WM_NCLBUTTONDOWN, HTCAPTION,
-                 static_cast<LPARAM>(GetMessagePos()));
+                 MAKELPARAM(cursor.x, cursor.y));
   }
 
   void quit_from_tray() {
@@ -1180,6 +1191,8 @@ private:
         return 0;
       }
       switch (message) {
+      case WM_MOUSEACTIVATE:
+        return MA_ACTIVATE;
       case WM_NCCALCSIZE:
         return 0;
       case WM_NCHITTEST: {

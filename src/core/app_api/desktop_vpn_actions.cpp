@@ -11,6 +11,7 @@
 #include "core/crypto/crypto.hpp"
 #include "core/rpc/desktop_rpc_adapter.hpp"
 #include "core/tunnel_controller/connect_pipeline.hpp"
+#include "core/tunnel_controller/engine_event_bridge.hpp"
 #include "core/tunnel_controller/native_engine_config_mapper.hpp"
 #include "core/tunnel_controller/timing.hpp"
 #include "core/tunnel_controller/tunnel_controller.hpp"
@@ -257,6 +258,22 @@ void apply_desktop_connect_error(nlohmann::json *status) {
       json_string(*failure, "recommended_action");
 }
 
+void apply_desktop_connect_job_status(nlohmann::json *status) {
+  if (!status) return;
+  auto state = g_desktop_connect_jobs.snapshot();
+  if (!state.active || !state.desired_connected) {
+    return;
+  }
+
+  (*status)["connected"] = false;
+  (*status)["process_running"] = true;
+  (*status)["network_ready"] = false;
+  (*status)["phase"] = state.phase.empty() ? "connecting" : state.phase;
+  (*status)["connect_job_id"] = state.job_id;
+  (*status)["connect_intent_epoch"] = state.intent_epoch;
+  (*status)["connect_cancelling"] = state.cancelling;
+}
+
 void cleanup_unused_oneshot_backend(const nlohmann::json &backend) {
   if (!backend.is_object() || backend.value("mode", std::string()) != "oneshot") {
     return;
@@ -294,6 +311,8 @@ void run_desktop_connect_job(Config cfg,
                              std::string attempt_id,
                              std::stop_token stop) {
   StageTimer timing("desktop.connect.background");
+  timing.mark("background_job_started",
+              attempt_id.empty() ? "attempt_id=none" : "attempt_id=present");
   testing::fire_desktop_vpn_connect_entered_hook();
   if (stop.stop_requested()) {
     return;
@@ -315,7 +334,7 @@ void run_desktop_connect_job(Config cfg,
       });
 
   auto backend_branch = [attempt_id](
-                            [[maybe_unused]] std::stop_token branch_stop) {
+                             [[maybe_unused]] std::stop_token branch_stop) {
     StageTimer branch_timing("desktop.connect.backend_helper_ready");
     platform::BackendResolveOptions options;
     options.preferred_mode = "auto";
@@ -324,6 +343,8 @@ void run_desktop_connect_job(Config cfg,
     options.allow_service_start = false;
     options.helper_path = helper_binary_next_to_exv();
 
+    branch_timing.mark("backend_resolve_started",
+                       "preferred_mode=auto allow_oneshot=true");
     nlohmann::json backend = platform::resolve_backend(options);
     const bool backend_ok = backend.value("ok", false);
     exv::observability::LogFacade::info(
@@ -373,6 +394,7 @@ void run_desktop_connect_job(Config cfg,
           nlohmann::json::object()};
     }
 
+    branch_timing.mark("runtime_status_check_started");
     nlohmann::json runtime = runtime_status_json(cfg);
     if (!runtime.value("available", false)) {
       branch_timing.finish(false, "code=runtime_unavailable");
@@ -385,6 +407,7 @@ void run_desktop_connect_job(Config cfg,
           nlohmann::json{{"runtime", runtime}}};
     }
 
+    branch_timing.mark("platform_checks_started");
     nlohmann::json platform_err =
         platform::preflight_connect_platform_checks(
             config::to_platform_config_view(cfg));
@@ -418,9 +441,10 @@ void run_desktop_connect_job(Config cfg,
   };
 
   auto protocol_branch = [cfg, password, prepared_handshake](
-                             std::stop_token branch_stop) mutable {
+                              std::stop_token branch_stop) mutable {
     StageTimer branch_timing("desktop.connect.protocol_handshake");
     ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+    branch_timing.mark("native_config_mapping_started");
     auto mapped =
         exv::core::make_native_engine_config(cfg, password, &engine_config);
     if (!mapped.ok) {
@@ -434,8 +458,20 @@ void run_desktop_connect_job(Config cfg,
     }
 
     auto deps = ecnuvpn::vpn_engine::default_native_engine_dependencies();
+    // Reuse EngineEventBridge as a log-only sink: the prepared-handshake job
+    // still emits auth.started / auth.failed / cstp.failed events even though
+    // we are not adopting a runner yet. Without a sink they vanish, leaving
+    // operators with no log trail for the most common failure layer of a real
+    // connect attempt. The bridge already filters noisy events, classifies
+    // severity, and redacts secret-bearing message and field text — passing
+    // nullptr as the TunnelEvent callback turns it into a pure log emitter
+    // without any controller coupling. See
+    // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §5.
+    exv::core::EngineEventBridge protocol_event_logger(nullptr);
+    deps.event_sink = &protocol_event_logger;
     ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
     ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config, deps);
+    branch_timing.mark("native_handshake_started");
     auto result = job.run(branch_stop, &handshake);
     if (!result.ok) {
       branch_timing.finish(false, "code=" + result.code);
@@ -528,9 +564,8 @@ void run_desktop_connect_job(Config cfg,
   reset_tunnel_controller();
   timing.mark("reset_controller", "stale_state_cleared");
 
-  exv::observability::LogFacade::info(
-      "app_api: Initializing TunnelController - endpoint=" +
-      (helper_endpoint.empty() ? "default" : helper_endpoint));
+  timing.mark("tunnel_controller_init_start",
+              helper_endpoint.empty() ? "endpoint=default" : "endpoint=custom");
   exv::observability::LogFacade::info(
       "app_api: Initializing TunnelController - endpoint=" +
       (helper_endpoint.empty() ? "default" : helper_endpoint));
@@ -556,6 +591,7 @@ void run_desktop_connect_job(Config cfg,
     return;
   }
 
+  timing.mark("tunnel_controller_config_start");
   controller->set_vpn_config(cfg, password);
   {
     std::lock_guard<std::mutex> lock(prepared_handshake->mutex);
@@ -576,6 +612,7 @@ void run_desktop_connect_job(Config cfg,
   intent.desired_connected = true;
   intent.auto_reconnect = cfg.auto_reconnect;
   intent.profile_id.value = cfg.server;
+  timing.mark("tunnel_controller_connect_start");
   exv::observability::LogFacade::info(
       "app_api: Calling TunnelController::connect - server=" + cfg.server);
   exv::observability::LogFacade::info(
@@ -618,6 +655,7 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
           return frontend_status_from_controller_snapshot(snap, cfg);
         }
         auto status = disconnected_status(cfg);
+        apply_desktop_connect_job_status(&status);
         apply_desktop_connect_error(&status);
         return status;
       });
