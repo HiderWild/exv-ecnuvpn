@@ -12,6 +12,7 @@ import ErrorDialog from './components/ErrorDialog.vue'
 import MinimalModeView from './components/MinimalModeView.vue'
 import ModalShell from './components/ModalShell.vue'
 import PasswordPromptDialog from './components/PasswordPromptDialog.vue'
+import QuickStartDialog from './components/QuickStartDialog.vue'
 import ServiceInstallLoadingOverlay from './components/ServiceInstallLoadingOverlay.vue'
 import ToastStack from './components/Toast.vue'
 import { useSSE } from './composables/useSSE'
@@ -214,6 +215,7 @@ async function handleCoreQuit() {
     <ConfirmDialog />
     <AuthContinuationDialog />
     <CredentialPromptDialog />
+    <QuickStartDialog />
     <PasswordPromptDialog />
     <ToastStack />
   </AppWindowFrame>

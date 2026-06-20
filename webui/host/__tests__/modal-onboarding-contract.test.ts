@@ -82,4 +82,20 @@ describe('modal onboarding and credential contracts', () => {
     assert.match(vpnStore, /remember_password: credentials\.rememberPassword/)
     assert.match(vpnStore, /password: credentials\.rememberPassword \? credentials\.password/)
   })
+
+  it('quick start supports quick/custom modes, import, skip, and service install default', () => {
+    const dialog = readSource('src', 'components', 'QuickStartDialog.vue')
+    const app = readSource('src', 'App.vue')
+
+    assert.match(dialog, /mode = ref<'quick' \| 'custom'>\('quick'\)/)
+    assert.match(dialog, /vpn-ct\.ecnu\.edu\.cn/)
+    assert.match(dialog, /remember_password:\s*true/)
+    assert.match(dialog, /installService/)
+    assert.match(dialog, /TokenInput/)
+    assert.match(dialog, /settingsForm\.mtu/)
+    assert.match(dialog, /settingsForm\.dtls/)
+    assert.match(dialog, /importConfig/)
+    assert.match(dialog, /skip\(\)/)
+    assert.match(app, /<QuickStartDialog \/>/)
+  })
 })
