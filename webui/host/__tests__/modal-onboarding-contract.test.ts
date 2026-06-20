@@ -98,4 +98,14 @@ describe('modal onboarding and credential contracts', () => {
     assert.match(dialog, /skip\(\)/)
     assert.match(app, /<QuickStartDialog \/>/)
   })
+
+  it('styles native select options with readable dark theme colors', () => {
+    const settings = readSource('src', 'pages', 'SettingsPage.vue')
+    const css = readSource('src', 'style.css')
+
+    assert.match(settings, /class="[^"]*exv-select/)
+    assert.match(css, /\.exv-select option/)
+    assert.match(css, /background:\s*#0f172a/)
+    assert.match(css, /color:\s*#f8fafc/)
+  })
 })

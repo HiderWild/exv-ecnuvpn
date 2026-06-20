@@ -32,6 +32,20 @@ body {
   background: transparent;
 }
 
+.exv-select {
+  color-scheme: dark;
+}
+
+.exv-select option {
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.exv-select option:checked {
+  background: #1e293b;
+  color: #ffffff;
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;

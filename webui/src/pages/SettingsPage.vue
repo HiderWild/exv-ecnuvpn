@@ -689,7 +689,7 @@ function killStaleCoreAction() {
                 <Server class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                 <select
                   v-model="serverChoice"
-                  class="w-full appearance-none rounded-lg border border-border bg-background py-2.5 pl-10 pr-4 text-sm text-foreground focus:border-accent focus:outline-none"
+                  class="exv-select w-full appearance-none rounded-lg border border-border bg-background py-2.5 pl-10 pr-4 text-sm text-foreground focus:border-accent focus:outline-none"
                 >
                   <option v-for="server in serverOptions" :key="server" :value="server">
                     {{ server }}
@@ -1096,7 +1096,7 @@ function killStaleCoreAction() {
                     <label class="mb-1.5 block text-xs font-medium text-muted">Windows 隧道驱动</label>
                     <select
                       v-model="settingsForm.windows_tunnel_driver"
-                      class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
+                      class="exv-select w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none"
                     >
                       <option value="auto">自动（优先 Wintun）</option>
                       <option value="wintun">Wintun</option>
@@ -1109,7 +1109,7 @@ function killStaleCoreAction() {
                     <select
                       v-model="settingsForm.windows_tap_interface"
                       :disabled="tapAdapters.length === 0"
-                      class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none disabled:opacity-50"
+                      class="exv-select w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none disabled:opacity-50"
                     >
                       <option value="">选择 TAP 适配器</option>
                       <option v-for="adapter in tapAdapters" :key="adapter" :value="adapter">
