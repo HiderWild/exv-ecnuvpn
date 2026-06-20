@@ -9,6 +9,7 @@ import AuthContinuationDialog from './components/AuthContinuationDialog.vue'
 import CoreCrashed from './components/CoreCrashed.vue'
 import ErrorDialog from './components/ErrorDialog.vue'
 import MinimalModeView from './components/MinimalModeView.vue'
+import ModalShell from './components/ModalShell.vue'
 import PasswordPromptDialog from './components/PasswordPromptDialog.vue'
 import ServiceInstallLoadingOverlay from './components/ServiceInstallLoadingOverlay.vue'
 import ToastStack from './components/Toast.vue'
@@ -122,23 +123,18 @@ async function handleCoreQuit() {
         </div>
       </main>
     </div>
-  </AppWindowFrame>
 
-  <div
-    v-if="closePromptVisible"
-    class="fixed inset-0 z-50 grid place-items-center bg-black/55 px-4 backdrop-blur-sm"
-  >
-    <section class="w-full max-w-md rounded-lg border border-border bg-surface p-5 shadow-xl shadow-black/30">
-      <div class="flex items-start gap-2.5">
-        <div class="mt-0.5 grid h-5 w-5 shrink-0 place-items-center text-warning">
-          !
-        </div>
-        <div class="min-w-0">
-          <h2 class="text-base font-semibold text-foreground">关闭 EXV for ECNU</h2>
-          <p class="mt-2 text-sm leading-6 text-muted">选择关闭窗口后的处理方式。</p>
-        </div>
-      </div>
-
+    <ModalShell
+      :open="closePromptVisible"
+      title="关闭 EXV"
+      description="选择关闭窗口后的处理方式。"
+      :close-on-scrim="!closePromptBusy"
+      size="md"
+      @close="resolveClosePrompt('cancel')"
+    >
+      <template #icon>
+        <span class="text-sm font-semibold text-warning">!</span>
+      </template>
       <fieldset class="mt-4 space-y-2">
         <label
           class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors"
@@ -182,7 +178,7 @@ async function handleCoreQuit() {
         <span>记住我的选择</span>
       </label>
 
-      <div class="mt-5 flex justify-end gap-2">
+      <template #actions>
         <button
           type="button"
           :disabled="closePromptBusy"
@@ -200,25 +196,25 @@ async function handleCoreQuit() {
         >
           确认
         </button>
-      </div>
-    </section>
-  </div>
+      </template>
+    </ModalShell>
 
-  <ServiceInstallLoadingOverlay
-    v-if="vpn.serviceOverlayOperation"
-    :message="serviceOverlayMessage"
-  />
-  <CoreCrashed
-    v-if="coreCrashed"
-    :exit-code="coreCrashInfo?.exitCode ?? null"
-    @restart="handleCoreRestart"
-    @quit="handleCoreQuit"
-  />
-  <ErrorDialog />
-  <ConfirmDialog />
-  <AuthContinuationDialog />
-  <PasswordPromptDialog />
-  <ToastStack />
+    <ServiceInstallLoadingOverlay
+      v-if="vpn.serviceOverlayOperation"
+      :message="serviceOverlayMessage"
+    />
+    <CoreCrashed
+      v-if="coreCrashed"
+      :exit-code="coreCrashInfo?.exitCode ?? null"
+      @restart="handleCoreRestart"
+      @quit="handleCoreQuit"
+    />
+    <ErrorDialog />
+    <ConfirmDialog />
+    <AuthContinuationDialog />
+    <PasswordPromptDialog />
+    <ToastStack />
+  </AppWindowFrame>
 </template>
 
 <style scoped>

@@ -43,4 +43,29 @@ describe('modal onboarding and credential contracts', () => {
     assert.doesNotMatch(app, /markServicePromptSeen/)
     assert.doesNotMatch(app, /serviceInstallPrompt\(/)
   })
+
+  it('mounts all in-window modals through the shared clipped modal shell', () => {
+    const app = readSource('src', 'App.vue')
+    const modalShell = readSource('src', 'components', 'ModalShell.vue')
+    const modalConsumers = [
+      'ErrorDialog.vue',
+      'ConfirmDialog.vue',
+      'AuthContinuationDialog.vue',
+      'CoreCrashed.vue',
+      'ServiceInstallLoadingOverlay.vue',
+    ]
+
+    assert.match(modalShell, /class="modal-shell__scrim"/)
+    assert.match(modalShell, /position:\s*absolute/)
+    assert.match(modalShell, /inset:\s*0/)
+    assert.doesNotMatch(modalShell, /Teleport/)
+    assert.match(app, /<ErrorDialog \/>[\s\S]*<\/AppWindowFrame>/)
+
+    for (const file of modalConsumers) {
+      const source = readSource('src', 'components', file)
+      assert.match(source, /ModalShell/)
+      assert.doesNotMatch(source, /fixed inset-0/)
+      assert.doesNotMatch(source, /Teleport/)
+    }
+  })
 })

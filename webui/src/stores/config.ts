@@ -86,6 +86,7 @@ export interface DriverStatus {
 export const useConfigStore = defineStore('config', () => {
   function readLocalBool(key: 'exv:minimal-mode', fallback: boolean) {
     if (typeof localStorage === 'undefined') return fallback
+    if (key !== 'exv:minimal-mode') return fallback
     const value = localStorage.getItem('exv:minimal-mode')
     if (value === 'true') return true
     if (value === 'false') return false
@@ -94,6 +95,7 @@ export const useConfigStore = defineStore('config', () => {
 
   function writeLocalBool(key: 'exv:minimal-mode', value: boolean) {
     if (typeof localStorage === 'undefined') return
+    if (key !== 'exv:minimal-mode') return
     localStorage.setItem('exv:minimal-mode', value ? 'true' : 'false')
   }
 
