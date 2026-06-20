@@ -6,6 +6,7 @@ import AppWindowFrame from './components/AppWindowFrame.vue'
 import NavBar from './components/NavBar.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import AuthContinuationDialog from './components/AuthContinuationDialog.vue'
+import CredentialPromptDialog from './components/CredentialPromptDialog.vue'
 import CoreCrashed from './components/CoreCrashed.vue'
 import ErrorDialog from './components/ErrorDialog.vue'
 import MinimalModeView from './components/MinimalModeView.vue'
@@ -212,6 +213,7 @@ async function handleCoreQuit() {
     <ErrorDialog />
     <ConfirmDialog />
     <AuthContinuationDialog />
+    <CredentialPromptDialog />
     <PasswordPromptDialog />
     <ToastStack />
   </AppWindowFrame>

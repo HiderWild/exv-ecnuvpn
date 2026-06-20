@@ -68,4 +68,18 @@ describe('modal onboarding and credential contracts', () => {
       assert.doesNotMatch(source, /Teleport/)
     }
   })
+
+  it('credential prompt supports missing username, missing password, and remembered password saves', () => {
+    const dialog = readSource('src', 'components', 'CredentialPromptDialog.vue')
+    const vpnStore = readSource('src', 'stores', 'vpn.ts')
+
+    assert.match(dialog, /missingUsername/)
+    assert.match(dialog, /missingPassword/)
+    assert.match(dialog, /rememberPassword/)
+    assert.match(dialog, /ui\.submitCredentialPrompt/)
+    assert.match(vpnStore, /const missingUsername = !auth\.username\.trim\(\)/)
+    assert.match(vpnStore, /const missingPassword = !\(auth\.remember_password && auth\.password_stored\)/)
+    assert.match(vpnStore, /remember_password: credentials\.rememberPassword/)
+    assert.match(vpnStore, /password: credentials\.rememberPassword \? credentials\.password/)
+  })
 })
