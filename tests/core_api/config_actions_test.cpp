@@ -174,6 +174,38 @@ int main() {
 
   {
     ConfigActionsFixture fix;
+    auto seed_resp = fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"https://test.example","username":"bob"})");
+    ok = expect(seed_resp.success,
+                "config.saveAuth seed should succeed before invalid save") &&
+         ok;
+
+    auto resp = fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"https://test.example","username":"","remember_password":true,"password":"secret"})");
+    ok = expect(!resp.success,
+                "config.saveAuth should reject remembered password without username") &&
+         ok;
+    ok = expect(resp.error_code == "invalid_payload",
+                "empty username with remembered password should be invalid_payload") &&
+         ok;
+    ok = expect(resp.error_message.find("username") != std::string::npos,
+                "validation error should mention username") &&
+         ok;
+
+    auto get_resp = fix.dispatch("config.getAuth");
+    auto payload = json::parse(get_resp.payload_json);
+    ok = expect(payload["username"] == "bob",
+                "invalid auth save should not partially clear username") &&
+         ok;
+    ok = expect(payload["password_stored"] == false,
+                "invalid auth save should not store the submitted password") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
     auto resp = fix.dispatch("config.getSettings");
     ok = expect(resp.success, "config.getSettings should succeed") && ok;
 
@@ -187,18 +219,92 @@ int main() {
     ok = expect(payload.contains("auto_reconnect"),
                 "config.getSettings should include auto_reconnect") &&
          ok;
+    ok = expect(payload.contains("include_class_a_private_routes"),
+                "config.getSettings should include class A private route toggle") &&
+         ok;
+    ok = expect(payload.contains("include_class_b_private_routes"),
+                "config.getSettings should include class B private route toggle") &&
+         ok;
+    ok = expect(payload.contains("launch_at_login"),
+                "config.getSettings should include launch at login toggle") &&
+         ok;
+    ok = expect(payload.contains("auto_connect_on_launch"),
+                "config.getSettings should include auto connect on launch toggle") &&
+         ok;
+    ok = expect(payload["include_class_a_private_routes"] == false,
+                "class A private route toggle should default to false") &&
+         ok;
+    ok = expect(payload["include_class_b_private_routes"] == false,
+                "class B private route toggle should default to false") &&
+         ok;
+    ok = expect(payload["launch_at_login"] == false,
+                "launch at login should default to false") &&
+         ok;
+    ok = expect(payload["auto_connect_on_launch"] == false,
+                "auto connect on launch should default to false") &&
+         ok;
   }
 
   {
     ConfigActionsFixture fix;
     auto resp = fix.dispatch("config.saveSettings",
-                             R"({"mtu":1500,"dtls":true,"auto_reconnect":true})");
+                             R"({"mtu":1500,"dtls":true,"auto_reconnect":true,"include_class_a_private_routes":true,"include_class_b_private_routes":true})");
     ok = expect(resp.success, "config.saveSettings should succeed") && ok;
 
     auto get_resp = fix.dispatch("config.getSettings");
     auto payload = json::parse(get_resp.payload_json);
     ok = expect(payload["mtu"] == 1500, "saved mtu should be 1500") && ok;
     ok = expect(payload["dtls"] == true, "saved dtls should be true") && ok;
+    ok = expect(payload["include_class_a_private_routes"] == true,
+                "saved class A private route toggle should be true") &&
+         ok;
+    ok = expect(payload["include_class_b_private_routes"] == true,
+                "saved class B private route toggle should be true") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    auto resp =
+        fix.dispatch("config.saveSettings",
+                     R"({"auto_connect_on_launch":true,"mtu":1200})");
+    ok = expect(!resp.success,
+                "config.saveSettings should reject auto connect on launch without remembered password and installed service") &&
+         ok;
+    ok = expect(resp.error_code == "invalid_payload",
+                "invalid auto connect on launch should return invalid_payload") &&
+         ok;
+
+    auto get_resp = fix.dispatch("config.getSettings");
+    auto payload = json::parse(get_resp.payload_json);
+    ok = expect(payload["auto_connect_on_launch"] == false,
+                "rejected auto connect on launch should remain false") &&
+         ok;
+    ok = expect(payload["mtu"] == 1290,
+                "rejected auto connect on launch should not partially apply mtu") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    auto resp = fix.dispatch(
+        "config.saveSettings",
+        R"({"dtls":false,"windows_tunnel_driver":"unsupported-driver"})");
+    ok = expect(!resp.success,
+                "config.saveSettings should reject invalid settings before applying any field") &&
+         ok;
+    ok = expect(resp.error_code == "invalid_payload",
+                "invalid settings should return invalid_payload") &&
+         ok;
+
+    auto get_resp = fix.dispatch("config.getSettings");
+    auto payload = json::parse(get_resp.payload_json);
+    ok = expect(payload["dtls"] == true,
+                "invalid settings save should not partially apply earlier valid fields") &&
+         ok;
+    ok = expect(payload["windows_tunnel_driver"] == "auto",
+                "invalid settings save should preserve previous driver choice") &&
+         ok;
   }
 
   {

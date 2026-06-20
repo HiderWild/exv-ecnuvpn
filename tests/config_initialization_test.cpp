@@ -52,7 +52,7 @@ json complete_config() {
       {"mtu", 1290},
       {"useragent", "test-agent"},
       {"disable_dtls", false},
-      {"remember_password", true},
+      {"remember_password", false},
       {"routes", json::array({"49.52.4.0/25"})},
       {"extra_args", json::array()},
       {"log_file", ""},
@@ -63,6 +63,10 @@ json complete_config() {
       {"minimal_mode", false},
       {"service_install_prompt_seen", false},
       {"minimal_install_service_before_connect", true},
+      {"include_class_a_private_routes", false},
+      {"include_class_b_private_routes", false},
+      {"launch_at_login", false},
+      {"auto_connect_on_launch", false},
   };
 }
 
@@ -85,6 +89,10 @@ bool has_minimal_required_fields(const json &cfg) {
       "minimal_mode",
       "service_install_prompt_seen",
       "minimal_install_service_before_connect",
+      "include_class_a_private_routes",
+      "include_class_b_private_routes",
+      "launch_at_login",
+      "auto_connect_on_launch",
   };
   for (const char *field : fields) {
     if (!cfg.contains(field)) {
@@ -114,6 +122,9 @@ int main() {
          ok;
     ok = expect(has_minimal_required_fields(read_json(dir)),
                 "missing config writes every minimal field") &&
+         ok;
+    ok = expect(read_json(dir).value("remember_password", true) == false,
+                "missing config writes remember_password false by default") &&
          ok;
     std::filesystem::remove_all(dir);
   }

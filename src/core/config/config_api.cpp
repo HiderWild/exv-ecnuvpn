@@ -13,7 +13,7 @@
 #include <cctype>
 #include <sstream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config_api {
 
 // ── CIDR validation (mirrors config.cpp) ──────────────────────────
@@ -87,6 +87,7 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
         } else if (value == "false" || value == "0") {
             cfg.remember_password = false;
             cfg.password = "";
+            cfg.auto_connect_on_launch = false;
             crypto::delete_key_file();
         } else {
             return "Invalid boolean value for remember_password";
@@ -131,6 +132,38 @@ std::string config_set(config::ConfigManager& mgr, const std::string& key,
         } else {
             return "Invalid boolean value for minimal_install_service_before_connect";
         }
+    } else if (key == "include_class_a_private_routes") {
+        if (value == "true" || value == "1") {
+            cfg.include_class_a_private_routes = true;
+        } else if (value == "false" || value == "0") {
+            cfg.include_class_a_private_routes = false;
+        } else {
+            return "Invalid boolean value for include_class_a_private_routes";
+        }
+    } else if (key == "include_class_b_private_routes") {
+        if (value == "true" || value == "1") {
+            cfg.include_class_b_private_routes = true;
+        } else if (value == "false" || value == "0") {
+            cfg.include_class_b_private_routes = false;
+        } else {
+            return "Invalid boolean value for include_class_b_private_routes";
+        }
+    } else if (key == "launch_at_login") {
+        if (value == "true" || value == "1") {
+            cfg.launch_at_login = true;
+        } else if (value == "false" || value == "0") {
+            cfg.launch_at_login = false;
+        } else {
+            return "Invalid boolean value for launch_at_login";
+        }
+    } else if (key == "auto_connect_on_launch") {
+        if (value == "true" || value == "1") {
+            cfg.auto_connect_on_launch = true;
+        } else if (value == "false" || value == "0") {
+            cfg.auto_connect_on_launch = false;
+        } else {
+            return "Invalid boolean value for auto_connect_on_launch";
+        }
     } else if (key == "vpn_engine") {
         if (value != "native") {
             return "vpn_engine is native-only; legacy engine has been removed";
@@ -161,6 +194,7 @@ std::string config_clear_password_and_key(config::ConfigManager& mgr) {
     Config cfg = mgr.load();
     cfg.remember_password = false;
     cfg.password.clear();
+    cfg.auto_connect_on_launch = false;
     normalize_native_only(cfg);
     if (!mgr.save(cfg)) {
         return "Failed to write config file. Check disk permissions for " +
@@ -248,6 +282,10 @@ std::string config_import(config::ConfigManager& mgr, const std::string& json_st
     if (j.contains("minimal_mode")) cfg.minimal_mode = j["minimal_mode"].get<bool>();
     if (j.contains("service_install_prompt_seen")) cfg.service_install_prompt_seen = j["service_install_prompt_seen"].get<bool>();
     if (j.contains("minimal_install_service_before_connect")) cfg.minimal_install_service_before_connect = j["minimal_install_service_before_connect"].get<bool>();
+    if (j.contains("include_class_a_private_routes")) cfg.include_class_a_private_routes = j["include_class_a_private_routes"].get<bool>();
+    if (j.contains("include_class_b_private_routes")) cfg.include_class_b_private_routes = j["include_class_b_private_routes"].get<bool>();
+    if (j.contains("launch_at_login")) cfg.launch_at_login = j["launch_at_login"].get<bool>();
+    if (j.contains("auto_connect_on_launch")) cfg.auto_connect_on_launch = j["auto_connect_on_launch"].get<bool>();
 
     if (j.contains("password")) {
         std::string pw = j["password"].get<std::string>();
@@ -338,4 +376,4 @@ void key_reset_noninteractive() {
 }
 
 } // namespace config_api
-} // namespace ecnuvpn
+} // namespace exv

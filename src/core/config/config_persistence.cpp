@@ -14,7 +14,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 namespace {
 
@@ -106,6 +106,17 @@ Config import_from(const std::string &path) {
     if (j.contains("minimal_install_service_before_connect"))
       cfg.minimal_install_service_before_connect =
           j["minimal_install_service_before_connect"].get<bool>();
+    if (j.contains("include_class_a_private_routes"))
+      cfg.include_class_a_private_routes =
+          j["include_class_a_private_routes"].get<bool>();
+    if (j.contains("include_class_b_private_routes"))
+      cfg.include_class_b_private_routes =
+          j["include_class_b_private_routes"].get<bool>();
+    if (j.contains("launch_at_login"))
+      cfg.launch_at_login = j["launch_at_login"].get<bool>();
+    if (j.contains("auto_connect_on_launch"))
+      cfg.auto_connect_on_launch =
+          j["auto_connect_on_launch"].get<bool>();
 
     if (j.contains("password")) {
       std::string pw = j["password"].get<std::string>();
@@ -146,4 +157,4 @@ Config reset() {
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

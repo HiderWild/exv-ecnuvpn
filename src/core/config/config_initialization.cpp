@@ -37,7 +37,10 @@ bool field_type_matches(std::string_view name, const json &value) {
   if (name == "disable_dtls" || name == "remember_password" ||
       name == "auto_reconnect" || name == "minimal_mode" ||
       name == "service_install_prompt_seen" ||
-      name == "minimal_install_service_before_connect") {
+      name == "minimal_install_service_before_connect" ||
+      name == "include_class_a_private_routes" ||
+      name == "include_class_b_private_routes" ||
+      name == "launch_at_login" || name == "auto_connect_on_launch") {
     return value.is_boolean();
   }
   if (name == "routes" || name == "extra_args") {
@@ -64,6 +67,10 @@ constexpr std::string_view kRequiredFields[] = {
     "minimal_mode",
     "service_install_prompt_seen",
     "minimal_install_service_before_connect",
+    "include_class_a_private_routes",
+    "include_class_b_private_routes",
+    "launch_at_login",
+    "auto_connect_on_launch",
 };
 
 bool write_default_config(const std::string &config_dir, Config &out) {
@@ -191,7 +198,7 @@ nlohmann::json quick_start_request_data(
   return json{{"reason", status_reason(result.status)},
               {"defaults",
                json{{"server", "vpn-ct.ecnu.edu.cn"},
-                    {"remember_password", true},
+                    {"remember_password", false},
                     {"install_service", true}}}};
 }
 
