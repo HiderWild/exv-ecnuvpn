@@ -594,7 +594,7 @@ public:
     }
     environment_.copy_from(environment);
     auto *handler = new ControllerCompletedHandler(this);
-    const HRESULT hr = environment_->CreateCoreWebView2Controller(hwnd_, handler);
+    const HRESULT hr = create_webview_controller(handler);
     handler->Release();
     if (FAILED(hr)) {
       fail_and_close(L"Unable to create the WebView2 controller.");
@@ -1434,6 +1434,48 @@ public:
   }
 
 private:
+  void enable_host_input_processing(ICoreWebView2ControllerOptions *options) {
+    if (!options) {
+      return;
+    }
+
+    ComPtr<ICoreWebView2ControllerOptions4> options4;
+    const HRESULT options4_result = options->QueryInterface(
+        IID_ICoreWebView2ControllerOptions4,
+        reinterpret_cast<void **>(options4.put()));
+    if (SUCCEEDED(options4_result) && options4) {
+      options4->put_AllowHostInputProcessing(TRUE);
+    }
+  }
+
+  HRESULT create_webview_controller(
+      ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *handler) {
+    if (!environment_ || !hwnd_) {
+      return E_FAIL;
+    }
+
+    ComPtr<ICoreWebView2Environment10> environment10;
+    const HRESULT environment10_result = environment_->QueryInterface(
+        IID_ICoreWebView2Environment10,
+        reinterpret_cast<void **>(environment10.put()));
+    if (SUCCEEDED(environment10_result) && environment10) {
+      ComPtr<ICoreWebView2ControllerOptions> options;
+      const HRESULT options_result =
+          environment10->CreateCoreWebView2ControllerOptions(options.put());
+      if (SUCCEEDED(options_result) && options) {
+        enable_host_input_processing(options.get());
+        const HRESULT options_controller_result =
+            environment10->CreateCoreWebView2ControllerWithOptions(
+                hwnd_, options.get(), handler);
+        if (SUCCEEDED(options_controller_result)) {
+          return options_controller_result;
+        }
+      }
+    }
+
+    return environment_->CreateCoreWebView2Controller(hwnd_, handler);
+  }
+
   void configure_non_client_region_support() {
     if (!webview_) {
       return;

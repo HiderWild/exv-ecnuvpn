@@ -375,16 +375,16 @@ onUnmounted(() => {
   height: 100%;
   align-items: stretch;
   overflow: hidden;
-  app-region: drag;
-  -webkit-app-region: drag;
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
 }
 
 .app-window-titlebar__button {
   display: grid;
   width: 44px;
   place-items: center;
-  app-region: drag;
-  -webkit-app-region: drag;
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
   color: var(--titlebar-button-fg);
   transition: background-color 120ms ease, color 120ms ease;
 }

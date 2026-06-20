@@ -152,6 +152,9 @@ int main() {
       !source_contains("restore_or_focus_window()") ||
       !source_contains("IsIconic(hwnd_)") ||
       !source_contains("GetForegroundWindow() != hwnd_") ||
+      !source_contains("CreateCoreWebView2ControllerWithOptions") ||
+      !source_contains("ICoreWebView2ControllerOptions4") ||
+      !source_contains("put_AllowHostInputProcessing(TRUE)") ||
       !source_contains("configure_non_client_region_support()") ||
       !source_contains("ICoreWebView2Settings9") ||
       !source_contains("put_IsNonClientRegionSupportEnabled(TRUE)") ||
