@@ -73,6 +73,7 @@ set(EXV_PLATFORM_LOGGING_SOURCES
 
 set(EXV_CORE_SOURCES
     src/core/config/config_manager.cpp
+    src/core/config/config_initialization.cpp
     src/core/config/config_api.cpp
     src/core/config/config_persistence.cpp
     src/core/config/config_show.cpp
@@ -2258,6 +2259,19 @@ target_link_libraries(config_actions_test PRIVATE exv-core)
 
 add_test(NAME config_actions_test COMMAND config_actions_test)
 
+add_executable(config_initialization_test
+    tests/config_initialization_test.cpp
+)
+
+target_include_directories(config_initialization_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(config_initialization_test PRIVATE exv-core)
+
+add_test(NAME config_initialization_test COMMAND config_initialization_test)
+
 add_executable(log_actions_test
     tests/core_api/log_actions_test.cpp
 )
@@ -2731,6 +2745,7 @@ set(_release_blocking_tests
     app_api_rpc_dispatcher_test
     vpn_actions_test
     config_actions_test
+    config_initialization_test
     log_actions_test
     core_hello_actions_test
     service_actions_test
@@ -2859,6 +2874,7 @@ set_property(TEST
     platform_network_ops_model_test
     vpn_actions_test
     config_actions_test
+    config_initialization_test
     log_actions_test
     core_hello_actions_test
     service_actions_test

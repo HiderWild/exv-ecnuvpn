@@ -1,10 +1,11 @@
-#include "platform/common/file_system.hpp"
-#include "platform/common/interface_stats.hpp"
-#include "platform/common/process_utils.hpp"
-#include "platform/common/path_utils.hpp"
+#include "core/config/config_initialization.hpp"
 #include "core/config/config_manager.hpp"
 #include "observability/log_facade.hpp"
+#include "platform/common/file_system.hpp"
+#include "platform/common/interface_stats.hpp"
 #include "platform/common/logging/log_runtime.hpp"
+#include "platform/common/path_utils.hpp"
+#include "platform/common/process_utils.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -21,23 +22,9 @@ ConfigManager::ConfigManager(const std::string& config_dir)
 Config ConfigManager::load() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    std::string path = platform::config_path(config_dir_);
-    if (!platform::file_exists(path)) {
-        config_ = Config{};
-        return config_;
-    }
-
-    try {
-        std::string content = platform::read_file(path);
-        auto j = nlohmann::json::parse(content);
-        config_ = j.get<Config>();
-        normalize_native_only(config_);
-    } catch (const std::exception& e) {
-        exv::observability::LogFacade::error("ConfigManager::load parse error: " +
-                      std::string(e.what()));
-        config_ = Config{};
-    }
-
+    const auto initialized = ensure_initialized_config(config_dir_);
+    config_ = initialized.config;
+    normalize_native_only(config_);
     return config_;
 }
 
