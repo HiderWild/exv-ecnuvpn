@@ -94,6 +94,22 @@ void TunnelController::Impl::do_core_lease_keepalive() {
             return;
         }
 
+        auto terminate_core_lease_keepalive = [this](const std::string& warning) {
+            log_tunnel_event("WARN", "core_lease.keep_alive.failed",
+                             "Core lease keepalive response not ok",
+                             {{"warning", warning}});
+            core_lease_id_.clear();
+            stop_core_lease_keepalive();
+            helper_status_override_ = "unavailable";
+            update_snapshot();
+            notify_status();
+        };
+
+        if (!helper_->is_connected()) {
+            terminate_core_lease_keepalive("PipeHelperClient is not connected");
+            return;
+        }
+
         try {
             exv::helper::KeepAliveRequest req;
             req.lease_id = core_lease_id_;
@@ -101,14 +117,14 @@ void TunnelController::Impl::do_core_lease_keepalive() {
 
             auto resp = helper_->keep_alive(req);
             if (!resp.ok) {
-                log_tunnel_event("WARN", "core_lease.keep_alive.failed",
-                                 "Core lease keepalive response not ok",
-                                 {{"warning", resp.warning.value_or("")}});
+                terminate_core_lease_keepalive(resp.warning.value_or(""));
+                return;
             }
         } catch (const std::exception& e) {
             log_tunnel_event("ERROR", "core_lease.keep_alive.error",
                              "Core lease keepalive send failed",
                              {{"error", e.what()}});
+            core_lease_id_.clear();
             stop_core_lease_keepalive();
             helper_status_override_ = "unavailable";
             update_snapshot();

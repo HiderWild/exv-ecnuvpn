@@ -63,6 +63,7 @@ struct TunnelStatusSnapshot {
     bool network_ready = false;
     std::string server;
     std::string interface_name;
+    std::string internal_ip;
     std::optional<ErrorInfo> last_error;
     std::optional<ReconnectInfo> reconnect;
 };

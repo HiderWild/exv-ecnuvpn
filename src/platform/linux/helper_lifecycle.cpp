@@ -17,7 +17,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -131,4 +131,4 @@ void cleanup_daemon_endpoint(const std::string &endpoint) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

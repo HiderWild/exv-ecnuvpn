@@ -4,14 +4,14 @@
 
 #include <iostream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 std::string get_bundled_wintun_path() { return ""; }
 std::string get_bundled_tap_installer_path() { return ""; }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv
 
 namespace {
 
@@ -23,8 +23,8 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::platform::ConfigView base_config() {
-  ecnuvpn::platform::ConfigView cfg;
+exv::platform::ConfigView base_config() {
+  exv::platform::ConfigView cfg;
   cfg.vpn_engine = "native";
   cfg.windows_tunnel_driver = "auto";
   cfg.windows_tap_interface = "";
@@ -35,18 +35,18 @@ bool driver_status_reuses_one_adapter_snapshot_for_burst() {
   bool ok = true;
   int scans = 0;
 
-  ecnuvpn::platform::clear_driver_status_cache_for_testing();
-  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+  exv::platform::clear_driver_status_cache_for_testing();
+  exv::platform::set_driver_status_adapter_snapshot_provider_for_testing(
       [&] {
         ++scans;
-        return ecnuvpn::platform::WindowsDriverAdapterSnapshot{
+        return exv::platform::WindowsDriverAdapterSnapshot{
             {"Wintun Userspace Tunnel"},
-            {"ECNU VPN TAP"}};
+            {"EXV TAP"}};
       });
 
   const auto cfg = base_config();
-  auto first = ecnuvpn::platform::driver_status_json(cfg);
-  auto second = ecnuvpn::platform::driver_status_json(cfg);
+  auto first = exv::platform::driver_status_json(cfg);
+  auto second = exv::platform::driver_status_json(cfg);
 
   ok = expect(scans == 1,
               "driver status burst should reuse a single adapter snapshot") &&
@@ -61,31 +61,31 @@ bool driver_status_reuses_one_adapter_snapshot_for_burst() {
               "cached status should still be ready when TAP is available") &&
        ok;
 
-  ecnuvpn::platform::clear_driver_status_cache_for_testing();
-  (void)ecnuvpn::platform::driver_status_json(cfg);
+  exv::platform::clear_driver_status_cache_for_testing();
+  (void)exv::platform::driver_status_json(cfg);
   ok = expect(scans == 2,
               "clearing driver status cache should force a fresh scan") &&
        ok;
 
-  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+  exv::platform::set_driver_status_adapter_snapshot_provider_for_testing(
       nullptr);
-  ecnuvpn::platform::clear_driver_status_cache_for_testing();
+  exv::platform::clear_driver_status_cache_for_testing();
   return ok;
 }
 
 bool wintun_adapter_without_runtime_is_unavailable() {
   bool ok = true;
 
-  ecnuvpn::platform::clear_driver_status_cache_for_testing();
-  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+  exv::platform::clear_driver_status_cache_for_testing();
+  exv::platform::set_driver_status_adapter_snapshot_provider_for_testing(
       [] {
-        return ecnuvpn::platform::WindowsDriverAdapterSnapshot{
+        return exv::platform::WindowsDriverAdapterSnapshot{
             {"Wintun Userspace Tunnel"},
             {}};
       });
 
   const auto cfg = base_config();
-  auto status = ecnuvpn::platform::driver_status_json(cfg);
+  auto status = exv::platform::driver_status_json(cfg);
 
   ok = expect(status.value("effective_driver", std::string()) == "wintun",
               "auto driver should still report the intended Wintun driver") &&
@@ -98,9 +98,9 @@ bool wintun_adapter_without_runtime_is_unavailable() {
               "Wintun without runtime DLL should be unavailable") &&
        ok;
 
-  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+  exv::platform::set_driver_status_adapter_snapshot_provider_for_testing(
       nullptr);
-  ecnuvpn::platform::clear_driver_status_cache_for_testing();
+  exv::platform::clear_driver_status_cache_for_testing();
   return ok;
 }
 
@@ -108,21 +108,21 @@ bool preflight_reuses_cached_driver_snapshot() {
   bool ok = true;
   int scans = 0;
 
-  ecnuvpn::platform::clear_driver_status_cache_for_testing();
-  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+  exv::platform::clear_driver_status_cache_for_testing();
+  exv::platform::set_driver_status_adapter_snapshot_provider_for_testing(
       [&] {
         ++scans;
-        return ecnuvpn::platform::WindowsDriverAdapterSnapshot{
+        return exv::platform::WindowsDriverAdapterSnapshot{
             {},
-            {"ECNU VPN TAP"}};
+            {"EXV TAP"}};
       });
 
   auto cfg = base_config();
   cfg.windows_tunnel_driver = "tap";
-  cfg.windows_tap_interface = "ECNU VPN TAP";
+  cfg.windows_tap_interface = "EXV TAP";
 
-  auto first = ecnuvpn::platform::preflight_connect_platform_checks(cfg);
-  auto second = ecnuvpn::platform::preflight_connect_platform_checks(cfg);
+  auto first = exv::platform::preflight_connect_platform_checks(cfg);
+  auto second = exv::platform::preflight_connect_platform_checks(cfg);
 
   ok = expect(scans == 1,
               "preflight burst should not rescan adapters for each call") &&
@@ -134,9 +134,9 @@ bool preflight_reuses_cached_driver_snapshot() {
               "second preflight should pass with cached TAP adapter") &&
        ok;
 
-  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+  exv::platform::set_driver_status_adapter_snapshot_provider_for_testing(
       nullptr);
-  ecnuvpn::platform::clear_driver_status_cache_for_testing();
+  exv::platform::clear_driver_status_cache_for_testing();
   return ok;
 }
 

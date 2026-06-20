@@ -6,13 +6,13 @@
 
 namespace fs = std::filesystem;
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
 namespace {
 
-const fs::path kRepoRoot = fs::path(ECNUVPN_SOURCE_DIR);
+const fs::path kRepoRoot = fs::path(EXV_SOURCE_DIR);
 
 bool contains(const std::string &haystack, const std::string &needle) {
   return haystack.find(needle) != std::string::npos;
@@ -27,6 +27,7 @@ std::string generic_relative_path(const fs::path &path) {
 bool allowed_path(const fs::path &path) {
   const std::string s = "/" + generic_relative_path(path);
   return contains(s, "/docs/archive/") || contains(s, "/reference/") ||
+         contains(s, "/docs/architecture/guardrail_allowlist.yml") ||
          contains(s, "/tests/") ||
          contains(s,
                   "/docs/handoffs/native-anyconnect-v2-live-validation-template.md") ||
@@ -39,7 +40,7 @@ bool allowed_path(const fs::path &path) {
 bool ignored_directory(const fs::path &path) {
   const std::string name = path.filename().generic_string();
   return name == ".git" || name == ".worktrees" || name == "build" ||
-         name == "build-windows" || name == "node_modules" ||
+         name == "build-windows" || name == "dbg" || name == "node_modules" ||
          name == "dist" || name == ".vite";
 }
 

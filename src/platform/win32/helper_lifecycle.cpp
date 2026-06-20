@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 void fix_config_dir_ownership() {}
@@ -115,4 +115,4 @@ void cleanup_daemon_endpoint(const std::string & /*endpoint*/) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

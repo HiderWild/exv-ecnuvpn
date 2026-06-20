@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -30,7 +30,7 @@ bool is_exv_adapter(const std::string &name, const std::string &detail,
   std::string lower_exv = lower_ascii(exv_interface);
   if (!lower_exv.empty() && lower_name == lower_exv)
     return true;
-  return lower_name.find("ecnuvpn") != std::string::npos ||
+  return lower_name.find("exv") != std::string::npos ||
          lower_detail.find("openconnect tunnel") != std::string::npos;
 }
 
@@ -101,4 +101,4 @@ virtual_network::AdapterInfo make_proxy_tun_adapter(
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

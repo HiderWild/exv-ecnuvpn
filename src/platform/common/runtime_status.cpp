@@ -7,11 +7,11 @@
 
 #include "platform/common/status_models.hpp"
 
-#ifndef ECNUVPN_VERSION
-#define ECNUVPN_VERSION "dev"
+#ifndef EXV_VERSION
+#define EXV_VERSION "dev"
 #endif
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 nlohmann::json runtime_status_json(const ConfigView &cfg) {
@@ -21,7 +21,7 @@ nlohmann::json runtime_status_json(const ConfigView &cfg) {
                         {"available", true},
                         {"source", "native"},
                         {"path", ""},
-                        {"version", ECNUVPN_VERSION},
+                        {"version", EXV_VERSION},
                         {"bundled_runtime_dir", platform::get_bundled_runtime_dir()}};
 #ifdef _WIN32
   native["wintun_path"] = platform::get_bundled_wintun_path();
@@ -31,4 +31,4 @@ nlohmann::json runtime_status_json(const ConfigView &cfg) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

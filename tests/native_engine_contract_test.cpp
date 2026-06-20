@@ -31,20 +31,20 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-class MockPacketDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+class MockPacketDevice final : public exv::vpn_engine::PacketDevice {
 public:
-  ecnuvpn::vpn_engine::ValidationResult open(
-      const ecnuvpn::vpn_engine::DeviceConfig & /*config*/) override {
+  exv::vpn_engine::ValidationResult open(
+      const exv::vpn_engine::DeviceConfig & /*config*/) override {
     opened_ = true;
     return {};
   }
-  ecnuvpn::vpn_engine::ValidationResult open(
-      const ecnuvpn::vpn_engine::TunnelMetadata & /*metadata*/) override {
+  exv::vpn_engine::ValidationResult open(
+      const exv::vpn_engine::TunnelMetadata & /*metadata*/) override {
     opened_ = true;
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     if (!packet)
       return {false, "null_packet", "packet output must not be null"};
@@ -56,7 +56,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> &packet) override {
     last_written_ = packet;
     return {};
@@ -79,9 +79,9 @@ private:
   std::vector<std::vector<std::uint8_t>> read_queue_;
 };
 
-class RecordingEventSink final : public ecnuvpn::vpn_engine::EventSink {
+class RecordingEventSink final : public exv::vpn_engine::EventSink {
 public:
-  void emit(const ecnuvpn::vpn_engine::VpnEngineEvent &event) override {
+  void emit(const exv::vpn_engine::VpnEngineEvent &event) override {
     const std::lock_guard<std::mutex> lock(mu_);
     events_.push_back(event);
   }
@@ -120,11 +120,11 @@ public:
 
 private:
   mutable std::mutex mu_;
-  std::vector<ecnuvpn::vpn_engine::VpnEngineEvent> events_;
+  std::vector<exv::vpn_engine::VpnEngineEvent> events_;
 };
 
 class FakeProtocolTransport final
-    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+    : public exv::vpn_engine::protocol::ProtocolTransport {
 public:
   struct State {
     bool auth_ok = true;
@@ -143,19 +143,19 @@ public:
     int keepalive_seconds = 0;
     std::atomic<int> keepalive_control_count{0};
     std::string last_cookie;
-    ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions last_options;
+    exv::vpn_engine::protocol::ProtocolSessionOptions last_options;
   };
 
   explicit FakeProtocolTransport(std::shared_ptr<State> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
-      const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions
+  exv::vpn_engine::protocol::AuthResult authenticate(
+      const exv::vpn_engine::protocol::ProtocolSessionOptions
           &options) override {
     state_->last_options = options;
     ++state_->auth_count;
     if (!state_->auth_ok) {
-      ecnuvpn::vpn_engine::protocol::AuthResult auth;
+      exv::vpn_engine::protocol::AuthResult auth;
       auth.ok = false;
       auth.error_code = state_->auth_error_code;
       auth.error_message = state_->auth_error_message;
@@ -165,15 +165,15 @@ public:
       return auth;
     }
 
-    ecnuvpn::vpn_engine::protocol::AuthResult auth;
+    exv::vpn_engine::protocol::AuthResult auth;
     auth.ok = true;
     auth.cookie = "webvpn=FAKE_COOKIE";
     return auth;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   connect_cstp(const std::string &cookie,
-               ecnuvpn::vpn_engine::TunnelMetadata *metadata) override {
+               exv::vpn_engine::TunnelMetadata *metadata) override {
     state_->last_cookie = cookie;
     ++state_->cstp_count;
     if (!state_->cstp_ok)
@@ -192,7 +192,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   send_packet(const std::vector<std::uint8_t> &packet) override {
     std::unique_lock<std::mutex> lock(transport_mu_);
     ++state_->exchange_count;
@@ -203,28 +203,28 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind kind) override {
+  exv::vpn_engine::ValidationResult
+  send_control(exv::vpn_engine::protocol::InboundFrameKind kind) override {
     std::unique_lock<std::mutex> lock(transport_mu_);
     if (transport_closed_)
       return {false, "transport_closed", "fake transport is closed"};
-    if (kind == ecnuvpn::vpn_engine::protocol::InboundFrameKind::keepalive)
+    if (kind == exv::vpn_engine::protocol::InboundFrameKind::keepalive)
       ++state_->keepalive_control_count;
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame *out) override {
+  exv::vpn_engine::ValidationResult
+  receive_frame(exv::vpn_engine::protocol::InboundFrame *out) override {
     if (!out)
       return {false, "packet_null_out", "inbound frame output must not be null"};
-    out->kind = ecnuvpn::vpn_engine::protocol::InboundFrameKind::none;
+    out->kind = exv::vpn_engine::protocol::InboundFrameKind::none;
     out->payload.clear();
 
     std::unique_lock<std::mutex> lock(transport_mu_);
     transport_cv_.wait(
         lock, [this] { return !echo_queue_.empty() || transport_closed_; });
     if (!echo_queue_.empty()) {
-      out->kind = ecnuvpn::vpn_engine::protocol::InboundFrameKind::data;
+      out->kind = exv::vpn_engine::protocol::InboundFrameKind::data;
       out->payload = std::move(echo_queue_.front());
       echo_queue_.pop_front();
       return {};
@@ -264,25 +264,25 @@ struct TlsStreamLifetimeState {
 };
 
 class LifetimeTlsStream final
-    : public ecnuvpn::vpn_engine::protocol::TlsStream {
+    : public exv::vpn_engine::protocol::TlsStream {
 public:
   explicit LifetimeTlsStream(std::shared_ptr<TlsStreamLifetimeState> state)
       : state_(std::move(state)) {}
 
   ~LifetimeTlsStream() override { state_->destroyed = true; }
 
-  ecnuvpn::vpn_engine::ValidationResult connect(
-      const ecnuvpn::vpn_engine::protocol::TlsEndpoint & /*endpoint*/)
+  exv::vpn_engine::ValidationResult connect(
+      const exv::vpn_engine::protocol::TlsEndpoint & /*endpoint*/)
       override {
     return {false, "unexpected_connect", "lifetime test should not connect"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_all(const std::vector<std::uint8_t> & /*bytes*/) override {
     return {false, "unexpected_write", "lifetime test should not write"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_some(std::vector<std::uint8_t> * /*bytes*/) override {
     return {false, "unexpected_read", "lifetime test should not read"};
   }
@@ -302,19 +302,19 @@ struct PacketDeviceState {
   std::thread::id read_thread_id;
   std::thread::id close_thread_id;
   std::vector<std::vector<std::uint8_t>> written_packets;
-  ecnuvpn::vpn_engine::TunnelMetadata last_open_metadata;
+  exv::vpn_engine::TunnelMetadata last_open_metadata;
   bool metadata_open_used = false;
 };
 
 class ScriptedEnginePacketDevice final
-    : public ecnuvpn::vpn_engine::PacketDevice {
+    : public exv::vpn_engine::PacketDevice {
 public:
   ScriptedEnginePacketDevice(std::shared_ptr<PacketDeviceState> state,
                              std::vector<std::vector<std::uint8_t>> packets = {})
       : state_(std::move(state)), packets_(std::move(packets)) {}
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::DeviceConfig &config) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata.interface_name = config.interface_name;
     state_->last_open_metadata.mtu = config.mtu;
@@ -323,8 +323,8 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
     state_->metadata_open_used = true;
@@ -333,7 +333,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     if (!packet)
@@ -349,7 +349,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> &packet) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     if (!state_->open)
@@ -372,13 +372,13 @@ private:
   std::vector<std::vector<std::uint8_t>> packets_;
 };
 
-class PollingPacketDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+class PollingPacketDevice final : public exv::vpn_engine::PacketDevice {
 public:
   explicit PollingPacketDevice(std::shared_ptr<PacketDeviceState> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::DeviceConfig &config) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata.interface_name = config.interface_name;
     state_->last_open_metadata.mtu = config.mtu;
@@ -387,8 +387,8 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
     state_->metadata_open_used = true;
@@ -397,7 +397,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     if (!packet)
@@ -410,7 +410,7 @@ public:
     return {false, "no_data", "no packet available"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> & /*packet*/) override {
     return {false, "unexpected_write", "no packet should be written"};
   }
@@ -428,13 +428,13 @@ private:
   std::shared_ptr<PacketDeviceState> state_;
 };
 
-class FailingOpenPacketDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+class FailingOpenPacketDevice final : public exv::vpn_engine::PacketDevice {
 public:
   explicit FailingOpenPacketDevice(std::shared_ptr<PacketDeviceState> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::DeviceConfig &config) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata.interface_name = config.interface_name;
     state_->last_open_metadata.mtu = config.mtu;
@@ -443,8 +443,8 @@ public:
             "packet device refused to open"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::TunnelMetadata &metadata) override {
     const std::lock_guard<std::mutex> lock(state_->mu);
     state_->last_open_metadata = metadata;
     state_->metadata_open_used = true;
@@ -453,12 +453,12 @@ public:
             "packet device refused to open"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> * /*packet*/) override {
     return {false, "unexpected_read", "packet loop should not read"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> & /*packet*/) override {
     return {false, "unexpected_write", "packet loop should not write"};
   }
@@ -512,7 +512,7 @@ written_packets(const std::shared_ptr<PacketDeviceState> &state) {
   return state->written_packets;
 }
 
-ecnuvpn::vpn_engine::TunnelMetadata
+exv::vpn_engine::TunnelMetadata
 last_open_metadata(const std::shared_ptr<PacketDeviceState> &state) {
   const std::lock_guard<std::mutex> lock(state->mu);
   return state->last_open_metadata;
@@ -544,12 +544,12 @@ make_failing_open_device(const std::shared_ptr<PacketDeviceState> &state) {
   return std::make_unique<FailingOpenPacketDevice>(state);
 }
 
-ecnuvpn::vpn_engine::VpnEngineConfig engine_config() {
-  ecnuvpn::vpn_engine::VpnEngineConfig cfg;
+exv::vpn_engine::VpnEngineConfig engine_config() {
+  exv::vpn_engine::VpnEngineConfig cfg;
   cfg.server = "https://vpn.example.invalid/+CSCOE+/logon.html";
   cfg.username = "alice";
   cfg.password = MOCK_PASSWORD;
-  cfg.useragent = "ECNU-VPN native test";
+  cfg.useragent = "EXV native test";
   cfg.disable_dtls = true;
   cfg.auto_reconnect = false;
   return cfg;
@@ -575,7 +575,7 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
   auto device = std::make_shared<PacketDeviceState>();
   RecordingEventSink events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -586,8 +586,8 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
   };
   deps.event_sink = &events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
 
   ok = expect(started.ok, "injected native start should succeed") && ok;
   ok = expect(started.code != "native_protocol_unimplemented",
@@ -609,7 +609,7 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
               "start should open the injected packet device") &&
        ok;
 
-  const ecnuvpn::vpn_engine::TunnelMetadata opened_metadata =
+  const exv::vpn_engine::TunnelMetadata opened_metadata =
       last_open_metadata(device);
   ok = expect(opened_metadata.mtu == 1400,
               "negotiated tunnel MTU should reach the packet device") &&
@@ -635,14 +635,14 @@ bool test_injected_fake_start_runs_packet_loop_and_cleans_up() {
        ok;
 
   ok = expect(wait_until([&session]() {
-                const ecnuvpn::vpn_engine::VpnEngineStatus status =
+                const exv::vpn_engine::VpnEngineStatus status =
                     session.status();
                 return !status.running && !status.network_ready;
               }),
               "clean packet loop exit should clear running and network_ready") &&
        ok;
 
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
   ok = expect(status.pid == -1,
               "native session should not report an OpenConnect PID") &&
        ok;
@@ -677,7 +677,7 @@ bool test_network_configurator_runs_before_packet_open() {
   auto device = std::make_shared<PacketDeviceState>();
   bool configurator_called = false;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -686,29 +686,29 @@ bool test_network_configurator_runs_before_packet_open() {
   };
   deps.network_configurator =
       [&device, &configurator_called](
-          const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
-          ecnuvpn::vpn_engine::DeviceConfig *device_config) {
+          const exv::vpn_engine::TunnelMetadata &metadata,
+          exv::vpn_engine::DeviceConfig *device_config) {
         configurator_called = true;
         if (!device_config)
-          return ecnuvpn::vpn_engine::ValidationResult{
+          return exv::vpn_engine::ValidationResult{
               false, "device_config_missing",
               "device config output must not be null"};
         if (open_count(device) != 0)
-          return ecnuvpn::vpn_engine::ValidationResult{
+          return exv::vpn_engine::ValidationResult{
               false, "packet_opened_too_early",
               "packet device opened before helper network config"};
         if (metadata.routes.empty() || metadata.server_bypass_ips.empty())
-          return ecnuvpn::vpn_engine::ValidationResult{
+          return exv::vpn_engine::ValidationResult{
               false, "metadata_incomplete",
               "network configurator should receive CSTP route metadata"};
 
         device_config->interface_name = "helper-wintun0";
         device_config->mtu = 1320;
-        return ecnuvpn::vpn_engine::ValidationResult{};
+        return exv::vpn_engine::ValidationResult{};
       };
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
 
   ok = expect(started.ok,
               "start should succeed with injected network configurator") &&
@@ -717,7 +717,7 @@ bool test_network_configurator_runs_before_packet_open() {
               "network configurator should run after CSTP and before packet open") &&
        ok;
 
-  const ecnuvpn::vpn_engine::TunnelMetadata opened_metadata =
+  const exv::vpn_engine::TunnelMetadata opened_metadata =
       last_open_metadata(device);
   ok = expect(opened_metadata.interface_name == "helper-wintun0",
               "packet device should open using helper-prepared adapter name") &&
@@ -742,7 +742,7 @@ bool test_native_session_splits_handshake_from_packet_attach() {
   int packet_devices_created = 0;
   int network_config_calls = 0;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -751,24 +751,24 @@ bool test_native_session_splits_handshake_from_packet_attach() {
     return make_scripted_device(device);
   };
   deps.network_configurator =
-      [&](const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
-          ecnuvpn::vpn_engine::DeviceConfig *device_config) {
+      [&](const exv::vpn_engine::TunnelMetadata &metadata,
+          exv::vpn_engine::DeviceConfig *device_config) {
         ++network_config_calls;
         if (metadata.internal_ip4_address != "10.255.0.10") {
-          return ecnuvpn::vpn_engine::ValidationResult{
+          return exv::vpn_engine::ValidationResult{
               false, "metadata_missing", "handshake metadata missing"};
         }
         if (!device_config) {
-          return ecnuvpn::vpn_engine::ValidationResult{
+          return exv::vpn_engine::ValidationResult{
               false, "device_config_missing", "device config missing"};
         }
         device_config->interface_name = "split-wintun0";
         device_config->mtu = 1310;
-        return ecnuvpn::vpn_engine::ValidationResult{};
+        return exv::vpn_engine::ValidationResult{};
       };
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  exv::vpn_engine::TunnelMetadata metadata;
   const auto handshake = session.start_handshake(&metadata);
 
   ok = expect(handshake.ok, "split handshake should succeed") && ok;
@@ -782,7 +782,7 @@ bool test_native_session_splits_handshake_from_packet_attach() {
               "split handshake must not apply network config") &&
        ok;
 
-  ecnuvpn::vpn_engine::DeviceConfig device_config;
+  exv::vpn_engine::DeviceConfig device_config;
   device_config.interface_name = "split-wintun0";
   device_config.mtu = 1310;
   const auto attached = session.start_packet_loop(device_config);
@@ -806,13 +806,13 @@ bool test_native_session_adopts_prepared_handshake_without_reauth() {
 
   auto transport = std::make_shared<FakeProtocolTransport::State>();
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies handshake_deps;
+  exv::vpn_engine::NativeVpnEngineDependencies handshake_deps;
   handshake_deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
 
-  ecnuvpn::vpn_engine::NativeHandshakeResult prepared;
-  ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config(), handshake_deps);
+  exv::vpn_engine::NativeHandshakeResult prepared;
+  exv::vpn_engine::NativeHandshakeJob job(engine_config(), handshake_deps);
   const auto prepared_result = job.run(std::stop_token{}, &prepared);
 
   ok = expect(prepared_result.ok, "prepared handshake should succeed") && ok;
@@ -826,7 +826,7 @@ bool test_native_session_adopts_prepared_handshake_without_reauth() {
   auto device = std::make_shared<PacketDeviceState>();
   int unexpected_transport_factory_calls = 0;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies attach_deps;
+  exv::vpn_engine::NativeVpnEngineDependencies attach_deps;
   attach_deps.transport_factory = [&]() {
     ++unexpected_transport_factory_calls;
     return make_fake_transport(transport);
@@ -835,9 +835,9 @@ bool test_native_session_adopts_prepared_handshake_without_reauth() {
     return make_scripted_device(device);
   };
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(),
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(),
                                                       attach_deps);
-  ecnuvpn::vpn_engine::TunnelMetadata adopted_metadata;
+  exv::vpn_engine::TunnelMetadata adopted_metadata;
   const auto adopted = session.adopt_handshake(std::move(prepared),
                                                &adopted_metadata);
 
@@ -847,7 +847,7 @@ bool test_native_session_adopts_prepared_handshake_without_reauth() {
               "adopted handshake should expose CSTP metadata") &&
        ok;
 
-  ecnuvpn::vpn_engine::DeviceConfig device_config;
+  exv::vpn_engine::DeviceConfig device_config;
   device_config.interface_name = "adopted-wintun0";
   device_config.mtu = 1300;
   const auto attached = session.start_packet_loop(device_config);
@@ -875,13 +875,13 @@ bool test_native_session_stop_disconnects_adopted_handshake_before_attach() {
 
   auto transport = std::make_shared<FakeProtocolTransport::State>();
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies handshake_deps;
+  exv::vpn_engine::NativeVpnEngineDependencies handshake_deps;
   handshake_deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
 
-  ecnuvpn::vpn_engine::NativeHandshakeResult prepared;
-  ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config(), handshake_deps);
+  exv::vpn_engine::NativeHandshakeResult prepared;
+  exv::vpn_engine::NativeHandshakeJob job(engine_config(), handshake_deps);
   const auto prepared_result = job.run(std::stop_token{}, &prepared);
 
   ok = expect(prepared_result.ok, "prepared handshake should succeed") && ok;
@@ -889,7 +889,7 @@ bool test_native_session_stop_disconnects_adopted_handshake_before_attach() {
               "prepared handshake should still be connected before adoption") &&
        ok;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config());
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config());
   const auto adopted = session.adopt_handshake(std::move(prepared));
   ok = expect(adopted.ok, "adopting prepared handshake should succeed") && ok;
 
@@ -914,7 +914,7 @@ bool test_dtls_config_flag_does_not_block_native_engine() {
   auto transport = std::make_shared<FakeProtocolTransport::State>();
   transport->auth_ok = false; // fail at auth so we stop cleanly
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -922,12 +922,12 @@ bool test_dtls_config_flag_does_not_block_native_engine() {
     return make_scripted_device(std::make_shared<PacketDeviceState>());
   };
 
-  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
+  exv::vpn_engine::VpnEngineConfig cfg = engine_config();
   cfg.disable_dtls = false; // intentionally set the "wrong" flag
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg, deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  exv::vpn_engine::NativeVpnEngineSession session(cfg, deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
 
   // Must NOT be rejected as unsupported_dtls — engine forces CSTP mode
   // regardless of this flag and proceeds to auth.
@@ -948,7 +948,7 @@ bool test_dtls_enabled_emits_unavailable_and_continues_cstp() {
   auto device = std::make_shared<PacketDeviceState>();
   RecordingEventSink events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -959,11 +959,11 @@ bool test_dtls_enabled_emits_unavailable_and_continues_cstp() {
   };
   deps.event_sink = &events;
 
-  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
+  exv::vpn_engine::VpnEngineConfig cfg = engine_config();
   cfg.disable_dtls = false;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg, deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  exv::vpn_engine::NativeVpnEngineSession session(cfg, deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
 
   ok = expect(started.ok,
               "DTLS-enabled native start should continue over CSTP") &&
@@ -990,7 +990,7 @@ bool test_auth_failure_maps_error_without_device() {
   transport->auth_ok = false;
   int packet_devices_created = 0;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -999,9 +999,9 @@ bool test_auth_failure_maps_error_without_device() {
     return make_scripted_device(std::make_shared<PacketDeviceState>());
   };
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
 
   ok = expect(!started.ok, "auth failure should fail native start") && ok;
   ok = expect(started.code == "auth_failed",
@@ -1038,7 +1038,7 @@ bool test_auth_challenge_emits_interaction_event_without_device() {
   RecordingEventSink events;
   int packet_devices_created = 0;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -1048,9 +1048,9 @@ bool test_auth_challenge_emits_interaction_event_without_device() {
   };
   deps.event_sink = &events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
 
   ok = expect(!started.ok,
               "auth challenge should stop native start until UI response path exists") &&
@@ -1089,7 +1089,7 @@ bool test_csd_required_emits_unsupported_event_without_device() {
   RecordingEventSink events;
   int packet_devices_created = 0;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -1099,9 +1099,9 @@ bool test_csd_required_emits_unsupported_event_without_device() {
   };
   deps.event_sink = &events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
 
   ok = expect(!started.ok,
               "host-scan requirement should stop native start") &&
@@ -1136,7 +1136,7 @@ bool test_cstp_failure_maps_error_without_device_open() {
   transport->cstp_ok = false;
   int packet_devices_created = 0;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -1145,9 +1145,9 @@ bool test_cstp_failure_maps_error_without_device_open() {
     return make_scripted_device(std::make_shared<PacketDeviceState>());
   };
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
 
   ok = expect(!started.ok, "CSTP failure should fail native start") && ok;
   ok = expect(started.code == "cstp_failed",
@@ -1179,7 +1179,7 @@ bool test_packet_loop_start_failure_emits_native_start_failed() {
   auto device = std::make_shared<PacketDeviceState>();
   RecordingEventSink events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -1188,9 +1188,9 @@ bool test_packet_loop_start_failure_emits_native_start_failed() {
   };
   deps.event_sink = &events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
 
   ok = expect(!started.ok, "packet device open failure should fail start") && ok;
   ok = expect(started.code == "packet_device_open_failed",
@@ -1218,7 +1218,7 @@ bool test_stop_cancels_packet_loop_and_closes_device() {
   auto transport = std::make_shared<FakeProtocolTransport::State>();
   auto device = std::make_shared<PacketDeviceState>();
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -1226,8 +1226,8 @@ bool test_stop_cancels_packet_loop_and_closes_device() {
     return make_polling_device(device);
   };
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
 
   ok = expect(started.ok, "polling fake start should succeed") && ok;
   ok = expect(open_count(device) == 1,
@@ -1241,7 +1241,7 @@ bool test_stop_cancels_packet_loop_and_closes_device() {
        ok;
 
   session.stop();
-  const ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  const exv::vpn_engine::VpnEngineStatus status = session.status();
 
   ok = expect(close_count(device) == 1,
               "stop should close active packet device exactly once") &&
@@ -1267,7 +1267,7 @@ bool test_gateway_keepalive_metadata_drives_native_session_timer() {
   auto device = std::make_shared<PacketDeviceState>();
   RecordingEventSink events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -1275,14 +1275,14 @@ bool test_gateway_keepalive_metadata_drives_native_session_timer() {
     return make_polling_device(device);
   };
   deps.protocol_options_configurator =
-      [](ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions *options) {
+      [](exv::vpn_engine::protocol::ProtocolSessionOptions *options) {
         if (options)
           options->liveness_idle_polls_per_second = 2;
       };
   deps.event_sink = &events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_config(), deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
 
   ok = expect(started.ok,
               "native start should succeed before keepalive metadata test") &&
@@ -1302,8 +1302,8 @@ bool test_gateway_keepalive_metadata_drives_native_session_timer() {
 bool test_default_dependencies_expose_factories() {
   bool ok = true;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps =
-      ecnuvpn::vpn_engine::default_native_engine_dependencies();
+  exv::vpn_engine::NativeVpnEngineDependencies deps =
+      exv::vpn_engine::default_native_engine_dependencies();
 
   ok = expect(static_cast<bool>(deps.transport_factory),
               "default native dependencies should expose a transport factory") &&
@@ -1313,7 +1313,7 @@ bool test_default_dependencies_expose_factories() {
        ok;
 
   if (deps.transport_factory) {
-    std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport> transport =
+    std::unique_ptr<exv::vpn_engine::protocol::ProtocolTransport> transport =
         deps.transport_factory();
     ok = expect(static_cast<bool>(transport),
                 "default transport factory should create a transport") &&
@@ -1321,7 +1321,7 @@ bool test_default_dependencies_expose_factories() {
   }
 
   if (deps.packet_device_factory) {
-    std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice> device =
+    std::unique_ptr<exv::vpn_engine::PacketDevice> device =
         deps.packet_device_factory();
     ok = expect(static_cast<bool>(device),
                 "default packet device factory should create a packet device") &&
@@ -1334,11 +1334,11 @@ bool test_default_dependencies_expose_factories() {
 bool test_default_tls_only_start_does_not_report_missing_transport_factory() {
   bool ok = true;
 
-  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
+  exv::vpn_engine::VpnEngineConfig cfg = engine_config();
   cfg.server = "https://127.0.0.1:1";
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  exv::vpn_engine::NativeVpnEngineSession session(cfg);
+  const exv::vpn_engine::ValidationResult started = session.start();
 
   ok = expect(!started.ok,
               "default native start to a closed local port should fail") &&
@@ -1359,9 +1359,9 @@ bool test_production_transport_can_own_tls_stream() {
   auto state = std::make_shared<TlsStreamLifetimeState>();
 
   {
-    std::unique_ptr<ecnuvpn::vpn_engine::protocol::TlsStream> stream(
+    std::unique_ptr<exv::vpn_engine::protocol::TlsStream> stream(
         new LifetimeTlsStream(state));
-    ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport transport(
+    exv::vpn_engine::protocol::ProductionProtocolTransport transport(
         std::move(stream));
 
     ok = expect(!state->destroyed,
@@ -1384,7 +1384,7 @@ bool test_invalid_metadata_mtu_falls_back_to_safe_default() {
   auto device = std::make_shared<PacketDeviceState>();
   RecordingEventSink events;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+  exv::vpn_engine::NativeVpnEngineDependencies deps;
   deps.transport_factory = [&transport]() {
     return make_fake_transport(transport);
   };
@@ -1393,11 +1393,11 @@ bool test_invalid_metadata_mtu_falls_back_to_safe_default() {
   };
   deps.event_sink = &events;
 
-  ecnuvpn::vpn_engine::VpnEngineConfig cfg = engine_config();
+  exv::vpn_engine::VpnEngineConfig cfg = engine_config();
   cfg.mtu = 1290; // documented safe default
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(cfg, deps);
-  const ecnuvpn::vpn_engine::ValidationResult started = session.start();
+  exv::vpn_engine::NativeVpnEngineSession session(cfg, deps);
+  const exv::vpn_engine::ValidationResult started = session.start();
 
   ok = expect(started.ok, "start should succeed despite an invalid gateway MTU") &&
        ok;
@@ -1415,7 +1415,7 @@ bool test_invalid_metadata_mtu_falls_back_to_safe_default() {
 } // namespace
 
 int main() {
-  static_assert(std::is_abstract_v<ecnuvpn::vpn_engine::PacketDevice>,
+  static_assert(std::is_abstract_v<exv::vpn_engine::PacketDevice>,
                 "PacketDevice must remain an abstract interface");
 
   bool ok = true;
@@ -1424,13 +1424,13 @@ int main() {
   {
     MockPacketDevice dev;
 
-    ecnuvpn::vpn_engine::TunnelMetadata meta;
-    ecnuvpn::vpn_engine::ValidationResult o = dev.open(meta);
+    exv::vpn_engine::TunnelMetadata meta;
+    exv::vpn_engine::ValidationResult o = dev.open(meta);
     ok = expect(o.ok, "mock open should succeed") && ok;
     ok = expect(dev.opened(), "mock open should update state") && ok;
 
     std::vector<std::uint8_t> write_pkt = {1, 2, 3};
-    ecnuvpn::vpn_engine::ValidationResult w = dev.write_packet(write_pkt);
+    exv::vpn_engine::ValidationResult w = dev.write_packet(write_pkt);
     ok = expect(w.ok, "mock write_packet should succeed") && ok;
     ok = expect(dev.last_written() == write_pkt,
                 "mock write_packet should capture packet bytes") &&
@@ -1438,7 +1438,7 @@ int main() {
 
     dev.push_read_packet({9, 8});
     std::vector<std::uint8_t> read_pkt;
-    ecnuvpn::vpn_engine::ValidationResult r = dev.read_packet(&read_pkt);
+    exv::vpn_engine::ValidationResult r = dev.read_packet(&read_pkt);
     ok = expect(r.ok, "mock read_packet should succeed when queued") && ok;
     ok = expect(read_pkt == std::vector<std::uint8_t>({9, 8}),
                 "mock read_packet should return queued packet") &&
@@ -1458,28 +1458,28 @@ int main() {
     ok = expect(dev.closed(), "mock close should update state") && ok;
   }
 
-  ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg =
+  exv::vpn_engine::VpnEngineConfig engine_cfg =
       engine_config();
-  ecnuvpn::vpn_engine::ValidationResult validation =
-      ecnuvpn::vpn_engine::validate_native_config(engine_cfg);
+  exv::vpn_engine::ValidationResult validation =
+      exv::vpn_engine::validate_native_config(engine_cfg);
   ok = expect(validation.ok,
               "native engine should accept complete engine config") &&
        ok;
 
   engine_cfg.password.clear();
-  validation = ecnuvpn::vpn_engine::validate_native_config(engine_cfg);
+  validation = exv::vpn_engine::validate_native_config(engine_cfg);
   ok = expect(!validation.ok && validation.code == "config_invalid",
               "native engine should reject engine config without password") &&
        ok;
 
   engine_cfg = engine_config();
 
-  ecnuvpn::vpn_engine::VpnEngineEvent event;
+  exv::vpn_engine::VpnEngineEvent event;
   event.type = "auth";
   event.level = "info";
   event.message = "连接成功";
   event.fields["stage"] = "cookie";
-  nlohmann::json event_json = ecnuvpn::vpn_engine::event_to_json(event);
+  nlohmann::json event_json = exv::vpn_engine::event_to_json(event);
   ok = expect(event_json.value("message", std::string()) == "连接成功",
               "native engine events should preserve UTF-8 text") &&
        ok;
@@ -1487,8 +1487,8 @@ int main() {
               "native engine events should expose structured fields") &&
        ok;
 
-  ecnuvpn::vpn_engine::NativeVpnEngineSession session(engine_cfg);
-  ecnuvpn::vpn_engine::VpnEngineStatus status = session.status();
+  exv::vpn_engine::NativeVpnEngineSession session(engine_cfg);
+  exv::vpn_engine::VpnEngineStatus status = session.status();
   ok = expect(!status.running && !status.network_ready && status.pid == -1,
               "new native session should not report an openconnect process") &&
        ok;

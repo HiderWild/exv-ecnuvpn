@@ -90,7 +90,7 @@ ifconfig > /tmp/exv-ifconfig-before.txt
   Socket Ready    : yes / no
   VPN Running     : yes / no
   ```
-- [ ] LaunchDaemon plist exists: `ls -la /Library/LaunchDaemons/com.ecnu.exv.helper.plist`
+- [ ] LaunchDaemon plist exists: `ls -la /Library/LaunchDaemons/com.exv.helper.plist`
   ```
   Permissions: ________
   ```
@@ -288,7 +288,7 @@ ifconfig > /tmp/exv-ifconfig-before.txt
 ## Test 8: Keychain Save/Load/Delete
 
 - [ ] Save credentials via `exv config saveAuth` or UI
-- [ ] Verify Keychain entry: Open Keychain Access.app, search for `com.ecnu-vpn`
+- [ ] Verify Keychain entry: Open Keychain Access.app, search for `com.exv`
   ```
   Entry found: yes / no
   ```

@@ -10,7 +10,7 @@
 #include <sstream>
 #include <utility>
 
-namespace ecnuvpn::platform::logging {
+namespace exv::platform::logging {
 
 namespace {
 
@@ -71,4 +71,4 @@ void FileLogSink::write(const exv::observability::LogEvent &event) {
 
 void FileLogSink::flush() {}
 
-} // namespace ecnuvpn::platform::logging
+} // namespace exv::platform::logging

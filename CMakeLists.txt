@@ -14,6 +14,40 @@ option(EXV_BUILD_UI_SHELL
     OFF
 )
 
+set(EXV_DISTRIBUTION_ID "ecnu" CACHE STRING "Distribution profile id")
+set(EXV_DISTRIBUTION_FILE
+    "${CMAKE_SOURCE_DIR}/distribution/${EXV_DISTRIBUTION_ID}.json"
+)
+set(EXV_GENERATED_DISTRIBUTION_HEADER
+    "${CMAKE_SOURCE_DIR}/src/generated/distribution_config.hpp"
+)
+set(EXV_GENERATED_DISTRIBUTION_TS
+    "${CMAKE_SOURCE_DIR}/webui/src/generated/distribution.ts"
+)
+
+add_custom_command(
+    OUTPUT
+        "${EXV_GENERATED_DISTRIBUTION_HEADER}"
+        "${EXV_GENERATED_DISTRIBUTION_TS}"
+    COMMAND
+        ${Python3_EXECUTABLE}
+        "${CMAKE_SOURCE_DIR}/scripts/generate_distribution_config.py"
+        --input "${EXV_DISTRIBUTION_FILE}"
+        --cpp-output "${EXV_GENERATED_DISTRIBUTION_HEADER}"
+        --ts-output "${EXV_GENERATED_DISTRIBUTION_TS}"
+    DEPENDS
+        "${EXV_DISTRIBUTION_FILE}"
+        "${CMAKE_SOURCE_DIR}/scripts/generate_distribution_config.py"
+    COMMENT "Generating EXV distribution config for ${EXV_DISTRIBUTION_ID}"
+    VERBATIM
+)
+
+add_custom_target(exv-generate-distribution-config
+    DEPENDS
+        "${EXV_GENERATED_DISTRIBUTION_HEADER}"
+        "${EXV_GENERATED_DISTRIBUTION_TS}"
+)
+
 # Release builds optimise for size and strip debug symbols. The MinGW
 # toolchain we ship on Windows links against the gcc/g++ runtime DLLs, so
 # stripping the binary itself gives the bulk of the savings (~3-4MB).
@@ -192,6 +226,7 @@ set(EXV_CLI_TRANSPORT_SOURCES
 
 set(EXV_CLI_FRONTEND_SOURCES
     src/cli/cli_main.cpp
+    src/cli/cli_entrypoint.cpp
     src/cli/cli_commands.cpp
     src/cli/core_request_formatter.cpp
     src/cli/console.cpp
@@ -219,13 +254,18 @@ set(EXV_PLATFORM_DEFINITIONS)
 # Source files
 set(SOURCES
     src/app/main.cpp
+    src/cli/cli_entrypoint.cpp
+    src/cli/cli_commands.cpp
+    src/cli/core_request_formatter.cpp
+    src/cli/pipe_client.cpp
+    src/platform/common/core_resolver_platform_deps.cpp
 )
 find_package(Threads REQUIRED)
 
 # Platform-specific dependencies
 if(APPLE)
     # CommonCrypto links implicitly on macOS
-    list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_DARWIN=1)
+    list(APPEND EXV_PLATFORM_DEFINITIONS EXV_PLATFORM_DARWIN=1)
     list(APPEND EXV_PLATFORM_LIBS "-framework Security" "-framework CoreFoundation")
     list(APPEND EXV_PLATFORM_SOURCES
         src/platform/darwin/helper_daemon.cpp
@@ -256,7 +296,7 @@ if(APPLE)
     )
 elseif(UNIX AND NOT APPLE)
     find_package(OpenSSL 1.1.1 REQUIRED)
-    list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_LINUX=1)
+    list(APPEND EXV_PLATFORM_DEFINITIONS EXV_PLATFORM_LINUX=1)
     list(APPEND EXV_PLATFORM_LIBS OpenSSL::SSL OpenSSL::Crypto)
     list(APPEND EXV_PLATFORM_SOURCES
         src/platform/linux/helper_daemon.cpp
@@ -284,7 +324,7 @@ elseif(WIN32)
     # AES-256-CBC and CSPRNG come from Windows CNG (bcrypt) so we no longer
     # need OpenSSL on this platform. The ~7MB libssl/libcrypto DLLs can be
     # dropped from the desktop bundle entirely.
-    list(APPEND EXV_PLATFORM_DEFINITIONS ECNUVPN_PLATFORM_WINDOWS=1)
+    list(APPEND EXV_PLATFORM_DEFINITIONS EXV_PLATFORM_WINDOWS=1)
     list(APPEND EXV_PLATFORM_LIBS bcrypt advapi32 iphlpapi ws2_32 secur32 crypt32)
     list(APPEND EXV_PLATFORM_SOURCES
         src/platform/win32/helper_daemon.cpp
@@ -327,13 +367,14 @@ add_library(exv-core STATIC
     ${EXV_CORE_SOURCES}
     ${EXV_PLATFORM_SOURCES}
 )
+add_dependencies(exv-core exv-generate-distribution-config)
 target_include_directories(exv-core PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
 )
 target_link_libraries(exv-core PUBLIC Threads::Threads ${EXV_PLATFORM_LIBS})
 target_compile_definitions(exv-core PUBLIC
-    ECNUVPN_VERSION="${PROJECT_VERSION}"
+    EXV_VERSION="${PROJECT_VERSION}"
     ${EXV_PLATFORM_DEFINITIONS}
 )
 
@@ -346,7 +387,7 @@ target_include_directories(exv-helper-runtime PUBLIC
 )
 target_link_libraries(exv-helper-runtime PUBLIC exv-core)
 target_compile_definitions(exv-helper-runtime PUBLIC
-    ECNUVPN_VERSION="${PROJECT_VERSION}"
+    EXV_VERSION="${PROJECT_VERSION}"
     ${EXV_PLATFORM_DEFINITIONS}
 )
 
@@ -565,9 +606,10 @@ else()
 endif()
 
 add_executable(exv-cli ${EXV_CLI_FRONTEND_SOURCES})
+add_dependencies(exv-cli exv-generate-distribution-config)
 target_link_libraries(exv-cli PRIVATE Threads::Threads ${EXV_PLATFORM_LIBS})
 target_compile_definitions(exv-cli PRIVATE
-    ECNUVPN_VERSION="${PROJECT_VERSION}"
+    EXV_VERSION="${PROJECT_VERSION}"
     ${EXV_PLATFORM_DEFINITIONS}
 )
 
@@ -576,12 +618,12 @@ add_executable(exv-helper
 )
 target_link_libraries(exv-helper PRIVATE exv-helper-runtime)
 target_compile_definitions(exv-helper PRIVATE
-    ECNUVPN_VERSION="${PROJECT_VERSION}"
+    EXV_VERSION="${PROJECT_VERSION}"
 )
 
 # Pass version to source
 target_compile_definitions(exv PRIVATE
-    ECNUVPN_VERSION="${PROJECT_VERSION}"
+    EXV_VERSION="${PROJECT_VERSION}"
 )
 
 # Embedded WebUI assets
@@ -624,7 +666,7 @@ target_include_directories(platform_network_ops_model_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_definitions(platform_network_ops_model_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME platform_network_ops_model_test COMMAND platform_network_ops_model_test)
@@ -716,7 +758,7 @@ target_include_directories(native_helper_session_test PRIVATE
 )
 
 target_compile_definitions(native_helper_session_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(native_helper_session_test PRIVATE exv-helper-runtime Threads::Threads)
@@ -955,7 +997,7 @@ add_executable(native_packaging_policy_test
 )
 
 target_compile_definitions(native_packaging_policy_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME native_packaging_policy_test COMMAND native_packaging_policy_test)
@@ -965,7 +1007,7 @@ add_executable(native_only_cutover_contract_test
 )
 
 target_compile_definitions(native_only_cutover_contract_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME native_only_cutover_contract_test COMMAND native_only_cutover_contract_test)
@@ -975,7 +1017,7 @@ add_executable(repository_hygiene_test
 )
 
 target_compile_definitions(repository_hygiene_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME repository_hygiene_test COMMAND repository_hygiene_test)
@@ -1052,7 +1094,7 @@ add_executable(ui_shell_cmake_policy_test
 )
 
 target_compile_definitions(ui_shell_cmake_policy_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME ui_shell_cmake_policy_test COMMAND ui_shell_cmake_policy_test)
@@ -1062,7 +1104,7 @@ add_executable(ui_shell_main_wiring_test
 )
 
 target_compile_definitions(ui_shell_main_wiring_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME ui_shell_main_wiring_test COMMAND ui_shell_main_wiring_test)
@@ -1080,7 +1122,7 @@ if(WIN32)
     )
 
     target_compile_definitions(win32_webview2_runtime_test PRIVATE
-        ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     )
 
     target_link_libraries(win32_webview2_runtime_test PRIVATE advapi32 urlmon shell32)
@@ -1102,7 +1144,7 @@ if(APPLE)
     )
     target_compile_definitions(darwin_wkwebview_runtime_test PRIVATE
         EXV_BUILD_UI_SHELL=1
-        ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     )
     target_link_libraries(darwin_wkwebview_runtime_test PRIVATE
         "-framework Cocoa"
@@ -1343,7 +1385,7 @@ target_include_directories(native_tls_stream_contract_test PRIVATE
 )
 
 target_compile_definitions(native_tls_stream_contract_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME native_tls_stream_contract_test COMMAND native_tls_stream_contract_test)
@@ -1503,7 +1545,7 @@ if(WIN32)
     )
 
     target_compile_definitions(win32_native_packet_device_test PRIVATE
-        ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     )
 
     target_link_libraries(win32_native_packet_device_test PRIVATE iphlpapi ws2_32)
@@ -1861,7 +1903,7 @@ target_include_directories(core_process_lifecycle_test PRIVATE
 target_link_libraries(core_process_lifecycle_test PRIVATE exv-core exv-helper-runtime Threads::Threads)
 
 target_compile_definitions(core_process_lifecycle_test PRIVATE
-    ECNUVPN_VERSION="${PROJECT_VERSION}"
+    EXV_VERSION="${PROJECT_VERSION}"
 )
 
 add_test(NAME core_process_lifecycle_test COMMAND core_process_lifecycle_test)
@@ -1876,7 +1918,7 @@ target_include_directories(core_lifecycle_registry_test PRIVATE
 )
 
 target_compile_definitions(core_lifecycle_registry_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(core_lifecycle_registry_test PRIVATE exv-core)
@@ -1893,7 +1935,7 @@ target_include_directories(core_resolver_test PRIVATE
 )
 
 target_compile_definitions(core_resolver_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(core_resolver_test PRIVATE exv-core)
@@ -1979,7 +2021,7 @@ target_include_directories(helper_contract_test PRIVATE
 )
 
 target_compile_definitions(helper_contract_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(helper_contract_test PRIVATE exv-helper-runtime Threads::Threads)
@@ -2174,7 +2216,7 @@ target_include_directories(app_api_status_contract_test PRIVATE
 )
 
 target_compile_definitions(app_api_status_contract_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME app_api_status_contract_test COMMAND app_api_status_contract_test)
@@ -2262,6 +2304,7 @@ add_test(NAME config_actions_test COMMAND config_actions_test)
 add_executable(config_initialization_test
     tests/config_initialization_test.cpp
 )
+add_dependencies(config_initialization_test exv-generate-distribution-config)
 
 target_include_directories(config_initialization_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -2361,7 +2404,7 @@ target_include_directories(contract_manifest_test PRIVATE
 )
 
 target_compile_definitions(contract_manifest_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME contract_manifest_test COMMAND contract_manifest_test)
@@ -2377,6 +2420,10 @@ target_include_directories(cli_commands_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+target_compile_definitions(cli_commands_test PRIVATE
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 add_test(NAME cli_commands_test COMMAND cli_commands_test)
 
 add_executable(core_architecture_contract_test
@@ -2389,7 +2436,7 @@ target_include_directories(core_architecture_contract_test PRIVATE
 )
 
 target_compile_definitions(core_architecture_contract_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME core_architecture_contract_test COMMAND core_architecture_contract_test)
@@ -2404,7 +2451,7 @@ target_include_directories(base_observability_architecture_test PRIVATE
 )
 
 target_compile_definitions(base_observability_architecture_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 add_test(NAME base_observability_architecture_test COMMAND base_observability_architecture_test)
@@ -2608,7 +2655,7 @@ target_include_directories(connection_attempt_test PRIVATE
 )
 
 target_compile_definitions(connection_attempt_test PRIVATE
-    ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    EXV_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(connection_attempt_test PRIVATE
@@ -2986,7 +3033,7 @@ set_property(TEST
 
 # Install target
 if(WIN32)
-  install(TARGETS exv exv-cli exv-helper DESTINATION "C:/Program Files/ECNU-VPN")
+  install(TARGETS exv exv-cli exv-helper DESTINATION "C:/Program Files/EXV")
 else()
   install(TARGETS exv exv-cli exv-helper DESTINATION /usr/local/bin)
 endif()

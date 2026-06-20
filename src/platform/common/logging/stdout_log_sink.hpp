@@ -5,7 +5,7 @@
 #include <iosfwd>
 #include <mutex>
 
-namespace ecnuvpn::platform::logging {
+namespace exv::platform::logging {
 
 class StdoutLogSink final : public exv::observability::LogSink {
 public:
@@ -19,4 +19,4 @@ private:
   std::mutex mutex_;
 };
 
-} // namespace ecnuvpn::platform::logging
+} // namespace exv::platform::logging

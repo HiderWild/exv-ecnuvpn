@@ -64,7 +64,7 @@ For AnyConnect-style VPN: **`NETunnelProviderManager`** (PacketTunnel) is the on
 
 ### 3.2 PacketTunnel Provider Constraints
 
-| Constraint | Impact on ECNU-VPN |
+| Constraint | Impact on EXV |
 |---|---|
 | Runs in a sandboxed extension process | Cannot use `fork()`, `exec()`, or arbitrary system calls |
 | No root access | Must use `NEPacketTunnelNetworkSettings` for IP/DNS/routes |

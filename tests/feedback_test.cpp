@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 
-using namespace ecnuvpn;
+using namespace exv;
 
 namespace {
 

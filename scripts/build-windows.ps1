@@ -10,8 +10,8 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $buildRoot = Join-Path $repoRoot 'build\windows'
 $cppBuildRoot = Join-Path $repoRoot 'build-windows'
-$env:ECNUVPN_BUILD_PLATFORM = 'windows'
-$env:ECNUVPN_WEBUI_DIST_DIR = Join-Path $buildRoot 'webview\dist'
+$env:EXV_BUILD_PLATFORM = 'windows'
+$env:EXV_WEBUI_DIST_DIR = Join-Path $buildRoot 'webview\dist'
 
 function Resolve-WebView2Sdk {
   param([string]$RequestedPath)

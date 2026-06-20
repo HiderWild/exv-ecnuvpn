@@ -12,7 +12,7 @@ namespace exv::platform::darwin {
 // ---------------------------------------------------------------------------
 
 std::string DarwinKeychainStore::make_service(const std::string& profile_id) const {
-    return "com.ecnu-vpn.profile." + profile_id;
+    return "com.exv.profile." + profile_id;
 }
 
 std::string DarwinKeychainStore::make_account(const std::string& profile_id,

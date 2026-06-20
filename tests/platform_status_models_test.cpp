@@ -18,40 +18,41 @@ bool expect(bool condition, const char *message) {
 int main() {
   bool ok = true;
 
-  ok = expect(ecnuvpn::platform::runtime_source_from_paths(
+  ok = expect(exv::platform::runtime_source_from_paths(
                   "C:/bundle/openconnect.exe",
                   "C:/bundle/openconnect.exe",
                   "C:/Windows/System32/openconnect.exe") == "bundled",
               "runtime source should classify bundled path") &&
        ok;
-  ok = expect(ecnuvpn::platform::runtime_source_from_paths(
+  ok = expect(exv::platform::runtime_source_from_paths(
                   "/usr/local/bin/openconnect",
-                  "/Applications/ECNU-VPN/openconnect",
+                  "/Applications/EXV/openconnect",
                   "/usr/local/bin/openconnect") == "system",
               "runtime source should classify system path") &&
        ok;
-  ok = expect(ecnuvpn::platform::runtime_source_from_paths(
+  ok = expect(exv::platform::runtime_source_from_paths(
                   "",
-                  "/Applications/ECNU-VPN/openconnect",
+                  "/Applications/EXV/openconnect",
                   "/usr/local/bin/openconnect") == "missing",
               "runtime source should report missing when no path resolves") &&
        ok;
 
-  ecnuvpn::platform::ServiceStatusSnapshot status;
+  exv::platform::ServiceStatusSnapshot status;
   status.installed = true;
   status.running = false;
   status.available = true;
   status.mode = "launchd";
   status.path = "/usr/local/bin/exv";
   status.endpoint = "/var/run/exv-helper.sock";
-  status.label = "com.ecnu.exv.helper";
-  status.binary_path = "/usr/local/bin/exv-helper";
+  status.label = "com.exv.helper";
+  status.binary_path =
+      "/Library/Application Support/EXV/Helper/exv-helper";
   status.capabilities = {{"service_mode", true}, {"oneshot_mode", true}};
   status.warning = "waiting for helper";
   status.has_service_state = true;
   status.service_state = 4;
 
-  nlohmann::json json = ecnuvpn::platform::service_status_to_json(status);
+  nlohmann::json json = exv::platform::service_status_to_json(status);
   ok = expect(json.value("installed", false),
               "service status should preserve installed flag") &&
        ok;
@@ -71,11 +72,11 @@ int main() {
                   "/var/run/exv-helper.sock",
               "service status should expose the helper endpoint") &&
        ok;
-  ok = expect(json.value("label", std::string()) == "com.ecnu.exv.helper",
+  ok = expect(json.value("label", std::string()) == "com.exv.helper",
               "service status should expose the platform label") &&
        ok;
   ok = expect(json.value("binary_path", std::string()) ==
-                  "/usr/local/bin/exv-helper",
+                  "/Library/Application Support/EXV/Helper/exv-helper",
               "service status should expose the resolved helper binary path") &&
        ok;
   ok = expect(json.contains("capabilities") &&

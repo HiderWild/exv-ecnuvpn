@@ -7,7 +7,7 @@
 
 #include <sys/stat.h>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 void prepare_direct_fallback_runtime() {
@@ -56,4 +56,4 @@ nlohmann::json status_fallback_without_helper(const ConfigView & /*cfg*/) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

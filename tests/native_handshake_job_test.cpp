@@ -18,26 +18,26 @@ bool expect(bool condition, const char *message) {
 }
 
 class FakeTransport final
-    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+    : public exv::vpn_engine::protocol::ProtocolTransport {
 public:
   explicit FakeTransport(int *auth_count, int *cstp_count,
                          int *disconnect_count)
       : auth_count_(auth_count), cstp_count_(cstp_count),
         disconnect_count_(disconnect_count) {}
 
-  ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
-      const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions
+  exv::vpn_engine::protocol::AuthResult authenticate(
+      const exv::vpn_engine::protocol::ProtocolSessionOptions
           & /*options*/) override {
     ++*auth_count_;
-    ecnuvpn::vpn_engine::protocol::AuthResult result;
+    exv::vpn_engine::protocol::AuthResult result;
     result.ok = true;
     result.cookie = "webvpn=HANDSHAKE";
     return result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   connect_cstp(const std::string &cookie,
-               ecnuvpn::vpn_engine::TunnelMetadata *metadata) override {
+               exv::vpn_engine::TunnelMetadata *metadata) override {
     ++*cstp_count_;
     last_cookie = cookie;
     if (!metadata) {
@@ -51,19 +51,19 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   send_packet(const std::vector<std::uint8_t> & /*packet*/) override {
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind /*kind*/)
+  exv::vpn_engine::ValidationResult
+  send_control(exv::vpn_engine::protocol::InboundFrameKind /*kind*/)
       override {
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame * /*out*/)
+  exv::vpn_engine::ValidationResult
+  receive_frame(exv::vpn_engine::protocol::InboundFrame * /*out*/)
       override {
     return {false, "not_used", "not used"};
   }
@@ -80,39 +80,39 @@ private:
 };
 
 class FailingTransport final
-    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+    : public exv::vpn_engine::protocol::ProtocolTransport {
 public:
   explicit FailingTransport(int *disconnect_count)
       : disconnect_count_(disconnect_count) {}
 
-  ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
-      const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions
+  exv::vpn_engine::protocol::AuthResult authenticate(
+      const exv::vpn_engine::protocol::ProtocolSessionOptions
           & /*options*/) override {
-    ecnuvpn::vpn_engine::protocol::AuthResult result;
+    exv::vpn_engine::protocol::AuthResult result;
     result.ok = true;
     result.cookie = "webvpn=HANDSHAKE";
     return result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   connect_cstp(const std::string & /*cookie*/,
-               ecnuvpn::vpn_engine::TunnelMetadata * /*metadata*/) override {
+               exv::vpn_engine::TunnelMetadata * /*metadata*/) override {
     return {false, "cstp_failed", "CSTP failed"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   send_packet(const std::vector<std::uint8_t> & /*packet*/) override {
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind /*kind*/)
+  exv::vpn_engine::ValidationResult
+  send_control(exv::vpn_engine::protocol::InboundFrameKind /*kind*/)
       override {
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame * /*out*/)
+  exv::vpn_engine::ValidationResult
+  receive_frame(exv::vpn_engine::protocol::InboundFrame * /*out*/)
       override {
     return {false, "not_used", "not used"};
   }
@@ -124,8 +124,8 @@ private:
   int *disconnect_count_;
 };
 
-ecnuvpn::vpn_engine::VpnEngineConfig valid_config() {
-  ecnuvpn::vpn_engine::VpnEngineConfig cfg;
+exv::vpn_engine::VpnEngineConfig valid_config() {
+  exv::vpn_engine::VpnEngineConfig cfg;
   cfg.server = "https://vpn.example.test";
   cfg.username = "alice";
   cfg.password = "secret";
@@ -137,7 +137,7 @@ ecnuvpn::vpn_engine::VpnEngineConfig valid_config() {
 } // namespace
 
 int main() {
-  namespace ve = ecnuvpn::vpn_engine;
+  namespace ve = exv::vpn_engine;
 
   bool ok = true;
 

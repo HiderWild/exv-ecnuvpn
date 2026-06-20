@@ -285,17 +285,31 @@ describe('native WebView package policy', () => {
     assert.match(types, /minimize\(\): Promise<\{ ok: true \}>/)
     assert.match(types, /requestClose\(\): Promise<\{ ok: true \}>/)
     assert.match(types, /resolveClosePrompt\(result: unknown\): Promise<\{ ok: true \}>/)
-    assert.match(types, /startDrag\(\): Promise<\{ ok: true \}>/)
+    assert.match(types, /startDrag\(start\?: DesktopWindowDragStart\): Promise<\{ ok: true \}>/)
+    assert.match(types, /shell:\s*\{[\s\S]*openExternal\(url: string\): Promise<\{ ok: true \}>/)
     assert.match(win32Host, /resizeForMode: \(mode, request\) => rpc\('window\.resizeForMode', \{ mode, request \}\)/)
     assert.match(win32Host, /minimize: \(\) => rpc\('window\.minimize'\)/)
     assert.match(win32Host, /requestClose: \(\) => rpc\('window\.requestClose'\)/)
-    assert.match(win32Host, /startDrag: \(\) => rpc\('window\.startDrag'\)/)
+    assert.match(win32Host, /startDrag: \(drag\) => rpc\('window\.startDrag', drag \?\? \{\}\)/)
+    assert.match(win32Host, /shell:\s*\{[\s\S]*openExternal: \(url\) => rpc\('shell\.openExternal', \{ url \}\)/)
+    assert.match(win32Host, /if \(action == "shell\.openExternal"\)[\s\S]*ShellExecuteW/)
     assert.match(win32Host, /if \(action == "window\.resolveClosePrompt"\)[\s\S]*data\["ok"\] = true/)
     assert.match(darwinHost, /resizeForMode: \(mode, request\) => rpc\('window\.resizeForMode', \{ mode, request \}\)/)
     assert.match(darwinHost, /minimize: \(\) => rpc\('window\.minimize'\)/)
     assert.match(darwinHost, /requestClose: \(\) => rpc\('window\.requestClose'\)/)
-    assert.match(darwinHost, /startDrag: \(\) => rpc\('window\.startDrag'\)/)
+    assert.match(darwinHost, /startDrag: \(drag\) => rpc\('window\.startDrag', drag \?\? \{\}\)/)
+    assert.match(darwinHost, /shell:\s*\{[\s\S]*openExternal: \(url\) => rpc\('shell\.openExternal', \{ url \}\)/)
+    assert.match(darwinHost, /if \(action == "shell\.openExternal"\)[\s\S]*openURL/)
     assert.match(darwinHost, /if \(action == "window\.resolveClosePrompt"\)[\s\S]*data\["ok"\] = true/)
+  })
+
+  it('opens About repository links through the native system browser bridge', () => {
+    const aboutPage = readFileSync(join(webuiRoot, 'src', 'pages', 'AboutPage.vue'), 'utf8')
+
+    assert.match(aboutPage, /async function openRepository\(\)/)
+    assert.match(aboutPage, /window\.exv\?\.shell\?\.openExternal\?\.\(distributionConfig\.repository\.url\)/)
+    assert.match(aboutPage, /@click\.prevent="openRepository"/)
+    assert.doesNotMatch(aboutPage, /target="_blank"/)
   })
 
   it('wraps advanced and minimal content in the shared transparent app frame', () => {
@@ -304,8 +318,11 @@ describe('native WebView package policy', () => {
     const navBarVue = readFileSync(join(webuiRoot, 'src', 'components', 'NavBar.vue'), 'utf8')
     const appIconSvg = readFileSync(join(webuiRoot, 'src', 'assets', 'app-icon.svg'), 'utf8')
     const advancedTitlebarRule = cssRule(frameVue, '.app-window-frame--advanced .app-window-titlebar')
+    const titlebarRule = cssRule(frameVue, '.app-window-titlebar')
     const titlebarIdentityRule = cssRule(frameVue, '.app-window-titlebar__identity')
     const titlebarTitleRule = cssRule(frameVue, '.app-window-titlebar__title')
+    const titlebarControlsRule = cssRule(frameVue, '.app-window-titlebar__controls')
+    const titlebarButtonRule = cssRule(frameVue, '.app-window-titlebar__button')
 
     assert.match(appVue, /import AppWindowFrame from '\.\/components\/AppWindowFrame\.vue'/)
     assert.match(appVue, /<AppWindowFrame[\s\S]*:mode="minimalMode \? 'minimal' : 'advanced'"/)
@@ -316,6 +333,7 @@ describe('native WebView package policy', () => {
     assert.match(appVue, /h-\[34px\][\s\S]*border-b[\s\S]*border-border/)
     assert.match(frameVue, /<header[\s\S]*class="app-window-titlebar/)
     assert.match(frameVue, /@pointerdown="startWindowDrag"/)
+    assert.match(frameVue, /if \(isWindows\.value\) return/)
     assert.match(frameVue, /EXV/)
     assert.match(frameVue, /v-if="visualMode === 'minimal'"/)
     assert.match(frameVue, /:aria-label="titlebarTitle"/)
@@ -330,6 +348,17 @@ describe('native WebView package policy', () => {
     assert.match(advancedTitlebarRule, /right: 0;/)
     assert.match(advancedTitlebarRule, /justify-content: flex-end;/)
     assert.match(advancedTitlebarRule, /padding: 0;/)
+    assert.match(titlebarRule, /app-region: drag;/)
+    assert.match(titlebarRule, /-webkit-app-region: drag;/)
+    assert.match(titlebarControlsRule, /app-region: drag;/)
+    assert.match(titlebarControlsRule, /-webkit-app-region: drag;/)
+    assert.match(titlebarButtonRule, /app-region: drag;/)
+    assert.match(titlebarButtonRule, /-webkit-app-region: drag;/)
+    assert.match(frameVue, /window\.exv\?\.events\.subscribe\(\(event\) =>/)
+    assert.match(frameVue, /event\.type !== 'window-control-state'/)
+    assert.match(frameVue, /nativeWindowControlState\.value = \{ control, pressed \}/)
+    assert.match(frameVue, /app-window-titlebar__button--native-hover/)
+    assert.match(frameVue, /app-window-titlebar__button--native-pressed/)
     assert.doesNotMatch(advancedTitlebarRule, /var\(--advanced-sidebar-width\)/)
     assert.doesNotMatch(advancedTitlebarRule, /border-bottom:/)
     assert.match(titlebarIdentityRule, /display: flex;/)
@@ -453,25 +482,63 @@ describe('native WebView package policy', () => {
     assert.match(runtime, /event_pump_thread\.join\(\)/)
   })
 
-  it('starts the Win32 system titlebar move loop with the current cursor position', () => {
+  it('starts the Win32 system titlebar move loop with a validated drag start position', () => {
     const win32Host = readFileSync(
       join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
       'utf8',
     )
-    const startDragStart = win32Host.indexOf('void start_window_drag()')
+    const startDragStart = win32Host.indexOf('void start_window_drag(')
     assert.notEqual(startDragStart, -1)
     const quitFromTrayStart = win32Host.indexOf('void quit_from_tray()', startDragStart)
     assert.notEqual(quitFromTrayStart, -1)
     const startDragBlock = win32Host.slice(startDragStart, quitFromTrayStart)
 
     assert.match(startDragBlock, /GetCursorPos\(&cursor\)/)
+    assert.match(startDragBlock, /renderer_client_to_screen\(renderer_start\)/)
+    assert.match(startDragBlock, /renderer_derived_start\.value_or\(renderer_start_point\.value_or\(cursor\)\)/)
+    assert.match(startDragBlock, /renderer_titlebar_hit_test\(renderer_start\)/)
+    assert.match(startDragBlock, /left_mouse_button_down\(\)/)
+    assert.match(startDragBlock, /start-drag-reject-button-up/)
+    assert.match(startDragBlock, /GetCursorPos\(&move_loop_start\)/)
+    assert.match(startDragBlock, /start-drag-current-cursor/)
     assert.match(startDragBlock, /ReleaseCapture\(\)/)
     assert.match(startDragBlock, /SendMessageW\(hwnd_, WM_NCLBUTTONDOWN, HTCAPTION/)
-    assert.match(startDragBlock, /MAKELPARAM\(cursor\.x, cursor\.y\)/)
+    assert.match(startDragBlock, /MAKELPARAM\(move_loop_start\.x, move_loop_start\.y\)/)
     assert.match(win32Host, /case WM_MOUSEACTIVATE:[\s\S]*return MA_ACTIVATE;/)
     assert.doesNotMatch(startDragBlock, /GetMessagePos\(\)/)
     assert.doesNotMatch(startDragBlock, /SetCapture\(hwnd_\)/)
     assert.doesNotMatch(win32Host, /void update_window_drag\(\)/)
+  })
+
+  it('enables WebView2 non-client drag regions for the Windows app frame', () => {
+    const win32Host = readFileSync(
+      join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
+      'utf8',
+    )
+
+    assert.match(win32Host, /ICoreWebView2Settings9/)
+    assert.match(win32Host, /put_IsNonClientRegionSupportEnabled\(TRUE\)/)
+    assert.match(win32Host, /configure_non_client_region_support\(\)/)
+  })
+
+  it('routes Windows titlebar control buttons through native hit testing', () => {
+    const win32Host = readFileSync(
+      join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
+      'utf8',
+    )
+    const types = readFileSync(join(webuiRoot, 'src', 'types', 'exv.d.ts'), 'utf8')
+
+    assert.match(win32Host, /control_button_hit_test\(content_x, content_y, content_width, dpi\)/)
+    assert.match(win32Host, /return HTMINBUTTON;/)
+    assert.match(win32Host, /return HTCLOSE;/)
+    assert.match(win32Host, /emit_window_control_state\(/)
+    assert.match(win32Host, /event\["type"\] = "window-control-state"/)
+    assert.match(win32Host, /case WM_NCLBUTTONDOWN:/)
+    assert.match(win32Host, /case WM_NCLBUTTONUP:/)
+    assert.match(win32Host, /case WM_NCMOUSELEAVE:/)
+    assert.match(types, /export type DesktopWindowControl = 'minimize' \| 'close'/)
+    assert.match(types, /export interface WindowControlStateEvent/)
+    assert.match(types, /type: DesktopEventType \| 'window-control-state'/)
   })
 
   it('treats accepted VPN connect jobs as cancellable frontend state', () => {

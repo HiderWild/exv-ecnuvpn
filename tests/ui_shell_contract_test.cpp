@@ -10,10 +10,10 @@
 #include <string>
 
 int main() {
-  using namespace ecnuvpn::ui_shell;
+  using namespace exv::ui_shell;
   namespace fs = std::filesystem;
 
-  if (kWindowShadowMarginPx != 12) {
+  if (kWindowShadowMarginPx != 0) {
     return 1;
   }
 
@@ -94,7 +94,7 @@ int main() {
   }
 
   const fs::path close_pref_root =
-      fs::temp_directory_path() / "ecnuvpn-ui-shell-close-pref";
+      fs::temp_directory_path() / "exv-ui-shell-close-pref";
   fs::remove_all(close_pref_root);
   if (close_preference_path(close_pref_root).filename() !=
       "close-preference.json") {
@@ -129,6 +129,8 @@ int main() {
   char renderer_url[] = "http://127.0.0.1:8288";
   char exv_arg[] = "--exv";
   char exv_path[] = "C:/app/bin/exv.exe";
+  char state_arg[] = "--state-dir";
+  char state_dir[] = "C:/Users/Alice/AppData/Local/EXV/profile/default";
   char devtools_arg[] = "--devtools";
   char *argv[] = {program, renderer_arg, renderer_url, exv_arg, exv_path,
                   devtools_arg};
@@ -136,13 +138,25 @@ int main() {
   assert(options.renderer_dev_server_url == "http://127.0.0.1:8288");
   assert(options.exv_path == "C:/app/bin/exv.exe");
   assert(options.enable_dev_tools);
+  assert(options.state_dir.empty());
   const std::string valid_options_error = validate_ui_shell_options(options);
   if (!valid_options_error.empty()) {
     return 1;
   }
 
+  char *profile_argv[] = {program, renderer_arg, renderer_url, exv_arg,
+                          exv_path, state_arg, state_dir};
+  UiShellOptions profile_options = parse_ui_shell_options(7, profile_argv);
+  if (profile_options.state_dir !=
+      "C:/Users/Alice/AppData/Local/EXV/profile/default") {
+    return 1;
+  }
+  if (!validate_ui_shell_options(profile_options).empty()) {
+    return 1;
+  }
+
   const fs::path package_root =
-      fs::temp_directory_path() / "ecnuvpn-ui-shell-contract-package";
+      fs::temp_directory_path() / "exv-ui-shell-contract-package";
   fs::remove_all(package_root);
   fs::create_directories(package_root);
   const fs::path args_file = package_root / "exv-ui.args";
@@ -165,6 +179,33 @@ int main() {
   if (fs::path(sidecar_options.packaged_renderer_index) !=
       package_root / "webui/index.html") {
     return 1;
+  }
+  if (!sidecar_options.state_dir.empty()) {
+    return 1;
+  }
+
+  {
+    std::ofstream sidecar(args_file, std::ios::trunc);
+    sidecar << "--exv\n"
+            << "bin/exv.exe\n"
+            << "--renderer-index\n"
+            << "webui/index.html\n"
+            << "--state-dir\n"
+            << "profile/default\n";
+  }
+  UiShellOptions relative_profile_sidecar_options =
+      parse_ui_shell_args_file(args_file);
+  if (fs::path(relative_profile_sidecar_options.state_dir) !=
+      package_root / "profile/default") {
+    return 1;
+  }
+
+  {
+    std::ofstream sidecar(args_file, std::ios::trunc);
+    sidecar << "--exv\n"
+            << "bin/exv.exe\n"
+            << "--renderer-index\n"
+            << "webui/index.html\n";
   }
 
   const fs::path bin_dir = package_root / "bin";

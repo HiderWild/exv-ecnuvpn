@@ -39,11 +39,11 @@ bool test_prepare_tunnel_device_delegates() {
     // Must set a session before calling prepare
     ops.set_session(make_session("test-session-1"));
 
-    auto desc = ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    auto desc = ops.prepare_tunnel_device("EXV", 1400);
 
     bool ok = true;
     ok = expect(desc.is_open, "1: device should be open after prepare") && ok;
-    ok = expect(desc.adapter_name == "ECNU-VPN",
+    ok = expect(desc.adapter_name == "EXV",
                 "1: adapter_name should match") && ok;
     ok = expect(desc.mtu == 1400,
                 "1: mtu should be 1400") && ok;
@@ -61,7 +61,7 @@ bool test_prepare_without_session() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
 
     // Intentionally do NOT set a session
-    auto desc = ops.prepare_tunnel_device("ECNU-VPN", 1280);
+    auto desc = ops.prepare_tunnel_device("EXV", 1280);
 
     bool ok = true;
     // The fake helper still returns success, but the session_id should be empty.
@@ -82,15 +82,15 @@ bool test_open_tunnel_device_after_prepare() {
     ops.set_session(make_session("test-session-3"));
 
     // Prepare first
-    auto prepared = ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    auto prepared = ops.prepare_tunnel_device("EXV", 1400);
     // Then open
-    auto opened = ops.open_tunnel_device("ECNU-VPN");
+    auto opened = ops.open_tunnel_device("EXV");
 
     bool ok = true;
     ok = expect(opened.is_open, "3: opened device should be open") && ok;
     ok = expect(opened.path == prepared.path,
                 "3: opened path should match prepared path") && ok;
-    ok = expect(opened.adapter_name == "ECNU-VPN",
+    ok = expect(opened.adapter_name == "EXV",
                 "3: adapter_name should match") && ok;
     return ok;
 }
@@ -103,7 +103,7 @@ bool test_open_without_prepare() {
     auto* h = helper.get();
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
 
-    auto opened = ops.open_tunnel_device("ECNU-VPN");
+    auto opened = ops.open_tunnel_device("EXV");
 
     bool ok = true;
     ok = expect(!opened.is_open,
@@ -120,7 +120,7 @@ bool test_open_wrong_adapter() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
     ops.set_session(make_session("test-session-5"));
 
-    ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    ops.prepare_tunnel_device("EXV", 1400);
     auto opened = ops.open_tunnel_device("OtherAdapter");
 
     bool ok = true;
@@ -138,11 +138,11 @@ bool test_apply_tunnel_config_success() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
     ops.set_session(make_session("test-session-6"));
 
-    auto device = ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    auto device = ops.prepare_tunnel_device("EXV", 1400);
 
     exv::platform::TunnelConfig config;
     config.interface_address = "10.0.0.2/24";
-    config.interface_name = "ECNU-VPN";
+    config.interface_name = "EXV";
     config.mtu = 1400;
     config.enable_kill_switch = false;
 
@@ -193,7 +193,7 @@ bool test_apply_tunnel_config_failure() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
     ops.set_session(make_session("test-session-7"));
 
-    auto device = ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    auto device = ops.prepare_tunnel_device("EXV", 1400);
 
     exv::platform::TunnelConfig config;
     config.interface_address = "10.0.0.2/24";
@@ -222,7 +222,7 @@ bool test_apply_no_helper() {
     ops.set_session(make_session("test-session-8"));
 
     exv::platform::TunnelDeviceDescriptor device;
-    device.adapter_name = "ECNU-VPN";
+    device.adapter_name = "EXV";
     device.is_open = true;
 
     exv::platform::TunnelConfig config;
@@ -242,7 +242,7 @@ bool test_cleanup_delegates() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
     ops.set_session(make_session("test-session-9"));
 
-    auto result = ops.cleanup("ECNU-VPN", exv::platform::CleanupPolicy::Full);
+    auto result = ops.cleanup("EXV", exv::platform::CleanupPolicy::Full);
 
     bool ok = true;
     ok = expect(result.success, "9: cleanup should succeed") && ok;
@@ -259,7 +259,7 @@ bool test_cleanup_no_helper() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(nullptr);
     ops.set_session(make_session("test-session-10"));
 
-    auto result = ops.cleanup("ECNU-VPN", exv::platform::CleanupPolicy::Full);
+    auto result = ops.cleanup("EXV", exv::platform::CleanupPolicy::Full);
 
     bool ok = true;
     ok = expect(!result.success, "10: cleanup should fail with null helper") && ok;
@@ -278,12 +278,12 @@ bool test_device_exists_after_prepare() {
     ops.set_session(make_session("test-session-11"));
 
     bool ok = true;
-    ok = expect(!ops.device_exists("ECNU-VPN"),
+    ok = expect(!ops.device_exists("EXV"),
                 "11: device should NOT exist before prepare") && ok;
 
-    ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    ops.prepare_tunnel_device("EXV", 1400);
 
-    ok = expect(ops.device_exists("ECNU-VPN"),
+    ok = expect(ops.device_exists("EXV"),
                 "11: device should exist after prepare") && ok;
     ok = expect(!ops.device_exists("OtherAdapter"),
                 "11: different adapter should NOT exist") && ok;
@@ -299,9 +299,9 @@ bool test_device_exists_cleared_after_cleanup() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
     ops.set_session(make_session("test-session-12"));
 
-    ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    ops.prepare_tunnel_device("EXV", 1400);
     bool ok = true;
-    ok = expect(ops.device_exists("ECNU-VPN"),
+    ok = expect(ops.device_exists("EXV"),
                 "12: device should exist after prepare") && ok;
 
     // Note: device_exists tracks via last_prepared_device_, not via a
@@ -309,7 +309,7 @@ bool test_device_exists_cleared_after_cleanup() {
     // the local tracking.  This is expected: device_exists reflects
     // prepare state, not cleanup state.  The real platform impl would
     // query the OS.
-    ops.cleanup("ECNU-VPN", exv::platform::CleanupPolicy::Full);
+    ops.cleanup("EXV", exv::platform::CleanupPolicy::Full);
 
     return ok;
 }
@@ -349,7 +349,7 @@ bool test_cleanup_policy_mapping() {
     bool ok = true;
 
     // Full cleanup
-    ops.cleanup("ECNU-VPN", exv::platform::CleanupPolicy::Full);
+    ops.cleanup("EXV", exv::platform::CleanupPolicy::Full);
     auto reqs = helper->cleanup_requests();
     ok = expect(reqs.size() == 1, "14a: should have 1 cleanup request") && ok;
     if (!reqs.empty()) {
@@ -360,7 +360,7 @@ bool test_cleanup_policy_mapping() {
     }
 
     // RoutesOnly
-    ops.cleanup("ECNU-VPN", exv::platform::CleanupPolicy::RoutesOnly);
+    ops.cleanup("EXV", exv::platform::CleanupPolicy::RoutesOnly);
     reqs = helper->cleanup_requests();
     ok = expect(reqs.size() == 2, "14b: should have 2 cleanup requests") && ok;
     if (reqs.size() >= 2) {
@@ -385,29 +385,29 @@ bool test_full_lifecycle() {
     ops.set_session(make_session("lifecycle-session"));
 
     // 1. Prepare
-    auto device = ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    auto device = ops.prepare_tunnel_device("EXV", 1400);
     bool ok = true;
     ok = expect(device.is_open, "15: prepare should succeed") && ok;
 
     // 2. Open
-    auto opened = ops.open_tunnel_device("ECNU-VPN");
+    auto opened = ops.open_tunnel_device("EXV");
     ok = expect(opened.is_open, "15: open should succeed after prepare") && ok;
 
     // 3. Apply
     exv::platform::TunnelConfig config;
     config.interface_address = "10.0.0.2/24";
-    config.interface_name = "ECNU-VPN";
+    config.interface_name = "EXV";
     config.routes.push_back({"0.0.0.0/0", "10.0.0.1", 100, true});
     config.dns.servers.push_back("8.8.8.8");
     bool applied = ops.apply_tunnel_config(device, config);
     ok = expect(applied, "15: apply should succeed") && ok;
 
     // 4. Cleanup
-    auto cleanup_result = ops.cleanup("ECNU-VPN", exv::platform::CleanupPolicy::Full);
+    auto cleanup_result = ops.cleanup("EXV", exv::platform::CleanupPolicy::Full);
     ok = expect(cleanup_result.success, "15: cleanup should succeed") && ok;
 
     // 5. Device should still exist (cleanup doesn't clear local tracking)
-    ok = expect(ops.device_exists("ECNU-VPN"), "15: device should still exist after cleanup") && ok;
+    ok = expect(ops.device_exists("EXV"), "15: device should still exist after cleanup") && ok;
 
     return ok;
 }
@@ -420,7 +420,7 @@ bool test_prepare_failure_preserves_helper_error() {
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
     ops.set_session(make_session("prepare-failure-session"));
 
-    auto device = ops.prepare_tunnel_device("ECNU-VPN", 1400);
+    auto device = ops.prepare_tunnel_device("EXV", 1400);
 
     bool ok = true;
     ok = expect(!device.is_open, "16: failed prepare should return closed device") &&

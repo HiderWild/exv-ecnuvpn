@@ -26,7 +26,7 @@ bool g_runtime_path_overridden = false;
 bool g_fix_config_dir_ownership_called = false;
 } // namespace
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 const ConfigDefaults &config_defaults() {
@@ -62,10 +62,10 @@ bool fix_runtime_config_dir_ownership() {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv
 
 #ifdef _WIN32
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 nlohmann::json driver_status_json(const ConfigView &) {
@@ -80,61 +80,61 @@ void sleep_ms(unsigned int) {}
 
 } // namespace platform
 
-} // namespace ecnuvpn
+} // namespace exv
 #endif
 
 int main() {
   bool ok = true;
 
-  ok = expect(std::string(ecnuvpn::platform::kHelperUnavailableCode) ==
+  ok = expect(std::string(exv::platform::kHelperUnavailableCode) ==
                   "helper_unavailable",
               "helper unavailable code should remain stable") &&
        ok;
 
 #ifdef _WIN32
   ok = expect(
-           ecnuvpn::platform::helper_unavailable_connect_message() ==
+           exv::platform::helper_unavailable_connect_message() ==
                "Helper daemon is not available. Install the helper service from Settings or run 'exv service install' as Administrator.",
            "Windows connect remediation message should stay stable") &&
        ok;
   ok = expect(
-           ecnuvpn::platform::helper_unavailable_disconnect_message() ==
+           exv::platform::helper_unavailable_disconnect_message() ==
                "Helper daemon is not available. Use the elevated desktop action or install the helper service from Settings.",
            "Windows disconnect remediation message should stay stable") &&
        ok;
 #elif defined(__APPLE__)
   ok = expect(
-           ecnuvpn::platform::helper_unavailable_connect_message() ==
+           exv::platform::helper_unavailable_connect_message() ==
                "Helper daemon is not available. The desktop app can request one-time administrator authorization, or you can install the helper service for persistent connections.",
            "macOS connect remediation message should stay stable") &&
        ok;
   ok = expect(
-           ecnuvpn::platform::helper_unavailable_disconnect_message() ==
+           exv::platform::helper_unavailable_disconnect_message() ==
                "Helper daemon is not available. The desktop app can request one-time administrator authorization to disconnect this session, or you can install the helper service.",
            "macOS disconnect remediation message should stay stable") &&
        ok;
 #else
   ok = expect(
-           ecnuvpn::platform::helper_unavailable_connect_message() ==
+           exv::platform::helper_unavailable_connect_message() ==
                "Helper daemon is not available. Install the helper service before starting the desktop client.",
            "Linux connect remediation message should stay stable") &&
        ok;
   ok = expect(
-           ecnuvpn::platform::helper_unavailable_disconnect_message() ==
+           exv::platform::helper_unavailable_disconnect_message() ==
                "Helper daemon is not available. Install the helper service before disconnecting managed sessions.",
            "Linux disconnect remediation message should stay stable") &&
        ok;
 #endif
 
-  ecnuvpn::platform::prepare_direct_fallback_runtime();
+  exv::platform::prepare_direct_fallback_runtime();
 
   #ifdef _WIN32
   ok = expect(!g_checked_root,
       "Windows runtime policy should remain an explicit no-op") &&
     ok;
 
-  nlohmann::json direct = ecnuvpn::platform::try_connect_direct_fallback(
-      ecnuvpn::platform::ConfigView{}, "test-mock");
+  nlohmann::json direct = exv::platform::try_connect_direct_fallback(
+      exv::platform::ConfigView{}, "test-mock");
   ok = expect(direct.empty(),
               "Windows direct connect fallback should remain disabled") &&
        ok;

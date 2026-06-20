@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 struct WindowsDriverAdapterSnapshot {
@@ -24,4 +24,4 @@ void set_driver_status_adapter_snapshot_provider_for_testing(
 void clear_driver_status_cache_for_testing();
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

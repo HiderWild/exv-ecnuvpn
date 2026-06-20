@@ -19,7 +19,7 @@
 
 namespace {
 
-class FakeTransport final : public ecnuvpn::ui_shell::CoreRpcTransport {
+class FakeTransport final : public exv::ui_shell::CoreRpcTransport {
 public:
   explicit FakeTransport(std::string response) {
     responses_.push_back(std::move(response));
@@ -50,7 +50,7 @@ private:
   std::vector<std::string>::size_type next_response_ = 0;
 };
 
-class BlockingTransport final : public ecnuvpn::ui_shell::CoreRpcTransport {
+class BlockingTransport final : public exv::ui_shell::CoreRpcTransport {
 public:
   void close() override {
     {
@@ -92,7 +92,7 @@ bool expect(bool condition, const char *message) {
 } // namespace
 
 int main() {
-  using namespace ecnuvpn::ui_shell;
+  using namespace exv::ui_shell;
   bool ok_all = true;
 
   CoreRpcResponse ok =
@@ -523,7 +523,7 @@ int main() {
     test_deps.get_env_var = [](const std::string &) { return std::string(); };
 
     CoreResolveOptions opts;
-    auto result = ecnuvpn::ui_shell::classify_core_state(opts, test_deps);
+    auto result = exv::ui_shell::classify_core_state(opts, test_deps);
     ok_all = expect(result.status == CoreResolveStatus::CoreNotFound,
                     "classify_core_state with no core should return CoreNotFound") &&
              ok_all;
@@ -554,7 +554,7 @@ int main() {
     test_deps.get_state_dir = []() { return "/tmp/exv-test"; };
 
     CoreResolveOptions opts;
-    auto result = ecnuvpn::ui_shell::classify_core_state(opts, test_deps);
+    auto result = exv::ui_shell::classify_core_state(opts, test_deps);
     ok_all = expect(result.status == CoreResolveStatus::ReuseExisting,
                     "classify_core_state with live IPC should return ReuseExisting") &&
              ok_all;

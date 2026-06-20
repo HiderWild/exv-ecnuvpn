@@ -20,7 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="${1:-$REPO_ROOT/build/macos/cpp}"
 DMG_PATH="${EXV_DMG_PATH:-}"
-PACKAGE_ROOT="${EXV_WEBVIEW_PACKAGE:-$REPO_ROOT/build/macos/webview/package/ECNU VPN}"
+PACKAGE_ROOT="${EXV_WEBVIEW_PACKAGE:-$REPO_ROOT/build/macos/webview/package/EXV}"
+STABLE_HELPER="/Library/Application Support/EXV/Helper/exv-helper"
 
 # Colors
 RED='\033[0;31m'
@@ -86,7 +87,7 @@ find_helper_binary() {
   local candidates=(
     "$PACKAGE_ROOT/bin/exv-helper"
     "$BUILD_DIR/exv-helper"
-    "/usr/local/bin/exv-helper"
+    "$STABLE_HELPER"
   )
   for c in "${candidates[@]}"; do
     if [[ -x "$c" ]]; then
@@ -114,7 +115,7 @@ fi
 if EXV_HELPER_BIN=$(find_helper_binary); then
   pass "exv-helper binary found at $EXV_HELPER_BIN"
 else
-  fail "exv-helper binary not found" "Searched: $PACKAGE_ROOT/bin, $BUILD_DIR, /usr/local/bin"
+  fail "exv-helper binary not found" "Searched: $PACKAGE_ROOT/bin, $BUILD_DIR, $STABLE_HELPER"
 fi
 
 section "Package payload policy"
@@ -274,7 +275,7 @@ fi
 section "8. Info.plist verification"
 
 PLIST_CANDIDATES=(
-  "$PACKAGE_ROOT/ECNU VPN.app/Contents/Info.plist"
+  "$PACKAGE_ROOT/EXV.app/Contents/Info.plist"
 )
 
 PLIST_FOUND=""
@@ -309,7 +310,7 @@ fi
 section "9. Codesign verification"
 
 APP_CANDIDATES=(
-  "$PACKAGE_ROOT/ECNU VPN.app"
+  "$PACKAGE_ROOT/EXV.app"
 )
 
 APP_FOUND=""
@@ -342,7 +343,7 @@ fi
 
 section "10. Helper launchd plist"
 
-LAUNCHD_PLIST="/Library/LaunchDaemons/com.ecnu.exv.helper.plist"
+LAUNCHD_PLIST="/Library/LaunchDaemons/com.exv.helper.plist"
 
 if [[ -f "$LAUNCHD_PLIST" ]]; then
   # Verify plist structure
@@ -358,6 +359,12 @@ if [[ -f "$LAUNCHD_PLIST" ]]; then
     done
     if [[ ${#MISSING[@]} -gt 0 ]]; then
       fail "launchd plist missing keys" "Missing: ${MISSING[*]}"
+    fi
+
+    if grep -q "$STABLE_HELPER" "$LAUNCHD_PLIST"; then
+      pass "Helper launchd plist points to stable helper"
+    else
+      fail "Helper launchd plist points to stable helper" "Expected: $STABLE_HELPER"
     fi
   else
     fail "Helper launchd plist exists but is malformed"

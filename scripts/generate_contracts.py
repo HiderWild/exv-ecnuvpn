@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate checked-in ECNU-VPN contract artifacts."""
+"""Generate checked-in EXV contract artifacts."""
 
 from __future__ import annotations
 
@@ -307,8 +307,8 @@ def validate_src_organization(src_organization: dict[str, Any]) -> None:
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    if manifest.get("contract_id") != "ecnu-vpn.system":
-        raise ContractError("contract_id must be ecnu-vpn.system")
+    if manifest.get("contract_id") != "exv.system":
+        raise ContractError("contract_id must be exv.system")
     require_string(manifest.get("version"), "version")
     require_positive_int(manifest.get("ipc_protocol_major"), "ipc_protocol_major")
 

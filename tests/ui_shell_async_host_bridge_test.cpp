@@ -13,7 +13,7 @@
 
 namespace {
 
-class FakeTransport final : public ecnuvpn::ui_shell::CoreRpcTransport {
+class FakeTransport final : public exv::ui_shell::CoreRpcTransport {
 public:
   explicit FakeTransport(std::string response)
       : response_(std::move(response)) {}
@@ -97,7 +97,7 @@ bool expect(bool condition, const char *message) {
 } // namespace
 
 int main() {
-  using namespace ecnuvpn::ui_shell;
+  using namespace exv::ui_shell;
   bool ok = true;
 
   {

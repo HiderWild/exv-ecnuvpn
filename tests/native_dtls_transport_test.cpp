@@ -17,9 +17,9 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
@@ -34,15 +34,15 @@ std::string as_text(const std::vector<std::uint8_t> &bytes) {
   return std::string(bytes.begin(), bytes.end());
 }
 
-class MockTlsStream final : public ecnuvpn::vpn_engine::protocol::TlsStream {
+class MockTlsStream final : public exv::vpn_engine::protocol::TlsStream {
 public:
-  ecnuvpn::vpn_engine::ValidationResult
-  connect(const ecnuvpn::vpn_engine::protocol::TlsEndpoint &) override {
+  exv::vpn_engine::ValidationResult
+  connect(const exv::vpn_engine::protocol::TlsEndpoint &) override {
     connected_ = true;
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_all(const std::vector<std::uint8_t> &bytes) override {
     if (!connected_)
       return invalid("tls_stream_not_connected", "TLS stream is not connected");
@@ -50,7 +50,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_some(std::vector<std::uint8_t> *out) override {
     if (!out)
       return invalid("tls_stream_null_output", "read output must not be null");
@@ -112,9 +112,9 @@ std::string cstp_with_dtls_metadata() {
          "\r\n";
 }
 
-ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
-  ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions out;
-  auto parsed = ecnuvpn::vpn_engine::protocol::parse_vpn_url(
+exv::vpn_engine::protocol::ProtocolSessionOptions options() {
+  exv::vpn_engine::protocol::ProtocolSessionOptions out;
+  auto parsed = exv::vpn_engine::protocol::parse_vpn_url(
       "https://vpn.example.invalid", &out.server);
   (void)parsed;
   out.username = "student";
@@ -124,10 +124,10 @@ ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
 }
 
 bool test_dtls_state_classification() {
-  using ecnuvpn::vpn_engine::protocol::DtlsNegotiationInput;
-  using ecnuvpn::vpn_engine::protocol::DtlsTransportState;
-  using ecnuvpn::vpn_engine::protocol::classify_dtls_negotiation;
-  using ecnuvpn::vpn_engine::protocol::dtls_transport_state_to_string;
+  using exv::vpn_engine::protocol::DtlsNegotiationInput;
+  using exv::vpn_engine::protocol::DtlsTransportState;
+  using exv::vpn_engine::protocol::classify_dtls_negotiation;
+  using exv::vpn_engine::protocol::dtls_transport_state_to_string;
 
   bool ok = true;
 
@@ -196,11 +196,11 @@ int main() {
   stream.push_read_text(aggregate_auth_ok());
   stream.push_read_text(cstp_with_dtls_metadata());
 
-  ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport transport(&stream);
+  exv::vpn_engine::protocol::ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
   ok = expect(auth.ok, "aggregate auth should succeed") && ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto connected = transport.connect_cstp(auth.cookie, &metadata);
   ok = expect(connected.ok,
               "CSTP should remain connected when DTLS metadata is advertised") &&

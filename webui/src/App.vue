@@ -20,7 +20,7 @@ const { connect: sseConnect, disconnect: sseDisconnect, coreCrashed, coreCrashIn
 const route = useRoute()
 
 const minimalMode = computed(() => config.settings.minimal_mode)
-const keptAlivePages = ['DashboardPage', 'SettingsPage', 'LogsPage']
+const keptAlivePages = ['DashboardPage', 'SettingsPage', 'LogsPage', 'AboutPage']
 let autoConnectAttempted = false
 const modalRoute = computed(() =>
   route.path.startsWith('/modal/') ||

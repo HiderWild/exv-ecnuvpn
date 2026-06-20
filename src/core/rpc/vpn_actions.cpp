@@ -109,7 +109,8 @@ RpcResponse VpnActions::status(const RpcRequest& req) {
         {"session_active", s.session_active},
         {"network_ready", s.network_ready},
         {"server", s.server},
-        {"interface_name", s.interface_name}
+        {"interface_name", s.interface_name},
+        {"internal_ip", s.internal_ip}
     };
 
     if (s.last_error.has_value()) {
@@ -160,12 +161,12 @@ RpcResponse VpnActions::set_auto_reconnect(const RpcRequest& req) {
 RpcResponse VpnActions::get_legacy_status(const RpcRequest& req) {
     RpcResponse resp;
     try {
-        ecnuvpn::Config cfg;
-        if (ecnuvpn::runtime::is_bootstrapped()) {
-            ecnuvpn::config::ConfigManager mgr(ecnuvpn::platform::get_config_dir());
+        exv::Config cfg;
+        if (exv::runtime::is_bootstrapped()) {
+            exv::config::ConfigManager mgr(exv::platform::get_config_dir());
             cfg = mgr.load();
         } else {
-            cfg = ecnuvpn::Config{};
+            cfg = exv::Config{};
         }
 
         auto snap = controller_ ? controller_->status() : exv::core::TunnelStatusSnapshot{};
@@ -177,6 +178,8 @@ RpcResponse VpnActions::get_legacy_status(const RpcRequest& req) {
                                     snap.phase != exv::core::TunnelPhase::Failed;
         result["auto_reconnect"] = snap.auto_reconnect;
         result["server"] = !snap.server.empty() ? snap.server : cfg.server;
+        result["interface"] = snap.interface_name;
+        result["internal_ip"] = snap.internal_ip;
 
         if (snap.last_error.has_value()) {
             const auto& err = snap.last_error.value();

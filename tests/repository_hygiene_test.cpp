@@ -9,11 +9,11 @@ namespace {
 
 namespace fs = std::filesystem;
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
-const fs::path kRepoRoot = fs::path(ECNUVPN_SOURCE_DIR);
+const fs::path kRepoRoot = fs::path(EXV_SOURCE_DIR);
 
 bool expect(bool condition, const std::string &message) {
   if (condition)

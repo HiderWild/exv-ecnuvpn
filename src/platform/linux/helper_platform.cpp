@@ -1,6 +1,6 @@
 #include "platform/common/helper_platform.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 const HelperPlatformConfig &helper_platform_config() {
@@ -20,4 +20,4 @@ const HelperPlatformConfig &helper_platform_config() {
 void wake_helper_daemon_for_shutdown() {}
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

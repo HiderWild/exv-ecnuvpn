@@ -31,7 +31,7 @@ export const themeAccentPalettes: Record<ThemeAccentTheme, ThemeAccentOption[]> 
     {
       key: 'red',
       label: '校徽红',
-      description: '取自 EXV 图标主色。',
+      description: '取自 ECNU 校徽主色。',
       color: '#A41F35',
       rgb: '164 31 53',
     },

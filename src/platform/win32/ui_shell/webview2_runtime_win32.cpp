@@ -11,7 +11,7 @@
 #include <string>
 #include <string_view>
 
-namespace ecnuvpn::platform::win32::ui_shell {
+namespace exv::platform::win32::ui_shell {
 namespace {
 
 constexpr wchar_t kWebView2MachineClientKey[] =
@@ -250,4 +250,4 @@ bool run_webview2_evergreen_bootstrapper_with_runner(
   return runner(installer_path, "/silent /install");
 }
 
-} // namespace ecnuvpn::platform::win32::ui_shell
+} // namespace exv::platform::win32::ui_shell

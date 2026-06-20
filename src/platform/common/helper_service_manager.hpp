@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 struct HelperServiceManagerContext {
@@ -22,4 +22,4 @@ int uninstall_helper_service(const HelperServiceManagerContext &context);
 int show_helper_service_status(const HelperServiceManagerContext &context);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

@@ -10,7 +10,7 @@ Production packaging stages native binaries from the CMake build output:
 - `exv-helper` / `exv-helper.exe`
 - required MinGW runtime DLLs on Windows
 
-Optional production runtime assets can be supplied with `ECNUVPN_RUNTIME_DIR` or
+Optional production runtime assets can be supplied with `EXV_RUNTIME_DIR` or
 placed in an ignored local `runtime/<platform>/` directory. The current
 allowlist contains only:
 

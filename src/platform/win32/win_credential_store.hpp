@@ -26,7 +26,7 @@ public:
     std::string backend_name() const override;
 
 private:
-    /// Build the CRED_TARGET_NAME: "ECNU-VPN/<profile_id>/<secret_name>"
+    /// Build the CRED_TARGET_NAME: "EXV/<profile_id>/<secret_name>"
     std::string make_target(const std::string& profile_id,
                             const std::string& secret_name) const;
 };

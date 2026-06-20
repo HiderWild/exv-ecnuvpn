@@ -13,7 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <thread>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 struct NativeHandshakeResult;
@@ -90,4 +90,4 @@ private:
 };
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

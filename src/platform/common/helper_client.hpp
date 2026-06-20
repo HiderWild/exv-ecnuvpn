@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 inline constexpr const char *kHelperUnavailableCode = "helper_unavailable";
@@ -18,4 +18,4 @@ nlohmann::json send_helper_request(const HelperEndpoint &endpoint,
                                    const nlohmann::json &request);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

@@ -1,5 +1,5 @@
 #!/bin/bash
-# run-tests.sh - Local test runner for ECNU-VPN
+# run-tests.sh - Local test runner for EXV
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=== ECNU-VPN Test Runner ==="
+echo "=== EXV Test Runner ==="
 echo "Preset: $PRESET"
 
 # List labels mode

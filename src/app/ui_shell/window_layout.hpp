@@ -1,13 +1,13 @@
 #pragma once
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 struct WindowBounds {
   int width = 0;
   int height = 0;
 };
 
-inline constexpr int kWindowShadowMarginPx = 12;
+inline constexpr int kWindowShadowMarginPx = 0;
 inline constexpr WindowBounds kAppSurfaceAdvancedWindowBounds{972, 563};
 inline constexpr WindowBounds kAppSurfaceMinimalWindowBounds{302, 118};
 inline constexpr WindowBounds kElectronAdvancedWindowBounds{
@@ -25,4 +25,4 @@ inline constexpr WindowBounds kElectronMinimalWindowBounds{
   return kElectronMinimalWindowBounds;
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

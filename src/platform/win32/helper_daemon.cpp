@@ -7,7 +7,7 @@
 #include <vector>
 #endif
 
-namespace ecnuvpn {
+namespace exv {
 namespace helper {
 
 class WinIpcServer : public IpcServer {
@@ -204,4 +204,4 @@ std::unique_ptr<IpcServer> create_ipc_server() {
 }
 
 } // namespace helper
-} // namespace ecnuvpn
+} // namespace exv

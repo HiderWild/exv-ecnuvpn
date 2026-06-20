@@ -12,7 +12,7 @@
 #include <windows.h>
 #endif
 
-namespace ecnuvpn::cli {
+namespace exv::cli {
 
 void print_success(const std::string &msg) {
   std::cout << GREEN << "✅ " << msg << RESET << std::endl;
@@ -59,5 +59,5 @@ void enable_windows_ansi() {
 #endif
 }
 
-} // namespace ecnuvpn::cli
+} // namespace exv::cli
 

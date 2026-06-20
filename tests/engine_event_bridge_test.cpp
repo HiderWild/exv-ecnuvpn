@@ -135,11 +135,11 @@ int main() {
         exv::core::EngineEventBridge bridge(
             [&](events::TunnelEvent e) { received.push_back(e.type); });
 
-        ecnuvpn::vpn_engine::VpnEngineEvent ev1;
+        exv::vpn_engine::VpnEngineEvent ev1;
         ev1.type = "auth.succeeded";
         bridge.emit(ev1);
 
-        ecnuvpn::vpn_engine::VpnEngineEvent ev2;
+        exv::vpn_engine::VpnEngineEvent ev2;
         ev2.type = "cstp.connected";
         bridge.emit(ev2);
 
@@ -159,7 +159,7 @@ int main() {
         exv::core::EngineEventBridge bridge(
             [&](events::TunnelEvent) { ++call_count; });
 
-        ecnuvpn::vpn_engine::VpnEngineEvent ev;
+        exv::vpn_engine::VpnEngineEvent ev;
         ev.type = "native.starting";
         bridge.emit(ev);
 
@@ -186,7 +186,7 @@ int main() {
             "packet_device.failed"
         };
         for (const char* t : types) {
-            ecnuvpn::vpn_engine::VpnEngineEvent ev;
+            exv::vpn_engine::VpnEngineEvent ev;
             ev.type = t;
             bridge.emit(ev);
         }
@@ -219,7 +219,7 @@ int main() {
         exv::core::EngineEventBridge bridge(
             [&](events::TunnelEvent e) { received.push_back(e); });
 
-        ecnuvpn::vpn_engine::VpnEngineEvent ev;
+        exv::vpn_engine::VpnEngineEvent ev;
         ev.type = "auth.failed";
         ev.message = "SAML authentication is required";
         ev.fields.emplace("code", "saml_required_unsupported");
@@ -244,7 +244,7 @@ int main() {
 
     {
         exv::core::EngineEventBridge bridge(nullptr);
-        ecnuvpn::vpn_engine::VpnEngineEvent ev;
+        exv::vpn_engine::VpnEngineEvent ev;
         ev.type = "auth.succeeded";
         bridge.emit(ev);  // Should not crash
         ok = expect(true, "null callback does not crash") && ok;
@@ -278,7 +278,7 @@ int main() {
             "reconnect.started"
         };
         for (const char* t : log_worthy_types) {
-            ecnuvpn::vpn_engine::VpnEngineEvent ev;
+            exv::vpn_engine::VpnEngineEvent ev;
             ev.type = t;
             ev.message = std::string("message for ") + t;
             ev.fields.emplace("phase", "test_phase");
@@ -293,7 +293,7 @@ int main() {
             "dpd.timeout"
         };
         for (const char* t : noisy_types) {
-            ecnuvpn::vpn_engine::VpnEngineEvent ev;
+            exv::vpn_engine::VpnEngineEvent ev;
             ev.type = t;
             bridge.emit(ev);
         }
@@ -328,7 +328,7 @@ int main() {
         auto log_sink = install_capturing_log_sink();
 
         exv::core::EngineEventBridge bridge(nullptr);
-        ecnuvpn::vpn_engine::VpnEngineEvent ev;
+        exv::vpn_engine::VpnEngineEvent ev;
         ev.type = "auth.failed";
         ev.level = "error";
         ev.message = "failed with password=SECRET_PASSWORD webvpn=SECRET_COOKIE";

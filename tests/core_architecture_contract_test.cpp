@@ -4,8 +4,8 @@
 #include <sstream>
 #include <string>
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
 namespace {
@@ -96,7 +96,7 @@ bool expect_tree_does_not_contain(const std::filesystem::path &root,
 } // namespace
 
 int main() {
-  const auto root = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto root = std::filesystem::path(EXV_SOURCE_DIR);
   const auto app_api_cpp =
       root / "src" / "core" / "app_api" / "app_api.cpp";
   const auto desktop_action_registry_cpp =
@@ -224,7 +224,7 @@ int main() {
       vpn_engine_dir, "#include <core/",
       "vpn_engine must not include higher-level core headers");
   ok &= expect_tree_does_not_contain(
-      vpn_engine_dir, "ecnuvpn::Config",
+      vpn_engine_dir, "exv::Config",
       "vpn_engine must not depend on the app Config model");
 
   ok &= expect_tree_does_not_contain(

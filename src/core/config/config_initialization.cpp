@@ -1,5 +1,6 @@
 #include "core/config/config_initialization.hpp"
 
+#include "generated/distribution_config.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/file_system.hpp"
 #include "platform/common/path_utils.hpp"
@@ -197,7 +198,7 @@ nlohmann::json quick_start_request_data(
     const ConfigInitializationResult &result) {
   return json{{"reason", status_reason(result.status)},
               {"defaults",
-               json{{"server", "vpn-ct.ecnu.edu.cn"},
+               json{{"server", std::string(distribution::kDefaultVpnServer)},
                     {"remember_password", false},
                     {"install_service", true}}}};
 }

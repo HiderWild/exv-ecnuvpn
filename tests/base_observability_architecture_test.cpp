@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
 namespace {
@@ -98,7 +98,7 @@ bool expect_no_legacy_logger_include_outside_compat(
 } // namespace
 
 int main() {
-  const auto source_root = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_root = std::filesystem::path(EXV_SOURCE_DIR);
   const auto src_root = source_root / "src";
   const auto base_root = src_root / "base";
   const auto observability_root = src_root / "observability";

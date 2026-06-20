@@ -148,7 +148,7 @@ int main() {
 
     // --- PlatformNetworkOps factory wiring ---
     {
-        const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+        const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
         const auto source =
             read_text_file(source_dir / "src" / "platform" / "common" /
                            "platform_network_ops.cpp");
@@ -178,7 +178,7 @@ int main() {
 
     // --- Linux PlatformNetworkOps durable cleanup facts ---
     {
-        const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+        const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
         const auto linux_source =
             read_text_file(source_dir / "src" / "platform" / "linux" /
                            "platform_network_ops_linux.cpp");

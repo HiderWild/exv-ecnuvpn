@@ -29,12 +29,12 @@ NativeDarwinDnsApi default_native_darwin_dns_api();
 std::unique_ptr<PlatformNetworkOps> create_darwin_platform_network_ops();
 
 std::unique_ptr<PlatformNetworkOps> create_darwin_platform_network_ops(
-    ecnuvpn::platform::NativeUtunApi utun_api,
-    ecnuvpn::platform::NativeDarwinRouteApi route_api);
+    exv::platform::NativeUtunApi utun_api,
+    exv::platform::NativeDarwinRouteApi route_api);
 
 std::unique_ptr<PlatformNetworkOps> create_darwin_platform_network_ops(
-    ecnuvpn::platform::NativeUtunApi utun_api,
-    ecnuvpn::platform::NativeDarwinRouteApi route_api,
+    exv::platform::NativeUtunApi utun_api,
+    exv::platform::NativeDarwinRouteApi route_api,
     NativeDarwinDnsApi dns_api);
 
 } // namespace exv::platform

@@ -7,8 +7,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_ROOT="$REPO_ROOT/build/macos"
 ACTION="${1:-all}"
 
-export ECNUVPN_BUILD_PLATFORM=macos
-export ECNUVPN_WEBUI_DIST_DIR="$BUILD_ROOT/webview/dist"
+export EXV_BUILD_PLATFORM=macos
+export EXV_WEBUI_DIST_DIR="$BUILD_ROOT/webview/dist"
 
 usage() {
   cat <<EOF

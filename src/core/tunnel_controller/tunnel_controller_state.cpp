@@ -22,7 +22,15 @@ void TunnelController::Impl::update_snapshot() {
         snapshot_.desired_connected = intent_.desired_connected;
         snapshot_.auto_reconnect   = intent_.auto_reconnect;
         snapshot_.server           = intent_.profile_id.value;
-        snapshot_.interface_name   = adapter_name_;
+        auto engine_status = runner_.status();
+        snapshot_.interface_name =
+            engine_status.interface_name.empty()
+                ? adapter_name_
+                : engine_status.interface_name;
+        snapshot_.internal_ip =
+            engine_status.internal_ip.empty()
+                ? assigned_internal_ip_
+                : engine_status.internal_ip;
 
         if (!helper_status_override_.empty()) {
             snapshot_.helper_status = helper_status_override_;

@@ -16,9 +16,9 @@ bool expect(bool condition, const char *message) {
 }
 
 bool round_trip_unblocks_handler_with_response_value() {
-  using ecnuvpn::app_api::AuthInteractionCoordinator;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionRequest;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionResponse;
+  using exv::app_api::AuthInteractionCoordinator;
+  using exv::vpn_engine::protocol::AuthInteractionRequest;
+  using exv::vpn_engine::protocol::AuthInteractionResponse;
 
   bool ok = true;
   AuthInteractionCoordinator coordinator;
@@ -67,9 +67,9 @@ bool round_trip_unblocks_handler_with_response_value() {
 }
 
 bool respond_with_mismatched_id_does_not_unblock_handler() {
-  using ecnuvpn::app_api::AuthInteractionCoordinator;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionRequest;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionResponse;
+  using exv::app_api::AuthInteractionCoordinator;
+  using exv::vpn_engine::protocol::AuthInteractionRequest;
+  using exv::vpn_engine::protocol::AuthInteractionResponse;
 
   bool ok = true;
   AuthInteractionCoordinator coordinator;
@@ -103,9 +103,9 @@ bool respond_with_mismatched_id_does_not_unblock_handler() {
 }
 
 bool stop_token_cancels_handler() {
-  using ecnuvpn::app_api::AuthInteractionCoordinator;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionRequest;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionResponse;
+  using exv::app_api::AuthInteractionCoordinator;
+  using exv::vpn_engine::protocol::AuthInteractionRequest;
+  using exv::vpn_engine::protocol::AuthInteractionResponse;
 
   bool ok = true;
   AuthInteractionCoordinator coordinator;
@@ -134,9 +134,9 @@ bool stop_token_cancels_handler() {
 }
 
 bool global_slot_is_round_trippable() {
-  using ecnuvpn::app_api::AuthInteractionCoordinator;
-  using ecnuvpn::app_api::get_active_connect_auth_coordinator;
-  using ecnuvpn::app_api::set_active_connect_auth_coordinator;
+  using exv::app_api::AuthInteractionCoordinator;
+  using exv::app_api::get_active_connect_auth_coordinator;
+  using exv::app_api::set_active_connect_auth_coordinator;
 
   bool ok = true;
   ok = expect(!get_active_connect_auth_coordinator(),
@@ -155,12 +155,12 @@ bool global_slot_is_round_trippable() {
 }
 
 bool stale_global_slot_clear_does_not_cancel_newer_coordinator() {
-  using ecnuvpn::app_api::AuthInteractionCoordinator;
-  using ecnuvpn::app_api::clear_active_connect_auth_coordinator_if_current;
-  using ecnuvpn::app_api::get_active_connect_auth_coordinator;
-  using ecnuvpn::app_api::set_active_connect_auth_coordinator;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionRequest;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionResponse;
+  using exv::app_api::AuthInteractionCoordinator;
+  using exv::app_api::clear_active_connect_auth_coordinator_if_current;
+  using exv::app_api::get_active_connect_auth_coordinator;
+  using exv::app_api::set_active_connect_auth_coordinator;
+  using exv::vpn_engine::protocol::AuthInteractionRequest;
+  using exv::vpn_engine::protocol::AuthInteractionResponse;
 
   bool ok = true;
   auto stale = std::make_shared<AuthInteractionCoordinator>();

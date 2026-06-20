@@ -22,8 +22,8 @@ TunnelController::TunnelController(
         this->on_event(std::move(event));
     });
     impl_->runner_.set_network_config_callback(
-        [this](const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
-               ecnuvpn::vpn_engine::DeviceConfig* device_config) {
+        [this](const exv::vpn_engine::TunnelMetadata& metadata,
+               exv::vpn_engine::DeviceConfig* device_config) {
             return impl_->configure_network_for_engine(metadata, device_config);
         });
 }
@@ -43,7 +43,7 @@ TunnelController::~TunnelController() {
     }
 }
 
-void TunnelController::set_vpn_config(const ecnuvpn::Config& cfg,
+void TunnelController::set_vpn_config(const exv::Config& cfg,
                                       const std::string& plaintext_password) {
     impl_->vpn_cfg_      = cfg;
     impl_->vpn_password_ = plaintext_password;
@@ -51,8 +51,8 @@ void TunnelController::set_vpn_config(const ecnuvpn::Config& cfg,
 }
 
 void TunnelController::set_prepared_native_handshake(
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_config,
-    ecnuvpn::vpn_engine::NativeHandshakeResult handshake) {
+    exv::vpn_engine::VpnEngineConfig engine_config,
+    exv::vpn_engine::NativeHandshakeResult handshake) {
     impl_->prepared_native_handshake_ =
         Impl::PreparedNativeHandshake{std::move(engine_config),
                                       std::move(handshake)};

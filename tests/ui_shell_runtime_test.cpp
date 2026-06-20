@@ -16,7 +16,7 @@
 
 namespace {
 
-class FakeTransport final : public ecnuvpn::ui_shell::CoreRpcTransport {
+class FakeTransport final : public exv::ui_shell::CoreRpcTransport {
 public:
   explicit FakeTransport(std::string response) {
     responses_.push_back(std::move(response));
@@ -71,13 +71,13 @@ private:
   std::vector<std::string>::size_type next_available_line_ = 0;
 };
 
-class FakeWindow final : public ecnuvpn::ui_shell::UiWindow {
+class FakeWindow final : public exv::ui_shell::UiWindow {
 public:
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+  void set_message_handler(exv::ui_shell::HostMessageHandler handler) override {
     handler_ = std::move(handler);
   }
 
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &config) override {
+  int run(const exv::ui_shell::UiWindowConfig &config) override {
     observed_config = config;
     if (throw_on_run) {
       throw std::runtime_error("window failed");
@@ -114,7 +114,7 @@ public:
     observed_cv.notify_all();
   }
 
-  ecnuvpn::ui_shell::UiWindowConfig observed_config;
+  exv::ui_shell::UiWindowConfig observed_config;
   std::string message_json =
       R"({"id":11,"action":"config.getAuth","payload":{"profile":"default"}})";
   bool throw_on_run = false;
@@ -155,7 +155,7 @@ public:
   }
 
 private:
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
+  exv::ui_shell::HostMessageHandler handler_;
 };
 
 bool expect(bool condition, const char *message) {
@@ -184,7 +184,7 @@ int count_action(const std::vector<std::string> &writes,
 } // namespace
 
 int main() {
-  using namespace ecnuvpn::ui_shell;
+  using namespace exv::ui_shell;
   bool ok = true;
 
   FakeTransport transport(R"({"id":11,"ok":true,"data":{"username":"alice"}})");

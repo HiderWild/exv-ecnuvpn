@@ -44,8 +44,8 @@ struct MockWintun {
   int session = 0;
 };
 
-ecnuvpn::platform::NativeWintunApi make_api(MockWintun &mock) {
-  using Api = ecnuvpn::platform::NativeWintunApi;
+exv::platform::NativeWintunApi make_api(MockWintun &mock) {
+  using Api = exv::platform::NativeWintunApi;
 
   Api api;
   api.open_adapter = [&mock](const std::wstring &name) -> Api::AdapterHandle {
@@ -86,9 +86,9 @@ ecnuvpn::platform::NativeWintunApi make_api(MockWintun &mock) {
   return api;
 }
 
-ecnuvpn::platform::NativeWintunDependencies make_dependencies(
+exv::platform::NativeWintunDependencies make_dependencies(
     MockWintun &mock) {
-  ecnuvpn::platform::NativeWintunDependencies deps;
+  exv::platform::NativeWintunDependencies deps;
   deps.path_provider = [&mock] {
     mock.path_provider_called = true;
     return mock.dll_path;
@@ -98,7 +98,7 @@ ecnuvpn::platform::NativeWintunDependencies make_dependencies(
     return mock.dll_exists;
   };
   deps.api_loader = [&mock](const std::wstring &path,
-                            ecnuvpn::platform::NativeWintunApi &api,
+                            exv::platform::NativeWintunApi &api,
                             std::string &error) {
     mock.loader_called = true;
     mock.loaded_path = path;
@@ -112,11 +112,11 @@ ecnuvpn::platform::NativeWintunDependencies make_dependencies(
   return deps;
 }
 
-ecnuvpn::platform::NativeWintunDependencies
+exv::platform::NativeWintunDependencies
 make_dependencies_without_delete_adapter(MockWintun &mock) {
   auto deps = make_dependencies(mock);
   deps.api_loader = [&mock](const std::wstring &path,
-                            ecnuvpn::platform::NativeWintunApi &api,
+                            exv::platform::NativeWintunApi &api,
                             std::string &error) {
     mock.loader_called = true;
     mock.loaded_path = path;
@@ -131,21 +131,21 @@ make_dependencies_without_delete_adapter(MockWintun &mock) {
   return deps;
 }
 
-ecnuvpn::platform::NativeWintunConfig config_with_prefix(
+exv::platform::NativeWintunConfig config_with_prefix(
     const std::wstring &prefix) {
-  ecnuvpn::platform::NativeWintunConfig config;
+  exv::platform::NativeWintunConfig config;
   config.adapter_name_prefix = prefix;
-  config.tunnel_type = L"ECNUVPN";
+  config.tunnel_type = L"EXV";
   config.session_capacity = 0x200000;
   return config;
 }
 
 bool locates_bundled_wintun_path_through_provider() {
   MockWintun mock;
-  mock.dll_path = L"C:\\Program Files\\ECNU-VPN\\bin\\wintun.dll";
+  mock.dll_path = L"C:\\Program Files\\EXV\\bin\\wintun.dll";
 
-  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
-                                         config_with_prefix(L"ECNUVPN-D2"));
+  exv::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"EXV-D2"));
   auto result = wintun.start();
 
   bool ok = true;
@@ -168,9 +168,9 @@ bool locates_bundled_wintun_path_through_provider() {
 bool starts_when_delete_adapter_export_is_missing() {
   MockWintun mock;
 
-  ecnuvpn::platform::NativeWintun wintun(
+  exv::platform::NativeWintun wintun(
       make_dependencies_without_delete_adapter(mock),
-      config_with_prefix(L"ECNUVPN-D2"));
+      config_with_prefix(L"EXV-D2"));
   auto result = wintun.start();
   auto deleted = wintun.delete_adapter();
 
@@ -180,7 +180,7 @@ bool starts_when_delete_adapter_export_is_missing() {
        ok;
   ok = expect(!deleted.ok() &&
                   deleted.error ==
-                      ecnuvpn::platform::NativeWintunError::adapter_delete_failed,
+                      exv::platform::NativeWintunError::adapter_delete_failed,
               "delete_adapter should fail only when the optional delete export is used") &&
        ok;
   wintun.stop();
@@ -191,17 +191,17 @@ bool returns_wintun_missing_when_dll_absent() {
   MockWintun mock;
   mock.dll_exists = false;
 
-  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
-                                         config_with_prefix(L"ECNUVPN-D2"));
+  exv::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"EXV-D2"));
   auto result = wintun.start();
 
   bool ok = true;
   ok = expect(!result.ok(), "start should fail when wintun.dll is absent") &&
        ok;
-  ok = expect(result.error == ecnuvpn::platform::NativeWintunError::wintun_missing,
+  ok = expect(result.error == exv::platform::NativeWintunError::wintun_missing,
               "missing bundled DLL should report wintun_missing") &&
        ok;
-  ok = expect(std::string(ecnuvpn::platform::native_wintun_error_code(
+  ok = expect(std::string(exv::platform::native_wintun_error_code(
                   result.error)) == "wintun_missing",
               "missing bundled DLL should expose stable error code text") &&
        ok;
@@ -214,16 +214,16 @@ bool returns_wintun_missing_when_dll_absent() {
 bool creates_adapter_with_deterministic_name_prefix_when_open_missing() {
   MockWintun mock;
   mock.open_returns_existing = false;
-  const std::wstring prefix = L"ECNUVPN-D2";
+  const std::wstring prefix = L"EXV-D2";
 
-  ecnuvpn::platform::NativeWintun first(make_dependencies(mock),
+  exv::platform::NativeWintun first(make_dependencies(mock),
                                         config_with_prefix(prefix));
   auto first_result = first.start();
 
   const std::wstring first_name =
       mock.created_names.empty() ? L"" : mock.created_names.back();
 
-  ecnuvpn::platform::NativeWintun second(make_dependencies(mock),
+  exv::platform::NativeWintun second(make_dependencies(mock),
                                          config_with_prefix(prefix));
   auto second_result = second.start();
 
@@ -257,8 +257,8 @@ bool opens_existing_adapter_without_creating() {
   MockWintun mock;
   mock.open_returns_existing = true;
 
-  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
-                                         config_with_prefix(L"ECNUVPN-D2"));
+  exv::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"EXV-D2"));
   auto result = wintun.start();
 
   bool ok = true;
@@ -269,7 +269,7 @@ bool opens_existing_adapter_without_creating() {
   ok = expect(mock.created_names.empty(),
               "existing adapter path should not create a duplicate adapter") &&
        ok;
-  ok = expect(starts_with(result.metadata.adapter_name, L"ECNUVPN-D2"),
+  ok = expect(starts_with(result.metadata.adapter_name, L"EXV-D2"),
               "opened adapter metadata should preserve deterministic prefix") &&
        ok;
   return ok;
@@ -280,8 +280,8 @@ bool reports_adapter_luid_and_if_index() {
   mock.luid = 0x9988776655443322ULL;
   mock.if_index = 77;
 
-  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
-                                         config_with_prefix(L"ECNUVPN-D2"));
+  exv::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"EXV-D2"));
   auto result = wintun.start();
 
   bool ok = true;
@@ -301,8 +301,8 @@ bool reports_adapter_luid_and_if_index() {
 bool prepares_adapter_without_starting_packet_session() {
   MockWintun mock;
 
-  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
-                                         config_with_prefix(L"ECNUVPN-D2"));
+  exv::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"EXV-D2"));
   auto result = wintun.prepare_adapter();
 
   bool ok = true;
@@ -326,8 +326,8 @@ bool prepares_adapter_without_starting_packet_session() {
 bool stop_closes_active_session_once() {
   MockWintun mock;
 
-  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
-                                         config_with_prefix(L"ECNUVPN-D2"));
+  exv::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"EXV-D2"));
   auto result = wintun.start();
   wintun.stop();
   wintun.stop();
@@ -350,8 +350,8 @@ bool stop_closes_active_session_once() {
 bool delete_adapter_ends_session_deletes_adapter_and_closes_handle_once() {
   MockWintun mock;
 
-  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
-                                         config_with_prefix(L"ECNUVPN-D2"));
+  exv::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"EXV-D2"));
   auto result = wintun.start();
   auto deleted = wintun.delete_adapter();
   auto second_delete = wintun.delete_adapter();
@@ -377,13 +377,13 @@ bool delete_adapter_ends_session_deletes_adapter_and_closes_handle_once() {
 
 } // namespace
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 std::string get_bundled_wintun_path() { return ""; }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv
 
 int main() {
   bool ok = true;

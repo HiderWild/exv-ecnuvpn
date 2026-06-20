@@ -1,3 +1,3 @@
 #pragma once
 
-#define IDI_ECNUVPN_APP 101
+#define IDI_EXV_APP 101

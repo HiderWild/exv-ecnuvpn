@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 using NativeTlsSocketHandle = std::uintptr_t;
@@ -118,4 +118,4 @@ private:
 };
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

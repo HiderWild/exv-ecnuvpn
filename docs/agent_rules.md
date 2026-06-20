@@ -1,4 +1,4 @@
-# ECNU-VPN Agent Rules
+# EXV Agent Rules
 
 - This repository is synced across machines, so keep the working tree light.
 - For any Node-based install, build, packaging, or test workflow in this repository, use `pnpm` exclusively. Do not use `npm` or `npx`.

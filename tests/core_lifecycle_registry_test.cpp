@@ -20,8 +20,8 @@
 #include <unistd.h>
 #endif
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
 namespace exv::core::lifecycle::testing {
@@ -113,7 +113,7 @@ exv::core::lifecycle::CoreRegistrySnapshot make_snapshot(
     exv::core::lifecycle::CoreRegistrySnapshot snapshot;
     snapshot.core_instance_id = "core-instance-1";
     snapshot.pid = 4242;
-    snapshot.core_path = "C:/Program Files/ECNU-VPN/exv.exe";
+    snapshot.core_path = "C:/Program Files/EXV/exv.exe";
     snapshot.ipc_path = exv::core::lifecycle::core_ipc_path(state_dir);
     snapshot.ipc_protocol_version = exv::core::lifecycle::ipc_protocol_name();
     snapshot.app_version = "3.3.0";
@@ -137,7 +137,7 @@ int main() {
     bool ok = true;
 
     {
-        const std::string state_dir = make_temp_dir("ecnuvpn-core-paths-test").string();
+        const std::string state_dir = make_temp_dir("exv-core-paths-test").string();
         const auto ipc_path = exv::core::lifecycle::core_ipc_path(state_dir);
         const auto lock_path = exv::core::lifecycle::core_lock_path(state_dir);
         const auto registry_path =
@@ -154,7 +154,7 @@ int main() {
     }
 
     {
-        const std::string state_dir = make_temp_dir("ecnuvpn-core-lock-test").string();
+        const std::string state_dir = make_temp_dir("exv-core-lock-test").string();
         auto first = CoreInstanceLock::try_acquire(state_dir);
         ok = expect(first.has_value(),
                     "first lock acquisition should succeed") && ok;
@@ -171,7 +171,7 @@ int main() {
     }
 
     {
-        const fs::path root = make_temp_dir("ecnuvpn-core-registry-test");
+        const fs::path root = make_temp_dir("exv-core-registry-test");
         const std::string state_dir = root.string();
         const auto registry_path = exv::core::lifecycle::core_registry_path(state_dir);
         const auto snapshot = make_snapshot(state_dir);
@@ -210,7 +210,7 @@ int main() {
     }
 
     {
-        const fs::path root = make_temp_dir("ecnuvpn-core-registry-concurrent");
+        const fs::path root = make_temp_dir("exv-core-registry-concurrent");
         const std::string state_dir = root.string();
         const auto registry_path =
             exv::core::lifecycle::core_registry_path(state_dir);
@@ -262,7 +262,7 @@ int main() {
     }
 
     {
-        const fs::path root = make_temp_dir("ecnuvpn-core-registry-missing");
+        const fs::path root = make_temp_dir("exv-core-registry-missing");
         const auto registry_path =
             exv::core::lifecycle::core_registry_path(root.string());
         const auto missing = exv::core::lifecycle::read_core_registry(registry_path);
@@ -291,7 +291,7 @@ int main() {
     }
 
     {
-        const fs::path root = make_temp_dir("ecnuvpn-core-registry-corrupt");
+        const fs::path root = make_temp_dir("exv-core-registry-corrupt");
         const auto registry_path =
             exv::core::lifecycle::core_registry_path(root.string());
         std::ofstream out(registry_path, std::ios::out | std::ios::trunc);
@@ -306,7 +306,7 @@ int main() {
     }
 
     {
-        const fs::path root = make_temp_dir("ecnuvpn-core-registry-delete");
+        const fs::path root = make_temp_dir("exv-core-registry-delete");
         const std::string state_dir = root.string();
         const auto registry_path =
             exv::core::lifecycle::core_registry_path(state_dir);
@@ -360,7 +360,7 @@ int main() {
 
     {
         const fs::path root =
-            make_temp_dir("ecnuvpn-core-registry-delete-quarantine");
+            make_temp_dir("exv-core-registry-delete-quarantine");
         const std::string state_dir = root.string();
         const auto registry_path =
             exv::core::lifecycle::core_registry_path(state_dir);
@@ -434,7 +434,7 @@ int main() {
     }
 
     {
-        const auto source_path = fs::path(ECNUVPN_SOURCE_DIR) / "src" / "platform" /
+        const auto source_path = fs::path(EXV_SOURCE_DIR) / "src" / "platform" /
             "common" / "lifecycle" / "core_registry.cpp";
         const auto source = read_file(source_path);
         ok = expect(!source.empty(),

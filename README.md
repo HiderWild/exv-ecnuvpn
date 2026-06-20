@@ -22,7 +22,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 desktop
 Windows 桌面包输出到：
 
 ```text
-build\windows\webview\package\ECNU VPN
+build\windows\webview\package\EXV
 ```
 
 包内关键文件：
@@ -42,7 +42,7 @@ build\windows\webview\package\ECNU VPN
 macOS 桌面包输出到：
 
 ```text
-build/macos/webview/package/ECNU VPN
+build/macos/webview/package/EXV
 ```
 
 ### Linux
@@ -54,7 +54,7 @@ build/macos/webview/package/ECNU VPN
 Linux 桌面包输出到：
 
 ```text
-build/linux/webview/package/ECNU VPN
+build/linux/webview/package/EXV
 ```
 
 ## 开发入口
@@ -70,13 +70,13 @@ build/linux/webview/package/ECNU VPN
 
 - `build-windows/cpp`：Windows CMake 产物和测试。
 - `build/windows/webview/dist`：Windows renderer 产物。
-- `build/windows/webview/package/ECNU VPN`：Windows native WebView 桌面包。
+- `build/windows/webview/package/EXV`：Windows native WebView 桌面包。
 - `build/macos/cpp`：macOS CMake 产物和测试。
 - `build/macos/webview/dist`：macOS renderer 产物。
-- `build/macos/webview/package/ECNU VPN`：macOS native WebView 桌面包。
+- `build/macos/webview/package/EXV`：macOS native WebView 桌面包。
 - `build/linux/cpp`：Linux CMake 产物和测试。
 - `build/linux/webview/dist`：Linux renderer 产物。
-- `build/linux/webview/package/ECNU VPN`：Linux native WebView 桌面包。
+- `build/linux/webview/package/EXV`：Linux native WebView 桌面包。
 
 ## 运行时依赖
 
@@ -91,8 +91,9 @@ build/linux/webview/package/ECNU VPN
 
 配置文件默认位置：
 
-- macOS/Linux：`~/.ecnuvpn/config.json`
-- Windows：`%APPDATA%\ecnuvpn\config.json`
+- Windows：`%LOCALAPPDATA%\EXV\profile\default\config.json`
+- macOS：`~/Library/Application Support/EXV/profile/default/config.json`
+- Linux：`~/.exv/config.json`
 
 示例：
 

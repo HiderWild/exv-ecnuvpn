@@ -18,7 +18,7 @@ bool expect(bool condition, const char *message) {
 }
 
 struct MockRouteApi {
-  ecnuvpn::platform::NativeDarwinUpstreamRoute upstream_route;
+  exv::platform::NativeDarwinUpstreamRoute upstream_route;
   int set_mtu_error = 0;
   int upstream_route_error = 0;
   int add_route_error = 0;
@@ -28,12 +28,12 @@ struct MockRouteApi {
   std::vector<std::string> mtu_interfaces;
   std::vector<int> mtu_values;
   std::vector<std::string> upstream_route_destinations;
-  std::vector<ecnuvpn::platform::NativeDarwinRoute> added_routes;
-  std::vector<ecnuvpn::platform::NativeDarwinRoute> deleted_routes;
+  std::vector<exv::platform::NativeDarwinRoute> added_routes;
+  std::vector<exv::platform::NativeDarwinRoute> deleted_routes;
 };
 
-ecnuvpn::platform::NativeDarwinRouteApi make_api(MockRouteApi &mock) {
-  ecnuvpn::platform::NativeDarwinRouteApi api;
+exv::platform::NativeDarwinRouteApi make_api(MockRouteApi &mock) {
+  exv::platform::NativeDarwinRouteApi api;
   api.set_interface_mtu = [&mock](const std::string &interface_name, int mtu) {
     mock.mtu_interfaces.push_back(interface_name);
     mock.mtu_values.push_back(mtu);
@@ -41,14 +41,14 @@ ecnuvpn::platform::NativeDarwinRouteApi make_api(MockRouteApi &mock) {
   };
   api.get_best_route =
       [&mock](const std::string &destination,
-              ecnuvpn::platform::NativeDarwinUpstreamRoute &route) {
+              exv::platform::NativeDarwinUpstreamRoute &route) {
         mock.upstream_route_destinations.push_back(destination);
         if (mock.upstream_route_error != 0)
           return mock.upstream_route_error;
         route = mock.upstream_route;
         return 0;
       };
-  api.add_route = [&mock](const ecnuvpn::platform::NativeDarwinRoute &route) {
+  api.add_route = [&mock](const exv::platform::NativeDarwinRoute &route) {
     mock.added_routes.push_back(route);
     if (!mock.add_route_error_cidr.empty() &&
         route.cidr == mock.add_route_error_cidr)
@@ -56,23 +56,23 @@ ecnuvpn::platform::NativeDarwinRouteApi make_api(MockRouteApi &mock) {
     return 0;
   };
   api.delete_route =
-      [&mock](const ecnuvpn::platform::NativeDarwinRoute &route) {
+      [&mock](const exv::platform::NativeDarwinRoute &route) {
         mock.deleted_routes.push_back(route);
         return mock.delete_route_error;
       };
   return api;
 }
 
-ecnuvpn::platform::NativeDarwinRouteConfigOptions options() {
-  ecnuvpn::platform::NativeDarwinRouteConfigOptions opts;
+exv::platform::NativeDarwinRouteConfigOptions options() {
+  exv::platform::NativeDarwinRouteConfigOptions opts;
   opts.interface_name = "utun7";
   opts.interface_index = 77;
   opts.configured_mtu = 1290;
   return opts;
 }
 
-ecnuvpn::vpn_engine::TunnelMetadata metadata() {
-  ecnuvpn::vpn_engine::TunnelMetadata meta;
+exv::vpn_engine::TunnelMetadata metadata() {
+  exv::vpn_engine::TunnelMetadata meta;
   meta.interface_name = "utun7";
   meta.interface_index = 77;
   meta.internal_ip4_address = "10.255.0.10";
@@ -91,11 +91,11 @@ MockRouteApi mock_api() {
 
 bool preserves_upstream_route_before_split_routes() {
   MockRouteApi mock = mock_api();
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.server_bypass_ips = {"203.0.113.15"};
   meta.routes = {"59.78.176.0/20", "10.0.0.0/8"};
 
-  ecnuvpn::platform::NativeDarwinRouteConfig config(make_api(mock),
+  exv::platform::NativeDarwinRouteConfig config(make_api(mock),
                                                     options());
   auto result = config.configure(meta);
 
@@ -143,10 +143,10 @@ bool preserves_upstream_route_before_split_routes() {
 
 bool server_bypass_route_carries_upstream_message_scope() {
   MockRouteApi mock = mock_api();
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.server_bypass_ips = {"203.0.113.15"};
 
-  ecnuvpn::platform::NativeDarwinRouteConfig config(make_api(mock),
+  exv::platform::NativeDarwinRouteConfig config(make_api(mock),
                                                     options());
   auto result = config.configure(meta);
 
@@ -171,10 +171,10 @@ bool server_bypass_route_carries_upstream_message_scope() {
 
 bool split_route_carries_utun_message_scope() {
   MockRouteApi mock = mock_api();
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.routes = {"59.78.176.0/20"};
 
-  ecnuvpn::platform::NativeDarwinRouteConfig config(make_api(mock),
+  exv::platform::NativeDarwinRouteConfig config(make_api(mock),
                                                     options());
   auto result = config.configure(meta);
 
@@ -199,10 +199,10 @@ bool split_route_carries_utun_message_scope() {
 
 bool cleanup_is_idempotent() {
   MockRouteApi mock = mock_api();
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.routes = {"59.78.176.0/20"};
 
-  ecnuvpn::platform::NativeDarwinRouteConfig config(make_api(mock),
+  exv::platform::NativeDarwinRouteConfig config(make_api(mock),
                                                     options());
   auto configure_result = config.configure(meta);
   auto cleanup_first = config.cleanup();
@@ -227,21 +227,21 @@ bool route_failures_include_target_and_stable_error_code() {
   MockRouteApi mock = mock_api();
   mock.add_route_error = 65;
   mock.add_route_error_cidr = "10.0.0.0/8";
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.routes = {"59.78.176.0/20", "10.0.0.0/8"};
 
-  ecnuvpn::platform::NativeDarwinRouteConfig config(make_api(mock),
+  exv::platform::NativeDarwinRouteConfig config(make_api(mock),
                                                     options());
   auto result = config.configure(meta);
 
   bool ok = true;
   ok = expect(!result.ok(), "route add failure should fail configure") && ok;
   ok = expect(result.error ==
-                  ecnuvpn::platform::
+                  exv::platform::
                       NativeDarwinRouteConfigError::route_add_failed,
               "route add failure should map to the stable route_add_failed enum") &&
        ok;
-  ok = expect(std::string(ecnuvpn::platform::
+  ok = expect(std::string(exv::platform::
                               native_darwin_route_config_error_code(
                                   result.error)) == "route_add_failed",
               "route add failure should expose stable error code text") &&

@@ -2,10 +2,16 @@
 
 #include <nlohmann/json.hpp>
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
+#endif
 
 namespace {
 
@@ -71,10 +77,35 @@ bool expect_action(const SentRequest &request, const std::string &action) {
                 "expected action " + action + ", got " + request.action);
 }
 
+std::string read_source_file(const std::filesystem::path &relative_path) {
+  std::ifstream in(std::filesystem::path(EXV_SOURCE_DIR) / relative_path);
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  return buffer.str();
+}
+
 } // namespace
 
 int main() {
   bool ok = true;
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command({"exv"}, deps);
+    ok = expect(rc == 0, "exv without arguments should default to start") &&
+         ok;
+    ok = expect(fixture.sent.size() == 1,
+                "exv without arguments should send one request") &&
+         ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "vpn.connect") && ok;
+    }
+    ok = expect(fixture.out.str().find("VPN connect request submitted") !=
+                    std::string::npos,
+                "exv without arguments should print a visible connect acknowledgement") &&
+         ok;
+  }
 
   {
     Fixture fixture;
@@ -85,6 +116,10 @@ int main() {
     if (fixture.sent.size() == 1) {
       ok = expect_action(fixture.sent[0], "vpn.connect") && ok;
     }
+    ok = expect(fixture.out.str().find("VPN connect request submitted") !=
+                    std::string::npos,
+                "start should print a visible connect acknowledgement") &&
+         ok;
   }
 
   {
@@ -133,6 +168,9 @@ int main() {
     if (fixture.sent.size() == 1) {
       ok = expect_action(fixture.sent[0], "status.get") && ok;
     }
+    ok = expect(fixture.out.str().find("\"ok\"") != std::string::npos,
+                "status should print the core payload instead of returning silently") &&
+         ok;
   }
 
   {
@@ -169,6 +207,69 @@ int main() {
       ok = expect_action(fixture.sent[0], "config.saveSettings") && ok;
       ok = expect(fixture.sent[0].payload["settings"]["mtu"] == 1400,
                   "mtu should be numeric in settings payload") && ok;
+    }
+  }
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command(
+        {"exv-cli", "config", "set", "include_class_a_private_routes", "true"},
+        deps);
+    ok = expect(rc == 0,
+                "config set include_class_a_private_routes should succeed") &&
+         ok;
+    ok = expect(fixture.sent.size() == 1,
+                "config set include_class_a_private_routes should send one request") &&
+         ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "config.saveSettings") && ok;
+      ok = expect(fixture.sent[0].payload["settings"]["include_class_a_private_routes"] == true,
+                  "class A route toggle should be boolean in settings payload") &&
+           ok;
+    }
+  }
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command(
+        {"exv-cli", "config", "routes", "add", "10.0.0.0/8"}, deps);
+    ok = expect(rc == 0, "config routes add should succeed") && ok;
+    ok = expect(fixture.sent.size() == 1,
+                "config routes add should send one request") &&
+         ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "routes.add") && ok;
+      ok = expect(fixture.sent[0].payload["cidr"] == "10.0.0.0/8",
+                  "routes.add should send cidr payload") &&
+           ok;
+    }
+  }
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc =
+        exv::cli::run_cli_command({"exv-cli", "config", "key", "status"}, deps);
+    ok = expect(rc == 0, "config key status should succeed") && ok;
+    ok = expect(fixture.sent.size() == 1,
+                "config key status should send one request") &&
+         ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "key.status") && ok;
+    }
+  }
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command({"exv-cli", "logs"}, deps);
+    ok = expect(rc == 0, "logs should succeed") && ok;
+    ok = expect(fixture.sent.size() == 1, "logs should send one request") &&
+         ok;
+    if (fixture.sent.size() == 1) {
+      ok = expect_action(fixture.sent[0], "logs.list") && ok;
     }
   }
 
@@ -228,6 +329,16 @@ int main() {
   {
     Fixture fixture;
     auto deps = fixture.deps();
+    int rc = exv::cli::run_cli_command({"exv", "help"}, deps);
+    ok = expect(rc == 0, "exv help should succeed") && ok;
+    ok = expect(fixture.out.str().find("Usage: exv ") != std::string::npos,
+                "exv help should use the invoked program name") &&
+         ok;
+  }
+
+  {
+    Fixture fixture;
+    auto deps = fixture.deps();
     int rc = exv::cli::run_cli_command({"exv-cli", "version"}, deps);
     ok = expect(rc == 0, "version should succeed") && ok;
     ok = expect(fixture.version_probe_calls == 1, "version should perform discovery probe") && ok;
@@ -267,6 +378,23 @@ int main() {
     if (fixture.sent.size() == 1) {
       ok = expect_action(fixture.sent[0], "service.status") && ok;
     }
+  }
+
+  {
+    const std::string app_main = read_source_file("src/app/main.cpp");
+    ok = expect(app_main.find("Use exv-cli for user commands") ==
+                    std::string::npos,
+                "exv app entrypoint should not print core-only CLI guidance") &&
+         ok;
+    ok = expect(app_main.find("run_cli_entrypoint") != std::string::npos,
+                "exv app entrypoint should delegate user commands to cli parser") &&
+         ok;
+    ok = expect(app_main.find("--mode=core") != std::string::npos,
+                "exv app entrypoint should keep explicit core mode") &&
+         ok;
+    ok = expect(app_main.find("desktop-rpc") != std::string::npos,
+                "exv app entrypoint should keep desktop RPC mode") &&
+         ok;
   }
 
   if (ok) {

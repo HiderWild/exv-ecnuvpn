@@ -15,12 +15,12 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::Config app_config() {
-  ecnuvpn::Config cfg;
+exv::Config app_config() {
+  exv::Config cfg;
   cfg.vpn_engine = "native";
   cfg.server = "https://vpn.example.edu";
   cfg.username = "alice";
-  cfg.useragent = "ECNU-VPN mapper test";
+  cfg.useragent = "EXV mapper test";
   cfg.mtu = 1400;
   cfg.routes = {"10.0.0.0/8", "172.16.0.0/12"};
   cfg.windows_tunnel_driver = "wintun";
@@ -36,7 +36,7 @@ int main() {
   bool ok = true;
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     cfg.server.clear();
     auto result = exv::core::validate_native_app_config(cfg);
     ok = expect(!result.ok && result.code == "config_invalid",
@@ -45,7 +45,7 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     cfg.username.clear();
     auto result = exv::core::validate_native_app_config(cfg);
     ok = expect(!result.ok && result.code == "config_invalid",
@@ -54,7 +54,7 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     cfg.extra_args = {"--dump-http-traffic"};
     auto result = exv::core::validate_native_app_config(cfg);
     ok = expect(!result.ok && result.code == "unsupported_extra_args",
@@ -63,7 +63,7 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     cfg.extra_args = {"--csd-wrapper", "C:\\secret\\wrapper.cmd"};
     auto result = exv::core::validate_native_app_config(cfg);
     ok = expect(!result.ok && result.code == "unsupported_extra_args",
@@ -75,8 +75,8 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+    exv::Config cfg = app_config();
+    exv::vpn_engine::VpnEngineConfig engine_cfg;
     auto result =
         exv::core::make_native_engine_config(cfg, kPassword, &engine_cfg);
     ok = expect(result.ok, "valid app config should map to engine config") &&
@@ -113,7 +113,7 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     cfg.extra_args = {"--cookie=SECRET_COOKIE_SEED"};
     auto result = exv::core::validate_native_app_config(cfg);
     ok = expect(!result.ok && result.code == "unsupported_extra_args",
@@ -128,14 +128,14 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     cfg.extra_args = {
         "--no-dtls",
-        "--useragent=ECNU-VPN custom native UA",
+        "--useragent=EXV custom native UA",
         "--authgroup=students",
         "--csd-wrapper=C:/Tools/csd-wrapper.bat",
     };
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+    exv::vpn_engine::VpnEngineConfig engine_cfg;
     auto result =
         exv::core::make_native_engine_config(cfg, kPassword, &engine_cfg);
     ok = expect(result.ok,
@@ -144,7 +144,7 @@ int main() {
     ok = expect(engine_cfg.disable_dtls,
                 "--no-dtls should set disable_dtls=true") &&
          ok;
-    ok = expect(engine_cfg.useragent == "ECNU-VPN custom native UA",
+    ok = expect(engine_cfg.useragent == "EXV custom native UA",
                 "--useragent should override useragent") &&
          ok;
     ok = expect(engine_cfg.auth_group == "students",
@@ -156,9 +156,9 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     cfg.disable_dtls = true;
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+    exv::vpn_engine::VpnEngineConfig engine_cfg;
     auto result =
         exv::core::make_native_engine_config(cfg, kPassword, &engine_cfg);
     ok = expect(result.ok, "valid disabled-DTLS config should map") && ok;
@@ -168,7 +168,7 @@ int main() {
   }
 
   {
-    ecnuvpn::Config cfg = app_config();
+    exv::Config cfg = app_config();
     auto result = exv::core::make_native_engine_config(cfg, kPassword, nullptr);
     ok = expect(!result.ok && result.code == "invalid_output",
                 "null output pointer should be rejected") &&

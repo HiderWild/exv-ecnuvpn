@@ -141,6 +141,16 @@ bool has_log_event(const std::vector<exv::observability::LogEvent>& logs,
     return false;
 }
 
+int count_log_event(const std::vector<exv::observability::LogEvent>& logs,
+                    const std::string& component,
+                    const std::string& code) {
+    int count = 0;
+    for (const auto& event : logs) {
+        if (event.component == component && event.code == code) ++count;
+    }
+    return count;
+}
+
 // Check whether any captured structured log contains sensitive text.
 bool logs_contain_text(const std::vector<exv::observability::LogEvent>& logs,
                        const std::string& needle) {
@@ -175,21 +185,21 @@ struct ControllerTransportState {
 };
 
 class ControllerFakeTransport final
-    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+    : public exv::vpn_engine::protocol::ProtocolTransport {
 public:
     explicit ControllerFakeTransport(std::shared_ptr<ControllerTransportState> state)
         : state_(std::move(state)) {}
 
-    ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
-        const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions&) override {
-        ecnuvpn::vpn_engine::protocol::AuthResult result;
+    exv::vpn_engine::protocol::AuthResult authenticate(
+        const exv::vpn_engine::protocol::ProtocolSessionOptions&) override {
+        exv::vpn_engine::protocol::AuthResult result;
         result.ok = true;
         result.cookie = "controller-cookie";
         return result;
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
-    connect_cstp(const std::string&, ecnuvpn::vpn_engine::TunnelMetadata* metadata) override {
+    exv::vpn_engine::ValidationResult
+    connect_cstp(const std::string&, exv::vpn_engine::TunnelMetadata* metadata) override {
         if (!metadata) {
             return {false, "metadata_missing", "metadata output is null"};
         }
@@ -208,18 +218,18 @@ public:
         return {};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
+    exv::vpn_engine::ValidationResult
     send_packet(const std::vector<std::uint8_t>&) override {
         return {};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
-    send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind) override {
+    exv::vpn_engine::ValidationResult
+    send_control(exv::vpn_engine::protocol::InboundFrameKind) override {
         return {};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
-    receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame*) override {
+    exv::vpn_engine::ValidationResult
+    receive_frame(exv::vpn_engine::protocol::InboundFrame*) override {
         if (state_->wait_for_disconnect.load()) {
             while (!state_->disconnected.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -243,25 +253,25 @@ private:
 };
 
 class ControllerDrainedPacketDevice final
-    : public ecnuvpn::vpn_engine::PacketDevice {
+    : public exv::vpn_engine::PacketDevice {
 public:
-    ecnuvpn::vpn_engine::ValidationResult
-    open(const ecnuvpn::vpn_engine::DeviceConfig&) override {
+    exv::vpn_engine::ValidationResult
+    open(const exv::vpn_engine::DeviceConfig&) override {
         return {};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
-    open(const ecnuvpn::vpn_engine::TunnelMetadata&) override {
+    exv::vpn_engine::ValidationResult
+    open(const exv::vpn_engine::TunnelMetadata&) override {
         return {};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
+    exv::vpn_engine::ValidationResult
     read_packet(std::vector<std::uint8_t>* packet) override {
         if (packet) packet->clear();
         return {false, "packet_device_empty", "packet device drained"};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
+    exv::vpn_engine::ValidationResult
     write_packet(const std::vector<std::uint8_t>&) override {
         return {};
     }
@@ -270,26 +280,26 @@ public:
 };
 
 class ControllerNoDataPacketDevice final
-    : public ecnuvpn::vpn_engine::PacketDevice {
+    : public exv::vpn_engine::PacketDevice {
 public:
-    ecnuvpn::vpn_engine::ValidationResult
-    open(const ecnuvpn::vpn_engine::DeviceConfig&) override {
+    exv::vpn_engine::ValidationResult
+    open(const exv::vpn_engine::DeviceConfig&) override {
         return {};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
-    open(const ecnuvpn::vpn_engine::TunnelMetadata&) override {
+    exv::vpn_engine::ValidationResult
+    open(const exv::vpn_engine::TunnelMetadata&) override {
         return {};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
+    exv::vpn_engine::ValidationResult
     read_packet(std::vector<std::uint8_t>* packet) override {
         if (packet) packet->clear();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return {false, "no_data", "no packet available"};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
+    exv::vpn_engine::ValidationResult
     write_packet(const std::vector<std::uint8_t>&) override {
         return {};
     }
@@ -298,26 +308,26 @@ public:
 };
 
 class ControllerFailingOpenPacketDevice final
-    : public ecnuvpn::vpn_engine::PacketDevice {
+    : public exv::vpn_engine::PacketDevice {
 public:
-    ecnuvpn::vpn_engine::ValidationResult
-    open(const ecnuvpn::vpn_engine::DeviceConfig&) override {
+    exv::vpn_engine::ValidationResult
+    open(const exv::vpn_engine::DeviceConfig&) override {
         return {false, "packet_open_failed",
                 "packet open failed after network apply"};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
-    open(const ecnuvpn::vpn_engine::TunnelMetadata&) override {
+    exv::vpn_engine::ValidationResult
+    open(const exv::vpn_engine::TunnelMetadata&) override {
         return {false, "packet_open_failed",
                 "packet open failed after network apply"};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
+    exv::vpn_engine::ValidationResult
     read_packet(std::vector<std::uint8_t>*) override {
         return {false, "unexpected_read", "packet device should not read"};
     }
 
-    ecnuvpn::vpn_engine::ValidationResult
+    exv::vpn_engine::ValidationResult
     write_packet(const std::vector<std::uint8_t>&) override {
         return {false, "unexpected_write", "packet device should not write"};
     }
@@ -327,6 +337,10 @@ public:
 
 class CoreLeaseRecordingHelper final : public exv::test::FakeHelper {
 public:
+    CoreLeaseRecordingHelper() {
+        connect();
+    }
+
     void set_hello_mode(exv::helper::HelperMode mode) {
         hello_mode_ = mode;
     }
@@ -334,6 +348,15 @@ public:
     void set_acquire_response(bool accepted, std::string lease_id) {
         acquire_accepted_ = accepted;
         acquire_lease_id_ = std::move(lease_id);
+    }
+
+    void set_keep_alive_response(bool ok, std::string warning = {}) {
+        keep_alive_ok_ = ok;
+        keep_alive_warning_ = std::move(warning);
+    }
+
+    void set_disconnect_after_acquire(bool enabled) {
+        disconnect_after_acquire_ = enabled;
     }
 
     exv::helper::HelloResponse hello(const exv::helper::HelloRequest& req) override {
@@ -354,6 +377,9 @@ public:
         resp.accepted = acquire_accepted_;
         resp.lease_id = acquire_lease_id_;
         resp.mode = hello_mode_ == exv::helper::HelperMode::Resident ? "resident" : "oneshot";
+        if (resp.accepted && disconnect_after_acquire_) {
+            simulate_disconnect();
+        }
         return resp;
     }
 
@@ -368,7 +394,12 @@ public:
         const exv::helper::KeepAliveRequest& req) override {
         calls_.push_back("keep_alive");
         keep_alive_requests_.push_back(req);
-        return {};
+        exv::helper::KeepAliveResponse resp;
+        resp.ok = keep_alive_ok_;
+        if (!keep_alive_warning_.empty()) {
+            resp.warning = keep_alive_warning_;
+        }
+        return resp;
     }
 
     exv::helper::ReleaseCoreLeaseResponse release_core_lease(
@@ -406,17 +437,20 @@ private:
     bool acquire_accepted_ = true;
     std::string acquire_lease_id_ = "core-lease-1";
     int start_session_count_ = 0;
+    bool keep_alive_ok_ = true;
+    bool disconnect_after_acquire_ = false;
+    std::string keep_alive_warning_;
     std::vector<std::string> calls_;
     std::vector<exv::helper::AcquireCoreLeaseRequest> acquire_requests_;
     std::vector<exv::helper::KeepAliveRequest> keep_alive_requests_;
     std::vector<exv::helper::ReleaseCoreLeaseRequest> release_requests_;
 };
 
-ecnuvpn::Config native_controller_config() {
-    ecnuvpn::Config cfg;
+exv::Config native_controller_config() {
+    exv::Config cfg;
     cfg.server = "https://vpn.example.invalid";
     cfg.username = "alice";
-    cfg.useragent = "ECNU-VPN controller integration test";
+    cfg.useragent = "EXV controller integration test";
     cfg.mtu = 1290;
     cfg.routes = {"198.51.100.0/24", "198.51.101.0/24"};
     return cfg;
@@ -625,15 +659,18 @@ bool test_native_network_config_failure_preserves_error() {
     auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{},
         [transport_state]() {
-            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            exv::vpn_engine::NativeVpnEngineDependencies deps;
             deps.transport_factory = [transport_state]() {
-                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                return std::unique_ptr<exv::vpn_engine::protocol::ProtocolTransport>(
                     new ControllerFakeTransport(transport_state));
             };
             return deps;
         });
     auto& ctrl = *ctrl_owner;
-    ctrl.set_vpn_config(native_controller_config(), "test-password");
+    exv::Config cfg = native_controller_config();
+    cfg.include_class_a_private_routes = true;
+    cfg.include_class_b_private_routes = true;
+    ctrl.set_vpn_config(cfg, "test-password");
 
     bool ok = true;
     ctrl.connect(make_intent(true));
@@ -670,13 +707,13 @@ bool test_native_network_config_preserves_routes_and_bypass() {
     auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{},
         [transport_state]() {
-            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            exv::vpn_engine::NativeVpnEngineDependencies deps;
             deps.transport_factory = [transport_state]() {
-                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                return std::unique_ptr<exv::vpn_engine::protocol::ProtocolTransport>(
                     new ControllerFakeTransport(transport_state));
             };
             deps.packet_device_factory = []() {
-                return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                return std::unique_ptr<exv::vpn_engine::PacketDevice>(
                     new ControllerDrainedPacketDevice());
             };
             return deps;
@@ -685,7 +722,10 @@ bool test_native_network_config_preserves_routes_and_bypass() {
     ctrl.set_status_callback([&](const exv::core::TunnelStatusSnapshot& snap) {
         ui.on_status_update(snap);
     });
-    ctrl.set_vpn_config(native_controller_config(), "test-password");
+    exv::Config cfg = native_controller_config();
+    cfg.include_class_a_private_routes = true;
+    cfg.include_class_b_private_routes = true;
+    ctrl.set_vpn_config(cfg, "test-password");
 
     bool ok = true;
     ctrl.connect(make_intent(true));
@@ -702,6 +742,8 @@ bool test_native_network_config_preserves_routes_and_bypass() {
                     "2e: platform tunnel config should derive prefix from CSTP netmask") && ok;
         bool has_cstp_route = false;
         bool has_manual_route = false;
+        bool has_class_a_private_route = false;
+        bool has_class_b_private_route = false;
         int duplicate_count = 0;
         for (const auto& route : configs[0].routes) {
             if (route.destination == "198.51.100.0/24") {
@@ -711,11 +753,21 @@ bool test_native_network_config_preserves_routes_and_bypass() {
             if (route.destination == "198.51.101.0/24") {
                 has_manual_route = true;
             }
+            if (route.destination == "10.0.0.0/8") {
+                has_class_a_private_route = true;
+            }
+            if (route.destination == "172.16.0.0/12") {
+                has_class_b_private_route = true;
+            }
         }
         ok = expect(has_cstp_route,
                     "2e: platform tunnel config should preserve CSTP route destination") && ok;
         ok = expect(has_manual_route,
                     "2e: platform tunnel config should merge manual configured routes") && ok;
+        ok = expect(has_class_a_private_route,
+                    "2e: platform tunnel config should include requested class A private route") && ok;
+        ok = expect(has_class_b_private_route,
+                    "2e: platform tunnel config should include requested class B private route") && ok;
         ok = expect(duplicate_count == 1,
                     "2e: platform tunnel config should de-duplicate route destinations") && ok;
         ok = expect(configs[0].server_bypass_ips.size() == 2 &&
@@ -749,18 +801,18 @@ bool test_native_network_refresh_reuses_prepared_device() {
 
     auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{}, []() {
-            return ecnuvpn::vpn_engine::NativeVpnEngineDependencies{};
+            return exv::vpn_engine::NativeVpnEngineDependencies{};
         });
 
-    ecnuvpn::vpn_engine::TunnelMetadata metadata;
-    metadata.interface_name = "ECNU-VPN";
+    exv::vpn_engine::TunnelMetadata metadata;
+    metadata.interface_name = "EXV";
     metadata.internal_ip4_address = "10.255.0.12";
     metadata.internal_ip4_netmask = "255.255.255.128";
     metadata.mtu = 1400;
     metadata.routes = {"198.51.100.0/24"};
 
-    ecnuvpn::vpn_engine::DeviceConfig first_device;
-    ecnuvpn::vpn_engine::DeviceConfig refreshed_device;
+    exv::vpn_engine::DeviceConfig first_device;
+    exv::vpn_engine::DeviceConfig refreshed_device;
 
     auto first = exv::core::TunnelControllerTestAccess::configure_network_for_engine(
         *ctrl_owner, metadata, &first_device);
@@ -777,13 +829,15 @@ bool test_native_network_refresh_reuses_prepared_device() {
     ok = expect(first_device.interface_name == refreshed_device.interface_name &&
                     first_device.mtu == refreshed_device.mtu,
                 "2e2: refreshed packet device config should remain stable") && ok;
+    ok = expect(ctrl_owner->status().internal_ip == "10.255.0.12",
+                "2e2: controller status should expose CSTP-assigned tunnel IP") && ok;
 
     auto connected_ctrl = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{}, []() {
-            return ecnuvpn::vpn_engine::NativeVpnEngineDependencies{};
+            return exv::vpn_engine::NativeVpnEngineDependencies{};
         });
-    ecnuvpn::vpn_engine::DeviceConfig connected_first_device;
-    ecnuvpn::vpn_engine::DeviceConfig connected_refreshed_device;
+    exv::vpn_engine::DeviceConfig connected_first_device;
+    exv::vpn_engine::DeviceConfig connected_refreshed_device;
     auto connected_first =
         exv::core::TunnelControllerTestAccess::configure_network_for_engine(
             *connected_ctrl, metadata, &connected_first_device);
@@ -795,6 +849,8 @@ bool test_native_network_refresh_reuses_prepared_device() {
                 "2e2: connected refresh should succeed") && ok;
     ok = expect(connected_ctrl->phase() == exv::core::TunnelPhase::Connected,
                 "2e2: connected refresh must not regress to opening packet device") && ok;
+    ok = expect(connected_ctrl->status().internal_ip == "10.255.0.12",
+                "2e2: connected refresh should preserve tunnel IP in status") && ok;
     return ok;
 }
 
@@ -809,13 +865,13 @@ bool test_native_packet_startup_failure_cleans_network_state() {
     auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, exv::core::ReconnectConfig{},
         [transport_state]() {
-            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            exv::vpn_engine::NativeVpnEngineDependencies deps;
             deps.transport_factory = [transport_state]() {
-                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                return std::unique_ptr<exv::vpn_engine::protocol::ProtocolTransport>(
                     new ControllerFakeTransport(transport_state));
             };
             deps.packet_device_factory = []() {
-                return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                return std::unique_ptr<exv::vpn_engine::PacketDevice>(
                     new ControllerFailingOpenPacketDevice());
             };
             return deps;
@@ -871,20 +927,20 @@ bool test_native_transport_reconnect_is_controller_owned() {
     auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
         helper, net_ops, config,
         [transport_state]() {
-            ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+            exv::vpn_engine::NativeVpnEngineDependencies deps;
             deps.transport_factory = [transport_state]() {
-                return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                return std::unique_ptr<exv::vpn_engine::protocol::ProtocolTransport>(
                     new ControllerFakeTransport(transport_state));
             };
             deps.packet_device_factory = []() {
-                return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                return std::unique_ptr<exv::vpn_engine::PacketDevice>(
                     new ControllerNoDataPacketDevice());
             };
             return deps;
         });
     auto& ctrl = *ctrl_owner;
 
-    ecnuvpn::Config cfg = native_controller_config();
+    exv::Config cfg = native_controller_config();
     cfg.auto_reconnect = true;
     ctrl.set_vpn_config(cfg, "test-password");
 
@@ -1017,6 +1073,63 @@ bool test_handoff_replaces_helper_and_preserves_session() {
                 "2i: controller should not release old oneshot lease during handoff") && ok;
     ok = expect(service->keep_alive_count() >= 1,
                 "2i: controller should start service core lease keepalive") && ok;
+    return ok;
+}
+
+// --- Test 2i2: CoreLease Keepalive Failure Stops Local Lease State ---
+bool test_core_lease_keepalive_failure_stops_local_lease_state() {
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
+    helper->set_keep_alive_response(
+        false, "PipeHelperClient is not connected");
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+    auto log_sink = install_capturing_log_sink();
+
+    ctrl.connect(make_intent(true));
+    auto snap = ctrl.status();
+
+    exv::observability::LogFacade::flush();
+    auto logs = log_sink->logs();
+    exv::observability::LogFacade::shutdown();
+
+    bool ok = true;
+    ok = expect(helper->keep_alive_count() == 1,
+                "2i2: failed core lease keepalive should be sent once") && ok;
+    ok = expect(count_log_event(logs, "tunnel",
+                                "core_lease.keep_alive.failed") == 1,
+                "2i2: failed core lease keepalive should log once") && ok;
+    ok = expect(!snap.core_lease_active,
+                "2i2: failed core lease keepalive should clear local lease state") && ok;
+    ok = expect(snap.helper_status == "unavailable",
+                "2i2: failed core lease keepalive should mark helper unavailable") && ok;
+    return ok;
+}
+
+// --- Test 2i3: CoreLease Keepalive Skips Helper IPC When Disconnected ---
+bool test_core_lease_keepalive_skips_ipc_when_helper_disconnected() {
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
+    helper->set_disconnect_after_acquire(true);
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+    exv::core::TunnelController ctrl(helper, net_ops);
+    auto log_sink = install_capturing_log_sink();
+
+    ctrl.connect(make_intent(true));
+    auto snap = ctrl.status();
+
+    exv::observability::LogFacade::flush();
+    auto logs = log_sink->logs();
+    exv::observability::LogFacade::shutdown();
+
+    bool ok = true;
+    ok = expect(helper->keep_alive_count() == 0,
+                "2i3: disconnected helper should not receive keep_alive IPC") && ok;
+    ok = expect(count_log_event(logs, "tunnel",
+                                "core_lease.keep_alive.failed") == 1,
+                "2i3: disconnected helper should log one terminal keepalive warning") && ok;
+    ok = expect(!snap.core_lease_active,
+                "2i3: disconnected helper should clear local lease state") && ok;
+    ok = expect(snap.helper_status == "unavailable",
+                "2i3: disconnected helper should mark helper unavailable") && ok;
     return ok;
 }
 
@@ -1447,7 +1560,7 @@ bool test_native_runner_failure_log() {
     auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
     exv::core::TunnelController ctrl(helper, net_ops);
 
-    ecnuvpn::Config cfg;
+    exv::Config cfg;
     cfg.server.clear();
     cfg.username.clear();
     ctrl.set_vpn_config(cfg, "super-secret-password");
@@ -1563,6 +1676,12 @@ int main() {
 
     std::cout << "--- Test 2i: Handoff Replaces Helper Without Dropping Session ---\n";
     ok = test_handoff_replaces_helper_and_preserves_session() && ok;
+
+    std::cout << "--- Test 2i2: CoreLease Keepalive Failure Stops Local Lease State ---\n";
+    ok = test_core_lease_keepalive_failure_stops_local_lease_state() && ok;
+
+    std::cout << "--- Test 2i3: CoreLease Keepalive Skips Helper IPC When Disconnected ---\n";
+    ok = test_core_lease_keepalive_skips_ipc_when_helper_disconnected() && ok;
 
     std::cout << "--- Test 2j: Hello Resident Mode Propagates To Status ---\n";
     ok = test_hello_resident_mode_propagates_to_status() && ok;

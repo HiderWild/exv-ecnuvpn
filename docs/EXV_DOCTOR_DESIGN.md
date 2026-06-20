@@ -64,7 +64,7 @@ exv doctor --check version
   Electron:     39.2.4 (if desktop app running)
 ```
 
-**Data source:** `ECNUVPN_VERSION` compile definition, `exv --version`, `exv-helper --version`.
+**Data source:** `EXV_VERSION` compile definition, `exv --version`, `exv-helper --version`.
 
 ### 3.2 Helper Service Status
 
@@ -123,9 +123,9 @@ exv doctor --check version
 
 ```
 === Engine ===
-  Binary path:  C:\Program Files\ECNU-VPN\bin\exv.exe
-  Helper path:  C:\Program Files\ECNU-VPN\bin\exv-helper.exe
-  Runtime dir:  C:\Program Files\ECNU-VPN\bin\
+  Binary path:  C:\Program Files\EXV\bin\exv.exe
+  Helper path:  C:\Program Files\EXV\bin\exv-helper.exe
+  Runtime dir:  C:\Program Files\EXV\bin\
   Wintun DLL:   present (427 KB)
   OpenSSL:      system / bundled
 ```
@@ -238,7 +238,7 @@ The diagnostic system uses four distinct log layers:
 - **Destination:** Log files (`exv.log`, `exv-helper.log`)
 - **Content:** Detailed protocol messages, state transitions, timing data
 - **Redaction:** Applied before writing. Secrets replaced with `[REDACTED-*]`.
-- **Level control:** `--verbose` flag or `ECNUVPN_LOG_LEVEL=debug` environment variable
+- **Level control:** `--verbose` flag or `EXV_LOG_LEVEL=debug` environment variable
 
 ### Layer 3: Support Bundle
 
@@ -260,9 +260,9 @@ The diagnostic system uses four distinct log layers:
 
 | Platform | Log Location |
 |----------|-------------|
-| Windows | `%APPDATA%\ECNU VPN\logs\exv.log` |
-| macOS | `~/Library/Logs/ECNU VPN/exv.log` |
-| Linux | `~/.local/share/ecnu-vpn/logs/exv.log` |
+| Windows | `%APPDATA%\EXV\logs\exv.log` |
+| macOS | `~/Library/Logs/EXV/exv.log` |
+| Linux | `~/.local/share/exv/logs/exv.log` |
 
 ---
 

@@ -5,7 +5,7 @@
 #include "core/rpc/desktop_rpc_adapter.hpp"
 #include "core/use_cases/config_use_cases.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 namespace {
 
@@ -58,7 +58,31 @@ void register_desktop_config_actions(exv::core_api::DesktopRpcAdapter &adapter) 
         apply_desktop_runtime_context(payload);
         return desktop_result(make_config_use_cases().get_key_status());
       });
+
+  adapter.register_legacy_handler(
+      "config.reset", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(make_config_use_cases().reset_config());
+      });
+
+  adapter.register_legacy_handler(
+      "key.reset", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(make_config_use_cases().reset_key());
+      });
+
+  adapter.register_legacy_handler(
+      "config.import", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(make_config_use_cases().import_config(payload));
+      });
+
+  adapter.register_legacy_handler(
+      "config.export", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(make_config_use_cases().export_config(payload));
+      });
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

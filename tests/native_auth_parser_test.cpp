@@ -27,13 +27,13 @@ std::string read_file_bytes(const std::string &path) {
 } // namespace
 
 int main() {
-  using ecnuvpn::vpn_engine::protocol::AuthForm;
-  using ecnuvpn::vpn_engine::protocol::AuthCookieJar;
-  using ecnuvpn::vpn_engine::protocol::AuthResult;
-  using ecnuvpn::vpn_engine::protocol::HttpResponse;
-  using ecnuvpn::vpn_engine::protocol::parse_auth_form;
-  using ecnuvpn::vpn_engine::protocol::parse_auth_response;
-  using ecnuvpn::vpn_engine::protocol::parse_http_response;
+  using exv::vpn_engine::protocol::AuthForm;
+  using exv::vpn_engine::protocol::AuthCookieJar;
+  using exv::vpn_engine::protocol::AuthResult;
+  using exv::vpn_engine::protocol::HttpResponse;
+  using exv::vpn_engine::protocol::parse_auth_form;
+  using exv::vpn_engine::protocol::parse_auth_response;
+  using exv::vpn_engine::protocol::parse_http_response;
 
   bool ok = true;
 

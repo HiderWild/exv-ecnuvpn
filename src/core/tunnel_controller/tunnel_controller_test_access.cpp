@@ -26,8 +26,8 @@ std::unique_ptr<TunnelController> TunnelControllerTestAccess::create(
       });
   controller->impl_->runner_.set_network_config_callback(
       [controller = controller.get()](
-          const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
-          ecnuvpn::vpn_engine::DeviceConfig *device_config) {
+          const exv::vpn_engine::TunnelMetadata &metadata,
+          exv::vpn_engine::DeviceConfig *device_config) {
         return controller->impl_->configure_network_for_engine(metadata,
                                                                device_config);
       });
@@ -35,11 +35,11 @@ std::unique_ptr<TunnelController> TunnelControllerTestAccess::create(
   return controller;
 }
 
-ecnuvpn::vpn_engine::ValidationResult
+exv::vpn_engine::ValidationResult
 TunnelControllerTestAccess::configure_network_for_engine(
     TunnelController &controller,
-    const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
-    ecnuvpn::vpn_engine::DeviceConfig *device_config) {
+    const exv::vpn_engine::TunnelMetadata &metadata,
+    exv::vpn_engine::DeviceConfig *device_config) {
   return controller.impl_->configure_network_for_engine(metadata,
                                                         device_config);
 }

@@ -37,7 +37,7 @@
 #include <string>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 namespace testing {
@@ -75,7 +75,7 @@ exv::core::VpnConnectJobOwner g_desktop_connect_jobs;
 
 config::ConfigManager make_config_manager() {
   platform::ensure_dir(platform::get_config_dir());
-  ecnuvpn::platform::logging::configure_default_logging(false);
+  exv::platform::logging::configure_default_logging(false);
   return config::ConfigManager(platform::get_config_dir());
 }
 
@@ -236,14 +236,14 @@ struct PreparedHandshakeHolder {
     }
   }
 
-  ecnuvpn::vpn_engine::NativeHandshakeResult take_handshake() {
+  exv::vpn_engine::NativeHandshakeResult take_handshake() {
     ready = false;
     return std::move(handshake);
   }
 
   std::mutex mutex;
-  ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
-  ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
+  exv::vpn_engine::VpnEngineConfig engine_config;
+  exv::vpn_engine::NativeHandshakeResult handshake;
   bool ready = false;
 };
 
@@ -320,7 +320,7 @@ void run_desktop_connect_job(Config cfg,
     return;
   }
 
-  namespace conn_attempt = ecnuvpn::connection_attempt;
+  namespace conn_attempt = exv::connection_attempt;
   conn_attempt::TerminalAttemptScope attempt_cleanup(
       platform::get_config_dir(), attempt_id, "scope_exit");
 
@@ -445,7 +445,7 @@ void run_desktop_connect_job(Config cfg,
   auto protocol_branch = [cfg, password, prepared_handshake](
                               std::stop_token branch_stop) mutable {
     StageTimer branch_timing("desktop.connect.protocol_handshake");
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+    exv::vpn_engine::VpnEngineConfig engine_config;
     branch_timing.mark("native_config_mapping_started");
     auto mapped =
         exv::core::make_native_engine_config(cfg, password, &engine_config);
@@ -459,7 +459,7 @@ void run_desktop_connect_job(Config cfg,
           nlohmann::json::object()};
     }
 
-    auto deps = ecnuvpn::vpn_engine::default_native_engine_dependencies();
+    auto deps = exv::vpn_engine::default_native_engine_dependencies();
     // Reuse EngineEventBridge as a log-only sink: the prepared-handshake job
     // still emits auth.started / auth.failed / cstp.failed events even though
     // we are not adopting a runner yet. Without a sink they vanish, leaving
@@ -481,33 +481,33 @@ void run_desktop_connect_job(Config cfg,
     // can drive the prompt to completion before the runner adopts. See
     // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
     auto auth_coordinator =
-        std::make_shared<ecnuvpn::app_api::AuthInteractionCoordinator>();
-    ecnuvpn::app_api::set_active_connect_auth_coordinator(auth_coordinator);
+        std::make_shared<exv::app_api::AuthInteractionCoordinator>();
+    exv::app_api::set_active_connect_auth_coordinator(auth_coordinator);
     struct AuthCoordinatorClearGuard {
       explicit AuthCoordinatorClearGuard(
-          std::shared_ptr<ecnuvpn::app_api::AuthInteractionCoordinator>
+          std::shared_ptr<exv::app_api::AuthInteractionCoordinator>
               coordinator_value)
           : coordinator(std::move(coordinator_value)) {}
 
       ~AuthCoordinatorClearGuard() {
         if (coordinator) {
           coordinator->cancel();
-          ecnuvpn::app_api::clear_active_connect_auth_coordinator_if_current(
+          exv::app_api::clear_active_connect_auth_coordinator_if_current(
               coordinator);
         }
       }
 
-      std::shared_ptr<ecnuvpn::app_api::AuthInteractionCoordinator>
+      std::shared_ptr<exv::app_api::AuthInteractionCoordinator>
           coordinator;
     } auth_coordinator_clear_guard(auth_coordinator);
     deps.auth_interaction_handler =
         [auth_coordinator, branch_stop](
-            const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest &req) {
+            const exv::vpn_engine::protocol::AuthInteractionRequest &req) {
           return auth_coordinator->handle(req, branch_stop);
         };
 
-    ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
-    ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config, deps);
+    exv::vpn_engine::NativeHandshakeResult handshake;
+    exv::vpn_engine::NativeHandshakeJob job(engine_config, deps);
     branch_timing.mark("native_handshake_started");
     auto result = job.run(branch_stop, &handshake);
     if (!result.ok) {
@@ -778,7 +778,7 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
           }
         }
 
-        namespace conn_attempt = ecnuvpn::connection_attempt;
+        namespace conn_attempt = exv::connection_attempt;
         conn_attempt::AcquireOptions attempt_opts;
         attempt_opts.config_dir = platform::get_config_dir();
         attempt_opts.mode = "native";
@@ -873,7 +873,7 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         // during that window. See
         // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
         if (auto coordinator =
-                ecnuvpn::app_api::get_active_connect_auth_coordinator();
+                exv::app_api::get_active_connect_auth_coordinator();
             coordinator) {
           if (auto pending = coordinator->pending(); pending) {
             return nlohmann::json{
@@ -910,7 +910,7 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         // prompts are not visible to the controller. See
         // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
         if (auto coordinator =
-                ecnuvpn::app_api::get_active_connect_auth_coordinator();
+                exv::app_api::get_active_connect_auth_coordinator();
             coordinator) {
           if (coordinator->respond(id, value)) {
             return nlohmann::json{{"ok", true}};
@@ -949,9 +949,12 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
         if (controller) {
           controller->disconnect(exv::core::DisconnectReason::UserRequested);
         }
+        namespace conn_attempt = exv::connection_attempt;
+        conn_attempt::mark_terminal(platform::get_config_dir(),
+                                    "user_disconnect");
         return disconnected_status(cfg);
       });
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

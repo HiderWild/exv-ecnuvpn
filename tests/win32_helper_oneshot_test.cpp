@@ -69,9 +69,9 @@ std::string current_owner_sid() {
   return result;
 }
 
-ecnuvpn::helper::DaemonOptions make_oneshot_options(
+exv::helper::DaemonOptions make_oneshot_options(
     const std::string &endpoint, const std::string &owner = std::string()) {
-  ecnuvpn::helper::DaemonOptions options;
+  exv::helper::DaemonOptions options;
   options.mode = "oneshot";
   options.endpoint = endpoint;
   options.owner = owner.empty() ? current_owner_sid() : owner;
@@ -99,17 +99,17 @@ bool run_oneshot_daemon_hello_sequence(int request_count,
                                        const char *description) {
   const std::string endpoint = random_endpoint();
 
-  ecnuvpn::helper::DaemonOptions options = make_oneshot_options(endpoint);
+  exv::helper::DaemonOptions options = make_oneshot_options(endpoint);
 
   int daemon_rc = -1;
-  std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
+  std::thread daemon([&]() { daemon_rc = exv::helper::daemon_main(options); });
 
-  const ecnuvpn::platform::HelperEndpoint helper_endpoint{endpoint};
+  const exv::platform::HelperEndpoint helper_endpoint{endpoint};
 
   bool ok = true;
   bool last_request_ok = false;
   for (int i = 0; i < request_count; ++i) {
-    const auto hello = ecnuvpn::platform::send_helper_request(
+    const auto hello = exv::platform::send_helper_request(
         helper_endpoint, nlohmann::json(make_hello_request()));
     last_request_ok = hello.value("success", false);
     ok = expect_json_ok(hello, description) && ok;
@@ -122,7 +122,7 @@ bool run_oneshot_daemon_hello_sequence(int request_count,
   }
 
   if (!last_request_ok) {
-    ecnuvpn::helper::request_daemon_stop();
+    exv::helper::request_daemon_stop();
     wake_acceptor_once(endpoint);
   }
 
@@ -140,10 +140,10 @@ bool oneshot_helper_responds_to_hello_and_exits_after_disconnect() {
 bool oneshot_helper_preserves_persistent_connection_and_shutdown() {
   const std::string endpoint = random_endpoint();
 
-  ecnuvpn::helper::DaemonOptions options = make_oneshot_options(endpoint);
+  exv::helper::DaemonOptions options = make_oneshot_options(endpoint);
 
   int daemon_rc = -1;
-  std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
+  std::thread daemon([&]() { daemon_rc = exv::helper::daemon_main(options); });
 
   exv::helper::PipeClientConfig config;
   config.pipe_path = endpoint;
@@ -228,19 +228,19 @@ bool oneshot_helper_preserves_persistent_connection_and_shutdown() {
 bool oneshot_helper_rejects_first_packet_that_is_not_hello() {
   const std::string endpoint = random_endpoint();
 
-  ecnuvpn::helper::DaemonOptions options = make_oneshot_options(endpoint);
+  exv::helper::DaemonOptions options = make_oneshot_options(endpoint);
 
   int daemon_rc = -1;
-  std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
+  std::thread daemon([&]() { daemon_rc = exv::helper::daemon_main(options); });
 
-  const ecnuvpn::platform::HelperEndpoint helper_endpoint{endpoint};
+  const exv::platform::HelperEndpoint helper_endpoint{endpoint};
   exv::helper::StartSessionRequest start_req;
   start_req.profile_id.value = "test-profile";
   exv::helper::HelperRequest request;
   request.op = exv::helper::HelperOp::StartSession;
   request.payload_json = nlohmann::json(start_req).dump();
 
-  const auto response = ecnuvpn::platform::send_helper_request(
+  const auto response = exv::platform::send_helper_request(
       helper_endpoint, nlohmann::json(request));
 
   bool ok = true;
@@ -264,14 +264,14 @@ bool oneshot_helper_rejects_first_packet_that_is_not_hello() {
 bool oneshot_helper_rejects_non_owner_client() {
   const std::string endpoint = random_endpoint();
 
-  ecnuvpn::helper::DaemonOptions options =
+  exv::helper::DaemonOptions options =
       make_oneshot_options(endpoint, "S-1-0-0");
 
   int daemon_rc = -1;
-  std::thread daemon([&]() { daemon_rc = ecnuvpn::helper::daemon_main(options); });
+  std::thread daemon([&]() { daemon_rc = exv::helper::daemon_main(options); });
 
-  const auto response = ecnuvpn::platform::send_helper_request(
-      ecnuvpn::platform::HelperEndpoint{endpoint},
+  const auto response = exv::platform::send_helper_request(
+      exv::platform::HelperEndpoint{endpoint},
       nlohmann::json(make_hello_request()));
 
   bool ok = true;

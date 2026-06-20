@@ -9,7 +9,7 @@
 #include <sstream>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace tests {
 namespace support {
 
@@ -618,4 +618,4 @@ FakeAnyConnectRunResult run_fake_anyconnect_session(
 
 } // namespace support
 } // namespace tests
-} // namespace ecnuvpn
+} // namespace exv

@@ -7,9 +7,9 @@
 namespace exv::core {
 namespace {
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
@@ -62,7 +62,7 @@ bool split_inline_value(const std::string &arg, const char *prefix,
   return true;
 }
 
-ecnuvpn::vpn_engine::ValidationResult
+exv::vpn_engine::ValidationResult
 parse_native_extra_args(const std::vector<std::string> &args,
                         NativeExtraArgs *out) {
   if (!out)
@@ -106,8 +106,8 @@ parse_native_extra_args(const std::vector<std::string> &args,
 
 } // namespace
 
-ecnuvpn::vpn_engine::ValidationResult
-validate_native_app_config(const ecnuvpn::Config &cfg) {
+exv::vpn_engine::ValidationResult
+validate_native_app_config(const exv::Config &cfg) {
   NativeExtraArgs extra;
   auto extra_result = parse_native_extra_args(cfg.extra_args, &extra);
   if (!extra_result.ok)
@@ -118,12 +118,12 @@ validate_native_app_config(const ecnuvpn::Config &cfg) {
   if (cfg.username.empty()) {
     return invalid("config_invalid", "VPN username is not configured.");
   }
-  return ecnuvpn::vpn_engine::ValidationResult{};
+  return exv::vpn_engine::ValidationResult{};
 }
 
-ecnuvpn::vpn_engine::ValidationResult make_native_engine_config(
-    const ecnuvpn::Config &cfg, const std::string &plaintext_password,
-    ecnuvpn::vpn_engine::VpnEngineConfig *out) {
+exv::vpn_engine::ValidationResult make_native_engine_config(
+    const exv::Config &cfg, const std::string &plaintext_password,
+    exv::vpn_engine::VpnEngineConfig *out) {
   if (!out) {
     return invalid("invalid_output",
                    "Native engine config output pointer is null.");
@@ -138,7 +138,7 @@ ecnuvpn::vpn_engine::ValidationResult make_native_engine_config(
   if (!extra_result.ok)
     return extra_result;
 
-  ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+  exv::vpn_engine::VpnEngineConfig engine_cfg;
   engine_cfg.engine = cfg.vpn_engine;
   engine_cfg.server = cfg.server;
   engine_cfg.username = cfg.username;
@@ -159,7 +159,7 @@ ecnuvpn::vpn_engine::ValidationResult make_native_engine_config(
   engine_cfg.csd_wrapper = std::move(extra.csd_wrapper);
 
   *out = std::move(engine_cfg);
-  return ecnuvpn::vpn_engine::ValidationResult{};
+  return exv::vpn_engine::ValidationResult{};
 }
 
 } // namespace exv::core

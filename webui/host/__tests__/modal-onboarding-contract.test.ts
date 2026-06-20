@@ -4,9 +4,14 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const webuiRoot = process.cwd()
+const repoRoot = join(webuiRoot, '..')
 
 function readSource(...parts: string[]) {
   return readFileSync(join(webuiRoot, ...parts), 'utf8')
+}
+
+function readRepoSource(...parts: string[]) {
+  return readFileSync(join(repoRoot, ...parts), 'utf8')
 }
 
 describe('modal onboarding and credential contracts', () => {
@@ -72,6 +77,7 @@ describe('modal onboarding and credential contracts', () => {
   it('credential prompt supports missing username, missing password, and remembered password saves', () => {
     const dialog = readSource('src', 'components', 'CredentialPromptDialog.vue')
     const vpnStore = readSource('src', 'stores', 'vpn.ts')
+    const css = readSource('src', 'style.css')
 
     assert.match(dialog, /missingUsername/)
     assert.match(dialog, /missingPassword/)
@@ -83,12 +89,26 @@ describe('modal onboarding and credential contracts', () => {
     assert.match(dialog, /ui\.submitCredentialPrompt/)
     assert.doesNotMatch(dialog, /title="补全连接凭据"/)
     assert.doesNotMatch(dialog, /:description=/)
-    assert.match(vpnStore, /const missingUsername = !auth\.username\.trim\(\)/)
-    assert.match(vpnStore, /const missingPassword = !\(auth\.remember_password && auth\.password_stored\)/)
+    assert.match(vpnStore, /missingUsername = options\.forcePrompt \? true : !auth\.username\.trim\(\)/)
+    assert.match(vpnStore, /missingPassword = options\.forcePrompt \? true : !\(auth\.remember_password && auth\.password_stored\)/)
     assert.match(vpnStore, /remember_password: credentials\.rememberPassword/)
     assert.match(vpnStore, /password: credentials\.rememberPassword \? credentials\.password/)
     assert.doesNotMatch(vpnStore, /请补全 VPN 连接凭据/)
-    assert.match(vpnStore, /密码不正确，请重新输入密码/)
+    assert.match(vpnStore, /认证失败，请重新输入用户名和密码/)
+    assert.match(css, /input\[type="password"\]::-ms-reveal/)
+    assert.match(css, /input\[type="password"\]::-ms-clear/)
+    assert.match(css, /display:\s*none/)
+  })
+
+  it('forces username and password credential prompt after authentication failure', () => {
+    const vpnStore = readSource('src', 'stores', 'vpn.ts')
+
+    assert.match(vpnStore, /forcePrompt/)
+    assert.match(vpnStore, /retryConnectAfterAuthFailure[\s\S]*resolveConnectCredentials\([^)]*forcePrompt:\s*true/)
+    assert.match(vpnStore, /missingUsername = options\.forcePrompt \? true : !auth\.username\.trim\(\)/)
+    assert.match(vpnStore, /missingPassword = options\.forcePrompt \? true : !\(auth\.remember_password && auth\.password_stored\)/)
+    assert.match(vpnStore, /认证失败，请重新输入用户名和密码/)
+    assert.doesNotMatch(vpnStore, /primaryLabel:\s*'重新输入密码'/)
   })
 
   it('quick start supports quick/custom modes, import, skip, and service install default', () => {
@@ -96,19 +116,45 @@ describe('modal onboarding and credential contracts', () => {
     const globalStack = readSource('src', 'windows', 'GlobalWindowStack.vue')
 
     assert.match(dialog, /mode = ref<'quick' \| 'custom'>\('quick'\)/)
-    assert.match(dialog, /vpn-ct\.ecnu\.edu\.cn/)
+    assert.match(dialog, /distributionConfig\.defaultVpnServer/)
+    assert.doesNotMatch(dialog, /vpn-cn\.ecnu\.edu\.cn/)
+    assert.doesNotMatch(dialog, /vpn-ct\.ecnu\.edu\.cn/)
     assert.match(dialog, /rememberPassword = ref\(false\)/)
+    assert.match(dialog, /launchAtLogin = ref\(false\)/)
     assert.match(dialog, /rememberPasswordEnabled/)
     assert.match(dialog, /remember_password:\s*rememberPassword\.value/)
     assert.match(dialog, /password:\s*rememberPassword\.value \? password\.value : ''/)
+    assert.match(dialog, /launch_at_login:\s*launchAtLogin\.value/)
+    assert.match(dialog, /开机自启/)
     assert.doesNotMatch(dialog, /remember_password:\s*true/)
     assert.match(dialog, /installService/)
     assert.match(dialog, /TokenInput/)
     assert.match(dialog, /settingsForm\.mtu/)
     assert.match(dialog, /settingsForm\.dtls/)
     assert.match(dialog, /importConfig/)
+    assert.match(dialog, /detectImportEnvelope/)
+    assert.match(dialog, /importEnvelopeToPayload/)
+    assert.match(dialog, /friendlyImportConfigError/)
+    assert.doesNotMatch(dialog, /JSON\.parse\(text\)/)
     assert.match(dialog, /skip\(\)/)
     assert.match(globalStack, /<QuickStartDialog \/>/)
+  })
+
+  it('defaults server presets to cn and normalizes legacy scheme-prefixed servers', () => {
+    const auth = readSource('src', 'pages', 'settings', 'SettingsAuthSection.vue')
+    const legacyAuth = readSource('src', 'pages', 'AuthPage.vue')
+    const quickStart = readSource('src', 'components', 'QuickStartDialog.vue')
+
+    for (const source of [auth, legacyAuth]) {
+      assert.match(source, /distributionConfig\.vpnServers/)
+      assert.match(source, /distributionConfig\.defaultVpnServer/)
+      assert.doesNotMatch(source, /'vpn-cn\.ecnu\.edu\.cn'/)
+      assert.doesNotMatch(source, /'vpn-ct\.ecnu\.edu\.cn'/)
+      assert.match(source, /normalizeServerChoice/)
+      assert.match(source, /replace\(\s*\/\^https\?:/)
+    }
+    assert.match(quickStart, /distributionConfig\.defaultVpnServer/)
+    assert.doesNotMatch(quickStart, /vpn-ct\.ecnu\.edu\.cn/)
   })
 
   it('styles native select options with readable dark theme colors', () => {
@@ -140,8 +186,63 @@ describe('modal onboarding and credential contracts', () => {
     assert.match(routes, /DashboardPage/)
     assert.match(routes, /SettingsPage/)
     assert.match(routes, /LogsPage/)
+    assert.match(routes, /AboutPage/)
+    assert.match(app, /'DashboardPage', 'SettingsPage', 'LogsPage', 'AboutPage'/)
     assert.match(globalStack, /CredentialPromptDialog/)
     assert.match(globalStack, /QuickStartDialog/)
+  })
+
+  it('loads brand, default VPN values, and about metadata from the distribution config', () => {
+    const distributionJson = JSON.parse(readRepoSource('distribution', 'ecnu.json'))
+    const generated = readSource('src', 'generated', 'distribution.ts')
+    const nav = readSource('src', 'components', 'NavBar.vue')
+    const routes = readSource('src', 'windows', 'routes.ts')
+    const about = readSource('src', 'pages', 'AboutPage.vue')
+    const auth = readSource('src', 'pages', 'settings', 'SettingsAuthSection.vue')
+    const legacyAuth = readSource('src', 'pages', 'AuthPage.vue')
+    const quickStart = readSource('src', 'components', 'QuickStartDialog.vue')
+    const cxxConfig = readRepoSource('src', 'core', 'config', 'config.hpp')
+    const winDefaults = readRepoSource('src', 'platform', 'win32', 'config_defaults.cpp')
+    const darwinDefaults = readRepoSource('src', 'platform', 'darwin', 'config_defaults.cpp')
+
+    assert.equal(distributionJson.app_name, 'EXV')
+    assert.equal(distributionJson.brand_subtitle, 'for ECNU')
+    assert.equal(distributionJson.default_vpn_server, 'vpn-cn.ecnu.edu.cn')
+    assert.equal(distributionJson.author, 'HiderWild')
+    assert.equal(distributionJson.repository.url, 'https://github.com/HiderWild/easy-ecnu-vpn')
+
+    assert.match(generated, /Generated from distribution\/ecnu\.json/)
+    assert.match(generated, /brandSubtitle:\s*'for ECNU'/)
+    assert.match(generated, /defaultVpnServer:\s*'vpn-cn\.ecnu\.edu\.cn'/)
+    assert.match(generated, /vpnServers:/)
+    assert.match(generated, /defaultRoutes:/)
+    assert.match(generated, /defaultUserAgents:/)
+
+    assert.match(nav, /distributionConfig\.appName/)
+    assert.match(nav, /distributionConfig\.brandSubtitle/)
+    assert.doesNotMatch(nav, /VPN 客户端/)
+    assert.match(nav, /关于/)
+    assert.match(routes, /path:\s*'\/about'/)
+    assert.match(routes, /AboutPage/)
+
+    for (const source of [auth, legacyAuth, quickStart]) {
+      assert.match(source, /distributionConfig/)
+      assert.doesNotMatch(source, /'vpn-cn\.ecnu\.edu\.cn'/)
+      assert.doesNotMatch(source, /'vpn-ct\.ecnu\.edu\.cn'/)
+    }
+
+    assert.match(about, /distributionConfig\.appName/)
+    assert.match(about, /distributionConfig\.brandSubtitle/)
+    assert.match(about, /distributionConfig\.author/)
+    assert.match(about, /distributionConfig\.repository\.label/)
+    assert.match(about, /distributionConfig\.repository\.url/)
+    assert.match(about, /runtimeStatus\?\.version/)
+
+    assert.match(cxxConfig, /generated\/distribution_config\.hpp/)
+    assert.match(cxxConfig, /distribution::kDefaultVpnServer/)
+    assert.match(cxxConfig, /default_distribution_routes/)
+    assert.match(winDefaults, /distribution::kDefaultUserAgent/)
+    assert.match(darwinDefaults, /distribution::kDefaultUserAgent/)
   })
 
   it('splits settings into section components and keeps the shell as orchestration only', () => {
@@ -330,17 +431,36 @@ describe('modal onboarding and credential contracts', () => {
 
   it('uses one export config action with a password choice dialog and corrected icons', () => {
     const system = readSource('src', 'pages', 'settings', 'SettingsSystemSection.vue')
+    const ui = readSource('src', 'stores', 'ui.ts')
+    const passwordPrompt = readSource('src', 'components', 'PasswordPromptDialog.vue')
 
     assert.match(system, /showExportDialog/)
     assert.match(system, /exportIncludePassword/)
     assert.match(system, /exportPasswordRequired/)
-    assert.match(system, /config\.exportConfig\(\{\s*protected:\s*exportIncludePassword\.value/)
+    assert.match(system, /hasSavedPasswordForExport/)
+    assert.match(system, /detectImportEnvelope/)
+    assert.match(system, /importEnvelopeToPayload/)
+    assert.match(system, /friendlyImportConfigError/)
+    assert.match(system, /exportConfigWithoutPassword/)
+    assert.match(system, /if \(!hasSavedPasswordForExport\.value\)[\s\S]*await exportConfigWithoutPassword\(\)/)
+    assert.match(system, /ui\.addToast\('配置已导出（不含密码）', 'success'\)[\s\S]*downloadExport\('exv-config\.json', result\.data\)/)
+    assert.match(system, /protected:\s*includesPassword/)
+    assert.match(system, /secondaryLabel:\s*'确认'/)
+    assert.doesNotMatch(system, /请输入导入文件的密码（如有）/)
     assert.match(system, /导入配置[\s\S]*<Download/)
     assert.match(system, /导出配置[\s\S]*<Upload/)
     assert.doesNotMatch(system, /exportConfigUnprotected/)
     assert.doesNotMatch(system, /exportConfigProtected/)
     assert.doesNotMatch(system, /导出配置（不含密码）/)
     assert.doesNotMatch(system, /导出配置（密码保护）/)
+
+    assert.match(ui, /passwordPromptSubmitLabel/)
+    assert.match(ui, /passwordPromptCancelLabel/)
+    assert.match(ui, /passwordPromptDescription/)
+    assert.match(ui, /function requestPassword\(message: string, options\?:/)
+    assert.match(passwordPrompt, /ui\.passwordPromptDescription/)
+    assert.match(passwordPrompt, /ui\.passwordPromptCancelLabel/)
+    assert.match(passwordPrompt, /ui\.passwordPromptSubmitLabel/)
   })
 
   it('routes native WebView CLI actions through desktop RPC instead of unsupported stubs', () => {
@@ -364,9 +484,22 @@ describe('modal onboarding and credential contracts', () => {
     const css = readSource('src', 'style.css')
     const dashboard = readSource('src', 'pages', 'DashboardPage.vue')
 
+    assert.match(axis, /position:\s*fixed/)
+    assert.match(axis, /\.settings-axis \{[\s\S]*right:\s*16px/)
+    assert.match(axis, /axisFlightActive/)
+    assert.match(axis, /visualActiveSection/)
+    assert.match(axis, /function isHighlighted/)
+    assert.match(axis, /visualActiveSection\.value = null/)
+    assert.match(axis, /axis-flight-orb/)
+    assert.match(axis, /width:\s*18px/)
+    assert.match(axis, /height:\s*18px/)
+    assert.match(axis, /200ms/)
+    assert.match(axis, /cubic-bezier\(0\.12,\s*0\.82,\s*0\.18,\s*1\)/)
+    assert.match(axis, /@keyframes axis-flight/)
     assert.match(axis, /cursor-pointer/)
     assert.match(axis, /w-auto/)
     assert.match(axis, /px-2/)
+    assert.doesNotMatch(axis, /w-32/)
     assert.doesNotMatch(axis, /w-24/)
     assert.doesNotMatch(axis, /max-w-16/)
 
@@ -380,8 +513,8 @@ describe('modal onboarding and credential contracts', () => {
     const app = readSource('src', 'App.vue')
     const configStore = readSource('src', 'stores', 'config.ts')
     const settings = readSource('src', 'pages', 'SettingsPage.vue')
-    const connection = readSource('src', 'pages', 'settings', 'SettingsConnectionSection.vue')
     const system = readSource('src', 'pages', 'settings', 'SettingsSystemSection.vue')
+    const connection = readSource('src', 'pages', 'settings', 'SettingsConnectionSection.vue')
     const registry = readSource('src', 'pages', 'settings', 'changeRegistry.ts')
     const quickStart = readSource('src', 'components', 'QuickStartDialog.vue')
 
@@ -396,13 +529,17 @@ describe('modal onboarding and credential contracts', () => {
     assert.match(system, /launch_at_login/)
     assert.match(system, /launchAtLoginModel/)
     assert.match(system, /<ToggleSwitch/)
-
-    assert.match(connection, /启动时自动连接/)
-    assert.match(connection, /auto_connect_on_launch/)
-    assert.match(connection, /startupAutoConnectAllowed/)
-    assert.match(connection, /remember_password/)
-    assert.match(connection, /password_stored/)
-    assert.match(connection, /serviceInstalled/)
+    assert.match(system, /启动时自动连接/)
+    assert.match(system, /auto_connect_on_launch/)
+    assert.match(system, /startupAutoConnectAllowed/)
+    assert.match(system, /remember_password/)
+    assert.match(system, /password_stored/)
+    assert.match(system, /serviceInstalled/)
+    assert.match(
+      system,
+      /<p class="text-sm text-foreground">开机自启<\/p>[\s\S]*<p class="text-sm text-foreground">启动时自动连接<\/p>/,
+    )
+    assert.doesNotMatch(connection, /启动时自动连接/)
 
     assert.match(registry, /settings\.launch_at_login/)
     assert.match(registry, /settings\.auto_connect_on_launch/)
@@ -423,6 +560,10 @@ describe('modal onboarding and credential contracts', () => {
     const pageState = readSource('src', 'stores', 'pageState.ts')
     const settings = readSource('src', 'pages', 'SettingsPage.vue')
     const logs = readSource('src', 'pages', 'LogsPage.vue')
+    const restoreSettingsScroll = settings.slice(
+      settings.indexOf('function restoreSettingsScroll()'),
+      settings.indexOf('function scheduleRestoreSettingsScroll()'),
+    )
 
     assert.match(app, /<KeepAlive/)
     assert.match(app, /SettingsPage/)
@@ -440,6 +581,12 @@ describe('modal onboarding and credential contracts', () => {
     assert.match(settings, /rememberSettingsDrafts/)
     assert.match(settings, /pageState\.settings\.scrollTop/)
     assert.match(settings, /pageState\.settings\.userInteracted/)
+    assert.match(settings, /onBeforeRouteLeave/)
+    assert.match(settings, /rememberCurrentSettingsScroll/)
+    assert.match(settings, /requestAnimationFrame/)
+    assert.match(settings, /if \(hasRememberedSettingsScroll\(\)\) \{\s*scheduleRestoreSettingsScroll\(\)\s*return\s*\}/)
+    assert.match(settings, /root\.scrollTop === 0 &&\s*activeSection\.value !== 'auth' &&\s*pageState\.settings\.scrollTop > 0[\s\S]*return/)
+    assert.doesNotMatch(restoreSettingsScroll, /updateActiveSection\(\)/)
 
     assert.match(logs, /usePageStateStore/)
     assert.match(logs, /pageState\.logs\.scrollTop/)

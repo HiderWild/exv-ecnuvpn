@@ -2,7 +2,7 @@
 
 #include <array>
 
-namespace ecnuvpn {
+namespace exv {
 namespace feedback {
 
 namespace {
@@ -217,4 +217,4 @@ nlohmann::json normalize_error(nlohmann::json response) {
 }
 
 } // namespace feedback
-} // namespace ecnuvpn
+} // namespace exv

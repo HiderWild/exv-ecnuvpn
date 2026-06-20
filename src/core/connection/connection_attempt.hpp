@@ -5,7 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace connection_attempt {
 
 inline constexpr const char *kConnectionAttemptActiveCode =
@@ -75,4 +75,4 @@ bool mark_terminal_if_current(const std::string &config_dir,
 bool mark_terminal(const std::string &config_dir, const std::string &reason);
 
 } // namespace connection_attempt
-} // namespace ecnuvpn
+} // namespace exv

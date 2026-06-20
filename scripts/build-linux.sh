@@ -7,8 +7,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_ROOT="$REPO_ROOT/build/linux"
 ACTION="${1:-all}"
 
-export ECNUVPN_BUILD_PLATFORM=linux
-export ECNUVPN_WEBUI_DIST_DIR="$BUILD_ROOT/webview/dist"
+export EXV_BUILD_PLATFORM=linux
+export EXV_WEBUI_DIST_DIR="$BUILD_ROOT/webview/dist"
 export CI="${CI:-true}"
 
 detect_clang_scan_deps() {

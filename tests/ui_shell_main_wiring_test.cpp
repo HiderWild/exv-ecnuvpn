@@ -3,8 +3,8 @@
 #include <iterator>
 #include <string>
 
-#ifndef ECNUVPN_SOURCE_DIR
-#error "ECNUVPN_SOURCE_DIR must be defined"
+#ifndef EXV_SOURCE_DIR
+#error "EXV_SOURCE_DIR must be defined"
 #endif
 
 namespace {
@@ -22,7 +22,7 @@ bool contains(const std::string &text, const std::string &needle) {
 } // namespace
 
 int main() {
-  const std::string root = ECNUVPN_SOURCE_DIR;
+  const std::string root = EXV_SOURCE_DIR;
   const std::string main_cpp =
       read_file(root + "/src/app/ui_shell/ui_shell_main.cpp");
   const std::string process_manager_cpp =
@@ -55,7 +55,7 @@ int main() {
   }
   if (!contains(main_cpp, "options.exv_path") ||
       !contains(main_cpp, "config.state_dir") ||
-      !contains(main_cpp, "ecnuvpn::runtime::paths().home")) {
+      !contains(main_cpp, "exv::runtime::paths().home")) {
     std::cerr << "exv-ui main must pass packaged core and runtime paths into the managed core process\n";
     ++failures;
   }
@@ -87,7 +87,7 @@ int main() {
     ++failures;
   }
   if (contains(main_cpp,
-               "return ecnuvpn::platform::win32::ui_shell::"
+               "return exv::platform::win32::ui_shell::"
                "run_webview2_host(config);")) {
     std::cerr << "exv-ui main must not bypass run_ui_shell_window on Windows\n";
     ++failures;

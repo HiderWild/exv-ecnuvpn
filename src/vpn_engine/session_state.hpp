@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 // Stable session lifecycle phases for the native engine.
@@ -100,4 +100,4 @@ nlohmann::json tunnel_metadata_to_json(const TunnelMetadata &metadata);
 nlohmann::json session_state_to_json(const SessionState &state);
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

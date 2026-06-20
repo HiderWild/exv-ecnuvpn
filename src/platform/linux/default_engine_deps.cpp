@@ -2,7 +2,7 @@
 
 #include <memory>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 namespace {
@@ -98,4 +98,4 @@ NativeVpnEngineDependencies default_native_engine_dependencies() {
 }
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

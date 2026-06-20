@@ -218,7 +218,7 @@ Windows:
   SCM CreateService 指向 exv-helper.exe --service
 
 macOS:
-  写入 /Library/LaunchDaemons/com.ecnu.exv.helper.plist
+  写入 /Library/LaunchDaemons/com.exv.helper.plist
   plist 指向 /usr/local/bin/exv-helper --service
 ```
 
@@ -570,7 +570,7 @@ Electron UI
  -> osascript with administrator privileges
  -> exv service install
  -> copy/reexec stable /usr/local/bin/exv if needed
- -> write /Library/LaunchDaemons/com.ecnu.exv.helper.plist
+ -> write /Library/LaunchDaemons/com.exv.helper.plist
  -> launchctl bootstrap system plist
  -> /usr/local/bin/exv __helper-daemon
  -> helper::daemon_main()
@@ -769,7 +769,7 @@ Electron UI
  -> osascript with administrator privileges
  -> exv service install
  -> copy stable exv-helper to /usr/local/bin/exv-helper
- -> write /Library/LaunchDaemons/com.ecnu.exv.helper.plist
+ -> write /Library/LaunchDaemons/com.exv.helper.plist
  -> plist ProgramArguments:
       /usr/local/bin/exv-helper --service
  -> launchctl bootstrap system

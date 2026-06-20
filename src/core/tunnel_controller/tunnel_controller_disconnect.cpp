@@ -14,10 +14,10 @@ void TunnelController::Impl::do_disconnect(DisconnectReason reason) {
 
         stop_heartbeat();
 
-        // Stop the native engine session if it's running.
-        if (runner_.is_running()) {
-            runner_.stop();
-        }
+        // Always stop the native engine session. The monitor thread may have
+        // observed a clean packet-loop exit and flipped running_ to false
+        // while the session object still owns native resources.
+        runner_.stop();
 
         transition_to(TunnelPhase::Disconnecting);
         do_cleanup();
@@ -53,6 +53,7 @@ void TunnelController::Impl::shutdown_helper_session_for_cleanup() {
             delegated_ops->clear_session();
         }
         session_id_ = exv::helper::SessionId{};
+        assigned_internal_ip_.clear();
         network_config_applied_ = false;
         packet_loop_started_ = false;
         prepared_tunnel_device_.reset();

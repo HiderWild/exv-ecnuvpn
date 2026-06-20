@@ -1,4 +1,4 @@
-# ECNU-VPN Current Architecture
+# EXV Current Architecture
 
 > Date: 2026-06-14
 > Scope: helper/config contract pilot branch

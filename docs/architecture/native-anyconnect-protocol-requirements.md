@@ -134,7 +134,7 @@
 
 - 必须发送 `CONNECT /CSCOSSLC/tunnel HTTP/1.1`，并携带：
   - `Cookie: webvpn=<token>`
-  - 配置的 AnyConnect `User-Agent`（**不得** 再用硬编码 `ECNU-VPN Native`）
+  - 配置的 AnyConnect `User-Agent`（**不得** 再用硬编码 `EXV Native`）
   - `X-CSTP-Version: 1`、`X-CSTP-Hostname`、`X-CSTP-Address-Type: IPv6,IPv4`
   - `X-CSTP-Base-MTU`、`X-CSTP-MTU`（来自配置 MTU）
   - `X-CSTP-Accept-Encoding`（按是否支持压缩）

@@ -44,7 +44,7 @@ static void expect_true(bool condition, const char* message) {
     }
 }
 
-namespace ecnuvpn {
+namespace exv {
 namespace logger {
 
 void init() {}
@@ -59,7 +59,7 @@ void show_logs(int) {}
 std::vector<std::string> tail(int) { return {}; }
 
 } // namespace logger
-} // namespace ecnuvpn
+} // namespace exv
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -283,7 +283,7 @@ static bool handle_persistent_requests_win32(const std::string& pipe_name,
             CleanupLeaseSession session;
             session.session_id.value = "pipe-session";
             session.profile_id.value = "pipe-profile";
-            session.managed_resources.push_back({"adapter", "ECNU-VPN"});
+            session.managed_resources.push_back({"adapter", "EXV"});
             ecr.lease.sessions.push_back(session);
             json payload;
             to_json(payload, ecr);
@@ -549,7 +549,7 @@ static bool handle_persistent_requests_posix(const std::string& socket_path,
             CleanupLeaseSession session;
             session.session_id.value = "pipe-session";
             session.profile_id.value = "pipe-profile";
-            session.managed_resources.push_back({"adapter", "ECNU-VPN"});
+            session.managed_resources.push_back({"adapter", "EXV"});
             ecr.lease.sessions.push_back(session);
             json payload;
             to_json(payload, ecr);

@@ -9,7 +9,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn {
 namespace {
 
@@ -54,4 +54,4 @@ RuntimeStatusSnapshot read_runtime_status_snapshot(const Config &cfg,
 }
 
 } // namespace vpn
-} // namespace ecnuvpn
+} // namespace exv

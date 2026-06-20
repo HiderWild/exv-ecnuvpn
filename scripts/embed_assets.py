@@ -16,7 +16,7 @@ import sys
 SCRIPT_DIR = os.path.dirname(__file__)
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 OUTPUT = os.environ.get(
-    "ECNUVPN_WEBUI_ASSETS_OUTPUT",
+    "EXV_WEBUI_ASSETS_OUTPUT",
     os.path.join(REPO_ROOT, "build", "generated", "webui_assets.hpp"),
 )
 
@@ -37,7 +37,7 @@ TEXT_EXTENSIONS = {".html", ".css", ".js", ".json", ".svg"}
 
 
 def build_platform():
-    raw = (os.environ.get("ECNUVPN_BUILD_PLATFORM") or sys.platform).lower()
+    raw = (os.environ.get("EXV_BUILD_PLATFORM") or sys.platform).lower()
     mapping = {
         "win32": "windows",
         "windows": "windows",
@@ -52,7 +52,7 @@ def build_platform():
 def candidate_dist_dirs():
     candidates = []
 
-    override = os.environ.get("ECNUVPN_WEBUI_DIST_DIR")
+    override = os.environ.get("EXV_WEBUI_DIST_DIR")
     if override:
         candidates.append(os.path.abspath(override))
 
@@ -132,7 +132,7 @@ def generate_header(files):
     lines.append("#include <string_view>")
     lines.append("#include <unordered_map>")
     lines.append("")
-    lines.append("namespace ecnuvpn {")
+    lines.append("namespace exv {")
     lines.append("namespace webui_assets {")
     lines.append("")
 
@@ -223,7 +223,7 @@ def generate_header(files):
     lines.append("")
 
     lines.append("} // namespace webui_assets")
-    lines.append("} // namespace ecnuvpn")
+    lines.append("} // namespace exv")
     lines.append("")
     lines.append("#endif // EMBEDDED_ASSETS")
 

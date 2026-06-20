@@ -5,34 +5,34 @@
 #include <memory>
 #include <string>
 
-namespace ecnuvpn::platform::linux_ui_shell {
+namespace exv::platform::linux_ui_shell {
 std::string dispatch_webkitgtk_host_message(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core);
-ecnuvpn::ui_shell::WindowBounds webkitgtk_default_window_bounds() noexcept;
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window();
+    const exv::ui_shell::CoreRpcInvoker &invoke_core);
+exv::ui_shell::WindowBounds webkitgtk_default_window_bounds() noexcept;
+std::unique_ptr<exv::ui_shell::UiWindow> create_webkitgtk_window();
 }
 
 int main() {
   const auto default_bounds =
-      ecnuvpn::platform::linux_ui_shell::webkitgtk_default_window_bounds();
+      exv::platform::linux_ui_shell::webkitgtk_default_window_bounds();
   if (default_bounds.width !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+          exv::ui_shell::kElectronAdvancedWindowBounds.width ||
       default_bounds.height !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+          exv::ui_shell::kElectronAdvancedWindowBounds.height) {
     return 7;
   }
 
   bool invoked = false;
   bool request_valid = false;
   const std::string response =
-      ecnuvpn::platform::linux_ui_shell::dispatch_webkitgtk_host_message(
+      exv::platform::linux_ui_shell::dispatch_webkitgtk_host_message(
           R"({"id":9,"action":"status.get","payload":{}})",
-          [&](const ecnuvpn::ui_shell::CoreRpcRequest &request) {
+          [&](const exv::ui_shell::CoreRpcRequest &request) {
             invoked = true;
             request_valid =
                 request.request_id == "9" && request.action == "status.get";
-            ecnuvpn::ui_shell::CoreRpcResponse out;
+            exv::ui_shell::CoreRpcResponse out;
             out.id = 9;
             out.request_id = request.request_id;
             out.ok = true;
@@ -55,7 +55,7 @@ int main() {
     return 5;
   }
 
-  auto window = ecnuvpn::platform::linux_ui_shell::create_webkitgtk_window();
+  auto window = exv::platform::linux_ui_shell::create_webkitgtk_window();
   if (!window) {
     return 6;
   }

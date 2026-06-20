@@ -15,7 +15,7 @@ public:
   ConfigUseCases();
   explicit ConfigUseCases(std::string config_dir);
 
-  ecnuvpn::Config load_config();
+  exv::Config load_config();
   UseCaseResult get_config();
   UseCaseResult save_config(const nlohmann::json &payload);
   UseCaseResult get_profile(const nlohmann::json &payload);
@@ -38,10 +38,10 @@ public:
   UseCaseResult reset_key();
 
   UseCaseResult import_config(const nlohmann::json &payload);
-  UseCaseResult export_config();
+  UseCaseResult export_config(const nlohmann::json &payload = nlohmann::json::object());
 
 private:
-  ecnuvpn::config::ConfigManager manager_;
+  exv::config::ConfigManager manager_;
 };
 
 } // namespace exv::core

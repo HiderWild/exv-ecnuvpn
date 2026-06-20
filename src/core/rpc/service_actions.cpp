@@ -107,7 +107,7 @@ exv::core::UseCaseResult install_with_active_controller_handoff(
     }
 
     exv::helper::AcquireCoreLeaseRequest acquire;
-    acquire.core_pid = ecnuvpn::connection_attempt::current_process_id();
+    acquire.core_pid = exv::connection_attempt::current_process_id();
     acquire.purpose = "service.handoff";
     auto service_lease = service_client->acquire_core_lease(acquire);
     if (!service_lease.accepted || service_lease.lease_id.empty()) {
@@ -247,11 +247,11 @@ RpcResponse ServiceActions::uninstall_helper(const RpcRequest& req) {
             "vpn_session_active",
             "Disconnect the VPN session before uninstalling the helper service."));
     }
-    ecnuvpn::platform::BackendResolveOptions options;
+    exv::platform::BackendResolveOptions options;
     options.preferred_mode = "service";
     options.allow_oneshot = false;
     options.allow_service_start = false;
-    auto backend = ecnuvpn::platform::resolve_backend(options);
+    auto backend = exv::platform::resolve_backend(options);
     if (!backend.value("ok", false)) {
         return to_rpc_response(exv::core::UseCaseResult::fail(
             backend.value("code", std::string("helper_unavailable")),

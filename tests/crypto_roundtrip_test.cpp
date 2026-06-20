@@ -29,7 +29,7 @@ std::string trim_copy(const std::string &value) {
 
 } // namespace
 
-namespace ecnuvpn {
+namespace exv {
 namespace logger {
 
 void init() {}
@@ -102,35 +102,35 @@ std::string run_command_output(const std::string &) { return ""; }
 std::string shell_quote(const std::string &value) { return value; }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv
 
 int main() {
   bool ok = true;
 
   temp_root = std::filesystem::temp_directory_path() /
-              std::filesystem::path("ecnuvpn-crypto-roundtrip-test");
+              std::filesystem::path("exv-crypto-roundtrip-test");
   std::error_code ec;
   std::filesystem::remove_all(temp_root, ec);
   std::filesystem::create_directories(temp_root, ec);
 
-  std::string generated_key = ecnuvpn::crypto::generate_key();
-  ok = expect(ecnuvpn::crypto::validate_key(generated_key),
+  std::string generated_key = exv::crypto::generate_key();
+  ok = expect(exv::crypto::validate_key(generated_key),
               "generate_key should return a valid 64-character hex key") &&
        ok;
 
-  ok = expect(ecnuvpn::crypto::save_key(generated_key),
+  ok = expect(exv::crypto::save_key(generated_key),
               "save_key should persist a generated key") &&
        ok;
-  ok = expect(ecnuvpn::crypto::load_key() == generated_key,
+  ok = expect(exv::crypto::load_key() == generated_key,
               "load_key should roundtrip the saved key") &&
        ok;
 
   std::string ciphertext =
-      ecnuvpn::crypto::encrypt("vpn-secret", generated_key);
+      exv::crypto::encrypt("vpn-secret", generated_key);
   ok = expect(!ciphertext.empty(),
               "encrypt should produce ciphertext for a valid key") &&
        ok;
-  std::string decrypted = ecnuvpn::crypto::decrypt(ciphertext, generated_key);
+  std::string decrypted = exv::crypto::decrypt(ciphertext, generated_key);
   if (decrypted != "vpn-secret") {
     std::cerr << "decrypt mismatch: [" << decrypted << "] len="
               << decrypted.size() << std::endl;
@@ -139,12 +139,12 @@ int main() {
               "decrypt should recover the original plaintext") &&
        ok;
 
-  std::filesystem::remove(ecnuvpn::crypto::key_path(), ec);
-  std::string initialized_key = ecnuvpn::crypto::init_key_if_needed();
-  ok = expect(ecnuvpn::crypto::validate_key(initialized_key),
+  std::filesystem::remove(exv::crypto::key_path(), ec);
+  std::string initialized_key = exv::crypto::init_key_if_needed();
+  ok = expect(exv::crypto::validate_key(initialized_key),
               "init_key_if_needed should recreate a valid key when missing") &&
        ok;
-  ok = expect(std::filesystem::exists(ecnuvpn::crypto::key_path()),
+  ok = expect(std::filesystem::exists(exv::crypto::key_path()),
               "init_key_if_needed should recreate the key file") &&
        ok;
 

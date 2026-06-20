@@ -8,14 +8,14 @@
 
 #include <cstdlib>
 
-namespace ecnuvpn {
+namespace exv {
 namespace runtime {
 
 namespace {
 bool g_bootstrapped = false;
 
 std::string env_state_dir() {
-  const char *value = std::getenv("ECNUVPN_STATE_DIR");
+  const char *value = std::getenv("EXV_STATE_DIR");
   if (value && *value) {
     return std::string(value);
   }
@@ -68,4 +68,4 @@ RuntimePaths paths() {
 bool is_bootstrapped() { return g_bootstrapped; }
 
 } // namespace runtime
-} // namespace ecnuvpn
+} // namespace exv

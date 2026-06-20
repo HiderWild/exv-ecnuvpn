@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 std::string get_bundled_wintun_path() { return ""; }
-} // namespace ecnuvpn::platform
+} // namespace exv::platform
 
 namespace {
 
@@ -31,13 +31,13 @@ struct MockWintun {
   std::vector<std::string> *ops = nullptr;
 };
 
-ecnuvpn::platform::NativeWintunApi make_wintun_api(MockWintun &mock) {
-  ecnuvpn::platform::NativeWintunApi api;
+exv::platform::NativeWintunApi make_wintun_api(MockWintun &mock) {
+  exv::platform::NativeWintunApi api;
   api.open_adapter = [](const std::wstring &) {
-    return ecnuvpn::platform::NativeWintunApi::AdapterHandle{};
+    return exv::platform::NativeWintunApi::AdapterHandle{};
   };
   api.create_adapter = [&mock](const std::wstring &, const std::wstring &) {
-    return static_cast<ecnuvpn::platform::NativeWintunApi::AdapterHandle>(
+    return static_cast<exv::platform::NativeWintunApi::AdapterHandle>(
         &mock.adapter);
   };
   api.close_adapter = [&mock](auto) { ++mock.adapters_closed; };
@@ -51,7 +51,7 @@ ecnuvpn::platform::NativeWintunApi make_wintun_api(MockWintun &mock) {
   };
   api.start_session = [&mock](auto, std::uint32_t) {
     ++mock.sessions_started;
-    return static_cast<ecnuvpn::platform::NativeWintunApi::SessionHandle>(
+    return static_cast<exv::platform::NativeWintunApi::SessionHandle>(
         &mock.session);
   };
   api.end_session = [&mock](auto) { ++mock.sessions_ended; };
@@ -64,13 +64,13 @@ ecnuvpn::platform::NativeWintunApi make_wintun_api(MockWintun &mock) {
   return api;
 }
 
-ecnuvpn::platform::NativeWintunDependencies make_wintun_deps(
+exv::platform::NativeWintunDependencies make_wintun_deps(
     MockWintun &mock) {
-  ecnuvpn::platform::NativeWintunDependencies deps;
+  exv::platform::NativeWintunDependencies deps;
   deps.path_provider = [&mock] { return mock.dll_path; };
   deps.file_exists = [](const std::wstring &) { return true; };
   deps.api_loader = [&mock](const std::wstring &,
-                            ecnuvpn::platform::NativeWintunApi &api,
+                            exv::platform::NativeWintunApi &api,
                             std::string &) {
     api = make_wintun_api(mock);
     return true;
@@ -79,13 +79,13 @@ ecnuvpn::platform::NativeWintunDependencies make_wintun_deps(
 }
 
 struct MockIpHelper {
-  std::vector<ecnuvpn::platform::NativeUnicastAddress> addresses;
+  std::vector<exv::platform::NativeUnicastAddress> addresses;
   std::vector<int> mtus;
-  std::vector<ecnuvpn::platform::NativeIpRoute> routes;
-  std::vector<ecnuvpn::platform::NativeIpRoute> deleted_routes;
+  std::vector<exv::platform::NativeIpRoute> routes;
+  std::vector<exv::platform::NativeIpRoute> deleted_routes;
   std::vector<std::uint32_t> dns_read_interfaces;
-  std::vector<ecnuvpn::platform::NativeDnsSettings> dns_writes;
-  ecnuvpn::platform::NativeDnsSettings current_dns;
+  std::vector<exv::platform::NativeDnsSettings> dns_writes;
+  exv::platform::NativeDnsSettings current_dns;
   int fail_route_after = -1;
   std::uint32_t delete_route_error = 0;
   std::uint32_t get_dns_error = 0;
@@ -93,12 +93,12 @@ struct MockIpHelper {
   std::vector<std::string> *ops = nullptr;
 };
 
-ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
-  ecnuvpn::platform::NativeIpHelperApi api;
+exv::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
+  exv::platform::NativeIpHelperApi api;
   api.initialize_unicast_ip_address_entry =
-      [](ecnuvpn::platform::NativeUnicastAddress &) {};
+      [](exv::platform::NativeUnicastAddress &) {};
   api.create_unicast_ip_address_entry =
-      [&mock](const ecnuvpn::platform::NativeUnicastAddress &address) {
+      [&mock](const exv::platform::NativeUnicastAddress &address) {
         mock.addresses.push_back(address);
         return std::uint32_t{0};
       };
@@ -107,13 +107,13 @@ ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
     return std::uint32_t{0};
   };
   api.get_best_route2 =
-      [](const std::string &, ecnuvpn::platform::NativeBestRoute &route) {
+      [](const std::string &, exv::platform::NativeBestRoute &route) {
         route.interface_index = 7;
         route.next_hop = "192.0.2.1";
         return std::uint32_t{0};
       };
   api.create_ip_forward_entry2 =
-      [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
+      [&mock](const exv::platform::NativeIpRoute &route) {
         mock.routes.push_back(route);
         if (mock.ops)
           mock.ops->push_back("route:create");
@@ -124,7 +124,7 @@ ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
         return std::uint32_t{0};
       };
   api.delete_ip_forward_entry2 =
-      [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
+      [&mock](const exv::platform::NativeIpRoute &route) {
         mock.deleted_routes.push_back(route);
         if (mock.ops)
           mock.ops->push_back("route:delete");
@@ -132,7 +132,7 @@ ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
       };
   api.get_interface_dns_settings =
       [&mock](std::uint32_t interface_index,
-              ecnuvpn::platform::NativeDnsSettings &settings) {
+              exv::platform::NativeDnsSettings &settings) {
         mock.dns_read_interfaces.push_back(interface_index);
         if (mock.get_dns_error != 0)
           return mock.get_dns_error;
@@ -141,7 +141,7 @@ ecnuvpn::platform::NativeIpHelperApi make_ip_api(MockIpHelper &mock) {
       };
   api.set_interface_dns_settings =
       [&mock](std::uint32_t,
-              const ecnuvpn::platform::NativeDnsSettings &settings) {
+              const exv::platform::NativeDnsSettings &settings) {
         mock.dns_writes.push_back(settings);
         if (mock.ops)
           mock.ops->push_back("dns:set");
@@ -167,7 +167,7 @@ bool win32_platform_ops_apply_routes_and_cleanup_in_order() {
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   ok = expect(device.is_open, "prepare should prepare a Wintun adapter") && ok;
   ok = expect(!device.path.empty(), "prepare should return an opaque device path") &&
        ok;
@@ -225,7 +225,7 @@ bool win32_platform_ops_apply_dns_and_restore_on_cleanup() {
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -280,7 +280,7 @@ bool win32_platform_ops_reapply_refreshes_routes_without_overwriting_dns_origin(
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -335,7 +335,7 @@ bool win32_platform_ops_cleans_imported_resource_facts() {
     auto ops = exv::platform::create_win32_platform_network_ops(
         make_wintun_deps(wintun), make_ip_api(ip));
 
-    auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+    auto device = ops->prepare_tunnel_device("EXV", 1320);
     exv::platform::TunnelConfig config;
     config.interface_address = "10.255.0.10/24";
     config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -400,7 +400,7 @@ bool win32_platform_ops_rolls_back_routes_when_apply_fails() {
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -441,7 +441,7 @@ bool win32_platform_ops_rolls_back_routes_when_dns_apply_fails() {
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -474,7 +474,7 @@ bool win32_platform_ops_restores_dns_when_route_cleanup_fails() {
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -512,7 +512,7 @@ bool win32_platform_ops_treats_adapter_delete_failure_as_nonfatal_after_network_
   auto ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});

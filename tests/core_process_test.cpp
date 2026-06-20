@@ -15,8 +15,8 @@
 #include <memory>
 #include <string>
 
-#ifndef ECNUVPN_VERSION
-#define ECNUVPN_VERSION "test"
+#ifndef EXV_VERSION
+#define EXV_VERSION "test"
 #endif
 
 using json = nlohmann::json;
@@ -98,7 +98,7 @@ static void register_core_exclusive_actions(
         [](const RpcRequest&) -> RpcResponse {
             RpcResponse resp;
             json info;
-            info["version"] = ECNUVPN_VERSION;
+            info["version"] = EXV_VERSION;
             info["bootstrapped"] = false; // not bootstrapped in test
             resp.success = true;
             resp.payload_json = info.dump();
@@ -185,8 +185,8 @@ int main() {
 
         auto data = json::parse(resp.payload_json);
         ok = expect(data.contains("version"), "runtime.status should contain version") && ok;
-        ok = expect(data.value("version", "") == ECNUVPN_VERSION,
-                    "version should match ECNUVPN_VERSION") && ok;
+        ok = expect(data.value("version", "") == EXV_VERSION,
+                    "version should match EXV_VERSION") && ok;
     }
 
     // ---- Test 4: service.status delegates to service.helper_status ----

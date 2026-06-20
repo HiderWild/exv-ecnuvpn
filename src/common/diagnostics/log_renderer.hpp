@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ecnuvpn {
+namespace exv {
 
 // Compatibility RAII object that enables default logging for process scopes
 // which need stdout log events in addition to the file sink.
@@ -16,4 +16,4 @@ private:
   bool active_ = false;
 };
 
-} // namespace ecnuvpn
+} // namespace exv

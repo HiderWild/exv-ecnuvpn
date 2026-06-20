@@ -14,7 +14,7 @@
 #include <cstring>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -271,4 +271,4 @@ bool NativeUtun::running() const { return fd_ >= 0; }
 const NativeUtunMetadata &NativeUtun::metadata() const { return metadata_; }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

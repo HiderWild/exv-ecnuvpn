@@ -96,7 +96,7 @@ bool is_blank(const std::string &value) {
 }
 
 bool to_native_dns_settings(const DnsConfig &dns,
-                            ecnuvpn::platform::NativeDnsSettings *settings) {
+                            exv::platform::NativeDnsSettings *settings) {
   if (!settings)
     return false;
 
@@ -141,19 +141,19 @@ std::string join(const std::vector<std::string> &values, char delimiter) {
 }
 
 std::string encode_route_resource(
-    const ecnuvpn::platform::NativeIpRoute &route) {
+    const exv::platform::NativeIpRoute &route) {
   return route.cidr + "|" + route.destination + "|" +
          std::to_string(route.prefix_length) + "|" +
          std::to_string(route.interface_index) + "|" + route.next_hop + "|" +
          (route.server_bypass ? "1" : "0");
 }
 
-std::optional<ecnuvpn::platform::NativeIpRoute>
+std::optional<exv::platform::NativeIpRoute>
 decode_route_resource(const std::string &detail) {
   auto parts = split(detail, '|');
   if (parts.size() != 6)
     return std::nullopt;
-  ecnuvpn::platform::NativeIpRoute route;
+  exv::platform::NativeIpRoute route;
   route.cidr = parts[0];
   route.destination = parts[1];
   try {
@@ -172,12 +172,12 @@ decode_route_resource(const std::string &detail) {
 
 std::string encode_dns_resource(
     std::uint32_t interface_index,
-    const ecnuvpn::platform::NativeDnsSettings &settings) {
+    const exv::platform::NativeDnsSettings &settings) {
   return std::to_string(interface_index) + "|" + join(settings.servers, ',') +
          "|" + settings.search_domain + "|" + join(settings.suffixes, ',');
 }
 
-std::optional<std::pair<std::uint32_t, ecnuvpn::platform::NativeDnsSettings>>
+std::optional<std::pair<std::uint32_t, exv::platform::NativeDnsSettings>>
 decode_dns_resource(const std::string &detail) {
   auto parts = split(detail, '|');
   if (parts.size() != 4)
@@ -188,7 +188,7 @@ decode_dns_resource(const std::string &detail) {
   } catch (...) {
     return std::nullopt;
   }
-  ecnuvpn::platform::NativeDnsSettings settings;
+  exv::platform::NativeDnsSettings settings;
   if (!parts[1].empty())
     settings.servers = split(parts[1], ',');
   settings.search_domain = parts[2];
@@ -219,18 +219,18 @@ void remove_managed_resources_of_type(
 class Win32PlatformNetworkOps final : public PlatformNetworkOps {
 public:
   Win32PlatformNetworkOps(
-      ecnuvpn::platform::NativeWintunDependencies wintun_dependencies,
-      ecnuvpn::platform::NativeIpHelperApi ip_helper_api)
+      exv::platform::NativeWintunDependencies wintun_dependencies,
+      exv::platform::NativeIpHelperApi ip_helper_api)
       : wintun_dependencies_(std::move(wintun_dependencies)),
         ip_helper_api_(std::move(ip_helper_api)) {}
 
   TunnelDeviceDescriptor prepare_tunnel_device(const std::string &adapter_name,
                                                int mtu = 1400) override {
-    ecnuvpn::platform::NativeWintunConfig config;
+    exv::platform::NativeWintunConfig config;
     config.adapter_name_prefix =
-        widen_ascii(adapter_name.empty() ? "ECNU-VPN" : adapter_name);
+        widen_ascii(adapter_name.empty() ? "EXV" : adapter_name);
 
-    auto wintun = std::make_unique<ecnuvpn::platform::NativeWintun>(
+    auto wintun = std::make_unique<exv::platform::NativeWintun>(
         wintun_dependencies_, config);
     auto started = wintun->prepare_adapter();
     if (!started.ok()) {
@@ -240,7 +240,7 @@ public:
       descriptor.is_open = false;
       descriptor.error_code =
           std::string("native_wintun_") +
-          ecnuvpn::platform::native_wintun_error_code(started.error);
+          exv::platform::native_wintun_error_code(started.error);
       descriptor.error_message = started.detail.empty()
                                      ? "failed to start Wintun adapter"
                                      : started.detail;
@@ -298,7 +298,7 @@ public:
       if (!cleaned.ok()) {
         set_last_error(
             std::string("native_ip_config_") +
-                ecnuvpn::platform::native_ip_config_error_code(cleaned.error),
+                exv::platform::native_ip_config_error_code(cleaned.error),
             cleaned.message.empty() ? "native route cleanup failed"
                                     : cleaned.message,
             cleaned.target, cleaned.system_error);
@@ -308,7 +308,7 @@ public:
       remove_managed_resources_of_type(managed_resources_, "win32_route");
     }
 
-    ecnuvpn::platform::NativeDnsSettings desired_dns;
+    exv::platform::NativeDnsSettings desired_dns;
     const bool configure_dns = has_dns_config(config.dns);
     if (configure_dns) {
       if (!to_native_dns_settings(config.dns, &desired_dns)) {
@@ -323,10 +323,10 @@ public:
       }
     }
 
-    ecnuvpn::platform::NativeDnsSettings previous_dns;
+    exv::platform::NativeDnsSettings previous_dns;
     bool captured_original_dns = false;
     if (configure_dns && !dns_configured_) {
-      ecnuvpn::platform::NativeIpHelperApi::ErrorCode dns_error =
+      exv::platform::NativeIpHelperApi::ErrorCode dns_error =
           ip_helper_api_.get_interface_dns_settings(interface_index_,
                                                     previous_dns);
       if (dns_error != 0) {
@@ -337,7 +337,7 @@ public:
       captured_original_dns = true;
     }
 
-    ecnuvpn::vpn_engine::TunnelMetadata metadata;
+    exv::vpn_engine::TunnelMetadata metadata;
     metadata.interface_name = device.adapter_name;
     metadata.interface_index = static_cast<int>(interface_index_);
     metadata.internal_ip4_address = address;
@@ -347,18 +347,18 @@ public:
       metadata.routes.push_back(route.destination);
     metadata.server_bypass_ips = config.server_bypass_ips;
 
-    ecnuvpn::platform::NativeIpConfigOptions options;
+    exv::platform::NativeIpConfigOptions options;
     options.interface_index = interface_index_;
     options.configured_mtu = metadata.mtu;
     options.configure_address = !reapplying_network_config;
 
-    auto ip_config = std::make_unique<ecnuvpn::platform::NativeIpConfig>(
+    auto ip_config = std::make_unique<exv::platform::NativeIpConfig>(
         ip_helper_api_, options);
     auto result = ip_config->configure(metadata);
     if (!result.ok()) {
       set_last_error(
           std::string("native_ip_config_") +
-              ecnuvpn::platform::native_ip_config_error_code(result.error),
+              exv::platform::native_ip_config_error_code(result.error),
           result.message, result.target, result.system_error);
       auto rollback = ip_config->cleanup();
       if (!rollback.ok())
@@ -367,7 +367,7 @@ public:
     }
 
     if (configure_dns) {
-      ecnuvpn::platform::NativeIpHelperApi::ErrorCode dns_error =
+      exv::platform::NativeIpHelperApi::ErrorCode dns_error =
           ip_helper_api_.set_interface_dns_settings(interface_index_,
                                                     desired_dns);
       if (dns_error != 0) {
@@ -429,7 +429,7 @@ public:
         result.error_message = "native DNS settings API is missing";
         return result;
       }
-      ecnuvpn::platform::NativeIpHelperApi::ErrorCode dns_error =
+      exv::platform::NativeIpHelperApi::ErrorCode dns_error =
           ip_helper_api_.set_interface_dns_settings(interface_index_,
                                                     *original_dns_);
       if (dns_error != 0) {
@@ -530,9 +530,9 @@ public:
     if (policy == CleanupPolicy::Full) {
       auto adapter = first_resource_detail(resources, "adapter");
       if (adapter.has_value()) {
-        ecnuvpn::platform::NativeWintunConfig config;
+        exv::platform::NativeWintunConfig config;
         config.adapter_name_prefix = widen_ascii(*adapter);
-        auto wintun = std::make_unique<ecnuvpn::platform::NativeWintun>(
+        auto wintun = std::make_unique<exv::platform::NativeWintun>(
             wintun_dependencies_, config);
         auto started = wintun->prepare_adapter();
         if (!started.ok()) {
@@ -571,11 +571,11 @@ private:
     last_error_.system_error = system_error;
   }
 
-  ecnuvpn::platform::NativeWintunDependencies wintun_dependencies_;
-  ecnuvpn::platform::NativeIpHelperApi ip_helper_api_;
-  std::unique_ptr<ecnuvpn::platform::NativeWintun> wintun_;
-  std::unique_ptr<ecnuvpn::platform::NativeIpConfig> ip_config_;
-  std::optional<ecnuvpn::platform::NativeDnsSettings> original_dns_;
+  exv::platform::NativeWintunDependencies wintun_dependencies_;
+  exv::platform::NativeIpHelperApi ip_helper_api_;
+  std::unique_ptr<exv::platform::NativeWintun> wintun_;
+  std::unique_ptr<exv::platform::NativeIpConfig> ip_config_;
+  std::optional<exv::platform::NativeDnsSettings> original_dns_;
   TunnelDeviceDescriptor last_device_;
   std::uint32_t interface_index_ = 0;
   bool dns_configured_ = false;
@@ -587,13 +587,13 @@ private:
 
 std::unique_ptr<PlatformNetworkOps> create_win32_platform_network_ops() {
   return create_win32_platform_network_ops(
-      ecnuvpn::platform::default_native_wintun_dependencies(),
-      ecnuvpn::platform::default_native_ip_helper_api());
+      exv::platform::default_native_wintun_dependencies(),
+      exv::platform::default_native_ip_helper_api());
 }
 
 std::unique_ptr<PlatformNetworkOps> create_win32_platform_network_ops(
-    ecnuvpn::platform::NativeWintunDependencies wintun_dependencies,
-    ecnuvpn::platform::NativeIpHelperApi ip_helper_api) {
+    exv::platform::NativeWintunDependencies wintun_dependencies,
+    exv::platform::NativeIpHelperApi ip_helper_api) {
   return std::make_unique<Win32PlatformNetworkOps>(
       std::move(wintun_dependencies), std::move(ip_helper_api));
 }

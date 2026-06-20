@@ -27,7 +27,7 @@ bool is_auth_failure_code(const std::string& code) {
 
 CoreSessionRunner::CoreSessionRunner()
     : CoreSessionRunner([] {
-          return ecnuvpn::vpn_engine::default_native_engine_dependencies();
+          return exv::vpn_engine::default_native_engine_dependencies();
       }) {}
 
 CoreSessionRunner::CoreSessionRunner(NativeDependenciesFactory deps_factory)
@@ -37,14 +37,14 @@ CoreSessionRunner::~CoreSessionRunner() {
     stop();
 }
 
-bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
+bool CoreSessionRunner::start(const exv::Config& cfg,
                               const std::string& password) {
     std::unique_lock<std::mutex> lock(mu_);
 
     if (running_) return false;
 
     // Build VpnEngineConfig from the application Config at the core boundary.
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
+    exv::vpn_engine::VpnEngineConfig engine_config;
     auto config_result =
         make_native_engine_config(cfg, password, &engine_config);
     if (!config_result.ok) return false;
@@ -73,15 +73,15 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
     // Create NativeVpnEngineSession with default dependencies and the bridge
     // as the event sink.
     auto deps = deps_factory_ ? deps_factory_()
-                              : ecnuvpn::vpn_engine::default_native_engine_dependencies();
+                              : exv::vpn_engine::default_native_engine_dependencies();
     deps.event_sink = bridge_.get();
     deps.network_configurator = network_config_callback_;
     deps.auth_interaction_handler =
-        [this](const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& req) {
+        [this](const exv::vpn_engine::protocol::AuthInteractionRequest& req) {
             return handle_auth_interaction(req);
         };
 
-    session_ = std::make_unique<ecnuvpn::vpn_engine::NativeVpnEngineSession>(
+    session_ = std::make_unique<exv::vpn_engine::NativeVpnEngineSession>(
         engine_config, deps);
 
     // Unlock before calling session_->start() because it runs auth + CSTP
@@ -98,7 +98,7 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
     lock.lock();
     if (!validation.ok) {
         cached_status_ = session_ ? session_->status()
-                                  : ecnuvpn::vpn_engine::VpnEngineStatus{};
+                                  : exv::vpn_engine::VpnEngineStatus{};
         if (cached_status_.error_code.empty())
             cached_status_.error_code = validation.code;
         if (cached_status_.error_message.empty())
@@ -137,8 +137,8 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
 }
 
 bool CoreSessionRunner::start_from_handshake(
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_config,
-    ecnuvpn::vpn_engine::NativeHandshakeResult handshake) {
+    exv::vpn_engine::VpnEngineConfig engine_config,
+    exv::vpn_engine::NativeHandshakeResult handshake) {
     std::unique_lock<std::mutex> lock(mu_);
 
     if (running_) return false;
@@ -158,24 +158,24 @@ bool CoreSessionRunner::start_from_handshake(
         });
 
     auto deps = deps_factory_ ? deps_factory_()
-                              : ecnuvpn::vpn_engine::default_native_engine_dependencies();
+                              : exv::vpn_engine::default_native_engine_dependencies();
     deps.event_sink = bridge_.get();
     deps.auth_interaction_handler =
-        [this](const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& req) {
+        [this](const exv::vpn_engine::protocol::AuthInteractionRequest& req) {
             return handle_auth_interaction(req);
         };
 
     auto network_config_callback = network_config_callback_;
 
-    session_ = std::make_unique<ecnuvpn::vpn_engine::NativeVpnEngineSession>(
+    session_ = std::make_unique<exv::vpn_engine::NativeVpnEngineSession>(
         std::move(engine_config), deps);
 
     lock.unlock();
 
-    ecnuvpn::vpn_engine::TunnelMetadata metadata;
+    exv::vpn_engine::TunnelMetadata metadata;
     auto validation = session_->adopt_handshake(std::move(handshake), &metadata);
     if (validation.ok) {
-        ecnuvpn::vpn_engine::DeviceConfig device_config;
+        exv::vpn_engine::DeviceConfig device_config;
         device_config.interface_name = metadata.interface_name;
         device_config.mtu = metadata.mtu;
         if (network_config_callback) {
@@ -196,7 +196,7 @@ bool CoreSessionRunner::start_from_handshake(
     lock.lock();
     if (!validation.ok) {
         cached_status_ = session_ ? session_->status()
-                                  : ecnuvpn::vpn_engine::VpnEngineStatus{};
+                                  : exv::vpn_engine::VpnEngineStatus{};
         if (cached_status_.error_code.empty())
             cached_status_.error_code = validation.code;
         if (cached_status_.error_message.empty())
@@ -273,7 +273,7 @@ void CoreSessionRunner::start_monitor_thread() {
 }
 
 void CoreSessionRunner::stop() {
-    std::unique_ptr<ecnuvpn::vpn_engine::NativeVpnEngineSession> session;
+    std::unique_ptr<exv::vpn_engine::NativeVpnEngineSession> session;
 
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -302,7 +302,7 @@ bool CoreSessionRunner::is_running() const {
     return running_;
 }
 
-ecnuvpn::vpn_engine::VpnEngineStatus CoreSessionRunner::status() const {
+exv::vpn_engine::VpnEngineStatus CoreSessionRunner::status() const {
     std::lock_guard<std::mutex> lock(mu_);
     if (session_) {
         return session_->status();
@@ -339,9 +339,9 @@ void CoreSessionRunner::set_network_config_callback(NetworkConfigCallback cb) {
     network_config_callback_ = std::move(cb);
 }
 
-ecnuvpn::vpn_engine::protocol::AuthInteractionResponse
+exv::vpn_engine::protocol::AuthInteractionResponse
 CoreSessionRunner::handle_auth_interaction(
-    const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& request) {
+    const exv::vpn_engine::protocol::AuthInteractionRequest& request) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         pending_auth_interaction_ = PendingAuthInteraction{
@@ -359,7 +359,7 @@ CoreSessionRunner::handle_auth_interaction(
                     auth_interaction_response_->id == request.id);
         });
 
-    ecnuvpn::vpn_engine::protocol::AuthInteractionResponse response;
+    exv::vpn_engine::protocol::AuthInteractionResponse response;
     if (!answered || !pending_auth_interaction_ || !auth_interaction_response_) {
         pending_auth_interaction_.reset();
         auth_interaction_response_.reset();

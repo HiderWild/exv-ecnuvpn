@@ -16,7 +16,7 @@ std::string state_leaf(const std::string& state_dir, const char* file_name) {
 std::string ipc_protocol_name() { return "ipc-v1"; }
 
 std::string core_ipc_path() {
-    return core_ipc_path(ecnuvpn::runtime::paths().state_dir);
+    return core_ipc_path(exv::runtime::paths().state_dir);
 }
 
 std::string core_ipc_path(const std::string& state_dir) {
@@ -29,7 +29,7 @@ std::string core_ipc_path(const std::string& state_dir) {
 }
 
 std::string core_lock_path() {
-    return core_lock_path(ecnuvpn::runtime::paths().state_dir);
+    return core_lock_path(exv::runtime::paths().state_dir);
 }
 
 std::string core_lock_path(const std::string& state_dir) {
@@ -37,7 +37,7 @@ std::string core_lock_path(const std::string& state_dir) {
 }
 
 std::string core_registry_path() {
-    return core_registry_path(ecnuvpn::runtime::paths().state_dir);
+    return core_registry_path(exv::runtime::paths().state_dir);
 }
 
 std::string core_registry_path(const std::string& state_dir) {

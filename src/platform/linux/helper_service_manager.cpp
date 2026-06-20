@@ -14,7 +14,7 @@
 #include <iostream>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -78,7 +78,7 @@ int install_helper_service(const std::string &executable_path,
     return 1;
   }
   ofs << "[Unit]\n";
-  ofs << "Description=ECNU VPN Helper Daemon\n";
+  ofs << "Description=EXV Helper Daemon\n";
   ofs << "After=network.target\n\n";
   ofs << "[Service]\n";
   ofs << "Type=simple\n";
@@ -166,4 +166,4 @@ int show_helper_service_status(const HelperServiceManagerContext &context) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 
 std::string expand_home(const std::string &path);
 std::string get_redirect_path();
@@ -28,4 +28,4 @@ unsigned int get_runtime_owner_gid();
 bool sync_owner(const std::string &path);
 bool fix_runtime_config_dir_ownership();
 
-} // namespace ecnuvpn::platform
+} // namespace exv::platform

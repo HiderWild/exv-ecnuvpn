@@ -21,17 +21,17 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
   return result;
 }
 
-ecnuvpn::vpn_engine::TunnelMetadata metadata() {
-  ecnuvpn::vpn_engine::TunnelMetadata meta;
+exv::vpn_engine::TunnelMetadata metadata() {
+  exv::vpn_engine::TunnelMetadata meta;
   meta.internal_ip4_address = "10.255.0.10";
   meta.internal_ip4_netmask = "255.255.255.0";
   meta.mtu = 1400;
@@ -41,21 +41,21 @@ ecnuvpn::vpn_engine::TunnelMetadata metadata() {
 }
 
 struct MockState {
-  ecnuvpn::platform::NativeUtunStartResult start_result;
-  ecnuvpn::platform::NativeDarwinRouteConfigResult configure_result;
-  ecnuvpn::platform::NativeDarwinRouteConfigResult cleanup_result;
-  std::vector<ecnuvpn::platform::NativeDarwinRouteConfigResult>
+  exv::platform::NativeUtunStartResult start_result;
+  exv::platform::NativeDarwinRouteConfigResult configure_result;
+  exv::platform::NativeDarwinRouteConfigResult cleanup_result;
+  std::vector<exv::platform::NativeDarwinRouteConfigResult>
       cleanup_results;
-  ecnuvpn::vpn_engine::ValidationResult read_result;
-  ecnuvpn::vpn_engine::ValidationResult write_result;
+  exv::vpn_engine::ValidationResult read_result;
+  exv::vpn_engine::ValidationResult write_result;
 
   int utun_starts = 0;
   int utun_stops = 0;
   int route_configures = 0;
   int route_cleanups = 0;
-  ecnuvpn::vpn_engine::TunnelMetadata utun_factory_metadata;
-  ecnuvpn::platform::NativeUtunMetadata route_factory_metadata;
-  ecnuvpn::vpn_engine::TunnelMetadata configured_metadata;
+  exv::vpn_engine::TunnelMetadata utun_factory_metadata;
+  exv::platform::NativeUtunMetadata route_factory_metadata;
+  exv::vpn_engine::TunnelMetadata configured_metadata;
   std::vector<std::vector<std::uint8_t>> incoming_frames;
   std::vector<std::vector<std::uint8_t>> written_frames;
   std::vector<std::string> events;
@@ -63,12 +63,12 @@ struct MockState {
 };
 
 class FakeUtunSession final
-    : public ecnuvpn::platform::NativePacketDeviceUtunSession {
+    : public exv::platform::NativePacketDeviceUtunSession {
 public:
   explicit FakeUtunSession(std::shared_ptr<MockState> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::platform::NativeUtunStartResult start() override {
+  exv::platform::NativeUtunStartResult start() override {
     ++state_->utun_starts;
     state_->events.push_back("utun_start");
     if (state_->start_result.ok())
@@ -76,7 +76,7 @@ public:
     return state_->start_result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_frame(std::vector<std::uint8_t> *frame) override {
     if (!state_->running)
       return invalid("packet_device_closed", "packet device is closed");
@@ -90,7 +90,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_frame(const std::vector<std::uint8_t> &frame) override {
     if (!state_->running)
       return invalid("packet_device_closed", "packet device is closed");
@@ -113,20 +113,20 @@ private:
 };
 
 class FakeRouteConfig final
-    : public ecnuvpn::platform::NativePacketDeviceRouteConfig {
+    : public exv::platform::NativePacketDeviceRouteConfig {
 public:
   explicit FakeRouteConfig(std::shared_ptr<MockState> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::platform::NativeDarwinRouteConfigResult
-  configure(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::platform::NativeDarwinRouteConfigResult
+  configure(const exv::vpn_engine::TunnelMetadata &metadata) override {
     ++state_->route_configures;
     state_->events.push_back("route_configure");
     state_->configured_metadata = metadata;
     return state_->configure_result;
   }
 
-  ecnuvpn::platform::NativeDarwinRouteConfigResult cleanup() override {
+  exv::platform::NativeDarwinRouteConfigResult cleanup() override {
     const std::size_t cleanup_index =
         static_cast<std::size_t>(state_->route_cleanups);
     ++state_->route_cleanups;
@@ -140,21 +140,21 @@ private:
   std::shared_ptr<MockState> state_;
 };
 
-ecnuvpn::platform::NativePacketDeviceDependencies
+exv::platform::NativePacketDeviceDependencies
 dependencies(std::shared_ptr<MockState> state) {
-  ecnuvpn::platform::NativePacketDeviceDependencies deps;
+  exv::platform::NativePacketDeviceDependencies deps;
   deps.create_utun_session =
-      [state](const ecnuvpn::vpn_engine::TunnelMetadata &metadata) {
+      [state](const exv::vpn_engine::TunnelMetadata &metadata) {
         state->utun_factory_metadata = metadata;
         return std::unique_ptr<
-            ecnuvpn::platform::NativePacketDeviceUtunSession>(
+            exv::platform::NativePacketDeviceUtunSession>(
             new FakeUtunSession(state));
       };
   deps.create_route_config =
-      [state](const ecnuvpn::platform::NativeUtunMetadata &metadata) {
+      [state](const exv::platform::NativeUtunMetadata &metadata) {
         state->route_factory_metadata = metadata;
         return std::unique_ptr<
-            ecnuvpn::platform::NativePacketDeviceRouteConfig>(
+            exv::platform::NativePacketDeviceRouteConfig>(
             new FakeRouteConfig(state));
       };
   return deps;
@@ -176,9 +176,9 @@ struct TestNativeUtunState {
   std::string interface_name = "utun-test";
 };
 
-ecnuvpn::platform::NativeUtunApi
+exv::platform::NativeUtunApi
 test_utun_api(std::shared_ptr<TestNativeUtunState> state) {
-  ecnuvpn::platform::NativeUtunApi api;
+  exv::platform::NativeUtunApi api;
   api.open_socket = [state](int, int, int) { return state->fd; };
   api.resolve_control_id =
       [](int, const std::string &, std::uint32_t &control_id) {
@@ -235,9 +235,9 @@ std::ptrdiff_t next_ptrdiff_result(const std::vector<std::ptrdiff_t> &values,
   return offset < values.size() ? values[offset] : default_value;
 }
 
-ecnuvpn::platform::NativeDarwinPacketIoApi
+exv::platform::NativeDarwinPacketIoApi
 test_packet_io_api(std::shared_ptr<TestPacketIoState> state) {
-  ecnuvpn::platform::NativeDarwinPacketIoApi api;
+  exv::platform::NativeDarwinPacketIoApi api;
   api.set_nonblocking_fd = [state](int) {
     ++state->set_nonblocking_calls;
     return 0;
@@ -297,7 +297,7 @@ test_packet_io_api(std::shared_ptr<TestPacketIoState> state) {
 
 bool open_starts_utun_and_configures_darwin_routes() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
 
@@ -332,7 +332,7 @@ bool packet_io_strips_and_adds_utun_address_family_header() {
   auto state = make_state();
   state->incoming_frames.push_back(
       {0x00, 0x00, 0x00, 0x02, 0x45, 0x00, 0x00, 0x2a});
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto opened = device.open(metadata());
   std::vector<std::uint8_t> packet;
@@ -367,7 +367,7 @@ bool packet_io_strips_and_adds_utun_address_family_header() {
 
 bool closed_device_rejects_packet_io() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
   std::vector<std::uint8_t> packet;
 
   auto read_before_open = device.read_packet(&packet);
@@ -396,7 +396,7 @@ bool closed_device_rejects_packet_io() {
 bool invalid_utun_frames_return_stable_errors() {
   auto short_state = make_state();
   short_state->incoming_frames.push_back({0x00, 0x00, 0x00});
-  ecnuvpn::platform::NativePacketDevice short_device(
+  exv::platform::NativePacketDevice short_device(
       dependencies(short_state));
   auto short_opened = short_device.open(metadata());
   std::vector<std::uint8_t> packet;
@@ -405,7 +405,7 @@ bool invalid_utun_frames_return_stable_errors() {
   auto family_state = make_state();
   family_state->incoming_frames.push_back(
       {0x00, 0x00, 0x00, 0x63, 0x45, 0x00});
-  ecnuvpn::platform::NativePacketDevice family_device(
+  exv::platform::NativePacketDevice family_device(
       dependencies(family_state));
   auto family_opened = family_device.open(metadata());
   auto family_read = family_device.read_packet(&packet);
@@ -428,7 +428,7 @@ bool invalid_utun_frames_return_stable_errors() {
 
 bool invalid_packets_return_stable_write_errors() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
   auto opened = device.open(metadata());
 
   auto empty = device.write_packet({});
@@ -455,7 +455,7 @@ bool utun_read_write_failures_are_propagated() {
       invalid("darwin_utun_read_failed", "failed to read utun frame");
   state->write_result =
       invalid("darwin_utun_write_failed", "failed to write utun frame");
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
   auto opened = device.open(metadata());
 
   std::vector<std::uint8_t> packet;
@@ -482,7 +482,7 @@ bool real_utun_read_timeout_returns_retryable_no_data() {
   auto io_state = std::make_shared<TestPacketIoState>();
   io_state->readable_results = {0};
 
-  auto session = ecnuvpn::platform::create_native_darwin_utun_packet_session(
+  auto session = exv::platform::create_native_darwin_utun_packet_session(
       metadata(), test_utun_api(utun_state), test_packet_io_api(io_state));
 
   auto started = session->start();
@@ -512,7 +512,7 @@ bool real_utun_read_transients_are_retryable() {
   eintr_io->read_results = {-1};
   eintr_io->read_errors = {EINTR};
   auto eintr_session =
-      ecnuvpn::platform::create_native_darwin_utun_packet_session(
+      exv::platform::create_native_darwin_utun_packet_session(
           metadata(), test_utun_api(eintr_utun),
           test_packet_io_api(eintr_io));
 
@@ -527,7 +527,7 @@ bool real_utun_read_transients_are_retryable() {
   eagain_io->read_results = {-1};
   eagain_io->read_errors = {EAGAIN};
   auto eagain_session =
-      ecnuvpn::platform::create_native_darwin_utun_packet_session(
+      exv::platform::create_native_darwin_utun_packet_session(
           metadata(), test_utun_api(eagain_utun),
           test_packet_io_api(eagain_io));
 
@@ -555,7 +555,7 @@ bool real_utun_write_retries_eintr_and_partial_writes() {
   io_state->write_results = {-1, 2, 3};
   io_state->write_errors = {EINTR};
 
-  auto session = ecnuvpn::platform::create_native_darwin_utun_packet_session(
+  auto session = exv::platform::create_native_darwin_utun_packet_session(
       metadata(), test_utun_api(utun_state), test_packet_io_api(io_state));
 
   auto started = session->start();
@@ -582,38 +582,38 @@ bool real_utun_write_retries_eintr_and_partial_writes() {
 bool route_cleanup_retry_uses_stable_configured_utun_index() {
   struct RouteMock {
     std::uint32_t resolved_index = 321;
-    std::vector<ecnuvpn::platform::NativeDarwinRoute> added_routes;
-    std::vector<ecnuvpn::platform::NativeDarwinRoute> deleted_routes;
+    std::vector<exv::platform::NativeDarwinRoute> added_routes;
+    std::vector<exv::platform::NativeDarwinRoute> deleted_routes;
   } mock;
 
-  ecnuvpn::platform::NativeDarwinRouteApi api;
+  exv::platform::NativeDarwinRouteApi api;
   api.set_interface_mtu = [](const std::string &, int) { return 0; };
   api.get_best_route =
       [](const std::string &,
-         ecnuvpn::platform::NativeDarwinUpstreamRoute &) { return 0; };
-  api.add_route = [&mock](const ecnuvpn::platform::NativeDarwinRoute &route) {
+         exv::platform::NativeDarwinUpstreamRoute &) { return 0; };
+  api.add_route = [&mock](const exv::platform::NativeDarwinRoute &route) {
     mock.added_routes.push_back(route);
     return 0;
   };
   api.delete_route =
-      [&mock](const ecnuvpn::platform::NativeDarwinRoute &route) {
+      [&mock](const exv::platform::NativeDarwinRoute &route) {
         mock.deleted_routes.push_back(route);
         return 0;
       };
   api.interface_index_from_name =
       [&mock](const std::string &) { return mock.resolved_index; };
 
-  ecnuvpn::platform::NativeDarwinRouteConfigOptions opts;
+  exv::platform::NativeDarwinRouteConfigOptions opts;
   opts.interface_name = "utun42";
   opts.configured_mtu = 1400;
 
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.interface_name = "utun42";
   meta.interface_index = -1;
   meta.routes = {"59.78.176.0/20"};
   meta.server_bypass_ips.clear();
 
-  ecnuvpn::platform::NativeDarwinRouteConfig config(api, opts);
+  exv::platform::NativeDarwinRouteConfig config(api, opts);
   auto configured = config.configure(meta);
   mock.resolved_index = 0;
   auto cleaned = config.cleanup();
@@ -638,10 +638,10 @@ bool route_cleanup_retry_uses_stable_configured_utun_index() {
 bool route_config_failure_cleans_up_partial_open() {
   auto state = make_state();
   state->configure_result.error =
-      ecnuvpn::platform::NativeDarwinRouteConfigError::route_add_failed;
+      exv::platform::NativeDarwinRouteConfigError::route_add_failed;
   state->configure_result.message = "route failed";
   state->configure_result.target = "59.78.176.0/20";
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
 
@@ -667,7 +667,7 @@ bool route_config_failure_cleans_up_partial_open() {
 
 bool close_cleans_routes_before_utun_and_is_idempotent() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
   auto opened = device.open(metadata());
   device.close();
   device.close();
@@ -690,9 +690,9 @@ bool close_cleans_routes_before_utun_and_is_idempotent() {
 bool close_cleanup_failure_keeps_cleanup_retry_available() {
   auto state = make_state();
   state->cleanup_result.error =
-      ecnuvpn::platform::NativeDarwinRouteConfigError::route_delete_failed;
+      exv::platform::NativeDarwinRouteConfigError::route_delete_failed;
   state->cleanup_result.message = "delete failed";
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto opened = device.open(metadata());
   device.close();
@@ -717,12 +717,12 @@ bool close_cleanup_failure_keeps_cleanup_retry_available() {
 
 bool successful_close_retry_clears_cleanup_state() {
   auto state = make_state();
-  ecnuvpn::platform::NativeDarwinRouteConfigResult cleanup_failure;
+  exv::platform::NativeDarwinRouteConfigResult cleanup_failure;
   cleanup_failure.error =
-      ecnuvpn::platform::NativeDarwinRouteConfigError::route_delete_failed;
+      exv::platform::NativeDarwinRouteConfigError::route_delete_failed;
   cleanup_failure.message = "delete failed";
   state->cleanup_results = {cleanup_failure, {}};
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto opened = device.open(metadata());
   device.close();
@@ -749,15 +749,15 @@ bool successful_close_retry_clears_cleanup_state() {
 bool open_rollback_cleanup_failure_is_reported_and_retryable() {
   auto state = make_state();
   state->configure_result.error =
-      ecnuvpn::platform::NativeDarwinRouteConfigError::route_add_failed;
+      exv::platform::NativeDarwinRouteConfigError::route_add_failed;
   state->configure_result.message = "route failed";
-  ecnuvpn::platform::NativeDarwinRouteConfigResult cleanup_failure;
+  exv::platform::NativeDarwinRouteConfigResult cleanup_failure;
   cleanup_failure.error =
-      ecnuvpn::platform::NativeDarwinRouteConfigError::route_delete_failed;
+      exv::platform::NativeDarwinRouteConfigError::route_delete_failed;
   cleanup_failure.message = "delete failed";
   cleanup_failure.target = "59.78.176.0/20";
   state->cleanup_results = {cleanup_failure, {}};
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
   device.close();
@@ -791,9 +791,9 @@ bool open_rollback_cleanup_failure_is_reported_and_retryable() {
 bool utun_start_failure_skips_route_config() {
   auto state = make_state();
   state->start_result.error =
-      ecnuvpn::platform::NativeUtunError::socket_open_failed;
+      exv::platform::NativeUtunError::socket_open_failed;
   state->start_result.detail = "socket failed";
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
 

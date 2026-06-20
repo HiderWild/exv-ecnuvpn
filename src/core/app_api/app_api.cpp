@@ -3,7 +3,7 @@
 #include "core/app_api/desktop_action_registry.hpp"
 #include "core/tunnel_controller/tunnel_controller_active.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 nlohmann::json handle_action(const std::string &action,
@@ -16,4 +16,4 @@ bool is_tunnel_controller_active() {
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

@@ -5,7 +5,7 @@
 #include <functional>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace helper {
 class IpcServer;
 } // namespace helper
@@ -60,4 +60,4 @@ void dispatch_request_background(
                                   const nlohmann::json &)> handler);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

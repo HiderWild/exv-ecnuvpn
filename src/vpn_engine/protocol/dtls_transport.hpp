@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -34,4 +34,4 @@ classify_dtls_negotiation(const DtlsNegotiationInput &input);
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

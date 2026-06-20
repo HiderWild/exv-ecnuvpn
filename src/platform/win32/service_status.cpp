@@ -1,23 +1,43 @@
 #include "platform/common/service_status.hpp"
+#include "platform/common/helper_platform.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
+namespace {
+
+std::string normalize_windows_path_for_compare(std::string path) {
+  std::replace(path.begin(), path.end(), '/', '\\');
+  std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return std::filesystem::path(path).lexically_normal().string();
+}
+
+bool same_windows_path(const std::string &left, const std::string &right) {
+  return normalize_windows_path_for_compare(left) ==
+         normalize_windows_path_for_compare(right);
+}
+
+} // namespace
 
 ServiceStatusSnapshot current_service_status() {
+  const auto &config = helper_platform_config();
   ServiceStatusSnapshot status;
-  status.mode = "windows-service";
-  status.path = "C:\\Program Files\\ECNU-VPN\\exv-helper.exe";
-  status.endpoint = "\\\\.\\pipe\\exv-helper";
-  status.label = "exv-helper";
+  status.mode = config.service_mode;
+  status.path = config.default_service_binary_path;
+  status.endpoint = config.endpoint;
+  status.label = config.service_label;
   status.capabilities = nlohmann::json{{"service_mode", true},
                                        {"oneshot_mode", true},
                                        {"temporary_connect", true},
@@ -32,7 +52,7 @@ ServiceStatusSnapshot current_service_status() {
   }
 
   SC_HANDLE svc = OpenServiceA(
-      scm, "exv-helper", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+      scm, config.service_name, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
   status.installed = (svc != NULL);
   if (!svc) {
     status.running = false;
@@ -74,7 +94,13 @@ ServiceStatusSnapshot current_service_status() {
   status.available = status.running;
   if (status.installed && !status.path.empty()) {
     std::filesystem::path service_path(status.path);
-    if (!std::filesystem::exists(service_path)) {
+    if (!same_windows_path(status.path, config.default_service_binary_path)) {
+      status.available = false;
+      status.warning =
+          "Helper service is registered, but it points to an old helper "
+          "binary path. Reinstall the helper service from the desktop app.";
+      status.capabilities["service_mode"] = false;
+    } else if (!std::filesystem::exists(service_path)) {
       status.available = false;
       status.warning =
           "Helper service is registered, but the installed helper binary is "
@@ -86,4 +112,4 @@ ServiceStatusSnapshot current_service_status() {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

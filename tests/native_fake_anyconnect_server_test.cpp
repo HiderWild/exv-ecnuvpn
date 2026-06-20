@@ -23,7 +23,7 @@ std::vector<std::uint8_t> bytes(std::initializer_list<std::uint8_t> values) {
 }
 
 bool contains_event(
-    const ecnuvpn::tests::support::RecordingEventSink &events,
+    const exv::tests::support::RecordingEventSink &events,
     const std::string &type) {
   for (const auto &event : events.events()) {
     if (event.type == type)
@@ -49,7 +49,7 @@ std::string fixture_text(const std::filesystem::path &relative) {
 }
 
 bool test_password_auth_success() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -65,7 +65,7 @@ bool test_password_auth_success() {
 }
 
 bool test_password_auth_failure() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -89,7 +89,7 @@ bool test_password_auth_failure() {
 }
 
 bool test_cstp_connect_success() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -97,7 +97,7 @@ bool test_cstp_connect_success() {
   const auto auth = server.password_authenticate(FakeAnyConnectCredentials{});
   ok = expect(auth.ok, "auth should succeed before CSTP connect") && ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   const auto connected = server.connect_cstp(auth.cookie, &metadata);
   ok = expect(connected.ok, "CSTP connect should succeed with auth cookie") && ok;
   ok = expect(metadata.interface_name == "fake-cstp0",
@@ -116,7 +116,7 @@ bool test_cstp_connect_success() {
 }
 
 bool test_packet_echo() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -147,7 +147,7 @@ bool test_packet_echo() {
 }
 
 bool test_server_close_during_packet_loop() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
 
@@ -168,7 +168,7 @@ bool test_server_close_during_packet_loop() {
   ok = expect(result.result.code == "transport_closed",
               "server close should surface transport_closed") &&
        ok;
-  ok = expect(result.state.phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+  ok = expect(result.state.phase == exv::vpn_engine::SessionPhase::failed,
               "server close should mark the session failed") &&
        ok;
   ok = expect(device.close_count() == 1,
@@ -185,7 +185,7 @@ bool test_server_close_during_packet_loop() {
 }
 
 bool test_reconnect_after_close() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
 
@@ -237,7 +237,7 @@ bool test_reconnect_after_close() {
 }
 
 bool test_v2_aggregate_auth_sequence_accepts_only_xml_and_cstp_tunnel() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
 
@@ -327,7 +327,7 @@ bool test_v2_aggregate_auth_sequence_accepts_only_xml_and_cstp_tunnel() {
 }
 
 bool test_v2_rejects_legacy_login_and_cstp_paths() {
-  using namespace ecnuvpn::tests::support;
+  using namespace exv::tests::support;
 
   bool ok = true;
 

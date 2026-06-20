@@ -172,7 +172,7 @@ bool TunnelController::Impl::prepare_tunnel_device_for_session(
 bool TunnelController::Impl::apply_tunnel_config_for_session(
         const exv::platform::TunnelDeviceDescriptor& device,
         const std::string& interface_address,
-        const ecnuvpn::vpn_engine::TunnelMetadata* metadata) {
+        const exv::vpn_engine::TunnelMetadata* metadata) {
         timing_.timer.start(ConnectTiming::NETWORK_CONFIG);
         transition_to(TunnelPhase::ApplyingNetworkConfig);
         log_tunnel_event("INFO", "network.config.applying", "Applying network config",
@@ -193,6 +193,10 @@ bool TunnelController::Impl::apply_tunnel_config_for_session(
                     add_route_once(&config.routes, destination);
                 for (const auto& destination : vpn_cfg_.routes)
                     add_route_once(&config.routes, destination);
+                if (vpn_cfg_.include_class_a_private_routes)
+                    add_route_once(&config.routes, "10.0.0.0/8");
+                if (vpn_cfg_.include_class_b_private_routes)
+                    add_route_once(&config.routes, "172.16.0.0/12");
                 config.server_bypass_ips = metadata->server_bypass_ips;
                 config.dns.servers = metadata->dns_servers;
                 config.dns.search_domain = metadata->default_domain;
@@ -267,11 +271,11 @@ ErrorInfo TunnelController::Impl::current_native_failure(
         return CoreErrorMapper::from_native_error(code, message);
     }
 
-ecnuvpn::vpn_engine::ValidationResult
+exv::vpn_engine::ValidationResult
 TunnelController::Impl::current_network_failure(
         const std::string& fallback_code,
         const std::string& fallback_message) const {
-        ecnuvpn::vpn_engine::ValidationResult result;
+        exv::vpn_engine::ValidationResult result;
         result.ok = false;
         result.code = fallback_code;
         result.message = fallback_message;
@@ -287,7 +291,7 @@ TunnelController::Impl::current_network_failure(
     }
 
 std::string TunnelController::Impl::interface_address_from_metadata(
-        const ecnuvpn::vpn_engine::TunnelMetadata& metadata) const {
+        const exv::vpn_engine::TunnelMetadata& metadata) const {
         std::string ip = metadata.internal_ip4_address;
         if (ip.empty()) {
             return "10.0.0.2/24";
@@ -299,10 +303,10 @@ std::string TunnelController::Impl::interface_address_from_metadata(
         return ip;
     }
 
-ecnuvpn::vpn_engine::ValidationResult
+exv::vpn_engine::ValidationResult
 TunnelController::Impl::configure_network_for_engine(
-        const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
-        ecnuvpn::vpn_engine::DeviceConfig* device_config) {
+        const exv::vpn_engine::TunnelMetadata& metadata,
+        exv::vpn_engine::DeviceConfig* device_config) {
         const bool was_connected = phase_ == TunnelPhase::Connected;
         exv::platform::TunnelDeviceDescriptor device;
         if (prepared_tunnel_device_.has_value() &&
@@ -323,6 +327,8 @@ TunnelController::Impl::configure_network_for_engine(
                 "apply_config_failed",
                 "Failed to apply tunnel config");
         }
+
+        assigned_internal_ip_ = metadata.internal_ip4_address;
 
         if (device_config) {
             device_config->interface_name =
@@ -353,6 +359,7 @@ void TunnelController::Impl::do_connect() {
         network_config_applied_ = false;
         packet_loop_started_ = false;
         prepared_tunnel_device_.reset();
+        assigned_internal_ip_.clear();
         timing_.timer.reset();
         reconnect_attempts_ = 0;
 

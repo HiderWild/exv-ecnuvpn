@@ -20,11 +20,11 @@ namespace exv::platform {
 namespace {
 
 std::string shell_quote(const std::string& value) {
-  return ecnuvpn::platform::shell_quote(value);
+  return exv::platform::shell_quote(value);
 }
 
 bool run_ok(const std::string& command) {
-  return ecnuvpn::platform::run_command(command) == 0;
+  return exv::platform::run_command(command) == 0;
 }
 
 std::string trim_interface_name(std::string name) {
@@ -143,7 +143,7 @@ struct LinuxDefaultRoute {
 };
 
 std::optional<LinuxDefaultRoute> read_default_route() {
-  const std::string output = ecnuvpn::platform::run_command_output(
+  const std::string output = exv::platform::run_command_output(
       "ip route show default 0.0.0.0/0");
   std::istringstream lines(output);
   std::string line;

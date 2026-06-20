@@ -26,22 +26,22 @@ struct MockIpHelper {
   std::uint32_t create_route_error = 0;
   std::string create_route_error_cidr;
 
-  std::vector<ecnuvpn::platform::NativeUnicastAddress> initialized_addresses;
-  std::vector<ecnuvpn::platform::NativeUnicastAddress> created_addresses;
+  std::vector<exv::platform::NativeUnicastAddress> initialized_addresses;
+  std::vector<exv::platform::NativeUnicastAddress> created_addresses;
   std::vector<int> mtu_values;
   std::vector<std::string> best_route_destinations;
-  std::vector<ecnuvpn::platform::NativeIpRoute> created_routes;
-  std::vector<ecnuvpn::platform::NativeIpRoute> deleted_routes;
+  std::vector<exv::platform::NativeIpRoute> created_routes;
+  std::vector<exv::platform::NativeIpRoute> deleted_routes;
 };
 
-ecnuvpn::platform::NativeIpHelperApi make_api(MockIpHelper &mock) {
-  ecnuvpn::platform::NativeIpHelperApi api;
+exv::platform::NativeIpHelperApi make_api(MockIpHelper &mock) {
+  exv::platform::NativeIpHelperApi api;
   api.initialize_unicast_ip_address_entry =
-      [&mock](ecnuvpn::platform::NativeUnicastAddress &address) {
+      [&mock](exv::platform::NativeUnicastAddress &address) {
         mock.initialized_addresses.push_back(address);
       };
   api.create_unicast_ip_address_entry =
-      [&mock](const ecnuvpn::platform::NativeUnicastAddress &address) {
+      [&mock](const exv::platform::NativeUnicastAddress &address) {
         mock.created_addresses.push_back(address);
         return mock.create_address_error;
       };
@@ -51,7 +51,7 @@ ecnuvpn::platform::NativeIpHelperApi make_api(MockIpHelper &mock) {
   };
   api.get_best_route2 =
       [&mock](const std::string &destination,
-              ecnuvpn::platform::NativeBestRoute &route) {
+              exv::platform::NativeBestRoute &route) {
         mock.best_route_destinations.push_back(destination);
         if (mock.best_route_error != 0)
           return mock.best_route_error;
@@ -60,7 +60,7 @@ ecnuvpn::platform::NativeIpHelperApi make_api(MockIpHelper &mock) {
         return std::uint32_t{0};
       };
   api.create_ip_forward_entry2 =
-      [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
+      [&mock](const exv::platform::NativeIpRoute &route) {
         mock.created_routes.push_back(route);
         if (!mock.create_route_error_cidr.empty() &&
             route.cidr == mock.create_route_error_cidr)
@@ -68,22 +68,22 @@ ecnuvpn::platform::NativeIpHelperApi make_api(MockIpHelper &mock) {
         return std::uint32_t{0};
       };
   api.delete_ip_forward_entry2 =
-      [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
+      [&mock](const exv::platform::NativeIpRoute &route) {
         mock.deleted_routes.push_back(route);
         return std::uint32_t{0};
       };
   return api;
 }
 
-ecnuvpn::platform::NativeIpConfigOptions options() {
-  ecnuvpn::platform::NativeIpConfigOptions opts;
+exv::platform::NativeIpConfigOptions options() {
+  exv::platform::NativeIpConfigOptions opts;
   opts.interface_index = 42;
   opts.configured_mtu = 1290;
   return opts;
 }
 
-ecnuvpn::vpn_engine::TunnelMetadata metadata() {
-  ecnuvpn::vpn_engine::TunnelMetadata meta;
+exv::vpn_engine::TunnelMetadata metadata() {
+  exv::vpn_engine::TunnelMetadata meta;
   meta.interface_index = 42;
   meta.internal_ip4_address = "10.255.0.10";
   meta.internal_ip4_netmask = "255.255.255.0";
@@ -93,11 +93,11 @@ ecnuvpn::vpn_engine::TunnelMetadata metadata() {
 
 bool installs_server_bypass_before_split_routes() {
   MockIpHelper mock;
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.server_bypass_ips = {"203.0.113.15"};
   meta.routes = {"59.78.176.0/20", "10.0.0.0/8"};
 
-  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  exv::platform::NativeIpConfig config(make_api(mock), options());
   auto result = config.configure(meta);
 
   bool ok = true;
@@ -140,11 +140,11 @@ bool installs_server_bypass_before_split_routes() {
 
 bool collapses_duplicate_routes() {
   MockIpHelper mock;
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.server_bypass_ips = {"203.0.113.15", "203.0.113.15/32"};
   meta.routes = {"59.78.176.0/20", "59.78.176.0/20", "10.0.0.0/8"};
 
-  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  exv::platform::NativeIpConfig config(make_api(mock), options());
   auto result = config.configure(meta);
 
   bool ok = true;
@@ -166,10 +166,10 @@ bool cleanup_removes_only_routes_owned_by_this_session() {
   mock.create_route_error = 1234;
   mock.create_route_error_cidr = "10.0.0.0/8";
 
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.routes = {"59.78.176.0/20", "10.0.0.0/8"};
 
-  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  exv::platform::NativeIpConfig config(make_api(mock), options());
   auto result = config.configure(meta);
   auto cleanup_first = config.cleanup();
   auto cleanup_second = config.cleanup();
@@ -178,7 +178,7 @@ bool cleanup_removes_only_routes_owned_by_this_session() {
   ok = expect(!result.ok(), "route creation failure should fail configure") &&
        ok;
   ok = expect(result.error ==
-                  ecnuvpn::platform::NativeIpConfigError::route_create_failed,
+                  exv::platform::NativeIpConfigError::route_create_failed,
               "route creation failure should map to route_create_failed") &&
        ok;
   ok = expect(cleanup_first.ok() && cleanup_second.ok(),
@@ -196,17 +196,17 @@ bool cleanup_removes_only_routes_owned_by_this_session() {
 
 bool cleanup_treats_missing_route_as_success() {
   MockIpHelper mock;
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.routes = {"59.78.176.0/20"};
 
   auto api = make_api(mock);
   api.delete_ip_forward_entry2 =
-      [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
+      [&mock](const exv::platform::NativeIpRoute &route) {
         mock.deleted_routes.push_back(route);
         return std::uint32_t{1168};
       };
 
-  ecnuvpn::platform::NativeIpConfig config(api, options());
+  exv::platform::NativeIpConfig config(api, options());
   auto result = config.configure(meta);
   auto cleanup = config.cleanup();
   auto cleanup_again = config.cleanup();
@@ -224,18 +224,18 @@ bool cleanup_treats_missing_route_as_success() {
 
 bool uses_tunnel_mtu_and_falls_back_to_configured_mtu() {
   MockIpHelper tunnel_mtu_mock;
-  ecnuvpn::vpn_engine::TunnelMetadata tunnel_meta = metadata();
+  exv::vpn_engine::TunnelMetadata tunnel_meta = metadata();
   tunnel_meta.mtu = 1400;
-  ecnuvpn::platform::NativeIpConfig tunnel_mtu_config(
+  exv::platform::NativeIpConfig tunnel_mtu_config(
       make_api(tunnel_mtu_mock), options());
   auto tunnel_result = tunnel_mtu_config.configure(tunnel_meta);
 
   MockIpHelper fallback_mtu_mock;
-  ecnuvpn::vpn_engine::TunnelMetadata fallback_meta = metadata();
+  exv::vpn_engine::TunnelMetadata fallback_meta = metadata();
   fallback_meta.mtu = 1100;
-  ecnuvpn::platform::NativeIpConfigOptions fallback_options = options();
+  exv::platform::NativeIpConfigOptions fallback_options = options();
   fallback_options.configured_mtu = 1350;
-  ecnuvpn::platform::NativeIpConfig fallback_mtu_config(
+  exv::platform::NativeIpConfig fallback_mtu_config(
       make_api(fallback_mtu_mock), fallback_options);
   auto fallback_result = fallback_mtu_config.configure(fallback_meta);
 
@@ -256,7 +256,7 @@ bool uses_tunnel_mtu_and_falls_back_to_configured_mtu() {
 
 bool creates_preferred_source_address() {
   MockIpHelper mock;
-  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  exv::platform::NativeIpConfig config(make_api(mock), options());
   auto result = config.configure(metadata());
 
   bool ok = true;
@@ -284,10 +284,10 @@ bool can_refresh_routes_without_recreating_address() {
   MockIpHelper mock;
   auto opts = options();
   opts.configure_address = false;
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.routes = {"59.78.176.0/20"};
 
-  ecnuvpn::platform::NativeIpConfig config(make_api(mock), opts);
+  exv::platform::NativeIpConfig config(make_api(mock), opts);
   auto result = config.configure(meta);
 
   bool ok = true;
@@ -311,10 +311,10 @@ bool can_refresh_routes_without_recreating_address() {
 bool ignores_invalid_parameter_mtu_failure() {
   MockIpHelper mock;
   mock.set_mtu_error = 87;
-  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  exv::vpn_engine::TunnelMetadata meta = metadata();
   meta.routes = {"59.78.176.0/20"};
 
-  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  exv::platform::NativeIpConfig config(make_api(mock), options());
   auto result = config.configure(meta);
 
   bool ok = true;
@@ -338,16 +338,16 @@ bool api_errors_map_to_stable_error_codes() {
   MockIpHelper mock;
   mock.create_address_error = 5;
 
-  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  exv::platform::NativeIpConfig config(make_api(mock), options());
   auto result = config.configure(metadata());
 
   bool ok = true;
   ok = expect(!result.ok(), "IP Helper failure should fail configure") && ok;
   ok = expect(result.error ==
-                  ecnuvpn::platform::NativeIpConfigError::address_create_failed,
+                  exv::platform::NativeIpConfigError::address_create_failed,
               "CreateUnicastIpAddressEntry failure should map to stable enum") &&
        ok;
-  ok = expect(std::string(ecnuvpn::platform::native_ip_config_error_code(
+  ok = expect(std::string(exv::platform::native_ip_config_error_code(
                   result.error)) == "address_create_failed",
               "stable error code text should not expose raw Windows errors") &&
        ok;

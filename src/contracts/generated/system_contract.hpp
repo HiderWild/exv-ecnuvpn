@@ -19,7 +19,7 @@ inline constexpr std::array<std::string_view, 5> CORE_RPC_RESPONSE_FIELDS = {{"s
 inline constexpr std::array<std::string_view, 31> CORE_RPC_ACTIONS = {{"core.hello", "status.get", "vpn.connect", "vpn.disconnect", "config.get", "config.save", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.reset", "config.import", "config.export", "config.get_profile", "config.save_profile", "key.status", "key.reset", "routes.list", "routes.add", "routes.remove", "routes.reset", "logs.list", "logs.clear", "service.status", "service.install", "service.uninstall", "runtime.status", "drivers.status", "drivers.install", "maintenance.inspectCore", "maintenance.killStaleCore"}};
 inline constexpr std::array<std::string_view, 3> DESTRUCTIVE_CORE_RPC_ACTIONS = {{"config.reset", "key.reset", "maintenance.killStaleCore"}};
 inline constexpr std::array<std::string_view, 17> STANDARD_ERROR_CODES = {{"confirmation_required", "invalid_payload", "invalid_config", "unsupported_contract_version", "core_comm_broken", "core_unresponsive", "core_protocol_mismatch", "core_not_found", "core_launch_failed", "core_version_probe_failed", "config_import_format_unsupported", "config_import_auth_failed", "config_import_tampered_or_wrong_password", "credential_store_unavailable", "key_missing", "key_corrupt", "log_clear_failed"}};
-inline constexpr std::array<std::string_view, 23> DESKTOP_RPC_ACTIONS = {{"status.get", "vpn.connect", "vpn.disconnect", "vpn.authInteraction.get", "vpn.authInteraction.respond", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "routes.list", "routes.add", "routes.remove", "routes.reset", "service.status", "helper.status", "runtime.status", "drivers.status", "drivers.install", "service.install", "service.uninstall", "logs.list", "logs.clear"}};
+inline constexpr std::array<std::string_view, 26> DESKTOP_RPC_ACTIONS = {{"status.get", "vpn.connect", "vpn.disconnect", "vpn.authInteraction.get", "vpn.authInteraction.respond", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "routes.list", "routes.add", "routes.remove", "routes.reset", "service.status", "helper.status", "runtime.status", "cli.status", "cli.install", "cli.uninstall", "drivers.status", "drivers.install", "service.install", "service.uninstall", "logs.list", "logs.clear"}};
 inline constexpr std::array<std::string_view, 7> DESKTOP_RPC_EVENT_TYPES = {{"log", "status", "heartbeat", "service-progress", "close-request", "core-crashed", "quick-start-request"}};
 inline constexpr std::array<std::string_view, 32> DESKTOP_RPC_ERROR_CODES = {{"helper_unavailable", "service_not_installed", "service_installed_not_running", "service_start_failed", "oneshot_not_supported", "oneshot_elevation_denied", "helper_rpc_failed", "auth_failed", "auth_protocol_mismatch", "auth_rejected", "auth_challenge_required", "auth_group_required", "auth_expired", "csd_required_unsupported", "dtls_unavailable", "tunnel_disconnected", "session_timeout", "idle_timeout", "rekey_unsupported", "cstp_compressed_unsupported", "unsupported_extra_args", "tls_verify_failed", "wintun_missing", "utun_permission_denied", "unsupported_dtls", "permission_denied", "network_unreachable", "user_cancelled", "invalid_request", "log_clear_failed", "connection_failed", "vpn_start_failed"}};
 inline constexpr std::array<std::string_view, 6> CONFIG_ACTIONS = {{"config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.profile.get", "config.profile.save"}};
@@ -40,7 +40,7 @@ struct ActionOwnerContract {
     std::string_view canonical;
 };
 
-inline constexpr std::array<ActionOwnerContract, 46> ACTION_OWNERS = {{
+inline constexpr std::array<ActionOwnerContract, 49> ACTION_OWNERS = {{
     {"core.hello", "core_rpc", ""},
     {"status.get", "core_rpc", ""},
     {"vpn.connect", "core_rpc", ""},
@@ -83,6 +83,9 @@ inline constexpr std::array<ActionOwnerContract, 46> ACTION_OWNERS = {{
     {"service.uninstall", "core_rpc", ""},
     {"service.driver_status", "core_rpc", ""},
     {"runtime.status", "core_rpc", ""},
+    {"cli.status", "desktop_host_adapter", ""},
+    {"cli.install", "desktop_host_adapter", ""},
+    {"cli.uninstall", "desktop_host_adapter", ""},
     {"drivers.status", "core_rpc", ""},
     {"drivers.install", "core_rpc", ""},
     {"maintenance.inspectCore", "core_rpc", ""},

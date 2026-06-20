@@ -11,7 +11,7 @@
 #include <exception>
 #include <mutex>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 exv::core_api::DesktopRpcAdapter &desktop_adapter() {
@@ -40,4 +40,4 @@ nlohmann::json dispatch_desktop_action(const std::string &action,
 
 // End inlined from core/app_api/app_api_desktop_handlers include-unit
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

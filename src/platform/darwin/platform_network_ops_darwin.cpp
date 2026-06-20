@@ -170,7 +170,7 @@ std::vector<std::string> split_fact_values(const std::string &value) {
   return values;
 }
 
-std::string route_fact_detail(const ecnuvpn::platform::NativeDarwinRoute &route) {
+std::string route_fact_detail(const exv::platform::NativeDarwinRoute &route) {
   std::vector<std::string> fields;
   fields.push_back(fact_field("cidr", route.cidr));
   fields.push_back(fact_field("destination", route.destination));
@@ -232,7 +232,7 @@ bool parse_int_field(const std::map<std::string, std::string> &fields,
 }
 
 bool parse_route_fact(const std::string &detail,
-                      ecnuvpn::platform::NativeDarwinRoute *route) {
+                      exv::platform::NativeDarwinRoute *route) {
   if (!route) {
     return false;
   }
@@ -242,7 +242,7 @@ bool parse_route_fact(const std::string &detail,
     return it == fields.end() ? std::string() : it->second;
   };
 
-  ecnuvpn::platform::NativeDarwinRoute parsed;
+  exv::platform::NativeDarwinRoute parsed;
   parsed.cidr = get("cidr");
   parsed.destination = get("destination");
   parsed.netmask = get("netmask");
@@ -325,8 +325,8 @@ std::string scutil_dns_script(const std::string &interface_name,
 
 class DarwinPlatformNetworkOps final : public PlatformNetworkOps {
 public:
-  DarwinPlatformNetworkOps(ecnuvpn::platform::NativeUtunApi utun_api,
-                           ecnuvpn::platform::NativeDarwinRouteApi route_api,
+  DarwinPlatformNetworkOps(exv::platform::NativeUtunApi utun_api,
+                           exv::platform::NativeDarwinRouteApi route_api,
                            NativeDarwinDnsApi dns_api)
       : utun_api_(std::move(utun_api)), route_api_(std::move(route_api)),
         dns_api_(std::move(dns_api)) {}
@@ -334,11 +334,11 @@ public:
   TunnelDeviceDescriptor prepare_tunnel_device(const std::string &adapter_name,
                                                int mtu = 1400) override {
     (void)adapter_name;
-    ecnuvpn::platform::NativeUtunConfig config;
+    exv::platform::NativeUtunConfig config;
     config.mtu = mtu > 0 ? mtu : 1400;
 
     auto utun =
-        std::make_unique<ecnuvpn::platform::NativeUtun>(utun_api_, config);
+        std::make_unique<exv::platform::NativeUtun>(utun_api_, config);
     auto started = utun->start();
     if (!started.ok())
       return {};
@@ -382,7 +382,7 @@ public:
     if (!split_ipv4_cidr(config.interface_address, &address, &netmask))
       return false;
 
-    ecnuvpn::vpn_engine::TunnelMetadata metadata;
+    exv::vpn_engine::TunnelMetadata metadata;
     metadata.interface_name = device.adapter_name;
     metadata.interface_index = 0;
     metadata.internal_ip4_address = address;
@@ -392,12 +392,12 @@ public:
       metadata.routes.push_back(route.destination);
     metadata.server_bypass_ips = config.server_bypass_ips;
 
-    ecnuvpn::platform::NativeDarwinRouteConfigOptions options;
+    exv::platform::NativeDarwinRouteConfigOptions options;
     options.interface_name = device.adapter_name;
     options.configured_mtu = metadata.mtu;
 
     auto route_config =
-        std::make_unique<ecnuvpn::platform::NativeDarwinRouteConfig>(
+        std::make_unique<exv::platform::NativeDarwinRouteConfig>(
             route_api_, options);
     auto configured = route_config->configure(metadata);
     if (!configured.ok()) {
@@ -497,12 +497,12 @@ public:
         policy == CleanupPolicy::Full || policy == CleanupPolicy::KeepAdapter ||
         policy == CleanupPolicy::RoutesOnly;
     if (remove_routes) {
-      std::vector<ecnuvpn::platform::NativeDarwinRoute> routes;
+      std::vector<exv::platform::NativeDarwinRoute> routes;
       for (const auto &resource : resources) {
         if (resource.type != "darwin_route") {
           continue;
         }
-        ecnuvpn::platform::NativeDarwinRoute route;
+        exv::platform::NativeDarwinRoute route;
         if (parse_route_fact(resource.detail, &route)) {
           routes.push_back(route);
         }
@@ -592,7 +592,7 @@ private:
   }
 
   void remember_routes(
-      const std::vector<ecnuvpn::platform::NativeDarwinRoute> &routes) {
+      const std::vector<exv::platform::NativeDarwinRoute> &routes) {
     forget_routes();
     for (const auto &route : routes) {
       managed_resources_.push_back({"darwin_route", route_fact_detail(route)});
@@ -651,11 +651,11 @@ private:
     managed_resources_ = std::move(kept);
   }
 
-  ecnuvpn::platform::NativeUtunApi utun_api_;
-  ecnuvpn::platform::NativeDarwinRouteApi route_api_;
+  exv::platform::NativeUtunApi utun_api_;
+  exv::platform::NativeDarwinRouteApi route_api_;
   NativeDarwinDnsApi dns_api_;
-  std::unique_ptr<ecnuvpn::platform::NativeUtun> utun_;
-  std::unique_ptr<ecnuvpn::platform::NativeDarwinRouteConfig> route_config_;
+  std::unique_ptr<exv::platform::NativeUtun> utun_;
+  std::unique_ptr<exv::platform::NativeDarwinRouteConfig> route_config_;
   TunnelDeviceDescriptor last_device_;
   std::vector<ManagedNetworkResource> managed_resources_;
 };
@@ -671,9 +671,9 @@ NativeDarwinDnsApi default_native_darwin_dns_api() {
     }
     const std::string script = scutil_dns_script(interface_name, settings);
     const std::string command =
-        "printf %s " + ecnuvpn::platform::shell_quote(script) +
+        "printf %s " + exv::platform::shell_quote(script) +
         " | /usr/sbin/scutil";
-    return ecnuvpn::platform::run_command(command);
+    return exv::platform::run_command(command);
   };
   api.restore_dns = [](const std::string &interface_name) {
     if (interface_name.empty()) {
@@ -682,16 +682,16 @@ NativeDarwinDnsApi default_native_darwin_dns_api() {
     const std::string script =
         "remove State:/Network/Service/exv-" + interface_name + "/DNS\n";
     const std::string command =
-        "printf %s " + ecnuvpn::platform::shell_quote(script) +
+        "printf %s " + exv::platform::shell_quote(script) +
         " | /usr/sbin/scutil";
-    return ecnuvpn::platform::run_command(command);
+    return exv::platform::run_command(command);
   };
   api.disable_interface = [](const std::string &interface_name) {
     if (interface_name.empty()) {
       return EINVAL;
     }
-    return ecnuvpn::platform::run_command(
-        "/sbin/ifconfig " + ecnuvpn::platform::shell_quote(interface_name) +
+    return exv::platform::run_command(
+        "/sbin/ifconfig " + exv::platform::shell_quote(interface_name) +
         " down >/dev/null 2>&1");
   };
   return api;
@@ -699,22 +699,22 @@ NativeDarwinDnsApi default_native_darwin_dns_api() {
 
 std::unique_ptr<PlatformNetworkOps> create_darwin_platform_network_ops() {
   return create_darwin_platform_network_ops(
-      ecnuvpn::platform::default_native_utun_api(),
-      ecnuvpn::platform::default_native_darwin_route_api(),
+      exv::platform::default_native_utun_api(),
+      exv::platform::default_native_darwin_route_api(),
       default_native_darwin_dns_api());
 }
 
 std::unique_ptr<PlatformNetworkOps> create_darwin_platform_network_ops(
-    ecnuvpn::platform::NativeUtunApi utun_api,
-    ecnuvpn::platform::NativeDarwinRouteApi route_api) {
+    exv::platform::NativeUtunApi utun_api,
+    exv::platform::NativeDarwinRouteApi route_api) {
   return create_darwin_platform_network_ops(
       std::move(utun_api), std::move(route_api),
       default_native_darwin_dns_api());
 }
 
 std::unique_ptr<PlatformNetworkOps> create_darwin_platform_network_ops(
-    ecnuvpn::platform::NativeUtunApi utun_api,
-    ecnuvpn::platform::NativeDarwinRouteApi route_api,
+    exv::platform::NativeUtunApi utun_api,
+    exv::platform::NativeDarwinRouteApi route_api,
     NativeDarwinDnsApi dns_api) {
   return std::make_unique<DarwinPlatformNetworkOps>(
       std::move(utun_api), std::move(route_api), std::move(dns_api));

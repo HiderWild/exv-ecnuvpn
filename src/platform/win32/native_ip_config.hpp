@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 enum class NativeIpConfigError {
@@ -117,4 +117,4 @@ private:
 };
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

@@ -7,14 +7,14 @@ This guide describes the active production build path. The desktop UI package is
 All generated desktop packages use the same layout:
 
 ```text
-build/<platform>/webview/package/ECNU VPN
+build/<platform>/webview/package/EXV
 ```
 
 Platform-specific examples:
 
-- Windows: `build\windows\webview\package\ECNU VPN`
-- macOS: `build/macos/webview/package/ECNU VPN`
-- Linux: `build/linux/webview/package/ECNU VPN`
+- Windows: `build\windows\webview\package\EXV`
+- macOS: `build/macos/webview/package/EXV`
+- Linux: `build/linux/webview/package/EXV`
 
 The package root contains:
 
@@ -90,7 +90,7 @@ Use the platform desktop scripts when the renderer, `exv-ui`, core, helper, and 
 The package script also supports verifying an existing package:
 
 ```bash
-python scripts/package_ui_shell.py --verify-launch-targets-only --package-dir "build/<platform>/webview/package/ECNU VPN"
+python scripts/package_ui_shell.py --verify-launch-targets-only --package-dir "build/<platform>/webview/package/EXV"
 ```
 
 That check validates `exv-ui.args` targets and rejects bundled Electron or Chromium payloads.

@@ -15,7 +15,7 @@
 #include <algorithm>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -359,4 +359,4 @@ std::wstring native_wintun_adapter_name(const std::wstring &prefix) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

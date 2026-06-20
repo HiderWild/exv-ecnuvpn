@@ -32,9 +32,24 @@ export interface QuickStartRequestEvent {
   }
 }
 
+export type DesktopWindowControl = 'minimize' | 'close'
+
+export interface WindowControlStateEvent {
+  control: DesktopWindowControl | null
+  pressed: boolean
+}
+
 export interface ExvEvent {
-  type: DesktopEventType
-  data: unknown | ServiceProgressEntry | QuickStartRequestEvent
+  type: DesktopEventType | 'window-control-state'
+  data: unknown | ServiceProgressEntry | QuickStartRequestEvent | WindowControlStateEvent
+}
+
+export interface DesktopWindowDragStart {
+  screenX: number
+  screenY: number
+  clientX: number
+  clientY: number
+  viewWidth: number
 }
 
 export type VpnErrorType =
@@ -154,7 +169,10 @@ export interface ExvApi {
     minimize(): Promise<{ ok: true }>
     requestClose(): Promise<{ ok: true }>
     resolveClosePrompt(result: unknown): Promise<{ ok: true }>
-    startDrag(): Promise<{ ok: true }>
+    startDrag(start?: DesktopWindowDragStart): Promise<{ ok: true }>
+  }
+  shell: {
+    openExternal(url: string): Promise<{ ok: true }>
   }
   modal: {
     serviceInstallPrompt(): Promise<DesktopServiceInstallPromptResult>

@@ -5,9 +5,9 @@
   <assemblyIdentity
       version="1.0.0.0"
       processorArchitecture="*"
-      name="ECNUVPN.exv-ui"
+      name="EXV.exv-ui"
       type="win32" />
-  <description>ECNU VPN WebView shell</description>
+  <description>EXV WebView shell</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges>

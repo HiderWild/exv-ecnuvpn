@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the core lifecycle hardening additions for the ECNU-VPN tunnel controller. The changes introduce failure classification, injectable clock/random for deterministic testing, and structured startup failure analysis.
+This document describes the core lifecycle hardening additions for the EXV tunnel controller. The changes introduce failure classification, injectable clock/random for deterministic testing, and structured startup failure analysis.
 
 ## FailurePhase Classification
 

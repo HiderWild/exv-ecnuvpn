@@ -22,7 +22,7 @@
 #include <string>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 namespace {
@@ -970,4 +970,4 @@ NativeTlsStream::fail_connect_and_reset(vpn_engine::ValidationResult result) {
 }
 // End inlined from platform/win32/native_tls_stream_public include-unit
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

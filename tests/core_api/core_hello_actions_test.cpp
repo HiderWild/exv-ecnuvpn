@@ -11,8 +11,8 @@
 #include <memory>
 #include <string>
 
-#ifndef ECNUVPN_VERSION
-#define ECNUVPN_VERSION "test"
+#ifndef EXV_VERSION
+#define EXV_VERSION "test"
 #endif
 
 using json = nlohmann::json;
@@ -74,7 +74,7 @@ int main() {
                         std::string(exv::contracts::generated::CONTRACT_VERSION),
                     "hello returns contract version") &&
              ok;
-        ok = expect(payload["app_version"] == ECNUVPN_VERSION,
+        ok = expect(payload["app_version"] == EXV_VERSION,
                     "hello returns app version") && ok;
         ok = expect(payload.contains("core_instance_id"),
                     "hello returns instance id") && ok;

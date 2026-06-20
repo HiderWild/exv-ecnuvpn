@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -238,4 +238,4 @@ nlohmann::json install_driver(const ConfigView &cfg,
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

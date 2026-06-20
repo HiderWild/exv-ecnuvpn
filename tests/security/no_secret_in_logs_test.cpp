@@ -184,7 +184,7 @@ int main() {
         snap.helper_status = "connected";
         snap.network_ready = true;
         snap.server = "vpn.example.edu";
-        snap.interface_name = "ECNU-VPN";
+        snap.interface_name = "EXV";
 
         std::string check;
         check += snap.helper_mode;

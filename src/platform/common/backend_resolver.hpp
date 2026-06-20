@@ -8,7 +8,7 @@
 #include <functional>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 inline constexpr const char *kServiceNotInstalledCode = "service_not_installed";
@@ -43,4 +43,4 @@ nlohmann::json backend_unavailable_error(const nlohmann::json &resolved,
                                          const std::string &fallback_message);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

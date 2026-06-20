@@ -18,7 +18,7 @@
 #include <unistd.h>
 #endif
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 
 int run_command(const std::string &cmd) { return std::system(cmd.c_str()); }
 
@@ -124,5 +124,5 @@ bool check_root() {
 #endif
 }
 
-} // namespace ecnuvpn::platform
+} // namespace exv::platform
 

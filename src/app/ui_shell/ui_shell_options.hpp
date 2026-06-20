@@ -3,12 +3,13 @@
 #include <filesystem>
 #include <string>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 struct UiShellOptions {
   std::string renderer_dev_server_url;
   std::string packaged_renderer_index;
   std::string exv_path;
+  std::string state_dir;
   bool enable_dev_tools = false;
 };
 
@@ -22,4 +23,4 @@ std::string validate_ui_shell_options(const UiShellOptions &options);
 std::string validate_packaged_ui_shell_options(
     const UiShellOptions &options, const std::filesystem::path &package_root);
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

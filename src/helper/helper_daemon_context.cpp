@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace ecnuvpn::helper {
+namespace exv::helper {
 
 std::unique_ptr<exv::helper::HelperHandler> create_helper_handler_for_daemon(
     const DaemonOptions &options, HelperNetworkOpsFactory network_ops_factory,
@@ -27,4 +27,4 @@ std::unique_ptr<exv::helper::HelperHandler> create_helper_handler_for_daemon(
   return handler;
 }
 
-} // namespace ecnuvpn::helper
+} // namespace exv::helper

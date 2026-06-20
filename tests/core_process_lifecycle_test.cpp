@@ -51,8 +51,8 @@
 
 using json = nlohmann::json;
 
-#ifndef ECNUVPN_VERSION
-#define ECNUVPN_VERSION "test"
+#ifndef EXV_VERSION
+#define EXV_VERSION "test"
 #endif
 
 namespace exv::core::lifecycle::testing {
@@ -221,7 +221,7 @@ static void write_valid_native_config(const std::string& config_dir) {
         {"log_file", ""},
         {"vpn_engine", "native"},
         {"windows_tunnel_driver", "tap"},
-        {"windows_tap_interface", "ECNU VPN TAP"},
+        {"windows_tap_interface", "EXV TAP"},
         {"auto_reconnect", false},
         {"minimal_mode", false},
         {"service_install_prompt_seen", false},
@@ -400,7 +400,7 @@ int main() {
             {"config_dir", config_dir},
             {"password", ""}
         };
-        json result = ecnuvpn::app_api::handle_action("vpn.connect", payload);
+        json result = exv::app_api::handle_action("vpn.connect", payload);
 
         expect(result.is_object(),
                "E2.0-regression: app_api vpn.connect returns object");
@@ -456,8 +456,8 @@ int main() {
             expect(event["data"]["defaults"].value("server", std::string()) ==
                        "vpn-ct.ecnu.edu.cn",
                    "E2.0-quick-start: default server is ct host");
-            expect(event["data"]["defaults"].value("remember_password", false),
-                   "E2.0-quick-start: remember password defaults true");
+            expect(!event["data"]["defaults"].value("remember_password", true),
+                   "E2.0-quick-start: remember password defaults false");
             expect(event["data"]["defaults"].value("install_service", false),
                    "E2.0-quick-start: install service defaults true");
         }
@@ -574,7 +574,7 @@ int main() {
             expect(payload.value("contract_version", std::string()) ==
                        std::string(exv::contracts::generated::CONTRACT_VERSION),
                    "E2.1a-native: core.hello payload includes contract version");
-            expect(payload.value("app_version", std::string()) == ECNUVPN_VERSION,
+            expect(payload.value("app_version", std::string()) == EXV_VERSION,
                    "E2.1a-native: core.hello payload includes app version");
             expect(payload.contains("core_instance_id") &&
                        payload["core_instance_id"].is_string() &&
@@ -1114,7 +1114,7 @@ int main() {
             release_connect_promise.get_future().share();
         std::atomic<bool> connect_entered_once{false};
 
-        ecnuvpn::app_api::testing::set_desktop_vpn_connect_entered_hook(
+        exv::app_api::testing::set_desktop_vpn_connect_entered_hook(
             [&] {
                 if (!connect_entered_once.exchange(true)) {
                     connect_entered_promise.set_value();
@@ -1146,7 +1146,7 @@ int main() {
         expect(wait_for_response_count(out_buf, 4, std::chrono::seconds(5)),
                "E2.3-lanes: accepted vpn.connect and read-only responses should all exist");
 
-        ecnuvpn::app_api::testing::set_desktop_vpn_connect_entered_hook(nullptr);
+        exv::app_api::testing::set_desktop_vpn_connect_entered_hook(nullptr);
         in_buf.close_input();
         cr.join();
 

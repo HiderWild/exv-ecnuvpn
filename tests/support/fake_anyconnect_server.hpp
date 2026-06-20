@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace tests {
 namespace support {
 
@@ -159,4 +159,4 @@ run_fake_anyconnect_session(FakeAnyConnectServer &server,
 
 } // namespace support
 } // namespace tests
-} // namespace ecnuvpn
+} // namespace exv

@@ -11,11 +11,11 @@ namespace {
 
 namespace fs = std::filesystem;
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
-const fs::path kRepoRoot = fs::path(ECNUVPN_SOURCE_DIR);
+const fs::path kRepoRoot = fs::path(EXV_SOURCE_DIR);
 
 struct FileText {
   fs::path relative_path;
@@ -370,6 +370,10 @@ bool check_webview_package_policy() {
               "package_ui_shell.py should require exv-helper in the packaged "
               "WebView shell") &&
        ok;
+  ok = expect(!contains(package_script, "--state-dir"),
+              "package_ui_shell.py should keep exv-ui.args portable by not "
+              "embedding profile paths") &&
+       ok;
   ok = expect(contains(package_script, "APP_ICON_ASSETS") &&
                   contains(package_script, "verify_app_icon_assets"),
               "package_ui_shell.py should fail packaging when shared app "
@@ -383,6 +387,228 @@ bool check_webview_package_policy() {
        ok;
   ok = expect(contains(embed, "webview") && !contains(embed, "electron"),
               "embed_assets.py should default to WebView renderer assets") &&
+       ok;
+
+  return ok;
+}
+
+std::vector<fs::path> active_naming_policy_roots() {
+  return {
+      "src",
+      "scripts",
+      "contracts",
+      "webui/src",
+      "webui/host",
+      "README.md",
+      "docs/build_guide.md",
+      "docs/user_guide.md",
+      "docs/CREDENTIAL_STORE_AND_SECRET_MIGRATION.md",
+  };
+}
+
+bool should_scan_text_file(const fs::path &path) {
+  const std::string extension = to_lower(path.extension().generic_string());
+  return extension == ".cpp" || extension == ".hpp" || extension == ".h" ||
+         extension == ".mm" || extension == ".m" || extension == ".rc" ||
+         extension == ".py" || extension == ".ps1" || extension == ".sh" ||
+         extension == ".ts" || extension == ".tsx" || extension == ".vue" ||
+         extension == ".svg" || extension == ".json" || extension == ".md" ||
+         extension == ".cjs";
+}
+
+std::vector<FileText> active_naming_policy_files() {
+  std::vector<FileText> files;
+  for (const fs::path &root : active_naming_policy_roots()) {
+    const fs::path full_root = kRepoRoot / root;
+    if (!fs::exists(full_root))
+      continue;
+    if (fs::is_regular_file(full_root)) {
+      if (should_scan_text_file(full_root))
+        files.push_back(read_file(root));
+      continue;
+    }
+
+    for (const fs::directory_entry &entry :
+         fs::recursive_directory_iterator(full_root,
+                                          fs::directory_options::skip_permission_denied)) {
+      if (!entry.is_regular_file() || !should_scan_text_file(entry.path()))
+        continue;
+      const fs::path relative_path = fs::relative(entry.path(), kRepoRoot);
+      const std::string normalized = normalize_path_separators(generic_path(relative_path));
+      if (normalized.find("/__tests__/") != std::string::npos ||
+          normalized.find("/__snapshots__/") != std::string::npos)
+        continue;
+      files.push_back(read_file(relative_path));
+    }
+  }
+  return files;
+}
+
+bool check_exv_naming_policy() {
+  bool ok = true;
+  const std::string old_dash_name = std::string("ECNU") + "-VPN";
+  const std::string old_space_name = std::string("ECNU") + " VPN";
+  const std::string old_dist_name = std::string("EXV") + " for " + "ECNU";
+  const std::string old_lower_joined = std::string("ecnu") + "vpn";
+  const std::string old_lower_dashed = std::string("ecnu") + "-vpn";
+  const std::string old_macro_prefix = std::string("ECNU") + "VPN_";
+  const std::string old_launchd_label =
+      std::string("com.") + "ecnu" + ".exv.helper";
+  const std::vector<std::string> denied_needles = {
+      old_dash_name,
+      old_space_name,
+      old_dist_name,
+      old_lower_joined,
+      old_lower_dashed,
+      old_macro_prefix,
+      old_launchd_label,
+  };
+  std::vector<Offense> offenses;
+
+  for (const FileText &file : active_naming_policy_files()) {
+    for (size_t i = 0; i < file.lines.size(); ++i) {
+      for (const std::string &needle : denied_needles) {
+        if (!contains_text(file.lines[i], needle))
+          continue;
+        const std::string normalized_path =
+            normalize_path_separators(generic_path(file.relative_path));
+        const bool allowed_repository_metadata =
+            (normalized_path == "src/generated/distribution_config.hpp" &&
+             (contains_text(file.lines[i], "kRepositoryLabel") ||
+              contains_text(file.lines[i], "kRepositoryUrl"))) ||
+            (normalized_path == "webui/src/generated/distribution.ts" &&
+             (contains_text(file.lines[i], "label:") ||
+              contains_text(file.lines[i], "url:")));
+        if (allowed_repository_metadata)
+          continue;
+        offenses.push_back(
+            Offense{file.relative_path, needle, static_cast<int>(i + 1),
+                    trim(file.lines[i])});
+      }
+    }
+  }
+
+  ok = emit_offenses(offenses,
+                     "Active production files contain old generated product "
+                     "naming; use EXV/exv instead:") &&
+       ok;
+
+  const FileText contract = read_file("contracts/system.contract.json");
+  const FileText generator = read_file("scripts/generate_contracts.py");
+  ok = expect(contains(contract, "\"contract_id\": \"exv.system\""),
+              "system contract id should be exv.system") &&
+       ok;
+  ok = expect(contains(generator, "exv.system") &&
+                  !contains(generator, std::string("ecnu") + "-vpn.system"),
+              "contract generator should validate exv.system") &&
+       ok;
+
+  return ok;
+}
+
+bool check_common_runtime_path_policy() {
+  bool ok = true;
+  const FileText win_paths = read_file("src/platform/win32/path_utils.cpp");
+  const FileText darwin_paths = read_file("src/platform/darwin/path_utils.cpp");
+  const FileText win_defaults =
+      read_file("src/platform/win32/config_defaults.cpp");
+  const FileText darwin_defaults =
+      read_file("src/platform/darwin/config_defaults.cpp");
+  const FileText win_helper =
+      read_file("src/platform/win32/helper_platform.cpp");
+  const FileText darwin_helper =
+      read_file("src/platform/darwin/helper_platform.cpp");
+  const FileText win_service =
+      read_file("src/platform/win32/helper_service_manager.cpp");
+  const FileText darwin_service =
+      read_file("src/platform/darwin/helper_service_manager.cpp");
+  const FileText darwin_status =
+      read_file("src/platform/darwin/service_status.cpp");
+  const FileText win_smoke = read_file("scripts/windows-packaging-smoke.ps1");
+
+  ok = expect(contains(win_paths, "LOCALAPPDATA") &&
+                  contains(win_paths, "EXV") &&
+                  contains(win_paths, "profile") &&
+                  contains(win_paths, "default"),
+              "Windows default profile path should resolve under "
+              "%LOCALAPPDATA%\\EXV\\profile\\default") &&
+       ok;
+  ok = expect(contains(darwin_paths, "Library") &&
+                  contains(darwin_paths, "Application Support") &&
+                  contains(darwin_paths, "EXV") &&
+                  contains(darwin_paths, "profile") &&
+                  contains(darwin_paths, "default"),
+              "macOS default profile path should resolve under "
+              "~/Library/Application Support/EXV/profile/default") &&
+       ok;
+  ok = expect(!contains(win_paths, "\"exv\"") &&
+                  !contains(darwin_paths, "\"~/.exv\""),
+              "Windows/macOS platform path defaults should not use bare "
+              "profile roots") &&
+       ok;
+  ok = expect(contains(win_defaults, "LOCALAPPDATA") &&
+                  contains(win_defaults, "EXV") &&
+                  contains(win_defaults, "profile") &&
+                  contains(win_defaults, "default") &&
+                  contains(win_defaults, "exv.log"),
+              "Windows config defaults should put the default log file under "
+              "the shared profile directory") &&
+       ok;
+  ok = expect(contains(darwin_defaults, "Library/Application Support/EXV/"
+                                      "profile/default/exv.log"),
+              "macOS config defaults should put the default log file under "
+              "the shared profile directory") &&
+       ok;
+
+  ok = expect(contains(win_helper, "LOCALAPPDATA") &&
+                  contains(win_helper, "EXV") &&
+                  contains(win_helper, "Helper") &&
+                  contains(win_helper, "exv-helper.exe"),
+              "Windows helper service binary should have a stable user-local "
+              "install path") &&
+       ok;
+  ok = expect(!contains(win_helper, "Program Files\\\\EXV\\\\exv-helper.exe"),
+              "Windows helper service binary must not default to a package or "
+              "Program Files path") &&
+       ok;
+  ok = expect(contains(darwin_helper,
+                       "/Library/Application Support/EXV/Helper/"
+                       "exv-helper"),
+              "macOS LaunchDaemon helper should have a stable system "
+              "Application Support path") &&
+       ok;
+  ok = expect(contains(win_service, "EXV Helper"),
+              "Windows helper service display name should be EXV Helper") &&
+       ok;
+  ok = expect(contains(darwin_helper, "com.exv.helper") &&
+                  !contains(darwin_helper,
+                            std::string("com.") + "ecnu" + ".exv.helper"),
+              "macOS helper service should use the com.exv.helper launchd label") &&
+       ok;
+
+  ok = expect(contains(win_service, "default_service_binary_path") &&
+                  contains(win_service, "create_directories") &&
+                  contains(win_service, "copy_file") &&
+                  contains(win_service, "SERVICE_AUTO_START"),
+              "Windows service install should copy the current package helper "
+              "to the stable helper path before SCM registration") &&
+       ok;
+  ok = expect(contains(darwin_service, "default_service_binary_path") &&
+                  contains(darwin_service, "create_directories") &&
+                  contains(darwin_service, "copy_file"),
+              "macOS service install should copy the current package helper "
+              "to the stable LaunchDaemon helper path") &&
+       ok;
+  ok = expect(!contains(darwin_status, "/usr/local/bin/exv-helper --service"),
+              "macOS service status warnings should describe the configured "
+              "stable helper path, not a legacy hard-coded path") &&
+       ok;
+  ok = expect(contains(win_smoke, "LOCALAPPDATA") &&
+                  contains(win_smoke, "EXV") &&
+                  contains(win_smoke, "Helper") &&
+                  contains(win_smoke, "exv-helper.exe"),
+              "Windows packaging smoke should expect SCM to point at the "
+              "stable helper copy, not the movable package root") &&
        ok;
 
   return ok;
@@ -412,8 +638,8 @@ bool check_webview_shell_icon_assets() {
 
   const FileText rc =
       read_file("src/platform/win32/ui_shell/exv_ui_win32.rc");
-  ok = expect(contains(rc, "IDI_ECNUVPN_APP ICON \"icon.ico\""),
-              "Windows resource script should embed the shared ECNU VPN app "
+  ok = expect(contains(rc, "IDI_EXV_APP ICON \"icon.ico\""),
+              "Windows resource script should embed the shared EXV app "
               "icon") &&
        ok;
 
@@ -519,6 +745,15 @@ bool check_cmake_wiring() {
   ok = expect(contains(cmake, "add_test(NAME native_packaging_policy_test"),
               "CMakeLists.txt should register native_packaging_policy_test "
               "with CTest") &&
+       ok;
+  ok = expect(contains(cmake, "EXV_SOURCE_DIR") &&
+                  contains(cmake, "EXV_VERSION") &&
+                  contains(cmake, "EXV_PLATFORM_WINDOWS") &&
+                  !contains(cmake, std::string("ECNU") + "VPN_SOURCE_DIR") &&
+                  !contains(cmake, std::string("ECNU") + "VPN_VERSION") &&
+                  !contains(cmake,
+                            std::string("ECNU") + "VPN_PLATFORM_WINDOWS"),
+              "CMake compile definitions should use the EXV_* namespace") &&
        ok;
 
   return ok;
@@ -705,12 +940,14 @@ int main() {
   ok = check_scanner_examples() && ok;
   ok = check_production_files_exist_and_scan_cleanly() && ok;
   ok = check_webview_package_policy() && ok;
+  ok = check_common_runtime_path_policy() && ok;
   ok = check_webview_shell_icon_assets() && ok;
   ok = check_retired_electron_artifacts() && ok;
   ok = check_legacy_staging_scripts_removed() && ok;
   ok = check_production_build_scripts() && ok;
   ok = check_runtime_assets_doc_policy() && ok;
   ok = check_cmake_wiring() && ok;
+  ok = check_exv_naming_policy() && ok;
   ok = check_active_cmake_legacy_sources_absent() && ok;
   ok = check_validation_scripts_do_not_name_legacy_payloads() && ok;
   ok = check_production_runtime_dirs() && ok;

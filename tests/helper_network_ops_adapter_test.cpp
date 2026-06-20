@@ -99,12 +99,12 @@ int test_platform_backed_helper_ops_delegate_and_track_resources() {
   session.value = "session-a";
   exv::helper::PrepareTunnelDeviceRequest prepare_req;
   prepare_req.session_id = session;
-  prepare_req.adapter_name = "ECNU-VPN";
+  prepare_req.adapter_name = "EXV";
   std::vector<exv::helper::ManagedResource> prepare_resources;
   auto prepare =
       helper_ops->prepare_tunnel_device(prepare_req, &prepare_resources);
 
-  ok = expect(prepare.device_path == "platform-device://ECNU-VPN",
+  ok = expect(prepare.device_path == "platform-device://EXV",
               "prepare should return platform device path") &&
        ok;
   ok = expect(prepare.mtu == 1320, "prepare should return platform MTU") && ok;
@@ -113,7 +113,7 @@ int test_platform_backed_helper_ops_delegate_and_track_resources() {
        ok;
   ok = expect(prepare_resources.size() == 1 &&
                   prepare_resources[0].type == "adapter" &&
-                  prepare_resources[0].detail == "ECNU-VPN",
+                  prepare_resources[0].detail == "EXV",
               "prepare should register the adapter resource") &&
        ok;
 
@@ -132,7 +132,7 @@ int test_platform_backed_helper_ops_delegate_and_track_resources() {
               "platform apply should be called once") &&
        ok;
   ok = expect(recording->last_apply_device.path ==
-                  "platform-device://ECNU-VPN",
+                  "platform-device://EXV",
               "apply should use the prepared platform descriptor") &&
        ok;
   ok = expect(recording->last_apply_config.interface_address ==
@@ -177,7 +177,7 @@ int test_platform_backed_helper_ops_delegate_and_track_resources() {
   ok = expect(recording->last_cleanup_resources.size() == 3,
               "resource-aware cleanup should receive all managed resources") &&
        ok;
-  ok = expect(recording->last_cleanup_adapter == "ECNU-VPN",
+  ok = expect(recording->last_cleanup_adapter == "EXV",
               "cleanup should use tracked adapter") &&
        ok;
   ok = expect(recording->last_cleanup_policy ==
@@ -198,7 +198,7 @@ int test_cleanup_with_no_requested_actions_does_not_call_platform() {
   session.value = "session-a";
   exv::helper::PrepareTunnelDeviceRequest prepare_req;
   prepare_req.session_id = session;
-  prepare_req.adapter_name = "ECNU-VPN";
+  prepare_req.adapter_name = "EXV";
   std::vector<exv::helper::ManagedResource> resources;
   auto prepare = helper_ops->prepare_tunnel_device(prepare_req, &resources);
   ok = expect(!prepare.device_path.empty(),

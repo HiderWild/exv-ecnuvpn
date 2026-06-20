@@ -41,13 +41,13 @@ std::filesystem::path unique_temp_dir(const std::string &name) {
   const auto stamp =
       std::chrono::steady_clock::now().time_since_epoch().count();
   auto path = std::filesystem::temp_directory_path() /
-              ("ecnuvpn-" + name + "-" + std::to_string(stamp));
+              ("exv-" + name + "-" + std::to_string(stamp));
   std::filesystem::create_directories(path);
   return path;
 }
 
 struct RuntimePathGuard {
-  ~RuntimePathGuard() { ecnuvpn::platform::clear_runtime_path_override(); }
+  ~RuntimePathGuard() { exv::platform::clear_runtime_path_override(); }
 };
 
 void write_json_file(const std::filesystem::path &path,
@@ -134,7 +134,7 @@ private:
 };
 
 bool active_owner_blocks_second_attempt() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("active-attempt");
   attempt::AcquireOptions first;
@@ -174,7 +174,7 @@ bool active_owner_blocks_second_attempt() {
 }
 
 bool dead_owner_allows_stale_attempt_replacement() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("stale-attempt");
   attempt::AcquireOptions stale;
@@ -203,7 +203,7 @@ bool dead_owner_allows_stale_attempt_replacement() {
 }
 
 bool unknown_owner_liveness_keeps_attempt_active() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("unknown-liveness-attempt");
   attempt::AcquireOptions active;
@@ -236,7 +236,7 @@ bool unknown_owner_liveness_keeps_attempt_active() {
 }
 
 bool fresh_lock_owner_metadata_wins_over_stale_registry() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("fresh-lock-over-stale-record");
   write_registry_record(dir, 111, "old-dead-attempt");
@@ -272,7 +272,7 @@ bool fresh_lock_owner_metadata_wins_over_stale_registry() {
 }
 
 bool dead_owner_live_helper_blocks_stale_cleanup() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("dead-owner-live-helper");
   write_registry_record(dir, 111, "helper-owned-attempt", "active", 222);
@@ -308,7 +308,7 @@ bool dead_owner_live_helper_blocks_stale_cleanup() {
 }
 
 bool dead_owner_dead_children_allow_stale_cleanup() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("dead-owner-dead-children");
   write_registry_record(dir, 131, "fully-dead-attempt", "active", 242);
@@ -339,7 +339,7 @@ bool dead_owner_dead_children_allow_stale_cleanup() {
 }
 
 bool unknown_child_liveness_keeps_attempt_active() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("unknown-child-liveness");
   write_registry_record(dir, 141, "unknown-child-attempt", "active", 252);
@@ -372,7 +372,7 @@ bool unknown_child_liveness_keeps_attempt_active() {
 }
 
 bool record_write_failure_removes_owned_lock_for_retry() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("write-failure-cleanup");
   std::filesystem::create_directories(dir / "connect-attempt.json");
@@ -409,7 +409,7 @@ bool record_write_failure_removes_owned_lock_for_retry() {
 }
 
 bool missing_registry_with_dead_lock_owner_is_recoverable() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("missing-registry-dead-lock-owner");
   write_lock_owner(dir, 666, "dead-lock-owner");
@@ -435,7 +435,7 @@ bool missing_registry_with_dead_lock_owner_is_recoverable() {
 }
 
 bool terminal_attempt_releases_guard_and_preserves_reason() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("terminal-attempt");
   attempt::AcquireOptions options;
@@ -472,7 +472,7 @@ bool terminal_attempt_releases_guard_and_preserves_reason() {
 }
 
 bool scope_exit_marks_current_attempt_terminal_on_exception() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("exception-cleanup-attempt");
   attempt::AcquireOptions options;
@@ -519,7 +519,7 @@ bool scope_exit_marks_current_attempt_terminal_on_exception() {
 }
 
 bool terminal_scope_retries_after_transient_mutex_contention() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   const auto dir = unique_temp_dir("terminal-mutex-contention");
   attempt::AcquireOptions options;
@@ -577,19 +577,19 @@ bool terminal_scope_retries_after_transient_mutex_contention() {
 }
 
 bool app_api_native_connect_reports_active_attempt_before_bootstrap() {
-  namespace attempt = ecnuvpn::connection_attempt;
+  namespace attempt = exv::connection_attempt;
 
   RuntimePathGuard guard;
   const auto dir = unique_temp_dir("app-api-active-attempt");
 
-  ecnuvpn::Config cfg;
+  exv::Config cfg;
   cfg.server = "https://vpn.example.invalid";
   cfg.username = "student@example.invalid";
   cfg.password.clear();
   cfg.remember_password = false;
   cfg.vpn_engine = "native";
   cfg.windows_tunnel_driver = "tap";
-  cfg.windows_tap_interface = "ECNU VPN TAP";
+  cfg.windows_tap_interface = "EXV TAP";
   cfg.auto_reconnect = false;
   cfg.extra_args.clear();
 
@@ -608,7 +608,7 @@ bool app_api_native_connect_reports_active_attempt_before_bootstrap() {
                                {"config_dir", dir.string()},
                                {"password", MOCK_PASSWORD}};
   const auto response =
-      ecnuvpn::app_api::handle_action("vpn.connect", payload);
+      exv::app_api::handle_action("vpn.connect", payload);
 
   attempt::mark_terminal_if_current(dir.string(), active.record.attempt_id,
                                     "test_complete");
@@ -646,12 +646,12 @@ bool app_api_native_connect_reports_active_attempt_before_bootstrap() {
 }
 
 bool app_api_acquires_attempt_before_submitting_connect_job() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const auto app_api_path =
-      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "core" /
+      std::filesystem::path(EXV_SOURCE_DIR) / "src" / "core" /
       "app_api" / "desktop_vpn_actions.cpp";
   std::ifstream in(app_api_path);
   const std::string source((std::istreambuf_iterator<char>(in)),
@@ -700,13 +700,13 @@ bool app_api_acquires_attempt_before_submitting_connect_job() {
 
 } // namespace
 
-namespace ecnuvpn {
+namespace exv {
 namespace helper {
 
 bool is_available() { return false; }
 
 } // namespace helper
-} // namespace ecnuvpn
+} // namespace exv
 
 int main() {
   bool ok = true;

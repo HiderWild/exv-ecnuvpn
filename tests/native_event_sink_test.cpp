@@ -53,13 +53,13 @@ int main() {
   bool ok = true;
 
   const auto tmp = std::filesystem::temp_directory_path();
-  const auto path = tmp / "ecnuvpn_native_event_sink_test.jsonl";
+  const auto path = tmp / "exv_native_event_sink_test.jsonl";
   {
     std::error_code ec;
     std::filesystem::remove(path, ec);
   }
 
-  ecnuvpn::vpn_engine::JsonLinesEventSink sink(path);
+  exv::vpn_engine::JsonLinesEventSink sink(path);
 
   // Round-trip exact UTF-8 text (no console codepage dependency).
   const std::string expected_bytes = "\xE8\xBF\x9E\xE6\x8E\xA5\xE6\x88\x90\xE5\x8A\x9F";
@@ -70,7 +70,7 @@ int main() {
 
   const std::string msg = expected;
 
-  ecnuvpn::vpn_engine::VpnEngineEvent event;
+  exv::vpn_engine::VpnEngineEvent event;
   event.type = "auth";
   event.level = "info";
   event.message = msg;
@@ -78,7 +78,7 @@ int main() {
   event.fields["user"] = "alice";
   sink.emit(event);
 
-  ecnuvpn::vpn_engine::VpnEngineEvent err;
+  exv::vpn_engine::VpnEngineEvent err;
   err.type = "auth";
   err.level = "error";
   err.message = msg;

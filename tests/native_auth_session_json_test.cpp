@@ -17,14 +17,14 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::vpn_engine::protocol::NativeAuthSession sample_session() {
-  ecnuvpn::vpn_engine::protocol::NativeAuthSession session;
+exv::vpn_engine::protocol::NativeAuthSession sample_session() {
+  exv::vpn_engine::protocol::NativeAuthSession session;
   session.server.scheme = "https";
   session.server.host = "vpn.example.invalid";
   session.server.port = 8443;
   session.server.base_path = "/vpn";
   session.username = "student@example.invalid";
-  session.useragent = "ECNU-VPN native-auth json test";
+  session.useragent = "EXV native-auth json test";
   session.cookie_header = "webvpn=secret-cookie-value";
   session.selected_group = "student";
   session.auth_method = "password";
@@ -37,14 +37,14 @@ ecnuvpn::vpn_engine::protocol::NativeAuthSession sample_session() {
 }
 
 bool roundtrip_preserves_auth_session_fields() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   const auto original = sample_session();
   const auto payload = to_json(original);
 
-  ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+  exv::vpn_engine::protocol::NativeAuthSession parsed;
   const auto result = from_json(payload, &parsed);
 
   ok = expect(result.ok, "roundtrip from_json should accept to_json payload") &&
@@ -86,7 +86,7 @@ bool roundtrip_preserves_auth_session_fields() {
 }
 
 bool serialized_payload_does_not_contain_password_field() {
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::to_json;
 
   const auto payload = to_json(sample_session());
   return expect(!payload.contains("password"),
@@ -94,7 +94,7 @@ bool serialized_payload_does_not_contain_password_field() {
 }
 
 bool redacted_summary_excludes_cookie_value() {
-  using ecnuvpn::vpn_engine::protocol::summarize_native_auth_session;
+  using exv::vpn_engine::protocol::summarize_native_auth_session;
 
   bool ok = true;
   const auto session = sample_session();
@@ -127,12 +127,12 @@ bool redacted_summary_excludes_cookie_value() {
 }
 
 bool summary_redacts_secret_like_free_form_fields() {
-  using ecnuvpn::vpn_engine::protocol::summarize_native_auth_session;
+  using exv::vpn_engine::protocol::summarize_native_auth_session;
 
   bool ok = true;
   auto session = sample_session();
   session.username = "alice token=user-token-123";
-  session.useragent = "ECNU-VPN password=ua-passw0rd csrf=ua-csrf-token";
+  session.useragent = "EXV password=ua-passw0rd csrf=ua-csrf-token";
   session.selected_group = "students; webvpn=group-cookie-value";
   session.diagnostics["http_status"] = "200";
   session.diagnostics["content_type"] = "text/html";
@@ -187,14 +187,14 @@ bool summary_redacts_secret_like_free_form_fields() {
 }
 
 bool missing_or_empty_cookie_is_rejected_without_leaking_cookie() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   auto payload = to_json(sample_session());
   payload.erase("cookie_header");
 
-  ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+  exv::vpn_engine::protocol::NativeAuthSession parsed;
   auto result = from_json(payload, &parsed);
   ok = expect(!result.ok, "missing cookie_header should be rejected") && ok;
   ok = expect(result.code == "auth_session_cookie_missing",
@@ -211,8 +211,8 @@ bool missing_or_empty_cookie_is_rejected_without_leaking_cookie() {
 }
 
 bool cookie_header_control_chars_are_rejected_without_leaking_value() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   auto payload = to_json(sample_session());
@@ -220,7 +220,7 @@ bool cookie_header_control_chars_are_rejected_without_leaking_value() {
       "webvpn=secret-cookie-value\r\nInjected: yes";
   payload["cookie_header"] = poisoned_cookie;
 
-  ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+  exv::vpn_engine::protocol::NativeAuthSession parsed;
   const auto result = from_json(payload, &parsed);
   ok = expect(!result.ok,
               "cookie_header with control chars should be rejected") &&
@@ -238,20 +238,20 @@ bool cookie_header_control_chars_are_rejected_without_leaking_value() {
 }
 
 bool useragent_control_chars_are_rejected_without_leaking_value() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   std::vector<std::string> poisoned_useragents = {
-      "ECNU-VPN\r\nInjected: ua",
-      std::string("ECNU-VPN ") + static_cast<char>(0x7f) + " native",
+      "EXV\r\nInjected: ua",
+      std::string("EXV ") + static_cast<char>(0x7f) + " native",
   };
 
   for (const auto &poisoned_useragent : poisoned_useragents) {
     auto payload = to_json(sample_session());
     payload["useragent"] = poisoned_useragent;
 
-    ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+    exv::vpn_engine::protocol::NativeAuthSession parsed;
     const auto result = from_json(payload, &parsed);
     ok = expect(!result.ok,
                 "useragent with control chars should be rejected") &&
@@ -259,7 +259,7 @@ bool useragent_control_chars_are_rejected_without_leaking_value() {
     ok = expect(result.code == "auth_session_useragent_invalid",
                 "bad useragent should use deterministic error code") &&
          ok;
-    ok = expect(result.message.find("ECNU-VPN") == std::string::npos,
+    ok = expect(result.message.find("EXV") == std::string::npos,
                 "useragent control-char error must not contain useragent") &&
          ok;
     ok = expect(result.message.find("Injected") == std::string::npos,
@@ -270,13 +270,13 @@ bool useragent_control_chars_are_rejected_without_leaking_value() {
 }
 
 bool unsupported_schema_version_is_rejected() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   auto payload = to_json(sample_session());
   payload["schema_version"] = 2;
 
-  ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+  exv::vpn_engine::protocol::NativeAuthSession parsed;
   const auto result = from_json(payload, &parsed);
   return expect(!result.ok, "unsupported schema_version should be rejected") &&
          expect(result.code == "auth_session_schema_unsupported",
@@ -284,8 +284,8 @@ bool unsupported_schema_version_is_rejected() {
 }
 
 bool schema_version_must_be_exact_integer_one() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   std::vector<nlohmann::json> invalid_versions = {
@@ -300,7 +300,7 @@ bool schema_version_must_be_exact_integer_one() {
     auto payload = to_json(sample_session());
     payload["schema_version"] = version;
 
-    ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+    exv::vpn_engine::protocol::NativeAuthSession parsed;
     const auto result = from_json(payload, &parsed);
     ok = expect(!result.ok,
                 "schema_version other than exact integer 1 should reject") &&
@@ -317,14 +317,14 @@ bool schema_version_must_be_exact_integer_one() {
 }
 
 bool malformed_server_is_rejected() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   auto payload = to_json(sample_session());
   payload["server"]["host"] = "";
 
-  ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+  exv::vpn_engine::protocol::NativeAuthSession parsed;
   const auto result = from_json(payload, &parsed);
   ok = expect(!result.ok, "empty server host should be rejected") && ok;
   ok = expect(result.code == "auth_session_server_invalid",
@@ -337,8 +337,8 @@ bool malformed_server_is_rejected() {
 }
 
 bool secret_like_diagnostics_are_not_serialized_or_summarized() {
-  using ecnuvpn::vpn_engine::protocol::summarize_native_auth_session;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::summarize_native_auth_session;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   auto session = sample_session();
@@ -373,9 +373,9 @@ bool secret_like_diagnostics_are_not_serialized_or_summarized() {
 }
 
 bool public_saml_diagnostic_roundtrips_without_secrets() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::summarize_native_auth_session;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::summarize_native_auth_session;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   auto session = sample_session();
@@ -396,7 +396,7 @@ bool public_saml_diagnostic_roundtrips_without_secrets() {
               "safe SAML diagnostic should be summarized") &&
        ok;
 
-  ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+  exv::vpn_engine::protocol::NativeAuthSession parsed;
   const auto result = from_json(payload, &parsed);
   ok = expect(result.ok, "safe SAML diagnostic should parse") && ok;
   ok = expect(parsed.diagnostics.at("saml_required") == "true",
@@ -417,8 +417,8 @@ bool public_saml_diagnostic_roundtrips_without_secrets() {
 }
 
 bool unsafe_or_malformed_diagnostics_are_rejected_on_parse() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   std::vector<nlohmann::json> bad_diagnostics = {
@@ -434,7 +434,7 @@ bool unsafe_or_malformed_diagnostics_are_rejected_on_parse() {
     auto payload = to_json(sample_session());
     payload["diagnostics"] = diagnostics;
 
-    ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+    exv::vpn_engine::protocol::NativeAuthSession parsed;
     const auto result = from_json(payload, &parsed);
     ok = expect(!result.ok,
                 "unsafe or malformed diagnostics should be rejected") &&
@@ -450,8 +450,8 @@ bool unsafe_or_malformed_diagnostics_are_rejected_on_parse() {
 }
 
 bool malformed_required_fields_are_rejected() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
 
@@ -475,7 +475,7 @@ bool malformed_required_fields_are_rejected() {
     auto payload = to_json(sample_session());
     payload[test_case.field] = test_case.value;
 
-    ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+    exv::vpn_engine::protocol::NativeAuthSession parsed;
     const auto result = from_json(payload, &parsed);
     ok = expect(!result.ok, "wrong required field type should reject") && ok;
     ok = expect(result.code == test_case.expected_code,
@@ -495,7 +495,7 @@ bool malformed_required_fields_are_rejected() {
     auto payload = to_json(sample_session());
     payload.erase(test_case.field);
 
-    ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+    exv::vpn_engine::protocol::NativeAuthSession parsed;
     const auto result = from_json(payload, &parsed);
     ok = expect(!result.ok, "missing required field should reject") && ok;
     ok = expect(result.code == test_case.expected_code,
@@ -506,8 +506,8 @@ bool malformed_required_fields_are_rejected() {
 }
 
 bool server_port_boundaries_are_rejected() {
-  using ecnuvpn::vpn_engine::protocol::from_json;
-  using ecnuvpn::vpn_engine::protocol::to_json;
+  using exv::vpn_engine::protocol::from_json;
+  using exv::vpn_engine::protocol::to_json;
 
   bool ok = true;
   for (const auto &port : {nlohmann::json(0), nlohmann::json(-1),
@@ -515,7 +515,7 @@ bool server_port_boundaries_are_rejected() {
     auto payload = to_json(sample_session());
     payload["server"]["port"] = port;
 
-    ecnuvpn::vpn_engine::protocol::NativeAuthSession parsed;
+    exv::vpn_engine::protocol::NativeAuthSession parsed;
     const auto result = from_json(payload, &parsed);
     ok = expect(!result.ok, "invalid server port should reject") && ok;
     ok = expect(result.code == "auth_session_server_invalid",

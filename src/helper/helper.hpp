@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace helper {
 
 struct DaemonOptions {
@@ -24,4 +24,4 @@ int daemon_main(const DaemonOptions &options);
 void request_daemon_stop();
 
 } // namespace helper
-} // namespace ecnuvpn
+} // namespace exv

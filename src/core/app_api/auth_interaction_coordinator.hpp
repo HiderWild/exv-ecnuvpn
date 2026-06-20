@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 struct PendingAuthInteraction {
@@ -97,4 +97,4 @@ bool clear_active_connect_auth_coordinator_if_current(
     const std::shared_ptr<AuthInteractionCoordinator> &coordinator);
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

@@ -7,7 +7,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace runtime {
 
 // Resolved, process-wide runtime paths. Pinned once by bootstrap() so that
@@ -18,12 +18,12 @@ struct RuntimePaths {
   std::string state_dir;   // canonical config/state directory
   std::string home;        // home directory used to derive state_dir
   std::string config_path; // <state_dir>/config(.json)
-  std::string log_path;    // <state_dir>/ecnuvpn.log
+  std::string log_path;    // <state_dir>/exv.log
 };
 
 // Pin the runtime paths for this process. Precedence (highest first):
 //   1. explicit_state_dir argument (non-empty)
-//   2. environment variable ECNUVPN_STATE_DIR
+//   2. environment variable EXV_STATE_DIR
 //   3. an override already installed via platform::set_runtime_path_override
 //   4. platform default (derived from the effective home)
 //
@@ -40,4 +40,4 @@ RuntimePaths paths();
 bool is_bootstrapped();
 
 } // namespace runtime
-} // namespace ecnuvpn
+} // namespace exv

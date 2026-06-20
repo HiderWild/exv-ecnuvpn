@@ -91,7 +91,7 @@ static void write_json_line(const json& obj) {
 static json desktop_action_response(int id,
                                     const std::string& action,
                                     const json& payload) {
-    json result = ecnuvpn::app_api::handle_action(action, payload);
+    json result = exv::app_api::handle_action(action, payload);
 
     if (result.is_object() && result.value("ok", true) == false) {
         std::string message = result.value("error", std::string());
@@ -158,7 +158,7 @@ static exv::core_api::RpcResponse dispatch_desktop_as_rpc(
         return response;
     }
 
-    json result = ecnuvpn::app_api::handle_action(request.action, payload);
+    json result = exv::app_api::handle_action(request.action, payload);
     if (result.is_object() && result.value("ok", true) == false) {
         response.success = false;
         response.error_message = result.value("error", std::string());
@@ -522,14 +522,14 @@ int core_process_main(const std::string& config_dir,
     std::cerr.setf(std::ios::unitbuf);
 
     // 1. Bootstrap runtime paths
-    ecnuvpn::runtime::bootstrap(config_dir, home_dir);
+    exv::runtime::bootstrap(config_dir, home_dir);
 
     // 2. Initialize logger
-    ecnuvpn::platform::logging::configure_default_logging(false);
+    exv::platform::logging::configure_default_logging(false);
 
     // 2b. Instantiate LogRenderer so typed events reach the disk file.
     // Must live for the lifetime of the core process.
-    ecnuvpn::LogRenderer log_renderer;
+    exv::LogRenderer log_renderer;
 
     exv::observability::LogFacade::info("Core process starting (mode=core, use_stdin=" + std::string(use_stdin ? "true" : "false") + ")");
 
@@ -697,7 +697,7 @@ int core_process_main(const std::string& config_dir,
                 }
 
                 auto events =
-                    ecnuvpn::app_api::drain_virtual_network_status_events();
+                    exv::app_api::drain_virtual_network_status_events();
                 if (events.empty()) {
                     continue;
                 }
@@ -784,7 +784,7 @@ int core_process_main(const std::string& config_dir,
         status_event_worker.join();
     }
     lane_scheduler.stop();
-    ecnuvpn::app_api::shutdown_desktop_vpn_runtime();
+    exv::app_api::shutdown_desktop_vpn_runtime();
     pipe_listener->stop();
 
     std::optional<exv::core::lifecycle::CoreRegistryDeleteMatch> delete_match;

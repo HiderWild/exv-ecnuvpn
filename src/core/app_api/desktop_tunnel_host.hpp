@@ -10,7 +10,7 @@ class HelperClient;
 class HelperConnector;
 }
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 std::string helper_binary_next_to_exv();
@@ -30,4 +30,4 @@ void reset_tunnel_controller();
 std::string tunnel_controller_init_error();
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

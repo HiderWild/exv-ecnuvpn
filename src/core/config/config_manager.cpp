@@ -11,7 +11,7 @@
 
 #include <filesystem>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 
 ConfigManager::ConfigManager(const std::string& config_dir)
@@ -81,4 +81,4 @@ Config ConfigManager::get() const {
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

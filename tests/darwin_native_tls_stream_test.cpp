@@ -21,9 +21,9 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
@@ -34,12 +34,12 @@ std::vector<std::uint8_t> bytes(std::initializer_list<std::uint8_t> values) {
   return std::vector<std::uint8_t>(values.begin(), values.end());
 }
 
-class MockDarwinTlsApi final : public ecnuvpn::platform::DarwinNativeTlsApi {
+class MockDarwinTlsApi final : public exv::platform::DarwinNativeTlsApi {
 public:
-  ecnuvpn::platform::DarwinNativeTlsTcpConnectResult tcp_connect_result;
-  ecnuvpn::platform::DarwinNativeTlsHandshakeResult handshake_result;
-  ecnuvpn::vpn_engine::ValidationResult write_result;
-  std::deque<ecnuvpn::platform::DarwinNativeTlsReadResult> read_results;
+  exv::platform::DarwinNativeTlsTcpConnectResult tcp_connect_result;
+  exv::platform::DarwinNativeTlsHandshakeResult handshake_result;
+  exv::vpn_engine::ValidationResult write_result;
+  std::deque<exv::platform::DarwinNativeTlsReadResult> read_results;
 
   int connect_count = 0;
   int handshake_count = 0;
@@ -48,7 +48,7 @@ public:
   int close_context_count = 0;
   int close_socket_count = 0;
 
-  ecnuvpn::vpn_engine::protocol::TlsEndpoint last_endpoint;
+  exv::vpn_engine::protocol::TlsEndpoint last_endpoint;
   std::string last_sni;
   std::vector<std::uint8_t> last_write;
 
@@ -57,66 +57,66 @@ public:
     handshake_result.tls_context = 202;
   }
 
-  ecnuvpn::platform::DarwinNativeTlsTcpConnectResult
-  connect_tcp(const ecnuvpn::vpn_engine::protocol::TlsEndpoint &endpoint)
+  exv::platform::DarwinNativeTlsTcpConnectResult
+  connect_tcp(const exv::vpn_engine::protocol::TlsEndpoint &endpoint)
       override {
     ++connect_count;
     last_endpoint = endpoint;
     return tcp_connect_result;
   }
 
-  ecnuvpn::platform::DarwinNativeTlsHandshakeResult
-  handshake(ecnuvpn::platform::DarwinNativeTlsSocketHandle,
+  exv::platform::DarwinNativeTlsHandshakeResult
+  handshake(exv::platform::DarwinNativeTlsSocketHandle,
             const std::string &sni_host) override {
     ++handshake_count;
     last_sni = sni_host;
     return handshake_result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  write_plaintext(ecnuvpn::platform::DarwinNativeTlsContextHandle,
-                  ecnuvpn::platform::DarwinNativeTlsSocketHandle,
+  exv::vpn_engine::ValidationResult
+  write_plaintext(exv::platform::DarwinNativeTlsContextHandle,
+                  exv::platform::DarwinNativeTlsSocketHandle,
                   const std::vector<std::uint8_t> &payload) override {
     ++write_count;
     last_write = payload;
     return write_result;
   }
 
-  ecnuvpn::platform::DarwinNativeTlsReadResult
-  read_plaintext(ecnuvpn::platform::DarwinNativeTlsContextHandle,
-                 ecnuvpn::platform::DarwinNativeTlsSocketHandle) override {
+  exv::platform::DarwinNativeTlsReadResult
+  read_plaintext(exv::platform::DarwinNativeTlsContextHandle,
+                 exv::platform::DarwinNativeTlsSocketHandle) override {
     ++read_count;
     if (read_results.empty()) {
-      ecnuvpn::platform::DarwinNativeTlsReadResult result;
+      exv::platform::DarwinNativeTlsReadResult result;
       result.result = invalid("tls_read_failed", "no read result queued");
       return result;
     }
 
-    ecnuvpn::platform::DarwinNativeTlsReadResult result = read_results.front();
+    exv::platform::DarwinNativeTlsReadResult result = read_results.front();
     read_results.pop_front();
     return result;
   }
 
   void close_tls_context(
-      ecnuvpn::platform::DarwinNativeTlsContextHandle) override {
+      exv::platform::DarwinNativeTlsContextHandle) override {
     ++close_context_count;
   }
 
   void close_socket(
-      ecnuvpn::platform::DarwinNativeTlsSocketHandle) override {
+      exv::platform::DarwinNativeTlsSocketHandle) override {
     ++close_socket_count;
   }
 };
 
-std::unique_ptr<ecnuvpn::platform::NativeTlsStream>
+std::unique_ptr<exv::platform::NativeTlsStream>
 make_stream(MockDarwinTlsApi **mock) {
   auto api = std::make_unique<MockDarwinTlsApi>();
   *mock = api.get();
-  return std::make_unique<ecnuvpn::platform::NativeTlsStream>(std::move(api));
+  return std::make_unique<exv::platform::NativeTlsStream>(std::move(api));
 }
 
-ecnuvpn::vpn_engine::protocol::TlsEndpoint endpoint() {
-  ecnuvpn::vpn_engine::protocol::TlsEndpoint endpoint;
+exv::vpn_engine::protocol::TlsEndpoint endpoint() {
+  exv::vpn_engine::protocol::TlsEndpoint endpoint;
   endpoint.host = "vpn.example.invalid";
   endpoint.port = 4443;
   endpoint.sni_host = "sni.example.invalid";
@@ -131,27 +131,27 @@ struct NativeSeamState {
   int failed_socket_option = 0;
   int last_error = EINVAL;
   int protocol_floor_result = 0;
-  ecnuvpn::platform::DarwinNativeTlsProtocolVersion last_protocol_floor =
-      ecnuvpn::platform::DarwinNativeTlsProtocolVersion::tls12;
+  exv::platform::DarwinNativeTlsProtocolVersion last_protocol_floor =
+      exv::platform::DarwinNativeTlsProtocolVersion::tls12;
   std::vector<int> socket_options;
 };
 
-ecnuvpn::platform::DarwinNativeTlsDependencies
+exv::platform::DarwinNativeTlsDependencies
 native_dependencies(std::shared_ptr<NativeSeamState> state) {
-  ecnuvpn::platform::DarwinNativeTlsDependencies deps;
+  exv::platform::DarwinNativeTlsDependencies deps;
   deps.tcp.open_connected_socket =
-      [state](const ecnuvpn::vpn_engine::protocol::TlsEndpoint &, int) {
+      [state](const exv::vpn_engine::protocol::TlsEndpoint &, int) {
         ++state->open_connected_socket_count;
-        ecnuvpn::platform::DarwinNativeTlsTcpConnectResult result;
+        exv::platform::DarwinNativeTlsTcpConnectResult result;
         result.socket = 303;
         return result;
       };
   deps.tcp.close_socket = [state](
-                              ecnuvpn::platform::DarwinNativeTlsSocketHandle) {
+                              exv::platform::DarwinNativeTlsSocketHandle) {
     ++state->close_socket_count;
   };
   deps.socket_options.set_socket_option =
-      [state](ecnuvpn::platform::DarwinNativeTlsSocketHandle, int, int option,
+      [state](exv::platform::DarwinNativeTlsSocketHandle, int, int option,
               const void *, std::size_t) {
         ++state->set_socket_option_count;
         state->socket_options.push_back(option);
@@ -159,8 +159,8 @@ native_dependencies(std::shared_ptr<NativeSeamState> state) {
       };
   deps.socket_options.last_error = [state] { return state->last_error; };
   deps.secure_transport.set_protocol_version_min =
-      [state](ecnuvpn::platform::DarwinNativeTlsSecureTransportContextHandle,
-              ecnuvpn::platform::DarwinNativeTlsProtocolVersion version) {
+      [state](exv::platform::DarwinNativeTlsSecureTransportContextHandle,
+              exv::platform::DarwinNativeTlsProtocolVersion version) {
         ++state->set_protocol_floor_count;
         state->last_protocol_floor = version;
         return state->protocol_floor_result;
@@ -172,8 +172,8 @@ bool socket_hardening_failure_fails_before_tls_handshake(int failed_option,
                                                          const char *name) {
   auto state = std::make_shared<NativeSeamState>();
   state->failed_socket_option = failed_option;
-  ecnuvpn::platform::NativeTlsStream stream(
-      ecnuvpn::platform::make_darwin_native_tls_api(
+  exv::platform::NativeTlsStream stream(
+      exv::platform::make_darwin_native_tls_api(
           native_dependencies(state)));
 
   auto connected = stream.connect(endpoint());
@@ -230,8 +230,8 @@ bool socket_timeout_and_no_sigpipe_failures_are_fatal() {
 bool secure_transport_protocol_floor_failure_is_handshake_error() {
   auto state = std::make_shared<NativeSeamState>();
   state->protocol_floor_result = -9800;
-  ecnuvpn::platform::NativeTlsStream stream(
-      ecnuvpn::platform::make_darwin_native_tls_api(
+  exv::platform::NativeTlsStream stream(
+      exv::platform::make_darwin_native_tls_api(
           native_dependencies(state)));
 
   auto connected = stream.connect(endpoint());
@@ -251,7 +251,7 @@ bool secure_transport_protocol_floor_failure_is_handshake_error() {
               "TLS setup should set an explicit minimum protocol once") &&
        ok;
   ok = expect(state->last_protocol_floor ==
-                  ecnuvpn::platform::DarwinNativeTlsProtocolVersion::tls12,
+                  exv::platform::DarwinNativeTlsProtocolVersion::tls12,
               "TLS setup should require TLS 1.2 as the protocol floor") &&
        ok;
   ok = expect(state->close_socket_count == 1,
@@ -349,7 +349,7 @@ bool connect_failure_maps_to_tls_connect_failed_and_leaves_not_connected() {
   mock->tcp_connect_result.result =
       invalid("tls_connect_failed", "TCP connect timed out");
   mock->tcp_connect_result.socket =
-      ecnuvpn::platform::kInvalidDarwinNativeTlsSocketHandle;
+      exv::platform::kInvalidDarwinNativeTlsSocketHandle;
 
   auto connected = stream->connect(endpoint());
   auto write = stream->write_all(bytes({0x01}));
@@ -383,7 +383,7 @@ bool handshake_failure_maps_to_tls_handshake_failed_and_closes_socket() {
   MockDarwinTlsApi *mock = nullptr;
   auto stream = make_stream(&mock);
   mock->handshake_result.tls_context =
-      ecnuvpn::platform::kInvalidDarwinNativeTlsContextHandle;
+      exv::platform::kInvalidDarwinNativeTlsContextHandle;
   mock->handshake_result.result =
       invalid("tls_handshake_failed", "TLS handshake failed");
 
@@ -458,7 +458,7 @@ bool partial_reads_return_plaintext_chunks() {
 bool peer_close_returns_clean_eof() {
   MockDarwinTlsApi *mock = nullptr;
   auto stream = make_stream(&mock);
-  ecnuvpn::platform::DarwinNativeTlsReadResult peer_closed;
+  exv::platform::DarwinNativeTlsReadResult peer_closed;
   peer_closed.peer_closed = true;
   mock->read_results.push_back(peer_closed);
 

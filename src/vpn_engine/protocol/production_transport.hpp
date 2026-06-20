@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -18,10 +18,10 @@ struct HttpResponse;
 class ProductionProtocolTransport final : public ProtocolTransport {
 public:
   explicit ProductionProtocolTransport(
-      TlsStream *stream, std::string client_hostname = "ecnu-vpn");
+      TlsStream *stream, std::string client_hostname = "exv");
   explicit ProductionProtocolTransport(
       std::unique_ptr<TlsStream> stream,
-      std::string client_hostname = "ecnu-vpn");
+      std::string client_hostname = "exv");
 
   AuthResult authenticate(const ProtocolSessionOptions &options) override;
   ValidationResult connect_cstp(const std::string &cookie,
@@ -63,4 +63,4 @@ private:
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

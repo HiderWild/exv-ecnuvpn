@@ -19,9 +19,9 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
@@ -32,14 +32,14 @@ std::vector<std::uint8_t> bytes(std::initializer_list<std::uint8_t> values) {
   return std::vector<std::uint8_t>(values.begin(), values.end());
 }
 
-class FakeTlsStream final : public ecnuvpn::vpn_engine::protocol::TlsStream {
+class FakeTlsStream final : public exv::vpn_engine::protocol::TlsStream {
 public:
   explicit FakeTlsStream(
-      ecnuvpn::vpn_engine::ValidationResult connect_result = {})
+      exv::vpn_engine::ValidationResult connect_result = {})
       : connect_result_(std::move(connect_result)) {}
 
-  ecnuvpn::vpn_engine::ValidationResult
-  connect(const ecnuvpn::vpn_engine::protocol::TlsEndpoint &endpoint)
+  exv::vpn_engine::ValidationResult
+  connect(const exv::vpn_engine::protocol::TlsEndpoint &endpoint)
       override {
     last_endpoint_ = endpoint;
     ++connect_count_;
@@ -52,7 +52,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_all(const std::vector<std::uint8_t> &bytes) override {
     if (closed_)
       return invalid("tls_stream_closed", "TLS stream is closed");
@@ -63,7 +63,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_some(std::vector<std::uint8_t> *out) override {
     if (!out)
       return invalid("tls_stream_null_output", "read output must not be null");
@@ -95,7 +95,7 @@ public:
     read_chunks_.push_back(std::move(chunk));
   }
 
-  const ecnuvpn::vpn_engine::protocol::TlsEndpoint &last_endpoint() const {
+  const exv::vpn_engine::protocol::TlsEndpoint &last_endpoint() const {
     return last_endpoint_;
   }
 
@@ -109,8 +109,8 @@ public:
   bool closed() const { return closed_; }
 
 private:
-  ecnuvpn::vpn_engine::ValidationResult connect_result_;
-  ecnuvpn::vpn_engine::protocol::TlsEndpoint last_endpoint_;
+  exv::vpn_engine::ValidationResult connect_result_;
+  exv::vpn_engine::protocol::TlsEndpoint last_endpoint_;
   std::vector<std::vector<std::uint8_t>> writes_;
   std::deque<std::vector<std::uint8_t>> read_chunks_;
   bool connected_ = false;
@@ -120,7 +120,7 @@ private:
 };
 
 bool test_endpoint_connect_contract() {
-  using ecnuvpn::vpn_engine::protocol::TlsEndpoint;
+  using exv::vpn_engine::protocol::TlsEndpoint;
 
   bool ok = true;
 
@@ -152,7 +152,7 @@ bool test_endpoint_connect_contract() {
 }
 
 bool test_write_all_partial_read_and_eof_contract() {
-  using ecnuvpn::vpn_engine::protocol::TlsEndpoint;
+  using exv::vpn_engine::protocol::TlsEndpoint;
 
   bool ok = true;
 
@@ -200,7 +200,7 @@ bool test_write_all_partial_read_and_eof_contract() {
 }
 
 bool test_tls_verification_failure_contract() {
-  using ecnuvpn::vpn_engine::protocol::TlsEndpoint;
+  using exv::vpn_engine::protocol::TlsEndpoint;
 
   bool ok = true;
 
@@ -237,7 +237,7 @@ bool test_tls_verification_failure_contract() {
 }
 
 bool test_idempotent_close_contract() {
-  using ecnuvpn::vpn_engine::protocol::TlsEndpoint;
+  using exv::vpn_engine::protocol::TlsEndpoint;
 
   bool ok = true;
 
@@ -291,7 +291,7 @@ bool test_protocol_sources_do_not_include_platform_tls_headers() {
   bool ok = true;
 
   const std::filesystem::path protocol_dir =
-      std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" / "vpn_engine" /
+      std::filesystem::path(EXV_SOURCE_DIR) / "src" / "vpn_engine" /
       "protocol";
 
   const std::vector<std::string> forbidden = {

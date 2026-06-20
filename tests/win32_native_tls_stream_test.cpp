@@ -32,9 +32,9 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
@@ -235,14 +235,14 @@ decltype(&FreeCredentialsHandle) __imp_FreeCredentialsHandle =
 
 namespace {
 
-class MockNativeTlsApi final : public ecnuvpn::platform::NativeTlsApi {
+class MockNativeTlsApi final : public exv::platform::NativeTlsApi {
 public:
-  ecnuvpn::vpn_engine::ValidationResult startup_result;
-  ecnuvpn::platform::NativeTlsTcpConnectResult tcp_connect_result;
-  ecnuvpn::platform::NativeTlsHandshakeResult handshake_result;
-  ecnuvpn::vpn_engine::ValidationResult send_result;
-  std::deque<ecnuvpn::platform::NativeTlsRecvResult> recv_results;
-  std::deque<ecnuvpn::platform::NativeTlsDecryptResult> decrypt_results;
+  exv::vpn_engine::ValidationResult startup_result;
+  exv::platform::NativeTlsTcpConnectResult tcp_connect_result;
+  exv::platform::NativeTlsHandshakeResult handshake_result;
+  exv::vpn_engine::ValidationResult send_result;
+  std::deque<exv::platform::NativeTlsRecvResult> recv_results;
+  std::deque<exv::platform::NativeTlsDecryptResult> decrypt_results;
 
   int startup_count = 0;
   int connect_count = 0;
@@ -254,7 +254,7 @@ public:
   int close_socket_count = 0;
   int shutdown_count = 0;
 
-  ecnuvpn::vpn_engine::protocol::TlsEndpoint last_endpoint;
+  exv::vpn_engine::protocol::TlsEndpoint last_endpoint;
   std::string last_sni;
   std::vector<std::uint8_t> last_write;
   std::vector<std::vector<std::uint8_t>> decrypt_inputs;
@@ -264,87 +264,87 @@ public:
     handshake_result.tls_context = 202;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult startup() override {
+  exv::vpn_engine::ValidationResult startup() override {
     ++startup_count;
     return startup_result;
   }
 
-  ecnuvpn::platform::NativeTlsTcpConnectResult connect_tcp(
-      const ecnuvpn::vpn_engine::protocol::TlsEndpoint &endpoint) override {
+  exv::platform::NativeTlsTcpConnectResult connect_tcp(
+      const exv::vpn_engine::protocol::TlsEndpoint &endpoint) override {
     ++connect_count;
     last_endpoint = endpoint;
     return tcp_connect_result;
   }
 
-  ecnuvpn::platform::NativeTlsHandshakeResult
-  handshake(ecnuvpn::platform::NativeTlsSocketHandle,
+  exv::platform::NativeTlsHandshakeResult
+  handshake(exv::platform::NativeTlsSocketHandle,
             const std::string &sni_host) override {
     ++handshake_count;
     last_sni = sni_host;
     return handshake_result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult send_plaintext(
-      ecnuvpn::platform::NativeTlsContextHandle,
-      ecnuvpn::platform::NativeTlsSocketHandle,
+  exv::vpn_engine::ValidationResult send_plaintext(
+      exv::platform::NativeTlsContextHandle,
+      exv::platform::NativeTlsSocketHandle,
       const std::vector<std::uint8_t> &bytes) override {
     ++send_count;
     last_write = bytes;
     return send_result;
   }
 
-  ecnuvpn::platform::NativeTlsRecvResult recv_encrypted(
-      ecnuvpn::platform::NativeTlsSocketHandle) override {
+  exv::platform::NativeTlsRecvResult recv_encrypted(
+      exv::platform::NativeTlsSocketHandle) override {
     ++recv_count;
     if (recv_results.empty()) {
-      ecnuvpn::platform::NativeTlsRecvResult result;
+      exv::platform::NativeTlsRecvResult result;
       result.result = invalid("transport_closed", "no encrypted bytes queued");
       result.peer_closed = true;
       return result;
     }
 
-    ecnuvpn::platform::NativeTlsRecvResult result = recv_results.front();
+    exv::platform::NativeTlsRecvResult result = recv_results.front();
     recv_results.pop_front();
     return result;
   }
 
-  ecnuvpn::platform::NativeTlsDecryptResult decrypt(
-      ecnuvpn::platform::NativeTlsContextHandle,
+  exv::platform::NativeTlsDecryptResult decrypt(
+      exv::platform::NativeTlsContextHandle,
       const std::vector<std::uint8_t> &encrypted) override {
     ++decrypt_count;
     decrypt_inputs.push_back(encrypted);
     if (decrypt_results.empty()) {
-      ecnuvpn::platform::NativeTlsDecryptResult result;
+      exv::platform::NativeTlsDecryptResult result;
       result.result = invalid("tls_decrypt_failed", "no decrypt result queued");
       return result;
     }
 
-    ecnuvpn::platform::NativeTlsDecryptResult result = decrypt_results.front();
+    exv::platform::NativeTlsDecryptResult result = decrypt_results.front();
     decrypt_results.pop_front();
     return result;
   }
 
   void close_tls_context(
-      ecnuvpn::platform::NativeTlsContextHandle) override {
+      exv::platform::NativeTlsContextHandle) override {
     ++close_context_count;
   }
 
-  void close_socket(ecnuvpn::platform::NativeTlsSocketHandle) override {
+  void close_socket(exv::platform::NativeTlsSocketHandle) override {
     ++close_socket_count;
   }
 
   void shutdown() override { ++shutdown_count; }
 };
 
-std::unique_ptr<ecnuvpn::platform::NativeTlsStream>
+std::unique_ptr<exv::platform::NativeTlsStream>
 make_stream(MockNativeTlsApi **mock) {
   auto api = std::make_unique<MockNativeTlsApi>();
   *mock = api.get();
-  return std::make_unique<ecnuvpn::platform::NativeTlsStream>(std::move(api));
+  return std::make_unique<exv::platform::NativeTlsStream>(std::move(api));
 }
 
-ecnuvpn::vpn_engine::protocol::TlsEndpoint endpoint() {
-  ecnuvpn::vpn_engine::protocol::TlsEndpoint endpoint;
+exv::vpn_engine::protocol::TlsEndpoint endpoint() {
+  exv::vpn_engine::protocol::TlsEndpoint endpoint;
   endpoint.host = "vpn.example.invalid";
   endpoint.port = 4443;
   endpoint.sni_host = "sni.example.invalid";
@@ -443,7 +443,7 @@ bool dns_failure_maps_to_tls_connect_failed() {
   mock->tcp_connect_result.result =
       invalid("tls_connect_failed", "DNS resolution failed");
   mock->tcp_connect_result.socket =
-      ecnuvpn::platform::kInvalidNativeTlsSocketHandle;
+      exv::platform::kInvalidNativeTlsSocketHandle;
 
   auto connected = stream->connect(endpoint());
 
@@ -473,7 +473,7 @@ bool tcp_failure_maps_to_tls_connect_failed() {
   mock->tcp_connect_result.result =
       invalid("tls_connect_failed", "TCP connect timed out");
   mock->tcp_connect_result.socket =
-      ecnuvpn::platform::kInvalidNativeTlsSocketHandle;
+      exv::platform::kInvalidNativeTlsSocketHandle;
 
   auto connected = stream->connect(endpoint());
 
@@ -524,8 +524,8 @@ bool failed_connect_leaves_stream_not_connected_for_io() {
 
 bool schannel_send_failure_deletes_created_context_once() {
   reset_windows_tls_mock();
-  ecnuvpn::platform::NativeTlsStream stream(
-      ecnuvpn::platform::make_windows_native_tls_api());
+  exv::platform::NativeTlsStream stream(
+      exv::platform::make_windows_native_tls_api());
 
   auto connected = stream.connect(endpoint());
   auto write = stream.write_all(bytes({0x01}));
@@ -575,8 +575,8 @@ bool tls_alert_closes_transport() {
   MockNativeTlsApi *mock = nullptr;
   auto stream = make_stream(&mock);
   mock->recv_results.push_back({{}, bytes({0x15, 0x03, 0x03}), false});
-  ecnuvpn::platform::NativeTlsDecryptResult alert;
-  alert.status = ecnuvpn::platform::NativeTlsReadStatus::tls_alert;
+  exv::platform::NativeTlsDecryptResult alert;
+  alert.status = exv::platform::NativeTlsReadStatus::tls_alert;
   alert.result = invalid("tls_alert", "TLS alert received");
   mock->decrypt_results.push_back(alert);
 
@@ -606,7 +606,7 @@ bool tls_alert_closes_transport() {
 bool tcp_peer_close_returns_clean_eof() {
   MockNativeTlsApi *mock = nullptr;
   auto stream = make_stream(&mock);
-  ecnuvpn::platform::NativeTlsRecvResult peer_closed;
+  exv::platform::NativeTlsRecvResult peer_closed;
   peer_closed.peer_closed = true;
   mock->recv_results.push_back(peer_closed);
 
@@ -638,8 +638,8 @@ bool schannel_peer_closed_returns_clean_eof() {
   auto stream = make_stream(&mock);
   mock->recv_results.push_back({{}, bytes({0x17, 0x03, 0x03}), false});
 
-  ecnuvpn::platform::NativeTlsDecryptResult peer_closed;
-  peer_closed.status = ecnuvpn::platform::NativeTlsReadStatus::peer_closed;
+  exv::platform::NativeTlsDecryptResult peer_closed;
+  peer_closed.status = exv::platform::NativeTlsReadStatus::peer_closed;
   peer_closed.encrypted_bytes_consumed = 3;
   mock->decrypt_results.push_back(peer_closed);
 
@@ -703,14 +703,14 @@ bool preserves_encrypted_extra_between_partial_reads() {
   auto stream = make_stream(&mock);
   mock->recv_results.push_back({{}, bytes({0x01, 0x02, 0x03, 0x04}), false});
 
-  ecnuvpn::platform::NativeTlsDecryptResult first;
-  first.status = ecnuvpn::platform::NativeTlsReadStatus::data;
+  exv::platform::NativeTlsDecryptResult first;
+  first.status = exv::platform::NativeTlsReadStatus::data;
   first.plaintext = bytes({0x48, 0x54, 0x54, 0x50});
   first.encrypted_bytes_consumed = 2;
   mock->decrypt_results.push_back(first);
 
-  ecnuvpn::platform::NativeTlsDecryptResult second;
-  second.status = ecnuvpn::platform::NativeTlsReadStatus::data;
+  exv::platform::NativeTlsDecryptResult second;
+  second.status = exv::platform::NativeTlsReadStatus::data;
   second.plaintext = bytes({0x2f, 0x31, 0x2e, 0x31});
   second.encrypted_bytes_consumed = 2;
   mock->decrypt_results.push_back(second);

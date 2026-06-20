@@ -1,4 +1,5 @@
 #include "core/config/config_initialization.hpp"
+#include "generated/distribution_config.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -46,14 +47,14 @@ json read_json(const std::filesystem::path &dir) {
 
 json complete_config() {
   return {
-      {"server", "https://vpn-ct.ecnu.edu.cn"},
+      {"server", std::string(exv::distribution::kDefaultVpnServer)},
       {"username", ""},
       {"password", ""},
       {"mtu", 1290},
-      {"useragent", "test-agent"},
+      {"useragent", std::string(exv::distribution::kDefaultUserAgent)},
       {"disable_dtls", false},
       {"remember_password", false},
-      {"routes", json::array({"49.52.4.0/25"})},
+      {"routes", json::array({std::string(exv::distribution::kDefaultRoutes[0])})},
       {"extra_args", json::array()},
       {"log_file", ""},
       {"vpn_engine", "native"},
@@ -111,6 +112,8 @@ int main() {
   {
     auto dir = unique_temp_dir("exv-config-init-missing");
     auto result = exv::config::ensure_initialized_config(dir.string());
+    const auto quick_start =
+        exv::config::quick_start_request_data(result);
     ok = expect(result.status == exv::config::ConfigInitializationStatus::Missing,
                 "missing config reports Missing") &&
          ok;
@@ -125,6 +128,22 @@ int main() {
          ok;
     ok = expect(read_json(dir).value("remember_password", true) == false,
                 "missing config writes remember_password false by default") &&
+         ok;
+    ok = expect(read_json(dir).value("server", "") ==
+                    std::string(exv::distribution::kDefaultVpnServer),
+                "missing config defaults to distribution VPN server") &&
+         ok;
+    ok = expect(read_json(dir).at("routes").size() ==
+                    exv::distribution::kDefaultRoutes.size(),
+                "missing config writes distribution default routes") &&
+         ok;
+    ok = expect(read_json(dir).value("useragent", "") ==
+                    std::string(exv::distribution::kDefaultUserAgent),
+                "missing config writes distribution platform useragent") &&
+         ok;
+    ok = expect(quick_start.at("defaults").value("server", "") ==
+                    std::string(exv::distribution::kDefaultVpnServer),
+                "quick start defaults to distribution VPN server") &&
          ok;
     std::filesystem::remove_all(dir);
   }
@@ -191,7 +210,8 @@ int main() {
     ok = expect(!result.should_request_quick_start(),
                 "complete config does not request quick start") &&
          ok;
-    ok = expect(read_json(dir).at("server") == "https://vpn-ct.ecnu.edu.cn",
+    ok = expect(read_json(dir).at("server") ==
+                    std::string(exv::distribution::kDefaultVpnServer),
                 "complete config is not replaced") &&
          ok;
     std::filesystem::remove_all(dir);

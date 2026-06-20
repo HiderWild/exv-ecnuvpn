@@ -1,6 +1,6 @@
 #include "common/diagnostics/log_event_bus.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 
 LogEventBus& LogEventBus::instance() {
   static LogEventBus bus;
@@ -36,4 +36,4 @@ void LogEventBus::publish(const TypedLogEvent& event) {
   }
 }
 
-} // namespace ecnuvpn
+} // namespace exv

@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <nlohmann/json.hpp>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 namespace {
 
 std::string error_response(int id, std::string_view code,
@@ -72,4 +72,4 @@ std::string handle_host_request(const std::string &request_json,
   return out.dump();
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

@@ -1,6 +1,6 @@
 # Architecture Target State
 
-This document defines the target architecture for the ECNU-VPN client after the native-only cutover.
+This document defines the target architecture for the EXV client after the native-only cutover.
 
 ## Production Connection Owner
 

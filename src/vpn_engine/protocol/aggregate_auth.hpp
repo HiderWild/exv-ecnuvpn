@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -22,7 +22,7 @@ enum class AggregateAuthResponseType {
 struct AggregateAuthInitRequest {
   std::string server_url;
   std::string device_id;
-  std::string version = "ECNUVPN-NATIVE";
+  std::string version = "EXV-NATIVE";
 };
 
 struct AggregateAuthReplyRequest {
@@ -32,7 +32,7 @@ struct AggregateAuthReplyRequest {
   std::string challenge_value;
   std::string challenge_field_name;
   std::string device_id;
-  std::string version = "ECNUVPN-NATIVE";
+  std::string version = "EXV-NATIVE";
   std::vector<std::string> opaque_xml;
 };
 
@@ -81,4 +81,4 @@ ValidationResult parse_aggregate_auth_response(const std::string &xml,
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

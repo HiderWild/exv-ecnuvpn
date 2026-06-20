@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn::platform::linux_ui_shell {
+namespace exv::platform::linux_ui_shell {
 
 namespace {
 
@@ -21,14 +21,14 @@ namespace {
 const char *bridge_script() {
   static constexpr char kBridgeScript[] = R"JS(
 (() => {
-  if (window.ecnuVpn || !window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.ecnuVpnHost) return;
+  if (window.exv || !window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.exvHost) return;
   let nextId = 1;
   const pending = new Map();
   const subscribers = new Set();
   function rpc(action, payload) {
     const id = nextId++;
     const request = { id, action, payload: payload ?? {} };
-    window.webkit.messageHandlers.ecnuVpnHost.postMessage(JSON.stringify(request));
+    window.webkit.messageHandlers.exvHost.postMessage(JSON.stringify(request));
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
     });
@@ -36,7 +36,7 @@ const char *bridge_script() {
   function unsupported(name) {
     return Promise.reject(new Error(`${name} is not available in the native WebView shell yet.`));
   }
-  window.__ecnuVpnHostReceive = (message) => {
+  window.__exvHostReceive = (message) => {
     if (message && typeof message.id === 'number' && pending.has(message.id)) {
       const callbacks = pending.get(message.id);
       pending.delete(message.id);
@@ -50,7 +50,7 @@ const char *bridge_script() {
     }
     subscribers.forEach((handler) => handler(message));
   };
-  window.ecnuVpn = {
+  window.exv = {
     status: { get: () => rpc('status.get') },
     vpn: {
       connect: (password) => rpc('vpn.connect', { password }),
@@ -82,9 +82,9 @@ const char *bridge_script() {
       uninstall: () => rpc('service.uninstall'),
     },
     cli: {
-      status: () => unsupported('cli.status'),
-      install: () => unsupported('cli.install'),
-      uninstall: () => unsupported('cli.uninstall'),
+      status: () => rpc('cli.status'),
+      install: () => rpc('cli.install'),
+      uninstall: () => rpc('cli.uninstall'),
     },
     logs: { list: (options) => rpc('logs.list', options ?? {}) },
     runtime: { status: () => rpc('runtime.status') },
@@ -163,8 +163,8 @@ std::string javascript_string_literal(const std::string &value) {
   return out;
 }
 
-std::string renderer_uri(const ecnuvpn::ui_shell::RendererAssets &renderer) {
-  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+std::string renderer_uri(const exv::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == exv::ui_shell::RendererAssetKind::DevServer) {
     return renderer.location;
   }
 
@@ -186,19 +186,19 @@ std::string renderer_uri(const ecnuvpn::ui_shell::RendererAssets &renderer) {
 
 } // namespace
 
-[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+[[nodiscard]] exv::ui_shell::WindowBounds
 webkitgtk_default_window_bounds() noexcept;
 
 #if defined(EXV_BUILD_UI_SHELL)
-class WebKitGtkWindow final : public ecnuvpn::ui_shell::UiWindow {
+class WebKitGtkWindow final : public exv::ui_shell::UiWindow {
 public:
   ~WebKitGtkWindow() override { cleanup(); }
 
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+  void set_message_handler(exv::ui_shell::HostMessageHandler handler) override {
     handler_ = std::move(handler);
   }
 
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &config) override {
+  int run(const exv::ui_shell::UiWindowConfig &config) override {
     active_config_ = config;
     exit_code_ = 0;
     renderer_ready_ = false;
@@ -279,7 +279,7 @@ private:
       return false;
     }
 
-    gtk_window_set_title(GTK_WINDOW(window_), "ECNU VPN");
+    gtk_window_set_title(GTK_WINDOW(window_), "EXV");
     gtk_window_set_default_size(GTK_WINDOW(window_), bounds.width,
                                 bounds.height);
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
@@ -291,9 +291,9 @@ private:
       return false;
     }
     webkit_user_content_manager_register_script_message_handler(
-        content_manager_, "ecnuVpnHost");
+        content_manager_, "exvHost");
     g_signal_connect(content_manager_,
-                     "script-message-received::ecnuVpnHost",
+                     "script-message-received::exvHost",
                      G_CALLBACK(&WebKitGtkWindow::on_script_message), this);
 
     WebKitUserScript *script = webkit_user_script_new(
@@ -314,7 +314,7 @@ private:
     return true;
   }
 
-  bool load_renderer(const ecnuvpn::ui_shell::RendererAssets &renderer) {
+  bool load_renderer(const exv::ui_shell::RendererAssets &renderer) {
     const std::string uri = renderer_uri(renderer);
     if (uri.empty()) {
       return false;
@@ -329,7 +329,7 @@ private:
       return;
     }
     const std::string script =
-        "window.__ecnuVpnHostReceive && window.__ecnuVpnHostReceive(JSON.parse(" +
+        "window.__exvHostReceive && window.__exvHostReceive(JSON.parse(" +
         javascript_string_literal(json) + "));";
     webkit_web_view_run_javascript(webview_, script.c_str(), nullptr, nullptr,
                                    nullptr);
@@ -350,7 +350,7 @@ private:
     }
     if (content_manager_ != nullptr) {
       webkit_user_content_manager_unregister_script_message_handler(
-          content_manager_, "ecnuVpnHost");
+          content_manager_, "exvHost");
     }
     if (window_ != nullptr) {
       GtkWidget *window = window_;
@@ -428,8 +428,8 @@ private:
     g_free(message);
   }
 
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
-  ecnuvpn::ui_shell::UiWindowConfig active_config_;
+  exv::ui_shell::HostMessageHandler handler_;
+  exv::ui_shell::UiWindowConfig active_config_;
   GtkApplication *application_ = nullptr;
   GtkWidget *window_ = nullptr;
   WebKitWebView *webview_ = nullptr;
@@ -442,36 +442,36 @@ private:
   int exit_code_ = 70;
 };
 #else
-class WebKitGtkWindow final : public ecnuvpn::ui_shell::UiWindow {
+class WebKitGtkWindow final : public exv::ui_shell::UiWindow {
 public:
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+  void set_message_handler(exv::ui_shell::HostMessageHandler handler) override {
     handler_ = std::move(handler);
   }
 
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &) override { return 70; }
+  int run(const exv::ui_shell::UiWindowConfig &) override { return 70; }
 
   void emit_event(const std::string &event_json) override {
     last_event_json_ = event_json;
   }
 
 private:
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
+  exv::ui_shell::HostMessageHandler handler_;
   std::string last_event_json_;
 };
 #endif
 
-ecnuvpn::ui_shell::WindowBounds webkitgtk_default_window_bounds() noexcept {
-  return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+exv::ui_shell::WindowBounds webkitgtk_default_window_bounds() noexcept {
+  return exv::ui_shell::kElectronAdvancedWindowBounds;
 }
 
 std::string dispatch_webkitgtk_host_message(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core) {
-  return ecnuvpn::ui_shell::handle_host_request(message_json, invoke_core);
+    const exv::ui_shell::CoreRpcInvoker &invoke_core) {
+  return exv::ui_shell::handle_host_request(message_json, invoke_core);
 }
 
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window() {
+std::unique_ptr<exv::ui_shell::UiWindow> create_webkitgtk_window() {
   return std::make_unique<WebKitGtkWindow>();
 }
 
-} // namespace ecnuvpn::platform::linux_ui_shell
+} // namespace exv::platform::linux_ui_shell

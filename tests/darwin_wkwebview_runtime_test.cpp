@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn::platform::darwin::ui_shell {
+namespace exv::platform::darwin::ui_shell {
 struct WkWebViewStatusMenuItem {
   std::string label;
   int command_id;
@@ -17,35 +17,35 @@ struct WkWebViewStatusMenuItem {
 };
 std::string dispatch_wkwebview_host_message(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core);
-ecnuvpn::ui_shell::WindowBounds wkwebview_default_window_bounds() noexcept;
+    const exv::ui_shell::CoreRpcInvoker &invoke_core);
+exv::ui_shell::WindowBounds wkwebview_default_window_bounds() noexcept;
 std::vector<WkWebViewStatusMenuItem> wkwebview_status_menu_model();
 bool wkwebview_should_create_status_item_on_start();
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window();
+std::unique_ptr<exv::ui_shell::UiWindow> create_wk_webview_window();
 }
 
 int main() {
   const auto default_bounds =
-      ecnuvpn::platform::darwin::ui_shell::wkwebview_default_window_bounds();
+      exv::platform::darwin::ui_shell::wkwebview_default_window_bounds();
   if (default_bounds.width !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+          exv::ui_shell::kElectronAdvancedWindowBounds.width ||
       default_bounds.height !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+          exv::ui_shell::kElectronAdvancedWindowBounds.height) {
     return 1;
   }
 
-  if (!ecnuvpn::platform::darwin::ui_shell::
+  if (!exv::platform::darwin::ui_shell::
           wkwebview_should_create_status_item_on_start()) {
     return 1;
   }
   const auto status_menu =
-      ecnuvpn::platform::darwin::ui_shell::wkwebview_status_menu_model();
-  if (status_menu.size() != 3 || status_menu[0].label != "显示 ECNU VPN" ||
+      exv::platform::darwin::ui_shell::wkwebview_status_menu_model();
+  if (status_menu.size() != 3 || status_menu[0].label != "显示 EXV" ||
       !status_menu[1].separator || status_menu[2].label != "退出") {
     return 1;
   }
   const std::string host_source_path =
-      std::string(ECNUVPN_SOURCE_DIR) +
+      std::string(EXV_SOURCE_DIR) +
       "/src/platform/darwin/ui_shell/wk_webview_host_darwin.mm";
   std::ifstream host_source_file(host_source_path);
   const std::string host_source(
@@ -68,13 +68,13 @@ int main() {
 
   bool invoked = false;
   const std::string response =
-      ecnuvpn::platform::darwin::ui_shell::dispatch_wkwebview_host_message(
+      exv::platform::darwin::ui_shell::dispatch_wkwebview_host_message(
           R"({"id":9,"action":"status.get","payload":{}})",
-          [&](const ecnuvpn::ui_shell::CoreRpcRequest &request) {
+          [&](const exv::ui_shell::CoreRpcRequest &request) {
             invoked = true;
             assert(request.request_id == "9");
             assert(request.action == "status.get");
-            ecnuvpn::ui_shell::CoreRpcResponse out;
+            exv::ui_shell::CoreRpcResponse out;
             out.id = 9;
             out.request_id = request.request_id;
             out.ok = true;
@@ -86,7 +86,7 @@ int main() {
   assert(response.find(R"("ok":true)") != std::string::npos);
   assert(response.find(R"("phase":"idle")") != std::string::npos);
 
-  auto window = ecnuvpn::platform::darwin::ui_shell::create_wk_webview_window();
+  auto window = exv::platform::darwin::ui_shell::create_wk_webview_window();
   if (!window) {
     return 1;
   }

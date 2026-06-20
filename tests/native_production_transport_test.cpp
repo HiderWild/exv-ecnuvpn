@@ -26,9 +26,9 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
@@ -190,23 +190,23 @@ const char *aggregate_auth_error_body() {
 }
 
 std::vector<std::uint8_t> encoded_frame(
-    ecnuvpn::vpn_engine::protocol::CstpFrameType type,
+    exv::vpn_engine::protocol::CstpFrameType type,
     std::vector<std::uint8_t> payload = {}) {
-  ecnuvpn::vpn_engine::protocol::CstpFrame frame;
+  exv::vpn_engine::protocol::CstpFrame frame;
   frame.type = type;
   frame.payload = std::move(payload);
 
   std::vector<std::uint8_t> out;
-  auto encoded = ecnuvpn::vpn_engine::protocol::encode_cstp_frame(frame, &out);
+  auto encoded = exv::vpn_engine::protocol::encode_cstp_frame(frame, &out);
   if (!encoded.ok)
     return {};
   return out;
 }
 
-class MockTlsStream final : public ecnuvpn::vpn_engine::protocol::TlsStream {
+class MockTlsStream final : public exv::vpn_engine::protocol::TlsStream {
 public:
-  ecnuvpn::vpn_engine::ValidationResult
-  connect(const ecnuvpn::vpn_engine::protocol::TlsEndpoint &endpoint) override {
+  exv::vpn_engine::ValidationResult
+  connect(const exv::vpn_engine::protocol::TlsEndpoint &endpoint) override {
     last_endpoint_ = endpoint;
     ++connect_count_;
     if (!connect_result_.ok)
@@ -216,7 +216,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_all(const std::vector<std::uint8_t> &bytes) override {
     ++write_count_;
     writes_.push_back(bytes);
@@ -231,7 +231,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_some(std::vector<std::uint8_t> *out) override {
     ++read_count_;
     if (!out)
@@ -268,13 +268,13 @@ public:
   void push_read_text(const std::string &text) { push_read(text_bytes(text)); }
 
   void fail_write(int write_number,
-                  ecnuvpn::vpn_engine::ValidationResult failure) {
+                  exv::vpn_engine::ValidationResult failure) {
     fail_write_number_ = write_number;
     write_failure_ = std::move(failure);
   }
 
   void fail_when_reads_exhausted(
-      ecnuvpn::vpn_engine::ValidationResult failure) {
+      exv::vpn_engine::ValidationResult failure) {
     exhausted_read_failure_ = std::move(failure);
   }
 
@@ -284,7 +284,7 @@ public:
   int read_count() const { return read_count_; }
   bool closed() const { return closed_; }
 
-  const ecnuvpn::vpn_engine::protocol::TlsEndpoint &last_endpoint() const {
+  const exv::vpn_engine::protocol::TlsEndpoint &last_endpoint() const {
     return last_endpoint_;
   }
 
@@ -293,12 +293,12 @@ public:
   }
 
 private:
-  ecnuvpn::vpn_engine::ValidationResult connect_result_;
-  ecnuvpn::vpn_engine::ValidationResult write_failure_;
-  ecnuvpn::vpn_engine::protocol::TlsEndpoint last_endpoint_;
+  exv::vpn_engine::ValidationResult connect_result_;
+  exv::vpn_engine::ValidationResult write_failure_;
+  exv::vpn_engine::protocol::TlsEndpoint last_endpoint_;
   std::deque<std::vector<std::uint8_t>> read_chunks_;
   std::vector<std::vector<std::uint8_t>> writes_;
-  std::optional<ecnuvpn::vpn_engine::ValidationResult> exhausted_read_failure_;
+  std::optional<exv::vpn_engine::ValidationResult> exhausted_read_failure_;
   bool connected_ = false;
   bool closed_ = false;
   int connect_count_ = 0;
@@ -308,15 +308,15 @@ private:
   int fail_write_number_ = 0;
 };
 
-ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
-  ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions out;
+exv::vpn_engine::protocol::ProtocolSessionOptions options() {
+  exv::vpn_engine::protocol::ProtocolSessionOptions out;
   out.server.scheme = "https";
   out.server.host = "vpn.example.invalid";
   out.server.port = 443;
   out.server.base_path = "/";
   out.username = "student@example.invalid";
   out.password = MOCK_PASSWORD_SPECIAL;
-  out.useragent = "ECNU-VPN native test";
+  out.useragent = "EXV native test";
   return out;
 }
 
@@ -413,7 +413,7 @@ std::string cstp_connect_ok() {
 }
 
 bool authenticate_success_sends_login_get_post_and_returns_cookie() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -497,9 +497,9 @@ bool authenticate_success_sends_login_get_post_and_returns_cookie() {
 }
 
 bool challenge_handler_can_continue_aggregate_auth() {
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionRequest;
-  using ecnuvpn::vpn_engine::protocol::AuthInteractionResponse;
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::AuthInteractionRequest;
+  using exv::vpn_engine::protocol::AuthInteractionResponse;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -553,7 +553,7 @@ bool challenge_handler_can_continue_aggregate_auth() {
 }
 
 bool configured_auth_group_answers_group_select_without_prompt() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -583,7 +583,7 @@ bool configured_auth_group_answers_group_select_without_prompt() {
 }
 
 bool selected_group_text_without_value_is_sent_in_auth_reply() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -611,7 +611,7 @@ bool selected_group_text_without_value_is_sent_in_auth_reply() {
 }
 
 bool bad_credentials_return_auth_rejected_without_secret_text() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -636,7 +636,7 @@ bool bad_credentials_return_auth_rejected_without_secret_text() {
 }
 
 bool host_scan_required_returns_unsupported_without_secret_text() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -661,7 +661,7 @@ bool host_scan_required_returns_unsupported_without_secret_text() {
 }
 
 bool missing_cookie_is_protocol_error() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -683,7 +683,7 @@ bool missing_cookie_is_protocol_error() {
 }
 
 bool post_set_cookie_session_satisfies_tokenless_success() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -709,7 +709,7 @@ bool post_set_cookie_session_satisfies_tokenless_success() {
 }
 
 bool preflight_cookie_without_post_session_is_protocol_error() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -739,7 +739,7 @@ bool preflight_cookie_without_post_session_is_protocol_error() {
 }
 
 bool connect_cstp_sends_connect_and_parses_metadata() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -751,7 +751,7 @@ bool connect_cstp_sends_connect_and_parses_metadata() {
   auto auth = transport.authenticate(options());
   ok = expect(auth.ok, "auth should succeed before CSTP connect") && ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto connected = transport.connect_cstp(auth.cookie, &metadata);
 
   ok = expect(connected.ok, "CSTP connect should succeed") && ok;
@@ -768,7 +768,7 @@ bool connect_cstp_sends_connect_and_parses_metadata() {
   ok = expect(contains(connect_request, "Cookie: webvpn=SESSION\r\n"),
               "CSTP should send auth cookie") &&
        ok;
-  ok = expect(contains(connect_request, "User-Agent: ECNU-VPN native test\r\n"),
+  ok = expect(contains(connect_request, "User-Agent: EXV native test\r\n"),
               "CSTP should use configured User-Agent") &&
        ok;
   ok = expect(contains(connect_request, "X-CSTP-Version: 1\r\n"),
@@ -814,7 +814,7 @@ bool connect_cstp_sends_connect_and_parses_metadata() {
 }
 
 bool connect_cstp_with_dtls_enabled_still_avoids_unimplemented_headers() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -830,7 +830,7 @@ bool connect_cstp_with_dtls_enabled_still_avoids_unimplemented_headers() {
   ok = expect(auth.ok, "auth should succeed before DTLS-enabled CSTP connect") &&
        ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto connected = transport.connect_cstp(auth.cookie, &metadata);
 
   ok = expect(connected.ok, "DTLS-enabled CSTP connect should still succeed") &&
@@ -851,7 +851,7 @@ bool connect_cstp_with_dtls_enabled_still_avoids_unimplemented_headers() {
 }
 
 bool cstp_non_2xx_fails_without_cookie_text() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -865,7 +865,7 @@ bool cstp_non_2xx_fails_without_cookie_text() {
   auto auth = transport.authenticate(options());
   ok = expect(auth.ok, "auth should succeed before rejected CSTP") && ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto connected = transport.connect_cstp(auth.cookie, &metadata);
 
   ok = expect(!connected.ok, "non-2xx CSTP should fail") && ok;
@@ -880,7 +880,7 @@ bool cstp_non_2xx_fails_without_cookie_text() {
 }
 
 bool cstp_401_maps_to_auth_expired() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -894,7 +894,7 @@ bool cstp_401_maps_to_auth_expired() {
   auto auth = transport.authenticate(options());
   ok = expect(auth.ok, "auth should succeed before expired CSTP cookie") && ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto connected = transport.connect_cstp(auth.cookie, &metadata);
 
   ok = expect(!connected.ok, "expired CSTP cookie should fail") && ok;
@@ -909,7 +909,7 @@ bool cstp_401_maps_to_auth_expired() {
 }
 
 bool oversized_http_header_fails_before_unbounded_read() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -928,7 +928,7 @@ bool oversized_http_header_fails_before_unbounded_read() {
 }
 
 bool oversized_http_body_fails_before_body_read() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -946,7 +946,7 @@ bool oversized_http_body_fails_before_body_read() {
 }
 
 bool overflowing_http_content_length_fails_before_target_calculation() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -967,7 +967,7 @@ bool overflowing_http_content_length_fails_before_target_calculation() {
 }
 
 bool failed_cstp_connect_body_is_not_reused_by_retry() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -982,7 +982,7 @@ bool failed_cstp_connect_body_is_not_reused_by_retry() {
   auto auth = transport.authenticate(options());
   ok = expect(auth.ok, "auth should succeed before rejected CSTP retry") && ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto rejected = transport.connect_cstp(auth.cookie, &metadata);
   ok = expect(!rejected.ok, "first CSTP connect should fail") && ok;
   ok = expect(rejected.code == "cstp_connect_failed",
@@ -1004,7 +1004,7 @@ bool failed_cstp_connect_body_is_not_reused_by_retry() {
 }
 
 bool failed_cstp_connect_read_clears_stale_bytes_before_retry() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -1018,7 +1018,7 @@ bool failed_cstp_connect_read_clears_stale_bytes_before_retry() {
 
   stream.push_read_text("CSTP CONNECT rejected body bytes");
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto failed = transport.connect_cstp(auth.cookie, &metadata);
   ok = expect(!failed.ok, "incomplete CSTP CONNECT response should fail") && ok;
   ok = expect(failed.code == "transport_closed",
@@ -1042,12 +1042,12 @@ bool failed_cstp_connect_read_clears_stale_bytes_before_retry() {
 }
 
 bool exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() {
-  using ecnuvpn::vpn_engine::protocol::CstpFrame;
-  using ecnuvpn::vpn_engine::protocol::CstpFrameType;
-  using ecnuvpn::vpn_engine::protocol::InboundFrame;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
-  using ecnuvpn::vpn_engine::protocol::decode_cstp_frame;
+  using exv::vpn_engine::protocol::CstpFrame;
+  using exv::vpn_engine::protocol::CstpFrameType;
+  using exv::vpn_engine::protocol::InboundFrame;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::decode_cstp_frame;
 
   bool ok = true;
   MockTlsStream stream;
@@ -1061,7 +1061,7 @@ bool exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() {
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(auth.ok, "auth should succeed before packet exchange") && ok;
   ok = expect(transport.connect_cstp(auth.cookie, &metadata).ok,
               "CSTP should succeed before packet exchange") &&
@@ -1094,8 +1094,8 @@ bool exchange_packet_writes_data_frame_and_reads_partial_inbound_frame() {
 }
 
 bool eof_during_cstp_exchange_returns_transport_closed() {
-  using ecnuvpn::vpn_engine::protocol::InboundFrame;
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::InboundFrame;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -1105,7 +1105,7 @@ bool eof_during_cstp_exchange_returns_transport_closed() {
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(auth.ok, "auth should succeed before EOF exchange") && ok;
   ok = expect(transport.connect_cstp(auth.cookie, &metadata).ok,
               "CSTP should succeed before EOF exchange") &&
@@ -1126,7 +1126,7 @@ bool eof_during_cstp_exchange_returns_transport_closed() {
 }
 
 bool reset_for_reconnect_closes_stream_and_clears_cookie_state() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -1158,7 +1158,7 @@ bool reset_for_reconnect_closes_stream_and_clears_cookie_state() {
               "reset should clear old cookie state") &&
        ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto connected = transport.connect_cstp(second.cookie, &metadata);
   ok = expect(connected.ok, "CSTP should use second auth cookie") && ok;
 
@@ -1174,7 +1174,7 @@ bool reset_for_reconnect_closes_stream_and_clears_cookie_state() {
 }
 
 bool write_errors_redact_password_and_cookie_values() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -1198,10 +1198,10 @@ bool write_errors_redact_password_and_cookie_values() {
 }
 
 bool disconnect_sends_best_effort_disconnect_frame_and_closes_stream() {
-  using ecnuvpn::vpn_engine::protocol::CstpFrame;
-  using ecnuvpn::vpn_engine::protocol::CstpFrameType;
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
-  using ecnuvpn::vpn_engine::protocol::decode_cstp_frame;
+  using exv::vpn_engine::protocol::CstpFrame;
+  using exv::vpn_engine::protocol::CstpFrameType;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::decode_cstp_frame;
 
   bool ok = true;
   MockTlsStream stream;
@@ -1211,7 +1211,7 @@ bool disconnect_sends_best_effort_disconnect_frame_and_closes_stream() {
 
   ProductionProtocolTransport transport(&stream);
   auto auth = transport.authenticate(options());
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(auth.ok, "auth should succeed before disconnect") && ok;
   ok = expect(transport.connect_cstp(auth.cookie, &metadata).ok,
               "CSTP should succeed before disconnect") &&
@@ -1246,7 +1246,7 @@ bool disconnect_sends_best_effort_disconnect_frame_and_closes_stream() {
 // ---------------------------------------------------------------------------
 
 bool chunked_aggregate_auth_response_split_across_tls_reads() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   // Single chunked response, but pushed in two halves so the read path
@@ -1279,7 +1279,7 @@ bool chunked_aggregate_auth_response_split_across_tls_reads() {
 }
 
 bool chunked_aggregate_auth_response_in_single_tls_read() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   // Same response, but headers + every chunk arrive in one TLS read. The
@@ -1306,7 +1306,7 @@ bool chunked_aggregate_auth_response_in_single_tls_read() {
 }
 
 bool chunked_aggregate_auth_request_with_trailers_preserves_next_response() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   const std::string init_response = login_get_ok();
@@ -1337,7 +1337,7 @@ bool chunked_aggregate_auth_request_with_trailers_preserves_next_response() {
 }
 
 bool chunked_aggregate_auth_ignores_malformed_content_length() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   const std::string body = aggregate_auth_error_body();
@@ -1363,7 +1363,7 @@ bool chunked_aggregate_auth_ignores_malformed_content_length() {
 }
 
 bool connection_close_aggregate_auth_response_reads_until_eof() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   // No Content-Length, no Transfer-Encoding, Connection: close. The body is
@@ -1394,7 +1394,7 @@ bool connection_close_aggregate_auth_response_reads_until_eof() {
 }
 
 bool keep_alive_undelimited_aggregate_auth_response_fails_fast() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   MockTlsStream stream;
@@ -1422,7 +1422,7 @@ bool keep_alive_undelimited_aggregate_auth_response_fails_fast() {
 }
 
 bool content_length_zero_aggregate_auth_response_reports_protocol_mismatch() {
-  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+  using exv::vpn_engine::protocol::ProductionProtocolTransport;
 
   bool ok = true;
   // 200 OK with Content-Length: 0 — body is empty. The auth call site must

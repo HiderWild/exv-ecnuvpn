@@ -24,7 +24,7 @@
 #include <thread>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -267,4 +267,4 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 enum class RendererAssetKind {
   DevServer,
@@ -17,4 +17,4 @@ struct RendererAssets {
 RendererAssets resolve_renderer_assets(const std::string &dev_server_url,
                                        const std::string &packaged_index);
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

@@ -42,7 +42,7 @@ WinCredentialStore::~WinCredentialStore() = default;
 
 std::string WinCredentialStore::make_target(const std::string& profile_id,
                                             const std::string& secret_name) const {
-    return "ECNU-VPN/" + profile_id + "/" + secret_name;
+    return "EXV/" + profile_id + "/" + secret_name;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-# run-tests.ps1 - Local test runner for ECNU-VPN
+# run-tests.ps1 - Local test runner for EXV
 param(
     [string]$Preset = "windows-release",
     [string]$Label = "",
@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 
-Write-Host "=== ECNU-VPN Test Runner ===" -ForegroundColor Cyan
+Write-Host "=== EXV Test Runner ===" -ForegroundColor Cyan
 Write-Host "Preset: $Preset"
 
 # List labels mode: configure, build, then show available labels

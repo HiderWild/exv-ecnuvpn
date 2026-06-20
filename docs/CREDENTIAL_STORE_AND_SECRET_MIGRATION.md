@@ -2,7 +2,7 @@
 
 ## Threat Model
 
-The ECNU-VPN client handles the following sensitive material:
+The EXV client handles the following sensitive material:
 
 | Secret type        | Lifetime          | Risk if leaked                         |
 |--------------------|-------------------|----------------------------------------|
@@ -61,7 +61,7 @@ Key design decisions:
 
 Uses the Win32 Credential Manager API (`CredWriteW` / `CredReadW` / `CredDeleteW`).
 
-- Target name format: `ECNU-VPN/<profile_id>/<secret_name>`
+- Target name format: `EXV/<profile_id>/<secret_name>`
 - Persistence: `CRED_PERSIST_LOCAL_MACHINE` -- survives reboots, not roamed.
 - Encoding: UTF-8 to wide-char conversion via `MultiByteToWideChar`.
 - Encryption: handled transparently by Windows (DPAPI under the hood).
@@ -72,7 +72,7 @@ Uses the Win32 Credential Manager API (`CredWriteW` / `CredReadW` / `CredDeleteW
 
 Uses the Security framework (`SecKeychainAddGenericPassword` / `SecKeychainFindGenericPassword` / `SecKeychainItemDelete`).
 
-- Service name: `com.ecnu-vpn.profile.<profile_id>`
+- Service name: `com.exv.profile.<profile_id>`
 - Account name: `<profile_id>/<secret_name>`
 - Encryption: handled transparently by the Keychain (AES-256 with user's keychain password).
 
@@ -91,7 +91,7 @@ No standard OS-level secret store is universally available on Linux (GNOME Keyri
 
 ## Migration from Old Config
 
-Older versions of ECNU-VPN stored passwords in plaintext in the config JSON. The migration path is:
+Older versions of EXV stored passwords in plaintext in the config JSON. The migration path is:
 
 1. On startup, the config manager checks for legacy plaintext credentials.
 2. If found, it attempts to migrate them to the CredentialStore.

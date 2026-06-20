@@ -35,7 +35,7 @@
 extern char **environ;
 #endif
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 namespace {
 
@@ -769,4 +769,4 @@ exv::core::lifecycle::CoreResolveResult classify_core_state(
   return exv::core::lifecycle::resolve_core(options, effective_deps);
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

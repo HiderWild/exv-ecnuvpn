@@ -27,7 +27,7 @@ void dump_json(const char *label, const nlohmann::json &value) {
 }
 
 struct RuntimePathGuard {
-  ~RuntimePathGuard() { ecnuvpn::platform::clear_runtime_path_override(); }
+  ~RuntimePathGuard() { exv::platform::clear_runtime_path_override(); }
 };
 
 bool logs_clear_truncates_runtime_log_file() {
@@ -35,12 +35,12 @@ bool logs_clear_truncates_runtime_log_file() {
 
   const auto temp_root =
       std::filesystem::temp_directory_path() /
-      ("ecnuvpn-app-api-logs-test-" +
+      ("exv-app-api-logs-test-" +
        std::to_string(
            std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::create_directories(temp_root);
 
-  const auto log_path = temp_root / "ecnuvpn.log";
+  const auto log_path = temp_root / "exv.log";
   {
     std::ofstream out(log_path.string(), std::ios::out | std::ios::trunc);
     out << "[INFO] marker-line-1\n";
@@ -53,9 +53,9 @@ bool logs_clear_truncates_runtime_log_file() {
       {"lines", 100},
   };
 
-  const auto before = ecnuvpn::app_api::handle_action("logs.list", payload);
-  const auto cleared = ecnuvpn::app_api::handle_action("logs.clear", payload);
-  const auto after = ecnuvpn::app_api::handle_action("logs.list", payload);
+  const auto before = exv::app_api::handle_action("logs.list", payload);
+  const auto cleared = exv::app_api::handle_action("logs.clear", payload);
+  const auto after = exv::app_api::handle_action("logs.list", payload);
 
   bool ok = true;
   ok = expect(before.is_array() && !before.empty(),

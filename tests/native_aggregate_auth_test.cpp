@@ -31,7 +31,7 @@ std::string fixture_text(const std::filesystem::path &relative) {
   return {};
 }
 
-bool has_field(const ecnuvpn::vpn_engine::protocol::AggregateAuthResponse &r,
+bool has_field(const exv::vpn_engine::protocol::AggregateAuthResponse &r,
                const std::string &name) {
   for (const auto &field : r.fields) {
     if (field.name == name)
@@ -40,8 +40,8 @@ bool has_field(const ecnuvpn::vpn_engine::protocol::AggregateAuthResponse &r,
   return false;
 }
 
-const ecnuvpn::vpn_engine::protocol::AggregateAuthField *
-field_named(const ecnuvpn::vpn_engine::protocol::AggregateAuthResponse &r,
+const exv::vpn_engine::protocol::AggregateAuthField *
+field_named(const exv::vpn_engine::protocol::AggregateAuthResponse &r,
             const std::string &name) {
   for (const auto &field : r.fields) {
     if (field.name == name)
@@ -51,12 +51,12 @@ field_named(const ecnuvpn::vpn_engine::protocol::AggregateAuthResponse &r,
 }
 
 bool test_builds_deterministic_init_xml() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   AggregateAuthInitRequest request;
   request.server_url = "https://vpn.example.invalid/";
-  request.device_id = "ECNUVPN-TEST-DEVICE";
-  request.version = "ECNUVPN-NATIVE-TEST";
+  request.device_id = "EXV-TEST-DEVICE";
+  request.version = "EXV-NATIVE-TEST";
 
   const std::string xml = build_aggregate_auth_init_xml(request);
 
@@ -66,11 +66,11 @@ bool test_builds_deterministic_init_xml() {
                   std::string::npos,
               "init XML should use AnyConnect aggregate-auth v2 root") &&
        ok;
-  ok = expect(xml.find("<version who=\"vpn\">ECNUVPN-NATIVE-TEST</version>") !=
+  ok = expect(xml.find("<version who=\"vpn\">EXV-NATIVE-TEST</version>") !=
                   std::string::npos,
               "init XML should include deterministic VPN version") &&
        ok;
-  ok = expect(xml.find("<device-id>ECNUVPN-TEST-DEVICE</device-id>") !=
+  ok = expect(xml.find("<device-id>EXV-TEST-DEVICE</device-id>") !=
                   std::string::npos,
               "init XML should include device id") &&
        ok;
@@ -82,7 +82,7 @@ bool test_builds_deterministic_init_xml() {
 }
 
 bool test_parses_auth_request_and_echoes_opaque() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   AggregateAuthResponse response;
   const auto parsed = parse_aggregate_auth_response(
@@ -146,7 +146,7 @@ bool test_parses_auth_request_and_echoes_opaque() {
 }
 
 bool test_parses_success_token_without_formatting_cookie() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   AggregateAuthResponse response;
   const auto parsed = parse_aggregate_auth_response(
@@ -168,7 +168,7 @@ bool test_parses_success_token_without_formatting_cookie() {
 }
 
 bool test_parses_challenge_and_error_shapes() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   AggregateAuthResponse challenge;
   const auto parsed_challenge = parse_aggregate_auth_response(
@@ -208,7 +208,7 @@ bool test_parses_challenge_and_error_shapes() {
 }
 
 bool test_parses_group_select_options() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   const std::string group_xml =
       "<config-auth client=\"vpn\" type=\"auth-request\">"
@@ -247,7 +247,7 @@ bool test_parses_group_select_options() {
 }
 
 bool test_select_option_without_value_uses_visible_text() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   const std::string group_xml =
       "<config-auth client=\"vpn\" type=\"auth-request\" "
@@ -281,7 +281,7 @@ bool test_select_option_without_value_uses_visible_text() {
 }
 
 bool test_parses_host_scan_metadata() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   const std::string host_scan_xml =
       "<config-auth client=\"vpn\" type=\"auth-reply\">"
@@ -315,7 +315,7 @@ bool test_parses_host_scan_metadata() {
 }
 
 bool test_non_success_shapes_take_precedence_over_complete_marker() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   const std::string complete_error_xml =
       "<config-auth client=\"vpn\" type=\"complete\">"
@@ -348,7 +348,7 @@ bool test_non_success_shapes_take_precedence_over_complete_marker() {
 }
 
 bool test_rejects_html_and_oversized_responses() {
-  using namespace ecnuvpn::vpn_engine::protocol;
+  using namespace exv::vpn_engine::protocol;
 
   AggregateAuthResponse response;
   const auto html =

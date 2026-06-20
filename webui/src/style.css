@@ -128,6 +128,17 @@ input[type="radio"]:disabled {
   cursor: not-allowed;
 }
 
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  display: none;
+}
+
+input[type="password"]::-webkit-credentials-auto-fill-button {
+  display: none !important;
+  pointer-events: none;
+  visibility: hidden;
+}
+
 #app {
   height: 100vh;
   overflow: hidden;

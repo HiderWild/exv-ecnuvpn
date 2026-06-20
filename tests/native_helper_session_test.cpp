@@ -13,9 +13,9 @@
 
 using json = nlohmann::json;
 
-namespace ecnuvpn::logger {
+namespace exv::logger {
 void info(const std::string &) {}
-} // namespace ecnuvpn::logger
+} // namespace exv::logger
 
 namespace {
 
@@ -220,7 +220,7 @@ bool test_helper_delegates_network_ops_and_owns_cleanup() {
 
   exv::helper::PrepareTunnelDeviceRequest prepare_req;
   prepare_req.session_id = start_resp.session_id;
-  prepare_req.adapter_name = "ECNU-VPN";
+  prepare_req.adapter_name = "EXV";
   const auto prepare =
       dispatch_json(handler, exv::helper::HelperOp::PrepareTunnelDevice,
                     json(prepare_req));
@@ -230,7 +230,7 @@ bool test_helper_delegates_network_ops_and_owns_cleanup() {
   const auto prepare_resp =
       exv::helper::prepare_tunnel_device_response_from_json(
           json::parse(prepare.payload_json));
-  ok = expect(prepare_resp.device_path == "helper-device://ECNU-VPN",
+  ok = expect(prepare_resp.device_path == "helper-device://EXV",
               "PrepareTunnelDevice should return the delegated device path") &&
        ok;
 

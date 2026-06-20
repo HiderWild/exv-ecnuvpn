@@ -8,7 +8,7 @@
 #include "helper/helper.hpp"
 #include "platform/common/helper_platform.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 ServiceStatusSnapshot current_service_status() {
@@ -30,4 +30,4 @@ ServiceStatusSnapshot current_service_status() {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

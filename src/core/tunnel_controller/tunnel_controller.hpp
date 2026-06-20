@@ -12,8 +12,8 @@
 // Forward declarations — the real interfaces live in helper / platform.
 namespace exv::helper { class HelperClient; }
 namespace exv::platform { class PlatformNetworkOps; }
-namespace ecnuvpn { struct Config; }
-namespace ecnuvpn::vpn_engine {
+namespace exv { struct Config; }
+namespace exv::vpn_engine {
 struct NativeHandshakeResult;
 struct VpnEngineConfig;
 }
@@ -41,11 +41,11 @@ public:
 
     /// Provide the VPN config and plaintext password used by the native
     /// engine.  Must be called before connect() when using the real engine.
-    void set_vpn_config(const ecnuvpn::Config& cfg,
+    void set_vpn_config(const exv::Config& cfg,
                         const std::string& plaintext_password);
     void set_prepared_native_handshake(
-        ecnuvpn::vpn_engine::VpnEngineConfig engine_config,
-        ecnuvpn::vpn_engine::NativeHandshakeResult handshake);
+        exv::vpn_engine::VpnEngineConfig engine_config,
+        exv::vpn_engine::NativeHandshakeResult handshake);
 
     // User intent interface
     void connect(UserIntent intent);

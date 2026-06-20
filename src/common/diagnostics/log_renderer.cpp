@@ -2,7 +2,7 @@
 
 #include "platform/common/logging/log_runtime.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 
 LogRenderer::LogRenderer() {
   platform::logging::configure_default_logging(true);
@@ -15,4 +15,4 @@ LogRenderer::~LogRenderer() {
   }
 }
 
-} // namespace ecnuvpn
+} // namespace exv

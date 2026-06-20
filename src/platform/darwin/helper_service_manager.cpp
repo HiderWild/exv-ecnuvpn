@@ -11,13 +11,15 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -44,6 +46,42 @@ void print_runtime_status_if_available(const HelperServiceManagerContext &contex
     return;
 }
 
+bool files_have_same_contents(const std::filesystem::path &left,
+                              const std::filesystem::path &right) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(left, ec) ||
+      !std::filesystem::is_regular_file(right, ec)) {
+    return false;
+  }
+
+  const auto left_size = std::filesystem::file_size(left, ec);
+  if (ec)
+    return false;
+  const auto right_size = std::filesystem::file_size(right, ec);
+  if (ec || left_size != right_size)
+    return false;
+
+  std::ifstream left_stream(left, std::ios::binary);
+  std::ifstream right_stream(right, std::ios::binary);
+  if (!left_stream || !right_stream)
+    return false;
+
+  std::array<char, 65536> left_buffer{};
+  std::array<char, 65536> right_buffer{};
+  while (left_stream && right_stream) {
+    left_stream.read(left_buffer.data(), left_buffer.size());
+    right_stream.read(right_buffer.data(), right_buffer.size());
+    if (left_stream.gcount() != right_stream.gcount())
+      return false;
+    if (!std::equal(left_buffer.begin(),
+                    left_buffer.begin() + left_stream.gcount(),
+                    right_buffer.begin())) {
+      return false;
+    }
+  }
+  return left_stream.eof() && right_stream.eof();
+}
+
 } // namespace
 
 int install_helper_service(const std::string &executable_path,
@@ -67,14 +105,27 @@ int install_helper_service(const std::string &executable_path,
   if (helper_source.string() != platform_config.default_service_binary_path &&
       std::filesystem::exists(helper_source)) {
     std::error_code copy_error;
-    std::filesystem::copy_file(
-        helper_source, platform_config.default_service_binary_path,
-        std::filesystem::copy_options::overwrite_existing, copy_error);
+    std::filesystem::create_directories(
+        std::filesystem::path(platform_config.default_service_binary_path)
+            .parent_path(),
+        copy_error);
     if (copy_error) {
-      cli::print_error("Failed to copy exv-helper to " +
-                         std::string(platform_config.default_service_binary_path) +
-                         ": " + copy_error.message());
+      cli::print_error("Failed to create stable helper directory: " +
+                       copy_error.message());
       return 1;
+    }
+    if (!files_have_same_contents(
+            helper_source, platform_config.default_service_binary_path)) {
+      std::filesystem::copy_file(
+          helper_source, platform_config.default_service_binary_path,
+          std::filesystem::copy_options::overwrite_existing, copy_error);
+      if (copy_error) {
+        cli::print_error(
+            "Failed to copy exv-helper to " +
+            std::string(platform_config.default_service_binary_path) + ": " +
+            copy_error.message());
+        return 1;
+      }
     }
     chmod(platform_config.default_service_binary_path, 0755);
   }
@@ -193,4 +244,4 @@ int show_helper_service_status(const HelperServiceManagerContext &context) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

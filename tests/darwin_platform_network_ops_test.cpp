@@ -22,8 +22,8 @@ struct MockUtun {
   std::string interface_name = "utun7";
 };
 
-ecnuvpn::platform::NativeUtunApi make_utun_api(MockUtun &mock) {
-  ecnuvpn::platform::NativeUtunApi api;
+exv::platform::NativeUtunApi make_utun_api(MockUtun &mock) {
+  exv::platform::NativeUtunApi api;
   api.open_socket = [&mock](int, int, int) {
     ++mock.open_count;
     return mock.fd;
@@ -51,8 +51,8 @@ ecnuvpn::platform::NativeUtunApi make_utun_api(MockUtun &mock) {
 
 struct MockRouteApi {
   int add_route_error_after = -1;
-  std::vector<ecnuvpn::platform::NativeDarwinRoute> added_routes;
-  std::vector<ecnuvpn::platform::NativeDarwinRoute> deleted_routes;
+  std::vector<exv::platform::NativeDarwinRoute> added_routes;
+  std::vector<exv::platform::NativeDarwinRoute> deleted_routes;
   std::vector<int> mtu_values;
 };
 
@@ -66,20 +66,20 @@ struct MockDnsApi {
   int disable_error = 0;
 };
 
-ecnuvpn::platform::NativeDarwinRouteApi make_route_api(MockRouteApi &mock) {
-  ecnuvpn::platform::NativeDarwinRouteApi api;
+exv::platform::NativeDarwinRouteApi make_route_api(MockRouteApi &mock) {
+  exv::platform::NativeDarwinRouteApi api;
   api.set_interface_mtu = [&mock](const std::string &, int mtu) {
     mock.mtu_values.push_back(mtu);
     return 0;
   };
   api.get_best_route =
-      [](const std::string &, ecnuvpn::platform::NativeDarwinUpstreamRoute &route) {
+      [](const std::string &, exv::platform::NativeDarwinUpstreamRoute &route) {
         route.interface_name = "en0";
         route.interface_index = 4;
         route.gateway = "192.0.2.1";
         return 0;
       };
-  api.add_route = [&mock](const ecnuvpn::platform::NativeDarwinRoute &route) {
+  api.add_route = [&mock](const exv::platform::NativeDarwinRoute &route) {
     mock.added_routes.push_back(route);
     if (mock.add_route_error_after >= 0 &&
         static_cast<int>(mock.added_routes.size()) >
@@ -89,7 +89,7 @@ ecnuvpn::platform::NativeDarwinRouteApi make_route_api(MockRouteApi &mock) {
     return 0;
   };
   api.delete_route =
-      [&mock](const ecnuvpn::platform::NativeDarwinRoute &route) {
+      [&mock](const exv::platform::NativeDarwinRoute &route) {
         mock.deleted_routes.push_back(route);
         return 0;
       };
@@ -126,7 +126,7 @@ bool darwin_platform_ops_apply_routes_and_cleanup_in_order() {
   auto ops = exv::platform::create_darwin_platform_network_ops(
       make_utun_api(utun), make_route_api(routes));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   ok = expect(device.is_open, "prepare should open a utun session") && ok;
   ok = expect(device.fd == 42, "prepare should return the utun fd") && ok;
   ok = expect(device.adapter_name == "utun7",
@@ -172,7 +172,7 @@ bool darwin_platform_ops_rolls_back_routes_when_apply_fails() {
   auto ops = exv::platform::create_darwin_platform_network_ops(
       make_utun_api(utun), make_route_api(routes));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -199,7 +199,7 @@ bool darwin_platform_ops_applies_dns_and_restores_on_cleanup() {
   auto ops = exv::platform::create_darwin_platform_network_ops(
       make_utun_api(utun), make_route_api(routes), make_dns_api(dns));
 
-  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  auto device = ops->prepare_tunnel_device("EXV", 1320);
   exv::platform::TunnelConfig config;
   config.interface_address = "10.255.0.10/24";
   config.routes.push_back({"10.0.0.0/8", "", 10, false});
@@ -256,7 +256,7 @@ bool darwin_platform_ops_fresh_backend_cleans_imported_resource_facts() {
     auto ops = exv::platform::create_darwin_platform_network_ops(
         make_utun_api(utun), make_route_api(routes), make_dns_api(dns));
 
-    auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+    auto device = ops->prepare_tunnel_device("EXV", 1320);
     exv::platform::TunnelConfig config;
     config.interface_address = "10.255.0.10/24";
     config.routes.push_back({"10.0.0.0/8", "", 10, false});

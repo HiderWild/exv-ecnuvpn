@@ -10,10 +10,10 @@ namespace {
 
 std::atomic<int> g_probe_calls{0};
 
-std::vector<ecnuvpn::virtual_network::AdapterInfo>
+std::vector<exv::virtual_network::AdapterInfo>
 counting_probe(const std::string &exv_interface) {
   g_probe_calls.fetch_add(1);
-  if (!exv_interface.empty() && exv_interface != "ECNU-VPN") {
+  if (!exv_interface.empty() && exv_interface != "EXV") {
     return {};
   }
   return {{"Mihomo", "Meta Tunnel", "proxy_tun", "internet_proxy", "38",
@@ -28,8 +28,8 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::Config sample_config() {
-  ecnuvpn::Config cfg;
+exv::Config sample_config() {
+  exv::Config cfg;
   cfg.server = "vpn.example.edu";
   cfg.username = "student";
   cfg.mtu = 1400;
@@ -56,7 +56,7 @@ bool expect_default_virtual_network_fields(const nlohmann::json &status,
 nlohmann::json wait_for_virtual_network_event() {
   for (int i = 0; i < 20; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    auto events = ecnuvpn::app_api::drain_virtual_network_status_events();
+    auto events = exv::app_api::drain_virtual_network_status_events();
     if (events.is_array() && !events.empty()) {
       return events;
     }
@@ -95,8 +95,8 @@ bool expect_finished_proxy_tun_event(const nlohmann::json &events,
 }
 
 bool idle_controller_status_starts_async_virtual_network_probe() {
-  using namespace ecnuvpn;
-  using namespace ecnuvpn::virtual_network;
+  using namespace exv;
+  using namespace exv::virtual_network;
 
   g_probe_calls.store(0);
   app_api::reset_virtual_network_probe_state_for_testing();
@@ -129,8 +129,8 @@ bool idle_controller_status_starts_async_virtual_network_probe() {
 }
 
 bool disconnected_status_starts_async_virtual_network_probe() {
-  using namespace ecnuvpn;
-  using namespace ecnuvpn::virtual_network;
+  using namespace exv;
+  using namespace exv::virtual_network;
 
   g_probe_calls.store(0);
   app_api::reset_virtual_network_probe_state_for_testing();
@@ -156,8 +156,8 @@ bool disconnected_status_starts_async_virtual_network_probe() {
 }
 
 bool failed_controller_status_starts_async_virtual_network_probe() {
-  using namespace ecnuvpn;
-  using namespace ecnuvpn::virtual_network;
+  using namespace exv;
+  using namespace exv::virtual_network;
 
   g_probe_calls.store(0);
   app_api::reset_virtual_network_probe_state_for_testing();
@@ -190,8 +190,8 @@ bool failed_controller_status_starts_async_virtual_network_probe() {
 }
 
 bool connected_controller_status_starts_async_virtual_network_probe_once() {
-  using namespace ecnuvpn;
-  using namespace ecnuvpn::virtual_network;
+  using namespace exv;
+  using namespace exv::virtual_network;
 
   g_probe_calls.store(0);
   app_api::reset_virtual_network_probe_state_for_testing();
@@ -200,7 +200,7 @@ bool connected_controller_status_starts_async_virtual_network_probe_once() {
   exv::core::TunnelStatusSnapshot snap;
   snap.phase = exv::core::TunnelPhase::Connected;
   snap.network_ready = true;
-  snap.interface_name = "ECNU-VPN";
+  snap.interface_name = "EXV";
 
   auto status = app_api::frontend_status_from_controller_snapshot(
       snap, sample_config());
@@ -224,8 +224,8 @@ bool connected_controller_status_starts_async_virtual_network_probe_once() {
 }
 
 bool virtual_network_probe_runs_asynchronously_and_drains_finished_event() {
-  using namespace ecnuvpn;
-  using namespace ecnuvpn::virtual_network;
+  using namespace exv;
+  using namespace exv::virtual_network;
 
   g_probe_calls.store(0);
   app_api::reset_virtual_network_probe_state_for_testing();

@@ -21,7 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace ecnuvpn {
+namespace exv {
 namespace crypto {
 namespace {
 
@@ -274,4 +274,4 @@ std::string read_password_hidden(const std::string &prompt) {
 }
 
 } // namespace crypto
-} // namespace ecnuvpn
+} // namespace exv

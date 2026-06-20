@@ -7,7 +7,7 @@
 ## 项目结构
 
 ```
-ECNU-VPN/
+EXV/
 ├── CMakeLists.txt              # C++20 构建，注入版本号 + 嵌入 WebUI 资产
 ├── .gitignore
 ├── scripts/
@@ -43,7 +43,7 @@ ECNU-VPN/
 - C++20 标准 + pthread（cpp-httplib 需要）
 - CMake 3.28+ and a Ninja/Visual Studio generator are required for the helper
   protocol named-module smoke test.
-- 通过 `target_compile_definitions` 注入 `ECNUVPN_VERSION` 和 `EMBEDDED_ASSETS`
+- 通过 `target_compile_definitions` 注入 `EXV_VERSION` 和 `EMBEDDED_ASSETS`
 - 源文件：`src/*.cpp`（12 个文件）
 - 依赖：`include/nlohmann/json.hpp`、`include/httplib.h`（header-only）
 - 系统依赖：`CommonCrypto`（macOS 内置）
@@ -66,7 +66,7 @@ sudo exv service install          # 安装 launchd root helper
 
 ```cpp
 std::string crypto::generate_key();           // 32 字节随机密钥 → 64 位 hex
-std::string crypto::load_key();               // 从 ~/.ecnuvpn/.key 读取
+std::string crypto::load_key();               // 从 ~/.exv/.key 读取
 bool crypto::save_key(const std::string& hex_key);
 bool crypto::validate_key(const std::string& hex_key);
 std::string crypto::init_key_if_needed();     // 不存在则生成

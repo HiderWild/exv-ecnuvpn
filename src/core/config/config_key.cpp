@@ -6,7 +6,7 @@
 
 #include <iostream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 
 // ── Key management ──────────────────────────────────────────────
@@ -58,4 +58,4 @@ std::string get_plaintext_password(const Config &cfg) {
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

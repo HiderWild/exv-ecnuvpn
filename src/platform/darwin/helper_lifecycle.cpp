@@ -24,7 +24,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -259,7 +259,7 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
   const auto &platform_config = helper_platform_config();
   SemanticVersion current_version;
   bool current_version_ok =
-      parse_semantic_version(ECNUVPN_VERSION, &current_version);
+      parse_semantic_version(EXV_VERSION, &current_version);
   bool stable_exists = platform::file_exists(platform_config.stable_install_path);
 
   cli::print_warning(
@@ -347,16 +347,29 @@ int copy_self_to_stable_path_and_reexec(const std::string &current_path) {
     return 1;
   }
 
-  cli::print_info("Copying exv-helper binary to /usr/local/bin/exv-helper ...");
+  std::filesystem::path stable_helper_path(
+      platform_config.default_service_binary_path);
+  std::error_code helper_dir_error;
+  std::filesystem::create_directories(stable_helper_path.parent_path(),
+                                      helper_dir_error);
+  if (helper_dir_error) {
+    cli::print_error("Failed to create stable helper directory: " +
+                     helper_dir_error.message());
+    return 1;
+  }
+
+  cli::print_info("Copying exv-helper binary to " +
+                  stable_helper_path.string() + " ...");
   if (!copy_file_contents(helper_source,
                           platform_config.default_service_binary_path,
                           &copy_error)) {
-    cli::print_error("Failed to copy exv-helper to /usr/local/bin/exv-helper: " +
+    cli::print_error("Failed to copy exv-helper to " +
+                       stable_helper_path.string() + ": " +
                        std::string(std::strerror(copy_error)));
     return 1;
   }
-  cli::print_success(
-      "Stable exv-helper binary updated at /usr/local/bin/exv-helper.");
+  cli::print_success("Stable exv-helper binary updated at " +
+                     stable_helper_path.string() + ".");
 
   cli::print_info("Re-running service installation from the copied binary...");
   execl(platform_config.stable_install_path, platform_config.stable_install_path,
@@ -468,4 +481,4 @@ void cleanup_daemon_endpoint(const std::string &endpoint) {
 }
 // End inlined from platform/darwin/helper_lifecycle_worker include-unit
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

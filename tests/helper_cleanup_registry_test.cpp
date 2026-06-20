@@ -64,7 +64,7 @@ exv::core::lifecycle::CoreRegistrySnapshot make_core_registry_snapshot(
     exv::core::lifecycle::CoreRegistrySnapshot snapshot;
     snapshot.core_instance_id = "core-instance-helper";
     snapshot.pid = pid;
-    snapshot.core_path = "C:/Program Files/ECNU-VPN/exv.exe";
+    snapshot.core_path = "C:/Program Files/EXV/exv.exe";
     snapshot.ipc_path = exv::core::lifecycle::core_ipc_path(root.string());
     snapshot.ipc_protocol_version = exv::core::lifecycle::ipc_protocol_name();
     snapshot.app_version = "3.3.0";
@@ -103,7 +103,7 @@ int main() {
         CleanupRegistry registry;
         CleanupRecord rec;
         rec.session_id.value = "ses-1";
-        rec.adapter_name = "ECNU-VPN";
+        rec.adapter_name = "EXV";
         rec.routes.push_back({"0.0.0.0/0", "10.0.0.1", 0});
         rec.dns.servers = {"8.8.8.8"};
 
@@ -114,7 +114,7 @@ int main() {
                     "should have 1 record after registration") && ok;
         ok = expect(records[0].session_id.value == "ses-1",
                     "record session_id should match") && ok;
-        ok = expect(records[0].adapter_name == "ECNU-VPN",
+        ok = expect(records[0].adapter_name == "EXV",
                     "record adapter_name should match") && ok;
     }
 
@@ -123,7 +123,7 @@ int main() {
         CleanupRegistry registry;
         CleanupRecord rec;
         rec.session_id.value = "ses-1";
-        rec.adapter_name = "ECNU-VPN";
+        rec.adapter_name = "EXV";
         rec.routes.push_back({"0.0.0.0/0", "10.0.0.1", 0});
         rec.routes.push_back({"10.0.0.0/8", "10.0.0.1", 0});
         rec.dns.servers = {"8.8.8.8", "8.8.4.4"};
@@ -156,7 +156,7 @@ int main() {
 
         ManagedResource res;
         res.type = "firewall_rule";
-        res.detail = "ECNU-VPN-kill-switch";
+        res.detail = "EXV-kill-switch";
         registry.add_resource(rec.session_id, res);
 
         auto records = registry.all_records();
@@ -166,7 +166,7 @@ int main() {
                     "add_resource should persist ManagedResource on CleanupRecord") && ok;
         ok = expect(records[0].managed_resources[0].type == "firewall_rule",
                     "stored managed resource type should match") && ok;
-        ok = expect(records[0].managed_resources[0].detail == "ECNU-VPN-kill-switch",
+        ok = expect(records[0].managed_resources[0].detail == "EXV-kill-switch",
                     "stored managed resource detail should match") && ok;
         ok = expect(records[0].firewall_rules.empty(),
                     "add_resource should not encode managed resources in firewall_rules") && ok;
@@ -174,7 +174,7 @@ int main() {
         auto resources = registry.get_resources(rec.session_id);
         bool found = false;
         for (const auto& r : resources) {
-            if (r.type == "firewall_rule" && r.detail == "ECNU-VPN-kill-switch") {
+            if (r.type == "firewall_rule" && r.detail == "EXV-kill-switch") {
                 found = true;
             }
         }
@@ -186,7 +186,7 @@ int main() {
         CleanupRegistry registry;
         CleanupRecord rec;
         rec.session_id.value = "ses-explicit";
-        rec.managed_resources.push_back({"adapter", "ECNU-VPN"});
+        rec.managed_resources.push_back({"adapter", "EXV"});
         rec.managed_resources.push_back({"route", "10.0.0.0/8"});
 
         registry.register_session(rec);
@@ -201,7 +201,7 @@ int main() {
         ok = expect(resources.size() == 2,
                     "get_resources should return explicit managed resources") && ok;
         ok = expect(resources[0].type == "adapter" &&
-                        resources[0].detail == "ECNU-VPN",
+                        resources[0].detail == "EXV",
                     "first explicit managed resource should match") && ok;
         ok = expect(resources[1].type == "route" &&
                         resources[1].detail == "10.0.0.0/8",
@@ -250,7 +250,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-cleanup-registry-test-" + std::to_string(current_process_id()));
+            ("exv-cleanup-registry-test-" + std::to_string(current_process_id()));
         fs::create_directories(root);
         const auto path = (root / "registry.json").string();
 
@@ -258,11 +258,11 @@ int main() {
             CleanupRegistry registry;
             CleanupRecord rec;
             rec.session_id.value = "ses-1";
-            rec.adapter_name = "ECNU-VPN";
+            rec.adapter_name = "EXV";
             rec.routes.push_back({"0.0.0.0/0", "10.0.0.1", 0});
             rec.dns.servers = {"8.8.8.8"};
             registry.register_session(rec);
-            registry.add_resource(rec.session_id, {"adapter", "ECNU-VPN"});
+            registry.add_resource(rec.session_id, {"adapter", "EXV"});
             registry.add_resource(rec.session_id, {"route", "10.0.0.0/8"});
 
             bool saved = registry.save_to_disk(path);
@@ -286,7 +286,7 @@ int main() {
                         "loaded registry should have 1 record") && ok;
             ok = expect(records[0].session_id.value == "ses-1",
                         "loaded session_id should match") && ok;
-            ok = expect(records[0].adapter_name == "ECNU-VPN",
+            ok = expect(records[0].adapter_name == "EXV",
                         "loaded adapter_name should match") && ok;
             ok = expect(records[0].routes.size() == 1,
                         "loaded routes should have 1 entry") && ok;
@@ -295,7 +295,7 @@ int main() {
             ok = expect(records[0].managed_resources.size() == 2,
                         "loaded managed_resources should have 2 entries") && ok;
             ok = expect(records[0].managed_resources[0].type == "adapter" &&
-                            records[0].managed_resources[0].detail == "ECNU-VPN",
+                            records[0].managed_resources[0].detail == "EXV",
                         "loaded adapter managed_resource should match") && ok;
             ok = expect(records[0].managed_resources[1].type == "route" &&
                             records[0].managed_resources[1].detail == "10.0.0.0/8",
@@ -349,7 +349,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-remove-only-" +
+            ("exv-helper-core-registry-remove-only-" +
              std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
@@ -388,7 +388,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-match-" + std::to_string(current_process_id()));
+            ("exv-helper-core-registry-match-" + std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
         fs::create_directories(root, ec);
@@ -401,7 +401,7 @@ int main() {
         exv::core::lifecycle::CoreRegistrySnapshot snapshot;
         snapshot.core_instance_id = "core-instance-helper";
         snapshot.pid = 5150;
-        snapshot.core_path = "C:/Program Files/ECNU-VPN/exv.exe";
+        snapshot.core_path = "C:/Program Files/EXV/exv.exe";
         snapshot.ipc_path = exv::core::lifecycle::core_ipc_path(root.string());
         snapshot.ipc_protocol_version = "ipc-v1";
         snapshot.app_version = "3.3.0";
@@ -448,7 +448,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-mismatch-" + std::to_string(current_process_id()));
+            ("exv-helper-core-registry-mismatch-" + std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
         fs::create_directories(root, ec);
@@ -461,7 +461,7 @@ int main() {
         exv::core::lifecycle::CoreRegistrySnapshot snapshot;
         snapshot.core_instance_id = "core-instance-helper";
         snapshot.pid = 6160;
-        snapshot.core_path = "C:/Program Files/ECNU-VPN/exv.exe";
+        snapshot.core_path = "C:/Program Files/EXV/exv.exe";
         snapshot.ipc_path = exv::core::lifecycle::core_ipc_path(root.string());
         snapshot.ipc_protocol_version = "ipc-v1";
         snapshot.app_version = "3.3.0";
@@ -499,13 +499,13 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-production-" +
+            ("exv-helper-core-registry-production-" +
              std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
         fs::create_directories(root, ec);
 
-        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+        exv::runtime::bootstrap(root.string(), root.string(), true);
 
         exv::helper::HelperHandler handler;
 
@@ -575,13 +575,13 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-delete-retry-" +
+            ("exv-helper-core-registry-delete-retry-" +
              std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
         fs::create_directories(root, ec);
 
-        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+        exv::runtime::bootstrap(root.string(), root.string(), true);
 
         exv::helper::HelperHandler handler;
 
@@ -662,13 +662,13 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-delete-unlocked-" +
+            ("exv-helper-core-registry-delete-unlocked-" +
              std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
         fs::create_directories(root, ec);
 
-        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+        exv::runtime::bootstrap(root.string(), root.string(), true);
 
         exv::helper::HelperHandler handler;
 
@@ -749,13 +749,13 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-finalize-" +
+            ("exv-helper-core-registry-finalize-" +
              std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
         fs::create_directories(root, ec);
 
-        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+        exv::runtime::bootstrap(root.string(), root.string(), true);
 
         exv::helper::HelperHandler handler;
         exv::helper::HelperStartupContext startup;
@@ -819,13 +819,13 @@ int main() {
     {
         namespace fs = std::filesystem;
         const auto root = fs::temp_directory_path() /
-            ("ecnuvpn-helper-core-registry-partial-" +
+            ("exv-helper-core-registry-partial-" +
              std::to_string(current_process_id()));
         std::error_code ec;
         fs::remove_all(root, ec);
         fs::create_directories(root, ec);
 
-        ecnuvpn::runtime::bootstrap(root.string(), root.string(), true);
+        exv::runtime::bootstrap(root.string(), root.string(), true);
 
         exv::helper::HelperHandler handler;
 

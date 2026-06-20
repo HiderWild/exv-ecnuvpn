@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace virtual_network {
 
 struct AdapterInfo {
@@ -15,4 +15,4 @@ struct AdapterInfo {
 };
 
 } // namespace virtual_network
-} // namespace ecnuvpn
+} // namespace exv

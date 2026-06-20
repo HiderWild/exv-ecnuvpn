@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Minus, X } from 'lucide-vue-next'
 import appIconUrl from '../assets/app-icon.svg'
+import type { DesktopWindowControl } from '../types/exv'
 
 type WindowMode = 'advanced' | 'minimal'
 type TransitionPhase = 'idle' | 'native-resize-before-animation' | 'preview-animating' | 'native-resize-after-animation' | 'settling'
@@ -18,7 +19,12 @@ const appliedMode = ref<WindowMode>(props.mode)
 const visualMode = ref<WindowMode>(props.mode)
 const transitionPhase = ref<TransitionPhase>('idle')
 const previewAnimating = ref(false)
+const nativeWindowControlState = ref<{
+  control: DesktopWindowControl | null
+  pressed: boolean
+}>({ control: null, pressed: false })
 let windowModeRequest = 0
+let windowControlUnsubscribe: (() => void) | null = null
 
 const isMac = computed(() => {
   if (typeof navigator === 'undefined') return false
@@ -44,6 +50,20 @@ function afterNextPaint() {
   return new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
   })
+}
+
+function isDesktopWindowControl(value: unknown): value is DesktopWindowControl {
+  return value === 'minimize' || value === 'close'
+}
+
+function windowControlButtonClass(control: DesktopWindowControl) {
+  return {
+    'app-window-titlebar__button--native-hover':
+      nativeWindowControlState.value.control === control,
+    'app-window-titlebar__button--native-pressed':
+      nativeWindowControlState.value.control === control &&
+      nativeWindowControlState.value.pressed,
+  }
 }
 
 async function waitForPreviewAnimation() {
@@ -122,13 +142,20 @@ async function requestWindowClose() {
 }
 
 function startWindowDrag(event: PointerEvent) {
+  if (isWindows.value) return
   if (event.button !== 0) return
   const target = event.target instanceof Element ? event.target : null
   if (target?.closest('[data-window-control-region="true"], button, a, input, textarea, select')) {
     return
   }
   event.preventDefault()
-  void window.exv?.window?.startDrag?.()
+  void window.exv?.window?.startDrag?.({
+    screenX: event.screenX,
+    screenY: event.screenY,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    viewWidth: window.innerWidth,
+  })
 }
 
 watch(
@@ -141,6 +168,20 @@ watch(
 onMounted(() => {
   appliedMode.value = props.mode
   visualMode.value = props.mode
+  windowControlUnsubscribe = window.exv?.events.subscribe((event) => {
+    if (event.type !== 'window-control-state') return
+    const data = event.data
+    if (!data || typeof data !== 'object') return
+    const raw = data as { control?: unknown; pressed?: unknown }
+    const control = isDesktopWindowControl(raw.control) ? raw.control : null
+    const pressed = raw.pressed === true
+    nativeWindowControlState.value = { control, pressed }
+  }) ?? null
+})
+
+onUnmounted(() => {
+  windowControlUnsubscribe?.()
+  windowControlUnsubscribe = null
 })
 </script>
 
@@ -169,6 +210,7 @@ onMounted(() => {
             <button
               type="button"
               class="app-window-titlebar__button"
+              :class="windowControlButtonClass('minimize')"
               aria-label="最小化"
               :disabled="transitionActive"
               @click="minimizeWindow"
@@ -178,6 +220,7 @@ onMounted(() => {
             <button
               type="button"
               class="app-window-titlebar__button app-window-titlebar__button--close"
+              :class="windowControlButtonClass('close')"
               aria-label="关闭"
               :disabled="transitionActive"
               @click="requestWindowClose"
@@ -271,6 +314,8 @@ onMounted(() => {
   justify-content: space-between;
   padding: 4px 4px 4px 10px;
   user-select: none;
+  app-region: drag;
+  -webkit-app-region: drag;
   background: transparent;
   color: var(--titlebar-fg);
 }
@@ -330,23 +375,41 @@ onMounted(() => {
   height: 100%;
   align-items: stretch;
   overflow: hidden;
+  app-region: drag;
+  -webkit-app-region: drag;
 }
 
 .app-window-titlebar__button {
   display: grid;
   width: 44px;
   place-items: center;
+  app-region: drag;
+  -webkit-app-region: drag;
   color: var(--titlebar-button-fg);
   transition: background-color 120ms ease, color 120ms ease;
 }
 
-.app-window-titlebar__button:hover:not(:disabled) {
+.app-window-titlebar__button:hover:not(:disabled),
+.app-window-titlebar__button--native-hover:not(:disabled) {
   background: var(--titlebar-button-hover-bg);
   color: var(--color-foreground);
 }
 
-.app-window-titlebar__button--close:hover:not(:disabled) {
+.app-window-titlebar__button:active:not(:disabled),
+.app-window-titlebar__button--native-pressed:not(:disabled) {
+  background: var(--titlebar-button-hover-bg);
+  filter: brightness(0.92);
+}
+
+.app-window-titlebar__button--close:hover:not(:disabled),
+.app-window-titlebar__button--close.app-window-titlebar__button--native-hover:not(:disabled) {
   background: #dc2626;
+  color: white;
+}
+
+.app-window-titlebar__button--close:active:not(:disabled),
+.app-window-titlebar__button--close.app-window-titlebar__button--native-pressed:not(:disabled) {
+  background: #b91c1c;
   color: white;
 }
 

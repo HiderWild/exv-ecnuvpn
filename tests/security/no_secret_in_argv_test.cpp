@@ -112,7 +112,7 @@ int main() {
     {
         PrepareTunnelDeviceRequest req;
         req.session_id.value = "test-session";
-        req.adapter_name = "ECNU-VPN";
+        req.adapter_name = "EXV";
 
         std::string serialized_check;
         serialized_check += req.session_id.value;
@@ -199,7 +199,8 @@ int main() {
     {
         HelperConnectorConfig config;
         config.mode = exv::helper::ConnectorMode::Transient;
-        config.helper_executable_path = "/usr/local/bin/exv-helper";
+        config.helper_executable_path =
+            "/Library/Application Support/EXV/Helper/exv-helper";
         config.connect_timeout_ms = 5000;
         config.heartbeat_interval_ms = 10000;
 

@@ -2,7 +2,7 @@
 
 **Ownership:** This document is the sole artifact for Task A1.
 
-**Goal:** Provide a clean-room, implementation-ready specification for the v1 native AnyConnect-compatible flow used by ECNU-VPN, without reproducing OpenConnect source or implementation structure.
+**Goal:** Provide a clean-room, implementation-ready specification for the v1 native AnyConnect-compatible flow used by EXV, without reproducing OpenConnect source or implementation structure.
 
 ---
 

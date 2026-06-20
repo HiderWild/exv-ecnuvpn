@@ -7,7 +7,7 @@ EXV provides a native WebView desktop shell backed by the C++ core and privilege
 Build or install the native WebView package for your platform, then launch `exv-ui` from:
 
 ```text
-build/<platform>/webview/package/ECNU VPN
+build/<platform>/webview/package/EXV
 ```
 
 Windows development shortcut:
@@ -68,8 +68,9 @@ If a one-shot helper is already elevated, service maintenance can reuse it so th
 
 Default config locations:
 
-- Windows: `%APPDATA%\ecnuvpn\config.json`
-- macOS/Linux: `~/.ecnuvpn/config.json`
+- Windows: `%LOCALAPPDATA%\EXV\profile\default\config.json`
+- macOS: `~/Library/Application Support/EXV/profile/default/config.json`
+- Linux: `~/.exv/config.json`
 
 Config stores user intent and preferences. Runtime facts such as active adapters, routes, DNS snapshots, cleanup plans, and helper lease state belong to helper/core runtime state, not the config file.
 
@@ -78,5 +79,5 @@ Config stores user intent and preferences. Runtime facts such as active adapters
 The browser WebUI is kept as a compatibility and diagnostics entry. Production desktop packaging uses the native WebView shell at:
 
 ```text
-build/<platform>/webview/package/ECNU VPN
+build/<platform>/webview/package/EXV
 ```

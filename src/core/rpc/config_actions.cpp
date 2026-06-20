@@ -188,8 +188,11 @@ RpcResponse ConfigActions::import_config(const RpcRequest& req) {
 }
 
 RpcResponse ConfigActions::export_config(const RpcRequest& req) {
-  (void)req;
-  return to_rpc_response(use_cases_.export_config());
+  exv::core::UseCaseResult parsed = try_parse_payload(req);
+  if (!parsed.success) {
+    return to_rpc_response(parsed);
+  }
+  return to_rpc_response(use_cases_.export_config(parsed.payload));
 }
 
 } // namespace exv::core_api

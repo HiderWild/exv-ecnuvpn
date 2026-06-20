@@ -11,7 +11,7 @@
 #include <string>
 #include <unistd.h>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 bool is_process_alive(int pid) {
@@ -33,4 +33,4 @@ void sleep_ms(unsigned int milliseconds) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

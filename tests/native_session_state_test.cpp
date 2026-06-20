@@ -18,9 +18,9 @@ bool expect(bool condition, const char *message) {
 int main() {
   bool ok = true;
 
-  using ecnuvpn::vpn_engine::SessionPhase;
-  using ecnuvpn::vpn_engine::SessionState;
-  using ecnuvpn::vpn_engine::TunnelMetadata;
+  using exv::vpn_engine::SessionPhase;
+  using exv::vpn_engine::SessionState;
+  using exv::vpn_engine::TunnelMetadata;
 
   SessionState state;
   ok = expect(state.phase == SessionPhase::idle,
@@ -100,7 +100,7 @@ int main() {
   const std::string utf8_message = "连接成功";
   state.last_event_message = utf8_message;
 
-  nlohmann::json j = ecnuvpn::vpn_engine::session_state_to_json(state);
+  nlohmann::json j = exv::vpn_engine::session_state_to_json(state);
   ok = expect(j.value("phase", std::string()) == "packet_loop",
               "session_state_to_json should expose stable phase strings") &&
        ok;
@@ -166,7 +166,7 @@ int main() {
               "failed session should not be network-ready") &&
        ok;
 
-  nlohmann::json failed_json = ecnuvpn::vpn_engine::session_state_to_json(state);
+  nlohmann::json failed_json = exv::vpn_engine::session_state_to_json(state);
   ok = expect(failed_json["failure"].value("code", std::string()) ==
                   "transport_error",
               "failed session JSON should expose failure code") &&

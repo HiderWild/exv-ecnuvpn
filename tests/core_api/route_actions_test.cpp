@@ -38,8 +38,8 @@ struct RouteActionsFixture {
   exv::core_api::RouteActions route{config_dir};
 
   RouteActionsFixture() {
-    ecnuvpn::config::ConfigManager manager(config_dir);
-    ecnuvpn::Config cfg;
+    exv::config::ConfigManager manager(config_dir);
+    exv::Config cfg;
     cfg.routes.clear();
     manager.save(cfg);
     route.register_handlers(dispatcher);

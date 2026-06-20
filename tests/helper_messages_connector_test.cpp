@@ -12,7 +12,7 @@
 using namespace exv::helper;
 using json = nlohmann::json;
 
-namespace ecnuvpn {
+namespace exv {
 namespace logger {
 
 void init() {}
@@ -27,7 +27,7 @@ void show_logs(int) {}
 std::vector<std::string> tail(int) { return {}; }
 
 } // namespace logger
-} // namespace ecnuvpn
+} // namespace exv
 
 // ---- Serialization round-trip tests ----
 
@@ -480,7 +480,7 @@ static void test_cleanup_lease_handoff_roundtrip() {
     session.mode = HelperMode::Transient;
     session.core_phase = "Connected";
     session.cleanup_policy.remove_adapter = true;
-    session.managed_resources.push_back({"adapter", "ECNU-VPN"});
+    session.managed_resources.push_back({"adapter", "EXV"});
     session.managed_resources.push_back({"route", "10.0.0.0/8"});
     lease.sessions.push_back(session);
 

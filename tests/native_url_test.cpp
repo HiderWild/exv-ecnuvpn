@@ -17,10 +17,10 @@ bool expect(bool condition, const char *message) {
 } // namespace
 
 int main() {
-  using ecnuvpn::vpn_engine::protocol::HttpResponse;
-  using ecnuvpn::vpn_engine::protocol::ParsedVpnUrl;
-  using ecnuvpn::vpn_engine::protocol::parse_http_response;
-  using ecnuvpn::vpn_engine::protocol::parse_vpn_url;
+  using exv::vpn_engine::protocol::HttpResponse;
+  using exv::vpn_engine::protocol::ParsedVpnUrl;
+  using exv::vpn_engine::protocol::parse_http_response;
+  using exv::vpn_engine::protocol::parse_vpn_url;
 
   bool ok = true;
 

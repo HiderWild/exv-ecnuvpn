@@ -19,7 +19,7 @@
 
 namespace exv::core {
 
-/// CoreSessionRunner bridges the NativeVpnEngineSession (ecnuvpn::vpn_engine)
+/// CoreSessionRunner bridges the NativeVpnEngineSession (exv::vpn_engine)
 /// into TunnelController's event-driven model.
 ///
 /// Responsibilities:
@@ -32,11 +32,11 @@ class CoreSessionRunner {
 public:
     using EventCallback = std::function<void(TunnelEvent)>;
     using NativeDependenciesFactory =
-        std::function<ecnuvpn::vpn_engine::NativeVpnEngineDependencies()>;
+        std::function<exv::vpn_engine::NativeVpnEngineDependencies()>;
     using NetworkConfigCallback =
-        std::function<ecnuvpn::vpn_engine::ValidationResult(
-            const ecnuvpn::vpn_engine::TunnelMetadata&,
-            ecnuvpn::vpn_engine::DeviceConfig*)>;
+        std::function<exv::vpn_engine::ValidationResult(
+            const exv::vpn_engine::TunnelMetadata&,
+            exv::vpn_engine::DeviceConfig*)>;
 
     struct PendingAuthInteraction {
         std::string id;
@@ -54,13 +54,13 @@ public:
     CoreSessionRunner& operator=(const CoreSessionRunner&) = delete;
 
     /// Start the VPN session.
-    /// Converts the ecnuvpn::Config into VpnEngineConfig and creates a
+    /// Converts the exv::Config into VpnEngineConfig and creates a
     /// NativeVpnEngineSession.  The session runs its own packet-loop thread.
     /// Returns false if start() fails immediately (e.g. validation error).
-    bool start(const ecnuvpn::Config& cfg, const std::string& password);
+    bool start(const exv::Config& cfg, const std::string& password);
     bool start_from_handshake(
-        ecnuvpn::vpn_engine::VpnEngineConfig engine_config,
-        ecnuvpn::vpn_engine::NativeHandshakeResult handshake);
+        exv::vpn_engine::VpnEngineConfig engine_config,
+        exv::vpn_engine::NativeHandshakeResult handshake);
 
     /// Stop the running session (graceful, then join monitoring thread).
     void stop();
@@ -70,7 +70,7 @@ public:
     bool is_running() const;
 
     /// Current VpnEngineStatus snapshot (thread-safe).
-    ecnuvpn::vpn_engine::VpnEngineStatus status() const;
+    exv::vpn_engine::VpnEngineStatus status() const;
     std::optional<PendingAuthInteraction> pending_auth_interaction() const;
     bool provide_auth_interaction_response(const std::string& id,
                                            const std::string& value);
@@ -85,14 +85,14 @@ private:
         std::string value;
     };
 
-    ecnuvpn::vpn_engine::protocol::AuthInteractionResponse
+    exv::vpn_engine::protocol::AuthInteractionResponse
     handle_auth_interaction(
-        const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest& request);
+        const exv::vpn_engine::protocol::AuthInteractionRequest& request);
     void start_monitor_thread();
 
     mutable std::mutex mu_;
     std::condition_variable auth_interaction_cv_;
-    std::unique_ptr<ecnuvpn::vpn_engine::NativeVpnEngineSession> session_;
+    std::unique_ptr<exv::vpn_engine::NativeVpnEngineSession> session_;
     std::unique_ptr<EngineEventBridge> bridge_;
     std::thread monitor_thread_;
     EventCallback event_callback_;
@@ -101,7 +101,7 @@ private:
     std::optional<PendingAuthInteraction> pending_auth_interaction_;
     std::optional<AuthInteractionResponseState> auth_interaction_response_;
     std::atomic<bool> running_{false};
-    ecnuvpn::vpn_engine::VpnEngineStatus cached_status_;
+    exv::vpn_engine::VpnEngineStatus cached_status_;
 };
 
 } // namespace exv::core

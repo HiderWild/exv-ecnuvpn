@@ -11,7 +11,7 @@
 #include <string_view>
 #include <thread>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 namespace {
 
 class WindowMessageHandlerGuard {
@@ -139,4 +139,4 @@ int run_ui_shell_window(UiWindow &window,
   return exit_code;
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

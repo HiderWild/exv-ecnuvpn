@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #endif
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 
 bool file_exists(const std::string &path) {
 #ifndef _WIN32
@@ -58,5 +58,5 @@ bool write_file(const std::string &path, const std::string &content) {
   return ofs.good() && sync_owner(path);
 }
 
-} // namespace ecnuvpn::platform
+} // namespace exv::platform
 

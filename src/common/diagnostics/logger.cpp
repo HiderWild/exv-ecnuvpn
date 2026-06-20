@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace logger {
 namespace {
 
@@ -150,4 +150,4 @@ void show_logs(int lines) {
 }
 
 } // namespace logger
-} // namespace ecnuvpn
+} // namespace exv

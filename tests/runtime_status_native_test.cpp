@@ -32,7 +32,7 @@ std::vector<std::string> removed_public_runtime_fields() {
 
 } // namespace
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 std::string run_command_output(const std::string &) { return ""; }
@@ -44,16 +44,16 @@ std::string get_bundled_wintun_path() { return ""; }
 std::string get_bundled_tap_installer_path() { return ""; }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv
 
 int main() {
   bool ok = true;
 
-  ecnuvpn::Config native_cfg;
+  exv::Config native_cfg;
   native_cfg.vpn_engine = "native";
   nlohmann::json native_status =
-      ecnuvpn::platform::runtime_status_json(
-          ecnuvpn::config::to_platform_config_view(native_cfg));
+      exv::platform::runtime_status_json(
+          exv::config::to_platform_config_view(native_cfg));
   ok = expect(native_status.value("engine", std::string()) == "native",
               "runtime status should expose native engine mode") &&
        ok;
@@ -84,11 +84,11 @@ int main() {
          ok;
   }
 
-  ecnuvpn::Config legacy_cfg;
+  exv::Config legacy_cfg;
   legacy_cfg.vpn_engine = "native";
   nlohmann::json legacy_status =
-      ecnuvpn::platform::runtime_status_json(
-          ecnuvpn::config::to_platform_config_view(legacy_cfg));
+      exv::platform::runtime_status_json(
+          exv::config::to_platform_config_view(legacy_cfg));
   ok = expect(legacy_status.value("engine", std::string()) == "native",
               "runtime status should remain native-only for all config views") &&
        ok;

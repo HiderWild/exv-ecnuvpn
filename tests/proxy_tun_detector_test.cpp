@@ -17,8 +17,8 @@ void expect(bool condition, const std::string &name) {
 } // namespace
 
 int main() {
-  using ecnuvpn::platform::is_proxy_tun_candidate;
-  using ecnuvpn::platform::make_proxy_tun_adapter;
+  using exv::platform::is_proxy_tun_candidate;
+  using exv::platform::make_proxy_tun_adapter;
 
   expect(is_proxy_tun_candidate("Mihomo", "Mihomo TUN",
                                 "default route; fake-ip 198.18.0.0/15", ""),
@@ -42,8 +42,8 @@ int main() {
   expect(!is_proxy_tun_candidate("Wintun", "Wintun Userspace Tunnel",
                                  "", ""),
          "wintun without route evidence is not enough");
-  expect(!is_proxy_tun_candidate("ECNUVPN-1234", "OpenConnect Tunnel",
-                                 "default route", "ECNUVPN-1234"),
+  expect(!is_proxy_tun_candidate("EXV-1234", "OpenConnect Tunnel",
+                                 "default route", "EXV-1234"),
          "exv adapter is excluded");
 
   auto adapter = make_proxy_tun_adapter("Mihomo", "Mihomo TUN", "42",

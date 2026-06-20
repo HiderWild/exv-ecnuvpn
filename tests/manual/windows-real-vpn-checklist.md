@@ -7,7 +7,7 @@
 
 ## Overview
 
-Step-by-step manual checklist for verifying ECNU-VPN on real Windows hardware
+Step-by-step manual checklist for verifying EXV on real Windows hardware
 with a live VPN gateway. Each step has expected output and a sign-off field.
 
 **Do not commit real credentials, tokens, cookies, raw logs, packet captures,

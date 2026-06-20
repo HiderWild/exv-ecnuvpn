@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 namespace {
 
@@ -79,6 +79,8 @@ UiShellOptions parse_ui_shell_options(int argc, char **argv) {
       options.packaged_renderer_index = argv[++i];
     } else if (arg == "--exv" && i + 1 < argc) {
       options.exv_path = argv[++i];
+    } else if (arg == "--state-dir" && i + 1 < argc) {
+      options.state_dir = argv[++i];
     } else if (arg == "--devtools") {
       options.enable_dev_tools = true;
     }
@@ -112,6 +114,9 @@ UiShellOptions parse_ui_shell_args_file(
   if (!options.packaged_renderer_index.empty()) {
     options.packaged_renderer_index =
         resolve_sidecar_path(package_root, options.packaged_renderer_index);
+  }
+  if (!options.state_dir.empty()) {
+    options.state_dir = resolve_sidecar_path(package_root, options.state_dir);
   }
   return options;
 }
@@ -168,4 +173,4 @@ std::string validate_packaged_ui_shell_options(
                                 "--renderer-index");
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

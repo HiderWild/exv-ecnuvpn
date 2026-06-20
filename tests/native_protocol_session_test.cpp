@@ -30,7 +30,7 @@ std::vector<std::uint8_t> bytes(std::initializer_list<std::uint8_t> values) {
 }
 
 bool contains_event(
-    const ecnuvpn::tests::support::RecordingEventSink &events,
+    const exv::tests::support::RecordingEventSink &events,
     const std::string &type) {
   for (const auto &event : events.events()) {
     if (event.type == type)
@@ -40,7 +40,7 @@ bool contains_event(
 }
 
 bool events_contain_password(
-    const ecnuvpn::tests::support::RecordingEventSink &events,
+    const exv::tests::support::RecordingEventSink &events,
     const std::string &password) {
   for (const auto &event : events.events()) {
     if (event.message.find(password) != std::string::npos)
@@ -56,39 +56,39 @@ bool events_contain_password(
 }
 
 class FakeProtocolTransport final
-    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+    : public exv::vpn_engine::protocol::ProtocolTransport {
 public:
   explicit FakeProtocolTransport(
-      ecnuvpn::tests::support::FakeAnyConnectServer &server)
+      exv::tests::support::FakeAnyConnectServer &server)
       : server_(server) {}
 
-  ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
-      const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions
+  exv::vpn_engine::protocol::AuthResult authenticate(
+      const exv::vpn_engine::protocol::ProtocolSessionOptions
           &options) override {
-    ecnuvpn::tests::support::FakeAnyConnectCredentials credentials;
+    exv::tests::support::FakeAnyConnectCredentials credentials;
     credentials.username = options.username;
     credentials.password = options.password;
     return server_.password_authenticate(credentials);
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   connect_cstp(const std::string &cookie,
-               ecnuvpn::vpn_engine::TunnelMetadata *metadata) override {
+               exv::vpn_engine::TunnelMetadata *metadata) override {
     return server_.connect_cstp(cookie, metadata);
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   send_packet(const std::vector<std::uint8_t> &packet) override {
     return server_.send_packet(packet);
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind kind) override {
+  exv::vpn_engine::ValidationResult
+  send_control(exv::vpn_engine::protocol::InboundFrameKind kind) override {
     return server_.send_control(kind);
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame *out) override {
+  exv::vpn_engine::ValidationResult
+  receive_frame(exv::vpn_engine::protocol::InboundFrame *out) override {
     return server_.receive_frame(out);
   }
 
@@ -97,11 +97,11 @@ public:
   void reset_for_reconnect() override { server_.reset_transport(); }
 
 private:
-  ecnuvpn::tests::support::FakeAnyConnectServer &server_;
+  exv::tests::support::FakeAnyConnectServer &server_;
 };
 
 class ManualCancellationToken final
-    : public ecnuvpn::vpn_engine::protocol::CancellationToken {
+    : public exv::vpn_engine::protocol::CancellationToken {
 public:
   bool is_cancelled() const override { return cancelled_; }
   void cancel() { cancelled_ = true; }
@@ -110,22 +110,22 @@ private:
   bool cancelled_ = false;
 };
 
-class NoDataCancellingPacketDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+class NoDataCancellingPacketDevice final : public exv::vpn_engine::PacketDevice {
 public:
   NoDataCancellingPacketDevice(ManualCancellationToken &cancel,
                                int cancel_after_reads)
       : cancel_(cancel), cancel_after_reads_(cancel_after_reads) {}
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::DeviceConfig &config) override {
     last_open_metadata_.interface_name = config.interface_name;
     last_open_metadata_.mtu = config.mtu;
     open_ = true;
     ++open_count_;
     return {};
   }
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::TunnelMetadata &metadata) override {
     last_open_metadata_ = metadata;
     metadata_open_used_ = true;
     open_ = true;
@@ -133,7 +133,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     if (!packet)
       return {false, "packet_null_out", "packet output must not be null"};
@@ -147,7 +147,7 @@ public:
     return {false, "no_data", "no packet available"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> & /*packet*/) override {
     return {false, "unexpected_write", "no packets should be written"};
   }
@@ -162,7 +162,7 @@ public:
   int open_count() const { return open_count_; }
   int close_count() const { return close_count_; }
   int read_count() const { return read_count_; }
-  const ecnuvpn::vpn_engine::TunnelMetadata &last_open_metadata() const {
+  const exv::vpn_engine::TunnelMetadata &last_open_metadata() const {
     return last_open_metadata_;
   }
   bool metadata_open_used() const { return metadata_open_used_; }
@@ -170,7 +170,7 @@ public:
 private:
   ManualCancellationToken &cancel_;
   int cancel_after_reads_ = 0;
-  ecnuvpn::vpn_engine::TunnelMetadata last_open_metadata_;
+  exv::vpn_engine::TunnelMetadata last_open_metadata_;
   bool metadata_open_used_ = false;
   bool open_ = false;
   int open_count_ = 0;
@@ -183,7 +183,7 @@ private:
 // the echo server. Inbound frames are injected explicitly; outbound control
 // frames are recorded; data sends are optionally echoed back as inbound data.
 class LivenessTransport final
-    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+    : public exv::vpn_engine::protocol::ProtocolTransport {
 public:
   explicit LivenessTransport(bool echo_data = false) : echo_data_(echo_data) {
     metadata_.interface_name = "fake-cstp0";
@@ -191,20 +191,20 @@ public:
     metadata_.mtu = 1290;
   }
 
-  ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
-      const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions
+  exv::vpn_engine::protocol::AuthResult authenticate(
+      const exv::vpn_engine::protocol::ProtocolSessionOptions
           & /*options*/) override {
     std::lock_guard<std::mutex> lock(mu_);
     ++auth_attempts_;
-    ecnuvpn::vpn_engine::protocol::AuthResult result;
+    exv::vpn_engine::protocol::AuthResult result;
     result.ok = true;
     result.cookie = "liveness-cookie";
     return result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   connect_cstp(const std::string &cookie,
-               ecnuvpn::vpn_engine::TunnelMetadata *metadata) override {
+               exv::vpn_engine::TunnelMetadata *metadata) override {
     std::lock_guard<std::mutex> lock(mu_);
     ++cstp_connects_;
     last_connect_cookies_.push_back(cookie);
@@ -218,15 +218,15 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   send_packet(const std::vector<std::uint8_t> &packet) override {
     std::lock_guard<std::mutex> lock(mu_);
     if (closed_)
       return {false, "transport_closed", "transport closed"};
     ++data_sends_;
     if (echo_data_) {
-      ecnuvpn::vpn_engine::protocol::InboundFrame frame;
-      frame.kind = ecnuvpn::vpn_engine::protocol::InboundFrameKind::data;
+      exv::vpn_engine::protocol::InboundFrame frame;
+      frame.kind = exv::vpn_engine::protocol::InboundFrameKind::data;
       frame.payload = packet;
       inbound_.push_back(std::move(frame));
       cv_.notify_all();
@@ -234,8 +234,8 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind kind) override {
+  exv::vpn_engine::ValidationResult
+  send_control(exv::vpn_engine::protocol::InboundFrameKind kind) override {
     std::lock_guard<std::mutex> lock(mu_);
     if (closed_)
       return {false, "transport_closed", "transport closed"};
@@ -244,8 +244,8 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  receive_frame(ecnuvpn::vpn_engine::protocol::InboundFrame *out) override {
+  exv::vpn_engine::ValidationResult
+  receive_frame(exv::vpn_engine::protocol::InboundFrame *out) override {
     std::unique_lock<std::mutex> lock(mu_);
     cv_.wait(lock, [&] { return !inbound_.empty() || closed_; });
     if (!inbound_.empty()) {
@@ -271,17 +271,17 @@ public:
     cv_.notify_all();
   }
 
-  void inject(ecnuvpn::vpn_engine::protocol::InboundFrameKind kind,
+  void inject(exv::vpn_engine::protocol::InboundFrameKind kind,
               std::vector<std::uint8_t> payload = {}) {
     std::lock_guard<std::mutex> lock(mu_);
-    ecnuvpn::vpn_engine::protocol::InboundFrame frame;
+    exv::vpn_engine::protocol::InboundFrame frame;
     frame.kind = kind;
     frame.payload = std::move(payload);
     inbound_.push_back(std::move(frame));
     cv_.notify_all();
   }
 
-  void set_connect_metadata(ecnuvpn::vpn_engine::TunnelMetadata metadata) {
+  void set_connect_metadata(exv::vpn_engine::TunnelMetadata metadata) {
     std::lock_guard<std::mutex> lock(mu_);
     metadata_ = std::move(metadata);
   }
@@ -302,7 +302,7 @@ public:
   }
 
   int control_send_count(
-      ecnuvpn::vpn_engine::protocol::InboundFrameKind kind) const {
+      exv::vpn_engine::protocol::InboundFrameKind kind) const {
     std::lock_guard<std::mutex> lock(mu_);
     int count = 0;
     for (const auto &sent : control_sends_) {
@@ -315,9 +315,9 @@ public:
 private:
   mutable std::mutex mu_;
   std::condition_variable cv_;
-  std::deque<ecnuvpn::vpn_engine::protocol::InboundFrame> inbound_;
-  std::vector<ecnuvpn::vpn_engine::protocol::InboundFrameKind> control_sends_;
-  ecnuvpn::vpn_engine::TunnelMetadata metadata_;
+  std::deque<exv::vpn_engine::protocol::InboundFrame> inbound_;
+  std::vector<exv::vpn_engine::protocol::InboundFrameKind> control_sends_;
+  exv::vpn_engine::TunnelMetadata metadata_;
   std::vector<std::string> last_connect_cookies_;
   bool echo_data_ = false;
   bool closed_ = false;
@@ -332,28 +332,28 @@ private:
 // Returns no_data until a predicate signals the loop should end, then reports a
 // clean packet-loop end. Used to gate test shutdown on observable transport
 // state so the assertions are deterministic rather than timing-based.
-class PredicateDrainDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+class PredicateDrainDevice final : public exv::vpn_engine::PacketDevice {
 public:
   explicit PredicateDrainDevice(std::function<bool()> end_when)
       : end_when_(std::move(end_when)) {}
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::DeviceConfig &config) override {
     last_open_metadata_.interface_name = config.interface_name;
     last_open_metadata_.mtu = config.mtu;
     open_ = true;
     ++open_count_;
     return {};
   }
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::TunnelMetadata &metadata) override {
     last_open_metadata_ = metadata;
     open_ = true;
     ++open_count_;
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     if (!packet)
       return {false, "packet_null_out", "packet output must not be null"};
@@ -363,7 +363,7 @@ public:
     return {false, "no_data", "no packet available"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> &packet) override {
     written_packets_.push_back(packet);
     return {};
@@ -381,7 +381,7 @@ public:
 
 private:
   std::function<bool()> end_when_;
-  ecnuvpn::vpn_engine::TunnelMetadata last_open_metadata_;
+  exv::vpn_engine::TunnelMetadata last_open_metadata_;
   std::vector<std::vector<std::uint8_t>> written_packets_;
   bool open_ = false;
   int open_count_ = 0;
@@ -391,10 +391,10 @@ private:
 // First session (open #1) is permanently silent (no_data) to trigger dead-peer
 // detection; from the second session onward it emits a single packet and then
 // drains cleanly, letting the reconnected session finish gracefully.
-class DeadPeerThenDrainDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+class DeadPeerThenDrainDevice final : public exv::vpn_engine::PacketDevice {
 public:
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::DeviceConfig &config) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::DeviceConfig &config) override {
     last_open_metadata_.interface_name = config.interface_name;
     last_open_metadata_.mtu = config.mtu;
     open_ = true;
@@ -403,8 +403,8 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::TunnelMetadata &metadata) override {
     last_open_metadata_ = metadata;
     open_ = true;
     ++open_count_;
@@ -412,7 +412,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     if (!packet)
       return {false, "packet_null_out", "packet output must not be null"};
@@ -427,7 +427,7 @@ public:
     return {false, "packet_device_empty", "packet device drained"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> &packet) override {
     written_packets_.push_back(packet);
     return {};
@@ -441,12 +441,12 @@ public:
   }
 
   int open_count() const { return open_count_; }
-  const ecnuvpn::vpn_engine::TunnelMetadata &last_open_metadata() const {
+  const exv::vpn_engine::TunnelMetadata &last_open_metadata() const {
     return last_open_metadata_;
   }
 
 private:
-  ecnuvpn::vpn_engine::TunnelMetadata last_open_metadata_;
+  exv::vpn_engine::TunnelMetadata last_open_metadata_;
   std::vector<std::vector<std::uint8_t>> written_packets_;
   bool open_ = false;
   int open_count_ = 0;
@@ -456,22 +456,22 @@ private:
 
 // Always reports no_data; never drains and never cancels. Lets every forwarding
 // session reach dead-peer detection so reconnect exhaustion can be exercised.
-class SilentNoDataDevice final : public ecnuvpn::vpn_engine::PacketDevice {
+class SilentNoDataDevice final : public exv::vpn_engine::PacketDevice {
 public:
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::DeviceConfig & /*config*/) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::DeviceConfig & /*config*/) override {
     open_ = true;
     ++open_count_;
     return {};
   }
-  ecnuvpn::vpn_engine::ValidationResult
-  open(const ecnuvpn::vpn_engine::TunnelMetadata & /*metadata*/) override {
+  exv::vpn_engine::ValidationResult
+  open(const exv::vpn_engine::TunnelMetadata & /*metadata*/) override {
     open_ = true;
     ++open_count_;
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     if (!packet)
       return {false, "packet_null_out", "packet output must not be null"};
@@ -479,7 +479,7 @@ public:
     return {false, "no_data", "no packet available"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> & /*packet*/) override {
     return {};
   }
@@ -500,22 +500,22 @@ private:
   int close_count_ = 0;
 };
 
-ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions session_options() {
-  ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options;
+exv::vpn_engine::protocol::ProtocolSessionOptions session_options() {
+  exv::vpn_engine::protocol::ProtocolSessionOptions options;
   options.server.scheme = "https";
   options.server.host = "vpn.example.invalid";
   options.server.port = 443;
   options.server.base_path = "/";
   options.username = "alice";
   options.password = MOCK_PASSWORD;
-  options.useragent = "ECNU-VPN test";
+  options.useragent = "EXV test";
   options.disable_dtls = true;
   return options;
 }
 
 bool test_authenticate_success_and_connect_cstp() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -528,14 +528,14 @@ bool test_authenticate_success_and_connect_cstp() {
               "auth success should call transport authenticate once") &&
        ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   auto cstp = session.connect_cstp(&metadata);
   ok = expect(cstp.ok, "CSTP connect should return ok after auth") && ok;
   ok = expect(metadata.interface_name == "fake-cstp0",
               "CSTP connect should return tunnel metadata") &&
        ok;
   ok = expect(session.state().phase ==
-                  ecnuvpn::vpn_engine::SessionPhase::configuring_network,
+                  exv::vpn_engine::SessionPhase::configuring_network,
               "CSTP connect should configure session state") &&
        ok;
 
@@ -543,8 +543,8 @@ bool test_authenticate_success_and_connect_cstp() {
 }
 
 bool test_auth_failure_never_reconnects() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -576,8 +576,8 @@ bool test_auth_failure_never_reconnects() {
 }
 
 bool test_packet_echo() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -588,7 +588,7 @@ bool test_packet_echo() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok, "auth should succeed before packet loop") &&
        ok;
   ok = expect(session.connect_cstp(&metadata).ok,
@@ -620,8 +620,8 @@ bool test_packet_echo() {
 }
 
 bool test_reconnect_after_transport_close() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
 
@@ -642,7 +642,7 @@ bool test_reconnect_after_transport_close() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok, "initial auth should succeed") && ok;
   ok = expect(session.connect_cstp(&metadata).ok,
               "initial CSTP connect should succeed") &&
@@ -685,8 +685,8 @@ bool test_reconnect_after_transport_close() {
 }
 
 bool test_cancellation_exits_without_opening_device() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -698,7 +698,7 @@ bool test_cancellation_exits_without_opening_device() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok, "auth should succeed before cancellation") &&
        ok;
   ok = expect(session.connect_cstp(&metadata).ok,
@@ -710,7 +710,7 @@ bool test_cancellation_exits_without_opening_device() {
   ok = expect(!loop.ok && loop.code == "session_cancelled",
               "cancelled loop should return session_cancelled") &&
        ok;
-  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::stopped,
+  ok = expect(session.state().phase == exv::vpn_engine::SessionPhase::stopped,
               "cancelled loop should mark session stopped") &&
        ok;
   ok = expect(device.open_count() == 0,
@@ -724,8 +724,8 @@ bool test_cancellation_exits_without_opening_device() {
 }
 
 bool test_active_loop_cancellation_during_no_data_poll_exits() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -736,7 +736,7 @@ bool test_active_loop_cancellation_during_no_data_poll_exits() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before active cancellation") &&
        ok;
@@ -768,7 +768,7 @@ bool test_active_loop_cancellation_during_no_data_poll_exits() {
   ok = expect(!device.metadata_open_used(),
               "active loop should open packet device with DeviceConfig") &&
        ok;
-  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::stopped,
+  ok = expect(session.state().phase == exv::vpn_engine::SessionPhase::stopped,
               "active cancellation should mark session stopped") &&
        ok;
 
@@ -776,8 +776,8 @@ bool test_active_loop_cancellation_during_no_data_poll_exits() {
 }
 
 bool test_disconnect_stops_before_packet_loop() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   FakeAnyConnectServer server;
@@ -788,7 +788,7 @@ bool test_disconnect_stops_before_packet_loop() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok, "auth should succeed before disconnect") &&
        ok;
   ok = expect(session.connect_cstp(&metadata).ok,
@@ -801,7 +801,7 @@ bool test_disconnect_stops_before_packet_loop() {
   ok = expect(!loop.ok && loop.code == "session_cancelled",
               "disconnected loop should return session_cancelled") &&
        ok;
-  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::stopped,
+  ok = expect(session.state().phase == exv::vpn_engine::SessionPhase::stopped,
               "disconnect should mark session stopped") &&
        ok;
   ok = expect(device.open_count() == 0,
@@ -812,9 +812,9 @@ bool test_disconnect_stops_before_packet_loop() {
 }
 
 bool test_inbound_dpd_request_is_answered() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -828,7 +828,7 @@ bool test_inbound_dpd_request_is_answered() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok, "auth should succeed before DPD test") &&
        ok;
   ok = expect(session.connect_cstp(&metadata).ok,
@@ -849,9 +849,9 @@ bool test_inbound_dpd_request_is_answered() {
 }
 
 bool test_peer_disconnect_is_not_generic_transport_eof() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -863,7 +863,7 @@ bool test_peer_disconnect_is_not_generic_transport_eof() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before disconnect frame test") &&
        ok;
@@ -876,7 +876,7 @@ bool test_peer_disconnect_is_not_generic_transport_eof() {
   ok = expect(!loop.ok && loop.code == "tunnel_disconnected",
               "peer disconnect frame should not be generic transport_closed") &&
        ok;
-  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+  ok = expect(session.state().phase == exv::vpn_engine::SessionPhase::failed,
               "peer disconnect should mark session failed") &&
        ok;
 
@@ -884,9 +884,9 @@ bool test_peer_disconnect_is_not_generic_transport_eof() {
 }
 
 bool test_terminate_frame_is_not_generic_transport_eof() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -898,7 +898,7 @@ bool test_terminate_frame_is_not_generic_transport_eof() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before terminate frame test") &&
        ok;
@@ -911,7 +911,7 @@ bool test_terminate_frame_is_not_generic_transport_eof() {
   ok = expect(!loop.ok && loop.code == "tunnel_disconnected",
               "terminate frame should not be generic transport_closed") &&
        ok;
-  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+  ok = expect(session.state().phase == exv::vpn_engine::SessionPhase::failed,
               "terminate frame should mark session failed") &&
        ok;
 
@@ -919,9 +919,9 @@ bool test_terminate_frame_is_not_generic_transport_eof() {
 }
 
 bool test_compressed_frame_fails_with_explicit_unsupported_code() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -933,7 +933,7 @@ bool test_compressed_frame_fails_with_explicit_unsupported_code() {
 
   ProtocolSession session(session_options(), &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before compressed frame test") &&
        ok;
@@ -946,7 +946,7 @@ bool test_compressed_frame_fails_with_explicit_unsupported_code() {
   ok = expect(!loop.ok && loop.code == "cstp_compressed_unsupported",
               "compressed frame should fail with explicit unsupported code") &&
        ok;
-  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+  ok = expect(session.state().phase == exv::vpn_engine::SessionPhase::failed,
               "compressed frame should mark session failed") &&
        ok;
 
@@ -954,9 +954,9 @@ bool test_compressed_frame_fails_with_explicit_unsupported_code() {
 }
 
 bool test_idle_keepalive_is_emitted() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -969,7 +969,7 @@ bool test_idle_keepalive_is_emitted() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before keepalive test") &&
        ok;
@@ -993,9 +993,9 @@ bool test_idle_keepalive_is_emitted() {
 }
 
 bool test_metadata_keepalive_drives_idle_timer() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -1003,7 +1003,7 @@ bool test_metadata_keepalive_drives_idle_timer() {
   ManualCancellationToken cancel;
   NoDataCancellingPacketDevice device(cancel, 5);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   metadata.interface_name = "fake-cstp0";
   metadata.internal_ip4_address = "10.0.0.2";
   metadata.mtu = 1290;
@@ -1015,7 +1015,7 @@ bool test_metadata_keepalive_drives_idle_timer() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  exv::vpn_engine::TunnelMetadata connected;
   ok = expect(session.authenticate().ok,
               "auth should succeed before metadata keepalive test") &&
        ok;
@@ -1039,9 +1039,9 @@ bool test_metadata_keepalive_drives_idle_timer() {
 }
 
 bool test_dead_peer_triggers_reconnect() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::InboundFrameKind;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::InboundFrameKind;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/true);
@@ -1057,7 +1057,7 @@ bool test_dead_peer_triggers_reconnect() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before dead-peer test") &&
        ok;
@@ -1099,8 +1099,8 @@ bool test_dead_peer_triggers_reconnect() {
 }
 
 bool test_reconnect_reauthenticates_when_cached_cookie_expires() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/true);
@@ -1116,7 +1116,7 @@ bool test_reconnect_reauthenticates_when_cached_cookie_expires() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before cookie-expiry reconnect test") &&
        ok;
@@ -1150,8 +1150,8 @@ bool test_reconnect_reauthenticates_when_cached_cookie_expires() {
 }
 
 bool test_reconnect_skips_cached_cookie_after_session_timeout() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/true);
@@ -1159,7 +1159,7 @@ bool test_reconnect_skips_cached_cookie_after_session_timeout() {
   DeadPeerThenDrainDevice device;
   ManualCancellationToken cancel;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   metadata.interface_name = "fake-cstp0";
   metadata.internal_ip4_address = "10.0.0.2";
   metadata.mtu = 1290;
@@ -1177,7 +1177,7 @@ bool test_reconnect_skips_cached_cookie_after_session_timeout() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  exv::vpn_engine::TunnelMetadata connected;
   ok = expect(session.authenticate().ok,
               "auth should succeed before session-timeout reconnect test") &&
        ok;
@@ -1211,8 +1211,8 @@ bool test_reconnect_skips_cached_cookie_after_session_timeout() {
 }
 
 bool test_reconnect_reopens_device_with_updated_metadata() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/true);
@@ -1228,7 +1228,7 @@ bool test_reconnect_reopens_device_with_updated_metadata() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before metadata-refresh reconnect test") &&
        ok;
@@ -1236,7 +1236,7 @@ bool test_reconnect_reopens_device_with_updated_metadata() {
               "CSTP should succeed before metadata-refresh reconnect test") &&
        ok;
 
-  ecnuvpn::vpn_engine::TunnelMetadata refreshed;
+  exv::vpn_engine::TunnelMetadata refreshed;
   refreshed.interface_name = "fake-cstp1";
   refreshed.internal_ip4_address = "10.0.0.3";
   refreshed.mtu = 1400;
@@ -1261,8 +1261,8 @@ bool test_reconnect_reopens_device_with_updated_metadata() {
 }
 
 bool test_metadata_new_tunnel_rekey_triggers_reconnect() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/true);
@@ -1270,7 +1270,7 @@ bool test_metadata_new_tunnel_rekey_triggers_reconnect() {
   DeadPeerThenDrainDevice device;
   ManualCancellationToken cancel;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   metadata.interface_name = "fake-cstp0";
   metadata.internal_ip4_address = "10.0.0.2";
   metadata.mtu = 1290;
@@ -1285,7 +1285,7 @@ bool test_metadata_new_tunnel_rekey_triggers_reconnect() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  exv::vpn_engine::TunnelMetadata connected;
   ok = expect(session.authenticate().ok,
               "auth should succeed before metadata rekey test") &&
        ok;
@@ -1309,8 +1309,8 @@ bool test_metadata_new_tunnel_rekey_triggers_reconnect() {
 }
 
 bool test_metadata_ssl_rekey_reports_unsupported_when_reconnect_disabled() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -1318,7 +1318,7 @@ bool test_metadata_ssl_rekey_reports_unsupported_when_reconnect_disabled() {
   SilentNoDataDevice device;
   ManualCancellationToken cancel;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   metadata.interface_name = "fake-cstp0";
   metadata.internal_ip4_address = "10.0.0.2";
   metadata.mtu = 1290;
@@ -1332,7 +1332,7 @@ bool test_metadata_ssl_rekey_reports_unsupported_when_reconnect_disabled() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  exv::vpn_engine::TunnelMetadata connected;
   ok = expect(session.authenticate().ok,
               "auth should succeed before SSL rekey test") &&
        ok;
@@ -1353,8 +1353,8 @@ bool test_metadata_ssl_rekey_reports_unsupported_when_reconnect_disabled() {
 }
 
 bool test_metadata_idle_timeout_has_specific_code() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -1362,7 +1362,7 @@ bool test_metadata_idle_timeout_has_specific_code() {
   SilentNoDataDevice device;
   ManualCancellationToken cancel;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   metadata.interface_name = "fake-cstp0";
   metadata.internal_ip4_address = "10.0.0.2";
   metadata.mtu = 1290;
@@ -1374,7 +1374,7 @@ bool test_metadata_idle_timeout_has_specific_code() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  exv::vpn_engine::TunnelMetadata connected;
   ok = expect(session.authenticate().ok,
               "auth should succeed before idle timeout test") &&
        ok;
@@ -1392,8 +1392,8 @@ bool test_metadata_idle_timeout_has_specific_code() {
 }
 
 bool test_metadata_session_timeout_has_specific_code() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -1401,7 +1401,7 @@ bool test_metadata_session_timeout_has_specific_code() {
   SilentNoDataDevice device;
   ManualCancellationToken cancel;
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   metadata.interface_name = "fake-cstp0";
   metadata.internal_ip4_address = "10.0.0.2";
   metadata.mtu = 1290;
@@ -1413,7 +1413,7 @@ bool test_metadata_session_timeout_has_specific_code() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata connected;
+  exv::vpn_engine::TunnelMetadata connected;
   ok = expect(session.authenticate().ok,
               "auth should succeed before session timeout test") &&
        ok;
@@ -1431,8 +1431,8 @@ bool test_metadata_session_timeout_has_specific_code() {
 }
 
 bool test_reconnect_exhaustion_fails_with_stable_code() {
-  using namespace ecnuvpn::tests::support;
-  using ecnuvpn::vpn_engine::protocol::ProtocolSession;
+  using namespace exv::tests::support;
+  using exv::vpn_engine::protocol::ProtocolSession;
 
   bool ok = true;
   LivenessTransport transport(/*echo_data=*/false);
@@ -1448,7 +1448,7 @@ bool test_reconnect_exhaustion_fails_with_stable_code() {
 
   ProtocolSession session(options, &transport);
 
-  ecnuvpn::vpn_engine::TunnelMetadata metadata;
+  exv::vpn_engine::TunnelMetadata metadata;
   ok = expect(session.authenticate().ok,
               "auth should succeed before exhaustion test") &&
        ok;
@@ -1467,7 +1467,7 @@ bool test_reconnect_exhaustion_fails_with_stable_code() {
   ok = expect(transport.auth_attempts() == 1,
               "exhaustion should not re-authenticate while cached cookie works") &&
        ok;
-  ok = expect(session.state().phase == ecnuvpn::vpn_engine::SessionPhase::failed,
+  ok = expect(session.state().phase == exv::vpn_engine::SessionPhase::failed,
               "exhausted reconnect should mark session failed") &&
        ok;
 

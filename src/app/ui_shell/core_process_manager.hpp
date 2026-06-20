@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 struct CoreProcessLaunch {
   std::string exv_path;
@@ -40,4 +40,4 @@ void configure_core_process_transport_signal_policy();
 std::unique_ptr<CoreRpcTransport> create_core_process_transport(
     const CoreProcessLaunch &launch);
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

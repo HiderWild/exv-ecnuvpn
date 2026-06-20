@@ -36,8 +36,8 @@
 #include <unistd.h>
 #endif
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
 using json = nlohmann::json;
@@ -538,7 +538,7 @@ int test_preferred_core_path_launches_packaged_bin_core() {
 
   std::string state_dir = make_state_dir();
   const std::filesystem::path package_root =
-      std::filesystem::path(state_dir) / "ECNU VPN";
+      std::filesystem::path(state_dir) / "EXV";
   const std::filesystem::path bin_dir = package_root / "bin";
   std::filesystem::create_directories(bin_dir);
   const std::string preferred_core =

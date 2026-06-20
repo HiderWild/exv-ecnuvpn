@@ -19,11 +19,14 @@ public:
   UseCaseResult runtime_status();
   UseCaseResult driver_status();
   UseCaseResult install_driver(const nlohmann::json &payload);
+  UseCaseResult cli_status();
+  UseCaseResult install_cli();
+  UseCaseResult uninstall_cli();
   UseCaseResult install_helper();
   UseCaseResult uninstall_helper();
 
 private:
-  ecnuvpn::config::ConfigManager manager_;
+  exv::config::ConfigManager manager_;
 };
 
 } // namespace exv::core

@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 struct VpnEngineConfig {
@@ -57,4 +57,4 @@ public:
 };
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

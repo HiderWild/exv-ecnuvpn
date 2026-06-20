@@ -45,7 +45,7 @@ json map_snapshot_to_frontend(const exv::core::TunnelStatusSnapshot &snap,
   j["pid"] = -1;
   j["network_ready"] = snap.network_ready;
   j["interface"] = snap.interface_name;
-  j["internal_ip"] = "";
+  j["internal_ip"] = snap.internal_ip;
   j["route_count"] = route_count;
   j["mtu"] = mtu;
   j["uptime_seconds"] = 0;
@@ -89,10 +89,10 @@ std::string read_source_file(const std::filesystem::path &path) {
 }
 
 std::string app_api_source_text() {
-#ifndef ECNUVPN_SOURCE_DIR
+#ifndef EXV_SOURCE_DIR
   return std::string();
 #else
-  const auto app_api_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR) / "src" /
+  const auto app_api_dir = std::filesystem::path(EXV_SOURCE_DIR) / "src" /
                            "core" / "app_api";
   const char *files[] = {"app_api.cpp", "desktop_action_registry.cpp",
                          "desktop_tunnel_host.cpp",
@@ -111,10 +111,10 @@ std::string app_api_source_text() {
 }
 
 std::string source_text_at(std::initializer_list<const char *> parts) {
-#ifndef ECNUVPN_SOURCE_DIR
+#ifndef EXV_SOURCE_DIR
   return std::string();
 #else
-  std::filesystem::path path = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  std::filesystem::path path = std::filesystem::path(EXV_SOURCE_DIR);
   for (const char *part : parts) {
     path /= part;
   }
@@ -184,7 +184,8 @@ bool connected_snapshot_maps_correctly() {
   snap.phase = exv::core::TunnelPhase::Connected;
   snap.network_ready = true;
   snap.server = "https://vpn.example.invalid";
-  snap.interface_name = "ECNU-VPN";
+  snap.interface_name = "EXV";
+  snap.internal_ip = "10.255.0.12";
   snap.auto_reconnect = true;
 
   json j = map_snapshot_to_frontend(snap, "https://vpn.example.invalid",
@@ -200,8 +201,11 @@ bool connected_snapshot_maps_correctly() {
   ok = expect(j.value("network_ready", false) == true,
               "connected phase should map to network_ready=true") &&
        ok;
-  ok = expect(j.value("interface", std::string()) == "ECNU-VPN",
+  ok = expect(j.value("interface", std::string()) == "EXV",
               "interface should be preserved") &&
+       ok;
+  ok = expect(j.value("internal_ip", std::string()) == "10.255.0.12",
+              "connected snapshot should expose assigned tunnel IP") &&
        ok;
   ok = expect(j.value("phase", std::string()) == "connected",
               "phase string should be 'connected'") &&
@@ -254,7 +258,7 @@ bool reconnecting_snapshot_maps_correctly() {
   snap.phase = exv::core::TunnelPhase::Reconnecting;
   snap.network_ready = false;
   snap.server = "https://vpn.example.invalid";
-  snap.interface_name = "ECNU-VPN";
+  snap.interface_name = "EXV";
   snap.auto_reconnect = true;
 
   exv::core::ReconnectInfo ri;
@@ -344,8 +348,8 @@ bool frontend_json_has_required_fields() {
 }
 
 bool disconnected_status_uses_async_virtual_network_probe_contract() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source =
@@ -375,8 +379,8 @@ bool disconnected_status_uses_async_virtual_network_probe_contract() {
 }
 
 bool core_process_pushes_async_virtual_network_status_events_contract() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source =
@@ -403,8 +407,8 @@ bool core_process_pushes_async_virtual_network_status_events_contract() {
 }
 
 bool app_api_activates_core_owned_native_mode() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -440,8 +444,8 @@ bool app_api_activates_core_owned_native_mode() {
 }
 
 bool desktop_native_connect_uses_core_owned_controller_pipeline() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -487,7 +491,7 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
                   std::string::npos,
               "desktop connect job should coordinate backend/platform/protocol branches through ConnectPipeline") &&
        ok;
-  ok = expect(source.find("ecnuvpn::vpn_engine::NativeHandshakeJob") !=
+  ok = expect(source.find("exv::vpn_engine::NativeHandshakeJob") !=
                   std::string::npos,
               "desktop connect job should prepare native protocol handshake before controller serial tail") &&
        ok;
@@ -516,8 +520,8 @@ bool desktop_native_connect_uses_core_owned_controller_pipeline() {
 }
 
 bool desktop_native_preflight_reports_substage_timing() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -569,8 +573,8 @@ bool desktop_native_preflight_reports_substage_timing() {
 }
 
 bool desktop_connect_pipeline_reports_branch_timing() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -699,8 +703,8 @@ bool desktop_connect_pipeline_reports_branch_timing() {
 }
 
 bool desktop_connect_pipeline_tracks_and_reaps_unused_oneshot_helper() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -781,8 +785,8 @@ bool desktop_connect_pipeline_tracks_and_reaps_unused_oneshot_helper() {
 }
 
 bool desktop_native_connect_releases_attempt_guard_on_failed_status() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -842,9 +846,59 @@ bool desktop_native_connect_releases_attempt_guard_on_failed_status() {
 #endif
 }
 
+bool desktop_disconnect_releases_successful_attempt_guard() {
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto disconnect_handler = source.find("\"vpn.disconnect\"");
+  const auto register_end = source.find("});\n}", disconnect_handler);
+  const auto disconnect_source =
+      disconnect_handler == std::string::npos
+          ? std::string()
+          : source.substr(disconnect_handler,
+                          register_end == std::string::npos
+                              ? std::string::npos
+                              : register_end - disconnect_handler);
+
+  const auto active_job_branch =
+      disconnect_source.find("g_desktop_connect_jobs.snapshot()");
+  const auto controller_disconnect =
+      disconnect_source.find("controller->disconnect");
+  const auto attempt_terminal =
+      disconnect_source.find("conn_attempt::mark_terminal");
+  const auto disconnected_return =
+      disconnect_source.find("return disconnected_status(cfg)");
+
+  bool ok = true;
+  ok = expect(disconnect_handler != std::string::npos,
+              "app_api should register vpn.disconnect handler") &&
+       ok;
+  ok = expect(attempt_terminal != std::string::npos,
+              "vpn.disconnect should release a successful connection-attempt guard") &&
+       ok;
+  if (active_job_branch != std::string::npos &&
+      controller_disconnect != std::string::npos &&
+      attempt_terminal != std::string::npos &&
+      disconnected_return != std::string::npos) {
+    ok = expect(active_job_branch < controller_disconnect,
+                "disconnect should keep active connect-job cancellation first") &&
+         ok;
+    ok = expect(controller_disconnect < attempt_terminal,
+                "disconnect should stop the controller before releasing the attempt guard") &&
+         ok;
+    ok = expect(attempt_terminal < disconnected_return,
+                "disconnect should release the attempt guard before returning disconnected status") &&
+         ok;
+  }
+  return ok;
+#endif
+}
+
 bool desktop_connect_error_preserves_status_error_code_contract() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -876,8 +930,8 @@ bool desktop_connect_error_preserves_status_error_code_contract() {
 }
 
 bool tunnel_controller_native_runner_failure_cleans_helper_session() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source =
@@ -939,8 +993,8 @@ bool tunnel_controller_native_runner_failure_cleans_helper_session() {
 }
 
 bool desktop_connect_job_owner_destructs_before_error_state_contract() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -964,8 +1018,8 @@ bool desktop_connect_job_owner_destructs_before_error_state_contract() {
 }
 
 bool desktop_helper_status_includes_current_instance_contract() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -1003,8 +1057,8 @@ bool desktop_helper_status_includes_current_instance_contract() {
 }
 
 bool auth_interaction_coordinator_test_is_release_blocking() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string cmake = source_text_at({"CMakeLists.txt"});
@@ -1031,8 +1085,8 @@ bool auth_interaction_coordinator_test_is_release_blocking() {
 }
 
 bool desktop_service_actions_use_helper_owned_maintenance_contract() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string source = app_api_source_text();
@@ -1081,8 +1135,8 @@ bool desktop_service_actions_use_helper_owned_maintenance_contract() {
 }
 
 bool cli_service_actions_use_core_helper_maintenance_contract() {
-#ifndef ECNUVPN_SOURCE_DIR
-  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+#ifndef EXV_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: EXV_SOURCE_DIR is not defined" << std::endl;
   return false;
 #else
   const std::string cli_source =
@@ -1164,6 +1218,7 @@ int main() {
   ok = desktop_connect_pipeline_reports_branch_timing() && ok;
   ok = desktop_connect_pipeline_tracks_and_reaps_unused_oneshot_helper() && ok;
   ok = desktop_native_connect_releases_attempt_guard_on_failed_status() && ok;
+  ok = desktop_disconnect_releases_successful_attempt_guard() && ok;
   ok = desktop_connect_error_preserves_status_error_code_contract() && ok;
   ok = tunnel_controller_native_runner_failure_cleans_helper_session() && ok;
   ok = desktop_connect_job_owner_destructs_before_error_state_contract() && ok;

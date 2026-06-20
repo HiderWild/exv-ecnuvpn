@@ -10,7 +10,7 @@
 #include <memory>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 struct NativeDarwinPacketIoApi {
@@ -95,4 +95,4 @@ private:
 std::unique_ptr<vpn_engine::PacketDevice> create_native_packet_device();
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

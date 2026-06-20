@@ -19,23 +19,26 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 
 if (-not $PackageRoot) {
-  $PackageRoot = Join-Path $repoRoot 'build\windows\webview\package\ECNU VPN'
+  $PackageRoot = Join-Path $repoRoot 'build\windows\webview\package\EXV'
 }
 if (-not $OutputRoot) {
   $OutputRoot = Join-Path $repoRoot 'build\manual-verification'
 }
 if ($StateDir) {
-  $env:ECNUVPN_STATE_DIR = $StateDir
+  $env:EXV_STATE_DIR = $StateDir
 }
 
 function Resolve-StateDir {
-  if ($env:ECNUVPN_STATE_DIR) {
-    return $env:ECNUVPN_STATE_DIR
+  if ($env:EXV_STATE_DIR) {
+    return $env:EXV_STATE_DIR
   }
-  if ($env:APPDATA) {
-    return Join-Path $env:APPDATA 'ecnuvpn'
+  if ($env:LOCALAPPDATA) {
+    return Join-Path $env:LOCALAPPDATA 'EXV\profile\default'
   }
-  return Join-Path $env:ProgramData 'ecnuvpn'
+  if ($env:USERPROFILE) {
+    return Join-Path $env:USERPROFILE 'AppData\Local\EXV\profile\default'
+  }
+  return Join-Path $env:ProgramData 'EXV\profile\default'
 }
 
 function Redact-LogLine {
@@ -303,7 +306,7 @@ $sessionDir = Join-Path $OutputRoot "phase7-vpn-$timestamp"
 New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
 
 $resolvedStateDir = Resolve-StateDir
-$logPath = Join-Path $resolvedStateDir 'ecnuvpn.log'
+$logPath = Join-Path $resolvedStateDir 'exv.log'
 $logOffset = 0
 if (Test-Path -LiteralPath $logPath) {
   $logOffset = (Get-Item -LiteralPath $logPath).Length
@@ -346,7 +349,7 @@ $metadata = [ordered]@{
 $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $sessionDir 'metadata.json') -Encoding UTF8
 
 Write-Host ''
-Write-Host '=== ECNU-VPN Phase 7 Manual Verification Capture ===' -ForegroundColor Cyan
+Write-Host '=== EXV Phase 7 Manual Verification Capture ===' -ForegroundColor Cyan
 Write-Host "Output: $sessionDir"
 Write-Host "State dir: $resolvedStateDir"
 Write-Host "Log: $logPath"

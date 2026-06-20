@@ -24,9 +24,9 @@
 
 using json = nlohmann::json;
 
-namespace ecnuvpn::logger {
+namespace exv::logger {
 void info(const std::string &) {}
-} // namespace ecnuvpn::logger
+} // namespace exv::logger
 
 namespace {
 
@@ -408,7 +408,7 @@ private:
 
 int test_manifest_declares_single_helper_protocol() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto manifest =
       read_json_file(source_dir / "contracts" / "system.contract.json");
   const auto &helper = manifest.at("modules").at("helper");
@@ -580,7 +580,7 @@ int test_generated_contract_matches_helper_manifest() {
 
 int test_daemon_uses_network_ops_handler_factory() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto helper_source = read_text_file(source_dir / "src" / "helper" /
                                            "helper.cpp");
 
@@ -599,7 +599,7 @@ int test_daemon_uses_network_ops_handler_factory() {
 
 int test_daemon_does_not_hold_external_handler_lock() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto helper_source = read_text_file(source_dir / "src" / "helper" /
                                            "helper.cpp");
 
@@ -613,7 +613,7 @@ int test_daemon_does_not_hold_external_handler_lock() {
 
 int test_legacy_helper_internal_header_removed() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto header_path = source_dir / "src" / "helper" /
                            "helper_internal.hpp";
   ok = expect(!std::filesystem::exists(header_path),
@@ -624,7 +624,7 @@ int test_legacy_helper_internal_header_removed() {
 
 int test_unused_helper_server_stub_removed() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   ok = expect(!std::filesystem::exists(source_dir / "src" / "helper" /
                                        "runtime" / "helper_server.hpp"),
               "unused helper_server.hpp production stub must be removed") &&
@@ -644,7 +644,7 @@ bool is_source_file(const std::filesystem::path &path) {
 
 int test_helper_platform_boundary_lives_under_platform() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
 
   ok = expect(!std::filesystem::exists(source_dir / "src" / "helper" /
                                        "platform"),
@@ -696,7 +696,7 @@ int test_helper_platform_boundary_lives_under_platform() {
 
 int test_oneshot_owner_is_uid_or_sid_not_pid_alias() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const std::vector<std::filesystem::path> files = {
       source_dir / "src" / "helper" / "helper.cpp",
       source_dir / "src" / "platform" / "win32" / "oneshot_bootstrap.cpp",
@@ -714,7 +714,7 @@ int test_oneshot_owner_is_uid_or_sid_not_pid_alias() {
 
 int test_windows_helper_has_no_second_service_entrypoint() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   ok = expect(!std::filesystem::exists(source_dir / "src" / "helper" /
                                        "platform" / "win32" /
                                        "helper_service.cpp"),
@@ -725,7 +725,7 @@ int test_windows_helper_has_no_second_service_entrypoint() {
 
 int test_oneshot_entrypoint_uses_only_endpoint_argument() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const std::vector<std::filesystem::path> files = {
       source_dir / "src" / "helper" / "helper_main.cpp",
       source_dir / "src" / "platform" / "win32" / "oneshot_bootstrap.cpp",
@@ -750,7 +750,7 @@ int test_oneshot_entrypoint_uses_only_endpoint_argument() {
 
 int test_windows_oneshot_bootstrap_does_not_consume_helper_connection() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto win32_bootstrap = read_text_file(
       source_dir / "src" / "platform" / "win32" / "oneshot_bootstrap.cpp");
 
@@ -775,7 +775,7 @@ int test_windows_oneshot_bootstrap_does_not_consume_helper_connection() {
 
 int test_helper_connector_requires_explicit_endpoint_field() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto connector_source = read_text_file(
       source_dir / "src" / "helper" / "common" / "helper_connector.cpp");
 
@@ -792,7 +792,7 @@ int test_helper_connector_requires_explicit_endpoint_field() {
 
 int test_pipe_helper_client_serializes_request_response_pairs() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto header_source = read_text_file(
       source_dir / "src" / "helper" / "common" / "pipe_helper_client.hpp");
   const auto impl_source = read_text_file(
@@ -820,7 +820,7 @@ int test_pipe_helper_client_serializes_request_response_pairs() {
 
 int test_windows_service_status_does_not_block_on_helper_hello() {
   bool ok = true;
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto service_status_source = read_text_file(
       source_dir / "src" / "platform" / "win32" / "service_status.cpp");
 
@@ -1420,7 +1420,7 @@ int test_handler_delegates_network_ops_and_cleans_registered_resources() {
 
   exv::helper::PrepareTunnelDeviceRequest prepare_req;
   prepare_req.session_id = start_resp.session_id;
-  prepare_req.adapter_name = "ECNU-VPN";
+  prepare_req.adapter_name = "EXV";
   auto prepare = dispatch_json(handler,
                                exv::helper::HelperOp::PrepareTunnelDevice,
                                json(prepare_req));
@@ -1428,7 +1428,7 @@ int test_handler_delegates_network_ops_and_cleans_registered_resources() {
        ok;
   const auto prepare_resp = exv::helper::prepare_tunnel_device_response_from_json(
       json::parse(prepare.payload_json));
-  ok = expect(prepare_resp.device_path == "helper-device://ECNU-VPN",
+  ok = expect(prepare_resp.device_path == "helper-device://EXV",
               "PrepareTunnelDevice should return network ops device path") &&
        ok;
 
@@ -1486,7 +1486,7 @@ int test_privileged_task_queue_serializes_mutations_and_reports_state() {
 
   exv::helper::PrepareTunnelDeviceRequest prepare_req;
   prepare_req.session_id = start_resp.session_id;
-  prepare_req.adapter_name = "ECNU-VPN";
+  prepare_req.adapter_name = "EXV";
 
   exv::helper::HelperResponse prepare_resp;
   std::thread prepare_thread([&] {
@@ -1577,7 +1577,7 @@ int test_core_lifecycle_cleanup_reports_task_queue_state() {
               "StartSession should succeed before lifecycle cleanup") &&
        ok;
   handler.cleanup_registry().add_resource(start_resp.session_id,
-                                          {"adapter", "ECNU-VPN"});
+                                          {"adapter", "EXV"});
 
   std::thread cleanup_thread([&] { handler.handle_core_lifecycle_lost(); });
 
@@ -1630,7 +1630,7 @@ int test_busy_privileged_task_keeps_core_lease_alive() {
 
   exv::helper::PrepareTunnelDeviceRequest prepare_req;
   prepare_req.session_id = start_resp.session_id;
-  prepare_req.adapter_name = "ECNU-VPN";
+  prepare_req.adapter_name = "EXV";
 
   exv::helper::HelperResponse prepare_resp;
   std::thread prepare_thread([&] {
@@ -1682,7 +1682,7 @@ int test_cleanup_all_sessions_reports_failure_and_keeps_retry_state() {
        ok;
 
   handler.cleanup_registry().add_resource(start_resp.session_id,
-                                          {"adapter", "ECNU-VPN"});
+                                          {"adapter", "EXV"});
 
   exv::helper::CleanupPolicy policy;
   policy.remove_adapter = true;
@@ -1711,7 +1711,7 @@ int test_network_ops_do_not_report_fake_success() {
 
   exv::helper::PrepareTunnelDeviceRequest prepare_req;
   prepare_req.session_id = start_resp.session_id;
-  prepare_req.adapter_name = "ECNU-VPN";
+  prepare_req.adapter_name = "EXV";
   auto prepare = dispatch_json(handler, exv::helper::HelperOp::PrepareTunnelDevice,
                                json(prepare_req));
   ok = expect(!prepare.success,
@@ -1832,7 +1832,7 @@ int test_cleanup_lease_handoff_moves_session_to_service() {
               "oneshot should start a session before export") &&
        ok;
   oneshot.cleanup_registry().add_resource(start_resp.session_id,
-                                          {"adapter", "ECNU-VPN"});
+                                          {"adapter", "EXV"});
   oneshot.cleanup_registry().add_resource(start_resp.session_id,
                                           {"route", "10.0.0.0/8"});
 

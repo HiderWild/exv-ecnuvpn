@@ -6,7 +6,7 @@
 #include <mutex>
 #include <string>
 
-namespace ecnuvpn::platform::logging {
+namespace exv::platform::logging {
 
 class FileLogSink final : public exv::observability::LogSink {
 public:
@@ -23,4 +23,4 @@ private:
   std::mutex mutex_;
 };
 
-} // namespace ecnuvpn::platform::logging
+} // namespace exv::platform::logging

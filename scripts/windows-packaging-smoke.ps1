@@ -1,5 +1,5 @@
 # windows-packaging-smoke.ps1
-# Smoke tests for ECNU-VPN Windows packaging — no real VPN connection required.
+# Smoke tests for EXV Windows packaging — no real VPN connection required.
 # Verifies that binaries, DLLs, IPC, and service infrastructure are present
 # and functional before a release candidate is shipped.
 #
@@ -35,15 +35,66 @@ function Write-Check {
     }
 }
 
+function Resolve-StableHelperPath {
+    if ($env:LOCALAPPDATA) {
+        return (Join-Path $env:LOCALAPPDATA "EXV\Helper\exv-helper.exe")
+    }
+    if ($env:USERPROFILE) {
+        return (Join-Path $env:USERPROFILE "AppData\Local\EXV\Helper\exv-helper.exe")
+    }
+    if ($env:ProgramData) {
+        return (Join-Path $env:ProgramData "EXV\Helper\exv-helper.exe")
+    }
+    return "C:\ProgramData\EXV\Helper\exv-helper.exe"
+}
+
+function Convert-ServicePathNameToExecutablePath {
+    param([string]$PathName)
+
+    if ([string]::IsNullOrWhiteSpace($PathName)) {
+        return $null
+    }
+
+    $trimmed = $PathName.Trim()
+    if ($trimmed -match '^"([^"]+)"') {
+        return $Matches[1]
+    }
+    if ($trimmed -match '^(.+?\.exe)(?:\s|$)') {
+        return $Matches[1]
+    }
+
+    return $trimmed
+}
+
+function Test-SamePath {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
+        return $false
+    }
+
+    try {
+        return ([System.IO.Path]::GetFullPath($Left).TrimEnd('\') -ieq
+            [System.IO.Path]::GetFullPath($Right).TrimEnd('\'))
+    }
+    catch {
+        return ($Left.TrimEnd('\') -ieq $Right.TrimEnd('\'))
+    }
+}
+
 # ── Resolve paths ────────────────────────────────────────────────────────────
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 
-if (-not $PackageRoot) { $PackageRoot = Join-Path $repoRoot "build\windows\webview\package\ECNU VPN" }
+if (-not $PackageRoot) { $PackageRoot = Join-Path $repoRoot "build\windows\webview\package\EXV" }
 $uiShellExe    = Join-Path $PackageRoot "exv-ui.exe"
 $exvExe        = Join-Path $PackageRoot "bin\exv.exe"
 $exvHelperExe  = Join-Path $PackageRoot "bin\exv-helper.exe"
+$stableHelperExe = Resolve-StableHelperPath
 
 $script:RuntimeSearchDirs = New-Object System.Collections.Generic.List[string]
 function Add-RuntimeSearchDir {
@@ -64,8 +115,9 @@ if ($RuntimeDir) {
 }
 
 Write-Host ""
-Write-Host "=== ECNU-VPN Windows Packaging Smoke Tests ===" -ForegroundColor Cyan
+Write-Host "=== EXV Windows Packaging Smoke Tests ===" -ForegroundColor Cyan
 Write-Host "Package root: $PackageRoot"
+Write-Host "Stable helper: $stableHelperExe"
 Write-Host "Runtime dirs: $($script:RuntimeSearchDirs -join '; ')"
 Write-Host ""
 
@@ -128,7 +180,7 @@ foreach ($dll in $optionalDlls) {
     if ($found) {
         Write-Check "S03.$dll" "$dll present" "PASS"
     } else {
-        Write-Check "S03.$dll" "$dll present" "SKIP" "Optional runtime asset not found. Provide it through ECNUVPN_RUNTIME_DIR before release packaging."
+        Write-Check "S03.$dll" "$dll present" "SKIP" "Optional runtime asset not found. Provide it through EXV_RUNTIME_DIR before release packaging."
     }
 }
 
@@ -212,10 +264,13 @@ $serviceName = "exv-helper"
 $svcQuery = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($svcQuery) {
     $binPath = (Get-WmiObject Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue).PathName
-    if ($binPath -and $binPath -like "*$PackageRoot*" -and $binPath -match "exv(-helper)?\.exe") {
+    $serviceExe = Convert-ServicePathNameToExecutablePath $binPath
+    if ($serviceExe -and (Test-SamePath $serviceExe $stableHelperExe) -and (Test-Path -LiteralPath $stableHelperExe)) {
         Write-Check "S06" "Helper service binary path correct" "PASS" "Path: $binPath"
+    } elseif ($serviceExe -and (Test-SamePath $serviceExe $stableHelperExe)) {
+        Write-Check "S06" "Helper service binary path correct" "FAIL" "Service points to stable helper, but the file is missing: $stableHelperExe"
     } elseif ($binPath) {
-        Write-Check "S06" "Helper service binary path correct" "SKIP" "Installed service points outside this package: $binPath"
+        Write-Check "S06" "Helper service binary path correct" "FAIL" "Installed service must point to $stableHelperExe, actual: $binPath"
     } else {
         Write-Check "S06" "Helper service binary path correct" "FAIL" "Unexpected path: $binPath"
     }

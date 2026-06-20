@@ -3,18 +3,15 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useConfigStore, type AuthConfig } from '../stores/config'
 import { useUiStore } from '../stores/ui'
 import { Shield, User, Key, Fingerprint, Server } from 'lucide-vue-next'
+import { distributionConfig } from '../generated/distribution'
 
 const config = useConfigStore()
 const ui = useUiStore()
 
 const saving = ref(false)
 const message = ref<{ text: string } | null>(null)
-const serverOptions = [
-  'vpn-ct.ecnu.edu.cn',
-  'vpn-cn.ecnu.edu.cn',
-  'vpn-lt.ecnu.edu.cn',
-]
-const serverChoice = ref(serverOptions[0])
+const serverOptions: string[] = distributionConfig.vpnServers.map((server) => server.value)
+const serverChoice = ref<string>(distributionConfig.defaultVpnServer)
 const customServer = ref('')
 
 const form = ref<AuthConfig>({
@@ -26,6 +23,10 @@ const form = ref<AuthConfig>({
   remember_password: false,
 })
 
+function normalizeServerChoice(server: string) {
+  return server.trim().replace(/^https?:\/\//i, '').replace(/\/$/, '').toLowerCase()
+}
+
 onMounted(async () => {
   await config.fetchAuthConfig()
   // Spread without copying back the dummy password value: the backend now
@@ -34,14 +35,15 @@ onMounted(async () => {
     ...config.authConfig,
     password: '',
   }
-  if (serverOptions.includes(form.value.server)) {
-    serverChoice.value = form.value.server
+  const normalizedServer = normalizeServerChoice(form.value.server)
+  if (serverOptions.includes(normalizedServer)) {
+    serverChoice.value = normalizedServer
     customServer.value = ''
   } else if (form.value.server) {
     serverChoice.value = 'custom'
     customServer.value = form.value.server
   } else {
-    serverChoice.value = serverOptions[0]
+    serverChoice.value = distributionConfig.defaultVpnServer
   }
 })
 

@@ -6,7 +6,7 @@
 
 #include <fstream>
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 namespace {
 
 std::string runtime_home_override;
@@ -147,4 +147,4 @@ bool fix_runtime_config_dir_ownership() {
   return fix_config_dir_ownership(get_config_dir(), get_effective_home());
 }
 
-} // namespace ecnuvpn::platform
+} // namespace exv::platform

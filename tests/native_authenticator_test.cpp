@@ -29,57 +29,57 @@ bool diagnostics_contain(const std::map<std::string, std::string> &diagnostics,
   return false;
 }
 
-ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions options() {
-  ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions out;
+exv::vpn_engine::protocol::ProtocolSessionOptions options() {
+  exv::vpn_engine::protocol::ProtocolSessionOptions out;
   out.server.scheme = "https";
   out.server.host = "vpn.example.invalid";
   out.server.port = 443;
   out.server.base_path = "/";
   out.username = "student@example.invalid";
   out.password = MOCK_PASSWORD;
-  out.useragent = "ECNU-VPN native-auth test";
+  out.useragent = "EXV native-auth test";
   return out;
 }
 
 class FakeProtocolTransport final
-    : public ecnuvpn::vpn_engine::protocol::ProtocolTransport {
+    : public exv::vpn_engine::protocol::ProtocolTransport {
 public:
-  ecnuvpn::vpn_engine::protocol::AuthResult authenticate(
-      const ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions
+  exv::vpn_engine::protocol::AuthResult authenticate(
+      const exv::vpn_engine::protocol::ProtocolSessionOptions
           &options) override {
     ++authenticate_calls;
     last_options = options;
     return auth_result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   connect_cstp(const std::string & /*cookie*/,
-               ecnuvpn::vpn_engine::TunnelMetadata * /*metadata*/) override {
+               exv::vpn_engine::TunnelMetadata * /*metadata*/) override {
     ++connect_cstp_calls;
     return {false, "unexpected_cstp", "CSTP must not be called by auth"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   send_packet(const std::vector<std::uint8_t> & /*packet*/) override {
     return {false, "unexpected_packet", "packet path must not be called"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
-  send_control(ecnuvpn::vpn_engine::protocol::InboundFrameKind /*kind*/)
+  exv::vpn_engine::ValidationResult
+  send_control(exv::vpn_engine::protocol::InboundFrameKind /*kind*/)
       override {
     return {false, "unexpected_control", "control path must not be called"};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult receive_frame(
-      ecnuvpn::vpn_engine::protocol::InboundFrame * /*out*/) override {
+  exv::vpn_engine::ValidationResult receive_frame(
+      exv::vpn_engine::protocol::InboundFrame * /*out*/) override {
     return {false, "unexpected_receive", "receive path must not be called"};
   }
 
   void disconnect() override { ++disconnect_calls; }
   void reset_for_reconnect() override { ++reset_calls; }
 
-  ecnuvpn::vpn_engine::protocol::AuthResult auth_result;
-  ecnuvpn::vpn_engine::protocol::ProtocolSessionOptions last_options;
+  exv::vpn_engine::protocol::AuthResult auth_result;
+  exv::vpn_engine::protocol::ProtocolSessionOptions last_options;
   int authenticate_calls = 0;
   int connect_cstp_calls = 0;
   int disconnect_calls = 0;
@@ -87,9 +87,9 @@ public:
 };
 
 bool fake_transport_success_populates_session() {
-  using ecnuvpn::vpn_engine::protocol::NativeAuthenticator;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthRequest;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthSession;
+  using exv::vpn_engine::protocol::NativeAuthenticator;
+  using exv::vpn_engine::protocol::NativeAuthRequest;
+  using exv::vpn_engine::protocol::NativeAuthSession;
 
   bool ok = true;
   FakeProtocolTransport transport;
@@ -120,7 +120,7 @@ bool fake_transport_success_populates_session() {
   ok = expect(session.username == "student@example.invalid",
               "session should carry username") &&
        ok;
-  ok = expect(session.useragent == "ECNU-VPN native-auth test",
+  ok = expect(session.useragent == "EXV native-auth test",
               "session should carry user agent") &&
        ok;
   ok = expect(session.auth_method == "password",
@@ -134,9 +134,9 @@ bool fake_transport_success_populates_session() {
 }
 
 bool auth_failed_propagates_exact_error_without_cstp() {
-  using ecnuvpn::vpn_engine::protocol::NativeAuthenticator;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthRequest;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthSession;
+  using exv::vpn_engine::protocol::NativeAuthenticator;
+  using exv::vpn_engine::protocol::NativeAuthRequest;
+  using exv::vpn_engine::protocol::NativeAuthSession;
 
   bool ok = true;
   FakeProtocolTransport transport;
@@ -166,9 +166,9 @@ bool auth_failed_propagates_exact_error_without_cstp() {
 }
 
 bool auth_protocol_mismatch_propagates_exact_code() {
-  using ecnuvpn::vpn_engine::protocol::NativeAuthenticator;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthRequest;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthSession;
+  using exv::vpn_engine::protocol::NativeAuthenticator;
+  using exv::vpn_engine::protocol::NativeAuthRequest;
+  using exv::vpn_engine::protocol::NativeAuthSession;
 
   bool ok = true;
   FakeProtocolTransport transport;
@@ -192,9 +192,9 @@ bool auth_protocol_mismatch_propagates_exact_code() {
 }
 
 bool plaintext_password_is_not_added_to_diagnostics_or_errors() {
-  using ecnuvpn::vpn_engine::protocol::NativeAuthenticator;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthRequest;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthSession;
+  using exv::vpn_engine::protocol::NativeAuthenticator;
+  using exv::vpn_engine::protocol::NativeAuthRequest;
+  using exv::vpn_engine::protocol::NativeAuthSession;
 
   bool ok = true;
   auto request_options = options();
@@ -238,9 +238,9 @@ bool plaintext_password_is_not_added_to_diagnostics_or_errors() {
 }
 
 bool missing_transport_or_output_is_rejected() {
-  using ecnuvpn::vpn_engine::protocol::NativeAuthenticator;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthRequest;
-  using ecnuvpn::vpn_engine::protocol::NativeAuthSession;
+  using exv::vpn_engine::protocol::NativeAuthenticator;
+  using exv::vpn_engine::protocol::NativeAuthRequest;
+  using exv::vpn_engine::protocol::NativeAuthSession;
 
   bool ok = true;
   NativeAuthenticator missing_transport(nullptr);

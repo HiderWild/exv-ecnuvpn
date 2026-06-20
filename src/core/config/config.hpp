@@ -1,5 +1,6 @@
 #pragma once
 
+#include "generated/distribution_config.hpp"
 #include "platform/common/config_defaults.hpp"
 
 #include <nlohmann/json.hpp>
@@ -7,9 +8,21 @@
 #include <vector>
 
 namespace exv {
+namespace config_detail {
+
+inline std::vector<std::string> default_distribution_routes() {
+  std::vector<std::string> routes;
+  routes.reserve(distribution::kDefaultRoutes.size());
+  for (const auto route : distribution::kDefaultRoutes) {
+    routes.emplace_back(route);
+  }
+  return routes;
+}
+
+} // namespace config_detail
 
 struct Config {
-  std::string server = "https://vpn-ct.ecnu.edu.cn";
+  std::string server = std::string(distribution::kDefaultVpnServer);
   std::string username = "";
   std::string password =
       ""; // AES-256-CBC ciphertext (base64); empty if remember_password=false
@@ -17,10 +30,7 @@ struct Config {
   std::string useragent = platform::config_defaults().useragent;
   bool disable_dtls = platform::config_defaults().disable_dtls;
   bool remember_password = false; // false = prompt hidden input at connect time
-  std::vector<std::string> routes = {
-      "49.52.4.0/25",      "59.78.176.0/20",  "59.78.199.0/21",
-      "58.198.176.128/25", "219.228.60.69",   "59.78.189.128/25",
-      "219.228.63.0/21",   "202.120.80.0/20", "222.66.117.0/24"};
+  std::vector<std::string> routes = config_detail::default_distribution_routes();
   std::vector<std::string> extra_args;
   std::string log_file = platform::config_defaults().log_file;
   std::string vpn_engine = "native";

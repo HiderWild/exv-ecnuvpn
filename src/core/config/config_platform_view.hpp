@@ -3,7 +3,7 @@
 #include "core/config/config.hpp"
 #include "platform/common/config_view.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 
 inline platform::ConfigView to_platform_config_view(const Config &cfg) {
@@ -22,4 +22,4 @@ inline platform::ConfigView to_platform_config_view(const Config &cfg) {
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

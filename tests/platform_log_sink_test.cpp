@@ -52,7 +52,7 @@ int main() {
     const auto log_path = temp_root / "nested" / "exv.log";
     int sync_count = 0;
     std::string synced_path;
-    ecnuvpn::platform::logging::FileLogSink sink(
+    exv::platform::logging::FileLogSink sink(
         log_path.string(), [&](const std::string &path) {
           ++sync_count;
           synced_path = path;
@@ -75,7 +75,7 @@ int main() {
 
   {
     std::ostringstream output;
-    ecnuvpn::platform::logging::StdoutLogSink sink(output);
+    exv::platform::logging::StdoutLogSink sink(output);
 
     auto event = make_event(LogLevel::Error, "stdout sink message");
     event.fields.push_back({"attempt", "2"});
@@ -99,7 +99,7 @@ int main() {
 
   {
     const auto log_path = temp_root / "redaction-policy.log";
-    ecnuvpn::platform::logging::FileLogSink sink(log_path.string());
+    exv::platform::logging::FileLogSink sink(log_path.string());
     auto event = make_event(LogLevel::Warn, "redaction policy");
     event.fields.push_back({"password", "secret-value"});
     sink.write(event);

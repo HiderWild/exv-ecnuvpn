@@ -8,7 +8,7 @@
 #include <thread>
 #include <utility>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 namespace {
 
 std::string error_response(int id, std::string_view code,
@@ -123,4 +123,4 @@ std::string accepted_host_response() {
   return {};
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

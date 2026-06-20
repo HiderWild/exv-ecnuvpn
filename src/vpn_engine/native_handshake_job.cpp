@@ -6,7 +6,7 @@
 #include <exception>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace {
 
@@ -205,4 +205,4 @@ void NativeHandshakeJob::emit_event(
 }
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

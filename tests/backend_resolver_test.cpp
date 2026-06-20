@@ -14,8 +14,8 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-ecnuvpn::platform::ServiceStatusSnapshot unavailable_service() {
-  ecnuvpn::platform::ServiceStatusSnapshot status;
+exv::platform::ServiceStatusSnapshot unavailable_service() {
+  exv::platform::ServiceStatusSnapshot status;
   status.installed = false;
   status.running = false;
   status.available = false;
@@ -27,7 +27,7 @@ ecnuvpn::platform::ServiceStatusSnapshot unavailable_service() {
 
 } // namespace
 
-namespace ecnuvpn {
+namespace exv {
 namespace logger {
 
 void info(const std::string &) {}
@@ -51,10 +51,10 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv
 
 int main() {
-  using namespace ecnuvpn::platform;
+  using namespace exv::platform;
 
   bool ok = true;
   int oneshot_calls = 0;
@@ -92,12 +92,12 @@ int main() {
        ok;
 
   ServiceStatusSnapshot stale_service = service;
-  stale_service.path = "C:/old/ECNU VPN/bin/exv-helper.exe";
+  stale_service.path = "C:/old/EXV/bin/exv-helper.exe";
   BackendResolveOptions current_package;
   current_package.preferred_mode = "auto";
   current_package.allow_oneshot = true;
   current_package.start_oneshot = true;
-  current_package.helper_path = "C:/current/ECNU VPN/bin/exv-helper.exe";
+  current_package.helper_path = "C:/current/EXV/bin/exv-helper.exe";
   BackendResolverDeps stale_service_deps{
       [&stale_service]() { return stale_service; },
       [&oneshot_calls](const OneshotBootstrapRequest &request) {

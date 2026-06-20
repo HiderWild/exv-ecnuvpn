@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace crypto {
 
 // ── Key management ───────────────────────────────────────────────
@@ -10,10 +10,10 @@ namespace crypto {
 // Generate a new 32-byte random key, returned as 64 hex chars
 std::string generate_key();
 
-// Load key from ~/.ecnuvpn/.key (returns "" if missing/corrupt)
+// Load key from the runtime profile directory (returns "" if missing/corrupt)
 std::string load_key();
 
-// Save key to ~/.ecnuvpn/.key with 0600 permissions
+// Save key to the runtime profile directory with restrictive permissions
 bool save_key(const std::string &hex_key);
 
 // Validate: must be exactly 64 valid hex characters (32 bytes)
@@ -53,4 +53,4 @@ std::string decrypt(const std::string &ciphertext_b64,
 std::string read_password_hidden(const std::string &prompt);
 
 } // namespace crypto
-} // namespace ecnuvpn
+} // namespace exv

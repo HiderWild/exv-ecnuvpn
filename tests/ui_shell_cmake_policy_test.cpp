@@ -3,8 +3,8 @@
 #include <sstream>
 #include <string>
 
-#ifndef ECNUVPN_SOURCE_DIR
-#error "ECNUVPN_SOURCE_DIR must be defined"
+#ifndef EXV_SOURCE_DIR
+#error "EXV_SOURCE_DIR must be defined"
 #endif
 
 namespace {
@@ -27,7 +27,7 @@ bool contains(const std::string &text, const std::string &needle) {
 } // namespace
 
 int main() {
-  const std::string source_dir = ECNUVPN_SOURCE_DIR;
+  const std::string source_dir = EXV_SOURCE_DIR;
   const std::string cmake = read_file(source_dir + "/CMakeLists.txt");
   const std::string windows_build_script =
       read_file(source_dir + "/scripts/build-windows.ps1");
@@ -114,7 +114,7 @@ int main() {
   expect_webview2_host_contains("WM_DPICHANGED");
   expect_webview2_host_contains("GetDpiForWindow");
   expect_webview2_host_contains("webview2_app_icon_resource_id");
-  expect_webview2_host_contains("IDI_ECNUVPN_APP");
+  expect_webview2_host_contains("IDI_EXV_APP");
   expect_webview2_host_contains("window_class.hIcon");
   expect_webview2_host_contains("window_class.hIconSm");
   if (contains(webview2_host, "LoadIconW(nullptr")) {
@@ -135,12 +135,12 @@ int main() {
     std::cerr << "Windows WebView shell manifest must request Administrator rights for Wintun packet I/O\n";
     ++failures;
   }
-  if (!contains(win32_resources, "#define IDI_ECNUVPN_APP")) {
-    std::cerr << "Windows WebView shell must define a stable ECNU VPN app icon resource id\n";
+  if (!contains(win32_resources, "#define IDI_EXV_APP")) {
+    std::cerr << "Windows WebView shell must define a stable EXV app icon resource id\n";
     ++failures;
   }
-  if (!contains(win32_resource_script, "IDI_ECNUVPN_APP ICON \"icon.ico\"")) {
-    std::cerr << "Windows WebView shell resource script must embed the ECNU VPN app icon\n";
+  if (!contains(win32_resource_script, "IDI_EXV_APP ICON \"icon.ico\"")) {
+    std::cerr << "Windows WebView shell resource script must embed the EXV app icon\n";
     ++failures;
   }
 
@@ -171,7 +171,7 @@ int main() {
   expect_webkitgtk_host_contains("gtk_application_window_new");
   expect_webkitgtk_host_contains("WebKitUserContentManager");
   expect_webkitgtk_host_contains("webkit_user_content_manager_register_script_message_handler");
-  expect_webkitgtk_host_contains("script-message-received::ecnuVpnHost");
+  expect_webkitgtk_host_contains("script-message-received::exvHost");
   expect_webkitgtk_host_contains("webkit_user_script_new");
   expect_webkitgtk_host_contains("webkit_web_view_run_javascript");
   expect_webkitgtk_host_contains("webkit_web_view_load_uri");

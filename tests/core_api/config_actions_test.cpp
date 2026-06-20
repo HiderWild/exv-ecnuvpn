@@ -383,6 +383,115 @@ int main() {
 
   {
     ConfigActionsFixture fix;
+    fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"vpn-cn.ecnu.edu.cn","username":"protected-user"})");
+    fix.dispatch("config.saveSettings", R"({"mtu":1360,"dtls":false})");
+
+    auto export_resp = fix.dispatch(
+        "config.export",
+        R"({"protected":true,"password":"correct-password"})");
+    ok = expect(export_resp.success,
+                "protected config.export should succeed with a password") &&
+         ok;
+    auto export_payload = json::parse(export_resp.payload_json);
+    ok = expect(export_payload["format"] == "protected",
+                "protected export should report protected format") &&
+         ok;
+    ok = expect(export_payload["data"].get<std::string>().find("protected-user") ==
+                    std::string::npos,
+                "protected export data should not contain plaintext config fields") &&
+         ok;
+
+    fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"vpn-lt.ecnu.edu.cn","username":"changed-user"})");
+    fix.dispatch("config.saveSettings", R"({"mtu":1400,"dtls":true})");
+
+    auto wrong_import = fix.dispatch(
+        "config.import",
+        json{{"format", "protected"},
+             {"data", export_payload["data"]},
+             {"password", "wrong-password"}}
+            .dump());
+    ok = expect(!wrong_import.success,
+                "protected config.import should reject a wrong password") &&
+         ok;
+    ok = expect(wrong_import.error_code ==
+                    "config_import_tampered_or_wrong_password",
+                "wrong protected import password should use auth/tamper error") &&
+         ok;
+    ok = expect(wrong_import.error_message.find("口令") != std::string::npos,
+                "wrong protected import error should mention the export passphrase") &&
+         ok;
+    ok = expect(wrong_import.error_message.find("损坏") != std::string::npos,
+                "wrong protected import error should mention damaged files as a possible cause") &&
+         ok;
+    ok = expect(wrong_import.error_message.find("用户名") == std::string::npos &&
+                    wrong_import.error_message.find("密码") == std::string::npos,
+                "wrong protected import error should not blame VPN credentials") &&
+         ok;
+
+    auto after_wrong_resp = fix.dispatch("config.get");
+    auto after_wrong = json::parse(after_wrong_resp.payload_json);
+    ok = expect(after_wrong["config"]["server"] == "vpn-lt.ecnu.edu.cn",
+                "wrong password import should not apply protected config") &&
+         ok;
+    ok = expect(after_wrong["config"]["username"] == "changed-user",
+                "wrong password import should not apply protected username") &&
+         ok;
+
+    auto correct_import = fix.dispatch(
+        "config.import",
+        json{{"format", "protected"},
+             {"data", export_payload["data"]},
+             {"password", "correct-password"}}
+            .dump());
+    ok = expect(correct_import.success,
+                "protected config.import should accept the correct password") &&
+         ok;
+
+    auto after_correct_resp = fix.dispatch("config.get");
+    auto after_correct = json::parse(after_correct_resp.payload_json);
+    ok = expect(after_correct["config"]["server"] == "vpn-cn.ecnu.edu.cn",
+                "correct protected import should restore server") &&
+         ok;
+    ok = expect(after_correct["config"]["username"] == "protected-user",
+                "correct protected import should restore username") &&
+         ok;
+    ok = expect(after_correct["settings"]["mtu"] == 1360,
+                "correct protected import should restore settings") &&
+         ok;
+
+    fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"vpn-lt.ecnu.edu.cn","username":"changed-again"})");
+    fix.dispatch("config.saveSettings", R"({"mtu":1410,"dtls":true})");
+
+    auto wrapped_correct_import = fix.dispatch(
+        "config.import",
+        json{{"format", "protected"},
+             {"data",
+              json{{"format", "protected"}, {"data", export_payload["data"]}}
+                  .dump()},
+             {"password", "correct-password"}}
+            .dump());
+    ok = expect(wrapped_correct_import.success,
+                "protected config.import should accept exported RPC wrapper files") &&
+         ok;
+
+    auto after_wrapped_resp = fix.dispatch("config.get");
+    auto after_wrapped = json::parse(after_wrapped_resp.payload_json);
+    ok = expect(after_wrapped["config"]["server"] == "vpn-cn.ecnu.edu.cn",
+                "wrapped protected import should restore server") &&
+         ok;
+    ok = expect(after_wrapped["config"]["username"] == "protected-user",
+                "wrapped protected import should restore username") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
 
     // First, modify some settings
     fix.dispatch("config.saveAuth",

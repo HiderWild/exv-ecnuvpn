@@ -46,8 +46,8 @@ def first_existing(paths: list[Path], name: str) -> Path:
 
 def default_cpp_build_dirs(platform: str) -> list[Path]:
     candidates: list[Path] = []
-    if os.environ.get("ECNUVPN_CPP_BUILD_DIR"):
-        candidates.append(Path(os.environ["ECNUVPN_CPP_BUILD_DIR"]))
+    if os.environ.get("EXV_CPP_BUILD_DIR"):
+        candidates.append(Path(os.environ["EXV_CPP_BUILD_DIR"]))
     candidates.extend(
         [
             REPO_ROOT / "build" / platform / "cpp",
@@ -59,8 +59,8 @@ def default_cpp_build_dirs(platform: str) -> list[Path]:
 
 
 def default_renderer_candidates(platform: str) -> list[Path]:
-    if os.environ.get("ECNUVPN_RENDERER_DIST_DIR"):
-        return [Path(os.environ["ECNUVPN_RENDERER_DIST_DIR"])]
+    if os.environ.get("EXV_RENDERER_DIST_DIR"):
+        return [Path(os.environ["EXV_RENDERER_DIST_DIR"])]
     return [
         REPO_ROOT / "build" / platform / "webview" / "dist",
         REPO_ROOT / "webui" / "dist",
@@ -69,8 +69,8 @@ def default_renderer_candidates(platform: str) -> list[Path]:
 
 def runtime_search_dirs(platform: str) -> list[Path]:
     candidates: list[Path] = []
-    if os.environ.get("ECNUVPN_RUNTIME_DIR"):
-        candidates.append(Path(os.environ["ECNUVPN_RUNTIME_DIR"]))
+    if os.environ.get("EXV_RUNTIME_DIR"):
+        candidates.append(Path(os.environ["EXV_RUNTIME_DIR"]))
     candidates.extend(default_cpp_build_dirs(platform))
     if platform == "windows":
         candidates.extend(
@@ -112,8 +112,8 @@ def find_binary(stem: str, platform: str) -> Path:
 def find_webview2_loader(platform: str) -> Path | None:
     if platform != "windows":
         return None
-    if os.environ.get("ECNUVPN_WEBVIEW2_LOADER_DLL"):
-        return Path(os.environ["ECNUVPN_WEBVIEW2_LOADER_DLL"])
+    if os.environ.get("EXV_WEBVIEW2_LOADER_DLL"):
+        return Path(os.environ["EXV_WEBVIEW2_LOADER_DLL"])
     return first_existing(
         [candidate / "WebView2Loader.dll" for candidate in default_cpp_build_dirs(platform)],
         "WebView2Loader.dll",
@@ -210,7 +210,7 @@ def build_package(platform: str, output_root: Path) -> Path:
     verify_app_icon_assets()
     renderer_dir = first_existing(default_renderer_candidates(platform), "Renderer build directory")
 
-    package_dir = output_root / "ECNU VPN"
+    package_dir = output_root / "EXV"
     if package_dir.exists():
         shutil.rmtree(package_dir)
 
@@ -241,7 +241,7 @@ def build_package(platform: str, output_root: Path) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    platform = normalized_platform(os.environ.get("ECNUVPN_BUILD_PLATFORM"))
+    platform = normalized_platform(os.environ.get("EXV_BUILD_PLATFORM"))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", default=platform)
     parser.add_argument("--verify-launch-targets-only", action="store_true")

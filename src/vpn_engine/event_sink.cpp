@@ -4,7 +4,7 @@
 
 #include <fstream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 JsonLinesEventSink::JsonLinesEventSink(std::filesystem::path path)
@@ -29,4 +29,4 @@ void JsonLinesEventSink::emit(const VpnEngineEvent &event) {
 }
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

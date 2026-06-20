@@ -42,8 +42,8 @@ struct MockUtun {
   std::vector<int> closed_fds;
 };
 
-ecnuvpn::platform::NativeUtunApi make_api(MockUtun &mock) {
-  ecnuvpn::platform::NativeUtunApi api;
+exv::platform::NativeUtunApi make_api(MockUtun &mock) {
+  exv::platform::NativeUtunApi api;
   api.open_socket = [&mock](int domain, int type, int protocol) {
     ++mock.socket_calls;
     mock.socket_domain = domain;
@@ -85,15 +85,15 @@ ecnuvpn::platform::NativeUtunApi make_api(MockUtun &mock) {
   return api;
 }
 
-ecnuvpn::platform::NativeUtunConfig config_with_mtu(int mtu) {
-  ecnuvpn::platform::NativeUtunConfig config;
+exv::platform::NativeUtunConfig config_with_mtu(int mtu) {
+  exv::platform::NativeUtunConfig config;
   config.mtu = mtu;
   return config;
 }
 
 bool opens_control_socket_through_injected_boundary() {
   MockUtun mock;
-  ecnuvpn::platform::NativeUtun utun(make_api(mock), config_with_mtu(1380));
+  exv::platform::NativeUtun utun(make_api(mock), config_with_mtu(1380));
 
   auto result = utun.start();
 
@@ -102,19 +102,19 @@ bool opens_control_socket_through_injected_boundary() {
   ok = expect(mock.socket_calls == 1,
               "start should open one utun control socket") &&
        ok;
-  ok = expect(mock.socket_domain == ecnuvpn::platform::native_utun_pf_system(),
+  ok = expect(mock.socket_domain == exv::platform::native_utun_pf_system(),
               "socket domain should model PF_SYSTEM") &&
        ok;
-  ok = expect(mock.socket_type == ecnuvpn::platform::native_utun_socket_type(),
+  ok = expect(mock.socket_type == exv::platform::native_utun_socket_type(),
               "socket type should model SOCK_DGRAM") &&
        ok;
   ok = expect(mock.socket_protocol ==
-                  ecnuvpn::platform::native_utun_sysproto_control(),
+                  exv::platform::native_utun_sysproto_control(),
               "socket protocol should model SYSPROTO_CONTROL") &&
        ok;
   ok = expect(mock.control_names.size() == 1 &&
                   mock.control_names[0] ==
-                      ecnuvpn::platform::native_utun_control_name(),
+                      exv::platform::native_utun_control_name(),
               "control lookup should use UTUN_CONTROL_NAME") &&
        ok;
   ok = expect(mock.connected_fd == mock.next_fd,
@@ -129,7 +129,7 @@ bool opens_control_socket_through_injected_boundary() {
 bool reports_utun_interface_name_from_boundary() {
   MockUtun mock;
   mock.interface_name = "utun12";
-  ecnuvpn::platform::NativeUtun utun(make_api(mock), config_with_mtu(1400));
+  exv::platform::NativeUtun utun(make_api(mock), config_with_mtu(1400));
 
   auto result = utun.start();
 
@@ -150,7 +150,7 @@ bool reports_utun_interface_name_from_boundary() {
 bool applies_mtu_through_native_api_boundary() {
   MockUtun mock;
   mock.interface_name = "utun3";
-  ecnuvpn::platform::NativeUtun utun(make_api(mock), config_with_mtu(1412));
+  exv::platform::NativeUtun utun(make_api(mock), config_with_mtu(1412));
 
   auto result = utun.start();
 
@@ -169,7 +169,7 @@ bool applies_mtu_through_native_api_boundary() {
 
 bool stop_closes_fd_once() {
   MockUtun mock;
-  ecnuvpn::platform::NativeUtun utun(make_api(mock), config_with_mtu(1290));
+  exv::platform::NativeUtun utun(make_api(mock), config_with_mtu(1290));
 
   auto result = utun.start();
   utun.stop();
@@ -188,17 +188,17 @@ bool permission_errors_map_to_stable_code() {
   MockUtun mock;
   mock.connect_result = -1;
   mock.current_errno = EACCES;
-  ecnuvpn::platform::NativeUtun utun(make_api(mock), config_with_mtu(1290));
+  exv::platform::NativeUtun utun(make_api(mock), config_with_mtu(1290));
 
   auto result = utun.start();
 
   bool ok = true;
   ok = expect(!result.ok(), "permission failure should fail start") && ok;
   ok = expect(result.error ==
-                  ecnuvpn::platform::NativeUtunError::utun_permission_denied,
+                  exv::platform::NativeUtunError::utun_permission_denied,
               "permission failure should map to utun_permission_denied") &&
        ok;
-  ok = expect(std::string(ecnuvpn::platform::native_utun_error_code(
+  ok = expect(std::string(exv::platform::native_utun_error_code(
                   result.error)) == "utun_permission_denied",
               "stable error code text should report utun_permission_denied") &&
        ok;

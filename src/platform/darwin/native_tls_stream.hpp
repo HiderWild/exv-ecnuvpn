@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 using DarwinNativeTlsSocketHandle = int;
@@ -125,4 +125,4 @@ private:
 };
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

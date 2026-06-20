@@ -25,16 +25,16 @@ struct RuntimePathGuard {
   RuntimePathGuard() {
     temp_root =
         std::filesystem::temp_directory_path() /
-        ("ecnuvpn-log-actions-test-" +
+        ("exv-log-actions-test-" +
          std::to_string(
              std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(temp_root);
-    ecnuvpn::platform::set_runtime_path_override(temp_root.string(),
+    exv::platform::set_runtime_path_override(temp_root.string(),
                                                  temp_root.string());
   }
 
   ~RuntimePathGuard() {
-    ecnuvpn::platform::clear_runtime_path_override();
+    exv::platform::clear_runtime_path_override();
     std::error_code ec;
     std::filesystem::remove_all(temp_root, ec);
   }
@@ -60,7 +60,7 @@ json invoke_logs_list(const json &payload) {
 bool logs_list_honors_incremental_limit_and_sequence() {
   RuntimePathGuard guard;
 
-  const auto log_path = guard.temp_root / "ecnuvpn.log";
+  const auto log_path = guard.temp_root / "exv.log";
   {
     std::ofstream out(log_path.string(), std::ios::out | std::ios::trunc);
     for (int i = 1; i <= 500; ++i) {
@@ -111,7 +111,7 @@ bool logs_list_honors_incremental_limit_and_sequence() {
 bool logs_list_keeps_single_response_under_pipe_budget() {
   RuntimePathGuard guard;
 
-  const auto log_path = guard.temp_root / "ecnuvpn.log";
+  const auto log_path = guard.temp_root / "exv.log";
   const std::string long_message(300, 'x');
   {
     std::ofstream out(log_path.string(), std::ios::out | std::ios::trunc);

@@ -20,7 +20,7 @@
 #include <unistd.h>
 #endif
 
-namespace ecnuvpn {
+namespace exv {
 namespace connection_attempt {
 // Begin inlined from core/connection/connection_attempt_internal include-unit
 namespace {
@@ -603,4 +603,4 @@ bool mark_terminal(const std::string &config_dir, const std::string &reason) {
 }
 // End inlined from core/connection/connection_attempt_public include-unit
 } // namespace connection_attempt
-} // namespace ecnuvpn
+} // namespace exv

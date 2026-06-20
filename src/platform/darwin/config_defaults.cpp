@@ -1,17 +1,18 @@
 #include "platform/common/config_defaults.hpp"
+#include "generated/distribution_config.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 const ConfigDefaults &config_defaults() {
   static const ConfigDefaults defaults{
       true,
-      "AnyConnect Darwin_x86_64 4.10.05095",
-      "~/.ecnuvpn/ecnuvpn.log",
+      std::string(distribution::kDefaultUserAgent),
+      "~/Library/Application Support/EXV/profile/default/exv.log",
       true,
   };
   return defaults;
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

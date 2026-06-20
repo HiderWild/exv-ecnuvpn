@@ -5,7 +5,7 @@
 #endif
 #include <windows.h>
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 
 std::wstring wide_from_utf8(const std::string &value) {
   if (value.empty()) {
@@ -73,5 +73,5 @@ std::string windows_error_message(unsigned long error_code) {
   return utf8_from_wide(message) + " (" + std::to_string(error_code) + ")";
 }
 
-} // namespace ecnuvpn::platform
+} // namespace exv::platform
 

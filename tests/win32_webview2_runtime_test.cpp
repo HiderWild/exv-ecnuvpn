@@ -11,30 +11,30 @@
 #include <vector>
 
 int main() {
-  using namespace ecnuvpn::platform::win32::ui_shell;
+  using namespace exv::platform::win32::ui_shell;
   const auto default_bounds = webview2_default_window_bounds();
   if (default_bounds.width !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+          exv::ui_shell::kElectronAdvancedWindowBounds.width ||
       default_bounds.height !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+          exv::ui_shell::kElectronAdvancedWindowBounds.height) {
     return 1;
   }
   const auto scaled_advanced =
       webview2_window_mode_bounds_for_dpi("advanced", 120);
-  if (scaled_advanced.width != 1245 || scaled_advanced.height != 734) {
+  if (scaled_advanced.width != 1215 || scaled_advanced.height != 704) {
     return 1;
   }
   const auto scaled_minimal =
       webview2_window_mode_bounds_for_dpi("minimal", 120);
-  if (scaled_minimal.width != 408 || scaled_minimal.height != 178) {
+  if (scaled_minimal.width != 378 || scaled_minimal.height != 148) {
     return 1;
   }
   const auto invalid_dpi_bounds =
       webview2_window_mode_bounds_for_dpi("advanced", 0);
   if (invalid_dpi_bounds.width !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.width ||
+          exv::ui_shell::kElectronAdvancedWindowBounds.width ||
       invalid_dpi_bounds.height !=
-          ecnuvpn::ui_shell::kElectronAdvancedWindowBounds.height) {
+          exv::ui_shell::kElectronAdvancedWindowBounds.height) {
     return 1;
   }
 
@@ -87,7 +87,7 @@ int main() {
     return 1;
   }
   const auto tray_menu = webview2_tray_menu_model();
-  if (tray_menu.size() != 3 || tray_menu[0].label != L"显示 ECNU VPN" ||
+  if (tray_menu.size() != 3 || tray_menu[0].label != L"显示 EXV" ||
       !tray_menu[1].separator || tray_menu[2].label != L"退出") {
     return 1;
   }
@@ -99,7 +99,7 @@ int main() {
     return 1;
   }
   const std::string host_source_path =
-      std::string(ECNUVPN_SOURCE_DIR) +
+      std::string(EXV_SOURCE_DIR) +
       "/src/platform/win32/ui_shell/webview2_host_win32.cpp";
   std::ifstream host_source_file(host_source_path);
   const std::string host_source(
@@ -112,10 +112,12 @@ int main() {
   const auto source_contains = [&](const std::string &needle) {
     return normalized_host_source.find(needle) != std::string::npos;
   };
-  const std::string renderer_control_hit_test =
-      "if (content_x >= content_width - controls_width &&\n"
-      "          content_x < content_width) {\n"
-      "        return HTCLIENT;\n"
+  const std::string native_control_hit_test =
+      "const LRESULT control_hit =\n"
+      "          control_button_hit_test(content_x, content_y, content_width, "
+      "dpi);\n"
+      "      if (control_hit != HTCLIENT) {\n"
+      "        return control_hit;\n"
       "      }";
   if (!source_contains("apply_window_mode_once") ||
       !source_contains("if (action == \"window.resizeForMode\")") ||
@@ -123,9 +125,18 @@ int main() {
       !source_contains("if (action == \"window.requestClose\")") ||
       !source_contains("if (action == \"window.startDrag\")") ||
       !source_contains("GetCursorPos(&cursor)") ||
+      !source_contains("renderer_client_to_screen(renderer_start)") ||
+      !source_contains(
+          "renderer_derived_start.value_or(renderer_start_point.value_or("
+          "cursor))") ||
+      !source_contains("renderer_titlebar_hit_test(renderer_start)") ||
+      !source_contains("left_mouse_button_down()") ||
+      !source_contains("start-drag-reject-button-up") ||
+      !source_contains("GetCursorPos(&move_loop_start)") ||
+      !source_contains("start-drag-current-cursor") ||
       !source_contains("ReleaseCapture()") ||
       !source_contains("WM_NCLBUTTONDOWN") ||
-      !source_contains("MAKELPARAM(cursor.x, cursor.y)") ||
+      !source_contains("MAKELPARAM(move_loop_start.x, move_loop_start.y)") ||
       !source_contains("case WM_MOUSEACTIVATE:") ||
       !source_contains("return MA_ACTIVATE;") ||
       !source_contains("WM_NCCALCSIZE") ||
@@ -134,41 +145,51 @@ int main() {
       !source_contains("content_x = x - shadow_margin") ||
       !source_contains("content_y = y - shadow_margin") ||
       !source_contains("return HTNOWHERE;") ||
-      !source_contains(renderer_control_hit_test) ||
+      !source_contains(native_control_hit_test) ||
       !source_contains("GWL_STYLE") ||
       !source_contains("~WS_CAPTION") ||
       !source_contains("SWP_FRAMECHANGED") ||
       !source_contains("restore_or_focus_window()") ||
       !source_contains("IsIconic(hwnd_)") ||
       !source_contains("GetForegroundWindow() != hwnd_") ||
+      !source_contains("configure_non_client_region_support()") ||
+      !source_contains("ICoreWebView2Settings9") ||
+      !source_contains("put_IsNonClientRegionSupportEnabled(TRUE)") ||
+      !source_contains("control_button_hit_test(content_x, content_y, "
+                       "content_width, dpi)") ||
+      !source_contains("return HTMINBUTTON;") ||
+      !source_contains("return HTCLOSE;") ||
+      !source_contains("emit_window_control_state(") ||
+      !source_contains("event[\"type\"] = \"window-control-state\"") ||
+      !source_contains("case WM_NCLBUTTONDOWN:") ||
+      !source_contains("case WM_NCLBUTTONUP:") ||
+      !source_contains("case WM_NCMOUSELEAVE:") ||
       !source_contains("CreateRoundRectRgn") ||
       !source_contains("SetWindowRgn") ||
       source_contains("GetMessagePos()") ||
       source_contains("SetCapture(hwnd_)") ||
       source_contains("void update_window_drag()") ||
-      source_contains("HTMINBUTTON") ||
-      source_contains("HTCLOSE") ||
       source_contains("kWindowModeAnimationTimer") ||
       source_contains("SetTimer(hwnd_, kWindowModeAnimationTimer")) {
     return 1;
   }
 
-  const ecnuvpn::ui_shell::RendererAssets packaged_renderer{
-      ecnuvpn::ui_shell::RendererAssetKind::PackagedFile,
-      "C:/Program Files/ECNU VPN/webui/index.html"};
+  const exv::ui_shell::RendererAssets packaged_renderer{
+      exv::ui_shell::RendererAssetKind::PackagedFile,
+      "C:/Program Files/EXV/webui/index.html"};
   const std::wstring packaged_uri = webview2_renderer_uri(packaged_renderer);
-  if (packaged_uri != L"https://appassets.ecnu-vpn.invalid/index.html") {
+  if (packaged_uri != L"https://appassets.exv.invalid/index.html") {
     return 1;
   }
   const std::wstring packaged_folder =
       webview2_packaged_renderer_folder(packaged_renderer);
-  if (packaged_folder.find(L"ECNU VPN") == std::wstring::npos ||
+  if (packaged_folder.find(L"EXV") == std::wstring::npos ||
       packaged_folder.find(L"webui") == std::wstring::npos ||
       packaged_folder.find(L"index.html") != std::wstring::npos) {
     return 1;
   }
   const std::wstring dev_server_uri = webview2_renderer_uri(
-      {ecnuvpn::ui_shell::RendererAssetKind::DevServer,
+      {exv::ui_shell::RendererAssetKind::DevServer,
        "http://127.0.0.1:5173/"});
   if (dev_server_uri != L"http://127.0.0.1:5173/") {
     return 1;
@@ -177,10 +198,10 @@ int main() {
   bool bridge_invoked = false;
   const std::string bridge_response = dispatch_webview2_host_message(
       R"({"id":9,"action":"status.get","payload":{}})",
-      [&](const ecnuvpn::ui_shell::CoreRpcRequest &request) {
+      [&](const exv::ui_shell::CoreRpcRequest &request) {
         bridge_invoked = true;
         assert(request.action == "status.get");
-        ecnuvpn::ui_shell::CoreRpcResponse response;
+        exv::ui_shell::CoreRpcResponse response;
         response.id = 9;
         response.ok = true;
         response.data_json = R"({"phase":"idle"})";
@@ -193,10 +214,10 @@ int main() {
   std::string posted_response;
   post_webview2_host_response(
       R"({"id":11,"action":"status.get","payload":{}})",
-      [&](const ecnuvpn::ui_shell::CoreRpcRequest &request) {
+      [&](const exv::ui_shell::CoreRpcRequest &request) {
         post_invoked = true;
         assert(request.action == "status.get");
-        ecnuvpn::ui_shell::CoreRpcResponse response;
+        exv::ui_shell::CoreRpcResponse response;
         response.id = 11;
         response.request_id = request.request_id;
         response.ok = true;

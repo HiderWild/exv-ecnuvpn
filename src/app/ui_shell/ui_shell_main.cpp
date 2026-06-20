@@ -56,53 +56,53 @@ std::filesystem::path current_executable_path() {
 } // namespace
 
 #if defined(_WIN32)
-namespace ecnuvpn::platform::win32::ui_shell {
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window();
+namespace exv::platform::win32::ui_shell {
+std::unique_ptr<exv::ui_shell::UiWindow> create_webview2_window();
 }
 #elif defined(__APPLE__)
-namespace ecnuvpn::platform::darwin::ui_shell {
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window();
+namespace exv::platform::darwin::ui_shell {
+std::unique_ptr<exv::ui_shell::UiWindow> create_wk_webview_window();
 }
 #elif defined(__linux__)
-namespace ecnuvpn::platform::linux_ui_shell {
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webkitgtk_window();
+namespace exv::platform::linux_ui_shell {
+std::unique_ptr<exv::ui_shell::UiWindow> create_webkitgtk_window();
 }
 #endif
 
 int main(int argc, char **argv) {
-  auto options = ecnuvpn::ui_shell::resolve_ui_shell_options(
+  auto options = exv::ui_shell::resolve_ui_shell_options(
       argc, argv, current_executable_path());
   const std::string validation_error =
-      ecnuvpn::ui_shell::validate_ui_shell_options(options);
+      exv::ui_shell::validate_ui_shell_options(options);
   if (!validation_error.empty()) {
     std::cerr << "exv-ui: " << validation_error << '\n';
     return 64;
   }
 
-  ecnuvpn::ui_shell::UiWindowConfig config{
-      ecnuvpn::ui_shell::resolve_renderer_assets(
+  exv::ui_shell::UiWindowConfig config{
+      exv::ui_shell::resolve_renderer_assets(
           options.renderer_dev_server_url, options.packaged_renderer_index),
       options.exv_path,
       options.enable_dev_tools,
   };
-  ecnuvpn::runtime::bootstrap();
-  config.state_dir = ecnuvpn::runtime::paths().state_dir;
+  exv::runtime::bootstrap(options.state_dir);
+  config.state_dir = exv::runtime::paths().state_dir;
 
-  ecnuvpn::ui_shell::configure_core_process_transport_signal_policy();
-  ecnuvpn::ui_shell::CoreProcessLaunch core_launch{
+  exv::ui_shell::configure_core_process_transport_signal_policy();
+  exv::ui_shell::CoreProcessLaunch core_launch{
       options.exv_path,
       config.state_dir,
-      ecnuvpn::runtime::paths().home,
+      exv::runtime::paths().home,
       true};
-  auto transport = ecnuvpn::ui_shell::create_core_process_transport(core_launch);
-  ecnuvpn::ui_shell::CoreRpcClient client(*transport);
+  auto transport = exv::ui_shell::create_core_process_transport(core_launch);
+  exv::ui_shell::CoreRpcClient client(*transport);
 
 #if defined(_WIN32)
-  auto window = ecnuvpn::platform::win32::ui_shell::create_webview2_window();
+  auto window = exv::platform::win32::ui_shell::create_webview2_window();
 #elif defined(__APPLE__)
-  auto window = ecnuvpn::platform::darwin::ui_shell::create_wk_webview_window();
+  auto window = exv::platform::darwin::ui_shell::create_wk_webview_window();
 #elif defined(__linux__)
-  auto window = ecnuvpn::platform::linux_ui_shell::create_webkitgtk_window();
+  auto window = exv::platform::linux_ui_shell::create_webkitgtk_window();
 #else
   return 70;
 #endif
@@ -110,5 +110,5 @@ int main(int argc, char **argv) {
     std::cerr << "exv-ui: failed to create platform WebView window\n";
     return 70;
   }
-  return ecnuvpn::ui_shell::run_ui_shell_window(*window, config, client);
+  return exv::ui_shell::run_ui_shell_window(*window, config, client);
 }

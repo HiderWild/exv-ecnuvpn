@@ -73,13 +73,13 @@ bool platform_launch_core(const std::string &core_path,
                           const std::string &home_dir) {
   std::string args = "--mode=core --daemon";
   if (!state_dir.empty()) {
-    args += " --config-dir " + ecnuvpn::platform::shell_quote(state_dir);
+    args += " --config-dir " + exv::platform::shell_quote(state_dir);
   }
   if (!home_dir.empty()) {
-    args += " --home " + ecnuvpn::platform::shell_quote(home_dir);
+    args += " --home " + exv::platform::shell_quote(home_dir);
   }
 #ifdef _WIN32
-  if (!ecnuvpn::platform::check_root()) {
+  if (!exv::platform::check_root()) {
     SHELLEXECUTEINFOA sei = {};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -96,7 +96,7 @@ bool platform_launch_core(const std::string &core_path,
     return true;
   }
 
-  std::string cmd = ecnuvpn::platform::shell_quote(core_path) + " " + args;
+  std::string cmd = exv::platform::shell_quote(core_path) + " " + args;
   cmd += " 2>nul";
   STARTUPINFOA si = {};
   si.cb = sizeof(si);
@@ -112,7 +112,7 @@ bool platform_launch_core(const std::string &core_path,
   CloseHandle(pi.hThread);
   return true;
 #else
-  std::string cmd = ecnuvpn::platform::shell_quote(core_path) + " " + args;
+  std::string cmd = exv::platform::shell_quote(core_path) + " " + args;
   cmd += " 2>/dev/null &";
   return std::system(cmd.c_str()) == 0;
 #endif
@@ -126,11 +126,11 @@ CoreResolverDeps make_platform_core_resolver_deps() {
   deps.send_ipc_request = platform_send_ipc_request;
   deps.disconnect_ipc = platform_disconnect_ipc;
   deps.launch_core = platform_launch_core;
-  deps.get_frontend_executable_path = ecnuvpn::platform::get_executable_path;
-  deps.run_command_output = ecnuvpn::platform::run_command_output;
+  deps.get_frontend_executable_path = exv::platform::get_executable_path;
+  deps.run_command_output = exv::platform::run_command_output;
   deps.is_pid_alive = platform_is_pid_alive;
-  deps.get_state_dir = []() { return ecnuvpn::runtime::paths().state_dir; };
-  deps.get_home_dir = []() { return ecnuvpn::runtime::paths().home; };
+  deps.get_state_dir = []() { return exv::runtime::paths().state_dir; };
+  deps.get_home_dir = []() { return exv::runtime::paths().home; };
   deps.get_env_var = [](const std::string &name) -> std::string {
     const char *value = std::getenv(name.c_str());
     return value ? std::string(value) : std::string();

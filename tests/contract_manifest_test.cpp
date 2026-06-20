@@ -383,9 +383,11 @@ bool source_tree_contains_utils_header_include(const std::filesystem::path &root
 }
 
 bool line_contains_forbidden_utils_scope(const std::string &line) {
+  const std::string old_project_namespace = std::string("ecnu") + "vpn";
   if (line.find("namespace utils") != std::string::npos ||
-      line.find("namespace ecnuvpn::utils") != std::string::npos ||
-      line.find("ecnuvpn::utils::") != std::string::npos) {
+      line.find("namespace " + old_project_namespace + "::utils") !=
+          std::string::npos ||
+      line.find(old_project_namespace + "::utils::") != std::string::npos) {
     return true;
   }
 
@@ -431,7 +433,7 @@ bool tree_contains_forbidden_utils_scope(const std::filesystem::path &root) {
 int main() {
   bool ok = true;
 
-  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto source_dir = std::filesystem::path(EXV_SOURCE_DIR);
   const auto manifest =
       read_json_file(source_dir / "contracts" / "system.contract.json");
   const auto snapshot =
@@ -592,7 +594,6 @@ int main() {
                        "event"),
               "desktop RPC response must include event") &&
        ok;
-
   ok = expect(contains(exv::contracts::generated::DESKTOP_RPC_EVENT_TYPES,
                        "quick-start-request"),
               "desktop RPC event types must include quick-start-request") &&
@@ -784,11 +785,11 @@ int main() {
               "instead of utils.hpp") &&
        ok;
   ok = expect(!tree_contains_forbidden_utils_scope(source_dir / "src"),
-              "production code must not use legacy ecnuvpn::utils or "
+              "production code must not use legacy utils namespace or "
               "unqualified utils:: APIs") &&
        ok;
   ok = expect(!tree_contains_forbidden_utils_scope(source_dir / "tests"),
-              "tests must not use legacy ecnuvpn::utils or unqualified "
+              "tests must not use legacy utils namespace or unqualified "
               "utils:: APIs") &&
        ok;
   if (std::filesystem::exists(legacy_utils_header_path)) {

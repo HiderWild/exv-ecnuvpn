@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace helper {
 
 class IpcServer {
@@ -53,4 +53,4 @@ public:
 std::unique_ptr<IpcServer> create_ipc_server();
 
 } // namespace helper
-} // namespace ecnuvpn
+} // namespace exv

@@ -7,7 +7,7 @@
 #include <memory>
 #include <string>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 using HostResponsePoster = std::function<void(std::string)>;
 
@@ -27,4 +27,4 @@ private:
 
 std::string accepted_host_response();
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

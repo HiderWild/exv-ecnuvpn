@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 bool fill_random_bytes(uint8_t *buffer, std::size_t len);
@@ -26,4 +26,4 @@ void normalize_secret_file_permissions(const std::string &path);
 std::string read_hidden_input(const std::string &prompt);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

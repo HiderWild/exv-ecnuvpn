@@ -21,8 +21,8 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
-#ifndef ECNUVPN_SOURCE_DIR
-#define ECNUVPN_SOURCE_DIR "."
+#ifndef EXV_SOURCE_DIR
+#define EXV_SOURCE_DIR "."
 #endif
 
 std::string read_text_file(const std::filesystem::path &path) {
@@ -32,17 +32,17 @@ std::string read_text_file(const std::filesystem::path &path) {
   return buffer.str();
 }
 
-ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
+exv::vpn_engine::ValidationResult invalid(std::string code,
                                               std::string message) {
-  ecnuvpn::vpn_engine::ValidationResult result;
+  exv::vpn_engine::ValidationResult result;
   result.ok = false;
   result.code = std::move(code);
   result.message = std::move(message);
   return result;
 }
 
-ecnuvpn::vpn_engine::TunnelMetadata metadata() {
-  ecnuvpn::vpn_engine::TunnelMetadata meta;
+exv::vpn_engine::TunnelMetadata metadata() {
+  exv::vpn_engine::TunnelMetadata meta;
   meta.internal_ip4_address = "10.255.0.10";
   meta.internal_ip4_netmask = "255.255.255.0";
   meta.mtu = 1400;
@@ -52,18 +52,18 @@ ecnuvpn::vpn_engine::TunnelMetadata metadata() {
 }
 
 struct MockState {
-  ecnuvpn::platform::NativeWintunStartResult start_result;
-  ecnuvpn::platform::NativeIpConfigResult configure_result;
-  ecnuvpn::platform::NativeIpConfigResult cleanup_result;
-  std::vector<ecnuvpn::platform::NativeIpConfigResult> cleanup_results;
+  exv::platform::NativeWintunStartResult start_result;
+  exv::platform::NativeIpConfigResult configure_result;
+  exv::platform::NativeIpConfigResult cleanup_result;
+  std::vector<exv::platform::NativeIpConfigResult> cleanup_results;
 
   int wintun_starts = 0;
   int wintun_stops = 0;
   int ip_configures = 0;
   int ip_cleanups = 0;
   std::uint32_t ip_config_factory_interface_index = 0;
-  ecnuvpn::vpn_engine::TunnelMetadata configured_metadata;
-  ecnuvpn::platform::NativeWintunConfig wintun_start_config;
+  exv::vpn_engine::TunnelMetadata configured_metadata;
+  exv::platform::NativeWintunConfig wintun_start_config;
   std::vector<std::vector<std::uint8_t>> incoming_packets;
   std::vector<std::vector<std::uint8_t>> written_packets;
   std::vector<std::string> events;
@@ -71,13 +71,13 @@ struct MockState {
 };
 
 class FakeWintunSession final
-    : public ecnuvpn::platform::NativePacketDeviceWintunSession {
+    : public exv::platform::NativePacketDeviceWintunSession {
 public:
   explicit FakeWintunSession(std::shared_ptr<MockState> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::platform::NativeWintunStartResult
-  start(const ecnuvpn::platform::NativeWintunConfig &config) override {
+  exv::platform::NativeWintunStartResult
+  start(const exv::platform::NativeWintunConfig &config) override {
     ++state_->wintun_starts;
     state_->wintun_start_config = config;
     state_->events.push_back("wintun_start");
@@ -86,7 +86,7 @@ public:
     return state_->start_result;
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) override {
     if (!state_->running)
       return invalid("packet_device_closed", "packet device is closed");
@@ -98,7 +98,7 @@ public:
     return {};
   }
 
-  ecnuvpn::vpn_engine::ValidationResult
+  exv::vpn_engine::ValidationResult
   write_packet(const std::vector<std::uint8_t> &packet) override {
     if (!state_->running)
       return invalid("packet_device_closed", "packet device is closed");
@@ -119,20 +119,20 @@ private:
 };
 
 class FakeIpConfig final
-    : public ecnuvpn::platform::NativePacketDeviceIpConfig {
+    : public exv::platform::NativePacketDeviceIpConfig {
 public:
   explicit FakeIpConfig(std::shared_ptr<MockState> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::platform::NativeIpConfigResult
-  configure(const ecnuvpn::vpn_engine::TunnelMetadata &metadata) override {
+  exv::platform::NativeIpConfigResult
+  configure(const exv::vpn_engine::TunnelMetadata &metadata) override {
     ++state_->ip_configures;
     state_->events.push_back("ip_configure");
     state_->configured_metadata = metadata;
     return state_->configure_result;
   }
 
-  ecnuvpn::platform::NativeIpConfigResult cleanup() override {
+  exv::platform::NativeIpConfigResult cleanup() override {
     std::size_t cleanup_index =
         static_cast<std::size_t>(state_->ip_cleanups);
     ++state_->ip_cleanups;
@@ -146,16 +146,16 @@ private:
   std::shared_ptr<MockState> state_;
 };
 
-ecnuvpn::platform::NativePacketDeviceDependencies
+exv::platform::NativePacketDeviceDependencies
 dependencies(std::shared_ptr<MockState> state) {
-  ecnuvpn::platform::NativePacketDeviceDependencies deps;
+  exv::platform::NativePacketDeviceDependencies deps;
   deps.create_wintun_session = [state] {
-    return std::unique_ptr<ecnuvpn::platform::NativePacketDeviceWintunSession>(
+    return std::unique_ptr<exv::platform::NativePacketDeviceWintunSession>(
         new FakeWintunSession(state));
   };
   deps.create_ip_config = [state](std::uint32_t interface_index) {
     state->ip_config_factory_interface_index = interface_index;
-    return std::unique_ptr<ecnuvpn::platform::NativePacketDeviceIpConfig>(
+    return std::unique_ptr<exv::platform::NativePacketDeviceIpConfig>(
         new FakeIpConfig(state));
   };
   return deps;
@@ -163,7 +163,7 @@ dependencies(std::shared_ptr<MockState> state) {
 
 std::shared_ptr<MockState> make_state() {
   auto state = std::make_shared<MockState>();
-  state->start_result.metadata.adapter_name = L"ECNUVPN-Test-Wintun";
+  state->start_result.metadata.adapter_name = L"EXV-Test-Wintun";
   state->start_result.metadata.if_index = 77;
   state->start_result.metadata.luid = 0x1234;
   return state;
@@ -171,7 +171,7 @@ std::shared_ptr<MockState> make_state() {
 
 bool open_starts_wintun_and_configures_native_ip() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
 
@@ -198,9 +198,9 @@ bool open_starts_wintun_and_configures_native_ip() {
 
 bool open_with_device_config_passes_interface_name_to_wintun() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
-  ecnuvpn::vpn_engine::DeviceConfig config;
-  config.interface_name = "ECNU-VPN-Wintun";
+  exv::platform::NativePacketDevice device(dependencies(state));
+  exv::vpn_engine::DeviceConfig config;
+  config.interface_name = "EXV-Wintun";
   config.mtu = 1318;
 
   auto result = device.open(config);
@@ -212,7 +212,7 @@ bool open_with_device_config_passes_interface_name_to_wintun() {
               "DeviceConfig open should start one Wintun session") &&
        ok;
   ok = expect(state->wintun_start_config.adapter_name_prefix ==
-                  L"ECNU-VPN-Wintun",
+                  L"EXV-Wintun",
               "DeviceConfig interface_name should select the prepared adapter") &&
        ok;
   ok = expect(state->ip_configures == 0,
@@ -225,9 +225,9 @@ bool device_config_open_requires_elevation_before_wintun_start() {
   auto state = make_state();
   auto deps = dependencies(state);
   deps.is_elevated = [] { return false; };
-  ecnuvpn::platform::NativePacketDevice device(std::move(deps));
-  ecnuvpn::vpn_engine::DeviceConfig config;
-  config.interface_name = "ECNU-VPN";
+  exv::platform::NativePacketDevice device(std::move(deps));
+  exv::vpn_engine::DeviceConfig config;
+  config.interface_name = "EXV";
 
   auto result = device.open(config);
 
@@ -238,7 +238,7 @@ bool device_config_open_requires_elevation_before_wintun_start() {
   ok = expect(result.code == "native_wintun_adapter_open_failed",
               "non-elevated open should use the Wintun adapter failure code") &&
        ok;
-  ok = expect(result.message.find("ECNU-VPN-Wintun") != std::string::npos,
+  ok = expect(result.message.find("EXV-Wintun") != std::string::npos,
               "non-elevated open should report the target Wintun adapter") &&
        ok;
   ok = expect(result.message.find("Windows error 5") != std::string::npos,
@@ -254,7 +254,7 @@ bool metadata_open_requires_elevation_before_wintun_start() {
   auto state = make_state();
   auto deps = dependencies(state);
   deps.is_elevated = [] { return false; };
-  ecnuvpn::platform::NativePacketDevice device(std::move(deps));
+  exv::platform::NativePacketDevice device(std::move(deps));
 
   auto result = device.open(metadata());
 
@@ -277,7 +277,7 @@ bool metadata_open_requires_elevation_before_wintun_start() {
 bool packet_io_delegates_to_wintun_session_after_open() {
   auto state = make_state();
   state->incoming_packets.push_back({0x45, 0x00, 0x00, 0x2a});
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto opened = device.open(metadata());
   std::vector<std::uint8_t> packet;
@@ -300,7 +300,7 @@ bool packet_io_delegates_to_wintun_session_after_open() {
 }
 
 bool wintun_empty_queue_maps_to_retryable_no_data() {
-  const auto source_path = std::filesystem::path(ECNUVPN_SOURCE_DIR) /
+  const auto source_path = std::filesystem::path(EXV_SOURCE_DIR) /
                            "src" / "platform" / "win32" /
                            "native_packet_device.cpp";
   const std::string source = read_text_file(source_path);
@@ -324,7 +324,7 @@ bool wintun_empty_queue_maps_to_retryable_no_data() {
 
 bool closed_device_rejects_packet_io() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
   std::vector<std::uint8_t> packet;
 
   auto read_before_open = device.read_packet(&packet);
@@ -353,9 +353,9 @@ bool closed_device_rejects_packet_io() {
 bool ip_config_failure_cleans_up_partial_open() {
   auto state = make_state();
   state->configure_result.error =
-      ecnuvpn::platform::NativeIpConfigError::route_create_failed;
+      exv::platform::NativeIpConfigError::route_create_failed;
   state->configure_result.message = "route failed";
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
 
@@ -380,7 +380,7 @@ bool ip_config_failure_cleans_up_partial_open() {
 
 bool close_cleans_routes_before_wintun_and_is_idempotent() {
   auto state = make_state();
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
   auto opened = device.open(metadata());
   device.close();
   device.close();
@@ -404,9 +404,9 @@ bool close_cleans_routes_before_wintun_and_is_idempotent() {
 bool close_cleanup_failure_keeps_cleanup_retry_available() {
   auto state = make_state();
   state->cleanup_result.error =
-      ecnuvpn::platform::NativeIpConfigError::route_delete_failed;
+      exv::platform::NativeIpConfigError::route_delete_failed;
   state->cleanup_result.message = "delete failed";
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto opened = device.open(metadata());
   device.close();
@@ -431,12 +431,12 @@ bool close_cleanup_failure_keeps_cleanup_retry_available() {
 
 bool successful_close_retry_clears_cleanup_state() {
   auto state = make_state();
-  ecnuvpn::platform::NativeIpConfigResult cleanup_failure;
+  exv::platform::NativeIpConfigResult cleanup_failure;
   cleanup_failure.error =
-      ecnuvpn::platform::NativeIpConfigError::route_delete_failed;
+      exv::platform::NativeIpConfigError::route_delete_failed;
   cleanup_failure.message = "delete failed";
   state->cleanup_results = {cleanup_failure, {}};
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto opened = device.open(metadata());
   device.close();
@@ -463,15 +463,15 @@ bool successful_close_retry_clears_cleanup_state() {
 bool open_rollback_cleanup_failure_is_reported_and_retryable() {
   auto state = make_state();
   state->configure_result.error =
-      ecnuvpn::platform::NativeIpConfigError::route_create_failed;
+      exv::platform::NativeIpConfigError::route_create_failed;
   state->configure_result.message = "route failed";
-  ecnuvpn::platform::NativeIpConfigResult cleanup_failure;
+  exv::platform::NativeIpConfigResult cleanup_failure;
   cleanup_failure.error =
-      ecnuvpn::platform::NativeIpConfigError::route_delete_failed;
+      exv::platform::NativeIpConfigError::route_delete_failed;
   cleanup_failure.message = "delete failed";
   cleanup_failure.target = "59.78.176.0/20";
   state->cleanup_results = {cleanup_failure, {}};
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
   device.close();
@@ -503,9 +503,9 @@ bool open_rollback_cleanup_failure_is_reported_and_retryable() {
 bool wintun_start_failure_skips_ip_config() {
   auto state = make_state();
   state->start_result.error =
-      ecnuvpn::platform::NativeWintunError::session_start_failed;
+      exv::platform::NativeWintunError::session_start_failed;
   state->start_result.detail = "session failed";
-  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  exv::platform::NativePacketDevice device(dependencies(state));
 
   auto result = device.open(metadata());
 
@@ -525,14 +525,14 @@ bool wintun_start_failure_skips_ip_config() {
 
 } // namespace
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 std::string get_bundled_wintun_path() { return ""; }
 bool check_root() { return true; }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv
 
 int main() {
   bool ok = true;

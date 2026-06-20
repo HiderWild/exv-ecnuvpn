@@ -16,6 +16,11 @@ import ToggleSwitch from '../../components/ToggleSwitch.vue'
 import { useConfigStore, type SettingsConfig } from '../../stores/config'
 import { useUiStore } from '../../stores/ui'
 import { normalizeError, useVpnStore } from '../../stores/vpn'
+import {
+  detectImportEnvelope,
+  friendlyImportConfigError,
+  importEnvelopeToPayload,
+} from '../../utils/configTransfer'
 
 const props = defineProps<{
   settingsDraft: SettingsConfig
@@ -109,13 +114,44 @@ const anyDriverAvailable = computed(() => {
   if (!config.driverStatus) return false
   return wintunReady.value || tapReady.value
 })
+const hasSavedPasswordForExport = computed(() =>
+  Boolean(config.authConfig.remember_password && config.authConfig.password_stored),
+)
 const exportPasswordRequired = computed(() =>
-  exportIncludePassword.value && exportPassword.value.trim().length === 0,
+  exportIncludePassword.value && hasSavedPasswordForExport.value && exportPassword.value.trim().length === 0,
 )
 
 const launchAtLoginModel = computed({
   get: () => settingsForm.value.launch_at_login,
   set: (value: boolean) => updateSettingField('launch_at_login', value),
+})
+
+const rememberedPasswordReady = computed(() =>
+  Boolean(config.authConfig.remember_password && config.authConfig.password_stored),
+)
+
+const startupAutoConnectAllowed = computed(() =>
+  rememberedPasswordReady.value && vpn.serviceInstalled,
+)
+
+const startupAutoConnectReason = computed(() => {
+  if (!rememberedPasswordReady.value) return '需要先保存并记住密码。'
+  if (!vpn.serviceInstalled) return '需要先安装 Helper 服务。'
+  return ''
+})
+
+const startupAutoConnectModel = computed({
+  get: () => settingsForm.value.auto_connect_on_launch,
+  set: (value: boolean) => {
+    if (value && !startupAutoConnectAllowed.value) {
+      ui.requestError({
+        title: '无法开启启动时自动连接',
+        message: startupAutoConnectReason.value,
+      })
+      return
+    }
+    updateSettingField('auto_connect_on_launch', value)
+  },
 })
 
 const driverReadinessLabel = computed(() => {
@@ -261,18 +297,26 @@ async function handleImportFileChange(event: Event) {
   if (!file) return
   try {
     const text = await readFileAsText(file)
-    const password = await ui.requestPassword('请输入导入文件的密码（如有）')
-    if (password === null) return
-    const isProtected = password.length > 0
-    await config.importConfig({
-      format: isProtected ? 'protected' : 'unprotected',
-      data: text,
-      password: isProtected ? password : undefined,
-    })
+    const envelope = detectImportEnvelope(text)
+    let password: string | undefined
+    if (envelope.format === 'protected') {
+      const passwordValue = await ui.requestPassword('请输入导入配置的保护口令', {
+        description: '受保护的配置文件需要导出口令才能解密。',
+        submitLabel: '确认',
+        cancelLabel: '取消',
+      })
+      if (passwordValue === null) return
+      password = passwordValue
+    }
+    await config.importConfig(importEnvelopeToPayload(envelope, password))
     ui.addToast('配置已导入', 'success')
     emit('reloadSettings')
   } catch (error) {
-    ui.requestError({ title: '导入配置失败', message: normalizeError(error).message })
+    ui.requestError({
+      title: '导入配置失败',
+      message: friendlyImportConfigError(error),
+      secondaryLabel: '确认',
+    })
   }
 }
 
@@ -288,10 +332,30 @@ function downloadExport(filename: string, payload: string) {
   setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
-function openExportDialog() {
+async function exportConfigWithoutPassword() {
+  const result = await config.exportConfig({ protected: false })
+  ui.addToast('配置已导出（不含密码）', 'success')
+  downloadExport('exv-config.json', result.data)
+}
+
+async function openExportDialog() {
   exportIncludePassword.value = false
   exportPassword.value = ''
   exportPasswordTouched.value = false
+  try {
+    await config.fetchAuthConfig()
+    if (!hasSavedPasswordForExport.value) {
+      await exportConfigWithoutPassword()
+      return
+    }
+  } catch (error) {
+    ui.requestError({
+      title: '导出配置失败',
+      message: normalizeError(error).message,
+      secondaryLabel: '确认',
+    })
+    return
+  }
   showExportDialog.value = true
 }
 
@@ -315,21 +379,25 @@ async function submitExportConfig() {
   if (exportPasswordRequired.value) return
 
   try {
-    const includesPassword = exportIncludePassword.value
-    const result = await config.exportConfig({ protected: exportIncludePassword.value, password: exportIncludePassword.value ? exportPassword.value : undefined })
+    const includesPassword = exportIncludePassword.value && hasSavedPasswordForExport.value
+    const result = await config.exportConfig({ protected: includesPassword, password: includesPassword ? exportPassword.value : undefined })
     downloadExport(includesPassword ? 'exv-config.protected' : 'exv-config.json', result.data)
     closeExportDialog()
     if (includesPassword) {
       ui.requestError({
         title: '导出已完成',
         message: PROTECTED_EXPORT_WARNING,
-        primaryLabel: '知道了',
+        secondaryLabel: '确认',
       })
     } else {
-      ui.addToast('配置已导出', 'success')
+      ui.addToast('配置已导出（不含密码）', 'success')
     }
   } catch (error) {
-    ui.requestError({ title: '导出配置失败', message: normalizeError(error).message })
+    ui.requestError({
+      title: '导出配置失败',
+      message: normalizeError(error).message,
+      secondaryLabel: '确认',
+    })
   }
 }
 
@@ -410,6 +478,19 @@ onMounted(() => {
           <p class="text-xs text-muted">登录系统后自动启动 EXV 客户端。</p>
         </div>
         <ToggleSwitch v-model="launchAtLoginModel" />
+      </div>
+
+      <div class="flex items-center justify-between rounded-lg border border-border bg-bg/40 px-4 py-3">
+        <div>
+          <p class="text-sm text-foreground">启动时自动连接</p>
+          <p class="text-xs text-muted">
+            {{ startupAutoConnectAllowed ? '客户端启动后自动建立 VPN 连接。' : startupAutoConnectReason }}
+          </p>
+        </div>
+        <ToggleSwitch
+          v-model="startupAutoConnectModel"
+          :disabled="!startupAutoConnectAllowed && !settingsForm.auto_connect_on_launch"
+        />
       </div>
 
       <div class="border-t border-border pt-4">
