@@ -314,6 +314,20 @@ static bool wait_for_response_id(CaptureOutputBuf& buf, int id,
     return false;
 }
 
+static bool wait_for_request_id(CaptureOutputBuf& buf,
+                                const std::string& request_id,
+                                std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto parsed = parse_json_lines(buf.get_all());
+        if (!find_by_request_id(parsed, request_id).is_null()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Scoped rdbuf redirector — restores original rdbuf on destruction
 // ---------------------------------------------------------------------------
@@ -636,6 +650,58 @@ int main() {
                  connect_resp["data"].value("status", "") == "connecting"),
                "E2.1a-regression: vpn.connect must not return blind connecting success");
         expect(cr.rc == 0, "E2.1a-regression: exit code 0");
+    }
+
+    // =======================================================================
+    // E2.1a-native-regression — Native envelope uses desktop VPN pipeline
+    // =======================================================================
+    {
+        std::cerr << "[E2.1a-native-regression] native vpn.connect missing config\n";
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(config_dir, home_dir);
+
+        in_buf.feed(R"({"request_id":"native-connect-missing","action":"vpn.connect","payload_json":"{}"})" "\n");
+        expect(wait_for_request_id(out_buf, "native-connect-missing",
+                                   std::chrono::seconds(5)),
+               "E2.1a-native-regression: native vpn.connect should respond");
+
+        std::raise(SIGTERM);
+        in_buf.close_input();
+        cr.join();
+
+        auto all = parse_json_lines(out_buf.read_all());
+        auto connect_resp = find_by_request_id(all, "native-connect-missing");
+
+        expect(!connect_resp.is_null(),
+               "E2.1a-native-regression: native vpn.connect response exists");
+        expect(connect_resp.value("success", true) == false,
+               "E2.1a-native-regression: native vpn.connect fails with missing config");
+        std::string message =
+            connect_resp.value("error_message", std::string());
+        std::string code = connect_resp.value("error_code", std::string());
+        expect(!message.empty(),
+               "E2.1a-native-regression: native vpn.connect error has message");
+        expect(message.find("server") != std::string::npos ||
+                   message.find("username") != std::string::npos ||
+                   message.find("password") != std::string::npos ||
+                   message.find("config") != std::string::npos ||
+                   message.find("backend") != std::string::npos ||
+                   code.find("config") != std::string::npos ||
+                   code.find("backend") != std::string::npos,
+               "E2.1a-native-regression: native vpn.connect error names config/backend prerequisite");
+        if (connect_resp.contains("payload_json") &&
+            connect_resp["payload_json"].is_string()) {
+            expect(connect_resp["payload_json"].get<std::string>().find("connecting") ==
+                       std::string::npos,
+                   "E2.1a-native-regression: native vpn.connect must not return blind connecting payload");
+        }
+        expect(cr.rc == 0, "E2.1a-native-regression: exit code 0");
     }
 
     // =======================================================================

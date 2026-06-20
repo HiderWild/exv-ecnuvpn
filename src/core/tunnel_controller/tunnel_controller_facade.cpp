@@ -34,6 +34,11 @@ TunnelController::~TunnelController() {
         impl_->stop_core_lease_keepalive();
         impl_->scheduler_.shutdown();
         impl_->runner_.stop();
+        if ((impl_->network_config_applied_ ||
+             !impl_->session_id_.value.empty()) &&
+            impl_->helper_) {
+            impl_->shutdown_helper_session_for_cleanup();
+        }
         impl_->release_core_lease();
     }
 }

@@ -21,12 +21,12 @@ int main() {
   }
   const auto scaled_advanced =
       webview2_window_mode_bounds_for_dpi("advanced", 120);
-  if (scaled_advanced.width != 1215 || scaled_advanced.height != 704) {
+  if (scaled_advanced.width != 1245 || scaled_advanced.height != 734) {
     return 1;
   }
   const auto scaled_minimal =
       webview2_window_mode_bounds_for_dpi("minimal", 120);
-  if (scaled_minimal.width != 378 || scaled_minimal.height != 148) {
+  if (scaled_minimal.width != 408 || scaled_minimal.height != 178) {
     return 1;
   }
   const auto invalid_dpi_bounds =
@@ -113,7 +113,8 @@ int main() {
     return normalized_host_source.find(needle) != std::string::npos;
   };
   const std::string renderer_control_hit_test =
-      "if (x >= width - controls_width && x < width) {\n"
+      "if (content_x >= content_width - controls_width &&\n"
+      "          content_x < content_width) {\n"
       "        return HTCLIENT;\n"
       "      }";
   if (!source_contains("apply_window_mode_once") ||
@@ -130,6 +131,9 @@ int main() {
       !source_contains("WM_NCCALCSIZE") ||
       !source_contains("WM_NCHITTEST") ||
       !source_contains("HTCAPTION") ||
+      !source_contains("content_x = x - shadow_margin") ||
+      !source_contains("content_y = y - shadow_margin") ||
+      !source_contains("return HTNOWHERE;") ||
       !source_contains(renderer_control_hit_test) ||
       !source_contains("GWL_STYLE") ||
       !source_contains("~WS_CAPTION") ||

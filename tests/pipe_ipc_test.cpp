@@ -47,6 +47,19 @@ std::string unique_pipe_path() {
 }
 
 #ifdef _WIN32
+HANDLE connect_windows_pipe_without_write(const std::string &pipe_path) {
+  HANDLE pipe = INVALID_HANDLE_VALUE;
+  for (int attempt = 0; attempt < 20; ++attempt) {
+    pipe = CreateFileA(pipe_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                       nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipe != INVALID_HANDLE_VALUE) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return pipe;
+}
+
 std::string send_windows_pipe_request(const std::string &pipe_path) {
   HANDLE pipe = INVALID_HANDLE_VALUE;
   for (int attempt = 0; attempt < 20; ++attempt) {
@@ -79,6 +92,34 @@ std::string send_windows_pipe_request(const std::string &pipe_path) {
   CloseHandle(pipe);
   return std::string(buffer, read);
 }
+
+std::string send_windows_pipe_request_after_delay(
+    const std::string &pipe_path,
+    std::chrono::milliseconds delay) {
+  HANDLE pipe = connect_windows_pipe_without_write(pipe_path);
+  if (pipe == INVALID_HANDLE_VALUE) {
+    return "connect_failed";
+  }
+  std::this_thread::sleep_for(delay);
+
+  const std::string request = "{\"id\":8,\"action\":\"status.get\"}\n";
+  DWORD written = 0;
+  if (!WriteFile(pipe, request.data(), static_cast<DWORD>(request.size()),
+                 &written, nullptr)) {
+    CloseHandle(pipe);
+    return "write_failed";
+  }
+
+  char buffer[256] = {};
+  DWORD read = 0;
+  if (!ReadFile(pipe, buffer, sizeof(buffer) - 1, &read, nullptr) ||
+      read == 0) {
+    CloseHandle(pipe);
+    return "read_failed";
+  }
+  CloseHandle(pipe);
+  return std::string(buffer, read);
+}
 #endif
 
 bool probe_connection_does_not_poison_next_request() {
@@ -93,6 +134,34 @@ bool probe_connection_does_not_poison_next_request() {
   const bool probe_connected = deps.try_connect_ipc(pipe_path);
   const bool probe_observed =
       listener.accept_one([](const std::string &) { return "{}"; });
+  HANDLE idle_client = connect_windows_pipe_without_write(pipe_path);
+  const bool idle_client_connected = idle_client != INVALID_HANDLE_VALUE;
+  const bool idle_observed =
+      listener.accept_one([](const std::string &) { return "{}"; });
+  if (idle_client_connected) {
+    CloseHandle(idle_client);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  auto slow_response_future = std::async(std::launch::async, [&] {
+    return send_windows_pipe_request_after_delay(
+        pipe_path, std::chrono::milliseconds(40));
+  });
+  bool slow_handled = false;
+  const auto slow_deadline = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < slow_deadline &&
+         !slow_handled) {
+    slow_handled = listener.accept_one([](const std::string &request) {
+      return request.find("status.get") != std::string::npos
+                 ? "{\"id\":8,\"ok\":true,\"data\":{\"connected\":false}}"
+                 : "{\"id\":8,\"ok\":false,\"message\":\"wrong request\"}";
+    });
+    if (!slow_handled) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  const auto slow_response = slow_response_future.get();
 
   auto response_future = std::async(std::launch::async, [&] {
     return send_windows_pipe_request(pipe_path);
@@ -119,6 +188,18 @@ bool probe_connection_does_not_poison_next_request() {
   ok = expect(probe_connected, "probe client should connect") && ok;
   ok = expect(!probe_observed,
               "resolver probe should not create an empty pipe request") &&
+       ok;
+  ok = expect(idle_client_connected,
+              "idle client should connect before writing") &&
+       ok;
+  ok = expect(!idle_observed,
+              "idle client should not create an empty pipe request") &&
+       ok;
+  ok = expect(slow_handled,
+              "listener should wait briefly for a connected client to write") &&
+       ok;
+  ok = expect(slow_response.find("\"ok\":true") != std::string::npos,
+              "slow client should receive response after delayed write") &&
        ok;
   ok = expect(handled,
               "listener should process request after a probe disconnect") &&

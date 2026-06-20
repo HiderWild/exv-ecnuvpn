@@ -1,9 +1,11 @@
 #include "pipe_helper_client.hpp"
 #include "helper_protocol.hpp"
+#include "observability/log_facade.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 #ifdef _WIN32
@@ -186,8 +188,28 @@ std::string PipeHelperClient::recv_raw() {
     HANDLE hPipe = static_cast<HANDLE>(pipe_handle_);
     char buffer[4096];
     DWORD bytes_read = 0;
+    const DWORD timeout_ms = static_cast<DWORD>(
+        std::max(config_.response_timeout_ms, 1));
+    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
 
     while (true) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(hPipe, NULL, 0, NULL, &available, NULL)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED) {
+                disconnect();
+            }
+            break;
+        }
+        if (available == 0) {
+            if (GetTickCount64() >= deadline) {
+                disconnect();
+                break;
+            }
+            Sleep(10);
+            continue;
+        }
+
         BOOL ok = ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytes_read, NULL);
         if (!ok || bytes_read == 0) {
             // Connection lost or pipe closed
@@ -204,7 +226,25 @@ std::string PipeHelperClient::recv_raw() {
 #else
     char buffer[4096];
     ssize_t n = 0;
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(std::max(config_.response_timeout_ms, 1));
     while (true) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            disconnect();
+            break;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now);
+        pollfd pfd{};
+        pfd.fd = socket_fd_;
+        pfd.events = POLLIN;
+        int ready = ::poll(&pfd, 1, static_cast<int>(remaining.count()));
+        if (ready <= 0) {
+            disconnect();
+            break;
+        }
         n = ::read(socket_fd_, buffer, sizeof(buffer) - 1);
         if (n <= 0) {
             // EOF or error -- peer disconnected
@@ -234,6 +274,8 @@ std::string PipeHelperClient::recv_raw() {
 
 HelperResponse PipeHelperClient::send_request(HelperOp op,
                                                const json& payload) {
+    std::lock_guard<std::mutex> request_lock(request_mutex_);
+
     HelperResponse resp{};
     resp.op = op;
 
@@ -310,6 +352,8 @@ PrepareTunnelDeviceResponse PipeHelperClient::prepare_tunnel_device(
     auto resp = send_request(HelperOp::PrepareTunnelDevice, payload);
     if (!resp.success) {
         PrepareTunnelDeviceResponse pr;
+        pr.error_code = resp.error_code;
+        pr.error_message = resp.error_message;
         return pr;
     }
     return prepare_tunnel_device_response_from_json(json::parse(resp.payload_json));
@@ -320,7 +364,21 @@ ApplyTunnelConfigResponse PipeHelperClient::apply_tunnel_config(
     json payload = req;
     auto resp = send_request(HelperOp::ApplyTunnelConfig, payload);
     if (!resp.success) {
+        if (!resp.payload_json.empty()) {
+            try {
+                auto parsed = apply_tunnel_config_response_from_json(
+                    json::parse(resp.payload_json));
+                if (!parsed.error_code.empty() ||
+                    !parsed.error_message.empty() ||
+                    !parsed.error_target.empty() ||
+                    parsed.system_error != 0) {
+                    return parsed;
+                }
+            } catch (...) {
+            }
+        }
         ApplyTunnelConfigResponse ar;
+        ar.error_code = resp.error_code;
         ar.error_message = resp.error_message;
         return ar;
     }
@@ -363,8 +421,17 @@ ShutdownResponse PipeHelperClient::shutdown(const ShutdownRequest& req) {
     json payload = req;
     auto resp = send_request(HelperOp::Shutdown, payload);
     if (!resp.success) {
+        exv::observability::LogFacade::warn(
+            "PipeHelperClient: Shutdown failed code=" + resp.error_code +
+            " message=" + resp.error_message);
         ShutdownResponse sr;
         sr.cleanup_success = false;
+        if (!resp.payload_json.empty()) {
+            try {
+                sr = shutdown_response_from_json(json::parse(resp.payload_json));
+            } catch (...) {
+            }
+        }
         sr.errors.push_back(resp.error_message);
         return sr;
     }
@@ -407,6 +474,9 @@ ReleaseCoreLeaseResponse PipeHelperClient::release_core_lease(
     json payload = req;
     auto resp = send_request(HelperOp::ReleaseCoreLease, payload);
     if (!resp.success) {
+        exv::observability::LogFacade::warn(
+            "PipeHelperClient: ReleaseCoreLease failed code=" +
+            resp.error_code + " message=" + resp.error_message);
         return ReleaseCoreLeaseResponse{};
     }
     return release_core_lease_response_from_json(json::parse(resp.payload_json));

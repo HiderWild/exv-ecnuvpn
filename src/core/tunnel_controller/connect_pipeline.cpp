@@ -1,6 +1,7 @@
 #include "core/tunnel_controller/connect_pipeline.hpp"
 
 #include <condition_variable>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -77,10 +78,22 @@ ConnectPipelineResult ConnectPipeline::run(BranchFn backend_helper,
     threads.emplace_back([shared, branch, fn = std::move(fn),
                           external_stop]() mutable {
       ConnectBranchResult result;
-      if (external_stop.stop_requested()) {
-        result = cancellation_result(branch);
-      } else {
-        result = fn(shared->stop_source.get_token());
+      try {
+        if (external_stop.stop_requested()) {
+          result = cancellation_result(branch);
+        } else {
+          result = fn(shared->stop_source.get_token());
+        }
+      } catch (const std::exception& error) {
+        result.branch = branch;
+        result.ok = false;
+        result.code = "branch_exception";
+        result.message = error.what();
+      } catch (...) {
+        result.branch = branch;
+        result.ok = false;
+        result.code = "branch_exception";
+        result.message = "Unhandled connect branch exception";
       }
 
       ConnectPipeline::LateFailureLogger late_logger;
@@ -137,7 +150,7 @@ ConnectPipelineResult ConnectPipeline::run(BranchFn backend_helper,
   if (shared->failed) {
     for (auto& thread : threads) {
       if (thread.joinable()) {
-        thread.detach();
+        thread.join();
       }
     }
     std::lock_guard<std::mutex> lock(shared->mutex);

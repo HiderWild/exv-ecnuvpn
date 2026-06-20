@@ -27,6 +27,7 @@ struct MockWintun {
   int adapters_closed = 0;
   int adapter = 0;
   int session = 0;
+  bool delete_adapter_success = true;
   std::vector<std::string> *ops = nullptr;
 };
 
@@ -58,7 +59,7 @@ ecnuvpn::platform::NativeWintunApi make_wintun_api(MockWintun &mock) {
     ++mock.adapters_deleted;
     if (mock.ops)
       mock.ops->push_back("adapter:delete");
-    return true;
+    return mock.delete_adapter_success;
   };
   return api;
 }
@@ -167,11 +168,11 @@ bool win32_platform_ops_apply_routes_and_cleanup_in_order() {
       make_wintun_deps(wintun), make_ip_api(ip));
 
   auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
-  ok = expect(device.is_open, "prepare should open a Wintun session") && ok;
+  ok = expect(device.is_open, "prepare should prepare a Wintun adapter") && ok;
   ok = expect(!device.path.empty(), "prepare should return an opaque device path") &&
        ok;
-  ok = expect(wintun.sessions_started == 1,
-              "prepare should start one Wintun session") &&
+  ok = expect(wintun.sessions_started == 0,
+              "prepare should not start a packet session owned by the core data plane") &&
        ok;
 
   exv::platform::TunnelConfig config;
@@ -203,9 +204,9 @@ bool win32_platform_ops_apply_routes_and_cleanup_in_order() {
   ok = expect(ip.deleted_routes.size() == 2,
               "cleanup should remove owned routes") &&
        ok;
-  ok = expect(wintun.sessions_ended == 1 && wintun.adapters_deleted == 1 &&
-                  wintun.adapters_closed == 1,
-              "cleanup should delete Wintun after route cleanup") &&
+  ok = expect(wintun.sessions_started == 0 && wintun.sessions_ended == 0 &&
+                  wintun.adapters_deleted == 1 && wintun.adapters_closed == 1,
+              "cleanup should delete Wintun without starting a packet session") &&
        ok;
   return ok;
 }
@@ -269,6 +270,59 @@ bool win32_platform_ops_apply_dns_and_restore_on_cleanup() {
   return ok;
 }
 
+bool win32_platform_ops_reapply_refreshes_routes_without_overwriting_dns_origin() {
+  bool ok = true;
+  MockWintun wintun;
+  MockIpHelper ip;
+  ip.current_dns.servers = {"192.0.2.53"};
+  ip.current_dns.search_domain = "corp.example";
+
+  auto ops = exv::platform::create_win32_platform_network_ops(
+      make_wintun_deps(wintun), make_ip_api(ip));
+
+  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  exv::platform::TunnelConfig config;
+  config.interface_address = "10.255.0.10/24";
+  config.routes.push_back({"10.0.0.0/8", "", 10, false});
+  config.dns.servers = {"10.0.0.53"};
+  config.dns.search_domain = "vpn.example";
+
+  ok = expect(ops->apply_tunnel_config(device, config),
+              "first apply should configure route and DNS") &&
+       ok;
+
+  ip.current_dns.servers = config.dns.servers;
+  ip.current_dns.search_domain = config.dns.search_domain;
+  ok = expect(ops->apply_tunnel_config(device, config),
+              "second apply should refresh route and DNS") &&
+       ok;
+
+  ok = expect(ip.dns_read_interfaces.size() == 1,
+              "reapply should not overwrite the original DNS snapshot") &&
+       ok;
+  ok = expect(ip.addresses.size() == 1,
+              "reapply should refresh routes without recreating the tunnel address") &&
+       ok;
+  ok = expect(ip.routes.size() == 2,
+              "reapply should recreate the split route") &&
+       ok;
+  ok = expect(ip.deleted_routes.size() == 1 &&
+                  ip.deleted_routes[0].cidr == "10.0.0.0/8",
+              "reapply should remove the previous owned route before recreating it") &&
+       ok;
+
+  auto cleanup = ops->cleanup(device.adapter_name,
+                              exv::platform::CleanupPolicy::Full);
+  ok = expect(cleanup.success, "cleanup after reapply should succeed") && ok;
+  ok = expect(ip.dns_writes.size() == 3 &&
+                  ip.dns_writes.back().servers ==
+                      std::vector<std::string>{"192.0.2.53"} &&
+                  ip.dns_writes.back().search_domain == "corp.example",
+              "cleanup should restore the DNS snapshot captured before the first apply") &&
+       ok;
+  return ok;
+}
+
 bool win32_platform_ops_cleans_imported_resource_facts() {
   bool ok = true;
   MockWintun wintun;
@@ -307,11 +361,12 @@ bool win32_platform_ops_cleans_imported_resource_facts() {
 
   auto fresh_ops = exv::platform::create_win32_platform_network_ops(
       make_wintun_deps(wintun), make_ip_api(ip));
+  ip.delete_route_error = 1168;
   auto cleanup = fresh_ops->cleanup_resources(
       resources, exv::platform::CleanupPolicy::Full);
 
   ok = expect(cleanup.success,
-              "fresh backend should cleanup using imported resource facts") &&
+              "fresh backend should cleanup using imported resource facts even when a route is already gone") &&
        ok;
   ok = expect(cleanup.routes_removed == 1,
               "fresh cleanup should delete the exported route fact") &&
@@ -353,6 +408,19 @@ bool win32_platform_ops_rolls_back_routes_when_apply_fails() {
 
   ok = expect(!ops->apply_tunnel_config(device, config),
               "apply should fail when route creation fails") &&
+       ok;
+  auto last_error = ops->last_error();
+  ok = expect(last_error.code == "native_ip_config_route_create_failed",
+              "apply failure should expose native IP config error code") &&
+       ok;
+  ok = expect(last_error.message.find("CreateIpForwardEntry2") != std::string::npos,
+              "apply failure should expose native IP config error message") &&
+       ok;
+  ok = expect(last_error.target == "59.78.176.0/20",
+              "apply failure should expose failing route target") &&
+       ok;
+  ok = expect(last_error.system_error == 87,
+              "apply failure should expose Win32 system error") &&
        ok;
   ok = expect(ip.routes.size() == 2,
               "apply should have attempted the failing route") &&
@@ -435,15 +503,56 @@ bool win32_platform_ops_restores_dns_when_route_cleanup_fails() {
   return ok;
 }
 
+bool win32_platform_ops_treats_adapter_delete_failure_as_nonfatal_after_network_cleanup() {
+  bool ok = true;
+  MockWintun wintun;
+  MockIpHelper ip;
+  ip.current_dns.servers = {"192.0.2.53"};
+  wintun.delete_adapter_success = false;
+  auto ops = exv::platform::create_win32_platform_network_ops(
+      make_wintun_deps(wintun), make_ip_api(ip));
+
+  auto device = ops->prepare_tunnel_device("ECNU-VPN", 1320);
+  exv::platform::TunnelConfig config;
+  config.interface_address = "10.255.0.10/24";
+  config.routes.push_back({"10.0.0.0/8", "", 10, false});
+  config.dns.servers = {"10.0.0.53"};
+
+  ok = expect(ops->apply_tunnel_config(device, config),
+              "apply should succeed before adapter delete failure scenario") &&
+       ok;
+
+  auto cleanup = ops->cleanup(device.adapter_name,
+                              exv::platform::CleanupPolicy::Full);
+  ok = expect(cleanup.success,
+              "adapter delete failure should not fail cleanup after routes and DNS are restored") &&
+       ok;
+  ok = expect(cleanup.routes_removed == 1,
+              "cleanup should still remove owned routes") &&
+       ok;
+  ok = expect(cleanup.dns_removed,
+              "cleanup should still restore DNS") &&
+       ok;
+  ok = expect(wintun.adapters_deleted == 1,
+              "cleanup should attempt adapter deletion") &&
+       ok;
+  ok = expect(!cleanup.adapter_removed,
+              "cleanup should not report adapter removed when deletion fails") &&
+       ok;
+  return ok;
+}
+
 } // namespace
 
 int main() {
   bool ok = true;
   ok = win32_platform_ops_apply_routes_and_cleanup_in_order() && ok;
   ok = win32_platform_ops_apply_dns_and_restore_on_cleanup() && ok;
+  ok = win32_platform_ops_reapply_refreshes_routes_without_overwriting_dns_origin() && ok;
   ok = win32_platform_ops_cleans_imported_resource_facts() && ok;
   ok = win32_platform_ops_rolls_back_routes_when_apply_fails() && ok;
   ok = win32_platform_ops_rolls_back_routes_when_dns_apply_fails() && ok;
   ok = win32_platform_ops_restores_dns_when_route_cleanup_fails() && ok;
+  ok = win32_platform_ops_treats_adapter_delete_failure_as_nonfatal_after_network_cleanup() && ok;
   return ok ? 0 : 1;
 }

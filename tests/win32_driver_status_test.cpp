@@ -51,17 +51,51 @@ bool driver_status_reuses_one_adapter_snapshot_for_burst() {
   ok = expect(scans == 1,
               "driver status burst should reuse a single adapter snapshot") &&
        ok;
-  ok = expect(first.value("effective_driver", std::string()) == "wintun",
-              "wintun should remain effective when available") &&
+  ok = expect(first.value("effective_driver", std::string()) == "tap",
+              "auto driver should fall back to TAP when wintun.dll is missing") &&
        ok;
-  ok = expect(!second.value("wintun_missing", true),
-              "cached status should preserve wintun availability") &&
+  ok = expect(second.value("wintun_missing", false),
+              "existing Wintun adapters must not hide a missing bundled wintun.dll") &&
+       ok;
+  ok = expect(second.value("effective_driver_status", std::string()) == "ready",
+              "cached status should still be ready when TAP is available") &&
        ok;
 
   ecnuvpn::platform::clear_driver_status_cache_for_testing();
   (void)ecnuvpn::platform::driver_status_json(cfg);
   ok = expect(scans == 2,
               "clearing driver status cache should force a fresh scan") &&
+       ok;
+
+  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+      nullptr);
+  ecnuvpn::platform::clear_driver_status_cache_for_testing();
+  return ok;
+}
+
+bool wintun_adapter_without_runtime_is_unavailable() {
+  bool ok = true;
+
+  ecnuvpn::platform::clear_driver_status_cache_for_testing();
+  ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
+      [] {
+        return ecnuvpn::platform::WindowsDriverAdapterSnapshot{
+            {"Wintun Userspace Tunnel"},
+            {}};
+      });
+
+  const auto cfg = base_config();
+  auto status = ecnuvpn::platform::driver_status_json(cfg);
+
+  ok = expect(status.value("effective_driver", std::string()) == "wintun",
+              "auto driver should still report the intended Wintun driver") &&
+       ok;
+  ok = expect(status.value("wintun_missing", false),
+              "Wintun should be missing when wintun.dll is not bundled") &&
+       ok;
+  ok = expect(status.value("effective_driver_status", std::string()) ==
+                  "unavailable",
+              "Wintun without runtime DLL should be unavailable") &&
        ok;
 
   ecnuvpn::platform::set_driver_status_adapter_snapshot_provider_for_testing(
@@ -111,6 +145,7 @@ bool preflight_reuses_cached_driver_snapshot() {
 int main() {
   bool ok = true;
   ok = driver_status_reuses_one_adapter_snapshot_for_burst() && ok;
+  ok = wintun_adapter_without_runtime_is_unavailable() && ok;
   ok = preflight_reuses_cached_driver_snapshot() && ok;
   return ok ? 0 : 1;
 }

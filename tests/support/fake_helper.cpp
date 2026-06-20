@@ -58,6 +58,11 @@ helper::PrepareTunnelDeviceResponse FakeHelper::prepare_tunnel_device(const help
     prepare_count_++;
     prepared_sessions_[req.session_id] = true;
     helper::PrepareTunnelDeviceResponse resp;
+    if (prepare_device_fail_) {
+        resp.error_code = prepare_device_error_code_;
+        resp.error_message = prepare_device_error_message_;
+        return resp;
+    }
     resp.device_path = "//./FakeTun/" + req.session_id.value;
     resp.mtu = 1400;
     return resp;
@@ -73,9 +78,17 @@ helper::ApplyTunnelConfigResponse FakeHelper::apply_tunnel_config(const helper::
     resp.success = !fail_next_ && !apply_config_fail_ && !missing_prepare;
     if (!resp.success) {
         if (missing_prepare) {
+            resp.error_code = "device_not_prepared";
             resp.error_message = "Tunnel device has not been prepared";
         } else {
-            resp.error_message = apply_config_fail_ ? "Simulated apply_config failure" : "Simulated fail_next";
+            resp.error_code = apply_config_fail_
+                                  ? apply_config_error_code_
+                                  : "simulated_fail_next";
+            resp.error_message = apply_config_fail_
+                                     ? apply_config_error_message_
+                                     : "Simulated fail_next";
+            resp.error_target = apply_config_error_target_;
+            resp.system_error = apply_config_system_error_;
         }
     }
     fail_next_ = false;
@@ -211,8 +224,27 @@ void FakeHelper::set_start_session_fail(bool fail) {
     start_session_fail_ = fail;
 }
 
+void FakeHelper::set_prepare_device_fail(std::string error_code, std::string error_message) {
+    prepare_device_fail_ = true;
+    prepare_device_error_code_ = std::move(error_code);
+    prepare_device_error_message_ = std::move(error_message);
+}
+
 void FakeHelper::set_apply_config_fail(bool fail) {
     apply_config_fail_ = fail;
+    apply_config_error_code_ = fail ? "apply_config_failed" : "";
+    apply_config_error_message_ = fail ? "Simulated apply_config failure" : "";
+    apply_config_error_target_.clear();
+    apply_config_system_error_ = 0;
+}
+
+void FakeHelper::set_apply_config_fail(std::string error_code,
+                                       std::string error_message) {
+    apply_config_fail_ = true;
+    apply_config_error_code_ = std::move(error_code);
+    apply_config_error_message_ = std::move(error_message);
+    apply_config_error_target_ = "59.78.176.0/20";
+    apply_config_system_error_ = 87;
 }
 
 void FakeHelper::set_require_prepare_before_apply(bool require) {

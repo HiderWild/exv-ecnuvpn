@@ -212,6 +212,12 @@ onMounted(() => {
   --minimal-height: 118px;
   --mac-traffic-light-inset: 78px;
   --window-radius: 16px;
+  --app-window-border-color: rgba(148, 163, 184, 0.32);
+  --app-window-shadow-margin: 12px;
+  --app-window-shadow-margin-total: 24px;
+  --app-window-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.34),
+    0 3px 10px rgba(0, 0, 0, 0.24);
   min-height: 100vh;
   overflow: hidden;
   background: transparent;
@@ -221,16 +227,21 @@ onMounted(() => {
 .app-window-transparent-host {
   min-height: 100vh;
   overflow: hidden;
+  box-sizing: border-box;
+  padding: var(--app-window-shadow-margin);
   background: transparent;
 }
 
 .mode-transition-surface {
   position: relative;
   overflow: hidden;
-  width: 100vw;
-  height: 100vh;
+  width: calc(100vw - var(--app-window-shadow-margin-total));
+  height: calc(100vh - var(--app-window-shadow-margin-total));
+  box-sizing: border-box;
+  border: 1px solid var(--app-window-border-color);
   border-radius: var(--window-radius);
   background: transparent;
+  box-shadow: var(--app-window-shadow);
   transform-origin: top left;
   transition:
     width 300ms cubic-bezier(0.16, 1, 0.3, 1),

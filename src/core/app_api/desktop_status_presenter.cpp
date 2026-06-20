@@ -9,29 +9,124 @@
 #include "platform/common/runtime_status.hpp"
 #include "platform/common/service_status.hpp"
 
+#include <chrono>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <utility>
+
 namespace ecnuvpn {
 namespace app_api {
 namespace {
 
-void add_default_virtual_network_fields(nlohmann::json &status) {
-  status["upstream_virtual_detected"] = false;
-  status["upstream_virtual_adapters"] = nlohmann::json::array();
-  status["upstream_virtual_message"] = "";
-  status["route_policy"] = "normal";
+using Clock = std::chrono::steady_clock;
+constexpr auto kVirtualNetworkProbeCacheTtl = std::chrono::seconds(10);
+
+struct VirtualNetworkProbeCacheEntry {
+  nlohmann::json fields;
+  Clock::time_point updated_at;
+};
+
+struct VirtualNetworkProbeState {
+  std::mutex mutex;
+  std::map<std::string, VirtualNetworkProbeCacheEntry> cache;
+  std::set<std::string> in_flight;
+  std::deque<nlohmann::json> pending_events;
+};
+
+VirtualNetworkProbeState &virtual_network_probe_state() {
+  static VirtualNetworkProbeState state;
+  return state;
 }
 
-void add_virtual_network_fields_if_ready(nlohmann::json &status,
-                                         const std::string &interface_name,
-                                         bool network_ready) {
-  if (!network_ready || interface_name.empty()) {
-    add_default_virtual_network_fields(status);
-    return;
+bool cache_entry_fresh(const VirtualNetworkProbeCacheEntry &entry,
+                       Clock::time_point now) {
+  return now - entry.updated_at < kVirtualNetworkProbeCacheTtl;
+}
+
+nlohmann::json default_virtual_network_fields() {
+  return nlohmann::json{{"upstream_virtual_detected", false},
+                        {"upstream_virtual_adapters", nlohmann::json::array()},
+                        {"upstream_virtual_message", ""},
+                        {"route_policy", "normal"}};
+}
+
+void merge_virtual_network_fields(nlohmann::json &status,
+                                  const nlohmann::json &fields) {
+  for (const auto *key : {"upstream_virtual_detected",
+                          "upstream_virtual_adapters",
+                          "upstream_virtual_message",
+                          "route_policy"}) {
+    if (fields.contains(key)) {
+      status[key] = fields.at(key);
+    }
   }
+}
+
+void add_default_virtual_network_fields(nlohmann::json &status) {
+  merge_virtual_network_fields(status, default_virtual_network_fields());
+}
+
+nlohmann::json probe_virtual_network_fields(
+    const std::string &interface_name) {
+  nlohmann::json fields = default_virtual_network_fields();
   try {
-    virtual_network::add_status_fields(status, interface_name);
+    virtual_network::add_status_fields(fields, interface_name);
   } catch (...) {
-    add_default_virtual_network_fields(status);
+    fields = default_virtual_network_fields();
   }
+  return fields;
+}
+
+void request_virtual_network_probe(const std::string &interface_name) {
+  auto &state = virtual_network_probe_state();
+  const std::string key = interface_name;
+  const auto now = Clock::now();
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto cached = state.cache.find(key);
+    if (cached != state.cache.end() &&
+        cache_entry_fresh(cached->second, now)) {
+      return;
+    }
+    if (state.in_flight.count(key) != 0) {
+      return;
+    }
+    state.in_flight.insert(key);
+  }
+
+  std::thread([key, interface_name] {
+    nlohmann::json fields = probe_virtual_network_fields(interface_name);
+    nlohmann::json event = fields;
+    event["Finnished"] = true;
+
+    auto &state = virtual_network_probe_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.cache[key] = VirtualNetworkProbeCacheEntry{fields, Clock::now()};
+    state.pending_events.push_back(std::move(event));
+    state.in_flight.erase(key);
+  }).detach();
+}
+
+void add_cached_virtual_network_fields(nlohmann::json &status,
+                                       const std::string &interface_name) {
+  auto &state = virtual_network_probe_state();
+  nlohmann::json fields = default_virtual_network_fields();
+  const std::string key = interface_name;
+  const auto now = Clock::now();
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto cached = state.cache.find(key);
+    if (cached != state.cache.end() &&
+        cache_entry_fresh(cached->second, now)) {
+      fields = cached->second.fields;
+    }
+  }
+
+  merge_virtual_network_fields(status, fields);
+  request_virtual_network_probe(interface_name);
 }
 
 } // namespace
@@ -55,8 +150,7 @@ nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
   j["uptime_seconds"] = 0;
   j["rx_bytes"] = json_u64(helper_resp, "rx_bytes", 0);
   j["tx_bytes"] = json_u64(helper_resp, "tx_bytes", 0);
-  add_virtual_network_fields_if_ready(j, json_string(j, "interface"),
-                                      network_ready);
+  add_cached_virtual_network_fields(j, json_string(j, "interface"));
   return j;
 }
 
@@ -73,11 +167,8 @@ nlohmann::json disconnected_status(const Config &cfg) {
                    {"mtu", cfg.mtu},
                    {"uptime_seconds", 0},
                    {"rx_bytes", 0},
-                   {"tx_bytes", 0},
-                   {"upstream_virtual_detected", false},
-                   {"upstream_virtual_adapters", nlohmann::json::array()},
-                   {"upstream_virtual_message", ""},
-                   {"route_policy", "normal"}};
+                   {"tx_bytes", 0}};
+  add_cached_virtual_network_fields(j, "");
   return j;
 }
 
@@ -106,7 +197,7 @@ nlohmann::json frontend_status_from_snapshot_json(
   j["uptime_seconds"] = 0;
   j["rx_bytes"] = rx_bytes;
   j["tx_bytes"] = tx_bytes;
-  add_virtual_network_fields_if_ready(j, iface, network_ready);
+  add_cached_virtual_network_fields(j, iface);
   return j;
 }
 
@@ -199,7 +290,7 @@ nlohmann::json frontend_status_from_controller_snapshot(
   }
   j["auto_reconnect"] = snap.auto_reconnect;
   j["phase"] = exv::core::tunnel_phase_wire_name(snap.phase);
-  add_virtual_network_fields_if_ready(j, snap.interface_name, connected);
+  add_cached_virtual_network_fields(j, snap.interface_name);
   return j;
 }
 
@@ -221,6 +312,25 @@ nlohmann::json driver_status_json(const Config &cfg) {
 
 nlohmann::json install_driver(const Config &cfg, const nlohmann::json &payload) {
   return platform::install_driver(config::to_platform_config_view(cfg), payload);
+}
+
+nlohmann::json drain_virtual_network_status_events() {
+  auto &state = virtual_network_probe_state();
+  nlohmann::json events = nlohmann::json::array();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  while (!state.pending_events.empty()) {
+    events.push_back(std::move(state.pending_events.front()));
+    state.pending_events.pop_front();
+  }
+  return events;
+}
+
+void reset_virtual_network_probe_state_for_testing() {
+  auto &state = virtual_network_probe_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.cache.clear();
+  state.in_flight.clear();
+  state.pending_events.clear();
 }
 
 } // namespace app_api

@@ -99,6 +99,26 @@ const upstreamVirtualCaption = computed(() => {
   return upstreamVirtualNames.value || vpn.status?.upstream_virtual_message || '已检测到'
 })
 
+const networkProbeSummary = computed(() => {
+  if (!vpn.status) return '正在探测本机出口'
+  if (hasUpstreamVirtual.value) return `已发现代理 TUN：${upstreamVirtualCaption.value}`
+  return '未发现代理 TUN，当前使用系统默认出口'
+})
+
+const routePolicyDescription = computed(() => {
+  if (!vpn.status) return '启动后会显示 EXV 与系统出口的相对位置。'
+  if (vpn.status.route_policy === 'exv-before-proxy-tun') {
+    return connected.value
+      ? '校园内网流量已写入 EXV 虚拟网卡；默认出口和代理 TUN 保持在 EXV 后方。'
+      : '连接时校园内网路由会写入 EXV 虚拟网卡；默认出口和代理 TUN 保持在 EXV 后方。'
+  }
+  return connected.value
+    ? '校园内网流量已写入 EXV 虚拟网卡，其他流量继续按系统默认出口处理。'
+    : '连接时校园内网流量会进入 EXV 虚拟网卡，其他流量继续按系统默认出口处理。'
+})
+
+const upstreamVirtualTooltip = computed(() => `${networkProbeSummary.value}。${routePolicyDescription.value}`)
+
 function handlePowerClick() {
   if (connecting.value) {
     void vpn.cancelConnect()
@@ -124,6 +144,7 @@ type TopologyNode = {
   key: string
   title: string
   caption: string
+  tooltip?: string
   icon?: unknown
   tone?: string
   pulseKeys: string[]
@@ -148,6 +169,7 @@ const topologyNodes = computed(() => {
       key: 'upstream',
       title: '代理 TUN',
       caption: upstreamVirtualCaption.value,
+      tooltip: upstreamVirtualTooltip.value,
       icon: EthernetPort,
       tone: 'accent',
       pulseKeys: ['routes'],
@@ -612,7 +634,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
           </div>
           <p
             class="node-title"
-            :title="node.title"
+            :title="node.tooltip || node.title"
           >
             {{ node.title }}
           </p>

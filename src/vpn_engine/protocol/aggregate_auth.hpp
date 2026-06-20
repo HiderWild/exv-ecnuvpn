@@ -30,6 +30,9 @@ struct AggregateAuthReplyRequest {
   std::string password;
   std::string selected_group;
   std::string challenge_value;
+  std::string challenge_field_name;
+  std::string device_id;
+  std::string version = "ECNUVPN-NATIVE";
   std::vector<std::string> opaque_xml;
 };
 

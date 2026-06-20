@@ -16,26 +16,85 @@ const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
 const autoScroll = ref(true)
 const logsContainer = ref<HTMLElement | null>(null)
 const savedScrollTop = ref(0)
+const lastLogSeq = ref(0)
+const logsLoading = ref(false)
+const LOG_FETCH_LIMIT = 200
+const LOG_POLL_INTERVAL_MS = 2000
+let logPollTimer: ReturnType<typeof setInterval> | null = null
 
 const isContextJump = computed(() => route.query.from === 'dashboard')
 const highlightCount = 10 // Number of recent entries to highlight on context jump
 
 onMounted(async () => {
   sseConnect()
-  try {
-    const api = (await import('../api/host')).default
-    const { data } = await api.get<LogEntry[]>('/logs')
-    if (Array.isArray(data)) {
-      vpn.setLogs(data)
-    }
-  } catch {}
+  await loadLogChunk(true)
+  startLogPolling()
 
   if (autoScroll.value) await scrollToBottom()
 })
 
 onUnmounted(() => {
+  stopLogPolling()
   sseDisconnect()
 })
+
+function logSeq(entry: LogEntry): number {
+  return typeof entry.seq === 'number' && Number.isFinite(entry.seq) ? entry.seq : 0
+}
+
+function maxLogSeq(entries: LogEntry[]): number {
+  return entries.reduce((max, entry) => Math.max(max, logSeq(entry)), 0)
+}
+
+function applyLogChunk(entries: LogEntry[], initial: boolean) {
+  if (!entries.length) {
+    return
+  }
+
+  const incomingMaxSeq = maxLogSeq(entries)
+  if (initial || (incomingMaxSeq > 0 && incomingMaxSeq <= lastLogSeq.value)) {
+    vpn.setLogs(entries)
+  } else {
+    for (const entry of entries) {
+      vpn.addLog(entry)
+    }
+  }
+
+  if (incomingMaxSeq > 0) {
+    lastLogSeq.value = incomingMaxSeq
+  }
+}
+
+async function loadLogChunk(initial: boolean) {
+  if (logsLoading.value) return
+  logsLoading.value = true
+  try {
+    const api = (await import('../api/host')).default
+    const params: { limit: number; after_seq?: number } = { limit: LOG_FETCH_LIMIT }
+    if (!initial && lastLogSeq.value > 0) {
+      params.after_seq = lastLogSeq.value
+    }
+    const { data } = await api.get<LogEntry[]>('/logs', { params })
+    if (Array.isArray(data)) {
+      applyLogChunk(data, initial)
+    }
+  } catch {
+  } finally {
+    logsLoading.value = false
+  }
+}
+
+function startLogPolling() {
+  stopLogPolling()
+  logPollTimer = setInterval(() => { void loadLogChunk(false) }, LOG_POLL_INTERVAL_MS)
+}
+
+function stopLogPolling() {
+  if (logPollTimer != null) {
+    clearInterval(logPollTimer)
+    logPollTimer = null
+  }
+}
 
 async function scrollToBottom() {
   await nextTick()

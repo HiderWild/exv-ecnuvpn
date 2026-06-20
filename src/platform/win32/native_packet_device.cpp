@@ -1,5 +1,6 @@
 #include "platform/win32/native_packet_device.hpp"
 
+#include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_discovery.hpp"
 
 
@@ -159,6 +160,40 @@ std::string packet_error_message(const char *operation, DWORD system_error) {
   return std::string(operation) + " failed with Windows error " +
          std::to_string(static_cast<unsigned long>(system_error));
 }
+
+std::string wintun_adapter_open_error_message(const std::wstring &adapter_name,
+                                              DWORD open_error,
+                                              DWORD create_error) {
+  return "failed to open or create Wintun adapter '" +
+         narrow_utf8(adapter_name) + "' (open Windows error " +
+         std::to_string(static_cast<unsigned long>(open_error)) +
+         ", create Windows error " +
+         std::to_string(static_cast<unsigned long>(create_error)) + ")";
+}
+
+NativeWintunConfig config_from_device_config(
+    const vpn_engine::DeviceConfig &device_config) {
+  NativeWintunConfig config;
+  if (!device_config.interface_name.empty())
+    config.adapter_name_prefix = widen_utf8(device_config.interface_name);
+  return config;
+}
+
+vpn_engine::ValidationResult
+wintun_elevation_failure_result(const NativeWintunConfig &config) {
+  return invalid("native_wintun_adapter_open_failed",
+                 wintun_adapter_open_error_message(
+                     native_wintun_adapter_name(config.adapter_name_prefix),
+                     ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED));
+}
+
+vpn_engine::ValidationResult require_wintun_elevation(
+    const NativePacketDeviceDependencies &dependencies,
+    const NativeWintunConfig &config) {
+  if (dependencies.is_elevated && !dependencies.is_elevated())
+    return wintun_elevation_failure_result(config);
+  return {};
+}
 // End inlined from platform/win32/native_packet_device_wintun_api include-unit
 // Begin inlined from platform/win32/native_packet_device_sessions include-unit
 class RealWintunPacketSession final : public NativePacketDeviceWintunSession {
@@ -166,12 +201,13 @@ public:
   RealWintunPacketSession() = default;
   ~RealWintunPacketSession() override { stop(); }
 
-  NativeWintunStartResult start() override {
+  NativeWintunStartResult start(const NativeWintunConfig &config) override {
     NativeWintunStartResult result;
     if (session_) {
       result.metadata = metadata_;
       return result;
     }
+    config_ = config;
 
     const std::wstring dll_path = widen_utf8(platform::get_bundled_wintun_path());
     if (!file_exists(dll_path))
@@ -191,14 +227,21 @@ public:
 
     const std::wstring adapter_name =
         native_wintun_adapter_name(config_.adapter_name_prefix);
+    SetLastError(ERROR_SUCCESS);
     AdapterHandle adapter = api_.open_adapter(adapter_name.c_str());
-    if (!adapter)
+    DWORD open_error = adapter ? ERROR_SUCCESS : GetLastError();
+    DWORD create_error = ERROR_SUCCESS;
+    if (!adapter) {
+      SetLastError(ERROR_SUCCESS);
       adapter = api_.create_adapter(adapter_name.c_str(),
                                     config_.tunnel_type.c_str(), nullptr);
+      create_error = adapter ? ERROR_SUCCESS : GetLastError();
+    }
     if (!adapter) {
       unload_module();
       return wintun_failure(NativeWintunError::adapter_open_failed,
-                            "failed to open or create Wintun adapter");
+                            wintun_adapter_open_error_message(
+                                adapter_name, open_error, create_error));
     }
 
     NET_LUID luid{};
@@ -212,13 +255,16 @@ public:
                             "failed to resolve Wintun adapter interface index");
     }
 
+    SetLastError(ERROR_SUCCESS);
     SessionHandle session =
         api_.start_session(adapter, config_.session_capacity);
     if (!session) {
+      DWORD session_error = GetLastError();
       api_.close_adapter(adapter);
       unload_module();
       return wintun_failure(NativeWintunError::session_start_failed,
-                            "failed to start Wintun session");
+                            packet_error_message("WintunStartSession",
+                                                 session_error));
     }
 
     adapter_ = adapter;
@@ -244,7 +290,7 @@ public:
     if (!bytes) {
       DWORD error = GetLastError();
       if (error == ERROR_NO_MORE_ITEMS)
-        return invalid("packet_device_empty", "no packet is queued");
+        return invalid("no_data", "no packet is queued");
       return invalid("wintun_receive_failed",
                      packet_error_message("WintunReceivePacket", error));
     }
@@ -384,6 +430,7 @@ NativePacketDeviceDependencies default_native_packet_device_dependencies() {
     return std::unique_ptr<NativePacketDeviceIpConfig>(
         new RealNativePacketIpConfig(interface_index));
   };
+  deps.is_elevated = [] { return platform::check_root(); };
   return deps;
 }
 // End inlined from platform/win32/native_packet_device_errors include-unit
@@ -407,13 +454,19 @@ NativePacketDevice::open(const vpn_engine::DeviceConfig &config) {
     return invalid("packet_device_api_missing",
                    "native packet device dependencies are incomplete");
 
+  NativeWintunConfig wintun_config = config_from_device_config(config);
+  vpn_engine::ValidationResult elevated =
+      require_wintun_elevation(dependencies_, wintun_config);
+  if (!elevated.ok)
+    return elevated;
+
   std::unique_ptr<NativePacketDeviceWintunSession> wintun =
       dependencies_.create_wintun_session();
   if (!wintun)
     return invalid("packet_device_api_missing",
                    "native Wintun packet session factory returned null");
 
-  NativeWintunStartResult started = wintun->start();
+  NativeWintunStartResult started = wintun->start(wintun_config);
   if (!started.ok())
     return wintun_start_failure_result(started);
 
@@ -436,13 +489,19 @@ NativePacketDevice::open(const vpn_engine::TunnelMetadata &metadata) {
     return invalid("packet_device_api_missing",
                    "native packet device dependencies are incomplete");
 
+  NativeWintunConfig wintun_config;
+  vpn_engine::ValidationResult elevated =
+      require_wintun_elevation(dependencies_, wintun_config);
+  if (!elevated.ok)
+    return elevated;
+
   std::unique_ptr<NativePacketDeviceWintunSession> wintun =
       dependencies_.create_wintun_session();
   if (!wintun)
     return invalid("packet_device_api_missing",
                    "native Wintun packet session factory returned null");
 
-  NativeWintunStartResult started = wintun->start();
+  NativeWintunStartResult started = wintun->start(wintun_config);
   if (!started.ok())
     return wintun_start_failure_result(started);
 

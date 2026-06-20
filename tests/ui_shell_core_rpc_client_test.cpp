@@ -5,10 +5,15 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -43,6 +48,37 @@ public:
 private:
   std::vector<std::string> responses_;
   std::vector<std::string>::size_type next_response_ = 0;
+};
+
+class BlockingTransport final : public ecnuvpn::ui_shell::CoreRpcTransport {
+public:
+  void close() override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      closed_ = true;
+      ++close_count;
+    }
+    cv_.notify_all();
+  }
+
+  bool write_line(const std::string &line) override {
+    writes.push_back(line);
+    return true;
+  }
+
+  bool read_line(std::string &) override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return closed_; });
+    return false;
+  }
+
+  int close_count = 0;
+  std::vector<std::string> writes;
+
+private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool closed_ = false;
 };
 
 bool expect(bool condition, const char *message) {
@@ -338,6 +374,71 @@ int main() {
   ok_all = expect(wrong_type_response.code == "protocol_error",
                   "wrong response field type error code should be stable") &&
            ok_all;
+
+  {
+    auto *blocking_transport = new BlockingTransport();
+    auto *blocking_client = new CoreRpcClient(*blocking_transport);
+    CoreRpcRequest blocking_request;
+    blocking_request.action = "status.get";
+    blocking_request.payload_json = "{}";
+    blocking_request.request_id = "501";
+
+    (void)blocking_client->invoke_async(blocking_request);
+    std::atomic<bool> shutdown_done{false};
+    std::thread shutdown_thread([&] {
+      blocking_client->shutdown();
+      shutdown_done.store(true);
+    });
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (!shutdown_done.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ok_all = expect(shutdown_done.load(),
+                    "client shutdown should close transport and unblock reader") &&
+             ok_all;
+    if (shutdown_done.load()) {
+      shutdown_thread.join();
+      ok_all = expect(blocking_transport->close_count == 1,
+                      "client shutdown should close transport exactly once") &&
+               ok_all;
+      delete blocking_client;
+      delete blocking_transport;
+    } else {
+      shutdown_thread.detach();
+    }
+  }
+
+  {
+    BlockingTransport blocking_transport;
+    CoreRpcClient blocking_client(blocking_transport);
+    CoreRpcRequest blocking_request;
+    blocking_request.action = "status.get";
+    blocking_request.payload_json = "{}";
+    blocking_request.request_id = "502";
+
+    (void)blocking_client.invoke_async(blocking_request);
+    std::atomic<bool> pump_done{false};
+    std::thread pump_thread([&] {
+      blocking_client.pump_events();
+      pump_done.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const bool returned_without_waiting_for_core = pump_done.load();
+
+    blocking_client.shutdown();
+    if (pump_thread.joinable()) {
+      pump_thread.join();
+    }
+
+    ok_all = expect(returned_without_waiting_for_core,
+                    "pump_events should not block while reader waits for core") &&
+             ok_all;
+  }
 
   CoreProcessLaunch launch;
   launch.state_dir = "C:/state";

@@ -6,6 +6,7 @@
 #include <deque>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -81,6 +82,16 @@ std::string aggregate_auth_http_response(const std::string &body) {
                        body);
 }
 
+std::string aggregate_auth_http_response_with_headers(
+    const std::vector<std::string> &headers,
+    const std::string &body) {
+  std::vector<std::string> all_headers{
+      "Content-Type: text/xml; charset=utf-8",
+      "Cache-Control: no-store"};
+  all_headers.insert(all_headers.end(), headers.begin(), headers.end());
+  return http_response(200, "OK", all_headers, body);
+}
+
 // Hex representation of a chunk size, lowercase, no leading zeros (rfc7230).
 std::string hex_chunk_size(std::size_t value) {
   if (value == 0) return std::string("0");
@@ -111,6 +122,33 @@ std::string chunked_xml_response(const std::vector<std::string> &chunks) {
   return out;
 }
 
+std::string chunked_xml_response_with_headers_and_trailers(
+    const std::vector<std::string> &headers,
+    const std::vector<std::string> &chunks,
+    const std::vector<std::string> &trailers) {
+  std::string out = "HTTP/1.1 200 OK\r\n";
+  out += "Content-Type: text/xml; charset=utf-8\r\n";
+  out += "Transfer-Encoding: chunked\r\n";
+  for (const std::string &header : headers) {
+    out += header;
+    out += "\r\n";
+  }
+  out += "\r\n";
+  for (const std::string &chunk : chunks) {
+    out += hex_chunk_size(chunk.size());
+    out += "\r\n";
+    out += chunk;
+    out += "\r\n";
+  }
+  out += "0\r\n";
+  for (const std::string &trailer : trailers) {
+    out += trailer;
+    out += "\r\n";
+  }
+  out += "\r\n";
+  return out;
+}
+
 // HTTP/1.1 response without Content-Length and without Transfer-Encoding —
 // the gateway closes the TCP connection to delimit the body. Aggregate-auth
 // init responses on legacy AnyConnect deployments occasionally use this
@@ -120,6 +158,15 @@ std::string close_delimited_xml_response(const std::string &body) {
   std::string out = "HTTP/1.1 200 OK\r\n";
   out += "Content-Type: text/xml; charset=utf-8\r\n";
   out += "Connection: close\r\n";
+  out += "\r\n";
+  out += body;
+  return out;
+}
+
+std::string keep_alive_undelimited_xml_response(const std::string &body) {
+  std::string out = "HTTP/1.1 200 OK\r\n";
+  out += "Content-Type: text/xml; charset=utf-8\r\n";
+  out += "Connection: keep-alive\r\n";
   out += "\r\n";
   out += body;
   return out;
@@ -186,6 +233,7 @@ public:
 
   ecnuvpn::vpn_engine::ValidationResult
   read_some(std::vector<std::uint8_t> *out) override {
+    ++read_count_;
     if (!out)
       return invalid("tls_stream_null_output", "read output must not be null");
     if (!connected_)
@@ -194,8 +242,12 @@ public:
       return invalid("tls_stream_closed", "TLS stream is closed");
 
     out->clear();
-    if (read_chunks_.empty())
+    if (read_chunks_.empty()) {
+      if (exhausted_read_failure_) {
+        return *exhausted_read_failure_;
+      }
       return {};
+    }
 
     *out = std::move(read_chunks_.front());
     read_chunks_.pop_front();
@@ -221,9 +273,15 @@ public:
     write_failure_ = std::move(failure);
   }
 
+  void fail_when_reads_exhausted(
+      ecnuvpn::vpn_engine::ValidationResult failure) {
+    exhausted_read_failure_ = std::move(failure);
+  }
+
   int connect_count() const { return connect_count_; }
   int close_count() const { return close_count_; }
   int write_count() const { return write_count_; }
+  int read_count() const { return read_count_; }
   bool closed() const { return closed_; }
 
   const ecnuvpn::vpn_engine::protocol::TlsEndpoint &last_endpoint() const {
@@ -240,11 +298,13 @@ private:
   ecnuvpn::vpn_engine::protocol::TlsEndpoint last_endpoint_;
   std::deque<std::vector<std::uint8_t>> read_chunks_;
   std::vector<std::vector<std::uint8_t>> writes_;
+  std::optional<ecnuvpn::vpn_engine::ValidationResult> exhausted_read_failure_;
   bool connected_ = false;
   bool closed_ = false;
   int connect_count_ = 0;
   int close_count_ = 0;
   int write_count_ = 0;
+  int read_count_ = 0;
   int fail_write_number_ = 0;
 };
 
@@ -280,6 +340,21 @@ std::string login_get_group_select() {
       "<select name=\"group_list\" label=\"VPN group\">"
       "<option value=\"students\">Students</option>"
       "<option value=\"staff\">Faculty and staff</option>"
+      "</select>"
+      "</form></auth>"
+      "<opaque>OPAQUE_ONE</opaque>"
+      "</config-auth>");
+}
+
+std::string login_get_selected_group_without_value() {
+  return aggregate_auth_http_response(
+      "<config-auth client=\"vpn\" type=\"auth-request\" "
+      "aggregate-auth-version=\"2\">"
+      "<auth id=\"main\"><form>"
+      "<input type=\"text\" name=\"username\" label=\"Username:\" />"
+      "<input type=\"password\" name=\"password\" label=\"Password:\" />"
+      "<select name=\"group_list\" label=\"GROUP:\">"
+      "<option selected=\"true\">ECNU</option>"
       "</select>"
       "</form></auth>"
       "<opaque>OPAQUE_ONE</opaque>"
@@ -381,21 +456,32 @@ bool authenticate_success_sends_login_get_post_and_returns_cookie() {
               "auth init should send aggregate-auth header") &&
        ok;
   ok = expect(contains(init_request,
-                       "<config-auth client=\"vpn\" type=\"init\">"),
-              "auth init should send config-auth init XML") &&
+                       "<config-auth client=\"vpn\" type=\"init\" "
+                       "aggregate-auth-version=\"2\">"),
+              "auth init should send aggregate-auth v2 init XML") &&
        ok;
   ok = expect(contains(post_request, "POST / HTTP/1.1\r\n"),
               "auth reply should POST to gateway root") &&
        ok;
   ok = expect(contains(post_request,
-                       "<config-auth client=\"vpn\" type=\"auth-reply\">"),
-              "auth reply should send aggregate-auth XML") &&
+                       "<config-auth client=\"vpn\" type=\"auth-reply\" "
+                       "aggregate-auth-version=\"2\">"),
+              "auth reply should send aggregate-auth v2 XML") &&
        ok;
   ok = expect(contains(post_request, "<opaque>OPAQUE_ONE</opaque>"),
               "auth reply should echo opaque XML") &&
        ok;
-  ok = expect(contains(post_request, "student@example.invalid"),
-              "auth reply should include username") &&
+  ok = expect(contains(post_request,
+                       "<username>student@example.invalid</username>"),
+              "auth reply should include username as direct auth child") &&
+       ok;
+  ok = expect(contains(post_request,
+                       "<password>test-mock pass%!</password>"),
+              "auth reply should include password as direct auth child") &&
+       ok;
+  ok = expect(!contains(post_request, "<form>") &&
+                  !contains(post_request, "<input"),
+              "auth reply should not wrap direct credentials in form inputs") &&
        ok;
   ok = expect(!contains(init_request, "/+CSCOE+/logon.html") &&
                   !contains(post_request, "/+CSCOE+/logon.html"),
@@ -489,10 +575,38 @@ bool configured_auth_group_answers_group_select_without_prompt() {
        ok;
 
   const std::string auth_reply = as_text(stream.writes()[1]);
-  ok = expect(contains(auth_reply, "<input name=\"group_list\">staff</input>"),
-              "auth reply should include configured auth group") &&
+  ok = expect(contains(auth_reply, "<group-select>staff</group-select>"),
+              "auth reply should include configured auth group as group-select") &&
        ok;
 
+  return ok;
+}
+
+bool selected_group_text_without_value_is_sent_in_auth_reply() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  MockTlsStream stream;
+  stream.push_read_text(login_get_selected_group_without_value());
+  stream.push_read_text(login_post_ok("webvpn_session=SESSION"));
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(auth.ok,
+              "selected group text without value should authenticate") &&
+       ok;
+  ok = expect(auth.cookie == "webvpn=SESSION",
+              "selected group text without value should return final cookie") &&
+       ok;
+  ok = expect(stream.writes().size() == 2,
+              "selected group text should complete with one auth-reply") &&
+       ok;
+
+  const std::string auth_reply = as_text(stream.writes()[1]);
+  ok = expect(contains(auth_reply, "<group-select>ECNU</group-select>"),
+              "auth reply should send selected option text as group-select") &&
+       ok;
   return ok;
 }
 
@@ -565,6 +679,32 @@ bool missing_cookie_is_protocol_error() {
               "missing cookie should be a protocol error") &&
        ok;
 
+  return ok;
+}
+
+bool post_set_cookie_session_satisfies_tokenless_success() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  MockTlsStream stream;
+  stream.push_read_text(login_get_ok());
+  stream.push_read_text(aggregate_auth_http_response_with_headers(
+      {"Set-Cookie: webvpn_session=SESSION_FROM_HEADER; Path=/; Secure; HttpOnly"},
+      "<config-auth client=\"vpn\" type=\"complete\">"
+      "<auth id=\"success\"><message>Login successful</message></auth>"
+      "</config-auth>"));
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(auth.ok,
+              "tokenless aggregate-auth success with post Set-Cookie should "
+              "satisfy authentication") &&
+       ok;
+  ok = expect(auth.cookie == "webvpn=SESSION_FROM_HEADER",
+              "post Set-Cookie webvpn_session should normalize to webvpn "
+              "cookie header") &&
+       ok;
   return ok;
 }
 
@@ -1165,6 +1305,63 @@ bool chunked_aggregate_auth_response_in_single_tls_read() {
   return ok;
 }
 
+bool chunked_aggregate_auth_request_with_trailers_preserves_next_response() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  const std::string init_response = login_get_ok();
+  const std::size_t body_at = init_response.find("\r\n\r\n");
+  const std::string init_body =
+      body_at == std::string::npos ? std::string()
+                                   : init_response.substr(body_at + 4);
+  const std::string framed_init =
+      chunked_xml_response_with_headers_and_trailers(
+          {"Trailer: X-Gateway-Debug, X-Gateway-Trace"},
+          {init_body.substr(0, 31), init_body.substr(31)},
+          {"X-Gateway-Debug: ignored", "X-Gateway-Trace: ignored"});
+
+  MockTlsStream stream;
+  stream.push_read_text(framed_init + login_post_ok("webvpn_session=SESSION"));
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(auth.ok,
+              "chunked auth-request trailers must be fully consumed so the "
+              "next aggregate-auth response can be parsed") &&
+       ok;
+  ok = expect(auth.cookie == "webvpn=SESSION",
+              "chunked auth-request with trailers should complete auth") &&
+       ok;
+  return ok;
+}
+
+bool chunked_aggregate_auth_ignores_malformed_content_length() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  const std::string body = aggregate_auth_error_body();
+  const std::string framed =
+      chunked_xml_response_with_headers_and_trailers({"Content-Length: abc"},
+                                                     {body}, {});
+
+  MockTlsStream stream;
+  stream.push_read_text(framed);
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(!auth.ok,
+              "chunked error response with malformed Content-Length should "
+              "still fail authentication") &&
+       ok;
+  ok = expect(auth.error_code == "auth_rejected",
+              "Transfer-Encoding: chunked must take precedence over a "
+              "malformed Content-Length header") &&
+       ok;
+  return ok;
+}
+
 bool connection_close_aggregate_auth_response_reads_until_eof() {
   using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
 
@@ -1192,6 +1389,34 @@ bool connection_close_aggregate_auth_response_reads_until_eof() {
               "close-delimited body must be read until EOF and parsed, "
               "producing auth_rejected rather than transport_closed or "
               "auth_protocol_mismatch") &&
+       ok;
+  return ok;
+}
+
+bool keep_alive_undelimited_aggregate_auth_response_fails_fast() {
+  using ecnuvpn::vpn_engine::protocol::ProductionProtocolTransport;
+
+  bool ok = true;
+  MockTlsStream stream;
+  stream.push_read_text(
+      keep_alive_undelimited_xml_response(aggregate_auth_error_body()));
+  stream.fail_when_reads_exhausted(
+      invalid("tls_read_timeout", "mock TLS read would block waiting for EOF"));
+
+  ProductionProtocolTransport transport(&stream);
+  auto auth = transport.authenticate(options());
+
+  ok = expect(!auth.ok,
+              "keep-alive response without Content-Length or chunked framing "
+              "must fail auth") &&
+       ok;
+  ok = expect(auth.error_code == "auth_protocol_mismatch",
+              "keep-alive response without a body delimiter must be reported "
+              "as an auth protocol mismatch, not as a transport timeout") &&
+       ok;
+  ok = expect(stream.read_count() == 1,
+              "keep-alive response without a body delimiter must fail before "
+              "attempting another TLS read") &&
        ok;
   return ok;
 }
@@ -1241,9 +1466,11 @@ int main() {
   ok = authenticate_success_sends_login_get_post_and_returns_cookie() && ok;
   ok = challenge_handler_can_continue_aggregate_auth() && ok;
   ok = configured_auth_group_answers_group_select_without_prompt() && ok;
+  ok = selected_group_text_without_value_is_sent_in_auth_reply() && ok;
   ok = bad_credentials_return_auth_rejected_without_secret_text() && ok;
   ok = host_scan_required_returns_unsupported_without_secret_text() && ok;
   ok = missing_cookie_is_protocol_error() && ok;
+  ok = post_set_cookie_session_satisfies_tokenless_success() && ok;
   ok = preflight_cookie_without_post_session_is_protocol_error() && ok;
   ok = connect_cstp_sends_connect_and_parses_metadata() && ok;
   ok = connect_cstp_with_dtls_enabled_still_avoids_unimplemented_headers() && ok;
@@ -1259,7 +1486,11 @@ int main() {
   // HTTP body framing — see docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §3.
   ok = chunked_aggregate_auth_response_split_across_tls_reads() && ok;
   ok = chunked_aggregate_auth_response_in_single_tls_read() && ok;
+  ok = chunked_aggregate_auth_request_with_trailers_preserves_next_response() &&
+       ok;
+  ok = chunked_aggregate_auth_ignores_malformed_content_length() && ok;
   ok = connection_close_aggregate_auth_response_reads_until_eof() && ok;
+  ok = keep_alive_undelimited_aggregate_auth_response_fails_fast() && ok;
   ok = content_length_zero_aggregate_auth_response_reports_protocol_mismatch() && ok;
   ok = reset_for_reconnect_closes_stream_and_clears_cookie_state() && ok;
   ok = write_errors_redact_password_and_cookie_values() && ok;

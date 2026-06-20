@@ -277,6 +277,45 @@ group_field(const AggregateAuthResponse &response) {
   return field_named(response, "group_list");
 }
 
+std::string extract_set_cookie_pair(std::string_view header) {
+  const std::size_t semi = header.find(';');
+  const std::string_view pair = trim_ascii(
+      semi == std::string_view::npos ? header : header.substr(0, semi));
+  return std::string(pair);
+}
+
+std::string aggregate_auth_cookie_from_response(const HttpResponse &response) {
+  const std::vector<std::string> *cookie_headers =
+      response.header_values_ci("set-cookie");
+  if (!cookie_headers || cookie_headers->empty()) {
+    return {};
+  }
+
+  for (const std::string &header : *cookie_headers) {
+    const std::string pair = extract_set_cookie_pair(header);
+    const std::size_t eq = pair.find('=');
+    if (eq == std::string::npos) {
+      continue;
+    }
+
+    const std::string name =
+        lower_ascii_copy(trim_ascii(std::string_view(pair).substr(0, eq)));
+    const std::string value =
+        std::string(trim_ascii(std::string_view(pair).substr(eq + 1)));
+    if (value.empty()) {
+      continue;
+    }
+
+    if (name == "webvpn") {
+      return "webvpn=" + value;
+    }
+    if (name == "webvpn_session") {
+      return "webvpn=" + value;
+    }
+  }
+  return {};
+}
+
 bool group_selection_requires_user_choice(
     const AggregateAuthResponse &response) {
   const AggregateAuthField *field = group_field(response);
@@ -510,6 +549,43 @@ ValidationResult parse_content_length(const HttpResponse &response,
   *out = parsed;
   return {};
 }
+
+bool header_value_contains_token_ci(std::string_view value,
+                                    std::string_view token) {
+  const std::string lowered_token = lower_ascii_copy(token);
+  while (true) {
+    const std::size_t comma = value.find(',');
+    const std::string_view part = trim_ascii(
+        comma == std::string_view::npos ? value : value.substr(0, comma));
+    if (lower_ascii_copy(part) == lowered_token) {
+      return true;
+    }
+    if (comma == std::string_view::npos) {
+      break;
+    }
+    value.remove_prefix(comma + 1);
+  }
+  return false;
+}
+
+bool response_header_contains_token_ci(const HttpResponse &response,
+                                       const std::string &name,
+                                       std::string_view token) {
+  if (const std::vector<std::string> *values =
+          response.header_values_ci(name);
+      values) {
+    for (const std::string &value : *values) {
+      if (header_value_contains_token_ci(value, token)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (const std::string *value = response.header_ci(name); value) {
+    return header_value_contains_token_ci(*value, token);
+  }
+  return false;
+}
 // End inlined from vpn_engine/protocol/production_transport_response_parse include-unit
 
 // Build a non-sensitive single-line summary of an HTTP response's framing for
@@ -653,6 +729,7 @@ AuthResult ProductionProtocolTransport::authenticate(
   }
   std::string selected_group = options.auth_group;
   std::string challenge_value;
+  std::string challenge_field_name;
   if (init_response.type == AggregateAuthResponseType::challenge) {
     AuthResult interaction =
         challenge_auth_error(init_response, current_password_,
@@ -661,6 +738,8 @@ AuthResult ProductionProtocolTransport::authenticate(
                                   &challenge_value)) {
       return interaction;
     }
+    if (const AggregateAuthField *field = first_challenge_field(init_response))
+      challenge_field_name = field->name;
   }
   if (init_response.type == AggregateAuthResponseType::group_select &&
       selected_group.empty() &&
@@ -697,6 +776,9 @@ AuthResult ProductionProtocolTransport::authenticate(
     reply.password = current_password_;
     reply.selected_group = selected_group;
     reply.challenge_value = challenge_value;
+    reply.challenge_field_name = challenge_field_name;
+    reply.device_id = client_hostname_;
+    reply.version = useragent_or_default(useragent_);
     reply.opaque_xml = init_response.opaque_xml;
     const std::string body = build_aggregate_auth_reply_xml(reply);
     ValidationResult written =
@@ -740,6 +822,7 @@ AuthResult ProductionProtocolTransport::authenticate(
   }
 
   AggregateAuthResponse submitted_auth;
+  std::string submitted_cookie;
   {
     ValidationResult parsed =
         parse_aggregate_auth_response(submitted.body, &submitted_auth);
@@ -749,6 +832,7 @@ AuthResult ProductionProtocolTransport::authenticate(
                            current_password_form_encoded_, auth_cookie_);
       return auth_error(sanitized.code, sanitized.message);
     }
+    submitted_cookie = aggregate_auth_cookie_from_response(submitted);
   }
 
   for (int followup = 0; followup < 3; ++followup) {
@@ -771,6 +855,8 @@ AuthResult ProductionProtocolTransport::authenticate(
 
     AggregateAuthReplyRequest reply;
     reply.opaque_xml = submitted_auth.opaque_xml;
+    reply.device_id = client_hostname_;
+    reply.version = useragent_or_default(useragent_);
     if (submitted_auth.type == AggregateAuthResponseType::challenge) {
       AuthResult interaction =
           challenge_auth_error(submitted_auth, current_password_,
@@ -778,6 +864,10 @@ AuthResult ProductionProtocolTransport::authenticate(
       if (!resolve_auth_interaction(options, "challenge", interaction, {},
                                     &reply.challenge_value)) {
         return interaction;
+      }
+      if (const AggregateAuthField *field =
+              first_challenge_field(submitted_auth)) {
+        reply.challenge_field_name = field->name;
       }
     } else {
       AuthResult interaction =
@@ -834,6 +924,7 @@ AuthResult ProductionProtocolTransport::authenticate(
                            current_password_form_encoded_, auth_cookie_);
       return auth_error(sanitized.code, sanitized.message);
     }
+    submitted_cookie = aggregate_auth_cookie_from_response(followup_http);
   }
 
   if (submitted_auth.type == AggregateAuthResponseType::challenge) {
@@ -849,7 +940,7 @@ AuthResult ProductionProtocolTransport::authenticate(
                                 ? submitted_auth.session_token
                                 : submitted_auth.session_id;
   if (submitted_auth.type != AggregateAuthResponseType::success ||
-      token.empty()) {
+      (token.empty() && submitted_cookie.empty())) {
     return sanitized_auth_error("protocol_error",
                                 "missing session token in aggregate-auth response",
                                 current_password_,
@@ -857,7 +948,7 @@ AuthResult ProductionProtocolTransport::authenticate(
                                 auth_cookie_);
   }
 
-  auth_cookie_ = "webvpn=" + token;
+  auth_cookie_ = token.empty() ? submitted_cookie : "webvpn=" + token;
   AuthResult result;
   result.ok = true;
   result.cookie = auth_cookie_;
@@ -1132,32 +1223,14 @@ ValidationResult ProductionProtocolTransport::read_http_response(
     return {};
   }
 
-  std::size_t content_length = 0;
-  bool has_content_length = false;
-  ValidationResult length_result =
-      parse_content_length(header_response, &has_content_length,
-                           &content_length);
-  if (!length_result.ok)
-    return length_result;
-
   // Transfer-Encoding wins over Content-Length per RFC 7230 §3.3.3. The
   // existing aggregate-auth gateway has been observed to return chunked
   // responses for some edge paths; treating those bytes as the body wholesale
   // would feed "1c\r\n<config-auth..." to the XML parser and surface as
   // "aggregate auth response is empty" once the chunk-size lines fail to
   // match. See docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §3.
-  const std::string *transfer_encoding =
-      header_response.header_ci("transfer-encoding");
-  bool is_chunked = false;
-  if (transfer_encoding) {
-    std::string lowered;
-    lowered.reserve(transfer_encoding->size());
-    for (char c : *transfer_encoding) {
-      lowered.push_back(static_cast<char>(
-          std::tolower(static_cast<unsigned char>(c))));
-    }
-    is_chunked = lowered.find("chunked") != std::string::npos;
-  }
+  const bool is_chunked = response_header_contains_token_ci(
+      header_response, "transfer-encoding", "chunked");
 
   if (is_chunked) {
     // RFC 7230 §4.1 chunked decoding. Each chunk is "<hex-size>[;ext]\r\n",
@@ -1227,17 +1300,29 @@ ValidationResult ProductionProtocolTransport::read_http_response(
       cursor = crlf_at + 2;
 
       if (chunk_size == 0) {
-        // Drain the trailer-terminating CRLF (no trailer fields expected
-        // from production AnyConnect gateways).
-        std::size_t end_at = std::string::npos;
-        while (end_at == std::string::npos) {
+        // Drain the complete trailer section. We ignore trailer fields, but
+        // must consume them all so the next response starts at the next HTTP
+        // status line.
+        while (true) {
+          if (cursor + 1 < read_buffer_.size() &&
+              read_buffer_[cursor] == '\r' &&
+              read_buffer_[cursor + 1] == '\n') {
+            cursor += 2;
+            break;
+          }
+
+          std::size_t line_end = std::string::npos;
           for (std::size_t i = cursor; i + 1 < read_buffer_.size(); ++i) {
             if (read_buffer_[i] == '\r' && read_buffer_[i + 1] == '\n') {
-              end_at = i;
+              line_end = i;
               break;
             }
           }
-          if (end_at != std::string::npos) break;
+          if (line_end != std::string::npos) {
+            cursor = line_end + 2;
+            continue;
+          }
+
           if (read_buffer_.size() - cursor > kMaxHttpHeaderBytes) {
             return invalid("http_header_too_large",
                            "trailer fields exceed maximum size");
@@ -1252,9 +1337,6 @@ ValidationResult ProductionProtocolTransport::read_http_response(
             }
             return r;
           }
-        }
-        if (end_at != std::string::npos) {
-          cursor = end_at + 2;
         }
         break;
       }
@@ -1289,6 +1371,14 @@ ValidationResult ProductionProtocolTransport::read_http_response(
     return {};
   }
 
+  std::size_t content_length = 0;
+  bool has_content_length = false;
+  ValidationResult length_result =
+      parse_content_length(header_response, &has_content_length,
+                           &content_length);
+  if (!length_result.ok)
+    return length_result;
+
   if (has_content_length) {
     if (content_length >
         std::numeric_limits<std::size_t>::max() - body_start) {
@@ -1320,7 +1410,17 @@ ValidationResult ProductionProtocolTransport::read_http_response(
     return {};
   }
 
-  // No Content-Length and not chunked → "Connection: close" / HTTP/1.0
+  const bool close_delimited_allowed =
+      response_header_contains_token_ci(header_response, "connection", "close") ||
+      header_only.rfind("HTTP/1.0 ", 0) == 0;
+  if (!close_delimited_allowed) {
+    return invalid("auth_protocol_mismatch",
+                   "HTTP response has no body delimiter: missing "
+                   "Content-Length, Transfer-Encoding: chunked, and "
+                   "Connection: close");
+  }
+
+  // No Content-Length and not chunked -> "Connection: close" / HTTP/1.0
   // close-delimited framing per RFC 7230 §3.3.3 (#7). The body terminates
   // when the TLS stream EOFs. Previously we returned whatever bytes had
   // already arrived in the buffer and cleared it, which surfaced as an

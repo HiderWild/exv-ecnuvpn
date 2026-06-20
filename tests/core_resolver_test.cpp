@@ -12,6 +12,7 @@
 // 4.10: Protocol mismatch returns core_protocol_mismatch
 // 4.11: Unresponsive core returns core_unresponsive
 // 4.12: Successful launch returns StartedCore
+// 4.13: Packaged UI may pass an explicit bin/exv.exe path
 #include "platform/common/core_resolver.hpp"
 #include "core/lifecycle/core_paths.hpp"
 #include "core/lifecycle/core_registry.hpp"
@@ -530,6 +531,64 @@ int test_started_core() {
   return ok ? 0 : 1;
 }
 
+// ── 4.13: Explicit packaged core path is preferred ─────────────────
+int test_preferred_core_path_launches_packaged_bin_core() {
+  using namespace exv::core::lifecycle;
+  bool ok = true;
+
+  std::string state_dir = make_state_dir();
+  const std::filesystem::path package_root =
+      std::filesystem::path(state_dir) / "ECNU VPN";
+  const std::filesystem::path bin_dir = package_root / "bin";
+  std::filesystem::create_directories(bin_dir);
+  const std::string preferred_core =
+      (bin_dir / core_candidate_name()).string();
+  {
+    std::ofstream out(preferred_core);
+    out << "fake packaged core";
+  }
+
+  auto deps = make_test_deps(state_dir);
+  bool core_launched = false;
+  std::string launched_path;
+  int connect_attempts = 0;
+
+  deps.try_connect_ipc = [&](const std::string &) {
+    ++connect_attempts;
+    return core_launched && connect_attempts > 1;
+  };
+  deps.send_ipc_request = [&](const std::string &, const std::string &) {
+    if (!core_launched) return std::string();
+    return make_hello_response("core-packaged", 88, preferred_core);
+  };
+  deps.get_frontend_executable_path = [&]() {
+    return (package_root / "exv-ui.exe").string();
+  };
+  deps.get_env_var = [](const std::string &) { return std::string(); };
+  deps.run_command_output = [](const std::string &) { return "3.3.0"; };
+  deps.launch_core = [&](const std::string &core_path, const std::string &,
+                         const std::string &) {
+    launched_path = core_path;
+    core_launched = true;
+    return true;
+  };
+
+  CoreResolveOptions opts;
+  opts.preferred_core_path = preferred_core;
+  opts.hello_timeout = std::chrono::milliseconds(1000);
+
+  auto result = resolve_core(opts, deps);
+  ok = expect_status(result.status, CoreResolveStatus::LaunchRequired,
+                     "4.13: explicit packaged core path should launch") &&
+       ok;
+  ok = expect(launched_path == preferred_core,
+              "4.13: resolver should launch the explicit bin/exv.exe path") &&
+       ok;
+
+  cleanup_state_dir(state_dir);
+  return ok ? 0 : 1;
+}
+
 // ── status code mapping ──────────────────────────────────────────
 int test_status_codes() {
   using namespace exv::core::lifecycle;
@@ -586,6 +645,7 @@ int main() {
   failures += test_protocol_mismatch();
   failures += test_core_unresponsive();
   failures += test_started_core();
+  failures += test_preferred_core_path_launches_packaged_bin_core();
   failures += test_status_codes();
 
   if (failures == 0) {

@@ -16,6 +16,7 @@ MINGW_RUNTIME_DLLS = [
     "libstdc++-6.dll",
     "libwinpthread-1.dll",
 ]
+PACKAGE_BINARIES = ("exv", "exv-helper")
 WINDOWS_OPTIONAL_RUNTIME_DLLS = ["wintun.dll"]
 APP_ICON_ASSETS = ["icon.ico", "icon.icns", "icon.png", "icon.svg"]
 
@@ -188,6 +189,23 @@ def validate_launch_args_targets(package_dir: Path) -> None:
             raise SystemExit(f"Launch args target not found: {token}")
 
 
+def validate_required_package_binaries(package_dir: Path, platform: str) -> None:
+    required = [package_dir / executable_name("exv-ui", platform)]
+    required.extend(
+        package_dir / "bin" / executable_name(stem, platform)
+        for stem in PACKAGE_BINARIES
+    )
+    missing = [
+        path.relative_to(package_dir).as_posix()
+        for path in required
+        if not path.is_file()
+    ]
+    if missing:
+        raise SystemExit(
+            "Required package executable(s) missing: " + ", ".join(missing)
+        )
+
+
 def build_package(platform: str, output_root: Path) -> Path:
     verify_app_icon_assets()
     renderer_dir = first_existing(default_renderer_candidates(platform), "Renderer build directory")
@@ -207,7 +225,7 @@ def build_package(platform: str, output_root: Path) -> Path:
     if webview2_loader:
         shutil.copy2(webview2_loader, package_dir / "WebView2Loader.dll")
 
-    for stem in ("exv", "exv-helper"):
+    for stem in PACKAGE_BINARIES:
         binary = find_binary(stem, platform)
         shutil.copy2(binary, bin_dir / binary.name)
 
@@ -216,6 +234,7 @@ def build_package(platform: str, output_root: Path) -> Path:
 
     copy_tree_contents(renderer_dir, webui_dir)
     write_launch_args(package_dir, platform)
+    validate_required_package_binaries(package_dir, platform)
     validate_launch_args_targets(package_dir)
     assert_no_electron_payload(package_dir)
     return package_dir
@@ -242,6 +261,7 @@ def main() -> int:
         if not args.package_dir:
             raise SystemExit("--package-dir is required with --verify-launch-targets-only")
         verify_app_icon_assets()
+        validate_required_package_binaries(args.package_dir, platform)
         validate_launch_args_targets(args.package_dir)
         assert_no_electron_payload(args.package_dir)
         print(f"verified native WebView shell package: {args.package_dir}")

@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,6 +19,17 @@ bool expect(bool condition, const char *message) {
 
   std::cerr << "EXPECT FAILED: " << message << std::endl;
   return false;
+}
+
+#ifndef ECNUVPN_SOURCE_DIR
+#define ECNUVPN_SOURCE_DIR "."
+#endif
+
+std::string read_text_file(const std::filesystem::path &path) {
+  std::ifstream input(path, std::ios::binary);
+  std::ostringstream buffer;
+  buffer << input.rdbuf();
+  return buffer.str();
 }
 
 ecnuvpn::vpn_engine::ValidationResult invalid(std::string code,
@@ -49,6 +63,7 @@ struct MockState {
   int ip_cleanups = 0;
   std::uint32_t ip_config_factory_interface_index = 0;
   ecnuvpn::vpn_engine::TunnelMetadata configured_metadata;
+  ecnuvpn::platform::NativeWintunConfig wintun_start_config;
   std::vector<std::vector<std::uint8_t>> incoming_packets;
   std::vector<std::vector<std::uint8_t>> written_packets;
   std::vector<std::string> events;
@@ -61,8 +76,10 @@ public:
   explicit FakeWintunSession(std::shared_ptr<MockState> state)
       : state_(std::move(state)) {}
 
-  ecnuvpn::platform::NativeWintunStartResult start() override {
+  ecnuvpn::platform::NativeWintunStartResult
+  start(const ecnuvpn::platform::NativeWintunConfig &config) override {
     ++state_->wintun_starts;
+    state_->wintun_start_config = config;
     state_->events.push_back("wintun_start");
     if (state_->start_result.ok())
       state_->running = true;
@@ -179,6 +196,84 @@ bool open_starts_wintun_and_configures_native_ip() {
   return ok;
 }
 
+bool open_with_device_config_passes_interface_name_to_wintun() {
+  auto state = make_state();
+  ecnuvpn::platform::NativePacketDevice device(dependencies(state));
+  ecnuvpn::vpn_engine::DeviceConfig config;
+  config.interface_name = "ECNU-VPN-Wintun";
+  config.mtu = 1318;
+
+  auto result = device.open(config);
+
+  bool ok = true;
+  ok = expect(result.ok, "packet device open with DeviceConfig should succeed") &&
+       ok;
+  ok = expect(state->wintun_starts == 1,
+              "DeviceConfig open should start one Wintun session") &&
+       ok;
+  ok = expect(state->wintun_start_config.adapter_name_prefix ==
+                  L"ECNU-VPN-Wintun",
+              "DeviceConfig interface_name should select the prepared adapter") &&
+       ok;
+  ok = expect(state->ip_configures == 0,
+              "DeviceConfig open should not re-apply native IP config") &&
+       ok;
+  return ok;
+}
+
+bool device_config_open_requires_elevation_before_wintun_start() {
+  auto state = make_state();
+  auto deps = dependencies(state);
+  deps.is_elevated = [] { return false; };
+  ecnuvpn::platform::NativePacketDevice device(std::move(deps));
+  ecnuvpn::vpn_engine::DeviceConfig config;
+  config.interface_name = "ECNU-VPN";
+
+  auto result = device.open(config);
+
+  bool ok = true;
+  ok = expect(!result.ok,
+              "DeviceConfig open should fail before Wintun when not elevated") &&
+       ok;
+  ok = expect(result.code == "native_wintun_adapter_open_failed",
+              "non-elevated open should use the Wintun adapter failure code") &&
+       ok;
+  ok = expect(result.message.find("ECNU-VPN-Wintun") != std::string::npos,
+              "non-elevated open should report the target Wintun adapter") &&
+       ok;
+  ok = expect(result.message.find("Windows error 5") != std::string::npos,
+              "non-elevated open should preserve the access-denied cause") &&
+       ok;
+  ok = expect(state->wintun_starts == 0,
+              "non-elevated open should not call into the Wintun session") &&
+       ok;
+  return ok;
+}
+
+bool metadata_open_requires_elevation_before_wintun_start() {
+  auto state = make_state();
+  auto deps = dependencies(state);
+  deps.is_elevated = [] { return false; };
+  ecnuvpn::platform::NativePacketDevice device(std::move(deps));
+
+  auto result = device.open(metadata());
+
+  bool ok = true;
+  ok = expect(!result.ok,
+              "metadata open should fail before Wintun when not elevated") &&
+       ok;
+  ok = expect(result.code == "native_wintun_adapter_open_failed",
+              "metadata non-elevated open should use Wintun failure code") &&
+       ok;
+  ok = expect(state->wintun_starts == 0,
+              "metadata non-elevated open should not call Wintun") &&
+       ok;
+  ok = expect(state->ip_configures == 0,
+              "metadata non-elevated open should not configure native IP") &&
+       ok;
+  return ok;
+}
+
 bool packet_io_delegates_to_wintun_session_after_open() {
   auto state = make_state();
   state->incoming_packets.push_back({0x45, 0x00, 0x00, 0x2a});
@@ -200,6 +295,29 @@ bool packet_io_delegates_to_wintun_session_after_open() {
                   state->written_packets[0] ==
                       std::vector<std::uint8_t>({0x45, 0x01, 0x02}),
               "write_packet should send packet bytes through Wintun") &&
+       ok;
+  return ok;
+}
+
+bool wintun_empty_queue_maps_to_retryable_no_data() {
+  const auto source_path = std::filesystem::path(ECNUVPN_SOURCE_DIR) /
+                           "src" / "platform" / "win32" /
+                           "native_packet_device.cpp";
+  const std::string source = read_text_file(source_path);
+  const auto branch = source.find("error == ERROR_NO_MORE_ITEMS");
+  const auto retryable = source.find("return invalid(\"no_data\"", branch);
+  const auto terminal =
+      source.find("return invalid(\"packet_device_empty\"", branch);
+
+  bool ok = true;
+  ok = expect(branch != std::string::npos,
+              "Wintun read should handle ERROR_NO_MORE_ITEMS explicitly") &&
+       ok;
+  ok = expect(retryable != std::string::npos,
+              "empty Wintun queue should map to retryable no_data") &&
+       ok;
+  ok = expect(terminal == std::string::npos || retryable < terminal,
+              "empty Wintun queue must not map to terminal packet_device_empty") &&
        ok;
   return ok;
 }
@@ -411,6 +529,7 @@ namespace ecnuvpn {
 namespace platform {
 
 std::string get_bundled_wintun_path() { return ""; }
+bool check_root() { return true; }
 
 } // namespace platform
 } // namespace ecnuvpn
@@ -418,7 +537,11 @@ std::string get_bundled_wintun_path() { return ""; }
 int main() {
   bool ok = true;
   ok = open_starts_wintun_and_configures_native_ip() && ok;
+  ok = open_with_device_config_passes_interface_name_to_wintun() && ok;
+  ok = device_config_open_requires_elevation_before_wintun_start() && ok;
+  ok = metadata_open_requires_elevation_before_wintun_start() && ok;
   ok = packet_io_delegates_to_wintun_session_after_open() && ok;
+  ok = wintun_empty_queue_maps_to_retryable_no_data() && ok;
   ok = closed_device_rejects_packet_io() && ok;
   ok = ip_config_failure_cleans_up_partial_open() && ok;
   ok = close_cleans_routes_before_wintun_and_is_idempotent() && ok;

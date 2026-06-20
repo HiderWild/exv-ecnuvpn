@@ -68,10 +68,10 @@ namespace {
 
 using StageTimer = exv::core::ConnectStageTimer;
 
-std::mutex g_desktop_connect_jobs_mutex;
-exv::core::VpnConnectJobOwner g_desktop_connect_jobs;
 std::mutex g_desktop_connect_error_mutex;
 std::optional<nlohmann::json> g_desktop_connect_error;
+std::mutex g_desktop_connect_jobs_mutex;
+exv::core::VpnConnectJobOwner g_desktop_connect_jobs;
 
 config::ConfigManager make_config_manager() {
   platform::ensure_dir(platform::get_config_dir());
@@ -253,7 +253,8 @@ void apply_desktop_connect_error(nlohmann::json *status) {
   if (!failure || !failure->is_object()) return;
   (*status)["error"] = json_string(*failure, "error",
                                    json_string(*failure, "message"));
-  (*status)["error_code"] = json_string(*failure, "code");
+  (*status)["error_code"] =
+      json_string(*failure, "code", json_string(*failure, "error_code"));
   (*status)["error_recoverable"] = json_bool(*failure, "recoverable", true);
   (*status)["recommended_action"] =
       json_string(*failure, "recommended_action");
@@ -483,15 +484,22 @@ void run_desktop_connect_job(Config cfg,
         std::make_shared<ecnuvpn::app_api::AuthInteractionCoordinator>();
     ecnuvpn::app_api::set_active_connect_auth_coordinator(auth_coordinator);
     struct AuthCoordinatorClearGuard {
+      explicit AuthCoordinatorClearGuard(
+          std::shared_ptr<ecnuvpn::app_api::AuthInteractionCoordinator>
+              coordinator_value)
+          : coordinator(std::move(coordinator_value)) {}
+
       ~AuthCoordinatorClearGuard() {
-        if (auto active =
-                ecnuvpn::app_api::get_active_connect_auth_coordinator();
-            active) {
-          active->cancel();
+        if (coordinator) {
+          coordinator->cancel();
+          ecnuvpn::app_api::clear_active_connect_auth_coordinator_if_current(
+              coordinator);
         }
-        ecnuvpn::app_api::set_active_connect_auth_coordinator(nullptr);
       }
-    } auth_coordinator_clear_guard;
+
+      std::shared_ptr<ecnuvpn::app_api::AuthInteractionCoordinator>
+          coordinator;
+    } auth_coordinator_clear_guard(auth_coordinator);
     deps.auth_interaction_handler =
         [auth_coordinator, branch_stop](
             const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest &req) {
@@ -671,6 +679,39 @@ nlohmann::json auth_interaction_json(
 }
 
 } // namespace
+
+void shutdown_desktop_vpn_runtime() {
+  exv::observability::LogFacade::info(
+      "app_api: Shutting down desktop VPN runtime");
+  {
+    std::lock_guard<std::mutex> lock(g_desktop_connect_jobs_mutex);
+    g_desktop_connect_jobs.shutdown("core_shutdown");
+  }
+
+  if (auto coordinator = get_active_connect_auth_coordinator(); coordinator) {
+    coordinator->cancel();
+    clear_active_connect_auth_coordinator_if_current(coordinator);
+  }
+
+  if (auto controller = get_tunnel_controller_if_exists(); controller) {
+    exv::observability::LogFacade::info(
+        "app_api: Disconnecting desktop VPN controller during shutdown");
+    try {
+      controller->disconnect(exv::core::DisconnectReason::UserRequested);
+    } catch (const std::exception &e) {
+      exv::observability::LogFacade::warn(
+          std::string("app_api: desktop VPN disconnect during shutdown failed - ") +
+          e.what());
+    }
+  } else {
+    exv::observability::LogFacade::info(
+        "app_api: No desktop VPN controller during shutdown");
+  }
+  exv::observability::LogFacade::info(
+      "app_api: Resetting desktop VPN controller during shutdown");
+  reset_tunnel_controller();
+  clear_desktop_connect_error();
+}
 
 void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
   adapter.register_legacy_handler(

@@ -166,6 +166,21 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
+int count_action(const std::vector<std::string> &writes,
+                 const std::string &action) {
+  int count = 0;
+  for (const auto &line : writes) {
+    try {
+      auto parsed = nlohmann::json::parse(line);
+      if (parsed.is_object() && parsed.value("action", std::string()) == action) {
+        ++count;
+      }
+    } catch (...) {
+    }
+  }
+  return count;
+}
+
 } // namespace
 
 int main() {
@@ -215,15 +230,21 @@ int main() {
                 "runtime should route core response through async host bridge") &&
          ok;
   }
-  ok = expect(transport.writes.size() == 1,
-              "runtime should forward one request to core") &&
+  ok = expect(count_action(transport.writes, "config.getAuth") == 1,
+              "runtime should forward one renderer request to core") &&
        ok;
-  if (transport.writes.size() == 1) {
-    ok = expect(transport.writes[0] ==
-                    R"({"id":11,"action":"config.getAuth","payload":{"profile":"default"}})",
-                "runtime should preserve desktop RPC envelope") &&
-         ok;
+  for (const auto &line : transport.writes) {
+    auto parsed = nlohmann::json::parse(line);
+    if (parsed.value("action", std::string()) == "config.getAuth") {
+      ok = expect(line ==
+                      R"({"id":11,"action":"config.getAuth","payload":{"profile":"default"}})",
+                  "runtime should preserve desktop RPC envelope") &&
+           ok;
+    }
   }
+  ok = expect(count_action(transport.writes, "core.shutdown") == 1,
+              "runtime should ask daemon core to shut down on exit") &&
+       ok;
 
   FakeTransport event_transport(
       std::vector<std::string>{R"({"event":"log","data":{"line":"connected"}})",
@@ -270,7 +291,8 @@ int main() {
                 "runtime should map pumped core event to renderer envelope") &&
          ok;
   }
-  ok = expect(unsolicited_event_transport.writes.size() == 1,
+  ok = expect(count_action(unsolicited_event_transport.writes,
+                           "config.getAuth") == 1,
               "runtime should still forward renderer request after pumping events") &&
        ok;
 
@@ -381,8 +403,11 @@ int main() {
   ok = expect(!bad_message_response.value("message", "").empty(),
               "runtime callback error should include a message") &&
        ok;
-  ok = expect(unused_transport.writes.empty(),
+  ok = expect(count_action(unused_transport.writes, "status.get") == 0,
               "invalid host request should not reach core transport") &&
+       ok;
+  ok = expect(count_action(unused_transport.writes, "core.shutdown") == 1,
+              "runtime should still shut down core after invalid host request") &&
        ok;
 
   FakeTransport throwing_transport(R"({"id":0,"ok":true,"data":{}})");

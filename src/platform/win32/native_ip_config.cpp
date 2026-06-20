@@ -417,6 +417,13 @@ to_unicast_row(const NativeUnicastAddress &address) {
   InitializeUnicastIpAddressEntry(&row);
   row.InterfaceIndex = address.interface_index;
   row.OnLinkPrefixLength = static_cast<UINT8>(address.prefix_length);
+  row.PrefixOrigin = IpPrefixOriginManual;
+  row.SuffixOrigin = IpSuffixOriginManual;
+  row.ValidLifetime = address.valid_lifetime;
+  row.PreferredLifetime = address.preferred_lifetime;
+  row.SkipAsSource = address.skip_as_source ? TRUE : FALSE;
+  if (address.dad_state_preferred)
+    row.DadState = IpDadStatePreferred;
   make_sockaddr_ipv4(address.address, &row.Address);
   return row;
 }
@@ -555,21 +562,24 @@ NativeIpConfig::configure(const vpn_engine::TunnelMetadata &metadata) {
     return failure(NativeIpConfigError::invalid_mtu,
                    "no usable tunnel or configured MTU");
 
-  NativeUnicastAddress address;
-  address.interface_index = interface_index;
-  address.address = metadata.internal_ip4_address;
-  address.prefix_length = prefix_length;
-  api_.initialize_unicast_ip_address_entry(address);
+  NativeIpHelperApi::ErrorCode error = kNoError;
+  if (options_.configure_address) {
+    NativeUnicastAddress address;
+    address.interface_index = interface_index;
+    address.address = metadata.internal_ip4_address;
+    address.prefix_length = prefix_length;
+    api_.initialize_unicast_ip_address_entry(address);
 
-  NativeIpHelperApi::ErrorCode error =
-      api_.create_unicast_ip_address_entry(address);
-  if (error != kNoError)
-    return failure(NativeIpConfigError::address_create_failed,
-                   "CreateUnicastIpAddressEntry failed", address.address,
-                   error);
+    error = api_.create_unicast_ip_address_entry(address);
+    if (error != kNoError && error != ERROR_OBJECT_ALREADY_EXISTS &&
+        error != ERROR_ALREADY_EXISTS)
+      return failure(NativeIpConfigError::address_create_failed,
+                     "CreateUnicastIpAddressEntry failed", address.address,
+                     error);
+  }
 
   error = api_.set_interface_mtu(interface_index, mtu);
-  if (error != kNoError)
+  if (error != kNoError && error != ERROR_INVALID_PARAMETER)
     return failure(NativeIpConfigError::mtu_set_failed,
                    "setting tunnel interface MTU failed", std::to_string(mtu),
                    error);
@@ -591,7 +601,11 @@ NativeIpConfig::configure(const vpn_engine::TunnelMetadata &metadata) {
       route.next_hop = best_route.next_hop;
     } else {
       route.interface_index = interface_index;
-      route.next_hop = metadata.internal_ip4_address;
+      // Wintun routes are directly attached to the tunnel interface. Using the
+      // local tunnel address as a gateway leaves the route out of Windows'
+      // active route selection, especially when another TUN owns the default
+      // route.
+      route.next_hop.clear();
     }
 
     error = api_.create_ip_forward_entry2(route);
@@ -618,7 +632,7 @@ NativeIpConfigResult NativeIpConfig::cleanup() {
   while (!owned_routes_.empty()) {
     NativeIpRoute route = owned_routes_.back();
     NativeIpHelperApi::ErrorCode error = api_.delete_ip_forward_entry2(route);
-    if (error != kNoError)
+    if (error != kNoError && error != ERROR_NOT_FOUND)
       return failure(NativeIpConfigError::route_delete_failed,
                      "DeleteIpForwardEntry2 failed", route.cidr, error);
     owned_routes_.pop_back();

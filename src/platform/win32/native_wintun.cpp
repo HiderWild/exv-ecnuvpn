@@ -103,9 +103,19 @@ bool load_real_wintun_api(const std::wstring &dll_path, NativeWintunApi &api,
       !load_proc(module, "WintunCloseAdapter", close_adapter, error) ||
       !load_proc(module, "WintunGetAdapterLUID", get_adapter_luid, error) ||
       !load_proc(module, "WintunStartSession", start_session, error) ||
-      !load_proc(module, "WintunEndSession", end_session, error) ||
-      !load_proc(module, "WintunDeleteAdapter", delete_adapter, error)) {
+      !load_proc(module, "WintunEndSession", end_session, error)) {
     return false;
+  }
+  FARPROC delete_proc = GetProcAddress(module, "WintunDeleteAdapter");
+  if (delete_proc) {
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+    delete_adapter = reinterpret_cast<WintunDeleteAdapterFn>(delete_proc);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
   }
 
   api.open_adapter = [open_adapter](const std::wstring &name) {
@@ -142,10 +152,12 @@ bool load_real_wintun_api(const std::wstring &dll_path, NativeWintunApi &api,
   api.end_session = [end_session](SessionHandle session) {
     end_session(session);
   };
-  api.delete_adapter = [delete_adapter](AdapterHandle adapter) {
-    BOOL reboot_required = FALSE;
-    return delete_adapter(adapter, TRUE, &reboot_required) != FALSE;
-  };
+  if (delete_adapter) {
+    api.delete_adapter = [delete_adapter](AdapterHandle adapter) {
+      BOOL reboot_required = FALSE;
+      return delete_adapter(adapter, TRUE, &reboot_required) != FALSE;
+    };
+  }
   api.owner = std::move(owner);
   return true;
 }
@@ -157,8 +169,7 @@ bool has_required_api(const NativeWintunApi &api) {
          static_cast<bool>(api.get_adapter_luid) &&
          static_cast<bool>(api.get_interface_index) &&
          static_cast<bool>(api.start_session) &&
-         static_cast<bool>(api.end_session) &&
-         static_cast<bool>(api.delete_adapter);
+         static_cast<bool>(api.end_session);
 }
 
 NativeWintunStartResult failure(NativeWintunError error,
@@ -214,9 +225,9 @@ NativeWintun::NativeWintun(NativeWintunDependencies dependencies,
 
 NativeWintun::~NativeWintun() { stop(); }
 
-NativeWintunStartResult NativeWintun::start() {
+NativeWintunStartResult NativeWintun::prepare_adapter() {
   NativeWintunStartResult result;
-  if (session_) {
+  if (adapter_) {
     result.metadata = metadata_;
     return result;
   }
@@ -263,20 +274,35 @@ NativeWintunStartResult NativeWintun::start() {
                    "failed to resolve Wintun adapter interface index");
   }
 
-  SessionHandle session = api.start_session(adapter, config_.session_capacity);
-  if (!session) {
-    close_adapter(api, adapter);
-    return failure(NativeWintunError::session_start_failed,
-                   "failed to start Wintun session");
-  }
-
   api_ = std::move(api);
   adapter_ = adapter;
-  session_ = session;
   metadata_.adapter_name = adapter_name;
   metadata_.luid = luid;
   metadata_.if_index = if_index;
 
+  result.metadata = metadata_;
+  return result;
+}
+
+NativeWintunStartResult NativeWintun::start() {
+  NativeWintunStartResult result;
+  if (session_) {
+    result.metadata = metadata_;
+    return result;
+  }
+
+  auto prepared = prepare_adapter();
+  if (!prepared.ok())
+    return prepared;
+
+  SessionHandle session = api_.start_session(adapter_, config_.session_capacity);
+  if (!session) {
+    stop();
+    return failure(NativeWintunError::session_start_failed,
+                   "failed to start Wintun session");
+  }
+
+  session_ = session;
   result.metadata = metadata_;
   return result;
 }

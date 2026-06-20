@@ -51,6 +51,7 @@ struct CoreResolverDeps {
 struct CoreResolveOptions {
   std::chrono::milliseconds hello_timeout{5000};
   int hello_retries = 1;
+  std::string preferred_core_path;
 };
 
 CoreResolveResult resolve_core(const CoreResolveOptions &options = {},

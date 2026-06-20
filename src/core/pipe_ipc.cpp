@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <sddl.h>
 #else
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -17,6 +18,9 @@
 #include <cerrno>
 #include <cstring>
 #endif
+
+#include <chrono>
+#include <thread>
 
 namespace exv::core {
 
@@ -40,6 +44,18 @@ PipeIpcListener::PipeIpcListener(const std::string& pipe_path)
 PipeIpcListener::~PipeIpcListener() { stop(); }
 
 bool PipeIpcListener::start() {
+  PSECURITY_DESCRIPTOR security_descriptor = nullptr;
+  SECURITY_ATTRIBUTES security_attributes{};
+  SECURITY_ATTRIBUTES *pipe_security = nullptr;
+  if (ConvertStringSecurityDescriptorToSecurityDescriptorA(
+          "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)",
+          SDDL_REVISION_1, &security_descriptor, nullptr)) {
+    security_attributes.nLength = sizeof(security_attributes);
+    security_attributes.lpSecurityDescriptor = security_descriptor;
+    security_attributes.bInheritHandle = FALSE;
+    pipe_security = &security_attributes;
+  }
+
   impl_->pipe_handle = CreateNamedPipeA(
       impl_->path.c_str(),
       PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -48,7 +64,10 @@ bool PipeIpcListener::start() {
       8192,     // out buffer size
       8192,     // in buffer size
       0,        // default timeout
-      nullptr); // default security
+      pipe_security);
+  if (security_descriptor) {
+    LocalFree(security_descriptor);
+  }
   if (impl_->pipe_handle == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -74,19 +93,39 @@ bool PipeIpcListener::accept_one(PipeRequestHandler handler) {
     }
   }
 
-  // Read one line
+  // Read one line. Windows nonblocking named pipes can report ERROR_NO_DATA
+  // for a client that has connected but has not written its first bytes yet.
+  // Give the client a short grace period; otherwise a normal connect/write
+  // sequence can race with the server poll loop and get disconnected.
   char buffer[8192] = {};
   DWORD bytes_read = 0;
-  if (!ReadFile(impl_->pipe_handle, buffer, sizeof(buffer) - 1,
-                &bytes_read, nullptr)) {
-    DWORD err = GetLastError();
-    if (err == ERROR_NO_DATA) {
-      return false; // client connected but has not written yet
+  const auto read_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+  for (;;) {
+    DWORD available = 0;
+    if (PeekNamedPipe(impl_->pipe_handle, nullptr, 0, nullptr, &available,
+                      nullptr) &&
+        available > 0) {
+      if (ReadFile(impl_->pipe_handle, buffer, sizeof(buffer) - 1,
+                   &bytes_read, nullptr)) {
+        break;
+      }
+      DisconnectNamedPipe(impl_->pipe_handle);
+      return false;
+    }
+
+    const DWORD err = GetLastError();
+    if (available == 0 || err == ERROR_NO_DATA || err == ERROR_PIPE_LISTENING) {
+      if (std::chrono::steady_clock::now() < read_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        continue;
+      }
     }
     DisconnectNamedPipe(impl_->pipe_handle);
     return false;
   }
   if (bytes_read == 0) {
+    DisconnectNamedPipe(impl_->pipe_handle);
     return false;
   }
   std::string request(buffer, bytes_read);

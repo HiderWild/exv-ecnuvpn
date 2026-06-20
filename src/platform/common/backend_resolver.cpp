@@ -5,6 +5,11 @@
 #include "platform/common/service_status.hpp"
 #include "observability/log_facade.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <string>
+
 namespace ecnuvpn {
 namespace platform {
 namespace {
@@ -18,9 +23,36 @@ nlohmann::json descriptor_from_service(const ServiceStatusSnapshot &service) {
                              ? "named-pipe"
                              : "unix-socket"},
                         {"endpoint", service.endpoint},
-                        {"pid", nullptr},
+                        {"pid", -1},
                         {"service", service_status_to_json(service)},
                         {"capabilities", service.capabilities}};
+}
+
+std::string normalized_helper_path(std::string path) {
+  if (path.empty())
+    return {};
+
+  try {
+    path = std::filesystem::path(path).lexically_normal().string();
+  } catch (...) {
+  }
+
+  std::replace(path.begin(), path.end(), '\\', '/');
+#ifdef _WIN32
+  std::transform(path.begin(), path.end(), path.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+#endif
+  return path;
+}
+
+bool service_matches_current_helper(const ServiceStatusSnapshot &service,
+                                    const BackendResolveOptions &options) {
+  if (options.helper_path.empty() || service.path.empty())
+    return true;
+  return normalized_helper_path(service.path) ==
+         normalized_helper_path(options.helper_path);
 }
 
 nlohmann::json unavailable(const char *code, const std::string &message,
@@ -55,8 +87,20 @@ nlohmann::json resolve_backend(const BackendResolveOptions &options,
   if (options.preferred_mode == "service" ||
       options.preferred_mode == "auto") {
     if (service.available) {
+      const bool stale_service_for_current_package =
+          options.preferred_mode == "auto" &&
+          options.allow_oneshot &&
+          options.start_oneshot &&
+          !service_matches_current_helper(service, options);
+      if (stale_service_for_current_package) {
+        exv::observability::LogFacade::warn(
+            "Backend resolver: Skipping available service because its helper "
+            "binary does not match the current package - service_path=" +
+            service.path + " helper_path=" + options.helper_path);
+      } else {
       exv::observability::LogFacade::info("Backend resolver: Using service backend - endpoint=" + service.endpoint);
       return descriptor_from_service(service);
+      }
     }
 
     if (options.preferred_mode == "service") {

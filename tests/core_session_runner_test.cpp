@@ -564,7 +564,8 @@ bool test_runner_starts_from_prepared_handshake_without_reauth() {
 
     auto packet_state = std::make_shared<RunnerPacketDeviceState>();
     int attach_transport_factory_calls = 0;
-    bool configurator_called = false;
+    int configurator_calls = 0;
+    bool reconfigured_after_open = false;
 
     CoreSessionRunner runner([packet_state, &attach_transport_factory_calls]() {
         ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
@@ -581,10 +582,16 @@ bool test_runner_starts_from_prepared_handshake_without_reauth() {
     });
 
     runner.set_network_config_callback(
-        [&configurator_called](
+        [packet_state, &configurator_calls, &reconfigured_after_open](
             const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
             ecnuvpn::vpn_engine::DeviceConfig* config) {
-            configurator_called = true;
+            ++configurator_calls;
+            {
+                const std::lock_guard<std::mutex> lock(packet_state->mu);
+                if (packet_state->open_count > 0) {
+                    reconfigured_after_open = true;
+                }
+            }
             if (metadata.internal_ip4_address != "10.255.0.10") {
                 return ecnuvpn::vpn_engine::ValidationResult{
                     false, "metadata_missing", "prepared metadata missing"};
@@ -610,8 +617,10 @@ bool test_runner_starts_from_prepared_handshake_without_reauth() {
         open_count = packet_state->open_count;
     }
 
-    ok = expect(configurator_called,
-                "prepared runner path should run network configurator") && ok;
+    ok = expect(configurator_calls == 2,
+                "prepared runner path should configure before and after packet open") && ok;
+    ok = expect(reconfigured_after_open,
+                "prepared runner path should refresh network config after packet open") && ok;
     ok = expect(attach_transport_factory_calls == 0,
                 "prepared runner path must not create a new transport") && ok;
     ok = expect(open_count == 1,
@@ -619,6 +628,165 @@ bool test_runner_starts_from_prepared_handshake_without_reauth() {
     ok = expect(opened.interface_name == "prepared-runner0" &&
                     opened.mtu == 1318,
                 "prepared runner path should use callback device config") && ok;
+
+    return ok;
+}
+
+bool test_runner_waits_for_packet_started_callback_before_network_refresh() {
+    using exv::core::CoreSessionRunner;
+    using exv::core::TunnelEvent;
+    using exv::core::TunnelEventType;
+
+    bool ok = true;
+
+    ecnuvpn::vpn_engine::NativeVpnEngineDependencies handshake_deps;
+    handshake_deps.transport_factory = []() {
+        return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+            new RunnerFakeTransport());
+    };
+
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+    auto mapped = exv::core::make_native_engine_config(
+        runner_config(), "test-password", &engine_cfg);
+    ok = expect(mapped.ok, "packet callback order config should map") && ok;
+
+    ecnuvpn::vpn_engine::NativeHandshakeResult prepared;
+    ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_cfg, handshake_deps);
+    const auto prepared_result = job.run(std::stop_token{}, &prepared);
+    ok = expect(prepared_result.ok,
+                "packet callback order prepared handshake should succeed") && ok;
+
+    auto packet_state = std::make_shared<RunnerPacketDeviceState>();
+    CoreSessionRunner runner([packet_state]() {
+        ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+        deps.transport_factory = []() {
+            return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                new RunnerFakeTransport());
+        };
+        deps.packet_device_factory = [packet_state]() {
+            return std::unique_ptr<ecnuvpn::vpn_engine::PacketDevice>(
+                new RunnerFakePacketDevice(packet_state));
+        };
+        return deps;
+    });
+
+    std::mutex mu;
+    std::condition_variable cv;
+    bool packet_started_callback_entered = false;
+    bool release_packet_started_callback = false;
+    bool second_refresh_before_callback_returned = false;
+    int configurator_calls = 0;
+
+    runner.set_event_callback([&](TunnelEvent event) {
+        if (event.type != TunnelEventType::PacketLoopStarted) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock(mu);
+        packet_started_callback_entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return release_packet_started_callback; });
+    });
+
+    runner.set_network_config_callback(
+        [&](const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
+            ecnuvpn::vpn_engine::DeviceConfig* config) {
+            ++configurator_calls;
+            if (metadata.internal_ip4_address != "10.255.0.10") {
+                return ecnuvpn::vpn_engine::ValidationResult{
+                    false, "metadata_missing", "prepared metadata missing"};
+            }
+            if (!config) {
+                return ecnuvpn::vpn_engine::ValidationResult{
+                    false, "device_config_missing", "device config output is null"};
+            }
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                if (configurator_calls == 2 &&
+                    packet_started_callback_entered &&
+                    !release_packet_started_callback) {
+                    second_refresh_before_callback_returned = true;
+                }
+            }
+            config->interface_name = "prepared-runner0";
+            config->mtu = 1318;
+            return ecnuvpn::vpn_engine::ValidationResult{};
+        });
+
+    std::thread starter([&] {
+        ok = expect(runner.start_from_handshake(engine_cfg, std::move(prepared)),
+                    "runner should attach from prepared handshake") && ok;
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(mu);
+        ok = expect(cv.wait_for(lock, std::chrono::seconds(2),
+                                [&] { return packet_started_callback_entered; }),
+                    "packet loop callback should be delivered") && ok;
+        release_packet_started_callback = true;
+    }
+    cv.notify_all();
+    starter.join();
+    runner.stop();
+
+    ok = expect(configurator_calls == 2,
+                "prepared runner path should still configure twice") && ok;
+    ok = expect(!second_refresh_before_callback_returned,
+                "post-open network refresh must wait for PacketLoopStarted callback") && ok;
+
+    return ok;
+}
+
+bool test_runner_prepared_handshake_network_failure_preserves_status() {
+    using exv::core::CoreSessionRunner;
+
+    bool ok = true;
+    ecnuvpn::vpn_engine::NativeVpnEngineDependencies handshake_deps;
+    handshake_deps.transport_factory = []() {
+        return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+            new RunnerFakeTransport());
+    };
+
+    ecnuvpn::vpn_engine::VpnEngineConfig engine_cfg;
+    auto mapped = exv::core::make_native_engine_config(
+        runner_config(), "test-password", &engine_cfg);
+    ok = expect(mapped.ok, "network failure test config should map") && ok;
+
+    ecnuvpn::vpn_engine::NativeHandshakeResult prepared;
+    ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_cfg, handshake_deps);
+    const auto prepared_result = job.run(std::stop_token{}, &prepared);
+    ok = expect(prepared_result.ok,
+                "network failure test prepared handshake should succeed") && ok;
+
+    CoreSessionRunner runner([]() {
+        ecnuvpn::vpn_engine::NativeVpnEngineDependencies deps;
+        deps.transport_factory = []() {
+            return std::unique_ptr<ecnuvpn::vpn_engine::protocol::ProtocolTransport>(
+                new RunnerFakeTransport());
+        };
+        return deps;
+    });
+
+    bool configurator_called = false;
+    runner.set_network_config_callback(
+        [&configurator_called](
+            const ecnuvpn::vpn_engine::TunnelMetadata&,
+            ecnuvpn::vpn_engine::DeviceConfig*) {
+            configurator_called = true;
+            return ecnuvpn::vpn_engine::ValidationResult{
+                false,
+                "native_wintun_missing",
+                "bundled wintun.dll is missing"};
+        });
+
+    ok = expect(!runner.start_from_handshake(engine_cfg, std::move(prepared)),
+                "prepared runner should fail when network config fails") && ok;
+    auto st = runner.status();
+    ok = expect(configurator_called,
+                "prepared runner should invoke the network configurator") && ok;
+    ok = expect(st.error_code == "native_wintun_missing",
+                "prepared runner should preserve network config error code") && ok;
+    ok = expect(st.error_message == "bundled wintun.dll is missing",
+                "prepared runner should preserve network config error message") && ok;
 
     return ok;
 }
@@ -724,7 +892,13 @@ int main() {
     std::cout << "--- Test 10: Runner prepared handshake attach ---\n";
     ok = test_runner_starts_from_prepared_handshake_without_reauth() && ok;
 
-    std::cout << "--- Test 11: Runner auth interaction response ---\n";
+    std::cout << "--- Test 11: Runner packet callback before network refresh ---\n";
+    ok = test_runner_waits_for_packet_started_callback_before_network_refresh() && ok;
+
+    std::cout << "--- Test 12: Runner prepared handshake network failure ---\n";
+    ok = test_runner_prepared_handshake_network_failure_preserves_status() && ok;
+
+    std::cout << "--- Test 13: Runner auth interaction response ---\n";
     ok = test_runner_auth_interaction_response_unblocks_start() && ok;
 
     if (ok) {

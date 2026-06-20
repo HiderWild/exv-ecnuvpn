@@ -84,8 +84,44 @@ int main() {
   ok = expect(resolved.value("transport", std::string()) == "named-pipe",
               "Windows helper endpoint should classify as named pipe") &&
        ok;
+  ok = expect(resolved.contains("pid") && resolved["pid"].is_number_integer(),
+              "service backend pid should be integer-safe for connect attempt bookkeeping") &&
+       ok;
   ok = expect(oneshot_calls == 0,
               "service resolution should not start oneshot helper") &&
+       ok;
+
+  ServiceStatusSnapshot stale_service = service;
+  stale_service.path = "C:/old/ECNU VPN/bin/exv-helper.exe";
+  BackendResolveOptions current_package;
+  current_package.preferred_mode = "auto";
+  current_package.allow_oneshot = true;
+  current_package.start_oneshot = true;
+  current_package.helper_path = "C:/current/ECNU VPN/bin/exv-helper.exe";
+  BackendResolverDeps stale_service_deps{
+      [&stale_service]() { return stale_service; },
+      [&oneshot_calls](const OneshotBootstrapRequest &request) {
+        ++oneshot_calls;
+        OneshotBackend backend;
+        backend.ok = true;
+        backend.transport = "named-pipe";
+        backend.endpoint = request.helper_path + ".pipe";
+        backend.owner = "test-owner";
+        backend.parent_pid = 7;
+        backend.pid = 43;
+        return backend;
+      },
+  };
+  resolved = resolve_backend(current_package, stale_service_deps);
+  ok = expect(resolved.value("ok", false),
+              "stale service should fall back to current package oneshot") &&
+       ok;
+  ok = expect(resolved.value("backend", std::string()) == "oneshot",
+              "stale service should not be selected ahead of current package oneshot") &&
+       ok;
+  ok = expect(resolved.value("endpoint", std::string()) ==
+                  current_package.helper_path + ".pipe",
+              "stale service fallback should start the current package helper") &&
        ok;
 
   BackendResolverDeps unavailable_deps{

@@ -115,12 +115,18 @@ static void test_prepare_tunnel_device_roundtrip() {
     PrepareTunnelDeviceResponse resp;
     resp.device_path = "//./Wintun/0";
     resp.mtu = 1500;
+    resp.error_code = "native_wintun_missing";
+    resp.error_message = "bundled wintun.dll is missing";
     json j2 = resp;
     assert(j2["device_path"] == "//./Wintun/0");
     assert(j2["mtu"] == 1500);
+    assert(j2["error_code"] == "native_wintun_missing");
+    assert(j2["error_message"] == "bundled wintun.dll is missing");
     auto parsed2 = prepare_tunnel_device_response_from_json(j2);
     assert(parsed2.device_path == "//./Wintun/0");
     assert(parsed2.mtu == 1500);
+    assert(parsed2.error_code == "native_wintun_missing");
+    assert(parsed2.error_message == "bundled wintun.dll is missing");
     std::cout << "  PASS prepare_tunnel_device_roundtrip\n";
 }
 
@@ -132,6 +138,7 @@ static void test_apply_tunnel_config_roundtrip() {
     req.config.server_bypass_ips = {"192.0.2.10", "192.0.2.11/32"};
     req.config.dns.servers = {"8.8.8.8"};
     req.config.dns.search_domain = "vpn.local";
+    req.config.dns.suffixes = {"vpn.local", "ecnu.edu.cn"};
     req.config.enable_kill_switch = true;
     json j = req;
     assert(j["config"]["interface_address"] == "10.0.0.2/24");
@@ -140,6 +147,9 @@ static void test_apply_tunnel_config_roundtrip() {
     assert(j["config"]["server_bypass_ips"][0] == "192.0.2.10");
     assert(j["config"]["server_bypass_ips"][1] == "192.0.2.11/32");
     assert(j["config"]["dns"]["servers"][0] == "8.8.8.8");
+    assert(j["config"]["dns"]["search_domain"] == "vpn.local");
+    assert(j["config"]["dns"]["suffixes"].size() == 2);
+    assert(j["config"]["dns"]["suffixes"][1] == "ecnu.edu.cn");
     assert(j["config"]["enable_kill_switch"] == true);
     auto parsed = apply_tunnel_config_request_from_json(j);
     assert(parsed.config.session_id.value == "s2");
@@ -149,7 +159,30 @@ static void test_apply_tunnel_config_roundtrip() {
     assert(parsed.config.server_bypass_ips[0] == "192.0.2.10");
     assert(parsed.config.server_bypass_ips[1] == "192.0.2.11/32");
     assert(parsed.config.dns.servers.size() == 1);
+    assert(parsed.config.dns.search_domain == "vpn.local");
+    assert(parsed.config.dns.suffixes.size() == 2);
+    assert(parsed.config.dns.suffixes[0] == "vpn.local");
+    assert(parsed.config.dns.suffixes[1] == "ecnu.edu.cn");
     assert(parsed.config.enable_kill_switch == true);
+
+    ApplyTunnelConfigResponse resp;
+    resp.success = false;
+    resp.error_code = "native_ip_config_route_create_failed";
+    resp.error_message = "CreateIpForwardEntry2 failed";
+    resp.error_target = "59.78.176.0/20";
+    resp.system_error = 87;
+    json j2 = resp;
+    assert(j2["success"] == false);
+    assert(j2["error_code"] == "native_ip_config_route_create_failed");
+    assert(j2["error_message"] == "CreateIpForwardEntry2 failed");
+    assert(j2["error_target"] == "59.78.176.0/20");
+    assert(j2["system_error"] == 87);
+    auto parsed2 = apply_tunnel_config_response_from_json(j2);
+    assert(parsed2.success == false);
+    assert(parsed2.error_code == "native_ip_config_route_create_failed");
+    assert(parsed2.error_message == "CreateIpForwardEntry2 failed");
+    assert(parsed2.error_target == "59.78.176.0/20");
+    assert(parsed2.system_error == 87);
     std::cout << "  PASS apply_tunnel_config_roundtrip\n";
 }
 

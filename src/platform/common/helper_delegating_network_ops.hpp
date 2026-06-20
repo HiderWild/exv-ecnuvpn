@@ -30,6 +30,7 @@ public:
     TunnelDeviceDescriptor prepare_tunnel_device(const std::string& adapter_name, int mtu = 1400) override;
     TunnelDeviceDescriptor open_tunnel_device(const std::string& adapter_name) override;
     bool apply_tunnel_config(const TunnelDeviceDescriptor& device, const TunnelConfig& config) override;
+    PlatformNetworkError last_error() const override;
     CleanupResult cleanup(const std::string& adapter_name, CleanupPolicy policy) override;
     bool device_exists(const std::string& adapter_name) const override;
 
@@ -49,6 +50,7 @@ private:
     helper::HelperClient* helper_;
     helper::SessionId session_id_;
     TunnelDeviceDescriptor last_prepared_device_;
+    PlatformNetworkError last_error_;
 };
 
 } // namespace exv::platform

@@ -119,9 +119,11 @@ bool installs_server_bypass_before_split_routes() {
               "split routes should follow bypass routes") &&
        ok;
   ok = expect(mock.created_routes.size() >= 3 &&
-                  mock.created_routes[1].next_hop == "10.255.0.10" &&
-                  mock.created_routes[2].interface_index == 42,
-              "split routes should target the tunnel interface") &&
+                  mock.created_routes[1].interface_index == 42 &&
+                  mock.created_routes[1].next_hop.empty() &&
+                  mock.created_routes[2].interface_index == 42 &&
+                  mock.created_routes[2].next_hop.empty(),
+              "split routes should be on-link routes on the tunnel interface") &&
        ok;
   ok = expect(mock.best_route_destinations.size() == 1 &&
                   mock.best_route_destinations[0] == "203.0.113.15",
@@ -192,6 +194,34 @@ bool cleanup_removes_only_routes_owned_by_this_session() {
   return ok;
 }
 
+bool cleanup_treats_missing_route_as_success() {
+  MockIpHelper mock;
+  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  meta.routes = {"59.78.176.0/20"};
+
+  auto api = make_api(mock);
+  api.delete_ip_forward_entry2 =
+      [&mock](const ecnuvpn::platform::NativeIpRoute &route) {
+        mock.deleted_routes.push_back(route);
+        return std::uint32_t{1168};
+      };
+
+  ecnuvpn::platform::NativeIpConfig config(api, options());
+  auto result = config.configure(meta);
+  auto cleanup = config.cleanup();
+  auto cleanup_again = config.cleanup();
+
+  bool ok = true;
+  ok = expect(result.ok(), "network config should succeed before cleanup") && ok;
+  ok = expect(cleanup.ok() && cleanup_again.ok(),
+              "missing route during cleanup should be idempotent success") &&
+       ok;
+  ok = expect(mock.deleted_routes.size() == 1,
+              "cleanup should attempt to delete the owned route once") &&
+       ok;
+  return ok;
+}
+
 bool uses_tunnel_mtu_and_falls_back_to_configured_mtu() {
   MockIpHelper tunnel_mtu_mock;
   ecnuvpn::vpn_engine::TunnelMetadata tunnel_meta = metadata();
@@ -220,6 +250,86 @@ bool uses_tunnel_mtu_and_falls_back_to_configured_mtu() {
   ok = expect(fallback_mtu_mock.mtu_values.size() == 1 &&
                   fallback_mtu_mock.mtu_values[0] == 1350,
               "low tunnel MTU should fall back to configured MTU") &&
+       ok;
+  return ok;
+}
+
+bool creates_preferred_source_address() {
+  MockIpHelper mock;
+  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  auto result = config.configure(metadata());
+
+  bool ok = true;
+  ok = expect(result.ok(), "network config should succeed") && ok;
+  ok = expect(mock.created_addresses.size() == 1,
+              "one tunnel address should be created") &&
+       ok;
+  ok = expect(mock.created_addresses.size() == 1 &&
+                  mock.created_addresses[0].valid_lifetime == 0xFFFFFFFFu &&
+                  mock.created_addresses[0].preferred_lifetime == 0xFFFFFFFFu,
+              "tunnel address should be created with infinite valid and preferred lifetime") &&
+       ok;
+  ok = expect(mock.created_addresses.size() == 1 &&
+                  !mock.created_addresses[0].skip_as_source,
+              "tunnel address should be usable as a route source address") &&
+       ok;
+  ok = expect(mock.created_addresses.size() == 1 &&
+                  mock.created_addresses[0].dad_state_preferred,
+              "tunnel address should skip tentative DAD and become preferred immediately") &&
+       ok;
+  return ok;
+}
+
+bool can_refresh_routes_without_recreating_address() {
+  MockIpHelper mock;
+  auto opts = options();
+  opts.configure_address = false;
+  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  meta.routes = {"59.78.176.0/20"};
+
+  ecnuvpn::platform::NativeIpConfig config(make_api(mock), opts);
+  auto result = config.configure(meta);
+
+  bool ok = true;
+  ok = expect(result.ok(),
+              "route refresh should succeed when tunnel address already exists") &&
+       ok;
+  ok = expect(mock.initialized_addresses.empty() &&
+                  mock.created_addresses.empty(),
+              "route refresh should not recreate the tunnel address") &&
+       ok;
+  ok = expect(mock.mtu_values.size() == 1 && mock.mtu_values[0] == 1400,
+              "route refresh should still update the tunnel MTU") &&
+       ok;
+  ok = expect(mock.created_routes.size() == 1 &&
+                  mock.created_routes[0].cidr == "59.78.176.0/20",
+              "route refresh should recreate split routes") &&
+       ok;
+  return ok;
+}
+
+bool ignores_invalid_parameter_mtu_failure() {
+  MockIpHelper mock;
+  mock.set_mtu_error = 87;
+  ecnuvpn::vpn_engine::TunnelMetadata meta = metadata();
+  meta.routes = {"59.78.176.0/20"};
+
+  ecnuvpn::platform::NativeIpConfig config(make_api(mock), options());
+  auto result = config.configure(meta);
+
+  bool ok = true;
+  ok = expect(result.ok(),
+              "ERROR_INVALID_PARAMETER while setting MTU should not fail configure") &&
+       ok;
+  ok = expect(mock.mtu_values.size() == 1 && mock.mtu_values[0] == 1400,
+              "MTU set should still be attempted") &&
+       ok;
+  ok = expect(mock.created_routes.size() == 1 &&
+                  mock.created_routes[0].cidr == "59.78.176.0/20",
+              "routes should still be configured after non-fatal MTU failure") &&
+       ok;
+  ok = expect(result.effective_mtu == 1400,
+              "effective MTU should remain visible after non-fatal MTU failure") &&
        ok;
   return ok;
 }
@@ -254,7 +364,11 @@ int main() {
   ok = installs_server_bypass_before_split_routes() && ok;
   ok = collapses_duplicate_routes() && ok;
   ok = cleanup_removes_only_routes_owned_by_this_session() && ok;
+  ok = cleanup_treats_missing_route_as_success() && ok;
   ok = uses_tunnel_mtu_and_falls_back_to_configured_mtu() && ok;
+  ok = creates_preferred_source_address() && ok;
+  ok = can_refresh_routes_without_recreating_address() && ok;
+  ok = ignores_invalid_parameter_mtu_failure() && ok;
   ok = api_errors_map_to_stable_error_codes() && ok;
   return ok ? 0 : 1;
 }

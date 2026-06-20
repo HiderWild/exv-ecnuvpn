@@ -609,8 +609,12 @@ HelperResponse HelperHandler::handle_prepare_tunnel_device(const HelperRequest& 
     resp.op = req.op;
     resp.success = !device_resp.device_path.empty();
     if (!resp.success) {
-        resp.error_code = "device_not_found";
-        resp.error_message = "Helper network operations did not return a device";
+        resp.error_code = device_resp.error_code.empty()
+                              ? "device_not_found"
+                              : device_resp.error_code;
+        resp.error_message = device_resp.error_message.empty()
+                                 ? "Helper network operations did not return a device"
+                                 : device_resp.error_message;
     }
     resp.payload_json = payload.dump();
     return resp;
@@ -680,6 +684,7 @@ HelperResponse HelperHandler::handle_apply_tunnel_config(const HelperRequest& re
                     (void)network_ops->cleanup(config_req.config.session_id,
                                                policy, created_resources);
                     response.success = false;
+                    response.error_code = "session_cleaned_during_apply";
                     response.error_message =
                         "Session was cleaned before apply completed";
                 }
@@ -695,7 +700,9 @@ HelperResponse HelperHandler::handle_apply_tunnel_config(const HelperRequest& re
     resp.op = req.op;
     resp.success = config_resp.success;
     if (!resp.success) {
-        resp.error_code = "network_ops_failed";
+        resp.error_code = config_resp.error_code.empty()
+                              ? "network_ops_failed"
+                              : config_resp.error_code;
         resp.error_message = config_resp.error_message.empty()
                                  ? "Helper network operations failed"
                                  : config_resp.error_message;

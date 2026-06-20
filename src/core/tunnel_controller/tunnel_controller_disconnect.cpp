@@ -35,7 +35,15 @@ void TunnelController::Impl::shutdown_helper_session_for_cleanup() {
             auto resp = helper_->shutdown(req);
 
             if (!resp.cleanup_success) {
-                // Log per-resource errors but still finish cleanup (best effort)
+                if (resp.errors.empty()) {
+                    log_tunnel_event("WARN", "helper.session.shutdown_partial",
+                                     "Helper session shutdown reported partial cleanup");
+                }
+                for (const auto& error : resp.errors) {
+                    log_tunnel_event("WARN", "helper.session.shutdown_partial",
+                                     "Helper session shutdown cleanup error",
+                                     {{"error", error}});
+                }
             }
         } catch (const std::exception&) {
             // Cleanup threw — nothing we can do; finish best effort.
@@ -46,6 +54,8 @@ void TunnelController::Impl::shutdown_helper_session_for_cleanup() {
         }
         session_id_ = exv::helper::SessionId{};
         network_config_applied_ = false;
+        packet_loop_started_ = false;
+        prepared_tunnel_device_.reset();
     }
 
 void TunnelController::Impl::cleanup_after_failed_startup() {
@@ -64,16 +74,25 @@ void TunnelController::Impl::do_cleanup() {
 
 void TunnelController::Impl::release_core_lease() {
         if (core_lease_id_.empty()) {
+            log_tunnel_event("INFO", "core_lease.release.skipped",
+                             "No helper core lease to release");
             stop_core_lease_keepalive();
             return;
         }
 
         const auto lease_id = core_lease_id_;
         try {
+            log_tunnel_event("INFO", "core_lease.release.starting",
+                             "Releasing helper core lease",
+                             {{"lease_id", lease_id}});
             exv::helper::ReleaseCoreLeaseRequest req;
             req.lease_id = lease_id;
             req.exit_if_oneshot = true;
-            (void)helper_->release_core_lease(req);
+            auto resp = helper_->release_core_lease(req);
+            log_tunnel_event("INFO", "core_lease.release.completed",
+                             "Helper core lease release completed",
+                             {{"released", resp.released ? "true" : "false"},
+                              {"exiting", resp.exiting ? "true" : "false"}});
         } catch (const std::exception& e) {
             log_tunnel_event("WARN", "core_lease.release.failed",
                              "Core lease release failed",

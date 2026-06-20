@@ -35,4 +35,13 @@ std::unique_ptr<TunnelController> TunnelControllerTestAccess::create(
   return controller;
 }
 
+ecnuvpn::vpn_engine::ValidationResult
+TunnelControllerTestAccess::configure_network_for_engine(
+    TunnelController &controller,
+    const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
+    ecnuvpn::vpn_engine::DeviceConfig *device_config) {
+  return controller.impl_->configure_network_for_engine(metadata,
+                                                        device_config);
+}
+
 } // namespace exv::core

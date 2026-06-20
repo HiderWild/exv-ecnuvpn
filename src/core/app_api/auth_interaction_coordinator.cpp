@@ -101,5 +101,19 @@ get_active_connect_auth_coordinator() {
   return active_coordinator_slot();
 }
 
+bool clear_active_connect_auth_coordinator_if_current(
+    const std::shared_ptr<AuthInteractionCoordinator> &coordinator) {
+  if (!coordinator) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(active_coordinator_mutex());
+  if (active_coordinator_slot().get() != coordinator.get()) {
+    return false;
+  }
+  active_coordinator_slot().reset();
+  return true;
+}
+
 } // namespace app_api
 } // namespace ecnuvpn

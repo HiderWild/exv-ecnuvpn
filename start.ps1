@@ -481,13 +481,92 @@ function Test-WebViewPackage {
   )
 }
 
+function Set-LaunchEnvironment {
+  param([Parameter(Mandatory = $true)][string]$CoreDirectory)
+
+  $snapshot = [pscustomobject]@{
+    ExvCorePath = $env:EXV_CORE_PATH
+    Path = $env:PATH
+  }
+
+  $env:EXV_CORE_PATH = $CoreDirectory
+  if ([string]::IsNullOrWhiteSpace($env:PATH)) {
+    $env:PATH = $CoreDirectory
+  }
+  elseif ($env:PATH -notlike "*$CoreDirectory*") {
+    $env:PATH = "$CoreDirectory;$env:PATH"
+  }
+
+  Write-Info "Launch environment: EXV_CORE_PATH=$env:EXV_CORE_PATH"
+  return $snapshot
+}
+
+function Restore-LaunchEnvironment {
+  param($Snapshot)
+
+  if (-not $Snapshot) {
+    return
+  }
+
+  $env:EXV_CORE_PATH = $Snapshot.ExvCorePath
+  $env:PATH = $Snapshot.Path
+}
+
+function Resolve-LaunchArgPath {
+  param([Parameter(Mandatory = $true)][string]$value)
+
+  if ([System.IO.Path]::IsPathRooted($value)) {
+    return $value
+  }
+
+  return (Join-Path $packageRoot $value)
+}
+
+function Resolve-LaunchArgs {
+  param([Parameter(Mandatory = $true)][string[]]$Tokens)
+
+  $resolved = @()
+  for ($i = 0; $i -lt $Tokens.Count; $i++) {
+    $token = $Tokens[$i]
+    $resolved += $token
+    if (($token -eq '--exv' -or $token -eq '--renderer-index') -and $i + 1 -lt $Tokens.Count) {
+      $i++
+      $resolved += (Resolve-LaunchArgPath $Tokens[$i])
+    }
+  }
+
+  return @($resolved)
+}
+
+function ConvertTo-WindowsProcessArgument {
+  param([AllowEmptyString()][string]$Value)
+
+  if ($null -eq $Value) {
+    return '""'
+  }
+
+  if ($Value -notmatch '[\s"]') {
+    return $Value
+  }
+
+  $escaped = $Value -replace '\\(?=($|"))', '\\' -replace '"', '\"'
+  return '"' + $escaped + '"'
+}
+
+function Join-LaunchArgsForStartProcess {
+  param([Parameter(Mandatory = $true)][string[]]$Tokens)
+
+  return (($Tokens | ForEach-Object { ConvertTo-WindowsProcessArgument $_ }) -join ' ')
+}
+
 function Read-LaunchArgs {
   if (-not (Test-Path -LiteralPath $launchArgsFile)) {
     throw "Launch argument file is missing: $launchArgsFile"
   }
 
-  return Get-Content -LiteralPath $launchArgsFile |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  $tokens = @(Get-Content -LiteralPath $launchArgsFile |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  return @(Resolve-LaunchArgs $tokens)
 }
 
 function Start-WebViewShell {
@@ -497,13 +576,20 @@ function Start-WebViewShell {
   if (Test-Path -LiteralPath $desktopErrLog) { Remove-Item -LiteralPath $desktopErrLog -Force -ErrorAction SilentlyContinue }
 
   $launchArgs = @(Read-LaunchArgs)
+  $launchArgumentList = Join-LaunchArgsForStartProcess $launchArgs
+  $launchEnvironment = Set-LaunchEnvironment -CoreDirectory (Split-Path -Parent $exvExe)
   Write-Info "Launching native WebView shell: $uiShellExe"
-  $process = Start-Process -FilePath $uiShellExe `
-    -ArgumentList $launchArgs `
-    -WorkingDirectory $packageRoot `
-    -RedirectStandardOutput $desktopOutLog `
-    -RedirectStandardError $desktopErrLog `
-    -PassThru
+  try {
+    $process = Start-Process -FilePath $uiShellExe `
+      -ArgumentList $launchArgumentList `
+      -WorkingDirectory $packageRoot `
+      -RedirectStandardOutput $desktopOutLog `
+      -RedirectStandardError $desktopErrLog `
+      -PassThru
+  }
+  finally {
+    Restore-LaunchEnvironment $launchEnvironment
+  }
 
   Start-Sleep -Seconds 2
   if ($process.HasExited) {

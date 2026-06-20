@@ -344,13 +344,30 @@ CoreResolveResult resolve_core(const CoreResolveOptions &options,
       deps.get_frontend_executable_path
           ? deps.get_frontend_executable_path()
           : std::string();
-  const std::string env_core_path =
-      deps.get_env_var ? deps.get_env_var("EXV_CORE_PATH") : std::string();
-  const std::string path_var =
-      deps.get_env_var ? deps.get_env_var("PATH") : std::string();
 
-  auto candidate =
-      find_core_candidate(frontend_path, env_core_path, path_var);
+  std::optional<std::string> candidate;
+  if (!options.preferred_core_path.empty()) {
+    std::error_code ec;
+    if (std::filesystem::exists(options.preferred_core_path, ec) && !ec &&
+        !is_self_reference(options.preferred_core_path, frontend_path)) {
+      exv::observability::LogFacade::info(
+          "Core resolver: using preferred core path: " +
+          options.preferred_core_path);
+      candidate = options.preferred_core_path;
+    } else {
+      exv::observability::LogFacade::warn(
+          "Core resolver: preferred core path is unavailable or invalid: " +
+          options.preferred_core_path);
+    }
+  }
+
+  if (!candidate.has_value()) {
+    const std::string env_core_path =
+        deps.get_env_var ? deps.get_env_var("EXV_CORE_PATH") : std::string();
+    const std::string path_var =
+        deps.get_env_var ? deps.get_env_var("PATH") : std::string();
+    candidate = find_core_candidate(frontend_path, env_core_path, path_var);
+  }
 
   if (!candidate.has_value()) {
     exv::observability::LogFacade::warn(

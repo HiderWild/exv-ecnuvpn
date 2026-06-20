@@ -99,6 +99,10 @@ bool CoreSessionRunner::start(const ecnuvpn::Config& cfg,
     if (!validation.ok) {
         cached_status_ = session_ ? session_->status()
                                   : ecnuvpn::vpn_engine::VpnEngineStatus{};
+        if (cached_status_.error_code.empty())
+            cached_status_.error_code = validation.code;
+        if (cached_status_.error_message.empty())
+            cached_status_.error_message = validation.message;
 
         TunnelEvent te;
         if (validation.code.rfind("packet", 0) == 0 ||
@@ -183,6 +187,9 @@ bool CoreSessionRunner::start_from_handshake(
             if (device_config.mtu <= 0)
                 device_config.mtu = metadata.mtu;
             validation = session_->start_packet_loop(device_config);
+            if (validation.ok && network_config_callback) {
+                validation = network_config_callback(metadata, &device_config);
+            }
         }
     }
 
@@ -190,6 +197,10 @@ bool CoreSessionRunner::start_from_handshake(
     if (!validation.ok) {
         cached_status_ = session_ ? session_->status()
                                   : ecnuvpn::vpn_engine::VpnEngineStatus{};
+        if (cached_status_.error_code.empty())
+            cached_status_.error_code = validation.code;
+        if (cached_status_.error_message.empty())
+            cached_status_.error_message = validation.message;
 
         TunnelEvent te;
         if (validation.code.rfind("packet", 0) == 0 ||

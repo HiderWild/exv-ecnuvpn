@@ -9,22 +9,21 @@
 #include "core/rpc/desktop_rpc_adapter.hpp"
 
 #include <exception>
+#include <mutex>
 
 namespace ecnuvpn {
 namespace app_api {
 
 exv::core_api::DesktopRpcAdapter &desktop_adapter() {
   static exv::core_api::DesktopRpcAdapter adapter;
-  static bool initialized = false;
-  if (!initialized) {
-    initialized = true;
-
+  static std::once_flag initialized;
+  std::call_once(initialized, [] {
     register_desktop_vpn_actions(adapter);
     register_desktop_config_actions(adapter);
     register_desktop_route_actions(adapter);
     register_desktop_system_actions(adapter);
     register_desktop_log_actions(adapter);
-  }
+  });
   return adapter;
 }
 

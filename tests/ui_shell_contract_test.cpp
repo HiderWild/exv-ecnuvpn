@@ -13,13 +13,31 @@ int main() {
   using namespace ecnuvpn::ui_shell;
   namespace fs = std::filesystem;
 
-  if (kElectronAdvancedWindowBounds.width != 972 ||
-      kElectronAdvancedWindowBounds.height != 563) {
+  if (kWindowShadowMarginPx != 12) {
     return 1;
   }
 
-  if (kElectronMinimalWindowBounds.width != 302 ||
-      kElectronMinimalWindowBounds.height != 118) {
+  if (kAppSurfaceAdvancedWindowBounds.width != 972 ||
+      kAppSurfaceAdvancedWindowBounds.height != 563) {
+    return 1;
+  }
+
+  if (kAppSurfaceMinimalWindowBounds.width != 302 ||
+      kAppSurfaceMinimalWindowBounds.height != 118) {
+    return 1;
+  }
+
+  if (kElectronAdvancedWindowBounds.width !=
+          kAppSurfaceAdvancedWindowBounds.width + kWindowShadowMarginPx * 2 ||
+      kElectronAdvancedWindowBounds.height !=
+          kAppSurfaceAdvancedWindowBounds.height + kWindowShadowMarginPx * 2) {
+    return 1;
+  }
+
+  if (kElectronMinimalWindowBounds.width !=
+          kAppSurfaceMinimalWindowBounds.width + kWindowShadowMarginPx * 2 ||
+      kElectronMinimalWindowBounds.height !=
+          kAppSurfaceMinimalWindowBounds.height + kWindowShadowMarginPx * 2) {
     return 1;
   }
 

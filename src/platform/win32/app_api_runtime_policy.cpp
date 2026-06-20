@@ -43,10 +43,10 @@ nlohmann::json preflight_connect_platform_checks(const ConfigView &cfg) {
   std::string effective = drivers.value("effective_driver", std::string("wintun"));
   bool wintun_missing = drivers.value(
       "wintun_missing", !drivers.value("wintun_bundled", false));
-  if (cfg.windows_tunnel_driver == "wintun" &&
+  if ((cfg.windows_tunnel_driver == "wintun" || effective == "wintun") &&
       wintun_missing) {
     return nlohmann::json{{"ok", false},
-                          {"error", "Wintun is selected but no bundled wintun.dll or existing Wintun adapter was detected."}};
+                          {"error", "Wintun runtime is missing. Bundle wintun.dll with the application runtime before connecting."}};
   }
   if (effective == "tap" && cfg.windows_tunnel_driver == "tap" &&
       cfg.windows_tap_interface.empty()) {

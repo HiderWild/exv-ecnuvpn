@@ -38,7 +38,9 @@ public:
     void simulate_ipc_lost();
     void set_heartbeat_fail_after(int count);
     void set_start_session_fail(bool fail);
+    void set_prepare_device_fail(std::string error_code, std::string error_message);
     void set_apply_config_fail(bool fail);
+    void set_apply_config_fail(std::string error_code, std::string error_message);
     void set_require_prepare_before_apply(bool require);
 
     // Inspection
@@ -61,7 +63,14 @@ private:
     bool connected_ = false;
     bool fail_next_ = false;
     bool start_session_fail_ = false;
+    bool prepare_device_fail_ = false;
+    std::string prepare_device_error_code_;
+    std::string prepare_device_error_message_;
     bool apply_config_fail_ = false;
+    std::string apply_config_error_code_;
+    std::string apply_config_error_message_;
+    std::string apply_config_error_target_;
+    std::uint32_t apply_config_system_error_ = 0;
     bool require_prepare_before_apply_ = false;
     bool ipc_lost_ = false;
     int prepare_count_ = 0;

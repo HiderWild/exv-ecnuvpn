@@ -209,6 +209,32 @@ int main() {
                 "failed_job: later user epoch starts new job") && ok;
   }
 
+  {
+    VpnConnectJobOwner owner;
+    std::atomic<int> starts{0};
+    std::atomic<bool> stop_seen{false};
+    auto run_until_shutdown = [&](std::stop_token stop, std::uint64_t) {
+      ++starts;
+      while (!stop.stop_requested()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      stop_seen = true;
+    };
+
+    owner.submit_connect(request("shutdown"), run_until_shutdown);
+    ok = expect(wait_until([&] { return starts.load() == 1; },
+                           std::chrono::milliseconds(500)),
+                "shutdown_active_job: workflow starts") && ok;
+    owner.shutdown("core_shutdown");
+    auto state = owner.snapshot();
+    ok = expect(stop_seen.load(),
+                "shutdown_active_job: stop requested") && ok;
+    ok = expect(!state.active,
+                "shutdown_active_job: job is idle after shutdown") && ok;
+    ok = expect(!state.desired_connected,
+                "shutdown_active_job: desired state is disconnected") && ok;
+  }
+
   if (ok) {
     std::cout << "connect_intent_test: all assertions passed\n";
   }

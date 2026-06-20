@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,8 @@ int main() {
     Gate handshake_release;
     std::atomic<bool> backend_cancel_requested{false};
     std::atomic<bool> handshake_cancel_requested{false};
+    std::atomic<bool> backend_finished{false};
+    std::atomic<bool> handshake_finished{false};
     std::mutex late_mutex;
     std::vector<std::string> late_failures;
 
@@ -82,13 +85,13 @@ int main() {
           late_failures.push_back(result.code + ":" + std::string(first_code));
         });
 
-    const auto start = std::chrono::steady_clock::now();
     auto result = pipeline.run(
         [&](std::stop_token stop) {
           backend_cancel_requested = stop.stop_requested();
           backend_release.wait_until_open(stop);
           backend_cancel_requested =
               backend_cancel_requested.load() || stop.stop_requested();
+          backend_finished = true;
           return ok_result(ConnectBranch::BackendHelperReady);
         },
         [&](std::stop_token) {
@@ -99,42 +102,21 @@ int main() {
           handshake_release.wait_until_open(stop);
           handshake_cancel_requested =
               handshake_cancel_requested.load() || stop.stop_requested();
+          handshake_finished = true;
           return fail_result(ConnectBranch::ProtocolHandshake, "auth_failed");
         },
         std::stop_token{});
-    const auto elapsed = std::chrono::steady_clock::now() - start;
 
     ok = expect(!result.ok, "first_failure: result fails") && ok;
     ok = expect(result.code == "wintun_missing",
                 "first_failure: first branch code wins") && ok;
     ok = expect(result.first_failure_branch == "platform_ready",
                 "first_failure: branch name is reported") && ok;
-    ok = expect(elapsed < std::chrono::milliseconds(200),
-                "first_failure: returns before slow branches release") && ok;
-    const auto cancel_deadline = std::chrono::steady_clock::now() +
-                                 std::chrono::milliseconds(500);
-    while (std::chrono::steady_clock::now() < cancel_deadline &&
-           !backend_cancel_requested.load() &&
-           !handshake_cancel_requested.load()) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    ok = expect(backend_cancel_requested.load() ||
+    ok = expect(backend_cancel_requested.load() &&
                     handshake_cancel_requested.load(),
-                "first_failure: cancellation is requested for losing branches") && ok;
-
-    backend_release.open();
-    handshake_release.open();
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(500);
-    while (std::chrono::steady_clock::now() < deadline) {
-      {
-        std::lock_guard<std::mutex> lock(late_mutex);
-        if (!late_failures.empty()) {
-          break;
-        }
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+                "first_failure: cancellation is requested for all losing branches") && ok;
+    ok = expect(backend_finished.load() && handshake_finished.load(),
+                "first_failure: losing branches are joined before returning") && ok;
     {
       std::lock_guard<std::mutex> lock(late_mutex);
       ok = expect(late_failures.size() == 1,
@@ -144,6 +126,30 @@ int main() {
                     "first_failure: late failure records discarded reason") && ok;
       }
     }
+  }
+
+  {
+    ConnectPipeline pipeline("job-branch-exception", nullptr);
+    auto result = pipeline.run(
+        [](std::stop_token) {
+          throw std::runtime_error("backend pid was null");
+          return ok_result(ConnectBranch::BackendHelperReady);
+        },
+        [](std::stop_token) {
+          return ok_result(ConnectBranch::PlatformReady);
+        },
+        [](std::stop_token) {
+          return ok_result(ConnectBranch::ProtocolHandshake);
+        },
+        std::stop_token{});
+
+    ok = expect(!result.ok, "branch_exception: result fails") && ok;
+    ok = expect(result.code == "branch_exception",
+                "branch_exception: exceptions become structured failures") && ok;
+    ok = expect(result.message == "backend pid was null",
+                "branch_exception: exception message is preserved") && ok;
+    ok = expect(result.first_failure_branch == "backend_helper_ready",
+                "branch_exception: throwing branch name is reported") && ok;
   }
 
   {

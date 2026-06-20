@@ -155,6 +155,7 @@ bool test_apply_tunnel_config_success() {
     config.dns.servers.push_back("8.8.8.8");
     config.dns.servers.push_back("8.8.4.4");
     config.dns.search_domain = "ecnu.edu.cn";
+    config.dns.suffixes = {"ecnu.edu.cn", "vpn.ecnu.edu.cn"};
     config.server_bypass_ips = {"192.0.2.10", "192.0.2.11/32"};
 
     bool result = ops.apply_tunnel_config(device, config);
@@ -169,6 +170,12 @@ bool test_apply_tunnel_config_success() {
                         requests[0].config.server_bypass_ips[0] == "192.0.2.10" &&
                         requests[0].config.server_bypass_ips[1] == "192.0.2.11/32",
                     "6: helper request should preserve all server bypass IPs") && ok;
+        ok = expect(requests[0].config.dns.servers.size() == 2 &&
+                        requests[0].config.dns.search_domain == "ecnu.edu.cn" &&
+                        requests[0].config.dns.suffixes.size() == 2 &&
+                        requests[0].config.dns.suffixes[0] == "ecnu.edu.cn" &&
+                        requests[0].config.dns.suffixes[1] == "vpn.ecnu.edu.cn",
+                    "6: helper request should preserve DNS servers, search domain, and suffixes") && ok;
     }
     return ok;
 }
@@ -179,7 +186,9 @@ bool test_apply_tunnel_config_success() {
 bool test_apply_tunnel_config_failure() {
     auto helper = std::make_unique<exv::test::FakeHelper>();
     auto* h = helper.get();
-    helper->set_apply_config_fail(true);
+    helper->set_apply_config_fail(
+        "native_ip_config_route_create_failed",
+        "CreateIpForwardEntry2 failed");
 
     exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
     ops.set_session(make_session("test-session-7"));
@@ -193,6 +202,15 @@ bool test_apply_tunnel_config_failure() {
 
     bool ok = true;
     ok = expect(!result, "7: apply_tunnel_config should fail when helper fails") && ok;
+    auto last_error = ops.last_error();
+    ok = expect(last_error.code == "native_ip_config_route_create_failed",
+                "7: apply failure should preserve helper error code") && ok;
+    ok = expect(last_error.message == "CreateIpForwardEntry2 failed",
+                "7: apply failure should preserve helper error message") && ok;
+    ok = expect(last_error.target == "59.78.176.0/20",
+                "7: apply failure should preserve helper error target") && ok;
+    ok = expect(last_error.system_error == 87,
+                "7: apply failure should preserve helper system error") && ok;
     return ok;
 }
 
@@ -394,6 +412,28 @@ bool test_full_lifecycle() {
     return ok;
 }
 
+bool test_prepare_failure_preserves_helper_error() {
+    auto helper = std::make_unique<exv::test::FakeHelper>();
+    helper->set_prepare_device_fail("native_wintun_missing",
+                                    "bundled wintun.dll is missing");
+    auto* h = helper.get();
+    exv::platform::HelperDelegatingPlatformNetworkOps ops(h);
+    ops.set_session(make_session("prepare-failure-session"));
+
+    auto device = ops.prepare_tunnel_device("ECNU-VPN", 1400);
+
+    bool ok = true;
+    ok = expect(!device.is_open, "16: failed prepare should return closed device") &&
+         ok;
+    ok = expect(device.error_code == "native_wintun_missing",
+                "16: failed prepare should preserve helper error code") &&
+         ok;
+    ok = expect(device.error_message == "bundled wintun.dll is missing",
+                "16: failed prepare should preserve helper error message") &&
+         ok;
+    return ok;
+}
+
 // ===========================================================================
 // main
 // ===========================================================================
@@ -444,6 +484,9 @@ int main() {
 
     std::cout << "--- Test 15: full lifecycle ---\n";
     ok = test_full_lifecycle() && ok;
+
+    std::cout << "--- Test 16: prepare failure preserves helper error ---\n";
+    ok = test_prepare_failure_preserves_helper_error() && ok;
 
     if (ok) {
         std::cout << "helper_delegating_network_ops_test: all tests passed\n";

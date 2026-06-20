@@ -97,6 +97,7 @@ struct TunnelController::Impl {
   void on_cstp_connected();
   void apply_tunnel_config_and_advance();
   void on_network_config_applied();
+  void complete_packet_loop_started();
   void on_packet_loop_started();
   void on_transport_closed();
   void on_packet_device_failed();
@@ -120,6 +121,8 @@ struct TunnelController::Impl {
   exv::helper::SessionId session_id_;
   std::string adapter_name_{"ECNU-VPN"};
   bool network_config_applied_ = false;
+  bool packet_loop_started_ = false;
+  std::optional<exv::platform::TunnelDeviceDescriptor> prepared_tunnel_device_;
 
   int reconnect_attempts_ = 0;
 

@@ -4,6 +4,8 @@ import api from '../api/host'
 import { useUiStore } from './ui'
 import { useConfigStore } from './config'
 
+const SERVICE_STATUS_REFRESH_TIMEOUT_MS = 2500
+
 export interface UpstreamVirtualAdapter {
   name: string
   detail: string
@@ -31,6 +33,7 @@ export interface VpnStatus {
   upstream_virtual_adapters: UpstreamVirtualAdapter[]
   upstream_virtual_message: string
   route_policy: string
+  Finnished?: boolean
   log_path?: string
   mode?: 'helper' | 'direct' | 'elevated' | 'disconnected'
   backend?: unknown
@@ -58,6 +61,7 @@ export interface RouteEntry {
 }
 
 export interface LogEntry {
+  seq?: number
   timestamp: string
   level: 'info' | 'warn' | 'error' | 'debug'
   message: string
@@ -243,6 +247,20 @@ function isCredentialFailureType(type: VpnErrorType) {
   return type === 'auth_failed' || type === 'auth_rejected'
 }
 
+function isBenignCancelTransportError(error: VpnError) {
+  const message = error.message.toLowerCase()
+  return error.error_type === 'user_cancelled' ||
+    (
+      (error.error_type === 'native_failure' || error.error_type === 'connection_failed') &&
+      (
+        message.includes('transport_closed') ||
+        message.includes('core rpc transport is closed') ||
+        message.includes('core_comm_broken') ||
+        message.includes('core_unresponsive')
+      )
+    )
+}
+
 type NativeErrorDescriptor = {
   error_type: VpnErrorType
   message: string
@@ -263,7 +281,7 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
   },
   auth_failed: {
     error_type: 'auth_failed',
-    message: 'VPN 密码错误，请重新输入密码。',
+    message: '登录失败，请核对您的用户名和密码。',
     recommended_action: 'retry_password',
     recoverable: true,
   },
@@ -383,7 +401,7 @@ const contractErrorMap: Record<string, NativeErrorDescriptor> = {
   },
   connection_attempt_active: {
     error_type: 'connection_attempt_active',
-    message: '已有连接流程正在进行，请等待完成或取消后重试。',
+    message: '已有 VPN 连接流程正在进行，请等待完成或取消后重试。',
     recommended_action: 'cancel_or_wait',
     recoverable: true,
   },
@@ -418,22 +436,139 @@ const rawCodeAliases: Record<string, string> = {
   // not the password.
   auth_response_invalid: 'auth_protocol_mismatch',
   auth_response_too_large: 'auth_protocol_mismatch',
+  native_wintun_wintun_missing: 'wintun_missing',
+  native_wintun_adapter_open_failed: 'permission_denied',
 }
 
 function canonicalizeRawCode(code: string): string {
   return rawCodeAliases[code] ?? code
 }
 
+function stripRemoteErrorPrefix(message: string) {
+  return message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+}
+
+function truncateMessage(message: string) {
+  return message.length > 96 ? `${message.slice(0, 96)}...` : message
+}
+
+function localizedRawError(message: string): Pick<VpnError, 'error_type' | 'message' | 'recoverable' | 'recommended_action'> {
+  const normalized = stripRemoteErrorPrefix(message)
+  const lower = normalized.toLowerCase()
+  if (isElevationCancelledMessage(normalized)) {
+    return {
+      error_type: 'elevation_cancelled',
+      message: '提权失败：用户已取消授权。',
+      recoverable: true,
+      recommended_action: '',
+    }
+  }
+  if (isAuthFailureMessage(normalized) || normalized.includes('Login failed.')) {
+    return {
+      error_type: 'auth_failed',
+      message: contractErrorMap.auth_failed.message,
+      recoverable: true,
+      recommended_action: 'retry_password',
+    }
+  }
+  if (normalized.includes('Core RPC transport is closed')) {
+    return {
+      error_type: 'native_failure',
+      message: '核心进程连接已关闭，请退出并重新打开客户端后重试。',
+      recoverable: true,
+      recommended_action: 'restart_app',
+    }
+  }
+  if (normalized.includes('Failed to start elevated one-shot helper.')) {
+    return {
+      error_type: 'helper_unavailable',
+      message: '临时助手启动失败，请确认已允许系统授权，或运行 start.ps1 修复本地组件后重试。',
+      recoverable: true,
+      recommended_action: 'retry_with_elevation',
+    }
+  }
+  if (normalized.includes('A native VPN connection attempt is already active.')) {
+    return {
+      error_type: 'connection_attempt_active',
+      message: contractErrorMap.connection_attempt_active.message,
+      recoverable: true,
+      recommended_action: 'cancel_or_wait',
+    }
+  }
+  if (normalized.includes('invalid X-CSTP-Session-Timeout value')) {
+    return {
+      error_type: 'connection_failed',
+      message: 'VPN 网关返回了异常的会话超时字段，请查看日志并重试。',
+      recoverable: true,
+      recommended_action: 'view_logs',
+    }
+  }
+  if (normalized.includes('Native engine session failed to start')) {
+    return {
+      error_type: 'connection_failed',
+      message: 'VPN 隧道启动失败，请确认网络驱动可用后重试。',
+      recoverable: true,
+      recommended_action: 'view_logs',
+    }
+  }
+  if (
+    normalized.includes('failed to open or create Wintun adapter') ||
+    lower.includes('failed to open or create wintun adapter') ||
+    lower.includes('windows error 5')
+  ) {
+    return {
+      error_type: 'permission_denied',
+      message: '需要管理员权限才能继续，请在系统授权窗口中点击允许后重试。',
+      recoverable: true,
+      recommended_action: 'retry_with_elevation',
+    }
+  }
+  if (lower.includes('bundled wintun.dll is missing') || lower.includes('wintun runtime is missing')) {
+    return {
+      error_type: 'wintun_missing',
+      message: contractErrorMap.wintun_missing.message,
+      recoverable: true,
+      recommended_action: 'install_wintun_driver',
+    }
+  }
+  if (normalized.includes('elevation_denied')) {
+    return {
+      error_type: 'elevation_denied',
+      message: '需要管理员权限才能继续，请在弹出的授权窗口中点击允许。',
+      recoverable: true,
+      recommended_action: 'retry_with_elevation',
+    }
+  }
+  return {
+    error_type: 'native_failure',
+    message: normalized ? `操作失败：${truncateMessage(normalized)}` : '操作失败，请查看日志。',
+    recoverable: true,
+    recommended_action: 'view_logs',
+  }
+}
+
 export function normalizeError(raw: unknown): VpnError {
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
     if (typeof obj.error_type === 'string') {
+      const descriptor = contractErrorMap[obj.error_type]
+      const localized = descriptor
+        ? {
+            error_type: descriptor.error_type,
+            message: descriptor.message,
+            recoverable: descriptor.recoverable,
+            recommended_action: descriptor.recommended_action,
+          }
+        : localizedRawError(String(obj.message || obj.error || '操作失败，请查看日志。'))
       return {
         ok: false,
-        error_type: obj.error_type as VpnErrorType,
-        message: String(obj.message || 'Operation failed'),
-        recoverable: obj.recoverable !== undefined ? !!obj.recoverable : true,
-        recommended_action: String(obj.recommended_action || ''),
+        error_type: localized.error_type,
+        message: localized.message,
+        recoverable: obj.recoverable !== undefined ? !!obj.recoverable : localized.recoverable,
+        recommended_action: String(obj.recommended_action || localized.recommended_action),
         timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : undefined,
       }
     }
@@ -447,7 +582,7 @@ export function normalizeError(raw: unknown): VpnError {
         return {
           ok: false,
           error_type: descriptor.error_type,
-          message: String(obj.message || obj.error || descriptor.message),
+          message: descriptor.message,
           recoverable: obj.recoverable !== undefined ? !!obj.recoverable : descriptor.recoverable,
           recommended_action: String(obj.recommended_action || descriptor.recommended_action),
           timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
@@ -455,55 +590,32 @@ export function normalizeError(raw: unknown): VpnError {
       }
     }
     if (obj.ok === false && obj.message) {
+      const localized = localizedRawError(String(obj.message))
       return {
         ok: false,
-        error_type: 'native_failure',
-        message: String(obj.message),
-        recoverable: true,
-        recommended_action: 'Retry the operation',
+        error_type: localized.error_type,
+        message: localized.message,
+        recoverable: localized.recoverable,
+        recommended_action: localized.recommended_action,
         timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : undefined,
       }
     }
   }
 
-  const message = raw instanceof Error ? raw.message : raw ? String(raw) : 'Unknown error'
-  if (isElevationCancelledMessage(message)) {
-    return {
-      ok: false,
-      error_type: 'elevation_cancelled',
-      message: '提权失败：用户已取消授权。',
-      recoverable: true,
-      recommended_action: '',
-      timestamp: Date.now(),
-    }
-  }
-  if (isAuthFailureMessage(message)) {
-    return {
-      ok: false,
-      error_type: 'auth_failed',
-      message: 'VPN 密码错误，请重新输入密码。',
-      recoverable: true,
-      recommended_action: 'retry_password',
-      timestamp: Date.now(),
-    }
-  }
+  const message = raw instanceof Error ? raw.message : raw ? String(raw) : '操作失败，请查看日志。'
+  const localized = localizedRawError(message)
   return {
     ok: false,
-    error_type: message.includes('elevation_denied') ? 'elevation_denied' : 'native_failure',
-    message,
-    recoverable: true,
-    recommended_action: 'Retry the operation',
+    error_type: localized.error_type,
+    message: localized.message,
+    recoverable: localized.recoverable,
+    recommended_action: localized.recommended_action,
     timestamp: Date.now(),
   }
 }
 
 function summarizeError(message: string) {
-  const normalized = message
-    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
-    .replace(/^Error:\s*/i, '')
-    .trim()
-  if (!normalized) return '操作失败，请查看日志。'
-  return normalized.length > 96 ? `${normalized.slice(0, 96)}...` : normalized
+  return localizedRawError(message).message
 }
 
 export const useVpnStore = defineStore('vpn', () => {
@@ -658,6 +770,7 @@ export const useVpnStore = defineStore('vpn', () => {
     return Boolean(
       nextStatus.connected ||
       nextStatus.error_code ||
+      nextStatus.error ||
       nextStatus.phase === 'failed',
     )
   }
@@ -668,13 +781,13 @@ export const useVpnStore = defineStore('vpn', () => {
     if (connectInFlight.value && isTerminalConnectStatus(nextStatus)) {
       if (
         !nextStatus.connected &&
-        nextStatus.error_code &&
+        (nextStatus.error_code || nextStatus.error) &&
         nextStatus.error_code !== 'user_cancelled'
       ) {
         lastFailedConnectMode.value = activeConnectMode.value ?? 'helper'
         setError(normalizeError({
           ok: false,
-          code: nextStatus.error_code,
+          code: nextStatus.error_code || 'connection_failed',
           message: nextStatus.error || '连接失败，请打开日志查看详细原因后重试。',
           recoverable: nextStatus.error_recoverable ?? true,
         }))
@@ -988,6 +1101,20 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
+  function handleStatusPollFailure(error: unknown) {
+    console.error('[vpn] fetchStatus failed:', error)
+    if (!connectInFlight.value) return
+
+    lastFailedConnectMode.value = activeConnectMode.value ?? 'helper'
+    setError(normalizeError(error))
+    connectInFlight.value = false
+    activeConnectMode.value = null
+    loading.value = false
+    stopConnectStatusPolling()
+    stopAuthInteractionPolling()
+    stopConnectionProgress()
+  }
+
   async function fetchStatus() {
     try {
       const { data } = await api.get<VpnStatus>('/status')
@@ -1002,12 +1129,44 @@ export const useVpnStore = defineStore('vpn', () => {
       })
       if (data.connected) clearError()
     } catch (e) {
-      console.error('[vpn] fetchStatus failed:', e)
+      handleStatusPollFailure(e)
     }
   }
 
+  function withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    onTimeout?: () => void,
+  ): Promise<T | undefined> {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timeout = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        timer = null
+        onTimeout?.()
+        resolve(undefined)
+      }, timeoutMs)
+    })
+    return Promise.race([
+      promise.finally(() => {
+        if (timer) {
+          clearTimeout(timer)
+          timer = null
+        }
+      }),
+      timeout,
+    ])
+  }
+
+  async function fetchServiceStatusWithTimeout() {
+    await withTimeout(
+      fetchServiceStatus(),
+      SERVICE_STATUS_REFRESH_TIMEOUT_MS,
+      () => console.warn('[vpn] fetchServiceStatus timed out; continuing UI state refresh'),
+    )
+  }
+
   async function fetchAppShellState() {
-    await Promise.allSettled([fetchStatus(), fetchServiceStatus()])
+    await Promise.allSettled([fetchStatus(), fetchServiceStatusWithTimeout()])
   }
 
   function startConnectStatusPolling() {
@@ -1168,8 +1327,9 @@ export const useVpnStore = defineStore('vpn', () => {
       return true
     } catch (error) {
       const normalized = normalizeError(error)
-      if (normalized.error_type !== 'user_cancelled') setError(normalized)
-      return normalized.error_type === 'user_cancelled'
+      if (isBenignCancelTransportError(normalized)) return true
+      setError(normalized)
+      return false
     } finally {
       connectInFlight.value = false
       activeConnectMode.value = null

@@ -130,7 +130,7 @@ export interface EcnuVpnApi {
     uninstall(): Promise<CliInstallStatus>
   }
   logs: {
-    list(options?: { lines?: number; filter?: string }): Promise<LogEntry[]>
+    list(options?: { lines?: number; limit?: number; after_seq?: number; filter?: string }): Promise<LogEntry[]>
   }
   runtime: {
     status(): Promise<RuntimeStatus>

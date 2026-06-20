@@ -112,6 +112,25 @@ ecnuvpn::platform::NativeWintunDependencies make_dependencies(
   return deps;
 }
 
+ecnuvpn::platform::NativeWintunDependencies
+make_dependencies_without_delete_adapter(MockWintun &mock) {
+  auto deps = make_dependencies(mock);
+  deps.api_loader = [&mock](const std::wstring &path,
+                            ecnuvpn::platform::NativeWintunApi &api,
+                            std::string &error) {
+    mock.loader_called = true;
+    mock.loaded_path = path;
+    if (!mock.loader_succeeds) {
+      error = "loader failed";
+      return false;
+    }
+    api = make_api(mock);
+    api.delete_adapter = nullptr;
+    return true;
+  };
+  return deps;
+}
+
 ecnuvpn::platform::NativeWintunConfig config_with_prefix(
     const std::wstring &prefix) {
   ecnuvpn::platform::NativeWintunConfig config;
@@ -143,6 +162,28 @@ bool locates_bundled_wintun_path_through_provider() {
   ok = expect(mock.loaded_path == mock.dll_path,
               "injected loader should receive the bundled wintun.dll path") &&
        ok;
+  return ok;
+}
+
+bool starts_when_delete_adapter_export_is_missing() {
+  MockWintun mock;
+
+  ecnuvpn::platform::NativeWintun wintun(
+      make_dependencies_without_delete_adapter(mock),
+      config_with_prefix(L"ECNUVPN-D2"));
+  auto result = wintun.start();
+  auto deleted = wintun.delete_adapter();
+
+  bool ok = true;
+  ok = expect(result.ok(),
+              "start should not require optional WintunDeleteAdapter export") &&
+       ok;
+  ok = expect(!deleted.ok() &&
+                  deleted.error ==
+                      ecnuvpn::platform::NativeWintunError::adapter_delete_failed,
+              "delete_adapter should fail only when the optional delete export is used") &&
+       ok;
+  wintun.stop();
   return ok;
 }
 
@@ -257,6 +298,31 @@ bool reports_adapter_luid_and_if_index() {
   return ok;
 }
 
+bool prepares_adapter_without_starting_packet_session() {
+  MockWintun mock;
+
+  ecnuvpn::platform::NativeWintun wintun(make_dependencies(mock),
+                                         config_with_prefix(L"ECNUVPN-D2"));
+  auto result = wintun.prepare_adapter();
+
+  bool ok = true;
+  ok = expect(result.ok(), "prepare_adapter should open or create the adapter") &&
+       ok;
+  ok = expect(result.metadata.luid == mock.luid,
+              "prepare_adapter should return adapter LUID metadata") &&
+       ok;
+  ok = expect(result.metadata.if_index == mock.if_index,
+              "prepare_adapter should return interface index metadata") &&
+       ok;
+  ok = expect(mock.sessions_started == 0,
+              "prepare_adapter should not start a packet session") &&
+       ok;
+  ok = expect(!wintun.running(),
+              "prepare_adapter should not mark the Wintun packet session running") &&
+       ok;
+  return ok;
+}
+
 bool stop_closes_active_session_once() {
   MockWintun mock;
 
@@ -322,10 +388,12 @@ std::string get_bundled_wintun_path() { return ""; }
 int main() {
   bool ok = true;
   ok = locates_bundled_wintun_path_through_provider() && ok;
+  ok = starts_when_delete_adapter_export_is_missing() && ok;
   ok = returns_wintun_missing_when_dll_absent() && ok;
   ok = creates_adapter_with_deterministic_name_prefix_when_open_missing() && ok;
   ok = opens_existing_adapter_without_creating() && ok;
   ok = reports_adapter_luid_and_if_index() && ok;
+  ok = prepares_adapter_without_starting_packet_session() && ok;
   ok = stop_closes_active_session_once() && ok;
   ok = delete_adapter_ends_session_deletes_adapter_and_closes_handle_once() && ok;
   return ok ? 0 : 1;

@@ -16,7 +16,7 @@ class NativePacketDeviceWintunSession {
 public:
   virtual ~NativePacketDeviceWintunSession() = default;
 
-  virtual NativeWintunStartResult start() = 0;
+  virtual NativeWintunStartResult start(const NativeWintunConfig &config) = 0;
   virtual vpn_engine::ValidationResult
   read_packet(std::vector<std::uint8_t> *packet) = 0;
   virtual vpn_engine::ValidationResult
@@ -38,6 +38,7 @@ struct NativePacketDeviceDependencies {
       create_wintun_session;
   std::function<std::unique_ptr<NativePacketDeviceIpConfig>(std::uint32_t)>
       create_ip_config;
+  std::function<bool()> is_elevated;
 };
 
 NativePacketDeviceDependencies default_native_packet_device_dependencies();

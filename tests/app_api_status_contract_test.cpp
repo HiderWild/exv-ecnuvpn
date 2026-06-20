@@ -343,7 +343,7 @@ bool frontend_json_has_required_fields() {
   return ok;
 }
 
-bool disconnected_status_skips_windows_platform_probe_contract() {
+bool disconnected_status_uses_async_virtual_network_probe_contract() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
   return false;
@@ -362,15 +362,41 @@ bool disconnected_status_skips_windows_platform_probe_contract() {
   ok = expect(fn != std::string::npos,
               "disconnected_status function should exist") &&
        ok;
+  ok = expect(disconnected_source.find("add_cached_virtual_network_fields") !=
+                  std::string::npos,
+              "disconnected status.get should use cached virtual network fields and request async probing") &&
+       ok;
   ok = expect(disconnected_source.find("virtual_network::add_status_fields") ==
                   std::string::npos,
-              "disconnected status.get must not run Windows virtual network platform probes") &&
+              "disconnected status.get must not run platform virtual network probes synchronously") &&
        ok;
-  ok = expect(disconnected_source.find("\"upstream_virtual_detected\"") !=
-                  std::string::npos &&
-                  disconnected_source.find("\"upstream_virtual_adapters\"") !=
-                      std::string::npos,
-              "disconnected status should keep stable upstream virtual fields without probing") &&
+  return ok;
+#endif
+}
+
+bool core_process_pushes_async_virtual_network_status_events_contract() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source =
+      source_text_at({"src", "core", "core_process.cpp"});
+
+  bool ok = true;
+  ok = expect(source.find("drain_virtual_network_status_events") !=
+                  std::string::npos,
+              "core process should drain async virtual network status patches") &&
+       ok;
+  ok = expect(source.find("std::chrono::milliseconds(200)") !=
+                  std::string::npos,
+              "core process should check for async virtual network patches every 200ms") &&
+       ok;
+  ok = expect(source.find("\"event\", \"status\"") != std::string::npos ||
+                  source.find("{\"event\", \"status\"}") != std::string::npos,
+              "core process should send async virtual network patches as status events") &&
+       ok;
+  ok = expect(source.find("if (events.empty())") != std::string::npos,
+              "core process should not emit empty async status responses") &&
        ok;
   return ok;
 #endif
@@ -646,6 +672,13 @@ bool desktop_connect_pipeline_reports_branch_timing() {
                 "protocol_branch should publish the coordinator into the "
                 "active-connect global slot") &&
          ok;
+    ok = expect(protocol_branch_source.find(
+                    "clear_active_connect_auth_coordinator_if_current") !=
+                    std::string::npos,
+                "protocol_branch should clear the active-connect coordinator "
+                "with a compare-and-clear guard so stale detached branches "
+                "cannot erase newer connect prompts") &&
+         ok;
     ok = expect(protocol_branch_source.find("deps.auth_interaction_handler =") !=
                     std::string::npos,
                 "protocol_branch should wire deps.auth_interaction_handler so "
@@ -809,6 +842,39 @@ bool desktop_native_connect_releases_attempt_guard_on_failed_status() {
 #endif
 }
 
+bool desktop_connect_error_preserves_status_error_code_contract() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto apply_error = source.find("void apply_desktop_connect_error");
+  const auto apply_job = source.find("void apply_desktop_connect_job_status",
+                                     apply_error);
+  const auto block =
+      apply_error == std::string::npos
+          ? std::string()
+          : source.substr(apply_error,
+                          apply_job == std::string::npos
+                              ? std::string::npos
+                              : apply_job - apply_error);
+
+  bool ok = true;
+  ok = expect(apply_error != std::string::npos,
+              "desktop status should merge stored connect failures") &&
+       ok;
+  ok = expect(block.find("json_string(*failure, \"error_code\"") !=
+                  std::string::npos,
+              "stored connect failure merge should read frontend status error_code") &&
+       ok;
+  ok = expect(block.find("json_string(*failure, \"code\"") !=
+                  std::string::npos,
+              "stored connect failure merge should still accept canonical code") &&
+       ok;
+  return ok;
+#endif
+}
+
 bool tunnel_controller_native_runner_failure_cleans_helper_session() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
@@ -872,6 +938,31 @@ bool tunnel_controller_native_runner_failure_cleans_helper_session() {
 #endif
 }
 
+bool desktop_connect_job_owner_destructs_before_error_state_contract() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string source = app_api_source_text();
+  const auto error_mutex = source.find("g_desktop_connect_error_mutex");
+  const auto error_state = source.find("g_desktop_connect_error", error_mutex);
+  const auto jobs_mutex = source.find("g_desktop_connect_jobs_mutex");
+  const auto jobs_owner = source.find("g_desktop_connect_jobs", jobs_mutex);
+
+  bool ok = true;
+  ok = expect(error_mutex != std::string::npos &&
+                  error_state != std::string::npos &&
+                  jobs_mutex != std::string::npos &&
+                  jobs_owner != std::string::npos,
+              "desktop connect globals should be present") &&
+       ok;
+  ok = expect(error_state < jobs_owner,
+              "desktop connect job owner must be declared after error state so it destructs first and joins background work before error state is destroyed") &&
+       ok;
+  return ok;
+#endif
+}
+
 bool desktop_helper_status_includes_current_instance_contract() {
 #ifndef ECNUVPN_SOURCE_DIR
   std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
@@ -906,6 +997,34 @@ bool desktop_helper_status_includes_current_instance_contract() {
   ok = expect(source.find("get_tunnel_controller_if_exists()") !=
                   std::string::npos,
               "desktop helper.status should inspect active TunnelController") &&
+       ok;
+  return ok;
+#endif
+}
+
+bool auth_interaction_coordinator_test_is_release_blocking() {
+#ifndef ECNUVPN_SOURCE_DIR
+  std::cerr << "EXPECT FAILED: ECNUVPN_SOURCE_DIR is not defined" << std::endl;
+  return false;
+#else
+  const std::string cmake = source_text_at({"CMakeLists.txt"});
+  const auto list_start = cmake.find("set(_release_blocking_tests");
+  const auto list_end = list_start == std::string::npos
+                            ? std::string::npos
+                            : cmake.find("\n)", list_start);
+  const std::string release_blocking =
+      (list_start == std::string::npos || list_end == std::string::npos)
+          ? std::string()
+          : cmake.substr(list_start, list_end - list_start);
+
+  bool ok = true;
+  ok = expect(!release_blocking.empty(),
+              "CMake release-blocking test list should be locatable") &&
+       ok;
+  ok = expect(release_blocking.find("auth_interaction_coordinator_test") !=
+                  std::string::npos,
+              "auth_interaction_coordinator_test must be in the CTest "
+              "release-blocking list, not only target LABELS") &&
        ok;
   return ok;
 #endif
@@ -1037,15 +1156,19 @@ int main() {
   ok = reconnecting_snapshot_maps_correctly() && ok;
   ok = all_phases_map_to_valid_strings() && ok;
   ok = frontend_json_has_required_fields() && ok;
-  ok = disconnected_status_skips_windows_platform_probe_contract() && ok;
+  ok = disconnected_status_uses_async_virtual_network_probe_contract() && ok;
+  ok = core_process_pushes_async_virtual_network_status_events_contract() && ok;
   ok = app_api_activates_core_owned_native_mode() && ok;
   ok = desktop_native_connect_uses_core_owned_controller_pipeline() && ok;
   ok = desktop_native_preflight_reports_substage_timing() && ok;
   ok = desktop_connect_pipeline_reports_branch_timing() && ok;
   ok = desktop_connect_pipeline_tracks_and_reaps_unused_oneshot_helper() && ok;
   ok = desktop_native_connect_releases_attempt_guard_on_failed_status() && ok;
+  ok = desktop_connect_error_preserves_status_error_code_contract() && ok;
   ok = tunnel_controller_native_runner_failure_cleans_helper_session() && ok;
+  ok = desktop_connect_job_owner_destructs_before_error_state_contract() && ok;
   ok = desktop_helper_status_includes_current_instance_contract() && ok;
+  ok = auth_interaction_coordinator_test_is_release_blocking() && ok;
   ok = desktop_service_actions_use_helper_owned_maintenance_contract() && ok;
   ok = cli_service_actions_use_core_helper_maintenance_contract() && ok;
   return ok ? 0 : 1;

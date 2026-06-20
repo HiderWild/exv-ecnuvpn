@@ -89,8 +89,12 @@ int main(int argc, char **argv) {
   config.state_dir = ecnuvpn::runtime::paths().state_dir;
 
   ecnuvpn::ui_shell::configure_core_process_transport_signal_policy();
-  auto transport = ecnuvpn::ui_shell::create_core_process_transport(
-      ecnuvpn::ui_shell::CoreProcessLaunch{options.exv_path, "", "", true});
+  ecnuvpn::ui_shell::CoreProcessLaunch core_launch{
+      options.exv_path,
+      config.state_dir,
+      ecnuvpn::runtime::paths().home,
+      true};
+  auto transport = ecnuvpn::ui_shell::create_core_process_transport(core_launch);
   ecnuvpn::ui_shell::CoreRpcClient client(*transport);
 
 #if defined(_WIN32)

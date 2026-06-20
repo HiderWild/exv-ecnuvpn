@@ -694,7 +694,6 @@ bool test_native_network_config_preserves_routes_and_bypass() {
                                          exv::core::TunnelPhase::Connected);
                 }),
                 "2e: route preservation path should reach Connected") && ok;
-
     auto configs = net_ops->applied_configs();
     ok = expect(configs.size() == 1,
                 "2e: native path should apply exactly one platform tunnel config") && ok;
@@ -740,6 +739,62 @@ bool test_native_network_config_preserves_routes_and_bypass() {
                     "2e: platform tunnel config should keep first exclude route in legacy field") && ok;
     }
 
+    return ok;
+}
+
+// --- Test 2e2: Native network refresh reuses prepared device ---
+bool test_native_network_refresh_reuses_prepared_device() {
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+
+    auto ctrl_owner = exv::core::TunnelControllerTestAccess::create(
+        helper, net_ops, exv::core::ReconnectConfig{}, []() {
+            return ecnuvpn::vpn_engine::NativeVpnEngineDependencies{};
+        });
+
+    ecnuvpn::vpn_engine::TunnelMetadata metadata;
+    metadata.interface_name = "ECNU-VPN";
+    metadata.internal_ip4_address = "10.255.0.12";
+    metadata.internal_ip4_netmask = "255.255.255.128";
+    metadata.mtu = 1400;
+    metadata.routes = {"198.51.100.0/24"};
+
+    ecnuvpn::vpn_engine::DeviceConfig first_device;
+    ecnuvpn::vpn_engine::DeviceConfig refreshed_device;
+
+    auto first = exv::core::TunnelControllerTestAccess::configure_network_for_engine(
+        *ctrl_owner, metadata, &first_device);
+    auto refreshed = exv::core::TunnelControllerTestAccess::configure_network_for_engine(
+        *ctrl_owner, metadata, &refreshed_device);
+
+    bool ok = true;
+    ok = expect(first.ok && refreshed.ok,
+                "2e2: repeated native network config should succeed") && ok;
+    ok = expect(net_ops->prepare_count() == 1,
+                "2e2: refresh should reuse the existing prepared tunnel device") && ok;
+    ok = expect(net_ops->apply_count() == 2,
+                "2e2: refresh should still reapply route and DNS config") && ok;
+    ok = expect(first_device.interface_name == refreshed_device.interface_name &&
+                    first_device.mtu == refreshed_device.mtu,
+                "2e2: refreshed packet device config should remain stable") && ok;
+
+    auto connected_ctrl = exv::core::TunnelControllerTestAccess::create(
+        helper, net_ops, exv::core::ReconnectConfig{}, []() {
+            return ecnuvpn::vpn_engine::NativeVpnEngineDependencies{};
+        });
+    ecnuvpn::vpn_engine::DeviceConfig connected_first_device;
+    ecnuvpn::vpn_engine::DeviceConfig connected_refreshed_device;
+    auto connected_first =
+        exv::core::TunnelControllerTestAccess::configure_network_for_engine(
+            *connected_ctrl, metadata, &connected_first_device);
+    connected_ctrl->on_event({exv::core::TunnelEventType::PacketLoopStarted});
+    auto connected_refreshed =
+        exv::core::TunnelControllerTestAccess::configure_network_for_engine(
+            *connected_ctrl, metadata, &connected_refreshed_device);
+    ok = expect(connected_first.ok && connected_refreshed.ok,
+                "2e2: connected refresh should succeed") && ok;
+    ok = expect(connected_ctrl->phase() == exv::core::TunnelPhase::Connected,
+                "2e2: connected refresh must not regress to opening packet device") && ok;
     return ok;
 }
 
@@ -885,6 +940,40 @@ bool test_core_lease_released_on_controller_destruction() {
                     releases[0].lease_id == "core-lease-1" &&
                     releases[0].exit_if_oneshot,
                 "2h: release should use acquired lease id and exit_if_oneshot=true") && ok;
+    return ok;
+}
+
+// --- Test 2h2: Active Helper Session Cleaned On Controller Destruction ---
+bool test_active_helper_session_cleaned_on_controller_destruction() {
+    auto helper = std::make_shared<CoreLeaseRecordingHelper>();
+    auto net_ops = std::make_shared<exv::test::FakePlatformNetworkOps>();
+
+    bool ok = true;
+    {
+        exv::core::TunnelController ctrl(helper, net_ops);
+        ctrl.connect(make_intent(true));
+        ok = expect(ctrl.phase() == exv::core::TunnelPhase::Connected,
+                    "2h2: controller should connect before destruction") && ok;
+        ok = expect(!helper->active_sessions().empty(),
+                    "2h2: helper session should be active before destruction") && ok;
+    }
+
+    ok = expect(helper->shutdown_count() == 1,
+                "2h2: controller destruction should shutdown active helper session") && ok;
+    auto shutdowns = helper->shutdown_requests();
+    ok = expect(shutdowns.size() == 1 &&
+                    shutdowns[0].policy.remove_routes &&
+                    shutdowns[0].policy.remove_dns &&
+                    shutdowns[0].policy.remove_adapter &&
+                    shutdowns[0].policy.remove_firewall_rules,
+                "2h2: destruction cleanup should request full helper cleanup") && ok;
+    ok = expect(helper->active_sessions().empty(),
+                "2h2: destruction cleanup should clear helper session") && ok;
+    ok = expect(helper->release_count() == 1,
+                "2h2: destruction should still release CoreLease once") && ok;
+    auto releases = helper->release_requests();
+    ok = expect(!releases.empty() && releases[0].exit_if_oneshot,
+                "2h2: CoreLease release should request one-shot exit only") && ok;
     return ok;
 }
 
@@ -1457,6 +1546,9 @@ int main() {
     std::cout << "--- Test 2e: Native Network Config Preserves Routes And Bypass ---\n";
     ok = test_native_network_config_preserves_routes_and_bypass() && ok;
 
+    std::cout << "--- Test 2e2: Native Network Refresh Reuses Prepared Device ---\n";
+    ok = test_native_network_refresh_reuses_prepared_device() && ok;
+
     std::cout << "--- Test 2f: Native Packet Startup Failure Cleans Network State ---\n";
     ok = test_native_packet_startup_failure_cleans_network_state() && ok;
 
@@ -1465,6 +1557,9 @@ int main() {
 
     std::cout << "--- Test 2h: CoreLease Released On Controller Destruction ---\n";
     ok = test_core_lease_released_on_controller_destruction() && ok;
+
+    std::cout << "--- Test 2h2: Active Helper Session Cleaned On Controller Destruction ---\n";
+    ok = test_active_helper_session_cleaned_on_controller_destruction() && ok;
 
     std::cout << "--- Test 2i: Handoff Replaces Helper Without Dropping Session ---\n";
     ok = test_handoff_replaces_helper_and_preserves_session() && ok;

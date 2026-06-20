@@ -790,6 +790,55 @@ int test_helper_connector_requires_explicit_endpoint_field() {
   return ok ? 0 : 1;
 }
 
+int test_pipe_helper_client_serializes_request_response_pairs() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto header_source = read_text_file(
+      source_dir / "src" / "helper" / "common" / "pipe_helper_client.hpp");
+  const auto impl_source = read_text_file(
+      source_dir / "src" / "helper" / "common" / "pipe_helper_client.cpp");
+  const auto send_request = impl_source.find("HelperResponse PipeHelperClient::send_request");
+  const auto hello = impl_source.find("HelloResponse PipeHelperClient::hello",
+                                      send_request);
+  const auto block =
+      send_request == std::string::npos
+          ? std::string()
+          : impl_source.substr(send_request,
+                               hello == std::string::npos
+                                   ? std::string::npos
+                                   : hello - send_request);
+
+  ok = expect(header_source.find("request_mutex_") != std::string::npos,
+              "PipeHelperClient must own a mutex for request/response serialization") &&
+       ok;
+  ok = expect(block.find("std::lock_guard<std::mutex>") != std::string::npos &&
+                  block.find("request_mutex_") != std::string::npos,
+              "PipeHelperClient::send_request must serialize one request/response pair at a time") &&
+       ok;
+  return ok ? 0 : 1;
+}
+
+int test_windows_service_status_does_not_block_on_helper_hello() {
+  bool ok = true;
+  const auto source_dir = std::filesystem::path(ECNUVPN_SOURCE_DIR);
+  const auto service_status_source = read_text_file(
+      source_dir / "src" / "platform" / "win32" / "service_status.cpp");
+
+  ok = expect(service_status_source.find("#include \"helper/helper.hpp\"") ==
+                  std::string::npos,
+              "Windows service status must not include the blocking helper availability probe") &&
+       ok;
+  ok = expect(service_status_source.find("helper::is_available") ==
+                  std::string::npos,
+              "service.status must not call helper::is_available because an active session can keep the helper pipe busy") &&
+       ok;
+  ok = expect(service_status_source.find("status.available = status.running") !=
+                  std::string::npos,
+              "service.status should report the SCM running state without a blocking Hello round trip") &&
+       ok;
+  return ok ? 0 : 1;
+}
+
 int test_hello_has_no_version_fields() {
   bool ok = true;
 
@@ -2061,6 +2110,8 @@ int main() {
   failures += test_oneshot_entrypoint_uses_only_endpoint_argument();
   failures += test_windows_oneshot_bootstrap_does_not_consume_helper_connection();
   failures += test_helper_connector_requires_explicit_endpoint_field();
+  failures += test_pipe_helper_client_serializes_request_response_pairs();
+  failures += test_windows_service_status_does_not_block_on_helper_hello();
   failures += test_hello_has_no_version_fields();
   failures += test_hello_mode_matches_startup_context();
   failures += test_start_session_requires_core_lease();

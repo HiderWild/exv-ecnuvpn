@@ -61,9 +61,10 @@ bool test_builds_deterministic_init_xml() {
   const std::string xml = build_aggregate_auth_init_xml(request);
 
   bool ok = true;
-  ok = expect(xml.find("<config-auth client=\"vpn\" type=\"init\">") !=
+  ok = expect(xml.find("<config-auth client=\"vpn\" type=\"init\" "
+                       "aggregate-auth-version=\"2\">") !=
                   std::string::npos,
-              "init XML should use AnyConnect aggregate-auth root") &&
+              "init XML should use AnyConnect aggregate-auth v2 root") &&
        ok;
   ok = expect(xml.find("<version who=\"vpn\">ECNUVPN-NATIVE-TEST</version>") !=
                   std::string::npos,
@@ -114,15 +115,32 @@ bool test_parses_auth_request_and_echoes_opaque() {
   reply.opaque_xml = response.opaque_xml;
 
   const std::string xml = build_aggregate_auth_reply_xml(reply);
-  ok = expect(xml.find("<config-auth client=\"vpn\" type=\"auth-reply\">") !=
+  ok = expect(xml.find("<config-auth client=\"vpn\" type=\"auth-reply\" "
+                       "aggregate-auth-version=\"2\">") !=
                   std::string::npos,
-              "auth reply should use aggregate-auth root") &&
+              "auth reply should use aggregate-auth v2 root") &&
        ok;
   ok = expect(xml.find("<opaque>OPAQUE_ONE</opaque>") != std::string::npos,
               "auth reply should echo opaque XML") &&
        ok;
-  ok = expect(xml.find("student@example.invalid") != std::string::npos,
-              "auth reply should include username") &&
+  ok = expect(xml.find("<auth>\n") != std::string::npos,
+              "auth reply should use direct auth node") &&
+       ok;
+  ok = expect(xml.find("<username>student@example.invalid</username>") !=
+                  std::string::npos,
+              "auth reply should include direct username node") &&
+       ok;
+  ok = expect(xml.find("<password>test-mock-password-placeholder</password>") !=
+                  std::string::npos,
+              "auth reply should include direct password node") &&
+       ok;
+  ok = expect(xml.find("<group-select>students</group-select>") !=
+                  std::string::npos,
+              "auth reply should include selected group as group-select") &&
+       ok;
+  ok = expect(xml.find("<form>") == std::string::npos &&
+                  xml.find("<input") == std::string::npos,
+              "auth reply must not wrap credentials as form inputs") &&
        ok;
   return ok;
 }
@@ -228,6 +246,40 @@ bool test_parses_group_select_options() {
   return ok;
 }
 
+bool test_select_option_without_value_uses_visible_text() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  const std::string group_xml =
+      "<config-auth client=\"vpn\" type=\"auth-request\" "
+      "aggregate-auth-version=\"2\">"
+      "<auth id=\"main\"><form>"
+      "<input type=\"text\" name=\"username\" label=\"Username:\" />"
+      "<input type=\"password\" name=\"password\" label=\"Password:\" />"
+      "<select name=\"group_list\" label=\"GROUP:\">"
+      "<option selected=\"true\">ECNU</option>"
+      "</select>"
+      "</form></auth></config-auth>";
+
+  AggregateAuthResponse response;
+  const auto parsed = parse_aggregate_auth_response(group_xml, &response);
+
+  const auto *group_field = field_named(response, "group_list");
+  bool ok = true;
+  ok = expect(parsed.ok, "ECNU group XML should parse") && ok;
+  ok = expect(group_field != nullptr, "ECNU group field should be present") && ok;
+  ok = expect(group_field && group_field->value == "ECNU",
+              "option text should become the selected group when value is absent") &&
+       ok;
+  ok = expect(group_field && group_field->options.size() == 1,
+              "option without value should still be preserved") &&
+       ok;
+  ok = expect(group_field && group_field->options[0].value == "ECNU" &&
+                  group_field->options[0].label == "ECNU",
+              "option text should fill both value and label") &&
+       ok;
+  return ok;
+}
+
 bool test_parses_host_scan_metadata() {
   using namespace ecnuvpn::vpn_engine::protocol;
 
@@ -258,6 +310,39 @@ bool test_parses_host_scan_metadata() {
        ok;
   ok = expect(response.host_scan.wait_uri == "/+CSCOE+/sdesktop/wait.html",
               "host-scan parser should expose wait URI") &&
+       ok;
+  return ok;
+}
+
+bool test_non_success_shapes_take_precedence_over_complete_marker() {
+  using namespace ecnuvpn::vpn_engine::protocol;
+
+  const std::string complete_error_xml =
+      "<config-auth client=\"vpn\" type=\"complete\">"
+      "<auth id=\"error\"><message>Invalid credentials</message></auth>"
+      "<error>Login failed</error>"
+      "</config-auth>";
+  const std::string complete_host_scan_xml =
+      "<config-auth client=\"vpn\" type=\"complete\">"
+      "<auth id=\"main\"><message>Host scan required</message></auth>"
+      "<host-scan ticket=\"CSD_TICKET_SEED\" token=\"CSD_TOKEN_SEED\" />"
+      "</config-auth>";
+
+  AggregateAuthResponse complete_error;
+  const auto parsed_error =
+      parse_aggregate_auth_response(complete_error_xml, &complete_error);
+  AggregateAuthResponse complete_host_scan;
+  const auto parsed_host_scan =
+      parse_aggregate_auth_response(complete_host_scan_xml, &complete_host_scan);
+
+  bool ok = true;
+  ok = expect(parsed_error.ok, "complete error XML should parse") && ok;
+  ok = expect(complete_error.type == AggregateAuthResponseType::error,
+              "error shape should take precedence over complete marker") &&
+       ok;
+  ok = expect(parsed_host_scan.ok, "complete host-scan XML should parse") && ok;
+  ok = expect(complete_host_scan.type == AggregateAuthResponseType::host_scan,
+              "host-scan shape should take precedence over complete marker") &&
        ok;
   return ok;
 }
@@ -293,7 +378,9 @@ int main() {
   ok = test_parses_success_token_without_formatting_cookie() && ok;
   ok = test_parses_challenge_and_error_shapes() && ok;
   ok = test_parses_group_select_options() && ok;
+  ok = test_select_option_without_value_uses_visible_text() && ok;
   ok = test_parses_host_scan_metadata() && ok;
+  ok = test_non_success_shapes_take_precedence_over_complete_marker() && ok;
   ok = test_rejects_html_and_oversized_responses() && ok;
   return ok ? 0 : 1;
 }

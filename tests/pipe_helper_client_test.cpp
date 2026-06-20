@@ -14,6 +14,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -323,6 +324,30 @@ static bool handle_persistent_requests_win32(const std::string& pipe_name,
     return true;
 }
 
+static bool handle_silent_request_win32(const std::string& pipe_name,
+                                         DWORD hold_ms) {
+    HANDLE hPipe = CreateNamedPipeA(
+        pipe_name.c_str(),
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+        1, 65536, 65536, 0, NULL);
+    if (hPipe == INVALID_HANDLE_VALUE)
+        return false;
+
+    if (!wait_for_client_win32(hPipe)) {
+        CloseHandle(hPipe);
+        return false;
+    }
+
+    std::string raw;
+    (void)read_request_win32(hPipe, raw);
+    Sleep(hold_ms);
+
+    DisconnectNamedPipe(hPipe);
+    CloseHandle(hPipe);
+    return !raw.empty();
+}
+
 #else // POSIX
 
 static bool handle_one_request_posix(const std::string& socket_path) {
@@ -600,6 +625,58 @@ static void test_single_hello() {
 
     client.disconnect();
     expect_true(!client.is_connected(), "client should disconnect");
+
+    server_thread.join();
+    std::cout << " PASS\n";
+}
+
+static void test_response_timeout_returns_failure() {
+    std::cout << "  test_response_timeout_returns_failure...";
+
+    std::string pipe = test_pipe_name();
+#ifdef _WIN32
+    std::thread server_thread(handle_silent_request_win32, pipe, 600);
+#else
+    std::thread server_thread([pipe]() {
+        int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
+                      pipe.c_str());
+        unlink(pipe.c_str());
+        bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        chmod(pipe.c_str(), 0666);
+        listen(server_fd, 1);
+        int client_fd = accept(server_fd, nullptr, nullptr);
+        char buffer[256];
+        (void)::read(client_fd, buffer, sizeof(buffer));
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        ::close(client_fd);
+        ::close(server_fd);
+        unlink(pipe.c_str());
+    });
+#endif
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    PipeClientConfig config;
+    config.pipe_path = pipe;
+    config.connect_timeout_ms = 3000;
+    config.response_timeout_ms = 150;
+
+    PipeHelperClient client(config);
+    expect_true(client.connect(), "client should connect to silent test pipe");
+
+    const auto started = std::chrono::steady_clock::now();
+    auto resp = client.hello(HelloRequest{});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+
+    expect_true(resp.capabilities.empty(),
+                "timed-out hello should return an empty response model");
+    expect_true(elapsed.count() < 1000,
+                "helper response timeout should prevent a long blocking read");
+    expect_true(!client.is_connected(),
+                "client should disconnect after a response timeout");
 
     server_thread.join();
     std::cout << " PASS\n";
@@ -927,6 +1004,8 @@ int main(int argc, char** argv) {
     if (run_all || filter == "test_disconnect_callback")
         test_disconnect_callback();
 #endif
+    if (run_all || filter == "test_response_timeout_returns_failure")
+        test_response_timeout_returns_failure();
     if (run_all || filter == "test_rejects_regular_file_path_on_windows")
         test_rejects_regular_file_path_on_windows();
     if (run_all || filter == "test_connector_factory")

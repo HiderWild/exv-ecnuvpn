@@ -9,6 +9,8 @@
 #include "core/pipe_ipc.hpp"
 #include "runtime/runtime_context.hpp"
 #include "core/app_api/app_api.hpp"
+#include "core/app_api/desktop_status_presenter.hpp"
+#include "core/app_api/desktop_vpn_actions.hpp"
 #include "core/rpc/lane_scheduler.hpp"
 #include "core/rpc/core_api_setup.hpp"
 #include "core/tunnel_controller/reconnect_policy.hpp"
@@ -180,6 +182,18 @@ static bool is_native_core_request(const json& request) {
            request.value("envelope", std::string()) == "core";
 }
 
+static bool is_desktop_backed_native_action(const std::string& action) {
+    return action == "status.get" ||
+           action == "vpn.connect" ||
+           action == "vpn.disconnect" ||
+           action == "vpn.authInteraction.get" ||
+           action == "vpn.authInteraction.respond";
+}
+
+static bool is_core_owned_control_action(const std::string& action) {
+    return action == "core.shutdown";
+}
+
 static json native_core_response(exv::core_api::AppRpcDispatcher& dispatcher,
                                  const json& request) {
     std::string action = request.value("action", std::string());
@@ -208,7 +222,9 @@ static json native_core_response(exv::core_api::AppRpcDispatcher& dispatcher,
     }
 
     exv::core_api::RpcResponse rpc_response =
-        dispatcher.dispatch(rpc_request);
+        is_desktop_backed_native_action(action)
+            ? dispatch_desktop_as_rpc(rpc_request)
+            : dispatcher.dispatch(rpc_request);
 
     json response = {
         {"request_id", rpc_response.request_id},
@@ -335,7 +351,17 @@ static bool schedule_request_json(
 
     exv::core_api::LaneWorkItem item;
     item.request = scheduled.rpc;
-    item.metadata = scheduled.is_desktop
+    const bool use_core_handler =
+        is_core_owned_control_action(item.request.action);
+    const bool use_desktop_handler =
+        !use_core_handler &&
+        (scheduled.is_desktop ||
+         is_desktop_backed_native_action(item.request.action));
+    item.metadata = use_core_handler
+        ? dispatcher.metadata_for(item.request.action)
+              .value_or(exv::core_api::default_metadata_for_action(
+                  item.request.action))
+        : use_desktop_handler
         ? exv::core_api::default_metadata_for_action(item.request.action)
         : dispatcher.metadata_for(item.request.action)
               .value_or(exv::core_api::default_metadata_for_action(
@@ -343,9 +369,9 @@ static bool schedule_request_json(
 
     const bool is_desktop = scheduled.is_desktop;
     const int desktop_id = scheduled.desktop_id;
-    item.handler = [&dispatcher, is_desktop](
+    item.handler = [&dispatcher, use_desktop_handler](
                        const exv::core_api::RpcRequest& rpc_request) {
-        if (is_desktop) {
+        if (use_desktop_handler) {
             return dispatch_desktop_as_rpc(rpc_request);
         }
         return dispatcher.dispatch(rpc_request);
@@ -526,6 +552,16 @@ int core_process_main(const std::string& config_dir,
         std::shared_ptr<exv::platform::PlatformNetworkOps>{},
         ReconnectConfig{});
     auto native_dispatcher = exv::core_api::create_dispatcher(controller);
+    native_dispatcher->register_handler(
+        "core.shutdown",
+        [](const exv::core_api::RpcRequest& req) {
+            (void)req;
+            g_stop_requested.store(true);
+            exv::core_api::RpcResponse resp;
+            resp.success = true;
+            resp.payload_json = R"({"ok":true})";
+            return resp;
+        });
     exv::core_api::LaneScheduler lane_scheduler;
     lane_scheduler.start();
     auto dispatch_line = [&](const std::string& request_line) {
@@ -644,6 +680,31 @@ int core_process_main(const std::string& config_dir,
         });
     }
 
+    std::atomic<bool> status_event_worker_stop{false};
+    std::thread status_event_worker;
+    if (stdin_available) {
+        status_event_worker = std::thread([&] {
+            while (!status_event_worker_stop.load() &&
+                   !g_stop_requested.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                if (status_event_worker_stop.load() ||
+                    g_stop_requested.load()) {
+                    break;
+                }
+
+                auto events =
+                    ecnuvpn::app_api::drain_virtual_network_status_events();
+                if (events.empty()) {
+                    continue;
+                }
+                for (const auto& event : events) {
+                    write_json_line(json{{"event", "status"},
+                                         {"data", event}});
+                }
+            }
+        });
+    }
+
     while (!g_stop_requested.load()) {
         // In daemon mode, just process pipe connections in a loop
         if (!stdin_available) {
@@ -708,7 +769,12 @@ int core_process_main(const std::string& config_dir,
     if (pipe_worker.joinable()) {
         pipe_worker.join();
     }
+    status_event_worker_stop.store(true);
+    if (status_event_worker.joinable()) {
+        status_event_worker.join();
+    }
     lane_scheduler.stop();
+    ecnuvpn::app_api::shutdown_desktop_vpn_runtime();
     pipe_listener->stop();
 
     std::optional<exv::core::lifecycle::CoreRegistryDeleteMatch> delete_match;

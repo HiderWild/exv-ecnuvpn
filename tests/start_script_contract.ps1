@@ -37,6 +37,13 @@ Require-Contains $start 'Stop-Service -Name $helperServiceName' 'start.ps1 must 
 Require-Contains $start 'sc.exe delete $helperServiceName' 'start.ps1 must uninstall the helper service before rebuilding'
 Require-Contains $start 'Wait-HelperServiceAbsent' 'start.ps1 must wait for service deletion before deleting packaged binaries'
 Require-Contains $start 'Invoke-HelperServicePrepackageCleanup' 'start.ps1 must expose a pre-package service cleanup step'
+Require-Contains $start '$env:EXV_CORE_PATH' 'start.ps1 must expose packaged bin directory to the UI core resolver during debug launch'
+Require-Contains $start 'Split-Path -Parent $exvExe' 'start.ps1 must derive EXV_CORE_PATH from the packaged bin/exv.exe path'
+Require-Contains $start 'Restore-LaunchEnvironment' 'start.ps1 must restore process environment after launching the debug UI'
+Require-Contains $start 'Resolve-LaunchArgs' 'start.ps1 must resolve packaged launch arguments before debug launch'
+Require-Contains $start 'Join-Path $packageRoot $value' 'start.ps1 must turn relative exv-ui.args paths into absolute package paths'
+Require-Contains $start 'Join-LaunchArgsForStartProcess' 'start.ps1 must quote launch arguments before calling Start-Process'
+Require-Contains $start "-ArgumentList `$launchArgumentList" 'start.ps1 must pass a single quoted argument string to Start-Process'
 if ($start -notmatch 'Stop-ProjectProcesses\s+Invoke-HelperServicePrepackageCleanup\s+if \(-not \$Quick\)') {
   throw 'start.ps1 must run helper service cleanup after process cleanup and before deleting build artifacts'
 }

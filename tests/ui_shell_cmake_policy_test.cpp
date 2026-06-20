@@ -80,6 +80,8 @@ int main() {
   expect_contains("WebView2Loader.dll");
   expect_contains("POST_BUILD");
   expect_contains("src/platform/win32/ui_shell/exv_ui_win32.rc");
+  expect_contains("src/platform/win32/ui_shell/exv_ui_win32.manifest");
+  expect_contains("OBJECT_DEPENDS");
   expect_contains("${CMAKE_SOURCE_DIR}/assets/icons");
   expect_contains("if(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)");
   expect_contains("pkg_check_modules(WEBKITGTK");
@@ -126,6 +128,11 @@ int main() {
   }
   if (!contains(win32_manifest, "dpiAwareness")) {
     std::cerr << "Windows WebView shell manifest must declare dpiAwareness\n";
+    ++failures;
+  }
+  if (!contains(win32_manifest, "requestedExecutionLevel") ||
+      !contains(win32_manifest, "requireAdministrator")) {
+    std::cerr << "Windows WebView shell manifest must request Administrator rights for Wintun packet I/O\n";
     ++failures;
   }
   if (!contains(win32_resources, "#define IDI_ECNUVPN_APP")) {

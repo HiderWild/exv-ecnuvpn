@@ -40,6 +40,7 @@ using CoreRpcEventHandler = std::function<void(const CoreRpcEvent &)>;
 class CoreRpcTransport {
 public:
   virtual ~CoreRpcTransport() = default;
+  virtual void close() {}
   virtual bool write_line(const std::string &line) = 0;
   virtual bool read_line(std::string &line) = 0;
   virtual bool read_available_line(std::string &line) { return false; }

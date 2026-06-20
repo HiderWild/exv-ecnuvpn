@@ -54,4 +54,35 @@ describe('native error presentation contract', () => {
         `${rawCode} must not recommend retry_password`)
     }
   })
+
+  it('prefers localized contract copy over raw backend English messages', () => {
+    assert.match(storeText, /message:\s*'登录失败，请核对您的用户名和密码。'/,
+      'auth_failed should use actionable Chinese copy')
+    assert.doesNotMatch(storeText,
+      /message:\s*String\(obj\.message\s*\|\|\s*obj\.error\s*\|\|\s*descriptor\.message\)/,
+      'canonical backend codes must not render raw English backend messages before localized descriptors')
+    assert.doesNotMatch(storeText, /Retry the operation/,
+      'user-facing fallback actions should not be English')
+    assert.doesNotMatch(storeText, /Operation failed/,
+      'user-facing fallback messages should not be English')
+  })
+
+  it('localizes common raw native failure messages before showing dialogs', () => {
+    const requiredRawMappings = [
+      ['Login failed.', '登录失败，请核对您的用户名和密码。'],
+      ['Core RPC transport is closed', '核心进程连接已关闭'],
+      ['Failed to start elevated one-shot helper.', '临时助手启动失败'],
+      ['A native VPN connection attempt is already active.', '已有 VPN 连接流程正在进行'],
+      ['invalid X-CSTP-Session-Timeout value', 'VPN 网关返回了异常的会话超时字段'],
+      ['Native engine session failed to start', 'VPN 隧道启动失败'],
+      ['failed to open or create Wintun adapter', '需要管理员权限才能继续'],
+    ] as const
+
+    for (const [rawMessage, localized] of requiredRawMappings) {
+      assert.match(storeText, new RegExp(rawMessage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+        `${rawMessage} should be recognized as a raw failure`)
+      assert.match(storeText, new RegExp(localized),
+        `${rawMessage} should map to Chinese dialog copy`)
+    }
+  })
 })

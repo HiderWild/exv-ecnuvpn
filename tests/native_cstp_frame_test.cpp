@@ -198,6 +198,58 @@ int main() {
          ok;
   }
 
+  // Optional timeout metadata may be advisory strings on some gateways.
+  {
+    const std::string raw =
+        "HTTP/1.1 200 OK\r\n"
+        "X-CSTP-Address: 10.255.0.10\r\n"
+        "X-CSTP-Netmask: 255.255.255.0\r\n"
+        "X-CSTP-MTU: 1400\r\n"
+        "X-CSTP-Idle-Timeout: disabled\r\n"
+        "X-CSTP-Session-Timeout: none\r\n"
+        "X-CSTP-Disconnected-Timeout: none\r\n"
+        "\r\n";
+
+    HttpResponse resp;
+    auto r = parse_http_response(raw, &resp);
+    ok = expect(r.ok, "non-numeric timeout HTTP should parse") && ok;
+
+    TunnelMetadata meta;
+    auto c = parse_cstp_headers(resp, &meta);
+    ok = expect(c.ok, "non-numeric optional timeout headers should not fail CSTP") &&
+         ok;
+    ok = expect(meta.idle_timeout_seconds == 0,
+                "ignored idle timeout should keep default") &&
+         ok;
+    ok = expect(meta.session_timeout_seconds == 0,
+                "ignored session timeout should keep default") &&
+         ok;
+    ok = expect(meta.disconnected_timeout_seconds == 0,
+                "ignored disconnected timeout should keep default") &&
+         ok;
+  }
+
+  // Strict optional transport numbers should still reject malformed values.
+  {
+    const std::string raw =
+        "HTTP/1.1 200 OK\r\n"
+        "X-CSTP-Address: 10.255.0.10\r\n"
+        "X-CSTP-Netmask: 255.255.255.0\r\n"
+        "X-CSTP-MTU: 1400\r\n"
+        "X-DTLS-MTU: nope\r\n"
+        "\r\n";
+
+    HttpResponse resp;
+    auto r = parse_http_response(raw, &resp);
+    ok = expect(r.ok, "malformed strict optional HTTP should parse") && ok;
+
+    TunnelMetadata meta;
+    auto c = parse_cstp_headers(resp, &meta);
+    ok = expect(!c.ok && c.code == "cstp_invalid_number",
+                "malformed DTLS MTU should remain a strict CSTP error") &&
+         ok;
+  }
+
   // Encode keepalive frame.
   {
     CstpFrame f;

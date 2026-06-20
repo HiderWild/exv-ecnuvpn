@@ -85,8 +85,8 @@ void TunnelController::Impl::on_network_config_applied() {
         }
     }
 
-void TunnelController::Impl::on_packet_loop_started() {
-        if (phase_ == TunnelPhase::OpeningPacketDevice) {
+void TunnelController::Impl::complete_packet_loop_started() {
+        if (phase_ != TunnelPhase::Connected) {
             log_tunnel_event("INFO", "packet.loop.started", "Packet loop started",
                              {{"session_id", session_id_.value}});
             timing_.timer.end(ConnectTiming::PACKET_DEVICE);
@@ -96,6 +96,13 @@ void TunnelController::Impl::on_packet_loop_started() {
             reconnect_attempts_ = 0;
             reconnect_policy_.reset();
             start_heartbeat();
+        }
+    }
+
+void TunnelController::Impl::on_packet_loop_started() {
+        packet_loop_started_ = true;
+        if (phase_ == TunnelPhase::OpeningPacketDevice) {
+            complete_packet_loop_started();
         }
     }
 

@@ -1,7 +1,5 @@
 #include "platform/common/service_status.hpp"
 
-#include "helper/helper.hpp"
-
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -73,7 +71,7 @@ ServiceStatusSnapshot current_service_status() {
 
   CloseServiceHandle(svc);
   CloseServiceHandle(scm);
-  status.available = status.running && helper::is_available();
+  status.available = status.running;
   if (status.installed && !status.path.empty()) {
     std::filesystem::path service_path(status.path);
     if (!std::filesystem::exists(service_path)) {

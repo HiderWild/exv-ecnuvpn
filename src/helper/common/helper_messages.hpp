@@ -83,6 +83,8 @@ struct PrepareTunnelDeviceRequest {
 struct PrepareTunnelDeviceResponse {
     std::string device_path;   // e.g. \\.\Wintun\... or /dev/tunN
     int mtu = 1400;
+    std::string error_code;
+    std::string error_message;
 };
 
 struct RouteEntry {
@@ -94,6 +96,7 @@ struct RouteEntry {
 struct DnsConfig {
     std::vector<std::string> servers;
     std::string search_domain;
+    std::vector<std::string> suffixes;
 };
 
 struct TunnelConfig {
@@ -111,7 +114,10 @@ struct ApplyTunnelConfigRequest {
 
 struct ApplyTunnelConfigResponse {
     bool success = false;
+    std::string error_code;
     std::string error_message;
+    std::string error_target;
+    std::uint32_t system_error = 0;
 };
 
 struct HeartbeatRequest {

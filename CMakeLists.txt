@@ -1216,6 +1216,11 @@ if(WIN32)
 endif()
 
 if(WIN32)
+    set_source_files_properties(
+        src/platform/win32/ui_shell/exv_ui_win32.rc
+        PROPERTIES
+        OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/platform/win32/ui_shell/exv_ui_win32.manifest"
+    )
 
     list(APPEND EXV_UI_PLATFORM_SOURCES
         src/platform/win32/ui_shell/exv_ui_win32.rc
@@ -1494,6 +1499,10 @@ if(WIN32)
     target_include_directories(win32_native_packet_device_test PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
+    )
+
+    target_compile_definitions(win32_native_packet_device_test PRIVATE
+        ECNUVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     )
 
     target_link_libraries(win32_native_packet_device_test PRIVATE iphlpapi ws2_32)
@@ -2249,6 +2258,19 @@ target_link_libraries(config_actions_test PRIVATE exv-core)
 
 add_test(NAME config_actions_test COMMAND config_actions_test)
 
+add_executable(log_actions_test
+    tests/core_api/log_actions_test.cpp
+)
+
+target_include_directories(log_actions_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(log_actions_test PRIVATE exv-core)
+
+add_test(NAME log_actions_test COMMAND log_actions_test)
+
 add_executable(core_hello_actions_test
     tests/core_api/core_hello_actions_test.cpp
 )
@@ -2709,6 +2731,7 @@ set(_release_blocking_tests
     app_api_rpc_dispatcher_test
     vpn_actions_test
     config_actions_test
+    log_actions_test
     core_hello_actions_test
     service_actions_test
     route_actions_test
@@ -2724,6 +2747,7 @@ set(_release_blocking_tests
     connection_attempt_test
     helper_delegating_network_ops_test
     app_api_status_contract_test
+    auth_interaction_coordinator_test
     desktop_status_presenter_test
     tunnel_controller_integration_test
 )
@@ -2835,6 +2859,7 @@ set_property(TEST
     platform_network_ops_model_test
     vpn_actions_test
     config_actions_test
+    log_actions_test
     core_hello_actions_test
     service_actions_test
     route_actions_test
@@ -2877,6 +2902,7 @@ set_property(TEST
     core_lifecycle_registry_test
     core_resolver_test
     core_hello_actions_test
+    log_actions_test
     tunnel_contract_test
     tunnel_module_smoke_test
     tunnel_public_module_smoke_test
@@ -2917,6 +2943,7 @@ set_property(TEST
     app_api_rpc_dispatcher_test
     vpn_actions_test
     config_actions_test
+    log_actions_test
     core_hello_actions_test
     core_lifecycle_registry_test
     core_resolver_test

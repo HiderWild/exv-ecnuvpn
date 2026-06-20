@@ -17,7 +17,10 @@ const configStoreText = readSource('src', 'stores', 'config.ts')
 const appText = readSource('src', 'App.vue')
 const vpnStoreText = readSource('src', 'stores', 'vpn.ts')
 const dashboardPageText = readSource('src', 'pages', 'DashboardPage.vue')
+const logsPageText = readSource('src', 'pages', 'LogsPage.vue')
 const minimalModeViewText = readSource('src', 'components', 'MinimalModeView.vue')
+const hostApiText = readSource('src', 'api', 'host.ts')
+const navBarText = readSource('src', 'components', 'NavBar.vue')
 
 function vueScriptSetup(text: string) {
   const match = text.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)
@@ -263,6 +266,23 @@ describe('frontend-owned UI mode state', () => {
     assert.ok(frameText.includes('MODE_TRANSITION_MS'))
     assert.ok(frameText.includes('POST_RESIZE_SETTLE_MS'))
   })
+
+  it('draws a stable one-pixel border around the native window surface', () => {
+    const frameText = readSource('src', 'components', 'AppWindowFrame.vue')
+    assert.ok(frameText.includes('--app-window-border-color'))
+    assert.match(frameText, /border:\s*1px solid var\(--app-window-border-color\)/)
+    assert.match(frameText, /box-sizing:\s*border-box/)
+  })
+
+  it('renders the native window contour with a visible transparent shadow gutter', () => {
+    const frameText = readSource('src', 'components', 'AppWindowFrame.vue')
+    assert.ok(frameText.includes('--app-window-shadow'))
+    assert.ok(frameText.includes('--app-window-shadow-margin'))
+    assert.match(frameText, /padding:\s*var\(--app-window-shadow-margin\)/)
+    assert.match(frameText, /width:\s*calc\(100vw - var\(--app-window-shadow-margin-total\)\)/)
+    assert.match(frameText, /height:\s*calc\(100vh - var\(--app-window-shadow-margin-total\)\)/)
+    assert.match(frameText, /box-shadow:\s*var\(--app-window-shadow\)/)
+  })
 })
 
 describe('connection failure presentation contract', () => {
@@ -275,9 +295,10 @@ describe('connection failure presentation contract', () => {
     assert.match(vpnStoreText, /connectInFlight\.value && isTerminalConnectStatus\(nextStatus\)/)
     assert.match(vpnStoreText, /nextStatus\.connected/)
     assert.match(vpnStoreText, /nextStatus\.error_code/)
+    assert.match(vpnStoreText, /function isTerminalConnectStatus\(nextStatus: VpnStatus\)\s*\{[\s\S]*nextStatus\.error/)
     assert.match(vpnStoreText, /nextStatus\.phase === 'failed'/)
     assert.doesNotMatch(vpnStoreText, /connectInFlight\.value && \(nextStatus\.connected \|\| nextStatus\.process_running === false\)/)
-    assert.match(vpnStoreText, /nextStatus\.error_code[\s\S]*setError\(normalizeError/)
+    assert.match(vpnStoreText, /\(nextStatus\.error_code \|\| nextStatus\.error\)[\s\S]*setError\(normalizeError/)
     assert.match(vpnStoreText, /lastFailedConnectMode\.value = 'helper'/)
   })
 
@@ -306,6 +327,45 @@ describe('connection failure presentation contract', () => {
     assert.ok(hasPropertyCall(minimalScript, 'cancelConnect'))
   })
 
+  it('suppresses transport-closed errors while cancelling an active connect', () => {
+    assert.match(vpnStoreText, /function isBenignCancelTransportError\(/)
+    assert.match(vpnStoreText, /transport_closed/)
+    assert.match(vpnStoreText, /core_comm_broken/)
+    assert.match(vpnStoreText, /core_unresponsive/)
+
+    const cancelStart = vpnStoreText.indexOf('async function cancelConnect')
+    assert.notEqual(cancelStart, -1)
+    const disconnectStart = vpnStoreText.indexOf('async function disconnect', cancelStart)
+    assert.notEqual(disconnectStart, -1)
+    const cancelBlock = vpnStoreText.slice(cancelStart, disconnectStart)
+    assert.match(cancelBlock, /isBenignCancelTransportError\(normalized\)/)
+    assert.doesNotMatch(cancelBlock, /if \(normalized\.error_type !== 'user_cancelled'\) setError\(normalized\)/)
+  })
+
+  it('does not let service status refresh block disconnect finalization', () => {
+    assert.match(vpnStoreText, /SERVICE_STATUS_REFRESH_TIMEOUT_MS\s*=/)
+    assert.match(vpnStoreText, /function withTimeout</)
+    assert.match(vpnStoreText, /async function fetchServiceStatusWithTimeout\(/)
+
+    const fetchShellStart = vpnStoreText.indexOf('async function fetchAppShellState')
+    assert.notEqual(fetchShellStart, -1)
+    const startPollingStart = vpnStoreText.indexOf('function startConnectStatusPolling', fetchShellStart)
+    assert.notEqual(startPollingStart, -1)
+    const fetchShellBlock = vpnStoreText.slice(fetchShellStart, startPollingStart)
+    assert.match(fetchShellBlock, /fetchServiceStatusWithTimeout\(\)/)
+    assert.doesNotMatch(fetchShellBlock, /fetchStatus\(\), fetchServiceStatus\(\)/)
+  })
+
+  it('turns core transport loss during active connect into a visible terminal failure', () => {
+    assert.match(vpnStoreText, /function handleStatusPollFailure\(error: unknown\)/)
+    assert.match(vpnStoreText, /connectInFlight\.value/)
+    assert.match(vpnStoreText, /setError\(normalizeError\(error\)\)/)
+    assert.match(vpnStoreText, /stopConnectStatusPolling\(\)/)
+    assert.match(vpnStoreText, /stopAuthInteractionPolling\(\)/)
+    assert.match(vpnStoreText, /stopConnectionProgress\(\)/)
+    assert.match(vpnStoreText, /handleStatusPollFailure\(e\)/)
+  })
+
   it('does not treat a hidden service install checkbox as an install request', () => {
     const dashboardScript = vueScriptSetup(dashboardPageText)
     assert.match(dashboardScript, /vpn\.connectFromDashboard\(\s*showInstallServiceChoice\.value && installServiceBeforeConnect\.value\s*\)/)
@@ -319,5 +379,34 @@ describe('connection failure presentation contract', () => {
     assert.match(connectFromDashboardBlock, /const shouldInstallService = installServiceFirst && !serviceInstalled\.value && !serviceAvailable\.value/)
     assert.match(connectFromDashboardBlock, /if \(shouldInstallService\)/)
     assert.doesNotMatch(connectFromDashboardBlock, /if \(installServiceFirst\)/)
+  })
+})
+
+describe('desktop log transport contract', () => {
+  it('loads logs incrementally with a bounded cursor instead of full history', () => {
+    const logsScript = vueScriptSetup(logsPageText)
+    assert.match(logsScript, /LOG_FETCH_LIMIT\s*=\s*200/)
+    assert.match(logsScript, /lastLogSeq/)
+    assert.match(logsScript, /after_seq/)
+    assert.match(logsScript, /loadLogChunk/)
+    assert.match(logsScript, /setInterval\(\(\)\s*=>\s*{\s*void loadLogChunk\(false\)/)
+    assert.match(logsScript, /api\.get<LogEntry\[\]>\('\/logs',\s*\{\s*params/)
+  })
+
+  it('passes log query parameters through the desktop host bridge', () => {
+    assert.match(hostApiText, /get<T = unknown>\(path: string,\s*options\?:/)
+    assert.match(hostApiText, /logs\.list\(plainPayload\(options\?\.params/)
+  })
+})
+
+describe('dashboard virtual network topology contract', () => {
+  it('shows upstream virtual adapter detection even before VPN is connected', () => {
+    assert.doesNotMatch(dashboardPageText, /network-probe-strip/)
+    assert.match(dashboardPageText, /upstreamVirtualTooltip/)
+    assert.match(dashboardPageText, /tooltip:\s*upstreamVirtualTooltip\.value/)
+    assert.match(dashboardPageText, /:title="node\.tooltip \|\| node\.title"/)
+    assert.match(dashboardPageText, /hasUpstreamVirtual/)
+    assert.match(dashboardPageText, /vpn\.status\?\.upstream_virtual_detected/)
+    assert.doesNotMatch(navBarText, /showSidebarStatusDetails\s*=\s*computed\(\(\) => Boolean\(vpn\.status\?\.connected\)\)/)
   })
 })

@@ -2,6 +2,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <cstdint>
 #include "tunnel_config.hpp"
 #include "tunnel_device_descriptor.hpp"
 
@@ -28,6 +29,13 @@ struct ManagedNetworkResource {
     std::string detail;
 };
 
+struct PlatformNetworkError {
+    std::string code;
+    std::string message;
+    std::string target;
+    std::uint32_t system_error = 0;
+};
+
 class PlatformNetworkOps {
 public:
     virtual ~PlatformNetworkOps() = default;
@@ -40,6 +48,10 @@ public:
 
     // Apply network configuration (routes, DNS, firewall)
     virtual bool apply_tunnel_config(const TunnelDeviceDescriptor& device, const TunnelConfig& config) = 0;
+
+    virtual PlatformNetworkError last_error() const {
+        return {};
+    }
 
     // Cleanup resources
     virtual CleanupResult cleanup(const std::string& adapter_name, CleanupPolicy policy) = 0;

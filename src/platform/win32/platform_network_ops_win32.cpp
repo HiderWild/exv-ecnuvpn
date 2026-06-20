@@ -2,6 +2,7 @@
 
 #include "vpn_engine/session_state.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -12,6 +13,8 @@
 
 namespace exv::platform {
 namespace {
+
+constexpr std::uint32_t kWin32ErrorNotFound = 1168;
 
 std::wstring widen_ascii(const std::string &value) {
   std::wstring out;
@@ -204,6 +207,15 @@ std::optional<std::string> first_resource_detail(
   return std::nullopt;
 }
 
+void remove_managed_resources_of_type(
+    std::vector<ManagedNetworkResource> &resources, const std::string &type) {
+  resources.erase(std::remove_if(resources.begin(), resources.end(),
+                                 [&](const ManagedNetworkResource &resource) {
+                                   return resource.type == type;
+                                 }),
+                  resources.end());
+}
+
 class Win32PlatformNetworkOps final : public PlatformNetworkOps {
 public:
   Win32PlatformNetworkOps(
@@ -220,9 +232,20 @@ public:
 
     auto wintun = std::make_unique<ecnuvpn::platform::NativeWintun>(
         wintun_dependencies_, config);
-    auto started = wintun->start();
-    if (!started.ok())
-      return {};
+    auto started = wintun->prepare_adapter();
+    if (!started.ok()) {
+      TunnelDeviceDescriptor descriptor;
+      descriptor.adapter_name = adapter_name;
+      descriptor.mtu = mtu > 0 ? mtu : 1400;
+      descriptor.is_open = false;
+      descriptor.error_code =
+          std::string("native_wintun_") +
+          ecnuvpn::platform::native_wintun_error_code(started.error);
+      descriptor.error_message = started.detail.empty()
+                                     ? "failed to start Wintun adapter"
+                                     : started.detail;
+      return descriptor;
+    }
 
     interface_index_ = started.metadata.if_index;
     wintun_ = std::move(wintun);
@@ -252,31 +275,66 @@ public:
 
   bool apply_tunnel_config(const TunnelDeviceDescriptor &device,
                            const TunnelConfig &config) override {
-    if (!wintun_ || !device.is_open || interface_index_ == 0)
+    last_error_ = {};
+    if (!wintun_ || !device.is_open || interface_index_ == 0) {
+      set_last_error("invalid_device",
+                     "Wintun device is not open or has no interface index",
+                     device.adapter_name);
       return false;
+    }
 
     std::string address;
     std::string netmask;
-    if (!split_ipv4_cidr(config.interface_address, &address, &netmask))
+    if (!split_ipv4_cidr(config.interface_address, &address, &netmask)) {
+      set_last_error("invalid_address",
+                     "Tunnel interface address is not valid CIDR",
+                     config.interface_address);
       return false;
+    }
+
+    const bool reapplying_network_config = static_cast<bool>(ip_config_);
+    if (ip_config_) {
+      auto cleaned = ip_config_->cleanup();
+      if (!cleaned.ok()) {
+        set_last_error(
+            std::string("native_ip_config_") +
+                ecnuvpn::platform::native_ip_config_error_code(cleaned.error),
+            cleaned.message.empty() ? "native route cleanup failed"
+                                    : cleaned.message,
+            cleaned.target, cleaned.system_error);
+        return false;
+      }
+      ip_config_.reset();
+      remove_managed_resources_of_type(managed_resources_, "win32_route");
+    }
 
     ecnuvpn::platform::NativeDnsSettings desired_dns;
     const bool configure_dns = has_dns_config(config.dns);
     if (configure_dns) {
-      if (!to_native_dns_settings(config.dns, &desired_dns))
+      if (!to_native_dns_settings(config.dns, &desired_dns)) {
+        set_last_error("invalid_dns", "Tunnel DNS settings are invalid");
         return false;
+      }
       if (!ip_helper_api_.get_interface_dns_settings ||
-          !ip_helper_api_.set_interface_dns_settings)
+          !ip_helper_api_.set_interface_dns_settings) {
+        set_last_error("dns_api_missing",
+                       "Native DNS settings API is unavailable");
         return false;
+      }
     }
 
     ecnuvpn::platform::NativeDnsSettings previous_dns;
-    if (configure_dns) {
+    bool captured_original_dns = false;
+    if (configure_dns && !dns_configured_) {
       ecnuvpn::platform::NativeIpHelperApi::ErrorCode dns_error =
           ip_helper_api_.get_interface_dns_settings(interface_index_,
                                                     previous_dns);
-      if (dns_error != 0)
+      if (dns_error != 0) {
+        set_last_error("dns_read_failed", "GetInterfaceDnsSettings failed",
+                       std::to_string(interface_index_), dns_error);
         return false;
+      }
+      captured_original_dns = true;
     }
 
     ecnuvpn::vpn_engine::TunnelMetadata metadata;
@@ -292,11 +350,16 @@ public:
     ecnuvpn::platform::NativeIpConfigOptions options;
     options.interface_index = interface_index_;
     options.configured_mtu = metadata.mtu;
+    options.configure_address = !reapplying_network_config;
 
     auto ip_config = std::make_unique<ecnuvpn::platform::NativeIpConfig>(
         ip_helper_api_, options);
     auto result = ip_config->configure(metadata);
     if (!result.ok()) {
+      set_last_error(
+          std::string("native_ip_config_") +
+              ecnuvpn::platform::native_ip_config_error_code(result.error),
+          result.message, result.target, result.system_error);
       auto rollback = ip_config->cleanup();
       if (!rollback.ok())
         ip_config_ = std::move(ip_config);
@@ -308,28 +371,33 @@ public:
           ip_helper_api_.set_interface_dns_settings(interface_index_,
                                                     desired_dns);
       if (dns_error != 0) {
-        (void)ip_helper_api_.set_interface_dns_settings(interface_index_,
-                                                        previous_dns);
+        set_last_error("dns_write_failed", "SetInterfaceDnsSettings failed",
+                       std::to_string(interface_index_), dns_error);
+        if (captured_original_dns)
+          (void)ip_helper_api_.set_interface_dns_settings(interface_index_,
+                                                          previous_dns);
         auto rollback = ip_config->cleanup();
         if (!rollback.ok())
           ip_config_ = std::move(ip_config);
         return false;
       }
-      original_dns_ = previous_dns;
-      dns_configured_ = true;
+      if (captured_original_dns) {
+        original_dns_ = previous_dns;
+        dns_configured_ = true;
+        managed_resources_.push_back(
+            {"win32_dns_original",
+             encode_dns_resource(interface_index_, previous_dns)});
+      }
     }
 
     ip_config_ = std::move(ip_config);
     for (const auto &route : ip_config_->owned_routes()) {
       managed_resources_.push_back({"win32_route", encode_route_resource(route)});
     }
-    if (configure_dns) {
-      managed_resources_.push_back(
-          {"win32_dns_original",
-           encode_dns_resource(interface_index_, previous_dns)});
-    }
     return true;
   }
+
+  PlatformNetworkError last_error() const override { return last_error_; }
 
   CleanupResult cleanup(const std::string &adapter_name,
                         CleanupPolicy policy) override {
@@ -384,16 +452,13 @@ public:
     if (policy == CleanupPolicy::Full && wintun_) {
       (void)adapter_name;
       auto deleted = wintun_->delete_adapter();
-      if (!deleted.ok()) {
-        result.success = false;
-        result.error_message = deleted.detail;
-        return result;
+      if (deleted.ok()) {
+        result.adapter_removed = true;
       }
       wintun_.reset();
       interface_index_ = 0;
       last_device_ = {};
       managed_resources_.clear();
-      result.adapter_removed = true;
     }
 
     return result;
@@ -420,14 +485,20 @@ public:
         auto route = decode_route_resource(resource.detail);
         if (!route.has_value())
           continue;
-        if (!ip_helper_api_.delete_ip_forward_entry2 ||
-            ip_helper_api_.delete_ip_forward_entry2(*route) != 0) {
+        if (!ip_helper_api_.delete_ip_forward_entry2) {
           result.success = false;
           if (result.error_message.empty())
             result.error_message = "Windows route cleanup from facts failed";
-        } else {
-          ++result.routes_removed;
+          continue;
         }
+        auto delete_error = ip_helper_api_.delete_ip_forward_entry2(*route);
+        if (delete_error != 0 && delete_error != kWin32ErrorNotFound) {
+          result.success = false;
+          if (result.error_message.empty())
+            result.error_message = "Windows route cleanup from facts failed";
+          continue;
+        }
+        ++result.routes_removed;
       }
     }
 
@@ -463,7 +534,7 @@ public:
         config.adapter_name_prefix = widen_ascii(*adapter);
         auto wintun = std::make_unique<ecnuvpn::platform::NativeWintun>(
             wintun_dependencies_, config);
-        auto started = wintun->start();
+        auto started = wintun->prepare_adapter();
         if (!started.ok()) {
           result.success = false;
           result.error_message = started.detail.empty()
@@ -472,12 +543,9 @@ public:
           return result;
         }
         auto deleted = wintun->delete_adapter();
-        if (!deleted.ok()) {
-          result.success = false;
-          result.error_message = deleted.detail;
-          return result;
+        if (deleted.ok()) {
+          result.adapter_removed = true;
         }
-        result.adapter_removed = true;
       }
     }
 
@@ -489,11 +557,20 @@ public:
   }
 
   bool device_exists(const std::string &adapter_name) const override {
-    return wintun_ && wintun_->running() && last_device_.is_open &&
+    return wintun_ && last_device_.is_open &&
            (adapter_name.empty() || adapter_name == last_device_.adapter_name);
   }
 
 private:
+  void set_last_error(const std::string &code, const std::string &message,
+                      const std::string &target = {},
+                      std::uint32_t system_error = 0) {
+    last_error_.code = code;
+    last_error_.message = message;
+    last_error_.target = target;
+    last_error_.system_error = system_error;
+  }
+
   ecnuvpn::platform::NativeWintunDependencies wintun_dependencies_;
   ecnuvpn::platform::NativeIpHelperApi ip_helper_api_;
   std::unique_ptr<ecnuvpn::platform::NativeWintun> wintun_;
@@ -503,6 +580,7 @@ private:
   std::uint32_t interface_index_ = 0;
   bool dns_configured_ = false;
   std::vector<ManagedNetworkResource> managed_resources_;
+  PlatformNetworkError last_error_;
 };
 
 } // namespace

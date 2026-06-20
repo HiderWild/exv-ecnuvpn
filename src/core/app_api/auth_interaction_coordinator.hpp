@@ -93,6 +93,8 @@ void set_active_connect_auth_coordinator(
     std::shared_ptr<AuthInteractionCoordinator> coordinator);
 std::shared_ptr<AuthInteractionCoordinator>
 get_active_connect_auth_coordinator();
+bool clear_active_connect_auth_coordinator_if_current(
+    const std::shared_ptr<AuthInteractionCoordinator> &coordinator);
 
 } // namespace app_api
 } // namespace ecnuvpn

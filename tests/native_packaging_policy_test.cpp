@@ -364,6 +364,12 @@ bool check_webview_package_policy() {
               "package_ui_shell.py should verify packaged launch argument "
               "targets") &&
        ok;
+  ok = expect(contains(package_script, "PACKAGE_BINARIES") &&
+                  contains(package_script, "\"exv-helper\"") &&
+                  contains(package_script, "validate_required_package_binaries"),
+              "package_ui_shell.py should require exv-helper in the packaged "
+              "WebView shell") &&
+       ok;
   ok = expect(contains(package_script, "APP_ICON_ASSETS") &&
                   contains(package_script, "verify_app_icon_assets"),
               "package_ui_shell.py should fail packaging when shared app "

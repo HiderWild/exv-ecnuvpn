@@ -11,8 +11,19 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -61,7 +72,7 @@ void write_registry_record(const std::filesystem::path &dir, int owner_pid,
 }
 
 void write_lock_owner(const std::filesystem::path &dir, int owner_pid,
-                      const std::string &attempt_id) {
+                       const std::string &attempt_id) {
   const auto lock_dir = dir / "connect-attempt.lock";
   std::filesystem::create_directories(lock_dir);
   write_json_file(lock_dir / "owner.json",
@@ -71,8 +82,56 @@ void write_lock_owner(const std::filesystem::path &dir, int owner_pid,
                                  {"mode", "native_auth"},
                                  {"created_at_unix_ms", 1712345679000LL},
                                  {"state", "active"},
-                                 {"terminal_reason", ""}});
+                                  {"terminal_reason", ""}});
 }
+
+class HeldAttemptMutex {
+public:
+  explicit HeldAttemptMutex(const std::filesystem::path &dir) {
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "connect-attempt.mutex";
+#ifdef _WIN32
+    handle_ = CreateFileA(path.string().c_str(), GENERIC_READ | GENERIC_WRITE,
+                          0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                          nullptr);
+    if (handle_ == INVALID_HANDLE_VALUE)
+      throw std::runtime_error("failed to hold connection attempt mutex");
+#else
+    fd_ = open(path.string().c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    if (fd_ < 0 || flock(fd_, LOCK_EX | LOCK_NB) != 0) {
+      release();
+      throw std::runtime_error("failed to hold connection attempt mutex");
+    }
+#endif
+  }
+
+  ~HeldAttemptMutex() { release(); }
+
+  HeldAttemptMutex(const HeldAttemptMutex &) = delete;
+  HeldAttemptMutex &operator=(const HeldAttemptMutex &) = delete;
+
+private:
+  void release() noexcept {
+#ifdef _WIN32
+    if (handle_ != INVALID_HANDLE_VALUE) {
+      CloseHandle(handle_);
+      handle_ = INVALID_HANDLE_VALUE;
+    }
+#else
+    if (fd_ >= 0) {
+      flock(fd_, LOCK_UN);
+      close(fd_);
+      fd_ = -1;
+    }
+#endif
+  }
+
+#ifdef _WIN32
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+  int fd_ = -1;
+#endif
+};
 
 bool active_owner_blocks_second_attempt() {
   namespace attempt = ecnuvpn::connection_attempt;
@@ -459,6 +518,64 @@ bool scope_exit_marks_current_attempt_terminal_on_exception() {
   return ok;
 }
 
+bool terminal_scope_retries_after_transient_mutex_contention() {
+  namespace attempt = ecnuvpn::connection_attempt;
+
+  const auto dir = unique_temp_dir("terminal-mutex-contention");
+  attempt::AcquireOptions options;
+  options.config_dir = dir.string();
+  options.owner_pid = 1112;
+  options.is_process_alive = [](int pid) { return pid == 1112; };
+  const auto first = attempt::try_acquire(options);
+
+  bool ok = true;
+  ok = expect(first.acquired, "contention setup should acquire initial attempt") &&
+       ok;
+
+  std::unique_ptr<HeldAttemptMutex> held;
+  try {
+    held = std::make_unique<HeldAttemptMutex>(dir);
+  } catch (const std::exception &ex) {
+    std::cerr << "EXPECT FAILED: " << ex.what() << std::endl;
+    return false;
+  }
+
+  std::thread releaser([&held]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    held.reset();
+  });
+
+  {
+    attempt::TerminalAttemptScope cleanup(
+        dir.string(), first.record.attempt_id, "transient_mutex_contention");
+  }
+
+  releaser.join();
+
+  attempt::AttemptRecord terminal_record;
+  const bool read_terminal =
+      attempt::read_record(dir.string(), &terminal_record);
+
+  attempt::AcquireOptions next = options;
+  next.owner_pid = 2223;
+  next.is_process_alive = [](int pid) { return pid == 1112 || pid == 2223; };
+  const auto second = attempt::try_acquire(next);
+
+  ok = expect(read_terminal,
+              "retrying terminal cleanup should leave a terminal record") &&
+       ok;
+  ok = expect(terminal_record.state == "terminal",
+              "retrying terminal cleanup should mark terminal state") &&
+       ok;
+  ok = expect(terminal_record.terminal_reason == "transient_mutex_contention",
+              "retrying terminal cleanup should preserve terminal reason") &&
+       ok;
+  ok = expect(second.acquired,
+              "transient mutex contention should not leave an active attempt") &&
+       ok;
+  return ok;
+}
+
 bool app_api_native_connect_reports_active_attempt_before_bootstrap() {
   namespace attempt = ecnuvpn::connection_attempt;
 
@@ -604,6 +721,7 @@ int main() {
   ok = missing_registry_with_dead_lock_owner_is_recoverable() && ok;
   ok = terminal_attempt_releases_guard_and_preserves_reason() && ok;
   ok = scope_exit_marks_current_attempt_terminal_on_exception() && ok;
+  ok = terminal_scope_retries_after_transient_mutex_contention() && ok;
   ok = app_api_native_connect_reports_active_attempt_before_bootstrap() && ok;
   ok = app_api_acquires_attempt_before_submitting_connect_job() && ok;
   return ok ? 0 : 1;
