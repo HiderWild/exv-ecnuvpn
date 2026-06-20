@@ -81,8 +81,8 @@ export const useUiStore = defineStore('ui', () => {
 
   function requestConfirm(message: string, onConfirm: () => void) {
     const config = useConfigStore()
-    if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
-      void window.ecnuVpn.modal.confirmPrompt(message).then((confirmed) => {
+    if (config.settings.minimal_mode && window.exv?.modal) {
+      void window.exv.modal.confirmPrompt(message).then((confirmed) => {
         if (confirmed) onConfirm()
       })
       return
@@ -140,8 +140,8 @@ export const useUiStore = defineStore('ui', () => {
   function requestPassword(message: string) {
     passwordPromptResolver.value?.(null)
     const config = useConfigStore()
-    if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
-      return window.ecnuVpn.modal.passwordPrompt(message)
+    if (config.settings.minimal_mode && window.exv?.modal) {
+      return window.exv.modal.passwordPrompt(message)
     }
     passwordPromptMessage.value = message
     showPasswordPrompt.value = true

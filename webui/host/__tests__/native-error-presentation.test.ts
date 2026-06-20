@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 const webuiRoot = process.cwd()
 const storeText = readFileSync(join(webuiRoot, 'src', 'stores', 'vpn.ts'), 'utf8')
-const globalTypeText = readFileSync(join(webuiRoot, 'src', 'types', 'ecnu-vpn.d.ts'), 'utf8')
+const globalTypeText = readFileSync(join(webuiRoot, 'src', 'types', 'exv.d.ts'), 'utf8')
 
 const requiredNativeErrorCodes = [
   'auth_protocol_mismatch',
@@ -30,7 +30,7 @@ describe('native error presentation contract', () => {
 
   it('keeps the desktop global VPN error type in sync', () => {
     for (const code of requiredNativeErrorCodes) {
-      assert.match(globalTypeText, new RegExp(`'${code}'`), `${code} missing from EcnuVpnApi VpnErrorType`)
+      assert.match(globalTypeText, new RegExp(`'${code}'`), `${code} missing from ExvApi VpnErrorType`)
     }
   })
 

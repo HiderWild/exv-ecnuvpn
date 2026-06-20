@@ -6,7 +6,7 @@ type ApiResponse<T> = Promise<{ data: T }>
 type ApiGetOptions = { params?: any }
 
 function hostAvailable() {
-  return typeof window !== 'undefined' && !!window.ecnuVpn
+  return typeof window !== 'undefined' && !!window.exv
 }
 
 function requireHost() {
@@ -34,30 +34,30 @@ const hostApi = {
 
     switch (path) {
       case desktopApiPaths.status:
-        return wrap(window.ecnuVpn!.status.get()) as ApiResponse<T>
+        return wrap(window.exv!.status.get()) as ApiResponse<T>
       case desktopApiPaths.configAuth:
-        return wrap(window.ecnuVpn!.config.getAuth()) as ApiResponse<T>
+        return wrap(window.exv!.config.getAuth()) as ApiResponse<T>
       case desktopApiPaths.configSettings:
-        return wrap(window.ecnuVpn!.config.getSettings()) as ApiResponse<T>
+        return wrap(window.exv!.config.getSettings()) as ApiResponse<T>
       case desktopApiPaths.configKey:
       case desktopApiPaths.configKeyAlias:
-        return wrap(window.ecnuVpn!.config.getKey()) as ApiResponse<T>
+        return wrap(window.exv!.config.getKey()) as ApiResponse<T>
       case desktopApiPaths.routes:
-        return wrap(window.ecnuVpn!.routes.list()) as ApiResponse<T>
+        return wrap(window.exv!.routes.list()) as ApiResponse<T>
       case desktopApiPaths.service:
-        return wrap(window.ecnuVpn!.service.status()) as ApiResponse<T>
+        return wrap(window.exv!.service.status()) as ApiResponse<T>
       case desktopApiPaths.cli:
-        return wrap(window.ecnuVpn!.cli.status()) as ApiResponse<T>
+        return wrap(window.exv!.cli.status()) as ApiResponse<T>
       case desktopApiPaths.runtime:
-        return wrap(window.ecnuVpn!.runtime.status()) as ApiResponse<T>
+        return wrap(window.exv!.runtime.status()) as ApiResponse<T>
       case desktopApiPaths.drivers:
-        return wrap(window.ecnuVpn!.drivers.status()) as ApiResponse<T>
+        return wrap(window.exv!.drivers.status()) as ApiResponse<T>
       case desktopApiPaths.logs:
-        return wrap(window.ecnuVpn!.logs.list(plainPayload(options?.params ?? {}))) as ApiResponse<T>
+        return wrap(window.exv!.logs.list(plainPayload(options?.params ?? {}))) as ApiResponse<T>
       case desktopApiPaths.maintenanceCore:
-        return wrap(window.ecnuVpn!.maintenance.inspectCore()) as ApiResponse<T>
+        return wrap(window.exv!.maintenance.inspectCore()) as ApiResponse<T>
       case desktopApiPaths.authInteraction:
-        return wrap(window.ecnuVpn!.vpn.authInteraction()) as ApiResponse<T>
+        return wrap(window.exv!.vpn.authInteraction()) as ApiResponse<T>
       default:
         unsupported(path)
     }
@@ -68,45 +68,45 @@ const hostApi = {
 
     switch (path) {
       case desktopApiPaths.connect:
-        return wrap(window.ecnuVpn!.vpn.connect(body?.password)) as ApiResponse<T>
+        return wrap(window.exv!.vpn.connect(body?.password)) as ApiResponse<T>
       case desktopApiPaths.connectElevated:
-        return wrap(window.ecnuVpn!.vpn.connectElevated(body?.password)) as ApiResponse<T>
+        return wrap(window.exv!.vpn.connectElevated(body?.password)) as ApiResponse<T>
       case desktopApiPaths.disconnect:
-        return wrap(window.ecnuVpn!.vpn.disconnect()) as ApiResponse<T>
+        return wrap(window.exv!.vpn.disconnect()) as ApiResponse<T>
       case desktopApiPaths.disconnectElevated:
         return wrap(
-          window.ecnuVpn!.vpn.disconnectElevated(plainPayload(body)?.backend),
+          window.exv!.vpn.disconnectElevated(plainPayload(body)?.backend),
         ) as ApiResponse<T>
       case desktopApiPaths.authInteractionResponse: {
         const payload = plainPayload(body ?? {})
         return wrap(
-          window.ecnuVpn!.vpn.respondAuthInteraction(payload.id ?? '', payload.value ?? ''),
+          window.exv!.vpn.respondAuthInteraction(payload.id ?? '', payload.value ?? ''),
         ) as ApiResponse<T>
       }
       case desktopApiPaths.routes:
-        return wrap(window.ecnuVpn!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
+        return wrap(window.exv!.routes.add(plainPayload(body)?.cidr ?? '')) as ApiResponse<T>
       case desktopApiPaths.routesReset:
-        return wrap(window.ecnuVpn!.routes.reset()) as ApiResponse<T>
+        return wrap(window.exv!.routes.reset()) as ApiResponse<T>
       case desktopApiPaths.serviceInstall:
-        return wrap(window.ecnuVpn!.service.install()) as ApiResponse<T>
+        return wrap(window.exv!.service.install()) as ApiResponse<T>
       case desktopApiPaths.serviceUninstall:
-        return wrap(window.ecnuVpn!.service.uninstall()) as ApiResponse<T>
+        return wrap(window.exv!.service.uninstall()) as ApiResponse<T>
       case desktopApiPaths.cliInstall:
-        return wrap(window.ecnuVpn!.cli.install()) as ApiResponse<T>
+        return wrap(window.exv!.cli.install()) as ApiResponse<T>
       case desktopApiPaths.cliUninstall:
-        return wrap(window.ecnuVpn!.cli.uninstall()) as ApiResponse<T>
+        return wrap(window.exv!.cli.uninstall()) as ApiResponse<T>
       case desktopApiPaths.driversInstall:
-        return wrap(window.ecnuVpn!.drivers.install(plainPayload(body)?.driver)) as ApiResponse<T>
+        return wrap(window.exv!.drivers.install(plainPayload(body)?.driver)) as ApiResponse<T>
       case desktopApiPaths.configImport:
-        return wrap(window.ecnuVpn!.config.importConfig(plainPayload(body))) as ApiResponse<T>
+        return wrap(window.exv!.config.importConfig(plainPayload(body))) as ApiResponse<T>
       case desktopApiPaths.configExport:
-        return wrap(window.ecnuVpn!.config.exportConfig(plainPayload(body))) as ApiResponse<T>
+        return wrap(window.exv!.config.exportConfig(plainPayload(body))) as ApiResponse<T>
       case desktopApiPaths.configReset:
-        return wrap(window.ecnuVpn!.config.reset(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
+        return wrap(window.exv!.config.reset(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
       case desktopApiPaths.keyReset:
-        return wrap(window.ecnuVpn!.key.reset(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
+        return wrap(window.exv!.key.reset(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
       case desktopApiPaths.maintenanceCoreKill:
-        return wrap(window.ecnuVpn!.maintenance.killStaleCore(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
+        return wrap(window.exv!.maintenance.killStaleCore(plainPayload(body)?.confirm ?? false)) as ApiResponse<T>
       default:
         unsupported(path)
     }
@@ -117,9 +117,9 @@ const hostApi = {
 
     switch (path) {
       case desktopApiPaths.configAuth:
-        return wrap(window.ecnuVpn!.config.saveAuth(plainPayload(body ?? {}))) as ApiResponse<T>
+        return wrap(window.exv!.config.saveAuth(plainPayload(body ?? {}))) as ApiResponse<T>
       case desktopApiPaths.configSettings:
-        return wrap(window.ecnuVpn!.config.saveSettings(plainPayload(body ?? {}))) as ApiResponse<T>
+        return wrap(window.exv!.config.saveSettings(plainPayload(body ?? {}))) as ApiResponse<T>
       default:
         unsupported(path)
     }
@@ -130,7 +130,7 @@ const hostApi = {
 
     switch (path) {
       case desktopApiPaths.routes:
-        return wrap(window.ecnuVpn!.routes.remove(plainPayload(options?.data)?.cidr ?? '')) as ApiResponse<T>
+        return wrap(window.exv!.routes.remove(plainPayload(options?.data)?.cidr ?? '')) as ApiResponse<T>
       default:
         unsupported(path)
     }

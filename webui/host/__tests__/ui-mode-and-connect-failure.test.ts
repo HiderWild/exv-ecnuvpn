@@ -274,14 +274,25 @@ describe('frontend-owned UI mode state', () => {
     assert.match(frameText, /box-sizing:\s*border-box/)
   })
 
-  it('renders the native window contour with a visible transparent shadow gutter', () => {
+  it('aligns the native window contour to the physical window edge', () => {
     const frameText = readSource('src', 'components', 'AppWindowFrame.vue')
+    const shadowDeclaration = frameText.match(/--app-window-shadow:\s*([\s\S]*?);/)?.[1] ?? ''
     assert.ok(frameText.includes('--app-window-shadow'))
     assert.ok(frameText.includes('--app-window-shadow-margin'))
+    assert.match(frameText, /--window-radius:\s*8px/)
+    assert.match(frameText, /--app-window-shadow-margin:\s*0px/)
+    assert.match(frameText, /--app-window-shadow-margin-total:\s*0px/)
     assert.match(frameText, /padding:\s*var\(--app-window-shadow-margin\)/)
     assert.match(frameText, /width:\s*calc\(100vw - var\(--app-window-shadow-margin-total\)\)/)
     assert.match(frameText, /height:\s*calc\(100vh - var\(--app-window-shadow-margin-total\)\)/)
     assert.match(frameText, /box-shadow:\s*var\(--app-window-shadow\)/)
+    assert.match(shadowDeclaration, /0\s+18px\s+42px\s+-18px\s+rgba/)
+    assert.doesNotMatch(shadowDeclaration, /0\s+0\s+0\s+\d+px/)
+  })
+
+  it('keeps the advanced sidebar anchored to the content surface, not the shadow gutter', () => {
+    assert.match(navBarText, /<nav class="absolute inset-y-0 left-0/)
+    assert.doesNotMatch(navBarText, /<nav class="fixed inset-y-0 left-0/)
   })
 })
 
@@ -400,13 +411,13 @@ describe('desktop log transport contract', () => {
 })
 
 describe('dashboard virtual network topology contract', () => {
-  it('shows upstream virtual adapter detection even before VPN is connected', () => {
+  it('keeps upstream virtual adapter detection on the dashboard while hiding disconnected sidebar details', () => {
     assert.doesNotMatch(dashboardPageText, /network-probe-strip/)
     assert.match(dashboardPageText, /upstreamVirtualTooltip/)
     assert.match(dashboardPageText, /tooltip:\s*upstreamVirtualTooltip\.value/)
     assert.match(dashboardPageText, /:title="node\.tooltip \|\| node\.title"/)
     assert.match(dashboardPageText, /hasUpstreamVirtual/)
     assert.match(dashboardPageText, /vpn\.status\?\.upstream_virtual_detected/)
-    assert.doesNotMatch(navBarText, /showSidebarStatusDetails\s*=\s*computed\(\(\) => Boolean\(vpn\.status\?\.connected\)\)/)
+    assert.match(navBarText, /showSidebarStatusDetails\s*=\s*computed\(\(\) => Boolean\(vpn\.status\?\.connected\)\)/)
   })
 })

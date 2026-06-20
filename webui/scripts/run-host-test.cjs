@@ -19,7 +19,7 @@ if (!fs.existsSync(tscBin)) {
   process.exit(1)
 }
 
-const outDir = path.join(os.tmpdir(), `ecnu-vpn-host-tests-${process.pid}`)
+const outDir = path.join(os.tmpdir(), `exv-host-tests-${process.pid}`)
 fs.rmSync(outDir, { recursive: true, force: true })
 
 try {

@@ -8,7 +8,7 @@
     "dev": "vite",
     "dev:desktop": "vite --port 8288 --strictPort",
     "build": "vue-tsc -b && vite build",
-    "webview:compile": "cross-env ECNUVPN_RENDERER_TARGET=webview pnpm run build",
+    "webview:compile": "cross-env EXV_RENDERER_TARGET=webview pnpm run build",
     "webview:package": "python ../scripts/package_ui_shell.py",
     "test:host": "node scripts/run-host-test.cjs host/__tests__/host-boundary.test.ts host/__tests__/webview-package-policy.test.ts host/__tests__/desktop-contract-generated.test.ts host/__tests__/native-error-presentation.test.ts host/__tests__/ui-mode-and-connect-failure.test.ts host/__tests__/modal-onboarding-contract.test.ts",
     "test:contract": "node scripts/run-host-test.cjs host/__tests__/desktop-contract-generated.test.ts",

@@ -18,7 +18,7 @@ export default defineConfig({
   plugins: [vue(), tailwindcss()],
   base: './',
   build: {
-    outDir: process.env.ECNUVPN_WEBUI_OUT_DIR ?? defaultOutDir(),
+    outDir: process.env.EXV_WEBUI_OUT_DIR ?? defaultOutDir(),
     emptyOutDir: true,
   },
   server: {

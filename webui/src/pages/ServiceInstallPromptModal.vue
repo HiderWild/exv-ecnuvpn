@@ -28,7 +28,7 @@ onMounted(async () => {
       : route.path.endsWith('/confirm')
         ? 'confirm'
         : 'service-install'
-  payload.value = await window.ecnuVpn?.modal.getPayload() ?? { kind: routeKind }
+  payload.value = await window.exv?.modal.getPayload() ?? { kind: routeKind }
 })
 
 async function resolvePrompt(result: unknown) {
@@ -36,7 +36,7 @@ async function resolvePrompt(result: unknown) {
   busy.value = true
   resolved.value = true
   try {
-    await window.ecnuVpn?.modal.resolve(result)
+    await window.exv?.modal.resolve(result)
   } finally {
     busy.value = false
   }
@@ -132,7 +132,7 @@ function submitCloseChoice() {
         <ShieldCheck v-else class="mt-0.5 h-5 w-5 shrink-0 text-accent" />
         <div class="min-w-0">
           <h1 class="text-base font-semibold text-foreground">
-            {{ isCloseApp ? '关闭 EXV for ECNU' : isConfirm ? '请确认操作' : '建议您安装辅助服务' }}
+            {{ isCloseApp ? '关闭 EXV' : isConfirm ? '请确认操作' : '建议您安装辅助服务' }}
           </h1>
           <p class="mt-2 text-sm leading-6 text-muted">
             {{ isCloseApp ? '选择关闭窗口后的处理方式。' : isConfirm ? message : '安装服务可以免于输入密码提权，精简连接流程。需要管理员权限。' }}

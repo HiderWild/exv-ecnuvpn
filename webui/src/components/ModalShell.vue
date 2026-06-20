@@ -64,7 +64,7 @@ function onScrimClick() {
   display: grid;
   place-items: center;
   padding: 14px;
-  background: rgba(2, 6, 23, 0.56);
+  background: var(--modal-scrim-bg);
   backdrop-filter: blur(10px) saturate(1.05);
 }
 
@@ -72,11 +72,11 @@ function onScrimClick() {
   width: min(100%, 400px);
   max-height: min(82vh, 520px);
   overflow: auto;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  border: 1px solid var(--modal-border);
   border-radius: 8px;
-  background: #111827;
-  color: #f8fafc;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.36);
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  box-shadow: var(--modal-shadow);
   padding: 18px;
 }
 
@@ -102,8 +102,8 @@ function onScrimClick() {
   flex: 0 0 auto;
   place-items: center;
   border-radius: 8px;
-  background: rgba(34, 197, 94, 0.12);
-  color: #22c55e;
+  background: var(--accent-soft-bg);
+  color: var(--color-accent);
 }
 
 .modal-shell__heading {
@@ -120,7 +120,7 @@ function onScrimClick() {
 
 .modal-shell__description {
   margin: 4px 0 0;
-  color: #94a3b8;
+  color: var(--color-muted);
   font-size: 12px;
   line-height: 1.45;
 }

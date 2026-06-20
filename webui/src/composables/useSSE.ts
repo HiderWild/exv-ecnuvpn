@@ -17,9 +17,9 @@ export function useSSE() {
   let unsubscribe: (() => void) | null = null
 
   function connect() {
-    if (window.ecnuVpn) {
+    if (window.exv) {
       disconnect()
-      unsubscribe = window.ecnuVpn.events.subscribe((event) => {
+      unsubscribe = window.exv.events.subscribe((event) => {
         connected.value = true
         error.value = null
 

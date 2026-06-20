@@ -39,8 +39,8 @@ function cssRule(source: string, selector: string): string {
 }
 
 function assertUnixDesktopScriptPackagesWebView(script: string, platform: string): void {
-  assert.match(script, new RegExp(`ECNUVPN_BUILD_PLATFORM=${platform}`))
-  assert.match(script, new RegExp(`ECNUVPN_WEBUI_DIST_DIR="\\$BUILD_ROOT/webview/dist"`))
+  assert.match(script, new RegExp(`EXV_BUILD_PLATFORM=${platform}`))
+  assert.match(script, new RegExp(`EXV_WEBUI_DIST_DIR="\\$BUILD_ROOT/webview/dist"`))
   assert.match(script, /-DEXV_BUILD_UI_SHELL=ON/)
   assert.match(script, /package_webview\(\)/)
   assert.match(script, /python3 scripts\/package_ui_shell\.py/)
@@ -80,7 +80,7 @@ describe('native WebView package policy', () => {
     assert.equal(packageJson.main, undefined)
     assert.equal(packageJson.pnpm?.onlyBuiltDependencies?.includes('electron') ?? false, false)
 
-    assert.match(packageJson.scripts['webview:compile'], /ECNUVPN_RENDERER_TARGET=webview/)
+    assert.match(packageJson.scripts['webview:compile'], /EXV_RENDERER_TARGET=webview/)
     assert.match(packageJson.scripts['webview:package'], /package_ui_shell\.py/)
     assert.match(packageJson.scripts['test:contract'], /run-host-test\.cjs/)
   })
@@ -90,7 +90,7 @@ describe('native WebView package policy', () => {
     const macos = readFileSync(join(repoRoot, 'scripts', 'build-macos.sh'), 'utf8')
     const linux = readFileSync(join(repoRoot, 'scripts', 'build-linux.sh'), 'utf8')
 
-    assert.match(windows, /ECNUVPN_WEBUI_DIST_DIR = Join-Path \$buildRoot 'webview\\dist'/)
+    assert.match(windows, /EXV_WEBUI_DIST_DIR = Join-Path \$buildRoot 'webview\\dist'/)
     assert.match(windows, /-DEXV_BUILD_UI_SHELL=ON/)
     assert.match(windows, /function Resolve-WebView2Sdk/)
     assert.match(windows, /build\\deps\\webview2\\1\.0\.4022\.49/)
@@ -136,6 +136,7 @@ describe('native WebView package policy', () => {
     assert.match(packageScript, /exv-ui\.args/)
     assert.match(packageScript, /--exv/)
     assert.match(packageScript, /--renderer-index/)
+    assert.doesNotMatch(packageScript, /--state-dir/)
     assert.match(packageScript, /MINGW_RUNTIME_DLLS/)
     assert.match(packageScript, /wintun\.dll/)
     assert.match(packageScript, /copy_windows_runtime_assets/)
@@ -153,20 +154,31 @@ describe('native WebView package policy', () => {
     assert.match(readme, /--renderer-index/)
   })
 
+  it('uses EXV-owned WebView host channels', () => {
+    const hostContract = readFileSync(join(webuiRoot, 'host', 'shared', 'host-contract.ts'), 'utf8')
+    const oldChannelPattern = new RegExp(`${'ecnu'}-vpn:`)
+
+    assert.match(hostContract, /rpc:\s*'exv:rpc'/)
+    assert.match(hostContract, /event:\s*'exv:event'/)
+    assert.doesNotMatch(hostContract, oldChannelPattern)
+  })
+
   it('keeps active packaging smoke and merge-prep scripts on WebView package paths', () => {
     const windowsSmoke = readFileSync(join(repoRoot, 'scripts', 'windows-packaging-smoke.ps1'), 'utf8')
     const macosSmoke = readFileSync(join(repoRoot, 'scripts', 'macos-packaging-smoke.sh'), 'utf8')
     const windowsMergePrep = readFileSync(join(repoRoot, 'scripts', 'validate-merge-prep-windows.ps1'), 'utf8')
     const macosMergePrep = readFileSync(join(repoRoot, 'scripts', 'validate-merge-prep-macos.sh'), 'utf8')
 
-    assert.match(windowsSmoke, /build\\windows\\webview\\package\\ECNU VPN/)
+    assert.match(windowsSmoke, /build\\windows\\webview\\package\\EXV/)
     assert.match(windowsSmoke, /WebView2Loader\.dll/)
     assert.match(windowsSmoke, /electron\.exe/)
     assert.match(windowsSmoke, /--verify-launch-targets-only/)
     assert.match(windowsSmoke, /--package-dir \$PackageRoot/)
+    assert.match(windowsSmoke, /LOCALAPPDATA/)
+    assert.match(windowsSmoke, /EXV\\Helper\\exv-helper\.exe/)
     assert.doesNotMatch(windowsSmoke, /windows\\electron|dist-electron/i)
 
-    assert.match(macosSmoke, /build\/macos\/webview\/package\/ECNU VPN/)
+    assert.match(macosSmoke, /build\/macos\/webview\/package\/EXV/)
     assert.match(macosSmoke, /package_ui_shell\.py --verify-launch-targets-only --package-dir "\$PACKAGE_ROOT"/)
     assert.doesNotMatch(macosSmoke, /build\/macos\/electron|Electron \.app|ELECTRON_RELEASE/)
 
@@ -179,10 +191,14 @@ describe('native WebView package policy', () => {
   it('keeps start.ps1 desktop flow on native WebView shell paths', () => {
     const startPs1 = readFileSync(join(repoRoot, 'start.ps1'), 'utf8')
 
-    assert.match(startPs1, /build\\windows\\webview\\package\\ECNU VPN/)
+    assert.match(startPs1, /build\\windows\\webview\\package\\EXV/)
     assert.match(startPs1, /exv-ui\.exe/)
+    assert.match(startPs1, /LOCALAPPDATA/)
+    assert.match(startPs1, /EXV\\Helper\\exv-helper\.exe/)
+    assert.match(startPs1, /Test-HelperServiceUsesStablePath/)
     assert.match(startPs1, /function Resolve-WebView2Sdk/)
     assert.match(startPs1, /-DWEBVIEW2_SDK_DIR=\$resolvedWebView2Sdk/)
+    assert.doesNotMatch(startPs1, /\$alwaysMatchNames = @\('exv\.exe', 'exv-helper\.exe', 'exv-ui\.exe'\)/)
     assert.doesNotMatch(startPs1, /build\\windows\\electron|dist-electron|desktop:package|desktop:package:dir|build:electron/i)
     assert.doesNotMatch(startPs1, /Find-ElectronProcess|Electron process/i)
   })
@@ -208,10 +224,10 @@ describe('native WebView package policy', () => {
     assert.match(configStore, /localStorage\.setItem\('exv:minimal-mode'/)
     assert.match(configStore, /delete remoteSettings\.minimal_mode/)
     assert.match(configStore, /settings\.value = \{ \.\.\.settings\.value, \.\.\.s \}/)
-    assert.doesNotMatch(appVue, /window\.ecnuVpn\?\.window\?\.setMode/)
+    assert.doesNotMatch(appVue, /window\.exv\?\.window\?\.setMode/)
     assert.match(frameVue, /watch\(\s*\(\) => props\.mode/)
     assert.match(frameVue, /requestAnimationFrame/)
-    assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.resizeForMode/)
+    assert.match(frameVue, /window\.exv\?\.window\?\.resizeForMode/)
   })
 
   it('keeps service install prompt seen state in core-owned settings', () => {
@@ -227,11 +243,13 @@ describe('native WebView package policy', () => {
 
   it('does not render a renderer-owned service install prompt from App', () => {
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
+    const globalStack = readFileSync(join(webuiRoot, 'src', 'windows', 'GlobalWindowStack.vue'), 'utf8')
 
     assert.doesNotMatch(appVue, /建议您安装辅助服务/)
     assert.doesNotMatch(appVue, /function dismissServicePrompt/)
     assert.doesNotMatch(appVue, /async function installServiceFromPrompt/)
-    assert.match(appVue, /<ServiceInstallLoadingOverlay/)
+    assert.doesNotMatch(appVue, /<ServiceInstallLoadingOverlay/)
+    assert.match(globalStack, /<ServiceInstallLoadingOverlay/)
   })
 
   it('defers native WebView window mode resizing outside the WebMessage callback', () => {
@@ -253,7 +271,7 @@ describe('native WebView package policy', () => {
   })
 
   it('exposes one-shot native window actions for transparent shell transitions', () => {
-    const types = readFileSync(join(webuiRoot, 'src', 'types', 'ecnu-vpn.d.ts'), 'utf8')
+    const types = readFileSync(join(webuiRoot, 'src', 'types', 'exv.d.ts'), 'utf8')
     const win32Host = readFileSync(
       join(repoRoot, 'src', 'platform', 'win32', 'ui_shell', 'webview2_host_win32.cpp'),
       'utf8',
@@ -298,10 +316,10 @@ describe('native WebView package policy', () => {
     assert.match(appVue, /h-\[34px\][\s\S]*border-b[\s\S]*border-border/)
     assert.match(frameVue, /<header[\s\S]*class="app-window-titlebar/)
     assert.match(frameVue, /@pointerdown="startWindowDrag"/)
-    assert.match(frameVue, /EXV for ECNU/)
+    assert.match(frameVue, /EXV/)
     assert.match(frameVue, /v-if="visualMode === 'minimal'"/)
     assert.match(frameVue, /:aria-label="titlebarTitle"/)
-    assert.match(frameVue, /<span class="app-window-titlebar__title" aria-hidden="true">EXV for ECNU<\/span>/)
+    assert.match(frameVue, /<span class="app-window-titlebar__title" aria-hidden="true">EXV<\/span>/)
     assert.doesNotMatch(frameVue, /app-window-titlebar__title-line/)
     assert.match(frameVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
     assert.match(navBarVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
@@ -311,6 +329,7 @@ describe('native WebView package policy', () => {
     assert.match(advancedTitlebarRule, /left: 0;/)
     assert.match(advancedTitlebarRule, /right: 0;/)
     assert.match(advancedTitlebarRule, /justify-content: flex-end;/)
+    assert.match(advancedTitlebarRule, /padding: 0;/)
     assert.doesNotMatch(advancedTitlebarRule, /var\(--advanced-sidebar-width\)/)
     assert.doesNotMatch(advancedTitlebarRule, /border-bottom:/)
     assert.match(titlebarIdentityRule, /display: flex;/)
@@ -326,9 +345,9 @@ describe('native WebView package policy', () => {
     assert.match(frameVue, /<slot \/>/)
     assert.match(frameVue, /isWindows/)
     assert.match(frameVue, /isMac/)
-    assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.startDrag/)
-    assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.minimize/)
-    assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.requestClose/)
+    assert.match(frameVue, /window\.exv\?\.window\?\.startDrag/)
+    assert.match(frameVue, /window\.exv\?\.window\?\.minimize/)
+    assert.match(frameVue, /window\.exv\?\.window\?\.requestClose/)
   })
 
   it('coordinates direction-specific transparent shell mode transitions in the renderer', () => {
@@ -363,8 +382,9 @@ describe('native WebView package policy', () => {
     assert.match(frameVue, /mode-transition-overlay/)
     assert.match(frameVue, /backdrop-filter: blur/)
     assert.match(frameVue, /mode-transition-surface/)
-    assert.match(frameRule, /--app-window-shadow-margin: 12px;/)
-    assert.match(frameRule, /--app-window-shadow-margin-total: 24px;/)
+    assert.match(frameRule, /--window-radius: 8px;/)
+    assert.match(frameRule, /--app-window-shadow-margin: 0px;/)
+    assert.match(frameRule, /--app-window-shadow-margin-total: 0px;/)
     assert.match(frameRule, /--app-window-shadow:/)
     assert.match(frameRule, /background: transparent;/)
     assert.match(transparentHostRule, /background: transparent;/)
@@ -391,7 +411,7 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(bodyRule, /@apply [^;]*bg-bg/)
     assert.doesNotMatch(appVue, /modeTransitionVisible/)
     assert.doesNotMatch(appVue, /applyWindowMode/)
-    assert.match(windowLayout, /kWindowShadowMarginPx = 12/)
+    assert.match(windowLayout, /kWindowShadowMarginPx = 0/)
     assert.match(windowLayout, /kAppSurfaceAdvancedWindowBounds\{972, 563\}/)
     assert.match(windowLayout, /kAppSurfaceMinimalWindowBounds\{302, 118\}/)
     assert.match(windowLayout, /kElectronAdvancedWindowBounds\{[\s\S]*kAppSurfaceAdvancedWindowBounds\.width \+ kWindowShadowMarginPx \* 2/)
@@ -458,7 +478,7 @@ describe('native WebView package policy', () => {
     const store = readFileSync(join(webuiRoot, 'src', 'stores', 'vpn.ts'), 'utf8')
     const dashboard = readFileSync(join(webuiRoot, 'src', 'pages', 'DashboardPage.vue'), 'utf8')
     const minimal = readFileSync(join(webuiRoot, 'src', 'components', 'MinimalModeView.vue'), 'utf8')
-    const types = readFileSync(join(webuiRoot, 'src', 'types', 'ecnu-vpn.d.ts'), 'utf8')
+    const types = readFileSync(join(webuiRoot, 'src', 'types', 'exv.d.ts'), 'utf8')
     const sse = readFileSync(join(webuiRoot, 'src', 'composables', 'useSSE.ts'), 'utf8')
 
     assert.match(store, /interface VpnConnectAccepted/)
@@ -510,7 +530,7 @@ describe('native WebView package policy', () => {
     assert.match(navBarVue, /import appIconUrl from '\.\.\/assets\/app-icon\.svg'/)
     assert.match(frameVue, /<img[\s\S]*class="mode-transition-icon"[\s\S]*:src="appIconUrl"/)
     assert.match(navBarVue, /<img[\s\S]*:src="appIconUrl"[\s\S]*class="h-9 w-9 shrink-0"/)
-    assert.match(appIconSvg, /<svg[\s\S]*aria-label="ECNU VPN logo"/)
+    assert.match(appIconSvg, /<svg[\s\S]*aria-label="EXV logo"/)
     assert.doesNotMatch(frameVue, /<div class="mode-transition-icon">EXV<\/div>/)
     assert.doesNotMatch(frameVue, /src="\/favicon\.svg"/)
     assert.doesNotMatch(navBarVue, /src="\/favicon\.svg"/)
@@ -587,7 +607,7 @@ describe('native WebView package policy', () => {
       ['docs/user_guide.md', userGuide],
     ] as const) {
       assert.match(text, /WebView/)
-      assert.match(text, /build\/<platform>\/webview\/package\/ECNU VPN|build\\windows\\webview\\package\\ECNU VPN|build\/macos\/webview\/package\/ECNU VPN/)
+      assert.match(text, /build\/<platform>\/webview\/package\/EXV|build\\windows\\webview\\package\\EXV|build\/macos\/webview\/package\/EXV/)
       assert.doesNotMatch(text, /build\/windows\/electron|build\\windows\\electron|build\/macos\/electron|build\\macos\\electron/)
       assert.doesNotMatch(text, /Desktop UI \(Electron\)|Electron-based desktop app is the recommended interface|Electron 桌面应用|Electron 桌面端|through Electron IPC/)
       assert.doesNotMatch(text, /pnpm run desktop:package|pnpm run desktop:build|pnpm run build:electron|pnpm run desktop:dev/)

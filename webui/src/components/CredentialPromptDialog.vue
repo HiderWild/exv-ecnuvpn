@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { Eye, KeyRound } from 'lucide-vue-next'
 import ModalShell from './ModalShell.vue'
 import { useUiStore } from '../stores/ui'
@@ -12,6 +12,15 @@ const error = ref('')
 const revealing = ref(false)
 const usernameRef = ref<HTMLInputElement | null>(null)
 const passwordRef = ref<HTMLInputElement | null>(null)
+
+const credentialPromptTitle = computed(() => {
+  const request = ui.credentialPrompt
+  if (!request) return ''
+  if (request.message) return request.message
+  if (request.missingUsername && request.missingPassword) return '请输入用户名和密码'
+  if (request.missingUsername) return '请输入用户名'
+  return '请输入密码'
+})
 
 watch(
   () => ui.showCredentialPrompt,
@@ -41,12 +50,12 @@ function submit() {
   const request = ui.credentialPrompt
   if (!request) return
   if (request.missingUsername && !username.value.trim()) {
-    error.value = '请填写用户名'
+    error.value = '请输入用户名'
     usernameRef.value?.focus()
     return
   }
   if (request.missingPassword && !password.value) {
-    error.value = '请填写密码'
+    error.value = '请输入密码'
     passwordRef.value?.focus()
     return
   }
@@ -65,8 +74,7 @@ function cancel() {
 <template>
   <ModalShell
     :open="ui.showCredentialPrompt"
-    title="补全连接凭据"
-    :description="ui.credentialPrompt?.message || '连接前需要补全缺少的认证信息。'"
+    :title="credentialPromptTitle"
     size="sm"
     @close="cancel"
   >

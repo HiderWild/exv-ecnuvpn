@@ -14,6 +14,7 @@ const vpn = useVpnStore()
 const mode = ref<'quick' | 'custom'>('quick')
 const username = ref('')
 const password = ref('')
+const rememberPassword = ref(false)
 const routes = ref<string[]>([])
 const settingsForm = ref({
   mtu: 1290,
@@ -26,6 +27,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const panelSize = computed(() => mode.value === 'custom' ? 'lg' : 'md')
 const defaultServer = computed(() => ui.quickStartRequest?.defaults.server || 'vpn-ct.ecnu.edu.cn')
 const shouldInstallService = computed(() => ui.quickStartRequest?.defaults.install_service ?? true)
+const rememberPasswordEnabled = computed(() => password.value.length > 0)
 
 watch(
   () => ui.showQuickStart,
@@ -35,6 +37,7 @@ watch(
     error.value = ''
     username.value = ''
     password.value = ''
+    rememberPassword.value = false
     routes.value = vpn.routes.map((route) => route.cidr)
     settingsForm.value = {
       mtu: config.settings.mtu || 1290,
@@ -51,6 +54,15 @@ watch(
     settingsForm.value = {
       mtu: config.settings.mtu || 1290,
       dtls: config.settings.dtls,
+    }
+  },
+)
+
+watch(
+  () => password.value,
+  (value) => {
+    if (!value) {
+      rememberPassword.value = false
     }
   },
 )
@@ -98,8 +110,8 @@ async function confirm() {
     await config.saveAuthConfig({
       server: defaultServer.value,
       username: username.value.trim(),
-      password: password.value,
-      remember_password: true,
+      password: rememberPassword.value ? password.value : '',
+      remember_password: rememberPassword.value,
       user_agent: config.authConfig.user_agent,
     })
     if (mode.value === 'custom') {
@@ -202,6 +214,18 @@ async function onImportFile(event: Event) {
           autocomplete="current-password"
           @input="error = ''"
         />
+      </label>
+      <label
+        class="flex items-center gap-2 text-xs"
+        :class="rememberPasswordEnabled ? 'text-muted' : 'text-muted/60'"
+      >
+        <input
+          v-model="rememberPassword"
+          type="checkbox"
+          :disabled="!rememberPasswordEnabled"
+          class="h-3.5 w-3.5 rounded border-border bg-bg accent-accent disabled:cursor-not-allowed disabled:opacity-45"
+        />
+        记住密码（加密存储）
       </label>
 
       <div v-if="mode === 'custom'" class="space-y-3">

@@ -695,7 +695,7 @@ export const useVpnStore = defineStore('vpn', () => {
   const serviceInstalled = computed(() => serviceStatus.value?.installed ?? false)
   const serviceRunning = computed(() => serviceStatus.value?.running ?? false)
   const serviceAvailable = computed(() => serviceStatus.value?.available ?? false)
-  const isDesktop = computed(() => typeof window !== 'undefined' && !!window.ecnuVpn)
+  const isDesktop = computed(() => typeof window !== 'undefined' && !!window.exv)
   const canUseElevatedFallback = computed(() => {
     const capabilities = serviceStatus.value?.capabilities
     return isDesktop.value && Boolean(
@@ -1229,14 +1229,7 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
-  function buildCredentialPromptMessage(prefix = '') {
-    const auth = config.authConfig
-    const username = auth.username || status.value?.username
-    const base = username ? `请补全 ${username} 的连接凭据` : '请补全 VPN 连接凭据'
-    return prefix ? `${prefix}${base}` : base
-  }
-
-  async function resolveConnectCredentials(messagePrefix = ''): Promise<{ password?: string } | null> {
+  async function resolveConnectCredentials(message?: string): Promise<{ password?: string } | null> {
     await config.fetchAuthConfig()
     const auth = config.authConfig
     const missingUsername = !auth.username.trim()
@@ -1249,7 +1242,7 @@ export const useVpnStore = defineStore('vpn', () => {
       missingPassword,
       username: auth.username,
       rememberPassword: auth.remember_password,
-      message: buildCredentialPromptMessage(messagePrefix),
+      message,
     })
     if (credentials === null) return null
 
@@ -1271,7 +1264,7 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   async function retryConnectAfterAuthFailure(mode: 'helper' | 'elevated'): Promise<boolean> {
-    const credentials = await resolveConnectCredentials('密码不正确，请重新输入。')
+    const credentials = await resolveConnectCredentials('密码不正确，请重新输入密码')
     if (credentials === null) return false
     clearError()
     const password = credentials.password

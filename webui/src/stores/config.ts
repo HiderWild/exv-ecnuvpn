@@ -30,6 +30,10 @@ export interface SettingsConfig {
   minimal_mode: boolean
   service_install_prompt_seen: boolean
   minimal_install_service_before_connect: boolean
+  include_class_a_private_routes: boolean
+  include_class_b_private_routes: boolean
+  launch_at_login: boolean
+  auto_connect_on_launch: boolean
 }
 
 export interface KeyStatus {
@@ -118,7 +122,7 @@ export const useConfigStore = defineStore('config', () => {
     password: '',
     password_stored: false,
     user_agent: '',
-    remember_password: true,
+    remember_password: false,
   })
 
   const settings = ref<SettingsConfig>({
@@ -137,6 +141,10 @@ export const useConfigStore = defineStore('config', () => {
     minimal_mode: readLocalBool('exv:minimal-mode', false),
     service_install_prompt_seen: false,
     minimal_install_service_before_connect: true,
+    include_class_a_private_routes: false,
+    include_class_b_private_routes: false,
+    launch_at_login: false,
+    auto_connect_on_launch: false,
   })
 
   const keyStatus = ref<KeyStatus>({ available: false, present: false, status: 'missing' })
@@ -151,12 +159,21 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function saveAuthConfig(config: Partial<AuthConfig>) {
-    const payload = {
-      server: config.server ?? '',
-      username: config.username ?? '',
-      password: config.password ?? '',
-      remember_password: config.remember_password ?? true,
-      user_agent: config.user_agent ?? '',
+    const payload: Partial<AuthConfig> = {}
+    if (Object.prototype.hasOwnProperty.call(config, 'server')) {
+      payload.server = config.server ?? ''
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'username')) {
+      payload.username = config.username ?? ''
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'password')) {
+      payload.password = config.password ?? ''
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'remember_password')) {
+      payload.remember_password = config.remember_password ?? false
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'user_agent')) {
+      payload.user_agent = config.user_agent ?? ''
     }
     const { data } = await api.put<AuthConfig>('/config/auth', payload)
     authConfig.value = { ...authConfig.value, ...data }

@@ -107,7 +107,7 @@ async function removeRoute(index: number) {
         v-if="message"
         :class="[
           'text-sm rounded-lg px-4 py-2.5',
-          'bg-green-500/10 text-green-400'
+          'bg-success/10 text-success'
         ]"
       >
         {{ message.text }}

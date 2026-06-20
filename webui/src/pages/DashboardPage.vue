@@ -547,7 +547,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
     <section class="dashboard-card h-full rounded-lg border border-border bg-surface p-5 shadow-lg shadow-black/10">
       <div class="mb-5 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h1 class="text-xl font-semibold text-foreground">主面板</h1>
+          <h1 class="text-3xl font-semibold text-foreground">主面板</h1>
         </div>
         <label class="flex items-center gap-2 text-xs text-muted">
           <span>高级</span>
@@ -702,7 +702,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-bottom: 4.25rem;
+  padding-bottom: 5.75rem;
 }
 
 .arc-stage {
@@ -732,12 +732,12 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 
 .ready-segment {
   fill: none;
-  stroke: rgba(34, 197, 94, 0.78);
+  stroke: var(--topology-accent-stroke);
   stroke-linecap: round;
   stroke-width: 4;
   stroke-dasharray: 100;
   stroke-dashoffset: 0;
-  filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.2));
+  filter: drop-shadow(0 0 6px var(--topology-accent-glow));
 }
 
 .ready-segment.is-entering {
@@ -745,23 +745,23 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 }
 
 .ready-segment.is-disconnecting {
-  stroke: rgba(245, 158, 11, 0.9);
-  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.24));
+  stroke: var(--topology-warning-stroke);
+  filter: drop-shadow(0 0 6px var(--topology-warning-glow));
 }
 
 .ready-segment.is-leaving {
-  stroke: rgba(245, 158, 11, 0.9);
-  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.24));
+  stroke: var(--topology-warning-stroke);
+  filter: drop-shadow(0 0 6px var(--topology-warning-glow));
   animation: ready-segment-retract 720ms cubic-bezier(0.64, 0, 0.78, 0) both;
 }
 
 .arc-pulse {
   fill: none;
-  stroke: rgb(245, 158, 11);
+  stroke: var(--color-warning);
   stroke-dasharray: 34 260;
   stroke-linecap: round;
   stroke-width: 4;
-  filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.78));
+  filter: drop-shadow(0 0 8px var(--topology-warning-glow));
   animation: arc-pulse-run 1.05s ease-in-out infinite;
 }
 
@@ -790,13 +790,13 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 .arc-node.node-success .node-icon-shell,
 .arc-node.node-success .node-icon,
 .arc-node.node-success .node-title {
-  color: rgb(134 239 172);
+  color: var(--color-accent);
 }
 
 .arc-node.node-warning .node-icon-shell,
 .arc-node.node-warning .node-icon,
 .arc-node.node-warning .node-title {
-  color: rgb(251 191 36);
+  color: var(--color-warning);
 }
 
 .arc-node.node-muted .node-icon-shell,
@@ -806,9 +806,9 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 }
 
 .arc-node.node-warning .photon {
-  background: rgb(245 158 11);
-  box-shadow: -0.8rem 0 0 -0.18rem rgba(245, 158, 11, 0.55),
-    -1.45rem 0 0 -0.28rem rgba(245, 158, 11, 0.25);
+  background: var(--color-warning);
+  box-shadow: -0.8rem 0 0 -0.18rem rgb(var(--color-warning-rgb) / 0.55),
+    -1.45rem 0 0 -0.28rem rgb(var(--color-warning-rgb) / 0.25);
 }
 
 .arc-node::before,
@@ -839,20 +839,20 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 }
 
 .arc-node.node-success::before {
-  border-color: rgba(34, 197, 94, 0.68);
-  box-shadow: 0 0 0.65rem rgba(34, 197, 94, 0.16);
+  border-color: var(--topology-accent-node);
+  box-shadow: 0 0 0.65rem var(--topology-accent-glow);
 }
 
 .arc-node.stage-active::before {
-  border-color: rgba(245, 158, 11, 0.72);
-  background: rgba(245, 158, 11, 0.14);
+  border-color: var(--topology-warning-node);
+  background: var(--topology-warning-soft);
   box-shadow:
-    inset 0 0 1rem rgba(245, 158, 11, 0.13),
-    0 0 1rem rgba(245, 158, 11, 0.24);
+    inset 0 0 1rem rgb(var(--color-warning-rgb) / 0.13),
+    0 0 1rem var(--topology-warning-glow);
 }
 
 .arc-node.stage-active::after {
-  background: rgba(245, 158, 11, 0.34);
+  background: rgb(var(--color-warning-rgb) / 0.34);
   opacity: 0.52;
 }
 
@@ -860,21 +860,21 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   position: relative;
   display: flex;
   justify-content: center;
-  margin-top: -10rem;
+  margin-top: -12rem;
   transform: translateY(0);
   transition: transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform;
 }
 
 .control-zone.is-lifted {
-  transform: translateY(-1.15rem);
+  transform: translateY(-1.35rem);
 }
 
 .control-center {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.25rem;
   width: min(34rem, 100%);
 }
 
@@ -974,7 +974,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   position: absolute;
   inset: 0.12rem;
   border-radius: 9999px;
-  border: 2px solid rgba(34, 197, 94, 0.68);
+  border: 2px solid var(--topology-accent-node);
   opacity: 0;
   animation: power-ripple 3.9s ease-out infinite;
 }
@@ -996,7 +996,7 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   position: absolute;
   inset: 0.18rem;
   border-radius: 9999px;
-  border: 2px solid rgba(245, 158, 11, 0.38);
+  border: 2px solid rgb(var(--color-warning-rgb) / 0.38);
 }
 
 .power-satellite {
@@ -1013,13 +1013,13 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   border-radius: 9999px;
   background: conic-gradient(
     from 276deg,
-    rgba(245, 158, 11, 0) 0deg,
-    rgba(245, 158, 11, 0) 246deg,
-    rgba(245, 158, 11, 0.08) 255deg,
-    rgba(245, 158, 11, 0.34) 268deg,
-    rgba(245, 158, 11, 0.74) 284deg,
-    rgba(245, 158, 11, 0) 304deg,
-    rgba(245, 158, 11, 0) 360deg
+    rgb(var(--color-warning-rgb) / 0) 0deg,
+    rgb(var(--color-warning-rgb) / 0) 246deg,
+    rgb(var(--color-warning-rgb) / 0.08) 255deg,
+    rgb(var(--color-warning-rgb) / 0.34) 268deg,
+    rgb(var(--color-warning-rgb) / 0.74) 284deg,
+    rgb(var(--color-warning-rgb) / 0) 304deg,
+    rgb(var(--color-warning-rgb) / 0) 360deg
   );
   mask: radial-gradient(circle, transparent 0 41%, #000 42% 48%, transparent 49%);
 }
@@ -1032,8 +1032,8 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   width: 0.62rem;
   height: 0.62rem;
   border-radius: 9999px;
-  background: rgb(245, 158, 11);
-  box-shadow: 0 0 0.55rem rgba(245, 158, 11, 0.7);
+  background: var(--color-warning);
+  box-shadow: 0 0 0.55rem var(--topology-warning-glow);
   z-index: 1;
 }
 
@@ -1078,8 +1078,8 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
 }
 
 .topology-node.stage-active {
-  background: rgba(245, 158, 11, 0.12);
-  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.35);
+  background: var(--topology-warning-soft);
+  box-shadow: inset 0 0 0 1px rgb(var(--color-warning-rgb) / 0.35);
 }
 
 .topology-node.compact {
@@ -1135,9 +1135,9 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 9999px;
-  background: rgb(34 197 94);
-  box-shadow: -0.8rem 0 0 -0.18rem rgba(34, 197, 94, 0.55),
-    -1.45rem 0 0 -0.28rem rgba(34, 197, 94, 0.25);
+  background: var(--color-accent);
+  box-shadow: -0.8rem 0 0 -0.18rem rgb(var(--color-accent-rgb) / 0.55),
+    -1.45rem 0 0 -0.28rem rgb(var(--color-accent-rgb) / 0.25);
 }
 
 .photon-a {

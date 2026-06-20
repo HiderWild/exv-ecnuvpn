@@ -39,7 +39,7 @@ The platform scripts build the renderer, native shell, core, helper, and package
 Package output:
 
 ```text
-build/<platform>/webview/package/ECNU VPN
+build/<platform>/webview/package/EXV
 ```
 
 Package contents include `exv-ui`, `exv-ui.args`, `bin/exv`, `bin/exv-helper`,
@@ -65,6 +65,6 @@ The native WebView package script rejects bundled Electron or Chromium payloads 
 
 ## Runtime Contract
 
-Renderer code talks to `window.ecnuVpn` through `src/api/host.ts`. The native WebView host implements that object in platform code and forwards requests to core using the generated desktop RPC contract.
+Renderer code talks to `window.exv` through `src/api/host.ts`. The native WebView host implements that object in platform code and forwards requests to core using the generated desktop RPC contract.
 
 Browser `/api/*` compatibility remains for diagnostics and legacy use, but it is not the production desktop bridge.

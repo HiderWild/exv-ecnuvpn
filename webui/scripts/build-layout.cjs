@@ -1,6 +1,6 @@
 const path = require('node:path')
 
-function normalizeBuildPlatform(input = process.env.ECNUVPN_BUILD_PLATFORM || process.platform) {
+function normalizeBuildPlatform(input = process.env.EXV_BUILD_PLATFORM || process.platform) {
   switch ((input || '').toLowerCase()) {
     case 'win32':
     case 'windows':
@@ -16,7 +16,7 @@ function normalizeBuildPlatform(input = process.env.ECNUVPN_BUILD_PLATFORM || pr
   }
 }
 
-function normalizeRendererTarget(input = process.env.ECNUVPN_RENDERER_TARGET || 'webview') {
+function normalizeRendererTarget(input = process.env.EXV_RENDERER_TARGET || 'webview') {
   switch ((input || '').toLowerCase()) {
     case 'webview':
     case 'native':
@@ -44,7 +44,7 @@ function getBuildLayout() {
     buildPlatform,
     rendererTarget,
     buildRoot,
-    cppBuildDir: process.env.ECNUVPN_CPP_BUILD_DIR || defaultCppBuildDir,
+    cppBuildDir: process.env.EXV_CPP_BUILD_DIR || defaultCppBuildDir,
     webviewRoot,
     rendererOutDir: webviewRendererOutDir,
     webviewRendererOutDir,
