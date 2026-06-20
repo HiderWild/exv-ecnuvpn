@@ -75,6 +75,7 @@ private:
   CoreRpcTransport &transport_;
   CoreRpcWireMode wire_mode_ = CoreRpcWireMode::Desktop;
   CoreRpcEventHandler event_handler_;
+  std::deque<CoreRpcEvent> pending_events_;
   std::deque<std::string> buffered_response_lines_;
   std::mutex write_mutex_;
   std::mutex read_mutex_;

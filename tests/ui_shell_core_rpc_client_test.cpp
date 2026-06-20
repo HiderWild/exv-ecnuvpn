@@ -259,6 +259,36 @@ int main() {
              ok_all;
   }
 
+  FakeTransport quick_start_before_handler_transport(
+      std::vector<std::string>{
+          R"({"event":"quick-start-request","data":{"reason":"missing"}})",
+          R"({"id":7,"ok":true,"data":{"phase":"idle"}})"});
+  CoreRpcClient quick_start_before_handler_client(
+      quick_start_before_handler_transport);
+  CoreRpcResponse quick_start_response =
+      quick_start_before_handler_client.invoke(desktop_request);
+  std::vector<CoreRpcEvent> pending_quick_start_events;
+  quick_start_before_handler_client.set_event_handler(
+      [&](const CoreRpcEvent &core_event) {
+        pending_quick_start_events.push_back(core_event);
+      });
+  ok_all = expect(quick_start_response.ok,
+                  "client should still return response after pending quick start event") &&
+           ok_all;
+  ok_all =
+      expect(pending_quick_start_events.size() == 1,
+             "client should replay quick-start-request once handler is installed") &&
+      ok_all;
+  if (pending_quick_start_events.size() == 1) {
+    ok_all = expect(pending_quick_start_events[0].event == "quick-start-request",
+                    "client should preserve pending quick start event type") &&
+             ok_all;
+    ok_all = expect(pending_quick_start_events[0].data_json ==
+                        R"({"reason":"missing"})",
+                    "client should preserve pending quick start event data") &&
+             ok_all;
+  }
+
   {
     FakeTransport out_of_order_transport(
         std::vector<std::string>{R"({"id":102,"ok":true,"data":{"connected":false}})",

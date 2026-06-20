@@ -212,12 +212,20 @@ static void write_valid_native_config(const std::string& config_dir) {
         {"server", "https://vpn.example.invalid"},
         {"username", "student@example.invalid"},
         {"password", ""},
+        {"mtu", 1290},
+        {"useragent", "test-agent"},
+        {"disable_dtls", false},
         {"remember_password", false},
+        {"routes", json::array({"49.52.4.0/25"})},
+        {"extra_args", json::array()},
+        {"log_file", ""},
         {"vpn_engine", "native"},
         {"windows_tunnel_driver", "tap"},
         {"windows_tap_interface", "ECNU VPN TAP"},
         {"auto_reconnect", false},
-        {"extra_args", json::array()}
+        {"minimal_mode", false},
+        {"service_install_prompt_seen", false},
+        {"minimal_install_service_before_connect", true},
     };
     std::ofstream out(std::filesystem::path(config_dir) / "config.json",
                       std::ios::out | std::ios::trunc);
@@ -297,6 +305,14 @@ static json find_by_request_id(const std::vector<json>& responses,
                                const std::string& request_id) {
     for (auto& r : responses) {
         if (r.value("request_id", std::string()) == request_id) return r;
+    }
+    return json();
+}
+
+static json find_event(const std::vector<json>& responses,
+                       const std::string& event_type) {
+    for (auto& r : responses) {
+        if (r.value("event", std::string()) == event_type) return r;
     }
     return json();
 }
@@ -404,6 +420,52 @@ int main() {
                "E2.0-regression: app_api error names missing config/backend prerequisite");
         expect(result.value("status", std::string()) != "connecting",
                "E2.0-regression: app_api must not return blind connecting status");
+    }
+
+    // =======================================================================
+    // E2.0-quick-start - missing config emits quick-start-request once
+    // =======================================================================
+    {
+        std::cerr << "[E2.0-quick-start] missing config emits quick start\n";
+        auto quick_config_dir = make_temp_dir();
+        auto quick_home_dir = make_temp_dir();
+
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(quick_config_dir, quick_home_dir);
+
+        in_buf.feed(R"({"id":901,"action":"status.get","payload":{}})" "\n");
+        expect(wait_for_response_count(out_buf, 1, std::chrono::seconds(3)),
+               "E2.0-quick-start: should receive response");
+
+        in_buf.close_input();
+        cr.join();
+
+        auto all = parse_json_lines(out_buf.read_all());
+        auto event = find_event(all, "quick-start-request");
+        expect(!event.is_null(),
+               "E2.0-quick-start: missing config emits quick-start-request");
+        if (!event.is_null()) {
+            expect(event["data"].value("reason", std::string()) == "missing",
+                   "E2.0-quick-start: reason is missing");
+            expect(event["data"]["defaults"].value("server", std::string()) ==
+                       "vpn-ct.ecnu.edu.cn",
+                   "E2.0-quick-start: default server is ct host");
+            expect(event["data"]["defaults"].value("remember_password", false),
+                   "E2.0-quick-start: remember password defaults true");
+            expect(event["data"]["defaults"].value("install_service", false),
+                   "E2.0-quick-start: install service defaults true");
+        }
+        expect(std::filesystem::exists(
+                   std::filesystem::path(quick_config_dir) / "config.json"),
+               "E2.0-quick-start: config file is generated before renderer actions");
+        std::filesystem::remove_all(quick_config_dir);
+        std::filesystem::remove_all(quick_home_dir);
     }
 
     // =======================================================================

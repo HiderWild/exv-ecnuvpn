@@ -147,8 +147,24 @@ std::future<CoreRpcResponse> CoreRpcClient::invoke_async(CoreRpcRequest request)
 }
 
 void CoreRpcClient::set_event_handler(CoreRpcEventHandler handler) {
-  std::lock_guard<std::mutex> lock(event_mutex_);
-  event_handler_ = std::move(handler);
+  std::deque<CoreRpcEvent> pending;
+  {
+    std::lock_guard<std::mutex> lock(event_mutex_);
+    event_handler_ = std::move(handler);
+    if (event_handler_) {
+      pending.swap(pending_events_);
+    }
+  }
+  for (const auto &event : pending) {
+    CoreRpcEventHandler current;
+    {
+      std::lock_guard<std::mutex> lock(event_mutex_);
+      current = event_handler_;
+    }
+    if (current) {
+      current(event);
+    }
+  }
 }
 
 void CoreRpcClient::pump_events() {
@@ -165,13 +181,17 @@ void CoreRpcClient::pump_events() {
     try {
       const auto parsed = nlohmann::json::parse(line);
       if (parsed.is_object() && parsed.contains("event")) {
+        auto event = parse_core_rpc_event_line(line);
         CoreRpcEventHandler handler;
         {
           std::lock_guard<std::mutex> lock(event_mutex_);
           handler = event_handler_;
+          if (!handler && event.event == "quick-start-request") {
+            pending_events_.push_back(event);
+          }
         }
         if (handler) {
-          handler(parse_core_rpc_event_line(line));
+          handler(event);
         }
         continue;
       }
@@ -234,13 +254,17 @@ void CoreRpcClient::reader_loop() {
     try {
       const auto parsed = nlohmann::json::parse(response_line);
       if (parsed.is_object() && parsed.contains("event")) {
+        auto event = parse_core_rpc_event_line(response_line);
         CoreRpcEventHandler handler;
         {
           std::lock_guard<std::mutex> lock(event_mutex_);
           handler = event_handler_;
+          if (!handler && event.event == "quick-start-request") {
+            pending_events_.push_back(event);
+          }
         }
         if (handler) {
-          handler(parse_core_rpc_event_line(response_line));
+          handler(event);
         }
         continue;
       }
