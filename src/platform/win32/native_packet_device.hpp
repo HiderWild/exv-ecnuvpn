@@ -9,7 +9,7 @@
 #include <memory>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 class NativePacketDeviceWintunSession {
@@ -74,4 +74,4 @@ private:
 std::unique_ptr<vpn_engine::PacketDevice> create_native_packet_device();
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

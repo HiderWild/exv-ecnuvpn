@@ -1,6 +1,6 @@
 #include "platform/common/driver_status.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 nlohmann::json driver_status_json(const ConfigView &cfg) {
@@ -31,4 +31,4 @@ void clear_driver_status_cache_for_testing() {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

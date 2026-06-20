@@ -1,6 +1,6 @@
 #include "platform/common/oneshot_bootstrap.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 nlohmann::json oneshot_backend_to_json(const OneshotBackend &backend) {
@@ -20,4 +20,4 @@ nlohmann::json oneshot_backend_to_json(const OneshotBackend &backend) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

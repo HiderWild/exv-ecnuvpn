@@ -11,12 +11,12 @@
 
 #include <iostream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn {
 
 int start(const Config &cfg, int retry_limit) {
   // Enable log rendering for CLI mode - subscribes to LogEventBus
-  ecnuvpn::LogRenderer log_renderer;
+  exv::LogRenderer log_renderer;
 
   exv::observability::LogFacade::info("VPN CLI: Connection starting - server=" + cfg.server +
                " username=" + cfg.username + " engine=" + cfg.vpn_engine);
@@ -93,4 +93,4 @@ int status() {
 }
 
 } // namespace vpn
-} // namespace ecnuvpn
+} // namespace exv

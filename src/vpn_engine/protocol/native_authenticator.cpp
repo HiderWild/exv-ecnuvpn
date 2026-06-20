@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -52,4 +52,4 @@ NativeAuthenticator::authenticate(const NativeAuthRequest &request,
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

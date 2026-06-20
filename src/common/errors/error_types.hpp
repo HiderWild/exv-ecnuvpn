@@ -4,7 +4,7 @@
 #include <ctime>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 
 // Unified error type strings matching the TypeScript VpnErrorType enum.
 static constexpr const char *kErrorElevationRequired = "elevation_required";
@@ -28,4 +28,4 @@ inline nlohmann::json structured_error(const char *error_type, const std::string
                         {"timestamp", static_cast<int64_t>(std::time(nullptr))}};
 }
 
-} // namespace ecnuvpn
+} // namespace exv

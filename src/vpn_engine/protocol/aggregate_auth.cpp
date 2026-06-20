@@ -7,7 +7,7 @@
 #include <string_view>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 namespace {
@@ -485,4 +485,4 @@ ValidationResult parse_aggregate_auth_response(const std::string &xml,
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

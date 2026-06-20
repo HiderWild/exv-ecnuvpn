@@ -8,7 +8,7 @@
 #include <ostream>
 #include <utility>
 
-namespace ecnuvpn::platform::logging {
+namespace exv::platform::logging {
 
 StdoutLogSink::StdoutLogSink(std::ostream &out) : out_(out) {}
 
@@ -46,4 +46,4 @@ void StdoutLogSink::flush() {
   out_ << std::flush;
 }
 
-} // namespace ecnuvpn::platform::logging
+} // namespace exv::platform::logging

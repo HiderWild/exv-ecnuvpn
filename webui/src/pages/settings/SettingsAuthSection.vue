@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Fingerprint, Key, Server, Shield, User } from 'lucide-vue-next'
+import { distributionConfig } from '../../generated/distribution'
 import type { AuthConfig } from '../../stores/config'
 
 const props = defineProps<{
@@ -11,12 +12,8 @@ const emit = defineEmits<{
   'update:authDraft': [value: AuthConfig]
 }>()
 
-const serverOptions = [
-  'vpn-ct.ecnu.edu.cn',
-  'vpn-cn.ecnu.edu.cn',
-  'vpn-lt.ecnu.edu.cn',
-]
-const serverChoice = ref(serverOptions[0])
+const serverOptions: string[] = distributionConfig.vpnServers.map((server) => server.value)
+const serverChoice = ref<string>(distributionConfig.defaultVpnServer)
 const customServer = ref('')
 
 const fallbackAuthDraft: AuthConfig = {
@@ -38,15 +35,20 @@ const passwordPlaceholder = computed(() =>
     : '请输入密码',
 )
 
+function normalizeServerChoice(server: string) {
+  return server.trim().replace(/^https?:\/\//i, '').replace(/\/$/, '').toLowerCase()
+}
+
 function applyServerChoice(server: string) {
-  if (serverOptions.includes(server)) {
-    serverChoice.value = server
+  const normalizedServer = normalizeServerChoice(server)
+  if (serverOptions.includes(normalizedServer)) {
+    serverChoice.value = normalizedServer
     customServer.value = ''
   } else if (server) {
     serverChoice.value = 'custom'
     customServer.value = server
   } else {
-    serverChoice.value = serverOptions[0]
+    serverChoice.value = distributionConfig.defaultVpnServer
     customServer.value = ''
   }
 }

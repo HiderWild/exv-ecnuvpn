@@ -24,7 +24,7 @@ public:
     std::string backend_name() const override;
 
 private:
-    /// Keychain "service" name: "com.ecnu-vpn.profile.<profile_id>"
+    /// Keychain "service" name: "com.exv.profile.<profile_id>"
     std::string make_service(const std::string& profile_id) const;
 
     /// Keychain "account" name: "<profile_id>/<secret_name>"

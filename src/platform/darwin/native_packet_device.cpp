@@ -15,7 +15,7 @@
 #include <unistd.h>
 #endif
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -636,4 +636,4 @@ std::unique_ptr<vpn_engine::PacketDevice> create_native_packet_device() {
 }
 // End inlined from platform/darwin/native_packet_device_public include-unit
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

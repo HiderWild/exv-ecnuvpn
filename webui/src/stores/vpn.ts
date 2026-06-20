@@ -863,7 +863,7 @@ export const useVpnStore = defineStore('vpn', () => {
       case 'auth_rejected':
       case 'auth_expired':
         return {
-          label: '重新输入密码',
+          label: '重新输入用户名和密码',
           action: () => retryConnectAfterAuthFailure(lastFailedConnectMode.value ?? 'helper'),
           variant: 'primary',
         }
@@ -944,7 +944,7 @@ export const useVpnStore = defineStore('vpn', () => {
       case 'auth_expired':
         return {
           title: err.error_type === 'auth_expired' ? '认证已过期' : '认证失败',
-          primaryLabel: '重新输入密码',
+          primaryLabel: '重新输入用户名和密码',
           onPrimary: () => retryConnectAfterAuthFailure(lastFailedConnectMode.value ?? 'helper'),
         }
       case 'auth_challenge_required':
@@ -1229,11 +1229,14 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
-  async function resolveConnectCredentials(message?: string): Promise<{ password?: string } | null> {
+  async function resolveConnectCredentials(
+    message?: string,
+    options: { forcePrompt?: boolean } = {},
+  ): Promise<{ password?: string } | null> {
     await config.fetchAuthConfig()
     const auth = config.authConfig
-    const missingUsername = !auth.username.trim()
-    const missingPassword = !(auth.remember_password && auth.password_stored)
+    const missingUsername = options.forcePrompt ? true : !auth.username.trim()
+    const missingPassword = options.forcePrompt ? true : !(auth.remember_password && auth.password_stored)
 
     if (!missingUsername && !missingPassword) return {}
 
@@ -1264,7 +1267,10 @@ export const useVpnStore = defineStore('vpn', () => {
   }
 
   async function retryConnectAfterAuthFailure(mode: 'helper' | 'elevated'): Promise<boolean> {
-    const credentials = await resolveConnectCredentials('密码不正确，请重新输入密码')
+    const credentials = await resolveConnectCredentials(
+      '认证失败，请重新输入用户名和密码',
+      { forcePrompt: true },
+    )
     if (credentials === null) return false
     clearError()
     const password = credentials.password

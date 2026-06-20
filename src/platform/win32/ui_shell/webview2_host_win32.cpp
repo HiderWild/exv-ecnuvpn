@@ -13,9 +13,12 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -29,13 +32,13 @@
 #include <shellapi.h>
 #endif
 
-namespace ecnuvpn::platform::win32::ui_shell {
+namespace exv::platform::win32::ui_shell {
 
 namespace {
 
-constexpr char kPackagedRendererHost[] = "appassets.ecnu-vpn.invalid";
+constexpr char kPackagedRendererHost[] = "appassets.exv.invalid";
 constexpr wchar_t kPackagedRendererHostWide[] =
-    L"appassets.ecnu-vpn.invalid";
+    L"appassets.exv.invalid";
 constexpr DWORD kFixedWindowStyle =
     WS_OVERLAPPED | WS_SYSMENU | WS_MINIMIZEBOX;
 constexpr int kTrayCommandShow = 1001;
@@ -47,8 +50,17 @@ constexpr UINT kRendererEventMessage = WM_APP + 0x45;
 constexpr UINT kTrayIconId = 1;
 constexpr int kCustomTitlebarHeightPx = 34;
 constexpr int kWindowControlWidthPx = 88;
+constexpr int kWindowControlButtonWidthPx = 44;
 constexpr int kWindowCornerRadiusPx = 16;
 constexpr UINT kDefaultDpi = 96;
+
+struct RendererDragStart {
+  POINT screen{};
+  double client_x = 0;
+  double client_y = 0;
+  double view_width = 0;
+  bool has_client_metrics = false;
+};
 
 std::wstring wide_from_utf8(const std::string &value) {
   if (value.empty()) {
@@ -82,6 +94,155 @@ std::string utf8_from_wide(const wchar_t *value) {
     out.pop_back();
   }
   return out;
+}
+
+std::string trace_token(std::string value) {
+  if (value.empty()) {
+    return "-";
+  }
+  if (value.size() > 96) {
+    value.resize(96);
+  }
+  for (char &ch : value) {
+    const auto byte = static_cast<unsigned char>(ch);
+    if (byte <= ' ' || ch == '"' || ch == '\\') {
+      ch = '_';
+    }
+  }
+  return value;
+}
+
+std::string window_class_trace_token(HWND hwnd) {
+  if (!hwnd) {
+    return "-";
+  }
+  wchar_t class_name[128]{};
+  if (GetClassNameW(hwnd, class_name,
+                    static_cast<int>(sizeof(class_name) /
+                                     sizeof(class_name[0]))) <= 0) {
+    return "-";
+  }
+  return trace_token(utf8_from_wide(class_name));
+}
+
+std::string window_title_trace_token(HWND hwnd) {
+  if (!hwnd) {
+    return "-";
+  }
+  wchar_t title[160]{};
+  if (GetWindowTextW(hwnd, title,
+                     static_cast<int>(sizeof(title) / sizeof(title[0]))) <=
+      0) {
+    return "-";
+  }
+  return trace_token(utf8_from_wide(title));
+}
+
+bool win32_drag_trace_enabled() {
+  wchar_t value[8]{};
+  if (GetEnvironmentVariableW(
+          L"EXV_WIN32_DRAG_TRACE", value,
+          static_cast<DWORD>(sizeof(value) / sizeof(value[0]))) > 0) {
+    return true;
+  }
+  wchar_t temp_path[MAX_PATH]{};
+  if (GetTempPathW(MAX_PATH, temp_path) == 0) {
+    return false;
+  }
+  const std::wstring sentinel =
+      std::wstring(temp_path) + L"exv-win32-drag-trace.enabled";
+  return GetFileAttributesW(sentinel.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+const char *drag_message_name(UINT message) {
+  switch (message) {
+  case WM_MOUSEACTIVATE:
+    return "WM_MOUSEACTIVATE";
+  case WM_ACTIVATE:
+    return "WM_ACTIVATE";
+  case WM_SETFOCUS:
+    return "WM_SETFOCUS";
+  case WM_KILLFOCUS:
+    return "WM_KILLFOCUS";
+  case WM_NCHITTEST:
+    return "WM_NCHITTEST";
+  case WM_NCMOUSEMOVE:
+    return "WM_NCMOUSEMOVE";
+  case WM_NCMOUSELEAVE:
+    return "WM_NCMOUSELEAVE";
+  case WM_NCLBUTTONDOWN:
+    return "WM_NCLBUTTONDOWN";
+  case WM_NCLBUTTONUP:
+    return "WM_NCLBUTTONUP";
+  case WM_SYSCOMMAND:
+    return "WM_SYSCOMMAND";
+  case WM_LBUTTONDOWN:
+    return "WM_LBUTTONDOWN";
+  case WM_LBUTTONUP:
+    return "WM_LBUTTONUP";
+  case WM_MOUSEMOVE:
+    return "WM_MOUSEMOVE";
+  case WM_ENTERSIZEMOVE:
+    return "WM_ENTERSIZEMOVE";
+  case WM_EXITSIZEMOVE:
+    return "WM_EXITSIZEMOVE";
+  case WM_CAPTURECHANGED:
+    return "WM_CAPTURECHANGED";
+  case WM_CANCELMODE:
+    return "WM_CANCELMODE";
+  default:
+    return "other";
+  }
+}
+
+std::string win32_drag_trace_path() {
+  wchar_t temp_path[MAX_PATH]{};
+  if (GetTempPathW(MAX_PATH, temp_path) == 0) {
+    return "exv-win32-drag-trace.log";
+  }
+  const std::wstring path =
+      std::wstring(temp_path) + L"exv-win32-drag-trace.log";
+  return utf8_from_wide(path.c_str());
+}
+
+void append_win32_drag_trace(HWND hwnd, const char *phase, UINT message,
+                             WPARAM wparam, LPARAM lparam,
+                             LRESULT detail = 0) {
+  if (!win32_drag_trace_enabled()) {
+    return;
+  }
+
+  POINT cursor{};
+  GetCursorPos(&cursor);
+  RECT rect{};
+  GetWindowRect(hwnd, &rect);
+  const HWND foreground = GetForegroundWindow();
+
+  std::ostringstream line;
+  line << GetTickCount64() << " phase=" << phase
+       << " msg=" << drag_message_name(message)
+       << " hwnd=" << reinterpret_cast<std::uintptr_t>(hwnd)
+       << " fg=" << (foreground == hwnd ? 1 : 0)
+       << " fg_hwnd=" << reinterpret_cast<std::uintptr_t>(foreground)
+       << " fg_class=" << window_class_trace_token(foreground)
+       << " fg_title=" << window_title_trace_token(foreground)
+       << " capture=" << reinterpret_cast<std::uintptr_t>(GetCapture())
+       << " cursor=" << cursor.x << "," << cursor.y << " rect=" << rect.left
+       << "," << rect.top << "," << rect.right << "," << rect.bottom
+       << " wparam=" << static_cast<std::uintptr_t>(wparam)
+       << " lparam=" << static_cast<std::intptr_t>(lparam)
+       << " detail=" << static_cast<std::intptr_t>(detail) << "\n";
+
+  std::ofstream out(win32_drag_trace_path(), std::ios::app);
+  out << line.str();
+}
+
+bool is_supported_external_url(std::string_view url) {
+  return url.starts_with("https://") || url.starts_with("http://");
+}
+
+bool left_mouse_button_down() {
+  return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
 }
 
 bool is_file_uri_path_byte_safe(unsigned char value) {
@@ -150,7 +311,7 @@ UINT dpi_for_window(HWND hwnd) {
 
 HICON load_shared_app_icon(HINSTANCE instance, int width, int height) {
   return static_cast<HICON>(LoadImageW(
-      instance, MAKEINTRESOURCEW(IDI_ECNUVPN_APP), IMAGE_ICON, width, height,
+      instance, MAKEINTRESOURCEW(IDI_EXV_APP), IMAGE_ICON, width, height,
       LR_DEFAULTCOLOR | LR_SHARED));
 }
 
@@ -276,7 +437,7 @@ private:
   WebView2Window *owner_ = nullptr;
 };
 
-class WebView2Window final : public ecnuvpn::ui_shell::UiWindow {
+class WebView2Window final : public exv::ui_shell::UiWindow {
 public:
   ~WebView2Window() override {
     stop_host_bridge_worker();
@@ -286,11 +447,11 @@ public:
     destroy_tray_icon();
   }
 
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+  void set_message_handler(exv::ui_shell::HostMessageHandler handler) override {
     handler_ = std::move(handler);
   }
 
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &config) override {
+  int run(const exv::ui_shell::UiWindowConfig &config) override {
     ui_thread_id_ = GetCurrentThreadId();
     active_config_ = config;
     if (!ensure_runtime_available()) {
@@ -412,6 +573,19 @@ public:
     webview_->PostWebMessageAsJson(wide_response.c_str());
   }
 
+  void post_bridge_error(int id, const char *code, const char *message) {
+    if (!webview_) {
+      return;
+    }
+    nlohmann::ordered_json out;
+    out["id"] = id;
+    out["ok"] = false;
+    out["code"] = code;
+    out["message"] = message;
+    const std::wstring wide_response = wide_from_utf8(out.dump());
+    webview_->PostWebMessageAsJson(wide_response.c_str());
+  }
+
   void on_environment_created(HRESULT error_code,
                               ICoreWebView2Environment *environment) {
     if (FAILED(error_code) || !environment || !hwnd_) {
@@ -420,7 +594,7 @@ public:
     }
     environment_.copy_from(environment);
     auto *handler = new ControllerCompletedHandler(this);
-    const HRESULT hr = environment_->CreateCoreWebView2Controller(hwnd_, handler);
+    const HRESULT hr = create_webview_controller(handler);
     handler->Release();
     if (FAILED(hr)) {
       fail_and_close(L"Unable to create the WebView2 controller.");
@@ -454,6 +628,7 @@ public:
       transparent.B = 0;
       controller2->put_DefaultBackgroundColor(transparent);
     }
+    configure_non_client_region_support();
 
     resize_webview();
     if (!configure_packaged_renderer_origin()) {
@@ -584,7 +759,56 @@ public:
         return S_OK;
       }
       if (action == "window.startDrag") {
-        start_window_drag();
+        std::optional<RendererDragStart> renderer_start;
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("screenX") && payload["screenX"].is_number() &&
+              payload.contains("screenY") && payload["screenY"].is_number()) {
+            RendererDragStart start;
+            start.screen = POINT{
+                static_cast<LONG>(payload["screenX"].get<double>()),
+                static_cast<LONG>(payload["screenY"].get<double>())};
+            if (payload.contains("clientX") &&
+                payload["clientX"].is_number() &&
+                payload.contains("clientY") &&
+                payload["clientY"].is_number() &&
+                payload.contains("viewWidth") &&
+                payload["viewWidth"].is_number()) {
+              start.client_x = payload["clientX"].get<double>();
+              start.client_y = payload["clientY"].get<double>();
+              start.view_width = payload["viewWidth"].get<double>();
+              start.has_client_metrics = true;
+            }
+            renderer_start = start;
+          }
+        }
+        start_window_drag(renderer_start);
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return S_OK;
+      }
+      if (action == "shell.openExternal") {
+        std::string url;
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("url") && payload["url"].is_string()) {
+            url = payload["url"].get<std::string>();
+          }
+        }
+        if (!is_supported_external_url(url)) {
+          post_bridge_error(id, "invalid_url",
+                            "Only http and https URLs can be opened.");
+          return S_OK;
+        }
+        const std::wstring wide_url = wide_from_utf8(url);
+        const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(
+            hwnd_, L"open", wide_url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        if (result <= 32) {
+          post_bridge_error(id, "open_external_failed",
+                            "Unable to open the URL in the default browser.");
+          return S_OK;
+        }
         nlohmann::ordered_json data;
         data["ok"] = true;
         post_bridge_success(id, data);
@@ -599,7 +823,7 @@ public:
       }
       if (action == "window.resolveClosePrompt") {
         apply_close_resolution(
-            ecnuvpn::ui_shell::parse_close_prompt_resolution(request_json));
+            exv::ui_shell::parse_close_prompt_resolution(request_json));
         nlohmann::ordered_json out;
         nlohmann::ordered_json data;
         data["ok"] = true;
@@ -740,7 +964,7 @@ public:
     if (!tray_icon_.hIcon) {
       return false;
     }
-    wcscpy_s(tray_icon_.szTip, L"ECNU VPN");
+    wcscpy_s(tray_icon_.szTip, L"EXV");
     tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &tray_icon_) == TRUE;
     return tray_icon_added_;
   }
@@ -783,24 +1007,93 @@ public:
     restore_or_focus_window();
   }
 
-  void start_window_drag() {
+  void start_window_drag(std::optional<RendererDragStart> renderer_start =
+                             std::nullopt) {
     if (!hwnd_) {
       return;
     }
+    append_win32_drag_trace(hwnd_, "start-drag-enter", 0, 0, 0);
+
     POINT cursor{};
     if (!GetCursorPos(&cursor)) {
       return;
     }
-
-    if (GetForegroundWindow() != hwnd_) {
-      SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
-                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-      SetForegroundWindow(hwnd_);
+    const std::optional<POINT> renderer_start_point =
+        renderer_start ? std::optional<POINT>(renderer_start->screen)
+                       : std::nullopt;
+    const std::optional<POINT> renderer_derived_start =
+        renderer_client_to_screen(renderer_start);
+    const POINT drag_start =
+        renderer_derived_start.value_or(renderer_start_point.value_or(cursor));
+    append_win32_drag_trace(
+        hwnd_,
+        renderer_start_point ? "start-drag-renderer-point"
+                             : "start-drag-live-point",
+        0, renderer_start_point ? 1 : 0,
+        MAKELPARAM(drag_start.x, drag_start.y));
+    if (renderer_start && renderer_start->has_client_metrics) {
+      append_win32_drag_trace(
+          hwnd_, "start-drag-renderer-client", 0,
+          static_cast<WPARAM>(renderer_start->view_width),
+          MAKELPARAM(static_cast<LONG>(renderer_start->client_x),
+                     static_cast<LONG>(renderer_start->client_y)));
+    }
+    if (renderer_derived_start) {
+      append_win32_drag_trace(
+          hwnd_, "start-drag-derived-screen", 0, 0,
+          MAKELPARAM(renderer_derived_start->x, renderer_derived_start->y));
     }
 
+    const LRESULT drag_hit =
+        renderer_start && renderer_start->has_client_metrics
+            ? renderer_titlebar_hit_test(renderer_start)
+            : hit_test_custom_frame_point(drag_start);
+    append_win32_drag_trace(hwnd_, "start-drag-hit-test", 0, 0,
+                            MAKELPARAM(drag_start.x, drag_start.y), drag_hit);
+    if (drag_hit != HTCAPTION) {
+      append_win32_drag_trace(hwnd_, "start-drag-reject-hit-test", 0, 0,
+                              MAKELPARAM(drag_start.x, drag_start.y),
+                              drag_hit);
+      return;
+    }
+
+    const bool button_down = left_mouse_button_down();
+    append_win32_drag_trace(hwnd_, "start-drag-left-button-state", 0,
+                            button_down ? 1 : 0,
+                            MAKELPARAM(drag_start.x, drag_start.y));
+    if (!button_down) {
+      append_win32_drag_trace(hwnd_, "start-drag-reject-button-up", 0, 0,
+                              MAKELPARAM(drag_start.x, drag_start.y));
+      return;
+    }
+
+    append_win32_drag_trace(hwnd_, "start-drag-before-foreground", 0, 0, 0);
+    if (GetForegroundWindow() != hwnd_) {
+      const BOOL top_result =
+          SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+      const BOOL foreground_result = SetForegroundWindow(hwnd_);
+      append_win32_drag_trace(hwnd_, "start-drag-after-foreground", 0,
+                              static_cast<WPARAM>(top_result),
+                              static_cast<LPARAM>(foreground_result));
+    }
+
+    POINT move_loop_start{};
+    if (!GetCursorPos(&move_loop_start)) {
+      return;
+    }
+    append_win32_drag_trace(hwnd_, "start-drag-current-cursor", 0, 0,
+                            MAKELPARAM(move_loop_start.x,
+                                        move_loop_start.y));
+    append_win32_drag_trace(hwnd_, "start-drag-before-send", WM_NCLBUTTONDOWN,
+                            HTCAPTION,
+                            MAKELPARAM(move_loop_start.x, move_loop_start.y));
     ReleaseCapture();
     SendMessageW(hwnd_, WM_NCLBUTTONDOWN, HTCAPTION,
-                 MAKELPARAM(cursor.x, cursor.y));
+                 MAKELPARAM(move_loop_start.x, move_loop_start.y));
+    append_win32_drag_trace(hwnd_, "start-drag-after-send", WM_NCLBUTTONDOWN,
+                            HTCAPTION,
+                            MAKELPARAM(move_loop_start.x, move_loop_start.y));
   }
 
   void quit_from_tray() {
@@ -817,7 +1110,7 @@ public:
       return;
     }
     if (const auto remembered_action =
-            ecnuvpn::ui_shell::read_close_preference(active_config_.state_dir)) {
+            exv::ui_shell::read_close_preference(active_config_.state_dir)) {
       apply_close_resolution({*remembered_action, false});
       return;
     }
@@ -826,10 +1119,10 @@ public:
   }
 
   void apply_close_resolution(
-      const ecnuvpn::ui_shell::ClosePromptResolution &resolution) {
+      const exv::ui_shell::ClosePromptResolution &resolution) {
     close_prompt_pending_ = false;
     if (resolution.remember) {
-      ecnuvpn::ui_shell::write_close_preference(active_config_.state_dir,
+      exv::ui_shell::write_close_preference(active_config_.state_dir,
                                                 resolution.action);
     }
 
@@ -899,11 +1192,142 @@ public:
     resize_webview();
   }
 
-  LRESULT hit_test_custom_frame(LPARAM lparam) const {
+  static bool is_window_control_hit(LRESULT hit) {
+    return hit == HTMINBUTTON || hit == HTCLOSE;
+  }
+
+  static const char *window_control_name(LRESULT hit) {
+    if (hit == HTMINBUTTON) {
+      return "minimize";
+    }
+    if (hit == HTCLOSE) {
+      return "close";
+    }
+    return nullptr;
+  }
+
+  LRESULT control_button_hit_test(int content_x, int content_y,
+                                  int content_width, UINT dpi) const {
+    const int titlebar_height =
+        MulDiv(kCustomTitlebarHeightPx, dpi, kDefaultDpi);
+    if (content_y < 0 || content_y >= titlebar_height) {
+      return HTCLIENT;
+    }
+
+    const int controls_width =
+        MulDiv(kWindowControlWidthPx, dpi, kDefaultDpi);
+    const int button_width =
+        MulDiv(kWindowControlButtonWidthPx, dpi, kDefaultDpi);
+    const int controls_left = content_width - controls_width;
+    if (content_x < controls_left || content_x >= content_width) {
+      return HTCLIENT;
+    }
+
+    if (content_x < controls_left + button_width) {
+      return HTMINBUTTON;
+    }
+    return HTCLOSE;
+  }
+
+  void track_non_client_mouse_leave() {
+    if (!hwnd_ || tracking_non_client_mouse_leave_) {
+      return;
+    }
+    TRACKMOUSEEVENT track{};
+    track.cbSize = sizeof(track);
+    track.dwFlags = TME_LEAVE | TME_NONCLIENT;
+    track.hwndTrack = hwnd_;
+    tracking_non_client_mouse_leave_ = TrackMouseEvent(&track) == TRUE;
+  }
+
+  void emit_window_control_state(LRESULT hit, bool pressed) {
+    if (!is_window_control_hit(hit)) {
+      hit = HTCLIENT;
+      pressed = false;
+    }
+    if (window_control_state_hit_ == hit &&
+        window_control_state_pressed_ == pressed) {
+      return;
+    }
+    window_control_state_hit_ = hit;
+    window_control_state_pressed_ = pressed;
+
+    nlohmann::ordered_json event;
+    event["type"] = "window-control-state";
+    event["data"] = nlohmann::ordered_json::object();
+    if (const char *control = window_control_name(hit)) {
+      event["data"]["control"] = control;
+    } else {
+      event["data"]["control"] = nullptr;
+    }
+    event["data"]["pressed"] = pressed;
+    emit_event(event.dump());
+  }
+
+  void clear_window_control_state() {
+    active_window_control_hit_ = HTCLIENT;
+    emit_window_control_state(HTCLIENT, false);
+  }
+
+  void invoke_window_control(LRESULT hit) {
+    if (hit == HTMINBUTTON) {
+      ShowWindow(hwnd_, SW_MINIMIZE);
+    } else if (hit == HTCLOSE) {
+      request_close_decision();
+    }
+  }
+
+  LRESULT window_control_hit_from_client_lparam(LPARAM lparam) const {
     if (!hwnd_) {
       return HTCLIENT;
     }
     POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    ClientToScreen(hwnd_, &point);
+    const LRESULT hit = hit_test_custom_frame_point(point);
+    return is_window_control_hit(hit) ? hit : HTCLIENT;
+  }
+
+  void begin_window_control_press(LRESULT hit) {
+    if (!hwnd_ || !is_window_control_hit(hit)) {
+      return;
+    }
+    active_window_control_hit_ = hit;
+    HWND capture_target = hwnd_;
+    SetCapture(capture_target);
+    track_non_client_mouse_leave();
+    emit_window_control_state(hit, true);
+  }
+
+  void update_window_control_press(LRESULT hit) {
+    if (!is_window_control_hit(active_window_control_hit_)) {
+      return;
+    }
+    const bool still_pressed = hit == active_window_control_hit_;
+    emit_window_control_state(still_pressed ? active_window_control_hit_
+                                            : HTCLIENT,
+                              still_pressed);
+  }
+
+  void finish_window_control_press(LRESULT hit) {
+    if (!is_window_control_hit(active_window_control_hit_)) {
+      return;
+    }
+    const LRESULT active_hit = active_window_control_hit_;
+    active_window_control_hit_ = HTCLIENT;
+    if (GetCapture() == hwnd_) {
+      ReleaseCapture();
+    }
+    emit_window_control_state(hit == active_hit ? active_hit : HTCLIENT,
+                              false);
+    if (hit == active_hit) {
+      invoke_window_control(active_hit);
+    }
+  }
+
+  LRESULT hit_test_custom_frame_point(POINT point) const {
+    if (!hwnd_) {
+      return HTCLIENT;
+    }
     RECT window{};
     if (!GetWindowRect(hwnd_, &window)) {
       return HTCLIENT;
@@ -914,7 +1338,7 @@ public:
     const int height = window.bottom - window.top;
     const UINT dpi = dpi_for_window(hwnd_);
     const int shadow_margin =
-        MulDiv(ecnuvpn::ui_shell::kWindowShadowMarginPx, dpi, kDefaultDpi);
+        MulDiv(exv::ui_shell::kWindowShadowMarginPx, dpi, kDefaultDpi);
     const int content_x = x - shadow_margin;
     const int content_y = y - shadow_margin;
     const int content_width = width - shadow_margin * 2;
@@ -926,16 +1350,60 @@ public:
     }
     const int titlebar_height =
         MulDiv(kCustomTitlebarHeightPx, dpi, kDefaultDpi);
-    const int controls_width =
-        MulDiv(kWindowControlWidthPx, dpi, kDefaultDpi);
     if (content_y >= 0 && content_y < titlebar_height) {
-      if (content_x >= content_width - controls_width &&
-          content_x < content_width) {
-        return HTCLIENT;
+      const LRESULT control_hit =
+          control_button_hit_test(content_x, content_y, content_width, dpi);
+      if (control_hit != HTCLIENT) {
+        return control_hit;
       }
       return HTCAPTION;
     }
     return HTCLIENT;
+  }
+
+  std::optional<POINT> renderer_client_to_screen(
+      const std::optional<RendererDragStart> &renderer_start) const {
+    if (!hwnd_ || !renderer_start || !renderer_start->has_client_metrics ||
+        renderer_start->client_x < 0 || renderer_start->client_y < 0) {
+      return std::nullopt;
+    }
+    RECT window{};
+    if (!GetWindowRect(hwnd_, &window)) {
+      return std::nullopt;
+    }
+    const UINT dpi = dpi_for_window(hwnd_);
+    return POINT{
+        window.left +
+            MulDiv(static_cast<int>(renderer_start->client_x), dpi,
+                   kDefaultDpi),
+        window.top +
+            MulDiv(static_cast<int>(renderer_start->client_y), dpi,
+                   kDefaultDpi)};
+  }
+
+  LRESULT renderer_titlebar_hit_test(
+      const std::optional<RendererDragStart> &renderer_start) const {
+    if (!renderer_start || !renderer_start->has_client_metrics ||
+        renderer_start->view_width <= 0 || renderer_start->client_x < 0 ||
+        renderer_start->client_y < 0 ||
+        renderer_start->client_x >= renderer_start->view_width) {
+      return HTCLIENT;
+    }
+    if (renderer_start->client_y >= kCustomTitlebarHeightPx) {
+      return HTCLIENT;
+    }
+    const double controls_left =
+        renderer_start->view_width - kWindowControlWidthPx;
+    if (renderer_start->client_x >= controls_left &&
+        renderer_start->client_x < renderer_start->view_width) {
+      return HTCLIENT;
+    }
+    return HTCAPTION;
+  }
+
+  LRESULT hit_test_custom_frame(LPARAM lparam) const {
+    return hit_test_custom_frame_point(
+        POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
   }
 
   void show_tray_menu() {
@@ -966,9 +1434,72 @@ public:
   }
 
 private:
+  void enable_host_input_processing(ICoreWebView2ControllerOptions *options) {
+    if (!options) {
+      return;
+    }
+
+    ComPtr<ICoreWebView2ControllerOptions4> options4;
+    const HRESULT options4_result = options->QueryInterface(
+        IID_ICoreWebView2ControllerOptions4,
+        reinterpret_cast<void **>(options4.put()));
+    if (SUCCEEDED(options4_result) && options4) {
+      options4->put_AllowHostInputProcessing(TRUE);
+    }
+  }
+
+  HRESULT create_webview_controller(
+      ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *handler) {
+    if (!environment_ || !hwnd_) {
+      return E_FAIL;
+    }
+
+    ComPtr<ICoreWebView2Environment10> environment10;
+    const HRESULT environment10_result = environment_->QueryInterface(
+        IID_ICoreWebView2Environment10,
+        reinterpret_cast<void **>(environment10.put()));
+    if (SUCCEEDED(environment10_result) && environment10) {
+      ComPtr<ICoreWebView2ControllerOptions> options;
+      const HRESULT options_result =
+          environment10->CreateCoreWebView2ControllerOptions(options.put());
+      if (SUCCEEDED(options_result) && options) {
+        enable_host_input_processing(options.get());
+        const HRESULT options_controller_result =
+            environment10->CreateCoreWebView2ControllerWithOptions(
+                hwnd_, options.get(), handler);
+        if (SUCCEEDED(options_controller_result)) {
+          return options_controller_result;
+        }
+      }
+    }
+
+    return environment_->CreateCoreWebView2Controller(hwnd_, handler);
+  }
+
+  void configure_non_client_region_support() {
+    if (!webview_) {
+      return;
+    }
+
+    ICoreWebView2Settings *raw_settings = nullptr;
+    if (FAILED(webview_->get_Settings(&raw_settings)) || !raw_settings) {
+      return;
+    }
+
+    ComPtr<ICoreWebView2Settings> settings;
+    settings.attach(raw_settings);
+    ComPtr<ICoreWebView2Settings9> settings9;
+    const HRESULT settings9_result = settings->QueryInterface(
+        IID_ICoreWebView2Settings9,
+        reinterpret_cast<void **>(settings9.put()));
+    if (SUCCEEDED(settings9_result) && settings9) {
+      settings9->put_IsNonClientRegionSupportEnabled(TRUE);
+    }
+  }
+
   bool configure_packaged_renderer_origin() {
     if (active_config_.renderer.kind ==
-        ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+        exv::ui_shell::RendererAssetKind::DevServer) {
       return true;
     }
 
@@ -998,7 +1529,7 @@ private:
         nullptr,
         L"Microsoft Edge WebView2 Runtime is required. Download and install "
         L"the Evergreen Runtime now?",
-        L"ECNU VPN", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
+        L"EXV", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
     if (choice != IDYES) {
       return false;
     }
@@ -1024,7 +1555,7 @@ private:
     window_class.cbSize = sizeof(window_class);
     window_class.lpfnWndProc = &WebView2Window::window_proc;
     window_class.hInstance = instance_;
-    window_class.lpszClassName = L"ECNUVPNWebViewShellWindow";
+    window_class.lpszClassName = L"EXVWebViewShellWindow";
     window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     window_class.hIcon =
         load_shared_app_icon(instance_, GetSystemMetrics(SM_CXICON),
@@ -1034,7 +1565,7 @@ private:
                              GetSystemMetrics(SM_CYSMICON));
     RegisterClassExW(&window_class);
 
-    hwnd_ = CreateWindowExW(0, window_class.lpszClassName, L"ECNU VPN",
+    hwnd_ = CreateWindowExW(0, window_class.lpszClassName, L"EXV",
                             kFixedWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                             bounds.width, bounds.height, nullptr, nullptr,
                             instance_, this);
@@ -1059,7 +1590,7 @@ private:
   void install_renderer_bridge() {
     static constexpr wchar_t kBridgeScript[] = LR"JS(
 (() => {
-  if (window.ecnuVpn || !window.chrome || !window.chrome.webview) return;
+  if (window.exv || !window.chrome || !window.chrome.webview) return;
   let nextId = 1;
   const pending = new Map();
   const subscribers = new Set();
@@ -1089,7 +1620,7 @@ private:
     }
     subscribers.forEach((handler) => handler(message));
   });
-  window.ecnuVpn = {
+  window.exv = {
     status: { get: () => rpc('status.get') },
     vpn: {
       connect: (password) => rpc('vpn.connect', { password }),
@@ -1121,9 +1652,9 @@ private:
       uninstall: () => rpc('service.uninstall'),
     },
     cli: {
-      status: () => unsupported('cli.status'),
-      install: () => unsupported('cli.install'),
-      uninstall: () => unsupported('cli.uninstall'),
+      status: () => rpc('cli.status'),
+      install: () => rpc('cli.install'),
+      uninstall: () => rpc('cli.uninstall'),
     },
     logs: { list: (options) => rpc('logs.list', options ?? {}) },
     runtime: { status: () => rpc('runtime.status') },
@@ -1145,7 +1676,10 @@ private:
       minimize: () => rpc('window.minimize'),
       requestClose: () => rpc('window.requestClose'),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
-      startDrag: () => rpc('window.startDrag'),
+      startDrag: (drag) => rpc('window.startDrag', drag ?? {}),
+    },
+    shell: {
+      openExternal: (url) => rpc('shell.openExternal', { url }),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -1178,7 +1712,7 @@ private:
   }
 
   void fail_and_close(const wchar_t *message) {
-    MessageBoxW(hwnd_, message, L"ECNU VPN", MB_ICONERROR | MB_OK);
+    MessageBoxW(hwnd_, message, L"EXV", MB_ICONERROR | MB_OK);
     exit_code_ = 70;
     running_ = false;
     if (hwnd_) {
@@ -1203,6 +1737,17 @@ private:
         self->recreate_tray_icon();
         return 0;
       }
+      if (message == WM_MOUSEACTIVATE || message == WM_ACTIVATE ||
+          message == WM_SETFOCUS || message == WM_KILLFOCUS ||
+          message == WM_NCHITTEST || message == WM_NCMOUSEMOVE ||
+          message == WM_NCMOUSELEAVE || message == WM_NCLBUTTONDOWN ||
+          message == WM_NCLBUTTONUP || message == WM_LBUTTONUP ||
+          message == WM_MOUSEMOVE || message == WM_SYSCOMMAND ||
+          message == WM_ENTERSIZEMOVE || message == WM_EXITSIZEMOVE ||
+          message == WM_CAPTURECHANGED || message == WM_CANCELMODE) {
+        append_win32_drag_trace(hwnd, "wndproc-enter", message, wparam,
+                                lparam);
+      }
       switch (message) {
       case WM_MOUSEACTIVATE:
         return MA_ACTIVATE;
@@ -1210,11 +1755,94 @@ private:
         return 0;
       case WM_NCHITTEST: {
         const LRESULT hit = self->hit_test_custom_frame(lparam);
+        append_win32_drag_trace(hwnd, "nchittest-result", message, wparam,
+                                lparam, hit);
+        if (is_window_control_hit(hit)) {
+          self->track_non_client_mouse_leave();
+          if (!is_window_control_hit(self->active_window_control_hit_)) {
+            self->emit_window_control_state(hit, false);
+          }
+          return hit;
+        }
+        if (!is_window_control_hit(self->active_window_control_hit_)) {
+          self->emit_window_control_state(HTCLIENT, false);
+        }
         if (hit != HTCLIENT) {
           return hit;
         }
         break;
       }
+      case WM_NCMOUSEMOVE:
+        if (is_window_control_hit(static_cast<LRESULT>(wparam))) {
+          self->track_non_client_mouse_leave();
+          if (!is_window_control_hit(self->active_window_control_hit_)) {
+            self->emit_window_control_state(static_cast<LRESULT>(wparam),
+                                            false);
+          }
+        } else if (!is_window_control_hit(self->active_window_control_hit_)) {
+          self->emit_window_control_state(HTCLIENT, false);
+        }
+        break;
+      case WM_NCLBUTTONDOWN:
+        if (is_window_control_hit(static_cast<LRESULT>(wparam))) {
+          self->begin_window_control_press(static_cast<LRESULT>(wparam));
+          return 0;
+        }
+        break;
+      case WM_MOUSEMOVE:
+        if (is_window_control_hit(self->active_window_control_hit_)) {
+          self->update_window_control_press(
+              self->window_control_hit_from_client_lparam(lparam));
+          return 0;
+        }
+        break;
+      case WM_LBUTTONUP:
+        if (is_window_control_hit(self->active_window_control_hit_)) {
+          self->finish_window_control_press(
+              self->window_control_hit_from_client_lparam(lparam));
+          return 0;
+        }
+        break;
+      case WM_NCLBUTTONUP:
+        if (is_window_control_hit(self->active_window_control_hit_)) {
+          const LRESULT hit = is_window_control_hit(static_cast<LRESULT>(wparam))
+                                  ? static_cast<LRESULT>(wparam)
+                                  : HTCLIENT;
+          self->finish_window_control_press(hit);
+          return 0;
+        }
+        break;
+      case WM_NCMOUSELEAVE:
+        self->tracking_non_client_mouse_leave_ = false;
+        if (!is_window_control_hit(self->active_window_control_hit_)) {
+          self->emit_window_control_state(HTCLIENT, false);
+        }
+        break;
+      case WM_ENTERSIZEMOVE:
+        append_win32_drag_trace(hwnd, "enter-size-move", message, wparam,
+                                lparam);
+        break;
+      case WM_EXITSIZEMOVE:
+        append_win32_drag_trace(hwnd, "exit-size-move", message, wparam,
+                                lparam);
+        break;
+      case WM_CAPTURECHANGED:
+        if (reinterpret_cast<HWND>(lparam) != hwnd) {
+          self->clear_window_control_state();
+        }
+        append_win32_drag_trace(hwnd, "capture-changed", message, wparam,
+                                lparam);
+        break;
+      case WM_CANCELMODE:
+        self->clear_window_control_state();
+        append_win32_drag_trace(hwnd, "cancel-mode", message, wparam, lparam);
+        break;
+      case WM_SYSCOMMAND:
+        if ((wparam & 0xFFF0) == SC_MINIMIZE ||
+            (wparam & 0xFFF0) == SC_CLOSE) {
+          self->clear_window_control_state();
+        }
+        break;
       case WM_SIZE:
         self->apply_rounded_window_region();
         self->resize_webview();
@@ -1225,6 +1853,7 @@ private:
             reinterpret_cast<const RECT *>(lparam));
         return 0;
       case WM_CLOSE:
+        self->clear_window_control_state();
         if (self->force_quit_) {
           DestroyWindow(hwnd);
         } else {
@@ -1262,8 +1891,8 @@ private:
   bool running_ = false;
   int exit_code_ = 70;
   EventRegistrationToken web_message_token_{};
-  ecnuvpn::ui_shell::UiWindowConfig active_config_;
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
+  exv::ui_shell::UiWindowConfig active_config_;
+  exv::ui_shell::HostMessageHandler handler_;
   ComPtr<ICoreWebView2Environment> environment_;
   ComPtr<ICoreWebView2Controller> controller_;
   ComPtr<ICoreWebView2> webview_;
@@ -1286,6 +1915,10 @@ private:
   bool tray_icon_added_ = false;
   bool force_quit_ = false;
   bool close_prompt_pending_ = false;
+  bool tracking_non_client_mouse_leave_ = false;
+  LRESULT active_window_control_hit_ = HTCLIENT;
+  LRESULT window_control_state_hit_ = HTCLIENT;
+  bool window_control_state_pressed_ = false;
 };
 
 HRESULT EnvironmentCompletedHandler::QueryInterface(REFIID riid, void **object) {
@@ -1349,13 +1982,13 @@ HRESULT WebMessageReceivedHandler::Invoke(
 
 #else
 
-class WebView2Window final : public ecnuvpn::ui_shell::UiWindow {
+class WebView2Window final : public exv::ui_shell::UiWindow {
 public:
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+  void set_message_handler(exv::ui_shell::HostMessageHandler handler) override {
     handler_ = std::move(handler);
   }
 
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &) override {
+  int run(const exv::ui_shell::UiWindowConfig &) override {
     return 70;
   }
 
@@ -1364,7 +1997,7 @@ public:
   }
 
 private:
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
+  exv::ui_shell::HostMessageHandler handler_;
   std::string last_event_json_;
 };
 
@@ -1372,16 +2005,16 @@ private:
 
 } // namespace
 
-ecnuvpn::ui_shell::WindowBounds webview2_default_window_bounds() noexcept {
-  return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+exv::ui_shell::WindowBounds webview2_default_window_bounds() noexcept {
+  return exv::ui_shell::kElectronAdvancedWindowBounds;
 }
 
-ecnuvpn::ui_shell::WindowBounds
+exv::ui_shell::WindowBounds
 webview2_window_mode_bounds_for_dpi(std::string_view mode,
                                     unsigned int dpi) noexcept {
   const auto bounds = mode == "minimal"
-                          ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
-                          : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+                          ? exv::ui_shell::kElectronMinimalWindowBounds
+                          : exv::ui_shell::kElectronAdvancedWindowBounds;
   const int effective_dpi =
       dpi == 0 ? static_cast<int>(kDefaultDpi) : static_cast<int>(dpi);
   return {MulDiv(bounds.width, effective_dpi, static_cast<int>(kDefaultDpi)),
@@ -1393,7 +2026,7 @@ bool webview2_should_create_tray_on_start() {
 }
 
 int webview2_app_icon_resource_id() noexcept {
-  return IDI_ECNUVPN_APP;
+  return IDI_EXV_APP;
 }
 
 std::wstring webview2_taskbar_created_message_name() {
@@ -1402,15 +2035,15 @@ std::wstring webview2_taskbar_created_message_name() {
 
 std::vector<WebView2TrayMenuItem> webview2_tray_menu_model() {
   return {
-      {L"显示 ECNU VPN", kTrayCommandShow, false},
+      {L"显示 EXV", kTrayCommandShow, false},
       {L"", 0, true},
       {L"退出", kTrayCommandQuit, false},
   };
 }
 
 std::wstring webview2_renderer_uri(
-    const ecnuvpn::ui_shell::RendererAssets &renderer) {
-  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    const exv::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == exv::ui_shell::RendererAssetKind::DevServer) {
     return wide_from_utf8(renderer.location);
   }
 
@@ -1427,8 +2060,8 @@ std::wstring webview2_renderer_uri(
 }
 
 std::wstring webview2_packaged_renderer_folder(
-    const ecnuvpn::ui_shell::RendererAssets &renderer) {
-  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    const exv::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == exv::ui_shell::RendererAssetKind::DevServer) {
     return {};
   }
 
@@ -1439,19 +2072,19 @@ std::wstring webview2_packaged_renderer_folder(
 
 std::string dispatch_webview2_host_message(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core) {
-  return ecnuvpn::ui_shell::handle_host_request(message_json, invoke_core);
+    const exv::ui_shell::CoreRpcInvoker &invoke_core) {
+  return exv::ui_shell::handle_host_request(message_json, invoke_core);
 }
 
 void post_webview2_host_response(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core,
+    const exv::ui_shell::CoreRpcInvoker &invoke_core,
     const std::function<void(const std::string &)> &post_response) {
   post_response(dispatch_webview2_host_message(message_json, invoke_core));
 }
 
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window() {
+std::unique_ptr<exv::ui_shell::UiWindow> create_webview2_window() {
   return std::make_unique<WebView2Window>();
 }
 
-} // namespace ecnuvpn::platform::win32::ui_shell
+} // namespace exv::platform::win32::ui_shell

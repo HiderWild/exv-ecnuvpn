@@ -7,7 +7,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 namespace {
 
@@ -46,4 +46,4 @@ void register_desktop_log_actions(exv::core_api::DesktopRpcAdapter &adapter) {
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

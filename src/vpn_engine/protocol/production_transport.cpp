@@ -15,14 +15,14 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
 namespace {
 
 constexpr const char *kCstpPath = "/CSCOSSLC/tunnel";
-constexpr const char *kDefaultUserAgent = "ECNU-VPN Native";
+constexpr const char *kDefaultUserAgent = "EXV Native";
 constexpr std::size_t kMaxHttpHeaderBytes = 64 * 1024;
 constexpr std::size_t kMaxHttpBodyBytes = 16 * 1024 * 1024;
 // Begin inlined from vpn_engine/protocol/production_transport_redaction include-unit
@@ -1451,4 +1451,4 @@ ValidationResult ProductionProtocolTransport::read_http_response(
 // End inlined from vpn_engine/protocol/production_transport_read_http include-unit
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

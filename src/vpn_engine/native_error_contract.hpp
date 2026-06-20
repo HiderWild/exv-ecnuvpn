@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 // Canonical native failure codes surfaced to the desktop RPC contract. Keep
@@ -113,4 +113,4 @@ map_native_error_to_contract_code(const std::string &code,
 }
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

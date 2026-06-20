@@ -2,17 +2,24 @@
 
 #include <cstdlib>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
-std::string get_windows_roaming_home(const std::string &home) {
-  const char *appdata = std::getenv("APPDATA");
-  if (appdata && *appdata)
-    return appdata;
+std::string get_windows_local_app_data_home(const std::string &home) {
+  const char *local_app_data = std::getenv("LOCALAPPDATA");
+  if (local_app_data && *local_app_data)
+    return local_app_data;
   if (!home.empty())
-    return join_path(join_path(home, "AppData"), "Roaming");
+    return join_path(join_path(home, "AppData"), "Local");
   return "";
+}
+
+std::string profile_root_for_home(const std::string &home) {
+  std::string base = get_windows_local_app_data_home(home);
+  if (base.empty())
+    return "";
+  return join_path(base, "EXV");
 }
 
 } // namespace
@@ -26,17 +33,17 @@ std::string join_path(const std::string &base, const std::string &component) {
 }
 
 std::string redirect_path_for_home(const std::string &home) {
-  std::string base = get_windows_roaming_home(home);
+  std::string base = profile_root_for_home(home);
   if (base.empty())
     return "";
-  return join_path(base, "ecnuvpn_home");
+  return join_path(base, "profile.redirect");
 }
 
 std::string default_config_dir_for_home(const std::string &home) {
-  std::string base = get_windows_roaming_home(home);
+  std::string base = profile_root_for_home(home);
   if (base.empty())
     return "";
-  return join_path(base, "ecnuvpn");
+  return join_path(join_path(base, "profile"), "default");
 }
 
 std::string home_for_uid(unsigned int uid) {
@@ -66,11 +73,11 @@ std::string config_path(const std::string &config_dir) {
 }
 
 std::string pid_path(const std::string &config_dir) {
-  return join_path(config_dir, "ecnuvpn.pid");
+  return join_path(config_dir, "exv.pid");
 }
 
 std::string log_path(const std::string &config_dir) {
-  return join_path(config_dir, "ecnuvpn.log");
+  return join_path(config_dir, "exv.log");
 }
 
 std::string tunnel_path(const std::string &config_dir) {
@@ -96,4 +103,4 @@ bool fix_config_dir_ownership(const std::string &dir,
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

@@ -10,7 +10,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-namespace ecnuvpn {
+namespace exv {
 namespace helper {
 
 class MacIpcServer : public IpcServer {
@@ -140,4 +140,4 @@ std::unique_ptr<IpcServer> create_ipc_server() {
 }
 
 } // namespace helper
-} // namespace ecnuvpn
+} // namespace exv

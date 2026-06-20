@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -79,4 +79,4 @@ ValidationResult decode_cstp_frame(const std::vector<std::uint8_t> &bytes,
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

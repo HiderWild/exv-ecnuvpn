@@ -15,7 +15,7 @@
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 #endif
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -308,4 +308,4 @@ std::string read_hidden_input(const std::string &prompt) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

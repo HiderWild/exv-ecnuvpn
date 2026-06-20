@@ -18,8 +18,8 @@
 #include <unistd.h>
 #endif
 
-#ifndef ECNUVPN_VERSION
-#define ECNUVPN_VERSION "dev"
+#ifndef EXV_VERSION
+#define EXV_VERSION "dev"
 #endif
 
 namespace exv::core::lifecycle {
@@ -76,7 +76,7 @@ CoreIdentity make_core_identity() {
 
     std::array<uint8_t, 8> random_bytes = {};
     std::string core_instance_id;
-    if (ecnuvpn::platform::fill_random_bytes(random_bytes.data(),
+    if (exv::platform::fill_random_bytes(random_bytes.data(),
                                              random_bytes.size())) {
         core_instance_id =
             "core-" + bytes_to_hex(random_bytes.data(), random_bytes.size());
@@ -93,7 +93,7 @@ CoreIdentity make_core_identity() {
     CoreIdentity identity;
     identity.core_instance_id = std::move(core_instance_id);
     identity.pid = pid;
-    identity.core_path = ecnuvpn::platform::get_executable_path();
+    identity.core_path = exv::platform::get_executable_path();
     if (identity.core_path.empty()) {
         identity.core_path = "unknown";
     }
@@ -106,7 +106,7 @@ nlohmann::json core_hello_payload(const CoreIdentity& identity) {
         {"ipc_protocol_version", ipc_protocol_version()},
         {"contract_version",
          std::string(exv::contracts::generated::CONTRACT_VERSION)},
-        {"app_version", ECNUVPN_VERSION},
+        {"app_version", EXV_VERSION},
         {"core_instance_id", identity.core_instance_id},
         {"pid", identity.pid},
         {"core_path", identity.core_path},

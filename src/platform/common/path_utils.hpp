@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 std::string join_path(const std::string &base, const std::string &component);
@@ -21,4 +21,4 @@ bool fix_config_dir_ownership(const std::string &dir,
                               const std::string &effective_home);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

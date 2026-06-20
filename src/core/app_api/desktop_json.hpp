@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 nlohmann::json error(const std::string &message,
@@ -22,4 +22,4 @@ nlohmann::json helper_error(const nlohmann::json &response,
 std::string json_safe_text(const std::string &text);
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

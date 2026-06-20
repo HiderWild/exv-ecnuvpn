@@ -3,7 +3,7 @@
 #include <functional>
 #include <string>
 
-namespace ecnuvpn::platform::win32::ui_shell {
+namespace exv::platform::win32::ui_shell {
 
 struct WebView2RuntimeStatus {
   bool installed = false;
@@ -36,4 +36,4 @@ bool run_webview2_evergreen_bootstrapper_with_runner(
 bool run_webview2_evergreen_bootstrapper(const std::string &download_url,
                                          const std::string &installer_path);
 
-} // namespace ecnuvpn::platform::win32::ui_shell
+} // namespace exv::platform::win32::ui_shell

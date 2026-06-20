@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config_api {
 
 // Non-interactive config field setter.
@@ -39,4 +39,4 @@ std::string key_status();
 void key_reset_noninteractive();
 
 } // namespace config_api
-} // namespace ecnuvpn
+} // namespace exv

@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <initializer_list>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -30,6 +31,22 @@ std::optional<int> try_parse_int(const std::string &value) {
   } catch (...) {
     return std::nullopt;
   }
+}
+
+std::optional<bool> try_parse_bool(const std::string &value) {
+  if (value == "true" || value == "1" || value == "yes" || value == "on") {
+    return true;
+  }
+  if (value == "false" || value == "0" || value == "no" || value == "off") {
+    return false;
+  }
+  return std::nullopt;
+}
+
+bool is_one_of(const std::string &value,
+               std::initializer_list<const char *> candidates) {
+  return std::any_of(candidates.begin(), candidates.end(),
+                     [&](const char *candidate) { return value == candidate; });
 }
 
 ParsedArgs parse_args(const std::vector<std::string> &args) {
@@ -69,7 +86,59 @@ std::ostream &err_stream(const CliCommandDeps &deps) {
   return deps.err ? *deps.err : std::cerr;
 }
 
-bool response_ok(const std::string &line, std::ostream &err) {
+std::string response_payload_text(const nlohmann::json &response) {
+  if (!response.contains("payload_json")) {
+    return "{}";
+  }
+  const auto &payload = response["payload_json"];
+  return payload.is_string() ? payload.get<std::string>() : payload.dump();
+}
+
+void print_payload_response(const nlohmann::json &response, std::ostream &out) {
+  const std::string payload_text = response_payload_text(response);
+  try {
+    out << nlohmann::json::parse(payload_text).dump(2) << '\n';
+  } catch (...) {
+    out << payload_text << '\n';
+  }
+}
+
+bool should_print_payload(const std::string &action) {
+  return is_one_of(action, {"status.get", "config.get", "routes.list",
+                            "key.status", "logs.list", "service.status"});
+}
+
+std::string success_message_for_action(const std::string &action) {
+  if (action == "vpn.connect") {
+    return "VPN connect request submitted. Use `exv status` to follow progress.";
+  }
+  if (action == "vpn.disconnect") {
+    return "VPN disconnect request submitted.";
+  }
+  if (action == "config.saveAuth" || action == "config.saveSettings") {
+    return "Configuration saved.";
+  }
+  if (action == "config.reset") {
+    return "Configuration reset.";
+  }
+  if (action == "routes.add" || action == "routes.remove" ||
+      action == "routes.reset") {
+    return "Routes updated.";
+  }
+  if (action == "key.reset") {
+    return "Encryption key reset.";
+  }
+  if (action == "logs.clear") {
+    return "Logs cleared.";
+  }
+  if (action == "service.install" || action == "service.uninstall") {
+    return "Service operation submitted.";
+  }
+  return "OK";
+}
+
+bool response_ok(const std::string &line, const std::string &action,
+                 std::ostream &out, std::ostream &err) {
   if (line.empty()) {
     err << "Core did not return a response.\n";
     return false;
@@ -77,6 +146,11 @@ bool response_ok(const std::string &line, std::ostream &err) {
   try {
     auto response = nlohmann::json::parse(line);
     if (response.value("success", false)) {
+      if (should_print_payload(action)) {
+        print_payload_response(response, out);
+      } else {
+        out << success_message_for_action(action) << '\n';
+      }
       return true;
     }
     err << response.value("error_message", response.value("error", "Core request failed.")) << '\n';
@@ -96,7 +170,7 @@ int send_action(const CliCommandDeps &deps,
   }
   const std::string response =
       deps.send_core_request(core.ipc_path, format_core_request(action, payload));
-  return response_ok(response, err_stream(deps)) ? 0 : 1;
+  return response_ok(response, action, out_stream(deps), err_stream(deps)) ? 0 : 1;
 }
 
 std::optional<CliCoreResolution> resolve_or_fail(const CliCommandDeps &deps) {
@@ -128,6 +202,124 @@ int handle_start(const CliCommandDeps &deps, const ParsedArgs &parsed) {
   return send_action(deps, *core, "vpn.connect");
 }
 
+int handle_routes(const std::vector<std::string> &args,
+                  const CliCommandDeps &deps,
+                  std::size_t subcommand_index) {
+  const std::string subcmd =
+      args.size() > subcommand_index ? args[subcommand_index] : "list";
+
+  if (subcmd == "list" || subcmd == "show") {
+    auto core = resolve_or_fail(deps);
+    return core.has_value() ? send_action(deps, *core, "routes.list") : 1;
+  }
+
+  if (subcmd == "add") {
+    if (args.size() <= subcommand_index + 1) {
+      err_stream(deps) << "Usage: exv config routes add <cidr>\n";
+      return 1;
+    }
+    auto core = resolve_or_fail(deps);
+    return core.has_value()
+               ? send_action(deps, *core, "routes.add",
+                             nlohmann::json{{"cidr", args[subcommand_index + 1]}})
+               : 1;
+  }
+
+  if (subcmd == "remove" || subcmd == "delete" || subcmd == "rm") {
+    if (args.size() <= subcommand_index + 1) {
+      err_stream(deps) << "Usage: exv config routes remove <cidr>\n";
+      return 1;
+    }
+    auto core = resolve_or_fail(deps);
+    return core.has_value()
+               ? send_action(deps, *core, "routes.remove",
+                             nlohmann::json{{"cidr", args[subcommand_index + 1]}})
+               : 1;
+  }
+
+  if (subcmd == "reset") {
+    const bool explicit_confirm = std::find(args.begin() + subcommand_index + 1,
+                                            args.end(), "--confirm") != args.end();
+    if (!explicit_confirm) {
+      if (!deps.interactive) {
+        err_stream(deps) << "routes reset requires --confirm in non-interactive mode.\n";
+        return 1;
+      }
+      if (!deps.confirm || !deps.confirm("Reset routes?")) {
+        err_stream(deps) << "Route reset cancelled.\n";
+        return 1;
+      }
+    }
+    auto core = resolve_or_fail(deps);
+    return core.has_value() ? send_action(deps, *core, "routes.reset") : 1;
+  }
+
+  err_stream(deps) << "Unknown routes subcommand: " << subcmd << '\n';
+  return 1;
+}
+
+int handle_key(const std::vector<std::string> &args,
+               const CliCommandDeps &deps,
+               std::size_t subcommand_index) {
+  const std::string subcmd =
+      args.size() > subcommand_index ? args[subcommand_index] : "status";
+
+  if (subcmd == "status" || subcmd == "show") {
+    auto core = resolve_or_fail(deps);
+    return core.has_value() ? send_action(deps, *core, "key.status") : 1;
+  }
+
+  if (subcmd == "reset") {
+    const bool explicit_confirm = std::find(args.begin() + subcommand_index + 1,
+                                            args.end(), "--confirm") != args.end();
+    if (!explicit_confirm) {
+      if (!deps.interactive) {
+        err_stream(deps) << "key reset requires --confirm in non-interactive mode.\n";
+        return 1;
+      }
+      if (!deps.confirm || !deps.confirm("Reset encryption key?")) {
+        err_stream(deps) << "Key reset cancelled.\n";
+        return 1;
+      }
+    }
+    auto core = resolve_or_fail(deps);
+    return core.has_value() ? send_action(deps, *core, "key.reset") : 1;
+  }
+
+  err_stream(deps) << "Unknown key subcommand: " << subcmd << '\n';
+  return 1;
+}
+
+int handle_logs(const std::vector<std::string> &args,
+                const CliCommandDeps &deps) {
+  const std::string subcmd = args.size() > 2 ? args[2] : "list";
+
+  if (subcmd == "list" || subcmd == "show") {
+    auto core = resolve_or_fail(deps);
+    return core.has_value() ? send_action(deps, *core, "logs.list") : 1;
+  }
+
+  if (subcmd == "clear") {
+    const bool explicit_confirm =
+        std::find(args.begin() + 3, args.end(), "--confirm") != args.end();
+    if (!explicit_confirm) {
+      if (!deps.interactive) {
+        err_stream(deps) << "logs clear requires --confirm in non-interactive mode.\n";
+        return 1;
+      }
+      if (!deps.confirm || !deps.confirm("Clear logs?")) {
+        err_stream(deps) << "Log clear cancelled.\n";
+        return 1;
+      }
+    }
+    auto core = resolve_or_fail(deps);
+    return core.has_value() ? send_action(deps, *core, "logs.clear") : 1;
+  }
+
+  err_stream(deps) << "Unknown logs subcommand: " << subcmd << '\n';
+  return 1;
+}
+
 int handle_config(const std::vector<std::string> &args, const CliCommandDeps &deps) {
   const std::string subcmd = args.size() > 2 ? args[2] : "show";
 
@@ -138,16 +330,17 @@ int handle_config(const std::vector<std::string> &args, const CliCommandDeps &de
 
   if (subcmd == "set") {
     if (args.size() < 5) {
-      err_stream(deps) << "Usage: exv-cli config set <key> <value>\n";
+      err_stream(deps) << "Usage: exv config set <key> <value>\n";
       return 1;
     }
     const std::string &key = args[3];
     const std::string &value = args[4];
     std::string action;
     nlohmann::json payload;
-    if (key == "server" || key == "username") {
+    if (key == "server" || key == "username" || key == "user_agent" ||
+        key == "useragent") {
       action = "config.saveAuth";
-      payload[key] = value;
+      payload[key == "useragent" ? "user_agent" : key] = value;
     } else if (key == "mtu" || key == "retry_limit") {
       auto parsed_value = try_parse_int(value);
       if (!parsed_value.has_value()) {
@@ -156,13 +349,31 @@ int handle_config(const std::vector<std::string> &args, const CliCommandDeps &de
       }
       action = "config.saveSettings";
       payload["settings"] = nlohmann::json{{key, *parsed_value}};
-    } else if (key == "dtls" || key == "auto_reconnect") {
-      if (value != "true" && value != "false") {
+    } else if (is_one_of(key, {"dtls", "disable_dtls", "remember_password",
+                               "auto_reconnect", "minimal_mode",
+                               "service_install_prompt_seen",
+                               "minimal_install_service_before_connect",
+                               "include_class_a_private_routes",
+                               "include_class_b_private_routes",
+                               "launch_at_login",
+                               "auto_connect_on_launch"})) {
+      auto parsed_value = try_parse_bool(value);
+      if (!parsed_value.has_value()) {
         err_stream(deps) << "Config key '" << key << "' requires true or false.\n";
         return 1;
       }
+      if (key == "remember_password") {
+        action = "config.saveAuth";
+        payload[key] = *parsed_value;
+      } else {
+        action = "config.saveSettings";
+        payload["settings"] = nlohmann::json{{key, *parsed_value}};
+      }
+    } else if (is_one_of(key, {"log_path", "log_file", "vpn_engine",
+                               "windows_tunnel_driver",
+                               "windows_tap_interface"})) {
       action = "config.saveSettings";
-      payload["settings"] = nlohmann::json{{key, value == "true"}};
+      payload["settings"] = nlohmann::json{{key, value}};
     } else {
       err_stream(deps) << "Unknown config key: " << key << '\n';
       return 1;
@@ -189,13 +400,21 @@ int handle_config(const std::vector<std::string> &args, const CliCommandDeps &de
     return core.has_value() ? send_action(deps, *core, "config.reset") : 1;
   }
 
+  if (subcmd == "routes" || subcmd == "route") {
+    return handle_routes(args, deps, 3);
+  }
+
+  if (subcmd == "key") {
+    return handle_key(args, deps, 3);
+  }
+
   err_stream(deps) << "Unknown config subcommand: " << subcmd << '\n';
   return 1;
 }
 
-void print_help(std::ostream &out) {
-  out << "Usage: exv-cli [command] [options]\n"
-      << "Commands: start, stop, status, config, service, version, help\n";
+void print_help(std::ostream &out, const std::string &program) {
+  out << "Usage: " << program << " [command] [options]\n"
+      << "Commands: start, stop, status, config, routes, logs, service, version, help\n";
 }
 
 } // namespace
@@ -221,7 +440,7 @@ int run_cli_command(const std::vector<std::string> &raw_args, CliCommandDeps dep
   }
 
   if (cmd == "help" || cmd == "-h" || cmd == "--help") {
-    print_help(out_stream(deps));
+    print_help(out_stream(deps), args[0]);
     return 0;
   }
   if (cmd == "version" || cmd == "-v" || cmd == "--version") {
@@ -245,6 +464,12 @@ int run_cli_command(const std::vector<std::string> &raw_args, CliCommandDeps dep
   }
   if (cmd == "config" || cmd == "-c") {
     return handle_config(args, deps);
+  }
+  if (cmd == "routes" || cmd == "route") {
+    return handle_routes(args, deps, 2);
+  }
+  if (cmd == "logs" || cmd == "log") {
+    return handle_logs(args, deps);
   }
   if (cmd == "service") {
     const std::string subcmd = args.size() > 2 ? args[2] : "status";

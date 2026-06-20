@@ -3,9 +3,15 @@ import { computed, ref, watch } from 'vue'
 import { FileUp, Rocket, Settings2 } from 'lucide-vue-next'
 import ModalShell from './ModalShell.vue'
 import TokenInput from './TokenInput.vue'
+import { distributionConfig } from '../generated/distribution'
 import { useConfigStore } from '../stores/config'
 import { normalizeError, useVpnStore } from '../stores/vpn'
 import { useUiStore } from '../stores/ui'
+import {
+  detectImportEnvelope,
+  friendlyImportConfigError,
+  importEnvelopeToPayload,
+} from '../utils/configTransfer'
 
 const ui = useUiStore()
 const config = useConfigStore()
@@ -15,6 +21,7 @@ const mode = ref<'quick' | 'custom'>('quick')
 const username = ref('')
 const password = ref('')
 const rememberPassword = ref(false)
+const launchAtLogin = ref(false)
 const routes = ref<string[]>([])
 const settingsForm = ref({
   mtu: 1290,
@@ -25,7 +32,7 @@ const error = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 
 const panelSize = computed(() => mode.value === 'custom' ? 'lg' : 'md')
-const defaultServer = computed(() => ui.quickStartRequest?.defaults.server || 'vpn-ct.ecnu.edu.cn')
+const defaultServer = computed(() => ui.quickStartRequest?.defaults.server || distributionConfig.defaultVpnServer)
 const shouldInstallService = computed(() => ui.quickStartRequest?.defaults.install_service ?? true)
 const rememberPasswordEnabled = computed(() => password.value.length > 0)
 
@@ -38,6 +45,7 @@ watch(
     username.value = ''
     password.value = ''
     rememberPassword.value = false
+    launchAtLogin.value = false
     routes.value = vpn.routes.map((route) => route.cidr)
     settingsForm.value = {
       mtu: config.settings.mtu || 1290,
@@ -92,11 +100,20 @@ function validate() {
   return true
 }
 
-async function saveCustomSettings() {
-  await config.saveSettings({
+async function saveQuickStartSettings() {
+  const settingsPayload = {
+    launch_at_login: launchAtLogin.value,
     mtu: settingsForm.value.mtu,
     dtls: settingsForm.value.dtls,
-  })
+  }
+  await config.saveSettings(
+    mode.value === 'custom'
+      ? settingsPayload
+      : { launch_at_login: settingsPayload.launch_at_login },
+  )
+}
+
+async function saveCustomRoutes() {
   await vpn.resetRoutes()
   for (const route of routes.value.map((item) => item.trim()).filter(Boolean)) {
     await vpn.addRoute(route)
@@ -114,8 +131,9 @@ async function confirm() {
       remember_password: rememberPassword.value,
       user_agent: config.authConfig.user_agent,
     })
+    await saveQuickStartSettings()
     if (mode.value === 'custom') {
-      await saveCustomSettings()
+      await saveCustomRoutes()
     }
     ui.closeQuickStart()
     if (shouldInstallService.value && !vpn.serviceInstalled) {
@@ -143,19 +161,22 @@ async function onImportFile(event: Event) {
   busy.value = true
   try {
     const text = await file.text()
-    const parsed = JSON.parse(text)
-    const format = parsed.format === 'protected' ? 'protected' : 'unprotected'
+    const envelope = detectImportEnvelope(text)
     let importPassword: string | undefined
-    if (format === 'protected') {
-      const passwordValue = await ui.requestPassword('请输入导入配置的保护密码')
+    if (envelope.format === 'protected') {
+      const passwordValue = await ui.requestPassword('请输入导入配置的保护口令', {
+        description: '受保护的配置文件需要导出口令才能解密。',
+        submitLabel: '确认',
+        cancelLabel: '取消',
+      })
       if (passwordValue === null) return
       importPassword = passwordValue
     }
-    await config.importConfig({ format, data: text, password: importPassword })
+    await config.importConfig(importEnvelopeToPayload(envelope, importPassword))
     await Promise.all([config.fetchAuthConfig(), config.fetchSettings(), vpn.fetchRoutes()])
     ui.closeQuickStart()
   } catch (err) {
-    error.value = normalizeError(err).message
+    error.value = friendlyImportConfigError(err)
   } finally {
     busy.value = false
   }
@@ -226,6 +247,18 @@ async function onImportFile(event: Event) {
           class="h-3.5 w-3.5 rounded border-border bg-bg accent-accent disabled:cursor-not-allowed disabled:opacity-45"
         />
         记住密码（加密存储）
+      </label>
+
+      <label class="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg px-3 py-2 text-sm">
+        <span>
+          <span class="block text-foreground">开机自启</span>
+          <span class="mt-0.5 block text-xs text-muted">登录系统后自动启动 EXV 客户端。</span>
+        </span>
+        <input
+          v-model="launchAtLogin"
+          type="checkbox"
+          class="h-4 w-4 cursor-pointer rounded border-border bg-bg accent-accent"
+        />
       </label>
 
       <div v-if="mode === 'custom'" class="space-y-3">

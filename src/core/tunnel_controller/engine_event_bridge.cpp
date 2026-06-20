@@ -96,7 +96,7 @@ std::string redact_sensitive_text(std::string text) {
     return redacted.empty() && !text.empty() ? "[REDACTED]" : redacted;
 }
 
-std::string log_level_for_event(const ecnuvpn::vpn_engine::VpnEngineEvent& event) {
+std::string log_level_for_event(const exv::vpn_engine::VpnEngineEvent& event) {
     if (event.level == "error" || event.type.find(".failed") != std::string::npos) {
         return "ERROR";
     }
@@ -106,7 +106,7 @@ std::string log_level_for_event(const ecnuvpn::vpn_engine::VpnEngineEvent& event
     return "INFO";
 }
 
-void log_engine_event(const ecnuvpn::vpn_engine::VpnEngineEvent& event) {
+void log_engine_event(const exv::vpn_engine::VpnEngineEvent& event) {
     if (!is_log_worthy_event(event.type)) {
         return;
     }
@@ -132,7 +132,7 @@ EngineEventBridge::EngineEventBridge(EventCallback callback)
 
 EngineEventBridge::~EngineEventBridge() = default;
 
-void EngineEventBridge::emit(const ecnuvpn::vpn_engine::VpnEngineEvent& event) {
+void EngineEventBridge::emit(const exv::vpn_engine::VpnEngineEvent& event) {
     log_engine_event(event);
 
     TunnelEventType type{};

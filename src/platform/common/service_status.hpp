@@ -2,10 +2,10 @@
 
 #include "platform/common/status_models.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 ServiceStatusSnapshot current_service_status();
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

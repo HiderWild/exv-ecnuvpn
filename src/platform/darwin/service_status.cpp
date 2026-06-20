@@ -8,7 +8,7 @@
 #include "helper/helper.hpp"
 #include "platform/common/helper_platform.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -43,12 +43,13 @@ ServiceStatusSnapshot current_service_status() {
 
   if (plist_exists && !helper_service_declared) {
     status.warning =
-        "LaunchDaemon exists, but it does not point to "
-        "/usr/local/bin/exv-helper --service.";
+        "LaunchDaemon exists, but it does not point to " +
+        std::string(config.default_service_binary_path) + " --service.";
   } else if (helper_service_declared && !helper_binary_exists) {
     status.warning =
-        "LaunchDaemon points to /usr/local/bin/exv-helper --service, but the "
-        "stable exv-helper binary is missing.";
+        "LaunchDaemon points to " +
+        std::string(config.default_service_binary_path) +
+        " --service, but the stable exv-helper binary is missing.";
   }
 
   status.capabilities = nlohmann::json{{"service_mode", true},
@@ -60,4 +61,4 @@ ServiceStatusSnapshot current_service_status() {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

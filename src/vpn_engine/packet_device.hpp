@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 // Forward declaration to keep this interface platform-neutral.
@@ -42,4 +42,4 @@ public:
 };
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

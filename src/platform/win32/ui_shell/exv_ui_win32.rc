@@ -2,4 +2,4 @@
 #include "resource.hpp"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "exv_ui_win32.manifest"
-IDI_ECNUVPN_APP ICON "icon.ico"
+IDI_EXV_APP ICON "icon.ico"

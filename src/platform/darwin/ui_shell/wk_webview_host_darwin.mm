@@ -16,46 +16,46 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn::platform::darwin::ui_shell {
+namespace exv::platform::darwin::ui_shell {
 class WkWebViewWindow;
 }
 
 #if defined(EXV_BUILD_UI_SHELL)
-@interface EcnuVpnScriptMessageHandler : NSObject <WKScriptMessageHandler> {
-  ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *owner_;
+@interface ExvScriptMessageHandler : NSObject <WKScriptMessageHandler> {
+  exv::platform::darwin::ui_shell::WkWebViewWindow *owner_;
 }
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner;
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner;
 @end
 
-@interface EcnuVpnWindowDelegate : NSObject <NSWindowDelegate> {
-  ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *owner_;
+@interface ExvWindowDelegate : NSObject <NSWindowDelegate> {
+  exv::platform::darwin::ui_shell::WkWebViewWindow *owner_;
 }
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner;
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner;
 @end
 
-@interface EcnuVpnNavigationDelegate : NSObject <WKNavigationDelegate> {
-  ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *owner_;
+@interface ExvNavigationDelegate : NSObject <WKNavigationDelegate> {
+  exv::platform::darwin::ui_shell::WkWebViewWindow *owner_;
 }
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner;
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner;
 @end
 
-@interface EcnuVpnUIDelegate : NSObject <WKUIDelegate>
+@interface ExvUIDelegate : NSObject <WKUIDelegate>
 @end
 
-@interface EcnuVpnStatusItemTarget : NSObject {
-  ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *owner_;
+@interface ExvStatusItemTarget : NSObject {
+  exv::platform::darwin::ui_shell::WkWebViewWindow *owner_;
 }
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner;
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner;
 - (void)showWindow:(id)sender;
 - (void)quitApp:(id)sender;
 @end
 #endif
 
-namespace ecnuvpn::platform::darwin::ui_shell {
+namespace exv::platform::darwin::ui_shell {
 namespace {
 
 #if defined(EXV_BUILD_UI_SHELL)
@@ -73,8 +73,12 @@ std::string utf8_from_ns_string(NSString *value) {
   return utf8 ? std::string(utf8) : std::string();
 }
 
-NSURL *renderer_url(const ecnuvpn::ui_shell::RendererAssets &renderer) {
-  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+bool is_supported_external_url(std::string_view url) {
+  return url.starts_with("https://") || url.starts_with("http://");
+}
+
+NSURL *renderer_url(const exv::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == exv::ui_shell::RendererAssetKind::DevServer) {
     return [NSURL URLWithString:ns_string(renderer.location)];
   }
 
@@ -84,8 +88,8 @@ NSURL *renderer_url(const ecnuvpn::ui_shell::RendererAssets &renderer) {
 }
 
 NSURL *renderer_read_access_url(
-    const ecnuvpn::ui_shell::RendererAssets &renderer) {
-  if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    const exv::ui_shell::RendererAssets &renderer) {
+  if (renderer.kind == exv::ui_shell::RendererAssetKind::DevServer) {
     return nil;
   }
 
@@ -98,14 +102,14 @@ NSURL *renderer_read_access_url(
 NSString *bridge_script() {
   static constexpr char kBridgeScript[] = R"JS(
 (() => {
-  if (window.ecnuVpn || !window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.ecnuVpnHost) return;
+  if (window.exv || !window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.exvHost) return;
   let nextId = 1;
   const pending = new Map();
   const subscribers = new Set();
   function rpc(action, payload) {
     const id = nextId++;
     const request = { id, action, payload: payload ?? {} };
-    window.webkit.messageHandlers.ecnuVpnHost.postMessage(JSON.stringify(request));
+    window.webkit.messageHandlers.exvHost.postMessage(JSON.stringify(request));
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
     });
@@ -113,7 +117,7 @@ NSString *bridge_script() {
   function unsupported(name) {
     return Promise.reject(new Error(`${name} is not available in the native WebView shell yet.`));
   }
-  window.__ecnuVpnHostReceive = (message) => {
+  window.__exvHostReceive = (message) => {
     if (message && typeof message.id === 'number' && pending.has(message.id)) {
       const callbacks = pending.get(message.id);
       pending.delete(message.id);
@@ -127,7 +131,7 @@ NSString *bridge_script() {
     }
     subscribers.forEach((handler) => handler(message));
   };
-  window.ecnuVpn = {
+  window.exv = {
     status: { get: () => rpc('status.get') },
     vpn: {
       connect: (password) => rpc('vpn.connect', { password }),
@@ -157,9 +161,9 @@ NSString *bridge_script() {
       uninstall: () => rpc('service.uninstall'),
     },
     cli: {
-      status: () => unsupported('cli.status'),
-      install: () => unsupported('cli.install'),
-      uninstall: () => unsupported('cli.uninstall'),
+      status: () => rpc('cli.status'),
+      install: () => rpc('cli.install'),
+      uninstall: () => rpc('cli.uninstall'),
     },
     logs: { list: (options) => rpc('logs.list', options ?? {}) },
     runtime: { status: () => rpc('runtime.status') },
@@ -181,7 +185,10 @@ NSString *bridge_script() {
       minimize: () => rpc('window.minimize'),
       requestClose: () => rpc('window.requestClose'),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
-      startDrag: () => rpc('window.startDrag'),
+      startDrag: (drag) => rpc('window.startDrag', drag ?? {}),
+    },
+    shell: {
+      openExternal: (url) => rpc('shell.openExternal', { url }),
     },
     modal: {
       serviceInstallPrompt: () => Promise.resolve('dismiss'),
@@ -209,7 +216,7 @@ NSString *bridge_script() {
 
 } // namespace
 
-[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+[[nodiscard]] exv::ui_shell::WindowBounds
 wkwebview_default_window_bounds() noexcept;
 
 struct WkWebViewStatusMenuItem {
@@ -227,22 +234,22 @@ bool wkwebview_should_create_status_item_on_start() {
 
 std::vector<WkWebViewStatusMenuItem> wkwebview_status_menu_model() {
   return {
-      {"显示 ECNU VPN", kStatusCommandShow, false},
+      {"显示 EXV", kStatusCommandShow, false},
       {"", 0, true},
       {"退出", kStatusCommandQuit, false},
   };
 }
 
 #if defined(EXV_BUILD_UI_SHELL)
-class WkWebViewWindow final : public ecnuvpn::ui_shell::UiWindow {
+class WkWebViewWindow final : public exv::ui_shell::UiWindow {
 public:
   ~WkWebViewWindow() override { cleanup(); }
 
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+  void set_message_handler(exv::ui_shell::HostMessageHandler handler) override {
     handler_ = std::move(handler);
   }
 
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &config) override {
+  int run(const exv::ui_shell::UiWindowConfig &config) override {
     if (![NSThread isMainThread]) {
       return 70;
     }
@@ -306,6 +313,15 @@ public:
     out["id"] = id;
     out["ok"] = true;
     out["data"] = data;
+    post_json_to_renderer(out.dump());
+  }
+
+  void post_bridge_error(int id, const char *code, const char *message) {
+    nlohmann::ordered_json out;
+    out["id"] = id;
+    out["ok"] = false;
+    out["code"] = code;
+    out["message"] = message;
     post_json_to_renderer(out.dump());
   }
 
@@ -416,6 +432,31 @@ public:
         post_bridge_success(id, data);
         return;
       }
+      if (action == "shell.openExternal") {
+        std::string url;
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("url") && payload["url"].is_string()) {
+            url = payload["url"].get<std::string>();
+          }
+        }
+        if (!is_supported_external_url(url)) {
+          post_bridge_error(id, "invalid_url",
+                            "Only http and https URLs can be opened.");
+          return;
+        }
+        NSURL *external_url = [NSURL URLWithString:ns_string(url)];
+        if (external_url == nil ||
+            ![[NSWorkspace sharedWorkspace] openURL:external_url]) {
+          post_bridge_error(id, "open_external_failed",
+                            "Unable to open the URL in the default browser.");
+          return;
+        }
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return;
+      }
       if (action == "window.requestClose") {
         request_close_decision();
         nlohmann::ordered_json data;
@@ -425,7 +466,7 @@ public:
       }
       if (action == "window.resolveClosePrompt") {
         apply_close_resolution(
-            ecnuvpn::ui_shell::parse_close_prompt_resolution(request_json));
+            exv::ui_shell::parse_close_prompt_resolution(request_json));
         nlohmann::ordered_json out;
         nlohmann::ordered_json data;
         data["ok"] = true;
@@ -490,7 +531,7 @@ public:
       return;
     }
     if (const auto remembered_action =
-            ecnuvpn::ui_shell::read_close_preference(active_config_.state_dir)) {
+            exv::ui_shell::read_close_preference(active_config_.state_dir)) {
       apply_close_resolution({*remembered_action, false});
       return;
     }
@@ -499,10 +540,10 @@ public:
   }
 
   void apply_close_resolution(
-      const ecnuvpn::ui_shell::ClosePromptResolution &resolution) {
+      const exv::ui_shell::ClosePromptResolution &resolution) {
     close_prompt_pending_ = false;
     if (resolution.remember) {
-      ecnuvpn::ui_shell::write_close_preference(active_config_.state_dir,
+      exv::ui_shell::write_close_preference(active_config_.state_dir,
                                                 resolution.action);
     }
 
@@ -523,8 +564,8 @@ public:
       return;
     }
     const auto bounds = current_window_mode_ == "minimal"
-                            ? ecnuvpn::ui_shell::kElectronMinimalWindowBounds
-                            : ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+                            ? exv::ui_shell::kElectronMinimalWindowBounds
+                            : exv::ui_shell::kElectronAdvancedWindowBounds;
     NSRect frame = [window_ frame];
     frame.size = NSMakeSize(bounds.width, bounds.height);
     [window_ setContentMinSize:NSMakeSize(bounds.width, bounds.height)];
@@ -551,7 +592,7 @@ private:
     if (window_ == nil) {
       return false;
     }
-    [window_ setTitle:@"ECNU VPN"];
+    [window_ setTitle:@"EXV"];
     [window_ setTitlebarAppearsTransparent:YES];
     [window_ setTitleVisibility:NSWindowTitleHidden];
     [window_ setMovableByWindowBackground:YES];
@@ -561,7 +602,7 @@ private:
     [window_ setContentMinSize:NSMakeSize(bounds.width, bounds.height)];
     [window_ setContentMaxSize:NSMakeSize(bounds.width, bounds.height)];
 
-    window_delegate_ = [[EcnuVpnWindowDelegate alloc] initWithOwner:this];
+    window_delegate_ = [[ExvWindowDelegate alloc] initWithOwner:this];
     [window_ setDelegate:window_delegate_];
 
     WKWebViewConfiguration *configuration =
@@ -569,9 +610,9 @@ private:
     content_controller_ = [[WKUserContentController alloc] init];
     configuration.userContentController = content_controller_;
 
-    script_handler_ = [[EcnuVpnScriptMessageHandler alloc] initWithOwner:this];
+    script_handler_ = [[ExvScriptMessageHandler alloc] initWithOwner:this];
     [content_controller_ addScriptMessageHandler:script_handler_
-                                           name:@"ecnuVpnHost"];
+                                           name:@"exvHost"];
     WKUserScript *user_script =
         [[[WKUserScript alloc] initWithSource:bridge_script()
                                 injectionTime:WKUserScriptInjectionTimeAtDocumentStart
@@ -587,21 +628,21 @@ private:
     [webview_ setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
 
     navigation_delegate_ =
-        [[EcnuVpnNavigationDelegate alloc] initWithOwner:this];
+        [[ExvNavigationDelegate alloc] initWithOwner:this];
     [webview_ setNavigationDelegate:navigation_delegate_];
-    ui_delegate_ = [[EcnuVpnUIDelegate alloc] init];
+    ui_delegate_ = [[ExvUIDelegate alloc] init];
     [webview_ setUIDelegate:ui_delegate_];
     [window_ setContentView:webview_];
     return true;
   }
 
-  bool load_renderer(const ecnuvpn::ui_shell::RendererAssets &renderer) {
+  bool load_renderer(const exv::ui_shell::RendererAssets &renderer) {
     NSURL *url = renderer_url(renderer);
     if (url == nil) {
       return false;
     }
 
-    if (renderer.kind == ecnuvpn::ui_shell::RendererAssetKind::DevServer) {
+    if (renderer.kind == exv::ui_shell::RendererAssetKind::DevServer) {
       [webview_ loadRequest:[NSURLRequest requestWithURL:url]];
       return true;
     }
@@ -620,7 +661,7 @@ private:
       return;
     }
     const std::string script =
-        "window.__ecnuVpnHostReceive && window.__ecnuVpnHostReceive(" +
+        "window.__exvHostReceive && window.__exvHostReceive(" +
         json + ");";
     [webview_ evaluateJavaScript:ns_string(script) completionHandler:nil];
   }
@@ -649,14 +690,14 @@ private:
     if (!wkwebview_should_create_status_item_on_start() || status_item_ != nil) {
       return;
     }
-    status_target_ = [[EcnuVpnStatusItemTarget alloc] initWithOwner:this];
+    status_target_ = [[ExvStatusItemTarget alloc] initWithOwner:this];
     status_item_ = [[[NSStatusBar systemStatusBar]
         statusItemWithLength:NSSquareStatusItemLength] retain];
     [[status_item_ button] setImage:status_icon()];
-    [[status_item_ button] setToolTip:@"ECNU VPN"];
+    [[status_item_ button] setToolTip:@"EXV"];
 
-    status_menu_ = [[NSMenu alloc] initWithTitle:@"ECNU VPN"];
-    [status_menu_ addItemWithTitle:@"显示 ECNU VPN"
+    status_menu_ = [[NSMenu alloc] initWithTitle:@"EXV"];
+    [status_menu_ addItemWithTitle:@"显示 EXV"
                              action:@selector(showWindow:)
                       keyEquivalent:@""];
     [[status_menu_ itemAtIndex:0] setTarget:status_target_];
@@ -683,7 +724,7 @@ private:
   void cleanup() {
     destroy_status_item();
     if (content_controller_ != nil) {
-      [content_controller_ removeScriptMessageHandlerForName:@"ecnuVpnHost"];
+      [content_controller_ removeScriptMessageHandlerForName:@"exvHost"];
     }
     if (webview_ != nil) {
       [webview_ setNavigationDelegate:nil];
@@ -711,18 +752,18 @@ private:
     renderer_ready_ = false;
   }
 
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
-  ecnuvpn::ui_shell::UiWindowConfig active_config_;
+  exv::ui_shell::HostMessageHandler handler_;
+  exv::ui_shell::UiWindowConfig active_config_;
   NSWindow *window_ = nil;
   WKWebView *webview_ = nil;
   WKUserContentController *content_controller_ = nil;
-  EcnuVpnScriptMessageHandler *script_handler_ = nil;
-  EcnuVpnWindowDelegate *window_delegate_ = nil;
-  EcnuVpnNavigationDelegate *navigation_delegate_ = nil;
-  EcnuVpnUIDelegate *ui_delegate_ = nil;
+  ExvScriptMessageHandler *script_handler_ = nil;
+  ExvWindowDelegate *window_delegate_ = nil;
+  ExvNavigationDelegate *navigation_delegate_ = nil;
+  ExvUIDelegate *ui_delegate_ = nil;
   NSStatusItem *status_item_ = nil;
   NSMenu *status_menu_ = nil;
-  EcnuVpnStatusItemTarget *status_target_ = nil;
+  ExvStatusItemTarget *status_target_ = nil;
   std::vector<std::string> pending_events_;
   bool running_ = false;
   bool renderer_ready_ = false;
@@ -733,44 +774,44 @@ private:
   int exit_code_ = 70;
 };
 #else
-class WkWebViewWindow final : public ecnuvpn::ui_shell::UiWindow {
+class WkWebViewWindow final : public exv::ui_shell::UiWindow {
 public:
-  void set_message_handler(ecnuvpn::ui_shell::HostMessageHandler handler) override {
+  void set_message_handler(exv::ui_shell::HostMessageHandler handler) override {
     handler_ = std::move(handler);
   }
 
-  int run(const ecnuvpn::ui_shell::UiWindowConfig &) override { return 70; }
+  int run(const exv::ui_shell::UiWindowConfig &) override { return 70; }
 
   void emit_event(const std::string &event_json) override {
     last_event_json_ = event_json;
   }
 
 private:
-  ecnuvpn::ui_shell::HostMessageHandler handler_;
+  exv::ui_shell::HostMessageHandler handler_;
   std::string last_event_json_;
 };
 #endif
 
-ecnuvpn::ui_shell::WindowBounds wkwebview_default_window_bounds() noexcept {
-  return ecnuvpn::ui_shell::kElectronAdvancedWindowBounds;
+exv::ui_shell::WindowBounds wkwebview_default_window_bounds() noexcept {
+  return exv::ui_shell::kElectronAdvancedWindowBounds;
 }
 
 std::string dispatch_wkwebview_host_message(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core) {
-  return ecnuvpn::ui_shell::handle_host_request(message_json, invoke_core);
+    const exv::ui_shell::CoreRpcInvoker &invoke_core) {
+  return exv::ui_shell::handle_host_request(message_json, invoke_core);
 }
 
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
+std::unique_ptr<exv::ui_shell::UiWindow> create_wk_webview_window() {
   return std::make_unique<WkWebViewWindow>();
 }
 
-} // namespace ecnuvpn::platform::darwin::ui_shell
+} // namespace exv::platform::darwin::ui_shell
 
 #if defined(EXV_BUILD_UI_SHELL)
-@implementation EcnuVpnScriptMessageHandler
+@implementation ExvScriptMessageHandler
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner {
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner {
   self = [super init];
   if (self != nil) {
     owner_ = owner;
@@ -790,9 +831,9 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
 }
 @end
 
-@implementation EcnuVpnWindowDelegate
+@implementation ExvWindowDelegate
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner {
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner {
   self = [super init];
   if (self != nil) {
     owner_ = owner;
@@ -816,9 +857,9 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
 }
 @end
 
-@implementation EcnuVpnNavigationDelegate
+@implementation ExvNavigationDelegate
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner {
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner {
   self = [super init];
   if (self != nil) {
     owner_ = owner;
@@ -836,7 +877,7 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
 }
 @end
 
-@implementation EcnuVpnUIDelegate
+@implementation ExvUIDelegate
 - (void)webView:(WKWebView *)webView
     runJavaScriptAlertPanelWithMessage:(NSString *)message
                       initiatedByFrame:(WKFrameInfo *)frame
@@ -844,7 +885,7 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
   (void)webView;
   (void)frame;
   NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-  [alert setMessageText:message ?: @"ECNU VPN"];
+  [alert setMessageText:message ?: @"EXV"];
   [alert addButtonWithTitle:@"OK"];
   [alert runModal];
   completionHandler();
@@ -857,7 +898,7 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
   (void)webView;
   (void)frame;
   NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-  [alert setMessageText:message ?: @"ECNU VPN"];
+  [alert setMessageText:message ?: @"EXV"];
   [alert addButtonWithTitle:@"OK"];
   [alert addButtonWithTitle:@"Cancel"];
   completionHandler([alert runModal] == NSAlertFirstButtonReturn);
@@ -872,7 +913,7 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
   (void)webView;
   (void)frame;
   NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-  [alert setMessageText:prompt ?: @"ECNU VPN"];
+  [alert setMessageText:prompt ?: @"EXV"];
   NSTextField *input =
       [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 320, 24)] autorelease];
   [input setStringValue:defaultText ?: @""];
@@ -887,9 +928,9 @@ std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_wk_webview_window() {
 }
 @end
 
-@implementation EcnuVpnStatusItemTarget
+@implementation ExvStatusItemTarget
 - (instancetype)initWithOwner:
-    (ecnuvpn::platform::darwin::ui_shell::WkWebViewWindow *)owner {
+    (exv::platform::darwin::ui_shell::WkWebViewWindow *)owner {
   self = [super init];
   if (self != nil) {
     owner_ = owner;

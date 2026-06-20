@@ -4,7 +4,7 @@
 #include <functional>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 enum class NativeUtunError {
@@ -82,4 +82,4 @@ int native_utun_sysproto_control();
 const char *native_utun_control_name();
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

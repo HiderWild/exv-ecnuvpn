@@ -13,7 +13,7 @@
 
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 namespace {
 
@@ -150,7 +150,7 @@ exv::core::UseCaseResult handoff_current_oneshot_to_service(
   }
 
   exv::helper::AcquireCoreLeaseRequest acquire;
-  acquire.core_pid = ecnuvpn::connection_attempt::current_process_id();
+  acquire.core_pid = exv::connection_attempt::current_process_id();
   acquire.purpose = "service.handoff";
   auto service_lease = service_client->acquire_core_lease(acquire);
   if (!service_lease.accepted || service_lease.lease_id.empty()) {
@@ -283,6 +283,24 @@ void register_desktop_system_actions(exv::core_api::DesktopRpcAdapter &adapter) 
       });
 
   adapter.register_legacy_handler(
+      "cli.status", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(make_system_status_use_cases().cli_status());
+      });
+
+  adapter.register_legacy_handler(
+      "cli.install", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(make_system_status_use_cases().install_cli());
+      });
+
+  adapter.register_legacy_handler(
+      "cli.uninstall", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(make_system_status_use_cases().uninstall_cli());
+      });
+
+  adapter.register_legacy_handler(
       "drivers.status", [](const nlohmann::json &payload) -> nlohmann::json {
         apply_desktop_runtime_context(payload);
         return desktop_result(make_system_status_use_cases().driver_status());
@@ -297,4 +315,4 @@ void register_desktop_system_actions(exv::core_api::DesktopRpcAdapter &adapter) 
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

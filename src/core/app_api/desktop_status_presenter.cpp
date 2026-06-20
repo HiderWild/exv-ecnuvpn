@@ -17,7 +17,7 @@
 #include <thread>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 namespace {
 
@@ -273,7 +273,7 @@ nlohmann::json frontend_status_from_controller_snapshot(
   j["pid"] = -1;
   j["network_ready"] = snap.network_ready;
   j["interface"] = snap.interface_name;
-  j["internal_ip"] = "";
+  j["internal_ip"] = snap.internal_ip;
   j["route_count"] = static_cast<int>(cfg.routes.size());
   j["mtu"] = cfg.mtu;
   j["uptime_seconds"] = 0;
@@ -334,4 +334,4 @@ void reset_virtual_network_probe_state_for_testing() {
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

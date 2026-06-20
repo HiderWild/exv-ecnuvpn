@@ -8,7 +8,7 @@
 #include <functional>
 #include <memory>
 
-namespace ecnuvpn::helper {
+namespace exv::helper {
 
 using HelperNetworkOpsFactory =
     std::function<std::shared_ptr<exv::helper::HelperNetworkOps>()>;
@@ -20,4 +20,4 @@ std::unique_ptr<exv::helper::HelperHandler> create_helper_handler_for_daemon(
     HelperNetworkOpsFactory network_ops_factory = HelperNetworkOpsFactory{},
     HelperServiceOpsFactory service_ops_factory = HelperServiceOpsFactory{});
 
-} // namespace ecnuvpn::helper
+} // namespace exv::helper

@@ -36,7 +36,7 @@ RpcActionMetadata default_metadata_for_action(std::string_view action) {
     if (is_one_of(action, {"status.get", "vpn.status", "runtime.status",
                            "service.status", "helper.status",
                            "drivers.status", "key.status",
-                           "maintenance.inspectCore"})) {
+                           "cli.status", "maintenance.inspectCore"})) {
         return metadata(RpcLane::ReadModel);
     }
 
@@ -69,6 +69,7 @@ RpcActionMetadata default_metadata_for_action(std::string_view action) {
     }
 
     if (is_one_of(action, {"service.install", "service.uninstall",
+                           "cli.install", "cli.uninstall",
                            "drivers.install", "maintenance.killStaleCore"})) {
         return metadata(RpcLane::PlatformAdmin,
                         RpcConflictClass::PlatformAdminWrite,

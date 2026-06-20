@@ -5,7 +5,7 @@
 #include <functional>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn {
 
 inline constexpr int kVpnInitialConnectFailedExitCode = 2;
@@ -38,4 +38,4 @@ int stop();
 int status();
 
 } // namespace vpn
-} // namespace ecnuvpn
+} // namespace exv

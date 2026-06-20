@@ -13,6 +13,7 @@ import {
   type ComponentPublicInstance,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave } from 'vue-router'
 import {
   EthernetPort,
   Palette,
@@ -64,6 +65,7 @@ const activeSection = ref<SectionKey>('auth')
 const sectionElements = new Map<SectionKey, HTMLElement>()
 let scrollListenerAttached = false
 let programmaticScroll = false
+let restoreFrame: number | null = null
 const savingSettings = ref(false)
 const saveHover = ref(false)
 
@@ -327,6 +329,23 @@ function updateActiveSection() {
   }
 }
 
+function rememberCurrentSettingsScroll() {
+  const root = scrollRoot.value
+  if (!root) return
+  if (
+    root.scrollTop === 0 &&
+    activeSection.value !== 'auth' &&
+    pageState.settings.scrollTop > 0
+  ) {
+    return
+  }
+  pageState.rememberSettingsScroll(root.scrollTop, activeSection.value)
+}
+
+function hasRememberedSettingsScroll() {
+  return pageState.settings.userInteracted || pageState.settings.scrollTop > 0
+}
+
 function markProgrammaticScroll() {
   programmaticScroll = true
   if (typeof window !== 'undefined') {
@@ -375,7 +394,23 @@ function restoreSettingsScroll() {
   markProgrammaticScroll()
   root.scrollTop = pageState.settings.scrollTop
   activeSection.value = pageState.settings.activeSection as SectionKey
-  updateActiveSection()
+}
+
+function scheduleRestoreSettingsScroll() {
+  if (typeof window === 'undefined') {
+    restoreSettingsScroll()
+    return
+  }
+  if (restoreFrame !== null) {
+    window.cancelAnimationFrame(restoreFrame)
+  }
+  restoreFrame = window.requestAnimationFrame(() => {
+    restoreSettingsScroll()
+    restoreFrame = window.requestAnimationFrame(() => {
+      restoreSettingsScroll()
+      restoreFrame = null
+    })
+  })
 }
 
 onMounted(async () => {
@@ -384,8 +419,9 @@ onMounted(async () => {
   }
   attachScrollListener()
   const section = explicitSection()
-  if (pageState.settings.userInteracted) {
-    restoreSettingsScroll()
+  if (hasRememberedSettingsScroll()) {
+    scheduleRestoreSettingsScroll()
+    return
   } else if (section) {
     await scrollToSection(section, false, 'auto')
   } else {
@@ -399,25 +435,33 @@ onMounted(async () => {
 onActivated(() => {
   attachScrollListener()
   void nextTick(() => {
-    if (pageState.settings.userInteracted) {
-      restoreSettingsScroll()
+    if (hasRememberedSettingsScroll()) {
+      scheduleRestoreSettingsScroll()
       return
     }
     if (explicitSection()) return
-    restoreSettingsScroll()
+    scheduleRestoreSettingsScroll()
   })
 })
 
 onDeactivated(() => {
-  if (scrollRoot.value) {
-    pageState.settings.scrollTop = scrollRoot.value.scrollTop
-  }
+  rememberCurrentSettingsScroll()
   pageState.rememberSettingsDrafts(authDraft, settingsDraft, authBaseline, settingsBaseline)
   detachScrollListener()
 })
 
 onBeforeUnmount(() => {
+  rememberCurrentSettingsScroll()
+  if (restoreFrame !== null && typeof window !== 'undefined') {
+    window.cancelAnimationFrame(restoreFrame)
+    restoreFrame = null
+  }
   detachScrollListener()
+})
+
+onBeforeRouteLeave(() => {
+  rememberCurrentSettingsScroll()
+  pageState.rememberSettingsDrafts(authDraft, settingsDraft, authBaseline, settingsBaseline)
 })
 
 watch(
@@ -434,7 +478,7 @@ watch(
 
 <template>
   <div class="relative h-full overflow-hidden">
-    <div class="flex h-full flex-col pr-14">
+    <div class="flex h-full flex-col pr-8">
       <header class="settings-header shrink-0 border-b border-border/70 bg-bg/95 py-3 backdrop-blur">
         <div class="mx-auto flex max-w-4xl items-center gap-4">
           <h1 class="text-3xl font-semibold text-foreground">设置</h1>

@@ -10,7 +10,7 @@
 #include <filesystem>
 #include <memory>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 namespace {
 
@@ -142,4 +142,4 @@ std::string tunnel_controller_init_error() {
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

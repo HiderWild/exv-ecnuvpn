@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 struct HelperPlatformConfig {
@@ -18,4 +18,4 @@ const HelperPlatformConfig &helper_platform_config();
 void wake_helper_daemon_for_shutdown();
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

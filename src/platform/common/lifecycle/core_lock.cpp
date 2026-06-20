@@ -28,7 +28,7 @@ std::string mutex_name_for_lock_path(const std::string& lock_path) {
         hash ^= static_cast<std::uint64_t>(ch);
         hash *= 1099511628211ull;
     }
-    return "Local\\ecnuvpn-core-lock-" + std::to_string(hash);
+    return "Local\\exv-core-lock-" + std::to_string(hash);
 }
 #endif
 
@@ -82,7 +82,7 @@ CoreInstanceLock& CoreInstanceLock::operator=(CoreInstanceLock&& other) noexcept
 }
 
 std::optional<CoreInstanceLock> CoreInstanceLock::try_acquire() {
-    return try_acquire(ecnuvpn::runtime::paths().state_dir);
+    return try_acquire(exv::runtime::paths().state_dir);
 }
 
 std::optional<CoreInstanceLock> CoreInstanceLock::try_acquire(

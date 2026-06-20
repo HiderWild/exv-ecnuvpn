@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -28,11 +28,11 @@ std::string join_path(const std::string &base, const std::string &component) {
 }
 
 std::string redirect_path_for_home(const std::string &home) {
-  return expand_home_with_base("~/.ecnuvpn_home", home);
+  return expand_home_with_base("~/.exv_home", home);
 }
 
 std::string default_config_dir_for_home(const std::string &home) {
-  return expand_home_with_base("~/.ecnuvpn", home);
+  return expand_home_with_base("~/.exv", home);
 }
 
 std::string home_for_uid(unsigned int uid) {
@@ -73,11 +73,11 @@ std::string config_path(const std::string &config_dir) {
 }
 
 std::string pid_path(const std::string &config_dir) {
-  return join_path(config_dir, "ecnuvpn.pid");
+  return join_path(config_dir, "exv.pid");
 }
 
 std::string log_path(const std::string &config_dir) {
-  return join_path(config_dir, "ecnuvpn.log");
+  return join_path(config_dir, "exv.log");
 }
 
 std::string tunnel_path(const std::string &config_dir) {
@@ -122,4 +122,4 @@ bool fix_config_dir_ownership(const std::string &dir,
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

@@ -28,7 +28,7 @@ struct FirewallRule {
 
 struct TunnelConfig {
     std::string interface_address;  // e.g. "10.0.0.2/24"
-    std::string interface_name;     // e.g. "tun0" or "ECNU-VPN"
+    std::string interface_name;     // e.g. "tun0" or "EXV"
     int mtu = 1400;
     std::vector<RouteEntry> routes;
     std::vector<std::string> server_bypass_ips;

@@ -8,13 +8,13 @@
 #include <filesystem>
 #include <vector>
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 namespace {
 
 std::vector<std::string> candidate_runtime_dirs() {
   std::vector<std::string> dirs;
 
-  const char *env_runtime_dir = std::getenv("ECNUVPN_RUNTIME_DIR");
+  const char *env_runtime_dir = std::getenv("EXV_RUNTIME_DIR");
   if (env_runtime_dir && *env_runtime_dir) {
     dirs.push_back(env_runtime_dir);
   }
@@ -83,5 +83,5 @@ std::string get_bundled_tap_installer_path() {
 #endif
 }
 
-} // namespace ecnuvpn::platform
+} // namespace exv::platform
 

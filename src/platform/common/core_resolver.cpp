@@ -381,7 +381,7 @@ CoreResolveResult resolve_core(const CoreResolveOptions &options,
       "Core resolver: probing candidate " + *candidate);
 
   std::string version_cmd =
-      ecnuvpn::platform::shell_quote(*candidate) + " --version";
+      exv::platform::shell_quote(*candidate) + " --version";
   std::string version_output =
       deps.run_command_output ? deps.run_command_output(version_cmd)
                               : std::string();

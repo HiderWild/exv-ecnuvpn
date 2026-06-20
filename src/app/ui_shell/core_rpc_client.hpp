@@ -13,7 +13,7 @@ namespace exv::core::lifecycle {
 struct CoreResolverDeps;
 }
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 struct CoreRpcRequest {
   std::string action;
@@ -97,4 +97,4 @@ CoreRpcEvent parse_core_rpc_event_line(const std::string &line);
 // This bridges the CLI PipeClient into the shared resolver's DI interface.
 exv::core::lifecycle::CoreResolverDeps make_pipe_resolver_deps();
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

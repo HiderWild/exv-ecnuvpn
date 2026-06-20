@@ -4,7 +4,7 @@ import { EthernetPort } from 'lucide-vue-next'
 import ToggleSwitch from '../../components/ToggleSwitch.vue'
 import { useConfigStore, type CoreInspection, type SettingsConfig } from '../../stores/config'
 import { useUiStore } from '../../stores/ui'
-import { normalizeError, useVpnStore } from '../../stores/vpn'
+import { normalizeError } from '../../stores/vpn'
 
 const props = defineProps<{
   settingsDraft: SettingsConfig
@@ -15,7 +15,6 @@ const emit = defineEmits<{
 }>()
 
 const config = useConfigStore()
-const vpn = useVpnStore()
 const ui = useUiStore()
 const isDesktop = typeof window !== 'undefined' && !!window.exv
 
@@ -54,34 +53,6 @@ const dtlsModel = computed({
 const autoReconnectModel = computed({
   get: () => settingsForm.value.auto_reconnect,
   set: (value: boolean) => updateSettingField('auto_reconnect', value),
-})
-
-const rememberedPasswordReady = computed(() =>
-  Boolean(config.authConfig.remember_password && config.authConfig.password_stored),
-)
-
-const startupAutoConnectAllowed = computed(() =>
-  rememberedPasswordReady.value && vpn.serviceInstalled,
-)
-
-const startupAutoConnectReason = computed(() => {
-  if (!rememberedPasswordReady.value) return '需要先保存并记住密码。'
-  if (!vpn.serviceInstalled) return '需要先安装 Helper 服务。'
-  return ''
-})
-
-const startupAutoConnectModel = computed({
-  get: () => settingsForm.value.auto_connect_on_launch,
-  set: (value: boolean) => {
-    if (value && !startupAutoConnectAllowed.value) {
-      ui.requestError({
-        title: '无法开启启动时自动连接',
-        message: startupAutoConnectReason.value,
-      })
-      return
-    }
-    updateSettingField('auto_connect_on_launch', value)
-  },
 })
 
 const showCoreMaintenanceBanner = computed(() => {
@@ -128,7 +99,6 @@ function killStaleCoreAction() {
 
 onMounted(async () => {
   if (isDesktop) {
-    void vpn.fetchServiceStatus()
     void inspectCoreSilently()
   }
 })
@@ -185,19 +155,6 @@ onMounted(async () => {
           <p class="text-xs text-muted">连接进程意外退出后自动尝试重新连接</p>
         </div>
         <ToggleSwitch v-model="autoReconnectModel" />
-      </div>
-
-      <div class="flex items-center justify-between rounded-lg border border-border bg-bg/40 px-4 py-3">
-        <div>
-          <p class="text-sm text-foreground">启动时自动连接</p>
-          <p class="text-xs text-muted">
-            {{ startupAutoConnectAllowed ? '客户端启动后自动建立 VPN 连接' : startupAutoConnectReason }}
-          </p>
-        </div>
-        <ToggleSwitch
-          v-model="startupAutoConnectModel"
-          :disabled="!startupAutoConnectAllowed && !settingsForm.auto_connect_on_launch"
-        />
       </div>
 
       <div>

@@ -52,6 +52,7 @@ void TunnelController::Impl::apply_tunnel_config_and_advance() {
         // back to a safe default only when the engine hasn't reported one.
         auto engine_status = runner_.status();
         std::string ip = engine_status.internal_ip;
+        assigned_internal_ip_ = ip;
         if (ip.empty()) {
             ip = "10.0.0.2/24";  // safe fallback
         } else if (ip.find('/') == std::string::npos) {

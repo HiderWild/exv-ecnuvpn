@@ -6,7 +6,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 // --- Existing policy helpers ---
@@ -39,4 +39,4 @@ nlohmann::json try_disconnect_direct_fallback(bool allow_direct_fallback);
 nlohmann::json status_fallback_without_helper(const ConfigView &cfg);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

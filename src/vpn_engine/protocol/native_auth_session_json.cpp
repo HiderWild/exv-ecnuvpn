@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -316,4 +316,4 @@ nlohmann::json summarize_native_auth_session(const NativeAuthSession &session) {
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

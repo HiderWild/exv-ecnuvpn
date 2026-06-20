@@ -1,6 +1,7 @@
 #include "core/use_cases/config_use_cases.hpp"
 
 #include "core/config/config_api.hpp"
+#include "core/crypto/crypto.hpp"
 #include "observability/log_facade.hpp"
 #include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/file_system.hpp"
@@ -9,11 +10,15 @@
 #include "platform/common/service_status.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -25,6 +30,141 @@ namespace exv::core {
 namespace {
 
 using exv::Config;
+
+constexpr std::string_view kProtectedExportFormat =
+    "exv-config-protected-v1";
+
+nlohmann::json full_config_json(const Config &cfg);
+
+std::string hex_from_bytes(const std::array<std::uint8_t, 32> &bytes) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(bytes.size() * 2);
+  for (std::uint8_t byte : bytes) {
+    out.push_back(kHex[(byte >> 4) & 0x0f]);
+    out.push_back(kHex[byte & 0x0f]);
+  }
+  return out;
+}
+
+void fnv_mix(std::uint64_t &hash, std::string_view value) {
+  constexpr std::uint64_t kPrime = 1099511628211ULL;
+  for (unsigned char ch : value) {
+    hash ^= static_cast<std::uint64_t>(ch);
+    hash *= kPrime;
+  }
+}
+
+void fnv_mix_u64(std::uint64_t &hash, std::uint64_t value) {
+  char bytes[8];
+  for (int i = 0; i < 8; ++i) {
+    bytes[i] = static_cast<char>((value >> (i * 8)) & 0xff);
+  }
+  fnv_mix(hash, std::string_view(bytes, sizeof(bytes)));
+}
+
+std::string derive_protected_export_key(const std::string &password,
+                                        const std::string &salt) {
+  constexpr std::uint64_t kOffset = 1469598103934665603ULL;
+  constexpr std::uint64_t kBlockSalt = 0x9e3779b97f4a7c15ULL;
+  std::array<std::uint8_t, 32> key{};
+
+  for (std::uint64_t block = 0; block < 4; ++block) {
+    std::uint64_t hash = kOffset ^ (kBlockSalt * (block + 1));
+    for (std::uint64_t round = 0; round < 8192; ++round) {
+      fnv_mix(hash, password);
+      fnv_mix_u64(hash, block);
+      fnv_mix(hash, salt);
+      fnv_mix_u64(hash, round);
+      fnv_mix_u64(hash, hash >> 17);
+    }
+    for (int i = 0; i < 8; ++i) {
+      key[static_cast<std::size_t>(block * 8 + i)] =
+          static_cast<std::uint8_t>((hash >> (i * 8)) & 0xff);
+    }
+  }
+
+  return hex_from_bytes(key);
+}
+
+nlohmann::json config_json_for_export(const Config &cfg,
+                                      bool include_plaintext_password) {
+  nlohmann::json export_json = full_config_json(cfg);
+  if (!include_plaintext_password || cfg.password.empty() ||
+      !cfg.remember_password) {
+    return export_json;
+  }
+
+  const std::string key = exv::crypto::load_key();
+  if (!exv::crypto::validate_key(key)) {
+    return export_json;
+  }
+
+  const std::string plaintext = exv::crypto::decrypt(cfg.password, key);
+  if (!plaintext.empty()) {
+    export_json["password"] = plaintext;
+  }
+  return export_json;
+}
+
+nlohmann::json make_protected_export_envelope(
+    const nlohmann::json &config_json, const std::string &password) {
+  const std::string salt = exv::crypto::generate_key();
+  if (!exv::crypto::validate_key(salt)) {
+    return {};
+  }
+
+  const std::string derived_key = derive_protected_export_key(password, salt);
+  nlohmann::json protected_payload = {
+      {"magic", std::string(kProtectedExportFormat)},
+      {"config", config_json},
+  };
+  const std::string ciphertext =
+      exv::crypto::encrypt(protected_payload.dump(), derived_key);
+  if (ciphertext.empty()) {
+    return {};
+  }
+
+  return nlohmann::json{{"format", "protected"},
+                        {"protected_format", std::string(kProtectedExportFormat)},
+                        {"kdf", "exv-fnv1a64-rounds-v1"},
+                        {"salt", salt},
+                        {"payload", ciphertext}};
+}
+
+std::optional<nlohmann::json>
+decrypt_protected_export_envelope(const nlohmann::json &envelope,
+                                  const std::string &password) {
+  if (!envelope.is_object() ||
+      envelope.value("format", std::string()) != "protected" ||
+      envelope.value("protected_format", std::string()) !=
+          std::string(kProtectedExportFormat) ||
+      !envelope.contains("salt") || !envelope["salt"].is_string() ||
+      !envelope.contains("payload") || !envelope["payload"].is_string()) {
+    return std::nullopt;
+  }
+
+  const std::string derived_key = derive_protected_export_key(
+      password, envelope["salt"].get<std::string>());
+  const std::string plaintext =
+      exv::crypto::decrypt(envelope["payload"].get<std::string>(), derived_key);
+  if (plaintext.empty()) {
+    return std::nullopt;
+  }
+
+  try {
+    auto wrapper = nlohmann::json::parse(plaintext);
+    if (!wrapper.is_object() ||
+        wrapper.value("magic", std::string()) !=
+            std::string(kProtectedExportFormat) ||
+        !wrapper.contains("config") || !wrapper["config"].is_object()) {
+      return std::nullopt;
+    }
+    return wrapper["config"];
+  } catch (...) {
+    return std::nullopt;
+  }
+}
 
 nlohmann::json auth_json(const Config &cfg) {
   return nlohmann::json{{"server", cfg.server},
@@ -881,11 +1021,17 @@ UseCaseResult ConfigUseCases::reset_key() {
 }
 
 UseCaseResult ConfigUseCases::import_config(const nlohmann::json &payload) {
-  if (payload.value("format", std::string()) == "protected" &&
+  const std::string protected_import_error =
+      "无法解密或读取受保护的配置文件。可能原因包括：导入口令不正确、文件已损坏、文件内容被修改，或配置格式不兼容。";
+  const std::string invalid_import_error =
+      "导入文件不是有效的 EXV 配置文件。可能原因包括：文件已损坏、内容不完整，或配置格式不兼容。";
+  const bool requested_protected =
+      payload.value("format", std::string()) == "protected";
+  if (requested_protected &&
       (!payload.contains("password") || !payload["password"].is_string() ||
        trim_copy(payload["password"].get<std::string>()).empty())) {
     return UseCaseResult::fail("config_import_auth_failed",
-                               "Import password is required.");
+                               "导入口令是必填项。");
   }
 
   // Import can take either a direct config object or a nested "config" field
@@ -894,9 +1040,8 @@ UseCaseResult ConfigUseCases::import_config(const nlohmann::json &payload) {
     try {
       config_json = nlohmann::json::parse(payload["data"].get<std::string>());
     } catch (const std::exception &e) {
-      return UseCaseResult::fail("invalid_config",
-                                 std::string("Invalid import data: ") +
-                                     e.what());
+      (void)e;
+      return UseCaseResult::fail("invalid_config", invalid_import_error);
     }
   } else if (payload.contains("config") && payload["config"].is_object()) {
     config_json = payload["config"];
@@ -904,6 +1049,64 @@ UseCaseResult ConfigUseCases::import_config(const nlohmann::json &payload) {
     config_json = payload["import_data"];
   } else {
     config_json = payload;
+  }
+
+  for (int unwrap_depth = 0; unwrap_depth < 2; ++unwrap_depth) {
+    if (config_json.is_object() && config_json.contains("export_data") &&
+        config_json["export_data"].is_object()) {
+      config_json = config_json["export_data"];
+      continue;
+    }
+    if (config_json.is_object() && config_json.contains("data") &&
+        config_json["data"].is_string()) {
+      const std::string format = config_json.value("format", std::string());
+      if (format == "protected" || format == "unprotected") {
+        try {
+          config_json =
+              nlohmann::json::parse(config_json["data"].get<std::string>());
+        } catch (const std::exception &e) {
+          (void)e;
+          return UseCaseResult::fail(
+              format == "protected"
+                  ? "config_import_tampered_or_wrong_password"
+                  : "invalid_config",
+              format == "protected" ? protected_import_error
+                                    : invalid_import_error);
+        }
+        continue;
+      }
+    }
+    break;
+  }
+
+  const bool data_is_protected =
+      config_json.is_object() &&
+      config_json.value("format", std::string()) == "protected";
+  if (requested_protected || data_is_protected) {
+    if (!payload.contains("password") || !payload["password"].is_string() ||
+        trim_copy(payload["password"].get<std::string>()).empty()) {
+      return UseCaseResult::fail("config_import_auth_failed",
+                                 "导入口令是必填项。");
+    }
+    auto decrypted = decrypt_protected_export_envelope(
+        config_json, payload["password"].get<std::string>());
+    if (!decrypted.has_value()) {
+      return UseCaseResult::fail(
+          "config_import_tampered_or_wrong_password", protected_import_error);
+    }
+    config_json = *decrypted;
+  }
+
+  Config current = manager_.load();
+  UseCaseResult auth_validation =
+      validate_auth_payload_before_save(current, config_json);
+  if (!auth_validation.success) {
+    return auth_validation;
+  }
+  UseCaseResult settings_validation =
+      validate_settings_payload_before_save(config_json);
+  if (!settings_validation.success) {
+    return settings_validation;
   }
 
   // Convert JSON to string for config_import
@@ -931,7 +1134,6 @@ UseCaseResult ConfigUseCases::export_config(const nlohmann::json &payload) {
   Config cfg = manager_.load();
 
   // Export format - clean config object without sensitive data
-  nlohmann::json export_json = full_config_json(cfg);
   if (payload.contains("protected") && !payload["protected"].is_boolean()) {
     return UseCaseResult::fail("invalid_payload",
                                "protected must be a boolean.");
@@ -941,12 +1143,30 @@ UseCaseResult ConfigUseCases::export_config(const nlohmann::json &payload) {
                                "password must be a string.");
   }
   const bool protected_export = payload.value("protected", false);
+  const std::string export_password =
+      payload.contains("password") && payload["password"].is_string()
+          ? payload["password"].get<std::string>()
+          : std::string();
   if (protected_export) {
     if (!payload.contains("password") || !payload["password"].is_string() ||
-        trim_copy(payload["password"].get<std::string>()).empty()) {
+        trim_copy(export_password).empty()) {
       return UseCaseResult::fail("invalid_payload",
                                  "Export password is required.");
     }
+    if (cfg.remember_password && !cfg.password.empty() &&
+        !exv::crypto::validate_key(exv::crypto::load_key())) {
+      return UseCaseResult::fail(
+          "credential_store_unavailable",
+          "Saved VPN password cannot be exported because the local key is unavailable.");
+    }
+  }
+
+  nlohmann::json export_json = config_json_for_export(cfg, protected_export);
+  if (protected_export && cfg.remember_password && !cfg.password.empty() &&
+      export_json.value("password", std::string()).empty()) {
+    return UseCaseResult::fail(
+        "credential_store_unavailable",
+        "Saved VPN password could not be decrypted for export.");
   }
 
   // Add export metadata
@@ -954,9 +1174,21 @@ UseCaseResult ConfigUseCases::export_config(const nlohmann::json &payload) {
   export_json["exported_at"] = ""; // Could be set with timestamp if needed
   export_json["protected"] = protected_export;
 
+  if (protected_export) {
+    nlohmann::json envelope =
+        make_protected_export_envelope(export_json, export_password);
+    if (envelope.empty()) {
+      return UseCaseResult::fail("invalid_payload",
+                                 "Failed to create protected export.");
+    }
+    return UseCaseResult::ok({{"exported", true},
+                              {"format", "protected"},
+                              {"data", envelope.dump(2)},
+                              {"export_data", envelope}});
+  }
+
   return UseCaseResult::ok({{"exported", true},
-                            {"format", protected_export ? "protected"
-                                                        : "unprotected"},
+                            {"format", "unprotected"},
                             {"data", export_json.dump(2)},
                             {"export_data", export_json}});
 }

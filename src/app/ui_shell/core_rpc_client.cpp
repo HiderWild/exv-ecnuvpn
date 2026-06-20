@@ -25,7 +25,7 @@
 #include <thread>
 #include <utility>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 namespace {
 
 int request_id_to_int(const std::string &request_id) {
@@ -403,19 +403,19 @@ exv::core::lifecycle::CoreResolverDeps make_pipe_resolver_deps() {
   };
 
   deps.get_frontend_executable_path = []() {
-    return ecnuvpn::platform::get_executable_path();
+    return exv::platform::get_executable_path();
   };
 
   deps.run_command_output = [](const std::string &cmd) {
-    return ecnuvpn::platform::run_command_output(cmd);
+    return exv::platform::run_command_output(cmd);
   };
 
   deps.get_state_dir = []() {
-    return ecnuvpn::runtime::paths().state_dir;
+    return exv::runtime::paths().state_dir;
   };
 
   deps.get_home_dir = []() {
-    return ecnuvpn::runtime::paths().home;
+    return exv::runtime::paths().home;
   };
 
   deps.get_env_var = [](const std::string &name) -> std::string {
@@ -426,4 +426,4 @@ exv::core::lifecycle::CoreResolverDeps make_pipe_resolver_deps() {
   return deps;
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

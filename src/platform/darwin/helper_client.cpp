@@ -10,7 +10,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -119,4 +119,4 @@ nlohmann::json send_helper_request(const HelperEndpoint &endpoint,
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

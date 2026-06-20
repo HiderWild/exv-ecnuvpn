@@ -9,7 +9,7 @@
 #include <mutex>
 #include <string>
 
-namespace ecnuvpn::platform::logging {
+namespace exv::platform::logging {
 
 namespace {
 
@@ -34,8 +34,8 @@ std::shared_ptr<exv::observability::LogService>
 create_default_log_service(bool emit_stdout_events) {
   auto service = std::make_shared<exv::observability::LogService>();
   service->add_sink(std::make_shared<FileLogSink>(
-      ecnuvpn::platform::get_log_path(), [](const std::string &path) {
-        return ecnuvpn::platform::sync_owner(path);
+      exv::platform::get_log_path(), [](const std::string &path) {
+        return exv::platform::sync_owner(path);
       }));
   if (emit_stdout_events) {
     service->add_sink(std::make_shared<StdoutLogSink>(std::cout));
@@ -75,4 +75,4 @@ void shutdown_default_logging() {
   exv::observability::LogFacade::shutdown();
 }
 
-} // namespace ecnuvpn::platform::logging
+} // namespace exv::platform::logging

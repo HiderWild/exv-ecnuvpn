@@ -8,7 +8,7 @@
 #include <string>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 namespace {
@@ -432,4 +432,4 @@ void NativeVpnEngineSession::set_failure_locked(
 }
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

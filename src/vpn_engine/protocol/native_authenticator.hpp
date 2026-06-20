@@ -6,7 +6,7 @@
 #include <map>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -38,4 +38,4 @@ private:
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

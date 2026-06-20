@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 enum class NativeWintunError {
@@ -61,8 +61,8 @@ struct NativeWintunDependencies {
 NativeWintunDependencies default_native_wintun_dependencies();
 
 struct NativeWintunConfig {
-  std::wstring adapter_name_prefix = L"ECNUVPN-Native";
-  std::wstring tunnel_type = L"ECNUVPN";
+  std::wstring adapter_name_prefix = L"EXV-Native";
+  std::wstring tunnel_type = L"EXV";
   std::uint32_t session_capacity = 0x400000;
 };
 
@@ -95,4 +95,4 @@ private:
 std::wstring native_wintun_adapter_name(const std::wstring &prefix);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

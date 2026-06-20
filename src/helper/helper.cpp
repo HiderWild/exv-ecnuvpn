@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace helper {
 
 namespace {
@@ -37,17 +37,17 @@ namespace {
 volatile sig_atomic_t daemon_stop_requested = 0;
 DaemonOptions active_daemon_options;
 
-#if defined(ECNUVPN_PLATFORM_WINDOWS)
+#if defined(EXV_PLATFORM_WINDOWS)
 inline constexpr std::string_view kHelperPlatformName = "windows";
 inline constexpr std::string_view kHelperTransportName = "named-pipe";
-#elif defined(ECNUVPN_PLATFORM_DARWIN)
+#elif defined(EXV_PLATFORM_DARWIN)
 inline constexpr std::string_view kHelperPlatformName = "darwin";
 inline constexpr std::string_view kHelperTransportName = "unix-socket";
-#elif defined(ECNUVPN_PLATFORM_LINUX)
+#elif defined(EXV_PLATFORM_LINUX)
 inline constexpr std::string_view kHelperPlatformName = "linux";
 inline constexpr std::string_view kHelperTransportName = "unix-socket";
 #else
-#error "Unsupported ECNU-VPN platform"
+#error "Unsupported EXV platform"
 #endif
 
 void daemon_signal_handler(int) {
@@ -72,7 +72,7 @@ nlohmann::json make_helper_capabilities() {
 nlohmann::json make_helper_descriptor() {
   const auto &platform_config = platform::helper_platform_config();
   return nlohmann::json{{"name", "exv-helper"},
-                        {"version", ECNUVPN_VERSION},
+                        {"version", EXV_VERSION},
                         {"platform_service_mode", platform_config.service_mode},
                         {"mode", active_daemon_options.mode},
                         {"endpoint", active_daemon_options.endpoint},
@@ -418,4 +418,4 @@ int daemon_main(const DaemonOptions &options) {
 }
 
 } // namespace helper
-} // namespace ecnuvpn
+} // namespace exv

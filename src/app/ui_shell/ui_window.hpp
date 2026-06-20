@@ -5,7 +5,7 @@
 #include <functional>
 #include <string>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 using HostMessageHandler = std::function<std::string(const std::string &)>;
 
@@ -28,4 +28,4 @@ public:
   }
 };
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

@@ -28,6 +28,11 @@ export const routeRecords: RouteRecordRaw[] = [
     component: () => import('../pages/LogsPage.vue'),
   },
   {
+    path: '/about',
+    name: 'about',
+    component: () => import('../pages/AboutPage.vue'),
+  },
+  {
     path: '/settings',
     name: 'settings',
     component: () => import('../pages/SettingsPage.vue'),

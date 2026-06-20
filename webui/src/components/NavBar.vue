@@ -2,9 +2,10 @@
 import { computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  LayoutDashboard, Settings, FileText
+  FileText, Info, LayoutDashboard, Settings,
 } from 'lucide-vue-next'
 import appIconUrl from '../assets/app-icon.svg'
+import { distributionConfig } from '../generated/distribution'
 import { useVpnStore } from '../stores/vpn'
 
 const router = useRouter()
@@ -16,6 +17,7 @@ const navItems = [
   { path: '/', name: '主面板', icon: LayoutDashboard },
   { path: '/settings', name: '设置', icon: Settings },
   { path: '/logs', name: '日志', icon: FileText },
+  { path: '/about', name: '关于', icon: Info },
 ]
 
 function isActive(path: string) {
@@ -70,8 +72,8 @@ const sidebarStatusItems = computed(() => [
         >
           <img :src="appIconUrl" alt="" class="h-9 w-9 shrink-0" />
           <span class="min-w-0 leading-tight">
-            <span class="block text-xl font-bold text-foreground">EXV</span>
-            <span class="block text-sm font-semibold text-muted">VPN 客户端</span>
+            <span class="block text-xl font-bold text-foreground">{{ distributionConfig.appName }}</span>
+            <span class="block text-sm font-semibold text-muted">{{ distributionConfig.brandSubtitle }}</span>
           </span>
         </button>
       </div>

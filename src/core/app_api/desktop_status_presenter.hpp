@@ -5,7 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 nlohmann::json frontend_status_from_helper(const nlohmann::json &helper_resp,
@@ -29,4 +29,4 @@ nlohmann::json drain_virtual_network_status_events();
 void reset_virtual_network_probe_state_for_testing();
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

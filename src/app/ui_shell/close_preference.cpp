@@ -4,7 +4,7 @@
 
 #include <fstream>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 namespace {
 
 bool is_persistable_close_action(const std::string &action) {
@@ -119,4 +119,4 @@ bool write_close_preference(const std::filesystem::path &state_dir,
   return output.good();
 }
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

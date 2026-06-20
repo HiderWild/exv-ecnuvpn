@@ -9,16 +9,20 @@
 #include "platform/common/helper_platform.hpp"
 #include "cli/console.hpp"
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -43,6 +47,97 @@ void print_runtime_status_if_available(const HelperServiceManagerContext &contex
   (void)context;
   if (!available)
     return;
+}
+
+bool files_have_same_contents(const std::filesystem::path &left,
+                              const std::filesystem::path &right) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(left, ec) ||
+      !std::filesystem::is_regular_file(right, ec)) {
+    return false;
+  }
+
+  const auto left_size = std::filesystem::file_size(left, ec);
+  if (ec)
+    return false;
+  const auto right_size = std::filesystem::file_size(right, ec);
+  if (ec || left_size != right_size)
+    return false;
+
+  std::ifstream left_stream(left, std::ios::binary);
+  std::ifstream right_stream(right, std::ios::binary);
+  if (!left_stream || !right_stream)
+    return false;
+
+  std::array<char, 65536> left_buffer{};
+  std::array<char, 65536> right_buffer{};
+  while (left_stream && right_stream) {
+    left_stream.read(left_buffer.data(), left_buffer.size());
+    right_stream.read(right_buffer.data(), right_buffer.size());
+    if (left_stream.gcount() != right_stream.gcount())
+      return false;
+    if (!std::equal(left_buffer.begin(),
+                    left_buffer.begin() + left_stream.gcount(),
+                    right_buffer.begin())) {
+      return false;
+    }
+  }
+  return left_stream.eof() && right_stream.eof();
+}
+
+bool ensure_stable_helper_binary(const std::filesystem::path &source,
+                                 const std::filesystem::path &target,
+                                 bool *refreshed) {
+  if (refreshed)
+    *refreshed = false;
+
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(source, ec)) {
+    cli::print_error("Dedicated exv-helper.exe was not found next to exv.exe.");
+    return false;
+  }
+
+  if (std::filesystem::equivalent(source, target, ec)) {
+    return true;
+  }
+
+  std::filesystem::create_directories(target.parent_path(), ec);
+  if (ec) {
+    cli::print_error("Failed to create stable helper directory: " +
+                     ec.message());
+    return false;
+  }
+
+  if (files_have_same_contents(source, target)) {
+    return true;
+  }
+
+  std::filesystem::copy_file(source, target,
+                             std::filesystem::copy_options::overwrite_existing,
+                             ec);
+  if (ec) {
+    cli::print_error("Failed to refresh stable exv-helper.exe: " +
+                     ec.message());
+    return false;
+  }
+  if (refreshed)
+    *refreshed = true;
+  return true;
+}
+
+std::string service_binary_path(SC_HANDLE service) {
+  DWORD bytes_needed = 0;
+  QueryServiceConfigA(service, NULL, 0, &bytes_needed);
+  if (bytes_needed == 0)
+    return {};
+
+  std::vector<unsigned char> buffer(bytes_needed);
+  auto *config = reinterpret_cast<QUERY_SERVICE_CONFIGA *>(buffer.data());
+  if (!QueryServiceConfigA(service, config, bytes_needed, &bytes_needed) ||
+      !config->lpBinaryPathName) {
+    return {};
+  }
+  return config->lpBinaryPathName;
 }
 
 } // namespace
@@ -73,22 +168,23 @@ int install_helper_service(const std::string &executable_path,
   }
 
   std::filesystem::path exec_fs_path(exec_path);
-  std::filesystem::path helper_path =
+  const std::filesystem::path packaged_helper_path =
       exec_fs_path.parent_path() / "exv-helper.exe";
+  const std::filesystem::path stable_helper_path =
+      platform_config.default_service_binary_path;
 
-  std::string binary_path;
-  if (std::filesystem::exists(helper_path)) {
-    binary_path = "\"" + helper_path.string() + "\" --service";
-  } else {
-    cli::print_error(
-        "Dedicated exv-helper.exe was not found next to exv.exe.");
+  bool helper_refreshed = false;
+  if (!ensure_stable_helper_binary(packaged_helper_path, stable_helper_path,
+                                   &helper_refreshed)) {
     CloseServiceHandle(hSCM);
     return 1;
   }
 
+  std::string binary_path = "\"" + stable_helper_path.string() + "\" --service";
+
   cli::print_info("Registering helper service...");
   SC_HANDLE hService = CreateServiceA(
-      hSCM, platform_config.service_name, "ECNU VPN Helper",
+      hSCM, platform_config.service_name, "EXV Helper",
       SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
       SERVICE_ERROR_NORMAL, binary_path.c_str(), NULL, NULL, NULL, NULL,
       NULL);
@@ -108,20 +204,25 @@ int install_helper_service(const std::string &executable_path,
         return 1;
       }
 
-      if (!ChangeServiceConfigA(hService, SERVICE_NO_CHANGE,
-                                SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
-                                binary_path.c_str(), NULL, NULL, NULL, NULL,
-                                NULL, NULL)) {
-        exv::observability::LogFacade::error("ChangeServiceConfig failed: " +
-                      std::to_string(GetLastError()));
-        CloseServiceHandle(hService);
-        CloseServiceHandle(hSCM);
-        return 1;
+      bool service_config_changed = false;
+      if (service_binary_path(hService) != binary_path) {
+        if (!ChangeServiceConfigA(hService, SERVICE_NO_CHANGE,
+                                  SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+                                  binary_path.c_str(), NULL, NULL, NULL, NULL,
+                                  NULL, NULL)) {
+          exv::observability::LogFacade::error("ChangeServiceConfig failed: " +
+                        std::to_string(GetLastError()));
+          CloseServiceHandle(hService);
+          CloseServiceHandle(hSCM);
+          return 1;
+        }
+        service_config_changed = true;
       }
 
       SERVICE_STATUS service_status = {};
       if (QueryServiceStatus(hService, &service_status) &&
-          service_status.dwCurrentState != SERVICE_STOPPED) {
+          service_status.dwCurrentState != SERVICE_STOPPED &&
+          (service_config_changed || helper_refreshed)) {
         cli::print_info(
             "Restarting helper service to apply the new binary path...");
         ControlService(hService, SERVICE_CONTROL_STOP, &service_status);
@@ -277,4 +378,4 @@ int show_helper_service_status(const HelperServiceManagerContext &context) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

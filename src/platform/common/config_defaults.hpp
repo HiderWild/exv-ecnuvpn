@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 struct ConfigDefaults {
@@ -15,4 +15,4 @@ struct ConfigDefaults {
 const ConfigDefaults &config_defaults();
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

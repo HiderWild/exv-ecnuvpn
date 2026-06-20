@@ -11,27 +11,27 @@
 #include <string_view>
 #include <vector>
 
-namespace ecnuvpn::platform::win32::ui_shell {
+namespace exv::platform::win32::ui_shell {
 
 std::string dispatch_webview2_host_message(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core);
+    const exv::ui_shell::CoreRpcInvoker &invoke_core);
 
 void post_webview2_host_response(
     const std::string &message_json,
-    const ecnuvpn::ui_shell::CoreRpcInvoker &invoke_core,
+    const exv::ui_shell::CoreRpcInvoker &invoke_core,
     const std::function<void(const std::string &)> &post_response);
 
 std::wstring webview2_renderer_uri(
-    const ecnuvpn::ui_shell::RendererAssets &renderer);
+    const exv::ui_shell::RendererAssets &renderer);
 
 std::wstring webview2_packaged_renderer_folder(
-    const ecnuvpn::ui_shell::RendererAssets &renderer);
+    const exv::ui_shell::RendererAssets &renderer);
 
-[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+[[nodiscard]] exv::ui_shell::WindowBounds
 webview2_default_window_bounds() noexcept;
 
-[[nodiscard]] ecnuvpn::ui_shell::WindowBounds
+[[nodiscard]] exv::ui_shell::WindowBounds
 webview2_window_mode_bounds_for_dpi(std::string_view mode,
                                     unsigned int dpi) noexcept;
 
@@ -46,6 +46,6 @@ bool webview2_should_create_tray_on_start();
 std::wstring webview2_taskbar_created_message_name();
 int webview2_app_icon_resource_id() noexcept;
 
-std::unique_ptr<ecnuvpn::ui_shell::UiWindow> create_webview2_window();
+std::unique_ptr<exv::ui_shell::UiWindow> create_webview2_window();
 
-} // namespace ecnuvpn::platform::win32::ui_shell
+} // namespace exv::platform::win32::ui_shell

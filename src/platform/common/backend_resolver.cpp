@@ -10,7 +10,7 @@
 #include <filesystem>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -160,4 +160,4 @@ nlohmann::json backend_unavailable_error(const nlohmann::json &resolved,
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

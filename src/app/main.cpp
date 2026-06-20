@@ -1,3 +1,4 @@
+#include "cli/cli_entrypoint.hpp"
 #include "core/app_api/app_api.hpp"
 #include "core/core_process.hpp"
 #include "platform/common/file_system.hpp"
@@ -10,17 +11,7 @@
 #include <string>
 #include <vector>
 
-using namespace ecnuvpn;
-
-namespace {
-
-void print_core_help() {
-  std::cout << "exv is the ECNU-VPN core executable.\n"
-            << "Use exv-cli for user commands.\n"
-            << "Core options: --mode=core, --version\n";
-}
-
-} // namespace
+using namespace exv;
 
 int main(int argc, char *argv[]) {
   std::vector<std::string> raw_args;
@@ -29,7 +20,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (raw_args.size() > 1 && raw_args[1] == "--version") {
-    std::cout << "exv " << ECNUVPN_VERSION << std::endl;
+    std::cout << "exv " << EXV_VERSION << std::endl;
     return 0;
   }
 
@@ -95,6 +86,7 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  print_core_help();
-  return 0;
+  exv::cli::CliEntrypointOptions cli_options;
+  cli_options.allow_self_core_candidate = true;
+  return exv::cli::run_cli_entrypoint(raw_args, cli_options);
 }

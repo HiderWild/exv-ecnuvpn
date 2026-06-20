@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace feedback {
 
 // ── Canonical error taxonomy ────────────────────────────────────────────────
@@ -73,4 +73,4 @@ nlohmann::json make_error(const std::string &message,
 nlohmann::json normalize_error(nlohmann::json response);
 
 } // namespace feedback
-} // namespace ecnuvpn
+} // namespace exv

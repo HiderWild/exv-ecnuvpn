@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -180,4 +180,4 @@ private:
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

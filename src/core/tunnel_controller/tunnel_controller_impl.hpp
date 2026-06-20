@@ -32,8 +32,8 @@ as_helper_delegating_ops(
 
 struct TunnelController::Impl {
   struct PreparedNativeHandshake {
-    ecnuvpn::vpn_engine::VpnEngineConfig engine_config;
-    ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
+    exv::vpn_engine::VpnEngineConfig engine_config;
+    exv::vpn_engine::NativeHandshakeResult handshake;
   };
 
   Impl() = default;
@@ -71,17 +71,17 @@ struct TunnelController::Impl {
   bool apply_tunnel_config_for_session(
       const exv::platform::TunnelDeviceDescriptor &device,
       const std::string &interface_address,
-      const ecnuvpn::vpn_engine::TunnelMetadata *metadata = nullptr);
+      const exv::vpn_engine::TunnelMetadata *metadata = nullptr);
   ErrorInfo current_native_failure(const std::string &fallback_code,
                                    const std::string &fallback_message) const;
-  ecnuvpn::vpn_engine::ValidationResult current_network_failure(
+  exv::vpn_engine::ValidationResult current_network_failure(
       const std::string &fallback_code,
       const std::string &fallback_message) const;
   std::string interface_address_from_metadata(
-      const ecnuvpn::vpn_engine::TunnelMetadata &metadata) const;
-  ecnuvpn::vpn_engine::ValidationResult configure_network_for_engine(
-      const ecnuvpn::vpn_engine::TunnelMetadata &metadata,
-      ecnuvpn::vpn_engine::DeviceConfig *device_config);
+      const exv::vpn_engine::TunnelMetadata &metadata) const;
+  exv::vpn_engine::ValidationResult configure_network_for_engine(
+      const exv::vpn_engine::TunnelMetadata &metadata,
+      exv::vpn_engine::DeviceConfig *device_config);
   void do_connect();
 
   void do_disconnect(DisconnectReason reason);
@@ -119,7 +119,8 @@ struct TunnelController::Impl {
   ConnectTiming timing_;
 
   exv::helper::SessionId session_id_;
-  std::string adapter_name_{"ECNU-VPN"};
+  std::string adapter_name_{"EXV"};
+  std::string assigned_internal_ip_;
   bool network_config_applied_ = false;
   bool packet_loop_started_ = false;
   std::optional<exv::platform::TunnelDeviceDescriptor> prepared_tunnel_device_;
@@ -141,7 +142,7 @@ struct TunnelController::Impl {
 
   CoreSessionRunner runner_;
 
-  ecnuvpn::Config vpn_cfg_;
+  exv::Config vpn_cfg_;
   std::string vpn_password_;
   std::optional<PreparedNativeHandshake> prepared_native_handshake_;
 };

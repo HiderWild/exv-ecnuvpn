@@ -1,6 +1,6 @@
 #include "platform/common/status_models.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 std::string runtime_source_from_paths(const std::string &resolved_path,
@@ -38,4 +38,4 @@ nlohmann::json service_status_to_json(const ServiceStatusSnapshot &status) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

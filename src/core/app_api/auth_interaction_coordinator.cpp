@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 namespace {
 
@@ -116,4 +116,4 @@ bool clear_active_connect_auth_coordinator_if_current(
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

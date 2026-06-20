@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 struct ConfigView {
@@ -20,4 +20,4 @@ struct ConfigView {
 };
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

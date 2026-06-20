@@ -15,7 +15,7 @@
 #include <conio.h>
 #endif
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 namespace wizard {
 
@@ -104,4 +104,4 @@ bool is_valid_cidr(const std::string &s) {
 
 } // namespace wizard
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

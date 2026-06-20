@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 bool SessionState::network_ready() const {
@@ -122,4 +122,4 @@ nlohmann::json session_state_to_json(const SessionState &state) {
 }
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ecnuvpn::cli {
+namespace exv::cli {
 
 constexpr const char *RESET = "\033[0m";
 constexpr const char *RED = "\033[31m";
@@ -23,5 +23,5 @@ void print_warning(const std::string &msg);
 void print_header(const std::string &msg);
 void enable_windows_ansi();
 
-} // namespace ecnuvpn::cli
+} // namespace exv::cli
 

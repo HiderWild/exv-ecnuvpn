@@ -3,7 +3,7 @@
 #include "feedback/feedback.hpp"
 #include "platform/common/helper_client.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 nlohmann::json error(const std::string &message, const std::string &code) {
@@ -86,4 +86,4 @@ std::string json_safe_text(const std::string &text) {
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

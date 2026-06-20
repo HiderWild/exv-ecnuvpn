@@ -11,7 +11,7 @@
 #include <optional>
 #include <string>
 
-#if defined(ECNUVPN_PLATFORM_WINDOWS)
+#if defined(EXV_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -50,7 +50,7 @@ void report_service_status(DWORD state, DWORD win32_exit_code = NO_ERROR,
 DWORD WINAPI service_control_handler(DWORD control, DWORD, LPVOID, LPVOID) {
   if (control == SERVICE_CONTROL_STOP || control == SERVICE_CONTROL_SHUTDOWN) {
     report_service_status(SERVICE_STOP_PENDING, NO_ERROR, 3000);
-    ecnuvpn::helper::request_daemon_stop();
+    exv::helper::request_daemon_stop();
     return NO_ERROR;
   }
   return ERROR_CALL_NOT_IMPLEMENTED;
@@ -64,10 +64,10 @@ void WINAPI service_main(DWORD, LPSTR *) {
 
   report_service_status(SERVICE_START_PENDING, NO_ERROR, 3000);
   report_service_status(SERVICE_RUNNING);
-  ecnuvpn::helper::DaemonOptions options;
+  exv::helper::DaemonOptions options;
   options.mode = "service";
-  options.endpoint = ecnuvpn::platform::helper_platform_config().endpoint;
-  int rc = ecnuvpn::helper::daemon_main(options);
+  options.endpoint = exv::platform::helper_platform_config().endpoint;
+  int rc = exv::helper::daemon_main(options);
   report_service_status(SERVICE_STOPPED,
                         rc == 0 ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR);
 }
@@ -118,24 +118,24 @@ std::optional<int> parse_positive_int(const std::string &value) {
 } // namespace
 
 int main(int argc, char *argv[]) {
-  ecnuvpn::cli::enable_windows_ansi();
+  exv::cli::enable_windows_ansi();
 
   if (argc > 1) {
     std::string arg = argv[1];
 
     if (arg == "--service") {
-      ecnuvpn::helper::DaemonOptions options;
+      exv::helper::DaemonOptions options;
       options.mode = "service";
-      options.endpoint = ecnuvpn::platform::helper_platform_config().endpoint;
-#if defined(ECNUVPN_PLATFORM_WINDOWS)
+      options.endpoint = exv::platform::helper_platform_config().endpoint;
+#if defined(EXV_PLATFORM_WINDOWS)
       return run_windows_service();
 #else
-      return ecnuvpn::helper::daemon_main(options);
+      return exv::helper::daemon_main(options);
 #endif
     }
 
     if (arg == "--oneshot") {
-      ecnuvpn::helper::DaemonOptions options;
+      exv::helper::DaemonOptions options;
       options.mode = "oneshot";
       options.oneshot = true;
 
@@ -169,7 +169,7 @@ int main(int argc, char *argv[]) {
         return print_usage();
       }
 
-      return ecnuvpn::helper::daemon_main(options);
+      return exv::helper::daemon_main(options);
     }
 
     return print_usage();

@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 
 // Machine-readable API used by Electron and by future non-HTTP integrations.
@@ -19,4 +19,4 @@ nlohmann::json handle_action(const std::string &action,
 bool is_tunnel_controller_active();
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

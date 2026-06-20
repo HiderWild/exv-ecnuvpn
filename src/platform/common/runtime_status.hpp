@@ -4,10 +4,10 @@
 
 #include <nlohmann/json.hpp>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 nlohmann::json runtime_status_json(const ConfigView &cfg);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

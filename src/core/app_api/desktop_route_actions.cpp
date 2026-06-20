@@ -5,7 +5,7 @@
 #include "core/rpc/desktop_rpc_adapter.hpp"
 #include "core/use_cases/config_use_cases.hpp"
 
-namespace ecnuvpn {
+namespace exv {
 namespace app_api {
 namespace {
 
@@ -50,4 +50,4 @@ void register_desktop_route_actions(exv::core_api::DesktopRpcAdapter &adapter) {
 }
 
 } // namespace app_api
-} // namespace ecnuvpn
+} // namespace exv

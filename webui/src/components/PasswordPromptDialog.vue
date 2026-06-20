@@ -57,7 +57,7 @@ function hidePassword() {
   <ModalShell
     :open="ui.showPasswordPrompt"
     :title="ui.passwordPromptMessage"
-    description="输入内容仅用于本次验证，不会写入设置。"
+    :description="ui.passwordPromptDescription"
     size="sm"
     @close="cancel"
   >
@@ -104,14 +104,14 @@ function hidePassword() {
         class="rounded-lg border border-border px-3 py-2 text-sm text-muted hover:bg-surface/80"
         @click="cancel"
       >
-        取消
+        {{ ui.passwordPromptCancelLabel }}
       </button>
       <button
         type="submit"
         form="legacy-password-prompt-form"
         class="rounded-lg bg-primary px-3 py-2 text-sm text-white hover:bg-primary/90"
       >
-        连接
+        {{ ui.passwordPromptSubmitLabel }}
       </button>
     </template>
   </ModalShell>

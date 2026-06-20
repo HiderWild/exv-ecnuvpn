@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -143,4 +143,4 @@ detect_virtual_network_adapters(const std::string &exv_interface) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

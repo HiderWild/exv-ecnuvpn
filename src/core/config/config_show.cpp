@@ -7,7 +7,7 @@
 #include <iomanip>
 #include <iostream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 
 // ── Show ─────────────────────────────────────────────────────────
@@ -47,4 +47,4 @@ void show(const Config &cfg) {
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

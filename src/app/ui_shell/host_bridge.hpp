@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace ecnuvpn::ui_shell {
+namespace exv::ui_shell {
 
 using CoreRpcInvoker = std::function<CoreRpcResponse(const CoreRpcRequest &)>;
 
@@ -14,4 +14,4 @@ bool is_allowed_host_action(std::string_view action);
 std::string handle_host_request(const std::string &request_json,
                                 const CoreRpcInvoker &invoke_core);
 
-} // namespace ecnuvpn::ui_shell
+} // namespace exv::ui_shell

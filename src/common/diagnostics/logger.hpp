@@ -4,7 +4,7 @@
 #include <utility>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace logger {
 
 // Initialize logger (ensure log file directory exists)
@@ -30,4 +30,4 @@ void show_logs(int lines = 50);
 std::vector<std::string> tail(int lines = 200);
 
 } // namespace logger
-} // namespace ecnuvpn
+} // namespace exv

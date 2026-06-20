@@ -10,7 +10,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace virtual_network {
 namespace {
 
@@ -100,4 +100,4 @@ void set_virtual_network_probe_provider_for_testing(
 } // namespace testing
 
 } // namespace virtual_network
-} // namespace ecnuvpn
+} // namespace exv

@@ -5,7 +5,7 @@
 #include <mutex>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 
 class ConfigManager {
@@ -25,4 +25,4 @@ private:
 };
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

@@ -11,7 +11,7 @@ namespace exv::platform {
 std::unique_ptr<PlatformNetworkOps> create_win32_platform_network_ops();
 
 std::unique_ptr<PlatformNetworkOps> create_win32_platform_network_ops(
-    ecnuvpn::platform::NativeWintunDependencies wintun_dependencies,
-    ecnuvpn::platform::NativeIpHelperApi ip_helper_api);
+    exv::platform::NativeWintunDependencies wintun_dependencies,
+    exv::platform::NativeIpHelperApi ip_helper_api);
 
 } // namespace exv::platform

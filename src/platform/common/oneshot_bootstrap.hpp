@@ -6,7 +6,7 @@
 
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 struct OneshotBootstrapRequest {
@@ -29,4 +29,4 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request);
 nlohmann::json oneshot_backend_to_json(const OneshotBackend &backend);
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

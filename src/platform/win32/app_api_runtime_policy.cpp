@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <sstream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 namespace {
 
@@ -88,4 +88,4 @@ nlohmann::json status_fallback_without_helper(const ConfigView & /*cfg*/) {
 }
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

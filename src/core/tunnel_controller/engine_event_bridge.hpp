@@ -18,15 +18,15 @@ namespace exv::core {
 // Thread-safety: emit() may be called from both the caller thread (auth/CSTP
 // events) and the packet-loop thread.  The callback must be safe to call from
 // either context.
-class EngineEventBridge final : public ecnuvpn::vpn_engine::EventSink {
+class EngineEventBridge final : public exv::vpn_engine::EventSink {
 public:
     using EventCallback = std::function<void(TunnelEvent)>;
 
     explicit EngineEventBridge(EventCallback callback);
     ~EngineEventBridge() override;
 
-    // ecnuvpn::vpn_engine::EventSink interface
-    void emit(const ecnuvpn::vpn_engine::VpnEngineEvent& event) override;
+    // exv::vpn_engine::EventSink interface
+    void emit(const exv::vpn_engine::VpnEngineEvent& event) override;
 
     // Visible for testing: maps an engine event type string to a TunnelEventType.
     // Returns true and sets *out on success; returns false if the event type

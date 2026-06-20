@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api from '../api/host'
+import { distributionConfig } from '../generated/distribution'
 
 export interface AuthConfig {
   server: string
@@ -117,7 +118,7 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   const authConfig = ref<AuthConfig>({
-    server: '',
+    server: distributionConfig.defaultVpnServer,
     username: '',
     password: '',
     password_stored: false,

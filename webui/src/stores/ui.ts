@@ -57,6 +57,9 @@ export const useUiStore = defineStore('ui', () => {
   })
   const showPasswordPrompt = ref(false)
   const passwordPromptMessage = ref('')
+  const passwordPromptDescription = ref('输入内容仅用于本次验证，不会写入设置。')
+  const passwordPromptSubmitLabel = ref('确认')
+  const passwordPromptCancelLabel = ref('取消')
   const passwordPromptResolver = ref<((value: string | null) => void) | null>(null)
   const showQuickStart = ref(false)
   const quickStartRequest = ref<QuickStartRequest | null>(null)
@@ -137,13 +140,20 @@ export const useUiStore = defineStore('ui', () => {
     void callback?.()
   }
 
-  function requestPassword(message: string) {
+  function requestPassword(message: string, options?: {
+    description?: string
+    submitLabel?: string
+    cancelLabel?: string
+  }) {
     passwordPromptResolver.value?.(null)
     const config = useConfigStore()
     if (config.settings.minimal_mode && window.exv?.modal) {
       return window.exv.modal.passwordPrompt(message)
     }
     passwordPromptMessage.value = message
+    passwordPromptDescription.value = options?.description || '输入内容仅用于本次验证，不会写入设置。'
+    passwordPromptSubmitLabel.value = options?.submitLabel || '确认'
+    passwordPromptCancelLabel.value = options?.cancelLabel || '取消'
     showPasswordPrompt.value = true
     return new Promise<string | null>((resolve) => {
       passwordPromptResolver.value = resolve
@@ -154,6 +164,9 @@ export const useUiStore = defineStore('ui', () => {
     const resolver = passwordPromptResolver.value
     showPasswordPrompt.value = false
     passwordPromptMessage.value = ''
+    passwordPromptDescription.value = '输入内容仅用于本次验证，不会写入设置。'
+    passwordPromptSubmitLabel.value = '确认'
+    passwordPromptCancelLabel.value = '取消'
     passwordPromptResolver.value = null
     resolver?.(password)
   }
@@ -162,6 +175,9 @@ export const useUiStore = defineStore('ui', () => {
     const resolver = passwordPromptResolver.value
     showPasswordPrompt.value = false
     passwordPromptMessage.value = ''
+    passwordPromptDescription.value = '输入内容仅用于本次验证，不会写入设置。'
+    passwordPromptSubmitLabel.value = '确认'
+    passwordPromptCancelLabel.value = '取消'
     passwordPromptResolver.value = null
     resolver?.(null)
   }
@@ -204,7 +220,8 @@ export const useUiStore = defineStore('ui', () => {
   return {
     toasts, showConfirm, confirmMessage, confirmCallback,
     errorModal,
-    showPasswordPrompt, passwordPromptMessage,
+    showPasswordPrompt, passwordPromptMessage, passwordPromptDescription,
+    passwordPromptSubmitLabel, passwordPromptCancelLabel,
     showQuickStart, quickStartRequest,
     showCredentialPrompt, credentialPrompt,
     addToast, removeToast,

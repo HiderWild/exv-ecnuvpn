@@ -11,7 +11,7 @@
 #include <thread>
 #include <utility>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 namespace protocol {
 
@@ -684,4 +684,4 @@ bool ProtocolSession::cached_cookie_within_session_timeout() const {
 
 } // namespace protocol
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

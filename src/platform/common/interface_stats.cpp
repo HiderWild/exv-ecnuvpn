@@ -5,7 +5,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace ecnuvpn::platform {
+namespace exv::platform {
 
 bool get_interface_traffic(const std::string &iface, std::uint64_t *rx_bytes,
                            std::uint64_t *tx_bytes) {
@@ -87,5 +87,5 @@ bool get_interface_traffic(const std::string &iface, std::uint64_t *rx_bytes,
 #endif
 }
 
-} // namespace ecnuvpn::platform
+} // namespace exv::platform
 

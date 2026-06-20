@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <iostream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 
 // ── Route management ────────────────────────────────────────────
@@ -52,4 +52,4 @@ void list_routes(const Config &cfg) {
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

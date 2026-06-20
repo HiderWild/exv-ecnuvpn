@@ -43,8 +43,8 @@ RpcResponse error_response(const std::string &code, const std::string &message) 
 }
 
 void prepare_log_runtime() {
-  ecnuvpn::platform::ensure_dir(ecnuvpn::platform::get_config_dir());
-  ecnuvpn::platform::logging::configure_default_logging(false);
+  exv::platform::ensure_dir(exv::platform::get_config_dir());
+  exv::platform::logging::configure_default_logging(false);
 }
 
 std::string log_safe_text(std::string value) {
@@ -118,7 +118,7 @@ std::size_t log_entry_wire_size(const json &entry) {
 json read_log_lines(const json &payload) {
   prepare_log_runtime();
 
-  const std::string log_path = ecnuvpn::runtime::paths().log_path;
+  const std::string log_path = exv::runtime::paths().log_path;
   const int max_lines = requested_log_limit(payload);
   const std::int64_t after_seq = requested_after_seq(payload);
   const std::string filter = payload.value("filter", std::string());
@@ -177,7 +177,7 @@ json read_log_lines(const json &payload) {
 json clear_log_file() {
   prepare_log_runtime();
 
-  const std::string log_path = ecnuvpn::runtime::paths().log_path;
+  const std::string log_path = exv::runtime::paths().log_path;
   std::ofstream out(log_path, std::ios::out | std::ios::trunc);
   if (!out.is_open()) {
     return {{"ok", false},

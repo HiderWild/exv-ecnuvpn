@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 namespace platform {
 
 enum class NativeDarwinRouteConfigError {
@@ -99,4 +99,4 @@ private:
 };
 
 } // namespace platform
-} // namespace ecnuvpn
+} // namespace exv

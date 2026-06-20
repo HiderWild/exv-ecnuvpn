@@ -5,7 +5,7 @@
 #include <filesystem>
 #include <mutex>
 
-namespace ecnuvpn {
+namespace exv {
 namespace vpn_engine {
 
 class EventSink {
@@ -25,4 +25,4 @@ private:
 };
 
 } // namespace vpn_engine
-} // namespace ecnuvpn
+} // namespace exv

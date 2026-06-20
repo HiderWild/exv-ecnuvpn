@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 
 struct TypedLogEvent {
   std::string level;       // "INFO", "WARN", "ERROR"
@@ -34,4 +34,4 @@ private:
   SubscriptionId next_id_ = 1;
 };
 
-} // namespace ecnuvpn
+} // namespace exv
