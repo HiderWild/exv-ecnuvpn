@@ -23,8 +23,6 @@ void print_core_help() {
 } // namespace
 
 int main(int argc, char *argv[]) {
-  runtime::bootstrap();
-
   std::vector<std::string> raw_args;
   for (int i = 0; i < argc; ++i) {
     raw_args.emplace_back(argv[i]);
@@ -50,6 +48,8 @@ int main(int argc, char *argv[]) {
     }
     return exv::core::core_process_main(config_dir, home_dir, use_stdin);
   }
+
+  runtime::bootstrap();
 
   if (raw_args.size() > 2 &&
       (raw_args[1] == "desktop-rpc" || raw_args[1] == "desktop-rpc-file" ||

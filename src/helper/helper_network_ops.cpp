@@ -25,6 +25,7 @@ platform::DnsConfig to_platform_dns(const DnsConfig &dns) {
   platform::DnsConfig converted;
   converted.servers = dns.servers;
   converted.search_domain = dns.search_domain;
+  converted.suffixes = dns.suffixes;
   return converted;
 }
 
@@ -115,12 +116,22 @@ public:
       const PrepareTunnelDeviceRequest &request,
       std::vector<ManagedResource> *created_resources) override {
     PrepareTunnelDeviceResponse response;
-    if (!platform_ops_)
+    if (!platform_ops_) {
+      response.error_code = "network_ops_unavailable";
+      response.error_message = "Platform network operations are not available";
       return response;
+    }
 
     auto descriptor = platform_ops_->prepare_tunnel_device(request.adapter_name);
-    if (!descriptor.is_open || descriptor.path.empty())
+    if (!descriptor.is_open || descriptor.path.empty()) {
+      response.error_code = descriptor.error_code.empty()
+                                ? "device_not_found"
+                                : descriptor.error_code;
+      response.error_message = descriptor.error_message.empty()
+                                   ? "Platform network operations did not return a device"
+                                   : descriptor.error_message;
       return response;
+    }
 
     response.device_path = descriptor.path;
     response.mtu = descriptor.mtu;
@@ -140,12 +151,14 @@ public:
       std::vector<ManagedResource> *created_resources) override {
     ApplyTunnelConfigResponse response;
     if (!platform_ops_) {
+      response.error_code = "network_ops_unavailable";
       response.error_message = "Platform network operations are not available";
       return response;
     }
 
     auto device_it = session_devices_.find(request.config.session_id.value);
     if (device_it == session_devices_.end() || !device_it->second.is_open) {
+      response.error_code = "device_not_prepared";
       response.error_message = "Tunnel device has not been prepared";
       return response;
     }
@@ -164,7 +177,15 @@ public:
     response.success =
         platform_ops_->apply_tunnel_config(device_it->second, config);
     if (!response.success) {
-      response.error_message = "Failed to apply platform tunnel config";
+      auto platform_error = platform_ops_->last_error();
+      response.error_code = platform_error.code.empty()
+                                ? "apply_config_failed"
+                                : platform_error.code;
+      response.error_message = platform_error.message.empty()
+                                   ? "Failed to apply platform tunnel config"
+                                   : platform_error.message;
+      response.error_target = platform_error.target;
+      response.system_error = platform_error.system_error;
       return response;
     }
 

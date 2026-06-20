@@ -9,6 +9,8 @@ namespace ecnuvpn {
 namespace platform {
 namespace {
 
+constexpr DWORD kHelperResponseTimeoutMs = 10000;
+
 std::string trim_copy(const std::string &value) {
   const auto first = value.find_first_not_of(" \t\r\n");
   if (first == std::string::npos)
@@ -74,8 +76,20 @@ nlohmann::json send_helper_request(const HelperEndpoint &endpoint,
 
   char buffer[1024];
   DWORD bytesRead = 0;
-  while (ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL) &&
-         bytesRead > 0) {
+  const ULONGLONG read_deadline = GetTickCount64() + kHelperResponseTimeoutMs;
+  while (GetTickCount64() < read_deadline) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(hPipe, NULL, 0, NULL, &available, NULL)) {
+      break;
+    }
+    if (available == 0) {
+      Sleep(10);
+      continue;
+    }
+    if (!ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL) ||
+        bytesRead == 0) {
+      break;
+    }
     raw.append(buffer, bytesRead);
     if (raw.find('\n') != std::string::npos)
       break;

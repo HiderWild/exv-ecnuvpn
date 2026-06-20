@@ -233,13 +233,19 @@ std::vector<AggregateAuthChoice> option_nodes(std::string_view select_body) {
 
     const std::string tag(select_body.substr(pos, tag_end - pos + 1));
     AggregateAuthChoice choice;
-    choice.value = attr_value(tag, "value");
+    const std::string explicit_value = attr_value(tag, "value");
     choice.label =
         xml_unescape(trim(select_body.substr(tag_end + 1, close_start - tag_end - 1)));
+    choice.value = explicit_value.empty() ? choice.label : explicit_value;
     if (choice.label.empty())
       choice.label = choice.value;
-    if (!choice.value.empty())
-      options.push_back(std::move(choice));
+    if (!choice.value.empty()) {
+      const std::string selected = lower_ascii(attr_value(tag, "selected"));
+      if (selected == "true" || selected == "selected")
+        options.insert(options.begin(), std::move(choice));
+      else
+        options.push_back(std::move(choice));
+    }
     pos = close_start + close.size();
   }
   return options;
@@ -328,12 +334,40 @@ AggregateAuthHostScan host_scan_metadata(std::string_view xml) {
   return metadata;
 }
 
-void append_input(std::ostringstream &out, const std::string &name,
-                  const std::string &value) {
+void append_text_node(std::ostringstream &out, int indent,
+                      const std::string &name, const std::string &value) {
   if (value.empty())
     return;
-  out << "      <input name=\"" << xml_escape(name) << "\">"
-      << xml_escape(value) << "</input>\n";
+  out << std::string(static_cast<std::size_t>(indent), ' ') << "<" << name
+      << ">" << xml_escape(value) << "</" << name << ">\n";
+}
+
+bool is_xml_name_start(unsigned char ch) {
+  return std::isalpha(ch) || ch == '_' || ch == ':';
+}
+
+bool is_xml_name_char(unsigned char ch) {
+  return is_xml_name_start(ch) || std::isdigit(ch) || ch == '-' || ch == '.';
+}
+
+bool is_safe_xml_name(std::string_view name) {
+  if (name.empty() || !is_xml_name_start(static_cast<unsigned char>(name.front())))
+    return false;
+  for (unsigned char ch : name) {
+    if (!is_xml_name_char(ch))
+      return false;
+  }
+  return true;
+}
+
+std::string auth_reply_field_name(std::string_view name) {
+  if (name.empty())
+    return "password";
+  if (name == "answer" || name == "whichpin" || name == "new_password")
+    return "password";
+  if (!is_safe_xml_name(name))
+    return "password";
+  return std::string(name);
 }
 
 } // namespace
@@ -341,15 +375,16 @@ void append_input(std::ostringstream &out, const std::string &name,
 std::string build_aggregate_auth_init_xml(
     const AggregateAuthInitRequest &request) {
   std::ostringstream out;
-  out << "<config-auth client=\"vpn\" type=\"init\">\n";
+  out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+  out << "<config-auth client=\"vpn\" type=\"init\" "
+         "aggregate-auth-version=\"2\">\n";
   out << "  <version who=\"vpn\">" << xml_escape(request.version)
       << "</version>\n";
   out << "  <device-id>" << xml_escape(request.device_id) << "</device-id>\n";
   out << "  <group-access>" << xml_escape(request.server_url)
       << "</group-access>\n";
   out << "  <capabilities>\n";
-  out << "    <capability>auth-method=password</capability>\n";
-  out << "    <capability>transport=cstp</capability>\n";
+  out << "    <auth-method>single-sign-on-v2</auth-method>\n";
   out << "  </capabilities>\n";
   out << "</config-auth>";
   return out.str();
@@ -358,17 +393,27 @@ std::string build_aggregate_auth_init_xml(
 std::string build_aggregate_auth_reply_xml(
     const AggregateAuthReplyRequest &request) {
   std::ostringstream out;
-  out << "<config-auth client=\"vpn\" type=\"auth-reply\">\n";
-  out << "  <auth id=\"main\">\n";
-  out << "    <form>\n";
-  append_input(out, "username", request.username);
-  append_input(out, "password", request.password);
-  append_input(out, "group_list", request.selected_group);
-  append_input(out, "secondary_password", request.challenge_value);
-  out << "    </form>\n";
-  out << "  </auth>\n";
+  out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+  out << "<config-auth client=\"vpn\" type=\"auth-reply\" "
+         "aggregate-auth-version=\"2\">\n";
+  out << "  <version who=\"vpn\">" << xml_escape(request.version)
+      << "</version>\n";
+  out << "  <device-id>" << xml_escape(request.device_id) << "</device-id>\n";
+  out << "  <capabilities>\n";
+  out << "    <auth-method>single-sign-on-v2</auth-method>\n";
+  out << "  </capabilities>\n";
   for (const std::string &opaque : request.opaque_xml)
     out << "  " << opaque << "\n";
+  out << "  <auth>\n";
+  append_text_node(out, 4, "username", request.username);
+  append_text_node(out, 4, "password", request.password);
+  if (!request.challenge_value.empty()) {
+    append_text_node(out, 4,
+                     auth_reply_field_name(request.challenge_field_name),
+                     request.challenge_value);
+  }
+  out << "  </auth>\n";
+  append_text_node(out, 2, "group-select", request.selected_group);
   out << "</config-auth>";
   return out.str();
 }
@@ -412,8 +457,7 @@ ValidationResult parse_aggregate_auth_response(const std::string &xml,
   parsed.session_id = node_text(trimmed, "session-id");
   parsed.host_scan = host_scan_metadata(trimmed);
 
-  if (!parsed.session_token.empty() || !parsed.session_id.empty() ||
-      parsed.auth_id == "success" || root_type == "complete") {
+  if (!parsed.session_token.empty() || !parsed.session_id.empty()) {
     parsed.type = AggregateAuthResponseType::success;
   } else if (contains_ci(trimmed, "<host-scan")) {
     parsed.type = AggregateAuthResponseType::host_scan;
@@ -429,6 +473,8 @@ ValidationResult parse_aggregate_auth_response(const std::string &xml,
              !has_field(parsed.fields, "username") &&
              !has_field(parsed.fields, "password")) {
     parsed.type = AggregateAuthResponseType::group_select;
+  } else if (parsed.auth_id == "success" || root_type == "complete") {
+    parsed.type = AggregateAuthResponseType::success;
   } else {
     parsed.type = AggregateAuthResponseType::auth_request;
   }

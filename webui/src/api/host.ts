@@ -3,6 +3,7 @@ import {
 } from '../../host/shared/host-contract'
 
 type ApiResponse<T> = Promise<{ data: T }>
+type ApiGetOptions = { params?: any }
 
 function hostAvailable() {
   return typeof window !== 'undefined' && !!window.ecnuVpn
@@ -28,7 +29,7 @@ function plainPayload<T>(value: T): T {
 }
 
 const hostApi = {
-  get<T = unknown>(path: string): ApiResponse<T> {
+  get<T = unknown>(path: string, options?: ApiGetOptions): ApiResponse<T> {
     requireHost()
 
     switch (path) {
@@ -52,7 +53,7 @@ const hostApi = {
       case desktopApiPaths.drivers:
         return wrap(window.ecnuVpn!.drivers.status()) as ApiResponse<T>
       case desktopApiPaths.logs:
-        return wrap(window.ecnuVpn!.logs.list()) as ApiResponse<T>
+        return wrap(window.ecnuVpn!.logs.list(plainPayload(options?.params ?? {}))) as ApiResponse<T>
       case desktopApiPaths.maintenanceCore:
         return wrap(window.ecnuVpn!.maintenance.inspectCore()) as ApiResponse<T>
       case desktopApiPaths.authInteraction:

@@ -84,6 +84,16 @@ void add_route_once(std::vector<exv::platform::RouteEntry>* routes,
         routes->push_back(route);
     }
 
+std::string join_route_destinations(
+        const std::vector<exv::platform::RouteEntry>& routes) {
+        std::ostringstream out;
+        for (std::size_t i = 0; i < routes.size(); ++i) {
+            if (i > 0) out << ',';
+            out << routes[i].destination;
+        }
+        return out.str();
+    }
+
 } // namespace
 
 // ================================================================
@@ -130,9 +140,17 @@ bool TunnelController::Impl::prepare_tunnel_device_for_session(
             *device = net_ops_->prepare_tunnel_device(adapter_name_);
             if (device->path.empty() || !device->is_open) {
                 timing_.timer.end(ConnectTiming::PACKET_DEVICE);
-                auto err = CoreErrorMapper::from_platform_error(
-                    "packet", -1, "prepare_tunnel_device");
-                err.message = "Tunnel device returned empty path";
+                auto err = device->error_code.empty()
+                    ? CoreErrorMapper::from_platform_error(
+                          "packet", -1, "prepare_tunnel_device")
+                    : CoreErrorMapper::from_native_error(
+                          device->error_code, device->error_message);
+                if (device->error_code.empty())
+                    err.message = "Tunnel device returned empty path";
+                log_tunnel_event("ERROR", "tunnel.device.prepare_failed",
+                                 "Tunnel device preparation failed",
+                                 {{"code", err.code},
+                                  {"message", err.message}});
                 set_error(err);
                 transition_to(TunnelPhase::Failed);
                 return false;
@@ -184,10 +202,43 @@ bool TunnelController::Impl::apply_tunnel_config_for_session(
                     config.exclude_route = config.exclude_routes.front();
             }
 
+            log_tunnel_event("INFO", "network.config.details",
+                             "Prepared network config",
+                             {{"interface", device.adapter_name},
+                              {"interface_address", config.interface_address},
+                              {"route_count",
+                               std::to_string(config.routes.size())},
+                              {"routes", join_route_destinations(config.routes)},
+                              {"server_bypass_count",
+                               std::to_string(config.server_bypass_ips.size())},
+                              {"dns_count",
+                               std::to_string(config.dns.servers.size())}});
+
             if (!net_ops_->apply_tunnel_config(device, config)) {
                 timing_.timer.end(ConnectTiming::NETWORK_CONFIG);
-                set_error(CoreErrorMapper::from_helper_error(
-                    "apply_config_failed", "Failed to apply tunnel config"));
+                auto platform_error = net_ops_->last_error();
+                if (!platform_error.code.empty()) {
+                    std::string message = platform_error.message.empty()
+                        ? "Failed to apply tunnel config"
+                        : platform_error.message;
+                    if (!platform_error.target.empty()) {
+                        message += " target=" + platform_error.target;
+                    }
+                    if (platform_error.system_error != 0) {
+                        message += " system_error=" +
+                                   std::to_string(platform_error.system_error);
+                    }
+                    auto err = CoreErrorMapper::from_native_error(
+                        platform_error.code, message);
+                    if (platform_error.system_error != 0) {
+                        err.native_code =
+                            static_cast<int>(platform_error.system_error);
+                    }
+                    set_error(err);
+                } else {
+                    set_error(CoreErrorMapper::from_helper_error(
+                        "apply_config_failed", "Failed to apply tunnel config"));
+                }
                 transition_to(TunnelPhase::Failed);
                 return false;
             }
@@ -252,11 +303,18 @@ ecnuvpn::vpn_engine::ValidationResult
 TunnelController::Impl::configure_network_for_engine(
         const ecnuvpn::vpn_engine::TunnelMetadata& metadata,
         ecnuvpn::vpn_engine::DeviceConfig* device_config) {
+        const bool was_connected = phase_ == TunnelPhase::Connected;
         exv::platform::TunnelDeviceDescriptor device;
-        if (!prepare_tunnel_device_for_session(&device)) {
-            return current_network_failure(
-                "prepare_tunnel_device_failed",
-                "Failed to prepare tunnel device");
+        if (prepared_tunnel_device_.has_value() &&
+            prepared_tunnel_device_->is_open) {
+            device = *prepared_tunnel_device_;
+        } else {
+            if (!prepare_tunnel_device_for_session(&device)) {
+                return current_network_failure(
+                    "prepare_tunnel_device_failed",
+                    "Failed to prepare tunnel device");
+            }
+            prepared_tunnel_device_ = device;
         }
 
         if (!apply_tunnel_config_for_session(
@@ -273,7 +331,13 @@ TunnelController::Impl::configure_network_for_engine(
             device_config->mtu = device.mtu > 0 ? device.mtu : metadata.mtu;
         }
 
-        transition_to(TunnelPhase::OpeningPacketDevice);
+        if (was_connected) {
+            transition_to(TunnelPhase::Connected);
+        } else if (packet_loop_started_) {
+            complete_packet_loop_started();
+        } else {
+            transition_to(TunnelPhase::OpeningPacketDevice);
+        }
         return {};
     }
 
@@ -287,6 +351,8 @@ void TunnelController::Impl::do_connect() {
         clear_error();
         helper_status_override_.clear();
         network_config_applied_ = false;
+        packet_loop_started_ = false;
+        prepared_tunnel_device_.reset();
         timing_.timer.reset();
         reconnect_attempts_ = 0;
 
@@ -392,18 +458,21 @@ void TunnelController::Impl::do_connect() {
                 ok = runner_.start(vpn_cfg_, vpn_password_);
             }
             if (!ok) {
-                log_tunnel_event("ERROR", "native.runner.failed",
-                                 "Native engine session failed to start");
                 timing_.timer.end(ConnectTiming::AUTH);
+                auto failure = current_native_failure(
+                    "native_start_failed",
+                    "Native engine session failed to start");
+                log_tunnel_event("ERROR", "native.runner.failed",
+                                 "Native engine session failed to start",
+                                 {{"code", failure.code},
+                                  {"message", failure.message}});
 
                 const bool should_replace_error =
                     !snapshot_.last_error ||
                     snapshot_.last_error->code == "auth_failed" ||
                     snapshot_.last_error->code == "packet_device_failed";
                 if (should_replace_error) {
-                    set_error(current_native_failure(
-                        "native_start_failed",
-                        "Native engine session failed to start"));
+                    set_error(failure);
                 }
 
                 if (!session_id_.value.empty() || network_config_applied_) {

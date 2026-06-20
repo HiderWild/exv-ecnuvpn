@@ -149,7 +149,7 @@ nlohmann::json driver_status_json(const ConfigView &cfg) {
   std::vector<std::string> wintun_adapters = adapters.wintun_adapters;
   std::vector<std::string> tap_adapters = adapters.tap_adapters;
   bool wintun_bundled = !wintun_path.empty();
-  bool wintun_available = wintun_bundled || !wintun_adapters.empty();
+  bool wintun_available = wintun_bundled;
   bool tap_available = !tap_adapters.empty();
   std::string effective =
       effective_windows_driver(cfg, tap_adapters, wintun_available);
@@ -160,15 +160,18 @@ nlohmann::json driver_status_json(const ConfigView &cfg) {
   json["wintun_bundled"] = wintun_bundled;
   json["wintun_path"] = wintun_path;
   json["wintun_adapters"] = wintun_adapters;
+  json["wintun_adapter_present"] = !wintun_adapters.empty();
   json["wintun_missing"] = !wintun_available;
   json["wintun_missing_reason"] =
       wintun_available
           ? ""
-          : "No bundled wintun.dll or existing Wintun adapter was detected.";
+          : (!wintun_adapters.empty()
+                 ? "Existing Wintun adapters were detected, but the packaged wintun.dll runtime is missing."
+                 : "No packaged wintun.dll runtime was detected.");
   json["wintun_recommended_action"] =
       wintun_available
           ? ""
-          : "Stage wintun.dll in the runtime directory or install a Wintun adapter.";
+          : "Stage wintun.dll in the packaged runtime directory.";
   json["tap_installer_path"] = tap_installer_path;
   json["tap_can_install"] = !tap_installer_path.empty();
   json["tap_adapters"] = tap_adapters;

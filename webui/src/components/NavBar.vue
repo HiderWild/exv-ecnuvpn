@@ -10,7 +10,7 @@ import { useVpnStore } from '../stores/vpn'
 const router = useRouter()
 const route = useRoute()
 const vpn = useVpnStore()
-const showSidebarStatusDetails = computed(() => Boolean(vpn.status?.connected))
+const showSidebarStatusDetails = computed(() => Boolean(vpn.status))
 
 const navItems = [
   { path: '/', name: '主面板', icon: LayoutDashboard },

@@ -274,13 +274,22 @@ ErrorInfo CoreErrorMapper::from_native_error(const std::string& code, const std:
         return native_error("transport", normalized_code, message, true,
                             "Continue on CSTP/TLS or disable DTLS for this profile");
     }
+    if (normalized_code == "native_wintun_wintun_missing" ||
+        normalized_code == "wintun_missing") {
+        ErrorInfo info = native_error("packet", "wintun_missing", message, true,
+                                      "Install or bundle the Wintun driver runtime");
+        info.native_api = "wintun";
+        return info;
+    }
     if (is_transport_native_code(normalized_code)) {
         return native_error("transport", normalized_code, message,
                             is_recoverable_native_code(normalized_code),
                             native_recommended_action(normalized_code));
     }
     if (normalized_code.rfind("packet", 0) == 0 ||
-        normalized_code.rfind("native_packet", 0) == 0) {
+        normalized_code.rfind("native_packet", 0) == 0 ||
+        normalized_code.rfind("native_wintun_", 0) == 0 ||
+        normalized_code.rfind("native_ip_config_", 0) == 0) {
         ErrorInfo info = native_error("packet", normalized_code, message, false,
                                       native_recommended_action(normalized_code));
         info.native_api = "packet_device";

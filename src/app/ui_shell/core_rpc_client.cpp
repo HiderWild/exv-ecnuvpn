@@ -152,7 +152,10 @@ void CoreRpcClient::set_event_handler(CoreRpcEventHandler handler) {
 }
 
 void CoreRpcClient::pump_events() {
-  std::lock_guard<std::mutex> read_lock(read_mutex_);
+  std::unique_lock<std::mutex> read_lock(read_mutex_, std::try_to_lock);
+  if (!read_lock.owns_lock()) {
+    return;
+  }
   for (;;) {
     std::string line;
     if (!transport_.read_available_line(line)) {
@@ -193,6 +196,8 @@ void CoreRpcClient::shutdown() {
   response.code = "transport_closed";
   response.message = "Core RPC transport is closed";
   resolve_all_pending(response);
+
+  transport_.close();
 
   if (reader_thread_.joinable()) {
     reader_thread_.join();

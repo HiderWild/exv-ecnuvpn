@@ -66,6 +66,40 @@ bool VpnConnectJobOwner::request_cancel(std::string reason) {
   return true;
 }
 
+void VpnConnectJobOwner::shutdown(std::string reason) {
+  std::jthread thread_to_join;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_run_.reset();
+    intent_.desired = DesiredVpnIntent::Disconnect;
+    intent_.epoch += 1;
+    state_.accepted = true;
+    state_.desired_connected = false;
+    state_.intent_epoch = intent_.epoch;
+    state_.cancelling = state_.active;
+    state_.user_cancelled = reason == "user_cancelled_connect";
+    state_.last_error_code.clear();
+    state_.last_error_message.clear();
+    if (active_thread_.joinable()) {
+      active_thread_.request_stop();
+      thread_to_join = std::move(active_thread_);
+    }
+  }
+
+  if (thread_to_join.joinable()) {
+    thread_to_join.join();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_run_.reset();
+    state_.active = false;
+    state_.phase = "idle";
+    state_.cancelling = false;
+    state_.desired_connected = false;
+  }
+}
+
 void VpnConnectJobOwner::reconcile_after_idle() {
   RunFn run;
   {

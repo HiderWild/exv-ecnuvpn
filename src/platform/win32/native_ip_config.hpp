@@ -41,6 +41,10 @@ struct NativeUnicastAddress {
   std::uint32_t interface_index = 0;
   std::string address;
   int prefix_length = 32;
+  std::uint32_t valid_lifetime = 0xFFFFFFFFu;
+  std::uint32_t preferred_lifetime = 0xFFFFFFFFu;
+  bool skip_as_source = false;
+  bool dad_state_preferred = true;
 };
 
 struct NativeBestRoute {
@@ -86,6 +90,7 @@ NativeIpHelperApi default_native_ip_helper_api();
 struct NativeIpConfigOptions {
   std::uint32_t interface_index = 0;
   int configured_mtu = 1290;
+  bool configure_address = true;
 };
 
 class NativeIpConfig {

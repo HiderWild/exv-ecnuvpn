@@ -51,7 +51,7 @@ helper::DnsConfig to_helper_dns(const platform::DnsConfig& d) {
     helper::DnsConfig hd;
     hd.servers = d.servers;
     hd.search_domain = d.search_domain;
-    // helper protocol does not carry suffixes; drop them
+    hd.suffixes = d.suffixes;
     return hd;
 }
 
@@ -129,6 +129,8 @@ TunnelDeviceDescriptor HelperDelegatingPlatformNetworkOps::prepare_tunnel_device
     desc.adapter_name = adapter_name;
     desc.mtu = resp.mtu > 0 ? resp.mtu : mtu;
     desc.is_open = !resp.device_path.empty();
+    desc.error_code = resp.error_code;
+    desc.error_message = resp.error_message;
     // fd and handle remain at their defaults (-1 / nullptr) because the
     // actual file descriptor / HANDLE acquisition is a data-plane concern
     // handled separately (e.g. via OpenTunnelDevice on the helper or a
@@ -158,7 +160,12 @@ TunnelDeviceDescriptor HelperDelegatingPlatformNetworkOps::open_tunnel_device(
 bool HelperDelegatingPlatformNetworkOps::apply_tunnel_config(
     const TunnelDeviceDescriptor& /*device*/, const TunnelConfig& config)
 {
-    if (!helper_) return false;
+    last_error_ = {};
+    if (!helper_) {
+        last_error_.code = "helper_missing";
+        last_error_.message = "No helper client";
+        return false;
+    }
 
     helper::ApplyTunnelConfigRequest req;
     req.config.session_id = session_id_;
@@ -172,7 +179,21 @@ bool HelperDelegatingPlatformNetworkOps::apply_tunnel_config(
     req.config.dns = to_helper_dns(config.dns);
 
     auto resp = helper_->apply_tunnel_config(req);
-    return resp.success;
+    if (!resp.success) {
+        last_error_.code =
+            resp.error_code.empty() ? "apply_config_failed" : resp.error_code;
+        last_error_.message = resp.error_message.empty()
+                                  ? "Failed to apply tunnel config"
+                                  : resp.error_message;
+        last_error_.target = resp.error_target;
+        last_error_.system_error = resp.system_error;
+        return false;
+    }
+    return true;
+}
+
+PlatformNetworkError HelperDelegatingPlatformNetworkOps::last_error() const {
+    return last_error_;
 }
 
 CleanupResult HelperDelegatingPlatformNetworkOps::cleanup(

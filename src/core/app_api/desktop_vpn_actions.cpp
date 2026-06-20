@@ -1,5 +1,6 @@
 #include "core/app_api/desktop_vpn_actions.hpp"
 
+#include "core/app_api/auth_interaction_coordinator.hpp"
 #include "core/app_api/desktop_json.hpp"
 #include "core/app_api/desktop_runtime_context.hpp"
 #include "core/app_api/desktop_status_presenter.hpp"
@@ -67,10 +68,10 @@ namespace {
 
 using StageTimer = exv::core::ConnectStageTimer;
 
-std::mutex g_desktop_connect_jobs_mutex;
-exv::core::VpnConnectJobOwner g_desktop_connect_jobs;
 std::mutex g_desktop_connect_error_mutex;
 std::optional<nlohmann::json> g_desktop_connect_error;
+std::mutex g_desktop_connect_jobs_mutex;
+exv::core::VpnConnectJobOwner g_desktop_connect_jobs;
 
 config::ConfigManager make_config_manager() {
   platform::ensure_dir(platform::get_config_dir());
@@ -252,7 +253,8 @@ void apply_desktop_connect_error(nlohmann::json *status) {
   if (!failure || !failure->is_object()) return;
   (*status)["error"] = json_string(*failure, "error",
                                    json_string(*failure, "message"));
-  (*status)["error_code"] = json_string(*failure, "code");
+  (*status)["error_code"] =
+      json_string(*failure, "code", json_string(*failure, "error_code"));
   (*status)["error_recoverable"] = json_bool(*failure, "recoverable", true);
   (*status)["recommended_action"] =
       json_string(*failure, "recommended_action");
@@ -469,6 +471,41 @@ void run_desktop_connect_job(Config cfg,
     // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §5.
     exv::core::EngineEventBridge protocol_event_logger(nullptr);
     deps.event_sink = &protocol_event_logger;
+
+    // Auth-interaction coordinator for the prepared-handshake window. The
+    // gateway can demand group_select or challenge before any TunnelController
+    // is initialized; without a handler the production_transport layer fails
+    // immediately with auth_group_required / auth_challenge_required and the
+    // user has no way to continue. Publish a coordinator into the connect-job
+    // global slot so vpn.authInteraction.get / vpn.authInteraction.respond
+    // can drive the prompt to completion before the runner adopts. See
+    // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
+    auto auth_coordinator =
+        std::make_shared<ecnuvpn::app_api::AuthInteractionCoordinator>();
+    ecnuvpn::app_api::set_active_connect_auth_coordinator(auth_coordinator);
+    struct AuthCoordinatorClearGuard {
+      explicit AuthCoordinatorClearGuard(
+          std::shared_ptr<ecnuvpn::app_api::AuthInteractionCoordinator>
+              coordinator_value)
+          : coordinator(std::move(coordinator_value)) {}
+
+      ~AuthCoordinatorClearGuard() {
+        if (coordinator) {
+          coordinator->cancel();
+          ecnuvpn::app_api::clear_active_connect_auth_coordinator_if_current(
+              coordinator);
+        }
+      }
+
+      std::shared_ptr<ecnuvpn::app_api::AuthInteractionCoordinator>
+          coordinator;
+    } auth_coordinator_clear_guard(auth_coordinator);
+    deps.auth_interaction_handler =
+        [auth_coordinator, branch_stop](
+            const ecnuvpn::vpn_engine::protocol::AuthInteractionRequest &req) {
+          return auth_coordinator->handle(req, branch_stop);
+        };
+
     ecnuvpn::vpn_engine::NativeHandshakeResult handshake;
     ecnuvpn::vpn_engine::NativeHandshakeJob job(engine_config, deps);
     branch_timing.mark("native_handshake_started");
@@ -643,6 +680,39 @@ nlohmann::json auth_interaction_json(
 
 } // namespace
 
+void shutdown_desktop_vpn_runtime() {
+  exv::observability::LogFacade::info(
+      "app_api: Shutting down desktop VPN runtime");
+  {
+    std::lock_guard<std::mutex> lock(g_desktop_connect_jobs_mutex);
+    g_desktop_connect_jobs.shutdown("core_shutdown");
+  }
+
+  if (auto coordinator = get_active_connect_auth_coordinator(); coordinator) {
+    coordinator->cancel();
+    clear_active_connect_auth_coordinator_if_current(coordinator);
+  }
+
+  if (auto controller = get_tunnel_controller_if_exists(); controller) {
+    exv::observability::LogFacade::info(
+        "app_api: Disconnecting desktop VPN controller during shutdown");
+    try {
+      controller->disconnect(exv::core::DisconnectReason::UserRequested);
+    } catch (const std::exception &e) {
+      exv::observability::LogFacade::warn(
+          std::string("app_api: desktop VPN disconnect during shutdown failed - ") +
+          e.what());
+    }
+  } else {
+    exv::observability::LogFacade::info(
+        "app_api: No desktop VPN controller during shutdown");
+  }
+  exv::observability::LogFacade::info(
+      "app_api: Resetting desktop VPN controller during shutdown");
+  reset_tunnel_controller();
+  clear_desktop_connect_error();
+}
+
 void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
   adapter.register_legacy_handler(
       "status.get", [](const nlohmann::json &payload) -> nlohmann::json {
@@ -797,6 +867,26 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
       "vpn.authInteraction.get",
       [](const nlohmann::json &payload) -> nlohmann::json {
         apply_desktop_runtime_context(payload);
+        // Connect-job-scoped coordinator wins over the runner: a
+        // prepared-handshake prompt is published before any TunnelController
+        // exists, so the controller path would always say "no pending"
+        // during that window. See
+        // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
+        if (auto coordinator =
+                ecnuvpn::app_api::get_active_connect_auth_coordinator();
+            coordinator) {
+          if (auto pending = coordinator->pending(); pending) {
+            return nlohmann::json{
+                {"ok", true},
+                {"pending", true},
+                {"interaction",
+                 nlohmann::json{{"id", pending->id},
+                                {"kind", pending->kind},
+                                {"label", pending->label},
+                                {"input_type", pending->input_type},
+                                {"options", pending->options}}}};
+          }
+        }
         auto controller = get_tunnel_controller_if_exists();
         if (!controller) {
           return nlohmann::json{{"ok", true}, {"pending", false}};
@@ -814,12 +904,22 @@ void register_desktop_vpn_actions(exv::core_api::DesktopRpcAdapter &adapter) {
       "vpn.authInteraction.respond",
       [](const nlohmann::json &payload) -> nlohmann::json {
         apply_desktop_runtime_context(payload);
+        const std::string id = payload.value("id", std::string());
+        const std::string value = payload.value("value", std::string());
+        // Try the connect-job-scoped coordinator first: prepared-handshake
+        // prompts are not visible to the controller. See
+        // docs/AGGREGATE_AUTH_EMPTY_RESPONSE_FIX_PLAN.md §6.
+        if (auto coordinator =
+                ecnuvpn::app_api::get_active_connect_auth_coordinator();
+            coordinator) {
+          if (coordinator->respond(id, value)) {
+            return nlohmann::json{{"ok", true}};
+          }
+        }
         auto controller = get_tunnel_controller_if_exists();
         if (!controller) {
           return error("No active VPN controller.", "invalid_request");
         }
-        const std::string id = payload.value("id", std::string());
-        const std::string value = payload.value("value", std::string());
         if (id.empty()) {
           return error("Missing auth interaction id.", "invalid_request");
         }

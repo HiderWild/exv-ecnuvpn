@@ -22,13 +22,16 @@ RouteEntry json_to_route_entry(const nlohmann::json& j) {
 }
 
 nlohmann::json dns_config_to_json(const DnsConfig& d) {
-    return {{"servers", d.servers}, {"search_domain", d.search_domain}};
+    return {{"servers", d.servers},
+            {"search_domain", d.search_domain},
+            {"suffixes", d.suffixes}};
 }
 
 DnsConfig json_to_dns_config(const nlohmann::json& j) {
     DnsConfig d;
     if (j.contains("servers")) d.servers = j["servers"].get<std::vector<std::string>>();
     d.search_domain = j.value("search_domain", "");
+    if (j.contains("suffixes")) d.suffixes = j["suffixes"].get<std::vector<std::string>>();
     return d;
 }
 

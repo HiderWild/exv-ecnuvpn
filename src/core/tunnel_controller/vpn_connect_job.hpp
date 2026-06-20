@@ -40,6 +40,7 @@ public:
   VpnConnectJobState submit_disconnect(std::string reason);
   VpnConnectJobState snapshot() const;
   bool request_cancel(std::string reason);
+  void shutdown(std::string reason);
   void reconcile_after_idle();
 
 private:

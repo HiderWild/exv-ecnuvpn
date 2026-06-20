@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <sys/types.h>
 #include <signal.h>
@@ -70,15 +71,32 @@ bool platform_is_pid_alive(int pid) {
 bool platform_launch_core(const std::string &core_path,
                           const std::string &state_dir,
                           const std::string &home_dir) {
-  std::string cmd = ecnuvpn::platform::shell_quote(core_path) +
-                    " --mode=core --daemon";
+  std::string args = "--mode=core --daemon";
   if (!state_dir.empty()) {
-    cmd += " --config-dir " + ecnuvpn::platform::shell_quote(state_dir);
+    args += " --config-dir " + ecnuvpn::platform::shell_quote(state_dir);
   }
   if (!home_dir.empty()) {
-    cmd += " --home " + ecnuvpn::platform::shell_quote(home_dir);
+    args += " --home " + ecnuvpn::platform::shell_quote(home_dir);
   }
 #ifdef _WIN32
+  if (!ecnuvpn::platform::check_root()) {
+    SHELLEXECUTEINFOA sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = "runas";
+    sei.lpFile = core_path.c_str();
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExA(&sei)) {
+      return false;
+    }
+    if (sei.hProcess) {
+      CloseHandle(sei.hProcess);
+    }
+    return true;
+  }
+
+  std::string cmd = ecnuvpn::platform::shell_quote(core_path) + " " + args;
   cmd += " 2>nul";
   STARTUPINFOA si = {};
   si.cb = sizeof(si);
@@ -94,6 +112,7 @@ bool platform_launch_core(const std::string &core_path,
   CloseHandle(pi.hThread);
   return true;
 #else
+  std::string cmd = ecnuvpn::platform::shell_quote(core_path) + " " + args;
   cmd += " 2>/dev/null &";
   return std::system(cmd.c_str()) == 0;
 #endif

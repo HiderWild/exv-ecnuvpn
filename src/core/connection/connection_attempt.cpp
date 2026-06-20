@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #ifdef _WIN32
@@ -536,23 +537,52 @@ bool update_pids_if_current(const std::string &config_dir,
   return true;
 }
 
-bool mark_terminal_if_current(const std::string &config_dir,
-                              const std::string &attempt_id,
-                              const std::string &reason) {
+namespace {
+
+enum class TerminalMarkStatus { marked, not_current, retryable_failure };
+
+TerminalMarkStatus mark_terminal_if_current_once(const std::string &config_dir,
+                                                 const std::string &attempt_id,
+                                                 const std::string &reason) {
   AttemptMutex mutex = AttemptMutex::acquire(config_dir);
   if (!mutex.acquired())
-    return false;
+    return TerminalMarkStatus::retryable_failure;
 
   AttemptRecord record;
-  if (!read_record(config_dir, &record) || record.attempt_id != attempt_id)
-    return false;
+  if (!read_record(config_dir, &record))
+    return TerminalMarkStatus::retryable_failure;
+  if (record.attempt_id != attempt_id)
+    return TerminalMarkStatus::not_current;
 
   record.state = "terminal";
   record.terminal_reason = reason;
   const bool wrote = write_record(config_dir, record);
+  if (!wrote)
+    return TerminalMarkStatus::retryable_failure;
 
   remove_owned_lock(config_dir, attempt_id);
-  return wrote;
+  return TerminalMarkStatus::marked;
+}
+
+} // namespace
+
+bool mark_terminal_if_current(const std::string &config_dir,
+                              const std::string &attempt_id,
+                              const std::string &reason) {
+  constexpr int kMaxTerminalMarkAttempts = 24;
+  constexpr auto kRetryDelay = std::chrono::milliseconds(25);
+
+  for (int attempt = 0; attempt < kMaxTerminalMarkAttempts; ++attempt) {
+    const TerminalMarkStatus status =
+        mark_terminal_if_current_once(config_dir, attempt_id, reason);
+    if (status == TerminalMarkStatus::marked)
+      return true;
+    if (status == TerminalMarkStatus::not_current)
+      return false;
+    if (attempt + 1 < kMaxTerminalMarkAttempts)
+      std::this_thread::sleep_for(kRetryDelay);
+  }
+  return false;
 }
 
 bool mark_terminal(const std::string &config_dir, const std::string &reason) {

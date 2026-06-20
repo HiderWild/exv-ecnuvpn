@@ -187,13 +187,18 @@ PrepareTunnelDeviceRequest prepare_tunnel_device_request_from_json(const json& j
 }
 
 void to_json(json& j, const PrepareTunnelDeviceResponse& resp) {
-    j = json{{"device_path", resp.device_path}, {"mtu", resp.mtu}};
+    j = json{{"device_path", resp.device_path},
+             {"mtu", resp.mtu},
+             {"error_code", resp.error_code},
+             {"error_message", resp.error_message}};
 }
 
 PrepareTunnelDeviceResponse prepare_tunnel_device_response_from_json(const json& j) {
     PrepareTunnelDeviceResponse resp;
     resp.device_path = j.value("device_path", "");
     resp.mtu = j.value("mtu", 1400);
+    resp.error_code = j.value("error_code", "");
+    resp.error_message = j.value("error_message", "");
     return resp;
 }
 
@@ -216,13 +221,16 @@ RouteEntry route_entry_from_json(const json& j) {
 // ---- DnsConfig ----
 
 void to_json(json& j, const DnsConfig& d) {
-    j = json{{"servers", d.servers}, {"search_domain", d.search_domain}};
+    j = json{{"servers", d.servers},
+             {"search_domain", d.search_domain},
+             {"suffixes", d.suffixes}};
 }
 
 DnsConfig dns_config_from_json(const json& j) {
     DnsConfig d;
     if (j.contains("servers")) d.servers = j["servers"].get<std::vector<std::string>>();
     d.search_domain = j.value("search_domain", "");
+    if (j.contains("suffixes")) d.suffixes = j["suffixes"].get<std::vector<std::string>>();
     return d;
 }
 
@@ -267,13 +275,20 @@ ApplyTunnelConfigRequest apply_tunnel_config_request_from_json(const json& j) {
 }
 
 void to_json(json& j, const ApplyTunnelConfigResponse& resp) {
-    j = json{{"success", resp.success}, {"error_message", resp.error_message}};
+    j = json{{"success", resp.success},
+             {"error_code", resp.error_code},
+             {"error_message", resp.error_message},
+             {"error_target", resp.error_target},
+             {"system_error", resp.system_error}};
 }
 
 ApplyTunnelConfigResponse apply_tunnel_config_response_from_json(const json& j) {
     ApplyTunnelConfigResponse resp;
     resp.success = j.value("success", false);
+    resp.error_code = j.value("error_code", "");
     resp.error_message = j.value("error_message", "");
+    resp.error_target = j.value("error_target", "");
+    resp.system_error = j.value("system_error", 0U);
     return resp;
 }
 

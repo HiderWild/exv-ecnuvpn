@@ -179,6 +179,25 @@ ValidationResult parse_optional_int_header(const HttpResponse &response,
   return ValidationResult{};
 }
 
+ValidationResult parse_optional_timeout_header(const HttpResponse &response,
+                                               const char *header_name,
+                                               int *out) {
+  if (!out)
+    return invalid("cstp_null_out", "output pointer is null");
+  const std::string value = header_string(response, header_name);
+  if (value.empty())
+    return ValidationResult{};
+
+  std::uint32_t parsed = 0;
+  ValidationResult result = parse_u32_decimal(value, &parsed);
+  if (!result.ok ||
+      parsed > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+    return ValidationResult{};
+  }
+  *out = static_cast<int>(parsed);
+  return ValidationResult{};
+}
+
 std::string lower_ascii(std::string_view value) {
   std::string out;
   out.reserve(value.size());
@@ -457,27 +476,27 @@ ValidationResult parse_cstp_headers(const HttpResponse &response,
       return v;
   }
   {
-    ValidationResult v = parse_optional_int_header(
+    ValidationResult v = parse_optional_timeout_header(
         response, "X-CSTP-Lease-Duration",
         &metadata->lease_duration_seconds);
     if (!v.ok)
       return v;
   }
   {
-    ValidationResult v = parse_optional_int_header(
+    ValidationResult v = parse_optional_timeout_header(
         response, "X-CSTP-Idle-Timeout", &metadata->idle_timeout_seconds);
     if (!v.ok)
       return v;
   }
   {
-    ValidationResult v = parse_optional_int_header(
+    ValidationResult v = parse_optional_timeout_header(
         response, "X-CSTP-Session-Timeout",
         &metadata->session_timeout_seconds);
     if (!v.ok)
       return v;
   }
   {
-    ValidationResult v = parse_optional_int_header(
+    ValidationResult v = parse_optional_timeout_header(
         response, "X-CSTP-Disconnected-Timeout",
         &metadata->disconnected_timeout_seconds);
     if (!v.ok)

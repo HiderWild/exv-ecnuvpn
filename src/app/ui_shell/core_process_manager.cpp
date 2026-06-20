@@ -1,10 +1,14 @@
 #include "app/ui_shell/core_process_manager.hpp"
 
+#include "cli/pipe_client.hpp"
+#include "core/lifecycle/core_paths.hpp"
 #include "platform/common/core_resolver_platform_deps.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cerrno>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <thread>
@@ -112,6 +116,12 @@ public:
   }
 
   ~WindowsCoreProcessTransport() override {
+    close();
+    close_handle(stdout_read_);
+    close_handle(process_);
+  }
+
+  void close() override {
     close_handle(stdin_write_);
 
     if (process_) {
@@ -121,9 +131,6 @@ public:
         WaitForSingleObject(process_, 1000);
       }
     }
-
-    close_handle(stdout_read_);
-    close_handle(process_);
   }
 
   WindowsCoreProcessTransport(const WindowsCoreProcessTransport &) = delete;
@@ -376,6 +383,11 @@ public:
   }
 
   ~PosixCoreProcessTransport() override {
+    close();
+    close_fd(stdout_read_);
+  }
+
+  void close() override {
     close_fd(stdin_write_);
 
     if (pid_ > 0) {
@@ -391,8 +403,6 @@ public:
         pid_ = -1;
       }
     }
-
-    close_fd(stdout_read_);
   }
 
   PosixCoreProcessTransport(const PosixCoreProcessTransport &) = delete;
@@ -649,6 +659,63 @@ public:
   }
 };
 
+class PipeCoreRpcTransport final : public CoreRpcTransport {
+public:
+  explicit PipeCoreRpcTransport(std::string ipc_path)
+      : ipc_path_(std::move(ipc_path)) {}
+
+  void close() override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      closed_ = true;
+      pending_.clear();
+    }
+    cv_.notify_all();
+  }
+
+  bool write_line(const std::string &line) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_ || ipc_path_.empty()) {
+        return false;
+      }
+      pending_.push_back(line);
+    }
+    cv_.notify_one();
+    return true;
+  }
+
+  bool read_line(std::string &line) override {
+    std::string request;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [this] { return closed_ || !pending_.empty(); });
+      if (closed_ || pending_.empty()) {
+        return false;
+      }
+      request = std::move(pending_.front());
+      pending_.pop_front();
+    }
+
+    exv::cli::PipeClient client;
+    if (!client.connect(ipc_path_)) {
+      return false;
+    }
+    line = client.send_request(request);
+    client.disconnect();
+    return !line.empty();
+  }
+
+  bool read_available_line(std::string &) override { return false; }
+
+private:
+  std::string ipc_path_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::deque<std::string> pending_;
+  bool closed_ = false;
+};
+
 } // namespace
 
 std::vector<std::string> build_core_process_arguments(
@@ -679,6 +746,10 @@ void configure_core_process_transport_signal_policy() {
 
 std::unique_ptr<CoreRpcTransport> create_core_process_transport(
     const CoreProcessLaunch &launch) {
+  if (!launch.use_stdin) {
+    return std::make_unique<PipeCoreRpcTransport>(
+        exv::core::lifecycle::core_ipc_path(launch.state_dir));
+  }
 #if defined(_WIN32)
   return std::make_unique<WindowsCoreProcessTransport>(launch);
 #elif defined(__APPLE__) || defined(__linux__) || defined(__unix__)

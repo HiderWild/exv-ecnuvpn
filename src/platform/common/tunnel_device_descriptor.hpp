@@ -11,6 +11,8 @@ struct TunnelDeviceDescriptor {
     void* handle = nullptr;    // Windows HANDLE
     int mtu = 1400;
     bool is_open = false;
+    std::string error_code;
+    std::string error_message;
 };
 
 } // namespace exv::platform

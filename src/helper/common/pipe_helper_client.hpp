@@ -1,6 +1,7 @@
 #pragma once
 #include "helper_client.hpp"
 #include "helper_messages.hpp"
+#include <mutex>
 #include <string>
 
 namespace exv::helper {
@@ -10,6 +11,7 @@ struct PipeClientConfig {
     std::string pipe_path;  // Named pipe path (e.g. \\.\pipe\exv-helper) or
                             // Unix socket path (e.g. /var/run/exv-helper.sock)
     int connect_timeout_ms = 5000;
+    int response_timeout_ms = 10000;
 };
 
 /// Platform-specific HelperClient that communicates over Windows named pipes
@@ -63,6 +65,7 @@ private:
     PipeClientConfig config_;
     bool connected_ = false;
     DisconnectCallback disconnect_cb_;
+    std::mutex request_mutex_;
 
 #ifdef _WIN32
     void* pipe_handle_ = nullptr;  // HANDLE stored as void* to avoid windows.h in header

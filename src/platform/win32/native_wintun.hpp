@@ -75,6 +75,7 @@ public:
   NativeWintun(const NativeWintun &) = delete;
   NativeWintun &operator=(const NativeWintun &) = delete;
 
+  NativeWintunStartResult prepare_adapter();
   NativeWintunStartResult start();
   void stop();
   NativeWintunStartResult delete_adapter();

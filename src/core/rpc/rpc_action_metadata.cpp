@@ -28,7 +28,7 @@ RpcActionMetadata metadata(RpcLane lane,
 } // namespace
 
 RpcActionMetadata default_metadata_for_action(std::string_view action) {
-    if (is_one_of(action, {"core.hello", "window.setMode",
+    if (is_one_of(action, {"core.hello", "core.shutdown", "window.setMode",
                            "window.resolveClosePrompt"})) {
         return metadata(RpcLane::Control);
     }

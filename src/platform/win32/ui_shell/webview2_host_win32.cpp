@@ -911,13 +911,26 @@ public:
     const int x = point.x - window.left;
     const int y = point.y - window.top;
     const int width = window.right - window.left;
+    const int height = window.bottom - window.top;
     const UINT dpi = dpi_for_window(hwnd_);
+    const int shadow_margin =
+        MulDiv(ecnuvpn::ui_shell::kWindowShadowMarginPx, dpi, kDefaultDpi);
+    const int content_x = x - shadow_margin;
+    const int content_y = y - shadow_margin;
+    const int content_width = width - shadow_margin * 2;
+    const int content_height = height - shadow_margin * 2;
+    if (content_width <= 0 || content_height <= 0 || content_x < 0 ||
+        content_y < 0 || content_x >= content_width ||
+        content_y >= content_height) {
+      return HTNOWHERE;
+    }
     const int titlebar_height =
         MulDiv(kCustomTitlebarHeightPx, dpi, kDefaultDpi);
     const int controls_width =
         MulDiv(kWindowControlWidthPx, dpi, kDefaultDpi);
-    if (y >= 0 && y < titlebar_height) {
-      if (x >= width - controls_width && x < width) {
+    if (content_y >= 0 && content_y < titlebar_height) {
+      if (content_x >= content_width - controls_width &&
+          content_x < content_width) {
         return HTCLIENT;
       }
       return HTCAPTION;

@@ -15,9 +15,13 @@
 #include "observability/log_facade.hpp"
 
 #include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace ecnuvpn {
@@ -130,6 +134,68 @@ bool start_helper_direct(const std::string &helper_path,
   return true;
 }
 
+struct ElevatedLaunchState {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool done = false;
+  bool ok = false;
+  DWORD error = ERROR_SUCCESS;
+  int pid = -1;
+};
+
+void finish_elevated_launch(const std::shared_ptr<ElevatedLaunchState> &state,
+                            bool ok, DWORD error, int pid) {
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->done = true;
+    state->ok = ok;
+    state->error = error;
+    state->pid = pid;
+  }
+  state->cv.notify_all();
+}
+
+bool start_helper_elevated_with_timeout(const std::string &helper_path,
+                                        const std::string &args, int *pid,
+                                        DWORD *error) {
+  auto state = std::make_shared<ElevatedLaunchState>();
+  std::thread([state, helper_path, args] {
+    SHELLEXECUTEINFOA sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = "runas";
+    sei.lpFile = helper_path.c_str();
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_HIDE;
+
+    if (!ShellExecuteExA(&sei)) {
+      finish_elevated_launch(state, false, GetLastError(), -1);
+      return;
+    }
+
+    int launched_pid = -1;
+    if (sei.hProcess) {
+      launched_pid = static_cast<int>(GetProcessId(sei.hProcess));
+      CloseHandle(sei.hProcess);
+    }
+    finish_elevated_launch(state, true, ERROR_SUCCESS, launched_pid);
+  }).detach();
+
+  std::unique_lock<std::mutex> lock(state->mutex);
+  if (!state->cv.wait_for(lock, std::chrono::seconds(15),
+                          [&] { return state->done; })) {
+    if (error)
+      *error = WAIT_TIMEOUT;
+    return false;
+  }
+
+  if (pid)
+    *pid = state->pid;
+  if (error)
+    *error = state->error;
+  return state->ok;
+}
+
 } // namespace
 
 OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
@@ -166,28 +232,23 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
       return backend;
     }
   } else {
-  SHELLEXECUTEINFOA sei = {};
-  sei.cbSize = sizeof(sei);
-  sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-  sei.lpVerb = "runas";
-  sei.lpFile = request.helper_path.c_str();
-  sei.lpParameters = args.c_str();
-  sei.nShow = SW_HIDE;
-
-  if (!ShellExecuteExA(&sei)) {
-    DWORD err = GetLastError();
-    backend.code = err == ERROR_CANCELLED ? kOneshotElevationDeniedCode
-                                          : kServiceStartFailedCode;
-    backend.message = err == ERROR_CANCELLED
-                          ? "Administrator authorization was cancelled."
-                          : "Failed to start elevated one-shot helper.";
-    return backend;
-  }
-
-  if (sei.hProcess) {
-    backend.pid = static_cast<int>(GetProcessId(sei.hProcess));
-    CloseHandle(sei.hProcess);
-  }
+    DWORD err = ERROR_SUCCESS;
+    if (!start_helper_elevated_with_timeout(request.helper_path, args,
+                                            &backend.pid, &err)) {
+      if (err == WAIT_TIMEOUT) {
+        backend.code = kServiceStartFailedCode;
+        backend.message =
+            "启动提权的一次性助手超时，请检查 UAC 提示是否被遮挡，"
+            "或以管理员身份运行 start.ps1 后重试。";
+        return backend;
+      }
+      backend.code = err == ERROR_CANCELLED ? kOneshotElevationDeniedCode
+                                            : kServiceStartFailedCode;
+      backend.message = err == ERROR_CANCELLED
+                            ? "管理员授权已取消，请允许 UAC 提权后重试。"
+                            : "启动提权的一次性助手失败，请以管理员身份运行 start.ps1 后重试。";
+      return backend;
+    }
   }
 
   DWORD wait_error = ERROR_SUCCESS;

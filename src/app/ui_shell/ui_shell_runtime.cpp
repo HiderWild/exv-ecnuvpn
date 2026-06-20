@@ -72,6 +72,15 @@ std::string renderer_event_envelope(const CoreRpcEvent &event) {
   return out.dump();
 }
 
+void request_core_shutdown(CoreRpcClient &client) {
+  CoreRpcRequest request;
+  request.action = "core.shutdown";
+  request.payload_json = nlohmann::json::object().dump();
+  request.request_id = "ui-shell-shutdown";
+  auto future = client.invoke_async(std::move(request));
+  (void)future.wait_for(std::chrono::seconds(2));
+}
+
 } // namespace
 
 int run_ui_shell_window(UiWindow &window,
@@ -91,7 +100,7 @@ int run_ui_shell_window(UiWindow &window,
   });
 
   UiWindowConfig runtime_config = config;
-  runtime_config.pump_core_events = []() {};
+  runtime_config.pump_core_events = [&client]() { client.pump_events(); };
 
   AsyncHostBridge bridge(client, [&window](std::string response_json) {
     window.post_host_response(response_json);
@@ -108,12 +117,25 @@ int run_ui_shell_window(UiWindow &window,
     }
   });
   WindowMessageHandlerGuard handler_guard(window);
-  const int exit_code = window.run(runtime_config);
-  stop_event_pump.store(true);
-  if (event_pump_thread.joinable()) {
-    event_pump_thread.join();
+
+  auto shutdown_runtime = [&]() {
+    stop_event_pump.store(true);
+    if (event_pump_thread.joinable()) {
+      event_pump_thread.join();
+    }
+    bridge.shutdown();
+    request_core_shutdown(client);
+    client.shutdown();
+  };
+
+  int exit_code = 70;
+  try {
+    exit_code = window.run(runtime_config);
+  } catch (...) {
+    shutdown_runtime();
+    throw;
   }
-  bridge.shutdown();
+  shutdown_runtime();
   return exit_code;
 }
 
