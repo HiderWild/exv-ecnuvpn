@@ -104,6 +104,9 @@ export const DESKTOP_RPC_ACTIONS = [
   "service.status",
   "helper.status",
   "runtime.status",
+  "cli.status",
+  "cli.install",
+  "cli.uninstall",
   "drivers.status",
   "drivers.install",
   "service.install",
@@ -117,7 +120,8 @@ export const DESKTOP_RPC_EVENT_TYPES = [
   "heartbeat",
   "service-progress",
   "close-request",
-  "core-crashed"
+  "core-crashed",
+  "quick-start-request"
 ] as const
 export const DESKTOP_RPC_ERROR_CODES = [
   "helper_unavailable",
@@ -377,6 +381,18 @@ export const ACTION_OWNERS = [
     "owner": "core_rpc"
   },
   {
+    "name": "cli.status",
+    "owner": "desktop_host_adapter"
+  },
+  {
+    "name": "cli.install",
+    "owner": "desktop_host_adapter"
+  },
+  {
+    "name": "cli.uninstall",
+    "owner": "desktop_host_adapter"
+  },
+  {
     "name": "drivers.status",
     "owner": "core_rpc"
   },
@@ -436,6 +452,9 @@ export const ACTION_OWNER_MAP = {
   "service.uninstall": "core_rpc",
   "service.driver_status": "core_rpc",
   "runtime.status": "core_rpc",
+  "cli.status": "desktop_host_adapter",
+  "cli.install": "desktop_host_adapter",
+  "cli.uninstall": "desktop_host_adapter",
   "drivers.status": "core_rpc",
   "drivers.install": "core_rpc",
   "maintenance.inspectCore": "core_rpc",

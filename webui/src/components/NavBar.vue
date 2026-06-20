@@ -10,7 +10,7 @@ import { useVpnStore } from '../stores/vpn'
 const router = useRouter()
 const route = useRoute()
 const vpn = useVpnStore()
-const showSidebarStatusDetails = computed(() => Boolean(vpn.status))
+const showSidebarStatusDetails = computed(() => Boolean(vpn.status?.connected))
 
 const navItems = [
   { path: '/', name: '主面板', icon: LayoutDashboard },
@@ -51,22 +51,17 @@ const connectionState = computed(() => {
   return { label: '已连接', tone: 'accent' }
 })
 
-const connectionMethodLabel = computed(() => {
-  return vpn.currentSessionMode === 'helper' ? '服务' : '单次连接'
-})
-
 const sidebarStatusItems = computed(() => [
   { label: '用户', value: vpn.status?.username || '--' },
   { label: '运行时长', value: vpn.status?.connected ? uptimeFormatted.value : '--' },
   { label: '代理 TUN', value: proxyTunLabel.value },
   { label: '内网地址', value: vpn.status?.internal_ip || '--' },
   { label: 'VPN 服务器', value: vpn.status?.server || '--' },
-  { label: '连接方式', value: connectionMethodLabel.value },
 ])
 </script>
 
 <template>
-  <nav class="fixed inset-y-0 left-0 z-40 flex w-44 flex-col border-r border-border bg-surface/80 backdrop-blur-sm">
+  <nav class="absolute inset-y-0 left-0 z-40 flex w-44 flex-col border-r border-border bg-surface/80 backdrop-blur-sm">
     <div class="flex items-center justify-between gap-3 px-3 py-5">
       <div class="min-w-0">
         <button
@@ -76,7 +71,7 @@ const sidebarStatusItems = computed(() => [
           <img :src="appIconUrl" alt="" class="h-9 w-9 shrink-0" />
           <span class="min-w-0 leading-tight">
             <span class="block text-xl font-bold text-foreground">EXV</span>
-            <span class="block text-sm font-semibold text-muted">for ECNU</span>
+            <span class="block text-sm font-semibold text-muted">VPN 客户端</span>
           </span>
         </button>
       </div>

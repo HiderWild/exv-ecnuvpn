@@ -23,9 +23,18 @@ import type {
   VpnStatus,
 } from '../stores/vpn'
 
-export interface EcnuVpnEvent {
+export interface QuickStartRequestEvent {
+  reason: 'missing' | 'invalid'
+  defaults: {
+    server: string
+    remember_password: boolean
+    install_service: boolean
+  }
+}
+
+export interface ExvEvent {
   type: DesktopEventType
-  data: unknown | ServiceProgressEntry
+  data: unknown | ServiceProgressEntry | QuickStartRequestEvent
 }
 
 export type VpnErrorType =
@@ -84,7 +93,7 @@ export interface VpnConnectAccepted {
 
 export type ConnectMode = 'helper' | 'elevated' | 'direct'
 
-export interface EcnuVpnApi {
+export interface ExvApi {
   status: {
     get(): Promise<VpnStatus>
   }
@@ -155,7 +164,7 @@ export interface EcnuVpnApi {
     resolve(result: unknown): Promise<{ ok: true }>
   }
   events: {
-    subscribe(handler: (event: EcnuVpnEvent) => void): () => void
+    subscribe(handler: (event: ExvEvent) => void): () => void
   }
   core: {
     restart(): Promise<{ ok: true }>
@@ -165,6 +174,6 @@ export interface EcnuVpnApi {
 
 declare global {
   interface Window {
-    ecnuVpn?: EcnuVpnApi
+    exv?: ExvApi
   }
 }

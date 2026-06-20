@@ -12,18 +12,18 @@ import {
 } from './generated/system-contract.js'
 
 export const desktopIpcChannels = {
-  rpc: 'ecnu-vpn:rpc',
-  rpcElevated: 'ecnu-vpn:rpc-elevated',
-  cliCommand: 'ecnu-vpn:cli-command',
-  driverInstall: 'ecnu-vpn:driver-install',
-  windowMode: 'ecnu-vpn:window-mode',
-  serviceInstallPrompt: 'ecnu-vpn:service-install-prompt',
-  passwordPrompt: 'ecnu-vpn:password-prompt',
-  confirmPrompt: 'ecnu-vpn:confirm-prompt',
-  modalPayload: 'ecnu-vpn:modal-payload',
-  modalResult: 'ecnu-vpn:modal-result',
-  closePromptResult: 'ecnu-vpn:close-prompt-result',
-  event: 'ecnu-vpn:event',
+  rpc: 'exv:rpc',
+  rpcElevated: 'exv:rpc-elevated',
+  cliCommand: 'exv:cli-command',
+  driverInstall: 'exv:driver-install',
+  windowMode: 'exv:window-mode',
+  serviceInstallPrompt: 'exv:service-install-prompt',
+  passwordPrompt: 'exv:password-prompt',
+  confirmPrompt: 'exv:confirm-prompt',
+  modalPayload: 'exv:modal-payload',
+  modalResult: 'exv:modal-result',
+  closePromptResult: 'exv:close-prompt-result',
+  event: 'exv:event',
 } as const
 
 export const desktopApiPaths = {

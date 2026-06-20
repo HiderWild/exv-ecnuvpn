@@ -2,6 +2,7 @@
 #include "platform/common/interface_stats.hpp"
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_paths.hpp"
+#include "core/config/config_initialization.hpp"
 #include "core/config/config.hpp"
 #include "core/crypto/crypto.hpp"
 #include "observability/log_facade.hpp"
@@ -13,7 +14,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 namespace {
 
@@ -26,28 +27,17 @@ std::string config_path() {
 // ── Load ─────────────────────────────────────────────────────────
 
 Config load() {
-  std::string path = config_path();
-  if (!platform::file_exists(path)) {
-    Config cfg;
-    normalize_native_only(cfg);
-    save(cfg);
+  const auto initialized = ensure_initialized_config(platform::get_config_dir());
+  Config cfg = initialized.config;
+  normalize_native_only(cfg);
+  if (initialized.status == ConfigInitializationStatus::Missing) {
     crypto::init_key_if_needed();
-    return cfg;
   }
-  try {
-    std::string content = platform::read_file(path);
-    auto j = nlohmann::json::parse(content);
-    Config cfg = j.get<Config>();
-    normalize_native_only(cfg);
-    return cfg;
-  } catch (const std::exception &e) {
-    cli::print_warning("Failed to parse config.json, using defaults.");
-    exv::observability::LogFacade::error("Config parse error: " + std::string(e.what()));
-    Config cfg;
-    normalize_native_only(cfg);
-    save(cfg);
-    return cfg;
+  if (initialized.status == ConfigInitializationStatus::Invalid) {
+    cli::print_warning(
+        "config.json was invalid or incomplete; defaults were regenerated.");
   }
+  return cfg;
 }
 
 // ── Save ─────────────────────────────────────────────────────────
@@ -116,6 +106,17 @@ Config import_from(const std::string &path) {
     if (j.contains("minimal_install_service_before_connect"))
       cfg.minimal_install_service_before_connect =
           j["minimal_install_service_before_connect"].get<bool>();
+    if (j.contains("include_class_a_private_routes"))
+      cfg.include_class_a_private_routes =
+          j["include_class_a_private_routes"].get<bool>();
+    if (j.contains("include_class_b_private_routes"))
+      cfg.include_class_b_private_routes =
+          j["include_class_b_private_routes"].get<bool>();
+    if (j.contains("launch_at_login"))
+      cfg.launch_at_login = j["launch_at_login"].get<bool>();
+    if (j.contains("auto_connect_on_launch"))
+      cfg.auto_connect_on_launch =
+          j["auto_connect_on_launch"].get<bool>();
 
     if (j.contains("password")) {
       std::string pw = j["password"].get<std::string>();
@@ -156,4 +157,4 @@ Config reset() {
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

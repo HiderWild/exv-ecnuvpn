@@ -18,6 +18,29 @@ export interface ErrorModalState {
   onClose: (() => void | Promise<void>) | null
 }
 
+export interface QuickStartRequest {
+  reason: 'missing' | 'invalid'
+  defaults: {
+    server: string
+    remember_password: boolean
+    install_service: boolean
+  }
+}
+
+export interface CredentialPromptRequest {
+  missingUsername: boolean
+  missingPassword: boolean
+  username: string
+  rememberPassword: boolean
+  message?: string
+}
+
+export interface CredentialPromptResult {
+  username?: string
+  password?: string
+  rememberPassword: boolean
+}
+
 export const useUiStore = defineStore('ui', () => {
   const toasts = ref<ToastMessage[]>([])
   const showConfirm = ref(false)
@@ -35,6 +58,11 @@ export const useUiStore = defineStore('ui', () => {
   const showPasswordPrompt = ref(false)
   const passwordPromptMessage = ref('')
   const passwordPromptResolver = ref<((value: string | null) => void) | null>(null)
+  const showQuickStart = ref(false)
+  const quickStartRequest = ref<QuickStartRequest | null>(null)
+  const showCredentialPrompt = ref(false)
+  const credentialPrompt = ref<CredentialPromptRequest | null>(null)
+  const credentialPromptResolver = ref<((value: CredentialPromptResult | null) => void) | null>(null)
   let nextId = 1
 
   function addToast(text: string, type: ToastMessage['type'] = 'info') {
@@ -53,8 +81,8 @@ export const useUiStore = defineStore('ui', () => {
 
   function requestConfirm(message: string, onConfirm: () => void) {
     const config = useConfigStore()
-    if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
-      void window.ecnuVpn.modal.confirmPrompt(message).then((confirmed) => {
+    if (config.settings.minimal_mode && window.exv?.modal) {
+      void window.exv.modal.confirmPrompt(message).then((confirmed) => {
         if (confirmed) onConfirm()
       })
       return
@@ -112,8 +140,8 @@ export const useUiStore = defineStore('ui', () => {
   function requestPassword(message: string) {
     passwordPromptResolver.value?.(null)
     const config = useConfigStore()
-    if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
-      return window.ecnuVpn.modal.passwordPrompt(message)
+    if (config.settings.minimal_mode && window.exv?.modal) {
+      return window.exv.modal.passwordPrompt(message)
     }
     passwordPromptMessage.value = message
     showPasswordPrompt.value = true
@@ -138,13 +166,52 @@ export const useUiStore = defineStore('ui', () => {
     resolver?.(null)
   }
 
+  function openQuickStart(request: QuickStartRequest) {
+    quickStartRequest.value = request
+    showQuickStart.value = true
+  }
+
+  function closeQuickStart() {
+    showQuickStart.value = false
+    quickStartRequest.value = null
+  }
+
+  function requestCredentials(request: CredentialPromptRequest) {
+    credentialPromptResolver.value?.(null)
+    credentialPrompt.value = request
+    showCredentialPrompt.value = true
+    return new Promise<CredentialPromptResult | null>((resolve) => {
+      credentialPromptResolver.value = resolve
+    })
+  }
+
+  function submitCredentialPrompt(value: CredentialPromptResult) {
+    const resolver = credentialPromptResolver.value
+    showCredentialPrompt.value = false
+    credentialPrompt.value = null
+    credentialPromptResolver.value = null
+    resolver?.(value)
+  }
+
+  function closeCredentialPrompt() {
+    const resolver = credentialPromptResolver.value
+    showCredentialPrompt.value = false
+    credentialPrompt.value = null
+    credentialPromptResolver.value = null
+    resolver?.(null)
+  }
+
   return {
     toasts, showConfirm, confirmMessage, confirmCallback,
     errorModal,
     showPasswordPrompt, passwordPromptMessage,
+    showQuickStart, quickStartRequest,
+    showCredentialPrompt, credentialPrompt,
     addToast, removeToast,
     requestConfirm, closeConfirm, onConfirm,
     requestError, closeError, onErrorPrimary,
     requestPassword, submitPasswordPrompt, closePasswordPrompt,
+    openQuickStart, closeQuickStart,
+    requestCredentials, submitCredentialPrompt, closeCredentialPrompt,
   }
 })

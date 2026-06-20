@@ -28,7 +28,7 @@ onMounted(async () => {
       : route.path.endsWith('/confirm')
         ? 'confirm'
         : 'service-install'
-  payload.value = await window.ecnuVpn?.modal.getPayload() ?? { kind: routeKind }
+  payload.value = await window.exv?.modal.getPayload() ?? { kind: routeKind }
 })
 
 async function resolvePrompt(result: unknown) {
@@ -36,7 +36,7 @@ async function resolvePrompt(result: unknown) {
   busy.value = true
   resolved.value = true
   try {
-    await window.ecnuVpn?.modal.resolve(result)
+    await window.exv?.modal.resolve(result)
   } finally {
     busy.value = false
   }
@@ -61,12 +61,11 @@ function submitCloseChoice() {
 <template>
   <main
     v-if="!resolved"
-    class="grid h-screen place-items-stretch bg-transparent text-foreground"
-    :class="isCloseApp ? 'p-0' : 'p-1'"
+    class="min-h-screen bg-transparent p-3 text-foreground"
   >
     <form
       v-if="isPassword"
-      class="modal-panel flex w-full flex-col justify-center rounded-lg border border-border bg-surface p-4 shadow-xl shadow-black/30"
+      class="modal-panel mx-auto flex w-full max-w-sm flex-col justify-center rounded-lg border border-border bg-surface p-4 shadow-xl shadow-black/30"
       @submit.prevent="submitPassword"
     >
       <div class="flex items-start gap-2.5">
@@ -108,7 +107,7 @@ function submitCloseChoice() {
         <button
           type="button"
           :disabled="busy"
-          class="rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
+          class="min-h-9 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
           @click="resolvePrompt(null)"
         >
           取消
@@ -116,7 +115,7 @@ function submitCloseChoice() {
         <button
           type="submit"
           :disabled="busy"
-          class="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+          class="min-h-9 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
         >
           连接
         </button>
@@ -125,7 +124,7 @@ function submitCloseChoice() {
 
     <section
       v-else
-      class="modal-panel flex w-full flex-col justify-center rounded-lg bg-surface p-4"
+      class="modal-panel mx-auto flex w-full max-w-sm flex-col justify-center rounded-lg bg-surface p-4"
       :class="isCloseApp ? 'border-0 shadow-none' : 'border border-border shadow-xl shadow-black/30'"
     >
       <div class="flex items-start gap-2.5">
@@ -133,7 +132,7 @@ function submitCloseChoice() {
         <ShieldCheck v-else class="mt-0.5 h-5 w-5 shrink-0 text-accent" />
         <div class="min-w-0">
           <h1 class="text-base font-semibold text-foreground">
-            {{ isCloseApp ? '关闭 EXV for ECNU' : isConfirm ? '请确认操作' : '建议您安装辅助服务' }}
+            {{ isCloseApp ? '关闭 EXV' : isConfirm ? '请确认操作' : '建议您安装辅助服务' }}
           </h1>
           <p class="mt-2 text-sm leading-6 text-muted">
             {{ isCloseApp ? '选择关闭窗口后的处理方式。' : isConfirm ? message : '安装服务可以免于输入密码提权，精简连接流程。需要管理员权限。' }}
@@ -189,7 +188,7 @@ function submitCloseChoice() {
           <button
             type="button"
             :disabled="busy"
-            class="rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
+            class="min-h-9 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
             @click="resolvePrompt('cancel')"
           >
             取消
@@ -197,7 +196,7 @@ function submitCloseChoice() {
           <button
             type="button"
             :disabled="busy"
-            class="rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50"
+            class="min-h-9 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50"
             :class="closeChoice === 'quit' ? 'bg-destructive hover:bg-destructive/90' : 'bg-accent hover:bg-accent/90'"
             @click="submitCloseChoice"
           >
@@ -210,7 +209,7 @@ function submitCloseChoice() {
         <button
           type="button"
           :disabled="busy"
-          class="rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
+          class="min-h-9 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
           @click="resolvePrompt(isConfirm ? false : 'dismiss')"
         >
           {{ isConfirm ? '取消' : '暂不安装' }}
@@ -218,7 +217,7 @@ function submitCloseChoice() {
         <button
           type="button"
           :disabled="busy"
-          class="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+          class="min-h-9 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
           @click="resolvePrompt(isConfirm ? true : 'install')"
         >
           {{ isConfirm ? '确认' : '安装服务' }}

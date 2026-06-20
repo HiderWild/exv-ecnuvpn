@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { KeyRound } from 'lucide-vue-next'
 import { useVpnStore } from '../stores/vpn'
+import ModalShell from './ModalShell.vue'
 
 const vpn = useVpnStore()
 const value = ref('')
@@ -46,63 +47,58 @@ async function submit() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      v-if="interaction"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
-    >
-      <form
-        class="w-full max-w-sm rounded-xl border border-border bg-surface p-6 shadow-xl"
-        @submit.prevent="submit"
+  <ModalShell
+    :open="Boolean(interaction)"
+    :title="title"
+    :description="interaction?.label"
+    :close-on-scrim="false"
+    size="sm"
+  >
+    <template #icon>
+      <KeyRound class="h-4 w-4" />
+    </template>
+
+    <form id="auth-continuation-form" class="space-y-3" @submit.prevent="submit">
+      <select
+        v-if="isGroupSelection"
+        ref="inputRef"
+        v-model="value"
+        class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-primary"
+        :disabled="vpn.authInteractionBusy"
+        @change="error = ''"
       >
-        <div class="mb-4 flex items-start gap-3">
-          <KeyRound class="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-          <div class="min-w-0">
-            <p class="text-sm font-semibold text-foreground">{{ title }}</p>
-            <p class="mt-1 text-xs leading-5 text-muted">{{ interaction.label }}</p>
-          </div>
-        </div>
-
-        <select
-          v-if="isGroupSelection"
-          ref="inputRef"
-          v-model="value"
-          class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-primary"
-          :disabled="vpn.authInteractionBusy"
-          @change="error = ''"
+        <option
+          v-for="option in interaction?.options ?? []"
+          :key="option"
+          :value="option"
         >
-          <option
-            v-for="option in interaction.options"
-            :key="option"
-            :value="option"
-          >
-            {{ option }}
-          </option>
-        </select>
-        <input
-          v-else
-          ref="inputRef"
-          v-model="value"
-          :type="inputType"
-          autocomplete="one-time-code"
-          class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-primary"
-          :disabled="vpn.authInteractionBusy"
-          placeholder="认证信息"
-          @input="error = ''"
-        />
+          {{ option }}
+        </option>
+      </select>
+      <input
+        v-else
+        ref="inputRef"
+        v-model="value"
+        :type="inputType"
+        autocomplete="one-time-code"
+        class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground outline-none transition-colors focus:border-primary"
+        :disabled="vpn.authInteractionBusy"
+        placeholder="认证信息"
+        @input="error = ''"
+      />
 
-        <p v-if="error" class="mt-2 text-xs text-destructive">{{ error }}</p>
+      <p v-if="error" class="text-xs text-destructive">{{ error }}</p>
+    </form>
 
-        <div class="mt-5 flex justify-end gap-3">
-          <button
-            type="submit"
-            class="rounded-lg bg-primary px-4 py-2 text-sm text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
-            :disabled="vpn.authInteractionBusy"
-          >
-            继续
-          </button>
-        </div>
-      </form>
-    </div>
-  </Teleport>
+    <template #actions>
+      <button
+        type="submit"
+        form="auth-continuation-form"
+        class="rounded-lg bg-primary px-3 py-2 text-sm text-white hover:bg-primary/90 disabled:opacity-50"
+        :disabled="vpn.authInteractionBusy"
+      >
+        继续
+      </button>
+    </template>
+  </ModalShell>
 </template>

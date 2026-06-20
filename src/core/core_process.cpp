@@ -11,6 +11,7 @@
 #include "core/app_api/app_api.hpp"
 #include "core/app_api/desktop_status_presenter.hpp"
 #include "core/app_api/desktop_vpn_actions.hpp"
+#include "core/config/config_initialization.hpp"
 #include "core/rpc/lane_scheduler.hpp"
 #include "core/rpc/core_api_setup.hpp"
 #include "core/tunnel_controller/reconnect_policy.hpp"
@@ -532,6 +533,9 @@ int core_process_main(const std::string& config_dir,
 
     exv::observability::LogFacade::info("Core process starting (mode=core, use_stdin=" + std::string(use_stdin ? "true" : "false") + ")");
 
+    const auto startup_config =
+        exv::config::ensure_initialized_config(config_dir);
+
     // 3. Install signal handlers for graceful shutdown
     std::signal(SIGINT,  core_signal_handler);
     std::signal(SIGTERM, core_signal_handler);
@@ -703,6 +707,12 @@ int core_process_main(const std::string& config_dir,
                 }
             }
         });
+    }
+
+    if (stdin_available && startup_config.should_request_quick_start()) {
+        write_json_line(json{{"event", "quick-start-request"},
+                             {"data", exv::config::quick_start_request_data(
+                                          startup_config)}});
     }
 
     while (!g_stop_requested.load()) {

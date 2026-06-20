@@ -30,6 +30,10 @@ export interface SettingsConfig {
   minimal_mode: boolean
   service_install_prompt_seen: boolean
   minimal_install_service_before_connect: boolean
+  include_class_a_private_routes: boolean
+  include_class_b_private_routes: boolean
+  launch_at_login: boolean
+  auto_connect_on_launch: boolean
 }
 
 export interface KeyStatus {
@@ -84,45 +88,31 @@ export interface DriverStatus {
 }
 
 export const useConfigStore = defineStore('config', () => {
-  function readLocalBool(key: 'ecnu-vpn:minimal-mode' | 'ecnu-vpn:service-install-prompt-seen', fallback: boolean) {
+  function readLocalBool(key: 'exv:minimal-mode', fallback: boolean) {
     if (typeof localStorage === 'undefined') return fallback
-    const value = key === 'ecnu-vpn:minimal-mode'
-      ? localStorage.getItem('ecnu-vpn:minimal-mode')
-      : localStorage.getItem('ecnu-vpn:service-install-prompt-seen')
+    if (key !== 'exv:minimal-mode') return fallback
+    const value = localStorage.getItem('exv:minimal-mode')
     if (value === 'true') return true
     if (value === 'false') return false
     return fallback
   }
 
-  function writeLocalBool(key: 'ecnu-vpn:minimal-mode' | 'ecnu-vpn:service-install-prompt-seen', value: boolean) {
+  function writeLocalBool(key: 'exv:minimal-mode', value: boolean) {
     if (typeof localStorage === 'undefined') return
-    if (key === 'ecnu-vpn:minimal-mode') {
-      localStorage.setItem('ecnu-vpn:minimal-mode', value ? 'true' : 'false')
-      return
-    }
-    localStorage.setItem('ecnu-vpn:service-install-prompt-seen', value ? 'true' : 'false')
+    if (key !== 'exv:minimal-mode') return
+    localStorage.setItem('exv:minimal-mode', value ? 'true' : 'false')
   }
 
   function applyFrontendLocalSettings(next: SettingsConfig) {
     return {
       ...next,
-      minimal_mode: readLocalBool('ecnu-vpn:minimal-mode', next.minimal_mode),
-      service_install_prompt_seen: readLocalBool(
-        'ecnu-vpn:service-install-prompt-seen',
-        next.service_install_prompt_seen,
-      ),
+      minimal_mode: readLocalBool('exv:minimal-mode', next.minimal_mode),
     }
   }
 
   function persistFrontendLocalSettings(s: Partial<SettingsConfig>) {
     if (Object.prototype.hasOwnProperty.call(s, 'minimal_mode') && s.minimal_mode != null) {
-      writeLocalBool('ecnu-vpn:minimal-mode', s.minimal_mode)
-    }
-    if (
-      Object.prototype.hasOwnProperty.call(s, 'service_install_prompt_seen') &&
-      s.service_install_prompt_seen != null
-    ) {
-      writeLocalBool('ecnu-vpn:service-install-prompt-seen', s.service_install_prompt_seen)
+      writeLocalBool('exv:minimal-mode', s.minimal_mode)
     }
   }
 
@@ -132,7 +122,7 @@ export const useConfigStore = defineStore('config', () => {
     password: '',
     password_stored: false,
     user_agent: '',
-    remember_password: true,
+    remember_password: false,
   })
 
   const settings = ref<SettingsConfig>({
@@ -148,9 +138,13 @@ export const useConfigStore = defineStore('config', () => {
     windows_tap_interface: '',
     auto_reconnect: true,
     retry_limit: -1,
-    minimal_mode: readLocalBool('ecnu-vpn:minimal-mode', false),
-    service_install_prompt_seen: readLocalBool('ecnu-vpn:service-install-prompt-seen', false),
+    minimal_mode: readLocalBool('exv:minimal-mode', false),
+    service_install_prompt_seen: false,
     minimal_install_service_before_connect: true,
+    include_class_a_private_routes: false,
+    include_class_b_private_routes: false,
+    launch_at_login: false,
+    auto_connect_on_launch: false,
   })
 
   const keyStatus = ref<KeyStatus>({ available: false, present: false, status: 'missing' })
@@ -165,12 +159,21 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function saveAuthConfig(config: Partial<AuthConfig>) {
-    const payload = {
-      server: config.server ?? '',
-      username: config.username ?? '',
-      password: config.password ?? '',
-      remember_password: config.remember_password ?? true,
-      user_agent: config.user_agent ?? '',
+    const payload: Partial<AuthConfig> = {}
+    if (Object.prototype.hasOwnProperty.call(config, 'server')) {
+      payload.server = config.server ?? ''
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'username')) {
+      payload.username = config.username ?? ''
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'password')) {
+      payload.password = config.password ?? ''
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'remember_password')) {
+      payload.remember_password = config.remember_password ?? false
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'user_agent')) {
+      payload.user_agent = config.user_agent ?? ''
     }
     const { data } = await api.put<AuthConfig>('/config/auth', payload)
     authConfig.value = { ...authConfig.value, ...data }
@@ -189,7 +192,6 @@ export const useConfigStore = defineStore('config', () => {
     persistFrontendLocalSettings(s)
     const remoteSettings = { ...s }
     delete remoteSettings.minimal_mode
-    delete remoteSettings.service_install_prompt_seen
     if (Object.keys(remoteSettings).length === 0) return
 
     try {
@@ -199,7 +201,6 @@ export const useConfigStore = defineStore('config', () => {
       settings.value = previous
       persistFrontendLocalSettings({
         minimal_mode: previous.minimal_mode,
-        service_install_prompt_seen: previous.service_install_prompt_seen,
       })
       throw error
     }

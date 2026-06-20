@@ -695,7 +695,7 @@ export const useVpnStore = defineStore('vpn', () => {
   const serviceInstalled = computed(() => serviceStatus.value?.installed ?? false)
   const serviceRunning = computed(() => serviceStatus.value?.running ?? false)
   const serviceAvailable = computed(() => serviceStatus.value?.available ?? false)
-  const isDesktop = computed(() => typeof window !== 'undefined' && !!window.ecnuVpn)
+  const isDesktop = computed(() => typeof window !== 'undefined' && !!window.exv)
   const canUseElevatedFallback = computed(() => {
     const capabilities = serviceStatus.value?.capabilities
     return isDesktop.value && Boolean(
@@ -1229,28 +1229,45 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
-  function buildPasswordPromptMessage(prefix = '') {
-    const auth = config.authConfig
-    const username = auth.username || status.value?.username
-    const base = username ? `请输入用户 ${username} 的密码` : '请输入 VPN 密码'
-    return prefix ? `${prefix}${base}` : base
-  }
-
-  async function resolveConnectPassword(messagePrefix = ''): Promise<string | undefined | null> {
+  async function resolveConnectCredentials(message?: string): Promise<{ password?: string } | null> {
     await config.fetchAuthConfig()
     const auth = config.authConfig
-    if (auth.remember_password && auth.password_stored) return undefined
+    const missingUsername = !auth.username.trim()
+    const missingPassword = !(auth.remember_password && auth.password_stored)
 
-    return ui.requestPassword(buildPasswordPromptMessage(messagePrefix))
+    if (!missingUsername && !missingPassword) return {}
+
+    const credentials = await ui.requestCredentials({
+      missingUsername,
+      missingPassword,
+      username: auth.username,
+      rememberPassword: auth.remember_password,
+      message,
+    })
+    if (credentials === null) return null
+
+    const nextUsername = credentials.username ?? auth.username
+    const nextPassword = credentials.password ?? ''
+
+    await config.saveAuthConfig({
+      server: auth.server,
+      username: nextUsername,
+      user_agent: auth.user_agent,
+      remember_password: credentials.rememberPassword,
+      password: credentials.rememberPassword ? credentials.password : '',
+    })
+
+    if (missingPassword && !credentials.rememberPassword) {
+      return { password: nextPassword }
+    }
+    return {}
   }
 
   async function retryConnectAfterAuthFailure(mode: 'helper' | 'elevated'): Promise<boolean> {
-    await config.fetchAuthConfig()
-    const password = await ui.requestPassword(
-      buildPasswordPromptMessage('密码不正确，请重新输入。'),
-    )
-    if (password === null) return false
+    const credentials = await resolveConnectCredentials('密码不正确，请重新输入密码')
+    if (credentials === null) return false
     clearError()
+    const password = credentials.password
     return mode === 'helper' ? connect(password) : connectElevated(password)
   }
 
@@ -1265,14 +1282,14 @@ export const useVpnStore = defineStore('vpn', () => {
     startAuthInteractionPolling()
     let acceptedByBackend = false
     try {
-      const password = providedPassword !== undefined
-        ? providedPassword
-        : await resolveConnectPassword()
-      if (password === null) return false
+      const credentials = providedPassword !== undefined
+        ? { password: providedPassword }
+        : await resolveConnectCredentials()
+      if (credentials === null) return false
 
       const { data } = await api.post<VpnStatus | VpnConnectAccepted>(
         '/connect',
-        password === undefined ? undefined : { password },
+        credentials.password === undefined ? undefined : { password: credentials.password },
       )
       if (isVpnConnectAccepted(data)) {
         acceptedByBackend = true
@@ -1374,14 +1391,14 @@ export const useVpnStore = defineStore('vpn', () => {
     startAuthInteractionPolling()
     let acceptedByBackend = false
     try {
-      const password = providedPassword !== undefined
-        ? providedPassword
-        : await resolveConnectPassword()
-      if (password === null) return false
+      const credentials = providedPassword !== undefined
+        ? { password: providedPassword }
+        : await resolveConnectCredentials()
+      if (credentials === null) return false
 
       const { data } = await api.post<VpnStatus | VpnConnectAccepted | VpnError>(
         '/connect/elevated',
-        password === undefined ? undefined : { password },
+        credentials.password === undefined ? undefined : { password: credentials.password },
       )
       if (isVpnError(data)) {
         if (isCredentialFailureType(data.error_type)) lastFailedConnectMode.value = 'elevated'

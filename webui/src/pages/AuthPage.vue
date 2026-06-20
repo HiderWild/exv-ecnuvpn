@@ -23,7 +23,7 @@ const form = ref<AuthConfig>({
   password: '',
   password_stored: false,
   user_agent: '',
-  remember_password: true,
+  remember_password: false,
 })
 
 onMounted(async () => {
@@ -142,7 +142,7 @@ async function save() {
             <input
               v-model="form.username"
               type="text"
-              placeholder="ECNU 用户名"
+              placeholder="用户名"
               class="w-full bg-background border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
             />
           </div>
@@ -209,7 +209,7 @@ async function save() {
           v-if="message"
           :class="[
             'text-sm rounded-lg px-4 py-2.5',
-          'bg-green-500/10 text-green-400'
+            'bg-success/10 text-success'
           ]"
         >
           {{ message.text }}

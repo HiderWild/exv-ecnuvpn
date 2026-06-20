@@ -2,25 +2,27 @@
 import { ref, onActivated, onDeactivated, onMounted, onUnmounted, nextTick, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useVpnStore, type LogEntry } from '../stores/vpn'
+import { usePageStateStore } from '../stores/pageState'
 import { useUiStore } from '../stores/ui'
 import { useSSE } from '../composables/useSSE'
-import { FileText, Trash2, Download, ArrowLeft, Copy } from 'lucide-vue-next'
+import { Trash2, Download, ArrowLeft, Copy } from 'lucide-vue-next'
 
 defineOptions({ name: 'LogsPage' })
 
 const vpn = useVpnStore()
 const ui = useUiStore()
+const pageState = usePageStateStore()
 const route = useRoute()
 const router = useRouter()
 const { connect: sseConnect, disconnect: sseDisconnect } = useSSE()
-const autoScroll = ref(true)
+const autoScroll = ref(pageState.logs.autoScroll)
 const logsContainer = ref<HTMLElement | null>(null)
-const savedScrollTop = ref(0)
 const lastLogSeq = ref(0)
 const logsLoading = ref(false)
 const LOG_FETCH_LIMIT = 200
 const LOG_POLL_INTERVAL_MS = 2000
 let logPollTimer: ReturnType<typeof setInterval> | null = null
+let programmaticLogScroll = false
 
 const isContextJump = computed(() => route.query.from === 'dashboard')
 const highlightCount = 10 // Number of recent entries to highlight on context jump
@@ -30,7 +32,11 @@ onMounted(async () => {
   await loadLogChunk(true)
   startLogPolling()
 
-  if (autoScroll.value) await scrollToBottom()
+  if (pageState.logs.userScrolled) {
+    restoreLogsScroll()
+  } else if (autoScroll.value) {
+    await scrollToBottom()
+  }
 })
 
 onUnmounted(() => {
@@ -100,22 +106,63 @@ async function scrollToBottom() {
   await nextTick()
   const container = logsContainer.value
   if (container) {
+    programmaticLogScroll = true
     container.scrollTop = container.scrollHeight
+    pageState.logs.scrollTop = container.scrollTop
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        programmaticLogScroll = false
+      }, 120)
+    } else {
+      programmaticLogScroll = false
+    }
+  }
+}
+
+function logScrollNearBottom(container: HTMLElement) {
+  return container.scrollTop + container.clientHeight >= container.scrollHeight - 8
+}
+
+function handleLogsScroll() {
+  const container = logsContainer.value
+  if (!container || programmaticLogScroll) return
+  pageState.logs.scrollTop = container.scrollTop
+  pageState.logs.userScrolled = true
+  if (!logScrollNearBottom(container) && autoScroll.value) {
+    autoScroll.value = false
+  }
+}
+
+function restoreLogsScroll() {
+  const container = logsContainer.value
+  if (!container) return
+  programmaticLogScroll = true
+  container.scrollTop = pageState.logs.scrollTop
+  if (typeof window !== 'undefined') {
+    window.setTimeout(() => {
+      programmaticLogScroll = false
+    }, 120)
+  } else {
+    programmaticLogScroll = false
   }
 }
 
 onActivated(() => {
   void nextTick(() => {
+    if (pageState.logs.userScrolled) {
+      restoreLogsScroll()
+      return
+    }
     if (autoScroll.value) {
       void scrollToBottom()
       return
     }
-    if (logsContainer.value) logsContainer.value.scrollTop = savedScrollTop.value
+    restoreLogsScroll()
   })
 })
 
 onDeactivated(() => {
-  savedScrollTop.value = logsContainer.value?.scrollTop ?? savedScrollTop.value
+  pageState.logs.scrollTop = logsContainer.value?.scrollTop ?? pageState.logs.scrollTop
 })
 
 function clearLogs() {
@@ -134,7 +181,7 @@ function downloadLogs() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `ecnu-vpn-${new Date().toISOString().slice(0, 10)}.log`
+  a.download = `exv-${new Date().toISOString().slice(0, 10)}.log`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -179,7 +226,11 @@ watch(
 )
 
 watch(autoScroll, (enabled) => {
-  if (enabled) void scrollToBottom()
+  pageState.logs.autoScroll = enabled
+  if (enabled) {
+    pageState.logs.userScrolled = false
+    void scrollToBottom()
+  }
 })
 
 function shouldHighlight(index: number): boolean {
@@ -190,8 +241,8 @@ function shouldHighlight(index: number): boolean {
 </script>
 
 <template>
-  <div class="h-full overflow-hidden py-4">
-    <div class="flex items-center justify-between mb-4">
+  <div class="h-full overflow-hidden py-3">
+    <div class="mb-3 flex items-center justify-between">
       <div class="flex items-center gap-3">
         <button
           v-if="isContextJump"
@@ -201,8 +252,7 @@ function shouldHighlight(index: number): boolean {
           <ArrowLeft class="w-3.5 h-3.5" />
           返回 Dashboard
         </button>
-        <h1 class="text-xl font-semibold text-foreground flex items-center gap-2">
-          <FileText class="w-5 h-5 text-accent" />
+        <h1 class="text-3xl font-semibold text-foreground">
           日志
         </h1>
       </div>
@@ -238,7 +288,8 @@ function shouldHighlight(index: number): boolean {
     <div
       id="logs-container"
       ref="logsContainer"
-      class="bg-bg border border-border rounded-xl p-4 h-[calc(100%-4rem)] overflow-y-auto font-mono text-xs leading-relaxed"
+      class="bg-bg border border-border rounded-xl p-4 h-[calc(100%-3.5rem)] overflow-y-auto font-mono text-xs leading-relaxed"
+      @scroll="handleLogsScroll"
     >
       <div v-if="vpn.logs.length === 0" class="text-muted text-center py-8">
         暂无日志
@@ -251,7 +302,7 @@ function shouldHighlight(index: number): boolean {
           shouldHighlight(i) ? 'log-highlight' : '',
           {
             'text-red-400': entry.level === 'error' || entry.message.includes('[ERROR]') || entry.message.includes('[error]'),
-            'text-yellow-400': entry.level === 'warn' || entry.message.includes('[WARN]') || entry.message.includes('[warn]'),
+            'text-warning': entry.level === 'warn' || entry.message.includes('[WARN]') || entry.message.includes('[warn]'),
             'text-foreground': entry.level === 'info' && !entry.message.includes('[ERROR]') && !entry.message.includes('[error]') && !entry.message.includes('[WARN]') && !entry.message.includes('[warn]'),
           }
         ]"

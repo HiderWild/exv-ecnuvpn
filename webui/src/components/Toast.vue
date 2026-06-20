@@ -14,7 +14,7 @@ const ui = useUiStore()
           :key="toast.id"
           :class="[
             'pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border backdrop-blur-sm max-w-sm',
-            toast.type === 'success' ? 'bg-accent/10 border-accent/30 text-accent' :
+            toast.type === 'success' ? 'bg-success/10 border-success/30 text-success' :
             toast.type === 'error' ? 'bg-destructive/10 border-destructive/30 text-destructive' :
             toast.type === 'warning' ? 'bg-warning/10 border-warning/30 text-warning' :
             'bg-primary/10 border-primary/30 text-foreground'

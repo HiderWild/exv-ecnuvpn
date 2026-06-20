@@ -8,7 +8,7 @@
 #include <iostream>
 #include <string>
 
-namespace ecnuvpn {
+namespace exv {
 namespace config {
 namespace {
 
@@ -86,6 +86,7 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
     cfg.remember_password = (input[0] == 'y' || input[0] == 'Y');
     if (!cfg.remember_password) {
       cfg.password = "";
+      cfg.auto_connect_on_launch = false;
       crypto::delete_key_file();
     }
     if (save(cfg)) {
@@ -143,6 +144,23 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
                   cfg.minimal_install_service_before_connect,
                   "  Install service before minimal-mode connect? [Y/n]: ",
                   true))
+    return true;
+  if (handle_bool("include_class_a_private_routes",
+                  cfg.include_class_a_private_routes,
+                  "  Route all 10.0.0.0/8 private addresses through EXV? [y/N]: ",
+                  false))
+    return true;
+  if (handle_bool("include_class_b_private_routes",
+                  cfg.include_class_b_private_routes,
+                  "  Route all 172.16.0.0/12 private addresses through EXV? [y/N]: ",
+                  false))
+    return true;
+  if (handle_bool("launch_at_login", cfg.launch_at_login,
+                  "  Launch EXV at login? [y/N]: ", false))
+    return true;
+  if (handle_bool("auto_connect_on_launch", cfg.auto_connect_on_launch,
+                  "  Connect automatically when EXV starts? [y/N]: ",
+                  false))
     return true;
 
   if (key == "vpn_engine") {
@@ -221,10 +239,13 @@ bool set_value(Config &cfg, const std::string &key, const std::string &inline_va
                     "auto_reconnect, minimal_mode, "
                     "service_install_prompt_seen, "
                     "minimal_install_service_before_connect, "
+                    "include_class_a_private_routes, "
+                    "include_class_b_private_routes, "
+                    "launch_at_login, auto_connect_on_launch, "
                     "vpn_engine, "
                     "windows_tunnel_driver, windows_tap_interface");
   return false;
 }
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv

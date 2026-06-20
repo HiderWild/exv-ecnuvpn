@@ -1,5 +1,7 @@
 import { ref, onUnmounted } from 'vue'
 import { useVpnStore, type LogEntry, type ServiceProgressEntry, type VpnStatus } from '../stores/vpn'
+import { useUiStore } from '../stores/ui'
+import type { QuickStartRequestEvent } from '../types/exv'
 
 export interface CoreCrashedEvent {
   exitCode: number | null
@@ -15,9 +17,9 @@ export function useSSE() {
   let unsubscribe: (() => void) | null = null
 
   function connect() {
-    if (window.ecnuVpn) {
+    if (window.exv) {
       disconnect()
-      unsubscribe = window.ecnuVpn.events.subscribe((event) => {
+      unsubscribe = window.exv.events.subscribe((event) => {
         connected.value = true
         error.value = null
 
@@ -39,6 +41,11 @@ export function useSSE() {
         if (event.type === 'service-progress' && event.data && typeof event.data === 'object') {
           const store = useVpnStore()
           store.addServiceProgress(event.data as ServiceProgressEntry)
+        }
+
+        if (event.type === 'quick-start-request' && event.data && typeof event.data === 'object') {
+          const ui = useUiStore()
+          ui.openQuickStart(event.data as QuickStartRequestEvent)
         }
 
         if (event.type === 'core-crashed' && event.data && typeof event.data === 'object') {

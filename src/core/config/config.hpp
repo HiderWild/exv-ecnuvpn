@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace ecnuvpn {
+namespace exv {
 
 struct Config {
   std::string server = "https://vpn-ct.ecnu.edu.cn";
@@ -16,7 +16,7 @@ struct Config {
   int mtu = 1290;
   std::string useragent = platform::config_defaults().useragent;
   bool disable_dtls = platform::config_defaults().disable_dtls;
-  bool remember_password = true; // false = prompt hidden input at connect time
+  bool remember_password = false; // false = prompt hidden input at connect time
   std::vector<std::string> routes = {
       "49.52.4.0/25",      "59.78.176.0/20",  "59.78.199.0/21",
       "58.198.176.128/25", "219.228.60.69",   "59.78.189.128/25",
@@ -30,6 +30,10 @@ struct Config {
   bool minimal_mode = false;
   bool service_install_prompt_seen = false;
   bool minimal_install_service_before_connect = true;
+  bool include_class_a_private_routes = false;
+  bool include_class_b_private_routes = false;
+  bool launch_at_login = false;
+  bool auto_connect_on_launch = false;
 
   NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(Config, server, username,
                                               password, mtu, useragent,
@@ -41,7 +45,11 @@ struct Config {
                                               auto_reconnect,
                                               minimal_mode,
                                               service_install_prompt_seen,
-                                              minimal_install_service_before_connect)
+                                              minimal_install_service_before_connect,
+                                              include_class_a_private_routes,
+                                              include_class_b_private_routes,
+                                              launch_at_login,
+                                              auto_connect_on_launch)
 };
 
 inline void normalize_native_only(Config &cfg) { cfg.vpn_engine = "native"; }
@@ -79,4 +87,4 @@ void key_show();
 bool key_reset();
 
 } // namespace config
-} // namespace ecnuvpn
+} // namespace exv
