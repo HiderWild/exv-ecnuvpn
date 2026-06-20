@@ -23,8 +23,6 @@ const ui = useUiStore()
 const { connect: sseConnect, disconnect: sseDisconnect, coreCrashed, coreCrashInfo, resetCrashState } = useSSE()
 const route = useRoute()
 
-const servicePromptVisible = ref(false)
-const servicePromptBusy = ref(false)
 const closePromptVisible = ref(false)
 const closePromptBusy = ref(false)
 const closeChoice = ref<'tray' | 'quit'>('tray')
@@ -56,21 +54,6 @@ onMounted(async () => {
     config.fetchAuthConfig(),
     vpn.fetchAppShellState(),
   ])
-  // AppWindowFrame owns native window sizing after initial settings load.
-  if (!config.settings.service_install_prompt_seen && !vpn.serviceInstalled) {
-    await markServicePromptSeen()
-    if (config.settings.minimal_mode && window.ecnuVpn?.modal) {
-      const result = await window.ecnuVpn.modal.serviceInstallPrompt()
-      if (result === 'install') {
-        const installed = await vpn.installService()
-        if (installed) {
-          ui.addToast('辅助服务已安装', 'success')
-        }
-      }
-      return
-    }
-    servicePromptVisible.value = true
-  }
 })
 
 onUnmounted(() => {
@@ -78,34 +61,6 @@ onUnmounted(() => {
   closeEventUnsubscribe?.()
   closeEventUnsubscribe = null
 })
-
-async function markServicePromptSeen() {
-  if (config.settings.service_install_prompt_seen) return
-  try {
-    await config.saveSettings({ service_install_prompt_seen: true })
-  } catch (error) {
-    console.error('[service-prompt] failed to persist prompt state:', error)
-  }
-}
-
-function dismissServicePrompt() {
-  if (servicePromptBusy.value) return
-  servicePromptVisible.value = false
-}
-
-async function installServiceFromPrompt() {
-  if (servicePromptBusy.value) return
-  servicePromptBusy.value = true
-  servicePromptVisible.value = false
-  try {
-    const installed = await vpn.installService()
-    if (installed) {
-      ui.addToast('辅助服务已安装', 'success')
-    }
-  } finally {
-    servicePromptBusy.value = false
-  }
-}
 
 async function resolveClosePrompt(result: 'cancel' | { action: 'tray' | 'quit'; remember: boolean }) {
   if (closePromptBusy.value) return
@@ -168,36 +123,6 @@ async function handleCoreQuit() {
       </main>
     </div>
   </AppWindowFrame>
-
-  <div
-    v-if="servicePromptVisible"
-    class="fixed inset-0 z-50 grid place-items-center bg-black/55 px-4 backdrop-blur-sm"
-  >
-    <section class="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-xl shadow-black/30">
-      <h2 class="text-base font-semibold text-foreground">建议您安装辅助服务</h2>
-      <p class="mt-2 text-sm leading-6 text-muted">
-        安装服务可以免于输入密码提权，精简连接流程。需要管理员权限。
-      </p>
-      <div class="mt-5 flex justify-end gap-2">
-        <button
-          type="button"
-          :disabled="servicePromptBusy"
-          class="rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
-          @click="dismissServicePrompt"
-        >
-          暂不安装
-        </button>
-        <button
-          type="button"
-          :disabled="servicePromptBusy"
-          class="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
-          @click="installServiceFromPrompt"
-        >
-          安装服务
-        </button>
-      </div>
-    </section>
-  </div>
 
   <div
     v-if="closePromptVisible"

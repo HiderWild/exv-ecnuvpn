@@ -187,12 +187,13 @@ describe('native WebView package policy', () => {
     assert.doesNotMatch(startPs1, /Find-ElectronProcess|Electron process/i)
   })
 
-  it('shows service install prompts only when the helper service is not installed', () => {
+  it('keeps first-run service install prompts out of the App bootstrap', () => {
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
     const dashboardVue = readFileSync(join(webuiRoot, 'src', 'pages', 'DashboardPage.vue'), 'utf8')
 
-    assert.match(appVue, /!config\.settings\.service_install_prompt_seen && !vpn\.serviceInstalled/)
-    assert.doesNotMatch(appVue, /!config\.settings\.service_install_prompt_seen && !vpn\.serviceAvailable/)
+    assert.doesNotMatch(appVue, /service_install_prompt_seen/)
+    assert.doesNotMatch(appVue, /serviceInstallPrompt\(/)
+    assert.doesNotMatch(appVue, /markServicePromptSeen/)
     assert.match(dashboardVue, /!vpn\.serviceInstalled/)
     assert.match(dashboardVue, /服务已安装但当前不可用/)
   })
@@ -202,9 +203,9 @@ describe('native WebView package policy', () => {
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
     const frameVue = readFileSync(join(webuiRoot, 'src', 'components', 'AppWindowFrame.vue'), 'utf8')
 
-    assert.doesNotMatch(configStore, /window\.ecnuVpn\.window\.setMode/)
-    assert.match(configStore, /localStorage\.getItem\('ecnu-vpn:minimal-mode'\)/)
-    assert.match(configStore, /localStorage\.setItem\('ecnu-vpn:minimal-mode'/)
+    assert.doesNotMatch(configStore, /window\.exv\.window\.setMode/)
+    assert.match(configStore, /localStorage\.getItem\('exv:minimal-mode'\)/)
+    assert.match(configStore, /localStorage\.setItem\('exv:minimal-mode'/)
     assert.match(configStore, /delete remoteSettings\.minimal_mode/)
     assert.match(configStore, /settings\.value = \{ \.\.\.settings\.value, \.\.\.s \}/)
     assert.doesNotMatch(appVue, /window\.ecnuVpn\?\.window\?\.setMode/)
@@ -213,35 +214,24 @@ describe('native WebView package policy', () => {
     assert.match(frameVue, /window\.ecnuVpn\?\.window\?\.resizeForMode/)
   })
 
-  it('keeps service install prompt seen state in frontend storage only', () => {
+  it('keeps service install prompt seen state in core-owned settings', () => {
     const configStore = readFileSync(join(webuiRoot, 'src', 'stores', 'config.ts'), 'utf8')
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
 
-    assert.match(configStore, /localStorage\.getItem\('ecnu-vpn:service-install-prompt-seen'\)/)
-    assert.match(configStore, /localStorage\.setItem\('ecnu-vpn:service-install-prompt-seen'/)
-    assert.match(configStore, /delete remoteSettings\.service_install_prompt_seen/)
-    assert.match(appVue, /await markServicePromptSeen\(\)[\s\S]*servicePromptVisible\.value = true/)
+    assert.match(configStore, /service_install_prompt_seen: boolean/)
+    assert.doesNotMatch(configStore, /localStorage\.getItem\('exv:service-install-prompt-seen'\)/)
+    assert.doesNotMatch(configStore, /localStorage\.setItem\('exv:service-install-prompt-seen'/)
+    assert.doesNotMatch(configStore, /delete remoteSettings\.service_install_prompt_seen/)
+    assert.doesNotMatch(appVue, /servicePromptVisible/)
   })
 
-  it('marks service install prompts seen before display and keeps dismiss visual-only', () => {
+  it('does not render a renderer-owned service install prompt from App', () => {
     const appVue = readFileSync(join(webuiRoot, 'src', 'App.vue'), 'utf8')
-    const promptGateStart = appVue.indexOf('if (!config.settings.service_install_prompt_seen && !vpn.serviceInstalled)')
-    const dismissStart = appVue.indexOf('function dismissServicePrompt')
-    const installStart = appVue.indexOf('async function installServiceFromPrompt')
-    const closeStart = appVue.indexOf('async function resolveClosePrompt')
-    assert.notEqual(promptGateStart, -1)
-    assert.notEqual(dismissStart, -1)
-    assert.notEqual(installStart, -1)
-    assert.notEqual(closeStart, -1)
 
-    const promptGate = appVue.slice(promptGateStart, dismissStart)
-    const dismissBlock = appVue.slice(dismissStart, installStart)
-    const installBlock = appVue.slice(installStart, closeStart)
-    assert.match(promptGate, /await markServicePromptSeen\(\)[\s\S]*servicePromptVisible\.value = true/)
-    assert.doesNotMatch(dismissBlock, /await markServicePromptSeen\(\)/)
-    assert.match(dismissBlock, /function dismissServicePrompt\(\)[\s\S]*servicePromptVisible\.value = false/)
-    assert.doesNotMatch(installBlock, /await markServicePromptSeen\(\)/)
-    assert.match(installBlock, /servicePromptVisible\.value = false[\s\S]*await vpn\.installService\(\)/)
+    assert.doesNotMatch(appVue, /建议您安装辅助服务/)
+    assert.doesNotMatch(appVue, /function dismissServicePrompt/)
+    assert.doesNotMatch(appVue, /async function installServiceFromPrompt/)
+    assert.match(appVue, /<ServiceInstallLoadingOverlay/)
   })
 
   it('defers native WebView window mode resizing outside the WebMessage callback', () => {

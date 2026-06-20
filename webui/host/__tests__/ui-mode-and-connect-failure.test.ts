@@ -236,10 +236,10 @@ function interfacePropertyNames(text: string, interfaceName: string) {
 }
 
 describe('frontend-owned UI mode state', () => {
-  it('keeps minimal mode and first-run service prompt state in renderer localStorage', () => {
+  it('keeps only minimal mode in renderer localStorage', () => {
     const literals = stringLiterals(configStoreText)
-    assert.ok(literals.includes('ecnu-vpn:minimal-mode'))
-    assert.ok(literals.includes('ecnu-vpn:service-install-prompt-seen'))
+    assert.ok(literals.includes('exv:minimal-mode'))
+    assert.equal(literals.includes('exv:service-install-prompt-seen'), false)
     assert.ok(hasPropertyCall(configStoreText, 'getItem'))
     assert.ok(hasPropertyCall(configStoreText, 'setItem'))
 
@@ -248,10 +248,10 @@ describe('frontend-owned UI mode state', () => {
     assert.ok(names.has('persistFrontendLocalSettings'))
   })
 
-  it('does not send renderer-only settings back to core config storage', () => {
+  it('sends service prompt config fields through core-owned settings unchanged', () => {
     const deleted = deletePropertyNames(configStoreText)
     assert.ok(deleted.has('minimal_mode'))
-    assert.ok(deleted.has('service_install_prompt_seen'))
+    assert.equal(deleted.has('service_install_prompt_seen'), false)
     assert.ok(hasObjectKeysLengthZeroReturn(configStoreText, 'remoteSettings'))
   })
 
