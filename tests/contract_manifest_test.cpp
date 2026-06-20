@@ -593,6 +593,11 @@ int main() {
               "desktop RPC response must include event") &&
        ok;
 
+  ok = expect(contains(exv::contracts::generated::DESKTOP_RPC_EVENT_TYPES,
+                       "quick-start-request"),
+              "desktop RPC event types must include quick-start-request") &&
+       ok;
+
   ok = expect(contains(exv::contracts::generated::CORE_RPC_REQUEST_FIELDS,
                        "payload_json"),
               "core RPC request must include payload_json") &&

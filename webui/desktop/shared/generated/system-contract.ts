@@ -117,7 +117,8 @@ export const DESKTOP_RPC_EVENT_TYPES = [
   "heartbeat",
   "service-progress",
   "close-request",
-  "core-crashed"
+  "core-crashed",
+  "quick-start-request"
 ] as const
 export const DESKTOP_RPC_ERROR_CODES = [
   "helper_unavailable",

@@ -1121,7 +1121,8 @@
         "heartbeat",
         "service-progress",
         "close-request",
-        "core-crashed"
+        "core-crashed",
+        "quick-start-request"
       ]
     }
   },

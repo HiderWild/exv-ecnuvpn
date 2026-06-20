@@ -219,6 +219,8 @@ describe('generated system contract', () => {
     )
 
     assert.deepEqual(DESKTOP_RPC_EVENT_TYPES, desktop.event_types)
+    expectContains(DESKTOP_RPC_EVENT_TYPES, 'quick-start-request')
+    expectContains(desktopEventTypes, 'quick-start-request')
     assert.deepEqual(DESKTOP_RPC_ERROR_CODES, errorCodes)
     assert.deepEqual(DESKTOP_RPC_ERROR_CODE_MAP, errorCodeMap)
     assert.deepEqual(desktopEventTypes, DESKTOP_RPC_EVENT_TYPES)
