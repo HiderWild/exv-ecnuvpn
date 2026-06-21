@@ -510,6 +510,20 @@ UninstallServiceResponse PipeHelperClient::uninstall_service(
     return uninstall_service_response_from_json(json::parse(resp.payload_json));
 }
 
+RepairServiceResponse PipeHelperClient::repair_service(
+    const RepairServiceRequest& req) {
+    json payload = req;
+    auto resp = send_request(HelperOp::RepairService, payload);
+    if (!resp.success) {
+        RepairServiceResponse result;
+        result.success = false;
+        result.exit_code = 1;
+        result.message = resp.error_message;
+        return result;
+    }
+    return repair_service_response_from_json(json::parse(resp.payload_json));
+}
+
 ExportCleanupLeaseResponse PipeHelperClient::export_cleanup_lease(
     const ExportCleanupLeaseRequest& req) {
     json payload = req;

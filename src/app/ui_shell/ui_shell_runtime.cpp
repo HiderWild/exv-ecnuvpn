@@ -7,7 +7,9 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <future>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <thread>
 
@@ -73,12 +75,44 @@ std::string renderer_event_envelope(const CoreRpcEvent &event) {
 }
 
 void request_core_shutdown(CoreRpcClient &client) {
+  static std::atomic_int shutdown_request_id{1100000000};
   CoreRpcRequest request;
   request.action = "core.shutdown";
   request.payload_json = nlohmann::json::object().dump();
-  request.request_id = "ui-shell-shutdown";
+  request.request_id = std::to_string(++shutdown_request_id);
   auto future = client.invoke_async(std::move(request));
   (void)future.wait_for(std::chrono::seconds(2));
+}
+
+std::optional<bool> status_response_connected(const CoreRpcResponse &response) {
+  if (!response.ok || response.data_json.empty()) {
+    return std::nullopt;
+  }
+  try {
+    const auto data = nlohmann::json::parse(response.data_json);
+    if (!data.is_object() || !data.contains("connected") ||
+        !data["connected"].is_boolean()) {
+      return std::nullopt;
+    }
+    return data["connected"].get<bool>();
+  } catch (const nlohmann::json::exception &) {
+    return std::nullopt;
+  }
+}
+
+bool query_vpn_connected_for_close(CoreRpcClient &client) {
+  static std::atomic_int close_status_request_id{1000000000};
+  CoreRpcRequest request;
+  request.action = "status.get";
+  request.payload_json = nlohmann::json::object().dump();
+  request.request_id = std::to_string(++close_status_request_id);
+
+  auto future = client.invoke_async(std::move(request));
+  if (future.wait_for(std::chrono::milliseconds(750)) !=
+      std::future_status::ready) {
+    return true;
+  }
+  return status_response_connected(future.get()).value_or(true);
 }
 
 } // namespace
@@ -101,6 +135,9 @@ int run_ui_shell_window(UiWindow &window,
 
   UiWindowConfig runtime_config = config;
   runtime_config.pump_core_events = [&client]() { client.pump_events(); };
+  runtime_config.is_vpn_connected = [&client]() {
+    return query_vpn_connected_for_close(client);
+  };
 
   AsyncHostBridge bridge(client, [&window](std::string response_json) {
     window.post_host_response(response_json);

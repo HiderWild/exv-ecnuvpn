@@ -80,6 +80,12 @@ int main() {
   if (remembered_close.action != "tray" || !remembered_close.remember) {
     return 1;
   }
+  const ClosePromptResolution smart_close =
+      parse_close_prompt_resolution(
+          R"({"id":7,"action":"window.resolveClosePrompt","payload":{"result":{"action":"smart","remember":true}}})");
+  if (smart_close.action != "smart" || !smart_close.remember) {
+    return 1;
+  }
   const ClosePromptResolution cancelled_close =
       parse_close_prompt_resolution(
           R"({"id":5,"action":"window.resolveClosePrompt","payload":{"result":"cancel"}})");
@@ -111,6 +117,21 @@ int main() {
     return 1;
   }
   if (write_close_preference(close_pref_root, "cancel")) {
+    return 1;
+  }
+  if (!write_close_preference(close_pref_root, "smart")) {
+    return 1;
+  }
+  const auto stored_smart_close_preference =
+      read_close_preference(close_pref_root);
+  if (!stored_smart_close_preference ||
+      *stored_smart_close_preference != "smart") {
+    return 1;
+  }
+  if (!clear_close_preference(close_pref_root)) {
+    return 1;
+  }
+  if (read_close_preference(close_pref_root).has_value()) {
     return 1;
   }
   fs::remove_all(close_pref_root);

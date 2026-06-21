@@ -47,15 +47,16 @@ void add_adapter_line(WindowsDriverAdapterSnapshot *snapshot,
 }
 
 WindowsDriverAdapterSnapshot query_windows_adapter_snapshot() {
-  std::string command =
-      "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-      "\"Get-CimInstance Win32_NetworkAdapter | Where-Object { "
+  std::string script =
+      "Get-CimInstance Win32_NetworkAdapter | Where-Object { "
       "$_.NetEnabled -ne $false } | ForEach-Object { "
       "$name = if ($_.NetConnectionID) { $_.NetConnectionID } else { $_.Name }; "
       "$kind = ''; "
       "if ($_.NetConnectionID -like '*Wintun*' -or $_.Name -like '*Wintun*' -or $_.Description -like '*Wintun*') { $kind = 'wintun' } "
       "elseif ($_.NetConnectionID -like '*TAP*' -or $_.Name -like '*TAP*' -or $_.Description -like '*TAP-Windows*' -or $_.Description -like '*tap0901*') { $kind = 'tap' }; "
-      "if ($kind -and $name) { $kind + [char]9 + $name } }\"";
+      "if ($kind -and $name) { $kind + [char]9 + $name } }";
+  std::string command = platform::powershell_encoded_command(
+      script, "-NoProfile -NonInteractive -ExecutionPolicy Bypass");
 
   WindowsDriverAdapterSnapshot snapshot;
   for (const auto &line : exv::utils::split_lines(platform::run_command_output(command))) {

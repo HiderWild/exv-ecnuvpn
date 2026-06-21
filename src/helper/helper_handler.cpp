@@ -25,6 +25,7 @@ bool requires_core_lease(HelperOp op) {
         case HelperOp::Shutdown:
         case HelperOp::InstallService:
         case HelperOp::UninstallService:
+        case HelperOp::RepairService:
         case HelperOp::ExportCleanupLease:
         case HelperOp::HandoffSession:
         case HelperOp::FinalizeHandoff:
@@ -126,6 +127,10 @@ void HelperHandler::register_handlers() {
     dispatcher_.register_handler(HelperOp::UninstallService,
         [this](const HelperRequest& req, const HelperRequestContext&) {
             return handle_uninstall_service(req);
+        });
+    dispatcher_.register_handler(HelperOp::RepairService,
+        [this](const HelperRequest& req, const HelperRequestContext&) {
+            return handle_repair_service(req);
         });
     dispatcher_.register_handler(HelperOp::ExportCleanupLease,
         [this](const HelperRequest& req, const HelperRequestContext&) {
@@ -350,7 +355,7 @@ HelperMode HelperHandler::current_mode() const {
 std::vector<std::string> HelperHandler::capabilities() const {
     return {"session", "heartbeat", "cleanup", "snapshot", "shutdown",
             "inspect", "core_lease", "service_install",
-            "service_uninstall", "cleanup_lease_export",
+            "service_uninstall", "service_repair", "cleanup_lease_export",
             "session_handoff"};
 }
 
@@ -1258,6 +1263,61 @@ HelperResponse HelperHandler::handle_uninstall_service(
                                  : service_resp.message;
     }
     resp.payload_json = payload.dump();
+    if (service_resp.success && !is_oneshot_context(startup_context_)) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        shutdown_requested_ = true;
+    }
+    return resp;
+}
+
+HelperResponse HelperHandler::handle_repair_service(const HelperRequest& req) {
+    RepairServiceRequest repair_req;
+    try {
+        auto j = nlohmann::json::parse(req.payload_json);
+        repair_req = repair_service_request_from_json(j);
+    } catch (const std::exception& e) {
+        return make_error_response(
+            req.op, "invalid_payload",
+            std::string("Failed to parse RepairService request: ") + e.what());
+    }
+
+    std::shared_ptr<HelperServiceOps> service_ops;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (leases_.active_session_count() > 0) {
+            return make_error_response(
+                req.op, "vpn_session_active",
+                "Disconnect the VPN session before repairing the helper service");
+        }
+        service_ops = service_ops_;
+    }
+    if (!service_ops) {
+        return make_error_response(req.op, "service_ops_unavailable",
+                                   "Helper service operations are not available");
+    }
+
+    RepairServiceResponse service_resp = task_queue_.run_sync(
+        "repair_service", [service_ops, repair_req] {
+            return service_ops->repair_service(repair_req);
+        });
+
+    nlohmann::json payload;
+    to_json(payload, service_resp);
+
+    HelperResponse resp;
+    resp.op = req.op;
+    resp.success = service_resp.success;
+    if (!resp.success) {
+        resp.error_code = "service_repair_failed";
+        resp.error_message = service_resp.message.empty()
+                                 ? "Helper service repair failed"
+                                 : service_resp.message;
+    }
+    resp.payload_json = payload.dump();
+    if (service_resp.success && !is_oneshot_context(startup_context_)) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        shutdown_requested_ = true;
+    }
     return resp;
 }
 

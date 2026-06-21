@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(exv VERSION 3.3.0 LANGUAGES CXX)
+project(exv VERSION 3.3.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -1291,6 +1291,7 @@ target_include_directories(exv-ui PRIVATE
 )
 
 if(WIN32)
+    set_target_properties(exv-ui PROPERTIES WIN32_EXECUTABLE TRUE)
     target_link_libraries(exv-ui PRIVATE advapi32 urlmon shell32 exv-core)
     target_include_directories(exv-ui PRIVATE
         ${CMAKE_SOURCE_DIR}/src/platform/win32/ui_shell

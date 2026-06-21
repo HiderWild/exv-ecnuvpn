@@ -3,6 +3,11 @@ import { AlertOctagon } from 'lucide-vue-next'
 import { useUiStore } from '../stores/ui'
 import ModalShell from './ModalShell.vue'
 
+const props = withDefaults(defineProps<{
+  compact?: boolean
+}>(), {
+  compact: false,
+})
 const ui = useUiStore()
 </script>
 
@@ -11,6 +16,7 @@ const ui = useUiStore()
     :open="ui.errorModal.visible"
     :title="ui.errorModal.title"
     :description="ui.errorModal.message"
+    :compact="props.compact"
     size="sm"
     @close="ui.closeError"
   >

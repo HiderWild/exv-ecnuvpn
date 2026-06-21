@@ -43,6 +43,7 @@ export const desktopApiPaths = {
   service: '/service',
   serviceInstall: '/service/install',
   serviceUninstall: '/service/uninstall',
+  serviceRepair: '/service/repair',
   cli: '/cli',
   cliInstall: '/cli/install',
   cliUninstall: '/cli/uninstall',

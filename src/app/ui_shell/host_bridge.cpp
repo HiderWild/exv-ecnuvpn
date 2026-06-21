@@ -21,7 +21,10 @@ std::string error_response(int id, std::string_view code,
 } // namespace
 
 bool is_allowed_host_action(std::string_view action) {
-  if (action == "window.resolveClosePrompt" || action == "window.setMode") {
+  if (action == "window.resolveClosePrompt" || action == "window.setMode" ||
+      action == "window.getClosePreference" ||
+      action == "window.setClosePreference" ||
+      action == "window.resetClosePreference") {
     return true;
   }
   const auto &desktop_actions = exv::contracts::generated::DESKTOP_RPC_ACTIONS;

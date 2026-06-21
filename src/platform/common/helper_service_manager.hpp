@@ -19,6 +19,7 @@ struct HelperServiceManagerContext {
 int install_helper_service(const std::string &executable_path,
                            const HelperServiceManagerContext &context);
 int uninstall_helper_service(const HelperServiceManagerContext &context);
+int repair_helper_service(const HelperServiceManagerContext &context);
 int show_helper_service_status(const HelperServiceManagerContext &context);
 
 } // namespace platform

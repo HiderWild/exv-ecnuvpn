@@ -47,6 +47,7 @@ constexpr UINT kTrayCallbackMessage = WM_APP + 0x42;
 constexpr UINT kApplyWindowModeMessage = WM_APP + 0x43;
 constexpr UINT kHostBridgeResponseMessage = WM_APP + 0x44;
 constexpr UINT kRendererEventMessage = WM_APP + 0x45;
+constexpr UINT kSmartCloseResolvedMessage = WM_APP + 0x46;
 constexpr UINT kTrayIconId = 1;
 constexpr int kCustomTitlebarHeightPx = 34;
 constexpr int kWindowControlWidthPx = 88;
@@ -440,6 +441,7 @@ private:
 class WebView2Window final : public exv::ui_shell::UiWindow {
 public:
   ~WebView2Window() override {
+    join_smart_close_thread();
     stop_host_bridge_worker();
     if (webview_ && web_message_token_.value != 0) {
       webview_->remove_WebMessageReceived(web_message_token_);
@@ -505,6 +507,7 @@ public:
     }
 
     stop_host_bridge_worker();
+    join_smart_close_thread();
     if (hwnd_) {
       DestroyWindow(hwnd_);
       hwnd_ = nullptr;
@@ -629,6 +632,7 @@ public:
       controller2->put_DefaultBackgroundColor(transparent);
     }
     configure_non_client_region_support();
+    configure_fixed_zoom_behavior();
 
     resize_webview();
     if (!configure_packaged_renderer_origin()) {
@@ -816,6 +820,48 @@ public:
       }
       if (action == "window.requestClose") {
         request_close_decision();
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        post_bridge_success(id, data);
+        return S_OK;
+      }
+      if (action == "window.getClosePreference") {
+        nlohmann::ordered_json data;
+        if (const auto preference =
+                exv::ui_shell::read_close_preference(active_config_.state_dir)) {
+          data["action"] = *preference;
+        } else {
+          data["action"] = nullptr;
+        }
+        post_bridge_success(id, data);
+        return S_OK;
+      }
+      if (action == "window.setClosePreference") {
+        std::string close_action;
+        if (parsed.contains("payload") && parsed["payload"].is_object()) {
+          const auto &payload = parsed["payload"];
+          if (payload.contains("action") && payload["action"].is_string()) {
+            close_action = payload["action"].get<std::string>();
+          }
+        }
+        if (!exv::ui_shell::write_close_preference(active_config_.state_dir,
+                                                   close_action)) {
+          post_bridge_error(id, "invalid_close_preference",
+                            "Invalid close preference.");
+          return S_OK;
+        }
+        nlohmann::ordered_json data;
+        data["ok"] = true;
+        data["action"] = close_action;
+        post_bridge_success(id, data);
+        return S_OK;
+      }
+      if (action == "window.resetClosePreference") {
+        if (!exv::ui_shell::clear_close_preference(active_config_.state_dir)) {
+          post_bridge_error(id, "close_preference_reset_failed",
+                            "Unable to reset close preference.");
+          return S_OK;
+        }
         nlohmann::ordered_json data;
         data["ok"] = true;
         post_bridge_success(id, data);
@@ -1104,16 +1150,32 @@ public:
     }
   }
 
+  void hide_to_tray() {
+    if (hwnd_) {
+      ShowWindow(hwnd_, SW_HIDE);
+    }
+  }
+
   void request_close_decision() {
     if (close_prompt_pending_) {
       show_from_tray();
       return;
     }
-    if (const auto remembered_action =
-            exv::ui_shell::read_close_preference(active_config_.state_dir)) {
+
+    const auto remembered_action =
+        exv::ui_shell::read_close_preference(active_config_.state_dir);
+    switch (webview2_close_decision_for_connection(
+        false, remembered_action.has_value())) {
+    case WebView2CloseDecision::QuitImmediately:
+      quit_from_tray();
+      return;
+    case WebView2CloseDecision::ApplyRememberedPreference:
       apply_close_resolution({*remembered_action, false});
       return;
+    case WebView2CloseDecision::Prompt:
+      break;
     }
+
     close_prompt_pending_ = true;
     emit_event(R"({"type":"close-request","data":{}})");
   }
@@ -1127,13 +1189,54 @@ public:
     }
 
     if (resolution.action == "tray") {
-      if (hwnd_) {
-        ShowWindow(hwnd_, SW_HIDE);
-      }
+      hide_to_tray();
     } else if (resolution.action == "quit") {
       quit_from_tray();
+    } else if (resolution.action == "smart") {
+      begin_smart_close_resolution();
     } else {
       show_from_tray();
+    }
+  }
+
+  void begin_smart_close_resolution() {
+    hide_to_tray();
+    if (!hwnd_) {
+      quit_from_tray();
+      return;
+    }
+    if (smart_close_pending_) {
+      return;
+    }
+    join_smart_close_thread();
+    smart_close_pending_ = true;
+
+    const HWND hwnd = hwnd_;
+    auto is_vpn_connected = active_config_.is_vpn_connected;
+    smart_close_thread_ = std::thread([hwnd, is_vpn_connected]() mutable {
+      bool connected = false;
+      if (is_vpn_connected) {
+        try {
+          connected = is_vpn_connected();
+        } catch (...) {
+          connected = false;
+        }
+      }
+      PostMessageW(hwnd, kSmartCloseResolvedMessage, connected ? 1 : 0, 0);
+    });
+  }
+
+  void handle_smart_close_resolved(bool vpn_connected) {
+    smart_close_pending_ = false;
+    join_smart_close_thread();
+    if (!vpn_connected) {
+      quit_from_tray();
+    }
+  }
+
+  void join_smart_close_thread() {
+    if (smart_close_thread_.joinable()) {
+      smart_close_thread_.join();
     }
   }
 
@@ -1497,6 +1600,24 @@ private:
     }
   }
 
+  void configure_fixed_zoom_behavior() {
+    if (controller_) {
+      controller_->put_ZoomFactor(1.0);
+    }
+    if (!webview_) {
+      return;
+    }
+
+    ICoreWebView2Settings *raw_settings = nullptr;
+    if (FAILED(webview_->get_Settings(&raw_settings)) || !raw_settings) {
+      return;
+    }
+
+    ComPtr<ICoreWebView2Settings> settings;
+    settings.attach(raw_settings);
+    settings->put_IsZoomControlEnabled(FALSE);
+  }
+
   bool configure_packaged_renderer_origin() {
     if (active_config_.renderer.kind ==
         exv::ui_shell::RendererAssetKind::DevServer) {
@@ -1650,6 +1771,7 @@ private:
       status: () => rpc('service.status'),
       install: () => rpc('service.install'),
       uninstall: () => rpc('service.uninstall'),
+      repair: () => rpc('service.repair'),
     },
     cli: {
       status: () => rpc('cli.status'),
@@ -1675,6 +1797,9 @@ private:
       resizeForMode: (mode, request) => rpc('window.resizeForMode', { mode, request }),
       minimize: () => rpc('window.minimize'),
       requestClose: () => rpc('window.requestClose'),
+      getClosePreference: () => rpc('window.getClosePreference'),
+      setClosePreference: (action) => rpc('window.setClosePreference', { action }),
+      resetClosePreference: () => rpc('window.resetClosePreference'),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
       startDrag: (drag) => rpc('window.startDrag', drag ?? {}),
     },
@@ -1879,6 +2004,9 @@ private:
       case kRendererEventMessage:
         self->flush_renderer_events();
         return 0;
+      case kSmartCloseResolvedMessage:
+        self->handle_smart_close_resolved(wparam != 0);
+        return 0;
       default:
         break;
       }
@@ -1905,6 +2033,7 @@ private:
   std::mutex host_response_mutex_;
   std::queue<std::string> host_response_queue_;
   std::thread host_request_thread_;
+  std::thread smart_close_thread_;
   NOTIFYICONDATAW tray_icon_{};
   DWORD ui_thread_id_ = 0;
   UINT taskbar_created_message_ = 0;
@@ -1915,6 +2044,7 @@ private:
   bool tray_icon_added_ = false;
   bool force_quit_ = false;
   bool close_prompt_pending_ = false;
+  bool smart_close_pending_ = false;
   bool tracking_non_client_mouse_leave_ = false;
   LRESULT active_window_control_hit_ = HTCLIENT;
   LRESULT window_control_state_hit_ = HTCLIENT;
@@ -2023,6 +2153,15 @@ webview2_window_mode_bounds_for_dpi(std::string_view mode,
 
 bool webview2_should_create_tray_on_start() {
   return true;
+}
+
+WebView2CloseDecision webview2_close_decision_for_connection(
+    bool vpn_connected, bool has_remembered_preference) noexcept {
+  (void)vpn_connected;
+  if (has_remembered_preference) {
+    return WebView2CloseDecision::ApplyRememberedPreference;
+  }
+  return WebView2CloseDecision::Prompt;
 }
 
 int webview2_app_icon_resource_id() noexcept {

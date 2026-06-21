@@ -234,6 +234,14 @@ struct UninstallServiceResponse {
     std::string message;
 };
 
+struct RepairServiceRequest {};
+
+struct RepairServiceResponse {
+    bool success = false;
+    int exit_code = 1;
+    std::string message;
+};
+
 struct CleanupLeaseSession {
     SessionId session_id;
     ProfileId profile_id;
@@ -408,6 +416,12 @@ UninstallServiceRequest uninstall_service_request_from_json(const json& j);
 void to_json(json& j, const UninstallServiceResponse& resp);
 void from_json(const json& j, UninstallServiceResponse& resp);
 UninstallServiceResponse uninstall_service_response_from_json(const json& j);
+void to_json(json& j, const RepairServiceRequest& req);
+void from_json(const json& j, RepairServiceRequest& req);
+RepairServiceRequest repair_service_request_from_json(const json& j);
+void to_json(json& j, const RepairServiceResponse& resp);
+void from_json(const json& j, RepairServiceResponse& resp);
+RepairServiceResponse repair_service_response_from_json(const json& j);
 void to_json(json& j, const CleanupLeaseSession& session);
 void from_json(const json& j, CleanupLeaseSession& session);
 CleanupLeaseSession cleanup_lease_session_from_json(const json& j);

@@ -14,6 +14,7 @@ struct UiWindowConfig {
   std::string exv_path;
   bool enable_dev_tools = false;
   std::function<void()> pump_core_events;
+  std::function<bool()> is_vpn_connected;
   std::string state_dir;
 };
 

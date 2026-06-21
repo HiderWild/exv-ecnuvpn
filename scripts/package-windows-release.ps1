@@ -1,7 +1,8 @@
 param(
-  [Parameter(Mandatory = $true)]
-  [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._+-]*$')]
-  [string]$Version,
+  [ValidatePattern('^$|^[0-9]+(\.[0-9]+){2,3}$')]
+  [string]$Version = "",
+  [ValidatePattern('^$|^[0-9A-Za-z][0-9A-Za-z._+-]*$')]
+  [string]$BuildLabel = "",
   [switch]$SkipBuild,
   [string]$PackageRoot = "",
   [string]$OutputDir = "",
@@ -21,6 +22,46 @@ function Resolve-AbsolutePath {
   }
 
   return [System.IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
+}
+
+function Get-CmakeProjectVersion {
+  param([Parameter(Mandatory = $true)][string]$CMakeListsPath)
+
+  if (-not (Test-Path -LiteralPath $CMakeListsPath -PathType Leaf)) {
+    throw "CMakeLists.txt not found: $CMakeListsPath"
+  }
+
+  $content = Get-Content -LiteralPath $CMakeListsPath -Raw
+  $match = [regex]::Match(
+    $content,
+    '(?m)^\s*project\s*\(\s*exv\s+VERSION\s+([0-9]+(?:\.[0-9]+){2,3})\b'
+  )
+  if (-not $match.Success) {
+    throw "Unable to read project(exv VERSION ...) from $CMakeListsPath"
+  }
+
+  return $match.Groups[1].Value
+}
+
+function Assert-ProductVersion {
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  if ($Value -notmatch '^[0-9]+(\.[0-9]+){2,3}$') {
+    throw "Product version must be a CMake-compatible numeric version such as 3.3.0: $Value"
+  }
+}
+
+function Join-ArtifactVersion {
+  param(
+    [Parameter(Mandatory = $true)][string]$Version,
+    [string]$BuildLabel = ""
+  )
+
+  if ([string]::IsNullOrWhiteSpace($BuildLabel)) {
+    return $Version
+  }
+
+  return "$Version-$BuildLabel"
 }
 
 function Invoke-Step {
@@ -60,6 +101,14 @@ function Resolve-MakeNsis {
   }
   if (${env:ProgramFiles(x86)}) {
     [void]$candidates.Add((Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'))
+  }
+  $environmentRoot = 'D:\Development\Environment'
+  if (Test-Path -LiteralPath $environmentRoot -PathType Container) {
+    $nsisDirs = @(Get-ChildItem -LiteralPath $environmentRoot -Directory -Filter 'NSIS-*' -ErrorAction SilentlyContinue)
+    foreach ($nsisDir in $nsisDirs) {
+      [void]$candidates.Add((Join-Path $nsisDir.FullName 'Bin\makensis.exe'))
+      [void]$candidates.Add((Join-Path $nsisDir.FullName 'makensis.exe'))
+    }
   }
 
   foreach ($candidate in $candidates) {
@@ -131,11 +180,82 @@ function New-PortableZip {
   }
 }
 
+function Get-RunningExvProcesses {
+  $filter = "Name='exv.exe' OR Name='exv-ui.exe' OR Name='exv-helper.exe'"
+  return @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue)
+}
+
+function Stop-PackageSmokeProcesses {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [int[]]$KnownProcessIds = @()
+  )
+
+  $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+  $known = @{}
+  foreach ($processId in $KnownProcessIds) {
+    $known[[int]$processId] = $true
+  }
+
+  foreach ($process in Get-RunningExvProcesses) {
+    $processId = [int]$process.ProcessId
+    if ($known.ContainsKey($processId)) {
+      continue
+    }
+
+    $exePath = [string]$process.ExecutablePath
+    $commandLine = [string]$process.CommandLine
+    $matchesPackageRoot = $false
+    if (-not [string]::IsNullOrWhiteSpace($exePath)) {
+      try {
+        $exeFull = [System.IO.Path]::GetFullPath($exePath)
+        $matchesPackageRoot = $exeFull.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+      } catch { }
+    }
+    if (-not $matchesPackageRoot -and
+        -not [string]::IsNullOrWhiteSpace($commandLine)) {
+      $matchesPackageRoot = $commandLine.IndexOf($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    }
+
+    # Some short-lived MinGW processes have already lost queryable image
+    # metadata by cleanup time. If they were not present before smoke and have
+    # an EXV binary name, treat them as smoke children so the temp package can
+    # be removed.
+    $unknownImage = [string]::IsNullOrWhiteSpace($exePath) -and
+      [string]::IsNullOrWhiteSpace($commandLine)
+    if ($matchesPackageRoot -or $unknownImage) {
+      Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Remove-DirectoryWithRetry {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$ProcessRoot,
+    [int[]]$KnownProcessIds = @()
+  )
+
+  for ($attempt = 1; $attempt -le 6; $attempt++) {
+    Stop-PackageSmokeProcesses -Root $ProcessRoot -KnownProcessIds $KnownProcessIds
+    try {
+      Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+      return
+    } catch {
+      if ($attempt -eq 6) {
+        throw
+      }
+      Start-Sleep -Milliseconds (200 * $attempt)
+    }
+  }
+}
+
 function Test-PortableZip {
   param([Parameter(Mandatory = $true)][string]$Archive)
 
   $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("exv-portable-" + [System.Guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $tempRoot | Out-Null
+  $knownExvProcessIds = @(Get-RunningExvProcesses | ForEach-Object { [int]$_.ProcessId })
 
   try {
     Expand-Archive -LiteralPath $Archive -DestinationPath $tempRoot -Force
@@ -159,7 +279,7 @@ function Test-PortableZip {
   }
   finally {
     if (Test-Path -LiteralPath $tempRoot) {
-      Remove-Item -LiteralPath $tempRoot -Recurse -Force
+      Remove-DirectoryWithRetry -Path $tempRoot -ProcessRoot $tempRoot -KnownProcessIds $knownExvProcessIds
     }
   }
 }
@@ -238,6 +358,8 @@ function Invoke-Nsis {
   $defaultInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\EXV'
   Invoke-Step -FilePath $MakeNsis -Arguments @(
     '/V2',
+    '/INPUTCHARSET',
+    'UTF8',
     "/DAPP_VERSION=$AppVersion",
     "/DSOURCE_DIR=$SourceDir",
     "/DOUTPUT_FILE=$OutputFile",
@@ -273,6 +395,14 @@ $resolvedOutputDir = if ([string]::IsNullOrWhiteSpace($OutputDir)) {
   Resolve-AbsolutePath $OutputDir
 }
 
+$productVersion = if ([string]::IsNullOrWhiteSpace($Version)) {
+  Get-CmakeProjectVersion -CMakeListsPath (Join-Path $repoRoot 'CMakeLists.txt')
+} else {
+  $Version
+}
+Assert-ProductVersion $productVersion
+$artifactVersion = Join-ArtifactVersion -Version $productVersion -BuildLabel $BuildLabel
+
 if (-not $SkipBuild) {
   $buildScript = Join-Path $repoRoot 'scripts\build-windows.ps1'
   Invoke-Step -FilePath 'powershell.exe' -Arguments @(
@@ -290,17 +420,21 @@ New-Item -ItemType Directory -Path $resolvedOutputDir -Force | Out-Null
 
 Invoke-PackageVerifier $resolvedPackageRoot
 
-$portableZip = Join-Path $resolvedOutputDir "EXV-$Version-windows-x64-portable.zip"
-$installerExe = Join-Path $resolvedOutputDir "EXV-$Version-windows-x64-setup.exe"
+$portableZip = Join-Path $resolvedOutputDir "EXV-$artifactVersion-windows-x64-portable.zip"
+$installerExe = Join-Path $resolvedOutputDir "EXV-$artifactVersion-windows-x64-setup.exe"
 
 New-PortableZip -Root $resolvedPackageRoot -Destination $portableZip
 Test-PortableZip -Archive $portableZip
 
 $makeNsis = Resolve-MakeNsis $NsisPath
-Invoke-Nsis -MakeNsis $makeNsis -SourceDir $resolvedPackageRoot -OutputFile $installerExe -AppVersion $Version
+Invoke-Nsis -MakeNsis $makeNsis -SourceDir $resolvedPackageRoot -OutputFile $installerExe -AppVersion $productVersion
 Assert-InstallerOutput $installerExe
 
 Write-Host ''
 Write-Host 'Windows release artifacts:' -ForegroundColor Cyan
+Write-Host "  Product version: $productVersion"
+if (-not [string]::IsNullOrWhiteSpace($BuildLabel)) {
+  Write-Host "  Build label: $BuildLabel"
+}
 Write-Host "  Portable: $portableZip"
 Write-Host "  Installer: $installerExe"

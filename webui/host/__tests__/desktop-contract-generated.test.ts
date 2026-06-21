@@ -105,6 +105,9 @@ describe('generated system contract', () => {
     assert(CORE_RPC_ACTIONS.includes('core.hello'))
     assert(CORE_RPC_ACTIONS.includes('config.import'))
     assert(CORE_RPC_ACTIONS.includes('maintenance.inspectCore'))
+    assert(CORE_RPC_ACTIONS.includes('service.repair'))
+    assert(DESKTOP_RPC_ACTIONS.includes('service.repair'))
+    assert.equal(ACTION_OWNER_MAP['service.repair'], 'core_rpc')
     assert(DESTRUCTIVE_CORE_RPC_ACTIONS.includes('key.reset'))
     assert(STANDARD_ERROR_CODES.includes('config_import_tampered_or_wrong_password'))
     assert.equal(IPC_PROTOCOL_MAJOR, 1)
@@ -118,6 +121,7 @@ describe('generated system contract', () => {
     expectContains(CORE_RPC_ACTIONS, 'key.status')
     expectContains(CORE_RPC_ACTIONS, 'key.reset')
     expectContains(CORE_RPC_ACTIONS, 'logs.clear')
+    expectContains(CORE_RPC_ACTIONS, 'service.repair')
     expectContains(CORE_RPC_ACTIONS, 'maintenance.inspectCore')
     expectContains(CORE_RPC_ACTIONS, 'maintenance.killStaleCore')
 

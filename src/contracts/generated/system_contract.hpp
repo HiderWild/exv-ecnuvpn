@@ -16,21 +16,21 @@ inline constexpr std::array<std::string_view, 5> DESKTOP_RPC_RESPONSE_FIELDS = {
 inline constexpr std::array<std::string_view, 3> CORE_RPC_REQUEST_FIELDS = {{"action", "payload_json", "request_id"}};
 inline constexpr std::array<std::string_view, 5> CORE_RPC_RESPONSE_FIELDS = {{"success", "payload_json", "error_code", "error_message", "request_id"}};
 
-inline constexpr std::array<std::string_view, 31> CORE_RPC_ACTIONS = {{"core.hello", "status.get", "vpn.connect", "vpn.disconnect", "config.get", "config.save", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.reset", "config.import", "config.export", "config.get_profile", "config.save_profile", "key.status", "key.reset", "routes.list", "routes.add", "routes.remove", "routes.reset", "logs.list", "logs.clear", "service.status", "service.install", "service.uninstall", "runtime.status", "drivers.status", "drivers.install", "maintenance.inspectCore", "maintenance.killStaleCore"}};
+inline constexpr std::array<std::string_view, 32> CORE_RPC_ACTIONS = {{"core.hello", "status.get", "vpn.connect", "vpn.disconnect", "config.get", "config.save", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.reset", "config.import", "config.export", "config.get_profile", "config.save_profile", "key.status", "key.reset", "routes.list", "routes.add", "routes.remove", "routes.reset", "logs.list", "logs.clear", "service.status", "service.install", "service.uninstall", "service.repair", "runtime.status", "drivers.status", "drivers.install", "maintenance.inspectCore", "maintenance.killStaleCore"}};
 inline constexpr std::array<std::string_view, 3> DESTRUCTIVE_CORE_RPC_ACTIONS = {{"config.reset", "key.reset", "maintenance.killStaleCore"}};
 inline constexpr std::array<std::string_view, 17> STANDARD_ERROR_CODES = {{"confirmation_required", "invalid_payload", "invalid_config", "unsupported_contract_version", "core_comm_broken", "core_unresponsive", "core_protocol_mismatch", "core_not_found", "core_launch_failed", "core_version_probe_failed", "config_import_format_unsupported", "config_import_auth_failed", "config_import_tampered_or_wrong_password", "credential_store_unavailable", "key_missing", "key_corrupt", "log_clear_failed"}};
-inline constexpr std::array<std::string_view, 26> DESKTOP_RPC_ACTIONS = {{"status.get", "vpn.connect", "vpn.disconnect", "vpn.authInteraction.get", "vpn.authInteraction.respond", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "routes.list", "routes.add", "routes.remove", "routes.reset", "service.status", "helper.status", "runtime.status", "cli.status", "cli.install", "cli.uninstall", "drivers.status", "drivers.install", "service.install", "service.uninstall", "logs.list", "logs.clear"}};
+inline constexpr std::array<std::string_view, 27> DESKTOP_RPC_ACTIONS = {{"status.get", "vpn.connect", "vpn.disconnect", "vpn.authInteraction.get", "vpn.authInteraction.respond", "config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.getKey", "routes.list", "routes.add", "routes.remove", "routes.reset", "service.status", "helper.status", "runtime.status", "cli.status", "cli.install", "cli.uninstall", "drivers.status", "drivers.install", "service.install", "service.uninstall", "service.repair", "logs.list", "logs.clear"}};
 inline constexpr std::array<std::string_view, 7> DESKTOP_RPC_EVENT_TYPES = {{"log", "status", "heartbeat", "service-progress", "close-request", "core-crashed", "quick-start-request"}};
 inline constexpr std::array<std::string_view, 32> DESKTOP_RPC_ERROR_CODES = {{"helper_unavailable", "service_not_installed", "service_installed_not_running", "service_start_failed", "oneshot_not_supported", "oneshot_elevation_denied", "helper_rpc_failed", "auth_failed", "auth_protocol_mismatch", "auth_rejected", "auth_challenge_required", "auth_group_required", "auth_expired", "csd_required_unsupported", "dtls_unavailable", "tunnel_disconnected", "session_timeout", "idle_timeout", "rekey_unsupported", "cstp_compressed_unsupported", "unsupported_extra_args", "tls_verify_failed", "wintun_missing", "utun_permission_denied", "unsupported_dtls", "permission_denied", "network_unreachable", "user_cancelled", "invalid_request", "log_clear_failed", "connection_failed", "vpn_start_failed"}};
 inline constexpr std::array<std::string_view, 6> CONFIG_ACTIONS = {{"config.getAuth", "config.saveAuth", "config.getSettings", "config.saveSettings", "config.profile.get", "config.profile.save"}};
 inline constexpr std::array<std::string_view, 4> CONFIG_LEGACY_ALIASES = {{"config.get", "config.save", "config.get_profile", "config.save_profile"}};
-inline constexpr std::array<std::string_view, 17> HELPER_OPS = {{"Hello", "StartSession", "PrepareTunnelDevice", "ApplyTunnelConfig", "Heartbeat", "Cleanup", "GetSnapshot", "Shutdown", "Inspect", "AcquireCoreLease", "KeepAlive", "ReleaseCoreLease", "InstallService", "UninstallService", "ExportCleanupLease", "HandoffSession", "FinalizeHandoff"}};
+inline constexpr std::array<std::string_view, 18> HELPER_OPS = {{"Hello", "StartSession", "PrepareTunnelDevice", "ApplyTunnelConfig", "Heartbeat", "Cleanup", "GetSnapshot", "Shutdown", "Inspect", "AcquireCoreLease", "KeepAlive", "ReleaseCoreLease", "InstallService", "UninstallService", "ExportCleanupLease", "HandoffSession", "FinalizeHandoff", "RepairService"}};
 inline constexpr std::array<std::string_view, 11> TUNNEL_PHASES = {{"Idle", "PreparingHelper", "Authenticating", "ConnectingCstp", "ApplyingNetworkConfig", "OpeningPacketDevice", "Connected", "Reconnecting", "Disconnecting", "CleaningUp", "Failed"}};
 inline constexpr std::array<std::string_view, 18> TUNNEL_EVENTS = {{"UserConnect", "UserDisconnect", "SetAutoReconnect", "HelperReady", "AuthSucceeded", "AuthFailed", "AuthChallengeRequired", "AuthGroupRequired", "CstpConnected", "NetworkConfigApplied", "PacketLoopStarted", "TransportClosed", "PacketDeviceFailed", "HelperLost", "LeaseExpired", "ReconnectTimerFired", "CleanupSucceeded", "CleanupFailed"}};
 inline constexpr std::array<std::string_view, 8> TUNNEL_DISCONNECT_REASONS = {{"UserRequested", "AuthFailed", "CertError", "TransportClosed", "HelperLost", "PacketDeviceFailed", "NetworkConfigFailed", "LeaseExpired"}};
 inline constexpr std::array<std::string_view, 8> TUNNEL_ERROR_DOMAINS = {{"transport", "auth", "helper", "os.route", "os.dns", "packet", "config", "native"}};
 inline constexpr std::array<std::string_view, 10> TUNNEL_STATUS_FIELDS = {{"phase", "desired_connected", "auto_reconnect", "helper_mode", "helper_status", "network_ready", "server", "interface_name", "last_error", "reconnect"}};
-inline constexpr std::array<std::string_view, 13> SRC_ALLOWED_TOP_LEVEL_DIRS = {{"app", "base", "cli", "common", "contracts", "core", "feedback", "helper", "observability", "platform", "runtime", "utils", "vpn_engine"}};
+inline constexpr std::array<std::string_view, 14> SRC_ALLOWED_TOP_LEVEL_DIRS = {{"app", "base", "cli", "common", "contracts", "core", "feedback", "generated", "helper", "observability", "platform", "runtime", "utils", "vpn_engine"}};
 inline constexpr std::array<std::string_view, 11> SRC_FORBIDDEN_PATTERNS = {{"src/*.hpp", "src/*.cpp", "src/core_api", "*.inc.cpp", "#include \"*.inc.cpp\"", "src/webui_assets.hpp", "platform include logger.hpp", "platform include vpn.hpp", "platform include tunnel.hpp", "platform include virtual_network.hpp", "platform include core/*"}};
 inline constexpr std::array<std::string_view, 14> HELPER_FORBIDDEN_CREDENTIAL_FIELDS = {{"password", "passwd", "cookie", "token", "secret", "credential", "auth_key", "auth_token", "session_cookie", "webvpn_cookie", "csrf_token", "bearer_token", "api_key", "apikey"}};
 
@@ -40,7 +40,7 @@ struct ActionOwnerContract {
     std::string_view canonical;
 };
 
-inline constexpr std::array<ActionOwnerContract, 49> ACTION_OWNERS = {{
+inline constexpr std::array<ActionOwnerContract, 50> ACTION_OWNERS = {{
     {"core.hello", "core_rpc", ""},
     {"status.get", "core_rpc", ""},
     {"vpn.connect", "core_rpc", ""},
@@ -81,6 +81,7 @@ inline constexpr std::array<ActionOwnerContract, 49> ACTION_OWNERS = {{
     {"helper.status", "desktop_host_adapter", ""},
     {"service.install", "core_rpc", ""},
     {"service.uninstall", "core_rpc", ""},
+    {"service.repair", "core_rpc", ""},
     {"service.driver_status", "core_rpc", ""},
     {"runtime.status", "core_rpc", ""},
     {"cli.status", "desktop_host_adapter", ""},
@@ -98,7 +99,7 @@ struct HelperOpContract {
     bool requires_session;
 };
 
-inline constexpr std::array<HelperOpContract, 17> HELPER_OP_CONTRACTS = {{
+inline constexpr std::array<HelperOpContract, 18> HELPER_OP_CONTRACTS = {{
     {"Hello", 1, false},
     {"StartSession", 2, false},
     {"PrepareTunnelDevice", 3, true},
@@ -116,6 +117,7 @@ inline constexpr std::array<HelperOpContract, 17> HELPER_OP_CONTRACTS = {{
     {"ExportCleanupLease", 15, false},
     {"HandoffSession", 16, false},
     {"FinalizeHandoff", 17, false},
+    {"RepairService", 18, false},
 }};
 
 struct ConfigAlias {

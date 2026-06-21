@@ -222,5 +222,41 @@ int main() {
          ok;
   }
 
+  {
+    FakeTransport transport(R"({"id":66,"ok":true,"data":{"late":true}})");
+    transport.block_reads = true;
+    CoreRpcClient client(transport);
+    PostedResponses posted;
+    AsyncHostBridge bridge(
+        client,
+        [&posted](std::string response) { posted.push(std::move(response)); },
+        std::chrono::milliseconds(30));
+
+    ok = expect(bridge.accept_message(
+                    R"({"id":66,"action":"config.import","payload":{"format":"unprotected","data":"{}"}})"),
+                "bridge should accept config import requests") &&
+         ok;
+    ok = expect(posted.wait_for_count(1, std::chrono::milliseconds(500)),
+                "bridge should post an error when core does not answer") &&
+         ok;
+    const auto responses = posted.snapshot();
+    if (responses.size() == 1) {
+      const auto timeout = nlohmann::json::parse(responses[0]);
+      ok = expect(timeout.value("id", 0) == 66,
+                  "timeout response should preserve the renderer request id") &&
+           ok;
+      ok = expect(timeout.value("ok", true) == false,
+                  "timeout response should reject the renderer promise") &&
+           ok;
+      ok = expect(timeout.value("code", "") == "core_unresponsive",
+                  "timeout response should use core_unresponsive") &&
+           ok;
+    }
+
+    bridge.shutdown();
+    transport.release_reads();
+    client.shutdown();
+  }
+
   return ok ? 0 : 1;
 }

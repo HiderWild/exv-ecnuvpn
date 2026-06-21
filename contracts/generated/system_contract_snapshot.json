@@ -166,6 +166,10 @@
       "owner": "core_rpc"
     },
     {
+      "name": "service.repair",
+      "owner": "core_rpc"
+    },
+    {
       "name": "service.driver_status",
       "owner": "core_rpc"
     },
@@ -475,6 +479,8 @@
         "InstallServiceResponse",
         "UninstallServiceRequest",
         "UninstallServiceResponse",
+        "RepairServiceRequest",
+        "RepairServiceResponse",
         "ManagedResource",
         "CleanupLeaseSession",
         "CleanupLease",
@@ -604,6 +610,13 @@
           "request": "FinalizeHandoffRequest",
           "requires_session": false,
           "response": "FinalizeHandoffResponse"
+        },
+        {
+          "code": 18,
+          "name": "RepairService",
+          "request": "RepairServiceRequest",
+          "requires_session": false,
+          "response": "RepairServiceResponse"
         }
       ],
       "security": {
@@ -668,6 +681,7 @@
         "service.helper_status",
         "service.install",
         "service.uninstall",
+        "service.repair",
         "service.driver_status"
       ],
       "namespace": "service.",
@@ -682,6 +696,7 @@
         "contracts",
         "core",
         "feedback",
+        "generated",
         "helper",
         "observability",
         "platform",
@@ -940,6 +955,7 @@
         "service.status",
         "service.install",
         "service.uninstall",
+        "service.repair",
         "runtime.status",
         "drivers.status",
         "drivers.install",
@@ -997,6 +1013,7 @@
         "drivers.install",
         "service.install",
         "service.uninstall",
+        "service.repair",
         "logs.list",
         "logs.clear"
       ],

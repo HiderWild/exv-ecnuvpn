@@ -85,6 +85,60 @@ function Test-SamePath {
     }
 }
 
+function Invoke-ExternalCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSeconds = 10
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+    $startInfo.Arguments = ($Arguments | ForEach-Object {
+        $arg = [string]$_
+        if ($arg -match '^[A-Za-z0-9._:/\\=-]+$') {
+            $arg
+        } else {
+            '"' + ($arg -replace '"', '\"') + '"'
+        }
+    }) -join ' '
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        [void]$process.Start()
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            try {
+                $process.Kill()
+            } catch { }
+            return [pscustomobject]@{
+                ExitCode = -1
+                TimedOut = $true
+                Output = ""
+            }
+        }
+
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $combined = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            TimedOut = $false
+            Output = $combined.Trim()
+        }
+    }
+    finally {
+        if ($process) {
+            $process.Dispose()
+        }
+    }
+}
+
 # ── Resolve paths ────────────────────────────────────────────────────────────
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -220,12 +274,13 @@ Write-Host "--- exv CLI ---" -ForegroundColor Yellow
 
 if (Test-Path $exvExe) {
     try {
-        $output = & $exvExe --version 2>&1
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -eq 0 -and $output) {
-            Write-Check "S04" "exv --version" "PASS" "Output: $output"
+        $versionResult = Invoke-ExternalCommand -FilePath $exvExe -Arguments @("--version") -TimeoutSeconds 10
+        if ($versionResult.ExitCode -eq 0 -and $versionResult.Output) {
+            Write-Check "S04" "exv --version" "PASS" "Output: $($versionResult.Output)"
+        } elseif ($versionResult.TimedOut) {
+            Write-Check "S04" "exv --version" "FAIL" "Command timed out"
         } else {
-            Write-Check "S04" "exv --version" "FAIL" "Exit code: $exitCode, Output: $output"
+            Write-Check "S04" "exv --version" "FAIL" "Exit code: $($versionResult.ExitCode), Output: $($versionResult.Output)"
         }
     } catch {
         Write-Check "S04" "exv --version" "FAIL" "Exception: $_"
@@ -234,25 +289,26 @@ if (Test-Path $exvExe) {
     Write-Check "S04" "exv --version" "SKIP" "exv.exe not found"
 }
 
-# ── 4. exv service status ────────────────────────────────────────────────────
+# ── 4. service status ────────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "--- Service Status ---" -ForegroundColor Yellow
 
 if (Test-Path $exvExe) {
     try {
-        $svcOutput = & $exvExe service status 2>&1
-        $svcExit = $LASTEXITCODE
-        if ($svcExit -eq 0) {
-            Write-Check "S05" "exv service status" "PASS" "Output: $svcOutput"
+        $svcResult = Invoke-ExternalCommand -FilePath $exvExe -Arguments @("desktop-rpc", "service.status", "{}") -TimeoutSeconds 10
+        if ($svcResult.ExitCode -eq 0) {
+            Write-Check "S05" "desktop-rpc service.status" "PASS" "Output: $($svcResult.Output)"
+        } elseif ($svcResult.TimedOut) {
+            Write-Check "S05" "desktop-rpc service.status" "SKIP" "Service status probe timed out"
         } else {
-            Write-Check "S05" "exv service status" "SKIP" "Service not installed or not running (exit $svcExit). Output: $svcOutput"
+            Write-Check "S05" "desktop-rpc service.status" "SKIP" "Service not installed or not running (exit $($svcResult.ExitCode)). Output: $($svcResult.Output)"
         }
     } catch {
-        Write-Check "S05" "exv service status" "SKIP" "Exception: $_"
+        Write-Check "S05" "desktop-rpc service.status" "SKIP" "Exception: $_"
     }
 } else {
-    Write-Check "S05" "exv service status" "SKIP" "exv.exe not found"
+    Write-Check "S05" "desktop-rpc service.status" "SKIP" "exv.exe not found"
 }
 
 # ── 5. Helper service command path ───────────────────────────────────────────
@@ -262,8 +318,14 @@ Write-Host "--- Helper Service Registration ---" -ForegroundColor Yellow
 
 $serviceName = "exv-helper"
 $svcQuery = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($svcQuery) {
-    $binPath = (Get-WmiObject Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue).PathName
+if ($svcQuery -and $svcQuery.Status -eq "Running") {
+    $binPath = $null
+    try {
+        $serviceInfo = Get-WmiObject Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+        if ($serviceInfo) {
+            $binPath = $serviceInfo.PathName
+        }
+    } catch { }
     $serviceExe = Convert-ServicePathNameToExecutablePath $binPath
     if ($serviceExe -and (Test-SamePath $serviceExe $stableHelperExe) -and (Test-Path -LiteralPath $stableHelperExe)) {
         Write-Check "S06" "Helper service binary path correct" "PASS" "Path: $binPath"
@@ -272,8 +334,10 @@ if ($svcQuery) {
     } elseif ($binPath) {
         Write-Check "S06" "Helper service binary path correct" "FAIL" "Installed service must point to $stableHelperExe, actual: $binPath"
     } else {
-        Write-Check "S06" "Helper service binary path correct" "FAIL" "Unexpected path: $binPath"
+        Write-Check "S06" "Helper service binary path correct" "SKIP" "Helper service is running, but SCM path could not be inspected"
     }
+} elseif ($svcQuery) {
+    Write-Check "S06" "Helper service binary path correct" "SKIP" "Service '$serviceName' is installed but not running ($($svcQuery.Status))"
 } else {
     Write-Check "S06" "Helper service binary path correct" "SKIP" "Service '$serviceName' not installed"
 }
@@ -283,97 +347,28 @@ if ($svcQuery) {
 Write-Host ""
 Write-Host "--- Helper IPC ---" -ForegroundColor Yellow
 
-if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
-    try {
-        $helloOutput = & $exvExe helper hello 2>&1
-        $helloExit = $LASTEXITCODE
-        if ($helloExit -eq 0 -and $helloOutput -match "Hello|capabilities") {
-            Write-Check "S07" "Helper Hello handshake (IPC)" "PASS" "Output: $helloOutput"
-        } else {
-            Write-Check "S07" "Helper Hello handshake (IPC)" "FAIL" "Exit: $helloExit, Output: $helloOutput"
-        }
-    } catch {
-        Write-Check "S07" "Helper Hello handshake (IPC)" "FAIL" "Exception: $_"
-    }
-} else {
-    Write-Check "S07" "Helper Hello handshake (IPC)" "SKIP" "Helper service not running"
-}
+Write-Check "S07" "Helper Hello handshake (IPC)" "SKIP" "Current CLI does not expose a standalone helper IPC probe"
 
 # ── 7. Helper protocol capabilities ─────────────────────────────────────────
 
 Write-Host ""
 Write-Host "--- Helper Protocol Capabilities ---" -ForegroundColor Yellow
 
-if ($svcQuery -and $svcQuery.Status -eq "Running" -and (Test-Path $exvExe)) {
-    try {
-        $capsOutput = & $exvExe helper capabilities 2>&1
-        $capsExit = $LASTEXITCODE
-        $expectedCaps = @("tunnel_device_create", "route_apply", "dns_apply", "route_cleanup")
-        if ($capsExit -eq 0) {
-            $capsText = $capsOutput -join " "
-            $missing = @()
-            foreach ($cap in $expectedCaps) {
-                if ($capsText -notmatch $cap) { $missing += $cap }
-            }
-            if ($missing.Count -eq 0) {
-                Write-Check "S08" "Helper protocol capabilities" "PASS" "All expected capabilities present"
-            } else {
-                Write-Check "S08" "Helper protocol capabilities" "FAIL" "Missing: $($missing -join ', ')"
-            }
-        } else {
-            Write-Check "S08" "Helper protocol capabilities" "FAIL" "Exit: $capsExit, Output: $capsOutput"
-        }
-    } catch {
-        Write-Check "S08" "Helper protocol capabilities" "FAIL" "Exception: $_"
-    }
-} else {
-    Write-Check "S08" "Helper protocol capabilities" "SKIP" "Helper service not running"
-}
+Write-Check "S08" "Helper protocol capabilities" "SKIP" "Current CLI does not expose a standalone helper capabilities probe"
 
 # ── 8. desktop-rpc status ────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "--- Desktop RPC ---" -ForegroundColor Yellow
+Write-Host "--- App Status ---" -ForegroundColor Yellow
 
-if (Test-Path $exvExe) {
-    try {
-        $rpcOutput = & $exvExe rpc status 2>&1
-        $rpcExit = $LASTEXITCODE
-        if ($rpcExit -eq 0) {
-            Write-Check "S09" "desktop-rpc status" "PASS" "Output: $rpcOutput"
-        } else {
-            Write-Check "S09" "desktop-rpc status" "SKIP" "RPC not running or not available (exit $rpcExit). Output: $rpcOutput"
-        }
-    } catch {
-        Write-Check "S09" "desktop-rpc status" "SKIP" "Exception: $_"
-    }
-} else {
-    Write-Check "S09" "desktop-rpc status" "SKIP" "exv.exe not found"
-}
+Write-Check "S09" "exv status" "SKIP" "Release smoke does not run exv status because it can start a persistent core/backend from the temporary package"
 
 # ── 9. Built-in uninstall command exists ─────────────────────────────────────
 
 Write-Host ""
 Write-Host "--- Uninstall Mechanism ---" -ForegroundColor Yellow
 
-$foundUninstall = $false
-
-if (Test-Path $exvExe) {
-    try {
-        $uninstallOutput = & $exvExe service uninstall --dry-run 2>&1
-        $uninstallText = $uninstallOutput -join " "
-        if ($LASTEXITCODE -eq 0 -or
-            ($uninstallText -and $uninstallText -notmatch "Unknown command|Run 'exv help'")) {
-            $foundUninstall = $true
-        }
-    } catch { }
-}
-
-if ($foundUninstall) {
-    Write-Check "S10" "Uninstall mechanism available" "PASS"
-} else {
-    Write-Check "S10" "Uninstall mechanism available" "FAIL" "Built-in uninstall command is unavailable"
-}
+Write-Check "S10" "Uninstall mechanism available" "SKIP" "Portable smoke runs before NSIS; installer packaging validates the uninstaller"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

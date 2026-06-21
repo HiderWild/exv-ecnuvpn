@@ -91,6 +91,8 @@ const hostApi = {
         return wrap(window.exv!.service.install()) as ApiResponse<T>
       case desktopApiPaths.serviceUninstall:
         return wrap(window.exv!.service.uninstall()) as ApiResponse<T>
+      case desktopApiPaths.serviceRepair:
+        return wrap(window.exv!.service.repair()) as ApiResponse<T>
       case desktopApiPaths.cliInstall:
         return wrap(window.exv!.cli.install()) as ApiResponse<T>
       case desktopApiPaths.cliUninstall:

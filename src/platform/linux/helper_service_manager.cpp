@@ -149,6 +149,35 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   return 0;
 }
 
+int repair_helper_service(const HelperServiceManagerContext &context) {
+  const auto &platform_config = helper_platform_config();
+
+  if (!platform::check_root()) {
+    cli::print_error("Root privileges required. Please run with sudo.");
+    return 1;
+  }
+
+  if (!platform::file_exists(platform_config.service_definition_path)) {
+    cli::print_error("EXV helper service is not installed.");
+    return 1;
+  }
+
+  std::string start_cmd =
+      "systemctl start " + std::string(platform_config.service_name);
+  if (platform::run_command(start_cmd) != 0) {
+    cli::print_error("Failed to start EXV helper service.");
+    return 1;
+  }
+
+  if (!wait_until_ready(context, 50, 100000)) {
+    cli::print_error("Helper service is running but did not respond.");
+    return 1;
+  }
+
+  cli::print_success("EXV helper service repaired.");
+  return 0;
+}
+
 int show_helper_service_status(const HelperServiceManagerContext &context) {
   const auto &platform_config = helper_platform_config();
 

@@ -23,4 +23,6 @@ std::optional<std::string> read_close_preference(
 bool write_close_preference(const std::filesystem::path &state_dir,
                             const std::string &action);
 
+bool clear_close_preference(const std::filesystem::path &state_dir);
+
 } // namespace exv::ui_shell

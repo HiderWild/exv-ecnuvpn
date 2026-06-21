@@ -2,12 +2,17 @@
 
 #include "core/config/config_manager.hpp"
 #include "core/use_cases/use_case_result.hpp"
+#include "helper/common/helper_messages.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <string>
 
 namespace exv::core {
+
+UseCaseResult finalize_service_uninstall_result(
+    const exv::helper::UninstallServiceResponse &response,
+    nlohmann::json service_status);
 
 class SystemStatusUseCases {
 public:
@@ -24,6 +29,7 @@ public:
   UseCaseResult uninstall_cli();
   UseCaseResult install_helper();
   UseCaseResult uninstall_helper();
+  UseCaseResult repair_helper();
 
 private:
   exv::config::ConfigManager manager_;

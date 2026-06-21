@@ -17,6 +17,7 @@ const std::set<HelperOp> CommandValidator::allowed_ops_ = {
     HelperOp::ReleaseCoreLease,
     HelperOp::InstallService,
     HelperOp::UninstallService,
+    HelperOp::RepairService,
     HelperOp::ExportCleanupLease,
     HelperOp::HandoffSession,
     HelperOp::FinalizeHandoff,

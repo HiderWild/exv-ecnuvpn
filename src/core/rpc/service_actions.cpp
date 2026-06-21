@@ -195,6 +195,8 @@ void ServiceActions::register_handlers(AppRpcDispatcher& dispatcher) {
         [this](const RpcRequest& req) { return install_helper(req); });
     dispatcher.register_handler("service.uninstall",
         [this](const RpcRequest& req) { return uninstall_helper(req); });
+    dispatcher.register_handler("service.repair",
+        [this](const RpcRequest& req) { return repair_helper(req); });
     dispatcher.register_handler("service.driver_status",
         [this](const RpcRequest& req) { return driver_status(req); });
 
@@ -247,19 +249,12 @@ RpcResponse ServiceActions::uninstall_helper(const RpcRequest& req) {
             "vpn_session_active",
             "Disconnect the VPN session before uninstalling the helper service."));
     }
-    exv::platform::BackendResolveOptions options;
-    options.preferred_mode = "service";
-    options.allow_oneshot = false;
-    options.allow_service_start = false;
-    auto backend = exv::platform::resolve_backend(options);
-    if (!backend.value("ok", false)) {
-        return to_rpc_response(exv::core::UseCaseResult::fail(
-            backend.value("code", std::string("helper_unavailable")),
-            backend.value(
-                "message",
-                std::string("No helper instance is available for privileged service maintenance."))));
-    }
     return to_rpc_response(use_cases_.uninstall_helper());
+}
+
+RpcResponse ServiceActions::repair_helper(const RpcRequest& req) {
+    (void)req;
+    return to_rpc_response(use_cases_.repair_helper());
 }
 
 RpcResponse ServiceActions::driver_status(const RpcRequest& req) {

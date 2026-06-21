@@ -7,8 +7,8 @@ export const distributionConfig = {
   brandSubtitle: 'for ECNU',
   author: 'HiderWild',
   repository: {
-    label: 'HiderWild/easy-ecnu-vpn',
-    url: 'https://github.com/HiderWild/easy-ecnu-vpn',
+    label: 'HiderWild/exv-ecnuvpn',
+    url: 'https://github.com/HiderWild/exv-ecnuvpn/',
   },
   defaultVpnServer: 'vpn-cn.ecnu.edu.cn',
   vpnServers: [

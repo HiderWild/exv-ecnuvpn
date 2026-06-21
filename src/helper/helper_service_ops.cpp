@@ -93,6 +93,20 @@ public:
                              : "Helper service uninstallation failed";
         return response;
     }
+
+    RepairServiceResponse repair_service(
+        const RepairServiceRequest& request) override {
+        (void)request;
+        const int exit_code = exv::platform::repair_helper_service(
+            service_manager_context());
+        RepairServiceResponse response;
+        response.success = exit_code == 0;
+        response.exit_code = exit_code;
+        response.message =
+            response.success ? "Helper service repaired"
+                             : "Helper service repair failed";
+        return response;
+    }
 };
 
 } // namespace

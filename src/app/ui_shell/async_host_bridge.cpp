@@ -4,6 +4,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
+#include <future>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -52,13 +54,30 @@ std::string host_wire_response(int id, const CoreRpcResponse &response) {
   return out.dump();
 }
 
+std::string timeout_response(int id) {
+  return error_response(id, "core_unresponsive",
+                        "核心进程无响应，请退出并重新打开客户端后重试。");
+}
+
+std::chrono::milliseconds request_timeout_for_action(
+    std::string_view action, std::chrono::milliseconds default_timeout) {
+  if (action == "service.install" || action == "service.uninstall" ||
+      action == "service.repair" || action == "drivers.install" ||
+      action == "maintenance.killStaleCore") {
+    return std::chrono::minutes(5);
+  }
+  return default_timeout;
+}
+
 } // namespace
 
 AsyncHostBridge::AsyncHostBridge(CoreRpcClient &client,
-                                 HostResponsePoster post_response)
+                                 HostResponsePoster post_response,
+                                 std::chrono::milliseconds request_timeout)
     : client_(client),
       post_response_(std::move(post_response)),
-      stopped_(std::make_shared<std::atomic<bool>>(false)) {}
+      stopped_(std::make_shared<std::atomic<bool>>(false)),
+      request_timeout_(request_timeout) {}
 
 AsyncHostBridge::~AsyncHostBridge() {
   shutdown();
@@ -104,8 +123,15 @@ bool AsyncHostBridge::accept_message(std::string message_json) {
   auto future = client_.invoke_async(std::move(request));
   auto poster = post_response_;
   auto stopped = stopped_;
+  const auto timeout = request_timeout_for_action(action, request_timeout_);
   std::thread([future = std::move(future), poster = std::move(poster),
-               stopped, id]() mutable {
+               stopped, id, timeout]() mutable {
+    if (future.wait_for(timeout) != std::future_status::ready) {
+      if (!stopped->load()) {
+        poster(timeout_response(id));
+      }
+      return;
+    }
     CoreRpcResponse response = future.get();
     if (stopped->load()) {
       return;

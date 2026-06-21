@@ -643,6 +643,16 @@ int main() {
                "maintenance.killStaleCore"),
            "maintenance.killStaleCore must be generated as a core RPC action") &&
        ok;
+  ok = expect(exv::contracts::generated::is_core_rpc_action("service.repair"),
+              "service.repair must be generated as a core RPC action") &&
+       ok;
+  ok = expect(
+           exv::contracts::generated::is_desktop_rpc_action("service.repair"),
+           "service.repair must be generated as a desktop RPC action") &&
+       ok;
+  ok = expect(exv::contracts::generated::is_core_owned_action("service.repair"),
+              "service.repair must have core_rpc ownership") &&
+       ok;
   ok = expect(
            exv::contracts::generated::is_destructive_core_rpc_action(
                "config.reset"),

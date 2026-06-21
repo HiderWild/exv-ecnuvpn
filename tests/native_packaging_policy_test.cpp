@@ -127,6 +127,19 @@ bool contains_text(const std::string &text, const std::string &needle) {
   return text.find(needle) != std::string::npos;
 }
 
+size_t count_occurrences(const std::string &text, const std::string &needle) {
+  if (needle.empty())
+    return 0;
+
+  size_t count = 0;
+  size_t pos = text.find(needle);
+  while (pos != std::string::npos) {
+    ++count;
+    pos = text.find(needle, pos + needle.size());
+  }
+  return count;
+}
+
 std::string context_for_line(const FileText &file, size_t index,
                              size_t radius = 8) {
   if (file.lines.empty())
@@ -582,6 +595,18 @@ bool check_common_runtime_path_policy() {
   ok = expect(contains(win_service, "EXV Helper"),
               "Windows helper service display name should be EXV Helper") &&
        ok;
+  const size_t win_refresh_change_config =
+      win_service.text.find("ChangeServiceConfigA(hService");
+  const size_t win_refresh_auto_start =
+      win_refresh_change_config == std::string::npos
+          ? std::string::npos
+          : win_service.text.find("SERVICE_AUTO_START",
+                                  win_refresh_change_config);
+  ok = expect(win_refresh_change_config != std::string::npos &&
+                  win_refresh_auto_start != std::string::npos,
+              "Windows service refresh should restore SERVICE_AUTO_START "
+              "when an existing service is repaired or updated") &&
+       ok;
   ok = expect(contains(darwin_helper, "com.exv.helper") &&
                   !contains(darwin_helper,
                             std::string("com.") + "ecnu" + ".exv.helper"),
@@ -611,6 +636,19 @@ bool check_common_runtime_path_policy() {
                   contains(win_smoke, "exv-helper.exe"),
               "Windows packaging smoke should expect SCM to point at the "
               "stable helper copy, not the movable package root") &&
+       ok;
+  ok = expect(contains(win_smoke, "function Invoke-ExternalCommand") &&
+                  contains(win_smoke, "WaitForExit") &&
+                  contains(win_smoke, "TimedOut"),
+              "Windows packaging smoke should wrap external CLI probes with "
+              "timeouts so unavailable services cannot hang release packaging") &&
+       ok;
+  ok = expect(!contains(win_smoke, "$exvExe helper hello") &&
+                  !contains(win_smoke, "$exvExe helper capabilities") &&
+                  !contains(win_smoke, "$exvExe rpc status") &&
+                  !contains(win_smoke, "$exvExe service uninstall --dry-run"),
+              "Windows packaging smoke should not fail on retired CLI "
+              "subcommands") &&
        ok;
 
   return ok;
@@ -717,6 +755,7 @@ bool check_production_build_scripts() {
 bool check_windows_release_packaging_scripts() {
   bool ok = true;
   const FileText release = read_file("scripts/package-windows-release.ps1");
+  const FileText win_smoke = read_file("scripts/windows-packaging-smoke.ps1");
   const FileText nsis = read_file("distribution/windows/exv.nsi");
 
   ok = expect(contains(release, "scripts\\build-windows.ps1") &&
@@ -753,6 +792,15 @@ bool check_windows_release_packaging_scripts() {
               "Windows release packaging should verify the existing native "
               "WebView package directory before creating release artifacts") &&
        ok;
+  ok = expect(contains(release, "function Get-CmakeProjectVersion") &&
+                  contains(release, "function Assert-ProductVersion") &&
+                  contains(release, "function Join-ArtifactVersion") &&
+                  contains(release, "$productVersion = if ([string]::IsNullOrWhiteSpace($Version))") &&
+                  contains(release, "Get-CmakeProjectVersion -CMakeListsPath (Join-Path $repoRoot 'CMakeLists.txt')") &&
+                  contains(release, "$artifactVersion = Join-ArtifactVersion -Version $productVersion -BuildLabel $BuildLabel"),
+              "Windows release packaging should derive the product version "
+              "from CMake by default and keep build labels separate") &&
+       ok;
   const size_t assert_package_root =
       release.text.find("Assert-PackageRoot $resolvedPackageRoot");
   const size_t create_output_dir =
@@ -765,15 +813,24 @@ bool check_windows_release_packaging_scripts() {
        ok;
   ok = expect(contains(release, "Compress-Archive") &&
                   contains(release, "Expand-Archive") &&
+                  contains(release, "EXV-$artifactVersion-windows-x64-portable.zip") &&
                   contains(release, "windows-packaging-smoke.ps1") &&
+                  contains(win_smoke, "S09") &&
+                  !contains(win_smoke, "-Arguments @(\"status\")") &&
                   !contains(release, "-RuntimeDir $resolvedPackageRoot"),
               "Windows release packaging should create and smoke-test a "
               "portable zip without borrowing runtime DLLs from the source "
-              "package") &&
+              "package, and smoke tests must not launch a persistent app "
+              "status backend from the temporary package") &&
        ok;
   ok = expect(contains(release, "makensis.exe") &&
                   contains(release, "distribution\\windows\\exv.nsi") &&
-                  contains(release, "EXV-$Version-windows-x64-setup.exe") &&
+                  contains(release, "D:\\Development\\Environment") &&
+                  contains(release, "NSIS-*") &&
+                  contains(release, "EXV-$artifactVersion-windows-x64-setup.exe") &&
+                  contains(release, "'/INPUTCHARSET'") &&
+                  contains(release, "'UTF8'") &&
+                  contains(release, "-AppVersion $productVersion") &&
                   contains(release, "New-NsisUninstallManifest") &&
                   contains(release, "UNINSTALL_MANIFEST") &&
                   contains(release, "Get-ChildItem") &&
@@ -785,12 +842,192 @@ bool check_windows_release_packaging_scripts() {
        ok;
   ok = expect(contains(nsis, "RequestExecutionLevel user") &&
                   contains(nsis, "$LOCALAPPDATA\\Programs\\EXV") &&
+                  contains(nsis, "!include \"MUI2.nsh\"") &&
+                  !contains(nsis, "!pragma codepage") &&
+                  contains(nsis, "Caption \"${APP_NAME} 安装向导\"") &&
+                  contains(nsis, "!insertmacro MUI_PAGE_WELCOME") &&
+                  contains(nsis, "!insertmacro MUI_PAGE_DIRECTORY") &&
+                  contains(nsis, "Page custom FinishOptionsPage FinishOptionsLeave") &&
+                  contains(nsis, "!insertmacro MUI_LANGUAGE \"SimpChinese\"") &&
+                  !contains(nsis, "Page directory") &&
                   contains(nsis, "WriteRegStr HKCU") &&
                   contains(nsis, "CreateShortCut") &&
                   contains(nsis, "WriteUninstaller") &&
                   contains(nsis, "DeleteRegKey HKCU"),
-              "NSIS installer should be per-user, create shortcuts, and "
-              "register a current-user uninstaller") &&
+              "NSIS installer should be localized to Simplified Chinese, "
+              "be per-user, create shortcuts, and register a current-user "
+              "uninstaller") &&
+       ok;
+  ok = expect(contains(nsis, "Var HadHelperService") &&
+                  contains(nsis, "!define SERVICE_NAME \"exv-helper\"") &&
+                  contains(nsis, "Function DetectHelperServiceBeforeInstall") &&
+                  contains(nsis, "sc.exe query ${SERVICE_NAME}") &&
+                  contains(nsis, "Call DetectHelperServiceBeforeInstall") &&
+                  contains(nsis, "Call RunHelperServicePreInstallMaintenance") &&
+                  contains(nsis, "Call RunHelperServicePostInstallRepair"),
+              "NSIS install should detect an existing helper service, retire "
+              "it before overwriting files, and repair it only after the new "
+              "files are copied") &&
+       ok;
+  ok = expect(contains(nsis, "desktop-rpc service.uninstall \"{}\"") &&
+                  contains(nsis, "desktop-rpc service.install \"{}\"") &&
+                  contains(nsis, "Function WaitForHelperServiceRemoval") &&
+                  contains(nsis, "Function un.WaitForHelperServiceRemoval") &&
+                  count_occurrences(nsis.text, "sc.exe query ${SERVICE_NAME}") >=
+                      4 &&
+                  contains(nsis, "Sleep 500") &&
+                  contains(nsis, "Var HelperServiceStillInstalled") &&
+                  contains(nsis, "StrCpy $HelperServiceStillInstalled 0") &&
+                  contains(nsis, "Start-Process -FilePath powershell.exe -Verb RunAs -Wait") &&
+                  contains(nsis, "Stop-Process -Name exv-helper") &&
+                  contains(nsis, "sc.exe delete ${SERVICE_NAME}") &&
+                  contains(nsis, "StrCmp $HadHelperService 1"),
+              "NSIS service maintenance should try helper-owned cleanup first, "
+              "poll SCM state, fall back to elevated force cleanup, poll again, "
+              "and only restart service when it existed before install") &&
+       ok;
+  const size_t install_helper_owned_uninstall =
+      nsis.text.find("desktop-rpc service.uninstall \"{}\"");
+  const size_t install_first_poll =
+      nsis.text.find("Call WaitForHelperServiceRemoval");
+  const size_t install_elevated_cleanup =
+      nsis.text.find("Call RunElevatedHelperServiceCleanup");
+  const size_t install_second_poll =
+      install_elevated_cleanup == std::string::npos
+          ? std::string::npos
+          : nsis.text.find("Call WaitForHelperServiceRemoval",
+                           install_elevated_cleanup);
+  ok = expect(install_helper_owned_uninstall != std::string::npos &&
+                  install_first_poll != std::string::npos &&
+                  install_elevated_cleanup != std::string::npos &&
+                  install_second_poll != std::string::npos &&
+                  install_helper_owned_uninstall < install_first_poll &&
+                  install_first_poll < install_elevated_cleanup &&
+                  install_elevated_cleanup < install_second_poll,
+              "NSIS install helper maintenance should call old desktop RPC "
+              "uninstall, poll SCM, run elevated cleanup only if still "
+              "installed, then poll SCM again") &&
+       ok;
+  const size_t post_install_repair =
+      nsis.text.find("Function RunHelperServicePostInstallRepair");
+  const size_t post_install_gate =
+      post_install_repair == std::string::npos
+          ? std::string::npos
+          : nsis.text.find("StrCmp $HadHelperService 1 0 done",
+                           post_install_repair);
+  const size_t post_install_service_install =
+      post_install_repair == std::string::npos
+          ? std::string::npos
+          : nsis.text.find("desktop-rpc service.install \"{}\"",
+                           post_install_repair);
+  ok = expect(post_install_repair != std::string::npos &&
+                  post_install_gate != std::string::npos &&
+                  post_install_service_install != std::string::npos &&
+                  post_install_repair < post_install_gate &&
+                  post_install_gate < post_install_service_install,
+              "NSIS post-install service repair should be inside a "
+              "HadHelperService gate so no-service and oneshot-only users do "
+              "not get a newly installed helper service") &&
+       ok;
+  ok = expect(contains(nsis, "Function un.RunHelperServiceUninstallMaintenance") &&
+                  contains(nsis, "Call un.RunHelperServiceUninstallMaintenance"),
+              "NSIS uninstall should run helper service maintenance before "
+              "removing installed files") &&
+       ok;
+  const size_t uninstall_helper_owned_uninstall =
+      nsis.text.find("desktop-rpc service.uninstall \"{}\"",
+                     nsis.text.find("Function un.RunHelperServiceUninstallMaintenance"));
+  const size_t uninstall_first_poll =
+      nsis.text.find("Call un.WaitForHelperServiceRemoval",
+                     nsis.text.find("Function un.RunHelperServiceUninstallMaintenance"));
+  const size_t uninstall_elevated_cleanup =
+      nsis.text.find("Call un.RunElevatedHelperServiceCleanup",
+                     nsis.text.find("Function un.RunHelperServiceUninstallMaintenance"));
+  const size_t uninstall_second_poll =
+      uninstall_elevated_cleanup == std::string::npos
+          ? std::string::npos
+          : nsis.text.find("Call un.WaitForHelperServiceRemoval",
+                           uninstall_elevated_cleanup);
+  ok = expect(uninstall_helper_owned_uninstall != std::string::npos &&
+                  uninstall_first_poll != std::string::npos &&
+                  uninstall_elevated_cleanup != std::string::npos &&
+                  uninstall_second_poll != std::string::npos &&
+                  uninstall_helper_owned_uninstall < uninstall_first_poll &&
+                  uninstall_first_poll < uninstall_elevated_cleanup &&
+                  uninstall_elevated_cleanup < uninstall_second_poll,
+              "NSIS uninstall helper maintenance should call old desktop RPC "
+              "uninstall, poll SCM, run elevated cleanup only if still "
+              "installed, then poll SCM again") &&
+       ok;
+  ok = expect(contains(nsis, "Function WriteAppProcessCleanupScript") &&
+                  contains(nsis, "NamedPipeClientStream") &&
+                  contains(nsis, "core.shutdown") &&
+                  contains(nsis, "Stop-Process -Name exv-ui") &&
+                  contains(nsis, "Stop-Process -Name exv") &&
+                  contains(nsis, "Function RunAppProcessCleanup") &&
+                  contains(nsis, "Call RunAppProcessCleanup") &&
+                  contains(nsis, "Start-Process -FilePath powershell.exe -Verb RunAs -Wait") &&
+                  contains(nsis, "Function StopRunningAppProcesses") &&
+                  contains(nsis, "Call StopRunningAppProcesses") &&
+                  contains(nsis, "Function un.RunAppProcessCleanup") &&
+                  contains(nsis, "Call un.RunAppProcessCleanup") &&
+                  contains(nsis, "Function un.StopRunningAppProcesses") &&
+                  contains(nsis, "taskkill.exe /IM exv-ui.exe /T /F") &&
+                  contains(nsis, "taskkill.exe /IM exv.exe /T /F") &&
+                  contains(nsis, "Call un.StopRunningAppProcesses"),
+              "NSIS install should ask a stale daemon core to shut itself down, "
+              "fall back through elevated process cleanup, and uninstall "
+              "should close running UI and core processes before service "
+              "maintenance and file removal") &&
+       ok;
+  const size_t install_stop_processes =
+      nsis.text.find("Call StopRunningAppProcesses");
+  const size_t install_detect =
+      nsis.text.find("Call DetectHelperServiceBeforeInstall");
+  const size_t install_retire =
+      nsis.text.find("Call RunHelperServicePreInstallMaintenance");
+  const size_t install_copy = nsis.text.find("File /r \"${SOURCE_DIR}\\*.*\"");
+  const size_t install_repair =
+      nsis.text.find("Call RunHelperServicePostInstallRepair");
+  ok = expect(install_stop_processes != std::string::npos &&
+                  install_detect != std::string::npos &&
+                  install_retire != std::string::npos &&
+                  install_copy != std::string::npos &&
+                  install_repair != std::string::npos &&
+                  install_stop_processes < install_detect &&
+                  install_detect < install_retire &&
+                  install_retire < install_copy &&
+                  install_copy < install_repair,
+              "NSIS install should close app processes including stale daemon "
+              "cores, detect/retire the old service before file copy, and "
+              "repair the service after file copy") &&
+       ok;
+  const size_t uninstall_maintenance =
+      nsis.text.find("Call un.RunHelperServiceUninstallMaintenance");
+  const size_t uninstall_stop_processes =
+      nsis.text.find("Call un.StopRunningAppProcesses");
+  const size_t uninstall_manifest =
+      nsis.text.find("!include \"${UNINSTALL_MANIFEST}\"");
+  ok = expect(uninstall_maintenance != std::string::npos &&
+                  uninstall_stop_processes != std::string::npos &&
+                  uninstall_manifest != std::string::npos &&
+                  uninstall_stop_processes < uninstall_maintenance &&
+                  uninstall_maintenance < uninstall_manifest,
+              "NSIS uninstall should close app processes, then run service "
+              "maintenance, then remove files") &&
+       ok;
+  ok = expect(contains(nsis, "Var FinishCreateDesktopShortcut") &&
+                  contains(nsis, "Var FinishLaunchApp") &&
+                  contains(nsis, "Var FinishCreateDesktopShortcutCheckbox") &&
+                  contains(nsis, "Var FinishLaunchAppCheckbox") &&
+                  contains(nsis, "${NSD_SetState} $FinishCreateDesktopShortcutCheckbox ${BST_CHECKED}") &&
+                  contains(nsis, "${NSD_SetState} $FinishLaunchAppCheckbox ${BST_CHECKED}") &&
+                  contains(nsis, "CreateShortCut \"$DESKTOP\\EXV.lnk\"") &&
+                  contains(nsis, "Delete \"$DESKTOP\\EXV.lnk\"") &&
+                  contains(nsis, "SetOutPath \"$INSTDIR\"") &&
+                  contains(nsis, "ExecShell \"open\" \"$INSTDIR\\exv-ui.exe\" \"\" SW_SHOWNORMAL"),
+              "NSIS finish page should default-check desktop shortcut and "
+              "launch-now options, and uninstall should remove that shortcut") &&
        ok;
   ok = expect(!contains(nsis, "$PROGRAMFILES") &&
                   !contains(nsis, "RequestExecutionLevel admin") &&
@@ -815,6 +1052,70 @@ bool check_windows_release_packaging_scripts() {
                   contains(release, "RMDir \"$INSTDIR\""),
               "NSIS uninstall should not recursively remove a user-selected "
               "install directory and should remove the root only if empty") &&
+       ok;
+
+  return ok;
+}
+
+bool check_windows_local_config_cleanup_script() {
+  bool ok = true;
+  const FileText script = read_file("scripts/clear-local-user-config.ps1");
+
+  ok = expect(contains(script, "[CmdletBinding(SupportsShouldProcess = $true)]") &&
+                  contains(script, "[switch]$Force") &&
+                  contains(script, "if (-not $Force -and -not $WhatIfPreference)") &&
+                  contains(script, "$WhatIfPreference = $true"),
+              "clear-local-user-config.ps1 should default to a ShouldProcess "
+              "dry run and require -Force for deletion") &&
+       ok;
+  ok = expect(contains(script, "function Stop-ExvUserProcesses") &&
+                  contains(script, "Stop-Process -Name exv-ui") &&
+                  contains(script, "Stop-Process -Name exv ") &&
+                  !contains(script, "Stop-Process -Name exv-helper") &&
+                  !contains(script, "Stop-Service") &&
+                  !contains(script, "sc.exe delete"),
+              "clear-local-user-config.ps1 should stop only UI/core user "
+              "processes and preserve the helper service") &&
+       ok;
+  ok = expect(contains(script, "config.json") &&
+                  contains(script, ".key") &&
+                  contains(script, "close-preference.json") &&
+                  contains(script, "exv.log") &&
+                  contains(script, "exv-core-ipc-v1.registry.json") &&
+                  contains(script, "exv-core-ipc-v1.lock") &&
+                  contains(script, "exv-core-ipc-v1.sock") &&
+                  contains(script, "connect-attempt.json") &&
+                  contains(script, "connect-attempt.lock") &&
+                  contains(script, "connect-attempt.mutex"),
+              "clear-local-user-config.ps1 should remove profile config, "
+              "logs, close preference, and stale core/connect lock, registry, "
+              "and IPC remnants") &&
+       ok;
+  ok = expect(contains(script, "Programs\\EXV") &&
+                  contains(script, "exv-ui.exe.WebView2") &&
+                  contains(script, "WebView2") &&
+                  contains(script, "Local Storage"),
+              "clear-local-user-config.ps1 should remove app-local and "
+              "profile-local WebView2/localStorage data directories without "
+              "removing the install directory") &&
+       ok;
+  ok = expect(contains(script, "function Remove-ConfigTree") &&
+                  contains(script, "Assert-PathUnderRoot -Path $Path -Root $Root") &&
+                  contains(script, "Remove-Item -LiteralPath $Path -Recurse -Force"),
+              "clear-local-user-config.ps1 recursive deletes should verify "
+              "the resolved final path stays under the intended root") &&
+       ok;
+  ok = expect(contains(script, "Remove-ExvCredentialManagerEntries") &&
+                  contains(script, "[switch]$IncludeCredentialManager") &&
+                  contains(script, "cmdkey.exe") &&
+                  contains(script, "EXV/*"),
+              "clear-local-user-config.ps1 should keep opt-in Credential "
+              "Manager cleanup behavior") &&
+       ok;
+  ok = expect(!contains(script, "Remove-Item -LiteralPath $installDir") &&
+                  !contains(script, "Remove-Item -LiteralPath $programsRoot"),
+              "clear-local-user-config.ps1 should not remove the EXV install "
+              "directory by default") &&
        ok;
 
   return ok;
@@ -1054,6 +1355,7 @@ int main() {
   ok = check_legacy_staging_scripts_removed() && ok;
   ok = check_production_build_scripts() && ok;
   ok = check_windows_release_packaging_scripts() && ok;
+  ok = check_windows_local_config_cleanup_script() && ok;
   ok = check_runtime_assets_doc_policy() && ok;
   ok = check_cmake_wiring() && ok;
   ok = check_exv_naming_policy() && ok;

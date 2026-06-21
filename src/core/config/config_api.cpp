@@ -266,39 +266,68 @@ std::string config_import(config::ConfigManager& mgr, const std::string& json_st
 
     Config cfg = mgr.load();
 
-    if (j.contains("server")) cfg.server = j["server"].get<std::string>();
-    if (j.contains("username")) cfg.username = j["username"].get<std::string>();
-    if (j.contains("mtu")) cfg.mtu = j["mtu"].get<int>();
-    if (j.contains("useragent")) cfg.useragent = j["useragent"].get<std::string>();
-    if (j.contains("disable_dtls")) cfg.disable_dtls = j["disable_dtls"].get<bool>();
-    if (j.contains("routes")) cfg.routes = j["routes"].get<std::vector<std::string>>();
-    if (j.contains("extra_args")) cfg.extra_args = j["extra_args"].get<std::vector<std::string>>();
-    if (j.contains("log_file")) cfg.log_file = j["log_file"].get<std::string>();
-    if (j.contains("remember_password")) cfg.remember_password = j["remember_password"].get<bool>();
-    if (j.contains("vpn_engine")) cfg.vpn_engine = j["vpn_engine"].get<std::string>();
-    if (j.contains("windows_tunnel_driver")) cfg.windows_tunnel_driver = j["windows_tunnel_driver"].get<std::string>();
-    if (j.contains("windows_tap_interface")) cfg.windows_tap_interface = j["windows_tap_interface"].get<std::string>();
-    if (j.contains("auto_reconnect")) cfg.auto_reconnect = j["auto_reconnect"].get<bool>();
-    if (j.contains("minimal_mode")) cfg.minimal_mode = j["minimal_mode"].get<bool>();
-    if (j.contains("service_install_prompt_seen")) cfg.service_install_prompt_seen = j["service_install_prompt_seen"].get<bool>();
-    if (j.contains("minimal_install_service_before_connect")) cfg.minimal_install_service_before_connect = j["minimal_install_service_before_connect"].get<bool>();
-    if (j.contains("include_class_a_private_routes")) cfg.include_class_a_private_routes = j["include_class_a_private_routes"].get<bool>();
-    if (j.contains("include_class_b_private_routes")) cfg.include_class_b_private_routes = j["include_class_b_private_routes"].get<bool>();
-    if (j.contains("launch_at_login")) cfg.launch_at_login = j["launch_at_login"].get<bool>();
-    if (j.contains("auto_connect_on_launch")) cfg.auto_connect_on_launch = j["auto_connect_on_launch"].get<bool>();
-
-    if (j.contains("password")) {
-        std::string pw = j["password"].get<std::string>();
-        if (!pw.empty() && cfg.remember_password) {
-            std::string ks = crypto::key_status();
-            if (ks == "valid") {
-                cfg.password = crypto::encrypt(pw, crypto::load_key());
+    try {
+        if (j.contains("server")) cfg.server = j["server"].get<std::string>();
+        if (j.contains("username")) cfg.username = j["username"].get<std::string>();
+        if (j.contains("mtu")) cfg.mtu = j["mtu"].get<int>();
+        if (j.contains("useragent")) cfg.useragent = j["useragent"].get<std::string>();
+        if (j.contains("disable_dtls")) cfg.disable_dtls = j["disable_dtls"].get<bool>();
+        if (j.contains("routes")) cfg.routes = j["routes"].get<std::vector<std::string>>();
+        if (j.contains("extra_args")) cfg.extra_args = j["extra_args"].get<std::vector<std::string>>();
+        if (j.contains("log_file")) cfg.log_file = j["log_file"].get<std::string>();
+        bool clear_stored_password = false;
+        if (j.contains("remember_password")) {
+            cfg.remember_password = j["remember_password"].get<bool>();
+            if (!cfg.remember_password) {
+                clear_stored_password = true;
             }
         }
+        if (j.contains("vpn_engine")) cfg.vpn_engine = j["vpn_engine"].get<std::string>();
+        if (j.contains("windows_tunnel_driver")) cfg.windows_tunnel_driver = j["windows_tunnel_driver"].get<std::string>();
+        if (j.contains("windows_tap_interface")) cfg.windows_tap_interface = j["windows_tap_interface"].get<std::string>();
+        if (j.contains("auto_reconnect")) cfg.auto_reconnect = j["auto_reconnect"].get<bool>();
+        if (j.contains("minimal_mode")) cfg.minimal_mode = j["minimal_mode"].get<bool>();
+        if (j.contains("service_install_prompt_seen")) cfg.service_install_prompt_seen = j["service_install_prompt_seen"].get<bool>();
+        if (j.contains("minimal_install_service_before_connect")) cfg.minimal_install_service_before_connect = j["minimal_install_service_before_connect"].get<bool>();
+        if (j.contains("include_class_a_private_routes")) cfg.include_class_a_private_routes = j["include_class_a_private_routes"].get<bool>();
+        if (j.contains("include_class_b_private_routes")) cfg.include_class_b_private_routes = j["include_class_b_private_routes"].get<bool>();
+        if (j.contains("launch_at_login")) cfg.launch_at_login = j["launch_at_login"].get<bool>();
+        if (j.contains("auto_connect_on_launch")) cfg.auto_connect_on_launch = j["auto_connect_on_launch"].get<bool>();
+
+        if (j.contains("password")) {
+            std::string pw = j["password"].get<std::string>();
+            if (!pw.empty() && cfg.remember_password) {
+                crypto::init_key_if_needed();
+                std::string ks = crypto::key_status();
+                if (ks != "valid") {
+                    return "Encryption key is " + ks + ". Reset key first.";
+                }
+                std::string encrypted = crypto::encrypt(pw, crypto::load_key());
+                if (encrypted.empty()) {
+                    return "Encryption failed";
+                }
+                cfg.password = encrypted;
+                clear_stored_password = false;
+            } else {
+                clear_stored_password = true;
+            }
+        }
+        if (clear_stored_password) {
+            cfg.password.clear();
+            cfg.remember_password = false;
+        }
+    } catch (const std::exception& e) {
+        return std::string("Invalid config: ") + e.what();
     }
 
     normalize_native_only(cfg);
-    mgr.save(cfg);
+    if (!mgr.save(cfg)) {
+        return "Failed to write config file. Check disk permissions for " +
+               platform::get_config_path();
+    }
+    if (cfg.password.empty()) {
+        crypto::delete_key_file();
+    }
     exv::observability::LogFacade::info("Config imported via config_api");
     return "";
 }

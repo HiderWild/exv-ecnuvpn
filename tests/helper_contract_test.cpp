@@ -278,10 +278,23 @@ public:
     return response;
   }
 
+  exv::helper::RepairServiceResponse repair_service(
+      const exv::helper::RepairServiceRequest &request) override {
+    (void)request;
+    ++repair_count;
+    exv::helper::RepairServiceResponse response;
+    response.success = repair_success;
+    response.exit_code = repair_success ? 0 : 11;
+    response.message = repair_success ? "repaired" : "repair failed";
+    return response;
+  }
+
   bool install_success = true;
   bool uninstall_success = true;
+  bool repair_success = true;
   int install_count = 0;
   int uninstall_count = 0;
+  int repair_count = 0;
 };
 
 class BlockingHelperNetworkOps final : public exv::helper::HelperNetworkOps {
@@ -426,7 +439,7 @@ int test_manifest_declares_single_helper_protocol() {
       "GetSnapshot",  "Shutdown",           "Inspect",
       "AcquireCoreLease", "KeepAlive",      "ReleaseCoreLease",
       "InstallService", "UninstallService", "ExportCleanupLease",
-      "HandoffSession", "FinalizeHandoff"};
+      "HandoffSession", "FinalizeHandoff", "RepairService"};
   ok = expect(helper_op_names(helper) == expected_ops,
               "helper ops must be the single protocol op set") &&
        ok;
@@ -472,6 +485,12 @@ int test_manifest_declares_single_helper_protocol() {
        ok;
   ok = expect(contains(helper.at("messages"), "UninstallServiceResponse"),
               "manifest must list UninstallServiceResponse") &&
+       ok;
+  ok = expect(contains(helper.at("messages"), "RepairServiceRequest"),
+              "manifest must list RepairServiceRequest") &&
+       ok;
+  ok = expect(contains(helper.at("messages"), "RepairServiceResponse"),
+              "manifest must list RepairServiceResponse") &&
        ok;
   ok = expect(contains(helper.at("messages"), "ExportCleanupLeaseRequest"),
               "manifest must list ExportCleanupLeaseRequest") &&
@@ -536,6 +555,9 @@ int test_generated_contract_matches_helper_manifest() {
   ok = expect(is_helper_op("FinalizeHandoff"),
               "generated helper ops include FinalizeHandoff") &&
        ok;
+  ok = expect(is_helper_op("RepairService"),
+              "generated helper ops include RepairService") &&
+       ok;
   ok = expect(!is_helper_op("EndSession"),
               "generated helper ops exclude EndSession") &&
        ok;
@@ -574,6 +596,7 @@ int test_generated_contract_matches_helper_manifest() {
   check("ExportCleanupLease", exv::helper::HelperOp::ExportCleanupLease, false);
   check("HandoffSession", exv::helper::HelperOp::HandoffSession, false);
   check("FinalizeHandoff", exv::helper::HelperOp::FinalizeHandoff, false);
+  check("RepairService", exv::helper::HelperOp::RepairService, false);
 
   return ok ? 0 : 1;
 }
@@ -768,6 +791,28 @@ int test_windows_oneshot_bootstrap_does_not_consume_helper_connection() {
                   std::string::npos,
               "Windows oneshot bootstrap should wait for pipe availability "
               "without consuming the one-shot helper session") &&
+       ok;
+  const auto start_fn =
+      win32_bootstrap.find("OneshotBackend start_oneshot_helper");
+  const auto helper_exists =
+      win32_bootstrap.find("helper_executable_exists(request.helper_path)",
+                           start_fn == std::string::npos ? 0 : start_fn);
+  const auto endpoint_setup =
+      win32_bootstrap.find("backend.endpoint", start_fn == std::string::npos ? 0
+                                                                             : start_fn);
+  const auto direct_launch =
+      win32_bootstrap.find("start_helper_direct(request.helper_path",
+                           start_fn == std::string::npos ? 0 : start_fn);
+  ok = expect(start_fn != std::string::npos &&
+                  helper_exists != std::string::npos &&
+                  endpoint_setup != std::string::npos &&
+                  direct_launch != std::string::npos &&
+                  start_fn < helper_exists &&
+                  helper_exists < endpoint_setup &&
+                  helper_exists < direct_launch,
+              "Windows oneshot bootstrap must check exv-helper.exe exists "
+              "before launching it so missing helper paths do not raise a "
+              "system error dialog") &&
        ok;
 
   return ok ? 0 : 1;
@@ -1754,6 +1799,18 @@ int test_service_maintenance_requires_core_lease_without_vpn_session() {
   ok = expect(service_ops->install_count == 0,
               "InstallService must not call platform ops without a lease") &&
        ok;
+  auto repair_without_lease = dispatch_json(
+      handler, exv::helper::HelperOp::RepairService,
+      json(exv::helper::RepairServiceRequest{}));
+  ok = expect(!repair_without_lease.success,
+              "RepairService must require an active core lease") &&
+       ok;
+  ok = expect(repair_without_lease.error_code == "core_lease_required",
+              "RepairService without lease must report core_lease_required") &&
+       ok;
+  ok = expect(service_ops->repair_count == 0,
+              "RepairService must not call platform ops without a lease") &&
+       ok;
 
   const auto lease = acquire_core_lease(handler);
   ok = expect(lease.accepted, "core lease should be acquired") && ok;
@@ -1767,6 +1824,18 @@ int test_service_maintenance_requires_core_lease_without_vpn_session() {
       json::parse(install.payload_json));
   ok = expect(install_resp.success && install_resp.exit_code == 0,
               "InstallService response should preserve platform result") &&
+       ok;
+
+  auto repair =
+      dispatch_json(handler, exv::helper::HelperOp::RepairService,
+                    json(exv::helper::RepairServiceRequest{}));
+  ok = expect(repair.success,
+              "RepairService should succeed with core lease and no VPN session") &&
+       ok;
+  auto repair_resp = exv::helper::repair_service_response_from_json(
+      json::parse(repair.payload_json));
+  ok = expect(repair_resp.success && repair_resp.exit_code == 0,
+              "RepairService response should preserve platform result") &&
        ok;
 
   auto uninstall =
@@ -1786,6 +1855,37 @@ int test_service_maintenance_requires_core_lease_without_vpn_session() {
   ok = expect(service_ops->uninstall_count == 1,
               "UninstallService should call service ops exactly once") &&
        ok;
+  ok = expect(service_ops->repair_count == 1,
+              "RepairService should call service ops exactly once") &&
+       ok;
+
+  return ok ? 0 : 1;
+}
+
+int test_successful_resident_service_uninstall_requests_shutdown() {
+  bool ok = true;
+  auto service_ops = std::make_shared<RecordingHelperServiceOps>();
+  exv::helper::HelperHandler handler{
+      exv::helper::HelperLifecyclePolicy{}, nullptr, service_ops};
+  exv::helper::HelperStartupContext context;
+  context.launch_mode = "service";
+  handler.set_startup_context(context);
+
+  const auto lease = acquire_core_lease(handler);
+  ok = expect(lease.accepted, "core lease should be acquired") && ok;
+
+  auto uninstall =
+      dispatch_json(handler, exv::helper::HelperOp::UninstallService,
+                    json(exv::helper::UninstallServiceRequest{}));
+  ok = expect(uninstall.success,
+              "resident UninstallService should succeed before shutdown") &&
+       ok;
+  ok = expect(service_ops->uninstall_count == 1,
+              "resident UninstallService should call service ops once") &&
+       ok;
+  ok = expect(handler.should_stop(),
+              "successful resident UninstallService should request helper shutdown") &&
+       ok;
 
   return ok ? 0 : 1;
 }
@@ -1796,6 +1896,9 @@ int test_service_uninstall_rejects_active_vpn_session_in_helper() {
   auto service_ops = std::make_shared<RecordingHelperServiceOps>();
   exv::helper::HelperHandler handler{
       exv::helper::HelperLifecyclePolicy{}, network_ops, service_ops};
+  exv::helper::HelperStartupContext context;
+  context.launch_mode = "service";
+  handler.set_startup_context(context);
 
   const auto start_resp = start_session_with_core_lease(handler);
   ok = expect(!start_resp.session_id.value.empty(),
@@ -1813,6 +1916,21 @@ int test_service_uninstall_rejects_active_vpn_session_in_helper() {
        ok;
   ok = expect(service_ops->uninstall_count == 0,
               "UninstallService must not call platform service ops while VPN is active") &&
+       ok;
+  ok = expect(!handler.should_stop(),
+              "rejected resident UninstallService must not request helper shutdown") &&
+       ok;
+  auto repair =
+      dispatch_json(handler, exv::helper::HelperOp::RepairService,
+                    json(exv::helper::RepairServiceRequest{}));
+  ok = expect(!repair.success,
+              "RepairService must reject an active VPN session") &&
+       ok;
+  ok = expect(repair.error_code == "vpn_session_active",
+              "RepairService active-session rejection should use vpn_session_active") &&
+       ok;
+  ok = expect(service_ops->repair_count == 0,
+              "RepairService must not call platform service ops while VPN is active") &&
        ok;
 
   return ok ? 0 : 1;
@@ -2076,6 +2194,8 @@ int test_helper_message_fields_are_credential_free() {
         "UninstallServiceRequest");
   check(json(exv::helper::UninstallServiceResponse{}),
         "UninstallServiceResponse");
+  check(json(exv::helper::RepairServiceRequest{}), "RepairServiceRequest");
+  check(json(exv::helper::RepairServiceResponse{}), "RepairServiceResponse");
   check(json(exv::helper::ExportCleanupLeaseRequest{}),
         "ExportCleanupLeaseRequest");
   check(json(exv::helper::ExportCleanupLeaseResponse{}),
@@ -2136,6 +2256,7 @@ int main() {
   failures += test_network_ops_do_not_report_fake_success();
   failures +=
       test_service_maintenance_requires_core_lease_without_vpn_session();
+  failures += test_successful_resident_service_uninstall_requests_shutdown();
   failures += test_service_uninstall_rejects_active_vpn_session_in_helper();
   failures += test_cleanup_lease_handoff_moves_session_to_service();
   failures +=

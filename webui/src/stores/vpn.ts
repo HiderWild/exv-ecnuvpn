@@ -98,7 +98,7 @@ export interface ServiceOperationResult {
 }
 
 export interface ServiceProgressEntry {
-  command: 'install' | 'uninstall'
+  command: 'install' | 'uninstall' | 'repair'
   message: string
   timestamp: string
 }
@@ -633,8 +633,8 @@ export const useVpnStore = defineStore('vpn', () => {
   const cliStatus = ref<CliInstallStatus | null>(null)
   const serviceProgress = ref<ServiceProgressEntry[]>([])
   const serviceBusy = ref(false)
-  const serviceOverlayOperation = ref<'install' | 'uninstall' | null>(null)
-  const serviceOperation = ref<'install' | 'uninstall' | null>(null)
+  const serviceOverlayOperation = ref<'install' | 'uninstall' | 'repair' | null>(null)
+  const serviceOperation = ref<'install' | 'uninstall' | 'repair' | null>(null)
   const cliOperation = ref<'install' | 'uninstall' | null>(null)
   const loading = ref(false)
   const lastError = ref<string | null>(null)
@@ -714,7 +714,7 @@ export const useVpnStore = defineStore('vpn', () => {
     return 'helper'
   })
 
-  async function showServiceOverlay(operation: 'install' | 'uninstall') {
+  async function showServiceOverlay(operation: 'install' | 'uninstall' | 'repair') {
     serviceOverlayOperation.value = operation
     await nextTick()
     await new Promise<void>((resolve) => {
@@ -1610,6 +1610,35 @@ export const useVpnStore = defineStore('vpn', () => {
     }
   }
 
+  async function repairService() {
+    await showServiceOverlay('repair')
+    try {
+      serviceBusy.value = true
+      serviceOperation.value = 'repair'
+      serviceProgress.value = []
+      clearError()
+      lastMutatingAction.value = repairService
+      try {
+        const { data } = await api.post<ServiceStatus | ServiceOperationResult>('/service/repair')
+        const nextStatus = serviceStatusFromOperationResult(data)
+        serviceStatus.value = nextStatus
+        if (nextStatus.warning || !nextStatus.available) {
+          throw new Error(nextStatus.warning || 'Helper service is not available after repair.')
+        }
+        await fetchAppShellState()
+        return true
+      } catch (error) {
+        setError(normalizeError(error))
+        return false
+      } finally {
+        serviceOperation.value = null
+        serviceBusy.value = false
+      }
+    } finally {
+      serviceOverlayOperation.value = null
+    }
+  }
+
   async function installCli() {
     cliOperation.value = 'install'
     clearError()
@@ -1674,7 +1703,7 @@ export const useVpnStore = defineStore('vpn', () => {
     fetchStatus, fetchAppShellState, updateStatusFromEvent, connect, disconnect, cancelConnect, connectElevated, disconnectElevated, connectFromDashboard,
     fetchAuthInteraction, respondAuthInteraction,
     fetchRoutes, addRoute, removeRoute, resetRoutes,
-    fetchServiceStatus, fetchCliStatus, installService, uninstallService, installCli, uninstallCli,
+    fetchServiceStatus, fetchCliStatus, installService, uninstallService, repairService, installCli, uninstallCli,
     addLog, clearLogs, setLogs, addServiceProgress, clearError, retryLastAction,
   }
 })

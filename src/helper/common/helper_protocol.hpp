@@ -21,7 +21,8 @@ enum class HelperOp : uint32_t {
     UninstallService = 14,
     ExportCleanupLease = 15,
     HandoffSession = 16,
-    FinalizeHandoff = 17
+    FinalizeHandoff = 17,
+    RepairService = 18
 };
 
 enum class HelperMode : uint32_t {

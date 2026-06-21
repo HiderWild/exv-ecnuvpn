@@ -24,7 +24,7 @@ export const themeAccentPalettes: Record<ThemeAccentTheme, ThemeAccentOption[]> 
     {
       key: 'blue',
       label: '教学蓝',
-      description: '清晰、稳重，适合浅色默认。',
+      description: '清晰、稳重。',
       color: '#2563EB',
       rgb: '37 99 235',
     },

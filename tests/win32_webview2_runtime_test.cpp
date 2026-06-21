@@ -94,6 +94,16 @@ int main() {
   if (webview2_taskbar_created_message_name() != L"TaskbarCreated") {
     return 1;
   }
+  if (webview2_close_decision_for_connection(false, false) !=
+          WebView2CloseDecision::Prompt ||
+      webview2_close_decision_for_connection(false, true) !=
+          WebView2CloseDecision::ApplyRememberedPreference ||
+      webview2_close_decision_for_connection(true, true) !=
+          WebView2CloseDecision::ApplyRememberedPreference ||
+      webview2_close_decision_for_connection(true, false) !=
+          WebView2CloseDecision::Prompt) {
+    return 1;
+  }
   if (webview2_app_icon_resource_id() <= 0 ||
       webview2_app_icon_resource_id() == 32512) {
     return 1;
@@ -123,6 +133,11 @@ int main() {
       !source_contains("if (action == \"window.resizeForMode\")") ||
       !source_contains("if (action == \"window.minimize\")") ||
       !source_contains("if (action == \"window.requestClose\")") ||
+      !source_contains("begin_smart_close_resolution()") ||
+      !source_contains("kSmartCloseResolvedMessage") ||
+      !source_contains("PostMessageW(hwnd, kSmartCloseResolvedMessage") ||
+      source_contains(
+          "const bool vpn_connected = active_config_.is_vpn_connected") ||
       !source_contains("if (action == \"window.startDrag\")") ||
       !source_contains("GetCursorPos(&cursor)") ||
       !source_contains("renderer_client_to_screen(renderer_start)") ||
@@ -158,6 +173,9 @@ int main() {
       !source_contains("configure_non_client_region_support()") ||
       !source_contains("ICoreWebView2Settings9") ||
       !source_contains("put_IsNonClientRegionSupportEnabled(TRUE)") ||
+      !source_contains("configure_fixed_zoom_behavior()") ||
+      !source_contains("put_IsZoomControlEnabled(FALSE)") ||
+      !source_contains("put_ZoomFactor(1.0)") ||
       !source_contains("control_button_hit_test(content_x, content_y, "
                        "content_width, dpi)") ||
       !source_contains("return HTMINBUTTON;") ||

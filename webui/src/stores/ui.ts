@@ -1,6 +1,5 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { useConfigStore } from './config'
 
 export interface ToastMessage {
   id: number
@@ -83,13 +82,6 @@ export const useUiStore = defineStore('ui', () => {
   }
 
   function requestConfirm(message: string, onConfirm: () => void) {
-    const config = useConfigStore()
-    if (config.settings.minimal_mode && window.exv?.modal) {
-      void window.exv.modal.confirmPrompt(message).then((confirmed) => {
-        if (confirmed) onConfirm()
-      })
-      return
-    }
     confirmMessage.value = message
     confirmCallback.value = onConfirm
     showConfirm.value = true
@@ -146,10 +138,6 @@ export const useUiStore = defineStore('ui', () => {
     cancelLabel?: string
   }) {
     passwordPromptResolver.value?.(null)
-    const config = useConfigStore()
-    if (config.settings.minimal_mode && window.exv?.modal) {
-      return window.exv.modal.passwordPrompt(message)
-    }
     passwordPromptMessage.value = message
     passwordPromptDescription.value = options?.description || '输入内容仅用于本次验证，不会写入设置。'
     passwordPromptSubmitLabel.value = options?.submitLabel || '确认'

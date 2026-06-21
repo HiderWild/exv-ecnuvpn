@@ -41,6 +41,15 @@ struct WebView2TrayMenuItem {
   bool separator;
 };
 
+enum class WebView2CloseDecision {
+  QuitImmediately,
+  ApplyRememberedPreference,
+  Prompt,
+};
+
+WebView2CloseDecision webview2_close_decision_for_connection(
+    bool vpn_connected, bool has_remembered_preference) noexcept;
+
 std::vector<WebView2TrayMenuItem> webview2_tray_menu_model();
 bool webview2_should_create_tray_on_start();
 std::wstring webview2_taskbar_created_message_name();

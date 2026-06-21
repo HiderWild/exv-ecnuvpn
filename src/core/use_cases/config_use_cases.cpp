@@ -33,6 +33,8 @@ using exv::Config;
 
 constexpr std::string_view kProtectedExportFormat =
     "exv-config-protected-v1";
+constexpr std::string_view kProtectedExportKdf =
+    "exv-fnv1a64-rounds-v1";
 
 nlohmann::json full_config_json(const Config &cfg);
 
@@ -92,6 +94,9 @@ nlohmann::json config_json_for_export(const Config &cfg,
   nlohmann::json export_json = full_config_json(cfg);
   if (!include_plaintext_password || cfg.password.empty() ||
       !cfg.remember_password) {
+    export_json["password"] = "";
+    export_json["password_stored"] = false;
+    export_json["remember_password"] = false;
     return export_json;
   }
 
@@ -127,7 +132,7 @@ nlohmann::json make_protected_export_envelope(
 
   return nlohmann::json{{"format", "protected"},
                         {"protected_format", std::string(kProtectedExportFormat)},
-                        {"kdf", "exv-fnv1a64-rounds-v1"},
+                        {"kdf", std::string(kProtectedExportKdf)},
                         {"salt", salt},
                         {"payload", ciphertext}};
 }
@@ -139,6 +144,8 @@ decrypt_protected_export_envelope(const nlohmann::json &envelope,
       envelope.value("format", std::string()) != "protected" ||
       envelope.value("protected_format", std::string()) !=
           std::string(kProtectedExportFormat) ||
+      envelope.value("kdf", std::string()) !=
+          std::string(kProtectedExportKdf) ||
       !envelope.contains("salt") || !envelope["salt"].is_string() ||
       !envelope.contains("payload") || !envelope["payload"].is_string()) {
     return std::nullopt;
@@ -1101,12 +1108,14 @@ UseCaseResult ConfigUseCases::import_config(const nlohmann::json &payload) {
   UseCaseResult auth_validation =
       validate_auth_payload_before_save(current, config_json);
   if (!auth_validation.success) {
-    return auth_validation;
+    return UseCaseResult::fail("invalid_config",
+                               auth_validation.error_message);
   }
   UseCaseResult settings_validation =
       validate_settings_payload_before_save(config_json);
   if (!settings_validation.success) {
-    return settings_validation;
+    return UseCaseResult::fail("invalid_config",
+                               settings_validation.error_message);
   }
 
   // Convert JSON to string for config_import

@@ -6,9 +6,10 @@
 #include "helper/common/helper_client.hpp"
 #include "helper/common/helper_connector.hpp"
 #include "observability/log_facade.hpp"
-#include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/backend_resolver.hpp"
 #include "platform/common/driver_status.hpp"
+#include "platform/common/helper_service_manager.hpp"
+#include "platform/common/logging/log_runtime.hpp"
 #include "platform/common/process_utils.hpp"
 #include "platform/common/runtime_paths.hpp"
 #include "platform/common/runtime_status.hpp"
@@ -34,6 +35,23 @@ namespace exv::core {
 namespace {
 
 template <typename ServiceResponse>
+nlohmann::json service_operation_payload(const ServiceResponse &response,
+                                         nlohmann::json service_status) {
+  return nlohmann::json{{"operation",
+                         {{"success", response.success},
+                          {"exit_code", response.exit_code},
+                          {"message", response.message}}},
+                        {"service_status", std::move(service_status)}};
+}
+
+UseCaseResult fail_with_payload(const char *error_code, std::string message,
+                                nlohmann::json payload) {
+  UseCaseResult result = UseCaseResult::fail(error_code, std::move(message));
+  result.payload = std::move(payload);
+  return result;
+}
+
+template <typename ServiceResponse>
 UseCaseResult service_op_result(const ServiceResponse &response,
                                 const char *error_code,
                                 const char *fallback_message) {
@@ -47,8 +65,9 @@ UseCaseResult service_op_result(const ServiceResponse &response,
   if (response.success) {
     return UseCaseResult::ok(std::move(payload));
   }
-  return UseCaseResult::fail(
-      error_code, response.message.empty() ? fallback_message : response.message);
+  return fail_with_payload(
+      error_code, response.message.empty() ? fallback_message : response.message,
+      std::move(payload));
 }
 
 std::string env_value(const char *name) {
@@ -371,6 +390,33 @@ UseCaseResult with_helper_service_lease(const std::string &purpose,
 
 } // namespace
 
+UseCaseResult finalize_service_uninstall_result(
+    const exv::helper::UninstallServiceResponse &response,
+    nlohmann::json service_status) {
+  nlohmann::json payload =
+      service_operation_payload(response, std::move(service_status));
+  constexpr const char *kErrorCode = "service_uninstall_failed";
+  constexpr const char *kFallbackMessage =
+      "Helper service uninstallation failed.";
+
+  if (!response.success) {
+    return fail_with_payload(
+        kErrorCode,
+        response.message.empty() ? kFallbackMessage : response.message,
+        std::move(payload));
+  }
+
+  if (!payload.value("service_status", nlohmann::json::object())
+           .value("installed", true)) {
+    return UseCaseResult::ok(std::move(payload));
+  }
+
+  return fail_with_payload(
+      kErrorCode,
+      "Helper service uninstallation did not remove the service registration.",
+      std::move(payload));
+}
+
 SystemStatusUseCases::SystemStatusUseCases()
     : SystemStatusUseCases(exv::platform::get_config_dir()) {}
 
@@ -508,10 +554,32 @@ UseCaseResult SystemStatusUseCases::uninstall_helper() {
         "vpn_session_active",
         "Disconnect the VPN session before uninstalling the helper service.");
   }
-  return with_helper_service_lease("service.uninstall", true, "oneshot", [](auto &client) {
+  auto self_cleanup = with_helper_service_lease(
+      "service.uninstall", false, "service", [](auto &client) {
+        auto response =
+            client.uninstall_service(exv::helper::UninstallServiceRequest{});
+        return finalize_service_uninstall_result(
+            response, exv::platform::service_status_to_json(
+                          exv::platform::current_service_status()));
+      });
+  if (self_cleanup.success || self_cleanup.error_code == "vpn_session_active") {
+    return self_cleanup;
+  }
+  return with_helper_service_lease(
+      "service.uninstall.fallback", true, "oneshot", [](auto &client) {
+        auto response =
+            client.uninstall_service(exv::helper::UninstallServiceRequest{});
+        return finalize_service_uninstall_result(
+            response, exv::platform::service_status_to_json(
+                          exv::platform::current_service_status()));
+      });
+}
+
+UseCaseResult SystemStatusUseCases::repair_helper() {
+  return with_helper_service_lease("service.repair", true, "oneshot", [](auto &client) {
     return service_op_result(
-        client.uninstall_service(exv::helper::UninstallServiceRequest{}),
-        "service_uninstall_failed", "Helper service uninstallation failed.");
+        client.repair_service(exv::helper::RepairServiceRequest{}),
+        "service_repair_failed", "Helper service repair failed.");
   });
 }
 

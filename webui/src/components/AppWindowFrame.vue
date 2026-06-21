@@ -5,9 +5,8 @@ import appIconUrl from '../assets/app-icon.svg'
 import type { DesktopWindowControl } from '../types/exv'
 
 type WindowMode = 'advanced' | 'minimal'
-type TransitionPhase = 'idle' | 'native-resize-before-animation' | 'preview-animating' | 'native-resize-after-animation' | 'settling'
+type TransitionPhase = 'idle' | 'native-resize' | 'settling'
 
-const MODE_TRANSITION_MS = 300
 const POST_RESIZE_SETTLE_MS = 50
 const HOST_RESIZE_TIMEOUT_MS = 1200
 
@@ -18,7 +17,6 @@ const props = defineProps<{
 const appliedMode = ref<WindowMode>(props.mode)
 const visualMode = ref<WindowMode>(props.mode)
 const transitionPhase = ref<TransitionPhase>('idle')
-const previewAnimating = ref(false)
 const nativeWindowControlState = ref<{
   control: DesktopWindowControl | null
   pressed: boolean
@@ -39,17 +37,10 @@ const frameClass = computed(() => [
   `app-window-frame--${visualMode.value}`,
   isMac.value ? 'app-window-frame--mac' : 'app-window-frame--windows',
   transitionActive.value ? 'app-window-frame--transitioning' : '',
-  previewAnimating.value ? 'app-window-frame--preview-animating' : '',
 ])
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms))
-}
-
-function afterNextPaint() {
-  return new Promise<void>((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-  })
 }
 
 function isDesktopWindowControl(value: unknown): value is DesktopWindowControl {
@@ -66,13 +57,6 @@ function windowControlButtonClass(control: DesktopWindowControl) {
   }
 }
 
-async function waitForPreviewAnimation() {
-  previewAnimating.value = true
-  await afterNextPaint()
-  await wait(MODE_TRANSITION_MS)
-  previewAnimating.value = false
-}
-
 async function resizeNativeWindow(mode: WindowMode, request: number) {
   const resize = window.exv?.window?.resizeForMode ?? window.exv?.window?.setMode
   if (!resize) return
@@ -84,6 +68,25 @@ async function resizeNativeWindow(mode: WindowMode, request: number) {
   ])
 }
 
+async function syncInitialWindowMode() {
+  const request = ++windowModeRequest
+  appliedMode.value = props.mode
+  visualMode.value = props.mode
+  transitionPhase.value = 'idle'
+  try {
+    await resizeNativeWindow(props.mode, request)
+    if (request !== windowModeRequest) return
+    appliedMode.value = props.mode
+    visualMode.value = props.mode
+  } catch (error) {
+    console.error('[window] initial mode sync failed:', error)
+  } finally {
+    if (request === windowModeRequest) {
+      transitionPhase.value = 'idle'
+    }
+  }
+}
+
 async function runModeTransition(nextMode: WindowMode) {
   const request = ++windowModeRequest
   if (appliedMode.value === nextMode) {
@@ -93,27 +96,9 @@ async function runModeTransition(nextMode: WindowMode) {
   }
 
   try {
-    if (appliedMode.value === 'minimal' && nextMode === 'advanced') {
-      transitionPhase.value = 'native-resize-before-animation'
-      visualMode.value = 'minimal'
-      await resizeNativeWindow(nextMode, request)
-      if (request !== windowModeRequest) return
-      transitionPhase.value = 'preview-animating'
-      visualMode.value = 'advanced'
-      await waitForPreviewAnimation()
-    } else if (appliedMode.value === 'advanced' && nextMode === 'minimal') {
-      transitionPhase.value = 'preview-animating'
-      visualMode.value = 'minimal'
-      await waitForPreviewAnimation()
-      if (request !== windowModeRequest) return
-      transitionPhase.value = 'native-resize-after-animation'
-      await resizeNativeWindow(nextMode, request)
-    } else {
-      transitionPhase.value = 'native-resize-before-animation'
-      visualMode.value = nextMode
-      await resizeNativeWindow(nextMode, request)
-    }
-
+    transitionPhase.value = 'native-resize'
+    visualMode.value = nextMode
+    await resizeNativeWindow(nextMode, request)
     if (request !== windowModeRequest) return
     transitionPhase.value = 'settling'
     await wait(POST_RESIZE_SETTLE_MS)
@@ -125,7 +110,6 @@ async function runModeTransition(nextMode: WindowMode) {
     visualMode.value = appliedMode.value
   } finally {
     if (request === windowModeRequest) {
-      previewAnimating.value = false
       transitionPhase.value = 'idle'
     }
   }
@@ -168,6 +152,7 @@ watch(
 onMounted(() => {
   appliedMode.value = props.mode
   visualMode.value = props.mode
+  void syncInitialWindowMode()
   windowControlUnsubscribe = window.exv?.events.subscribe((event) => {
     if (event.type !== 'window-control-state') return
     const data = event.data
@@ -233,14 +218,6 @@ onUnmounted(() => {
         <section class="app-window-content-shell">
           <slot />
         </section>
-
-        <div
-          v-if="transitionActive"
-          class="mode-transition-overlay"
-          aria-hidden="true"
-        >
-          <img class="mode-transition-icon" :src="appIconUrl" alt="" />
-        </div>
       </div>
     </div>
   </div>
@@ -287,9 +264,6 @@ onUnmounted(() => {
   background: transparent;
   box-shadow: var(--app-window-shadow);
   transform-origin: top left;
-  transition:
-    width 300ms cubic-bezier(0.16, 1, 0.3, 1),
-    height 300ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .app-window-frame--minimal.app-window-frame--transitioning .mode-transition-surface {
@@ -430,24 +404,5 @@ onUnmounted(() => {
 
 .app-window-frame--minimal .app-window-content-shell {
   height: calc(100% - var(--titlebar-height));
-}
-
-.mode-transition-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 80;
-  display: grid;
-  place-items: center;
-  border-radius: inherit;
-  background: #0a1223;
-  backdrop-filter: blur(18px) saturate(1.1);
-  pointer-events: auto;
-}
-
-.mode-transition-icon {
-  width: 3.4rem;
-  height: 3.4rem;
-  display: block;
-  filter: drop-shadow(0 0.45rem 0.9rem rgba(0, 0, 0, 0.24));
 }
 </style>

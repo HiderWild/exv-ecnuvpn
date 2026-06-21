@@ -35,11 +35,19 @@ const panelSize = computed(() => mode.value === 'custom' ? 'lg' : 'md')
 const defaultServer = computed(() => ui.quickStartRequest?.defaults.server || distributionConfig.defaultVpnServer)
 const shouldInstallService = computed(() => ui.quickStartRequest?.defaults.install_service ?? true)
 const rememberPasswordEnabled = computed(() => password.value.length > 0)
+const quickStartDescription = computed(() =>
+  ui.quickStartRequest?.reason === 'invalid'
+    ? '配置文件不完整，已重新初始化。'
+    : '首次使用前补全连接信息。',
+)
 
 watch(
   () => ui.showQuickStart,
   async (visible) => {
     if (!visible) return
+    if (config.settings.minimal_mode) {
+      await config.saveSettings({ minimal_mode: false })
+    }
     mode.value = 'quick'
     error.value = ''
     username.value = ''
@@ -187,7 +195,7 @@ async function onImportFile(event: Event) {
   <ModalShell
     :open="ui.showQuickStart"
     title="快速入门"
-    :description="ui.quickStartRequest?.reason === 'invalid' ? '配置文件不完整，已重新初始化。' : '首次使用前补全连接信息。'"
+    :description="quickStartDescription"
     :size="panelSize"
     @close="skip"
   >

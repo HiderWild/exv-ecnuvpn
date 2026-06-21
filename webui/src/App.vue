@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRoute } from 'vue-router'
 import AppWindowFrame from './components/AppWindowFrame.vue'
@@ -20,6 +20,7 @@ const { connect: sseConnect, disconnect: sseDisconnect, coreCrashed, coreCrashIn
 const route = useRoute()
 
 const minimalMode = computed(() => config.settings.minimal_mode)
+const settingsReady = ref(false)
 const keptAlivePages = ['DashboardPage', 'SettingsPage', 'LogsPage', 'AboutPage']
 let autoConnectAttempted = false
 const modalRoute = computed(() =>
@@ -36,6 +37,7 @@ onMounted(async () => {
     config.fetchAuthConfig(),
     vpn.fetchAppShellState(),
   ])
+  settingsReady.value = true
   await maybeAutoConnectOnLaunch()
 })
 
@@ -79,7 +81,8 @@ async function handleCoreQuit() {
     v-else
     :mode="minimalMode ? 'minimal' : 'advanced'"
   >
-    <MinimalModeView v-if="minimalMode" />
+    <div v-if="!settingsReady" class="h-full bg-bg" aria-hidden="true" />
+    <MinimalModeView v-else-if="minimalMode" />
     <div v-else class="app-advanced-shell flex h-full overflow-hidden bg-bg text-foreground font-sans">
       <NavBar />
       <main class="min-w-0 flex-1 overflow-hidden pl-44">

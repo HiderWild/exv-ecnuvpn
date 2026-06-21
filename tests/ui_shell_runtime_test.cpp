@@ -181,6 +181,23 @@ int count_action(const std::vector<std::string> &writes,
   return count;
 }
 
+bool has_numeric_action_id(const std::vector<std::string> &writes,
+                           const std::string &action,
+                           int expected_id) {
+  for (const auto &line : writes) {
+    try {
+      auto parsed = nlohmann::json::parse(line);
+      if (parsed.is_object() &&
+          parsed.value("action", std::string()) == action &&
+          parsed.value("id", -1) == expected_id) {
+        return true;
+      }
+    } catch (...) {
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 int main() {
@@ -245,6 +262,47 @@ int main() {
   ok = expect(count_action(transport.writes, "core.shutdown") == 1,
               "runtime should ask daemon core to shut down on exit") &&
        ok;
+
+  {
+    FakeTransport close_status_transport(
+        R"({"id":1000000001,"ok":true,"data":{"connected":true}})");
+    CoreRpcClient close_status_client(close_status_transport);
+    FakeWindow close_status_window;
+    close_status_window.message_json =
+        R"({"id":22,"action":"window.setMode","payload":{"mode":"advanced"}})";
+    bool close_connected = false;
+    close_status_window.on_before_dispatch = [&]() {
+      close_connected =
+          close_status_window.observed_config.is_vpn_connected();
+    };
+    (void)run_ui_shell_window(close_status_window, config,
+                              close_status_client);
+    ok = expect(close_connected,
+                "close status query should resolve a connected desktop RPC response") &&
+         ok;
+    ok = expect(has_numeric_action_id(close_status_transport.writes,
+                                      "status.get", 1000000001),
+                "close status query should use the numeric desktop RPC id") &&
+         ok;
+  }
+
+  {
+    FakeTransport unavailable_status_transport(std::vector<std::string>{});
+    CoreRpcClient unavailable_status_client(unavailable_status_transport);
+    FakeWindow unavailable_status_window;
+    unavailable_status_window.message_json =
+        R"({"id":23,"action":"window.setMode","payload":{"mode":"advanced"}})";
+    bool close_connected = false;
+    unavailable_status_window.on_before_dispatch = [&]() {
+      close_connected =
+          unavailable_status_window.observed_config.is_vpn_connected();
+    };
+    (void)run_ui_shell_window(unavailable_status_window, config,
+                              unavailable_status_client);
+    ok = expect(close_connected,
+                "close status query should keep the app in tray when status is unavailable") &&
+         ok;
+  }
 
   FakeTransport event_transport(
       std::vector<std::string>{R"({"event":"log","data":{"line":"connected"}})",

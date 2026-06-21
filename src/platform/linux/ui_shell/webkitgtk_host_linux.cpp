@@ -80,6 +80,7 @@ const char *bridge_script() {
       status: () => rpc('service.status'),
       install: () => rpc('service.install'),
       uninstall: () => rpc('service.uninstall'),
+      repair: () => rpc('service.repair'),
     },
     cli: {
       status: () => rpc('cli.status'),
@@ -102,6 +103,9 @@ const char *bridge_script() {
     },
     window: {
       setMode: () => Promise.resolve(),
+      getClosePreference: () => Promise.resolve({ action: null }),
+      setClosePreference: (action) => Promise.resolve({ ok: true, action }),
+      resetClosePreference: () => Promise.resolve({ ok: true }),
       resolveClosePrompt: () => Promise.resolve(),
     },
     modal: {

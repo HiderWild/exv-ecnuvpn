@@ -31,6 +31,8 @@ const emit = defineEmits<{
   reloadSettings: []
 }>()
 
+type ClosePreference = 'smart' | 'tray' | 'quit'
+
 const config = useConfigStore()
 const vpn = useVpnStore()
 const ui = useUiStore()
@@ -40,10 +42,14 @@ const busyDriver = ref<'wintun' | 'tap' | null>(null)
 const systemMessage = ref<{ text: string } | null>(null)
 const installFeedback = ref<{ driver: 'wintun' | 'tap'; takes_effect: string } | null>(null)
 const importFileInput = ref<HTMLInputElement | null>(null)
+const importBusy = ref(false)
+const exportBusy = ref(false)
 const showExportDialog = ref(false)
 const exportIncludePassword = ref(false)
 const exportPassword = ref('')
 const exportPasswordTouched = ref(false)
+const closePreference = ref<ClosePreference>('smart')
+const closePreferenceBusy = ref(false)
 
 const fallbackSettingsDraft: SettingsConfig = {
   mtu: 1400,
@@ -68,6 +74,12 @@ const fallbackSettingsDraft: SettingsConfig = {
 }
 
 const settingsForm = computed(() => props.settingsDraft ?? fallbackSettingsDraft)
+
+const closePreferenceOptions: Array<{ value: ClosePreference; label: string }> = [
+  { value: 'smart', label: '智能处理' },
+  { value: 'tray', label: '缩小到托盘' },
+  { value: 'quit', label: '彻底退出' },
+]
 
 const PROTECTED_EXPORT_WARNING =
   '导出的配置包含可恢复的 VPN 密码。请把导出文件当作敏感文件保存，不要通过不可信渠道共享。'
@@ -204,6 +216,52 @@ async function refreshRuntime() {
   ])
 }
 
+function normalizeClosePreference(action: unknown): ClosePreference {
+  return action === 'tray' || action === 'quit' || action === 'smart' ? action : 'smart'
+}
+
+async function loadClosePreference() {
+  if (!isDesktop || !window.exv?.window.getClosePreference) return
+  try {
+    const result = await window.exv?.window.getClosePreference?.()
+    closePreference.value = normalizeClosePreference(result?.action)
+  } catch (error) {
+    ui.requestError({ title: '读取关闭窗口设置失败', message: normalizeError(error).message })
+  }
+}
+
+async function saveClosePreference(action: ClosePreference) {
+  const previous = closePreference.value
+  closePreference.value = action
+  if (!isDesktop || !window.exv?.window.setClosePreference) return
+  closePreferenceBusy.value = true
+  try {
+    const result = await window.exv?.window.setClosePreference?.(action)
+    closePreference.value = normalizeClosePreference(result?.action ?? action)
+    ui.addToast('关闭窗口处理方式已保存', 'success')
+  } catch (error) {
+    closePreference.value = previous
+    ui.requestError({ title: '保存关闭窗口设置失败', message: normalizeError(error).message })
+  } finally {
+    closePreferenceBusy.value = false
+  }
+}
+
+async function resetClosePreference() {
+  const previous = closePreference.value
+  closePreference.value = 'smart'
+  if (!isDesktop || !window.exv?.window.resetClosePreference) return
+  closePreferenceBusy.value = true
+  try {
+    await window.exv?.window.resetClosePreference?.()
+  } catch (error) {
+    closePreference.value = previous
+    throw error
+  } finally {
+    closePreferenceBusy.value = false
+  }
+}
+
 async function loadSystemSettings() {
   await Promise.all([
     vpn.fetchServiceStatus(),
@@ -212,7 +270,10 @@ async function loadSystemSettings() {
 
   if (isDesktop) {
     try {
-      await refreshRuntime()
+      await Promise.all([
+        refreshRuntime(),
+        loadClosePreference(),
+      ])
     } catch (error) {
       ui.requestError({ title: '刷新运行时失败', message: normalizeError(error).message })
     }
@@ -278,6 +339,7 @@ async function installDriver(driver: 'wintun' | 'tap') {
 }
 
 function triggerImportConfig() {
+  if (importBusy.value) return
   importFileInput.value?.click()
 }
 
@@ -295,6 +357,8 @@ async function handleImportFileChange(event: Event) {
   const file = target.files?.[0]
   target.value = ''
   if (!file) return
+  if (importBusy.value) return
+  importBusy.value = true
   try {
     const text = await readFileAsText(file)
     const envelope = detectImportEnvelope(text)
@@ -317,6 +381,8 @@ async function handleImportFileChange(event: Event) {
       message: friendlyImportConfigError(error),
       secondaryLabel: '确认',
     })
+  } finally {
+    importBusy.value = false
   }
 }
 
@@ -339,9 +405,11 @@ async function exportConfigWithoutPassword() {
 }
 
 async function openExportDialog() {
+  if (exportBusy.value) return
   exportIncludePassword.value = false
   exportPassword.value = ''
   exportPasswordTouched.value = false
+  exportBusy.value = true
   try {
     await config.fetchAuthConfig()
     if (!hasSavedPasswordForExport.value) {
@@ -355,6 +423,8 @@ async function openExportDialog() {
       secondaryLabel: '确认',
     })
     return
+  } finally {
+    exportBusy.value = false
   }
   showExportDialog.value = true
 }
@@ -375,9 +445,11 @@ function updateExportIncludePassword(value: boolean) {
 }
 
 async function submitExportConfig() {
+  if (exportBusy.value) return
   exportPasswordTouched.value = true
   if (exportPasswordRequired.value) return
 
+  exportBusy.value = true
   try {
     const includesPassword = exportIncludePassword.value && hasSavedPasswordForExport.value
     const result = await config.exportConfig({ protected: includesPassword, password: includesPassword ? exportPassword.value : undefined })
@@ -393,11 +465,14 @@ async function submitExportConfig() {
       ui.addToast('配置已导出（不含密码）', 'success')
     }
   } catch (error) {
+    closeExportDialog()
     ui.requestError({
       title: '导出配置失败',
       message: normalizeError(error).message,
       secondaryLabel: '确认',
     })
+  } finally {
+    exportBusy.value = false
   }
 }
 
@@ -405,6 +480,7 @@ function resetConfigAction() {
   ui.requestConfirm('此操作会清空所有 VPN 配置，是否继续？', async () => {
     try {
       await config.resetConfig(true)
+      await resetClosePreference()
       ui.addToast('配置已重置', 'success')
       emit('reloadSettings')
     } catch (error) {
@@ -493,6 +569,27 @@ onMounted(() => {
         />
       </div>
 
+      <div v-if="isDesktop" class="flex flex-col gap-3 rounded-lg border border-border bg-bg/40 px-4 py-3 md:flex-row md:items-center md:justify-between">
+        <div class="min-w-0">
+          <p class="text-sm text-foreground">关闭窗口时</p>
+          <p class="text-xs text-muted">默认智能处理：有连接时缩小到托盘，无连接时直接退出。</p>
+        </div>
+        <select
+          :value="closePreference"
+          :disabled="closePreferenceBusy"
+          class="exv-select w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-foreground transition-colors focus:border-accent/50 focus:outline-none disabled:opacity-50 md:w-64"
+          @change="saveClosePreference(($event.target as HTMLSelectElement).value as ClosePreference)"
+        >
+          <option
+            v-for="option in closePreferenceOptions"
+            :key="option.value"
+            :value="option.value"
+          >
+            {{ option.label }}
+          </option>
+        </select>
+      </div>
+
       <div class="border-t border-border pt-4">
         <div class="mb-3">
           <p class="text-sm font-medium text-foreground">Helper 服务</p>
@@ -527,19 +624,21 @@ onMounted(() => {
         <div class="flex flex-wrap gap-3">
           <button
             aria-label="导入配置"
-            class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+            :disabled="importBusy"
+            class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
             @click="triggerImportConfig"
           >
             <Download class="h-4 w-4" />
-            导入配置
+            {{ importBusy ? '导入中...' : '导入配置' }}
           </button>
           <button
             aria-label="导出配置"
-            class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50"
+            :disabled="exportBusy"
+            class="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm text-foreground transition-colors hover:border-accent/50 disabled:opacity-50"
             @click="openExportDialog"
           >
             <Upload class="h-4 w-4" />
-            导出配置
+            {{ exportBusy && !showExportDialog ? '导出中...' : '导出配置' }}
           </button>
           <button
             class="inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-destructive/90"
@@ -807,11 +906,11 @@ onMounted(() => {
           </button>
           <button
             type="button"
-            :disabled="exportPasswordRequired"
+            :disabled="exportPasswordRequired || exportBusy"
             class="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
             @click="submitExportConfig"
           >
-            导出
+            {{ exportBusy ? '导出中...' : '导出' }}
           </button>
         </template>
       </ModalShell>

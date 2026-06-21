@@ -50,6 +50,10 @@ public:
         (void)req;
         return {};
     }
+    virtual RepairServiceResponse repair_service(const RepairServiceRequest& req) {
+        (void)req;
+        return {};
+    }
     virtual ExportCleanupLeaseResponse export_cleanup_lease(
         const ExportCleanupLeaseRequest& req) {
         (void)req;

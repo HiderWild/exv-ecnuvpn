@@ -16,9 +16,11 @@ function readSource(...parts: string[]) {
 const configStoreText = readSource('src', 'stores', 'config.ts')
 const appText = readSource('src', 'App.vue')
 const vpnStoreText = readSource('src', 'stores', 'vpn.ts')
+const uiStoreText = readSource('src', 'stores', 'ui.ts')
 const dashboardPageText = readSource('src', 'pages', 'DashboardPage.vue')
 const logsPageText = readSource('src', 'pages', 'LogsPage.vue')
 const minimalModeViewText = readSource('src', 'components', 'MinimalModeView.vue')
+const modalShellText = readSource('src', 'components', 'ModalShell.vue')
 const hostApiText = readSource('src', 'api', 'host.ts')
 const navBarText = readSource('src', 'components', 'NavBar.vue')
 
@@ -260,10 +262,11 @@ describe('frontend-owned UI mode state', () => {
     assert.ok(frameText.includes('windowModeRequest'))
     assert.ok(frameText.includes('resizeForMode'))
     assert.ok(frameText.includes('transitionPhase'))
-    assert.ok(frameText.includes('native-resize-before-animation'))
-    assert.ok(frameText.includes('native-resize-after-animation'))
+    assert.ok(frameText.includes("'native-resize'"))
     assert.ok(frameText.includes('settling'))
-    assert.ok(frameText.includes('MODE_TRANSITION_MS'))
+    assert.equal(frameText.includes('native-resize-before-animation'), false)
+    assert.equal(frameText.includes('native-resize-after-animation'), false)
+    assert.equal(frameText.includes('MODE_TRANSITION_MS'), false)
     assert.ok(frameText.includes('POST_RESIZE_SETTLE_MS'))
   })
 
@@ -293,6 +296,26 @@ describe('frontend-owned UI mode state', () => {
   it('keeps the advanced sidebar anchored to the content surface, not the shadow gutter', () => {
     assert.match(navBarText, /<nav class="absolute inset-y-0 left-0/)
     assert.doesNotMatch(navBarText, /<nav class="fixed inset-y-0 left-0/)
+  })
+
+  it('keeps minimal-mode prompts inside the shared in-window modal stack', () => {
+    assert.match(uiStoreText, /function requestConfirm\(message: string, onConfirm: \(\) => void\)/)
+    assert.match(uiStoreText, /function requestPassword\(message: string, options\?:/)
+    assert.doesNotMatch(uiStoreText, /window\.exv\.modal\.confirmPrompt/)
+    assert.doesNotMatch(uiStoreText, /window\.exv\.modal\.passwordPrompt/)
+    assert.doesNotMatch(uiStoreText, /config\.settings\.minimal_mode && window\.exv\?\.modal/)
+  })
+
+  it('keeps compact modal panels inside minimal windows without scrollbars', () => {
+    assert.match(modalShellText, /max-height:\s*calc\(100vh - 28px\)/)
+    assert.match(modalShellText, /display:\s*flex/)
+    assert.match(modalShellText, /flex-direction:\s*column/)
+    assert.match(modalShellText, /compact\?:\s*boolean/)
+    assert.match(modalShellText, /modal-shell__panel--compact/)
+    assert.match(modalShellText, /\.modal-shell__panel--compact\s+\.modal-shell__body\s*\{[\s\S]*overflow:\s*hidden/)
+    assert.match(modalShellText, /\.modal-shell__panel--compact\s+\.modal-shell__actions\s+button\s*\{[\s\S]*font-size:\s*11px/)
+    assert.match(modalShellText, /\.modal-shell__panel--compact\s+\.modal-shell__actions\s+button\s*\{[\s\S]*white-space:\s*nowrap/)
+    assert.match(modalShellText, /@media \(max-width: 360px\), \(max-height: 180px\)[\s\S]*\.modal-shell__panel--compact \.modal-shell__actions button\s*\{[\s\S]*flex:\s*0 0 auto/)
   })
 })
 

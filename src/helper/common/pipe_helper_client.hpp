@@ -45,6 +45,7 @@ public:
     ReleaseCoreLeaseResponse release_core_lease(const ReleaseCoreLeaseRequest& req) override;
     InstallServiceResponse install_service(const InstallServiceRequest& req) override;
     UninstallServiceResponse uninstall_service(const UninstallServiceRequest& req) override;
+    RepairServiceResponse repair_service(const RepairServiceRequest& req) override;
     ExportCleanupLeaseResponse export_cleanup_lease(const ExportCleanupLeaseRequest& req) override;
     HandoffSessionResponse handoff_session(const HandoffSessionRequest& req) override;
     FinalizeHandoffResponse finalize_handoff(const FinalizeHandoffRequest& req) override;

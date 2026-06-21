@@ -68,6 +68,7 @@
         "drivers.install",
         "service.install",
         "service.uninstall",
+        "service.repair",
         "logs.list",
         "logs.clear"
       ],
@@ -143,6 +144,7 @@
         "service.status",
         "service.install",
         "service.uninstall",
+        "service.repair",
         "runtime.status",
         "drivers.status",
         "drivers.install",
@@ -216,6 +218,7 @@
     { "name": "helper.status", "owner": "desktop_host_adapter" },
     { "name": "service.install", "owner": "core_rpc" },
     { "name": "service.uninstall", "owner": "core_rpc" },
+    { "name": "service.repair", "owner": "core_rpc" },
     { "name": "service.driver_status", "owner": "core_rpc" },
     { "name": "runtime.status", "owner": "core_rpc" },
     { "name": "cli.status", "owner": "desktop_host_adapter" },
@@ -309,7 +312,8 @@
         { "name": "UninstallService", "code": 14, "request": "UninstallServiceRequest", "response": "UninstallServiceResponse", "requires_session": false },
         { "name": "ExportCleanupLease", "code": 15, "request": "ExportCleanupLeaseRequest", "response": "ExportCleanupLeaseResponse", "requires_session": false },
         { "name": "HandoffSession", "code": 16, "request": "HandoffSessionRequest", "response": "HandoffSessionResponse", "requires_session": false },
-        { "name": "FinalizeHandoff", "code": 17, "request": "FinalizeHandoffRequest", "response": "FinalizeHandoffResponse", "requires_session": false }
+        { "name": "FinalizeHandoff", "code": 17, "request": "FinalizeHandoffRequest", "response": "FinalizeHandoffResponse", "requires_session": false },
+        { "name": "RepairService", "code": 18, "request": "RepairServiceRequest", "response": "RepairServiceResponse", "requires_session": false }
       ],
       "messages": [
         "HelloRequest",
@@ -340,6 +344,8 @@
         "InstallServiceResponse",
         "UninstallServiceRequest",
         "UninstallServiceResponse",
+        "RepairServiceRequest",
+        "RepairServiceResponse",
         "ManagedResource",
         "CleanupLeaseSession",
         "CleanupLease",
@@ -546,6 +552,7 @@
         "contracts",
         "core",
         "feedback",
+        "generated",
         "helper",
         "observability",
         "platform",
@@ -575,7 +582,7 @@
     "service": {
       "shallow": true,
       "namespace": "service.",
-      "actions": ["service.helper_status", "service.install", "service.uninstall", "service.driver_status"]
+      "actions": ["service.helper_status", "service.install", "service.uninstall", "service.repair", "service.driver_status"]
     },
     "routes": {
       "shallow": true,

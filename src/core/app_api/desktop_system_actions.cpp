@@ -23,7 +23,13 @@ exv::core::SystemStatusUseCases make_system_status_use_cases() {
 
 nlohmann::json desktop_result(const exv::core::UseCaseResult &result) {
   if (!result.success) {
-    return error(result.error_message, result.error_code);
+    nlohmann::json failure = error(result.error_message, result.error_code);
+    if (result.payload.is_object() && !result.payload.empty()) {
+      for (auto it = result.payload.begin(); it != result.payload.end(); ++it) {
+        failure[it.key()] = it.value();
+      }
+    }
+    return failure;
   }
   return result.payload;
 }
@@ -246,7 +252,26 @@ exv::core::UseCaseResult uninstall_helper_service_with_current_instance() {
         "vpn_session_active",
         "Disconnect the VPN session before uninstalling the helper service.");
   }
+  if (auto client = get_current_helper_client_if_exists()) {
+    if (client->is_connected()) {
+      auto response =
+          client->uninstall_service(exv::helper::UninstallServiceRequest{});
+      if (response.success) {
+        auto service_status = make_system_status_use_cases().service_status();
+        auto finalized = exv::core::finalize_service_uninstall_result(
+            response, service_status.success ? service_status.payload
+                                             : nlohmann::json::object());
+        if (finalized.success) {
+          return finalized;
+        }
+      }
+    }
+  }
   return make_system_status_use_cases().uninstall_helper();
+}
+
+exv::core::UseCaseResult repair_helper_service() {
+  return make_system_status_use_cases().repair_helper();
 }
 
 } // namespace
@@ -274,6 +299,12 @@ void register_desktop_system_actions(exv::core_api::DesktopRpcAdapter &adapter) 
       "service.uninstall", [](const nlohmann::json &payload) -> nlohmann::json {
         apply_desktop_runtime_context(payload);
         return desktop_result(uninstall_helper_service_with_current_instance());
+      });
+
+  adapter.register_legacy_handler(
+      "service.repair", [](const nlohmann::json &payload) -> nlohmann::json {
+        apply_desktop_runtime_context(payload);
+        return desktop_result(repair_helper_service());
       });
 
   adapter.register_legacy_handler(

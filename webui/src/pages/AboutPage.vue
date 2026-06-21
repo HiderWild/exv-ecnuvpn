@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { Github, Info, Tag, UserRound } from 'lucide-vue-next'
+import { Github, Tag, UserRound } from 'lucide-vue-next'
+import appIconUrl from '../assets/app-icon.svg'
 import { distributionConfig } from '../generated/distribution'
 import { useConfigStore } from '../stores/config'
 
@@ -37,13 +38,13 @@ onMounted(() => {
       </header>
 
       <section class="rounded-xl border border-border bg-surface p-5">
-        <div class="flex items-center gap-3 border-b border-border pb-4">
-          <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-accent/10 text-accent">
-            <Info class="h-5 w-5" />
+        <div class="flex items-center gap-4 border-b border-border pb-5">
+          <div class="flex h-20 w-20 items-center justify-center rounded-2xl bg-accent/10">
+            <img class="h-16 w-16" :src="appIconUrl" alt="" />
           </div>
-          <div>
-            <p class="text-xl font-semibold leading-6 text-foreground">{{ distributionConfig.appName }}</p>
-            <p class="text-sm font-medium text-muted">{{ distributionConfig.brandSubtitle }}</p>
+          <div class="min-w-0">
+            <p class="text-4xl font-semibold leading-10 text-foreground">{{ distributionConfig.appName }}</p>
+            <p class="text-2xl font-medium leading-8 text-muted">{{ distributionConfig.brandSubtitle }}</p>
           </div>
         </div>
 

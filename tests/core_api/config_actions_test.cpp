@@ -2,7 +2,9 @@
 
 #include "core/rpc/app_rpc_dispatcher.hpp"
 #include "core/rpc/config_actions.hpp"
+#include "core/crypto/crypto.hpp"
 #include "contracts/generated/system_contract.hpp"
+#include "platform/common/runtime_paths.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -47,10 +49,12 @@ struct ConfigActionsFixture {
 
   ConfigActionsFixture()
       : config(config_dir) {
+    exv::platform::set_runtime_path_override(config_dir, config_dir);
     config.register_handlers(dispatcher);
   }
 
   ~ConfigActionsFixture() {
+    exv::platform::clear_runtime_path_override();
     std::error_code ec;
     std::filesystem::remove_all(config_dir, ec);
   }
@@ -75,6 +79,12 @@ struct ConfigActionsFixture {
         {"mtu", 1400},
     };
     out << legacy_config.dump(2);
+  }
+
+  json read_config_file() const {
+    const auto path = std::filesystem::path(config_dir) / "config.json";
+    std::ifstream in(path);
+    return json::parse(in);
   }
 };
 
@@ -441,6 +451,27 @@ int main() {
                 "wrong password import should not apply protected username") &&
          ok;
 
+    auto tampered_kdf = json::parse(export_payload["data"].get<std::string>());
+    tampered_kdf["kdf"] = "unexpected-kdf";
+    auto tampered_kdf_import = fix.dispatch(
+        "config.import",
+        json{{"format", "protected"},
+             {"data", tampered_kdf.dump()},
+             {"password", "correct-password"}}
+            .dump());
+    ok = expect(!tampered_kdf_import.success,
+                "protected config.import should reject tampered KDF metadata") &&
+         ok;
+    ok = expect(tampered_kdf_import.error_code ==
+                    "config_import_tampered_or_wrong_password",
+                "tampered protected metadata should use auth/tamper error") &&
+         ok;
+    auto after_tampered_kdf_resp = fix.dispatch("config.get");
+    auto after_tampered_kdf = json::parse(after_tampered_kdf_resp.payload_json);
+    ok = expect(after_tampered_kdf["config"]["server"] == "vpn-lt.ecnu.edu.cn",
+                "tampered KDF import should not apply protected config") &&
+         ok;
+
     auto correct_import = fix.dispatch(
         "config.import",
         json{{"format", "protected"},
@@ -487,6 +518,148 @@ int main() {
          ok;
     ok = expect(after_wrapped["config"]["username"] == "protected-user",
                 "wrapped protected import should restore username") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    auto save_resp = fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"https://secret.example","username":"secret-user","remember_password":true,"password":"vpn-secret"})");
+    ok = expect(save_resp.success,
+                "config.saveAuth should store a remembered VPN password") &&
+         ok;
+
+    auto auth_resp = fix.dispatch("config.getAuth");
+    auto auth_payload = json::parse(auth_resp.payload_json);
+    ok = expect(auth_payload["password_stored"] == true,
+                "saved auth should report a stored VPN password") &&
+         ok;
+
+    auto export_resp = fix.dispatch(
+        "config.export",
+        R"({"protected":true,"password":"export-passphrase"})");
+    ok = expect(export_resp.success,
+                "protected export should include saved VPN credentials") &&
+         ok;
+    auto export_payload = json::parse(export_resp.payload_json);
+    const std::string downloaded_file =
+        export_payload["data"].get<std::string>();
+    ok = expect(downloaded_file.find("vpn-secret") == std::string::npos,
+                "protected export file should not expose the VPN password") &&
+         ok;
+
+    auto clear_resp = fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"https://changed.example","username":"changed-user","remember_password":false})");
+    ok = expect(clear_resp.success,
+                "test should clear saved credentials before import") &&
+         ok;
+    ok = expect(exv::crypto::key_status() == "missing",
+                "clearing remembered credentials should remove the local key") &&
+         ok;
+
+    auto wrong_import = fix.dispatch(
+        "config.import",
+        json{{"format", "protected"},
+             {"data", downloaded_file},
+             {"password", "wrong-export-passphrase"}}
+            .dump());
+    ok = expect(!wrong_import.success,
+                "protected import should reject the wrong export passphrase") &&
+         ok;
+
+    auto export_after_wrong = fix.dispatch("config.export");
+    ok = expect(export_after_wrong.success,
+                "config.export should still respond after a failed protected import") &&
+         ok;
+
+    auto correct_import = fix.dispatch(
+        "config.import",
+        json{{"format", "protected"},
+             {"data", downloaded_file},
+             {"password", "export-passphrase"}}
+            .dump());
+    ok = expect(correct_import.success,
+                "protected import should accept the correct export passphrase after a failure") &&
+         ok;
+
+    auto imported_auth_resp = fix.dispatch("config.getAuth");
+    auto imported_auth = json::parse(imported_auth_resp.payload_json);
+    ok = expect(imported_auth["username"] == "secret-user",
+                "protected import should restore the auth username") &&
+         ok;
+    ok = expect(imported_auth["password_stored"] == true,
+                "protected import should recreate local storage for the VPN password") &&
+         ok;
+
+    auto on_disk = fix.read_config_file();
+    const std::string stored_ciphertext =
+        on_disk.value("password", std::string());
+    ok = expect(!stored_ciphertext.empty() &&
+                    stored_ciphertext != "vpn-secret",
+                "imported VPN password should be stored encrypted") &&
+         ok;
+    ok = expect(exv::crypto::decrypt(stored_ciphertext,
+                                     exv::crypto::load_key()) ==
+                    "vpn-secret",
+                "imported encrypted VPN password should decrypt correctly") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    auto save_resp = fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"https://secret.example","username":"secret-user","remember_password":true,"password":"vpn-secret"})");
+    ok = expect(save_resp.success,
+                "config.saveAuth should seed a remembered password before unprotected export") &&
+         ok;
+
+    auto export_resp = fix.dispatch("config.export", R"({"protected":false})");
+    ok = expect(export_resp.success,
+                "unprotected config.export should succeed with saved credentials") &&
+         ok;
+    auto export_payload = json::parse(export_resp.payload_json);
+    auto exported_file = json::parse(export_payload["data"].get<std::string>());
+    ok = expect(exported_file.value("password", std::string()).empty(),
+                "unprotected export should not contain the VPN password") &&
+         ok;
+    ok = expect(exported_file.value("remember_password", true) == false,
+                "unprotected export should not preserve remember_password=true") &&
+         ok;
+    ok = expect(exported_file.value("password_stored", true) == false,
+                "unprotected export should not claim a password is stored") &&
+         ok;
+
+    auto replace_resp = fix.dispatch(
+        "config.saveAuth",
+        R"({"server":"https://changed.example","username":"changed-user","remember_password":true,"password":"local-secret"})");
+    ok = expect(replace_resp.success,
+                "test should store a local password before unprotected import") &&
+         ok;
+    ok = expect(exv::crypto::key_status() == "valid",
+                "test should have a local key before unprotected import") &&
+         ok;
+
+    auto import_resp = fix.dispatch(
+        "config.import",
+        json{{"format", "unprotected"}, {"data", export_payload["data"]}}
+            .dump());
+    ok = expect(import_resp.success,
+                "unprotected import should accept the redacted export file") &&
+         ok;
+
+    auto imported_auth_resp = fix.dispatch("config.getAuth");
+    auto imported_auth = json::parse(imported_auth_resp.payload_json);
+    ok = expect(imported_auth["remember_password"] == false,
+                "unprotected import should clear remember_password") &&
+         ok;
+    ok = expect(imported_auth["password_stored"] == false,
+                "unprotected import should clear existing local password storage") &&
+         ok;
+    ok = expect(exv::crypto::key_status() == "missing",
+                "unprotected import should remove the local encryption key") &&
          ok;
   }
 
@@ -540,6 +713,28 @@ int main() {
          ok;
     ok = expect(resp.error_code == "invalid_payload",
                 "error code should be invalid_payload") &&
+         ok;
+  }
+
+  {
+    ConfigActionsFixture fix;
+    fix.dispatch("config.saveSettings", R"({"mtu":1350})");
+    auto resp = fix.dispatch("config.import", R"({"mtu":"not-a-number"})");
+    ok = expect(!resp.success,
+                "config.import with an invalid field type should fail") &&
+         ok;
+    ok = expect(resp.error_code == "invalid_config",
+                "invalid imported field type should be invalid_config") &&
+         ok;
+
+    auto after_invalid = json::parse(fix.dispatch("config.get").payload_json);
+    ok = expect(after_invalid["settings"]["mtu"] == 1350,
+                "invalid field type import should leave existing settings unchanged") &&
+         ok;
+
+    auto export_after_invalid = fix.dispatch("config.export");
+    ok = expect(export_after_invalid.success,
+                "config.export should still respond after invalid config import") &&
          ok;
   }
 

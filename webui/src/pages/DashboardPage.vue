@@ -6,6 +6,7 @@ import {
   LockKeyhole,
   Power,
   Server,
+  Wrench,
 } from 'lucide-vue-next'
 import ToggleSwitch from '../components/ToggleSwitch.vue'
 import { useConfigStore } from '../stores/config'
@@ -50,6 +51,14 @@ const showInstallServiceChoice = computed(() => (
   !vpn.serviceInstalled
 ))
 const installServiceChoiceDisabled = computed(() => connecting.value || disconnecting.value || vpn.loading || vpn.serviceBusy)
+const showServiceRepairAction = computed(() => (
+  !connected.value &&
+  !connecting.value &&
+  !disconnecting.value &&
+  !vpn.loading &&
+  vpn.serviceInstalled &&
+  !vpn.serviceAvailable
+))
 
 const statusLabel = computed(() => {
   if (disconnecting.value) return '正在断开'
@@ -126,6 +135,11 @@ function handlePowerClick() {
   }
   if (vpn.loading || vpn.serviceBusy) return
   vpn.connectFromDashboard(showInstallServiceChoice.value && installServiceBeforeConnect.value)
+}
+
+function handleServiceRepairClick() {
+  if (vpn.serviceBusy || vpn.loading) return
+  void vpn.repairService()
 }
 
 const arcViewBox = {
@@ -677,6 +691,16 @@ function nodeVisualClass(node: { key: string; tone?: string; pulseKeys?: string[
             <p class="text-lg font-semibold text-foreground">{{ statusLabel }}</p>
             <p class="mx-auto mt-1 max-w-xl text-sm text-muted">{{ statusDescription }}</p>
           </div>
+          <button
+            v-if="showServiceRepairAction"
+            type="button"
+            :disabled="vpn.serviceBusy"
+            class="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/50 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-accent/50 hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-50"
+            @click="handleServiceRepairClick"
+          >
+            <Wrench class="h-3.5 w-3.5" />
+            尝试修复
+          </button>
           <label
             v-if="showInstallServiceChoice"
             class="inline-flex items-center gap-2 rounded-full border border-border bg-bg/40 px-3 py-1.5 text-xs text-muted"

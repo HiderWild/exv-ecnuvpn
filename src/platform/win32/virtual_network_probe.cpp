@@ -93,16 +93,17 @@ std::vector<virtual_network::AdapterInfo>
 detect_virtual_network_adapters(const std::string &exv_interface) {
   std::map<std::string, Candidate> candidates;
 
-  std::string command =
-      "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
-      "\"Get-NetAdapter -ErrorAction SilentlyContinue | "
+  std::string script =
+      "Get-NetAdapter -ErrorAction SilentlyContinue | "
       "ForEach-Object { 'adapter|' + $_.ifIndex + '|' + $_.Name + '|' + $_.InterfaceDescription + '|' + $_.Status }; "
       "Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
       "Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1') -or "
       "$_.DestinationPrefix -like '198.18.*' -or $_.DestinationPrefix -like '198.19.*' -or "
       "$_.NextHop -like '198.18.*' -or $_.NextHop -like '198.19.*' } | "
       "Sort-Object RouteMetric,InterfaceMetric | "
-      "ForEach-Object { 'route|' + $_.InterfaceIndex + '|' + $_.InterfaceAlias + '|' + $_.DestinationPrefix + '|' + $_.NextHop + '|' + $_.RouteMetric }\"";
+      "ForEach-Object { 'route|' + $_.InterfaceIndex + '|' + $_.InterfaceAlias + '|' + $_.DestinationPrefix + '|' + $_.NextHop + '|' + $_.RouteMetric }";
+  std::string command = platform::powershell_encoded_command(
+      script, "-NoProfile -NonInteractive -ExecutionPolicy Bypass");
 
   for (const auto &line : exv::utils::split_lines(platform::run_command_output(command))) {
     std::vector<std::string> fields = split_pipe_fields(line);

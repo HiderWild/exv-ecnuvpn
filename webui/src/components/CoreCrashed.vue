@@ -2,7 +2,12 @@
 import { AlertTriangle } from 'lucide-vue-next'
 import ModalShell from './ModalShell.vue'
 
-defineProps<{ exitCode: number | null }>()
+const props = withDefaults(defineProps<{
+  exitCode: number | null
+  compact?: boolean
+}>(), {
+  compact: false,
+})
 defineEmits<{ restart: []; quit: [] }>()
 </script>
 
@@ -10,16 +15,17 @@ defineEmits<{ restart: []; quit: [] }>()
   <ModalShell
     open
     title="核心进程已退出"
-    description="VPN 核心进程已终止，VPN 连接可能已中断。"
+    :description="props.compact ? '' : 'VPN 核心进程已终止，VPN 连接可能已中断。'"
     :close-on-scrim="false"
+    :compact="props.compact"
     size="sm"
   >
     <template #icon>
       <AlertTriangle class="h-4 w-4 text-warning" />
     </template>
 
-    <p v-if="exitCode !== null" class="rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-destructive">
-      退出码: {{ exitCode }}
+    <p v-if="props.exitCode !== null" :class="props.compact ? 'modal-compact-message font-mono text-destructive' : 'rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-destructive'">
+      退出码: {{ props.exitCode }}
     </p>
 
     <template #actions>

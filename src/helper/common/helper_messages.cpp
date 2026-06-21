@@ -655,6 +655,38 @@ UninstallServiceResponse uninstall_service_response_from_json(const json& j) {
     return resp;
 }
 
+void to_json(json& j, const RepairServiceRequest& req) {
+    (void)req;
+    j = json::object();
+}
+
+void from_json(const json& j, RepairServiceRequest& req) {
+    req = repair_service_request_from_json(j);
+}
+
+RepairServiceRequest repair_service_request_from_json(const json& j) {
+    (void)j;
+    return {};
+}
+
+void to_json(json& j, const RepairServiceResponse& resp) {
+    j = json{{"success", resp.success},
+             {"exit_code", resp.exit_code},
+             {"message", resp.message}};
+}
+
+void from_json(const json& j, RepairServiceResponse& resp) {
+    resp = repair_service_response_from_json(j);
+}
+
+RepairServiceResponse repair_service_response_from_json(const json& j) {
+    RepairServiceResponse resp;
+    resp.success = j.value("success", false);
+    resp.exit_code = j.value("exit_code", 1);
+    resp.message = j.value("message", "");
+    return resp;
+}
+
 void to_json(json& j, const CleanupLeaseSession& session) {
     j = json{{"session_id", session.session_id},
              {"profile_id", session.profile_id},

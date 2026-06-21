@@ -20,6 +20,7 @@
 #include "cli/pipe_client.hpp"
 #include "core/app_api/app_api.hpp"
 #include "core/app_api/desktop_vpn_test_hooks.hpp"
+#include "generated/distribution_config.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -226,6 +227,10 @@ static void write_valid_native_config(const std::string& config_dir) {
         {"minimal_mode", false},
         {"service_install_prompt_seen", false},
         {"minimal_install_service_before_connect", true},
+        {"include_class_a_private_routes", false},
+        {"include_class_b_private_routes", false},
+        {"launch_at_login", false},
+        {"auto_connect_on_launch", false},
     };
     std::ofstream out(std::filesystem::path(config_dir) / "config.json",
                       std::ios::out | std::ios::trunc);
@@ -454,8 +459,8 @@ int main() {
             expect(event["data"].value("reason", std::string()) == "missing",
                    "E2.0-quick-start: reason is missing");
             expect(event["data"]["defaults"].value("server", std::string()) ==
-                       "vpn-ct.ecnu.edu.cn",
-                   "E2.0-quick-start: default server is ct host");
+                       std::string(exv::distribution::kDefaultVpnServer),
+                   "E2.0-quick-start: default server follows distribution");
             expect(!event["data"]["defaults"].value("remember_password", true),
                    "E2.0-quick-start: remember password defaults false");
             expect(event["data"]["defaults"].value("install_service", false),
@@ -464,6 +469,49 @@ int main() {
         expect(std::filesystem::exists(
                    std::filesystem::path(quick_config_dir) / "config.json"),
                "E2.0-quick-start: config file is generated before renderer actions");
+        std::filesystem::remove_all(quick_config_dir);
+        std::filesystem::remove_all(quick_home_dir);
+    }
+
+    {
+        std::cerr << "[E2.0-quick-start-invalid] incomplete config emits quick start\n";
+        auto quick_config_dir = make_temp_dir();
+        auto quick_home_dir = make_temp_dir();
+        {
+            std::ofstream out(std::filesystem::path(quick_config_dir) / "config.json",
+                              std::ios::out | std::ios::trunc);
+            out << R"({"server":"vpn.example.invalid","username":"","password":""})";
+        }
+
+        BlockingInputBuf in_buf;
+        CaptureOutputBuf out_buf;
+        ScopedRdbuf sci(std::cin,  &in_buf);
+        ScopedRdbuf sco(std::cout, &out_buf);
+        std::cin.tie(nullptr);
+
+        CoreRunner cr;
+        cr.start(quick_config_dir, quick_home_dir);
+
+        in_buf.feed(R"({"id":902,"action":"status.get","payload":{}})" "\n");
+        expect(wait_for_response_count(out_buf, 1, std::chrono::seconds(3)),
+               "E2.0-quick-start-invalid: should receive response");
+
+        in_buf.close_input();
+        cr.join();
+
+        auto all = parse_json_lines(out_buf.read_all());
+        auto event = find_event(all, "quick-start-request");
+        expect(!event.is_null(),
+               "E2.0-quick-start-invalid: incomplete config emits quick-start-request");
+        if (!event.is_null()) {
+            expect(event["data"].value("reason", std::string()) == "invalid",
+                   "E2.0-quick-start-invalid: reason is invalid");
+            expect(event["data"].contains("defaults"),
+                   "E2.0-quick-start-invalid: defaults are present");
+        }
+        expect(std::filesystem::exists(
+                   std::filesystem::path(quick_config_dir) / "config.json"),
+               "E2.0-quick-start-invalid: config file is regenerated");
         std::filesystem::remove_all(quick_config_dir);
         std::filesystem::remove_all(quick_home_dir);
     }

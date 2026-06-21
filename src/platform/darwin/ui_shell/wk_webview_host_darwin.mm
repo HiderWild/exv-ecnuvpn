@@ -159,6 +159,7 @@ NSString *bridge_script() {
       status: () => rpc('service.status'),
       install: () => rpc('service.install'),
       uninstall: () => rpc('service.uninstall'),
+      repair: () => rpc('service.repair'),
     },
     cli: {
       status: () => rpc('cli.status'),
@@ -184,6 +185,9 @@ NSString *bridge_script() {
       resizeForMode: (mode, request) => rpc('window.resizeForMode', { mode, request }),
       minimize: () => rpc('window.minimize'),
       requestClose: () => rpc('window.requestClose'),
+      getClosePreference: () => Promise.resolve({ action: null }),
+      setClosePreference: (action) => Promise.resolve({ ok: true, action }),
+      resetClosePreference: () => Promise.resolve({ ok: true }),
       resolveClosePrompt: (result) => rpc('window.resolveClosePrompt', { result }),
       startDrag: (drag) => rpc('window.startDrag', drag ?? {}),
     },

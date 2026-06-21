@@ -33,6 +33,7 @@ export interface QuickStartRequestEvent {
 }
 
 export type DesktopWindowControl = 'minimize' | 'close'
+export type DesktopCloseChoice = 'smart' | 'tray' | 'quit'
 
 export interface WindowControlStateEvent {
   control: DesktopWindowControl | null
@@ -147,6 +148,7 @@ export interface ExvApi {
     status(): Promise<ServiceStatus>
     install(): Promise<ServiceStatus | ServiceOperationResult>
     uninstall(): Promise<ServiceStatus | ServiceOperationResult>
+    repair(): Promise<ServiceStatus | ServiceOperationResult>
   }
   cli: {
     status(): Promise<CliInstallStatus>
@@ -169,6 +171,9 @@ export interface ExvApi {
     minimize(): Promise<{ ok: true }>
     requestClose(): Promise<{ ok: true }>
     resolveClosePrompt(result: unknown): Promise<{ ok: true }>
+    getClosePreference(): Promise<{ action: DesktopCloseChoice | null }>
+    setClosePreference(action: DesktopCloseChoice): Promise<{ ok: true; action: DesktopCloseChoice }>
+    resetClosePreference(): Promise<{ ok: true }>
     startDrag(start?: DesktopWindowDragStart): Promise<{ ok: true }>
   }
   shell: {

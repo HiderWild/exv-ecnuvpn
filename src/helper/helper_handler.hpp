@@ -93,6 +93,7 @@ private:
         const HelperRequest& req, const HelperRequestContext& context);
     HelperResponse handle_install_service(const HelperRequest& req);
     HelperResponse handle_uninstall_service(const HelperRequest& req);
+    HelperResponse handle_repair_service(const HelperRequest& req);
     HelperResponse handle_export_cleanup_lease(const HelperRequest& req);
     HelperResponse handle_handoff_session(const HelperRequest& req);
     HelperResponse handle_finalize_handoff(const HelperRequest& req);

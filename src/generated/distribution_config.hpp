@@ -11,8 +11,8 @@ inline constexpr std::string_view kId = "ecnu";
 inline constexpr std::string_view kAppName = "EXV";
 inline constexpr std::string_view kBrandSubtitle = "for ECNU";
 inline constexpr std::string_view kAuthor = "HiderWild";
-inline constexpr std::string_view kRepositoryLabel = "HiderWild/easy-ecnu-vpn";
-inline constexpr std::string_view kRepositoryUrl = "https://github.com/HiderWild/easy-ecnu-vpn";
+inline constexpr std::string_view kRepositoryLabel = "HiderWild/exv-ecnuvpn";
+inline constexpr std::string_view kRepositoryUrl = "https://github.com/HiderWild/exv-ecnuvpn/";
 inline constexpr std::string_view kDefaultVpnServer = "vpn-cn.ecnu.edu.cn";
 
 inline constexpr std::array<std::string_view, 3> kVpnServers = {

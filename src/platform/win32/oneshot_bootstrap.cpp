@@ -55,6 +55,12 @@ bool wait_for_helper_pipe_available(const std::string &endpoint,
   return false;
 }
 
+bool helper_executable_exists(const std::string &helper_path) {
+  const DWORD attrs = GetFileAttributesA(helper_path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES &&
+         (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
 std::string current_owner_sid() {
   HANDLE token = nullptr;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
@@ -205,6 +211,11 @@ OneshotBackend start_oneshot_helper(const OneshotBootstrapRequest &request) {
   if (request.helper_path.empty()) {
     backend.code = kOneshotNotSupportedCode;
     backend.message = "exv-helper.exe path is not available.";
+    return backend;
+  }
+  if (!helper_executable_exists(request.helper_path)) {
+    backend.code = kServiceStartFailedCode;
+    backend.message = "exv-helper.exe was not found: " + request.helper_path;
     return backend;
   }
 

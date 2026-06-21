@@ -8,7 +8,7 @@ namespace exv::ui_shell {
 namespace {
 
 bool is_persistable_close_action(const std::string &action) {
-  return action == "tray" || action == "quit";
+  return action == "smart" || action == "tray" || action == "quit";
 }
 
 ClosePromptResolution normalize_close_result(const nlohmann::json &result) {
@@ -117,6 +117,17 @@ bool write_close_preference(const std::filesystem::path &state_dir,
   }
   output << out.dump(2);
   return output.good();
+}
+
+bool clear_close_preference(const std::filesystem::path &state_dir) {
+  const auto path = close_preference_path(state_dir);
+  if (path.empty()) {
+    return false;
+  }
+
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  return !error;
 }
 
 } // namespace exv::ui_shell

@@ -125,19 +125,58 @@ bool ensure_stable_helper_binary(const std::filesystem::path &source,
   return true;
 }
 
-std::string service_binary_path(SC_HANDLE service) {
+struct ServiceConfigSnapshot {
+  std::string binary_path;
+  DWORD start_type = SERVICE_NO_CHANGE;
+  bool valid = false;
+};
+
+ServiceConfigSnapshot query_service_config(SC_HANDLE service) {
+  ServiceConfigSnapshot snapshot;
   DWORD bytes_needed = 0;
   QueryServiceConfigA(service, NULL, 0, &bytes_needed);
   if (bytes_needed == 0)
-    return {};
+    return snapshot;
 
   std::vector<unsigned char> buffer(bytes_needed);
   auto *config = reinterpret_cast<QUERY_SERVICE_CONFIGA *>(buffer.data());
   if (!QueryServiceConfigA(service, config, bytes_needed, &bytes_needed) ||
       !config->lpBinaryPathName) {
-    return {};
+    return snapshot;
   }
-  return config->lpBinaryPathName;
+  snapshot.binary_path = config->lpBinaryPathName;
+  snapshot.start_type = config->dwStartType;
+  snapshot.valid = true;
+  return snapshot;
+}
+
+bool wait_for_service_deleted_or_marked(SC_HANDLE scm, const char *service_name,
+                                        bool current_process_is_service) {
+  if (current_process_is_service) {
+    SC_HANDLE check = OpenServiceA(scm, service_name, SERVICE_QUERY_STATUS);
+    if (!check) {
+      DWORD err = GetLastError();
+      return err == ERROR_SERVICE_DOES_NOT_EXIST ||
+             err == ERROR_SERVICE_MARKED_FOR_DELETE;
+    }
+    CloseServiceHandle(check);
+    return true;
+  }
+
+  for (int i = 0; i < 50; ++i) {
+    SC_HANDLE check = OpenServiceA(scm, service_name, SERVICE_QUERY_STATUS);
+    if (!check) {
+      DWORD err = GetLastError();
+      if (err == ERROR_SERVICE_DOES_NOT_EXIST ||
+          err == ERROR_SERVICE_MARKED_FOR_DELETE) {
+        return true;
+      }
+    } else {
+      CloseServiceHandle(check);
+    }
+    Sleep(100);
+  }
+  return false;
 }
 
 } // namespace
@@ -204,10 +243,15 @@ int install_helper_service(const std::string &executable_path,
         return 1;
       }
 
-      bool service_config_changed = false;
-      if (service_binary_path(hService) != binary_path) {
+      const ServiceConfigSnapshot service_config =
+          query_service_config(hService);
+      const bool binary_path_changed =
+          !service_config.valid || service_config.binary_path != binary_path;
+      const bool start_type_changed =
+          !service_config.valid || service_config.start_type != SERVICE_AUTO_START;
+      if (binary_path_changed || start_type_changed) {
         if (!ChangeServiceConfigA(hService, SERVICE_NO_CHANGE,
-                                  SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+                                  SERVICE_AUTO_START, SERVICE_NO_CHANGE,
                                   binary_path.c_str(), NULL, NULL, NULL, NULL,
                                   NULL, NULL)) {
           exv::observability::LogFacade::error("ChangeServiceConfig failed: " +
@@ -216,13 +260,12 @@ int install_helper_service(const std::string &executable_path,
           CloseServiceHandle(hSCM);
           return 1;
         }
-        service_config_changed = true;
       }
 
       SERVICE_STATUS service_status = {};
       if (QueryServiceStatus(hService, &service_status) &&
           service_status.dwCurrentState != SERVICE_STOPPED &&
-          (service_config_changed || helper_refreshed)) {
+          (binary_path_changed || helper_refreshed)) {
         cli::print_info(
             "Restarting helper service to apply the new binary path...");
         ControlService(hService, SERVICE_CONTROL_STOP, &service_status);
@@ -283,8 +326,19 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
     return 0;
   }
 
+  SERVICE_STATUS_PROCESS process_status = {};
+  DWORD bytes_needed = 0;
+  bool current_process_is_service = false;
+  if (QueryServiceStatusEx(
+          hService, SC_STATUS_PROCESS_INFO,
+          reinterpret_cast<LPBYTE>(&process_status),
+          sizeof(process_status), &bytes_needed)) {
+    current_process_is_service =
+        process_status.dwProcessId == GetCurrentProcessId();
+  }
+
   SERVICE_STATUS status = {};
-  if (QueryServiceStatus(hService, &status) &&
+  if (!current_process_is_service && QueryServiceStatus(hService, &status) &&
       status.dwCurrentState != SERVICE_STOPPED) {
     std::cout << "Stopping helper service...\n";
     ControlService(hService, SERVICE_CONTROL_STOP, &status);
@@ -313,19 +367,8 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
 
   CloseServiceHandle(hService);
 
-  bool removed = false;
-  for (int i = 0; i < 50; ++i) {
-    SC_HANDLE check =
-        OpenServiceA(hSCM, platform_config.service_name, SERVICE_QUERY_STATUS);
-    if (!check) {
-      removed = GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST;
-      if (removed)
-        break;
-    } else {
-      CloseServiceHandle(check);
-    }
-    Sleep(100);
-  }
+  const bool removed = wait_for_service_deleted_or_marked(
+      hSCM, platform_config.service_name, current_process_is_service);
 
   CloseServiceHandle(hSCM);
 
@@ -335,6 +378,84 @@ int uninstall_helper_service(const HelperServiceManagerContext &context) {
   }
 
   std::cout << "Helper service uninstalled.\n";
+  return 0;
+}
+
+int repair_helper_service(const HelperServiceManagerContext &context) {
+  const auto &platform_config = helper_platform_config();
+
+  if (!platform::check_root()) {
+    cli::print_error(
+        "Administrator privileges required. Please run from an elevated prompt.");
+    return 1;
+  }
+
+  SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+  if (!hSCM) {
+    exv::observability::LogFacade::error("Cannot open Service Control Manager");
+    return 1;
+  }
+
+  SC_HANDLE hService = OpenServiceA(
+      hSCM, platform_config.service_name,
+      SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS);
+  if (!hService) {
+    CloseServiceHandle(hSCM);
+    cli::print_error("Helper service is not installed.");
+    return 1;
+  }
+
+  if (!ChangeServiceConfigA(hService, SERVICE_NO_CHANGE, SERVICE_AUTO_START,
+                            SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL,
+                            NULL, NULL)) {
+    exv::observability::LogFacade::error("ChangeServiceConfig failed: " +
+                                         std::to_string(GetLastError()));
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hSCM);
+    return 1;
+  }
+
+  SERVICE_STATUS status = {};
+  if (QueryServiceStatus(hService, &status) &&
+      status.dwCurrentState != SERVICE_RUNNING) {
+    cli::print_info("Starting helper service...");
+    if (!StartService(hService, 0, NULL)) {
+      DWORD err = GetLastError();
+      if (err != ERROR_SERVICE_ALREADY_RUNNING) {
+        exv::observability::LogFacade::error("StartService failed: " +
+                                             std::to_string(err));
+        CloseServiceHandle(hService);
+        CloseServiceHandle(hSCM);
+        return 1;
+      }
+    }
+  }
+
+  bool running = false;
+  for (int i = 0; i < 50; ++i) {
+    if (QueryServiceStatus(hService, &status) &&
+        status.dwCurrentState == SERVICE_RUNNING) {
+      running = true;
+      break;
+    }
+    Sleep(100);
+  }
+
+  CloseServiceHandle(hService);
+  CloseServiceHandle(hSCM);
+
+  if (!running) {
+    cli::print_error("Helper service did not reach the running state.");
+    return 1;
+  }
+
+  cli::print_info("Waiting for helper to become ready...");
+  if (!wait_until_ready(context, 50, 100000)) {
+    cli::print_error("Helper service is running but did not respond.");
+    return 1;
+  }
+
+  cli::print_success("EXV helper service repaired.");
   return 0;
 }
 

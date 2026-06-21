@@ -252,10 +252,16 @@ int main() {
             resp.success = true;
             return resp;
         });
+        dispatcher.register_handler("service.repair", [](const RpcRequest&) {
+            RpcResponse resp;
+            resp.success = true;
+            return resp;
+        });
 
         auto vpn_meta = dispatcher.metadata_for("vpn.connect");
         auto config_meta = dispatcher.metadata_for("config.saveAuth");
         auto admin_meta = dispatcher.metadata_for("service.install");
+        auto repair_meta = dispatcher.metadata_for("service.repair");
 
         ok = expect(vpn_meta.has_value() &&
                         vpn_meta->lane == RpcLane::VpnControl &&
@@ -269,6 +275,10 @@ int main() {
                         admin_meta->lane == RpcLane::PlatformAdmin &&
                         admin_meta->conflict == RpcConflictClass::PlatformAdminWrite,
                     "service.install should default to platform_admin write metadata") && ok;
+        ok = expect(repair_meta.has_value() &&
+                        repair_meta->lane == RpcLane::PlatformAdmin &&
+                        repair_meta->conflict == RpcConflictClass::PlatformAdminWrite,
+                    "service.repair should default to platform_admin write metadata") && ok;
     }
 
     // --- desktop adapter exposes metadata for legacy handlers ---

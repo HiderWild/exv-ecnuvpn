@@ -55,6 +55,7 @@ export const CORE_RPC_ACTIONS = [
   "service.status",
   "service.install",
   "service.uninstall",
+  "service.repair",
   "runtime.status",
   "drivers.status",
   "drivers.install",
@@ -111,6 +112,7 @@ export const DESKTOP_RPC_ACTIONS = [
   "drivers.install",
   "service.install",
   "service.uninstall",
+  "service.repair",
   "logs.list",
   "logs.clear"
 ] as const
@@ -373,6 +375,10 @@ export const ACTION_OWNERS = [
     "owner": "core_rpc"
   },
   {
+    "name": "service.repair",
+    "owner": "core_rpc"
+  },
+  {
     "name": "service.driver_status",
     "owner": "core_rpc"
   },
@@ -450,6 +456,7 @@ export const ACTION_OWNER_MAP = {
   "helper.status": "desktop_host_adapter",
   "service.install": "core_rpc",
   "service.uninstall": "core_rpc",
+  "service.repair": "core_rpc",
   "service.driver_status": "core_rpc",
   "runtime.status": "core_rpc",
   "cli.status": "desktop_host_adapter",
@@ -485,7 +492,8 @@ export const HELPER_OPS = [
   "UninstallService",
   "ExportCleanupLease",
   "HandoffSession",
-  "FinalizeHandoff"
+  "FinalizeHandoff",
+  "RepairService"
 ] as const
 export const HELPER_OP_CONTRACTS = [
   {
@@ -605,6 +613,13 @@ export const HELPER_OP_CONTRACTS = [
     "code": 17,
     "request": "FinalizeHandoffRequest",
     "response": "FinalizeHandoffResponse",
+    "requires_session": false
+  },
+  {
+    "name": "RepairService",
+    "code": 18,
+    "request": "RepairServiceRequest",
+    "response": "RepairServiceResponse",
     "requires_session": false
   }
 ] as const
@@ -764,6 +779,7 @@ export const SRC_ALLOWED_TOP_LEVEL_DIRS = [
   "contracts",
   "core",
   "feedback",
+  "generated",
   "helper",
   "observability",
   "platform",

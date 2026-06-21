@@ -1092,6 +1092,7 @@ bool desktop_service_actions_use_helper_owned_maintenance_contract() {
   const std::string source = app_api_source_text();
   const auto service_install_handler = source.find("\"service.install\"");
   const auto service_uninstall_handler = source.find("\"service.uninstall\"");
+  const auto service_repair_handler = source.find("\"service.repair\"");
 
   bool ok = true;
   ok = expect(service_install_handler != std::string::npos,
@@ -1099,6 +1100,9 @@ bool desktop_service_actions_use_helper_owned_maintenance_contract() {
        ok;
   ok = expect(service_uninstall_handler != std::string::npos,
               "desktop API should register service.uninstall") &&
+       ok;
+  ok = expect(service_repair_handler != std::string::npos,
+              "desktop API should register service.repair") &&
        ok;
   ok = expect(source.find("get_current_helper_client_if_exists()") !=
                   std::string::npos,
@@ -1120,12 +1124,18 @@ bool desktop_service_actions_use_helper_owned_maintenance_contract() {
   ok = expect(source.find("finalize_handoff") != std::string::npos,
               "desktop service.install should finalize oneshot handoff") &&
        ok;
-  ok = expect(source.find("client->uninstall_service") == std::string::npos,
-              "desktop service.uninstall must not ask the running service helper to uninstall itself") &&
+  ok = expect(source.find("client->uninstall_service") != std::string::npos,
+              "desktop service.uninstall should first ask the current helper "
+              "to remove its service and exit cleanly") &&
        ok;
   ok = expect(source.find("make_system_status_use_cases().uninstall_helper()") !=
                   std::string::npos,
-              "desktop service.uninstall should delegate to the shared one-shot helper maintenance path") &&
+              "desktop service.uninstall should fall back to the shared helper "
+              "maintenance path when self-cleanup is unavailable") &&
+       ok;
+  ok = expect(source.find("make_system_status_use_cases().repair_helper()") !=
+                  std::string::npos,
+              "desktop service.repair should delegate to shared service repair") &&
        ok;
   ok = expect(source.find("\"vpn_session_active\"") != std::string::npos,
               "desktop service.uninstall should reject active VPN sessions") &&
@@ -1144,6 +1154,8 @@ bool cli_service_actions_use_core_helper_maintenance_contract() {
   const std::string use_case_source =
       source_text_at({"src", "core", "use_cases",
                       "system_status_use_cases.cpp"});
+  const std::string service_ops_source =
+      source_text_at({"src", "helper", "helper_service_ops.cpp"});
   const auto service_handler = cli_source.find("\"service\"");
   const auto config_handler = cli_source.find("\"config\"",
                                                service_handler);
@@ -1180,15 +1192,25 @@ bool cli_service_actions_use_core_helper_maintenance_contract() {
                   std::string::npos,
               "service.uninstall should call helper UninstallService through IPC") &&
        ok;
-  ok = expect(use_case_source.find(
-                  "with_helper_service_lease(\"service.uninstall\", true") !=
-                  std::string::npos,
-              "service.uninstall should bootstrap a one-shot helper when the installed service is stopped") &&
+  ok = expect(use_case_source.find("repair_helper") != std::string::npos &&
+                  use_case_source.find("client.repair_service") !=
+                      std::string::npos &&
+                  service_ops_source.find(
+                      "exv::platform::repair_helper_service") !=
+                      std::string::npos,
+              "shared service repair should delegate through elevated helper "
+              "ops and start only an existing installed service") &&
        ok;
-  ok = expect(use_case_source.find(
-                  "with_helper_service_lease(\"service.uninstall\", true, \"oneshot\"") !=
+  ok = expect(use_case_source.find("\"service.uninstall\", false") !=
                   std::string::npos,
-              "service.uninstall must force oneshot backend instead of asking the running service to uninstall itself") &&
+              "service.uninstall should first attempt helper-owned cleanup "
+              "through the installed service without bootstrapping oneshot") &&
+       ok;
+  ok = expect(use_case_source.find("\"service.uninstall.fallback\", true") !=
+                      std::string::npos &&
+                  use_case_source.find("\"oneshot\"") != std::string::npos,
+              "service.uninstall should fall back to oneshot maintenance when "
+              "the installed service is stopped or unreachable") &&
        ok;
   ok = expect(use_case_source.find("read_runtime_status_snapshot") !=
                   std::string::npos &&

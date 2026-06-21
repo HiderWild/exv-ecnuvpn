@@ -24,6 +24,7 @@ public:
     RpcResponse helper_status(const RpcRequest& req);
     RpcResponse install_helper(const RpcRequest& req);
     RpcResponse uninstall_helper(const RpcRequest& req);
+    RpcResponse repair_helper(const RpcRequest& req);
     RpcResponse driver_status(const RpcRequest& req);
     RpcResponse install_driver(const RpcRequest& req);
 

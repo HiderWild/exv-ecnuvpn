@@ -81,6 +81,7 @@ int main() {
   expect_contains("POST_BUILD");
   expect_contains("src/platform/win32/ui_shell/exv_ui_win32.rc");
   expect_contains("src/platform/win32/ui_shell/exv_ui_win32.manifest");
+  expect_contains("WIN32_EXECUTABLE TRUE");
   expect_contains("OBJECT_DEPENDS");
   expect_contains("${CMAKE_SOURCE_DIR}/assets/icons");
   expect_contains("if(UNIX AND NOT APPLE AND EXV_BUILD_UI_SHELL)");

@@ -522,7 +522,7 @@ int core_process_main(const std::string& config_dir,
     std::cerr.setf(std::ios::unitbuf);
 
     // 1. Bootstrap runtime paths
-    exv::runtime::bootstrap(config_dir, home_dir);
+    exv::runtime::bootstrap(config_dir, home_dir, true);
 
     // 2. Initialize logger
     exv::platform::logging::configure_default_logging(false);
