@@ -1,5 +1,4 @@
-// Generated from distribution/ecnu.json by scripts/generate_distribution_config.py.
-// Do not edit by hand.
+// Generated from distribution/ecnu.json.
 
 export const distributionConfig = {
   id: 'ecnu',
@@ -7,8 +6,8 @@ export const distributionConfig = {
   brandSubtitle: 'for ECNU',
   author: 'HiderWild',
   repository: {
-    label: 'HiderWild/easy-ecnu-vpn',
-    url: 'https://github.com/HiderWild/easy-ecnu-vpn',
+    label: 'HiderWild/exv-ecnuvpn',
+    url: 'https://github.com/HiderWild/exv-ecnuvpn',
   },
   defaultVpnServer: 'vpn-cn.ecnu.edu.cn',
   vpnServers: [

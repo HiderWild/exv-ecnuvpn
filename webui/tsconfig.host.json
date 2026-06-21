@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": ".tmp-host-tests",
+    "rootDir": ".",
+    "strict": true,
+    "types": ["node"],
+    "skipLibCheck": true,
+    "sourceMap": true
+  },
+  "include": ["host/**/*.ts", "desktop/shared/**/*.ts"],
+  "exclude": ["host/**/*sync-conflict*.ts", "desktop/shared/**/*sync-conflict*.ts"]
+}

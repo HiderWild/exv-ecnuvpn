@@ -1,0 +1,32 @@
+{
+  "name": "exv-webui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "preinstall": "node -e \"const ua = process.env.npm_config_user_agent || ''; if (!ua.startsWith('pnpm/')) { console.error('Use pnpm instead of npm for this project.'); process.exit(1); }\"",
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "webview:compile": "cross-env EXV_RENDERER_TARGET=webview pnpm run build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.4",
+    "@types/node": "^24.12.2",
+    "@vitejs/plugin-vue": "^6.0.6",
+    "@vue/tsconfig": "^0.9.1",
+    "@vueuse/core": "^14.3.0",
+    "autoprefixer": "^10.5.0",
+    "cross-env": "^7.0.3",
+    "lucide-vue-next": "^1.0.0",
+    "pinia": "^3.0.4",
+    "postcss": "^8.5.14",
+    "tailwindcss": "^4.2.4",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.10",
+    "vue": "^3.5.32",
+    "vue-router": "^5.0.6",
+    "vue-tsc": "^3.2.7"
+  },
+  "packageManager": "pnpm@10.33.2"
+}
