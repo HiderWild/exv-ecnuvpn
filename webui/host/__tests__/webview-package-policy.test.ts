@@ -208,6 +208,8 @@ describe('native WebView package policy', () => {
     assert.match(releaseScript, /\[string\]\$NsisPath/)
     assert.match(releaseScript, /scripts\\build-windows\.ps1/)
     assert.match(releaseScript, /desktop/)
+    assert.doesNotMatch(releaseScript, /Invoke-Step powershell /)
+    assert.match(releaseScript, /Invoke-Step powershell\.exe -NoProfile -ExecutionPolicy Bypass -File/)
     assert.match(releaseScript, /package_ui_shell\.py/)
     assert.match(releaseScript, /--verify-launch-targets-only/)
     assert.match(releaseScript, /build\\windows\\webview\\package\\EXV/)

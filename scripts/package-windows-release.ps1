@@ -141,7 +141,7 @@ function Test-PortableZip {
 
     $extractedPackage = Join-Path $tempRoot 'EXV'
     $smoke = Join-Path $repoRoot 'scripts\windows-packaging-smoke.ps1'
-    Invoke-Step powershell -NoProfile -ExecutionPolicy Bypass -File $smoke -PackageRoot $extractedPackage
+    Invoke-Step powershell.exe -NoProfile -ExecutionPolicy Bypass -File $smoke -PackageRoot $extractedPackage
   }
   finally {
     if (Test-Path -LiteralPath $tempRoot) {
@@ -260,7 +260,7 @@ $resolvedOutputDir = if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 
 if (-not $SkipBuild) {
   $buildScript = Join-Path $repoRoot 'scripts\build-windows.ps1'
-  Invoke-Step powershell -NoProfile -ExecutionPolicy Bypass -File $buildScript desktop
+  Invoke-Step powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript desktop
 }
 
 Assert-PackageRoot $resolvedPackageRoot

@@ -724,6 +724,16 @@ bool check_windows_release_packaging_scripts() {
               "Windows release packaging should build the native WebView "
               "desktop package by default") &&
        ok;
+  ok = expect(!contains(release, "Invoke-Step powershell "),
+              "Windows release packaging should not invoke bare powershell "
+              "through Invoke-Step because project wrappers can shadow it") &&
+       ok;
+  ok = expect(contains(release,
+                       "Invoke-Step powershell.exe -NoProfile "
+                       "-ExecutionPolicy Bypass -File"),
+              "Windows release packaging should invoke child PowerShell "
+              "scripts through an explicit powershell.exe executable") &&
+       ok;
   ok = expect(contains(release, "package_ui_shell.py") &&
                   contains(release, "--verify-launch-targets-only") &&
                   contains(release, "build\\windows\\webview\\package\\EXV"),
