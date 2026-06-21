@@ -304,9 +304,11 @@ std::vector<fs::path> production_files() {
       "webui/package.json",
       "webui/scripts/build-layout.cjs",
       "scripts/package_ui_shell.py",
+      "scripts/package-windows-release.ps1",
       "scripts/embed_assets.py",
       "scripts/build-windows.ps1",
       "scripts/build-macos.sh",
+      "distribution/windows/exv.nsi",
       "docs/runtime-assets.md",
   };
 }
@@ -712,6 +714,57 @@ bool check_production_build_scripts() {
   return ok;
 }
 
+bool check_windows_release_packaging_scripts() {
+  bool ok = true;
+  const FileText release = read_file("scripts/package-windows-release.ps1");
+  const FileText nsis = read_file("distribution/windows/exv.nsi");
+
+  ok = expect(contains(release, "scripts\\build-windows.ps1") &&
+                  contains(release, "desktop"),
+              "Windows release packaging should build the native WebView "
+              "desktop package by default") &&
+       ok;
+  ok = expect(contains(release, "package_ui_shell.py") &&
+                  contains(release, "--verify-launch-targets-only") &&
+                  contains(release, "build\\windows\\webview\\package\\EXV"),
+              "Windows release packaging should verify the existing native "
+              "WebView package directory before creating release artifacts") &&
+       ok;
+  ok = expect(contains(release, "Compress-Archive") &&
+                  contains(release, "Expand-Archive") &&
+                  contains(release, "windows-packaging-smoke.ps1"),
+              "Windows release packaging should create and smoke-test a "
+              "portable zip") &&
+       ok;
+  ok = expect(contains(release, "makensis.exe") &&
+                  contains(release, "distribution\\windows\\exv.nsi") &&
+                  contains(release, "EXV-$Version-windows-x64-setup.exe"),
+              "Windows release packaging should compile the NSIS setup "
+              "artifact with the expected filename") &&
+       ok;
+  ok = expect(contains(nsis, "RequestExecutionLevel user") &&
+                  contains(nsis, "$LOCALAPPDATA\\Programs\\EXV") &&
+                  contains(nsis, "WriteRegStr HKCU") &&
+                  contains(nsis, "CreateShortCut") &&
+                  contains(nsis, "WriteUninstaller") &&
+                  contains(nsis, "DeleteRegKey HKCU"),
+              "NSIS installer should be per-user, create shortcuts, and "
+              "register a current-user uninstaller") &&
+       ok;
+  ok = expect(!contains(nsis, "$PROGRAMFILES") &&
+                  !contains(nsis, "RequestExecutionLevel admin") &&
+                  !contains(nsis, "RequestExecutionLevel highest") &&
+                  !contains(nsis, "SetShellVarContext all") &&
+                  !contains(nsis, "HKLM") &&
+                  !contains(nsis, "RMDir /r \"$LOCALAPPDATA\\EXV\""),
+              "NSIS installer should not force machine-wide elevation, "
+              "all-user shell context, machine registry writes, or remove "
+              "user profile data") &&
+       ok;
+
+  return ok;
+}
+
 bool check_runtime_assets_doc_policy() {
   bool ok = true;
   const FileText doc = read_file("docs/runtime-assets.md");
@@ -945,6 +998,7 @@ int main() {
   ok = check_retired_electron_artifacts() && ok;
   ok = check_legacy_staging_scripts_removed() && ok;
   ok = check_production_build_scripts() && ok;
+  ok = check_windows_release_packaging_scripts() && ok;
   ok = check_runtime_assets_doc_policy() && ok;
   ok = check_cmake_wiring() && ok;
   ok = check_exv_naming_policy() && ok;
