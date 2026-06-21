@@ -40,9 +40,15 @@ webui/release/
 reference/
 /runtime/
 
-# OMC / Claude
+# Agent/tool workspaces
 .omc/
 .claude/
+.codex/
+.reasonix/
+.superpowers/
+codex/
+reasonix/
+claude/
 
 # Sync conflict artifacts
 *sync-conflict*
