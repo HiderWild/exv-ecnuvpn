@@ -190,17 +190,20 @@ describe('native WebView package policy', () => {
 
   it('keeps start.ps1 desktop flow on native WebView shell paths', () => {
     const startPs1 = readFileSync(join(repoRoot, 'start.ps1'), 'utf8')
+    const startCommon = readFileSync(join(repoRoot, 'scripts', 'start-common.ps1'), 'utf8')
+    const startFlow = `${startPs1}\n${startCommon}`
 
-    assert.match(startPs1, /build\\windows\\webview\\package\\EXV/)
-    assert.match(startPs1, /exv-ui\.exe/)
-    assert.match(startPs1, /LOCALAPPDATA/)
-    assert.match(startPs1, /EXV\\Helper\\exv-helper\.exe/)
-    assert.match(startPs1, /Test-HelperServiceUsesStablePath/)
-    assert.match(startPs1, /function Resolve-WebView2Sdk/)
-    assert.match(startPs1, /-DWEBVIEW2_SDK_DIR=\$resolvedWebView2Sdk/)
-    assert.doesNotMatch(startPs1, /\$alwaysMatchNames = @\('exv\.exe', 'exv-helper\.exe', 'exv-ui\.exe'\)/)
-    assert.doesNotMatch(startPs1, /build\\windows\\electron|dist-electron|desktop:package|desktop:package:dir|build:electron/i)
-    assert.doesNotMatch(startPs1, /Find-ElectronProcess|Electron process/i)
+    assert.match(startPs1, /start-common\.ps1/)
+    assert.match(startFlow, /build\\windows\\webview\\package\\EXV/)
+    assert.match(startFlow, /exv-ui\.exe/)
+    assert.match(startFlow, /LOCALAPPDATA/)
+    assert.match(startFlow, /EXV\\Helper\\exv-helper\.exe/)
+    assert.match(startFlow, /Test-HelperServiceUsesStablePath/)
+    assert.match(startFlow, /function Resolve-WebView2Sdk/)
+    assert.match(startFlow, /-DWEBVIEW2_SDK_DIR=\$resolvedWebView2Sdk/)
+    assert.doesNotMatch(startFlow, /\$alwaysMatchNames = @\('exv\.exe', 'exv-helper\.exe', 'exv-ui\.exe'\)/)
+    assert.doesNotMatch(startFlow, /build\\windows\\electron|dist-electron|desktop:package|desktop:package:dir|build:electron/i)
+    assert.doesNotMatch(startFlow, /Find-ElectronProcess|Electron process/i)
   })
 
   it('keeps first-run service install prompts out of the App bootstrap', () => {
