@@ -732,15 +732,23 @@ bool check_windows_release_packaging_scripts() {
        ok;
   ok = expect(contains(release, "Compress-Archive") &&
                   contains(release, "Expand-Archive") &&
-                  contains(release, "windows-packaging-smoke.ps1"),
+                  contains(release, "windows-packaging-smoke.ps1") &&
+                  !contains(release, "-RuntimeDir $resolvedPackageRoot"),
               "Windows release packaging should create and smoke-test a "
-              "portable zip") &&
+              "portable zip without borrowing runtime DLLs from the source "
+              "package") &&
        ok;
   ok = expect(contains(release, "makensis.exe") &&
                   contains(release, "distribution\\windows\\exv.nsi") &&
-                  contains(release, "EXV-$Version-windows-x64-setup.exe"),
+                  contains(release, "EXV-$Version-windows-x64-setup.exe") &&
+                  contains(release, "New-NsisUninstallManifest") &&
+                  contains(release, "UNINSTALL_MANIFEST") &&
+                  contains(release, "Get-ChildItem") &&
+                  contains(release, "Get-RelativePathFromRoot") &&
+                  !contains(release, "GetRelativePath"),
               "Windows release packaging should compile the NSIS setup "
-              "artifact with the expected filename") &&
+              "artifact with the expected filename and generated uninstall "
+              "manifest using PowerShell 5.1-compatible path handling") &&
        ok;
   ok = expect(contains(nsis, "RequestExecutionLevel user") &&
                   contains(nsis, "$LOCALAPPDATA\\Programs\\EXV") &&
@@ -760,6 +768,20 @@ bool check_windows_release_packaging_scripts() {
               "NSIS installer should not force machine-wide elevation, "
               "all-user shell context, machine registry writes, or remove "
               "user profile data") &&
+       ok;
+  ok = expect(contains(nsis, "DeleteRegValue HKCU \"Software\\EXV\" \"InstallDir\"") &&
+                  contains(nsis, "DeleteRegKey /ifempty HKCU \"Software\\EXV\"") &&
+                  !contains(nsis, "DeleteRegKey HKCU \"Software\\EXV\""),
+              "NSIS uninstall should remove only the installer-owned app "
+              "registry value and preserve other app state") &&
+       ok;
+  ok = expect(contains(nsis, "!include \"${UNINSTALL_MANIFEST}\"") &&
+                  !contains(nsis, "RMDir /r \"$INSTDIR\"") &&
+                  !contains(nsis, "RMDir /r \"$INSTDIR\\bin\"") &&
+                  !contains(nsis, "RMDir /r \"$INSTDIR\\webui\"") &&
+                  contains(release, "RMDir \"$INSTDIR\""),
+              "NSIS uninstall should not recursively remove a user-selected "
+              "install directory and should remove the root only if empty") &&
        ok;
 
   return ok;
