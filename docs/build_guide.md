@@ -27,9 +27,30 @@ The package root contains:
 
 ## Windows
 
+Build the Windows desktop package:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 desktop
 ```
+
+Build Windows release artifacts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package-windows-release.ps1 -Version 0.1.0
+```
+
+Release output examples:
+
+- `build\windows\release\EXV-0.1.0-windows-x64-portable.zip`
+- `build\windows\release\EXV-0.1.0-windows-x64-setup.exe`
+
+The setup executable is built with NSIS and requires `makensis.exe`. Put `makensis.exe` on `PATH`, set `NSIS_MAKENSIS`, or pass `-NsisPath`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package-windows-release.ps1 -Version 0.1.0 -NsisPath "C:\Program Files (x86)\NSIS\makensis.exe"
+```
+
+The release script verifies the already-built package, creates the portable zip, expands that zip into a temporary directory, and runs `windows-packaging-smoke.ps1` against the extracted `EXV` directory.
 
 Focused package smoke:
 

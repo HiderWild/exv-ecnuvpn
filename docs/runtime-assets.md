@@ -19,3 +19,11 @@ allowlist contains only:
 Packaging scripts copy allowlisted assets by exact name. They must not copy
 runtime directories wholesale, and root-level build outputs such as `*.a`,
 `*.lib`, `*.dll`, `*.dylib`, or `*.so` must stay out of the repository root.
+
+Windows release packaging uses the same allowlist through
+`scripts/package_ui_shell.py`. The release script packages the already-built
+`build\windows\webview\package\EXV` directory into a portable zip and an NSIS
+installer; it does not directly copy runtime directories. The installer does
+not bundle Microsoft Edge WebView2 Evergreen Runtime. `exv-ui.exe` keeps
+responsibility for detecting a missing WebView2 Evergreen Runtime and running
+the controlled bootstrap flow.

@@ -45,6 +45,19 @@ build/<platform>/webview/package/EXV
 - `webui/index.html`：打包后的 Vue renderer。
 - `WebView2Loader.dll`：Windows 包内 WebView2 loader。
 
+Windows release packaging 输出到：
+
+```text
+build\windows\release\
+```
+
+发布产物：
+
+- `EXV-<version>-windows-x64-portable.zip`：包含单个 `EXV\` 顶层目录的 portable archive。
+- `EXV-<version>-windows-x64-setup.exe`：per-user NSIS installer for `%LOCALAPPDATA%\Programs\EXV`。
+
+setup 是面向 `%LOCALAPPDATA%\Programs\EXV` 的 per-user NSIS installer。它不捆绑 Microsoft Edge WebView2 Evergreen Runtime，也不在安装阶段安装 privileged helper；WebView2 Runtime 检测和 helper 安装仍由 app first-run flow 控制。
+
 ## 开发与构建
 
 Windows 本地开发推荐入口：
