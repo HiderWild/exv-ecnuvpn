@@ -728,11 +728,24 @@ bool check_windows_release_packaging_scripts() {
               "Windows release packaging should not invoke bare powershell "
               "through Invoke-Step because project wrappers can shadow it") &&
        ok;
+  ok = expect(!contains(release, "ValueFromRemainingArguments"),
+              "Windows release packaging should not use "
+              "ValueFromRemainingArguments for external command arguments "
+              "because child -File flags can bind to Invoke-Step") &&
+       ok;
+  ok = expect(!contains(release, "Invoke-Step powershell.exe "),
+              "Windows release packaging should not invoke powershell.exe "
+              "with positional child arguments through Invoke-Step") &&
+       ok;
   ok = expect(contains(release,
-                       "Invoke-Step powershell.exe -NoProfile "
-                       "-ExecutionPolicy Bypass -File"),
-              "Windows release packaging should invoke child PowerShell "
-              "scripts through an explicit powershell.exe executable") &&
+                       "Invoke-Step -FilePath 'powershell.exe' "
+                       "-Arguments @(") &&
+                  contains(release, "Invoke-Step -FilePath 'python' "
+                                    "-Arguments @(") &&
+                  contains(release,
+                           "Invoke-Step -FilePath $MakeNsis -Arguments @("),
+              "Windows release packaging should pass external command "
+              "arguments through explicit -Arguments arrays") &&
        ok;
   ok = expect(contains(release, "package_ui_shell.py") &&
                   contains(release, "--verify-launch-targets-only") &&

@@ -27,8 +27,7 @@ function Invoke-Step {
   param(
     [Parameter(Mandatory = $true)]
     [string]$FilePath,
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$Arguments
+    [string[]]$Arguments = @()
   )
 
   & $FilePath @Arguments
@@ -106,7 +105,14 @@ function Invoke-PackageVerifier {
   param([Parameter(Mandatory = $true)][string]$Root)
 
   $verifyScript = Join-Path $repoRoot 'scripts\package_ui_shell.py'
-  Invoke-Step python $verifyScript --verify-launch-targets-only --platform windows --package-dir $Root
+  Invoke-Step -FilePath 'python' -Arguments @(
+    $verifyScript,
+    '--verify-launch-targets-only',
+    '--platform',
+    'windows',
+    '--package-dir',
+    $Root
+  )
 }
 
 function New-PortableZip {
@@ -141,7 +147,15 @@ function Test-PortableZip {
 
     $extractedPackage = Join-Path $tempRoot 'EXV'
     $smoke = Join-Path $repoRoot 'scripts\windows-packaging-smoke.ps1'
-    Invoke-Step powershell.exe -NoProfile -ExecutionPolicy Bypass -File $smoke -PackageRoot $extractedPackage
+    Invoke-Step -FilePath 'powershell.exe' -Arguments @(
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      $smoke,
+      '-PackageRoot',
+      $extractedPackage
+    )
   }
   finally {
     if (Test-Path -LiteralPath $tempRoot) {
@@ -222,14 +236,15 @@ function Invoke-Nsis {
   New-NsisUninstallManifest -SourceDir $SourceDir -Destination $manifestPath
 
   $defaultInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\EXV'
-  Invoke-Step $MakeNsis `
-    /V2 `
-    "/DAPP_VERSION=$AppVersion" `
-    "/DSOURCE_DIR=$SourceDir" `
-    "/DOUTPUT_FILE=$OutputFile" `
-    "/DDEFAULT_INSTALL_DIR=$defaultInstallDir" `
-    "/DUNINSTALL_MANIFEST=$manifestPath" `
+  Invoke-Step -FilePath $MakeNsis -Arguments @(
+    '/V2',
+    "/DAPP_VERSION=$AppVersion",
+    "/DSOURCE_DIR=$SourceDir",
+    "/DOUTPUT_FILE=$OutputFile",
+    "/DDEFAULT_INSTALL_DIR=$defaultInstallDir",
+    "/DUNINSTALL_MANIFEST=$manifestPath",
     $scriptPath
+  )
 }
 
 function Assert-InstallerOutput {
@@ -260,7 +275,14 @@ $resolvedOutputDir = if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 
 if (-not $SkipBuild) {
   $buildScript = Join-Path $repoRoot 'scripts\build-windows.ps1'
-  Invoke-Step powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript desktop
+  Invoke-Step -FilePath 'powershell.exe' -Arguments @(
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    $buildScript,
+    'desktop'
+  )
 }
 
 Assert-PackageRoot $resolvedPackageRoot
