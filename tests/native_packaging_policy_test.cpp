@@ -730,6 +730,16 @@ bool check_windows_release_packaging_scripts() {
               "Windows release packaging should verify the existing native "
               "WebView package directory before creating release artifacts") &&
        ok;
+  const size_t assert_package_root =
+      release.text.find("Assert-PackageRoot $resolvedPackageRoot");
+  const size_t create_output_dir =
+      release.text.find("New-Item -ItemType Directory -Path $resolvedOutputDir");
+  ok = expect(assert_package_root != std::string::npos &&
+                  create_output_dir != std::string::npos &&
+                  assert_package_root < create_output_dir,
+              "Windows release packaging should validate the source package "
+              "before creating the output directory") &&
+       ok;
   ok = expect(contains(release, "Compress-Archive") &&
                   contains(release, "Expand-Archive") &&
                   contains(release, "windows-packaging-smoke.ps1") &&

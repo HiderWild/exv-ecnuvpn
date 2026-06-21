@@ -216,6 +216,21 @@ describe('native WebView package policy', () => {
     assert.match(releaseScript, /Compress-Archive/)
     assert.match(releaseScript, /Expand-Archive/)
     assert.match(releaseScript, /windows-packaging-smoke\.ps1/)
+    assert.match(releaseScript, /function Test-PortableZip/)
+    assert.match(releaseScript, /Portable zip must contain exactly one top-level EXV directory/)
+    assert.match(releaseScript, /Test-PortableZip -Archive \$portableZip/)
+    assert.match(releaseScript, /function Assert-InstallerOutput/)
+    assert.match(releaseScript, /Installer is empty/)
+    assert.match(releaseScript, /Assert-InstallerOutput \$installerExe/)
+    assert.match(
+      releaseScript,
+      /Install NSIS, add makensis\.exe to PATH, set NSIS_MAKENSIS, or pass -NsisPath/,
+    )
+    const packageRootAssertion = releaseScript.indexOf('Assert-PackageRoot $resolvedPackageRoot')
+    const outputDirCreation = releaseScript.indexOf('New-Item -ItemType Directory -Path $resolvedOutputDir')
+    assert.notEqual(packageRootAssertion, -1, 'package root assertion should exist')
+    assert.notEqual(outputDirCreation, -1, 'output directory creation should exist')
+    assert.ok(packageRootAssertion < outputDirCreation, 'package root should be validated before output directory creation')
     assert.match(releaseScript, /makensis\.exe/)
     assert.match(releaseScript, /distribution\\windows\\exv\.nsi/)
     assert.match(releaseScript, /function New-NsisUninstallManifest/)

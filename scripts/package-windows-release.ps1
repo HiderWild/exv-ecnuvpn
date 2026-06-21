@@ -263,9 +263,9 @@ if (-not $SkipBuild) {
   Invoke-Step powershell -NoProfile -ExecutionPolicy Bypass -File $buildScript desktop
 }
 
+Assert-PackageRoot $resolvedPackageRoot
 New-Item -ItemType Directory -Path $resolvedOutputDir -Force | Out-Null
 
-Assert-PackageRoot $resolvedPackageRoot
 Invoke-PackageVerifier $resolvedPackageRoot
 
 $portableZip = Join-Path $resolvedOutputDir "EXV-$Version-windows-x64-portable.zip"
