@@ -1,74 +1,95 @@
 # EXV - 华东师范大学智能 VPN 客户端
 
-EXV 用于解决校园 VPN 连接后默认路由接管全局流量的问题。它通过分流路由只让校内网段走 VPN，其余流量继续走本地网络，从而保持日常访问速度并兼顾校内资源访问。
+EXV 是面向华东师范大学校园网的跨平台 VPN 客户端。它的核心目标很简单：连接校园 VPN 后，只让校内资源流量进入 VPN 隧道，其余互联网流量继续走本地网络，避免传统 VPN 默认路由接管全局流量。
 
-## 主要功能
+当前项目已经完成从旧桌面壳和外部 OpenConnect 依赖到 native core + native WebView shell 的主路径迁移。生产桌面包不再捆绑 Electron/Chromium，也不把 OpenConnect 作为生产运行时依赖。
 
-- 分流路由：仅校园网流量进入 VPN 隧道。
-- native WebView 桌面界面：默认桌面壳为 C++ `exv-ui`，复用系统 WebView 内核。
-- 原生 VPN 引擎：生产默认运行时，不依赖 OpenConnect。
-- 特权 helper：负责服务维护、网卡、DNS、路由和清理等特权操作。
-- 加密凭据存储：按平台使用系统加密能力或 OpenSSL。
-- 自动重连与状态事件：core 维护业务状态，桌面界面通过稳定 RPC 契约交互。
+## 主要能力
 
-## 快速构建
+- 分流路由：仅校园网段走 VPN，普通互联网访问保持本地出口。
+- native WebView 桌面壳：`exv-ui` 使用系统 WebView 内核，Windows 为 WebView2，macOS 为 WKWebView，Linux 为 WebKitGTK。
+- 原生 VPN 引擎：C++ core 负责认证、协议状态、重连策略和数据面协调。
+- 特权 helper：以系统服务或一次性提权进程执行网卡、DNS、路由、清理等特权操作。
+- 加密凭据存储：按平台使用系统加密能力或 OpenSSL 相关能力保存敏感配置。
+- 稳定 RPC 契约：桌面 UI 通过 core RPC 和 helper contract 获取状态、触发连接、管理配置。
+- 自动重连与状态事件：core 维护连接生命周期，UI 只负责交互和呈现。
 
-### Windows
+## 快速开始
+
+### 使用桌面应用
+
+1. 构建或下载对应平台的 native WebView 桌面包。
+2. 启动包内的 `exv-ui` 或 `exv-ui.exe`。
+3. 首次使用时按提示安装或启动特权 helper。
+4. 填写服务器、学号/账号、密码和路由设置。
+5. 点击连接；断开时由 core 和 helper 清理路由、DNS 和隧道资源。
+
+生产桌面包统一输出到：
+
+```text
+build/<platform>/webview/package/EXV
+```
+
+平台示例：
+
+- Windows：`build\windows\webview\package\EXV`
+- macOS：`build/macos/webview/package/EXV`
+- Linux：`build/linux/webview/package/EXV`
+
+包内关键文件：
+
+- `exv-ui` / `exv-ui.exe`：native WebView 桌面壳。
+- `exv-ui.args`：桌面壳启动参数清单。
+- `bin/exv` / `bin/exv.exe`：core/CLI 进程。
+- `bin/exv-helper` / `bin/exv-helper.exe`：特权 helper。
+- `webui/index.html`：打包后的 Vue renderer。
+- `WebView2Loader.dll`：Windows 包内 WebView2 loader。
+
+## 开发与构建
+
+Windows 本地开发推荐入口：
+
+```powershell
+.\start.ps1
+```
+
+常用 Windows 参数：
+
+```powershell
+.\start.ps1 -Status          # 查看当前构建和 helper 状态
+.\start.ps1 -Package         # 只生成 native WebView 包，不启动
+.\start.ps1 -NoLaunch        # 构建并验证包，但不启动桌面壳
+.\start.ps1 -NoFrontendBuild # 复用现有 renderer 产物
+```
+
+三平台桌面包构建：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 desktop
 ```
 
-Windows 桌面包输出到：
-
-```text
-build\windows\webview\package\EXV
-```
-
-包内关键文件：
-
-- `exv-ui.exe`：native WebView shell。
-- `WebView2Loader.dll`：WebView2 SDK loader。
-- `bin\exv.exe`：core 进程。
-- `bin\exv-helper.exe`：特权 helper。
-- `webui\index.html`：打包后的 Vue renderer。
-
-### macOS
-
 ```bash
 ./scripts/build-macos.sh desktop
-```
-
-macOS 桌面包输出到：
-
-```text
-build/macos/webview/package/EXV
-```
-
-### Linux
-
-```bash
 ./scripts/build-linux.sh desktop
 ```
 
-Linux 桌面包输出到：
+只做 C++ core/helper 开发时，可使用 CMake preset：
 
-```text
-build/linux/webview/package/EXV
+```bash
+cmake --preset <platform>-release
+cmake --build --preset <platform>-release
+ctest --preset <platform>-release --output-on-failure
 ```
 
-## 开发入口
+Web renderer 单独编译：
 
-- Windows 本地一键重建和启动：`.\start.ps1`
-- 只查看当前构建状态：`.\start.ps1 -Status`
-- 只生成包不启动：`.\start.ps1 -Package`
-- 跳过启动：`.\start.ps1 -NoLaunch`
-
-`start.ps1` 使用 native WebView package 路径，不再把桌面调试流程绑定到旧桌面壳。
+```bash
+pnpm --dir webui webview:compile
+```
 
 ## 构建产物目录
 
-- `build-windows/cpp`：Windows CMake 产物和测试。
+- `build-windows/cpp`：Windows CMake 产物、测试和 `compile_commands.json`。
 - `build/windows/webview/dist`：Windows renderer 产物。
 - `build/windows/webview/package/EXV`：Windows native WebView 桌面包。
 - `build/macos/cpp`：macOS CMake 产物和测试。
@@ -80,22 +101,22 @@ build/linux/webview/package/EXV
 
 ## 运行时依赖
 
-- Windows：WebView2 Evergreen Runtime。缺失时 native shell 会按受控策略提示安装。
+- Windows：Microsoft Edge WebView2 Evergreen Runtime。缺失时 `exv-ui` 会按受控流程提示安装。
 - macOS：系统 WKWebView。
-- Linux：WebKitGTK。
-- Linux 加密依赖 OpenSSL；macOS 使用 CommonCrypto；Windows 使用 CNG/BCrypt。
+- Linux：WebKitGTK 运行时和开发包；加密相关能力依赖 OpenSSL。
+- Windows 原生隧道资产：`wintun.dll`。
 
-本地可选运行时资产说明见 [docs/runtime-assets.md](docs/runtime-assets.md)。根目录 `runtime/` 是未跟踪的本地暂存目录，不属于仓库内容。
+OpenConnect 只保留为历史兼容或诊断对照语境，不是生产桌面包的必需运行时。
 
 ## 配置
 
-配置文件默认位置：
+默认配置文件位置：
 
 - Windows：`%LOCALAPPDATA%\EXV\profile\default\config.json`
 - macOS：`~/Library/Application Support/EXV/profile/default/config.json`
 - Linux：`~/.exv/config.json`
 
-示例：
+示例配置：
 
 ```json
 {
@@ -108,16 +129,25 @@ build/linux/webview/package/EXV
 }
 ```
 
+配置文件保存用户意图和偏好。活动网卡、DNS 快照、清理计划、helper lease 等运行时事实由 core/helper 运行时状态管理，不写入用户配置。
+
 ## 技术栈
 
 - C++20 + CMake 3.28+
 - Vue 3 + TypeScript + Vite
-- native WebView shell: WebView2 / WKWebView / WebKitGTK
+- native WebView shell：WebView2 / WKWebView / WebKitGTK
 - nlohmann/json
 - cpp-httplib
+- Wintun / utun / Linux network stack
 
-完整构建矩阵见 [docs/build_guide.md](docs/build_guide.md)，使用说明见 [docs/user_guide.md](docs/user_guide.md)。
+## 文档入口
 
-## 许可证
+- 日常使用：[docs/user_guide.md](docs/user_guide.md)
+- 构建矩阵：[docs/build_guide.md](docs/build_guide.md)
+- 当前架构：[docs/PROJECT_CURRENT_ARCHITECTURE.md](docs/PROJECT_CURRENT_ARCHITECTURE.md)
+- 运行时资产：[docs/runtime-assets.md](docs/runtime-assets.md)
+- Windows WebView2 失焦输入问题归档：[docs/archive/2026-06/reports/2026-06-21-win32-webview2-focus-input-resolution.md](docs/archive/2026-06/reports/2026-06-21-win32-webview2-focus-input-resolution.md)
+
+## License
 
 [MIT](LICENSE)
