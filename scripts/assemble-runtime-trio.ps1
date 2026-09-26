@@ -35,6 +35,8 @@ $TauriDir  = Join-Path $RustDir  "tauri"
 # leave the previous release binary in place.  Use the Windows command shim
 # explicitly so this assembly can never copy a stale exv-ui.exe.
 $TauriCli  = Join-Path $TauriDir "frontend\node_modules\.bin\tauri.cmd"
+$TaskbarIconPatcher = Join-Path $RepoRoot "scripts\patch-windows-taskbar-icon-resource.ps1"
+$TaskbarIconExeTest = Join-Path $RepoRoot "scripts\tests\test-windows-taskbar-icon-exe.ps1"
 
 # wintun.dll source lives in the MAIN repo runtime\win32-x64 (worktrees have no runtime\ dir).
 $GitCommon = git -C $RepoRoot rev-parse --path-format=absolute --git-common-dir 2>$null
@@ -47,6 +49,8 @@ if (-not (Test-Path $WintunSrc)) {
 }
 if (-not (Test-Path $WintunSrc)) { throw "wintun.dll not found (main repo runtime\win32-x64 or target trio): $WintunSrc" }
 if (-not (Test-Path $TauriCli)) { throw "Tauri CLI command shim not found: $TauriCli" }
+if (-not (Test-Path $TaskbarIconPatcher)) { throw "Taskbar icon resource patcher not found: $TaskbarIconPatcher" }
+if (-not (Test-Path $TaskbarIconExeTest)) { throw "Taskbar icon EXE test not found: $TaskbarIconExeTest" }
 
 # Rust toolchain (fixed 1.96.0-msvc on this machine). $env:USERPROFILE is reliable here
 # (the earlier emptiness was the encoding misparse swallowing this line).
@@ -71,6 +75,15 @@ try {
     & $TauriCli build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "tauri build --no-bundle failed: $LASTEXITCODE" }
 } finally { Pop-Location; Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
+
+# Tauri's default Windows resource writer omits 20px/40px icon frames.  Patch
+# only the completed EXE's default GROUP_ICON after its link step; the tray
+# image is a separately-created runtime HICON and remains untouched.
+$BuiltTauriExe = Join-Path $TauriDir "target\release\exv-ui.exe"
+& powershell -NoProfile -ExecutionPolicy Bypass -File $TaskbarIconPatcher -ExePath $BuiltTauriExe
+if ($LASTEXITCODE -ne 0) { throw "taskbar icon resource patch failed: $LASTEXITCODE" }
+& powershell -NoProfile -ExecutionPolicy Bypass -File $TaskbarIconExeTest -ExePath $BuiltTauriExe
+if ($LASTEXITCODE -ne 0) { throw "taskbar icon EXE verification failed: $LASTEXITCODE" }
 
 Write-Host "== 3/4 assemble sibling directory =="
 $EngineExe = Join-Path $RustDir  "target\release\exv-engine.exe"

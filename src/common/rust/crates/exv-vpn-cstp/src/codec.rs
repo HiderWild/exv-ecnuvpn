@@ -115,7 +115,7 @@ impl Codec {
                 }
                 Ok(Some(CstpFrame::Data(payload)))
             }
-            CSTP_PACKET_TYPE_KEEPALIVE => Ok(Some(CstpFrame::Control {
+            CSTP_PACKET_TYPE_KEEPALIVE | 0x05 | 0x09 => Ok(Some(CstpFrame::Control {
                 kind: packet_type,
                 body: payload,
             })),
@@ -169,5 +169,3 @@ impl Codec {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

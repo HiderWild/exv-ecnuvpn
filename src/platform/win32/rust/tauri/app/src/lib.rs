@@ -1,13 +1,3 @@
-//! EXV VPN Tauri 桌面 UI（P4-b：core 真实接线）。
-//!
-//! 独立 requirement: vpn-rust-tauri-desktop-ui。
-//! 架构：UI 进程（Tauri 前端）↔ core 进程 = Tauri Command/Event；
-//!      core ↔ engine = tonic gRPC；core 是唯一语义网关。
-//! P4-b：setup 时 spawn core → 拨号 KernelControl 端点 → 管理状态 → 挂事件订阅；
-//!      CoreClient 真实 tonic 调用（unary + WatchEvents streaming）；托盘「退出」→
-//!      O3 停机（core 经 pipe-close 感知退出，engine 一并终止）。
-//! 2026-08-23：前端自有设置（ui_prefs）+ 自管托盘 + close_preference 驱动关闭 +
-//! 静默启动（`--silent` 单次 / prefs 常态）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -16,91 +6,48 @@
 pub mod kernel;
 mod autostart;
 mod lifecycle;
+mod log_export;
 mod toast;
 mod toast_identity;
 mod tray;
 mod ui_prefs;
 mod window_chrome;
 
-use std::sync::Mutex;
-use std::time::Instant;
-
 use tauri::Manager;
 
 use kernel::commands;
-
-/// smart 关闭宽限状态：隐藏时刻（None = 未在宽限期内）。
-static SMART_CLOSE_HIDDEN_AT: Mutex<Option<Instant>> = Mutex::new(None);
-
-/// 主窗口被显式显示/聚焦时重置 smart 宽限计时（宽限期内唤出 = 用户还在用）。
-pub fn notify_main_window_shown() {
-    if let Ok(mut guard) = SMART_CLOSE_HIDDEN_AT.lock() {
-        *guard = None;
-    }
-}
-
-/// 处理主窗口关闭请求：按 `close_preference` 决定 hide / smart-hide / 退出。
-fn handle_close_request(window: &tauri::WebviewWindow) {
-    use lifecycle::CloseDecision;
-
-    let app = window.app_handle();
-    let preference = app
-        .try_state::<ui_prefs::UiPrefsStore>()
-        .and_then(|store| store.get().ok())
-        .and_then(|prefs| prefs.close_preference)
-        .unwrap_or_else(|| ui_prefs::DEFAULT_CLOSE_PREFERENCE.to_string());
-
-    let grace_active = SMART_CLOSE_HIDDEN_AT
-        .lock()
-        .map(|guard| guard.is_some())
-        .unwrap_or(false);
-
-    match lifecycle::close_decision(&preference, grace_active) {
-        CloseDecision::Quit => {
-            lifecycle::notify_core_shutdown(app);
-        }
-        CloseDecision::Hide => {
-            let _ = window.hide();
-        }
-        CloseDecision::SmartHide => {
-            // 隐藏并启动宽限计时；超时后自动退出（误关保护到期）。
-            let _ = window.hide();
-            if let Ok(mut guard) = SMART_CLOSE_HIDDEN_AT.lock() {
-                *guard = Some(Instant::now());
-            }
-            let app_handle = app.clone();
-            let _ = tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    lifecycle::SMART_CLOSE_GRACE_MS,
-                ))
-                .await;
-                let expired = SMART_CLOSE_HIDDEN_AT
-                    .lock()
-                    .map(|guard| {
-                        guard
-                            .map(|at| {
-                                at.elapsed().as_millis() as u64 >= lifecycle::SMART_CLOSE_GRACE_MS
-                            })
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                if expired {
-                    if let Ok(mut guard) = SMART_CLOSE_HIDDEN_AT.lock() {
-                        *guard = None;
-                    }
-                    tracing::info!(target: "exv.lifecycle",
-                        "smart-close grace expired; quitting (O3)");
-                    lifecycle::notify_core_shutdown(&app_handle);
-                }
-            });
-        }
-    }
-}
 
 /// 应用入口（main.rs 调用）。
 pub fn run() {
     tauri::Builder::default()
         .manage(window_chrome::WindowChromeState::new())
+        // 应用级单实例（2026-09-05 单实例计划 §4.2）：必须在 plugin 链中**先于业务插件**
+        // 注册——插件在自身初始化期（早于 `.setup`）判定互斥体并转发第二实例参数，
+        // 第二实例在此之前零副作用退出（不 spawn core、不装托盘、不建窗口）。
+        // 注意：`.manage(...)` 与插件注册之间无顺序约束（「须置于 manage 之前」的旧表述废止）。
+        //
+        // 插件初始化失败约定（互斥体不可用等罕见环境）：统一以 tracing target
+        // `exv::single_instance` 记录后继续启动——如实记录、不加第二道全局门禁
+        // （开放世界纪律）；互斥体名/回收细节以插件实现为准，本仓以行为级验收承载。
+        //
+        // 回调线程契约：second-instance 回调可能在任意线程触发，回调内只允许线程安全的
+        // `AppHandle` 操作，不得访问 managed State、不得阻塞（任何锁等待/长任务都会
+        // 卡死激活转发路径）；禁止派发 connect/stop/serviceControl、改 ui_prefs、
+        // 发托盘气泡、触碰 CoreState——「只激活不打扰」。
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 激活决策（§4.3，lifecycle::activation_decision 冻结规则）：argv 含
+            // `--silent`（精确匹配）→ 仅记录、不改第一实例可见性；否则唤出主窗口
+            // （show_main_window 与托盘 show 同一执行点）。遵守上述回调线程契约：
+            // 只有线程安全的 AppHandle 操作 + tracing，零业务派发。
+            use lifecycle::ActivationDecision;
+            match lifecycle::activation_decision(&argv) {
+                ActivationDecision::ShowMainWindow => lifecycle::show_main_window(app),
+                ActivationDecision::StayHidden => {
+                    tracing::info!(target: "exv::single_instance",
+                        "second instance activated with --silent; keeping current visibility");
+                }
+            }
+        }))
         .plugin(tauri_plugin_log::Builder::new().build())
         .setup(|app| {
             // 前端自有设置存储（产品状态目录；解析失败时不 manage → Command 返回错误）。
@@ -126,18 +73,15 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // 关闭行为由 close_preference 驱动（quit/tray/smart 宽限）；
-                    // prevent_close 统一接管，真正退出走 notify_core_shutdown。
+                    // 系统关闭与自绘关闭按钮共用 lifecycle 的单一关闭协调器。
                     api.prevent_close();
                     if window.label() == "main" {
                         if let Some(webview) = window.app_handle().get_webview_window("main") {
-                            handle_close_request(&webview);
+                            lifecycle::request_main_window_close(
+                                webview,
+                                lifecycle::MainWindowCloseSource::SystemCloseRequested,
+                            );
                         }
-                    }
-                }
-                tauri::WindowEvent::Focused(true) => {
-                    if window.label() == "main" && window.is_visible().unwrap_or(false) {
-                        notify_main_window_shown();
                     }
                 }
                 _ => {}
@@ -151,8 +95,11 @@ pub fn run() {
             commands::stats,
             commands::logs_list,
             commands::logs_clear,
+            log_export::logs_export,
             commands::config_get,
+            commands::saved_password,
             commands::config_set,
+            kernel::quick_start::quick_start_apply,
             commands::tunnel_address,
             commands::respond_interaction,
             commands::trigger_latency_refresh,

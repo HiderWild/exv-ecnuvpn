@@ -1,7 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-// R30-T/I：bounded FIFO mailbox。容量由 MvpLimits 预算决定；满了之后 try_send 拒绝（返回被拒消息），
-// try_send_drop_oldest 则淘汰最旧消息腾出空间（latest-wins，供慢速 snapshot reader 使用）。
 
 use std::collections::VecDeque;
 
@@ -62,5 +58,3 @@ impl<T> BoundedMailbox<T> {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

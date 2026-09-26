@@ -1,45 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W19-T Terra: interface MTU（GetIpInterfaceEntry / SetIpInterfaceEntry）契约测试。
-// 这些测试钉住 W19-I 在 exv_vpn_win32_resource::mtu 实现的 seam（src/mtu.rs，当前为空
-// 占位——本文件即 RED）。冻结事实
-// （docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md，
-// WSP4 提权实测）是契约：
-//   - Wintun 接口 v4/v6 行 NlMtu 基准均为 65535（0xFFFF = Wintun 最大包）；
-//   - SetIpInterfaceEntry 前必须强制 SitePrefixLength=0（Get 填充的 IPv4 行带 64，
-//     不清直接 Set 返回 87；IPv6 行无此约束）；
-//   - 1420/1280/576/65535 均可写；0 是无操作（rc=0 但回读保持上一个值，不重置默认）；
-//     1（低于 IPv4 最小 68）→ 87（ERROR_INVALID_PARAMETER）；
-//   - 第三方改值后回读必须检测（≠ 我们设的值）；同值再 Set 幂等成功；
-//   - restore：Set 回 65535（SitePrefixLength=0）→ 回读 65535，verified=true；
-//     compare-and-restore 必须比较当前值与 applied 值，仅当未被第三方修改才恢复——
-//     无条件恢复旧快照 = W19 killer mutant（会覆盖第三方变更）。
-//
-// W19-I pinned seam（src/mtu.rs，W19-I 必须按此实现，否则 GREEN 编译失败）：
-//   pub enum MtuFamily { V4, V6 }                                  // derive(Debug, Clone, Copy, PartialEq, Eq)
-//   pub struct MtuSnapshot { pub luid: u64, pub family: MtuFamily, pub value: u32 }
-//                                                                // derive(Debug, Clone, PartialEq, Eq)
-//   impl MtuSnapshot { pub fn new(luid: u64, family: MtuFamily, value: u32) -> Self }
-//   pub enum RestoreOutcome { Restored, SkippedThirdPartyChanged }  // derive(Debug, Clone, Copy, PartialEq, Eq)
-//   pub struct MtuController                                       // 包装 (luid, family)
-//   impl MtuController {
-//     pub fn new(luid: u64, family: MtuFamily) -> MtuController
-//     pub fn capture(&self) -> Result<MtuSnapshot, NativeError>     // GetIpInterfaceEntry → NlMtu
-//     pub fn apply(&self, value: u32) -> Result<(), NativeError>    // SetIpInterfaceEntry（Set 前强制 SitePrefixLength=0）
-//     pub fn read_back(&self) -> Result<u32, NativeError>           // 重新 capture 取 value（真实 Get，不得缓存本地状态）
-//     pub fn compare_and_restore(&self, applied: &MtuSnapshot, original: &MtuSnapshot)
-//         -> Result<RestoreOutcome, NativeError>                    // 仅 current == applied 时 Set(original.value)
-//   }
-//   纯逻辑（非提权可测）：
-//   pub fn decide_restore(applied: &MtuSnapshot, current: &MtuSnapshot) -> RestoreOutcome
-//   pub fn validate_mtu_value(value: u32) -> Result<(), NativeError>  // 0 或 [68..=0xFFFF] Ok；其余 ERROR_INVALID_PARAMETER(87)
-//
-// 提权设计（W17-T 同款）：纯逻辑测试（restore 决策、apply 值校验）在非提权宿主上必须
-// 全部通过；真实 MTU 变更测试经 require_admin 门禁（非提权记为
-// [not_run/blocked_by_environment]，不伪造假绿），且只变更测试自建的 scratch Wintun
-// adapter（WSP4 spike 同款：drop 创建者句柄即移除接口，MTU 状态随接口消失）；每个
-// 变更测试同时把 MTU 显式恢复原值（所有路径清理）。
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -56,7 +14,7 @@ use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenElevation}
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（PATH DLL 是 W16 mutant；哈希由 WintunLibrary::load 校验）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// 与 WSP3/WSP4 探针一致的 tunnel type。
 const TUNNEL_TYPE: &str = "EXV VPN";
 /// 纯逻辑测试用的任意接口 LUID（纯逻辑不触碰 OS，值任意但固定 -> 确定性）。
@@ -457,5 +415,3 @@ fn compare_and_restore_restores_original_when_unmodified() {
     drop(adapter);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

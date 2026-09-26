@@ -1,5 +1,3 @@
-# EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-# cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 [package]
 name = "exv-vpn-host"
@@ -16,19 +14,14 @@ exv-vpn-domain = { path = "../exv-vpn-domain" }
 exv-vpn-local-rpc = { path = "../exv-vpn-local-rpc" }
 exv-vpn-resource = { path = "../exv-vpn-resource" }
 exv-vpn-runtime = { path = "../exv-vpn-runtime" }
+# W3-1/P1 S1a：event_bus 核心总线只依赖 wire 类型（RuntimeEvent/RuntimeStats），
+# 不引入平台语义；win32 wrapper 与 darwin core 两侧同时消费。
+exv-vpn-wire = { path = "../exv-vpn-wire" }
 tokio.workspace = true
+# BroadcastStream（broadcast 通道的 Stream 适配）需要 sync feature。
+tokio-stream = { workspace = true, features = ["sync"] }
 tracing.workspace = true
-
-[dev-dependencies]
-exv-vpn-testkit = { path = "../exv-vpn-testkit" }
-# R1 (single-host exemption, win32 active host): the portable composition's
-# new ConnectFailed test constructs a deterministic domain VpnError, whose
-# ErrorSubject is uuid-backed (RuntimeEpoch); uuid is a direct dev-dependency
-# so the R1 failure-semantics tests can be pinned in this common crate.
-uuid.workspace = true
 
 [lints]
 workspace = true
 
-# EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-# cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

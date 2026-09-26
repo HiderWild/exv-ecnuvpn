@@ -1,12 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P2 心跳有界存留（plan D8 / 判据 7）：engine 侧 `last_heartbeat` 单调计时 + 超时自清理。
-//
-// 与 `wait_core_process_exit`（进程句柄 signaled，即时兜底）的关系：进程句柄覆盖 core
-// 正常/崩溃/强杀退出；心跳提供**硬时间界 + hung-core 检测**（core 存活但不发心跳）——
-// 两者互补，双保险。oneshot 专属：服务 engine（未来 SCM/LocalSystem 形态）生命周期自管，
-// 不受心跳影响（无服务形态代码，文档声明）。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +10,10 @@ use crate::tunnel_runtime::TunnelRuntime;
 pub const HEARTBEAT_PERIOD_MS: u64 = 10_000;
 /// 默认 engine 侧心跳超时上界（15s，硬时间界；可调——watchdog 参数）。
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 15_000;
+
+/// 退出前等待在途组装响应取消的既有预算；SCM 停止等待必须覆盖此窗口。
+pub const ASSEMBLY_CANCEL_WAIT: Duration = Duration::from_secs(5);
+const ASSEMBLY_CANCEL_POLL: Duration = Duration::from_millis(50);
 
 /// engine 侧心跳监视状态（单调计时，无跨线程锁：仅原子读改写）。
 ///
@@ -109,11 +104,11 @@ pub async fn heartbeat_shutdown(runtime: Arc<dyn TunnelRuntime>, status: Arc<Sta
     runtime.cancel();
     // 2. teardown 数据面/特权资源（阻塞操作 → spawn_blocking 隔离，不占异步 worker）。
     let _ = tokio::task::spawn_blocking(move || {
-        for _ in 0..100 {
+        for _ in 0..(ASSEMBLY_CANCEL_WAIT.as_millis() / ASSEMBLY_CANCEL_POLL.as_millis()) {
             if !runtime.is_assembling() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(ASSEMBLY_CANCEL_POLL);
         }
         runtime.teardown()
     })
@@ -126,161 +121,3 @@ pub async fn heartbeat_shutdown(runtime: Arc<dyn TunnelRuntime>, status: Arc<Sta
 // ---------------------------------------------------------------------------
 // 单元测试：监视计时 / 超时判据 / watchdog 触发 / 自清理顺序（teardown→Idle）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::status::StatusPublisher;
-    use crate::tunnel_runtime::{ApplyContext, TunnelError};
-
-    /// 计时语义：构造时 `elapsed_ms = 0`（启动时刻）；`touch` 后 `elapsed_ms` 归零重置。
-    #[test]
-    fn heartbeat_watch_starts_at_launch_and_touches_reset() {
-        let watch = HeartbeatWatch::new();
-        assert_eq!(watch.elapsed_ms(), 0, "last_ms=0 = 引擎启动时刻，elapsed 为 0");
-        // 推进时间（小睡眠）后 elapsed 增长。
-        std::thread::sleep(Duration::from_millis(20));
-        assert!(
-            watch.elapsed_ms() >= 20,
-            "启动后 elapsed 必须随单调时间增长，got {}",
-            watch.elapsed_ms()
-        );
-        // touch 重置最近心跳时刻 → elapsed 归零。
-        watch.touch();
-        assert!(watch.elapsed_ms() < 5, "touch 后 elapsed 必须归零");
-    }
-
-    /// 超时判据：默认上界 [`HEARTBEAT_TIMEOUT_MS`]（15s）——超时未到不触发；`elapsed`
-    /// 增长超过较小上界即判超时（通用形态 `elapsed_exceeds`）。
-    #[test]
-    fn heartbeat_watch_timed_out_after_bound() {
-        let watch = HeartbeatWatch::new();
-        assert!(!watch.timed_out(), "启动即刻未超过 15s 上界");
-        // 推进真实时间（20ms）→ elapsed 超过 10ms 的较小上界（通用判据）。
-        std::thread::sleep(Duration::from_millis(20));
-        assert!(
-            watch.elapsed_exceeds(10),
-            "elapsed 超过较小上界必须判超时（elapsed_ms={}）",
-            watch.elapsed_ms()
-        );
-        // 20ms 远未达到 15s 默认上界。
-        assert!(!watch.timed_out(), "20ms 远未达到 15s 默认上界");
-    }
-
-    /// watchdog：短超时上界 + 短检查节拍下，心跳停滞 → watchdog resolve（触发自退信号）。
-    #[tokio::test]
-    async fn heartbeat_timeout_watcher_fires_on_stalled_heartbeat() {
-        let watch = Arc::new(HeartbeatWatch::new());
-        let handle = heartbeat_timeout_watcher(Arc::clone(&watch), Duration::from_millis(20), 100);
-        // 100ms 超时上界内无心跳 → watchdog 在约 100ms 后 resolve。
-        let outcome = tokio::time::timeout(Duration::from_millis(500), handle).await;
-        assert!(outcome.is_ok(), "心跳停滞超过上界必须触发 watchdog resolve");
-    }
-
-    /// watchdog：心跳持续刷新 → watchdog 保持 pending（不触发自退）。
-    #[tokio::test]
-    async fn heartbeat_timeout_watcher_stays_pending_while_heartbeats_flow() {
-        let watch = Arc::new(HeartbeatWatch::new());
-        let handle = heartbeat_timeout_watcher(Arc::clone(&watch), Duration::from_millis(20), 100);
-        // 每 20ms 刷新一次心跳 → elapsed 恒 < 100ms 上界 → watchdog 不 resolve。
-        for _ in 0..5 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            watch.touch();
-        }
-        let outcome = tokio::time::timeout(Duration::from_millis(50), handle).await;
-        assert!(
-            outcome.is_err(),
-            "心跳持续刷新时 watchdog 必须保持 pending（不触发自退）"
-        );
-    }
-
-    /// 测试专用 runtime：可置「在途组装」+ 记录 teardown（验证自清理顺序）。
-    struct TestRuntime {
-        assembling: std::sync::atomic::AtomicBool,
-        teardown_count: std::sync::atomic::AtomicUsize,
-        cancel_count: std::sync::atomic::AtomicUsize,
-    }
-
-    impl TestRuntime {
-        fn connecting() -> Self {
-            Self {
-                assembling: std::sync::atomic::AtomicBool::new(true),
-                teardown_count: std::sync::atomic::AtomicUsize::new(0),
-                cancel_count: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl TunnelRuntime for TestRuntime {
-        fn start_apply(self: Arc<Self>, _ctx: ApplyContext) -> Result<(), TunnelError> {
-            unreachable!("heartbeat shutdown 测试不调用 start_apply")
-        }
-        fn cancel(&self) {
-            self.cancel_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // 协作式取消：组装在段边界自清理（模拟 assembling 随 cancel 结束）。
-            self.assembling
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-        fn disconnect(&self) -> Result<(), String> {
-            self.teardown_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }
-        fn teardown(&self) -> Result<(), String> {
-            self.teardown_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }
-        fn is_connected(&self) -> bool {
-            false
-        }
-        fn is_assembling(&self) -> bool {
-            self.assembling
-                .load(std::sync::atomic::Ordering::SeqCst)
-        }
-        fn is_paused(&self) -> bool {
-            false
-        }
-    }
-
-    /// 自清理顺序（「关机瞬间 connect 中」完整序的可测投影）：cancel 在途组装 →
-    /// teardown → post Idle（coarse Idle 终态到达 status 流）。host 侧 Idle 事件即
-    /// 数据面侧加入 teardown 屏障的收敛信号。
-    #[tokio::test]
-    async fn heartbeat_shutdown_orders_cancel_teardown_then_idle() {
-        let runtime_typed = Arc::new(TestRuntime::connecting());
-        let runtime: Arc<dyn TunnelRuntime> = runtime_typed.clone();
-        let status = Arc::new(StatusPublisher::new());
-        let mut rx = status.open_stream();
-
-        heartbeat_shutdown(Arc::clone(&runtime), Arc::clone(&status)).await;
-
-        // 1. teardown 已执行（复用 teardown 路径；cancel 在 teardown 前）。
-        assert_eq!(
-            runtime_typed
-                .cancel_count
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "心跳自清理必须先 cancel 在途组装"
-        );
-        assert_eq!(
-            runtime_typed
-                .teardown_count
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "心跳自清理必须执行 teardown（复用 teardown 路径）"
-        );
-        // 2. post Idle 终态（teardown 之后经 status 通道发布）。
-        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("idle within timeout")
-            .expect("stream alive")
-            .expect("event ok");
-        assert_eq!(
-            event.coarse_phase,
-            exv_vpn_wire::generated::StatsPhase::Idle as i32,
-            "心跳自清理必须在 teardown 后 post Idle 终态"
-        );
-    }
-}

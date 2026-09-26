@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { defineConfig } from "vitest/config";
+import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 
 // 产品版本号单一来源：app/tauri.conf.json 的 version（打包产物运行时版本由 Tauri 注入；
@@ -25,13 +25,6 @@ export default defineConfig({
   plugins: [vue()],
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
-  },
-  test: {
-    css: true,
-    environment: "happy-dom",
-    setupFiles: ["./src/test/setup.ts"],
-    clearMocks: true,
-    restoreMocks: true,
   },
   // 生产构建输出到 ../frontend/dist（tauri.conf.json frontendDist）。
   build: { target: "es2022" },

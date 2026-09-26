@@ -1,13 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-// R31-T/I: the single-writer `RuntimeActor`. It consumes `RuntimeCommand`s from a bounded mailbox,
-// calls the frozen `Reducer::reduce(state, command, inputs)` with fresh `ReducerInputs` seeds,
-// schedules the resulting fenced `RuntimeEffect`s via an injected `EffectScheduler`, and routes
-// `EffectCompleted` completions back (with their `CompletionFence` + `StaleDisposition`). The actor
-// is the ONLY state writer: effect tasks never write state directly, no lock is held across an
-// effect, Stop is recorded before new effects are issued, and completions are serviced even under a
-// Stop flood. Late TLS/packet handles are closed+joined / detached+reconciled; a completion fenced
-// to a prior runtime epoch is rejected.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -299,7 +289,7 @@ impl RuntimeActor {
         )
         .expect("profile ref");
         let intent = ConnectIntent::new(lookup_key.clone(), request_digest.clone(), profile);
-        let attempt = Attempt::new(epoch.clone(), attempt_id.clone(), intent, None);
+        let attempt = Attempt::new(epoch.clone(), attempt_id.clone(), intent);
         let stop = StopIntent::new(lookup_key.clone(), request_digest.clone());
         inner.state = RuntimeState::stopping(attempt, stop, None);
 
@@ -436,5 +426,3 @@ fn fence_effect_id(fence: &CompletionFence) -> Option<EffectId> {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

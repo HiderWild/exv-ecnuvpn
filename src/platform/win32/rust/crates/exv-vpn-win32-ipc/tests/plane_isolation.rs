@@ -1,18 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W12-T terra: plane isolation for the Win32 native runtime. These tests pin the
-// grpc_planes / limits / connection_binding API that W12-I implements in
-// exv_vpn_win32_ipc::{grpc_planes, limits, connection_binding}. The frozen WSP1 facts
-// (docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-pipe-facts.md) are the
-// contract:
-//   - control 与 data 使用两条独立物理连接，各自 CreateNamedPipeW + ConnectNamedPipe（§3）；
-//   - pre-auth 资源初值：stream=1、message=64 KiB（65536B）、buffer=64 KiB（65536B）（§7）；
-//   - pre-auth 超大 frame 在不派发的前提下被拒；pre-auth 阶段不得按声明长度预分配大缓冲（§7）；
-//   - unauthorized 不派发（§7）。
-//
-// The isolation model is PURE in-memory state: no real Named Pipe is needed. Only the
-// two-physical-connection test uses two distinct pipe-name strings. Every test is deterministic.
 
 use exv_vpn_win32_ipc::connection_binding::{ConnectionBinding, Plane};
 use exv_vpn_win32_ipc::grpc_planes::PlaneIsolation;
@@ -169,5 +154,3 @@ fn unauthorized_plane_has_no_dispatch() {
     );
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

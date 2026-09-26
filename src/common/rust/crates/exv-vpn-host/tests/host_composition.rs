@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! RED tests for the host control-plane composition (spec L1072/L1074/L1079/L1296/L1300).
 //!
@@ -345,5 +343,3 @@ fn reopen_keeps_bound_peer_and_capability_across_connections() {
     assert_eq!(c.apply(HostEvent::Connect), HostEffect::ConnectAdmitted);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

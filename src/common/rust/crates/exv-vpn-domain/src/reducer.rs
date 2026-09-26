@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 use crate::error::{EffectCertainty, ErrorCode, ErrorStage, ErrorSubject, RetryAdvice, VpnError};
 use crate::identity::{
@@ -7,9 +5,9 @@ use crate::identity::{
     RequestDigest, RetirementOperationId, RuntimeEpoch,
 };
 use crate::model::{
-    Attempt, CleanupProofRef, ConnectIntent, ConnectPhase, ConnectedSession, DataRunningProof,
-    InteractionPrompt, PacketLeaseRef, PlatformOwnershipRef, PlatformReadyProof, PromptDeadline,
-    ProtocolSessionRef, RecoveryContext, RecoveryObligation, RuntimeState, StopIntent,
+    Attempt, CleanupProofRef, ConnectIntent, ConnectPhase, DataRunningProof, InteractionPrompt,
+    PacketLeaseRef, PlatformOwnershipRef, PlatformReadyProof, PromptDeadline, ProtocolSessionRef,
+    RecoveryContext, RecoveryObligation, RuntimeState, StopIntent,
 };
 use crate::ports::{
     AcquireOwnershipRequest, ApplyTunnelRequest, AttemptEffectFence, BeginRecoveryStopRequest,
@@ -327,8 +325,6 @@ pub struct ReducerDecision {
     pub operation_outcomes: Vec<OperationOutcome>,
     pub events: Vec<RuntimeEvent>,
 }
-
-pub type ReduceFn = fn(RuntimeState, RuntimeCommand, ReducerInputs) -> ReducerDecision;
 
 pub struct Reducer;
 
@@ -727,12 +723,7 @@ impl Reducer {
         inputs: &ReducerInputs,
         events: Vec<RuntimeEvent>,
     ) -> ReducerDecision {
-        let attempt = Attempt::new(
-            epoch.clone(),
-            inputs.next_attempt_id.clone(),
-            intent.clone(),
-            None,
-        );
+        let attempt = Attempt::new(epoch.clone(), inputs.next_attempt_id.clone(), intent.clone());
         let effect = RuntimeEffect {
             fence: CompletionFence::Attempt(AttemptEffectFence {
                 runtime_epoch: epoch.clone(),
@@ -789,5 +780,3 @@ impl Reducer {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

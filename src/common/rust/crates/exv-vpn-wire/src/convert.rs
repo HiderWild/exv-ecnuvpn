@@ -1,12 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// V20-I strict wire<->domain conversion. Every converter enforces the exact
-// byte lengths of identity/digest fields and rejects any enum that decodes to
-// its UNSPECIFIED=0 sentinel. Peer identity is ALWAYS the authenticated
-// transport principal, never a client-supplied (self-reported) field. Secrets
-// are moved into a buffer and the source is zeroized immediately. A transport
-// / future cancel is never an in-connection business operation.
 
 use crate::generated;
 use exv_vpn_domain::identity::{
@@ -250,5 +241,3 @@ fn tunnel_intent_from_wire(w: &generated::TunnelIntentRef) -> Result<TunnelInten
         .map_err(|_| "wire: invalid tunnel intent ref")
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

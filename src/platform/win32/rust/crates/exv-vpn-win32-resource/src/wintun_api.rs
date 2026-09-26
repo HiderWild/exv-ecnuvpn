@@ -1,19 +1,8 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! Dynamic loading of the frozen amd64 `wintun.dll` (W16).
-//!
-//! The WSP3 facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-wintun-facts.md`)
-//! freeze the loading contract: the amd64 wintun-0.14.1 DLL must be loaded **by
-//! exact absolute path only** (a PATH-searchable DLL is a mutant), its SHA-256
-//! must equal the frozen value, and all 14 exports must resolve —
-//! `WintunGetAdapterName` does **not** exist in 0.14.1 and must not be required.
-//!
-//! Typed function pointers are transmuted from `FARPROC`; each `unsafe` block
-//! carries a reviewed `// SAFETY:` comment (workspace enforces
-//! `unsafe_op_in_unsafe_fn = deny`).
 
 use std::path::Path;
+use std::io::Read;
+use std::os::windows::fs::OpenOptionsExt;
 
 use sha2::{Digest, Sha256};
 
@@ -113,6 +102,8 @@ pub struct WintunLibrary {
     module: HMODULE,
     /// The resolved typed exports of this module.
     exports: WintunExports,
+    /// 校验到卸载期间禁止写入/替换同一 DLL，防止校验后再按路径加载的竞态。
+    _validated_file: std::fs::File,
 }
 
 impl WintunLibrary {
@@ -130,14 +121,22 @@ impl WintunLibrary {
                 "wintun DLL 必须按精确绝对路径加载（绝不 PATH 搜索）",
             ));
         }
-        let bytes = std::fs::read(dll_path).map_err(|_| {
-            NativeError::from_win32(2, &format!("无法读取 wintun.dll：{}", dll_path.display()))
-        })?;
+        let read_error = |error: std::io::Error| {
+            NativeError::from_win32(
+                error.raw_os_error().unwrap_or(0) as u32,
+                &format!("无法读取 wintun.dll：{}：{error}", dll_path.display()),
+            )
+        };
+        // FILE_SHARE_READ：允许 Windows 加载器读取，但拒绝其他写入和删除句柄。
+        let mut validated_file = std::fs::OpenOptions::new().read(true).share_mode(1)
+            .open(dll_path).map_err(read_error)?;
+        let mut bytes = Vec::new();
+        validated_file.read_to_end(&mut bytes).map_err(read_error)?;
         let digest = Sha256::digest(&bytes);
         let hash_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         if !hash_hex.eq_ignore_ascii_case(FROZEN_WINTUN_DLL_SHA256) {
             return Err(NativeError::from_win32(
-                0,
+                13,
                 "wintun.dll SHA-256 与冻结值不一致（mutant 拒绝）",
             ));
         }
@@ -145,9 +144,11 @@ impl WintunLibrary {
         // SAFETY: hstring 是合法宽字符串绝对路径；返回的模块句柄由本结构持有并在
         // Drop 中经 FreeLibrary 释放（LoadLibraryW 引用计数配对）。
         let module = unsafe { LoadLibraryW(&hstring) }.map_err(|e| {
+            let hresult = e.code().0 as u32;
             NativeError::from_win32(
-                u32::try_from(e.code().0).unwrap_or(0),
-                "LoadLibraryW 失败",
+                // 只解包 HRESULT_FROM_WIN32；未知 HRESULT 保留全部位用于诊断。
+                if hresult & 0xffff_0000 == 0x8007_0000 { hresult & 0xffff } else { hresult },
+                &format!("LoadLibraryW 失败：{}：{e}", dll_path.display()),
             )
         })?;
         let exports = match resolve_all_exports(module) {
@@ -159,7 +160,7 @@ impl WintunLibrary {
                 return Err(e);
             }
         };
-        Ok(Self { module, exports })
+        Ok(Self { module, exports, _validated_file: validated_file })
     }
 
     /// The resolved typed exports of the loaded module.
@@ -208,5 +209,3 @@ fn resolve_typed<T>(module: HMODULE, name: &str) -> Result<T, NativeError> {
     Ok(unsafe { std::mem::transmute_copy(&fp) })
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

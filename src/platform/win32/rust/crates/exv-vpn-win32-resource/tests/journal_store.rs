@@ -1,33 +1,11 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W14-T terra: durable journal store over the Win32 platform. These tests pin the
-// WinJournalStore / JournalPath / storage_security API that W14-I implements in
-// exv_vpn_win32_resource::{journal_store, journal_path, storage_security}. The frozen
-// WSP2 facts (docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-authority-storage-facts.md)
-// are the contract:
-//   - journal path is %ProgramData%\ExvVpn\journal (facts §2), with a %LOCALAPPDATA%
-//     fallback when ProgramData is not writable;
-//   - the journal file is opened FILE_APPEND_DATA + FILE_SHARE_READ, and each
-//     append_synced is durable via FlushFileBuffers — Rust std::fs::flush is a no-op and
-//     must NOT be the durability point (facts §3/§7);
-//   - a torn final tail recovers to the last complete record; a corrupt middle record
-//     yields Corrupt and never skips forward (facts §4);
-//   - the journal dir ACL is SYSTEM + the current user, never broad BUILTIN\Users / IU
-//     (facts §2/§5);
-//   - an ACL tamper that denies the current user surfaces as a typed NativeError with kind
-//     Permission, never a panic (facts §5);
-//   - compaction replaces the journal file with only the kept records (facts §3).
-//
-// All tests do real I/O in per-test temp dirs (%TEMP%\exv-w14-<pid>-<tag>) and clean them
-// up. Record framing uses the J50 codec (exv_vpn_resource::journal): the raw journal file
-// must be a concatenation of J50 frames, so the tests read the raw bytes and decode them.
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use exv_vpn_resource::journal::{decode, encode, verify_chain, DecodeOutcome, JournalRecord};
+use exv_vpn_resource::journal::{
+    decode, encode, verify_chain, ChainError, DecodeOutcome, JournalRecord,
+};
 use exv_vpn_win32_resource::journal_path::JournalPath;
 use exv_vpn_win32_resource::journal_store::{RecoverOutcome, WinJournalStore};
 use exv_vpn_win32_resource::native_error::{NativeError, NativeErrorKind};
@@ -421,5 +399,117 @@ fn acl_tamper_deny_is_typed_error() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
+// ---------------------------------------------------------------------------
+// J6（2026-09-05 系统代理账本计划 §5.2 测试 10）：前缀压缩链有效性 + 「只丢后缀」
+// 规则钉死。活跃步骤记录的清除 = 前缀 compact；keep 只能是现存记录的严格前缀。
+// ---------------------------------------------------------------------------
+
+/// compact(keep=严格前缀) 后链保持有效：追加 3 条 → keep 前 2 → Clean 且
+/// verify_chain Ok → keep 前 0（空文件合法，verify_chain 空输入 Ok）。
+#[test]
+fn prefix_compact_keeps_chain_valid() {
+    let dir = test_dir("prefixkeep");
+    let jp = JournalPath::from_dir(dir.clone());
+    let records = chained_records(3);
+    {
+        let mut store = WinJournalStore::open(&jp).expect("open the journal");
+        for rec in &records {
+            store.append_synced(rec).expect("append record");
+        }
+    }
+
+    // keep = 前 2（严格前缀）→ Clean + 链有效。
+    {
+        let mut store = WinJournalStore::open(&jp).expect("reopen for compact keep-2");
+        match store.recover().expect("recover before keep-2") {
+            RecoverOutcome::Clean(all) => store.compact(&all[..2]).expect("compact keep-2"),
+            RecoverOutcome::TornTail { .. } => panic!("clean precondition violated: TornTail"),
+            RecoverOutcome::Corrupt { offset } => {
+                panic!("clean precondition violated: Corrupt at {offset}")
+            }
+        }
+    }
+    {
+        let store = WinJournalStore::open(&jp).expect("reopen after keep-2");
+        match store.recover().expect("recover after keep-2") {
+            RecoverOutcome::Clean(got) => {
+                assert_eq!(got.len(), 2, "keep-2 必须恰好保留前 2 条");
+                assert_records(&records[..2], &got);
+                assert!(verify_chain(&got).is_ok(), "前缀压缩后链必须有效");
+            }
+            RecoverOutcome::TornTail { .. } => panic!("expected Clean after keep-2, got TornTail"),
+            RecoverOutcome::Corrupt { offset } => {
+                panic!("expected Clean after keep-2, got Corrupt at {offset}")
+            }
+        }
+    }
+
+    // keep = 前 0 → 空文件合法。
+    {
+        let mut store = WinJournalStore::open(&jp).expect("reopen for compact keep-0");
+        store.compact(&[]).expect("compact keep-0");
+    }
+    {
+        let store = WinJournalStore::open(&jp).expect("reopen after keep-0");
+        match store.recover().expect("recover after keep-0") {
+            RecoverOutcome::Clean(got) => {
+                assert!(got.is_empty(), "keep-0 必须清空");
+                assert!(verify_chain(&got).is_ok(), "空输入 verify_chain 必须 Ok");
+            }
+            RecoverOutcome::TornTail { .. } => panic!("expected Clean empty, got TornTail"),
+            RecoverOutcome::Corrupt { offset } => {
+                panic!("expected Clean empty, got Corrupt at {offset}")
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 钉死「只丢后缀」：丢弃中段的记录集 `[r0, r2]` 在 J50 链规则下不合法——逐帧
+/// 自洽（帧内 digest 不含位置信息）但 `verify_chain` 报 `SequenceGap`：前缀 compact
+/// 的反例形态不可用，中段丢弃的产物必被链校验检出。
+#[test]
+fn dropping_a_middle_record_breaks_the_chain() {
+    let mut records = chained_records(3);
+    let dropped = records.remove(1); // 取走 r1 → records = [r0, r2]（所有权移动，无 Clone）。
+    assert_eq!(dropped.sequence, 1);
+    let hole = records;
+
+    // 链级裁决：sequence==index 被破坏 → SequenceGap@1。
+    match verify_chain(&hole) {
+        Ok(()) => panic!("中段丢弃的记录集链校验必须失败"),
+        Err(ChainError::SequenceGap { index, expected, found }) => {
+            assert_eq!(index, 1);
+            assert_eq!(expected, 1);
+            assert_eq!(found, 2);
+        }
+        Err(ChainError::DigestMismatch { index }) => {
+            panic!("期望 SequenceGap，得到 DigestMismatch@{index}")
+        }
+    }
+
+    // 字节级反证：把 [r0, r2] 原样写入 journal.bin —— decode 逐帧自洽返回 Clean，
+    // 但链校验拒绝它：前缀规则是清除的唯一合法形态。
+    let dir = test_dir("middlehole");
+    let jp = JournalPath::from_dir(dir.clone());
+    {
+        let mut store = WinJournalStore::open(&jp).expect("open the journal");
+        store.compact(&hole).expect("write the middle-hole bytes via compact");
+    }
+    let store = WinJournalStore::open(&jp).expect("reopen the middle-hole journal");
+    match store.recover().expect("recover the middle-hole journal") {
+        RecoverOutcome::Clean(got) => {
+            assert_eq!(got.len(), 2);
+            assert!(
+                verify_chain(&got).is_err(),
+                "中段丢弃的字节形态必须被链校验拒绝（只丢后缀）"
+            );
+        }
+        RecoverOutcome::TornTail { .. } => panic!("expected Clean frames, got TornTail"),
+        RecoverOutcome::Corrupt { offset } => panic!("expected Clean frames, got Corrupt at {offset}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

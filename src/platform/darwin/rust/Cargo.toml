@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/exv-vpn-darwin-ipc",
+    "crates/exv-vpn-darwin-core",
+    "crates/exv-vpn-darwin-engine",
+    "crates/exv-vpn-darwin-service-agent",
+    "tauri/app",
+]
+default-members = [
+    "crates/exv-vpn-darwin-ipc",
+    "crates/exv-vpn-darwin-core",
+    "crates/exv-vpn-darwin-engine",
+    "crates/exv-vpn-darwin-service-agent",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.dev]
+# sccache 纪律（2026-09-07）：sccache 不缓存增量编译单元；关闭 incremental 使全部
+# 编译走 sccache 缓存，并避免 target/debug/incremental 无限增长。
+incremental = false
+
+[profile.release]
+# 服务二进制发布形态默认裁剪：验证 release 构建（含真实体积/段读取）走裁剪产物。
+# dev 默认不裁剪（保留调试信息），此 profile 只作用于显式 --release 构建。
+strip = "symbols"

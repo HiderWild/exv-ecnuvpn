@@ -1,16 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// S2 服务生命周期独立测试（tests/service_lifecycle.rs）——不与 S1（packet_relay.rs /
-// grpc_server.rs admission+relay）或 t1-stats（data_plane/stats/tunnel_runtime/cstp）
-// 撞测试文件。覆盖：
-// - [`EngineExitForm`] 分派（service 形态禁用心跳自清理 + core-pid watch，SCM 管生死）；
-// - 服务 accept-loop（注入 fake server：连续 accept / SCM stop / 服务端关闭 / 失败传播）；
-// - 服务停止 → 退出清理入口触发（accept-loop 返回 `Stopped` = 清理入口的触发信号）；
-// - engine 子命令解析 + SCM failure actions（SC_ACTION_RESTART）。
-//
-// SCM 集成真机（需 admin）分栏：标 `#[ignore]` + env 门控（`EXV_SCM_INTEGRATION=1` 且
-// 测试进程已提权），属 S5 业务验收的 opt-in 预演。
 
 use std::path::PathBuf;
 use std::time::Duration;

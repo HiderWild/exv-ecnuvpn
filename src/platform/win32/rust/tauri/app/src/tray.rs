@@ -14,21 +14,23 @@
 
 use std::sync::OnceLock;
 
-use windows::core::{w, PCWSTR};
+use tauri::Manager;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
-use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DispatchMessageW, GetMessageW, GetCursorPos, HICON, ICONINFO, MF_SEPARATOR,
-    MF_STRING, PostQuitMessage, RegisterClassW, SetForegroundWindow, TrackPopupMenu,
-    TranslateMessage, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_DESTROY,
-    WM_LBUTTONUP, WM_RBUTTONUP, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, HICON, ICON_BIG, ICON_SMALL,
+    ICONINFO, MF_SEPARATOR, MF_STRING, MSG, PostQuitMessage, RegisterClassW, SendMessageW,
+    SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TrackPopupMenu, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP,
+    WM_SETICON, WNDCLASSW,
 };
+use windows::core::{PCWSTR, w};
 
 /// 托盘回调消息基址（WM_APP 区段，不与框架消息冲突；对齐 C++ 壳 `WM_APP + 0x42` 惯例）。
 const TRAY_CALLBACK_MSG: u32 = WM_APP + 0x51;
@@ -90,12 +92,7 @@ fn fill_utf16_buf(buf: &mut [u16], source: &str) {
     }
 }
 
-extern "system" fn tray_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if msg == TRAY_CALLBACK_MSG {
             let mouse = (lparam.0 & 0xFFFF) as u32;
@@ -155,13 +152,13 @@ fn invoke_show() {
     }
 }
 
-/// 托盘图标渲染（纯像素处理，可单测）：先按 alpha 裁掉全透明边，再按 alpha
-/// 预乘做面积平均（area-average）缩放到 32×32，最后翻转为 bottom-up BGRA
+/// 托盘图标渲染（纯像素处理，可单测）：保留完整源画布，按原始纵横比居中缩放，
+/// 再按 alpha 预乘做面积平均（area-average）缩放到 32×32，最后转为 BGRA
 /// （`CreateBitmap` 32bpp 期望的格式）。
 ///
 /// 为什么这样做：
-///   * **trim**：把内容区域（alpha bbox）最大化贴满目标画布，透明边不再以
-///     白边/透明边形式残留——浅色任务栏上白盾牌不会再「白对白」糊成一团；
+///   * **完整画布**：canonical PNG 中的透明留白是品牌图形纵横比的一部分；
+///     按 alpha bbox 裁剪后再拉满正方形会把窄于画布的图形横向拉伸；
 ///   * **面积平均 + alpha 预乘**：256²→32² 是 8:1 大倍数缩小。面积平均等价于
 ///     高质量超采样，边缘像素按实际覆盖面积加权，抗锯齿自然保留；旧实现用
 ///     最近邻稀疏采样，会丢抗锯齿、白色细线（网络线/盾牌描边）断裂成噪点。
@@ -169,41 +166,39 @@ fn invoke_show() {
 ///
 /// 返回 None 表示源为空或全透明。
 fn render_tray_bgra(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
-    const SIZE: usize = 32;
-    if width == 0 || height == 0 || rgba.len() < width * height * 4 {
+    render_icon_bgra(rgba, width, height, 32)
+}
+
+/// 把完整 RGBA 画布等比居中缩放为指定的方形 top-down BGRA。
+/// `render_tray_bgra` 和运行时窗口大/小 HICON 共用这一像素真源。
+fn render_icon_bgra(rgba: &[u8], width: usize, height: usize, size: usize) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || size == 0 || rgba.len() < width * height * 4 {
         return None;
     }
 
-    // 1) 全透明边 bbox（alpha > 0 即视为内容）。
-    let (mut x0, mut y0, mut x1, mut y1) = (width, height, 0usize, 0usize);
-    for y in 0..height {
-        let row = y * width * 4;
-        for x in 0..width {
-            if rgba[row + x * 4 + 3] != 0 {
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x);
-                y1 = y1.max(y);
-            }
-        }
-    }
-    if x1 < x0 || y1 < y0 {
+    if !rgba.chunks_exact(4).any(|pixel| pixel[3] != 0) {
         return None; // 全透明
     }
-    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
 
-    // 2) 面积平均缩放到 32×32（内容拉伸填满，不留白边）。
-    let mut top_down = vec![0u8; SIZE * SIZE * 4];
-    for dy in 0..SIZE {
-        let fy0 = dy as f64 * ch as f64 / SIZE as f64;
-        let fy1 = (dy as f64 + 1.0) * ch as f64 / SIZE as f64;
-        for dx in 0..SIZE {
-            let fx0 = dx as f64 * cw as f64 / SIZE as f64;
-            let fx1 = (dx as f64 + 1.0) * cw as f64 / SIZE as f64;
+    // 完整源画布按纵横比 fit 到 size×size，奇数留白时将多的 1px 放在右/下侧。
+    let scale = (size as f64 / width as f64).min(size as f64 / height as f64);
+    let target_width = ((width as f64 * scale).round() as usize).clamp(1, size);
+    let target_height = ((height as f64 * scale).round() as usize).clamp(1, size);
+    let offset_x = (size - target_width) / 2;
+    let offset_y = (size - target_height) / 2;
+
+    // 在 fit 矩形内做 alpha 预乘面积平均，矩形外保持透明。
+    let mut top_down = vec![0u8; size * size * 4];
+    for target_y in 0..target_height {
+        let fy0 = target_y as f64 * height as f64 / target_height as f64;
+        let fy1 = (target_y as f64 + 1.0) * height as f64 / target_height as f64;
+        for target_x in 0..target_width {
+            let fx0 = target_x as f64 * width as f64 / target_width as f64;
+            let fx1 = (target_x as f64 + 1.0) * width as f64 / target_width as f64;
             let sx0 = fx0.floor() as usize;
-            let sx1 = (fx1.ceil() as usize).min(cw);
+            let sx1 = (fx1.ceil() as usize).min(width);
             let sy0 = fy0.floor() as usize;
-            let sy1 = (fy1.ceil() as usize).min(ch);
+            let sy1 = (fy1.ceil() as usize).min(height);
             let (mut pr, mut pg, mut pb, mut pa, mut area) =
                 (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
             for sy in sy0..sy1 {
@@ -211,7 +206,7 @@ fn render_tray_bgra(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>>
                 for sx in sx0..sx1 {
                     let wx = ((sx as f64 + 1.0).min(fx1) - (sx as f64).max(fx0)).max(0.0);
                     let w = wx * wy;
-                    let i = (y0 + sy) * width * 4 + (x0 + sx) * 4;
+                    let i = (sy * width + sx) * 4;
                     let a = rgba[i + 3] as f64 / 255.0;
                     pr += rgba[i] as f64 * a * w;
                     pg += rgba[i + 1] as f64 * a * w;
@@ -220,7 +215,7 @@ fn render_tray_bgra(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>>
                     area += w;
                 }
             }
-            let di = (dy * SIZE + dx) * 4;
+            let di = ((offset_y + target_y) * size + offset_x + target_x) * 4;
             if pa > 0.0 && area > 0.0 {
                 let alpha = pa / area;
                 top_down[di + 3] = (alpha * 255.0).round() as u8;
@@ -233,11 +228,11 @@ fn render_tray_bgra(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>>
 
     // 3) `CreateBitmap` 按传入的 top-down 扫描线解释颜色位图；只转换
     // RGBA→BGRA，绝不能额外翻转行序，否则托盘图标会垂直镜像。
-    let mut bgra = vec![0u8; SIZE * SIZE * 4];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let si = (y * SIZE + x) * 4;
-            let di = (y * SIZE + x) * 4;
+    let mut bgra = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let si = (y * size + x) * 4;
+            let di = (y * size + x) * 4;
             bgra[di] = top_down[si + 2];
             bgra[di + 1] = top_down[si + 1];
             bgra[di + 2] = top_down[si];
@@ -256,21 +251,44 @@ fn opaque_and_mask(size: usize) -> Vec<u8> {
 }
 
 /// 把 RGBA 像素（tauri Image）转成 32×32 32bpp HICON（托盘图标）。
-/// 像素处理见 [`render_tray_bgra`]（trim + 面积平均 + bottom-up BGRA）。
+/// 像素处理见 [`render_tray_bgra`]（完整画布 + 等比居中 + alpha 预乘面积平均）。
 fn hicon_from_rgba(image: &tauri::image::Image<'_>) -> Option<HICON> {
-    const SIZE: i32 = 32;
-    let bgra = render_tray_bgra(image.rgba(), image.width() as usize, image.height() as usize)?;
-    let and_mask_pixels = opaque_and_mask(SIZE as usize);
+    let bgra = render_tray_bgra(
+        image.rgba(),
+        image.width() as usize,
+        image.height() as usize,
+    )?;
+    hicon_from_bgra(&bgra, 32)
+}
+
+/// 从 canonical RGBA 画布生成指定方形尺寸的 32bpp HICON。
+fn hicon_from_rgba_sized(image: &tauri::image::Image<'_>, size: i32) -> Option<HICON> {
+    let size_usize = usize::try_from(size).ok().filter(|value| *value > 0)?;
+    let bgra = render_icon_bgra(
+        image.rgba(),
+        image.width() as usize,
+        image.height() as usize,
+        size_usize,
+    )?;
+    hicon_from_bgra(&bgra, size)
+}
+
+fn hicon_from_bgra(bgra: &[u8], size: i32) -> Option<HICON> {
+    let size_usize = usize::try_from(size).ok().filter(|value| *value > 0)?;
+    if bgra.len() < size_usize * size_usize * 4 {
+        return None;
+    }
+    let and_mask_pixels = opaque_and_mask(size_usize);
 
     unsafe {
         // `CreateBitmap(..., None)` 留下未初始化的 AND 掩码；Shell 会把其中的 1
         // 当透明像素，表现为偶发或全透明托盘图标。明确传全 0 让 32bpp 图标的 alpha
         // 成为唯一透明度来源。
-        let and_mask = CreateBitmap(SIZE, SIZE, 1, 1, Some(and_mask_pixels.as_ptr().cast()));
+        let and_mask = CreateBitmap(size, size, 1, 1, Some(and_mask_pixels.as_ptr().cast()));
         if and_mask.is_invalid() {
             return None;
         }
-        let color = CreateBitmap(SIZE, SIZE, 1, 32, Some(bgra.as_ptr().cast()));
+        let color = CreateBitmap(size, size, 1, 32, Some(bgra.as_ptr().cast()));
         if color.is_invalid() {
             let _ = DeleteObject(and_mask.into());
             return None;
@@ -290,6 +308,81 @@ fn hicon_from_rgba(image: &tauri::image::Image<'_>) -> Option<HICON> {
             _ => None,
         }
     }
+}
+
+/// 同时设置 Win32 窗口的任务栏大图标和标题栏小图标。
+///
+/// Tauri/tao 的普通 `set_window_icon` 在 Windows 上只发送 `ICON_SMALL`；若
+/// `ICON_BIG` 为空，Shell 可能回退到 16px 小图标并放大成任务栏图标。
+fn set_window_icons(hwnd: HWND, big: HICON, small: HICON) {
+    unsafe {
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(big.0 as isize)),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(small.0 as isize)),
+        );
+    }
+}
+
+struct WindowIconState {
+    // 窗口持有引用期间必须保持 HICON 有效，随进程一并回收。
+    big: TrayHandles,
+    small: TrayHandles,
+}
+
+static WINDOW_ICONS: OnceLock<WindowIconState> = OnceLock::new();
+
+/// 在主窗口可见前安装独立的 256px `ICON_BIG` 与 32px `ICON_SMALL`。
+///
+/// # Errors
+/// 主窗口或 HWND 不可用、canonical PNG 无法解码/转换，或本进程已安装过窗口图标。
+pub fn install_window_icons<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+    if WINDOW_ICONS.get().is_some() {
+        return Err("window icons already installed".into());
+    }
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_owned())?;
+    let tauri_hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    // Tauri 运行时返回 windows 0.61 HWND，本应用使用 windows 0.62；ABI 相同，
+    // 显式经原始指针转接，不混用两个 crate 版本的 Rust 类型。
+    let hwnd = HWND(tauri_hwnd.0);
+    let image = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+        .map_err(|error| format!("canonical icon.png decode failed: {error}"))?;
+    let big = hicon_from_rgba_sized(&image, 256)
+        .ok_or_else(|| "256px taskbar HICON creation failed".to_owned())?;
+    let small = match hicon_from_rgba_sized(&image, 32) {
+        Some(icon) => icon,
+        None => {
+            unsafe {
+                let _ = DestroyIcon(big);
+            }
+            return Err("32px window HICON creation failed".into());
+        }
+    };
+    if WINDOW_ICONS
+        .set(WindowIconState {
+            big: TrayHandles(big.0),
+            small: TrayHandles(small.0),
+        })
+        .is_err()
+    {
+        unsafe {
+            let _ = DestroyIcon(big);
+            let _ = DestroyIcon(small);
+        }
+        return Err("window icons already installed".to_owned());
+    }
+    let installed = WINDOW_ICONS.get().expect("window icons just installed");
+    set_window_icons(hwnd, HICON(installed.big.0), HICON(installed.small.0));
+    Ok(())
 }
 
 /// 安装自管托盘。失败返回 Err（调用方记录并降级为无托盘，行为同旧 tauri tray 缺图标分支）。
@@ -336,9 +429,9 @@ pub fn install_tray() -> Result<(), String> {
         // 图标：显式用 app/icons/icon.png（256² 品牌红盾牌 logo）。不走
         // ExtractIconExW(exe, ...)——exe 内嵌 icon.ico 的默认帧在 16px 下会把
         // 白色盾牌糊成白块/白边（浅色任务栏白对白近不可见 = 「空/透明」），是
-        // 托盘 icon 未就位的根因之一。这里先裁掉全透明边、再按 alpha 预乘面积
-        // 平均缩放到 32×32（内容贴满、无白边、非最近邻），Windows 再下采样到
-        // 托盘显示尺寸时像素质量不损。
+        // 托盘 icon 未就位的根因之一。这里保留完整 canonical 画布，等比居中后按
+        // alpha 预乘面积平均缩放到 32×32；透明留白不裁剪，Windows 再下采样到托盘
+        // 显示尺寸时仍保留正确的品牌比例与边缘质量。
         let embedded = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
             .ok()
             .and_then(|img| hicon_from_rgba(&img));
@@ -347,7 +440,7 @@ pub fn install_tray() -> Result<(), String> {
             None => {
                 return Err(
                     "no icon available for tray (embedded icon.png decode/render failed)".into(),
-                )
+                );
             }
         };
 
@@ -443,163 +536,4 @@ fn tray_balloon(title: &str, body: &str) {
 #[tauri::command]
 pub fn tray_notify(title: String, body: String) {
     notify(&title, &body);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{hicon_from_rgba, opaque_and_mask, render_tray_bgra};
-    use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetPixel,
-        ReleaseDC, SelectObject,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, DrawIconEx, DI_NORMAL};
-
-    /// 读取 top-down BGRA 缓冲里 (x, y)（y = 0 为显示顶行）的 B,G,R,A。
-    fn px(buf: &[u8], x: usize, y: usize) -> (u8, u8, u8, u8) {
-        let i = (y * 32 + x) * 4;
-        (buf[i], buf[i + 1], buf[i + 2], buf[i + 3])
-    }
-
-    #[test]
-    fn empty_source_returns_none() {
-        assert!(render_tray_bgra(&[], 0, 0).is_none());
-        assert!(render_tray_bgra(&[0u8; 16], 2, 2).is_none()); // 长度不足
-    }
-
-    #[test]
-    fn fully_transparent_returns_none() {
-        let rgba = vec![0u8; 8 * 8 * 4];
-        assert!(render_tray_bgra(&rgba, 8, 8).is_none());
-    }
-
-    #[test]
-    fn tray_and_mask_is_explicitly_opaque() {
-        let mask = opaque_and_mask(32);
-        assert_eq!(mask.len(), 128, "32px 1bpp mask uses 4 bytes per row");
-        assert!(
-            mask.iter().all(|byte| *byte == 0),
-            "AND mask must be initialized to opaque pixels; uninitialized bits can make the entire tray icon transparent"
-        );
-    }
-
-    #[test]
-    fn trim_removes_margin_and_fills_canvas() {
-        // 4×4：仅中心 2×2 白色不透明，四周全透明。
-        let mut rgba = vec![0u8; 4 * 4 * 4];
-        for y in 2..4 {
-            for x in 2..4 {
-                let i = (y * 4 + x) * 4;
-                rgba[i..i + 3].copy_from_slice(&[255, 255, 255]);
-                rgba[i + 3] = 255;
-            }
-        }
-        let buf = render_tray_bgra(&rgba, 4, 4).expect("render");
-        // 内容应贴满 32×32：全部像素不透明且为白色，无透明/白边残留。
-        for y in 0..32 {
-            for x in 0..32 {
-                assert_eq!(px(&buf, x, y), (255, 255, 255, 255), "at ({x},{y})");
-            }
-        }
-    }
-
-    #[test]
-    fn single_pixel_content_fills_entire_canvas() {
-        // 4×4：仅左上角 1 个红色像素不透明。
-        let mut rgba = vec![0u8; 4 * 4 * 4];
-        rgba[0..4].copy_from_slice(&[255, 0, 0, 255]);
-        let buf = render_tray_bgra(&rgba, 4, 4).expect("render");
-        for y in 0..32 {
-            for x in 0..32 {
-                assert_eq!(px(&buf, x, y), (0, 0, 255, 255), "at ({x},{y})");
-            }
-        }
-    }
-
-    #[test]
-    fn create_bitmap_keeps_top_down_scanline_order() {
-        // 2×2：上行红、下行蓝（top-down）。传给 CreateBitmap 的行序必须保持
-        // top-down；否则 Windows 托盘会把整个图标上下翻转。
-        let rgba: [u8; 16] = [
-            255, 0, 0, 255, 255, 0, 0, 255, // row0: red
-            0, 0, 255, 255, 0, 0, 255, 255, // row1: blue
-        ];
-        let buf = render_tray_bgra(&rgba, 2, 2).expect("render");
-        assert_eq!(px(&buf, 0, 0), (0, 0, 255, 255), "buffer row0 = 红");
-        assert_eq!(px(&buf, 0, 15), (0, 0, 255, 255), "buffer row15 = 红");
-        assert_eq!(px(&buf, 0, 16), (255, 0, 0, 255), "buffer row16 = 蓝");
-        assert_eq!(px(&buf, 0, 31), (255, 0, 0, 255), "buffer row31 = 蓝");
-    }
-
-    #[test]
-    fn windows_hicon_draws_top_source_row_at_the_visual_top() {
-        // 直接走 CreateIconIndirect → DrawIconEx：上红下蓝的源图必须仍是视觉上红下蓝。
-        // 这覆盖实际 Windows 图标绘制路径，防止今后又在扫描线方向上做重复翻转。
-        let image = tauri::image::Image::new_owned(
-            vec![
-                255, 0, 0, 255, 255, 0, 0, 255, // top: red
-                0, 0, 255, 255, 0, 0, 255, 255, // bottom: blue
-            ],
-            2,
-            2,
-        );
-        let icon = hicon_from_rgba(&image).expect("create HICON");
-        unsafe {
-            let screen = GetDC(None);
-            assert!(!screen.is_invalid(), "obtain screen DC");
-            let memory = CreateCompatibleDC(Some(screen));
-            assert!(!memory.is_invalid(), "create memory DC");
-            let canvas = CreateCompatibleBitmap(screen, 32, 32);
-            assert!(!canvas.is_invalid(), "create canvas bitmap");
-            let previous = SelectObject(memory, canvas.into());
-
-            DrawIconEx(memory, 0, 0, icon, 32, 32, 0, None, DI_NORMAL).expect("draw HICON");
-            let top = GetPixel(memory, 0, 0).0;
-            let bottom = GetPixel(memory, 0, 31).0;
-
-            let _ = SelectObject(memory, previous);
-            let _ = DeleteObject(canvas.into());
-            let _ = DeleteDC(memory);
-            let _ = ReleaseDC(None, screen);
-            let _ = DestroyIcon(icon);
-
-            assert_eq!(top & 0x0000_00FF, 0xFF, "visual top is red");
-            assert_eq!(top & 0x00FF_0000, 0x00, "visual top is not blue");
-            assert_eq!(bottom & 0x0000_00FF, 0x00, "visual bottom is not red");
-            assert_eq!(bottom & 0x00FF_0000, 0xFF00_00, "visual bottom is blue");
-        }
-    }
-
-    #[test]
-    fn real_icon_fills_canvas_with_red_and_white() {
-        let img = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
-            .expect("decode embedded icon.png");
-        let buf =
-            render_tray_bgra(img.rgba(), img.width() as usize, img.height() as usize)
-                .expect("render");
-        let mut opaque = 0u32;
-        let (mut red, mut white) = (0u32, 0u32);
-        let mut row_opaque = [0u32; 32];
-        let mut col_opaque = [0u32; 32];
-        for y in 0..32 {
-            for x in 0..32 {
-                let (b, g, r, a) = px(&buf, x, y);
-                if a != 0 {
-                    opaque += 1;
-                    row_opaque[y] += 1;
-                    col_opaque[x] += 1;
-                    if r > 200 && g > 200 && b > 200 {
-                        white += 1;
-                    } else if r > 90 && r > g + 30 && r > b + 30 {
-                        red += 1;
-                    }
-                }
-            }
-        }
-        // 内容贴满：任一边界行/列都不全透明（无白边残留）。
-        assert!(row_opaque[0] > 0 && row_opaque[31] > 0, "边界行不透明");
-        assert!(col_opaque[0] > 0 && col_opaque[31] > 0, "边界列不透明");
-        // 红盾牌与白内容都在，且非空、非纯白块（品牌红占主导，深/浅任务栏均可见）。
-        assert!(red > 0 && white > 0, "红白内容都存在");
-        assert!(opaque > 32 * 32 / 2, "内容覆盖超过一半画布");
-    }
 }

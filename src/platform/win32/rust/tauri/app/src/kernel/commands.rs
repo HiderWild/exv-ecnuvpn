@@ -83,6 +83,22 @@ pub async fn config_get(
     CoreClient.config_get(&state).await
 }
 
+/// 显式窥视动作专用。Core 子进程继承 UI 的 EXV_CONFIG_DIR，统一用配置 crate 解析。
+#[tauri::command]
+pub async fn saved_password(
+    state: State<'_, CoreState>,
+    username: String,
+    server: String,
+) -> Result<Option<super::saved_password::PasswordForDisplay>, String> {
+    let current = CoreClient.config_get(&state).await
+        .map_err(|_| "无法读取当前配置的已保存密码".to_string())?;
+    let value = |key: &str| current.items.iter().find(|item| item.key == key).map(|item| item.value.as_str());
+    if value("username") != Some(username.as_str()) || value("server") != Some(server.as_str()) {
+        return Err("当前账户已变化，请重新按住查看密码".to_string());
+    }
+    super::saved_password::read_for_display(&exv_vpn_win32_config::config_dir(), &username, &server)
+}
+
 /// 拉取当前归一化统计（stats-wire 方案 A：从 `snapshot` 命令维护的缓存读取；
 /// 尚无样本返回 typed NotWired 占位，前端保持「暂无统计」不视为失败）。
 #[tauri::command]

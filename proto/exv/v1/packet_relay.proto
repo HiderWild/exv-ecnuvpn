@@ -1,29 +1,3 @@
-// EXV_CUTOVER (2026-08-17): Rust is the active product line; C++ is deprecated, reference only.
-// Spec: docs/superpowers/specs/vpn-rust-native-runtime-mvp-common-architecture.md
-// section 9.3 (PacketRelay); cutover record: docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md; re-wiring requires a new cutover requirement and a rerun of the real business flow on the native host - satisfied by the 2026-08-17 cutover.
-//
-// This file is the canonical shared wire authority for the packet data plane
-// of the exv.vpn.v1 namespace. Service meaning is declarative: it binds the
-// packet capability to a packet lease, opaque platform ownership, a direction,
-// a monotonic sequence, packet count and total bytes. Control and packet
-// traffic MUST use independent HTTP/2 connections and independent resource
-// budgets; whether they are registered on separate listeners/paths is a
-// platform security/performance decision. The packet capability is consumed
-// atomically a single time by the resource owner.
-//
-// Field tags are permanently assigned and never reused. Reserved ranges:
-//   reserved 9000 to 9999  : internal / future use, never shipped
-//   reserved 1000 to 1999  : burn-in guard for each message
-// A tag that is vacated is recorded as a reserved range in this file before
-// any reuse is ever permitted; reuse is forbidden by policy.
-//
-// Security invariants carried by these types:
-//   * identitys and digests are opaque bytes whose exact length is enforced by
-//     the strict converter (16 bytes for UUID-backed ids, 32 bytes for digests).
-//   * No field self-reports platform identity; identity is derived exclusively
-//     from verified transport metadata, never from a client field.
-//   * Secrets travel only as one-shot bytes and are never persisted, logged,
-//     or replayed; only digests are retained for correlation.
 
 syntax = "proto3";
 

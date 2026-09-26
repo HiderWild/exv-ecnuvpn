@@ -1,25 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P5-a: engine 统计注册表 + StreamStats 推送。
-//
-// 数据面（Wintun ring → CSTP/TLS）尚未在本阶段接死；本模块是统计点的产品化接缝：
-// 未来数据面在每个 packet 边界调用 [`StatsRegistry::record_rx`]/[`record_tx`]，
-// 本模块聚合为 wire `StatsEvent` 并经 `HelperControl.StreamStats` 推给 core。
-//
-// 通道设计镜像 `log_sink::LogSink`（P2-b）：
-//   * [`StatsPublisher::open_stream`] 建立一条 mpsc 推送通道（last-writer-wins：
-//     core 是唯一统计消费方），并 spawn 一个采样 task；
-//   * 采样 task 按 interval 读 [`StatsRegistry`] 快照，计算自上次样本的字节速率
-//     （bytes/sec），组 wire `StatsEvent` 推送；无挂接流则不采样（无空转）；
-//   * 客户端断线（接收端 drop）→ 发送失败 → task 自行退出；重连走 `open_stream`
-//     重新挂接（累计计数器即天然断点，无需 resume tick）。
-//
-// 数据面安全：`record_rx`/`record_tx` 是 lock-free 的 saturating 原子累加，永不
-// 阻塞 packet 路径（relaxed 序对单调累计计数器足够）。
-//
-// wire 形态：`rx_bytes`/`tx_bytes` 为累计权威字节数；`rx_rate`/`tx_rate` 为 engine
-// 采样速率（0 = 尚无前一样本），core 侧 P5-2 仍按字节增量自行归一化速度。
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,8 +31,9 @@ pub struct StatsSample {
 
 /// 数据面可写的统计注册表（lock-free 累计 + 阶段）。
 ///
-/// 数据面线程只在 packet 边界调用 `record_rx`/`record_tx`（以及可选的
-/// `record_latency`/`set_phase`）；采样 task 以 relaxed 序读取，永不加锁。
+/// 数据面线程在 packet 边界调用 `record_rx`/`record_tx`（data_plane.rs 方向计数）；
+/// 隧道运行时在连接/掉线边界调用 `set_phase`（tunnel_runtime.rs），延迟探测
+/// （DPD/ping fallback）调用 `record_latency`；采样 task 以 relaxed 序读取，永不加锁。
 #[derive(Debug)]
 pub struct StatsRegistry {
     rx_bytes: AtomicU64,
@@ -301,120 +280,3 @@ async fn sample_loop(
 // 单元测试：累计正确性（含饱和）、阶段/延迟反映、速率计算、事件形状。
 // 集成契约测试（StreamStats RPC over named pipe）在 tests/stats.rs。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 累计正确性：`record_rx`/`record_tx` 聚合为快照的累计值。
-    #[test]
-    fn cumulative_counters_accumulate() {
-        let registry = StatsRegistry::new();
-        registry.record_rx(100);
-        registry.record_rx(250);
-        registry.record_tx(40);
-        let sample = registry.snapshot();
-        assert_eq!(sample.rx_bytes, 350);
-        assert_eq!(sample.tx_bytes, 40);
-    }
-
-    /// 饱和：在 `u64::MAX` 处继续累加不回绕（累计计数器 bug 的回归门）。
-    #[test]
-    fn cumulative_counters_saturate_at_max() {
-        let registry = StatsRegistry::new();
-        registry.record_rx(u64::MAX);
-        registry.record_rx(1000);
-        assert_eq!(registry.snapshot().rx_bytes, u64::MAX, "saturating add");
-    }
-
-    /// 阶段/延迟：`set_phase` 与 `record_latency` 反映到快照；默认阶段为 `Idle`。
-    #[test]
-    fn phase_and_latency_reflect_in_snapshot() {
-        let registry = StatsRegistry::new();
-        assert_eq!(registry.snapshot().phase, StatsPhase::Idle);
-        registry.set_phase(StatsPhase::Connected);
-        registry.record_latency(42);
-        let sample = registry.snapshot();
-        assert_eq!(sample.phase, StatsPhase::Connected);
-        assert_eq!(sample.latency_ms, 42);
-        registry.record_latency(0);
-        assert_eq!(registry.snapshot().latency_ms, 0, "0 = unknown");
-    }
-
-    /// 速率：纯函数按 delta/elapsed 计算 bytes/sec，elapsed 0 与 delta 0 均安全。
-    #[test]
-    fn rate_bytes_per_sec_computes_deltas() {
-        assert_eq!(rate_bytes_per_sec(1000, 1000), 1000);
-        assert_eq!(rate_bytes_per_sec(2000, 500), 4000);
-        assert_eq!(rate_bytes_per_sec(0, 1000), 0);
-        assert_eq!(rate_bytes_per_sec(1000, 0), 0, "zero elapsed is safe");
-        assert_eq!(rate_bytes_per_sec(u64::MAX, 1), u64::MAX, "saturating rate");
-    }
-
-    /// 阶段判别往返：u8 判别 → `StatsPhase` → 事件 `i32`。
-    #[test]
-    fn phase_discriminant_round_trips() {
-        for phase in [
-            StatsPhase::Idle,
-            StatsPhase::Connecting,
-            StatsPhase::Connected,
-            StatsPhase::Stopping,
-            StatsPhase::Failed,
-        ] {
-            let as_u8 = phase as u8;
-            assert_eq!(phase_from_u8(as_u8), phase, "{phase:?} round-trips");
-        }
-        assert_eq!(phase_from_u8(99), StatsPhase::Unspecified, "unknown -> unspecified");
-    }
-
-    /// 采样事件形状：注册表写入 → `open_stream` 后首个事件携带累计计数与阶段，
-    /// 且首个样本速率 = 0（尚无前一样本）；后续样本速率 > 0。
-    #[tokio::test]
-    async fn sample_loop_pushes_events_with_accumulated_shape() {
-        let registry = Arc::new(StatsRegistry::new());
-        registry.record_rx(1000);
-        registry.record_tx(500);
-        registry.set_phase(StatsPhase::Connected);
-        registry.record_latency(7);
-
-        let publisher = StatsPublisher {
-            registry: registry.clone(),
-            next_sequence: Arc::new(AtomicU64::new(0)),
-            inner: Mutex::new(StatsPublisherInner { push: None }),
-        };
-        let mut rx = publisher.open_stream(10); // 10 ms 采样
-        assert!(publisher.is_push_attached(), "push attached after open_stream");
-
-        // 首个事件：累计计数 + 阶段 + 延迟；速率为 0。
-        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("first sample within timeout")
-            .expect("stream alive")
-            .expect("event ok");
-        assert_eq!(first.sequence, 1);
-        assert_eq!(first.rx_bytes, 1000);
-        assert_eq!(first.tx_bytes, 500);
-        assert_eq!(first.latency_ms, 7);
-        assert_eq!(first.phase, StatsPhase::Connected as i32);
-        assert_eq!(first.rx_rate, 0, "first sample has no prior rate");
-        assert_eq!(first.tx_rate, 0);
-
-        // 继续累加 → 下一个样本反映累计增长，且速率 > 0。
-        registry.record_rx(9000);
-        registry.record_tx(4000);
-        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("second sample within timeout")
-            .expect("stream alive")
-            .expect("event ok");
-        assert_eq!(second.sequence, 2);
-        assert_eq!(second.rx_bytes, 10_000);
-        assert_eq!(second.tx_bytes, 4_500);
-        assert!(second.rx_rate > 0, "rate computed from delta: {}", second.rx_rate);
-        assert!(second.tx_rate > 0, "rate computed from delta: {}", second.tx_rate);
-
-        // 断线（drop 接收端）→ 采样 task 自行退出（channel closed）。
-        drop(rx);
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-}

@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! R1b 业务门禁（opt-in）：真实数据面组装全链路经**产品 engine** 跑通，ping/SSH
 //! 校内真实通。
@@ -857,12 +855,14 @@ async fn run_real_round(
                 ipv4_routes: vec![],
                 dns_servers: vec![],
                 control_bypass: vec![],
+                proxy_exempt: vec![],
                 opaque_intent: Some(generated::TunnelIntentRef {
                     identity_digest: digest32(2),
                 }),
             }),
             request_digest: digest32(2),
             secret_payload: payload.into_bytes(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .map_err(|e| format!("round {round}: apply: {e}"))?;
@@ -1236,12 +1236,14 @@ async fn cancel_mid_assembly_cleans_up() {
                 ipv4_routes: vec![],
                 dns_servers: vec![],
                 control_bypass: vec![],
+                proxy_exempt: vec![],
                 opaque_intent: Some(generated::TunnelIntentRef {
                     identity_digest: digest32(2),
                 }),
             }),
             request_digest: digest32(2),
             secret_payload: payload.into_bytes(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .expect("apply");

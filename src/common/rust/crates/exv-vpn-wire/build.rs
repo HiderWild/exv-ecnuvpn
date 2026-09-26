@@ -1,12 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// C02-E：可复现 generation 与 descriptor baseline。
-//   * 使用 vendored protoc（protoc_bin_vendored::protoc_bin_path()），通过
-//     tonic_prost_build::Config::protoc_executable 显式传给 prost-build/tonic，
-//     因此无需系统 protoc 在 PATH 上。
-//   * 生成 server + client 以及 exv.vpn.v1 descriptor set。
-//   * 不修改 PATH、不调用 CMake、不提交生成 .rs（生成发生在 target/OUT_DIR 构建期）。
 
 use std::env;
 use std::path::{Path, PathBuf};

@@ -145,8 +145,8 @@ export const CONNECT_PHASE_ORDER: ConnectPhase[] = [
 /**
  * 稳定错误码 → 友好中文文案。
  *
- * Rust `VpnError` 只向 UI 透传稳定 code 字符串（redaction 政策：自由文本诊断栈永不
- * 进 UI，见 app/src/kernel/wire.rs `vpn_error_from_wire`），故用码表转可读文案。
+ * Rust `VpnError` 向 UI 透传稳定 code；平台依赖错误另带由 redacted native code 选择的
+ * 仓库内静态修复建议。自由文本诊断栈永不进 UI（见 `vpn_error_from_wire`）。
  */
 export const ERROR_CODE_LABELS: Record<string, string> = {
   ERROR_CODE_INVALID_INPUT: "输入无效",
@@ -167,6 +167,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   ERROR_CODE_DEADLINE_EXCEEDED: "操作超时",
   ERROR_CODE_ACTIVE_ATTEMPT_CANNOT_RECONCILE: "进行中的连接无法恢复",
   ERROR_CODE_ACTIVE_SESSION_CANNOT_RECONCILE: "已连接会话无法恢复",
+  ERROR_CODE_PLATFORM_DEPENDENCY_UNAVAILABLE: "Windows 网络组件不可用，请修复 EXV 安装后重试",
 };
 
 // ---------------------------------------------------------------------------
@@ -202,11 +203,16 @@ export function errorOf(state: RuntimeState): string | null {
   }
 }
 
-/** 格式化 VpnError：优先稳定 code 的友好文案，回退 message / 原始 code。 */
+/**
+ * 格式化 VpnError：平台依赖错误的 message 是 Rust 依据 redacted native code 生成的
+ * 静态修复建议，须保留具体原因；操作结果未知也优先使用宿主的具体解释。
+ * 其余错误继续优先使用稳定 code 的友好文案。
+ */
 export function formatError(err: VpnError): string {
+  const msg = err.message?.trim();
+  if ((err.code === "ERROR_CODE_PLATFORM_DEPENDENCY_UNAVAILABLE" || err.code === "ERROR_CODE_EFFECT_UNKNOWN") && msg) return msg;
   const label = ERROR_CODE_LABELS[err.code];
   if (label) return label;
-  const msg = err.message?.trim();
   return msg ? msg : err.code;
 }
 
@@ -234,10 +240,19 @@ export interface OpCorrelation {
   activeOpId: string | null;
   /** 当前操作是否已显示过终态（此后只接受同操作的同态终态重放，不扰动）。 */
   terminalReached: boolean;
+  /**
+   * C2（ui-connect-stop-responsiveness）：点击 → RPC 回复之间的乐观窗口方向。
+   * null = 无窗口。窗口内放行一切状态事件（含受理快照），方向一致性裁决与窗口
+   * 解除由 runtime 采纳层负责（复审 P1-2：相位与方向不一致时采纳显示但不解除）。
+   */
+  inFlightAction: "connect" | "stop" | null;
 }
 
 /**
  * 事件是否应驱动 UI（operation_id 关联过滤）：
+ *   * C2 窗口规则：已点击（inFlightAction ≠ null）但回复未登记（activeOpId == null）
+ *     → 放行一切事件（含受理快照；窗口由 4s 看门狗与回复/错误路径有界化，见 C4；
+ *     陈旧 pre-click 快照的「采纳但不解除」裁决在 runtime 侧）；
  *   * 无在途操作 → 跟随全局（空 id 或终态；带非空 id 的非终态事件是他人操作，不劫持）；
  *   * 有在途操作 → 只认 activeOpId 的事件；已显示终态后只接受同态终态重放；
  *   * 事件无操作 id → 仅终态放行（操作终结、host 清空 id 的收敛事件仍属当前操作）。
@@ -245,6 +260,10 @@ export interface OpCorrelation {
 export function shouldApplyEvent(ev: RuntimeEvent, corr: OpCorrelation): boolean {
   const op = ev.snapshot.operation_id ?? ev.operation_id ?? null;
   const isTerm = isTerminalState(ev.snapshot.runtime);
+  // C2（ui-connect-stop-responsiveness）：点击到回复之间的自操作确认窗口。
+  if (corr.activeOpId == null && corr.inFlightAction != null) {
+    return true;
+  }
   if (corr.activeOpId == null) {
     return op == null || op === "" || isTerm;
   }

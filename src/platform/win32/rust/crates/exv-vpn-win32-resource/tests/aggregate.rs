@@ -1,75 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W22-T Terra: aggregate（Wintun adapter/session 与 address/MTU/bypass/routes/DNS 配置的
-// **单一 owner**）契约。这些测试钉住 W22-I 在 exv_vpn_win32_resource::{aggregate,
-// inventory, apply_tunnel} 实现的 seam。契约来源：
-//   - 计划 W22 行：`aggregate.rs`：adapter/session/address/MTU/bypass/routes/DNS/packet/
-//     running effects complete inventory 与 proof；生产文件 `aggregate.rs,inventory.rs,
-//     apply_tunnel.rs`；killer mutant：omit one inventory item / split adapter/session
-//     owner / effect before admission；
-//   - 架构 §7.1（单一 logical aggregate owner）：每个活动平台 ownership 有一个 canonical
-//     obligation inventory；proof inventory 从 durable canonical projection 派生，调用者
-//     不能任意遗漏一项；**Windows 的 aggregate 必须同时拥有 Wintun adapter/config 与
-//     packet session**，不再由两套 NativeWintun 分拆 ownership；
-//   - WSP4 事实（native-network-settings-facts.md §3/§6，W20-W21 已冻结）：bypass 必须在
-//     隧道路由**之前**捕获/安装（否则控制流量被隧道路由劫持）；cleanup 按安装顺序**逆序**；
-//     compare-and-restore 必须先比较当前状态与 applied 指纹再恢复（无条件恢复旧快照 =
-//     mutant）；MTU=1（低于 IPv4 最小 68）-> 87；重复精确行/地址 -> 5010。
-//
-// W22-I pinned seam（src/inventory.rs + src/apply_tunnel.rs + src/aggregate.rs；W22-I 必须
-// 提供下列 exact 名称，否则本测试编译失败 = RED）：
-//   inventory::InventoryItem { Adapter, Session, Address, Mtu, BypassRoute, Route, Dns,
-//     PacketAttachment, RunningEffect }（Debug/Clone/Copy/PartialEq/Eq）
-//     —— 9 项 canonical obligation（计划 W22 行逐字枚举：adapter/session/address/MTU/
-//     bypass/routes/DNS/packet/running effects；缺一项 = mutant）
-//   inventory::COMPLETE_INVENTORY: &[InventoryItem] —— 平台冻结的 9 项完整清单
-//   inventory::is_complete(items: &[InventoryItem]) -> bool
-//     —— 全部 9 项在列才算 complete；缺任一项必须 false
-//   apply_tunnel::FamilyStep { Address, Mtu, Bypass, Routes, Dns }（Debug/Clone/Copy/PartialEq/Eq）
-//   apply_tunnel::ApplyPlan {
-//       pub steps: Vec<FamilyStep>,
-//       pub addresses: Vec<IpAddressRow>,   // W18 类型（组合，不得重新实现）
-//       pub mtu_v4: u32, pub mtu_v6: Option<u32>,
-//       pub bypass: Vec<RouteRow>,          // W20 类型；bypass 族步骤必须先于 Routes 族
-//       pub tunnel_routes: Vec<RouteRow>,   // W20 类型
-//       pub dns: DnsSettings,               // W21 类型
-//   }（Debug/Clone/PartialEq/Eq）
-//   apply_tunnel::build_apply_plan(addresses, mtu_v4, mtu_v6, bypass, tunnel_routes, dns)
-//     -> ApplyPlan —— 纯逻辑：steps 中 Bypass 族在 Routes 族**之前**
-//   apply_tunnel::build_restore_plan(apply: &ApplyPlan) -> Vec<FamilyStep>
-//     —— 纯逻辑：apply.steps 的**精确逆序**（最后应用的族先恢复；路由先删、bypass 最后删）
-//   apply_tunnel::apply(aggregate: &mut Aggregate, plan: &ApplyPlan)
-//     -> Result<(), NativeError>
-//     —— admission 先于 effect：先完整验证/承认整个 plan（任一族非法，如 MTU=1 -> 87，
-//     则 **零效果**，绝不半状态）；通过后才按 steps 顺序逐族 effect（委托 leaf seam）
-//   apply_tunnel::restore(aggregate: &mut Aggregate) -> Result<(), NativeError>
-//     —— 逆 family 顺序 compare-and-restore（委托 leaf seam 的 compare-and-restore；
-//     第三方修改 -> typed 跳过，绝不覆盖）
-//   aggregate::Aggregate —— 单一类型同时拥有 WintunAdapter 与 WintunSession
-//     （split adapter/session owner = mutant）；Drop 必须 session 先 EndSession、
-//     adapter 后 close（W17 语义，测试依赖 drop 自清理）
-//     Aggregate::new(adapter: WintunAdapter, session: WintunSession) -> Self
-//       —— 单个构造器同时接收两者（分拆 owner 无法满足此签名）
-//     Aggregate::adapter(&self) -> &WintunAdapter；Aggregate::session(&self) -> &WintunSession
-//     Aggregate::inventory(&self) -> &[InventoryItem] —— 存活期间必须 is_complete（9 项）
-//     Aggregate::capture(&self) -> Result<TunnelSnapshot, NativeError>
-//       —— 全族真实回读组合（任一族失败 -> Err，绝不返回缺项 partial 快照）
-//   aggregate::TunnelSnapshot {
-//       pub address_rows: Vec<IpAddressRow>,   // W18 类型（leaf 回读行）
-//       pub mtu_v4: MtuSnapshot,               // W19 类型
-//       pub mtu_v6: Option<MtuSnapshot>,       // W19 类型（V6 行存在时为 Some）
-//       pub routes: Vec<RouteRow>,             // W20 类型（leaf 回读行，含 bypass）
-//       pub dns: DnsSettings,                  // W21 类型
-//   }（Debug/Clone/PartialEq/Eq）—— 字段类型就是已提交 leaf 的类型（组合而非重新实现；
-//   W22-I 自己定义行/快照类型会让本测试编译失败）
-//
-// 纯逻辑测试（inventory 完整性 / apply-restore 计划顺序 / 快照组合）在任何宿主都必须
-// 通过。真实跨族 mutation 测试在探针自建的 scratch Wintun adapter + session 上运行，
-// 需要 admin；非 elevated 宿主上短路为 `not_run / blocked_by_environment`（明确输出，
-// 不伪造假绿）。每个 mutation 测试以 Aggregate::new(adapter, session) 构造单一 owner，
-// 结束（含 panic 早退）时 drop aggregate：session 先 EndSession、创建者 close 移除
-// adapter 及其全部 IP/路由/DNS（W16 事实；W20-T 同款自清理语义），无残留。
 
 use std::ffi::c_void;
 use std::net::Ipv4Addr;
@@ -77,29 +5,29 @@ use std::path::Path;
 
 use exv_vpn_win32_resource::aggregate::{Aggregate, TunnelSnapshot};
 use exv_vpn_win32_resource::apply_tunnel::{
-    apply, build_apply_plan, build_restore_plan, restore, FamilyStep,
+    FamilyStep, apply, build_apply_plan, build_restore_plan, restore,
 };
 use exv_vpn_win32_resource::dns::DnsApplier;
 use exv_vpn_win32_resource::dns_types::{DnsFingerprint, DnsSettings};
-use exv_vpn_win32_resource::inventory::{is_complete, InventoryItem, COMPLETE_INVENTORY};
-use exv_vpn_win32_resource::ip_address::{plan_addresses, IpAddressController};
+use exv_vpn_win32_resource::inventory::{COMPLETE_INVENTORY, InventoryItem, is_complete};
+use exv_vpn_win32_resource::ip_address::{IpAddressController, plan_addresses};
 use exv_vpn_win32_resource::ip_helper_types::{IpAddressPlan, IpAddressRow};
 use exv_vpn_win32_resource::mtu::{MtuController, MtuFamily, MtuSnapshot};
 use exv_vpn_win32_resource::native_error::NativeError;
-use exv_vpn_win32_resource::routes::{install, RouteRow};
+use exv_vpn_win32_resource::routes::{RouteRow, install};
 use exv_vpn_win32_resource::wintun_adapter::{AdapterOpen, WintunAdapter};
 use exv_vpn_win32_resource::wintun_api::WintunLibrary;
 use exv_vpn_win32_resource::wintun_session::WintunSession;
 
-use windows::core::GUID;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::ConvertInterfaceLuidToGuid;
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::core::GUID;
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（WSP3/WSP4 冻结路径；PATH DLL 是 mutant）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// WintunCreateAdapter 的 TunnelType 参数（WSP4 冻结值）。
 const TUNNEL_TYPE: &str = "EXV VPN";
 /// Wintun ring capacity 官方下限（wintun.h：min 0x20000；W17-T 同款）。
@@ -189,7 +117,9 @@ fn is_elevated() -> bool {
         elevated = u32::from_ne_bytes(buff[0..4].try_into().unwrap_or([0u8; 4])) != 0;
     }
     // SAFETY: token 是本进程新打开句柄，使用后关闭。
-    unsafe { let _ = CloseHandle(token); }
+    unsafe {
+        let _ = CloseHandle(token);
+    }
     elevated
 }
 
@@ -221,8 +151,10 @@ fn unique_name(prefix: &str) -> String {
 /// 创建真实 adapter（创建者 owned；drop 即移除 adapter——W16 事实）。
 fn create_adapter(lib: &WintunLibrary, prefix: &str) -> WintunAdapter {
     let name = unique_name(prefix);
-    let (adapter, opened) =
-        expect_ok(WintunAdapter::create(lib, &name, TUNNEL_TYPE), "create adapter");
+    let (adapter, opened) = expect_ok(
+        WintunAdapter::create(lib, &name, TUNNEL_TYPE),
+        "create adapter",
+    );
     assert!(
         matches!(opened, AdapterOpen::Created),
         "create 必须返回 AdapterOpen::Created"
@@ -317,6 +249,8 @@ fn apply_plan_orders_bypass_before_routes() {
         vec![bypass],
         vec![t1, t2],
         DnsSettings::new(Vec::new(), Vec::new()),
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     );
 
     let bypass_at = plan
@@ -334,12 +268,18 @@ fn apply_plan_orders_bypass_before_routes() {
         "bypass 族必须排在隧道路由族之前（先 bypass 再 tunnel，否则控制流量被隧道路由劫持）"
     );
     assert_eq!(
-        plan.steps.iter().filter(|s| **s == FamilyStep::Bypass).count(),
+        plan.steps
+            .iter()
+            .filter(|s| **s == FamilyStep::Bypass)
+            .count(),
         1,
         "bypass 族步骤必须恰好出现一次"
     );
     assert_eq!(
-        plan.steps.iter().filter(|s| **s == FamilyStep::Routes).count(),
+        plan.steps
+            .iter()
+            .filter(|s| **s == FamilyStep::Routes)
+            .count(),
         1,
         "routes 族步骤必须恰好出现一次"
     );
@@ -365,6 +305,8 @@ fn restore_plan_reverses_apply_family_order() {
         vec![bypass],
         vec![t1],
         DnsSettings::new(vec![DNS_SERVER.to_string()], vec![DNS_SEARCH.to_string()]),
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     );
 
     let mut expected = plan.steps.clone();
@@ -419,10 +361,21 @@ fn snapshot_composes_leaf_types_not_reimplemented() {
         routes: vec![route.clone()],
         dns: dns.clone(),
     };
-    assert_eq!(snap.address_rows, vec![row], "快照 address 字段必须是 W18 的 IpAddressRow");
+    assert_eq!(
+        snap.address_rows,
+        vec![row],
+        "快照 address 字段必须是 W18 的 IpAddressRow"
+    );
     assert_eq!(snap.mtu_v4, mtu4, "快照 MTU 字段必须是 W19 的 MtuSnapshot");
-    assert_eq!(snap.mtu_v6, mtu6, "快照 V6 MTU 字段必须是 W19 的 MtuSnapshot");
-    assert_eq!(snap.routes, vec![route], "快照路由字段必须是 W20 的 RouteRow");
+    assert_eq!(
+        snap.mtu_v6, mtu6,
+        "快照 V6 MTU 字段必须是 W19 的 MtuSnapshot"
+    );
+    assert_eq!(
+        snap.routes,
+        vec![route],
+        "快照路由字段必须是 W20 的 RouteRow"
+    );
     assert_eq!(snap.dns, dns, "快照 DNS 字段必须是 W21 的 DnsSettings");
     // 快照的 DNS 部分可直接经 leaf 指纹（W21 DnsFingerprint::of）——若 aggregate 重新实现
     // 自己的 DNS 类型，此断言无法编译。
@@ -489,7 +442,10 @@ fn aggregate_capture_is_complete_composition() {
     // 经 leaf seam 直接应用各族已知配置（组合证明：aggregate 的 capture 必须委托 leaf
     // 回读，不得重新实现）。
     let addr = IpAddressRow::new(PROBE_IP, luid, TUNNEL_PREFIX);
-    expect_ok(IpAddressController::new(luid).apply(&addr), "leaf apply address");
+    expect_ok(
+        IpAddressController::new(luid).apply(&addr),
+        "leaf apply address",
+    );
     expect_ok(
         MtuController::new(luid, MtuFamily::V4).apply(MTU_APPLY),
         "leaf apply mtu",
@@ -502,9 +458,9 @@ fn aggregate_capture_is_complete_composition() {
 
     let snap = expect_ok(agg.capture(), "aggregate capture（全族）");
     assert!(
-        snap.address_rows
-            .iter()
-            .any(|r| r.address == PROBE_IP && r.interface_luid == luid && r.on_link_prefix_length == TUNNEL_PREFIX),
+        snap.address_rows.iter().any(|r| r.address == PROBE_IP
+            && r.interface_luid == luid
+            && r.on_link_prefix_length == TUNNEL_PREFIX),
         "address 族必须真实回读（缺族回读 = omit one inventory item mutant）"
     );
     assert_eq!(
@@ -546,6 +502,8 @@ fn apply_rejects_invalid_plan_without_any_effect() {
         Vec::new(),
         vec![tunnel],
         dns,
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     );
 
     let err = expect_native_error(apply(&mut agg, &invalid), "apply 非法 plan");
@@ -590,15 +548,16 @@ fn aggregate_apply_restore_roundtrip_returns_to_original() {
         Vec::new(),
         vec![tunnel.clone()],
         dns.clone(),
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     );
 
     expect_ok(apply(&mut agg, &plan), "aggregate apply 全族配置");
     let applied = expect_ok(agg.capture(), "apply 后 capture");
     assert!(
-        applied
-            .address_rows
-            .iter()
-            .any(|r| r.address == PROBE_IP && r.interface_luid == luid && r.on_link_prefix_length == TUNNEL_PREFIX),
+        applied.address_rows.iter().any(|r| r.address == PROBE_IP
+            && r.interface_luid == luid
+            && r.on_link_prefix_length == TUNNEL_PREFIX),
         "apply 后 address 必须真实回读（API success 不是 proof）"
     );
     assert_eq!(
@@ -619,23 +578,16 @@ fn aggregate_apply_restore_roundtrip_returns_to_original() {
     expect_ok(restore(&mut agg), "aggregate 逆族序 compare-and-restore");
     let restored = expect_ok(agg.capture(), "restore 后 capture");
     assert_eq!(
-        restored.address_rows,
-        original.address_rows,
+        restored.address_rows, original.address_rows,
         "restore 必须删除 owned 地址（pre-existing 永不删）"
     );
     assert_eq!(
-        restored.mtu_v4,
-        original.mtu_v4,
+        restored.mtu_v4, original.mtu_v4,
         "MTU 必须 compare-and-restore 回原始值"
     );
+    assert_eq!(restored.mtu_v6, original.mtu_v6, "V6 MTU 必须未被触碰");
     assert_eq!(
-        restored.mtu_v6,
-        original.mtu_v6,
-        "V6 MTU 必须未被触碰"
-    );
-    assert_eq!(
-        restored.dns,
-        original.dns,
+        restored.dns, original.dns,
         "DNS 必须恢复原始快照（不得无条件覆盖第三方变更）"
     );
     assert!(
@@ -652,5 +604,3 @@ fn aggregate_apply_restore_roundtrip_returns_to_original() {
     drop(agg);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

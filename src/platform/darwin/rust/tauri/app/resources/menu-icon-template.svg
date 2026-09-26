@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="39" viewBox="522 469 696 754" role="img" aria-label="EXV 模板菜单栏图标" aria-labelledby="title description">
+  <title id="title">EXV 黑白菜单栏模板图标</title>
+  <desc id="description">盾牌加勾号的简化剪影：纯黑前景，alpha 表达形状，勾号镂空（alpha 0）；macOS template 渲染在浅色菜单栏画黑、深色画白。勾号相对双色版加粗，保证 18 pt 下的镂空可读。</desc>
+  <defs>
+    <mask id="check-knockout">
+      <rect x="522" y="469" width="696" height="754" fill="#ffffff" />
+      <path d="M772 853 L839 919 L982 765" fill="none" stroke="#000000" stroke-width="88" stroke-linecap="round" stroke-linejoin="round" />
+    </mask>
+  </defs>
+  <path d="M871 512 C879 512 887 516 895 523 C956 568 1028 596 1114 612 C1126 614 1133 624 1133 637 V824 C1133 985 1038 1105 887 1175 C876 1180 867 1180 857 1175 C705 1105 607 987 607 824 V637 C607 624 615 614 627 612 C711 596 786 566 848 523 C855 516 863 512 871 512 Z" fill="#000000" mask="url(#check-knockout)" />
+</svg>

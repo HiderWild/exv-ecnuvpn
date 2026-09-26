@@ -215,17 +215,16 @@ impl Mux {
 // Protocol late-cleanup vault
 // ---------------------------------------------------------------------------
 
-static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 static NEXT_ENTRY: AtomicU64 = AtomicU64::new(1);
 
 /// A linear (non-`Clone`) late-cleanup handle. Opaque; minted by the owner.
-pub struct LateHandle(u64);
+pub struct LateHandle;
 
 impl LateHandle {
     /// Mint a fresh linear handle (owner/test seam).
     pub fn new() -> Self {
-        LateHandle(NEXT_HANDLE.fetch_add(1, Ordering::Relaxed))
+        LateHandle
     }
 }
 

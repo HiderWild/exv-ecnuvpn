@@ -1,0 +1,37 @@
+[package]
+name = "exv-vpn-darwin-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+aes-gcm = "0.10.3"
+base64 = "0.22.1"
+exv-vpn-darwin-ipc = { path = "../exv-vpn-darwin-ipc" }
+# W3-1/P1 S2：WatchEvents 事件总线（common 上提核心；win32 wrapper 与 darwin 两侧消费）。
+exv-vpn-host = { path = "../../../../../common/rust/crates/exv-vpn-host" }
+exv-vpn-wire = { path = "../../../../../common/rust/crates/exv-vpn-wire" }
+getrandom = "0.4"
+libc = "0.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+# W3-1/P1 S2：watch_events 把总线订阅流 map(Ok) 成 tonic server-streaming。
+tokio-stream = "0.1"
+tonic = { version = "0.14.6", default-features = false, features = ["transport"] }
+zeroize = "1.9"
+
+[[bin]]
+name = "exv-vpn-darwin-core"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+serde_json = "1.0.151"

@@ -1,15 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// V20-T terra：strict wire<->domain conversion contract. These tests pin the
-// conversion API that V20-I implements in `exv_vpn_wire::convert` (and the
-// redaction seam in `exv_vpn_wire::redact`). Every test is written so the
-// declared mutants are killed:
-//   * accept enum 0                      -> rejects_unspecified_enum
-//   * protobuf self-reported principal   -> operation_lookup_uses_authenticated_principal
-//   * snapshot leaks password            -> snapshot_omits_secret_native_handle_and_raw_cert
-//
-// Deterministic only: no I/O, no sleep, no randomness.
 
 use exv_vpn_domain::identity::canonical_lookup_digest;
 use exv_vpn_domain::identity::{OperationMethod, PrincipalDigest};

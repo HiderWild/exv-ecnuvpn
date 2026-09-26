@@ -309,3 +309,46 @@ fn codec_has_no_dtls_or_udp_variant() {
         body: vec![],
     }));
 }
+
+// ---- W6（2026-09-05 cstp-keepalive 计划）：keepalive/DPD 应答帧 encode_raw →
+// feed → decode 往返。冻结 F3：解码面零改动——0x07 照旧解码为 Control{0x07}，
+// 0x04 照旧走 UnknownControl(0x04) 错误路径（由 session.rs 映射为 DpdResponse 探测
+// 信号），不新增解码支持。 ----
+
+#[test]
+fn keepalive_frame_round_trips_as_control() {
+    // 0x07 空 body encode_raw → decode：`Control { kind: 0x07, body: [] }`（codec
+    // 既有 keepalive 解码行为不回归——客户端周期 keepalive 与网关 keepalive 共用
+    // 同一解码面）。
+    let wire = Codec::encode_raw(
+        exv_vpn_cstp::codec::CSTP_PACKET_TYPE_KEEPALIVE,
+        &[],
+    )
+    .expect("empty keepalive encodes within bounds");
+    assert_eq!(wire.len(), CSTP_HEADER_LEN, "空 body 帧 = 纯 8 字节 STF 头");
+    let frames = decode_all(&[&wire]).expect("keepalive frame decodes");
+    assert_eq!(
+        frames,
+        vec![CstpFrame::Control {
+            kind: exv_vpn_cstp::codec::CSTP_PACKET_TYPE_KEEPALIVE,
+            body: Vec::new(),
+        }]
+    );
+}
+
+#[test]
+fn dpd_response_frame_round_trips_as_unknown_control() {
+    // 0x04 空 body encode_raw → decode：`Err(UnknownControl(0x04))`（冻结 F3：解码面
+    // 不变——codec 不新增 0x04 解码支持，错误由 session.rs 的控制面映射消费）。
+    let wire = Codec::encode_raw(exv_vpn_cstp::session::CSTP_PACKET_TYPE_DPD_RESPONSE, &[])
+        .expect("empty dpd response encodes within bounds");
+    assert_eq!(wire.len(), CSTP_HEADER_LEN, "空 body 帧 = 纯 8 字节 STF 头");
+    assert_eq!(wire[6], 0x04, "STF 头 packet_type = DPD response");
+    let mut codec = Codec::new();
+    codec.feed(&wire);
+    assert_eq!(
+        codec.decode(),
+        Err(CodecError::UnknownControl(0x04)),
+        "0x04 仍走 UnknownControl 错误路径（解码面冻结）"
+    );
+}

@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! Non-privileged host composition (W27-I): binds the verified helper identity
 //! (WSP1 §6, anti fake-helper), observes the real process token elevation
@@ -181,6 +179,11 @@ impl HostComposition {
     /// when the protocol establishes and stop when the business stops.
     pub fn apply(&mut self, event: HostEvent) -> HostEffect {
         match event {
+            HostEvent::ConnectionLost(error) => {
+                self.relay.stop();
+                self.session_established_at_ms = None;
+                self.actors[0].apply(HostEvent::ConnectionLost(error))
+            }
             HostEvent::Connect
             | HostEvent::HelperLinkLost
             | HostEvent::StopNewAdmission
@@ -344,6 +347,7 @@ impl HostComposition {
     /// driven into reconciliation and admission is closed regardless of the
     /// phase it was in when the link died.
     pub fn on_helper_link_terminal(&mut self) {
+        self.session_established_at_ms = None;
         self.teardown_started = true;
         self.relay.on_terminal(RelayTerminalSource::StreamEof);
         let effect = self.actors[0].apply(HostEvent::HelperLinkLost);
@@ -475,5 +479,3 @@ fn observe_process_token_elevation() -> bool {
     elevated
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

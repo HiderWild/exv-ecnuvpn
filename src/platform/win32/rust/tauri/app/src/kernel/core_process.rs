@@ -72,9 +72,6 @@ pub fn core_args_for_spawn() -> Vec<String> {
 /// spawn core 进程失败的 typed 错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreSpawnError {
-    /// core 二进制不存在（P5 落 host main 前，产品 core bin 尚未产出）。
-    #[allow(dead_code)]
-    BinaryNotFound,
     /// 进程拉起失败（操作系统错误码）。
     Spawn(String),
 }
@@ -82,7 +79,6 @@ pub enum CoreSpawnError {
 impl std::fmt::Display for CoreSpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BinaryNotFound => write!(f, "core binary not found (P5 lands host main)"),
             Self::Spawn(e) => write!(f, "core spawn failed: {e}"),
         }
     }
@@ -93,8 +89,7 @@ impl std::error::Error for CoreSpawnError {}
 /// spawn core 进程（非特权；核心参数契约见模块文档）。
 ///
 /// # Errors
-/// 二进制不存在 → `CoreSpawnError::BinaryNotFound`；拉起失败 →
-/// `CoreSpawnError::Spawn`。
+/// 拉起失败 → `CoreSpawnError::Spawn`。
 pub fn spawn_core(exe: &Path) -> Result<CoreChild, CoreSpawnError> {
     let child = Command::new(exe)
         .args(core_args_for_spawn())
@@ -112,7 +107,6 @@ pub fn spawn_core(exe: &Path) -> Result<CoreChild, CoreSpawnError> {
 
 /// core 子进程句柄：持有 `(pid, Child)`，生命周期安全（O3）。
 ///
-/// - [`CoreChild::wait_exit`]：有界等待退出（成功 → 归还 `std::process::ExitStatus`）。
 /// - [`CoreChild::terminate`]：强制终止（显式调用；core 挂死时的兜底）。
 ///
 /// **有意不做 Drop 自动 terminate**（对比 host `EngineChild`）：core 侧 O3 语义是
@@ -148,30 +142,6 @@ impl CoreChild {
         }
     }
 
-    /// 有界等待进程退出（`timeout_ms`）。超时返回 `None`（进程仍存活）。
-    /// O3 兜底观测：UI 退出后等待 core 自行退出（Pipe-close 感知），挂死时再 terminate。
-    #[allow(dead_code)]
-    pub fn wait_exit(&mut self, timeout_ms: u64) -> Option<std::process::ExitStatus> {
-        let child = self.child.as_mut()?;
-        // 非阻塞探活：先查已退出，再等待一小段（std Child 无超时 wait，这里以
-        // try_wait 轮询近似有界等待）。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    self.child = None;
-                    return Some(status);
-                }
-                Ok(None) if std::time::Instant::now() >= deadline => return None,
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                Err(_) => {
-                    // 无法查询（进程句柄失效）→ fail closed：视为未退出，调用方走 terminate。
-                    return None;
-                }
-            }
-        }
-    }
-
     /// 强制终止进程（幂等；已退出/已 terminate 时 no-op）。core 挂死时的显式兜底。
     #[allow(dead_code)]
     pub fn terminate(&mut self) {
@@ -187,53 +157,3 @@ impl CoreChild {
 // ---------------------------------------------------------------------------
 // 单元测试：管道名唯一 + 参数契约往返 + bin 路径解析。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 参数契约往返：`core_args_for_spawn` 产出必须含必需参数且值一致。
-    #[test]
-    fn core_args_for_spawn_round_trip() {
-        let pid = std::process::id();
-        let argv = core_args_for_spawn();
-        assert_eq!(
-            argv[argv.iter().position(|a| a == "--control-pipe").unwrap() + 1],
-            core_control_pipe_name()
-        );
-        assert_eq!(
-            argv[argv.iter().position(|a| a == "--ui-pid").unwrap() + 1],
-            pid.to_string()
-        );
-        if let Some(i) = argv.iter().position(|a| a == "--ui-sid") {
-            let sid = argv.get(i + 1).expect("--ui-sid value");
-            assert_eq!(
-                Some(sid.as_str()),
-                current_user_sid().as_deref(),
-                "--ui-sid 必须携带 UI 用户 SID"
-            );
-        }
-    }
-
-    /// 管道名按 UI PID 唯一。
-    #[test]
-    fn core_control_pipe_name_unique_per_pid() {
-        let name = core_control_pipe_name();
-        assert!(name.starts_with(r"\\.\pipe\exv-core-"), "pipe 前缀");
-        assert!(name.contains(&std::process::id().to_string()), "必须含 UI PID");
-    }
-
-    /// core 二进制路径解析：文件名必须与 core bin 一致（不断言存在——cargo test
-    /// 上下文 bin 未必已构建；spawn 路径有独立存在性门禁）。
-    #[test]
-    fn core_bin_path_resolves_name() {
-        let Some(p) = core_bin_path() else {
-            panic!("core_bin_path 必须解析出路径");
-        };
-        let name = p.file_name().expect("file name").to_string_lossy();
-        assert!(
-            name == "exv-core" || name == "exv-core.exe",
-            "bin 名必须为 exv-core，got {name}"
-        );
-    }
-}

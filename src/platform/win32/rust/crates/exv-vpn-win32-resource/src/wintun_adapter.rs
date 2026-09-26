@@ -1,18 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! Wintun adapter create-vs-open ownership and identity (W16).
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-wintun-facts.md`
-//! §2/§4): open-before-create fails `ERROR_NOT_FOUND` (1168); after create,
-//! open-by-name succeeds (second handle, `Opened`, not owned); a non-creator
-//! close does **not** remove the adapter; the creator's `WintunCloseAdapter`
-//! **removes** the adapter (0.14.1 has no delete-adapter export — that close is
-//! the real cleanup predicate). LUID comes from `WintunGetAdapterLUID`; ifindex
-//! from `ConvertInterfaceLuidToIndex`; alias from `ConvertInterfaceLuidToAlias`.
-//!
-//! Each `unsafe` block carries a reviewed `// SAFETY:` comment (workspace
-//! enforces `unsafe_op_in_unsafe_fn = deny`).
 
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{GetLastError, HANDLE};
@@ -251,5 +237,3 @@ fn adapter_identity(
     })
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

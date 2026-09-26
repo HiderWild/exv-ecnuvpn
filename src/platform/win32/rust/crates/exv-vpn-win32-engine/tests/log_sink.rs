@@ -1,17 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P2-b RED→GREEN tests for the engine structured log sink:
-//
-//   1. **事件推送**：`LogSink::open_stream` 返回的 mpsc 接收端按序收到真实 `LogEvent`
-//      （level/component/code/message/fields/timestamp_ms 结构完整）；
-//   2. **raw-dump 触发**：无 StreamLogs 接收端（`resume_tick` 未挂接）或推送失败
-//      （gRPC stream 断开 → 接收端 drop）时，同一事件直写 `engine-raw-<pid>.log`
-//      （NDJSON 行），并清空失效的推送通道；
-//   3. **恢复切回**：断线后重新 `open_stream(resume_tick)` → 先补拉 `tick > resume_tick`
-//      的缓冲历史，再无缝切回实时推送；`resume_tick == 0` 表示从当前流位置开始（不补拉）。
-//
-// 这些是 engine（本 crate）侧契约；core（P2-a 聚合）侧消费同一 proto LogEvent。
 
 use std::time::Duration;
 
@@ -53,9 +39,27 @@ async fn live_push_delivers_events_in_order() {
     let sink = LogSink::new(dumper);
     let mut rx = sink.open_stream(0);
 
-    sink.emit(LogLevel::Info, "engine", "boot.started", "engine booting", &[("pid", "42")]);
-    sink.emit(LogLevel::Warn, "auth", "lease.refused", "handshake refused", &[]);
-    sink.emit(LogLevel::Error, "cstp", "tls.failed", "tls handshake failed", &[]);
+    sink.emit(
+        LogLevel::Info,
+        "engine",
+        "boot.started",
+        "engine booting",
+        &[("pid", "42")],
+    );
+    sink.emit(
+        LogLevel::Warn,
+        "auth",
+        "lease.refused",
+        "handshake refused",
+        &[],
+    );
+    sink.emit(
+        LogLevel::Error,
+        "cstp",
+        "tls.failed",
+        "tls handshake failed",
+        &[],
+    );
 
     let e1 = recv(&mut rx).await;
     assert_eq!(e1.level, "info");
@@ -74,14 +78,54 @@ async fn live_push_delivers_events_in_order() {
     assert_eq!(e3.code, "tls.failed");
 }
 
+/// debug 诊断与错误一样可经实时流和离线文件保留，显示筛选不影响采集。
+#[tokio::test]
+async fn debug_diagnostics_survive_live_and_raw_paths() {
+    let (_dir, dumper) = temp_dumper("debug");
+    let sink = LogSink::new(dumper);
+    sink.emit(
+        LogLevel::Debug,
+        "engine",
+        "tunnel.diagnostics",
+        "会话诊断",
+        &[("writes", "4")],
+    );
+    let lines = dump_lines(&sink.dump_path());
+    assert_eq!(lines[0]["level"], "debug");
+    assert_eq!(lines[0]["fields"]["writes"], "4");
+    let mut rx = sink.open_stream(0);
+    sink.emit(
+        LogLevel::Debug,
+        "engine",
+        "tunnel.diagnostics",
+        "会话诊断",
+        &[("writes", "5")],
+    );
+    let event = recv(&mut rx).await;
+    assert_eq!(event.level, "debug");
+    assert_eq!(event.fields["writes"], "5");
+}
+
 /// raw-dump 触发：无接收端（未挂接）时事件直写独立 raw 文件（NDJSON 行）。
 #[test]
 fn emit_without_stream_writes_raw_dump() {
     let (_dir, dumper) = temp_dumper("dump");
     let sink = LogSink::new(dumper);
 
-    sink.emit(LogLevel::Info, "engine", "boot.started", "engine booting", &[("pid", "42")]);
-    sink.emit(LogLevel::Error, "cstp", "tls.failed", "tls handshake failed", &[]);
+    sink.emit(
+        LogLevel::Info,
+        "engine",
+        "boot.started",
+        "engine booting",
+        &[("pid", "42")],
+    );
+    sink.emit(
+        LogLevel::Error,
+        "cstp",
+        "tls.failed",
+        "tls handshake failed",
+        &[],
+    );
 
     assert!(!sink.is_push_attached(), "no stream attached");
     let path = sink.dump_path();
@@ -162,7 +206,13 @@ async fn resume_zero_skips_prior_history() {
     let sink = LogSink::new(dumper);
 
     let mut rx1 = sink.open_stream(0);
-    sink.emit(LogLevel::Info, "engine", "before.gap", "pre-disconnect", &[]);
+    sink.emit(
+        LogLevel::Info,
+        "engine",
+        "before.gap",
+        "pre-disconnect",
+        &[],
+    );
     assert_eq!(recv(&mut rx1).await.code, "before.gap");
     drop(rx1);
 
@@ -171,7 +221,10 @@ async fn resume_zero_skips_prior_history() {
     let mut rx2 = sink.open_stream(0); // 0 = 当前流位置
     sink.emit(LogLevel::Error, "engine", "live.after", "post-connect", &[]);
     let first = recv(&mut rx2).await;
-    assert_eq!(first.code, "live.after", "resume 0 starts at current position");
+    assert_eq!(
+        first.code, "live.after",
+        "resume 0 starts at current position"
+    );
 }
 
 /// raw-dump 写失败降级：目录不可创建（父路径是文件）→ dump 返回 false 且不 panic，
@@ -185,7 +238,13 @@ async fn raw_dump_write_failure_degrades_gracefully() {
     let dumper = RawLogDumper::new(blocker.join("logs"));
     let sink = LogSink::new(dumper);
 
-    sink.emit(LogLevel::Warn, "engine", "no.write", "write impossible", &[]);
+    sink.emit(
+        LogLevel::Warn,
+        "engine",
+        "no.write",
+        "write impossible",
+        &[],
+    );
     assert!(!sink.dump_path().exists(), "no file created on failed dir");
 
     // 推送路径不受影响：挂接后事件仍可送达。
@@ -222,5 +281,8 @@ fn ticks_are_strictly_monotonic() {
     let t2 = sink.last_tick();
     sink.emit(LogLevel::Error, "engine", "c", "c", &[]);
     let t3 = sink.last_tick();
-    assert!(t1 < t2 && t2 < t3, "ticks strictly increase: {t1} < {t2} < {t3}");
+    assert!(
+        t1 < t2 && t2 < t3,
+        "ticks strictly increase: {t1} < {t2} < {t3}"
+    );
 }

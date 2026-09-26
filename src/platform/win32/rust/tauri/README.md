@@ -2,7 +2,6 @@
 
 独立 requirement：`vpn-rust-tauri-desktop-ui`（spec：不塞进 Common workspace）。
 前端重写（O2）：不复用 C++ `webui/` 代码，仅参考其功能清单。
-计划：`docs/superpowers/plans/2026-08-17-vpn-rust-native-runtime-productization-plan.md` Phase 4。
 
 ## 结构
 
@@ -37,7 +36,7 @@ src/platform/win32/rust/tauri/        # 独立 workspace（独立 Cargo.lock）
 环境注意：cargo 不在标准 PATH；D: 磁盘接近满，target 在 D: 需注意剩余空间。
 
 ```bash
-export PATH="/c/Users/TomLi/.rustup/toolchains/1.96.0-x86_64-pc-windows-msvc/bin:$PATH"
+export PATH="/c/Users/user/.rustup/toolchains/1.96.0-x86_64-pc-windows-msvc/bin:$PATH"
 
 # 前端依赖（一次）
 cd src/platform/win32/rust/tauri/frontend && npm install
@@ -180,14 +179,16 @@ host/proto 变更须协调者评估（建议见 `app/src/kernel/stats.rs` 模块
 
 ### 构建环境注意（P4-b 起）
 
-D: 磁盘长期 100% 满。Tauri 构建改用 **C: 上的 target**：
+D: 磁盘紧张时，Tauri 构建和链接临时文件仍必须留在当前工作树内，不能写入 C: 系统 Temp：
 ```bash
-export PATH="/c/Users/TomLi/.rustup/toolchains/1.96.0-x86_64-pc-windows-msvc/bin:$PATH"
+export PATH="/c/Users/user/.rustup/toolchains/1.96.0-x86_64-pc-windows-msvc/bin:$PATH"
 cd src/platform/win32/rust/tauri
-CARGO_TARGET_DIR=/c/Users/TomLi/AppData/Local/Temp/exv-tauri-target cargo check -p exv-ui
-CARGO_TARGET_DIR=/c/Users/TomLi/AppData/Local/Temp/exv-tauri-target cargo test -p exv-ui
+CARGO_TARGET_DIR="$(pwd)/../.build-tmp/tauri-target" cargo check -p exv-ui
+CARGO_TARGET_DIR="$(pwd)/../.build-tmp/tauri-target" cargo test -p exv-ui
 ```
-（不再用 `$(pwd)/target`——D: 已满，link.exe 会 LNK1180/LNK1108 失败。）
+Cargo 的 `TMP`/`TEMP` 由上级 `rust/.cargo/config.toml` 以 `relative = true` 和
+`force = true` 固定到 `rust/.build-tmp`，即使启动 Cargo 的父进程已设置这两个变量亦然；
+构建产物清理脚本会统一清除该目录中的可再生内容。
 
 ## 与核心 runtime workspace 的关系
 

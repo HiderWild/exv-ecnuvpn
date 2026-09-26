@@ -1,77 +1,3 @@
-// EXV_CUTOVER (2026-08-17): Rust is the active product line; C++ is deprecated, reference only.
-// Spec: docs/superpowers/specs/vpn-rust-native-runtime-mvp-common-architecture.md
-// section 9.2 (Windows HelperControl); cutover record: docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md; re-wiring requires a new cutover requirement and a rerun of the real business flow on the native host - satisfied by the 2026-08-17 cutover.
-//
-// EXV_FROZEN_WIRE (2026-08-18): helper_control was frozen; this file is now UNFROZEN by the
-// R1w unfreeze record (docs/superpowers/evidence/2026-08-18-helper-control-frozen-wire-unfreeze.md)
-// for the async + independent status-channel contract. The unfreeze is narrowly scoped to:
-//   * ApplyTunnelReply gains a `pending` branch (ApplyAccepted) - ApplyTunnel becomes async
-//     (engine returns pending immediately; terminal outcome flows on the status channel);
-//   * a NEW independent server-streaming status RPC (StreamConnectStatus) carries
-//     operation_id + 8-level ConnectPhase + coarse StatsPhase + optional VpnError. It is a
-//     SEPARATE channel from StreamStats (stats stays pure counters - never "one channel,
-//     two jobs"). Tag discipline is unchanged: reserved 1000-1999 (burn-in guard) and
-//     9000-9999 (internal/future) hold; all new tags sit outside those ranges.
-// Any further unfreeze requires a new unfreeze record under the same governance process.
-//
-// EXV_FROZEN_WIRE (2026-08-19): second unfreeze by the P2 keepalive record
-// (docs/superpowers/evidence/2026-08-19-helper-control-frozen-wire-unfreeze-keepalive.md)
-// for the bounded-retention heartbeat contract. The unfreeze is narrowly scoped to:
-//   * a NEW unary KeepAlive RPC (request/reply below) — the core sends a heartbeat
-//     on a fixed period (default 10s); the engine's heartbeat watchdog self-cleans
-//     and self-exits if no KeepAlive arrives within the timeout bound (default 15s).
-//     Oneshot only: the service engine manages its own SCM lifecycle and is
-//     unaffected by the heartbeat. Tag discipline is unchanged: reserved
-//     1000-1999 (burn-in guard) and 9000-9999 (internal/future) hold; the new tags
-//     sit outside those ranges.
-//
-// EXV_FROZEN_WIRE (2026-08-22): third unfreeze by the ServiceManage record
-// (docs/superpowers/evidence/2026-08-22-helper-control-frozen-wire-unfreeze-servicemanage.md)
-// for the running-service self-service query contract. The unfreeze is narrowly
-// scoped to:
-//   * a NEW unary ServiceManage RPC (request/reply below) — the host queries the
-//     engine's internal deep self-report over the EXISTING zero-UAC auth channel
-//     (Tier 2). Read-only: the reply IS the report; no mutation, no owner-lease
-//     requirement (transport peer gate only). Tier 2 v1 lands ONLY the `query`
-//     action; install/repair/uninstall stay elevated-batch. The report carries
-//     facts ONLY the engine knows (control_plane_ready / psk_present /
-//     connection_mode / runtime_epoch / authority_fence) — health/display input
-//     only, NEVER authorization material. Tag discipline is unchanged: reserved
-//     1000-1999 (burn-in guard) and 9000-9999 (internal/future) hold; the new
-//     tags sit outside those ranges.
-//
-// This file is the shared wire authority for the Windows helper topology's
-// declarative service. It does NOT expose fine-grained platform commands
-// (route/dns/device primitives); it only carries high-level declarative
-// operations. The wire AcquireLease maps to domain AcquireOwnership.
-// Domain code never exposes generated types directly.
-//
-// WIRE DECISION (productization Phase 1, P1-1/P1-2): product core<->engine
-// wire is tonic gRPC over this proto contract ONLY. The self-developed JSON
-// frame protocol (src/platform/win32/rust/crates/exv-vpn-win32-ipc/src/
-// engine_protocol.rs, u32 BE length + JSON) is legacy / acceptance-only: it is
-// retained for the acceptance harness and as the raw-dump serialization
-// reference, never used as a product channel. Log streaming between engine
-// (server) and core (client) is defined here as HelperControl.StreamLogs.
-//
-// Field tags are permanently assigned and never reused. Reserved ranges:
-//   reserved 9000 to 9999  : internal / future use, never shipped
-//   reserved 1000 to 1999  : burn-in guard for each message
-// A tag that is vacated is recorded as a reserved range in this file before
-// any reuse is ever permitted; reuse is forbidden by policy.
-//
-// Security invariants (mirrored from common.proto section 9.2):
-//   * Peer identity is derived exclusively from verified transport metadata,
-//     never from a client-supplied field; no field self-reports platform
-//     identity.
-//   * Capabilities are non-forwardable, not logged, not persisted in plaintext,
-//     not reused, compared in constant time, and revoked on Stop, OwnerLost,
-//     authority restart, or expiry. Only digests are retained for
-//     correlation/audit and are never treated as authorization material.
-//   * Secrets travel only as one-shot bytes and are never persisted, logged,
-//     or replayed; they are cleared immediately after authorization.
-//   * Every cross-process VpnError uses the canonical ErrorSubject oneof from
-//     common.proto with exactly six branches.
 
 syntax = "proto3";
 
@@ -177,6 +103,16 @@ service HelperControl {
   // owner-lease requirement (transport peer gate only). Tier 2 v1 lands ONLY
   // the `query` action; install/repair/uninstall stay elevated-batch.
   rpc ServiceManage(ServiceManageRequest) returns (ServiceManageReply);
+
+  // Explicit graceful shutdown (2026-09-05 unfreeze, fourth). An authorized
+  // peer (same transport auth surface as KeepAlive/ServiceManage) notifies the
+  // service engine to enter the SAME exit sequence as SCM SERVICE_CONTROL_STOP:
+  // the engine replies ACCEPTED, then triggers the existing scm_stop watch
+  // after a short delay — the SCM stop path itself remains the backstop and is
+  // unchanged. Idempotent during the shutdown window (ALREADY_STOPPING);
+  // oneshot engines answer NOT_APPLICABLE (lifecycle follows the core process
+  // / heartbeat backstop, not taken over). `reason` is diagnostic/audit only.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownReply);
 }
 
 // ---------------------------------------------------------------------------
@@ -320,11 +256,18 @@ message AcquireLeaseReply {
 // persisted or logged, and must be cleared (zeroized) immediately after the
 // engine consumes them for CSTP auth. An absent/empty payload means no
 // credentials are provided (connect without re-auth is the caller's choice).
+enum WindowsConnectionMode {
+  WINDOWS_CONNECTION_MODE_UNSPECIFIED = 0;   // old/Darwin callers; Windows treats as STANDARD
+  WINDOWS_CONNECTION_MODE_STANDARD = 1;      // existing physical direct path
+  WINDOWS_CONNECTION_MODE_COMPATIBILITY = 2; // use the actual egress selected by Windows
+}
+
 message ApplyTunnelRequest {
   OperationLookupKey lookup_key = 1;
   TunnelPlan plan = 2;
   bytes request_digest = 3;  // 32 bytes
   bytes secret_payload = 4;  // one-shot CSTP credentials; zeroized after use
+  WindowsConnectionMode windows_connection_mode = 5;
   reserved 9000 to 9999;
   reserved 1000 to 1999;
 }
@@ -518,6 +461,9 @@ message ConnectStatusEvent {
   // Engine wall-clock time at which a Connected status was established; UTC
   // epoch milliseconds. 0 for all non-Connected events or when unavailable.
   int64 session_established_at_ms = 5;
+  // 当前宿主 Engine 实际持有的隧道接口索引；0 表示当前事件无接口事实。
+  // Darwin 用于外部 TUN 只读检测时排除 EXV 自身；不决定另一宿主行为。
+  uint32 own_tunnel_if_index = 6;
   reserved 9000 to 9999;
   reserved 1000 to 1999;
 }
@@ -577,14 +523,59 @@ message ServiceManageReply {
 }
 
 // The engine's internal deep self-report — facts ONLY the engine knows that the
-// host cannot observe from SCM alone. Health/display input only — NEVER
-// authorization material (peer identity stays transport-derived + PSK).
+// host cannot observe from SCM alone. Health/display and feature-negotiation input only —
+// NEVER authorization material (peer identity stays transport-derived + PSK).
 message ServiceSelfReport {
   bool control_plane_ready = 1;  // engine control plane is serving (service: accept-loop created pipe + ServiceMain reported Running)
   bool psk_present = 2;          // service-mode PSK loaded at startup (fail-closed: absent = engine refused to start)
   string connection_mode = 3;    // "service" | "oneshot" (engine-authoritative)
   bytes runtime_epoch = 4;       // 16 bytes; identity of this engine instance
   AuthorityFence authority_fence = 5;  // current fence (epoch / instance / watermark / revision)
+  // Empty means a pre-connection-mode engine. The host must reject COMPATIBILITY
+  // before ApplyTunnel in that case because an old protobuf peer ignores tag 5.
+  repeated WindowsConnectionMode supported_windows_connection_modes = 6;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown (2026-09-05 unfreeze: explicit graceful shutdown, scheme B)
+// ---------------------------------------------------------------------------
+
+// Why the caller asked for the graceful shutdown. Diagnostic/audit ONLY — the
+// engine logs it but NEVER treats it as authorization input (authorization is
+// the unchanged transport peer gate + PSK, same surface as
+// KeepAlive/ServiceManage).
+enum ShutdownReason {
+  SHUTDOWN_REASON_UNSPECIFIED = 0;
+  SHUTDOWN_REASON_UNINSTALL = 1;        // host is about to run the elevated uninstall batch
+  SHUTDOWN_REASON_UPGRADE = 2;          // host is about to run the elevated install(REPAIR) batch
+  SHUTDOWN_REASON_SERVICE_SWITCH = 3;   // reserved for future service-switch flows
+}
+
+// Request for HelperControl.Shutdown. The engine replies ACCEPTED (first call
+// in the shutdown window), ALREADY_STOPPING (idempotent re-entry), or
+// NOT_APPLICABLE (oneshot engine); RPC-level failures surface as tonic Status
+// (unauthenticated / unavailable), not as a failed branch.
+message ShutdownRequest {
+  ShutdownReason reason = 1;  // diagnostic/audit only; never authorization input
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
+// The engine's disposition of a Shutdown request.
+enum ShutdownOutcome {
+  SHUTDOWN_OUTCOME_UNSPECIFIED = 0;
+  SHUTDOWN_OUTCOME_ACCEPTED = 1;          // first call: shutdown sequence armed
+  SHUTDOWN_OUTCOME_ALREADY_STOPPING = 2;  // idempotent re-entry during the window
+  SHUTDOWN_OUTCOME_NOT_APPLICABLE = 3;    // oneshot engine: lifecycle follows core
+}
+
+// Reply to HelperControl.Shutdown. ACCEPTED means the engine armed the SAME
+// exit sequence SCM stop drives (delayed trigger); the caller still proceeds
+// with its SCM stop backstop regardless of the outcome.
+message ShutdownReply {
+  ShutdownOutcome outcome = 1;
   reserved 1000 to 1999;
   reserved 9000 to 9999;
 }

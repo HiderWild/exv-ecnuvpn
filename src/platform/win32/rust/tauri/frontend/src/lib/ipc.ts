@@ -78,6 +78,19 @@ export interface ReconnectStatus {
   active: boolean;
 }
 
+/** host 自愈（engine 崩溃 respawn）状态（EXV_UNFREEZE 2026-09-05；仅状态上报——
+ * respawn 决策与编排留在 host，wire 不携带凭据/栈）。 */
+export interface SelfHealStatus {
+  /** 自愈阶段："respawning" | "succeeded" | "failed"；未知码原样透传。 */
+  stage: string;
+  /** 崩溃 engine PID；0 = 未知。 */
+  old_pid: number;
+  /** 新 engine PID；0 = 未知/不适用（stage ≠ "succeeded" 时为 0）。 */
+  new_pid: number;
+  /** 稳定错误码；仅 stage="failed" 非空。 */
+  error_code: string;
+}
+
 /** win32 engine SCM 服务状态（S3/D5；仅状态展示，非授权材料——服务存在性不构成
  * capability，peer 身份只来自验证过的传输元数据 + PSK）。 */
 export interface ServiceStatus {
@@ -110,6 +123,8 @@ export interface RuntimeSnapshot {
   system_proxy?: SystemProxyDetection | null;
   /** S4：快照携带的自动重连状态；null = 重连不适用/从未建立连接。仅状态上报。 */
   reconnect?: ReconnectStatus | null;
+  /** EXV_UNFREEZE 2026-09-05：快照携带的 host 自愈进展；null = 无自愈上下文。 */
+  self_heal?: SelfHealStatus | null;
 }
 
 export interface RuntimeEvent {
@@ -186,15 +201,25 @@ export interface LogsClearReply {
 
 // ---- Command 参数 ----
 
+/** 仅用于本次连接的短生命周期凭据；组件不接触不透明 secret payload。 */
+export interface ConnectCredentials {
+  username: string;
+  password: string;
+  persist: boolean;
+}
+
 export interface ConnectIntent {
   profile_ref: string;
-  secret_payload?: string | null;
+  credentials?: ConnectCredentials | null;
 }
 
 // ---- 服务控制（S3/D5：KernelControl.ServiceControl） ----
 
-/** ServiceControl 的 action：query 非提权读；install/uninstall/start 走 runas 提权 seam。 */
-export type ServiceControlAction = "query" | "install" | "uninstall" | "start";
+/**
+ * ServiceControl 的 action：query 非提权读；install/uninstall/start 走 runas 提权 seam；
+ * rotate_key 轮换（撤销）服务 PSK（同一 runas 提权批量通道，无需重启服务）。
+ */
+export type ServiceControlAction = "query" | "install" | "uninstall" | "start" | "rotate_key";
 
 /** ServiceControl 回复：post-action 服务状态 + 结果 + 人类可读信息（无秘密/栈）。 */
 export interface ServiceControlReply {
@@ -208,8 +233,29 @@ export interface ConfigItem {
   value: string;
 }
 
+/** 快速入门的一次性提交：核心配置和可选服务安装在同一 Tauri 业务入口执行。 */
+export interface QuickStartApplyRequest {
+  items: ConfigItem[];
+  install_service: boolean;
+}
+
+/** 失败不丢弃前端草稿；成功时可附带安装后的服务状态。 */
+export interface QuickStartApplyReply {
+  ok: boolean;
+  service_status?: ServiceStatus | null;
+  message?: string;
+}
+
 export interface ConfigPayload {
   items: ConfigItem[];
+  /** 本次读取是否因无效本地配置而 bootstrap 默认值；不含原始文件、异常或秘密。 */
+  requires_quick_start: boolean;
+}
+
+/** Tauri command 的兼容读模型：旧/测试回复缺少新字段时明确视为 false。 */
+interface ConfigPayloadWire {
+  items: ConfigItem[];
+  requires_quick_start?: boolean;
 }
 
 /** UI 对 Core 控制面的仅有两种结论：正常（已验证管道可通）或已停止。 */
@@ -255,11 +301,22 @@ export const kernel = {
   logsClear(): Promise<LogsClearReply> {
     return invokeTauri<LogsClearReply>("logs_clear");
   },
-  configGet(): Promise<ConfigPayload> {
-    return invokeTauri<ConfigPayload>("config_get");
+  async configGet(): Promise<ConfigPayload> {
+    const payload = await invokeTauri<ConfigPayloadWire>("config_get");
+    return {
+      items: payload.items,
+      requires_quick_start: payload.requires_quick_start === true,
+    };
   },
   configSet(items: ConfigItem[]): Promise<boolean> {
     return invokeTauri<boolean>("config_set", { items });
+  },
+  /** 仅按住密码眼睛时请求；调用者松开立即丢弃，不进配置草稿或日志。 */
+  savedPassword(username: string, server: string): Promise<string | null> {
+    return invokeTauri<string | null>("saved_password", { username, server });
+  },
+  quickStartApply(request: QuickStartApplyRequest): Promise<QuickStartApplyReply> {
+    return invokeTauri<QuickStartApplyReply>("quick_start_apply", { request });
   },
   /** 读取 EXV 隧道适配器当前的真实 IPv4 地址；未连接/尚未分配时返回 null。 */
   tunnelAddress(): Promise<string | null> {
@@ -272,7 +329,7 @@ export const kernel = {
   triggerLatencyRefresh(): Promise<void> {
     return invokeTauri<void>("trigger_latency_refresh");
   },
-  /** 服务控制（S3/D5）：query 非提权读；install/uninstall/start 经 host runas seam。 */
+  /** 服务控制（S3/D5）：query 非提权读；install/uninstall/start/rotate_key 经 host runas seam。 */
   serviceControl(action: ServiceControlAction): Promise<ServiceControlReply> {
     return invokeTauri<ServiceControlReply>("service_control", { action });
   },

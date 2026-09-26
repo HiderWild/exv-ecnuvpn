@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! Win32 非特权 host 平台 crate。
 //!
@@ -37,24 +35,25 @@
 //! 钩子接线）与 `kernel_control_transport`（UI-facing `KernelControl` Named Pipe 传输层，
 //! UI 断开 → 停机）已实现。
 
+#[path = "../../../build_identity.rs"]
+pub mod build_identity;
 pub mod composition;
 pub mod control_client;
 pub mod crash_recovery;
 pub mod credential;
 pub mod engine_lifecycle;
+pub mod engine_provisioner;
 pub mod grpc_control;
-pub mod guards;
 pub mod grpc_transport;
+pub mod guards;
 pub mod kernel_control;
 pub mod kernel_control_service;
 pub mod kernel_control_transport;
 pub mod log_aggregator;
 pub mod log_control;
-pub mod plan_exempt;
+mod network_diagnostics;
 pub mod process_lifecycle;
 pub mod service_status;
 pub mod shutdown;
 pub mod stats;
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

@@ -1,12 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// 规格：docs/superpowers/specs/vpn-rust-native-runtime-mvp.md；cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// Terra (test writer) — leaf Q60: bounded byte-budget admission + single-slot packet attach guard.
-// RED tests ONLY. The production seams (budget.rs / attachment.rs) are empty stubs and are NOT
-// implemented here. This file references the pinned seam and must fail to compile until Q60-I lands.
-//
-// Pure + deterministic: no I/O, no filesystem, no sleep, no randomness. All counts are fixed
-// integer literals and a fixed, non-nil RuntimeEpoch (Uuid::from_u128(1)).
 
 use std::time::Duration;
 

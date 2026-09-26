@@ -1,21 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! Cross-family tunnel apply / restore orchestration (W22-I).
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md`
-//! WSP4 §3/§6, W20-W21 frozen): the bypass family must be installed **before**
-//! the tunnel-routes family (otherwise control traffic is hijacked by the
-//! tunnel route); cleanup runs in **reverse** install order (tunnel routes are
-//! removed first, the bypass last); apply is admission-first — the whole plan
-//! is validated before any effect, so an invalid family (e.g. MTU=1 -> 87)
-//! leaves **zero** effect, never half state; restore is compare-and-restore —
-//! the current state is compared against the applied fingerprint and a
-//! third-party change is a typed skip, never an unconditional overwrite.
-//!
-//! Every effect delegates to the committed leaf seams (W18 `ip_address` /
-//! W19 `mtu` / W20 `routes`+`bypass_route` / W21 `dns`); the plan and snapshot
-//! types are the leaves' types — composition, never reimplementation.
 
 use windows::core::GUID;
 
@@ -82,8 +65,8 @@ pub struct ApplyPlan {
     pub tunnel_routes: Vec<RouteRow>,
     /// W21 类型：接口 DNS 设置。
     pub dns: DnsSettings,
-    /// 系统代理豁免条目（设计 §5.4；v1 由 host `plan_from_config` 从
-    /// server_bypass_ips + routes 派生）。空矢量 = family 零动作候选（仍会
+    /// 系统代理豁免条目（设计 §5.4；2026-09-08 计划后 host 不再从已退役的
+    /// `server_bypass_ips` 派生，恒为空传入）。空矢量 = family 零动作候选（仍会
     /// capture+classify，Disabled 时零动作零账本，拍板结论 4）。
     pub proxy_exempt_entries: Vec<String>,
     /// 发起用户 SID（系统代理写入必须落在该用户 HKU；空串 = 不执行该 family）。
@@ -559,5 +542,3 @@ fn restore_step(step: FamilyStep, state: &AppliedState, luid: u64) -> Result<(),
     Ok(())
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

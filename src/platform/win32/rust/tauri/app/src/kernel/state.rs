@@ -119,6 +119,21 @@ pub struct ReconnectStatus {
     pub active: bool,
 }
 
+/// host 自愈（engine 崩溃 respawn）状态（proto `SelfHealStatus`；EXV_UNFREEZE
+/// 2026-09-05，仅状态上报——respawn 决策与编排留在 host，wire 不携带凭据/栈）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfHealStatus {
+    /// 自愈阶段："respawning" | "succeeded" | "failed"；未知码原样透传（前端
+    /// fail-safe 渲染为 unknown 档）。
+    pub stage: String,
+    /// 崩溃 engine PID；0 = 不可得。
+    pub old_pid: u32,
+    /// 新 engine PID；`stage != "succeeded"` 时为 0。
+    pub new_pid: u32,
+    /// 稳定错误码；仅 `stage == "failed"` 非空。
+    pub error_code: String,
+}
+
 /// win32 engine SCM 服务状态（proto `ServiceStatus`；S3/D5，仅状态展示，非授权材料——
 /// 服务存在性不构成 capability，peer 身份只来自验证过的传输元数据 + PSK）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,7 +160,8 @@ pub struct ServiceControlReply {
     pub message: String,
 }
 
-/// `KernelControl.ServiceControl` 的 action（S3/D5：query 非提权读；变更走 runas 提权 seam）。
+/// `KernelControl.ServiceControl` 的 action（S3/D5：query 非提权读；变更走 runas 提权
+/// seam；RotateKey 轮换（撤销）服务 PSK——同一提权批量通道，无需重启服务）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceControlAction {
@@ -153,6 +169,7 @@ pub enum ServiceControlAction {
     Install,
     Uninstall,
     Start,
+    RotateKey,
 }
 
 /// RuntimeSnapshot 的 UI 视图（mirror 自 proto RuntimeSnapshot）。
@@ -183,6 +200,9 @@ pub struct RuntimeSnapshot {
     /// 快照携带的自动重连状态（S4：`GetSnapshot`/`WatchEvents` 随状态附带；
     /// `None` = 重连不适用/从未建立连接）。
     pub reconnect: Option<ReconnectStatus>,
+    /// 快照携带的 host 自愈进展（EXV_UNFREEZE 2026-09-05：`GetSnapshot`/`WatchEvents`
+    /// 随状态附带；`None` = 无自愈上下文）。
+    pub self_heal: Option<SelfHealStatus>,
 }
 
 /// 运行时事件类型（proto RuntimeEventKind）。
@@ -232,24 +252,6 @@ pub struct OperationReply {
     pub operation_id: Option<String>,
 }
 
-// 便于前端直接消费的派生显示辅助：state 的展示名。
-impl RuntimeState {
-    /// 前端用于 badge/文案的稳定状态名（P4-a 前端展示辅助；当前前端按枚举原样渲染）。
-    #[allow(dead_code)]
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::Idle { .. } => "idle",
-            Self::Connecting { .. } => "connecting",
-            Self::AwaitingInteraction { .. } => "awaiting_interaction",
-            Self::Connected { .. } => "connected",
-            Self::Stopping { .. } => "stopping",
-            Self::Reconciling { .. } => "reconciling",
-            Self::FailedClean { .. } => "failed_clean",
-            Self::FailedDirty { .. } => "failed_dirty",
-        }
-    }
-}
-
 impl ConnectPhase {
     /// proto 序号，供前端进度条。
     pub fn index(self) -> u8 {
@@ -262,21 +264,6 @@ impl ConnectPhase {
             Self::ApplyingPlatformTunnel => 5,
             Self::AttachingPacketBoundary => 6,
             Self::StartingDataPlane => 7,
-        }
-    }
-
-    /// 中文展示名（前端默认语言为中文；P4-a 展示辅助）。
-    #[allow(dead_code)]
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::ObservingOwnedState => "观察自有状态",
-            Self::AcquiringPlatformLease => "获取平台租约",
-            Self::ConnectingControl => "连接控制通道",
-            Self::AwaitingInteraction => "等待交互确认",
-            Self::NegotiatingTunnel => "协商隧道",
-            Self::ApplyingPlatformTunnel => "应用平台隧道",
-            Self::AttachingPacketBoundary => "挂接数据边界",
-            Self::StartingDataPlane => "启动数据面",
         }
     }
 }

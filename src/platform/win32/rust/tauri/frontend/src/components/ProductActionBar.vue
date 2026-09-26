@@ -4,6 +4,9 @@ import { serviceStateLabel, type ProductUiState } from "../product/types";
 
 const props = defineProps<{ state: ProductUiState }>();
 
+const systemProxyEnabled = computed(() => ["manual", "automatic", "mixed"].includes(props.state.systemProxy.status));
+const proxyTunEnabled = computed(() => props.state.proxyTun.status === "detected");
+
 const serviceStatus = computed(() => {
   const status = props.state.service.status;
   if (status.kind === "unknown") return "状态未知";
@@ -16,40 +19,22 @@ const serviceMode = computed(() => {
   return labels[props.state.service.mode];
 });
 
-const routePolicy = computed(() => props.state.proxyTun.routePolicy ?? "未报告");
-const networkResources = computed(() => props.state.networkResources.available ? "已接入" : "未实现");
-
-/** S4：自动重连次数只有开关开启时显示；关闭时整个项目不存在。 */
-const reconnectStatus = computed(() => {
-  const r = props.state.reconnect;
-  if (r.active) {
-    return {
-      visible: true,
-      label: `重连中 · 第 ${r.currentAttempt} 次`,
-    };
-  }
-  if (r.enabled) {
-    return { visible: true, label: `已重连 ${r.currentAttempt} 次` };
-  }
-  return { visible: false, label: "" };
-});
 </script>
 
 <template>
   <section class="product-action-bar" data-testid="product-action-bar" aria-label="连接环境摘要">
-    <div class="product-action-bar__item">
+    <div class="product-action-bar__item" data-testid="product-service-status">
       <span>服务</span>
       <strong>{{ serviceStatus }}</strong>
       <small>{{ serviceMode }}</small>
     </div>
-    <div v-if="reconnectStatus.visible" class="product-action-bar__item" data-testid="reconnect-status">
-      <span>自动重连</span>
-      <strong>{{ reconnectStatus.label }}</strong>
+    <div class="product-action-bar__item" data-testid="system-proxy-status" :data-enabled="systemProxyEnabled">
+      <span>系统代理</span>
+      <strong>{{ state.systemProxy.status === 'unknown' ? '未知' : systemProxyEnabled ? '开启' : '关闭' }}</strong>
     </div>
-    <div class="product-action-bar__item product-action-bar__item--wide">
-      <span>路由策略</span>
-      <strong :title="routePolicy">{{ routePolicy }}</strong>
-      <small>网络资源 {{ networkResources }}</small>
+    <div class="product-action-bar__item" data-testid="tun-status" :data-enabled="proxyTunEnabled">
+      <span>TUN</span>
+      <strong>{{ state.proxyTun.status === 'unknown' ? '未知' : proxyTunEnabled ? '已检测' : '未检测' }}</strong>
     </div>
   </section>
 </template>
@@ -58,12 +43,10 @@ const reconnectStatus = computed(() => {
 .product-action-bar {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(130px, 0.7fr) minmax(150px, 0.85fr) minmax(190px, 1.2fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-panel);
+  padding: var(--space-3) 0;
+
 }
 
 .product-action-bar__item {
@@ -99,13 +82,4 @@ const reconnectStatus = computed(() => {
   white-space: nowrap;
 }
 
-@media (max-width: 760px) {
-  .product-action-bar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .product-action-bar__item--wide {
-    grid-column: 1 / -1;
-  }
-}
 </style>

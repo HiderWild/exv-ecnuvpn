@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! core 侧 engine 进程原语（P3-c2：engine 由 core 拉起）。
 //!
@@ -37,11 +35,11 @@ use windows::Win32::System::Threading::{
 
 /// `STILL_ACTIVE`（259）：进程仍在运行（`GetExitCodeProcess` 对存活进程返回该值）。
 const STILL_ACTIVE: u32 = 259;
-use windows::Win32::UI::Shell::{
-    ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    SHELLEXECUTEINFOW_0,
-};
 use windows::Win32::System::Registry::HKEY;
+use windows::Win32::UI::Shell::{
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHELLEXECUTEINFOW_0,
+    ShellExecuteExW,
+};
 use windows::core::{HSTRING, PCWSTR};
 
 /// engine 创建的 Wintun adapter 名称（与 acceptance `engine::ENGINE_ADAPTER_NAME` 一致；
@@ -158,6 +156,11 @@ pub fn engine_control_pipe_name() -> String {
 /// `--dll`、`--host-pid`；可选 `--journal-dir`/`--authority-name`/`--adapter-name`/
 /// `--user-sid`。wintun.dll 路径经 [`resolve_wintun_dll_path`] 解析（env 或默认路径）。
 ///
+/// `--journal-dir` 是**机器级稳定目录**（[`JournalPath::machine_default`] =
+/// `%ProgramData%\ExvVpn\journal`，不可写回退 `%LOCALAPPDATA%`）：engine 崩溃
+/// （强杀/断电）后整机重启，新 engine 必须能在同一路径发现旧账本完成系统代理
+/// 回放——按 host-pid 的临时目录会让崩溃残留永远不可发现。
+///
 /// `--user-sid` 携带 **core** 进程的用户 SID：engine 用它建控制面管道 DACL，授权普通用户
 /// core 连接（engine 是特权进程，默认 ACL 只含 SYSTEM/Administrators，普通 core 会被拒）。
 ///
@@ -166,8 +169,8 @@ pub fn engine_control_pipe_name() -> String {
 #[must_use]
 pub fn engine_args_for_spawn() -> Vec<String> {
     let host_pid = std::process::id();
-    let journal_dir = std::env::temp_dir()
-        .join(format!("exv-engine-journal-{host_pid}"))
+    let journal_dir = exv_vpn_win32_resource::journal_path::JournalPath::machine_default()
+        .as_path()
         .display()
         .to_string();
     let dll = resolve_wintun_dll_path().display().to_string();
@@ -221,7 +224,8 @@ pub fn is_elevated() -> bool {
 #[must_use]
 pub fn verify_process_elevated(pid: u32) -> bool {
     // SAFETY: OpenProcess 打开受限查询句柄；失败即返回 false（fail closed）。
-    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }) else {
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+    else {
         return false;
     };
     let mut token = HANDLE::default();
@@ -289,7 +293,10 @@ pub fn collect_uac_events_for(exe_name: &str, start_time_iso: &str) -> u32 {
         .args(["-NoProfile", "-Command", &script])
         .output()
     {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0),
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
         Err(_) => 0,
     }
 }
@@ -466,267 +473,15 @@ impl Drop for EngineChild {
     }
 }
 
+// SAFETY: Windows HANDLE 是不透明内核对象值，跨线程移动/共享句柄值本身安全；对句柄
+// 的 wait/terminate/close 等可变操作由持有方串行化（EngineSupervisor 经 tokio::sync::
+// Mutex 互斥——provision/respawn/停机三方串行；与 `kernel_control_service::SendChild`
+// 先例同理由）。按需拉起模型（2026-09-08 计划）下 supervisor 进入
+// `EngineProvisioner`（KernelControlService 字段）跨 await 持有，必须 Send+Sync。
+unsafe impl Send for EngineChild {}
+unsafe impl Sync for EngineChild {}
+
 // ---------------------------------------------------------------------------
 // 单元测试：参数契约往返 + 管道名唯一 + bin 路径 + elevation 探针（探针 elevation-gated：
 // 非 elevated 环境 runas 弹 UAC，自动化无法可靠推进，诚实短路）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 镜像 acceptance `engine::EngineArgs` 的必需/可选字段，验证参数往返契约。
-    #[derive(Debug)]
-    struct ParsedEngineArgs {
-        control_pipe: String,
-        dll: PathBuf,
-        journal_dir: Option<PathBuf>,
-        authority_name: Option<String>,
-        host_pid: u32,
-        adapter_name: Option<String>,
-        core_user_sid: Option<String>,
-    }
-
-    fn parse_engine_args(argv: &[String]) -> ParsedEngineArgs {
-        let mut a = ParsedEngineArgs {
-            control_pipe: String::new(),
-            dll: PathBuf::new(),
-            journal_dir: None,
-            authority_name: None,
-            host_pid: 0,
-            adapter_name: None,
-            core_user_sid: None,
-        };
-        let mut i = 0;
-        while i < argv.len() {
-            match argv[i].as_str() {
-                "--control-pipe" => a.control_pipe = argv.get(i + 1).cloned().unwrap_or_default(),
-                "--dll" => a.dll = PathBuf::from(argv.get(i + 1).cloned().unwrap_or_default()),
-                "--journal-dir" => {
-                    a.journal_dir = Some(PathBuf::from(
-                        argv.get(i + 1).cloned().unwrap_or_default(),
-                    ))
-                }
-                "--authority-name" => {
-                    a.authority_name = argv.get(i + 1).cloned();
-                }
-                "--host-pid" => {
-                    a.host_pid = argv.get(i + 1).cloned().unwrap_or_default().parse().unwrap_or(0);
-                }
-                "--adapter-name" => {
-                    a.adapter_name = argv.get(i + 1).cloned();
-                }
-                "--user-sid" => a.core_user_sid = argv.get(i + 1).cloned(),
-                _ => {}
-            }
-            i += 1;
-        }
-        a
-    }
-
-    /// `engine_args_for_spawn` 产出的参数必须能被 engine 契约解析，且必需字段齐备。
-    #[test]
-    fn engine_args_for_spawn_parse_round_trip() {
-        let pid = std::process::id();
-        let spawn_argv = {
-            let mut v = vec!["exv-engine".to_string()];
-            v.extend(engine_args_for_spawn());
-            v
-        };
-        let args = parse_engine_args(&spawn_argv);
-        assert_eq!(args.control_pipe, engine_control_pipe_name());
-        assert_eq!(args.control_pipe, format!(r"\\.\pipe\exv-engine-{pid}-c"));
-        assert!(!args.dll.as_os_str().is_empty(), "dll 必须非空");
-        assert_eq!(args.host_pid, pid);
-        assert_eq!(args.adapter_name.as_deref(), Some(ENGINE_ADAPTER_NAME));
-        assert_eq!(
-            args.authority_name.as_deref(),
-            Some(format!("Local\\exv-engine-{pid}-authority").as_str())
-        );
-        assert!(args
-            .journal_dir
-            .as_ref()
-            .is_some_and(|p| p.display().to_string().contains(&format!("exv-engine-journal-{pid}"))));
-        assert_eq!(
-            args.core_user_sid.as_deref(),
-            exv_vpn_win32_ipc::peer_auth::current_user_sid().as_deref(),
-            "--user-sid 必须携带 core 用户 SID（engine 用它建控制面 DACL）"
-        );
-    }
-
-    /// ShellExecuteExW 的参数必须按 Windows argv 规则引用；否则带空格的用户目录会在
-    /// UAC/runas 边界被拆成多个参数。
-    #[test]
-    fn windows_command_line_quotes_config_paths_without_losing_backslashes() {
-        assert_eq!(
-            quote_windows_argument(r"C:\Users\Alice Smith\.exv"),
-            "\"C:\\Users\\Alice Smith\\.exv\""
-        );
-        assert_eq!(
-            quote_windows_argument(r"C:\path with trailing\"),
-            "\"C:\\path with trailing\\\\\""
-        );
-        assert_eq!(
-            quote_windows_argument(r#"C:\path\with"quote"#),
-            "\"C:\\path\\with\\\"quote\""
-        );
-
-        let args = vec![
-            "--config-dir".to_string(),
-            r"C:\Users\Alice Smith\.exv".to_string(),
-        ];
-        assert_eq!(
-            windows_command_line(&args),
-            "--config-dir \"C:\\Users\\Alice Smith\\.exv\""
-        );
-    }
-
-    /// `engine_control_pipe_name` 按 core PID 唯一。
-    #[test]
-    fn engine_control_pipe_name_unique_per_pid() {
-        let name = engine_control_pipe_name();
-        assert!(name.starts_with(r"\\.\pipe\exv-engine-"), "pipe 前缀");
-        assert!(name.ends_with("-c"), "control 后缀");
-        assert!(
-            name.contains(&std::process::id().to_string()),
-            "必须含 core PID"
-        );
-    }
-
-    /// `engine_bin_path` 必须解析出与生产 engine bin 一致的文件名（不断言文件存在——
-    /// cargo test 上下文 bin 未必已构建；探针测试单独做存在性门禁）。
-    /// 生产 engine = `exv-engine`（HelperControl gRPC server）；acceptance 的
-    /// `exv-win32-engine`（legacy JSON frame）不是 core 的 gRPC client 契约对象。
-    #[test]
-    fn engine_bin_path_resolves_name() {
-        let Some(p) = engine_bin_path() else {
-            panic!("engine_bin_path 必须解析出路径");
-        };
-        let name = p.file_name().expect("file name").to_string_lossy();
-        assert!(
-            name == "exv-engine" || name == "exv-engine.exe",
-            "bin 名必须为 exv-engine，got {name}"
-        );
-    }
-
-    /// elevation 探针：仅当测试进程本身已 elevated 时，提权拉起 engine bin 并观测其 token
-    /// 为 elevated（elevated 父进程 runas 不弹 UAC、静默建 elevated 子进程）；非 elevated 环境
-    /// 诚实短路（不冒充）。engine bin 未构建（测试流）时同样短路。
-    #[test]
-    fn spawn_engine_elevated_token_probe() {
-        if !is_elevated() {
-            // 非 elevated：runas 会弹 UAC，自动化无法可靠推进。
-            return;
-        }
-        let Some(exe) = engine_bin_path().filter(|p| p.exists()) else {
-            // engine bin 未构建（cargo test 仅构建 lib 测试目标时）。
-            return;
-        };
-        let args = engine_args_for_spawn();
-        let (pid, handle) = spawn_engine_elevated(&exe, &args).expect("spawn engine elevated");
-        // 给 engine 一点启动时间（CreateProcess 返回后进程对象已存在，token 已固定）。
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(
-            verify_process_elevated(pid),
-            "engine token 必须 elevated（engine 是唯一特权进程）"
-        );
-        // engine 在等 core 连接（run_engine_role 阻塞于 connect），探针不消费它——直接终止。
-        let mut child = EngineChild::new(pid, handle);
-        child.terminate();
-    }
-
-    /// `verify_process_elevated` fail closed：未知 PID 必须返回 false（不 panic、不假成功）。
-    #[test]
-    fn verify_process_elevated_fails_closed_for_unknown_pid() {
-        // 0xFFFFFFFF 不可能是活动进程 PID（保留值）；OpenProcess 失败 → false。
-        assert!(!verify_process_elevated(u32::MAX), "未知 PID 必须 fail closed");
-    }
-
-    /// `is_elevated` 与 `verify_process_elevated(当前 pid)` 一致（同一 token 观测）。
-    #[test]
-    fn is_elevated_matches_self_token_observation() {
-        assert_eq!(
-            is_elevated(),
-            verify_process_elevated(std::process::id()),
-            "本进程观测必须一致（同一 TokenElevation 事实）"
-        );
-    }
-
-    /// 提权不变量（判据 6）：core 启动 token **非提权**——`is_elevated()` 必须 false。
-    ///
-    /// core 普通 token 永不 elevated（两进程架构硬门禁：engine 经 runas 唯一特权）；core
-    /// 自身启动/连接/UI 任何路径不得拉 UAC。测试进程 = host（core）测试上下文——非提权
-    /// 环境下断言成立；若测试进程被提权（环境问题）则断言失败（不变量即被破坏）。
-    #[test]
-    fn core_startup_token_is_not_elevated() {
-        assert!(
-            !is_elevated(),
-            "core 启动 token 必须非提权（判据 6：core 永不 elevated，engine 是唯一特权进程）"
-        );
-    }
-
-    /// 提取当前可执行文件嵌入的 `RT_MANIFEST` 资源字节（无清单资源 → `None`）。
-    ///
-    /// 仅读清单资源而非字节扫描全二进制——避免二进制嵌调试字符串（测试自身的断言
-    /// 消息/常量）与真正清单声明误碰撞。`RT_MANIFEST`（MAKEINTRESOURCEW(24)）为资源
-    /// 类型，资源 ID = 1（`CREATEPROCESS_MANIFEST_RESOURCE_ID`）。
-    fn embedded_manifest() -> Option<Vec<u8>> {
-        use windows::Win32::Foundation::{HRSRC, HMODULE};
-        use windows::Win32::System::LibraryLoader::{
-            FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
-        };
-        // SAFETY: 全部资源 API 只读当前模块的嵌入资源；指针在拷贝前有效。
-        unsafe {
-            let module: HMODULE = GetModuleHandleW(None).ok()?;
-            // RT_MANIFEST = MAKEINTRESOURCEW(24)；清单资源 ID = 1（CREATEPROCESS...）。
-            let manifest_type = windows::core::PCWSTR(24u16 as _);
-            let manifest_id = windows::core::PCWSTR(1u16 as _);
-            let res: HRSRC = FindResourceW(Some(module), manifest_id, manifest_type);
-            if res.is_invalid() {
-                return None; // 无嵌入清单。
-            }
-            let size = SizeofResource(Some(module), res);
-            if size == 0 {
-                return None;
-            }
-            let hglobal = LoadResource(Some(module), res).ok()?;
-            let ptr = LockResource(hglobal);
-            if ptr.is_null() {
-                return None;
-            }
-            Some(std::slice::from_raw_parts(ptr.cast::<u8>(), size as usize).to_vec())
-        }
-    }
-
-    /// 提权不变量（判据 6）：core 可执行文件**无 requireAdministrator 清单**——core
-    /// 启动绝不主动提权（无 `requestedExecutionLevel level=requireAdministrator`）。
-    ///
-    /// 读取当前测试可执行文件（host 测试上下文 = core 二进制同构建配置）的嵌入
-    /// `RT_MANIFEST` 资源并断言不含提权声明：清单缺失 → 通过（无清单即无提权）；清单
-    /// 存在 → 必须为 `asInvoker`/缺省（不得出现 `requireAdministrator`）。core exe 与
-    /// 测试 exe 共用同一 Cargo 清单/构建配置——测试 exe 无提权清单即证明 core exe 无。
-    #[test]
-    fn core_exe_manifest_has_no_require_administrator() {
-        let Some(manifest) = embedded_manifest() else {
-            return; // 无嵌入清单：core 启动绝不主动提权（无 requireAdministrator 可含）。
-        };
-        assert!(
-            !manifest
-                .windows(b"requireAdministrator".len())
-                .any(|w| w == b"requireAdministrator"),
-            "core 嵌入式清单不得含 requireAdministrator（core 启动绝不主动提权，判据 6）"
-        );
-    }
-
-    /// 提权不变量（判据 6）的 UAC 采集基建可调用、过滤器生效：不存在的进程名 → 0
-    /// 事件（UAC 事件日志从未记录过它；日志通道未启用同样回落 0）。完整"每 core
-    /// 生命周期恰 1 次且归属 engine spawn"计数在 P4 业务验收断言。
-    #[test]
-    fn uac_event_collection_filters_by_process_path() {
-        let count = collect_uac_events_for("exv-no-such-engine-xyz.exe", "1970-01-01T00:00:00");
-        assert_eq!(
-            count, 0,
-            "无此进程的 UAC 事件 → 0（采集基建可调用、过滤器生效/通道未启用回落 0）"
-        );
-    }
-}

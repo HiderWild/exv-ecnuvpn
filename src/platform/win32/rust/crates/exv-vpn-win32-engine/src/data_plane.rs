@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! engine 特权进程内的 Wintun 数据面（R1b）：ring→CSTP→TLS reader + TLS→CSTP→ring
 //! writer，**全在 engine 进程内零跨进程**。
@@ -31,8 +29,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use exv_vpn_cstp::codec::{Codec, CstpFrame};
-use exv_vpn_cstp::session::{CSTP_PACKET_TYPE_DPD_REQUEST, CstpControlEvent};
+use exv_vpn_cstp::codec::{CSTP_PACKET_TYPE_KEEPALIVE, Codec, CstpFrame};
+use exv_vpn_cstp::session::{
+    CSTP_PACKET_TYPE_DPD_REQUEST, CSTP_PACKET_TYPE_DPD_RESPONSE, CstpControlEvent, IoDirection,
+    SessionEndReason, SessionIoDiagnostics, SessionIoError,
+};
 use exv_vpn_win32_resource::wintun_adapter::WintunAdapter;
 use exv_vpn_win32_resource::wintun_api::WintunLibrary;
 use exv_vpn_win32_resource::wintun_session::WintunSession;
@@ -64,6 +65,40 @@ pub struct EngineDataPlane {
     pub session: Arc<Mutex<WintunSession>>,
 }
 
+/// 两个工作线程共享一次失败上报；正常停止不制造掉线，提前退出（含 unwind）不能静默。
+struct DataPlaneWorkerGuard {
+    stop: Arc<AtomicBool>,
+    reported: Arc<AtomicBool>,
+    operation_id: Arc<Mutex<Vec<u8>>>,
+    worker: &'static str,
+    aux: DataPlaneAux,
+    log: Option<Arc<crate::log_sink::LogSink>>,
+}
+
+impl DataPlaneWorkerGuard {
+    fn report(&self, trigger: &str, native_code: Option<u32>, reason: Option<&SessionEndReason>) {
+        let operation_guard = self.operation_id.lock().unwrap_or_else(|error| error.into_inner());
+        if self.stop.load(Ordering::Acquire) || self.reported.swap(true, Ordering::AcqRel) { return; }
+        let operation_id = operation_guard.clone();
+        drop(operation_guard);
+        if let Some(log) = &self.log {
+            log.emit(crate::log_sink::LogLevel::Warn, "dataplane", "tunnel.dataplane.worker-failed",
+                "数据面工作线程终止，当前会话已不可用",
+                &[("worker", self.worker), ("trigger", trigger),
+                    ("operation_id", &uuid::Uuid::from_slice(&operation_id).map(|id| id.to_string()).unwrap_or_default()),
+                    ("native_code", &native_code.map(|code| code.to_string()).unwrap_or_default())]);
+        }
+        on_data_plane_lost(&self.aux.notify_data_plane_lost, &self.log, &self.aux.status,
+            &operation_id, self.aux.stats.as_deref(), reason);
+    }
+}
+
+impl Drop for DataPlaneWorkerGuard {
+    fn drop(&mut self) {
+        self.report(if std::thread::panicking() { "worker_panic" } else { "unexpected_exit" }, None, None);
+    }
+}
+
 /// 数据面辅助接线（T1：统计注册表 + 延迟探测输入；C2：掉线状态上报）。
 ///
 /// 单一入口避免 `spawn_data_plane` 参数爆炸；`Option` 字段不接线时行为与 T1 之前
@@ -82,6 +117,11 @@ pub struct DataPlaneAux {
     pub status: Option<Arc<StatusPublisher>>,
     /// 关联的 apply operation_id（掉线状态事件携带；未接线时为空）。
     pub operation_id: Vec<u8>,
+    /// T3b（F6）：数据面掉线信号发射端——writer 检测到 read_channel 关闭时调用
+    /// **恰好一次**（sweeper 异步清 live，S4）。世代号由构造方
+    /// （`tunnel_runtime::assemble`）预制在闭包内，writer 无需感知世代细节（复审
+    /// P2-5）。`None` = 未接线（行为与 T3 之前一致）。
+    pub notify_data_plane_lost: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Default for DataPlaneAux {
@@ -92,6 +132,7 @@ impl Default for DataPlaneAux {
             control_rx: None,
             status: None,
             operation_id: Vec::new(),
+            notify_data_plane_lost: None,
         }
     }
 }
@@ -144,6 +185,15 @@ const DPD_MAX_TIMEOUTS: u32 = 3;
 const PING_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 手动刷新标记文件的轮询间隔。
 const MARKER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// F2（2026-09-05 cstp-keepalive 计划）：周期 CSTP keepalive 周期（秒）。
+///
+/// 裁决：15s 与 darwin 已在真实网关运行的实现字节级对齐（`bootstrap_runtime.rs`
+/// 1s tick × 15 发一帧空 body 0x07），且远小于网关 ~60s 断开阈值（`session.rs`
+/// GatewayClosedStream 记录）；openconnect 惯例 30s 仅作上限参考不采纳为初值。
+/// 与 DPD 探测开关（`DPD_PROBE_ENABLED`）相互独立：keepalive 是会话维持，
+/// 不是探测。
+pub(crate) const CSTP_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
 /// 延迟探测配置（由 `tunnel_runtime` 在拿到 CSTP offer 后构建）。
 #[derive(Debug, Clone)]
@@ -224,12 +274,7 @@ impl ProbeState {
     /// 收到一个入站包：若匹配在途 ping 的 echo reply → 返回 RTT（ms）并清除请求。
     fn on_icmp_echo_reply(&mut self, pkt: &[u8], now: Instant) -> Option<u64> {
         let pending = self.pending_ping.take()?;
-        if is_icmp_echo_reply(
-            pkt,
-            self.cfg.target,
-            self.cfg.source,
-            pending.ident,
-        ) {
+        if is_icmp_echo_reply(pkt, self.cfg.target, self.cfg.source, pending.ident) {
             Some(rtt_ms(pending.sent_at, now))
         } else {
             self.pending_ping = Some(pending);
@@ -309,7 +354,10 @@ impl ProbeState {
         self.next_ident = self.next_ident.wrapping_add(1);
         let pkt = build_icmp_echo_request(self.cfg.source, self.cfg.target, ident, 0);
         if let Ok(frame) = self.codec.encode(&CstpFrame::Data(pkt)) {
-            self.pending_ping = Some(PendingPing { sent_at: now, ident });
+            self.pending_ping = Some(PendingPing {
+                sent_at: now,
+                ident,
+            });
             send(frame);
         }
     }
@@ -338,10 +386,345 @@ fn build_dpd_request_frame() -> Vec<u8> {
         .expect("DPD request frame encodes within bounds")
 }
 
+/// 构建 DPD **应答**帧（control kind 0x04，空 body；F1 冻结——darwin
+/// `bootstrap_runtime.rs` 同款。wire 上 0x03 本无载荷，应答无需回显任何字节）。
+#[must_use]
+fn build_dpd_response_frame() -> Vec<u8> {
+    Codec::encode_raw(CSTP_PACKET_TYPE_DPD_RESPONSE, &[])
+        .expect("DPD response frame encodes within bounds")
+}
+
+/// F2 周期 CSTP keepalive 节拍器（writer 线程内；与 [`ProbeState`] 同构，
+/// `Instant` 注入可单测）。
+///
+/// 初始化 `last = Some(连接时刻)`——首帧在连接建立后第 15s（对齐 darwin 时序，
+/// 不引入第二套节拍）。生命周期与 writer 线程同生共死（`stop_and_join`/`Drop`
+/// 既有路径回收，零新增关停管道）。
+struct KeepaliveTicker {
+    period: Duration,
+    last: Option<Instant>,
+}
+
+impl KeepaliveTicker {
+    /// 建节拍器：`connected_at` = 连接建立时刻（首帧在其后第 `period` 秒）。
+    fn new(period: Duration, connected_at: Instant) -> Self {
+        Self {
+            period,
+            last: Some(connected_at),
+        }
+    }
+
+    /// 距上次发送 ≥ `period` → 触发一次并重置（返回 `true`）；未到期 → `false`。
+    fn due(&mut self, now: Instant) -> bool {
+        match self.last {
+            Some(last) if now.duration_since(last) >= self.period => {
+                self.last = Some(now);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// writer 线程控制面事件分派动作（F5 冻结分派表的纯决策输出，可单测）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EventAction {
+    /// DPD response（0x04）→ 既有 `ProbeState` RTT 处理。
+    ProbeRtt,
+    /// 网关 DPD request（0x03）→ 立即回 0x04 空 body 应答（F1，无条件、不 dedup）。
+    ReplyDpd,
+    /// 静默忽略（网关 keepalive 0x07 = 预期帧；重复出现的未知 kind）。
+    Ignore,
+    /// 未知控制 kind 首见 → 记一条 Warn（每 kind 每会话至多 1 条）。
+    WarnUnknownKind(u8),
+    /// 会话终结 → stash 原因（掉线单条 Warn 携带，不单独成日志）。
+    StashSessionEnd(SessionEndReason),
+}
+
+/// 单条控制面事件 → 动作（纯函数，可单测；`seen_unknown_kinds` 为 writer 线程
+/// 局部去重表——每 kind 每会话至多 1 条 Warn）。F5 冻结分派表：
+/// `DpdResponse`→RTT；`Control{0x03}`→应答；`Control{0x07}`→静默；
+/// `Control{其他}`→首见 Warn；`SessionEnded`→stash。
+fn control_event_action(event: &CstpControlEvent, seen_unknown_kinds: &mut Vec<u8>) -> EventAction {
+    match event {
+        CstpControlEvent::DpdResponse => EventAction::ProbeRtt,
+        CstpControlEvent::Control {
+            kind: CSTP_PACKET_TYPE_DPD_REQUEST,
+            ..
+        } => EventAction::ReplyDpd,
+        CstpControlEvent::Control {
+            kind: CSTP_PACKET_TYPE_KEEPALIVE,
+            ..
+        } => EventAction::Ignore,
+        CstpControlEvent::Control { kind: 0x05 | 0x09, .. } => EventAction::Ignore,
+        CstpControlEvent::Control { kind, .. } => {
+            if seen_unknown_kinds.contains(kind) {
+                EventAction::Ignore
+            } else {
+                seen_unknown_kinds.push(*kind);
+                EventAction::WarnUnknownKind(*kind)
+            }
+        }
+        CstpControlEvent::SessionEnded(reason) => EventAction::StashSessionEnd(reason.clone()),
+        CstpControlEvent::WriteFailed(error) => EventAction::StashSessionEnd(SessionEndReason::Io(error.clone())),
+        CstpControlEvent::IoDiagnostics(_) => EventAction::Ignore,
+    }
+}
+
+/// `SessionEndReason` → 掉线单条 Warn 携带的可读原因标签（如 `gateway_closed_stream`
+/// / `io: TimedOut`；不包含 secret——ErrorKind/CodecError 均为类型化枚举）。F5 冻结。
+#[must_use]
+fn session_end_reason_label(reason: &SessionEndReason) -> String {
+    match reason {
+        SessionEndReason::ServerDisconnect { kind, code, reason, body_len } =>
+            format!("server_disconnect: kind={kind:#04x} code={code:?} body_len={body_len} reason={reason}"),
+        SessionEndReason::GatewayClosedStream => "gateway_closed_stream".to_string(),
+        SessionEndReason::Io(error) => format!("io: {:?}", error.kind),
+        SessionEndReason::Codec(err) => format!("codec: {err:?}"),
+        SessionEndReason::ConsumerDropped => "consumer_dropped".to_string(),
+    }
+}
+
+/// 安全的错误字段，原始文本已在 TLS 边界分类；缺失 OS 码不能写成 0。
+fn io_error_fields(error: &SessionIoError) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "io_direction",
+            match error.direction {
+                IoDirection::Read => "read",
+                IoDirection::Write => "write",
+            }
+            .into(),
+        ),
+        ("io_kind", format!("{:?}", error.kind)),
+        (
+            "raw_os_error",
+            error
+                .raw_os_error
+                .map_or_else(|| "none".into(), |code| code.to_string()),
+        ),
+        ("io_detail", error.detail.clone()),
+        ("error_observed_ms", error.observed_ms.to_string()),
+    ]
+}
+
+fn diagnostic_identity(operation_id: &[u8]) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "operation_id",
+            uuid::Uuid::from_slice(operation_id)
+                .map_or_else(|_| "unknown".into(), |id| id.to_string()),
+        ),
+        (
+            "operation_id_hex",
+            operation_id.iter().map(|b| format!("{b:02x}")).collect(),
+        ),
+        (
+            "event_observed_ms",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .to_string(),
+        ),
+    ]
+}
+
+fn log_write_failure(
+    log: &Option<Arc<crate::log_sink::LogSink>>,
+    operation_id: &[u8],
+    error: &SessionIoError,
+) {
+    if let Some(log) = log {
+        let mut fields = io_error_fields(error);
+        fields.extend(diagnostic_identity(operation_id));
+        let refs: Vec<_> = fields
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        log.emit(
+            crate::log_sink::LogLevel::Warn,
+            "engine",
+            "tunnel.dataplane.tls-write-failed",
+            "CSTP TLS write_all failed; queued frames are not confirmed written",
+            &refs,
+        );
+    }
+}
+
+/// 在清理通知之前留下本线程观察点；只记录诊断，不变更失败与清理的既有顺序。
+fn log_data_plane_lifecycle(
+    log: &Option<Arc<crate::log_sink::LogSink>>,
+    operation_id: &[u8],
+    code: &str,
+    outcome: &str,
+    reason: Option<&SessionEndReason>,
+) {
+    if let Some(log) = log {
+        let mut fields = diagnostic_identity(operation_id);
+        fields.push(("outcome", outcome.to_owned()));
+        if let Some(reason) = reason {
+            fields.push(("reason", session_end_reason_label(reason)));
+            if let SessionEndReason::Io(error) = reason {
+                fields.extend(io_error_fields(error));
+            }
+        }
+        let refs: Vec<_> = fields
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        log.emit(
+            crate::log_sink::LogLevel::Debug,
+            "engine",
+            code,
+            "数据面生命周期观察点",
+            &refs,
+        );
+    }
+}
+
+/// 会话级诊断只存计数与时刻。TLS 累计值来自真实 task 的低频采样，未知不能报零。
+struct DataPlaneDiagnostics {
+    started: Instant,
+    last_summary: Instant,
+    keepalive_queued: u64,
+    dpd_reply_queued: u64,
+    keepalive_received: u64,
+    dpd_requests_received: u64,
+    dpd_responses_received: u64,
+    control_queue_failures: u64,
+    read: Option<SessionIoDiagnostics>,
+    write: Option<SessionIoDiagnostics>,
+}
+
+impl DataPlaneDiagnostics {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            last_summary: Instant::now(),
+            keepalive_queued: 0,
+            dpd_reply_queued: 0,
+            keepalive_received: 0,
+            dpd_requests_received: 0,
+            dpd_responses_received: 0,
+            control_queue_failures: 0,
+            read: None,
+            write: None,
+        }
+    }
+
+    fn observe(&mut self, event: &CstpControlEvent) {
+        match event {
+            CstpControlEvent::IoDiagnostics(snapshot) => match snapshot.direction {
+                IoDirection::Read => self.read = Some(snapshot.clone()),
+                IoDirection::Write => self.write = Some(snapshot.clone()),
+            },
+            CstpControlEvent::DpdResponse => self.dpd_responses_received += 1,
+            CstpControlEvent::Control {
+                kind: CSTP_PACKET_TYPE_KEEPALIVE,
+                ..
+            } => self.keepalive_received += 1,
+            CstpControlEvent::Control {
+                kind: CSTP_PACKET_TYPE_DPD_REQUEST,
+                ..
+            } => self.dpd_requests_received += 1,
+            _ => {}
+        }
+    }
+
+    fn emit(
+        &mut self,
+        log: &Option<Arc<crate::log_sink::LogSink>>,
+        operation_id: &[u8],
+        trigger: &str,
+    ) {
+        self.last_summary = Instant::now();
+        let Some(log) = log else {
+            return;
+        };
+        let value = |snapshot: Option<&SessionIoDiagnostics>,
+                     select: fn(&SessionIoDiagnostics) -> u64| {
+            snapshot.map_or_else(|| "unobserved".into(), |s| select(s).to_string())
+        };
+        let age = |instant: Option<Instant>| {
+            instant.map_or_else(
+                || "unobserved".into(),
+                |t| t.elapsed().as_millis().to_string(),
+            )
+        };
+        let read = self.read.as_ref();
+        let write = self.write.as_ref();
+        let mut fields = vec![
+            ("trigger", trigger.to_string()),
+            (
+                "connected_for_ms",
+                self.started.elapsed().as_millis().to_string(),
+            ),
+            (
+                "keepalive_interval_secs",
+                CSTP_KEEPALIVE_INTERVAL_SECS.to_string(),
+            ),
+            ("keepalive_queued", self.keepalive_queued.to_string()),
+            ("dpd_reply_queued", self.dpd_reply_queued.to_string()),
+            ("keepalive_received", self.keepalive_received.to_string()),
+            (
+                "dpd_requests_received",
+                self.dpd_requests_received.to_string(),
+            ),
+            (
+                "dpd_responses_received",
+                self.dpd_responses_received.to_string(),
+            ),
+            (
+                "control_queue_failures",
+                self.control_queue_failures.to_string(),
+            ),
+            ("tls_read_bytes", value(read, |s| s.bytes)),
+            ("tls_write_completed_bytes", value(write, |s| s.bytes)),
+            ("tls_write_completed_frames", value(write, |s| s.operations)),
+            ("keepalive_written", value(write, |s| s.keepalive_frames)),
+            (
+                "dpd_request_written",
+                value(write, |s| s.dpd_request_frames),
+            ),
+            ("dpd_reply_written", value(write, |s| s.dpd_response_frames)),
+            (
+                "last_tls_read_ms_ago",
+                age(read.and_then(|s| s.last_activity)),
+            ),
+            (
+                "last_tls_write_ms_ago",
+                age(write.and_then(|s| s.last_activity)),
+            ),
+            ("tls_read_sample_ms_ago", age(read.map(|s| s.sampled_at))),
+            ("tls_write_sample_ms_ago", age(write.map(|s| s.sampled_at))),
+        ];
+        fields.extend(diagnostic_identity(operation_id));
+        let refs: Vec<_> = fields
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        let level = if trigger == "periodic" {
+            crate::log_sink::LogLevel::Debug
+        } else {
+            crate::log_sink::LogLevel::Info
+        };
+        log.emit(level, "engine", "tunnel.dataplane.session-summary",
+            "CSTP session counters and sampled TLS activity (write completion is not peer acknowledgement)", &refs);
+    }
+}
+
 /// 构建一个 IPv4 ICMP echo request 包（源/目标/标识/序号）。
 #[must_use]
 fn build_icmp_echo_request(source: Ipv4Addr, target: Ipv4Addr, ident: u16, seq: u16) -> Vec<u8> {
-    let payload = [b'E', b'X', b'V', 0x01, (ident >> 8) as u8, (ident & 0xFF) as u8];
+    let payload = [
+        b'E',
+        b'X',
+        b'V',
+        0x01,
+        (ident >> 8) as u8,
+        (ident & 0xFF) as u8,
+    ];
     let payload_len = payload.len();
     let total_len = 20 + 8 + payload_len;
     let mut pkt = vec![0u8; total_len];
@@ -434,13 +817,18 @@ impl EngineDataPlane {
     ///   `session.receive()` → `is_ipv4_packet` → ring 字节计数（上传/tx）→
     ///   `Codec::encode(CstpFrame::Data)` → engine `write_channel`（TLS）→ 学校。
     /// - **writer 线程**：engine `read_channel`（TLS 解码帧，IP 包）→ ring 字节计数
-    ///   （下载/rx）→ `session.send()` → ring。
+    ///   （下载/rx）→ `session.send()` → ring；同时是**会话维持责任人**
+    ///   （2026-09-05 cstp-keepalive 计划 F1/F2/F5）：排空 CSTP 控制面事件——网关
+    ///   DPD request（0x03）→ 无条件回 0x04 空 body；每 15s 发一帧 0x07 keepalive
+    ///   （[`KeepaliveTicker`]，首帧在连接后第 15s）；未知控制 kind 首见记 Warn；
+    ///   `SessionEnded(reason)` stash 进局部变量。read_channel 关闭 =
+    ///   [`on_read_channel_closed`]（恰好一条带 reason 的 Warn + stats Failed +
+    ///   C2 Failed 事件）。
     ///
     /// `aux`（[`DataPlaneAux`]）携带统计注册表（T1 Part A：方向映射见
     /// [`count_reader_upload`]/[`count_writer_download`]）与延迟探测输入（T1 Part B：
     /// DPD→ping fallback 探测循环 + 手动刷新标记）；C2 起另携带状态发布端点与
-    /// operation_id——writer 线程检测到 read_channel 关闭（TLS 掉线）时发布数据面
-    /// 掉线 Failed 事件（见 [`on_read_channel_closed`]）。
+    /// operation_id。会话退出经 LogSink 输出汇总，Debug 每 30s 输出采样；不逐帧记日志。
     ///
     /// W17 SAFETY-ORDER：返回的 [`EngineDataPlaneThreads`] 在 `stop_and_join`/`Drop`
     /// 时先 join 两个线程，再放掉持有的 session Arc 克隆——`WintunEndSession` 之前
@@ -457,6 +845,17 @@ impl EngineDataPlane {
         let writer_stop = Arc::new(AtomicBool::new(false));
         let ring_received_bytes = Arc::new(AtomicU64::new(0));
         let ring_sent_bytes = Arc::new(AtomicU64::new(0));
+        let failure_reported = Arc::new(AtomicBool::new(false));
+        let active_operation_id = Arc::new(Mutex::new(aux.operation_id.clone()));
+        let activated = Arc::new(AtomicBool::new(false));
+        let reader_activated = activated.clone();
+        let writer_activated = activated.clone();
+        let reader_guard = DataPlaneWorkerGuard { stop: reader_stop.clone(),
+            operation_id: active_operation_id.clone(),
+            reported: failure_reported.clone(), worker: "wintun_reader", aux: aux.clone(), log: log.clone() };
+        let writer_guard = DataPlaneWorkerGuard { stop: writer_stop.clone(),
+            operation_id: active_operation_id.clone(),
+            reported: failure_reported.clone(), worker: "wintun_writer", aux: aux.clone(), log: log.clone() };
 
         // ---- reader 线程：ring → ring 计数 → STF Data 帧 → write_channel（TLS）。 ----
         let reader_session = Arc::clone(&self.session);
@@ -464,15 +863,19 @@ impl EngineDataPlane {
         let reader_stop_flag = Arc::clone(&reader_stop);
         let ring_recv_counter = Arc::clone(&ring_received_bytes);
         let reader_stats = aux.stats.clone();
-        let reader_log = log.clone();
         let reader = std::thread::spawn(move || {
-            while !reader_stop_flag.load(Ordering::SeqCst) {
+            let guard = reader_guard;
+            if !wait_for_data_plane_activation(&reader_activated, &reader_stop_flag) { return; }
+            'reader: while !reader_stop_flag.load(Ordering::SeqCst) {
                 // 事件等待基于 session 管理的 read-wait event（调用方不 CloseHandle），
                 // 50ms 超时保持 stop 标志可及时观察（可中断 join）。
                 let ev = reader_session.lock().expect("session 锁").read_wait_event();
                 // SAFETY: ev 是 session 管理的有效事件句柄（本线程不 CloseHandle）。
                 let wr = unsafe { WaitForSingleObject(ev, 50) };
                 if wr == WAIT_FAILED {
+                    // 必须紧随失败调用取 GetLastError，避免其它 Win32 调用覆盖原始码。
+                    let code = unsafe { windows::Win32::Foundation::GetLastError().0 };
+                    guard.report("wintun_wait_failed", Some(code), None);
                     break; // 事件句柄无效（session 已结束等）：停止线程，绝不 panic
                 }
                 // 排空 ring（read-wait 只保证"至少一个"；内部循环直到空）。
@@ -485,7 +888,9 @@ impl EngineDataPlane {
                             Ok(None) => None,
                             Err(e) => {
                                 eprintln!("[info] engine data-plane receive Err: {e:?}");
-                                None
+                                drop(sess);
+                                guard.report("wintun_receive_failed", Some(e.code), None);
+                                break 'reader;
                             }
                         }
                     };
@@ -499,17 +904,17 @@ impl EngineDataPlane {
                         let Ok(frame) = Codec::new().encode(&CstpFrame::Data(pkt)) else {
                             continue;
                         };
-                        // 发送失败 = TLS-write 任务已退出（write_rx drop）→ 诊断。
+                        // 发送失败 = TLS-write 任务已退出（write_rx drop）：真实掉线，
+                        // 或 teardown 之后的尾包竞态。掉线信号统一由 read-channel 关闭
+                        // 路径（on_read_channel_closed → Failed 事件）上报，这里不再发
+                        // Warn 进 UI 日志——TLS 死后外圈循环在 stop 前每个出站包批都会
+                        // 走到此处，曾造成该告警按包批刷屏（2026-09-05 移除）。保留
+                        // stderr 供现场诊断。
                         if reader_tx.send(frame).is_err() {
-                            if let Some(log) = &reader_log {
-                                log.emit(
-                                    crate::log_sink::LogLevel::Warn,
-                                    "engine",
-                                    "tunnel.dataplane.write-channel-closed",
-                                    "CSTP write channel closed (TLS task exited)",
-                                    &[],
-                                );
-                            }
+                            eprintln!(
+                                "[info] engine data-plane: CSTP write channel closed (TLS task exited)"
+                            );
+                            // writer 排空控制事件后报告首个 TLS 原因，避免这里抢先丢掉细节。
                             break;
                         }
                     }
@@ -529,27 +934,107 @@ impl EngineDataPlane {
         let writer_log = log.clone();
         // C2：掉线状态上报端点与关联 operation_id（read_channel 关闭时发布
         // Failed 事件；`None` 发布端 = 不接线，行为与 C2 之前一致）。
-        let writer_status = aux.status.clone();
         let writer_operation_id = aux.operation_id.clone();
+        // T3b（F6）：数据面掉线信号发射端（sweeper 清 live；`None` = 未接线）。
         let writer = std::thread::spawn(move || {
+            let failure = writer_guard;
+            if !wait_for_data_plane_activation(&writer_activated, &writer_stop_flag) { return; }
             // T1 latency probe：状态机（DPD→ping fallback + 手动刷新标记）。
             let mut probe = writer_latency.map(ProbeState::new);
+            // F2：周期 CSTP keepalive（0x07 空 body）——帧只编码一次；节拍器初始化
+            // `last = Some(线程启动时刻 ≈ 连接建立时刻)`，首帧在第 15s（对齐 darwin
+            // 时序）。生命周期与 writer 线程同生共死，零新增关停管道。
+            let keepalive_frame = Codec::encode_raw(CSTP_PACKET_TYPE_KEEPALIVE, &[])
+                .expect("keepalive frame encodes within bounds");
+            let mut keepalive = KeepaliveTicker::new(
+                Duration::from_secs(CSTP_KEEPALIVE_INTERVAL_SECS),
+                Instant::now(),
+            );
+            // F1：DPD 应答帧（0x04 空 body）——帧只编码一次。
+            let dpd_response_frame = build_dpd_response_frame();
+            // F5：未知控制 kind 去重表（每 kind 每会话至多 1 条 Warn）+ 会话终结
+            // 原因 stash（掉线单条 Warn 携带）。
+            let mut seen_unknown_kinds: Vec<u8> = Vec::new();
+            let mut session_end: Option<SessionEndReason> = None;
+            let mut diagnostics = DataPlaneDiagnostics::new();
+            let mut exit_reason = "stop_requested";
             // 引擎 data 通道是 tokio unbounded receiver：轮询 `try_recv`（空则短睡，
             // 保持 stop 标志的可达性），收到解码后的 IP 包 → session.send。
             while !writer_stop_flag.load(Ordering::SeqCst) {
-                // T1：轮询 CSTP 控制面事件（DPD response）→ 算 RTT 写 registry。
+                // F5：排空 CSTP 控制面事件（drain——消除事件积压；1ms 轮询下无性能
+                // 影响），按冻结分派表处置。
                 if let Some(ctrl) = &writer_control_rx {
                     let mut guard = ctrl.lock().expect("control rx 锁");
-                    if let Ok(event) = guard.try_recv() {
-                        if matches!(event, CstpControlEvent::DpdResponse) {
-                            if let Some(probe) = probe.as_mut() {
-                                if let Some(stats) = &writer_stats {
-                                    if let Some(rtt) = probe.on_dpd_response(Instant::now()) {
-                                        stats.record_latency(rtt);
+                    while let Ok(event) = guard.try_recv() {
+                        diagnostics.observe(&event);
+                        if let CstpControlEvent::WriteFailed(error) = &event {
+                            log_write_failure(&writer_log, &writer_operation_id, error);
+                            diagnostics.emit(&writer_log, &writer_operation_id, "tls-write-failed");
+                        }
+                        match control_event_action(&event, &mut seen_unknown_kinds) {
+                            EventAction::ProbeRtt => {
+                                if let Some(probe) = probe.as_mut() {
+                                    if let Some(stats) = &writer_stats {
+                                        if let Some(rtt) = probe.on_dpd_response(Instant::now()) {
+                                            stats.record_latency(rtt);
+                                        }
                                     }
                                 }
                             }
+                            EventAction::ReplyDpd => {
+                                // F1：无条件应答（与 DPD_PROBE_ENABLED 无关——这是
+                                // 被动应答网关，不是主动探测）。失败 = TLS 写任务
+                                // 已死 → stderr 单行诊断，不发状态事件、不重试；
+                                // 掉线统一由 read-channel 关闭路径上报。
+                                if probe_tx.send(dpd_response_frame.clone()).is_ok() {
+                                    diagnostics.dpd_reply_queued += 1;
+                                } else {
+                                    diagnostics.control_queue_failures += 1;
+                                    eprintln!(
+                                        "[info] engine data-plane: DPD reply send failed (TLS write task exited)"
+                                    );
+                                }
+                            }
+                            EventAction::Ignore => {}
+                            EventAction::WarnUnknownKind(kind) => {
+                                if let Some(log) = &writer_log {
+                                    log.emit(
+                                        crate::log_sink::LogLevel::Warn,
+                                        "engine",
+                                        "tunnel.dataplane.unknown-control",
+                                        "unknown CSTP control frame ignored (once per kind)",
+                                        &[("kind", &format!("{kind:#04x}"))],
+                                    );
+                                }
+                            }
+                            EventAction::StashSessionEnd(reason) => {
+                                // F5：stash，不单独成日志——掉线单条 Warn 携带。
+                                session_end.get_or_insert(reason);
+                            }
                         }
+                    }
+                }
+                // 写侧任务结束也会使隧道不可用，不必等待读侧 EOF。
+                if session_end.is_none() && probe_tx.is_closed() {
+                    session_end = Some(SessionEndReason::Io(SessionIoError::new(
+                        IoDirection::Write, &std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+                    )));
+                }
+                if session_end.is_some() {
+                    exit_reason = "session_terminated";
+                    failure.report("session_terminated", None, session_end.as_ref());
+                    break;
+                }
+                // F2：周期 CSTP keepalive（无条件、不判空闲；15s × ~8 字节开销可
+                // 忽略）。发送失败只 stderr 单行（同 F1 失败语义）。
+                if keepalive.due(Instant::now()) {
+                    if probe_tx.send(keepalive_frame.clone()).is_ok() {
+                        diagnostics.keepalive_queued += 1;
+                    } else {
+                        diagnostics.control_queue_failures += 1;
+                        eprintln!(
+                            "[info] engine data-plane: keepalive send failed (TLS write task exited)"
+                        );
                     }
                 }
                 // T1：探测节拍（周期 ping / 手动标记 / 超时回退）。
@@ -557,8 +1042,13 @@ impl EngineDataPlane {
                     probe.tick(Instant::now(), &mut |frame: Vec<u8>| {
                         // 发送失败 = TLS-write 任务已退出（write_rx drop）→ 忽略（探测
                         // 请求是尽力而为，数据面仍继续）。
-                        let _ = probe_tx.send(frame);
+                        if probe_tx.send(frame).is_err() {
+                            diagnostics.control_queue_failures += 1;
+                        }
                     });
+                }
+                if diagnostics.last_summary.elapsed() >= Duration::from_secs(30) {
+                    diagnostics.emit(&writer_log, &writer_operation_id, "periodic");
                 }
                 let pkt = match tls_reader.lock().expect("tls reader 锁").try_recv() {
                     Ok(pkt) => Some(pkt),
@@ -567,10 +1057,29 @@ impl EngineDataPlane {
                         None
                     }
                     Err(_) => {
-                        // read_channel 关闭 = TLS-read 任务已退出 → 诊断 + C2 掉线
-                        // 状态上报（Failed(DataPlane, RetrySameOperation)；自动重连
-                        // 前置，见 on_read_channel_closed）。
-                        on_read_channel_closed(&writer_log, &writer_status, &writer_operation_id);
+                        exit_reason = "read_channel_closed";
+                        // read_channel 关闭 = TLS-read 任务已退出 → 先发数据面掉线
+                        // 信号（sweeper 异步清 live，F6/S4），再 C2 掉线状态上报
+                        // （Failed(DataPlane, RetrySameOperation)；自动重连前置）+
+                        // 恰好一条带 reason 的 Warn（F5；reason 来自 SessionEnded
+                        // stash，writer 先观察到关闭的理论罕见场景下省略原因字段）。
+                        // TLS read 在最终控制事件入队后才关闭 data channel；再次排空
+                        // 消除首次 drain 与关闭观察之间的竞态，避免丢失真实错误原因。
+                        if let Some(ctrl) = &writer_control_rx {
+                            while let Ok(event) = ctrl.lock().expect("control rx 锁").try_recv() {
+                                diagnostics.observe(&event);
+                                match event {
+                                    CstpControlEvent::SessionEnded(reason) => {
+                                        session_end.get_or_insert(reason);
+                                    }
+                                    CstpControlEvent::WriteFailed(error) => {
+                                        log_write_failure(&writer_log, &writer_operation_id, &error)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        failure.report("read_channel_closed", None, session_end.as_ref());
                         break;
                     }
                 };
@@ -584,19 +1093,37 @@ impl EngineDataPlane {
                             }
                         }
                     }
-                    let mut sess = writer_session.lock().expect("session 锁");
-                    if sess.send(&pkt).is_ok() {
+                    let sent = writer_session.lock().expect("session 锁").send(&pkt);
+                    if sent.is_ok() {
                         count_writer_download(
                             &ring_sent_counter,
                             writer_stats.as_deref(),
                             pkt.len() as u64,
                         );
+                    } else if let Err(error) = sent {
+                        // 环满是单包背压；其它错误意味着 ring 已失效，不能继续显示在线。
+                        if error.code != windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW.0 {
+                            exit_reason = "wintun_send_failed";
+                            failure.report(exit_reason, Some(error.code), None);
+                            break;
+                        }
                     }
                 }
             }
+            log_data_plane_lifecycle(
+                &writer_log,
+                &writer_operation_id,
+                "tunnel.dataplane.writer-exit",
+                exit_reason,
+                session_end.as_ref(),
+            );
+            diagnostics.emit(&writer_log, &writer_operation_id, "writer-exit");
         });
 
         EngineDataPlaneThreads {
+            activated,
+            failure_reported,
+            active_operation_id,
             reader_stop,
             writer_stop,
             reader: Some(reader),
@@ -615,6 +1142,9 @@ impl EngineDataPlane {
 /// 错误）都先 join 再放 session，绝不把未 join 的 reader 留在 `WintunEndSession` 之后
 /// （0.14.1 EndSession 销毁 session 对象，之后 receive 是 UAF）。
 pub struct EngineDataPlaneThreads {
+    activated: Arc<AtomicBool>,
+    failure_reported: Arc<AtomicBool>,
+    active_operation_id: Arc<Mutex<Vec<u8>>>,
     /// reader 线程 stop 标志。
     reader_stop: Arc<AtomicBool>,
     /// writer 线程 stop 标志。
@@ -630,6 +1160,33 @@ pub struct EngineDataPlaneThreads {
 }
 
 impl EngineDataPlaneThreads {
+    /// 只有 owner 安装会话并发布 Connected 后才允许工作线程处理包或报告失败。
+    pub fn activate(&self) {
+        self.activated.store(true, Ordering::Release);
+    }
+
+    /// 掉线已经被观察到时立即失去可复用性，不等待异步清理线程取走 live。
+    pub fn is_alive(&self) -> bool {
+        !self.failure_reported.load(Ordering::Acquire)
+            && !self.reader_stop.load(Ordering::Acquire)
+            && !self.writer_stop.load(Ordering::Acquire)
+            && !self.reader.as_ref().is_some_and(|thread| thread.is_finished())
+            && !self.writer.as_ref().is_some_and(|thread| thread.is_finished())
+    }
+
+    /// 复用同一活动会话时，后续掉线必须关联新受理的操作；与报失互斥。
+    pub fn rebind_operation(&self, operation_id: &[u8]) -> bool {
+        self.rebind_operation_with(operation_id, || {})
+    }
+
+    pub fn rebind_operation_with(&self, operation_id: &[u8], on_rebound: impl FnOnce()) -> bool {
+        let mut current = self.active_operation_id.lock().unwrap_or_else(|error| error.into_inner());
+        if !self.is_alive() { return false; }
+        *current = operation_id.to_vec();
+        on_rebound();
+        true
+    }
+
     /// 置位 stop → join 两个线程（W17 SAFETY-ORDER：先 join 再放 session，绝不把
     /// 未 join 的 reader 留在 `WintunEndSession` 之后）。返回
     /// `(ring_received_bytes, ring_sent_bytes)`——engine 数据面计数器，证据读取。
@@ -679,6 +1236,14 @@ impl EngineDataPlaneThreads {
             Arc::clone(&self.ring_sent_bytes),
         )
     }
+}
+
+fn wait_for_data_plane_activation(activated: &AtomicBool, stop: &AtomicBool) -> bool {
+    while !activated.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire) { return false; }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    !stop.load(Ordering::Acquire)
 }
 
 impl Drop for EngineDataPlaneThreads {
@@ -735,25 +1300,103 @@ fn data_plane_drop_error() -> generated::VpnError {
     }
 }
 
-/// read_channel 关闭（TLS-read 任务已退出）时的处理：写诊断日志 + 数据面掉线
-/// 状态上报。
+/// read_channel 关闭时的**完整掉线处置**（T3b 接线，F6+F5）：**先**发数据面掉线
+/// 信号（sweeper 异步清 live，S4），**再**做既有掉线上报（恰好一条带 reason 的
+/// Warn + stats Failed + C2 Failed 事件）。`notify` 为 `None`（未接线）时行为与
+/// T3 之前一致（只做上报）。
+///
+/// 顺序契约：sweeper 清 live 与 writer 退出解耦（sweeper 异步），信号先于上报
+/// 发出、不保证 sweeper 先完成——`is_connected()` 的新鲜度由 sweeper 收敛保证
+/// （S4 → S5，计划 9.3 开放窗口如实记录）。writer 闭包持有的本信号发射端随线程
+/// 退出 drop（P1-1 双份发送端安放之一；另一份在 EngineCstp/LiveTunnel）。
+fn on_data_plane_lost(
+    notify: &Option<Arc<dyn Fn() + Send + Sync>>,
+    log: &Option<Arc<crate::log_sink::LogSink>>,
+    status: &Option<Arc<StatusPublisher>>,
+    operation_id: &[u8],
+    stats: Option<&StatsRegistry>,
+    reason: Option<&SessionEndReason>,
+) {
+    log_data_plane_lifecycle(
+        log,
+        operation_id,
+        "tunnel.dataplane.loss-observed",
+        "before_cleanup_notification",
+        reason,
+    );
+    if let Some(notify) = notify {
+        notify();
+    }
+    on_read_channel_closed(log, status, operation_id, stats, reason);
+}
+
+/// read_channel 关闭（TLS-read 任务已退出）时的处理：**恰好一条**带原因的 Warn +
+/// stats phase 置 Failed + 数据面掉线状态上报。
 ///
 /// 独立成函数以便单测——writer 线程整体需要真实 Wintun session 才能构造，而本
-/// 掉线发布路径（日志 + `StatusEvent::failed`）可不依赖数据面线程直接验证。
-/// `status` 为 `None`（未接线）时保持 C2 之前行为（只写日志，不发布状态）。
+/// 掉线发布路径（日志 + `StatusEvent::failed` + stats）可不依赖数据面线程直接验证。
+/// `status` 为 `None`（未接线）时保持 C2 之前行为（只写日志，不发布状态）；
+/// `stats` 为 `None` 时跳过 phase 写入。
+///
+/// F5 冻结（2026-09-05 cstp-keepalive 计划）：
+/// - Warn 每次掉线恰好一条，event key `tunnel.dataplane.read-channel-closed` 不变，
+///   消息携带 `reason`（来自读任务 `SessionEnded` 事件的 stash）；stash 为空（理论
+///   罕见：writer 先观察到 read_channel 关闭）时如实省略原因字段；
+/// - `stats.set_phase(Failed)`——掉线窗口快照诚实化；
+/// - `StatusEvent::failed(DataPlane, RetrySameOperation)` 原样保留（C2 契约不变）。
 fn on_read_channel_closed(
     log: &Option<Arc<crate::log_sink::LogSink>>,
     status: &Option<Arc<StatusPublisher>>,
     operation_id: &[u8],
+    stats: Option<&StatsRegistry>,
+    reason: Option<&SessionEndReason>,
 ) {
     if let Some(log) = log {
-        log.emit(
-            crate::log_sink::LogLevel::Warn,
-            "engine",
-            "tunnel.dataplane.read-channel-closed",
-            "CSTP read channel closed (TLS task exited)",
-            &[],
-        );
+        match reason {
+            Some(reason) => {
+                let label = session_end_reason_label(reason);
+                let mut fields = diagnostic_identity(operation_id);
+                fields.push(("reason", label.clone()));
+                if let SessionEndReason::ServerDisconnect { kind, code, reason, body_len } = reason {
+                    fields.push(("server_packet_type", format!("{kind:#04x}")));
+                    fields.push(("server_reason_code", code.map_or_else(|| "none".into(), |code| code.to_string())));
+                    fields.push(("server_reason", reason.clone()));
+                    fields.push(("server_body_len", body_len.to_string()));
+                }
+                if let SessionEndReason::Io(error) = reason {
+                    fields.extend(io_error_fields(error));
+                }
+                let refs: Vec<_> = fields
+                    .iter()
+                    .map(|(key, value)| (*key, value.as_str()))
+                    .collect();
+                log.emit(
+                    crate::log_sink::LogLevel::Warn,
+                    "engine",
+                    "tunnel.dataplane.read-channel-closed",
+                    &format!("CSTP read channel closed (TLS task exited; reason={label})"),
+                    &refs,
+                );
+            }
+            None => {
+                let fields = diagnostic_identity(operation_id);
+                let refs: Vec<_> = fields
+                    .iter()
+                    .map(|(key, value)| (*key, value.as_str()))
+                    .collect();
+                log.emit(
+                    crate::log_sink::LogLevel::Warn,
+                    "engine",
+                    "tunnel.dataplane.read-channel-closed",
+                    "CSTP read channel closed (TLS task exited)",
+                    &refs,
+                );
+            }
+        }
+    }
+    if let Some(stats) = stats {
+        // 掉线窗口快照诚实化：stats phase = Failed（快照不再报告 Connected）。
+        stats.set_phase(generated::StatsPhase::Failed);
     }
     if let Some(status) = status {
         status.publish(StatusEvent::failed(
@@ -768,337 +1411,3 @@ fn on_read_channel_closed(
 // 单元测试：纯函数 `is_ipv4_packet` + 线程句柄计数器访问器（无需真实 Wintun
 // adapter；真实数据面线程的 W17 顺序由集成路径覆盖）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// IPv4 版本字段（首字节高 4 位 = 4）。
-    #[test]
-    fn ipv4_version_field_detected() {
-        assert!(is_ipv4_packet(&[0x45, 0x00, 0x00, 0x2a]));
-        assert!(is_ipv4_packet(&[0x40, 0x00, 0x00, 0x00]));
-        assert!(is_ipv4_packet(&[0x4f, 0xff, 0xff, 0xff]));
-    }
-
-    /// 非 IPv4（IPv6 版本字段高 4 位 = 6 / 空 / 无首字节）必须返回 false。
-    #[test]
-    fn non_ipv4_rejected() {
-        assert!(!is_ipv4_packet(&[0x60, 0x00, 0x00, 0x00]), "IPv6 头");
-        assert!(!is_ipv4_packet(&[0x6f, 0xff, 0xff, 0xff]), "IPv6 头（全 1 版本）");
-        assert!(!is_ipv4_packet(&[]), "空包");
-        assert!(!is_ipv4_packet(&[0x00]), "版本 0");
-        assert!(!is_ipv4_packet(&[0x05]), "版本 5（非 4/6）");
-    }
-
-    /// 线程句柄的计数器访问器初始为 0，且可独立读取（与 `stop_and_join` 的返回值
-    /// 同源——都读同一 `Arc<AtomicU64>`）。
-    #[test]
-    fn thread_counters_start_zero_and_readable() {
-        let threads = EngineDataPlaneThreads {
-            reader_stop: Arc::new(AtomicBool::new(false)),
-            writer_stop: Arc::new(AtomicBool::new(false)),
-            reader: None,
-            writer: None,
-            ring_received_bytes: Arc::new(AtomicU64::new(0)),
-            ring_sent_bytes: Arc::new(AtomicU64::new(0)),
-        };
-        assert_eq!(threads.ring_received(), 0);
-        assert_eq!(threads.ring_sent(), 0);
-        // stop_and_join 对无线程句柄的空结构是幂等 no-op（不 panic）。
-        let mut threads = threads;
-        assert_eq!(threads.stop_and_join(), (0, 0));
-        assert_eq!(threads.stop_and_join(), (0, 0), "幂等");
-    }
-
-    /// `EngineDataPlaneThreads` 的 Drop 对无线程句柄的空结构是安全 no-op（不 panic）。
-    #[test]
-    fn thread_handle_drop_is_safe_noop() {
-        let threads = EngineDataPlaneThreads {
-            reader_stop: Arc::new(AtomicBool::new(false)),
-            writer_stop: Arc::new(AtomicBool::new(false)),
-            reader: None,
-            writer: None,
-            ring_received_bytes: Arc::new(AtomicU64::new(0)),
-            ring_sent_bytes: Arc::new(AtomicU64::new(0)),
-        };
-        drop(threads);
-    }
-
-    // ---- T1 Part A：方向映射（reader=上传=tx，writer=下载=rx）----
-
-    /// 方向映射：reader 计数 → tx 增长、rx 不动；writer 计数 → rx 增长、tx 不动。
-    /// 与前端「下载/上传」标签一致（rx=下载，tx=上传）。
-    #[test]
-    fn direction_mapping_reader_tx_writer_rx() {
-        let stats = StatsRegistry::new();
-        let mut counter = AtomicU64::new(0);
-        count_reader_upload(&mut counter, Some(&stats), 100);
-        count_reader_upload(&mut counter, Some(&stats), 50);
-        let sample = stats.snapshot();
-        assert_eq!(sample.tx_bytes, 150, "reader 消费出站包 = 上传 = tx");
-        assert_eq!(sample.rx_bytes, 0, "reader 不写 rx");
-        assert_eq!(counter.load(Ordering::SeqCst), 150, "ring 计数器同步增长");
-
-        let mut counter = AtomicU64::new(0);
-        count_writer_download(&mut counter, Some(&stats), 200);
-        let sample = stats.snapshot();
-        assert_eq!(sample.rx_bytes, 200, "writer 送进 ring 入站包 = 下载 = rx");
-        assert_eq!(sample.tx_bytes, 150, "writer 不写 tx");
-        assert_eq!(counter.load(Ordering::SeqCst), 200);
-    }
-
-    /// 方向映射在 stats 为 None（不接线）时仍维持 ring 计数器（T1 前行为）。
-    #[test]
-    fn direction_mapping_without_stats_keeps_ring_counter() {
-        let mut counter = AtomicU64::new(0);
-        count_reader_upload(&mut counter, None, 10);
-        count_writer_download(&mut counter, None, 20);
-        assert_eq!(counter.load(Ordering::SeqCst), 30, "ring 计数器不受 stats 接线影响");
-    }
-
-    /// T1 Part A wire 断言：数据面计数（经方向映射 helper）→ registry →
-    /// StreamStats 事件 rx/tx 非零（wire 输出非零）。
-    #[tokio::test]
-    async fn data_plane_counting_reaches_wire_nonzero() {
-        use std::sync::atomic::AtomicU64;
-        use std::time::Duration;
-
-        let publisher = crate::stats::StatsPublisher::new();
-        let reg = publisher.registry().clone();
-        // 模拟数据面包流：reader 出站 500B（tx），writer 入站 1000B（rx）。
-        let mut reader_counter = AtomicU64::new(0);
-        let mut writer_counter = AtomicU64::new(0);
-        count_reader_upload(&mut reader_counter, Some(&reg), 500);
-        count_writer_download(&mut writer_counter, Some(&reg), 1000);
-
-        let mut rx = publisher.open_stream(10);
-        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("first sample")
-            .expect("stream alive")
-            .expect("event ok");
-        assert!(first.tx_bytes > 0, "上传字节非零: {}", first.tx_bytes);
-        assert!(first.rx_bytes > 0, "下载字节非零: {}", first.rx_bytes);
-        assert_eq!(first.tx_bytes, 500);
-        assert_eq!(first.rx_bytes, 1000);
-    }
-
-    // ---- C2 掉线感知：read_channel 关闭 → 数据面掉线 Failed 状态上报 ----
-
-    /// 掉线发布（有 status 接线）：`on_read_channel_closed` 必须调用
-    /// `status.publish`，事件携带 coarse=Failed + connect_phase=StartingDataPlane +
-    /// 掉线错误标记（stage=DataPlane、retry=RetrySameOperation——与连接期失败
-    /// stage=Ingress/DoNotRetry 明确区分）。
-    #[test]
-    fn read_channel_closed_publishes_drop_failed_event() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let publisher = Arc::new(StatusPublisher::new());
-        let calls = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::new(std::sync::Mutex::new(Vec::<StatusEvent>::new()));
-        let calls_c = Arc::clone(&calls);
-        let seen_c = Arc::clone(&seen);
-        publisher.set_terminal_observer(Arc::new(move |event: &StatusEvent| {
-            calls_c.fetch_add(1, Ordering::SeqCst);
-            seen_c.lock().unwrap().push(event.clone());
-        }));
-
-        let op = vec![0x42u8; 16];
-        on_read_channel_closed(&None, &Some(Arc::clone(&publisher)), &op);
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "掉线必须发布一个事件");
-        let got = seen.lock().unwrap();
-        assert_eq!(got.len(), 1);
-        let ev = &got[0];
-        assert_eq!(ev.operation_id, op, "事件携带关联 operation_id");
-        assert_eq!(ev.coarse_phase, generated::StatsPhase::Failed, "掉线 = coarse Failed");
-        assert_eq!(ev.connect_phase, ConnectPhase::StartingDataPlane);
-        let err = ev.error.as_ref().expect("掉线事件必须携带错误");
-        assert_eq!(err.stage, generated::ErrorStage::DataPlane as i32, "stage=DataPlane");
-        assert_eq!(err.retry, generated::RetryAdvice::RetrySameOperation as i32, "可重试标记");
-        drop(got);
-    }
-
-    /// 未接线 status（`None`）→ 掉线路径不发布（保持 C2 之前行为，不 panic）。
-    #[test]
-    fn read_channel_closed_without_status_is_noop() {
-        on_read_channel_closed(&None, &None, &[]);
-    }
-
-    /// 掉线错误标记自身可区分：stage=DataPlane + retry=RetrySameOperation（现有
-    /// 连接期失败路径一律 stage=Ingress + DoNotRetry——无其它来源产生此组合）。
-    #[test]
-    fn data_plane_drop_error_is_distinguishable() {
-        let err = data_plane_drop_error();
-        assert_eq!(err.code, generated::ErrorCode::EffectUnknown as i32);
-        assert_eq!(err.stage, generated::ErrorStage::DataPlane as i32);
-        assert_eq!(err.retry, generated::RetryAdvice::RetrySameOperation as i32);
-        let native = err.native.as_ref().expect("携带 native 传输层归属");
-        assert_eq!(
-            native.category,
-            generated::NativeErrorCategory::Transport as i32
-        );
-        assert_eq!(native.namespace, generated::NativeErrorNamespace::Win32 as i32);
-    }
-
-    /// aux 字段构造：默认（未接线）时 status 为 None、operation_id 为空。
-    #[test]
-    fn data_plane_aux_default_has_no_status() {
-        let aux = DataPlaneAux::default();
-        assert!(aux.status.is_none(), "默认不接线状态发布");
-        assert!(aux.operation_id.is_empty(), "默认无关联 operation_id");
-    }
-
-    // ---- T1 Part B：ICMP echo 构建/匹配 ----
-
-    /// 构建的 echo request 可被自己的 echo reply（type 0 + 同 ident）匹配，RTT 计时正确。
-    #[test]
-    fn icmp_echo_request_round_trips_match() {
-        let source = Ipv4Addr::new(10, 88, 88, 5);
-        let target = Ipv4Addr::new(10, 88, 88, 0);
-        let ident = 0x1234;
-        let req = build_icmp_echo_request(source, target, ident, 7);
-        assert_eq!(req.len(), 20 + 8 + 6, "IPv4 头 + ICMP 头 + payload");
-        assert_eq!(req[9], 1, "ICMP 协议");
-        assert_eq!(req[20], 8, "echo request type");
-        assert_eq!(req[24..26], ident.to_be_bytes(), "ident 写入");
-
-        // 构造匹配的 echo reply：源/目标互换 + type 0 + 重算校验和。
-        let mut reply = build_icmp_echo_request(target, source, ident, 7);
-        reply[20] = 0;
-        let sum = internet_checksum(&reply[20..]);
-        reply[22] = (sum >> 8) as u8;
-        reply[23] = (sum & 0xFF) as u8;
-        assert!(is_icmp_echo_reply(&reply, target, source, ident), "匹配 reply");
-    }
-
-    /// 不匹配的包（type 8 请求 / 异 ident / 异目标 / 非 ICMP）不得被当作 echo reply。
-    #[test]
-    fn icmp_echo_reply_rejects_non_matching() {
-        let source = Ipv4Addr::new(10, 88, 88, 5);
-        let target = Ipv4Addr::new(10, 88, 88, 0);
-        let ident = 0x1234;
-        let req = build_icmp_echo_request(source, target, ident, 0);
-        assert!(!is_icmp_echo_reply(&req, target, source, ident), "type 8 不是 reply");
-
-        let mut reply = build_icmp_echo_request(target, source, ident + 1, 0);
-        reply[20] = 0;
-        let sum = internet_checksum(&reply[20..]);
-        reply[22] = (sum >> 8) as u8;
-        reply[23] = (sum & 0xFF) as u8;
-        assert!(!is_icmp_echo_reply(&reply, target, source, ident), "异 ident 不匹配");
-
-        assert!(!is_icmp_echo_reply(&[], target, source, ident), "空包");
-        let mut v6 = vec![0u8; 28];
-        v6[0] = 0x60;
-        assert!(!is_icmp_echo_reply(&v6, target, source, ident), "IPv6 不匹配");
-    }
-
-    // ---- T1 Part B：探测状态机（DPD→ping fallback / 手动标记 / RTT 计时）----
-
-    fn probe_cfg(dpd_enabled: bool, refresh_marker: Option<PathBuf>) -> LatencyProbeConfig {
-        LatencyProbeConfig {
-            target: Ipv4Addr::new(10, 88, 88, 0),
-            source: Ipv4Addr::new(10, 88, 88, 5),
-            dpd_enabled,
-            ping_interval: Duration::from_secs(180),
-            refresh_marker,
-        }
-    }
-
-    /// 解码一条探测发出的 CSTP Data 帧 → IP 包（测试便捷）。
-    fn decode_data_frame(frame: &[u8]) -> Vec<u8> {
-        let mut codec = Codec::new();
-        codec.feed(frame);
-        match codec.decode().expect("decodes").expect("some") {
-            CstpFrame::Data(p) => p,
-            other => panic!("expected Data frame, got {other:?}"),
-        }
-    }
-
-    /// ping 周期触发：interval 未到不发，interval 到发一条，echo reply 匹配 → RTT。
-    #[test]
-    fn probe_ping_periodic_fires_and_times_reply() {
-        let mut probe = ProbeState::new(probe_cfg(false, None));
-        let t0 = Instant::now();
-        let mut sent: Vec<Vec<u8>> = Vec::new();
-        probe.tick(t0, &mut |f| sent.push(f));
-        assert!(sent.is_empty(), "interval 未到不发");
-
-        let t1 = t0 + Duration::from_secs(180);
-        probe.tick(t1, &mut |f| sent.push(f));
-        assert_eq!(sent.len(), 1, "interval 到发一条 ping");
-
-        let ip = decode_data_frame(&sent[0]);
-        assert_eq!(ip[16..20], probe.cfg.target.octets(), "ping 包目标 = 探测目标");
-        // 构造匹配 echo reply（type 0 + 同 ident）。
-        let mut reply = build_icmp_echo_request(probe.cfg.target, probe.cfg.source, 0, 0);
-        reply[20] = 0;
-        let sum = internet_checksum(&reply[20..]);
-        reply[22] = (sum >> 8) as u8;
-        reply[23] = (sum & 0xFF) as u8;
-        let rtt = probe.on_icmp_echo_reply(&reply, t1 + Duration::from_millis(40));
-        assert_eq!(rtt, Some(40), "echo reply 计时 40ms");
-        assert!(probe.pending_ping.is_none(), "reply 后清空在途请求");
-    }
-
-    /// DPD 优先：周期到发 DPD request；无应答连续超时 → 永久回退 ping。
-    #[test]
-    fn probe_dpd_timeout_falls_back_to_ping() {
-        let mut probe = ProbeState::new(probe_cfg(true, None));
-        let t0 = Instant::now();
-        let mut sent: Vec<Vec<u8>> = Vec::new();
-        // DPD interval 5s。推进 3 个周期且无应答 → 回退 ping。
-        let mut t = t0;
-        for i in 0..(super::DPD_MAX_TIMEOUTS + 1) {
-            t = t0 + Duration::from_secs(5 * u64::from(i + 1));
-            probe.tick(t, &mut |f| sent.push(f));
-        }
-        assert_eq!(probe.kind, ProbeKind::Ping, "DPD 连续无应答 → 回退 ping");
-        // 回退后下一个 ping 周期（180s）发 ping（DPD 不再发）。
-        let before = sent.len();
-        let t_ping = t + Duration::from_secs(180);
-        probe.tick(t_ping, &mut |f| sent.push(f));
-        assert_eq!(sent.len(), before + 1, "回退后发 ping");
-    }
-
-    /// DPD response 到达 → 计时 RTT（`on_dpd_response`）。
-    #[test]
-    fn probe_dpd_response_times_rtt() {
-        let mut probe = ProbeState::new(probe_cfg(true, None));
-        let t0 = Instant::now();
-        let mut sent: Vec<Vec<u8>> = Vec::new();
-        probe.tick(t0 + Duration::from_secs(5), &mut |f| sent.push(f));
-        assert_eq!(sent.len(), 1, "DPD request 已发");
-        assert!(probe.pending_dpd.is_some());
-        let rtt = probe.on_dpd_response(t0 + Duration::from_secs(5) + Duration::from_millis(30));
-        assert_eq!(rtt, Some(30), "DPD response 计时 30ms");
-        assert_eq!(probe.dpd_timeouts, 0, "response 重置超时计数");
-    }
-
-    /// 手动刷新标记：文件内容（epoch 毫秒）新于上次 → 立即探测（无需等周期）。
-    #[test]
-    fn probe_marker_triggers_immediate_probe() {
-        let dir = std::env::temp_dir();
-        let marker = dir.join(format!("exv-latency-marker-{}.txt", std::process::id()));
-        let _ = std::fs::remove_file(&marker);
-        let cfg = probe_cfg(false, Some(marker.clone()));
-        let mut probe = ProbeState::new(cfg);
-        let t0 = Instant::now();
-        let mut sent: Vec<Vec<u8>> = Vec::new();
-        probe.tick(t0 + Duration::from_secs(1), &mut |f| sent.push(f));
-        assert!(sent.is_empty(), "无标记不触发");
-
-        std::fs::write(&marker, "1700000000000").expect("write marker");
-        let t1 = t0 + Duration::from_secs(2); // 超过 MARKER_POLL_INTERVAL
-        probe.tick(t1, &mut |f| sent.push(f));
-        assert_eq!(sent.len(), 1, "新标记立即触发探测");
-
-        // 同值标记不重复触发。
-        let t2 = t0 + Duration::from_secs(3);
-        probe.tick(t2, &mut |f| sent.push(f));
-        assert_eq!(sent.len(), 1, "同值标记不重复触发");
-
-        let _ = std::fs::remove_file(&marker);
-    }
-}

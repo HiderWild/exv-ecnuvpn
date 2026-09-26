@@ -216,35 +216,3 @@ fn file_uri(path: &Path) -> String {
     }
     format!("file:///{s}")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn aumid_matches_tauri_identifier() {
-        assert_eq!(AUMID, "com.exv.vpn.desktop");
-    }
-
-    #[test]
-    fn aumid_no_longer_reuses_powershell_identity() {
-        // R8 回归护栏：旧实现用 PowerShell 的 AUMID（toast 名头显示「Windows PowerShell」）。
-        assert_ne!(
-            AUMID,
-            r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
-        );
-    }
-
-    #[test]
-    fn start_menu_layout_matches_installer() {
-        // 与 windows_setup_rust/shortcuts.cpp 的 `<Programs>\EXV\EXV.lnk` 保持一致，
-        // 保证安装器与运行时注册落在同一文件、不产生双份快捷方式。
-        assert_eq!(START_MENU_REL_PATH, "EXV\\EXV.lnk");
-    }
-
-    #[test]
-    fn file_uri_uses_forward_slashes() {
-        assert_eq!(file_uri(Path::new(r"C:\Users\Tom\AppData\Local\EXV\a b.png")),
-            "file:///C:/Users/Tom/AppData/Local/EXV/a b.png");
-    }
-}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EXV",
+  "version": "4.0.0",
+  "identifier": "com.exv.vpn.desktop",
+  "build": {
+    "beforeDevCommand": "npm --prefix ../frontend run dev",
+    "beforeBuildCommand": "npm --prefix ../frontend run build",
+    "frontendDist": "/Users/user/Projects/exv-private/target/darwin-tauri-frontend"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "EXV",
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 860,
+        "minHeight": 600,
+        "resizable": true,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "../../../../../../assets/icons/icon.icns",
+      "../../../../../../assets/icons/icon.png"
+    ]
+  }
+}

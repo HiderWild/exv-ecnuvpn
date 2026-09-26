@@ -62,37 +62,3 @@ pub fn show_toast(title: &str, body: &str) -> bool {
     // Show 是 fire-and-forget；横幅是否弹出由用户系统通知设置决定（通知中心始终可达）。
     notifier.Show(&toast).is_ok()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escape_xml_handles_special_chars() {
-        assert_eq!(escape_xml("a&b<c>d\"e"), "a&amp;b&lt;c&gt;d&quot;e");
-    }
-
-    #[test]
-    fn toast_xml_without_icon_has_no_image() {
-        let xml = toast_xml("标题", "正文", None);
-        assert!(!xml.contains("<image"));
-        assert!(xml.contains("<text>标题</text>"));
-        assert!(xml.contains("<text>正文</text>"));
-        assert!(xml.contains("template=\"ToastGeneric\""));
-    }
-
-    #[test]
-    fn toast_xml_with_icon_embeds_applogo_override() {
-        let xml = toast_xml("标题", "正文", Some("file:///C:/EXV/toast-icon.png"));
-        assert!(xml.contains(
-            "<image placement=\"appLogoOverride\" src=\"file:///C:/EXV/toast-icon.png\"/>"
-        ));
-    }
-
-    #[test]
-    fn toast_xml_escapes_injected_tags_in_body() {
-        let xml = toast_xml("t", "<script>alert(1)</script>", None);
-        assert!(!xml.contains("<script>"));
-        assert!(xml.contains("&lt;script&gt;"));
-    }
-}

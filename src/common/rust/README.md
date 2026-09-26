@@ -37,9 +37,7 @@ Common 不是跨进程、跨宿主的联合状态机，也不规定 Windows 与 
 本路径遵循：
 
 - 顶层需求：
-  `docs/superpowers/specs/vpn-rust-native-runtime-mvp.md`
 - Common Architecture：
-  `docs/superpowers/specs/vpn-rust-native-runtime-mvp-common-architecture.md`
 
 任何重新接线都必须另立独立的 cutover requirement，明确引用顶层需求，并在
 Windows 与 Darwin 各自对应的原生宿主上重新运行真实 VPN 业务流。一个平台的

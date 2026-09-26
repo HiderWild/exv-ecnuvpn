@@ -1,17 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P5-a integration contract for `HelperControl.StreamStats` over the REAL named-pipe
-// transport:
-//
-//   1. `stream_stats` is transport-gated (unauthenticated peer is refused).
-//   2. Over the pipe, opening `stream_stats` attaches the engine stats publisher;
-//      counters recorded on the shared registry stream out as `StatsEvent` samples
-//      with the accumulated cumulative shape.
-//   3. The mutation boundary transitions phase: `ApplyTunnel` → Connected,
-//      `StopTunnel` → Idle, and the pushed samples reflect it.
-//
-// Mirrors the harness in tests/grpc_server.rs (same test-only named-pipe connector).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -77,6 +63,7 @@ fn wire_plan() -> generated::TunnelPlan {
         ipv4_routes: vec![],
         dns_servers: vec![],
         control_bypass: vec![],
+        proxy_exempt: vec![],
         opaque_intent: Some(generated::TunnelIntentRef {
             identity_digest: digest32(0x33),
         }),
@@ -271,6 +258,7 @@ async fn stream_stats_pushes_accumulated_samples_over_named_pipe() {
             request_digest: digest32(2),
             secret_payload: b"{\"version\":1,\"username\":\"student\",\"password\":\"s3cret\"}"
                 .to_vec(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .expect("apply succeeds");

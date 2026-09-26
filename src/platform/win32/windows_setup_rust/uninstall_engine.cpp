@@ -6,6 +6,7 @@
 #include "windows_setup_rust/registry_install.hpp"
 #include "windows_setup_rust/service_control.hpp"
 #include "windows_setup_rust/shortcuts.hpp"
+#include "windows_setup_rust/util/command_line.hpp"
 #include "windows_setup_rust/util/hidden_process.hpp"
 
 #define WIN32_LEAN_AND_MEAN
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -23,6 +25,13 @@ namespace {
 
 struct DeleteTreeResult {
   bool ok{true};
+  std::uint32_t scheduled_delete_count{0};
+  std::wstring error;
+};
+
+struct DeletePathResult {
+  bool ok{true};
+  bool scheduled{false};
   std::wstring error;
 };
 
@@ -33,34 +42,89 @@ void AppendError(std::wstring &errors, const std::wstring &error) {
   errors += error;
 }
 
-bool DeleteOrSchedule(const fs::path &path, std::wstring &error) {
+DeletePathResult DeleteOrSchedule(const fs::path &path) {
+  DeletePathResult result;
   std::error_code ec;
   const bool present = fs::exists(path, ec);
   if (ec) {
-    error = L"无法检查路径：" + path.wstring();
-    return false;
+    result.ok = false;
+    result.error = L"无法检查路径：" + path.wstring();
+    return result;
   }
   if (!present) {
-    return true;
+    return result;
   }
   if (fs::remove(path, ec)) {
-    return true;
+    return result;
   }
   if (!ec) {
     const bool still_present = fs::exists(path, ec);
     if (!ec && !still_present) {
-      return true;
+      return result;
     }
   }
   const auto remove_error = ec.value();
   if (MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) {
-    return true;
+    result.scheduled = true;
+    return result;
   }
   const DWORD schedule_error = GetLastError();
-  error = L"无法删除或登记重启删除：" + path.wstring() + L"（remove=" +
-          std::to_wstring(remove_error) + L"，schedule=" +
-          std::to_wstring(schedule_error) + L"）";
-  return false;
+  result.ok = false;
+  result.error = L"无法删除或登记重启删除：" + path.wstring() + L"（remove=" +
+                 std::to_wstring(remove_error) + L"，schedule=" +
+                 std::to_wstring(schedule_error) + L"）";
+  return result;
+}
+
+void AccumulateDeletion(DeleteTreeResult &tree, const DeletePathResult &path) {
+  if (path.scheduled) {
+    ++tree.scheduled_delete_count;
+  }
+  if (!path.ok) {
+    tree.ok = false;
+    AppendError(tree.error, path.error);
+  }
+}
+
+std::wstring CreateTemporaryLogPath(const std::wstring &preferred_temp_root) {
+  wchar_t temp_file[MAX_PATH + 1] = {};
+  if (!preferred_temp_root.empty() && preferred_temp_root.size() <= MAX_PATH &&
+      GetTempFileNameW(preferred_temp_root.c_str(), L"exv", 0, temp_file) != 0) {
+    return temp_file;
+  }
+
+  wchar_t process_temp[MAX_PATH + 1] = {};
+  const DWORD length = GetTempPathW(MAX_PATH + 1, process_temp);
+  if (length == 0 || length > MAX_PATH ||
+      GetTempFileNameW(process_temp, L"exv", 0, temp_file) == 0) {
+    return {};
+  }
+  return temp_file;
+}
+
+std::wstring WriteCleanupDiagnosticLog(const HiddenProcessResult &cleanup,
+                                       const std::wstring &preferred_temp_root) {
+  const auto temp_file = CreateTemporaryLogPath(preferred_temp_root);
+  if (temp_file.empty()) {
+    return {};
+  }
+
+  std::ofstream output(fs::path(temp_file), std::ios::binary | std::ios::trunc);
+  if (!output) {
+    DeleteFileW(temp_file.c_str());
+    return {};
+  }
+  output << "started=" << (cleanup.started ? "true" : "false") << "\r\n"
+         << "exit_code=" << cleanup.exit_code << "\r\n"
+         << "captured_output:\r\n"
+         << cleanup.captured_stdout;
+  output.flush();
+  if (!output) {
+    output.close();
+    DeleteFileW(temp_file.c_str());
+    return {};
+  }
+  return temp_file;
 }
 
 DeleteTreeResult DeleteTreeBestEffort(const fs::path &root) {
@@ -91,38 +155,50 @@ DeleteTreeResult DeleteTreeBestEffort(const fs::path &root) {
     return result;
   }
 
-  std::wstring errors;
   for (const auto &f : files) {
-    std::wstring error;
-    if (!DeleteOrSchedule(f, error)) {
-      AppendError(errors, error);
-    }
+    AccumulateDeletion(result, DeleteOrSchedule(f));
   }
   std::sort(dirs.begin(), dirs.end(),
             [](const fs::path &a, const fs::path &b) {
               return a.wstring().size() > b.wstring().size();
             });
   for (const auto &d : dirs) {
-    std::wstring error;
-    if (!DeleteOrSchedule(d, error)) {
-      AppendError(errors, error);
-    }
+    AccumulateDeletion(result, DeleteOrSchedule(d));
   }
-  std::wstring error;
-  if (!DeleteOrSchedule(root, error)) {
-    AppendError(errors, error);
-  }
-  if (!errors.empty()) {
-    result.ok = false;
-    result.error = errors;
-  }
+  AccumulateDeletion(result, DeleteOrSchedule(root));
   return result;
 }
 
 }  // namespace
 
+std::wstring BuildUninstallResultDetail(const UninstallResult &result) {
+  std::wstring detail;
+  auto append = [&](const std::wstring &line) {
+    if (line.empty()) {
+      return;
+    }
+    if (!detail.empty()) {
+      detail.push_back(L'\n');
+    }
+    detail += line;
+  };
+  // 重启提示优先显示，避免错误正文很长时被页面底部裁掉。
+  if (result.reboot_required) {
+    append(L"部分文件将在重启后自动删除。");
+  }
+  append(result.error);
+  append(result.notice);
+  if (!result.diagnostic_log_path.empty()) {
+    append(L"诊断日志：" + result.diagnostic_log_path);
+  }
+  return detail;
+}
+
 UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *progress) {
   UninstallResult result;
+  if (request.clear_user_data) {
+    result.notice = request.credential_cleanup_note;
+  }
   std::wstring errors;
   // Monotonic milestones 0→1. UI maps target to falling water (1 - t).
   // Skipped work still advances the waterline so each step is visually accounted for.
@@ -202,16 +278,65 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
     if (progress) {
       progress->SetStageSpan(0.66, 0.78);
     }
+    std::wstring missing_roots;
+    auto require_root = [&](const wchar_t *name, const std::wstring &value) {
+      if (value.empty()) {
+        if (!missing_roots.empty()) {
+          missing_roots += L"、";
+        }
+        missing_roots += name;
+      }
+    };
+    require_root(L"USERPROFILE", request.user_profile_root);
+    require_root(L"LOCALAPPDATA", request.local_app_data_root);
+    require_root(L"APPDATA", request.roaming_app_data_root);
+    require_root(L"TEMP", request.temp_root);
+
     const auto script = fs::path(install_dir) / L"support" / L"clear-local-user-config.ps1";
-    if (fs::exists(script)) {
+    if (!missing_roots.empty()) {
+      AppendError(errors, L"无法清理用户数据：未捕获发起卸载者路径（" + missing_roots +
+                              L"），为避免访问提权账户已跳过");
+      status(L"用户数据清理失败", 0.78);
+    } else if (fs::exists(script)) {
       // Hidden PowerShell only — never elevated Verb RunAs window path.
-      const std::wstring cmd =
-          L"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" +
-          script.wstring() + L"\" -Force -IncludeCredentialManager";
-      RunHidden(L"", cmd, 120000);
-      status(L"用户数据已清除", 0.78);
+      std::wstring cmd =
+          L"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File " +
+          QuoteCommandLineArgument(script.wstring()) + L" -Force";
+      if (request.include_credential_manager) {
+        cmd += L" -IncludeCredentialManager";
+      }
+      auto append_path = [&](const wchar_t *name, const std::wstring &value) {
+        if (!value.empty()) {
+          cmd += L" ";
+          cmd += name;
+          cmd += L" ";
+          cmd += QuoteCommandLineArgument(value);
+        }
+      };
+      append_path(L"-InstallDir", install_dir);
+      append_path(L"-UserProfileRoot", request.user_profile_root);
+      append_path(L"-LocalAppDataRoot", request.local_app_data_root);
+      append_path(L"-RoamingAppDataRoot", request.roaming_app_data_root);
+      append_path(L"-ConfigDir", request.config_dir);
+      append_path(L"-TempRoot", request.temp_root);
+      const auto cleanup_result = RunHidden(L"", cmd, 120000);
+      if (!cleanup_result.started || cleanup_result.exit_code != 0) {
+        result.diagnostic_log_path = WriteCleanupDiagnosticLog(cleanup_result, request.temp_root);
+        std::wstring cleanup_error = cleanup_result.started
+                                         ? L"用户数据清理脚本执行失败（exit=" +
+                                               std::to_wstring(cleanup_result.exit_code) + L"）"
+                                         : L"无法启动用户数据清理脚本";
+        if (result.diagnostic_log_path.empty()) {
+          cleanup_error += L"，且无法写入诊断日志";
+        }
+        AppendError(errors, cleanup_error);
+        status(L"用户数据清理失败", 0.78);
+      } else {
+        status(L"用户数据已清除", 0.78);
+      }
     } else {
-      status(L"未找到清理脚本，已跳过", 0.78);
+      AppendError(errors, L"未找到用户数据清理脚本");
+      status(L"用户数据清理失败", 0.78);
     }
   } else {
     status(L"保留用户数据", 0.78);
@@ -222,6 +347,8 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
     progress->SetStageSpan(0.82, 0.96);
   }
   const auto delete_result = DeleteTreeBestEffort(install_dir);
+  result.scheduled_delete_count = delete_result.scheduled_delete_count;
+  result.reboot_required = result.scheduled_delete_count != 0;
   if (!delete_result.ok) {
     AppendError(errors, delete_result.error);
     status(L"文件删除失败", 0.96);

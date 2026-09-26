@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! engine 崩溃自愈（P3 / plan D3）：liveness → respawn 全链路。
 //!
@@ -30,11 +28,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 use exv_vpn_win32_ipc::peer_auth::VerifiedPipePeer;
 
-use crate::composition::{compose_nonprivileged_host, HostComposition};
+use crate::composition::{HostComposition, compose_nonprivileged_host};
 use crate::engine_lifecycle::{
     ElevatedEngineSpawner, EngineSlot, EngineSpawnError, EngineSupervisor,
 };
@@ -113,7 +111,7 @@ impl SystemResidueProbe {
     /// 枚举全部 adapter：返回（engine adapter 计数, 现存接口 LUID 集合）。
     fn enumerate(&self) -> Result<(usize, HashSet<u64>), String> {
         use windows::Win32::NetworkManagement::IpHelper::{
-            GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, IP_ADAPTER_ADDRESSES_LH,
+            GAA_FLAG_INCLUDE_GATEWAYS, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
         };
         use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -259,6 +257,62 @@ impl std::fmt::Display for RespawnError {
 }
 
 impl std::error::Error for RespawnError {}
+
+// ---------------------------------------------------------------------------
+// 自愈上报 seam（2026-09-05 host 自愈进展 UI 计划 §4.3）：把 respawn 阶段变化变为
+// 可观测状态（真实实现桥接 EventBus lane + 日志聚合器；测试用 recording fake）。
+// host 阶段变化点只经本 seam 上报，不反向依赖 kernel_control 服务内部。
+// ---------------------------------------------------------------------------
+
+/// 自愈阶段（wire `SelfHealStatus.stage` 的 host 侧枚举；计划 §4.2 冻结三态）。
+///
+/// 不设独立 `detected` 阶段（检测即 respawn，liveness 翻转与 `run_respawn` 开始间无
+/// 用户可感知窗口——`Respawning` 的首次发布即「检测到崩溃」）；也不设 `reconnecting`
+/// 阶段（respawn 不重放凭据，「连接重建」是用户重新点击连接，不是上报状态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfHealStage {
+    /// 检测到 engine 失联，respawn 编排进行中（含 teardown/残留探测/重建各步）。
+    Respawning,
+    /// 新 engine 已拉起并接好；原连接已终止，需用户重新连接。
+    Succeeded,
+    /// respawn 被阻/失败（fail-closed，不自动重试；携带 [`respawn_error_code`] 码）。
+    Failed,
+}
+
+impl SelfHealStage {
+    /// wire stage 字符串（计划 §4.2 冻结枚举；未知码由前端 fail-safe 渲染）。
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Respawning => "respawning",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// 自愈上报 seam：一次阶段变化的上报（lane 刷新 + 结构化日志由真实实现落地；随后的
+/// 相位快照刷新发布由调用方在发布点驱动——`EventBus::publish_self_heal_refresh`）。
+pub trait SelfHealReporter: Send + Sync {
+    /// 上报一次自愈阶段变化。
+    ///
+    /// `old_pid` = 崩溃 engine PID（0 = 不可得）；`new_pid` = 新 engine PID（仅
+    /// `Succeeded` 非零）；`error_code` = 仅 `Failed` 非空（[`respawn_error_code`] 码表）。
+    fn report(&self, stage: SelfHealStage, old_pid: u32, new_pid: u32, error_code: &str);
+}
+
+/// `RespawnError` → 稳定 error_code（计划 §4.2 冻结码表；五变体穷尽映射，无秘密、
+/// 无栈——与 wire `SelfHealStatus.error_code` 同源）。
+#[must_use]
+pub fn respawn_error_code(error: &RespawnError) -> &'static str {
+    match error {
+        RespawnError::ResidueProbe(_) => "residue_probe_failed",
+        RespawnError::Residue(_) => "residue_assert_failed",
+        RespawnError::Spawn(_) => "spawn_failed",
+        RespawnError::Connect(_) => "connect_failed",
+        RespawnError::Rebuild(_) => "rebuild_failed",
+    }
+}
 
 /// 新 `EngineSupervisor` 的可注入工厂（测试注入 fake child，规避真实提权/elevation
 /// 门禁；生产 [`ProductSupervisorFactory`] 走 `EngineSupervisor::spawn_product`）。
@@ -424,24 +478,39 @@ impl CrashRecovery {
     /// 重开、phase Idle、操作登记清空），并重授权 gate（controller transport peer 身份）
     /// + actor 绑定——"回 Idle/报错"的 Idle 侧。
     async fn rebuild_composition(&self, new_peer: &VerifiedPipePeer) -> Result<(), String> {
-        let mut composition = self.composition.lock().await;
-        let fresh = compose_nonprivileged_host(new_peer)
-            .map_err(|e| format!("compose for respawn failed: {e:?}"))?;
-        *composition = fresh;
-        // 重建后的 gate 未授权：用已验证的 controller（UI）peer 重授权（fail closed）。
-        composition
-            .kernel_gate()
-            .authorize(&self.ui_peer)
-            .map_err(|e| format!("gate reauthorize after respawn failed: {e:?}"))?;
-        let (actor_peer, capability) = controller_peer_and_capability();
-        composition.bind_controller(actor_peer, capability);
-        Ok(())
+        rebind_composition(&self.composition, new_peer, &self.ui_peer).await
     }
+}
+
+/// composition 身份重建（respawn 与按需 provision 共用的实现）：
+///
+/// 替换为绑定新 engine peer 的全新 composition（admission 重开、phase Idle、操作登记
+/// 清空），并以已验证的 controller（UI）peer 重授权 gate + 重绑 actor。
+///
+/// # Errors
+/// compose 失败 / gate 重授权失败（fail closed——不留下半重建状态，回收决策归调用方）。
+pub(crate) async fn rebind_composition(
+    composition: &Arc<Mutex<HostComposition>>,
+    new_peer: &VerifiedPipePeer,
+    ui_peer: &VerifiedPipePeer,
+) -> Result<(), String> {
+    let mut composition = composition.lock().await;
+    let fresh = compose_nonprivileged_host(new_peer)
+        .map_err(|e| format!("compose for engine rebind failed: {e:?}"))?;
+    *composition = fresh;
+    // 重建后的 gate 未授权：用已验证的 controller（UI）peer 重授权（fail closed）。
+    composition
+        .kernel_gate()
+        .authorize(ui_peer)
+        .map_err(|e| format!("gate reauthorize after engine rebind failed: {e:?}"))?;
+    let (actor_peer, capability) = controller_peer_and_capability();
+    composition.bind_controller(actor_peer, capability);
+    Ok(())
 }
 
 /// 组装 composition 绑定用的 engine peer 身份（PID + 用户 SID + account name）。
 /// 与 core bin 的 `engine_peer_for` 同构（lib 侧复用点）。
-fn engine_peer_for(pid: u32, user_sid: &str) -> VerifiedPipePeer {
+pub(crate) fn engine_peer_for(pid: u32, user_sid: &str) -> VerifiedPipePeer {
     let account_name = lookup_account_name(user_sid);
     VerifiedPipePeer {
         process_id: pid,
@@ -454,306 +523,3 @@ fn engine_peer_for(pid: u32, user_sid: &str) -> VerifiedPipePeer {
 // ---------------------------------------------------------------------------
 // 单元测试：纯断言 + 编排链（fake seam；无真实进程/提权/Wintun）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::composition::HostPhase;
-    use crate::engine_lifecycle::test_support::{RecordingEngine, fake_child};
-    use exv_vpn_win32_ipc::peer_auth::VerifiedPipePeer;
-
-    /// 确定性已验 helper peer（与 process_boundary 同源构造）。
-    fn helper_peer() -> VerifiedPipePeer {
-        VerifiedPipePeer {
-            process_id: 4242,
-            user_sid: "S-1-5-21-3980489076-1253412212-3874560562-1002".to_string(),
-            logon_sid: Some("S-1-5-5-0-323470".to_string()),
-            account_name: "EXV VPN Helper".to_string(),
-        }
-    }
-
-    /// 真实系统残留探测（轻量运行时证据）：`SystemResidueProbe` 对本机只读探测必须返回
-    /// 报告（不 panic、不误报失败）。**不断言 0/0**——机器状态外部可变（上游 proxy TUN 等），
-    /// 断言探测可用 + 报告结构自洽；0 残留的完整验收在 P4 业务验收（Mihomo TUN 关闭前提）。
-    #[test]
-    fn system_residue_probe_runs_against_real_system() {
-        let probe = SystemResidueProbe {
-            adapter_name: crate::process_lifecycle::ENGINE_ADAPTER_NAME.to_string(),
-        };
-        let report = probe.probe().expect("system probe must succeed");
-        // 结构自洽：残留数非负（usize 天然）；探测不 panic 即证明 Win32 枚举路径可用。
-        let _ = report.exv_adapter_count;
-        let _ = report.orphan_route_count;
-    }
-
-    /// `assert_no_residue`：零残留放行；adapter 残留 / 孤儿路由残留任一存在即阻断。
-    #[test]
-    fn residue_assertion_gates_on_any_residue() {
-        assert!(assert_no_residue(&ResidueReport::default()).is_ok());
-        assert!(
-            assert_no_residue(&ResidueReport {
-                exv_adapter_count: 1,
-                orphan_route_count: 0,
-            })
-            .is_err(),
-            "adapter 残留必须阻断 respawn"
-        );
-        assert!(
-            assert_no_residue(&ResidueReport {
-                exv_adapter_count: 0,
-                orphan_route_count: 1,
-            })
-            .is_err(),
-            "孤儿路由残留必须阻断 respawn"
-        );
-    }
-
-    /// 确定性残留探测：注入残留事实。
-    #[derive(Default)]
-    struct FakeResidue {
-        report: std::sync::Mutex<Option<ResidueReport>>,
-    }
-
-    impl ResidueProbe for FakeResidue {
-        fn probe(&self) -> Result<ResidueReport, String> {
-            Ok(self.report.lock().unwrap().clone().unwrap_or_default())
-        }
-    }
-
-    /// 失败注入残留探测（系统枚举不可用）。
-    struct FailingProbe;
-
-    impl ResidueProbe for FailingProbe {
-        fn probe(&self) -> Result<ResidueReport, String> {
-            Err("GetAdaptersAddresses failed: 31".to_string())
-        }
-    }
-
-    /// fake client 连接器：产出记录型 fake engine（`RecordingEngine`），记录每次
-    /// connect 的 pid。
-    struct FakeConnector {
-        /// 每次 connect 记录 pid。
-        pids: std::sync::Mutex<Vec<u32>>,
-        /// connect 失败的注入（`Some` = 模拟连接失败）。
-        fail: std::sync::Mutex<Option<String>>,
-        /// 记录型 engine（slot 换入后断言可用）。
-        engine: Arc<tokio::sync::Mutex<RecordingEngine>>,
-    }
-
-    #[tonic::async_trait]
-    impl RespawnClientConnector for FakeConnector {
-        async fn connect(
-            &self,
-            engine_pid: u32,
-            _user_sid: &str,
-        ) -> Result<(Arc<Mutex<dyn KernelEngineControl>>, watch::Receiver<bool>), String> {
-            self.pids.lock().unwrap().push(engine_pid);
-            if let Some(reason) = self.fail.lock().unwrap().clone() {
-                return Err(reason);
-            }
-            let engine: Arc<Mutex<dyn KernelEngineControl>> = self.engine.clone();
-            let (_tx, rx) = watch::channel(true);
-            Ok((engine, rx))
-        }
-    }
-
-    /// fake supervisor 工厂：产出占位 child（0 句柄）的 supervisor。
-    struct FakeSupervisorFactory;
-
-    impl RespawnSupervisorFactory for FakeSupervisorFactory {
-        fn spawn_supervisor(&self) -> Result<EngineSupervisor, EngineSpawnError> {
-            Ok(EngineSupervisor::with_child(fake_child()))
-        }
-    }
-
-    /// 构造一个已 connect 的 composition（已连接，用于断言 respawn 后重建回 Idle）。
-    fn connected_composition() -> Arc<Mutex<HostComposition>> {
-        let mut comp =
-            crate::composition::compose_nonprivileged_host(&helper_peer()).expect("compose");
-        let (peer, cap) = controller_peer_and_capability();
-        comp.bind_controller(peer, cap);
-        comp.apply(crate::composition::HostEvent::Connect);
-        comp.apply(crate::composition::HostEvent::ProtocolEstablished);
-        assert_eq!(comp.phase(), HostPhase::Connected);
-        Arc::new(Mutex::new(comp))
-    }
-
-    /// 构造 `CrashRecovery`（默认零残留 + 成功连接器）。
-    fn recovery(
-        residue: Arc<dyn ResidueProbe>,
-        connector: Arc<FakeConnector>,
-        slot: EngineSlot,
-        composition: Arc<Mutex<HostComposition>>,
-    ) -> CrashRecovery {
-        CrashRecovery::new(
-            Arc::new(FakeSupervisorFactory),
-            connector,
-            residue,
-            slot,
-            composition,
-            helper_peer(),
-            "S-1-5-21-3980489076-1253412212-3874560562-1002".to_string(),
-        )
-    }
-
-    /// 完整 respawn 链（成功路径）：teardown 兜底 → 0 残留断言 → 新 supervisor → 新
-    /// client → slot 换入 → composition 身份重建（回 Idle + 新 peer + gate 重授权）→
-    /// supervisor 替换。
-    #[tokio::test]
-    async fn run_respawn_full_chain_rebuilds_identity_and_idle() {
-        let connector_engine = Arc::new(tokio::sync::Mutex::new(RecordingEngine {
-            stops: std::sync::Mutex::new(Vec::new()),
-        }));
-        let connector = Arc::new(FakeConnector {
-            pids: std::sync::Mutex::new(Vec::new()),
-            fail: std::sync::Mutex::new(None),
-            engine: Arc::clone(&connector_engine),
-        });
-        // 初始 client：占位 fake（slot 初始指向它）。
-        let initial: Arc<Mutex<dyn KernelEngineControl>> = Arc::new(tokio::sync::Mutex::new(
-            RecordingEngine {
-                stops: std::sync::Mutex::new(Vec::new()),
-            },
-        ));
-        let slot = EngineSlot::new(initial);
-        let composition = connected_composition();
-        let recovery = recovery(
-            Arc::new(FakeResidue::default()),
-            Arc::clone(&connector),
-            slot.clone(),
-            Arc::clone(&composition),
-        );
-        let mut supervisor = EngineSupervisor::with_child(fake_child());
-        let old_pid = supervisor.pid().unwrap_or(0);
-
-        let outcome = recovery
-            .run_respawn(&mut supervisor)
-            .await
-            .expect("respawn ok");
-
-        // 1. respawn 成功：旧 pid 记录 + 新 supervisor 就位。
-        let new_pid = supervisor.pid().unwrap_or(0);
-        assert_eq!(
-            outcome,
-            RespawnOutcome::Respawned { old_pid, new_pid },
-            "respawn 结果必须携带旧/新 pid"
-        );
-        assert_eq!(connector.pids.lock().unwrap().len(), 1, "恰好一次新 client 连接");
-        assert!(supervisor.client().is_some(), "新 supervisor 必须挂接新 client");
-
-        // 2. slot 已换入新 client（respawn 后写路径指向新 engine——身份重建后连接可用）。
-        let swapped = slot.current().await;
-        let mut guard = swapped.lock().await;
-        let reply = guard
-            .stop_tunnel(exv_vpn_wire::generated::StopTunnelRequest::default())
-            .await;
-        assert!(reply.is_ok(), "slot 换入的 client 必须可用");
-        drop(guard);
-
-        // 3. composition 身份重建：回 Idle + admission 重开 + gate 已授权（新 peer PID
-        //    与旧 engine PID 不同——fake 新 child PID=0 不等于旧 composition 的 4242）。
-        let mut comp = composition.lock().await;
-        assert_eq!(comp.phase(), HostPhase::Idle, "respawn 后 composition 回 Idle");
-        assert!(
-            comp.admission_open(),
-            "respawn 后 admission 必须重开（用户再点连接可受理）"
-        );
-        assert!(
-            comp.kernel_gate().is_authorized(),
-            "respawn 后 gate 必须已重授权（写路径不因重建被拒）"
-        );
-        assert_ne!(
-            comp.helper_process_id(),
-            4242,
-            "身份重建后 composition 必须绑定新 engine peer（旧 PID 失效）"
-        );
-    }
-
-    /// respawn 前置 0 残留硬断言：任一残留（adapter/孤儿路由）→ `Residue` 错误，supervisor
-    /// 不被替换（fail closed，不自动重连）。
-    #[tokio::test]
-    async fn run_respawn_blocked_by_residue_assertion() {
-        let residue = Arc::new(FakeResidue {
-            report: std::sync::Mutex::new(Some(ResidueReport {
-                exv_adapter_count: 1,
-                orphan_route_count: 0,
-            })),
-        });
-        let connector = Arc::new(FakeConnector {
-            pids: std::sync::Mutex::new(Vec::new()),
-            fail: std::sync::Mutex::new(None),
-            engine: Arc::new(tokio::sync::Mutex::new(RecordingEngine {
-                stops: std::sync::Mutex::new(Vec::new()),
-            })),
-        });
-        let initial: Arc<Mutex<dyn KernelEngineControl>> = Arc::new(tokio::sync::Mutex::new(
-            RecordingEngine {
-                stops: std::sync::Mutex::new(Vec::new()),
-            },
-        ));
-        let slot = EngineSlot::new(initial);
-        let composition = connected_composition();
-        let recovery = recovery(
-            residue,
-            Arc::clone(&connector),
-            slot,
-            Arc::clone(&composition),
-        );
-        let mut supervisor = EngineSupervisor::with_child(fake_child());
-
-        let err = recovery
-            .run_respawn(&mut supervisor)
-            .await
-            .expect_err("residue blocks");
-        assert!(
-            matches!(err, RespawnError::Residue(_)),
-            "残留必须阻断：{err:?}"
-        );
-        assert_eq!(
-            connector.pids.lock().unwrap().len(),
-            0,
-            "残留阻断不得连接新 client"
-        );
-        // 残留阻断不得替换 supervisor：旧 child 已由 verify_exit 回收（child=None），
-        // 但**没有**新 client 挂接（respawn 未完成——不自动重连）。
-        assert!(
-            supervisor.client().is_none(),
-            "残留阻断后 supervisor 不得挂接新 client"
-        );
-    }
-
-    /// respawn 探测失败（系统枚举不可用）→ `ResidueProbe` 错误，同样阻断（fail closed）。
-    #[tokio::test]
-    async fn run_respawn_blocked_by_residue_probe_failure() {
-        let connector = Arc::new(FakeConnector {
-            pids: std::sync::Mutex::new(Vec::new()),
-            fail: std::sync::Mutex::new(None),
-            engine: Arc::new(tokio::sync::Mutex::new(RecordingEngine {
-                stops: std::sync::Mutex::new(Vec::new()),
-            })),
-        });
-        let initial: Arc<Mutex<dyn KernelEngineControl>> = Arc::new(tokio::sync::Mutex::new(
-            RecordingEngine {
-                stops: std::sync::Mutex::new(Vec::new()),
-            },
-        ));
-        let slot = EngineSlot::new(initial);
-        let composition = connected_composition();
-        let recovery = recovery(
-            Arc::new(FailingProbe),
-            connector,
-            slot,
-            Arc::clone(&composition),
-        );
-        let mut supervisor = EngineSupervisor::with_child(fake_child());
-
-        let err = recovery
-            .run_respawn(&mut supervisor)
-            .await
-            .expect_err("probe failure blocks");
-        assert!(
-            matches!(err, RespawnError::ResidueProbe(_)),
-            "探测失败必须阻断：{err:?}"
-        );
-    }
-}

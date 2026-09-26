@@ -1,0 +1,55 @@
+[package]
+name = "exv-vpn-darwin-tauri"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = "=2.5.6"
+
+[dependencies]
+exv-vpn-darwin-core = { path = "../../crates/exv-vpn-darwin-core" }
+zeroize = "1.9"
+exv-vpn-darwin-ipc = { path = "../../crates/exv-vpn-darwin-ipc" }
+exv-vpn-wire = { path = "../../../../../common/rust/crates/exv-vpn-wire" }
+getrandom = "0.4"
+# http/tokio-stream：kernel mock-server 集成测试所需的既有传递依赖（tonic 同源，
+# 不引入新版本解析；与 win32 kernel/tests.rs 同款测试基建）。
+http = "1.5"
+libc = "0.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11"
+# tray-icon：MAC-SHELL-17 S2 托盘（TrayIconBuilder）所需的 tauri 自带 feature，
+# 不新增 crate（tray-icon/muda 已在 workspace Cargo.lock 的解析结果中）。
+tauri = { version = "=2.10.3", features = ["tray-icon"] }
+# 真标题栏原生拖动条（NSView 子类 mouseDown: → performDrag:，对齐 win32
+# WM_NCHITTEST 返回 HTCAPTION 把拖动区交还系统的做法）。版本精确对齐
+# workspace Cargo.lock 既有解析结果（tao/wry/tray-icon 同源），不新增版本。
+# NSWorkspace 额外被「外部浏览器打开」（external_open.rs，open_external 命令）
+# 使用：objc2-app-kit/objc2-foundation 同源，不新增 crate。NSPanel/NSSavePanel
+# 被「日志导出」（log_export.rs，logs_export 命令，2026-09-17 吸收）使用：
+# 同一 crate 的 feature 扩展先例，不新增版本。
+objc2 = "=0.6.4"
+objc2-app-kit = { version = "=0.3.2", features = ["NSEvent", "NSResponder", "NSView", "NSWindow", "NSWorkspace", "NSPanel", "NSSavePanel"] }
+objc2-foundation = { version = "=0.3.2", features = ["NSObject", "NSString", "NSURL", "NSGeometry", "NSError"] }
+# MAC-SHELL-17 S3 系统通知（win32 toast.rs 的 macOS 重写，计划 §2「重写为插件通知」）。
+# **旧路径后端**：插件的 macOS 实现实际走已弃用的 `NSUserNotificationCenter`
+# （notify-rust → mac-notification-sys 0.6.15），投递是 fire-and-forget——macOS 26 上
+# 它返回 Ok 却零投递（2026-09-20 真机探针实证），故只在 < 26 的系统上使用。
+# 版本与 tauri 2.10.x 同期（要求 tauri ^2.8.2），沿用壳侧精确锁定风格。
+tauri-plugin-notification = "=2.3.3"
+# **新路径后端**（macOS >= 26）：UNUserNotificationCenter 的 Rust 绑定（objc2 家族），
+# 与 notification_modern.rs 配套；策略选择见 notification.rs 的 strategy_for。
+objc2-user-notifications = "=0.3.2"
+block2 = "=0.6.2"
+tauri-plugin-single-instance = "=2.4.4"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = { version = "0.14.6", default-features = false, features = ["transport"] }
+
+[lints]
+workspace = true

@@ -1,92 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W25-T terra: startup recovery over the durable journal + native observation. These tests pin the
-// recovery / journal_projection / native_observation API that W25-I implements in
-// exv_vpn_win32_resource::{recovery, journal_projection, native_observation}. The frozen
-// contracts are:
-//   - plan W25 row: `recovery.rs`：admission/effect/outcome/proof/retirement/token-slot crash
-//     points、native observe before action；production files `recovery.rs, journal_projection.rs,
-//     native_observation.rs`；killer mutants: **timeout replay apply** / **prior token auth** /
-//     **delete same-name without ownership**；
-//   - architecture §5.1 (启动恢复): 平台 resource owner 在查 journal 和原生状态前先获取排他
-//     mutation authority；只返回 EXV 已记录但未退休的 obligation；对 durable intent 未有
-//     terminal outcome 的 operation 按冻结 predicate 观察并 reconcile——绝不重放 apply；没有
-//     durable EXV ownership 证据的资源不凭名字或推测删除；
-//   - architecture §7.4 (crash rules): torn/incomplete admission 不是 admission；corrupt middle
-//     → JournalCorrupt 不跳过、不出 proof；`MutationAdmitted` durable 后先 observation 不重放
-//     apply；token slot/connection/authority 终止 → token 失效清零，journal 中的 ownership
-//     必须先 recovery/retirement，不并行签发新 token；
-//   - architecture §7.5: destructive cleanup 只由 durable recovery authority
-//     （`AuthorizationSubject::RecoveryAuthority(RetirementOperationId)`）授予，prior token
-//     或其 digest 永不授权；proof 绑定 `journal_root_or_projection_digest`；
-//   - WSP2 facts (native-authority-storage-facts.md §1/§4): torn final tail 恢复到最后一个
-//     完整 record；corrupt middle 报 Corrupt 不跳过；owner 被 TerminateProcess 杀死而不释放时
-//     下一个 waiter 得 WAIT_ABANDONED_0=128 并被授予所有权，接管后必须先观察再谈 clean。
-//
-// W25-I pinned seam（W25-I 必须提供下列 exact 名称，否则本测试编译失败 = RED）：
-//   journal_projection::ProjectionOutcome { Clean(Vec<JournalRecord>),
-//     TornTail { records: Vec<JournalRecord> }, Corrupt { offset: usize } }
-//     （Debug/Clone/PartialEq）—— torn tail 只保留最后一个完整 record；corrupt middle 报
-//     offset，不跳过（WSP2 §4）
-//   journal_projection::JournalProjection::new(journal: &JournalPath) -> Self
-//   journal_projection::JournalProjection::project(&self) -> Result<ProjectionOutcome, NativeError>
-//   journal_projection::JournalProjection::projection_digest(&self, records: &[JournalRecord])
-//     -> [u8; 32] —— durable projection digest（CleanProof 的 journal_root_or_projection_digest
-//     输入；同一 projection 重复计算必须稳定）
-//   native_observation::ObservedResource { pub obligation: u8, pub identity_digest: [u8; 32],
-//     pub fingerprint: [u8; 32] }（Debug/Clone/PartialEq/Eq）—— obligation 为
-//     inventory::InventoryItem 的 u8 标签；identity_digest 是平台资源身份（adapter 名/地址行…）
-//   native_observation::ObservedFingerprint（TryFrom<[u8; 32]>，Error = &'static str；
-//     Debug/Clone/PartialEq/Eq）
-//   native_observation::NativeObservation::new() -> Self
-//   native_observation::NativeObservation::fingerprint(&self, facts: &[ObservedResource])
-//     -> ObservedFingerprint —— 纯逻辑，无 I/O
-//   native_observation::NativeObservation::matches(&self, observed: &ObservedFingerprint,
-//     applied: &AppliedFingerprint) -> bool —— 纯逻辑指纹比对
-//   recovery::RecoveryAction { EffectUnknown { observed_fingerprint: ObservedFingerprint },
-//     CleanOwned { observed_fingerprint: ObservedFingerprint },
-//     DivergedNotOwned { observed_fingerprint: ObservedFingerprint },
-//     PriorOwnershipStale { observed_fingerprint: ObservedFingerprint } }
-//     （Debug/Clone/PartialEq）
-//   recovery::ObligationRecovery { pub obligation: u8,
-//     pub applied_fingerprint: AppliedFingerprint,
-//     pub observed_fingerprint: ObservedFingerprint, pub action: RecoveryAction }
-//     （Debug/Clone/PartialEq）
-//   recovery::RecoveryOutcome { ProvenClean { projection_digest: [u8; 32] },
-//     Pending { obligations: Vec<ObligationRecovery>, projection_digest: [u8; 32] },
-//     ObservationFailed { obligation: u8 }, Corrupt { offset: usize } }
-//     （Debug/Clone/PartialEq；镜像架构 §7.5 CleanupOutcome：ProvenClean / StillOwned（→
-//     CleanOwned）/ EffectUnknown / ObservationFailed）
-//   recovery::RecoveryEngine::new(journal: JournalPath, authority: SingletonAuthority) -> Self
-//     —— 类型层强制：恢复必须在排他 mutation authority 之后（架构 §5.1 第一步；W13 顺序：
-//     先 lock 后 scan）；engine 持有 authority 直到恢复完成
-//   recovery::RecoveryEngine::recover(&mut self, current_ownership_version: OwnershipVersion,
-//     observed: &[ObservedResource]) -> Result<RecoveryOutcome, NativeError>
-//     —— `observed` 是必填输入：native observation 必须先于任何 action（observe before
-//     action）；engine 永不执行或重放 apply。分类契约（W25-I 必须实现，按序判定）：
-//       1) projection Corrupt -> RecoveryOutcome::Corrupt{offset}（不跳过、不出 proof）；
-//       2) 无未退休 intent -> ProvenClean{projection_digest}；
-//       3) 逐条解码 projection 中的 admission（torn 尾帧不是 admission，不进入决策）：
-//          a) ownership_version != current -> PriorOwnershipStale（prior token/digest 只关联
-//             历史，永不授权 —— mutant: prior token auth 死于此）；
-//          b) 该 obligation 无 observed 事实 -> ObservationFailed{obligation}（绝不猜测）；
-//          c) observed fingerprint != desired_applied_fingerprint -> DivergedNotOwned
-//             （同名字也绝不删除 —— mutant: delete same-name without ownership 死于此）；
-//          d) fingerprint 匹配且 admission 为 durable RecoveryAuthority(id) -> CleanOwned
-//             （destructive cleanup 只由 durable retirement identity 授予，绝不由 token 授予）；
-//          e) 其余（durable admission 后无 terminal outcome，live-token subject）-> EffectUnknown
-//             （native effect 可能已发生：观察并 reconcile，绝不重放 apply —— mutant:
-//             timeout replay apply 死于此）；
-//       4) 全部未退休 obligation 分类完成 -> Pending{obligations, projection_digest}。
-//
-// 所有测试在每测独立 temp 目录（%TEMP%\exv-w25-<pid>-<tag>）做真实 journal I/O 并自清理；
-// 纯逻辑（决策分类、指纹比对、J50 decode 结果）与真实 journal 往返测试在非提权宿主必须
-// 通过。abandoned-mutex 接管用真子进程：测试二进制以 EXV_W25_CHILD 环境变量 + libtest
-// --exact 重执行（authority_singleton.rs 同款模式）；parent 先持有 mutex 句柄使内核对象
-// 在子进程被 TerminateProcess 后仍存活，接管后 recovery 必须先观察（never ProvenClean
-// without observation）。prior token 明文不可持久、trace 或 debug；digest 只关联历史，
-// 永远不授权（W15 冻结行）。
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -987,5 +898,101 @@ fn terminated_token_slot_never_reissues_parallel_token() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
+// ---------------------------------------------------------------------------
+// J6（2026-09-05 系统代理账本计划 §5.2 测试 9）：系统代理步骤记录（v0x03 payload）
+// 与准入/退役记录同库共存不受扰——`decode_admission` 对非 J51 payload 一律跳过，
+// 步骤记录既不产生 obligation、也不产生 ObservationFailed / Corrupt。
+// ---------------------------------------------------------------------------
+
+/// 构造一条最小 v0x03 步骤记录并以链式 J50 帧追加（编解码细节由
+/// system_proxy_family 单测钉死，这里只造共存形态）。
+fn append_step_record(store: &mut WinJournalStore, seq: u64, prev: [u8; 32]) -> JournalRecord {
+    use exv_vpn_win32_resource::system_proxy::RawInternetSettings;
+    use exv_vpn_win32_resource::system_proxy::RawValue;
+    use exv_vpn_win32_resource::system_proxy_family::SystemProxyFamilyStep;
+    let step = SystemProxyFamilyStep {
+        prestate: RawInternetSettings {
+            proxy_enable: RawValue::Dword(1),
+            proxy_server: RawValue::Sz("127.0.0.1:7890".to_owned()),
+            proxy_override: RawValue::Sz("localhost".to_owned()),
+            auto_config_url: RawValue::Absent,
+            auto_detect: RawValue::Absent,
+        },
+        desired_entries: vec!["10.9.9.9".to_owned()],
+        originating_sid: "S-1-5-21-999".to_owned(),
+        pac_detected: false,
+        written_fingerprint: vec![0x77; 32],
+    };
+    let rec = JournalRecord::new(seq, prev, step.to_payload());
+    store.append_synced(&rec).expect("append a step record");
+    rec
+}
+
+/// journal 内含步骤记录时，`RecoveryEngine::recover` 的裁决与不含时完全一致；
+/// 仅含步骤记录的 journal = ProvenClean（等同空 journal）。
+#[test]
+fn step_records_coexist_without_disturbing_admission_track() {
+    let key = lookup_key(1, OperationMethod::Connect);
+    let m0 = admitted(
+        &key,
+        version(7),
+        AuthorizationSubject::LiveOwnershipTokenDigest(token(7)),
+        [0x33; 32],
+        [0x55; 32],
+        MutationKind::External(OperationMethod::Connect),
+    );
+
+    // Journal A：仅一条 J51 admission；Journal B：同一条 admission + 步骤记录。
+    let dir_a = test_dir("stepcoex-a");
+    let dir_b = test_dir("stepcoex-b");
+    let (r0, _) = {
+        let mut store = WinJournalStore::open(&JournalPath::from_dir(dir_a.clone()))
+            .expect("open journal A");
+        append_admission(&mut store, 0, [0u8; 32], &m0)
+    };
+    {
+        let mut store = WinJournalStore::open(&JournalPath::from_dir(dir_b.clone()))
+            .expect("open journal B");
+        append_admission(&mut store, 0, [0u8; 32], &m0);
+        append_step_record(&mut store, 1, r0.digest);
+    }
+
+    let fact = observed(InventoryItem::Adapter, [0x33; 32], [0x55; 32]);
+    let mut eng_a = engine(JournalPath::from_dir(dir_a.clone()), "stepcoex-a");
+    let mut eng_b = engine(JournalPath::from_dir(dir_b.clone()), "stepcoex-b");
+    let outcome_a = eng_a.recover(version(7), &[fact.clone()]).expect("recover A");
+    let outcome_b = eng_b.recover(version(7), &[fact]).expect("recover B");
+
+    let obs_a = obligations(&outcome_a);
+    let obs_b = obligations(&outcome_b);
+    assert_eq!(obs_a.len(), 1, "前置：单 admission → 单 obligation");
+    assert_eq!(
+        obs_a, obs_b,
+        "含步骤记录的 journal 必须产出与不含时逐字段一致的裁决（步骤记录不受扰也不扰人）"
+    );
+    assert!(
+        matches!(obs_b[0].action, RecoveryAction::EffectUnknown { .. }),
+        "admission 裁决形态不变（无 ObservationFailed/Corrupt 干扰）"
+    );
+
+    // Journal C：仅步骤记录（无任何 admission）→ ProvenClean，与空 journal 同判。
+    let dir_c = test_dir("stepcoex-c");
+    {
+        let mut store = WinJournalStore::open(&JournalPath::from_dir(dir_c.clone()))
+            .expect("open journal C");
+        append_step_record(&mut store, 0, [0u8; 32]);
+    }
+    let mut eng_c = engine(JournalPath::from_dir(dir_c.clone()), "stepcoex-c");
+    let outcome_c = eng_c
+        .recover(version(7), &[observed(InventoryItem::Adapter, [0x33; 32], [0x55; 32])])
+        .expect("recover C");
+    match outcome_c {
+        RecoveryOutcome::ProvenClean { .. } => {}
+        other => panic!("仅步骤记录的 journal 必须是 ProvenClean，got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+    let _ = std::fs::remove_dir_all(&dir_c);
+}
+

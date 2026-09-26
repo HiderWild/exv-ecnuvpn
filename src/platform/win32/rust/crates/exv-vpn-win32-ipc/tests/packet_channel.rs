@@ -1,20 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W23A-T terra: the Win32 packet channel. These tests pin the packet_limits / packet_channel
-// API that W23A-I implements in exv_vpn_win32_ipc::{packet_limits, packet_channel}. The frozen
-// WSP1 facts (docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-pipe-facts.md
-// §7) extend to the post-auth packet plane: a 64 KiB message ceiling (65536 B). The channel's
-// admission budget is Q60 `exv_vpn_data_plane::budget::PacketBudget` built from those limits
-// (per-batch caps max_batch_packets=64 / max_batch_bytes=262144, queue byte budget derived from
-// the same limits), its fairness is Q61 `exv_vpn_data_plane::pump::PumpScheduler` (strict
-// alternation so neither data-plane leg starves, spec §8.5), and its owned-frame admission
-// carries the X71H ownership-version semantics: a frame bearing a stale sequence (older than
-// `next_sequence`) is refused, only the current sequence is admitted.
-//
-// This file is RED / test-only: it references the empty `packet_limits` / `packet_channel`
-// modules and must fail to compile until W23A-I implements the seam. PURE + deterministic: no
-// I/O, no pipes, no sleep, no randomness; fixed integer literals only.
 
 use exv_vpn_win32_ipc::packet_channel::{ChannelVerdict, PacketChannel};
 use exv_vpn_win32_ipc::packet_limits::PacketLimits;
@@ -166,5 +149,3 @@ fn pump_alternates_fairly() {
     );
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

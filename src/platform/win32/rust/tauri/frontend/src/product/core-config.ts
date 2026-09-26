@@ -1,4 +1,4 @@
-import type { InjectionKey } from "vue";
+import { ref, type InjectionKey } from "vue";
 
 import { kernel } from "../lib/ipc";
 
@@ -7,14 +7,28 @@ export const CORE_CONFIG_KEYS = [
   "username",
   "password",
   "remember_password",
+  "connection_mode",
   "routes",
   "user_agent",
   "mtu",
   "auto_reconnect",
   "auto_reconnect_max_attempts",
+  "auto_reconnect_backoff",
 ] as const;
 
 export type CoreConfigKey = (typeof CORE_CONFIG_KEYS)[number];
+export type ConnectionMode = "standard" | "compatibility";
+
+export const DEFAULT_CONNECTION_MODE: ConnectionMode = "standard";
+export const CONNECTION_MODE_OPTIONS: readonly { label: string; value: ConnectionMode }[] = [
+  { label: "标准模式", value: "standard" },
+  { label: "兼容模式", value: "compatibility" },
+];
+
+/** 读取未知或缺失值时保守使用标准模式；写入仍由补丁校验拒绝未知值。 */
+export function connectionModeFromConfig(raw: string | undefined): ConnectionMode {
+  return raw === "compatibility" ? "compatibility" : DEFAULT_CONNECTION_MODE;
+}
 
 export interface CoreConfigItem {
   key: string;
@@ -24,6 +38,45 @@ export interface CoreConfigItem {
 export interface CoreConfigGateway {
   configGet(): Promise<ReadonlyArray<CoreConfigItem>>;
   configSet(items: ReadonlyArray<{ key: CoreConfigKey; value: string }>): Promise<boolean>;
+  savedPassword?(username: string, server: string): Promise<string | null>;
+}
+
+/** 同一配置网关共享非秘密凭据状态；保存成功与切换模式均刷新，不缓存明文。 */
+const credentialStates = new WeakMap<CoreConfigGateway, ReturnType<typeof createCredentialState>>();
+function createCredentialState(gateway: CoreConfigGateway) {
+  const state = ref({ username: "", server: "", remember: false, stored: false });
+  const savedRevision = ref(0);
+  let writeTail: Promise<void> = Promise.resolve();
+  /** 同一网关的配置与凭据写入串行；失败不阻塞后续显式保存。 */
+  function write<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = writeTail.then(operation);
+    writeTail = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+  let revision = 0;
+  function apply(items: ReadonlyArray<CoreConfigItem>): void {
+    revision += 1;
+    const value = (key: string) => items.find((item) => item.key === key)?.value;
+    state.value = { username: value("username") ?? "", server: value("server") ?? "", remember: value("remember_password") === "true", stored: value("has_stored_password") === "true" };
+  }
+  async function refresh(): Promise<void> {
+    const current = ++revision;
+    try {
+      const items = await gateway.configGet();
+      if (current === revision) apply(items);
+    } catch {
+      if (current === revision) state.value = { username: "", server: "", remember: false, stored: false };
+    }
+  }
+  return { state, apply, refresh, write, savedRevision, markSaved: () => { savedRevision.value += 1; } };
+}
+export function credentialConfigFor(gateway: CoreConfigGateway) {
+  let value = credentialStates.get(gateway);
+  if (!value) { value = createCredentialState(gateway); credentialStates.set(gateway, value); }
+  return value;
+}
+export function revealSavedPassword(gateway: CoreConfigGateway, username: string, server: string): Promise<string | null> {
+  return gateway.savedPassword ? gateway.savedPassword(username, server) : kernel.savedPassword(username, server);
 }
 
 /** 应用入口在预览模式下可注入内存网关；生产页面仍默认连接真实 core。 */
@@ -35,7 +88,7 @@ export interface CoreConfigField {
   key: CoreConfigKey;
   label: string;
   description: string;
-  kind: "text" | "password" | "boolean" | "routes" | "mtu" | "number" | "server";
+  kind: "text" | "password" | "boolean" | "routes" | "mtu" | "number" | "server" | "connection_mode";
 }
 
 export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
@@ -43,11 +96,13 @@ export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
   { key: "username", label: "登录账户", description: "连接时使用的账户名。", kind: "text" },
   { key: "password", label: "密码", description: "留空表示保持已保存密码。", kind: "password" },
   { key: "remember_password", label: "记住密码", description: "勾选后密码随配置保存；关闭则连接时需手动输入。", kind: "boolean" },
+  { key: "connection_mode", label: "连接模式", description: "标准模式优先直连；特定网络环境下连接不稳定时可尝试兼容模式。更改在下次手动连接时生效。", kind: "connection_mode" },
   { key: "routes", label: "路由", description: "由EXV处理的流量的目标地址范围", kind: "routes" },
   { key: "user_agent", label: "User-Agent", description: "连接请求使用的客户端标识。", kind: "text" },
   { key: "mtu", label: "MTU", description: "网络接口的正整数 MTU。", kind: "mtu" },
   { key: "auto_reconnect", label: "自动重连", description: "连接意外断开时自动重新连接（下次连接生效）。", kind: "boolean" },
   { key: "auto_reconnect_max_attempts", label: "自动重连次数", description: "仅在开启自动重连后可设置；0 表示无限重连；达到次数后不再重连。", kind: "number" },
+  { key: "auto_reconnect_backoff", label: "自动重连退避", description: "仅在开启自动重连后可设置；开启后掉线按 2s→4s→8s→16s→30s 退避重连，成功连接后重置。", kind: "boolean" },
 ];
 
 /** VPN 服务器预设地址（与旧 C++ distribution/ecnu.json 对齐；默认 vpn-cn）。 */
@@ -75,6 +130,12 @@ export function isCoreConfigKey(key: string): key is CoreConfigKey {
 }
 
 export function normalizeCoreConfigValue(key: CoreConfigKey, raw: string): NormalizedCoreConfigValue {
+  if (key === "connection_mode") {
+    return raw === "standard" || raw === "compatibility"
+      ? { ok: true, value: raw }
+      : { ok: false, message: "连接模式只能是 standard 或 compatibility。" };
+  }
+
   if (key === "routes") {
     return {
       ok: true,
@@ -106,6 +167,12 @@ export function normalizeCoreConfigValue(key: CoreConfigKey, raw: string): Norma
       : { ok: false, message: "自动重连次数必须是 0-1024 的整数。" };
   }
 
+  if (key === "auto_reconnect_backoff") {
+    return raw === "true" || raw === "false"
+      ? { ok: true, value: raw }
+      : { ok: false, message: "自动重连退避只能是 true 或 false。" };
+  }
+
   if (key === "remember_password") {
     return raw === "true" || raw === "false"
       ? { ok: true, value: raw }
@@ -129,5 +196,6 @@ export function createCoreConfigGateway(): CoreConfigGateway {
     configSet(items) {
       return kernel.configSet([...items]);
     },
+    savedPassword: (username, server) => kernel.savedPassword(username, server),
   };
 }

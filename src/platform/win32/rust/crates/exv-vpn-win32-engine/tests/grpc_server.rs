@@ -1,25 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P1-b RED→GREEN tests for the engine HelperControl tonic gRPC server:
-//
-//   1. Unit tests (no transport): the `HelperControl` trait handlers fail closed
-//      (unauthenticated without the transport-verified peer; refused without an
-//      established owner lease), observe/get_operation/stream_logs answer, and
-//      the dispatch interceptor rejects unverified requests.
-//   2. End-to-end test over a REAL local Named Pipe: `serve_named_pipe` creates
-//      the DACL'd pipe, authenticates the core peer (same process → pid/SID pass),
-//      and a tonic client drives the full lifecycle — MaintainOwnerLease handshake
-//      + keepalive, AcquireLease, GetOperation, ApplyTunnel, StopTunnel,
-//      ReleaseLease.
-//   3. R1w wire contract over the same real pipe: ApplyTunnel returns the async
-//      `pending` ApplyAccepted, and the INDEPENDENT StreamConnectStatus channel
-//      pushes the correlated phase progression (operation_id + ConnectPhase +
-//      coarse StatsPhase + err), distinct from StreamStats.
-//
-// The client connector below is a TEST-ONLY minimal named-pipe connector (mirrors
-// the proven pattern in exv-core::grpc_transport; the product client is
-// P1-c's).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -103,6 +81,7 @@ fn wire_plan() -> generated::TunnelPlan {
         ipv4_routes: vec![],
         dns_servers: vec![],
         control_bypass: vec![],
+        proxy_exempt: vec![],
         opaque_intent: Some(generated::TunnelIntentRef {
             identity_digest: digest32(0x33),
         }),
@@ -520,6 +499,7 @@ async fn full_control_plane_round_trip_over_named_pipe() {
             // host's CredentialPackage). The engine parses them for the CSTP auth seam.
             secret_payload: b"{\"version\":1,\"username\":\"student\",\"password\":\"s3cret\"}"
                 .to_vec(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .expect("apply rpc succeeds");
@@ -566,6 +546,7 @@ async fn full_control_plane_round_trip_over_named_pipe() {
             // Truncated JSON (missing closing brace) with the password substring intact.
             secret_payload: b"{\"version\":1,\"username\":\"student\",\"password\":\"hunter2\""
                 .to_vec(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .expect_err("malformed secret_payload must fail closed");
@@ -700,6 +681,7 @@ async fn stream_connect_status_pushes_correlated_phases_over_named_pipe() {
             request_digest: digest32(2),
             secret_payload: b"{\"version\":1,\"username\":\"student\",\"password\":\"s3cret\"}"
                 .to_vec(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .expect("apply rpc succeeds");
@@ -1076,6 +1058,7 @@ async fn second_connect_passes_gate_hitting_first_lease() {
             request_digest: digest32(2),
             secret_payload: b"{\"version\":1,\"username\":\"student\",\"password\":\"s3cret\"}"
                 .to_vec(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .expect("first connect apply accepted");
@@ -1112,6 +1095,7 @@ async fn second_connect_passes_gate_hitting_first_lease() {
             request_digest: digest32(6),
             secret_payload: b"{\"version\":1,\"username\":\"student\",\"password\":\"s3cret\"}"
                 .to_vec(),
+            windows_connection_mode: generated::WindowsConnectionMode::Standard as i32,
         })
         .await
         .expect("second connect apply accepted");

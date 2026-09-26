@@ -1,15 +1,16 @@
 import { createApp, watch } from "vue";
 import App from "./App.vue";
+import { kernel, type ConfigPayload } from "./lib/ipc";
 import {
   APPEARANCE_KEY,
   createAppearance,
   createBrowserSafeAppearanceStorage,
 } from "./product/appearance";
-import { CORE_CONFIG_GATEWAY_KEY } from "./product/core-config";
-import { computeLifecycleEffects, shouldAutoConnectOnLaunch } from "./product/lifecycle-effects";
+import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway } from "./product/core-config";
+import { computeLifecycleEffects, computeSelfHealNotify, shouldAutoConnectOnLaunch } from "./product/lifecycle-effects";
 import { LOGS_GATEWAY_KEY } from "./product/logs";
 import { createMockCoreConfigGateway, createMockLogsGateway } from "./product/mock-page-data";
-import { createMockRuntime, selectRuntimeSource } from "./product/mock-runtime";
+import { createMockRuntime, selectRuntimeSource, selectPreviewStatus } from "./product/mock-runtime";
 import { createProductRuntime, PRODUCT_RUNTIME_KEY } from "./product/runtime";
 import {
   loadUiPreferences,
@@ -28,14 +29,32 @@ const appearance = createAppearance(createBrowserSafeAppearanceStorage(() => win
 appearance.applyDocument(document.documentElement);
 const chrome = createWindowChromePort();
 const source = selectRuntimeSource(import.meta.env.DEV, window.location.search);
-const runtime = source === "mock" ? createMockRuntime() : createProductRuntime();
-const app = createApp(App);
+const runtime = source === "mock" ? createMockRuntime(selectPreviewStatus(import.meta.env.DEV, window.location.search)) : createProductRuntime();
+/**
+ * Core 在 Rust setup 中完成 bootstrap 后才暴露 Tauri gateway；主入口把这次读取注入
+ * App，由 App 在首次挂载时只按 `requires_quick_start` 决定是否显示对话框。
+ */
+const loadQuickStart = (): Promise<ConfigPayload> => {
+  if (source === "mock") return Promise.resolve({ items: [], requires_quick_start: false });
+  return kernel.configGet();
+};
+const app = createApp(App, {
+  loadQuickStart,
+  onStartupReady: () => {
+    // 运行时的身份刷新也读取 ConfigGet，必须等首次启动结论已被 App 接收。
+    if (source === "mock" || "__TAURI_INTERNALS__" in window) {
+      void runtime.start().catch((error: unknown) => {
+        console.error("产品运行时初始化失败", error);
+      });
+    }
+  },
+});
 
 app.provide(PRODUCT_RUNTIME_KEY, runtime);
 app.provide(APPEARANCE_KEY, appearance);
 app.provide(WINDOW_CHROME_PORT_KEY, chrome);
+app.provide(CORE_CONFIG_GATEWAY_KEY, source === "mock" ? createMockCoreConfigGateway() : createCoreConfigGateway());
 if (source === "mock") {
-  app.provide(CORE_CONFIG_GATEWAY_KEY, createMockCoreConfigGateway());
   app.provide(LOGS_GATEWAY_KEY, createMockLogsGateway());
 }
 try {
@@ -53,6 +72,9 @@ await loadUiPreferences();
 
 // 连接过渡效果分发：状态流 → hide-window / tray-notify / 启动自动连接。
 let previousStatus: ProductStatus | null = null;
+// 2026-09-05 host 自愈（计划 §4.5）：selfHeal stage 去重游标（与 previousStatus 同模式；
+// null = 首快照只记录基线）。
+let prevSelfHealStage: string | null = null;
 watch(
   runtime.state,
   (productState) => {
@@ -60,6 +82,16 @@ watch(
     const nextStatus = productState.status;
     const prevStatus = previousStatus;
     const isFirstSnapshot = prevStatus === null;
+
+    // host 自愈失败气泡（§4.5 冻结）：仅非 failed → failed 进入时一次；respawning/
+    // succeeded 不弹。不参与前台异步探测（失败是必须知道的事件），同步分发即可。
+    const nextSelfHealStage = productState.selfHeal.active ? productState.selfHeal.stage : null;
+    for (const effect of computeSelfHealNotify(prevSelfHealStage, nextSelfHealStage)) {
+      if (effect.kind === "tray-notify") {
+        void invokeTrayNotify(effect.title, effect.body);
+      }
+    }
+    prevSelfHealStage = nextSelfHealStage;
 
     // 前台状态异步探测后分发效果；等待期间状态再次变化则由后续回调接管（丢弃本次，避免错序）。
     void (async () => {
@@ -129,12 +161,6 @@ if (source === "mock") {
     "font:12px/1.2 system-ui,sans-serif",
   ].join(";");
   document.body.append(badge);
-}
-
-if (source === "mock" || "__TAURI_INTERNALS__" in window) {
-  void runtime.start().catch((error: unknown) => {
-    console.error("产品运行时初始化失败", error);
-  });
 }
 
 window.addEventListener("beforeunload", () => runtime.dispose(), { once: true });

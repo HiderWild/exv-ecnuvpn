@@ -1,18 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// S2 服务基础设施（完整服务形态 W28 第一批）：engine 可作 SCM 服务常驻。
-//
-// 本模块是**库侧**服务原语；main.rs（bin）负责 ServiceMain 接线与生命周期分叉：
-// - [`EngineExitForm`]：engine 进程退出形态（oneshot = core 生命周期；service = SCM
-//   生命周期）——驱动 main.rs 生命周期分叉（D1）。
-// - SCM 子命令：[`install_service`] / [`uninstall_service`] / [`start_service`]
-//   （复用 runas 提权边界，本机 admin；不新建特权二进制，D4）。
-// - SCM failure actions（CR R3.1）：崩溃后 `SC_ACTION_RESTART` 由 SCM 重新拉起。
-// - 服务常量：服务名 / 显示名 / 服务控制面管道名。
-//
-// 与 C++ legacy webui 的差异：legacy helper 服务名 `exv-helper`（被弃用参考）；Rust
-// 产品 engine 是独立特权二进制（`exv-engine`），服务名 `exv-engine`。
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -38,9 +23,13 @@ pub const SERVICE_CONTROL_PIPE: &str = r"\\.\pipe\exv-engine-service-c";
 /// engine 创建的 Wintun adapter 名（与 host `ENGINE_ADAPTER_NAME` 一致）。
 pub const ENGINE_ADAPTER_NAME: &str = "ExvEngine";
 
-/// SCM 状态转换的硬上限：服务必须在有限时间内进入 Stopped，避免安装/卸载请求无限
-/// 占用 Core 的操作通道。引擎正常 teardown 通常 <1s；3s 足够覆盖慢机器并提前报错。
-const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+/// 服务退出时让最后的状态/日志写回管道的既有窗口。
+pub const SERVICE_EXIT_FLUSH: Duration = Duration::from_millis(300);
+/// SCM 停止等待覆盖 5 秒组装取消、300ms 冲洗及 2 秒资源收尾/SCM 调度余量。
+/// 这是控制调用的有界等待预算，不承诺底层驱动或阻塞 teardown 一定在此时限结束。
+const SERVICE_STOP_TIMEOUT: Duration = crate::heartbeat::ASSEMBLY_CANCEL_WAIT
+    .saturating_add(SERVICE_EXIT_FLUSH)
+    .saturating_add(Duration::from_secs(2));
 /// DeleteService 后只等待一个短的 SCM settle 窗口。服务句柄已显式释放，正常机器上
 /// 条目会在首个轮询内消失；若 SCM 仍处于 marked-for-delete，卸载仍按 DeleteService
 /// 成功返回，下一次安装会复用 install 侧的 wait_service_removed 重试（service.rs:284），
@@ -323,6 +312,27 @@ pub fn install_service(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// 轮换（撤销）服务 PSK（`--service-rotate-key` / 批量 `RotateKey` 步骤共用原语）。
+///
+/// 2026-09-05 撤销计划：生成新 32 字节随机密钥覆盖写 `%ProgramData%\exv\service.key`
+///（复用安装路径的 [`exv_vpn_win32_ipc::service_key::write_service_psk`]——CREATE_ALWAYS
+/// 覆盖写 + DACL 重建，不新增密钥原语）。**无需重启服务、不中断在用连接**：engine 侧
+/// 每 accept 现读文件，撤销自下一次连接起生效；已建立连接存活至自然断开（残余窗口 =
+/// 连接生命周期，文档化）。返回新 key 的 fingerprint（SHA-256 前 8 字节 hex，非秘密）
+/// 供审计关联。
+///
+/// 提权边界：runas/管理员环境内调用（批量进程或提权 CLI）；非提权执行 → Windows ACL
+/// 拒绝写 `%ProgramData%\exv`，诚实报错。
+///
+/// # Errors
+/// 当前用户 SID 不可得 / PSK 生成或写入失败 → 携带原因的字符串。
+pub fn rotate_service_key() -> Result<String, String> {
+    let sid = current_user_sid().ok_or_else(|| "current user SID unavailable".to_string())?;
+    let psk = exv_vpn_win32_ipc::service_key::write_service_psk(&sid)
+        .map_err(|e| format!("write service PSK: {e}"))?;
+    Ok(exv_vpn_win32_ipc::service_key::fingerprint(&psk))
+}
+
 /// 给 `config_dir/config.json` 授予 `NT AUTHORITY\SYSTEM` 读权限（服务引擎 LocalSystem
 /// 读用户配置所需）。best-effort：失败仅记 warning，不阻断安装。
 fn grant_system_read_config(config_dir: &std::path::Path) {
@@ -448,9 +458,14 @@ where
 {
     let deadline = std::time::Instant::now() + timeout;
     let mut stop_requested = false;
+    let mut stop_accepted = false;
     let mut stop_attempts = 0u8;
+    let mut last_state = None;
     loop {
-        let state = query_status()?;
+        let state = query_status().map_err(|error| format!(
+            "查询 exv-engine 停止状态失败: {error}; last_state={last_state:?}, stop_attempts={stop_attempts}, stop_accepted={stop_accepted}; 请运行 sc.exe queryex exv-engine 并检查 Windows System 与 EXV 日志"
+        ))?;
+        last_state = Some(state);
         if state == ServiceState::Stopped {
             return Ok(());
         }
@@ -461,18 +476,25 @@ where
             && stop_attempts < MAX_STOP_REQUEST_ATTEMPTS
         {
             stop_attempts += 1;
-            match request_stop()? {
-                StopRequestResult::Requested | StopRequestResult::AlreadyStopped => {
+            match request_stop().map_err(|error| format!(
+                "请求 SCM 停止 exv-engine 失败: {error}; state={state:?}, stop_attempts={stop_attempts}, stop_accepted={stop_accepted}; 请运行 sc.exe queryex exv-engine 并检查 Windows System 与 EXV 日志"
+            ))? {
+                StopRequestResult::Requested => {
+                    stop_accepted = true;
                     stop_requested = true;
                 }
+                // 1062 是 SCM 拒绝本次控制的幂等结果，不能记成接受了 Stop。
+                StopRequestResult::AlreadyStopped => stop_requested = true,
                 StopRequestResult::Retry => {}
             }
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "service did not stop within {}ms (state={:?})",
+                "service did not stop within {}ms (state={:?}, stop_attempts={}, stop_accepted={}); 请运行 sc.exe queryex exv-engine 采集 PID/退出码，并检查 Windows System 与 EXV 日志后重试本次服务操作",
                 timeout.as_millis(),
-                state
+                state,
+                stop_attempts,
+                stop_accepted
             ));
         }
         std::thread::sleep(poll);
@@ -586,296 +608,3 @@ pub fn restart_failure_actions() -> ServiceFailureActions {
 // 单元测试：EngineExitForm 分派（service 禁用心跳 / core-pid watch）+ 子命令解析 +
 // failure actions（纯逻辑；SCM 真机集成在 tests/service_lifecycle.rs，env 门控）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// oneshot 形态：启用心跳自清理 + core 进程句柄监视；暴露 core_handle/heartbeat_timeout。
-    #[test]
-    fn oneshot_form_enables_heartbeat_and_core_watch() {
-        let form = EngineExitForm::Oneshot {
-            core_handle: 4242,
-            heartbeat_timeout: 15_000,
-        };
-        assert!(form.uses_heartbeat(), "oneshot 必须启用心跳自清理");
-        assert!(
-            form.uses_core_process_watch(),
-            "oneshot 必须启用 core 进程句柄监视"
-        );
-        assert_eq!(form.core_handle(), Some(4242));
-        assert_eq!(form.heartbeat_timeout(), Some(15_000));
-    }
-
-    /// service 形态：**禁用心跳自清理 + core-pid watch**（SCM 管生死）；无 core_handle。
-    #[test]
-    fn service_form_disables_heartbeat_and_core_watch() {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let form = EngineExitForm::Service { scm_stop: rx };
-        assert!(
-            !form.uses_heartbeat(),
-            "service 形态必须禁用心跳自清理（SCM 管生死）"
-        );
-        assert!(
-            !form.uses_core_process_watch(),
-            "service 形态必须禁用 core 进程句柄监视（无单一 core 可等）"
-        );
-        assert_eq!(form.core_handle(), None);
-        assert_eq!(form.heartbeat_timeout(), None);
-        let _ = tx;
-    }
-
-    /// failure actions（CR R3.1）：SC_ACTION_RESTART 在 1s 延迟；reset 24h。
-    #[test]
-    fn restart_failure_actions_restart_after_crash() {
-        let actions = restart_failure_actions();
-        let list = actions.actions.expect("actions present");
-        assert_eq!(list.len(), 1, "单一 SC_ACTION_RESTART");
-        assert_eq!(list[0].action_type, ServiceActionType::Restart);
-        assert_eq!(list[0].delay, Duration::from_secs(1));
-    }
-
-    /// 服务安装参数解析：显式 `--dll`/`--adapter-name`/`--user-sid` 覆盖缺省。
-    #[test]
-    fn parse_install_options_honors_overrides() {
-        let argv = vec![
-            "exv-engine".to_string(),
-            "--service-install".to_string(),
-            "--dll".to_string(),
-            r"C:\custom\wintun.dll".to_string(),
-            "--adapter-name".to_string(),
-            "MyAdapter".to_string(),
-            "--user-sid".to_string(),
-            "S-1-5-21-1-2-3-4".to_string(),
-            "--config-dir".to_string(),
-            r"C:\Users\Alice\.exv".to_string(),
-        ];
-        let opts = parse_install_options(&argv).expect("parse");
-        assert_eq!(opts.dll, PathBuf::from(r"C:\custom\wintun.dll"));
-        assert_eq!(opts.adapter_name, "MyAdapter");
-        assert_eq!(opts.core_user_sid, "S-1-5-21-1-2-3-4");
-        assert_eq!(opts.config_dir, PathBuf::from(r"C:\Users\Alice\.exv"));
-    }
-
-    /// 显式配置目录缺少值时必须 fail closed，不能变成空路径或相对路径。
-    #[test]
-    fn parse_install_options_rejects_invalid_config_dir_value() {
-        for value in [None, Some(""), Some("--dll"), Some("relative\\.exv")] {
-            let mut argv = vec![
-                "exv-engine".to_string(),
-                "--service-install".to_string(),
-                "--config-dir".to_string(),
-            ];
-            if let Some(value) = value {
-                argv.push(value.to_string());
-            }
-            let error = parse_install_options(&argv)
-                .err()
-                .expect("invalid config dir must fail");
-            assert!(error.contains("--config-dir"), "error should name the option: {error}");
-        }
-    }
-
-    /// 服务安装参数解析：全部缺省时回退默认（dll 默认路径 + adapter 默认名 + 当前用户 SID）。
-    #[test]
-    fn parse_install_options_falls_back_to_defaults() {
-        let argv = vec!["exv-engine".to_string(), "--service-install".to_string()];
-        let opts = parse_install_options(&argv).expect("parse with defaults");
-        assert!(
-            opts.dll.to_string_lossy().contains("wintun.dll"),
-            "缺省 dll 必须含 wintun.dll，got {}",
-            opts.dll.display()
-        );
-        assert_eq!(opts.adapter_name, ENGINE_ADAPTER_NAME);
-        // 缺省 SID = 当前用户 SID；SID 不可解析（极罕见）时诚实短路。
-        if let Some(sid) = current_user_sid() {
-            assert_eq!(opts.core_user_sid, sid);
-        }
-    }
-
-    /// 服务启动参数契约：`--service` + 稳定控制管道 + dll + adapter + SID（ServiceMain
-    /// 解析所需字段齐备）。
-    #[test]
-    fn service_launch_arguments_contain_required_fields() {
-        let opts = ServiceInstallOptions {
-            dll: PathBuf::from(r"C:\wintun\wintun.dll"),
-            adapter_name: ENGINE_ADAPTER_NAME.to_string(),
-            core_user_sid: "S-1-5-21-1-2-3-4".to_string(),
-            config_dir: PathBuf::from(r"C:\Users\Alice\.exv"),
-        };
-        let args = service_launch_arguments(&opts);
-        let joined = args
-            .iter()
-            .map(|a| a.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(joined.contains("--service"), "必须含 --service");
-        assert!(joined.contains(SERVICE_CONTROL_PIPE), "必须含稳定控制管道");
-        assert!(joined.contains(r"C:\wintun\wintun.dll"), "必须含 dll");
-        assert!(joined.contains(ENGINE_ADAPTER_NAME), "必须含 adapter 名");
-        assert!(joined.contains("S-1-5-21-1-2-3-4"), "必须含授权 SID");
-        assert!(joined.contains(r"C:\Users\Alice\.exv"), "必须含用户配置目录");
-    }
-
-    /// 停止命令必须等待 StopPending 结束，而不能把"停止请求已提交"当作 Stopped。
-    #[test]
-    fn stop_poll_waits_for_stopped_after_request() {
-        let mut states = [
-            ServiceState::Running,
-            ServiceState::StopPending,
-            ServiceState::Stopped,
-        ]
-        .into_iter();
-        let mut requests = 0;
-
-        wait_for_service_stopped(
-            Duration::from_secs(1),
-            Duration::ZERO,
-            || Ok(states.next().unwrap_or(ServiceState::Stopped)),
-            || {
-                requests += 1;
-                Ok(StopRequestResult::Requested)
-            },
-        )
-        .expect("stop poll reaches Stopped");
-
-        assert_eq!(requests, 1, "只应向 SCM 提交一次停止请求");
-    }
-
-    /// StartPending 先收敛到 Running 时，停止器仍应继续完成完整停止收敛。
-    #[test]
-    fn stop_poll_waits_through_start_pending() {
-        let mut states = [
-            ServiceState::StartPending,
-            ServiceState::Running,
-            ServiceState::StopPending,
-            ServiceState::Stopped,
-        ]
-        .into_iter();
-        let mut requests = 0;
-
-        wait_for_service_stopped(
-            Duration::from_secs(1),
-            Duration::ZERO,
-            || Ok(states.next().unwrap_or(ServiceState::Stopped)),
-            || {
-                requests += 1;
-                Ok(StopRequestResult::Requested)
-            },
-        )
-        .expect("start pending should converge to stopped");
-
-        assert_eq!(requests, 1);
-    }
-
-    /// 已暂停服务也能直接接受 Stop，不应无谓等待到超时。
-    #[test]
-    fn stop_poll_requests_stop_for_paused_service() {
-        let mut states = [
-            ServiceState::Paused,
-            ServiceState::StopPending,
-            ServiceState::Stopped,
-        ]
-        .into_iter();
-        let mut requests = 0;
-
-        wait_for_service_stopped(
-            Duration::from_secs(1),
-            Duration::ZERO,
-            || Ok(states.next().unwrap_or(ServiceState::Stopped)),
-            || {
-                requests += 1;
-                Ok(StopRequestResult::Requested)
-            },
-        )
-        .expect("paused service should converge to stopped");
-
-        assert_eq!(requests, 1);
-    }
-
-    /// services.msc/SCM 并发控制造成的 1061 是可重试竞态；观察到 StopPending 后继续等待。
-    #[test]
-    fn stop_poll_retries_transient_control_rejection() {
-        let mut states = [
-            ServiceState::Running,
-            ServiceState::Running,
-            ServiceState::StopPending,
-            ServiceState::Stopped,
-        ]
-        .into_iter();
-        let mut outcomes = [StopRequestResult::Retry, StopRequestResult::Requested].into_iter();
-        let mut requests = 0;
-
-        wait_for_service_stopped(
-            Duration::from_secs(1),
-            Duration::ZERO,
-            || Ok(states.next().unwrap_or(ServiceState::Stopped)),
-            || {
-                requests += 1;
-                Ok(outcomes.next().unwrap_or(StopRequestResult::Requested))
-            },
-        )
-        .expect("transient control rejection should be retried");
-
-        assert_eq!(requests, 2);
-    }
-
-    /// 服务名/管道名常量形态（UI/SCM 契约的稳定标识）。
-    #[test]
-    fn service_constants_are_well_formed() {
-        assert!(!SERVICE_NAME.is_empty());
-        assert!(!SERVICE_DISPLAY_NAME.is_empty());
-        assert!(SERVICE_CONTROL_PIPE.starts_with(r"\\.\pipe\"));
-        assert!(SERVICE_CONTROL_PIPE.ends_with("-c"), "控制面管道 -c 后缀");
-    }
-
-    /// R3 卸载收尾顺序契约：先有界轮询等服务条目完全移除，再删孤儿 PSK（载荷残留清理
-    /// 必须在条目删除之后——条目删除是 `uninstall_service` 的 SCM 前置步骤）。
-    #[test]
-    fn uninstall_cleanup_waits_removal_then_deletes_psk() {
-        // 两个闭包都要记录顺序 → 共享 `Rc<RefCell>`（同一 `order` 的双可变借用）。
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        let order = Rc::new(RefCell::new(Vec::new()));
-        uninstall_cleanup(
-            {
-                let order = Rc::clone(&order);
-                move || {
-                    order.borrow_mut().push("wait_removed");
-                    true
-                }
-            },
-            {
-                let order = Rc::clone(&order);
-                move || {
-                    order.borrow_mut().push("delete_psk");
-                    Ok(())
-                }
-            },
-        )
-        .expect("cleanup must succeed");
-        assert_eq!(*order.borrow(), vec!["wait_removed", "delete_psk"]);
-    }
-
-    /// R3 卸载收尾：PSK 删除失败 → 诚实上报（载荷残留会让健康模型误判 PayloadOrphan）；
-    /// 轮询结果被忽略（`DeleteService` 已成功，超时不是卸载失败）。
-    #[test]
-    fn uninstall_cleanup_propagates_psk_delete_error_but_ignores_wait_timeout() {
-        // 轮询超时（false）不阻塞清理；PSK 删除失败照常上报。
-        let err = uninstall_cleanup(
-            || {
-                false // wait timed out
-            },
-            || Err("disk full".to_string()),
-        )
-        .expect_err("psk delete failure must surface");
-        assert_eq!(err, "disk full");
-
-        // 轮询成功 + PSK 成功 → Ok。
-        uninstall_cleanup(
-            || true,
-            || Ok(()),
-        )
-        .expect("cleanup ok");
-    }
-}

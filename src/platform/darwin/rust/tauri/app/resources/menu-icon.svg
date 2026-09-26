@@ -1,0 +1,38 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="39" viewBox="95 50 1080 1170" role="img" aria-label="EXV logo" aria-labelledby="title description">
+  <title id="title">EXV 双色菜单栏图标</title>
+  <desc id="description">沿用原 Logo 的球面网络与盾牌勾号，酒红与暖金双色，针对菜单栏去除阴影并加粗纹理。</desc>
+  <defs>
+    <clipPath id="globe-face-clip">
+      <circle cx="600" cy="553" r="424" />
+    </clipPath>
+    </defs>
+
+  <g id="globe">
+    <circle id="globe-white-rim" cx="600" cy="553" r="463" fill="#F2CE82" />
+    <circle id="globe-red-face" cx="600" cy="553" r="421" fill="#9B1D35" />
+    <g id="network-lines" clip-path="url(#globe-face-clip)" fill="none" stroke="#F2CE82" stroke-width="58" stroke-linecap="round" stroke-linejoin="round">
+      <path id="latitude" d="M130 500 Q225 623 337 682 Q565 766 769 562 Q890 430 950 190" />
+      <path id="upper-longitude" d="M270 215 Q412 238 494 306 Q652 392 769 562" />
+      <path id="vertical-longitude" d="M430 1010 Q326 805 337 682 Q351 468 494 306 Q630 155 800 105" />
+    </g>
+    <circle id="globe-edge-mask" cx="600" cy="553" r="422" fill="none" stroke="#F2CE82" stroke-width="4" />
+    <g id="nodes">
+      <circle cx="494" cy="306" r="65" fill="#F2CE82" />
+      <circle cx="494" cy="306" r="38" fill="#9B1D35" />
+      <circle cx="337" cy="682" r="65" fill="#F2CE82" />
+      <circle cx="337" cy="682" r="38" fill="#9B1D35" />
+      <circle cx="769" cy="562" r="65" fill="#F2CE82" />
+      <circle cx="769" cy="562" r="38" fill="#9B1D35" />
+    </g>
+  </g>
+
+  <g id="shield">
+    <path id="shield-white-face" d="M871 512 C879 512 887 516 895 523 C956 568 1028 596 1114 612 C1126 614 1133 624 1133 637 V824 C1133 985 1038 1105 887 1175 C876 1180 867 1180 857 1175 C705 1105 607 987 607 824 V637 C607 624 615 614 627 612 C711 596 786 566 848 523 C855 516 863 512 871 512 Z" fill="#F2CE82" />
+    <path id="shield-red-frame" fill="#9B1D35" fill-rule="evenodd" d="M871 552 C936 600 1004 628 1092 646 V818 C1092 957 1011 1063 871 1138 C731 1063 649 957 649 818 V646 C737 628 805 600 871 552 Z M871 607 C925 645 980 669 1049 684 V817 C1049 924 990 1006 871 1071 C752 1006 693 924 693 817 V684 C762 669 817 645 871 607 Z" />
+  </g>
+
+  <g id="checkmark">
+    <path d="M772 853 L839 919 L982 765" fill="none" stroke="#9B1D35" stroke-width="76" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>

@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 use crate::error::VpnError;
 use crate::identity::{
@@ -42,7 +40,6 @@ pub struct Attempt {
     runtime_epoch: RuntimeEpoch,
     attempt_id: AttemptId,
     intent: ConnectIntent,
-    prior_error: Option<VpnError>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
@@ -98,18 +95,7 @@ pub struct ConnectedSession {
     protocol_session: ProtocolSessionRef,
     platform_ownership: PlatformOwnershipRef,
     packet_lease: PacketLeaseRef,
-    platform_ready: PlatformReadyProof,
-    data_running: DataRunningProof,
 }
-
-pub type ConnectedSessionConstructor = fn(
-    Attempt,
-    ProtocolSessionRef,
-    PlatformOwnershipRef,
-    PacketLeaseRef,
-    PlatformReadyProof,
-    DataRunningProof,
-) -> ConnectedSession;
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub enum RecoveryContext {
@@ -411,17 +397,11 @@ impl StopIntent {
 }
 
 impl Attempt {
-    pub fn new(
-        runtime_epoch: RuntimeEpoch,
-        attempt_id: AttemptId,
-        intent: ConnectIntent,
-        prior_error: Option<VpnError>,
-    ) -> Self {
+    pub fn new(runtime_epoch: RuntimeEpoch, attempt_id: AttemptId, intent: ConnectIntent) -> Self {
         Attempt {
             runtime_epoch,
             attempt_id,
             intent,
-            prior_error,
         }
     }
 
@@ -435,10 +415,6 @@ impl Attempt {
 
     pub(crate) fn intent(&self) -> &ConnectIntent {
         &self.intent
-    }
-
-    pub(crate) fn prior_error(&self) -> &Option<VpnError> {
-        &self.prior_error
     }
 }
 
@@ -480,16 +456,12 @@ impl ConnectedSession {
         protocol_session: ProtocolSessionRef,
         platform_ownership: PlatformOwnershipRef,
         packet_lease: PacketLeaseRef,
-        platform_ready: PlatformReadyProof,
-        data_running: DataRunningProof,
     ) -> Self {
         ConnectedSession {
             attempt,
             protocol_session,
             platform_ownership,
             packet_lease,
-            platform_ready,
-            data_running,
         }
     }
 
@@ -507,14 +479,6 @@ impl ConnectedSession {
 
     pub(crate) fn packet_lease(&self) -> &PacketLeaseRef {
         &self.packet_lease
-    }
-
-    pub(crate) fn platform_ready(&self) -> &PlatformReadyProof {
-        &self.platform_ready
-    }
-
-    pub(crate) fn data_running(&self) -> &DataRunningProof {
-        &self.data_running
     }
 }
 
@@ -618,5 +582,3 @@ impl RuntimeState {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

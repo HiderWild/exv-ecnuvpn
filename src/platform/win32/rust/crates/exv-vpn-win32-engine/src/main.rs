@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 // 产品化（2026-08-19，随 host 一致）：engine 为特权产品进程，隐藏控制台黑框。
 #![windows_subsystem = "windows"]
@@ -107,7 +105,9 @@ struct EngineArgs {
     control_pipe: String,
     /// wintun.dll 路径（本 MVP 阶段由 engine 侧后续 slice 消费）。
     dll: PathBuf,
-    /// durable journal 目录（teardown 记录；本 MVP 阶段未接线）。
+    /// durable journal 目录（`--journal-dir`；2026-09-05 账本计划起真正接线：系统代理
+    /// 账本的 open_and_replay 与运行期记账都在此目录，host 传机器级稳定路径
+    /// `%ProgramData%\ExvVpn\journal`，崩溃/重启后同路径可回放）。
     journal_dir: PathBuf,
     /// `Local\`-scoped authority mutex 名（后续 authority 组合使用）。
     authority_name: String,
@@ -274,10 +274,17 @@ enum EngineExitTrigger {
 ///   → [`shutdown_after_trigger`] 完整序。
 /// - **service**：连续 accept-loop（`serve_named_pipe_loop`）→ SCM stop 信号 →
 ///   [`service_exit_cleanup`]（无心跳 watchdog、无 core-pid watch）。
+///
+/// `shutdown_tx`（2026-09-05 方案 B，增参穿入）：`run_service_main` 把**既有** scm_stop
+/// watch 的 Sender 克隆传入（`Some`），`run_engine` 转交 `HelperControlService`
+/// （`with_shutdown_signal`）——`Shutdown` RPC 受理后延迟触发与 SCM stop 相同的 watch，
+/// 不新增第二根通道。`EngineExitForm` 定义于 `service.rs`（计划领地不可改），故经本
+/// 参数穿入；oneshot 传 `None`（`Shutdown` 回 `NOT_APPLICABLE`）。
 async fn run_engine(
     args: EngineArgs,
     form: EngineExitForm,
     ready_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
 ) -> Result<i32, String> {
     // 控制面管道 DACL 的 core 用户 SID：显式 `--user-sid` 优先；缺省回退本进程用户 SID
     // （同用户拓扑下两者相等）。任一不可得 → fail closed。
@@ -295,6 +302,9 @@ async fn run_engine(
     // 单独持有 Arc，供 service 退出路径（service_exit_cleanup）经 log.emit 记录
     // 退出 outcome——tracing 无 subscriber 会丢弃日志，log.emit 才是可达聚合器的通道。
     let log: Arc<LogSink> = Arc::new(LogSink::engine_default());
+    // 2026-09-05 账本计划 J4：`args.journal_dir` 真正用起来——with_real_tunnel 在
+    // serving 前执行系统代理账本 open_and_replay（§4.5 两形态共用钩子），回放后的
+    // 句柄交 RealTunnelRuntime 供运行期记账（崩溃恢复的业务闭环入口）。
     let service = HelperControlService::with_real_tunnel(
         log.clone(),
         args.dll.clone(),
@@ -302,6 +312,7 @@ async fn run_engine(
         args.config_dir.clone(),
         // 发起用户 SID：系统代理豁免写入该用户 HKU（engine 以服务身份运行）。
         Some(core_sid.clone()),
+        args.journal_dir.clone(),
     );
     // S3/D7：service 形态启用 owner 断线释放（连接 EOF → 释放 owner + version++）。
     // oneshot 保持一次性 owner（host 握手后关流，owner 跨 stream 保持）。
@@ -309,6 +320,12 @@ async fn run_engine(
         service.in_service_mode()
     } else {
         service
+    };
+    // 2026-09-05 方案 B：service 形态注入 Shutdown 触发信号（既有 scm_stop watch 的
+    // Sender 克隆，见 `run_engine` 文档）；oneshot 不注入。
+    let service = match (shutdown_tx, matches!(form, EngineExitForm::Service { .. })) {
+        (Some(tx), true) => service.with_shutdown_signal(tx),
+        _ => service,
     };
     let runtime = service.runtime_handle();
     let status = service.status_publisher();
@@ -342,16 +359,16 @@ async fn run_engine(
             // S3/D2：服务模式 PSK 是主认证机制——缺 PSK 文件 → 服务启动失败（fail
             // closed，不静默降级到无 PSK 服务）。exe 路径 + SYSTEM 的 SID 验证保留为
             // 传输层兜底；PSK 是共享秘密证明（D2）。PSK 读取失败路径不变（fail closed）。
-            let psk = match read_service_psk() {
-                Ok(psk) => psk,
-                Err(e) => {
-                    let error = format!("service PSK unavailable (reinstall the service): {e}");
-                    if let Some(ref mut ready) = ready {
-                        let _ = ready.report_error(error.clone());
-                    }
-                    return Err(error);
+            // 2026-09-05 撤销计划（4.2）：启动读取仅为 fail-closed 校验，**不再向
+            // acceptor 传值**——accept 侧每 accept 现读文件（撤销即时生效），禁缓存
+            // last-known-good。
+            if let Err(e) = read_service_psk() {
+                let error = format!("service PSK unavailable (reinstall the service): {e}");
+                if let Some(ref mut ready) = ready {
+                    let _ = ready.report_error(error.clone());
                 }
-            };
+                return Err(error);
+            }
             // S3/Tier 2：控制面就绪的共享持久布尔——同一事实同时注入
             // HelperControlService（ServiceManage.query 读）与 ServiceAcceptor
             // （建管 + report_ready 成功后置 true）。ready oneshot 仍驱动 ServiceMain
@@ -364,7 +381,6 @@ async fn run_engine(
             let outcome = serve_named_pipe_loop(
                 &args.control_pipe,
                 &core_sid,
-                psk,
                 server,
                 scm_stop,
                 ready,
@@ -384,7 +400,8 @@ async fn run_engine_oneshot() -> Result<i32, String> {
         core_handle: args.host_pid,
         heartbeat_timeout: HEARTBEAT_TIMEOUT_MS,
     };
-    run_engine(args, form, None).await
+    // oneshot 无 Shutdown 触发信号（生命周期随 core；`Shutdown` 回 NOT_APPLICABLE）。
+    run_engine(args, form, None, None).await
 }
 
 /// 引擎 CLI 分派（main 的同步入口）：
@@ -392,6 +409,8 @@ async fn run_engine_oneshot() -> Result<i32, String> {
 /// - `--service-install` / `--service-uninstall` / `--service-start`：
 ///   SCM 管理子命令（本机 admin，runas 提权边界内；不新建特权二进制，D4）。
 /// - `--service-batch`：批量提权模式（一次 runas 完成完整服务操作序列，1 次 UAC）。
+/// - `--service-rotate-key`：轮换（撤销）服务 PSK（2026-09-05 撤销计划；覆盖写新
+///   密钥，无需重启服务；stdout 输出 fingerprint 摘要）。
 /// - `--service`：注册 SCM ServiceMain（阻塞直至服务停止；必须由 SCM 启动）。
 /// - 其它：oneshot（默认）——core 生命周期。
 fn dispatch(argv: &[String]) -> Result<i32, String> {
@@ -407,6 +426,9 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
     if argv.iter().any(|a| a == "--service-batch") {
         return dispatch_service_batch(argv);
     }
+    if wants_service_rotate_key(argv) {
+        return dispatch_service_rotate_key();
+    }
     if argv.iter().any(|a| a == "--service") {
         return run_service_dispatcher();
     }
@@ -415,6 +437,21 @@ fn dispatch(argv: &[String]) -> Result<i32, String> {
         .build()
         .map_err(|e| format!("build tokio runtime: {e}"))?;
     runtime.block_on(run_engine_oneshot())
+}
+
+/// 是否请求 `--service-rotate-key` 子命令（可测谓词；dispatch 据此分派）。
+fn wants_service_rotate_key(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--service-rotate-key")
+}
+
+/// `--service-rotate-key` 分派（2026-09-05 撤销计划）：提权环境内直接轮换服务 PSK
+///（`rotate_service_key` = `write_service_psk(current_user_sid)` 覆盖写新密钥，无需
+/// 重启服务），stdout 输出新 key 的 fingerprint（`rotated fingerprint=<16hex>`，非
+/// 秘密摘要）供运维审计。非提权执行 → Windows ACL 拒绝 → 诚实报错（非零退出）。
+fn dispatch_service_rotate_key() -> Result<i32, String> {
+    let fingerprint = exv_engine::service::rotate_service_key()?;
+    println!("rotated fingerprint={fingerprint}");
+    Ok(0)
 }
 
 /// 提取 `--key` 后的参数值；缺失或下一个 token 是另一个 `--` 选项 → `None`。
@@ -525,7 +562,11 @@ fn run_service_main(arguments: &[OsString]) -> Result<(), String> {
 
     // 停止信号通道：控制处理器收到 SERVICE_CONTROL_STOP/SHUTDOWN → 置位 → accept-loop
     // 退出 → 清理。发送端随控制处理器存活（windows-service 在停止时释放回调）。
+    // 2026-09-05 方案 B：`shutdown_tx` 是同一 watch 的额外克隆（控制处理器持原
+    // Sender；克隆随 `run_engine` 穿入 `HelperControlService`，`Shutdown` RPC 受理后
+    // 延迟 300ms 向同一 watch 发 `true`——"可编程 SCM stop"，停机序列零改动）。
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let shutdown_tx = stop_tx.clone();
     let status_handle = service_control_handler::register(SERVICE_NAME, move |control_event| {
         match control_event {
             ServiceControl::Stop | ServiceControl::Shutdown => {
@@ -558,7 +599,7 @@ fn run_service_main(arguments: &[OsString]) -> Result<(), String> {
     let form = EngineExitForm::Service { scm_stop: stop_rx };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let run = runtime.block_on(async {
-        let mut run_future = Box::pin(run_engine(args, form, Some(ready_tx)));
+        let mut run_future = Box::pin(run_engine(args, form, Some(ready_tx), Some(shutdown_tx)));
         tokio::select! {
             ready = ready_rx => {
                 match ready {
@@ -627,7 +668,7 @@ async fn service_exit_cleanup(
     );
     tracing::info!(?outcome, "service engine exiting: full teardown sequence");
     heartbeat_shutdown(runtime, status).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(exv_engine::service::SERVICE_EXIT_FLUSH).await;
 }
 
 /// 生命周期触发后的 shutdown 路径（P2 完整序的可测单元，P3 双路径闭合）：
@@ -694,452 +735,3 @@ fn main() {
 // 进程退出，engine 回 Idle 常驻；进程退出仅由 core 进程退出信号触发。不触碰真实
 // 进程/管道，注入 JoinHandle 验证等待语义）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 注入 argv（`argv[0]` = 程序名，与 `std::env::args()` 形状一致）。
-    fn parse_from(args: &[&str]) -> Result<EngineArgs, String> {
-        let mut argv: Vec<String> = vec!["exv-engine".to_string()];
-        argv.extend(args.iter().map(|s| s.to_string()));
-        parse_argv(&argv)
-    }
-
-    /// `core` 参数往返：`engine_args_for_spawn` 产出（缺 `--log-pipe`）必须被生产
-    /// engine 解析器接受，且必需字段齐备。
-    #[test]
-    fn parse_engine_args_round_trip() {
-        let parsed = parse_from(&[
-            "--control-pipe",
-            r"\\.\pipe\exv-engine-4242-c",
-            "--dll",
-            r"C:\wintun\wintun.dll",
-            "--journal-dir",
-            r"C:\tmp\exv-engine-journal-4242",
-            "--authority-name",
-            "Local\\exv-engine-4242-authority",
-            "--host-pid",
-            "4242",
-            "--adapter-name",
-            "ExvEngine",
-            "--user-sid",
-            "S-1-5-21-1-2-3-4",
-        ])
-        .expect("parse");
-        assert_eq!(parsed.control_pipe, r"\\.\pipe\exv-engine-4242-c");
-        assert_eq!(parsed.dll, PathBuf::from(r"C:\wintun\wintun.dll"));
-        assert_eq!(parsed.host_pid, 4242);
-        assert_eq!(parsed.adapter_name, "ExvEngine");
-        assert_eq!(parsed.core_user_sid.as_deref(), Some("S-1-5-21-1-2-3-4"));
-    }
-
-    /// 必需参数缺失 / `--host-pid` 非数字 → Err（fail closed）。
-    #[test]
-    fn parse_engine_args_rejects_incomplete() {
-        assert!(parse_from(&[]).is_err(), "空参数必须拒绝");
-        assert!(
-            parse_from(&["--control-pipe", r"\\.\pipe\exv-engine-1-c"]).is_err(),
-            "缺 --dll/--host-pid 必须拒绝"
-        );
-        assert!(
-            parse_from(&[
-                "--control-pipe",
-                r"\\.\pipe\exv-engine-1-c",
-                "--dll",
-                r"C:\wintun\wintun.dll",
-                "--host-pid",
-                "not-a-pid",
-            ])
-            .is_err(),
-            "--host-pid 非数字必须拒绝"
-        );
-    }
-
-    /// `--user-sid` 缺省允许（`None`——engine 回退本进程用户 SID，同用户拓扑相等）。
-    #[test]
-    fn parse_engine_args_ui_sid_optional() {
-        let parsed = parse_from(&[
-            "--control-pipe",
-            r"\\.\pipe\exv-engine-7-c",
-            "--dll",
-            r"C:\wintun\wintun.dll",
-            "--host-pid",
-            "7",
-        ])
-        .expect("parse without --user-sid");
-        assert_eq!(parsed.core_user_sid, None);
-    }
-
-    // 服务形态参数契约（S2）：`parse_service_argv` 要求 `--control-pipe`/`--dll`/绝对
-    // `--config-dir`，
-    // **不要求 `--host-pid`**（服务引擎无单一 core，生命周期 = SCM）。
-
-    /// 服务参数：`--host-pid` 缺省允许（host_pid = 0；服务形态不用 core 进程句柄）。
-    #[test]
-    fn parse_service_argv_allows_missing_host_pid() {
-        let argv: Vec<String> = vec![
-            "exv-engine".to_string(),
-            "--service".to_string(),
-            "--control-pipe".to_string(),
-            r"\\.\pipe\exv-engine-service-c".to_string(),
-            "--dll".to_string(),
-            r"C:\wintun\wintun.dll".to_string(),
-            "--adapter-name".to_string(),
-            "ExvEngine".to_string(),
-            "--user-sid".to_string(),
-            "S-1-5-21-1-2-3-4".to_string(),
-            "--config-dir".to_string(),
-            r"C:\Users\Alice\.exv".to_string(),
-        ];
-        let parsed = parse_service_argv(&argv).expect("service args parse");
-        assert_eq!(parsed.control_pipe, r"\\.\pipe\exv-engine-service-c");
-        assert_eq!(parsed.dll, PathBuf::from(r"C:\wintun\wintun.dll"));
-        assert_eq!(parsed.host_pid, 0, "服务形态无 host-pid");
-        assert_eq!(parsed.core_user_sid.as_deref(), Some("S-1-5-21-1-2-3-4"));
-        assert_eq!(parsed.config_dir, PathBuf::from(r"C:\Users\Alice\.exv"));
-    }
-
-    /// 服务参数：必需字段缺失（`--control-pipe`/`--dll`/`--config-dir`）→ `Err`（fail closed）。
-    #[test]
-    fn parse_service_argv_rejects_incomplete() {
-        let argv: Vec<String> = vec![
-            "exv-engine".to_string(),
-            "--service".to_string(),
-        ];
-        assert!(
-            parse_service_argv(&argv).is_err(),
-            "服务参数缺 --control-pipe/--dll 必须拒绝"
-        );
-    }
-
-    #[test]
-    fn parse_service_argv_rejects_missing_or_relative_config_dir() {
-        let base = vec![
-            "exv-engine".to_string(),
-            "--service".to_string(),
-            "--control-pipe".to_string(),
-            r"\\.\pipe\exv-engine-service-c".to_string(),
-            "--dll".to_string(),
-            r"C:\wintun.dll".to_string(),
-        ];
-
-        let mut missing = base.clone();
-        assert!(
-            parse_service_argv(&missing)
-                .expect_err("service args without config dir must fail")
-                .contains("--config-dir")
-        );
-
-        missing.extend([
-            "--config-dir".to_string(),
-            r"relative\.exv".to_string(),
-        ]);
-        assert!(
-            parse_service_argv(&missing)
-                .expect_err("relative service config dir must fail")
-                .contains("--config-dir")
-        );
-    }
-
-    /// SCM 的 `ServiceMain` 参数通常只有服务名；服务注册项中的完整启动参数仍在
-    /// 当前进程命令行中，服务启动必须从后者恢复 `--control-pipe`/`--dll`/`--config-dir`。
-    #[test]
-    fn parse_service_argv_uses_process_command_line_when_scm_args_only_have_name() {
-        let service_argv = vec!["exv-engine".to_string()];
-        let process_argv = vec![
-            "exv-engine.exe".to_string(),
-            "--service".to_string(),
-            "--control-pipe".to_string(),
-            r"\\.\pipe\exv-engine-service-c".to_string(),
-            "--dll".to_string(),
-            r"C:\wintun\wintun.dll".to_string(),
-            "--config-dir".to_string(),
-            r"C:\Users\Alice\.exv".to_string(),
-        ];
-
-        let parsed = parse_service_argv_sources(&service_argv, &process_argv)
-            .expect("service must use registered process command line");
-        assert_eq!(parsed.control_pipe, r"\\.\pipe\exv-engine-service-c");
-        assert_eq!(parsed.dll, PathBuf::from(r"C:\wintun\wintun.dll"));
-    }
-
-    /// D1 服务形态：`EngineExitForm::Service` 禁用 core 进程句柄监视（run_engine 的
-    /// service 分支不调 `wait_core_process_exit`）——生命周期由 SCM 管。
-    #[test]
-    fn service_form_has_no_core_process_watch() {
-        use exv_engine::service::EngineExitForm;
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let form = EngineExitForm::Service { scm_stop: rx };
-        assert_eq!(form.core_handle(), None, "服务形态无 core 句柄可等");
-        assert!(!form.uses_core_process_watch());
-        assert!(!form.uses_heartbeat());
-    }
-
-    /// D1 解耦 + P2 双保险：core 进程存活**且**心跳新鲜 → engine 保持 pending（不触发
-    /// 自退）。注入两个永不完结的等待（= core 进程存活 + 心跳持续刷新），
-    /// `await_core_process_exit` 必须保持 pending（engine 不因业务停机/无触发自退）。
-    #[tokio::test]
-    async fn lifecycle_stays_alive_while_core_alive_and_heartbeat_fresh() {
-        // core 进程仍存活 → 进程等待永不完成。
-        let process_wait = tokio::task::spawn(std::future::pending::<()>());
-        // 心跳新鲜（watchdog 不 resolve）→ 心跳等待永不完成。
-        let heartbeat_timeout = tokio::task::spawn(std::future::pending::<()>());
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            await_core_process_exit(process_wait, heartbeat_timeout),
-        )
-        .await;
-        assert!(
-            outcome.is_err(),
-            "core 存活 + 心跳新鲜时 engine 必须保持常驻（无退出触发）"
-        );
-    }
-
-    /// D1 解耦：core 进程退出（主动关停随行 / 崩溃 / kill）→ engine 随行退出。
-    /// 注入立即完成的进程等待（= core 进程句柄 signaled）+ 永不完成的心跳等待，
-    /// `await_core_process_exit` 必须返回 [`EngineExitTrigger::CoreProcessExited`]
-    /// （engine 随 core 退出，不遗留）。
-    #[tokio::test]
-    async fn lifecycle_exits_on_core_process_exit() {
-        let process_wait = tokio::task::spawn(async {}); // 立即完成 = core 已退出。
-        let heartbeat_timeout = tokio::task::spawn(std::future::pending::<()>());
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            await_core_process_exit(process_wait, heartbeat_timeout),
-        )
-        .await;
-        assert_eq!(
-            outcome.expect("must complete"),
-            EngineExitTrigger::CoreProcessExited,
-            "core 进程句柄 signaled 必须触发 engine 随行退出（进程退出触发）"
-        );
-    }
-
-    /// P2 双保险：心跳超时（core 存活不发心跳 = hung-core 检测）→ engine 自退。
-    /// 注入永不完成的进程等待（= core 进程存活）+ 立即完成的心跳等待（= 心跳停滞超时），
-    /// `await_core_process_exit` 必须返回 [`EngineExitTrigger::HeartbeatTimeout`]
-    /// （硬时间界兜底：不依赖进程句柄）。
-    #[tokio::test]
-    async fn lifecycle_heartbeat_timeout_exits_engine() {
-        let process_wait = tokio::task::spawn(std::future::pending::<()>()); // core 存活。
-        let heartbeat_timeout = tokio::task::spawn(async {}); // 心跳超时触发。
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            await_core_process_exit(process_wait, heartbeat_timeout),
-        )
-        .await;
-        assert_eq!(
-            outcome.expect("must complete"),
-            EngineExitTrigger::HeartbeatTimeout,
-            "心跳超时必须触发 engine 自退（hung-core / 句柄路径故障兜底）"
-        );
-    }
-
-    /// P2 完整序（「关机瞬间 connect 中」的可测投影）：心跳超时 → `shutdown_after_trigger`
-    /// 先 teardown（复用 teardown 路径）→ post Idle → 300ms flush。注入 connecting runtime
-    /// + status 流，断言 teardown 计数 + Idle 终态 + flush 时长。
-    #[tokio::test]
-    async fn shutdown_after_heartbeat_timeout_orders_teardown_idle_flush() {
-        use exv_engine::status::StatusPublisher;
-        use exv_engine::tunnel_runtime::{FakeTunnelRuntime, TunnelRuntime};
-
-        let runtime_typed = std::sync::Arc::new(FakeTunnelRuntime::new());
-        let runtime: std::sync::Arc<dyn TunnelRuntime> = runtime_typed.clone();
-        let status = std::sync::Arc::new(StatusPublisher::new());
-        let mut rx = status.open_stream();
-
-        let t0 = std::time::Instant::now();
-        shutdown_after_trigger(EngineExitTrigger::HeartbeatTimeout, runtime, status).await;
-
-        // 1. teardown 已执行（复用 teardown 路径——心跳自清理必须撤网卡/路由）。
-        assert_eq!(
-            runtime_typed
-                .teardown_count
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "心跳超时自清理必须先 teardown（复用 teardown 路径）"
-        );
-        // 2. post Idle 终态（teardown 之后经 status 通道发布——host 侧数据面加入收敛信号）。
-        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("idle within timeout")
-            .expect("stream alive")
-            .expect("event ok");
-        assert_eq!(
-            event.coarse_phase,
-            exv_vpn_wire::generated::StatsPhase::Idle as i32,
-            "心跳超时自清理必须在 teardown 后 post Idle 终态"
-        );
-        // 3. 300ms flush（给 detached serve task 写回终态的有界窗口）。
-        assert!(
-            t0.elapsed() >= std::time::Duration::from_millis(300),
-            "心跳超时 shutdown 必须含 300ms flush（实测 {:?}）",
-            t0.elapsed()
-        );
-    }
-
-    /// P3 折叠项[1]：进程句柄触发（core 正常关机/崩溃/强杀）同样走完整序——teardown
-    /// → post Idle → 300ms flush。判据 4：connect 中/已连接时 core 被杀（无 StopTunnel
-    /// 业务停机）必须由本路径兜底撤网卡/路由；core 正常关机场景下二次 teardown 幂等
-    /// （`live.take()` None → Ok）。
-    #[tokio::test]
-    async fn shutdown_after_core_exit_also_runs_full_teardown_sequence() {
-        use exv_engine::status::StatusPublisher;
-        use exv_engine::tunnel_runtime::{FakeTunnelRuntime, TunnelRuntime};
-
-        let runtime_typed = std::sync::Arc::new(FakeTunnelRuntime::new());
-        let runtime: std::sync::Arc<dyn TunnelRuntime> = runtime_typed.clone();
-        let status = std::sync::Arc::new(StatusPublisher::new());
-        let mut rx = status.open_stream();
-
-        let t0 = std::time::Instant::now();
-        shutdown_after_trigger(EngineExitTrigger::CoreProcessExited, runtime, status).await;
-
-        // 1. teardown 已执行（进程句柄路径无条件走完整序——connect 中被杀兜底）。
-        assert_eq!(
-            runtime_typed
-                .teardown_count
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "进程句柄路径必须执行 teardown（判据 4：connect 中被杀兜底撤网卡/路由）"
-        );
-        // 2. post Idle 终态（teardown 之后经 status 通道发布）。
-        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("idle within timeout")
-            .expect("stream alive")
-            .expect("event ok");
-        assert_eq!(
-            event.coarse_phase,
-            exv_vpn_wire::generated::StatsPhase::Idle as i32,
-            "进程句柄路径必须在 teardown 后 post Idle 终态"
-        );
-        // 3. 300ms flush（给 detached serve task 写回终态的有界窗口）。
-        assert!(
-            t0.elapsed() >= std::time::Duration::from_millis(300),
-            "进程句柄路径仍须 300ms flush（实测 {:?}）",
-            t0.elapsed()
-        );
-    }
-
-    /// P3 折叠项[1]：双退出路径都走完整序的幂等性——`shutdown_after_trigger` 对同一
-    /// runtime 连续调用两次不 panic、不重复 post 错误状态（teardown 计数累加、Idle
-    /// 事件各发一次；真实运行时 `live.take()` None → Ok 是 no-op）。这证明进程句柄路径
-    /// 在 core 已发 StopTunnel（业务 teardown 已完成）后再次执行完整序是安全的。
-    #[tokio::test]
-    async fn shutdown_after_trigger_is_idempotent_across_invocations() {
-        use exv_engine::status::StatusPublisher;
-        use exv_engine::tunnel_runtime::{FakeTunnelRuntime, TunnelRuntime};
-
-        let runtime_typed = std::sync::Arc::new(FakeTunnelRuntime::new());
-        let runtime: std::sync::Arc<dyn TunnelRuntime> = runtime_typed.clone();
-        let status = std::sync::Arc::new(StatusPublisher::new());
-        let mut rx = status.open_stream();
-
-        // 第一次：HeartbeatTimeout 路径（完整序）。
-        shutdown_after_trigger(EngineExitTrigger::HeartbeatTimeout, runtime.clone(), status.clone()).await;
-        // 第二次：CoreProcessExited 路径（完整序，幂等）。必须不 panic。
-        shutdown_after_trigger(EngineExitTrigger::CoreProcessExited, runtime, status).await;
-
-        assert_eq!(
-            runtime_typed
-                .teardown_count
-                .load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "两次完整序共执行两次 teardown（真实运行时第二次是 live.take None → Ok）"
-        );
-        // 两条 Idle 终态都被发布（各一次；空 operation_id，host 侧空 id 过滤丢弃）。
-        let e1 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("first idle")
-            .expect("stream alive")
-            .expect("event ok");
-        let e2 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("second idle")
-            .expect("stream alive")
-            .expect("event ok");
-        assert_eq!(e1.coarse_phase, exv_vpn_wire::generated::StatsPhase::Idle as i32);
-        assert_eq!(e2.coarse_phase, exv_vpn_wire::generated::StatsPhase::Idle as i32);
-    }
-
-    // -------------------------------------------------------------------------
-    // `--service-batch` 分派（S2-A）：三参数解析 + 缺失 fail closed。
-    // -------------------------------------------------------------------------
-
-    /// `--service-batch` 三参数（`--request/--result/--host-pid`）齐备 → 解析通过。
-    #[test]
-    fn service_batch_dispatch_parses_three_args() {
-        let argv = vec![
-            "exv-engine.exe".to_string(),
-            "--service-batch".to_string(),
-            "--request".to_string(),
-            r"C:\tmp\req.json".to_string(),
-            "--result".to_string(),
-            r"C:\tmp\res.json".to_string(),
-            "--host-pid".to_string(),
-            "4242".to_string(),
-        ];
-        assert_eq!(arg_value(&argv, "--request"), Some(r"C:\tmp\req.json"));
-        assert_eq!(arg_value(&argv, "--result"), Some(r"C:\tmp\res.json"));
-        assert_eq!(arg_value(&argv, "--host-pid"), Some("4242"));
-    }
-
-    /// `--service-batch` 任一必需参数缺失 → Err（非零退出，fail closed）。
-    #[test]
-    fn service_batch_dispatch_rejects_missing_args() {
-        for missing in ["--request", "--result", "--host-pid"] {
-            let mut argv = vec![
-                "exv-engine.exe".to_string(),
-                "--service-batch".to_string(),
-                "--request".to_string(),
-                r"C:\tmp\req.json".to_string(),
-                "--result".to_string(),
-                r"C:\tmp\res.json".to_string(),
-                "--host-pid".to_string(),
-                "4242".to_string(),
-            ];
-            let pos = argv.iter().position(|a| a == missing).expect("arg present");
-            argv.remove(pos); // 删选项本身。
-            argv.remove(pos); // 删其值。
-            let err = dispatch_service_batch(&argv).expect_err("缺失参数必须拒绝");
-            assert!(err.contains(missing), "错误必须点名缺失参数 {missing}: {err}");
-        }
-    }
-
-    /// `--host-pid` 非数字 → Err（fail closed，防孤儿 watch 的输入必须可靠）。
-    #[test]
-    fn service_batch_dispatch_rejects_non_numeric_host_pid() {
-        let argv = vec![
-            "exv-engine.exe".to_string(),
-            "--service-batch".to_string(),
-            "--request".to_string(),
-            r"C:\tmp\req.json".to_string(),
-            "--result".to_string(),
-            r"C:\tmp\res.json".to_string(),
-            "--host-pid".to_string(),
-            "not-a-pid".to_string(),
-        ];
-        let err = dispatch_service_batch(&argv).expect_err("非数字 host-pid 必须拒绝");
-        assert!(err.contains("--host-pid"), "got {err}");
-    }
-
-    // -------------------------------------------------------------------------
-    // S2-C 孤儿 watchdog（--service-batch）单元测试在 lib `service_batch` 模块
-    // （`service_batch::tests::orphan_watchdog_*`，`cargo test --lib` 覆盖）。
-    // 进程级（host 退出 → 批量 engine 退出）留 tests/ 集成（env 门控 + 标 ignored）。
-    // -------------------------------------------------------------------------
-
-    /// `wait_for_process_exit_blocking` fail-safe：PID 不存在（host 已退出）→ 立即返回，
-    /// 不阻塞（防孤儿 watch 的 OpenProcess 失败路径）。
-    #[test]
-    fn wait_for_process_exit_blocking_failsafe_returns_immediately() {
-        let start = std::time::Instant::now();
-        wait_for_process_exit_blocking(u32::MAX);
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "OpenProcess fail-safe 必须立即返回（host 已退出）"
-        );
-    }
-}

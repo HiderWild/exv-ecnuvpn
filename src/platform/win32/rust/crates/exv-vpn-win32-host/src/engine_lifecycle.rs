@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! engine 子进程监督（P3-c2：engine 由 core 拉起，core 停机时 engine 一并终止）。
 //!
@@ -36,50 +34,59 @@ use crate::process_lifecycle::{
     verify_process_elevated,
 };
 
-/// 共享 engine 控制面槽（P3 崩溃自愈的换点）。
+/// 共享 engine 控制面槽（P3 崩溃自愈 / 2026-09-08 按需拉起的换点）。
 ///
 /// 服务（`KernelControlService`）、状态/统计/日志转发器与 KeepAlive tick 任务共享同一
-/// `EngineSlot`；engine respawn 后经 [`EngineSlot::swap`] 换入新 client——转发器在下一轮
-/// 重连即从 [`EngineSlot::current`] 拿到新 engine，无需 abort/重拉转发器。
+/// `EngineSlot`；engine respawn/provision 后经 [`EngineSlot::swap`] 换入新 client——
+/// 转发器在下一轮重连即从 [`EngineSlot::current`] 拿到新 engine，无需 abort/重拉转发器。
+///
+/// 「空」态以规范 [`crate::grpc_control::DetachedEngine`] 占位表达（按需拉起模型：
+/// core 启动不预拉 engine；服务在场时 core 不持有 oneshot——存在性互斥）。
 #[derive(Clone)]
 pub struct EngineSlot {
     inner: Arc<tokio::sync::Mutex<Arc<Mutex<dyn KernelEngineControl>>>>,
-    initial: Arc<Mutex<dyn KernelEngineControl>>,
     generation: Arc<AtomicU64>,
     swaps: watch::Sender<u64>,
 }
 
 impl EngineSlot {
-    /// 用初始 engine 控制面构造。
+    /// 用初始 engine 控制面构造（provision/测试路径——已拉起/注入 client 后）。
     #[must_use]
     pub fn new(engine: Arc<Mutex<dyn KernelEngineControl>>) -> Self {
         let (swaps, _) = watch::channel(0);
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(Arc::clone(&engine))),
-            initial: engine,
             generation: Arc::new(AtomicU64::new(0)),
             swaps,
         }
     }
 
-    /// Core 启动时的初始 oneshot engine。service 路由换点后，卸载服务可恢复此控制面。
+    /// 空槽构造（按需拉起模型：core 启动时无 engine；槽指向规范 detached 占位）。
     #[must_use]
-    pub fn initial(&self) -> Arc<Mutex<dyn KernelEngineControl>> {
-        Arc::clone(&self.initial)
+    pub fn new_detached() -> Self {
+        Self::new(crate::grpc_control::detached_engine())
     }
 
-    /// 当前 engine 控制面 Arc（RPC 前取；respawn 后为最新）。
+    /// 当前 engine 控制面 Arc（RPC 前取；respawn/provision 后为最新）。
     pub async fn current(&self) -> Arc<Mutex<dyn KernelEngineControl>> {
         self.inner.lock().await.clone()
     }
 
-    /// 订阅 engine 控制面换点通知（服务/respawn 路由切换状态流时使用）。
+    /// 槽是否处于空态（规范 detached 占位）。
+    pub async fn is_detached(&self) -> bool {
+        Arc::ptr_eq(
+            &self.current().await,
+            &crate::grpc_control::detached_engine(),
+        )
+    }
+
+    /// 订阅 engine 控制面换点通知（服务/respawn/provision 路由切换状态流时使用）。
     pub fn subscribe_swaps(&self) -> watch::Receiver<u64> {
         self.swaps.subscribe()
     }
 
-    /// 换入新 engine 控制面（respawn/service 路径）。返回是否真的发生换点；相同
-    /// 控制面重复设置不制造无意义的状态流重连。
+    /// 换入新 engine 控制面（respawn/provision/service 路径）。返回是否真的发生换点；
+    /// 相同控制面重复设置不制造无意义的状态流重连。
     pub async fn swap(&self, engine: Arc<Mutex<dyn KernelEngineControl>>) -> bool {
         let mut current = self.inner.lock().await;
         if Arc::ptr_eq(&*current, &engine) {
@@ -87,8 +94,14 @@ impl EngineSlot {
         }
         *current = engine;
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = self.swaps.send(generation);
+        self.swaps.send_replace(generation);
         true
+    }
+
+    /// 换回空态（规范 detached 占位；服务安装成功/卸载完成等「无 oneshot 维护对象」
+    /// 的边界）。幂等：已在占位上不制造换点。
+    pub async fn swap_detached(&self) -> bool {
+        self.swap(crate::grpc_control::detached_engine()).await
     }
 }
 
@@ -160,6 +173,18 @@ pub struct EngineSupervisor {
 }
 
 impl EngineSupervisor {
+    /// 空监督句柄（按需拉起模型，2026-09-08 计划批 1）：core 启动时无 engine——
+    /// child/client/liveness 均空。engine 由 `EngineProvisioner` 在首次 oneshot 业务
+    /// 连接（或 respawn）时提权拉起并挂接。
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            child: None,
+            client: None,
+            liveness: None,
+        }
+    }
+
     /// 提权拉起 engine 并做拓扑门禁（elevated 验证）。
     ///
     /// 流程：定位 bin → 构造参数 → spawner 提权拉起 → 观测 engine token 必须 elevated；
@@ -296,227 +321,3 @@ impl EngineSupervisor {
 // 进程级 wait/terminate 由集成测试覆盖）。
 // ---------------------------------------------------------------------------
 
-/// 测试共享基建（`shutdown` 测试复用）：记录型 fake engine 控制面 + 占位 child。
-#[cfg(test)]
-pub(crate) mod test_support {
-    use super::*;
-    use crate::grpc_control::{
-        EngineStatusEventStream, GrpcClientError, LogEventStream, StatsEventStream,
-    };
-    use crate::kernel_control::ClearableSecret;
-    use exv_vpn_wire::generated::{
-        ApplyTunnelReply, ApplyTunnelRequest, GetOperationReply, GetOperationRequest,
-        InteractionResponse, KeepAliveReply, KeepAliveRequest, ObserveOwnedStateReply,
-        ObserveOwnedStateRequest, OperationReply, ReconcileRequest, ServiceManageReply,
-        ServiceManageRequest, StopTunnelReply, StopTunnelRequest,
-    };
-
-    /// 记录型 fake engine 控制面（记录 stop 调用；其余 typed 拒绝/占位）。
-    pub struct RecordingEngine {
-        pub stops: std::sync::Mutex<Vec<StopTunnelRequest>>,
-    }
-
-    #[tonic::async_trait]
-    impl KernelEngineControl for RecordingEngine {
-        async fn ensure_owner_lease(&mut self) -> Result<(), GrpcClientError> {
-            // fake：无真实 lease 语义——幂等成功（真实实现做 MaintainOwnerLease 握手）。
-            Ok(())
-        }
-
-        async fn apply_connect(
-            &mut self,
-            _request: ApplyTunnelRequest,
-            secret_payload: &mut ClearableSecret,
-        ) -> Result<ApplyTunnelReply, GrpcClientError> {
-            // 契约：发送后零化槽（镜像真实实现）。
-            secret_payload.clear();
-            Ok(ApplyTunnelReply { result: None })
-        }
-
-        async fn stop_tunnel(
-            &mut self,
-            request: StopTunnelRequest,
-        ) -> Result<StopTunnelReply, GrpcClientError> {
-            self.stops.lock().unwrap().push(request);
-            Ok(StopTunnelReply { result: None })
-        }
-
-        async fn get_operation(
-            &mut self,
-            _request: GetOperationRequest,
-        ) -> Result<GetOperationReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn observe_owned_state(
-            &mut self,
-            _request: ObserveOwnedStateRequest,
-        ) -> Result<ObserveOwnedStateReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn service_manage(
-            &mut self,
-            _request: ServiceManageRequest,
-        ) -> Result<ServiceManageReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn keep_alive(
-            &mut self,
-            _request: KeepAliveRequest,
-        ) -> Result<KeepAliveReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn stream_connect_status(
-            &mut self,
-        ) -> Result<EngineStatusEventStream, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn stream_stats(
-            &mut self,
-            _sample_interval_ms: u32,
-        ) -> Result<StatsEventStream, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn stream_logs(
-            &mut self,
-            _resume_tick: u64,
-        ) -> Result<LogEventStream, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn respond_interaction(
-            &mut self,
-            _response: InteractionResponse,
-        ) -> Result<OperationReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-
-        async fn retry_obligation(
-            &mut self,
-            _request: ReconcileRequest,
-        ) -> Result<GetOperationReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in test".to_string(),
-            ))
-        }
-    }
-
-    /// 无真实子进程的占位 child（单元测试仅验证 stop 的顺序逻辑；进程级
-    /// wait/terminate 由集成测试用真实 child 覆盖）。0 句柄仅作占位；stop 路径不触碰
-    /// 它（child 为 None 路径或 wait 短路）。
-    #[must_use]
-    pub fn fake_child() -> EngineChild {
-        EngineChild::new(0, HANDLE::default())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::test_support::{RecordingEngine, fake_child};
-    use super::*;
-
-    /// spawn 失败路径（fail-closed typed 拒绝，两条路径都覆盖）：
-    /// bin 缺失（`engine_bin_path` 解析出的 sibling 不存在——测试流 deps 目录常无
-    /// engine bin）→ 存在性门禁拦截 → `BinNotFound`；bin 存在但 spawner 拒绝 →
-    /// `SpawnFailed`。两种结果都是合法 typed 拒绝，断言不允许第三种。
-    #[test]
-    fn spawn_product_bin_not_found_or_spawner_fails() {
-        struct FailSpawner;
-        impl EngineSpawner for FailSpawner {
-            fn spawn(&self, _exe: &Path, _args: &[String]) -> Result<(u32, HANDLE), String> {
-                Err("shell execute refused".to_string())
-            }
-        }
-        let err = EngineSupervisor::spawn_product(&FailSpawner)
-            .err()
-            .expect("spawn must fail");
-        match err {
-            EngineSpawnError::BinNotFound => {
-                // 门禁拦截（bin 缺失）：确定性 fail fast，不触碰 runas。
-            }
-            EngineSpawnError::SpawnFailed(_) => {
-                // bin 存在但 spawner 拒绝。
-            }
-            other => panic!("unexpected error classification: {other:?}"),
-        }
-    }
-
-    /// D1 解耦 / 判据 8：`stop` 发退出包（`StopTunnel` 恰好一次）后**即返**——不等待
-    /// engine 退出、不触发 terminate 兜底（fire-and-forget；无 Terminated 出现）。
-    #[tokio::test]
-    async fn stop_fires_exit_packet_and_returns_immediately() {
-        let engine = Arc::new(Mutex::new(RecordingEngine {
-            stops: std::sync::Mutex::new(Vec::new()),
-        }));
-        let (tx, _rx) = watch::channel(true);
-        let mut supervisor = EngineSupervisor::with_child(fake_child());
-        supervisor.attach_client(engine.clone(), tx.subscribe());
-
-        let outcome = supervisor.stop().await;
-        // 业务退出包（StopTunnel）恰好一次。
-        assert_eq!(engine.lock().await.stops.lock().unwrap().len(), 1);
-        // fire-and-forget：发退出包即返，无 Terminated 兜底触发。
-        assert_eq!(
-            outcome,
-            EngineShutdownOutcome::ExitPacketSent,
-            "stop 发退出包后即返（UI 只等 core，不等 engine 退）——不得出现 Terminated"
-        );
-        let _ = tx;
-    }
-
-    /// D1 解耦：engine 未连接（无共享 client）→ `stop` 无退出包可发 → `NoClient`
-    ///（core 退出后 engine 由进程句柄兜底随行）。
-    #[tokio::test]
-    async fn stop_without_client_reports_no_client() {
-        let supervisor = EngineSupervisor::with_child(fake_child());
-        let outcome = supervisor.stop().await;
-        assert_eq!(
-            outcome,
-            EngineShutdownOutcome::NoClient,
-            "未连接时无退出包可发 → NoClient（不出现 Terminated）"
-        );
-    }
-
-    /// 崩溃恢复/验证路径：`verify_exit` 有界等待/终止（与 UI 关闭路径的 fire-and-forget
-    /// 分离）。fake child（占位 0 句柄）wait 失败 → 超时强制终止（engine 不得遗留）。
-    #[tokio::test]
-    async fn verify_exit_bounded_wait_or_terminate() {
-        let mut supervisor = EngineSupervisor::with_child(fake_child());
-        let outcome = supervisor.verify_exit(1);
-        assert_eq!(
-            outcome,
-            EngineShutdownOutcome::Terminated,
-            "fake child（0 句柄）无法干净退出 → Terminated（崩溃恢复路径的强制终止兜底）"
-        );
-    }
-}

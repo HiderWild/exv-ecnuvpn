@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 use crate::identity::{
     AttemptId, EffectId, OperationLookupKey, RecoveryId, ResourceIdentityDigest,
@@ -27,6 +25,7 @@ pub enum ErrorCode {
     DeadlineExceeded,
     ActiveAttemptCannotReconcile,
     ActiveSessionCannotReconcile,
+    PlatformDependencyUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -150,18 +149,6 @@ pub struct VpnError {
     native: Option<RedactedNativeError>,
 }
 
-pub type VpnErrorAccessorFn = for<'a> fn(
-    &'a VpnError,
-) -> (
-    &'a ErrorCode,
-    &'a ErrorStage,
-    &'a EffectCertainty,
-    &'a RetryAdvice,
-    &'a ErrorSubject,
-    Option<&'a OpaqueResourceRef>,
-    Option<&'a RedactedNativeError>,
-);
-
 // ---- D10-T construction seams (error) ----
 
 use std::fmt;
@@ -262,5 +249,3 @@ impl fmt::Debug for VpnError {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

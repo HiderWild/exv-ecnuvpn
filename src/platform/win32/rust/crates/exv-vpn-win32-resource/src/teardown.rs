@@ -1,29 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! Journaled reverse-order teardown of the aggregate (W24-I).
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-wintun-facts.md`
-//! WSP3 §2, `native-network-settings-facts.md` WSP4 §3/§6): the packet worker MUST be
-//! joined **before** `WintunEndSession` (0.14.1's `WintunEndSession` destroys the session
-//! object — any receive after end is a use-after-free); a creator's `WintunCloseAdapter`
-//! removes the adapter and cascades away all of its address/MTU/route/DNS; cleanup runs
-//! in **reverse** install order — the last-applied family restores first, the tunnel
-//! routes before the bypass; every destructive step must be durably journaled
-//! (`RetirementStarted`) before it may run.
-//!
-//! [`build_teardown_plan`] fixes the stage order (pure logic — the W24 killer-mutant
-//! seam): `PureCancel` → (`JournaledUnblock` → `ChildJoin`, only when packet children
-//! exist) → `ReverseRestore` → `FinalHandle` → `Proof`, and composes
-//! [`crate::apply_tunnel::build_restore_plan`] for the reverse-family restore steps —
-//! never a reimplementation. [`WindowsTeardown`] executes the plan on the committed
-//! pieces (W22 `Aggregate` + `apply_tunnel::restore`, J53 `RetirementSaga`, W17
-//! `PacketWorker`) without re-implementing them: a `join`/`restore` failure poisons
-//! the teardown (remaining stages still run, but no proof is ever signed — the
-//! benign pre-journal `unblock` and final-handle ordering guards are correctable
-//! rejections and do not poison), a repeated `begin` merges into the same saga, and
-//! `Drop` preserves the W17 SAFETY-ORDER (children joined before the aggregate's
-//! session end).
 
 use exv_vpn_domain::error::ErrorSubject;
 use exv_vpn_domain::identity::{InventoryDigest, RetirementOperationId};
@@ -408,5 +383,3 @@ impl Drop for WindowsTeardown {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

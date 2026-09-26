@@ -49,8 +49,8 @@
 }
 
 .product-brand img {
-  width: 72px;
-  height: 72px;
+  width: 48px;
+  height: 48px;
 }
 
 .minimal-brand strong {
@@ -227,8 +227,8 @@
   display: flex;
   container-name: product-rail;
   container-type: inline-size;
-  /* 左侧栏在当前尺寸基础上拓宽约 10%，给连接信息保留更舒适的展示宽度。 */
-  width: clamp(212px, 23vw, 282px);
+  /* 固定导航宽度，连接摘要在剩余高度内独立滚动。 */
+  width: 248px;
   flex: none;
   flex-direction: column;
   gap: var(--space-5);
@@ -245,7 +245,7 @@
   display: block;
   font-size: 22px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.025em;
 }
 
 .product-brand span {
@@ -348,17 +348,6 @@
   font-size: 14px;
 }
 
-.minimal-progress {
-  display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 3px;
-}
-
-.minimal-progress-segment {
-  height: 4px;
-  border-radius: 999px;
-}
-
 @media (min-width: 860px) {
   .product-window--advanced {
     min-width: 860px;
@@ -368,7 +357,7 @@
 
 @media (max-width: 760px) {
   .product-rail {
-    /* 窄窗口继续保留拓宽后的侧栏比例，避免信息列过度压缩。 */
+    /* 窄窗口收敛导航留白。 */
     width: 194px;
     padding: var(--space-3);
   }
@@ -378,8 +367,13 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .minimal-progress-segment--current {
-    animation: none;
-  }
-}
+/* 窗口内布局：固定导航与全局状态，正文只有一层水平留白。 */
+.product-rail { overflow:hidden; gap:28px; padding:28px 18px 18px; }
+.product-brand { flex:none; gap:12px; padding:0 6px; }
+.product-rail nav { flex:none; }
+.product-rail nav button { display:flex; align-items:center; gap:12px; min-height:40px; padding:9px 12px; font-size:14px; }
+.product-rail nav button.active { font-weight:600; }
+.product-rail__connection { min-height:0; }
+.product-content { padding:0 36px; }
+.product-content--scrollable { overflow:hidden; }
+@media(max-width:1000px) { .product-rail { width:232px; padding-left:14px; padding-right:14px; } .product-content { padding:0 24px; } }

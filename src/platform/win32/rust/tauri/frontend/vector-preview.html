@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EXV · 灰阶矢量预览</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f2f3f5;color:#222;font:15px/1.6 system-ui,sans-serif;padding:32px}
+main{max-width:1320px;margin:auto}h1{font-size:27px;margin:0 0 6px}p{color:#6b6b6b;margin:0 0 24px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}.tile{border-radius:14px;padding:18px;background:#fff;border:1px solid #ddd}.dark{background:#141a21;color:#e5e5e5;border-color:#30363e}img{display:block;width:100%;aspect-ratio:1.5}h2{font-size:14px;margin:0;font-weight:500}.old{margin-top:32px}.old img{filter:none}@media(max-width:700px){body{padding:20px}.grid{grid-template-columns:1fr}}
+</style>
+<main><h1>减少动效 · 灰阶矢量</h1><p>沿用现有三维模型的视角和三态造型。固定中性灰，放大仍清晰。</p>
+<div class="grid">
+<section class="tile"><h2>未连接 · 浅色背景</h2><img src="/src/assets/connection-vectors/idle.svg" alt="灰色未连接场景"></section>
+<section class="tile"><h2>连接中 · 浅色背景</h2><img src="/src/assets/connection-vectors/working.svg" alt="灰色连接中场景"></section>
+<section class="tile"><h2>已连接 · 浅色背景</h2><img src="/src/assets/connection-vectors/connected.svg" alt="灰色已连接场景"></section>
+</div><div class="grid">
+<section class="tile dark"><h2>未连接 · 深色背景</h2><img src="/src/assets/connection-vectors/idle.svg" alt="深色背景未连接场景"></section>
+<section class="tile dark"><h2>连接中 · 深色背景</h2><img src="/src/assets/connection-vectors/working.svg" alt="深色背景连接中场景"></section>
+<section class="tile dark"><h2>已连接 · 深色背景</h2><img src="/src/assets/connection-vectors/connected.svg" alt="深色背景已连接场景"></section>
+</div><div class="old"><h2>原位图参考</h2><div class="grid">
+<section class="tile"><img src="/src/assets/connection-stills/light-idle-azure.webp" alt="原未连接位图"></section>
+<section class="tile"><img src="/src/assets/connection-stills/light-working-azure.webp" alt="原连接中位图"></section>
+<section class="tile"><img src="/src/assets/connection-stills/light-connected-azure.webp" alt="原已连接位图"></section>
+</div></div></main></html>

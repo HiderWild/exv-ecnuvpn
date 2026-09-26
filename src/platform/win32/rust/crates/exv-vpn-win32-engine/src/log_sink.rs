@@ -1,28 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P2-b: engine 结构化日志 sink —— StreamLogs 真实推送 + RawLogDumper 兜底。
-//
-// engine（特权进程）不实例化完整日志框架，只持最小兜底：本模块是 engine 日志的
-// 唯一出口，产品 wire 形态是 `HelperControl.StreamLogs` 推送的 proto `LogEvent`
-// （exv.vpn.v1，见 helper_control.proto 的 WIRE DECISION）：
-//
-//   * [`LogSink`] 是 engine 日志端点：`emit` 把事件**扇出**给所有挂接的 StreamLogs
-//     mpsc 通道（[`open_stream`] 建立；多消费方可同时挂接，各持独立通道、互不饿死）；
-//     无挂接或全部推送失败（gRPC stream 断开 → 接收端 drop / 通道满）时，同一事件
-//     直写 [`RawLogDumper`] 的独立 raw 文件，断线恢复（重新 `open_stream`）后无缝
-//     切回推送。
-//   * 单调 tick：每个事件被赋予一个严格递增的 `u64` 序列（resume_tick 的序列基础，
-//     与 KernelControl.WatchEvents 的 monotonic_tick 同一 idiom）。[`open_stream`]
-//     带 `resume_tick` 时先补拉 `tick > resume_tick` 的缓冲历史（有界环），再流实时；
-//     `resume_tick == 0` 表示从当前流位置开始（不补拉）。
-//   * [`RawLogDumper`]：mutex + 文件 + append；文件 `engine-raw-<pid>.log`，目录随
-//     W14 journal 同款机器级约定（`%ProgramData%\ExvVpn\logs`，不可写则
-//     `%LOCALAPPDATA%\ExvVpn\logs`）。写失败自禁用 + `tracing::warn!`，永不 panic、
-//     永不阻塞业务路径。raw-dump 仅离线调试用途（O4），不纳入 UI。
-//
-// 安全：本模块绝不把 secret/capability/凭据放进 LogEvent 的 `fields`/`message`（wire
-// 契约同款禁令）；调用方负责只在 emit 里传结构化诊断元数据。
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -40,9 +15,11 @@ pub const HISTORY_CAPACITY: usize = 256;
 /// StreamLogs mpsc 通道容量（与历史环同量级，推送不阻塞 emit）。
 const STREAM_CAPACITY: usize = 256;
 
-/// 日志级别，映射 proto `LogEvent.level` 字符串集（info | warn | error）。
+/// 日志级别，映射 proto `LogEvent.level` 字符串集（debug | info | warn | error）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
+    /// 调试（网络快照、会话诊断；始终保留，由界面筛选显示）。
+    Debug,
     /// 信息（正常流程里程碑）。
     Info,
     /// 警告（可恢复异常、拒绝）。
@@ -52,10 +29,11 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    /// proto `LogEvent.level` 字符串（info | warn | error）。
+    /// proto `LogEvent.level` 字符串（debug | info | warn | error）。
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Debug => "debug",
             Self::Info => "info",
             Self::Warn => "warn",
             Self::Error => "error",
@@ -133,7 +111,8 @@ impl RawLogDumper {
     /// 本 dumper 的 raw 文件路径（`dir/engine-raw-<pid>.log`）。
     #[must_use]
     pub fn path(&self) -> PathBuf {
-        self.dir.join(format!("engine-raw-{}.log", std::process::id()))
+        self.dir
+            .join(format!("engine-raw-{}.log", std::process::id()))
     }
 
     /// 追加一行到 raw 文件（best-effort：打开失败/写失败 → 自禁用并返回 false）。
@@ -168,7 +147,11 @@ impl RawLogDumper {
     }
 
     /// 自禁用：关掉已打开的文件（若开过），记一次 warn。
-    fn disable(&self, mut guard: std::sync::MutexGuard<'_, Option<std::fs::File>>, error: std::io::Error) {
+    fn disable(
+        &self,
+        mut guard: std::sync::MutexGuard<'_, Option<std::fs::File>>,
+        error: std::io::Error,
+    ) {
         *guard = None;
         tracing::warn!(path = %self.path().display(), error = %error, "engine raw-dump disabled; logs fall back to push-only");
     }
@@ -177,7 +160,10 @@ impl RawLogDumper {
 /// 建目录并打开 append 文件（目录不可建/文件不可开 → `Err`）。
 fn open_append(dir: &Path, path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::create_dir_all(dir)?;
-    std::fs::OpenOptions::new().create(true).append(true).open(path)
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 /// 目录是否可建可用（对齐 W14 journal 的 probe 约定）。
@@ -304,7 +290,10 @@ impl LogSink {
     /// （不补拉）。R3 扇出：每次挂接**追加**一条独立通道（各消费者容量隔离、互不
     /// 饿死）；断线由 `emit` 在 `try_send` 时识别 `Closed` 移除，不替换其他消费者。
     #[must_use]
-    pub fn open_stream(&self, resume_tick: u64) -> mpsc::Receiver<Result<generated::LogEvent, Status>> {
+    pub fn open_stream(
+        &self,
+        resume_tick: u64,
+    ) -> mpsc::Receiver<Result<generated::LogEvent, Status>> {
         let mut inner = self.inner.lock().expect("log sink mutex");
         let (tx, rx) = mpsc::channel(STREAM_CAPACITY);
         if resume_tick > 0 {
@@ -396,111 +385,3 @@ fn wall_clock_ms() -> i64 {
 // ---------------------------------------------------------------------------
 // 单元测试：序列化往返 + tick 单调（集成契约测试在 tests/log_sink.rs）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn raw_line_serializes_ndjson() {
-        let mut fields = std::collections::HashMap::new();
-        fields.insert("pid".to_string(), "42".to_string());
-        let line = RawLogLine {
-            level: "info",
-            component: "engine",
-            code: "boot.started",
-            message: "engine booting",
-            fields: &fields,
-            timestamp_ms: 1_700_000_000_000,
-            tick: 7,
-        };
-        let json = serde_json::to_string(&line).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        assert_eq!(value["level"], "info");
-        assert_eq!(value["component"], "engine");
-        assert_eq!(value["code"], "boot.started");
-        assert_eq!(value["fields"]["pid"], "42");
-        assert_eq!(value["timestamp_ms"], 1_700_000_000_000_i64);
-        assert_eq!(value["tick"], 7);
-    }
-
-    #[test]
-    fn disabled_dumper_returns_false() {
-        let dumper = RawLogDumper::disabled();
-        assert!(!dumper.dump("x"), "disabled dumper never writes");
-    }
-
-    /// R3 扇出：两个消费者同时挂接，同一 emit 事件都到达（互不饿死）。
-    #[test]
-    fn fanout_delivers_to_every_attached_consumer() {
-        let sink = LogSink::null();
-        let mut rx_a = sink.open_stream(0);
-        let mut rx_b = sink.open_stream(0);
-        assert!(sink.is_push_attached(), "both channels attached");
-
-        sink.emit(LogLevel::Info, "engine", "fanout.e1", "shared event", &[]);
-
-        let a = rx_a.try_recv().expect("consumer a receives").expect("ok");
-        let b = rx_b.try_recv().expect("consumer b receives").expect("ok");
-        assert_eq!(a.code, "fanout.e1", "consumer a sees the shared event");
-        assert_eq!(b.code, "fanout.e1", "consumer b sees the same event");
-    }
-
-    /// R3 扇出：一个消费者断开不饿死不替换另一个——剩余消费者继续实时接收。
-    #[test]
-    fn fanout_keeps_live_consumer_when_other_disconnects() {
-        let sink = LogSink::null();
-        let mut rx_a = sink.open_stream(0);
-        {
-            let _rx_b = sink.open_stream(0);
-        } // rx_b drop = 消费者 b 断开
-
-        sink.emit(LogLevel::Warn, "engine", "fanout.e2", "b gone", &[]);
-        // a 仍收到（b 的关闭只从集合移除 b，不影响 a）。
-        let a = rx_a.try_recv().expect("a still receives").expect("ok");
-        assert_eq!(a.code, "fanout.e2");
-        assert!(sink.is_push_attached(), "a remains attached");
-    }
-
-    /// R3 扇出：全部消费者断开 → 不再视为挂接，事件落 raw 兜底。
-    #[test]
-    fn fanout_raw_dumps_when_all_consumers_disconnect() {
-        let dir = std::env::temp_dir().join(format!(
-            "exv-log-sink-fanout-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let sink = LogSink::new(RawLogDumper::new(dir.clone()));
-        let rx = sink.open_stream(0);
-        drop(rx); // 唯一消费者断开
-
-        sink.emit(LogLevel::Error, "engine", "fanout.e3", "no consumers", &[]);
-        assert!(!sink.is_push_attached(), "no consumers left");
-        let raw_path = dir.join(format!("engine-raw-{}.log", std::process::id()));
-        let raw = std::fs::read_to_string(&raw_path).expect("raw dump written");
-        assert!(raw.contains("fanout.e3"), "event fell back to raw dump");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// R3 扇出：慢消费者通道满只丢自己的事件，另一消费者不受影响（互不饿死）。
-    #[test]
-    fn fanout_slow_consumer_does_not_starve_others() {
-        let sink = LogSink::null();
-        // 消费者 a：不消费（慢）→ 其通道填满；消费者 b：持续消费。
-        let rx_a = sink.open_stream(0);
-        let mut rx_b = sink.open_stream(0);
-        // 填满 a 的通道（STREAM_CAPACITY 条）并让 b 也收到同一条。
-        for i in 0..256 {
-            sink.emit(LogLevel::Info, "engine", &format!("burst.{i}"), "burst", &[]);
-            let _ = rx_b.try_recv(); // b 消费，保持 b 通道不饱和
-        }
-        // a 未消费 → 后续事件 a 丢；b 继续收到（a 的满不阻塞 b）。
-        sink.emit(LogLevel::Warn, "engine", "burst.tail", "tail", &[]);
-        let tail = rx_b.try_recv().expect("b still receives").expect("ok");
-        assert_eq!(tail.code, "burst.tail");
-        // a 的通道已满：本次事件对 a 丢弃（try_send Full），但 a 仍被保留为挂接。
-        assert!(sink.is_push_attached(), "slow consumer still attached");
-        drop(rx_a);
-        drop(rx_b);
-    }
-}

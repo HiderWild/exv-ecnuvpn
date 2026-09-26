@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! Deterministic host control-plane composition (spec L1072/L1074/L1079/L1296/L1300).
 //!
@@ -49,6 +47,8 @@ pub enum HostEvent {
     /// that may move [`HostPhase::Connecting`] to [`HostPhase::Failed`]; the
     /// error detail is retained for snapshot reporting (no silent half-state).
     ConnectFailed(VpnError),
+    /// 当前有效会话已丢失；调用者先核对操作归属，与是否再次连接无关。
+    ConnectionLost(VpnError),
     /// The fine connect phase advanced (R1, driven by the engine status
     /// stream). Records the latest observed [`ConnectPhase`] on the attempt.
     ConnectPhaseProgress(ConnectPhase),
@@ -203,6 +203,14 @@ impl HostComposition {
                 }
                 HostEffect::ConnectFailed
             }
+            HostEvent::ConnectionLost(error) => {
+                self.last_error = Some(error);
+                if matches!(self.phase, HostPhase::Connected | HostPhase::Connecting) {
+                    self.phase = HostPhase::Failed;
+                    self.connect_phase = None;
+                }
+                HostEffect::ConnectFailed
+            }
             HostEvent::Disconnect => {
                 self.admission_open = false;
                 self.phase = HostPhase::Stopping;
@@ -254,5 +262,3 @@ impl Default for HostComposition {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

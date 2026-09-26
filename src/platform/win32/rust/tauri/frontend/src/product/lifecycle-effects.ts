@@ -28,6 +28,11 @@ export const CONNECTED_BODY = "校园网连接已建立。";
 export const DISCONNECTED_TITLE = "EXV 已断开";
 export const DISCONNECTED_BODY = "校园网连接已断开。";
 
+/** host 自愈失败的托盘气泡（2026-09-05 计划 §4.5 冻结；文案与 presenter 文案表一致）。 */
+export const SELF_HEAL_FAILED_TITLE = "EXV VPN";
+export const SELF_HEAL_FAILED_BODY =
+  "引擎自动恢复失败，请重启应用后重新连接；若重复失败，请查看日志并反馈。";
+
 function isConnected(status: ProductStatus): boolean {
   return status === "connected";
 }
@@ -92,4 +97,22 @@ export function shouldAutoConnectOnLaunch(
   prefs: UiPreferences,
 ): boolean {
   return isFirstSnapshot && status === "idle" && prefs.auto_connect_on_launch;
+}
+
+/**
+ * host 自愈进展的托盘气泡（2026-09-05 计划 §4.5，冻结）：仅 stage 从**非 failed**
+ * 进入 `failed` 时给一次气泡（`respawning`/`succeeded` 不弹气泡）；`failed` →
+ * `failed` 不重复（prevStage 去重由调用方 `prevSelfHealStage` 承担，与 previousStatus
+ * 同模式）。首见（prevStage = null）只记录基线，不弹气泡。
+ *
+ * 自愈失败是用户必须知道的事件（连接无法恢复、需重启应用），不受前台抑制约束——
+ * 与连接类通知的语义分级不同，这里不做 foreground 判定。
+ */
+export function computeSelfHealNotify(
+  prevStage: string | null,
+  nextStage: string | null,
+): LifecycleEffect[] {
+  if (prevStage === null || nextStage === null) return [];
+  if (prevStage === "failed" || nextStage !== "failed") return [];
+  return [{ kind: "tray-notify", title: SELF_HEAL_FAILED_TITLE, body: SELF_HEAL_FAILED_BODY }];
 }

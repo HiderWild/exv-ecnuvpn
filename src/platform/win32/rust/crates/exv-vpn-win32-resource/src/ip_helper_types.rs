@@ -1,14 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! Pure IPv4 unicast address row / plan types (W18).
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md`
-//! §6): row identity is `address + interface_luid`; prefix length lives in
-//! `OnLinkPrefixLength` (UINT8). The read-back fields (prefix/suffix origin,
-//! dad state, lifetime) are filled by `capture` and never participate in
-//! identity or fingerprint comparison. This module is pure logic — no Win32
-//! calls.
 
 use std::net::Ipv4Addr;
 
@@ -69,5 +59,3 @@ pub struct IpAddressPlan {
     pub pre_existing: Vec<IpAddressRow>,
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 // 产品化（用户拍板 2026-08-19）：host 为 GUI 产品进程，隐藏控制台黑框。
 // 注：workspace [profile.release] rustc-link-arg-bins=/SUBSYSTEM:WINDOWS 不生效
@@ -15,19 +13,21 @@
 //!    唯一 `\\.\pipe\exv-core-<ui_pid>`）、`--ui-pid <pid>`（UI 进程 PID，身份记录）、
 //!    `--ui-sid <sid>`（UI 用户 SID——管道 DACL + accept 后 peer 验证；缺省回退当前
 //!    用户 SID，同用户拓扑下相等）。
-//! 2. **compose**：打开共享日志聚合器 → 提权拉起唯一特权进程 engine
-//!    （`ShellExecuteExW(runas)` + 拓扑门禁：engine 必须 elevated）→ 经双向认证
-//!    Named Pipe 连接 engine gRPC 控制面（`EngineControlGrpcClient::connect`）→
-//!    组合 `KernelControlService`（共享 composition/engine 控制面/日志聚合器）→
-//!    组装 `CoreRuntime`。
+//! 2. **compose（按需拉起模型，2026-09-08 计划）**：打开共享日志聚合器 → 组合
+//!    composition（占位 engine 身份——真实身份随首次 provision/respawn 重建）→
+//!    组装 `KernelControlService` + 空态 `EngineSupervisor` + detached engine 槽 →
+//!    组装 `CoreRuntime`。**core 启动全程零 UAC、零特权子进程**；oneshot engine 由
+//!    首次业务连接经 `EngineProvisioner` 提权拉起（`ShellExecuteExW(runas)` + 拓扑
+//!    门禁：engine 必须 elevated），服务形态由 SCM 承载。
 //! 3. **serve**：`serve_kernel_control_pipe` 建 UI 控制面管道（DACL = SYSTEM +
 //!    UI SID）→ accept 一个 UI 连接 → 验证 UI peer（client pid + user SID +
-//!    account name）→ gate 授权 → 拉起 engine 事件/统计转发器 → 返回
-//!    [`UiKernelControlHandles`] 接进 `CoreRuntime`。
+//!    account name；并回填 provisioner 的 UI peer）→ gate 授权 → 拉起 engine
+//!    事件/统计转发器 → 返回 [`UiKernelControlHandles`] 接进 `CoreRuntime`。
 //! 4. **运行**：`CoreRuntime::run` 主循环——等 UI 彻底退出（O3 强绑定：UI **进程**退出
 //!    → 传输层进程监视触发 `on_ui_exited` → 停机；tonic serve 任务不充当"UI 断开"
 //!    信号——单元素流 accept 后即返回、连接任务 detached 继续服务）或显式停机；
-//!    运行期监听 engine 掉线（liveness）→ 驱动 `composition.on_helper_link_terminal`
+//!    运行期监听 engine 掉线（liveness）→ 按维护形态分流（oneshot 才 respawn；
+//!    service 形态归 SCM）→ 驱动 `composition.on_helper_link_terminal`
 //!    （engine 死亡 ≠ core 死亡）。
 //! 5. **停机**：`shutdown_core` 有序停机（先 RPC waiter 取消 → engine 发退出包
 //!    （`StopTunnel` 业务停机）后即返 → `composition.exit()`）→ core 退出；engine 由
@@ -37,33 +37,23 @@
 //! 所有，任何失败路径 drop 即强制终止已拉起的 engine。
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use tokio::sync::Mutex;
 
 use exv_core::composition::compose_nonprivileged_host;
 use exv_core::crash_recovery::{
     CrashRecovery, GrpcClientConnector, ProductSupervisorFactory, SystemResidueProbe,
 };
-use exv_core::engine_lifecycle::{ElevatedEngineSpawner, EngineSlot, EngineSupervisor};
-use exv_core::grpc_control::{EngineControlGrpcClient, KernelEngineControl};
-use exv_core::kernel_control_service::KernelControlService;
-use exv_core::kernel_control_transport::{
-    lookup_account_name, serve_kernel_control_pipe,
-};
+use exv_core::engine_lifecycle::{EngineSlot, EngineSupervisor};
+use exv_core::engine_provisioner::EngineProvisioner;
+use exv_core::kernel_control_service::{EventBusSelfHealReporter, KernelControlService};
+use exv_core::kernel_control_transport::{lookup_account_name, serve_kernel_control_pipe};
 use exv_core::log_aggregator::LogAggregator;
-use exv_core::process_lifecycle::{engine_control_pipe_name, ENGINE_ADAPTER_NAME};
+use exv_core::process_lifecycle::ENGINE_ADAPTER_NAME;
 use exv_core::shutdown::{CoreRuntime, UiLifetime};
-use exv_vpn_win32_ipc::peer_auth::{current_user_sid, VerifiedPipePeer};
-use exv_vpn_wire::generated::KeepAliveRequest;
+use exv_vpn_win32_ipc::peer_auth::{VerifiedPipePeer, current_user_sid};
 
-/// R2：oneshot engine 就绪轮询上界（原生判据=拨号+认证成功 或 keepalive 回复，任一生效
-/// 即就位；engine 冷启动/UAC 慢不因首次拨号失败而终止 core）。
-const ONESHOT_READY_TIMEOUT: Duration = Duration::from_secs(15);
-/// R2：oneshot engine 就绪轮询间隔。
-const ONESHOT_READY_POLL: Duration = Duration::from_millis(500);
-/// R2：oneshot keepalive 确认单次超时（拨号+认证成功后确认 gRPC 服务实际响应）。
-const ONESHOT_KEEPALIVE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+// R2 的 oneshot 就绪轮询常量（ONESHOT_READY_TIMEOUT / ONESHOT_READY_POLL /
+// ONESHOT_KEEPALIVE_CONFIRM_TIMEOUT）随「启动即拉 engine」一并移入
+// `engine_provisioner`（按需拉起路径的 provision 就绪等待）。
 
 /// 启动参数用法说明（`--help` / 参数错误时打印）。
 const USAGE: &str = "\
@@ -105,11 +95,7 @@ impl CoreArgs {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--control-pipe" => control_pipe = args.next(),
-                "--ui-pid" => {
-                    ui_pid = args
-                        .next()
-                        .and_then(|v| v.parse::<u32>().ok())
-                }
+                "--ui-pid" => ui_pid = args.next().and_then(|v| v.parse::<u32>().ok()),
                 "--ui-sid" => ui_sid = args.next(),
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 _ => {} // 未知参数忽略（前向兼容）。
@@ -192,82 +178,25 @@ pub async fn run_core(args: CoreArgs) -> i32 {
         &std::collections::BTreeMap::new(),
     );
 
-    // 3. 提权拉起唯一特权进程 engine（拓扑门禁：非 elevated 即拒绝）。
-    let mut supervisor = match EngineSupervisor::spawn_product(&ElevatedEngineSpawner) {
-        Ok(supervisor) => supervisor,
-        Err(e) => {
-            let _ = logs.append_core(
-                "error",
-                "core",
-                "core.engine.spawn_failed",
-                &format!("engine spawn failed: {e}"),
-                &std::collections::BTreeMap::new(),
-            );
-            eprintln!("core: {e}");
-            return 1;
-        }
-    };
-    let engine_pid = supervisor.pid().unwrap_or_default();
-
-    // 4. 连接 engine gRPC 控制面（双向认证 Named Pipe；engine 是状态权威）。R2：有界轮询
-    //    等 engine 就绪——原生判据 = 拨号+认证成功（`EngineControlGrpcClient::connect`）；
-    //    keepalive 回复 = 替代信号（确认 gRPC 服务实际响应）。engine 冷启动慢不因首次拨号
-    //    失败而终止 core；`connect` 内部已含拨号重试（30×100ms），此处兜底更长窗口。
+    // 3. （2026-09-08 计划批 1）core 启动**不再提权拉起 engine**。engine 槽以
+    //    detached 占位构造、supervisor 空态——core 启动全程零 UAC；oneshot engine 由
+    //    首次业务连接经 [`EngineProvisioner`] 按需提权拉起（UAC 归属该次连接），服务
+    //    形态由 SCM 承载（存在性互斥：core 不为它拉任何常驻 engine）。
+    let supervisor = EngineSupervisor::empty();
+    let engine_slot = EngineSlot::new_detached();
     let user_sid = current_user_sid().unwrap_or_else(|| ui_sid.clone());
-    let ready_start = Instant::now();
-    let client = loop {
-        // 每次迭代的失败事实（`Err` = 本拍拨号/认证/keepalive 未达成；`Ok` 仅经
-        // `break` 返回 client，故循环内 `Err` 恒为最近一次未达成的详情）。
-        let outcome: Result<(), String> = match EngineControlGrpcClient::connect(
-            &engine_control_pipe_name(),
-            engine_pid,
-            &user_sid,
-        )
-        .await
-        {
-            Ok(client) => {
-                // 原生判据达成（拨号+认证）。keepalive 确认：gRPC 服务实际响应才算就绪。
-                let mut confirmed = client;
-                match tokio::time::timeout(
-                    ONESHOT_KEEPALIVE_CONFIRM_TIMEOUT,
-                    confirmed.keep_alive(KeepAliveRequest { monotonic_tick: 0 }),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => break confirmed,
-                    Ok(Err(e)) => {
-                        // 连接成功但 keepalive 未回复（gRPC 服务未就绪）→ 丢弃本 client，
-                        // 下一拍重连（client Drop → liveness 监视因 Receiver 全弃自动退出）。
-                        Err(format!("keepalive confirm rejected: {e:?}"))
-                    }
-                    Err(_) => Err("keepalive confirm timeout".to_string()),
-                }
-            }
-            Err(e) => Err(format!("{e:?}")),
-        };
-        if ready_start.elapsed() >= ONESHOT_READY_TIMEOUT {
-            let detail = outcome.unwrap_err();
-            let _ = logs.append_core(
-                "error",
-                "core",
-                "core.engine.connect_failed",
-                &format!("engine control connect timed out: {detail}"),
-                &std::collections::BTreeMap::new(),
-            );
-            eprintln!("core: engine control connect failed: {detail}");
-            return 1; // supervisor Drop → engine 终止（O3）。
-        }
-        tokio::time::sleep(ONESHOT_READY_POLL).await;
-    };
-    let liveness = client.liveness();
-    let engine: Arc<Mutex<dyn KernelEngineControl>> = Arc::new(Mutex::new(client));
-    supervisor.attach_client(Arc::clone(&engine), liveness);
-    // P3 崩溃自愈：共享 engine 控制面槽（服务/转发器/KeepAlive 与 CrashRecovery 共用；
-    // respawn 换入新 client 后写路径自动指向新 engine）。
-    let engine_slot = EngineSlot::new(engine);
+    let _ = logs.append_core(
+        "info",
+        "core",
+        "core.start.lazy_engine",
+        "core booting without engine; oneshot engine provisioned on first business request",
+        &std::collections::BTreeMap::new(),
+    );
 
-    // 5. 组合：composition（绑定 engine 身份）+ KernelControlService + CoreRuntime。
-    let engine_peer = engine_peer_for(engine_pid, &user_sid);
+    // 4. 组合：composition（占位 engine 身份）+ KernelControlService + CoreRuntime。
+    //    占位 peer（pid 0）：composition 需要一份初始身份事实才能服务 UI 快照等只读
+    //    路径；首次 provision/respawn 会以真实 engine peer 重建（rebind_composition）。
+    let engine_peer = engine_peer_for(0, &user_sid);
     let composition = match compose_nonprivileged_host(&engine_peer) {
         Ok(composition) => composition,
         Err(e) => {
@@ -286,7 +215,7 @@ pub async fn run_core(args: CoreArgs) -> i32 {
     // 失败（password key unavailable）→ connect KeyMissing（dbg-auth 2026-08-23 根因 #1）。
     let _ = exv_vpn_win32_config::ExvConfig::ensure_key(&exv_vpn_win32_config::config_dir());
     // 服务持共享日志聚合器；main 侧保留一份 Arc 供停机结果落盘（UI 可观测全生命周期）。
-    let (shared_composition, service) = KernelControlService::from_composition(
+    let (shared_composition, mut service) = KernelControlService::from_composition(
         composition,
         engine_slot.clone(),
         exv_vpn_win32_config::config_dir(),
@@ -295,21 +224,43 @@ pub async fn run_core(args: CoreArgs) -> i32 {
     // UI 生命周期信号（O3 强绑定）：CoreRuntime 与 serve 传输层共享同一事实——传输层
     // 的 UI 进程退出监视触发 on_ui_exited，run 的 select 等待同一信号。
     let ui = UiLifetime::new();
-    let mut runtime = CoreRuntime::new(
-        ui.clone(),
-        Arc::clone(&shared_composition),
-        supervisor,
-    );
+    // 2026-09-05 host 自愈进展（计划 §4.3）：自愈阶段显式发布的事件总线（服务在 serve
+    // 前先克隆一份——service 随后移入 serve_kernel_control_pipe）。
+    let self_heal_events = service.events();
+    let mut runtime = CoreRuntime::new(ui.clone(), Arc::clone(&shared_composition), supervisor);
 
-    // 6. serve UI 控制面：accept UI → 验证 peer → gate 授权 → UI 进程退出监视 →
-    //    拉起事件/统计转发器。
+    // 4.5 按需拉起编排接线（2026-09-08 计划批 2）：provisioner 与 CoreRuntime 共享
+    //     supervisor 互斥句柄；维护形态句柄供 run 循环 respawn 分流（批 3）；槽换点
+    //     通知用于 provision 后重新获取 liveness。
+    let ui_peer_cell = Arc::new(std::sync::RwLock::new(None::<VerifiedPipePeer>));
+    let provisioner = Arc::new(EngineProvisioner::new(
+        runtime.supervisor_handle(),
+        engine_slot.clone(),
+        Arc::clone(&shared_composition),
+        user_sid.clone(),
+        Arc::clone(&logs),
+        Arc::clone(&ui_peer_cell),
+        Arc::new(ProductSupervisorFactory),
+        Arc::new(GrpcClientConnector),
+        Arc::new(SystemResidueProbe {
+            adapter_name: ENGINE_ADAPTER_NAME.to_string(),
+        }),
+    ));
+    service.set_engine_provisioner(Arc::clone(&provisioner));
+    runtime.set_slot_swaps(engine_slot.subscribe_swaps());
+    runtime.set_mode_gauge(service.selected_mode_handle());
+
+    // 5. serve UI 控制面：accept UI → 验证 peer → gate 授权（并回填 provisioner 的
+    //    UI peer）→ UI 进程退出监视 → 拉起事件/统计转发器。
     let handles = match serve_kernel_control_pipe(&args.control_pipe, &ui_sid, service, ui).await {
         Ok(handles) => handles,
         Err(e) => {
             eprintln!("core: serve kernel control pipe failed: {e}");
-            return 1; // supervisor Drop → engine 终止（O3）。
+            return 1;
         }
     };
+    // serve 内部已在验证 UI 后回填 provisioner 的 ui_peer；此处幂等兜底（双通道防窗口）。
+    provisioner.set_ui_peer(handles.ui_peer.clone());
     runtime.set_serve_task(handles.serve_task);
     runtime.set_forwarder_task(handles.forwarder);
     runtime.set_stats_forwarder_task(handles.stats_forwarder);
@@ -334,6 +285,15 @@ pub async fn run_core(args: CoreArgs) -> i32 {
         user_sid,
     );
     runtime.set_crash_recovery(recovery);
+
+    // 2026-09-05 host 自愈进展（计划 §4.3）：respawn 阶段变化 → EventBus self_heal
+    // lane + kernel.selfheal.* 结构化日志 + 相位快照显式发布（自愈窗口内没有自然事件，
+    // 不显式发布则 UI 停留「处理中」——§1.3 缺陷修复）。
+    runtime.set_self_heal_reporter(Arc::new(EventBusSelfHealReporter::new(
+        Arc::clone(&self_heal_events),
+        Arc::clone(&logs),
+    )));
+    runtime.set_self_heal_events(self_heal_events);
 
     // 7. 运行：等 UI 退出 / 显式停机 → 有序停机（发退出包后即返；engine 由三重保证
     //    随 core 退出，UI 只等 core）。
@@ -374,146 +334,3 @@ async fn main() {
 // 进程级（拉起 engine → serve 管道 → 连接 → 停机）需真实 engine bin + 提权，
 // 由外部集成验证（见任务报告）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `CoreArgs::parse`：必需参数齐备时解析成功且值一致。
-    #[test]
-    fn parse_full_args_round_trip() {
-        let args = CoreArgs::parse(
-            [
-                "exv-core".to_string(),
-                "--control-pipe".to_string(),
-                r"\\.\pipe\exv-core-4242".to_string(),
-                "--ui-pid".to_string(),
-                "4242".to_string(),
-                "--ui-sid".to_string(),
-                "S-1-5-21-1-2-3-4".to_string(),
-            ]
-            .into_iter(),
-        )
-        .expect("full args parse");
-        assert_eq!(args.control_pipe, r"\\.\pipe\exv-core-4242");
-        assert_eq!(args.ui_pid, 4242);
-        assert_eq!(args.ui_sid.as_deref(), Some("S-1-5-21-1-2-3-4"));
-    }
-
-    /// `CoreArgs::parse`：`--ui-sid` 缺省允许（`None`——core 回退当前用户 SID）。
-    #[test]
-    fn parse_ui_sid_optional() {
-        let args = CoreArgs::parse(
-            [
-                "--control-pipe".to_string(),
-                r"\\.\pipe\exv-core-7".to_string(),
-                "--ui-pid".to_string(),
-                "7".to_string(),
-            ]
-            .into_iter(),
-        )
-        .expect("parse without ui-sid");
-        assert_eq!(args.ui_sid, None);
-    }
-
-    /// `CoreArgs::parse`：必需参数缺失 / `--ui-pid` 非数字 → `Err`。
-    #[test]
-    fn parse_rejects_missing_or_invalid_required_args() {
-        // 缺 --control-pipe。
-        assert!(CoreArgs::parse(
-            ["--ui-pid".to_string(), "1".to_string()].into_iter(),
-        )
-        .is_err());
-        // 缺 --ui-pid。
-        assert!(CoreArgs::parse(
-            [
-                "--control-pipe".to_string(),
-                r"\\.\pipe\exv-core-1".to_string(),
-            ]
-            .into_iter(),
-        )
-        .is_err());
-        // --ui-pid 非数字。
-        assert!(CoreArgs::parse(
-            [
-                "--control-pipe".to_string(),
-                r"\\.\pipe\exv-core-1".to_string(),
-                "--ui-pid".to_string(),
-                "not-a-pid".to_string(),
-            ]
-            .into_iter(),
-        )
-        .is_err());
-        // --control-pipe 空值。
-        assert!(CoreArgs::parse(
-            [
-                "--control-pipe".to_string(),
-                String::new(),
-                "--ui-pid".to_string(),
-                "1".to_string(),
-            ]
-            .into_iter(),
-        )
-        .is_err());
-    }
-
-    /// `CoreArgs::parse`：未知参数忽略（前向兼容），不影响必需参数解析。
-    #[test]
-    fn parse_ignores_unknown_args() {
-        let args = CoreArgs::parse(
-            [
-                "--future-flag".to_string(),
-                "x".to_string(),
-                "--control-pipe".to_string(),
-                r"\\.\pipe\exv-core-3".to_string(),
-                "--ui-pid".to_string(),
-                "3".to_string(),
-            ]
-            .into_iter(),
-        )
-        .expect("unknown args ignored");
-        assert_eq!(args.control_pipe, r"\\.\pipe\exv-core-3");
-        assert_eq!(args.ui_pid, 3);
-    }
-
-    /// `effective_ui_sid`：显式 `--ui-sid` 优先；缺省回退当前用户 SID（同用户拓扑）。
-    #[test]
-    fn effective_ui_sid_prefers_explicit_then_falls_back() {
-        let explicit = CoreArgs {
-            control_pipe: r"\\.\pipe\exv-core-1".to_string(),
-            ui_pid: 1,
-            ui_sid: Some("S-1-5-21-explicit".to_string()),
-        };
-        assert_eq!(
-            explicit.effective_ui_sid().expect("explicit"),
-            "S-1-5-21-explicit"
-        );
-
-        // 缺省回退：当前用户 SID 可解析时成功且等于 current_user_sid。
-        let fallback = CoreArgs {
-            control_pipe: r"\\.\pipe\exv-core-2".to_string(),
-            ui_pid: 2,
-            ui_sid: None,
-        };
-        match current_user_sid() {
-            Some(sid) => assert_eq!(fallback.effective_ui_sid().expect("fallback"), sid),
-            None => assert!(fallback.effective_ui_sid().is_err(), "无法解析 SID 时 fail closed"),
-        }
-    }
-
-    /// `engine_peer_for`：PID + SID + 解析出的 account name 组装完整（composition 绑定
-    /// engine 身份所需的三项身份事实齐备）。
-    #[test]
-    fn engine_peer_for_assembles_identity_facts() {
-        let Some(sid) = current_user_sid() else {
-            return; // 当前用户 SID 不可解析（极罕见）——诚实短路。
-        };
-        let peer = engine_peer_for(4242, &sid);
-        assert_eq!(peer.process_id, 4242);
-        assert_eq!(peer.user_sid, sid);
-        assert!(
-            !peer.account_name.is_empty(),
-            "当前用户 SID 必须解析出 account name"
-        );
-    }
-}

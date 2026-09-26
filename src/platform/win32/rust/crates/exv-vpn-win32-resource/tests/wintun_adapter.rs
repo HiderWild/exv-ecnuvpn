@@ -1,23 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W16-T Terra: Wintun adapter 加载/所有权/LUID 契约。这些测试钉住 W16-I 在
-// exv_vpn_win32_resource::{wintun_api, wintun_adapter} 实现的 seam。冻结事实
-// （docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-wintun-facts.md，
-// WSP3 提权实测）是契约：
-//   - DLL：amd64 wintun-0.14.1，SHA-256 e5da8447...dafce，Authenticode（DigiCert 2021）；
-//     14 个导出全部可解析（含 WintunDeleteDriver）；WintunGetAdapterName 在 0.14.1 不存在；
-//   - PATH DLL 是 mutant：只能按精确路径/哈希加载，绝不按 PATH 搜索；
-//   - create-vs-open 所有权：open-before-create 失败 ERROR_NOT_FOUND(1168)；
-//     创建后 open-by-name 成功（第二句柄，Opened 非 owned）；非创建者 close 不删除 adapter；
-//     创建者 WintunCloseAdapter 即移除 adapter（0.14.1 无 delete-adapter 导出——真实清理谓词）；
-//   - LUID 经 WintunGetAdapterLUID；ifindex 经 ConvertInterfaceLuidToIndex；
-//     alias 经 ConvertInterfaceLuidToAlias。
-//
-// 本测试在真实 Windows 宿主上创建真实的 Wintun adapter（需要 admin）。每个测试
-// 通过 Drop 释放全部句柄，由创建者 close 移除 adapter（无残留）。非 elevated 宿主
-// 上动态断言短路为 `not_run / blocked_by_environment`（明确输出，不伪造假绿）；
-// DLL 静态断言（哈希/导出/精确路径）任何宿主都必须成立。
 
 use std::ffi::{c_void, CString};
 use std::path::Path;
@@ -34,7 +14,7 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（WSP3 冻结值；PATH DLL 是 mutant）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// 冻结的 wintun.dll SHA-256（native-wintun-facts.md §1）。
 const FROZEN_DLL_SHA256: &str =
     "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce";

@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! core 侧 gRPC 控制面客户端（P1-c：自研 JSON frame → tonic `HelperControlClient`）。
 //!
@@ -22,34 +20,34 @@
 //!   [`EngineControlGrpcClient::liveness`] 观察或 `ping` 主动探测。
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
 
+use exv_vpn_win32_ipc::peer_auth::{VerifiedPipePeer, current_user_sid};
 use exv_vpn_wire::generated::helper_control_client::HelperControlClient;
 use exv_vpn_wire::generated::{
-    acquire_lease_reply, helper_lease_message, host_lease_message, service_manage_request,
     AcquireLeaseReply, AcquireLeaseRequest, ApplyTunnelReply, ApplyTunnelRequest, ConnectPhase,
     ConnectStatusEvent, GetOperationReply, GetOperationRequest, HelperLeaseMessage,
     HostLeaseMessage, InteractionResponse, KeepAliveReply, KeepAliveRequest, LeaseHandshake,
     LogEvent, ObserveOwnedStateReply, ObserveOwnedStateRequest, OperationLookupKey,
     OperationMethod, OperationReply, ReconcileRequest, ReleaseLeaseReply, ReleaseLeaseRequest,
-    ServiceManageReply, ServiceManageRequest, ServiceSelfQuery, ServiceSelfReport, StatsEvent,
-    StatsPhase, StopTunnelReply, StopTunnelRequest, StreamLogsRequest, StreamStatsRequest,
-    StreamConnectStatusRequest, VpnError,
+    ServiceManageReply, ServiceManageRequest, ServiceSelfQuery, ServiceSelfReport,
+    ShutdownReply, ShutdownRequest, StatsEvent, StatsPhase, StopTunnelReply,
+    StopTunnelRequest, StreamConnectStatusRequest, StreamLogsRequest, StreamStatsRequest, VpnError,
+    acquire_lease_reply, helper_lease_message, host_lease_message, service_manage_request,
 };
-use exv_vpn_win32_ipc::peer_auth::{current_user_sid, VerifiedPipePeer};
 
 use crate::engine_lifecycle::EngineSlot;
 use crate::grpc_transport::{
-    connect_engine_channel, connect_engine_service_channel, GrpcPipeError,
+    GrpcPipeError, connect_engine_channel, connect_engine_service_channel,
 };
 use crate::kernel_control::ClearableSecret;
 
@@ -61,10 +59,110 @@ const LIVENESS_TIMEOUT: Duration = Duration::from_secs(3);
 /// 超时上界 15s 见 `exv_engine::heartbeat::HEARTBEAT_TIMEOUT_MS`）。
 pub const KEEPALIVE_PERIOD: Duration = Duration::from_secs(10);
 
+
 /// 当前 core 维护的 engine 类型：KeepAlive 只对 oneshot 有效。
 pub const ENGINE_KIND_AUTO: u8 = 0;
 pub const ENGINE_KIND_SERVICE: u8 = 1;
 pub const ENGINE_KIND_ONESHOT: u8 = 2;
+
+/// 无 engine 占位（按需拉起模型，2026-09-08 计划批 1/2）。
+///
+/// core 启动不再预拉 engine；engine 槽的「空」态以本占位表达（服务在场时 core 也不
+/// 持有 oneshot——存在性互斥）。所有控制面调用返回 [`GrpcClientError::ConnectionLost`]，
+/// 与「engine 掉线」同语义：转发器按既有退避重连、ticker best-effort、业务派发报真实
+/// 错误。真正需要 engine 的路径（connect 路由）必须先经 provisioner 换入真实 client。
+///
+/// 规范单例：[`detached_engine`] 每次返回同一 `Arc`，`Arc::ptr_eq` 可判定槽处于空态。
+pub struct DetachedEngine;
+
+#[tonic::async_trait]
+impl KernelEngineControl for DetachedEngine {
+    async fn apply_connect(
+        &mut self,
+        _request: ApplyTunnelRequest,
+        _secret_payload: &mut ClearableSecret,
+    ) -> Result<ApplyTunnelReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn stop_tunnel(
+        &mut self,
+        _request: StopTunnelRequest,
+    ) -> Result<StopTunnelReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn get_operation(
+        &mut self,
+        _request: GetOperationRequest,
+    ) -> Result<GetOperationReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn observe_owned_state(
+        &mut self,
+        _request: ObserveOwnedStateRequest,
+    ) -> Result<ObserveOwnedStateReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn keep_alive(
+        &mut self,
+        _request: KeepAliveRequest,
+    ) -> Result<KeepAliveReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn ensure_owner_lease(&mut self) -> Result<(), GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn stream_connect_status(&mut self) -> Result<EngineStatusEventStream, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn stream_stats(
+        &mut self,
+        _sample_interval_ms: u32,
+    ) -> Result<StatsEventStream, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn stream_logs(&mut self, _resume_tick: u64) -> Result<LogEventStream, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn service_manage(
+        &mut self,
+        _request: ServiceManageRequest,
+    ) -> Result<ServiceManageReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn respond_interaction(
+        &mut self,
+        _response: InteractionResponse,
+    ) -> Result<OperationReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
+    async fn retry_obligation(
+        &mut self,
+        _request: ReconcileRequest,
+    ) -> Result<GetOperationReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+}
+
+/// 规范 detached 占位单例（见 [`DetachedEngine`]）。
+#[must_use]
+pub fn detached_engine() -> Arc<tokio::sync::Mutex<dyn KernelEngineControl>> {
+    static DETACHED: std::sync::OnceLock<Arc<tokio::sync::Mutex<dyn KernelEngineControl>>> =
+        std::sync::OnceLock::new();
+    DETACHED
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(DetachedEngine)))
+        .clone()
+}
 
 /// 从已认证的 core 用户 SID 派生 owner lease principal。
 ///
@@ -101,7 +199,105 @@ fn map_status(s: Status) -> GrpcClientError {
 
 /// transport 类失败（掉线）判据。
 fn is_lost_status(s: &Status) -> bool {
-    matches!(s.code(), Code::Unavailable | Code::Cancelled | Code::Unknown)
+    matches!(
+        s.code(),
+        Code::Unavailable | Code::Cancelled | Code::Unknown
+    )
+}
+
+/// 统计流中传输错误项的稳定类别（RT-SEAM-01；host 内部类型，不进 wire）。
+///
+/// 字符串化后即诊断 fields 的 `error_kind`（冻结枚举：
+/// transport/rpc_unauthenticated/rpc_permission_denied/rpc_unavailable/rpc_deadline/
+/// connection_lost/rpc_other）。与既有 `map_status`/`is_lost_status` 同口径，但**不
+/// 改变**既有 `GrpcClientError` 行为——只是把流中错误项从"静默吞掉"改为"保留类别"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatsErrorKind {
+    /// 传输层构造失败（拨号/认证/channel；订阅路径的 `GrpcClientError::Transport`）。
+    Transport,
+    /// RPC 被拒：未认证（Unauthenticated）。
+    RpcUnauthenticated,
+    /// RPC 被拒：无权限（PermissionDenied）。
+    RpcPermissionDenied,
+    /// RPC 被拒：不可用（Unavailable，订阅时未被 `is_lost_status` 归并的场景）。
+    RpcUnavailable,
+    /// RPC 超时（DeadlineExceeded / `GrpcClientError::Timeout`）。
+    RpcDeadline,
+    /// 连接丢失（Unavailable/Cancelled/Unknown——`is_lost_status` 同口径）。
+    ConnectionLost,
+    /// 其余未建模 RPC 拒绝（开放世界：不逐 code 建模）。
+    RpcOther,
+}
+
+impl StatsErrorKind {
+    /// 稳定枚举字符串（诊断 fields `error_kind` 的唯一取值来源）。
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::RpcUnauthenticated => "rpc_unauthenticated",
+            Self::RpcPermissionDenied => "rpc_permission_denied",
+            Self::RpcUnavailable => "rpc_unavailable",
+            Self::RpcDeadline => "rpc_deadline",
+            Self::ConnectionLost => "connection_lost",
+            Self::RpcOther => "rpc_other",
+        }
+    }
+}
+
+/// 流中 tonic `Status` → 稳定类别（与 `map_status`/`is_lost_status` 同口径；L0 单测
+/// 锁定映射表）。
+#[must_use]
+pub fn stats_error_kind_from_status(s: &Status) -> StatsErrorKind {
+    match s.code() {
+        Code::Unavailable | Code::Cancelled | Code::Unknown => StatsErrorKind::ConnectionLost,
+        Code::Unauthenticated => StatsErrorKind::RpcUnauthenticated,
+        Code::PermissionDenied => StatsErrorKind::RpcPermissionDenied,
+        Code::DeadlineExceeded => StatsErrorKind::RpcDeadline,
+        _ => StatsErrorKind::RpcOther,
+    }
+}
+
+/// 订阅失败（`GrpcClientError`）→ 稳定类别（类别透传，不丢失）。
+impl From<&GrpcClientError> for StatsErrorKind {
+    fn from(err: &GrpcClientError) -> Self {
+        match err {
+            GrpcClientError::Transport(_) => Self::Transport,
+            GrpcClientError::Rpc(Code::Unauthenticated, _) => Self::RpcUnauthenticated,
+            GrpcClientError::Rpc(Code::PermissionDenied, _) => Self::RpcPermissionDenied,
+            GrpcClientError::Rpc(Code::Unavailable, _) => Self::RpcUnavailable,
+            GrpcClientError::Rpc(Code::DeadlineExceeded, _) => Self::RpcDeadline,
+            GrpcClientError::Rpc(_, _) => Self::RpcOther,
+            GrpcClientError::ConnectionLost => Self::ConnectionLost,
+            // `map_status` 把 DeadlineExceeded 归一为 Timeout——类别归并到 rpc_deadline。
+            GrpcClientError::Timeout => Self::RpcDeadline,
+        }
+    }
+}
+
+/// 统计流元素（RT-SEAM-01）：原样本透传、传输错误项保留类别、干净 EOF 显式终结。
+///
+/// 既有实现 `filter_map(|ev| ev.ok())` 把流中传输错误项静默吞掉（错误类别丢失），
+/// 统计链路失败时不可区分；本枚举把两类事实都交给消费方（统计转发器按冻结诊断表
+/// 落码）。wire 零变更——`StatsEvent` 字段原样透传。
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatsStreamItem {
+    /// 原样本（字段透传不改）。
+    Sample(StatsEvent),
+    /// 流中传输错误项（原被 `filter_map` 吞掉；类别见 [`StatsErrorKind`]）。
+    StreamError(StatsErrorKind),
+    /// 干净 EOF（流自然结束）。
+    Ended,
+}
+
+/// wire `Result<StatsEvent, Status>` 项 → [`StatsStreamItem`]（Ok → Sample；
+/// Err → StreamError(kind)）。
+#[must_use]
+pub fn stats_stream_item_from_wire(ev: Result<StatsEvent, Status>) -> StatsStreamItem {
+    match ev {
+        Ok(event) => StatsStreamItem::Sample(event),
+        Err(status) => StatsStreamItem::StreamError(stats_error_kind_from_status(&status)),
+    }
 }
 
 /// core→engine 的 gRPC 控制面客户端。
@@ -196,10 +392,9 @@ impl EngineControlGrpcClient {
         expected_user_sid: &str,
         psk: &[u8],
     ) -> Result<Self, GrpcClientError> {
-        let (channel, peer) =
-            connect_engine_service_channel(pipe_name, expected_user_sid, psk)
-                .await
-                .map_err(GrpcClientError::Transport)?;
+        let (channel, peer) = connect_engine_service_channel(pipe_name, expected_user_sid, psk)
+            .await
+            .map_err(GrpcClientError::Transport)?;
         let client = HelperControlClient::new(channel.clone());
         let (liveness_tx, liveness) = watch::channel(true);
         let monitor = tokio::spawn(engine_liveness_monitor(channel, liveness_tx));
@@ -237,8 +432,8 @@ impl EngineControlGrpcClient {
     /// `GrpcClientError::Timeout`。
     pub async fn ping(&mut self) -> Result<(), GrpcClientError> {
         let probe = ObserveOwnedStateRequest { lookup_key: None };
-        let outcome = tokio::time::timeout(LIVENESS_TIMEOUT, self.client.observe_owned_state(probe))
-            .await;
+        let outcome =
+            tokio::time::timeout(LIVENESS_TIMEOUT, self.client.observe_owned_state(probe)).await;
         match outcome {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(s)) if is_lost_status(&s) => Err(GrpcClientError::ConnectionLost),
@@ -276,7 +471,11 @@ impl EngineControlGrpcClient {
         &mut self,
         request: AcquireLeaseRequest,
     ) -> Result<AcquireLeaseReply, GrpcClientError> {
-        let resp = self.client.acquire_lease(request).await.map_err(map_status)?;
+        let resp = self
+            .client
+            .acquire_lease(request)
+            .await
+            .map_err(map_status)?;
         Ok(resp.into_inner())
     }
 
@@ -288,7 +487,11 @@ impl EngineControlGrpcClient {
         &mut self,
         request: ApplyTunnelRequest,
     ) -> Result<ApplyTunnelReply, GrpcClientError> {
-        let resp = self.client.apply_tunnel(request).await.map_err(map_status)?;
+        let resp = self
+            .client
+            .apply_tunnel(request)
+            .await
+            .map_err(map_status)?;
         Ok(resp.into_inner())
     }
 
@@ -312,7 +515,11 @@ impl EngineControlGrpcClient {
         &mut self,
         request: GetOperationRequest,
     ) -> Result<GetOperationReply, GrpcClientError> {
-        let resp = self.client.get_operation(request).await.map_err(map_status)?;
+        let resp = self
+            .client
+            .get_operation(request)
+            .await
+            .map_err(map_status)?;
         Ok(resp.into_inner())
     }
 
@@ -324,7 +531,29 @@ impl EngineControlGrpcClient {
         &mut self,
         request: ReleaseLeaseRequest,
     ) -> Result<ReleaseLeaseReply, GrpcClientError> {
-        let resp = self.client.release_lease(request).await.map_err(map_status)?;
+        let resp = self
+            .client
+            .release_lease(request)
+            .await
+            .map_err(map_status)?;
+        Ok(resp.into_inner())
+    }
+
+    /// 通知 engine 优雅停机（`HelperControl.Shutdown`，2026-09-05 方案 B）。
+    ///
+    /// 走当前已建立的控制连接（keepalive/既有 RPC 同通道）：engine 回 `ACCEPTED`
+    /// （首次受理）/`ALREADY_STOPPING`（窗口内重入）/`NOT_APPLICABLE`（oneshot 不接管）。
+    /// 回复后调用方仍应照常执行 SCM stop 兜底（Shutdown 只是把既有停机序的触发点
+    /// 提前，不替代兜底）。
+    ///
+    /// # Errors
+    /// 同 [`EngineControlGrpcClient::observe_owned_state`]；旧 engine（无 Shutdown
+    /// RPC）→ `Rpc(Code::Unimplemented)`（调用方记 dial-failed 类别并照常兜底）。
+    pub async fn shutdown(
+        &mut self,
+        request: ShutdownRequest,
+    ) -> Result<ShutdownReply, GrpcClientError> {
+        let resp = self.client.shutdown(request).await.map_err(map_status)?;
         Ok(resp.into_inner())
     }
 
@@ -347,7 +576,7 @@ impl EngineControlGrpcClient {
         Ok(resp.into_inner())
     }
 
-    /// 订阅 engine 统计推送流（P5-a：`HelperControl.StreamStats`）。
+    /// 订阅 engine 统计推送流（`HelperControl.StreamStats` 已实现接线，productization P5-1）。
     /// `sample_interval_ms == 0` 用 engine 默认间隔（1000 ms）；流从当前累计计数开始，
     /// 持续到客户端断开。返回的流由调用方驱动；流 EOF 即 engine 断开（掉线感知）。
     ///
@@ -358,7 +587,11 @@ impl EngineControlGrpcClient {
         sample_interval_ms: u32,
     ) -> Result<tonic::codec::Streaming<StatsEvent>, GrpcClientError> {
         let request = StreamStatsRequest { sample_interval_ms };
-        let resp = self.client.stream_stats(request).await.map_err(map_status)?;
+        let resp = self
+            .client
+            .stream_stats(request)
+            .await
+            .map_err(map_status)?;
         Ok(resp.into_inner())
     }
 
@@ -479,10 +712,7 @@ impl EngineControlGrpcClient {
             .await
             .map_err(map_status)?
             .into_inner();
-        if !matches!(
-            reply.result,
-            Some(acquire_lease_reply::Result::Acquired(_))
-        ) {
+        if !matches!(reply.result, Some(acquire_lease_reply::Result::Acquired(_))) {
             return Err(GrpcClientError::Rpc(
                 Code::FailedPrecondition,
                 "owner lease acquire rejected".to_string(),
@@ -553,7 +783,10 @@ pub fn hand_off_request<R: Default>(request: &mut R, secret: &mut ClearableSecre
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineStatusEvent {
     /// 连接阶段推进（coarse = Connecting；携带细粒度 ConnectPhase）。
-    Progress { operation_id: Vec<u8>, connect_phase: ConnectPhase },
+    Progress {
+        operation_id: Vec<u8>,
+        connect_phase: ConnectPhase,
+    },
     /// 连接成功（coarse = Connected）——`set_phase(Connected)` 的唯一驱动；时间来自
     /// engine 确认数据面可用的 wall-clock，0 表示上游尚不能提供。
     Connected {
@@ -561,7 +794,10 @@ pub enum EngineStatusEvent {
         session_established_at_ms: Option<i64>,
     },
     /// 连接失败（coarse = Failed；携带结构化错误）。
-    Failed { operation_id: Vec<u8>, error: VpnError },
+    Failed {
+        operation_id: Vec<u8>,
+        error: VpnError,
+    },
     /// 已停止 / 回 idle（coarse = Idle；停止收敛）。
     Stopped { operation_id: Vec<u8> },
 }
@@ -569,10 +805,11 @@ pub enum EngineStatusEvent {
 /// `WatchEvents` 的 engine connect-status 事件流类型（host 侧归一化后；由调用方驱动）。
 pub type EngineStatusEventStream = Pin<Box<dyn Stream<Item = EngineStatusEvent> + Send>>;
 
-/// engine 统计推送流类型（P5-b：host 侧消费 `StreamStats` 后；由调用方驱动）。
-/// 元素为 wire `StatsEvent`（累计权威字节 + engine 采样 convenience），host 侧
-/// [`crate::stats`] 归一化层再算权威速度。
-pub type StatsEventStream = Pin<Box<dyn Stream<Item = StatsEvent> + Send>>;
+/// engine 统计推送流类型（host 侧消费 `StreamStats`，经 [`crate::stats`] 归一化为权威
+/// 速度后发布；由调用方驱动）。
+/// 元素为 [`StatsStreamItem`]（样本透传 / 流中传输错误项保留类别 / 干净 EOF）——
+/// RT-SEAM-01 起不再吞错误项；host 侧 [`crate::stats`] 归一化层再算权威速度。
+pub type StatsEventStream = Pin<Box<dyn Stream<Item = StatsStreamItem> + Send>>;
 
 /// engine 日志推送流类型（R3：host 侧消费 `StreamLogs` 后；由调用方驱动）。
 /// 元素为 `Result<LogEvent, Status>`（transport 错误项已被过滤，仅保留成功项——
@@ -590,8 +827,8 @@ pub fn connect_status_from_wire(event: ConnectStatusEvent) -> Option<EngineStatu
     if operation_id.is_empty() {
         return None;
     }
-    let connect_phase = ConnectPhase::try_from(event.connect_phase)
-        .unwrap_or(ConnectPhase::Unspecified);
+    let connect_phase =
+        ConnectPhase::try_from(event.connect_phase).unwrap_or(ConnectPhase::Unspecified);
     match StatsPhase::try_from(event.coarse_phase).unwrap_or(StatsPhase::Unspecified) {
         StatsPhase::Connecting => Some(EngineStatusEvent::Progress {
             operation_id,
@@ -638,8 +875,6 @@ pub trait KernelEngineControl: Send + Sync {
         request: StopTunnelRequest,
     ) -> Result<StopTunnelReply, GrpcClientError>;
 
-    /// 查询先前提交操作的 disposition（`KernelControl.Reconcile` 的义务观察；
-    /// HelperControl 无 Reconcile RPC，重试落在 P3-b1/P3-c engine 义务模型）。
     async fn get_operation(
         &mut self,
         request: GetOperationRequest,
@@ -681,14 +916,12 @@ pub trait KernelEngineControl: Send + Sync {
     /// [`ConnectStatusEvent`]；流 EOF = engine 断开（掉线感知，host 侧断线重放
     /// 语义的判据）。**必须先挂接本流再 ApplyTunnel/StopTunnel**（attach-before-apply
     /// 硬约束——status 发布器无快照，open 前事件丢弃）。
-    async fn stream_connect_status(
-        &mut self,
-    ) -> Result<EngineStatusEventStream, GrpcClientError>;
+    async fn stream_connect_status(&mut self) -> Result<EngineStatusEventStream, GrpcClientError>;
 
-    /// 订阅 engine 统计推送流（P5-b：core 统计归一化的源）。
+    /// 订阅 engine 统计推送流（host 侧统计归一化的源，已接线）。
     ///
     /// `sample_interval_ms == 0` 用 engine 默认间隔（1000 ms）。真实实现包装
-    /// `stream_stats`（`HelperControl.StreamStats`，P5-a 契约）；流 EOF = engine 断开
+    /// `stream_stats`（`HelperControl.StreamStats` 契约）；流 EOF = engine 断开
     /// （host 侧统计转发器退避重连的判据）。`StatsEvent.rx_bytes`/`tx_bytes` 为累计
     /// 权威字节，host 侧 [`crate::stats::TrafficSample`] 以增量归一化速度。
     async fn stream_stats(
@@ -702,10 +935,7 @@ pub trait KernelEngineControl: Send + Sync {
     /// 离线对账，O4）。真实实现包装 `stream_logs`（`HelperControl.StreamLogs`）并丢弃
     /// transport 错误项；流 EOF = engine 断开（host 侧日志转发器退避重连的判据）。
     /// **纯单向输出**（D3 铁律）：日志只流向聚合落盘，绝不回流状态机。
-    async fn stream_logs(
-        &mut self,
-        resume_tick: u64,
-    ) -> Result<LogEventStream, GrpcClientError>;
+    async fn stream_logs(&mut self, resume_tick: u64) -> Result<LogEventStream, GrpcClientError>;
 
     /// 查询 engine 内部深度自述（S3-B：Tier 2 零 UAC 通道）。
     ///
@@ -717,24 +947,32 @@ pub trait KernelEngineControl: Send + Sync {
         request: ServiceManageRequest,
     ) -> Result<ServiceManageReply, GrpcClientError>;
 
-    /// 应答一个待决交互提示（P3-c1：`KernelControl.RespondInteraction` 转发 seam）。
-    ///
-    /// engine 冻结 wire 无 interaction RPC（P5 补 wire 后替换）；真实实现返回 typed
-    /// `Unimplemented`，host 侧保留完整校验 + 转发语义，wire 缺口已标注。
     async fn respond_interaction(
         &mut self,
         response: InteractionResponse,
     ) -> Result<OperationReply, GrpcClientError>;
 
-    /// 重试一个未终局的义务（P3-c1：`KernelControl.Reconcile` 的真实重试 seam）。
-    ///
-    /// engine 义务模型未在冻结 wire 上（HelperControl 无 Reconcile RPC）；真实实现
-    /// 返回 typed `Unimplemented`——host 保留观测 disposition 作为回执并标注，重试
-    /// seam 由 engine 义务模型落地（P3-c2）后接线。
     async fn retry_obligation(
         &mut self,
         request: ReconcileRequest,
     ) -> Result<GetOperationReply, GrpcClientError>;
+
+    /// 通知 engine 优雅停机（2026-09-05 方案 B：`HelperControl.Shutdown` seam）。
+    ///
+    /// **带默认实现**（typed `Unimplemented`）：既有 fake 无需改动即编译通过——默认
+    /// 返回值正是「旧 engine（无 Shutdown RPC）」兼容矩阵（4.5）的单元投影：调用方把
+    /// 一切失败按 dial-failed 类别记日志并**照常继续批量兜底**（SCM stop），不把
+    /// Shutdown 失败当操作失败。
+    async fn shutdown(
+        &mut self,
+        request: ShutdownRequest,
+    ) -> Result<ShutdownReply, GrpcClientError> {
+        let _ = request;
+        Err(GrpcClientError::Rpc(
+            Code::Unimplemented,
+            "engine shutdown RPC not supported by this control".to_string(),
+        ))
+    }
 }
 
 #[tonic::async_trait]
@@ -765,7 +1003,11 @@ impl KernelEngineControl for EngineControlGrpcClient {
         &mut self,
         request: GetOperationRequest,
     ) -> Result<GetOperationReply, GrpcClientError> {
-        let resp = self.client.get_operation(request).await.map_err(map_status)?;
+        let resp = self
+            .client
+            .get_operation(request)
+            .await
+            .map_err(map_status)?;
         Ok(resp.into_inner())
     }
 
@@ -793,9 +1035,7 @@ impl KernelEngineControl for EngineControlGrpcClient {
         self.establish_owner_lease().await
     }
 
-    async fn stream_connect_status(
-        &mut self,
-    ) -> Result<EngineStatusEventStream, GrpcClientError> {
+    async fn stream_connect_status(&mut self) -> Result<EngineStatusEventStream, GrpcClientError> {
         use tokio_stream::StreamExt;
         // 真实通道 = StreamConnectStatus（R1w 独立 status 通道，非 StreamLogs——日志
         // 已退役为纯输出，绝不回流状态）。丢弃无法归一化的事件（空 operation_id /
@@ -815,18 +1055,19 @@ impl KernelEngineControl for EngineControlGrpcClient {
         sample_interval_ms: u32,
     ) -> Result<StatsEventStream, GrpcClientError> {
         use tokio_stream::StreamExt;
-        // 真实通道 = StreamStats（P5-a 契约）；丢弃 transport 错误项，EOF 即断线。
+        // 真实通道 = StreamStats。RT-SEAM-01：错误项不再被吞——
+        // `Ok` → `Sample`、`Err` → `StreamError(稳定类别)`；EOF 追加显式 `Ended`
+        // 终结项（转发器据此落 `kernel.stats.stream_ended` 并退避重订阅）。
         // 注意：inherent `stream_stats` 在此优先于 trait 方法解析（具体类型方法
         // 遮蔽 trait 方法），取到的是 client passthrough（raw `Streaming<StatsEvent>`）。
         let stream = self.stream_stats(sample_interval_ms).await?;
-        let normalized = stream.filter_map(|ev| ev.ok());
+        let normalized = stream
+            .map(stats_stream_item_from_wire)
+            .chain(tokio_stream::iter([StatsStreamItem::Ended]));
         Ok(Box::pin(normalized))
     }
 
-    async fn stream_logs(
-        &mut self,
-        resume_tick: u64,
-    ) -> Result<LogEventStream, GrpcClientError> {
+    async fn stream_logs(&mut self, resume_tick: u64) -> Result<LogEventStream, GrpcClientError> {
         // 真实通道 = StreamLogs（产品日志通道）；元素为 `Result<LogEvent, Status>`
         // （transport 错误项由下游 [`crate::log_aggregator::ingest_engine_stream`]
         // 判为 `StreamError` → 转发器退避重连）。聚合-only 消费：下游 ingest 只落盘，
@@ -839,7 +1080,11 @@ impl KernelEngineControl for EngineControlGrpcClient {
         &mut self,
         request: ServiceManageRequest,
     ) -> Result<ServiceManageReply, GrpcClientError> {
-        let resp = self.client.service_manage(request).await.map_err(map_status)?;
+        let resp = self
+            .client
+            .service_manage(request)
+            .await
+            .map_err(map_status)?;
         Ok(resp.into_inner())
     }
 
@@ -847,9 +1092,6 @@ impl KernelEngineControl for EngineControlGrpcClient {
         &mut self,
         _response: InteractionResponse,
     ) -> Result<OperationReply, GrpcClientError> {
-        // engine 冻结 wire 无 interaction RPC（HostLeaseMessage/HelperControl 均无交互
-        // 变体）；显式 typed 拒绝而非静默丢弃——P5 补 wire（InteractionResponse 落点）
-        // 后替换为真实转发。
         Err(GrpcClientError::Rpc(
             Code::Unimplemented,
             "engine has no interaction RPC on frozen wire (P5)".to_string(),
@@ -860,12 +1102,18 @@ impl KernelEngineControl for EngineControlGrpcClient {
         &mut self,
         _request: ReconcileRequest,
     ) -> Result<GetOperationReply, GrpcClientError> {
-        // engine 冻结 wire 无 Reconcile RPC / 义务模型；显式 typed 拒绝——host 保留
-        // 观测 disposition 作为回执，义务模型落地（P3-c2）后替换为真实重试派发。
         Err(GrpcClientError::Rpc(
             Code::Unimplemented,
             "engine obligation model not on frozen wire (P3-c2 seam)".to_string(),
         ))
+    }
+
+    async fn shutdown(
+        &mut self,
+        request: ShutdownRequest,
+    ) -> Result<ShutdownReply, GrpcClientError> {
+        // 当前控制连接上的显式 Shutdown RPC；服务安装/卸载不调用它，进程停止由 SCM 负责。
+        self.shutdown(request).await
     }
 }
 
@@ -969,18 +1217,24 @@ pub async fn query_service_self(
     service_report_from_reply(reply.into_inner())
 }
 
+
 /// 拉起 core 侧 KeepAlive 心跳 tick 任务（P2 有界存留）：按 `period`（默认
 /// [`KEEPALIVE_PERIOD`] = 10s）周期发 `KeepAlive` 到 engine——engine 侧刷新
 /// `last_heartbeat`，15s 未收到即自清理+自退出（hung-core / 进程句柄路径故障兜底）。
 ///
-/// 持共享 [`EngineSlot`]（P3 崩溃自愈换点：respawn 换入新 engine 后，本任务下一 tick
-/// 即从槽取新 engine 续心跳，无需重拉任务）。服务路由换入 service engine 后，当前
-/// service engine 不收 KeepAlive；若初始 oneshot 仍被槽保留以支持卸载后的恢复，则
-/// ticker 继续维护这个隐藏的 oneshot，避免它自己的 watchdog 误判 Core 已失联并关闭
-/// admission。调用方（`serve_kernel_control_pipe` 拉起，`CoreRuntime` 停机先中止）须在
-/// `shutdown_core` 前中止本任务，释放 engine client
-/// 引用。传输类失败（engine 掉线）best-effort：继续 tick，engine 恢复后自动续心跳——
-/// 链接终止由 liveness 监视/状态转发器驱动（本任务不改变业务状态）。
+/// 持共享 [`EngineSlot`]（respawn/provision 换入新 engine 后，本任务下一 tick 即从槽取
+/// 新 engine 续心跳，无需重拉任务）。
+///
+/// **发送对象（2026-09-08 计划批 2）**：只对「当前维护形态为 oneshot 且槽内是真实
+/// engine」发送。auto（尚未连接过）无维护对象；service 形态 engine 由 SCM 管生死，
+/// 不参与 core 心跳；槽处于 detached 占位（服务在场 / oneshot 已退役）同样无对象。
+/// 旧实现「service/auto 下继续保活隐藏的初始 oneshot」已废除——不再保留任何隐藏
+/// 常驻 oneshot（存在性互斥）。
+///
+/// 调用方（`serve_kernel_control_pipe` 拉起，`CoreRuntime` 停机先中止）须在
+/// `shutdown_core` 前中止本任务，释放 engine client 引用。传输类失败（engine 掉线）
+/// best-effort：继续 tick，engine 恢复后自动续心跳——链接终止由 liveness 监视/状态
+/// 转发器驱动（本任务不改变业务状态）。
 #[must_use]
 pub fn spawn_keepalive_ticker(
     slot: EngineSlot,
@@ -990,6 +1244,7 @@ pub fn spawn_keepalive_ticker(
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         let mut tick: u64 = 0;
+        let detached = detached_engine();
         loop {
             ticker.tick().await;
             let kind = engine_kind.load(Ordering::Relaxed);
@@ -999,23 +1254,19 @@ pub fn spawn_keepalive_ticker(
             ) {
                 continue;
             }
-            tick = tick.saturating_add(1);
-            let request = KeepAliveRequest { monotonic_tick: tick };
+            // 只有 oneshot 维护形态才发心跳（见函数文档）；detached 占位无对象可发。
+            if kind != ENGINE_KIND_ONESHOT {
+                continue;
+            }
             let current = slot.current().await;
-            let initial = slot.initial();
-            // service engine 的业务生命周期不依赖 core KeepAlive；但当前架构为了
-            // 卸载后无重启地恢复 oneshot，仍保留初始 oneshot client。服务/auto 路由下
-            // 若当前已换成 service，就维护这个保留 client；当前仍是初始 oneshot 时
-            // 直接维护当前 client。切回 oneshot 后维护槽内当前 engine（包括 crash
-            // recovery 换入的新 oneshot）。
-            let engine = if kind == ENGINE_KIND_ONESHOT {
-                current
-            } else if Arc::ptr_eq(&current, &initial) {
-                current
-            } else {
-                initial
+            if Arc::ptr_eq(&current, &detached) {
+                continue;
+            }
+            tick = tick.saturating_add(1);
+            let request = KeepAliveRequest {
+                monotonic_tick: tick,
             };
-            let mut guard = engine.lock().await;
+            let mut guard = current.lock().await;
             // best-effort：失败（engine 掉线/超时）不 panic、不重试风暴——下一个周期
             // 再发；engine 存活时下一个 KeepAlive 刷新心跳计时。
             let _ = guard.keep_alive(request).await;
@@ -1027,436 +1278,3 @@ pub fn spawn_keepalive_ticker(
 // 单元测试：hand_off_request 的 move + zeroize 语义、map_status 分类、
 // spawn_keepalive_ticker 周期发送。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    /// `hand_off_request` 必须把请求 move 交给 wire（调用方 `request` 被 Default 化，
-    /// secret 不再驻留），并零化 one-shot 源。
-    #[test]
-    fn hand_off_moves_request_and_zeroizes_secret() {
-        let mut secret = ClearableSecret::new(b"one-shot-credential");
-        let mut request = ApplyTunnelRequest {
-            lookup_key: None,
-            plan: None,
-            request_digest: b"secret-on-wire".to_vec(),
-            // P3-b1: proto added one-shot secret_payload (tag=4); the host's real
-            // credential hand-off lands in P3-b2. Keep the literal compile-valid here.
-            secret_payload: Vec::new(),
-        };
-
-        let wire_request = hand_off_request(&mut request, &mut secret);
-
-        // wire 请求拿到完整 secret（move，非空）。
-        assert_eq!(wire_request.request_digest, b"secret-on-wire");
-        // 调用方 request 已被 Default 化（secret 移出）。
-        assert!(request.request_digest.is_empty(), "request 必须被清空");
-        // one-shot 源已零化。
-        assert!(
-            secret.as_bytes().iter().all(|&b| b == 0),
-            "secret 必须已零化"
-        );
-    }
-
-    /// `map_status`：transport 类 code → ConnectionLost；DeadlineExceeded → Timeout。
-    #[test]
-    fn map_status_classifies_codes() {
-        assert_eq!(
-            map_status(Status::unavailable("engine gone")),
-            GrpcClientError::ConnectionLost
-        );
-        assert_eq!(
-            map_status(Status::deadline_exceeded("slow engine")),
-            GrpcClientError::Timeout
-        );
-        assert!(matches!(
-            map_status(Status::invalid_argument("bad req")),
-            GrpcClientError::Rpc(Code::InvalidArgument, _)
-        ));
-    }
-
-    /// S3-B：`service_manage_query_request` 构造 `ServiceManage.query` action（Tier 2 v1
-    /// 只落 query；请求无其它字段）。
-    #[test]
-    fn service_manage_query_request_builds_query_action() {
-        let request = service_manage_query_request();
-        assert!(
-            matches!(
-                request.action,
-                Some(service_manage_request::Action::Query(ServiceSelfQuery {}))
-            ),
-            "Tier 2 v1 只落 query action"
-        );
-    }
-
-    /// S3-B：`service_report_from_reply` 映射——reply 带 report → Some；缺 report → None。
-    #[test]
-    fn service_report_from_reply_maps_some_and_none() {
-        let report = ServiceSelfReport {
-            control_plane_ready: true,
-            psk_present: true,
-            connection_mode: "service".to_string(),
-            runtime_epoch: vec![0u8; 16],
-            authority_fence: None,
-        };
-        let reply = ServiceManageReply {
-            self_report: Some(report.clone()),
-        };
-        assert_eq!(
-            service_report_from_reply(reply),
-            Some(report),
-            "reply 带 report → Some"
-        );
-        assert_eq!(
-            service_report_from_reply(ServiceManageReply { self_report: None }),
-            None,
-            "reply 缺 report → None"
-        );
-    }
-
-    /// S3-B：`query_service_self` 失败保守——拨号不到（无 server）→ `None`（不抛错，
-    /// 调用方保留 SCM 派生）。镜像 `dial_fails_closed_when_no_server` 的 absent-pipe
-    /// 探测方式。
-    #[tokio::test]
-    async fn query_service_self_returns_none_when_dial_fails() {
-        let pipe = format!(r"\\.\pipe\exv-query-self-absent-{}", std::process::id());
-        let report = query_service_self(
-            &pipe,
-            "S-1-5-18",
-            &[0u8; 32],
-            Duration::from_millis(200),
-        )
-        .await;
-        assert!(
-            report.is_none(),
-            "拨号失败必须保守返回 None（探针失败 ≠ 引擎失败）"
-        );
-    }
-
-    /// service engine 以 LocalSystem 运行时，owner principal 必须仍由 core 用户 SID
-    /// 派生，不能误用服务端的 SYSTEM SID。
-    #[test]
-    fn owner_principal_is_bound_to_core_sid_not_service_sid() {
-        let core = owner_principal_digest("S-1-5-21-core");
-        let system = owner_principal_digest("S-1-5-18");
-        assert_ne!(core, system);
-        assert_eq!(core.len(), 32);
-    }
-
-    /// 16-byte 测试 operation id。
-    fn uuid16(n: u8) -> Vec<u8> {
-        let mut bytes = [0u8; 16];
-        bytes[0] = n;
-        bytes[1] = 0x42;
-        bytes.to_vec()
-    }
-
-    fn wire_status_event(
-        operation_id: Vec<u8>,
-        connect_phase: ConnectPhase,
-        coarse_phase: StatsPhase,
-        error: Option<VpnError>,
-    ) -> ConnectStatusEvent {
-        ConnectStatusEvent {
-            operation_id,
-            connect_phase: connect_phase as i32,
-            coarse_phase: coarse_phase as i32,
-            error,
-            session_established_at_ms: 1_700_000_000_123,
-        }
-    }
-
-    /// `connect_status_from_wire`（R1）：按 coarse 分支归一化——Connecting →
-    /// Progress（带细粒度 ConnectPhase）；Connected → Connected；Failed → Failed
-    /// （携带 err）；Idle → Stopped；空 operation_id / 未覆盖 coarse → `None`。
-    #[test]
-    fn connect_status_from_wire_maps_coarse_branches() {
-        let id = uuid16(3);
-        assert_eq!(
-            connect_status_from_wire(wire_status_event(
-                id.clone(),
-                ConnectPhase::ApplyingPlatformTunnel,
-                StatsPhase::Connecting,
-                None,
-            )),
-            Some(EngineStatusEvent::Progress {
-                operation_id: id.clone(),
-                connect_phase: ConnectPhase::ApplyingPlatformTunnel,
-            })
-        );
-        assert_eq!(
-            connect_status_from_wire(wire_status_event(
-                id.clone(),
-                ConnectPhase::StartingDataPlane,
-                StatsPhase::Connected,
-                None,
-            )),
-            Some(EngineStatusEvent::Connected {
-                operation_id: id.clone(),
-                session_established_at_ms: Some(1_700_000_000_123),
-            })
-        );
-        let error = VpnError {
-            code: 1,
-            stage: 8,
-            certainty: 0,
-            retry: 1,
-            subject: None,
-            resource: None,
-            native: None,
-        };
-        assert_eq!(
-            connect_status_from_wire(wire_status_event(
-                id.clone(),
-                ConnectPhase::ApplyingPlatformTunnel,
-                StatsPhase::Failed,
-                Some(error.clone()),
-            )),
-            Some(EngineStatusEvent::Failed {
-                operation_id: id.clone(),
-                error,
-            })
-        );
-        assert_eq!(
-            connect_status_from_wire(wire_status_event(
-                id.clone(),
-                ConnectPhase::Unspecified,
-                StatsPhase::Idle,
-                None,
-            )),
-            Some(EngineStatusEvent::Stopped {
-                operation_id: id.clone()
-            })
-        );
-        // 空 operation_id / 未覆盖 coarse → None（无关联操作或非 R1w 状态分支）。
-        assert_eq!(
-            connect_status_from_wire(wire_status_event(
-                vec![],
-                ConnectPhase::Unspecified,
-                StatsPhase::Connected,
-                None,
-            )),
-            None
-        );
-        assert_eq!(
-            connect_status_from_wire(wire_status_event(
-                id,
-                ConnectPhase::Unspecified,
-                StatsPhase::Stopping,
-                None,
-            )),
-            None
-        );
-    }
-
-    /// 记录 `keep_alive` 调用的 fake engine（ticker 周期发送的观测点）。
-    #[derive(Default)]
-    struct TickerEngine {
-        /// 收到的心跳序号（monotonic_tick）。
-        keeps: std::sync::Mutex<Vec<u64>>,
-    }
-
-    #[tonic::async_trait]
-    impl KernelEngineControl for TickerEngine {
-        async fn keep_alive(
-            &mut self,
-            request: KeepAliveRequest,
-        ) -> Result<KeepAliveReply, GrpcClientError> {
-            self.keeps.lock().unwrap().push(request.monotonic_tick);
-            Ok(KeepAliveReply {
-                monotonic_tick: request.monotonic_tick,
-            })
-        }
-
-        async fn ensure_owner_lease(&mut self) -> Result<(), GrpcClientError> {
-            Ok(())
-        }
-
-        async fn service_manage(
-            &mut self,
-            _request: ServiceManageRequest,
-        ) -> Result<ServiceManageReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-
-        async fn apply_connect(
-            &mut self,
-            _request: ApplyTunnelRequest,
-            secret_payload: &mut ClearableSecret,
-        ) -> Result<ApplyTunnelReply, GrpcClientError> {
-            secret_payload.clear();
-            Ok(ApplyTunnelReply { result: None })
-        }
-
-        async fn stop_tunnel(
-            &mut self,
-            _request: StopTunnelRequest,
-        ) -> Result<StopTunnelReply, GrpcClientError> {
-            Ok(StopTunnelReply { result: None })
-        }
-
-        async fn get_operation(
-            &mut self,
-            _request: GetOperationRequest,
-        ) -> Result<GetOperationReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-
-        async fn observe_owned_state(
-            &mut self,
-            _request: ObserveOwnedStateRequest,
-        ) -> Result<ObserveOwnedStateReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-
-        async fn stream_connect_status(
-            &mut self,
-        ) -> Result<EngineStatusEventStream, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-
-        async fn stream_stats(
-            &mut self,
-            _sample_interval_ms: u32,
-        ) -> Result<StatsEventStream, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-
-        async fn stream_logs(
-            &mut self,
-            _resume_tick: u64,
-        ) -> Result<LogEventStream, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-
-        async fn respond_interaction(
-            &mut self,
-            _response: InteractionResponse,
-        ) -> Result<OperationReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-
-        async fn retry_obligation(
-            &mut self,
-            _request: ReconcileRequest,
-        ) -> Result<GetOperationReply, GrpcClientError> {
-            Err(GrpcClientError::Rpc(
-                tonic::Code::Unimplemented,
-                "not in ticker test".to_string(),
-            ))
-        }
-    }
-
-    /// 让 paused 时间下的被唤醒任务运行若干次（advance 后 ticker 需要被 poll 才能 send）。
-    async fn pump() {
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-    }
-
-    /// `spawn_keepalive_ticker`（P2）：按周期（默认 10s）发 KeepAlive，序号严格递增。
-    #[tokio::test(start_paused = true)]
-    async fn keepalive_ticker_sends_every_period() {
-        // 持有具体类型 Arc（断言读取）与 trait 对象 Arc（ticker 调用）——两者共享同一
-        // Mutex（`Arc<Mutex<T>>` → `Arc<Mutex<dyn KernelEngineControl>>` unsizing）。
-        let typed = Arc::new(tokio::sync::Mutex::new(TickerEngine::default()));
-        let engine: Arc<tokio::sync::Mutex<dyn KernelEngineControl>> = typed.clone();
-        let slot = EngineSlot::new(engine);
-        let kind = Arc::new(AtomicU8::new(ENGINE_KIND_ONESHOT));
-        let handle = spawn_keepalive_ticker(slot, kind, Duration::from_secs(10));
-        // interval 首 tick 立即发送（t=0 即 1 次心跳）。
-        pump().await;
-        assert_eq!(
-            typed.lock().await.keeps.lock().unwrap().len(),
-            1,
-            "interval 首 tick 立即发送一次心跳"
-        );
-        // 推进一个周期 → 第 2 次心跳；再推进 → 第 3 次。
-        tokio::time::advance(Duration::from_secs(10)).await;
-        pump().await;
-        assert_eq!(
-            typed.lock().await.keeps.lock().unwrap().len(),
-            2,
-            "推进 10s → 第 2 次心跳"
-        );
-        tokio::time::advance(Duration::from_secs(10)).await;
-        pump().await;
-        assert_eq!(
-            typed.lock().await.keeps.lock().unwrap().len(),
-            3,
-            "推进 20s → 第 3 次心跳"
-        );
-        // 序号严格递增（1,2,3）——engine 侧据此刷新单调计时。
-        let ticks = typed.lock().await.keeps.lock().unwrap().clone();
-        assert_eq!(ticks, vec![1, 2, 3], "心跳序号必须严格递增");
-        handle.abort();
-    }
-
-    /// 服务 engine 不依赖 core KeepAlive；服务路由切换后只维护保留的初始 oneshot，
-    /// 切回 oneshot 后 ticker 恢复向当前 oneshot 发送。
-    #[tokio::test(start_paused = true)]
-    async fn keepalive_ticker_skips_service_engine() {
-        let original_typed = Arc::new(tokio::sync::Mutex::new(TickerEngine::default()));
-        let original: Arc<tokio::sync::Mutex<dyn KernelEngineControl>> = original_typed.clone();
-        let service_typed = Arc::new(tokio::sync::Mutex::new(TickerEngine::default()));
-        let service_engine: Arc<tokio::sync::Mutex<dyn KernelEngineControl>> = service_typed.clone();
-        let slot = EngineSlot::new(original);
-        slot.swap(service_engine).await;
-        let kind = Arc::new(std::sync::atomic::AtomicU8::new(ENGINE_KIND_SERVICE));
-        let handle = spawn_keepalive_ticker(slot.clone(), kind.clone(), Duration::from_secs(10));
-
-        pump().await;
-        tokio::time::advance(Duration::from_secs(20)).await;
-        pump().await;
-        assert!(
-            service_typed.lock().await.keeps.lock().unwrap().is_empty(),
-            "service engine 不应收到周期性 KeepAlive"
-        );
-        assert_eq!(
-            original_typed.lock().await.keeps.lock().unwrap().len(),
-            3,
-            "服务路由仍需维护保留的初始 oneshot，避免其心跳 watchdog 误杀 Core admission"
-        );
-
-        // 真实卸载路径会在记录 oneshot 类型前先把 EngineSlot 切回初始 oneshot；
-        // 测试也复现这一顺序，确保切回后心跳目标不是已经停止的 service client。
-        let initial = slot.initial();
-        slot.swap(initial).await;
-        kind.store(ENGINE_KIND_ONESHOT, std::sync::atomic::Ordering::Relaxed);
-        // 切换恰好发生在 interval 边界时，先推进一个完整周期再多推进一拍，
-        // 避免把 Tokio 的 paused-clock 唤醒顺序误判成业务行为。
-        tokio::time::advance(Duration::from_secs(11)).await;
-        pump().await;
-        let ticks = original_typed.lock().await.keeps.lock().unwrap().clone();
-        assert!(
-            ticks.len() >= 4,
-            "切回 oneshot 后下一拍恢复 KeepAlive，序号继续单调递增：{ticks:?}"
-        );
-        assert_eq!(&ticks[..3], &[1, 2, 3]);
-        assert_eq!(ticks[3], 4);
-        handle.abort();
-    }
-}

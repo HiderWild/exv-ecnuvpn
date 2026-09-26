@@ -1,21 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// C5-pre proxy TUN detection contract (PRD G-⑥, Phase 7). These tests pin the
-// pure filter seam in `src/proxy_tun.rs` and run on ANY host — they drive the
-// filter with injected [`exv_vpn_win32_resource::proxy_tun::AdapterRecord`]
-// lists and never depend on real machine state (a real-machine manual check is
-// optional and separate).
-//
-// Reference semantics (C++ `src/platform/common/proxy_tun_detector.cpp`):
-//   - EXV's own adapter is never a proxy TUN (name == exv_interface, or
-//     contains "exv", or description contains "openconnect tunnel");
-//   - non-proxy virtual adapters are blacklisted (vmware / virtualbox /
-//     hyper-v / vethernet / docker / wsl / bluetooth / loopback / tailscale /
-//     wireguard / openvpn / zerotier);
-//   - detected when name+description carries a proxy token (mihomo / clash /
-//     sing-box / …) or is a virtualish TUN adapter (tun / tap / utun / wintun);
-//   - route_policy = "exv-before-proxy-tun" when detected, "normal" otherwise.
 
 use exv_vpn_win32_resource::proxy_tun::{
     detection_from_adapters, filter_proxy_tun_adapters, AdapterRecord, KIND_PROXY_TUN,

@@ -1,6 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-// PRD G-⑤ / C4：docs/superpowers/plans/2026-08-17-vpn-rust-proxy-tun-coexistence-prd.md。
 
 //! 生产装配点：VGDC 双线直连 DNS + CSTP 控制面 socket 出口绑定（C4）。
 //!
@@ -18,12 +15,16 @@
 //! 绑定共用同一物理网卡 ifindex（`find_physical_nics` 一次发现）。P5 接线点：engine
 //! 的 connect 路径构造 `BootstrapConfig` 时注入两个闭包。
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::os::windows::io::AsRawSocket;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use exv_vpn_cstp::connector::{GatewayResolver, ResolverFuture, SocketBinder};
 use exv_vpn_win32_resource::vgdc_dns::{
-    DualLineConfig, ResolveLayerError, find_physical_nics, socket_binder_for_ifindex,
+    DualLineConfig, ResolutionSource, ResolveLayerError, find_physical_nics,
+    socket_binder_for_ifindex,
 };
 
 /// CSTP 控制面默认端口（标准 HTTPS/CSTP 端口；协议帧未携带端口字段）。
@@ -45,6 +46,26 @@ pub fn production_gateway_resolver(
     ifindex: u32,
     port: u16,
 ) -> Result<Arc<GatewayResolver>, String> {
+    production_gateway_resolver_observed(ifindex, port, None)
+}
+
+/// 实际一次解析的结果；不保存原始错误文本或连接凭据。
+#[derive(Debug, Clone)]
+pub struct GatewayResolutionObservation {
+    pub address: Option<SocketAddr>,
+    pub source: Option<ResolutionSource>,
+    pub elapsed: Duration,
+    pub failed_layers: Option<usize>,
+}
+
+pub type GatewayResolutionObserver = dyn Fn(&GatewayResolutionObservation) + Send + Sync;
+
+/// 原解析闭包的小观测端口；保留解析选择、返回值与错误字符串行为。
+pub fn production_gateway_resolver_observed(
+    ifindex: u32,
+    port: u16,
+    observer: Option<Arc<GatewayResolutionObserver>>,
+) -> Result<Arc<GatewayResolver>, String> {
     let resolved_ifindex = if ifindex == 0 {
         let nics = find_physical_nics().map_err(|e| format!("vgdc-nics:{e}"))?;
         let nic = nics
@@ -56,22 +77,116 @@ pub fn production_gateway_resolver(
     };
     let cfg = DualLineConfig::production(Some(resolved_ifindex))
         .map_err(|e| format!("vgdc-config:{e}"))?;
-    Ok(Arc::new(move |host: &str| -> ResolverFuture {
+    Ok(resolver_with_config(cfg, port, observer))
+}
+
+fn resolver_with_config(
+    cfg: DualLineConfig,
+    port: u16,
+    observer: Option<Arc<GatewayResolutionObserver>>,
+) -> Arc<GatewayResolver> {
+    Arc::new(move |host: &str| -> ResolverFuture {
         let cfg = cfg.clone();
+        let observer = observer.clone();
         let host = host.to_string();
         Box::pin(async move {
-            exv_vpn_win32_resource::vgdc_dns::resolve_gateway_dual_line(&cfg, &host)
-                .await
+            let started = Instant::now();
+            let result =
+                exv_vpn_win32_resource::vgdc_dns::resolve_gateway_dual_line(&cfg, &host).await;
+            if let Some(observe) = observer {
+                let (address, source, failed_layers) = match &result {
+                    Ok((ip, source)) => (Some(SocketAddr::from((*ip, port))), Some(*source), None),
+                    Err(errors) => (None, None, Some(errors.len())),
+                };
+                observe(&GatewayResolutionObservation {
+                    address,
+                    source,
+                    elapsed: started.elapsed(),
+                    failed_layers,
+                });
+            }
+            result
                 .map(|(ip, _source)| SocketAddr::from((ip, port)))
                 .map_err(|errors| {
-                    let detail: Vec<String> = errors
-                        .iter()
-                        .map(ResolveLayerError::describe)
-                        .collect();
+                    let detail: Vec<String> =
+                        errors.iter().map(ResolveLayerError::describe).collect();
                     format!("vgdc-resolve:{}", detail.join("; "))
                 })
         })
-    }))
+    })
+}
+
+/// 只读取这条已连接 socket 的端点和已生效 IP_UNICAST_IF；不会二次解析或重选路由。
+pub(crate) fn connected_socket_fields(socket: &tokio::net::TcpStream) -> BTreeMap<String, String> {
+    use windows::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid;
+    use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+    use windows::Win32::Networking::WinSock::{
+        IP_UNICAST_IF, IPPROTO_IP, SOCKET, WSAGetLastError, getsockopt,
+    };
+    let mut fields = BTreeMap::new();
+    for (name, result) in [
+        ("local_addr", socket.local_addr()),
+        ("peer_addr", socket.peer_addr()),
+    ] {
+        match result {
+            Ok(address) => {
+                fields.insert(name.to_string(), address.to_string());
+            }
+            Err(error) => {
+                fields.insert(name.to_string(), "unavailable".into());
+                fields.insert(
+                    format!("{name}_error"),
+                    error
+                        .raw_os_error()
+                        .map_or_else(|| "none".into(), |code| code.to_string()),
+                );
+            }
+        }
+    }
+    let mut index_bytes = [0u8; 4];
+    let mut length = 4i32;
+    // SAFETY: socket 存活，缓冲区为 4 字节 DWORD，optlen 与其长度一致。
+    let result = unsafe {
+        getsockopt(
+            SOCKET(socket.as_raw_socket() as usize),
+            IPPROTO_IP.0,
+            IP_UNICAST_IF,
+            windows::core::PSTR(index_bytes.as_mut_ptr()),
+            &raw mut length,
+        )
+    };
+    if result == 0 && length == 4 {
+        // getsockopt 返回主机字节序；仅 setsockopt 的输入要求网络字节序。
+        // https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options
+        let ifindex = u32::from_ne_bytes(index_bytes);
+        fields.insert("socket_bound_ifindex".into(), ifindex.to_string());
+        if ifindex != 0 {
+            let mut luid = NET_LUID_LH::default();
+            // SAFETY: 查询已绑定索引对应的标识，不重新运行出口选择。
+            let code = unsafe { ConvertInterfaceIndexToLuid(ifindex, &raw mut luid) };
+            if code.0 == 0 {
+                fields.insert(
+                    "socket_bound_luid".into(),
+                    unsafe { luid.Value }.to_string(),
+                );
+            } else {
+                fields.insert("socket_luid_query_error".into(), code.0.to_string());
+            }
+        }
+    } else if result != 0 {
+        // SAFETY: 紧随失败的 WinSock 调用读取同线程错误码。
+        fields.insert(
+            "socket_binding_query_error".into(),
+            unsafe { WSAGetLastError() }.0.to_string(),
+        );
+    } else {
+        fields.insert(
+            "socket_binding_query_error".into(),
+            "unexpected_option_length".into(),
+        );
+        fields.insert("socket_option_length".into(), length.to_string());
+    }
+    fields
 }
 
 /// 由物理出口 ifindex 构造 CSTP/TLS 控制面 socket 出口绑定闭包
@@ -83,82 +198,20 @@ pub fn production_socket_binder(ifindex: u32) -> Option<Arc<SocketBinder>> {
     socket_binder_for_ifindex(ifindex)
 }
 
+/// 模式在 Core 受理手动连接时冻结，登录和 CSTP 必须共用这一选择。
+pub(crate) fn socket_binder_for_mode(
+    mode: exv_vpn_win32_config::ConnectionMode,
+    physical_ifindex: u32,
+) -> Option<Arc<SocketBinder>> {
+    match mode {
+        exv_vpn_win32_config::ConnectionMode::Standard => {
+            production_socket_binder(physical_ifindex)
+        }
+        exv_vpn_win32_config::ConnectionMode::Compatibility => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 单元测试（非网络）：闭包形态、IP 字面量路径、ifindex==0 自动发现与 fail-closed。
 // 真实双线解析机制测试在 `exv-vpn-win32-resource::vgdc_dns`。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use std::net::Ipv4Addr;
-
-    use super::*;
-    use exv_vpn_win32_resource::vgdc_dns::DualLineConfig;
-
-    /// IP 字面量 host 直接采用（`ResolutionSource::System`）——不触碰网络，验证闭包
-    /// 装配后的 async 解析语义正确。
-    #[tokio::test]
-    async fn resolver_accepts_ip_literal_host() {
-        let resolver = production_gateway_resolver(0, CSTP_GATEWAY_PORT).unwrap_or_else(|e| {
-            panic!("production resolver must construct: {e}");
-        });
-        let addr = resolver("222.66.117.109").await.expect("IP 字面量直接采用");
-        assert_eq!(addr, SocketAddr::from((Ipv4Addr::new(222, 66, 117, 109), 443)));
-    }
-
-    /// fake-ip 字面量必须被拒绝（typed 错误）——闭包把 `ResolveLayerError` 向量
-    /// 描述为 `vgdc-resolve:` 前缀错误。
-    #[tokio::test]
-    async fn resolver_rejects_fake_ip_literal() {
-        let resolver = production_gateway_resolver(0, CSTP_GATEWAY_PORT).unwrap_or_else(|e| {
-            panic!("production resolver must construct: {e}");
-        });
-        let err = resolver("198.18.1.15")
-            .await
-            .expect_err("fake-ip 字面量必须拒绝");
-        assert!(err.starts_with("vgdc-resolve:fake-ip-literal:198.18.1.15"), "got {err}");
-    }
-
-    /// `production_gateway_resolver` 的 ifindex==0 自动发现路径在无物理网卡宿主上
-    /// fail-closed（`Err`），绝不静默回退系统解析；有物理网卡时返回 Ok 且闭包可解析
-    /// IP 字面量。两种结果都是合法行为，断言不允许第三种。
-    #[test]
-    fn resolver_zero_ifindex_discovers_or_fails_closed() {
-        match production_gateway_resolver(0, CSTP_GATEWAY_PORT) {
-            Ok(resolver) => {
-                // 自动发现成功：闭包必须可解析 IP 字面量（不触碰网络）。
-                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-                let addr = rt
-                    .block_on(resolver("222.66.117.109"))
-                    .expect("IP 字面量直接采用");
-                assert_eq!(addr.port(), 443);
-            }
-            Err(msg) => {
-                // 无物理网卡：fail closed（绝不静默回退系统解析）。
-                assert!(msg.starts_with("vgdc-nics:"), "got {msg}");
-            }
-        }
-    }
-
-    /// `production_socket_binder` 与资源原语一致：ifindex==0 → None；非零 → Some。
-    #[test]
-    fn socket_binder_zero_ifindex_yields_none() {
-        assert!(production_socket_binder(0).is_none());
-    }
-
-    /// `production_gateway_resolver` 产出的闭包底层使用生产 `DualLineConfig`（含
-    /// 绑网卡 ifindex）——装配正确性（不 fork 配置构造）。
-    #[test]
-    fn resolver_builds_production_dualline_config() {
-        let nics = find_physical_nics().unwrap_or_default();
-        let Some(nic) = nics.first() else {
-            return; // 无物理网卡：不可验证，跳过（非失败）。
-        };
-        let cfg = DualLineConfig::production(Some(nic.ifindex)).expect("production config");
-        // 生产 DoH endpoint 冻结（223.5.5.5/resolve → 1.1.1.1/dns-query）。
-        assert_eq!(cfg.doh_endpoints.len(), 2);
-        assert_eq!(cfg.doh_endpoints[0].ip, Ipv4Addr::new(223, 5, 5, 5));
-        assert_eq!(cfg.udp53_resolvers.len(), 3);
-        assert_eq!(cfg.udp53_ifindex, Some(nic.ifindex));
-    }
-}

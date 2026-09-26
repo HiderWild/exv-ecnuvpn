@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! S3/D2 + D7 契约测试：service 模式 PSK-HMAC 双向认证 + owner 断线释放（真实 Named
 //! Pipe，engine service accept-loop ⇄ host service-mode client）。
@@ -14,21 +12,19 @@
 //! 3. **PSK 轮换（M14）**：写 key A 的服务接受 key A；重装写 key B 后，持 key A 的
 //!    client 挑战失败（旧 key 断开即失效）。
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use exv_core::grpc_control::{EngineControlGrpcClient, KernelEngineControl, query_service_self};
+use exv_core::grpc_transport::{dial_control_pipe_with_retry, service_peer_handshake};
+use exv_core::service_status::{RealServiceStatusSource, ServiceState, query_service_status};
 use exv_engine::grpc_server::HelperControlService;
 use exv_engine::grpc_transport::{psk_challenge_server, serve_named_pipe_loop};
-use exv_core::grpc_control::{
-    query_service_self, EngineControlGrpcClient, KernelEngineControl,
-};
-use exv_core::grpc_transport::{
-    dial_control_pipe_with_retry, service_peer_handshake,
-};
-use exv_core::service_status::{query_service_status, RealServiceStatusSource, ServiceState};
 use exv_engine::service::{SERVICE_CONTROL_PIPE, SERVICE_NAME};
-use exv_vpn_win32_ipc::peer_auth::{current_process_identity, current_user_sid, ProcessIdentity, SYSTEM_SID};
+use exv_vpn_win32_ipc::peer_auth::{
+    ProcessIdentity, SYSTEM_SID, current_process_identity, current_user_sid,
+};
 use exv_vpn_win32_ipc::service_key::read_service_psk;
 use exv_vpn_wire::generated::helper_control_server::HelperControlServer;
 
@@ -37,6 +33,8 @@ fn unique_pipe_name(tag: &str) -> String {
 }
 
 /// 引擎 service 侧 accept-loop + PSK 的建连任务（真实管道；`serve_named_pipe_loop`）。
+/// `psk` 仅供 client 侧 `connect_service` 使用；accept-loop 本体（2026-09-05 撤销计划 4.2）
+/// 不再接收 psk——acceptor 每 accept 从 service key 路径现读。
 fn spawn_service_loop(name: &str, sid: &str, psk: [u8; 32]) -> tokio::sync::watch::Sender<bool> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let server = HelperControlServer::new(HelperControlService::new().in_service_mode());
@@ -46,9 +44,18 @@ fn spawn_service_loop(name: &str, sid: &str, psk: [u8; 32]) -> tokio::sync::watc
     let name = name.to_string();
     let sid = sid.to_string();
     tokio::spawn(async move {
-        let _outcome =
-            serve_named_pipe_loop(&name, &sid, psk, server, stop_rx, None, control_plane_ready)
-                .await;
+        // PSK 注入 seam（2026-09-05 撤销改造后 accept 侧每连接现读来源；测试注入
+        // 确定性内存 key——不落盘、不依赖 ProgramData，保留每 accept 现取时序）。
+        let _outcome = exv_engine::grpc_transport::serve_named_pipe_loop_with_psk(
+            &name,
+            &sid,
+            server,
+            stop_rx,
+            None,
+            control_plane_ready,
+            std::sync::Arc::new(move || Ok(psk)),
+        )
+        .await;
     });
     stop_tx
 }
@@ -62,7 +69,10 @@ fn spawn_service_loop_with_report(
     sid: &str,
     psk: [u8; 32],
     psk_present: bool,
-) -> (tokio::sync::watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+) -> (
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let control_plane_ready = Arc::new(AtomicBool::new(true));
     let server = HelperControlServer::new(
@@ -73,9 +83,17 @@ fn spawn_service_loop_with_report(
     let name = name.to_string();
     let sid = sid.to_string();
     let handle = tokio::spawn(async move {
-        let _outcome =
-            serve_named_pipe_loop(&name, &sid, psk, server, stop_rx, None, control_plane_ready)
-                .await;
+        // 同 spawn_service_loop：PSK 注入 seam（每 accept 现取，撤销时序不变）。
+        let _outcome = exv_engine::grpc_transport::serve_named_pipe_loop_with_psk(
+            &name,
+            &sid,
+            server,
+            stop_rx,
+            None,
+            control_plane_ready,
+            std::sync::Arc::new(move || Ok(psk)),
+        )
+        .await;
     });
     (stop_tx, handle)
 }
@@ -89,7 +107,7 @@ async fn psk_challenge_mutual_accept_with_matching_key() {
     let psk = [0x42; 32];
     let identity = current_process_identity().expect("current process identity");
 
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         let mut server = server;
@@ -120,7 +138,7 @@ async fn psk_challenge_rejects_wrong_client_key() {
     let server_psk = [0x11; 32];
     let client_psk = [0x22; 32];
 
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         let mut server = server;
@@ -137,9 +155,10 @@ async fn psk_challenge_rejects_wrong_client_key() {
         "wrong client key → Auth error, got {client_err:?}"
     );
     // server 侧同步失败（读到错误应答 → 拒绝连接）。
-    let server_err = server_task.await.expect("server task joins").expect_err(
-        "server must reject wrong client response",
-    );
+    let server_err = server_task
+        .await
+        .expect("server task joins")
+        .expect_err("server must reject wrong client response");
     assert!(
         server_err.contains("psk challenge"),
         "server rejects challenge, got {server_err}"
@@ -156,7 +175,7 @@ async fn psk_challenge_rejects_wrong_server_key() {
     let server_psk = [0x33; 32];
     let client_psk = [0x44; 32];
 
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         let mut server = server;
@@ -174,9 +193,10 @@ async fn psk_challenge_rejects_wrong_server_key() {
         "wrong server key → Auth error, got {client_err:?}"
     );
     // server 侧：client 的应答（用 client_psk 计算）同样不匹配 → server 也失败。
-    let server_err = server_task.await.expect("server task joins").expect_err(
-        "server must reject client response (both directions fail closed)",
-    );
+    let server_err = server_task
+        .await
+        .expect("server task joins")
+        .expect_err("server must reject client response (both directions fail closed)");
     assert!(
         server_err.contains("psk challenge"),
         "server rejects challenge, got {server_err}"
@@ -279,7 +299,7 @@ async fn service_psk_rotation_invalidates_old_key() {
     let new_psk = [0x72; 32];
 
     // 服务用「新 key」（重装后 engine 重启读入）accept；client 仍持旧 key → 挑战失败。
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         let mut server = server;
@@ -366,14 +386,20 @@ async fn service_psk_rotation_report_reflects_rotated_key_state() {
 
     // 旧 key 在新服务上挑战失败（M14：旧 key 断开即失效）。
     let stale = query_service_self(&name, &sid, &old_psk, Duration::from_secs(2)).await;
-    assert!(stale.is_none(), "轮换后旧 key 必须无法拨号（M14 fail-closed）");
+    assert!(
+        stale.is_none(),
+        "轮换后旧 key 必须无法拨号（M14 fail-closed）"
+    );
 
     // 新 key query → 报告反映轮换后的 key 状态。
     let after = query_service_self(&name, &sid, &new_psk, Duration::from_secs(3))
         .await
         .expect("轮换后新 key 拨号必须成功");
     assert_eq!(after.connection_mode, "service");
-    assert!(after.psk_present, "轮换后 report 反映新 key（psk_present=true）");
+    assert!(
+        after.psk_present,
+        "轮换后 report 反映新 key（psk_present=true）"
+    );
     assert!(after.control_plane_ready, "轮换后控制面就绪");
 
     stop_tx.send(true).expect("stop rotated service");
@@ -450,8 +476,13 @@ async fn real_service_mode_self_report_over_service_control_pipe() {
     // 拨号重试 30×100ms 之外再加外层轮询覆盖真实服务启动）。
     let mut report = None;
     for attempt in 0..20 {
-        let r = query_service_self(SERVICE_CONTROL_PIPE, SYSTEM_SID, &psk, Duration::from_secs(2))
-            .await;
+        let r = query_service_self(
+            SERVICE_CONTROL_PIPE,
+            SYSTEM_SID,
+            &psk,
+            Duration::from_secs(2),
+        )
+        .await;
         if r.is_some() {
             report = r;
             break;
@@ -481,7 +512,7 @@ async fn service_engine_pid_self_report_mismatch_fails_closed() {
         user_sid: sid.clone(),
     };
 
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         let mut server = server;
@@ -516,7 +547,7 @@ async fn service_engine_sid_self_report_mismatch_fails_closed() {
         user_sid: SYSTEM_SID.to_string(),
     };
 
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         let mut server = server;
@@ -545,7 +576,7 @@ async fn service_engine_missing_identity_frame_fails_closed() {
     let sid = current_user_sid().expect("current user sid");
     let psk = [0x83; 32];
 
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         server.connect().await.expect("accept");
@@ -578,7 +609,7 @@ async fn service_engine_self_reports_system_sid_accepted() {
         user_sid: SYSTEM_SID.to_string(),
     };
 
-    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid)
+    let server = exv_engine::grpc_transport::create_control_pipe_server(&name, &sid, true, 1)
         .expect("create control pipe");
     let server_task = tokio::spawn(async move {
         let mut server = server;
@@ -590,7 +621,10 @@ async fn service_engine_self_reports_system_sid_accepted() {
     let peer = service_peer_handshake(&mut client, SYSTEM_SID, &psk)
         .await
         .expect("SYSTEM 自报身份验证通过（免 OpenProcess）");
-    assert_eq!(peer.user_sid, SYSTEM_SID, "自报 SYSTEM SID 被采纳为已验证身份");
+    assert_eq!(
+        peer.user_sid, SYSTEM_SID,
+        "自报 SYSTEM SID 被采纳为已验证身份"
+    );
     assert_eq!(peer.process_id, std::process::id(), "PID 交叉核验通过");
 
     server_task

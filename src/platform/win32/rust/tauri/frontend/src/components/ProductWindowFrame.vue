@@ -29,13 +29,9 @@ const nativeControlState = ref<NativeWindowControlState>({ control: null, presse
 let unsubscribeControlState: (() => void) | null = null;
 let frameUnmounted = false;
 
-async function setMode(nextMode: WindowModePreference): Promise<void> {
-  try {
-    await props.chrome.setMode(nextMode);
-    props.appearance.setMode(nextMode);
-  } catch (error) {
-    console.error("窗口模式切换失败", error);
-  }
+function setMode(nextMode: WindowModePreference): void {
+  // 用户主动切换：提交成功才落盘；失败由 commitMode 回滚并写入 saveError。
+  void props.appearance.commitMode(nextMode, (mode) => props.chrome.setMode(mode));
 }
 
 function setTheme(theme: ThemePreference): void {
@@ -102,7 +98,7 @@ onUnmounted(() => {
           @update:model-value="setTheme"
         />
         <ModeSegmentedControl
-          :model-value="mode"
+          :model-value="props.appearance.state.value.mode"
           :disabled="false"
           :icon-only="mode === 'minimal'"
           @update:model-value="setMode"
@@ -115,6 +111,7 @@ onUnmounted(() => {
         />
       </div>
     </header>
+    <p v-if="props.appearance.saveError.value" role="alert" data-testid="appearance-save-error">{{ props.appearance.saveError.value }}</p>
 
     <div class="product-body">
       <ProductRail
@@ -130,3 +127,7 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+[data-testid="appearance-save-error"] { position: absolute; top: 34px; right: 8px; z-index: 20; max-width: calc(100% - 16px); margin: 0; padding: 8px; background: var(--surface-panel); color: var(--text-primary); }
+</style>

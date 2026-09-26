@@ -15,6 +15,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(exv-setup-rust LANGUAGES CXX RC)
 
+include(CTest)
+
 set(EXV_PRODUCT_VERSION "4.0.0" CACHE STRING "EXV product version baked into the installer registry entry")
 
 set(EXV_RUST_SETUP_PAYLOAD_SOURCES
@@ -76,6 +78,16 @@ set_target_properties(exv-setup PROPERTIES
   OUTPUT_NAME "exv-setup"
 )
 if(MINGW)
+  # 发布安装器沿用旧产品的体积优化；静态运行库仍支持干净宿主。
+  target_compile_options(exv-setup PRIVATE
+    "$<$<CONFIG:Release>:-Os>"
+    "$<$<CONFIG:Release>:-ffunction-sections>"
+    "$<$<CONFIG:Release>:-fdata-sections>"
+  )
+  target_link_options(exv-setup PRIVATE
+    "$<$<CONFIG:Release>:-Wl,--gc-sections>"
+    "$<$<CONFIG:Release>:-Wl,-s>"
+  )
   # Single-file installer runs on clean machines without MinGW runtime DLLs.
   target_link_options(exv-setup PRIVATE
     -municode
@@ -83,6 +95,49 @@ if(MINGW)
     -static-libgcc
     -static-libstdc++
   )
+endif()
+
+if(BUILD_TESTING)
+  add_executable(service_stop_test tests/service_stop_test.cpp)
+  target_include_directories(service_stop_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(service_stop_test PRIVATE advapi32)
+  if(MINGW)
+    target_link_options(service_stop_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME installer_service_stop_budget COMMAND service_stop_test)
+  set_tests_properties(installer_service_stop_budget PROPERTIES TIMEOUT 10)
+  add_executable(setup_cli_options_test p1_setup_regression_test.cpp cli.cpp app_paths.cpp)
+  target_include_directories(setup_cli_options_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(setup_cli_options_test PRIVATE shell32 ole32)
+  if(MINGW)
+    target_link_options(setup_cli_options_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME setup_cli_elevation_context COMMAND setup_cli_options_test)
+  set_tests_properties(setup_cli_elevation_context PROPERTIES TIMEOUT 10)
+  add_executable(install_service_state_test tests/install_service_state_test.cpp progress_model.cpp)
+  target_include_directories(install_service_state_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(install_service_state_test PRIVATE shell32)
+  if(MINGW)
+    target_link_options(install_service_state_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME install_service_state_preservation COMMAND install_service_state_test)
+  set_tests_properties(install_service_state_preservation PROPERTIES TIMEOUT 10)
+  add_executable(uninstall_result_test tests/uninstall_result_test.cpp progress_model.cpp)
+  target_include_directories(uninstall_result_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(uninstall_result_test PRIVATE shell32)
+  if(MINGW)
+    target_link_options(uninstall_result_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME uninstall_result_reporting COMMAND uninstall_result_test)
+  set_tests_properties(uninstall_result_reporting PROPERTIES TIMEOUT 10)
+  add_executable(installer_pipe_test tests/installer_pipe_test.cpp)
+  target_include_directories(installer_pipe_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(installer_pipe_test PRIVATE shell32 advapi32)
+  if(MINGW)
+    target_link_options(installer_pipe_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME installer_pipe_timeout_and_recovery COMMAND installer_pipe_test)
+  set_tests_properties(installer_pipe_timeout_and_recovery PROPERTIES TIMEOUT 10)
 endif()
 
 add_executable(pack_setup_payload

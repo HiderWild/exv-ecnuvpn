@@ -1,14 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W10-T terra: h2 byte-stream over a Windows byte-mode Named Pipe. These tests pin the
-// NamedPipeByteStream API that W10-I implements in exv_vpn_win32_ipc::named_pipe_io.
-// The frozen WSP1 facts (native-pipe-facts.md) are the contract: byte mode carries the
-// h2 preface across partial I/O; message mode is a wrong mutant; control/data are two
-// separate physical pipes.
-//
-// The tests run REAL local Named Pipe I/O (server + client); the client side runs on a
-// std::thread. Deterministic payloads only.
 
 use std::thread;
 use std::time::Duration;
@@ -171,5 +160,3 @@ fn two_pipes_are_independent_physical_connections() {
     assert_eq!(&buf_b[..n_b], b"ping-b", "pipe B must carry only its own payload");
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

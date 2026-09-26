@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! P3-b2 集成测试：host 的 `KernelControl` 写路径 engine 派发 ⇄ 真实 in-process engine
 //! （`exv-engine` 的 `HelperControlService`，P1-b）经真实 Named Pipe。
@@ -70,6 +68,7 @@ fn wire_plan() -> wire::TunnelPlan {
         ipv4_routes: vec![],
         dns_servers: vec![],
         control_bypass: vec![],
+        proxy_exempt: vec![],
         opaque_intent: Some(wire::TunnelIntentRef {
             identity_digest: digest32(0x33),
         }),
@@ -161,6 +160,7 @@ async fn connect_secret_reaches_engine_and_zeroizes_slot() {
         plan: Some(wire_plan()),
         request_digest: digest32(1),
         secret_payload: vec![],
+        windows_connection_mode: wire::WindowsConnectionMode::Standard as i32,
     };
     let reply = client.apply_connect(apply, &mut slot).await.expect("apply accepted");
     // R1w: ApplyTunnel is async — the engine returns the `pending` ApplyAccepted;
@@ -185,6 +185,7 @@ async fn connect_secret_reaches_engine_and_zeroizes_slot() {
         plan: Some(wire_plan()),
         request_digest: digest32(1),
         secret_payload: vec![],
+        windows_connection_mode: wire::WindowsConnectionMode::Standard as i32,
     };
     let err = client
         .apply_connect(bad_apply, &mut bad_slot)
@@ -249,6 +250,7 @@ async fn owner_lease_client_method_establishes_lease_before_apply() {
         plan: Some(wire_plan()),
         request_digest: digest32(1),
         secret_payload: vec![],
+        windows_connection_mode: wire::WindowsConnectionMode::Standard as i32,
     };
     let reply = client
         .apply_connect(apply, &mut slot)
@@ -309,6 +311,7 @@ async fn apply_tunnel_requires_apply_tunnel_method_not_connect() {
         plan: Some(wire_plan()),
         request_digest: digest32(1),
         secret_payload: vec![],
+        windows_connection_mode: wire::WindowsConnectionMode::Standard as i32,
     };
     let err = client
         .apply_connect(wrong_apply, &mut wrong_slot)
@@ -331,6 +334,7 @@ async fn apply_tunnel_requires_apply_tunnel_method_not_connect() {
         plan: Some(wire_plan()),
         request_digest: digest32(1),
         secret_payload: vec![],
+        windows_connection_mode: wire::WindowsConnectionMode::Standard as i32,
     };
     let reply = client
         .apply_connect(good_apply, &mut good_slot)

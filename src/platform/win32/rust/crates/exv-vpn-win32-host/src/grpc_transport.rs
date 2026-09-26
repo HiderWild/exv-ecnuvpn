@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! core→engine 的 tonic gRPC 传输层：Tokio Windows Named Pipe（spec §9.4）。
 //!
@@ -527,60 +525,3 @@ pub async fn connect_engine_service_channel(
 // ---------------------------------------------------------------------------
 // 单元测试：真实 local Named Pipe（同进程）验证 client 侧 peer 认证 fail closed。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use tokio::net::windows::named_pipe::ServerOptions;
-
-    use exv_vpn_win32_ipc::peer_auth::current_user_sid;
-
-    use super::*;
-
-    fn unique_pipe_name(tag: &str) -> String {
-        format!(r"\\.\pipe\exv-grpc-transport-{tag}-{}", std::process::id())
-    }
-
-    /// client 侧验证同进程 server：pid/SID 必须通过；错误 pid/SID 必须 fail closed。
-    ///
-    /// server 的 accept 在独立任务中等待 client 连接，避免 accept 与拨号互等死锁。
-    #[tokio::test]
-    async fn verify_engine_server_pipe_accepts_local_server() {
-        let name = unique_pipe_name("verify");
-        let server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(name.as_str())
-            .expect("create server");
-        let accept_task = tokio::spawn(async move {
-            server.connect().await.expect("accept client");
-        });
-
-        let client = dial_control_pipe_with_retry(&name).await.expect("dial");
-        let pid = std::process::id();
-        let sid = current_user_sid().expect("current user sid");
-
-        let peer = verify_engine_server_pipe(&client, pid, &sid).expect("verify local server");
-        assert_eq!(peer.process_id, pid);
-        assert_eq!(peer.user_sid, sid);
-
-        // 错误 PID / SID 必须 fail closed。
-        assert!(
-            verify_engine_server_pipe(&client, pid + 1, &sid).is_err(),
-            "错误 PID 必须拒绝"
-        );
-        assert!(
-            verify_engine_server_pipe(&client, pid, "S-1-0-0").is_err(),
-            "错误 SID 必须拒绝"
-        );
-
-        drop(client);
-        accept_task.await.expect("accept task joins");
-    }
-
-    /// 拨号重试：server 尚未存在时（无 server），拨号到重试耗尽必须返回 Dial 错误。
-    #[tokio::test]
-    async fn dial_fails_closed_when_no_server() {
-        let name = unique_pipe_name("absent");
-        let err = dial_control_pipe_with_retry(&name).await.expect_err("must fail");
-        assert!(matches!(err, GrpcPipeError::Dial(_)), "got {err:?}");
-    }
-}

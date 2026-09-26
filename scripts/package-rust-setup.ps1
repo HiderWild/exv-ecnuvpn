@@ -1,7 +1,8 @@
+[CmdletBinding()]
 param(
   [string]$Version = '',
   [string]$SetupToolsDir = 'build-setup-rust',
-  [string]$OutDir = 'build\release',
+  [string]$OutDir = '',
   [ValidateSet('lzms', 'store')]
   [string]$Compression = 'lzms',
   [ValidateRange(1, 10)]
@@ -81,41 +82,7 @@ function Assert-ItemIsSafe([IO.FileSystemInfo]$Item, [string]$Label) {
 }
 
 function Assert-NoReparsePoint([string]$Path, [string]$Label) {
-  $rootItem = Get-ExistingItem $Path $Label
-  if ($null -ne $rootItem) {
-    Assert-ItemIsSafe $rootItem $Label
-    if (($rootItem.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
-      $pending = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
-      $pending.Push([IO.DirectoryInfo]$rootItem)
-      while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
-        try {
-          $children = @($directory.GetFileSystemInfos())
-        } catch {
-          throw "$Label contains an inaccessible directory: $($directory.FullName) ($($_.Exception.Message))"
-        }
-        foreach ($child in $children) {
-          Assert-ItemIsSafe $child $Label
-          if (($child.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
-            $pending.Push([IO.DirectoryInfo]$child)
-          }
-        }
-      }
-    }
-  }
-
-  $probe = $Path
-  while ($null -ne $probe -and $probe.Length -gt 0) {
-    $item = Get-ExistingItem $probe $Label
-    if ($null -ne $item) {
-      Assert-ItemIsSafe $item $Label
-    }
-    $parent = Split-Path -Parent $probe
-    if ([string]::IsNullOrEmpty($parent) -or (Test-SamePath $parent $probe)) {
-      break
-    }
-    $probe = $parent
-  }
+  Assert-ExvNoReparsePoint $Path $Label
 }
 
 function Assert-NotTemporaryPath([string]$FullPath, [string]$Label) {
@@ -153,11 +120,38 @@ function Resolve-InRepo([string]$Candidate, [string]$Label) {
   return [string]$full
 }
 
-function Assert-SafeDirectoryTarget([string]$Path, [string]$Label) {
+function Resolve-OutputDirectory([string]$Candidate, [string]$Label) {
+  $full = Get-FullPath $Candidate $Label
+  if (Test-SamePath $full $sharedArtifactRoot) {
+    Assert-NotTemporaryPath $full $Label
+    Assert-NoReparsePoint $full $Label
+    return $full
+  }
+  if (Test-ExvPathWithin $full $sharedArtifactRoot) {
+    throw "$Label must equal the canonical shared artifact root; child paths are not allowed: $full"
+  }
+  return Resolve-InRepo $full $Label
+}
+
+function Resolve-ManagedOutputPath([string]$Candidate, [string]$Label) {
+  $full = Get-FullPath $Candidate $Label
+  if ((Test-SamePath $full $sharedArtifactRoot) -or (Test-ExvPathWithin $full $sharedArtifactRoot)) {
+    Assert-NotTemporaryPath $full $Label
+    Assert-NoReparsePoint $full $Label
+    return $full
+  }
+  return Resolve-InRepo $full $Label
+}
+
+function Assert-SafeDirectoryTarget([string]$Path, [string]$Label, [switch]$AllowCanonicalSharedChild) {
   if (Test-SamePath $Path $repoRoot -or Test-SamePath $Path $mainWorktree) {
     throw "$Label may not be the EXV worktree or root/main worktree: $Path"
   }
-  Resolve-InRepo $Path $Label | Out-Null
+  if ($AllowCanonicalSharedChild) {
+    Resolve-ManagedOutputPath $Path $Label | Out-Null
+  } else {
+    Resolve-OutputDirectory $Path $Label | Out-Null
+  }
 }
 
 function Require-File([string]$Path, [string]$Label) {
@@ -176,6 +170,21 @@ function Get-RequiredInput([string]$Path, [string]$Label) {
     throw "$Label resolved outside the EXV worktree: $resolved"
   }
   return $item
+}
+
+function Resolve-CanonicalRuntimeTrioPath {
+  $testRuntimeTrioDir = [Environment]::GetEnvironmentVariable('EXV_PACKAGE_TEST_RUNTIME_TRIO_DIR')
+  $testMode = [Environment]::GetEnvironmentVariable('EXV_PACKAGE_TEST_MODE')
+  if (-not [string]::IsNullOrWhiteSpace($testRuntimeTrioDir)) {
+    if ($testMode -ne '1') {
+      throw 'EXV_PACKAGE_TEST_RUNTIME_TRIO_DIR is test-only and requires EXV_PACKAGE_TEST_MODE=1'
+    }
+    return Resolve-InRepo $testRuntimeTrioDir 'test runtime trio directory'
+  }
+  if ($testMode -eq '1') {
+    throw 'EXV_PACKAGE_TEST_MODE=1 requires EXV_PACKAGE_TEST_RUNTIME_TRIO_DIR'
+  }
+  return Resolve-InRepo $canonicalRuntimeTrioDir 'runtime trio directory'
 }
 
 function Write-ProtectedPathList([string]$Phase, [string]$PayloadPath, [string]$InstallerPath) {
@@ -223,7 +232,7 @@ function Assert-ContainsMagic([byte[]]$Bytes, [string]$Magic, [string]$Label) {
 }
 
 function Remove-ProtectedDirectory([string]$Path, [string]$Label) {
-  Assert-SafeDirectoryTarget $Path $Label
+  Assert-SafeDirectoryTarget $Path $Label -AllowCanonicalSharedChild
   if (Test-Path -LiteralPath $Path) {
     Write-Host "cleaning protected directory: $Path"
     Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
@@ -237,7 +246,7 @@ function Remove-GeneratedFile([string]$Path, [string]$Label) {
   if ([string]::IsNullOrWhiteSpace($Path)) {
     return
   }
-  $full = Resolve-InRepo $Path $Label
+  $full = Resolve-ManagedOutputPath $Path $Label
   Assert-NotTemporaryPath $full $Label
   $item = Get-ExistingItem $full $Label
   if ($null -ne $item) {
@@ -255,6 +264,7 @@ function Remove-GeneratedFile([string]$Path, [string]$Label) {
 
 $scriptRoot = Get-FullPath $PSScriptRoot 'script directory'
 $repoRoot = Get-FullPath (Split-Path -Parent $scriptRoot) 'EXV worktree root'
+. (Join-Path $PSScriptRoot 'shared-artifact-root.ps1')
 $gitMetadata = Get-ExistingItem (Join-Path $repoRoot '.git') 'Git metadata'
 if ($null -eq $gitMetadata) {
   throw "EXV worktree root is not a Git worktree: $repoRoot"
@@ -287,7 +297,10 @@ if (Test-SamePath $repoRoot $mainWorktree) {
   throw "refusing to package from the root/main worktree: $repoRoot"
 }
 
+$sharedArtifactRoot = Get-ExvSharedArtifactRoot -RepositoryRoot $repoRoot -GitApplication $gitApp
+$OutDir = Get-ExvPackageOutputRoot -RepositoryRoot $repoRoot -RequestedOutputRoot $OutDir -GitApplication $gitApp
 $Version = Resolve-ProductVersion $Version $repoRoot
+$canonicalRuntimeTrioDir = 'build\release-ui-merged\runtime-trio-current'
 
 $setupToolsItem = $null
 $payloadDir = $null
@@ -302,14 +315,18 @@ $nativeFailureCode = $null
 $failureRecord = $null
 
 try {
-  $outDir = Resolve-InRepo $OutDir 'output directory'
+  $outDir = Resolve-OutputDirectory $OutDir 'output directory'
   Assert-SafeDirectoryTarget $outDir 'output directory'
+  $effectiveKeep = Get-ExvEffectiveInstallerRetention `
+    -OutputRoot $outDir `
+    -CanonicalSharedRoot $sharedArtifactRoot `
+    -RequestedKeep $KeepInstallers
   $payloadDir = Get-FullPath (Join-Path $outDir 'rust-payload') 'payload directory'
   $installer = Get-FullPath (Join-Path $outDir "EXV-$Version-windows-x64-setup.exe") 'installer output'
   $installerStage = Get-FullPath (Join-Path $outDir ".EXV-$Version-windows-x64-setup.staging.exe") 'installer staging output'
   $archiveStage = "$installerStage.exvp"
   $installerBackup = Get-FullPath (Join-Path $outDir ".EXV-$Version-windows-x64-setup.previous.exe") 'installer backup'
-  Assert-SafeDirectoryTarget $payloadDir 'payload directory'
+  Assert-SafeDirectoryTarget $payloadDir 'payload directory' -AllowCanonicalSharedChild
   Assert-NotTemporaryPath $installer 'installer output'
   Assert-NotTemporaryPath $installerStage 'installer staging output'
   Assert-NotTemporaryPath $archiveStage 'archive staging output'
@@ -325,33 +342,26 @@ try {
   $stub = Require-File (Join-Path $setupToolsItem.FullName 'exv-setup.exe') 'setup stub'
   $packer = Require-File (Join-Path $setupToolsItem.FullName 'pack_setup_payload.exe') 'payload packer'
 
+  $runtimeTrioPath = Resolve-CanonicalRuntimeTrioPath
+  $runtimeTrioItem = Get-Item -LiteralPath $runtimeTrioPath -Force -ErrorAction SilentlyContinue
+  if ($null -eq $runtimeTrioItem -or ($runtimeTrioItem.Attributes -band [IO.FileAttributes]::Directory) -eq 0) {
+    throw "missing runtime trio directory: $runtimeTrioPath"
+  }
+  Assert-NoReparsePoint $runtimeTrioPath 'runtime trio directory'
+
   $sourceCandidates = [ordered]@{
-    'exv-core.exe' = 'src\platform\win32\rust\target\release\exv-core.exe'
-    'exv-engine.exe' = 'src\platform\win32\rust\target\release\exv-engine.exe'
-    'exv-ui.exe' = 'src\platform\win32\rust\tauri\target\release\exv-ui.exe'
+    'exv-core.exe' = (Join-Path $runtimeTrioPath 'exv-core.exe')
+    'exv-engine.exe' = (Join-Path $runtimeTrioPath 'exv-engine.exe')
+    'exv-ui.exe' = (Join-Path $runtimeTrioPath 'exv-ui.exe')
+    'support\clear-local-user-config.ps1' = 'scripts\clear-local-user-config.ps1'
   }
   $sourceMap = [ordered]@{}
   foreach ($entry in $sourceCandidates.GetEnumerator()) {
     $sourceMap[$entry.Key] = (Get-RequiredInput (Resolve-InRepo $entry.Value "source $($entry.Key)") "source $($entry.Key)")
   }
 
-  $wintunCandidates = @(
-    'runtime\win32-x64\wintun.dll',
-    'wintun.dll',
-    'src\platform\win32\rust\target\release\trio\wintun.dll'
-  )
-  $wintun = $null
-  foreach ($candidate in $wintunCandidates) {
-    $candidatePath = Resolve-InRepo $candidate 'wintun candidate'
-    if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
-      $wintun = Get-RequiredInput $candidatePath 'wintun.dll'
-      Write-Host "wintun-selected=$($wintun.FullName)"
-      break
-    }
-  }
-  if ($null -eq $wintun) {
-    throw ('missing wintun.dll; checked: ' + ($wintunCandidates -join ', '))
-  }
+  $wintun = Get-RequiredInput (Join-Path $runtimeTrioPath 'wintun.dll') 'wintun.dll'
+  Write-Host "wintun-selected=$($wintun.FullName)"
   $sourceMap['wintun.dll'] = $wintun
 
   $sourceHashes = [ordered]@{}
@@ -363,7 +373,7 @@ try {
   Write-Host "EXV Rust setup package worktree: $repoRoot"
   Write-Host "EXV Rust setup version: $Version"
   Write-Host "EXV Rust setup compression: $Compression"
-  Write-Host "EXV Rust setup keep requested: $KeepInstallers effective: $([Math]::Min($KeepInstallers, 2))"
+  Write-Host "EXV Rust setup keep requested: $KeepInstallers effective: $effectiveKeep"
   Write-Host "setup-stub=$($stub.FullName)"
   Write-Host "payload-packer=$($packer.FullName)"
   Write-Host "payload-layout=exv-core.exe,exv-engine.exe,exv-ui.exe,wintun.dll"
@@ -398,6 +408,8 @@ try {
 
   foreach ($entry in $sourceMap.GetEnumerator()) {
     $targetPath = Join-Path $payloadDir $entry.Key
+    $targetParent = Split-Path -Parent $targetPath
+    New-Item -ItemType Directory -Path $targetParent -Force -ErrorAction Stop | Out-Null
     Copy-Item -LiteralPath $entry.Value.FullName -Destination $targetPath -Force -ErrorAction Stop
     $payloadItem = Require-File $targetPath "payload $($entry.Key)"
     if ($payloadItem.Length -ne $entry.Value.Length) {
@@ -439,7 +451,6 @@ try {
   Write-Host ("installer path={0} size={1} sha256={2} mz=verified pe=verified magic=EXVP01" -f
     $installerItem.FullName, $installerItem.Length, $installerHash)
 
-  $effectiveKeep = [Math]::Min($KeepInstallers, 2)
   Assert-NoReparsePoint $outDir 'output directory before retention'
   $allCandidates = @(
     Get-ChildItem -LiteralPath $outDir -Filter 'EXV-*-windows-x64-setup.exe' -File -Force |
@@ -465,8 +476,8 @@ try {
     Get-ChildItem -LiteralPath $outDir -Filter 'EXV-*-windows-x64-setup.exe' -File -Force |
       Sort-Object @{ Expression = 'LastWriteTimeUtc'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
   )
-  if ($retained.Count -gt 2) {
-    throw "installer retention kept more than two files: $($retained.Count)"
+  if ($retained.Count -ne $effectiveKeep) {
+    throw "installer retention expected $effectiveKeep files but kept $($retained.Count)"
   }
   Require-File $installer 'current installer after retention' | Out-Null
   Write-Host "retained installers=$($retained.Count)"

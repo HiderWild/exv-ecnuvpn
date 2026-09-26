@@ -1,22 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! Interface MTU capture / apply / read-back / compare-and-restore (W19).
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md`
-//! §2, WSP4 elevated measurements) are the contract:
-//! - Wintun v4/v6 interface rows start at `NlMtu = 0xFFFF` (Wintun max packet);
-//! - `SetIpInterfaceEntry` rejects the Get-filled IPv4 row (`SitePrefixLength=64`)
-//!   with 87 unless `SitePrefixLength` is forced to 0 before Set (IPv6 rows have
-//!   no such constraint, and are left untouched);
-//! - 1420/1280/576/65535 are writable; 0 is a no-op (rc=0 but the read-back
-//!   keeps the previous value, it does not reset to default); 1 (below the IPv4
-//!   minimum 68) → 87;
-//! - a third-party change is detected by read-back (≠ the value we applied);
-//!   re-Setting the same value is idempotent;
-//! - restore: Set back the original value only when the current value still
-//!   equals the applied value (compare-and-restore). Restoring the old snapshot
-//!   unconditionally would clobber a third-party change (W19 killer mutant).
 
 use windows::Win32::NetworkManagement::IpHelper::{
     GetIpInterfaceEntry, InitializeIpInterfaceEntry, MIB_IPINTERFACE_ROW, SetIpInterfaceEntry,
@@ -248,5 +230,3 @@ fn interface_row(luid: u64, family: MtuFamily) -> Result<MIB_IPINTERFACE_ROW, Na
     Ok(row)
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

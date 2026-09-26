@@ -1,61 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W18-T Terra: 接口 IPv4 地址（CreateUnicastIpAddressEntry / DeleteUnicastIpAddressEntry /
-// GetUnicastIpAddressTable）契约测试。这些测试钉住 W18-I 在 exv_vpn_win32_resource::
-// {ip_address, ip_helper_types} 实现的 seam（src/ip_address.rs、src/ip_helper_types.rs，
-// 当前均为空占位——本文件即 RED）。冻结事实
-// （docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md，
-// WSP4 提权实测）是契约：
-//   - 行身份 = Address + InterfaceLuid（facts §6）；前缀长度在 OnLinkPrefixLength（UINT8）；
-//   - Create 回读精确行：地址、OnLinkPrefixLength=24、PrefixOrigin=1（Manual）、
-//     SuffixOrigin=1（Manual）、DadState=1（Tentative，创建后立即回读未收敛到 Preferred）、
-//     SkipAsSource=false、lifetime 0xffffffff（无限）——W18 不得用 API success 代替 proof；
-//   - 重复 Create 同一地址 -> 5010（ERROR_OBJECT_ALREADY_EXISTS，非 183）——已存在行必须
-//     在 effect 前被 admission 识别，不得重复 Create；
-//   - 非法前缀 33（IPv4 上限 32）-> 87（ERROR_INVALID_PARAMETER）；接口 LUID 不存在 ->
-//     1168（ERROR_NOT_FOUND）；
-//   - compare-and-restore：restore 只删除本 admission owned 的行，且仅当该行仍存在且未被
-//     第三方修改（无条件恢复/按地址-only 删除 = killer mutant，会 clobber 第三方变更或
-//     删除他接口上的同地址行）。
-//
-// W18-I pinned seam（src/ip_address.rs + src/ip_helper_types.rs，W18-I 必须按此实现，
-// 否则 GREEN 编译失败）：
-//   pub struct IpAddressRow { pub address: Ipv4Addr, pub interface_luid: u64,
-//       pub on_link_prefix_length: u8, pub skip_as_source: bool,
-//       pub prefix_origin: u8, pub suffix_origin: u8, pub dad_state: u8,
-//       pub lifetime_infinite: bool }                    // derive(Debug, Clone, PartialEq, Eq)
-//   impl IpAddressRow { pub fn new(address: Ipv4Addr, interface_luid: u64,
-//       on_link_prefix_length: u8) -> Self }             // skip_as_source=false；回读字段由 capture 填充
-//   pub struct IpAddressPlan { pub to_add: Vec<IpAddressRow>,
-//       pub pre_existing: Vec<IpAddressRow> }            // derive(Debug, Clone, PartialEq, Eq)
-//   pub enum ApplyOutcome { Applied, AlreadyExists }     // derive(Debug, Clone, Copy, PartialEq, Eq)
-//   pub struct IpAddressController                       // 包装 interface_luid
-//   impl IpAddressController {
-//     pub fn new(interface_luid: u64) -> IpAddressController
-//     pub fn capture(&self) -> Result<Vec<IpAddressRow>, NativeError>
-//       // GetUnicastIpAddressTable 过滤到本接口（IPv4 行；真实 Get，不得缓存/伪造）
-//     pub fn apply(&self, row: &IpAddressRow) -> Result<ApplyOutcome, NativeError>
-//       // CreateUnicastIpAddressEntry；5010 -> AlreadyExists；87/1168 -> 类型化 Err
-//     pub fn delete(&self, row: &IpAddressRow) -> Result<(), NativeError>
-//       // DeleteUnicastIpAddressEntry 按完整精确行（address + interface_luid）
-//   }
-//   纯逻辑（非提权可测）：
-//   pub fn plan_addresses(captured: &[IpAddressRow], desired: &[IpAddressRow]) -> IpAddressPlan
-//     // admission：desired ∩ captured（同身份 address+luid）-> pre_existing（永不 owned）；
-//     // desired ∖ captured -> to_add（本 admission 将成为 owned）。身份匹配不比较回读字段。
-//   pub fn restore_owned_addresses(applied: &[IpAddressRow], current: &[IpAddressRow])
-//     -> Vec<IpAddressRow>
-//     // compare-delete：applied 的子集——仍存在且 fingerprint（address/luid/prefix/
-//     // skip_as_source）未变的 owned 行；已消失或已被第三方修改的行跳过；pre-existing 永不
-//     // 进入。返回顺序保持 applied 顺序。
-//
-// 提权设计（W17-T/W19-T 同款）：纯逻辑测试（plan 拆分、compare-delete 规划）在非提权宿主
-// 上必须全部通过；真实地址变更测试经 require_admin 门禁（非提权记为
-// [not_run/blocked_by_environment]，不伪造假绿），且只变更测试自建的 scratch Wintun
-// adapter（WSP4 spike 同款：测试网络 10.88.88.0/24，前缀 24；drop 创建者句柄即移除接口，
-// 地址状态随接口消失——panic 路径进程退出同样关闭句柄，无残留）；每个变更测试同时把
-// owned 地址显式删除（所有路径清理）。
 
 use std::ffi::c_void;
 use std::net::Ipv4Addr;
@@ -74,7 +16,7 @@ use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenElevation}
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（PATH DLL 是 W16 mutant；哈希由 WintunLibrary::load 校验）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// 与 WSP3/WSP4 探针一致的 tunnel type。
 const TUNNEL_TYPE: &str = "EXV VPN";
 /// 纯逻辑测试用的任意接口 LUID（纯逻辑不触碰 OS，值任意但固定 -> 确定性）。
@@ -606,5 +548,3 @@ fn invalid_prefix_and_missing_interface_are_typed_errors() {
     drop(adapter);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

@@ -1,23 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! IPv4 unicast address capture / apply / restore controller (W18).
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md`
-//! §1/§6, elevated-verified): row identity = `address + interface_luid`; prefix
-//! length lives in `OnLinkPrefixLength` (UINT8); create reads back exactly
-//! `OnLinkPrefixLength=24`, `PrefixOrigin/SuffixOrigin=1` (Manual),
-//! `DadState=1` (Tentative right after create), `SkipAsSource=false`, lifetime
-//! 0xffffffff; duplicate create -> 5010 (`ERROR_OBJECT_ALREADY_EXISTS`, not
-//! 183); invalid prefix 33 (IPv4 max 32) -> 87 (`ERROR_INVALID_PARAMETER`);
-//! missing interface LUID -> 1168 (`ERROR_NOT_FOUND`).
-//!
-//! Byte order (elevated-verified): `IN_ADDR.S_un.S_addr` is stored in network
-//! byte order in memory; on x86 (LE) write with `from_le_bytes`, read with
-//! `to_le_bytes` — `from_be_bytes` would write 1.88.88.10 for 10.88.88.1.
-//!
-//! Each `unsafe` block carries a reviewed `// SAFETY:` comment (workspace
-//! enforces `unsafe_op_in_unsafe_fn = deny`).
 
 use std::net::Ipv4Addr;
 
@@ -240,5 +221,3 @@ fn ipv4_row_from_mib(row: &MIB_UNICASTIPADDRESS_ROW, interface_luid: u64) -> IpA
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

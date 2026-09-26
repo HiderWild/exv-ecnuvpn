@@ -1,107 +1,9 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W24-T Terra: teardown（WindowsTeardown）契约测试。test names 是
-// docs/superpowers/plans/2026-08-12-vpn-rust-native-runtime-mvp-terra-oracle-plan.md §6.1
-// `W24-T` 行的**完整且精确**集合（Terra 不得改名/增删/合并）；frozen seam 是
-// `WindowsTeardown`（exv-vpn-win32-resource crate 的 teardown 模块）。Win32 子计划
-// §7 `W24-T/I` 行的必测行为：pure cancel、journaled unblock、child join、final handle、
-// reverse compare-restore、proof；生产文件 `teardown.rs,cleanup_proof.rs`；killer
-// mutants：**destructive before journal**、**final handle before join**、**failure signs
-// proof**（以及 join-before-cancel，见 oracle 测试）。
-//
-// 本测试对 seam 追加的契约（W24-I 必须满足，否则 GREEN 编译失败）：
-//   exv_vpn_win32_resource::teardown::TeardownStage
-//     { PureCancel, JournaledUnblock, ChildJoin, ReverseRestore, FinalHandle, Proof }
-//     （Debug/Clone/Copy/PartialEq/Eq）——架构 §6.2 的六类步骤
-//   teardown::TeardownPlan {
-//       pub stages: Vec<TeardownStage>,
-//       pub restore_steps: Vec<FamilyStep>,   // apply_tunnel 类型（组合，不重新实现）
-//   }（Debug/Clone/PartialEq/Eq）
-//   teardown::build_teardown_plan(apply: &ApplyPlan, has_packet_children: bool) -> TeardownPlan
-//     —— 纯逻辑：stages 恒为 [PureCancel] + （有 child 时 [JournaledUnblock, ChildJoin]）
-//        + [ReverseRestore, FinalHandle, Proof]（ChildJoin 严格先于 FinalHandle）；
-//       restore_steps == apply_tunnel::build_restore_plan(apply)（逆族序组合，绝不重新实现）
-//   teardown::TeardownError { DestructiveBeforeJournal, StageOutOfOrder, ProofUnavailable }
-//     （Debug/Clone/Copy/PartialEq/Eq）
-//   teardown::WindowsTeardown（frozen seam）
-//     WindowsTeardown::new(aggregate: Option<Aggregate>, saga: RetirementSaga,
-//       plan: TeardownPlan, children: Vec<PacketWorker>) -> Self
-//       —— 组合 W22（Aggregate/apply_tunnel）+ J53（RetirementSaga）+ W17（PacketWorker）；
-//         纯状态机构造（非提权可测）；None aggregate = 无实状态（no-op teardown）
-//     WindowsTeardown::pure_cancel(&mut self) -> Result<(), TeardownError>
-//       —— 纯 cancel/wakeup：不写 journal、不改变资源所有权、**不是** cleanup completion
-//         （spec §6.2 step 2）；不得在此 join child（join 是后续 stage）
-//     WindowsTeardown::begin(&mut self, retirement_operation_id: RetirementOperationId,
-//       trigger: CleanupTrigger, origin_subject: ErrorSubject,
-//       prior_platform_ownership: PlatformOwnershipRef,
-//       canonical_inventory_digest: InventoryDigest) -> Result<(), TeardownError>
-//       —— journaled start（saga.begin，expected obligations = 9 项 canonical 的判别值，
-//         u8 cast——与 cleanup_proof::verify_cleanup_proof 同一映射）；幂等：第二次调用
-//         合并到同一 saga 并返回 Ok（spec §6.1：相同 Stop 幂等、不同 Stop 合并，不创建
-//         第二次 destructive cleanup）；必须位于 pure_cancel 之后（cancel 先于 journal
-//         记录，spec §5.6）
-//     WindowsTeardown::unblock_native_read(&mut self) -> Result<(), TeardownError>
-//       —— journaled unblock（spec §6.2 step 4/5）：未 begin -> DestructiveBeforeJournal
-//     WindowsTeardown::join_children(&mut self) -> Result<(), TeardownError>
-//       —— 依赖 child join（spec §6.2 step 4：先发取消信号、RetirementStarted 后 join）
-//     WindowsTeardown::restore_owned_resources(&mut self) -> Result<(), TeardownError>
-//       —— 逆族序 compare-and-restore（委托 apply_tunnel::restore，不重新实现）
-//     WindowsTeardown::drop_final_handle(&mut self) -> Result<(), TeardownError>
-//       —— aggregate/final handle 销毁：session 先 EndSession、adapter 后 close（W17
-//         语义）；必须位于全部 child join 之后（越序 -> StageOutOfOrder）
-//     WindowsTeardown::aggregate(&self) -> Option<&Aggregate>
-//       —— final handle 前可读（测试在 restore 后、drop 前 capture 验证逆序恢复）
-//     WindowsTeardown::is_complete(&self) -> bool   // 全部 stage（含 proof）完成
-//     WindowsTeardown::cleanup_proof(&mut self, input: ProveCleanInput,
-//       predicates: &[CleanupPredicate]) -> Result<CleanupProof, TeardownError>
-//       —— 未完成或任何 stage 曾失败 -> Err(ProofUnavailable)（failure signs proof =
-//         mutant）；成功路径委托 cleanup_proof::verify_cleanup_proof
-//     —— 错误优先级：journaled 步骤未 begin -> DestructiveBeforeJournal（先于越序检查）；
-//       已 begin 但越序 -> StageOutOfOrder。Drop 契约：children 先 join、aggregate 后
-//       销毁（W17 SAFETY-ORDER），panic 早退自清理、无残留。
-//   exv_vpn_win32_resource::cleanup_proof::CleanupPredicate {
-//       pub item: InventoryItem, pub verified: bool, pub evidence: &'static str }
-//     （Debug/Clone/PartialEq/Eq）
-//   cleanup_proof::CleanupProof {
-//       pub clean: CleanProof,               // exv_vpn_domain::ports（J53 组合）
-//       pub inventory_digest: InventoryDigest,
-//       pub predicates: Vec<CleanupPredicate> }
-//     （Debug/Clone/PartialEq/Eq）
-//   cleanup_proof::verify_cleanup_proof(inventory: &[InventoryItem],
-//     predicates: &[CleanupPredicate], canonical_inventory_digest: InventoryDigest,
-//     saga: &mut RetirementSaga, input: ProveCleanInput)
-//     -> Result<CleanupProof, &'static str>
-//     —— 纯逻辑：inventory 必须 is_complete（9 项 canonical）；predicates 必须逐项覆盖
-//        inventory 且各自 verified（缺项/未验证/未知项 -> Err）；随后
-//        saga.observe_cleanup + prove_clean 成功才签发（J53 组合；失败不签发 =
-//        'failure signs proof' mutant 反例）
-//
-// 冻结事实继承（native-wintun-facts.md §2 / native-network-settings-facts.md）：
-//   - 0.14.1 的 WintunEndSession 销毁 session 对象：child worker 必须**先 join 再
-//     EndSession**，否则 receive 是 UAF（实测 ntdll AV）；
-//   - 创建者 WintunCloseAdapter 即移除 adapter（无独立 delete export），adapter 移除
-//     级联清除其全部 address/MTU/route/DNS；
-//   - EndSession 关闭 session 拥有的 read-wait event：结束后 WaitForSingleObject 返回
-//     WAIT_FAILED（0xFFFFFFFF）——真实 child 可观测的"会话已终止"谓词；
-//   - 清理必须是 compare-and-restore：当前状态 != applied 指纹（第三方修改）时 typed
-//     跳过，绝不无条件覆盖；
-//   - cleanup 按安装顺序**逆序**：最后应用的族先恢复，隧道路由先于 bypass 删除。
-//
-// 纯逻辑测试（阶段顺序、计划构建、proof 门禁、幂等、no-op）任何宿主都必须通过。真实
-// teardown（scratch adapter/session + apply 全族 + 真实 read-blocked child worker）需要
-// admin；非 elevated 宿主短路为 `not_run / blocked_by_environment`（明确输出，不伪造
-// 假绿）。所有真实测试自清理：WindowsTeardown 的 Drop（children 先 join、aggregate 后
-// drop）在 panic 早退时同样执行；teardown 结束后独立验证 Get-NetAdapter /
-// Get-NetIPAddress / netsh 无残留（W16 冻结事实：创建者 close 移除 adapter 及其全部
-// 配置），并断言 child 从未观察到 WAIT_FAILED（final handle before join mutant 的
-// native 化身）。
 
 use std::ffi::c_void;
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use exv_vpn_domain::error::ErrorSubject;
@@ -119,33 +21,33 @@ use exv_vpn_domain::ports::{
 use exv_vpn_resource::retirement::{ProveCleanInput, RetirementSaga};
 use exv_vpn_win32_resource::aggregate::Aggregate;
 use exv_vpn_win32_resource::apply_tunnel::{
-    apply, build_apply_plan, build_restore_plan, ApplyPlan, FamilyStep,
+    ApplyPlan, FamilyStep, apply, build_apply_plan, build_restore_plan,
 };
-use exv_vpn_win32_resource::cleanup_proof::{verify_cleanup_proof, CleanupPredicate, CleanupProof};
+use exv_vpn_win32_resource::cleanup_proof::{CleanupPredicate, CleanupProof, verify_cleanup_proof};
 use exv_vpn_win32_resource::dns::DnsApplier;
 use exv_vpn_win32_resource::dns_types::DnsSettings;
-use exv_vpn_win32_resource::inventory::{is_complete, InventoryItem, COMPLETE_INVENTORY};
+use exv_vpn_win32_resource::inventory::{COMPLETE_INVENTORY, InventoryItem, is_complete};
 use exv_vpn_win32_resource::ip_helper_types::IpAddressRow;
 use exv_vpn_win32_resource::mtu::{MtuController, MtuFamily, MtuSnapshot};
 use exv_vpn_win32_resource::packet_worker::PacketWorker;
 use exv_vpn_win32_resource::routes::RouteRow;
 use exv_vpn_win32_resource::teardown::{
-    build_teardown_plan, TeardownError, TeardownStage, WindowsTeardown,
+    TeardownError, TeardownStage, WindowsTeardown, build_teardown_plan,
 };
 use exv_vpn_win32_resource::wintun_adapter::{AdapterOpen, WintunAdapter};
 use exv_vpn_win32_resource::wintun_api::WintunLibrary;
 use exv_vpn_win32_resource::wintun_session::WintunSession;
 
 use uuid::Uuid;
-use windows::core::GUID;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
 use windows::Win32::NetworkManagement::IpHelper::ConvertInterfaceLuidToGuid;
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, WaitForSingleObject};
+use windows::core::GUID;
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（WSP3/WSP4 冻结路径；PATH DLL 是 mutant）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// WintunCreateAdapter 的 TunnelType 参数（WSP4 冻结值）。
 const TUNNEL_TYPE: &str = "EXV VPN";
 /// Wintun ring capacity 官方下限（wintun.h：min 0x20000；W17-T 同款）。
@@ -296,6 +198,8 @@ fn empty_apply_plan() -> ApplyPlan {
         Vec::new(),
         Vec::new(),
         DnsSettings::new(Vec::new(), Vec::new()),
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     )
 }
 
@@ -323,6 +227,8 @@ fn full_apply_plan() -> ApplyPlan {
         vec![bypass],
         vec![t1, t2],
         DnsSettings::new(vec![DNS_SERVER.to_string()], vec![DNS_SEARCH.to_string()]),
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     )
 }
 
@@ -381,7 +287,9 @@ fn is_elevated() -> bool {
         elevated = u32::from_ne_bytes(buff[0..4].try_into().unwrap_or([0u8; 4])) != 0;
     }
     // SAFETY: token 是本进程新打开句柄，使用后关闭。
-    unsafe { let _ = CloseHandle(token); }
+    unsafe {
+        let _ = CloseHandle(token);
+    }
     elevated
 }
 
@@ -412,7 +320,10 @@ fn load_frozen() -> WintunLibrary {
 
 /// 创建真实 adapter（创建者 owned；drop 即移除 adapter——W16 事实）。
 fn create_named_adapter(lib: &WintunLibrary, name: &str) -> WintunAdapter {
-    let (adapter, opened) = expect_ok(WintunAdapter::create(lib, name, TUNNEL_TYPE), "create adapter");
+    let (adapter, opened) = expect_ok(
+        WintunAdapter::create(lib, name, TUNNEL_TYPE),
+        "create adapter",
+    );
     assert!(
         matches!(opened, AdapterOpen::Created),
         "create 必须返回 AdapterOpen::Created"
@@ -442,11 +353,7 @@ fn luid_to_guid(luid: u64) -> Option<GUID> {
 /// 带 watchdog 的子进程调用：超时后 kill 子进程并返回 None（WSP3 spike 同款；
 /// 本机实测 netsh 在 Wintun 接口上可能无限阻塞，必须 watchdog）。
 /// 返回 (退出成功, stdout+stderr 文本)。
-fn run_cmd_checked(
-    program: &str,
-    args: &[String],
-    timeout: Duration,
-) -> Option<(bool, String)> {
+fn run_cmd_checked(program: &str, args: &[String], timeout: Duration) -> Option<(bool, String)> {
     use std::io::Read;
     let mut child = std::process::Command::new(program)
         .args(args)
@@ -546,10 +453,7 @@ fn no_scratch_residue(lib: &WintunLibrary, name: &str) {
 #[test]
 fn pure_cancel_is_not_cleanup_completion() {
     let mut td = new_teardown(&empty_apply_plan(), Vec::new());
-    assert!(
-        !td.is_complete(),
-        "teardown 尚未开始不得 complete"
-    );
+    assert!(!td.is_complete(), "teardown 尚未开始不得 complete");
 
     td.pure_cancel()
         .expect("pure cancel 必须成功（不写 journal、不改变资源所有权）");
@@ -558,7 +462,8 @@ fn pure_cancel_is_not_cleanup_completion() {
         "pure cancel 不是 cleanup completion——cancel 后 teardown 不得 complete"
     );
     assert!(
-        td.cleanup_proof(prove_input(), &complete_predicates()).is_err(),
+        td.cleanup_proof(prove_input(), &complete_predicates())
+            .is_err(),
         "cancel 后未完成 teardown 不得签发 proof（pure cancel 不是完成）"
     );
 
@@ -575,10 +480,7 @@ fn pure_cancel_is_not_cleanup_completion() {
         .expect("无 applied 状态时 restore 必须幂等 no-op");
     td.drop_final_handle()
         .expect("无 aggregate 时 final handle 必须幂等 no-op");
-    assert!(
-        !td.is_complete(),
-        "proof 签发前不得 complete"
-    );
+    assert!(!td.is_complete(), "proof 签发前不得 complete");
 
     let proof = td
         .cleanup_proof(prove_input(), &complete_predicates())
@@ -601,7 +503,10 @@ fn pure_cancel_is_not_cleanup_completion() {
 #[test]
 fn session_end_is_journaled_before_unblocking_native_read() {
     let counter = Arc::new(AtomicU64::new(0));
-    let mut td = new_teardown(&empty_apply_plan(), vec![counting_worker(Arc::clone(&counter))]);
+    let mut td = new_teardown(
+        &empty_apply_plan(),
+        vec![counting_worker(Arc::clone(&counter))],
+    );
     td.pure_cancel().expect("pure cancel 不需 journal");
 
     let err = expect_teardown_err(
@@ -705,7 +610,10 @@ fn all_packet_children_join_before_final_handle_drop() {
 
     // ---- 运行时（纯逻辑 + 真实 PacketWorker 线程） ----
     let counter = Arc::new(AtomicU64::new(0));
-    let mut td = new_teardown(&empty_apply_plan(), vec![counting_worker(Arc::clone(&counter))]);
+    let mut td = new_teardown(
+        &empty_apply_plan(),
+        vec![counting_worker(Arc::clone(&counter))],
+    );
     td.pure_cancel().expect("pure cancel");
     td.begin(
         retirement_id(1),
@@ -717,10 +625,7 @@ fn all_packet_children_join_before_final_handle_drop() {
     .expect("journaled begin");
 
     // final handle 先于 child join -> StageOutOfOrder（mutant 反例）。
-    let err = expect_teardown_err(
-        td.drop_final_handle(),
-        "join 之前的 final handle 销毁",
-    );
+    let err = expect_teardown_err(td.drop_final_handle(), "join 之前的 final handle 销毁");
     assert!(
         matches!(err, TeardownError::StageOutOfOrder),
         "join 前的 final handle 必须 StageOutOfOrder, got {err:?}"
@@ -824,6 +729,8 @@ fn owned_resources_clean_in_reverse_compare_restore_order() {
         Vec::new(),
         vec![tunnel.clone()],
         dns.clone(),
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     );
     expect_ok(apply(&mut agg, &plan), "aggregate apply 全族配置");
     let applied = expect_ok(agg.capture(), "apply 后 capture");
@@ -880,7 +787,9 @@ fn owned_resources_clean_in_reverse_compare_restore_order() {
 
     // restore 后、final handle 前：接口仍存活，capture 必须回到原始快照。
     let restored = expect_ok(
-        td.aggregate().expect("final handle 前 aggregate 必须存活").capture(),
+        td.aggregate()
+            .expect("final handle 前 aggregate 必须存活")
+            .capture(),
         "restore 后 capture",
     );
     assert_eq!(
@@ -889,7 +798,8 @@ fn owned_resources_clean_in_reverse_compare_restore_order() {
          隧道路由无残留）"
     );
 
-    td.drop_final_handle().expect("final handle（children 已 join）");
+    td.drop_final_handle()
+        .expect("final handle（children 已 join）");
     assert!(
         td.aggregate().is_none(),
         "final handle 后 aggregate 必须已销毁"
@@ -938,6 +848,8 @@ fn third_party_changes_survive_cleanup() {
         Vec::new(),
         vec![tunnel.clone()],
         dns.clone(),
+        Vec::new(),
+        "S-1-5-21-test".to_string(),
     );
     expect_ok(apply(&mut agg, &plan), "aggregate apply 全族配置");
 
@@ -991,7 +903,9 @@ fn third_party_changes_survive_cleanup() {
     // 第三方修改必须存活：MTU 保持 1400、DNS 保持 10.88.88.54（compare-and-restore
     // typed 跳过——无条件恢复旧快照 = mutant）；own 隧道路由与 owned 地址被清。
     let after = expect_ok(
-        td.aggregate().expect("final handle 前 aggregate 必须存活").capture(),
+        td.aggregate()
+            .expect("final handle 前 aggregate 必须存活")
+            .capture(),
         "teardown restore 后 capture",
     );
     assert_eq!(
@@ -1011,12 +925,12 @@ fn third_party_changes_survive_cleanup() {
         "own 隧道路由必须已清理（逆序 restore 只清 owned）"
     );
     assert_eq!(
-        after.address_rows,
-        original.address_rows,
+        after.address_rows, original.address_rows,
         "own 地址必须已删除（第三方未触碰的行指纹不变 -> compare-delete）"
     );
 
-    td.drop_final_handle().expect("final handle（children 已 join）");
+    td.drop_final_handle()
+        .expect("final handle（children 已 join）");
     assert!(
         !saw_wait_failed.load(Ordering::Relaxed),
         "child 不得在 EndSession 前未 join（final handle before join mutant）"
@@ -1082,7 +996,8 @@ fn proof_requires_complete_inventory() {
     )
     .expect("journaled begin");
     assert!(
-        td.cleanup_proof(prove_input(), &complete_predicates()).is_err(),
+        td.cleanup_proof(prove_input(), &complete_predicates())
+            .is_err(),
         "teardown 未完成不得签发 proof"
     );
     td.restore_owned_resources().expect("restore");
@@ -1132,8 +1047,12 @@ fn proof_requires_complete_inventory() {
 fn oracle_kills_prejournal_destroy_or_false_proof_mutant() {
     // ---- (a) pre-journal destroy ----
     let counter = Arc::new(AtomicU64::new(0));
-    let mut td = new_teardown(&empty_apply_plan(), vec![counting_worker(Arc::clone(&counter))]);
-    td.pure_cancel().expect("pure cancel 不需 journal（cancel 先于 journal）");
+    let mut td = new_teardown(
+        &empty_apply_plan(),
+        vec![counting_worker(Arc::clone(&counter))],
+    );
+    td.pure_cancel()
+        .expect("pure cancel 不需 journal（cancel 先于 journal）");
     for (r, label) in [
         (td.unblock_native_read(), "pre-journal unblock"),
         (td.join_children(), "pre-journal join"),
@@ -1161,7 +1080,8 @@ fn oracle_kills_prejournal_destroy_or_false_proof_mutant() {
     td.restore_owned_resources().expect("restore");
     td.drop_final_handle().expect("final handle");
     assert!(
-        td.cleanup_proof(prove_input(), &complete_predicates()).is_err(),
+        td.cleanup_proof(prove_input(), &complete_predicates())
+            .is_err(),
         "曾失败的 teardown 不得签发 proof——即使剩余步骤全部完成（failure signs proof mutant）"
     );
 
@@ -1226,5 +1146,3 @@ fn oracle_kills_prejournal_destroy_or_false_proof_mutant() {
     );
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

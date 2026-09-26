@@ -1,15 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! DNS settings domain types + applied-state fingerprint + compare-and-restore
-//! planning (W21). Pure logic only — no Win32 calls here.
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md`
-//! WSP4 §4): the interface DNS state is a GUID-keyed set of nameservers and
-//! search suffixes; the Wintun read-back is an **exact, order-preserving list**
-//! (排序指纹会掩盖第三方重排); and compare-and-restore must compare the current
-//! state against the **applied** fingerprint before restoring the original
-//! snapshot — an unconditional restore would clobber third-party changes.
 
 use sha2::{Digest, Sha256};
 
@@ -93,5 +82,3 @@ impl RestoreDecision {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

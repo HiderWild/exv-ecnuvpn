@@ -10,7 +10,7 @@
 // H00 D3 bounded multi-effect batch). They must be killable by:
 //   - D11-M1  reducer does not clear the queued connect on Stop            -> tests 11, 12
 //   - D11-M2  promotion races actor-order / promotes before Stop           -> tests 12, 13
-//   - D11-M3  reducer reaches Connected without all five proofs            -> test 7
+//   - D11-M3  reducer reaches Connected without all three refs             -> test 7
 //
 // No assertion depends on the exact EffectId values (those come from `ReducerInputs`).
 
@@ -24,9 +24,8 @@ use exv_vpn_domain::identity::{
 };
 use exv_vpn_domain::model::{
     Attempt, CleanupProofRef, ConnectIntent, ConnectPhase, ConnectedSession, ConnectionProfileRef,
-    DataRunningProof, InteractionPrompt, PacketLeaseRef, PlatformOwnershipRef, PlatformReadyProof,
-    PromptDeadline, ProtocolSessionRef, RecoveryContext, RecoveryObligation, RuntimeState,
-    StopIntent,
+    InteractionPrompt, PacketLeaseRef, PlatformOwnershipRef, PromptDeadline, ProtocolSessionRef,
+    RecoveryContext, RecoveryObligation, RuntimeState, StopIntent,
 };
 use exv_vpn_domain::ports::MonotonicTick;
 use exv_vpn_domain::reducer::{
@@ -71,7 +70,6 @@ fn make_attempt(intent: ConnectIntent) -> Attempt {
         RuntimeEpoch::try_from(Uuid::new_v4()).unwrap(),
         AttemptId::try_from(Uuid::new_v4()).unwrap(),
         intent,
-        None, // prior_error
     )
 }
 
@@ -114,8 +112,8 @@ fn make_obligation(ctx: &RecoveryContext) -> RecoveryObligation {
     )
 }
 
-// A ConnectedSession carries all five proofs: protocol_session, platform_ownership, packet_lease,
-// platform_ready, data_running. The D11-I constructor requires all five arguments.
+// A ConnectedSession carries three refs: protocol_session, platform_ownership, packet_lease.
+// The D11-I constructor requires all three arguments.
 fn connected_session(intent: ConnectIntent) -> ConnectedSession {
     let attempt = make_attempt(intent);
     let protocol_session =
@@ -129,26 +127,7 @@ fn connected_session(intent: ConnectIntent) -> ConnectedSession {
     .unwrap();
     let packet_lease =
         PacketLeaseRef::try_from(ResourceIdentityDigest::try_from([0xDD; 32]).unwrap()).unwrap();
-    let platform_ready = PlatformReadyProof::try_from((
-        platform_ownership.clone(),
-        EvidenceDigest::try_from([0xEE; 32]).unwrap(),
-    ))
-    .unwrap();
-    let data_running = DataRunningProof::try_from((
-        protocol_session.clone(),
-        platform_ownership.clone(),
-        packet_lease.clone(),
-        EvidenceDigest::try_from([0xFF; 32]).unwrap(),
-    ))
-    .unwrap();
-    ConnectedSession::new(
-        attempt,
-        protocol_session,
-        platform_ownership,
-        packet_lease,
-        platform_ready,
-        data_running,
-    )
+    ConnectedSession::new(attempt, protocol_session, platform_ownership, packet_lease)
 }
 
 fn inputs() -> ReducerInputs {
@@ -344,7 +323,7 @@ fn awaiting_interaction_stop_revokes_prompt() {
     let epoch = RuntimeEpoch::try_from(Uuid::new_v4()).unwrap();
     let attempt_id = AttemptId::try_from(Uuid::new_v4()).unwrap();
     let intent = make_intent(make_key(OperationMethod::Connect), make_digest(0x11));
-    let attempt = Attempt::new(epoch.clone(), attempt_id.clone(), intent, None);
+    let attempt = Attempt::new(epoch.clone(), attempt_id.clone(), intent);
     let interaction_id = InteractionId::try_from(Uuid::new_v4()).unwrap();
     let deadline = PromptDeadline::try_from((
         MonotonicTick::try_from(500u64).unwrap(),
@@ -376,12 +355,11 @@ fn awaiting_interaction_stop_revokes_prompt() {
 // ---------------------------------------------------------------------------
 #[test]
 fn connected_requires_all_five_proofs() {
-    // A ConnectedSession is only constructible with all five proofs (protocol_session,
-    // platform_ownership, packet_lease, platform_ready, data_running); the D11-I constructor
-    // requires all five arguments. The reducer must treat a Connected state as carrying that
-    // complete proof set and preserve it exactly across an idempotent Connect. This kills
-    // D11-M3: a reducer that reached Connected without all five proofs would not hold the
-    // canonical full session.
+    // A ConnectedSession is only constructible with all three refs (protocol_session,
+    // platform_ownership, packet_lease); the D11-I constructor requires all three arguments.
+    // The reducer must treat a Connected state as carrying that complete ref set and preserve it
+    // exactly across an idempotent Connect. This kills D11-M3: a reducer that reached Connected
+    // without all three refs would not hold the canonical full session.
     let key = make_key(OperationMethod::Connect);
     let req = make_digest(0x11);
     let intent = make_intent(key.clone(), req.clone());

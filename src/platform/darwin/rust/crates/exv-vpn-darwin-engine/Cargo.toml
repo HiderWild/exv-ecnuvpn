@@ -1,0 +1,33 @@
+[package]
+name = "exv-vpn-darwin-engine"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+exv-vpn-darwin-ipc = { path = "../exv-vpn-darwin-ipc" }
+# WebVPN 登录、TLS bootstrap 与 CSTP session 直接复用 Common；Darwin 只补宿主网络实现。
+exv-vpn-cstp = { path = "../../../../../common/rust/crates/exv-vpn-cstp" }
+exv-vpn-wire = { path = "../../../../../common/rust/crates/exv-vpn-wire" }
+async-trait = "0.1"
+libc = "0.2"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "transport"] }
+zeroize = "1.9"
+getrandom = "0.4"
+
+[[bin]]
+name = "exv-vpn-darwin-engine"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+serde_json = "1.0.151"

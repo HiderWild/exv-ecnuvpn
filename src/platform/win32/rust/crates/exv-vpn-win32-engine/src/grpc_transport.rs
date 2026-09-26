@@ -1,43 +1,25 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P1-b: the engine-side gRPC transport over a mutually-authenticated Tokio Windows
-// Named Pipe (spec §9.4; TG-WIN "Named Pipe mutual auth"). This module is the
-// transport-layer interception gate for the HelperControl product channel:
-//
-//   * [`serve_named_pipe`] creates the pipe with the WSP1 §4 DACL (SYSTEM + the
-//     core user SID, via `pipe_security::PipeSecurity`), accepts one core
-//     connection, authenticates the core peer (client pid + user SID) BEFORE any
-//     gRPC frame is dispatched, and only then serves the HelperControl service.
-//     Any identity query failure fails closed and the connection is refused.
-//   * [`require_verified_peer`] is the dispatch-time interceptor: every request
-//     must carry the transport-verified peer extension ([`NamedPipeConnectInfo`],
-//     attached via the tonic `Connected` hook); without it the call is rejected
-//     with `UNAUTHENTICATED`. Handlers additionally fail closed when the
-//     extension is absent — dispatch only ever happens for verified connections.
-//
-// The client side (core) mirrors this in `exv_core::grpc_transport`
-// (P1-c): tokio `NamedPipeClient` + `GetNamedPipeServerProcessId`+SID verification.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use exv_vpn_domain::identity::{ConnectionBindingDigest, PrincipalDigest};
 use exv_vpn_win32_ipc::peer_auth::{
-    current_process_identity, current_user_sid, process_sid, encode_identity_frame, ProcessIdentity,
+    ProcessIdentity, current_process_identity, current_user_sid, encode_identity_frame, process_sid,
 };
 use exv_vpn_win32_ipc::pipe_security::PipeSecurity;
-use exv_vpn_win32_ipc::service_key::{ct_eq, hmac_sha256, random_32};
+use exv_vpn_win32_ipc::service_key::{
+    ct_eq, fingerprint, hmac_sha256, random_32, read_service_psk,
+};
 use exv_vpn_wire::generated;
 use generated::helper_control_server::HelperControlServer;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tonic::Status;
 use tonic::codegen::tokio_stream;
 use tonic::transport::Server;
-use tonic::Status;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
 
@@ -173,7 +155,12 @@ pub fn create_control_pipe_server(
     // the live descriptor owned by `security`; both stay alive for the duration of this call
     // (same scope). tokio forwards the pointer verbatim as `CreateNamedPipeW`'s
     // `lpSecurityAttributes`, which copies the DACL at creation.
-    unsafe { options.create_with_security_attributes_raw(name, &raw mut attributes as *mut core::ffi::c_void) }
+    unsafe {
+        options.create_with_security_attributes_raw(
+            name,
+            &raw mut attributes as *mut core::ffi::c_void,
+        )
+    }
 }
 
 /// Verify the connected core (client) peer: its pid must equal `expected_host_pid` and its
@@ -204,7 +191,8 @@ pub fn verify_core_peer(
             "core pid mismatch: expected {expected_host_pid}, observed {pid}"
         ));
     }
-    let sid = process_sid(pid).ok_or_else(|| format!("cannot resolve user SID of core pid {pid}"))?;
+    let sid =
+        process_sid(pid).ok_or_else(|| format!("cannot resolve user SID of core pid {pid}"))?;
     if sid != expected_core_sid {
         return Err(format!(
             "core SID mismatch: expected {expected_core_sid}, observed {sid}"
@@ -215,10 +203,9 @@ pub fn verify_core_peer(
     let nonce = uuid::Uuid::new_v4();
     let principal = PrincipalDigest::try_from(digest32(format!("sid:{sid}").as_bytes()))
         .expect("principal digest mints");
-    let connection_digest = ConnectionBindingDigest::try_from(digest32(
-        format!("conn:{pid}:{nonce}").as_bytes(),
-    ))
-    .expect("connection digest mints");
+    let connection_digest =
+        ConnectionBindingDigest::try_from(digest32(format!("conn:{pid}:{nonce}").as_bytes()))
+            .expect("connection digest mints");
 
     Ok(TransportPeerInfo {
         verified: true,
@@ -247,12 +234,13 @@ pub fn verify_service_peer(
     let mut pid = 0u32;
     // SAFETY: `server.as_raw_handle()` is the connected server pipe handle and `pid` is a
     // live out-param for the call.
-    if let Err(e) = unsafe {
-        GetNamedPipeClientProcessId(HANDLE(server.as_raw_handle()), &raw mut pid)
-    } {
+    if let Err(e) =
+        unsafe { GetNamedPipeClientProcessId(HANDLE(server.as_raw_handle()), &raw mut pid) }
+    {
         return Err(format!("core process query failed: {e}"));
     }
-    let sid = process_sid(pid).ok_or_else(|| format!("cannot resolve user SID of core pid {pid}"))?;
+    let sid =
+        process_sid(pid).ok_or_else(|| format!("cannot resolve user SID of core pid {pid}"))?;
     if sid != expected_core_sid {
         return Err(format!(
             "core SID mismatch: expected {expected_core_sid}, observed {sid}"
@@ -263,10 +251,9 @@ pub fn verify_service_peer(
     let nonce = uuid::Uuid::new_v4();
     let principal = PrincipalDigest::try_from(digest32(format!("sid:{sid}").as_bytes()))
         .expect("principal digest mints");
-    let connection_digest = ConnectionBindingDigest::try_from(digest32(
-        format!("conn:{pid}:{nonce}").as_bytes(),
-    ))
-    .expect("connection digest mints");
+    let connection_digest =
+        ConnectionBindingDigest::try_from(digest32(format!("conn:{pid}:{nonce}").as_bytes()))
+            .expect("connection digest mints");
 
     Ok(TransportPeerInfo {
         verified: true,
@@ -278,26 +265,6 @@ pub fn verify_service_peer(
     })
 }
 
-/// 服务模式 pre-gRPC 握手（server 侧，D2 + S6 自报身份）：在 SID 验证（`verify_service_peer`）
-/// 之后、任何 gRPC 帧派发之前，经裸帧先自报身份、再证明客户端持有共享 PSK。
-///
-/// 协议：
-/// 0. server → client：**自报身份帧**（PID u32 LE + sid_len u16 LE + SID UTF-8）——
-///    engine 自报自身进程 PID + user SID（S6 方案；标准用户 core 无法 `OpenProcess`
-///    SYSTEM 会话 0 服务进程读 SID，S5 真机实测 err=5，改由 engine 免特权自报）；
-/// 1. server → client：`nonce_e`（32 字节随机）；
-/// 2. client → server：`HMAC(psk, nonce_e || "c2e")`（32 字节）+ `nonce_s`（32 字节）；
-/// 3. server 恒时验证应答 → server → client：`HMAC(psk, nonce_s || "e2c")`（32 字节）。
-///
-/// 双向：server 验证 client 的应答（client 证明持有 PSK），client 验证 server 的应答
-/// （server 证明持有 PSK，防伪 server / 中间人）+ 自报身份（PID 交叉核验 + SID 比对）。
-/// 任何失败 → `Err`（调用方 fail closed 拒绝该连接）。落点选 pre-gRPC 裸帧挑战——免
-/// helper_control.proto 第三次解冻（理由见
-/// `docs/superpowers/evidence/2026-08-20-engine-service-psk-hmac.md`；身份帧决策见
-/// `docs/superpowers/evidence/2026-08-20-engine-self-identity.md`）。
-///
-/// # Errors
-/// 随机数 / 读 / 写 / 应答不匹配 → 携带原因的字符串（连接拒绝）。
 pub async fn psk_challenge_server(
     pipe: &mut NamedPipeServer,
     psk: &[u8],
@@ -420,7 +387,9 @@ pub struct ControlPlaneReady {
 impl ControlPlaneReady {
     #[must_use]
     pub fn new(sender: tokio::sync::oneshot::Sender<Result<(), String>>) -> Self {
-        Self { sender: Some(sender) }
+        Self {
+            sender: Some(sender),
+        }
     }
 
     /// 报告控制管道已经创建；重复报告或接收端已关闭均失败。
@@ -503,8 +472,6 @@ pub struct ServiceAcceptor {
     name: String,
     /// 授权 core 用户 SID（安装用户；管道 DACL + 每次 accept 的 peer 验证）。
     core_sid: String,
-    /// service 模式 PSK（安装时生成；engine 启动读入）。缺文件 → 启动失败（fail closed）。
-    psk: [u8; 32],
     /// engine 自身身份（PID + SID，自进程 token 读取免特权）——pre-gRPC 握手时自报。
     identity: ProcessIdentity,
     /// tonic HelperControl server（`HelperControlServer` 经 Arc 封装，Clone 共享同一服务）。
@@ -518,18 +485,34 @@ pub struct ServiceAcceptor {
     /// 是否已创建管道名的首实例（`FILE_FLAG_FIRST_PIPE_INSTANCE`）。首个连接用
     /// first=true；其后用 first=false 创建多实例——连接存活时旧实例被占不影响新 accept。
     first_instance_created: bool,
+    /// PSK 来源（**每 accept 调用**——撤销即轮换的语义不变：生产缺省 = 现读
+    /// `service_key_path()` 文件、不缓存 last-known-good；测试注入确定性内存 key，
+    /// 不落盘也不依赖 ProgramData 环境）。
+    psk_source: PskSource,
 }
 
+/// service accept 的 PSK 来源 seam（每 accept 调用一次）。
+///
+/// 生产缺省 = `read_service_psk`（现读文件，2026-09-05 撤销计划 4.2 的语义载体）；
+/// 测试经 [`ServiceAcceptor::with_psk_source`] / [`serve_named_pipe_loop_with_psk`]
+/// 注入确定性来源——**保留每 accept 现读的调用时序**（撤销语义测的是「来源在下一
+/// 次 accept 重取」，不是「来源必须是文件」）。
+pub type PskSource = std::sync::Arc<dyn Fn() -> Result<[u8; 32], String> + Send + Sync>;
+
 impl ServiceAcceptor {
-    /// 用稳定管道名 + 授权 SID + PSK + 自报身份 + tonic server 构造。
+    /// 用稳定管道名 + 授权 SID + 自报身份 + tonic server 构造。
     ///
     /// `identity` 是 engine 自身身份（`serve_named_pipe_loop` 经 `current_process_identity`
     /// 解析；SYSTEM 服务进程自报 `S-1-5-18`，标准用户 core 据此免特权验证）。
+    ///
+    /// 2026-09-05 撤销计划（4.2）：acceptor **不持有 PSK**——每次 accept 在挑战前从
+    /// `service_key_path()` 现读（撤销即轮换，下一次 accept 即生效）；**禁止缓存
+    /// last-known-good**（缓存会放大泄露副本的有效期，违背撤销语义）。启动 fail-closed
+    /// 校验由调用方（`run_engine` Service 分支）保留。
     #[must_use]
     pub fn new(
         name: String,
         core_sid: String,
-        psk: [u8; 32],
         identity: ProcessIdentity,
         service: HelperControlServer<HelperControlService>,
         ready: Option<ControlPlaneReady>,
@@ -538,13 +521,21 @@ impl ServiceAcceptor {
         Self {
             name,
             core_sid,
-            psk,
             identity,
             service,
             ready,
             control_plane_ready,
             first_instance_created: false,
+            psk_source: std::sync::Arc::new(read_service_psk),
         }
+    }
+
+    /// 注入 PSK 来源 seam（测试用）：每个 accept 经该来源现取 key——保留「每 accept
+    /// 现读」的撤销时序；生产路径不调用（缺省读文件）。
+    #[must_use]
+    pub fn with_psk_source(mut self, source: PskSource) -> Self {
+        self.psk_source = source;
+        self
     }
 }
 
@@ -608,8 +599,31 @@ impl AcceptServe for ServiceAcceptor {
         // D2 + S6：PSK-HMAC 双向挑战（service 模式主认证；SID 之上的第二层），握手首帧
         // 携带 engine 自报身份（PID + SID）。挑战/身份失败 → fail closed 拒绝该连接
         // （单次连接失败不拖垮常驻服务）。
+        //
+        // 2026-09-05 撤销计划（4.2）：**每 accept 现读 PSK**——撤销（轮换/覆盖写）自
+        // 下一次连接起生效，合法 core 每次连接现读文件对轮换透明。读失败（缺失/非
+        // 32 字节/IO 错误，含瞬时 AV 扫描锁文件/CREATE_ALWAYS 截断窗）→ fail closed
+        // 拒绝该连接（Warn 只含错误类别，无秘密），accept-loop 继续——**不用旧 key
+        // 兜底、不缓存 last-known-good**；瞬时失败的代价由 host bootstrap retry 的
+        // 既有有界重试下一拍重读收敛（自觉接受，不为微竞窗引入锁文件/缓存对冲）。
         let mut server = server;
-        if let Err(e) = psk_challenge_server(&mut server, &self.psk, &self.identity).await {
+        let psk = match (self.psk_source)() {
+            Ok(psk) => psk,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "service accept rejected: service key unreadable (fail closed, no last-known-good)"
+                );
+                return Ok(true); // 独立 verify：拒绝该连接，继续 accept。
+            }
+        };
+        // 4.4 审计：每次 accept 记所用 key 的 fingerprint（SHA-256 前 8 字节 hex，
+        // 非秘密）——与批量/host 轮换侧可关联；日志红线：禁 PSK 原文/HMAC。
+        tracing::info!(
+            fingerprint = %fingerprint(&psk),
+            "service.key.accept-fingerprint"
+        );
+        if let Err(e) = psk_challenge_server(&mut server, &psk, &self.identity).await {
             tracing::warn!(error = %e, "service accept rejected psk challenge");
             return Ok(true);
         }
@@ -634,19 +648,44 @@ impl AcceptServe for ServiceAcceptor {
 /// 服务模式便捷入口：连续 accept + 独立 verify + PSK 挑战 + 独立 owner 流，直至 SCM
 /// stop 或服务端关闭。ServiceMain 仅做薄壳——把 SCM 停止信号接进 `stop_rx` 后调用。
 ///
-/// `psk` 是服务模式共享秘密（安装时生成，engine 启动读入）；PSK 缺失 → 服务启动失败
-/// （fail closed，D2——服务无 PSK 即拒绝一切连接）。
+/// 2026-09-05 撤销计划（4.2）：PSK **不再经参数传入**——acceptor 每 accept 现读
+/// `service_key_path()`（撤销即轮换，下一次 accept 生效；禁 last-known-good）。
+/// **启动 fail-closed 校验由调用方保留**（`run_engine` Service 分支：PSK 缺失 → 服务
+/// 启动失败，D2——服务无 PSK 即拒绝一切连接；该读取不再向 acceptor 传值）。
 ///
 /// `control_plane_ready` 是与 [`HelperControlService`] 共享的 `Arc<AtomicBool>`
 /// （S3/Tier 2）：`ServiceAcceptor` 建管 + `report_ready` 成功后置 true，`query` 读同一事实。
 pub async fn serve_named_pipe_loop(
     name: &str,
     core_sid: &str,
-    psk: [u8; 32],
+    service: HelperControlServer<HelperControlService>,
+    stop_rx: tokio::sync::watch::Receiver<bool>,
+    ready: Option<ControlPlaneReady>,
+    control_plane_ready: Arc<AtomicBool>,
+) -> AcceptLoopOutcome {
+    serve_named_pipe_loop_with_psk(
+        name,
+        core_sid,
+        service,
+        stop_rx,
+        ready,
+        control_plane_ready,
+        std::sync::Arc::new(read_service_psk),
+    )
+    .await
+}
+
+/// [`serve_named_pipe_loop`] 的 PSK 来源注入变体（测试 seam）：每个 accept 经
+/// `psk_source` 现取 key（撤销时序不变）；生产经 [`serve_named_pipe_loop`] 走
+/// 读文件缺省。
+pub async fn serve_named_pipe_loop_with_psk(
+    name: &str,
+    core_sid: &str,
     service: HelperControlServer<HelperControlService>,
     stop_rx: tokio::sync::watch::Receiver<bool>,
     mut ready: Option<ControlPlaneReady>,
     control_plane_ready: Arc<AtomicBool>,
+    psk_source: PskSource,
 ) -> AcceptLoopOutcome {
     // S6：engine 自报身份（PID + SID）——自进程 token 读取免特权；解析失败 → 启动失败
     // fail closed（服务无自报身份即拒绝一切连接）。
@@ -671,12 +710,12 @@ pub async fn serve_named_pipe_loop(
     let acceptor = ServiceAcceptor::new(
         name.to_string(),
         core_sid.to_string(),
-        psk,
         identity,
         service,
         ready,
         control_plane_ready,
-    );
+    )
+    .with_psk_source(psk_source);
     accept_loop(acceptor, stop_rx).await
 }
 
@@ -697,167 +736,3 @@ pub fn engine_default_core_sid() -> Result<String, String> {
 // （未授权用户连接必须被拒 = 5，授权用户可连）——对旧实现失败（garbage DACL 会让本机
 // 用户连上或创建失败），对修复后实现通过。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    use exv_vpn_win32_ipc::named_pipe_io::{NamedPipeByteStream, PipeIoError};
-    use exv_vpn_win32_ipc::peer_auth::current_user_sid;
-    use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
-
-    use super::*;
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    fn unique_pipe(tag: &str) -> String {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!(r"\\.\pipe\exv-ctrl-dacl-{tag}-{}-{n}", std::process::id())
-    }
-
-    /// DACL 授权 core 用户 SID 时，当前用户（非提权 token 亦可）能连上控制面管道。
-    #[tokio::test]
-    async fn control_pipe_dacl_allows_current_user_connect() {
-        let sid = current_user_sid().expect("current user sid");
-        let name = unique_pipe("allow");
-        let server = create_control_pipe_server(&name, &sid, true, 1).expect("create control pipe");
-        let client =
-            NamedPipeByteStream::connect_client(&name).expect("current user must connect");
-        server.connect().await.expect("server accept");
-        drop(client);
-    }
-
-    /// DACL 未授权当前用户（只授 SYSTEM + 伪造域 SID）时，客户端连接必须被拒
-    /// （ERROR_ACCESS_DENIED = 5）——证明 `create_control_pipe_server` 确实把
-    /// `SECURITY_ATTRIBUTES`（含 DACL）交到了 `CreateNamedPipeW`。旧实现（传
-    /// `PSECURITY_DESCRIPTOR`，DACL garbage）下本测试会失败。
-    #[tokio::test]
-    async fn control_pipe_dacl_denies_unlisted_user() {
-        // 当前用户不可能持有的伪造域 SID；DACL = SYSTEM + 该 SID，普通客户端在
-        // CreateFileW 阶段即被 ACL 拒绝。
-        let bogus = "S-1-5-21-1000000000-1000000000-1000000000-1001";
-        let name = unique_pipe("deny");
-        let server = create_control_pipe_server(&name, bogus, true, 1).expect("create control pipe");
-        let err = NamedPipeByteStream::connect_client(&name)
-            .expect_err("unlisted user must be denied by the DACL");
-        assert_eq!(
-            err,
-            PipeIoError::Io(ERROR_ACCESS_DENIED.0),
-            "unlisted user connect must fail with ERROR_ACCESS_DENIED (5)"
-        );
-        drop(server);
-    }
-
-    // -------------------------------------------------------------------------
-    // 服务 accept-loop（S2）：注入 fake [`AcceptServe`] 验证循环控制流——
-    // 连续 accept / SCM stop / 服务端关闭 / 失败传播。真实管道 accept+verify+serve
-    // 由真机集成覆盖（tests/service_lifecycle.rs，env 门控）。
-    // -------------------------------------------------------------------------
-
-    /// 记录型 fake acceptor：可配置连续 N 次后服务端关闭、或第 1 次即失败。
-    ///
-    /// 注：每次 serve 前 `sleep(1ms)` 模拟真实 [`ServiceAcceptor`] 阻塞于 accept 的
-    /// 行为——当前线程 tokio runtime 下，完全立即返回的 busy-loop 会饿死计时器驱动
-    /// （SCM stop 信号测试将永不触发）。
-    struct FakeAcceptor {
-        served: u32,
-        stop_after: Option<u32>,
-        fail_with: Option<String>,
-    }
-
-    impl AcceptServe for FakeAcceptor {
-        async fn serve_one(&mut self) -> Result<bool, String> {
-            if let Some(fail) = &self.fail_with {
-                return Err(fail.clone());
-            }
-            // 模拟真实 accept 阻塞（真实 acceptor await pipe connect，让出驱动）。
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            self.served += 1;
-            if let Some(n) = self.stop_after
-                && self.served >= n
-            {
-                return Ok(false);
-            }
-            Ok(true)
-        }
-    }
-
-    /// 连续 accept：服务端每次 serve_one 返回继续 → 循环持续推进，直到服务端关闭。
-    #[tokio::test]
-    async fn accept_loop_continues_until_server_closed() {
-        let acceptor = FakeAcceptor {
-            served: 0,
-            stop_after: Some(3),
-            fail_with: None,
-        };
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let outcome = accept_loop(acceptor, rx).await;
-        assert_eq!(
-            outcome,
-            AcceptLoopOutcome::ServerClosed,
-            "服务端关闭（Ok(false)）必须结束循环"
-        );
-    }
-
-    /// SCM stop：循环运行中 stop 信号置位 → [`AcceptLoopOutcome::Stopped`]（SCM stop →
-    /// 退出清理路径的入口触发）。
-    #[tokio::test]
-    async fn accept_loop_stops_on_scm_stop_signal() {
-        let acceptor = FakeAcceptor {
-            served: 0,
-            stop_after: None,
-            fail_with: None,
-        };
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let handle = tokio::spawn(accept_loop(acceptor, rx));
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        tx.send(true).expect("stop signal send");
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            handle,
-        )
-        .await
-        .expect("loop within timeout")
-        .expect("task ok");
-        assert_eq!(
-            outcome,
-            AcceptLoopOutcome::Stopped,
-            "SCM stop 信号必须结束 accept-loop（退出清理入口）"
-        );
-    }
-
-    /// 停止信号发送端 drop → 视同停止（防 busy-loop：无停止信号可再等）。
-    #[tokio::test]
-    async fn accept_loop_treats_sender_drop_as_stop() {
-        let acceptor = FakeAcceptor {
-            served: 0,
-            stop_after: None,
-            fail_with: None,
-        };
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        drop(tx); // 发送端终结：无后续信号，循环必须退出而非空转。
-        let outcome = accept_loop(acceptor, rx).await;
-        assert_eq!(
-            outcome,
-            AcceptLoopOutcome::Stopped,
-            "停止信号发送端 drop 必须视同停止（防 busy-loop）"
-        );
-    }
-
-    /// 失败传播：serve_one 返回 Err → [`AcceptLoopOutcome::Failed`]（携带原因）。
-    #[tokio::test]
-    async fn accept_loop_propagates_serve_failure() {
-        let acceptor = FakeAcceptor {
-            served: 0,
-            stop_after: None,
-            fail_with: Some("boom".to_string()),
-        };
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let outcome = accept_loop(acceptor, rx).await;
-        assert_eq!(
-            outcome,
-            AcceptLoopOutcome::Failed("boom".to_string()),
-            "serve_one 失败必须传播"
-        );
-    }
-}

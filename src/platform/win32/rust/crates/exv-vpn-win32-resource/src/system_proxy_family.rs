@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! 系统代理 family 的纯逻辑层（设计 §5.3 接入 apply/restore 家族；TK1a 拆小前半）。
 //!
@@ -12,10 +10,16 @@
 //! - [`decide`]：快照 + 期望豁免条目 → family 动作（Disabled 零动作零账本，
 //!   对齐拍板结论 4；Manual/Mixed 合并写入；Automatic typed skip）；
 //! - [`SystemProxyFamilyStep`]：apply 成功前经 `journal_store::append_synced`
-//!   落盘的步骤记录，手写字节编解码对齐 journal 的 `payload: Vec<u8>` 惯例；
-//! - [`compute_restore`]：teardown / crash recovery 统一的 compare-and-restore
-//!   还原语义——当前值指纹 == 我们写入的指纹才精确还原（存在 → 字节级写回；
-//!   原不存在 → 删除该值），第三方中途改动是 typed skip，绝不强写（设计 §5.3）。
+//!   落盘的步骤记录（payload v0x03 自带写入后指纹），手写字节编解码对齐
+//!   journal 的 `payload: Vec<u8>` 惯例；
+//! - [`compute_restore`]：teardown 的两态 compare-and-restore 还原语义——当前值
+//!   指纹 == 我们写入的指纹才精确还原（存在 → 字节级写回；原不存在 → 删除该值），
+//!   第三方中途改动是 typed skip，绝不强写（设计 §5.3）；
+//! - [`decide_replay`]：崩溃回放的三态裁决（§4.3 冻结）——比较序先 `written` 后
+//!   `prestate`：当前等于写入态且写入态异于 prestate → [`ReplayDecision::Restore`]；
+//!   当前等于 prestate（含退化全等，冻结返回 AlreadyClean）→
+//!   [`ReplayDecision::AlreadyClean`]；其余（含用户手工修改）→
+//!   [`ReplayDecision::SkipForfeit`]（弃权清除，绝不强写）。
 //!
 //! Win32 写入、广播刷新与 journal 落盘本身由后续 engine 接线任务组合本层结果完成。
 
@@ -64,11 +68,19 @@ pub struct SystemProxyFamilyStep {
     pub originating_sid: String,
     /// 连接瞬间是否检测到 PAC / WPAD（v1 仅记账，供 engine 侧后续接线观察）。
     pub pac_detected: bool,
+    /// 写入后五值指纹（还原 compare 的基准；payload v0x03 起随记录落盘）。
+    ///
+    /// 显式存储的原因：Manual 的写入态可由 prestate+desired 确定性重算，但 PAC 的
+    /// 写入态含动态端口（`http://127.0.0.1:<port>/proxy.pac`）不可重算；统一显式
+    /// 存储，两种模式同一裁决路径（§4.1）。
+    pub written_fingerprint: Vec<u8>,
 }
 
 /// payload 格式版本（不兼容变更时递增；旧版本拒绝解码，不猜）。
 // 0x02: Other 变体由「仅类型码」改为「type + 数据字节」（字节级还原契约）。
-const PAYLOAD_VERSION: u8 = 0x02;
+// 0x03: 尾部追加 written_fingerprint（PAC 动态端口写入态入账；v0x02 从未在生产
+//       落盘——engine 记账接线此前不存在，故无兼容负担）。
+const PAYLOAD_VERSION: u8 = 0x03;
 
 /// [`RawValue`] 编码标记：不存在。
 const TAG_ABSENT: u8 = 0;
@@ -94,20 +106,10 @@ impl SystemProxyFamilyStep {
         proxy_enabled && (has_endpoint || has_pac)
     }
 
-    /// 写入后指纹的字节视图（journal 记录不直接携带——由 engine 接线把
-    /// [`crate::system_proxy_family_exec::SystemProxyApplyOutcome`] 的指纹与
-    /// 本记录一并落盘；此处提供 prestate 指纹作为「未写入」缺省基准）。
-    /// 完整语义：`written_fingerprint == fingerprint(prestate)` 表示写入未生效，
-    /// 还原为幂等 no-op。
-    #[must_use]
-    pub fn written_fingerprint_bytes(&self) -> Vec<u8> {
-        crate::system_proxy_family_exec::fingerprint_prestate(&self.prestate)
-    }
-
     /// 序列化为 journal record payload（确定性字节布局，小端）：
     /// `version(1) | sid(len+bytes) | pac_detected(1) | desired(count + entries)
     /// | 五个 RawValue（固定顺序 ProxyEnable/ProxyServer/ProxyOverride/
-    /// AutoConfigURL/AutoDetect，各为 tag+data）`。
+    /// AutoConfigURL/AutoDetect，各为 tag+data）| written_fp(len+bytes)`。
     #[must_use]
     pub fn to_payload(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -130,6 +132,8 @@ impl SystemProxyFamilyStep {
         ] {
             push_raw_value(&mut buf, value);
         }
+        // v0x03 尾部追加：写入后指纹（还原 compare 基准）。
+        push_len_bytes(&mut buf, &self.written_fingerprint);
         buf
     }
 
@@ -172,6 +176,8 @@ impl SystemProxyFamilyStep {
         let proxy_override = reader.read_raw_value()?;
         let auto_config_url = reader.read_raw_value()?;
         let auto_detect = reader.read_raw_value()?;
+        // v0x03 尾部：写入后指纹。
+        let written_fingerprint = reader.read_len_bytes()?.to_vec();
         if reader.pos != reader.bytes.len() {
             return Err(invalid_payload("payload 存在尾部冗余字节"));
         }
@@ -186,6 +192,7 @@ impl SystemProxyFamilyStep {
             desired_entries,
             originating_sid,
             pac_detected: pac_byte == 1,
+            written_fingerprint,
         })
     }
 }
@@ -333,6 +340,50 @@ pub fn compute_restore(
     }
 }
 
+/// 崩溃回放三态裁决结果（§4.3 冻结；engine 启动回放与 apply 内联回放共用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDecision {
+    /// 当前注册表仍处于我们写入的写入态 → 执行 `compute_restore` 精确还原 + 广播。
+    /// 条件（比较序先 written 后 prestate）：`current_fp == written_fp` 且
+    /// `written_fp != prestate_fp`。
+    Restore,
+    /// 注册表已等于 prestate（效果从未落地或已被精确还原）→ 无写入，只清账。
+    /// 含退化全等 `current==written==prestate`（零效果写入不可能记账；防御性
+    /// 冻结其返回值为 AlreadyClean——还原将是零效果冗余写 + 广播）。
+    AlreadyClean,
+    /// 其余（含用户中途手工修改）→ 绝不强写，记 restore_failures 日志后弃权清除
+    /// （指纹不符即不再拥有，保留记录只会永久空转）。
+    SkipForfeit,
+}
+
+/// 崩溃回放三态裁决（纯函数，全函数可判定；§4.3 真值表冻结）。
+///
+/// 输入：`prestate_fp`/`written_fp`（均来自账本记录）、`current_fp`（回放时重读
+/// 五值的指纹）。比较序**先 `written` 后 `prestate`**：
+///
+/// 1. `current == written` 且 `written != prestate` → [`ReplayDecision::Restore`]；
+/// 2. `current == prestate`（含退化 `current == written == prestate`）→
+///    [`ReplayDecision::AlreadyClean`]；
+/// 3. 其余 → [`ReplayDecision::SkipForfeit`]。
+#[must_use]
+pub fn decide_replay(
+    prestate_fp: &[u8],
+    written_fp: &[u8],
+    current_fp: &[u8],
+) -> ReplayDecision {
+    if current_fp == written_fp {
+        if written_fp != prestate_fp {
+            return ReplayDecision::Restore;
+        }
+        // 退化全等：注册表已等于 prestate，还原是零效果冗余写——冻结 AlreadyClean。
+        return ReplayDecision::AlreadyClean;
+    }
+    if current_fp == prestate_fp {
+        return ReplayDecision::AlreadyClean;
+    }
+    ReplayDecision::SkipForfeit
+}
+
 /// family 自洽性 typed 错误（kind 走既有 Storage 分类；code 用保留高位标记）。
 fn family_malformed(message: &str) -> NativeError {
     NativeError {
@@ -461,3 +512,8 @@ impl Reader<'_> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 单测：payload v0x03 编解码底座 + 三态裁决真值表（§5.1 测试 1-4；本文件此前
+// 零测试——编解码与裁决自本批起有覆盖）。零 Win32 依赖，纯字节级断言。
+// ---------------------------------------------------------------------------

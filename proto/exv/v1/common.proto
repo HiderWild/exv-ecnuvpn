@@ -1,59 +1,3 @@
-// EXV_CUTOVER (2026-08-17): Rust is the active product line; C++ is deprecated, reference only.
-// Cutover record: docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md; re-wiring requires a new cutover requirement and a rerun of the real business flow on the native host - satisfied by the 2026-08-17 cutover.
-//
-// This file is the canonical shared wire authority for the exv.vpn.v1 namespace.
-// It mirrors the exv-vpn-domain types in
-//   src/common/rust/crates/exv-vpn-domain/src/{identity,error,model,ports}.rs
-// Domain code never exposes generated types directly; the strict converter
-// enforces exact byte lengths for every identity/digest field and rejects any
-// enum that decodes to its UNSPECIFIED=0 sentinel.
-//
-// Field tags are permanently assigned and never reused. Reserved ranges:
-//   reserved 9000 to 9999  : internal / future use, never shipped
-//   reserved 1000 to 1999  : burn-in guard for each message
-// A tag that is vacated is recorded as a reserved range in this file before
-// any reuse is ever permitted; reuse is forbidden by policy.
-//
-// EXV_FROZEN_WIRE (2026-08-20): the RuntimeSnapshot service/mode domain is
-// UNFROZEN by the S3 common runtime-snapshot unfreeze record
-// (docs/superpowers/evidence/2026-08-20-common-runtime-snapshot-unfreeze-service-mode.md)
-// for the service-awareness fields only:
-//   * new message ServiceStatus;
-//   * RuntimeSnapshot gains `service_status` (tag 12) and `mode` (tag 13).
-// R3 then UNFROZEN ServiceStatus.health_state (tag 4) under
-// (docs/superpowers/evidence/2026-08-20-common-runtime-snapshot-unfreeze-health-state.md):
-//   * ServiceStatus gains `health_state` (tag 4), the unified service health
-//     enum ("healthy" | "scm_orphan" | "installed_unavailable" |
-//     "payload_orphan" | "not_installed") from the R3 unified health model.
-// Tag discipline is unchanged: reserved 1000-1999 (burn-in guard) and 9000-9999
-// (internal/future) hold; all new tags sit outside those ranges. Any further
-// unfreeze requires a new unfreeze record under the same governance process.
-//
-// EXV_UNFREEZE 2026-08-24: system proxy awareness, see
-// docs/superpowers/evidence/2026-08-24-system-proxy-wire-unfreeze.md
-// (design: docs/superpowers/plans/2026-08-24-system-proxy-awareness-design.md
-// §5.4/§5.5) for the following fields only:
-//   * new message SystemProxyDetection;
-//   * TunnelPlan gains `proxy_exempt` (tag 8): system-proxy exemption entries,
-//     decoupled from routing; the engine derives desired_bypass_entries from
-//     the plan;
-//   * RuntimeSnapshot gains `system_proxy` (tag 14): detect-and-report status
-//     only, no behavior decision in v1.
-// Tag discipline is unchanged: reserved 1000-1999 (burn-in guard) and 9000-9999
-// (internal/future) hold; all new tags sit outside those ranges.
-//
-// Security invariants carried by these types:
-//   * identitys and digests are opaque bytes whose exact length is enforced by
-//     the strict converter (16 bytes for UUID-backed ids, 32 bytes for digests,
-//     4 bytes for IPv4 addresses).
-//   * ErrorSubject is the single canonical causal attribution for every
-//     cross-process VpnError. It has exactly six branches; a missing/unknown
-//     oneof, an empty or malformed identity, a legacy bare operation id field,
-//     or any extra legacy branch is rejected before it reaches the domain.
-//   * Secrets travel only as one-shot bytes and are never persisted,
-//     logged, or replayed; only digests are retained for correlation.
-//   * No field self-reports platform identity; peer identity is derived
-//     exclusively from verified transport metadata, never from a client field.
 
 syntax = "proto3";
 
@@ -101,6 +45,8 @@ enum ErrorCode {
   ERROR_CODE_DEADLINE_EXCEEDED = 16;
   ERROR_CODE_ACTIVE_ATTEMPT_CANNOT_RECONCILE = 17;
   ERROR_CODE_ACTIVE_SESSION_CANNOT_RECONCILE = 18;
+  // 平台依赖不可用；宿主通过 native 字段提供可操作的修复提示。
+  ERROR_CODE_PLATFORM_DEPENDENCY_UNAVAILABLE = 19;
 }
 
 // Mirrors domain ErrorStage.
@@ -369,11 +315,6 @@ message TunnelPlan {
   repeated bytes dns_servers = 5;       // each 4 bytes
   repeated bytes control_bypass = 6;    // each 4 bytes
   TunnelIntentRef opaque_intent = 7;
-  // EXV_UNFREEZE 2026-08-24: system proxy awareness, see docs/superpowers/evidence/2026-08-24-system-proxy-wire-unfreeze.md
-  // System-proxy exemption entries (IP or CIDR/wildcard strings), decoupled
-  // from routing (`ipv4_routes` / `control_bypass`): an exemption declares
-  // "which targets must not go through the system proxy", it is NOT an L3
-  // route. The engine derives its desired_bypass_entries from this plan field.
   repeated string proxy_exempt = 8;
   reserved 9000 to 9999;
 }
@@ -560,15 +501,6 @@ message ProxyTunDetection {
   reserved 9000 to 9999;
 }
 
-// System-proxy detect-and-report status (EXV_UNFREEZE 2026-08-24: system proxy
-// awareness, see docs/superpowers/evidence/2026-08-24-system-proxy-wire-unfreeze.md;
-// design §5.5). Carried by `RuntimeSnapshot.system_proxy` next to `proxy_tun`.
-// Status only — no behavior decision in v1. Classification is a pure function
-// of (proxy_present, tunnel_present); self-inconsistency fails closed upstream
-// and never reaches the wire.
-//
-// Security: carries counts and short enum-like strings only — no endpoint URLs,
-// no registry values, no secrets (same invariants as RuntimeStats / LogEvent).
 message SystemProxyDetection {
   string mode = 1;            // "disabled" | "manual" | "automatic" | "mixed"
   uint32 endpoint_count = 2;  // number of detected system-proxy endpoints
@@ -577,24 +509,20 @@ message SystemProxyDetection {
   reserved 9000 to 9999;
 }
 
-// Auto-reconnect status (EXV_UNFREEZE 2026-08-25, see
-// docs/superpowers/evidence/2026-08-25-reconnect-wire-unfreeze.md). Carried by
-// `RuntimeSnapshot.reconnect` (C4 wire unfreeze). Status reporting only — the
-// reconnect decision stays host-side (C3a reconnect worker, mirrors
-// `reconnect_attempts` / `reconnect_active` in kernel_control_service.rs).
-//
-// Field semantics:
-//   * `auto_reconnect`  config switch; mirrors config key `auto_reconnect`
-//   * `max_attempts`     configured retry budget; mirrors
-//                        `auto_reconnect_max_attempts` (0 = unlimited)
-//   * `current_attempt`  retries already performed this connection
-//                        (per-connection, cleared on Connected; 0 = none)
-//   * `active`           a reconnect attempt is in flight right now
 message ReconnectStatus {
   bool auto_reconnect = 1;    // config: auto-reconnect switch
   uint32 max_attempts = 2;    // config: retry budget (0 = unlimited)
   uint32 current_attempt = 3; // retries already performed (per-connection)
   bool active = 4;            // a reconnect attempt is in flight
+  reserved 9000 to 9999;
+}
+
+message SelfHealStatus {
+  string stage = 1;       // "respawning" | "succeeded" | "failed"
+  uint32 old_pid = 2;     // crashed engine PID; 0 = not available
+  uint32 new_pid = 3;     // new engine PID; 0 when stage != "succeeded"
+  string error_code = 4;  // only when stage = "failed"; empty otherwise
+  reserved 1000 to 1999;
   reserved 9000 to 9999;
 }
 
@@ -794,17 +722,9 @@ message RuntimeSnapshot {
   // Display only: the routing decision is core-side (M3 decision table); there is
   // NO ConnectIntent.mode field.
   string mode = 13;
-  // EXV_UNFREEZE 2026-08-24: system proxy awareness, see docs/superpowers/evidence/2026-08-24-system-proxy-wire-unfreeze.md
-  // System-proxy detect-and-report status (design §5.5). Status only — no
-  // behavior decision in v1 (aligns with the PRD O1 precedent). Absent = not
-  // probed / probe not running.
   SystemProxyDetection system_proxy = 14;
-  // EXV_UNFREEZE 2026-08-25: auto reconnect status, see docs/superpowers/evidence/2026-08-25-reconnect-wire-unfreeze.md
-  // Auto-reconnect status (design/board C3a/C4): config switch + retry budget +
-  // per-connection retry count + in-flight flag, mirrored from the host
-  // reconnect worker. Status reporting only — no behavior decision on the wire.
-  // Absent = reconnect not applicable (e.g. no connection ever established).
   ReconnectStatus reconnect = 15;
+  SelfHealStatus self_heal = 16;
   reserved 9000 to 9999;
 }
 
@@ -844,8 +764,14 @@ message LogEvent {
   reserved 1000 to 1999;
 }
 
-// Reply to KernelControl.LogsList. Entries are in ascending seq order; the
-// client continues with `after_seq = next_seq`.
+// Reply to KernelControl.LogsList. Entries are in ascending seq order.
+// `next_seq` = last returned entry's `seq + 1` (empty page: `last_seq + 1`).
+// CURSOR CONTRACT (pinned, W1-B/P9): the client must continue with
+// `after_seq` = the seq of the LAST ENTRY IT HAS SEEN (last-seen, i.e.
+// `next_seq - 1`), NOT `next_seq` itself — the incremental filter is a
+// strict `seq > after_seq`, so passing `next_seq` would silently skip
+// exactly the entry whose seq equals it (off-by-one on every cursor
+// advance). Comment-only change; no field was modified.
 message LogsListReply {
   repeated LogEvent entries = 1;
   uint64 next_seq = 2;
@@ -875,6 +801,9 @@ message ConfigItem {
 // Reply to KernelControl.ConfigGet. Contains only non-secret fields.
 message ConfigPayload {
   repeated ConfigItem items = 1;
+  // True only when this ConfigGet read bootstrapped the default config because
+  // the local config was absent, empty, non-object, or not decodable.
+  bool requires_quick_start = 2;
   reserved 9000 to 9999;
 }
 

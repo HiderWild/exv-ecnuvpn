@@ -1,54 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W21-T Terra: DNS settings 契约（GUID 键控 capture / apply / applied fingerprint /
-// third-party conflict / compare-and-restore）。这些测试钉住 W21-I 在
-// exv_vpn_win32_resource::{dns, dns_types} 实现的 seam。冻结事实
-// （docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md，
-// WSP4 提权实测）是契约：
-//   - Get 语义：原地填充调用方结构（Version=1，与 windows crate 0.62.2 的
-//     DNS_INTERFACE_SETTINGS v1 布局一致；0 → 87），Flags 必须为空；内嵌字符串由系统
-//     分配，用毕必须 FreeInterfaceDnsSettings 释放；
-//   - Flags 文档值（实测修正）：DNS_SETTING_NAMESERVER=0x0002、DNS_SETTING_SEARCHLIST=0x0004
-//     （0x0001 是 DNS_SETTING_IPV6——用错 87）；windows crate 0.62.2 未导出，需手写；
-//   - v2 布局（实测修正）：VERSION2 = DNS_INTERFACE_SETTINGS_EX（80 字节，
-//     NameServer/SearchList 仍是**字符串**）；误按 DNS_ADDRESS_ARRAY（104 字节）构造会
-//     让 Set 把 @24 的 {ver,count} 当 PWSTR 解引用 → AV 0xC0000005；
-//   - apply/read-back：Set v1（Version=1，flags=0x6，ns=10.88.88.53，search=exv.test）
-//     rc=0；回读 fingerprint ns=[10.88.88.53]、search=[exv.test]（回读 flags=0）；
-//   - 第三方冲突：独立 Set 改 10.88.88.54 → 回读 ≠ 我们的值；同值再 Set 幂等；
-//   - partial/unknown：nameserver 非 IP（"not-an-ip"）→ 87；
-//   - mutant（无条件恢复旧快照 = 反例）：第三方改值后当前状态 ≠ 原始快照 →
-//     compare-and-restore 必须**跳过**恢复（无条件恢复会覆盖第三方变更）；随后显式清理
-//     （空字符串指针 + flags 置位 = 清空语义；NULL 指针不清除且返回 87）→ 最终
-//     fingerprint == 原始；
-//   - 恢复失败是类型化错误（restore_failures），不得静默。
-//
-// W21-I pinned seam（src/dns_types.rs + src/dns.rs）：
-//   dns_types::DnsSettings { pub nameservers: Vec<String>, pub search_suffixes: Vec<String> }
-//     （Clone/Debug/PartialEq/Eq）；DnsSettings::new(nameservers, search_suffixes) -> Self
-//   dns_types::DnsFingerprint（Clone/Debug/PartialEq/Eq，不透明值）；
-//     DnsFingerprint::of(&DnsSettings) -> Self —— nameservers + search_suffixes 的确定性
-//     指纹，**顺序敏感**（WSP4 回读是精确列表；排序指纹会掩盖第三方重排）
-//   dns_types::RestoreDecision { Restore, SkipThirdPartyChange }（Clone/Debug/PartialEq/Eq）；
-//     RestoreDecision::plan(current: &DnsFingerprint, applied: &DnsFingerprint) -> Self
-//     —— 当前 == applied 才 Restore；当前 != applied（第三方改过）→ SkipThirdPartyChange
-//   dns::DnsCapture::capture(interface_guid: &GUID) -> Result<DnsSettings, NativeError>
-//     —— GUID 键控：GetInterfaceDnsSettings 原地填充 + FreeInterfaceDnsSettings 释放
-//   dns::DnsApplier::apply(interface_guid: &GUID, desired: &DnsSettings)
-//     -> Result<DnsFingerprint, NativeError> —— Set + 独立回读，返回 **applied 指纹**
-//     （API success 不等于 proof；W21 不得用 API success 代替 proof）
-//   dns::DnsApplier::restore(interface_guid: &GUID, applied: &DnsFingerprint,
-//     original: &DnsSettings) -> Result<RestoreDecision, NativeError>
-//     —— compare-and-restore：先比较当前状态与 applied 指纹，相等才恢复 original；
-//     第三方已修改 → Ok(SkipThirdPartyChange)（typed 冲突，不得覆盖）；失败是类型化
-//     Err（restore_failures），不得静默
-//
-// 纯逻辑测试（指纹比较 / restore 计划）在任何宿主都必须通过。真实 DNS mutation 测试
-// 在探针自建的 scratch Wintun adapter（WSP4 冻结动态加载路径）上运行，需要 admin；
-// 非 elevated 宿主上短路为 `not_run / blocked_by_environment`（明确输出，不伪造假绿）。
-// 每个 mutation 测试：创建 scratch adapter → 捕获原始 DNS → 断言 → 恢复原始状态 →
-// 创建者 close 移除 adapter（无残留）；DnsCleanupGuard 保证 panic/早退路径也恢复。
 
 use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
@@ -68,7 +17,7 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（WSP4 冻结路径；PATH DLL 是 mutant）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// WintunCreateAdapter 的 TunnelType 参数（WSP4 冻结值）。
 const TUNNEL_TYPE: &str = "EXV VPN";
 /// DNS 测试值（WSP4 冻结）：应用 / 第三方改值 / search suffix。
@@ -676,5 +625,3 @@ fn restore_on_absent_interface_is_typed_error() {
     );
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

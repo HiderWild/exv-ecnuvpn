@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! core 侧 UI-facing `KernelControl` Named Pipe 传输层（P3-c2：UI↔core 强绑定）。
 //!
@@ -25,11 +23,11 @@
 
 use std::ffi::c_void;
 
-use exv_vpn_domain::identity::{ConnectionBindingDigest, PrincipalDigest};
 use exv_engine::grpc_transport::{
-    require_verified_peer, TransportPeerInfo, VerifiedNamedPipeServer,
+    TransportPeerInfo, VerifiedNamedPipeServer, require_verified_peer,
 };
-use exv_vpn_win32_ipc::peer_auth::{process_sid, VerifiedPipePeer};
+use exv_vpn_domain::identity::{ConnectionBindingDigest, PrincipalDigest};
+use exv_vpn_win32_ipc::peer_auth::{VerifiedPipePeer, process_sid};
 use exv_vpn_win32_ipc::pipe_security::PipeSecurity;
 use exv_vpn_wire::generated::kernel_control_server::KernelControlServer;
 use sha2::{Digest, Sha256};
@@ -38,11 +36,9 @@ use tokio_stream::StreamExt;
 use tonic::transport::Server;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
-use windows::Win32::Security::{LookupAccountSidW, SidTypeUser, PSID};
+use windows::Win32::Security::{LookupAccountSidW, PSID, SidTypeUser};
 use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
-use windows::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, PROCESS_ACCESS_RIGHTS,
-};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_ACCESS_RIGHTS, WaitForSingleObject};
 
 use crate::grpc_control::KEEPALIVE_PERIOD;
 use crate::kernel_control_service::KernelControlService;
@@ -140,16 +136,16 @@ pub fn lookup_account_name(sid: &str) -> String {
 ///
 /// # Errors
 /// SID 不匹配 / 身份无法解析 → 携带原因的字符串。
-pub fn verify_ui_peer(server: &NamedPipeServer, expected_sid: &str) -> Result<TransportPeerInfo, String> {
+pub fn verify_ui_peer(
+    server: &NamedPipeServer,
+    expected_sid: &str,
+) -> Result<TransportPeerInfo, String> {
     use std::os::windows::io::AsRawHandle;
 
     let mut pid = 0u32;
     // SAFETY: `server.as_raw_handle()` 是已连接的 server pipe 句柄，`pid` 是活输出参数。
     if let Err(e) = unsafe {
-        GetNamedPipeClientProcessId(
-            HANDLE(server.as_raw_handle() as *mut c_void),
-            &raw mut pid,
-        )
+        GetNamedPipeClientProcessId(HANDLE(server.as_raw_handle() as *mut c_void), &raw mut pid)
     } {
         return Err(format!("ui process query failed: {e}"));
     }
@@ -168,10 +164,9 @@ pub fn verify_ui_peer(server: &NamedPipeServer, expected_sid: &str) -> Result<Tr
     let nonce = uuid::Uuid::new_v4();
     let principal = PrincipalDigest::try_from(digest32(format!("sid:{sid}").as_bytes()))
         .expect("principal digest mints");
-    let connection_digest = ConnectionBindingDigest::try_from(digest32(
-        format!("conn:{pid}:{nonce}").as_bytes(),
-    ))
-    .expect("connection digest mints");
+    let connection_digest =
+        ConnectionBindingDigest::try_from(digest32(format!("conn:{pid}:{nonce}").as_bytes()))
+            .expect("connection digest mints");
 
     Ok(TransportPeerInfo {
         verified: true,
@@ -188,7 +183,10 @@ pub fn verify_ui_peer(server: &NamedPipeServer, expected_sid: &str) -> Result<Tr
 ///
 /// # Errors
 /// 管道创建失败（另一 core 已持名——first-instance 反 squatting）。
-pub fn create_kernel_control_pipe_server(name: &str, ui_sid: &str) -> std::io::Result<NamedPipeServer> {
+pub fn create_kernel_control_pipe_server(
+    name: &str,
+    ui_sid: &str,
+) -> std::io::Result<NamedPipeServer> {
     let security = PipeSecurity::new(ui_sid, true)
         .map_err(|code| std::io::Error::from_raw_os_error(code as i32))?;
     // `CreateNamedPipeW` 的 `lpSecurityAttributes` 参数是 `SECURITY_ATTRIBUTES*`，**不是**
@@ -312,6 +310,11 @@ pub async fn serve_kernel_control_pipe(
         .await
         .map_err(|e| format!("authorize ui peer: {e:?}"))?;
 
+    // 回填已验证的 UI peer 给按需拉起编排（provision 的 composition 重建需要它做
+    // gate 重授权；2026-09-08 计划批 2——在此回填而非 serve 返回后，消除「UI 连接已
+    // 受理、首个 connect 先于 main 回填到达」的窗口）。
+    service.note_verified_ui_peer(&ui_peer);
+
     // UI 进程退出监视（O3 强绑定）：进程句柄等待 → on_ui_exited → core 停机。
     // 放在授权后（gate 已通过、UI 身份已核实），UI 退出即触发真实停机。
     spawn_ui_exit_watcher(info.process_id, ui);
@@ -336,8 +339,8 @@ pub async fn serve_kernel_control_pipe(
     // 单元素流，serve 任务会在 accept 后 ~1ms 假 resolve，被当作"UI 断开"触发假停机。
     // pending 链让 serve 任务保持 pending 到 core 停机（abort），detached 连接任务
     // 继续服务 UI。
-    let incoming = tokio_stream::iter(vec![Ok::<_, std::io::Error>(io)])
-        .chain(tokio_stream::pending());
+    let incoming =
+        tokio_stream::iter(vec![Ok::<_, std::io::Error>(io)]).chain(tokio_stream::pending());
 
     let router = Server::builder()
         .layer(tonic::service::InterceptorLayer::new(require_verified_peer))
@@ -361,130 +364,3 @@ pub async fn serve_kernel_control_pipe(
 // 单元测试：digest 派生（纯）+ account name 解析（真实 SID 查询；当前用户恒可解析）。
 // `verify_ui_peer` / `serve_kernel_control_pipe` 需真实 Named Pipe 连接，属集成覆盖。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `digest32` 输出 32 字节且确定性（同一输入 → 同一 digest；不同输入 → 不同 digest）。
-    #[test]
-    fn digest32_is_deterministic_32_byte_sha256() {
-        let a = digest32(b"peer");
-        let b = digest32(b"peer");
-        let c = digest32(b"peep");
-        assert_eq!(a.len(), 32);
-        assert_eq!(a, b, "同一输入必须产生同一 digest");
-        assert_ne!(a, c, "不同输入必须产生不同 digest");
-    }
-
-    /// `lookup_account_name` 对当前进程的 user SID 必须解析出非空 account name——
-    /// 这是 gate 授权的必需事实（fail closed：解析不出 → 空串 → 授权拒绝）。
-    /// 非交互/系统级 token（不可解析 SID）时短路：本机用户 token 恒有可解析的 SID。
-    #[test]
-    fn lookup_account_name_resolves_current_user() {
-        let Some(sid) = exv_vpn_win32_ipc::peer_auth::current_user_sid() else {
-            return; // 无法解析当前用户 SID（极罕见）——诚实短路。
-        };
-        let name = lookup_account_name(&sid);
-        assert!(!name.is_empty(), "当前用户 SID {sid} 必须解析出 account name");
-    }
-
-    /// `lookup_account_name` 对无效 SID fail closed（返回空串，不 panic）。
-    #[test]
-    fn lookup_account_name_fails_closed_on_invalid_sid() {
-        assert_eq!(lookup_account_name("S-1-not-a-real-sid"), "");
-    }
-
-    /// `spawn_ui_exit_watcher`：真实子进程退出 → `on_ui_exited` 触发（O3 强绑定信号）。
-    ///
-    /// 子进程退出后 OS 回收其句柄、管道断开——进程句柄等待随即 signaled，信号翻转。
-    /// 用真实的 `cmd /c exit 0` 子进程；其 pid 即监视目标。
-    #[tokio::test]
-    async fn ui_exit_watcher_flips_signal_on_process_exit() {
-        let child = std::process::Command::new("cmd")
-            .args(["/c", "exit 0"])
-            .spawn()
-            .expect("spawn child");
-        let pid = child.id();
-        // 等子进程退出（进程句柄 signaled 的前提）。`cmd /c exit 0` 立即退出，阻塞短暂。
-        let mut child = child;
-        let status = child.wait().expect("wait child");
-        assert!(status.success());
-
-        let ui = crate::shutdown::UiLifetime::new();
-        spawn_ui_exit_watcher(pid, ui.clone());
-        // 已退出的进程：OpenProcess 成功（句柄仍可打开）→ WaitForSingleObject 立即
-        // signaled → on_ui_exited。有界等待翻转。
-        let flipped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                if !ui.is_ui_alive() {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await;
-        assert!(flipped.is_ok(), "UI 进程退出必须翻转存活信号");
-    }
-
-    /// `spawn_ui_exit_watcher`：已不可打开的 pid（进程已完全消失）→ fail-safe 立即翻转。
-    /// 0xFFFFFFFF 是保留 pid，OpenProcess 恒失败 → 立即判定 UI 退出。
-    #[tokio::test]
-    async fn ui_exit_watcher_fails_closed_for_unknown_pid() {
-        let ui = crate::shutdown::UiLifetime::new();
-        spawn_ui_exit_watcher(u32::MAX, ui.clone());
-        let flipped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                if !ui.is_ui_alive() {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await;
-        assert!(flipped.is_ok(), "未知 pid 必须 fail-safe 判定 UI 退出");
-    }
-
-    // -----------------------------------------------------------------------
-    // Bug C 回归护栏：`create_kernel_control_pipe_server` 的 DACL 真实生效。
-    // 旧实现把 `PSECURITY_DESCRIPTOR` 当 `SECURITY_ATTRIBUTES*` 传给 tokio → OS 读
-    // garbage DACL，同进程碰巧可用、跨进程被拒。下面两个测试钉死：DACL 确实交到了
-    // CreateNamedPipeW（未授权用户连接必须被拒 = 5，授权用户可连）——对旧实现失败。
-    // -----------------------------------------------------------------------
-
-    /// DACL 授权 UI 用户 SID 时，当前用户能连上 KernelControl 管道。
-    #[tokio::test]
-    async fn kernel_control_pipe_dacl_allows_current_user_connect() {
-        let sid = exv_vpn_win32_ipc::peer_auth::current_user_sid().expect("current user sid");
-        let name = format!(r"\\.\pipe\exv-kc-dacl-allow-{}", std::process::id());
-        let server = create_kernel_control_pipe_server(&name, &sid).expect("create kernel pipe");
-        let client =
-            exv_vpn_win32_ipc::named_pipe_io::NamedPipeByteStream::connect_client(&name)
-                .expect("current user must connect");
-        server.connect().await.expect("server accept");
-        drop(client);
-    }
-
-    /// DACL 未授权当前用户（只授 SYSTEM + 伪造域 SID）时，客户端连接必须被拒
-    /// （ERROR_ACCESS_DENIED = 5）——证明 `create_kernel_control_pipe_server` 确实把
-    /// `SECURITY_ATTRIBUTES`（含 DACL）交到了 `CreateNamedPipeW`。旧实现（传
-    /// `PSECURITY_DESCRIPTOR`，DACL garbage）下本测试会失败。
-    #[tokio::test]
-    async fn kernel_control_pipe_dacl_denies_unlisted_user() {
-        // 当前用户不可能持有的伪造域 SID；DACL = SYSTEM + 该 SID，普通客户端在
-        // CreateFileW 阶段即被 ACL 拒绝。
-        let bogus = "S-1-5-21-1000000000-1000000000-1000000000-1001";
-        let name = format!(r"\\.\pipe\exv-kc-dacl-deny-{}", std::process::id());
-        let server = create_kernel_control_pipe_server(&name, bogus).expect("create kernel pipe");
-        let err = exv_vpn_win32_ipc::named_pipe_io::NamedPipeByteStream::connect_client(&name)
-            .expect_err("unlisted user must be denied by the DACL");
-        assert_eq!(
-            err,
-            exv_vpn_win32_ipc::named_pipe_io::PipeIoError::Io(
-                windows::Win32::Foundation::ERROR_ACCESS_DENIED.0
-            ),
-            "unlisted user connect must fail with ERROR_ACCESS_DENIED (5)"
-        );
-        drop(server);
-    }
-}

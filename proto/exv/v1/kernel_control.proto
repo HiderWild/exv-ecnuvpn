@@ -1,67 +1,3 @@
-// EXV_CUTOVER (2026-08-17): Rust is the active product line; C++ is deprecated, reference only.
-// Spec: docs/superpowers/specs/vpn-rust-native-runtime-mvp-common-architecture.md
-// section 9.1 (KernelControl); cutover record: docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md; re-wiring requires a new cutover requirement and a rerun of the real business flow on the native host - satisfied by the 2026-08-17 cutover.
-//
-// EXV_FROZEN_WIRE (2026-08-18): the kernel_control / common runtime-snapshot domain
-// (RuntimeSnapshot / RuntimeEvent in common.proto, consumed via KernelControl
-// GetSnapshot / WatchEvents) is UNFROZEN by the R1 unfreeze record
-// (docs/superpowers/evidence/2026-08-18-kernel-control-common-unfreeze.md) for the
-// operation_id correlation fields only:
-//   * RuntimeSnapshot gains `operation_id` (tag 11);
-//   * RuntimeEvent gains `operation_id` (tag 4).
-// Tag discipline is unchanged: reserved 1000-1999 (burn-in guard) and 9000-9999
-// (internal/future) hold; all new tags sit outside those ranges. Any further
-// unfreeze requires a new unfreeze record under the same governance process.
-//
-// EXV_FROZEN_WIRE (2026-08-20): this file is UNFROZEN by the S3 ServiceControl
-// unfreeze record
-// (docs/superpowers/evidence/2026-08-20-kernel-control-frozen-wire-unfreeze-service-control.md)
-// for the service-control domain only:
-//   * service KernelControl gains `rpc ServiceControl`;
-//   * new messages ServiceControlRequest / ServiceControlReply (and the action
-//     sub-messages ServiceStatusQuery/Install/Uninstall/Start/Stop).
-// ConnectRequest also briefly gained `auto_install_service` (tag 3) in that S3
-// unfreeze; it is REMOVED by the R1 removal record
-// (docs/superpowers/evidence/2026-08-20-kernel-control-frozen-wire-unfreeze-remove-auto-install.md)
-// — install/service and connect are independent routes (UI sequences them as two
-// requests), so the auto-install preference and its install-then-connect route are
-// gone. Tag 3 is now reserved (never reused).
-// `ServiceStop` (tag 5 of the ServiceControl action oneof) is likewise REMOVED
-// (2026-08-22) by its own removal record
-// (docs/superpowers/evidence/2026-08-22-kernel-control-frozen-wire-unfreeze-remove-servicestop.md):
-// the UI no longer initiates "stop service" — a stopped service is a recoverable
-// error state and start is the repair. Tag 5 is now reserved (never reused).
-// Tag discipline is unchanged: reserved 1000-1999 (burn-in guard) and 9000-9999
-// (internal/future) hold; all new tags sit outside those ranges. Any further
-// unfreeze requires a new unfreeze record under the same governance process.
-//
-// This file is the canonical wire authority for the KernelControl service in
-// the exv.vpn.v1 namespace. It imports the shared types from common.proto and
-// defines only the request messages and the service; all reply/state/event
-// types (OperationReply, KernelOperationReply, RuntimeSnapshot, RuntimeEvent)
-// live in common.proto.
-//
-// Domain code never exposes generated types directly. The acceptance
-// controller only submits the fields required by the fixed scenario; it must
-// pass transport peer authentication and a test-run bootstrap capability
-// before it may trigger connect/stop/reconcile or submit a secret.
-//
-// Security invariants:
-//   * Secrets travel only as one-shot bytes and are cleared from the generated
-//     message immediately after being moved into a zeroable Rust buffer.
-//   * Snapshots and events never carry passwords, cookies, raw certificates,
-//     native handles, or free-text diagnostic stacks.
-//   * No field self-reports platform identity; peer identity is derived
-//     exclusively from verified transport metadata.
-//   * Stop is the only in-connection business cancellation; RPC future
-//     cancellation is not Stop. Reconcile explicitly retries the current
-//     obligation in FailedDirty/Reconciling.
-//
-// Field tags are permanently assigned and never reused. Reserved ranges:
-//   reserved 9000 to 9999  : internal / future use, never shipped
-//   reserved 1000 to 1999  : burn-in guard for each message
-// A tag that is vacated is recorded as a reserved range in this file before
-// any reuse is ever permitted; reuse is forbidden by policy.
 
 syntax = "proto3";
 
@@ -219,6 +155,7 @@ message ServiceControlRequest {
     ServiceStart start = 4;           // start the engine SCM service (elevated)
     // ServiceStop (tag 5) removed 2026-08-22: the UI no longer initiates a stop;
     // a stopped service is a recoverable error state (start is the repair).
+    ServiceRotateKey rotate_key = 6;  // rotate (revoke) the service PSK; elevated batch
   }
   reserved 5;  // ServiceStop (removed 2026-08-22; S3 service-control unfreeze record 2026-08-20)
   reserved 1000 to 1999;
@@ -236,6 +173,8 @@ message ServiceUninstall {}
 
 // Start the engine SCM service.
 message ServiceStart {}
+
+message ServiceRotateKey {}
 
 // Reply to KernelControl.ServiceControl. `service_status` is the post-action
 // status (or the current status on query); `ok` reflects the action result and

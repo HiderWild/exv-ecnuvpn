@@ -51,15 +51,14 @@ use exv_vpn_domain::error::{
     EffectCertainty, ErrorCode, ErrorStage, ErrorSubject, RetryAdvice, VpnError,
 };
 use exv_vpn_domain::identity::{
-    AttemptId, EffectId, EvidenceDigest, InventoryDigest, OperationId, OperationMethod,
-    OperationLookupKey, OwnershipVersion, PrincipalDigest, RequestDigest, ResourceIdentityDigest,
-    RuntimeEpoch, TokenDigest,
+    AttemptId, EffectId, InventoryDigest, OperationId, OperationMethod, OperationLookupKey,
+    OwnershipVersion, PrincipalDigest, RequestDigest, ResourceIdentityDigest, RuntimeEpoch,
+    TokenDigest,
 };
 use exv_vpn_domain::limits::MvpLimits;
 use exv_vpn_domain::model::{
-    Attempt, ConnectIntent, ConnectedSession, ConnectionProfileRef, DataRunningProof,
-    PacketLeaseRef, PlatformOwnershipRef, PlatformReadyProof, ProtocolSessionRef, RecoveryObligation,
-    RuntimeState, StopIntent,
+    Attempt, ConnectIntent, ConnectedSession, ConnectionProfileRef, PacketLeaseRef,
+    PlatformOwnershipRef, ProtocolSessionRef, RecoveryObligation, RuntimeState, StopIntent,
 };
 use exv_vpn_domain::ports::AttemptEffectFence;
 use exv_vpn_domain::reducer::{
@@ -141,12 +140,7 @@ fn stop_intent(key: &OperationLookupKey) -> StopIntent {
 }
 
 fn attempt(epoch: &RuntimeEpoch) -> Attempt {
-    Attempt::new(
-        epoch.clone(),
-        fresh_attempt_id(),
-        connect_intent(epoch, &lookup_key(epoch)),
-        None,
-    )
+    Attempt::new(epoch.clone(), fresh_attempt_id(), connect_intent(epoch, &lookup_key(epoch)))
 }
 
 /// A completion fence for an arbitrary (foreign) attempt/effect — used to build STALE or
@@ -194,23 +188,8 @@ fn connected_session() -> (RuntimeState, RuntimeEpoch) {
     ))
     .expect("platform ownership ref");
     let lease = PacketLeaseRef::try_from(rid(13)).expect("packet lease ref");
-    let ready = PlatformReadyProof::try_from((ownership.clone(), EvidenceDigest::try_from([4u8; 32]).expect("evidence")))
-        .expect("platform ready proof");
-    let running = DataRunningProof::try_from((
-        session_ref.clone(),
-        ownership.clone(),
-        lease.clone(),
-        EvidenceDigest::try_from([6u8; 32]).expect("evidence"),
-    ))
-    .expect("data running proof");
-    let session = ConnectedSession::new(
-        attempt(&epoch),
-        session_ref,
-        ownership,
-        lease,
-        ready,
-        running,
-    );
+    let session =
+        ConnectedSession::new(attempt(&epoch), session_ref, ownership, lease);
     (RuntimeState::connected(session), epoch)
 }
 

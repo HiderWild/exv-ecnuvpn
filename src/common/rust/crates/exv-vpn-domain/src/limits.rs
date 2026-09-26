@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 use crate::error::{EffectCertainty, ErrorCode, ErrorStage, ErrorSubject, RetryAdvice, VpnError};
 use crate::identity::RuntimeEpoch;
@@ -23,8 +21,6 @@ pub struct MvpLimits {
     pub owner_lease_ttl: Duration,
     pub packet_loss_cleanup_grace: Duration,
 }
-
-pub type ValidateLimitsFn = fn(&MvpLimits) -> Result<(), VpnError>;
 
 /// Rejects zero budgets and inverted budget ordering (queued connect budget shorter than the
 /// cleanup budget). Returns a generic `InvalidInput` admission error on failure.
@@ -55,5 +51,3 @@ pub fn validate_limits(limits: &MvpLimits) -> Result<(), VpnError> {
     Ok(())
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

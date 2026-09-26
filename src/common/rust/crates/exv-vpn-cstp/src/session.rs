@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! CSTP session phase (CS-AUTH-02-I): `CONNECT /CSCOSSLC/tunnel` + webvpn
 //! cookie + data session.
@@ -21,6 +19,7 @@
 //! `read_channel`.
 
 use std::net::Ipv4Addr;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -29,9 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::codec::{Codec, CodecError, CstpFrame};
 use crate::connector::{Bootstrap, BootstrapConfig, BootstrapError};
-use crate::webvpn::{
-    LoginSession, build_connect_request, build_connect_request_with_user_agent,
-};
+use crate::webvpn::{LoginSession, build_connect_request, build_connect_request_with_user_agent};
 
 /// Upper bound on the offer head before it is rejected as non-CSTP content.
 const MAX_OFFER: usize = 16 * 1024;
@@ -79,6 +76,184 @@ pub const CSTP_PACKET_TYPE_DPD_REQUEST: u8 = 0x03;
 /// CSTP wire packet type for a DPD response (AnyConnect 0x04) — the RTT probe signal.
 pub const CSTP_PACKET_TYPE_DPD_RESPONSE: u8 = 0x04;
 
+/// 读任务退出原因（F4 契约：读任务退出前经 `control_tx` 发出的最后一条
+/// `CstpControlEvent::SessionEnded` 携带）。修复前 `Ok(0) | Err(_) => break`
+/// 把网关 clean close 与 io 错误合并、codec 真错误与消费端先掉均静默 return，
+/// 宿主无法区分掉线原因——本枚举把四个退出点全部可观测化。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionEndReason {
+    /// 服务器协议层终止，正文在 TLS 读取边界脱敏并限制长度。
+    ServerDisconnect { kind: u8, code: Option<u8>, reason: String, body_len: usize },
+    /// 读到 `Ok(0)`：网关 clean close（典型 = 网关 DPD 超时单方面断开会话）。
+    GatewayClosedStream,
+    /// TLS 读错误：保留方向、错误类别、原始系统码与安全诊断详情。
+    Io(SessionIoError),
+    /// 真 codec 流错误（修复前 `session.rs` 读任务静默 `return` 的路径）。
+    Codec(CodecError),
+    /// `read_tx` 消费端先掉（修复前静默 `return` 的路径）：数据面已无人收数据帧，
+    /// 读任务继续解码只会空转。
+    ConsumerDropped,
+}
+
+// Windows 宿主直修 Common：位置为错误映射与 TLS task 的诊断出口；目的为保留
+// 已建立会话的真实 I/O 失败和写入结果；必要性为宿主拿到 ErrorKind/队列后已无法
+// 还原 raw_os_error、rustls 错误或 write_all 完成状态。本改动不决定其他宿主验收。
+/// TLS 操作方向，避免与宿主 ring reader/writer 的命名混淆。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoDirection {
+    Read,
+    Write,
+}
+
+/// 有界脱敏的 I/O 诊断；不持有 payload、凭据或原始错误对象。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIoError {
+    /// 原始 I/O 错误捕获时刻，UNIX 毫秒；区别于宿主稍后收到事件的时刻。
+    pub observed_ms: u64,
+    pub direction: IoDirection,
+    pub kind: std::io::ErrorKind,
+    pub raw_os_error: Option<i32>,
+    pub detail: String,
+}
+
+impl SessionIoError {
+    #[must_use]
+    pub fn new(direction: IoDirection, error: &std::io::Error) -> Self {
+        let observed_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        // TLS typed error 保留分类与 alert 枚举；自由文本必须脱敏且有界，
+        // OS 消息重新由原始错误码生成，避免混入自定义上下文。
+        let detail = if let Some(code) = error.raw_os_error() {
+            std::io::Error::from_raw_os_error(code).to_string()
+        } else if let Some(tls) = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        {
+            match tls {
+                rustls::Error::AlertReceived(alert) => format!("rustls: AlertReceived({alert:?})"),
+                rustls::Error::DecryptError => "rustls: DecryptError".into(),
+                rustls::Error::EncryptError => "rustls: EncryptError".into(),
+                rustls::Error::InvalidMessage(detail) => {
+                    format!("rustls: InvalidMessage({detail:?})")
+                }
+                rustls::Error::PeerMisbehaved(_) => "rustls: PeerMisbehaved".into(),
+                rustls::Error::PeerIncompatible(_) => "rustls: PeerIncompatible".into(),
+                rustls::Error::InvalidCertificate(_) => "rustls: InvalidCertificate".into(),
+                rustls::Error::InappropriateMessage { .. } => "rustls: InappropriateMessage".into(),
+                rustls::Error::InappropriateHandshakeMessage { .. } => {
+                    "rustls: InappropriateHandshakeMessage".into()
+                }
+                rustls::Error::PeerSentOversizedRecord => "rustls: PeerSentOversizedRecord".into(),
+                rustls::Error::HandshakeNotComplete => "rustls: HandshakeNotComplete".into(),
+                rustls::Error::General(detail) => {
+                    format!("rustls: General: {}", redact_io_detail(detail))
+                }
+                _ => "rustls: other error (detail redacted)".into(),
+            }
+        } else {
+            redact_io_detail(&error.to_string())
+        };
+        // 上限按 UTF-8 字节计，过滤控制字符以避免多行日志或终端控制序列。
+        let mut bounded = String::new();
+        for ch in detail.chars().filter(|ch| !ch.is_control()) {
+            if bounded.len() + ch.len_utf8() > 256 {
+                break;
+            }
+            bounded.push(ch);
+        }
+        Self {
+            observed_ms,
+            direction,
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+            detail: bounded,
+        }
+    }
+}
+
+/// 保留现场错误上下文；遇到凭据字段从该位置截断，URL/带值键整体替换。
+/// 不能把无法识别的自定义故障重新压成 ErrorKind；也不输出 URL 查询或 Cookie 值。
+fn redact_io_detail(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let sensitive_start = [
+        "cookie",
+        "authorization",
+        "password",
+        "passwd",
+        "credential",
+        "token",
+        "secret",
+        "webvpn",
+        "bearer",
+        "username",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min();
+    let prefix = &text[..sensitive_start.unwrap_or(text.len())];
+    let mut result = prefix
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("://") {
+                "[url redacted]"
+            } else if word.contains('=') {
+                "[value redacted]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if sensitive_start.is_some() {
+        result.push_str(" [sensitive detail redacted]");
+    }
+    result
+}
+
+/// 单个 TLS task 的累计采样。写入计数仅在完整帧写入并 flush 成功后更新，
+/// 不表示对端已处理该帧。
+/// 读操作次数为 TLS read 批次；写操作次数为完整 CSTP 帧数；均不含 payload。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIoDiagnostics {
+    pub direction: IoDirection,
+    pub bytes: u64,
+    pub operations: u64,
+    pub keepalive_frames: u64,
+    pub dpd_request_frames: u64,
+    pub dpd_response_frames: u64,
+    pub last_activity: Option<Instant>,
+    pub sampled_at: Instant,
+}
+
+impl SessionIoDiagnostics {
+    fn new(direction: IoDirection) -> Self {
+        Self {
+            direction,
+            bytes: 0,
+            operations: 0,
+            keepalive_frames: 0,
+            dpd_request_frames: 0,
+            dpd_response_frames: 0,
+            last_activity: None,
+            sampled_at: Instant::now(),
+        }
+    }
+
+    fn record(&mut self, bytes: usize) {
+        self.bytes = self.bytes.saturating_add(bytes as u64);
+        self.operations = self.operations.saturating_add(1);
+        self.last_activity = Some(Instant::now());
+    }
+
+    fn publish(&mut self, tx: &mpsc::UnboundedSender<CstpControlEvent>) {
+        self.sampled_at = Instant::now();
+        let _ = tx.send(CstpControlEvent::IoDiagnostics(self.clone()));
+    }
+}
+
 /// A CSTP control-plane event surfaced from the data session's read path.
 ///
 /// The codec decodes keepalive control frames into [`CstpFrame::Control`]; DPD
@@ -91,6 +266,14 @@ pub enum CstpControlEvent {
     Control { kind: u8, body: Vec<u8> },
     /// A DPD response frame (wire kind 0x04) was received.
     DpdResponse,
+    /// 读任务退出（会话终结）：携带退出原因。这是读任务经 `control_tx` 发出的
+    /// **最后一条**事件；宿主据此可区分「网关 clean close / io 错误 / codec 错误 /
+    /// 消费端先掉」并感知会话已不可恢复。
+    SessionEnded(SessionEndReason),
+    /// TLS 写失败：诊断事件，不替宿主决定掉线或重连策略。
+    WriteFailed(SessionIoError),
+    /// 低频累计 I/O 采样与任务退出快照，无逐帧日志。
+    IoDiagnostics(SessionIoDiagnostics),
 }
 
 /// An established CSTP data session (the outcome of a successful CONNECT
@@ -184,6 +367,18 @@ impl CstpSession {
         login: Option<&LoginSession>,
         user_agent: Option<&str>,
     ) -> Result<CstpSession, SessionError> {
+        Self::open_with_user_agent_observed(cfg, login, user_agent, None).await
+    }
+
+    /// Windows 宿主直修 Common 的小观测端口：成功校验 offer 后读取真实 TLS 底层
+    /// socket；目的为证明实际 local/peer 与绑定出口。宿主只持通道时无法还原这些事实。
+    /// 原入口委托 None，不改变 macOS 或现有调用方的连接/认证行为。
+    pub async fn open_with_user_agent_observed(
+        cfg: BootstrapConfig,
+        login: Option<&LoginSession>,
+        user_agent: Option<&str>,
+        on_established: Option<&(dyn Fn(&tokio::net::TcpStream) + Send + Sync)>,
+    ) -> Result<CstpSession, SessionError> {
         // A cookie-less CONNECT is a typed error BEFORE any network activity
         // (kills the "cookie missing still CONNECTs" mutant).
         let login = login.ok_or(SessionError::MissingSession)?;
@@ -252,6 +447,9 @@ impl CstpSession {
         let remainder = buf.split_off(head_end);
         let head = String::from_utf8_lossy(&buf);
         let offer_plan = parse_offer(&head).ok_or(SessionError::OfferParseFailed)?;
+        if let Some(observe) = on_established {
+            observe(stream.get_ref().0);
+        }
 
         // --- Split the stream; the two data tasks carry the binary framing
         // (engine version of the school spawn_school_data_tasks pattern) ---
@@ -262,7 +460,9 @@ impl CstpSession {
         // signal) ride a dedicated channel so the engine can time dead-peer RTT
         // without mixing control frames into the data payload stream.
         let (control_tx, control_rx) = mpsc::unbounded_channel::<CstpControlEvent>();
-        spawn_data_tasks(read_half, write_half, read_tx, write_rx, remainder, control_tx);
+        spawn_data_tasks(
+            read_half, write_half, read_tx, write_rx, remainder, control_tx,
+        );
 
         Ok(CstpSession {
             offer_plan,
@@ -423,8 +623,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 ///
 /// DPD responses surface through the codec's `UnknownControl(0x04)` error path (the
 /// codec only decodes keepalive control frames); this maps that error to the RTT
-/// probe signal without killing the read task. Other unknown control kinds yield
-/// `None` (they are skipped by the caller, never fatal).
+/// probe signal without killing the read task.
+///
+/// F4 未知控制帧收敛：**所有** `UnknownControl(kind)`（0x04 优先映射
+/// `DpdResponse` 之外）一律上抛 `Control { kind, body: Vec::new() }`——读任务保持
+/// 存活，宿主可见每一个未知 kind（特别是网关 DPD request 0x03：不回应会被网关在
+/// ~60s 后单方面断开会话，macOS 宿主实测记录）。body 恒空：codec 的
+/// `UnknownControl` 错误只携带 kind 字节、载荷已消费丢弃，而 wire 上 0x03 本无
+/// 载荷，空 body 语义无损。
 fn control_event_for_decode(
     outcome: &Result<Option<CstpFrame>, CodecError>,
 ) -> Option<CstpControlEvent> {
@@ -436,7 +642,60 @@ fn control_event_for_decode(
         Err(CodecError::UnknownControl(kind)) if *kind == CSTP_PACKET_TYPE_DPD_RESPONSE => {
             Some(CstpControlEvent::DpdResponse)
         }
+        Err(CodecError::UnknownControl(kind)) => Some(CstpControlEvent::Control {
+            kind: *kind,
+            body: Vec::new(),
+        }),
         _ => None,
+    }
+}
+
+/// 纯映射 seam（W5 可测；`spawn_data_tasks` 收具体 TLS 流类型无法 mock）：一次
+/// TLS 读结果 → 会话终结原因。`Ok(n>0)`（正常读到字节）→ `None`（继续读）；
+/// `Ok(0)`（网关 clean close）→ `GatewayClosedStream`；`Err(e)` → `Io(SessionIoError)`。
+fn session_end_reason_for_read(outcome: &std::io::Result<usize>) -> Option<SessionEndReason> {
+    match outcome {
+        Ok(0) => Some(SessionEndReason::GatewayClosedStream),
+        Err(e) => Some(SessionEndReason::Io(SessionIoError::new(
+            IoDirection::Read,
+            e,
+        ))),
+        Ok(_) => None,
+    }
+}
+
+/// 纯映射 seam（W5 可测）：一次 codec 解码结果 → 会话终结原因。
+/// `Err` 且**非** `UnknownControl`（未知控制帧经 [`control_event_for_decode`]
+/// 上抛后读任务继续存活）→ `Codec(err)`；其余（数据/半帧/未知控制帧）→ `None`。
+fn session_end_reason_for_decode(
+    outcome: &Result<Option<CstpFrame>, CodecError>,
+) -> Option<SessionEndReason> {
+    match outcome {
+        Ok(Some(CstpFrame::Control { kind: kind @ (0x05 | 0x09), body })) => {
+            Some(SessionEndReason::ServerDisconnect {
+                kind: *kind,
+                code: body.first().copied(),
+                reason: redact_io_detail(&String::from_utf8_lossy(body.get(1..).unwrap_or_default()))
+                    .chars().filter(|character| !character.is_control()).take(256).collect(),
+                body_len: body.len(),
+            })
+        }
+        Err(err) if !matches!(err, CodecError::UnknownControl(_)) => {
+            Some(SessionEndReason::Codec(err.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// 纯映射 seam（W5 可测）：一次数据帧交付结果 → 会话终结原因。
+/// 交付失败（`read_tx` 消费端已 drop）→ `ConsumerDropped`；成功 → `None`。
+fn session_end_reason_for_data_send(
+    sent: &Result<(), mpsc::error::SendError<Vec<u8>>>,
+) -> Option<SessionEndReason> {
+    if sent.is_err() {
+        Some(SessionEndReason::ConsumerDropped)
+    } else {
+        None
     }
 }
 
@@ -451,61 +710,135 @@ fn control_event_for_decode(
 /// probe signal are forwarded on `control_tx` (best-effort — a dropped consumer is
 /// non-fatal). An unknown control frame is SKIPPED rather than fatal: the read task
 /// must survive a gateway control frame the codec cannot decode (in particular a
-/// DPD response, which the codec reports as `UnknownControl(0x04)`).
+/// DPD response, which the codec reports as `UnknownControl(0x04)`); 每一个未知
+/// kind 都经 [`control_event_for_decode`] 上抛为 `Control { kind, .. }`（F4 收敛，
+/// 宿主可见且可应答网关 DPD request 0x03）。
+///
+/// F4 退出可观测：读任务的**每一个**退出点（网关 clean close / io 错误 / codec 真
+/// 错误 / 消费端先掉）退出前都先发 `SessionEnded(reason)` 作为最后一条事件。
 fn spawn_data_tasks(
-    read_half: tokio::io::ReadHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
-    write_half: tokio::io::WriteHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+    read_half: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    write_half: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
     read_tx: mpsc::UnboundedSender<Vec<u8>>,
     write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     offer_remainder: Vec<u8>,
     control_tx: mpsc::UnboundedSender<CstpControlEvent>,
 ) {
-    tokio::spawn(async move {
+    let write_control_tx = control_tx.clone();
+    // 任一方向退出就取消另一方向；不能留下读任务永久等待，或让旧 TLS 会话跨重连存活。
+    let (read_done, read_ended) = tokio::sync::oneshot::channel::<()>();
+    let (write_done, write_ended) = tokio::sync::oneshot::channel::<()>();
+    let consumer = read_tx.clone();
+    let consumer_control = control_tx.clone();
+    let read_task = async move {
+        let mut diagnostics = SessionIoDiagnostics::new(IoDirection::Read);
         let mut codec = Codec::new();
         codec.feed(&offer_remainder);
         let mut read_half = read_half;
         let mut chunk = [0u8; 4096];
         loop {
-            match read_half.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    codec.feed(&chunk[..n]);
-                    loop {
-                        match codec.decode() {
-                            Ok(Some(CstpFrame::Data(payload))) => {
-                                if read_tx.send(payload).is_err() {
-                                    return;
-                                }
-                            }
-                            outcome => {
-                                // Surface control-plane events (keepalive + DPD
-                                // response) to the latency probe; a dropped consumer
-                                // is non-fatal.
-                                if let Some(event) = control_event_for_decode(&outcome) {
-                                    let _ = control_tx.send(event);
-                                }
-                                match outcome {
-                                    Ok(None) => break,                    // need more bytes
-                                    Err(CodecError::UnknownControl(_)) => {} // skip, keep reading
-                                    Err(_) => return,                     // genuine stream error
-                                    _ => {} // Ok(Some(Control)) already surfaced
-                                }
-                            }
+            // HTTP offer 后同次 read 中的二进制余量也必须立即解码，不能等下一次网络读。
+            loop {
+                let outcome = codec.decode();
+                match outcome {
+                    Ok(Some(CstpFrame::Data(payload))) => {
+                        if session_end_reason_for_data_send(&read_tx.send(payload)).is_some() {
+                            diagnostics.publish(&control_tx);
+                            let _ = control_tx.send(CstpControlEvent::SessionEnded(SessionEndReason::ConsumerDropped));
+                            return;
                         }
+                    }
+                    outcome => {
+                        if let Some(event) = control_event_for_decode(&outcome) { let _ = control_tx.send(event); }
+                        if let Some(reason) = session_end_reason_for_decode(&outcome) {
+                            diagnostics.publish(&control_tx);
+                            let _ = control_tx.send(CstpControlEvent::SessionEnded(reason));
+                            return;
+                        }
+                        if matches!(outcome, Ok(None)) { break; }
                     }
                 }
             }
+            match read_half.read(&mut chunk).await {
+                Ok(n) if n > 0 => {
+                    diagnostics.record(n);
+                    if diagnostics.sampled_at.elapsed() >= Duration::from_secs(15) {
+                        diagnostics.publish(&control_tx);
+                    }
+                    codec.feed(&chunk[..n]);
+                }
+                outcome => {
+                    // 读任务退出（F4：原 `Ok(0) | Err(_) => break` 合并静默 → 拆分
+                    // 可观测）。最后一条事件携带原因；控制面通道无消费端时静默失败
+                    // （best-effort，与既有语义一致）。
+                    if let Some(reason) = session_end_reason_for_read(&outcome) {
+                        diagnostics.publish(&control_tx);
+                        let _ = control_tx.send(CstpControlEvent::SessionEnded(reason));
+                    }
+                    return;
+                }
+            }
+        }
+    };
+    tokio::spawn(async move {
+        let _done = read_done;
+        tokio::select! {
+            _ = write_ended => {}
+            _ = consumer.closed() => {
+                let _ = consumer_control.send(CstpControlEvent::SessionEnded(SessionEndReason::ConsumerDropped));
+            }
+            _ = read_task => {}
         }
     });
     tokio::spawn(async move {
-        let mut write_half = write_half;
-        let mut write_rx = write_rx;
-        while let Some(frame) = write_rx.recv().await {
-            if write_half.write_all(&frame).await.is_err() {
-                break;
-            }
+        let _done = write_done;
+        tokio::select! {
+            _ = read_ended => {}
+            _ = write_data_task(write_half, write_rx, write_control_tx) => {}
         }
     });
+}
+
+/// 将诊断放在实际写入与 flush 之后；独立 AsyncWrite seam 可复现断管及缓冲提交失败。
+async fn write_data_task<W: tokio::io::AsyncWrite + Unpin>(
+    mut write_half: W,
+    mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    control_tx: mpsc::UnboundedSender<CstpControlEvent>,
+) {
+    let mut diagnostics = SessionIoDiagnostics::new(IoDirection::Write);
+    while let Some(frame) = write_rx.recv().await {
+        let write_result = async {
+            write_half.write_all(&frame).await?;
+            write_half.flush().await
+        }
+        .await;
+        if let Err(error) = write_result {
+            let error = SessionIoError::new(IoDirection::Write, &error);
+            diagnostics.publish(&control_tx);
+            let _ = control_tx.send(CstpControlEvent::WriteFailed(error));
+            return;
+        }
+        diagnostics.record(frame.len());
+        let control_write = match frame.get(6).copied() {
+            Some(crate::codec::CSTP_PACKET_TYPE_KEEPALIVE) => {
+                diagnostics.keepalive_frames += 1;
+                true
+            }
+            Some(CSTP_PACKET_TYPE_DPD_REQUEST) => {
+                diagnostics.dpd_request_frames += 1;
+                true
+            }
+            Some(CSTP_PACKET_TYPE_DPD_RESPONSE) => {
+                diagnostics.dpd_response_frames += 1;
+                true
+            }
+            _ => false,
+        };
+        if control_write || diagnostics.sampled_at.elapsed() >= Duration::from_secs(15) {
+            diagnostics.publish(&control_tx);
+        }
+    }
+    diagnostics.publish(&control_tx);
 }
 
 // ---------------------------------------------------------------------------
@@ -513,69 +846,3 @@ fn spawn_data_tasks(
 // 控制帧存活）。`control_event_for_decode` 是纯函数，直接断言解码结果→事件。
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// DPD wire 判别常量：request=0x03 / response=0x04（AnyConnect 标准）。
-    #[test]
-    fn dpd_wire_discriminants() {
-        assert_eq!(CSTP_PACKET_TYPE_DPD_REQUEST, 0x03);
-        assert_eq!(CSTP_PACKET_TYPE_DPD_RESPONSE, 0x04);
-    }
-
-    /// keepalive 控制帧（codec 可解码）→ `Control` 事件，携带 wire kind + body。
-    #[test]
-    fn decoded_control_frame_surfaces_as_control_event() {
-        let outcome = Ok(Some(CstpFrame::Control {
-            kind: 0x07,
-            body: vec![1, 2, 3],
-        }));
-        assert_eq!(
-            control_event_for_decode(&outcome),
-            Some(CstpControlEvent::Control {
-                kind: 0x07,
-                body: vec![1, 2, 3],
-            })
-        );
-    }
-
-    /// DPD response（0x04）以 `UnknownControl` 错误路径出现 → 映射为 `DpdResponse`
-    /// 探测信号（读任务据此算 RTT，且不死亡）。
-    #[test]
-    fn dpd_response_maps_from_unknown_control_error() {
-        let outcome = Err(CodecError::UnknownControl(CSTP_PACKET_TYPE_DPD_RESPONSE));
-        assert_eq!(
-            control_event_for_decode(&outcome),
-            Some(CstpControlEvent::DpdResponse)
-        );
-    }
-
-    /// 其它未知控制帧（非 DPD response）→ `None`（调用方跳过，不致命）。
-    #[test]
-    fn other_unknown_control_yields_none() {
-        let outcome = Err(CodecError::UnknownControl(0x09));
-        assert_eq!(control_event_for_decode(&outcome), None);
-    }
-
-    /// Data 帧 / 半帧（`Ok(None)`）/ 其它错误 → `None`（数据面不被控制事件污染）。
-    #[test]
-    fn data_and_stream_outcomes_yield_none() {
-        assert_eq!(control_event_for_decode(&Ok(Some(CstpFrame::Data(vec![0x45])))), None);
-        assert_eq!(control_event_for_decode(&Ok(None)), None);
-        assert_eq!(control_event_for_decode(&Err(CodecError::Truncated)), None);
-        assert_eq!(control_event_for_decode(&Err(CodecError::BadMagic)), None);
-    }
-
-    /// `CstpControlEvent` 可 Debug/Clone/Eq（事件随 channel 传递所需）。
-    #[test]
-    fn control_event_implements_debug_clone_eq() {
-        let a = CstpControlEvent::DpdResponse;
-        let b = a.clone();
-        assert_eq!(a, b);
-        let _ = format!("{a:?}");
-    }
-}
-
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

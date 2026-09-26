@@ -1,8 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-// R30-T/I：single-slot Stop latch。至多持有一个 Stop token，锚定在当前 attempt 上；
-// 后续 Stop 全部 coalesce 到该 token（计数，而非分配新 token）。stop/RPC waiter 记账均有界，
-// 且 RPC waiter 的 drop 绝不自行 emit Stop（取消不是 Stop 请求）。
 
 use exv_vpn_domain::identity::AttemptId;
 use exv_vpn_domain::limits::MvpLimits;
@@ -93,5 +88,3 @@ impl Default for StopLatch {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

@@ -16,42 +16,15 @@ use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 
 use super::client::CoreClient;
-use super::logs::LogEvent;
 use super::state::RuntimeEvent;
-use super::stats::RuntimeStats;
 use super::wire;
 
 /// WatchEvents 订阅的 Event 名。
 pub const EVENT_STATUS: &str = "exv://status";
-/// StreamLogs 订阅的 Event 名（P4-b wire 缺口：core 未向 UI 暴露 StreamLogs，
-/// 前端 `ipc.ts` 仍监听此名，接线后生效）。
-#[allow(dead_code)]
-pub const EVENT_LOGS: &str = "exv://logs";
-/// 交互提示 Event 名（登录二次确认等；P5 交互流接线后生效）。
-#[allow(dead_code)]
-pub const EVENT_INTERACTION: &str = "exv://interaction";
-/// 归一化统计推送 Event 名（stats-wire 方案 A 后为 seam：统计随 `exv://status` 的
-/// `snapshot.stats` 到达，前端直接读 `ev.snapshot.stats`，本事件无发射源；若后续需
-/// 独立高频统计推送再经 `emit_stats` 启用）。
-#[allow(dead_code)]
-pub const EVENT_STATS: &str = "exv://stats";
 
 /// 向主窗口广播一次运行时事件。
 pub fn emit_status(app: &AppHandle, event: &RuntimeEvent) -> tauri::Result<()> {
     app.emit(EVENT_STATUS, event)
-}
-
-/// 向主窗口广播一条日志（P4-b wire 缺口 seam：无真实推送源，StreamLogs 接线后启用）。
-#[allow(dead_code)]
-pub fn emit_log(app: &AppHandle, log: &LogEvent) -> tauri::Result<()> {
-    app.emit(EVENT_LOGS, log)
-}
-
-/// 向主窗口广播一条归一化统计（stats-wire 方案 A 后为 seam：统计随快照到达，前端
-/// 经 `exv://status` 读 `snapshot.stats`；独立高频推送需先立 requirement 再启用）。
-#[allow(dead_code)]
-pub fn emit_stats(app: &AppHandle, stats: &RuntimeStats) -> tauri::Result<()> {
-    app.emit(EVENT_STATS, stats)
 }
 
 /// 启动 core 事件订阅（P4-b）：WatchEvents 实时订阅 task。
@@ -60,8 +33,7 @@ pub fn emit_stats(app: &AppHandle, stats: &RuntimeStats) -> tauri::Result<()> {
 /// `emit_status` → 流 EOF（core 断开）→ 以本地已见最大 tick 恢复订阅（core
 /// `EventBus::subscribe` 按 resume_tick 重放当前快照，断线重放语义）→ 退避重连。
 ///
-/// StreamLogs（`exv://logs`）为 wire 缺口（见模块文档），当前不拉起——emit_log
-/// seam 保留。
+/// StreamLogs（`exv://logs`）为 wire 缺口（见模块文档），当前不拉起。
 pub fn spawn_subscriptions(app: AppHandle, channel: Channel) -> Vec<tauri::async_runtime::JoinHandle<()>> {
     let mut handles = Vec::new();
 

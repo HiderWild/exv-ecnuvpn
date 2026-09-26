@@ -1,40 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W17-T Terra: Wintun session（WintunSession / WintunPacket）契约测试。这些测试钉住
-// W17-I 在 exv_vpn_win32_resource::wintun_session 实现的 seam。冻结事实
-// （docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-wintun-facts.md，
-// WSP3 提权实测）是契约：
-//   - ring capacity 131072（2^17；min 131072 / max 67108864，power_of_two）；WintunStartSession
-//     拒绝非 2 幂 / 越界容量（seam start 必须 Err）；
-//   - 空 ring receive -> ERROR_NO_MORE_ITEMS(259)，seam 映射为 Ok(None)；
-//   - 满 ring allocate -> ERROR_BUFFER_OVERFLOW(111)，seam send 映射为 Err（不得 panic）；
-//   - child packet worker 必须**先 join 再 WintunEndSession**（0.14.1 的 EndSession 销毁
-//     session 对象，之后任何 WintunReceivePacket 都是 UAF——实测 ntdll AV 崩溃）；
-//   - read-wait 事件由 session 管理：调用方不得 CloseHandle（EndSession 关闭之）；
-//   - outstanding receive 必须经 WintunReleaseReceivePacket 释放；
-//   - 真实收发：Wintun 是 NdisMediumLoopback——同子网 ICMP 被内核本地应答、不进入 ring；
-//     只有跨子网（10.99.99.0/24 经 adapter 显式路由）的包才真实经过 ring；ICMP 校验和
-//     必须先把字段清零再重算（WSP3 实测 bug：漏清零导致 reply 校验和无效被内核丢弃）。
-//
-// W17-I pinned seam（src/wintun_session.rs）：
-//   pub struct WintunSession（包装 WintunStartSession 句柄）；pub struct WintunPacket（receive 缓冲 + 大小，drop 时释放）
-//   WintunSession::start(&WintunLibrary, &WintunAdapter, u32) -> Result<Self, NativeError>
-//   WintunSession::receive(&mut self) -> Result<Option<WintunPacket>, NativeError>   // 空 -> Ok(None)；满 -> Err
-//   WintunSession::send(&mut self, &[u8]) -> Result<(), NativeError>                 // AllocateSendPacket + SendPacket
-//   WintunSession::read_wait_event(&self) -> HANDLE                                    // 调用方不得 CloseHandle
-//   WintunSession::ring_capacity(&self) -> u32
-//   Drop -> WintunEndSession（必须在 packet worker join 之后）
-// 本测试对 seam 追加的契约（W17-I 必须满足，否则 GREEN 编译失败）：
-//   - WintunPacket::as_slice() -> &[u8]：receive 缓冲的内容访问（缓冲由 drop 释放）；
-//   - WintunSession: Send：worker 线程经 Arc<Mutex<WintunSession>> 共享。windows::HANDLE
-//     不是 Send（裸指针），W17-I 须提供有审阅 SAFETY 注释的 Send 实现（同 WSP3 spike 的
-//     RawSession 模式：句柄生命周期由实现保证，跨线程期间 session 不被 EndSession）。
-//
-// 本测试在真实 Windows 宿主（admin）上创建真实的 Wintun adapter + session。每个测试
-// 结束时按安全顺序清理：worker join -> drop session（EndSession）-> drop adapter
-// （创建者 close = 移除 adapter，无残留；adapter 上的 IP/路由随之消失）。非 elevated
-// 宿主上动态断言短路为 `not_run / blocked_by_environment`（明确输出，不伪造假绿）。
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -54,7 +17,7 @@ use windows::Win32::System::Threading::{
 };
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（PATH DLL 是 mutant；哈希由 WintunLibrary::load 校验）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// Wintun ring capacity 官方界限（wintun.h / native-wintun-facts.md §1：min 0x20000 / max 0x4000000）。
 const RING_CAPACITY_MIN: u32 = 131072;
 const RING_CAPACITY_MAX: u32 = 67108864;

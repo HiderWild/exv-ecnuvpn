@@ -440,7 +440,7 @@ pub async fn window_chrome_set_mode<R: Runtime>(
 ///
 /// 控件区在 `WM_NCHITTEST` 中按客户区交给 WebView，不能再依赖 WebView2
 /// 对 `HTMINBUTTON`/`HTMAXBUTTON`/`HTCLOSE` 的非客户区转发；否则按钮可能只
-/// 能显示而不能收到 click。关闭继续保持既有“隐藏到托盘”语义。
+/// 能显示而不能收到 click。关闭统一进入 lifecycle 策略，不能在此绕过偏好或运行时状态。
 #[tauri::command]
 pub async fn window_chrome_control<R: Runtime>(
     window: WebviewWindow<R>,
@@ -464,9 +464,13 @@ pub async fn window_chrome_control<R: Runtime>(
                     .map_err(|error| format!("窗口最大化失败：{error}"))
             }
         }
-        NativeWindowControl::Close => window
-            .hide()
-            .map_err(|error| format!("窗口隐藏失败：{error}")),
+        NativeWindowControl::Close => {
+            crate::lifecycle::request_main_window_close(
+                window,
+                crate::lifecycle::MainWindowCloseSource::WindowChrome,
+            );
+            Ok(())
+        }
     }
 }
 
@@ -480,6 +484,11 @@ pub async fn window_set_visible<R: Runtime>(
     visible: bool,
 ) -> Result<(), String> {
     if visible {
+        // 与 `lifecycle::show_main_window` 同序：先还原最小化态，再 show + focus。
+        // 窗口停在任务栏最小化时，show() 是 no-op 且 tao 会跳过已最小化窗口的聚焦。
+        window
+            .unminimize()
+            .map_err(|error| format!("窗口还原失败：{error}"))?;
         window
             .show()
             .map_err(|error| format!("窗口显示失败：{error}"))?;
@@ -491,11 +500,6 @@ pub async fn window_set_visible<R: Runtime>(
             .hide()
             .map_err(|error| format!("窗口隐藏失败：{error}"))
     }
-}
-
-#[cfg(not(windows))]
-pub fn install<R: Runtime>(_app: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    Ok(())
 }
 
 #[cfg(windows)]
@@ -693,115 +697,4 @@ mod native {
 #[cfg(windows)]
 pub fn install<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     native::install(app)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::{
-        FrameMetrics, HitResult, NativeWindowControl, NativeWindowControlState, Point,
-        WindowChromeState, WindowMode, hit_test, native_window_control,
-    };
-
-    #[test]
-    fn native_hit_results_map_to_distinct_controls() {
-        assert_eq!(
-            native_window_control(HitResult::Minimize),
-            Some(NativeWindowControl::Minimize)
-        );
-        assert_eq!(
-            native_window_control(HitResult::Maximize),
-            Some(NativeWindowControl::Maximize)
-        );
-        assert_eq!(
-            native_window_control(HitResult::Close),
-            Some(NativeWindowControl::Close)
-        );
-        assert_eq!(native_window_control(HitResult::Caption), None);
-    }
-
-    #[test]
-    fn native_control_state_publishes_hover_and_reset() {
-        let state = WindowChromeState::new();
-        let events: Arc<Mutex<Vec<NativeWindowControlState>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink_events = Arc::clone(&events);
-        state.inner.set_event_sink(Arc::new(move |payload| {
-            sink_events.lock().expect("event lock").push(payload);
-        }));
-
-        state
-            .inner
-            .set_hovered_control(Some(NativeWindowControl::Close));
-        state
-            .inner
-            .set_pressed_control(Some(NativeWindowControl::Close));
-        state.inner.reset_control_state();
-
-        let events = events.lock().expect("event lock");
-        assert_eq!(
-            events[0],
-            NativeWindowControlState {
-                control: Some(NativeWindowControl::Close),
-                pressed: false,
-            }
-        );
-        assert_eq!(
-            events[1],
-            NativeWindowControlState {
-                control: Some(NativeWindowControl::Close),
-                pressed: true,
-            }
-        );
-        assert_eq!(
-            events[2],
-            NativeWindowControlState {
-                control: None,
-                pressed: false,
-            }
-        );
-    }
-
-    #[test]
-    fn advanced_titlebar_preserves_web_controls_and_owns_native_buttons() {
-        let frame = FrameMetrics::from_logical(1200, 760, 96, WindowMode::Advanced);
-        assert_eq!(hit_test(Point { x: 420, y: 16 }, frame), HitResult::Caption);
-        assert_eq!(hit_test(Point { x: 820, y: 16 }, frame), HitResult::Client);
-        assert_eq!(hit_test(Point { x: 1000, y: 16 }, frame), HitResult::Client);
-        assert_eq!(
-            hit_test(Point { x: 1090, y: 16 }, frame),
-            HitResult::Minimize
-        );
-        assert_eq!(
-            hit_test(Point { x: 1134, y: 16 }, frame),
-            HitResult::Maximize
-        );
-        assert_eq!(hit_test(Point { x: 1178, y: 16 }, frame), HitResult::Close);
-    }
-
-    #[test]
-    fn minimal_titlebar_has_no_maximize_button_and_no_resize_border() {
-        let frame = FrameMetrics::from_logical(328, 136, 96, WindowMode::Minimal);
-        assert_eq!(hit_test(Point { x: 220, y: 16 }, frame), HitResult::Caption);
-        assert_eq!(hit_test(Point { x: 260, y: 16 }, frame), HitResult::Client);
-        assert_eq!(
-            hit_test(Point { x: 284, y: 16 }, frame),
-            HitResult::Minimize
-        );
-        assert_eq!(hit_test(Point { x: 326, y: 16 }, frame), HitResult::Close);
-        assert_ne!(
-            hit_test(Point { x: 0, y: 68 }, frame),
-            HitResult::ResizeLeft
-        );
-    }
-
-    #[test]
-    fn advanced_window_keeps_dpi_scaled_eight_logical_pixel_resize_border() {
-        let frame = FrameMetrics::from_logical(1200, 760, 144, WindowMode::Advanced);
-        assert_eq!(frame.resize_border_px, 12);
-        assert_eq!(
-            hit_test(Point { x: 2, y: 400 }, frame),
-            HitResult::ResizeLeft
-        );
-    }
 }

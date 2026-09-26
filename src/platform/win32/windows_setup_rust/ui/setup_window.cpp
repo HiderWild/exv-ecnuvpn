@@ -6,6 +6,7 @@
 #include "windows_setup_rust/resource.hpp"
 #include "windows_setup_rust/shortcuts.hpp"
 #include "windows_setup_rust/uninstall_engine.hpp"
+#include "windows_setup_rust/util/command_line.hpp"
 #include "windows_setup_rust/ui/icon_bitmaps.hpp"
 #include "windows_setup_rust/ui/theme.hpp"
 
@@ -52,6 +53,8 @@ struct AppState {
   std::wstring install_dir;
   std::wstring status;
   std::wstring error;
+  std::wstring uninstall_detail;
+  std::wstring diagnostic_log_path;
   float display_progress{0.0f};
   float target_progress{0.0f};
   float wave_phase{0.0f};
@@ -107,6 +110,7 @@ struct AppState {
   D2D1_RECT_F hit_finish{};
   D2D1_RECT_F hit_uninstall{};
   D2D1_RECT_F hit_close{};
+  D2D1_RECT_F hit_diagnostic_log{};
   D2D1_RECT_F hit_check_desktop{};
   D2D1_RECT_F hit_check_start{};
   D2D1_RECT_F hit_check_quick{};
@@ -124,6 +128,7 @@ struct AppState {
   float hover_finish{0.0f};
   float hover_uninstall{0.0f};
   float hover_close{0.0f};
+  float hover_diagnostic_log{0.0f};
   float hover_window_close{0.0f};
   float hover_path{0.0f};
   float hover_check_desktop{0.0f};
@@ -332,6 +337,7 @@ float WaterLevel(const AppState *app) {
 bool IsInteractiveControl(const AppState *app, float x, float y) {
   if (Hit(x, y, app->hit_install) || Hit(x, y, app->hit_browse) || Hit(x, y, app->hit_path_field) ||
       Hit(x, y, app->hit_finish) || Hit(x, y, app->hit_uninstall) || Hit(x, y, app->hit_close) ||
+      Hit(x, y, app->hit_diagnostic_log) ||
       Hit(x, y, app->hit_window_close) || Hit(x, y, app->hit_check_desktop) ||
       Hit(x, y, app->hit_check_start) || Hit(x, y, app->hit_check_quick) ||
       Hit(x, y, app->hit_check_launch) || Hit(x, y, app->hit_check_clear)) {
@@ -348,6 +354,7 @@ bool IsHandCursorControl(const AppState *app, float x, float y) {
   }
   return Hit(x, y, app->hit_browse) || Hit(x, y, app->hit_finish) ||
          Hit(x, y, app->hit_uninstall) || Hit(x, y, app->hit_close) ||
+         Hit(x, y, app->hit_diagnostic_log) ||
          Hit(x, y, app->hit_window_close) || Hit(x, y, app->hit_check_desktop) ||
          Hit(x, y, app->hit_check_start) || Hit(x, y, app->hit_check_quick) ||
          Hit(x, y, app->hit_check_launch) || Hit(x, y, app->hit_check_clear);
@@ -1094,6 +1101,7 @@ void PaintScene(AppState *app, ID2D1RenderTarget *rt, float width, float height,
   const float pad = kShadowMarginDip;
   const D2D1_RECT_F card = D2D1::RectF(pad, pad, width - pad, height - pad);
   app->content_rect = card;
+  app->hit_diagnostic_log = {};
 
   // Compact icon/wave stage: only the upper band. Title/form sit on clean white below.
   // Wave pool must NOT cover the EXV wordmark.
@@ -1353,24 +1361,22 @@ void PaintScene(AppState *app, ID2D1RenderTarget *rt, float width, float height,
     DrawCardChrome(rt, card, kCardRadius, 1.0f);
     // Primary close button only — no "退出安装" disc after work is finished.
     app->hit_window_close = {};
-    // Match the install finish page rhythm: icon above title, button lower but
-    // still inside the card.
     const float icon_sz = 64.0f;
     const float title_h = 36.0f;
     const float btn_h = 40.0f;
-    const float fixed = icon_sz + title_h + btn_h;
-    const float free = std::max(0.0f, (card.bottom - card.top) - fixed);
-    const float unit = free / 7.0f;
-    const float m_top = unit * 2.0f;
-    const float g_icon = unit * 2.0f;
-    const float g_title = unit * 2.0f;
-    float y = card.top + m_top;
+    float y = card.top + 28.0f;
     DrawWaveIcon(app, rt, cx, y + icon_sz * 0.5f, icon_sz, true);
-    y += icon_sz + g_icon;
+    y += icon_sz + 14.0f;
     DrawD2DText(rt, app->title_tf, brand, L"已卸载",
                 D2D1::RectF(cx - 100, y, cx + 100, y + title_h));
-    y += title_h + g_title;
-    app->hit_close = ButtonRect(cx, y, 180.0f, btn_h);
+    const float button_top = card.bottom - 28.0f - btn_h;
+    if (!app->uninstall_detail.empty()) {
+      DrawD2DText(rt, app->body_tf, dark, app->uninstall_detail,
+                  D2D1::RectF(card.left + 28.0f, y + title_h + 4.0f,
+                              card.right - 28.0f, button_top - 8.0f),
+                  DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+    app->hit_close = ButtonRect(cx, button_top, 180.0f, btn_h);
     DrawPrimaryButton(rt, app->button_tf, app->hit_close, L"有缘再会", app->hover_close, kBrandR,
                       kBrandG, kBrandB, true);
   } else if (app->page == Page::Error) {
@@ -1378,17 +1384,27 @@ void PaintScene(AppState *app, ID2D1RenderTarget *rt, float width, float height,
     // Keep the title high enough to read as the page heading and anchor the
     // primary action to the card bottom so it can never overflow the surface.
     const float title_h = 50.0f;
-    const float body_h = 58.0f;
     const float btn_h = 40.0f;
     const float title_top = card.top + 76.0f;
     const float body_top = title_top + title_h + 14.0f;
     const float button_bottom = card.bottom - 28.0f;
     const float button_top = button_bottom - btn_h;
+    const bool has_diagnostic_log = !app->diagnostic_log_path.empty();
     DrawD2DText(rt, app->title_tf, brand, L"出错了",
                 D2D1::RectF(cx - 100, title_top, cx + 100, title_top + title_h));
-    DrawD2DText(rt, app->body_tf, dark, app->error.empty() ? L"未知错误" : app->error,
-                D2D1::RectF(card.left + 24, body_top, card.right - 24, body_top + body_h));
-    app->hit_close = ButtonRect(cx, button_top, 180.0f, btn_h);
+    const auto &error_detail = app->uninstall && !app->uninstall_detail.empty()
+                                   ? app->uninstall_detail
+                                   : app->error;
+    DrawD2DText(rt, app->body_tf, dark, error_detail.empty() ? L"未知错误" : error_detail,
+                D2D1::RectF(card.left + 24, body_top, card.right - 24, button_top - 12.0f));
+    if (has_diagnostic_log) {
+      app->hit_diagnostic_log = ButtonRect(cx - 94.0f, button_top, 168.0f, btn_h);
+      app->hit_close = ButtonRect(cx + 94.0f, button_top, 168.0f, btn_h);
+      DrawSecondaryButton(rt, app->button_tf, app->hit_diagnostic_log, L"打开诊断日志",
+                          app->hover_diagnostic_log, kBrandR, kBrandG, kBrandB);
+    } else {
+      app->hit_close = ButtonRect(cx, button_top, 180.0f, btn_h);
+    }
     DrawPrimaryButton(rt, app->button_tf, app->hit_close, L"关闭", app->hover_close, kBrandR,
                       kBrandG, kBrandB);
     DrawWindowCloseButton(app, rt, card, app->hover_window_close);
@@ -1771,6 +1787,8 @@ void StartUninstallWorker(AppState *app) {
   app->intro_drain_active = false;
   app->fill_water_before_finish = false;
   app->status = L"正在开始卸载…";
+  app->uninstall_detail.clear();
+  app->diagnostic_log_path.clear();
   app->progress_model.SetListener([app](double t, const std::wstring &status) {
     const float p = static_cast<float>(std::clamp(t, 0.0, 1.0));
     app->target_progress = p;
@@ -1787,9 +1805,18 @@ void StartUninstallWorker(AppState *app) {
     UninstallRequest req;
     req.install_dir = app->install_dir;
     req.clear_user_data = app->opt_clear_user_data;
+    req.user_profile_root = app->options.user_profile_root;
+    req.local_app_data_root = app->options.local_app_data_root;
+    req.roaming_app_data_root = app->options.roaming_app_data_root;
+    req.config_dir = app->options.config_dir;
+    req.temp_root = app->options.temp_root;
+    req.include_credential_manager = app->options.include_credential_manager;
+    req.credential_cleanup_note = app->options.credential_cleanup_note;
     const auto result = RunUninstall(req, &app->progress_model);
     app->work_ok = result.ok;
     app->error = result.error;
+    app->uninstall_detail = BuildUninstallResultDetail(result);
+    app->diagnostic_log_path = result.diagnostic_log_path;
     app->work_done = true;
     app->work_running = false;
     PostMessageW(app->hwnd, WM_APP + 1, 0, 0);
@@ -1962,6 +1989,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           app->hover_uninstall =
               ease_hover(app->hover_uninstall, Hit(app->pointer_x, app->pointer_y, app->hit_uninstall));
           app->hover_close = ease_hover(app->hover_close, Hit(app->pointer_x, app->pointer_y, app->hit_close));
+          app->hover_diagnostic_log = ease_hover(
+              app->hover_diagnostic_log,
+              Hit(app->pointer_x, app->pointer_y, app->hit_diagnostic_log));
           app->hover_path = ease_hover(app->hover_path, Hit(app->pointer_x, app->pointer_y, app->hit_path_field));
           app->hover_check_desktop =
               ease_hover(app->hover_check_desktop, Hit(app->pointer_x, app->pointer_y, app->hit_check_desktop));
@@ -1979,6 +2009,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           app->hover_finish = ease_hover(app->hover_finish, false);
           app->hover_uninstall = ease_hover(app->hover_uninstall, false);
           app->hover_close = ease_hover(app->hover_close, false);
+          app->hover_diagnostic_log = ease_hover(app->hover_diagnostic_log, false);
           app->hover_path = ease_hover(app->hover_path, false);
           app->hover_check_desktop = ease_hover(app->hover_check_desktop, false);
           app->hover_check_start = ease_hover(app->hover_check_start, false);
@@ -2144,7 +2175,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           Present(app);
         }
       } else if (app->page == Page::Done || app->page == Page::Error) {
-        if (Hit(x, y, app->hit_close)) {
+        if (app->page == Page::Error && Hit(x, y, app->hit_diagnostic_log) &&
+            !app->diagnostic_log_path.empty()) {
+          const auto log_argument = QuoteCommandLineArgument(app->diagnostic_log_path);
+          const auto opened = reinterpret_cast<INT_PTR>(
+              ShellExecuteW(hwnd, L"open", L"notepad.exe", log_argument.c_str(), nullptr,
+                            SW_SHOWNORMAL));
+          if (opened <= 32) {
+            MessageBoxW(hwnd, L"无法打开诊断日志；请按页面显示的路径手动打开。", L"EXV Setup",
+                        MB_OK | MB_ICONWARNING);
+          }
+        } else if (Hit(x, y, app->hit_close)) {
           DestroyWindow(hwnd);
         }
       }

@@ -3,9 +3,6 @@ import type { ConnectPhase } from "../lib/ipc";
 /** 阶段在产品界面中的三种明确语义。 */
 export type StageVisual = "complete" | "current" | "waiting";
 
-/** 完整模式和极简模式共享的产品模式标识。 */
-export type ProductMode = "advanced" | "minimal";
-
 /** 从 Rust 运行状态归一化而来的产品状态。 */
 export type ProductStatus =
   | "idle"
@@ -25,19 +22,22 @@ export interface ProductStage {
   visual: StageVisual;
 }
 
-/** 尚无稳定 Rust/Tauri 数据口时唯一允许的呈现方式。 */
-export interface UnimplementedValue {
-  label: "未实现";
-  interactive: false;
-}
-
-export interface ProductUnimplemented {
-  currentUser: UnimplementedValue;
-  campusIp: UnimplementedValue;
-  vpnServer: UnimplementedValue;
-}
-
-/** 连接页可展示的身份与隧道信息；null 表示真实数据源暂未提供该字段。 */
+/**
+ * 连接页可展示的身份与隧道信息；`null` 表示「有数据口但本次值为空」。
+ *
+ * 两级占位契约（2026-09-05-product-ui-unimplemented-fields-plan §4.2，冻结）：
+ * - 「未实现」= 字段**无任何数据口**（不可点击、非故障/警告语义）；
+ * - 「—」= 字段**有数据口**但本次值为空/探测失败/尚未到达（静态文本，
+ *   不重试提示、不回退旧值）。
+ * 禁止用示例用户名/示例 IP/示例服务器填充任一档；两档文案不得混用或互换。
+ *
+ * 数据源裁决（§4.1，冻结）：三字段全部有口，任何状态下都不得渲染「未实现」——
+ * - `account`   ← config `username`（ConfigGet 非秘密项）；空/未配置 → null
+ * - `vpnServer` ← config `server`（ConfigGet 非秘密项）；空/未配置 → null
+ * - `campusIp`  ← `tunnel_address` 本机 ExvEngine 适配器 IPv4；未连接/未分配/失败 → null
+ * 若未来快照新增会话级账户/服务器事实，须另立 wire unfreeze 记录后由适配层映射。
+ *
+ */
 export interface ProductConnectionInfo {
   account: string | null;
   vpnServer: string | null;
@@ -102,6 +102,20 @@ export interface ProductReconnect {
   /** 配置的重试预算（0 = 无限）。 */
   maxAttempts: number;
 }
+
+/**
+ * host 自愈进展（EXV_UNFREEZE 2026-09-05；engine 崩溃 respawn 的用户可见化，
+ * 2026-09-05 host 自愈进展 UI 计划 §4.5 冻结）。`active: true` 时仅覆盖
+ * `ProductUiState.description`（title/severity 仍由真实 runtime 状态决定，不伪造
+ * 「已连接/已恢复」标题）；`errorCode` 字段只在 failed 档携带自愈稳定码——顶层
+ * `ProductUiState.errorCode` 是 runtime 业务错误的稳定码语义，不被自愈改写。
+ */
+export type ProductSelfHeal =
+  | { active: true; stage: "respawning"; description: string }
+  | { active: true; stage: "succeeded"; description: string }
+  | { active: true; stage: "failed"; description: string; errorCode: string }
+  | { active: true; stage: "unknown"; description: string }
+  | { active: false };
 
 /** SCM 服务状态 wire 值（`ServiceStatus.state`；穷尽解析，未知码归 `"other"`）。 */
 export type ServiceScmState =
@@ -174,7 +188,10 @@ export interface ProductService {
 /**
  * 网络资源状态（S1.5 三 owner：路由/网卡/连接，经 StatusPublisher 结构化上报）。
  * 当前快照 wire 未携带 owner 状态字段（proto 冻结，D5 不新增 UI 直连字段）→
- * `available: false` 占位，UI 呈现「未实现」，不伪造 owner 状态。
+ * **无任何数据口**，属两级占位契约的「未实现」档：`available: false` 占位，
+ * 不伪造 owner 状态；该档固定文案「未实现」、不可点击、非故障/警告语义，
+ * 永不回落「—」（「—」暗示值稍后会来，而该字段根本没有接口），直至 S1.5
+ * owner 状态真正接线（届时按计划 §4.1 重裁）。
  */
 export type ProductNetworkResources =
   | { available: true; sessionOwner: string; nicOwner: string; routeOwner: string }
@@ -182,6 +199,8 @@ export type ProductNetworkResources =
 
 /** 产品层可直接交给完整模式和极简模式的只读呈现模型。 */
 export interface ProductUiState {
+  /** 接纳快照所属操作，只用于关联真实终态。 */
+  operationId?: string | null;
   /** Core 控制面两态：仅由已认证控制管道的真实可用性推导。 */
   coreStatus: "normal" | "stopped";
   status: ProductStatus;
@@ -196,6 +215,8 @@ export interface ProductUiState {
   proxyTun: ProductProxyTun;
   systemProxy: ProductSystemProxy;
   reconnect: ProductReconnect;
+  /** host 自愈进展（EXV_UNFREEZE 2026-09-05；仅覆盖描述行，见 ProductSelfHeal）。 */
+  selfHeal: ProductSelfHeal;
   service: ProductService;
   networkResources: ProductNetworkResources;
   connectEnabled: boolean;

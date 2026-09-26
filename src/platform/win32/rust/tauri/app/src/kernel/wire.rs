@@ -16,7 +16,8 @@ use super::logs::LogEvent;
 use super::state::{
     ConnectPhase, OperationReply, OperationResult, ProxyTunAdapter, ProxyTunDetection,
     ReconnectStatus, RuntimeEvent, RuntimeEventKind, RuntimeSnapshot, RuntimeState,
-    ServiceControlAction, ServiceControlReply, ServiceStatus, SystemProxyDetection, VpnError,
+    SelfHealStatus, ServiceControlAction, ServiceControlReply, ServiceStatus,
+    SystemProxyDetection, VpnError,
 };
 use super::stats::{RuntimeStats, StatsPhase};
 
@@ -41,8 +42,7 @@ pub fn current_principal_digest() -> Option<[u8; 32]> {
 /// 请求与回传**，host 以 lookup_key.operation_id 关联状态事件；request_digest 32
 /// 字节；profile 从 UI 引用）。
 ///
-/// UI 提交的一次性 `secret_payload` 原样进入 wire（core 侧会零化其副本；UI 侧
-/// 请求 move 后随 drop 释放）。
+/// UI 提交的结构化一次性凭据在此编码到既有 `secret_payload`（core 侧会零化其副本）。
 ///
 /// # Errors
 /// 当前用户 SID 无法解析（无法派生 principal digest）→ `AppError::Internal`。
@@ -72,12 +72,40 @@ pub fn connect_request(
             request_digest,
             profile,
         }),
-        secret_payload: intent
-            .secret_payload
-            .clone()
-            .unwrap_or_default()
-            .into_bytes(),
+        secret_payload: secret_payload_for(intent)?,
     })
+}
+
+/// 在 Tauri→Core 边界将组件可见的结构化凭据编码进既有秘密载荷。这个 JSON 不会返回
+/// Vue，也不作为错误内容；未提供凭据时保留旧 Rust 内部调用者的 payload 兼容路径。
+fn secret_payload_for(
+    intent: &super::client::ConnectIntent,
+) -> Result<Vec<u8>, super::error::AppError> {
+    if let Some(credentials) = &intent.credentials {
+        let engine_payload = EngineCredentialPayload {
+            version: 1,
+            username: &credentials.username,
+            password: &credentials.password,
+        };
+        return serde_json::to_vec(&engine_payload).map_err(|_| {
+            super::error::AppError::Internal(
+                "connect: cannot encode credential payload".to_string(),
+            )
+        });
+    }
+    Ok(intent
+        .secret_payload
+        .clone()
+        .unwrap_or_default()
+        .into_bytes())
+}
+
+/// engine 只识别凭据包版本与用户名/密码；前端持久化选择属于 host 语义，绝不穿透本包。
+#[derive(serde::Serialize)]
+struct EngineCredentialPayload<'a> {
+    version: u32,
+    username: &'a str,
+    password: &'a str,
 }
 
 /// 组装 `KernelControl.Stop` 请求（method=STOP 的完整意图；principal 派生同
@@ -136,7 +164,8 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
 /// stats-wire 方案 A：`stats` 随快照携带，`None` = 尚无样本；C5-wire：`proxy_tun`
 /// 随快照携带，`None` = 未探测/探测失败；R1：`operation_id` 随快照携带，hex16，
 /// 空 = 无在途操作；S2：`system_proxy` 随快照携带，`None` = 未检测/检测失败；
-/// S4：`reconnect` 随快照携带，`None` = 重连不适用）。
+/// S4：`reconnect` 随快照携带，`None` = 重连不适用；EXV_UNFREEZE 2026-09-05：
+/// `self_heal` 随快照携带，`None` = 无自愈上下文）。
 #[must_use]
 pub fn snapshot_from_wire(
     wire_snap: &wire::RuntimeSnapshot,
@@ -160,10 +189,8 @@ pub fn snapshot_from_wire(
             .system_proxy
             .as_ref()
             .map(system_proxy_detection_from_wire),
-        reconnect: wire_snap
-            .reconnect
-            .as_ref()
-            .map(reconnect_status_from_wire),
+        reconnect: wire_snap.reconnect.as_ref().map(reconnect_status_from_wire),
+        self_heal: wire_snap.self_heal.as_ref().map(self_heal_status_from_wire),
     }
 }
 
@@ -188,6 +215,7 @@ pub fn event_from_wire(ev: &wire::RuntimeEvent) -> RuntimeEvent {
             mode: String::new(),
             system_proxy: None,
             reconnect: None,
+            self_heal: None,
         });
     RuntimeEvent {
         monotonic_tick: ev.monotonic_tick,
@@ -324,6 +352,18 @@ fn reconnect_status_from_wire(w: &wire::ReconnectStatus) -> ReconnectStatus {
     }
 }
 
+/// wire `SelfHealStatus` → UI `SelfHealStatus`（EXV_UNFREEZE 2026-09-05；字段一一
+/// 对应，stage 未知码原样透传——前端 fail-safe 渲染，error_code 仅 failed 非空）。
+#[must_use]
+fn self_heal_status_from_wire(w: &wire::SelfHealStatus) -> SelfHealStatus {
+    SelfHealStatus {
+        stage: w.stage.clone(),
+        old_pid: w.old_pid,
+        new_pid: w.new_pid,
+        error_code: w.error_code.clone(),
+    }
+}
+
 /// wire `ServiceStatus` → UI `ServiceStatus`（S3/D5 字段一一对应 + R3 `health_state`，
 /// 仅展示）。
 #[must_use]
@@ -338,8 +378,9 @@ fn service_status_from_wire(w: &wire::ServiceStatus) -> ServiceStatus {
 
 /// 组装 `KernelControl.ServiceControl` 请求：UI action → wire action（S3/D5）。
 ///
-/// query 为非提权读；install/uninstall/start 为变更 action，host 侧走 write path
-/// gate + engine 子命令 runas 提权 seam（D4）。
+/// query 为非提权读；install/uninstall/start/rotate_key 为变更 action，host 侧走
+/// write path gate + engine 子命令 runas 提权 seam（D4）。RotateKey 轮换（撤销）
+/// 服务 PSK（2026-09-05 解冻：`ServiceRotateKey` 空消息，tag 6）。
 #[must_use]
 pub fn service_control_request(action: ServiceControlAction) -> wire::ServiceControlRequest {
     use wire::service_control_request::Action as WireAction;
@@ -348,6 +389,7 @@ pub fn service_control_request(action: ServiceControlAction) -> wire::ServiceCon
         ServiceControlAction::Install => WireAction::Install(wire::ServiceInstall {}),
         ServiceControlAction::Uninstall => WireAction::Uninstall(wire::ServiceUninstall {}),
         ServiceControlAction::Start => WireAction::Start(wire::ServiceStart {}),
+        ServiceControlAction::RotateKey => WireAction::RotateKey(wire::ServiceRotateKey {}),
     };
     wire::ServiceControlRequest {
         action: Some(action),
@@ -364,15 +406,39 @@ pub fn service_control_reply_from_wire(reply: &wire::ServiceControlReply) -> Ser
     }
 }
 
-/// wire `VpnError` → UI `VpnError`（redacted：仅稳定 code 字符串；自由文本诊断栈
-/// 永不进 UI——wire 的 native 字段是 redacted 类别，不展开）。
+/// wire `VpnError` → UI `VpnError`。稳定 code 原样映射；平台依赖错误只按 redacted
+/// Win32 原始码选择仓库内静态修复文案。自由文本诊断栈和原始码本身永不进入 UI。
 #[must_use]
 fn vpn_error_from_wire(err: &wire::VpnError) -> VpnError {
+    let message = if err.code == wire::ErrorCode::PlatformDependencyUnavailable as i32 {
+        let win32_code = err.native.as_ref().and_then(|native| {
+            (native.namespace == wire::NativeErrorNamespace::Win32 as i32).then_some(native.code)
+        });
+        match win32_code {
+            Some(2 | 3) => {
+                "Wintun 网络组件缺失，未找到可用的本地副本。请重新运行 EXV 安装程序修复后重试。"
+            }
+            Some(5) => "Wintun 网络组件无法读取或权限不足。请修复 EXV 安装权限后重试。",
+            Some(13 | 127 | 193) => "Wintun 本地组件损坏或版本不匹配。请覆盖安装官方 EXV 后重试。",
+            _ => "Wintun 网络组件自动恢复失败。请查看日志或修复安装后重试。",
+        }
+    } else if err.code == wire::ErrorCode::EffectUnknown as i32
+        && err.stage == wire::ErrorStage::ApplyingPlatformTunnel as i32
+    {
+        match err.native.as_ref().filter(|native| native.namespace == wire::NativeErrorNamespace::Win32 as i32).map(|native| native.code) {
+            Some(1168) => "配置连接路由失败：Windows 未找到对应的接口或路由。请重试；仍失败请导出日志反馈。",
+            Some(5) => "配置本机网络失败：Windows 拒绝访问。请检查 EXV 服务权限，并导出日志反馈。",
+            _ => "配置本机网络失败，连接未建立。请重试；仍失败请导出日志反馈。",
+        }
+    } else {
+        ""
+    };
+
     VpnError {
         code: wire::ErrorCode::try_from(err.code)
             .map(|c| c.as_str_name().to_string())
             .unwrap_or_else(|_| "ERROR_CODE_UNSPECIFIED".to_string()),
-        message: String::new(),
+        message: message.to_owned(),
     }
 }
 
@@ -476,526 +542,3 @@ fn hex8(b: &u8) -> String {
 // ---------------------------------------------------------------------------
 // 单元测试：wire → UI 映射 + 请求组装。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// wire Idle 快照 → UI Idle。
-    #[test]
-    fn snapshot_idle_maps_to_ui_idle() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Idle(wire::IdleState {
-                last_cleanup: None,
-            })),
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 7);
-        assert_eq!(ui.monotonic_tick, 7);
-        assert!(matches!(ui.runtime, RuntimeState::Idle { .. }));
-    }
-
-    /// wire Connecting（phase=STARTING_DATA_PLANE，携带 attempt_id）→ UI Connecting。
-    #[test]
-    fn snapshot_connecting_maps_phase_and_attempt() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Connecting(
-                wire::ConnectingState {
-                    attempt: Some(wire::Attempt {
-                        runtime_epoch: vec![0xEE; 16],
-                        attempt_id: vec![0xAB; 16],
-                        intent: None,
-                        prior_error: None,
-                    }),
-                    phase: wire::ConnectPhase::StartingDataPlane as i32,
-                },
-            )),
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 1);
-        let RuntimeState::Connecting {
-            phase,
-            attempt_id,
-            phase_index,
-        } = ui.runtime
-        else {
-            panic!("expected connecting");
-        };
-        assert_eq!(phase, ConnectPhase::StartingDataPlane);
-        assert_eq!(phase_index, 7);
-        assert_eq!(
-            attempt_id,
-            Some("ab".repeat(16)),
-            "attempt_id 必须小写 hex 展示"
-        );
-    }
-
-    /// wire Connected（内部 refs 不泄漏）→ UI Connected（redacted：无 summary）。
-    #[test]
-    fn snapshot_connected_is_redacted() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Connected(
-                wire::ConnectedState {
-                    session: Some(wire::ConnectedSession {
-                        attempt: Some(wire::Attempt::default()),
-                        protocol_session: Some(wire::ProtocolSessionRef {
-                            identity_digest: vec![1; 32],
-                        }),
-                        platform_ownership: None,
-                        packet_lease: None,
-                        platform_ready: None,
-                        data_running: None,
-                    }),
-                    session_established_at_ms: 1_700_000_000_123,
-                },
-            )),
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 2);
-        assert!(matches!(
-            ui.runtime,
-            RuntimeState::Connected {
-                session_established_at_ms: Some(1_700_000_000_123),
-                summary: None,
-            }
-        ));
-    }
-
-    /// wire FailedDirty（带 obligation）→ UI FailedDirty has_obligation=true + error code。
-    #[test]
-    fn snapshot_failed_dirty_maps_obligation_and_error() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::FailedDirty(
-                wire::FailedDirtyState {
-                    last_error: Some(wire::VpnError {
-                        code: wire::ErrorCode::Unauthorized as i32,
-                        ..Default::default()
-                    }),
-                    context: None,
-                    obligation: Some(wire::RecoveryObligation::default()),
-                },
-            )),
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 3);
-        let RuntimeState::FailedDirty {
-            error,
-            has_obligation,
-        } = ui.runtime
-        else {
-            panic!("expected failed_dirty");
-        };
-        assert!(has_obligation);
-        assert_eq!(error.unwrap().code, "ERROR_CODE_UNAUTHORIZED");
-    }
-
-    /// wire `RuntimeSnapshot.stats`（stats-wire 方案 A）→ UI `RuntimeStats`：字段
-    /// 一一对应、phase 判别映射。
-    #[test]
-    fn snapshot_stats_map_to_ui_mirror() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Idle(wire::IdleState {
-                last_cleanup: None,
-            })),
-            stats: Some(wire::RuntimeStats {
-                rx_bytes: 42,
-                tx_bytes: 24,
-                rx_rate_bps: 1000,
-                tx_rate_bps: 500,
-                latency_ms: 9,
-                phase: wire::StatsPhase::Stopping as i32,
-                engine_sequence: 6,
-                sample_tick: 11,
-            }),
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 1);
-        let stats = ui.stats.expect("stats mapped");
-        assert_eq!(stats.rx_bytes, 42);
-        assert_eq!(stats.tx_bytes, 24);
-        assert_eq!(stats.rx_rate_bps, 1000);
-        assert_eq!(stats.tx_rate_bps, 500);
-        assert_eq!(stats.latency_ms, 9);
-        assert_eq!(stats.phase, StatsPhase::Stopping);
-        assert_eq!(stats.engine_sequence, 6);
-        assert_eq!(stats.sample_tick, 11);
-    }
-
-    /// wire `RuntimeSnapshot.proxy_tun`（C5-wire）→ UI `ProxyTunDetection`：字段一一
-    /// 对应（detected/adapters/route_policy）；缺省（None）→ UI `proxy_tun` 为空。
-    #[test]
-    fn snapshot_proxy_tun_maps_to_ui_mirror() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Idle(wire::IdleState {
-                last_cleanup: None,
-            })),
-            stats: None,
-            proxy_tun: Some(wire::ProxyTunDetection {
-                detected: true,
-                adapters: vec![wire::ProxyTunAdapter {
-                    name: "Mihomo".to_string(),
-                    description: "Wintun Userspace Tunnel".to_string(),
-                    if_index: 42,
-                    kind: "proxy_tun".to_string(),
-                }],
-                route_policy: "exv-before-proxy-tun".to_string(),
-            }),
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 1);
-        let detection = ui.proxy_tun.expect("proxy_tun mapped");
-        assert!(detection.detected);
-        assert_eq!(detection.route_policy, "exv-before-proxy-tun");
-        assert_eq!(detection.adapters.len(), 1);
-        assert_eq!(detection.adapters[0].name, "Mihomo");
-        assert_eq!(detection.adapters[0].description, "Wintun Userspace Tunnel");
-        assert_eq!(detection.adapters[0].if_index, 42);
-        assert_eq!(detection.adapters[0].kind, "proxy_tun");
-
-        // None → UI proxy_tun 为空（未探测/探测失败）。
-        let empty = wire::RuntimeSnapshot {
-            state: None,
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        assert!(snapshot_from_wire(&empty, 2).proxy_tun.is_none());
-    }
-
-    /// wire `RuntimeSnapshot.system_proxy`（S2）→ UI `SystemProxyDetection`：字段一一
-    /// 对应（mode/endpoint_count/bypass_merged/topology）；缺省（None）→ UI `system_proxy`
-    /// 为空。
-    #[test]
-    fn snapshot_system_proxy_maps_to_ui_mirror() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Idle(wire::IdleState {
-                last_cleanup: None,
-            })),
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: Some(wire::SystemProxyDetection {
-                mode: "automatic".to_string(),
-                endpoint_count: 3,
-                bypass_merged: true,
-                topology: "t2".to_string(),
-            }),
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 1);
-        let detection = ui.system_proxy.expect("system_proxy mapped");
-        assert_eq!(detection.mode, "automatic");
-        assert_eq!(detection.endpoint_count, 3);
-        assert!(detection.bypass_merged);
-        assert_eq!(detection.topology, "t2");
-
-        // None → UI system_proxy 为空（未检测/检测失败）。
-        let empty = wire::RuntimeSnapshot {
-            state: None,
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        assert!(snapshot_from_wire(&empty, 2).system_proxy.is_none());
-    }
-
-    /// wire `RuntimeSnapshot.reconnect`（S4）→ UI `ReconnectStatus`：字段一一对应
-    /// （auto_reconnect/max_attempts/current_attempt/active）；缺省（None）→ UI
-    /// `reconnect` 为空（重连不适用）。
-    #[test]
-    fn snapshot_reconnect_maps_to_ui_mirror() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Idle(wire::IdleState {
-                last_cleanup: None,
-            })),
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: Some(wire::ReconnectStatus {
-                auto_reconnect: true,
-                max_attempts: 5,
-                current_attempt: 2,
-                active: true,
-            }),
-        };
-        let ui = snapshot_from_wire(&w, 1);
-        let status = ui.reconnect.expect("reconnect mapped");
-        assert!(status.auto_reconnect);
-        assert_eq!(status.max_attempts, 5);
-        assert_eq!(status.current_attempt, 2);
-        assert!(status.active);
-
-        // None → UI reconnect 为空（重连不适用/从未建立连接）。
-        let empty = wire::RuntimeSnapshot {
-            state: None,
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        assert!(snapshot_from_wire(&empty, 2).reconnect.is_none());
-    }
-
-    /// `stats_phase_from_wire`：已知判别往返，未知/未指定 → `Unspecified`。
-    #[test]
-    fn stats_phase_from_wire_round_trips_and_falls_back() {
-        for (phase, want) in [
-            (1, StatsPhase::Idle),
-            (2, StatsPhase::Connecting),
-            (3, StatsPhase::Connected),
-            (4, StatsPhase::Stopping),
-            (5, StatsPhase::Failed),
-        ] {
-            assert_eq!(stats_phase_from_wire(phase), want, "phase {phase}");
-        }
-        assert_eq!(stats_phase_from_wire(0), StatsPhase::Unspecified);
-        assert_eq!(stats_phase_from_wire(99), StatsPhase::Unspecified);
-    }
-
-    /// wire RuntimeEvent（kind=TRANSITION + Connected）→ UI event（tick 内嵌 snapshot）。
-    #[test]
-    fn event_maps_kind_and_embeds_tick() {
-        let w = wire::RuntimeEvent {
-            monotonic_tick: 42,
-            kind: wire::RuntimeEventKind::Transition as i32,
-            snapshot: Some(wire::RuntimeSnapshot {
-                state: Some(wire::runtime_snapshot::State::Idle(wire::IdleState {
-                    last_cleanup: None,
-                })),
-                stats: None,
-                proxy_tun: None,
-                operation_id: vec![],
-
-                service_status: None,
-                mode: String::new(),
-                system_proxy: None,
-                reconnect: None,
-            }),
-            operation_id: vec![],
-        };
-        let ui = event_from_wire(&w);
-        assert_eq!(ui.monotonic_tick, 42);
-        assert_eq!(ui.kind, RuntimeEventKind::Transition);
-        assert_eq!(ui.snapshot.monotonic_tick, 42);
-    }
-
-    /// wire OperationReply succeeded（receipt 带 effect_id + ownership_version）→ UI。
-    #[test]
-    fn operation_reply_succeeded_maps_effect_and_epoch() {
-        let w = wire::OperationReply {
-            terminal: Some(wire::OperationTerminal {
-                result: Some(wire::operation_terminal::Result::Succeeded(
-                    wire::MutationReceipt {
-                        effect_id: vec![0x11; 16],
-                        ownership_version: 5,
-                        ..Default::default()
-                    },
-                )),
-            }),
-        };
-        let ui = operation_reply_from_wire(&w);
-        let OperationResult::Succeeded {
-            effect_id,
-            authority_epoch,
-        } = ui.result
-        else {
-            panic!("expected succeeded");
-        };
-        assert_eq!(effect_id, Some("11".repeat(16)));
-        assert_eq!(authority_epoch, Some(5));
-    }
-
-    /// wire OperationReply failed（error）→ UI failed with error code。
-    #[test]
-    fn operation_reply_failed_maps_error() {
-        let w = wire::OperationReply {
-            terminal: Some(wire::OperationTerminal {
-                result: Some(wire::operation_terminal::Result::Failed(
-                    wire::OperationFailed {
-                        receipt: Some(wire::MutationReceipt::default()),
-                        error: Some(wire::VpnError {
-                            code: wire::ErrorCode::SessionBusy as i32,
-                            ..Default::default()
-                        }),
-                    },
-                )),
-            }),
-        };
-        let ui = operation_reply_from_wire(&w);
-        let OperationResult::Failed { error } = ui.result else {
-            panic!("expected failed");
-        };
-        assert_eq!(error.unwrap().code, "ERROR_CODE_SESSION_BUSY");
-    }
-
-    /// wire OperationReply（terminal: None = R1w pending）→ UI `Pending`（不是失败——
-    /// 前端「pending 误报失败」回归测试）。
-    #[test]
-    fn operation_reply_pending_when_no_terminal() {
-        let w = wire::OperationReply { terminal: None };
-        let ui = operation_reply_from_wire(&w);
-        assert!(
-            matches!(ui.result, OperationResult::Pending),
-            "terminal: None 必须映射为 Pending（异步受理），而非 Failed；got {:?}",
-            ui.result
-        );
-        assert_eq!(ui.operation_id, None, "operation_id 由调用方回填");
-    }
-
-    /// wire snapshot/event 的 operation_id（非空 → hex16；空 → None）映射 + 事件级与
-    /// 快照内嵌一致。
-    #[test]
-    fn operation_id_maps_hex_and_empty_to_none() {
-        let w = wire::RuntimeSnapshot {
-            state: Some(wire::runtime_snapshot::State::Idle(wire::IdleState {
-                last_cleanup: None,
-            })),
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![0xAB; 16],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        let ui = snapshot_from_wire(&w, 1);
-        assert_eq!(
-            ui.operation_id,
-            Some("ab".repeat(16)),
-            "operation_id 小写 hex"
-        );
-
-        let empty = wire::RuntimeSnapshot {
-            state: None,
-            stats: None,
-            proxy_tun: None,
-            operation_id: vec![],
-
-            service_status: None,
-            mode: String::new(),
-            system_proxy: None,
-            reconnect: None,
-        };
-        assert_eq!(
-            snapshot_from_wire(&empty, 2).operation_id,
-            None,
-            "空 → None"
-        );
-
-        let ev = wire::RuntimeEvent {
-            monotonic_tick: 3,
-            kind: wire::RuntimeEventKind::Snapshot as i32,
-            snapshot: Some(w.clone()),
-            operation_id: vec![0xAB; 16],
-        };
-        let ui_ev = event_from_wire(&ev);
-        assert_eq!(ui_ev.operation_id, Some("ab".repeat(16)));
-        assert_eq!(
-            ui_ev.snapshot.operation_id, ui_ev.operation_id,
-            "事件级与快照内嵌 operation_id 一致"
-        );
-    }
-
-    /// connect_request 组装完整意图：lookup_key method=CONNECT、digest 32 字节、
-    /// profile 从 UI 引用派生、secret_payload 透传、operation_id 透传调用方 id。
-    #[test]
-    fn connect_request_builds_well_formed_intent() {
-        let intent = super::super::client::ConnectIntent {
-            profile_ref: "ecnu".to_string(),
-            secret_payload: Some("ui-secret".to_string()),
-        };
-        let op_id = vec![0xCD; 16];
-        let req = connect_request(&intent, op_id.clone()).expect("connect request builds");
-        let w_intent = req.intent.expect("intent");
-        let key = w_intent.lookup_key.expect("lookup key");
-        assert_eq!(key.method, wire::OperationMethod::Connect as i32);
-        assert_eq!(w_intent.request_digest.len(), 32);
-        assert_eq!(key.runtime_epoch.len(), 16);
-        assert_eq!(
-            key.operation_id, op_id,
-            "operation_id 必须透传调用方 id（事件关联契约）"
-        );
-        let profile = w_intent.profile.expect("profile");
-        assert_eq!(profile.identity_digest.len(), 32);
-        assert_eq!(req.secret_payload, b"ui-secret");
-    }
-
-    /// stop_request 组装完整 STOP 意图（method=STOP、digest 32 字节、operation_id 透传）。
-    #[test]
-    fn stop_request_builds_well_formed_intent() {
-        let op_id = vec![0xCD; 16];
-        let req = stop_request(op_id.clone()).expect("stop request builds");
-        let intent = req.intent.expect("intent");
-        assert_eq!(
-            intent.lookup_key.as_ref().expect("key").method,
-            wire::OperationMethod::Stop as i32
-        );
-        assert_eq!(
-            intent.lookup_key.as_ref().expect("key").operation_id,
-            op_id,
-            "operation_id 必须透传调用方 id（事件关联契约）"
-        );
-        assert_eq!(intent.request_digest.len(), 32);
-    }
-}

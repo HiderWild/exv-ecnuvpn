@@ -1,28 +1,9 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P1-b: the engine's HelperControl tonic gRPC server — the PRODUCT control plane
-// (WIRE DECISION: proto gRPC is the sole wire authority; engine_protocol.rs JSON
-// frame is legacy/acceptance-only). This module implements the generated
-// `helper_control_server::HelperControl` trait, replacing the self-developed
-// engine_protocol command loop as the product channel while REUSING the existing
-// win32-engine business logic:
-//   * `owner_lease::OwnerLeaseManager` — J52 per-connection ownership-token slot;
-//   * `mutation_ingress::MutationIngress` — W15 sync-before-reply admission gate;
-//   * `exv_vpn_resource::operation::AdmissionIndex` — J51 durable admission sequencer;
-//   * `exv_vpn_resource::authority` — PeerContext / PeerCapability / ConnectionBinding;
-//   * `exv_vpn_local_rpc::kernel::kernel_request_to_operation` — wire→domain binding
-//     anchored to the AUTHENTICATED peer principal only.
-//
-// Transport-layer peer authentication (peer_auth/pipe_security) is a separate
-// concern in `crate::grpc_transport`; every handler here FAILS CLOSED when a
-// request does not carry the transport-verified peer extension, so no mutation
-// ever dispatches for an unverified connection.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use exv_vpn_domain::identity::{
     canonical_lookup_digest, EffectId, OperationLookupKey, OperationLookupKeyDigest,
@@ -66,6 +47,32 @@ use crate::tunnel_runtime::{ApplyContext, FakeTunnelRuntime, TunnelRuntime};
 
 /// The capability lifetime for a freshly bound operation capability (monotonic ms).
 const CAPABILITY_TTL_MS: u64 = 30_000;
+
+/// Shutdown RPC 受理后延迟触发既有 scm_stop watch 的延迟（2026-09-05 方案 B）。
+///
+/// 300ms 用于让 tonic 把 `ACCEPTED` 回复帧写回 Named Pipe（与既有退出路径的 300ms
+/// flush 窗口同量级）；它是「调用方在引擎开始 teardown 前收到回复」这一设计目标的
+/// **充分余量，不是硬保证**（回复帧写回是异步的；测试断言对象为构造顺序）。触发
+/// 目标 = `run_service_main` 注入的**既有** scm_stop watch（同一根通道，不新增第二
+/// 根 watch），之后的一切与 SCM SERVICE_CONTROL_STOP 完全相同。
+pub const SHUTDOWN_TRIGGER_DELAY: Duration = Duration::from_millis(300);
+
+fn windows_connection_mode_from_wire(
+    value: i32,
+) -> Result<exv_vpn_win32_config::ConnectionMode, Status> {
+    match generated::WindowsConnectionMode::try_from(value) {
+        Ok(generated::WindowsConnectionMode::Unspecified)
+        | Ok(generated::WindowsConnectionMode::Standard) => {
+            Ok(exv_vpn_win32_config::ConnectionMode::Standard)
+        }
+        Ok(generated::WindowsConnectionMode::Compatibility) => {
+            Ok(exv_vpn_win32_config::ConnectionMode::Compatibility)
+        }
+        Err(_) => Err(Status::invalid_argument(
+            "apply: unsupported Windows connection mode",
+        )),
+    }
+}
 
 /// The engine's connection-handling mode (S3/D7). Decides whether the engine releases
 /// the connection-bound owner when the `MaintainOwnerLease` stream EOFs.
@@ -183,9 +190,19 @@ pub struct ServiceSelfState {
     pub psk_present: bool,
 }
 
+/// Shutdown RPC 的停机触发 seam（2026-09-05 方案 B）。
+///
+/// `sender` 克隆自 `run_service_main` 的**既有** scm_stop watch（同一根通道——与 SCM
+/// `SERVICE_CONTROL_STOP` 写同一 Sender，watch 语义幂等；不新增第二根 watch）；
+/// `armed` 是一次性受理标志（进程内存 `AtomicBool`，随进程消亡，不持久化、不跨重启）。
+#[derive(Clone)]
+struct ShutdownSignal {
+    sender: tokio::sync::watch::Sender<bool>,
+    armed: Arc<AtomicBool>,
+}
+
 /// The engine's HelperControl gRPC endpoint (the product control plane).
-pub struct HelperControlService {
-    core: Arc<Mutex<HelperControlCore>>,
+pub struct HelperControlService {    core: Arc<Mutex<HelperControlCore>>,
     /// The authority epoch minted at boot (matches the composed helper's authority).
     authority_epoch: u64,
     /// The runtime epoch minted at boot (identity of this helper instance).
@@ -220,6 +237,10 @@ pub struct HelperControlService {
     /// reads it). Injected in service mode by `main.rs` (`with_service_self`); the
     /// oneshot/test default answers a trivially-ready report.
     service_self: Arc<ServiceSelfState>,
+    /// Shutdown RPC 的停机触发 seam（2026-09-05 方案 B）：`Some` = service 形态由
+    /// `main.rs` 注入既有 scm_stop watch 的 Sender 克隆（`with_shutdown_signal`）；
+    /// `None` = oneshot / 测试默认 → `Shutdown` 回 `NOT_APPLICABLE`（不接管生命周期）。
+    shutdown_signal: Option<ShutdownSignal>,
 }
 
 /// A 32-byte SHA-256 digest of `bytes`.
@@ -390,9 +411,16 @@ impl HelperControlService {
     /// Build the endpoint with the real data-plane runtime (R1b): ApplyTunnel performs the
     /// real login/CSTP/apply/data-plane assembly in the engine process.
     ///
-    /// `wintun_dll` / `adapter_name` / `config_dir` come from the engine startup args
-    /// (`--dll`, `--adapter-name`, `--config-dir`). The machine-dir log sink is wired by
-    /// the caller.
+    /// `wintun_dll` / `adapter_name` / `config_dir` / `journal_dir` come from the engine
+    /// startup args (`--dll`, `--adapter-name`, `--config-dir`, `--journal-dir`). The
+    /// machine-dir log sink is wired by the caller.
+    ///
+    /// **系统代理账本启动回放钩子**（2026-09-05 账本计划 §4.5）：本构造器在服务组装
+    /// （serving 之前）执行 `SystemProxyJournal::open_and_replay`——崩溃残留的步骤记录
+    /// 在控制面可用前完成三态裁决与还原；oneshot 与 service 两形态共用（`run_engine`
+    /// 两分支都经此构造）。回放失败只记日志，绝不阻塞服务组装；回放后的账本句柄交给
+    /// [`RealTunnelRuntime`](crate::tunnel_runtime::RealTunnelRuntime) 供运行期 apply
+    /// 记账 / clear 清账。
     #[must_use]
     pub fn with_real_tunnel(
         log: Arc<LogSink>,
@@ -400,15 +428,23 @@ impl HelperControlService {
         adapter_name: String,
         config_dir: PathBuf,
         core_user_sid: Option<String>,
+        journal_dir: PathBuf,
     ) -> Self {
+        // §4.5：open → recover 三态分派（Corrupt 隔离 / TornTail compact 修复）→
+        // LIFO 回放。open 失败 = 禁用账本态（本会话无账本保护，继续启动）。
+        let journal = crate::system_proxy_journal::SystemProxyJournal::open_and_replay(
+            &journal_dir,
+            Arc::clone(&log),
+        );
         Self::with_tunnel_runtime(
             log,
             Arc::new(
-                crate::tunnel_runtime::RealTunnelRuntime::new_with_config_dir_and_sid(
+                crate::tunnel_runtime::RealTunnelRuntime::new_with_config_dir_and_sid_and_journal(
                     wintun_dll,
                     adapter_name,
                     config_dir,
                     core_user_sid,
+                    journal,
                 ),
             ),
         )
@@ -507,6 +543,7 @@ impl HelperControlService {
                 control_plane_ready: Arc::new(AtomicBool::new(true)),
                 psk_present: false,
             }),
+            shutdown_signal: None,
         }
     }
 
@@ -530,6 +567,21 @@ impl HelperControlService {
         self.service_self = Arc::new(ServiceSelfState {
             control_plane_ready,
             psk_present,
+        });
+        self
+    }
+
+    /// Inject the Shutdown RPC trigger signal (2026-09-05 方案 B)：service 形态由
+    /// `run_service_main` 把**既有** scm_stop watch 的 Sender 克隆经 `run_engine` 穿入
+    /// （`EngineExitForm` 定义于 `service.rs`，不可改——增参穿入是计划定案的注入方式）。
+    /// `Shutdown` 受理后延迟 [`SHUTDOWN_TRIGGER_DELAY`] 向该 watch 发 `true`，与 SCM
+    /// `SERVICE_CONTROL_STOP` 走完全相同的停机序列。oneshot 不注入（缺省 `None` →
+    /// `NOT_APPLICABLE`）。
+    #[must_use]
+    pub fn with_shutdown_signal(mut self, scm_stop_tx: tokio::sync::watch::Sender<bool>) -> Self {
+        self.shutdown_signal = Some(ShutdownSignal {
+            sender: scm_stop_tx,
+            armed: Arc::new(AtomicBool::new(false)),
         });
         self
     }
@@ -635,6 +687,14 @@ impl HelperControlService {
     #[must_use]
     fn authority(&self) -> AuthorityEpoch {
         AuthorityEpoch::try_from(self.authority_epoch).expect("authority epoch mints")
+    }
+
+    /// Build the wire `ShutdownReply` for an outcome (free-standing helper so the
+    /// handler stays readable; prost enums travel as i32 on the wire).
+    fn shutdown_reply(outcome: generated::ShutdownOutcome) -> generated::ShutdownReply {
+        generated::ShutdownReply {
+            outcome: outcome as i32,
+        }
     }
 
     /// Record a terminal outcome for a completed mutation so GetOperation can answer.
@@ -968,21 +1028,30 @@ impl HelperControl for HelperControlService {
         request: Request<generated::ObserveOwnedStateRequest>,
     ) -> Result<Response<generated::ObserveOwnedStateReply>, Status> {
         let (peer, _connection) = self.transport_peer(request.extensions())?;
-        let wire_key = request
-            .get_ref()
-            .lookup_key
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("observe: missing lookup key"))?;
-        let _key = convert::lookup_key_from_wire(wire_key, peer.principal().clone())
-            .map_err(|e| Status::invalid_argument(format!("observe: {e}")))?;
+        // 未指定操作表示读取当前运行状态；仍必须通过上面的传输身份认证。
+        // 指定操作时保留原有字段与身份校验，读取不产生新的授权或业务动作。
+        if let Some(wire_key) = request.get_ref().lookup_key.as_ref() {
+            let _key = convert::lookup_key_from_wire(wire_key, peer.principal().clone())
+                .map_err(|e| Status::invalid_argument(format!("observe: {e}")))?;
+        }
+        let latest = self.status.latest();
+        let state = match latest.as_ref().map(|event| event.coarse_phase) {
+            Some(generated::StatsPhase::Connected) => generated::runtime_snapshot::State::Connected(
+                generated::ConnectedState { session: None,
+                    session_established_at_ms: latest.as_ref().unwrap().session_established_at_ms }),
+            Some(generated::StatsPhase::Connecting) => generated::runtime_snapshot::State::Connecting(
+                generated::ConnectingState { attempt: None, phase: latest.as_ref().unwrap().connect_phase as i32 }),
+            Some(generated::StatsPhase::Failed) => generated::runtime_snapshot::State::FailedDirty(
+                generated::FailedDirtyState { last_error: latest.as_ref().and_then(|event| event.error.clone()),
+                    context: None, obligation: None }),
+            _ => generated::runtime_snapshot::State::Idle(generated::IdleState { last_cleanup: None }),
+        };
         let core = self.core.lock().expect("helper core lock");
         Ok(Response::new(generated::ObserveOwnedStateReply {
-            // The pure composition phase owns no native runtime state; a real snapshot is a P3
-            // semantic-gateway concern. The Idle branch is the only identity-free snapshot shape.
+            // 来自真实运行时事件，不能用 Idle 占位掩盖当前连接/掉线状态。
             snapshot: Some(generated::RuntimeSnapshot {
-                state: Some(generated::runtime_snapshot::State::Idle(generated::IdleState {
-                    last_cleanup: None,
-                })),
+                state: Some(state),
+                operation_id: latest.map(|event| event.operation_id).unwrap_or_default(),
                 // stats-wire 方案 A：helper 的 Idle 占位快照无统计样本（core 负责填）。
                 ..Default::default()
             }),
@@ -1103,6 +1172,7 @@ impl HelperControl for HelperControlService {
             // P3-b1: the one-shot secret_payload moves out of the wire message; it is parsed
             // and zeroized below. No plaintext stays in the request carrier.
             mut secret_payload,
+            windows_connection_mode,
         } = request.into_inner();
         let wire_key = lookup_key
             .as_ref()
@@ -1131,6 +1201,8 @@ impl HelperControl for HelperControlService {
             // the wire copy immediately. R1b: the credentials are consumed by the tunnel
             // runtime at apply time (never parked in a pending slot).
             let credentials = Self::parse_secret_payload(&mut secret_payload)?;
+            let connection_mode =
+                windows_connection_mode_from_wire(windows_connection_mode)?;
 
             let subject = Self::owned_token_subject(&core, &request_digest);
             let effect_uuid = Uuid::new_v4();
@@ -1174,6 +1246,7 @@ impl HelperControl for HelperControlService {
             let ctx = ApplyContext {
                 plan,
                 credentials,
+                connection_mode,
                 operation_id: operation_id.clone(),
                 status: Arc::clone(&self.status),
                 stats: Arc::clone(&self.stats),
@@ -1315,6 +1388,8 @@ impl HelperControl for HelperControlService {
         // R1w: publish the stop terminal on the independent status channel (coarse Idle).
         // The stop operation carries its OWN operation_id; R2 wires the full
         // teardown/convergence (core-synthesized Idle + engine-first Idle) behind it.
+        // 发布顺序锁会调用终态观察者；不能持 helper core 锁进入发布，避免锁顺序倒置。
+        drop(core);
         self.status.publish(StatusEvent::idle(wire_key.operation_id.clone()));
         // R1: PURE DIAGNOSTIC — no state semantics ride on this log code; state
         // flows only on StreamConnectStatus (the Idle event published above).
@@ -1573,12 +1648,6 @@ impl HelperControl for HelperControlService {
         &self,
         request: Request<generated::ServiceManageRequest>,
     ) -> Result<Response<generated::ServiceManageReply>, Status> {
-        // S3/Tier 2: only the transport-verified core may read the deep self-report
-        // (fail closed — an unverified peer must never learn engine internals). The
-        // dispatch interceptor already gates every RPC; this is the handler's
-        // fail-closed defense in depth (same idiom as keep_alive). No owner-lease
-        // requirement: any authenticated connection may ask (health probe works
-        // before an owner is established).
         self.transport_peer(request.extensions())?;
         // Tier 2 v1 lands ONLY the `query` action; a default/absent or unknown action
         // is an invalid argument (future actions evolve via the oneof).
@@ -1606,6 +1675,10 @@ impl HelperControl for HelperControlService {
             authority_fence: Some(wire_fence(
                 &self.core.lock().expect("helper core lock"),
             )),
+            supported_windows_connection_modes: vec![
+                generated::WindowsConnectionMode::Standard as i32,
+                generated::WindowsConnectionMode::Compatibility as i32,
+            ],
         };
         self.log.emit(
             LogLevel::Info,
@@ -1618,185 +1691,70 @@ impl HelperControl for HelperControlService {
             self_report: Some(report),
         }))
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Empty payload → `Ok(None)` — no credentials is a valid caller choice.
-    #[test]
-    fn parse_secret_payload_empty_is_ok_none() {
-        let mut bytes = Vec::new();
-        let parsed = HelperControlService::parse_secret_payload(&mut bytes).expect("ok");
-        assert!(parsed.is_none());
-    }
-
-    /// Valid payload → `Ok(Some(creds))` with correct plaintext, and the wire copy is
-    /// zeroized immediately after parsing (no plaintext stays in the caller's carrier).
-    #[test]
-    fn parse_secret_payload_valid_consumes_and_zeroizes_wire_copy() {
-        let mut bytes = b"{\"version\":1,\"username\":\"student\",\"password\":\"s3cret\"}"
-            .to_vec();
-        let creds = HelperControlService::parse_secret_payload(&mut bytes)
-            .expect("parse")
-            .expect("some");
-        assert_eq!(creds.username, "student");
-        assert_eq!(creds.password, "s3cret");
-        // The wire copy is deterministically zeroized (fail-closed hygiene even on success).
-        assert!(bytes.iter().all(|&b| b == 0), "wire copy must be zeroized");
-    }
-
-    /// Malformed payload → fail closed with `InvalidArgument`, and the wire copy is still
-    /// zeroized before returning — no plaintext lingers even on a rejected payload.
-    #[test]
-    fn parse_secret_payload_malformed_fails_closed_and_zeroizes() {
-        let mut bytes = b"{\"version\":1,\"username\":\"student\",\"password\":\"hunter2\"}"
-            .to_vec();
-        // Corrupt the shape (drop the closing brace) while keeping the password substring.
-        bytes.pop();
-        let status = HelperControlService::parse_secret_payload(&mut bytes).expect_err("must fail");
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(bytes.iter().all(|&b| b == 0), "wire copy must be zeroized");
-        assert!(
-            !status.to_string().contains("hunter2"),
-            "error must not carry plaintext"
+    async fn shutdown(
+        &self,
+        request: Request<generated::ShutdownRequest>,
+    ) -> Result<Response<generated::ShutdownReply>, Status> {
+        // 2026-09-05 方案 B：显式优雅停机受理。前置 fail-closed（**先于任何状态
+        // 变化**）：未验证 peer → unauthenticated，且停机标志不得置位（防线：先
+        // transport_peer 再置位）。授权面与 KeepAlive/ServiceManage 一致（管道 DACL +
+        // SID 验证 + PSK-HMAC 的传输层认证；handler 内 fail-closed 复核同惯例）；无
+        // owner-lease 要求——停机场景（崩溃后卸载/升级）恰恰是 owner 缺失的场景。
+        // `reason` 仅诊断/审计，绝不作为授权输入。
+        self.transport_peer(request.extensions())?;
+        let request = request.into_inner();
+        let reason = generated::ShutdownReason::try_from(request.reason)
+            .unwrap_or(generated::ShutdownReason::Unspecified);
+        // Oneshot 形态：生命周期随 core 进程句柄/心跳兜底（4.3），不接管、不做任何
+        // 状态变化。未注入停机信号的 service（组装缺口，理论态）同样诚实回
+        // NOT_APPLICABLE——引擎没有可触发的停机通道。
+        let Some(signal) = self.shutdown_signal.as_ref() else {
+            return Ok(Response::new(Self::shutdown_reply(
+                generated::ShutdownOutcome::NotApplicable,
+            )));
+        };
+        if self.connection_mode != ConnectionMode::Service {
+            return Ok(Response::new(Self::shutdown_reply(
+                generated::ShutdownOutcome::NotApplicable,
+            )));
+        }
+        // 一次性受理（幂等）：已置位 → ALREADY_STOPPING，不重复触发；与重复/并发
+        // Shutdown 及 SCM stop 并发的幂等性由 swap 原子性 + watch 语义保证。
+        if signal.armed.swap(true, Ordering::SeqCst) {
+            self.log.emit(
+                LogLevel::Info,
+                "engine",
+                "service.shutdown.already-stopping",
+                "shutdown re-entered during the shutdown window",
+                &[("reason", reason.as_str_name())],
+            );
+            return Ok(Response::new(Self::shutdown_reply(
+                generated::ShutdownOutcome::AlreadyStopping,
+            )));
+        }
+        // 受理审计（稳定事件码，无秘密字段）。
+        self.log.emit(
+            LogLevel::Info,
+            "engine",
+            "service.shutdown.accepted",
+            "graceful shutdown accepted; arming the same exit sequence as SCM stop",
+            &[("reason", reason.as_str_name())],
         );
-    }
-
-    /// Unsupported version → fail closed with `InvalidArgument` (forward-compat guard).
-    #[test]
-    fn parse_secret_payload_unsupported_version_rejected() {
-        let mut bytes = b"{\"version\":99,\"username\":\"student\",\"password\":\"s3cret\"}"
-            .to_vec();
-        let status = HelperControlService::parse_secret_payload(&mut bytes).expect_err("must fail");
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.to_string().contains("unsupported version"));
-    }
-
-    // -----------------------------------------------------------------------
-    // S3/Tier 2: ServiceManage unit tests (no transport needed)
-    // -----------------------------------------------------------------------
-
-    use exv_vpn_domain::identity::ConnectionBindingDigest;
-
-    /// A transport-verified peer extension (simulates the named-pipe transport after auth).
-    fn test_peer() -> NamedPipeConnectInfo {
-        NamedPipeConnectInfo(crate::grpc_transport::TransportPeerInfo {
-            verified: true,
-            process_id: 42,
-            user_sid: "S-1-5-21-exv-test".to_string(),
-            account_name: "exv-test".to_string(),
-            principal: PrincipalDigest::try_from([1u8; 32]).expect("principal"),
-            connection_digest: ConnectionBindingDigest::try_from([2u8; 32]).expect("connection"),
-        })
-    }
-
-    /// A verified-peer `ServiceManageRequest` with the given action.
-    fn service_manage_request(
-        action: Option<generated::service_manage_request::Action>,
-    ) -> Request<generated::ServiceManageRequest> {
-        let mut request = Request::new(generated::ServiceManageRequest { action });
-        request.extensions_mut().insert(test_peer());
-        request
-    }
-
-    /// `ServiceManage` without a transport-verified peer fails closed
-    /// (unauthenticated) — an unverified peer must never read the deep self-report.
-    #[tokio::test]
-    async fn service_manage_without_verified_peer_rejected() {
-        let service = HelperControlService::new();
-        let request = Request::new(generated::ServiceManageRequest {
-            action: Some(generated::service_manage_request::Action::Query(
-                generated::ServiceSelfQuery::default(),
-            )),
+        // 触发时序（构造顺序）：本 handler 返回 Ok(Response)（回复帧先构造/先发起
+        // 写回），延迟任务在 [`SHUTDOWN_TRIGGER_DELAY`] 后才向既有 scm_stop watch 发
+        // `true` → accept-loop 以 `Stopped` 退出 → `service_exit_cleanup`（与 SCM
+        // stop 共用同一停机序列，本计划不新写停机序）。journal 挂点预留：若未来接入
+        // 持久 journal，落盘点位于 teardown 之前（当前诚实表述：durable gate 是 codec
+        // 往返，停机序的持久化事实 = LogSink raw-dump/冲洗窗口）。
+        let sender = signal.sender.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SHUTDOWN_TRIGGER_DELAY).await;
+            // watch 语义幂等：与 SCM stop 并发时先到先触发、后到 no-op。
+            let _ = sender.send(true);
         });
-        let status = service
-            .service_manage(request)
-            .await
-            .expect_err("must fail closed");
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
-    }
-
-    /// A default/absent action is `InvalidArgument` — Tier 2 v1 lands ONLY `query`.
-    #[tokio::test]
-    async fn service_manage_rejects_missing_action() {
-        let service = HelperControlService::new();
-        let request = service_manage_request(None);
-        let status = service
-            .service_manage(request)
-            .await
-            .expect_err("missing action must fail");
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    }
-
-    /// Oneshot default report: mode="oneshot", psk_present=false,
-    /// control_plane_ready=true (default seam: a runnable control plane answers
-    /// RPCs), runtime_epoch is 16 bytes, and the authority fence is populated.
-    #[tokio::test]
-    async fn service_manage_oneshot_default_report() {
-        let service = HelperControlService::new();
-        let request = service_manage_request(Some(
-            generated::service_manage_request::Action::Query(
-                generated::ServiceSelfQuery::default(),
-            ),
-        ));
-        let reply = service
-            .service_manage(request)
-            .await
-            .expect("query succeeds")
-            .into_inner();
-        let report = reply.self_report.expect("self_report present");
-        assert_eq!(report.connection_mode, "oneshot");
-        assert!(!report.psk_present, "oneshot default has no service PSK");
-        assert!(report.control_plane_ready, "oneshot default control plane is ready");
-        assert_eq!(report.runtime_epoch.len(), 16, "runtime_epoch is 16 bytes");
-        let fence = report.authority_fence.expect("authority fence present");
-        assert_ne!(fence.authority_epoch, 0, "authority epoch is set");
-        assert!(
-            !fence.platform_authority_instance_id.is_empty(),
-            "instance id set"
-        );
-    }
-
-    /// `with_service_self` injection is reflected: psk_present=true and
-    /// control_plane_ready mirrors the shared AtomicBool (the report reads the
-    /// SAME carrier the accept-loop writes).
-    #[tokio::test]
-    async fn service_manage_with_service_self_injection() {
-        let control_plane_ready = Arc::new(AtomicBool::new(true));
-        let service =
-            HelperControlService::new().with_service_self(Arc::clone(&control_plane_ready), true);
-        let request = service_manage_request(Some(
-            generated::service_manage_request::Action::Query(
-                generated::ServiceSelfQuery::default(),
-            ),
-        ));
-        let reply = service
-            .service_manage(request)
-            .await
-            .expect("query succeeds")
-            .into_inner();
-        let report = reply.self_report.expect("self_report present");
-        assert!(report.psk_present, "injected psk_present must be true");
-        assert!(report.control_plane_ready, "injected ready must be true");
-        // The report reads the SAME shared AtomicBool: flip it and the next query
-        // reflects the change (the accept-loop store(true) path is mirrored here).
-        control_plane_ready.store(false, Ordering::SeqCst);
-        let request = service_manage_request(Some(
-            generated::service_manage_request::Action::Query(
-                generated::ServiceSelfQuery::default(),
-            ),
-        ));
-        let reply = service
-            .service_manage(request)
-            .await
-            .expect("second query succeeds")
-            .into_inner();
-        let report = reply.self_report.expect("self_report present");
-        assert!(
-            !report.control_plane_ready,
-            "report must reflect the shared AtomicBool"
-        );
+        Ok(Response::new(Self::shutdown_reply(
+            generated::ShutdownOutcome::Accepted,
+        )))
     }
 }

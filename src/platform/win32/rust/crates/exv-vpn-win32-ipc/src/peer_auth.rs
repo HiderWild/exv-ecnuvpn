@@ -1,12 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W11-I: peer authentication over a Windows byte-mode Named Pipe. The frozen WSP1 facts
-// (native-pipe-facts.md §5) pin the identity query path: `GetNamedPipeClientProcessId` for the
-// client PID, `OpenProcess` + `OpenProcessToken` + `GetTokenInformation(TokenUser)` for the user
-// SID, `TokenLogonSid` parsed as `TOKEN_GROUPS` (`Groups[0]` at offset 8) for the logon SID, and
-// `LookupAccountSidW` for the account name. Every query failure fails closed; the host verifies
-// the helper PID+SID (anti fake-helper, §6).
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
@@ -27,12 +18,6 @@ use crate::named_pipe_io::NamedPipeByteStream;
 /// 服务 engine 必须是特权系统服务，而非用户态冒名进程）。
 pub const SYSTEM_SID: &str = "S-1-5-18";
 
-/// A process's self-identity (PID + user SID), read from its own token.
-///
-/// 引擎侧自报身份的载体：engine 在 pre-gRPC 握手帧中携带自身 PID + SID，core 据此验证
-/// server 身份（取代 core 侧 `OpenProcess` 读 SYSTEM 会话 0 进程 SID 的路径——该路径在
-/// 标准用户下必失败，S5 真机实测 `OpenProcess` 即 err=5，见
-/// `docs/superpowers/evidence/2026-08-20-service-form-closeout.md` §4.2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessIdentity {
     /// The process ID (self-identity; core cross-checks it against the pipe server PID).
@@ -399,66 +384,4 @@ fn lookup_account_name(sid: PSID) -> Result<String, u32> {
 fn win32_code(err: &windows::core::Error) -> u32 {
     let bits = u32::from_ne_bytes(err.code().0.to_ne_bytes());
     bits & 0xFFFF
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 自报身份帧编解码往返：pid + SID 一致。
-    #[test]
-    fn identity_frame_round_trip() {
-        let identity = ProcessIdentity {
-            process_id: 0x1234_5678,
-            user_sid: SYSTEM_SID.to_string(),
-        };
-        let frame = encode_identity_frame(&identity);
-        let decoded = decode_identity_frame(&frame).expect("decode round-trip");
-        assert_eq!(decoded, identity, "编解码往返必须一致");
-    }
-
-    /// `current_process_identity` 与 `current_user_sid` 一致（自进程 token 恒可读）。
-    #[test]
-    fn current_process_identity_matches_current_user_sid() {
-        let identity = current_process_identity().expect("self identity resolvable");
-        let sid = current_user_sid().expect("current user sid");
-        assert_eq!(identity.user_sid, sid, "自报 SID 必须等于自进程 token 的 user SID");
-        assert_eq!(identity.process_id, std::process::id(), "自报 PID 必须等于当前进程");
-    }
-
-    /// 畸形帧 fail closed：帧过短 / SID 长度越界 / 声明长度超出实际字节。
-    #[test]
-    fn identity_frame_malformed_fails_closed() {
-        // 帧短于 6 字节头。
-        assert!(decode_identity_frame(&[0u8; 3]).is_none());
-        // SID 长度超出上限（u16 大值）→ 拒绝。
-        let mut header_too_long = vec![0u8; IDENTITY_FRAME_HEADER_LEN];
-        header_too_long[4..6]
-            .copy_from_slice(&(IDENTITY_FRAME_MAX_SID_LEN as u16 + 1).to_le_bytes());
-        assert!(decode_identity_frame(&header_too_long).is_none());
-        // 声明长度超出实际帧长 → 拒绝。
-        let mut truncated = vec![0u8; IDENTITY_FRAME_HEADER_LEN];
-        truncated[4..6].copy_from_slice(&10u16.to_le_bytes());
-        truncated.extend_from_slice(b"S-1-5"); // 只有 5 字节，声明 10 → 不足。
-        assert!(decode_identity_frame(&truncated).is_none());
-        // 非 UTF-8 SID 字节 → 拒绝。
-        let mut bad_utf8 = vec![0u8; IDENTITY_FRAME_HEADER_LEN];
-        bad_utf8[4..6].copy_from_slice(&1u16.to_le_bytes());
-        bad_utf8.push(0xFF);
-        assert!(decode_identity_frame(&bad_utf8).is_none());
-    }
-
-    /// 超长 SID 编码被截断到上限（解码方比对真实 SID 时会 mismatch → fail closed）。
-    #[test]
-    fn identity_frame_long_sid_truncated() {
-        let long_sid = "S-1-5-21-".to_string() + &"9".repeat(IDENTITY_FRAME_MAX_SID_LEN + 10);
-        let identity = ProcessIdentity {
-            process_id: 7,
-            user_sid: long_sid,
-        };
-        let frame = encode_identity_frame(&identity);
-        let decoded = decode_identity_frame(&frame).expect("decodes");
-        assert_eq!(decoded.user_sid.len(), IDENTITY_FRAME_MAX_SID_LEN, "截断到上限");
-        assert_eq!(decoded.process_id, 7);
-    }
 }

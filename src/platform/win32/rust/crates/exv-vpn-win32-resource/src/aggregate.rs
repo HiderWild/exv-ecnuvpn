@@ -1,21 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! Single logical aggregate owner (W22-I): one type owns both the Wintun
-//! adapter and the Wintun packet session (architecture §7.1 — no split
-//! adapter/session ownership), and composes the four committed leaf families
-//! (W18 address / W19 MTU / W20 routes+bypass / W21 DNS) for full-family
-//! capture. The apply/restore orchestration lives in
-//! [`crate::apply_tunnel`]; this module holds the composed one-shot capture
-//! ([`TunnelSnapshot`]) and the applied state recorded by `apply`.
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md`
-//! WSP4 §3/§6): bypass is captured/installed **before** the tunnel routes;
-//! cleanup runs in reverse install order; compare-and-restore must compare the
-//! current state against the applied fingerprint before restoring (an
-//! unconditional restore of the old snapshot would clobber third-party
-//! changes); a family failure makes `capture` return `Err` — never a partial
-//! snapshot with a missing family.
 
 use windows::core::GUID;
 use windows::Win32::NetworkManagement::IpHelper::ConvertInterfaceLuidToGuid;
@@ -189,5 +172,3 @@ pub(crate) fn luid_to_guid(luid: u64) -> Option<GUID> {
     Some(guid)
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

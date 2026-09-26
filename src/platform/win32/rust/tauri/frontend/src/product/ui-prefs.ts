@@ -5,13 +5,10 @@
 //   * 本模块的键是纯前端行为偏好，存 `%LOCALAPPDATA%\EXV\profile\default\ui-preferences.json`
 //     （字段名照抄 C++ 宿主偏好契约，升级时 schema 同源；Rust 侧负责持久化与 legacy 导入）。
 //
-// 保存模型（用户拍板 2026-08-23）：除外观个性化即时生效外，偏好修改先进草稿；
-// 「保存」时统一解析脏修改并分流应用（注册表 / 偏好文件）。`updateUiPreferences`
-// 是保存动作的执行器；页面编辑只写 `draft`。
+// 保存模型：页面编辑只写 `draft`；设置页点击“保存设置”后才调用本模块按归属分流到
+// 注册表 / 偏好文件。`draft` 同时承载待保存值与失败后可重试的用户选择。
 
 import { computed, ref } from "vue";
-
-import { pushToast } from "../lib/toast";
 
 export type ClosePreference = "smart" | "tray" | "quit";
 
@@ -37,6 +34,8 @@ export interface UiPreferences {
   suppress_notify_when_foreground: boolean;
   /** 应用启动且空闲时自动发起连接。 */
   auto_connect_on_launch: boolean;
+  /** 连接后显示实时时延（毫秒）；纯前端显示偏好，默认关闭。 */
+  show_latency: boolean;
 }
 
 /** 全部可保存键（页面据此渲染控件；旧 connection_state_notifications 不再渲染/可编辑）。 */
@@ -50,9 +49,14 @@ export const UI_PREF_KEYS = [
   "reconnect_notify",
   "suppress_notify_when_foreground",
   "auto_connect_on_launch",
+  "show_latency",
 ] as const;
 
 export type UiPrefKey = (typeof UI_PREF_KEYS)[number];
+
+/** 按项保存状态与失败反馈；和草稿同属模块级状态，页面重挂载后仍可继续处理。 */
+export const uiPrefSaving = ref<Partial<Record<UiPrefKey, boolean>>>({});
+export const uiPrefErrors = ref<Partial<Record<UiPrefKey, string>>>({});
 
 export const CLOSE_PREFERENCE_VALUES: readonly ClosePreference[] = ["smart", "tray", "quit"];
 
@@ -67,6 +71,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   reconnect_notify: false,
   suppress_notify_when_foreground: true,
   auto_connect_on_launch: false,
+  show_latency: false,
 };
 
 export const CLOSE_PREFERENCE_LABELS: Record<ClosePreference, string> = {
@@ -108,6 +113,7 @@ export function normalizeUiPreferences(raw: UiPreferencesWire | null | undefined
     "reconnect_notify",
     "suppress_notify_when_foreground",
     "auto_connect_on_launch",
+    "show_latency",
   ] as const) {
     const value = raw[key];
     if (typeof value === "boolean") merged[key] = value;
@@ -149,6 +155,9 @@ const draft = ref<Partial<UiPreferences>>({});
 let gateway: UiPrefsGateway | null = null;
 let loadedOnce = false;
 let loadPromise: Promise<void> | null = null;
+let saveTail: Promise<void> = Promise.resolve();
+const pendingKeys = new Set<UiPrefKey>();
+let stateEpoch = 0;
 
 /** 草稿视图（页面控件读这里；缺键回落已生效值）。 */
 export const uiPrefsDraft = computed<UiPreferences>(() => ({ ...state.value, ...draft.value }));
@@ -158,19 +167,29 @@ export const uiPrefsDirty = computed(() => Object.keys(draft.value).length > 0);
 
 /** 测试重置（生产路径不调用）。 */
 export function resetUiPrefsState(): void {
+  stateEpoch += 1;
   state.value = { ...DEFAULT_UI_PREFERENCES };
   draft.value = {};
   gateway = null;
   loadedOnce = false;
   loadPromise = null;
+  saveTail = Promise.resolve();
+  pendingKeys.clear();
+  uiPrefSaving.value = {};
+  uiPrefErrors.value = {};
 }
 
 /** 注入网关（测试注入内存实现；生产在 main.ts 调用一次装真实网关）。
  * 换网关后允许重新 load（新网关的存储才是真相源）。 */
 export function provideUiPrefsGateway(impl: UiPrefsGateway): void {
+  stateEpoch += 1;
   gateway = impl;
   loadedOnce = false;
   loadPromise = null;
+  saveTail = Promise.resolve();
+  pendingKeys.clear();
+  uiPrefSaving.value = {};
+  uiPrefErrors.value = {};
 }
 
 /**
@@ -188,6 +207,7 @@ export async function loadUiPreferences(): Promise<void> {
       const raw = await impl.get();
       state.value = normalizeUiPreferences(raw);
       draft.value = {};
+      uiPrefErrors.value = {};
       loadedOnce = true;
     } catch {
       // 外壳之外 / 后端不可用：保持默认值（诚实降级，不阻断 UI）。
@@ -201,9 +221,9 @@ export async function loadUiPreferences(): Promise<void> {
   }
 }
 
-/** 编辑草稿（页面控件调用；不落盘、不生效）。 */
+/** 编辑草稿（页面控件调用；保存成功前不视为已生效）。 */
 export function editUiPreference<K extends UiPrefKey>(key: K, value: UiPreferences[K]): void {
-  if (value === state.value[key]) {
+  if (value === state.value[key] && !pendingKeys.has(key)) {
     // 改回原值 = 该键不再脏。
     const next = { ...draft.value };
     delete next[key];
@@ -217,54 +237,113 @@ function effectiveImpl(): UiPrefsGateway {
   return gateway ?? createTauriUiPrefsGateway();
 }
 
+/** 捕获用户点击保存时的脏值；等待其他分支期间的新编辑仍留在草稿。 */
+export function captureUiPreferenceChanges(): UiPreferencesPatch {
+  return { ...draft.value };
+}
+
 /**
- * 保存动作执行器：解析脏修改并分流应用。
+ * 保存动作执行器：只截取调用方指定的脏键，并按调用顺序串行持久化。
  *
  * 分流规则：
  *   * `launch_at_login` → 先写注册表（执行真相源），再持久化偏好文件（显示态）；
  *   * 其余键 → 直接持久化偏好文件（UI 进程启动时读取生效）。
  *
- * 任一分流失败：回滚全部（含已成功的部分——注册表写回原值）、toast 报错、返回 false。
- * 成功：清空草稿、toast 确认。
+ * 失败时保留本次草稿，并尽力把已改的注册表值写回；成功时只清除仍等于本次快照的
+ * 草稿，避免吞掉排队期间的新编辑。
  */
-export async function updateUiPreferences(): Promise<boolean> {
-  const patch = { ...draft.value };
-  if (Object.keys(patch).length === 0) return true;
-  const previous = state.value;
-  const nextFull = normalizeUiPreferences({ ...previous, ...patch });
-
-  try {
-    const impl = effectiveImpl();
-
-    // 分流一：注册表（先执行后记录；失败即整体失败）。
-    if (patch.launch_at_login !== undefined && patch.launch_at_login !== previous.launch_at_login) {
-      const result = await impl.setAutostart(patch.launch_at_login);
-      if (!result.ok) throw new Error(result.message ?? "autostart rejected");
-    }
-
-    // 分流二：偏好文件。
-    await impl.set(patch);
-
-    state.value = normalizeUiPreferences({ ...state.value, ...patch });
-    draft.value = {};
-    pushToast("设置已保存。", "success");
-    return true;
-  } catch {
-    // 注册表可能已写新值：回写到旧值（best effort）。
-    if (
-      patch.launch_at_login !== undefined &&
-      patch.launch_at_login !== previous.launch_at_login
-    ) {
-      try {
-        await effectiveImpl().setAutostart(previous.launch_at_login);
-      } catch {
-        // 回滚失败仅记录；状态仍按未保存处理。
-      }
-    }
-    void nextFull; // 仅用于类型完整性；状态保持 previous。
-    pushToast("设置保存失败。", "error");
-    return false;
+export function updateUiPreferences(
+  requestedKeys: readonly UiPrefKey[] = UI_PREF_KEYS,
+  requestedValues: UiPreferencesPatch = draft.value,
+): Promise<boolean> {
+  const patch: UiPreferencesPatch = {};
+  const keys: UiPrefKey[] = [];
+  for (const key of requestedKeys) {
+    if (pendingKeys.has(key) || requestedValues[key] === undefined) continue;
+    (patch as Record<UiPrefKey, UiPreferences[UiPrefKey]>)[key] = requestedValues[key] as UiPreferences[UiPrefKey];
+    keys.push(key);
   }
+
+  if (keys.length === 0) {
+    // 同一键在前一项保存途中再次被编辑时，等队列落稳后保存最新草稿。
+    if (requestedKeys.some((key) => pendingKeys.has(key) && draft.value[key] !== undefined)) {
+      return saveTail.then(() => updateUiPreferences(requestedKeys));
+    }
+    return Promise.resolve(true);
+  }
+
+  for (const key of keys) pendingKeys.add(key);
+  const nextErrors = { ...uiPrefErrors.value };
+  const nextSaving = { ...uiPrefSaving.value };
+  for (const key of keys) {
+    delete nextErrors[key];
+    nextSaving[key] = true;
+  }
+  uiPrefErrors.value = nextErrors;
+  uiPrefSaving.value = nextSaving;
+  const operationEpoch = stateEpoch;
+  const impl = effectiveImpl();
+
+  const run = async (): Promise<boolean> => {
+    const previous = state.value;
+    let autostartChanged = false;
+    try {
+      if (patch.launch_at_login !== undefined && patch.launch_at_login !== previous.launch_at_login) {
+        const result = await impl.setAutostart(patch.launch_at_login);
+        if (!result.ok) throw new Error(result.message ?? "autostart rejected");
+        autostartChanged = true;
+      }
+
+      await impl.set(patch);
+      if (operationEpoch !== stateEpoch) return false;
+
+      // 用户可能在 Core 等待期间改回旧基线，稀疏草稿会删掉该键；先保留完整意图，
+      // 再采用本次快照，不能把这种“撤回”误认为没有后续编辑。
+      const latestIntent = { ...uiPrefsDraft.value };
+      state.value = normalizeUiPreferences({ ...state.value, ...patch });
+      const remaining = { ...draft.value };
+      for (const key of keys) {
+        if (latestIntent[key] === patch[key]) delete remaining[key];
+        else (remaining as Record<UiPrefKey, UiPreferences[UiPrefKey]>)[key] = latestIntent[key];
+      }
+      draft.value = remaining;
+      const errorsAfterSave = { ...uiPrefErrors.value };
+      for (const key of keys) delete errorsAfterSave[key];
+      uiPrefErrors.value = errorsAfterSave;
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      let rollbackError = "";
+      if (autostartChanged) {
+        try {
+          const rollback = await impl.setAutostart(previous.launch_at_login);
+          if (!rollback.ok) throw new Error(rollback.message ?? "自启恢复被拒绝");
+        } catch (error) {
+          rollbackError = "；自启可能已变更，恢复失败：" + (error instanceof Error ? error.message : String(error));
+        }
+      }
+      if (operationEpoch === stateEpoch) {
+        const errorsAfterFailure = { ...uiPrefErrors.value };
+        for (const key of keys) errorsAfterFailure[key] = "保存失败，未确认生效：" + detail + rollbackError;
+        uiPrefErrors.value = errorsAfterFailure;
+      }
+      return false;
+    }
+  };
+
+  const result = saveTail.then(run, run);
+  saveTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result.finally(() => {
+    for (const key of keys) pendingKeys.delete(key);
+    if (operationEpoch === stateEpoch) {
+      const savingAfter = { ...uiPrefSaving.value };
+      for (const key of keys) savingAfter[key] = false;
+      uiPrefSaving.value = savingAfter;
+    }
+  });
 }
 
 /** 只读视图（运行时效果消费 lifecycle-effects 等）。 */

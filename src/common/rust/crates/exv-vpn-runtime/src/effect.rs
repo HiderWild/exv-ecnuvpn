@@ -1,9 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-// R31-T/I: fenced `RuntimeEffect` scheduling. The single-writer actor calls `schedule` immediately
-// after committing a state transition that emits effects; the scheduler runs the effect off the
-// actor's lock and routes its `EffectCompleted` (exact `CompletionFence` + `StaleDisposition`)
-// back to the actor. Outer/inner fence mismatch fails closed: the effect is not run.
 
 use std::sync::Arc;
 
@@ -93,5 +87,3 @@ fn inner_effect_id(request: &EffectRequest) -> Option<EffectId> {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

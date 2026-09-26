@@ -1,18 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// S2-C 批量集成测试（真 engine 进程级）。贴近既有 `scm_integration` 惯例：真 SCM 场景
-// 标 `#[ignore]` + env 门控（`EXV_SCM_INTEGRATION=1`），S5 业务验收跑。覆盖：
-//   1. 文件生命周期对真 engine：host 写 req → engine 删 req → result 保留 → host 读后删。
-//   2. engine 中途被杀 → result 缺失 → host 失败路径（host 侧缺 result 已有单测）。
-//   3. 孤儿 watchdog：host 进程退出 → 批量 engine 退出（防孤儿）。
-//   4. uninstall → VerifyRemoved（真 SCM，需 admin）。
-//
-// 进程级场景（被杀 / 孤儿）用「req 指向 named pipe 阻塞 engine」确定性模拟「批量进行中」，
-// 不依赖真 SCM——engine 打开 req 管道后阻塞在 read 上，直至被杀 / host 退出触发 watchdog。
-//
-// 业务验收锚点（无法自动化，不硬编码）：**install 恰 1 次 UAC**——安装/修复/启动/卸载经
-// `--service-batch` 一次 runas 完成（计划文档阶段 2 验收锚点），真 UAC 交互由 S5 人工验收。
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

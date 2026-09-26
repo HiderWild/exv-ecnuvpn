@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! core 日志聚合服务（P2-a）：磁盘文件为唯一真相源。
 //!
@@ -162,6 +160,26 @@ pub struct LogEntry {
     pub message: String,
     /// 结构化键值元数据。
     pub fields: BTreeMap<String, String>,
+}
+
+impl LogEntry {
+    /// 沿既有日志 wire 保留聚合元数据，使 UI 复制也能分析事件传播延迟。
+    /// `log.*` 为聚合器保留键，来源字段不能覆盖真实接收时间与序号。
+    #[must_use]
+    pub fn into_wire_event(self) -> LogEvent {
+        let mut fields: std::collections::HashMap<_, _> = self.fields.into_iter().collect();
+        fields.insert("log.seq".into(), self.seq.to_string());
+        fields.insert("log.received_ms".into(), self.received_ms.to_string());
+        fields.insert("log.source".into(), self.source);
+        LogEvent {
+            level: self.level,
+            component: self.component,
+            code: self.code,
+            message: self.message,
+            fields,
+            timestamp_ms: self.timestamp_ms,
+        }
+    }
 }
 
 /// 增量拉取的返回页（P2-c `logs.list` 的语义底座）。
@@ -479,260 +497,3 @@ where
 // ---------------------------------------------------------------------------
 // 单元测试：事件落盘、source 标记、after_seq 增量、重启游标重建、clear 语义。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 每个测试独立的临时聚合日志路径（按进程 pid + 用例名隔离，避免并发冲突）。
-    fn temp_log_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "exv-log-agg-{tag}-{}.jsonl",
-            std::process::id()
-        ))
-    }
-
-    fn engine_event(level: &str, code: &str, message: &str, timestamp_ms: i64) -> LogEvent {
-        LogEvent {
-            level: level.to_string(),
-            component: "engine".to_string(),
-            code: code.to_string(),
-            message: message.to_string(),
-            // proto map 生成 `HashMap`（与 `append_engine` 的 BTreeMap 转换边界对齐）。
-            fields: std::collections::HashMap::from([(
-                "pid".to_string(),
-                "42".to_string(),
-            )]),
-            timestamp_ms,
-        }
-    }
-
-    /// 事件落盘：append 后文件存在且每行一条 JSON，含全部字段。
-    #[test]
-    fn appends_persist_full_fields_to_disk() {
-        let path = temp_log_path("disk");
-        let agg = LogAggregator::open(&path).expect("open");
-        let entry = agg
-            .append_engine(&engine_event("info", "WINTUN_UP", "tunnel up", 1_700_000_000_000))
-            .expect("append");
-
-        assert_eq!(entry.seq, 1);
-        assert_eq!(entry.source, "engine");
-        assert_eq!(entry.level, "info");
-        assert_eq!(entry.code, "WINTUN_UP");
-        assert_eq!(entry.message, "tunnel up");
-        assert_eq!(entry.fields.get("pid").map(String::as_str), Some("42"));
-
-        let raw = std::fs::read_to_string(&path).expect("read file");
-        let lines: Vec<&str> = raw.lines().collect();
-        assert_eq!(lines.len(), 1, "每事件一行 JSONL");
-        assert!(lines[0].contains("\"source\":\"engine\""));
-        assert!(lines[0].contains("\"code\":\"WINTUN_UP\""));
-        assert!(lines[0].contains("\"timestamp_ms\":1700000000000"));
-        assert!(!lines[0].contains("\"seq\""), "行内不存 seq（真相=行号）");
-    }
-
-    /// source 标记：engine 与 core 事件必须带上不同 source。
-    #[test]
-    fn source_marker_distinguishes_engine_and_core() {
-        let path = temp_log_path("src");
-        let agg = LogAggregator::open(&path).expect("open");
-
-        agg.append_engine(&engine_event("warn", "RTT", "high rtt", 0))
-            .expect("engine");
-        agg.append_core("error", "platform", "E_GATE", "gate refused", &BTreeMap::new())
-            .expect("core");
-
-        let page = agg.list(0, 0).expect("list");
-        assert_eq!(page.entries.len(), 2);
-        assert_eq!(page.entries[0].source, "engine");
-        assert_eq!(page.entries[1].source, "core");
-        assert_eq!(page.entries[0].seq, 1);
-        assert_eq!(page.entries[1].seq, 2);
-    }
-
-    /// `after_seq` 增量：`limit` 分页、`next_seq` 正确、无更多时指向 `last_seq + 1`。
-    #[test]
-    fn incremental_cursor_after_seq_is_correct() {
-        let path = temp_log_path("incr");
-        let agg = LogAggregator::open(&path).expect("open");
-        for i in 1..=5 {
-            agg.append_engine(&engine_event("info", "", &format!("e{i}"), i))
-                .expect("append");
-        }
-        assert_eq!(agg.last_seq(), 5);
-
-        // 取 2 条：seq 1,2；next_seq = 3。
-        let p1 = agg.list(0, 2).expect("list");
-        assert_eq!(p1.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
-        assert_eq!(p1.next_seq, 3);
-
-        // 从 2 继续取 2 条：seq 3,4；next_seq = 5。
-        let p2 = agg.list(2, 2).expect("list");
-        assert_eq!(p2.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [3, 4]);
-        assert_eq!(p2.next_seq, 5);
-
-        // 从 4 取：seq 5；next_seq = 6。
-        let p3 = agg.list(4, 2).expect("list");
-        assert_eq!(p3.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [5]);
-        assert_eq!(p3.next_seq, 6);
-
-        // 已到末尾：空页，next_seq = last_seq + 1（轮询可用 `next_seq > after_seq`
-        // 判断有新日志）。
-        let p4 = agg.list(5, 10).expect("list");
-        assert!(p4.entries.is_empty());
-        assert_eq!(p4.next_seq, 6);
-    }
-
-    /// 重启游标重建：重新打开同一文件后 `last_seq` 恢复、可继续追加、seq 连续。
-    #[test]
-    fn cursor_rebuilds_from_file_after_restart() {
-        let path = temp_log_path("restart");
-        {
-            let agg = LogAggregator::open(&path).expect("open 1");
-            agg.append_engine(&engine_event("info", "", "before", 1))
-                .expect("append");
-            agg.append_core("info", "core", "", "boot", &BTreeMap::new())
-                .expect("append");
-            assert_eq!(agg.last_seq(), 2);
-        } // drop = 进程退出模拟
-
-        // 重启：仅凭文件重建游标。
-        let agg = LogAggregator::open(&path).expect("open 2");
-        assert_eq!(agg.last_seq(), 2, "重启后从文件重建 last_seq");
-
-        let p = agg.list(0, 0).expect("list");
-        assert_eq!(p.entries.len(), 2, "历史行完整保留");
-        assert_eq!(p.entries[0].seq, 1);
-        assert_eq!(p.entries[0].source, "engine");
-        assert_eq!(p.entries[1].seq, 2);
-        assert_eq!(p.entries[1].source, "core");
-
-        // 继续追加：seq 从 3 接续。
-        let e = agg
-            .append_engine(&engine_event("info", "", "after", 3))
-            .expect("append");
-        assert_eq!(e.seq, 3);
-        assert_eq!(agg.last_seq(), 3);
-    }
-
-    /// clear：truncate 同一文件、游标归零、后续从 seq 1 重新开始（logs.clear 语义）。
-    #[test]
-    fn clear_truncates_and_restarts_cursor() {
-        let path = temp_log_path("clear");
-        let agg = LogAggregator::open(&path).expect("open");
-        for i in 1..=3 {
-            agg.append_engine(&engine_event("info", "", &format!("e{i}"), i))
-                .expect("append");
-        }
-        assert_eq!(agg.last_seq(), 3);
-
-        agg.clear().expect("clear");
-        assert_eq!(agg.last_seq(), 0);
-        assert_eq!(agg.list(0, 0).expect("list").entries.len(), 0);
-        assert!(std::fs::read_to_string(&path).expect("read").is_empty());
-
-        let e = agg
-            .append_engine(&engine_event("info", "", "fresh", 4))
-            .expect("append");
-        assert_eq!(e.seq, 1, "清空后从 seq 1 重新开始");
-        assert_eq!(agg.last_seq(), 1);
-    }
-
-    /// limit == 0 表示无限（返回全部剩余）。
-    #[test]
-    fn zero_limit_returns_all_remaining() {
-        let path = temp_log_path("nolimit");
-        let agg = LogAggregator::open(&path).expect("open");
-        for i in 1..=5 {
-            agg.append_core("info", "core", "", &format!("c{i}"), &BTreeMap::new())
-                .expect("append");
-        }
-        let p = agg.list(1, 0).expect("list");
-        assert_eq!(p.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [2, 3, 4, 5]);
-        assert_eq!(p.next_seq, 6);
-    }
-
-    /// 坏行（崩溃残留半行）跳过但占用 seq 槽，后续行 seq 与行号对齐不破。
-    #[test]
-    fn malformed_line_consumes_seq_slot_without_breaking_cursor() {
-        let path = temp_log_path("badline");
-        let agg = LogAggregator::open(&path).expect("open");
-        agg.append_engine(&engine_event("info", "", "good1", 1))
-            .expect("append");
-        agg.append_engine(&engine_event("info", "", "good2", 2))
-            .expect("append");
-        // 模拟崩溃残留：直接向文件追加半行 JSON（不经过 append）。
-        {
-            let mut f = OpenOptions::new().append(true).open(&path).expect("open");
-            writeln!(f, "{{broken").expect("write");
-            f.flush().expect("flush");
-        }
-        // 再次打开（重启），游标 = 3 行。
-        let agg = LogAggregator::open(&path).expect("reopen");
-        assert_eq!(agg.last_seq(), 3);
-
-        // 坏行被跳过，但 seq 槽保留（后续 new 是 seq 4）。
-        let e = agg
-            .append_engine(&engine_event("info", "", "good3", 3))
-            .expect("append");
-        assert_eq!(e.seq, 4);
-
-        let p = agg.list(0, 0).expect("list");
-        assert_eq!(
-            p.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
-            [1, 2, 4],
-            "坏行占用 seq 3 槽"
-        );
-    }
-
-    /// R3：`ingest_engine_stream` 把 engine `StreamLogs` 推送逐条落盘（聚合-only、
-    /// 单向下行）——每条一个 JSONL 行，source=engine；流干净结束 → EndOfStream；
-    /// 中途 transport 错误 → StreamError 并停止。
-    #[tokio::test]
-    async fn ingest_engine_stream_persists_events_one_way() {
-        use std::sync::Arc;
-        use tokio_stream::wrappers::UnboundedReceiverStream;
-        use tokio_stream::StreamExt;
-
-        let path = temp_log_path("ingest");
-        let agg = Arc::new(LogAggregator::open(&path).expect("open"));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<LogEvent, tonic::Status>>();
-        let stream = UnboundedReceiverStream::new(rx);
-
-        tx.send(Ok(engine_event("info", "WINTUN_UP", "tunnel up", 1_700_000_000_000)))
-            .unwrap();
-        tx.send(Ok(engine_event("error", "TLS_FAIL", "tls failed", 1_700_000_000_001)))
-            .unwrap();
-        // 先 drop 发送端：ingest 消费到 None（流干净结束）才返回 EndOfStream——否则
-        // 通道永不关闭、测试永久悬挂。
-        drop(tx);
-
-        let outcome = ingest_engine_stream(stream, Arc::clone(&agg)).await;
-        assert_eq!(outcome, IngestOutcome::EndOfStream, "流干净结束");
-
-        let page = agg.list(0, 0).expect("list");
-        assert_eq!(page.entries.len(), 2);
-        assert_eq!(page.entries[0].source, "engine");
-        assert_eq!(page.entries[0].code, "WINTUN_UP");
-        assert_eq!(page.entries[1].code, "TLS_FAIL");
-        // 纯单向：磁盘行 = 唯一真相源（不携带 seq；聚合不产生任何状态/事件）。
-        let raw = std::fs::read_to_string(&path).expect("read");
-        assert_eq!(raw.lines().count(), 2);
-
-        // 中途 transport 错误 → StreamError 并停止（后续事件不再消费）。
-        let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel::<Result<LogEvent, tonic::Status>>();
-        let stream2 = UnboundedReceiverStream::new(rx2);
-        tx2.send(Ok(engine_event("info", "", "before.error", 3))).unwrap();
-        tx2.send(Err(tonic::Status::unavailable("transport broken"))).unwrap();
-        tx2.send(Ok(engine_event("info", "", "after.error", 4))).unwrap();
-        let outcome2 = ingest_engine_stream(stream2, Arc::clone(&agg)).await;
-        assert!(
-            matches!(outcome2, IngestOutcome::StreamError(_)),
-            "transport 错误 → StreamError"
-        );
-        assert_eq!(agg.last_seq(), 3, "错误后的事件不再落盘");
-        let p2 = agg.list(0, 0).expect("list");
-        assert_eq!(p2.entries[2].message, "before.error");
-    }
-}

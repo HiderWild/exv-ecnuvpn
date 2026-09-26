@@ -1,12 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// S1 admission 重开 + relay 重武装（win32 host 组合层）：断开收敛 → Stopped →
-// controller 显式 ReopenAdmission → Idle/admission_open → 二次 Connect admitted →
-// 二次 ProtocolEstablished → packet_attachment_active()==true（数据面证明重新成立）。
-// 纯逻辑 + 确定性：只驱动 win32 host 组合（`compose_nonprivileged_host`，纯构造，
-// 唯一 native 读是进程 token elevation 事实）与 relay 每腿状态机，无真实 pipe/session
-// I/O、无需提权。独立文件（不并入 W27-T 冻结集 `process_boundary.rs`）。
 
 use exv_vpn_data_plane::teardown::TeardownSide;
 use exv_vpn_domain::identity::{ConnectionBindingDigest, OperationMethod, PrincipalDigest};
@@ -143,5 +134,3 @@ fn connect_refused_through_teardown_then_admitted_after_reopen() {
     assert_eq!(composition.apply(HostEvent::Connect), HostEffect::ConnectAdmitted);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

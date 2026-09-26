@@ -43,6 +43,9 @@ bool LooksLikePe(const fs::path &path) {
 bool CopyDirectoryRecursive(const fs::path &from, const fs::path &to) {
   std::error_code ec;
   fs::create_directories(to, ec);
+  if (ec) {
+    return false;
+  }
   for (auto it = fs::recursive_directory_iterator(from, ec); it != fs::recursive_directory_iterator();
        it.increment(ec)) {
     if (ec) {
@@ -65,8 +68,11 @@ bool CopyDirectoryRecursive(const fs::path &from, const fs::path &to) {
         return false;
       }
     }
+    if (ec) {
+      return false;
+    }
   }
-  return true;
+  return !ec;
 }
 
 // Rust line: the host resolves wintun.dll from env EXV_RUST_VPN_WINTUN_DLL OR the
@@ -227,6 +233,7 @@ InstallResult RunInstall(const InstallRequest &request, ProgressModel *progress)
   // 准备服务 0.42→0.46）、解压 0.50→0.85、finalize 0.85→1.0
   double mark = 0.0;
   auto status = [&](const wchar_t *s, double t) {
+    OutputDebugStringW((std::wstring(L"[EXV Setup] ") + s + L"\n").c_str());
     mark = std::max(mark, std::clamp(t, 0.0, 1.0));
     if (progress) {
       progress->SetStatus(s);
@@ -248,6 +255,34 @@ InstallResult RunInstall(const InstallRequest &request, ProgressModel *progress)
     return result;
   }
 
+  // 旧进程清理也会结束 exv-engine；必须在它之前保存精确 SCM 状态并正常停服，
+  // 避免把清理后的 Stopped 误当成原始状态，或让 SCM 故障恢复与文件覆盖交叉。
+  status(L"正在保存原服务运行状态…", 0.01);
+  const auto original_service = QueryServiceRuntimeState();
+  if (original_service.state == ServiceRuntimeState::Error) {
+    result.error = L"安装前无法读取 exv-engine 服务状态（Win32=" +
+                   std::to_wstring(original_service.error_code) + L"），请稍后重试。";
+    status(result.error.c_str(), 0.01);
+    return result;
+  }
+  if (original_service.state == ServiceRuntimeState::Other) {
+    result.error = L"exv-engine 服务尚未处于稳定的运行或停止状态（SCM=" +
+                   std::to_wstring(original_service.scm_state) +
+                   L"），请等待服务状态稳定后重试安装。";
+    status(result.error.c_str(), 0.01);
+    return result;
+  }
+  const bool restore_running_service = original_service.state == ServiceRuntimeState::Running;
+  const bool had_service = original_service.state != ServiceRuntimeState::NotInstalled;
+  status(restore_running_service ? L"已保存：原服务运行中，安装成功后恢复运行"
+                                 : had_service ? L"已保存：原服务已停止，安装后保持停止"
+                                               : L"已保存：原服务未安装，保留按需安装行为", 0.02);
+  if (!PreInstallServiceMaintenance(request.install_dir)) {
+    result.error = L"无法停止已安装的 exv-engine 服务，请稍后重试。";
+    status(result.error.c_str(), 0.02);
+    return result;
+  }
+
   // --- NSIS Section Install preflight ---
   // 检查是否有运行中的旧版本（新增步骤）：没有则直接跳到 33% 视为完成；有则 15%，
   // 结束进程后跳到 40%（关旧实例占进度拉满到 40%）。UI 停滞注入以该满值为蠕动上限。
@@ -264,12 +299,6 @@ InstallResult RunInstall(const InstallRequest &request, ProgressModel *progress)
   }
 
   status(L"正在准备服务组件…", 0.42);
-  // Service installation is an explicit post-install engine/UI action.
-  const bool had_service = IsServiceInstalled();
-  if (!PreInstallServiceMaintenance(request.install_dir)) {
-    result.error = L"无法停止已安装的 exv-engine 服务，请稍后重试。";
-    return result;
-  }
   status_done(had_service ? L"服务已停止，保留安装配置" : L"无需预清理服务", 0.46);
 
   // --- Extract / copy (overwrite) ---
@@ -338,9 +367,18 @@ InstallResult RunInstall(const InstallRequest &request, ProgressModel *progress)
   status_done(L"注册表已更新", 0.93);
 
   // Rust line: preplace wintun.dll to the frozen default path so the app finds it
-  // without EXV_RUST_VPN_WINTUN_DLL. Non-fatal if the payload lacks wintun.dll.
+  // without EXV_RUST_VPN_WINTUN_DLL. 缺失 DLL 保持可跳过；存在但写入失败必须上报。
   status(L"正在配置 wintun 驱动…", 0.94);
-  const bool wintun_placed = PreplaceWintunToFrozenPath(request.install_dir);
+  const bool has_wintun = fs::exists(fs::path(request.install_dir) / L"wintun.dll", ec);
+  if (ec) {
+    result.error = L"无法检查安装目录中的 wintun 驱动，服务尚未恢复。";
+    return result;
+  }
+  const bool wintun_placed = has_wintun && PreplaceWintunToFrozenPath(request.install_dir);
+  if (has_wintun && !wintun_placed) {
+    result.error = L"wintun 驱动写入失败，服务尚未恢复。请重试安装。";
+    return result;
+  }
   status_done(wintun_placed ? L"wintun 驱动已就位" : L"wintun 未随包携带，跳过", 0.94);
 
   // NSIS always creates Start Menu during Install section.
@@ -348,25 +386,49 @@ InstallResult RunInstall(const InstallRequest &request, ProgressModel *progress)
   if (progress) {
     progress->SetStageSpan(0.95, 0.96);
   }
-  CreateStartMenuShortcuts(request.install_dir);
+  if (!CreateStartMenuShortcuts(request.install_dir)) {
+    result.error = L"创建开始菜单快捷方式失败，服务尚未恢复。";
+    return result;
+  }
   status_done(L"开始菜单快捷方式已创建", 0.96);
 
   // Optional finish-page defaults when silent path requests them immediately.
   if (request.create_desktop_shortcut) {
     status(L"正在创建桌面快捷方式…", 0.97);
-    CreateDesktopShortcut(request.install_dir);
+    if (!CreateDesktopShortcut(request.install_dir)) {
+      result.error = L"创建桌面快捷方式失败，服务尚未恢复。";
+      return result;
+    }
   } else {
     status_done(L"跳过桌面快捷方式", 0.97);
   }
   if (request.create_quick_launch) {
     status(L"正在创建快速启动…", 0.98);
-    CreateQuickLaunchShortcut(request.install_dir);
+    if (!CreateQuickLaunchShortcut(request.install_dir)) {
+      result.error = L"创建快速启动快捷方式失败，服务尚未恢复。";
+      return result;
+    }
   } else {
     status_done(L"跳过快速启动", 0.98);
   }
 
-  // Service installation is an explicit post-install engine/UI action.
-  status_done(L"无需修复服务", 0.99);
+  // 所有必要文件和收尾成功后才恢复；此前失败不启动可能部分覆盖的二进制。
+  if (restore_running_service) {
+    status(L"正在恢复原服务运行状态…", 0.985);
+    if (progress) {
+      progress->SetStageSpan(0.985, 0.99);
+    }
+    std::wstring service_error;
+    if (!EnsureServiceRunning(&service_error)) {
+      result.error = L"文件已安装，但恢复 exv-engine 服务失败：" + service_error +
+                     L"。安装未完成，请重试安装或检查服务日志。";
+      status(result.error.c_str(), 0.985);
+      return result;
+    }
+    status_done(L"原服务已恢复运行", 0.99);
+  } else {
+    status_done(had_service ? L"服务保持停止" : L"服务保留按需安装", 0.99);
+  }
 
   if (request.launch_app) {
     status(L"正在启动 EXV…", 0.995);

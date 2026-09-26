@@ -1,53 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-// EXV CS-AUTH-03-T: CSTP offer parsing alignment contract tests for
-// exv-vpn-cstp.
-//
-// The engine's `CstpSession::open` (committed CS-AUTH-02 surface) reads the
-// offer head up to its `\r\n\r\n` terminator and validates it into a
-// `TunnelOffer` plan. These tests pin the plan §3.3 offer-validation semantics
-// (engine version of the school `validate_school_offer`, school.rs L1334-1409,
-// controlled alignment), driven end-to-end through the real loopback TLS
-// gateway pattern: login -> CONNECT -> configurable offer body -> typed
-// outcome. They are expected to be RED against the CS-AUTH-02 provisional
-// parse wherever the alignment gap lives (currently: the legacy line-style
-// branch — school splits `key value` on whitespace, the provisional engine
-// parse only splits on `:`), and CS-AUTH-03-I must align `session.rs`
-// `parse_offer` (the only production file this leaf may touch) until the
-// whole matrix is GREEN.
-//
-// Contract (docs/superpowers/plans/2026-08-15-cstp-authentication-rebuild-plan.md
-// leaf CS-AUTH-03, §3.3; openconnect cstp.c offer semantics):
-//   * HTTP-header-style real offer — `HTTP/1.1 200` + `X-CSTP-Address` /
-//     `X-CSTP-Netmask` / `X-CSTP-MTU` / `X-CSTP-DNS` (whitespace-separated) /
-//     `X-CSTP-Split-Include` (whitespace-separated CIDR), plus the wrapper
-//     headers `Transfer-Encoding: chunked`, `Session-Id`, `DPD`, `Keepalive` —
-//     parses into `TunnelOffer { ipv4_address, prefix, mtu, dns_servers,
-//     routes }`.
-//   * Legacy line-style offer (`key value` on whitespace, the school-retained
-//     legacy form) — parses into the SAME plan (controlled alignment
-//     retained).
-//   * Missing required field (`CSTP_NETMASK`, `CSTP_ADDRESS`, `CSTP_MTU`) is a
-//     typed `SessionError::OfferParseFailed`, never a plan.
-//   * Unknown `X-CSTP-*` / wrapper keys are ignored (real-gateway extra
-//     fields); the offer still parses.
-//   * Any `dtls` appearance (e.g. `X-CSTP-Protocol: dtls`) rejects the offer.
-//   * HTML error pages (bare, or served under a 200 status) are rejected, NOT
-//     parsed into a plan.
-//   * HTTP error status (non-2xx) is rejected even when X-CSTP-* fields are
-//     present.
-//   * Contiguous netmask -> prefix length (0..=32); a non-contiguous mask is
-//     rejected.
-//
-// Mutants this suite must kill (plan leaf row):
-//   M1 HTML page parsed into a plan        -> html_error_page_*_rejected...
-//   M2 DTLS offer accepted                 -> dtls_offer_is_rejected
-//   M3 missing CSTP_NETMASK accepted       -> missing_required_offer_fields_are_rejected
-// plus the alignment pin:
-//   M4 legacy line style dropped/ignored   -> legacy_line_style_offer_parses_like_header_style
-//     (the school `validate_school_offer` whitespace split branch must be
-//     retained under control: the same plan as the header style)
 
 use exv_vpn_cstp::connector::{BootstrapConfig, TrustPolicy};
 use exv_vpn_cstp::session::{CstpSession, SessionError, TunnelOffer};
@@ -714,5 +665,3 @@ async fn netmask_converts_to_prefix() {
     );
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! The MVP `ExvConfig` structure plus load/save and credential helpers.
 //!
@@ -10,41 +8,107 @@
 //! is stored as ciphertext and decrypted one-shot with the independent
 //! `key.bin` key.
 
-use std::path::Path;
+use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::crypto::{decrypt_password, encrypt_password, KEY_LEN};
+use crate::crypto::{KEY_LEN, decrypt_password, encrypt_password};
 use crate::error::ConfigError;
 use crate::paths::{config_path, key_path};
 
 /// Default gateway hostname (`distribution/ecnu.json` `default_vpn_server`).
 pub const DEFAULT_SERVER: &str = "vpn-cn.ecnu.edu.cn";
-/// Default campus routes (`distribution/ecnu.json` `default_routes`).
-pub const DEFAULT_ROUTES: [&str; 9] = [
+/// 新建配置的八条默认校园路由；历史用户配置不随默认值迁移。
+///
+/// 末条 `219.228.144.0/22` 是 2026-09-20 补入的唯一新增网段：同批给出的
+/// `219.228.144.107/22` 与 `219.228.144.105/22` 规范化后是同一条，而
+/// `219.228.60.69/22` 已被既有的 `219.228.63.0/21`（规范形 `219.228.56.0/21`）覆盖。
+pub const DEFAULT_ROUTES: [&str; 8] = [
     "49.52.4.0/25",
     "59.78.176.0/20",
     "59.78.199.0/21",
     "58.198.176.128/25",
-    "219.228.60.69",
     "59.78.189.128/25",
     "219.228.63.0/21",
     "202.120.80.0/20",
-    "222.66.117.0/24",
+    "219.228.144.0/22",
 ];
 /// Default Windows user-agent (`distribution/ecnu.json` `default_user_agents.windows`).
 pub const DEFAULT_USER_AGENT: &str = "AnyConnect Win_x86_64 4.10.05095";
 /// Default MTU, matching the C++ `Config` default (1290).
 pub const DEFAULT_MTU: u32 = 1290;
 
+/// Windows 连接使用的物理出口选择策略。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionMode {
+    /// 优先使用既有物理直连路径。
+    #[default]
+    Standard,
+    /// 使用 Windows 当前选择的实际网络出口。
+    Compatibility,
+}
+
+impl ConnectionMode {
+    /// 稳定配置字面量；也用于不含凭据的诊断日志。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Compatibility => "compatibility",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ConnectionMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "compatibility" => Ok(Self::Compatibility),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConnectionMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        // 配置文件可能来自更高版本。未知字符串只局部回退，不让整个 ExvConfig
+        // 回落默认值而丢失同一文档里的账户、密文和其他设置。
+        Ok(value.parse().unwrap_or_default())
+    }
+}
+
 /// User VPN configuration (MVP subset).
 ///
 /// Fields mirror the C++ `Config` JSON keys. `password` holds the AES-256-GCM
 /// ciphertext (`base64( nonce || tag || ct )`), never the plaintext.
+///
+/// 2026-09-08 计划（config 基线）：**不含任何 VPN 网关 IP 字段**——网关地址由
+/// VGDC 双线解析（DoH）每次连接即时获得，手填 IP 已退役。历史 `server_bypass_ips`
+/// 字段自本计划起删除：serde 未知字段容忍 ⇒ 旧配置读到即丢弃（忽略不读），字段
+/// 不存在 ⇒ 任何保存路径都写不出它（结构性禁止写入）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExvConfig {
-    /// Gateway hostname, e.g. `vpn-cn.ecnu.edu.cn`.
+    /// Gateway hostname, e.g. `vpn-cn.ecnu.edu.cn` (never a gateway IP — the
+    /// real gateway address is VGDC-resolved per connection).
     pub server: String,
     /// Login username.
     pub username: String,
@@ -54,20 +118,20 @@ pub struct ExvConfig {
     pub remember_password: bool,
     /// Campus routes to push into the tunnel.
     pub routes: Vec<String>,
-    /// Server control-plane destinations to keep on the physical egress
-    /// (Phase 7 C1: `control_bypass` — one `/32` bypass route per entry,
-    /// installed before the tunnel routes; mirrors C++ `tunnel_config.hpp`
-    /// `server_bypass_ips`, the `X-CSTP-Bypass-Route` + config double source).
-    pub server_bypass_ips: Vec<String>,
     /// Client user-agent presented to the gateway.
     #[serde(rename = "useragent")]
     pub user_agent: String,
     /// Tunnel MTU.
     pub mtu: u32,
+    /// Windows 物理出口选择策略；旧配置缺省为标准模式。
+    pub connection_mode: ConnectionMode,
     /// Whether to automatically reconnect after an unexpected disconnect.
     pub auto_reconnect: bool,
     /// Maximum auto-reconnect attempts (0 = unlimited).
     pub auto_reconnect_max_attempts: u32,
+    /// Whether automatic reconnects back off exponentially (base 2s, cap 30s);
+    /// off keeps the legacy immediate-reconnect behavior.
+    pub auto_reconnect_backoff: bool,
 }
 
 impl Default for ExvConfig {
@@ -78,11 +142,12 @@ impl Default for ExvConfig {
             password: String::new(),
             remember_password: false,
             routes: DEFAULT_ROUTES.iter().map(|r| (*r).to_string()).collect(),
-            server_bypass_ips: Vec::new(),
             user_agent: DEFAULT_USER_AGENT.to_string(),
             mtu: DEFAULT_MTU,
+            connection_mode: ConnectionMode::Standard,
             auto_reconnect: false,
             auto_reconnect_max_attempts: 0,
+            auto_reconnect_backoff: false,
         }
     }
 }
@@ -137,10 +202,8 @@ impl ExvConfig {
     ///
     /// Returns [`ConfigError`] on any filesystem or serialization failure.
     pub fn save_to_dir(&self, dir: &Path) -> Result<(), ConfigError> {
-        std::fs::create_dir_all(dir)?;
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(config_path(dir), json)?;
-        Ok(())
+        write_config_json_atomically(dir, &json)
     }
 
     /// Ensure a 32-byte key exists in `dir`, generating and persisting a new
@@ -233,5 +296,65 @@ impl ExvConfig {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
+/// Atomically replace `config.json` with already-serialized JSON.
+///
+/// The temporary file is created next to the destination so the final rename
+/// stays on the same filesystem. `std::fs::rename` uses replace-existing
+/// semantics on Windows; if replacement fails, this function never removes
+/// the previous destination.
+pub(crate) fn write_config_json_atomically(dir: &Path, json: &str) -> Result<(), ConfigError> {
+    write_config_json_atomically_with(dir, json, |temporary, destination| {
+        std::fs::rename(temporary, destination)
+    })
+}
+
+pub(crate) fn write_config_json_atomically_with<F>(
+    dir: &Path,
+    json: &str,
+    replace: F,
+) -> Result<(), ConfigError>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    std::fs::create_dir_all(dir)?;
+    let destination = config_path(dir);
+    let (temporary, mut file) = create_temporary_config_file(dir)?;
+
+    let write_result = (|| -> Result<(), ConfigError> {
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        replace(&temporary, &destination)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+fn create_temporary_config_file(dir: &Path) -> Result<(PathBuf, File), ConfigError> {
+    static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+    for _ in 0..32 {
+        let id = NEXT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary = dir.join(format!(".config.json.{}.{}.tmp", std::process::id(), id));
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique config temporary file",
+    )
+    .into())
+}
+

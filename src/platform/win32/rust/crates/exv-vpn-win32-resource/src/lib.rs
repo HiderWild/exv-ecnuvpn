@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! Win32 资源平台 crate（构建接缝，空模块占位）。
 //!
@@ -10,7 +8,6 @@ pub mod aggregate;
 pub mod adapter_address;
 pub mod apply_tunnel;
 pub mod authority;
-pub mod bypass_route;
 pub mod cleanup_proof;
 pub mod dns;
 pub mod dns_types;
@@ -27,7 +24,6 @@ pub mod packet_attachment;
 pub mod packet_buffer;
 pub mod packet_capability;
 pub mod packet_worker;
-pub mod plan_wiring;
 pub mod proxy_tun;
 pub mod recovery;
 pub mod routes;
@@ -44,5 +40,3 @@ pub mod wintun_adapter;
 pub mod wintun_api;
 pub mod wintun_session;
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

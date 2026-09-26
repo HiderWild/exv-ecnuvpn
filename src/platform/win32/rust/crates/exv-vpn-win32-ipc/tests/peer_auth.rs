@@ -1,20 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W11-T terra: peer authentication over a Windows byte-mode Named Pipe. These tests pin the
-// peer_auth / pipe_security / verified_incoming API that W11-I implements in
-// exv_vpn_win32_ipc::{peer_auth, pipe_security, verified_incoming}. The frozen WSP1 facts
-// (docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-pipe-facts.md) are the
-// contract:
-//   - DACL = expected user/logon SID + SYSTEM, never broad BUILTIN\Users (facts §4);
-//   - PIPE_REJECT_REMOTE_CLIENTS + FILE_FLAG_FIRST_PIPE_INSTANCE; second-create refused, 231 (§2);
-//   - TokenLogonSid parsed as TOKEN_GROUPS with Groups[0] at offset 8 (§5);
-//   - any token/identity query failure fails closed (§5); endpoint name is not authority (§6);
-//   - the host verifies the helper PID+SID (anti fake-helper) (§6).
-//
-// The tests run REAL local Named Pipe I/O (server + client in a std::thread). Deterministic
-// expectations only: the current user's SID is read via GetTokenInformation(TokenUser) and is the
-// same token the local pipe client connects with.
 
 use std::thread;
 
@@ -325,5 +308,3 @@ fn remote_client_rejected() {
     client.join().expect("client thread joins");
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

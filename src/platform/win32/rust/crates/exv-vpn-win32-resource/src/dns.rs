@@ -1,27 +1,4 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
-//! GUID-keyed DNS capture / apply / compare-and-restore over the real Win32
-//! IpHelper DNS settings APIs (W21).
-//!
-//! Frozen facts (`docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md`
-//! WSP4 §4): `GetInterfaceDnsSettings` fills the caller's structure **in place**
-//! (`Version = 1` selects the v1 string layout — `0` returns 87), with `Flags`
-//! empty; the embedded strings are system-allocated and must be released with
-//! `FreeInterfaceDnsSettings`. `SetInterfaceDnsSettings` accepts the v1 string
-//! layout on this host (fallback: the 80-byte v2 `DNS_INTERFACE_SETTINGS_EX`
-//! layout, where `NameServer`/`SearchList` are still strings — the 104-byte
-//! `DNS_ADDRESS_ARRAY` misconstruction dereferences the @24 `{ver,count}` as a
-//! `PWSTR` and access-violates). Flag values are hand-written (0x0001 is
-//! `DNS_SETTING_IPV6`; 0x0002 = NAMESERVER; 0x0004 = SEARCHLIST — the crate's
-//! windows 0.62.2 does not export them). Clearing means empty-string pointers
-//! with the flags set (NULL pointers neither clear nor succeed — 87).
-//!
-//! W21 contract: apply must return the **applied fingerprint** from an
-//! independent read-back (API success is not proof); compare-and-restore must
-//! compare the current state against the applied fingerprint and skip when a
-//! third party modified the interface (typed `SkipThirdPartyChange`, never
-//! clobbered); every failure path is a typed [`NativeError`], never silent.
 
 use windows::core::{GUID, HSTRING, PWSTR};
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -274,5 +251,3 @@ fn flags_of(settings: &DnsSettings) -> u64 {
     flags
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

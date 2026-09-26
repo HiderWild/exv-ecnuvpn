@@ -1,21 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// P2 有界存留进程级测试（判据 7 / plan D8）：kill / hung core 时 engine 最迟 M 秒内
-// 自退（硬时间界 15s，文本证据计时）。
-//
-// 拓扑（真实进程，无需提权——engine 不建 Wintun adapter，仅 serve 控制面管道 + 等心跳）：
-//   * **core 子进程**（W13-T 子进程模式：以 `--exact <test>` 重执行本测试二进制 +
-//     `EXV_ENGINE_TEST_CHILD` 环境变量）：作为 core 连接 engine 控制面 Named Pipe 并保持
-//     连接存活（不发心跳）。
-//   * **engine**（真实 `exv-engine` bin，`CARGO_BIN_EXE_exv-engine`
-//     或 current_exe sibling）：`--host-pid <core_child_pid>` 指向 core 子进程。
-//
-// 双保险验证：
-//   * **kill core** → engine 经 `wait_core_process_exit`（进程句柄 signaled，即时兜底）
-//     随行退出——实测计时 ≤15s（硬时间界）。
-//   * **hung core**（core 存活但不发心跳）→ engine 经心跳超时（`HeartbeatWatch`，
-//     15s 上界）自清理+自退出——实测计时约 15s+（硬时间界兜底，不依赖进程句柄）。
 
 use std::future::Future;
 use std::path::{Path, PathBuf};

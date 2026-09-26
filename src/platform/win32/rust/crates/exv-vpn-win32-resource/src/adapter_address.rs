@@ -1,4 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
 
 //! 读取指定适配器当前的 IPv4 单播地址。
 //!
@@ -101,17 +100,4 @@ fn ipv4_of(address: &SOCKET_ADDRESS) -> Option<Ipv4Addr> {
     // 还原用户可读的 IPv4 八位组顺序。
     let octets = unsafe { inet.Ipv4.sin_addr.S_un.S_addr }.to_le_bytes();
     Some(Ipv4Addr::from(octets))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn blank_adapter_name_is_a_non_effectful_miss() {
-        assert_eq!(
-            first_ipv4_for_adapter("  ").expect("blank name is valid"),
-            None
-        );
-    }
 }

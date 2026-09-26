@@ -1,13 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// S1 relay re-arm：被停掉的 `AttachedPacketRelay`（两腿 Terminal）可经 `reset_legs`
-// 复位回 Attached，使二次连接（stop → 二次 start_leg）的 running proof（数据面证明）
-// 重新成立。纯逻辑 + 确定性：无 I/O、无 Win32 调用、无需提权——只驱动 relay 的
-// 每腿状态机（Attached → Running → Terminal → Attached）。frozen seam 是
-// `AttachedPacketRelay`（exv-engine crate 的 packet_relay 模块），与
-// W23B-T `tests/packet_relay.rs` 同 seam，但独立文件、独立 test names（S1 新能力，
-// 不并入 Terra 冻结集）。
 
 use exv_vpn_data_plane::budget::DataPlaneDirection;
 use exv_vpn_domain::identity::{ResourceIdentityDigest, RuntimeEpoch};
@@ -129,5 +119,3 @@ fn reset_legs_rearms_after_any_terminal_source() {
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

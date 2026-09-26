@@ -1,64 +1,13 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W20-T Terra: route capture / install / remove / bypass 契约。这些测试钉住 W20-I 在
-// exv_vpn_win32_resource::{routes, bypass_route} 实现的 seam。冻结事实
-// （docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-network-settings-facts.md，
-// WSP4 提权实测）是契约：
-//   - bypass 必须在加隧道路由**之前**捕获（facts §3）：GetBestRoute2(10.99.99.2) 在隧道
-//     路由存在前返回宿主默认路由；隧道路由入表后**无源限制**查找仍返回 bypass（Wintun 接口
-//     未 connected，隧道路由不参与无源查找）——选路不得依赖无源 GetBestRoute2；
-//   - 创建路由必须 Initialize + 显式 SitePrefixLength=0 + 网络字节序正确（S_addr 用
-//     from_le_bytes/to_le_bytes；前缀含主机位 -> Create 返回 87）；
-//   - 回读精确行：metric=5（所设值）、protocol=3（MIB_IPPROTO_NETMGMT）、nexthop、
-//     InterfaceLuid 全部匹配；重复 Create 同一精确行 -> 5010；partial（前缀 33）-> 87；
-//   - 删除必须先 GetIpForwardEntry2 填满精确行再 Delete：dest-only key（nexthop/luid 为零）
-//     按通配匹配填满行，但**直接用 dest-only 行 Delete 返回 2**——按 CIDR 删除是 mutant；
-//   - already-absent 是合法状态：Get 找不到 -> Ok(AlreadyAbsent)，幂等；
-//   - cleanup 必须按安装顺序的**逆序**（最后安装的先删）。
-//
-// W20-I pinned seam（src/routes.rs + src/bypass_route.rs）：
-//   pub struct RouteRow { pub network: Ipv4Addr, pub prefix_len: u8, pub next_hop: Ipv4Addr,
-//                         pub interface_luid: u64, pub metric: u32, pub protocol: u32 }
-//     RouteRow::new(network, prefix_len, next_hop, interface_luid, metric) -> RouteRow
-//       // 规范化：prefix<=32 时屏蔽主机位（网络字节序/主机位 mutant 在此死）；protocol=3
-//     RouteRow::dest_only(network, prefix_len) -> RouteRow
-//       // 通配 key：next_hop=0.0.0.0、interface_luid=0、metric=0、protocol=0（facts §3 冻结）
-//     RouteRow::dest_key(&self) -> RouteKey            // (network, prefix_len) CIDR 身份
-//   pub struct RouteKey { pub network: Ipv4Addr, pub prefix_len: u8 }  // PartialEq/Eq/Hash
-//   pub enum RemoveOutcome { Removed, AlreadyAbsent }
-//   routes::capture_rows(interface_luid: u64) -> Result<Vec<RouteRow>, NativeError>
-//     // GetIpForwardTable2 按 LUID 过滤——read-back 证明（API success 不是 proof）
-//   routes::install(row: &RouteRow) -> Result<(), NativeError>
-//     // CreateIpForwardEntry2 精确构造；重复精确行 -> Err(5010)
-//   routes::remove(row: &RouteRow) -> Result<RemoveOutcome, NativeError>
-//     // 先 Get 精确行再 Delete（dest-only 通配填满必须与请求行比对，不匹配 -> Err，不得删除）；
-//     // 已 absent -> Ok(AlreadyAbsent)；dest-only 输入 -> Err（绝不静默成功/绝不半删除）
-//   routes::install_plan(rows: &[RouteRow]) -> Result<(), NativeError>
-//     // 批量安装：任一失败时**整批不得留下半状态**（partial mutant 在此死）
-//   routes::build_install_plan(bypass: Option<&RouteRow>, tunnel: &[RouteRow]) -> Vec<RouteRow>
-//     // 纯逻辑：bypass 行永远排在隧道路由**之前**（'bypass after default route' mutant 在此死）
-//   routes::build_cleanup_order(installed: &[RouteRow]) -> Vec<RouteRow>
-//     // 纯逻辑：安装顺序的**逆序**（reverse cleanup mutant 在此死）
-//   bypass_route::capture(control_destination: Ipv4Addr) -> Result<Option<RouteRow>, NativeError>
-//     // GetBestRoute2(destination)，必须在隧道路由安装**之前**调用；None = 1168（无路由）
-//
-// 本测试在真实 Windows 宿主（admin）上创建 scratch Wintun adapter，路由只装在其上
-// （nexthop=10.88.88.1、测试网络 10.99.99.0/24，与 WSP4 spike 完全一致）；drop adapter
-// 即移除 adapter 及其全部路由（无残留）。非 elevated 宿主上动态断言短路为
-// `not_run / blocked_by_environment`（明确输出，不伪造假绿）；纯逻辑测试（行身份/顺序/
-// 计划构建）任何宿主都必须通过。
 
 use std::io::Read;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use exv_vpn_win32_resource::bypass_route;
 use exv_vpn_win32_resource::native_error::NativeError;
 use exv_vpn_win32_resource::routes::{
-    build_cleanup_order, build_install_plan, capture_rows, install, install_plan, remove,
-    RemoveOutcome, RouteRow,
+    build_cleanup_order, build_install_plan, capture_rows, find_rows_for_dest, install,
+    install_plan, remove, RemoveOutcome, RouteRow,
 };
 use exv_vpn_win32_resource::wintun_adapter::{AdapterOpen, WintunAdapter};
 use exv_vpn_win32_resource::wintun_api::WintunLibrary;
@@ -68,7 +17,7 @@ use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenElevation}
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（WSP3 冻结值；PATH DLL 是 mutant）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// 与 WSP3/WSP4 探针一致的 tunnel type。
 const TUNNEL_TYPE: &str = "EXV VPN";
 /// scratch adapter 的测试地址（WSP4 spike 同款；nexthop 指向它）。
@@ -371,46 +320,44 @@ fn cleanup_plan_reverses_install_order() {
 // 真实路由契约（需要 admin；非 elevated 记为 not_run）
 // ---------------------------------------------------------------------------
 
-/// bypass 捕获必须在隧道路由安装**之前**：捕获到的必须是宿主自身的最优路由（本测试
-/// adapter 上还没有任何路由）；隧道路由入表后再次捕获仍不得返回隧道路由（WSP4 facts §3：
-/// 无源 GetBestRoute2 不选 Wintun 隧道路由——接口未 connected）。
-/// 杀死 'GetBestRoute2 after tunnel route' mutant。
+/// `find_rows_for_dest` 跨接口全表扫描（2026-09-08 计划 I5 崩溃清扫的读表基础）：
+/// scratch adapter 上安装的 `/32` 行必须被跨接口扫描找到（不按调用方 luid 过滤），
+/// 移除后不再出现。杀死 'sweep scoped to current nic only' mutant（上次崩溃遗留
+/// 行挂在旧物理网卡上时，只扫当前 luid 会漏掉遗留行）。
+///
+/// （原 `capture_bypass_before_tunnel_route_install`（无源 `GetBestRoute2` 捕获证据）
+/// 随 `bypass_route` 模块退役删除：2026-09-08 计划——无源捕获在上游 TUN 默认路由
+/// 在表时会抓到 TUN，不再作为生产原语；证据转入 facts 文档与真机门禁。）
 #[test]
-fn capture_bypass_before_tunnel_route_install() {
-    if !require_admin("capture_bypass_before_tunnel_route_install") {
+fn find_rows_for_dest_scans_across_interfaces() {
+    if !require_admin("find_rows_for_dest_scans_across_interfaces") {
         return;
     }
     let lib = load_frozen();
     let adapter = create_scratch_adapter(&lib, "ExvW20Bypass");
-
-    // 1) 隧道路由存在之前捕获：必须是宿主真实最优路由（冻结宿主有默认路由），
-    //    绝不是本测试 adapter 上的路由。
-    let pre = expect_ok(bypass_route::capture(CONTROL_DEST), "capture bypass before tunnel route");
-    let pre_row = pre.expect("capture 必须返回隧道路由之前的最优路由（冻结宿主存在默认路由）");
-    assert!(
-        pre_row.interface_luid != adapter.luid() && pre_row.network != TUNNEL_NET,
-        "隧道路由之前捕获的 bypass 必须是宿主自身路由（不得是 scratch adapter 上的路由）：{pre_row:?}"
-    );
-
-    // 2) scratch 接口前置 + 经被测试 seam 安装隧道路由。
     configure_scratch_interface(adapter.alias())
         .expect("scratch 接口配置失败（无法安装路由）：netsh 前置失败");
-    let tunnel = RouteRow::new(TUNNEL_NET, 24, PROBE_IP, adapter.luid(), 5);
-    expect_ok(install(&tunnel), "install tunnel route");
 
-    // 3) 隧道路由入表后再次捕获：仍必须是 bypass（无源查找不选未 connected 接口的隧道路由）。
-    //    若 impl 在安装后才捕获（mutant），这里会拿到隧道路由行。
-    let post = expect_ok(bypass_route::capture(CONTROL_DEST), "capture after tunnel route install");
-    let post_row = post.expect("隧道路由入表后无源捕获仍必须返回 bypass（facts §3 冻结语义）");
+    let dest = CONTROL_DEST;
+    let row = RouteRow::new(dest, 32, PROBE_IP, adapter.luid(), 1);
+    expect_ok(install(&row), "install /32 scratch route");
+
+    // 跨接口扫描：行挂在 scratch adapter luid 上，调用方不传任何 luid——必须找到。
+    let found = expect_ok(find_rows_for_dest(dest, 32), "find rows for dest");
     assert!(
-        post_row.interface_luid != adapter.luid() || post_row.network != TUNNEL_NET,
-        "安装后的捕获返回了隧道路由——'GetBestRoute2 after tunnel route' mutant：{post_row:?}"
+        found.contains(&row),
+        "跨接口扫描必须找到 scratch adapter 上的 /32 行：found={found:?} row={row:?}"
     );
 
-    // cleanup：经 seam 精确删除隧道路由，然后 drop adapter（移除 adapter 及其全部路由）。
-    match expect_ok(remove(&tunnel), "cleanup remove tunnel route") {
+    // cleanup：经 seam 精确删除，再扫必须不含。
+    match expect_ok(remove(&row), "cleanup remove /32 route") {
         RemoveOutcome::Removed | RemoveOutcome::AlreadyAbsent => {}
     }
+    let after = expect_ok(find_rows_for_dest(dest, 32), "re-scan after remove");
+    assert!(
+        !after.contains(&row),
+        "移除后跨接口扫描不得再出现该行：after={after:?}"
+    );
     drop(adapter);
 }
 
@@ -566,5 +513,3 @@ fn partial_plan_failure_leaves_no_half_state() {
     drop(adapter);
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

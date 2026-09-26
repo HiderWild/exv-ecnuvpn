@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 use crate::error::{EffectCertainty, ErrorSubject, VpnError};
 use crate::identity::{
@@ -8,8 +6,8 @@ use crate::identity::{
     ResourceIdentityDigest, RetirementOperationId, RuntimeEpoch, TokenDigest,
 };
 use crate::model::{
-    CleanupProofRef, ConnectIntent, DataRunningProof, PacketLeaseRef, PlatformOwnershipRef,
-    PlatformReadyProof, PromptDeadline, ProtocolSessionRef, RecoveryContext, RecoveryObligation,
+    CleanupProofRef, ConnectIntent, PacketLeaseRef, PlatformOwnershipRef, PlatformReadyProof,
+    PromptDeadline, ProtocolSessionRef, RecoveryContext, RecoveryObligation,
 };
 use serde::Serialize;
 use std::convert::Infallible;
@@ -340,21 +338,6 @@ pub enum PacketLateCleanupOutcome<H> {
     },
 }
 
-#[allow(dead_code)]
-fn assert_send_static<T: Send + 'static>() {}
-
-#[allow(dead_code)]
-fn assert_c1_results_are_send_static() {
-    assert_send_static::<ProtocolTerminal>();
-    assert_send_static::<PacketTerminal>();
-    assert_send_static::<OwnedStateObservation>();
-    assert_send_static::<PlatformApplied>();
-    assert_send_static::<RetirementStarted>();
-    assert_send_static::<CleanupOutcome>();
-    assert_send_static::<OwnershipRetired>();
-    assert_send_static::<OperationState>();
-}
-
 pub trait ProtocolPort: Send + Sync {
     type LateHandle: Send + 'static;
 
@@ -378,26 +361,6 @@ pub trait ProtocolPort: Send + Sync {
     ) -> PortFuture<'_, ProtocolLateCleanupOutcome<Self::LateHandle>, Infallible>;
 }
 
-pub trait NativePacketPort: Send + Sync {
-    type LateHandle: Send + 'static;
-
-    fn attach(
-        &self,
-        fence: OwnedAttemptEffectFence,
-        lease: PacketLeaseRef,
-        ready: PlatformReadyProof,
-    ) -> PortFuture<'_, PacketAttached<Self::LateHandle>>;
-    fn begin_stop(
-        &self,
-        fence: PacketStopFence,
-        lease: PacketLeaseRef,
-    ) -> PortFuture<'_, PacketTerminal>;
-    fn cleanup_late(
-        &self,
-        handle: Self::LateHandle,
-    ) -> PortFuture<'_, PacketLateCleanupOutcome<Self::LateHandle>, Infallible>;
-}
-
 pub trait Clock: Send + Sync {
     fn monotonic_now(&self) -> MonotonicTick;
 }
@@ -405,80 +368,6 @@ pub trait Clock: Send + Sync {
 pub trait EntropySource: Send + Sync {
     fn next_uuid(&self) -> Uuid;
 }
-
-#[allow(dead_code)]
-fn assert_late_results_are_send_static<H: Send + 'static>() {
-    assert_send_static::<ProtocolProgress<H>>();
-    assert_send_static::<PacketAttached<H>>();
-    assert_send_static::<ProtocolLateCleanupOutcome<H>>();
-    assert_send_static::<PacketLateCleanupOutcome<H>>();
-}
-
-pub trait PlatformResourcePort: Send + Sync {
-    type OwnershipToken: Send + 'static;
-
-    fn observe_owned_state(
-        &self,
-        request: ObserveOwnedStateRequest,
-    ) -> PortFuture<'_, OwnedStateObservation>;
-    fn acquire_ownership(
-        &self,
-        request: AcquireOwnershipRequest,
-    ) -> PortFuture<'_, OwnershipAcquired<Self::OwnershipToken>>;
-    fn apply_tunnel<'a>(
-        &'a self,
-        token: &'a mut Self::OwnershipToken,
-        request: ApplyTunnelRequest,
-    ) -> PortFuture<'a, PlatformApplied>;
-    fn begin_stop<'a>(
-        &'a self,
-        token: &'a mut Self::OwnershipToken,
-        request: BeginStopRequest,
-    ) -> PortFuture<'a, RetirementStarted>;
-    fn begin_recovery_stop(
-        &self,
-        request: BeginRecoveryStopRequest,
-    ) -> PortFuture<'_, RetirementStarted>;
-    fn reconcile(&self, request: ReconcileRequest) -> PortFuture<'_, CleanupOutcome>;
-    fn release_ownership(
-        &self,
-        request: ReleaseOwnershipRequest,
-    ) -> PortFuture<'_, OwnershipRetired>;
-    fn get_operation(&self, request: GetOperationRequest) -> PortFuture<'_, OperationState>;
-}
-
-pub trait JournalStore: Send + Sync {
-    type Record: Send + 'static;
-    type Projection: Send + 'static;
-    type Commit: Send + 'static;
-
-    fn recover_projection(&self) -> PortFuture<'_, Self::Projection>;
-    fn append_and_sync(&self, record: Self::Record) -> PortFuture<'_, Self::Commit>;
-}
-
-#[allow(dead_code)]
-fn assert_ownership_result_is_send_static<T: Send + 'static>() {
-    assert_send_static::<OwnershipAcquired<T>>();
-}
-
-pub type IssueProtocolSessionRefFn =
-    fn(ResourceIdentityDigest) -> Result<ProtocolSessionRef, VpnError>;
-pub type IssuePlatformOwnershipRefFn = fn(
-    ResourceIdentityDigest,
-    OwnershipVersion,
-    TokenDigest,
-) -> Result<PlatformOwnershipRef, VpnError>;
-pub type IssuePacketLeaseRefFn = fn(ResourceIdentityDigest) -> Result<PacketLeaseRef, VpnError>;
-pub type IssueCleanupProofRefFn =
-    fn(InventoryDigest, EvidenceDigest) -> Result<CleanupProofRef, VpnError>;
-pub type IssuePlatformReadyProofFn =
-    fn(PlatformOwnershipRef, EvidenceDigest) -> Result<PlatformReadyProof, VpnError>;
-pub type IssueDataRunningProofFn = fn(
-    ProtocolSessionRef,
-    PlatformOwnershipRef,
-    PacketLeaseRef,
-    EvidenceDigest,
-) -> Result<DataRunningProof, VpnError>;
 
 // ---- D10-T construction seams (ports) ----
 
@@ -609,5 +498,3 @@ impl
     }
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

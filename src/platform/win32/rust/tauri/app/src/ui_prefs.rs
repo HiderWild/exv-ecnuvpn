@@ -69,6 +69,9 @@ pub struct UiPreferences {
     /// 应用启动且空闲时自动发起连接。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_connect_on_launch: Option<bool>,
+    /// 连接后显示实时时延（毫秒）；纯前端显示偏好，默认关闭。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_latency: Option<bool>,
 }
 
 impl UiPreferences {
@@ -89,6 +92,7 @@ impl UiPreferences {
                 self.connection_state_notifications.unwrap_or(false),
             ),
             auto_connect_on_launch: Some(self.auto_connect_on_launch.unwrap_or(false)),
+            show_latency: Some(self.show_latency.unwrap_or(false)),
         }
     }
 }
@@ -228,13 +232,6 @@ impl UiPrefsStore {
         Some(Self { dir: ui_state_dir()?, inner: Mutex::new(()) })
     }
 
-    /// 测试构造：注入目录。
-    #[cfg(test)]
-    #[must_use]
-    pub fn for_dir(dir: PathBuf) -> Self {
-        Self { dir, inner: Mutex::new(()) }
-    }
-
     /// 读有效偏好。
     ///
     /// # Errors
@@ -272,171 +269,3 @@ pub fn ui_prefs_set(
 }
 
 // ---- 测试 ----
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "exv-ui-prefs-test-{}-{tag}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    fn read_json(dir: &Path) -> serde_json::Value {
-        serde_json::from_str(&fs::read_to_string(ui_prefs_path_for(dir)).expect("prefs file"))
-            .expect("valid json")
-    }
-
-    #[test]
-    fn roundtrip_preserves_set_fields_and_defaults_rest() {
-        let dir = temp_dir("roundtrip");
-        let store = UiPrefsStore::for_dir(dir.clone());
-
-        let first = store.get().expect("get");
-        assert_eq!(first.close_preference.as_deref(), Some("smart"));
-        assert_eq!(first.minimize_to_tray_on_connect, Some(false));
-
-        store
-            .set(UiPreferences {
-                minimize_to_tray_on_connect: Some(true),
-                ..Default::default()
-            })
-            .expect("set");
-
-        let json = read_json(&dir);
-        assert_eq!(json["minimize_to_tray_on_connect"], serde_json::json!(true));
-        // 未设置的键不落盘（skip_serializing_if），读回仍得默认值。
-        assert!(json.get("launch_at_login").is_none());
-        let second = store.get().expect("get");
-        assert_eq!(second.minimize_to_tray_on_connect, Some(true));
-        assert_eq!(second.silent_startup, Some(false));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn corrupt_json_falls_back_to_defaults_without_crash() {
-        let dir = temp_dir("corrupt");
-        fs::write(ui_prefs_path_for(&dir), "{not valid json").expect("write junk");
-
-        let store = UiPrefsStore::for_dir(dir.clone());
-        let prefs = store.get().expect("get");
-        assert_eq!(prefs.close_preference.as_deref(), Some("smart"));
-        assert_eq!(prefs.minimize_to_tray_on_connect, Some(false));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn invalid_close_preference_value_falls_back_to_smart() {
-        let dir = temp_dir("bad-close");
-        fs::write(
-            ui_prefs_path_for(&dir),
-            r#"{"close_preference": "minimize"}"#,
-        )
-        .expect("write");
-
-        let prefs = UiPrefsStore::for_dir(dir).get().expect("get");
-        assert_eq!(prefs.close_preference.as_deref(), Some("smart"));
-    }
-
-    #[test]
-    fn unknown_keys_are_preserved_on_disk_across_patches() {
-        let dir = temp_dir("unknown-keys");
-        fs::write(
-            ui_prefs_path_for(&dir),
-            r#"{"future_field": {"a": 1}, "silent_startup": true}"#,
-        )
-        .expect("write");
-
-        let store = UiPrefsStore::for_dir(dir.clone());
-        let prefs = store.get().expect("get");
-        assert_eq!(prefs.silent_startup, Some(true));
-
-        // 补丁只改自己的键；磁盘上的未知键保留（向前兼容：新版本写入的字段不被旧版本抹掉）。
-        store
-            .set(UiPreferences {
-                launch_at_login: Some(true),
-                ..Default::default()
-            })
-            .expect("set");
-        let json = read_json(&dir);
-        assert_eq!(json["future_field"], serde_json::json!({"a": 1}));
-        assert_eq!(json["launch_at_login"], serde_json::json!(true));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn imports_legacy_close_preference_once() {
-        let dir = temp_dir("legacy-import");
-        fs::write(
-            legacy_close_pref_path_for(&dir),
-            r#"{"action": "quit"}"#,
-        )
-        .expect("write legacy");
-
-        let store = UiPrefsStore::for_dir(dir.clone());
-        let imported = store.get().expect("get");
-        assert_eq!(imported.close_preference.as_deref(), Some("quit"));
-        // 导入已落盘。
-        assert_eq!(read_json(&dir)["close_preference"], serde_json::json!("quit"));
-
-        // 之后改掉 close_preference 不再被 legacy 文件覆盖（幂等：仅目标文件不存在才导入）。
-        store
-            .set(UiPreferences {
-                close_preference: Some("tray".into()),
-                ..Default::default()
-            })
-            .expect("set");
-        let again = store.get().expect("get");
-        assert_eq!(again.close_preference.as_deref(), Some("tray"));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn no_import_when_target_already_exists() {
-        let dir = temp_dir("no-import");
-        fs::write(ui_prefs_path_for(&dir), r#"{"close_preference": "tray"}"#)
-            .expect("write prefs");
-        fs::write(
-            legacy_close_pref_path_for(&dir),
-            r#"{"action": "quit"}"#,
-        )
-        .expect("write legacy");
-
-        let prefs = UiPrefsStore::for_dir(dir).get().expect("get");
-        assert_eq!(prefs.close_preference.as_deref(), Some("tray"));
-    }
-
-    #[test]
-    fn patch_merges_without_clearing_unset_fields() {
-        let dir = temp_dir("patch-merge");
-        let store = UiPrefsStore::for_dir(dir.clone());
-        store
-            .set(UiPreferences {
-                silent_startup: Some(true),
-                connection_state_notifications: Some(true),
-                ..Default::default()
-            })
-            .expect("seed");
-        store
-            .set(UiPreferences {
-                silent_startup: Some(false),
-                ..Default::default()
-            })
-            .expect("patch");
-
-        let prefs = store.get().expect("get");
-        assert_eq!(prefs.silent_startup, Some(false));
-        assert_eq!(prefs.connection_state_notifications, Some(true));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-}

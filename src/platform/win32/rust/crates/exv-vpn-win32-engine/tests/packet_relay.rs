@@ -1,59 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W23B-T Terra: packet relay（AttachedPacketRelay）契约测试。test names 是
-// docs/superpowers/plans/2026-08-12-vpn-rust-native-runtime-mvp-terra-oracle-plan.md §6.1
-// `W23B-T` 行的**完整且精确**集合（Terra 不得改名/增删/合并）；frozen seam 是
-// `AttachedPacketRelay`（exv-engine crate 的 packet_relay 模块）。Win32 子计划
-// §7 `W23B-T/I` 行的必测行为：atomic single attach、two-stream race、running proof、
-// EOF/panic/native terminal；killer mutants：**double consume**、**EOF only stops task**
-// （以及 partial stop，见 oracle 测试）。
-//
-// 本测试对 seam 追加的契约（W23B-I 必须满足，否则 GREEN 编译失败）：
-//   exv_vpn_win32_resource::packet_capability::PacketCapability（capability owner 在 resource crate）
-//     PacketCapability::issue(lease: PacketLeaseRef, epoch: RuntimeEpoch) -> Self
-//     PacketCapability::lease(&self) -> PacketLeaseRef
-//     PacketCapability::is_consumed(&self) -> bool
-//     （消费动作经 AttachedPacketRelay::attach 原子执行——spec §5.5：
-//       Pending(capability) -> Attached(connection_id)，并发/重复 -> PacketLeaseAlreadyAttached）
-//   exv_vpn_win32_resource::packet_attachment::PacketAttachment（Clone/Debug/PartialEq/Eq）
-//     PacketAttachment::connection_id(&self) -> u64
-//     PacketAttachment::lease(&self) -> PacketLeaseRef
-//   exv_engine::packet_relay::AttachedPacketRelay（frozen seam）
-//     AttachedPacketRelay::attach(&mut PacketCapability, connection_id: u64) -> Result<PacketAttachment, VpnError>
-//     AttachedPacketRelay::new(attachment, channel: PacketChannel, limits: PacketLimits) -> Self
-//       —— 纯状态机构造（非提权可测）；relay 组合 W23A 的 PacketChannel，不重新实现预算/序列
-//     AttachedPacketRelay::attach_session(&mut self, Arc<Mutex<WintunSession>>)   // 真实环回测试注入 W17 session
-//     AttachedPacketRelay::start_leg(&mut self, RelayDirection)                   // 该方向 worker 开始运行
-//     AttachedPacketRelay::leg_state(&self, RelayDirection) -> RelayLegState
-//     AttachedPacketRelay::running_proof(&self) -> bool   // 两个方向都必须 Running（spec §5.5/§8.5）
-//     AttachedPacketRelay::on_terminal(&mut self, RelayTerminalSource)
-//       —— 任一 terminal（EOF/panic/native read terminal/Stop）都使 running proof 失效（spec §6.6）
-//     AttachedPacketRelay::admit_receive_packet(&mut self, &[u8]) -> Result<u64, &'static str>
-//       —— receive 侧：ring 包 admit 进 channel，返回单调 sequence；> 64KiB 消息上限拒绝且不消耗 sequence
-//     AttachedPacketRelay::admit_send_frame(&mut self, packets, bytes, frame_sequence) -> Result<(), &'static str>
-//       —— send 侧 X71H：frame_sequence 必须等于 channel 当前 sequence（旧帧/超限拒绝）
-//     AttachedPacketRelay::pump_send_frame(&mut self, &[u8], frame_sequence) -> Result<(), RelaySendError>
-//       —— send 侧单帧入口：X71H + 预算 + 写入 Wintun send ring（relay 锁 -> session 锁，锁序固定）
-//     AttachedPacketRelay::stop(&mut self)   // 两个方向都停（partial stop 是 mutant）
-//   RelayDirection { Receive, Send } / RelayLegState { Attached, Running, Terminal }
-//   RelayTerminalSource { StreamEof, TaskPanic, NativeReadTerminal, Stop }
-//   RelaySendError { Rejected(&'static str), Native(NativeError) }
-//
-// 本测试组合 W17（wintun_session.rs 的 WintunSession/WintunPacket）与 W23A
-// （packet_channel.rs 的 PacketChannel / packet_limits.rs 的 PacketLimits），不重新实现它们。
-// 纯逻辑断言（capability 单次消费、attach 原子性、two-stream race、running proof 决策、
-// terminal 失效、序列/admission 记账、通道上限）非提权即可运行；真实 ring 流量断言
-// （跨子网 10.99.99.0/24 环回）提权运行，全部 netsh/ping 子进程带 watchdog。
-//
-// 冻结事实（native-wintun-facts.md §2，WSP3 提权实测）继承：
-//   - Wintun 是 NdisMediumLoopback：同子网 ICMP 被内核本地应答、不进入 ring；只有跨子网
-//     （10.99.99.0/24 经 adapter 显式路由）的包才真实经过 ring；
-//   - ICMP reply 校验和必须先清零再重算（实测 bug：漏清零 -> 0x0800 无效，内核静默丢弃）；
-//   - child worker 必须**先 join 再 WintunEndSession**（0.14.1 EndSession 销毁 session 对象，
-//     之后任何 receive 都是 UAF——实测 ntdll AV）；
-//   - read-wait 事件由 session 管理，调用方不得 CloseHandle；
-//   - outstanding receive 经 WintunReleaseReceivePacket 释放（drop WintunPacket 即是）。
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -82,7 +26,7 @@ use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenElevation}
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, WaitForSingleObject};
 
 /// 冻结的 amd64 wintun-0.14.1 DLL 精确路径（PATH DLL 是 mutant；哈希由 WintunLibrary::load 校验）。
-const FROZEN_DLL_PATH: &str = "C:\\Users\\TomLi\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
+const FROZEN_DLL_PATH: &str = "C:\\Users\\user\\.exv\\wintun\\wintun\\bin\\amd64\\wintun.dll";
 /// 测试使用的环容量（与 WSP3 探针一致：2^17，wintun.h 下界）。
 const RING_CAPACITY: u32 = 131072;
 /// 与 WSP3 探针一致的 tunnel type。
@@ -847,5 +791,3 @@ fn oracle_kills_double_consume_or_partial_stop_mutant() {
     );
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

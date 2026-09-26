@@ -1,23 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// W13-T terra: singleton authority over a Local\ named mutex. These tests pin the
-// SingletonAuthority / AuthorityAcquire / NativeError API that W13-I implements in
-// exv_vpn_win32_resource::{authority, native_error}. The frozen WSP2 facts
-// (docs/superpowers/platforms/win32/vpn-rust-native-runtime-mvp/native-authority-storage-facts.md)
-// are the contract:
-//   - Named Mutex in the Local\ namespace is the authority primitive (facts §1);
-//   - the loser of the race observes WAIT_TIMEOUT (258) and exits BEFORE any
-//     scan/observe/publish (mutex_loser_exited_before_scan_observe_publish);
-//   - an owner killed by TerminateProcess without releasing yields WAIT_ABANDONED_0
-//     (128) to the next waiter, which is GRANTED ownership and can release;
-//   - a released mutex is reacquirable (mutex_reusable_after_release);
-//   - the mutex DACL is SYSTEM + the current user only, never broad IU (facts §1).
-//
-// The two-process cases spawn a real child process: the test binary is re-executed
-// (std::env::current_exe) with EXV_W13_CHILD + libtest's --exact filter so only the
-// spawning test runs in the child. The child role (child_role) exits before doing any
-// parent work, so there is no recursion.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -495,5 +475,3 @@ fn authority_dacl_rejects_broad_iu() {
     authority.release().expect("release before dropping");
 }
 
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。

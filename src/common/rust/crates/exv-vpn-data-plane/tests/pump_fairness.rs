@@ -1,12 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// 规格：docs/superpowers/specs/vpn-rust-native-runtime-mvp.md；cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
-//
-// Terra (test writer) — leaf Q61: fair directional pump scheduler. RED tests ONLY.
-// The production seam (pump.rs) is an empty stub and is NOT implemented here. This file references
-// the pinned seam and must fail to compile until Q61-I lands.
-//
-// Pure + deterministic: no I/O, no filesystem, no sleep, no randomness. All counts are fixed
-// integer literals and the sustained-full budget is driven with fixed batches.
 
 use exv_vpn_data_plane::budget::{DataPlaneDirection, PacketBudget};
 use exv_vpn_data_plane::pump::{DirectionReadiness, PollDecision, PumpScheduler};

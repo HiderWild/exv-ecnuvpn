@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! P2-c `logs.list`/`logs.clear` 契约（`exv_core::log_control`）集成测试。
 //!
@@ -166,4 +164,100 @@ fn filter_by_text_keeps_original_seq_slots() {
     assert_eq!(seqs(&reply), [2], "seq 槽保持原值（不因过滤重排）");
     assert_eq!(reply.entries[0].message, "certificate verify FAILED");
     assert_eq!(reply.next_seq, 3);
+}
+
+/// W1-B（P9）：last-seen + 严格 `>` 游标契约矩阵（与 darwin core 同构钉死）。
+///
+/// 统一契约：客户端续拉传「最后已见 seq」，core 返回 `seq > after_seq`；
+/// 本测试钉死五个分支——last-seen 续拉恰返回下一条、以 `next_seq` 续拉恰等条
+/// **不**返回（旧桥 off-by-one 漏条机理的反例）、`after_seq` 回退重发、
+/// `after_seq > last_seq` 空页 `next_seq` 稳定、clear 后 seq 重启。
+#[test]
+fn last_seen_strict_greater_cursor_contract_matrix() {
+    let (agg, svc) = service("it-lastseen");
+    for i in 1..=5 {
+        append_core(&agg, "info", &format!("e{i}"));
+    }
+
+    // 上一页：after_seq=2 → seq 3..=5，next_seq=6；last-seen=5。
+    let page = svc
+        .list(&ListLogsRequest {
+            after_seq: 2,
+            limit: None,
+            filter: None,
+        })
+        .expect("page");
+    assert_eq!(seqs(&page), [3, 4, 5]);
+    assert_eq!(page.next_seq, 6);
+
+    append_core(&agg, "info", "e6-new");
+
+    // (1) last-seen（next_seq - 1 = 5）续拉：恰返回下一条 seq 6。
+    let next = svc
+        .list(&ListLogsRequest {
+            after_seq: page.next_seq - 1,
+            limit: Some(10),
+            filter: None,
+        })
+        .expect("last-seen continuation");
+    assert_eq!(seqs(&next), [6], "last-seen 续拉恰返回下一条");
+    assert_eq!(next.next_seq, 7);
+
+    // (2) 反例钉死：以 next_seq（6）续拉 → seq 恰等条目不返回（严格 `>`）。
+    let skipped = svc
+        .list(&ListLogsRequest {
+            after_seq: page.next_seq,
+            limit: Some(10),
+            filter: None,
+        })
+        .expect("next_seq continuation counter-example");
+    assert!(
+        skipped.entries.is_empty(),
+        "seq 恰等于 next_seq 的条目不得返回——回传 next_seq 会漏条"
+    );
+    assert_eq!(skipped.next_seq, 7);
+
+    // (3) after_seq 回退（< 已见）→ 重发（前端按事件键去重，重复无害）。
+    let resent = svc
+        .list(&ListLogsRequest {
+            after_seq: 3,
+            limit: Some(10),
+            filter: None,
+        })
+        .expect("resend");
+    assert_eq!(seqs(&resent), [4, 5, 6], "游标回退重发");
+
+    // (4) after_seq > last_seq → 空页 + next_seq 稳定（= last_seq + 1）。
+    let beyond = svc
+        .list(&ListLogsRequest {
+            after_seq: 100,
+            limit: Some(10),
+            filter: None,
+        })
+        .expect("beyond");
+    assert!(beyond.entries.is_empty());
+    assert_eq!(beyond.next_seq, 7);
+
+    // (5) clear 后 seq 重启：旧游标只见空页（客户端必须清零游标）；
+    //     清零重拉得到从 seq 1 重新开始的新条目。
+    svc.clear().expect("clear");
+    let stale = svc
+        .list(&ListLogsRequest {
+            after_seq: 6,
+            limit: Some(10),
+            filter: None,
+        })
+        .expect("stale cursor after clear");
+    assert!(stale.entries.is_empty(), "clear 后旧游标拉不到重启的 seq");
+
+    append_core(&agg, "info", "fresh");
+    let fresh = svc
+        .list(&ListLogsRequest {
+            after_seq: 0,
+            limit: None,
+            filter: None,
+        })
+        .expect("fresh");
+    assert_eq!(seqs(&fresh), [1], "清空后从 seq 1 重新开始");
+    assert_eq!(fresh.next_seq, 2);
 }

@@ -1,18 +1,19 @@
-//! core 启动接线（P4-b）：Tauri setup 时 spawn core → 拨号 → 管理状态 → 挂订阅。
+//! core 启动接线：Tauri setup 时 spawn core → 拨号 → 管理状态 → 挂订阅。
 //!
 //! 流程（O3 强绑定：UI 宿主管理 core 生命周期）：
 //!   1. 定位 core 二进制（[`super::core_process::core_bin_path`]）并 spawn
 //!      （[`super::core_process::spawn_core`]）——core 是普通用户 token 的纯协调层，
-//!      非特权直接拉起；
+//!      非特权直接拉起（host main 已是真实入口，本模块在 Tauri 壳内托管其进程）；
 //!   2. 拨号 core 控制面 Named Pipe（[`super::client::dial_core`]，按 UI 侧已知的
 //!      core pid + 当前用户 SID 验证 server）；
 //!   3. 组装 [`CoreState`]（Dialed/NotWired handle + 快照缓存）与 [`CoreSession`]
 //!      （core 子进程句柄 + 订阅 task 句柄）并 `app.manage`；
 //!   4. 拨号成功 → 拉起事件订阅（[`super::events::spawn_subscriptions`]）。
 //!
-//! **诚实降级**：core 二进制尚不存在（P5 落 host main 前）或拨号失败 → 记录 warning，
-//! 保留 `NotWired` handle，UI 照常打开（命令返回 `CoreUnreachable`，前端展示
-//! "core 未连接"）——不把启动失败升级为进程崩溃。
+//! **防御降级**：core 二进制缺失或拨号失败（例如开发壳未随附 core、启动竞态）→
+//! 记录 warning，保留 `NotWired` handle，UI 照常打开（命令返回 `CoreUnreachable`，
+//! 前端展示 "core 未连接"；用户点连接时经 [`recover_stopped_core_for_connect`] 恢复）
+//! ——不把启动失败升级为进程崩溃。
 
 use tauri::{AppHandle, Manager};
 
@@ -41,7 +42,7 @@ pub fn bootstrap(app: &mut tauri::App) -> tauri::Result<()> {
         None => {
             tracing::warn!(
                 target: "exv.bootstrap",
-                "core binary not available (P5 lands host main); running degraded with NotWired handle"
+                "core binary unavailable; running degraded with NotWired handle (connect will attempt recovery)"
             );
             (None, 0)
         }
@@ -53,13 +54,13 @@ pub fn bootstrap(app: &mut tauri::App) -> tauri::Result<()> {
         pid => {
             // setup 阶段 tauri 的 tokio runtime 已就绪：阻塞等待拨号完成。
             match tauri::async_runtime::block_on(dial_spawned_core(pid)) {
-                Ok((channel, core_peer)) => {
+                Ok((channel, _)) => {
                     tracing::info!(
                         target: "exv.bootstrap",
-                        core_pid = core_peer.process_id,
+                        core_pid = pid,
                         "dialed core KernelControl endpoint"
                     );
-                    CoreHandle::Dialed { channel, core_peer }
+                    CoreHandle::Dialed { channel }
                 }
                 Err(e) => {
                     tracing::warn!(target: "exv.bootstrap", "dial core failed (degraded): {e}");
@@ -139,10 +140,9 @@ pub async fn recover_stopped_core_for_connect(
     let pid = replacement.pid();
     // core 刚 spawn 时命名管道尚在创建。有限重试只等待本次受控重拉的就绪，不做后台轮询。
     match dial_spawned_core(pid).await {
-        Ok((channel, core_peer)) => {
+        Ok((channel, _)) => {
             state.replace_handle(CoreHandle::Dialed {
                 channel: channel.clone(),
-                core_peer,
             });
             replace_subscriptions(app, session, channel);
             if let Ok(mut child) = session.child.lock() {

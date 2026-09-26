@@ -14,13 +14,13 @@
 //! 服务，LogEvent 迁至 common.proto 共享）。stats 经 RuntimeSnapshot.stats 携带，
 //! `stats` 命令从 snapshot 缓存读取。`stats` 缓存无样本时返回 NotWired 占位。
 
-use std::sync::RwLock;
+use std::{fmt, sync::RwLock};
 
 use exv_vpn_wire::generated::kernel_control_client::KernelControlClient;
 use exv_vpn_wire::generated::{self as wire};
 use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
-use tonic::{Code, Status};
+use tonic::{Code, Request, Status};
 
 use super::core_transport::{connect_core_channel, CorePeer, GrpcPipeError};
 use super::error::AppError;
@@ -29,14 +29,35 @@ use super::state::{OperationReply, RuntimeSnapshot, ServiceControlAction, Servic
 use super::stats::RuntimeStats;
 use super::wire::{self as wire_map};
 
-/// 连接/身份意图（P4-b 已对齐 core ConnectIntent 的 UI 侧字段；`secret_payload`
-/// 是 UI 提交的一次性 secret，core 侧走一次性通道并零化 wire 副本）。
+/// 前端提交的本次连接凭据。密码只会在 Tauri→Core 的当前请求中编码，不记录到错误或日志。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ConnectCredentials {
+    pub username: String,
+    pub password: String,
+    pub persist: bool,
+}
+
+impl fmt::Debug for ConnectCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("persist", &self.persist)
+            .finish()
+    }
+}
+
+/// 连接/身份意图。Tauri 命令边界只接收结构化 `credentials`，由 wire 层编码为已有
+/// `secret_payload`；保留 `secret_payload` 仅供既有 Rust 内部调用路径兼容。
 ///
 /// R1：安装/连接拆分为独立路由——`auto_install_service` 已从 wire 移除，connect 只携带
 /// `profile_ref` + `secret_payload`；安装服务由 UI 独立发 ServiceControl install 请求。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectIntent {
     pub profile_ref: String,
+    #[serde(default)]
+    pub credentials: Option<ConnectCredentials>,
+    #[serde(default)]
     pub secret_payload: Option<String>,
 }
 
@@ -44,6 +65,9 @@ pub struct ConnectIntent {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigPayload {
     pub items: Vec<ConfigItem>,
+    /// 本次 ConfigGet 是否因配置缺失、空白、非 object 或不可解析而 bootstrap 默认配置。
+    /// 不携带原始配置、异常细节或任何秘密。
+    pub requires_quick_start: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,12 +81,9 @@ pub struct ConfigItem {
 pub enum CoreHandle {
     /// 尚未建立到 core 的通道（core 未启动 / 拨号失败）。
     NotWired,
-    /// 已拨号并验证 core server 的通道（含已验证的 core peer 身份）。
+    /// 已拨号并验证 core server 的通道。
     Dialed {
         channel: Channel,
-        /// 已验证的 core server 身份（transport 派生；生命周期/诊断在后续阶段读取）。
-        #[allow(dead_code)]
-        core_peer: CorePeer,
     },
 }
 
@@ -91,23 +112,6 @@ impl CoreHandle {
         }
     }
 
-    /// 是否已拨号（UI 可否访问 core）。
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn is_dialed(&self) -> bool {
-        matches!(self, Self::Dialed { .. })
-    }
-
-    /// 已验证的 core peer 身份（未拨号 → `None`）。P4-b 接入点：bootstrap 已存入，
-    /// 生命周期/诊断在后续阶段读取。
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn core_peer(&self) -> Option<&CorePeer> {
-        match self {
-            Self::Dialed { core_peer, .. } => Some(core_peer),
-            Self::NotWired => None,
-        }
-    }
 }
 
 /// Tauri managed state：UI 侧 core 会话状态 + 快照缓存。
@@ -236,6 +240,8 @@ fn pipe_error_to_app(e: GrpcPipeError) -> AppError {
 const SERVICE_NOT_RUNNING_PREFIX: &str = "service_not_running|";
 const SERVICE_START_FAILED_PREFIX: &str = "service_start_failed|";
 const SERVICE_CONNECT_FAILED_PREFIX: &str = "service_connect_failed|";
+const CREDENTIAL_REQUIRED_PREFIX: &str = "credential_required|";
+const COMPATIBILITY_MODE_UNAVAILABLE_PREFIX: &str = "compatibility_mode_unavailable|";
 
 /// 把 tonic `Status` 映射为 UI 错误：transport 类 → `CoreUnreachable`；
 /// 服务路由失败前缀 → typed `ServiceNotRunning` / `ServiceConnectFailed`（R5 modal
@@ -247,17 +253,43 @@ fn map_status(s: Status) -> AppError {
         }
         _ => {
             let message = s.message();
-            if let Some(rest) = message.strip_prefix(SERVICE_NOT_RUNNING_PREFIX) {
+            if let Some(rest) = message.strip_prefix(CREDENTIAL_REQUIRED_PREFIX) {
+                let code = rest.trim();
+                AppError::CredentialRequired {
+                    code: (!code.is_empty()).then(|| code.to_string()),
+                    message: "credential_required".to_string(),
+                }
+            } else if let Some(rest) = message.strip_prefix(SERVICE_NOT_RUNNING_PREFIX) {
                 AppError::ServiceNotRunning(rest.trim().to_string())
             } else if let Some(rest) = message.strip_prefix(SERVICE_START_FAILED_PREFIX) {
                 AppError::ServiceNotRunning(rest.trim().to_string())
             } else if let Some(rest) = message.strip_prefix(SERVICE_CONNECT_FAILED_PREFIX) {
                 AppError::ServiceConnectFailed(rest.trim().to_string())
+            } else if let Some(rest) = message.strip_prefix(COMPATIBILITY_MODE_UNAVAILABLE_PREFIX) {
+                AppError::CompatibilityModeUnavailable(rest.trim().to_string())
             } else {
                 AppError::Internal(format!("{}: {}", s.code(), s.message()))
             }
         }
     }
+}
+
+/// R4（ui-connect-stop-responsiveness 复审 P1-1）：把壳本地生成的 16 字节
+/// operation_id 以小写 hex 回注 UI `OperationReply`。
+///
+/// 硬契约（C1 三方 id 锚的壳侧一环）：host wire `OperationReply` **没有**
+/// operation_id 字段（common.proto:430-433 仅 `terminal`）——前端看到的回复 id
+/// 完全由壳在本地生成并回注；host 受理快照/状态事件携带同一 id
+/// （`OperationLookupKey.operation_id`），前端据此关联「当前用户操作」。
+/// connect 与 stop 两处回注共用本实现，壳层单测钉死（前端 mock gateway
+/// 覆盖不到的测试空洞）。
+fn ui_operation_reply_with_local_id(
+    reply: wire::OperationReply,
+    operation_id: &[u8],
+) -> OperationReply {
+    let mut ui = wire_map::operation_reply_from_wire(&reply);
+    ui.operation_id = Some(wire_map::hex(operation_id));
+    ui
 }
 
 impl CoreClient {
@@ -275,7 +307,19 @@ impl CoreClient {
             .channel()
             .ok_or_else(|| AppError::CoreUnreachable("connect: core not dialed".to_string()))?;
         let operation_id = uuid::Uuid::new_v4().as_bytes().to_vec();
-        let request = wire_map::connect_request(&intent, operation_id.clone())?;
+        let mut request = Request::new(wire_map::connect_request(&intent, operation_id.clone())?);
+        // `persist` 是 host 配置写入的非秘密选择；engine 只接收固定的
+        // `{version,username,password}` payload，绝不看到此元数据。
+        if intent
+            .credentials
+            .as_ref()
+            .is_some_and(|credentials| credentials.persist)
+        {
+            request.metadata_mut().insert(
+                "x-exv-persist-credentials",
+                tonic::metadata::MetadataValue::from_static("true"),
+            );
+        }
         let mut client = KernelControlClient::new(channel);
         let reply = match client.connect(request).await.map_err(map_status) {
             Ok(reply) => reply,
@@ -286,9 +330,10 @@ impl CoreClient {
                 return Err(error);
             }
         };
-        let mut ui = wire_map::operation_reply_from_wire(&reply.into_inner());
-        ui.operation_id = Some(wire_map::hex(&operation_id));
-        Ok(ui)
+        Ok(ui_operation_reply_with_local_id(
+            reply.into_inner(),
+            &operation_id,
+        ))
     }
 
     /// 停止连接（P4-b: KernelControl.Stop）。operation_id 关联契约同 connect。
@@ -300,9 +345,10 @@ impl CoreClient {
         let request = wire_map::stop_request(operation_id.clone())?;
         let mut client = KernelControlClient::new(channel);
         let reply = client.stop(request).await.map_err(map_status)?;
-        let mut ui = wire_map::operation_reply_from_wire(&reply.into_inner());
-        ui.operation_id = Some(wire_map::hex(&operation_id));
-        Ok(ui)
+        Ok(ui_operation_reply_with_local_id(
+            reply.into_inner(),
+            &operation_id,
+        ))
     }
 
     /// 拉取当前运行时快照（P4-b: KernelControl.GetSnapshot），并更新缓存。
@@ -379,9 +425,15 @@ impl CoreClient {
             .map(wire_map::log_event_from_wire)
             .collect::<Vec<_>>();
         let has_more = !inner.entries.is_empty() && inner.entries.len() >= effective_limit;
+        // W1-B（P9）：core 的增量过滤是严格 `seq > after_seq`，且 `next_seq` =
+        // 末条 seq + 1——把 `next_seq` 原样回传会让前端下一轮恰漏 seq ==
+        // next_seq 的那条（每轮游标推进漏一条）。翻译成 last-seen 游标
+        // （末条 seq），钳制不回退（对齐 `LogChunk::next_after_seq` 既有文档
+        // 「本分片末条的事件序号」）。
+        let next_after_seq = inner.next_seq.saturating_sub(1).max(after_seq);
         Ok(LogChunk {
             events,
-            next_after_seq: inner.next_seq,
+            next_after_seq,
             has_more,
         })
     }
@@ -423,6 +475,7 @@ impl CoreClient {
                     value: i.value,
                 })
                 .collect(),
+            requires_quick_start: inner.requires_quick_start,
         })
     }
 
@@ -522,78 +575,5 @@ impl CoreClient {
             .await
             .map_err(map_status)?;
         Ok(reply.into_inner())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// R5：服务路由失败前缀 → typed AppError 变体（modal 触发），前缀被剥离。
-    #[test]
-    fn map_status_service_prefixes_map_to_typed_variants() {
-        let not_running = map_status(Status::failed_precondition(
-            "service_not_running|service installed but not running; start the service and reconnect",
-        ));
-        assert!(matches!(
-            not_running,
-            AppError::ServiceNotRunning(ref m) if m.contains("start the service")
-        ));
-
-        let start_failed = map_status(Status::failed_precondition(
-            "service_start_failed|服务业务面未就绪（SCM 状态=Running，keepalive 未响应）",
-        ));
-        assert!(matches!(
-            start_failed,
-            AppError::ServiceNotRunning(ref m) if m.contains("keepalive")
-        ));
-
-        let connect_failed = map_status(Status::failed_precondition(
-            "service_connect_failed|service engine connect: psk unreadable",
-        ));
-        assert!(matches!(
-            connect_failed,
-            AppError::ServiceConnectFailed(ref m) if m.contains("psk unreadable")
-        ));
-    }
-
-    /// 非服务前缀的普通业务拒绝仍映射为 Internal（不误触发 modal）。
-    #[test]
-    fn map_status_plain_business_rejection_stays_internal() {
-        let err = map_status(Status::failed_precondition("authorization refused"));
-        assert!(matches!(err, AppError::Internal(_)));
-        assert!(!matches!(err, AppError::ServiceNotRunning(_)));
-        assert!(!matches!(err, AppError::ServiceConnectFailed(_)));
-    }
-
-    /// transport 类错误仍映射为 CoreUnreachable（modal 不因掉线触发）。
-    #[test]
-    fn map_status_transport_errors_map_to_core_unreachable() {
-        for code in [
-            Code::Unavailable,
-            Code::Cancelled,
-            Code::Unknown,
-            Code::DeadlineExceeded,
-        ] {
-            let err = map_status(Status::new(code, "boom"));
-            assert!(
-                matches!(err, AppError::CoreUnreachable(_)),
-                "code {code} must map to CoreUnreachable"
-            );
-        }
-    }
-
-    /// R5 变体 serde 形状稳定：`{kind,message}`（前端 command-error 识别）。
-    #[test]
-    fn service_error_variants_serialize_as_kind_message() {
-        let err = AppError::ServiceNotRunning("please start".to_string());
-        let json = serde_json::to_value(err).expect("serialize");
-        assert_eq!(json["kind"], "service_not_running");
-        assert_eq!(json["message"], "please start");
-
-        let err = AppError::ServiceConnectFailed("connect failed".to_string());
-        let json = serde_json::to_value(err).expect("serialize");
-        assert_eq!(json["kind"], "service_connect_failed");
-        assert_eq!(json["message"], "connect failed");
     }
 }

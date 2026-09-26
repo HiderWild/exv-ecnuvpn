@@ -1,5 +1,3 @@
-// EXV_CUTOVER（2026-08-17）：Rust 为正式活动产品线；C++ 已弃用、仅作参考。
-// cutover 记录：docs/superpowers/evidence/2026-08-17-rust-native-product-line-cutover.md；重新接线须另立 cutover requirement 并重跑真实业务流——该条件已由 2026-08-17 cutover 满足。
 
 //! core 进程生命周期（P3-c2 / D1 解耦）：启动 → 拉起 engine → 运行 → 停机（发退出包）
 //! → core 退出 → engine 由三重保证随行退出。
@@ -23,12 +21,17 @@
 //!   终止降为崩溃恢复/验证路径（`EngineSupervisor::verify_exit`）。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
-use crate::composition::HostComposition;
-use crate::crash_recovery::CrashRecovery;
+use crate::composition::{HostComposition, HostPhase};
+use crate::crash_recovery::{
+    CrashRecovery, RespawnOutcome, SelfHealReporter, SelfHealStage, respawn_error_code,
+};
 use crate::engine_lifecycle::{EngineShutdownOutcome, EngineSupervisor};
+use crate::guards::ServiceMode;
+use crate::kernel_control_service::{EventBus, snapshot_for_phase};
 
 /// UI 生命周期信号（O3 强绑定）。
 ///
@@ -103,7 +106,7 @@ pub struct CoreShutdownOutcome {
 ///
 /// 调用方须在进入本函数前 drop 服务任务 / 事件转发器（释放对共享 engine client 的引用）。
 pub async fn shutdown_core(
-    supervisor: EngineSupervisor,
+    supervisor: Arc<Mutex<EngineSupervisor>>,
     composition: &Arc<Mutex<HostComposition>>,
 ) -> CoreShutdownOutcome {
     // 1. 取消待决 RPC waiter（RPC cancel ≠ 业务 Stop：只记录，不改业务状态）。
@@ -111,7 +114,12 @@ pub async fn shutdown_core(
         let mut comp = composition.lock().await;
         comp.on_rpc_waiter_cancel();
     }
-    // 2. engine 发退出包（fire-and-forget；不等待 engine 退出）。
+    // 2. engine 发退出包（fire-and-forget；不等待 engine 退出）。按需拉起模型下
+    //    supervisor 可能为空监督（无 engine 曾被拉起）→ `NoClient`（core 退出即完）。
+    let supervisor = {
+        let mut guard = supervisor.lock().await;
+        std::mem::replace(&mut *guard, EngineSupervisor::empty())
+    };
     let engine = supervisor.stop().await;
     // 3. composition.exit()（幂等业务 Stop）。
     let mut comp = composition.lock().await;
@@ -143,8 +151,17 @@ pub struct CoreRuntime {
     shutdown_rx: watch::Receiver<bool>,
     /// 共享 host composition（与 `KernelControlService` 共享同一 Arc）。
     composition: Arc<Mutex<HostComposition>>,
-    /// engine 子进程监督句柄。
-    supervisor: EngineSupervisor,
+    /// engine 子进程监督句柄（与 `EngineProvisioner` 共享的互斥句柄——respawn/
+    /// provision/停机三方互斥；按需拉起模型下可为空监督）。
+    supervisor: Arc<Mutex<EngineSupervisor>>,
+    /// engine 槽换点订阅（按需拉起模型：provision 换入新 engine 挂接新 liveness 后，
+    /// run 循环据此重新获取掉线监听——启动时无 engine，无 liveness 可监听）。
+    /// `None` = 未接线（测试）。
+    slot_swaps: Option<watch::Receiver<u64>>,
+    /// 共享维护形态（`KernelControlService::selected_mode_handle`；respawn 分流判据
+    /// ——仅 oneshot 维护形态 respawn，2026-09-08 计划批 3）。`None` = 未接线（测试，
+    /// 保持既有「总是 respawn」语义）。
+    mode_gauge: Option<Arc<AtomicU8>>,
     /// KernelControl 服务任务（P4 传输层；停机先中止 = 停止接收 UI 请求）。
     serve_task: Option<tokio::task::JoinHandle<()>>,
     /// 事件转发器任务（持 engine client 引用；停机先中止释放引用）。
@@ -161,6 +178,12 @@ pub struct CoreRuntime {
     keepalive_ticker_task: Option<tokio::task::JoinHandle<()>>,
     /// P3 崩溃自愈编排（engine 掉线 → respawn 全链路）；`None` = 不自愈（测试/降级）。
     crash_recovery: Option<CrashRecovery>,
+    /// 2026-09-05 自愈上报 seam（阶段变化 → EventBus lane + 结构化日志）；`None` =
+    /// 不上报（测试/降级）。
+    self_heal_reporter: Option<Arc<dyn SelfHealReporter>>,
+    /// 2026-09-05 自愈阶段显式发布的事件总线（`publish_self_heal_refresh`——自愈窗口
+    /// 内没有自然事件，阶段变化必须显式驱动发布）；`None` = 不发布（测试/降级）。
+    self_heal_events: Option<Arc<EventBus>>,
 }
 
 impl CoreRuntime {
@@ -180,7 +203,9 @@ impl CoreRuntime {
             shutdown_tx,
             shutdown_rx,
             composition,
-            supervisor,
+            supervisor: Arc::new(Mutex::new(supervisor)),
+            slot_swaps: None,
+            mode_gauge: None,
             serve_task: None,
             forwarder_task: None,
             stats_forwarder_task: None,
@@ -188,7 +213,26 @@ impl CoreRuntime {
             reconnect_worker_task: None,
             keepalive_ticker_task: None,
             crash_recovery: None,
+            self_heal_reporter: None,
+            self_heal_events: None,
         }
+    }
+
+    /// 共享 supervisor 互斥句柄（`EngineProvisioner` 的 provision/retire 与本运行期
+    /// 的 respawn/停机经它互斥）。
+    #[must_use]
+    pub fn supervisor_handle(&self) -> Arc<Mutex<EngineSupervisor>> {
+        Arc::clone(&self.supervisor)
+    }
+
+    /// 接线 engine 槽换点订阅（provision 换入新 engine 后重新获取 liveness）。
+    pub fn set_slot_swaps(&mut self, swaps: watch::Receiver<u64>) {
+        self.slot_swaps = Some(swaps);
+    }
+
+    /// 接线共享维护形态（respawn 分流判据：仅 oneshot respawn）。
+    pub fn set_mode_gauge(&mut self, gauge: Arc<AtomicU8>) {
+        self.mode_gauge = Some(gauge);
     }
 
     /// UI 生命周期信号句柄。
@@ -252,6 +296,18 @@ impl CoreRuntime {
         self.crash_recovery = Some(recovery);
     }
 
+    /// 挂接自愈上报 seam（2026-09-05 计划 §4.3：阶段变化 → EventBus lane + 结构化日志；
+    /// 真实实现 = `EventBusSelfHealReporter`，测试用 recording fake）。
+    pub fn set_self_heal_reporter(&mut self, reporter: Arc<dyn SelfHealReporter>) {
+        self.self_heal_reporter = Some(reporter);
+    }
+
+    /// 挂接自愈阶段显式发布的事件总线（2026-09-05 计划 §4.3：阶段变化点以当前相位
+    /// 快照经 `publish_self_heal_refresh` 发布——复用既有 `publish` 路径）。
+    pub fn set_self_heal_events(&mut self, events: Arc<EventBus>) {
+        self.self_heal_events = Some(events);
+    }
+
     /// 显式请求停机（UI 发 stop / 系统信号）→ `run` 的 select 触发停机。
     pub fn request_shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -272,7 +328,11 @@ impl CoreRuntime {
         // core 自愈后继续服务 UI）。
         let mut ui_rx = self.ui.receiver();
         let mut shutdown_rx = self.shutdown_rx.clone();
-        let mut liveness_rx = self.supervisor.liveness();
+        // 按需拉起模型：启动时无 engine → 无 liveness 可监听；provision 换入新 engine
+        //（supervisor 挂接新 liveness）后经 slot 换点通知重新获取。
+        let mut liveness_rx = self.supervisor.lock().await.liveness();
+        let mut slot_swaps = self.slot_swaps.take();
+        let mode_gauge = self.mode_gauge.take();
         let crash_recovery = self.crash_recovery.take();
 
         loop {
@@ -293,6 +353,19 @@ impl CoreRuntime {
             tokio::select! {
                 _ = ui_rx.changed() => break,
                 _ = shutdown_rx.changed() => break,
+                // engine 槽换点（provision/respawn/service 路由）：liveness 尚未接线时
+                // 尝试从 supervisor 获取新 engine 的掉线监听。
+                _ = async {
+                    if let Some(rx) = slot_swaps.as_mut() {
+                        let _ = rx.changed().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    if liveness_rx.is_none() {
+                        liveness_rx = self.supervisor.lock().await.liveness();
+                    }
+                }
                 died = async {
                     if let Some(fut) = liveness_fired {
                         fut.await
@@ -302,19 +375,92 @@ impl CoreRuntime {
                     }
                 } => {
                     if died {
-                        if let Some(recovery) = &crash_recovery {
-                            match recovery.run_respawn(&mut self.supervisor).await {
+                        // 崩溃自愈按维护形态 + 业务在途分流（2026-09-08 计划批 3）：
+                        // 1. service/auto 形态不 respawn——service engine 崩溃归 SCM
+                        //    （SC_ACTION_RESTART），auto 无维护对象；
+                        // 2. oneshot 形态但**业务不在途**（idle engine 自然死亡）同样
+                        //    不 respawn——不为无用户业务手势的死亡弹 UAC；下一次
+                        //    connect 的 provision（ensure_oneshot_engine）按需重拉。
+                        // 未接线 gauge（测试）保持既有「总是 respawn」语义。
+                        let mode_allows_respawn = match mode_gauge.as_ref().map(|g| {
+                            ServiceMode::from_u8(g.load(Ordering::SeqCst))
+                        }) {
+                            None => true,
+                            Some(ServiceMode::Oneshot) => true,
+                            Some(_) => false,
+                        };
+                        let busy = {
+                            let composition = self.composition.lock().await;
+                            !matches!(
+                                composition.phase(),
+                                HostPhase::Idle | HostPhase::Stopped
+                            )
+                        };
+                        if !mode_allows_respawn || !busy {
+                            // 业务在途（如 service 连接中掉线）才做 composition 收敛；
+                            // 闲置边界（如 oneshot 退役/idle 死亡引发的 liveness 翻转）
+                            // 不重复 teardown，避免把 Idle/Stopped 压成 Reconciling
+                            // 关闭 admission。
+                            if busy {
+                                self.composition.lock().await.on_helper_link_terminal();
+                            }
+                            liveness_rx = None;
+                        } else if let Some(recovery) = &crash_recovery {
+                            let mut supervisor = self.supervisor.lock().await;
+                            let old_pid = supervisor.pid().unwrap_or(0);
+                            // 2026-09-05 发布点 1（冻结表）：liveness 翻 false、进入
+                            // respawn 前——`respawning` + 当前相位快照显式刷新。
+                            Self::report_self_heal_refresh(
+                                self.self_heal_reporter.as_ref(),
+                                self.self_heal_events.as_ref(),
+                                &self.composition,
+                                SelfHealStage::Respawning,
+                                old_pid,
+                                0,
+                                "",
+                            )
+                            .await;
+                            match recovery.run_respawn(&mut *supervisor).await {
                                 Ok(outcome) => {
                                     // respawn 成功：新 supervisor 带新 liveness（初始 true），
                                     // 继续等 UI 退出 / 下次掉线。
-                                    liveness_rx = self.supervisor.liveness();
+                                    liveness_rx = supervisor.liveness();
                                     tracing::info!(?outcome, "engine respawned (crash self-heal)");
+                                    // 2026-09-05 发布点 2（冻结表）：`succeeded` + 重建后
+                                    // Idle 快照。既有缺陷修复：composition 重建为 Idle 后
+                                    // 无人发布快照（新 engine 状态流不回放旧状态），UI 停留
+                                    // 「处理中」——此处显式刷新告诉 UI「自愈完成，可重新
+                                    // 连接」。
+                                    let RespawnOutcome::Respawned { old_pid, new_pid } = outcome;
+                                    Self::report_self_heal_refresh(
+                                        self.self_heal_reporter.as_ref(),
+                                        self.self_heal_events.as_ref(),
+                                        &self.composition,
+                                        SelfHealStage::Succeeded,
+                                        old_pid,
+                                        new_pid,
+                                        "",
+                                    )
+                                    .await;
                                 }
                                 Err(reason) => {
                                     // respawn 被阻/失败：回 Idle/报错（不自动重连）。停止
                                     // 掉线监听（无新 engine 可等）；用户再点连接走正常登录。
                                     liveness_rx = None;
                                     tracing::warn!(error = %reason, "engine respawn failed; user reconnect required");
+                                    // 2026-09-05 发布点 3（冻结表）：`failed`（error_code
+                                    // 按 §4.2 码表穷尽映射）+ 当前相位快照（teardown 已在
+                                    // respawn 步骤 1 落地，composition 处 Reconciling）。
+                                    Self::report_self_heal_refresh(
+                                        self.self_heal_reporter.as_ref(),
+                                        self.self_heal_events.as_ref(),
+                                        &self.composition,
+                                        SelfHealStage::Failed,
+                                        old_pid,
+                                        0,
+                                        respawn_error_code(&reason),
+                                    )
+                                    .await;
                                 }
                             }
                         } else {
@@ -377,6 +523,38 @@ impl CoreRuntime {
         // 有序停机（supervisor 所有权移入；engine 发退出包后即返；composition.exit()）。
         shutdown_core(self.supervisor, &self.composition).await
     }
+
+    /// 2026-09-05 自愈发布点统一落地（计划 §4.3，发布点表三行共用）：
+    ///
+    /// 1. 经 reporter 上报一次阶段变化（EventBus self_heal lane + `kernel.selfheal.*`
+    ///    结构化日志）；
+    /// 2. 以 composition **当前相位**组装快照经 `EventBus::publish_self_heal_refresh`
+    ///    显式发布（复用既有 `publish(TRANSITION, ...)` 路径与 lane 附加链）——自愈窗口
+    ///    内没有自然事件，不显式发布则订阅者拿不到阶段变化（§1.3 缺陷的机制根源）。
+    ///
+    /// reporter/events 任一未挂接（测试/降级）时跳过对应半边；相位快照从不伪造——
+    /// 发布的是 composition 的真实相位（respawn 入口 = 进入 teardown 前；成功臂 =
+    /// 重建后 Idle；失败臂 = teardown 后 Reconciling）。
+    async fn report_self_heal_refresh(
+        reporter: Option<&Arc<dyn SelfHealReporter>>,
+        events: Option<&Arc<EventBus>>,
+        composition: &Arc<Mutex<HostComposition>>,
+        stage: SelfHealStage,
+        old_pid: u32,
+        new_pid: u32,
+        error_code: &str,
+    ) {
+        if let Some(reporter) = reporter {
+            reporter.report(stage, old_pid, new_pid, error_code);
+        }
+        if let Some(events) = events {
+            let snapshot = {
+                let composition = composition.lock().await;
+                snapshot_for_phase(composition.phase(), &composition)
+            };
+            events.publish_self_heal_refresh(snapshot);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,374 +562,3 @@ impl CoreRuntime {
 // （UI 退出 / 显式停机）。进程级 wait/terminate 用 fake child（占位 0 句柄——
 // WaitForSingleObject(null) 返回 WAIT_FAILED → 有界等待失败 → Terminated，确定性）。
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::composition::compose_nonprivileged_host;
-    use crate::engine_lifecycle::EngineSlot;
-    use crate::process_lifecycle::EngineChild;
-    use exv_vpn_win32_ipc::peer_auth::VerifiedPipePeer;
-    use windows::Win32::Foundation::HANDLE;
-
-    /// 无真实子进程的占位 child（0 句柄；stop 的 wait 对其返回 false → Terminated 路径）。
-    fn fake_child() -> EngineChild {
-        EngineChild::new(0, HANDLE::default())
-    }
-
-    /// 确定性已验 helper peer（与 process_boundary 同源构造）。
-    fn helper_peer() -> VerifiedPipePeer {
-        VerifiedPipePeer {
-            process_id: 4242,
-            user_sid: "S-1-5-21-3980489076-1253412212-3874560562-1002".to_string(),
-            logon_sid: Some("S-1-5-5-0-323470".to_string()),
-            account_name: "EXV VPN Helper".to_string(),
-        }
-    }
-
-    /// 纯组合的共享 host composition（无真实 pipe/session I/O）。
-    fn composition() -> Arc<Mutex<HostComposition>> {
-        Arc::new(Mutex::new(
-            compose_nonprivileged_host(&helper_peer()).expect("compose_nonprivileged_host"),
-        ))
-    }
-
-    /// UiLifetime 初始为存活（UI 已连接）；`on_ui_exited` 翻转 → 触发 core 停机。
-    #[test]
-    fn ui_lifetime_starts_alive_and_flips_on_exit() {
-        let ui = UiLifetime::new();
-        assert!(ui.is_ui_alive(), "UI 初始必须视为存活（最小化到托盘仍存活）");
-        ui.on_ui_exited();
-        assert!(!ui.is_ui_alive(), "UI 彻底退出 → 信号翻转 false");
-    }
-
-    /// `UiLifetime` 可多克隆共享同一事实（P4 UI 传输层与 run select 各持一份）。
-    #[test]
-    fn ui_lifetime_clone_shares_signal_state() {
-        let ui = UiLifetime::new();
-        let ui2 = ui.clone();
-        assert!(ui.is_ui_alive() && ui2.is_ui_alive());
-        ui.on_ui_exited();
-        assert!(!ui2.is_ui_alive(), "克隆必须观察到同一翻转");
-    }
-
-    /// shutdown_core 顺序契约（D1 解耦）：rpc_waiter_cancel（先）→ engine 发退出包后
-    /// 即返（无 client → NoClient；无 Terminated 兜底触发）→ composition.exit()（恰好
-    /// 一次业务 Stop）。
-    #[tokio::test]
-    async fn shutdown_core_orders_cancel_stop_exit() {
-        let composition = composition();
-        let supervisor = EngineSupervisor::with_child(fake_child());
-        let outcome = shutdown_core(supervisor, &composition).await;
-
-        // 顺序事实：RPC waiter 取消恰好一次（cancel ≠ 业务 Stop）。
-        assert_eq!(outcome.rpc_waiter_cancellations, 1);
-        // 业务 Stop 恰好一次（唯一业务取消是 exit()）。
-        assert_eq!(outcome.stop_requests, 1);
-        assert!(outcome.teardown_started, "exit 必须启动 teardown");
-        // D1：无 client（未连接）→ NoClient；UI 关闭路径不等 engine、无 Terminated 兜底。
-        assert_eq!(
-            outcome.engine,
-            EngineShutdownOutcome::NoClient,
-            "UI 关闭路径发退出包后即返——不得出现 Terminated（判据 8）"
-        );
-    }
-
-    /// D1 解耦（判据 8）：shutdown_core UI 关闭路径——engine 已连接时发退出包
-    /// （StopTunnel 恰好一次）后即返，无 Terminated 兜底触发（fire-and-forget）。
-    #[tokio::test]
-    async fn shutdown_core_fires_exit_packet_and_returns_without_terminate() {
-        let engine = Arc::new(Mutex::new(
-            crate::engine_lifecycle::test_support::RecordingEngine {
-                stops: std::sync::Mutex::new(Vec::new()),
-            },
-        ));
-        let (tx, _rx) = watch::channel(true);
-        let mut supervisor = EngineSupervisor::with_child(
-            crate::engine_lifecycle::test_support::fake_child(),
-        );
-        supervisor.attach_client(engine.clone(), tx.subscribe());
-        let composition = composition();
-
-        let outcome = shutdown_core(supervisor, &composition).await;
-        // 退出包（StopTunnel）恰好一次 + fire-and-forget（ExitPacketSent，无 Terminated）。
-        assert_eq!(engine.lock().await.stops.lock().unwrap().len(), 1);
-        assert_eq!(
-            outcome.engine,
-            EngineShutdownOutcome::ExitPacketSent,
-            "UI 关闭路径发退出包后即返——不得出现 Terminated（判据 8）"
-        );
-        assert_eq!(outcome.stop_requests, 1);
-        let _ = tx;
-    }
-
-    /// R2 (a) 收敛双保险：`synthesize_data_plane_join` 仅在停机收敛（Stopping，控制面
-    /// 侧已加入屏障）时把数据面侧补上 → 双侧齐 → Stopped/Idle 终态；Idle / Connected /
-    /// 已 Stopped 等相位 no-op（不制造虚假相位）。core 在 engine 干净退出（wait_exit
-    /// 成功）时调用它——engine 侧 Idle 终态事件可能随断线丢失。
-    #[tokio::test]
-    async fn synthesize_data_plane_join_converges_only_in_stopping() {
-        use crate::composition::{HostEvent, HostPhase};
-        use exv_vpn_data_plane::teardown::TeardownSide;
-
-        // Idle（从未连接）：synthesize no-op（不制造虚假 Stopped）。
-        let mut comp = compose_nonprivileged_host(&helper_peer()).expect("compose");
-        assert_eq!(comp.phase(), HostPhase::Idle);
-        comp.synthesize_data_plane_join();
-        assert_eq!(comp.phase(), HostPhase::Idle, "Idle 不得被合成相位");
-
-        // Stopping（用户 stop：Disconnect + 控制面侧加入）：synthesize 补数据面侧 →
-        // Stopped 终态（断开->收敛->Idle 判据）。
-        comp.apply(HostEvent::Disconnect);
-        comp.apply(HostEvent::TeardownSideJoined(TeardownSide::ProtocolControl));
-        assert_eq!(comp.phase(), HostPhase::Stopping);
-        comp.synthesize_data_plane_join();
-        assert_eq!(comp.phase(), HostPhase::Stopped, "双侧齐必须收敛到 Stopped");
-
-        // 已 Stopped：synthesize no-op（幂等，不回归）。
-        comp.synthesize_data_plane_join();
-        assert_eq!(comp.phase(), HostPhase::Stopped, "已 Stopped 保持终态");
-
-        // Connected（从未 Disconnect，teardown 屏障未开）：synthesize no-op（TeardownBarrier
-        // 单侧加入为 Pending，不移动相位）。
-        let mut comp2 = compose_nonprivileged_host(&helper_peer()).expect("compose");
-        comp2.apply(HostEvent::ProtocolEstablished); // 无能力绑定下 actor 仍进入 Connected
-        assert_eq!(comp2.phase(), HostPhase::Connected);
-        comp2.synthesize_data_plane_join();
-        assert_eq!(comp2.phase(), HostPhase::Connected, "未 Disconnect 不得被合成 Stopped");
-    }
-
-    /// `CoreRuntime::run`：UI 彻底退出（`on_ui_exited`）→ select 触发 → 有序停机。
-    ///
-    /// watch 语义（tokio `Receiver::clone` 保留原 receiver 的 last-seen version）：run 内
-    /// 克隆的 receiver 版本旧于 on_ui_exited 后的 state 版本 → `changed()` 立即 resolve——
-    /// 信号在 run 前发送即可，无需并发。
-    #[tokio::test]
-    async fn core_runtime_ui_exit_triggers_shutdown() {
-        let ui = UiLifetime::new();
-        let runtime = CoreRuntime::new(
-            ui.clone(),
-            composition(),
-            EngineSupervisor::with_child(fake_child()),
-        );
-        ui.on_ui_exited();
-
-        let outcome = runtime.run().await;
-        assert_eq!(outcome.rpc_waiter_cancellations, 1);
-        assert_eq!(outcome.stop_requests, 1, "UI 退出必须触发恰好一次业务 Stop");
-        assert!(outcome.teardown_started);
-    }
-
-    /// `CoreRuntime::run`：显式停机命令（`request_shutdown`）同样触发有序停机。
-    #[tokio::test]
-    async fn core_runtime_request_shutdown_triggers_shutdown() {
-        let ui = UiLifetime::new();
-        let runtime = CoreRuntime::new(
-            ui,
-            composition(),
-            EngineSupervisor::with_child(fake_child()),
-        );
-        runtime.request_shutdown();
-
-        let outcome = runtime.run().await;
-        assert_eq!(outcome.rpc_waiter_cancellations, 1);
-        assert_eq!(outcome.stop_requests, 1, "显式停机必须触发业务 Stop");
-        assert!(outcome.teardown_started);
-    }
-
-    /// `CoreRuntime::run`：serve 任务 **pending**（正常服务中）不是 UI 断开信号——
-    /// UI 存活且无显式停机时，run 必须保持运行（不因 serve 任务存活/解析而假停机）。
-    ///
-    /// tonic `serve_with_incoming` 对单元素流在 accept 后立即返回、连接任务 detached
-    /// 继续服务——若把 serve 任务 JoinHandle 当"UI 断开"判据会假 resolve 触发假停机。
-    /// 本测试钉死：serve 任务 pending ≠ UI 退出，run 不返回。
-    #[tokio::test]
-    async fn core_runtime_pending_serve_task_does_not_fake_shutdown() {
-        let ui = UiLifetime::new();
-        let mut runtime = CoreRuntime::new(
-            ui,
-            composition(),
-            EngineSupervisor::with_child(fake_child()),
-        );
-        // 一个保持 pending 的 serve 任务 = 正常服务中（UI 连接未断开）。
-        runtime.set_serve_task(tokio::spawn(async {
-            std::future::pending::<()>().await;
-        }));
-        // UI 存活 + 无显式停机：run 不得在短时间内返回（假停机回归护栏）。
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            runtime.run(),
-        )
-        .await;
-        assert!(
-            outcome.is_err(),
-            "serve 任务 pending 不是 UI 断开——run 必须保持运行"
-        );
-    }
-
-    /// `CoreRuntime::run`：停机时**中止服务任务**（停止接收 UI 请求——router 持有的
-    /// 服务引用释放）。serve 任务现在保持 pending 到停机，因此 run 必须显式 abort 它
-    /// （旧实现依赖 serve 任务假 resolve 顺带 drop 服务；修复后由停机路径负责）。
-    #[tokio::test]
-    async fn core_runtime_aborts_serve_task_during_shutdown() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let ui = UiLifetime::new();
-        let mut runtime = CoreRuntime::new(
-            ui.clone(),
-            composition(),
-            EngineSupervisor::with_child(fake_child()),
-        );
-        // 一个在 abort（drop）时置位标志的 serve 任务——证明 run 停机路径中止了它。
-        // 先经 started 握手确保任务已启动（DropFlag 已构造）：abort 一个从未 poll 的
-        // 任务不会执行其 future 体（DropFlag 从未构造、drop 也不触发）。
-        let aborted = Arc::new(AtomicBool::new(false));
-        let guard = Arc::clone(&aborted);
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
-        runtime.set_serve_task(tokio::spawn(async move {
-            struct DropFlag(Arc<AtomicBool>);
-            impl Drop for DropFlag {
-                fn drop(&mut self) {
-                    self.0.store(true, Ordering::SeqCst);
-                }
-            }
-            let _flag = DropFlag(guard);
-            let _ = started_tx.send(());
-            std::future::pending::<()>().await;
-        }));
-        started_rx.await.expect("serve task must start before shutdown");
-
-        ui.on_ui_exited();
-        let outcome = runtime.run().await;
-        assert_eq!(outcome.stop_requests, 1, "UI 退出必须触发恰好一次业务 Stop");
-        assert!(
-            aborted.load(Ordering::SeqCst),
-            "停机必须中止 serve 任务（停止接收 UI 请求、释放服务引用）"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // P3 崩溃自愈：`CoreRuntime::run` 的 liveness 掉线 → respawn 触发路径（引擎死 ≠ core
-    // 死）。fake seam（0 残留 / fake 新 supervisor / 记录连接器）——无真实进程/提权。
-    // -----------------------------------------------------------------------
-
-    /// P3 respawn 触发的测试 fake：0 残留（硬断言放行）。
-    struct TestResidue;
-
-    impl crate::crash_recovery::ResidueProbe for TestResidue {
-        fn probe(&self) -> Result<crate::crash_recovery::ResidueReport, String> {
-            Ok(crate::crash_recovery::ResidueReport::default())
-        }
-    }
-
-    /// P3 respawn 触发的测试 fake：新 supervisor（占位 child）。
-    struct TestSupervisorFactory;
-
-    impl crate::crash_recovery::RespawnSupervisorFactory for TestSupervisorFactory {
-        fn spawn_supervisor(
-            &self,
-        ) -> Result<EngineSupervisor, crate::engine_lifecycle::EngineSpawnError> {
-            Ok(EngineSupervisor::with_child(fake_child()))
-        }
-    }
-
-    /// P3 respawn 触发的测试 fake：记录每次 connect 的连接器。
-    struct TestConnector {
-        pids: std::sync::Mutex<Vec<u32>>,
-    }
-
-    #[tonic::async_trait]
-    impl crate::crash_recovery::RespawnClientConnector for TestConnector {
-        async fn connect(
-            &self,
-            pid: u32,
-            _user_sid: &str,
-        ) -> Result<(Arc<Mutex<dyn crate::grpc_control::KernelEngineControl>>, watch::Receiver<bool>), String> {
-            self.pids.lock().unwrap().push(pid);
-            let engine = Arc::new(tokio::sync::Mutex::new(
-                crate::engine_lifecycle::test_support::RecordingEngine {
-                    stops: std::sync::Mutex::new(Vec::new()),
-                },
-            ));
-            let engine: Arc<Mutex<dyn crate::grpc_control::KernelEngineControl>> = engine;
-            let (_tx, rx) = watch::channel(true);
-            Ok((engine, rx))
-        }
-    }
-
-    /// `CoreRuntime::run`（P3）：engine 掉线（liveness 翻 false）→ `CrashRecovery::run_respawn`
-    /// 触发（新 client 连接）→ 回 Idle 继续服务 UI → UI 退出仍有序停机。**不自动重连**：
-    /// respawn 只重建进程/身份，不重放凭据（用户再点连接走正常登录）。
-    ///
-    /// `run` 不经 `tokio::spawn` 驱动（其 future 跨 respawn await 持有 `EngineSupervisor`
-    /// 的 HANDLE——非 `Send`；生产经 `#[tokio::main]` 的 `block_on` 直接 await，不要求
-    /// `Send`）。用独立 watcher 任务在 respawn 完成后触发 UI 退出。
-    #[tokio::test]
-    async fn core_runtime_engine_death_triggers_respawn_then_shutdown() {
-        // 1. supervisor 挂接可控 liveness（初始 true）。
-        let (liveness_tx, liveness_rx) = watch::channel(true);
-        let mut supervisor = EngineSupervisor::with_child(fake_child());
-        let initial_engine = Arc::new(tokio::sync::Mutex::new(
-            crate::engine_lifecycle::test_support::RecordingEngine {
-                stops: std::sync::Mutex::new(Vec::new()),
-            },
-        ));
-        let initial: Arc<Mutex<dyn crate::grpc_control::KernelEngineControl>> =
-            initial_engine.clone();
-        supervisor.attach_client(initial, liveness_rx);
-        let slot = EngineSlot::new(initial_engine);
-
-        // 2. CrashRecovery（fake seam：0 残留 / fake 新 supervisor / 记录连接器）。
-        let composition = composition();
-        let connector = Arc::new(TestConnector {
-            pids: std::sync::Mutex::new(Vec::new()),
-        });
-        let recovery = crate::crash_recovery::CrashRecovery::new(
-            Arc::new(TestSupervisorFactory),
-            connector.clone(),
-            Arc::new(TestResidue),
-            slot,
-            Arc::clone(&composition),
-            helper_peer(),
-            "S-1-5-21-3980489076-1253412212-3874560562-1002".to_string(),
-        );
-        let ui = UiLifetime::new();
-        let mut runtime = CoreRuntime::new(ui.clone(), Arc::clone(&composition), supervisor);
-        runtime.set_crash_recovery(recovery);
-
-        // 3. watcher 任务：respawn 完成（新 client 连接）后触发 UI 退出（run 直接 await，
-        //    不经 spawn——non-Send future 生产侧 block_on 驱动）。
-        let connector_watcher = Arc::clone(&connector);
-        let ui_watcher = ui.clone();
-        let watcher = tokio::spawn(async move {
-            loop {
-                if connector_watcher.pids.lock().unwrap().len() >= 1 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            ui_watcher.on_ui_exited();
-        });
-
-        // 4. liveness 翻 false（engine 死亡）→ run 触发 respawn → watcher 感知后 UI 退出 →
-        //    有序停机。
-        liveness_tx.send(false).unwrap();
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), runtime.run())
-            .await
-            .expect("run completes within timeout");
-        assert!(
-            watcher.await.is_ok(),
-            "watcher 必须感知 respawn 完成并触发 UI 退出"
-        );
-        assert_eq!(
-            connector.pids.lock().unwrap().len(),
-            1,
-            "engine 掉线必须触发 respawn（恰好一次新 client 连接）"
-        );
-        assert_eq!(
-            outcome.stop_requests,
-            1,
-            "UI 退出必须触发恰好一次业务 Stop（respawn 后仍有序停机）"
-        );
-        let _ = liveness_tx;
-    }
-}

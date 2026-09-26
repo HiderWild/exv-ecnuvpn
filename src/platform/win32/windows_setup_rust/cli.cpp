@@ -1,6 +1,7 @@
 #include "windows_setup_rust/cli.hpp"
 
 #include "windows_setup_rust/app_paths.hpp"
+#include "windows_setup_rust/util/command_line.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -74,6 +75,43 @@ std::wstring ResolveGuiInstallDir(bool uninstall, const CliOptions &options) {
   return options.install_dir.empty() ? DefaultInstallDir() : options.install_dir;
 }
 
+std::wstring BuildUninstallElevationParameters(const CliOptions &options) {
+  std::wstring parameters;
+  auto append_flag = [&](const wchar_t *flag) {
+    if (!parameters.empty()) {
+      parameters.push_back(L' ');
+    }
+    parameters += flag;
+  };
+  auto append_value = [&](const wchar_t *flag, const std::wstring &value) {
+    if (value.empty()) {
+      return;
+    }
+    append_flag(flag);
+    parameters.push_back(L' ');
+    parameters += QuoteCommandLineArgument(value);
+  };
+
+  if (options.role == Role::UninstallSilent) {
+    append_flag(L"/S");
+  }
+  append_flag(L"/uninstall");
+  if (options.clear_user_data) {
+    append_flag(L"/clear-user-data");
+  }
+  append_value(L"/D", options.install_dir);
+  if (options.initiating_user_context) {
+    append_flag(L"--initiating-user-context");
+  }
+  append_value(L"--initiating-user-sid", options.initiating_user_sid);
+  append_value(L"--user-profile-root", options.user_profile_root);
+  append_value(L"--local-app-data-root", options.local_app_data_root);
+  append_value(L"--roaming-app-data-root", options.roaming_app_data_root);
+  append_value(L"--config-dir", options.config_dir);
+  append_value(L"--temp-root", options.temp_root);
+  return parameters;
+}
+
 std::optional<CliOptions> ParseCli(int argc, wchar_t **argv) {
   if (argc < 0 || argv == nullptr) {
     return std::nullopt;
@@ -116,6 +154,38 @@ std::optional<CliOptions> ParseCli(int argc, wchar_t **argv) {
       elevated = true;
       continue;
     }
+    if (EqualsIgnoreCase(arg, L"--initiating-user-context")) {
+      opts.initiating_user_context = true;
+      continue;
+    }
+    auto consume_value = [&](const wchar_t *name, std::wstring &destination) {
+      if (!EqualsIgnoreCase(arg, name)) {
+        return 0;
+      }
+      if (i + 1 >= argc || argv[i + 1] == nullptr) {
+        return -1;
+      }
+      destination = argv[++i];
+      return 1;
+    };
+    int consumed = consume_value(L"--initiating-user-sid", opts.initiating_user_sid);
+    if (consumed < 0) return std::nullopt;
+    if (consumed > 0) continue;
+    consumed = consume_value(L"--user-profile-root", opts.user_profile_root);
+    if (consumed < 0) return std::nullopt;
+    if (consumed > 0) continue;
+    consumed = consume_value(L"--local-app-data-root", opts.local_app_data_root);
+    if (consumed < 0) return std::nullopt;
+    if (consumed > 0) continue;
+    consumed = consume_value(L"--roaming-app-data-root", opts.roaming_app_data_root);
+    if (consumed < 0) return std::nullopt;
+    if (consumed > 0) continue;
+    consumed = consume_value(L"--config-dir", opts.config_dir);
+    if (consumed < 0) return std::nullopt;
+    if (consumed > 0) continue;
+    consumed = consume_value(L"--temp-root", opts.temp_root);
+    if (consumed < 0) return std::nullopt;
+    if (consumed > 0) continue;
     if (EqualsIgnoreCase(arg, L"--pipe") || EqualsIgnoreCase(arg, L"/pipe")) {
       if (i + 1 >= argc || argv[i + 1] == nullptr) {
         return std::nullopt;

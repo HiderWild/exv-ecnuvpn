@@ -1,51 +1,18 @@
-## CodeGraph 代码结构定位
+# 贡献与维护须知
 
-代码结构定位必须优先使用 CodeGraph。若仓库根目录没有 `.codegraph/`，先在仓库根目录执行
-`codegraph init .`；索引变化后执行 `codegraph sync`，需要完整重建时执行
-`codegraph index .`。优先使用 `codegraph explore`、`codegraph node` 和
-`codegraph files`。
+## 构建
 
-只有 CodeGraph CLI 不可用或初始化失败时，才记录失败原因并使用 `rg` 或直接阅读文件作为
-后备；不得把未运行 CodeGraph 的结果表述为 CodeGraph 证据。
+- 一键发布构建：`scripts/build-release.ps1`（前置环境见 `README.md`）。
+- 构建脚本只消费已提交内容；提交前请确认本地构建通过。
 
-## 业务流优先的宿主修复治理
+## 代码约定
 
-[业务流优先的宿主修复治理政策](docs/superpowers/governance/business-first-host-repair-policy.md)
-是本仓库相关治理的**唯一活跃正文**。涉及 Common、宿主修复、双轨版本、业务流验收、证据与
-流程脚本时，必须以该政策为准；不得用提交元数据、离线模型、未知状态或跨宿主联合机制替代宿主
-真实用户业务流。历史设计仅用于理解已有材料，不再产生新的治理要求。
+- Rust：遵守仓库 `rustfmt.toml`；不引入 `unsafe`（平台 crate 除外，需附
+  SAFETY 说明）；注释与文档以中文为主，标识符与协议字面量保持原文。
+- 前端：Vue 3 + TypeScript，构建以 `vite` 为准。
 
-## 禁止 GitHub Actions
+## 流程约定
 
-本仓库禁用 GitHub Actions，不得把它用于 CI、验收门禁或原生平台证据。不得新增
-`.github/workflows/`、启用 Actions 或派发 workflow。构建、测试、架构和治理命令必须在
-本地原生宿主运行；宿主不可用时，只记录该宿主未运行，不得伪造真实通过。
-
-## 文档语言
-
-新建或新增内容的仓库文档，主要自然语言统一使用中文。标题、背景、设计、任务、状态、验收
-结论和说明文字都应使用中文；必要的技术术语、产品名、缩写和稳定标识可以保留原文。
-
-代码标识符、文件路径、命令、配置键、协议字面量、API 名称、测试原始输出、上游原文引用，
-以及历史机器 JSON 不要求翻译。
-
-## Architecture JSON 本地验收
-
-Architecture JSON CRUD 验收必须先让以下命令成功：
-
-`python3 -m tools.architecture_json doctor --require mutate`
-
-macOS 使用依赖完整的 Conda `base` 环境：
-
-~~~bash
-/opt/anaconda3/bin/conda run -n base \
-  python3 -m tools.architecture_json doctor --require mutate
-/opt/anaconda3/bin/conda run -n base \
-  python3 -m unittest discover \
-    -s tests/tooling \
-    -p 'test_architecture_json_*.py' \
-    -v
-~~~
-
-不得把 doctor 失败且大量测试被 skip 的解释器结果判定为绿色。工具自身不得安装依赖；每个
-本地宿主负责提供文档要求的依赖环境。
+- 不使用 CI 强制门禁；提交者自行保证构建与基本回归。
+- 发布版本以 `CHANGELOG.md` 为准，版本号来源为
+  `src/platform/win32/rust/tauri/app/tauri.conf.json` 的 `version`。
