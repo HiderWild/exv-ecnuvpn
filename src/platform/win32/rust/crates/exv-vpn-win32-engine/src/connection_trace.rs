@@ -337,6 +337,18 @@ impl ConnectionTraceStore {
         })
     }
 
+    /// 首次建立锚点（诊断质量项，计划 v6.1 P1-7）：`mark_live` 时回写真实
+    /// `established_at_ms`（此前仅重连回写、首建留 0——现场取证无法回答"何时
+    /// 建立"）。**不换 `connection_id`**（受理时铸造的代次不动；重连换新仍走
+    /// [`ConnectionTraceStore::update_established_at`]）。
+    ///
+    /// # Errors
+    ///
+    /// 文件不存在 / 现有文件损坏 / 写入失败。
+    pub fn mark_established(&self, user_sid: &str, established_at_ms: u64) -> Result<(), TraceStoreError> {
+        self.modify(user_sid, |record| record.established_at_ms = established_at_ms)
+    }
+
     /// 装配后补写网卡/NRPT/代理端口/engine PID（其余字段不动）。
     ///
     /// # Errors

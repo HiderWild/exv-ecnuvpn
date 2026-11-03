@@ -57,7 +57,8 @@ struct RawLogLine<'a> {
     tick: u64,
 }
 
-/// engine raw-dump 兜底：mutex + 文件 + append。
+/// engine raw-dump 落盘器：mutex + 文件 + append（KI-13 修复后为**恒定完整镜像**，
+/// 非推送失败兜底）。
 ///
 /// 文件按需打开（首个 `dump` 才建目录/文件——无 raw 事件时不落盘）；任何写失败
 /// （目录不可建、文件不可写）自禁用（后续 `dump` 返回 false），并 `tracing::warn!`
@@ -232,8 +233,11 @@ impl LogSink {
     ///
     /// 流程：分配严格递增 tick → 入有界历史环 → 扇出给所有挂接通道（逐通道
     /// `try_send`：成功即投递；通道满 = 该消费者慢 → 只丢它的事件；通道已关闭 =
-    /// 断线 → 从集合移除）→ **至少一个**通道接受即完成；无挂接 / 全部通道满 /
-    /// 最后一个通道刚断开 → 落 raw 兜底。永不阻塞业务路径（无 `await`，通道满不等待）。
+    /// 断线 → 从集合移除）→ **无论推送结局如何都落 raw 镜像**（KI-13 日志停写
+    /// 修复，2026-09-28：raw 此前仅在无消费者/推送失败时兜底，core 转发器挂接
+    /// 即静默——服务形态下 raw 只剩 boot 片段，事后取证盲区；现恒为完整镜像，
+    /// raw 是离线调试用途（O4），重复写入可接受）。永不阻塞业务路径（无
+    /// `await`，通道满不等待）。
     ///
     /// 调用方保证 `fields` 不含 secret/capability/凭据（wire 契约同款禁令）。
     pub fn emit(
@@ -257,13 +261,9 @@ impl LogSink {
         // Fan out to every attached consumer channel. `drain` lets us drop closed
         // senders (dead gRPC streams) while iterating; live senders are re-collected.
         let mut live = Vec::with_capacity(inner.push.len());
-        let mut delivered = false;
         for tx in inner.push.drain(..) {
             match tx.try_send(Ok(event.clone())) {
-                Ok(()) => {
-                    delivered = true;
-                    live.push(tx);
-                }
+                Ok(()) => live.push(tx),
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     // 通道满（该消费者消费不及时）：只丢这个消费者的事件，不饿死其他。
                     live.push(tx);
@@ -275,11 +275,8 @@ impl LogSink {
         }
         inner.push = live;
 
-        // At least one live consumer accepted the event → push-only; otherwise fall
-        // back to the raw dump (no attachment / all channels full / last closed).
-        if delivered {
-            return;
-        }
+        // KI-13 日志停写修复（2026-09-28）：raw 镜像无条件执行——推送成功不再是
+        // 跳过落盘的理由（服务形态下 core 转发器全程挂接，跳过即静默）。
         dump_ev(&inner.dumper, tick, &event);
     }
 

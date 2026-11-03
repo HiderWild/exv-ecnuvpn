@@ -160,6 +160,10 @@ pub enum EngineShutdownOutcome {
     CleanExit,
     /// 崩溃恢复/验证路径（`verify_exit`）：有界等待超时后强制终止。
     Terminated,
+    /// 崩溃恢复/验证路径（`verify_exit`）：强制终止**未确认生效**（提权子进程对
+    /// 非提权 core 的 `TerminateProcess` 被拒）——进程很可能仍存活，调用方不得
+    /// 当作已收走（P0-1 随附真值，计划 v6.1 §8.2 缺口④扩项）。
+    TerminateUnconfirmed,
 }
 
 /// core 对 engine 子进程的监督句柄。
@@ -291,6 +295,12 @@ impl EngineSupervisor {
 
     /// 崩溃恢复/验证路径：有界等待 engine 退出 → 超时强制终止（engine 不得遗留）。
     ///
+    /// **终止真值（P0-1 随附，计划 v6.1 §8.2 缺口④扩项）**：`Terminated` 只在
+    /// 有限等待内确认进程退出信号时返回；提权 oneshot 子进程对非提权 core 的
+    /// `TerminateProcess` 可能被拒（完整性级别）——此时返回
+    /// [`EngineShutdownOutcome::TerminateUnconfirmed`]（进程很可能仍存活，调用方
+    /// 不得当作已收走：槽位/心跳处置见 `retire_oneshot_engine` 的未确认分叉）。
+    ///
     /// **UI 关闭路径不调用本方法**（[`EngineSupervisor::stop`] 已 fire-and-forget）——
     /// 仅崩溃恢复/验证时使用（如 P3 respawn 前回收旧 engine：确认旧 engine 已退出或
     /// 强制终止，再拉起新实例）。
@@ -298,14 +308,16 @@ impl EngineSupervisor {
         let outcome = if let Some(child) = &mut self.child {
             if child.wait_exit(wait_timeout_ms) {
                 EngineShutdownOutcome::CleanExit
-            } else {
-                child.terminate();
+            } else if child.terminate() {
                 EngineShutdownOutcome::Terminated
+            } else {
+                EngineShutdownOutcome::TerminateUnconfirmed
             }
         } else {
             EngineShutdownOutcome::CleanExit
         };
-        // child 已退出/terminate → 置 None（句柄已关闭）。
+        // child 已退出/terminate → 置 None（句柄已关闭；未确认场景同样置 None——
+        // 句柄已消费，进程级追踪到此为止，存活判定交给心跳/lease 探测）。
         self.child = None;
         outcome
     }

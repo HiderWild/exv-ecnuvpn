@@ -335,16 +335,15 @@ async fn run_engine(
     };
     let runtime = service.runtime_handle();
     let status = service.status_publisher();
-    // T5 兜底善后驱动：oneshot 随行退出路径在完整停机序（teardown→Idle→flush）之后
-    // 收口连接痕（复验干净→删；残留→留 Aftermath 给下次预检）。keep 无头续存在
-    // oneshot 形态依赖 T10（拉起底质+心跳退出动作策略化），退出即终局。
-    let aftermath = service.aftermath_driver();
 
     match form {
         EngineExitForm::Oneshot {
             core_handle,
             heartbeat_timeout,
         } => {
+            // T5：只有 oneshot 随行退出需要在 teardown→Idle→flush 后收口连接痕。
+            // service 善后由连接 EOF 路径负责；此处不额外强持驱动到 run_engine 末尾。
+            let aftermath = service.aftermath_driver();
             // P2：仅 oneshot 提取心跳 watchdog 句柄（服务形态不启动心跳——SCM 管生死）。
             let heartbeat = service.heartbeat_watch();
             let server = HelperControlServer::new(service);
@@ -393,6 +392,16 @@ async fn run_engine(
             let server = HelperControlServer::new(service);
             // 服务模式连续 accept（每次独立 verify + PSK 挑战 + 独立 owner 流）；SCM
             // stop → 退出清理。
+            // 诊断打点（计划 v6.1 第二批 / 40s 窗口分解）：accept-loop 起点时间戳——
+            // 与 SCM Running 上报（ready 报告后）、host 侧 dial 日志（kernel.route.
+            // service_dial_*）三方对齐，细分「SCM Running → 控制面可拨」窗口。
+            log.emit(
+                LogLevel::Info,
+                "engine",
+                "service.control_plane.serving_start",
+                "service accept loop starting (identity resolve + first pipe instance next)",
+                &[],
+            );
             let outcome = serve_named_pipe_loop(
                 &args.control_pipe,
                 &core_sid,
@@ -402,7 +411,18 @@ async fn run_engine(
                 control_plane_ready,
             )
             .await;
+            // P0-2：启动/运行期 accept 失败（含 D12 管道互斥诚实失败）以错误串上抛
+            // ——main 按类别定 SCM 退出码（Verify 快速失败通道读取归因）。此前该
+            // 失败被吞成 Ok(0)：错误串只在 ready oneshot 竞速胜利时才到达 main，
+            // select 抢先分支下归因子串丢失、退出码退化为通用值。
+            let startup_failure = match &outcome {
+                AcceptLoopOutcome::Failed(error) => Some(error.clone()),
+                _ => None,
+            };
             service_exit_cleanup(outcome, runtime, status, log).await;
+            if let Some(error) = startup_failure {
+                return Err(error);
+            }
         }
     }
     Ok(0)
@@ -645,7 +665,10 @@ fn run_service_main(arguments: &[OsString]) -> Result<(), String> {
         }
     });
 
-    let exit_code = u32::from(run.is_err());
+    let exit_code = match run.as_ref() {
+        Ok(_) => exv_engine::service_batch::service_exit_code::SUCCESS,
+        Err(error) => service_startup_exit_code(error),
+    };
     status_handle
         .set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
@@ -659,6 +682,21 @@ fn run_service_main(arguments: &[OsString]) -> Result<(), String> {
         .map_err(|e| format!("report service stopped: {e}"))?;
 
     run.map(|_| ())
+}
+
+/// 服务启动/运行失败类别 → SCM 退出码（P0-2 语义透传通道，见
+/// `service_batch::service_exit_code` 约定）。
+///
+/// host 批量 Verify 对连续 Stopped 终态快速失败时经 `query_status` 读回该码，组装
+/// `service_not_running|<exit_code>|<可读短语>` 稳定前缀——前端三选恢复模态据此归因。
+/// 归类按错误串稳定子串：D12 管道互斥（`PIPE_FIRST_INSTANCE_CONFLICT_MARKER`）→ 2；
+/// 其余 → 1（未分类）。
+fn service_startup_exit_code(error: &str) -> u32 {
+    if error.contains(exv_engine::grpc_transport::PIPE_FIRST_INSTANCE_CONFLICT_MARKER) {
+        exv_engine::service_batch::service_exit_code::PIPE_MUTEX_HELD
+    } else {
+        exv_engine::service_batch::service_exit_code::UNCATEGORIZED
+    }
 }
 
 /// 服务模式退出清理（SCM stop → 退出清理**入口**接线）：与心跳路径共用同一完整序

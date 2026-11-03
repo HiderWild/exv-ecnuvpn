@@ -187,7 +187,9 @@ impl ProbeChild {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|_| "无法启动预检 PowerShell，请检查 Windows PowerShell 后重试。".to_owned())?;
+            .map_err(|_| {
+                "无法启动预检 PowerShell，请检查 Windows PowerShell 后重试。".to_owned()
+            })?;
         let Some(stdin) = child.stdin.take() else {
             return Err("预检 PowerShell 启动失败（无 stdin），请重试。".to_owned());
         };

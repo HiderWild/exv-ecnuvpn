@@ -15,7 +15,7 @@ use crate::crash_recovery::{
     ResidueProbe, RespawnClientConnector, RespawnSupervisorFactory, assert_no_residue,
     engine_peer_for, rebind_composition,
 };
-use crate::engine_lifecycle::{EngineSlot, EngineSupervisor};
+use crate::engine_lifecycle::{EngineShutdownOutcome, EngineSlot, EngineSupervisor};
 use crate::grpc_control::KernelEngineControl;
 use crate::log_aggregator::LogAggregator;
 
@@ -138,6 +138,15 @@ impl EngineProvisioner {
     /// 终止 supervisor 持有的 oneshot 子进程（业务停机已由 transition stop 完成，
     /// 此处只收进程）+ 槽换回 detached 占位。幂等。
     ///
+    /// **收走真值与槽位处置（P0-1 随附，计划 v6.1 §8.2 缺口④扩项——mode 翻转
+    /// 饿死收口）**：提权 oneshot 子进程对非提权 core 的 `TerminateProcess` 可能
+    /// 被拒（完整性级别）——此时子进程**很可能仍存活**。仅当收走已确认
+    /// （干净退出/终止确认/本就无 child）才换槽 detached；未确认时**保留槽内
+    /// engine client**，供失败路径回滚 mode 后心跳继续喂给（调用方
+    /// `restore_oneshot_keepalive_if_engine_alive`），避免「retire 名义收走 +
+    /// 实际饿死 15s」的隐式退场（2026-09-28 Install 流案）。D12 管道互斥不受
+    /// 槽位影响（互斥在 engine 进程侧的管道首实例，不在 core 槽）。
+    ///
     /// **retire→install 序与 D12 管道名的过渡属性（T11）**：retire 先杀本 core 持有的
     /// oneshot（无论其持旧名还是新名——杀进程按 supervisor 句柄，与管道名无关），随后
     /// 服务绑定新名（安装用户 sid 段常量名）。**跨版本升级**（旧版本 engine 在跑）时
@@ -147,22 +156,40 @@ impl EngineProvisioner {
     /// create_first_instance_with_bootstrap_retry`）。本函数不杀非本 core 持有的进程
     ///（孤儿 oneshot 由其自身的 core 句柄/心跳超时退场）。
     pub async fn retire_oneshot_engine(&self) {
-        {
+        let confirmed_gone = {
             let mut supervisor = self.supervisor.lock().await;
-            if supervisor.pid().is_some() {
-                supervisor.verify_exit(RETIRE_OLD_EXIT_WAIT_MS);
+            match supervisor.pid() {
+                None => true, // 无 child 可收（从未拉起/已收走）。
+                Some(_) => !matches!(
+                    supervisor.verify_exit(RETIRE_OLD_EXIT_WAIT_MS),
+                    EngineShutdownOutcome::TerminateUnconfirmed
+                ),
             }
+        };
+        if confirmed_gone {
+            let swapped = self.slot.swap_detached().await;
+            let _ = self.logs.append_core(
+                "info",
+                "kernel",
+                "kernel.engine.retired",
+                &format!(
+                    "oneshot engine retired (service form is now authoritative); slot detached (swapped={swapped})"
+                ),
+                &BTreeMap::new(),
+            );
+        } else {
+            // 收走未确认：槽位保留（心跳可续喂；engine 随 core 退出或被下次重试
+            // 收走）。已从 supervisor 视野移除（句柄已消费）——存活判定走槽内
+            // client 的 lease 探测。
+            let _ = self.logs.append_core(
+                "warn",
+                "kernel",
+                "kernel.engine.retire_unconfirmed",
+                "oneshot engine retire could not confirm exit (elevated child terminate refused?); \
+                 slot kept for heartbeat continuity; engine exits with core or on next retire retry",
+                &BTreeMap::new(),
+            );
         }
-        let swapped = self.slot.swap_detached().await;
-        let _ = self.logs.append_core(
-            "info",
-            "kernel",
-            "kernel.engine.retired",
-            &format!(
-                "oneshot engine retired (service form is now authoritative); slot detached (swapped={swapped})"
-            ),
-            &BTreeMap::new(),
-        );
     }
 
     /// 槽内 engine 是否存活：`ensure_owner_lease` 幂等确认（detached 占位/死 client
@@ -174,7 +201,22 @@ impl EngineProvisioner {
     }
 
     /// 拉起全链（见模块文档步骤 3-8）。调用方已持串行门且确认槽内无存活 engine。
+    ///
+    /// **分阶段打点（计划 v6.1 第二批诊断，P1-5 合并交付）**：12.8s 提权链此前只有
+    /// 起止两条日志，无法细分 UAC 等待/残留探测/冷启动/拨号等待——每阶段落
+    /// `kernel.engine.provision.stage`（stage + elapsed_ms），供 40s 窗口机制分解。
     async fn provision(&self) -> Result<EnsureOutcome, Status> {
+        let t_provision = Instant::now();
+        let stage = |name: &str, fields: &[(&str, String)]| {
+            let mut pairs: BTreeMap<String, String> = BTreeMap::from([
+                ("stage".to_string(), name.to_string()),
+                ("elapsed_ms".to_string(), t_provision.elapsed().as_millis().to_string()),
+            ]);
+            for (key, value) in fields {
+                pairs.insert((*key).to_string(), value.clone());
+            }
+            pairs
+        };
         let Some(ui_peer) = self.ui_peer.read().unwrap().clone() else {
             return Err(Status::failed_precondition(
                 "engine_provision_failed|ui peer not established; cannot provision engine",
@@ -203,6 +245,13 @@ impl EngineProvisioner {
         let report = self.residue.probe().map_err(|e| {
             Status::failed_precondition(format!("engine_provision_failed|residue probe: {e}"))
         })?;
+        let _ = self.logs.append_core(
+            "info",
+            "kernel",
+            "kernel.engine.provision.stage",
+            "residue probe done before spawn",
+            &stage("residue_probed", &[]),
+        );
         if let Err(e) = assert_no_residue(&report) {
             let _ = self.logs.append_core(
                 "error",
@@ -215,7 +264,9 @@ impl EngineProvisioner {
                 "engine_provision_failed|{e}"
             )));
         }
-        // 提权拉起（本模型中唯一归属连接的 UAC）。
+        // 提权拉起（本模型中唯一归属连接的 UAC）。elapsed 覆盖 UAC 弹窗等待 + 进程
+        // spawn（12.8s 链的主要疑点段——Defender 首扫也在此窗）。
+        let t_spawn = Instant::now();
         let mut new_supervisor = self.factory.spawn_supervisor().map_err(|e| {
             let _ = self.logs.append_core(
                 "error",
@@ -227,7 +278,18 @@ impl EngineProvisioner {
             Status::failed_precondition(format!("engine_provision_failed|engine spawn: {e}"))
         })?;
         let new_pid = new_supervisor.pid().unwrap_or(0);
+        let _ = self.logs.append_core(
+            "info",
+            "kernel",
+            "kernel.engine.provision.stage",
+            "elevated spawn returned (UAC wait + process creation)",
+            &stage(
+                "spawned",
+                &[("pid", new_pid.to_string()), ("spawn_ms", t_spawn.elapsed().as_millis().to_string())],
+            ),
+        );
         // 有界等待就绪 + 连接。
+        let t_ready = Instant::now();
         let (engine, liveness) = match self.connect_with_ready_wait(new_pid).await {
             Ok(pair) => pair,
             Err(detail) => {
@@ -244,6 +306,13 @@ impl EngineProvisioner {
                 )));
             }
         };
+        let _ = self.logs.append_core(
+            "info",
+            "kernel",
+            "kernel.engine.provision.stage",
+            "engine control plane ready (dial + auth + keepalive confirmed)",
+            &stage("ready", &[("pid", new_pid.to_string()), ("ready_wait_ms", t_ready.elapsed().as_millis().to_string())]),
+        );
         // composition 身份重建（绑定新 peer；admission 重开；gate 重授权）。provision
         // 可能发生在 connect 在途（受理后路由内拉起）——重建前捕获在途操作上下文，
         // 重建后恢复（相位 Connecting + operation_id），使 engine 终态事件照常驱动
@@ -286,21 +355,36 @@ impl EngineProvisioner {
         let _ = self.logs.append_core(
             "info",
             "kernel",
+            "kernel.engine.provision.stage",
+            "composition rebound + engine slot swapped",
+            &stage("swapped", &[("pid", new_pid.to_string())]),
+        );
+        let _ = self.logs.append_core(
+            "info",
+            "kernel",
             "kernel.engine.provisioned",
             &format!("oneshot engine provisioned on demand (pid={new_pid})"),
-            &BTreeMap::new(),
+            &BTreeMap::from([(
+                "total_ms".to_string(),
+                t_provision.elapsed().as_millis().to_string(),
+            )]),
         );
         Ok(EnsureOutcome::Provisioned)
     }
 
     /// 有界就绪等待（拨号+认证+keepalive 确认；上界 [`ONESHOT_READY_TIMEOUT`]）。
     /// 复用 respawn 的 [`RespawnClientConnector`] seam（生产实现内部已含拨号重试）。
+    ///
+    /// 每次失败尝试落 debug 级 `kernel.engine.provision.ready_attempt`（诊断打点，
+    /// P1-5：拨号等待段的可细分性；默认 info 级日志不放大重试噪音）。
     async fn connect_with_ready_wait(
         &self,
         pid: u32,
     ) -> Result<EngineConnection, String> {
         let start = Instant::now();
+        let mut attempt: u32 = 0;
         loop {
+            attempt += 1;
             let outcome: Result<EngineConnection, String> =
                 match self.connector.connect(pid, &self.user_sid).await {
                 Ok((engine, liveness)) => {
@@ -323,6 +407,17 @@ impl EngineProvisioner {
             match outcome {
                 Ok(pair) => return Ok(pair),
                 Err(detail) => {
+                    let _ = self.logs.append_core(
+                        "debug",
+                        "kernel",
+                        "kernel.engine.provision.ready_attempt",
+                        &format!("engine ready-wait attempt failed: {detail}"),
+                        &BTreeMap::from([
+                            ("pid".to_string(), pid.to_string()),
+                            ("attempt".to_string(), attempt.to_string()),
+                            ("elapsed_ms".to_string(), start.elapsed().as_millis().to_string()),
+                        ]),
+                    );
                     if start.elapsed() >= ONESHOT_READY_TIMEOUT {
                         return Err(detail);
                     }

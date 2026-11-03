@@ -10,6 +10,9 @@
 exv_vpn_darwin_ipc::embed_service_revision!();
 
 mod bootstrap_runtime;
+mod core_exit_policy;
+pub(crate) mod preflight;
+pub(crate) mod trace;
 #[path = "../../../build_identity.rs"]
 pub(crate) mod build_identity;
 pub mod egress;

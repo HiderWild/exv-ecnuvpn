@@ -7,6 +7,11 @@ namespace exv::setup {
 
 inline constexpr wchar_t kEngineServiceName[] = L"exv-engine";
 
+// KI-13 ⑥ 历代服务漂移：C++ 3.3.x 时代的提升助手 SCM 服务名（NSIS
+// !define SERVICE_NAME "exv-helper"，payload 在 %ProgramData%\EXV\Helper）。
+// 一路覆盖升级从未卸载的宿主可能仍注册着该遗留服务，卸载时需要一并移除。
+inline constexpr wchar_t kLegacyHelperServiceName[] = L"exv-helper";
+
 enum class ServicePresence {
   Installed,
   NotInstalled,

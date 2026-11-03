@@ -16,11 +16,17 @@
 //! - **情形②（无头 R1 终态）/ 情形③（崩溃环终态）**：重连与拉起归 T6a/T10；
 //!   终态钩子 = [`AftermathDriver::abandon_session`]（本模块实现并被单测，调用方
 //!   后续接入）。
+//! - **情形⑤（数据面工作线程死亡，计划 v6.1 §8.2 T5 情形扩充）**：worker 终止 →
+//!   sweeper 清 live → R1 无材料可自愈（重连未开启/受理未驻留）时，
+//!   [`crate::reconnect::ReconnectDriver::on_tunnel_lost`] 的未武装分叉转
+//!   [`AftermathDriver::abandon_session`]——该路径此前无人驱动善后（痕停留
+//!   Live、lease 残留无人复验，2026-09-28 worker-failed 案）；R1 有材料时归
+//!   自愈循环的终态分叉（情形②/非无头残留清理），不在本情形。
 //! - **断开路径（core 删除权前提"善后已验证"）**：`StopTunnel` 的 disconnect 完成
 //!   后 [`AftermathDriver::verify_disconnect_aftermath`] 复验（预检探针 + `trace`
 //!   hint）→ 干净：痕 Aftermath → 删 + `verified=true`（Idle 终态事件携带，
 //!   `EXV_UNFREEZE` tag 7，core/UI 可清除本地会话状态）；残留：痕留 Aftermath +
-//!   `verified=false`（下次连接预检阻断）。
+//!   `verified=false`（trace 留待复验；仅实际阻断理由会阻断连接）。
 //! - **oneshot 随行退出（T10 前过渡）**：engine 进程随 core 退出（main.rs 既有
 //!   生命周期）时 [`AftermathDriver::on_engine_exit`] 收口——keep 的无头续存在
 //!   oneshot 形态依赖 T10（拉起底质 + 心跳退出动作策略化），退出即终局。
@@ -28,7 +34,7 @@
 //! # 痕迹即证据（计划 §2.5/§2.9）
 //!
 //! 每次善后都写终态摘要事件：`aftermath.completed`（验证干净，痕已删）/
-//! `aftermath.residual`（残留未决，痕留 Aftermath），携带稳定 reason id
+//! `aftermath.residual`（残留或复验未决，痕留 Aftermath），携带稳定 reason id
 //! （[`reason`]）与残留 id（[`residual_reasons`]）。摘要在删痕**之前**落日志。
 //!
 //! # 与预检的关系
@@ -36,7 +42,7 @@
 //! 善后验证 = [`crate::preflight::run_preflight_for`]（trace 作 hint；其清理阶段
 //! 会顺带清除 teardown 漏掉的自有残留——清理执行器即 T3 的复用）。评估口径与
 //! 连接门的 `blocking_reasons` 不同：外来 NRPT 冲突是**活系统事实**而非本会话
-//! 残留（不阻断善后完成，下次连接预检自会看见）；D12 设计内保留的网卡（Paused
+//! 残留（不阻断善后完成；同轮报告可供连接门判断）；D12 设计内保留的网卡（Paused
 //! 态 engine 仍持有 adapter 句柄）不算残留（[`residual_reasons`] 的
 //! `expected_retained_adapters` 豁免）。
 
@@ -100,6 +106,8 @@ pub mod reason {
     pub const R1_TERMINAL: &str = "r1_terminal";
     /// 情形③：core 崩溃环终态（T10 在 N 次拉起复死后调用，§2.9 缺口②）。
     pub const CRASH_LOOP: &str = "crash_loop";
+    /// 情形⑤（计划 v6.1 §8.2 T5 情形扩充）：数据面工作线程死亡且 R1 无材料自愈。
+    pub const DATA_PLANE_WORKER_FAILED: &str = "data_plane_worker_failed";
     /// 断开路径：core 正常 `StopTunnel` 后的善后验证。
     pub const NORMAL_DISCONNECT: &str = "normal_disconnect";
     /// oneshot 随行退出（T10 前过渡：keep 无头续存不可用，退出即终局）。
@@ -863,18 +871,58 @@ impl AftermathDriver {
         }
         // 有界验证（超时按未验证；痕留 Aftermath 待下次预检/善后裁定）。验证器
         // 拿记录克隆（settle 后续仍要据 `record` 判删痕）。
-        let (verified, residual, timed_out) = match tokio::time::timeout(
-            VERIFY_BOUND,
-            (self.verifier)(record.clone()),
-        )
-        .await
-        {
-            Ok(report) => {
-                let residual = residual_reasons(&report, expected_retained_adapters);
-                (residual.is_empty(), residual, false)
-            }
-            Err(_) => (false, vec!["verify_timeout"], true),
-        };
+        let (verified, residual, timed_out, failed_domains, error_reasons, blocking_ids) =
+            match tokio::time::timeout(VERIFY_BOUND, (self.verifier)(record.clone())).await {
+                Ok(report) => {
+                    let residual = residual_reasons(&report, expected_retained_adapters);
+                    let mut failed_domains = Vec::new();
+                    let mut error_reasons = Vec::new();
+                    for domain in &report.domains {
+                        let name = domain_id(domain.domain);
+                        match &domain.status {
+                            DomainStatus::Timeout => failed_domains.push(format!("{name}:timeout")),
+                            DomainStatus::Error(error) => {
+                                failed_domains.push(format!("{name}:error"));
+                                error_reasons
+                                    .push(format!("{name}:{}", safe_probe_error_reason(error)));
+                            }
+                            DomainStatus::Clean | DomainStatus::Findings => {}
+                        }
+                        if domain.domain != DomainKind::Adapter {
+                            match &domain.post_cleanup_status {
+                                Some(DomainStatus::Timeout) => {
+                                    failed_domains.push(format!("{name}:post_cleanup:timeout"));
+                                }
+                                Some(DomainStatus::Error(error)) => {
+                                    failed_domains.push(format!("{name}:post_cleanup:error"));
+                                    error_reasons.push(format!(
+                                        "{name}:post_cleanup:{}",
+                                        safe_probe_error_reason(error)
+                                    ));
+                                }
+                                Some(DomainStatus::Clean | DomainStatus::Findings) | None => {}
+                            }
+                        }
+                    }
+                    let blocking_ids = preflight::blocking_reasons(&report);
+                    (
+                        residual.is_empty(),
+                        residual,
+                        false,
+                        failed_domains.join(","),
+                        error_reasons.join(","),
+                        blocking_ids.join(","),
+                    )
+                }
+                Err(_) => (
+                    false,
+                    vec!["verify_timeout"],
+                    true,
+                    "preflight:timeout".to_owned(),
+                    String::new(),
+                    String::new(),
+                ),
+            };
         // 终态摘要（痕迹即证据；在删痕**之前**落——痕删除是收口的最后一步动作，
         // 摘要先于动作成案）。`has_trace` 字段区分"删痕"与"无痕可删"（gate 未接线
         // /损坏痕留给预检——后者绝不删）。
@@ -896,10 +944,17 @@ impl AftermathDriver {
                 LogLevel::Warn,
                 "engine",
                 "aftermath.residual",
-                "善后完成但复验存在未决残留，痕留 Aftermath（下次连接预检将阻断）",
+                if blocking_ids.is_empty() {
+                    "善后复验未完成，痕留 Aftermath；需复验失败域后确认"
+                } else {
+                    "善后复验未收敛，痕留 Aftermath；当前报告含连接门阻断理由，需处置后复验"
+                },
                 &[
                     ("reason", reason),
                     ("residual_ids", &residual.join(",")),
+                    ("failed_domains", &failed_domains),
+                    ("error_reasons", &error_reasons),
+                    ("blocking_ids", &blocking_ids),
                     ("timed_out", &timed_out.to_string()),
                     ("elapsed_ms", &started.elapsed().as_millis().to_string()),
                 ],
@@ -1012,6 +1067,60 @@ pub fn preflight_verifier(
     })
 }
 
+/// 预检域的稳定日志标识。
+fn domain_id(domain: DomainKind) -> &'static str {
+    match domain {
+        DomainKind::Nrpt => "nrpt",
+        DomainKind::Adapter => "adapter",
+        DomainKind::Routes => "routes",
+        DomainKind::IfaceDns => "iface_dns",
+        DomainKind::Proxy => "proxy",
+        DomainKind::Journal => "journal",
+    }
+}
+
+/// 从已有域错误提取可定位、受控的原因。PowerShell 的错误正文可能含响应内容，
+/// 因此只记录固定类别；JSON 解析位置只接受数字，不写入原始应答。
+fn safe_probe_error_reason(error: &str) -> String {
+    if let Some(detail) = error.strip_prefix("预检 PowerShell 应答无法解析：") {
+        let words: Vec<_> = detail.split_whitespace().collect();
+        let line = words
+            .windows(2)
+            .find(|pair| pair[0] == "line")
+            .and_then(|pair| pair[1].parse::<u32>().ok());
+        let column = words
+            .windows(2)
+            .find(|pair| pair[0] == "column")
+            .and_then(|pair| pair[1].parse::<u32>().ok());
+        return match (line, column) {
+            (Some(line), Some(column)) => {
+                format!("powershell_response_parse:line={line}:column={column}")
+            }
+            _ => "powershell_response_parse".to_owned(),
+        };
+    }
+    let reason = if error.starts_with("预检 PowerShell 子进程不可用") {
+        "powershell_unavailable"
+    } else if error.starts_with("预检 PowerShell 子进程已关闭") {
+        "powershell_closed"
+    } else if error.starts_with("预检 PowerShell 应答 op 不配对") {
+        "powershell_response_op_mismatch"
+    } else if error.starts_with("预检 op 请求编码失败") {
+        "powershell_request_encode"
+    } else if error.starts_with("预检 op 任务异常退出") {
+        "powershell_op_task_exit"
+    } else if error.starts_with("预检 op ") && error.contains(" 失败：") {
+        "powershell_op_failed"
+    } else if error.starts_with("探测任务异常退出") {
+        "probe_task_exit"
+    } else if error.starts_with("journal 目录读取失败") {
+        "journal_read_failed"
+    } else {
+        "probe_error"
+    };
+    reason.to_owned()
+}
+
 /// 善后残留评估：预检报告 + 会话语境 → 未决残留稳定 id（空 = 验证干净）。
 ///
 /// 与连接门 `blocking_reasons` 的口径差异（见模块级文档）：
@@ -1019,7 +1128,7 @@ pub fn preflight_verifier(
 ///   自会看见并阻断）；
 /// - **网卡域**：命中 `expected_retained_adapters`（D12 设计内保留，Paused 态
 ///   engine 持有句柄）的发现豁免，其余 `adapter_orphan`；
-/// - **探测 Timeout/Error 域**：无法宣称验证干净 → `verify_degraded`（连接门
+/// - **初次或清理后探测 Timeout/Error 域**：无法宣称验证干净 → `verify_degraded`（连接门
 ///   不据此拦连接，但善后"已验证"必须诚实）；
 /// - 清理失败/未收敛照算（`cleanup_failed` / `cleanup_unresolved`）。
 #[must_use]
@@ -1065,6 +1174,9 @@ pub fn residual_reasons(
         if matches!(
             domain.status,
             DomainStatus::Timeout | DomainStatus::Error(_)
+        ) || matches!(
+            domain.post_cleanup_status.as_ref(),
+            Some(DomainStatus::Timeout | DomainStatus::Error(_))
         ) {
             push("verify_degraded");
         }

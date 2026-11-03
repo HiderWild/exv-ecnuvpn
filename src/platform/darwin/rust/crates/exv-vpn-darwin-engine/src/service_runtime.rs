@@ -41,6 +41,7 @@ use crate::bootstrap_runtime::{
     HEARTBEAT_TIMEOUT, HEARTBEAT_WATCHDOG_CHECK_INTERVAL, TERMINATION_REQUESTED,
     converge_and_await_teardown, poll_signal_flag, spawn_heartbeat_watchdog_with,
 };
+use crate::core_exit_policy::CoreExitPolicy;
 
 /// 非对端发起的会话终结（心跳超时/显式停止/信号）在强制收权底层 socket 前的
 /// 应答排空宽限：本地 UDS 上的在途应答（含 Shutdown 的 ACCEPTED）flush 是微秒级，
@@ -173,6 +174,22 @@ enum SessionEnd {
     CleanExit,
 }
 
+/// 会话终态 + 会话结束时 runtime 的归属（T1 keep 分支携带跨会话；teardown 路径
+/// 返回 None——runtime 随收敛消亡）。
+struct SessionOutcome {
+    end: SessionEnd,
+    kept_runtime: Option<Arc<EngineRuntime>>,
+}
+
+/// T1：service 会话该终结触发是否进入 keep 分支（与 oneshot 的
+/// [`crate::bootstrap_runtime::core_exit_keeps_tunnel`] 同语义；显式停止/信号豁免）。
+fn session_end_keeps_tunnel(trigger: SessionTrigger, policy: CoreExitPolicy) -> bool {
+    matches!(
+        trigger,
+        SessionTrigger::CoreClosed | SessionTrigger::HeartbeatTimeout
+    ) && policy == CoreExitPolicy::KeepTunnel
+}
+
 /// 触发会话结束的源（诊断标注；EOF/超时共用「拆隧道不退出」路径）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionTrigger {
@@ -211,10 +228,12 @@ async fn run_service_loop_with_timing(
         ServiceListener::bind(ServiceListenerConfig::new(socket_path, owner_uid))
             .map_err(|_| EngineBootstrapError::Listener)?,
     );
-    let outcome = service_session_loop_with_timing(
+    let outcome = service_session_loop_with_policy(
         Arc::clone(&listener),
         termination_requested,
         timing,
+        CoreExitPolicy::default(),
+        owner_uid,
     )
     .await;
     // 干净退出前 guarded 清理本端点；拒绝（被替换等）不阻断退出（stale 由下次
@@ -242,11 +261,47 @@ async fn service_session_loop_with_timing(
     termination_requested: &AtomicBool,
     timing: SessionHeartbeatTiming,
 ) -> ServiceLoopOutcome {
+    service_session_loop_with_policy(
+        listener,
+        termination_requested,
+        timing,
+        CoreExitPolicy::default(),
+        // SAFETY: geteuid 只读取当前进程凭证。
+        unsafe { libc::geteuid() },
+    )
+    .await
+}
+
+/// [`service_session_loop_with_timing`] 的策略注入变体（T1 测试入口；生产默认
+/// Teardown=现状行为）。keep 分支的会话结束后 runtime 携带进入下一会话（管线
+/// 跨会话存续），teardown 语义延迟到下一个默认策略会话尾或显式停止。
+async fn service_session_loop_with_policy(
+    listener: Arc<ServiceListener>,
+    termination_requested: &AtomicBool,
+    timing: SessionHeartbeatTiming,
+    policy: CoreExitPolicy,
+    owner_uid: u32,
+) -> ServiceLoopOutcome {
+    let mut kept_runtime: Option<Arc<EngineRuntime>> = None;
     loop {
-        // 空闲段：等待下一条通过 uid 门的连接；SIGTERM 在空闲期同样干净退出
-        //（空闲=无隧道，无需 teardown 等待）。
+        // 空闲段：等待下一条通过 uid 门的连接；SIGTERM 在空闲期干净退出。
+        // T1 复审整改（发现 2）：默认路径空闲=无隧道（无需 teardown 等待），但
+        // keep 携带期持有活管线——退出前必须经统一收敛的有界等待，否则进程退出
+        // 与管线自拆竞速，可能残留 root 路由/utun。
         let connection = tokio::select! {
             () = poll_signal_flag(termination_requested) => {
+                if let Some(runtime) = kept_runtime.as_ref() {
+                    let converged = converge_and_await_teardown(runtime).await;
+                    if !converged {
+                        runtime.logs().publish(
+                            "error",
+                            "lifecycle",
+                            "TEARDOWN_TIMEOUT",
+                            "idle-exit with kept pipeline; teardown unconfirmed within the bound",
+                            &[],
+                        );
+                    }
+                }
                 return ServiceLoopOutcome::CleanExit
             }
             admitted = listener.accept_uid_gated() => match admitted {
@@ -254,28 +309,97 @@ async fn service_session_loop_with_timing(
                 Err(_) => return ServiceLoopOutcome::ListenerError,
             },
         };
-        match run_one_service_session(&listener, connection, termination_requested, timing).await
-        {
-            SessionEnd::BackToAccept => {}
+        let carried = kept_runtime.take();
+        let outcome = run_one_service_session(
+            &listener,
+            connection,
+            termination_requested,
+            timing,
+            policy,
+            owner_uid,
+            carried,
+        )
+        .await;
+        match outcome.end {
+            SessionEnd::BackToAccept => {
+                kept_runtime = outcome.kept_runtime;
+            }
             SessionEnd::CleanExit => return ServiceLoopOutcome::CleanExit,
         }
     }
 }
 
-/// 服务一个已准入会话直至其终结，返回会话终态（不进程退出）。
+/// 服务一个已准入会话直至其终结，返回会话终态与 runtime 归属（不进程退出）。
 ///
 /// 会话生命周期：uid 门准入（=认证，=心跳零点）→ tonic 服务 → 四类触发之一
 ///（EOF/信号/心跳超时/显式停止）→ W1 统一收敛（拆隧道）→ 会话占用解除。
+/// T1：`carried` 携带上一会话按 keep 策略保留的 runtime（管线跨会话存续；
+/// None=全新 runtime——原"每会话全新"语义，keep 策略是唯一例外来源）。
 #[allow(clippy::too_many_lines)]
 async fn run_one_service_session(
     listener: &Arc<ServiceListener>,
     connection: ServiceConnection,
     termination_requested: &AtomicBool,
     timing: SessionHeartbeatTiming,
-) -> SessionEnd {
-    // 每会话全新 runtime：状态机/心跳监视/触发槽零残留（常驻进程跨会话复用的
-    // 只有 listener 与进程本身）。
-    let engine_runtime = Arc::new(EngineRuntime::new_service());
+    fresh_policy: CoreExitPolicy,
+    owner_uid: u32,
+    carried: Option<Arc<EngineRuntime>>,
+) -> SessionOutcome {
+    // 全新 runtime 注入本会话策略；携带 runtime（keep 保留的）沿用自身策略——
+    // 策略随连接所有权走，不随进程走（生产注入点由连接信封接线，T1 默认 Teardown）。
+    let engine_runtime = carried.unwrap_or_else(|| {
+        let runtime = Arc::new(EngineRuntime::new_for_owner(owner_uid, "service"));
+        runtime.set_core_exit_policy(fresh_policy);
+        runtime
+    });
+
+    // T6 预检触发（复审必改 C1 整改）：trace 残留（双亡格兜底）或版本升级后
+    // 首连→**后台并行**执行（serve 先行——紧急断开 StopTunnel 立即可达，计划
+    // 验收 10a）；ApplyTunnel 侧经 runtime 的预检门有界等待（连接本就不急）。
+    // 触发面以 trace 句柄在场为前提（预检报告本身落 trace；句柄缺席=非 root
+    // 测试/无载体环境——C8 测试卫生：单测不再真跑 netstat/回收真实残留）。
+    if engine_runtime.trace_handle().is_some() {
+        let base = std::path::Path::new(crate::trace::TRACE_ROOT);
+        let version = crate::build_identity::release_version();
+        let needs_preflight = crate::trace::TraceStore::trace_exists(base, owner_uid)
+            || crate::preflight::version_marker_changed(base, version);
+        if needs_preflight {
+            let logs = Arc::clone(engine_runtime.logs());
+            let uid = owner_uid;
+            let trace = engine_runtime.trace_handle();
+            let handle = tokio::spawn(async move {
+                let started = tokio::time::Instant::now();
+                let report = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::task::spawn_blocking(move || crate::preflight::run(uid, &logs)),
+                )
+                .await;
+                let completed = matches!(&report, Ok(Ok(_)));
+                if let Some(trace) = trace
+                    && let Ok(Ok(report)) = report
+                {
+                    trace.append_event(
+                        "info",
+                        "PREFLIGHT_DONE",
+                        &format!(
+                            "dirs_removed={} dirs_live_skipped={} orphan_routes_removed={} observations={} elapsed_ms={}",
+                            report.stale_runtime_dirs_removed,
+                            report.stale_runtime_dirs_skipped_live,
+                            report.orphan_routes_removed,
+                            report.observations.len(),
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                }
+                // C3：超时/失败不重写版本标记——半途预检下次连接重试（trace
+                // 在场场景不受影响）。
+                if completed {
+                    crate::preflight::rewrite_version_marker(base, version);
+                }
+            });
+            engine_runtime.set_preflight_gate(handle);
+        }
+    }
     let service = EngineControlService::from_runtime(Arc::clone(&engine_runtime));
     // 底层 socket 强制关闭句柄：必须在 stream 移交 tonic 前取（tonic 经 incoming
     // 通道 spawn 的连接任务无法从外部 abort，挂起对端只能内核层收权）。
@@ -289,15 +413,24 @@ async fn run_one_service_session(
             .await
     });
     // incoming 已关等罕见交付失败：本会话无从服务，丢弃回 accept。
+    // T1 复审整改（发现 3）：携带进来的 runtime 原样带出——丢弃会使已应用管线
+    // 成为常驻进程内无主资源（自持 Arc 的管线任务无人再置位收敛）。
+    let carried_through = Arc::clone(&engine_runtime);
     let Ok(close_signal) = sender
         .handoff_service_stream_with_close_signal(connection.into_authenticated_unix_stream())
         .await
     else {
-        return SessionEnd::BackToAccept;
+        return SessionOutcome {
+            end: SessionEnd::BackToAccept,
+            kept_runtime: Some(carried_through),
+        };
     };
     // uid 门准入完成 = 认证握手完成 = 心跳零点（对齐会话形态的零点语义）。
+    // T1 复审整改：会话入口轮换生命周期触发槽（跨会话携带 runtime 的 permit/
+    // 电平零残留——Notify permit 无法清空，唯一可靠手段是换新槽）。
+    engine_runtime.rotate_session_trigger_slots();
     engine_runtime.arm_session_heartbeat();
-    spawn_heartbeat_watchdog_with(
+    let watchdog = spawn_heartbeat_watchdog_with(
         Arc::clone(&engine_runtime),
         timing.check_interval,
         timing.timeout,
@@ -312,6 +445,46 @@ async fn run_one_service_session(
         () = engine_runtime.wait_heartbeat_timeout() => SessionTrigger::HeartbeatTimeout,
         () = engine_runtime.wait_explicit_stop() => SessionTrigger::ExplicitStop,
     };
+
+    // T1 keep 分支：core 会话终结（EOF/心跳超时）且策略为 KeepTunnel 时不收敛
+    // teardown——管线随 runtime 携带回 accept，等待下一会话；teardown 语义延迟
+    // 到下一个默认策略会话尾或显式停止。显式停止与信号不受策略豁免。
+    let keep_tunnel =
+        session_end_keeps_tunnel(trigger, engine_runtime.core_exit_policy());
+    if keep_tunnel {
+        engine_runtime.logs().publish(
+            "info",
+            "lifecycle",
+            "CORE_EXIT_KEEP",
+            "core session ended; pipeline kept per on_core_exit policy",
+            &[("trigger", format!("{trigger:?}"))],
+        );
+        // T6：无 core 期事件落 trace（聚合日志随 core 死亡截断——T0 新事实）。
+        if let Some(trace) = engine_runtime.trace_handle() {
+            trace.append_event(
+                "info",
+                "CORE_EXIT_KEEP",
+                &format!("pipeline kept after core session end ({trigger:?})"),
+            );
+        }
+        busy.abort();
+        // T1 复审整改：看门狗是心跳槽唯一生产写入方——keep 转换必须 abort，
+        // 否则空闲期触发会把 permit 落存到已无等待者的槽里（发现 1），且任务
+        // 跨会话泄漏（发现 4）。
+        watchdog.abort();
+        drop(sender);
+        // 心跳超时的挂起对端必须收权掐断（EOF 时连接已由对端关闭）。
+        if trigger == SessionTrigger::HeartbeatTimeout {
+            tokio::time::sleep(REPLY_FLUSH_GRACE).await;
+            if let Some(handle) = kill_handle.as_ref() {
+                handle.shutdown();
+            }
+        }
+        return SessionOutcome {
+            end: SessionEnd::BackToAccept,
+            kept_runtime: Some(Arc::clone(&engine_runtime)),
+        };
+    }
 
     // W1 统一收敛执行体（service 形态分叉点：收敛后不进程退出）。收敛完成前不
     // drop(sender)/关 server——在途 handler（含 Shutdown 应答）需要活着的服务端。
@@ -339,11 +512,15 @@ async fn run_one_service_session(
         }
     }
 
-    match trigger {
+    let end = match trigger {
         SessionTrigger::PosixSignals | SessionTrigger::ExplicitStop => SessionEnd::CleanExit,
         SessionTrigger::CoreClosed | SessionTrigger::HeartbeatTimeout => {
             SessionEnd::BackToAccept
         }
+    };
+    SessionOutcome {
+        end,
+        kept_runtime: None,
     }
 }
 

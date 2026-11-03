@@ -1203,8 +1203,35 @@ impl KernelControlService {
     /// 记录最近一次连接路由的实际模式（快照 `mode` 展示用；缺省 auto）。`ServiceMode`
     /// 是 typed 编码（与 `ENGINE_KIND_*` 共享 0/1/2），存储沿用 `AtomicU8` 供 keepalive
     /// ticker 后台线程无锁读取。
+    ///
+    /// **翻转必须留痕（P0-1 随附，2026-09-28 案例归因缺口）**：mode 翻转即改变
+    /// keepalive ticker 的喂给对象（`grpc_control::spawn_keepalive_ticker` 仅对
+    /// Oneshot 发心跳）——翻离 Oneshot 后被 keep 的 oneshot 将在心跳超时（15s，
+    /// `heartbeat::HEARTBEAT_TIMEOUT_MS`）后自清理退出。2026-09-28 Install 流中
+    /// 正是这一翻转把 oneshot 饿死（无 stop.dispatched/retired 伴随、无日志可查）；
+    /// 此后每次翻转都写一条 `kernel.service.mode_changed`。
     fn record_mode(&self, mode: ServiceMode) {
-        self.selected_mode.store(mode.as_u8(), Ordering::Relaxed);
+        let previous =
+            ServiceMode::from_u8(self.selected_mode.swap(mode.as_u8(), Ordering::Relaxed));
+        if previous == mode {
+            return;
+        }
+        let _ = self.logs.append_core(
+            "info",
+            "kernel",
+            "kernel.service.mode_changed",
+            &format!(
+                "service mode changed {} -> {} (keepalive feeding follows the new mode; \
+                 a kept oneshot starves out via heartbeat timeout after flipping away \
+                 unless explicitly retired)",
+                previous.as_wire_str(),
+                mode.as_wire_str()
+            ),
+            &BTreeMap::from([
+                ("previous".to_string(), previous.as_wire_str().to_string()),
+                ("mode".to_string(), mode.as_wire_str().to_string()),
+            ]),
+        );
     }
 
     /// 当前展示模式字符串（`"auto"` / `"service"` / `"oneshot"`；未知码 fail-closed → auto）。
@@ -1251,6 +1278,66 @@ impl KernelControlService {
             .store(false, Ordering::Release);
     }
 
+    /// 服务启动入口共用的 oneshot 前置退役（P0-1，计划 v6.1 §8.1 修法 / §四 edge 20：
+    /// retire→install 序）。
+    ///
+    /// 任何会**启动服务 engine** 的批量/start 提交前先显式 retire oneshot：D12 每用户
+    /// 单引擎互斥下 oneshot 持有同名控制管道首实例（T11 常量名），install 批量内含
+    /// Start，retire 后置会使服务 engine 在建管处撞互斥退出（2026-09-28 根因 A：服务
+    /// Stopped + Verify 傻等 30s + 33s 转圈）。幂等（重复调用为 no-op 日志）。
+    ///
+    /// 失败代价（有意接受，产品语义）：批量提交后失败（UAC 拒绝 / SCM 拒绝）时
+    /// oneshot 已收，下一次 oneshot 连接需重新提权（1 次 UAC）；是否回退由用户经
+    /// 前端三选恢复模态决定——**降级永不自动执行**（2026-09-28 用户裁定）。
+    ///
+    /// **不对称说明（有意）**：Uninstall 分支维持 retire-after-Ok——`[Uninstall,
+    /// VerifyRemoved]` 批量无 Start，不触发 D12 管道互斥；延迟 retire 保留卸载失败时
+    /// 的 oneshot 回退能力（卸载失败后现有 oneshot 连接仍可用），见该分支注记。
+    async fn retire_oneshot_engine_before_service_start(&self) {
+        if let Some(provisioner) = &self.engine_provisioner {
+            provisioner.retire_oneshot_engine().await;
+        }
+    }
+
+    /// 服务操作（Install/Start）失败后的 oneshot 心跳回滚（计划 v6.1 §8.2 缺口④
+    /// 扩项——mode 翻转饿死的行为收口）。
+    ///
+    /// 背景：`stop_engine_for_transition` 把 mode 翻离 Oneshot（keepalive ticker 停
+    /// 喂）；若操作随后失败中断而 oneshot **仍存活**（retire 收走未确认——提权
+    /// 子进程 terminate 被拒时槽位保留——或未走 retire），engine 将在 15s 心跳
+    /// 超时后饿死——恰是三选恢复模态「本次一次性连接」想复用的引擎。本方法在
+    /// 操作失败返回前把 mode 回滚 Oneshot（心跳恢复喂给槽内存活 engine）；成功
+    /// 路径不调用（成功即服务形态接管，engine 由 retire 收走）。
+    ///
+    /// 判定（诚实探测，非记账）：`mode_before == Oneshot`（本次操作确实把它翻走）
+    /// 且槽内 engine 经幂等 owner lease 探测存活（detached 占位/死 client → 探测
+    /// 失败 → 无可救者，不回滚——下次 oneshot 连接重新提权，P0-1 已接受的代价）。
+    async fn restore_oneshot_keepalive_if_engine_alive(&self, mode_before: ServiceMode, why: &'static str) {
+        if mode_before != ServiceMode::Oneshot {
+            return;
+        }
+        let alive = {
+            let current = self.engine.current().await;
+            let mut guard = current.lock().await;
+            guard.ensure_owner_lease().await.is_ok()
+        };
+        if !alive {
+            return;
+        }
+        self.record_mode(ServiceMode::Oneshot);
+        let _ = self.logs.append_core(
+            "info",
+            "kernel",
+            "kernel.service.oneshot_keepalive_restored",
+            &format!(
+                "service operation failed ({why}) while oneshot engine still alive; \
+                 mode rolled back to oneshot so keepalive feeding resumes \
+                 (engine stays reusable for the one-shot connect option; no implicit starvation)"
+            ),
+            &BTreeMap::from([("why".to_string(), why.to_string())]),
+        );
+    }
+
     /// Core-owned service bootstrap：确保服务正在运行且业务面已经可用。
     ///
     /// 这是 install、显式 Start 和 connect-after-install 的共同入口。仅在本次操作
@@ -1258,6 +1345,9 @@ impl KernelControlService {
     /// `StopPending` 均不重复提交，由 SCM 自己收敛。提交发生竞态时，若随后查询已经
     /// 变成 Running，仍按幂等成功处理。
     async fn ensure_service_ready(&self) -> Result<ServiceReadiness, String> {
+        // P0-1：start 同样会把服务 engine 拉起建管——先退役 oneshot（D12 互斥；
+        // 覆盖 PromptStart/显式 Start/post-install readiness 三类调用方）。
+        self.retire_oneshot_engine_before_service_start().await;
         let initial_state = self
             .query_service_status_snapshot()
             .map(|snapshot| snapshot.state);
@@ -1338,6 +1428,9 @@ impl KernelControlService {
                     ),
                     &BTreeMap::new(),
                 );
+                // P0-1：修复批量含 Start——先退役 oneshot 再提交（retire→install 序；
+                // 首次 ensure 已 retire 过，此处幂等兜底，防未来调用序变动）。
+                self.retire_oneshot_engine_before_service_start().await;
                 match self.service_ops.install().await {
                     Ok(_) => self.ensure_service_ready().await.map_err(|second| {
                         format!(
@@ -1750,6 +1843,9 @@ impl KernelControlService {
                     ),
                     &BTreeMap::new(),
                 );
+                // P0-1：修复批量含 Start（install→restart 服务 engine）——先退役
+                // oneshot 再提交（retire→install 序；与另两处共用同一 helper）。
+                self.retire_oneshot_engine_before_service_start().await;
                 self.service_ops.install().await.map_err(|repair| {
                     Status::failed_precondition(format!(
                         "service_connect_failed|service engine connect: {first_error}; repair batch failed: {repair}"
@@ -1767,6 +1863,15 @@ impl KernelControlService {
     /// 卸载服务前清理 service。`StopTunnel` 成功后把 host composition 收敛回 Idle，并
     /// 暂时将维护类型置为 auto，确保旧 oneshot 不再收到 KeepAlive；调用方在服务子命令
     /// 成功后再写入目标类型。
+    ///
+    /// **mode 翻转与心跳喂给（计划 v6.1 §8.2 缺口④扩项设计注记，本轮不改行为）**：
+    /// 本函数把维护形态翻回 `Auto`——keepalive ticker（`grpc_control::
+    /// spawn_keepalive_ticker`）仅对 Oneshot 发心跳，mode 翻离 Oneshot 即停止喂给；
+    /// 被 keep 的 oneshot 将在心跳超时（15s，`heartbeat::HEARTBEAT_TIMEOUT_MS`）后走
+    /// 自清理退出。**显式 retire 是唯一合法退场**：饿死是被动兜底而非设计退场
+    /// （2026-09-28 Install 流曾以饿死事实退场且无日志可查，`record_mode` 已补翻转
+    /// 日志）；远期 keep 语义下心跳超时改走 keep 语义（与 EOF 对齐），依赖 D15
+    /// 拉起底质（explorer 令牌复制 + CreateProcessWithTokenW）落地。
     async fn stop_engine_for_transition(&self, _source_mode: ServiceMode) -> Result<(), String> {
         let active = {
             let composition = self.composition.lock().await;
@@ -4340,9 +4445,22 @@ impl KernelControl for KernelControlService {
             }
             service_control_request::Action::Install(_) => {
                 self.require_authorized().await?;
+                let mode_before =
+                    ServiceMode::from_u8(self.selected_mode.load(Ordering::SeqCst));
                 if let Err(error) = self.stop_engine_for_transition(ServiceMode::Oneshot).await {
                     return self.service_control_reply(true, Err(error)).await;
                 }
+                // P0-1（retire→install 序，计划 §四 edge 20 / v6.1 §8.1）：install 批量
+                // 内含 Start，必须先退役 oneshot 再提交——D12 每用户单引擎互斥下，
+                // oneshot 持有同名控制管道首实例，后置 retire 使服务 engine 建管即撞
+                // 互斥退出（2026-09-28 根因 A：33s 转圈 + 服务 Stopped + Verify 傻等）。
+                // 失败代价有意接受：install 失败（UAC 拒绝）后 oneshot 已收，下次
+                // oneshot 连接需重新提权（1 次 UAC）；回退选择归前端三选恢复模态，
+                // 降级永不自动执行。**收走未确认例外（v6.1 §8.2 饿死收口）**：提权
+                // 子进程 terminate 被拒时槽位保留，操作失败经
+                // `restore_oneshot_keepalive_if_engine_alive` 回滚心跳——「本次一次性
+                // 连接」可零 UAC 复用。
+                self.retire_oneshot_engine_before_service_start().await;
                 // 业务隧道已收束；服务进程的停止由批量内 SCM Stop 唯一负责，避免
                 // Shutdown RPC 自退出与 SCM 停止/失败恢复交叉。
                 let outcome = self.service_ops.install().await;
@@ -4352,19 +4470,30 @@ impl KernelControl for KernelControlService {
                         // auto：只有真正换入 service engine 的 connect 才记录 service，
                         // 避免把"安装完成"误当成"当前连接已经使用服务"。
                         self.clear_service_removed_override();
-                        // 存在性互斥（2026-09-08 计划批 2）：服务形态成为唯一权威——
-                        // 退役 oneshot engine（业务停机已由 transition stop 完成，此处
-                        // 收进程）+ 槽换回 detached 占位。下一次 connect 走 Service
-                        // 分支拨号服务管道；卸载后的 oneshot 连接则按需重新 provision。
-                        if let Some(provisioner) = &self.engine_provisioner {
-                            provisioner.retire_oneshot_engine().await;
-                        }
+                        // 存在性互斥（2026-09-08 计划批 2）：服务形态成为唯一权威；
+                        // oneshot 已在批量提交前退役（P0-1 前置），此处无需再收进程。
                         match self.ensure_service_ready().await {
                             Ok(readiness) => self.service_control_start_reply(readiness).await,
-                            Err(error) => self.service_control_reply(true, Err(error)).await,
+                            Err(error) => {
+                                // 批量 Ok 但 start/readiness 失败：同样是操作失败——
+                                // oneshot 仍存活则回滚心跳（饿死收口）。
+                                self.restore_oneshot_keepalive_if_engine_alive(
+                                    mode_before,
+                                    "install_start_failed",
+                                )
+                                .await;
+                                self.service_control_reply(true, Err(error)).await
+                            }
                         }
                     }
-                    Err(error) => self.service_control_reply(true, Err(error)).await,
+                    Err(error) => {
+                        // Install 失败（如 UAC 拒绝）：mode 已被 transition 翻走——
+                        // oneshot 仍存活时回滚 Oneshot 恢复心跳（饿死收口，成功路径
+                        // 不回滚）。
+                        self.restore_oneshot_keepalive_if_engine_alive(mode_before, "install_failed")
+                            .await;
+                        self.service_control_reply(true, Err(error)).await
+                    }
                 }
             }
             service_control_request::Action::Uninstall(_) => {
@@ -4382,6 +4511,11 @@ impl KernelControl for KernelControlService {
                     // 维护形态记录 oneshot。不再保留预拉 oneshot——下一次一次性连接
                     // 由 provisioner 按需重新提权拉起（每 core 会话内仍只在首次需要
                     // 时 1 次 UAC）。无 provisioner（测试）时仅换占位。
+                    //
+                    // **retire 维持 Ok 之后（与 Install 分支不对称，有意）**：卸载批量
+                    // `[Uninstall, VerifyRemoved]` 无 Start，不触发 D12 管道互斥；延迟
+                    // retire 保留卸载失败时的 oneshot 回退能力——批量失败（UAC 拒绝等）
+                    // 时现有 oneshot 仍可服务后续连接。
                     if let Some(provisioner) = &self.engine_provisioner {
                         provisioner.retire_oneshot_engine().await;
                     } else {
@@ -4397,13 +4531,23 @@ impl KernelControl for KernelControlService {
                 self.require_authorized().await?;
                 // 显式 Start 是用户业务手势：bootstrap 失败 = 服务客观问题 → 允许一次
                 // 修复子进程补洞（2026-09-08 计划批 4）。
+                let mode_before =
+                    ServiceMode::from_u8(self.selected_mode.load(Ordering::SeqCst));
                 let mut repair_budget = RepairBudget::default();
                 match self
                     .ensure_service_ready_for_connect(&mut repair_budget)
                     .await
                 {
                     Ok(readiness) => self.service_control_start_reply(readiness).await,
-                    Err(error) => self.service_control_reply(true, Err(error)).await,
+                    Err(error) => {
+                        // Start 失败：ensure 内部的 retire 若收走未确认（提权子进程
+                        // terminate 被拒），槽位保留——mode 仍为 Oneshot 时心跳本就
+                        // 续喂；此处回滚仅覆盖 mode 已被翻走的罕见交错（饿死收口，
+                        // 计划 v6.1 §8.2）。
+                        self.restore_oneshot_keepalive_if_engine_alive(mode_before, "start_failed")
+                            .await;
+                        self.service_control_reply(true, Err(error)).await
+                    }
                 }
             }
             service_control_request::Action::RotateKey(_) => {
@@ -7004,23 +7148,34 @@ fn uuid_from_16(bytes: &[u8]) -> Option<uuid::Uuid> {
     Some(uuid::Uuid::from_bytes(arr))
 }
 
-/// 断线表示的快照（engine 断开 → 包边界丢失的恢复上下文，Reconciling 状态）。
+/// 断线表示的快照（engine 断开 → 包边界丢失的恢复上下文；默认 Reconciling 状态）。
 ///
 /// 与 composition 的 `HelperLinkLost` 语义对齐：helper 链路断开 ≈ 包边界丢失。host
 /// 不在此处 mutate composition（那属 P3-c2 进程生命周期的 helper-link 处理）；仅向
-/// UI 发布恢复中过渡。
+/// UI 发布恢复中过渡。**例外（P0-3，2026-09-28 根因 C）**：Connecting 相位投影
+/// Connecting（受理后的引擎不可确认窗口不得降级为「处理中」，见函数体注记）。
 fn disconnected_snapshot(composition: &HostComposition) -> RuntimeSnapshot {
     // R2 收敛双保险：已收敛的终态（Idle / Stopped / Failed）不得被 engine 状态流断线
-    // 回归成 Reconciling——EOF 只表示 engine 侧掉线，不代表业务已回退。只有非终态
-    // （Connecting / Connected / Stopping / Reconciling——连接在途、engine 提前离开）
-    // 才以 Reconciling 表示待恢复。`Stopped`/`Idle` 回落 Idle 终态，`Failed` 保持
-    // FailedDirty（终态不丢错误上下文）。
+    // 回归成 Reconciling——EOF 只表示 engine 侧掉线，不代表业务已回退。`Stopped`/`Idle`
+    // 回落 Idle 终态，`Failed` 保持 FailedDirty（终态不丢错误上下文）。
     match composition.phase() {
         HostPhase::Idle | HostPhase::Stopped | HostPhase::Failed => {
             return snapshot_for_phase(composition.phase(), composition);
         }
         _ => {}
     }
+    // P0-3（2026-09-28 根因 C）：Connecting + 引擎查询失败 → 投影 Connecting（不再
+    // 降级 Reconciling）。受理后的「引擎真相不可确认窗口」（oneshot 提权拉起 12.8s /
+    // 预检门 / 服务批量 / 引擎控制面初始化）里 composition 仍是 Connecting——降级
+    // Reconciling 会把「连接中」翻成无解释的「处理中」，引擎恢复后又翻回「连接中」
+    // （2026-09-28 问题 2 的「连接中→处理中→连接中→已连接」跳变）。Connecting 的
+    // 阶段字段缺省回落 ObservingOwnedState，前端按快照 service_status/mode 显示
+    // 「正在启动引擎/正在准备服务」（presenter，复审 F9：不新增 wire 字段）。
+    if composition.phase() == HostPhase::Connecting {
+        return snapshot_for_phase(HostPhase::Connecting, composition);
+    }
+    // Connected / Stopping / Reconciling + 查询失败 → Reconciling（已建立后的不确定
+    // 态——语义正确保留：EOF 只表示链路断，不代表会话已回退，等待对账/引擎恢复）。
     wire::RuntimeSnapshot {
         state: Some(wire::runtime_snapshot::State::Reconciling(
             wire::ReconcilingState {

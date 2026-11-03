@@ -129,6 +129,45 @@ int main() {
     }
   }
 
+  {
+    // KI-13 ④：升级链路语义开关 /preserve-user-data 的解析与 UAC 参数往返。
+    auto storage = MakeArgs({L"Uninstall.exe", L"/uninstall", L"/S",
+                             L"/clear-user-data", L"/preserve-user-data"});
+    auto pointers = Pointers(storage);
+    const auto options = exv::setup::ParseCli(static_cast<int>(pointers.size()), pointers.data());
+    Expect(options.has_value(), "upgrade-mode uninstall parse succeeds");
+    if (options) {
+      Expect(options->role == exv::setup::Role::UninstallSilent,
+             "upgrade-mode uninstall resolves the silent uninstall role");
+      Expect(options->clear_user_data, "upgrade-mode uninstall keeps the clear-data run");
+      Expect(options->preserve_user_data,
+             "upgrade-mode uninstall parses the preserve-user-data switch");
+    }
+
+    exv::setup::CliOptions source;
+    source.role = exv::setup::Role::UninstallSilent;
+    source.clear_user_data = true;
+    source.preserve_user_data = true;
+    source.install_dir = L"C:\\Program Files\\EXV";
+    source.initiating_user_context = true;
+    source.user_profile_root = L"C:\\Users\\Original User";
+
+    const std::wstring command_line =
+        L"Uninstall.exe " + exv::setup::BuildUninstallElevationParameters(source);
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(command_line.c_str(), &argc);
+    Expect(argv != nullptr, "upgrade elevation command line parses with CommandLineToArgvW");
+    if (argv) {
+      const auto parsed = exv::setup::ParseCli(argc, argv);
+      LocalFree(argv);
+      Expect(parsed.has_value(), "upgrade elevation context round-trip parses");
+      if (parsed) {
+        Expect(parsed->clear_user_data && parsed->preserve_user_data,
+               "upgrade semantics survive the UAC round-trip");
+      }
+    }
+  }
+
   if (failures != 0) {
     return 1;
   }

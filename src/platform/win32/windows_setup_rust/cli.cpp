@@ -105,6 +105,10 @@ std::wstring BuildUninstallElevationParameters(const CliOptions &options) {
   if (options.clear_user_data) {
     append_flag(L"/clear-user-data");
   }
+  if (options.preserve_user_data) {
+    // KI-13 ④：升级语义开关必须穿过 UAC 往返存活。
+    append_flag(L"/preserve-user-data");
+  }
   append_value(L"/D", options.install_dir);
   if (options.initiating_user_context) {
     append_flag(L"--initiating-user-context");
@@ -153,6 +157,11 @@ std::optional<CliOptions> ParseCli(int argc, wchar_t **argv) {
     if (EqualsIgnoreCase(arg, L"/clear-user-data") ||
         EqualsIgnoreCase(arg, L"--clear-user-data")) {
       opts.clear_user_data = true;
+      continue;
+    }
+    if (EqualsIgnoreCase(arg, L"/preserve-user-data") ||
+        EqualsIgnoreCase(arg, L"--preserve-user-data")) {
+      opts.preserve_user_data = true;
       continue;
     }
     if (EqualsIgnoreCase(arg, L"/elevated-worker") ||

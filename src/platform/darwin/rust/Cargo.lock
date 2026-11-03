@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-core"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-engine"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "async-trait",
  "exv-vpn-cstp",
@@ -1145,6 +1145,7 @@ dependencies = [
  "exv-vpn-wire",
  "getrandom 0.4.3",
  "libc",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -1168,14 +1169,14 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-service-agent"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "exv-vpn-darwin-tauri"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "block2",
  "exv-vpn-darwin-core",

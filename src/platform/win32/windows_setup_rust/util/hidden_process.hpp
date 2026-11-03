@@ -8,6 +8,9 @@ namespace exv::setup {
 
 struct HiddenProcessResult {
   bool started{false};
+  // KI-13 (2026-09-28 review F2): true = wait hit timeout_ms; the child is still
+  // running (exit_code reads STILL_ACTIVE 259 and must not be treated as failure).
+  bool timed_out{false};
   std::uint32_t exit_code{0xFFFFFFFFu};
   std::string captured_stdout;
 };

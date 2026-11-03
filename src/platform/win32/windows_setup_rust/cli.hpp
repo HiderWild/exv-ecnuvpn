@@ -17,6 +17,9 @@ struct CliOptions {
   Role role{Role::InstallGui};
   std::wstring install_dir;
   bool clear_user_data{false};
+  // KI-13 ④：升级链路调卸载链时的保留语义开关——用户数据清理脚本跳过用户数据段
+  // （配置/凭据/UI 偏好），缓存/账本照清。全新卸载不传该开关（全清语义）。
+  bool preserve_user_data{false};
   bool desktop_shortcut{true};
   bool start_menu{true};
   bool quick_launch{false};

@@ -36,7 +36,8 @@ const runtime = source === "mock"
   : createProductRuntime(undefined, undefined, announceReconnectSnapshot);
 /**
  * Core 在 Rust setup 中完成 bootstrap 后才暴露 Tauri gateway；主入口把这次读取注入
- * App，由 App 在首次挂载时只按 `requires_quick_start` 决定是否显示对话框。
+ * App，由 App 在首次挂载时按「已见标记 + requires_quick_start」决定是否显示对话框
+ * （KI-13：有且仅有首次运行弹出；详见 product/quick-start.ts）。
  */
 const loadQuickStart = (): Promise<ConfigPayload> => {
   if (source === "mock") return Promise.resolve({ items: [], requires_quick_start: false });

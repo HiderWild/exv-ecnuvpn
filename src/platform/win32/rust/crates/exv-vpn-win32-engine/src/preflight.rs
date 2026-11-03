@@ -930,6 +930,73 @@ async fn shutdown_probe_child(ps: &SharedProbeChild) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 兜底认领清理（计划 v6.1 §8.2 触发模型补洞；T2/T3 清理器的同款策略与代码）
+// ---------------------------------------------------------------------------
+
+/// 兜底认领清理的结局（受理门/connect 路由侧重试判定的输入）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NrptClaimClean {
+    /// 已删除的自有前缀（`EXV-NRPT:`）规则名。
+    pub(crate) removed: Vec<String>,
+    /// 现存的外来校园域冲突规则名（未动——T2 裁定不变，只上报）。
+    pub(crate) foreign_present: Vec<String>,
+    /// 探测与删除是否全部成功（false = 清理未收敛）。
+    pub(crate) all_ok: bool,
+}
+
+/// 兜底认领清理（计划 v6.1 §8.2 触发模型补洞）：连接路径撞自有 NRPT conflict 时
+/// （预检三触发源全不命中的路径——上次善后未竟的残留规则），只针对 NRPT 域跑
+/// 一轮「探测 → 分类 → 删除」。
+///
+/// **与预检清理阶段完全同源**（非新机制）：[`classify_nrpt`] 的 `own` 集 =
+/// `EXV-NRPT:` 前缀规则（孤儿语义——任意 GUID 均为 EXV 残留）；删除走同一
+/// [`ProbeRequest::NrptDelete`]；生效后清 DNS 缓存。**外来规则（无前缀的校园域
+/// 规则）绝不动**（T2 裁定不变——他牌规则只上报，补救三选归 UI）。
+pub(crate) async fn claim_clean_own_nrpt(campus_namespaces: &[String]) -> NrptClaimClean {
+    let ps = spawn_probe_child().await;
+    let outcome = claim_clean_own_nrpt_on(&ps, campus_namespaces).await;
+    shutdown_probe_child(&ps).await;
+    outcome
+}
+
+/// 认领清理主体（子进程句柄由调用方提供——测试注入假脚本子进程，生产经
+/// [`claim_clean_own_nrpt`] 用真实 PS 子进程）。
+async fn claim_clean_own_nrpt_on(
+    ps: &SharedProbeChild,
+    campus_namespaces: &[String],
+) -> NrptClaimClean {
+    if ps.is_none() {
+        return NrptClaimClean::default();
+    }
+    let response = match ps_op(ps, &ProbeRequest::List).await {
+        Ok(response) => response,
+        Err(_) => return NrptClaimClean::default(),
+    };
+    let classified = classify_nrpt(&response.rules, campus_namespaces);
+    let foreign_present = classified
+        .foreign_conflict
+        .iter()
+        .map(|rule| rule.name.clone())
+        .collect();
+    let mut removed = Vec::new();
+    let mut all_ok = true;
+    for rule in &classified.own {
+        match ps_op(ps, &ProbeRequest::NrptDelete { name: &rule.name }).await {
+            Ok(_) => removed.push(rule.name.clone()),
+            Err(_) => all_ok = false,
+        }
+    }
+    if !removed.is_empty() {
+        let _ = ps_op(ps, &ProbeRequest::Flushdns).await;
+    }
+    NrptClaimClean {
+        removed,
+        foreign_present,
+        all_ok,
+    }
+}
+
 /// Unix 毫秒时间戳（时钟回拨等异常退化为 0，仅用于报告标记）。
 fn unix_now_ms() -> u64 {
     SystemTime::now()

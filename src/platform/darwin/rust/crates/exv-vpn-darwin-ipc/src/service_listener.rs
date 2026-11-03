@@ -276,6 +276,14 @@ fn remove_safe_stale_service_socket(socket_path: &Path, owner_uid: u32) -> Resul
     if metadata.uid() != owner_uid || metadata.mode() & 0o7777 != SERVICE_SOCKET_MODE {
         return Err(PreauthError::EndpointOwnership);
     }
+    // T7（UDS 偷取缺口修复）：文件属性全部匹配**不代表** stale——活引擎的 socket
+    // 同样满足。摘除前必须 connect 探活：可连=有本形态 engine 正在监听，摘除它
+    // 会把活实例的端点偷走（其 listener 变孤儿、新实例劫持后续连接）；连接被拒
+    // （ECONNREFUSED）才是真 stale。UDS 无 FIRST_PIPE_INSTANCE 等价物，这是
+    // darwin 侧"每用户单 engine"互斥的探活实现（D-d3 倾向：探活 connect）。
+    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+        return Err(PreauthError::EndpointInUse);
+    }
     std::fs::remove_file(socket_path).map_err(|_| PreauthError::CleanupRefused)
 }
 

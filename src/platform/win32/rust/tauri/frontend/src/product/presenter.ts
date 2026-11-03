@@ -35,7 +35,7 @@ import type {
 } from "./types";
 
 /**
- * Rust 的工程阶段名不直接进入产品界面。未知阶段仍回退现有 `phaseLabelOf`，避免静默捏造文字。
+ * Rust 的工程阶段名不直接进入产品界面。未知阶段仍回落现有 `phaseLabelOf`，避免静默捏造文字。
  */
 export const PRODUCT_PHASE_LABELS: Record<ConnectPhase, string> = {
   observing_owned_state: "检查环境",
@@ -47,6 +47,28 @@ export const PRODUCT_PHASE_LABELS: Record<ConnectPhase, string> = {
   attaching_packet_boundary: "启用通道",
   starting_data_plane: "检查网络",
 };
+
+/**
+ * P0-3a（计划 v6.1 第二批，2026-09-28 根因 C）：Connecting 首阶段（观察自有状态）
+ * 在**引擎尚未挂接**时改写为「正在启动引擎/正在准备服务」。
+ *
+ * 信号判别只用快照已有 `service_status`/`mode`（复审 F9：不新增 wire 字段）：
+ * `mode` 仍为 auto（或空——路由未完成、无已确立形态）即视为无引擎窗口——服务已装
+ * 未跑 =「正在准备服务」（SCM bootstrap/批量安装启动中）；其余（服务未装 = oneshot
+ * 提权拉起中；已装 Running = 控制面拨号/初始化中）=「正在启动引擎」。`mode` 已确立
+ * （service/oneshot）说明 engine 已挂接、门检里程碑（ObservingOwnedState）在真实
+ * 推进，沿用标准标签「检查环境」。
+ */
+export function connectingFirstStageLabel(snapshot: RuntimeSnapshot): string {
+  if (snapshot.mode !== "" && snapshot.mode !== "auto") {
+    return PRODUCT_PHASE_LABELS.observing_owned_state;
+  }
+  const service = snapshot.service_status;
+  if (service != null && service.installed && service.state !== "running") {
+    return "正在准备服务";
+  }
+  return "正在启动引擎";
+}
 
 interface ProductCopy {
   title: string;
@@ -88,7 +110,8 @@ function productPhaseLabel(phase: ConnectPhase): string {
   return PRODUCT_PHASE_LABELS[phase] ?? phaseLabelOf(phase);
 }
 
-function stagesFor(runtime: RuntimeState): ProductStage[] {
+function stagesFor(snapshot: RuntimeSnapshot): ProductStage[] {
+  const runtime = snapshot.runtime;
   const current = currentPhase(runtime);
   if (current === null) return [];
 
@@ -97,7 +120,11 @@ function stagesFor(runtime: RuntimeState): ProductStage[] {
 
   return CONNECT_PHASE_ORDER.map((phase, index) => ({
     phase,
-    label: productPhaseLabel(phase),
+    // P0-3a：首阶段推进中且引擎未挂接 → 引擎/服务启动标签（判别见该函数注记）。
+    label:
+      phase === "observing_owned_state" && current === "observing_owned_state"
+        ? connectingFirstStageLabel(snapshot)
+        : productPhaseLabel(phase),
     visual: index < currentIndex ? "complete" : index === currentIndex ? "current" : "waiting",
   }));
 }
@@ -334,6 +361,12 @@ function descriptionFor(runtime: RuntimeState): string | null {
     const summary = runtime.summary?.trim();
     return summary || null;
   }
+  // P0-3（计划 v6.1 第二批，诊断 P1-8）：reconciling（「处理中」）附原因副文案——
+  // 无 blocking 错误时给缺省解释「状态确认中…」，消除无解释跳变（2026-09-28 问题 2
+  // 的「连接中→处理中→连接中」序列中「处理中」无任何说明）。
+  if (runtime.state === "reconciling") {
+    return errorOf(runtime) ?? "状态确认中…";
+  }
 
   return errorOf(runtime);
 }
@@ -370,7 +403,7 @@ export function present(
     title: copy.title,
     description: descriptionFor(runtime),
     errorCode: errorCodeFor(runtime),
-    stages: stagesFor(runtime),
+    stages: stagesFor(snapshot),
     metrics: metricsFor(snapshot, nowMs),
     connectionInfo: connectionInfoFor(connectionInfo),
     proxyTun: proxyTunFor(snapshot),

@@ -14,15 +14,8 @@ import {
   type ServiceControlAction,
   type ServiceControlReply,
 } from "../lib/ipc";
-import {
-  CONNECT_PHASE_ORDER,
-  errorAfterEvent,
-  errorOf,
-  isTerminalState,
-  shouldApplyEvent,
-  type OpCorrelation,
-} from "../lib/status-map";
-import { PRODUCT_PHASE_LABELS, present } from "./presenter";
+import { CONNECT_PHASE_ORDER, errorAfterEvent, errorOf, isTerminalState, shouldApplyEvent, type OpCorrelation } from "../lib/status-map";
+import { connectingFirstStageLabel, PRODUCT_PHASE_LABELS, present } from "./presenter";
 import {
   EMPTY_PRODUCT_CONNECTION_INFO,
   type ProductConnectionInfo,
@@ -118,7 +111,7 @@ type DisplayError = string | null | undefined;
  */
 const TRANSITION_SNAPSHOT_POLL_MS = 1_000;
 /**
- * C3（复审 P2-4）：GetSnapshot 含 engine `ObserveOwnedState` gRPC 往返与探测/SCM
+ * C4（复审 P2-4）：GetSnapshot 含 engine `ObserveOwnedState` gRPC 往返与探测/SCM
  * 成本（composition/engine 锁均为短临界区、`prefer_snapshot` 防假 Idle——此为可接受
  * 的量化论证）；过渡窗口超过 10s 后轮询降频 1s → 3s，长窗口（bootstrap 慢路径）的
  * 轮询成本有界。
@@ -126,10 +119,31 @@ const TRANSITION_SNAPSHOT_POLL_MS = 1_000;
 const TRANSITION_SNAPSHOT_POLL_SLOW_MS = 3_000;
 const TRANSITION_SNAPSHOT_POLL_SLOW_AFTER_MS = 10_000;
 /**
- * C4（ui-connect-stop-responsiveness）：`pendingAction` 超时回落。只在事件链与
- * GetSnapshot 轮询双双不可达时触发（正常路径受理快照 ≤1s、轮询兜底 ≤2s 都先到）。
+ * C4：`pendingAction` 超时回落。只在事件链与 GetSnapshot 轮询双双不可达时触发（正常
+ * 路径受理快照 ≤1s、轮询兜底 ≤2s 都先到）。
+ *
+ * P0-3（计划 v6.1 第二批，2026-09-28 根因 C）：固定 4s 改按路径区分——真死连接由
+ * connect RPC 的拒绝路径立即出错误（`connect` 的 catch 解除窗口），乐观窗只在 RPC
+ * 悬挂时持续；窗口长度覆盖对应链路的最坏在途时间：
+ * - oneshot 30s：提权拉起链（实测 12.8s，UAC 等待含内）+ 预检门 ~1s + 组装；
+ * - 服务 90s：最坏 = readiness ensure 15s + 修复批量 30s + 再 ensure 15s = 60s，
+ *   加控制面初始化余量。
+ * 路径判别用发起时快照的 service_status/mode（复审 F9：不新增 wire 字段；与
+ * presenter 的 `connectingFirstStageLabel` 同一信号）。
  */
-const PENDING_ACTION_TIMEOUT_MS = 4_000;
+const PENDING_ACTION_TIMEOUT_ONESHOT_MS = 30_000;
+const PENDING_ACTION_TIMEOUT_SERVICE_MS = 90_000;
+/** 乐观期副文案切换阈值：超过旧 4s 窗口后从「正在发起…」切到「仍在…」。 */
+const PENDING_ACTION_SLOW_COPY_AFTER_MS = 4_000;
+
+/** 连接路径（乐观窗口超时与副文案按此区分；stop 不分路径）。 */
+type PendingActionPath = "oneshot" | "service";
+
+/** 连接发起时的路径判定：服务已装（或上次路由已是服务形态）→ 服务链。 */
+function connectPathFor(snapshot: RuntimeSnapshot): PendingActionPath {
+  if (snapshot.mode === "service") return "service";
+  return snapshot.service_status?.installed === true ? "service" : "oneshot";
+}
 
 function idleSnapshot(): RuntimeSnapshot {
   return {
@@ -217,23 +231,42 @@ type PendingAction = "connect" | "stop" | null;
  * 其余等待），不等第一个真实事件——阶段序号与引擎真实推进一致，只是先呈现占位，
  * 真实 Connecting 事件到达后由快照覆盖。
  */
-function optimisticStages(): ProductStage[] {
+function optimisticStages(snapshot: RuntimeSnapshot): ProductStage[] {
   return CONNECT_PHASE_ORDER.map((phase, index) => ({
     phase,
-    label: PRODUCT_PHASE_LABELS[phase] ?? phase,
+    // P0-3a：乐观窗口 = 引擎未挂接窗口——首阶段标签按 service_status/mode 判别
+    //（「正在启动引擎/正在准备服务」，与 presenter 的 stagesFor 同一信号/同一文案）。
+    label:
+      index === 0
+        ? connectingFirstStageLabel(snapshot)
+        : (PRODUCT_PHASE_LABELS[phase] ?? phase),
     visual: index === 0 ? "current" : "waiting",
   }));
 }
 
-function optimisticProductState(base: ProductUiState, pendingAction: PendingAction): ProductUiState {
+function optimisticProductState(
+  base: ProductUiState,
+  pendingAction: PendingAction,
+  path: PendingActionPath,
+  elapsedMs: number,
+  snapshot: RuntimeSnapshot,
+): ProductUiState {
   if (pendingAction === "connect") {
+    // P0-3：乐观期副文案——旧 4s 窗口内「正在发起…」，超过后按路径切「仍在连接/
+    // 准备服务…」（服务链含 UAC 修复批量，需预告长等待）。
+    const description =
+      elapsedMs < PENDING_ACTION_SLOW_COPY_AFTER_MS
+        ? "正在发起连接请求。"
+        : path === "service"
+          ? "仍在准备服务，可能需要管理员授权，请稍候…"
+          : "仍在连接，请稍候…";
     return {
       ...base,
       status: "connecting",
       severity: "attention",
       title: "连接中",
-      description: "正在发起连接请求。",
-      stages: optimisticStages(),
+      description,
+      stages: optimisticStages(snapshot),
       errorCode: null,
       metrics: null,
       connectEnabled: false,
@@ -289,6 +322,10 @@ export function createProductRuntime(
   let coreStatusInFlight = false;
   let connectionInfoInFlight: Promise<boolean> | null = null;
   let pendingAction: PendingAction = null;
+  /** P0-3：乐观窗口的路径与起点（超时上界/副文案按路径区分；stop 无路径语义，
+   *  复用 oneshot 档不产生可见差异——stop 副文案不随 elapsed 切换）。 */
+  let pendingActionPath: PendingActionPath = "oneshot";
+  let pendingActionSinceMs = 0;
   let userOperationSequence = 0;
   /** C3（2026-09-05）：最近一次被采纳状态事件的时间。事件链在流动时轮询让位——
    *  仅当事件静默（饥饿）超过一个周期才拉一次 GetSnapshot 兜底。 */
@@ -317,7 +354,13 @@ export function createProductRuntime(
       base.title = "连接状态待确认";
       base.description = "与后台的状态通信已中断，正在重新确认连接。";
     }
-    state.value = optimisticProductState(base, pendingAction);
+    state.value = optimisticProductState(
+      base,
+      pendingAction,
+      pendingActionPath,
+      pendingActionSinceMs === 0 ? 0 : Math.max(0, now() - pendingActionSinceMs),
+      latestSnapshot,
+    );
     if (browserWaiting.value && pendingAction !== "stop") {
       state.value = {
         ...state.value, status: "connecting", severity: "attention",
@@ -568,9 +611,14 @@ export function createProductRuntime(
     pendingActionWatchdog = null;
   }
 
-  /** C4：武装 pendingAction 超时看门狗（事件链与轮询双失联时的最后可操作回落）。 */
-  function armPendingActionWatchdog(): void {
+  /** C4：武装 pendingAction 超时看门狗（事件链与轮询双失联时的最后可操作回落）。
+   *  P0-3：超时上界按路径（oneshot 30s / 服务 90s，见常量注记）。 */
+  function armPendingActionWatchdog(path: PendingActionPath): void {
     disarmPendingActionWatchdog();
+    const timeoutMs =
+      path === "service"
+        ? PENDING_ACTION_TIMEOUT_SERVICE_MS
+        : PENDING_ACTION_TIMEOUT_ONESHOT_MS;
     pendingActionWatchdog = setTimeout(() => {
       pendingActionWatchdog = null;
       if (pendingAction === null) return;
@@ -579,7 +627,7 @@ export function createProductRuntime(
       pendingAction = null;
       correlation = { ...correlation, inFlightAction: null };
       writeState();
-    }, PENDING_ACTION_TIMEOUT_MS);
+    }, timeoutMs);
   }
 
   function stopTransitionSnapshotRefresh(): void {
@@ -654,7 +702,10 @@ export function createProductRuntime(
     displayError = null;
     correlation = { activeOpId: null, terminalReached: false, inFlightAction: action };
     pendingAction = action;
-    armPendingActionWatchdog();
+    // P0-3：记录路径与起点——超时上界/副文案按路径区分（连接路径用发起时快照判定）。
+    pendingActionPath = action === "connect" ? connectPathFor(latestSnapshot) : "oneshot";
+    pendingActionSinceMs = now();
+    armPendingActionWatchdog(pendingActionPath);
     // C3：乐观置位时立即启动兜底真相源轮询（事件先到时由 handleStatus/停表条件收口）。
     startTransitionSnapshotRefresh();
     writeState();

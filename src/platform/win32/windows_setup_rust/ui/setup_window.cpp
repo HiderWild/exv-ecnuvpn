@@ -2250,7 +2250,10 @@ int RunGui(bool uninstall, const CliOptions &options) {
   app.opt_start_menu = options.start_menu;
   app.opt_quick_launch = options.quick_launch;
   app.opt_launch = options.launch_app;
-  app.opt_clear_user_data = options.clear_user_data;
+  // KI-13 用户裁定 2：全新卸载必须干净（义务）——确认页「清除用户数据」默认勾选，
+  // 用户仍可显式取消以保留数据（例如卸载重装修复）。升级链路不经过本确认页
+  // （安装链自建覆盖安装，不调卸载链；升级语义见 /preserve-user-data 参数链）。
+  app.opt_clear_user_data = uninstall ? true : options.clear_user_data;
   app.page = uninstall ? Page::UninstallConfirm : Page::Home;
   app.card_opacity = 1.0f;
   // Home starts nearly full but not flood-filled (keeps organic wave silhouette).

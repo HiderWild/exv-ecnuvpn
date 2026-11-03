@@ -17,7 +17,9 @@
 //!   `ClearedLive` 分支——信号只在已安装 Live 隧道的数据面死亡时出现，且带世代
 //!   守卫，天然满足"session was Live"门控）。触发门控：材料在（受理时
 //!   `reconnect.enabled` 才捕获）、无在途自愈循环、隧道确死（`is_connected()`
-//!   兜底复核）。
+//!   兜底复核）。**无材料的 worker 死亡**（重连未开启/受理未驻留）走 T5 第五
+//!   情形善后（计划 v6.1 §8.2：`abandon_session(DATA_PLANE_WORKER_FAILED)`——
+//!   lease 释放复验 + trace 终态化 + 验证收口全链走完，不再静默返回）。
 //! - **退避**：[`backoff_delay`]——2s→30s 指数封顶（2,4,8,16,30,30…；不做抖动，
 //!   保持可测）。尝试上限 [`MAX_ATTEMPTS`] = 6（五次重试延迟 2/4/8/16/30 完整
 //!   实现计划退避表到封顶值；计划未定上限，本值为 D11 邻接的实现裁量），
@@ -238,6 +240,11 @@ struct DriverInner {
     epoch: u64,
     /// arm 时捕获的 tokio 句柄（sweeper 线程无异步上下文，用它 spawn 自愈循环）。
     handle: Option<tokio::runtime::Handle>,
+    /// 最近一次解除原因（arm 清空）。`user_stop` / R1 终态已有各自的善后链
+    /// （StopTunnel 的 verify_disconnect_aftermath / terminal 分叉），第五情形
+    /// 不重复驱动；None + session 空 = 从未武装（重连未开启）——worker 死亡的
+    /// 善后无人接管，第五情形负责。
+    disarm_reason: Option<&'static str>,
 }
 
 impl ReconnectDriver {
@@ -261,7 +268,13 @@ impl ReconnectDriver {
             stats,
             aftermath,
             headless,
-            inner: Mutex::new(DriverInner::default()),
+            inner: Mutex::new(DriverInner {
+                // 构造点句柄（生产 `with_real_tunnel` 在 async 上下文内；sweeper 线程
+                // 无上下文——未武装（第五情形善后）也需可 spawn）。arm 时若在异步
+                // 上下文会刷新为当值句柄。
+                handle: tokio::runtime::Handle::try_current().ok(),
+                ..DriverInner::default()
+            }),
         }
     }
 
@@ -275,7 +288,10 @@ impl ReconnectDriver {
         inner.session = Some(session);
         inner.epoch += 1;
         inner.in_flight = false;
-        inner.handle = handle;
+        inner.disarm_reason = None;
+        if handle.is_some() {
+            inner.handle = handle;
+        }
         drop(inner);
         self.log.emit(
             LogLevel::Info,
@@ -287,6 +303,7 @@ impl ReconnectDriver {
     }
 
     /// 解除：用户显式断开/会话换装时清驻留（材料即刻零化；在途循环经代次自行退出）。
+    /// 记录解除原因：`user_stop` / R1 终态的善后链由各自路径驱动，第五情形不重复。
     pub fn disarm(&self, why: &'static str) {
         let had_material = {
             let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -294,6 +311,7 @@ impl ReconnectDriver {
             inner.session = None; // Drop → Zeroizing 零化
             inner.epoch += 1;
             inner.in_flight = false;
+            inner.disarm_reason = Some(why);
             had
         };
         if had_material {
@@ -331,18 +349,37 @@ impl ReconnectDriver {
     /// 门控：材料在 / 无在途循环 / 隧道确死（迟到的旧世代信号由 sweeper 世代守卫
     /// 拦截，此处 `is_connected` 兜底）。通过后 spawn 自愈循环（sweeper 线程无
     /// 异步上下文，用 arm 时捕获的句柄）。
+    ///
+    /// **T5 第五情形（计划 v6.1 §8.2）**：材料不在（重连未开启/受理未驻留）时
+    /// 不再静默返回——worker 死亡已清 live，善后链（lease 释放复验 + trace 终态
+    /// 化 + 验证收口）转既有 [`AftermathDriver::abandon_session`] 主体驱动
+    /// （reason = [`crate::aftermath::reason::DATA_PLANE_WORKER_FAILED`]）。
+    /// 2026-09-28 worker-failed 案：该路径静默导致痕停留 Live、NRPT 残留无人
+    /// 复验，四次重连全撞 conflict。
     pub fn on_tunnel_lost(self: &Arc<Self>) {
         let (epoch, handle) = {
             let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if inner.session.is_none() || inner.in_flight {
+            if inner.in_flight {
                 return;
             }
             if self.runtime.is_connected() {
                 // 竞态兜底：新隧道已立（信号属于已拆除的旧世代）。
                 return;
             }
-            let Some(handle) = inner.handle.clone() else {
+            let handle = inner.handle.clone();
+            if inner.session.is_none() {
+                // T5 第五情形：无自愈材料。`user_stop` / R1 终态解除过的会话已有
+                // 各自善后链（StopTunnel 验证收口 / terminal 分叉），不重复驱动；
+                // 从未武装（重连未开启——2026-09-28 worker-failed 案形态）才由本
+                // 情形接管。持锁仅取事实，锁外分派。
+                let user_or_terminal_disarmed = inner.disarm_reason.is_some();
                 drop(inner);
+                if !user_or_terminal_disarmed {
+                    self.worker_failed_aftermath(handle);
+                }
+                return;
+            }
+            let Some(handle) = handle else {
                 self.log.emit(
                     LogLevel::Warn,
                     "engine",
@@ -370,6 +407,38 @@ impl ReconnectDriver {
             if inner.epoch == epoch {
                 inner.in_flight = false;
             }
+        });
+    }
+
+    /// T5 第五情形善后分派：数据面工作线程死亡、无 R1 材料——接既有善后主体
+    /// （[`AftermathDriver::abandon_session`]：cancel+teardown 复验 lease 释放 →
+    /// 痕 Aftermath → 预检验证 → 干净删痕 → Idle 终态事件）。teardown 幂等：sweeper
+    /// 的 `disconnect_for` 已做过一轮清理（失败残留的 owner 会被本轮重试）。
+    fn worker_failed_aftermath(&self, handle: Option<tokio::runtime::Handle>) {
+        self.log.emit(
+            LogLevel::Warn,
+            "engine",
+            "reconnect.worker_failed_aftermath",
+            "数据面工作线程死亡且无 R1 自愈材料：转 T5 第五情形善后（lease 复验+trace 终态化+验证收口）",
+            &[("reason", reason::TUNNEL_LOST)],
+        );
+        let Some(handle) = handle else {
+            // 无异步句柄（构造与武装均在异步上下文外——异常装配）：善后无法驱动，
+            // 掉线状态已由 C2 事件上报，残留由下次连接预检兜底（如实记录，不伪造）。
+            self.log.emit(
+                LogLevel::Warn,
+                "engine",
+                "reconnect.worker_failed_aftermath.dropped",
+                "无可用异步句柄，第五情形善后无法驱动（残留由下次连接预检兜底）",
+                &[],
+            );
+            return;
+        };
+        let aftermath = Arc::clone(&self.aftermath);
+        handle.spawn(async move {
+            aftermath
+                .abandon_session(crate::aftermath::reason::DATA_PLANE_WORKER_FAILED)
+                .await;
         });
     }
 

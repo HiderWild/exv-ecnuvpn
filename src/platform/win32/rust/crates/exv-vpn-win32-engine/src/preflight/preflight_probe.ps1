@@ -26,7 +26,7 @@ function Get-NrptRuleDtos {
             comment = $comment
         }
     }
-    , @($out)
+    $out
 }
 
 # IPv4 路由投影（Get-NetRoute -> dest/prefix/next_hop/ifindex/metric/protocol）。
@@ -48,7 +48,7 @@ function Get-RouteDtos {
             protocol = [string]$route.Protocol
         }
     }
-    , @($out)
+    $out
 }
 
 # 接口 DNS 投影（Get-DnsClientServerAddress -> ifindex/alias/servers）。
@@ -61,7 +61,7 @@ function Get-DnsInterfaceDtos {
             servers = @($iface.ServerAddresses | ForEach-Object { [string]$_ })
         }
     }
-    , @($out)
+    $out
 }
 
 Write-Protocol '{"ready":true}'

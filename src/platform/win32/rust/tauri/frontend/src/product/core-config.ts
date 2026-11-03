@@ -131,8 +131,10 @@ export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
   { key: "auto_reconnect_max_attempts", label: "自动重连次数", description: "仅在开启自动重连后可设置；0 表示无限重连；达到次数后不再重连。", kind: "number" },
   { key: "auto_reconnect_backoff", label: "自动重连退避", description: "仅在开启自动重连后可设置；开启后掉线按 2s→4s→8s→16s→30s 退避重连，成功连接后重置。", kind: "boolean" },
   // T4 新设置项（计划 §2.8；位置紧邻自动重连主开关）。可见性在 SettingsPage 按
-  // 服务安装态与主开关门控（description = 问号帮助弹层文案，D13 裁定版）。
-  { key: "reconnect_on_oneshot_engine_crash", label: "一次性 engine 崩溃后仍自动重连", description: "当前未安装服务，连接时建立的是一次性 engine，该进程在崩溃后丧失管理员权限并需要重新提权。这会重新触发 UAC 弹窗。", kind: "boolean" },
+  // 服务安装态与主开关门控（description = 问号帮助弹层文案，D13 裁定版 + D15
+  // 灰度声明句：T10-oneshot 拉起底质落地前 keep 在 win32 oneshot 形态不可用——
+  // 一次性形态下 core 崩溃即断开，恢复走重新提权；底质立项后解除）。
+  { key: "reconnect_on_oneshot_engine_crash", label: "一次性 engine 崩溃后仍自动重连", description: "当前未安装服务，连接时建立的是一次性 engine，该进程在崩溃后丧失管理员权限并需要重新提权。这会重新触发 UAC 弹窗。一次性形态下 core 崩溃会断开连接，恢复将重新提权。", kind: "boolean" },
   { key: "reconnect_notify", label: "自动重连时发送通知", description: "自动重连触发时通过系统托盘气泡发送通知；仅在开启自动重连后生效。", kind: "boolean" },
 ];
 

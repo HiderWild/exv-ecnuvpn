@@ -105,6 +105,7 @@ int RunSilentUninstall(const exv::setup::CliOptions &opts) {
   exv::setup::UninstallRequest req;
   req.install_dir = opts.install_dir;
   req.clear_user_data = opts.clear_user_data;
+  req.preserve_user_data = opts.preserve_user_data;
   req.user_profile_root = opts.user_profile_root;
   req.local_app_data_root = opts.local_app_data_root;
   req.roaming_app_data_root = opts.roaming_app_data_root;

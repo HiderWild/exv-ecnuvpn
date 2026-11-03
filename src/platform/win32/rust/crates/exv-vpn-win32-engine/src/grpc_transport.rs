@@ -178,6 +178,15 @@ fn is_first_instance_conflict(err: &std::io::Error) -> bool {
     matches!(err.raw_os_error(), Some(5) | Some(231))
 }
 
+/// D12 首实例互斥冲突错误串的稳定子串（P0-2 语义透传通道）。
+///
+/// `create_first_instance_with_bootstrap_retry` 的诚实失败消息恒含该子串；服务
+/// 形态下 main（`service_startup_exit_code`）据此把 SCM 退出码定为
+/// [`crate::service_batch::service_exit_code::PIPE_MUTEX_HELD`]（=2），host 批量
+/// Verify 快速失败读码归因。**改写该错误文案时必须保持此子串**（或同步改此处）。
+pub const PIPE_FIRST_INSTANCE_CONFLICT_MARKER: &str =
+    "first instance still held by another engine";
+
 /// 建控制面管道**首实例**，含 D12 bootstrap 有界重试（oneshot/service 两形态共用）。
 ///
 /// **过渡属性（T11 一次切换，无兼容期）**：旧版本 engine 持旧名（oneshot =

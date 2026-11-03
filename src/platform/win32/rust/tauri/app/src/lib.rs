@@ -7,6 +7,7 @@ mod autostart;
 pub mod kernel;
 mod lifecycle;
 mod log_export;
+mod quick_start_marker;
 mod toast;
 mod toast_identity;
 mod tray;
@@ -58,6 +59,10 @@ pub fn run() {
                 tracing::warn!(target: "exv.bootstrap",
                     "ui state dir unavailable; ui prefs commands will error");
             }
+
+            // 快速入门「已见」标记（KI-13：与 core config.json 同目录；
+            // 路径推导不失败，无需降级分支——config_dir() 恒有回落值）。
+            app.manage(quick_start_marker::QuickStartMarkerStore::from_product_dir());
 
             lifecycle::setup(app)?;
             window_chrome::install(&app.handle())?;
@@ -113,6 +118,8 @@ pub fn run() {
             lifecycle::app_exit,
             ui_prefs::ui_prefs_get,
             ui_prefs::ui_prefs_set,
+            quick_start_marker::quick_start_seen_get,
+            quick_start_marker::quick_start_seen_mark,
             autostart::autostart_set,
             tray::tray_notify,
             window_chrome::window_chrome_set_mode,

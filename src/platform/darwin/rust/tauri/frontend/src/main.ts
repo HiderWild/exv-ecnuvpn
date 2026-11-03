@@ -8,7 +8,7 @@ import {
   createBrowserSafeAppearanceStorage,
 } from "./product/appearance";
 import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway } from "./product/core-config";
-import { computeLifecycleEffects, computeSelfHealNotify, shouldAutoConnectOnLaunch } from "./product/lifecycle-effects";
+import { computeLifecycleEffects, computeReconnectNotifyEffect, computeSelfHealNotify, shouldAutoConnectOnLaunch } from "./product/lifecycle-effects";
 import { LOGS_GATEWAY_KEY } from "./product/logs";
 import { createMockCoreConfigGateway, createMockLogsGateway } from "./product/mock-page-data";
 import { createMockRuntime, selectRuntimeSource, selectPreviewStatus } from "./product/mock-runtime";
@@ -76,6 +76,8 @@ let previousStatus: ProductStatus | null = null;
 // 2026-09-05 host 自愈（计划 §4.5）：selfHeal stage 去重游标（与 previousStatus 同模式；
 // null = 首快照只记录基线）。
 let prevSelfHealStage: string | null = null;
+// T8（v6 §2.8）：自动重连气泡游标——reconnect.active 上升沿（每周期一条）。
+let prevReconnectActive = false;
 watch(
   runtime.state,
   (productState) => {
@@ -93,6 +95,31 @@ watch(
       }
     }
     prevSelfHealStage = nextSelfHealStage;
+
+    // T8：重连上升沿气泡——与连接/断开气泡同走前台异步探测（E1 整改：不再
+    // 硬编码前台抑制失效）；等待期间状态再变由后续回调接管。游标仅在实际
+    // 分发后推进（与 previousStatus 同模式，避免探测间隙吞边沿）。
+    const nextReconnectActive = productState.reconnect.active;
+    if (!prevReconnectActive && nextReconnectActive) {
+      void (async () => {
+        const foreground = await isWindowForeground();
+        if (!nextReconnectActive) return;
+        for (const effect of computeReconnectNotifyEffect(
+          prevReconnectActive,
+          nextReconnectActive,
+          previousStatus !== null,
+          prefs,
+          { foreground },
+        )) {
+          if (effect.kind === "tray-notify") {
+            void invokeTrayNotify(effect.title, effect.body);
+          }
+        }
+        prevReconnectActive = nextReconnectActive;
+      })();
+    } else {
+      prevReconnectActive = nextReconnectActive;
+    }
 
     // 前台状态异步探测后分发效果；等待期间状态再次变化则由后续回调接管（丢弃本次，避免错序）。
     void (async () => {

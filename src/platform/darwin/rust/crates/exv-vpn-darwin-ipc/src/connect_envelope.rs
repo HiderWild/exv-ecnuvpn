@@ -209,6 +209,12 @@ impl DarwinEngineConnectV1 {
     }
 
     #[must_use]
+    /// T2 采纳判定：只读用户名（不消耗 envelope、不触发清零——采纳匹配是非
+    /// 秘密比较，密码永不参与）。
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
     pub fn server(&self) -> &str {
         &self.server
     }

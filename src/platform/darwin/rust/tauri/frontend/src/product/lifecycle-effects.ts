@@ -27,6 +27,26 @@ export const CONNECTED_TITLE = "EXV 已连接";
 export const CONNECTED_BODY = "校园网连接已建立。";
 export const DISCONNECTED_TITLE = "EXV 已断开";
 export const DISCONNECTED_BODY = "校园网连接已断开。";
+export const RECONNECTING_TITLE = "EXV 正在重连";
+export const RECONNECTING_BODY = "连接中断，正在自动重连。";
+
+/**
+ * T8（v6 §2.8）：自动重连气泡——`reconnect.active` 上升沿触发一次（每轮重连
+ * 周期一条；引擎侧 R1 与 core 侧 R2 都经快照的 reconnect 伴生字段到达）。
+ * 仅在最近曾连接的会话内感知（首快照/未连接过不弹）。
+ */
+export function computeReconnectNotifyEffect(
+  prevActive: boolean,
+  nextActive: boolean,
+  hadConnectedSession: boolean,
+  prefs: UiPreferences,
+  context: NotifyContext = { foreground: false },
+): LifecycleEffect[] {
+  if (!prevActive && nextActive && hadConnectedSession && prefs.reconnect_notify && !notifyBlocked(prefs, context)) {
+    return [{ kind: "tray-notify", title: RECONNECTING_TITLE, body: RECONNECTING_BODY }];
+  }
+  return [];
+}
 
 /** host 自愈失败的托盘气泡（2026-09-05 计划 §4.5 冻结；文案与 presenter 文案表一致）。 */
 export const SELF_HEAL_FAILED_TITLE = "EXV";

@@ -49,10 +49,33 @@ use tokio_stream::{Empty, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status, transport::Server};
 use zeroize::Zeroize;
 
+use crate::core_exit_policy::CoreExitPolicy;
 use crate::protocol::EstablishedSession;
 
 /// 数据面存活标记：Some = 管线处于保持态，None = 已 teardown/无连接。
 struct HeldTunnel;
+
+/// T4（D9）：引擎侧 R1 重拨材料——内存驻留、Zeroizing 持有、随善后清位。
+/// 协议无关位（未来 aTrust 会话缓存走同一驻留位，不绑死 Cisco 凭据形状）。
+#[derive(Clone)]
+#[allow(dead_code, reason = "mtu_override 为材料完整性保留：管线参数走 plan_mtu，信封线程化（挂账）后由材料供值")]
+pub(crate) struct ReconnectMaterials {
+    pub(crate) server: String,
+    pub(crate) username: String,
+    pub(crate) password: zeroize::Zeroizing<String>,
+    pub(crate) user_agent: String,
+    pub(crate) routes: Vec<String>,
+    pub(crate) mtu_override: Option<u16>,
+}
+
+/// T2 采纳判定的管线身份：与凭据无关的非秘密比较面（同服务器+同用户名 =
+/// 同一连接配置的接管；密码永不参与比较——新密码属"新认证材料"，走拒绝
+/// 分支由 core 显式 Stop 后重建）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PipelineIdentity {
+    pub(crate) server: String,
+    pub(crate) username: String,
+}
 
 /// Engine 唯一持有的跨会话平台资源账本。
 ///
@@ -135,14 +158,41 @@ pub(crate) struct EngineRuntime {
     shutdown: Arc<AtomicBool>,
     /// W2 心跳超时的触发槽：唯一触发方是 [`spawn_heartbeat_watchdog`] 的常驻
     /// 看门狗（心跳监视超 15s）；触发后与信号/EOF 同入 W1 统一收敛。
-    heartbeat_timeout: TriggerSlot,
+    /// T1 复审整改：Arc 包裹可整体轮换——`Notify` permit 无法清空，跨会话携带
+    /// 的 runtime 必须在会话入口换新槽，否则上一会话空闲期看门狗落存的 permit
+    /// 会让下一会话 select 瞬时假触发。
+    heartbeat_timeout: std::sync::RwLock<Arc<TriggerSlot>>,
     /// W2.5 service 形态的显式停止触发槽（`Shutdown` RPC 唯一生产触发方；
     /// service 会话循环消费：拆隧道 → exit(0)，`KeepAlive={SuccessfulExit:false}`
     /// 下不复活）。会话形态为 None——Shutdown 对其恒 NOT_APPLICABLE。
-    explicit_stop: Option<TriggerSlot>,
+    /// T1 复审整改：同 heartbeat_timeout 的轮换语义（EOF/Shutdown 竞态残留）。
+    explicit_stop: Option<std::sync::RwLock<Arc<TriggerSlot>>>,
     /// W2 心跳监视：最近一次 KeepAlive 到达时刻；零点=认证握手完成时刻
     /// （[`HeartbeatWatch::arm`] 武装），未武装不参与看门狗判定。
     heartbeat: Mutex<HeartbeatWatch>,
+    /// T1：core 会话终结策略位（生产默认 [`CoreExitPolicy::Teardown`]；
+    /// keep 值由后续任务的连接信封/trace 接线注入）。
+    core_exit_policy: std::sync::RwLock<CoreExitPolicy>,
+    /// T2：管线身份（Connected 时刻记录；采纳判定与收敛清除）。
+    pipeline_identity: Mutex<Option<PipelineIdentity>>,
+    /// T2：当前数据面 ifindex 与 Connected 纪元毫秒（采纳事件重放 Connected
+    /// 时须沿用真实值，不为采纳伪造新会话起点）。
+    live_if_index: std::sync::atomic::AtomicU32,
+    connected_at_ms: std::sync::atomic::AtomicI64,
+    /// T2：管线状态事件的当前归属 operation_id（采纳时切换——管线后续事件
+    /// （如 SessionLost）必须能被新 core 的投影按其 operation_id 接收，
+    /// 否则采纳方对后续失联失明）。
+    current_operation_id: Mutex<Vec<u8>>,
+    /// T6：owner uid（trace 载体与预检域的所有权判定；默认当前 euid）。
+    owner_uid: u32,
+    /// T6：连接痕迹句柄（engine 单写者；base 不可用时 None——trace 失败不阻塞
+    /// 连接主路径）。
+    trace: Option<Arc<crate::trace::TraceStore>>,
+    /// T4（D9）：R1 重拨材料（管线存活期驻留；善后清位。Debug 永不打印）。
+    reconnect_materials: Mutex<Option<ReconnectMaterials>>,
+    /// T6（复审 C1）：本会话预检门——后台预检的 JoinHandle；ApplyTunnel 有界
+    /// 等待其完成（紧急断开不受门约束——serve 先行）。
+    preflight_gate: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl EngineRuntime {
@@ -155,7 +205,22 @@ impl EngineRuntime {
         Self::with_explicit_stop(Some(TriggerSlot::default()))
     }
 
+    /// T6：带 owner 与形态的构造（service 会话循环用——trace 载体与预检域按
+    /// owner 归属；new/new_service 保持默认=当前 euid/空形态）。
+    pub(crate) fn new_for_owner(owner_uid: u32, mode: &'static str) -> Self {
+        Self::with_owner_and_explicit_stop(owner_uid, mode, Some(TriggerSlot::default()))
+    }
+
     fn with_explicit_stop(explicit_stop: Option<TriggerSlot>) -> Self {
+        // SAFETY: geteuid 只读取当前进程凭证。
+        Self::with_owner_and_explicit_stop(unsafe { libc::geteuid() }, "", explicit_stop)
+    }
+
+    fn with_owner_and_explicit_stop(
+        owner_uid: u32,
+        mode: &'static str,
+        explicit_stop: Option<TriggerSlot>,
+    ) -> Self {
         let (status_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             attempt: Mutex::new(None),
@@ -165,9 +230,24 @@ impl EngineRuntime {
             stats: Arc::new(StatsPublisher::new()),
             logs: Arc::new(LogSink::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
-            heartbeat_timeout: TriggerSlot::default(),
-            explicit_stop,
+            heartbeat_timeout: std::sync::RwLock::new(Arc::new(TriggerSlot::default())),
+            explicit_stop: explicit_stop.map(|slot| std::sync::RwLock::new(Arc::new(slot))),
             heartbeat: Mutex::new(HeartbeatWatch::default()),
+            core_exit_policy: std::sync::RwLock::new(CoreExitPolicy::default()),
+            pipeline_identity: Mutex::new(None),
+            live_if_index: std::sync::atomic::AtomicU32::new(0),
+            connected_at_ms: std::sync::atomic::AtomicI64::new(0),
+            current_operation_id: Mutex::new(Vec::new()),
+            reconnect_materials: Mutex::new(None),
+            preflight_gate: tokio::sync::Mutex::new(None),
+            owner_uid,
+            trace: crate::trace::TraceStore::open(
+                std::path::Path::new(crate::trace::TRACE_ROOT),
+                owner_uid,
+                mode,
+            )
+            .ok()
+            .map(Arc::new),
         }
     }
 
@@ -176,12 +256,33 @@ impl EngineRuntime {
     /// 触发后与 SIGTERM/SIGINT、Core EOF 同入统一退出收敛，不新增第二条
     /// teardown 路径。
     fn request_heartbeat_timeout(&self) {
-        self.heartbeat_timeout.request();
+        if let Ok(slot) = self.heartbeat_timeout.read() {
+            slot.request();
+        }
     }
 
     /// 等待 W2 心跳超时触发槽（先触发后等待也能完成：notify_one 留有 permit）。
+    /// 等待方克隆 Arc 后 await，不持有读锁跨 await。
     pub(crate) async fn wait_heartbeat_timeout(&self) {
-        self.heartbeat_timeout.wait().await;
+        let slot = match self.heartbeat_timeout.read() {
+            Ok(guard) => Arc::clone(&guard),
+            Err(_) => return,
+        };
+        slot.wait().await;
+    }
+
+    /// T1 复审整改：会话入口轮换本会话生命周期触发槽（心跳超时/显式停止）。
+    /// `Notify` 的 permit 无法清空，`requested` 电平无复位路径——唯一可靠的
+    /// 跨会话零残留手段是整体换新槽（旧槽随旧等待方消亡）。
+    pub(crate) fn rotate_session_trigger_slots(&self) {
+        if let Ok(mut slot) = self.heartbeat_timeout.write() {
+            *slot = Arc::new(TriggerSlot::default());
+        }
+        if let Some(explicit_stop) = &self.explicit_stop
+            && let Ok(mut slot) = explicit_stop.write()
+        {
+            *slot = Arc::new(TriggerSlot::default());
+        }
     }
 
     /// W2.5：武装本会话心跳（uid 门准入完成=心跳零点；service 会话循环入口调用）。
@@ -194,9 +295,143 @@ impl EngineRuntime {
         &self.logs
     }
 
+    /// T1：当前 core 会话终结策略（生产默认 Teardown）。
+    pub(crate) fn core_exit_policy(&self) -> CoreExitPolicy {
+        self.core_exit_policy
+            .read()
+            .map_or(CoreExitPolicy::Teardown, |guard| *guard)
+    }
+
+    /// T1：注入 core 会话终结策略（生产调用方由后续任务接线；测试注入 KeepTunnel
+    /// 驱动 keep 分支）。
+    pub(crate) fn set_core_exit_policy(&self, policy: CoreExitPolicy) {
+        if let Ok(mut guard) = self.core_exit_policy.write() {
+            *guard = policy;
+        }
+    }
+
+    /// T6：owner uid（预检域所有权）。
+    pub(crate) fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+
+    /// T6：trace 句柄克隆（无则 None——调用方 best-effort）。
+    pub(crate) fn trace_handle(&self) -> Option<Arc<crate::trace::TraceStore>> {
+        self.trace.clone()
+    }
+
+    /// T4（D9）：驻留 R1 材料（apply 受理时捕获；管线存活期可取）。
+    pub(crate) fn store_reconnect_materials(&self, materials: ReconnectMaterials) {
+        if let Ok(mut slot) = self.reconnect_materials.lock() {
+            *slot = Some(materials);
+        }
+    }
+
+    /// T6（C1）：登记本会话预检门（service 会话循环在 accept 后调用）。
+    pub(crate) fn set_preflight_gate(&self, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut gate) = self.preflight_gate.try_lock() {
+            *gate = Some(handle);
+        }
+    }
+
+    /// T6（C1）：等待预检完成（ApplyTunnel 侧调用；无门=无预检，立即通过）。
+    pub(crate) async fn await_preflight(&self) {
+        if let Ok(mut gate) = self.preflight_gate.try_lock() {
+            if let Some(handle) = gate.take() {
+                let _ = handle.await;
+            }
+        }
+    }
+
+    /// T4（D9）：取 R1 材料克隆（无驻留=None——不重拨）。
+    pub(crate) fn reconnect_materials(&self) -> Option<ReconnectMaterials> {
+        self.reconnect_materials.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// T2：管线是否处于持有态（live 标记在场）。
+    pub(crate) fn pipeline_is_held(&self) -> bool {
+        self.live.lock().map_or(false, |slot| slot.is_some())
+    }
+
+    /// T2：读取管线身份克隆（未持有时 None）。
+    pub(crate) fn pipeline_identity(&self) -> Option<PipelineIdentity> {
+        self.pipeline_identity.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// T2：Connected 时刻的管线事实记录（身份/ifindex/纪元/op 归属/keep 策略）。
+    /// 由 run_tunnel_pipeline 在数据面真实 Connected 后调用——生产侧 keep 策略
+    /// 的唯一注入点（连接成功即 keep；用户级设置项留 T8 接线）。
+    pub(crate) fn record_pipeline_connected(
+        &self,
+        identity: PipelineIdentity,
+        if_index: u32,
+        connected_at_ms: i64,
+        operation_id: Vec<u8>,
+    ) {
+        if let Ok(mut slot) = self.pipeline_identity.lock() {
+            *slot = Some(identity);
+        }
+        self.live_if_index
+            .store(if_index, std::sync::atomic::Ordering::Relaxed);
+        self.connected_at_ms
+            .store(connected_at_ms, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut slot) = self.current_operation_id.lock() {
+            *slot = operation_id;
+        }
+        // T2（复审必改 3）：keep 策略只对 service 形态注入（explicit_stop 槽在位
+        // =service 形态的既有判别面）。oneshot 形态无采纳端点，EOF 必须维持
+        // "收敛+退出"红测行为；oneshot keep 属端点统一（T7）后的灰度项。
+        if self.explicit_stop.is_some() {
+            self.set_core_exit_policy(CoreExitPolicy::KeepTunnel);
+        }
+    }
+
+    /// T2：采纳时切换管线事件归属（身份/管线事实不变）。
+    pub(crate) fn adopt_operation(&self, operation_id: Vec<u8>) {
+        if let Ok(mut slot) = self.current_operation_id.lock() {
+            *slot = operation_id;
+        }
+    }
+
+    /// T2：当前事件归属的 operation_id 克隆（空 = 无归属）。
+    pub(crate) fn current_operation_id(&self) -> Vec<u8> {
+        self.current_operation_id
+            .lock()
+            .map_or_else(|_| Vec::new(), |slot| slot.clone())
+    }
+
+    /// T2：采纳事件重放所需的管线事实（ifindex/纪元）。
+    pub(crate) fn connected_facts(&self) -> (u32, i64) {
+        (
+            self.live_if_index.load(std::sync::atomic::Ordering::Relaxed),
+            self.connected_at_ms.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// T2：管线收敛后的身份清位、事件归属清空与策略复位（teardown 后的会话
+    /// 回到默认策略；收敛空场景调用无害）。归属必须一并清空——复用 runtime 的
+    /// 下一代管线在 record 前发布事件时，读到上一代归属会让新 core 过滤掉
+    /// 全部阶段事件（复审必改 4）。
+    pub(crate) fn clear_pipeline_facts(&self) {
+        if let Ok(mut slot) = self.pipeline_identity.lock() {
+            *slot = None;
+        }
+        self.live_if_index.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.connected_at_ms.store(0, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut slot) = self.current_operation_id.lock() {
+            *slot = Vec::new();
+        }
+        if let Ok(mut slot) = self.reconnect_materials.lock() {
+            *slot = None;
+        }
+        self.set_core_exit_policy(CoreExitPolicy::Teardown);
+    }
+
     /// W2.5 显式停止请求（`Shutdown` RPC，service 形态实装；会话形态无槽不动作）。
     pub(crate) fn request_explicit_stop(&self) {
-        if let Some(slot) = &self.explicit_stop {
+        if let Some(explicit_stop) = &self.explicit_stop
+            && let Ok(slot) = explicit_stop.read()
+        {
             slot.request();
         }
     }
@@ -209,15 +444,21 @@ impl EngineRuntime {
     pub(crate) fn explicit_stop_requested(&self) -> bool {
         self.explicit_stop
             .as_ref()
-            .is_some_and(TriggerSlot::is_requested)
+            .and_then(|slot| slot.read().ok())
+            .is_some_and(|slot| slot.is_requested())
     }
 
     /// 等待显式停止触发槽；会话形态（无槽）恒不完成。
     pub(crate) async fn wait_explicit_stop(&self) {
-        match &self.explicit_stop {
-            Some(slot) => slot.wait().await,
-            None => std::future::pending::<()>().await,
-        }
+        let Some(explicit_stop) = &self.explicit_stop else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        let slot = match explicit_stop.read() {
+            Ok(guard) => Arc::clone(&guard),
+            Err(_) => return,
+        };
+        slot.wait().await;
     }
 
     /// 登录前读取本次物理出口事实后，确保 VPN 服务端的精确 `/32` 专用路由走当前网关。
@@ -388,7 +629,26 @@ impl EngineRuntime {
             }
             tokio::time::sleep(TERMINATION_TEARDOWN_POLL_INTERVAL).await;
         }
-        self.complete_resource_cleanup()
+        let outcome = self.complete_resource_cleanup();
+        // T2（复审必改 5）：显式 Stop 的成功路径同样清管线事实与策略——否则
+        // KeepTunnel 残留让 Stop 后的 EOF 继续走 keep 分支携带空 runtime。
+        if outcome.is_ok() {
+            // T6：显式停止=善后已验证（清理链走完）→ 终态入 trace 后删除。
+            if let Some(trace) = self.trace_handle()
+                && let Some(identity) = self.pipeline_identity()
+            {
+                trace.record(
+                    crate::trace::TraceState::Terminal,
+                    &identity.server,
+                    &identity.username,
+                    Some("user_stop"),
+                    true,
+                );
+                trace.delete_after_verified_teardown();
+            }
+            self.clear_pipeline_facts();
+        }
+        outcome
     }
 }
 
@@ -458,7 +718,7 @@ impl TriggerSlot {
 
 /// 统一退出收敛的触发源（仅诊断标注；三类触发共用同一收敛序列）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TerminationTrigger {
+pub(crate) enum TerminationTrigger {
     /// SIGTERM/SIGINT（launchd/用户停止；由信号处理器置标志，主循环轮询）。
     PosixSignals,
     /// Core 关闭已认证连接（EOF/失联，经 handoff_with_close_signal）。
@@ -467,7 +727,63 @@ enum TerminationTrigger {
     HeartbeatTimeout,
 }
 
+/// T1：该终止触发是否进入"保持持有"分支（不收敛 teardown）。
+///
+/// 只有 core 会话终结类触发（EOF/心跳超时）受策略管辖；显式信号始终收敛
+/// （显式停止是用户/launchd 意图，不受 keep 策略豁免）。
+pub(crate) fn core_exit_keeps_tunnel(
+    trigger: TerminationTrigger,
+    policy: CoreExitPolicy,
+) -> bool {
+    matches!(
+        trigger,
+        TerminationTrigger::CoreClosed | TerminationTrigger::HeartbeatTimeout
+    ) && policy == CoreExitPolicy::KeepTunnel
+}
+
 const OBSERVE_ONLY_MESSAGE: &str = "DARWIN_ENGINE_OBSERVE_ONLY";
+/// T2 采纳裁决的稳定码：身份不匹配（新认证材料）→ 由 core 显式 Stop 后重建。
+const ADOPT_MISMATCH_MESSAGE: &str = "DARWIN_ENGINE_ADOPT_MISMATCH";
+/// T4：引擎侧 R1 预算（v6 退避 2s→30s 封顶的 darwin 固定档；信封线程化挂账）。
+const R1_MAX_ATTEMPTS: u32 = 5;
+
+fn r1_backoff_delay(attempt: u32) -> Duration {
+    let base_secs: u64 = [2, 4, 8, 16, 30]
+        .into_iter()
+        .nth(attempt.saturating_sub(1).min(4) as usize)
+        .unwrap_or(30);
+    Duration::from_secs(base_secs)
+}
+
+/// T4（复审必改 D3）：R1 跟随 owner 的 `auto_reconnect` 主开关（与 core 侧 R2
+/// 同一开关、同一语义——v6 D11）。引擎（euid=0）直读 owner 家目录的
+/// `~/.exv/config.json`：免去信封 v2 变更（dev core×安装引擎混合版本安全），
+/// 且与用户设置实时一致（每轮触发时读）。读取/解析失败一律视为关（fail-safe
+/// =基线行为：掉线即终态）；只读布尔字段，不触碰密文。
+fn owner_auto_reconnect_enabled(owner_uid: u32) -> bool {
+    // SAFETY: getpwuid 只读取系统用户数据库；返回结构在拷贝字段后立即释放。
+    let home = unsafe {
+        let entry = libc::getpwuid(owner_uid);
+        if entry.is_null() {
+            return false;
+        }
+        let dir = (*entry).pw_dir;
+        if dir.is_null() {
+            return false;
+        }
+        std::ffi::CStr::from_ptr(dir).to_string_lossy().into_owned()
+    };
+    let Ok(payload) = std::fs::read_to_string(std::path::Path::new(&home).join(".exv/config.json"))
+    else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|config| config.get("auto_reconnect").and_then(|value| value.as_bool()))
+        .unwrap_or(false)
+}
+/// T2：管线持有但身份记录缺失（收敛竞态窗口）→ 保守拒绝。
+const ADOPT_IDENTITY_MISSING_MESSAGE: &str = "DARWIN_ENGINE_ADOPT_IDENTITY_MISSING";
 const APPLY_INVALID_MESSAGE: &str = "DARWIN_ENGINE_APPLY_INVALID";
 /// 当前 Unix epoch 毫秒（诊断与会话起点字段；取时失败返回 0）。
 fn now_epoch_ms() -> i64 {
@@ -698,6 +1014,20 @@ async fn run_observe_bootstrap(
             () = poll_termination_signals() => TerminationTrigger::PosixSignals,
             () = engine_runtime.wait_heartbeat_timeout() => TerminationTrigger::HeartbeatTimeout,
         };
+        // T1 keep 分支：core 会话终结（EOF/心跳超时）且策略为 KeepTunnel 时，先不
+        // 收敛 teardown——检测保留（日志记录 EOF/超时事实），管线持有等待；本形态
+        // 无第二会话端点（采纳接线在端点统一任务），显式信号是唯一既有终结出口，
+        // 到来后与既有路径共享收敛与收尾（sender/server 的 drop 顺序不变）。
+        if core_exit_keeps_tunnel(trigger, engine_runtime.core_exit_policy()) {
+            engine_runtime.logs.publish(
+                "info",
+                "lifecycle",
+                "CORE_EXIT_KEEP",
+                "core session ended; tunnel held per on_core_exit policy",
+                &[("trigger", format!("{trigger:?}"))],
+            );
+            poll_termination_signals().await;
+        }
         let converged = converge_and_await_teardown(&engine_runtime).await;
         if !converged {
             // 有界超时：仍走既有退出路径（cleanup + 退出 record），但落诊断。
@@ -856,7 +1186,27 @@ async fn heartbeat_watchdog_loop(
 /// 返回 true = teardown 确认完成（或本就无管线任务）；false = 有界超时（调用方
 /// 仍继续既有退出路径，但应记录诊断）。
 pub(crate) async fn converge_and_await_teardown(runtime: &EngineRuntime) -> bool {
-    converge_and_await_teardown_with(runtime, &TERMINATION_TEARDOWN_DONE).await
+    let converged = converge_and_await_teardown_with(runtime, &TERMINATION_TEARDOWN_DONE).await;
+    // T6：终态入 trace——善后已验证才删 trace（v6 删除权）；未验证保留，作为
+    // 下次连接的预检触发信号（双亡格）。
+    if let Some(trace) = runtime.trace_handle()
+        && let Some(identity) = runtime.pipeline_identity()
+    {
+        trace.record(
+            crate::trace::TraceState::Terminal,
+            &identity.server,
+            &identity.username,
+            Some(if converged { "teardown_verified" } else { "teardown_unconfirmed" }),
+            converged,
+        );
+        if converged {
+            trace.delete_after_verified_teardown();
+        }
+    }
+    // T2：收敛即管线事实清位（身份/采纳面随管线消亡；teardown 后的会话回默认
+    // 策略）。收敛超时同样清——身份残留会让下一 Apply 误入采纳分叉。
+    runtime.clear_pipeline_facts();
+    converged
 }
 
 /// [`converge_and_await_teardown`] 的可注入变体：teardown 完成标志由调用方提供，
@@ -992,6 +1342,67 @@ impl HelperControl for EngineControlService {
         let envelope = DarwinEngineConnectV1::decode(request.secret_payload)
             .map_err(|_| Status::invalid_argument(APPLY_INVALID_MESSAGE))?;
 
+        // T2 采纳分叉：管线持有中（T1 keep 携带或同会话重建）时的 ApplyTunnel
+        // 不再是"新尝试"而是"接管裁决"——同服务器+同用户名（跨平台指南 §6.2：
+        // 无新认证材料的明确接管保留旧隧道）→ 采纳：不重新登录/协商，切换事件
+        // 归属并按本次 operation_id 重放 Connected；新认证材料（服务器或用户名
+        // 不同）→ typed 拒绝，由 core 显式 Stop 后重建（引擎不做隐式拆旧建新）。
+        if self.runtime.pipeline_is_held() {
+            let identity = self
+                .runtime
+                .pipeline_identity()
+                .ok_or_else(|| Status::failed_precondition(ADOPT_IDENTITY_MISSING_MESSAGE))?;
+            let matches = identity.server == envelope.server()
+                && identity.username == envelope.username();
+            if !matches {
+                self.runtime.logs.publish(
+                    "info",
+                    "engine",
+                    "ADOPT_MISMATCH",
+                    "held pipeline identity differs from the new apply; caller must Stop then re-apply",
+                    &[],
+                );
+                return Err(Status::failed_precondition(ADOPT_MISMATCH_MESSAGE));
+            }
+            self.runtime.adopt_operation(operation_id.clone());
+            if let Some(trace) = self.runtime.trace_handle() {
+                trace.append_event("info", "ADOPTED", "new core session adopted the held pipeline");
+                trace.record(
+                    crate::trace::TraceState::Connected,
+                    envelope.server(),
+                    envelope.username(),
+                    None,
+                    false,
+                );
+            }
+            let (if_index, connected_at_ms) = self.runtime.connected_facts();
+            self.runtime.logs.publish(
+                "info",
+                "engine",
+                "ADOPTED",
+                "new core session adopted the held pipeline",
+                &[],
+            );
+            let _ = self.runtime.status_tx.send(wire::ConnectStatusEvent {
+                aftermath_verified: false,
+                reconnect_state: None,
+                own_tunnel_if_index: if_index,
+                session_established_at_ms: connected_at_ms,
+                operation_id,
+                connect_phase: wire::ConnectPhase::StartingDataPlane as i32,
+                coarse_phase: wire::StatsPhase::Connected as i32,
+                error: None,
+            });
+            return Ok(Response::new(wire::ApplyTunnelReply {
+                result: Some(wire::apply_tunnel_reply::Result::Pending(
+                    wire::ApplyAccepted {
+                        operation_id: self.runtime.current_operation_id(),
+                        authority_fence: Some(wire::AuthorityFence::default()),
+                    },
+                )),
+            }));
+        }
+
         {
             let mut attempt_slot = self
                 .runtime
@@ -1009,13 +1420,43 @@ impl HelperControl for EngineControlService {
                 cancel: Arc::new(AtomicBool::new(false)),
             });
         }
+        // T6（C1）：全新建立前有界等待后台预检完成（连接不急；Stop 不受门约束）。
+        self.runtime.await_preflight().await;
+        // T6：受理即留痕（双亡格兜底信号；善后验证后由收敛路径删除）。
+        if let Some(trace) = self.runtime.trace_handle() {
+            trace.record(
+                crate::trace::TraceState::Connecting,
+                envelope.server(),
+                envelope.username(),
+                None,
+                false,
+            );
+        }
 
         let runtime = Arc::clone(&self.runtime);
         let task_operation_id = operation_id.clone();
         let server = envelope.server().to_owned();
         let user_agent = envelope.user_agent().to_owned();
-        let campus_routes = envelope.routes().to_vec();
+        let mut campus_routes = envelope.routes().to_vec();
+        // T2（复审必改 1）：身份必须在 take_credentials 之后、zeroize **之前**
+        // 捕获——zeroize 会把 String 清零并置空，之后的 clone 恒为空串，采纳
+        // 匹配将永久失败。身份只含非秘密面（服务器+用户名）。
+        let mut pipeline_identity = PipelineIdentity {
+            server: server.clone(),
+            username: envelope.username().to_owned(),
+        };
         let (username, password) = envelope.take_credentials();
+        // T4（D9）：R1 材料驻留——副本在原始值清零前捕获；管线存活期供引擎侧
+        // 重拨，善后清位时随 Zeroizing 清零（不跨连接生命周期留存）。
+        self.runtime.store_reconnect_materials(ReconnectMaterials {
+            server: server.clone(),
+            username: username.clone(),
+            password: zeroize::Zeroizing::new(password.clone()),
+            user_agent: user_agent.clone(),
+            routes: campus_routes.clone(),
+            mtu_override: u16::try_from(plan.mtu).ok().filter(|mtu| *mtu > 0),
+        });
+
         let plan_mtu = plan.mtu;
         tokio::spawn(async move {
             let cancel = runtime
@@ -1077,34 +1518,188 @@ impl HelperControl for EngineControlService {
                         *slot = None;
                     }
                 }
-                Ok(established) => {
+                Ok(initial_established) => {
                     // MAC-UTUN-06 / MAC-NET-07 / MAC-DATA-08：协商成功后建立完整平台
                     // 数据面；失败沿逆序 teardown，成功后保持并按需 teardown。
-                    let runtime_for_pipeline = Arc::clone(&runtime);
-                    let operation_for_pipeline = task_operation_id.clone();
-                    let outcome = tokio::spawn(async move {
-                        run_tunnel_pipeline(
-                            &runtime_for_pipeline,
-                            established,
-                            operation_for_pipeline,
-                            plan_mtu,
-                            campus_routes,
-                            &cancel,
-                        )
+                    // T4（R1=engine，v6 §2.7）：SessionLost 不再直接终态——按驻留
+                    // 材料（D9）退避重拨（有界次数），同一 operation_id 保持 core
+                    // 投影连续；预算内不可恢复或材料缺失才终态。
+                    let mut r1_attempt = 0_u32;
+                    let mut established_slot = Some(initial_established);
+                    let mut needs_establish = false;
+                    let outcome = loop {
+                        if needs_establish {
+                            let Some(materials) = runtime.reconnect_materials() else {
+                                break TunnelOutcome::SessionLost;
+                            };
+                            match crate::protocol::establish_observed(
+                                &materials.server,
+                                materials.username.as_bytes(),
+                                materials.password.as_bytes(),
+                                &materials.user_agent,
+                                is_cancelled,
+                                &|phase| {
+                                    let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
+                                        aftermath_verified: false,
+                                        reconnect_state: None,
+                                        own_tunnel_if_index: 0,
+                                        session_established_at_ms: 0,
+                                        operation_id: task_operation_id.clone(),
+                                        connect_phase: phase as i32,
+                                        coarse_phase: wire::StatsPhase::Connecting as i32,
+                                        error: None,
+                                    });
+                                },
+                                Some((&runtime.logs, &task_operation_id)),
+                                |egress, server| {
+                                    runtime.ensure_control_route(egress, server).map(|_| ())
+                                },
+                            )
+                            .await
+                            {
+                                Ok(next) if !is_cancelled() => {
+                                    pipeline_identity = PipelineIdentity {
+                                        server: materials.server.clone(),
+                                        username: materials.username.clone(),
+                                    };
+                                    campus_routes = materials.routes.clone();
+                                    established_slot = Some(next);
+                                }
+                                Ok(_) => break TunnelOutcome::Cancelled,
+                                Err(error) => {
+                                    runtime.logs.publish(
+                                        "error",
+                                        "protocol",
+                                        "R1_RECONNECT_FAILED",
+                                        format!("engine-side reconnect establish failed: {error}"),
+                                        &[("attempt", r1_attempt.to_string())],
+                                    );
+                                    if r1_attempt >= R1_MAX_ATTEMPTS {
+                                        break TunnelOutcome::Failed("R1", 0, 0);
+                                    }
+                                    // 材料仍在但未建立：退避后重试建立（不落回
+                                    // spawn——established 已被上一轮移动）。预算按
+                                    // 调度计数（D1）：establish 失败同样消耗。
+                                    r1_attempt += 1;
+                                    if r1_attempt > R1_MAX_ATTEMPTS {
+                                        break TunnelOutcome::Failed("R1", 0, 0);
+                                    }
+                                    // 重拨期间保持 attempt 槽占用（D2：Stop 取消通道）。
+                                    {
+                                        let mut slot = runtime
+                                            .attempt
+                                            .lock()
+                                            .expect("attempt slot lock");
+                                        if slot.is_none() {
+                                            *slot = Some(ActiveAttempt {
+                                                cancel: Arc::clone(&cancel),
+                                            });
+                                        }
+                                    }
+                                    tokio::time::sleep(r1_backoff_delay(r1_attempt)).await;
+                                    if is_cancelled() {
+                                        break TunnelOutcome::Cancelled;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        let runtime_for_pipeline = Arc::clone(&runtime);
+                        let operation_for_pipeline = task_operation_id.clone();
+                        let identity_for_pipeline = pipeline_identity.clone();
+                        let routes_for_pipeline = campus_routes.clone();
+                        let cancel_for_pipeline = Arc::clone(&cancel);
+                        let Some(established) = established_slot.take() else {
+                            // 上一轮管线已消费会话且未重建（理论不可达——所有
+                            // 到达路径都先经 establish 重填）。
+                            break TunnelOutcome::Failed("R1", 0, 0);
+                        };
+                        let attempt = tokio::spawn(async move {
+                            run_tunnel_pipeline(
+                                &runtime_for_pipeline,
+                                established,
+                                operation_for_pipeline,
+                                plan_mtu,
+                                routes_for_pipeline,
+                                &cancel_for_pipeline,
+                                identity_for_pipeline,
+                            )
+                            .await
+                        })
                         .await
-                    })
-                    .await
-                    .unwrap_or_else(|panic| {
-                        println!("[pipeline] panicked: {panic}");
+                        .unwrap_or_else(|panic| {
+                            println!("[pipeline] panicked: {panic}");
+                            runtime.logs.publish(
+                                "error",
+                                "pipeline",
+                                "PIPELINE_PANIC",
+                                format!("pipeline panicked: {panic}"),
+                                &[],
+                            );
+                            TunnelOutcome::Failed("PANIC", 0, 0)
+                        });
+                        if !matches!(attempt, TunnelOutcome::SessionLost) {
+                            break attempt;
+                        }
+                        // T4（复审必改 D3）：R1 跟随 owner 的 auto_reconnect 主开关
+                        // ——关（默认/读取失败）即维持基线终态行为，默认行为与
+                        // dev 逐字节等价。
+                        if !owner_auto_reconnect_enabled(runtime.owner_uid()) {
+                            runtime.logs.publish(
+                                "info",
+                                "pipeline",
+                                "R1_DISABLED_BY_OWNER_SWITCH",
+                                "data plane lost; owner auto_reconnect switch is off — terminal (baseline behavior)",
+                                &[],
+                            );
+                            break attempt;
+                        }
+                        // T4（复审必改 D1）：预算按"重试调度次数"计——SessionLost
+                        // 与 establish 失败都消耗（旧行为只在 SessionLost 递增，
+                        // establish 持续失败时恒 1<5 无限循环）。
+                        r1_attempt += 1;
+                        if r1_attempt > R1_MAX_ATTEMPTS {
+                            runtime.logs.publish(
+                                "error",
+                                "pipeline",
+                                "R1_EXHAUSTED",
+                                "engine-side reconnect budget exhausted",
+                                &[("attempts", r1_attempt.to_string())],
+                            );
+                            break attempt;
+                        }
+                        // T4（复审必改 D2）：重试期间重新声明 attempt 槽——管线
+                        // teardown 会清空它，而 Stop 的取消通道（request_pipeline_
+                        // cancel）经 attempt.cancel：槽空则 R1 退避/重拨阶段不可停机
+                        // （Stop 后隧道复活+二次 Stop 超时的竞态）。环终态臂照旧清槽。
+                        {
+                            let mut slot = runtime
+                                .attempt
+                                .lock()
+                                .expect("attempt slot lock");
+                            if slot.is_none() {
+                                *slot = Some(ActiveAttempt {
+                                    cancel: Arc::clone(&cancel),
+                                });
+                            }
+                        }
+                        let delay = r1_backoff_delay(r1_attempt);
                         runtime.logs.publish(
-                            "error",
+                            "warn",
                             "pipeline",
-                            "PIPELINE_PANIC",
-                            format!("pipeline panicked: {panic}"),
-                            &[],
+                            "PUMP_LOST_R1_RETRY",
+                            "data plane lost; engine-side reconnect retry scheduled",
+                            &[
+                                ("attempt", r1_attempt.to_string()),
+                                ("delay_ms", delay.as_millis().to_string()),
+                            ],
                         );
-                        TunnelOutcome::Failed("PANIC", 0, 0)
-                    });
+                        tokio::time::sleep(delay).await;
+                        if is_cancelled() {
+                            break TunnelOutcome::Cancelled;
+                        }
+                        needs_establish = true;
+                    };
                     match outcome {
                         TunnelOutcome::Cancelled => {}
                         TunnelOutcome::SessionLost => {
@@ -1115,16 +1710,30 @@ impl HelperControl for EngineControlService {
                                 "data plane pump finished unexpectedly",
                                 &[],
                             );
+                            // T2（复审必改 2）：终态事件归属读 runtime 当前值——
+                            // 采纳后归属已切换，旧 task_operation_id 会被采纳方
+                            // 投影过滤，造成采纳方对失联失明。
                             let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
                                 aftermath_verified: false,
                                 reconnect_state: None,
                                 own_tunnel_if_index: 0,
                                 session_established_at_ms: 0,
-                                operation_id: task_operation_id,
+                                operation_id: runtime.current_operation_id(),
                                 connect_phase: wire::ConnectPhase::NegotiatingTunnel as i32,
                                 coarse_phase: wire::StatsPhase::Failed as i32,
                                 error: Some(ConnectCancelled::session_lost_vpn_error()),
                             });
+                            if let Some(trace) = runtime.trace_handle()
+                                && let Some(identity) = runtime.pipeline_identity()
+                            {
+                                trace.record(
+                                    crate::trace::TraceState::Terminal,
+                                    &identity.server,
+                                    &identity.username,
+                                    Some("session_lost"),
+                                    false,
+                                );
+                            }
                             if let Ok(mut slot) = runtime.attempt.lock() {
                                 *slot = None;
                             }
@@ -1147,7 +1756,7 @@ impl HelperControl for EngineControlService {
                                 reconnect_state: None,
                                 own_tunnel_if_index: 0,
                                 session_established_at_ms: 0,
-                                operation_id: task_operation_id,
+                                operation_id: runtime.current_operation_id(),
                                 connect_phase: wire::ConnectPhase::ApplyingPlatformTunnel as i32,
                                 coarse_phase: wire::StatsPhase::Failed as i32,
                                 error: Some(ConnectCancelled::platform_vpn_error(
@@ -1361,7 +1970,12 @@ async fn run_tunnel_pipeline(
     plan_mtu: u32,
     campus_routes: Vec<String>,
     cancel: &Arc<AtomicBool>,
+    pipeline_identity: PipelineIdentity,
 ) -> TunnelOutcome {
+    // T2（复审必改 4）：管线入口即切换事件归属到本代 operation——上一代若经
+    // SessionLost 自拆（无收敛清位）残留旧归属，本代早期的阶段事件会被新 core
+    // 按 operation_id 过滤丢弃。Connected 时刻的 record 会再次确认同一值。
+    runtime.adopt_operation(operation_id.clone());
     // Connected 时刻的 epoch ms：status 事件与会话时长诊断共用的单一事实源；
     // 0 = 尚未到达 Connected。Atomic 是因为闭包随管线 future 跨线程（Cell 非 Send）。
     let session_started_ms = std::sync::atomic::AtomicI64::new(0);
@@ -1384,7 +1998,12 @@ async fn run_tunnel_pipeline(
             reconnect_state: None,
             own_tunnel_if_index: own_tunnel_if_index.load(Ordering::Relaxed),
             session_established_at_ms: session_started_ms.load(Ordering::Relaxed),
-            operation_id: operation_id.clone(),
+            // T2：事件归属读 runtime 当前值（采纳时切换）；本地捕获值仅作
+            // runtime 尚未记录时的兜底（管线 Connected 前无采纳，二者一致）。
+            operation_id: {
+                let current = runtime.current_operation_id();
+                if current.is_empty() { operation_id.clone() } else { current }
+            },
             connect_phase: phase as i32,
             coarse_phase: coarse as i32,
             error: None,
@@ -1576,6 +2195,24 @@ async fn run_tunnel_pipeline(
         wire::ConnectPhase::StartingDataPlane,
         wire::StatsPhase::Connected,
     );
+    // T2：Connected 事实记录——身份（采纳判定）、ifindex/纪元（采纳事件重放）、
+    // 事件归属（采纳切换）与 keep 策略（连接成功即 keep 的生产注入点）。
+    let trace_identity = pipeline_identity.clone();
+    runtime.record_pipeline_connected(
+        pipeline_identity,
+        own_tunnel_if_index.load(Ordering::Relaxed),
+        session_started_ms.load(Ordering::Relaxed),
+        operation_id.clone(),
+    );
+    if let Some(trace) = runtime.trace_handle() {
+        trace.record(
+            crate::trace::TraceState::Connected,
+            &trace_identity.server,
+            &trace_identity.username,
+            None,
+            false,
+        );
+    }
 
     // ---- 4. 保持：DPD 应答 + 周期 keepalive + 泵监视。----
     let keepalive = Codec::encode_raw(CSTP_PACKET_TYPE_KEEPALIVE, &[]).expect("keepalive frame");

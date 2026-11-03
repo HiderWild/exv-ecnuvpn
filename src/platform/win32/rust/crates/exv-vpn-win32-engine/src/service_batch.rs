@@ -19,6 +19,34 @@ pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const VERIFY_SCM_RUNNING_TIMEOUT: Duration = Duration::from_secs(30);
 /// SCM Running 轮询间隔。
 const SCM_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Verify 对连续 Stopped 终态的判死门限：12 次 × 250ms = 3s（P0-2 裁定 2-3s 内判死）。
+///
+/// **为什么 3s 判死是安全的（钉住，防将来回归）**：`install_service` 的 FailureActions
+/// （`service::restart_failure_actions`）**未设 `failure-actions-on-graceful-stop`**
+/// （`SERVICE_CONFIG_FAILURE_ACTIONS_FLAG`）——SCM 恢复对「正常上报 Stopped 的退出」
+/// 惰性：服务进程优雅退出（ServiceMain 自报 Stopped）不触发 `SC_ACTION_RESTART`，
+/// 连续 Stopped 观测即真死，无 1s 复活在途。**若将来打开该标志**（graceful stop 也
+/// 按失败重启、1s 复活），本快速失败窗口必须重新评估——否则会把 SCM 正在复活的
+/// 瞬态 Stopped 判成死亡，把可自愈的启动抖动升级为用户可见失败。
+const STOPPED_TERMINAL_CONFIRM_POLLS: u32 = 12;
+
+/// P0-2 语义透传通道：服务引擎启动失败的 SCM 退出码约定。
+///
+/// engine 进程（`main.rs` 的 ServiceMain）按 `run_engine` 错误**类别**定码，经
+/// `SetServiceStatus(Stopped)` 的 `dwWin32ExitCode` 报给 SCM；批量 Verify 对连续
+/// Stopped 终态快速失败时用 `query_status` 读回该码，组装稳定前缀
+/// `service_not_running|<exit_code>|<可读短语>`（host 原样透传、禁止叠前缀；前端
+/// `isServiceRecoveryError` 认前缀路由三选恢复模态）。**不读 engine-raw 日志文件**
+/// 归因（2026-09-28 复审裁定：host 不掌握服务 pid，按文件名反查属日志抓取，脆）。
+pub mod service_exit_code {
+    /// 服务正常退出（Running 后 SCM stop 等）。
+    pub const SUCCESS: u32 = 0;
+    /// 未分类启动失败（沿用既有 `u32::from(run.is_err())` 语义）。
+    pub const UNCATEGORIZED: u32 = 1;
+    /// D12 每用户单引擎管道互斥：同名控制管道首实例仍被另一 engine 持有（残留
+    /// oneshot / 双 engine 并存），engine 建管有界重试（3×1s）耗尽后诚实退出。
+    pub const PIPE_MUTEX_HELD: u32 = 2;
+}
 
 // ---------------------------------------------------------------------------
 // Wire 类型（serde JSON；`deny_unknown_fields`——host 侧旧字段/拼写错误在解析即拒）。
@@ -402,30 +430,126 @@ pub fn orphan_watchdog_body(
 // 生产 Verify / VerifyRemoved：SCM 查询（Verify 只确认 Running，不做管道探活）。
 // ---------------------------------------------------------------------------
 
-/// `Verify`：SCM Running 轮询等待（Start 后服务经 StartPending→Running）。
+/// SCM 状态必须为 Running（`Verify` 步骤的探活语义：批量进程是 runas 提权的**用户**
+/// 身份，服务控制管道 DACL = SYSTEM + core_sid，用户进程打开管道被拒——控制面
+/// liveness 由 host 的 connect 完整校验，批量 Verify 只确认 SCM Running）。
 ///
-/// 注意：批量进程是 runas 提权的**用户**身份，而服务控制管道 DACL = SYSTEM + core_sid
-/// （WSP1 §4 frozen shape），用户进程打开管道被拒 → 原 keepalive 管道探活必然
-/// 「transport error」（2026-08-23 实测）。控制面 liveness 由 host 的 connect 完整
-/// 校验（core SID 在 DACL 内 + PSK 握手），批量 Verify 只确认 SCM Running 即可。
+/// P0-2（2026-09-28 根因 B）：对连续 Stopped **终态** ~3s 快速失败；StartPending 等
+/// 过渡态保留 30s 耐心（SCM 早期抖动无复活来源——`install_service` 的 FailureActions
+/// 未设 failure-actions-on-graceful-stop，SCM 恢复对正常上报 Stopped 的退出惰性；
+/// 钉住注记见 [`STOPPED_TERMINAL_CONFIRM_POLLS`]，防将来开标志后快失败吞掉 1s 复活）。
 fn verify_service_ready() -> Result<(), String> {
     wait_for_service_running(VERIFY_SCM_RUNNING_TIMEOUT)
 }
 
-/// 轮询等待 SCM 服务进入 Running（`StartPending`/`StopPending` 等过渡态不判失败）。
-fn wait_for_service_running(timeout: Duration) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match service_scm_running() {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                if std::time::Instant::now() >= deadline {
-                    return Err(e);
+/// Verify 轮询的单次 SCM 观测（决策输入；纯逻辑，可单测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScmPollObservation {
+    /// SCM Running。
+    Running,
+    /// 终态 Stopped（携带 SCM 报告的退出码——win32 / service_specific 归一 u32）。
+    Stopped(u32),
+    /// 过渡态（StartPending / StopPending / Paused 等）或查询失败——保持耐心。
+    Transitional,
+}
+
+/// [`wait_for_service_running`] 的可测决策核：连续 Stopped 终态计数判死。
+///
+/// 过渡态/查询失败重置计数——SCM 状态抖动（如 StartPending→Stopped→StartPending
+/// 的恢复路径）不得累计误判为终局死亡。
+#[derive(Debug, Default)]
+struct VerifyRunningTracker {
+    consecutive_stopped: u32,
+    last_exit_code: u32,
+}
+
+impl VerifyRunningTracker {
+    /// 观测一次：Running → `Some(Ok(()))`；连续 Stopped 达门限 → `Some(Err(判死
+    /// 消息))`；其余 → `None`（继续轮询）。
+    fn observe(&mut self, observation: ScmPollObservation) -> Option<Result<(), String>> {
+        match observation {
+            ScmPollObservation::Running => Some(Ok(())),
+            ScmPollObservation::Stopped(exit_code) => {
+                self.consecutive_stopped += 1;
+                self.last_exit_code = exit_code;
+                if self.consecutive_stopped >= STOPPED_TERMINAL_CONFIRM_POLLS {
+                    Some(Err(stopped_terminal_failure(self.last_exit_code)))
+                } else {
+                    None
                 }
-                std::thread::sleep(SCM_POLL_INTERVAL);
+            }
+            ScmPollObservation::Transitional => {
+                self.consecutive_stopped = 0;
+                None
             }
         }
     }
+}
+
+/// Stopped 终态判死的失败消息：稳定前缀 `service_not_running|<exit_code>|<可读短语>`
+/// （退出码即 [`service_exit_code`] 约定；前端按前缀路由三选恢复模态）。
+fn stopped_terminal_failure(exit_code: u32) -> String {
+    let phrase = match exit_code {
+        service_exit_code::PIPE_MUTEX_HELD => {
+            "控制管道被另一引擎占用（每用户单引擎互斥），服务启动后已退出"
+        }
+        service_exit_code::SUCCESS => "服务已停止且未报告失败原因",
+        other => {
+            return format!("service_not_running|{exit_code}|服务启动失败（退出码 {other}）");
+        }
+    };
+    format!("service_not_running|{exit_code}|{phrase}")
+}
+
+/// 轮询等待 SCM 服务进入 Running：Running 即成；连续 Stopped 终态 ~3s 判死（P0-2，
+/// 2026-09-28 根因 B——此前对 Stopped 终态傻等满 30s）；过渡态/查询失败吃满
+/// `timeout` 后按超时失败（同样携带稳定前缀走恢复模态路由）。`StartPending` 等过渡
+/// 态保留 30s 耐心（SCM 早期抖动无复活来源的论证见 [`STOPPED_TERMINAL_CONFIRM_POLLS`]
+/// 钉住注记）。
+fn wait_for_service_running(timeout: Duration) -> Result<(), String> {
+    use windows_service::service::ServiceState;
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut tracker = VerifyRunningTracker::default();
+    loop {
+        let observation = match query_service_state_and_exit_code() {
+            Ok((ServiceState::Running, _)) => ScmPollObservation::Running,
+            Ok((ServiceState::Stopped, exit_code)) => ScmPollObservation::Stopped(exit_code),
+            Ok((_, _)) => ScmPollObservation::Transitional,
+            Err(_) => ScmPollObservation::Transitional,
+        };
+        if let Some(decision) = tracker.observe(observation) {
+            return decision;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "service_not_running|{}|服务长时间未进入运行状态（{timeout:?} 超时）",
+                tracker.last_exit_code
+            ));
+        }
+        std::thread::sleep(SCM_POLL_INTERVAL);
+    }
+}
+
+/// SCM 当前状态 + 退出码（`ServiceExitCode` 的 win32 / service_specific 归一 u32；
+/// 退出码是引擎侧启动失败类别的透传通道，见 [`service_exit_code`]）。
+///
+/// # Errors
+/// SCM 打开 / 查询失败 → 携带原因的字符串。
+fn query_service_state_and_exit_code() -> Result<(windows_service::service::ServiceState, u32), String> {
+    use windows_service::service::{ServiceAccess, ServiceExitCode};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(scm_error)?;
+    let service = manager
+        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+        .map_err(scm_error)?;
+    let status = service.query_status().map_err(scm_error)?;
+    let exit_code = match status.exit_code {
+        ServiceExitCode::Win32(code) | ServiceExitCode::ServiceSpecific(code) => code,
+    };
+    Ok((status.current_state, exit_code))
 }
 
 /// `VerifyRemoved`：SCM 服务已不存在（`ERROR_SERVICE_DOES_NOT_EXIST` = 1060）。
@@ -440,26 +564,6 @@ fn verify_service_removed() -> Result<(), String> {
         Err(e) if service_not_found(&e) => Ok(()),
         Err(e) => Err(scm_error(e)),
     }
-}
-
-/// SCM 状态必须为 Running。
-fn service_scm_running() -> Result<(), String> {
-    use windows_service::service::{ServiceAccess, ServiceState};
-    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .map_err(scm_error)?;
-    let service = manager
-        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
-        .map_err(scm_error)?;
-    let status = service.query_status().map_err(scm_error)?;
-    if status.current_state != ServiceState::Running {
-        return Err(format!(
-            "service not running (state={:?})",
-            status.current_state
-        ));
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

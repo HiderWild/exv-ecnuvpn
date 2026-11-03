@@ -1593,7 +1593,16 @@ impl HelperControl for HelperControlService {
         // T4 连接门（计划 §2.1–§2.4/§三）：受理即建痕 + 痕在即预检。位于 admission
         // （引擎内部记账，非系统变更）之后、`start_apply`（登录/网卡/路由等一切系统
         // 变更的开端）之前；分路（在途组装/采纳/自留状态）见 `admit_through_gate`。
-        if let Err(gate_error) = self
+        //
+        // P0-3（计划 v6.1 第二批，诊断 P1-6）：门检（预检 ~1s+）前后各发一条
+        // Connecting(ObservingOwnedState) 里程碑——core 的 attach-before-apply 保证
+        // 状态流已挂接，事件不丢；消除受理→组装之间「engine StatusPublisher 无快照、
+        // 门检前状态通道静默」的 1s+ 空窗（前端此前只能靠乐观态撑住首阶段标签）。
+        self.status.publish(StatusEvent::connecting(
+            operation_id.clone(),
+            generated::ConnectPhase::ObservingOwnedState,
+        ));
+        let gate_admitted = self
             .admit_through_gate(
                 &extensions,
                 envelope_kind,
@@ -1602,8 +1611,12 @@ impl HelperControl for HelperControlService {
                 reconnect_policy_from_wire(reconnect_policy.as_ref()),
                 ui_pid,
             )
-            .await
-        {
+            .await;
+        self.status.publish(StatusEvent::connecting(
+            operation_id.clone(),
+            generated::ConnectPhase::ObservingOwnedState,
+        ));
+        if let Err(gate_error) = gate_admitted {
             // 已 admission 的操作以 Failed 终态收口（镜像 start_apply 受理拒绝路径：
             // 终态观察者据此写回 terminal，不静默悬挂），再向调用方回结构化错误。
             self.stats

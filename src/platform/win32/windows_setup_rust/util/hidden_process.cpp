@@ -63,7 +63,8 @@ HiddenProcessResult RunHidden(const std::wstring &application,
   CloseHandle(read_pipe);
 
   const DWORD wait_ms = timeout_ms < 0 ? INFINITE : static_cast<DWORD>(timeout_ms);
-  WaitForSingleObject(pi.hProcess, wait_ms);
+  const DWORD wait_outcome = WaitForSingleObject(pi.hProcess, wait_ms);
+  result.timed_out = (wait_outcome == WAIT_TIMEOUT);
   DWORD code = 1;
   GetExitCodeProcess(pi.hProcess, &code);
   result.exit_code = code;

@@ -73,6 +73,100 @@ export function quickStartShouldOpen(payload: QuickStartConfigPayload): boolean 
   return payload.requires_quick_start === true;
 }
 
+// ---- 「已见」标记（KI-13：有且仅有首次运行弹出） ----
+
+/**
+ * 启动判定三态：
+ *   * `show`  —— 无标记且 Core 判定需要快速入门（干净安装首运行）→ 弹出；
+ *   * `seed`  —— 无标记但已有合法配置（≤4.1.0 升级/历史安装从未写过标记）→
+ *                补写标记、不弹（升级用户二次弹出违反「绝不弹第二次」）；
+ *   * `quiet` —— 已有标记（完成或跳过过）→ 永不再弹（即使 config.json 之后
+ *                损坏触发 Core 修复性 requires_quick_start，也不得二次弹出）。
+ */
+export type QuickStartStartupDecision = "show" | "seed" | "quiet";
+
+export function decideQuickStartOnStartup(
+  payload: QuickStartConfigPayload,
+  seen: boolean,
+): QuickStartStartupDecision {
+  if (seen) return "quiet";
+  return quickStartShouldOpen(payload) ? "show" : "seed";
+}
+
+/** 「已见」标记网关：读/写宿主侧 `<config_dir>/quick-start.json`（单键
+ * `quick_start_seen`；与 core config.json 同目录，卸载整树清理天然耦合）。 */
+export interface QuickStartSeenGateway {
+  getSeen(): Promise<boolean>;
+  markSeen(): Promise<void>;
+}
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+async function invokeCommand<T>(cmd: string): Promise<T> {
+  if (!isTauri()) {
+    throw new Error("quick start 标记仅在 Tauri 外壳内可用");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(cmd);
+}
+
+/** 生产网关：走 Tauri Command（app/src/quick_start_marker.rs）。 */
+export function createTauriQuickStartSeenGateway(): QuickStartSeenGateway {
+  return {
+    getSeen() {
+      return invokeCommand<boolean>("quick_start_seen_get");
+    },
+    markSeen() {
+      return invokeCommand<void>("quick_start_seen_mark");
+    },
+  };
+}
+
+let seenGateway: QuickStartSeenGateway | null = null;
+
+/** 注入网关（测试注入内存实现；生产保持 null 走真实 Tauri 网关）。 */
+export function provideQuickStartSeenGateway(impl: QuickStartSeenGateway): void {
+  seenGateway = impl;
+}
+
+/** 测试重置（生产路径不调用）。 */
+export function resetQuickStartSeenGateway(): void {
+  seenGateway = null;
+}
+
+function effectiveSeenGateway(): QuickStartSeenGateway {
+  return seenGateway ?? createTauriQuickStartSeenGateway();
+}
+
+/**
+ * 读「已见」标记。外壳之外（浏览器/测试预览）没有标记存储，静默保持「未见过」
+ * 默认（不视为错误，与 ui-prefs 的降级口径一致）；真实网关失败也诚实降级为
+ * false，交由 {@link decideQuickStartOnStartup} 结合 Core 结论决定，不阻断启动。
+ */
+export async function loadQuickStartSeen(): Promise<boolean> {
+  if (!seenGateway && !isTauri()) return false;
+  try {
+    return await effectiveSeenGateway().getSeen();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 写「已见」标记（跳过/完成/迁移播种三处时机）。尽力而为：失败不抛出、
+ * 不阻断界面——后续启动的 `seed` 分支会重试补写。
+ */
+export async function markQuickStartSeen(): Promise<void> {
+  if (!seenGateway && !isTauri()) return;
+  try {
+    await effectiveSeenGateway().markSeen();
+  } catch (error) {
+    console.error("快速入门已见标记写入失败", error);
+  }
+}
+
 /**
  * Core 返回的已知配置覆盖默认值；未知字段不会进入 UI 草稿。旧配置仍按 Cisco 解释，
  * 并把旧 `server` 仅迁入当前协议对应的独立服务器值。

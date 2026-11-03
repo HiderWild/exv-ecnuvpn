@@ -24,7 +24,7 @@ export type RecoveryAction = "clean" | "reinstall";
 /** 恢复动作 → 步骤定义（顺序即执行顺序）。 */
 export const RECOVERY_STEP_DEFS: Record<RecoveryAction, readonly RecoveryStepDef[]> = {
   clean: [
-    { id: "uninstall", label: "卸载服务" },
+    { id: "uninstall", label: "卸载服务（切换一次性引擎）" },
     { id: "connect", label: "建立连接" },
   ],
   reinstall: [
@@ -32,6 +32,20 @@ export const RECOVERY_STEP_DEFS: Record<RecoveryAction, readonly RecoveryStepDef
     { id: "connect", label: "建立连接" },
   ],
 };
+
+/**
+ * P0-2（计划 v6.1 第二批，2026-09-28 根因 B）：从服务失败消息中提取可读短语。
+ *
+ * host/engine 侧稳定前缀 `service_not_running|<exit_code>|<短语>`（engine 批量
+ * Verify 快速失败产出；可能嵌在 `…; repair batch failed: <前缀消息>` 等复合串中）。
+ * 命中 → 返回短语（模态「重试服务安装」选项携带失败原因）；未命中 → 原样返回
+ * （诚实透传，不伪造归因）。
+ */
+export function serviceFailurePhrase(message: string): string {
+  const match = message.match(/service_not_running\|\d+\|([^;]+)/);
+  const phrase = match?.[1]?.trim();
+  return phrase ? phrase : message;
+}
 
 /** 初始步骤列表（全部 pending）。 */
 export function initialSteps(action: RecoveryAction): RecoveryStep[] {

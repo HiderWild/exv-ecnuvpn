@@ -83,10 +83,16 @@ mod windows_worker {
         /// 本次会话的 owner 标记（`EXV-NRPT:<guid>`，ready 应答回带；旧脚本应答
         /// 不携带则为 None）。T4 起记入连接痕迹供预检 NRPT 域认领。
         owner: Option<String>,
+        /// 启动应答是否为 conflict（随 ready 解析点记录，转投 `NrptStartError`）。
+        conflict: bool,
     }
 
     pub(crate) struct NrptStartError {
         pub(crate) message: String,
+        /// 是否为「校园 DNS 域名已有精确规则」conflict（受理门兜底认领清理的机器
+        /// 判别位，计划 v6.1 §8.2 触发模型补洞——字符串匹配脆弱，判别位随
+        /// `ReadyLine::Failed("conflict")` 解析点产生）。
+        pub(crate) conflict: bool,
         // Box：lease 持子进程句柄/通道（>128B），装箱把 Err 变体压回常规尺寸
         //（错误返回值按值穿过多层调用，热路径不应携带大对象）。
         pub(crate) worker: Option<Box<NrptWorkerLease>>,
@@ -96,8 +102,16 @@ mod windows_worker {
         fn from(message: String) -> Self {
             Self {
                 message,
+                conflict: false,
                 worker: None,
             }
+        }
+    }
+
+    impl NrptStartError {
+        /// 是否为 conflict（受理门按 EXV-NRPT: 前缀认领清理后重试一次的判别位）。
+        pub(crate) fn is_conflict(&self) -> bool {
+            self.conflict
         }
     }
 
@@ -178,6 +192,7 @@ mod windows_worker {
                 messages,
                 cleanup_confirmed: false,
                 owner: None,
+                conflict: false,
             };
             let input = lease.stdin.as_mut().expect("worker stdin");
             let write_result = input
@@ -188,6 +203,7 @@ mod windows_worker {
                 lease.stdin.take();
                 return Err(NrptStartError {
                     message: "校园 DNS 规则通信失败；正在清理，请重试。".to_owned(),
+                    conflict: false,
                     worker: Some(Box::new(lease)),
                 });
             }
@@ -201,6 +217,7 @@ mod windows_worker {
                     return Ok(Some(lease));
                 }
                 Some(ReadyLine::Failed("conflict")) => {
+                    lease.conflict = true;
                     "校园 DNS 域名已有精确规则，未覆盖现有设置；请调整校园域名配置。"
                 }
                 Some(ReadyLine::Failed("input")) => {
@@ -220,6 +237,7 @@ mod windows_worker {
             lease.stdin.take();
             Err(NrptStartError {
                 message: message.to_owned(),
+                conflict: lease.conflict,
                 worker: Some(Box::new(lease)),
             })
         }

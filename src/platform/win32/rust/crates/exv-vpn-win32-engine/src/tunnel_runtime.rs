@@ -834,8 +834,9 @@ fn live_sweeper_step(
                     // start_apply 清）。
                     rt.paused.store(true, Ordering::SeqCst);
                     // T6a：R1 触发点——隧道已死且 live 已清，engine 自愈接管
-                    //（门控在驱动内：材料在/无在途循环/隧道确死/reconnect.enabled）。
-                    // 同步非阻塞（驱动只做判定并 spawn 自愈循环）。
+                    //（门控在驱动内：材料在/无在途循环/隧道确死/reconnect.enabled；
+                    // 无材料时驱动转 T5 第五情形善后——worker 死亡不再静默，
+                    // 计划 v6.1 §8.2）。同步非阻塞（驱动只做判定并 spawn）。
                     if let Some(driver) = rt
                         .reconnect
                         .lock()
@@ -894,7 +895,7 @@ fn live_sweeper_loop(
 /// `live`（session owner + route owner）为 per-connection 存活状态。
 pub struct RealTunnelRuntime {
     /// 专用异步运行时（登录/CSTP；`block_on`，不阻塞调用方 async worker）。
-    rt: tokio::runtime::Runtime,
+    rt: Option<tokio::runtime::Runtime>,
     /// wintun.dll 路径（engine 启动参数）。
     wintun_dll: PathBuf,
     /// 创建的 adapter 名称（engine 启动参数）。
@@ -995,8 +996,8 @@ impl RealTunnelRuntime {
         journal: SystemProxyJournal,
     ) -> Self {
         Self {
-            rt: tokio::runtime::Runtime::new()
-                .expect("engine: tokio runtime（登录/CSTP 需要异步运行时）"),
+            rt: Some(tokio::runtime::Runtime::new()
+                .expect("engine: tokio runtime（登录/CSTP 需要异步运行时）")),
             wintun_dll,
             adapter_name,
             config_dir,
@@ -1036,6 +1037,10 @@ impl RealTunnelRuntime {
             .reconnect
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(driver));
+    }
+
+    fn inner_runtime(&self) -> &tokio::runtime::Runtime {
+        self.rt.as_ref().expect("inner runtime exists until RealTunnelRuntime::drop")
     }
 
     fn diagnostic_context(&self) -> Option<RuntimeDiagnostics> {
@@ -1459,6 +1464,21 @@ impl Drop for RealTunnelRuntime {
                 )],
             );
         }
+        // Tokio Runtime 的析构会等待其阻塞线程停机；若最后的 Arc 由 async
+        // task（包括 tonic detached serve）释放，直接字段析构会在该上下文 panic。
+        // 业务资源已在上面按原顺序拆完，此处只转移内层 Runtime 的所有权。
+        if let Some(rt) = self.rt.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::Builder::new()
+                    .name("exv-inner-runtime-shutdown".to_string())
+                    .spawn(move || drop(rt))
+                    .expect("spawn inner runtime shutdown thread")
+                    .join()
+                    .expect("inner runtime shutdown thread");
+            } else {
+                drop(rt);
+            }
+        }
     }
 }
 
@@ -1802,7 +1822,7 @@ impl RealTunnelRuntime {
                     Err(_) => return Err(TunnelError::plain(ConnectPhase::ConnectingControl,
                         "engine: cannot read explicitly configured aTrust node certificate")),
                 };
-                let prepared = self.rt.block_on(crate::atrust_prepare::prepare(
+                let prepared = self.inner_runtime().block_on(crate::atrust_prepare::prepare(
                     browser, &config, certificate.as_deref(),
                 )).map_err(|error| TunnelError::plain(ConnectPhase::ConnectingControl, error))?;
                 (prepared.offer, prepared.campus_dns_servers, prepared.bypasses, PreparedPackets::Atrust {
@@ -1887,7 +1907,7 @@ impl RealTunnelRuntime {
                 .map_err(|e| TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}")))?;
                 let socket_binder = socket_binder_for_mode(connection_mode, physical_ifindex);
                 let resolver = gateway_resolver.clone();
-                let gateway_addr = self.rt.block_on(resolver(&hostname)).map_err(|e| {
+                let gateway_addr = self.inner_runtime().block_on(resolver(&hostname)).map_err(|e| {
                     TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}"))
                 })?;
                 if is_cancelled() {
@@ -1913,7 +1933,7 @@ impl RealTunnelRuntime {
                 // logon GET / credential POST）在 Mihomo TUN 默认路由下走代理路径，登录
                 // 流量绕过物理出口（与 R1b 已修的 CSTP 控制面 C4/G-⑤ 同机理）。
                 let login = self
-                    .rt
+                    .inner_runtime()
                     .block_on(WebvpnLogin::perform_login_with_socket_binder(
                         &hostname,
                         gateway_addr,
@@ -1993,7 +2013,7 @@ impl RealTunnelRuntime {
                     );
                 };
                 let session = self
-                    .rt
+                    .inner_runtime()
                     .block_on(CstpSession::open_with_user_agent_observed(
                         cfg,
                         Some(&login),
@@ -2408,7 +2428,7 @@ impl RealTunnelRuntime {
             PreparedPackets::Atrust { owner, channels } => {
                 let threads = plane.spawn_raw_packet_data_plane(channels.outgoing, channels.incoming,
                     Some(Arc::clone(&ctx.log)), aux);
-                (threads, None, Some(EngineAtrust { owner, runtime: self.rt.handle().clone(),
+                (threads, None, Some(EngineAtrust { owner, runtime: self.inner_runtime().handle().clone(),
                     _lost_tx: Some(lost_tx) }), Protocol::Atrust)
             }
         };
@@ -2427,7 +2447,58 @@ impl RealTunnelRuntime {
         // T4：NRPT owner 标记随 lease 建立即捕获（worker 移入 live 后不再可及），
         // 供装配成功回写 trace 的 nrpt_owner_guids。
         let mut nrpt_owner_guids: Vec<String> = Vec::new();
-        match crate::nrpt_worker::NrptWorkerLease::start(&config.campus_dns_domains, &campus_dns_servers) {
+        // 兜底认领清理（计划 v6.1 §8.2 触发模型补洞）：撞自有 NRPT conflict——上次
+        // 会话善后未竟的残留规则（预检三触发源在该路径全不命中：痕可能已删或 gate
+        // 走了无预检分路；2026-09-28 四次重连全撞 conflict 案）→ 按 EXV-NRPT: 前缀
+        // 认领清理（预检清理器同款策略与代码，preflight::claim_clean_own_nrpt）→
+        // 自动重试一次。外来规则（无前缀）不动（T2 裁定不变）——清理集为空则不
+        // 重试，错误原文上抛（UI 三选）。
+        let mut campus_dns_start = crate::nrpt_worker::NrptWorkerLease::start(
+            &config.campus_dns_domains,
+            &campus_dns_servers,
+        );
+        if let Err(first) = &mut campus_dns_start
+            && first.is_conflict()
+        {
+            // 首次尝试在 stage=conflict 早退（未 add 任何规则）——有界 shutdown 收掉
+            // 其子进程（EOF + 清理确认），再清理重试。
+            if let Some(mut lease) = first.worker.take() {
+                let _ = lease.shutdown();
+            }
+            ctx.log.emit(
+                crate::log_sink::LogLevel::Warn,
+                "engine",
+                "tunnel.nrpt.conflict.claim_started",
+                "校园 DNS 精确规则冲突：按 EXV-NRPT: 前缀认领清理后自动重试一次（预检清理器同款策略；外来规则不动）",
+                &[("first_message", first.message.as_str())],
+            );
+            let claim = self
+                .inner_runtime()
+                .block_on(crate::preflight::claim_clean_own_nrpt(&config.campus_dns_domains));
+            ctx.log.emit(
+                if claim.all_ok {
+                    crate::log_sink::LogLevel::Info
+                } else {
+                    crate::log_sink::LogLevel::Warn
+                },
+                "engine",
+                "tunnel.nrpt.conflict.claim_cleaned",
+                "NRPT 认领清理完成（自有前缀规则已删；外来校园域规则未动）",
+                &[
+                    ("removed", &claim.removed.join(",")),
+                    ("removed_count", &claim.removed.len().to_string()),
+                    ("foreign_present", &claim.foreign_present.join(",")),
+                    ("all_ok", &claim.all_ok.to_string()),
+                ],
+            );
+            if !claim.removed.is_empty() {
+                campus_dns_start = crate::nrpt_worker::NrptWorkerLease::start(
+                    &config.campus_dns_domains,
+                    &campus_dns_servers,
+                );
+            }
+        }
+        match campus_dns_start {
             Ok(worker) => {
                 if let Some(marker) = worker.as_ref().and_then(|lease| lease.owner_guid()) {
                     nrpt_owner_guids.push(marker.to_owned());

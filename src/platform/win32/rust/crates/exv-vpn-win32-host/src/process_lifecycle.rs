@@ -467,19 +467,25 @@ impl EngineChild {
         }
     }
 
-    /// 强制终止进程并关闭句柄（幂等；句柄已关闭时 no-op）。
-    pub fn terminate(&mut self) {
+    /// 强制终止进程并关闭句柄（幂等；句柄已关闭时 no-op）。返回是否在有限等待内
+    /// 观察到进程退出信号——**runas 提权子进程对非提权 core 的 TerminateProcess
+    /// 可能被拒绝**（完整性级别），此时返回 `false`（进程很可能仍存活，调用方
+    /// 不得当作已收走——P0-1 随附的饿死收口依赖该真值，计划 v6.1 §8.2 缺口④
+    /// 扩项）。
+    pub fn terminate(&mut self) -> bool {
         if self.handle_closed {
-            return;
+            return true;
         }
         terminate_process(self.handle);
-        // 等待进程 signaled（TerminateProcess 后立即 signaled），然后关闭句柄。
-        // SAFETY: handle 是有效进程句柄，使用后关闭。
+        // 等待进程 signaled（TerminateProcess 生效后立即 signaled）；被拒（提权
+        // 子进程）则超时——真值上抛，不静默当成功。
+        let signaled = unsafe { WaitForSingleObject(self.handle, 5_000) } == WAIT_OBJECT_0;
+        // SAFETY: handle 使用后关闭；此后本结构不再持有。
         unsafe {
-            let _ = WaitForSingleObject(self.handle, 5_000);
             let _ = CloseHandle(self.handle);
         }
         self.handle_closed = true;
+        signaled
     }
 }
 

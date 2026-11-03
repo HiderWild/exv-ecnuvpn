@@ -338,18 +338,64 @@ DeleteTreeResult DeleteTreeBestEffort(const fs::path &root) {
     AccumulateDeletion(result, DeleteOrSchedule(d));
   }
   if (found_running_image) {
-    std::error_code root_error;
-    if (fs::remove(root, root_error)) {
-      // The installation path is now free for an immediate reinstall.
+    if (relocated_running_image) {
+      // KI-13 ②：自删固有窗口——映像已改名搬入隔离目录后，安装根内只剩「已删除或
+      // 已登记重启删除」的残留壳，remove=5（ACCESS_DENIED）是常态而非文件数。与无
+      // 自身映像分支对称，安装根也走 DeleteOrSchedule：登记成功即属「重启后自动
+      // 清理」的成功语义（KI-13 ①），只有登记也失败才计错。
+      AccumulateDeletion(result, DeleteOrSchedule(root));
     } else {
-      result.ok = false;
-      AppendError(result.error, L"安装目录仍有未删除文件，未登记安装目录本身的重启删除（remove=" +
-                                    std::to_wstring(root_error.value()) + L"）");
+      // 隔离移动失败（活动映像仍在安装根原路径）：fail closed——绝不把安装根连同
+      // 活动映像原路径登记重启删除，避免同路径重装后重启时误删新映像。
+      std::error_code root_error;
+      if (fs::remove(root, root_error)) {
+        // The installation path is now free for an immediate reinstall.
+      } else {
+        result.ok = false;
+        AppendError(result.error, L"安装目录仍有未删除文件，未登记安装目录本身的重启删除（remove=" +
+                                      std::to_wstring(root_error.value()) + L"）");
+      }
     }
   } else {
     AccumulateDeletion(result, DeleteOrSchedule(root));
   }
   return result;
+}
+
+// KI-13 ③：从清理脚本的 stdout 中解析机器可读摘要行
+//   EXV-CLEANUP-SUMMARY: scheduled=<n>
+// 只接受该精确前缀加十进制数字；n 是脚本对被锁文件成功登记的 MoveFileEx 重启删除
+// 数。脚本以 exit 0 报告「全清或部分待重启」（两者都是成功语义），硬失败才非零——
+// 卸载器据此把登记数并入 reboot 提示，而不再把被锁文件当成卸载失败。
+std::uint32_t ParseCleanupScheduledSummary(const std::string &captured_output) {
+  static const char kSummaryPrefix[] = "EXV-CLEANUP-SUMMARY: scheduled=";
+  std::uint32_t scheduled = 0;
+  std::size_t search_from = 0;
+  while (true) {
+    const auto line_start = captured_output.find(kSummaryPrefix, search_from);
+    if (line_start == std::string::npos) {
+      break;
+    }
+    const auto digits_begin = line_start + sizeof(kSummaryPrefix) - 1;
+    const auto digits = captured_output.find_first_not_of("0123456789", digits_begin);
+    const auto number = captured_output.substr(
+        digits_begin, digits == std::string::npos ? std::string::npos : digits - digits_begin);
+    if (!number.empty()) {
+      try {
+        const auto value = std::stoull(number);
+        // 多行摘要理论上不应出现；出现时取最大值而不是累加，避免重复放大。
+        scheduled = std::max<std::uint32_t>(
+            scheduled, static_cast<std::uint32_t>(std::min<std::uint64_t>(value, 0xFFFFFFFFu)));
+      } catch (const std::out_of_range &) {
+        // 数值溢出：忽略该行，保持 0——提示性信息不应因畸形输入而失败。
+      }
+    }
+    search_from = digits_begin + number.size();
+    if (search_from <= line_start) {
+      break;
+    }
+  }
+  return scheduled;
 }
 
 }  // namespace
@@ -383,6 +429,8 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
     result.notice = request.credential_cleanup_note;
   }
   std::wstring errors;
+  // KI-13 ③：清理脚本对被锁文件登记的重启删除数（脚本 exit 0 时解析摘要行得到）。
+  std::uint32_t cleanup_scheduled = 0;
   // Monotonic milestones 0→1. UI maps target to falling water (1 - t).
   // Skipped work still advances the waterline so each step is visually accounted for.
   double mark = 0.0;
@@ -440,6 +488,22 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
     status(L"未安装服务，已跳过", 0.30);
   }
 
+  // KI-13 ⑥ 历代服务漂移治理：C++ 3.3.x 时代的提升助手服务名是 exv-helper
+  // （NSIS !define SERVICE_NAME "exv-helper"，载荷在 %ProgramData%\EXV\Helper）。
+  // 一路覆盖升级、从未卸载的宿主可能仍注册着该遗留服务；卸载必须干净的义务要求
+  // 同步移除它。与 exv-engine 同语义：SCM 查询失败或删除失败都如实计错。
+  const auto legacy_service = QueryServicePresence(kLegacyHelperServiceName);
+  if (legacy_service == ServicePresence::Error) {
+    AppendError(errors, L"无法查询遗留 exv-helper 服务状态");
+  } else if (legacy_service == ServicePresence::Installed) {
+    if (StopAndDeleteService(kLegacyHelperServiceName)) {
+      status(L"遗留 exv-helper 服务已移除", 0.30);
+    } else {
+      AppendError(errors, L"无法停止并删除遗留 exv-helper 服务");
+      status(L"遗留服务移除失败，继续清理文件", 0.30);
+    }
+  }
+
   status(L"正在移除快捷方式…", 0.38);
   if (progress) {
     progress->SetStageSpan(0.38, 0.48);
@@ -488,6 +552,11 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
       if (request.include_credential_manager) {
         cmd += L" -IncludeCredentialManager";
       }
+      if (request.preserve_user_data) {
+        // KI-13 ④：升级语义——清理脚本照常运行（缓存/账本/服务态照清），但跳过
+        // 用户数据段（连接配置、凭据、UI 偏好），与全新卸载的全清语义区分。
+        cmd += L" -PreserveUserData";
+      }
       auto append_path = [&](const wchar_t *name, const std::wstring &value) {
         if (!value.empty()) {
           cmd += L" ";
@@ -502,8 +571,20 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
       append_path(L"-RoamingAppDataRoot", request.roaming_app_data_root);
       append_path(L"-ConfigDir", request.config_dir);
       append_path(L"-TempRoot", request.temp_root);
-      const auto cleanup_result = RunHidden(L"", cmd, 120000);
-      if (!cleanup_result.started || cleanup_result.exit_code != 0) {
+      // KI-13 (2026-09-28 review F2): 300s budget covers the pathological worst
+      // case (AV scanning + per-locked-file retries + legacy tree sweeps); a
+      // timeout means the script is STILL working in the background (retries and
+      // reboot-delete registration are idempotent and complete on their own) --
+      // per the user's ruling this must surface as success, not an error dialog.
+      const auto cleanup_result = RunHidden(L"", cmd, 300000);
+      if (cleanup_result.started && cleanup_result.timed_out) {
+        // Still running: do not kill it, do not fail the uninstall. Write the
+        // diagnostic log for observability and surface a success-side note.
+        result.diagnostic_log_path = WriteCleanupDiagnosticLog(cleanup_result, request.temp_root);
+        status(L"用户数据清理仍在后台完成", 0.78);
+      } else if (!cleanup_result.started || cleanup_result.exit_code != 0) {
+        // KI-13 ③ 语义边界：脚本 exit 非零只代表硬失败（有限重试与重启删除登记
+        // 都没做到）；被锁文件已登记重启删除时脚本以 exit 0 报成功，不再走到这里。
         result.diagnostic_log_path = WriteCleanupDiagnosticLog(cleanup_result, request.temp_root);
         std::wstring cleanup_error = cleanup_result.started
                                          ? L"用户数据清理脚本执行失败（exit=" +
@@ -515,6 +596,9 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
         AppendError(errors, cleanup_error);
         status(L"用户数据清理失败", 0.78);
       } else {
+        // 把脚本登记的重启删除数并入结果：Done 页据此给出「部分文件将在重启后自动
+        // 清理」的提示性文案（成功语义，KI-13 ①③）。
+        cleanup_scheduled = ParseCleanupScheduledSummary(cleanup_result.captured_stdout);
         status(L"用户数据已清除", 0.78);
       }
     } else {
@@ -530,7 +614,7 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
     progress->SetStageSpan(0.82, 0.96);
   }
   const auto delete_result = DeleteTreeBestEffort(install_dir);
-  result.scheduled_delete_count = delete_result.scheduled_delete_count;
+  result.scheduled_delete_count = cleanup_scheduled + delete_result.scheduled_delete_count;
   result.reboot_required = result.scheduled_delete_count != 0;
   if (!delete_result.ok) {
     AppendError(errors, delete_result.error);

@@ -1,9 +1,10 @@
 //! core/engine 共用的构建身份采集，不修改发行版或打包参数。
 //!
-//! 覆盖语义：构建命令可显式设置 EXV_BUILD_RELEASE_VERSION、EXV_BUILD_GIT_COMMIT、
-//! EXV_BUILD_GIT_DIRTY、EXV_BUILD_PROFILE、EXV_BUILD_TARGET。设置即覆盖自动值；
-//! 空值、非法值及显式 unknown 都记录 unknown，绝不悄悄回退。日志列出覆盖字段名。
-//! PROFILE 是 Cargo 的 debug/release 继承族；精确自定义名称由 EXV_BUILD_PROFILE 声明。
+//! 覆盖语义：构建命令可显式设置 `EXV_BUILD_RELEASE_VERSION`、`EXV_BUILD_GIT_COMMIT`、
+//! `EXV_BUILD_GIT_DIRTY`、`EXV_BUILD_PROFILE`、`EXV_BUILD_TARGET`。设置即覆盖自动值；
+//! 空值、非法值及显式 `unknown` 都记录 `unknown`，绝不悄悄回退。日志列出覆盖字段名。
+//! `PROFILE` 是 Cargo 的 `debug`/`release` 继承族；精确自定义名称由
+//! `EXV_BUILD_PROFILE` 声明。
 //! Git 只读取本地 HEAD 和已跟踪改动；无仓库或命令失败时记录 unknown。
 //! 追踪源码、HEAD、index、当前 ref 和 packed-refs；不扫描 target，不注入墙钟时间，
 //! 保持相同源码/环境下输出稳定，以便 sccache 重用。
@@ -239,6 +240,17 @@ fn automatic_values(root: Option<&Path>) -> BTreeMap<&'static str, String> {
     ])
 }
 
+/// 相对 `--git-path` 输出解析为绝对路径；不存在返回 None（两处监听解析共用）。
+fn resolve_existing_git_path(root: &Path, output: String) -> Option<PathBuf> {
+    let path = PathBuf::from(output);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    resolved.exists().then_some(resolved)
+}
+
 fn git_watch_paths(root: &Path) -> BTreeSet<PathBuf> {
     let mut paths = BTreeSet::from([root.join(".git")]);
     // .git 为目录时不能监听整个目录（日志/锁会导致无关重建）；工作树 .git 文件需监听。
@@ -246,30 +258,17 @@ fn git_watch_paths(root: &Path) -> BTreeSet<PathBuf> {
         paths.clear();
     }
     for name in ["HEAD", "index", "packed-refs", "refs", "config"] {
-        if let Some(path) = git_text(root, &["rev-parse", "--git-path", name]) {
-            let path = PathBuf::from(path);
-            let resolved = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            if resolved.exists() {
-                paths.insert(resolved);
-            }
+        if let Some(output) = git_text(root, &["rev-parse", "--git-path", name])
+            && let Some(resolved) = resolve_existing_git_path(root, output)
+        {
+            paths.insert(resolved);
         }
     }
-    if let Some(reference) = git_text(root, &["symbolic-ref", "-q", "HEAD"]) {
-        if let Some(path) = git_text(root, &["rev-parse", "--git-path", &reference]) {
-            let path = PathBuf::from(path);
-            let resolved = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            if resolved.exists() {
-                paths.insert(resolved);
-            }
-        }
+    if let Some(reference) = git_text(root, &["symbolic-ref", "-q", "HEAD"])
+        && let Some(output) = git_text(root, &["rev-parse", "--git-path", &reference])
+        && let Some(resolved) = resolve_existing_git_path(root, output)
+    {
+        paths.insert(resolved);
     }
     if let Some(files) = git(root, &["ls-files", "-z"]) {
         for file in files

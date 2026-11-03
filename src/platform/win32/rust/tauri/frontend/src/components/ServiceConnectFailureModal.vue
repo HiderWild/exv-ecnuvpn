@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, ref } from "vue";
+import { computed, inject, ref } from "vue";
 import { useDialogFocus } from "./use-dialog-focus";
 
 import { commandErrorMessage } from "../lib/command-error";
@@ -8,6 +8,7 @@ import {
   markCurrent,
   markDone,
   markFailed,
+  serviceFailurePhrase,
   stepMarker,
   type RecoveryAction,
   type RecoveryStep,
@@ -16,14 +17,18 @@ import { PRODUCT_RUNTIME_KEY, type ProductRuntime } from "../product/runtime";
 import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../product/service-operations";
 
 /**
- * R5 服务连接失败恢复 modal。
+ * R5 服务连接失败恢复 modal（P0-2 扩展，计划 v6.1 第二批 / 2026-09-28 裁定）。
  *
- * 服务模式连接失败（`service_not_running` / `service_connect_failed`）时由连接页挂起：
- * 三种恢复方式；服务 bootstrap 由 Core 统一负责：
- *   * 清理服务后连接：serviceControl("uninstall") → connect()（路由回 oneshot）；
- *   * 重装服务后连接：serviceControl("install")（Core 自动 start + readiness）→ connect()
- *     （路由回 service）；
- *   * 取消：仅关闭 modal，错误文案保留在页面上。
+ * 服务模式连接/安装失败（`service_not_running` / `service_connect_failed`——含 engine
+ * 批量 Verify 快速失败透传的 `service_not_running|<exit_code>|<短语>` 稳定前缀）时由
+ * 连接页挂起。**三选恢复**（降级永不自动执行——2026-09-28 用户裁定，用户未选择前
+ * 不发生任何形态切换）：
+ *   * 重试服务安装：serviceControl("repair"/install)（Core 侧 retire→install 序 +
+ *     自动 start + readiness）→ connect()（路由回 service）；失败原因短语随错误框
+ *     展示（`serviceFailurePhrase` 解析稳定前缀）；
+ *   * 本次尝试一次性连接：serviceControl("uninstall") → connect()（路由回 oneshot）；
+ *     **会重新弹 UAC**（D13 句式，无 UAC 等级建议句——若弹窗打扰请改用安装服务）；
+ *   * 取消：仅关闭 modal，回到未连接态（页面错误文案保留）。
  * 任一步失败 → 错误显示在 modal 内（不关闭、不丢失恢复入口）。
  */
 const props = defineProps<{
@@ -59,6 +64,10 @@ const busyAction = ref<"clean" | "reinstall" | null>(null);
 const actionError = ref<string | null>(null);
 /** 当前恢复序列的步骤列表（pending/current/done/failed；分步透明）。 */
 const steps = ref<RecoveryStep[]>([]);
+
+/** P0-2：失败原因短语（`service_not_running|<code>|<短语>` 稳定前缀解析；未命中时
+ *  原样展示错误文案）。 */
+const failurePhrase = computed(() => serviceFailurePhrase(props.errorMessage));
 
 function isCredentialRequiredFailure(error: unknown): error is CredentialRequiredFailure {
   return typeof error === "object"
@@ -137,8 +146,8 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
     <div class="modal-card">
       <div class="modal-body">
         <h2 id="service-failure-modal-title">服务连接失败</h2>
-        <p class="modal-error" data-testid="service-failure-error">{{ errorMessage }}</p>
-        <p class="modal-hint">服务模式连接未成功。请选择恢复方式：</p>
+        <p class="modal-error" data-testid="service-failure-error">{{ failurePhrase }}</p>
+        <p class="modal-hint">服务引擎未能就绪，请选择恢复方式（不会自动降级）：</p>
 
         <div
           v-if="actionError"
@@ -170,19 +179,20 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
       <div class="modal-actions">
         <button
           type="button"
-          data-testid="service-failure-clean"
-          :disabled="busyAction !== null"
-          @click="runSequence('clean')"
-        >
-          清理服务后连接
-        </button>
-        <button
-          type="button"
           data-testid="service-failure-reinstall"
           :disabled="busyAction !== null"
           @click="runSequence('reinstall')"
         >
-          重装服务后连接
+          重试服务安装
+        </button>
+        <button
+          type="button"
+          data-testid="service-failure-clean"
+          :disabled="busyAction !== null"
+          title="卸载服务并以一次性引擎连接本次"
+          @click="runSequence('clean')"
+        >
+          本次尝试一次性连接
         </button>
         <button
           type="button"
@@ -193,6 +203,10 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
           取消
         </button>
       </div>
+      <!-- D13 句式（2026-09-28 裁定）：无 UAC 等级建议句——不指导用户降低 UAC。 -->
+      <p class="modal-footnote" data-testid="service-failure-uac-hint">
+        一次性连接会重新弹 UAC；若弹窗打扰请改用安装服务形态。
+      </p>
     </div>
   </div>
 </template>
@@ -324,6 +338,13 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   gap: var(--space-2);
 }
 
+/* D13 脚注：一次性连接的 UAC 预告（无 UAC 等级建议句）。 */
+.modal-footnote {
+  margin-top: var(--space-2);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .modal-actions button {
   min-height: 34px;
   padding: var(--space-1) var(--space-3);
@@ -373,6 +394,12 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 .modal-overlay[data-compact="true"] .modal-pending,
 .modal-overlay[data-compact="true"] .recovery-step {
   margin-bottom: 3px;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.modal-overlay[data-compact="true"] .modal-footnote {
+  margin-top: 3px;
   font-size: 11px;
   line-height: 1.25;
 }

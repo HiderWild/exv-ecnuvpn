@@ -324,6 +324,17 @@ trait ConnectionEngine: Send {
     fn stop(&mut self, request: &StopRequest) -> Result<(), Status>;
 }
 
+/// T5：重连信号的触发类别（worker 据此决定派发失败的处置——数据面掉线沿用
+/// 一期"派发前失败即终态"；引擎失联的派发失败多为引擎尚未被 launchd 拉回，
+/// 按预算退避重试）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReconnectSignal {
+    /// 数据面掉线（可重试标记的主轨触发）。
+    DataPlaneDrop,
+    /// 引擎失联（service 形态；R2——launchd KeepAlive 自启，等待回归后重发）。
+    EngineLost,
+}
+
 /// Core 观察到的 Engine 失联 typed 错误（状态流终止/进程死亡），MAC-LIFECYCLE-15 S1。
 ///
 /// 不伪造 Engine 自身的错误码与平台细节：`code`/`stage` 对齐 Engine 既有 `SessionLost`
@@ -621,7 +632,7 @@ impl LiveEngineSession {
         match self {
             Self::Live(session) => session.kind().as_mode_str(),
             #[cfg(test)]
-            Self::Fixture(_) => "",
+            Self::Fixture(session) => session.mode,
         }
     }
 
@@ -878,7 +889,7 @@ pub(crate) struct LiveConnectionProjection {
     reconnect_active: Arc<AtomicBool>,
     /// W3-2/P3：状态投影→重连 worker 的掉线信号通道（单发送端槽位随 worker 拉起
     /// 换入；`std::sync::Mutex` 短临界区，不跨 await——win32 :1915-1925 同形态）。
-    reconnect_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<u64>>>>,
+    reconnect_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u64, ReconnectSignal)>>>>,
     /// W3-2/P3：退避 base（产品默认 [`RECONNECT_BACKOFF_BASE`] = 2s；测试经
     /// [`Self::with_reconnect_backoff`] 注入毫秒级，生产路径不改默认）。
     reconnect_backoff_base: Duration,
@@ -1001,6 +1012,9 @@ struct OperationProjection {
     /// W2 心跳：会话伴生 ticker 槽——失联重置 session 槽时一并 abort 对应 ticker。
     keepalive_ticker: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     engine_pid: u32,
+    /// T5：会话形态快照（构造点=self.engine_mode；投影期内不变）——EOF 失联
+    /// 分支据此裁决 R2 资格（service 才自动重连）。
+    engine_mode: &'static str,
 }
 
 impl LiveConnectionProjection {
@@ -1267,6 +1281,7 @@ impl LiveConnectionProjection {
             connect_status_stream,
             engine_stats_stream,
             OperationProjection {
+                engine_mode: *lock_recover(&self.engine_mode),
                 stats_state: Arc::clone(&self.stats_state),
                 runtime_epoch: lookup_key.runtime_epoch.clone(),
                 operation_id: pending.operation_id,
@@ -1374,6 +1389,7 @@ impl LiveConnectionProjection {
             session_slot,
             keepalive_ticker,
             engine_pid,
+            engine_mode: engine_mode_snapshot,
         } = projection;
         let events = Arc::clone(&self.events);
         let proxy_tun = Arc::clone(&self.proxy_tun);
@@ -1528,22 +1544,36 @@ impl LiveConnectionProjection {
                         if retryable_drop {
                             // 该 Engine 失败保留空闲 utun/控制专用路由供可能的自动重连；
                             // 在 Core 真正 Stop 并得到 Stopped 前不得发布 FailedClean。
-                            publish(pending_stop_snapshot(
-                                &StopRequest {
-                                    intent: Some(reconnect_stop_intent()),
-                                },
-                                operation_id.clone(),
+                            // D4/E2（复审）：可重试掉线的 pending_stop 伴生
+                            // reconnect.active=true——引擎侧 R1 期间 UI 可感知
+                            // "正在重连"（重连气泡的上升沿；快照伴生字段不再失真）。
+                            publish(snapshot_with_reconnect(
+                                pending_stop_snapshot(
+                                    &StopRequest {
+                                        intent: Some(reconnect_stop_intent()),
+                                    },
+                                    operation_id.clone(),
+                                ),
+                                Some(wire::ReconnectStatus {
+                                    reason: String::new(),
+                                    auto_reconnect: true,
+                                    max_attempts: 0,
+                                    current_attempt: 0,
+                                    active: true,
+                                }),
                             ));
+                            // T4：R1 所有权已下沉 engine（v6 §2.7——引擎持 D9 驻留
+                            // 材料在连接任务内退避重拨，同 operation_id 保持投影
+                            // 连续）。core 不再对数据面掉线重发 Apply——只保留
+                            // pending_stop 投影（不停留在虚假 Connected），重连进度
+                            // 由引擎事件流驱动。worker 通道保留给 R2（引擎失联）。
                             logs.append_core(
                                 "info",
                                 "kernel",
-                                "kernel.reconnect.trigger",
-                                "retryable data-plane drop detected; signaling reconnect worker",
+                                "kernel.reconnect.engine_owned",
+                                "retryable data-plane drop projected; R1 reconnect is engine-owned",
                                 &[],
                             );
-                            if let Some(tx) = lock_recover(&reconnect_tx).as_ref() {
-                                let _ = tx.send(reconnect_generation.load(Ordering::Acquire));
-                            }
                             logs.append_core(
                                 "debug",
                                 "kernel",
@@ -1675,6 +1705,36 @@ impl LiveConnectionProjection {
                         &operation_id,
                         engine_lost_vpn_error(),
                     ));
+                    // T5 R2：service 形态的引擎失联是可恢复故障（launchd KeepAlive
+                    // 自启）——主开关开启且本连接曾 Connected 时发 R2 信号，由重连
+                    // worker 等引擎回归后重发连接（v6 §2.7 R2=core；D-d6 代裁：随
+                    // 主开关）。oneshot 形态维持一期语义（F8：重连必然重新提权，
+                    // 手动出口）。终态快照仍如实发布；重连派发后的新操作事件将其
+                    // 取代。
+                    let r2_eligible = engine_mode_snapshot == "service"
+                        && reconnect_ever_connected.load(Ordering::Acquire)
+                        && lock_recover(&reconnect_session_policy)
+                            .as_ref()
+                            .is_some_and(|policy| policy.enabled);
+                    // A1（复审）：信号携带投影自身代次——迟到的旧投影 EOF 不得
+                    // 以"当前代次"误触发（与槽位重置的 pid 门同款防御）。
+                    if r2_eligible
+                        && projection_generation == reconnect_generation.load(Ordering::Acquire)
+                    {
+                        logs.append_core(
+                            "info",
+                            "kernel",
+                            "kernel.reconnect.r2_trigger",
+                            "engine lost in service form; signaling R2 reconnect worker (launchd self-heal expected)",
+                            &[],
+                        );
+                        if let Some(tx) = lock_recover(&reconnect_tx).as_ref() {
+                            let _ = tx.send((
+                                projection_generation,
+                                ReconnectSignal::EngineLost,
+                            ));
+                        }
+                    }
                 }
                 // 死 session 槽位重置：仅当槽位仍是产生本状态流的那个 Engine（pid 身份）
                 // 时才清空——防止迟到的旧投影把并发重连已换入的新会话误删。EOF =
@@ -2039,7 +2099,10 @@ impl LiveConnectionProjection {
     )]
     fn signal_reconnect(&self) {
         if let Some(tx) = lock_recover(&self.reconnect_tx).as_ref() {
-            let _ = tx.send(self.reconnect_generation.load(Ordering::Acquire));
+            let _ = tx.send((
+                self.reconnect_generation.load(Ordering::Acquire),
+                ReconnectSignal::DataPlaneDrop,
+            ));
         }
     }
 
@@ -2071,10 +2134,10 @@ impl LiveConnectionProjection {
         clippy::too_many_lines,
         reason = "判定链（防重入/开关/预算）+ 退避 + 派发/失败分支线性展开保持事实顺序可读，镜像 win32 drive_reconnect"
     )]
-    async fn drive_reconnect(&self) {
-        let reconnect_started = std::time::Instant::now();
-        let generation = self.reconnect_generation.load(Ordering::Acquire);
-        // 防重入：上一次重连尝试仍在途（已派发、终态未到）→ 不重复触发。
+    async fn drive_reconnect(&self, kind: ReconnectSignal) {
+        // 防重入首检：上一次重连尝试仍在途（已派发、终态未到）时新信号直接跳过。
+        // R2 的预算内再入走 [`Self::drive_reconnect_reentry`]（在途标记保持占用，
+        // 不得被自己的首检拦截——worker 单任务串行消费，无并发面）。
         if self.reconnect_active.load(Ordering::Acquire) {
             self.logs
                 .aggregator()
@@ -2087,6 +2150,13 @@ impl LiveConnectionProjection {
                 );
             return;
         }
+        self.drive_reconnect_reentry(kind).await;
+    }
+
+    /// [`Self::drive_reconnect`] 的再入体：无防重入首检（调用方已持有在途语义）。
+    async fn drive_reconnect_reentry(&self, kind: ReconnectSignal) {
+        let reconnect_started = std::time::Instant::now();
+        let generation = self.reconnect_generation.load(Ordering::Acquire);
         // 当前连接的实际重连决策只读受理时冻结的策略。
         let Some(SessionReconnectPolicy {
             enabled,
@@ -2142,6 +2212,15 @@ impl LiveConnectionProjection {
             return;
         }
         let attempts = self.reconnect_attempts.load(Ordering::Relaxed);
+        // T5：R2（EngineLost）的派发失败按预算退避重试——循环头的预算门拦截耗尽；
+        // 数据面掉线（DataPlaneDrop）沿用一期"派发前失败即终态"。
+        let r2_retry = kind == ReconnectSignal::EngineLost;
+        if r2_retry && attempts < if max == 0 { u32::MAX } else { max } {
+            self.logs.aggregator().append_core(
+                "info", "kernel", "kernel.reconnect.r2_mode",
+                "engine-lost reconnect: dispatch failures will retry within budget until the engine returns", &[],
+            );
+        }
         if max != 0 && attempts >= max {
             self.logs
                 .aggregator()
@@ -2154,6 +2233,10 @@ impl LiveConnectionProjection {
                     ),
                     &[],
                 );
+            // T5 自查修复：预算耗尽必须释放在途标记——R2 再入循环占用标记跨轮，
+            // 耗尽出口若不清位，后续掉线信号会被防重入首检永久跳过（公开入口
+            // 到达此处的常规路径 active 本就为 false，清位幂等无害）。
+            self.reconnect_active.store(false, Ordering::Release);
             self.finish_reconnect_and_cleanup(generation, reconnect_exhausted_vpn_error())
                 .await;
             return;
@@ -2241,6 +2324,44 @@ impl LiveConnectionProjection {
                     );
             }
             Err(status) => {
+                // T5 R2：引擎失联触发的派发失败多为引擎尚未被 launchd 拉回（会话
+                // 建立失败）——预算未耗尽时退避后重试（循环头的预算门会拦截耗尽），
+                // 不发终态。数据面掉线触发沿用一期语义：派发前失败即终态。
+                if r2_retry
+                    && generation == self.reconnect_generation.load(Ordering::Acquire)
+                {
+                    self.logs
+                        .aggregator()
+                        .append_core(
+                            "info",
+                            "kernel",
+                            "kernel.reconnect.r2_retry",
+                            &format!(
+                                "engine-lost reconnect attempt {attempt} failed before dispatch (engine not back yet?); budget permitting, sleeping before the next attempt: code={:?} msg={}",
+                                status.code(),
+                                status.message()
+                            ),
+                            &[],
+                        );
+                    // 无退避配置时 R2 也须给 launchd 拉回引擎留时间。
+                    let delay = if backoff {
+                        reconnect_backoff_delay(
+                            self.reconnect_backoff_base,
+                            self.reconnect_backoff_cap,
+                            attempt,
+                        )
+                    } else {
+                        std::time::Duration::from_secs(2)
+                    };
+                    tokio::time::sleep(delay).await;
+                    if generation != self.reconnect_generation.load(Ordering::Acquire) {
+                        return;
+                    }
+                    // 再入驱动下一轮（预算门在轮首拦截耗尽；在途标记保持占用，
+                    // 经 reentry 入口绕过防重入首检——自己不能拦自己）。async 再入
+                    // 需 boxing——每轮一个 box，退避 30s 封顶下增长率有界。
+                    return Box::pin(self.drive_reconnect_reentry(kind)).await;
+                }
                 // 同步失败（凭据缺失/会话建立失败等）：释放在途标记并发布 FailedClean
                 // 终态——错误按「派发前失败」诚实归类为连接控制阶段 + 用新 operation
                 // 重试（对齐 engine 取消语义；不携带平台细节）。
@@ -2318,12 +2439,12 @@ impl LiveConnectionProjection {
     /// 供测试 abort（取消退避 sleep）；darwin Core 随 UI session 结束整体退出，生产
     /// 路径 detach（进程 teardown 取消一切，无需 win32 常驻服务的显式 abort 纪律）。
     fn spawn_reconnect_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, ReconnectSignal)>();
         *lock_recover(&self.reconnect_tx) = Some(tx);
         tokio::spawn(async move {
-            while let Some(generation) = rx.recv().await {
+            while let Some((generation, kind)) = rx.recv().await {
                 if generation == self.reconnect_generation.load(Ordering::Acquire) {
-                    self.drive_reconnect().await;
+                    self.drive_reconnect(kind).await;
                 }
             }
         })

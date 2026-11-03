@@ -208,12 +208,17 @@ export function reconnectCursorOf(snapshot: RuntimeSnapshot): ReconnectNotifyCur
 }
 
 /**
- * 初始化门控读取源并立即读一次（main.ts 启动调用；测试注入内存 loader）。
- * 读取失败（core 不可达/纯浏览器预览）保持当前缓存值，不阻断 UI。
+ * 初始化门控读取源（main.ts 启动调用；测试注入内存 loader）。
+ *
+ * **不做立即读取**（2026-09-28 复审 F1 / 计划 v6.1 第一批）：入口层 eager
+ * ConfigGet 会与 App 的快速入门首读竞态——core 侧 config_get 在配置缺失时当场
+ * bootstrap 落盘且仅该次返回 requires=true，入口层抢先读取会把干净机器的首次
+ * 判定永久翻成「已配置」（2026-09-14 修过的同类启动顺序竞态在 T12 入口层重
+ * 开）。门控缓存保持默认值（开），首次刷新由 lane 变化触发；首个过程类 toast
+ * 判定前首观察只建基线不弹，门届时已完成刷新（终态类恒不受门控）。
  */
 export function initReconnectNotifyGate(loader: () => Promise<ConfigPayload>): void {
   gateLoader = loader;
-  void refreshReconnectNotifyGate();
 }
 
 /** 后台 best-effort 刷新门控缓存（config `reconnect_notify`；缺省 = 开）。 */

@@ -1,6 +1,6 @@
 [package]
 name = "exv-ui"
-version = "4.1.0"
+version = "4.1.1"
 description = "EXV VPN desktop UI (Tauri v2). Frontend: Vue3 + Vite + TS. UI<->core via Tauri Command/Event (Phase 4, P4-b real KernelControl gRPC wiring)."
 authors = ["HiderWild"]
 edition.workspace = true

@@ -46,6 +46,8 @@ pub enum PreauthError {
     EndpointExists,
     /// endpoint 或运行目录的 uid/gid 不匹配。
     EndpointOwnership,
+    /// T7：端点探活可连——有同形态实例正在监听，不得摘除其 socket（UDS 互斥）。
+    EndpointInUse,
     /// OS 提供的 uid/pid 与预期 peer 不匹配。
     PeerMismatch,
     /// 固定认证帧使用了未知版本。
@@ -70,6 +72,7 @@ impl fmt::Display for PreauthError {
             Self::PathInvalid => "Darwin IPC path is invalid",
             Self::EndpointExists => "Darwin IPC endpoint already exists",
             Self::EndpointOwnership => "Darwin IPC endpoint ownership is invalid",
+            Self::EndpointInUse => "Darwin IPC endpoint is live (another engine listens)",
             Self::PeerMismatch => "Darwin IPC peer does not match the expected uid/pid",
             Self::AuthVersion => "Darwin IPC authentication version is unsupported",
             Self::AuthFrame => "Darwin IPC authentication frame is malformed",

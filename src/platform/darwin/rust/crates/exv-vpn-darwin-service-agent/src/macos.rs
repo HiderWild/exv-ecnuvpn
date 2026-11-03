@@ -718,7 +718,20 @@ pub(crate) fn remove_safe_stale_socket(owner: EnrolledOwner) -> Result<(), Platf
         return Ok(());
     };
     match stale_socket_plan(identity, owner) {
-        StaleSocketPlan::StrictRemoval => remove_socket_if_identity(identity, owner),
+        StaleSocketPlan::StrictRemoval => {
+            // T7（UDS 偷取缺口镜像修复，对齐 ipc service_listener 的探活纪律）：
+            // 身份匹配不代表 stale——活 daemon 的 control.sock 同样匹配。摘除前
+            // connect 探活：可连=有 daemon 正在监听（ArtifactGuardRejected 拒绝
+            // 摘除）；连接被拒才是真 stale。防第二个 agent 实例偷走活端点。
+            if std::os::unix::net::UnixStream::connect(
+                crate::platform::SERVICE_AGENT_SOCKET_PATH,
+            )
+            .is_ok()
+            {
+                return Err(PlatformError::ArtifactGuardRejected);
+            }
+            remove_socket_if_identity(identity, owner)
+        }
         // 身份不符的旧语义是直接 Err，失败推迟为 core 侧
         // `DARWIN_CORE_SERVICE_NOT_READY` 二次卡点；改为孤儿语义回收——父目录
         // root 属主且无 022 写位 + 非 symlink + 固定叶名即删除，不再要求残留

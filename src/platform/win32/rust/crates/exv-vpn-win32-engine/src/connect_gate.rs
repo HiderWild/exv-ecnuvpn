@@ -374,6 +374,10 @@ impl ConnectGate {
     /// 数据面已承载业务流），同一时刻回写**版本标记**（`mark_live` = 首次建立；
     /// R1 重连的 `update_established_at` 是既有代次的重新建立，不重复回写）。
     ///
+    /// 首建锚点（诊断质量项，计划 v6.1 P1-7）：`established_at_ms` 在此回写真实
+    /// 时刻（不换 `connection_id`——受理时铸造的代次不动；此前仅重连回写、首建
+    /// 留 0，现场取证无法回答"何时建立"）。
+    ///
     /// 失败只告警不上抛——装配已成功，痕迹/标记写失败不得拆毁活隧道；痕的
     /// connecting 残留下次预检兜底；标记未更新 → 版本触发源下次连接重复命中
     /// （多跑一轮无害预检，保守方向）。
@@ -404,6 +408,9 @@ impl ConnectGate {
         if let Err(error) = store.update_state(sid, TraceState::Live) {
             self.warn_trace(log, "update_state(live)", &error);
             return;
+        }
+        if let Err(error) = store.mark_established(sid, unix_now_ms()) {
+            self.warn_trace(log, "mark_established", &error);
         }
         if let Err(error) = store.patch_fields(sid, patch) {
             self.warn_trace(log, "patch_fields", &error);
