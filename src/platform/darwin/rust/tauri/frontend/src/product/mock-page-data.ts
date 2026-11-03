@@ -31,10 +31,6 @@ export function createMockCoreConfigGateway(): CoreConfigGateway {
       if (values.get("remember_password") !== "true") values.delete("password");
       return true;
     },
-    async savedPassword(username, server) {
-      if (values.get("username") !== username || values.get("server") !== server) throw new Error("预览账户已变化");
-      return values.get("remember_password") === "true" ? values.get("password") || null : null;
-    },
   };
 }
 

@@ -68,7 +68,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
 <template>
   <div
     v-if="visible"
-    class="modal-overlay"
+    class="modal-overlay exv-dialog"
     data-testid="core-wake-failure-modal"
     :data-compact="compact ? 'true' : 'false'"
     role="alertdialog"
@@ -78,14 +78,17 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
     tabindex="-1"
     @keydown="onDialogKeydown"
   >
-    <div class="modal-card">
-      <div class="modal-body">
-        <h2 id="core-wake-failure-title">无法恢复后台服务</h2>
+    <div class="modal-card exv-dialog-card">
+      <h2 v-if="compact" id="core-wake-failure-title">无法恢复后台服务</h2>
+      <div class="modal-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '详细说明' : undefined">
+        <h2 v-if="!compact" id="core-wake-failure-title">无法恢复后台服务</h2>
         <p class="modal-error" data-testid="core-wake-failure-error">
           后台核心进程已停止，自动重启未能成功；本次操作未完成。
         </p>
         <p v-if="message" class="modal-detail" data-testid="core-wake-failure-detail">{{ message }}</p>
         <p class="modal-hint">请选择以下处理方式：</p>
+        <p v-if="compact" class="modal-consequences">「尝试重启程序」将关闭并重新启动 EXV：进行中的连接会中断，未保存的界面状态会丢失，重启后后台服务会重新拉起。
+        「仅退出」将退出 EXV，后台不会继续运行任何服务；下次启动时恢复。</p>
       </div>
 
       <div class="modal-actions">
@@ -107,7 +110,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
           {{ busyAction === "exit" ? "正在退出…" : "仅退出" }}
         </button>
       </div>
-      <p class="modal-consequences">
+      <p v-if="!compact" class="modal-consequences">
         「尝试重启程序」将关闭并重新启动 EXV：进行中的连接会中断，未保存的界面状态会丢失，重启后后台服务会重新拉起。
         「仅退出」将退出 EXV，后台不会继续运行任何服务；下次启动时恢复。
       </p>
@@ -142,7 +145,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
 
 .modal-card h2 {
   margin-bottom: var(--space-2);
-  font-size: 18px;
+  font-size: var(--font-size-heading);
 }
 
 .modal-error {
@@ -151,19 +154,19 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
   border: 1px solid var(--state-danger);
   border-radius: var(--radius-md);
   color: var(--state-danger);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-detail {
   margin-bottom: var(--space-2);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-hint {
   margin-bottom: var(--space-4);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-actions {
@@ -177,14 +180,14 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
   padding: var(--space-1) var(--space-3);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--font-size-body);
   cursor: pointer;
 }
 
 .modal-actions__primary {
   border-color: var(--state-danger);
   background: var(--state-danger);
-  color: #fff;
+  color: var(--state-danger-on);
 }
 
 .modal-actions button:disabled {
@@ -197,11 +200,11 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
 .modal-consequences {
   margin: var(--space-3) 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   line-height: 1.5;
 }
 
-/* 极简紧凑变体：对齐既有模态的紧凑规则（面板收窄、正文裁切、按钮不换行）。 */
+/* 极简紧凑变体：对齐既有模态的紧凑规则（面板收窄、正文完整滚动、按钮不换行）。 */
 .modal-overlay[data-compact="true"] {
   padding: 8px;
 }
@@ -217,12 +220,9 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
 }
 
 .modal-overlay[data-compact="true"] .modal-card h2 {
-  overflow: hidden;
   margin-bottom: 3px;
-  font-size: 12px;
+  font-size: var(--font-size-heading);
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .modal-overlay[data-compact="true"] .modal-error,
@@ -230,7 +230,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
 .modal-overlay[data-compact="true"] .modal-hint,
 .modal-overlay[data-compact="true"] .modal-consequences {
   margin-bottom: 3px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.25;
 }
 
@@ -239,7 +239,8 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
   min-height: 0;
   flex: 1 1 auto;
   gap: 3px;
-  overflow: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .modal-overlay[data-compact="true"] .modal-actions {
@@ -252,13 +253,9 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => {}
   min-width: 0;
   min-height: 22px;
   padding: 2px 7px;
-  font-size: 11px;
+  font-size: var(--font-size-body);
   line-height: 1.1;
   white-space: nowrap;
 }
 
-.modal-overlay[data-compact="true"] .modal-consequences {
-  overflow: hidden;
-  max-height: 3.9em;
-}
 </style>

@@ -12,6 +12,9 @@ serde_json = { workspace = true }
 aes-gcm = { workspace = true }
 base64 = { workspace = true }
 getrandom = { workspace = true }
+# S4（2026-10）：读失败三档自愈的第二档（Owner=self 时 SetNamedSecurityInfo 自修
+# DACL）需要 advapi32 安全 API；仅 Windows 构建使用（代码 cfg(windows) 门控）。
+windows = { workspace = true }
 
 [lints]
 workspace = true

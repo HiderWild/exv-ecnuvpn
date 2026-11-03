@@ -1,3 +1,4 @@
+import type { AuthPreparationAction, AuthPreparationEvent, AuthReceiverReply } from "../product/auth-preparation";
 // Typed IPC wrappers: Tauri Command (invoke) + Event (listen).
 // 契约来源：app/src/kernel/{commands,events,state,logs}.rs（P4-a 骨架）。
 // 前端重写（O2）：不复用 C++ webui/ 代码。
@@ -25,6 +26,10 @@ export type ConnectPhase =
 export interface VpnError {
   code: string;
   message: string;
+  stage?: string | null;
+  /** 稳定失败原因 id（EXV_UNFREEZE 2026-10-09，tag 8；空 = 缺省）。文案按
+   * `lib/copy-tables.ts` 的 REASON_COPY 映射——单一文案来源。 */
+  reason?: string | null;
 }
 
 export type RuntimeState =
@@ -81,6 +86,8 @@ export interface ReconnectStatus {
   current_attempt: number;
   /** 重连尝试是否正在飞行中。 */
   active: boolean;
+  /** 重连 reason lane 稳定 id（S5b 暂停事实 reconnect_paused_* 等；空 = 无事实）。 */
+  reason?: string;
 }
 
 /** host 自愈（engine 崩溃 respawn）状态（EXV_UNFREEZE 2026-09-05；仅状态上报——
@@ -108,7 +115,23 @@ export interface ServiceStatus {
   health_state?: string | null;
 }
 
+export interface StopCompletion {
+  stopped: boolean;
+  blocks_new_connect: boolean;
+  errors: VpnError[];
+}
+
+/** 已由 Core 接纳的非秘密会话身份；不来自当前可变配置。 */
+export interface SessionIdentity {
+  protocol: string;
+  username: string;
+  server: string;
+}
+
 export interface RuntimeSnapshot {
+  session_identity?: SessionIdentity | null;
+  engine_reconnect?: { attempt: number; next_retry_at_ms: number; reason: string } | null;
+  stop_completion?: StopCompletion | null;
   runtime: RuntimeState;
   monotonic_tick: number;
   /** stats-wire 方案 A：快照携带最新归一化统计；null = 尚无样本。 */
@@ -146,6 +169,7 @@ export type OperationResult =
   | { result: "failed"; error?: VpnError | null };
 
 export interface OperationReply {
+  stop_completion?: StopCompletion | null;
   result: OperationResult;
   /** R4：本命令生成的操作 id（hex16）；null = 未产生/被拒（无状态事件关联）。 */
   operation_id?: string | null;
@@ -215,6 +239,7 @@ export interface ConnectCredentials {
 
 export interface ConnectIntent {
   profile_ref: string;
+  atrust_reauthenticate?: string;
   credentials?: ConnectCredentials | null;
 }
 
@@ -227,7 +252,16 @@ export interface ConnectIntent {
 export type ServiceControlAction = "query" | "install" | "uninstall" | "start" | "rotate_key";
 
 /** ServiceControl 回复：post-action 服务状态 + 结果 + 人类可读信息（无秘密/栈）。 */
+export interface ServiceVersion {
+  expected: number;
+  bundled: number | null;
+  installed: number | null;
+  /** 只比较安装文件；不把文件版本冒充正在运行的进程版本。 */
+  matches_bundle: boolean | null;
+}
+
 export interface ServiceControlReply {
+  service_version?: ServiceVersion | null;
   service_status?: ServiceStatus | null;
   ok: boolean;
   message: string;
@@ -238,29 +272,55 @@ export interface ConfigItem {
   value: string;
 }
 
-/** 快速入门的一次性提交：核心配置和可选服务安装在同一 Tauri 业务入口执行。 */
-export interface QuickStartApplyRequest {
-  items: ConfigItem[];
-  install_service: boolean;
+/** AUTH-03：浏览器选择状态（B3 起仅状态展示：默认/安装枚举/会话内显式偏好；
+ * 选择器等待流已退场——默认浏览器不受支持时按优先序自动选择，零可用静默
+ * 回退内嵌，前端不再提供选择界面）。 */
+export interface AtrustBrowserStatus {
+  /** 系统默认浏览器受支持时为 "chrome" | "safari" | "edge"；否则 null。 */
+  default_browser: string | null;
+  /** 已安装的受支持浏览器（chrome → safari → edge 固定顺序，即平台优先序）。 */
+  installed: string[];
+  /** 本会话已记住的显式选择（wire 兼容保留，生产界面无写入方）；null = 未选择。 */
+  chosen: string | null;
 }
 
-/** 失败不丢弃前端草稿；成功时可附带安装后的服务状态。 */
+/** 快速入门只提交核心配置；服务安装沿既有独立协调器执行。 */
+export interface QuickStartApplyRequest {
+  items: ConfigItem[];
+}
+
+/** 失败不丢弃前端草稿；service_status 仅保留旧回复兼容。 */
 export interface QuickStartApplyReply {
   ok: boolean;
   service_status?: ServiceStatus | null;
   message?: string;
 }
 
+export interface ConfigRecovery {
+  corrupted: boolean;
+  backup_file: string;
+}
+
+export interface ConfigReadFailure {
+  /** 沿既有 wire 保留；Darwin 为 0，界面不展示 Win32 错误号。 */
+  win32_code: number;
+  path: string;
+}
+
 export interface ConfigPayload {
   items: ConfigItem[];
   /** 本次读取是否因无效本地配置而 bootstrap 默认值；不含原始文件、异常或秘密。 */
   requires_quick_start: boolean;
+  config_recovery?: ConfigRecovery | null;
+  read_failure?: ConfigReadFailure | null;
 }
 
 /** Tauri command 的兼容读模型：旧/测试回复缺少新字段时明确视为 false。 */
 interface ConfigPayloadWire {
   items: ConfigItem[];
   requires_quick_start?: boolean;
+  config_recovery?: ConfigRecovery | null;
+  read_failure?: ConfigReadFailure | null;
 }
 
 /** UI 对 Core 控制面的仅有两种结论：正常（已验证管道可通）或已停止。 */
@@ -293,6 +353,11 @@ function listenTauri<Payload>(
 }
 
 export const kernel = {
+  authPreparationRespond(generation: number, action: AuthPreparationAction): Promise<void> {
+    return invokeTauri<void>("auth_preparation_respond", { generation, action });
+  },
+  authReceiverStatus(): Promise<AuthReceiverReply> { return invokeTauri<AuthReceiverReply>("auth_receiver_status"); },
+  restoreOfficialAuthReceiver(): Promise<AuthReceiverReply> { return invokeTauri<AuthReceiverReply>("restore_official_auth_receiver"); },
   connect(intent: ConnectIntent): Promise<OperationReply> {
     return invokeTauri<OperationReply>("connect", { intent });
   },
@@ -319,10 +384,9 @@ export const kernel = {
     return {
       items: payload.items,
       requires_quick_start: payload.requires_quick_start === true,
+      config_recovery: payload.config_recovery ?? null,
+      read_failure: payload.read_failure ?? null,
     };
-  },
-  savedPassword(username: string, server: string): Promise<string | null> {
-    return invokeTauri<string | null>("saved_password", { username, server });
   },
 
   configSet(items: ConfigItem[]): Promise<boolean> {
@@ -330,6 +394,13 @@ export const kernel = {
   },
   quickStartApply(request: QuickStartApplyRequest): Promise<QuickStartApplyReply> {
     return invokeTauri<QuickStartApplyReply>("quick_start_apply", { request });
+  },
+  /** 快速入门「已见」标记（KI-03 对齐 win32 KI-13：`~/.exv/quick-start.json` 单键）。 */
+  quickStartSeenGet(): Promise<boolean> {
+    return invokeTauri<boolean>("quick_start_seen_get");
+  },
+  quickStartSeenMark(): Promise<void> {
+    return invokeTauri<void>("quick_start_seen_mark");
   },
   /** 读取 EXV 隧道适配器当前的真实 IPv4 地址；未连接/尚未分配时返回 null。 */
   tunnelAddress(): Promise<string | null> {
@@ -339,14 +410,42 @@ export const kernel = {
     return invokeTauri<OperationReply>("respond_interaction", { interactionId, responsePayload });
   },
   /** 触发一次延迟刷新（T1：写本地标记，engine 探测循环立即 ping；延迟经快照 stats 到达）。 */
-  triggerLatencyRefresh(): Promise<void> {
-    return invokeTauri<void>("trigger_latency_refresh");
+  triggerLatencyRefresh(operationId: string): Promise<void> {
+    return invokeTauri<void>("trigger_latency_refresh", { operationId });
   },
   /** 服务控制（S3/D5）：query 非提权读；install/uninstall/start/rotate_key 经 host runas seam。 */
   serviceControl(action: ServiceControlAction): Promise<ServiceControlReply> {
     return invokeTauri<ServiceControlReply>("service_control", { action });
   },
+  /** AUTH-03：浏览器选择状态（默认/安装/会话内偏好的状态展示面）。 */
+  atrustBrowserStatus(): Promise<AtrustBrowserStatus> {
+    return invokeTauri<AtrustBrowserStatus>("atrust_browser_status");
+  },
+  /** AUTH-03：会话内显式选择（chrome/safari/edge）；wire 兼容保留（生产界面
+   * 无写入方），写入后下次连接优先采用并失效自动选择缓存。 */
+  atrustBrowserChoose(browser: string): Promise<boolean> {
+    return invokeTauri<boolean>("atrust_browser_choose", { browser });
+  },
+  /** C3：常驻本地 Agent 状态（原生系统浏览器认证的票据接收面；离线=启动失败事实）。 */
+  nativeAgentStatus(): Promise<NativeAgentStatus> {
+    return invokeTauri<NativeAgentStatus>("native_agent_status");
+  },
 };
+
+/** 常驻本地 Agent 状态（`exv://native-agent` 事件同形状）。 */
+export interface NativeAgentStatus {
+  phase?: "idle" | "active";
+  online: boolean;
+  /** 离线原因（在线为空串）。 */
+  message: string;
+}
+
+/** C3：常驻本地 Agent 状态事件（bootstrap 启动/失败时发射；前端启动后以命令兜底查询）。 */
+export const EVENT_NATIVE_AGENT = "exv://native-agent";
+
+export function onNativeAgentStatus(cb: (status: NativeAgentStatus) => void): Promise<UnlistenFn> {
+  return listenTauri<NativeAgentStatus>(EVENT_NATIVE_AGENT, (event) => cb(event.payload));
+}
 
 // ---- Event 订阅（P4-b 接真实 WatchEvents/StreamLogs 后生效） ----
 
@@ -378,4 +477,28 @@ export function isNotWired(e: unknown): boolean {
     e !== null &&
     (e as { kind?: string }).kind === "not_wired"
   );
+}
+
+export type BrowserLoginMilestone = "opening" | "school_login" | "submitting" | "gateway_confirming" | "awaiting_manual" | "recovering" | "ticket_invalid";
+
+/** 仅承载本地认证等待呈现，代次与里程碑均来自连接请求。 */
+export interface BrowserLoginEvent {
+  /** 当前用户明确选择的临时认证渠道；普通重复首事件保持冻结语义。 */
+  channel_override?: boolean;
+  active: boolean;
+  generation: number;
+  mode: "embedded" | "browser" | "headless";
+  outcome?: "authenticated" | "cancelled";
+  /** 后台认证首事件的冻结呈现上下文；后续阶段沿同一 generation。 */
+  recovery?: { mode: "embedded" | "browser" | "headless"; auto_login: boolean };
+  milestone?: BrowserLoginMilestone;
+  /** 自动恢复事件可选携带；缺省载荷沿用原阶段。 */
+  round?: 1 | 2;
+}
+export function onBrowserLogin(cb: (event: BrowserLoginEvent) => void): Promise<UnlistenFn> {
+  return listenTauri<BrowserLoginEvent>("exv://browser-login", (event) => cb(event.payload));
+}
+
+export function onAuthPreparation(cb: (event: AuthPreparationEvent) => void): Promise<UnlistenFn> {
+  return listenTauri<AuthPreparationEvent>("exv://auth-preparation", event => cb(event.payload));
 }

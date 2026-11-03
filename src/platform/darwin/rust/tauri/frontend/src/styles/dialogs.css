@@ -1,0 +1,186 @@
+/* 模态共用已选预览的表面、标题与控件，原组件继续拥有事件及层级。 */
+.exv-dialog.exv-dialog {
+  padding: 18px;
+  background: rgb(24 32 28 / 40%);
+  backdrop-filter: blur(3px);
+}
+.exv-dialog.exv-dialog .exv-dialog-card {
+  width: min(100%, 420px);
+  padding: 25px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  box-shadow: 0 25px 80px rgb(0 0 0 / 20%);
+  overflow-wrap: anywhere;
+}
+.exv-dialog.exv-dialog h2,
+.exv-dialog.exv-dialog .routes-nested-modal h3 {
+  margin: 0 0 16px;
+  font-size: var(--font-size-heading);
+  line-height: 1.4;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.exv-dialog.exv-dialog :is(.modal-intro, .modal-hint, .modal-steps, .modal-consequences, .modal-footnote, .credential-modal-intro) {
+  font-size: var(--font-size-caption);
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+.exv-dialog.exv-dialog :is(.modal-actions, .credential-modal-actions, .auth-wait-actions, .quick-start-actions) {
+  gap: 9px;
+  justify-content: flex-end;
+}
+.exv-dialog.exv-dialog :is(.modal-actions, .credential-modal-actions, .auth-wait-actions, .quick-start-actions) button {
+  min-height: 35px;
+  padding: 7px 12px;
+  border-radius: 7px;
+  font-size: var(--font-size-body);
+  line-height: 1.4;
+}
+.exv-dialog.exv-dialog :is(.modal-error, .modal-action-error, .credential-modal-error, .submit-error, .auth-wait-error) {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--state-danger) 35%, var(--border-subtle));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--state-danger) 5%, var(--surface-panel));
+  color: var(--state-danger);
+  font-size: var(--font-size-caption);
+  line-height: 1.7;
+}
+.exv-dialog.exv-dialog .credential-modal-body { display: grid; gap: 14px; }
+.exv-dialog.exv-dialog .credential-modal-field { font-size: var(--font-size-body); gap: 7px; }
+.exv-dialog.exv-dialog input:not([type="checkbox"]):not([type="radio"]),
+.exv-dialog.exv-dialog select,
+.exv-dialog.exv-dialog textarea {
+  min-width: 0;
+  border-radius: 7px;
+  background: var(--surface-panel);
+  font-size: var(--font-size-body);
+}
+.exv-dialog.exv-dialog :is(input, select, textarea):focus-visible { outline-offset: -2px; }
+/* 编辑边界沿用阶段 2 裁定；卡片和只读／禁用控件仍使用原装饰边界。 */
+.exv-dialog.exv-dialog input:not([type="checkbox"]):not([type="radio"]):not(:disabled):not([readonly]),
+.exv-dialog.exv-dialog select:not(:disabled),
+.exv-dialog.exv-dialog textarea:not(:disabled):not([readonly]) { border-color: var(--border-strong); }
+.exv-dialog.exv-dialog .routes-modal-card { width: min(100%, 740px); }
+.exv-dialog.exv-dialog .service-overlay__label { font-size: var(--font-size-heading); font-weight: 500; line-height: 1.4; }
+.exv-dialog.exv-dialog .service-overlay__extra { justify-items: stretch; }
+.exv-dialog.exv-dialog .service-overlay__spinner { width: 32px; height: 32px; }
+.exv-dialog.exv-dialog .auth-wait-stage { color: var(--accent); }
+.exv-dialog.exv-dialog .quick-start-card {
+  width: min(100%, 600px);
+  max-height: 90dvh;
+  display: flex;
+  flex-direction: column;
+  padding: 26px;
+}
+.exv-dialog.exv-dialog .quick-start-card--advanced { width: min(100%, 1080px); height: min(90dvh, 740px); }
+.exv-dialog.exv-dialog .quick-start-header { flex: none; margin-bottom: 18px; }
+.exv-dialog.exv-dialog .quick-start-header h2 { margin: 0; }
+.exv-dialog.exv-dialog .quick-start-mode-control { background: var(--surface-subtle); }
+.exv-dialog.exv-dialog .quick-start-mode-control__button--active { background: var(--surface-panel); color: var(--accent); }
+.exv-dialog.exv-dialog :is(.quick-start-fields, .quick-start-advanced) {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  margin: 0 -6px;
+  gap: 18px 20px;
+  border: 0;
+}
+.exv-dialog.exv-dialog .quick-start-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.exv-dialog.exv-dialog .quick-start-advanced--three-columns { grid-template-columns: minmax(0, .9fr) minmax(0, 1fr) minmax(0, 1.15fr); column-gap: 24px; }
+.exv-dialog.exv-dialog .quick-start-advanced-column { gap: 18px; }
+.exv-dialog.exv-dialog .quick-start-route-column { min-height: 300px; }
+.exv-dialog.exv-dialog .quick-start-route-column h3 { font-size: var(--font-size-heading); }
+.exv-dialog.exv-dialog .quick-start-actions { flex: none; margin-top: 18px; }
+.exv-dialog.exv-dialog .quick-start-actions .quick-start-submit { font-weight: 500; }
+.exv-dialog.exv-dialog [data-testid="service-failure-reinstall"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+.exv-dialog.exv-dialog[data-compact="true"],
+.exv-dialog.exv-dialog.service-overlay--minimal { padding: 8px; }
+.exv-dialog.exv-dialog[data-compact="true"] .exv-dialog-card,
+.exv-dialog.exv-dialog.service-overlay--minimal .exv-dialog-card {
+  width: min(100%, 294px);
+  max-height: calc(100dvh - 28px);
+  padding: 8px;
+  border-radius: 10px;
+}
+.exv-dialog.exv-dialog[data-compact="true"] .exv-dialog-card { box-sizing: border-box; min-width: 0; }
+.exv-dialog.exv-dialog[data-compact="true"] :is(.modal-body, .credential-modal-body) {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 1.3em;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  align-content: start;
+  gap: 4px;
+}
+.exv-dialog.exv-dialog[data-compact="true"] :is(h2, .service-overlay__label) { font-size: var(--font-size-heading); margin-bottom: 4px; }
+.exv-dialog.exv-dialog[data-compact="true"] h2 { flex: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.exv-dialog.exv-dialog[data-compact="true"] :is(p, li, label) { font-size: var(--font-size-caption); line-height: 1.3; }
+.exv-dialog.exv-dialog[data-compact="true"] :is(.modal-error, .modal-action-error, .credential-modal-error) { padding: 4px 6px; }
+.exv-dialog.exv-dialog[data-compact="true"] :is(.modal-consequences, .modal-footnote) { margin: 0; }
+.exv-dialog.exv-dialog[data-compact="true"] :is(.modal-actions, .credential-modal-actions) { flex: none; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.exv-dialog.exv-dialog[data-compact="true"] :is(.modal-actions, .credential-modal-actions) button,
+.exv-dialog.exv-dialog.service-overlay--minimal .auth-wait-actions button { min-height: 22px; padding: 2px 7px; font-size: var(--font-size-body); }
+.exv-dialog.exv-dialog.service-overlay--minimal .service-overlay__label { font-size: var(--font-size-heading); }
+.exv-dialog.exv-dialog.service-overlay--minimal .service-overlay__spinner { width: 20px; height: 20px; }
+/* 紧凑认证保留标题／动作；只有提示正文滚动，不依赖截图的请求尺寸。 */
+.exv-dialog.exv-dialog.service-overlay--minimal .service-overlay__card { overflow: visible; gap: 2px; min-width: 0; }
+.exv-dialog.exv-dialog.service-overlay--minimal .service-overlay__spinner { flex: none; }
+.exv-dialog.exv-dialog.service-overlay--minimal .service-overlay__label { flex: 0 1 auto; min-height: 1.3em; overflow-y: auto; overscroll-behavior: contain; }
+.exv-dialog.exv-dialog.service-overlay--minimal .service-overlay__extra {
+  flex: 0 1 auto;
+  min-height: calc(1.3em + 35px);
+  grid-template-rows: minmax(1.3em, auto) auto;
+  gap: 0;
+}
+.exv-dialog.exv-dialog .auth-wait-body { display: grid; gap: var(--space-3); }
+.exv-dialog.exv-dialog.service-overlay--minimal .auth-wait-body { min-width: 0; min-height: 1.3em; overflow-y: auto; overflow-wrap: anywhere; overscroll-behavior: contain; align-content: start; gap: 4px; }
+.exv-dialog.exv-dialog.service-overlay--minimal .auth-wait-body p { font-size: var(--font-size-caption); line-height: 1.3; }
+/* 外圈留在动作自己的空间内；底部另容纳带向下偏移的悬停阴影。 */
+.exv-dialog.exv-dialog.service-overlay--minimal .auth-wait-actions { flex: none; padding: 5px 5px 8px; }
+/* 快速入门也可能在极简窗口首次打开，标题与动作保留、字段滚动。 */
+:root[data-mode="minimal"] .exv-dialog.quick-start-overlay { padding: 8px; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-card { max-height: calc(100dvh - 16px); padding: 8px; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-header { margin-bottom: 6px; gap: 8px; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-header h2 { font-size: var(--font-size-heading); }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-mode-control__button { min-height: 22px; padding: 2px 7px; font-size: var(--font-size-body); }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-actions { margin-top: 6px; gap: 4px; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-actions button { min-height: 22px; padding: 2px 7px; font-size: var(--font-size-body); }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-body { display: block; flex: 1 1 auto; min-height: 1.3em; overflow-y: auto; overflow-wrap: anywhere; overscroll-behavior: contain; scrollbar-width: thin; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog :is(.quick-start-fields, .quick-start-advanced) { overflow: visible; margin: 0; padding: 2px; gap: 8px; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-advanced-column { gap: 8px; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog .quick-start-route-column { min-height: 0; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog :is(.submit-error, .preference-notice) { margin-top: 4px; padding: 4px 6px; font-size: var(--font-size-caption); line-height: 1.3; }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog label { font-size: var(--font-size-body); }
+:root[data-mode="minimal"] .exv-dialog.exv-dialog :is(input:not([type="checkbox"]), select) { min-height: 28px; }
+/* 路由编辑只由快速入门传入 compact；设置页退出极简后仍沿用完整布局。 */
+.routes-editor[data-compact="true"] :is(.routes-workspace, .routes-list) { flex: none; }
+.routes-editor[data-compact="true"] .routes-list { max-height: 8em; margin-bottom: 4px; }
+.routes-editor[data-compact="true"] :is(.routes-panel, .route-item) { padding: 4px; gap: 4px; }
+.routes-editor[data-compact="true"] .route-item { min-height: 24px; }
+.routes-editor[data-compact="true"] :is(.route-item__text, .routes-selection-count, .routes-merge-preview, .routes-empty) { font-size: var(--font-size-caption); line-height: 1.3; }
+.routes-editor[data-compact="true"] .routes-panel h3 { font-size: var(--font-size-heading); line-height: 1.3; }
+.routes-editor[data-compact="true"] .routes-merge { flex-wrap: wrap; gap: 4px; }
+.routes-editor[data-compact="true"] .routes-add-composer textarea { min-height: 64px; padding: 4px 4px 28px; font-size: var(--font-size-body); }
+.routes-editor[data-compact="true"] :is(.route-item__remove, .routes-add-composer > button, .routes-merge-button) { min-height: 22px; padding: 2px 7px; font-size: var(--font-size-body); }
+.exv-dialog.exv-dialog.routes-nested-overlay[data-compact="true"] { position: fixed; inset: 0; z-index: 80; }
+.exv-dialog.exv-dialog[data-compact="true"] .routes-nested-modal { display: flex; flex-direction: column; overflow: hidden; }
+.exv-dialog.exv-dialog[data-compact="true"] .routes-nested-modal h3 { flex: none; margin: 0 0 4px; font-size: var(--font-size-heading); line-height: 1.3; }
+.exv-dialog.exv-dialog[data-compact="true"] .routes-nested-body { display: block; flex: 1 1 auto; min-height: 1.3em; min-width: 0; overflow-y: auto; overflow-wrap: anywhere; overscroll-behavior: contain; }
+.exv-dialog.exv-dialog[data-compact="true"] .routes-failure-list { margin-top: 4px; padding-left: 12px; gap: 4px; }
+.exv-dialog.exv-dialog [role="region"][tabindex="0"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+@media (max-width: 800px) {
+  .exv-dialog.exv-dialog .quick-start-advanced--three-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .exv-dialog.exv-dialog .quick-start-route-column { grid-column: 1 / -1; }
+}
+@media (max-width: 520px) {
+  .exv-dialog.exv-dialog .quick-start-card { padding: 16px; }
+  .exv-dialog.exv-dialog :is(.quick-start-fields, .quick-start-advanced--three-columns) { grid-template-columns: minmax(0, 1fr); }
+  .exv-dialog.exv-dialog .quick-start-route-column { grid-column: auto; }
+}

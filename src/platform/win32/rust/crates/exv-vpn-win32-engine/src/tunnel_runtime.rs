@@ -36,6 +36,9 @@
 //! **Connected 必须来自真实数据面就绪**：`data_plane::spawn_data_plane` 成功返回后
 //! 才推 Connected——记账式 set_phase 已退役（grpc_server 不再凭空推占位信号）。
 
+pub(crate) mod lifecycle;
+
+use crate::stop_report::{StopAction, StopActionState, StopObligation, StopReport};
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -50,6 +53,7 @@ use exv_vpn_wire::generated;
 use generated::ConnectPhase;
 use tokio::sync::mpsc;
 
+use crate::connect_ledger::{AttemptEnd, LedgerDomain, TraceAdmission};
 use crate::data_plane::{
     DataPlaneAux, EngineDataPlane, EngineDataPlaneThreads, LatencyProbeConfig, WINTUN_RING_CAPACITY,
 };
@@ -166,10 +170,19 @@ pub struct TunnelError {
     pub a0: u32,
     /// 可读错误详情（typed 变体名，绝不含 secret/cookie）。
     pub detail: String,
+    /// 稳定失败原因 id（阶段② reason 透传；`<域>/<细分>` 小写，空 = 缺省，落
+    /// T-22 泛化文案）。词表与文案单一来源见前端 `lib/copy-tables.ts` 与壳
+    /// `wire.rs` 的 reason 文案表（两表注释互指 + 一致性测试钉住）。
+    /// ConnectingControl 段的 `plain()` 群与出口探查（`observed_cstp_bypass`）
+    /// 刻意维持空 reason——细分不入 v1 词表，泛化句已可行动。
+    pub reason: &'static str,
 }
 
-/// SAML 要求的特定 domain 错误码：MVP 不支持交互式 SAML，engine 诚实标记。
-const ERROR_CODE_SAML_REQUIRED: u32 = 1;
+/// SAML 要求的内部标记码（仅存于 `TunnelError.code`，供日志与测试判别；与 wire
+/// 判别值无关——wire SAML 码自 EXV_UNFREEZE 2026-10-09 起为 20，见
+/// `tunnel_error_to_wire` 的 `WIRE_SAML_REQUIRED`）。MVP 不支持交互式 SAML，
+/// engine 诚实标记。
+const SAML_MARKER_CODE: u32 = 1;
 /// wire `ErrorStage::Ingress` 判别值。
 const ERROR_STAGE_INGRESS: i32 = 1;
 /// wire `RetryAdvice::DoNotRetry` 判别值。
@@ -196,13 +209,15 @@ pub enum TunnelErrorKind {
 }
 
 /// `TunnelError` → wire `VpnError`（status 通道 Failed 事件）。可读 detail 仅本地
-/// 记录，绝不落 wire（spec §10：wire 只带结构化字段）。
+/// 记录，绝不落 wire（spec §10：wire 只带结构化字段）；稳定原因以 `reason` id
+/// 透传（EXV_UNFREEZE 2026-10-09，tag 8），壳侧按 id 映射文案。
 ///
 /// 精确映射表（按 `TunnelErrorKind` 判别）：
 /// - `DuplicateConnect` → `CONNECT_IN_PROGRESS(3)`
 /// - `MissingCredentials` → `INVALID_INPUT(1)`
 /// - `LoginRejected` → `UNAUTHORIZED(15)`（唯一真实的认证拒绝）
-/// - `LoginSaml` → `SAML_REQUIRED(1)`
+/// - `LoginSaml` → `SAML_REQUIRED(20)`（EXV_UNFREEZE 2026-10-09 修撞码：旧值 1
+///   与 `INVALID_INPUT` 同值，SAML 场景误显「输入无效」）
 /// - `Transport` → `DEADLINE_EXCEEDED(16)`
 /// - `Platform` → `EFFECT_UNKNOWN(13)`
 pub(crate) fn tunnel_error_to_wire(err: &TunnelError) -> generated::VpnError {
@@ -210,7 +225,7 @@ pub(crate) fn tunnel_error_to_wire(err: &TunnelError) -> generated::VpnError {
     const WIRE_CONNECT_IN_PROGRESS: i32 = 3;
     const WIRE_INVALID_INPUT: i32 = 1;
     const WIRE_UNAUTHORIZED: i32 = 15;
-    const WIRE_SAML_REQUIRED: i32 = 1;
+    const WIRE_SAML_REQUIRED: i32 = 20;
     const WIRE_DEADLINE_EXCEEDED: i32 = 16;
     const WIRE_EFFECT_UNKNOWN: i32 = 13;
 
@@ -236,11 +251,17 @@ pub(crate) fn tunnel_error_to_wire(err: &TunnelError) -> generated::VpnError {
         kind = ?err.kind,
         code,
         a0 = err.a0,
+        reason = err.reason,
         "tunnel assembly failed"
     );
     generated::VpnError {
         code,
-        stage: if matches!(err.kind, TunnelErrorKind::PlatformDependency | TunnelErrorKind::Platform) {
+        // 稳定 reason id（tag 8，EXV_UNFREEZE 2026-10-09）：空串 = 缺省。
+        reason: err.reason.to_string(),
+        stage: if matches!(
+            err.kind,
+            TunnelErrorKind::PlatformDependency | TunnelErrorKind::Platform
+        ) {
             if err.connect_phase == ConnectPhase::ObservingOwnedState {
                 generated::ErrorStage::ObservingOwnedState as i32
             } else if err.connect_phase == ConnectPhase::ConnectingControl {
@@ -285,26 +306,42 @@ pub(crate) fn tunnel_error_to_wire(err: &TunnelError) -> generated::VpnError {
             } else {
                 generated::NativeErrorNamespace::Win32 as i32
             },
-            code: i64::from(if matches!(err.kind, TunnelErrorKind::PlatformDependency | TunnelErrorKind::Platform) {
-                err.code
-            } else {
-                err.a0
-            }),
+            code: i64::from(
+                if matches!(
+                    err.kind,
+                    TunnelErrorKind::PlatformDependency | TunnelErrorKind::Platform
+                ) {
+                    err.code
+                } else {
+                    err.a0
+                },
+            ),
         }),
+        operation_detail: None,
     }
 }
 
 impl TunnelError {
     /// 认证阶段失败：从 `LoginError` 读网关 `a0` 结果码与 SAML 标记。
+    /// reason 挂载条件（复审 2.1-5d）：`login_rejected` 仅在 `a0≠0`（网关明确
+    /// 拒绝凭据）时挂——`a0=0` 时 wire code 为 EFFECT_UNKNOWN，若仍挂「登录被拒」
+    /// 会与 code 语义相悖、误导文案。
     fn login(err: &LoginError) -> Self {
         let a0 = err
             .a0_result()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
         let (kind, code) = if matches!(err, LoginError::SamlRequired) {
-            (TunnelErrorKind::LoginSaml, ERROR_CODE_SAML_REQUIRED)
+            (TunnelErrorKind::LoginSaml, SAML_MARKER_CODE)
         } else {
             (TunnelErrorKind::LoginRejected, 0)
+        };
+        let reason = if matches!(err, LoginError::SamlRequired) {
+            "auth/saml_required"
+        } else if a0 != 0 {
+            "auth/login_rejected"
+        } else {
+            ""
         };
         Self {
             kind,
@@ -312,6 +349,7 @@ impl TunnelError {
             code,
             a0,
             detail: format!("engine: login:{err:?}"),
+            reason,
         }
     }
 
@@ -323,6 +361,7 @@ impl TunnelError {
             code: 0,
             a0: 0,
             detail: format!("engine: connect-tunnel:{err:?}"),
+            reason: "transport/session_failed",
         }
     }
 
@@ -334,6 +373,22 @@ impl TunnelError {
             code: 0,
             a0: 0,
             detail: detail.into(),
+            reason: "",
+        }
+    }
+
+    /// 带稳定 reason id 的受控失败（阶段② reason 透传；词表见
+    /// `frontend/src/lib/copy-tables.ts`）。`platform/route_apply` 仅在无原始
+    /// native 码时挂载（T-05 裁定：有 native 码时壳侧 1168/5 分档文案更具体，
+    /// reason 让路——engine 侧条件挂载使壳侧优先级判定保持统一）。
+    fn plain_with_reason(
+        connect_phase: ConnectPhase,
+        detail: impl Into<String>,
+        reason: &'static str,
+    ) -> Self {
+        Self {
+            reason,
+            ..Self::plain(connect_phase, detail)
         }
     }
 }
@@ -369,6 +424,13 @@ fn decide_start_apply(
     }
 }
 
+/// 单次同步受理的事实回执，不存储为连接状态；Adopted 仅由实际 rebind 点产生。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyAcceptance {
+    Started,
+    Adopted,
+}
+
 /// 数据面组装 seam（注入点；契约测试注入 fake，生产注入 [`RealTunnelRuntime`]）。
 ///
 /// A1b 异步形态：`start_apply` **受理即回**（后台组装 task 跑，逐段状态实时 post），
@@ -387,6 +449,39 @@ pub trait TunnelRuntime: Send + Sync {
     /// 重复组装（已有活跃组装/隧道）→ [`TunnelError`]（duplicate connect）。组装
     /// **过程**中的失败不在此返回——经 `ctx.status` 以 Failed 事件上报。
     fn start_apply(self: Arc<Self>, ctx: ApplyContext) -> Result<(), TunnelError>;
+    /// R1 受理返回发布游标；实现必须在自己的受理串行窗口内、任何发布前取得。
+    /// 未提供此窗口的运行时不能启动一个无法关联完成的自愈尝试。
+    fn start_reconnect(
+        self: Arc<Self>,
+        _ctx: ApplyContext,
+        _attempt: u32,
+    ) -> Result<u64, TunnelError> {
+        Err(TunnelError {
+            kind: TunnelErrorKind::Platform,
+            connect_phase: ConnectPhase::ConnectingControl,
+            code: 0,
+            a0: 0,
+            detail: "runtime does not expose reconnect admission".into(),
+            reason: "",
+        })
+    }
+    /// 传递门受理事实；默认替身沿用原入口，真实运行时在最终裁决后开户。
+    fn start_apply_admitted(
+        self: Arc<Self>,
+        ctx: ApplyContext,
+        _trace: TraceAdmission,
+    ) -> Result<(), TunnelError> {
+        self.start_apply(ctx)
+    }
+    /// 默认实现只承诺启动；不得根据调用后的瞬时 is_connected 猜测采纳。
+    fn start_apply_with_receipt(
+        self: Arc<Self>,
+        ctx: ApplyContext,
+        trace: TraceAdmission,
+    ) -> Result<ApplyAcceptance, TunnelError> {
+        self.start_apply_admitted(ctx, trace)
+            .map(|()| ApplyAcceptance::Started)
+    }
     /// 取消令牌：请求中止在途组装（StopTunnel）。协作式——后台组装在段边界检查并
     /// 自清理（登录后/CSTP 后/apply 后）。
     fn cancel(&self);
@@ -401,6 +496,16 @@ pub trait TunnelRuntime: Send + Sync {
     ///
     /// route 清硬失败 → `String`（调用方据情兜底；adapter 保留，退出清理仍会 close）。
     fn disconnect(&self) -> Result<(), String>;
+    /// 本次实际停止及剩余资源义务；默认适配只根据运行时可观察事实收口。
+    fn disconnect_report(&self) -> StopReport {
+        let result = self.disconnect();
+        let mut report = StopReport {
+            stopped: !self.is_connected() && !self.is_assembling(),
+            ..Default::default()
+        };
+        report.action(LedgerDomain::SessionLease, "runtime_disconnect", &result);
+        report
+    }
     /// **退出清理（D12/D15）**：断开 + NIC owner 关 adapter（adapter creator close
     /// 移除网卡，0 残留兜底）。有界 join 由调用方在断开后确保（worker 已 join）。
     ///
@@ -492,7 +597,21 @@ struct EngineCstp {
     /// T3（F6/P1-1）：数据面掉线信号发送端的 **LiveTunnel 持有副本**——LiveTunnel
     /// drop 即关停 sweeper（覆盖 writer 线程卡死、其闭包副本永不释放的泄漏边界）。
     /// 与 writer 闭包内的发送端副本共同构成 sweeper 的终止条件（双份安放）。
-    lost_tx: std::sync::mpsc::Sender<DataPlaneLost>,
+    lost_tx: Option<std::sync::mpsc::Sender<DataPlaneLost>>,
+    tasks: exv_vpn_cstp::session::CstpTasks,
+    runtime: tokio::runtime::Handle,
+}
+
+impl EngineCstp {
+    fn close(self) -> Result<(), String> {
+        let Self {
+            mut tasks, runtime, ..
+        } = self;
+        // RPC 经 spawn_blocking 调用；专用 runtime 驱动 TLS 任务，当前线程只等待回执。
+        std::thread::spawn(move || runtime.block_on(tasks.close()))
+            .join()
+            .map_err(|_| "cstp_cleanup_worker_join".to_owned())?
+    }
 }
 
 enum PreparedPackets {
@@ -503,9 +622,218 @@ enum PreparedPackets {
         latency_cfg: LatencyProbeConfig,
     },
     Atrust {
-        owner: crate::atrust_tunnel::AtrustPacketTunnel,
         channels: crate::atrust_tunnel::RawPacketChannels,
     },
+}
+
+/// 控制段取得结果；数据包通道与既有 per-connection owner 分开移交。
+struct PreparedConnection {
+    offer: exv_vpn_cstp::session::TunnelOffer,
+    campus_dns_servers: Vec<String>,
+    bypasses: Vec<exv_vpn_win32_resource::routes::RouteRow>,
+    // 默认载体析构也必须先沿原 owner graceful 回滚，再释放宿主通道。
+    control: AttemptOwner,
+    packets: PreparedPackets,
+}
+
+/// 每个序号对应下面 LiveTunnel 的唯一资源槽，不复制句柄或清理权限。
+#[derive(Default)]
+struct AttemptBindings {
+    id: Vec<u8>,
+    trace: Option<(usize, String)>,
+    session: Option<usize>,
+    // bool 只表示本轮新取得 owner，不等同创建者 owned。
+    nic: Option<(Option<usize>, bool)>,
+    route: Option<usize>,
+    data_plane: Option<usize>,
+    nrpt: Option<usize>,
+    registration_error: Option<TunnelError>,
+    prior_results: crate::connect_ledger::RollbackOutcome,
+}
+
+fn settle_nic_attempt(
+    acquired_this_attempt: bool,
+    dependencies_pending: bool,
+    action: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if acquired_this_attempt && dependencies_pending {
+        return Err("engine: NIC retained because dependent cleanup failed".into());
+    }
+    action(acquired_this_attempt)
+}
+
+fn record_nic_creation(count: &std::sync::atomic::AtomicUsize, acquired: bool, created: bool) {
+    if acquired && created {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 仅携带原资源边界已经观察的结果及访问失败来源，不推断未访问资源的状态。
+#[derive(Default)]
+struct PreviousCleanupObservation {
+    outcome: crate::connect_ledger::RollbackOutcome,
+    access_failure: Option<&'static str>,
+}
+
+impl PreviousCleanupObservation {
+    fn access_failed(&mut self, source: &'static str) -> String {
+        self.access_failure = Some(source);
+        source.to_owned()
+    }
+
+    fn held(&mut self, domain: LedgerDomain, resource: &str) {
+        self.outcome.observe(
+            None,
+            domain,
+            Err(format!(
+                "engine: previous {resource} retained; cleanup not started"
+            )),
+            true,
+            "previous_resource_retained",
+        );
+    }
+}
+
+/// 所有退出（含 unwind）都保留同一个 owner，直到提交或统一回滚。
+struct AttemptOwner {
+    runtime: Arc<RealTunnelRuntime>,
+    live: Option<LiveTunnel>,
+}
+
+impl AttemptOwner {
+    fn new(runtime: &Arc<RealTunnelRuntime>, mut live: LiveTunnel, id: &[u8]) -> Self {
+        let trace = runtime
+            .attempt_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_ref()
+            .filter(|ledger| ledger.attempt_id == id)
+            .and_then(|ledger| {
+                let connection_id = match &ledger.trace {
+                    TraceAdmission::Created { connection_id }
+                    | TraceAdmission::Replaced { connection_id }
+                    | TraceAdmission::Existing { connection_id }
+                    | TraceAdmission::Skipped {
+                        connection_id: Some(connection_id),
+                    } => connection_id,
+                    TraceAdmission::Unwired
+                    | TraceAdmission::Skipped {
+                        connection_id: None,
+                    } => return None,
+                };
+                ledger
+                    .entries
+                    .iter()
+                    .find(|e| e.domain == LedgerDomain::Trace)
+                    .map(|e| (e.sequence, connection_id.clone()))
+            });
+        live.attempt.get_or_insert_with(|| AttemptBindings {
+            id: id.to_vec(),
+            trace,
+            ..Default::default()
+        });
+        Self {
+            runtime: runtime.clone(),
+            live: Some(live),
+        }
+    }
+    fn into_live(mut self) -> LiveTunnel {
+        self.live.take().expect("attempt owner held")
+    }
+    fn register(&mut self, domain: LedgerDomain, persistent: bool) -> Result<usize, TunnelError> {
+        let id = self.attempt.as_ref().expect("attempt bindings").id.clone();
+        self.runtime.record_acquired(&id, domain, persistent)
+    }
+    fn check_registration(&mut self) -> Result<(), TunnelError> {
+        self.attempt
+            .as_mut()
+            .expect("attempt bindings")
+            .registration_error
+            .take()
+            .map_or(Ok(()), Err)
+    }
+    fn hold_nrpt_result(
+        &mut self,
+        result: &mut Result<
+            Option<crate::nrpt_worker::NrptWorkerLease>,
+            crate::nrpt_worker::NrptStartError,
+        >,
+    ) -> Result<(), TunnelError> {
+        let lease = match result {
+            Ok(worker) => worker.take(),
+            Err(error) => error.worker.take().map(|lease| *lease),
+        };
+        if let Some(lease) = lease {
+            self.campus_dns = Some(lease);
+            self.attempt.as_mut().unwrap().nrpt = None;
+            let sequence = self.register(LedgerDomain::Nrpt, false)?;
+            self.attempt.as_mut().unwrap().nrpt = Some(sequence);
+        }
+        Ok(())
+    }
+    fn release_first_nrpt(&mut self) {
+        if let Some(mut lease) = self.campus_dns.take() {
+            let binding = self.attempt.as_mut().unwrap();
+            let sequence = binding.nrpt.take();
+            let result = lease.shutdown();
+            let mut observed = crate::connect_ledger::RollbackOutcome::default();
+            observed.observe(
+                sequence,
+                LedgerDomain::Nrpt,
+                result.clone(),
+                false,
+                "nrpt_shutdown",
+            );
+            if let Some(sequence) = sequence {
+                self.runtime
+                    .attempt_ledger
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record_result(
+                        &self.attempt.as_ref().unwrap().id,
+                        sequence,
+                        observed.entries[0].state.clone(),
+                    );
+            }
+            if result.is_ok() {
+                self.attempt
+                    .as_mut()
+                    .unwrap()
+                    .prior_results
+                    .entries
+                    .extend(observed.entries);
+            } else {
+                self.retired_nrpt.push((sequence, lease));
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for AttemptOwner {
+    type Target = LiveTunnel;
+    fn deref(&self) -> &LiveTunnel {
+        self.live.as_ref().expect("attempt owner held")
+    }
+}
+impl std::ops::DerefMut for AttemptOwner {
+    fn deref_mut(&mut self) -> &mut LiveTunnel {
+        self.live.as_mut().expect("attempt owner held")
+    }
+}
+impl Drop for AttemptOwner {
+    fn drop(&mut self) {
+        if let Some(live) = self.live.take() {
+            self.runtime.rollback_attempt(
+                live,
+                if std::thread::panicking() {
+                    "assembly_panicked"
+                } else {
+                    "assembly_failed_or_cancelled"
+                },
+            );
+        }
+    }
 }
 
 /// aTrust 节点连接及驱动该连接的运行时句柄。
@@ -518,10 +846,10 @@ struct EngineAtrust {
 impl EngineAtrust {
     // LiveTunnel 的同步清理也可能由 RPC 的 Tokio 上下文调用。
     // 在独立线程驱动 close，避免嵌套 block_on；返回前等待节点任务释放连接。
-    fn close(mut self) -> Result<(), String> {
+    fn close(mut self) -> Result<Option<crate::atrust_tunnel::AtrustNormalEnd>, String> {
         std::thread::Builder::new()
             .name("atrust-close".into())
-            .spawn(move || self.runtime.block_on(self.owner.close()))
+            .spawn(move || self.runtime.block_on(self.owner.close_observed()))
             .map_err(|_| "engine: cannot start aTrust cleanup worker".to_owned())?
             .join()
             .map_err(|_| "engine: aTrust cleanup worker stopped".to_owned())?
@@ -541,11 +869,13 @@ struct LiveTunnel {
     route: Option<RouteOwner>,
     campus_dns: Option<crate::nrpt_worker::NrptWorkerLease>,
     diagnostics: Option<RuntimeDiagnostics>,
+    attempt: Option<AttemptBindings>,
+    pending_route_cleanup: Option<RouteCleanupObligations>,
+    retired_nrpt: Vec<(Option<usize>, crate::nrpt_worker::NrptWorkerLease)>,
 }
 
 impl LiveTunnel {
-    fn cleanup_only(
-        route: RouteOwner,
+    fn connecting_control(
         connection_mode: ConnectionMode,
         diagnostics: RuntimeDiagnostics,
     ) -> Self {
@@ -556,16 +886,20 @@ impl LiveTunnel {
             data_plane: None,
             cstp: None,
             atrust: None,
-            route: Some(route),
+            route: None,
             campus_dns: None,
             diagnostics: Some(diagnostics),
+            attempt: None,
+            pending_route_cleanup: None,
+            retired_nrpt: Vec::new(),
         }
     }
+
     /// **drop_live——F6 共用清理主体**（`TunnelRuntime::disconnect`（S7）与掉线
     /// sweeper（S4）共用；区别只在调用方的 paused 置位时机——两个路径最终都置
     /// `paused=true`）：停数据面线程（先 join）→ 结束 session → 关闭 CSTP 通道 →
-    /// 逆序清 route（地址/路由/DNS，**adapter 保留**）。任一阶段错误即返回（W17
-    /// SAFETY-ORDER 仍由字段 Drop 兜底）。
+    /// 逆序清 route（地址/路由/DNS，**adapter 保留**）。逐项尝试后汇总本机资源错误，
+    /// 协议与 join 结果另外如实记录，不跳过后续清理。
     ///
     /// 调用纪律（F6）：sweeper 侧**锁内仅 take、锁外调用**本函数——绝不持 live 锁
     /// 执行（内含 join，持锁 join 有死锁风险）。
@@ -574,49 +908,162 @@ impl LiveTunnel {
     }
 
     fn disconnect_for(&mut self, reason: &str) -> Result<(), String> {
+        self.disconnect_for_observed(reason).0
+    }
+
+    /// 与正常断开同一原语，逐项观察；一项失败仍按既定安全序尝试后续资源。
+    fn disconnect_for_observed(
+        &mut self,
+        reason: &str,
+    ) -> (Result<(), String>, crate::connect_ledger::RollbackOutcome) {
+        let (report, outcome) = self.disconnect_for_report(reason);
+        (report.result(), outcome)
+    }
+
+    fn disconnect_for_report(
+        &mut self,
+        reason: &str,
+    ) -> (StopReport, crate::connect_ledger::RollbackOutcome) {
         let started = Instant::now();
+        let mut outcome = self
+            .attempt
+            .as_mut()
+            .map(|b| std::mem::take(&mut b.prior_results))
+            .unwrap_or_default();
+        let mut report = StopReport {
+            stopped: false,
+            ..Default::default()
+        };
         if let Some(diag) = &self.diagnostics {
             diag.emit("tunnel.runtime.live_cleanup", reason, "started", []);
         }
-        let result = (|| {
-            if let Some(atrust) = &self.atrust {
-                atrust.owner.begin_host_shutdown();
-            }
-            // 1. 停数据面线程（先 join，再放 session Arc 克隆；W17 SAFETY-ORDER）。
-            if let Some(mut threads) = self.data_plane_threads.take() {
-                let _ = threads.stop_and_join();
-            }
-            // 2. 结束 session（drop data plane → `WintunEndSession`）——必须在 adapter
-            //    creator close 之前（W17：session 先于 adapter）。
+        if let Some(atrust) = &self.atrust {
+            atrust.owner.begin_host_shutdown();
+        }
+        // 线程 join -> session end，两个取得边界共用一条 DataPlane 义务。
+        if self.data_plane_threads.is_some() || self.data_plane.is_some() {
+            let result = self
+                .data_plane_threads
+                .take()
+                .map_or(Ok(()), |mut threads| threads.stop_and_join_result());
             self.data_plane = None;
-            // 3. 关闭 CSTP 通道（drop write/read channel → TLS 任务退出）。
-            self.cstp = None;
-            // 节点自身的错误不能跳过本机路由清理；待清理后再返回。
-            let protocol_result = self.atrust.take().map_or(Ok(()), EngineAtrust::close);
-            if let Err(category) = protocol_result
-                && let Some(diag) = &self.diagnostics
+            report.action(LedgerDomain::DataPlane, "data_plane_stop", &result);
+            outcome.observe(
+                self.attempt.as_ref().and_then(|b| b.data_plane),
+                LedgerDomain::DataPlane,
+                result,
+                false,
+                "data_plane_stop",
+            );
+        }
+        if self.cstp.is_some() || self.atrust.is_some() {
+            let cstp = self.cstp.take().map_or(Ok(()), EngineCstp::close);
+            let atrust = self.atrust.take().map_or(Ok(None), EngineAtrust::close);
+            if let Ok(Some(ended)) = &atrust {
+                if let Some(diag) = &self.diagnostics {
+                    diag.emit(
+                        "tunnel.protocol.termination",
+                        "packet_worker_terminated",
+                        "completed",
+                        [("termination_category".into(), ended.category().to_owned())],
+                    );
+                }
+            }
+            let atrust = atrust.map(|_| ());
+            let result = match (cstp, atrust) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+                (Err(a), Err(b)) => Err(format!("{a}; {b}")),
+            };
+            if let Err(category) = &result {
+                if let Some(diag) = &self.diagnostics {
+                    diag.emit(
+                        "tunnel.protocol.termination",
+                        "packet_worker_terminated",
+                        "failed",
+                        [("failure_category".into(), category.clone())],
+                    );
+                }
+            }
+            report.action(LedgerDomain::SessionLease, "protocol_close", &result);
+            // 协议终止错误如实进入 rollback，仍不阻止本机资源清理或正常新连接。
+            outcome.observe(
+                self.attempt.as_ref().and_then(|b| b.session),
+                LedgerDomain::SessionLease,
+                result,
+                false,
+                "protocol_close",
+            );
+        }
+        // NRPT 先于校园路由；失败的 lease 保持原 owner，不能丢弃其重试权限。
+        if let Some(worker) = self.campus_dns.as_mut() {
+            let result = worker.shutdown();
+            report.action(LedgerDomain::Nrpt, "nrpt_shutdown", &result);
+            if result.is_ok() {
+                self.campus_dns = None;
+            }
+            outcome.observe(
+                self.attempt.as_ref().and_then(|b| b.nrpt),
+                LedgerDomain::Nrpt,
+                result,
+                false,
+                "nrpt_shutdown",
+            );
+        }
+        self.retired_nrpt.retain_mut(|(sequence, worker)| {
+            let result = worker.shutdown();
+            let keep = result.is_err();
+            report.action(LedgerDomain::Nrpt, "retired_nrpt_shutdown", &result);
+            outcome.observe(
+                *sequence,
+                LedgerDomain::Nrpt,
+                result,
+                false,
+                "nrpt_shutdown",
+            );
+            keep
+        });
+        // RouteOwner 的地址/MTU/路由/DNS/代理内部逆序保持不变。
+        if let Some(route) = self.route.as_mut() {
+            let route_report = route.clear_report();
+            let result = route_report.result();
+            let released = route_report.remaining.is_empty();
+            report.merge(route_report);
+            if released {
+                self.route = None;
+            }
+            outcome.observe(
+                self.attempt.as_ref().and_then(|b| b.route),
+                LedgerDomain::RouteFamily,
+                result,
+                false,
+                "route_clear",
+            );
+        }
+        if let Some(routes) = self.pending_route_cleanup.as_mut() {
+            let result = routes.retry_clear();
+            report.action(LedgerDomain::RouteFamily, "pending_route_clear", &result);
+            if routes.is_empty() {
+                self.pending_route_cleanup = None;
+            }
+            outcome.observe(
+                self.attempt.as_ref().and_then(|b| b.route),
+                LedgerDomain::RouteFamily,
+                result,
+                false,
+                "pending_route_clear",
+            );
+        }
+        let facts = self.stop_report_for_outcome(&outcome);
+        report.stopped = facts.stopped;
+        for obligation in facts.remaining {
+            if obligation.step != "route_clear"
+                || !report.remaining.iter().any(|o| o.owner == obligation.owner)
             {
-                diag.emit(
-                    "tunnel.protocol.termination",
-                    "packet_worker_terminated",
-                    "failed",
-                    [("failure_category".into(), category)],
-                );
+                report.remaining.push(obligation);
             }
-            // 校园 DNS 规则先撤销，再撤去到解析器的校园路由；失败保留 owner 供重试。
-            if let Some(worker) = self.campus_dns.as_mut() {
-                worker.shutdown()?;
-            }
-            self.campus_dns = None;
-            // 4. 逆序清 route（地址/路由/MTU/DNS）——adapter 保留（D12 网卡惰性存续）。
-            if let Some(route) = self.route.as_mut() {
-                route.clear()?;
-            }
-            self.route = None;
-            // 协议终止结果单独记录。对端 EOF 不应让已成功撤销路由/DNS 的旧 live
-            // 被保留；只有本地资源清理失败才需要保留 owner 供重试。
-            Ok(())
-        })();
+        }
+        let result = report.result();
         if let Some(diag) = &self.diagnostics {
             diag.emit(
                 "tunnel.runtime.live_cleanup",
@@ -632,76 +1079,71 @@ impl LiveTunnel {
                 )],
             );
         }
-        result
+        (report, outcome)
+    }
+    fn stop_report_for_outcome(
+        &self,
+        outcome: &crate::connect_ledger::RollbackOutcome,
+    ) -> StopReport {
+        let mut report = StopReport::from_rollback(outcome);
+        report.stopped = self.data_plane_threads.is_none()
+            && self.data_plane.is_none()
+            && self.cstp.is_none()
+            && self.atrust.is_none();
+        if let Some(worker) = &self.campus_dns {
+            report.remaining.push(StopObligation {
+                domain: LedgerDomain::Nrpt,
+                owner: worker.owner_guid().unwrap_or("live:nrpt").to_owned(),
+                step: "nrpt_shutdown",
+                blocks_new_connect: true,
+            });
+        }
+        for (sequence, worker) in &self.retired_nrpt {
+            report.remaining.push(StopObligation {
+                domain: LedgerDomain::Nrpt,
+                owner: worker
+                    .owner_guid()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("retired:nrpt:{sequence:?}")),
+                step: "retired_nrpt_shutdown",
+                blocks_new_connect: true,
+            });
+        }
+        if let Some(route) = &self.route {
+            report.remaining.push(StopObligation {
+                domain: LedgerDomain::RouteFamily,
+                owner: route.owner_identity(),
+                step: "route_clear",
+                blocks_new_connect: true,
+            });
+        }
+        if let Some(routes) = &self.pending_route_cleanup {
+            for owner in routes.owner_identities() {
+                report.remaining.push(StopObligation {
+                    domain: LedgerDomain::RouteFamily,
+                    owner,
+                    step: "pending_route_clear",
+                    blocks_new_connect: true,
+                });
+            }
+        }
+        report
     }
 }
 
 impl Drop for LiveTunnel {
     fn drop(&mut self) {
-        let had_resources = self.data_plane_threads.is_some()
+        // 正常断开、装配回滚、Drop 兜底共用同一清理主体及安全依赖序。
+        if self.data_plane_threads.is_some()
             || self.data_plane.is_some()
             || self.cstp.is_some()
             || self.atrust.is_some()
+            || self.campus_dns.is_some()
+            || !self.retired_nrpt.is_empty()
             || self.route.is_some()
-            || self.campus_dns.is_some();
-        let started = Instant::now();
-        if had_resources
-            && let Some(diag) = &self.diagnostics
+            || self.pending_route_cleanup.is_some()
         {
-            diag.emit(
-                "tunnel.runtime.live_cleanup",
-                "live_drop_fallback",
-                "started",
-                [],
-            );
-        }
-        // 兜底：任何未显式 disconnect 的退出路径都先 join 数据面、再逆序清理。
-        if let Some(atrust) = &self.atrust {
-            atrust.owner.begin_host_shutdown();
-        }
-        if let Some(mut threads) = self.data_plane_threads.take() {
-            let _ = threads.stop_and_join();
-        }
-        self.data_plane = None;
-        self.cstp = None;
-        let protocol_result = self.atrust.take().map_or(Ok(()), EngineAtrust::close);
-        if let Err(category) = protocol_result
-            && let Some(diag) = &self.diagnostics
-        {
-            diag.emit(
-                "tunnel.protocol.termination",
-                "packet_worker_terminated",
-                "failed",
-                [("failure_category".into(), category)],
-            );
-        }
-        let dns_result = self.campus_dns.as_mut().map_or(Ok(()), |worker| worker.shutdown());
-        self.campus_dns = None;
-        // route 兜底清理（best-effort；adapter 由 NicOwner 在退出序 close）。
-        let result = if let Some(mut route) = self.route.take() {
-            route.clear()
-        } else {
-            Ok(())
-        };
-        // Drop 兜底无法重试错误，但清理诊断仍只反映本地资源清理结果；协议终止
-        // 已通过上方独立的脱敏事件记录。
-        let result = result.and(dns_result);
-        if had_resources
-            && let Some(diag) = &self.diagnostics
-        {
-            diag.emit(
-                "tunnel.runtime.live_cleanup",
-                "live_drop_fallback",
-                if result.is_ok() {
-                    "completed"
-                } else {
-                    "failed"
-                },
-                [(
-                    "elapsed_ms".into(),
-                    started.elapsed().as_millis().to_string(),
-                )],
-            );
+            let _ = self.disconnect_for("live_drop_fallback");
         }
     }
 }
@@ -761,8 +1203,11 @@ fn live_sweeper_step(
                 // 运行时已 drop：Drop 兜底已清 live，直接退出。
                 return SweeperStep::Exit;
             };
-            // 与新连接的资源应用串行；take(None) 不能代表旧路由已经清理完成。
-            // 数据面线程从不取得此锁，因此清理时可以安全 join。
+            // 原清理占用与新装配串行；take(None) 不代表旧 owner 已完成。
+            // sweeper 不丢弃已收到的掉线信号，等待原装配收口后再核对 generation。
+            let _cleanup = rt
+                .begin_cleanup_until(false, None)
+                .expect("sweeper waits for original owner");
             let _resources = rt.resources.lock().expect("runtime resources lock");
             if lost.generation != rt.generation.load(Ordering::SeqCst) {
                 // 世代守卫（P2-5）：信号属于已拆除的旧隧道，绝不拆当前 live。
@@ -789,6 +1234,7 @@ fn live_sweeper_step(
                 }
                 guard.take()
             };
+            drop(_resources);
             match taken {
                 Some(mut tunnel) => {
                     let diagnostics = tunnel
@@ -828,7 +1274,12 @@ fn live_sweeper_step(
                         // W17 SAFETY-ORDER 由 LiveTunnel 字段 Drop 兜底）。
                         eprintln!("[info] engine live-sweeper: drop_live route clear failed: {e}");
                         // 数据面已停，保留清理所有者供下一次 disconnect/connect 重试。
-                        *rt.live.lock().expect("live lock") = Some(tunnel);
+                        if tunnel
+                            .stop_report_for_outcome(&Default::default())
+                            .blocks_new_connect()
+                        {
+                            *rt.live.lock().expect("live lock") = Some(tunnel);
+                        }
                     }
                     // S4：掉线清 live 与减负断开同语义——置 Paused（下次连接
                     // start_apply 清）。
@@ -884,6 +1335,12 @@ fn live_sweeper_loop(
     while live_sweeper_step(&rt, &lost_rx, LIVE_SWEEPER_IDLE_POLL) != SweeperStep::Exit {}
 }
 
+/// 唯一已批准的本地原生验收故障位点；不进入 RPC 或正式配置契约。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptanceFaultOnce {
+    AfterControlBeforeNic,
+}
+
 /// 真实组装运行时（A1b 异步形态）：`start_apply` 受理即回，组装在后台 thread 内
 /// 逐段执行（登录/CSTP 经专用 tokio runtime `block_on`；特权/Wintun 段为阻塞调用），
 /// 逐段状态实时 post；`cancel` 触发取消令牌令组装在段边界中断并自清理。
@@ -894,6 +1351,8 @@ fn live_sweeper_loop(
 /// **S1.5 三 owner**：`nic`（Mutex<Option<NicOwner>>）为 NIC owner，跨连接存续（D12）；
 /// `live`（session owner + route owner）为 per-connection 存活状态。
 pub struct RealTunnelRuntime {
+    /// 显式隔离验收输入；每个 engine runtime 在统一装配边界最多消费一次。
+    acceptance_fault_once: std::sync::atomic::AtomicBool,
     /// 专用异步运行时（登录/CSTP；`block_on`，不阻塞调用方 async worker）。
     rt: Option<tokio::runtime::Runtime>,
     /// wintun.dll 路径（engine 启动参数）。
@@ -915,10 +1374,13 @@ pub struct RealTunnelRuntime {
     live: Mutex<Option<LiveTunnel>>,
     /// 平台 apply 回滚后仍失败的外层路由；后续断开/连接必须继续持有并重试。
     pending_routes: Mutex<Vec<RouteCleanupObligations>>,
-    /// 旧会话清理与新会话 NIC/路由应用的串行边界；工作线程不参与此锁。
+    /// 原资源槽访问检查；装配/清理占用负责全段串行，必要 join 不持此锁。
     resources: Mutex<()>,
     /// 取消与最终 Connected 提交的短临界区；不覆盖登录或 join。
-    lifecycle_commit: Mutex<()>,
+    lifecycle_commit: Mutex<lifecycle::CommitState>,
+    assembly_done: std::sync::Condvar,
+    /// 同一把锁管理活动记录和最近一条结束记录，不持有资源。
+    attempt_ledger: Mutex<crate::connect_ledger::AttemptLedger>,
     /// 在途组装标记（`start_apply` 已受理、未完成/未取消）。
     assembling: std::sync::atomic::AtomicBool,
     /// 协作式取消令牌（StopTunnel 置位；组装在段边界检查并自清理）。
@@ -942,6 +1404,17 @@ pub struct RealTunnelRuntime {
     /// **Weak**——强引用由 `HelperControlService` 持有，防止 运行时↔驱动 强引用
     /// 环阻止 `RealTunnelRuntime::Drop` 的兜底清理。`None` = 未接线（测试构造器）。
     reconnect: Mutex<Option<std::sync::Weak<crate::reconnect::ReconnectDriver>>>,
+}
+
+/// W1：预检网卡归属事实——本进程 NicOwner 持有即"设计内持久网卡"，
+/// 预检四象限判定据此放行（不拒绝实际可建立的连接）。
+impl crate::connect_gate::AdapterOwnershipProbe for RealTunnelRuntime {
+    fn held_adapter_name(&self) -> Option<String> {
+        self.nic
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|owner| owner.adapter_name().to_owned()))
+    }
 }
 
 impl RealTunnelRuntime {
@@ -996,8 +1469,11 @@ impl RealTunnelRuntime {
         journal: SystemProxyJournal,
     ) -> Self {
         Self {
-            rt: Some(tokio::runtime::Runtime::new()
-                .expect("engine: tokio runtime（登录/CSTP 需要异步运行时）")),
+            acceptance_fault_once: std::sync::atomic::AtomicBool::new(false),
+            rt: Some(
+                tokio::runtime::Runtime::new()
+                    .expect("engine: tokio runtime（登录/CSTP 需要异步运行时）"),
+            ),
             wintun_dll,
             adapter_name,
             config_dir,
@@ -1007,7 +1483,9 @@ impl RealTunnelRuntime {
             live: Mutex::new(None),
             pending_routes: Mutex::new(Vec::new()),
             resources: Mutex::new(()),
-            lifecycle_commit: Mutex::new(()),
+            lifecycle_commit: Mutex::new(lifecycle::CommitState::default()),
+            assembly_done: std::sync::Condvar::new(),
+            attempt_ledger: Mutex::new(crate::connect_ledger::AttemptLedger::default()),
             assembling: std::sync::atomic::AtomicBool::new(false),
             cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             paused: std::sync::atomic::AtomicBool::new(false),
@@ -1028,6 +1506,14 @@ impl RealTunnelRuntime {
         self
     }
 
+    /// 仅由启动前已验证的隔离验收输入启用，不读环境或配置文件。
+    #[must_use]
+    pub fn with_acceptance_fault_once(self, fault: Option<AcceptanceFaultOnce>) -> Self {
+        self.acceptance_fault_once
+            .store(fault.is_some(), std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
     /// 注入 R1 重连驱动（T6a）：`grpc_server::with_real_tunnel` 在驱动构造后调用
     /// （驱动需先持有运行时 `Arc`，故此处只存 `Weak`）。sweeper 的 `ClearedLive`
     /// 分支经它触发 engine 自愈；未注入（测试构造器）时掉线维持既有行为（清
@@ -1040,7 +1526,18 @@ impl RealTunnelRuntime {
     }
 
     fn inner_runtime(&self) -> &tokio::runtime::Runtime {
-        self.rt.as_ref().expect("inner runtime exists until RealTunnelRuntime::drop")
+        self.rt
+            .as_ref()
+            .expect("inner runtime exists until RealTunnelRuntime::drop")
+    }
+
+    fn current_trace_id(&self, log: &LogSink) -> Option<String> {
+        match self.trace_gate.as_ref()?.read_current_trace(log)? {
+            crate::connection_trace::TraceReadOutcome::Present(record) => {
+                Some(record.connection_id)
+            }
+            _ => None,
+        }
     }
 
     fn diagnostic_context(&self) -> Option<RuntimeDiagnostics> {
@@ -1070,13 +1567,21 @@ impl RealTunnelRuntime {
         // 连接阶段必须读取实际配置，不能沿用首次启动时缺文件即生成默认值的语义。
         let path = self.config_dir.join("config.json");
         let text = std::fs::read_to_string(&path).map_err(|error| {
-            format!("config-load: read {}: kind={:?}, os={:?}",
-                path.display(), error.kind(), error.raw_os_error())
+            format!(
+                "config-load: read {}: kind={:?}, os={:?}",
+                path.display(),
+                error.kind(),
+                error.raw_os_error()
+            )
         })?;
         let parse_error = |error: serde_json::Error| {
             // serde 的完整错误可能含字段值；这里只记录类别与位置。
-            format!("config-load: parse category={:?}, line={}, column={}",
-                error.classify(), error.line(), error.column())
+            format!(
+                "config-load: parse category={:?}, line={}, column={}",
+                error.classify(),
+                error.line(),
+                error.column()
+            )
         };
         let raw: serde_json::Value = serde_json::from_str(&text).map_err(&parse_error)?;
         if let Some(protocol) = raw.get("protocol")
@@ -1087,7 +1592,10 @@ impl RealTunnelRuntime {
         serde_json::from_value(raw).map_err(parse_error)
     }
 
-    fn load_connection_config(&self, credentials: &ConnectionCredentials) -> Result<exv_vpn_win32_config::ExvConfig, String> {
+    fn load_connection_config(
+        &self,
+        credentials: &ConnectionCredentials,
+    ) -> Result<exv_vpn_win32_config::ExvConfig, String> {
         let config = self.load_config()?;
         let protocol = match credentials {
             ConnectionCredentials::Cisco(_) => Protocol::Cisco,
@@ -1106,35 +1614,51 @@ impl RealTunnelRuntime {
 
     /// 调用方持有 resources 锁；硬失败的清理义务保留到下一次操作。
     fn retry_pending_routes(&self) -> Result<(), String> {
+        self.retry_pending_routes_observed(&mut Default::default())
+    }
+
+    fn retry_pending_routes_observed(
+        &self,
+        observed: &mut PreviousCleanupObservation,
+    ) -> Result<(), String> {
         let mut pending = self
             .pending_routes
             .lock()
-            .map_err(|_| "pending routes lock".to_string())?;
+            .map_err(|_| observed.access_failed("pending routes lock"))?;
         let groups_before = pending.len();
         let mut errors = Vec::new();
         for routes in pending.iter_mut() {
-            if let Err(error) = routes.retry_clear() {
-                errors.push(error);
+            let result = routes.retry_clear();
+            if let Err(error) = &result {
+                errors.push(error.clone());
             }
+            // 旧义务的真实重试结果，不冒记为本轮新取得的登记序号。
+            observed.outcome.observe(
+                None,
+                LedgerDomain::RouteFamily,
+                result,
+                false,
+                "pending_route_clear",
+            );
         }
         pending.retain(|routes| !routes.is_empty());
         if groups_before > 0
             && let Some(diag) = self.diagnostic_context()
         {
             diag.emit(
-                    "tunnel.route.cleanup",
-                    "pending_rollback_recovery",
-                    if errors.is_empty() {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
-                    [
-                        ("pending_groups_before".into(), groups_before.to_string()),
-                        ("pending_groups_after".into(), pending.len().to_string()),
-                        ("detail".into(), errors.join("; ")),
-                    ],
-                );
+                "tunnel.route.cleanup",
+                "pending_rollback_recovery",
+                if errors.is_empty() {
+                    "completed"
+                } else {
+                    "failed"
+                },
+                [
+                    ("pending_groups_before".into(), groups_before.to_string()),
+                    ("pending_groups_after".into(), pending.len().to_string()),
+                    ("detail".into(), errors.join("; ")),
+                ],
+            );
         }
         if errors.is_empty() {
             Ok(())
@@ -1143,24 +1667,224 @@ impl RealTunnelRuntime {
         }
     }
 
-    /// 登录前清理旧会话，避免旧网关 /32 影响新模式的系统选路。
-    fn clear_previous_connection(&self) -> Result<(), String> {
-        let _resources = self
-            .resources
-            .lock()
-            .map_err(|_| "runtime resources lock".to_string())?;
+    /// 调用方持原装配/清理占用；清理动作和保留 owner 仍只有原路径。
+    fn clear_previous_connection_observed(
+        &self,
+        observed: &mut PreviousCleanupObservation,
+    ) -> Result<(), String> {
         let previous = self
             .live
             .lock()
-            .map_err(|_| "live lock".to_string())?
+            .map_err(|_| observed.access_failed("live lock"))?
             .take();
-        if let Some(mut previous) = previous
-            && let Err(error) = previous.disconnect_for("before_new_connection")
-        {
-            *self.live.lock().map_err(|_| "live lock".to_string())? = Some(previous);
-            return Err(error);
+        if let Some(mut previous) = previous {
+            let (result, mut previous_outcome) =
+                previous.disconnect_for_observed("before_new_connection");
+            // 结果仍属旧 holder；旧序号不能落到本轮新账本的同号条目。
+            for entry in &mut previous_outcome.entries {
+                entry.sequence = None;
+            }
+            observed
+                .outcome
+                .entries
+                .append(&mut previous_outcome.entries);
+            observed
+                .outcome
+                .unresolved
+                .append(&mut previous_outcome.unresolved);
+            if let Err(error) = result
+                && previous
+                    .stop_report_for_outcome(&previous_outcome)
+                    .blocks_new_connect()
+            {
+                match self.live.lock() {
+                    Ok(mut live) => *live = Some(previous),
+                    Err(poisoned) => {
+                        // 只归还原 owner；访问失败不能触发其 Drop 再清一次。
+                        *poisoned.into_inner() = Some(previous);
+                        observed.access_failed("live lock");
+                        return Err(error);
+                    }
+                }
+                // 原路径在此早退。其它 runtime pending 组仍真实持有，不能把未试当成功。
+                let pending = match self.pending_routes.lock() {
+                    Ok(pending) => pending,
+                    Err(_) => {
+                        observed.access_failed("pending routes lock");
+                        return Err(error);
+                    }
+                };
+                for routes in pending.iter() {
+                    if !routes.is_empty() {
+                        observed.outcome.observe(
+                            None,
+                            LedgerDomain::RouteFamily,
+                            Err(format!(
+                                "engine: pending routes retained after previous cleanup failure; remaining={}",
+                                routes.len()
+                            )),
+                            true,
+                            "pending_route_retained",
+                        );
+                    }
+                }
+                return Err(error);
+            }
         }
-        self.retry_pending_routes()
+        self.retry_pending_routes_observed(observed)
+    }
+
+    fn clear_previous_connection_for_attempt(
+        self: &Arc<Self>,
+        operation_id: &[u8],
+        connection_mode: ConnectionMode,
+        diagnostics: RuntimeDiagnostics,
+    ) -> Result<(), String> {
+        let mut observed = PreviousCleanupObservation::default();
+        let (_resources, access_error) = match self.resources.lock() {
+            Ok(guard) => (guard, None),
+            Err(poisoned) => (
+                poisoned.into_inner(),
+                Some(observed.access_failed("runtime resources lock")),
+            ),
+        };
+        // 原 assembling 占用排斥 Stop/sweeper；互斥锁不跨旧 owner 的必要 join。
+        drop(_resources);
+        let result = match access_error {
+            Some(error) => Err(error),
+            None => self.clear_previous_connection_observed(&mut observed),
+        };
+        if result.is_err() {
+            self.finish_previous_observation_for_attempt(
+                operation_id,
+                connection_mode,
+                diagnostics,
+                observed,
+            );
+        }
+        result
+    }
+
+    /// 未开始取得资源的失败只观察仍持有的旧槽，不改变最早取消的旧连接行为。
+    fn rollback_unstarted_attempt(
+        self: &Arc<Self>,
+        operation_id: &[u8],
+        diagnostics: RuntimeDiagnostics,
+    ) {
+        let mut observed = PreviousCleanupObservation::default();
+        let _resources = match self.resources.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                observed.access_failed("runtime resources lock");
+                poisoned.into_inner()
+            }
+        };
+        if observed.access_failure.is_none() {
+            let _ = (|| -> Result<(), String> {
+                let live = self
+                    .live
+                    .lock()
+                    .map_err(|_| observed.access_failed("live lock"))?;
+                if let Some(live) = live.as_ref() {
+                    // plane 与 threads 是同组义务；观察一次，不接管或清理句柄。
+                    if live.data_plane.is_some() || live.data_plane_threads.is_some() {
+                        observed.held(LedgerDomain::DataPlane, "data plane group");
+                    }
+                    if live.cstp.is_some() || live.atrust.is_some() {
+                        observed.held(LedgerDomain::SessionLease, "protocol session");
+                    }
+                    if live.campus_dns.is_some() {
+                        observed.held(LedgerDomain::Nrpt, "NRPT worker");
+                    }
+                    for _ in &live.retired_nrpt {
+                        observed.held(LedgerDomain::Nrpt, "retired NRPT worker");
+                    }
+                    if live.route.is_some() {
+                        observed.held(LedgerDomain::RouteFamily, "route owner");
+                    }
+                    if live
+                        .pending_route_cleanup
+                        .as_ref()
+                        .is_some_and(|r| !r.is_empty())
+                    {
+                        observed.held(LedgerDomain::RouteFamily, "live pending routes");
+                    }
+                }
+                let pending = self
+                    .pending_routes
+                    .lock()
+                    .map_err(|_| observed.access_failed("pending routes lock"))?;
+                for routes in pending.iter().filter(|r| !r.is_empty()) {
+                    observed.held(
+                        LedgerDomain::RouteFamily,
+                        &format!("pending routes (remaining={})", routes.len()),
+                    );
+                }
+                Ok(())
+            })();
+        }
+        // 相同观察收口接缝；owner Drop 明确发生在原 resources Guard 释放之前。
+        self.finish_previous_observation_for_attempt(
+            operation_id,
+            ConnectionMode::Standard,
+            diagnostics,
+            observed,
+        );
+    }
+
+    /// 调用方持原 resources 锁；只消费观察结果，不再清理旧 owner / pending groups。
+    fn finish_previous_observation_for_attempt(
+        self: &Arc<Self>,
+        operation_id: &[u8],
+        connection_mode: ConnectionMode,
+        diagnostics: RuntimeDiagnostics,
+        mut observed: PreviousCleanupObservation,
+    ) {
+        if let Some(source) = observed.access_failure {
+            diagnostics.emit(
+                "tunnel.previous_cleanup.access",
+                "previous_cleanup_access",
+                "failed",
+                [("detail".into(), source.to_owned())],
+            );
+        }
+        let live = LiveTunnel::connecting_control(connection_mode, diagnostics);
+        let mut owner = AttemptOwner::new(self, live, operation_id);
+        if let Some(source) = observed.access_failure {
+            if owner
+                .attempt
+                .as_ref()
+                .is_some_and(|binding| binding.trace.is_some())
+            {
+                observed.outcome.observe(
+                    None,
+                    LedgerDomain::Trace,
+                    Err(format!("engine: previous cleanup access failed: {source}")),
+                    true,
+                    "previous_cleanup_access",
+                );
+            } else {
+                // 无关联 UUID 无写删权限，也不把未访问的旧资源记成空回滚成功。
+                // 上方 connecting_control 全部资源槽为空，new 只绑定实际账本，
+                // 尚未执行本轮任何资源取得；仅此空 owner 可解除 Drop 回滚。
+                // 保存实际观察结果即可阻止后备路径二次虚报。
+                drop(owner.live.take());
+                observed.outcome.attempt_id = operation_id.to_vec();
+                self.attempt_ledger
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .last_rollback = Some(observed.outcome);
+                return;
+            }
+        }
+        owner
+            .attempt
+            .as_mut()
+            .expect("actual attempt binding")
+            .prior_results = observed.outcome;
+        // 同一个 rollback 接口只消费刚取得的结果；不再次清旧 owner 或 pending groups。
+        // 仍持原资源锁，先收口关联痕，再发布 Failed；后备路径不会覆盖本次 last_rollback。
+        drop(owner);
     }
 
     /// 调用方持有 resources 锁。失败时保存只剩清理工作的 live，绝不算作已连接。
@@ -1174,10 +1898,132 @@ impl RealTunnelRuntime {
                     [("detail".into(), error.clone())],
                 );
             }
-            *self.live.lock().expect("live lock") = Some(live);
+            if live
+                .stop_report_for_outcome(&Default::default())
+                .blocks_new_connect()
+            {
+                *self.live.lock().expect("live lock") = Some(live);
+            }
             return Err(error);
         }
         Ok(())
+    }
+
+    /// 唯一装配回滚入口：owner 组先执行既有原语，再记录其真实结果。
+    /// 不持 lifecycle_commit 执行 join、子进程等待、路由重试。
+    fn rollback_attempt(
+        &self,
+        mut live: LiveTunnel,
+        reason: &str,
+    ) -> crate::connect_ledger::RollbackOutcome {
+        let id = live
+            .attempt
+            .as_ref()
+            .map(|b| b.id.clone())
+            .unwrap_or_default();
+        let (_, mut outcome) = live.disconnect_for_observed(reason);
+        outcome.attempt_id = id.clone();
+        let trace = live
+            .attempt
+            .as_ref()
+            .and_then(|binding| binding.trace.clone());
+        let diagnostics = live.diagnostics.clone();
+        let resources_pending = live.campus_dns.is_some()
+            || !live.retired_nrpt.is_empty()
+            || live.route.is_some()
+            || live.pending_route_cleanup.is_some();
+        if let Some((sequence, acquired_this_attempt)) = live.attempt.as_ref().and_then(|b| b.nic) {
+            let mut nic = self
+                .nic
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let result = settle_nic_attempt(acquired_this_attempt, resources_pending, |release| {
+                if release {
+                    if let Some(owner) = nic.take() {
+                        // Close 本轮句柄；Opened 不声称删除设备。
+                        drop(owner);
+                        Ok(())
+                    } else {
+                        Err("engine: acquired NIC owner missing during rollback".into())
+                    }
+                } else {
+                    nic.as_ref()
+                        .ok_or_else(|| "engine: reused NIC owner missing during rollback".into())
+                        .and_then(NicOwner::verify_retained)
+                }
+            });
+            outcome.observe(
+                sequence,
+                LedgerDomain::Nic,
+                result,
+                !acquired_this_attempt,
+                "nic_cleanup",
+            );
+        }
+        // apply Err 的未竟义务仍交给原 pending_routes；没有成功的 retry 不得报干净。
+        if let Some(routes) = live.pending_route_cleanup.take() {
+            self.pending_routes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(routes);
+        }
+        if live.campus_dns.is_some() || !live.retired_nrpt.is_empty() || live.route.is_some() {
+            *self
+                .live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(live);
+        }
+        // 原资源回滚及未竟义务移交完成后，仍在原 resources 锁的 owner 作用域内收口。
+        // 只使用实际回执 UUID；Unwired/Skipped(None) 没有删除权限。
+        if let Some((sequence, connection_id)) = trace {
+            let effect = self
+                .trace_gate
+                .as_ref()
+                .ok_or_else(|| "engine: associated rollback trace gate unavailable".to_owned())
+                .and_then(|gate| gate.finish_rollback(&connection_id, &outcome));
+            let retained = matches!(
+                effect,
+                Ok(crate::connection_trace::RollbackTraceEffect::Preserved
+                    | crate::connection_trace::RollbackTraceEffect::Replaced)
+            );
+            outcome.observe(
+                Some(sequence),
+                LedgerDomain::Trace,
+                effect.map(|_| ()),
+                retained,
+                "trace_store",
+            );
+        }
+        if let Some(diag) = diagnostics {
+            diag.emit(
+                if outcome.resolved() {
+                    "tunnel.rollback.completed"
+                } else {
+                    "tunnel.rollback.unresolved"
+                },
+                reason,
+                if outcome.resolved() {
+                    "completed"
+                } else {
+                    "unresolved"
+                },
+                [(
+                    "unresolved_domains".into(),
+                    outcome.unresolved_domains().join(","),
+                )],
+            );
+        }
+        let mut slot = self
+            .attempt_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for entry in &outcome.entries {
+            if let Some(sequence) = entry.sequence {
+                slot.record_result(&id, sequence, entry.state.clone());
+            }
+        }
+        slot.last_rollback = Some(outcome.clone());
+        outcome
     }
 
     /// 启动掉线 sweeper 线程（T3/F6；assemble 在落 `LiveTunnel` 前调用——sweeper
@@ -1194,91 +2040,86 @@ impl RealTunnelRuntime {
     }
 }
 
-impl TunnelRuntime for RealTunnelRuntime {
-    fn start_apply(self: Arc<Self>, ctx: ApplyContext) -> Result<(), TunnelError> {
-        use std::sync::atomic::Ordering;
-        // v1/无载荷保持既有 Cisco 语义；v2 明确请求浏览器认证的 aTrust。
-        let requested_protocol = match ctx.credentials.as_ref() {
-            Some(ConnectionCredentials::Atrust(_)) => Protocol::Atrust,
-            _ => Protocol::Cisco,
+impl RealTunnelRuntime {
+    /// 取得 owner 后登记；实际身份缺失/失配是硬错误，owner 仍在 guard 内回滚。
+    fn record_acquired(
+        &self,
+        id: &[u8],
+        domain: LedgerDomain,
+        persistent: bool,
+    ) -> Result<usize, TunnelError> {
+        let mut slot = self.attempt_ledger.lock().expect("attempt ledger lock");
+        let sequence = slot.register(id, domain, persistent);
+        let failure = if sequence.is_none() {
+            Some(if slot.active.is_none() {
+                "active_missing"
+            } else {
+                "attempt_id_mismatch"
+            })
+        } else {
+            None
         };
-        let _commit = self.lifecycle_commit.lock().expect("runtime commit lock");
-        let decision =
-            decide_start_apply(
-                self.assembling.load(Ordering::SeqCst),
-                self.is_connected(),
-                ctx.credentials.is_some(),
-            );
-        match decision {
-            StartDecision::RefuseDuplicate => {
-                return Err(TunnelError {
-                    kind: TunnelErrorKind::DuplicateConnect,
-                    connect_phase: ConnectPhase::ApplyingPlatformTunnel,
-                    code: 0,
-                    a0: 0,
-                    detail: "engine: duplicate connect (assembling)".to_string(),
-                });
+        drop(slot);
+        if let Some(category) = failure {
+            if let Some(diag) = self.diagnostic_context() {
+                diag.emit(
+                    "tunnel.ledger.registration_failed",
+                    "resource_acquired",
+                    "failed",
+                    [
+                        ("domain".into(), format!("{domain:?}")),
+                        ("failure_category".into(), category.into()),
+                    ],
+                );
+            } else {
+                eprintln!(
+                    "[warn] engine ledger: registration failed domain={domain:?} category={category}"
+                );
             }
-            StartDecision::Adopt => {
-                // P2：服务引擎已有活跃隧道——采纳，不重建。直接为本次 operation
-                // 发布 Connected 状态，复用现有隧道。
-                // 掉线报告与身份转交由线程组的同一短锁串行；死亡后的旧会话不能
-                // 被包装成新 operation，存活会话转交后的失败必须携带新的身份。
-                let rebound = self
-                    .live
-                    .lock()
-                    .expect("live lock")
-                    .as_ref()
-                    .filter(|live| live.connection_mode == ctx.connection_mode && live.protocol == requested_protocol)
-                    .and_then(|live| live.data_plane_threads.as_ref())
-                    .is_some_and(|threads| {
-                        threads.rebind_operation_with(&ctx.operation_id, || {
-                            ctx.stats
-                                .registry()
-                                .set_phase(generated::StatsPhase::Connected);
-                            ctx.status
-                                .publish(StatusEvent::connected(ctx.operation_id.clone()));
-                        })
-                    });
-                if rebound {
-                    return Ok(());
-                }
-            }
-            StartDecision::Proceed => { /* 正常进入组装 */ }
         }
-        let diagnostics = RuntimeDiagnostics::new(Arc::clone(&ctx.log), &ctx.operation_id);
-        let connection_mode = ctx.connection_mode;
-        ctx.log.emit(
-            LogLevel::Info,
-            "connection",
-            "tunnel.connection_mode.selected",
-            "本次连接使用已冻结的连接模式",
-            &[
-                ("connection_mode", connection_mode.as_str()),
-                ("operation_id", &diagnostics.operation_id),
-            ],
-        );
-        diagnostics.emit("tunnel.runtime.apply", "apply_accepted", "started", []);
-        *self.diagnostics.lock().expect("diagnostics lock") = Some(diagnostics);
-        // 重置取消令牌 → 清 Paused → 标记在途 → 后台 thread 跑组装（受理即回）。
-        self.cancel_flag.store(false, Ordering::SeqCst);
-        self.paused.store(false, Ordering::SeqCst);
-        self.assembling.store(true, Ordering::SeqCst);
-        let rt = Arc::clone(&self);
-        let cancel = Arc::clone(&self.cancel_flag);
-        // 终态由后台 thread 统一发布（受理即回后 handler 无法知道结果）：成功 →
-        // Connected + stats Connected；失败/取消 → Failed + stats Failed。
-        let op_id = ctx.operation_id.clone();
-        let status = Arc::clone(&ctx.status);
-        let stats = Arc::clone(&ctx.stats);
-        std::thread::spawn(move || {
-            // run_assemble_with_reset 内部处理 assemble 结果的 status 推送；
-            // assembling 复位在该函数内完成（含 panic 保护）。返回 ()，无需绑定。
-            RealTunnelRuntime::run_assemble_with_reset(
-                &rt, ctx, cancel, &stats, &status, &op_id,
-            );
-        });
-        Ok(())
+        sequence.ok_or_else(|| {
+            TunnelError::plain_with_reason(
+                ConnectPhase::ApplyingPlatformTunnel,
+                format!(
+                    "engine: ledger registration {domain:?}: {}",
+                    failure.expect("observed registration failure")
+                ),
+                "platform/ledger_registration",
+            )
+        })
+    }
+
+}
+
+impl TunnelRuntime for RealTunnelRuntime {
+    fn start_apply_with_receipt(
+        self: Arc<Self>,
+        ctx: ApplyContext,
+        trace: TraceAdmission,
+    ) -> Result<ApplyAcceptance, TunnelError> {
+        self.start_apply_recorded_with_receipt(ctx, Some(trace), None)
+            .map(|(_, receipt)| receipt)
+    }
+    fn start_reconnect(
+        self: Arc<Self>,
+        ctx: ApplyContext,
+        attempt: u32,
+    ) -> Result<u64, TunnelError> {
+        self.start_apply_recorded(ctx, None, Some(attempt))
+    }
+
+    fn start_apply(self: Arc<Self>, ctx: ApplyContext) -> Result<(), TunnelError> {
+        // R1 直接入口没有新建痕事实；只读取实际现存关联，不触发新的门检。
+        self.start_apply_recorded(ctx, None, None).map(|_| ())
+    }
+
+    fn start_apply_admitted(
+        self: Arc<Self>,
+        ctx: ApplyContext,
+        trace: TraceAdmission,
+    ) -> Result<(), TunnelError> {
+        self.start_apply_recorded(ctx, Some(trace), None)
+            .map(|_| ())
     }
 
     fn cancel(&self) {
@@ -1296,108 +2137,15 @@ impl TunnelRuntime for RealTunnelRuntime {
     }
 
     fn disconnect(&self) -> Result<(), String> {
-        // 先撤销最终提交许可，再等旧资源清理；即使调用方没有单独 cancel，
-        // 排队等待资源锁期间也不能新提交 Connected。
-        {
-            let _commit = self
-                .lifecycle_commit
-                .lock()
-                .map_err(|_| "runtime commit lock".to_string())?;
-            self.cancel_flag
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        let diagnostics = self.diagnostic_context();
-        let started = Instant::now();
-        if let Some(diag) = &diagnostics {
-            diag.emit(
-                "tunnel.runtime.disconnect",
-                "caller_disconnect_request",
-                "started",
-                [],
-            );
-        }
-        let result = (|| {
-            use std::sync::atomic::Ordering;
-            let _resources = self
-                .resources
-                .lock()
-                .map_err(|_| "runtime resources lock".to_string())?;
-            let mut live = {
-                let _commit = self
-                    .lifecycle_commit
-                    .lock()
-                    .map_err(|_| "runtime commit lock".to_string())?;
-                self.cancel_flag.store(true, Ordering::SeqCst);
-                self.live
-                    .lock()
-                    .map_err(|_| "live lock".to_string())?
-                    .take()
-            };
-            if let Some(tunnel) = live.as_mut()
-                && let Err(error) = tunnel.disconnect()
-            {
-                *self.live.lock().map_err(|_| "live lock".to_string())? = live;
-                return Err(error);
-            }
-            self.retry_pending_routes()?;
-            // 减负断开完成：置 Paused 标记（D13；下次连接 start_apply 清）。
-            self.paused.store(true, Ordering::SeqCst);
-            Ok(())
-        })();
-        if let Some(diag) = &diagnostics {
-            diag.emit(
-                "tunnel.runtime.disconnect",
-                "caller_disconnect_request",
-                if result.is_ok() {
-                    "completed"
-                } else {
-                    "failed"
-                },
-                [(
-                    "elapsed_ms".into(),
-                    started.elapsed().as_millis().to_string(),
-                )],
-            );
-        }
-        result
+        self.disconnect_report().result()
+    }
+
+    fn disconnect_report(&self) -> StopReport {
+        self.disconnect_lifecycle()
     }
 
     fn teardown(&self) -> Result<(), String> {
-        let diagnostics = self.diagnostic_context();
-        let started = Instant::now();
-        if let Some(diag) = &diagnostics {
-            diag.emit(
-                "tunnel.runtime.teardown",
-                "caller_teardown_request",
-                "started",
-                [],
-            );
-        }
-        let result = (|| {
-            // 退出清理（D12/D15）：先减负断开（session-end + route 清 + 有界 join），再
-            // NIC owner 关 adapter（0 网卡残留兜底）。
-            self.disconnect()?;
-            let mut nic = self.nic.lock().map_err(|_| "nic lock".to_string())?;
-            // drop NicOwner = adapter creator close 移除 adapter + 释放 lib。
-            let _ = nic.take();
-            Ok(())
-        })();
-        if let Some(diag) = &diagnostics {
-            diag.emit(
-                "tunnel.runtime.teardown",
-                "caller_teardown_request",
-                if result.is_ok() {
-                    "completed"
-                } else {
-                    "failed"
-                },
-                [(
-                    "elapsed_ms".into(),
-                    started.elapsed().as_millis().to_string(),
-                )],
-            );
-        }
-        result
+        self.teardown_lifecycle()
     }
 
     fn is_connected(&self) -> bool {
@@ -1551,6 +2299,38 @@ fn emit_assemble_failure_log(log: &LogSink, error: &TunnelError) {
     }
 }
 
+/// Failed 的诊断详情追加真实未竟因果；已知错误仍使用原安全文案，不外泄原始错误。
+fn emit_assemble_failure_with_rollback(
+    log: &LogSink,
+    error: &TunnelError,
+    rollback: Option<&crate::connect_ledger::RollbackOutcome>,
+) {
+    let Some(rollback) = rollback.filter(|outcome| !outcome.resolved()) else {
+        emit_assemble_failure_log(log, error);
+        return;
+    };
+    let public = public_assembly_failure(&error.detail);
+    let primary = public.map_or(error.detail.as_str(), |failure| failure.message);
+    let detail = format!(
+        "{primary}；连接失败后的实际回滚未竟域：{}；残留事实保留供下次预检处理，可重试并反馈日志",
+        rollback.unresolved_domains().join(",")
+    );
+    log.emit(
+        LogLevel::Warn,
+        "engine",
+        "tunnel.assemble.failed",
+        "连接失败，实际清理未完成；本次失败仍已上报",
+        &[
+            ("detail", &detail),
+            ("phase", &format!("{:?}", error.connect_phase)),
+            (
+                "reason_id",
+                public.map_or(error.reason, |failure| failure.reason_id),
+            ),
+        ],
+    );
+}
+
 impl RealTunnelRuntime {
     /// 组装线程入口（P3）：包裹 `assemble` + `catch_unwind`，**无论如何都复位
     /// `assembling`**，杜绝 panic 后 assembling 永真导致后续连接全部被拒为 duplicate。
@@ -1565,7 +2345,7 @@ impl RealTunnelRuntime {
         status: &Arc<StatusPublisher>,
         op_id: &[u8],
     ) {
-        use std::sync::atomic::Ordering;
+        let _completion = lifecycle::AssemblyCompletion(rt);
         // 克隆 LogSink 供失败详情落盘（ctx 随后被 assemble 消费；log.emit 才是可达
         // 聚合器/raw 的通道，tracing 无 subscriber 会丢）。
         let log = ctx.log.clone();
@@ -1577,6 +2357,32 @@ impl RealTunnelRuntime {
         );
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.assemble(ctx, cancel)));
+        let record_end = match &result {
+            Ok(Ok(_)) => AttemptEnd::Committed,
+            Ok(Err(err)) if err.detail == "engine: cancelled" => AttemptEnd::Cancelled,
+            Ok(Err(_)) => AttemptEnd::Failed,
+            Err(_) => AttemptEnd::Panicked,
+        };
+        if record_end != AttemptEnd::Committed
+            && !rt
+                .attempt_ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .last_rollback
+                .as_ref()
+                .is_some_and(|outcome| outcome.attempt_id == op_id)
+        {
+            // 空新 owner 不能证明旧资源已干净；原资源锁内观察 held 事实后统一收口。
+            rt.rollback_unstarted_attempt(op_id, diagnostics.clone());
+        }
+        let rollback = rt
+            .attempt_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_rollback
+            .as_ref()
+            .filter(|outcome| outcome.attempt_id == op_id)
+            .cloned();
         match result {
             Ok(Ok(_)) => {
                 let diag = rt
@@ -1612,7 +2418,7 @@ impl RealTunnelRuntime {
                         ("error_kind".into(), format!("{:?}", err.kind)),
                     ],
                 );
-                emit_assemble_failure_log(&log, &err);
+                emit_assemble_failure_with_rollback(&log, &err, rollback.as_ref());
                 stats.registry().set_phase(generated::StatsPhase::Failed);
                 let wire = tunnel_error_to_wire(&err);
                 status.publish(StatusEvent::failed(op_id.to_vec(), err.connect_phase, wire));
@@ -1628,9 +2434,23 @@ impl RealTunnelRuntime {
                     )],
                 );
                 // assemble 内部 panic（.expect() 逃逸）：推 Failed + EFFECT_UNKNOWN，
-                // 不让 assembling 永真导致后续连接全部被拒。
+                // 不让 assembling 永真导致后续连接全部被拒。此处不经
+                // `tunnel_error_to_wire` 直构 wire——reason 落点必须显式补上
+                // （复审 2.1-5a：只挂构造点会漏此直构点）。
                 stats.registry().set_phase(generated::StatsPhase::Failed);
                 tracing::error!("tunnel assembly panicked (catch_unwind captured)");
+                emit_assemble_failure_with_rollback(
+                    &log,
+                    &TunnelError {
+                        kind: TunnelErrorKind::Platform,
+                        connect_phase: ConnectPhase::ApplyingPlatformTunnel,
+                        code: 0,
+                        a0: 0,
+                        detail: "engine: assembly panicked".into(),
+                        reason: "platform/assembly_internal",
+                    },
+                    rollback.as_ref(),
+                );
                 status.publish(StatusEvent::failed(
                     op_id.to_vec(),
                     ConnectPhase::ApplyingPlatformTunnel,
@@ -1646,12 +2466,24 @@ impl RealTunnelRuntime {
                             namespace: generated::NativeErrorNamespace::Win32 as i32,
                             code: 0,
                         }),
+                        // T-13 panic 兜底：直构 wire 点同样携带稳定 reason id。
+                        reason: "platform/assembly_internal".to_string(),
+                        operation_detail: None,
                     },
                 ));
             }
         }
+        // 成功已在 install_live 提交；这里仅结束失败/取消/panic 记录，不清资源。
+        // 结束槽和释放单飞同属短锁，下一尝试不能继承旧条目。
+        let _commit = rt.lifecycle_commit.lock().expect("runtime commit lock");
+        if record_end != AttemptEnd::Committed {
+            rt.attempt_ledger
+                .lock()
+                .expect("attempt ledger lock")
+                .finish(op_id, record_end);
+        }
         // P3：无论如何都复位 assembling——含 panic 路径。
-        rt.assembling.store(false, Ordering::SeqCst);
+        // _completion 在短提交锁释放后通知所有等待者。
     }
 
     /// 组装被取消时的受控错误（StopTunnel 中途中止）。
@@ -1662,6 +2494,85 @@ impl RealTunnelRuntime {
             code: 0,
             a0: 0,
             detail: "engine: cancelled".to_string(),
+            reason: "platform/assembly_cancelled",
+        }
+    }
+
+    /// prepare 返回后立即保存真实 aTrust 控制 owner，并登记取得事实。
+    fn hold_atrust_control(
+        self: &Arc<Self>,
+        prepared: crate::atrust_prepare::PreparedAtrust,
+        operation_id: &[u8],
+        connection_mode: ConnectionMode,
+        diagnostics: RuntimeDiagnostics,
+    ) -> PreparedConnection {
+        // prepare 返回的真实 owner 先进入既有清理槽，下一可失败步骤前即具备 graceful 义务。
+        let mut control = LiveTunnel::connecting_control(connection_mode, diagnostics);
+        control.protocol = Protocol::Atrust;
+        control.atrust = Some(EngineAtrust {
+            owner: prepared.owner,
+            runtime: self.inner_runtime().handle().clone(),
+            _lost_tx: None,
+        });
+        let mut control = AttemptOwner::new(self, control, operation_id);
+        match control.register(LedgerDomain::SessionLease, false) {
+            Ok(sequence) => control.attempt.as_mut().unwrap().session = Some(sequence),
+            Err(error) => control.attempt.as_mut().unwrap().registration_error = Some(error),
+        }
+        PreparedConnection {
+            offer: prepared.offer,
+            campus_dns_servers: prepared.campus_dns_servers,
+            bypasses: prepared.bypasses,
+            packets: PreparedPackets::Atrust {
+                channels: prepared.channels,
+            },
+            control,
+        }
+    }
+
+    fn hold_cisco_control(
+        self: &Arc<Self>,
+        session: CstpSession,
+        operation_id: &[u8],
+        connection_mode: ConnectionMode,
+        diagnostics: RuntimeDiagnostics,
+    ) -> PreparedConnection {
+        let mut control = LiveTunnel::connecting_control(connection_mode, diagnostics);
+        let write_channel = session.write_channel;
+        let read_channel = Arc::new(Mutex::new(session.read_channel));
+        let control_rx = Arc::new(Mutex::new(session.control_rx));
+        control.cstp = Some(EngineCstp {
+            write_channel: write_channel.clone(),
+            read_channel: read_channel.clone(),
+            control_rx: Some(control_rx.clone()),
+            lost_tx: None,
+            tasks: session.tasks,
+            runtime: self.inner_runtime().handle().clone(),
+        });
+        let mut control = AttemptOwner::new(self, control, operation_id);
+        match control.register(LedgerDomain::SessionLease, false) {
+            Ok(sequence) => control.attempt.as_mut().unwrap().session = Some(sequence),
+            Err(error) => control.attempt.as_mut().unwrap().registration_error = Some(error),
+        }
+        let offer = session.offer_plan;
+        let latency_cfg = LatencyProbeConfig {
+            target: network_base(offer.ipv4_address, offer.prefix),
+            source: offer.ipv4_address,
+            dpd_enabled: DPD_PROBE_ENABLED,
+            ping_interval: Duration::from_secs(LATENCY_PING_INTERVAL_SECS),
+            refresh_marker: Some(self.refresh_marker_path()),
+        };
+        PreparedConnection {
+            campus_dns_servers: offer.dns_servers.iter().map(ToString::to_string).collect(),
+            offer,
+            bypasses: Vec::new(),
+            packets: PreparedPackets::Cisco {
+                write_channel,
+                read_channel,
+                control_rx,
+                latency_cfg,
+            },
+            control,
         }
     }
 
@@ -1679,7 +2590,7 @@ impl RealTunnelRuntime {
     /// 出 `Weak`——调用方 `run_assemble_with_reset` 手头即有 `&Arc<Self>`。
     fn assemble(
         self: &Arc<Self>,
-        ctx: ApplyContext,
+        mut ctx: ApplyContext,
         cancel_flag: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<PlatformFacts, TunnelError> {
         use std::sync::atomic::Ordering;
@@ -1690,10 +2601,16 @@ impl RealTunnelRuntime {
             return Err(Self::cancelled_error(ConnectPhase::ObservingOwnedState));
         }
 
-        self.clear_previous_connection().map_err(|error| {
-            TunnelError::plain(
+        self.clear_previous_connection_for_attempt(
+            &ctx.operation_id,
+            connection_mode,
+            diagnostics.clone(),
+        )
+        .map_err(|error| {
+            TunnelError::plain_with_reason(
                 ConnectPhase::ObservingOwnedState,
                 format!("engine: previous connection cleanup:{error}"),
+                "platform/previous_cleanup",
             )
         })?;
         if is_cancelled() {
@@ -1758,6 +2675,8 @@ impl RealTunnelRuntime {
                     code,
                     a0: 0,
                     detail,
+                    // T-06/07 Wintun：native 分档文案已达标，不设 id（词表 §2.3）。
+                    reason: "",
                 }
             })?;
             ctx.log.emit(
@@ -1787,12 +2706,13 @@ impl RealTunnelRuntime {
         }
 
         // 认证材料与本次磁盘配置必须一致，再进入任何网关认证分支。
-        let credentials = ctx.credentials.ok_or_else(|| TunnelError {
+        let credentials = ctx.credentials.take().ok_or_else(|| TunnelError {
             kind: TunnelErrorKind::MissingCredentials,
             connect_phase: ConnectPhase::ConnectingControl,
             code: 0,
             a0: 0,
             detail: "engine: no credentials provided".to_string(),
+            reason: "auth/credentials_missing",
         })?;
         let config = self.load_connection_config(&credentials).map_err(|e| {
             TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}"))
@@ -1803,31 +2723,48 @@ impl RealTunnelRuntime {
             "observed",
             [
                 ("directory".into(), self.config_dir.display().to_string()),
-                ("file_exists".into(), self.config_dir.join("config.json").is_file().to_string()),
+                (
+                    "file_exists".into(),
+                    self.config_dir.join("config.json").is_file().to_string(),
+                ),
                 ("protocol".into(), config.protocol.to_string()),
             ],
         );
         let hostname = config.server.clone();
         let user_agent = config.user_agent.clone();
-        let campus_routes = config.routes.clone();
 
-        let (offer, campus_dns_servers, bypasses, prepared_packets) = match credentials {
+        let prepared = match credentials {
             ConnectionCredentials::Atrust(browser) => {
                 ctx.status.publish(StatusEvent::connecting(
-                    ctx.operation_id.clone(), ConnectPhase::ConnectingControl,
+                    ctx.operation_id.clone(),
+                    ConnectPhase::ConnectingControl,
                 ));
-                let certificate = match std::fs::read(self.config_dir.join("atrust-node-certificate.der")) {
-                    Ok(bytes) => Some(bytes),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(_) => return Err(TunnelError::plain(ConnectPhase::ConnectingControl,
-                        "engine: cannot read explicitly configured aTrust node certificate")),
-                };
-                let prepared = self.inner_runtime().block_on(crate::atrust_prepare::prepare(
-                    browser, &config, certificate.as_deref(),
-                )).map_err(|error| TunnelError::plain(ConnectPhase::ConnectingControl, error))?;
-                (prepared.offer, prepared.campus_dns_servers, prepared.bypasses, PreparedPackets::Atrust {
-                    owner: prepared.owner, channels: prepared.channels,
-                })
+                let certificate =
+                    match std::fs::read(self.config_dir.join("atrust-node-certificate.der")) {
+                        Ok(bytes) => Some(bytes),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(_) => {
+                            return Err(TunnelError::plain(
+                                ConnectPhase::ConnectingControl,
+                                "engine: cannot read explicitly configured aTrust node certificate",
+                            ));
+                        }
+                    };
+                let prepared = self
+                    .inner_runtime()
+                    .block_on(crate::atrust_prepare::prepare(
+                        browser,
+                        &config,
+                        certificate.as_deref(),
+                        &ctx.log,
+                    ))
+                    .map_err(|error| TunnelError::plain(ConnectPhase::ConnectingControl, error))?;
+                self.hold_atrust_control(
+                    prepared,
+                    &ctx.operation_id,
+                    connection_mode,
+                    diagnostics.clone(),
+                )
             }
             ConnectionCredentials::Cisco(mut credentials) => {
                 // ---- 阶段 1：登录 + CSTP 控制面协商（真实学校网关；plan 来自真实 offer）。
@@ -1904,12 +2841,20 @@ impl RealTunnelRuntime {
                     CSTP_GATEWAY_PORT,
                     Some(dns_observer),
                 )
-                .map_err(|e| TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}")))?;
-                let socket_binder = socket_binder_for_mode(connection_mode, physical_ifindex);
-                let resolver = gateway_resolver.clone();
-                let gateway_addr = self.inner_runtime().block_on(resolver(&hostname)).map_err(|e| {
+                .map_err(|e| {
                     TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}"))
                 })?;
+                let socket_binder = socket_binder_for_mode(connection_mode, physical_ifindex);
+                let resolver = gateway_resolver.clone();
+                let gateway_addr =
+                    self.inner_runtime()
+                        .block_on(resolver(&hostname))
+                        .map_err(|e| {
+                            TunnelError::plain(
+                                ConnectPhase::ConnectingControl,
+                                format!("engine: {e}"),
+                            )
+                        })?;
                 if is_cancelled() {
                     return Err(Self::cancelled_error(ConnectPhase::ConnectingControl));
                 }
@@ -2021,42 +2966,61 @@ impl RealTunnelRuntime {
                         Some(&socket_observer),
                     ))
                     .map_err(TunnelError::session)?;
+                let mut prepared = self.hold_cisco_control(
+                    session,
+                    &ctx.operation_id,
+                    connection_mode,
+                    diagnostics.clone(),
+                );
+                prepared.control.check_registration()?;
                 // 在写入校园路由前，以长期 CSTP socket 的实际源地址确定出口。
                 // 兼容模式不能在此切回物理网卡，否则将改变已经建立的连接路径。
-                let (bypass_row, egress_ifindex) = match connection_mode {
-                    ConnectionMode::Standard => (
-                        exv_vpn_win32_resource::routes::gateway_bypass_row(physical_nic, gateway_ip)
+                let egress_result = (|| {
+                    Ok(match connection_mode {
+                        ConnectionMode::Standard => (
+                            exv_vpn_win32_resource::routes::gateway_bypass_row(
+                                physical_nic,
+                                gateway_ip,
+                            )
                             .map_err(|error| {
                                 TunnelError::plain(
                                     ConnectPhase::ConnectingControl,
                                     format!("engine: bypass-row:{error:?}"),
                                 )
                             })?,
-                        physical_ifindex,
-                    ),
-                    ConnectionMode::Compatibility => {
-                        let endpoints = actual_endpoints
-                            .into_inner()
-                            .expect("socket observation lock")
-                            .ok_or_else(|| {
-                                TunnelError::plain(
-                                    ConnectPhase::ConnectingControl,
-                                    "engine: established CSTP socket endpoints unavailable",
-                                )
-                            })?
-                            .map_err(|error| {
-                                TunnelError::plain(
-                                    ConnectPhase::ConnectingControl,
-                                    format!("engine: CSTP endpoint query:{error}"),
-                                )
-                            })?;
-                        let own_ifindex = self
-                            .nic
-                            .lock()
-                            .expect("nic lock")
-                            .as_ref()
-                            .map(NicOwner::ifindex);
-                        observed_cstp_bypass(gateway_addr, endpoints, own_ifindex)?
+                            physical_ifindex,
+                        ),
+                        ConnectionMode::Compatibility => {
+                            let endpoints = actual_endpoints
+                                .into_inner()
+                                .expect("socket observation lock")
+                                .ok_or_else(|| {
+                                    TunnelError::plain(
+                                        ConnectPhase::ConnectingControl,
+                                        "engine: established CSTP socket endpoints unavailable",
+                                    )
+                                })?
+                                .map_err(|error| {
+                                    TunnelError::plain(
+                                        ConnectPhase::ConnectingControl,
+                                        format!("engine: CSTP endpoint query:{error}"),
+                                    )
+                                })?;
+                            let own_ifindex = self
+                                .nic
+                                .lock()
+                                .expect("nic lock")
+                                .as_ref()
+                                .map(NicOwner::ifindex);
+                            observed_cstp_bypass(gateway_addr, endpoints, own_ifindex)?
+                        }
+                    })
+                })();
+                let (bypass_row, egress_ifindex) = match egress_result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        drop(prepared.packets);
+                        return Err(error);
                     }
                 };
                 diagnostics.emit(
@@ -2072,7 +3036,7 @@ impl RealTunnelRuntime {
                         ("route_metric".into(), bypass_row.metric.to_string()),
                     ],
                 );
-                let offer = session.offer_plan.clone();
+                let offer = &prepared.offer;
                 diagnostics.emit(
                     "tunnel.cstp.effective_parameters",
                     "negotiated_offer",
@@ -2111,63 +3075,98 @@ impl RealTunnelRuntime {
                         ("routes", &offer.routes.join(",")),
                     ],
                 );
-                // 拆流：write_channel（reader 线程发 TLS）克隆 + read_channel（writer 线程收
-                // TLS 解码帧）包 Arc<Mutex>。**先作局部持有**——只有全部可失败步骤（apply /
-                // data-plane start）成功后才落进 `LiveTunnel`；任何中途错误路径局部 drop 即关闭
-                // CSTP 通道（TLS 任务退出、学校连接断开），不泄漏连接。
-                let write_channel = session.write_channel.clone();
-                let read_channel = Arc::new(Mutex::new(session.read_channel));
-                // T1 latency probe：持有 CSTP 控制面接收端（DPD response），并据真实 offer
-                // 构建探测配置（目标 = 客户端隧道子网网络基地址；真实学校网关 S5 验证）。
-                let control_rx = Arc::new(Mutex::new(session.control_rx));
-                let latency_cfg = LatencyProbeConfig {
-                    target: network_base(offer.ipv4_address, offer.prefix),
-                    source: offer.ipv4_address,
-                    dpd_enabled: DPD_PROBE_ENABLED,
-                    ping_interval: Duration::from_secs(LATENCY_PING_INTERVAL_SECS),
-                    refresh_marker: Some(self.refresh_marker_path()),
-                };
-                (offer.clone(), offer.dns_servers.iter().map(ToString::to_string).collect::<Vec<_>>(), vec![bypass_row], PreparedPackets::Cisco {
-                    write_channel, read_channel, control_rx, latency_cfg,
-                })
+                prepared.bypasses.push(bypass_row);
+                prepared
             }
         };
-        if is_cancelled() {
-            // 取消：drop 局部 CSTP 通道（TLS 任务退出），无其它资源——直接中断。
-            return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
-        }
+        self.assemble_prepared(ctx, config, prepared_wintun, prepared, cancel_flag)
+    }
 
-        // ---- 阶段 2：**NIC owner 确保/复用 + route owner 应用**（D11 连接序：session
-        //      协商 offer → NIC 确保/复用 adapter → route 应用地址/DNS/路由）。 ----
-        let _resources = self.resources.lock().expect("runtime resources lock");
-        if is_cancelled() {
-            return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
-        }
-        // sweeper 可能还未处理掉线信号。新连接既不能 Adopt 死数据面，也不能在旧
-        // 路由仍在清理时写入新路由；资源锁覆盖 take、真实清理和本次应用/安装。
-        let old_live = self.live.lock().expect("live lock").take();
-        if let Some(mut old_live) = old_live {
-            old_live
-                .disconnect_for("replace_failed_data_plane")
-                .map_err(|error| TunnelError::plain(ConnectPhase::ApplyingPlatformTunnel, error))?;
-        }
-        ctx.status.publish(StatusEvent::connecting(
-            ctx.operation_id.clone(),
-            ConnectPhase::ApplyingPlatformTunnel,
-        ));
-        // 2a. NIC owner：首次连接建 adapter（D12），断开后复用（`nic` 已存在）。接口级
-        //     配置（DAD 禁用/接口启用）随 ensure 一次完成，跨连接存续。
-        let nic_newly_created = {
-            let mut guard = self.nic.lock().expect("nic lock");
-            if guard.is_none() {
-                let prepared = prepared_wintun.ok_or_else(|| {
-                    TunnelError::plain(
-                        ConnectPhase::ApplyingPlatformTunnel,
-                        "engine: preflight NIC changed unexpectedly",
-                    )
-                })?;
-                let nic = NicOwner::ensure_with_library(prepared.library, &self.adapter_name)
+    fn assemble_prepared(
+        self: &Arc<Self>,
+        ctx: ApplyContext,
+        config: exv_vpn_win32_config::ExvConfig,
+        prepared_wintun: Option<crate::wintun_dependency::PreparedWintun>,
+        prepared: PreparedConnection,
+        cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<PlatformFacts, TunnelError> {
+        use std::sync::atomic::Ordering;
+        let diagnostics = RuntimeDiagnostics::new(Arc::clone(&ctx.log), &ctx.operation_id);
+        let connection_mode = ctx.connection_mode;
+        let is_cancelled = || cancel_flag.load(Ordering::SeqCst);
+        let campus_routes = config.routes.clone();
+        let PreparedConnection {
+            offer,
+            campus_dns_servers,
+            bypasses,
+            packets: prepared_packets,
+            control,
+        } = prepared;
+        let mut live = control;
+        // 失败时通道保留到显式协议清理之后；成功时只在 spawn 点取走。
+        let mut prepared_packets = Some(prepared_packets);
+        // 控制段只有既有 LiveTunnel owner；失败回到其原语，成功只把同一 owner 移交。
+        // 登记关联本 owner，错误/取消/panic 都由 guard 同入口回滚；trace 留阶段 5。
+        let result = (|| {
+            live.check_registration()?;
+            if is_cancelled() {
+                // 尚无平台资源：退出时 guard 以同一控制 owner 显式清理协议。
+                return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
+            }
+
+            // ---- 阶段 2：**NIC owner 确保/复用 + route owner 应用**（D11 连接序：session
+            //      协商 offer → NIC 确保/复用 adapter → route 应用地址/DNS/路由）。 ----
+            #[cfg(test)]
+            control_tests::observe_before_resources_lock();
+            let resources = self.resources.lock().expect("runtime resources lock");
+            drop(resources); // 原装配占用仍有效；失败 owner 的 Drop 可在锁外等待。
+            // Err/unwind 先完成原 owner 回滚和义务移交，再由 AssemblyCompletion
+            // 释放装配占用；失败 join 不持资源锁，不扩大 lifecycle_commit。
+            let mut live = live;
+            if is_cancelled() {
+                return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
+            }
+            // sweeper 可能还未处理掉线信号。新连接既不能 Adopt 死数据面，也不能在旧
+            // 路由仍在清理时写入新路由；原装配占用覆盖清理和本次应用/安装。
+            let old_live = self.live.lock().expect("live lock").take();
+            if let Some(old_live) = old_live {
+                self.cleanup_or_retain(old_live, "replace_failed_data_plane")
                     .map_err(|error| {
+                        TunnelError::plain(ConnectPhase::ApplyingPlatformTunnel, error)
+                    })?;
+            }
+            ctx.status.publish(StatusEvent::connecting(
+                ctx.operation_id.clone(),
+                ConnectPhase::ApplyingPlatformTunnel,
+            ));
+            if self.acceptance_fault_once.swap(false, Ordering::SeqCst) {
+                diagnostics.emit(
+                    "tunnel.acceptance.fault.injected",
+                    "acceptance_fault",
+                    "injected",
+                    [
+                        ("fault_id".into(), "after-control-before-nic".into()),
+                        ("phase".into(), "ApplyingPlatformTunnel".into()),
+                    ],
+                );
+                return Err(TunnelError::plain(
+                    ConnectPhase::ApplyingPlatformTunnel,
+                    "engine: acceptance fault after-control-before-nic",
+                ));
+            }
+            // 2a. NIC owner：首次连接建 adapter（D12），断开后复用（`nic` 已存在）。接口级
+            //     配置（DAD 禁用/接口启用）随 ensure 一次完成，跨连接存续。
+            {
+                let mut guard = self.nic.lock().expect("nic lock");
+                if guard.is_none() {
+                    let prepared = prepared_wintun.ok_or_else(|| {
+                        TunnelError::plain(
+                            ConnectPhase::ApplyingPlatformTunnel,
+                            "engine: preflight NIC changed unexpectedly",
+                        )
+                    })?;
+                    let nic = NicOwner::ensure_with_library(prepared.library, &self.adapter_name)
+                        .map_err(|error| {
                         use crate::platform_tunnel::NicInitializationError;
                         match error {
                             NicInitializationError::Native(native) => {
@@ -2187,8 +3186,15 @@ impl RealTunnelRuntime {
                                     connect_phase: ConnectPhase::ApplyingPlatformTunnel,
                                     code: native.code,
                                     a0: 0,
-                                    detail: format!("engine: wintun-create:{native:?}"),
+                                    detail: format!("engine: wintun-open-or-create:{native:?}"),
+                                    // T-06/07 Wintun：native 分档文案已达标，不设 id（词表 §2.3）。
+                                    reason: "",
                                 }
+                            }
+                            NicInitializationError::Interface(native) => {
+                                let mut error = TunnelError::plain(ConnectPhase::ApplyingPlatformTunnel, format!("engine: interface-enable:{native:?}"));
+                                error.code = native.code;
+                                error
                             }
                             NicInitializationError::Configuration(detail) => TunnelError::plain(
                                 ConnectPhase::ApplyingPlatformTunnel,
@@ -2196,397 +3202,562 @@ impl RealTunnelRuntime {
                             ),
                         }
                     })?;
-                *guard = Some(nic);
-                self.nic_created_count
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                true
-            } else {
-                // D12 复用证据：断开后重连 adapter 句柄未重建。
-                self.nic_reused_count
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ctx.log.emit(
-                    LogLevel::Info,
-                    "engine",
-                    "tunnel.nic.reused",
-                    "NIC adapter reused across connections (D12; handle not rebuilt)",
-                    &[("reused_count", &self.nic_reused_count().to_string())],
-                );
-                false
-            }
-        };
-
-        // 2b. route owner：经 NIC 交出的 LUID 应用真实 offer 五族（D17 + 2026-09-08
-        //     计划网关 bypass /32 族）。发起用户 SID 一并传入（系统代理豁免写入该
-        //     用户 HKU；None = 跳过 system_proxy 族）。系统代理账本一并传入
-        //     （apply 记账 / clear 清账；J4 接线）。bypass 行来自阶段 1 的 VGDC
-        //     解析结果；aTrust 可含认证网关和数据节点的多条旁路。
-        let route_result = {
-            let guard = self.nic.lock().expect("nic lock");
-            let nic = guard.as_ref().expect("nic ensured");
-            if bypasses.iter().any(|row| row.interface_luid == nic.luid()) {
-                Err("engine: gateway bypass points into EXV's own tunnel".into())
-            } else {
-                nic.apply_offer_with_bypasses(
-                    &offer,
-                    &campus_routes,
-                    &config.campus_dns_domains,
-                    &bypasses,
-                    self.core_user_sid.clone(),
-                    &self.journal,
-                )
-            }
-        };
-        let (route, facts) = match route_result {
-            Ok(v) => v,
-            Err(e) => {
-                // all-or-nothing（D16）：新 adapter + 失败 → 移除（0 残留兜底）；复用
-                // adapter + 失败 → 保留（RouteOwner::apply 已内部逆序回滚各族含
-                // bypass 行，无残留）。
-                if nic_newly_created {
-                    let _ = self.nic.lock().expect("nic lock").take();
-                }
-                let detail = format!("engine: {e}");
-                let route_native_code = e.route_native_code;
-                if !e.pending_routes.is_empty() {
+                    let created = nic.adapter().owned();
+                    *guard = Some(nic);
+                    live.attempt.as_mut().unwrap().nic = Some((None, true));
+                    let sequence = live.register(LedgerDomain::Nic, true)?;
+                    live.attempt.as_mut().unwrap().nic = Some((Some(sequence), true));
+                    record_nic_creation(&self.nic_created_count, true, created);
+                } else {
+                    // D12 复用证据：断开后重连 adapter 句柄未重建。
+                    live.attempt.as_mut().unwrap().nic = Some((None, false));
+                    let sequence = live.register(LedgerDomain::Nic, true)?;
+                    live.attempt.as_mut().unwrap().nic = Some((Some(sequence), false));
+                    self.nic_reused_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     ctx.log.emit(
-                        LogLevel::Warn,
-                        "connection",
-                        "tunnel.route.rollback.pending",
-                        "平台配置失败，部分本次创建的路由清理失败，已保留后续重试记录",
-                        &[
-                            ("connection_mode", connection_mode.as_str()),
-                            ("operation_id", &diagnostics.operation_id),
-                            ("pending_route_count", &e.pending_routes.len().to_string()),
-                            ("detail", &detail),
-                        ],
+                        LogLevel::Info,
+                        "engine",
+                        "tunnel.nic.reused",
+                        "NIC adapter reused across connections (D12; handle not rebuilt)",
+                        &[("reused_count", &self.nic_reused_count().to_string())],
                     );
-                    self.pending_routes
-                        .lock()
-                        .expect("pending routes lock")
-                        .push(e.pending_routes);
                 }
-                let mut error = TunnelError::plain(
-                    ConnectPhase::ApplyingPlatformTunnel,
-                    detail,
-                );
-                error.code = route_native_code.unwrap_or(0);
-                return Err(error);
-            }
-        };
-        // 诊断：apply 后立即回读接口地址行（含 DadState）——R0 归因的 Wintun IPv4 DAD
-        // 恒 Tentative 问题；真实地址行/状态决定业务流量是否可达。
-        let addr_readback =
-            exv_vpn_win32_resource::ip_address::IpAddressController::new(facts.luid)
-                .capture()
-                .map(|rows| {
-                    rows.iter()
-                        .map(|r| {
-                            format!(
-                                "{}/{} dad={}",
-                                r.address, r.on_link_prefix_length, r.dad_state
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_else(|e| format!("capture-err:{e:?}"));
-        let route_readback = exv_vpn_win32_resource::routes::capture_rows(facts.luid)
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| format!("{}/{}", r.network, r.prefix_len))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_else(|e| format!("capture-err:{e:?}"));
-        ctx.log.emit(
-            if facts.route_ownership.pending > 0 {
-                LogLevel::Warn
-            } else {
-                LogLevel::Info
-            },
-            "engine",
-            "tunnel.platform.applied",
-            "platform tunnel applied (diagnostic)",
-            &[
-                ("connection_mode", connection_mode.as_str()),
-                (
-                    "route_created_count",
-                    &facts.route_ownership.created.to_string(),
-                ),
-                (
-                    "route_borrowed_count",
-                    &facts.route_ownership.borrowed.to_string(),
-                ),
-                (
-                    "route_pending_count",
-                    &facts.route_ownership.pending.to_string(),
-                ),
-                (
-                    "address",
-                    facts.address_applied.as_deref().unwrap_or("none"),
-                ),
-                (
-                    "mtu",
-                    &facts
-                        .mtu_applied
-                        .map(|m| m.to_string())
-                        .unwrap_or_else(|| "none".to_string()),
-                ),
-                ("routes", &facts.routes_applied.join(",")),
-                ("dns", &facts.dns_applied.join(",")),
-                ("addr_readback", &addr_readback),
-                ("route_readback", &route_readback),
-            ],
-        );
-        if is_cancelled() {
-            // 取消：显式逆序清理已建 route（地址/路由/DNS）；若本次新建 adapter 则移除。
-            let cleaned = self.cleanup_or_retain(
-                LiveTunnel::cleanup_only(route, connection_mode, diagnostics.clone()),
-                "cancelled_after_platform_apply",
-            );
-            if nic_newly_created && cleaned.is_ok() {
-                let _ = self.nic.lock().expect("nic lock").take();
-            }
-            return Err(Self::cancelled_error(ConnectPhase::StartingDataPlane));
-        }
+            };
 
-        // ---- 阶段 3：engine 数据面（session owner 接续——engine 自己建 session +
-        //      reader/writer 线程，全在 engine 进程内零跨进程）。 ----
-        ctx.status.publish(StatusEvent::connecting(
-            ctx.operation_id.clone(),
-            ConnectPhase::StartingDataPlane,
-        ));
-        let plane = {
-            let guard = self.nic.lock().expect("nic lock");
-            let nic = guard.as_ref().expect("nic ensured");
-            EngineDataPlane::start(nic.library(), nic.adapter(), WINTUN_RING_CAPACITY)
-        };
-        let plane = match plane {
-            Ok(plane) => plane,
-            Err(e) => {
-                // 数据面启动失败：显式逆序清理已建 route；若本次新建 adapter 则移除。
-                let cleaned = self.cleanup_or_retain(
-                    LiveTunnel::cleanup_only(route, connection_mode, diagnostics.clone()),
-                    "data_plane_start_failed",
-                );
-                if nic_newly_created && cleaned.is_ok() {
-                    let _ = self.nic.lock().expect("nic lock").take();
+            if is_cancelled() {
+                return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
+            }
+
+            // 2b. route owner：经 NIC 交出的 LUID 应用真实 offer 五族（D17 + 2026-09-08
+            //     计划网关 bypass /32 族）。发起用户 SID 一并传入（系统代理豁免写入该
+            //     用户 HKU；None = 跳过 system_proxy 族）。系统代理账本一并传入
+            //     （apply 记账 / clear 清账；J4 接线）。bypass 行来自阶段 1 的 VGDC
+            //     解析结果；aTrust 可含认证网关和数据节点的多条旁路。
+            let route_result = {
+                let guard = self.nic.lock().expect("nic lock");
+                let nic = guard.as_ref().expect("nic ensured");
+                if bypasses.iter().any(|row| row.interface_luid == nic.luid()) {
+                    Err("engine: gateway bypass points into EXV's own tunnel".into())
+                } else {
+                    nic.apply_offer_with_bypasses(
+                        &offer,
+                        &campus_routes,
+                        &config.campus_dns_domains,
+                        &bypasses,
+                        self.core_user_sid.clone(),
+                        &self.journal,
+                    )
                 }
-                return Err(TunnelError::plain(
-                    ConnectPhase::StartingDataPlane,
-                    format!("engine: data-plane:{e}"),
-                ));
-            }
-        };
-        // ---- T3（F6）：掉线 sweeper 接线——世代号分配 + 信号通道 + 双份发送端
-        //      安放（P1-1：writer 闭包一份 + EngineCstp 一份）。世代号在安装 live
-        //      前递增分配；sweeper 先于 live 安装启动——writer 若在安装后立即死亡，
-        //      信号也已有人接收。----
-        let generation = self
-            .generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let mut live_diagnostics = diagnostics.clone();
-        live_diagnostics.generation = Some(generation);
-        *self.diagnostics.lock().expect("diagnostics lock") = Some(live_diagnostics.clone());
-        live_diagnostics.emit(
-            "tunnel.runtime.generation",
-            "data_plane_install",
-            "assigned",
-            [],
-        );
-        let (lost_tx, lost_rx) = std::sync::mpsc::channel::<DataPlaneLost>();
-        self.spawn_live_sweeper(lost_rx);
-        // writer 闭包内的发送端：`Arc<dyn Fn>` 持 Sender 克隆 + 预制世代号（复审
-        // P2-5）——writer 掉线时调用一次，DataPlaneAux 无需感知世代细节。
-        let notify_data_plane_lost: Arc<dyn Fn() + Send + Sync> = {
-            let lost_tx = lost_tx.clone();
-            Arc::new(move || {
-                // send 失败（sweeper 已退出）→ stderr 单行、忽略（F6，不重试——
-                // 该失败仅发生在运行时已 drop 的退出边界）。
-                if lost_tx.send(DataPlaneLost { generation }).is_err() {
-                    eprintln!("[info] engine data-plane: lost signal send failed (sweeper gone)");
+            };
+            // apply 失败仍携带 pending_routes 时，本次已取得可重试义务，不能漏记。
+            let facts = match route_result {
+                Ok((route, facts)) => {
+                    live.route = Some(route);
+                    let sequence = live.register(LedgerDomain::RouteFamily, false)?;
+                    live.attempt.as_mut().unwrap().route = Some(sequence);
+                    facts
                 }
-            })
-        };
-        let aux = DataPlaneAux {
-            stats: Some(Arc::clone(ctx.stats.registry())),
-            latency: None, control_rx: None,
-            status: Some(Arc::clone(&ctx.status)),
-            operation_id: ctx.operation_id.clone(),
-            notify_data_plane_lost: Some(notify_data_plane_lost),
-        };
-        let (threads, cstp, atrust, protocol) = match prepared_packets {
-            PreparedPackets::Cisco { write_channel, read_channel, control_rx, latency_cfg } => {
-                let threads = plane.spawn_data_plane(write_channel.clone(), &read_channel,
-                    Some(Arc::clone(&ctx.log)), DataPlaneAux {
-                        latency: Some(latency_cfg), control_rx: Some(control_rx.clone()), ..aux
-                    });
-                (threads, Some(EngineCstp { write_channel, read_channel,
-                    control_rx: Some(control_rx), lost_tx }), None, Protocol::Cisco)
-            }
-            PreparedPackets::Atrust { owner, channels } => {
-                let threads = plane.spawn_raw_packet_data_plane(channels.outgoing, channels.incoming,
-                    Some(Arc::clone(&ctx.log)), aux);
-                (threads, None, Some(EngineAtrust { owner, runtime: self.inner_runtime().handle().clone(),
-                    _lost_tx: Some(lost_tx) }), Protocol::Atrust)
-            }
-        };
-        // 数据面已可传输后再安装校园域名规则；连接终态只能在规则回读成功后发布。
-        let mut live = LiveTunnel {
-            protocol,
-            connection_mode,
-            data_plane_threads: Some(threads),
-            data_plane: Some(plane),
-            atrust,
-            cstp,
-            route: Some(route),
-            campus_dns: None,
-            diagnostics: Some(live_diagnostics),
-        };
-        // T4：NRPT owner 标记随 lease 建立即捕获（worker 移入 live 后不再可及），
-        // 供装配成功回写 trace 的 nrpt_owner_guids。
-        let mut nrpt_owner_guids: Vec<String> = Vec::new();
-        // 兜底认领清理（计划 v6.1 §8.2 触发模型补洞）：撞自有 NRPT conflict——上次
-        // 会话善后未竟的残留规则（预检三触发源在该路径全不命中：痕可能已删或 gate
-        // 走了无预检分路；2026-09-28 四次重连全撞 conflict 案）→ 按 EXV-NRPT: 前缀
-        // 认领清理（预检清理器同款策略与代码，preflight::claim_clean_own_nrpt）→
-        // 自动重试一次。外来规则（无前缀）不动（T2 裁定不变）——清理集为空则不
-        // 重试，错误原文上抛（UI 三选）。
-        let mut campus_dns_start = crate::nrpt_worker::NrptWorkerLease::start(
-            &config.campus_dns_domains,
-            &campus_dns_servers,
-        );
-        if let Err(first) = &mut campus_dns_start
-            && first.is_conflict()
-        {
-            // 首次尝试在 stage=conflict 早退（未 add 任何规则）——有界 shutdown 收掉
-            // 其子进程（EOF + 清理确认），再清理重试。
-            if let Some(mut lease) = first.worker.take() {
-                let _ = lease.shutdown();
-            }
+                Err(e) => {
+                    // 内部回滚后仍携义务则由同 owner 重试；未清完不得提前关闭 NIC。
+                    let detail = format!("engine: {e}");
+                    let route_native_code = e.route_native_code;
+                    if !e.pending_routes.is_empty() {
+                        ctx.log.emit(
+                            LogLevel::Warn,
+                            "connection",
+                            "tunnel.route.rollback.pending",
+                            "平台配置失败，部分本次创建的路由清理失败，已保留后续重试记录",
+                            &[
+                                ("connection_mode", connection_mode.as_str()),
+                                ("operation_id", &diagnostics.operation_id),
+                                ("pending_route_count", &e.pending_routes.len().to_string()),
+                                ("detail", &detail),
+                            ],
+                        );
+                        live.pending_route_cleanup = Some(e.pending_routes);
+                        let sequence = live.register(LedgerDomain::RouteFamily, false)?;
+                        live.attempt.as_mut().unwrap().route = Some(sequence);
+                    }
+                    let native_code = route_native_code.unwrap_or(0);
+                    // T-05 裁定：有原始 native 码（1168/5 等）→ 不挂 reason，壳侧
+                    // native 分档文案保留；无 native 码 → 挂 route_apply 细分 id。
+                    let mut error = if native_code == 0 {
+                        TunnelError::plain_with_reason(
+                            ConnectPhase::ApplyingPlatformTunnel,
+                            detail,
+                            "platform/route_apply",
+                        )
+                    } else {
+                        TunnelError::plain(ConnectPhase::ApplyingPlatformTunnel, detail)
+                    };
+                    error.code = native_code;
+                    return Err(error);
+                }
+            };
             ctx.log.emit(
+                if facts.route_ownership.pending > 0 {
+                    LogLevel::Warn
+                } else {
+                    LogLevel::Info
+                },
+                "engine",
+                "tunnel.platform.applied",
+                "platform tunnel applied (diagnostic)",
+                &[
+                    ("connection_mode", connection_mode.as_str()),
+                    (
+                        "route_created_count",
+                        &facts.route_ownership.created.to_string(),
+                    ),
+                    (
+                        "route_borrowed_count",
+                        &facts.route_ownership.borrowed.to_string(),
+                    ),
+                    (
+                        "route_pending_count",
+                        &facts.route_ownership.pending.to_string(),
+                    ),
+                    (
+                        "address",
+                        facts.address_applied.as_deref().unwrap_or("none"),
+                    ),
+                    (
+                        "mtu",
+                        &facts
+                            .mtu_applied
+                            .map(|m| m.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                    ),
+                    ("routes", &facts.routes_applied.join(",")),
+                    ("dns", &facts.dns_applied.join(",")),
+                ],
+            );
+            if is_cancelled() {
+                // 取消：同一 guard 清理 route；依赖已清完才释放新建 adapter handle。
+                return Err(Self::cancelled_error(ConnectPhase::StartingDataPlane));
+            }
+
+            // ---- 阶段 3：engine 数据面（session owner 接续——engine 自己建 session +
+            //      reader/writer 线程，全在 engine 进程内零跨进程）。 ----
+            ctx.status.publish(StatusEvent::connecting(
+                ctx.operation_id.clone(),
+                ConnectPhase::StartingDataPlane,
+            ));
+            let plane = {
+                let guard = self.nic.lock().expect("nic lock");
+                let nic = guard.as_ref().expect("nic ensured");
+                EngineDataPlane::start(nic.library(), nic.adapter(), WINTUN_RING_CAPACITY)
+            };
+            match plane {
+                Ok(plane) => {
+                    // Wintun session 已建立；后续线程 spawn / NRPT 失败仍须保留取得事实。
+                    live.data_plane = Some(plane);
+                    let sequence = live.register(LedgerDomain::DataPlane, false)?;
+                    live.attempt.as_mut().unwrap().data_plane = Some(sequence);
+                }
+                Err(e) => {
+                    // 数据面启动失败：同一 guard 按安全序清理，不丢 route 或新建 NIC 的义务。
+                    return Err(TunnelError::plain_with_reason(
+                        ConnectPhase::StartingDataPlane,
+                        format!("engine: data-plane:{e}"),
+                        "platform/data_plane_start",
+                    ));
+                }
+            };
+            if is_cancelled() {
+                return Err(Self::cancelled_error(ConnectPhase::StartingDataPlane));
+            }
+            // ---- T3（F6）：掉线 sweeper 接线——世代号分配 + 信号通道 + 双份发送端
+            //      安放（P1-1：writer 闭包一份 + EngineCstp 一份）。世代号在安装 live
+            //      前递增分配；sweeper 先于 live 安装启动——writer 若在安装后立即死亡，
+            //      信号也已有人接收。----
+            let generation = self
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let mut live_diagnostics = diagnostics.clone();
+            live_diagnostics.generation = Some(generation);
+            *self.diagnostics.lock().expect("diagnostics lock") = Some(live_diagnostics.clone());
+            live_diagnostics.emit(
+                "tunnel.runtime.generation",
+                "data_plane_install",
+                "assigned",
+                [],
+            );
+            let (lost_tx, lost_rx) = std::sync::mpsc::channel::<DataPlaneLost>();
+            self.spawn_live_sweeper(lost_rx);
+            // writer 闭包内的发送端：`Arc<dyn Fn>` 持 Sender 克隆 + 预制世代号（复审
+            // P2-5）——writer 掉线时调用一次，DataPlaneAux 无需感知世代细节。
+            let notify_data_plane_lost: Arc<dyn Fn() + Send + Sync> = {
+                let lost_tx = lost_tx.clone();
+                Arc::new(move || {
+                    // send 失败（sweeper 已退出）→ stderr 单行、忽略（F6，不重试——
+                    // 该失败仅发生在运行时已 drop 的退出边界）。
+                    if lost_tx.send(DataPlaneLost { generation }).is_err() {
+                        eprintln!(
+                            "[info] engine data-plane: lost signal send failed (sweeper gone)"
+                        );
+                    }
+                })
+            };
+            let aux = DataPlaneAux {
+                stats: Some(Arc::clone(ctx.stats.registry())),
+                latency: None,
+                control_rx: None,
+                status: Some(Arc::clone(&ctx.status)),
+                operation_id: ctx.operation_id.clone(),
+                notify_data_plane_lost: Some(notify_data_plane_lost),
+            };
+            let threads = match prepared_packets.take().expect("packet channels held") {
+                PreparedPackets::Cisco {
+                    write_channel,
+                    read_channel,
+                    control_rx,
+                    latency_cfg,
+                } => {
+                    let threads = live
+                        .data_plane
+                        .as_ref()
+                        .expect("plane held")
+                        .spawn_data_plane(
+                            write_channel,
+                            &read_channel,
+                            Some(Arc::clone(&ctx.log)),
+                            DataPlaneAux {
+                                latency: Some(latency_cfg),
+                                control_rx: Some(control_rx),
+                                ..aux
+                            },
+                        );
+                    live.cstp.as_mut().expect("Cisco control held").lost_tx = Some(lost_tx);
+                    threads
+                }
+                PreparedPackets::Atrust { channels } => {
+                    let threads = live
+                        .data_plane
+                        .as_ref()
+                        .expect("plane held")
+                        .spawn_raw_packet_data_plane(
+                            channels.outgoing,
+                            channels.incoming,
+                            Some(Arc::clone(&ctx.log)),
+                            aux,
+                        );
+                    live.atrust.as_mut().expect("aTrust control held")._lost_tx = Some(lost_tx);
+                    threads
+                }
+            };
+            // 同一控制 owner 接续到 live；移交后早期失败收尾没有重复释放权限。
+            match threads {
+                Ok(threads) => live.data_plane_threads = Some(threads),
+                Err(error) => {
+                    live.data_plane_threads = Some(error.threads);
+                    return Err(TunnelError::plain_with_reason(
+                        ConnectPhase::StartingDataPlane,
+                        format!("engine: data-plane spawn:{}", error.message),
+                        "platform/data_plane_start",
+                    ));
+                }
+            }
+            live.diagnostics = Some(live_diagnostics);
+            if is_cancelled() {
+                return Err(Self::cancelled_error(ConnectPhase::StartingDataPlane));
+            }
+            // T4：NRPT owner 标记随 lease 建立即捕获（worker 移入 live 后不再可及），
+            // 供装配成功回写 trace 的 nrpt_owner_guids。
+            let mut nrpt_owner_guids: Vec<String> = Vec::new();
+            // ---- 等效接纳（2026-10-08 计划阶段 1）+ 静默精准接管（D8 阶段 2）----
+            // 有界只读探测（复用预检探针子进程的**既有**有界生命周期：spawn ≤2.5s、
+            // op ≤2s、退出 ≤0.5s——不启动 NRPT worker 做判定，不新增「等待 PS 进程
+            // 退出」依赖）+ 纯函数判定（preflight/classify.rs 单一指纹规则）：外来规则
+            // 与本次会话 campus_dns_servers 完全等效的形式跳过自有添加
+            // （external-provided：台账标记 + teardown 绝不删它、绝不期待它消失）；
+            // 下次连接重新判定（规则消失→正常添加；变不等效→接管路径）。
+            // 探测失败 → 空接纳（fail closed，worker 冲突检测自行裁定，语义与
+            // 既有行为一致，无重试循环）。
+            //
+            // **静默精准接管（2026-10-09 用户裁定）**：conflict 形式非空且探测成功 →
+            // `nrpt_takeover`（journal 前置 → 原动作完成，会话服务器权威判定）→
+            // 继续实际 NRPT Add。失败/重建环 → 连接失败终态（reason 走 D9 的
+            // `VpnError.reason` 通道：`platform/nrpt_takeover_failed` /
+            // `platform/nrpt_foreign_rebuild`）。最小必要由判定结构保证：等效不覆盖、
+            // 清单外/自有前缀绝不进接管目标。
+            let mut nrpt_acceptance =
+                self.inner_runtime()
+                    .block_on(crate::preflight::determine_nrpt_acceptance(
+                        &config.campus_dns_domains,
+                        &campus_dns_servers,
+                    ));
+            if !nrpt_acceptance.accept_forms().is_empty() {
+                ctx.log.emit(
+                crate::log_sink::LogLevel::Info,
+                "engine",
+                "tunnel.nrpt.equivalent_accepted",
+                "外来 NRPT 规则与本次校园 DNS 配置完全等效：跳过自有添加（external-provided；teardown 不动该规则，下次连接重验）",
+                &[
+                    ("forms", &nrpt_acceptance.accept_forms().join(",")),
+                    ("fingerprint", &nrpt_acceptance.decision.digest_hex),
+                    ("servers", &campus_dns_servers.join(",")),
+                    ("probed_ok", &nrpt_acceptance.probed_ok.to_string()),
+                ],
+            );
+            }
+            let mut nrpt_external_forms = nrpt_acceptance.accept_forms().to_vec();
+            // 接管共享状态：本连接内已覆盖指纹账本（初始分支与 worker conflict 分支
+            // 共用——单指纹至多覆盖一次，重建即停）+ 已接管形式台账（trace 取证）。
+            let mut covered_fingerprints: Vec<String> = Vec::new();
+            let mut nrpt_taken_over_forms: Vec<String> = Vec::new();
+            let mut takeover_engaged = false;
+            if nrpt_acceptance.probed_ok && !nrpt_acceptance.decision.conflict_forms.is_empty() {
+                // 10s 接管预算 vs 5s 断开有界等待的竞态处理（复审遗漏 7）：接管前的
+                // 取消段边界检查——断开已取消时尽早退出，不进入 10s 预算的接管段。
+                if is_cancelled() {
+                    return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
+                }
+                let outcome =
+                    self.inner_runtime()
+                        .block_on(crate::nrpt_takeover::takeover_foreign_nrpt(
+                            &config.campus_dns_domains,
+                            &campus_dns_servers,
+                            &mut covered_fingerprints,
+                            &ctx.log,
+                            &diagnostics.operation_id,
+                        ));
+                takeover_engaged = outcome.engaged();
+                if let Some(failure) = &outcome.failed {
+                    return Err(self.fail_after_takeover(
+                        live,
+                        ConnectPhase::ApplyingPlatformTunnel,
+                        format!(
+                            "engine: nrpt takeover {}: {}",
+                            failure.detail(),
+                            failure.message()
+                        ),
+                        "platform/nrpt_takeover_failed",
+                    ));
+                }
+                if !outcome.rebuilt_forms.is_empty() {
+                    return Err(self.fail_after_takeover(
+                        live,
+                        ConnectPhase::ApplyingPlatformTunnel,
+                        format!(
+                            "engine: nrpt takeover rebuilt: {}",
+                            outcome.rebuilt_forms.join(",")
+                        ),
+                        "platform/nrpt_foreign_rebuild",
+                    ));
+                }
+                nrpt_taken_over_forms.extend(outcome.taken_over_forms.iter().cloned());
+            }
+            // 全部校园形式都被等效接纳 → **不启动 worker**（防死锁硬约束：等效接纳
+            // 路径不启动 NRPT worker 或 worker 即刻正常收尾——此处直接零进程）。
+            if is_cancelled() {
+                return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
+            }
+            let mut campus_dns_start = if nrpt_acceptance
+                .decision
+                .accepts_all(&config.campus_dns_domains)
+            {
+                Ok(None)
+            } else {
+                crate::nrpt_worker::NrptWorkerLease::start(
+                    &config.campus_dns_domains,
+                    &campus_dns_servers,
+                    nrpt_acceptance.accept_forms(),
+                )
+            };
+            // Err 也可能持有 lease；首次 conflict 在重试前就有真实进程义务。
+            live.hold_nrpt_result(&mut campus_dns_start)?;
+            // 兜底认领清理（计划 v6.1 §8.2 触发模型补洞）：撞 NRPT conflict——上次
+            // 会话善后未竟的自有残留（预检三触发源在该路径全不命中），或判定与
+            // worker 启动之间重现的外来覆盖（竞态，D8 起接管处置）→ 按 EXV-NRPT:
+            // 前缀认领清理（预检清理器同款策略与代码）→ 按原前置目标分流 →
+            // 仍有外来冲突则静默接管一次 → 仍冲突 → 重建环收口。自动重试有界
+            // （无循环）；D8 阶段 2 起认领清理集为空也重判（外来冲突的处置点在此）。
+            if let Err(first) = &mut campus_dns_start
+                && first.is_conflict()
+            {
+                // 首次尝试在 stage=conflict 早退（未 add 任何规则）——有界 shutdown 收掉
+                // 其子进程（EOF + 清理确认），再清理重试。
+                live.release_first_nrpt();
+                ctx.log.emit(
                 crate::log_sink::LogLevel::Warn,
                 "engine",
                 "tunnel.nrpt.conflict.claim_started",
-                "校园 DNS 精确规则冲突：按 EXV-NRPT: 前缀认领清理后自动重试一次（预检清理器同款策略；外来规则不动）",
+                "校园 DNS 精确规则冲突：按 EXV-NRPT: 前缀认领清理后自动重试一次（预检清理器同款策略；外来冲突走静默精准接管）",
                 &[("first_message", first.message.as_str())],
             );
-            let claim = self
-                .inner_runtime()
-                .block_on(crate::preflight::claim_clean_own_nrpt(&config.campus_dns_domains));
-            ctx.log.emit(
-                if claim.all_ok {
-                    crate::log_sink::LogLevel::Info
+                let claim = self
+                    .inner_runtime()
+                    .block_on(crate::preflight::claim_clean_own_nrpt(
+                        &config.campus_dns_domains,
+                        &campus_dns_servers,
+                    ));
+                ctx.log.emit(
+                    if claim.all_ok {
+                        crate::log_sink::LogLevel::Info
+                    } else {
+                        crate::log_sink::LogLevel::Warn
+                    },
+                    "engine",
+                    "tunnel.nrpt.conflict.claim_cleaned",
+                    "NRPT 认领清理完成（自有前缀规则已删；外来校园域规则交静默精准接管处置）",
+                    &[
+                        ("removed", &claim.removed.join(",")),
+                        ("removed_count", &claim.removed.len().to_string()),
+                        ("foreign_present", &claim.foreign_present.join(",")),
+                        ("all_ok", &claim.all_ok.to_string()),
+                    ],
+                );
+                if !claim.errors.is_empty() {
+                    return Err(self.fail_after_takeover(
+                        live,
+                        ConnectPhase::ApplyingPlatformTunnel,
+                        format!("engine: nrpt claim failed: {}", claim.errors.join("；")),
+                        "platform/nrpt_takeover_failed",
+                    ));
+                }
+                // claim 已有前置快照是重试的等效输入；错误先返回，不追加 reaccept。
+                // 同步 trace 与实际 worker 消费者，接管仍自行精确定位非等效目标。
+                let can_skip_worker = claim.can_skip_worker(&config.campus_dns_domains);
+                nrpt_acceptance.decision = claim.decision;
+                nrpt_external_forms = nrpt_acceptance.accept_forms().to_vec();
+                if !claim.foreign_present.is_empty() {
+                    if is_cancelled() {
+                        return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
+                    }
+                    let outcome =
+                        self.inner_runtime()
+                            .block_on(crate::nrpt_takeover::takeover_foreign_nrpt(
+                                &config.campus_dns_domains,
+                                &campus_dns_servers,
+                                &mut covered_fingerprints,
+                                &ctx.log,
+                                &diagnostics.operation_id,
+                            ));
+                    takeover_engaged |= outcome.engaged();
+                    if let Some(failure) = &outcome.failed {
+                        return Err(self.fail_after_takeover(
+                            live,
+                            ConnectPhase::ApplyingPlatformTunnel,
+                            format!(
+                                "engine: nrpt takeover (retry) {}: {}",
+                                failure.detail(),
+                                failure.message()
+                            ),
+                            "platform/nrpt_takeover_failed",
+                        ));
+                    }
+                    if !outcome.rebuilt_forms.is_empty() {
+                        return Err(self.fail_after_takeover(
+                            live,
+                            ConnectPhase::ApplyingPlatformTunnel,
+                            format!(
+                                "engine: nrpt takeover (retry) rebuilt: {}",
+                                outcome.rebuilt_forms.join(",")
+                            ),
+                            "platform/nrpt_foreign_rebuild",
+                        ));
+                    }
+                    nrpt_taken_over_forms.extend(outcome.taken_over_forms.iter().cloned());
+                }
+                if is_cancelled() {
+                    return Err(Self::cancelled_error(ConnectPhase::ApplyingPlatformTunnel));
+                }
+                // 本次删除的 own 可能仍留在旧 effective 投影中；原 worker 在 Add 前
+                // 选择仍在的等效 foreign，已消失形式继续真实 Add。
+                campus_dns_start = if can_skip_worker {
+                    Ok(None)
                 } else {
-                    crate::log_sink::LogLevel::Warn
-                },
-                "engine",
-                "tunnel.nrpt.conflict.claim_cleaned",
-                "NRPT 认领清理完成（自有前缀规则已删；外来校园域规则未动）",
-                &[
-                    ("removed", &claim.removed.join(",")),
-                    ("removed_count", &claim.removed.len().to_string()),
-                    ("foreign_present", &claim.foreign_present.join(",")),
-                    ("all_ok", &claim.all_ok.to_string()),
-                ],
-            );
-            if !claim.removed.is_empty() {
-                campus_dns_start = crate::nrpt_worker::NrptWorkerLease::start(
-                    &config.campus_dns_domains,
-                    &campus_dns_servers,
+                    crate::nrpt_worker::NrptWorkerLease::start(
+                        &config.campus_dns_domains,
+                        &campus_dns_servers,
+                        nrpt_acceptance.accept_forms(),
+                    )
+                };
+                // 重试取得另一份 lease 时另行登记；等效接纳的 Ok(None) 不造条目。
+                live.hold_nrpt_result(&mut campus_dns_start)?;
+            }
+            match campus_dns_start {
+                Ok(worker) => {
+                    if let Some(marker) = live
+                        .campus_dns
+                        .as_ref()
+                        .and_then(|lease| lease.owner_guid())
+                    {
+                        nrpt_owner_guids.push(marker.to_owned());
+                    }
+                    debug_assert!(worker.is_none(), "lease already held by attempt owner");
+                }
+                Err(error) => {
+                    // 接管已介入后的残余 conflict = 外来软件持续重建（单指纹单次覆盖
+                    // 硬闸拒绝二次覆盖）→ rebuild 收口；未介入的 conflict（如认领
+                    // 清理未竟的自有残留）维持既有泛化语义（reason=""，T-22）。
+                    let reason = if error.is_conflict() && takeover_engaged {
+                        "platform/nrpt_foreign_rebuild"
+                    } else {
+                        error.reason
+                    };
+                    let message = error.message.clone();
+                    debug_assert!(
+                        error.worker.is_none(),
+                        "failed lease already held by attempt owner"
+                    );
+                    let mut failure = TunnelError::plain_with_reason(
+                        ConnectPhase::ApplyingPlatformTunnel, message, reason,
+                    );
+                    failure.code = error.native_code.unwrap_or(0);
+                    return Err(failure);
+                }
+            }
+            self.install_live(live.into_live(), &ctx.status, &ctx.stats, &ctx.operation_id)?;
+            // T4 装配成功回写：trace connecting → live + 网卡/NRPT owner/engine PID 补丁
+            // （端口清单暂空——系统代理 PAC 回环端口深藏于 route owner 的 teardown 所有权，
+            // 与预检代理域的接线一并后置）。失败只告警：装配已成功，痕迹写失败不得
+            // 拆毁活隧道；connecting 残留下次预检兜底。
+            if let Some(gate) = &self.trace_gate {
+                gate.mark_live(
+                    &crate::connection_trace::TracePatch {
+                        adapter_names: Some(vec![self.adapter_name.clone()]),
+                        nrpt_owner_guids: Some(nrpt_owner_guids),
+                        // 台账标记（防死锁约束的账面落地）：external-provided 形式
+                        // 不归 EXV 所有——认领清理/善后只认 owner GUID 前缀，本清单
+                        // 仅作取证与下次连接重验的对照，不驱动任何删除。
+                        nrpt_external_forms: Some(nrpt_external_forms),
+                        // 接管台账（D8 阶段 2）：journal 有完整形状与完成标记，是
+                        // `-Restore` 的数据源；teardown 不恢复被接管规则（恢复=制造
+                        // EXV 不拥有的规则）。
+                        nrpt_taken_over_forms: Some(nrpt_taken_over_forms),
+                        rollback_unresolved: Some(Vec::new()),
+                        proxy_ports: Some(Vec::new()),
+                        engine_pid: Some(std::process::id()),
+                    },
+                    &ctx.log,
                 );
             }
-        }
-        match campus_dns_start {
-            Ok(worker) => {
-                if let Some(marker) = worker.as_ref().and_then(|lease| lease.owner_guid()) {
-                    nrpt_owner_guids.push(marker.to_owned());
-                }
-                live.campus_dns = worker;
-            }
-            Err(error) => {
-                live.campus_dns = error.worker.map(|lease| *lease);
-                let cleaned = self.cleanup_or_retain(live, "campus_dns_start_failed");
-                if nic_newly_created && cleaned.is_ok() {
-                    let _ = self.nic.lock().expect("nic lock").take();
-                }
-                return Err(TunnelError::plain(ConnectPhase::ApplyingPlatformTunnel, error.message));
-            }
-        }
-        self.install_live(
-            live,
-            &ctx.status,
-            &ctx.stats,
-            &ctx.operation_id,
-        )?;
-        // T4 装配成功回写：trace connecting → live + 网卡/NRPT owner/engine PID 补丁
-        // （端口清单暂空——系统代理 PAC 回环端口深藏于 route owner 的 teardown 所有权，
-        // 与预检代理域的接线一并后置）。失败只告警：装配已成功，痕迹写失败不得
-        // 拆毁活隧道；connecting 残留下次预检兜底。
-        if let Some(gate) = &self.trace_gate {
-            gate.mark_live(
-                &crate::connection_trace::TracePatch {
-                    adapter_names: Some(vec![self.adapter_name.clone()]),
-                    nrpt_owner_guids: Some(nrpt_owner_guids),
-                    proxy_ports: Some(Vec::new()),
-                    engine_pid: Some(std::process::id()),
-                },
-                &ctx.log,
+            ctx.log.emit(
+                LogLevel::Info,
+                "engine",
+                "tunnel.dataplane.started",
+                "data plane started (diagnostic; state on StreamConnectStatus)",
+                &[],
             );
-        }
-        ctx.log.emit(
-            LogLevel::Info,
-            "engine",
-            "tunnel.dataplane.started",
-            "data plane started (diagnostic; state on StreamConnectStatus)",
-            &[],
-        );
-        Ok(facts)
+            Ok(facts)
+        })();
+        result
     }
 
-    /// 安装、确认连接、放行工作线程属于同一提交。调用者已持资源锁；取消只等待
-    /// 这个短提交，不等待网络登录。发布状态时不持 live 锁，观察者可读取运行状态。
-    fn install_live(
+    /// 接管失败收尾（D8 阶段 2）：拆掉已组装的数据面并返回带稳定 reason 的平台
+    /// 失败（与既有 `campus_dns_start_failed` 路径同一清理语义；新建网卡回收）。
+    fn fail_after_takeover(
         &self,
-        live: LiveTunnel,
-        status: &StatusPublisher,
-        stats: &crate::stats::StatsPublisher,
-        operation_id: &[u8],
-    ) -> Result<(), TunnelError> {
-        use std::sync::atomic::Ordering;
-        let _commit = self.lifecycle_commit.lock().expect("runtime commit lock");
-        if self.cancel_flag.load(Ordering::SeqCst) {
-            drop(_commit);
-            let _ = self.cleanup_or_retain(live, "cancelled_before_connected");
-            return Err(Self::cancelled_error(ConnectPhase::StartingDataPlane));
-        }
-        if !live
-            .data_plane_threads
-            .as_ref()
-            .is_some_and(EngineDataPlaneThreads::is_alive)
-        {
-            drop(_commit);
-            let _ = self.cleanup_or_retain(live, "workers_exited_before_connected");
-            return Err(TunnelError::plain(
-                ConnectPhase::StartingDataPlane,
-                "engine: data-plane workers exited before activation",
-            ));
-        }
-        *self.live.lock().expect("live lock") = Some(live);
-        self.paused.store(false, Ordering::SeqCst);
-        stats.registry().set_phase(generated::StatsPhase::Connected);
-        status.publish(StatusEvent::connected(operation_id.to_vec()));
-        if let Some(threads) = self
-            .live
-            .lock()
-            .expect("live lock")
-            .as_ref()
-            .and_then(|live| live.data_plane_threads.as_ref())
-        {
-            threads.activate();
-        }
-        Ok(())
+        _live: AttemptOwner,
+        phase: ConnectPhase,
+        detail: String,
+        reason: &'static str,
+    ) -> TunnelError {
+        TunnelError::plain_with_reason(phase, detail, reason)
     }
 }
 
@@ -2682,3 +3853,4 @@ impl TunnelRuntime for FakeTunnelRuntime {
 // ---------------------------------------------------------------------------
 // 单元测试：纯逻辑（错误分类：login a0/SAML 映射、plain 阶段；fake 相位推进）。
 // ---------------------------------------------------------------------------
+

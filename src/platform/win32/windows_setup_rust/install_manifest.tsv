@@ -1,0 +1,84 @@
+﻿# EXV Windows 安装文件清单库（install_manifest.tsv）——单一真相源
+scope	path	class	introduced	removed	pipeline	noreboot	action	purpose
+# --- 当前包载荷（installdir）---
+installdir	exv-core.exe	payload	4.0.0		path	0	delete_always	Rust core 进程载荷
+installdir	exv-engine.exe	payload	4.0.0		path	0	delete_always	Rust engine/服务宿主载荷
+installdir	exv-ui.exe	payload	3.3.2		path	0	delete_always	UI 载荷；3.3.x C++ 时代同名延续，从未退役
+installdir	wintun.dll	payload	3.3.6		path	0	delete_always	wintun 用户态隧道库；3.3.2 为可选随包、3.3.6 起必带
+# --- 当前包支撑文件（installdir/support）---
+installdir	support\clear-local-user-config.ps1	support	3.3.6		path	0	delete_always	卸载链用户数据清理脚本（S3c 消费本清单）
+installdir	support\install_manifest.tsv	support	dev		path	0	delete_always	本清单自身（S3a 注入；dev=随下一发布版本落地）
+# --- 运行期生成（installdir；安装目录 diff 跳过、不报未知）---
+installdir	Uninstall.exe	runtime-generated	3.3.2		path	0	delete_always	安装第 8 步写入的卸载器（NSIS 时代为 WriteUninstaller）；运行映像自删由卸载引擎隔离机制处理
+installdir	exv-ui.exe.WebView2	runtime-generated	3.3.2		tree	1	delete_u1_only	WebView2 用户数据目录（UDF）：升级保留、全新卸载删除；禁重启删除登记（同路径重装保护）
+# --- 历代载荷（installdir；4.0.0 Rust 包裁撤）---
+installdir	exv-ui.args	legacy-payload	3.3.2	4.0.0	path	0	delete_always	C++ 桌面壳启动参数清单
+installdir	WebView2Loader.dll	legacy-payload	3.3.2	4.0.0	path	0	delete_always	C++ WebView2 loader
+installdir	webui	legacy-payload	3.3.2	4.0.0	tree	0	delete_always	C++ 打包 Vue renderer 树（index.html+assets）
+installdir	bin\exv.exe	legacy-payload	3.3.2	4.0.0	path	0	delete_always	C++ core/CLI 进程
+installdir	bin\exv-helper.exe	legacy-payload	3.3.2	4.0.0	path	0	delete_always	C++ 特权 helper
+installdir	libgcc_s_seh-1.dll	legacy-payload	3.3.2	4.0.0	path	0	delete_always	MinGW 运行库（根级）
+installdir	libstdc++-6.dll	legacy-payload	3.3.2	4.0.0	path	0	delete_always	MinGW 运行库（根级）
+installdir	libwinpthread-1.dll	legacy-payload	3.3.2	4.0.0	path	0	delete_always	MinGW 运行库（根级）
+installdir	bin\libgcc_s_seh-1.dll	legacy-payload	3.3.2	4.0.0	path	0	delete_always	MinGW 运行库（bin 级双写）
+installdir	bin\libstdc++-6.dll	legacy-payload	3.3.2	4.0.0	path	0	delete_always	MinGW 运行库（bin 级双写）
+installdir	bin\libwinpthread-1.dll	legacy-payload	3.3.2	4.0.0	path	0	delete_always	MinGW 运行库（bin 级双写）
+installdir	bin\wintun.dll	legacy-payload	3.3.6	4.0.0	path	0	delete_always	wintun（bin 级双写）
+installdir	support\clear-windows-legacy-state.ps1	support	3.3.6	4.0.0	path	0	delete_always	历代安装根/WebView2 迁移清理脚本；Rust 4.0.0 起不再随包
+# --- 用户数据根（U1 删/U2 留）---
+userprofile	.exv	user-data	4.0.0		tree	0	delete_u1_only	Rust 默认配置根：config.json、key.bin、凭据、wintun 预置、聚合日志
+localappdata	EXV	user-data	3.3.2		tree	0	delete_u1_only	产品固定命名空间：profile\default、ui-preferences.json、profile.redirect、旧 Helper、历代 WebView2 状态
+localappdata	com.exv.vpn.desktop	user-data	4.0.0		tree	0	delete_u1_only	Tauri identifier WebView2 数据根（外观域 localStorage+logs）；2026-10-10 起纳入卸载清理
+localappdata	Programs\EXV\exv-ui.exe.WebView2\EBWebView\Default\Local Storage	user-data	3.3.2		tree	1	delete_u1_only	默认/旧安装根旁 WebView2 登录局部存储（保留语义下不清）
+localappdata	Programs\EXV\exv-ui.exe.WebView2	user-data	3.3.2		tree	1	delete_u1_only	默认/旧安装根旁 WebView2 用户数据根（用户登录数据）
+# --- 机器数据（U1/U2 都删）---
+localappdata	ExvVpn	machine-data	4.0.0		tree	0	delete_always	Rust journal/raw log 的 LocalAppData 回退专属根
+programdata	ExvVpn	machine-data	4.0.0		tree	0	delete_always	Rust journal/日志/连接痕迹机器级专属根
+programdata	EXV\Helper	machine-data	3.3.2		tree	0	delete_always	旧 C++ Helper 载荷根（父根 ProgramData\EXV 与 exv 同一物理根，只整树删 Helper）
+programdata	exv-helper-session.json	machine-data	3.3.2		path	0	delete_always	Helper 会话文件（ProgramData 共享根单叶）
+programdata	exv\service.key	machine-data	4.0.0		path	0	delete_always	服务密钥
+programdata	exv\profile\default\exv.log	machine-data	3.3.2		path	0	delete_always	C++ 日志 ProgramData 回退叶
+programdata	exv\profile\default	machine-data	3.3.2		empty-dir	0	delete_always	空目录壳
+programdata	exv\profile	machine-data	3.3.2		empty-dir	0	delete_always	空目录壳
+programdata	exv	machine-data	3.3.2		empty-dir	0	delete_always	空目录壳（与 EXV 同一物理根，大小写不敏感）
+temp	ExvVpn	machine-data	4.0.0		tree	0	delete_always	临时根回退：用户临时根与系统临时根两处展开的精确 ExvVpn 子树
+# --- 历代安装根（3 父目录 × 3 名称；当前安装根排除为运行时控制流）---
+install-legacy-3parent	EXV	legacy-payload	3.3.2		tree	1	delete_u1_only	历代/当前安装名（现役默认 %LOCALAPPDATA%\Programs\EXV；扫描时排除当前安装根）
+install-legacy-3parent	ECNU VPN	legacy-payload	ecnu-era	3.3.2	tree	1	delete_u1_only	ECNU VPN 时代 per-user 安装名；EXV 3.3.2 起不再用于新安装
+install-legacy-3parent	ECNU-VPN	legacy-payload	ecnu-era	3.3.2	tree	1	delete_u1_only	ECNU-VPN 时代安装名；EXV 3.3.2 起不再用于新安装
+# --- 自定义/重定向配置根已知叶（configdir-leaf；U1 删/U2 留）---
+configdir-leaf	config.json	user-data	3.3.2		path	0	delete_u1_only	连接配置（C++ 与 Rust 共用名）
+configdir-leaf	config.json.tmp	user-data	3.3.2		path	0	delete_u1_only	C++ 原子保存残留
+configdir-leaf	config.protocol-switch-backup.json	user-data	4.1.1		path	0	delete_u1_only	协议切换前的 Cisco 配置备份（T02；与 config.json 同目录）
+configdir-leaf	quick-start.json	user-data	4.1.1		path	0	delete_u1_only	快速入门「已见」标记（KI-13/A）
+configdir-leaf	quick-start.json.tmp	user-data	4.1.1		path	0	delete_u1_only	快速入门原子保存残留
+configdir-leaf	.key	user-data	3.3.2		path	0	delete_u1_only	C++ 加密密钥
+configdir-leaf	key.bin	user-data	4.0.0		path	0	delete_u1_only	Rust 加密密钥
+configdir-leaf	close-preference.json	user-data	3.3.2		path	0	delete_u1_only	C++ UI 关闭偏好
+configdir-leaf	exv.log	user-data	3.3.2		path	0	delete_u1_only	C++ 运行日志
+configdir-leaf	exv.pid	user-data	3.3.2		path	0	delete_u1_only	C++ PID 文件
+configdir-leaf	tunnel.js	user-data	3.3.2		path	0	delete_u1_only	C++ 隧道脚本
+configdir-leaf	route-ready	user-data	3.3.2		path	0	delete_u1_only	C++ 路由就绪标记
+configdir-leaf	logs\aggregated.jsonl	user-data	4.0.0		path	0	delete_u1_only	Rust 聚合日志
+configdir-leaf	exv-core-ipc-v1.registry.json	user-data	3.3.2		path	0	delete_u1_only	C++ IPC 兼容状态
+configdir-leaf	exv-core-ipc-v1.lock	user-data	3.3.2		path	0	delete_u1_only	C++ IPC 锁
+configdir-leaf	exv-core-ipc-v1.sock	user-data	3.3.2		path	0	delete_u1_only	C++ IPC 套接字
+configdir-leaf	connect-attempt.json	user-data	3.3.2		path	0	delete_u1_only	C++ 连接尝试状态
+configdir-leaf	connect-attempt.mutex	user-data	3.3.2		path	0	delete_u1_only	C++ 连接互斥体
+configdir-leaf	active-tunnel.mutex	user-data	3.3.2		path	0	delete_u1_only	C++ 活动隧道租约互斥体
+configdir-leaf	connect-attempt.lock\owner.json	user-data	3.3.2		path	0	delete_u1_only	连接锁目录属主文件
+configdir-leaf	active-tunnel.lock\owner.json	user-data	3.3.2		path	0	delete_u1_only	隧道锁目录属主文件
+configdir-leaf	atrust-credentials	user-data	dev		tree	0	delete_u1_only	学校密码 EXV 专属子树（T4b；dev=开发中未发布）
+configdir-leaf	WebView2	user-data	3.3.7		tree	0	delete_u1_only	私有迁移线 profile 内 WebView2 子树（兼容项，public 3.3.x 未必产生）
+configdir-leaf	WebView2.migrating	user-data	3.3.7		tree	0	delete_u1_only	迁移 staging 子树（兼容项）
+configdir-leaf	WebView2\Default\Local Storage	user-data	3.3.7		tree	0	delete_u1_only	profile WebView2 局部存储
+configdir-leaf	WebView2\EBWebView\Default\Local Storage	user-data	3.3.7		tree	0	delete_u1_only	profile WebView2 局部存储
+configdir-leaf	connect-attempt.lock	user-data	3.3.2		empty-dir	0	delete_u1_only	连接锁目录壳（删叶后仅空时移除）
+configdir-leaf	active-tunnel.lock	user-data	3.3.2		empty-dir	0	delete_u1_only	隧道锁目录壳（删叶后仅空时移除）
+configdir-leaf	.	user-data	3.3.2		empty-dir	0	preserve_with_shell	配置根本身：内容一律保留，仅在删尽已知叶后目录为空时移除目录壳
+# --- 模式叶（pattern；regex 锚定匹配根的直接子项 basename）---
+pattern	configdir:^config\.corrupt-backup-[0-9]+\.json$	user-data	dev		path	0	delete_u1_only	损坏配置整字节备份（core 修复前备份；严格 Unix 毫秒时间戳；dev=开发中未发布）
+pattern	configdir:^connect-attempt\.json\.tmp\.[0-9]+$	user-data	3.3.2		path	0	delete_u1_only	连接尝试原子保存残留（严格完整数字后缀）
+pattern	configdir:^connect-attempt\.lock\.tmp\.attempt-[0-9]+-[1-9][0-9]*-[1-9][0-9]*$	user-data	3.3.2		empty-dir	0	delete_u1_only	临时锁目录（内部 owner.json 按锁目录规则展开，随后仅空时移除）
+pattern	lockdir:^owner\.json\.tmp\.[0-9]+$	user-data	3.3.2		path	0	delete_u1_only	锁目录内属主原子保存残留（严格完整数字后缀）
+pattern	programdata:^EXV\.quarantine\.[0-9]+\.[0-9]+\.[0-9]+$	machine-data	3.3.7		tree	0	preserve	Helper 安全隔离目录：保全可疑/未知数据，禁止卸载自动删除（仅登记备查）

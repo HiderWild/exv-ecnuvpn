@@ -71,7 +71,7 @@ const { toasts, dismiss } = useToasts();
 .toast-stack--minimal .toast {
   padding: 6px 8px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
@@ -82,7 +82,7 @@ const { toasts, dismiss } = useToasts();
   border-radius: 10px;
   border: 1px solid rgb(255 255 255 / 0.14);
   color: #fff;
-  font-size: 13px;
+  font-size: var(--font-size-caption);
   line-height: 1.5;
   box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
   cursor: pointer;

@@ -42,6 +42,17 @@ export function isCoreWakeFailure(error: unknown): boolean {
 }
 
 /**
+ * core 不可达错误的识别：壳层 ConfigSet 重试环（A1-1，2026-10-09 区域 A）耗尽后
+ * 仍不可达时以该 kind 拒绝业务命令。与 `isCoreWakeFailure`（走全局强报错模态）
+ * 不同：core 可能仍在恢复窗口内，正确动作是「稍候重试」，由各业务面自行分流为
+ * 可重试文案（快速入门/设置页），不复用全局模态。
+ */
+export function isCoreUnreachable(error: unknown): boolean {
+  return typeof error === "object" && error !== null
+    && (error as { kind?: unknown }).kind === "core_unreachable";
+}
+
+/**
  * 业务面错误分流：唤醒失败 → 打开全局强报错模态并返回 true（调用方不再走 toast）；
  * 其余错误返回 false，由调用方沿用既有处理。
  */

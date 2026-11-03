@@ -25,6 +25,8 @@ import {
 const emit = defineEmits<{
   /** 用户已查看结果并请求退出（由本组件调用壳侧退出命令）。 */
   closeApp: [];
+  uninstallStarted: [];
+  uninstallAborted: [];
 }>();
 
 type Phase = "closed" | "confirm" | "running" | "done";
@@ -36,6 +38,7 @@ const reply = ref<PreUninstallReply | null>(null);
 /** 确认表格：从"连接"到"应用本体"的完整动作清单（顺序即执行顺序）。 */
 const plan: ReadonlyArray<{ action: string; target: string }> = [
   { action: "断开连接", target: "当前 VPN 连接（若有）" },
+  { action: "恢复 aTrust 启动设置", target: "按保存的原配置恢复官方认证服务" },
   { action: "卸载系统组件", target: "服务、历史遗留守护、/Library 应用支持目录" },
   { action: "删除运行时残留", target: "/private/tmp 下标属于 EXV 的目录" },
   { action: "删除配置与凭据", target: "~/.exv（含已保存密码与密钥）" },
@@ -62,13 +65,16 @@ function dismiss(): void {
 async function confirmUninstall(): Promise<void> {
   if (phase.value === "running") return;
   phase.value = "running";
+  emit("uninstallStarted");
   errorMessage.value = "";
   try {
     reply.value = await runPreUninstall();
     phase.value = "done";
+    if (reply.value.aborted) emit("uninstallAborted");
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);
     phase.value = "confirm";
+    emit("uninstallAborted");
   }
 }
 
@@ -156,7 +162,7 @@ async function quitApp(): Promise<void> {
         <template v-else>
           <h3 id="pre-uninstall-modal-title">卸载结果</h3>
           <p v-if="reply?.aborted" class="danger-modal__warning" data-testid="pre-uninstall-aborted">
-            已中止卸载：当前连接未能停止，未删除任何数据。请先在连接页断开并确认回到「未连接」后重试。
+            已中止卸载，App与用户数据保留。请处理下列具体问题后重试。
           </p>
           <table class="danger-table" data-testid="pre-uninstall-result">
             <thead>
@@ -177,7 +183,7 @@ async function quitApp(): Promise<void> {
             class="danger-modal__note"
             data-testid="pre-uninstall-elevation-skipped"
           >
-            未完成管理员授权：系统级组件（服务、/Library 产物）仍在本机，需以管理员身份重新执行或手动清理。
+            未完成管理员授权，App与用户数据保留。请重新执行卸载。
           </p>
           <div v-if="requiresManual" class="danger-modal__manual" data-testid="pre-uninstall-manual">
             <p>需要你手动处理：</p>
@@ -189,7 +195,12 @@ async function quitApp(): Promise<void> {
             {{ errorMessage }}
           </p>
           <div class="danger-modal__actions">
+            <template v-if="reply?.aborted">
+              <button type="button" data-testid="pre-uninstall-return" @click="dismiss">返回设置</button>
+              <button type="button" class="danger-action" data-testid="pre-uninstall-retry" @click="confirmUninstall">重试卸载</button>
+            </template>
             <button
+              v-else
               type="button"
               class="danger-action"
               data-testid="pre-uninstall-quit"
@@ -219,8 +230,8 @@ async function quitApp(): Promise<void> {
   gap: var(--space-3);
   margin-bottom: var(--space-2);
 }
-.settings-danger__header h3 { margin: 0 0 2px; font-size: 15px; }
-.settings-danger__header p { margin: 0; color: var(--text-secondary); font-size: 12px; }
+.settings-danger__header h3 { margin: 0 0 2px; font-size: var(--font-size-heading); }
+.settings-danger__header p { margin: 0; color: var(--text-secondary); font-size: var(--font-size-caption); }
 .danger-action {
   margin-top: var(--space-2);
   padding: 6px 14px;
@@ -228,7 +239,7 @@ async function quitApp(): Promise<void> {
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--status-error, #c0392b);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -251,15 +262,15 @@ async function quitApp(): Promise<void> {
   background: var(--surface-panel, #fff);
   color: var(--text-primary);
 }
-.danger-modal__card h3 { margin: 0 0 var(--space-2); font-size: 15px; }
-.danger-modal__warning { color: var(--status-error, #c0392b); font-size: 13px; }
-.danger-modal__note { color: var(--text-secondary); font-size: 12px; }
-.danger-modal__error { color: var(--status-error, #c0392b); font-size: 12px; }
+.danger-modal__card h3 { margin: 0 0 var(--space-2); font-size: var(--font-size-heading); }
+.danger-modal__warning { color: var(--status-error, #c0392b); font-size: var(--font-size-caption); }
+.danger-modal__note { color: var(--text-secondary); font-size: var(--font-size-caption); }
+.danger-modal__error { color: var(--status-error, #c0392b); font-size: var(--font-size-caption); }
 .danger-table {
   width: 100%;
   margin-top: var(--space-2);
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
 }
 .danger-table th,
 .danger-table td {
@@ -271,7 +282,7 @@ async function quitApp(): Promise<void> {
 .danger-table th { color: var(--text-secondary); font-weight: 600; }
 .danger-table__status { width: 84px; white-space: nowrap; }
 .danger-table__detail { color: var(--text-secondary); }
-.danger-modal__manual { margin-top: var(--space-2); font-size: 12px; }
+.danger-modal__manual { margin-top: var(--space-2); font-size: var(--font-size-caption); }
 .danger-modal__manual ul { padding-left: 18px; }
 .danger-modal__actions {
   display: flex;

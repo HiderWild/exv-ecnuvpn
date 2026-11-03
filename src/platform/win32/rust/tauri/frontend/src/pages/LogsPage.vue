@@ -100,11 +100,21 @@ function toggleLevelFilter(): void {
 }
 
 function handleOutsidePointer(event: Event): void {
+  // S6b：条目右键菜单先判关闭（点击菜单自身不关，交给菜单按钮的 click）。
+  if (logContextMenu.value !== null
+    && !(event.target instanceof Node && logContextMenuRef.value?.contains(event.target))) closeLogContextMenu();
   if (event.target instanceof Node && !levelFilterRef.value?.contains(event.target)) closeLevelFilter();
 }
 
 function handleEscape(event: KeyboardEvent): void {
-  if (levelFilterOpen.value && event.key === "Escape") {
+  if (event.key !== "Escape") return;
+  if (logContextMenu.value !== null) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeLogContextMenu();
+    return;
+  }
+  if (levelFilterOpen.value) {
     event.preventDefault();
     event.stopPropagation();
     closeLevelFilter(true);
@@ -131,6 +141,39 @@ async function copyFilteredLogs(): Promise<void> {
     copyStatus.value = "复制失败，请重试。";
   } finally {
     copying.value = false;
+  }
+}
+
+/** S6b 日志条目右键菜单：仅「复制」一项，复用 serializeLogs+copyLogText 管线。 */
+const logContextMenu = ref<{ x: number; y: number; entry: LogEvent } | null>(null);
+const logContextMenuRef = ref<HTMLElement | null>(null);
+
+function closeLogContextMenu(): void {
+  logContextMenu.value = null;
+}
+
+function handleEntryContextMenu(event: MouseEvent, entry: LogEvent): void {
+  // 自制菜单接管右键（原生菜单由入口全域禁用）；坐标贴近视口边缘时内收防出屏。
+  event.preventDefault();
+  const menuWidth = 120;
+  const menuHeight = 44;
+  const x = Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8));
+  const y = Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8));
+  logContextMenu.value = { x, y, entry };
+}
+
+async function copyLogEntryFromMenu(): Promise<void> {
+  const target = logContextMenu.value;
+  if (target === null) return;
+  closeLogContextMenu();
+  copyStatus.value = "";
+  copyFailed.value = false;
+  try {
+    await copyLogText(serializeLogs([target.entry]));
+    copyStatus.value = "已复制 1 条日志";
+  } catch {
+    copyFailed.value = true;
+    copyStatus.value = "复制失败，请重试。";
   }
 }
 
@@ -236,6 +279,8 @@ function handleWindowBlur(): void {
 
 function handleScroll(event: Event): void {
   const body = event.currentTarget as HTMLElement;
+  // S6b：列表滚动即关闭条目右键菜单（菜单锚定视口坐标，滚动后位置失效）。
+  if (logContextMenu.value !== null) closeLogContextMenu();
   rememberViewport();
   // 仅把按住鼠标拖动滚动条导致的离底视为用户暂停；布局或程序滚动不能改变状态。
   if (pointerScrollInProgress && !isAtLatest(body)) pauseFollowLatest();
@@ -285,6 +330,9 @@ function scrollToLatest(): void {
 }
 
 function handleDetailsSummaryClick(event: Event, key: string): void {
+  // S6b：右键（button≠0，如个别 WebView 合成的合成 click）不触发展开/收起，
+  // 与条目右键菜单完全隔离。
+  if (event instanceof MouseEvent && event.button !== 0) return;
   const details = (event.currentTarget as HTMLElement).closest("details");
   if (!(details instanceof HTMLDetailsElement)) return;
   if (details.open) expandedLogKeys.value.delete(key);
@@ -372,6 +420,15 @@ async function subscribeToFutureEntries(): Promise<void> {
   }
 }
 
+async function retryHistory(): Promise<void> {
+  // 仅 DEV 显式模拟故障可释放该 mock episode；正式网关和轮询语义不变。
+  if (import.meta.env.DEV) {
+    const { retryPreviewLogsFailure } = await import("../product/mock-page-data");
+    retryPreviewLogsFailure(import.meta.env.DEV, window.location.search, gateway);
+  }
+  await loadHistory();
+}
+
 async function clearLogs(): Promise<void> {
   if (clearing.value) return;
   clearing.value = true;
@@ -442,8 +499,11 @@ watch([selectedLevels, searchQuery], () => {
   <section class="logs-page" aria-labelledby="logs-title">
     <header class="logs-page__header">
       <div>
-        <h1 id="logs-title">日志</h1>
+        <h1 id="logs-title">连接日志</h1>
       </div>
+    </header>
+
+    <div class="logs-toolbar">
       <div class="logs-actions">
         <div ref="levelFilterRef" class="logs-filter" @focusout="handleFilterFocusOut">
           <button ref="levelButtonRef" type="button" data-testid="log-level-filter" aria-label="日志等级筛选"
@@ -467,6 +527,7 @@ watch([selectedLevels, searchQuery], () => {
             </fieldset>
           </div>
         </div>
+        <input v-model="searchQuery" type="search" data-testid="logs-search" class="logs-search" aria-label="搜索日志" placeholder="搜索消息、组件、代码或字段…" />
         <label class="logs-follow-latest">
           <input
             :checked="followLatest"
@@ -476,21 +537,16 @@ watch([selectedLevels, searchQuery], () => {
           />
           <span>跟随最新</span>
         </label>
-        <button type="button" data-testid="copy-logs" :disabled="copying || filteredEntries.length === 0" @click="copyFilteredLogs">
-          {{ copying ? "复制中…" : `复制当前筛选（${filteredEntries.length} 条）` }}
+        <button type="button" data-testid="copy-logs" :aria-label="`复制当前筛选（${filteredEntries.length} 条）`" title="复制当前页面已保留且符合筛选条件的日志，包含完整时间和全部详情字段" :disabled="copying || filteredEntries.length === 0" @click="copyFilteredLogs">
+          {{ copying ? "复制中…" : "复制日志" }}
         </button>
         <button type="button" data-testid="export-logs" :disabled="exporting || filteredEntries.length === 0" title="导出当前页面已保留且符合筛选条件的日志，包含全部详情字段（JSONL）" @click="exportFilteredLogs">
-          {{ exporting ? "导出中…" : "导出当前筛选" }}
+          {{ exporting ? "导出中…" : "导出日志" }}
         </button>
         <button type="button" data-testid="clear-logs" :disabled="clearing" title="清空全部持久化日志，不受当前筛选影响" @click="clearLogs">
           {{ clearing ? "清空中…" : "清空日志" }}
         </button>
       </div>
-    </header>
-
-    <div class="logs-toolbar">
-      <input v-model="searchQuery" type="search" data-testid="logs-search" class="logs-search" aria-label="搜索日志" placeholder="搜索消息、组件、代码或字段…" />
-      <span class="logs-window" data-testid="logs-window">显示 {{ filteredEntries.length }} / 已保留 {{ entries.length }} 条 · 最多保留最近 2,000 条</span>
     </div>
     <p v-show="!exportStatus" class="logs-copy-status" :class="{ 'logs-copy-status--error': copyFailed }" data-testid="logs-copy-status" role="status" aria-live="polite">{{ copyStatus }}</p>
     <p v-show="exportStatus" class="logs-copy-status" :class="{ 'logs-copy-status--error': exportFailed }" data-testid="logs-export-status" role="status" aria-live="polite">{{ exportStatus }}</p>
@@ -500,23 +556,17 @@ watch([selectedLevels, searchQuery], () => {
     </div>
     <div v-if="error && entries.length > 0" class="logs-message logs-message--error" role="status">
       <span>日志更新失败，当前显示已读取记录。</span>
-      <button type="button" :disabled="loading" @click="loadHistory">重试</button>
+      <button type="button" :disabled="loading" @click="retryHistory">重试</button>
     </div>
 
     <div v-if="error && entries.length === 0" class="logs-message logs-message--error">
       <span>暂时无法读取日志。</span>
-      <button type="button" data-testid="retry-logs" @click="loadHistory">重试</button>
+      <button type="button" data-testid="retry-logs" @click="retryHistory">重试</button>
     </div>
     <p v-else-if="isInitialLoading" class="logs-message">正在读取历史记录…</p>
 
     <div v-else class="logs-page__table-shell" data-testid="logs-table-shell">
       <div class="log-table" data-testid="log-table">
-        <div class="log-row log-row--head" data-testid="logs-table-header" aria-hidden="true">
-          <span>时间</span>
-          <span>级别</span>
-          <span>组件</span>
-          <span>消息</span>
-        </div>
         <div ref="bodyRef" class="logs-page__body" data-testid="logs-scroll-body"
           @scroll="handleScroll" @wheel="handleWheel" @keydown="handleBodyKeydown"
           @touchstart="handleTouchStart" @touchmove="handleTouchMove" @touchend="handleTouchEnd" @touchcancel="handleTouchEnd"
@@ -524,15 +574,15 @@ watch([selectedLevels, searchQuery], () => {
           <p v-if="filteredEntries.length === 0" class="logs-empty">
             {{ selectedLevels?.length === 0 ? "请选择至少一个日志等级" : entries.length === 0 ? "暂无日志" : "没有符合筛选条件的日志" }}
           </p>
-          <details v-for="entry in filteredEntries" :key="logEventKey(entry)" :data-log-key="logEventKey(entry)" :open="expandedLogKeys.has(logEventKey(entry))" class="log-details" data-testid="log-entry" @toggle="handleDetailsToggle($event, logEventKey(entry))">
+          <details v-for="entry in filteredEntries" :key="logEventKey(entry)" :data-log-key="logEventKey(entry)" :open="expandedLogKeys.has(logEventKey(entry))" class="log-details" data-testid="log-entry" @toggle="handleDetailsToggle($event, logEventKey(entry))" @contextmenu="handleEntryContextMenu($event, entry)">
             <summary class="log-row" data-testid="log-details-toggle" @click.prevent="handleDetailsSummaryClick($event, logEventKey(entry))">
               <time class="log-time" :datetime="preciseLogTime(entry.timestamp_ms) === '时间未知' ? undefined : preciseLogTime(entry.timestamp_ms)" :title="preciseLogTime(entry.timestamp_ms)">{{ formatTime(entry.timestamp_ms) }}</time>
               <span class="log-level" :class="`log-level--${entry.level}`">{{ entry.level }}</span>
-              <span class="log-component">{{ entry.component || "—" }}</span>
               <span class="log-message">{{ entry.message }}</span>
               <svg class="log-details__triangle" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2 9 6 4 10Z" fill="currentColor" /></svg>
             </summary>
             <dl data-testid="log-details">
+              <dt>组件</dt><dd>{{ entry.component || "—" }}</dd>
               <dt>完整时间</dt><dd>{{ preciseLogTime(entry.timestamp_ms) }}</dd>
               <dt>事件代码</dt><dd>{{ entry.code || "—" }}</dd>
               <template v-for="(value, key) in entry.fields" :key="key"><dt>{{ key }}</dt><dd>{{ value }}</dd></template>
@@ -540,6 +590,23 @@ watch([selectedLevels, searchQuery], () => {
           </details>
         </div>
       </div>
+    </div>
+    <footer class="logs-footer">
+      <span class="logs-window" data-testid="logs-window">显示 {{ filteredEntries.length }} / 已保留 {{ entries.length }} 条 · 最多保留最近 2,000 条</span>
+      <span>复制与导出为当前筛选记录的 JSONL，含全部字段；清空全部持久化日志。</span>
+    </footer>
+
+    <div
+      v-if="logContextMenu"
+      ref="logContextMenuRef"
+      class="log-context-menu"
+      data-testid="log-context-menu"
+      role="menu"
+      aria-label="日志条目操作"
+      :style="{ left: `${logContextMenu.x}px`, top: `${logContextMenu.y}px` }"
+      @contextmenu.prevent
+    >
+      <button type="button" role="menuitem" data-testid="log-context-copy" @click="copyLogEntryFromMenu">复制</button>
     </div>
   </section>
 </template>
@@ -552,7 +619,7 @@ watch([selectedLevels, searchQuery], () => {
   height: 100%;
   min-height: 0;
   margin-top: 0;
-  padding: var(--product-page-top-gap) 0 var(--space-4);
+  padding: 0;
 }
 
 .logs-page__header {
@@ -570,7 +637,9 @@ watch([selectedLevels, searchQuery], () => {
 .logs-page__header h1 {
   margin: 0;
   white-space: nowrap;
-  font-size: clamp(22px, 2.2vw, 30px);
+  font-size: var(--font-size-display);
+  line-height: 1.6;
+  font-weight: 700;
   letter-spacing: -0.02em;
 }
 
@@ -578,8 +647,8 @@ watch([selectedLevels, searchQuery], () => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-2) var(--space-3);
+  justify-content: flex-start;
+  gap: 8px;
 }
 
 .logs-filter,
@@ -588,7 +657,7 @@ watch([selectedLevels, searchQuery], () => {
   align-items: center;
   gap: var(--space-1);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   white-space: nowrap;
 }
 
@@ -606,13 +675,14 @@ watch([selectedLevels, searchQuery], () => {
   color: var(--text-primary);
 }
 
-.logs-filter__summary { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.logs-filter__summary { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
 .logs-filter__chevron { display: block; flex: none; width: 14px; height: 14px; color: var(--text-secondary); }
 .logs-filter > button[aria-expanded="true"] .logs-filter__chevron { transform: rotate(180deg); }
 .logs-level-panel {
   position: absolute;
   top: calc(100% + 8px);
-  right: 0;
+  left: 0;
+  right: auto;
   z-index: 40;
   width: 240px;
   max-width: calc(100vw - 40px);
@@ -625,18 +695,20 @@ watch([selectedLevels, searchQuery], () => {
   box-shadow: var(--shadow-raised);
 }
 .logs-level-panel__actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-bottom: var(--space-2); }
-.logs-level-panel__actions button { min-height: 28px; padding: 2px var(--space-2); font-size: 12px; }
+.logs-level-panel__actions button { min-height: 28px; padding: 2px var(--space-2); font-size: var(--font-size-body); }
 .logs-level-panel fieldset { margin: 0; padding: 0; border: 0; }
-.logs-level-panel legend { margin-bottom: var(--space-2); color: var(--text-secondary); font-size: 12px; }
+.logs-level-panel legend { margin-bottom: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-caption); }
 .logs-level-option { display: flex; align-items: center; gap: var(--space-2); min-height: 34px; padding: 3px var(--space-2); border-radius: var(--radius-md); cursor: pointer; }
 .logs-level-option:hover { background: var(--surface-subtle); }
 .logs-level-option input { width: 15px; height: 15px; accent-color: var(--accent); }
 .logs-filter button:focus-visible, .logs-level-option input:focus-visible, .logs-search:focus-visible, .log-details summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.logs-toolbar { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
-.logs-search { flex: 1; min-width: 200px; max-width: 450px; min-height: 34px; padding: 5px var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-panel); color: var(--text-primary); font: inherit; font-size: 13px; }
+.logs-toolbar { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 10px; }
+.logs-actions { flex:1; flex-wrap:wrap; gap:7px; }
+.logs-actions button { min-height:34px; font-size: var(--font-size-body); padding:5px 9px; white-space:nowrap; }
+.logs-search { flex:1 1 120px; width:120px; min-width:100px; max-width:none; min-height: 34px; padding: 5px var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-panel); color: var(--text-primary); font: inherit; font-size: var(--font-size-body); }
 .logs-search::placeholder { color: var(--text-secondary); }
-.logs-window { color: var(--text-secondary); font-size: 12px; }
-.logs-copy-status { flex: none; min-height: 20px; margin: 3px 0; color: var(--text-secondary); font-size: 12px; }
+.logs-window { color: var(--text-secondary); font-size: var(--font-size-caption); }
+.logs-copy-status { flex:none; min-height:0; margin:5px 0; color: var(--text-secondary); font-size: var(--font-size-caption); }
 .logs-copy-status--error { color: var(--state-danger); }
 
 .logs-follow-latest input {
@@ -656,7 +728,7 @@ watch([selectedLevels, searchQuery], () => {
   border-radius: var(--radius-md);
   background: var(--surface-panel);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .logs-message--error { color: var(--state-danger); }
@@ -682,28 +754,21 @@ watch([selectedLevels, searchQuery], () => {
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-panel);
+  border-radius:16px;
+  padding:12px 0;
+  background:var(--surface-panel);
 }
 
 .log-row {
   position: relative;
   display: grid;
-  grid-template-columns: 106px 62px minmax(88px, 0.32fr) minmax(260px, 2.68fr);
+  grid-template-columns: 98px 45px minmax(0,1fr);
   gap: var(--space-2);
   align-items: start;
   min-width: 0;
-  padding: 7px calc(var(--space-3) + 28px) 7px var(--space-3);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.log-row--head {
-  flex: none;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-subtle);
-  color: var(--text-secondary);
-  font-weight: 650;
+  padding:9px 32px 9px 18px;
+  font-size: var(--font-size-caption);
+  line-height:1.45;
 }
 
 .logs-page__body .log-row:hover { background: var(--surface-subtle); }
@@ -713,20 +778,22 @@ watch([selectedLevels, searchQuery], () => {
   min-width: 0;
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 12px;
-  overflow-wrap: anywhere;
+  font-size: var(--font-size-caption);
+  overflow-wrap:anywhere;
 }
 
 .log-level {
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   text-transform: uppercase;
 }
 
-.log-level--warn { color: var(--state-warning); }
-.log-level--error { color: var(--state-danger); }
+.log-level--warn { color: var(--state-warning); background: color-mix(in srgb, var(--state-warning) 10%, transparent); }
+.log-level--error { color: var(--state-danger); background: color-mix(in srgb, var(--state-danger) 10%, transparent); }
 .log-level--debug { color: var(--text-secondary); }
+.log-row .log-level { width: max-content; max-width: 100%; padding: 2px 5px; border-radius: 4px; font-size: var(--font-size-caption); line-height: 1.5; }
+.log-level--info { color: var(--accent); background: var(--accent-subtle); }
 .log-message {
   min-width: 0;
   display: block;
@@ -742,13 +809,14 @@ watch([selectedLevels, searchQuery], () => {
   overflow-wrap: anywhere;
 }
 
-.log-details { margin: 0; white-space: normal; }
+.log-details { margin:0; white-space:normal; }
+.log-details:last-child { border-bottom: 0; }
 .log-details summary { cursor: pointer; list-style: none; }
 .log-details summary::-webkit-details-marker { display: none; }
-.log-details__triangle { position: absolute; top: 11px; right: calc(var(--space-3) + 6px); width: 12px; height: 12px; color: var(--text-secondary); }
+.log-details__triangle { position: absolute; top:13px; right: calc(var(--space-3) + 6px); width: 12px; height: 12px; color: var(--text-secondary); }
 .log-details[open] .log-details__triangle { transform: rotate(90deg); }
 .log-details[open] .log-details__triangle { color: var(--accent); }
-.log-details dl { display: grid; grid-template-columns: minmax(90px, 0.3fr) minmax(0, 1fr); gap: 4px var(--space-3); margin: 0 var(--space-3) var(--space-2); padding: var(--space-2) var(--space-3); border-left: 2px solid var(--border-subtle); background: var(--surface-subtle); font-family: var(--font-mono); font-size: 12px; }
+.log-details dl { display: grid; grid-template-columns: minmax(90px, 0.3fr) minmax(0, 1fr); gap: 4px var(--space-3); margin: 0 var(--space-3) var(--space-2); padding: var(--space-2) var(--space-3); border-left: 2px solid var(--border-subtle); background: var(--surface-subtle); font-family: var(--font-mono); font-size: var(--font-size-caption); }
 .log-details dt { color: var(--text-secondary); overflow-wrap: anywhere; }
 .log-details dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -763,15 +831,47 @@ watch([selectedLevels, searchQuery], () => {
   .logs-page__header {
     flex-direction: column;
     align-items: flex-start;
-    padding: var(--space-3) 0 var(--space-4);
   }
 
   .logs-actions { justify-content: flex-start; }
 
-  .log-row { grid-template-columns: 100px 52px minmax(0, 1fr); }
-  .log-row > :nth-child(3) { display: none; }
+  .log-row { grid-template-columns:92px 40px minmax(0,1fr); }
   .logs-level-panel { left: 0; right: auto; }
   .logs-filter__summary { max-width: 170px; }
   .log-details dl { grid-template-columns: 1fr; }
 }
+.logs-toolbar { margin:3px 0 14px; }
+.logs-copy-status:empty { display:none; }
+.logs-footer { display:flex; flex:none; flex-direction:column; gap:3px; padding-top:16px; color:var(--text-secondary); font-size: var(--font-size-caption); line-height:1.5; }
+.logs-footer .logs-window { font-size: var(--font-size-caption); }
+.log-details dl { margin-top:4px; }
+
+/* S6b 日志条目右键菜单：样式沿用现有设计 token（面板/描边/阴影/焦点环）。 */
+.log-context-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 104px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-raised);
+}
+
+.log-context-menu button {
+  display: block;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--font-size-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.log-context-menu button:hover { background: var(--surface-subtle); }
+.log-context-menu button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 </style>

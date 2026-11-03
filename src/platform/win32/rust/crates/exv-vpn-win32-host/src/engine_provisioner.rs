@@ -314,18 +314,10 @@ impl EngineProvisioner {
             &stage("ready", &[("pid", new_pid.to_string()), ("ready_wait_ms", t_ready.elapsed().as_millis().to_string())]),
         );
         // composition 身份重建（绑定新 peer；admission 重开；gate 重授权）。provision
-        // 可能发生在 connect 在途（受理后路由内拉起）——重建前捕获在途操作上下文，
+        // 可能发生在 connect 在途（受理后路由内拉起）——重建入口在同一锁内读取在途操作上下文，
         // 重建后恢复（相位 Connecting + operation_id），使 engine 终态事件照常驱动
         // 相态（R3-C2 的在途登记过滤也有据可依）。respawn 路径不经过此处（teardown
         // 后无在途 connect），语义不受影响。
-        let inflight_connect = {
-            let composition = self.composition.lock().await;
-            if composition.phase() == crate::composition::HostPhase::Connecting {
-                Some(composition.operation_id())
-            } else {
-                None
-            }
-        };
         let new_peer = engine_peer_for(new_pid, &self.user_sid);
         if let Err(e) = rebind_composition(&self.composition, &new_peer, &ui_peer).await {
             new_supervisor.terminate();
@@ -339,13 +331,6 @@ impl EngineProvisioner {
             return Err(Status::failed_precondition(format!(
                 "engine_provision_failed|composition rebind: {e}"
             )));
-        }
-        if let Some(operation_id) = inflight_connect {
-            let mut composition = self.composition.lock().await;
-            composition.apply(crate::composition::HostEvent::Connect);
-            if let Some(operation_id) = operation_id {
-                composition.set_operation_id(operation_id);
-            }
         }
         // 换槽 + 挂接（转发器/ticker 经 swap watch 自动重指向；run loop 经 supervisor
         // 挂接的新 liveness 恢复掉线监听）。

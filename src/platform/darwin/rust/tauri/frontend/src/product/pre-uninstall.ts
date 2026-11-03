@@ -23,7 +23,7 @@ export interface PreUninstallReply {
   manual_actions: string[];
   /** 提权段是否整体未运行（用户取消密码 / 无管理员凭据）。 */
   elevation_skipped: boolean;
-  /** 是否因"当前连接无法断开"而中止（中止时除断开一项外未执行任何删除）。 */
+  /** 连接或必要系统步骤中止后，用户数据及App保留供重试。 */
   aborted: boolean;
 }
 

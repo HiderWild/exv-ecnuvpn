@@ -94,8 +94,7 @@ pub fn bootstrap(app: &mut tauri::App) -> tauri::Result<()> {
         handle: std::sync::RwLock::new(handle),
         last_snapshot: Default::default(),
         last_stats: Default::default(),
-        browser_login: Default::default(),
-        browser_commit_gate: Default::default(),
+        connection_requests: Default::default(),
     });
     handle_ref.manage(CoreSession {
         child: std::sync::Mutex::new(child),

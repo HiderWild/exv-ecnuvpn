@@ -25,7 +25,7 @@ const reconnect = computed(() => props.state.reconnect.active ? `重连中 · �
     </div>
     <dl class="runtime-panel__identity">
       <div v-if="connected"><dt>校内地址</dt><dd>{{ state.connectionInfo.campusIp ?? '—' }}</dd></div>
-      <div><dt>配置账户</dt><dd>{{ state.connectionInfo.account ?? '—' }}</dd></div>
+      <div><dt>配置账户</dt><dd>{{ state.connectionInfo.accountSource === 'unavailable' ? '通过系统认证，无法获取' : state.connectionInfo.account ?? '—' }}</dd></div>
       <div><dt>配置服务器</dt><dd>{{ state.connectionInfo.vpnServer ?? '—' }}</dd></div>
     </dl>
     <div v-if="state.reconnect.enabled || state.reconnect.active" class="runtime-panel__reconnect" data-testid="reconnect-status"><span>自动重连</span><strong>{{ reconnect }}</strong></div>
@@ -34,18 +34,18 @@ const reconnect = computed(() => props.state.reconnect.active ? `重连中 · �
 
 <style scoped>
 .runtime-panel { min-width:0; width:100%; display:grid; grid-template-columns:minmax(0,1fr); align-content:center; gap:18px; padding:8px 0; }
-h2 { margin:0 0 6px; font-size:12px; font-weight:500; color:var(--text-secondary); }
-.runtime-panel__duration { font-size:27px; font-weight:600; letter-spacing:-.04em; font-variant-numeric:tabular-nums; line-height:1.3; }
+h2 { margin:0 0 6px; font-size: var(--font-size-heading); font-weight:500; color:var(--text-secondary); }
+.runtime-panel__duration { font-size: var(--font-size-display); font-weight:600; letter-spacing:-.04em; font-variant-numeric:tabular-nums; line-height:1.3; }
 .runtime-panel__traffic { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
 .runtime-panel__traffic > div { display:flex; flex-direction:column; gap:5px; min-width:0; }
-.runtime-panel__traffic span { font-size:12px; color:var(--text-secondary); }
-.runtime-panel__traffic strong { font-size:15px; font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
-.runtime-panel__traffic small { font-size:11px; color:var(--text-tertiary); }
+.runtime-panel__traffic span { font-size: var(--font-size-caption); color:var(--text-secondary); }
+.runtime-panel__traffic strong { font-size: var(--font-size-body); font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.runtime-panel__traffic small { font-size: var(--font-size-caption); color:var(--text-tertiary); }
 .runtime-panel__identity { margin:0; display:grid; gap:10px; }
 .runtime-panel__identity > div { display:grid; grid-template-columns:66px minmax(0,1fr); align-items:baseline; gap:10px; }
-dt { font-size:11px; color:var(--text-secondary); }
-dd { margin:0; font-size:13px; color:var(--text-primary); overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
-.runtime-panel__reconnect { display:grid; grid-template-columns:66px minmax(0,1fr); align-items:baseline; gap:10px; font-size:12px; }
+dt { font-size: var(--font-size-caption); color:var(--text-secondary); }
+dd { margin:0; font-size: var(--font-size-body); color:var(--text-primary); overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.runtime-panel__reconnect { display:grid; grid-template-columns:66px minmax(0,1fr); align-items:baseline; gap:10px; font-size: var(--font-size-caption); }
 .runtime-panel__reconnect > span { color:var(--text-secondary); }
 .runtime-panel__reconnect strong { font-weight:500; }
 .runtime-panel__operation :deep(.stage-reel) { margin:0; }

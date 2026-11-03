@@ -115,8 +115,11 @@ bool CreateQuickLaunchShortcut(const std::wstring &install_dir) {
   return CreateShortcut(ql.wstring(), ui, ui, install_dir);
 }
 
-bool RemoveDesktopShortcut() {
-  const auto desktop = KnownPath(FOLDERID_Desktop);
+bool RemoveDesktopShortcut(const std::wstring &user_profile_root) {
+  // T10（F13）：发起用户根非空 → 原用户桌面（标准布局）；为空 → 当前令牌已知文件夹。
+  const auto desktop = user_profile_root.empty()
+                           ? KnownPath(FOLDERID_Desktop)
+                           : (fs::path(user_profile_root) / L"Desktop").wstring();
   if (desktop.empty()) {
     return true;
   }
@@ -125,8 +128,12 @@ bool RemoveDesktopShortcut() {
   return true;
 }
 
-bool RemoveStartMenuShortcuts() {
-  const auto programs = KnownPath(FOLDERID_Programs);
+bool RemoveStartMenuShortcuts(const std::wstring &roaming_app_data_root) {
+  const auto programs = roaming_app_data_root.empty()
+                            ? KnownPath(FOLDERID_Programs)
+                            : (fs::path(roaming_app_data_root) / L"Microsoft" / L"Windows" /
+                               L"Start Menu" / L"Programs")
+                                  .wstring();
   if (programs.empty()) {
     return true;
   }
@@ -138,8 +145,9 @@ bool RemoveStartMenuShortcuts() {
   return true;
 }
 
-bool RemoveQuickLaunchShortcut() {
-  const auto appdata = KnownPath(FOLDERID_RoamingAppData);
+bool RemoveQuickLaunchShortcut(const std::wstring &roaming_app_data_root) {
+  const auto appdata = roaming_app_data_root.empty() ? KnownPath(FOLDERID_RoamingAppData)
+                                                     : roaming_app_data_root;
   if (appdata.empty()) {
     return true;
   }

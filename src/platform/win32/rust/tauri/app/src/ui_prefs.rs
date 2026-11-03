@@ -66,6 +66,17 @@ pub struct UiPreferences {
     /// 连接/断开时托盘气泡通知。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_state_notifications: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disconnect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconnect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unexpected_disconnect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_notify_when_foreground: Option<bool>,
+
     /// 应用启动且空闲时自动发起连接。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_connect_on_launch: Option<bool>,
@@ -91,6 +102,11 @@ impl UiPreferences {
             connection_state_notifications: Some(
                 self.connection_state_notifications.unwrap_or(false),
             ),
+            connect_notify: Some(self.connect_notify.unwrap_or(false)),
+            disconnect_notify: Some(self.disconnect_notify.unwrap_or(false)),
+            reconnect_notify: Some(self.reconnect_notify.unwrap_or(false)),
+            unexpected_disconnect_notify: Some(self.unexpected_disconnect_notify.unwrap_or(false)),
+            suppress_notify_when_foreground: Some(self.suppress_notify_when_foreground.unwrap_or(true)),
             auto_connect_on_launch: Some(self.auto_connect_on_launch.unwrap_or(false)),
             show_latency: Some(self.show_latency.unwrap_or(false)),
         }
@@ -251,12 +267,25 @@ impl UiPrefsStore {
     }
 }
 
+/// 注册表只覆盖返回视图，不迁移或重写偏好文件。
+fn with_autostart_status(mut prefs: UiPreferences, status: Result<bool, String>) -> Result<UiPreferences, String> {
+    prefs.launch_at_login = Some(status.map_err(|error| format!("autostart_state_unavailable: {error}"))?);
+    Ok(prefs)
+}
+
+/// 无关补丁不查询系统注册，也不把 JSON 留存值作为有效自启状态返回。
+fn store_unrelated_patch(store: &UiPrefsStore, patch: UiPreferences) -> Result<UiPreferences, String> {
+    let mut prefs = store.set(patch)?;
+    prefs.launch_at_login = None;
+    Ok(prefs)
+}
+
 // ---- Commands ----
 
 /// `ui_prefs_get`：读前端自有设置（有效值视图）。
 #[tauri::command]
 pub fn ui_prefs_get(store: State<'_, UiPrefsStore>) -> Result<UiPreferences, String> {
-    store.get()
+    with_autostart_status(store.get()?, crate::autostart::is_autostart_enabled())
 }
 
 /// `ui_prefs_set`：合并补丁保存前端自有设置（不走 core config）。
@@ -265,7 +294,15 @@ pub fn ui_prefs_set(
     store: State<'_, UiPrefsStore>,
     patch: UiPreferences,
 ) -> Result<UiPreferences, String> {
-    store.set(patch)
+    // 无关偏好保存不依赖注册表可读；仅自启补丁需要真实自启回读。
+    if patch.launch_at_login.is_some() {
+        let status = crate::autostart::is_autostart_enabled()
+            .map_err(|error| format!("autostart_state_unavailable: {error}"))?;
+        with_autostart_status(store.set(patch)?, Ok(status))
+    } else {
+        store_unrelated_patch(&store, patch)
+    }
 }
 
 // ---- 测试 ----
+

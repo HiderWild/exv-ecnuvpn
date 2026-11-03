@@ -1,3 +1,4 @@
+import { toRaw } from "vue";
 import type { LogEvent } from "../lib/ipc";
 import {
   DEFAULT_CONNECTION_MODE,
@@ -6,6 +7,24 @@ import {
   type CoreConfigKey,
 } from "./core-config";
 import type { LogsGateway } from "./logs";
+import { DEFAULT_UI_PREFERENCES, type UiPrefsGateway } from "./ui-prefs";
+
+export type PreviewPageFault = "logs-read-failure" | "settings-save-failure" | "credentials-save-failure";
+
+/** 错误视觉场景与真实入口隔离，未知 query 不启用。 */
+export function selectPreviewPageFault(dev: boolean, search: string): PreviewPageFault | null {
+  const params = new URLSearchParams(search);
+  if (!dev || params.get("preview") !== "1") return null;
+  const fault = params.get("pageFault");
+  return fault === "logs-read-failure" || fault === "settings-save-failure" || fault === "credentials-save-failure" ? fault : null;
+}
+
+const failedPreviewLogs = new WeakSet<LogsGateway>();
+
+/** 只释放注册过的模拟故障，不扩展正式 LogsGateway 能力。 */
+export function retryPreviewLogsFailure(dev: boolean, search: string, gateway: LogsGateway): void {
+  if (selectPreviewPageFault(dev, search) === "logs-read-failure") failedPreviewLogs.delete(toRaw(gateway));
+}
 
 const previewConfig: ReadonlyArray<{ key: CoreConfigKey; value: string }> = [
   // 预览保持 Cisco：与旧预览行为一致，协议能力由设置页/快速入门的真实选择覆盖。
@@ -22,7 +41,8 @@ const previewConfig: ReadonlyArray<{ key: CoreConfigKey; value: string }> = [
 /**
  * 仅供开发预览使用的内存配置。生产入口不会创建它，也不会写入本机或 core。
  */
-export function createMockCoreConfigGateway(): CoreConfigGateway {
+export function createMockCoreConfigGateway(fault: PreviewPageFault | null = null): CoreConfigGateway {
+  let rejectCredentials = fault === "credentials-save-failure";
   const values = new Map(previewConfig.map((item) => [item.key, item.value]));
 
   return {
@@ -32,15 +52,15 @@ export function createMockCoreConfigGateway(): CoreConfigGateway {
       ];
     },
     async configSet(items) {
+      if (rejectCredentials && items.some((item) => item.key === "password" || item.key === "remember_password")) {
+        rejectCredentials = false;
+        return false;
+      }
       const previousUsername = values.get("username");
       for (const item of items) values.set(item.key, item.value);
       if (values.get("username") !== previousUsername && !items.some((item) => item.key === "password" && !!item.value)) values.delete("password");
       if (values.get("remember_password") !== "true") values.delete("password");
       return true;
-    },
-    async savedPassword(username, server) {
-      if (values.get("username") !== username || values.get("server") !== server) throw new Error("预览账户已变化");
-      return values.get("remember_password") === "true" ? values.get("password") || null : null;
     },
   };
 }
@@ -57,6 +77,7 @@ export function createMockCoreConfigGateway(): CoreConfigGateway {
  */
 export function createMockLogsGateway(
   now: () => number = Date.now,
+  fault: PreviewPageFault | null = null,
 ): LogsGateway & { append(entry: LogEvent): void } {
   const timestampMs = now();
   const history: LogEvent[] = [
@@ -78,8 +99,9 @@ export function createMockLogsGateway(
     },
   ];
 
-  return {
+  const gateway: LogsGateway & { append(entry: LogEvent): void } = {
     async logsList(afterSeq, limit) {
+      if (failedPreviewLogs.has(gateway)) throw new Error("模拟日志读取失败；重试后恢复。");
       const cursor = Math.max(0, Math.floor(afterSeq));
       const safeLimit = Math.max(1, Math.floor(limit));
       // after_seq 是 last-seen 游标：<= 0 走初始尾部（最近 limit 条匹配项）；
@@ -110,5 +132,25 @@ export function createMockLogsGateway(
     append(entry) {
       history.push(entry);
     },
+  };
+  if (fault === "logs-read-failure") failedPreviewLogs.add(gateway);
+  return gateway;
+}
+
+/** 稳定复现已有偏好逐项反馈；其他写入和启动读取不消耗目标故障。 */
+export function createMockUiPrefsGateway(fault: PreviewPageFault | null = null): UiPrefsGateway {
+  let values = { ...DEFAULT_UI_PREFERENCES };
+  let rejectLatency = fault === "settings-save-failure";
+  return {
+    async get() { return { ...values }; },
+    async set(patch) {
+      if (rejectLatency && patch.show_latency !== undefined && patch.show_latency !== values.show_latency) {
+        rejectLatency = false;
+        throw new Error("模拟时延偏好保存失败；请重试。");
+      }
+      values = { ...values, ...patch };
+      return { ...values };
+    },
+    async setAutostart() { return { ok: true }; },
   };
 }

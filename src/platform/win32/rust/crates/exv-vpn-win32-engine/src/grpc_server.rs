@@ -320,6 +320,8 @@ pub struct HelperControlService {    core: Arc<Mutex<HelperControlCore>>,
     /// service 形态按 peer PID 的在途 lease 流量规（T5 EOF 细则：EOF on one
     /// connection ≠ core death——分叉只在同 PID 最后一根流结束时评估）。
     lease_streams: Arc<LeaseStreamGauge>,
+    // 测试构造器保留注入 fixture；生产由 with_real_tunnel 接入固定 SCM 适配器。
+    official_auth_receiver: Option<Arc<crate::official_auth_receiver::OfficialAuthReceiver>>,
 }
 
 /// A 32-byte SHA-256 digest of `bytes`.
@@ -359,13 +361,16 @@ fn wire_error_no_subject(detail: &str) -> generated::VpnError {
         subject: None,
         resource: None,
         native: None,
+        // 控制面拒绝类错误：命令拒绝通道（非失败终态面），不设 reason id。
+        reason: String::new(),
+        operation_detail: None,
     }
 }
 
 /// The wire error for a failed mutation under an external lookup key.
 ///
-/// Free-text diagnostic detail is logged locally but never placed on the wire
-/// (spec §10: wire errors carry structured fields only; free-text stacks never travel).
+/// 通用拒绝原因保留在关联日志；Stop mapper 另外携带有界操作原因供原 UI 呈现。
+/// 诊断栈继续只留日志。
 fn wire_error(key: &generated::OperationLookupKey, code: i32, detail: &str) -> generated::VpnError {
     tracing::warn!(code, detail, "helper control operation failed");
     generated::VpnError {
@@ -378,6 +383,60 @@ fn wire_error(key: &generated::OperationLookupKey, code: i32, detail: &str) -> g
         }),
         resource: None,
         native: None,
+        // 控制面拒绝类错误：命令拒绝通道（非失败终态面），不设 reason id。
+        reason: String::new(),
+        operation_detail: None,
+    }
+}
+
+fn stop_wire_error(key: &generated::OperationLookupKey, step: &str, detail: Option<&str>) -> generated::VpnError {
+    tracing::warn!(step, operation_id = ?key.operation_id, detail = detail.unwrap_or("stop cleanup failed"), "停止清理原操作失败");
+    // 与既有服务错误摘要相同的 200 字符上界；仅消费本次 Stop 已捕获的原因。
+    let detail = detail.map(|text| text.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect::<String>()
+        .split_whitespace().collect::<Vec<_>>().join(" ")
+        .chars().take(200).collect::<String>()).filter(|text| !text.is_empty());
+    let mut error = wire_error(
+        key,
+        generated::ErrorCode::EffectUnknown as i32,
+        detail.as_deref().unwrap_or("stop cleanup failed"),
+    );
+    error.stage = generated::ErrorStage::Teardown as i32;
+    error.retry = generated::RetryAdvice::UseNewOperation as i32;
+    error.reason = format!("platform/stop_{step}");
+    error.operation_detail = detail;
+    error
+}
+
+fn stop_errors_from_report(key: &generated::OperationLookupKey, report: &crate::stop_report::StopReport) -> Vec<generated::VpnError> {
+    let mut errors: Vec<_> = report
+        .actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.state,
+                crate::stop_report::StopActionState::Failed
+                    | crate::stop_report::StopActionState::NotAttempted
+            )
+        })
+        .map(|action| stop_wire_error(key, action.step, action.error.as_deref()))
+        .collect();
+    if !report.succeeded() && errors.is_empty() {
+        errors.push(stop_wire_error(key, "not_completed", None));
+    }
+    errors
+}
+
+fn stop_reply_from_terminal(terminal: &generated::OperationTerminal) -> generated::StopTunnelReply {
+    generated::StopTunnelReply {
+        result: terminal.result.as_ref().map(|result| match result {
+            generated::operation_terminal::Result::Succeeded(receipt) => {
+                generated::stop_tunnel_reply::Result::Stopped(receipt.clone())
+            }
+            generated::operation_terminal::Result::Failed(failed) => {
+                generated::stop_tunnel_reply::Result::Failed(failed.clone())
+            }
+        }),
+        stop_completion: terminal.stop_completion.clone(),
     }
 }
 
@@ -512,6 +571,7 @@ impl HelperControlService {
         core_user_sid: Option<String>,
         journal_dir: PathBuf,
         engine_form: crate::connection_trace::TraceEngineMode,
+        acceptance_fault_once: Option<crate::tunnel_runtime::AcceptanceFaultOnce>,
     ) -> Self {
         // §4.5：open → recover 三态分派（Corrupt 隔离 / TornTail compact 修复）→
         // LIFO 回放。open 失败 = 禁用账本态（本会话无账本保护，继续启动）。
@@ -540,10 +600,16 @@ impl HelperControlService {
                 gate_user_sid.clone(),
                 journal,
             )
-            .with_trace_gate(Arc::clone(&trace_gate)),
+            .with_trace_gate(Arc::clone(&trace_gate))
+            .with_acceptance_fault_once(acceptance_fault_once),
         );
         let mut service = Self::with_tunnel_runtime(log, Arc::clone(&runtime) as Arc<dyn TunnelRuntime>);
+        service.official_auth_receiver = Some(Arc::new(crate::official_auth_receiver::OfficialAuthReceiver::real(journal_dir)));
         service.trace_gate = Some(Arc::clone(&trace_gate));
+        // W1：挂接网卡归属探针——预检与 runtime 同进程，runtime 构造晚于门，
+        // 服务开始受理前补挂（real 预检执行器经共享槽每次执行现读）。
+        trace_gate.attach_ownership(Arc::clone(&runtime)
+            as Arc<dyn crate::connect_gate::AdapterOwnershipProbe>);
         // T5 兜底善后驱动：生产接缝 = OpenProcess 存活性谓词 + 预检验证器
         // （user_sid/校园命名空间取自门——与预检受理路径同一事实源）。
         // T10 core 拉起器：仅 service 形态装配真实 WTS spawner（SYSTEM 服务持
@@ -558,7 +624,11 @@ impl HelperControlService {
             Some(Arc::clone(&service.status)),
             Some(Arc::clone(&service.stats)),
             open_process_liveness(),
-            preflight_verifier(gate_user_sid, campus_namespaces),
+            preflight_verifier(
+                gate_user_sid,
+                campus_namespaces,
+                Arc::clone(&runtime) as Arc<dyn crate::connect_gate::AdapterOwnershipProbe>,
+            ),
             relaunch_spawner,
         ));
         service.aftermath = Some(Arc::clone(&aftermath));
@@ -573,6 +643,7 @@ impl HelperControlService {
             Arc::clone(&service.stats),
             Arc::clone(&aftermath),
         ));
+        aftermath.attach_reconnect(&reconnect);
         runtime.attach_reconnect(&reconnect);
         service.reconnect = Some(reconnect);
         service
@@ -630,6 +701,7 @@ impl HelperControlService {
                     );
                     let terminal = if event.coarse_phase == StatsPhase::Connected {
                         generated::OperationTerminal {
+                            stop_completion: None,
                             result: Some(generated::operation_terminal::Result::Succeeded(
                                 receipt,
                             )),
@@ -639,6 +711,7 @@ impl HelperControlService {
                             wire_error(&pending.wire_key, ERROR_CODE_UNAUTHORIZED, "apply failed")
                         });
                         generated::OperationTerminal {
+                            stop_completion: None,
                             result: Some(generated::operation_terminal::Result::Failed(
                                 generated::OperationFailed {
                                     receipt: Some(receipt),
@@ -676,6 +749,7 @@ impl HelperControlService {
             aftermath: None,
             reconnect: None,
             lease_streams: Arc::new(LeaseStreamGauge::new()),
+            official_auth_receiver: None,
         }
     }
 
@@ -796,9 +870,9 @@ impl HelperControlService {
         on_core_exit: TraceOnCoreExit,
         reconnect: TraceReconnectPolicy,
         ui_pid: u32,
-    ) -> Result<(), Status> {
+    ) -> Result<crate::connect_ledger::TraceAdmission, Status> {
         let Some(gate) = self.trace_gate.as_ref() else {
-            return Ok(()); // 测试/旧构造器未接线：连接路径维持既有行为。
+            return Ok(crate::connect_ledger::TraceAdmission::Unwired); // 测试/旧构造器未接线：连接路径维持既有行为。
         };
         // core PID 取自**传输层已验证 peer**（与 bind_mutation 同一事实源），不经
         // 任何客户端自报字段（proto 安全不变量）。
@@ -830,13 +904,16 @@ impl HelperControlService {
                 "连接门跳过（在途组装或既有连接采纳；痕迹语义不变）",
                 &[("in_flight", in_flight.to_string().as_str())],
             );
-            return Ok(());
+            return Ok(crate::connect_ledger::TraceAdmission::Skipped {
+                connection_id: None,
+            });
         }
         let self_retained = self.runtime.is_connected() || self.runtime.is_paused();
         let outcome = if self_retained {
-            gate.replace_connect_trace(&envelope)
+            gate.replace_connect_trace_with_receipt(&envelope)
         } else {
-            gate.ensure_connect_trace(&envelope, &self.log).await
+            gate.ensure_connect_trace_with_receipt(&envelope, &self.log)
+                .await
         };
         // T10：非跳过路径（新受理/自留重建）放行即 core 回归在场——崩溃环账本
         // 归零（环已断，新会话新起点；采纳跳过路径不清：采纳的 core 是拉起
@@ -847,7 +924,7 @@ impl HelperControlService {
             driver.note_core_returned();
         }
         match outcome {
-            Ok(_) => Ok(()),
+            Ok(receipt) => Ok(receipt.into_ledger_fact()),
             Err(rejection) => {
                 let joined = rejection.reason_ids.join(",");
                 // 外层稳定码：预检未决发现 → `preflight_blocked`；载体类失败 →
@@ -1289,15 +1366,31 @@ impl HelperControl for HelperControlService {
         }
         let latest = self.status.latest();
         let state = match latest.as_ref().map(|event| event.coarse_phase) {
-            Some(generated::StatsPhase::Connected) => generated::runtime_snapshot::State::Connected(
-                generated::ConnectedState { session: None,
-                    session_established_at_ms: latest.as_ref().unwrap().session_established_at_ms }),
-            Some(generated::StatsPhase::Connecting) => generated::runtime_snapshot::State::Connecting(
-                generated::ConnectingState { attempt: None, phase: latest.as_ref().unwrap().connect_phase as i32 }),
-            Some(generated::StatsPhase::Failed) => generated::runtime_snapshot::State::FailedDirty(
-                generated::FailedDirtyState { last_error: latest.as_ref().and_then(|event| event.error.clone()),
-                    context: None, obligation: None }),
-            _ => generated::runtime_snapshot::State::Idle(generated::IdleState { last_cleanup: None }),
+            Some(generated::StatsPhase::Connected) => {
+                generated::runtime_snapshot::State::Connected(generated::ConnectedState {
+                    session: None,
+                    session_established_at_ms: latest.as_ref().unwrap().session_established_at_ms,
+                })
+            }
+            Some(generated::StatsPhase::Connecting) => {
+                generated::runtime_snapshot::State::Connecting(generated::ConnectingState {
+                    attempt: None,
+                    phase: latest.as_ref().unwrap().connect_phase as i32,
+                })
+            }
+            Some(generated::StatsPhase::Stopping) => {
+                generated::runtime_snapshot::State::Stopping(generated::StoppingState::default())
+            }
+            Some(generated::StatsPhase::Failed) => {
+                generated::runtime_snapshot::State::FailedDirty(generated::FailedDirtyState {
+                    last_error: latest.as_ref().and_then(|event| event.error.clone()),
+                    context: None,
+                    obligation: None,
+                })
+            }
+            _ => generated::runtime_snapshot::State::Idle(generated::IdleState {
+                last_cleanup: None,
+            }),
         };
         // T8 采纳握手快照分量（EXV_UNFREEZE tag 17/18/19，第十次窄解冻）：
         // 重启后的 core 以本快照判定「engine 有无活隧道/无头会话可采纳」。全部是
@@ -1336,6 +1429,9 @@ impl HelperControl for HelperControlService {
         Ok(Response::new(generated::ObserveOwnedStateReply {
             // 来自真实运行时事件，不能用 Idle 占位掩盖当前连接/掉线状态。
             snapshot: Some(generated::RuntimeSnapshot {
+                stop_completion: latest
+                    .as_ref()
+                    .and_then(|event| event.stop_completion.clone()),
                 state: Some(state),
                 operation_id: latest.map(|event| event.operation_id).unwrap_or_default(),
                 // stats-wire 方案 A：统计样本随快照携带（T8 起引擎侧也填——采纳 core
@@ -1419,6 +1515,7 @@ impl HelperControl for HelperControlService {
                 )?;
                 let receipt = build_wire_receipt(&core, wire_key, canonical_input_digest, effect_uuid);
                 let terminal = generated::OperationTerminal {
+                    stop_completion: None,
                     result: Some(generated::operation_terminal::Result::Succeeded(receipt.clone())),
                 };
                 Self::record_terminal(&mut core, &key, terminal);
@@ -1448,6 +1545,7 @@ impl HelperControl for HelperControlService {
                     error: Some(error),
                 };
                 let terminal = generated::OperationTerminal {
+                    stop_completion: None,
                     result: Some(generated::operation_terminal::Result::Failed(failed.clone())),
                 };
                 Self::record_terminal(&mut core, &key, terminal);
@@ -1462,6 +1560,11 @@ impl HelperControl for HelperControlService {
         &self,
         request: Request<generated::ApplyTunnelRequest>,
     ) -> Result<Response<generated::ApplyTunnelReply>, Status> {
+        // 与 Stop 必要收尾、R1 受理和 Exit 共用同一控制入口许可；不阻塞 Tokio worker。
+        let _admission = self.status.admission.access.lock().await;
+        if *_admission {
+            return Err(Status::failed_precondition("engine exiting"));
+        }
         // Take the request apart up front: the owned message is destructured so no borrow of
         // `request` outlives the extraction (the extensions handle stays alive for the peer).
         let extensions = request.extensions().clone();
@@ -1525,6 +1628,7 @@ impl HelperControl for HelperControlService {
                 (
                     Arc::clone(driver),
                     crate::reconnect::RetainedSession::new(
+                        wire_key.operation_id.clone(),
                         envelope_kind,
                         connection_mode,
                         plan,
@@ -1590,6 +1694,10 @@ impl HelperControl for HelperControlService {
             )
         };
 
+        // 新受理先终止旧 R1 发布资格；门检 await 期间旧 epoch 也不能发布到新请求。
+        if let Some(driver) = &self.reconnect {
+            driver.invalidate_for_apply();
+        }
         // T4 连接门（计划 §2.1–§2.4/§三）：受理即建痕 + 痕在即预检。位于 admission
         // （引擎内部记账，非系统变更）之后、`start_apply`（登录/网卡/路由等一切系统
         // 变更的开端）之前；分路（在途组装/采纳/自留状态）见 `admit_through_gate`。
@@ -1616,44 +1724,50 @@ impl HelperControl for HelperControlService {
             operation_id.clone(),
             generated::ConnectPhase::ObservingOwnedState,
         ));
-        if let Err(gate_error) = gate_admitted {
-            // 已 admission 的操作以 Failed 终态收口（镜像 start_apply 受理拒绝路径：
-            // 终态观察者据此写回 terminal，不静默悬挂），再向调用方回结构化错误。
-            self.stats
-                .registry()
-                .set_phase(generated::StatsPhase::Failed);
-            self.status.publish(StatusEvent::failed(
-                operation_id.clone(),
-                generated::ConnectPhase::ObservingOwnedState,
-                wire_error(
-                    wire_key,
-                    generated::ErrorCode::ObservedConflict as i32,
-                    &format!("connect gate refused: {gate_error}"),
-                ),
-            ));
-            self.log.emit(
-                LogLevel::Warn,
-                "platform",
-                "mutation.apply.gate_refused",
-                "connect refused by preflight gate (diagnostic; state on StreamConnectStatus)",
-                &[("detail", gate_error.message())],
-            );
-            return Err(gate_error);
-        }
-        // T6a：门放行后武装 R1 自愈（材料驻留 D9；替换任何先前会话的材料——新
-        // 受理的连接取代旧驻留）。位于 `start_apply` 之前：受理成功即武装，
-        // 组装失败（连接未成）时驻留无害——触发点（sweeper ClearedLive）只在
-        // 已安装 Live 隧道死亡时出现。
-        if let Some((driver, session)) = retained_session {
-            driver.arm(session);
-        }
+        let trace_admission = match gate_admitted {
+            Ok(fact) => fact,
+            Err(gate_error) => {
+                // 已 admission 的操作以 Failed 终态收口（镜像 start_apply 受理拒绝路径：
+                // 终态观察者据此写回 terminal，不静默悬挂），再向调用方回结构化错误。
+                self.stats
+                    .registry()
+                    .set_phase(generated::StatsPhase::Failed);
+                self.status.publish(StatusEvent::failed(
+                    operation_id.clone(),
+                    generated::ConnectPhase::ObservingOwnedState,
+                    wire_error(
+                        wire_key,
+                        generated::ErrorCode::ObservedConflict as i32,
+                        &format!("connect gate refused: {gate_error}"),
+                    ),
+                ));
+                self.log.emit(
+                    LogLevel::Warn,
+                    "platform",
+                    "mutation.apply.gate_refused",
+                    "connect refused by preflight gate (diagnostic; state on StreamConnectStatus)",
+                    &[("detail", gate_error.message())],
+                );
+                return Err(gate_error);
+            }
+        };
         // A1b: the real assembly is async-start — `start_apply` 受理即回，组装在后台
         // thread 内逐段执行，终态（Connected/Failed）由后台 thread 经 status 通道
         // 发布（handler 不等待、不记账——记账式假连接已退役）。The reply is the
         // `pending` ApplyAccepted; the terminal never rides on the ApplyTunnel reply
         // (R1w).
         let runtime = Arc::clone(&self.runtime);
-        let outcome = runtime.start_apply(ctx);
+        let adopt = !envelope_has_credentials && runtime.is_connected() && !runtime.is_assembling();
+        let outcome = if let Some(driver) = &self.reconnect {
+            driver.start_apply_with_session(
+                retained_session.map(|(_, session)| session),
+                adopt,
+                &operation_id,
+                || runtime.start_apply_with_receipt(ctx, trace_admission),
+            )
+        } else {
+            runtime.start_apply_admitted(ctx, trace_admission)
+        };
         // 组装受理失败（duplicate connect 等）→ 以 Failed 终态上报（不静默），仍回
         // pending（host 经 status 通道关联 Failed）。
         if let Err(err) = outcome {
@@ -1705,6 +1819,42 @@ impl HelperControl for HelperControlService {
             .ok_or_else(|| Status::invalid_argument("stop: missing lookup key"))?;
         let wire_key_bytes = wire_key.encode_to_vec();
         let request_digest = request.get_ref().request_digest.clone();
+        // 重放只读原 admission/terminal，不能排在自身尚未结束的停止后面。
+        {
+            let core = self.core.lock().expect("helper core lock");
+            let (_, key, _) = self.bind_mutation(
+                request.extensions(),
+                &core,
+                wire_key,
+                &request_digest,
+                OperationMethod::StopTunnel,
+            )?;
+            if core
+                .ingress
+                .replay(
+                    &key,
+                    &exv_vpn_domain::ports::CanonicalInputDigest::try_from(digest32(
+                        &request_digest,
+                    ))
+                    .expect("digest"),
+                )
+                .map_err(Status::failed_precondition)?
+                .is_some()
+            {
+                return Ok(Response::new(
+                    core.terminals
+                        .get(&canonical_lookup_digest(&key))
+                        .map(stop_reply_from_terminal)
+                        .unwrap_or(generated::StopTunnelReply {
+                            result: Some(generated::stop_tunnel_reply::Result::Pending(
+                                generated::EmptyOperationState {},
+                            )),
+                            stop_completion: None,
+                        }),
+                ));
+            }
+        }
+        let admission = Arc::clone(&self.status.admission.access).lock_owned().await;
         // Core-guarded admission runs in a scope block so the `MutexGuard` drops
         // structurally BEFORE the spawn_blocking await (a `MutexGuard` is not Send
         // across an await).
@@ -1718,6 +1868,30 @@ impl HelperControl for HelperControlService {
                 OperationMethod::StopTunnel,
             )?;
 
+            if let Some(admitted) = core
+                .ingress
+                .replay(
+                    &key,
+                    &exv_vpn_domain::ports::CanonicalInputDigest::try_from(digest32(
+                        &request_digest,
+                    ))
+                    .expect("digest"),
+                )
+                .map_err(Status::failed_precondition)?
+            {
+                let _ = admitted;
+                let reply = core
+                    .terminals
+                    .get(&canonical_lookup_digest(&key))
+                    .map(stop_reply_from_terminal)
+                    .unwrap_or(generated::StopTunnelReply {
+                        result: Some(generated::stop_tunnel_reply::Result::Pending(
+                            generated::EmptyOperationState {},
+                        )),
+                        stop_completion: None,
+                    });
+                return Ok(Response::new(reply));
+            }
             let subject = Self::owned_token_subject(&core, &request_digest);
             let effect_uuid = Uuid::new_v4();
             let effect_id = EffectId::try_from(effect_uuid).expect("effect id mints");
@@ -1735,93 +1909,82 @@ impl HelperControl for HelperControlService {
             (key, effect_uuid)
         };
 
-        // Tear down the real tunnel (R1b + A1b cancel + S1.5 D13 减负断开): first
-        // `cancel()` 触发取消令牌中止在途组装（后台组装在段边界自清理），等待其退出
-        // （有界），再 `disconnect()`——session owner 断 VPN 连接 + route owner 清路由
-        // （含地址/on-link）+ Paused 标记；**NIC owner 保留 adapter**（D12 网卡惰性
-        // 存续，退出清理阶段才 close）。The J52 ownership token slot is NOT invalidated
-        // here — the ownership lease outlives the tunnel and is retired by ReleaseLease.
+        // 受理后的执行任务拥有最终记录权；RPC 等待被取消不会取消实际停止或丢失终态。
         let runtime = Arc::clone(&self.runtime);
-        let disconnect = tokio::task::spawn_blocking(move || {
-            // A1b：置位取消令牌 → 有界等待在途组装在段边界取消并自清理（5s 上限）。
-            runtime.cancel();
-            for _ in 0..100 {
-                if !runtime.is_assembling() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        let core = Arc::clone(&self.core);
+        let status = Arc::clone(&self.status);
+        let stats = Arc::clone(&self.stats);
+        let reconnect = self.reconnect.clone();
+        let aftermath = self.aftermath.clone();
+        let wire_key = wire_key.clone();
+        let completion = tokio::spawn(async move {
+            let _admission = admission;
+            if let Some(driver) = &reconnect {
+                driver.disarm("user_stop");
             }
-            runtime.disconnect()
-        })
-        .await
-        .map_err(|e| Status::internal(format!("stop: disconnect join: {e}")))?;
-        {
-            let mut core = self.core.lock().expect("helper core lock");
-            core.applied_tunnel = None;
-            core.pending_apply.clear();
-        }
-        // T6a：用户显式断开 → R1 材料驻留解除并零化（后续掉线信号不再自愈）。
-        if let Some(driver) = &self.reconnect {
-            driver.disarm("user_stop");
-        }
-        // T5 断开路径善后验证（core 删除权前提"善后已验证"）：disconnect 已完成
-        //（成败均如实进入验证——失败会体现为残留）；预检探针复验 + trace hint，
-        // 干净 → 痕 Aftermath→删 + verified（挂到下方 Idle 终态事件上 wire，core/UI
-        // 可清除本地会话状态）；残留 → 痕留 Aftermath + 未验证（下次连接预检阻断）。
-        // 顺序纪律：先拆后验（紧急断开不被预检阻塞）；验证秒级且在 stop 回复前完成，
-        // 使 verified 信号随本操作的 Idle 终态一次送达（不静默悬挂）。
-        let aftermath_verified = match &self.aftermath {
-            Some(aftermath) => aftermath.verify_disconnect_aftermath().await.verified,
-            // 未接线构造（测试/旧路径）：维持既有行为，不携带验证结论。
-            None => false,
-        };
-        if let Err(e) = disconnect {
-            // Disconnect failure: report it on the status channel as a typed failure, but
-            // still return the stop receipt (the caller must not retry stop forever).
-            // The adapter is retained (D12); exit cleanup still closes it.
-            self.log.emit(
-                LogLevel::Warn,
-                "platform",
-                "mutation.stop.disconnect-failed",
-                "tunnel disconnect failed (diagnostic; adapter retained for exit cleanup)",
-                &[("detail", &e)],
-            );
-        }
-        // P5-a: the tunnel is torn down — the engine returns to idle.
-        self.stats.registry().set_phase(generated::StatsPhase::Idle);
-        let canonical_input_digest = digest32(&request_digest);
-        let mut core = self.core.lock().expect("helper core lock");
-        let receipt = build_wire_receipt(&core, wire_key, canonical_input_digest, effect_uuid);
-        let terminal = generated::OperationTerminal {
-            result: Some(generated::operation_terminal::Result::Succeeded(receipt.clone())),
-        };
-        Self::record_terminal(&mut core, &key, terminal);
-        // R1w: publish the stop terminal on the independent status channel (coarse Idle).
-        // The stop operation carries its OWN operation_id; R2 wires the full
-        // teardown/convergence (core-synthesized Idle + engine-first Idle) behind it.
-        // 发布顺序锁会调用终态观察者；不能持 helper core 锁进入发布，避免锁顺序倒置。
-        drop(core);
-        // T5：Idle 终态事件携带善后验证结论（EXV_UNFREEZE tag 7）。
-        self.status.publish(StatusEvent::idle_with_aftermath(
-            wire_key.operation_id.clone(),
-            aftermath_verified,
-        ));
-        // R1: PURE DIAGNOSTIC — no state semantics ride on this log code; state
-        // flows only on StreamConnectStatus (the Idle event published above).
-        self.log.emit(
-            LogLevel::Info,
-            "platform",
-            "mutation.stop.stopped",
-            "tunnel stopped (diagnostic; state on StreamConnectStatus)",
-            &[],
-        );
-        // D1 (engine persistent lifecycle): StopTunnel 只做业务停机——拆隧道 + publish
-        // Idle + 回 Stopped 回复；engine 回 Idle **常驻**,本 RPC 不再触发进程退出
-        // （进程退出仅由 engine bin 的 core 进程句柄等待驱动）。core 停机链 = 发本退出包
-        // → core 自身进程退出 → engine 随行。
-        Ok(Response::new(generated::StopTunnelReply {
-            result: Some(generated::stop_tunnel_reply::Result::Stopped(receipt)),
-        }))
+            let snapshot = aftermath.as_ref().map(|driver| driver.stop_snapshot());
+            let mut report = tokio::task::spawn_blocking(move || runtime.disconnect_report())
+                .await
+                .unwrap_or_else(|_| {
+                    let mut report = crate::stop_report::StopReport::default();
+                    report.action(
+                        crate::connect_ledger::LedgerDomain::DataPlane,
+                        "stop_worker_join",
+                        &Err("stop_worker_join".into()),
+                    );
+                    report
+                });
+            if let (Some(driver), Some(snapshot)) = (&aftermath, snapshot) {
+                driver.finish_disconnect(snapshot, &mut report);
+            }
+            let errors = stop_errors_from_report(&wire_key, &report);
+            let summary = generated::StopCompletion {
+                stopped: report.stopped,
+                blocks_new_connect: report.blocks_new_connect(),
+                errors,
+            };
+            // 未运行全域诊断，不能把真实停止摘要改称 aftermath_verified。
+            let aftermath_verified = false;
+            let terminal = {
+                let mut guard = core.lock().expect("helper core lock");
+                if report.stopped {
+                    guard.applied_tunnel = None;
+                    guard.pending_apply.clear();
+                }
+                let receipt =
+                    build_wire_receipt(&guard, &wire_key, digest32(&request_digest), effect_uuid);
+                let result = if report.succeeded() {
+                    generated::operation_terminal::Result::Succeeded(receipt)
+                } else {
+                    generated::operation_terminal::Result::Failed(generated::OperationFailed {
+                        receipt: Some(receipt),
+                        error: summary.errors.first().cloned(),
+                    })
+                };
+                let terminal = generated::OperationTerminal {
+                    result: Some(result),
+                    stop_completion: Some(summary.clone()),
+                };
+                Self::record_terminal(&mut guard, &key, terminal.clone());
+                terminal
+            };
+            let phase = if summary.stopped {
+                generated::StatsPhase::Idle
+            } else {
+                generated::StatsPhase::Stopping
+            };
+            stats.registry().set_phase(phase);
+            let mut event =
+                StatusEvent::idle_with_aftermath(wire_key.operation_id.clone(), aftermath_verified);
+            event.coarse_phase = phase;
+            event.stop_completion = Some(summary);
+            status.publish(event);
+            stop_reply_from_terminal(&terminal)
+        });
+        completion
+            .await
+            .map(Response::new)
+            .map_err(|_| Status::internal("stop: completion task join"))
     }
 
     async fn get_operation(
@@ -1951,6 +2114,7 @@ impl HelperControl for HelperControlService {
         let canonical_input_digest = digest32(&request_digest);
         let receipt = build_wire_receipt(&core, wire_key, canonical_input_digest, effect_uuid);
         let terminal = generated::OperationTerminal {
+            stop_completion: None,
             result: Some(generated::operation_terminal::Result::Succeeded(receipt.clone())),
         };
         Self::record_terminal(&mut core, &key, terminal);
@@ -2057,6 +2221,42 @@ impl HelperControl for HelperControlService {
         Ok(Response::new(generated::KeepAliveReply {
             monotonic_tick: request.get_ref().monotonic_tick,
         }))
+    }
+
+    /// Windows 现役刷新由原 marker 消费者处理，不把新 RPC 伪装为成功。
+    async fn trigger_latency_refresh(
+        &self,
+        request: Request<generated::HelperLatencyRefreshRequest>,
+    ) -> Result<Response<generated::HelperLatencyRefreshReply>, Status> {
+        self.transport_peer(request.extensions())?;
+        Err(Status::unimplemented(
+            "Windows latency refresh RPC is not implemented",
+        ))
+    }
+
+    async fn auth_receiver_control(
+        &self, request: Request<generated::AuthReceiverControlRequest>,
+    ) -> Result<Response<generated::AuthReceiverControlReply>, Status> {
+        self.transport_peer(request.extensions())?;
+        let request = request.into_inner();
+        if request.operation_id.len() != 16 {
+            return Err(Status::invalid_argument("auth_receiver_control/operation_id must be 16 bytes"));
+        }
+        if !matches!(generated::AuthReceiverAction::try_from(request.action), Ok(generated::AuthReceiverAction::Inspect | generated::AuthReceiverAction::DisableAndStop | generated::AuthReceiverAction::Restore | generated::AuthReceiverAction::ReadRecovery)) {
+            return Err(Status::invalid_argument("auth_receiver_control/action is required"));
+        }
+        use exv_vpn_win32_ipc::auth_deadline::{AuthDeadline, AuthDeadlineError};
+        let deadline = AuthDeadline::from_monotonic_ns(request.deadline_monotonic_ns).map_err(|error| match error {
+            AuthDeadlineError::Expired => Status::deadline_exceeded("auth_receiver_control/deadline expired"),
+            AuthDeadlineError::Invalid => Status::invalid_argument("auth_receiver_control/invalid deadline"),
+        })?;
+        let receiver = self.official_auth_receiver.as_ref().cloned().ok_or_else(|| Status::unimplemented("official_auth_receiver/test backend"))?;
+        let now = std::time::Instant::now();
+        let until = now + deadline.remaining().map_err(|_| Status::deadline_exceeded("auth_receiver_control/deadline expired"))?;
+        let runtime_epoch = self.runtime_epoch_bytes;
+        let reply = tokio::task::spawn_blocking(move || receiver.control(request.action, until, &runtime_epoch))
+            .await.map_err(|error| Status::internal(format!("auth_receiver_control/task: {error}")))?;
+        Ok(Response::new(reply))
     }
 
     async fn service_manage(

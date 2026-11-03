@@ -19,9 +19,9 @@ include(CTest)
 
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../../../release.json" EXV_RELEASE_JSON)
 string(JSON EXV_SOURCE_VERSION GET "${EXV_RELEASE_JSON}" version)
-set(EXV_PRODUCT_VERSION "${EXV_SOURCE_VERSION}" CACHE STRING "EXV product version")
+set(EXV_PRODUCT_VERSION "${EXV_SOURCE_VERSION}" CACHE STRING "EXV product version baked into the installer registry entry")
 if(NOT EXV_PRODUCT_VERSION STREQUAL EXV_SOURCE_VERSION)
-  message(FATAL_ERROR "EXV_PRODUCT_VERSION differs from release.json")
+  message(FATAL_ERROR "EXV_PRODUCT_VERSION differs from release.json; configure with the source product version")
 endif()
 
 set(EXV_RUST_SETUP_PAYLOAD_SOURCES
@@ -43,6 +43,7 @@ set(EXV_RUST_SETUP_ENGINE_SOURCES
   progress_model.cpp
   uninstaller_copy.cpp
   install_engine.cpp
+  pfro_sweep.cpp
   uninstall_engine.cpp
   payload/embedded_payload.cpp
   ui/setup_window.cpp
@@ -144,7 +145,34 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME uninstall_result_reporting COMMAND uninstall_result_test)
   set_tests_properties(uninstall_result_reporting PROPERTIES TIMEOUT 10)
-  add_executable(installer_pipe_test tests/installer_pipe_test.cpp)
+  # 2026-10-10 修复计划 T3：进程处置注入缝测试（杀序/形态分叉/假等待/名单）。
+  add_executable(process_stop_order_test tests/process_stop_order_test.cpp)
+  target_include_directories(process_stop_order_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  if(MINGW)
+    target_link_options(process_stop_order_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME installer_process_stop_order COMMAND process_stop_order_test)
+  set_tests_properties(installer_process_stop_order PROPERTIES TIMEOUT 10)
+  # 2026-10-10 修复计划 T7/F7：解压输出锁有界重试（窗口内释放成功/耗尽失败）。
+  # 耗尽用例固定消耗约 5 秒重试窗口，超时上限放宽到 20 秒。
+  add_executable(archive_extract_retry_test tests/archive_extract_retry_test.cpp
+    ${EXV_RUST_SETUP_PAYLOAD_SOURCES})
+  target_include_directories(archive_extract_retry_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(archive_extract_retry_test PRIVATE cabinet)
+  if(MINGW)
+    target_link_options(archive_extract_retry_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME archive_extract_retry COMMAND archive_extract_retry_test)
+  set_tests_properties(archive_extract_retry PROPERTIES TIMEOUT 20)
+  add_executable(pfro_sweep_test tests/pfro_sweep_test.cpp pfro_sweep.cpp)
+  target_include_directories(pfro_sweep_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(pfro_sweep_test PRIVATE advapi32)
+  if(MINGW)
+    target_link_options(pfro_sweep_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME installer_pfro_sweep_logic COMMAND pfro_sweep_test)
+  set_tests_properties(installer_pfro_sweep_logic PROPERTIES TIMEOUT 10)
+  add_executable(installer_pipe_test tests/installer_pipe_test.cpp pfro_sweep.cpp)
   target_include_directories(installer_pipe_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
   target_link_libraries(installer_pipe_test PRIVATE shell32 advapi32)
   if(MINGW)
@@ -152,6 +180,31 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME installer_pipe_timeout_and_recovery COMMAND installer_pipe_test)
   set_tests_properties(installer_pipe_timeout_and_recovery PROPERTIES TIMEOUT 10)
+  # S5（2026-10-10 换盘服务迁移）：ImagePath 切分/比对规整纯函数单测——直编
+  # 生产 service_control.cpp 真实现，只调纯函数零 SCM 访问（本机 ctest 未提权，
+  # fixture 真服务迁移不可行；真机换盘迁移人工验收归 W5）。
+  add_executable(service_image_path_test tests/service_image_path_test.cpp
+    service_control.cpp util/hidden_process.cpp)
+  target_include_directories(service_image_path_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(service_image_path_test PRIVATE advapi32)
+  if(MINGW)
+    target_link_options(service_image_path_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME installer_service_image_path_normalize COMMAND service_image_path_test)
+  set_tests_properties(installer_service_image_path_normalize PROPERTIES TIMEOUT 10)
+  # S6（2026-10-10 错误页重试，计划 §七 v2）：重试状态机单测——直编生产
+  # ui/setup_window.cpp（守卫态/水面重置/排水转场真实实现），安装/卸载引擎与
+  # 快捷方式等宿主副作用链接期整函数替换；不建窗口、不初始化 D2D。
+  add_executable(install_retry_state_test tests/install_retry_state_test.cpp
+    ui/icon_bitmaps.cpp progress_model.cpp)
+  target_include_directories(install_retry_state_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(install_retry_state_test PRIVATE
+    shell32 ole32 uuid user32 gdi32 d2d1 dwrite windowscodecs dwmapi msimg32)
+  if(MINGW)
+    target_link_options(install_retry_state_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME installer_install_retry_state COMMAND install_retry_state_test)
+  set_tests_properties(installer_install_retry_state PROPERTIES TIMEOUT 30)
 endif()
 
 add_executable(pack_setup_payload

@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, ref, watch } from "vue";
+import { computed, inject } from "vue";
+
+import { useDialogFocus } from "./use-dialog-focus";
 
 import { APPEARANCE_KEY } from "../product/appearance";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   visible: boolean;
   label: string;
-}>();
+  /** 是否渲染加载指示器；错误/操作态可关闭（默认 true，服务操作保持原行为）。 */
+  spinner?: boolean;
+  /** 标题元素 id（aria-labelledby 目标）；默认服务遮罩自身 id。 */
+  labelId?: string;
+  /** 根节点 data-testid；默认 service-operation-overlay。 */
+  testId?: string;
+}>(), {
+  spinner: true,
+  labelId: "service-operation-overlay-label",
+  testId: "service-operation-overlay",
+});
 
 /**
  * 极简适配：服务安装/卸载遮罩在 328px 窗口内也要可见。这是第三套独立适配
@@ -15,52 +27,33 @@ const props = defineProps<{
 const appearance = inject(APPEARANCE_KEY, null);
 const minimal = computed(() => appearance?.state.value.mode === "minimal");
 
-const dialog = ref<HTMLElement | null>(null);
-let previousActiveElement: HTMLElement | null = null;
-
-function keepFocusInDialog(event: KeyboardEvent): void {
-  if (event.key !== "Tab") return;
-  event.preventDefault();
-  dialog.value?.focus();
-}
-
-watch(
-  () => props.visible,
-  async (visible) => {
-    if (visible) {
-      previousActiveElement = document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-      await nextTick();
-      dialog.value?.focus();
-      return;
-    }
-
-    const focusTarget = previousActiveElement;
-    previousActiveElement = null;
-    await nextTick();
-    if (focusTarget?.isConnected) focusTarget.focus();
-  },
-);
+const emit = defineEmits<{ escape: [] }>();
+const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => emit("escape"), {
+  // 忙碌无可用动作时仍聚焦遮罩根；全文区可经 Tab 阅读，不抢占初始动作焦点。
+  initialFocus: "button, input, select, textarea, a[href]",
+});
 </script>
 
 <template>
   <div
     v-if="visible"
-    class="service-overlay"
+    class="service-overlay exv-dialog"
     :class="{ 'service-overlay--minimal': minimal }"
-    data-testid="service-operation-overlay"
+    :data-testid="testId"
     role="dialog"
     aria-modal="true"
-    aria-live="polite"
-    aria-labelledby="service-operation-overlay-label"
+    :aria-live="spinner ? 'polite' : undefined"
+    :aria-labelledby="labelId"
     tabindex="-1"
     ref="dialog"
-    @keydown="keepFocusInDialog"
+    @keydown="onDialogKeydown"
   >
-    <div class="service-overlay__card service-overlay__card--contained">
-      <div class="service-overlay__spinner" aria-hidden="true" />
-      <p id="service-operation-overlay-label" class="service-overlay__label service-overlay__label--wrap">{{ label }}</p>
+    <div class="service-overlay__card service-overlay__card--contained exv-dialog-card">
+      <div v-if="spinner" class="service-overlay__spinner" data-testid="service-overlay-spinner" aria-hidden="true" />
+      <p :id="labelId" class="service-overlay__label service-overlay__label--wrap">{{ label }}</p>
+      <div v-if="$slots.default" class="service-overlay__extra">
+        <slot />
+      </div>
     </div>
   </div>
 </template>
@@ -96,7 +89,7 @@ watch(
 .service-overlay__label {
   margin: 0;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--font-size-heading);
   line-height: 1.5;
   text-align: center;
 }
@@ -116,6 +109,15 @@ watch(
   animation: service-spin 0.8s linear infinite;
 }
 
+/* 可选插槽区：承载等待认证模态的取消/回退/三选项等操作与错误区，
+   与遮罩共用同一份 token（--surface-panel/--text-primary/--state-danger）。 */
+.service-overlay__extra {
+  display: grid;
+  width: 100%;
+  justify-items: center;
+  gap: var(--space-3);
+}
+
 /* 极简：卡片收进 328px 宽窗口（左右各留 8px），内边距与文案同步收敛。 */
 .service-overlay--minimal {
   padding: 8px;
@@ -129,7 +131,7 @@ watch(
 }
 
 .service-overlay--minimal .service-overlay__label {
-  font-size: 12px;
+  font-size: var(--font-size-heading);
   line-height: 1.3;
 }
 
@@ -137,6 +139,10 @@ watch(
   width: 20px;
   height: 20px;
   border-width: 2px;
+}
+
+.service-overlay--minimal .service-overlay__extra {
+  gap: 6px;
 }
 
 @keyframes service-spin {

@@ -39,7 +39,13 @@ export interface ProductStage {
  *
  */
 export interface ProductConnectionInfo {
+  /** 已保存配置中的规则条数，不表示活动系统路由。 */
+  routeRuleCount?: number | null;
+  /** 活动身份协议由现有接纳投影提供，不能由配置刷新覆写。 */
+  protocol?: "cisco" | "atrust";
   account: string | null;
+  /** 配置账号只属于 Cisco；aTrust 尚无可信的认证身份数据口。 */
+  accountSource?: "configured" | "unavailable";
   vpnServer: string | null;
   campusIp: string | null;
 }
@@ -101,6 +107,8 @@ export interface ProductReconnect {
   currentAttempt: number;
   /** 配置的重试预算（0 = 无限）。 */
   maxAttempts: number;
+  /** 重连 reason lane 稳定 id 原样透传（S5b 暂停事实；空串 = 无事实）。 */
+  reason: string;
 }
 
 /**
@@ -165,6 +173,28 @@ export function serviceStateLabel(scmState: ServiceScmState): string {
   }
 }
 
+/**
+ * S6b 服务真话化：连接运行态 → 隧道/会话可用性文案（双端同构）。
+ * 服务运行 ≠ 隧道可用——服务状态行需同时呈现连接运行态；无连接时明确
+ * 「隧道未建立」，避免「服务运行中」被误读为已可访问校园网。
+ */
+export function tunnelSessionLabel(status: ProductStatus): string {
+  switch (status) {
+    case "connected":
+      return "隧道已建立";
+    case "connecting":
+    case "awaiting":
+      return "隧道建立中";
+    case "stopping":
+      return "隧道断开中";
+    case "reconciling":
+      return "隧道状态核对中";
+    case "idle":
+    case "failed":
+      return "隧道未建立";
+  }
+}
+
 /** SCM 服务状态的产品语义（S3/D5；仅展示，非授权材料）。 */
 export type ProductServiceState =
   /** 尚未查询/查询失败：不得据此自动安装（MED [3]），连接回退 oneshot。 */
@@ -202,14 +232,23 @@ export type ProductNetworkResources =
 export interface ProductUiState {
   /** 接纳快照所属操作，只用于关联真实终态。 */
   operationId?: string | null;
-  /** Core 控制面两态：仅由已认证控制管道的真实可用性推导。 */
-  coreStatus: "normal" | "stopped";
+  /** Core 控制面显示；null 是尚无读数，不参与连接能力或动画裁定。 */
+  coreStatus: "normal" | "stopped" | null;
   status: ProductStatus;
   severity: ProductSeverity;
   title: string;
   description: string | null;
+  /**
+   * 阶段①（「需要处理」分流，2026-10-08 调研 §6，win32 树同构镜像）：failed 终态
+   * 是否为「曾连上后断开」语义——标题「连接已断开」、动作按钮「重新连接」；
+   * false/缺省 = 连接失败语义（「连接失败」/「重试」）。仅 status === "failed" 时
+   * 有意义；判定三判据（error.stage / 重连 reason lane / 失败前已连接）见
+   * `lib/status-map.ts` `disconnectSemanticsOf`。
+   */
+  disconnectSemantics?: boolean;
   /** 当前失败/恢复错误的稳定码；页面据此选择可执行的处理说明。 */
   errorCode: string | null;
+  errorReason?: string | null;
   stages: ProductStage[];
   metrics: ProductMetricsDisplay | null;
   connectionInfo: ProductConnectionInfo;

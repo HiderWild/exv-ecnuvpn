@@ -36,7 +36,8 @@
 //! 脚本参数（`nrpt_worker` `lifecycle_tests` 同款）。
 
 mod classify;
-mod probe_child;
+// `pub(crate)`：D8 阶段 2 起接管执行器（nrpt_takeover.rs）消费 op 协议与 DTO。
+pub(crate) mod probe_child;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -61,11 +62,25 @@ use windows::Win32::System::Registry::{
 
 use crate::connection_trace::TraceRecord;
 use classify::{
-    adapter_findings, classify_adapter_orphans, classify_iface_dns, classify_nrpt,
+    adapter_disposition, adapter_domain_data, classify_adapter_orphans, classify_iface_dns,
+    classify_nrpt, nrpt_equivalence_decision, foreign_presence_report, AdapterDisposition,
+    AdapterDomainData, NrptEquivalenceDecision,
     classify_proxy, classify_routes, iface_dns_findings, nrpt_findings, proxy_findings,
     route_findings, NrptClassified, ProxyClassified, RoutesClassified,
 };
 use probe_child::{ProbeChild, ProbeRequest, ProbeResponse, PsDnsIface};
+
+// D8 阶段 2：接管执行器（nrpt_takeover.rs）复用本模块的常驻探针子进程机制与
+// 判定纯函数（同源同输入——最小必要只有会话权威判定能保证）。
+pub(crate) use classify::{
+    expand_campus_forms, foreign_form_verdict, takeover_targets, ForeignFormVerdict,
+    NrptTakeoverStore, NrptTakeoverTarget,
+};
+
+/// 已知校园解析器常量（连接门/善后路径的等效判定启发式输入——会话实际服务器
+/// 在 T3 才可知；误判方向安全：门放行的形式若与会话服务器不等效，T3 权威
+/// 判定走原冲突失败路径）。
+pub(crate) use classify::CAMPUS_DNS_SERVERS;
 
 /// 单域探测预算（并行；探测阶段墙钟 ≈ 最慢域）。
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -75,6 +90,9 @@ pub const PREFLIGHT_BUDGET_TARGET: Duration = Duration::from_secs(3);
 
 /// PS 子进程启动的观察上界（冷启动就绪 2s + 余量）。
 const SPAWN_BOUND: Duration = Duration::from_millis(2_500);
+
+/// NRPT 自有规则删除失败后的门内限界重试间隔（D8 §2.2.2：一次、~500ms）。
+const NRPT_DELETE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// `WinINET` `Internet Settings` 子键路径（resource 同款字面量）。
 const INTERNET_SETTINGS_SUBKEY: &str =
@@ -150,6 +168,10 @@ pub struct DomainReport {
     pub findings: Vec<Finding>,
     /// 清理后复验状态（仅对「清理前有发现」的域重跑只读探测；其余 None）。
     pub post_cleanup_status: Option<DomainStatus>,
+    /// 清理后复验发现（D8 阶段 2 观测缺口修复：复验只保留状态枚举时，
+    /// `Nrpt×4` 的构成无法事后复原——外来/自有残留构成是 NRPT 域未收敛判定的
+    /// 输入，见 [`blocking_reasons`]；仅复验域填充，其余空）。
+    pub post_cleanup_findings: Vec<Finding>,
 }
 
 /// 单条清理动作的执行记账。
@@ -206,6 +228,14 @@ pub struct PreflightInputs<'a> {
     pub user_sid: Option<&'a str>,
     /// 校园命名空间清单（外来 NRPT 冲突的匹配集；T4 接线时来自配置）。
     pub campus_namespaces: &'a [String],
+    /// 校园 DNS 解析器集合（NRPT 等效判定的服务器集合）。会话实际下发的服务器
+    /// 在 T3 装配才可知；连接门/善后路径传已知校园解析器常量（启发式——误判
+    /// 方向安全：门放行的形式若与会话服务器不等效，T3 权威判定走原冲突路径）。
+    /// 空集 = 不做等效归类（全部外来按冲突上报，保守）。
+    pub campus_dns_servers: &'a [String],
+    /// W1 归属事实：本进程 NicOwner 当前持有的网卡名（None = 未持有）。
+    /// 网卡域四象限判定的输入——持有且健康的持久网卡不是发现，不得据此阻断。
+    pub held_adapter_name: Option<&'a str>,
 }
 
 /// 运行一次预检（无 `user_sid` / 无校园命名空间集的便捷入口）。
@@ -217,6 +247,8 @@ pub async fn run_preflight(record_hint: Option<&TraceRecord>) -> PreflightReport
         record_hint,
         user_sid: None,
         campus_namespaces: &[],
+        campus_dns_servers: &[],
+        held_adapter_name: None,
     })
     .await
 }
@@ -235,7 +267,8 @@ pub async fn run_preflight_for(inputs: &PreflightInputs<'_>) -> PreflightReport 
         probed.iter().cloned().map(to_domain_report).collect();
 
     // ③ 清理阶段（唯一写路径）+ DNS 缓存清刷。
-    let (cleanup_actions, changed) = cleanup_phase(&ps, inputs.user_sid, &probed).await;
+    let (cleanup_actions, changed) =
+        cleanup_phase(&ps, inputs.user_sid, &probed, inputs.held_adapter_name).await;
     let dns_cache_flushed = if changed {
         ps_op(&ps, &ProbeRequest::Flushdns).await.is_ok()
     } else {
@@ -257,18 +290,54 @@ pub async fn run_preflight_for(inputs: &PreflightInputs<'_>) -> PreflightReport 
     }
 }
 
+/// 按需全域只读诊断：共享查询探针，但不进入 cleanup/reverify/flushdns 路径。
+pub async fn run_diagnostics_for(inputs: &PreflightInputs<'_>) -> PreflightReport {
+    let ps = spawn_probe_child().await;
+    let report = read_only_probe_report(build_probe_set(&ps, inputs)).await;
+    shutdown_probe_child(&ps).await;
+    report
+}
+
+async fn read_only_probe_report(probes: Vec<(DomainKind, ProbeFuture)>) -> PreflightReport {
+    let started_at_ms = unix_now_ms();
+    let start = Instant::now();
+    let domains = run_probe_set(probes, PROBE_TIMEOUT)
+        .await
+        .into_iter()
+        .map(to_domain_report)
+        .collect();
+    PreflightReport {
+        started_at_ms,
+        elapsed: start.elapsed(),
+        domains,
+        cleanup: Vec::new(),
+        dns_cache_flushed: false,
+    }
+}
+
 /// 从预检报告提取**阻断连接**的未决发现（T4 连接门消费；计划 §三）。
 ///
-/// 阻断集合（稳定 reason id，UI 文案后置阶段按 id 路由）：
-/// - `nrpt_foreign_conflict`：外来校园域 NRPT 规则冲突（他牌规则不可动，补救
-///   三选归 UI/T13）；
-/// - `adapter_manual`：需人工处置的发现（wintun 0.14.1 网卡无非创建者删除路径）；
-/// - `cleanup_failed`：清理动作执行失败；
-/// - `cleanup_unresolved`：已清理域复验仍有发现（清理未收敛）。
+/// 阻断集合（稳定 reason id，UI 文案按 id 路由；**D8 阶段 2 起按域降级**）：
+/// - `adapter_manual`：网卡域 Manual 发现——W1 后仅 D 类（自有名被非 EXV 网卡
+///   占用）产生；本进程持有的持久网卡（A 类）与真孤儿（C 类）不阻断；
+/// - `cleanup_failed`：清理动作执行失败——**NRPT 域自有孤儿删除失败不阻断**
+///   （降级 ReportOnly：T3 认领清理兜底会再清一次并自动重试装配，门放行；
+///   门内已限界重试一次，仍失败按未收敛由装配段终态呈现）；路由/代理域清理
+///   失败维持阻断（代理残留会实际影响用户上网，快速失败语义保留）；
+/// - `cleanup_unresolved`：已清理域复验仍有发现——NRPT 域只看「自有发现仍在」
+///   （复验仅剩外来/等效 ReportOnly 发现不算未收敛：外来冲突已改静默接管，
+///   等效发现本就不期待消失——顺带修掉按「任意发现」判未收敛的假阳性面）；
+///   路由/代理域维持「复验仍有发现即未收敛」（已知假阳性面保留：bypass_shape/
+///   dangling_foreign 为 ReportOnly，如实声明）。
 ///
-/// 非阻断：ReportOnly 的 journal 遗留 / 接口 DNS 命中 / 活接口 bypass 形状等
-/// （仅上报）；探测 Timeout/Error 域不计阻断（病态环境如实上报，不据此拦连接）。
-/// 返回值去重保序（空 = 无阻断，连接放行）。
+/// **`nrpt_foreign_conflict` 已退出阻断集合**（2026-10-09 用户裁定 → D8 阶段 2）：
+/// 外来校园域 NRPT 冲突改「报告+放行」，处置（journal→删除→验证）在 T3 装配段
+/// 以会话实际 `campus_dns_servers` 权威判定后静默执行——门侧常量启发式只用于
+/// 报告（会话服务器与常量不同的部署里，门内覆盖会违反最小必要）。
+///
+/// 非阻断：ReportOnly 的 journal 遗留 / 接口 DNS 命中 / 活接口 bypass 形状 /
+/// 外来 NRPT 冲突（放行，T3 处置）等（仅上报）；探测 Timeout/Error 域不计阻断
+/// （病态环境如实上报，不据此拦连接）。返回值去重保序（空 = 无阻断，连接放行）。
 #[must_use]
 pub fn blocking_reasons(report: &PreflightReport) -> Vec<&'static str> {
     let mut reasons: Vec<&'static str> = Vec::new();
@@ -281,13 +350,6 @@ pub fn blocking_reasons(report: &PreflightReport) -> Vec<&'static str> {
         if domain
             .findings
             .iter()
-            .any(|finding| finding.kind == "nrpt_foreign_conflict")
-        {
-            push("nrpt_foreign_conflict");
-        }
-        if domain
-            .findings
-            .iter()
             .any(|finding| finding.policy == FindingPolicy::Manual)
         {
             push("adapter_manual");
@@ -296,12 +358,26 @@ pub fn blocking_reasons(report: &PreflightReport) -> Vec<&'static str> {
             .findings
             .iter()
             .any(|finding| finding.policy == FindingPolicy::Cleanup);
-        if had_cleanup && domain.post_cleanup_status == Some(DomainStatus::Findings) {
+        let unresolved = match domain.post_cleanup_status {
+            Some(DomainStatus::Findings) => match domain.domain {
+                // NRPT 域：复验仅剩外来/等效 ReportOnly 发现不算未收敛（发现
+                // 构成经 post_cleanup_findings 保留，观测缺口 §1.3 修复）。
+                DomainKind::Nrpt => domain.post_cleanup_findings.iter().any(|finding| {
+                    finding.kind == "nrpt_own_orphan"
+                }),
+                _ => true,
+            },
+            _ => false,
+        };
+        if had_cleanup && unresolved {
             push("cleanup_unresolved");
         }
     }
     for action in &report.cleanup {
-        if matches!(action.outcome, CleanupOutcome::Failed(_)) {
+        if matches!(action.outcome, CleanupOutcome::Failed(_))
+            // NRPT 域自有孤儿删除失败降级：T3 认领清理兜底（§2.2.1）。
+            && !(action.domain == DomainKind::Nrpt && action.finding_kind == "nrpt_own_orphan")
+        {
             push("cleanup_failed");
         }
     }
@@ -314,6 +390,7 @@ async fn cleanup_phase(
     ps: &SharedProbeChild,
     user_sid: Option<&str>,
     probed: &[DomainOutcome],
+    held_adapter_name: Option<&str>,
 ) -> (Vec<CleanupAction>, bool) {
     let mut actions = Vec::new();
     let mut changed = false;
@@ -321,9 +398,19 @@ async fn cleanup_phase(
         match (&outcome.domain, &outcome.result) {
             (DomainKind::Nrpt, Ok(DomainData::Nrpt(classified))) => {
                 for rule in &classified.own {
-                    let result = ps_op(ps, &ProbeRequest::NrptDelete { name: &rule.name })
+                    let mut result = ps_op(ps, &ProbeRequest::NrptDelete { name: &rule.name })
                         .await
                         .map(|_| ());
+                    if result.is_err() {
+                        // 门内限界重试一次（D8 §2.2.2，~500ms 间隔；计入预检 3s
+                        // 目标——事故模式 00:36:50 失败 → 00:40:00 自愈成功说明
+                        // 存在瞬态失败面）。第二次失败按域降级（blocking_reasons
+                        // 不再据此阻断），T3 认领清理兜底。
+                        tokio::time::sleep(NRPT_DELETE_RETRY_DELAY).await;
+                        result = ps_op(ps, &ProbeRequest::NrptDelete { name: &rule.name })
+                            .await
+                            .map(|_| ());
+                    }
                     actions.push(record_cleanup(
                         DomainKind::Nrpt,
                         "nrpt_own_orphan",
@@ -333,16 +420,21 @@ async fn cleanup_phase(
                     ));
                 }
             }
-            (DomainKind::Adapter, Ok(DomainData::Adapters(orphans))) => {
-                // wintun 0.14.1 只有创建者 close 才移除 adapter（冻结事实）：
-                // 预检进程不是创建者 → 无安全删除路径，全部转人工。
-                for orphan in orphans {
-                    actions.push(CleanupAction {
-                        domain: DomainKind::Adapter,
-                        finding_kind: "adapter_orphan",
-                        target: orphan.name.clone(),
-                        outcome: CleanupOutcome::Manual,
-                    });
+            (DomainKind::Adapter, Ok(DomainData::Adapters(data))) => {
+                // W1：仅 D 类（自有名被非 EXV 网卡占用）保留 Manual 记账——真需人工。
+                // A 复用/C 真孤儿不产生人工处置动作（不阻断；C 由装配领用/重建，
+                // W3 实证后扩展主动清理）；wintun 0.14.1 只有创建者 close 才能移除，
+                // 预检对非持有网卡本就无安全删除路径。
+                for record in &data.matched {
+                    if adapter_disposition(record, held_adapter_name) == AdapterDisposition::NameConflict
+                    {
+                        actions.push(CleanupAction {
+                            domain: DomainKind::Adapter,
+                            finding_kind: "adapter_name_conflict",
+                            target: record.name.clone(),
+                            outcome: CleanupOutcome::Manual,
+                        });
+                    }
                 }
             }
             (DomainKind::Routes, Ok(DomainData::Routes(classified))) => {
@@ -417,6 +509,13 @@ async fn reverify_phase(
     for report in domain_reports {
         if let Some(post) = reverified.iter().find(|outcome| outcome.domain == report.domain) {
             report.post_cleanup_status = Some(outcome_status(&post.result));
+            // 复验发现构成保留（D8 观测缺口修复）：NRPT 域未收敛判定只看自有发现
+            // 是否仍在，外来/等效 ReportOnly 发现不算未收敛。
+            report.post_cleanup_findings = post
+                .result
+                .as_ref()
+                .map(|data| data.render())
+                .unwrap_or_default();
         }
     }
 }
@@ -453,8 +552,8 @@ fn record_cleanup(
 pub(crate) enum DomainData {
     /// NRPT 域分类。
     Nrpt(NrptClassified),
-    /// 网卡域命中的自有残留（空 = 干净）。
-    Adapters(Vec<AdapterRecord>),
+    /// 网卡域分类结果（W1 四象限：命中记录 + 归属定性发现；空发现 = 干净/复用）。
+    Adapters(AdapterDomainData),
     /// 路由域分类。
     Routes(RoutesClassified),
     /// 接口 DNS 域命中（空 = 干净）。
@@ -479,7 +578,7 @@ impl DomainData {
     pub(crate) fn render(&self) -> Vec<Finding> {
         match self {
             Self::Nrpt(classified) => nrpt_findings(classified),
-            Self::Adapters(orphans) => adapter_findings(orphans),
+            Self::Adapters(data) => data.findings.clone(),
             Self::Routes(classified) => route_findings(classified),
             Self::IfaceDns(hits) => iface_dns_findings(hits),
             Self::Proxy(data) => proxy_findings(&data.classified, data.server_text.as_deref()),
@@ -542,6 +641,7 @@ fn to_domain_report(outcome: DomainOutcome) -> DomainReport {
         status: outcome_status(&outcome.result),
         findings: outcome.result.map(|data| data.render()).unwrap_or_default(),
         post_cleanup_status: None,
+        post_cleanup_findings: Vec::new(),
     }
 }
 
@@ -571,12 +671,23 @@ fn build_probe_set(
         .record_hint
         .map(|hint| hint.proxy_ports.clone())
         .unwrap_or_default();
+    let campus_servers = inputs.campus_dns_servers.to_vec();
     vec![
         (
             DomainKind::Nrpt,
-            nrpt_probe(ps.clone(), inputs.campus_namespaces.to_vec()),
+            nrpt_probe(
+                ps.clone(),
+                inputs.campus_namespaces.to_vec(),
+                campus_servers,
+            ),
         ),
-        (DomainKind::Adapter, adapters_probe(hint_adapters)),
+        (
+            DomainKind::Adapter,
+            adapters_probe(
+                hint_adapters,
+                inputs.held_adapter_name.map(str::to_owned),
+            ),
+        ),
         (DomainKind::Routes, routes_probe(ps.clone())),
         (DomainKind::IfaceDns, iface_dns_probe(ps.clone())),
         (
@@ -587,24 +698,38 @@ fn build_probe_set(
     ]
 }
 
-/// NRPT 域探针：list op → 分类（自有前缀孤儿 / 外来校园域冲突）。
-fn nrpt_probe(ps: SharedProbeChild, campus_namespaces: Vec<String>) -> ProbeFuture {
+/// NRPT 域探针：list op（本地规则表 + 有效策略表）→ 分类（自有前缀孤儿 /
+/// 外来校园域冲突 / 等效外来 external-provided）。
+fn nrpt_probe(
+    ps: SharedProbeChild,
+    campus_namespaces: Vec<String>,
+    campus_servers: Vec<String>,
+) -> ProbeFuture {
     Box::pin(async move {
         let response = ps_op(&ps, &ProbeRequest::List).await?;
-        Ok(DomainData::Nrpt(classify_nrpt(&response.rules, &campus_namespaces)))
+        Ok(DomainData::Nrpt(classify_nrpt(
+            &response.rules,
+            &response.effective,
+            &campus_namespaces,
+            &campus_servers,
+        )))
     })
 }
 
-/// 网卡域探针：`GetAdaptersAddresses` 枚举 → 自有残留（ExvEngine / hint 记录名）。
-fn adapters_probe(hint_adapter_names: Vec<String>) -> ProbeFuture {
+/// 网卡域探针：`GetAdaptersAddresses` 枚举 → 自有名命中 + W1 归属四象限分类。
+fn adapters_probe(
+    hint_adapter_names: Vec<String>,
+    held_adapter_name: Option<String>,
+) -> ProbeFuture {
     Box::pin(async move {
         let records = tokio::task::spawn_blocking(enumerate_adapter_records)
             .await
             .map_err(|e| format!("网卡枚举任务异常退出：{e}"))?
             .map_err(|e| format!("网卡枚举失败：{}", e.message))?;
-        Ok(DomainData::Adapters(classify_adapter_orphans(
+        Ok(DomainData::Adapters(adapter_domain_data(
             &records,
             &hint_adapter_names,
+            held_adapter_name.as_deref(),
         )))
     })
 }
@@ -859,10 +984,11 @@ fn disable_hkcu_proxy() -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// 各 PS 域共享的子进程句柄（None = 启动失败/超时，PS 域记 Error）。
-type SharedProbeChild = Option<Arc<tokio::sync::Mutex<Option<ProbeChild>>>>;
+/// `pub(crate)`：D8 阶段 2 起接管执行器（`nrpt_takeover.rs`）复用同一机制。
+pub(crate) type SharedProbeChild = Option<Arc<tokio::sync::Mutex<Option<ProbeChild>>>>;
 
 /// 启动常驻 PS 子进程（有界等待 ready；超时/失败返回 None，不阻塞整轮预检）。
-async fn spawn_probe_child() -> SharedProbeChild {
+pub(crate) async fn spawn_probe_child() -> SharedProbeChild {
     let joined =
         tokio::time::timeout(SPAWN_BOUND, tokio::task::spawn_blocking(ProbeChild::start)).await;
     match joined {
@@ -883,7 +1009,23 @@ async fn spawn_probe_child() -> SharedProbeChild {
 }
 
 /// 在共享子进程上执行一个 op（串行互斥；op 校验 ok 与应答回显配对）。
-async fn ps_op(ps: &SharedProbeChild, request: &ProbeRequest<'_>) -> Result<ProbeResponse, String> {
+pub(crate) async fn ps_op(
+    ps: &SharedProbeChild,
+    request: &ProbeRequest<'_>,
+) -> Result<ProbeResponse, String> {
+    ps_op_with_timeout(ps, request, None).await
+}
+
+/// [`ps_op`] 的显式 op 应答超时变体（`restart_dnscache` 用
+/// [`probe_child::RESTART_OP_TIMEOUT`]；None = 普通 2s 预算）。
+///
+/// 超时后该子进程可能残留迟到应答（后续请求与其错位）——调用方须弃用本子进程、
+/// 换新进程续作（见 `nrpt_takeover.rs` 的超时重验设计）。
+pub(crate) async fn ps_op_with_timeout(
+    ps: &SharedProbeChild,
+    request: &ProbeRequest<'_>,
+    op_timeout: Option<std::time::Duration>,
+) -> Result<ProbeResponse, String> {
     let Some(ps) = ps.as_ref() else {
         return Err("预检 PowerShell 子进程不可用（启动失败或超时）。".to_owned());
     };
@@ -896,7 +1038,10 @@ async fn ps_op(ps: &SharedProbeChild, request: &ProbeRequest<'_>) -> Result<Prob
         let Some(child) = guard.as_mut() else {
             return Err("预检 PowerShell 子进程已关闭。".to_owned());
         };
-        child.request_line(&line)
+        match op_timeout {
+            Some(timeout) => child.request_line_with_timeout(&line, timeout),
+            None => child.request_line(&line),
+        }
     })
     .await
     .map_err(|e| format!("预检 op 任务异常退出：{e}"))??;
@@ -910,15 +1055,19 @@ async fn ps_op(ps: &SharedProbeChild, request: &ProbeRequest<'_>) -> Result<Prob
     }
     if !response.ok {
         return Err(format!(
-            "预检 op {expected_op} 失败：{reason}",
-            reason = response.error.unwrap_or_else(|| "未知错误".to_owned())
+            "预检 op {expected_op} 失败：{reason}；native_code={:?}；hresult={:?}；exception_type={}；error_id={}",
+            response.native_code,
+            response.hresult,
+            response.exception_type.as_deref().unwrap_or(""),
+            response.error_id.as_deref().unwrap_or(""),
+            reason = response.error.unwrap_or_else(|| "未知错误".to_owned()),
         ));
     }
     Ok(response)
 }
 
 /// 关闭共享子进程（take 出来后 bye + EOF + 有界等待退出；幂等）。
-async fn shutdown_probe_child(ps: &SharedProbeChild) {
+pub(crate) async fn shutdown_probe_child(ps: &SharedProbeChild) {
     if let Some(ps) = ps.as_ref() {
         let ps = Arc::clone(ps);
         let _ = tokio::task::spawn_blocking(move || {
@@ -937,12 +1086,26 @@ async fn shutdown_probe_child(ps: &SharedProbeChild) {
 /// 兜底认领清理的结局（受理门/connect 路由侧重试判定的输入）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct NrptClaimClean {
+    /// 当前原操作真实失败；保留每次失败的动作、原异常和原码。
+    pub(crate) errors: Vec<String>,
     /// 已删除的自有前缀（`EXV-NRPT:`）规则名。
     pub(crate) removed: Vec<String>,
-    /// 现存的外来校园域冲突规则名（未动——T2 裁定不变，只上报）。
+    /// 现存的外来校园域覆盖标识（未动——T2 裁定不变，只上报）。自阶段 1 起
+    /// 同时覆盖本地规则表与有效策略表：`{form}@local:{规则名}` /
+    /// `{form}@effective`（仅有效表）/ `{form}@equivalent`（等效提供）。
     pub(crate) foreign_present: Vec<String>,
+    /// 同次前置快照扣除已删除自有规则后的候选决策；保留旧 effective，供原 worker 选择。
+    pub(crate) decision: NrptEquivalenceDecision,
     /// 探测与删除是否全部成功（false = 清理未收敛）。
     pub(crate) all_ok: bool,
+}
+
+impl NrptClaimClean {
+    /// 删除发生后，旧 effective 可能仍含自有规则投影，交原 worker 的 Add 前选择。
+    /// 未删除时，全等效输入仍可直接完成，无需启动 worker。
+    pub(crate) fn can_skip_worker(&self, campus_domains: &[String]) -> bool {
+        self.removed.is_empty() && self.decision.accepts_all(campus_domains)
+    }
 }
 
 /// 兜底认领清理（计划 v6.1 §8.2 触发模型补洞）：连接路径撞自有 NRPT conflict 时
@@ -953,9 +1116,16 @@ pub(crate) struct NrptClaimClean {
 /// `EXV-NRPT:` 前缀规则（孤儿语义——任意 GUID 均为 EXV 残留）；删除走同一
 /// [`ProbeRequest::NrptDelete`]；生效后清 DNS 缓存。**外来规则（无前缀的校园域
 /// 规则）绝不动**（T2 裁定不变——他牌规则只上报，补救三选归 UI）。
-pub(crate) async fn claim_clean_own_nrpt(campus_namespaces: &[String]) -> NrptClaimClean {
+///
+/// `campus_dns_servers` 是等效判定的服务器集合（T3 调用点传会话实际下发值）；
+/// `foreign_present` 自 2026-10-08 阶段 1 起同时读本地规则表与有效策略表
+/// （缺口 G 修复：仅有效表存在的外来规则此前永远上报为空）。
+pub(crate) async fn claim_clean_own_nrpt(
+    campus_namespaces: &[String],
+    campus_dns_servers: &[String],
+) -> NrptClaimClean {
     let ps = spawn_probe_child().await;
-    let outcome = claim_clean_own_nrpt_on(&ps, campus_namespaces).await;
+    let outcome = claim_clean_own_nrpt_on(&ps, campus_namespaces, campus_dns_servers).await;
     shutdown_probe_child(&ps).await;
     outcome
 }
@@ -965,36 +1135,125 @@ pub(crate) async fn claim_clean_own_nrpt(campus_namespaces: &[String]) -> NrptCl
 async fn claim_clean_own_nrpt_on(
     ps: &SharedProbeChild,
     campus_namespaces: &[String],
+    campus_dns_servers: &[String],
 ) -> NrptClaimClean {
-    if ps.is_none() {
-        return NrptClaimClean::default();
-    }
-    let response = match ps_op(ps, &ProbeRequest::List).await {
+    let mut response = match ps_op(ps, &ProbeRequest::List).await {
         Ok(response) => response,
-        Err(_) => return NrptClaimClean::default(),
+        Err(error) => return NrptClaimClean { errors: vec![error], ..NrptClaimClean::default() },
     };
-    let classified = classify_nrpt(&response.rules, campus_namespaces);
-    let foreign_present = classified
-        .foreign_conflict
-        .iter()
-        .map(|rule| rule.name.clone())
-        .collect();
+    let classified = classify_nrpt(
+        &response.rules,
+        &response.effective,
+        campus_namespaces,
+        campus_dns_servers,
+    );
+    // foreign_present 修真（缺口 G）：本地表外来（按规则名）+ 仅有效表覆盖
+    // （按命名空间）+ 等效标记。仅有效表条目无规则名，命名空间自带点形态
+    // 自描述。
+    let foreign_present = foreign_presence_report(
+        campus_namespaces,
+        campus_dns_servers,
+        &response.rules,
+        &response.effective,
+    );
     let mut removed = Vec::new();
     let mut all_ok = true;
+    let mut errors = Vec::new();
     for rule in &classified.own {
         match ps_op(ps, &ProbeRequest::NrptDelete { name: &rule.name }).await {
             Ok(_) => removed.push(rule.name.clone()),
-            Err(_) => all_ok = false,
+            Err(error) => {
+                all_ok = false;
+                errors.push(error);
+            }
         }
     }
     if !removed.is_empty() {
-        let _ = ps_op(ps, &ProbeRequest::Flushdns).await;
+        if let Err(error) = ps_op(ps, &ProbeRequest::Flushdns).await {
+            all_ok = false;
+            errors.push(error);
+        }
     }
+    // 只按原 Delete 的成功结果更新已取得的输入；外来规则保持原样，失败项不剔除。
+    response.rules.retain(|rule| !removed.contains(&rule.name));
+    let decision = nrpt_equivalence_decision(
+        campus_namespaces,
+        campus_dns_servers,
+        &response.rules,
+        &response.effective,
+    );
     NrptClaimClean {
+        errors,
         removed,
         foreign_present,
+        decision,
         all_ok,
     }
+}
+
+// ---------------------------------------------------------------------------
+// T3 等效接纳判定（2026-10-08 计划阶段 1；有界只读探测）
+// ---------------------------------------------------------------------------
+
+/// T3 等效接纳判定结论（消费方：`tunnel_runtime` 装配路径）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NrptAcceptance {
+    /// 等效接纳决策（accept_forms 传给 worker；accepts_all 时不启动 worker）。
+    pub(crate) decision: NrptEquivalenceDecision,
+    /// 探测是否成功（false = 探测失败/超时，accept_forms 为空——保守回退原
+    /// 路径：worker 冲突检测自行裁定，语义与既有行为完全一致）。
+    pub(crate) probed_ok: bool,
+}
+
+impl NrptAcceptance {
+    /// 便捷：等效接纳形式清单。
+    pub(crate) fn accept_forms(&self) -> &[String] {
+        &self.decision.accept_forms
+    }
+}
+
+/// T3 装配前的等效接纳判定（有界只读探测 + 纯函数判定）。
+///
+/// # 防死锁约束（2026-09-26 孤儿事故复盘结论的落地）
+///
+/// - 全程复用常驻探针子进程的**既有**有界生命周期：spawn ≤ [`SPAWN_BOUND`]
+///   （2.5s）、单 op 应答 ≤ 2s、bye/EOF 退出 ≤ 0.5s——不新增任何「等待 PS
+///   进程退出」依赖，也绝不启动 NRPT worker 来做判定；
+/// - 探测失败/超时 → 空接纳（原冲突路径，worker 自行检测），绝不重试循环；
+/// - 判定只读，不删除、不添加任何规则。
+pub(crate) async fn determine_nrpt_acceptance(
+    campus_domains: &[String],
+    campus_dns_servers: &[String],
+) -> NrptAcceptance {
+    if campus_domains.is_empty() {
+        // 无校园 DNS 诉求：无需判定（worker 本就不启动）。
+        return NrptAcceptance::default();
+    }
+    let ps = spawn_probe_child().await;
+    let outcome = determine_nrpt_acceptance_on(&ps, campus_domains, campus_dns_servers).await;
+    shutdown_probe_child(&ps).await;
+    outcome
+}
+
+/// 判定主体（子进程句柄由调用方提供——测试注入假脚本，生产经
+/// [`determine_nrpt_acceptance`] 用真实探针）。
+async fn determine_nrpt_acceptance_on(
+    ps: &SharedProbeChild,
+    campus_domains: &[String],
+    campus_dns_servers: &[String],
+) -> NrptAcceptance {
+    let mut acceptance = NrptAcceptance::default();
+    let Ok(response) = ps_op(ps, &ProbeRequest::List).await else {
+        return acceptance;
+    };
+    acceptance.decision = nrpt_equivalence_decision(
+        campus_domains,
+        campus_dns_servers,
+        &response.rules,
+        &response.effective,
+    );
+    acceptance.probed_ok = true;
+    acceptance
 }
 
 /// Unix 毫秒时间戳（时钟回拨等异常退化为 0，仅用于报告标记）。

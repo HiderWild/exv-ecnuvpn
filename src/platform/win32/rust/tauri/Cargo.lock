@@ -1159,8 +1159,10 @@ dependencies = [
 
 [[package]]
 name = "exv-core"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
+ "base64 0.22.1",
+ "bytes",
  "exv-engine",
  "exv-vpn-atrust",
  "exv-vpn-cstp",
@@ -1176,11 +1178,19 @@ dependencies = [
  "exv-vpn-wire",
  "futures-util",
  "http",
+ "http-body-util",
+ "hyper",
  "hyper-util",
+ "log",
+ "prost",
+ "ring",
+ "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
  "tonic",
@@ -1193,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "exv-engine"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
  "base64 0.22.1",
  "exv-vpn-atrust",
@@ -1226,16 +1236,20 @@ dependencies = [
 
 [[package]]
 name = "exv-ui"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
  "exv-core",
+ "exv-vpn-atrust",
+ "exv-vpn-win32-agent-sim",
  "exv-vpn-win32-config",
  "exv-vpn-win32-ipc",
  "exv-vpn-win32-resource",
  "exv-vpn-wire",
  "http",
  "hyper-util",
+ "json-patch",
  "log",
+ "prost",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1243,6 +1257,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "tauri-plugin-single-instance",
+ "tauri-utils",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -1270,6 +1285,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "zeroize",
 ]
 
@@ -1373,6 +1389,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "exv-vpn-win32-agent-sim"
+version = "0.1.0"
+dependencies = [
+ "exv-vpn-atrust",
+ "futures-util",
+ "rcgen",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tracing",
+ "windows 0.62.2",
+ "zeroize",
+]
+
+[[package]]
 name = "exv-vpn-win32-config"
 version = "0.1.0"
 dependencies = [
@@ -1381,6 +1416,7 @@ dependencies = [
  "getrandom 0.3.4",
  "serde",
  "serde_json",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3081,6 +3117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3608,6 +3654,19 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -6218,6 +6277,15 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]

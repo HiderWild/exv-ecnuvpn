@@ -10,7 +10,7 @@ const frontendDirectory = fileURLToPath(new URL(".", import.meta.url));
 const commonGitDirectory = execFileSync("git", ["-C", frontendDirectory, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
 const frontendOutput = resolve(commonGitDirectory, "..", "target", "darwin-tauri-frontend");
 
-// 产品版本从根 release.json 读取，并检查本平台配置。
+// 产品版本仅从根 release.json 读取；构建时检查 Tauri 配置的同步结果。
 const appVersion: string = JSON.parse(readFileSync(new URL("../../../../../../release.json", import.meta.url), "utf8")).version;
 const configuredVersion = JSON.parse(readFileSync(new URL("../app/tauri.conf.json", import.meta.url), "utf8")).version;
 if (typeof appVersion !== "string" || !appVersion || appVersion !== configuredVersion) {

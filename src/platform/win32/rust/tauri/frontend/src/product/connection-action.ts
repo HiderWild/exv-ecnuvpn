@@ -2,7 +2,7 @@ import type { ProductUiState } from "./types";
 
 export type ProductConnectionActionKind = "connect" | "stop" | "none";
 
-export type ProductConnectionActionLabel = "连接" | "取消" | "断开" | "重试" | "继续" | "连接中" | "断开中" | "处理中";
+export type ProductConnectionActionLabel = "连接" | "取消" | "断开" | "重试" | "重新连接" | "继续" | "连接中" | "断开中" | "处理中";
 
 export interface ProductConnectionAction {
   kind: ProductConnectionActionKind;
@@ -13,10 +13,18 @@ export interface ProductConnectionAction {
 /** 产品动作的唯一决策源；页面只消费 kind 和 label，不根据状态自行猜测。 */
 export function connectionActionFor(ui: ProductUiState): ProductConnectionAction {
   if (ui.status === "failed") {
-    // failed_clean / failed_dirty 均可重试：点击重连会清除错误并重置状态机（status-map
-    // 盲清修复规则1）。"blocking / 需要处理"语义由页面横幅与标题呈现，**不禁用按钮**——
-    // 禁用会制造无恢复路径的死锁（按钮永远停在「需要处理」，无法回到可连接态）。
-    return { kind: "connect", label: "重试", enabled: true };
+    if (ui.stopEnabled) return { kind: "stop", label: "重试", enabled: true };
+    // failed_clean / failed_dirty 均可重连：点击会清除错误并重置状态机（status-map
+    // 盲清修复规则1）。"blocking"严重度由页面横幅与标题呈现，**不禁用按钮**——
+    // 禁用会制造无恢复路径的死锁（按钮永远停在失败态，无法回到可连接态）。
+    // 阶段①（「需要处理」分流）：label 按断开语义分流——曾连上后掉线 →
+    // 「重新连接」（B 类，恢复既有连接）；本次没连上 →「重试」（A 类）。
+    // 与在飞语义（A 线修复 3b）不冲突：连接命令在飞时 ConnectionInteractionHost
+    // 的 effectiveAction 守卫把任意相位的按钮改写为「取消」，本分支只在失败终态命中。
+    return { kind: "connect", label: ui.disconnectSemantics === true ? "重新连接" : "重试", enabled: true };
+  }
+  if (ui.status === "idle" && ui.stopEnabled) {
+    return { kind: "stop", label: "重试", enabled: true };
   }
   if (ui.connectEnabled) {
     return { kind: "connect", label: "连接", enabled: true };

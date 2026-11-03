@@ -32,6 +32,22 @@ impl MutationIngress {
         }
     }
 
+    /// 已受理操作只重放原状态；同键不同摘要沿用现有冲突错误。
+    pub fn replay(
+        &self,
+        key: &OperationLookupKey,
+        digest: &exv_vpn_domain::ports::CanonicalInputDigest,
+    ) -> Result<Option<&MutationAdmitted>, &'static str> {
+        let identity = exv_vpn_domain::identity::canonical_lookup_digest(key);
+        match self.durable.iter().find_map(|(record_key, record)| {
+            (exv_vpn_domain::identity::canonical_lookup_digest(record_key) == identity)
+                .then_some(record)
+        }) {
+            Some(record) if &record.canonical_input_digest != digest => Err("idempotency conflict"),
+            record => Ok(record),
+        }
+    }
+
     /// Admit a mutation RPC for the given lease/key once its J51 admission is durable.
     ///
     /// # Errors

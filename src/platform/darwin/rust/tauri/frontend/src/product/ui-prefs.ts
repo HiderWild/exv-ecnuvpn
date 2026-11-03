@@ -30,6 +30,8 @@ export interface UiPreferences {
   connect_notify: boolean;
   /** 断开连接时发送通知。 */
   disconnect_notify: boolean;
+  /** 当前已连接会话意外断开时发送通知，默认关闭。 */
+  unexpected_disconnect_notify: boolean;
   /** 触发重连时发送通知（C5 自动重连落地前仅开关+文案，效果待接线）。 */
   reconnect_notify: boolean;
   /** 窗口在前台（聚焦）时抑制所有连接类通知；优先级最高。 */
@@ -50,6 +52,7 @@ export const UI_PREF_KEYS = [
   "silent_startup",
   "connect_notify",
   "disconnect_notify",
+  "unexpected_disconnect_notify",
   "reconnect_notify",
   "suppress_notify_when_foreground",
   "auto_connect_on_launch",
@@ -73,6 +76,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   connection_state_notifications: false,
   connect_notify: false,
   disconnect_notify: false,
+  unexpected_disconnect_notify: false,
   reconnect_notify: false,
   suppress_notify_when_foreground: true,
   auto_connect_on_launch: false,
@@ -116,6 +120,7 @@ export function normalizeUiPreferences(raw: UiPreferencesWire | null | undefined
     "connection_state_notifications",
     "connect_notify",
     "disconnect_notify",
+    "unexpected_disconnect_notify",
     "reconnect_notify",
     "suppress_notify_when_foreground",
     "auto_connect_on_launch",

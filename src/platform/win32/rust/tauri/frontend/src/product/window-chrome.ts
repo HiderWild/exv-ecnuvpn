@@ -15,6 +15,7 @@ export type WindowChromeListen = (
 ) => Promise<() => void>;
 
 export interface WindowChromePort {
+  isForeground(): Promise<boolean>;
   setMode(mode: WindowMode): Promise<void>;
   control(control: NativeWindowControl): Promise<void>;
   /** 窗口显隐原语（连接后最小化到托盘 / 托盘唤出）；纯显隐，不携带关闭语义。 */
@@ -26,7 +27,7 @@ export interface WindowChromeOptions {
   browserPreview?: boolean;
   invoke?: (
     command: string,
-    args: { mode: WindowMode } | { control: NativeWindowControl } | { visible: boolean },
+    args: { mode: WindowMode } | { control: NativeWindowControl } | { visible: boolean } | Record<string, never>,
   ) => Promise<unknown>;
   listen?: WindowChromeListen;
 }
@@ -51,6 +52,10 @@ export function createWindowChromePort(options: WindowChromeOptions = {}): Windo
   const invoke = options.invoke ?? ((command, args) => tauriInvoke(command, args));
   const listen = options.listen ?? ((event, listener) => tauriListen<unknown>(event, listener));
   return {
+    async isForeground() {
+      if (browserPreview) return document.hasFocus();
+      return await invoke("window_is_foreground", {}) === true;
+    },
     async setMode(mode) {
       if (browserPreview) return;
       await invoke("window_chrome_set_mode", { mode });

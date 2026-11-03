@@ -54,11 +54,14 @@ impl fmt::Debug for ObserveEndpoint {
 
 /// Observe-only 调用的稳定错误边界。
 ///
-/// 认证前和 transport 失败沿用 IPC 的固定 [`PreauthError`]；已经进入 Common tonic
+/// 原connect失败保留IO；peer/认证和其余transport失败沿用IPC的固定
+/// [`PreauthError`]；已经进入Common tonic
 /// handler 的错误保持其原始 [`Status`]，绝不能重新解释为认证失败。
 #[derive(Debug)]
 pub enum ObserveError {
-    /// 本地 socket、peer 或认证阶段的失败。
+    /// 本次原Unix socket连接失败；保原IO，不据其他状态改判。
+    Connect(std::io::Error),
+    /// 本地peer或认证阶段的失败。
     Transport(PreauthError),
     /// 已认证 Common `HelperControl` handler 的 tonic 状态。
     Rpc(Status),
@@ -67,6 +70,12 @@ pub enum ObserveError {
 impl fmt::Display for ObserveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Connect(error) => write!(
+                formatter,
+                "Darwin Engine connect failed kind={:?} errno={:?}: {error}",
+                error.kind(),
+                error.raw_os_error(),
+            ),
             Self::Transport(error) => write!(formatter, "Darwin Engine Observe transport: {error}"),
             Self::Rpc(status) => write!(
                 formatter,
@@ -78,7 +87,14 @@ impl fmt::Display for ObserveError {
     }
 }
 
-impl std::error::Error for ObserveError {}
+impl std::error::Error for ObserveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Connect(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// 在已认证的同一条 UDS 上观察 Engine 的当前状态。
 ///
@@ -87,8 +103,8 @@ impl std::error::Error for ObserveError {}
 ///
 /// # Errors
 ///
-/// 本地连接、peer 校验、`DarwinAuthV1` 或 warm tonic channel 失败返回
-/// [`ObserveError::Transport`]。Common handler 返回的 tonic 状态不作翻译，返回
+/// 本地连接失败返回[`ObserveError::Connect`]；peer校验、`DarwinAuthV1`或warm
+/// tonic channel失败返回[`ObserveError::Transport`]。Common handler 返回的 tonic 状态不作翻译，返回
 /// [`ObserveError::Rpc`]。
 pub async fn observe_owned_state(
     endpoint: ObserveEndpoint,
@@ -114,7 +130,15 @@ pub async fn connect_authenticated_engine(
 ) -> Result<HelperControlClient<Channel>, ObserveError> {
     let stream = UnixStream::connect(endpoint.socket_path.as_path())
         .await
-        .map_err(|_| ObserveError::Transport(PreauthError::Transport))?;
+        .map_err(ObserveError::Connect)?;
+    authenticate_connected_engine(endpoint, stream).await
+}
+
+/// 消费已经连接的同一条stream与一次性认证材料；此处绝不重新dial。
+pub(crate) async fn authenticate_connected_engine(
+    endpoint: ObserveEndpoint,
+    stream: UnixStream,
+) -> Result<HelperControlClient<Channel>, ObserveError> {
     let core_identity = ExpectedPeer::current_process();
     let peer_lookup = SystemPeerLookup;
     let (channel, _verified_engine) = authenticate_client_to_tonic_channel(

@@ -10,8 +10,8 @@ namespace exv::setup {
 struct UninstallRequest {
   std::wstring install_dir;  // empty → read registry
   bool clear_user_data{false};
-  // KI-13 ④：升级语义开关——true 时用户数据清理脚本照常运行，但跳过用户数据段
-  // （连接配置/凭据/UI 偏好），只清缓存/账本/服务态。全新卸载保持 false（全清）。
+  // 覆盖升级显式设为 true；普通卸载通过 clear_user_data=false 保留数据。
+  // 两者都运行清理脚本的运行资源段，保留连接配置、凭据、profile 和偏好。
   bool preserve_user_data{false};
   std::wstring user_profile_root;
   std::wstring local_app_data_root;

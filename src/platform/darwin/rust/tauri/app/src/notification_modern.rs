@@ -35,7 +35,7 @@ use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationRequest,
-    UNNotificationPresentationOptions, UNNotificationSettings, UNUserNotificationCenter,
+    UNNotificationPresentationOptions, UNUserNotificationCenter,
     UNUserNotificationCenterDelegate,
 };
 use tauri::AppHandle;
@@ -58,8 +58,6 @@ objc2::define_class!(
             _notification: &UNNotification,
             completion_handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            // 诊断：系统是否真的把「前台呈现」决策交给本 delegate（未实现它时前台不弹横幅）。
-            crate::notification::record_delivery("modern", None, "will-present", "");
             completion_handler.call((UNNotificationPresentationOptions::Banner
                 | UNNotificationPresentationOptions::List
                 | UNNotificationPresentationOptions::Sound,));
@@ -86,9 +84,8 @@ static NOTIFICATION_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::
 
 /// 在主线程向系统**提交**一条通知；授权未定时系统会弹授权窗，授权完成后在同一回调链里投递。
 ///
-/// 返回 `Ok(())` 只表示「已提交给系统」——真实结果（投递成功/授权被拒/投递失败）经
-/// `report` 在系统回调队列上异步落盘（见 `super::record_report`）。主线程派发失败或超时
-/// 返回 `Err`，调用方据此回退旧后端。
+/// 返回 `Ok(())` 只表示主线程已发起通知流程；异步授权拒绝或安排失败经 `report` 交给调用方记录。
+/// 无错误安排不表示用户已看到通知。主线程派发失败或超时返回 `Err`，调用方据此回退旧后端。
 pub(super) fn submit(
     app: &AppHandle,
     title: String,
@@ -163,36 +160,6 @@ fn dispatch(
     Ok(())
 }
 
-/// 读取并把 `UNNotificationSettings` 的关键数值落盘（诊断「接受了却不显示」类问题）。
-///
-/// 关注点：`alertStyle` 为 `None` 时系统**不弹横幅**（只进通知中心），而 `add` 仍返回成功；
-/// 授权状态、通知中心/声音开关同理。数值映射见 `UNNotificationSettings` 的枚举定义
-/// （0 = notSupported/None，1 = 对应最低档，2 = 上一档）。
-fn report_notification_settings(center: &UNUserNotificationCenter) {
-    let block = RcBlock::new(move |settings: std::ptr::NonNull<UNNotificationSettings>| {
-        // SAFETY: 回调参数由系统保证在本调用内有效。
-        let settings = unsafe { settings.as_ref() };
-        // 逐项数值：alertSetting=0 表示「不允许提醒」→ 系统接受请求但不弹横幅；
-        // alertStyle=0（None）同理；scheduledDelivery=1 表示进了「定时摘要」（延后显示）。
-        let summary = format!(
-            "auth={} alert={} alertStyle={} center={} sound={} badge={} lock={} previews={} scheduled={} timeSensitive={} announcement={}",
-            settings.authorizationStatus().0,
-            settings.alertSetting().0,
-            settings.alertStyle().0,
-            settings.notificationCenterSetting().0,
-            settings.soundSetting().0,
-            settings.badgeSetting().0,
-            settings.lockScreenSetting().0,
-            settings.showPreviewsSetting().0,
-            settings.scheduledDeliverySetting().0,
-            settings.timeSensitiveSetting().0,
-            settings.announcementSetting().0,
-        );
-        crate::notification::record_delivery("modern", None, "settings", &summary);
-    });
-    center.getNotificationSettingsWithCompletionHandler(&block);
-}
-
 /// 主线程投递：构建 content/request 并交给系统；结果经 `report` 异步回报。
 fn deliver_now(
     app: &AppHandle,
@@ -201,7 +168,6 @@ fn deliver_now(
     report: Arc<dyn Fn(DeliveryReport) + Send + Sync>,
 ) {
     let center = UNUserNotificationCenter::currentNotificationCenter();
-    report_notification_settings(&center);
     let content = UNMutableNotificationContent::new();
     // 字符串在此构建（NSString 跨线程安全，内容不可变）。
     content.setTitle(&NSString::from_str(title));

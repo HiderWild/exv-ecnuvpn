@@ -7,6 +7,9 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
+
+#include <cwctype>
 
 namespace exv::setup {
 namespace fs = std::filesystem;
@@ -233,6 +236,163 @@ bool RunEngineServiceUninstall(const std::wstring &engine_exe_path) {
   const std::wstring cmd = L"\"" + engine_exe_path + L"\" --service-uninstall";
   const auto r = RunHidden(L"", cmd, 60000);
   return r.started && r.exit_code == 0;
+}
+
+// ---- S5（2026-10-10 换盘服务迁移）----
+
+ServiceImagePathParts SplitServiceImagePathExecutable(const std::wstring &image_path) {
+  const std::size_t begin = image_path.find_first_not_of(L" \t");
+  if (begin == std::wstring::npos) {
+    return {};
+  }
+  if (image_path[begin] == L'"') {
+    const std::size_t close = image_path.find(L'"', begin + 1);
+    // 未闭合引号容错：引号后全部视为可执行段（比对失败只会多一次幂等改写）。
+    if (close == std::wstring::npos) {
+      return {image_path.substr(begin + 1), L""};
+    }
+    ServiceImagePathParts parts;
+    parts.executable = image_path.substr(begin + 1, close - begin - 1);
+    const std::size_t rest = image_path.find_first_not_of(L" \t", close + 1);
+    parts.arguments = rest == std::wstring::npos ? L"" : image_path.substr(rest);
+    return parts;
+  }
+  const std::size_t end = image_path.find_first_of(L" \t", begin);
+  ServiceImagePathParts parts;
+  parts.executable =
+      end == std::wstring::npos ? image_path.substr(begin)
+                                : image_path.substr(begin, end - begin);
+  const std::size_t rest = end == std::wstring::npos ? std::wstring::npos
+                                                     : image_path.find_first_not_of(L" \t", end);
+  parts.arguments = rest == std::wstring::npos ? L"" : image_path.substr(rest);
+  return parts;
+}
+
+std::wstring NormalizeServiceImagePathForCompare(const std::wstring &path) {
+  std::size_t begin = path.find_first_not_of(L" \t");
+  if (begin == std::wstring::npos) {
+    return {};
+  }
+  const std::size_t end = path.find_last_not_of(L" \t");
+  std::wstring normalized = path.substr(begin, end - begin + 1);
+  // 去包围引号（成对或单侧残余都规整掉——只影响比对形态）。
+  if (!normalized.empty() && normalized.front() == L'"') {
+    normalized.erase(0, 1);
+  }
+  if (!normalized.empty() && normalized.back() == L'"') {
+    normalized.pop_back();
+  }
+  for (wchar_t &ch : normalized) {
+    if (ch == L'/') {
+      ch = L'\\';
+    } else {
+      ch = static_cast<wchar_t>(std::towlower(ch));
+    }
+  }
+  return normalized;
+}
+
+bool ServiceImagePathDrifted(const std::wstring &image_path,
+                             const std::wstring &expected_engine_path) {
+  return NormalizeServiceImagePathForCompare(
+             SplitServiceImagePathExecutable(image_path).executable) !=
+         NormalizeServiceImagePathForCompare(expected_engine_path);
+}
+
+ServiceImagePathSnapshot QueryServiceImagePath(const std::wstring &service_name) {
+  SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (scm == nullptr) {
+    return {ServicePresence::Error, L"", GetLastError()};
+  }
+  SC_HANDLE svc = OpenServiceW(scm, service_name.c_str(), SERVICE_QUERY_CONFIG);
+  if (svc == nullptr) {
+    const DWORD error = GetLastError();
+    CloseServiceHandle(scm);
+    return {error == ERROR_SERVICE_DOES_NOT_EXIST ? ServicePresence::NotInstalled
+                                                  : ServicePresence::Error,
+            L"", error};
+  }
+  DWORD needed = 0;
+  std::vector<BYTE> buffer;
+  if (QueryServiceConfigW(svc, nullptr, 0, &needed) || needed == 0) {
+    // 预期失败形态是 ERROR_INSUFFICIENT_BUFFER；其余（含诡异的 0 需求）走错误路径。
+    const DWORD error = GetLastError();
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return {ServicePresence::Error, L"", error};
+  }
+  buffer.resize(needed);
+  auto *config = reinterpret_cast<QUERY_SERVICE_CONFIGW *>(buffer.data());
+  if (!QueryServiceConfigW(svc, config, needed, &needed)) {
+    const DWORD error = GetLastError();
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return {ServicePresence::Error, L"", error};
+  }
+  ServiceImagePathSnapshot snapshot;
+  snapshot.presence = ServicePresence::Installed;
+  snapshot.binary_path = config->lpBinaryPathName != nullptr ? config->lpBinaryPathName : L"";
+  snapshot.error_code = ERROR_SUCCESS;
+  CloseServiceHandle(svc);
+  CloseServiceHandle(scm);
+  return snapshot;
+}
+
+bool MigrateServiceImagePath(const std::wstring &new_engine_path,
+                             const std::wstring &service_name, std::wstring *error) {
+  auto fail = [&](const wchar_t *step, DWORD code) {
+    if (error) {
+      *error = std::wstring(step) + L" (Win32=" + std::to_wstring(code) + L")";
+    }
+    return false;
+  };
+  if (new_engine_path.empty()) {
+    return fail(L"empty new image path", ERROR_INVALID_PARAMETER);
+  }
+  // 尾参保真：控制面管道名/dll/SID/config-dir 是按用户派生的安装目录无关值，
+  // 只改写可执行段（复审 MINOR-2 引号/斜杠/大小写规整只影响比对，不回写规整值）。
+  const auto current = QueryServiceImagePath(service_name);
+  if (current.presence != ServicePresence::Installed) {
+    return fail(L"QueryImagePath", current.error_code != 0 ? current.error_code
+                                                           : static_cast<DWORD>(ERROR_FILE_NOT_FOUND));
+  }
+  const ServiceImagePathParts parts = SplitServiceImagePathExecutable(current.binary_path);
+  // 写入带引号惯例形态（CreateService 同惯例，路径含空格时必需）。
+  std::wstring new_binary_path = L"\"" + new_engine_path + L"\"";
+  if (!parts.arguments.empty()) {
+    new_binary_path += L" " + parts.arguments;
+  }
+
+  SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (scm == nullptr) {
+    return fail(L"OpenSCManager", GetLastError());
+  }
+  SC_HANDLE svc = OpenServiceW(scm, service_name.c_str(),
+                               SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
+  if (svc == nullptr) {
+    const DWORD code = GetLastError();
+    CloseServiceHandle(scm);
+    return fail(L"OpenService", code);
+  }
+  const BOOL changed = ChangeServiceConfigW(
+      svc, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, new_binary_path.c_str(),
+      nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+  if (!changed) {
+    const DWORD code = GetLastError();
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return fail(L"ChangeServiceConfig", code);
+  }
+  CloseServiceHandle(svc);
+  CloseServiceHandle(scm);
+
+  // 写后回读校验（fail-closed）：SCM 报成功但可执行段未按规整语义落地即失败。
+  const auto verify = QueryServiceImagePath(service_name);
+  if (verify.presence != ServicePresence::Installed ||
+      ServiceImagePathDrifted(verify.binary_path, new_engine_path)) {
+    return fail(L"VerifyImagePath", ERROR_INVALID_DATA);
+  }
+  return true;
 }
 
 }  // namespace exv::setup

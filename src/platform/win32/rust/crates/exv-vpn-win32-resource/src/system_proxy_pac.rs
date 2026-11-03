@@ -84,12 +84,12 @@ pub fn wrap_pac_script(original: &str, exempt: &[String]) -> Result<String, Nati
         0 => {
             return Err(err_unwrappable(
                 "no `function FindProxyForURL` declaration found",
-            ))
+            ));
         }
         n => {
             return Err(err_unwrappable(&format!(
                 "{n} `function FindProxyForURL` declarations found, exactly 1 required"
-            )))
+            )));
         }
     }
 
@@ -162,10 +162,7 @@ fn emit_exempt_conditions(exempt: &[String]) -> String {
             );
             out.push_str(&cond);
         } else {
-            let cond = format!(
-                "  if (h === {}) {{ return true; }}\n",
-                js_quote(&lowered)
-            );
+            let cond = format!("  if (h === {}) {{ return true; }}\n", js_quote(&lowered));
             out.push_str(&cond);
         }
     }
@@ -244,6 +241,7 @@ pub struct PacEndpoint {
 /// 端点后台线程的共享状态。
 struct PacWorker {
     shutdown: AtomicBool,
+    completion: Mutex<Option<Result<(), &'static str>>>,
     handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -266,6 +264,7 @@ impl PacEndpoint {
         let port = listener.local_addr()?.port();
         let worker = Arc::new(PacWorker {
             shutdown: AtomicBool::new(false),
+            completion: Mutex::new(None),
             handle: Mutex::new(None),
         });
         let worker_for_thread = Arc::clone(&worker);
@@ -280,6 +279,40 @@ impl PacEndpoint {
             .lock()
             .map_err(|poisoned| io::Error::other(poisoned.to_string()))? = Some(handle);
         Ok(Self { port, worker })
+    }
+
+    /// 显式停止并取得线程完成回执；错误只报告稳定类别，不回显 panic 内容。
+    /// # Errors
+    /// 句柄锁损坏或线程异常结束时返回错误。取得句柄后先释放锁，再等待线程。
+    pub fn close(&self) -> Result<(), io::Error> {
+        self.worker.shutdown.store(true, Ordering::SeqCst);
+        // 完成锁只串行显式关闭者；worker 退出不访问它。句柄锁不跨 join。
+        let mut completion = self
+            .worker
+            .completion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(result) = *completion {
+            return result.map_err(io::Error::other);
+        }
+        let (handle, poisoned) = match self.worker.handle.lock() {
+            Ok(mut slot) => (slot.take(), false),
+            Err(poisoned) => (poisoned.into_inner().take(), true),
+        };
+        let result = if let Some(handle) = handle {
+            handle.join().map_err(|_| "pac_worker_join")
+        } else {
+            Ok(())
+        };
+        let result = result.and_then(|()| {
+            if poisoned {
+                Err("pac_handle_lock")
+            } else {
+                Ok(())
+            }
+        });
+        *completion = Some(result);
+        result.map_err(io::Error::other)
     }
 
     /// 已绑定的动态端口（用于拼 `http://127.0.0.1:<port>/proxy.pac`）。
@@ -297,16 +330,7 @@ impl PacEndpoint {
 
 impl Drop for PacEndpoint {
     fn drop(&mut self) {
-        // 1) 置位关闭标志：accept 循环在下个轮询窗口（<= ACCEPT_POLL_INTERVAL）
-        //    退出。Windows 上跨线程解除阻塞 accept 不可靠，轮询窗口是兜底；
-        //    join 至多等一个窗口。
-        self.worker.shutdown.store(true, Ordering::SeqCst);
-        // 2) join 回收线程。
-        if let Ok(mut slot) = self.worker.handle.lock()
-            && let Some(handle) = slot.take()
-        {
-            let _ = handle.join();
-        }
+        let _ = self.close();
     }
 }
 
@@ -382,17 +406,28 @@ fn serve_one(mut stream: &TcpStream, script: &str) {
 pub fn fetch_pac_script(url: &str) -> Result<String, NativeError> {
     let addr = parse_loopback_http_url(url)?;
 
-    let stream = TcpStream::connect_timeout(&addr, FETCH_TIMEOUT).map_err(|e| err_fetch(
-        NativeErrorKind::Transport,
-        e.raw_os_error().map_or(0, |c| u32::try_from(c).unwrap_or(0)),
-        format!("pac_fetch_connect_failed: {url}: {e}"),
-    ))?;
-    stream
-        .set_read_timeout(Some(FETCH_TIMEOUT))
-        .map_err(|e| err_fetch(NativeErrorKind::Transport, 0, format!("pac_fetch_connect_failed: {url}: set_read_timeout: {e}")))?;
-    stream
-        .set_write_timeout(Some(FETCH_TIMEOUT))
-        .map_err(|e| err_fetch(NativeErrorKind::Transport, 0, format!("pac_fetch_connect_failed: {url}: set_write_timeout: {e}")))?;
+    let stream = TcpStream::connect_timeout(&addr, FETCH_TIMEOUT).map_err(|e| {
+        err_fetch(
+            NativeErrorKind::Transport,
+            e.raw_os_error()
+                .map_or(0, |c| u32::try_from(c).unwrap_or(0)),
+            format!("pac_fetch_connect_failed: {url}: {e}"),
+        )
+    })?;
+    stream.set_read_timeout(Some(FETCH_TIMEOUT)).map_err(|e| {
+        err_fetch(
+            NativeErrorKind::Transport,
+            0,
+            format!("pac_fetch_connect_failed: {url}: set_read_timeout: {e}"),
+        )
+    })?;
+    stream.set_write_timeout(Some(FETCH_TIMEOUT)).map_err(|e| {
+        err_fetch(
+            NativeErrorKind::Transport,
+            0,
+            format!("pac_fetch_connect_failed: {url}: set_write_timeout: {e}"),
+        )
+    })?;
 
     fetch_via_stream(stream, url)
 }
@@ -400,11 +435,13 @@ pub fn fetch_pac_script(url: &str) -> Result<String, NativeError> {
 /// 在已建立的连接上执行「GET → 解析状态行与头 → 读 body」。独立成函数供
 /// 单测注入内存流场景（真实路径走 [`fetch_pac_script`]）。
 fn fetch_via_stream<S: Read + Write>(mut stream: S, url: &str) -> Result<String, NativeError> {
-    let request = format!("GET {PAC_SERVE_PATH} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET {PAC_SERVE_PATH} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).map_err(|e| {
         err_fetch(
             NativeErrorKind::Transport,
-            e.raw_os_error().map_or(0, |c| u32::try_from(c).unwrap_or(0)),
+            e.raw_os_error()
+                .map_or(0, |c| u32::try_from(c).unwrap_or(0)),
             format!("pac_fetch_request_write_failed: {url}: {e}"),
         )
     })?;
@@ -429,21 +466,24 @@ fn fetch_via_stream<S: Read + Write>(mut stream: S, url: &str) -> Result<String,
             Err(e)
                 if matches!(
                     e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
                 ) =>
             {
                 return Err(err_fetch(
                     NativeErrorKind::Transport,
                     0,
                     format!("pac_fetch_timeout: {url}"),
-                ))
+                ));
             }
             Err(e) => {
                 return Err(err_fetch(
                     NativeErrorKind::Transport,
-                    e.raw_os_error().map_or(0, |c| u32::try_from(c).unwrap_or(0)),
+                    e.raw_os_error()
+                        .map_or(0, |c| u32::try_from(c).unwrap_or(0)),
                     format!("pac_fetch_read_failed: {url}: {e}"),
-                ))
+                ));
             }
         }
         if raw.len() > MAX_SCRIPT_BYTES {
@@ -488,14 +528,14 @@ fn parse_http_response(raw: &[u8], url: &str) -> Result<String, NativeError> {
                 NativeErrorKind::Protocol,
                 other.min(u32::from(u16::MAX)),
                 format!("pac_fetch_http_status_{other}: {url}"),
-            ))
+            ));
         }
         _ => {
             return Err(err_fetch(
                 NativeErrorKind::Protocol,
                 0,
                 format!("pac_fetch_malformed_response: {url}: {status_line:?}"),
-            ))
+            ));
         }
     }
 
@@ -519,13 +559,15 @@ fn parse_loopback_http_url(url: &str) -> Result<SocketAddr, NativeError> {
     const HTTPS_HINT: &str =
         "https PAC URL unsupported in v1 (most proxy PACs are local http://127.0.0.1)";
     let rest = url.strip_prefix("https://").map_or_else(
-        || url.strip_prefix("http://").ok_or_else(|| {
-            err_fetch(
-                NativeErrorKind::Unsupported,
-                0,
-                format!("pac_fetch_unsupported_url: {url}"),
-            )
-        }),
+        || {
+            url.strip_prefix("http://").ok_or_else(|| {
+                err_fetch(
+                    NativeErrorKind::Unsupported,
+                    0,
+                    format!("pac_fetch_unsupported_url: {url}"),
+                )
+            })
+        },
         |_https| {
             Err(err_fetch(
                 NativeErrorKind::Unsupported,
@@ -562,6 +604,4 @@ fn split_host_port(authority: &str) -> Result<(String, u16), NativeError> {
         None => Ok((authority.to_ascii_lowercase(), 80)),
     }
 }
-
-
 

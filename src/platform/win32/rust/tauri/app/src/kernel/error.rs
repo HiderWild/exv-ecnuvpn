@@ -29,20 +29,154 @@ pub enum AppError {
         message: String,
     },
     /// 仅由固定认证提示构造；不携带浏览器、系统或上游响应原文。
-    BrowserLoginFailed(&'static str),
+    /// `code` 是页面分类等稳定机器码（前端据以分流「重试/手动介入/取消」）；普通提示为 `None`。
+    /// `server_detail` 是**净化后的服务端消息摘录**（2026-10-07 终端页研究：失败页
+    /// `#errorData` 文本 / 限流页 `err_info` 提示，经 `码 \x1f 摘录` 结构化后缀携带并
+    /// 在构造时再次净化）——它到达前端后以独立行展示，让网关返回的真实原因成为
+    /// 用户可见文案；摘录不含票据/凭据（来源与净化见 `exv_core::atrust_browser`）。
+    BrowserLoginFailed {
+        code: Option<&'static str>,
+        message: &'static str,
+        server_detail: Option<String>,
+    },
+    /// 本轮宿主/原生步骤失败；保留净化的实际阶段、端口与系统错误，省略认证URL。
+    NativeBrowserLoginFailed {
+        code: Option<&'static str>,
+        message: String,
+        server_detail: Option<String>,
+    },
+    /// engine 连接门已给出稳定 reason id；不传递自由文本诊断。
+    PreflightBlocked(String),
     /// 内部错误。
     Internal(String),
 }
 
+
+fn native_auth_message(message: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = message;
+    loop {
+        let next = ["https://", "http://", "atrust://"].iter()
+            .filter_map(|scheme| remaining.find(*scheme).map(|index| (index, scheme.len())))
+            .min_by_key(|(index, _)| *index);
+        let Some((start, prefix_len)) = next else { output.push_str(remaining); break; };
+        output.push_str(&remaining[..start]);
+        output.push_str("[认证地址已省略]");
+        let tail = &remaining[start..];
+        let end = tail.char_indices().find(|(index, value)| *index >= prefix_len
+            && (value.is_whitespace() || matches!(*value, '）' | '，' | '；' | '"' | '\'')))
+            .map_or(tail.len(), |(index, _)| index);
+        remaining = &tail[end..];
+    }
+    exv_core::browser_auth::page_facts::sanitize_server_detail(&output)
+}
+
 impl AppError {
+    /// 页面分类保持既有提示；宿主与原生失败保留实际操作事实和错误码。
+    pub fn browser_auth_failed(error: exv_core::atrust_browser::BrowserAuthError) -> Self {
+        if let exv_core::atrust_browser::BrowserAuthError::Auth { error: auth, .. } = &error
+            && auth.code == exv_core::browser_auth::AuthErrorCode::CredentialRequired
+        {
+            return Self::CredentialRequired {
+                code: Some("auto_login_no_credentials".into()),
+                message: "credential_required".into(),
+            };
+        }
+        if let exv_core::atrust_browser::BrowserAuthError::Host(message) = &error {
+            return Self::NativeBrowserLoginFailed {
+                code: None, message: native_auth_message(message), server_detail: None,
+            };
+        }
+        if let exv_core::atrust_browser::BrowserAuthError::Auth { error: auth, compatibility_message } = &error {
+            use exv_core::browser_auth::{AuthErrorCode as Code, AuthOperation};
+            let page = matches!(auth.code, Code::ClientInstallRequired | Code::FailedPage | Code::Stalled | Code::GatewayThrottled);
+            if !page || auth.native_code.is_some() {
+                let stage = match auth.operation {
+                    AuthOperation::Open => "启动认证渠道", AuthOperation::Navigate => "打开认证页",
+                    AuthOperation::Observe => "读取认证进度", AuthOperation::Probe => "检查网关登录状态",
+                    AuthOperation::Reuse => "复用已保存会话", AuthOperation::Inject => "提交学校登录信息",
+                    AuthOperation::Extract => "取得网关认证会话", AuthOperation::Present => "显示认证窗口",
+                    AuthOperation::Wait => "等待认证结果", AuthOperation::Close => "关闭认证通道",
+                };
+                let mut message = if compatibility_message.starts_with(auth.code.machine_code()) {
+                    format!("{stage}失败（错误码：{}）。请重试本次连接。", auth.code.machine_code())
+                } else { native_auth_message(compatibility_message) };
+                if let Some(native) = auth.native_code { message.push_str(&format!("（系统错误码：{native}）")); }
+                return Self::NativeBrowserLoginFailed {
+                    code: Some(auth.code.machine_code()), message,
+                    server_detail: auth.server_detail.as_deref().map(native_auth_message).filter(|s| !s.is_empty()),
+                };
+            }
+        }
+        let detail =
+            if let exv_core::atrust_browser::BrowserAuthError::Auth { error: auth, .. } = &error {
+                auth.server_detail
+                    .as_deref()
+                    .map(exv_core::browser_auth::page_facts::sanitize_server_detail)
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
+        let mut result = Self::browser_login_failed(error.legacy_message());
+        if let Self::BrowserLoginFailed { server_detail, .. } = &mut result
+            && server_detail.is_none()
+        {
+            *server_detail = detail;
+        }
+        result
+    }
+
     /// 浏览器认证路径只向界面交付已知固定提示；未知原文不跨过此边界。
+    ///
+    /// 页面分类结果以稳定机器码上报：`detail` 为机器码，或「机器码 + \x1f 分隔符 +
+    /// 服务端消息摘录」的结构化形态（摘录只对已知机器码放行，且构造时再次净化；
+    /// 未知码的任何后缀一律丢弃，不让自由文本冒充机器码）。
     pub fn browser_login_failed(detail: impl AsRef<str>) -> Self {
+        let detail = detail.as_ref();
+        const CODED_MESSAGES: &[(&str, &str)] = &[
+            (
+                exv_core::atrust_browser::BROWSER_AUTH_CLIENT_INSTALL_REQUIRED,
+                "网关要求使用官方客户端完成认证；请重试或改用手动登录",
+            ),
+            (
+                exv_core::atrust_browser::BROWSER_AUTH_FAILED_PAGE,
+                "认证未通过；请重试或改用手动登录",
+            ),
+            (
+                exv_core::atrust_browser::BROWSER_AUTH_STALLED,
+                "认证长时间没有进展；请重试或改用手动登录",
+            ),
+            (
+                exv_core::atrust_browser::BROWSER_AUTH_GATEWAY_THROTTLED,
+                "网关提示登录受限（如短时间重复登录或并发登录冲突）；请稍候片刻再重试，或改用手动登录",
+            ),
+        ];
+        // 结构化切分：摘录经共享净化（剥控制字符+截断），空摘录归一为 `None`。
+        let (code_part, server_detail) =
+            match detail.split_once(exv_core::atrust_browser::SERVER_DETAIL_SEPARATOR) {
+                Some((code, detail_text)) => (
+                    code,
+                    Some(exv_core::browser_auth::page_facts::sanitize_server_detail(
+                        detail_text,
+                    ))
+                    .filter(|text| !text.is_empty()),
+                ),
+                None => (detail, None),
+            };
+        if let Some((code, message)) = CODED_MESSAGES
+            .iter()
+            .copied()
+            .find(|(candidate, _)| *candidate == code_part)
+        {
+            return Self::BrowserLoginFailed {
+                code: Some(code),
+                message,
+                server_detail,
+            };
+        }
         const MESSAGES: &[&str] = &[
             "浏览器登录状态不可用",
             "正在等待浏览器登录，请完成或取消当前登录",
-            "无法读取系统默认浏览器设置",
-            "系统默认浏览器目前不受支持；请将 HTTPS 默认浏览器设为 Microsoft Edge 或 Chrome 后重试",
-            "系统默认浏览器已识别，但未找到对应的 Edge 或 Chrome 程序",
             "无法定位 EXV 浏览器配置目录",
             "无法创建 EXV 浏览器配置目录",
             "无法准备浏览器调试入口",
@@ -97,9 +231,14 @@ impl AppError {
         let message = MESSAGES
             .iter()
             .copied()
-            .find(|message| *message == detail.as_ref())
+            .find(|message| *message == code_part)
             .unwrap_or("浏览器登录未完成，请重试；若持续出现请反馈应用日志。");
-        Self::BrowserLoginFailed(message)
+        // 未知机器码（或不带码的原文）不携带任何服务端摘录——白名单纪律。
+        Self::BrowserLoginFailed {
+            code: None,
+            message,
+            server_detail: None,
+        }
     }
 }
 
@@ -108,31 +247,63 @@ impl serde::Serialize for AppError {
     where
         S: serde::Serializer,
     {
-        let (kind, code, message) = match self {
-            Self::NotWired(message) => ("not_wired", None, message.as_str()),
-            Self::CoreUnreachable(message) => ("core_unreachable", None, message.as_str()),
-            Self::CoreWakeFailed(message) => ("core_wake_failed", None, message.as_str()),
-            Self::ServiceNotRunning(message) => ("service_not_running", None, message.as_str()),
+        let (kind, code, message, server_detail) = match self {
+            Self::NotWired(message) => ("not_wired", None, message.as_str(), None),
+            Self::CoreUnreachable(message) => ("core_unreachable", None, message.as_str(), None),
+            Self::CoreWakeFailed(message) => ("core_wake_failed", None, message.as_str(), None),
+            Self::ServiceNotRunning(message) => {
+                ("service_not_running", None, message.as_str(), None)
+            }
             Self::ServiceConnectFailed(message) => {
-                ("service_connect_failed", None, message.as_str())
+                ("service_connect_failed", None, message.as_str(), None)
             }
-            Self::CompatibilityModeUnavailable(message) => {
-                ("compatibility_mode_unavailable", None, message.as_str())
+            Self::CompatibilityModeUnavailable(message) => (
+                "compatibility_mode_unavailable",
+                None,
+                message.as_str(),
+                None,
+            ),
+            Self::ProtocolUnavailable(message) => {
+                ("protocol_unavailable", None, message.as_str(), None)
             }
-            Self::ProtocolUnavailable(message) => ("protocol_unavailable", None, message.as_str()),
-            Self::CredentialRequired { code, message } => {
-                ("credential_required", code.as_deref(), message.as_str())
-            }
-            Self::BrowserLoginFailed(message) => ("browser_login_failed", None, *message),
-            Self::Internal(message) => ("internal", None, message.as_str()),
+            Self::CredentialRequired { code, message } => (
+                "credential_required",
+                code.as_deref(),
+                message.as_str(),
+                None,
+            ),
+            Self::BrowserLoginFailed {
+                code,
+                message,
+                server_detail,
+            } => (
+                "browser_login_failed",
+                *code,
+                *message,
+                server_detail.as_deref(),
+            ),
+            Self::NativeBrowserLoginFailed { code, message, server_detail } => (
+                "browser_login_failed", *code, message.as_str(), server_detail.as_deref(),
+            ),
+            Self::PreflightBlocked(reasons) => (
+                "preflight_blocked",
+                Some(reasons.as_str()),
+                "连接前检查未通过",
+                None,
+            ),
+            Self::Internal(message) => ("internal", None, message.as_str(), None),
         };
-        let mut output =
-            serializer.serialize_struct("AppError", if code.is_some() { 3 } else { 2 })?;
+        let field_count =
+            2 + usize::from(code.is_some()) + usize::from(server_detail.is_some());
+        let mut output = serializer.serialize_struct("AppError", field_count)?;
         output.serialize_field("kind", kind)?;
         if let Some(code) = code {
             output.serialize_field("code", code)?;
         }
         output.serialize_field("message", message)?;
+        if let Some(server_detail) = server_detail {
+            output.serialize_field("server_detail", server_detail)?;
+        }
         output.end()
     }
 }
@@ -152,10 +323,27 @@ impl fmt::Display for AppError {
             Self::CredentialRequired { code, message } => {
                 write!(f, "credential required ({code:?}): {message}")
             }
-            Self::BrowserLoginFailed(m) => write!(f, "browser login failed: {m}"),
+            Self::BrowserLoginFailed {
+                message,
+                server_detail,
+                ..
+            } => match server_detail {
+                Some(server_detail) => {
+                    // 摘录已净化（无控制字符/已截断），进入日志不构成注入面。
+                    write!(f, "browser login failed: {message}（网关返回：{server_detail}）")
+                }
+                None => write!(f, "browser login failed: {message}"),
+            },
+            Self::NativeBrowserLoginFailed { message, server_detail, .. } => {
+                write!(f, "browser login failed: {message}")?;
+                if let Some(detail) = server_detail { write!(f, "（网关返回：{detail}）")?; }
+                Ok(())
+            }
+            Self::PreflightBlocked(reasons) => write!(f, "preflight blocked: {reasons}"),
             Self::Internal(m) => write!(f, "internal: {m}"),
         }
     }
 }
 
 impl std::error::Error for AppError {}
+

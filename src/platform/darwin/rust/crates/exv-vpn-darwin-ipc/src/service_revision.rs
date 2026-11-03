@@ -13,15 +13,16 @@
 //! 这是 macOS 可执行文件原生自带的元数据机制（与 Windows PE 的
 //! Version Resource、代码段常量同一思路；Rust 用 `#[link_section]` 落进二进制）。
 //!
-//! 因为 launchd 总是从**固定安装路径**启动 engine（`KeepAlive` re-exec），「已装
-//! engine 文件的嵌入式修订号」同时就是「下一次/正在运行的 engine 修订号」——
-//! 文件与运行两个问题坍缩成一个，不再需要运行期写叶、也不需要 socket 门控。
+//! 此元数据只表示磁盘上的二进制版本，不证明旧进程已经退出。运行版本以
+//! Engine 的构建身份日志核验；服务替换前释放旧控制会话。
 //!
 //! 开发 debug 与发布裁剪（release+strip）都保留该 section：这是二进制最简
 //! 元数据，strip="symbols" 不删自定义 `#[used]` 数据段（构建验证已用 release
 //! 产物实测 `otool` 可读）。
 //!
 //! ## bump 纪律
+//!
+//! 只随服务程序逻辑或所需契约变化递增；普通 App 版本更新不自动递增。
 //!
 //! 触及 engine 运行逻辑的提交应 +1 本常量（`scripts/bump-darwin-service-revision.sh`）。
 //! 忘 bump 会让已装/随附比对显示「旧版」，是人工可见的信号而非静默错误。
@@ -38,7 +39,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Darwin 服务内部修订号（engine 与 Core 共同编译，进 engine 二进制的元数据段）。
-pub const DARWIN_SERVICE_REVISION: u32 = 1;
+pub const DARWIN_SERVICE_REVISION: u32 = 22;
 
 /// 修订号元数据所在的 Mach-O segment（`link_section` 写作 `"{segment},{section}"`）。
 pub const REVISION_SEGMENT: &str = "__TEXT";

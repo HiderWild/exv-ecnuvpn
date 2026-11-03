@@ -4,6 +4,7 @@
 //! `MAC-IPC-01` 才能在本 crate 中接入 UI→Core 和 Core→Engine 的已认证 UDS。
 
 pub mod auth;
+pub mod auth_deadline;
 pub mod bootstrap;
 pub mod connect_envelope;
 pub mod listener;
@@ -20,3 +21,6 @@ pub use tonic_bridge::{
     DarwinConnectInfo,
 };
 pub use warm_connector::{authenticate_client_to_tonic_channel, connect_service_authenticated_channel};
+
+pub mod atrust_auth_error;
+pub mod browser_session;

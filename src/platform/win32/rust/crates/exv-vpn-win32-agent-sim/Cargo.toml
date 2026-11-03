@@ -1,0 +1,31 @@
+
+[package]
+name = "exv-vpn-win32-agent-sim"
+version = "0.1.0"
+description = "L3 aTrust 本机 agent 仿真：127.0.0.1 HTTPS/WSS 端点契约 + 自建 CA（仅用户 Root 存储）"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+exv-vpn-atrust = { workspace = true }
+futures-util = { workspace = true }
+rcgen = { workspace = true }
+ring = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+windows = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] }
+zeroize = { workspace = true }
+
+[features]
+# 见上方 dev-dependencies 注释；启用本 crate 的该 feature 等价启用依赖的注入点。
+internal-test-trust = ["exv-vpn-atrust/internal-test-trust"]
+
+[lints]
+workspace = true
+

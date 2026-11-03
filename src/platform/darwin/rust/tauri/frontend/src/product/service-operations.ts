@@ -1,10 +1,11 @@
 import { readonly, ref, type InjectionKey, type Ref } from "vue";
 
-import type { ServiceControlAction, ServiceControlReply } from "../lib/ipc";
+import type { ServiceControlAction, ServiceControlReply, ServiceVersion } from "../lib/ipc";
 
-export type ServiceOperationAction = ServiceControlAction | "repair";
+export type ServiceOperationAction = ServiceControlAction | "repair" | "update";
 
 export interface ServiceOperationCoordinator {
+  readonly version: Readonly<Ref<ServiceVersion | null>>;
   readonly busy: Readonly<Ref<boolean>>;
   readonly label: Readonly<Ref<string>>;
   run(action: ServiceOperationAction): Promise<ServiceControlReply>;
@@ -18,12 +19,14 @@ const OPERATION_LABEL: Record<Exclude<ServiceOperationAction, "query">, string> 
   start: "正在启动服务…",
   rotate_key: "正在轮换服务密钥…",
   repair: "正在修复服务…",
+  update: "正在更新服务…",
 };
 
 export function createServiceOperationCoordinator(
   control: (action: ServiceControlAction) => Promise<ServiceControlReply>,
 ): ServiceOperationCoordinator {
   const busy = ref(false);
+  const version = ref<ServiceVersion | null>(null);
   const label = ref("");
   const pending: Array<{
     action: ServiceControlAction;
@@ -48,6 +51,7 @@ export function createServiceOperationCoordinator(
     }
     void operation.then(
       (reply) => {
+        if (reply.service_version !== undefined) version.value = reply.service_version;
         next.resolve(reply);
         running = false;
         drain();
@@ -68,6 +72,7 @@ export function createServiceOperationCoordinator(
   );
 
   return {
+    version: readonly(version),
     busy: readonly(busy),
     label: readonly(label),
     async run(action: ServiceOperationAction): Promise<ServiceControlReply> {
@@ -78,7 +83,7 @@ export function createServiceOperationCoordinator(
       busy.value = true;
       label.value = OPERATION_LABEL[action];
       try {
-        return await enqueue(action === "repair" ? "install" : action);
+        return await enqueue(action === "repair" || action === "update" ? "install" : action);
       } finally {
         busy.value = false;
         label.value = "";

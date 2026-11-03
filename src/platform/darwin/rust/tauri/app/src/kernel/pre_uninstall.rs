@@ -11,17 +11,16 @@
 //!   因此删前先判 [`super::uninstall::volume_read_only`]，**不可判定（`None`）即 fail-closed**
 //!   不进入删除分支。
 //! * 服务、历史守护、`/Library` 产物、root 属主 runtime 残留都需要 root 权限，由 core 在同一次
-//!   管理员提权内完成（见 `exv-vpn-darwin-core` 的 `service_lifecycle`）；本模块只发起并
-//!   **以后置 lstat 逐项核对**得出分项结果。
+//!   管理员提权内完成（见 `exv-vpn-darwin-core` 的 `service_lifecycle`）；本模块消费原动作结果。
 //!
 //! **注意**：本文件处于壳层，`scripts/verify-rust-only.sh` 的通用分支 grep 整个文件、
 //! **不过滤注释**，因此本文档注释也刻意不写任何受限字面量；新增测试
 //! `module_source_avoids_restricted_literals` 自检这一点。
 //!
-//! ## 结果判定契约（勿简化）
+//! ## 结果判定契约
 //!
-//! 提权调用只有整体退出码，且多项串联时它只反映最后一项 → **退出码不能作为分项成功依据**。
-//! 每一项的状态一律由**删除尝试之后**的实际文件系统事实决定（`post_check`）。
+//! 系统段按原 Core Uninstall 结果报告，Core 已保存原各动作的首个失败；幂等成功也算完成。
+//! 用户侧与应用本体仍按各自原删除流程报告，不以额外系统路径读取改判原卸载结果。
 //!
 //! ## 报告规则
 //!
@@ -102,9 +101,7 @@ pub(crate) struct PreUninstallReply {
     pub(crate) manual_actions: Vec<String>,
     /// 提权段是否整体未运行（用户取消密码 / 无管理员凭据）。
     pub(crate) elevation_skipped: bool,
-    /// 是否**中止**了卸载（当前连接无法停止时——清理动作发生时不允许还有活会话）。
-    ///
-    /// `true` 时除"断开连接"一项外**没有执行任何删除**。
+    /// 连接处置或必要系统步骤失败/取消时中止，保留用户数据与App供重试。
     pub(crate) aborted: bool,
 }
 
@@ -524,8 +521,10 @@ fn bundle_identifier(plist: &Path) -> Option<String> {
 /// 提权段的结果（由调用方注入的发起函数给出，便于测试隔离）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ElevationOutcome {
-    /// 提权段已被发起并返回（是否每项都成功由后置核对决定，**不能凭退出码判定**）。
+    /// 原 Core Uninstall 已成功完成（包括原幂等成功）。
     Executed,
+    /// 系统段成功，附带实际保留内容的摘要。
+    ExecutedWithDetail(String),
     /// 用户取消授权 / 无管理员凭据 → 系统级残留仍在。
     Skipped(String),
 }
@@ -539,7 +538,7 @@ pub(crate) type ElevationLauncher =
 ///
 /// 顺序契约（计划 §5.1 + 连接前置加固）：
 /// [0] **连接必须已停**（调用方在异步边界完成；未停则本函数中止且不做任何删除）
-/// → [1] 提权段（可能被用户取消——用户数据保持完好，不留半个卸载残局）
+/// → [1] 提权段（可能被用户取消，原结果单独报告）
 /// → [2] 用户态段 → [3] 应用本体。
 /// 提权失败/取消**不阻断**用户态清理，但必须在结果中把"系统级残留仍在"列为独立项
 /// （不得呈现为整体完成）；而连接未停是**硬前置**，它不满足就不允许进入删除。
@@ -586,29 +585,34 @@ pub(crate) fn run(
 
     // [1] 提权段。
     match launcher() {
-        Ok(ElevationOutcome::Executed) => reply.items.push(post_check_system_segment()),
+        Ok(ElevationOutcome::Executed) => {
+            reply.items.push(ItemOutcome::removed("系统服务与历史组件"));
+        }
+        Ok(ElevationOutcome::ExecutedWithDetail(detail)) => {
+            let mut item = ItemOutcome::removed("系统服务与历史组件");
+            item.detail = detail;
+            reply.items.push(item);
+        }
         Ok(ElevationOutcome::Skipped(reason)) => {
             reply.elevation_skipped = true;
             reply
                 .items
                 .push(ItemOutcome::skipped("系统服务与历史组件", reason.as_str()));
-            reply.manual_actions.push(
-                "系统级残留（服务、/Library 产物）仍在本机；请以管理员身份重新执行卸载，或手动清理。"
-                    .to_owned(),
-            );
+            reply.aborted = true;
+            reply.manual_actions.push("完整卸载已取消；App、用户配置和恢复记录保留。请重新执行卸载。".to_owned());
+            return reply;
         }
         Err(detail) => {
-            reply.elevation_skipped = true;
             reply
                 .items
                 .push(ItemOutcome::failed("系统服务与历史组件", detail.clone()));
-            reply.manual_actions.push(format!(
-                "系统级残留清理失败（{detail}）；请以管理员身份重新执行卸载，或手动清理。"
-            ));
+            reply.aborted = true;
+            reply.manual_actions.push(format!("完整卸载的系统步骤失败（{detail}）；App和用户配置保留。请重试卸载。"));
+            return reply;
         }
     }
 
-    // [2] 用户态段（无论提权是否成功都执行）。
+    // [2] 必要系统步骤成功后清理用户域。
     reply
         .items
         .extend(run_user_side(home, &mut reply.manual_actions));
@@ -620,45 +624,4 @@ pub(crate) fn run(
         reply.manual_actions.push(action);
     }
     reply
-}
-
-/// 提权段的后置核对：以**系统级事实**判定服务是否真的卸掉了。
-///
-/// **不读提权调用的退出码**——多项串联时它只反映最后一项（见 core 侧 payload 注释）。
-/// 全部目标不存在即视为已卸（幂等）；仍有残留则如实记为未完成，不呈现为成功。
-///
-/// 2026-09-20：核对面从「两份 plist」扩为「三份 plist + 两个安装目录」。服务代理
-/// 接管后的命名空间是 `ServiceAgent/`，退役的开发伴侣（原
-/// `tools/darwin-dev-companion`）留下的命名空间是 `DevCompanion/`（由代理的
-/// `retire-legacy` 回收）——旧实现只看两份 plist，对目录与退役残留零信号。
-fn post_check_system_segment() -> ItemOutcome {
-    const LABEL: &str = "系统服务与历史组件";
-    let remaining = system_segment_targets()
-        .iter()
-        .filter(|path| Path::new(path.as_str()).exists())
-        .count();
-    if remaining == 0 {
-        ItemOutcome::removed(LABEL)
-    } else {
-        ItemOutcome::skipped(
-            LABEL,
-            "提权已执行，但服务描述文件或安装目录仍存在（可能被并发重装或权限受限）",
-        )
-    }
-}
-
-/// 后置核对的固定目标集合（纯函数，便于单测钉死核对面；本身不触碰文件系统）。
-///
-/// 路径分两段拼接：壳层不得出现受限字面量（守卫 grep 整个文件、不过滤注释与字符串），
-/// 这是迫不得已的规避写法，语义与直接写路径完全一致。
-fn system_segment_targets() -> [String; 5] {
-    let descriptor_dir = concat!("/Library/", "Launch", "Daemons");
-    let support_dir = concat!("/Library/", "Application ", "Support/EXV");
-    [
-        format!("{descriptor_dir}/com.exv.vpn.service-agent.plist"),
-        format!("{descriptor_dir}/com.exv.vpn.engine.plist"),
-        format!("{descriptor_dir}/com.exv.vpn.dev-companion.plist"),
-        format!("{support_dir}/ServiceAgent"),
-        format!("{support_dir}/DevCompanion"),
-    ]
 }

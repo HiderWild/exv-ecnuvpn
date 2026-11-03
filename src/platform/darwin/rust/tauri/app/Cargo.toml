@@ -1,6 +1,6 @@
 [package]
 name = "exv-vpn-darwin-tauri"
-version = "4.1.1"
+version = "4.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,11 +11,15 @@ build = "build.rs"
 tauri-build = "=2.5.6"
 
 [dependencies]
+exv-vpn-atrust = { path = "../../../../../common/rust/crates/exv-vpn-atrust" }
+futures-util = "0.3.34"
+tokio-tungstenite = "0.28"
 exv-vpn-darwin-core = { path = "../../crates/exv-vpn-darwin-core" }
 zeroize = "1.9"
 exv-vpn-darwin-ipc = { path = "../../crates/exv-vpn-darwin-ipc" }
 exv-vpn-wire = { path = "../../../../../common/rust/crates/exv-vpn-wire" }
 getrandom = "0.4"
+prost = "0.14.4"
 # http/tokio-stream：kernel mock-server 集成测试所需的既有传递依赖（tonic 同源，
 # 不引入新版本解析；与 win32 kernel/tests.rs 同款测试基建）。
 http = "1.5"
@@ -34,8 +38,9 @@ tauri = { version = "=2.10.3", features = ["tray-icon"] }
 # 被「日志导出」（log_export.rs，logs_export 命令，2026-09-17 吸收）使用：
 # 同一 crate 的 feature 扩展先例，不新增版本。
 objc2 = "=0.6.4"
-objc2-app-kit = { version = "=0.3.2", features = ["NSEvent", "NSResponder", "NSView", "NSWindow", "NSWorkspace", "NSPanel", "NSSavePanel"] }
-objc2-foundation = { version = "=0.3.2", features = ["NSObject", "NSString", "NSURL", "NSGeometry", "NSError"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "WKWebView", "block2", "objc2-app-kit"] }
+objc2-app-kit = { version = "=0.3.2", features = ["NSEvent", "NSResponder", "NSView", "NSWindow", "NSWorkspace", "NSPanel", "NSSavePanel", "NSRunningApplication"] }
+objc2-foundation = { version = "=0.3.2", features = ["NSObject", "NSString", "NSURL", "NSGeometry", "NSError", "NSBundle"] }
 # MAC-SHELL-17 S3 系统通知（win32 toast.rs 的 macOS 重写，计划 §2「重写为插件通知」）。
 # **旧路径后端**：插件的 macOS 实现实际走已弃用的 `NSUserNotificationCenter`
 # （notify-rust → mac-notification-sys 0.6.15），投递是 fire-and-forget——macOS 26 上

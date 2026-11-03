@@ -18,6 +18,9 @@ const DEFAULT_QUICK_START_CORE_DRAFT: Record<CoreConfigKey, string> = {
   server: defaultServerFor(RECOMMENDED_PROTOCOL),
   cisco_server: defaultServerFor("cisco"),
   atrust_server: defaultServerFor("atrust"),
+  // 2026-10-22 双端对齐裁定：新装默认系统浏览器（browser），
+  // 与后端 ExvConfig::default 一致。atrust_auto_login 已死代码清理（S6a）：
+  // 残留键读取侧忽略，投影不再下发。
   atrust_auth_mode: "browser",
   username: "",
   password: "",
@@ -66,11 +69,29 @@ export type QuickStartDraft = Record<CoreConfigKey | QuickStartUiKey, string>;
 export interface QuickStartConfigPayload {
   items: ReadonlyArray<CoreConfigItem>;
   requires_quick_start: boolean;
+  /** R-D3-C：当次启动损坏修复的一次性报告；缺失/合法启动为 null/缺省。 */
+  config_recovery?: { corrupted: boolean; backup_file: string } | null;
 }
 
 /** 初次打开的唯一决定因素是 Core 明确返回的配置健康结论。 */
 export function quickStartShouldOpen(payload: QuickStartConfigPayload): boolean {
   return payload.requires_quick_start === true;
+}
+
+/**
+ * R-D3-C（裁定实施）：损坏修复的一次性通知文案。仅 quiet 分支消费（seen=true
+ * 的老用户不重弹快速入门，改收本通知）；show 路径走快速入门引导，**不得**双提示。
+ * 非损坏（无报告 / corrupted=false）返回 null——不通知。
+ * 一次性语义天然成立：信息源是当次损坏分支，用户下次启动 config 已合法不再触发。
+ */
+export function configRecoveryNotice(payload: QuickStartConfigPayload): string | null {
+  const recovery = payload.config_recovery;
+  if (!recovery || recovery.corrupted !== true) return null;
+  const backup = recovery.backup_file.trim();
+  const backupHint = backup
+    ? `原配置已备份为 ${backup}（配置目录内）`
+    : "原配置已备份（配置目录内）";
+  return `配置文件损坏，已恢复为默认设置。${backupHint}；请到设置重新填写账户，或从备份找回原配置。`;
 }
 
 // ---- 「已见」标记（KI-13：有且仅有首次运行弹出） ----
@@ -177,9 +198,11 @@ export function createQuickStartDraft(items: ReadonlyArray<CoreConfigItem>): Qui
     ? protocolFromConfig(items.find((item) => item.key === "protocol")?.value)
     : RECOMMENDED_PROTOCOL;
   draft.protocol = protocol;
-  if (!items.some((item) => item.key === "server")) draft.server = defaultServerFor(protocol);
+  if (!items.some((item) => item.key === "server" && item.value.trim())) draft.server = defaultServerFor(protocol);
   for (const item of items) {
-    if (!isCoreConfigKey(item.key)) continue;
+    if (!isCoreConfigKey(item.key) || item.key === "password") continue;
+    // 首次配置可保留空服务器；入门采用现有预设，后续用户编辑仍正常校验。
+    if (["server", "atrust_server", "cisco_server"].includes(item.key) && !item.value.trim()) continue;
     const fieldProtocol = item.key === "cisco_server" ? "cisco" : item.key === "atrust_server" ? "atrust" : protocol;
     const normalized = normalizeCoreConfigValue(item.key, item.value, { protocol: fieldProtocol });
     if (normalized.ok) draft[item.key] = normalized.value;
@@ -190,37 +213,43 @@ export function createQuickStartDraft(items: ReadonlyArray<CoreConfigItem>): Qui
   return draft;
 }
 
-/** 快速入门仅强制账号和服务器必填；密码留空表示不保存。 */
-export function validateQuickStartDraft(draft: QuickStartDraft): Partial<Record<"username" | "password" | "server", string>> {
+/** 自动登录可复用当前账户已有密码；浏览器通道仅校验服务器。 */
+export function validateQuickStartDraft(
+  draft: QuickStartDraft,
+  saved: { username: string; stored: boolean } = { username: "", stored: false },
+): Partial<Record<"username" | "password" | "server", string>> {
   const errors: Partial<Record<"username" | "password" | "server", string>> = {};
-  if (!draft.username.trim()) errors.username = "请输入登录账户。";
+  const usesCredentials = protocolFromConfig(draft.protocol) === "cisco" || draft.atrust_auth_mode === "headless";
+  if (usesCredentials && !draft.username.trim()) errors.username = "请输入登录账户。";
   if (!draft.server.trim()) errors.server = "请输入 VPN 服务器。";
+  if (protocolFromConfig(draft.protocol) === "atrust" && draft.atrust_auth_mode === "headless"
+    && !draft.password && !(saved.stored && draft.username.trim() === saved.username.trim())) {
+    errors.password = "请输入自动登录密码。";
+  }
   return errors;
 }
 
-/** 快速入门提交始终包含同一组已知 Core 配置键。 */
+/** 快速入门提交包含同一组已知 Core 配置键；密码留空时省略派生键。 */
 export function quickStartItems(draft: QuickStartDraft): CoreConfigItem[] {
   // 服务器地址的归一化跟随草稿协议；协议本身在下面单独收口。
   const protocol = protocolFromConfig(draft.protocol);
-  return (Object.keys(DEFAULT_QUICK_START_CORE_DRAFT) as CoreConfigKey[]).map((key) => {
-    // 快速入门按实际密码输入派生记住选择，不沿用 bootstrap 或历史草稿标记。
-    if (key === "remember_password") return { key, value: String(draft.password.length > 0) };
-    // 协议必须落在后端接受的枚举内：草稿只来自水合或下拉，仍在此收口，
-    // 否则一个未知取值会让后端整批拒绝（Core 日志里看不到具体是哪一项）。
-    if (key === "protocol") return { key, value: protocol };
-    const fieldProtocol = key === "cisco_server" ? "cisco" : key === "atrust_server" ? "atrust" : protocol;
-    const normalized = normalizeCoreConfigValue(key, draft[key], { protocol: fieldProtocol });
-    return { key, value: normalized.ok ? normalized.value : draft[key] };
-  });
-}
-
-/** 成功回读只确认非秘密身份字段；绝不把密码显示值引入草稿或错误状态。 */
-export function quickStartCredentialsMatch(
-  username: string,
-  rememberPassword: string,
-  items: ReadonlyArray<CoreConfigItem>,
-): boolean {
-  return !items.some((item) => item.key === "password" && item.value !== "") &&
-    items.some((item) => item.key === "username" && item.value === username) &&
-    items.some((item) => item.key === "remember_password" && item.value === rememberPassword);
+  return (Object.keys(DEFAULT_QUICK_START_CORE_DRAFT) as CoreConfigKey[])
+    // S5a（2026-10-26）：密码留空时省略 remember_password 键——core 对缺键保持
+    // 原值，已保存密文与 owner 不被"派生 false"误清除（"留空保留原密码"承诺在
+    // 快速入门同样成立）；非空密码仍派生 true 一并落盘。Rust 白名单只拒未知键，
+    // 少发安全。
+    .filter((key) => {
+      if (protocol === "atrust" && draft.atrust_auth_mode !== "headless"
+        && ["username", "password", "remember_password"].includes(key)) return false;
+      return key !== "remember_password" || draft.password.length > 0;
+    })
+    .map((key) => {
+      if (key === "remember_password") return { key, value: String(draft.password.length > 0) };
+      // 协议必须落在后端接受的枚举内：草稿只来自水合或下拉，仍在此收口，
+      // 否则一个未知取值会让后端整批拒绝（Core 日志里看不到具体是哪一项）。
+      if (key === "protocol") return { key, value: protocol };
+      const fieldProtocol = key === "cisco_server" ? "cisco" : key === "atrust_server" ? "atrust" : protocol;
+      const normalized = normalizeCoreConfigValue(key, draft[key], { protocol: fieldProtocol });
+      return { key, value: normalized.ok ? normalized.value : draft[key] };
+    });
 }

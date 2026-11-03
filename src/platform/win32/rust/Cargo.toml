@@ -9,6 +9,7 @@ rust-version = "1.96"
 license = "MIT"
 
 [workspace.dependencies]
+log = "0.4"
 # Common (cross-platform) crates, referenced by relative path.
 exv-vpn-domain = { path = "../../../common/rust/crates/exv-vpn-domain" }
 exv-vpn-resource = { path = "../../../common/rust/crates/exv-vpn-resource" }
@@ -22,6 +23,7 @@ exv-vpn-host = { path = "../../../common/rust/crates/exv-vpn-host" }
 exv-vpn-helper = { path = "../../../common/rust/crates/exv-vpn-helper" }
 
 # Win32 platform crates (workspace members referenced by each other).
+exv-vpn-win32-agent-sim = { path = "crates/exv-vpn-win32-agent-sim" }
 exv-vpn-win32-config = { path = "crates/exv-vpn-win32-config" }
 exv-vpn-win32-ipc = { path = "crates/exv-vpn-win32-ipc" }
 exv-vpn-win32-resource = { path = "crates/exv-vpn-win32-resource" }
@@ -47,13 +49,21 @@ windows = { version = "0.62.2", features = [
 aes-gcm = "0.10.3"
 base64 = "0.22.1"
 bytes = "1.12.1"
+futures-util = "0.3.34"
 getrandom = { version = "0.3.4", features = ["std"] }
 prost = "0.14.4"
 proptest = "1.11.0"
+# L3 本机 agent 仿真：自建 CA/叶子证书（rcgen，ring 后端）、TLS 服务端与 SHA-1 指纹。
+# 版本与根 workspace 的 rustls/ring 线一致（exv-vpn-atrust 已锁定同一版本）。
+rcgen = "0.13.2"
+ring = "0.17.14"
+rustls = { version = "0.23.43", default-features = false, features = ["std", "tls12", "ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "tls12", "ring"] }
+tokio-tungstenite = "0.28"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "transport"] }
 tracing = "0.1.44"

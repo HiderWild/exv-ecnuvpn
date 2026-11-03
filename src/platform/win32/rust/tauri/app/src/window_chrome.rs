@@ -8,20 +8,30 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{Emitter, LogicalSize, Runtime, State, WebviewWindow};
 
-const TITLEBAR_LOGICAL_PX: i32 = 34;
+const TITLEBAR_LOGICAL_PX: i32 = 48;
 const ADVANCED_SYSTEM_LOGICAL_PX: i32 = 132;
 const MINIMAL_SYSTEM_LOGICAL_PX: i32 = 88;
-// 完整模式右侧主题三位开关与窗口模式两位开关合计约 280px；保留少量
+// 完整模式右侧主题三位开关与窗口模式两位开关合计约 340px；保留少量
 // 间距余量，避免 DPI 缩放或字体回退时把网页控件误判成拖动区。
-const WEB_CONTROL_LOGICAL_PX: i32 = 288;
+const WEB_CONTROL_LOGICAL_PX: i32 = 344;
+// 极简标题栏两组图标开关及间距；不把网页按钮交给原生拖动命中。
+const MINIMAL_WEB_CONTROL_LOGICAL_PX: i32 = 152;
 const ADVANCED_MIN_WIDTH: f64 = 860.0;
-const ADVANCED_MIN_HEIGHT: f64 = 600.0;
+const ADVANCED_MIN_HEIGHT: f64 = 620.0;
 const ADVANCED_DEFAULT_WIDTH: f64 = 1180.0;
 const ADVANCED_DEFAULT_HEIGHT: f64 = 760.0;
 const MINIMAL_WIDTH: f64 = 328.0;
 const MINIMAL_HEIGHT: f64 = 136.0;
 
 const SUBCLASS_ID: usize = 0x4558_565f_4348_524d;
+
+/// 恢复完整窗口时，旧记忆尺寸不能绕过当前原生最低尺寸。
+fn advanced_restore_size(size: LogicalSize<f64>) -> LogicalSize<f64> {
+    LogicalSize::new(
+        size.width.max(ADVANCED_MIN_WIDTH),
+        size.height.max(ADVANCED_MIN_HEIGHT),
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowMode {
@@ -119,7 +129,10 @@ impl FrameMetrics {
                 WindowMode::Advanced => ADVANCED_SYSTEM_LOGICAL_PX,
                 WindowMode::Minimal => MINIMAL_SYSTEM_LOGICAL_PX,
             }),
-            web_control_px: px(WEB_CONTROL_LOGICAL_PX),
+            web_control_px: px(match mode {
+                WindowMode::Advanced => WEB_CONTROL_LOGICAL_PX,
+                WindowMode::Minimal => MINIMAL_WEB_CONTROL_LOGICAL_PX,
+            }),
             resize_border_px: px(8),
             mode,
         }
@@ -137,7 +150,10 @@ impl FrameMetrics {
                 WindowMode::Advanced => ADVANCED_SYSTEM_LOGICAL_PX,
                 WindowMode::Minimal => MINIMAL_SYSTEM_LOGICAL_PX,
             }),
-            web_control_px: px(WEB_CONTROL_LOGICAL_PX),
+            web_control_px: px(match mode {
+                WindowMode::Advanced => WEB_CONTROL_LOGICAL_PX,
+                WindowMode::Minimal => MINIMAL_WEB_CONTROL_LOGICAL_PX,
+            }),
             resize_border_px: px(8),
             mode,
         }
@@ -176,12 +192,9 @@ pub fn hit_test(point: Point, frame: FrameMetrics) -> HitResult {
     if point.x >= system_start {
         let local_x = point.x - system_start;
         if frame.is_minimal() {
-            // 极简模式左半仍是网页外观/模式区，右半交给两个原生按钮。
-            if local_x < frame.system_zone_px / 2 {
-                return HitResult::Client;
-            }
-            let button_width = (frame.system_zone_px / 2).max(1) / 2;
-            return if local_x < frame.system_zone_px / 2 + button_width {
+            // 与网页两枚44px按钮保持同一边界。
+            let button_width = (frame.system_zone_px / 2).max(1);
+            return if local_x < button_width {
                 HitResult::Minimize
             } else {
                 HitResult::Close
@@ -197,7 +210,7 @@ pub fn hit_test(point: Point, frame: FrameMetrics) -> HitResult {
         };
     }
 
-    if !frame.is_minimal() && point.x >= system_start - frame.web_control_px {
+    if point.x >= system_start - frame.web_control_px {
         HitResult::Client
     } else {
         HitResult::Caption
@@ -330,7 +343,7 @@ impl WindowChromeState {
     ) -> Result<(), String> {
         let current = *self.inner.mode.lock().map_err(|_| "窗口状态锁已损坏")?;
         if current == requested {
-            return Ok(());
+            return sync_window_resize_style(window, requested);
         }
 
         match (current, requested) {
@@ -372,6 +385,7 @@ impl WindowChromeState {
                 window
                     .set_resizable(false)
                     .map_err(|error| format!("锁定极简窗口尺寸失败：{error}"))?;
+                sync_window_resize_style(window, requested)?;
                 let minimal = LogicalSize::new(MINIMAL_WIDTH, MINIMAL_HEIGHT);
                 window
                     .set_min_size(Some(minimal))
@@ -387,6 +401,7 @@ impl WindowChromeState {
                 window
                     .set_resizable(true)
                     .map_err(|error| format!("恢复完整窗口缩放失败：{error}"))?;
+                sync_window_resize_style(window, requested)?;
                 window
                     .set_max_size::<LogicalSize<f64>>(None)
                     .map_err(|error| format!("移除完整窗口最大尺寸失败：{error}"))?;
@@ -402,7 +417,7 @@ impl WindowChromeState {
                     .lock()
                     .map_err(|_| "窗口尺寸锁已损坏")?;
                 window
-                    .set_size(size)
+                    .set_size(advanced_restore_size(size))
                     .map_err(|error| format!("恢复完整窗口尺寸失败：{error}"))?;
                 window
                     .set_decorations(false)
@@ -425,6 +440,44 @@ impl WindowChromeState {
         *self.inner.mode.lock().map_err(|_| "窗口状态锁已损坏")? = requested;
         Ok(())
     }
+}
+
+// Tao 的可缩放标志可能与实际 HWND 样式失配。只修复已观察到的原生样式位，
+// 保持现有无装饰标题栏、Tauri 拖边子窗口及最小/最大尺寸管理。
+fn sync_window_resize_style<R: Runtime>(
+    window: &WebviewWindow<R>,
+    mode: WindowMode,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let maximized = window
+            .is_maximized()
+            .map_err(|error| format!("读取窗口最大化状态失败：{error}"))?;
+        let size = if maximized {
+            None
+        } else {
+            Some(
+                window
+                    .inner_size()
+                    .map_err(|error| format!("读取窗口尺寸失败：{error}"))?,
+            )
+        };
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| format!("读取原生窗口失败：{error}"))?;
+        if native::sync_resize_style(windows::Win32::Foundation::HWND(hwnd.0), mode)? {
+            // FRAMECHANGED 会重算客户区；保持切换前的物理客户区预算。
+            // 最大化窗口不调用 set_size，避免同模式修复把它还原。
+            if let Some(size) = size {
+                window
+                    .set_size(size)
+                    .map_err(|error| format!("恢复窗口客户区尺寸失败：{error}"))?;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, mode);
+    Ok(())
 }
 
 #[tauri::command]
@@ -474,6 +527,44 @@ pub async fn window_chrome_control<R: Runtime>(
     }
 }
 
+/// 沿实际前台窗口的 parent/owner 链判断主窗归属；同函数供无 GUI 单测调用。
+fn foreground_belongs_to_main(
+    main: isize,
+    mut foreground: isize,
+    mut parent_or_owner: impl FnMut(isize) -> Option<isize>,
+) -> bool {
+    while foreground != 0 {
+        if foreground == main { return true; }
+        let Some(parent) = parent_or_owner(foreground) else { return false; };
+        if parent == foreground { return false; }
+        foreground = parent;
+    }
+    false
+}
+
+/// 即时读取系统前台窗口，包含主窗子窗口及其 owned 窗口。
+#[tauri::command]
+pub async fn window_is_foreground<R: Runtime>(window: WebviewWindow<R>) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetParent, GetWindow, GW_OWNER};
+        if window.label() != "main" { return Err("前台查询需要主窗口".into()); }
+        let main = window.hwnd().map_err(|error| format!("读取主窗口句柄失败：{error}"))?;
+        let foreground = unsafe { GetForegroundWindow() };
+        Ok(foreground_belongs_to_main(main.0 as isize, foreground.0 as isize, |handle| {
+            let hwnd = HWND(handle as *mut core::ffi::c_void);
+            // 子窗口沿 parent，顶层窗口沿 owner；其他应用窗口不会归属 main。
+            unsafe { GetParent(hwnd).or_else(|_| GetWindow(hwnd, GW_OWNER)) }
+                .ok().map(|parent| parent.0 as isize)
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        window.is_focused().map_err(|error| format!("读取窗口前台状态失败：{error}"))
+    }
+}
+
 /// 窗口显隐（前端生命周期效果通道：连接后最小化到托盘 / 静默启动后托盘唤出）。
 ///
 /// 与 `window_chrome_control(Close)` 的区别：这是纯显隐原语，不携带关闭语义——
@@ -519,10 +610,48 @@ mod native {
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
-        HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW,
-        SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, WM_CLOSE, WM_NCDESTROY, WM_NCHITTEST,
-        WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
+        HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
+        WM_CLOSE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+        WM_NCMOUSEMOVE, WM_SYSCOMMAND,
     };
+
+    pub(super) fn sync_resize_style(hwnd: HWND, mode: WindowMode) -> Result<bool, String> {
+        use windows::Win32::Foundation::{ERROR_SUCCESS, GetLastError, SetLastError};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_THICKFRAME,
+        };
+        let current = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+        let resize_bit = WS_THICKFRAME.0 as isize;
+        let desired = match mode {
+            WindowMode::Advanced => current | resize_bit,
+            WindowMode::Minimal => current & !resize_bit,
+        };
+        if desired == current {
+            return Ok(false);
+        }
+        unsafe {
+            SetLastError(ERROR_SUCCESS);
+            let previous = SetWindowLongPtrW(hwnd, GWL_STYLE, desired);
+            if previous == 0 && GetLastError() != ERROR_SUCCESS {
+                return Err(format!(
+                    "同步原生窗口缩放样式失败：{}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .map_err(|error| format!("刷新原生窗口边框失败：{error}"))?;
+        }
+        Ok(true)
+    }
 
     fn point_from_lparam(lparam: LPARAM) -> Point {
         let packed = lparam.0 as u32;
@@ -687,7 +816,8 @@ mod native {
             )
         };
         if installed.as_bool() {
-            Ok(())
+            sync_window_resize_style(&window, WindowMode::Advanced)
+                .map_err(|error| tauri::Error::Io(std::io::Error::other(error)))
         } else {
             unsafe {
                 drop(Arc::from_raw(callback_data as *const ChromeData));
@@ -703,3 +833,4 @@ mod native {
 pub fn install<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     native::install(app)
 }
+

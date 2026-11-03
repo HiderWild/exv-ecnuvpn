@@ -34,7 +34,7 @@ pub enum ConnectError {
     Login(LoginError),
     /// CSTP CONNECT 或 offer 失败。
     Session(SessionError),
-    /// 登录前的 VPN 服务端专用路由未能读取、更新或回读确认。
+    /// 登录前的 VPN 服务端专用路由读取或更新失败。
     ControlRoute(crate::platform::PlatformError),
     /// 取消栅栏触发。
     Cancelled,
@@ -55,31 +55,54 @@ impl ConnectError {
         }
     }
 
-    /// 映射为 Common `VpnError`（只填 code/stage，凭据与主机名永不入错误）。
+    /// 已明确需要新认证/交互的失败不能重复消耗 R1 重拨预算。
+    pub(crate) const fn requires_new_authentication(&self) -> bool {
+        matches!(self, Self::Login(LoginError::LoginRejected { .. } | LoginError::SamlRequired | LoginError::TwoFactorRequired))
+    }
+
+    /// 映射为 Common `VpnError`（只填 code/stage/reason，凭据与主机名永不入错误）。
+    ///
+    /// 阶段② darwin 真注记（2026-10-09 裁定）：darwin engine 无
+    /// `tunnel_runtime`/`nrpt_worker`（模块清单已核），SAML 走本映射——本就无
+    /// 撞码（win32 专属缺陷），但旧映射 Unauthorized 呈现「认证失败（未授权）」
+    /// 误导；EXV_UNFREEZE 2026-10-09 起 SamlRequired 单独走 `SAML_REQUIRED(20)` +
+    /// `auth/saml_required`（与 win32 同文案）。TwoFactorRequired 保持
+    /// Unauthorized（双因素是真实认证交互要求，语义不同，不并入 SAML 文案）。
     #[must_use]
     pub fn to_vpn_error(&self) -> wire::VpnError {
         use wire::{ErrorCode, ErrorStage};
-        let (code, stage) = match self {
-            Self::Egress(_) | Self::ControlRoute(_) => {
-                (ErrorCode::ObservationFailed, ErrorStage::ConnectingControl)
+        let (code, stage, reason) = match self {
+            Self::Egress(_) | Self::ControlRoute(_) => (
+                ErrorCode::ObservationFailed,
+                ErrorStage::ConnectingControl,
+                "",
+            ),
+            Self::Login(LoginError::SamlRequired) => (
+                ErrorCode::SamlRequired,
+                ErrorStage::AwaitingInteraction,
+                "auth/saml_required",
+            ),
+            Self::Login(LoginError::TwoFactorRequired) => {
+                (ErrorCode::Unauthorized, ErrorStage::AwaitingInteraction, "")
             }
-            Self::Login(LoginError::SamlRequired | LoginError::TwoFactorRequired) => {
-                (ErrorCode::Unauthorized, ErrorStage::AwaitingInteraction)
-            }
-            Self::Login(LoginError::LoginRejected { .. }) => {
-                (ErrorCode::Unauthorized, ErrorStage::ConnectingControl)
-            }
+            Self::Login(LoginError::LoginRejected { .. }) => (
+                ErrorCode::Unauthorized,
+                ErrorStage::ConnectingControl,
+                "auth/login_rejected",
+            ),
             Self::Login(_) | Self::Session(_) => {
-                (ErrorCode::EffectUnknown, ErrorStage::ProtocolSession)
+                (ErrorCode::EffectUnknown, ErrorStage::ProtocolSession, "")
             }
             Self::Cancelled => (
                 ErrorCode::CancelledBeforeStart,
                 ErrorStage::ConnectingControl,
+                "",
             ),
         };
         wire::VpnError {
             code: code as i32,
             stage: stage as i32,
+            reason: reason.to_string(),
             ..Default::default()
         }
     }
@@ -117,6 +140,8 @@ pub struct EstablishedSession {
     pub read_channel: mpsc::UnboundedReceiver<Vec<u8>>,
     /// 控制面事件（网关 keepalive/DPD 请求等）。
     pub control_rx: mpsc::UnboundedReceiver<CstpControlEvent>,
+    /// CSTP 完成 owner；None 仅用于隔离替身。
+    pub tasks: Option<exv_vpn_cstp::session::CstpTasks>,
 }
 
 /// 建立一次真实的 WebVPN 登录 + CSTP 会话。
@@ -178,17 +203,11 @@ pub(crate) async fn establish_observed(
         "开始建立 CSTP 会话",
         crate::session_diagnostics::build_fields(),
     );
-    let egress = find_physical_egress().map_err(|error| {
-        log("EGRESS_FAILED", "物理出口观察失败", vec![]);
-        ConnectError::Egress(error)
-    })?;
+    let egress = find_physical_egress().map_err(ConnectError::Egress)?;
     let (gateway, source) =
         resolve_gateway_ipv4_observed(hostname, CSTP_GATEWAY_PORT, Some(egress.ifindex))
             .await
-            .map_err(|error| {
-                log("GATEWAY_RESOLUTION_FAILED", "网关 IPv4 解析失败", vec![]);
-                ConnectError::Egress(error)
-            })?;
+            .map_err(ConnectError::Egress)?;
     log(
         "GATEWAY_RESOLVED",
         "已解析本次实际连接地址",
@@ -206,15 +225,7 @@ pub(crate) async fn establish_observed(
             ));
         }
     };
-    prepare_control_route(egress, server_ipv4).map_err(|error| {
-        log("CONTROL_ROUTE_FAILED", "VPN 服务端专用路由校正失败", vec![]);
-        ConnectError::ControlRoute(error)
-    })?;
-    log(
-        "CONTROL_ROUTE_READY",
-        "VPN 服务端专用路由已按当前物理网关回读确认",
-        vec![("server_ipv4", server_ipv4.to_string())],
-    );
+    prepare_control_route(egress, server_ipv4).map_err(ConnectError::ControlRoute)?;
     let gateway = CachedGateway::new(gateway);
     if is_cancelled() {
         return Err(ConnectError::Cancelled);
@@ -234,10 +245,7 @@ pub(crate) async fn establish_observed(
         Some(Arc::clone(&binder)),
     )
     .await
-    .map_err(|error| {
-        log("LOGIN_FAILED", "WebVPN 登录阶段失败", vec![]);
-        ConnectError::Login(error)
-    })?;
+    .map_err(ConnectError::Login)?;
 
     log("LOGIN_COMPLETED", "WebVPN 登录完成", vec![]);
     if is_cancelled() {
@@ -255,58 +263,10 @@ pub(crate) async fn establish_observed(
         socket_binder: Some(binder),
         gateway_resolver: None,
     };
-    let observe_socket = |socket: &tokio::net::TcpStream| {
-        use std::os::fd::AsRawFd;
-        let mut bound: libc::c_uint = 0;
-        let mut length = std::mem::size_of_val(&bound) as libc::socklen_t;
-        // 只读已连接 socket 的真实 IP_BOUND_IF；读取失败不冒充配置意图。
-        let result = unsafe {
-            libc::getsockopt(
-                socket.as_raw_fd(),
-                libc::IPPROTO_IP,
-                25,
-                std::ptr::from_mut(&mut bound).cast(),
-                &mut length,
-            )
-        };
-        log(
-            "CSTP_SOCKET_ESTABLISHED",
-            "已观察实际 CSTP socket",
-            vec![
-                (
-                    "local_address",
-                    socket
-                        .local_addr()
-                        .map_or_else(|_| "unobserved".into(), |a| a.to_string()),
-                ),
-                (
-                    "peer_address",
-                    socket
-                        .peer_addr()
-                        .map_or_else(|_| "unobserved".into(), |a| a.to_string()),
-                ),
-                (
-                    "socket_bound_ifindex",
-                    if result == 0 {
-                        bound.to_string()
-                    } else {
-                        "unobserved".into()
-                    },
-                ),
-            ],
-        );
-    };
-    let session = CstpSession::open_with_user_agent_observed(
-        config,
-        Some(&login),
-        Some(user_agent),
-        Some(&observe_socket),
-    )
-    .await
-    .map_err(|error| {
-        log("CSTP_NEGOTIATION_FAILED", "CSTP 协商阶段失败", vec![]);
-        ConnectError::Session(error)
-    })?;
+    let session =
+        CstpSession::open_with_user_agent_observed(config, Some(&login), Some(user_agent), None)
+            .await
+            .map_err(ConnectError::Session)?;
     log(
         "CSTP_OFFER_ACCEPTED",
         "已接受网关实际协商参数",
@@ -329,6 +289,7 @@ pub(crate) async fn establish_observed(
         write_channel,
         read_channel,
         control_rx,
+        tasks,
         ..
     } = session;
     Ok(EstablishedSession {
@@ -337,5 +298,6 @@ pub(crate) async fn establish_observed(
         write_channel,
         read_channel,
         control_rx,
+        tasks: Some(tasks),
     })
 }

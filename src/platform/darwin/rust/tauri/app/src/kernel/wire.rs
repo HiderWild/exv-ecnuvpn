@@ -18,7 +18,7 @@ use super::logs::LogEvent;
 use super::state::{
     ConnectPhase, OperationReply, OperationResult, ProxyTunAdapter, ProxyTunDetection,
     ReconnectStatus, RuntimeEvent, RuntimeEventKind, RuntimeSnapshot, RuntimeState,
-    SelfHealStatus, ServiceStatus, SystemProxyDetection, VpnError,
+    SelfHealStatus, ServiceStatus, SessionIdentity, SystemProxyDetection, VpnError,
 };
 use super::stats::{RuntimeStats, StatsPhase};
 
@@ -61,6 +61,7 @@ pub(crate) fn connect_request(
         identity_digest: sha256(intent.profile_ref.as_bytes()),
     });
     Ok(wire::ConnectRequest {
+        auth_binding: None,
         intent: Some(wire::ConnectIntent {
             lookup_key: Some(wire::OperationLookupKey {
                 principal_digest: principal_digest.to_vec(),
@@ -154,7 +155,7 @@ pub(crate) fn service_control_request(
         }
         super::state::ServiceControlAction::Install => Action::Install(wire::ServiceInstall {}),
         super::state::ServiceControlAction::Uninstall => {
-            Action::Uninstall(wire::ServiceUninstall {})
+            Action::Uninstall(wire::ServiceUninstall { full_cleanup: false })
         }
         super::state::ServiceControlAction::Start => Action::Start(wire::ServiceStart {}),
         super::state::ServiceControlAction::RotateKey => {
@@ -166,12 +167,22 @@ pub(crate) fn service_control_request(
     }
 }
 
+/// 仅实验性完整卸载显式请求恢复与完整清理。
+pub(crate) fn full_uninstall_request() -> wire::ServiceControlRequest {
+    wire::ServiceControlRequest {
+        action: Some(wire::service_control_request::Action::Uninstall(
+            wire::ServiceUninstall { full_cleanup: true },
+        )),
+    }
+}
+
 /// wire `ServiceControlReply` → UI `ServiceControlReply`（W3-4/P4 v1 透传形态）。
 #[must_use]
 pub(crate) fn service_control_reply_from_wire(
     reply: &wire::ServiceControlReply,
 ) -> super::state::ServiceControlReply {
     super::state::ServiceControlReply {
+        service_version: None,
         service_status: reply.service_status.as_ref().map(service_status_from_wire),
         ok: reply.ok,
         message: reply.message.clone(),
@@ -205,6 +216,13 @@ pub(crate) fn snapshot_from_wire(
     monotonic_tick: u64,
 ) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        session_identity: wire_snap.session_identity.as_ref().map(|identity| SessionIdentity {
+            protocol: identity.protocol.clone(),
+            username: identity.username.clone(),
+            server: identity.server.clone(),
+        }),
+        engine_reconnect: wire_snap.engine_reconnect.as_ref().map(|state| super::state::EngineReconnect { attempt: state.attempt, next_retry_at_ms: state.next_retry_at_ms, reason: state.reason.clone() }),
+        stop_completion: wire_snap.stop_completion.as_ref().map(stop_completion_from_wire),
         runtime: runtime_state_from_wire(wire_snap.state.as_ref()),
         monotonic_tick,
         stats: wire_snap.stats.as_ref().map(stats_from_wire),
@@ -227,6 +245,13 @@ pub(crate) fn snapshot_from_wire(
     }
 }
 
+fn stop_completion_from_wire(value: &wire::StopCompletion) -> super::state::StopCompletion {
+    super::state::StopCompletion {
+        stopped: value.stopped, blocks_new_connect: value.blocks_new_connect,
+        errors: value.errors.iter().map(vpn_error_from_wire).collect(),
+    }
+}
+
 /// wire `RuntimeEvent` → UI `RuntimeEvent`（UI snapshot 内嵌同一 monotonic_tick；
 /// 事件级 operation_id 与快照内嵌的保持一致，前端二选一即可）。
 #[must_use]
@@ -237,6 +262,9 @@ pub(crate) fn event_from_wire(ev: &wire::RuntimeEvent) -> RuntimeEvent {
         .as_ref()
         .map(|s| snapshot_from_wire(s, ev.monotonic_tick))
         .unwrap_or_else(|| RuntimeSnapshot {
+            session_identity: None,
+            engine_reconnect: None,
+            stop_completion: None,
             runtime: RuntimeState::Idle {
                 last_cleanup_at_ms: None,
             },
@@ -288,6 +316,7 @@ pub(crate) fn operation_reply_from_wire(reply: &wire::OperationReply) -> Operati
         None => OperationResult::Pending,
     };
     OperationReply {
+        stop_completion: reply.terminal.as_ref().and_then(|terminal| terminal.stop_completion.as_ref()).map(stop_completion_from_wire),
         result,
         operation_id: None,
     }
@@ -406,15 +435,106 @@ fn service_status_from_wire(w: &wire::ServiceStatus) -> ServiceStatus {
     }
 }
 
-/// wire `VpnError` → UI `VpnError`（redacted：仅稳定 code 字符串；自由文本诊断栈
-/// 永不进 UI——wire 的 native 字段是 redacted 类别，不展开）。
+/// wire `VpnError` 的稳定 reason id → 用户文案表（阶段③ 单一文案来源的壳侧
+/// 镜像；与前端 `frontend/src/lib/copy-tables.ts` 的 `REASON_COPY` 注释互指 +
+/// 两侧一致性测试钉住——新增 id 必须两表同步补行）。文案与 win32 壳同源
+/// （D9 计划 §3.3；NRPT 两行以 D8 版为准）。
+#[must_use]
+fn reason_message(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "DARWIN_ATRUST_SESSION_INVALIDATED" => "学校登录会话已失效，请重新网页登录后连接。",
+        "DARWIN_ATRUST_AUTH_STAGE_GATEWAY" => "网页登录网关与本次连接不一致，请重新连接并登录正确网关。",
+        "DARWIN_ATRUST_AUTH_STAGE_SOURCE" => "学校网关未确认当前网页登录会话，请重新网页登录后重试。",
+        "DARWIN_ATRUST_AUTH_STAGE_RECEIVER" => "向学校网关交接登录会话失败，请检查网络后重试。",
+        "DARWIN_ATRUST_AUTH_STAGE_TICKET" => "获取学校认证票据失败，请检查网络后重新登录。",
+        "DARWIN_ATRUST_AUTH_STAGE_EXCHANGE" => "学校认证票据兑换失败，请重新网页登录后重试。",
+        "DARWIN_ATRUST_AUTH_STAGE_VERIFIED" => "学校网关未确认交接后的会话，请重新网页登录后重试。",
+        "DARWIN_ATRUST_AUTH_STAGE_RESOURCES" => "读取学校授权资源失败，请检查网络后重新连接。",
+        "DARWIN_ATRUST_RESOLVER_CONFLICT" => "校园 DNS 配置位置已有其他工具的文件，请调整校园域配置或按提示手动处理。",
+        "DARWIN_ATRUST_RESOLVER_WRITE_FAILED" => "写入校园 DNS 配置失败，请检查系统权限后重新连接。",
+        "DARWIN_ATRUST_RESOLVER_SIGNAL_FAILED" => "通知系统装载校园 DNS 配置失败，请重新连接；仍失败请导出日志反馈。",
+        "DARWIN_ATRUST_RESOLVER_GATE_NOT_LOADED" => "系统尚未装载校园 DNS 配置，请重新连接；仍失败请导出日志反馈。",
+
+        "darwin/stop_wait" => "隧道执行任务尚未退出，停止未完成。请重新断开重试；仍失败请导出日志反馈。",
+        "darwin/route_cleanup" => "隧道已请求停止，但本次连接路由删除失败。请重新断开重试；仍失败请导出日志反馈。",
+        "darwin/cstp_close" => "隧道协议读写任务已结束，但关闭时报告错误。可重新断开确认；仍失败请导出日志反馈。",
+        "darwin/pump_join" => "数据转发线程已退出，但退出时报告异常。可重新断开确认；仍失败请导出日志反馈。",
+        "darwin/pipeline_task" => "隧道执行任务异常退出，停止过程报告错误。可重新断开确认；仍失败请导出日志反馈。",
+        "darwin/stop_unconfirmed" => "停止请求未取得服务完成回执，尚不能确认停止结果。请重新断开重试。",
+        "darwin/stop_task" => "停止任务异常退出，尚不能确认停止结果。请重新断开重试。",
+        "darwin/stop_incomplete" => "服务未完成本次停止清理。请重新断开重试；仍失败请导出日志反馈。",
+        "auth/login_rejected" => "账号或密码未通过学校网关验证，请重新输入后再试。",
+        "auth/saml_required" => "该服务器要求网页单点登录，当前版本暂不支持；请联系网络管理员或改用 aTrust 协议。",
+        "auth/credentials_missing" => "缺少连接所需的账号或密码，请填写后再连接。",
+        "transport/session_failed" => "无法连接 VPN 服务器，请检查网络后重试；持续失败请导出日志反馈。",
+        "platform/nrpt_takeover_failed" => "校园 DNS 规则冲突的自动处理未成功（已保留完整备份，未删除规则）。请重启电脑后重试；仍失败请导出日志反馈。",
+        "platform/nrpt_foreign_rebuild" => "检测到其他软件正在持续重建校园 DNS 规则，连接无法建立。请重启电脑，或在对应网络软件中处理后重试；EXV 已停止自动移除。",
+        "platform/route_apply" => "配置本机网络失败，连接未建立。请重试；仍失败请导出日志反馈。",
+        "platform/data_plane_start" => "连接准备未完成，请重试；持续失败请导出日志反馈。",
+        "platform/previous_cleanup" => "上次连接残留的网络设置清理失败，请重试；持续失败请重启电脑后再试。",
+        "platform/assembly_internal" => "连接过程中发生内部错误，请重试；持续失败请导出日志反馈。",
+        "platform/assembly_cancelled" => "本次连接已取消，如需继续请重新点击连接。",
+        _ => return None,
+    })
+}
+
+/// wire `VpnError` → UI `VpnError`（redacted：稳定 code 字符串 + reason id 文案；
+/// 自由文本诊断栈永不进 UI——wire 的 native 字段是 redacted 类别，不展开）。
+/// EXV_UNFREEZE 2026-10-09（tag 8）：已知 reason id → 静态用户文案；未知 id 与
+/// 空 reason 维持空 message（前端 formatError 回落 code 标签，不透出 id 原文）。
+#[must_use]
+/// 将本次停止的原错误薄映射到已有 UI message；旧端空值保持原文案。
+fn stop_error_message(err: &wire::VpnError, copy: &str) -> String {
+    if err.stage != wire::ErrorStage::Teardown as i32 {
+        return copy.to_owned();
+    }
+    let detail = err.operation_detail.as_deref().map(|text|
+        text.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect::<String>()
+            .split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>()
+    ).unwrap_or_default();
+    let native = err.native.as_ref().map(|native| {
+        let namespace = match wire::NativeErrorNamespace::try_from(native.namespace).ok() {
+            Some(wire::NativeErrorNamespace::Win32) => "Win32",
+            Some(wire::NativeErrorNamespace::Hresult) => "HRESULT",
+            Some(wire::NativeErrorNamespace::Ntstatus) => "NTSTATUS",
+            Some(wire::NativeErrorNamespace::PosixErrno) => "POSIX errno",
+            Some(wire::NativeErrorNamespace::AppleOsStatus) => "Apple OSStatus",
+            Some(wire::NativeErrorNamespace::AppleMach) => "Apple Mach",
+            Some(wire::NativeErrorNamespace::AppleNetworkExtension) => "Apple NetworkExtension",
+            _ => "原生错误",
+        };
+        format!("{namespace}: {}", native.code)
+    });
+    if detail.is_empty() && native.is_none() { return copy.to_owned(); }
+    let base = if copy.is_empty() { "停止清理失败" } else { copy };
+    let mut message = base.to_owned();
+    if !detail.is_empty() { message.push_str("："); message.push_str(&detail); }
+    if let Some(native) = native { message.push_str("（"); message.push_str(&native); message.push('）'); }
+    message
+}
+
 #[must_use]
 fn vpn_error_from_wire(err: &wire::VpnError) -> VpnError {
+    // 原 EOF producer 的已知通信结束事实；保留旧端空 reason 的原回落。
+    let message = if err.code == wire::ErrorCode::EffectUnknown as i32
+        && err.stage == wire::ErrorStage::ConnectingControl as i32
+        && err.reason == "DARWIN_CORE_CONNECT_CREDENTIALS_MISSING"
+    {
+        "自动恢复缺少登录材料，请重新登录后连接。"
+    } else if err.code == wire::ErrorCode::EffectUnknown as i32
+        && err.stage == wire::ErrorStage::ProtocolSession as i32
+        && err.reason == "session/engine_control_stream_ended"
+    {
+        "与本地 EXV 引擎的通信已中断，当前 VPN 连接已断开。"
+    } else {
+        (!err.reason.is_empty()).then(|| reason_message(err.reason.as_str())).flatten().unwrap_or("")
+    };
     VpnError {
         code: wire::ErrorCode::try_from(err.code)
             .map(|c| c.as_str_name().to_string())
             .unwrap_or_else(|_| "ERROR_CODE_UNSPECIFIED".to_string()),
-        message: String::new(),
+        message: stop_error_message(err, message),
+        reason: err.reason.clone(),
     }
 }
 

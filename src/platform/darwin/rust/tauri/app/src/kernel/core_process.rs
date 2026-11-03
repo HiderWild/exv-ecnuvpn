@@ -1,7 +1,7 @@
 //! 10b 唯一的普通用户 Core launcher。
 //!
 //! 本文件是 Rust-only guard 唯一允许创建子进程的位置。它只启动固定 Core（无签名
-//! `.app` bundle 布局同目录 Core，或固定开发期 target/debug Core），把固定
+//! `.app` bundle 布局同目录 Core，或固定开发期 target/<profile> Core），把固定
 //! bootstrap record 写入 stdin，并持有一次 authenticated UDS session；不接触
 //! Engine、提权、网络或用户可配置的 executable/path。
 
@@ -219,34 +219,44 @@ pub(crate) fn bundle_core_binary_at(executable: &Path) -> Option<PathBuf> {
     Some(candidate)
 }
 
-/// 解析唯一开发期 Core binary，且拒绝任何 fallback。
+/// 解析当前编译 profile 的唯一开发期 Core binary，不跨 profile 回退。
 fn canonical_dev_core_binary() -> Result<PathBuf, CoreProcessError> {
     let manifest_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // 治理 §7：唯一共享根仓 target。工作树层级不定（主仓与 `.worktrees/` 下深度不同），
-    // 沿祖先目录向上寻找第一个持有当前 Core 的 `target/debug`——最近祖先优先，
-    // 工作树内按纪律不囤积产物，故实际命中的总是根仓唯一 `target/`。
-    let canonical_target_debug = manifest_directory
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    shared_profile_core_binary_at(&manifest_directory, profile)
+}
+
+/// 沿既有祖先查找规则定位根仓共享 target；不新增环境覆盖或工作树产物。
+pub(super) fn shared_profile_core_binary_at(
+    manifest_directory: &Path,
+    profile: &str,
+) -> Result<PathBuf, CoreProcessError> {
+    let canonical_target = manifest_directory
         .ancestors()
-        .map(|ancestor| ancestor.join("target").join("debug"))
+        .map(|ancestor| ancestor.join("target").join(profile))
         .find(|candidate| candidate.join("exv-vpn-darwin-core").is_file())
         .and_then(|candidate| candidate.canonicalize().ok())
         .ok_or(CoreProcessError::CoreBinaryMissing)?;
-    let canonical_binary = canonical_target_debug
+    let canonical_binary = canonical_target
         .join("exv-vpn-darwin-core")
         .canonicalize()
         .map_err(|_| CoreProcessError::CoreBinaryMissing)?;
-    validate_canonical_dev_core_binary(&canonical_target_debug, canonical_binary)
+    validate_canonical_dev_core_binary(&canonical_target, canonical_binary)
 }
 
 fn validate_canonical_dev_core_binary(
-    canonical_target_debug: &Path,
+    canonical_target: &Path,
     canonical_binary: PathBuf,
 ) -> Result<PathBuf, CoreProcessError> {
     let metadata =
         fs::metadata(&canonical_binary).map_err(|_| CoreProcessError::CoreBinaryMissing)?;
     if canonical_binary.file_name() != Some(OsStr::new("exv-vpn-darwin-core"))
-        || canonical_binary.parent() != Some(canonical_target_debug)
-        || !canonical_binary.starts_with(canonical_target_debug)
+        || canonical_binary.parent() != Some(canonical_target)
+        || !canonical_binary.starts_with(canonical_target)
         || !metadata.is_file()
         || metadata.permissions().mode() & 0o111 == 0
     {

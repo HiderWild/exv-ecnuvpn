@@ -1,0 +1,6 @@
+/* 浅色、深色及跟随系统共用同一规则，点色来自当前主题。 */
+.connection-stage {
+  --connection-stage-texture: radial-gradient(var(--border-subtle) .65px, transparent .65px);
+  background-image: var(--connection-stage-texture);
+  background-size: 15px 15px;
+}

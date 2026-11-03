@@ -91,7 +91,7 @@ const minimal = computed(() => {
   border-radius: 10px;
   background: var(--surface-panel, #2a2f3a);
   color: var(--text-primary, #fff);
-  font-size: 13px;
+  font-size: var(--font-size-body);
   line-height: 1.4;
   box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
 }
@@ -118,7 +118,7 @@ const minimal = computed(() => {
   border-radius: 8px;
   background: var(--state-danger, #b3363b);
   color: #fff;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   cursor: pointer;
 }
 
@@ -130,7 +130,7 @@ const minimal = computed(() => {
   border-radius: 8px;
   background: transparent;
   color: var(--text-secondary, rgb(255 255 255 / 0.66));
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   cursor: pointer;
 }
 
@@ -150,13 +150,13 @@ const minimal = computed(() => {
   flex-wrap: wrap;
   gap: 6px;
   padding: 6px 8px;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
 }
 
 .core-crash-banner--minimal .core-crash-banner__restart,
 .core-crash-banner--minimal .core-crash-banner__dismiss {
   min-height: 22px;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
 }
 </style>

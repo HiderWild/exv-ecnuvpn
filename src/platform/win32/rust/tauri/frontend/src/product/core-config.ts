@@ -1,7 +1,10 @@
 import { ref, type InjectionKey } from "vue";
 
+import { SHARED_CORE_FIELD_COPY } from "../../../../../../../common/frontend/settings-fields";
 import { kernel } from "../lib/ipc";
 
+// atrust_auto_login 已死代码清理（S6a）：读取侧经 isCoreConfigKey 忽略旧配置/
+// 旧载荷残留键，写入侧不再由前端投影下发。
 export const CORE_CONFIG_KEYS = [
   "protocol",
   "server",
@@ -60,13 +63,24 @@ export interface CoreConfigItem {
 export interface CoreConfigGateway {
   configGet(): Promise<ReadonlyArray<CoreConfigItem>>;
   configSet(items: ReadonlyArray<{ key: CoreConfigKey; value: string }>): Promise<boolean>;
-  savedPassword?(username: string, server: string): Promise<string | null>;
 }
 
 /** 同一配置网关共享非秘密凭据状态；保存成功与切换模式均刷新，不缓存明文。 */
 const credentialStates = new WeakMap<CoreConfigGateway, ReturnType<typeof createCredentialState>>();
 function createCredentialState(gateway: CoreConfigGateway) {
-  const state = ref({ username: "", server: "", protocol: "cisco" as Protocol, remember: false, stored: false });
+  const state = ref({
+    username: "",
+    server: "",
+    protocol: "cisco" as Protocol,
+    remember: false,
+    stored: false,
+    // §7.10-3 渠道边界：认证渠道由「认证方式 + 是否开启自动登录」推导（S7 裁定后：
+    // headless+自动登录保持无头；browser+自动登录升级内嵌）。E12（阶段②附带）：
+    // authMode 三值——headless 不再折叠进 "browser"（旧折叠使无头渠道的失败文案
+    // 误走系统浏览器建议）。
+    authMode: "browser" as "browser" | "embedded" | "headless",
+    autoLogin: false,
+  });
   const savedRevision = ref(0);
   let writeTail: Promise<void> = Promise.resolve();
   /** 同一网关的配置与凭据写入串行；失败不阻塞后续显式保存。 */
@@ -79,7 +93,21 @@ function createCredentialState(gateway: CoreConfigGateway) {
   function apply(items: ReadonlyArray<CoreConfigItem>): void {
     revision += 1;
     const value = (key: string) => items.find((item) => item.key === key)?.value;
-    state.value = { username: value("username") ?? "", server: value("server") ?? "", protocol: protocolFromConfig(value("protocol")), remember: value("remember_password") === "true", stored: value("has_stored_password") === "true" };
+    state.value = {
+      username: value("username") ?? "",
+      server: value("server") ?? "",
+      protocol: protocolFromConfig(value("protocol")),
+      remember: value("remember_password") === "true",
+      stored: value("has_stored_password") === "true",
+      // E12：三值渠道——embedded/headless 原样透传，其余（含缺省）回落 browser。
+      authMode:
+        value("atrust_auth_mode") === "embedded"
+          ? "embedded"
+          : value("atrust_auth_mode") === "headless"
+            ? "headless"
+            : "browser",
+      autoLogin: value("atrust_auth_mode") === "headless",
+    };
   }
   async function refresh(): Promise<void> {
     const current = ++revision;
@@ -87,7 +115,7 @@ function createCredentialState(gateway: CoreConfigGateway) {
       const items = await gateway.configGet();
       if (current === revision) apply(items);
     } catch {
-      if (current === revision) state.value = { username: "", server: "", protocol: "cisco", remember: false, stored: false };
+      if (current === revision) state.value = { username: "", server: "", protocol: "cisco", remember: false, stored: false, authMode: "browser", autoLogin: false };
     }
   }
   return { state, apply, refresh, write, savedRevision, markSaved: () => { savedRevision.value += 1; } };
@@ -96,9 +124,6 @@ export function credentialConfigFor(gateway: CoreConfigGateway) {
   let value = credentialStates.get(gateway);
   if (!value) { value = createCredentialState(gateway); credentialStates.set(gateway, value); }
   return value;
-}
-export function revealSavedPassword(gateway: CoreConfigGateway, username: string, server: string): Promise<string | null> {
-  return gateway.savedPassword ? gateway.savedPassword(username, server) : kernel.savedPassword(username, server);
 }
 
 /** 应用入口在预览模式下可注入内存网关；生产页面仍默认连接真实 core。 */
@@ -113,23 +138,29 @@ export interface CoreConfigField {
   kind: "text" | "password" | "boolean" | "routes" | "mtu" | "number" | "server" | "connection_mode" | "protocol" | "auth_mode";
 }
 
+// 跨端字段文案引自共享表（S6a）；kind/顺序与本端平台特有键（cisco_server /
+// connection_mode / 重连两项）留在本表。
 export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
-  { key: "protocol", label: "VPN 协议", description: "选择要使用的 VPN 协议。每种协议分别保存服务器地址。", kind: "protocol" },
-  { key: "server", label: "VPN 服务器", description: "用于建立当前协议 VPN 连接的服务地址。", kind: "server" },
+  { key: "protocol", kind: "protocol", ...SHARED_CORE_FIELD_COPY.protocol },
+  { key: "server", kind: "server", ...SHARED_CORE_FIELD_COPY.server },
   { key: "cisco_server", label: "Cisco 服务器", description: "Cisco 专用服务器地址。", kind: "server" },
-  { key: "atrust_server", label: "aTrust 服务器", description: "aTrust 专用服务器地址。", kind: "server" },
-  { key: "atrust_auth_mode", label: "aTrust 认证方式", description: "浏览器登录会打开系统浏览器；内嵌登录会在学校网页中完成认证。", kind: "auth_mode" },
-  { key: "username", label: "登录账户", description: "连接时使用的账户名。", kind: "text" },
-  { key: "password", label: "密码", description: "留空表示保持已保存密码。", kind: "password" },
-  { key: "remember_password", label: "记住密码", description: "勾选后密码随配置保存；关闭则连接时需手动输入。", kind: "boolean" },
+  { key: "atrust_server", kind: "server", ...SHARED_CORE_FIELD_COPY.atrust_server },
+  { key: "atrust_auth_mode", kind: "auth_mode", ...SHARED_CORE_FIELD_COPY.atrust_auth_mode },
+  // T4c（2026-09-30 用户授权）：与 Cisco 完全共享的单对账密（username/password/
+  // remember_password）；仅 aTrust 协议下参与一次性学校页自动填交。
+  { key: "username", kind: "text", ...SHARED_CORE_FIELD_COPY.username },
+  // Area F（2026-10-09）：密码不设内联输入；该字段仅维持配置键与草稿置空语义，
+  // 设置页呈现为「凭据状态行 + 统一模态修改」（存在性见 has_stored_password）。
+  { key: "password", kind: "password", ...SHARED_CORE_FIELD_COPY.password },
+  { key: "remember_password", kind: "boolean", ...SHARED_CORE_FIELD_COPY.remember_password },
   { key: "connection_mode", label: "连接模式", description: "标准模式优先直连；特定网络环境下连接不稳定时可尝试兼容模式。更改在下次手动连接时生效。", kind: "connection_mode" },
-  { key: "routes", label: "路由", description: "由EXV处理的流量的目标地址范围", kind: "routes" },
-  { key: "campus_dns_domains", label: "校园 DNS 域名", description: "多个域名用逗号分隔，包含其子域；使用 VPN 下发的 DNS。留空关闭。服务端未提供 DNS 时，请清空此项后重试连接。", kind: "text" },
-  { key: "user_agent", label: "User-Agent", description: "连接请求使用的客户端标识。", kind: "text" },
-  { key: "mtu", label: "MTU", description: "网络接口的正整数 MTU。", kind: "mtu" },
-  { key: "auto_reconnect", label: "自动重连", description: "连接意外断开时自动重新连接（下次连接生效）。", kind: "boolean" },
-  { key: "auto_reconnect_max_attempts", label: "自动重连次数", description: "仅在开启自动重连后可设置；0 表示无限重连；达到次数后不再重连。", kind: "number" },
-  { key: "auto_reconnect_backoff", label: "自动重连退避", description: "仅在开启自动重连后可设置；开启后掉线按 2s→4s→8s→16s→30s 退避重连，成功连接后重置。", kind: "boolean" },
+  { key: "routes", kind: "routes", ...SHARED_CORE_FIELD_COPY.routes },
+  { key: "campus_dns_domains", kind: "text", ...SHARED_CORE_FIELD_COPY.campus_dns_domains },
+  { key: "user_agent", kind: "text", ...SHARED_CORE_FIELD_COPY.user_agent },
+  { key: "mtu", kind: "mtu", ...SHARED_CORE_FIELD_COPY.mtu },
+  { key: "auto_reconnect", kind: "boolean", ...SHARED_CORE_FIELD_COPY.auto_reconnect },
+  { key: "auto_reconnect_max_attempts", kind: "number", ...SHARED_CORE_FIELD_COPY.auto_reconnect_max_attempts },
+  { key: "auto_reconnect_backoff", kind: "boolean", ...SHARED_CORE_FIELD_COPY.auto_reconnect_backoff },
   // T4 新设置项（计划 §2.8；位置紧邻自动重连主开关）。可见性在 SettingsPage 按
   // 服务安装态与主开关门控（description = 问号帮助弹层文案，D13 裁定版 + D15
   // 灰度声明句：T10-oneshot 拉起底质落地前 keep 在 win32 oneshot 形态不可用——
@@ -216,9 +247,11 @@ export function normalizeCoreConfigValue(
   }
 
   if (key === "atrust_auth_mode") {
-    return raw === "browser" || raw === "embedded"
+    // C1（2026-10-10）放行 headless：三值与 core config_set / 壳侧
+    // configured_atrust_auth_mode 的取值集合一致。
+    return raw === "browser" || raw === "embedded" || raw === "headless"
       ? { ok: true, value: raw }
-      : { ok: false, message: "aTrust 认证方式只能是 browser 或 embedded。" };
+      : { ok: false, message: "aTrust 认证方式只能是 browser、embedded 或 headless。" };
   }
 
   if (key === "connection_mode") {
@@ -327,6 +360,5 @@ export function createCoreConfigGateway(): CoreConfigGateway {
     configSet(items) {
       return kernel.configSet([...items]);
     },
-    savedPassword: (username, server) => kernel.savedPassword(username, server),
   };
 }

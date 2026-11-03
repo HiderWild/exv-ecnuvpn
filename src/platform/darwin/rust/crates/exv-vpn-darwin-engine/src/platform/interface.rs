@@ -1,4 +1,4 @@
-//! 接口地址（含点对点 dstaddr=自身）、UP、MTU 的 apply 与 readback（AF_INET ioctl）。
+//! 接口地址（含点对点 dstaddr=自身）、UP、MTU 的 apply（AF_INET ioctl）。
 //!
 //! 只操作 Engine 自建 utun 的 ifindex/名字；不改其他接口。
 
@@ -24,16 +24,10 @@ const SIOCDIFADDR: u64 = 0x8020_6919;
 /// 拒绝出接口 → ping `sendto: Can't assign requested address`（真机实锤：Clash 的
 /// utun 配 `dstaddr=自身` 即正常）。
 const SIOCSIFDSTADDR: u64 = 0x8020_690e;
-/// `_IOWR('i', 34, struct ifreq)`（sys/sockio.h）：dstaddr 回读。
-const SIOCGIFDSTADDR: u64 = 0xC020_6922;
 /// `_IOW('i', 22, struct ifreq)`（sys/sockio.h）：设置 IPv4 掩码。
 const SIOCSIFNETMASK: u64 = 0x8020_6916;
-/// `_IOWR('i', 37, struct ifreq)`（sys/sockio.h）：掩码回读。
-const SIOCGIFNETMASK: u64 = 0xC020_6925;
 /// `_IOW('i', 52, struct ifreq)`（sys/sockio.h）。
 const SIOCSIFMTU: u64 = 0x8020_6934;
-/// `_IOWR('i', 51, struct ifreq)`（sys/sockio.h）。
-const SIOCGIFMTU: u64 = 0xC020_6933;
 /// `_IOWR('i', 17, struct ifreq)`。
 const SIOCGIFFLAGS: u64 = 0xC020_6911;
 /// `_IOW('i', 16, struct ifreq)`。
@@ -136,87 +130,45 @@ pub fn apply_ipv4(
 ) -> Result<(), PlatformError> {
     let socket = IoctlSocket::open()?;
 
-    let _ = prefix; // 点对点接口无 netmask；网段由显式路由表达。
-    let mut req = interface_req_with_addr(utun.name(), RawSockaddrIn::ipv4(address));
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCSIFADDR,
-        "SIOCSIFADDR",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
+    let _ = prefix; // 点对点接口固定 /32；网段由显式路由表达。
+    apply_ipv4_with(utun.name(), address, mtu, |request, step, argument| {
+        socket.ioctl_named(request, step, std::ptr::from_mut(argument).cast())
+    })
+}
+
+// 仅隔离本次 ioctl 顺序，生产仍使用同一个 socket 和原错误返回。
+fn apply_ipv4_with(
+    name: &str,
+    address: Ipv4Addr,
+    mtu: u16,
+    mut ioctl: impl FnMut(u64, &'static str, &mut IfReq) -> Result<(), PlatformError>,
+) -> Result<(), PlatformError> {
+    let mut req = interface_req_with_addr(name, RawSockaddrIn::ipv4(address));
+    ioctl(SIOCSIFADDR, "SIOCSIFADDR", &mut req)?;
     // 点对点 dstaddr = 自身（Clash 同款形态）：macOS 内核源地址选择要求 p2p 接口的
     // 对端地址有效（非 0.0.0.0），否则 sendto 报 EADDRNOTAVAIL。失败必须让整个
     // apply 失败——残缺接口是连接态不可用的隐性故障。
-    let mut dst = interface_req_with_addr(utun.name(), RawSockaddrIn::ipv4(address));
-    socket.ioctl_named(
-        SIOCSIFDSTADDR,
-        "SIOCSIFDSTADDR",
-        std::ptr::addr_of_mut!(dst).cast::<libc::c_void>(),
-    )?;
+    let mut dst = interface_req_with_addr(name, RawSockaddrIn::ipv4(address));
+    ioctl(SIOCSIFDSTADDR, "SIOCSIFDSTADDR", &mut dst)?;
     // 掩码显式 /32：不设时内核按类别默认（172.20.x.x → /16），宽掩码会让隐式源
     // 地址选择为「不在该子网」的目的地跳过本接口地址（真机实锤：显式 -S 可通、
     // 隐式 sendto EADDRNOTAVAIL）。窄掩码是 p2p utun 的通用先例（/30~/32）。
     // offer.prefix 只用于探测目标派生（packet::probe），不进接口掩码。
-    let mut mask = interface_req_with_addr(
-        utun.name(),
-        RawSockaddrIn::ipv4(Ipv4Addr::new(255, 255, 255, 255)),
-    );
-    socket.ioctl_named(
-        SIOCSIFNETMASK,
-        "SIOCSIFNETMASK",
-        std::ptr::addr_of_mut!(mask).cast::<libc::c_void>(),
-    )?;
+    let mut mask =
+        interface_req_with_addr(name, RawSockaddrIn::ipv4(Ipv4Addr::new(255, 255, 255, 255)));
+    ioctl(SIOCSIFNETMASK, "SIOCSIFNETMASK", &mut mask)?;
 
-    let mut req = interface_req(utun.name());
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCGIFFLAGS,
-        "SIOCGIFFLAGS",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
+    let mut req = interface_req(name);
+    ioctl(SIOCGIFFLAGS, "SIOCGIFFLAGS", &mut req)?;
     let mut flags = i16::from_ne_bytes([req.value[0], req.value[1]]);
     flags |= IFF_UP;
     req.value[0..2].copy_from_slice(&flags.to_ne_bytes());
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCSIFFLAGS,
-        "SIOCSIFFLAGS",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
+    ioctl(SIOCSIFFLAGS, "SIOCSIFFLAGS", &mut req)?;
 
-    let mut req = interface_req(utun.name());
+    let mut req = interface_req(name);
     req.value[0..4].copy_from_slice(&i32::from(mtu).to_ne_bytes());
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCSIFMTU,
-        "SIOCSIFMTU",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
+    ioctl(SIOCSIFMTU, "SIOCSIFMTU", &mut req)?;
 
-    // readback barrier：地址、点对点对端与 MTU 必须与期望一致。
-    let readback_address = read_ipv4(&socket, utun.name())?;
-    if readback_address != address {
-        return Err(PlatformError::Readback("ADDRESS"));
-    }
-    let readback_dst = read_dstaddr(&socket, utun.name())?;
-    if readback_dst != address {
-        return Err(PlatformError::Readback("DSTADDR"));
-    }
-    let readback_mask = read_netmask(&socket, utun.name())?;
-    if readback_mask != Ipv4Addr::new(255, 255, 255, 255) {
-        return Err(PlatformError::Readback("NETMASK"));
-    }
-    let mut req = interface_req(utun.name());
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCGIFMTU,
-        "SIOCGIFMTU",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
-    let readback_mtu = i32::from_ne_bytes([req.value[0], req.value[1], req.value[2], req.value[3]]);
-    if readback_mtu != i32::from(mtu) {
-        return Err(PlatformError::Readback("MTU"));
-    }
     Ok(())
 }
 
@@ -232,54 +184,4 @@ pub fn clear_ipv4(utun: &Utun, address: Ipv4Addr) -> Result<(), PlatformError> {
         "SIOCDIFADDR",
         std::ptr::addr_of_mut!(request).cast::<libc::c_void>(),
     )
-}
-
-fn read_netmask(socket: &IoctlSocket, name: &str) -> Result<Ipv4Addr, PlatformError> {
-    let mut req = interface_req(name);
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCGIFNETMASK,
-        "SIOCGIFNETMASK",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
-    Ok(Ipv4Addr::new(
-        req.value[4],
-        req.value[5],
-        req.value[6],
-        req.value[7],
-    ))
-}
-
-fn read_dstaddr(socket: &IoctlSocket, name: &str) -> Result<Ipv4Addr, PlatformError> {
-    let mut req = interface_req(name);
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCGIFDSTADDR,
-        "SIOCGIFDSTADDR",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
-    Ok(Ipv4Addr::new(
-        req.value[4],
-        req.value[5],
-        req.value[6],
-        req.value[7],
-    ))
-}
-
-fn read_ipv4(socket: &IoctlSocket, name: &str) -> Result<Ipv4Addr, PlatformError> {
-    /// `_IOWR('i', 33, struct ifreq)`。
-    const SIOCGIFADDR: u64 = 0xC020_6921;
-    let mut req = interface_req(name);
-    // SAFETY: req is a complete ifreq.
-    socket.ioctl_named(
-        SIOCGIFADDR,
-        "SIOCGIFADDR",
-        std::ptr::addr_of_mut!(req).cast::<libc::c_void>(),
-    )?;
-    Ok(Ipv4Addr::new(
-        req.value[4],
-        req.value[5],
-        req.value[6],
-        req.value[7],
-    ))
 }

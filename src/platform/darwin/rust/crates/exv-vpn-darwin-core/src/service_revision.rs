@@ -1,10 +1,9 @@
 //! Darwin 服务修订号观测面（`exv-vpn-darwin-ipc::service_revision` 的 Core 读侧）。
 //!
 //! 修订号作为二进制元数据嵌在 engine 可执行文件的 `__TEXT,__exv_revision`
-//! section；读侧**不运行进程、不发请求**，解析 Mach-O 头即可拿到。因为 launchd
-//! 总是从固定安装路径启动 engine，「已装文件」的修订号同时就是「正在/下一次
-//! 运行」的修订号（文件与运行坍缩成一个事实），不需要运行期叶、不需要 socket
-//! 门控。
+//! section；读侧不运行进程、不发请求，解析 Mach-O 头即可拿到。
+//! 已装文件与当前运行进程是不同事实；本模块只报告安装文件，运行版本由实际
+//! Engine 的构建身份日志核验。服务更新会释放旧控制会话，下一次连接重新拨号。
 //!
 //! 与 [`crate::service_status`] 的关系：五态健康映射不含修订号——修订是正交的
 //! 诊断事实，不参与健康判定、不改变 wire 词汇。本模块只做无特权只读观测
@@ -15,11 +14,11 @@
 //!   * `bundled`：随附 engine（Core 同目录兄弟二进制）的嵌入式修订号；
 //!   * `installed`：已安装 engine（固定安装路径）的嵌入式修订号。
 //!
-//! 覆盖验证读法：`bundled == installed == expected` → 装的就是本构建这版。
+//! 修订相等只证明计数器相等；完整安装一致性另比较 Engine 与服务代理文件摘要。
 //! `installed` 缺席/无 section = 未安装或装的旧版（尚无元数据的 engine）。
 //!
-//! 观测成本：只读每个文件头 4KiB + 目标 section 4 字节，与二进制大小无关
-//! （debug 上百 MB 也不受影响），无阻塞线程顾虑。
+//! 修订号读取只检查文件头与目标 section；摘要诊断会完整读取 Engine 和服务代理，
+//! 因此版本视图应在阻塞 worker 中采集，不阻塞异步执行线程。
 //!
 //! ## 不做什么
 //!
@@ -28,7 +27,8 @@
 //! * **不含 win32 侧**。
 //! * **不参与健康五态判定**：`derive_health` 不读修订事实。
 
-use std::path::Path;
+use std::{path::Path, io::Read};
+use sha2::{Digest, Sha256};
 
 use exv_vpn_darwin_ipc::service_revision::{
     DARWIN_SERVICE_REVISION, read_embedded_revision,
@@ -41,6 +41,54 @@ const SERVICE_AGENT_INSTALL_DIR: &str = "/Library/Application Support/EXV/Servic
 /// 已安装 engine 二进制文件名（镜像服务代理 `platform.rs` 的
 /// `ENGINE_BINARY_PATH` 目录内名）。
 const INSTALLED_ENGINE_BINARY_NAME: &str = "exv-vpn-darwin-engine";
+
+/// Darwin 壳侧的服务版本视图；只读本机文件，不扩展认证或 Common wire 契约。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServiceBundleStatus {
+    /// 当前 App 期望修订。
+    pub expected: u32,
+    /// 随附 Engine 修订。
+    pub bundled: Option<u32>,
+    /// 已装 Engine 修订；不声称是正在运行进程的版本。
+    pub installed: Option<u32>,
+    /// Engine 与服务代理两件文件是否都与 App 相同；无法读取时未知。
+    pub matches_bundle: Option<bool>,
+}
+
+fn file_digest(path: &Path) -> Option<Vec<u8>> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 16384];
+    loop {
+        let count = file.read(&mut buffer).ok()?;
+        if count == 0 { return Some(digest.finalize().to_vec()); }
+        digest.update(&buffer[..count]);
+    }
+}
+
+fn bundle_matches(bundled: &Path, installed: &Path) -> Option<bool> {
+    let mut unknown = false;
+    for name in [INSTALLED_ENGINE_BINARY_NAME, "exv-vpn-darwin-service-agent"] {
+        match (file_digest(&bundled.join(name)), file_digest(&installed.join(name))) {
+            (Some(left), Some(right)) if left != right => return Some(false),
+            (Some(_), Some(_)) => {},
+            _ => unknown = true,
+        }
+    }
+    if unknown { None } else { Some(true) }
+}
+
+/// 同目录随附组件与正式安装组件的只读比较。调用者应在阻塞 worker 中执行。
+#[must_use]
+pub fn service_bundle_status() -> ServiceBundleStatus {
+    let engine = bundled_engine_path();
+    let facts = collect_revision_facts(engine.as_deref());
+    ServiceBundleStatus {
+        expected: facts.expected, bundled: facts.bundled, installed: facts.installed,
+        matches_bundle: engine.as_deref().and_then(Path::parent)
+            .and_then(|dir| bundle_matches(dir, Path::new(SERVICE_AGENT_INSTALL_DIR))),
+    }
+}
 
 /// 服务修订观测快照。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

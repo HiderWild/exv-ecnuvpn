@@ -75,7 +75,7 @@ async function refreshLatency(): Promise<void> {
 
 .latency-section h2 {
   margin-bottom: var(--space-3);
-  font-size: 14px;
+  font-size: var(--font-size-heading);
   font-weight: 650;
 }
 
@@ -95,7 +95,7 @@ async function refreshLatency(): Promise<void> {
 
 .info-row dt {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .info-row dd {
@@ -103,7 +103,7 @@ async function refreshLatency(): Promise<void> {
   margin: 0;
   overflow-wrap: anywhere;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--font-size-body);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -111,7 +111,7 @@ async function refreshLatency(): Promise<void> {
 .latency-request-status {
   margin: var(--space-2) 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   line-height: 1.4;
 }
 
@@ -123,7 +123,7 @@ async function refreshLatency(): Promise<void> {
   border-radius: var(--radius-md);
   background: var(--surface-subtle);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   cursor: pointer;
 }
 

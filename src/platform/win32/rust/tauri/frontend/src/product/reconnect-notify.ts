@@ -94,13 +94,13 @@ export const RECONNECT_NOTIFY_COPY: Readonly<Record<string, ReconnectNotifyCopy>
     notify: true,
     terminal: false,
     kind: "warning",
-    message: "后台服务已重启，正在自动恢复连接…",
+    message: "后台服务连接中断，正在尝试恢复连接…",
   },
   engine_lost_oneshot: {
     notify: true,
     terminal: false,
     kind: "warning",
-    message: "后台引擎已重启，正在重新提权恢复连接（会重新弹 UAC）…",
+    message: "后台引擎连接中断，正在重新提权恢复连接（会重新弹 UAC）…",
   },
   engine_lost_oneshot_gated_off: {
     notify: true,
@@ -127,6 +127,8 @@ export interface ReconnectNotifyCursor {
   r1: string | null;
   /** R2 lane：`reconnect.reason`（null = 无 R2 事件）。 */
   r2: string | null;
+  /** 原恢复已结束时，消费真实连接／失败终态。 */
+  r2Result?: "connected" | "failed";
 }
 
 /** 一次判定的产出：待弹的 toast（空数组 = 无通知）。 */
@@ -139,6 +141,12 @@ export interface ReconnectToastDecision {
 function normalizeReason(raw: string | null | undefined): string | null {
   const trimmed = raw?.trim();
   return trimmed ? trimmed : null;
+}
+
+/** 实际 R2 恢复结束并进入失败；终态 reason 可由 Core 正常清空。 */
+function r2Failed(prev: ReconnectNotifyCursor | null, next: ReconnectNotifyCursor): boolean {
+  return prev !== null && prev.r2 !== null && prev.r2 !== "engine_lost_oneshot_gated_off"
+    && next.r2 === null && next.r2Result === "failed";
 }
 
 /**
@@ -162,6 +170,14 @@ export function decideReconnectToasts(
 ): ReconnectToastDecision[] {
   if (prev === null) return [];
   const decisions: ReconnectToastDecision[] = [];
+
+  if (prev.r2 !== null && next.r2 === null && prev.r2 !== "engine_lost_oneshot_gated_off") {
+    if (next.r2Result === "connected" && notifyEnabled) {
+      decisions.push({ kind: "success", message: "连接已自动恢复。" });
+    } else if (r2Failed(prev, next)) {
+      decisions.push({ kind: "error", message: "自动恢复连接失败，请重新连接；仍失败请导出日志反馈。" });
+    }
+  }
 
   // R1 lane（engine 自愈）。
   if (next.r1 !== prev.r1 && next.r1 !== null) {
@@ -198,12 +214,32 @@ let reconnectNotifyEnabled = true;
 let gateLoader: (() => Promise<ConfigPayload>) | null = null;
 /** 门控后台刷新在途标记（防重入）。 */
 let gateRefreshInFlight = false;
+/**
+ * 阶段④ failed-notify 互斥游标（2026-10-09 裁定 D9 #4：互斥收敛**单向**——
+ * failed-notify 让位于 lane 终态；lane 终态恒弹是既有语义，不做反向抑制）：
+ * 当前 episode 内 R1/R2 是否已弹过终态通知。reason 终态先到、Failed 后到时
+ * 沿原 lane id 关联；R2 的无 reason 失败终态也沿此位消费。失败家族内保持，
+ * 离开失败家族且 lane 已离开终态 id 时重新武装。
+ */
+let laneTerminalEpisodeOpen = false;
 
 /** 从快照提取两条 lane 的 reason id。 */
 export function reconnectCursorOf(snapshot: RuntimeSnapshot): ReconnectNotifyCursor {
+  const reason = normalizeReason(snapshot.reconnect?.reason);
+  const recovering = snapshot.reconnect?.auto_reconnect === true && snapshot.reconnect.active;
+  const runtime = snapshot.runtime;
+  const state = runtime.state;
+  const failed = runtime.state === "failed_clean" || runtime.state === "failed_dirty";
+  // 本地用户取消由原 Host 普通 toast 呈现，仍沿原游标结束本次恢复。
+  const authCancelled = failed
+    && runtime.error?.code === "ERROR_CODE_CANCELLED_BEFORE_START"
+    && runtime.error.reason === "atrust/auth_cancelled";
   return {
     r1: normalizeReason(snapshot.engine_reconnect?.reason),
-    r2: normalizeReason(snapshot.reconnect?.reason),
+    // reason表示失联来源；只有实际恢复active才承诺正在恢复。
+    r2: recovering || reason === "engine_lost_oneshot_gated_off" ? reason : null,
+    ...(state === "connected" ? { r2Result: "connected" as const } :
+      failed && !authCancelled ? { r2Result: "failed" as const } : {}),
   };
 }
 
@@ -246,10 +282,12 @@ export function setReconnectNotifyGate(enabled: boolean): void {
 /**
  * 快照采纳钩子（产品运行时的唯一喂入口——事件与 GetSnapshot 轮询都汇到快照采纳）。
  * 判定 → 弹 toast；lane 游标变化时后台刷新门控（罕见路径，成本可忽略）。
+ * 终态类 id 实际弹出时置 lane 终态 episode 游标（供 failed-notify 单向让位查询）。
  */
-export function announceReconnectSnapshot(snapshot: RuntimeSnapshot): void {
+export function announceReconnectSnapshot(snapshot: RuntimeSnapshot, options: { lifecycleOwnsProgress?: boolean } = {}): void {
   const next = reconnectCursorOf(snapshot);
   const decisions = decideReconnectToasts(cursor, next, reconnectNotifyEnabled);
+  const r2FailureNotified = r2Failed(cursor, next) && decisions.length > 0;
   const laneChanged =
     cursor === null || cursor.r1 !== next.r1 || cursor.r2 !== next.r2;
   cursor = next;
@@ -257,8 +295,26 @@ export function announceReconnectSnapshot(snapshot: RuntimeSnapshot): void {
     void refreshReconnectNotifyGate();
   }
   for (const decision of decisions) {
-    pushToast(decision.message, decision.kind);
+    if (!options.lifecycleOwnsProgress || decision.kind !== "warning") pushToast(decision.message, decision.kind);
   }
+  // reason 终态或 R2 实际失败已发声时置位；失败家族内保持，避免 reason 清空
+  // 导致紧随其后的 failed-notify 再次通知。离开失败且无终态 lane 时重新武装。
+  const isTerminalId = (id: string | null): boolean =>
+    id !== null && (RECONNECT_NOTIFY_COPY[id]?.terminal ?? false);
+  if (r2FailureNotified || (decisions.length > 0 && (isTerminalId(next.r1) || isTerminalId(next.r2)))) {
+    laneTerminalEpisodeOpen = true;
+  } else if (!isTerminalId(next.r1) && !isTerminalId(next.r2) && next.r2Result !== "failed") {
+    laneTerminalEpisodeOpen = false;
+  }
+}
+
+/**
+ * 阶段④ failed-notify 互斥查询（只读）：当前 episode 内 lane 终态是否已弹过
+ * 通知——true 时 failed-notify 对同一 episode 不再弹通用失败 toast（让位于携带
+ * 具体原因句的 lane 终态 toast；同一 episode 一个声音）。
+ */
+export function laneTerminalNotifiedInEpisode(): boolean {
+  return laneTerminalEpisodeOpen;
 }
 
 /** 测试隔离：复位模块状态（生产路径不调用）。 */
@@ -267,4 +323,5 @@ export function resetReconnectNotifyState(): void {
   reconnectNotifyEnabled = true;
   gateLoader = null;
   gateRefreshInFlight = false;
+  laneTerminalEpisodeOpen = false;
 }

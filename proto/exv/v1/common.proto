@@ -47,6 +47,9 @@ enum ErrorCode {
   ERROR_CODE_ACTIVE_SESSION_CANNOT_RECONCILE = 18;
   // 平台依赖不可用；宿主通过 native 字段提供可操作的修复提示。
   ERROR_CODE_PLATFORM_DEPENDENCY_UNAVAILABLE = 19;
+  // 网关要求交互式 SAML 网页单点登录（win32 MVP 不支持；EXV_UNFREEZE 2026-10-09，
+  // 修复与 ERROR_CODE_INVALID_INPUT(1) 的撞码——细分原因见 VpnError.reason）。
+  ERROR_CODE_SAML_REQUIRED = 20;
 }
 
 // Mirrors domain ErrorStage.
@@ -202,6 +205,14 @@ message VpnError {
   ErrorSubject subject = 5;
   OpaqueResourceRef resource = 6;
   RedactedNativeError native = 7;
+  // 稳定失败原因 id（EXV_UNFREEZE 2026-10-09）：“<域>/<细分>” 小写仓库静态标识，
+  // 空 = 缺省（proto3）；壳侧按 id 映射
+  // 用户文案，未知 id 由壳侧兜底文案处理（fail-safe，不透出 id 原文）。
+  string reason = 8;
+  // 本次停止操作的有界实际原因；当前仅由 Windows StopAction 原错误生产。
+  // 最多 200 个 Unicode 字符，不携带诊断栈；空／缺省沿用旧端稳定文案。
+  // 仅供壳侧现有 message 呈现，不参与原因分类、授权、重试或 domain 状态。
+  optional string operation_detail = 9;
   reserved 9000 to 9999;
 }
 
@@ -358,8 +369,18 @@ message OperationFailed {
   reserved 9000 to 9999;
 }
 
+// 停止终态的脱敏摘要；缺消息表示旧端未提供停止事实。
+message StopCompletion {
+  bool stopped = 1;
+  bool blocks_new_connect = 2;
+  repeated VpnError errors = 3;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
 // Mirrors domain OperationTerminal.
 message OperationTerminal {
+  StopCompletion stop_completion = 3;
   oneof result {
     MutationReceipt succeeded = 1;
     OperationFailed failed = 2;
@@ -581,6 +602,14 @@ message SelfHealStatus {
   reserved 9000 to 9999;
 }
 
+message SessionIdentity {
+  string protocol = 1;  // "cisco" | "atrust"
+  string username = 2;  // frozen account; empty = none/unavailable
+  string server = 3;    // frozen server address; empty = none
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
 // The win32 engine SCM service status (S3/D5; mirrors the host core
 // `ServiceStatusSnapshot` from win32 service_status). Carried by
 // `RuntimeSnapshot.service_status` for UI service awareness (D6). Display/status
@@ -739,6 +768,23 @@ message FailedDirtyState {
   reserved 9000 to 9999;
 }
 
+// aTrust 同次认证获取的非秘密冻结上下文；请求不携带候选或密码。
+// Core 保留恢复轮、预算和派发关联，Tauri 仅执行原认证入口并回交一次结果。
+message AtrustAuthAcquisition {
+  bytes interaction_id = 1;  // 16 字节；Tauri 去重、原回执关联与 Core 等待槽匹配
+  bytes runtime_epoch = 2;   // 16 字节；隔离 Core 会话，沿原回执原样返回
+  uint64 deadline_monotonic_ns = 3;  // 本机绝对单调期限；原认证和最终派发共用
+  string gateway = 4;        // 原认证上下文、学校凭据网关绑定与返回候选校验
+  string mode = 5;           // 冻结的有效 headless／embedded／browser 通道
+  bool auto_login = 6;       // 原学校凭据授权；false 沿原 FreshManual
+  string config_dir = 7;     // 原学校凭据目录；Darwin 同时供原认证存储使用
+  string browser_profile = 8;  // Windows 冻结的原绝对缓存目录；Darwin 留空
+  string user_agent = 9;     // Darwin 原 AuthContext 输入；Windows 留空
+  bool browser_profile_explicit = 10;  // Windows 原 BrowserDataDirs::Explicit 选择；false 为 Default；Darwin 不消费
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
 // Mirrors domain RuntimeState. Snapshots never carry passwords, cookies,
 // raw certificates, or free-text diagnostic stacks.
 //
@@ -753,6 +799,10 @@ message FailedDirtyState {
 // `detected` distinguishes "probed and found none" from "not probed". Never
 // changes routing (PRD O1) — status reporting only (see `ProxyTunDetection`).
 message RuntimeSnapshot {
+  StopCompletion stop_completion = 21;
+  // 可选非 oneof 伴生；缺省表示没有认证获取请求，原 state 与 operation_id 保持原语义。
+  // 候选仅经 InteractionResponse.response_payload 回交，不进入快照或事件。
+  AtrustAuthAcquisition atrust_auth_acquisition = 22;
   oneof state {
     IdleState idle = 1;
     ConnectingState connecting = 2;
@@ -783,6 +833,7 @@ message RuntimeSnapshot {
   bool relaunched_by_engine = 17;    // T10-reserved: engine sets false until T10 lands
   HeadlessFacts headless = 18;       // keep-headless episode facts (None = not headless)
   ReconnectState engine_reconnect = 19;  // engine R1 telemetry of the latest status event (None = none)
+  SessionIdentity session_identity = 20;
   reserved 9000 to 9999;
 }
 
@@ -862,6 +913,44 @@ message ConfigPayload {
   // True only when this ConfigGet read bootstrapped the default config because
   // the local config was absent, empty, non-object, or not decodable.
   bool requires_quick_start = 2;
+  // R-D3-C: one-shot report for a corrupt existing config that this read had to
+  // back up and repair. Present only on the startup load that performed the
+  // repair (never persisted — the next read sees the repaired file and reports
+  // nothing). Missing-file bootstrap and healthy loads omit it.
+  ConfigRecovery config_recovery = 3;
+  // S4 (2026-10): structured report for a config.json read that STILL failed
+  // after bounded sharing-violation retries and owner-self DACL self-repair.
+  // Present only on reads that could not load the file; such a read never
+  // rewrites or bootstraps config.json (items stay empty, requires_quick_start
+  // stays false — rebuilding an unreadable file is forbidden). Distinct from
+  // config_recovery: that reports a corrupt file that WAS repaired; this
+  // reports a file that could NOT be read at all.
+  ConfigReadFailure read_failure = 4;
+  reserved 9000 to 9999;
+}
+
+// R-D3-C: recovery report carried by ConfigPayload when a corrupt config was
+// repaired during this ConfigGet. Names the byte-for-byte backup file (base
+// name only, same directory as config.json); carries no paths and no secrets.
+message ConfigRecovery {
+  // True only when an existing unusable config file was replaced with defaults.
+  bool corrupted = 1;
+  // Base file name of the pre-repair backup (e.g. config.corrupt-backup-<millis>.json).
+  string backup_file = 2;
+  reserved 9000 to 9999;
+}
+
+// S4 (2026-10): unreadable-config report carried by ConfigPayload when the
+// three-tier read self-healing (sharing-violation retry, owner-self DACL
+// repair) could not recover. Carries the redacted Win32 raw code and the
+// config.json path for an explicit user-facing error and the elevated
+// permission-repair entry point; carries no secrets.
+message ConfigReadFailure {
+  // Win32 raw OS error code of the final failing read (e.g. 5 access denied,
+  // 32 sharing violation); 0 = native code unavailable.
+  int32 win32_code = 1;
+  // Full path of the config.json that could not be read (local diagnostics).
+  string path = 2;
   reserved 9000 to 9999;
 }
 

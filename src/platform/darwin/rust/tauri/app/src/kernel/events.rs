@@ -58,17 +58,25 @@ pub(crate) fn spawn_status_forwarder(
         let mut stream = Some(initial_stream);
         let mut resume_tick = 0u64;
         let mut backoff = WATCH_RECONNECT_BASE;
+        let mut last_subscribe_error: Option<String> = None;
         loop {
             if stream.is_none() {
                 match CoreClient.open_watch_stream(&channel, resume_tick).await {
                     Ok(reopened) => {
+                        if last_subscribe_error.take().is_some() {
+                            eprintln!("exv.events: watch subscription recovered from tick {resume_tick}");
+                        }
                         backoff = WATCH_RECONNECT_BASE;
                         stream = Some(reopened);
                     }
                     Err(error) => {
                         // win32 同款：订阅失败退避后重试（通道死时由连接恢复正路
                         // `recover_stopped_core_for_connect` 重建会话）。
-                        eprintln!("exv.events: watch re-subscribe failed: {error}; retrying");
+                        let detail = error.to_string();
+                        if last_subscribe_error.as_deref() != Some(detail.as_str()) {
+                            eprintln!("exv.events: watch re-subscribe failed: {error}; retrying");
+                            last_subscribe_error = Some(detail);
+                        }
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(WATCH_RECONNECT_MAX);
                         continue;
@@ -77,18 +85,22 @@ pub(crate) fn spawn_status_forwarder(
             }
             let mut active = stream.take().expect("watch stream present");
             let mut last_tick = resume_tick;
+            let mut stream_error = None;
             loop {
                 let wire_ev = match active.message().await {
                     Ok(Some(wire_ev)) => wire_ev,
                     // 流 EOF（core 断开）或流错误 → 断流，走恢复语义。
                     Ok(None) => break,
                     Err(status) => {
-                        eprintln!("exv.events: watch_events stream error: {status}");
+                        stream_error = Some(status);
                         break;
                     }
                 };
                 // 记录本地已见最大 tick，供断线后 resume（core 断线重放语义）。
                 last_tick = last_tick.max(wire_ev.monotonic_tick);
+                if let Some(snapshot) = wire_ev.snapshot.as_ref() {
+                    super::auth_acquisition::consume(&app, &channel, snapshot.atrust_auth_acquisition.as_ref());
+                }
                 let ui = wire::event_from_wire(&wire_ev);
                 // 快照缓存 + 托盘状态行与前端 `exv://status` 同源同步
                 //（托盘未安装时 tray 侧静默丢弃）。
@@ -100,11 +112,13 @@ pub(crate) fn spawn_status_forwarder(
                     eprintln!("exv.events: emit_status failed: {error}");
                 }
             }
+            super::auth_acquisition::consume(&app, &channel, None);
             resume_tick = last_tick;
             // win32 逻辑：断流后指数退避，再在下一轮循环顶部尝试 resume 重开。
-            eprintln!(
-                "exv.events: watch_events stream ended; reconnecting from tick {resume_tick}"
-            );
+            match stream_error {
+                Some(status) => eprintln!("exv.events: watch_events stream error: {status}; reconnecting from tick {resume_tick}"),
+                None => eprintln!("exv.events: watch_events stream ended; reconnecting from tick {resume_tick}"),
+            }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(WATCH_RECONNECT_MAX);
         }

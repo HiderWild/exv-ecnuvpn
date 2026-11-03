@@ -21,19 +21,27 @@
 //!     engine utun，判据与 None 语义对齐 win32 `adapter_address` 本地 seam 契约）。
 
 pub(crate) mod adapter_address;
+pub(crate) mod atrust_connect;
+pub(crate) mod auth_acquisition;
+pub(crate) mod auth_diagnostics;
 pub(crate) mod bootstrap;
+pub(crate) mod browser_auth;
 pub(crate) mod client;
 pub(crate) mod commands;
+pub(crate) mod connection_request;
 pub(crate) mod core_process;
 pub(crate) mod error;
 pub(crate) mod events;
 pub(crate) mod external_open;
 pub(crate) mod logs;
+pub(crate) mod native_agent;
 pub(crate) mod pre_uninstall;
 pub(crate) mod quick_start;
-pub(crate) mod saved_password;
+pub(crate) mod retry;
 pub(crate) mod state;
 pub(crate) mod stats;
 pub(crate) mod uninstall;
 pub(crate) mod wire;
 
+
+pub(crate) mod quick_start_marker;

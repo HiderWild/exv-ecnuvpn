@@ -22,11 +22,8 @@
 //!   [`AftermathDriver::abandon_session`]——该路径此前无人驱动善后（痕停留
 //!   Live、lease 残留无人复验，2026-09-28 worker-failed 案）；R1 有材料时归
 //!   自愈循环的终态分叉（情形②/非无头残留清理），不在本情形。
-//! - **断开路径（core 删除权前提"善后已验证"）**：`StopTunnel` 的 disconnect 完成
-//!   后 [`AftermathDriver::verify_disconnect_aftermath`] 复验（预检探针 + `trace`
-//!   hint）→ 干净：痕 Aftermath → 删 + `verified=true`（Idle 终态事件携带，
-//!   `EXV_UNFREEZE` tag 7，core/UI 可清除本地会话状态）；残留：痕留 Aftermath +
-//!   `verified=false`（trace 留待复验；仅实际阻断理由会阻断连接）。
+//! - **普通断开**：`StopTunnel` 以实际 StopReport 完成必要 trace 和会话材料收尾，
+//!   不等待全域复验，不宣称 `aftermath_verified`。按需诊断消费旧快照且只读。
 //! - **oneshot 随行退出（T10 前过渡）**：engine 进程随 core 退出（main.rs 既有
 //!   生命周期）时 [`AftermathDriver::on_engine_exit`] 收口——keep 的无头续存在
 //!   oneshot 形态依赖 T10（拉起底质 + 心跳退出动作策略化），退出即终局。
@@ -35,7 +32,7 @@
 //!
 //! 每次善后都写终态摘要事件：`aftermath.completed`（验证干净，痕已删）/
 //! `aftermath.residual`（残留或复验未决，痕留 Aftermath），携带稳定 reason id
-//! （[`reason`]）与残留 id（[`residual_reasons`]）。摘要在删痕**之前**落日志。
+//! （[`reason`]）与残留 id（[`residual_reasons`]）。摘要在必要 I/O 完成后定稿。
 //!
 //! # 与预检的关系
 //!
@@ -54,24 +51,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use exv_vpn_wire::generated;
 use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
 
 use crate::connect_gate::ConnectGate;
 use crate::connection_trace::{
     TraceEngineMode, TraceOnCoreExit, TraceReadOutcome, TraceRecord, TraceState,
 };
-use crate::heartbeat::ASSEMBLY_CANCEL_WAIT;
 use crate::log_sink::{LogLevel, LogSink};
 use crate::preflight::{
-    self, CleanupOutcome, DomainKind, DomainStatus, FindingPolicy, PreflightInputs,
-    PreflightReport,
+    self, CleanupOutcome, DomainKind, DomainStatus, FindingPolicy, PreflightInputs, PreflightReport,
 };
-use crate::status::{StatusEvent, StatusPublisher};
 use crate::stats::StatsPublisher;
+use crate::status::{StatusEvent, StatusPublisher};
 use crate::tunnel_runtime::TunnelRuntime;
-
-/// 在途组装取消的轮询周期（镜像 `stop_tunnel` / `heartbeat_shutdown` 的 50ms）。
-const ASSEMBLY_CANCEL_POLL: Duration = Duration::from_millis(50);
 
 /// 善后验证墙钟上界：超时按"未验证"处理（痕留 Aftermath，绝不因验证卡死而吊住
 /// 断开/退出路径）。典型干净路径 ≪ 此值（PS 冷启动 ~1s + 各域毫秒级）。
@@ -375,6 +367,9 @@ pub struct AftermathOutcome {
 /// engine 兜底善后驱动（持有全部接缝：载体 / 运行时 / 日志 / 状态 / 统计 /
 /// 存活性谓词 / 验证器 / core 拉起器）。
 pub struct AftermathDriver {
+    admission: Arc<crate::tunnel_runtime::lifecycle::Admission>,
+    /// 只回接原 R1 权威；driver 已强持本善后器，此处不得形成强引用环。
+    reconnect: Mutex<std::sync::Weak<crate::reconnect::ReconnectDriver>>,
     /// 连接门（痕载体 + 用户 SID + 命名空间源）。None = 测试/未接线（无痕保护，
     /// 分叉降级为纯 teardown + 探针验证，不触碰痕）。
     gate: Option<Arc<ConnectGate>>,
@@ -418,6 +413,11 @@ impl AftermathDriver {
         relaunch_spawner: Option<crate::core_relaunch::CoreSpawner>,
     ) -> Self {
         Self {
+            admission: status
+                .as_ref()
+                .map(|status| status.admission.clone())
+                .unwrap_or_default(),
+            reconnect: Mutex::new(std::sync::Weak::new()),
             gate,
             runtime,
             log,
@@ -435,6 +435,13 @@ impl AftermathDriver {
     #[must_use]
     pub fn headless(&self) -> Arc<HeadlessState> {
         Arc::clone(&self.headless)
+    }
+
+    pub(crate) fn attach_reconnect(&self, driver: &Arc<crate::reconnect::ReconnectDriver>) {
+        *self
+            .reconnect
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(driver);
     }
 
     /// T10：受理期记录 core 会话事实（`admit_through_gate` 放行路径调用——core
@@ -499,6 +506,10 @@ impl AftermathDriver {
     /// 收窄到「同数值 PID 复用且恰为本会话痕主」。完整的进程身份（启动时间/句柄
     /// 钉住）留给 T10 拉起机制（它天然持有进程句柄）。
     pub async fn on_owner_stream_eof(&self, eof_pid: u32, same_pid_streams_remaining: usize) {
+        let admission = self.admission.access.lock().await;
+        if *admission {
+            return;
+        }
         if same_pid_streams_remaining > 0 {
             self.log.emit(
                 LogLevel::Debug,
@@ -531,7 +542,8 @@ impl AftermathDriver {
         });
         match current {
             None => {
-                self.abandon_session(reason::CORE_EXIT_TEARDOWN).await;
+                self.abandon_session_admitted(reason::CORE_EXIT_TEARDOWN)
+                    .await;
             }
             Some(TraceReadOutcome::Present(record)) => {
                 self.fork_present_record(record, eof_pid).await;
@@ -546,14 +558,19 @@ impl AftermathDriver {
                     "engine",
                     "aftermath.skipped",
                     "痕损坏（善后未竟的预检信号）：痕留给预检裁定，活隧道按 legacy teardown 兜底",
-                    &[("reason", "trace_corrupt"), ("core_pid", &eof_pid.to_string())],
+                    &[
+                        ("reason", "trace_corrupt"),
+                        ("core_pid", &eof_pid.to_string()),
+                    ],
                 );
-                self.abandon_session(reason::CORE_EXIT_TEARDOWN).await;
+                self.abandon_session_admitted(reason::CORE_EXIT_TEARDOWN)
+                    .await;
             }
             Some(TraceReadOutcome::Absent) => {
                 // core 死亡 + 无痕（已收口过的会话/载体竞态）——teardown 兜底 +
                 // 验证照做（无痕可删；隧道若仍在则由本路径收口）。
-                self.abandon_session(reason::CORE_EXIT_TEARDOWN).await;
+                self.abandon_session_admitted(reason::CORE_EXIT_TEARDOWN)
+                    .await;
             }
         }
     }
@@ -587,10 +604,12 @@ impl AftermathDriver {
         }
         match (record.state, record.on_core_exit) {
             (TraceState::Connecting, _) => {
-                self.abandon_session(reason::CONNECTING_ABORT).await;
+                self.abandon_session_admitted(reason::CONNECTING_ABORT)
+                    .await;
             }
             (TraceState::Live, TraceOnCoreExit::Teardown) => {
-                self.abandon_session(reason::CORE_EXIT_TEARDOWN).await;
+                self.abandon_session_admitted(reason::CORE_EXIT_TEARDOWN)
+                    .await;
             }
             (TraceState::Live, TraceOnCoreExit::Keep) => {
                 self.headless.enter(HeadlessSession {
@@ -699,7 +718,7 @@ impl AftermathDriver {
                     ("core_pid", &eof_pid.to_string()),
                 ],
             );
-            self.abandon_session(reason::CRASH_LOOP).await;
+            self.abandon_session_admitted(reason::CRASH_LOOP).await;
             return;
         };
         // 拉起参数（缺口①：ui_pid 传递链——trace 受理事实）。
@@ -713,7 +732,10 @@ impl AftermathDriver {
                 "engine",
                 "relaunch.failed",
                 "发起用户 SID 缺失，无法构造拉起参数（无头续存维持；UI 侧 L1 仍是备用路径）",
-                &[("reason", "user_sid_missing"), ("core_pid", &eof_pid.to_string())],
+                &[
+                    ("reason", "user_sid_missing"),
+                    ("core_pid", &eof_pid.to_string()),
+                ],
             );
             return;
         };
@@ -795,6 +817,45 @@ impl AftermathDriver {
     /// 经各自入口复用本主体）。
     pub async fn abandon_session(&self, reason: &'static str) -> AftermathOutcome {
         let record = self.current_record();
+        let operation = self
+            .status
+            .as_ref()
+            .and_then(|s| s.latest())
+            .map(|s| s.operation_id);
+        let _admission = self.admission.access.lock().await;
+        // 排队期间会话已被新 Apply 替换，旧退出不得取得新 owner。
+        if record.as_ref().map(|r| &r.connection_id)
+            != self.current_record().as_ref().map(|r| &r.connection_id)
+            || operation
+                != self
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.latest())
+                    .map(|s| s.operation_id)
+        {
+            return Self::unfinished_outcome(reason, "session_replaced");
+        }
+        self.abandon_session_admitted(reason).await
+    }
+
+    pub(crate) async fn abandon_session_admitted(&self, reason: &'static str) -> AftermathOutcome {
+        // 各入口已在同 admission 内核实当前身份及真正 abandon 政策；Keep 不走此处。
+        // 先终止原 session/epoch，服务仍可接纳全新 Apply，不能永久关闭 admission。
+        let reconnect = self
+            .reconnect
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade();
+        if let Some(driver) = reconnect {
+            driver.disarm(reason);
+        }
+        let record = self.current_record();
+        let identity = record.as_ref().map(|r| r.connection_id.clone());
+        let operation = self
+            .status
+            .as_ref()
+            .and_then(|s| s.latest())
+            .map(|s| s.operation_id);
         // 1. teardown：cancel 在途组装（有界等待段边界自清理）→ teardown（幂等）。
         if let Err(error) = self.teardown_with_cancel().await {
             self.log.emit(
@@ -805,11 +866,21 @@ impl AftermathDriver {
                 &[("reason", reason), ("detail", &error)],
             );
         }
+        if self.runtime.is_assembling() || self.runtime.is_connected() {
+            return Self::unfinished_outcome(reason, "assembly_or_data_plane_pending");
+        }
         // 2. 验证收口（Aftermath 标记 → 验证 → 摘要 → 删痕）。
         let outcome = self.settle(reason, record, &[]).await;
         // 3. Idle 终态事件（空 operation_id——终态无外部操作关联，镜像
         //    heartbeat_shutdown 的发布形态；携带验证结论 EXV_UNFREEZE tag 7）。
-        if let Some(status) = &self.status {
+        let same_trace = self
+            .current_record()
+            .as_ref()
+            .is_none_or(|r| Some(&r.connection_id) == identity.as_ref());
+        if let Some(status) = &self.status
+            && same_trace
+            && status.latest().map(|s| s.operation_id) == operation
+        {
             status.publish(StatusEvent::idle_with_aftermath(
                 Vec::new(),
                 outcome.verified,
@@ -818,28 +889,176 @@ impl AftermathDriver {
         outcome
     }
 
-    /// 断开路径善后验证（core 删除权前提"善后已验证"；`StopTunnel` 的 disconnect
-    /// 完成后调用，**不再 teardown**——减负断开已按 D13 完成）。
-    ///
-    /// 干净 → 痕 Aftermath → 删 + `verified=true`（调用方挂到 stop 的 Idle 终态
-    /// 事件上 wire）；残留/超时 → 痕留 Aftermath + `verified=false`（下次连接的
-    /// 连接门预检阻断）。
-    ///
-    /// D12 网卡豁免：disconnect 成功后 engine 处于 Paused 且持有 adapter 句柄——
-    /// 痕记录的 `adapter_names` 是**设计内存活**，验证时豁免（teardown 关网卡的
-    /// 语义留给退出/终态路径）。
-    pub async fn verify_disconnect_aftermath(&self) -> AftermathOutcome {
-        let record = self.current_record();
-        let expected_retained: Vec<String> = if self.runtime.is_paused() {
-            record
-                .as_ref()
-                .map(|record| record.adapter_names.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+    fn unfinished_outcome(reason: &'static str, pending: &'static str) -> AftermathOutcome {
+        AftermathOutcome {
+            reason,
+            verified: false,
+            residual_reasons: vec![pending],
+            trace_deleted: false,
+            timed_out: false,
+        }
+    }
+
+    /// Stop 开始时取得原会话快照；读取失败必须留到本次报告。
+    pub(crate) fn stop_snapshot(&self) -> Result<Option<TraceRecord>, String> {
+        self.gate
+            .as_ref()
+            .map_or(Ok(None), |gate| gate.stop_trace_snapshot())
+    }
+
+    /// 必要生命周期收尾，不调用全域探针。报告定稿前同步完成。
+    pub(crate) fn finish_disconnect(
+        &self,
+        snapshot: Result<Option<TraceRecord>, String>,
+        report: &mut crate::stop_report::StopReport,
+    ) {
+        let record = match snapshot {
+            Ok(record) => record,
+            Err(error) => {
+                self.log.emit(
+                    LogLevel::Warn,
+                    "engine",
+                    "aftermath.trace_failed",
+                    "停止时读取 trace 失败，错误进入本次停止报告",
+                    &[("detail", &error)],
+                );
+                report.action(
+                    crate::connect_ledger::LedgerDomain::Trace,
+                    "trace_read",
+                    &Err(error),
+                );
+                return;
+            }
         };
-        self.settle(reason::NORMAL_DISCONNECT, record, &expected_retained)
-            .await
+        if !report.stopped {
+            return;
+        }
+        if let (Some(gate), Some(record)) = (&self.gate, record) {
+            // 有真实剩余义务时留 Aftermath；历史任务错误不代表仍有资源待清。
+            let marked = gate.finish_stop_trace(&record.connection_id, false, || {
+                self.headless.clear_all();
+                if let Some(stats) = &self.stats {
+                    stats.registry().set_phase(generated::StatsPhase::Idle);
+                }
+            });
+            if matches!(
+                marked,
+                Ok(crate::connection_trace::RollbackTraceEffect::Absent
+                    | crate::connection_trace::RollbackTraceEffect::Replaced)
+            ) {
+                return;
+            }
+            if let Err(error) = &marked {
+                self.log.emit(
+                    LogLevel::Warn,
+                    "engine",
+                    "aftermath.trace_failed",
+                    "停止时标记 trace 失败，保留恢复记录",
+                    &[("detail", error)],
+                );
+            }
+            report.action(
+                crate::connect_ledger::LedgerDomain::Trace,
+                "trace_mark_aftermath",
+                &marked.as_ref().map(|_| ()).map_err(Clone::clone),
+            );
+            if marked.is_ok() && report.remaining.is_empty() {
+                let finished = gate.finish_stop_trace(&record.connection_id, true, || {});
+                if matches!(
+                    finished,
+                    Ok(crate::connection_trace::RollbackTraceEffect::Absent
+                        | crate::connection_trace::RollbackTraceEffect::Replaced)
+                ) {
+                    return;
+                }
+                if let Err(error) = &finished {
+                    self.log.emit(
+                        LogLevel::Warn,
+                        "engine",
+                        "aftermath.trace_failed",
+                        "停止时完成 trace 失败，保留恢复记录",
+                        &[("detail", error)],
+                    );
+                }
+                report.action(
+                    crate::connect_ledger::LedgerDomain::Trace,
+                    "trace_finish",
+                    &finished.map(|_| ()),
+                );
+            }
+        }
+    }
+
+    /// 全域诊断只消费旧快照、返回结果；不删除 trace、不清材料、不发布状态。
+    pub async fn diagnose_snapshot(
+        &self,
+        record: Option<TraceRecord>,
+        expected_retained_adapters: &[String],
+    ) -> AftermathOutcome {
+        let sid = self
+            .gate
+            .as_ref()
+            .and_then(|gate| gate.user_sid_ref().map(str::to_owned));
+        let namespaces = self
+            .gate
+            .as_ref()
+            .map(|gate| gate.campus_namespaces_ref())
+            .unwrap_or_default();
+        let held = expected_retained_adapters.first().cloned();
+        let verifier: AftermathVerifier = Arc::new(move |snapshot| {
+            let sid = sid.clone();
+            let namespaces = namespaces.clone();
+            let held = held.clone();
+            Box::pin(async move {
+                let servers = preflight::CAMPUS_DNS_SERVERS
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect::<Vec<_>>();
+                preflight::run_diagnostics_for(&PreflightInputs {
+                    record_hint: snapshot.as_ref(),
+                    user_sid: sid.as_deref(),
+                    campus_namespaces: &namespaces,
+                    campus_dns_servers: &servers,
+                    held_adapter_name: held.as_deref(),
+                })
+                .await
+            })
+        });
+        Self::diagnose_with(record, expected_retained_adapters, verifier).await
+    }
+
+    async fn diagnose_with(
+        record: Option<TraceRecord>,
+        expected_retained_adapters: &[String],
+        verifier: AftermathVerifier,
+    ) -> AftermathOutcome {
+        match tokio::time::timeout(VERIFY_BOUND, verifier(record)).await {
+            Ok(report) => {
+                let mut residual_reasons = residual_reasons(&report, expected_retained_adapters);
+                if report.domains.iter().any(|domain| {
+                    domain
+                        .findings
+                        .iter()
+                        .any(|finding| finding.policy == FindingPolicy::Cleanup)
+                }) {
+                    residual_reasons.push("cleanup_candidate");
+                }
+                AftermathOutcome {
+                    reason: reason::NORMAL_DISCONNECT,
+                    verified: residual_reasons.is_empty(),
+                    residual_reasons,
+                    trace_deleted: false,
+                    timed_out: false,
+                }
+            }
+            Err(_) => AftermathOutcome {
+                reason: reason::NORMAL_DISCONNECT,
+                verified: false,
+                residual_reasons: vec!["verify_timeout"],
+                trace_deleted: false,
+                timed_out: true,
+            },
+        }
     }
 
     /// oneshot 随行退出收口（main.rs 在 `shutdown_after_trigger` 的 teardown 之后
@@ -849,6 +1068,13 @@ impl AftermathDriver {
     /// 退出 teardown 已关 adapter，stop 路径留下的残留可能已收敛）→ 摘要 → 删痕。
     /// 不发布状态事件（`heartbeat_shutdown` 已发 Idle；进程即将退出）。
     pub async fn on_engine_exit(&self) -> AftermathOutcome {
+        let _admission = self.admission.access.lock().await;
+        if self.runtime.is_assembling() || self.runtime.is_connected() {
+            return Self::unfinished_outcome(
+                reason::ONESHOT_ENGINE_EXIT,
+                "assembly_or_data_plane_pending",
+            );
+        }
         let record = self.current_record();
         self.settle(reason::ONESHOT_ENGINE_EXIT, record, &[]).await
     }
@@ -862,16 +1088,21 @@ impl AftermathDriver {
         expected_retained_adapters: &[String],
     ) -> AftermathOutcome {
         let started = Instant::now();
-        // 痕 → Aftermath（验证前落——Aftermath 即"善后进行中/未竟"的信号；失败只
-        // 告警，验证继续，残留由验证如实上报）。
-        if let Some(gate) = self.gate.as_ref()
-            && record.is_some()
-        {
-            gate.mark_aftermath(&self.log);
-        }
+        // 痕 → Aftermath；真实 I/O 失败保留到最终结果，探针成功不能覆盖它。
+        let trace_mark = match (&self.gate, &record) {
+            (Some(gate), Some(record)) => {
+                gate.finish_stop_trace(&record.connection_id, false, || {
+                    self.headless.clear_all();
+                    if let Some(stats) = &self.stats {
+                        stats.registry().set_phase(generated::StatsPhase::Idle);
+                    }
+                })
+            }
+            _ => Ok(crate::connection_trace::RollbackTraceEffect::Absent),
+        };
         // 有界验证（超时按未验证；痕留 Aftermath 待下次预检/善后裁定）。验证器
         // 拿记录克隆（settle 后续仍要据 `record` 判删痕）。
-        let (verified, residual, timed_out, failed_domains, error_reasons, blocking_ids) =
+        let (mut verified, mut residual, timed_out, failed_domains, error_reasons, blocking_ids) =
             match tokio::time::timeout(VERIFY_BOUND, (self.verifier)(record.clone())).await {
                 Ok(report) => {
                     let residual = residual_reasons(&report, expected_retained_adapters);
@@ -923,9 +1154,37 @@ impl AftermathDriver {
                     String::new(),
                 ),
             };
-        // 终态摘要（痕迹即证据；在删痕**之前**落——痕删除是收口的最后一步动作，
-        // 摘要先于动作成案）。`has_trace` 字段区分"删痕"与"无痕可删"（gate 未接线
-        // /损坏痕留给预检——后者绝不删）。
+        // 验证不拥有删除权；原身份仍匹配且必要标记成功才可收口。
+        let mut trace_deleted = false;
+        if let Err(error) = &trace_mark {
+            verified = false;
+            residual.push("trace_io_failed");
+            self.log.emit(
+                LogLevel::Warn,
+                "engine",
+                "aftermath.trace_failed",
+                "必要 trace 收尾失败，保留恢复记录",
+                &[("detail", error)],
+            );
+        } else if let (Some(gate), Some(record)) = (&self.gate, &record) {
+            let result = gate.finish_stop_trace(&record.connection_id, verified, || {});
+            match result {
+                Ok(crate::connection_trace::RollbackTraceEffect::Deleted) => trace_deleted = true,
+                Err(error) => {
+                    verified = false;
+                    residual.push("trace_io_failed");
+                    self.log.emit(
+                        LogLevel::Warn,
+                        "engine",
+                        "aftermath.trace_failed",
+                        "必要 trace 收尾失败，保留恢复记录",
+                        &[("detail", &error)],
+                    );
+                }
+                _ => {}
+            }
+        }
+        // 必要 trace I/O 已完成，摘要反映最终事实；损坏记录继续保留。
         let has_trace = record.is_some();
         if verified {
             self.log.emit(
@@ -960,19 +1219,6 @@ impl AftermathDriver {
                 ],
             );
         }
-        // 删痕 LAST（只在验证通过后；无痕会话/损坏痕 = false——无事可删）。
-        let trace_deleted = verified
-            && has_trace
-            && self
-                .gate
-                .as_ref()
-                .is_some_and(|gate| gate.delete_aftermath_trace(&self.log));
-        // 会话终局：清无头态与拉起账本（T10）+ stats 回 Idle（teardown 类善后
-        // 完成后引擎无连接）。
-        self.headless.clear_all();
-        if let Some(stats) = &self.stats {
-            stats.registry().set_phase(generated::StatsPhase::Idle);
-        }
         AftermathOutcome {
             reason,
             verified,
@@ -1003,21 +1249,11 @@ impl AftermathDriver {
         })
     }
 
-    /// cancel → 有界等待在途组装段边界自清理（5s/50ms，镜像 `stop_tunnel`）→ teardown。
+    /// 原运行时在 teardown 内以完成通知有界等待；调用方不再重复轮询。
     async fn teardown_with_cancel(&self) -> Result<(), String> {
-        self.runtime.cancel();
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || {
-            let polls = u64::try_from(
-                ASSEMBLY_CANCEL_WAIT.as_millis() / ASSEMBLY_CANCEL_POLL.as_millis(),
-            )
-            .unwrap_or(100);
-            for _ in 0..polls {
-                if !runtime.is_assembling() {
-                    break;
-                }
-                std::thread::sleep(ASSEMBLY_CANCEL_POLL);
-            }
+            runtime.cancel();
             runtime.teardown()
         })
         .await
@@ -1047,20 +1283,32 @@ pub fn open_process_liveness() -> CoreLiveness {
     })
 }
 
-/// 生产接缝构造：预检验证器（`run_preflight_for` 包装；`user_sid`/命名空间取自门）。
+/// 生产接缝构造：预检验证器（`run_preflight_for` 包装；`user_sid`/命名空间取自门；
+/// W1 归属事实取自 runtime 探针——善后验证同样不得把本引擎持有的持久网卡判为孤儿）。
 #[must_use]
 pub fn preflight_verifier(
     user_sid: Option<String>,
     campus_namespaces: Vec<String>,
+    ownership: Arc<dyn crate::connect_gate::AdapterOwnershipProbe>,
 ) -> AftermathVerifier {
     Arc::new(move |hint| {
         let user_sid = user_sid.clone();
         let namespaces = campus_namespaces.clone();
+        let ownership = Arc::clone(&ownership);
         Box::pin(async move {
+            let held_adapter_name = ownership.held_adapter_name();
+            // 等效判定启发式服务器集（与连接门同一常量；external-provided 为
+            // ReportOnly 不阻断善后验证，T3 才是权威判定）。
+            let campus_servers: Vec<String> = preflight::CAMPUS_DNS_SERVERS
+                .iter()
+                .map(|server| (*server).to_owned())
+                .collect();
             preflight::run_preflight_for(&PreflightInputs {
                 record_hint: hint.as_ref(),
                 user_sid: user_sid.as_deref(),
                 campus_namespaces: &namespaces,
+                campus_dns_servers: &campus_servers,
+                held_adapter_name: held_adapter_name.as_deref(),
             })
             .await
         })

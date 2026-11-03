@@ -73,11 +73,27 @@ struct Notices {
     last: Mutex<Option<PacketEvent>>,
 }
 
+/// 已完成worker的正常会话终结原因，与本次关闭失败分开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtrustNormalEnd {
+    RemoteEof,
+    HostClosed,
+}
+impl AtrustNormalEnd {
+    pub const fn category(self) -> &'static str {
+        match self {
+            Self::RemoteEof => "connection_eof",
+            Self::HostClosed => "host_closed",
+        }
+    }
+}
+
 /// 一个节点组的连接 owner。不创建网卡或路由；宿主 teardown 先停网卡线程，再关闭它。
 pub struct AtrustPacketTunnel {
     vip: Ipv4Addr,
     lifecycle: Session,
     worker: Option<JoinHandle<Result<(), PacketSessionError>>>,
+    completion: Option<Result<Option<AtrustNormalEnd>, String>>,
     notices: Arc<Notices>,
     host_shutdown: Arc<AtomicBool>,
 }
@@ -195,6 +211,7 @@ impl AtrustPacketTunnel {
                 vip,
                 lifecycle,
                 worker: Some(worker),
+                completion: None,
                 notices,
                 host_shutdown,
             },
@@ -231,26 +248,46 @@ impl AtrustPacketTunnel {
         self.host_shutdown.store(true, Ordering::Release);
     }
 
-    /// 显式关闭并等待协议释放连接；可重复调用。
+    /// 兼容入口：正常会话终结不使关闭动作失败。
     /// # Errors
-    /// 保留协议失败的脱敏原因；worker panic/cancel 不回显任务内部内容。
+    /// 返回真实worker异常和协议失败的稳定脱敏类别。
     pub async fn close(&mut self) -> Result<(), String> {
+        self.close_observed().await.map(|_| ())
+    }
+
+    /// 取得本次关闭结果及类型化正常终结原因；结果归原owner所有，重复调用稳定返回。
+    /// # Errors
+    /// worker panic/cancel及非正常协议失败仍返回错误，不回显任务内部内容。
+    pub async fn close_observed(&mut self) -> Result<Option<AtrustNormalEnd>, String> {
         let _ = self.lifecycle.close();
-        if let Some(worker) = self.worker.take() {
-            match worker.await {
-                Err(_) => return Err("worker_stopped".to_owned()),
-                Ok(Err(error)) => return Err(packet_session_failure_category(&error).to_owned()),
-                Ok(Ok(())) => {}
-            }
+        if let Some(completion) = &self.completion {
+            return completion.clone();
         }
-        Ok(())
+        if let Some(worker) = self.worker.as_mut() {
+            let completion = match worker.await {
+                Err(_) => Err("worker_stopped".to_owned()),
+                Ok(Err(PacketSessionError::Connection(ConnectionError::Io {
+                    kind: std::io::ErrorKind::UnexpectedEof,
+                    ..
+                }))) => Ok(Some(AtrustNormalEnd::RemoteEof)),
+                Ok(Err(PacketSessionError::HostClosed)) => Ok(Some(AtrustNormalEnd::HostClosed)),
+                Ok(Err(error)) => Err(packet_session_failure_category(&error).to_owned()),
+                Ok(Ok(())) => Ok(None),
+            };
+            self.completion = Some(completion);
+            self.worker.take();
+        }
+        self.completion.clone().unwrap_or(Ok(None))
     }
 }
 
 /// 将协议 worker 终止原因压缩为稳定类别；不输出底层错误正文、节点地址或认证材料。
 fn packet_session_failure_category(error: &PacketSessionError) -> &'static str {
     match error {
-        PacketSessionError::Connection(ConnectionError::Io(std::io::ErrorKind::UnexpectedEof)) => {
+        PacketSessionError::Connection(ConnectionError::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            ..
+        }) => {
             "connection_eof"
         }
         PacketSessionError::Connection(ConnectionError::HeartbeatTimeout) => "heartbeat_timeout",

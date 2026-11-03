@@ -26,20 +26,21 @@
 //!   吸收即落在此——预检七域取代退出期硬断言，退出期兜底仍由 main.rs 既有
 //!   清理路径承担）。
 //!
-//! 组装失败/回滚**不删痕**（connecting 态 = 善后未竟，留给下次预检裁定，§2.4）。
+//! W2 阶段 5 有意修订旧「组装失败/回滚不删痕」：实际补偿干净后只删本次 UUID 的痕；
+//! 未竟保留痕并写稳定域 id，留给下次预检观察真实残留。账本 Registered 不是清理结果。
 //! 删除权的其余情形（teardown 策略 / 无头 R1 终态 / core 崩溃环 / 断开路径验证
-//! 后删）归 T5；本模块只在「预检干净后重建」与「本 engine 自留状态下的重建」
-//! 两个位置行使删除（前者 = 预检复验代替善后验证；后者见
+//! 后删）归 T5；本模块在实际回滚干净、「预检干净后重建」与「本 engine 自留状态下的重建」
+//! 行使删除（预检复验代替善后验证；自留重建见
 //! [`ConnectGate::replace_connect_trace`]）。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::connection_trace::{
-    ConnectionTraceStore, TraceEngineMode, TraceKind, TraceOnCoreExit, TracePatch, TraceReadOutcome,
-    TraceRecord, TraceReconnectPolicy, TraceState, TraceStoreError,
+    ConnectionTraceStore, TraceEngineMode, TraceKind, TraceOnCoreExit, TracePatch,
+    TraceReadOutcome, TraceReconnectPolicy, TraceRecord, TraceState, TraceStoreError,
 };
 use crate::log_sink::{LogLevel, LogSink};
 use crate::preflight::{self, PreflightInputs};
@@ -63,6 +64,31 @@ pub enum GateAdmission {
     /// 本 engine 自留状态（Live 接力 / Paused 保网卡，D12）下的删旧建新——
     /// 预检前提「无存活 engine 会话」不成立，不跑预检。
     RecreatedInPlace,
+}
+
+/// 本次实际落盘的回执；connection_id 是建痕时的 UUID，不是 operation_id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceReceipt {
+    pub admission: GateAdmission,
+    pub connection_id: String,
+}
+
+impl TraceReceipt {
+    pub fn into_ledger_fact(self) -> crate::connect_ledger::TraceAdmission {
+        use crate::connect_ledger::TraceAdmission;
+        match self.admission {
+            GateAdmission::CreatedFresh | GateAdmission::FreshAfterPreflight => {
+                TraceAdmission::Created {
+                    connection_id: self.connection_id,
+                }
+            }
+            GateAdmission::RecreatedAfterPreflight | GateAdmission::RecreatedInPlace => {
+                TraceAdmission::Replaced {
+                    connection_id: self.connection_id,
+                }
+            }
+        }
+    }
 }
 
 /// 连接门拒绝（结构化稳定 id；UI 文案按 id 路由，后置阶段）。
@@ -101,6 +127,14 @@ pub struct ConnectEnvelope {
     pub kind: TraceKind,
 }
 
+/// W1：预检的网卡归属事实来源。预检与 runtime 同进程，但门构造早于 runtime
+/// （runtime 需从门读校园命名空间）——门持有该探针的共享槽，runtime 构造后
+/// 经 [`ConnectGate::attach_ownership`] 挂接；预检执行时现读。
+pub trait AdapterOwnershipProbe: Send + Sync {
+    /// 本进程 NicOwner 当前持有的网卡名（None = 未持有）。
+    fn held_adapter_name(&self) -> Option<String>;
+}
+
 /// 连接门：持有 trace store + engine 形态 + 发起用户 SID + 用户配置目录。
 ///
 /// 由 `grpc_server::with_real_tunnel` 构建并注入服务与运行时两侧；测试构造
@@ -121,6 +155,9 @@ pub struct ConnectGate {
     /// 预检执行器（生产 = 真实 `run_preflight_for` 包装；测试注入假报告——
     /// 与 T5 善后验证器同一接缝形态，见 [`PreflightRunner`]）。
     preflight_runner: PreflightRunner,
+    /// W1：网卡归属探针共享槽（real 预检执行器与 [`Self::attach_ownership`]
+    /// 持有同一 Arc；None = 未挂接，预检按"未持有"判定——保守但不误放 D 类）。
+    adapter_ownership: Arc<std::sync::RwLock<Option<Arc<dyn AdapterOwnershipProbe>>>>,
 }
 
 impl ConnectGate {
@@ -144,8 +181,19 @@ impl ConnectGate {
             );
             error
         });
-        let runner = Self::real_preflight_runner(&user_sid, &config_dir);
-        Self::with_store(store.ok(), engine_mode, user_sid, config_dir, runner)
+        let ownership: Arc<std::sync::RwLock<Option<Arc<dyn AdapterOwnershipProbe>>>> =
+            Arc::new(std::sync::RwLock::new(None));
+        let runner = Self::real_preflight_runner(&user_sid, &config_dir, Arc::clone(&ownership));
+        let mut gate = Self::with_store(store.ok(), engine_mode, user_sid, config_dir, runner);
+        gate.adapter_ownership = ownership;
+        gate
+    }
+
+    /// W1：挂接网卡归属探针（runtime 构造晚于门；服务开始受理前调用一次）。
+    pub fn attach_ownership(&self, probe: Arc<dyn AdapterOwnershipProbe>) {
+        if let Ok(mut slot) = self.adapter_ownership.write() {
+            *slot = Some(probe);
+        }
     }
 
     /// 指定 store 载体上的门（crate 内组装接缝：生产经 [`Self::open`] 打开机器级
@@ -166,27 +214,44 @@ impl ConnectGate {
             config_dir,
             preflight_done: AtomicBool::new(false),
             preflight_runner,
+            adapter_ownership: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
     /// 生产预检执行器：包装 [`preflight::run_preflight_for`]——user_sid 取门自身
     /// 字段；校园命名空间按 config_dir **每次调用现读**（与 T4 受理路径同一事实
-    /// 源，配置变更即时生效）。
+    /// 源，配置变更即时生效）；网卡归属从共享槽**每次执行现读**（held 状态随
+    /// 连接/断开变化）。
     fn real_preflight_runner(
         user_sid: &Option<String>,
         config_dir: &Path,
+        ownership: Arc<std::sync::RwLock<Option<Arc<dyn AdapterOwnershipProbe>>>>,
     ) -> PreflightRunner {
         let user_sid = user_sid.clone();
         let config_dir = config_dir.to_path_buf();
         Arc::new(move |hint| {
             let user_sid = user_sid.clone();
             let config_dir = config_dir.clone();
+            let ownership = Arc::clone(&ownership);
             Box::pin(async move {
                 let namespaces = campus_namespaces_in(&config_dir);
+                let held_adapter_name = ownership
+                    .read()
+                    .ok()
+                    .and_then(|slot| slot.clone())
+                    .and_then(|probe| probe.held_adapter_name());
+                // 等效判定启发式服务器集（已知校园解析器常量；T3 以会话实际
+                // 下发服务器做权威重判——门侧误判方向安全）。
+                let campus_servers: Vec<String> = preflight::CAMPUS_DNS_SERVERS
+                    .iter()
+                    .map(|server| (*server).to_owned())
+                    .collect();
                 preflight::run_preflight_for(&PreflightInputs {
                     record_hint: hint.as_ref(),
                     user_sid: user_sid.as_deref(),
                     campus_namespaces: &namespaces,
+                    campus_dns_servers: &campus_servers,
+                    held_adapter_name: held_adapter_name.as_deref(),
                 })
                 .await
             })
@@ -206,6 +271,17 @@ impl ConnectGate {
         envelope: &ConnectEnvelope,
         log: &LogSink,
     ) -> Result<GateAdmission, GateRejection> {
+        self.ensure_connect_trace_with_receipt(envelope, log)
+            .await
+            .map(|receipt| receipt.admission)
+    }
+
+    /// 新建或预检重建的实际落盘回执；不改变原门检与拒绝语义。
+    pub async fn ensure_connect_trace_with_receipt(
+        &self,
+        envelope: &ConnectEnvelope,
+        log: &LogSink,
+    ) -> Result<TraceReceipt, GateRejection> {
         let record = self.build_record(envelope);
         let sid = self.user_sid_for_write()?;
         let store = self.store_for_write()?;
@@ -220,73 +296,84 @@ impl ConnectGate {
             && let Ok(TraceReadOutcome::Absent) = store.read(sid)
         {
             log.emit(
-                    LogLevel::Info,
-                    "engine",
-                    "connect.gate.preflight.started",
-                    "版本升级或本进程首连触发连接前只读预检（无遗留痕迹）",
-                    &[("triggers", &triggers.join(","))],
-                );
-                let report = (self.preflight_runner)(None).await;
-                self.note_preflight_ran();
-                preflighted_this_admission = true;
-                let reason_ids = preflight::blocking_reasons(&report);
-                if !reason_ids.is_empty() {
-                    log.emit(
-                        LogLevel::Warn,
-                        "engine",
-                        "connect.gate.preflight.blocked",
-                        "连接前预检发现未决残留，本次连接被拒绝",
-                        &[
-                            ("reason_ids", &reason_ids.join(",")),
-                            ("triggers", &triggers.join(",")),
-                            (
-                                "elapsed_ms",
-                                &report.elapsed.as_millis().to_string(),
-                            ),
-                        ],
-                    );
-                    return Err(GateRejection {
-                        reason_ids,
-                        summary: format!(
-                            "预检未决发现（触发源 {}）：{}",
-                            triggers.join(","),
-                            report
-                                .domains
-                                .iter()
-                                .filter(|domain| !domain.findings.is_empty())
-                                .map(|domain| {
-                                    format!("{:?}×{}", domain.domain, domain.findings.len())
-                                })
-                                .collect::<Vec<_>>()
-                                .join("；"),
-                        ),
-                    });
-                }
+                LogLevel::Info,
+                "engine",
+                "connect.gate.preflight.started",
+                "版本升级或本进程首连触发连接前只读预检（无遗留痕迹）",
+                &[("triggers", &triggers.join(","))],
+            );
+            let report = (self.preflight_runner)(None).await;
+            self.note_preflight_ran();
+            preflighted_this_admission = true;
+            let reason_ids = preflight::blocking_reasons(&report);
+            if !reason_ids.is_empty() {
+                let mut fields: Vec<(&str, String)> = vec![
+                    ("reason_ids", reason_ids.join(",")),
+                    ("triggers", triggers.join(",")),
+                    ("elapsed_ms", report.elapsed.as_millis().to_string()),
+                ];
+                fields.extend(preflight_summary_fields(&report));
+                let fields_ref: Vec<(&str, &str)> = fields
+                    .iter()
+                    .map(|(key, value)| (*key, value.as_str()))
+                    .collect();
                 log.emit(
-                    LogLevel::Info,
+                    LogLevel::Warn,
                     "engine",
-                    "connect.gate.preflight.passed",
-                    "预检干净，放行本次连接（无遗留痕迹，直接落新痕）",
-                    &[
-                        ("triggers", &triggers.join(",")),
-                        ("elapsed_ms", &report.elapsed.as_millis().to_string()),
-                    ],
+                    "connect.gate.preflight.blocked",
+                    "连接前预检发现未决残留，本次连接被拒绝",
+                    &fields_ref,
                 );
+                return Err(GateRejection {
+                    reason_ids,
+                    summary: format!(
+                        "预检未决发现（触发源 {}）：{}",
+                        triggers.join(","),
+                        report
+                            .domains
+                            .iter()
+                            .filter(|domain| !domain.findings.is_empty())
+                            .map(|domain| {
+                                format!("{:?}×{}", domain.domain, domain.findings.len())
+                            })
+                            .collect::<Vec<_>>()
+                            .join("；"),
+                    ),
+                });
+            }
+            let mut passed_fields: Vec<(&str, String)> = vec![
+                ("triggers", triggers.join(",")),
+                ("elapsed_ms", report.elapsed.as_millis().to_string()),
+            ];
+            passed_fields.extend(preflight_summary_fields(&report));
+            let passed_ref: Vec<(&str, &str)> = passed_fields
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .collect();
+            log.emit(
+                LogLevel::Info,
+                "engine",
+                "connect.gate.preflight.passed",
+                "预检干净，放行本次连接（无遗留痕迹，直接落新痕）",
+                &passed_ref,
+            );
         }
-        match store.create(sid, &record) {
+        let admission = match store.create(sid, &record) {
             Ok(()) => Ok(if preflighted_this_admission {
                 GateAdmission::FreshAfterPreflight
             } else {
                 GateAdmission::CreatedFresh
             }),
-            Err(TraceStoreError::AlreadyExists) => {
-                self.resolve_stale(sid, &record, log).await
-            }
+            Err(TraceStoreError::AlreadyExists) => self.resolve_stale(sid, &record, log).await,
             Err(error) => Err(GateRejection::carrier(
                 "trace_create_failed",
                 format!("trace create 失败：{error:?}"),
             )),
-        }
+        }?;
+        Ok(TraceReceipt {
+            admission,
+            connection_id: record.connection_id,
+        })
     }
 
     /// T7 触发源评估（痕外，§三）：返回命中的触发源 id 清单（空 = 无）。
@@ -307,14 +394,8 @@ impl ConnectGate {
                 "connect.gate.preflight.version_marker",
                 "上次连接版本与当前 engine 版本不一致（或标记缺失/损坏），首连将强制预检",
                 &[
-                    (
-                        "engine_version",
-                        crate::version_marker::ENGINE_VERSION,
-                    ),
-                    (
-                        "marker",
-                        marker.as_deref().unwrap_or("<unknown>"),
-                    ),
+                    ("engine_version", crate::version_marker::ENGINE_VERSION),
+                    ("marker", marker.as_deref().unwrap_or("<unknown>")),
                 ],
             );
             triggers.push("version_upgrade");
@@ -350,6 +431,15 @@ impl ConnectGate {
         &self,
         envelope: &ConnectEnvelope,
     ) -> Result<GateAdmission, GateRejection> {
+        self.replace_connect_trace_with_receipt(envelope)
+            .map(|receipt| receipt.admission)
+    }
+
+    /// 自留状态重建的实际落盘回执。
+    pub fn replace_connect_trace_with_receipt(
+        &self,
+        envelope: &ConnectEnvelope,
+    ) -> Result<TraceReceipt, GateRejection> {
         let record = self.build_record(envelope);
         let sid = self.user_sid_for_write()?;
         let store = self.store_for_write()?;
@@ -365,7 +455,10 @@ impl ConnectGate {
                 format!("trace replace 重建失败：{error:?}"),
             )
         })?;
-        Ok(GateAdmission::RecreatedInPlace)
+        Ok(TraceReceipt {
+            admission: GateAdmission::RecreatedInPlace,
+            connection_id: record.connection_id,
+        })
     }
 
     /// 装配成功回写：connecting → live + 装配字段补丁（网卡/NRPT owner/端口/PID）。
@@ -415,6 +508,26 @@ impl ConnectGate {
         if let Err(error) = store.patch_fields(sid, patch) {
             self.warn_trace(log, "patch_fields", &error);
         }
+    }
+
+    /// 只收口已完成真实资源回滚的关联 trace；错误回传调用者，Failed 仍必须上报。
+    pub(crate) fn finish_rollback(
+        &self,
+        connection_id: &str,
+        outcome: &crate::connect_ledger::RollbackOutcome,
+    ) -> Result<crate::connection_trace::RollbackTraceEffect, String> {
+        let sid = self.user_sid_for_write().map_err(|error| error.summary)?;
+        let store = self.store_for_write().map_err(|error| error.summary)?;
+        store
+            .finish_rollback(
+                sid,
+                connection_id,
+                &TracePatch {
+                    rollback_unresolved: Some(outcome.unresolved_domains()),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| format!("engine: rollback trace store failed: {error:?}"))
     }
 
     /// T6a：重连成功回写（§2.4：**engine 在重连成功时**调用；采纳路径不得触碰）。
@@ -480,18 +593,21 @@ impl ConnectGate {
         self.note_preflight_ran();
         let reason_ids = preflight::blocking_reasons(&report);
         if !reason_ids.is_empty() {
+            let mut fields: Vec<(&str, String)> = vec![
+                ("reason_ids", reason_ids.join(",")),
+                ("elapsed_ms", report.elapsed.as_millis().to_string()),
+            ];
+            fields.extend(preflight_summary_fields(&report));
+            let fields_ref: Vec<(&str, &str)> = fields
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .collect();
             log.emit(
                 LogLevel::Warn,
                 "engine",
                 "connect.gate.preflight.blocked",
                 "连接前预检发现未决残留，本次连接被拒绝",
-                &[
-                    ("reason_ids", &reason_ids.join(",")),
-                    (
-                        "elapsed_ms",
-                        &report.elapsed.as_millis().to_string(),
-                    ),
-                ],
+                &fields_ref,
             );
             return Err(GateRejection {
                 reason_ids,
@@ -507,7 +623,10 @@ impl ConnectGate {
                     report
                         .cleanup
                         .iter()
-                        .filter(|action| matches!(action.outcome, preflight::CleanupOutcome::Failed(_)))
+                        .filter(|action| matches!(
+                            action.outcome,
+                            preflight::CleanupOutcome::Failed(_)
+                        ))
                         .count()
                 ),
             });
@@ -520,17 +639,21 @@ impl ConnectGate {
             ));
         }
         store.create(sid, record).map_err(|error| {
-            GateRejection::carrier(
-                "trace_create_failed",
-                format!("预检后重建失败：{error:?}"),
-            )
+            GateRejection::carrier("trace_create_failed", format!("预检后重建失败：{error:?}"))
         })?;
+        let mut passed_fields: Vec<(&str, String)> =
+            vec![("elapsed_ms", report.elapsed.as_millis().to_string())];
+        passed_fields.extend(preflight_summary_fields(&report));
+        let passed_ref: Vec<(&str, &str)> = passed_fields
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
         log.emit(
             LogLevel::Info,
             "engine",
             "connect.gate.preflight.passed",
             "预检干净，遗留痕迹已清除并为本次连接重建",
-            &[("elapsed_ms", &report.elapsed.as_millis().to_string())],
+            &passed_ref,
         );
         Ok(GateAdmission::RecreatedAfterPreflight)
     }
@@ -562,6 +685,9 @@ impl ConnectGate {
             engine_pid: std::process::id(),
             adapter_names: Vec::new(),
             nrpt_owner_guids: Vec::new(),
+            nrpt_external_forms: Vec::new(),
+            nrpt_taken_over_forms: Vec::new(),
+            rollback_unresolved: Vec::new(),
             proxy_ports: Vec::new(),
         }
     }
@@ -657,6 +783,33 @@ impl ConnectGate {
         }
     }
 
+    /// 必要收尾读取：保留实际 I/O 错误，不能将不可读误作无痕。
+    pub(crate) fn stop_trace_snapshot(&self) -> Result<Option<TraceRecord>, String> {
+        let sid = self.user_sid_for_write().map_err(|error| error.summary)?;
+        let store = self.store_for_write().map_err(|error| error.summary)?;
+        match store
+            .read(sid)
+            .map_err(|error| format!("trace read: {error:?}"))?
+        {
+            TraceReadOutcome::Present(record) => Ok(Some(record)),
+            TraceReadOutcome::Absent => Ok(None),
+            TraceReadOutcome::Corrupt => Err("trace read: corrupt".into()),
+        }
+    }
+
+    pub(crate) fn finish_stop_trace(
+        &self,
+        connection_id: &str,
+        delete: bool,
+        on_current: impl FnOnce(),
+    ) -> Result<crate::connection_trace::RollbackTraceEffect, String> {
+        let sid = self.user_sid_for_write().map_err(|error| error.summary)?;
+        let store = self.store_for_write().map_err(|error| error.summary)?;
+        store
+            .finish_aftermath(sid, connection_id, delete, on_current)
+            .map_err(|error| format!("trace finish: {error:?}"))
+    }
+
     /// 痕 → Aftermath（善后收口路径；失败只告警——验证仍继续，残留由验证如实上报）。
     pub fn mark_aftermath(&self, log: &LogSink) {
         let Ok(sid) = self.user_sid_for_write() else {
@@ -669,23 +822,6 @@ impl ConnectGate {
             self.warn_trace(log, "update_state(aftermath)", &error);
         }
     }
-
-    /// 删痕（**只在善后验证通过后调用**，§2.4 删除权；返回是否删除成功）。
-    pub fn delete_aftermath_trace(&self, log: &LogSink) -> bool {
-        let Ok(sid) = self.user_sid_for_write() else {
-            return false;
-        };
-        let Some(store) = self.store.as_ref() else {
-            return false;
-        };
-        match store.delete(sid) {
-            Ok(()) => true,
-            Err(error) => {
-                self.warn_trace(log, "delete(善后验证通过后)", &error);
-                false
-            }
-        }
-    }
 }
 
 /// Unix 毫秒时间戳（时钟回拨等异常退化为 0）。
@@ -693,6 +829,59 @@ fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// 预检结构化摘要 fields（D8 阶段 2 观测缺口 §1.3 修复）：`preflight.passed/
+/// blocked` 事件此前只落 `reason_ids+elapsed`——`Nrpt×4` 的发现构成、失败清理
+/// 动作的目标与错误、复验状态均不可复原（2026-10-09 00:36 事故复盘）。本函数
+/// 从 [`preflight::PreflightReport`] 渲染三组 fields（NRPT 发现 detail 已含
+/// namespace/servers/store 材料）：
+/// - `nrpt_findings`：NRPT 域逐条发现（kind + detail）；
+/// - `cleanup_failed_actions`：失败动作（目标[错误文本]，含域与 finding kind）；
+/// - `post_cleanup`：复验状态（域:状态，仅复验过的域）。
+fn preflight_summary_fields(report: &preflight::PreflightReport) -> Vec<(&'static str, String)> {
+    let mut fields = Vec::new();
+    for domain in &report.domains {
+        if domain.domain == preflight::DomainKind::Nrpt && !domain.findings.is_empty() {
+            fields.push((
+                "nrpt_findings",
+                domain
+                    .findings
+                    .iter()
+                    .map(|finding| format!("{}:{}", finding.kind, finding.detail))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            ));
+        }
+    }
+    let failed_actions: Vec<String> = report
+        .cleanup
+        .iter()
+        .filter_map(|action| match &action.outcome {
+            preflight::CleanupOutcome::Failed(message) => Some(format!(
+                "{:?}/{} {}[{message}]",
+                action.domain, action.finding_kind, action.target
+            )),
+            _ => None,
+        })
+        .collect();
+    if !failed_actions.is_empty() {
+        fields.push(("cleanup_failed_actions", failed_actions.join(" | ")));
+    }
+    let post: Vec<String> = report
+        .domains
+        .iter()
+        .filter_map(|domain| {
+            domain
+                .post_cleanup_status
+                .as_ref()
+                .map(|status| format!("{:?}:{:?}", domain.domain, status))
+        })
+        .collect();
+    if !post.is_empty() {
+        fields.push(("post_cleanup", post.join(",")));
+    }
+    fields
 }
 
 /// 读用户 config（尽力：`<config_dir>/config.json`；缺省/不可解析 → None）。

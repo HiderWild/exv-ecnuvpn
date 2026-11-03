@@ -12,6 +12,7 @@ pub(super) struct SleepConnection {
 impl LiveConnectionProjection {
     fn session_reconnect_enabled(&self) -> bool {
         lock_recover(&self.reconnect_session_policy)
+            .as_ref()
             .is_some_and(|policy| policy.enabled)
     }
 
@@ -23,7 +24,9 @@ impl LiveConnectionProjection {
             return None;
         }
         Some(SleepConnection {
-            generation: self.reconnect_generation.load(Ordering::Acquire),
+            generation: self
+                .reconnect_generation
+                .source_generation(&snapshot.operation_id)?,
             operation_id: snapshot.operation_id,
         })
     }
@@ -66,7 +69,7 @@ impl LiveConnectionProjection {
                 // 接口恢复晚于 30 秒也不应贸然拆掉旧隧道并消耗重连预算。
                 // 等待期间用户的新连接/断开撤销本次恢复；保存设置只影响下次连接。
                 loop {
-                    if connection.generation != engine.reconnect_generation.load(Ordering::Acquire)
+                    if connection.generation != engine.reconnect_generation.current()
                         || !engine.session_reconnect_enabled()
                     {
                         break;
@@ -83,7 +86,7 @@ impl LiveConnectionProjection {
     }
 
     pub(super) async fn resume_after_sleep(&self, connection: SleepConnection) {
-        if connection.generation != self.reconnect_generation.load(Ordering::Acquire)
+        if connection.generation != self.reconnect_generation.current()
             || !self.session_reconnect_enabled()
             || self.reconnect_active.load(Ordering::Acquire)
         {
@@ -105,23 +108,33 @@ impl LiveConnectionProjection {
                         request_digest: intent.request_digest,
                     }),
                 };
-                let next_generation = connection.generation.wrapping_add(1);
-                if self.reconnect_generation.compare_exchange(
-                    connection.generation, next_generation, Ordering::AcqRel, Ordering::Acquire,
-                ).is_err() { return; }
-                if let Err(error) = self.stop_in_generation(&request, next_generation, true).await {
-                    self.logs.aggregator().append_core(
-                        "warn",
-                        "core",
-                        "WAKE_STOP_FAILED",
-                        error.message(),
-                        &[],
-                    );
+                let Some(next_generation) =
+                    self.reconnect_generation.advance_if(connection.generation)
+                else {
                     return;
-                }
-                if self.reconnect_generation.load(Ordering::Acquire)
-                    != connection.generation.wrapping_add(1)
+                };
+                match self
+                    .stop_in_generation(&request, next_generation, true)
+                    .await
                 {
+                    Ok(reply)
+                        if reply
+                            .terminal
+                            .as_ref()
+                            .and_then(|terminal| terminal.stop_completion.as_ref())
+                            .is_some_and(|done| done.stopped && !done.blocks_new_connect) => {}
+                    _ => {
+                        self.logs.aggregator().append_core(
+                            "warn",
+                            "core",
+                            "WAKE_STOP_FAILED",
+                            "唤醒恢复停止尚未完成，不派发下一连接",
+                            &[],
+                        );
+                        return;
+                    }
+                }
+                if self.reconnect_generation.current() != connection.generation.wrapping_add(1) {
                     return;
                 }
             }

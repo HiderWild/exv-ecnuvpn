@@ -30,6 +30,10 @@ pub struct VpnError {
     pub code: String,
     /// 面向用户的简短描述（不含诊断栈）。
     pub message: String,
+    /// 稳定失败原因 id（EXV_UNFREEZE 2026-10-09，tag 8；空 = 缺省）。前端
+    /// `lib/copy-tables.ts` 按 id 映射文案（与壳侧 `wire.rs` 的 reason 文案表
+    /// 注释互指 + 一致性测试钉住）。
+    pub reason: String,
 }
 
 /// RuntimeSnapshot 的 state oneof 各分支。
@@ -155,6 +159,9 @@ pub struct ServiceStatus {
 /// `KernelControl.ServiceControl` 的 UI 视图（proto `ServiceControlReply`；S3/D5）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceControlReply {
+    /// Darwin 安装文件版本，与运行状态分开呈现。
+    #[serde(default)]
+    pub service_version: Option<exv_vpn_darwin_core::service_revision::ServiceBundleStatus>,
     /// action 执行后（或 query 时）的当前服务状态；`None` = 查询失败未获取。
     pub service_status: Option<ServiceStatus>,
     /// action 是否成功（query 恒 true；变更 action 反映提权子命令结果）。
@@ -175,9 +182,39 @@ pub enum ServiceControlAction {
     RotateKey,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineReconnect {
+    pub attempt: u32,
+    pub next_retry_at_ms: i64,
+    pub reason: String,
+}
+
+/// 实际停止、剩余义务与已完成动作的错误，互相独立。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopCompletion {
+    pub stopped: bool,
+    pub blocks_new_connect: bool,
+    pub errors: Vec<VpnError>,
+}
+
+/// Core 已接纳载荷的非秘密会话身份；仅供显示，不读取配置或参与授权。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIdentity {
+    pub protocol: String,
+    pub username: String,
+    pub server: String,
+}
+
 /// RuntimeSnapshot 的 UI 视图（mirror 自 proto RuntimeSnapshot）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
+    /// 现有 wire tag 20；缺失表示无可用活动身份，不能在此补配置值。
+    #[serde(default)]
+    pub session_identity: Option<SessionIdentity>,
+    #[serde(default)]
+    pub engine_reconnect: Option<EngineReconnect>,
+    #[serde(default)]
+    pub stop_completion: Option<StopCompletion>,
     pub runtime: RuntimeState,
     /// 单调 tick（WatchEvents resume 游标），0 表示未知。
     pub monotonic_tick: u64,
@@ -249,6 +286,8 @@ pub enum OperationResult {
 /// Command（connect/stop/...）的统一回复形状。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationReply {
+    #[serde(default)]
+    pub stop_completion: Option<StopCompletion>,
     pub result: OperationResult,
     /// 本命令所属操作 id（UI 侧组装 intent 时生成，随回复回传前端做事件关联；
     /// `Some(hex16)` = 已受理（host 以该 id 关联状态事件），`None` = 未产生/被拒）。

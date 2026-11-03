@@ -1,11 +1,11 @@
 
 
-use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{GetLastError, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceLuidToAlias, ConvertInterfaceLuidToIndex,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows::core::{HSTRING, PCWSTR};
 
 use crate::native_error::NativeError;
 use crate::wintun_api::{WintunCloseAdapterFn, WintunExports, WintunLibrary};
@@ -26,8 +26,8 @@ pub enum AdapterOpen {
 ///
 /// Dropping the adapter closes the handle: a creator close removes the adapter
 /// (the real cleanup predicate of 0.14.1), a non-creator close only releases
-/// the second handle. A copy of the close export is kept so the handle can be
-/// closed even after the [`WintunLibrary`] was dropped.
+/// the second handle.
+/// [`WintunLibrary`] 必须比本句柄长寿：保存函数指针不会保持模块加载。
 pub struct WintunAdapter {
     /// The adapter handle from `WintunCreateAdapter`/`WintunOpenAdapter`.
     handle: HANDLE,
@@ -44,6 +44,52 @@ pub struct WintunAdapter {
 }
 
 impl WintunAdapter {
+    /// 按精确名称领用，只有原生 Open 未找到才创建；身份错误不触发创建。
+    /// 调用者必须让 lib 比返回的 adapter 长寿。
+    pub fn open_or_create(
+        lib: &WintunLibrary,
+        name: &str,
+        tunnel_type: &str,
+    ) -> Result<(Self, AdapterOpen), NativeError> {
+        let exports = *lib.exports();
+        let name_w = HSTRING::from(name);
+        let tunnel_w = HSTRING::from(tunnel_type);
+        open_or_create_with(
+            name,
+            || {
+                // SAFETY: 宽字符串在调用期间存活；仅 NULL 后立即读原始错误。
+                let handle = unsafe { (exports.open_adapter)(PCWSTR::from_raw(name_w.as_ptr())) };
+                if handle.0.is_null() {
+                    Err(NativeError::from_win32(
+                        unsafe { GetLastError().0 },
+                        "WintunOpenAdapter 失败",
+                    ))
+                } else {
+                    Ok(handle)
+                }
+            },
+            || {
+                // SAFETY: 两宽字符串有效；NULL GUID 由系统分配，NULL 句柄才读错误。
+                let handle = unsafe {
+                    (exports.create_adapter)(
+                        PCWSTR::from_raw(name_w.as_ptr()),
+                        PCWSTR::from_raw(tunnel_w.as_ptr()),
+                        std::ptr::null(),
+                    )
+                };
+                if handle.0.is_null() {
+                    Err(NativeError::from_win32(
+                        unsafe { GetLastError().0 },
+                        "WintunCreateAdapter 失败",
+                    ))
+                } else {
+                    Ok(handle)
+                }
+            },
+            |handle| adapter_identity(&exports, handle),
+            exports.close_adapter,
+        )
+    }
     /// Create a new Wintun adapter (creator owned; dropping it removes the
     /// adapter).
     ///
@@ -180,6 +226,48 @@ impl Drop for WintunAdapter {
         // SAFETY: self.handle 是本实例持有的有效 adapter 句柄；创建者 close 即移除
         // adapter（0.14.1 真实清理谓词），非创建者 close 仅释放该句柄。
         unsafe { (self.close)(self.handle) };
+    }
+}
+
+fn open_or_create_with(
+    name: &str,
+    open: impl FnOnce() -> Result<HANDLE, NativeError>,
+    create: impl FnOnce() -> Result<HANDLE, NativeError>,
+    identity: impl FnOnce(HANDLE) -> Result<WintunIdentity, NativeError>,
+    close: WintunCloseAdapterFn,
+) -> Result<(WintunAdapter, AdapterOpen), NativeError> {
+    let (handle, kind) = match open() {
+        Ok(handle) => (handle, AdapterOpen::Opened),
+        Err(error) if error.code == 1168 => (create()?, AdapterOpen::Created),
+        Err(error) => return Err(error),
+    };
+    let identity = identity(handle).and_then(|identity| {
+        if identity.alias == name {
+            Ok(identity)
+        } else {
+            Err(NativeError::from_win32(
+                13,
+                "Wintun adapter alias 与配置精确名称不匹配",
+            ))
+        }
+    });
+    match identity {
+        Ok(identity) => Ok((
+            WintunAdapter {
+                handle,
+                luid: identity.luid,
+                ifindex: identity.ifindex,
+                alias: identity.alias,
+                owned: kind == AdapterOpen::Created,
+                close,
+            },
+            kind,
+        )),
+        Err(error) => {
+            // SAFETY: 仅关闭本轮刚取得的有效句柄；lib 仍保持加载。
+            unsafe { close(handle) };
+            Err(error)
+        }
     }
 }
 

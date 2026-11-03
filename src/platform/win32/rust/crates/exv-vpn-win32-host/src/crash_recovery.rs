@@ -32,6 +32,7 @@ use tokio::sync::{Mutex, watch};
 
 use exv_vpn_win32_ipc::peer_auth::VerifiedPipePeer;
 
+use crate::kernel_control_service::session_orchestration::{accept_process_fact, ProcessFact};
 use crate::composition::{HostComposition, compose_nonprivileged_host};
 use crate::engine_lifecycle::{
     ElevatedEngineSpawner, EngineSlot, EngineSpawnError, EngineSupervisor,
@@ -449,7 +450,10 @@ impl CrashRecovery {
         }
 
         // 1. teardown 兜底（engine 死 ≠ core 死：撤销 admission + packet leg + teardown）。
-        self.composition.lock().await.on_helper_link_terminal();
+        {
+            let mut composition = self.composition.lock().await;
+            let _ = accept_process_fact(&mut composition, ProcessFact::ControlChannelLost);
+        }
 
         // 2. 回收旧 engine 进程句柄（有界等待退出/强制终止；engine 不得遗留）。
         let old_pid = supervisor.pid().unwrap_or(0);
@@ -517,18 +521,16 @@ pub(crate) async fn rebind_composition(
     new_peer: &VerifiedPipePeer,
     ui_peer: &VerifiedPipePeer,
 ) -> Result<(), String> {
-    let mut composition = composition.lock().await;
-    let fresh = compose_nonprivileged_host(new_peer)
+    let mut fresh = compose_nonprivileged_host(new_peer)
         .map_err(|e| format!("compose for engine rebind failed: {e:?}"))?;
-    *composition = fresh;
-    // 重建后的 gate 未授权：用已验证的 controller（UI）peer 重授权（fail closed）。
-    composition
+    fresh
         .kernel_gate()
         .authorize(ui_peer)
         .map_err(|e| format!("gate reauthorize after engine rebind failed: {e:?}"))?;
     let (actor_peer, capability) = controller_peer_and_capability();
-    composition.bind_controller(actor_peer, capability);
-    Ok(())
+    fresh.bind_controller(actor_peer, capability);
+    let mut composition = composition.lock().await;
+    accept_process_fact(&mut composition, ProcessFact::Rebound(fresh))
 }
 
 /// 组装 composition 绑定用的 engine peer 身份（PID + 用户 SID + account name）。

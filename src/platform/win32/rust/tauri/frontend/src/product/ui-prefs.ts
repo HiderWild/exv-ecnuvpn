@@ -28,9 +28,9 @@ export interface UiPreferences {
   connect_notify: boolean;
   /** 断开连接时发送通知。 */
   disconnect_notify: boolean;
-  /** 遗留键（存储兼容，T12 归并）：与 core config `reconnect_notify`（计划 §2.8/T4）
-   * 同名的前端旧开关，效果从未接线。重连通知门控由 core config 键统一承担
-   * （`reconnect-notify.ts`）；本键不再渲染/消费，仅保留读写以兼容旧偏好文件。 */
+  /** 当前已连接会话意外断开时发送通知，默认关闭。 */
+  unexpected_disconnect_notify: boolean;
+  /** 实际触发自动重连时发送系统通知，默认关闭。 */
   reconnect_notify: boolean;
   /** 窗口在前台（聚焦）时抑制所有连接类通知；优先级最高。 */
   suppress_notify_when_foreground: boolean;
@@ -40,8 +40,7 @@ export interface UiPreferences {
   show_latency: boolean;
 }
 
-/** 全部可保存键（页面据此渲染控件；旧 connection_state_notifications 与
- * reconnect_notify（T12 归并至 core config）不再渲染/可编辑）。 */
+/** 全部可保存键；旧 connection_state_notifications 仅保留存储兼容。 */
 export const UI_PREF_KEYS = [
   "close_preference",
   "minimize_to_tray_on_connect",
@@ -49,6 +48,8 @@ export const UI_PREF_KEYS = [
   "silent_startup",
   "connect_notify",
   "disconnect_notify",
+  "unexpected_disconnect_notify",
+  "reconnect_notify",
   "suppress_notify_when_foreground",
   "auto_connect_on_launch",
   "show_latency",
@@ -70,6 +71,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   connection_state_notifications: false,
   connect_notify: false,
   disconnect_notify: false,
+  unexpected_disconnect_notify: false,
   reconnect_notify: false,
   suppress_notify_when_foreground: true,
   auto_connect_on_launch: false,
@@ -112,6 +114,7 @@ export function normalizeUiPreferences(raw: UiPreferencesWire | null | undefined
     "connection_state_notifications",
     "connect_notify",
     "disconnect_notify",
+    "unexpected_disconnect_notify",
     "reconnect_notify",
     "suppress_notify_when_foreground",
     "auto_connect_on_launch",
@@ -156,6 +159,8 @@ const state = ref<UiPreferences>({ ...DEFAULT_UI_PREFERENCES });
 const draft = ref<Partial<UiPreferences>>({});
 let gateway: UiPrefsGateway | null = null;
 let loadedOnce = false;
+/** 注册表查询失败时，开关不能冒充关闭；重试仍走已有读取入口。 */
+export const autostartStateUnavailable = ref(false);
 let loadPromise: Promise<void> | null = null;
 let saveTail: Promise<void> = Promise.resolve();
 const pendingKeys = new Set<UiPrefKey>();
@@ -174,6 +179,7 @@ export function resetUiPrefsState(): void {
   draft.value = {};
   gateway = null;
   loadedOnce = false;
+  autostartStateUnavailable.value = false;
   loadPromise = null;
   saveTail = Promise.resolve();
   pendingKeys.clear();
@@ -208,10 +214,16 @@ export async function loadUiPreferences(): Promise<void> {
     try {
       const raw = await impl.get();
       state.value = normalizeUiPreferences(raw);
-      draft.value = {};
+      if (!autostartStateUnavailable.value) draft.value = {};
+      autostartStateUnavailable.value = false;
       uiPrefErrors.value = {};
       loadedOnce = true;
-    } catch {
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (detail.includes("autostart_state_unavailable:")) {
+        autostartStateUnavailable.value = true;
+        uiPrefErrors.value = { ...uiPrefErrors.value, launch_at_login: "无法读取系统自启状态，当前状态未确认。请重试：" + detail };
+      }
       // 外壳之外 / 后端不可用：保持默认值（诚实降级，不阻断 UI）。
     }
   })();
@@ -225,7 +237,7 @@ export async function loadUiPreferences(): Promise<void> {
 
 /** 编辑草稿（页面控件调用；保存成功前不视为已生效）。 */
 export function editUiPreference<K extends UiPrefKey>(key: K, value: UiPreferences[K]): void {
-  if (value === state.value[key] && !pendingKeys.has(key)) {
+  if (value === state.value[key] && !pendingKeys.has(key) && key !== "launch_at_login") {
     // 改回原值 = 该键不再脏。
     const next = { ...draft.value };
     delete next[key];
@@ -290,7 +302,7 @@ export function updateUiPreferences(
     const previous = state.value;
     let autostartChanged = false;
     try {
-      if (patch.launch_at_login !== undefined && patch.launch_at_login !== previous.launch_at_login) {
+      if (patch.launch_at_login !== undefined) {
         const result = await impl.setAutostart(patch.launch_at_login);
         if (!result.ok) throw new Error(result.message ?? "autostart rejected");
         autostartChanged = true;

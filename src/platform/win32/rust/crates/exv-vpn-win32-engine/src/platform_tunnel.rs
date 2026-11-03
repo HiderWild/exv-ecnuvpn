@@ -21,7 +21,7 @@
 //! 本模块承载 **NIC owner**（adapter 句柄 + session 生命周期）与 **route owner**
 //! （路由 + DNS + 地址族 apply，经 NIC 交出的 LUID 驱动）：
 //!
-//! - [`NicOwner::ensure`]：**首次连接**建 adapter（D12），存续复用；只做 adapter
+//! - [`NicOwner::ensure`]：**首次连接**领用或创建 adapter（D12），存续复用；只做 adapter
 //!   创建 + 接口级配置（DAD 禁用 / 接口启用）。断开**不拆**（D12）——adapter 由
 //!   协调者持有到退出清理阶段才 close。
 //! - [`NicOwner::apply_offer`]：在已 ensure 的 adapter 上按真实 CSTP offer 应用四族
@@ -34,11 +34,13 @@
 //! DP-01 create-then-idle：本模块**不创建 Wintun session、不启动 ring worker**——数据
 //! 面由 `crate::data_plane` 在 route 应用后接续（同一 adapter 上 `WintunSession::start`）。
 
+use crate::connect_ledger::LedgerDomain;
+use crate::stop_report::{StopAction, StopActionState, StopObligation, StopReport};
+use sha2::Digest as _;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use sha2::Digest as _;
 
 use exv_vpn_cstp::session::TunnelOffer;
 use exv_vpn_win32_resource::dns::{DnsApplier, DnsCapture};
@@ -211,11 +213,20 @@ fn install_route_logged(
     ifindex: u32,
     log: &crate::log_sink::LogSink,
 ) -> Result<RouteInstallOutcome, NativeError> {
-    log.emit(LogLevel::Debug, "route", "route.install.started", "安装连接路由", &[
-        ("role", role), ("network", &format!("{}/{}", row.network, row.prefix_len)),
-        ("next_hop", &row.next_hop.to_string()), ("luid", &row.interface_luid.to_string()),
-        ("tunnel_ifindex", &ifindex.to_string()), ("metric", &row.metric.to_string()),
-    ]);
+    log.emit(
+        LogLevel::Debug,
+        "route",
+        "route.install.started",
+        "安装连接路由",
+        &[
+            ("role", role),
+            ("network", &format!("{}/{}", row.network, row.prefix_len)),
+            ("next_hop", &row.next_hop.to_string()),
+            ("luid", &row.interface_luid.to_string()),
+            ("tunnel_ifindex", &ifindex.to_string()),
+            ("metric", &row.metric.to_string()),
+        ],
+    );
     let result = routes::install_with_outcome(row);
     match &result {
         Ok(outcome) => {
@@ -224,19 +235,37 @@ fn install_route_logged(
                 RouteInstallOutcome::Borrowed(actual) => ("borrowed", actual),
                 RouteInstallOutcome::CreatedPending { submitted, .. } => ("pending", submitted),
             };
-            log.emit(LogLevel::Debug, "route", "route.install.completed", "路由安装结果", &[
-                ("role", role), ("ownership", ownership), ("route", &format!("{actual:?}")),
-            ]);
+            log.emit(
+                LogLevel::Debug,
+                "route",
+                "route.install.completed",
+                "路由安装结果",
+                &[
+                    ("role", role),
+                    ("ownership", ownership),
+                    ("route", &format!("{actual:?}")),
+                ],
+            );
         }
         Err(error) => {
             let observed = routes::capture_rows(row.interface_luid).map(|rows| {
-                rows.into_iter().filter(|actual| actual.dest_key() == row.dest_key()).collect::<Vec<_>>()
+                rows.into_iter()
+                    .filter(|actual| actual.dest_key() == row.dest_key())
+                    .collect::<Vec<_>>()
             });
-            log.emit(LogLevel::Error, "route", "route.install.failed", "连接路由配置失败", &[
-                ("role", role), ("requested_route", &format!("{row:?}")),
-                ("native_code", &error.code.to_string()), ("detail", &error.message),
-                ("observed_after_failure", &format!("{observed:?}")),
-            ]);
+            log.emit(
+                LogLevel::Error,
+                "route",
+                "route.install.failed",
+                "连接路由配置失败",
+                &[
+                    ("role", role),
+                    ("requested_route", &format!("{row:?}")),
+                    ("native_code", &error.code.to_string()),
+                    ("detail", &error.message),
+                    ("observed_after_failure", &format!("{observed:?}")),
+                ],
+            );
         }
     }
     result
@@ -284,11 +313,17 @@ fn retry_owned_routes_with(
 #[derive(Debug, Default)]
 pub struct RouteCleanupObligations {
     routes: Vec<OwnedRoute>,
+    #[cfg(test)]
+    test_remove: Option<fn(&OwnedRoute) -> Result<routes::RemoveOutcome, NativeError>>,
 }
 
 impl RouteCleanupObligations {
     fn from_routes(routes: Vec<OwnedRoute>) -> Self {
-        Self { routes }
+        Self {
+            routes,
+            #[cfg(test)]
+            test_remove: None,
+        }
     }
 
     /// 是否已没有待清理路由。
@@ -305,7 +340,27 @@ impl RouteCleanupObligations {
 
     /// 逆安装序重试清理；硬失败项继续留在本容器中，调用方不得在错误后丢弃容器。
     pub fn retry_clear(&mut self) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(remove) = self.test_remove {
+            return retry_owned_routes_with(&mut self.routes, remove);
+        }
         retry_owned_routes_with(&mut self.routes, remove_owned_route)
+    }
+
+    /// 仅导出仍持有路由的稳定身份，报告不复制 owner 或重试权限。
+    pub(crate) fn owner_identities(&self) -> Vec<String> {
+        self.routes
+            .iter()
+            .map(|route| {
+                let row = match route {
+                    OwnedRoute::Effective(row) | OwnedRoute::Pending(row) => row,
+                };
+                format!(
+                    "route:{}:{}/{}",
+                    row.interface_luid, row.network, row.prefix_len
+                )
+            })
+            .collect()
     }
 
     /// 接管另一批清理义务；用于运行时把连续失败产生的 owner 汇入同一 holder。
@@ -405,23 +460,34 @@ fn disable_ipv4_dad(luid: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// 接口启用（IpHelper `SetIfEntry`，生产 API——非 netsh；best-effort：顺序与
-/// WSP3/W17 冻结路径一致：address → enable → route（路由安装前启用））。
-fn enable_interface_best_effort(ifindex: u32) -> Result<(), String> {
+/// 接口启用：Get 提供 Set 输入行，两个原操作的 Win32 失败均返回当前连接。
+fn enable_interface_best_effort(ifindex: u32) -> Result<(), NativeError> {
+    enable_interface_with(
+        ifindex,
+        // SAFETY: row 是有效输出参数；GetIfEntry 填充接口行。
+        |row| unsafe { GetIfEntry(row) },
+        // SAFETY: row 已由 GetIfEntry 填充，SetIfEntry 写入管理员状态。
+        |row| unsafe { SetIfEntry(row) },
+    )
+}
+
+fn enable_interface_with(
+    ifindex: u32,
+    get: impl FnOnce(&mut MIB_IFROW) -> u32,
+    set: impl FnOnce(&MIB_IFROW) -> u32,
+) -> Result<(), NativeError> {
     let mut row = MIB_IFROW {
         dwIndex: ifindex,
         ..Default::default()
     };
-    // SAFETY: row 是有效输出参数；GetIfEntry 填充接口行。
-    let rc = unsafe { GetIfEntry(&raw mut row) };
+    let rc = get(&mut row);
     if rc != 0 {
-        return Err(format!("GetIfEntry failed: {rc}"));
+        return Err(NativeError::from_win32(rc, "GetIfEntry (enable)"));
     }
     row.dwAdminStatus = 1; // MIB_IF_ADMIN_STATUS_UP
-    // SAFETY: row 已由 GetIfEntry 填充（身份字段一致），SetIfEntry 写回。
-    let rc = unsafe { SetIfEntry(&raw const row) };
+    let rc = set(&row);
     if rc != 0 {
-        return Err(format!("SetIfEntry failed: {rc}"));
+        return Err(NativeError::from_win32(rc, "SetIfEntry (enable)"));
     }
     Ok(())
 }
@@ -458,21 +524,21 @@ pub struct RouteOwnershipFacts {
     pub pending: usize,
 }
 
-/// **NIC owner（D11/D17）**：创建者 adapter 句柄 + WintunLibrary + 名称，跨连接存续。
+/// **NIC owner（D11/D17）**：领用或创建的 adapter 句柄 + WintunLibrary + 精确名称，跨连接存续。
 ///
-/// S1.5 生命周期（D12）：`NicOwner::ensure` **首次连接**建 adapter；断开**不拆**
-/// （网卡以无地址惰性存续）；退出清理阶段由协调者 close（Drop = adapter creator
-/// close 移除 adapter）。
+/// S1.5 生命周期（D12）：`NicOwner::ensure` **首次连接**领用或创建 adapter；断开**不拆**
+/// （网卡以无地址惰性存续）；退出清理阶段由协调者 Close 本句柄；
+/// 仅创建者句柄保留既有移除语义。
 ///
 /// **字段声明顺序即 Drop 顺序（W17 SAFETY-ORDER + 资源逆序）**：先 drop `adapter`
 /// （调用仍位于已加载模块内的 `WintunCloseAdapter`），再 drop `_lib`（释放 DLL 加载）。
 /// 保存函数指针不保持模块映射，因此该顺序属于安全性约束。
 pub struct NicOwner {
-    /// 创建者 adapter 句柄（drop = creator close 移除 adapter）。
+    /// 本 owner 持有的 adapter 句柄（领用只 Close 本句柄；创建者保留原语义）。
     adapter: WintunAdapter,
     /// 保持 Wintun DLL 加载直到 adapter 完成 close；`_lib` 在 `adapter` 之后 drop。
     _lib: WintunLibrary,
-    /// adapter 名称（create 名；宿主按此名可观测）。
+    /// adapter 精确配置名称（宿主按此名可观测）。
     adapter_name: String,
 }
 
@@ -482,10 +548,12 @@ pub struct NicOwner {
 /// 的接口配置失败保持现有字符串语义，由上层按平台配置失败处理。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NicInitializationError {
-    /// `WintunCreateAdapter` 或 adapter 身份解析返回的原始系统错误。
+    /// `WintunOpenAdapter` / `WintunCreateAdapter` 或 adapter 身份解析返回的原始系统错误。
     Native(NativeError),
     /// adapter 创建后的接口配置失败。
     Configuration(String),
+    /// 接口启用操作的原始系统错误。
+    Interface(NativeError),
 }
 
 impl NicInitializationError {
@@ -494,6 +562,7 @@ impl NicInitializationError {
         match self {
             Self::Native(error) => format!("wintun-create:{error:?}"),
             Self::Configuration(detail) => detail,
+            Self::Interface(error) => format!("interface-enable:{error:?}"),
         }
     }
 }
@@ -508,7 +577,7 @@ impl NicInitializationError {
 unsafe impl Send for NicOwner {}
 
 impl NicOwner {
-    /// **首次连接建 adapter（D12）**：`WintunLibrary::load` + `WintunAdapter::create`
+    /// **首次连接建 adapter（D12）**：`WintunLibrary::load` + `WintunAdapter::open_or_create`
     /// + 接口级配置（DAD 禁用 + 接口启用，均跨连接存续）。重复调用由协调者保证
     ///   不触发（`nic` 已存在则复用）。
     ///
@@ -527,14 +596,14 @@ impl NicOwner {
         lib: WintunLibrary,
         adapter_name: &str,
     ) -> Result<Self, NicInitializationError> {
-        let (adapter, _open) = WintunAdapter::create(&lib, adapter_name, TUNNEL_TYPE)
+        let (adapter, _open) = WintunAdapter::open_or_create(&lib, adapter_name, TUNNEL_TYPE)
             .map_err(NicInitializationError::Native)?;
         let luid = adapter.luid();
         // 禁用 DAD（地址 apply 之前；R0 归因根因——Wintun IPv4 地址恒 Tentative）。
         // 接口级配置：建一次，跨连接存续。
         disable_ipv4_dad(luid).map_err(NicInitializationError::Configuration)?;
         // 接口启用（在隧道路由安装之前——WSP3/W17 冻结顺序：address → enable → route）。
-        let _ = enable_interface_best_effort(adapter.ifindex());
+        enable_interface_best_effort(adapter.ifindex()).map_err(NicInitializationError::Interface)?;
         Ok(Self {
             adapter,
             _lib: lib,
@@ -554,7 +623,7 @@ impl NicOwner {
         self.adapter.ifindex()
     }
 
-    /// adapter 创建者句柄引用（`data_plane::EngineDataPlane::start` 直接在该句柄上
+    /// adapter 持有句柄引用（`data_plane::EngineDataPlane::start` 直接在该句柄上
     /// `WintunSession::start`，不再 open-by-name）。
     #[must_use]
     pub fn adapter(&self) -> &WintunAdapter {
@@ -567,10 +636,25 @@ impl NicOwner {
         &self._lib
     }
 
-    /// adapter 名称（create 名；宿主按此名可观测）。
+    /// adapter 精确配置名称（宿主按此名可观测）。
     #[must_use]
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
+    }
+
+    /// 复用保留时只回读已有接口，不删除或改写状态；真实读取错误才成为未竟结果。
+    pub(crate) fn verify_retained(&self) -> Result<(), String> {
+        let mut row = MIB_IFROW {
+            dwIndex: self.ifindex(),
+            ..Default::default()
+        };
+        // SAFETY: 与既有 enable_interface_best_effort 相同的 GetIfEntry 输出参数。
+        let code = unsafe { GetIfEntry(&raw mut row) };
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(format!("GetIfEntry (retained NIC): {code}"))
+        }
     }
 
     /// 在已 ensure 的 adapter 上应用一次连接的 offer（地址/DNS/路由，经 LUID 驱动）
@@ -632,7 +716,11 @@ impl NicOwner {
     ) -> Result<(RouteOwner, PlatformFacts), RouteApplyError> {
         // 接口启用（路由安装前；WSP3 顺序 address → enable → route）。接口级配置
         // 在 ensure 时已启用，但地址 apply 后再次启用是既有 W17 路径，保持幂等。
-        let _ = enable_interface_best_effort(self.adapter.ifindex());
+        enable_interface_best_effort(self.adapter.ifindex()).map_err(|error| {
+            let mut failure = RouteApplyError::from(format!("interface-enable:{error:?}"));
+            failure.route_native_code = Some(error.code);
+            failure
+        })?;
         RouteOwner::apply(
             self.luid(),
             self.adapter.ifindex(),
@@ -665,6 +753,7 @@ pub struct RouteOwner {
     mtu_applied: Option<MtuSnapshot>,
     mtu_original: Option<MtuSnapshot>,
     /// DNS applied fingerprint + 原始快照（GUID-keyed）。
+    dns_pending: bool,
     dns_fingerprint: DnsFingerprint,
     dns_original: DnsSettings,
     dns_guid: GUID,
@@ -795,7 +884,10 @@ impl RouteOwner {
             owned_addresses = addr_plan.to_add.clone();
 
             // 接口启用（路由安装前；WSP3 顺序 address → enable → route）。
-            let _ = enable_interface_best_effort(ifindex);
+            enable_interface_best_effort(ifindex).map_err(|error| {
+                route_native_code = Some(error.code);
+                format!("interface-enable:{error:?}")
+            })?;
 
             // ---- MTU 族（W19 leaf：Set 前原始快照；clear 输入）。 ----
             let mtu_ctrl = MtuController::new(luid, MtuFamily::V4);
@@ -836,8 +928,8 @@ impl RouteOwner {
                 let row = RouteRow::new(net, prefix, Ipv4Addr::UNSPECIFIED, luid, ROUTE_METRIC);
                 // W24 + ownership：API 返回回读生效行；只有本次真正创建的行进入
                 // installed_routes。既有校园路由只借用，断开不得删除。
-                let outcome = install_route_logged(&row, "tunnel", ifindex, &route_log)
-                    .map_err(|e| {
+                let outcome =
+                    install_route_logged(&row, "tunnel", ifindex, &route_log).map_err(|e| {
                         route_native_code = Some(e.code);
                         format!("route-install:{e:?}")
                     })?;
@@ -868,7 +960,10 @@ impl RouteOwner {
                 let proxy_started = Instant::now();
                 let desired = campus_proxy_bypasses(campus_routes, campus_dns_domains);
                 // 仅用摘要核对服务与发起用户身份，不记录原始 SID。
-                let user_hash: String = sha2::Sha256::digest(sid.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+                let user_hash: String = sha2::Sha256::digest(sid.as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
                 proxy_log.emit(
                     LogLevel::Debug,
                     "system-proxy",
@@ -1018,6 +1113,7 @@ impl RouteOwner {
                 installed_routes,
                 mtu_applied: mtu_state.as_ref().map(|(a, _)| a.clone()),
                 mtu_original: mtu_state.as_ref().map(|(_, o)| o.clone()),
+                dns_pending: true,
                 dns_fingerprint: fingerprint,
                 dns_original: original,
                 dns_guid: guid,
@@ -1039,9 +1135,54 @@ impl RouteOwner {
     /// 任一 leaf restore 硬失败 → typed `String`（绝不静默）；调用方应据错误决定兜底
     /// （adapter 保留，退出清理仍会 close）。
     pub fn clear(&mut self) -> Result<(), String> {
+        self.clear_report().result()
+    }
+
+    pub(crate) fn owner_identity(&self) -> String {
+        format!("route:{}", self.luid)
+    }
+
+    /// 保留内部逆序及短路语义；报告引用本 owner，不复制资源。
+    pub(crate) fn clear_report(&mut self) -> StopReport {
+        let mut report = StopReport {
+            stopped: true,
+            ..Default::default()
+        };
+        let _ = self.clear_steps(&mut report);
+        complete_route_report(self.luid, report, self.remaining_steps())
+    }
+
+    fn remaining_steps(&self) -> Vec<&'static str> {
+        let mut steps = Vec::new();
+        if self.dns_pending {
+            steps.push("dns_restore");
+        }
+        if self.system_proxy.is_some() {
+            steps.push("system_proxy_restore");
+        }
+        if !self.installed_routes.is_empty() {
+            steps.push("routes_remove");
+        }
+        if self.mtu_applied.is_some() && self.mtu_original.is_some() {
+            steps.push("mtu_restore");
+        }
+        if !self.owned_addresses.is_empty() {
+            steps.push("addresses_remove");
+        }
+        steps
+    }
+
+    fn clear_steps(&mut self, report: &mut StopReport) -> Result<(), String> {
         // DNS 逆序。
-        DnsApplier::restore(&self.dns_guid, &self.dns_fingerprint, &self.dns_original)
-            .map_err(|e| format!("dns-restore:{e:?}"))?;
+        if self.dns_pending {
+            let result =
+                DnsApplier::restore(&self.dns_guid, &self.dns_fingerprint, &self.dns_original)
+                    .map(|_| ())
+                    .map_err(|e| format!("dns-restore:{e:?}"));
+            report.action(LedgerDomain::RouteFamily, "dns_restore", &result);
+            result?;
+            self.dns_pending = false;
+        }
         // 系统代理族逆序（设计 §5.3：DNS 先撤、system_proxy 在路由/bypass 之前撤）。
         // 两态 compare-and-restore（§2 表）：指纹等 → 精确还原 / 不等 → typed skip
         // （不覆盖）。还原成功或 typed skip 后清账（compact 自己的严格后缀）；
@@ -1083,13 +1224,22 @@ impl RouteOwner {
                     // restore 未完成时仍保留完整 state（含 PAC endpoint 与账本基准），
                     // 让持有本 RouteOwner 的调用方稍后可以重试；不能因 take 丢 owner。
                     self.system_proxy = Some(applied);
-                    return Err(format!("system-proxy-restore:{e:?}"));
+                    let error = format!("system-proxy-restore:{e:?}");
+                    report.action(
+                        LedgerDomain::RouteFamily,
+                        "system_proxy_restore",
+                        &Err(error.clone()),
+                    );
+                    return Err(error);
                 }
             }
+            report.action(LedgerDomain::RouteFamily, "system_proxy_restore", &Ok(()));
             // §5.6 零扰动顺序：先还原注册表并广播，端点随后 drop 关闭（Drop 即关
             // listener；浏览器已缓存包装脚本，短期重取失败回退直连，属降级不断网）。
             if let Some(endpoint) = applied.pac_endpoint {
                 let release_started = Instant::now();
+                let closed = endpoint.close().map_err(|_| "pac_worker_join".to_owned());
+                report.action(LedgerDomain::RouteFamily, "pac_close", &closed);
                 drop(endpoint);
                 log_system_proxy_stage(
                     &proxy_log,
@@ -1099,23 +1249,64 @@ impl RouteOwner {
             }
         }
         // 路由逆序（最后安装的先删）。
-        retry_owned_routes_with(&mut self.installed_routes, remove_owned_route)?;
+        if !self.installed_routes.is_empty() {
+            let result = retry_owned_routes_with(&mut self.installed_routes, remove_owned_route);
+            report.action(LedgerDomain::RouteFamily, "routes_remove", &result);
+            result?;
+        }
         // MTU 逆序（V4 族）。
         if let (Some(applied), Some(original)) = (&self.mtu_applied, &self.mtu_original) {
             let ctrl = MtuController::new(applied.luid, applied.family);
-            ctrl.compare_and_restore(applied, original)
-                .map_err(|e| format!("mtu-restore:{e:?}"))?;
+            let result = ctrl
+                .compare_and_restore(applied, original)
+                .map(|_| ())
+                .map_err(|e| format!("mtu-restore:{e:?}"));
+            report.action(LedgerDomain::RouteFamily, "mtu_restore", &result);
+            result?;
+            self.mtu_applied = None;
+            self.mtu_original = None;
         }
         // 地址：compare-delete owned 行。
-        let ctrl = IpAddressController::new(self.luid);
-        let current = ctrl.capture().map_err(|e| format!("addr-capture:{e:?}"))?;
-        for row in restore_owned_addresses(&self.owned_addresses, &current) {
-            ctrl.delete(&row)
-                .map_err(|e| format!("addr-delete:{e:?}"))?;
+        if !self.owned_addresses.is_empty() {
+            let result = (|| {
+                let ctrl = IpAddressController::new(self.luid);
+                let current = ctrl.capture().map_err(|e| format!("addr-capture:{e:?}"))?;
+                for row in restore_owned_addresses(&self.owned_addresses, &current) {
+                    ctrl.delete(&row)
+                        .map_err(|e| format!("addr-delete:{e:?}"))?;
+                }
+                Ok(())
+            })();
+            report.action(LedgerDomain::RouteFamily, "addresses_remove", &result);
+            result?;
         }
         self.owned_addresses.clear();
         Ok(())
     }
+}
+
+fn complete_route_report(
+    luid: u64,
+    mut report: StopReport,
+    remaining_steps: Vec<&'static str>,
+) -> StopReport {
+    for step in remaining_steps {
+        if !report.actions.iter().any(|a| a.step == step) {
+            report.actions.push(StopAction {
+                domain: LedgerDomain::RouteFamily,
+                step,
+                state: StopActionState::NotAttempted,
+                error: None,
+            });
+        }
+        report.remaining.push(StopObligation {
+            domain: LedgerDomain::RouteFamily,
+            owner: format!("route:{luid}"),
+            step,
+            blocks_new_connect: true,
+        });
+    }
+    report
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,13 +1315,18 @@ impl RouteOwner {
 
 /// 系统代理必须在本地解析校园域名，避免显式 HTTP 代理重新将其送入 FakeIP 路径。
 fn campus_proxy_bypasses(routes: &[String], domains: &[String]) -> Vec<String> {
-    let mut entries: Vec<String> = routes.iter().filter_map(|route| {
-        exv_vpn_win32_resource::system_proxy_override::cidr_to_wildcard_opt(route)
-            .map(|entry| entry.as_str().to_owned())
-    }).collect();
+    let mut entries: Vec<String> = routes
+        .iter()
+        .filter_map(|route| {
+            exv_vpn_win32_resource::system_proxy_override::cidr_to_wildcard_opt(route)
+                .map(|entry| entry.as_str().to_owned())
+        })
+        .collect();
     for domain in domains {
         for entry in [domain.clone(), format!("*.{domain}")] {
-            if !entries.contains(&entry) { entries.push(entry); }
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
         }
     }
     entries

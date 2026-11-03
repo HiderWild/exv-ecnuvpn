@@ -13,10 +13,13 @@ const props = withDefaults(defineProps<{
   showActions?: boolean;
   sideBySide?: boolean;
   busy?: boolean;
+  /** 快速入门的极简变体；设置页仍沿用完整编辑器。 */
+  compact?: boolean;
 }>(), {
   showActions: false,
   sideBySide: false,
   busy: false,
+  compact: false,
 });
 
 const emit = defineEmits<{
@@ -33,12 +36,15 @@ const mergeError = ref<string | null>(null);
 const confirmState = ref<MergedCidr | null>(null);
 const { dialog: addErrorDialog, onDialogKeydown: onAddErrorKeydown } = useDialogFocus(
   () => addFailures.value.length > 0, () => { addFailures.value = []; },
+  { nested: true },
 );
 const { dialog: mergeErrorDialog, onDialogKeydown: onMergeErrorKeydown } = useDialogFocus(
   () => mergeError.value !== null, () => { mergeError.value = null; },
+  { nested: true },
 );
 const { dialog: confirmDialog, onDialogKeydown: onConfirmKeydown } = useDialogFocus(
   () => confirmState.value !== null, () => { confirmState.value = null; },
+  { nested: true },
 );
 
 function routesMatch(left: readonly string[], right: readonly string[]): boolean {
@@ -159,7 +165,7 @@ function requestMerge(): void {
 </script>
 
 <template>
-  <div class="routes-editor" :class="{ 'routes-editor--split': sideBySide }" data-testid="routes-editor">
+  <div class="routes-editor" :class="{ 'routes-editor--split': sideBySide }" :data-compact="compact ? 'true' : 'false'" data-testid="routes-editor">
     <div class="routes-workspace">
     <div class="routes-list" data-testid="routes-list">
       <p v-if="localRoutes.length === 0" class="routes-empty" data-testid="routes-empty">暂无路由。</p>
@@ -192,20 +198,25 @@ function requestMerge(): void {
       <button type="button" class="routes-save" data-testid="routes-save" :disabled="busy" @click="emit('save', [...localRoutes])">{{ busy ? "保存中…" : "确认修改" }}</button>
     </div>
 
-    <div v-if="addFailures.length" ref="addErrorDialog" tabindex="-1" @keydown="onAddErrorKeydown" class="routes-nested-overlay" data-testid="routes-add-error-modal" role="alertdialog" aria-modal="true" aria-labelledby="routes-add-error-title" @click.self="addFailures = []">
-      <div class="routes-nested-modal">
+    <!-- 极简提示离开快速入门的滚动／裁切祖先，状态和键盘边界仍归本编辑器。 -->
+    <Teleport to="body" :disabled="!compact">
+    <div v-if="addFailures.length" ref="addErrorDialog" tabindex="-1" @keydown="onAddErrorKeydown" class="routes-nested-overlay exv-dialog" :data-compact="compact ? 'true' : 'false'" data-testid="routes-add-error-modal" role="alertdialog" aria-modal="true" aria-labelledby="routes-add-error-title" @click.self="addFailures = []">
+      <div class="routes-nested-modal exv-dialog-card">
         <h3 id="routes-add-error-title">部分路由未添加</h3>
+        <div class="routes-nested-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '路由校验详情' : undefined">
         <p>以下项目校验失败或已经存在，请修正后重新添加：</p>
         <ul class="routes-failure-list"><li v-for="failure in addFailures" :key="`${failure.value}-${failure.reason}`"><code>{{ failure.value }}</code><span>{{ failure.reason }}</span></li></ul>
+        </div>
         <div class="modal-actions"><button type="button" data-testid="routes-add-error-close" @click="addFailures = []">知道了</button></div>
       </div>
     </div>
-    <div v-if="mergeError" ref="mergeErrorDialog" tabindex="-1" @keydown="onMergeErrorKeydown" class="routes-nested-overlay" data-testid="routes-merge-error-modal" role="alertdialog" aria-modal="true" aria-labelledby="routes-merge-error-title" @click.self="mergeError = null">
-      <div class="routes-nested-modal"><h3 id="routes-merge-error-title">无法合并路由</h3><p>{{ mergeError }}</p><div class="modal-actions"><button type="button" data-testid="routes-merge-error-close" @click="mergeError = null">知道了</button></div></div>
+    <div v-if="mergeError" ref="mergeErrorDialog" tabindex="-1" @keydown="onMergeErrorKeydown" class="routes-nested-overlay exv-dialog" :data-compact="compact ? 'true' : 'false'" data-testid="routes-merge-error-modal" role="alertdialog" aria-modal="true" aria-labelledby="routes-merge-error-title" @click.self="mergeError = null">
+      <div class="routes-nested-modal exv-dialog-card"><h3 id="routes-merge-error-title">无法合并路由</h3><div class="routes-nested-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '路由合并失败详情' : undefined"><p>{{ mergeError }}</p></div><div class="modal-actions"><button type="button" data-testid="routes-merge-error-close" @click="mergeError = null">知道了</button></div></div>
     </div>
-    <div v-if="confirmState" ref="confirmDialog" tabindex="-1" @keydown="onConfirmKeydown" class="routes-nested-overlay" data-testid="routes-confirm" role="alertdialog" aria-modal="true" aria-labelledby="routes-confirm-title" @click.self="confirmState = null">
-      <div class="routes-nested-modal"><h3 id="routes-confirm-title">确认合并</h3><p>合并网段过大，可能导致不必要流量流经 VPN 服务器影响体验，是否继续？</p><p class="routes-confirm-result" data-testid="routes-confirm-result">合并结果：{{ confirmState.cidr }}</p><div class="modal-actions"><button type="button" data-testid="routes-confirm-cancel" @click="confirmState = null">取消</button><button type="button" class="routes-save" data-testid="routes-confirm-ok" @click="confirmState !== null && applyMergeResult(confirmState)">继续合并</button></div></div>
+    <div v-if="confirmState" ref="confirmDialog" tabindex="-1" @keydown="onConfirmKeydown" class="routes-nested-overlay exv-dialog" :data-compact="compact ? 'true' : 'false'" data-testid="routes-confirm" role="alertdialog" aria-modal="true" aria-labelledby="routes-confirm-title" @click.self="confirmState = null">
+      <div class="routes-nested-modal exv-dialog-card"><h3 id="routes-confirm-title">确认合并</h3><div class="routes-nested-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '路由合并影响与结果' : undefined"><p>合并网段过大，可能导致不必要流量流经 VPN 服务器影响体验，是否继续？</p><p class="routes-confirm-result" data-testid="routes-confirm-result">合并结果：{{ confirmState.cidr }}</p></div><div class="modal-actions"><button type="button" data-testid="routes-confirm-cancel" @click="confirmState = null">取消</button><button type="button" class="routes-save" data-testid="routes-confirm-ok" @click="confirmState !== null && applyMergeResult(confirmState)">继续合并</button></div></div>
     </div>
+    </Teleport>
   </div>
 </template>
 
@@ -213,12 +224,12 @@ function requestMerge(): void {
 .routes-editor { position: relative; display: flex; min-height: 0; flex-direction: column; color: var(--text-primary); }
 .routes-list { flex: 1 1 auto; min-height: 0; max-height: min(48vh, 460px); display: grid; gap: var(--space-1); margin-bottom: var(--space-3); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .routes-list::-webkit-scrollbar { width: 8px; }
-.routes-empty { margin: 0; padding: var(--space-2) 0; color: var(--text-secondary); font-size: 13px; }
+.routes-empty { margin: 0; padding: var(--space-2) 0; color: var(--text-secondary); font-size: var(--font-size-caption); }
 .route-item { display: flex; align-items: center; gap: var(--space-2); min-height: 34px; padding: var(--space-1) var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); cursor: pointer; }
 .route-item--selected { border-color: var(--accent); background: var(--accent-subtle); }
 .route-item__select { flex: none; width: 16px; height: 16px; accent-color: var(--accent); }
-.route-item__text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 13px; }
-.route-item__remove { flex: none; min-height: 26px; padding: 0 var(--space-2); font-size: 12px; color: var(--text-secondary); }
+.route-item__text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--font-size-caption); }
+.route-item__remove { flex: none; min-height: 26px; padding: 0 var(--space-2); font-size: var(--font-size-body); color: var(--text-secondary); }
 .route-item__remove:hover { color: var(--state-danger); border-color: var(--state-danger); }
 .routes-workspace { display:flex; flex-direction:column; min-height:0; }
 .routes-editor--split .routes-workspace { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(240px,1fr); gap:var(--space-4); height:clamp(180px,38vh,360px); }
@@ -232,27 +243,28 @@ function requestMerge(): void {
   .routes-editor--split .routes-add-composer textarea { min-height:110px; }
 }
 .routes-panel { min-width: 0; padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-subtle); }
-.routes-panel h3 { margin: 0 0 var(--space-2); font-size: 13px; }
+.routes-panel h3 { margin: 0 0 var(--space-2); font-size: var(--font-size-heading); }
 .routes-add-panel { display: flex; flex-direction: column; gap: var(--space-2); }
 .routes-add-composer { position: relative; min-width: 0; }
-.routes-add-composer textarea { width: 100%; min-height: 74px; resize: vertical; padding: var(--space-2) var(--space-2) 42px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-panel); color: var(--text-primary); font-family: var(--font-mono); font-size: 13px; }
+.routes-add-composer textarea { width: 100%; min-height: 74px; resize: vertical; padding: var(--space-2) var(--space-2) 42px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-panel); color: var(--text-primary); font-family: var(--font-mono); font-size: var(--font-size-body); }
 .routes-add-composer > button { position: absolute; right: var(--space-2); bottom: var(--space-2); min-height: 28px; padding: 0 var(--space-3); }
 .routes-merge-panel { display: flex; flex-direction: column; justify-content: center; padding-block: var(--space-2); }
 .routes-merge { display: flex; align-items: center; gap: var(--space-2); }
-.routes-selection-count { color: var(--text-secondary); font-size: 13px; }
+.routes-selection-count { color: var(--text-secondary); font-size: var(--font-size-caption); }
 .routes-merge-button { min-height: 32px; padding: 0 var(--space-3); }
-.routes-merge-preview { min-width: 0; flex: 1 1 auto; color: var(--state-success); font-family: var(--font-mono); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.routes-merge-preview { min-width: 0; flex: 1 1 auto; color: var(--state-success); font-family: var(--font-mono); font-size: var(--font-size-caption); line-height: 1.5; overflow-wrap: anywhere; }
 .modal-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
 .routes-editor__actions { margin-top: var(--space-3); }
-.modal-actions button { min-height: 34px; padding: var(--space-1) var(--space-3); font-size: 13px; }
+.modal-actions button { min-height: 34px; padding: var(--space-1) var(--space-3); font-size: var(--font-size-body); }
 .modal-actions button:disabled { border-color: var(--border-subtle); background: var(--surface-subtle); color: var(--text-secondary); }
 .routes-save { border-color: var(--accent); background: var(--accent); color: var(--accent-on); font-weight: 600; }
 .routes-save:hover { border-color: var(--accent-strong); background: var(--accent-strong); }
 .routes-nested-overlay { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; padding: var(--space-5); background: rgb(0 0 0 / 0.28); }
 .routes-nested-modal { width: min(100%, 480px); max-height: min(70vh, 540px); overflow-y: auto; padding: var(--space-5); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); box-shadow: 0 16px 40px rgb(0 0 0 / 0.35); }
-.routes-nested-modal h3 { margin: 0 0 var(--space-2); font-size: 16px; }
-.routes-nested-modal p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
-.routes-failure-list { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; padding-left: var(--space-4); color: var(--text-secondary); font-size: 12px; }
+.routes-nested-modal h3 { margin: 0 0 var(--space-2); font-size: var(--font-size-heading); }
+.routes-nested-modal p { margin: 0; color: var(--text-secondary); font-size: var(--font-size-caption); line-height: 1.5; }
+.routes-nested-body { display: contents; }
+.routes-failure-list { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; padding-left: var(--space-4); color: var(--text-secondary); font-size: var(--font-size-caption); }
 .routes-failure-list li { display: grid; gap: 2px; }
 .routes-failure-list code { color: var(--text-primary); font-family: var(--font-mono); overflow-wrap: anywhere; }
 .routes-confirm-result { color: var(--text-primary) !important; font-family: var(--font-mono); }

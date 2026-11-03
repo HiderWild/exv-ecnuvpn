@@ -13,7 +13,6 @@ pub const HEARTBEAT_TIMEOUT_MS: u64 = 15_000;
 
 /// 退出前等待在途组装响应取消的既有预算；SCM 停止等待必须覆盖此窗口。
 pub const ASSEMBLY_CANCEL_WAIT: Duration = Duration::from_secs(5);
-const ASSEMBLY_CANCEL_POLL: Duration = Duration::from_millis(50);
 
 /// engine 侧心跳监视状态（单调计时，无跨线程锁：仅原子读改写）。
 ///
@@ -100,22 +99,18 @@ pub fn heartbeat_timeout_watcher(
 ///
 /// oneshot 专属：服务 engine 不受影响（SCM 生命周期自管，无服务形态代码）。
 pub async fn heartbeat_shutdown(runtime: Arc<dyn TunnelRuntime>, status: Arc<StatusPublisher>) {
-    // 1. 置位取消令牌 → 有界等待在途组装在段边界取消并自清理（5s 上限，镜像 stop_tunnel）。
-    runtime.cancel();
-    // 2. teardown 数据面/特权资源（阻塞操作 → spawn_blocking 隔离，不占异步 worker）。
+    let mut admission = status.admission.access.lock().await;
+    *admission = true; // 进程退出的接纳边界，flush 期间不能新建隧道。
+    let worker = Arc::clone(&runtime);
     let _ = tokio::task::spawn_blocking(move || {
-        for _ in 0..(ASSEMBLY_CANCEL_WAIT.as_millis() / ASSEMBLY_CANCEL_POLL.as_millis()) {
-            if !runtime.is_assembling() {
-                break;
-            }
-            std::thread::sleep(ASSEMBLY_CANCEL_POLL);
-        }
-        runtime.teardown()
+        worker.cancel();
+        worker.teardown()
     })
     .await;
-    // 3. post Idle（coarse Idle 终态；空 operation_id——心跳超时无外部操作关联，host 侧
-    //    R3-C2 陈旧过滤在无在途操作时保守透传/在途不符时丢弃，均为安全）。
-    status.publish(StatusEvent::idle(Vec::new()));
+    // 真实装配/转发未收口时不得发布假 Idle；进程退出仍由原外层生命周期负责。
+    if !runtime.is_assembling() && !runtime.is_connected() {
+        status.publish(StatusEvent::idle(Vec::new()));
+    }
 }
 
 // ---------------------------------------------------------------------------

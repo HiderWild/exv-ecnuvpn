@@ -8,8 +8,7 @@
 //! darwin 平台旁路（诚实语义，不伪造 win32 状态）：
 //!   * `respond_interaction`：darwin core 该 RPC 返回 typed `Unimplemented` →
 //!     原样透传为 typed 错误，前端走既有认证失败/内部错误面；
-//!   * `trigger_latency_refresh`：v1 no-op（周期探测由并行车道实现；win32 的
-//!     本地标记文件机制属于其 engine 探测循环，darwin 无对应消费方）；
+//!   * `trigger_latency_refresh`：经已认证 Core 转交当前 Cisco Engine 探测队列；
 //!   * `service_control` 已非旁路（W3-4/P4 v1 起透传 core 的 query 实装与变更
 //!     动作 typed 指引，见下文命令文档）；
 //!   * `open_external` 已实装（非旁路）：壳侧 AppKit `NSWorkspace openURL:` 打开
@@ -21,6 +20,7 @@
 //! utun（[`super::adapter_address`]），判据与 None 语义对齐 win32 `adapter_address`
 //! 本地 seam 契约——未连接/未分配/候选歧义诚实返回 `None`。
 
+use exv_vpn_darwin_ipc::auth_deadline::AuthDeadline;
 use tauri::State;
 
 use super::client::{ConfigItem, ConnectIntent, CoreClient, CoreState, CoreStatus};
@@ -41,20 +41,63 @@ pub(crate) async fn connect(
     state: State<'_, CoreState>,
     intent: ConnectIntent,
 ) -> Result<OperationReply, AppError> {
-    match CoreClient.connect(&state, &intent).await {
-        Ok(reply) => Ok(reply),
+    // 在恢复Core等任何异步准备之前建立本次用户意图；后续认证只会交候选给此入口。
+    let request = state.connection_requests.begin()?;
+    let deadline = AuthDeadline::after(super::browser_auth::AUTH_BUDGET)
+        .map_err(super::client::auth_deadline_app_error)?;
+    connect_with_recovery(
+        request,
+        deadline,
+        |request, deadline| {
+            super::atrust_connect::connect(&app, &state, &intent, request, deadline)
+        },
+        || super::bootstrap::recover_stopped_core_for_connect(&app, &state),
+    )
+    .await
+}
+
+/// 命令的真实恢复编排：同一请求、同一绝对期限；已启动恢复等待真实收束。
+pub(super) async fn connect_with_recovery<A, AF, R, RF>(
+    request: std::sync::Arc<super::connection_request::ConnectionRequest>,
+    deadline: AuthDeadline,
+    mut attempt: A,
+    recover: R,
+) -> Result<OperationReply, AppError>
+where
+    A: FnMut(std::sync::Arc<super::connection_request::ConnectionRequest>, AuthDeadline) -> AF,
+    AF: std::future::Future<Output = Result<OperationReply, AppError>>,
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = Result<(), AppError>>,
+{
+    request.begin_submit()?;
+    deadline
+        .remaining()
+        .map_err(super::client::auth_deadline_app_error)?;
+    let result = attempt(std::sync::Arc::clone(&request), deadline).await;
+    request.begin_submit()?;
+    match result {
         Err(AppError::CoreUnreachable(_)) => {
-            super::bootstrap::recover_stopped_core_for_connect(&app, &state).await?;
-            CoreClient.connect(&state, &intent).await
+            request.begin_submit()?;
+            deadline
+                .remaining()
+                .map_err(super::client::auth_deadline_app_error)?;
+            recover().await?;
+            request.begin_submit()?;
+            deadline
+                .remaining()
+                .map_err(super::client::auth_deadline_app_error)?;
+            let result = attempt(std::sync::Arc::clone(&request), deadline).await;
+            request.begin_submit()?;
+            result
         }
-        Err(error) => Err(error),
+        result => result,
     }
 }
 
-/// UI 的 Core 两态健康检查。仅由控制管道实际可通与否得出，绝不扫描进程或拉起 Core。
+/// UI 控制面读取；失败沿原 AppError 返回，不扫描进程或推导已停止。
 #[tauri::command]
 pub(crate) async fn core_status(state: State<'_, CoreState>) -> Result<CoreStatus, AppError> {
-    Ok(state.probe_status().await)
+    state.probe_status().await
 }
 
 /// 停止连接（core KernelControl.Stop）。
@@ -93,27 +136,23 @@ pub(crate) async fn config_get(
     CoreClient.config_get(&state).await
 }
 
-/// 仅用户主动按住眼睛时读取；使用 Darwin 配置目录解析，与 Core 继承同一环境。
-#[tauri::command]
-pub(crate) async fn saved_password(
-    state: State<'_, CoreState>, username: String, server: String,
-) -> Result<Option<super::saved_password::PasswordForDisplay>, String> {
-    let current = CoreClient.config_get(&state).await
-        .map_err(|_| "无法读取当前配置的已保存密码".to_string())?;
-    let value = |key: &str| current.items.iter().find(|item| item.key == key).map(|item| item.value.as_str());
-    if value("username") != Some(username.as_str()) || value("server") != Some(server.as_str()) {
-        return Err("当前账户已变化，请重新按住查看密码".to_string());
-    }
-    super::saved_password::read_current_for_display(&username, &server)
-}
-
 /// 写入配置（KernelControl.ConfigSet；返回 ok 标志）。
+///
+/// A1-1e（2026-10-09 区域 A）：ConfigSet 阶段的有界重试环（[`super::retry`]，
+/// win32 `commands.rs::config_set` 同构参数化——仅对 `CoreUnreachable`、仅包裹
+/// 幂等的 ConfigSet、整环 15s 硬上界；darwin 无唤醒设施，`wake` 恒 `None`
+/// 纯退避，core 若死则环耗尽后快速失败交给连接路径恢复语义）。darwin 宿主
+/// 未运行，本改动为参数化文本改动，未经本地编译/测试验证，如实登记。
 #[tauri::command]
 pub(crate) async fn config_set(
     state: State<'_, CoreState>,
     items: Vec<ConfigItem>,
 ) -> Result<bool, AppError> {
-    CoreClient.config_set(&state, items).await
+    super::retry::retry_on_core_unreachable(
+        || async { CoreClient.config_set(&state, items.clone()).await },
+        super::retry::NO_WAKE,
+    )
+    .await
 }
 
 /// 拉取当前归一化统计（stats-wire 方案 A：从 `snapshot` 命令维护的缓存读取；
@@ -153,14 +192,15 @@ pub(crate) async fn respond_interaction(
         .await
 }
 
-/// 触发一次延迟刷新（win32 写本地标记文件，engine 探测循环轮询到即立即 ping）。
-///
-/// darwin v1 no-op：周期延迟探测由并行车道实现（engine 数据面探测流），
-/// 本命令如实受理（Ok）但不产生副作用；延迟仍经 `RuntimeSnapshot.stats.latency_ms`
-/// 到达，无 wire 变更。
+/// 请求当前已接纳 operation 的时延刷新；受理与匹配回包分别沿 RPC/Stats 返回。
 #[tauri::command]
-pub(crate) async fn trigger_latency_refresh() -> Result<(), AppError> {
-    Ok(())
+pub(crate) async fn trigger_latency_refresh(
+    state: State<'_, CoreState>,
+    operation_id: String,
+) -> Result<(), AppError> {
+    CoreClient
+        .trigger_latency_refresh(&state, &operation_id)
+        .await
 }
 
 /// 服务控制（core `KernelControl.ServiceControl`；W3-4/P4 v1 起透传 core）。
@@ -238,8 +278,7 @@ pub(crate) async fn pre_uninstall(
     // 一次管理员提权内完成「卸服务 + 历史守护 + `/Library` 产物 + root 属主 runtime 残留」。
     // 壳层不拼任何提权 payload、不 exec 进程（守卫约束）。
     //
-    // 提权返回**只代表"发起过"**：服务是否真的卸掉由 `pre_uninstall::run` 的后置核对判定，
-    // 不以本调用成功为其依据（core payload 用 `;` 串联，退出码只反映最后一项）。
+    // 按原 Core Uninstall 结果报告：Core 已保存各原清理动作的首个失败，原错误继续上抛。
     // [0] 连接前置：用户要卸载，连接必须停。停不下来就**中止整次卸载**（不做任何删除）——
     // 清理会删本连接的运行目录、服务组件与凭据，存在活动会话时删除会与运行中的引擎竞态。
     let connection = stop_active_connection(&state).await;
@@ -247,10 +286,15 @@ pub(crate) async fn pre_uninstall(
     // 服务卸载必须延迟到连接前置确认之后；不能先执行再交给 run 报告中止。
     let elevation_entry = elevate_for_stopped_connection(&connection, || async {
         match CoreClient
-            .service_control(&state, super::state::ServiceControlAction::Uninstall)
+            .full_uninstall(&state)
             .await
         {
-            Ok(reply) if reply.ok => Ok(super::pre_uninstall::ElevationOutcome::Executed),
+            Ok(reply) if reply.ok => {
+                let detail = reply.message.lines().filter(|line| line.starts_with("已保留包含其他文件的目录："))
+                    .collect::<Vec<_>>().join("\n");
+                if detail.is_empty() { Ok(super::pre_uninstall::ElevationOutcome::Executed) }
+                else { Ok(super::pre_uninstall::ElevationOutcome::ExecutedWithDetail(detail)) }
+            },
             Ok(reply) => classify_elevation_failure(&reply.message),
             Err(error) => classify_elevation_failure(&error.to_string()),
         }
@@ -404,3 +448,113 @@ const STOP_IDLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3
 
 /// Idle 轮询间隔。
 const STOP_IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// 浏览器发现与会话内选择只影响本地认证原语，连接提交仍由用户请求持有。
+/// （B3 起选择按阶梯+缓存自动求值；`atrust_browser_choose` 为 wire 兼容保留，
+/// 前端选择器与等待流已退场。）
+#[tauri::command]
+pub(crate) async fn atrust_browser_status(app: tauri::AppHandle, state: State<'_, CoreState>) -> Result<super::browser_auth::BrowserStatus, AppError> {
+    super::browser_auth::browser_status(&app, &state.browser_selection).await.map_err(AppError::Internal)
+}
+#[tauri::command]
+pub(crate) fn atrust_browser_choose(state: State<'_, CoreState>, browser: String) -> Result<bool, AppError> {
+    state.browser_selection.choose(&browser).map_err(AppError::Internal)?; Ok(true)
+}
+
+/// 只提交本代准备动作；真实phase/busy/取消权限由原ConnectionRequests处理。
+#[tauri::command]
+pub(crate) fn auth_preparation_respond(
+    state: State<'_, CoreState>,
+    generation: u64,
+    action: super::connection_request::AuthPreparationAction,
+) -> Result<(), AppError> {
+    state.connection_requests.respond_auth_preparation(generation, action).map_err(AppError::Internal)
+}
+
+/// 仅由设置页主动展开后调用，保持未连接及切换协议后可用。
+#[tauri::command]
+pub(crate) async fn auth_receiver_status(state: State<'_, CoreState>) -> Result<serde_json::Value, AppError> {
+    official_receiver_control(&state, exv_vpn_wire::generated::AuthReceiverAction::Inspect).await
+}
+
+/// 固定恢复官方认证接收端首次保存的启动设置，不接受任意服务或路径输入。
+#[tauri::command]
+pub(crate) async fn restore_official_auth_receiver(state: State<'_, CoreState>) -> Result<serde_json::Value, AppError> {
+    official_receiver_control(&state, exv_vpn_wire::generated::AuthReceiverAction::Restore).await
+}
+
+fn official_receiver_reply(reply: exv_vpn_wire::generated::AuthReceiverControlReply) -> serde_json::Value {
+    let config = |value: &exv_vpn_wire::generated::AuthReceiverConfigSummary| serde_json::json!({
+        "windows_start_type": value.windows_start_type,
+        "windows_delayed_auto_start": value.windows_delayed_auto_start,
+        "launchd_targets": value.launchd_targets.iter().map(|target| serde_json::json!({
+            "domain": target.domain, "label": target.label, "disabled": target.disabled,
+        })).collect::<Vec<_>>(),
+    });
+    let receiver = reply.receiver.as_ref().map(|value| serde_json::json!({
+        "running": value.running, "can_start": value.can_start,
+        "recovery_available": value.recovery_available, "source": value.source,
+        "original_config": value.original_config.as_ref().map(&config),
+        "current_config": value.current_config.as_ref().map(&config),
+    }));
+    let error = reply.error.as_ref().map(|value| serde_json::json!({
+        "message": value.operation_detail.clone().filter(|s| !s.is_empty()).unwrap_or_else(||
+            format!("aTrust 启动设置操作失败：{}。请重试。", value.reason)),
+        "code": value.code, "stage": value.stage, "reason": value.reason,
+        "native": value.native.as_ref().map(|native| serde_json::json!({
+            "category": native.category, "namespace": native.namespace, "code": native.code,
+        })),
+    }));
+    serde_json::json!({ "receiver": receiver, "completed_steps": reply.completed_steps, "error": error })
+}
+
+async fn official_receiver_control(
+    state: &CoreState,
+    action: exv_vpn_wire::generated::AuthReceiverAction,
+) -> Result<serde_json::Value, AppError> {
+    use exv_vpn_wire::generated as wire;
+    if action == wire::AuthReceiverAction::Restore {
+        ensure_official_receiver_restore_allowed(
+            state.connection_requests.has_active_request(),
+            state.cached_snapshot().as_ref().map(|snapshot| &snapshot.runtime),
+        )?;
+    }
+    let deadline = AuthDeadline::after(std::time::Duration::from_secs(60))
+        .map_err(|error| AppError::Internal(format!("准备 aTrust 启动设置控制期限失败：{error:?}")))?;
+    let until = deadline.tokio_deadline()
+        .map_err(|error| AppError::Internal(format!("aTrust 启动设置操作期限已耗尽：{error:?}")))?;
+    let mut operation_id = vec![0u8; 16];
+    getrandom::fill(&mut operation_id)
+        .map_err(|error| AppError::Internal(format!("生成 aTrust 启动设置操作标识失败：{error}")))?;
+    CoreClient.prepare_auth_control(state, deadline).await?;
+    if action == wire::AuthReceiverAction::Restore {
+        let snapshot = CoreClient.snapshot(state).await?;
+        ensure_official_receiver_restore_allowed(
+            state.connection_requests.has_active_request(), Some(&snapshot.runtime),
+        )?;
+    }
+    let reply = tokio::time::timeout_at(until, CoreClient.auth_receiver_control(state, wire::AuthReceiverControlRequest {
+        operation_id, action: action as i32, deadline_monotonic_ns: deadline.monotonic_ns(),
+    })).await.map_err(|_| AppError::Internal("aTrust 启动设置操作超过本次期限，请重试。".into()))??;
+    Ok(official_receiver_reply(reply))
+}
+
+
+/// 活动认证、连接和清理期间保留官方接收端的禁用设置。
+fn ensure_official_receiver_restore_allowed(
+    active_request: bool,
+    runtime: Option<&super::state::RuntimeState>,
+) -> Result<(), AppError> {
+    use super::state::RuntimeState;
+    let connection_active = matches!(runtime,
+        Some(RuntimeState::Connecting { .. }
+            | RuntimeState::AwaitingInteraction { .. }
+            | RuntimeState::Connected { .. }
+            | RuntimeState::Stopping { .. }
+            | RuntimeState::Reconciling { .. }
+            | RuntimeState::FailedDirty { has_obligation: true, .. }));
+    if active_request || connection_active {
+        return Err(AppError::Internal("当前连接或认证正在进行，请先断开连接后恢复 aTrust 原启动设置。".into()));
+    }
+    Ok(())
+}

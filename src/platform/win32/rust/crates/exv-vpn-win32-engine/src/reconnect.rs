@@ -112,9 +112,12 @@ const HEAL_POLL: Duration = Duration::from_millis(250);
 
 /// wire `ErrorCode::UNAUTHORIZED` 判别值（`tunnel_error_to_wire` 的登录拒绝映射）。
 const WIRE_UNAUTHORIZED: i32 = 15;
-/// Cisco 登录拒绝以外的 `INVALID_INPUT` 判别值（本驱动自建 ctx 不缺输入——此码即
-/// 交互式 SAML 要求，无头不可交互）。
-const WIRE_SAML_REQUIRED: i32 = 1;
+/// wire `ErrorCode::SAML_REQUIRED` 判别值（EXV_UNFREEZE 2026-10-09 修撞码：旧值 1
+/// 与 `INVALID_INPUT` 同值）。本驱动自建 ctx 不缺输入，收到此码即交互式 SAML
+/// 要求——无头不可交互，按认证终态收口。`tunnel_error_to_wire` 的同名常量同改
+/// 20（SAML 三落点之二，复审 2.2-2：漏改则 R1 自愈遇 SAML 从立即终态退化为六次
+/// 退避耗尽）。
+const WIRE_SAML_REQUIRED: i32 = 20;
 /// wire `ErrorCode::DEADLINE_EXCEEDED` 判别值（尝试耗尽的"超时类"终态映射）。
 const WIRE_DEADLINE_EXCEEDED: i32 = 16;
 /// wire `ErrorStage::Ingress` 判别值（engine 内发起、无外部操作主体）。
@@ -167,6 +170,8 @@ impl std::fmt::Debug for RetainedMaterial {
 
 /// 一次受连接的会话级驻留（材料 + 组装上下文快照）。
 pub struct RetainedSession {
+    /// 首连受理的逻辑身份；R1 内部重试不重新铸造公开身份。
+    operation_id: Vec<u8>,
     /// 隧道种类（决定 heal 路径与 aTrust 前置复核）。
     kind: TraceKind,
     /// 冻结的连接模式（标准/兼容；自动重连沿用，不读实时设置）。
@@ -181,12 +186,14 @@ impl RetainedSession {
     /// 组装会话驻留（`grpc_server::apply_tunnel` 在重连开启时捕获）。
     #[must_use]
     pub fn new(
+        operation_id: Vec<u8>,
         kind: TraceKind,
         connection_mode: ConnectionMode,
         plan: exv_vpn_domain::ports::TunnelPlan,
         material: RetainedMaterial,
     ) -> Self {
         Self {
+            operation_id,
             kind,
             connection_mode,
             plan,
@@ -302,6 +309,75 @@ impl ReconnectDriver {
         );
     }
 
+    /// 新请求排除旧循环发布；门拒绝不意味着原会话材料或善后责任已结束。
+    pub(crate) fn invalidate_for_apply(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.epoch += 1;
+        inner.in_flight = false;
+    }
+
+    /// 同一 admission 内的同步 runtime 受理。暂移原材料，拒绝即还原；没有第二份材料库。
+    /// Adopt 沿原 Live 的 operation 关联重绑定，不改材料、trace identity 或冻结政策。
+    pub(crate) fn start_apply_with_session(
+        &self,
+        session: Option<RetainedSession>,
+        adopt: bool,
+        operation_id: &[u8],
+        start: impl FnOnce() -> Result<
+            crate::tunnel_runtime::ApplyAcceptance,
+            crate::tunnel_runtime::TunnelError,
+        >,
+    ) -> Result<(), crate::tunnel_runtime::TunnelError> {
+        if adopt {
+            let result = start();
+            if let Ok(adopted) = &result {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *adopted == crate::tunnel_runtime::ApplyAcceptance::Started {
+                    inner.session = None;
+                    inner.disarm_reason = None;
+                } else if let Some(session) = inner.session.as_mut() {
+                    session.operation_id = operation_id.to_vec();
+                }
+            }
+            return result.map(|_| ());
+        }
+        let previous = {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // 新的无 R1 会话仍由 worker-failed 善后；只有真实 Stop/terminal 才负责去重。
+            (inner.session.take(), inner.disarm_reason.take())
+        };
+        if let Some(session) = session {
+            self.arm(session); // 保留原句柄捕获、材料驻留和 armed 日志语义。
+        }
+        let result = start();
+        if result.is_err() || matches!(result, Ok(crate::tunnel_runtime::ApplyAcceptance::Adopted))
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.session = previous.0;
+            inner.disarm_reason = previous.1;
+            inner.epoch += 1; // 本次可能排队的回调亦失效，不复活先前旧循环。
+            inner.in_flight = false;
+            if result.is_ok()
+                && let Some(session) = inner.session.as_mut()
+            {
+                session.operation_id = operation_id.to_vec();
+            }
+        }
+        result.map(|_| ())
+    }
+
     /// 解除：用户显式断开/会话换装时清驻留（材料即刻零化；在途循环经代次自行退出）。
     /// 记录解除原因：`user_stop` / R1 终态的善后链由各自路径驱动，第五情形不重复。
     pub fn disarm(&self, why: &'static str) {
@@ -414,7 +490,7 @@ impl ReconnectDriver {
     /// （[`AftermathDriver::abandon_session`]：cancel+teardown 复验 lease 释放 →
     /// 痕 Aftermath → 预检验证 → 干净删痕 → Idle 终态事件）。teardown 幂等：sweeper
     /// 的 `disconnect_for` 已做过一轮清理（失败残留的 owner 会被本轮重试）。
-    fn worker_failed_aftermath(&self, handle: Option<tokio::runtime::Handle>) {
+    fn worker_failed_aftermath(self: &Arc<Self>, handle: Option<tokio::runtime::Handle>) {
         self.log.emit(
             LogLevel::Warn,
             "engine",
@@ -434,10 +510,19 @@ impl ReconnectDriver {
             );
             return;
         };
-        let aftermath = Arc::clone(&self.aftermath);
+        let driver = Arc::clone(self);
+        let epoch = self.current_epoch();
         handle.spawn(async move {
-            aftermath
-                .abandon_session(crate::aftermath::reason::DATA_PLANE_WORKER_FAILED)
+            let _admission = driver.status.admission.access.lock().await;
+            if *_admission {
+                return;
+            }
+            if driver.current_epoch() != epoch || driver.runtime.is_connected() {
+                return;
+            }
+            driver
+                .aftermath
+                .abandon_session_admitted(crate::aftermath::reason::DATA_PLANE_WORKER_FAILED)
                 .await;
         });
     }
@@ -450,37 +535,67 @@ impl ReconnectDriver {
             .epoch
     }
 
+    /// 与 arm/disarm 共用局部锁，使已失效代次不能随后发布自愈结果。
+    async fn publish_current(&self, epoch: u64, event: StatusEvent) -> bool {
+        let admission = self.status.admission.access.lock().await;
+        if *admission {
+            return false;
+        }
+        self.publish_current_admitted(epoch, event)
+    }
+
+    fn publish_current_admitted(&self, epoch: u64, event: StatusEvent) -> bool {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.epoch != epoch {
+            return false;
+        }
+        self.status.publish(event);
+        true
+    }
+
     /// 自愈循环主体：Armed → Reconnecting →（Healed | Backoff' | Terminal）。
     async fn heal_loop(self: &Arc<Self>, epoch: u64) {
         let started = std::time::Instant::now();
         let mut attempt: u32 = 0;
         let mut failure_reason = reason::TUNNEL_LOST;
-        let mut announced_op: Option<Vec<u8>> = None;
         loop {
-            if self.current_epoch() != epoch {
+            let admission = self.status.admission.access.lock().await;
+            if *admission || self.current_epoch() != epoch {
                 return; // 会话已换装/解除
             }
             attempt += 1;
-            let op_id = announced_op
-                .take()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().into_bytes().to_vec());
             let Some(facts) = self.session_facts() else {
                 return;
             };
-            // 尝试开始：计数 + 在途事件（退避预告已发过的事件不重发）。
+            let op_id = facts.operation_id.clone();
+            // 开始本轮决策；真实受理点另发 next_retry_at_ms=0，退避预告不作受理凭据。
             self.stats.registry().record_reconnect_attempt();
             if attempt == 1 {
-                self.status.publish(StatusEvent::reconnecting(
-                    op_id.clone(),
-                    attempt,
-                    failure_reason,
-                    0,
-                ));
+                if !self.publish_current_admitted(
+                    epoch,
+                    StatusEvent::reconnecting(op_id.clone(), attempt, failure_reason, 0),
+                ) {
+                    return;
+                }
             }
-            match self.heal_once(&facts, &op_id, epoch).await {
+            drop(admission);
+            let outcome = self.heal_once(&facts, &op_id, epoch, attempt).await;
+            if self.current_epoch() != epoch { return; }
+            match outcome {
                 HealOutcome::Healed => {
+                    let admission = self.status.admission.access.lock().await;
+                    if *admission
+                        || !self.publish_current_admitted(
+                            epoch,
+                            StatusEvent::reconnected(op_id, attempt),
+                        )
+                    {
+                        return;
+                    }
                     self.stats.registry().record_reconnect_success();
-                    self.status.publish(StatusEvent::reconnected(op_id, attempt));
                     let connection_id = self
                         .gate
                         .as_ref()
@@ -502,7 +617,7 @@ impl ReconnectDriver {
                     return; // 材料保留、尝试计数随成功归零（下次触发从 1 起）
                 }
                 HealOutcome::Terminal(terminal_reason) => {
-                    self.terminal(op_id, attempt, terminal_reason).await;
+                    self.terminal(op_id, attempt, terminal_reason, epoch).await;
                     return;
                 }
                 HealOutcome::Aborted => {
@@ -511,21 +626,27 @@ impl ReconnectDriver {
                 HealOutcome::Transient(next_reason) => {
                     failure_reason = next_reason;
                     if attempt >= MAX_ATTEMPTS {
-                        self.terminal(op_id, attempt, reason::ATTEMPTS_EXHAUSTED)
+                        self.terminal(op_id, attempt, reason::ATTEMPTS_EXHAUSTED, epoch)
                             .await;
                         return;
                     }
                     let delay = backoff_delay(attempt);
-                    let next_op = uuid::Uuid::new_v4().into_bytes().to_vec();
-                    let next_retry_at_ms = wall_now_ms().saturating_add(
-                        i64::try_from(delay.as_millis()).unwrap_or(i64::MAX),
-                    );
-                    self.status.publish(StatusEvent::reconnecting(
-                        next_op.clone(),
-                        attempt + 1,
-                        failure_reason,
-                        next_retry_at_ms,
-                    ));
+                    let next_retry_at_ms = wall_now_ms()
+                        .saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX));
+                    if !self
+                        .publish_current(
+                            epoch,
+                            StatusEvent::reconnecting(
+                                op_id.clone(),
+                                attempt + 1,
+                                failure_reason,
+                                next_retry_at_ms,
+                            ),
+                        )
+                        .await
+                    {
+                        return;
+                    }
                     self.log.emit(
                         LogLevel::Warn,
                         "engine",
@@ -542,7 +663,6 @@ impl ReconnectDriver {
                     if self.current_epoch() != epoch {
                         return;
                     }
-                    announced_op = Some(next_op);
                 }
             }
         }
@@ -552,6 +672,7 @@ impl ReconnectDriver {
     fn session_facts(&self) -> Option<SessionFacts> {
         let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.session.as_ref().map(|session| SessionFacts {
+            operation_id: session.operation_id.clone(),
             kind: session.kind,
             connection_mode: session.connection_mode,
             plan: session.plan.clone(),
@@ -560,7 +681,7 @@ impl ReconnectDriver {
     }
 
     /// 单次自愈尝试：aTrust 前置材料复核 → 全量重跑组装 → 观察终态。
-    async fn heal_once(&self, facts: &SessionFacts, op_id: &[u8], epoch: u64) -> HealOutcome {
+    async fn heal_once(&self, facts: &SessionFacts, op_id: &[u8], epoch: u64, attempt: u32) -> HealOutcome {
         // aTrust：源会话复核（既有 auth_config(false) 原语）。死亡 → 终态；
         // 网络不可核 → 瞬态退避（不值得全量组装）。
         if facts.kind == TraceKind::Atrust
@@ -583,21 +704,39 @@ impl ReconnectDriver {
             stats: Arc::clone(&self.stats),
             log: Arc::clone(&self.log),
         };
-        if let Err(error) = Arc::clone(&self.runtime).start_apply(ctx) {
-            // 受理拒绝（重复连接等）按瞬态退避——他人在途组装完成后重试。
-            self.log.emit(
-                LogLevel::Warn,
-                "engine",
-                "reconnect.heal.refused",
-                "自愈组装受理被拒（重复连接/状态），退避重试",
-                &[("detail", &error.detail)],
-            );
-            return HealOutcome::Transient(reason::HEAL_ASSEMBLY_FAILED);
+        let admission = self.status.admission.access.lock().await;
+        if *admission {
+            return HealOutcome::Aborted;
         }
-        // 观察终态：轮询 status.latest()（组装路径对本次 op 发布 Connected/Failed）。
+        if self.current_epoch() != epoch {
+            return HealOutcome::Aborted;
+        }
+        let cursor = match Arc::clone(&self.runtime).start_reconnect(ctx, attempt) {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                // 受理拒绝（重复连接等）按瞬态退避，不观察旧完成。
+                self.log.emit(
+                    LogLevel::Warn,
+                    "engine",
+                    "reconnect.heal.refused",
+                    "自愈组装受理被拒（重复连接/状态），退避重试",
+                    &[("detail", &error.detail)],
+                );
+                return if self.current_epoch() != epoch {
+                    HealOutcome::Aborted
+                } else {
+                    HealOutcome::Transient(reason::HEAL_ASSEMBLY_FAILED)
+                };
+            }
+        };
+        drop(admission);
+        // 只观察真实受理游标之后、同一逻辑 id 的新完成；序列与事件同快照。
         let deadline = tokio::time::Instant::now() + HEAL_BOUND;
         loop {
-            if let Some(latest) = self.status.latest()
+            let (sequence, latest) = self.status.snapshot();
+            if self.current_epoch() != epoch { return HealOutcome::Aborted; }
+            if let Some(latest) = latest
+                && sequence > cursor
                 && latest.operation_id == op_id
             {
                 match latest.coarse_phase {
@@ -653,9 +792,29 @@ impl ReconnectDriver {
 
     /// R1 终态善后（认证拒绝 / 尝试耗尽）：分叉见模块级文档（无头=engine 完成；
     /// core 在场=事件交 core 驱动，engine 清残留不删痕）。
-    async fn terminal(&self, op_id: Vec<u8>, attempt: u32, terminal_reason: &'static str) {
-        // 材料即刻零化（终态不循环）。
-        self.disarm(terminal_reason);
+    async fn terminal(
+        &self,
+        op_id: Vec<u8>,
+        attempt: u32,
+        terminal_reason: &'static str,
+        epoch: u64,
+    ) {
+        let _admission = self.status.admission.access.lock().await;
+        if *_admission {
+            return;
+        }
+        // 终态决策与发布同 arm/disarm 串行，不能清掉或覆盖已取代的会话。
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if inner.epoch != epoch { return; }
+            inner.session = None;
+            inner.epoch += 1;
+            inner.in_flight = false;
+            inner.disarm_reason = Some(terminal_reason);
+            self.status.publish(StatusEvent::reconnect_terminal(
+                op_id, attempt, terminal_reason, terminal_wire_error(terminal_reason),
+            ));
+        }
         let headless = self.headless.current().is_some();
         self.log.emit(
             LogLevel::Warn,
@@ -672,18 +831,11 @@ impl ReconnectDriver {
                 ("headless", &headless.to_string()),
             ],
         );
-        // 终态事件（无头时无外部消费者，发布为幂等记账；Idle 善后事件随后到达）。
-        self.status.publish(StatusEvent::reconnect_terminal(
-            op_id,
-            attempt,
-            terminal_reason,
-            terminal_wire_error(terminal_reason),
-        ));
         if headless {
             // 无头：engine 驱动完整善后（T5 钩子：cancel+teardown+验证+删痕+Idle）。
             let outcome = self
                 .aftermath
-                .abandon_session(crate::aftermath::reason::R1_TERMINAL)
+                .abandon_session_admitted(crate::aftermath::reason::R1_TERMINAL)
                 .await;
             self.log.emit(
                 if outcome.verified {
@@ -727,6 +879,7 @@ impl ReconnectDriver {
 
 /// 单次尝试携带的会话事实（材料副本 + 组装上下文）。
 struct SessionFacts {
+    operation_id: Vec<u8>,
     kind: TraceKind,
     connection_mode: ConnectionMode,
     plan: exv_vpn_domain::ports::TunnelPlan,
@@ -736,8 +889,10 @@ struct SessionFacts {
 /// 组装失败分类（wire 错误码 → 自愈结局）。
 ///
 /// 码表来源 `tunnel_error_to_wire`：15=UNAUTHORIZED（Cisco 登录被拒 `a0≠0`，
-/// 唯一真实认证拒绝）；1=`INVALID_INPUT`/SAML 要求（本驱动自建 ctx 不缺输入，
-/// 置 1 即交互式 SAML——无头不可交互，终态）；其余（13 平台/16 传输）瞬态。
+/// 唯一真实认证拒绝）；20=SAML_REQUIRED（EXV_UNFREEZE 2026-10-09 起——本驱动
+/// 自建 ctx 不缺输入，收到即交互式 SAML 要求，无头不可交互，终态）；1=
+/// INVALID_INPUT（仅凭据缺失；本驱动自建 ctx 已带凭据，罕见形态按瞬态退避，
+/// 不再误当 SAML 终态）；其余（13 平台/16 传输）瞬态。
 fn classify_assembly_failure(latest: &StatusEvent) -> HealOutcome {
     let Some(error) = latest.error.as_ref() else {
         return HealOutcome::Transient(reason::HEAL_ASSEMBLY_FAILED);
@@ -763,6 +918,10 @@ fn terminal_wire_error(terminal_reason: &str) -> VpnError {
         subject: None,
         resource: None,
         native: None,
+        // R1 终态的断开语义由 reason lane id（T16b）承载，VpnError.reason 不再
+        // 重复细分（T-16/17 不设 VpnError reason id，词表 §2.3）。
+        reason: String::new(),
+        operation_detail: None,
     }
 }
 

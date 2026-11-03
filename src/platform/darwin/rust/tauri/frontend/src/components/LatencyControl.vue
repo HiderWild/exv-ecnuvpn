@@ -3,13 +3,22 @@
  * 时延数据唯一来自 engine 的隧道探测。这里不再维护 localStorage 开关或前端定时器：
  * 前者不能控制 engine，后者也会让 UI 声称发生了实际探测。用户可随时请求一次真实刷新。
  */
-import { computed, inject, ref } from "vue";
+import { computed, inject, ref, watch } from "vue";
 
 import { PRODUCT_RUNTIME_KEY } from "../product/runtime";
 
 const runtime = inject(PRODUCT_RUNTIME_KEY, null);
 const refreshing = ref(false);
 const refreshStatus = ref<"idle" | "requested" | "failed">("idle");
+const failureMessage = ref("");
+let refreshGeneration = 0;
+watch([() => runtime?.state.value.status, () => runtime?.state.value.operationId], () => {
+  refreshGeneration += 1;
+  refreshing.value = false;
+  refreshStatus.value = "idle";
+  failureMessage.value = "";
+}, { flush: "sync" });
+
 
 const latencyValue = computed(() => {
   const metrics = runtime?.state.value.metrics;
@@ -19,15 +28,19 @@ const latencyValue = computed(() => {
 async function refreshLatency(): Promise<void> {
   if (refreshing.value || runtime === null) return;
 
+  const generation = ++refreshGeneration;
   refreshing.value = true;
   refreshStatus.value = "idle";
   try {
     await runtime.triggerLatencyRefresh();
-    refreshStatus.value = "requested";
-  } catch {
+    if (generation === refreshGeneration) refreshStatus.value = "requested";
+  } catch (error) {
+    if (generation !== refreshGeneration) return;
     refreshStatus.value = "failed";
+    failureMessage.value = typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+      ? error.message : "时延刷新未获受理，请重试。";
   } finally {
-    refreshing.value = false;
+    if (generation === refreshGeneration) refreshing.value = false;
   }
 }
 </script>
@@ -52,8 +65,8 @@ async function refreshLatency(): Promise<void> {
         refreshing
           ? "正在发送刷新请求…"
           : refreshStatus === "requested"
-            ? "刷新请求已发送，等待隧道回包。"
-            : "刷新请求未发送，请重试。"
+            ? "探测已受理，等待隧道回包更新时延。"
+            : failureMessage
       }}
     </p>
     <button
@@ -75,7 +88,7 @@ async function refreshLatency(): Promise<void> {
 
 .latency-section h2 {
   margin-bottom: var(--space-3);
-  font-size: 14px;
+  font-size: var(--font-size-heading);
   font-weight: 650;
 }
 
@@ -95,7 +108,7 @@ async function refreshLatency(): Promise<void> {
 
 .info-row dt {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .info-row dd {
@@ -103,7 +116,7 @@ async function refreshLatency(): Promise<void> {
   margin: 0;
   overflow-wrap: anywhere;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--font-size-body);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -111,7 +124,7 @@ async function refreshLatency(): Promise<void> {
 .latency-request-status {
   margin: var(--space-2) 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   line-height: 1.4;
 }
 
@@ -123,7 +136,7 @@ async function refreshLatency(): Promise<void> {
   border-radius: var(--radius-md);
   background: var(--surface-subtle);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   cursor: pointer;
 }
 

@@ -35,5 +35,5 @@ export function useConnectionVisual(state: () => ProductUiState) {
     window.removeEventListener("focus", resume);
   });
   const visual = computed(() => connectionVisualFor(state()));
-  return { visualState: computed(() => visual.value.state), paused: computed(() => hidden.value || unfocused.value || visual.value.paused) };
+  return { visualState: computed(() => visual.value.state), viewportPaused: computed(() => hidden.value || unfocused.value), paused: computed(() => hidden.value || unfocused.value || visual.value.paused) };
 }

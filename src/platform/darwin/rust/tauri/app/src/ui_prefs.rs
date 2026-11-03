@@ -58,6 +58,17 @@ pub struct UiPreferences {
     /// 连接/断开时发系统通知。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_state_notifications: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disconnect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconnect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unexpected_disconnect_notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_notify_when_foreground: Option<bool>,
+
     /// 应用启动且空闲时自动发起连接。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_connect_on_launch: Option<bool>,
@@ -91,6 +102,11 @@ impl UiPreferences {
             connection_state_notifications: Some(
                 self.connection_state_notifications.unwrap_or(false),
             ),
+            connect_notify: Some(self.connect_notify.unwrap_or(false)),
+            disconnect_notify: Some(self.disconnect_notify.unwrap_or(false)),
+            reconnect_notify: Some(self.reconnect_notify.unwrap_or(false)),
+            unexpected_disconnect_notify: Some(self.unexpected_disconnect_notify.unwrap_or(false)),
+            suppress_notify_when_foreground: Some(self.suppress_notify_when_foreground.unwrap_or(true)),
             auto_connect_on_launch: Some(self.auto_connect_on_launch.unwrap_or(false)),
             // 默认勾选（R2/R3）：缺键即 true，与前端默认值一致。
             install_service_on_connect: Some(self.install_service_on_connect.unwrap_or(true)),
@@ -244,3 +260,4 @@ pub fn ui_prefs_set(
 }
 
 // ---- 测试 ----
+

@@ -17,7 +17,7 @@ use super::state::{
     ConnectPhase, EngineReconnectState, OperationReply, OperationResult, ProxyTunAdapter,
     ProxyTunDetection, ReconnectStatus, RuntimeEvent, RuntimeEventKind, RuntimeSnapshot,
     RuntimeState, SelfHealStatus, ServiceControlAction, ServiceControlReply, ServiceStatus,
-    SystemProxyDetection, VpnError,
+    SessionIdentity, SystemProxyDetection, VpnError,
 };
 use super::stats::{RuntimeStats, StatsPhase};
 
@@ -62,6 +62,7 @@ pub fn connect_request(
         identity_digest: sha256(intent.profile_ref.as_bytes()),
     });
     Ok(wire::ConnectRequest {
+        auth_binding: None,
         intent: Some(wire::ConnectIntent {
             lookup_key: Some(wire::OperationLookupKey {
                 principal_digest: principal_digest.to_vec(),
@@ -151,6 +152,11 @@ pub fn interaction_response(
     }
 }
 
+/// Core 专用认证 epoch 沿原请求回传，不使用普通交互的兼容占位。
+pub(super) fn auth_acquisition_response(request: &wire::AtrustAuthAcquisition, response_payload: Vec<u8>) -> wire::InteractionResponse {
+    wire::InteractionResponse { interaction_id: request.interaction_id.clone(), runtime_epoch: request.runtime_epoch.clone(), response_payload }
+}
+
 /// 32 字节 SHA-256（wire 身份 ref 的确定性派生）。
 fn sha256(bytes: &[u8]) -> Vec<u8> {
     Sha256::digest(bytes).to_vec()
@@ -165,13 +171,18 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
 /// 随快照携带，`None` = 未探测/探测失败；R1：`operation_id` 随快照携带，hex16，
 /// 空 = 无在途操作；S2：`system_proxy` 随快照携带，`None` = 未检测/检测失败；
 /// S4：`reconnect` 随快照携带，`None` = 重连不适用；EXV_UNFREEZE 2026-09-05：
-/// `self_heal` 随快照携带，`None` = 无自愈上下文）。
+/// `self_heal` 随快照携带，`None` = 无自愈上下文；EXV_UNFREEZE 2026-10-04（bug3）：
+/// `session_identity` 随快照携带，`None` = 无活动会话身份）。
 #[must_use]
 pub fn snapshot_from_wire(
     wire_snap: &wire::RuntimeSnapshot,
     monotonic_tick: u64,
 ) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        stop_completion: wire_snap
+            .stop_completion
+            .as_ref()
+            .map(stop_completion_from_wire),
         runtime: runtime_state_from_wire(wire_snap.state.as_ref()),
         monotonic_tick,
         stats: wire_snap.stats.as_ref().map(stats_from_wire),
@@ -195,6 +206,10 @@ pub fn snapshot_from_wire(
             .as_ref()
             .map(engine_reconnect_state_from_wire),
         self_heal: wire_snap.self_heal.as_ref().map(self_heal_status_from_wire),
+        session_identity: wire_snap
+            .session_identity
+            .as_ref()
+            .map(session_identity_from_wire),
     }
 }
 
@@ -208,6 +223,7 @@ pub fn event_from_wire(ev: &wire::RuntimeEvent) -> RuntimeEvent {
         .as_ref()
         .map(|s| snapshot_from_wire(s, ev.monotonic_tick))
         .unwrap_or_else(|| RuntimeSnapshot {
+            stop_completion: None,
             runtime: RuntimeState::Idle {
                 last_cleanup_at_ms: None,
             },
@@ -221,6 +237,7 @@ pub fn event_from_wire(ev: &wire::RuntimeEvent) -> RuntimeEvent {
             reconnect: None,
             engine_reconnect: None,
             self_heal: None,
+            session_identity: None,
         });
     RuntimeEvent {
         monotonic_tick: ev.monotonic_tick,
@@ -231,6 +248,14 @@ pub fn event_from_wire(ev: &wire::RuntimeEvent) -> RuntimeEvent {
         },
         snapshot,
         operation_id,
+    }
+}
+
+fn stop_completion_from_wire(summary: &wire::StopCompletion) -> super::state::StopCompletion {
+    super::state::StopCompletion {
+        stopped: summary.stopped,
+        blocks_new_connect: summary.blocks_new_connect,
+        errors: summary.errors.iter().map(vpn_error_from_wire).collect(),
     }
 }
 
@@ -261,6 +286,11 @@ pub fn operation_reply_from_wire(reply: &wire::OperationReply) -> OperationReply
         None => OperationResult::Pending,
     };
     OperationReply {
+        stop_completion: reply
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.stop_completion.as_ref())
+            .map(stop_completion_from_wire),
         result,
         operation_id: None,
     }
@@ -384,6 +414,17 @@ fn self_heal_status_from_wire(w: &wire::SelfHealStatus) -> SelfHealStatus {
     }
 }
 
+/// wire `SessionIdentity` → UI `SessionIdentity`（EXV_UNFREEZE 2026-10-04，bug3；字段
+/// 一一对应，仅显示投影，非授权材料）。
+#[must_use]
+fn session_identity_from_wire(w: &wire::SessionIdentity) -> SessionIdentity {
+    SessionIdentity {
+        protocol: w.protocol.clone(),
+        username: w.username.clone(),
+        server: w.server.clone(),
+    }
+}
+
 /// wire `ServiceStatus` → UI `ServiceStatus`（S3/D5 字段一一对应 + R3 `health_state`，
 /// 仅展示）。
 #[must_use]
@@ -407,7 +448,7 @@ pub fn service_control_request(action: ServiceControlAction) -> wire::ServiceCon
     let action = match action {
         ServiceControlAction::Query => WireAction::Query(wire::ServiceStatusQuery {}),
         ServiceControlAction::Install => WireAction::Install(wire::ServiceInstall {}),
-        ServiceControlAction::Uninstall => WireAction::Uninstall(wire::ServiceUninstall {}),
+        ServiceControlAction::Uninstall => WireAction::Uninstall(wire::ServiceUninstall { full_cleanup: false }),
         ServiceControlAction::Start => WireAction::Start(wire::ServiceStart {}),
         ServiceControlAction::RotateKey => WireAction::RotateKey(wire::ServiceRotateKey {}),
     };
@@ -426,11 +467,118 @@ pub fn service_control_reply_from_wire(reply: &wire::ServiceControlReply) -> Ser
     }
 }
 
-/// wire `VpnError` → UI `VpnError`。稳定 code 原样映射；平台依赖错误只按 redacted
-/// Win32 原始码选择仓库内静态修复文案。自由文本诊断栈和原始码本身永不进入 UI。
+/// wire `VpnError` 的稳定 reason id → 用户文案表（阶段③ 单一文案来源的壳侧
+/// 镜像；与前端 `frontend/src/lib/copy-tables.ts` 的 `REASON_COPY` 注释互指 +
+/// 两侧一致性测试钉住——新增 id 必须两表同步补行）。
+///
+/// 文案来源：D9 计划 §3.3 文案表；`platform/nrpt_takeover_failed` 与
+/// `platform/nrpt_foreign_rebuild` 两行以 D8 版为准（2026-10-09 接缝终裁）。
+#[must_use]
+fn reason_message(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        // ---- auth 域 ----
+        "auth/login_rejected" => "账号或密码未通过学校网关验证，请重新输入后再试。",
+        "auth/saml_required" => "该服务器要求网页单点登录，当前版本暂不支持；请联系网络管理员或改用 aTrust 协议。",
+        "auth/credentials_missing" => "缺少连接所需的账号或密码，请填写后再连接。",
+        // ---- transport 域 ----
+        "transport/session_failed" => "无法连接 VPN 服务器，请检查网络后重试；持续失败请导出日志反馈。",
+        // ---- platform 域（NRPT：D8 静默接管失败面，D8 版文案）----
+        "platform/nrpt_takeover_failed" => "校园 DNS 规则冲突的自动处理未成功（已保留完整备份，未删除规则）。请重启电脑后重试；仍失败请导出日志反馈。",
+        "platform/nrpt_foreign_rebuild" => "检测到其他软件正在持续重建校园 DNS 规则，连接无法建立。请重启电脑，或在对应网络软件中处理后重试；EXV 已停止自动移除。",
+        // ---- platform 域（装配）----
+        // T-05：仅无 native 码的路径携带此 id（engine 侧条件挂载）；有 native 码
+        //（1168/5）时 reason 让路、由下方 native 分档生成文案。
+        "platform/route_apply" => "配置本机网络失败，连接未建立。请重试；仍失败请导出日志反馈。",
+        "platform/data_plane_start" => "连接准备未完成，请重试；持续失败请导出日志反馈。",
+        "platform/previous_cleanup" => "上次连接残留的网络设置清理失败，请重试；持续失败请重启电脑后再试。",
+        "platform/assembly_internal" => "连接过程中发生内部错误，请重试；持续失败请导出日志反馈。",
+        "platform/assembly_cancelled" => "本次连接已取消，如需继续请重新点击连接。",
+        _ => return None,
+    })
+}
+
+/// wire `VpnError` → UI `VpnError`。稳定 code 原样映射；文案优先级（阶段②
+/// §2.4-4）：**reason id 文案 > 现有 native 分档 > code 泛文案**。平台依赖错误
+/// 只按 redacted Win32 原始码选择仓库内静态修复文案。自由文本诊断栈和原始码
+/// 本身永不进入 UI；未知 reason id 落回 native/code 层（fail-safe，不透出 id
+/// 原文给非技术用户）。
+#[must_use]
+/// 将本次停止的原错误薄映射到已有 UI message；旧端空值保持原文案。
+fn stop_error_message(err: &wire::VpnError, copy: &str) -> String {
+    if err.stage != wire::ErrorStage::Teardown as i32 {
+        return copy.to_owned();
+    }
+    let detail = err.operation_detail.as_deref().map(|text|
+        text.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect::<String>()
+            .split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>()
+    ).unwrap_or_default();
+    let native = err.native.as_ref().map(|native| {
+        let namespace = match wire::NativeErrorNamespace::try_from(native.namespace).ok() {
+            Some(wire::NativeErrorNamespace::Win32) => "Win32",
+            Some(wire::NativeErrorNamespace::Hresult) => "HRESULT",
+            Some(wire::NativeErrorNamespace::Ntstatus) => "NTSTATUS",
+            Some(wire::NativeErrorNamespace::PosixErrno) => "POSIX errno",
+            Some(wire::NativeErrorNamespace::AppleOsStatus) => "Apple OSStatus",
+            Some(wire::NativeErrorNamespace::AppleMach) => "Apple Mach",
+            Some(wire::NativeErrorNamespace::AppleNetworkExtension) => "Apple NetworkExtension",
+            _ => "原生错误",
+        };
+        format!("{namespace}: {}", native.code)
+    });
+    if detail.is_empty() && native.is_none() { return copy.to_owned(); }
+    let base = if copy.is_empty() { "停止清理失败" } else { copy };
+    let mut message = base.to_owned();
+    if !detail.is_empty() { message.push_str("："); message.push_str(&detail); }
+    if let Some(native) = native { message.push_str("（"); message.push_str(&native); message.push('）'); }
+    message
+}
+
 #[must_use]
 fn vpn_error_from_wire(err: &wire::VpnError) -> VpnError {
-    let message = if err.code == wire::ErrorCode::PlatformDependencyUnavailable as i32 {
+    let reason_copy = (!err.reason.is_empty())
+        .then(|| reason_message(err.reason.as_str()))
+        .flatten();
+    // 只消费原 EOF producer 的完整事实；其他效果未知仍沿原文案出口。
+    let engine_stream_ended = err.code == wire::ErrorCode::EffectUnknown as i32
+        && err.stage == wire::ErrorStage::ProtocolSession as i32
+        && err.reason == format!("stop/engine_lost: {}: engine status stream ended", tonic::Code::Unavailable);
+    let recovery_detail = (err.code == wire::ErrorCode::Unauthorized as i32
+        && err.stage == wire::ErrorStage::AwaitingInteraction as i32)
+        .then(|| err.reason.split_once('|'))
+        .flatten()
+        .filter(|(code, _)| matches!(*code, "atrust_browser_required" | "atrust_recovery_material" | "atrust_recovery_auth_failed" | "auth_binding_changed"));
+    let recovery_message = recovery_detail.map(|(code, detail)| {
+        if code == "atrust_recovery_auth_failed" {
+            format!("aTrust 自动恢复认证失败：{detail}。请重新登录后连接。")
+        } else { detail.to_owned() }
+    });
+    // 原认证获取边界沿既有 code|detail 交付净化摘要；分类仍由 code/native 保留。
+    let acquisition_message = (err.stage == wire::ErrorStage::AwaitingInteraction as i32
+        && matches!(
+            wire::ErrorCode::try_from(err.code),
+            Ok(wire::ErrorCode::Unauthorized
+                | wire::ErrorCode::ObservationFailed
+                | wire::ErrorCode::DeadlineExceeded)
+        ))
+        .then(|| err.reason.split_once('|'))
+        .flatten()
+        .filter(|(code, _)| code.starts_with("atrust/"))
+        .map(|(_, detail)| detail);
+    let message = if let Some(detail) = acquisition_message {
+        detail
+    } else if let Some(detail) = recovery_message.as_deref() {
+        detail
+    } else if engine_stream_ended {
+        "与本地 EXV 引擎的通信已中断，当前 VPN 连接已断开。"
+    } else if let Some(copy) = reason_copy {
+        copy
+    } else if err.code == wire::ErrorCode::PlatformDependencyUnavailable as i32
+        && err.stage == wire::ErrorStage::Admission as i32
+        && err.native.is_none()
+    {
+        // 派发前本地服务不可用，尚未开始连接；不误报为 Wintun 组件损坏。
+        "无法连接 EXV 本地网络服务，连接未开始。请修复服务后重试；仍失败请导出日志反馈。"
+    } else if err.code == wire::ErrorCode::PlatformDependencyUnavailable as i32 {
         let win32_code = err.native.as_ref().and_then(|native| {
             (native.namespace == wire::NativeErrorNamespace::Win32 as i32).then_some(native.code)
         });
@@ -445,7 +593,7 @@ fn vpn_error_from_wire(err: &wire::VpnError) -> VpnError {
     } else if err.code == wire::ErrorCode::EffectUnknown as i32
         && err.stage == wire::ErrorStage::ConnectingControl as i32
     {
-        "连接准备未完成。请查看日志中的原因和处理建议后重试。"
+        "网络连接失败或网关不可达，连接未建立。请检查网络后重试；仍失败请导出日志反馈。"
     } else if err.code == wire::ErrorCode::EffectUnknown as i32
         && err.stage == wire::ErrorStage::ApplyingPlatformTunnel as i32
     {
@@ -462,7 +610,9 @@ fn vpn_error_from_wire(err: &wire::VpnError) -> VpnError {
         code: wire::ErrorCode::try_from(err.code)
             .map(|c| c.as_str_name().to_string())
             .unwrap_or_else(|_| "ERROR_CODE_UNSPECIFIED".to_string()),
-        message: message.to_owned(),
+        message: stop_error_message(err, message),
+        stage: wire::ErrorStage::try_from(err.stage).ok().map(|stage| stage.as_str_name().to_owned()),
+        reason: err.reason.clone(),
     }
 }
 

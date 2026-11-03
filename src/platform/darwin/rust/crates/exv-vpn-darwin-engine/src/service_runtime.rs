@@ -19,7 +19,7 @@ use std::{
     ffi::OsString,
     path::PathBuf,
     sync::Arc,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, AtomicU64},
     time::Duration,
 };
 
@@ -42,6 +42,37 @@ use crate::bootstrap_runtime::{
     converge_and_await_teardown, poll_signal_flag, spawn_heartbeat_watchdog_with,
 };
 use crate::core_exit_policy::CoreExitPolicy;
+use crate::file_log;
+
+/// 会话代数计数器（进程内单调递增；取证时区分同一 engine 进程内的多个会话）。
+static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 取下一会话代数（从 1 起）。
+fn next_session_generation() -> u64 {
+    SESSION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// service 形态文件日志快捷入口（component 固定 `service`）。
+///
+/// 挂点纪律（S7）：事件字段只携带 pid/generation/决策布尔/错误类别一类取证
+/// 元数据；凭据/cookie/token/session id 一律不进日志（`file_log` 的 key 脱敏是
+/// 兜底防线，不是许可）。
+fn service_log(level: &str, code: &str, message: &str, fields: &[(&str, String)]) {
+    file_log::default_log().log(level, "service", code, message, fields);
+}
+
+/// [`EngineBootstrapError`] 的稳定短类别（日志字段用；不展开内部错误细节）。
+fn bootstrap_error_category(error: &EngineBootstrapError) -> &'static str {
+    match error {
+        EngineBootstrapError::Arguments => "arguments",
+        EngineBootstrapError::Credentials => "credentials",
+        EngineBootstrapError::RuntimeDir(_) => "runtime_dir",
+        EngineBootstrapError::Ticket(_) => "ticket",
+        EngineBootstrapError::Listener => "listener",
+        EngineBootstrapError::Pipe => "pipe",
+        EngineBootstrapError::Server => "server",
+    }
+}
 
 /// 非对端发起的会话终结（心跳超时/显式停止/信号）在强制收权底层 socket 前的
 /// 应答排空宽限：本地 UDS 上的在途应答（含 Shutdown 的 ACCEPTED）flush 是微秒级，
@@ -117,17 +148,74 @@ impl ServiceArgs {
 pub(crate) fn run_service_from_process(
     values: &[OsString],
 ) -> Result<(), EngineBootstrapError> {
-    let args = ServiceArgs::from_values(values)?;
-    demote_to_service_credentials(args.owner_uid)?;
-    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+    let args = match ServiceArgs::from_values(values) {
+        Ok(args) => args,
+        Err(error) => {
+            service_log(
+                "error",
+                "SERVICE_FORM_START_FAILED",
+                "service form argv rejected",
+                &[("error", bootstrap_error_category(&error).to_owned())],
+            );
+            return Err(error);
+        }
+    };
+    if let Err(error) = demote_to_service_credentials(args.owner_uid) {
+        service_log(
+            "error",
+            "SERVICE_FORM_START_FAILED",
+            "service form credential demotion failed",
+            &[
+                ("error", bootstrap_error_category(&error).to_owned()),
+                ("stage", "demote".to_owned()),
+            ],
+        );
+        return Err(error);
+    }
+    service_log(
+        "info",
+        "SERVICE_FORM_STARTED",
+        "service engine form started",
+        &[
+            ("owner_uid", args.owner_uid.to_string()),
+            ("pid", std::process::id().to_string()),
+        ],
+    );
+    let Ok(tokio_runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
-        .map_err(|_| EngineBootstrapError::Server)?;
-    tokio_runtime.block_on(run_service_loop(
+    else {
+        service_log(
+            "error",
+            "SERVICE_FORM_START_FAILED",
+            "service form tokio runtime build failed",
+            &[(
+                "error",
+                bootstrap_error_category(&EngineBootstrapError::Server).to_owned(),
+            )],
+        );
+        return Err(EngineBootstrapError::Server);
+    };
+    let outcome = tokio_runtime.block_on(run_service_loop(
         SocketPath::new(&args.control_socket).map_err(|_| EngineBootstrapError::Arguments)?,
         args.owner_uid,
-    ))
+    ));
+    match &outcome {
+        Ok(()) => service_log(
+            "info",
+            "SERVICE_FORM_EXIT",
+            "service engine form exited cleanly",
+            &[],
+        ),
+        Err(error) => service_log(
+            "error",
+            "SERVICE_FORM_EXIT",
+            "service engine form exited with listener error",
+            &[("error", bootstrap_error_category(error).to_owned())],
+        ),
+    }
+    outcome
 }
 
 /// service 形态身份自检与自降权：允许 root 起步（launchd 拉起），随后
@@ -135,7 +223,7 @@ pub(crate) fn run_service_from_process(
 ///
 /// # Errors
 ///
-/// 非 uid=euid=0 起步、setreuid 失败或降权后复验不符返回
+/// 非 uid=euid=0 起步或 setreuid 原操作失败返回
 /// [`EngineBootstrapError::Credentials`]。
 fn demote_to_service_credentials(owner_uid: u32) -> Result<(), EngineBootstrapError> {
     // SAFETY: these calls only read this process credentials.
@@ -144,13 +232,8 @@ fn demote_to_service_credentials(owner_uid: u32) -> Result<(), EngineBootstrapEr
         return Err(EngineBootstrapError::Credentials);
     }
     // SAFETY: setreuid 只改本进程身份；参数为固定 u32（owner 来自已校验 argv，
-    // 非 root），root 进程恒可执行；此后 real=owner/euid=0 与会话形态对齐。
+    // 非 root）；目标 real=owner/euid=0 与会话形态对齐，失败按原返回处理。
     if unsafe { libc::setreuid(owner_uid as libc::uid_t, 0) } != 0 {
-        return Err(EngineBootstrapError::Credentials);
-    }
-    // SAFETY: these calls only read this process credentials.
-    let (uid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
-    if uid != owner_uid || euid != 0 {
         return Err(EngineBootstrapError::Credentials);
     }
     Ok(())
@@ -345,61 +428,13 @@ async fn run_one_service_session(
     owner_uid: u32,
     carried: Option<Arc<EngineRuntime>>,
 ) -> SessionOutcome {
-    // 全新 runtime 注入本会话策略；携带 runtime（keep 保留的）沿用自身策略——
-    // 策略随连接所有权走，不随进程走（生产注入点由连接信封接线，T1 默认 Teardown）。
-    let engine_runtime = carried.unwrap_or_else(|| {
-        let runtime = Arc::new(EngineRuntime::new_for_owner(owner_uid, "service"));
-        runtime.set_core_exit_policy(fresh_policy);
-        runtime
-    });
-
-    // T6 预检触发（复审必改 C1 整改）：trace 残留（双亡格兜底）或版本升级后
-    // 首连→**后台并行**执行（serve 先行——紧急断开 StopTunnel 立即可达，计划
-    // 验收 10a）；ApplyTunnel 侧经 runtime 的预检门有界等待（连接本就不急）。
-    // 触发面以 trace 句柄在场为前提（预检报告本身落 trace；句柄缺席=非 root
-    // 测试/无载体环境——C8 测试卫生：单测不再真跑 netstat/回收真实残留）。
-    if engine_runtime.trace_handle().is_some() {
-        let base = std::path::Path::new(crate::trace::TRACE_ROOT);
-        let version = crate::build_identity::release_version();
-        let needs_preflight = crate::trace::TraceStore::trace_exists(base, owner_uid)
-            || crate::preflight::version_marker_changed(base, version);
-        if needs_preflight {
-            let logs = Arc::clone(engine_runtime.logs());
-            let uid = owner_uid;
-            let trace = engine_runtime.trace_handle();
-            let handle = tokio::spawn(async move {
-                let started = tokio::time::Instant::now();
-                let report = tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || crate::preflight::run(uid, &logs)),
-                )
-                .await;
-                let completed = matches!(&report, Ok(Ok(_)));
-                if let Some(trace) = trace
-                    && let Ok(Ok(report)) = report
-                {
-                    trace.append_event(
-                        "info",
-                        "PREFLIGHT_DONE",
-                        &format!(
-                            "dirs_removed={} dirs_live_skipped={} orphan_routes_removed={} observations={} elapsed_ms={}",
-                            report.stale_runtime_dirs_removed,
-                            report.stale_runtime_dirs_skipped_live,
-                            report.orphan_routes_removed,
-                            report.observations.len(),
-                            started.elapsed().as_millis()
-                        ),
-                    );
-                }
-                // C3：超时/失败不重写版本标记——半途预检下次连接重试（trace
-                // 在场场景不受影响）。
-                if completed {
-                    crate::preflight::rewrite_version_marker(base, version);
-                }
-            });
-            engine_runtime.set_preflight_gate(handle);
-        }
-    }
+    let engine_runtime = prepare_service_session_runtime(
+        carried,
+        fresh_policy,
+        || Arc::new(EngineRuntime::new_for_owner(owner_uid)),
+        start_fresh_runtime_sweep,
+    );
+    let generation = next_session_generation();
     let service = EngineControlService::from_runtime(Arc::clone(&engine_runtime));
     // 底层 socket 强制关闭句柄：必须在 stream 移交 tonic 前取（tonic 经 incoming
     // 通道 spawn 的连接任务无法从外部 abort，挂起对端只能内核层收权）。
@@ -420,6 +455,12 @@ async fn run_one_service_session(
         .handoff_service_stream_with_close_signal(connection.into_authenticated_unix_stream())
         .await
     else {
+        service_log(
+            "warn",
+            "SESSION_OPEN_FAILED",
+            "admitted connection failed stream handoff; back to accept",
+            &[("generation", generation.to_string())],
+        );
         return SessionOutcome {
             end: SessionEnd::BackToAccept,
             kept_runtime: Some(carried_through),
@@ -430,6 +471,12 @@ async fn run_one_service_session(
     // 电平零残留——Notify permit 无法清空，唯一可靠手段是换新槽）。
     engine_runtime.rotate_session_trigger_slots();
     engine_runtime.arm_session_heartbeat();
+    service_log(
+        "info",
+        "SESSION_OPENED",
+        "core session admitted and served",
+        &[("generation", generation.to_string())],
+    );
     let watchdog = spawn_heartbeat_watchdog_with(
         Arc::clone(&engine_runtime),
         timing.check_interval,
@@ -437,7 +484,7 @@ async fn run_one_service_session(
     );
     // 会话占用期：额外连接 accept 后 typed 拒绝（既有 ATTEMPT_ACTIVE 门词汇，
     // 不 evict、不抢占）。
-    let busy = tokio::spawn(busy_reject_loop(Arc::clone(listener)));
+    let busy = tokio::spawn(busy_reject_loop(Arc::clone(listener), generation));
 
     let trigger = tokio::select! {
         _signal = close_signal => SessionTrigger::CoreClosed,
@@ -451,6 +498,16 @@ async fn run_one_service_session(
     // 到下一个默认策略会话尾或显式停止。显式停止与信号不受策略豁免。
     let keep_tunnel =
         session_end_keeps_tunnel(trigger, engine_runtime.core_exit_policy());
+    service_log(
+        "info",
+        "SESSION_ENDED",
+        "core session trigger resolved",
+        &[
+            ("trigger", format!("{trigger:?}")),
+            ("keep_tunnel", keep_tunnel.to_string()),
+            ("generation", generation.to_string()),
+        ],
+    );
     if keep_tunnel {
         engine_runtime.logs().publish(
             "info",
@@ -459,14 +516,6 @@ async fn run_one_service_session(
             "core session ended; pipeline kept per on_core_exit policy",
             &[("trigger", format!("{trigger:?}"))],
         );
-        // T6：无 core 期事件落 trace（聚合日志随 core 死亡截断——T0 新事实）。
-        if let Some(trace) = engine_runtime.trace_handle() {
-            trace.append_event(
-                "info",
-                "CORE_EXIT_KEEP",
-                &format!("pipeline kept after core session end ({trigger:?})"),
-            );
-        }
         busy.abort();
         // T1 复审整改：看门狗是心跳槽唯一生产写入方——keep 转换必须 abort，
         // 否则空闲期触发会把 permit 落存到已无等待者的槽里（发现 1），且任务
@@ -489,6 +538,16 @@ async fn run_one_service_session(
     // W1 统一收敛执行体（service 形态分叉点：收敛后不进程退出）。收敛完成前不
     // drop(sender)/关 server——在途 handler（含 Shutdown 应答）需要活着的服务端。
     let converged = converge_and_await_teardown(&engine_runtime).await;
+    service_log(
+        if converged { "info" } else { "error" },
+        "SESSION_TORN_DOWN",
+        "service session teardown finished",
+        &[
+            ("converged", converged.to_string()),
+            ("trigger", format!("{trigger:?}")),
+            ("generation", generation.to_string()),
+        ],
+    );
     if !converged {
         engine_runtime.logs().publish(
             "error",
@@ -524,14 +583,51 @@ async fn run_one_service_session(
     }
 }
 
+/// 携带在用 runtime 时保留原实例与策略；只有新建实例才注入本次会话策略。
+///
+/// S2（2026-10-26 验收修复计划）：新建（fresh）runtime 挂启动清扫——managed
+/// resolver 标记回收域（best-effort 后台执行；携带 runtime 仍拥有在用隧道与
+/// resolver，其文件不是待回收残留，复用即跳过）。
+fn prepare_service_session_runtime(
+    carried: Option<Arc<EngineRuntime>>,
+    fresh_policy: CoreExitPolicy,
+    create_runtime: impl FnOnce() -> Arc<EngineRuntime>,
+    start_sweep: impl FnOnce(&Arc<EngineRuntime>),
+) -> Arc<EngineRuntime> {
+    if let Some(runtime) = carried {
+        return runtime;
+    }
+    let runtime = create_runtime();
+    runtime.set_core_exit_policy(fresh_policy);
+    start_sweep(&runtime);
+    runtime
+}
+
+/// fresh runtime 的启动清扫：后台执行（会话服务先行——紧急断开 StopTunnel 立即
+/// 可达），动作落 S7 文件日志（component=sweep）+ 会话日志流。
+fn start_fresh_runtime_sweep(engine_runtime: &Arc<EngineRuntime>) {
+    let owner_uid = engine_runtime.owner_uid();
+    let logs = Arc::clone(engine_runtime.logs());
+    let gate = crate::connect_gate::process_gate();
+    tokio::task::spawn_blocking(move || {
+        gate.sweep_startup_residue(owner_uid, &logs);
+    });
+}
+
 /// 会话占用期的额外连接拒绝循环：每条 uid 门通过的连接由一个一次性拒绝服务
 /// 以 `ATTEMPT_ACTIVE` typed 拒绝（全部 RPC；不 evict 当前会话）。拒绝连接随对端
-/// 断开自然终结。
-async fn busy_reject_loop(listener: Arc<ServiceListener>) {
+/// 断开自然终结。`generation` 为当前占用会话的代数（文件日志标注）。
+async fn busy_reject_loop(listener: Arc<ServiceListener>, generation: u64) {
     loop {
         let Ok(connection) = listener.accept_uid_gated().await else {
             return;
         };
+        service_log(
+            "info",
+            "SESSION_BUSY_REJECTED",
+            "second concurrent core connection typed rejected",
+            &[("generation", generation.to_string())],
+        );
         tokio::spawn(async move {
             let (sender, incoming) = AuthenticatedIncoming::channel(1);
             if sender
@@ -638,6 +734,21 @@ impl HelperControl for SessionOccupiedService {
         &self,
         _request: Request<wire::KeepAliveRequest>,
     ) -> Result<Response<wire::KeepAliveReply>, Status> {
+        Err(Status::failed_precondition(ATTEMPT_ACTIVE_MESSAGE))
+    }
+
+    async fn trigger_latency_refresh(
+        &self,
+        _request: Request<wire::HelperLatencyRefreshRequest>,
+    ) -> Result<Response<wire::HelperLatencyRefreshReply>, Status> {
+        Err(Status::failed_precondition(ATTEMPT_ACTIVE_MESSAGE))
+    }
+
+    // Busy connections retain ATTEMPT_ACTIVE; the admitted service session uses
+    // EngineControlService and its real official receiver backend.
+    async fn auth_receiver_control(
+        &self, _request: Request<wire::AuthReceiverControlRequest>,
+    ) -> Result<Response<wire::AuthReceiverControlReply>, Status> {
         Err(Status::failed_precondition(ATTEMPT_ACTIVE_MESSAGE))
     }
 

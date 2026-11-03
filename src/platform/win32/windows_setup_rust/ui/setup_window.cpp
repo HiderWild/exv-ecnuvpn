@@ -6,6 +6,8 @@
 #include "windows_setup_rust/resource.hpp"
 #include "windows_setup_rust/shortcuts.hpp"
 #include "windows_setup_rust/uninstall_engine.hpp"
+// T8（F12）：GUI 安装版本号与静默安装（main.cpp）同源，禁止再硬编码版本串。
+#include "windows_setup_rust/version_const.hpp"
 #include "windows_setup_rust/webview2_runtime.hpp"
 #include "windows_setup_rust/util/command_line.hpp"
 #include "windows_setup_rust/ui/icon_bitmaps.hpp"
@@ -55,6 +57,9 @@ struct AppState {
   std::wstring status;
   std::wstring error;
   std::wstring uninstall_detail;
+  // S3b（2026-10-10 安装侧清单消费，计划 §七 v2）：本次安装的清理明细
+  // （按册删除的陈旧文件 + 不在册文件报告），安装成功后在完成页呈现。
+  std::wstring install_cleanup_detail;
   std::wstring diagnostic_log_path;
   float display_progress{0.0f};
   float target_progress{0.0f};
@@ -111,6 +116,8 @@ struct AppState {
   D2D1_RECT_F hit_finish{};
   D2D1_RECT_F hit_uninstall{};
   D2D1_RECT_F hit_close{};
+  // S6（2026-10-10 错误页重试，计划 §七 v2）：安装失败页的「重试」命中区。
+  D2D1_RECT_F hit_retry{};
   D2D1_RECT_F hit_diagnostic_log{};
   D2D1_RECT_F hit_check_desktop{};
   D2D1_RECT_F hit_check_start{};
@@ -129,6 +136,7 @@ struct AppState {
   float hover_finish{0.0f};
   float hover_uninstall{0.0f};
   float hover_close{0.0f};
+  float hover_retry{0.0f};
   float hover_diagnostic_log{0.0f};
   float hover_window_close{0.0f};
   float hover_path{0.0f};
@@ -338,7 +346,7 @@ float WaterLevel(const AppState *app) {
 bool IsInteractiveControl(const AppState *app, float x, float y) {
   if (Hit(x, y, app->hit_install) || Hit(x, y, app->hit_browse) || Hit(x, y, app->hit_path_field) ||
       Hit(x, y, app->hit_finish) || Hit(x, y, app->hit_uninstall) || Hit(x, y, app->hit_close) ||
-      Hit(x, y, app->hit_diagnostic_log) ||
+      Hit(x, y, app->hit_retry) || Hit(x, y, app->hit_diagnostic_log) ||
       Hit(x, y, app->hit_window_close) || Hit(x, y, app->hit_check_desktop) ||
       Hit(x, y, app->hit_check_start) || Hit(x, y, app->hit_check_quick) ||
       Hit(x, y, app->hit_check_launch) || Hit(x, y, app->hit_check_clear)) {
@@ -355,7 +363,7 @@ bool IsHandCursorControl(const AppState *app, float x, float y) {
   }
   return Hit(x, y, app->hit_browse) || Hit(x, y, app->hit_finish) ||
          Hit(x, y, app->hit_uninstall) || Hit(x, y, app->hit_close) ||
-         Hit(x, y, app->hit_diagnostic_log) ||
+         Hit(x, y, app->hit_retry) || Hit(x, y, app->hit_diagnostic_log) ||
          Hit(x, y, app->hit_window_close) || Hit(x, y, app->hit_check_desktop) ||
          Hit(x, y, app->hit_check_start) || Hit(x, y, app->hit_check_quick) ||
          Hit(x, y, app->hit_check_launch) || Hit(x, y, app->hit_check_clear);
@@ -1275,13 +1283,17 @@ void PaintScene(AppState *app, ID2D1RenderTarget *rt, float width, float height,
     const float opt_row_gap = 12.0f;
     const float options_h = opt_row_h * 2.0f + opt_row_gap;
     const float btn_h = 40.0f;
+    // S3b：有清理明细时在标题与选项之间插入两行正文（无明细时高度为 0，布局
+    // 与原样完全一致）。
+    const bool has_cleanup_detail = !app->install_cleanup_detail.empty();
+    const float cleanup_h = has_cleanup_detail ? 42.0f : 0.0f;
     const float content_top = title_top + 6.0f;
     const float content_bottom = card.bottom - 18.0f;
     const float content_span = std::max(0.0f, content_bottom - content_top);
-    // fixed = title + options + button; free space split into 3 equal gaps
+    // fixed = title + detail + options + button; free space split into 3 equal gaps
     // (above title residual already in content_top, between title/options,
     // between options/button, and a bottom residual counted in content_bottom).
-    const float fixed = title_h + options_h + btn_h;
+    const float fixed = title_h + cleanup_h + options_h + btn_h;
     const float free = std::max(0.0f, content_span - fixed);
     // Two inter-section gaps must be equal (title→options and options→button).
     // Remaining free is split as small top residual under the pool.
@@ -1292,6 +1304,12 @@ void PaintScene(AppState *app, ID2D1RenderTarget *rt, float width, float height,
     DrawD2DText(rt, app->title_tf, brand, L"安装完成",
                 D2D1::RectF(cx - 130, y, cx + 130, y + title_h));
     y += title_h + section_gap;
+    if (has_cleanup_detail) {
+      DrawD2DText(rt, app->body_tf, dark, app->install_cleanup_detail,
+                  D2D1::RectF(card.left + 26.0f, y, card.right - 26.0f, y + cleanup_h),
+                  DWRITE_TEXT_ALIGNMENT_CENTER);
+      y += cleanup_h;
+    }
 
     const float col_gap = 18.0f;
     const float side_l = 34.0f;
@@ -1398,16 +1416,32 @@ void PaintScene(AppState *app, ID2D1RenderTarget *rt, float width, float height,
                                    : app->error;
     DrawD2DText(rt, app->body_tf, dark, error_detail.empty() ? L"未知错误" : error_detail,
                 D2D1::RectF(card.left + 24, body_top, card.right - 24, button_top - 12.0f));
-    if (has_diagnostic_log) {
-      app->hit_diagnostic_log = ButtonRect(cx - 94.0f, button_top, 168.0f, btn_h);
+    // S6（2026-10-10 错误页重试，计划 §七 v2）：安装失败页一律显示「重试」——
+    // 安装是同目录幂等覆盖，重试安全（复审 S6 MAJOR-1 的「一律重试」简式）；
+    // 卸载错误页不加（卸载链重跑幂等性差，显式声明不扩展）。重试是推荐动作
+    // 为主按钮，关闭降为次按钮；安装链不产生诊断日志（diagnostic_log_path 仅
+    // 卸载链填充），两种两钮布局互斥不叠加。
+    const bool show_retry = !app->uninstall;
+    if (show_retry) {
+      app->hit_retry = ButtonRect(cx - 94.0f, button_top, 168.0f, btn_h);
       app->hit_close = ButtonRect(cx + 94.0f, button_top, 168.0f, btn_h);
-      DrawSecondaryButton(rt, app->button_tf, app->hit_diagnostic_log, L"打开诊断日志",
-                          app->hover_diagnostic_log, kBrandR, kBrandG, kBrandB);
+      DrawSecondaryButton(rt, app->button_tf, app->hit_close, L"关闭", app->hover_close, kBrandR,
+                          kBrandG, kBrandB);
+      DrawPrimaryButton(rt, app->button_tf, app->hit_retry, L"重试", app->hover_retry, kBrandR,
+                        kBrandG, kBrandB);
     } else {
-      app->hit_close = ButtonRect(cx, button_top, 180.0f, btn_h);
+      app->hit_retry = {};
+      if (has_diagnostic_log) {
+        app->hit_diagnostic_log = ButtonRect(cx - 94.0f, button_top, 168.0f, btn_h);
+        app->hit_close = ButtonRect(cx + 94.0f, button_top, 168.0f, btn_h);
+        DrawSecondaryButton(rt, app->button_tf, app->hit_diagnostic_log, L"打开诊断日志",
+                            app->hover_diagnostic_log, kBrandR, kBrandG, kBrandB);
+      } else {
+        app->hit_close = ButtonRect(cx, button_top, 180.0f, btn_h);
+      }
+      DrawPrimaryButton(rt, app->button_tf, app->hit_close, L"关闭", app->hover_close, kBrandR,
+                        kBrandG, kBrandB);
     }
-    DrawPrimaryButton(rt, app->button_tf, app->hit_close, L"关闭", app->hover_close, kBrandR,
-                      kBrandG, kBrandB);
     DrawWindowCloseButton(app, rt, card, app->hover_window_close);
     if (app->close_tooltip_alpha > 0.05f) {
       DrawTooltip(rt, app->dwrite, app->body_tf, app->hit_window_close, L"退出安装",
@@ -1691,6 +1725,42 @@ void ApplyFinishOptions(AppState *app) {
   }
 }
 
+// S3b（2026-10-10 安装侧清单消费，计划 §七 v2）：把 InstallResult.cleanup 组装成
+// 完成页明细文案。完成页空间有限：最多点名 3 个，其余以「等 N 个」收口；完整
+// 如实清单由安装引擎经 OutputDebugStringW 写日志（[EXV Setup] 前缀），两处同源
+// 于同一 result.cleanup。
+std::wstring SummarizeCleanupNames(const std::vector<std::wstring> &names) {
+  std::wstring joined;
+  const std::size_t listed = std::min<std::size_t>(names.size(), 3);
+  for (std::size_t i = 0; i < listed; ++i) {
+    if (i != 0) {
+      joined += L"、";
+    }
+    joined += names[i];
+  }
+  if (names.size() > listed) {
+    joined += L" 等 " + std::to_wstring(names.size()) + L" 个";
+  }
+  return joined;
+}
+
+std::wstring BuildInstallCleanupDetailText(const InstallCleanupDetail &cleanup) {
+  if (cleanup.Empty()) {
+    return {};
+  }
+  std::wstring text;
+  if (!cleanup.removed_files.empty()) {
+    text += L"已按清单清理陈旧文件：" + SummarizeCleanupNames(cleanup.removed_files);
+  }
+  if (!cleanup.unknown_files.empty()) {
+    if (!text.empty()) {
+      text += L"\n";
+    }
+    text += L"发现未在册文件（未删除，请自行确认）：" + SummarizeCleanupNames(cleanup.unknown_files);
+  }
+  return text;
+}
+
 void KickInstallWorkerThread(AppState *app) {
   if (app->work_running || app->deferred_work_started) {
     return;
@@ -1728,7 +1798,7 @@ void KickInstallWorkerThread(AppState *app) {
     req.create_desktop_shortcut = false;
     req.create_quick_launch = false;
     req.launch_app = false;
-    req.app_version = L"3.3.8";
+    req.app_version = EXV_PRODUCT_VERSION;
     wchar_t env[4096] = {};
     if (GetEnvironmentVariableW(L"EXV_SETUP_PAYLOAD_DIR", env, 4096) > 0) {
       req.payload_path = env;
@@ -1737,6 +1807,8 @@ void KickInstallWorkerThread(AppState *app) {
     const auto result = RunInstall(req, &app->progress_model);
     app->work_ok = result.ok;
     app->error = result.error;
+    // S3b：清理明细与错误同源取自 result——失败页以错误为主，完成页呈现明细。
+    app->install_cleanup_detail = BuildInstallCleanupDetailText(result.cleanup);
     if (result.ok && !result.install_dir.empty()) {
       app->install_dir = result.install_dir;
     }
@@ -1744,6 +1816,13 @@ void KickInstallWorkerThread(AppState *app) {
     app->work_running = false;
     PostMessageW(app->hwnd, WM_APP + 1, 0, 0);
   });
+}
+
+// WM_TIMER 引导排水完成时的转场（单测直调承载，见 install_retry_state_test）。
+void CompleteIntroDrain(AppState *app) {
+  app->intro_drain_active = false;
+  // Start real extract after the color-drain choreography.
+  KickInstallWorkerThread(app);
 }
 
 void StartInstallWorker(AppState *app) {
@@ -1761,6 +1840,37 @@ void StartInstallWorker(AppState *app) {
   app->icon_scale = 1.0f;
   app->status = L"";
   // Real install starts after drain finishes (see WM_TIMER).
+}
+
+// S6（2026-10-10 错误页重试，计划 §七 v2）：安装失败页「重试」入口——完整重置
+// StartInstallWorker 的守卫态与编排水面（work_running / deferred_work_started /
+// intro_drain_active / 水面进度）后重跑 RunInstall；install_dir 复用本次请求值
+// （失败路径不清空、不回 Home 页，重试语义即同目录幂等覆盖）。卸载错误页不加
+// 重试（显式声明）：卸载链重跑幂等性差（U1/U2 门控与清理脚本重入语义不同），
+// 入口由调用方以 !app->uninstall 把门，本函数自身再挡一层。
+void RetryInstallFromErrorPage(AppState *app) {
+  if (app->uninstall) {
+    return;
+  }
+  // 守卫态：OnWorkDone 失败路径已复位部分旗标，此处显式全量重置——防止未来
+  // 新增旗标时重试面与守卫面漂移（复审 S6 MINOR-2 要求列全）。
+  app->work_running = false;
+  app->deferred_work_started = false;
+  app->intro_drain_active = false;
+  app->fill_water_before_finish = false;
+  // 水面进度：错误页停在满水，回到排水起点重做开场编排。
+  app->display_progress = 0.0f;
+  app->target_progress = 0.0f;
+  app->visual_water = 1.0f;
+  app->target_visual_water = 0.0f;
+  app->icon_scale = 1.0f;
+  // 停滞注入基准：随 KickInstallWorkerThread 重置，此处清残留。
+  app->stall_base = 0.0f;
+  app->stall_water = 0.0f;
+  app->status.clear();
+  app->error.clear();
+  app->install_cleanup_detail.clear();
+  StartInstallWorker(app);
 }
 
 void StartUninstallWorker(AppState *app) {
@@ -1826,6 +1936,8 @@ void StartUninstallWorker(AppState *app) {
 
 void EnterSuccessPage(AppState *app) {
   app->page = app->uninstall ? Page::Done : Page::Finish;
+  // 离开错误页后清「重试」命中区，避免陈旧矩形在成功页触发手型光标。
+  app->hit_retry = {};
   // Install finish settles on the home-style wave-pool card. Icon is solid (no
   // progress clip). Grow the HWND only for Finish so other stages stay compact.
   app->card_opacity = app->uninstall ? 1.0f : 0.15f;
@@ -1906,9 +2018,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           app->icon_scale = Lerp(app->icon_scale, 1.55f, 0.12f);
           if (app->visual_water < 0.03f) {
             app->visual_water = 0.0f;
-            app->intro_drain_active = false;
-            // Start real extract after the color-drain choreography.
-            KickInstallWorkerThread(app);
+            CompleteIntroDrain(app);
           }
         } else if (app->fill_water_before_finish) {
           // Fast fill to full water after engine done, then enter Finish.
@@ -1990,6 +2100,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           app->hover_uninstall =
               ease_hover(app->hover_uninstall, Hit(app->pointer_x, app->pointer_y, app->hit_uninstall));
           app->hover_close = ease_hover(app->hover_close, Hit(app->pointer_x, app->pointer_y, app->hit_close));
+          app->hover_retry = ease_hover(app->hover_retry, Hit(app->pointer_x, app->pointer_y, app->hit_retry));
           app->hover_diagnostic_log = ease_hover(
               app->hover_diagnostic_log,
               Hit(app->pointer_x, app->pointer_y, app->hit_diagnostic_log));
@@ -2010,6 +2121,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           app->hover_finish = ease_hover(app->hover_finish, false);
           app->hover_uninstall = ease_hover(app->hover_uninstall, false);
           app->hover_close = ease_hover(app->hover_close, false);
+          app->hover_retry = ease_hover(app->hover_retry, false);
           app->hover_diagnostic_log = ease_hover(app->hover_diagnostic_log, false);
           app->hover_path = ease_hover(app->hover_path, false);
           app->hover_check_desktop = ease_hover(app->hover_check_desktop, false);
@@ -2176,8 +2288,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           Present(app);
         }
       } else if (app->page == Page::Done || app->page == Page::Error) {
-        if (app->page == Page::Error && Hit(x, y, app->hit_diagnostic_log) &&
-            !app->diagnostic_log_path.empty()) {
+        // S6：安装失败页「重试」——完整重置守卫态后同目录重跑（卸载错误页不加，
+        // 显式声明见 RetryInstallFromErrorPage 注释）。
+        if (app->page == Page::Error && !app->uninstall && Hit(x, y, app->hit_retry)) {
+          RetryInstallFromErrorPage(app);
+          Present(app);
+          return 0;
+        } else if (app->page == Page::Error && Hit(x, y, app->hit_diagnostic_log) &&
+                   !app->diagnostic_log_path.empty()) {
           const auto log_argument = QuoteCommandLineArgument(app->diagnostic_log_path);
           const auto opened = reinterpret_cast<INT_PTR>(
               ShellExecuteW(hwnd, L"open", L"notepad.exe", log_argument.c_str(), nullptr,

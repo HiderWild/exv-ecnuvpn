@@ -25,6 +25,14 @@ rustls.workspace = true
 rustls-platform-verifier.workspace = true
 tokio-rustls.workspace = true
 ring.workspace = true
+# L1 诊断：记录服务端回显的 `traceId`（只记字段，不记凭据）。
+tracing.workspace = true
+
+# 跨 crate 集成测试专用（2026-10-07，S2 评审修正 7）：允许消费方 crate 的 dev 依赖
+# 按实例注入显式信任根（`AuthClientOptions::set_test_trust`），用于回环假网关的自建
+# CA。生产构建与常规依赖不得启用；注入根仍走完整链与主机名校验，无禁用校验的开关。
+[features]
+internal-test-trust = []
 
 [lints]
 workspace = true

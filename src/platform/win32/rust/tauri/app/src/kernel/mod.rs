@@ -1,16 +1,23 @@
 
+mod auth_acquisition;
+pub(crate) mod auth_diagnostics;
+mod browser_cache_profile;
 pub mod bootstrap;
 pub mod client;
 pub mod commands;
+pub mod connection_request;
 pub mod core_process;
 pub mod core_transport;
 pub mod embedded_auth;
 pub mod error;
 pub mod events;
 pub mod latency;
+pub mod local_agent;
+pub mod login_attempt_tracker;
 pub mod logs;
 pub mod quick_start;
-pub mod saved_password;
+pub mod retry;
 pub mod state;
 pub mod stats;
+mod system_auth;
 pub mod wire;

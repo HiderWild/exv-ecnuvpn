@@ -8,11 +8,11 @@ fn main() -> ExitCode {
     match run_process() {
         Ok(None | Some(ServiceAgentOutcome::Accepted)) => ExitCode::SUCCESS,
         Ok(Some(ServiceAgentOutcome::Rejected(error))) => {
-            eprintln!("{}", error.code());
+            eprintln!("{error}");
             ExitCode::FAILURE
         }
         Err(error) => {
-            eprintln!("{}", error.code());
+            eprintln!("{error}");
             ExitCode::FAILURE
         }
     }

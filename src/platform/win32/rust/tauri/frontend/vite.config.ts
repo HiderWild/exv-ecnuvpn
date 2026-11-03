@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 
-// 产品版本从根 release.json 读取，并检查本平台配置。
+// 产品版本仅从根 release.json 读取；构建时检查 Tauri 配置的同步结果。
 const appVersion: string = JSON.parse(readFileSync(new URL("../../../../../../release.json", import.meta.url), "utf8")).version;
 const configuredVersion = JSON.parse(readFileSync(new URL("../app/tauri.conf.json", import.meta.url), "utf8")).version;
 if (typeof appVersion !== "string" || !appVersion || appVersion !== configuredVersion) {

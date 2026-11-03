@@ -96,6 +96,7 @@ impl NetworkMonitor {
         context: SnapshotContext,
         operation_id: Uuid,
         generation: u64,
+        probe: fn(Instant) -> Value,
     ) {
         let gate = Arc::clone(CAPTURE_GATE.get_or_init(|| Arc::new(Semaphore::new(1))));
         self.start_sampling(
@@ -107,7 +108,7 @@ impl NetworkMonitor {
             },
             gate,
             MONITOR_PERIOD,
-            Arc::new(collect_light_network),
+            Arc::new(probe),
         );
     }
 
@@ -368,14 +369,14 @@ impl SnapshotContext {
 }
 
 /// 调用方不等待探测；满载时记录 busy，绝不排队积累原生查询。
-pub(crate) fn request_snapshot(logs: Arc<LogAggregator>, context: SnapshotContext) {
+pub(crate) fn request_snapshot(logs: Arc<LogAggregator>, context: SnapshotContext, probe: fn(Instant) -> Value) {
     let gate = Arc::clone(CAPTURE_GATE.get_or_init(|| Arc::new(Semaphore::new(1))));
     drop(spawn_capture(
         logs,
         context,
         gate,
         CAPTURE_DEADLINE,
-        collect_network,
+        probe,
     ));
 }
 
@@ -518,7 +519,7 @@ fn stage(deadline: Instant, probe: impl FnOnce() -> Value) -> Value {
     value
 }
 
-fn collect_network(deadline: Instant) -> Value {
+pub(crate) fn collect_network(deadline: Instant) -> Value {
     // 系统代理为独立注册表事实，先采集，避免被后续网卡/路由慢查询消耗预算。
     let system_proxy = stage(deadline, || {
         let Some(sid) = current_user_sid() else {
@@ -598,7 +599,7 @@ fn collect_network(deadline: Instant) -> Value {
 }
 
 /// 周期采样只做一次接口枚举、一次关键路由读表和系统代理状态读取，不解析外网或重复物理出口探测。
-fn collect_light_network(deadline: Instant) -> Value {
+pub(crate) fn collect_light_network(deadline: Instant) -> Value {
     let system_proxy = if let Some(sid) = current_user_sid() {
         match system_proxy::capture_for_user(&sid) {
             Ok(raw) => proxy_raw_summary(&raw),

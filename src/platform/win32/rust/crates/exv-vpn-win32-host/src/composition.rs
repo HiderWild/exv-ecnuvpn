@@ -76,6 +76,9 @@ pub struct HostComposition {
     /// `Failed` state; the portable actor holds the domain error for the state
     /// machine). None = no failure observed since the last connect.
     last_wire_error: Option<exv_vpn_wire::generated::VpnError>,
+    pub(crate) stop_completion: Option<exv_vpn_wire::generated::StopCompletion>,
+    /// 当前逻辑会话的引擎 R1 遥测；仅影响投影。
+    pub(crate) engine_reconnect: Option<exv_vpn_wire::generated::ReconnectState>,
     /// 当前已连接会话由 engine 确认的起点（Unix epoch ms）。这是状态事件携带的
     /// 权威事实；后续 GetSnapshot/统计刷新必须复用，不能因重新组装快照而回退为 0。
     session_established_at_ms: Option<i64>,
@@ -119,6 +122,8 @@ pub fn compose_nonprivileged_host(helper: &VerifiedPipePeer) -> Result<HostCompo
         exited: false,
         operation_id: None,
         last_wire_error: None,
+        stop_completion: None,
+        engine_reconnect: None,
         session_established_at_ms: None,
     })
 }
@@ -184,8 +189,12 @@ impl HostComposition {
                 self.session_established_at_ms = None;
                 self.actors[0].apply(HostEvent::ConnectionLost(error))
             }
-            HostEvent::Connect
-            | HostEvent::HelperLinkLost
+            HostEvent::Connect => {
+                let effect = self.actors[0].apply(HostEvent::Connect);
+                if self.phase() == HostPhase::Connecting { self.last_wire_error = None; self.stop_completion = None; }
+                effect
+            }
+            HostEvent::HelperLinkLost
             | HostEvent::StopNewAdmission
             | HostEvent::TeardownSideJoined(_)
             // R1: failure and fine-phase progress only drive the actor's state
@@ -282,6 +291,11 @@ impl HostComposition {
         self.stop_requests
     }
 
+    /// 退出已持有受理关闭职责；迟到的停止失败不得重开它。
+    pub(crate) fn is_exiting(&self) -> bool {
+        self.exited
+    }
+
     /// R1: the 16-byte operation id of the in-flight connect/stop operation
     /// (host-side correlation register; set at dispatch, cleared on terminal).
     #[must_use]
@@ -295,6 +309,7 @@ impl HostComposition {
         self.operation_id = Some(operation_id);
         // 新操作开启：清掉上一个失败的 wire error（成败由状态流再报）。
         self.last_wire_error = None;
+        self.engine_reconnect = None;
         // 新连接/停止操作不能沿用上一会话的在线时长起点。
         self.session_established_at_ms = None;
     }
@@ -366,9 +381,9 @@ impl HostComposition {
 
     /// R2 (a) 收敛双保险：core 合成数据面侧加入。
     ///
-    /// 当 engine 已确认离开（干净退出 / 状态流断开）而本机仍停在停机收敛
+    /// 当 engine 已通过停止回执确认数据面结束，或本次尚未派发数据面，而本机仍停在停机收敛
     /// （[`HostPhase::Stopping`]，host 控制面侧已加入 teardown 屏障）时，补发数据面
-    /// 侧（PacketData）加入——engine 侧的 Idle 终态事件可能随断线丢失。双侧齐 →
+    /// 侧（PacketData）加入；单纯状态流 EOF / 查询失败不构成此回执。双侧齐 →
     /// [`HostPhase::Stopped`]（回落 Idle 终态），UI 不再卡 Reconciling。
     ///
     /// 幂等：仅在 `Stopping` 时生效（[`TeardownBarrier`] 未释放才 join 生效；Idle /

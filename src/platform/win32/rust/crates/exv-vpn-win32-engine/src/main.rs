@@ -122,6 +122,7 @@ struct EngineArgs {
     config_dir: PathBuf,
     /// 服务形态是否收到有效的显式 `--config-dir`（SCM 启动必须带该参数）。
     config_dir_explicit: bool,
+    acceptance_fault_once: Option<exv_engine::tunnel_runtime::AcceptanceFaultOnce>,
 }
 
 /// 解析 engine bin 命令行参数（`--key value`；未知参数忽略，前向兼容）。
@@ -136,7 +137,7 @@ fn parse_engine_args() -> Result<EngineArgs, String> {
 /// 纯参数提取（`argv[0]` 是程序名，与 `std::env::args()` 形状一致；测试直接注入）。
 /// 不做必需性校验——由调用方（oneshot = [`parse_argv`]；service = [`parse_service_argv`]）
 /// 按形态要求校验。
-fn parse_fields(argv: &[String]) -> EngineArgs {
+fn parse_fields(argv: &[String]) -> Result<EngineArgs, String> {
     let mut a = EngineArgs {
         control_pipe: String::new(),
         dll: PathBuf::new(),
@@ -147,10 +148,20 @@ fn parse_fields(argv: &[String]) -> EngineArgs {
         core_user_sid: None,
         config_dir: exv_vpn_win32_config::config_dir(),
         config_dir_explicit: false,
+        acceptance_fault_once: None,
     };
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
+            "--acceptance-fault-once" => {
+                if a.acceptance_fault_once.is_some() {
+                    return Err("--acceptance-fault-once must occur once".into());
+                }
+                if argv.get(i + 1).map(String::as_str) != Some("after-control-before-nic") {
+                    return Err("--acceptance-fault-once requires after-control-before-nic".into());
+                }
+                a.acceptance_fault_once = Some(exv_engine::tunnel_runtime::AcceptanceFaultOnce::AfterControlBeforeNic);
+            }
             "--control-pipe" => a.control_pipe = argv.get(i + 1).cloned().unwrap_or_default(),
             "--dll" => a.dll = PathBuf::from(argv.get(i + 1).cloned().unwrap_or_default()),
             "--journal-dir" => {
@@ -180,13 +191,16 @@ fn parse_fields(argv: &[String]) -> EngineArgs {
         }
         i += 1;
     }
-    a
+    if a.acceptance_fault_once.is_some() && !a.config_dir_explicit {
+        return Err("--acceptance-fault-once requires explicit absolute --config-dir".into());
+    }
+    Ok(a)
 }
 
 /// oneshot 参数校验（必需 `--control-pipe`/`--dll`/`--host-pid`；`--host-pid` 是 core 进程
 /// 句柄等待的输入——oneshot 生命周期 = core 生命周期）。
 fn parse_argv(argv: &[String]) -> Result<EngineArgs, String> {
-    let a = parse_fields(argv);
+    let a = parse_fields(argv)?;
     if a.control_pipe.is_empty() || a.dll.as_os_str().is_empty() || a.host_pid == 0 {
         return Err("engine args incomplete (need --control-pipe, --dll, --host-pid)".to_string());
     }
@@ -197,7 +211,7 @@ fn parse_argv(argv: &[String]) -> Result<EngineArgs, String> {
 /// `--host-pid`**——服务引擎无单一 core 可等，生命周期 = SCM）。ServiceMain 收到的启动
 /// 参数（含 `--service` 本身，解析时忽略）经此校验。
 fn parse_service_argv(argv: &[String]) -> Result<EngineArgs, String> {
-    let a = parse_fields(argv);
+    let a = parse_fields(argv)?;
     if a.control_pipe.is_empty()
         || a.dll.as_os_str().is_empty()
         || !a.config_dir_explicit
@@ -220,9 +234,97 @@ fn parse_service_argv_sources(
     service_argv: &[String],
     process_argv: &[String],
 ) -> Result<EngineArgs, String> {
-    parse_service_argv(process_argv).or_else(|process_error| {
-        parse_service_argv(service_argv).map_err(|_| process_error)
-    })
+    // 显式 fault 错误不能落入无 fault 的另一个参数源；普通 SCM 回退保留。
+    if process_argv.iter().any(|arg| arg == "--acceptance-fault-once") {
+        return parse_service_argv(process_argv);
+    }
+    match parse_service_argv(process_argv) {
+        Ok(_) if service_argv.iter().any(|arg| arg == "--acceptance-fault-once") =>
+            Err("--acceptance-fault-once in unselected ServiceMain arguments".into()),
+        Ok(args) => Ok(args),
+        Err(_) if service_argv.iter().any(|arg| arg == "--acceptance-fault-once") => parse_service_argv(service_argv),
+        Err(process_error) => parse_service_argv(service_argv).map_err(|_| process_error),
+    }
+}
+
+const ACCEPTANCE_MARKER: &str = "exv-native-acceptance.opt-in";
+const ACCEPTANCE_MARKER_BYTES: &[u8] = b"after-control-before-nic\n";
+
+/// 只读取发起用户 ProfileList 定位；不访问正式 settings、key 或 credentials。
+fn acceptance_profile_directory(sid: &str) -> Result<PathBuf, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE,
+        RRF_RT_REG_SZ, RRF_RT_REG_EXPAND_SZ};
+    let subkey = HSTRING::from(format!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\{sid}"));
+    let value = HSTRING::from("ProfileImagePath");
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+    let mut bytes = 0;
+    // RegGetValueW 在未指定 NOEXPAND 时展开 REG_EXPAND_SZ，REG_SZ 原样返回。
+    // SAFETY: 宽字符串有效；第一遍只询问大小，第二遍使用对应 UTF-16 缓冲区。
+    let rc = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, &subkey, &value, flags, None, None, Some(&raw mut bytes)) };
+    if rc.0 != 0 { return Err(format!("acceptance fault: ProfileImagePath unavailable ({})", rc.0)); }
+    let mut data = vec![0u16; (bytes as usize).div_ceil(2)];
+    let rc = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, &subkey, &value, flags, None,
+        Some(data.as_mut_ptr().cast()), Some(&raw mut bytes)) };
+    if rc.0 != 0 { return Err(format!("acceptance fault: ProfileImagePath read failed ({})", rc.0)); }
+    data.truncate(bytes as usize / 2);
+    while data.last() == Some(&0) { data.pop(); }
+    let profile = PathBuf::from(String::from_utf16(&data).map_err(|_| "acceptance fault: invalid ProfileImagePath")?);
+    if !profile.is_absolute() || !profile.is_dir() {
+        return Err("acceptance fault: ProfileImagePath must be existing absolute directory".into());
+    }
+    std::fs::canonicalize(profile).map_err(|e| format!("acceptance fault: resolve ProfileImagePath: {e}"))
+}
+
+/// Windows 真实目录身份，覆盖大小写、..、junction、符号链接及短路径别名。
+fn acceptance_directory_identity(path: &std::path::Path) -> Result<(u32, u32, u32), String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS};
+    let directory = OpenOptions::new().read(true).access_mode(0).share_mode(7)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0).open(path)
+        .map_err(|e| format!("acceptance fault: open directory identity: {e}"))?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: File 持有有效句柄且覆盖整个调用；info 为完整输出结构。
+    unsafe { GetFileInformationByHandle(HANDLE(directory.as_raw_handle()), &raw mut info) }
+        .map_err(|e| format!("acceptance fault: directory identity: {e}"))?;
+    Ok((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+}
+
+fn validate_acceptance_directory(config: &std::path::Path, profile: &std::path::Path,
+    engine_default: &std::path::Path) -> Result<(), String> {
+    if !config.is_absolute() || !config.is_dir() {
+        return Err("acceptance fault: explicit config directory must exist and be absolute".into());
+    }
+    let resolved = std::fs::canonicalize(config).map_err(|e| format!("acceptance fault: resolve config directory: {e}"))?;
+    let identity = acceptance_directory_identity(&resolved)?;
+    let profile = std::fs::canonicalize(profile).map_err(|e| format!("acceptance fault: resolve user profile: {e}"))?;
+    let formal = profile.join(exv_vpn_win32_config::DEFAULT_CONFIG_SUBDIR);
+    if formal.exists() {
+        if identity == acceptance_directory_identity(&formal)? {
+            return Err("acceptance fault: formal user configuration directory rejected".into());
+        }
+    } else {
+        // 正式叶目录缺失仍用已解析父目录拼公开固定子目录，不能因此放行别名。
+        if resolved.as_os_str().to_string_lossy().eq_ignore_ascii_case(&formal.as_os_str().to_string_lossy()) {
+            return Err("acceptance fault: formal user configuration directory rejected".into());
+        }
+    }
+    if engine_default.exists() && identity == acceptance_directory_identity(engine_default)? {
+        return Err("acceptance fault: engine default configuration directory rejected".into());
+    }
+    let marker = std::fs::read(resolved.join(ACCEPTANCE_MARKER))
+        .map_err(|e| format!("acceptance fault: isolated opt-in marker missing: {e}"))?;
+    if marker != ACCEPTANCE_MARKER_BYTES { return Err("acceptance fault: isolated opt-in marker content invalid".into()); }
+    Ok(())
+}
+
+fn validate_acceptance_fault(args: &EngineArgs, core_sid: &str) -> Result<(), String> {
+    if args.acceptance_fault_once.is_none() { return Ok(()); }
+    if !args.config_dir_explicit { return Err("acceptance fault: explicit absolute --config-dir required".into()); }
+    let profile = acceptance_profile_directory(core_sid)?;
+    validate_acceptance_directory(&args.config_dir, &profile, &exv_vpn_win32_config::config_dir())
 }
 
 /// 同步阻塞等待进程退出（`OpenProcess` fail-safe + `WaitForSingleObject` INFINITE）。
@@ -293,6 +395,7 @@ async fn run_engine(
         None => current_user_sid()
             .ok_or_else(|| "--user-sid missing and current user SID unresolvable".to_string())?,
     };
+    validate_acceptance_fault(&args, &core_sid)?;
 
     // 组装生产 HelperControl gRPC 服务（产品日志 sink：raw 落盘机器级目录；
     // StreamLogs 推送由 LogSink 内部负责）。R1b：注入真实数据面运行时（登录/CSTP/
@@ -319,6 +422,7 @@ async fn run_engine(
         } else {
             exv_engine::connection_trace::TraceEngineMode::Oneshot
         },
+        args.acceptance_fault_once,
     );
     // S3/D7：service 形态启用 owner 断线释放（连接 EOF → 释放 owner + version++）。
     // oneshot 保持一次性 owner（host 握手后关流，owner 跨 stream 保持）。

@@ -100,6 +100,8 @@ impl StatsRegistry {
         let mut counters = self.counters.write().expect("stats registry counters lock");
         counters.rx_bytes = rx_bytes;
         counters.tx_bytes = tx_bytes;
+        // 新数据面从未知 RTT 开始；探测超时不写 0，只有本次匹配回包再更新。
+        self.latency_ms.store(0, Ordering::Relaxed);
     }
 
     /// 拆除挂接（teardown 后样本回到恒 0 占位，不泄露旧连接计数）。

@@ -1,3 +1,4 @@
+import type { AuthPreparationAction, AuthPreparationEvent, AuthReceiverReply } from "../product/auth-preparation";
 // Typed IPC wrappers: Tauri Command (invoke) + Event (listen).
 // 契约来源：app/src/kernel/{commands,events,state,logs}.rs（P4-a 骨架）。
 // 前端重写（O2）：不复用 C++ webui/ 代码。
@@ -20,6 +21,10 @@ export type ConnectPhase =
 export interface VpnError {
   code: string;
   message: string;
+  stage?: string | null;
+  /** 稳定失败原因 id（EXV_UNFREEZE 2026-10-09，tag 8；空 = 缺省）。文案按
+   * `lib/copy-tables.ts` 的 REASON_COPY 映射——单一文案来源。 */
+  reason?: string | null;
 }
 
 export type RuntimeState =
@@ -97,6 +102,17 @@ export interface EngineReconnectState {
   reason: string;
 }
 
+/** 连接受理时冻结的会话身份投影（EXV_UNFREEZE 2026-10-04，bug3；仅显示，非授权
+ * 材料）。会话活动期间设置页改协议/账号/服务器不得改写连接页显示。 */
+export interface SessionIdentity {
+  /** 活动会话使用的协议："cisco" | "atrust"（未知码由前端按 Cisco 保守处理）。 */
+  protocol: string;
+  /** 受理时冻结的账号；空 = 无（aTrust 经系统认证、无可读账号）。 */
+  username: string;
+  /** 受理时冻结的服务器地址；空 = 无。 */
+  server: string;
+}
+
 /** host 自愈（engine 崩溃 respawn）状态（EXV_UNFREEZE 2026-09-05；仅状态上报——
  * respawn 决策与编排留在 host，wire 不携带凭据/栈）。 */
 export interface SelfHealStatus {
@@ -122,7 +138,14 @@ export interface ServiceStatus {
   health_state?: string | null;
 }
 
+export interface StopCompletion {
+  stopped: boolean;
+  blocks_new_connect: boolean;
+  errors: VpnError[];
+}
+
 export interface RuntimeSnapshot {
+  stop_completion?: StopCompletion | null;
   runtime: RuntimeState;
   monotonic_tick: number;
   /** stats-wire 方案 A：快照携带最新归一化统计；null = 尚无样本。 */
@@ -149,6 +172,9 @@ export interface RuntimeSnapshot {
   engine_reconnect?: EngineReconnectState | null;
   /** EXV_UNFREEZE 2026-09-05：快照携带的 host 自愈进展；null = 无自愈上下文。 */
   self_heal?: SelfHealStatus | null;
+  /** EXV_UNFREEZE 2026-10-04（bug3）：快照携带的会话身份投影；null = 无活动会话
+   * 身份（连接页回落当前配置）。 */
+  session_identity?: SessionIdentity | null;
 }
 
 export interface RuntimeEvent {
@@ -165,6 +191,7 @@ export type OperationResult =
   | { result: "failed"; error?: VpnError | null };
 
 export interface OperationReply {
+  stop_completion?: StopCompletion | null;
   result: OperationResult;
   /** R4：本命令生成的操作 id（hex16）；null = 未产生/被拒（无状态事件关联）。 */
   operation_id?: string | null;
@@ -257,10 +284,9 @@ export interface ConfigItem {
   value: string;
 }
 
-/** 快速入门的一次性提交：核心配置和可选服务安装在同一 Tauri 业务入口执行。 */
+/** 快速入门的一次性提交：只保存核心配置（T4 后服务安装由前端应用级协调器独立执行）。 */
 export interface QuickStartApplyRequest {
   items: ConfigItem[];
-  install_service: boolean;
 }
 
 /** 失败不丢弃前端草稿；成功时可附带安装后的服务状态。 */
@@ -270,16 +296,37 @@ export interface QuickStartApplyReply {
   message?: string;
 }
 
+/** R-D3-C：当次启动损坏修复的一次性报告（core 损坏分支产出，不持久化）。 */
+export interface ConfigRecovery {
+  corrupted: boolean;
+  /** 覆盖前的整字节备份文件名（配置目录内，仅文件名）。 */
+  backup_file: string;
+}
+
+/** S4：config.json 读失败（core 三档自愈后仍不可读）的结构化报告。 */
+export interface ConfigReadFailure {
+  /** Win32 原始错误码（5=拒绝访问、32=占用…；0=未知）。 */
+  win32_code: number;
+  /** 读取失败的 config.json 全路径（本地诊断，无秘密）。 */
+  path: string;
+}
+
 export interface ConfigPayload {
   items: ConfigItem[];
   /** 本次读取是否因无效本地配置而 bootstrap 默认值；不含原始文件、异常或秘密。 */
   requires_quick_start: boolean;
+  /** R-D3-C：损坏修复报告（kernel.configGet 恒返回，null=无损坏）；测试注入可省略。 */
+  config_recovery?: ConfigRecovery | null;
+  /** S4：读失败报告（kernel.configGet 恒返回，null=读取成功含自愈成功）；测试注入可省略。 */
+  read_failure?: ConfigReadFailure | null;
 }
 
 /** Tauri command 的兼容读模型：旧/测试回复缺少新字段时明确视为 false。 */
 interface ConfigPayloadWire {
   items: ConfigItem[];
   requires_quick_start?: boolean;
+  config_recovery?: { corrupted?: boolean; backup_file?: string } | null;
+  read_failure?: { win32_code?: number; path?: string } | null;
 }
 
 /** UI 对 Core 控制面的仅有两种结论：正常（已验证管道可通）或已停止。 */
@@ -313,6 +360,11 @@ async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Prom
 }
 
 export const kernel = {
+  authPreparationRespond(generation: number, action: AuthPreparationAction): Promise<void> {
+    return invokeTauri<void>("auth_preparation_respond", { generation, action });
+  },
+  authReceiverStatus(): Promise<AuthReceiverReply> { return invokeTauri<AuthReceiverReply>("auth_receiver_status"); },
+  restoreOfficialAuthReceiver(): Promise<AuthReceiverReply> { return invokeTauri<AuthReceiverReply>("restore_official_auth_receiver"); },
   connect(intent: ConnectIntent): Promise<OperationReply> {
     return invokeTauri<OperationReply>("connect", { intent });
   },
@@ -321,6 +373,10 @@ export const kernel = {
   },
   atrustBrowserFallbackAvailable(): Promise<boolean> {
     return invokeTauri<boolean>("atrust_browser_fallback_available");
+  },
+  /** §7.5 手动介入：显示/前置被隐藏的内嵌认证窗口。 */
+  atrustShowAuthWindow(): Promise<void> {
+    return invokeTauri<void>("atrust_show_auth_window");
   },
   stop(): Promise<OperationReply> {
     return invokeTauri<OperationReply>("stop");
@@ -342,17 +398,31 @@ export const kernel = {
   },
   async configGet(): Promise<ConfigPayload> {
     const payload = await invokeTauri<ConfigPayloadWire>("config_get");
+    const recovery = payload.config_recovery;
+    const readFailure = payload.read_failure;
     return {
       items: payload.items,
       requires_quick_start: payload.requires_quick_start === true,
+      // 与 requires_quick_start 同一兼容口径：仅 corrupted 明确为 true 才透出，
+      // 旧壳/测试回复缺少该字段时静默视为无损坏。
+      config_recovery:
+        recovery?.corrupted === true
+          ? { corrupted: true, backup_file: recovery.backup_file ?? "" }
+          : null,
+      // S4：read_failure 对象在场即读失败（缺 win32_code 视为未知码 0）；旧壳/
+      // 测试回复缺少该字段时视为读取成功。
+      read_failure: readFailure
+        ? { win32_code: readFailure.win32_code ?? 0, path: readFailure.path ?? "" }
+        : null,
     };
   },
   configSet(items: ConfigItem[]): Promise<boolean> {
     return invokeTauri<boolean>("config_set", { items });
   },
-  /** 仅按住密码眼睛时请求；调用者松开立即丢弃，不进配置草稿或日志。 */
-  savedPassword(username: string, server: string): Promise<string | null> {
-    return invokeTauri<string | null>("saved_password", { username, server });
+  /** S4：「以管理员身份修复权限」——壳 runas 重置 config.json ACL（只动权限不动
+   * 内容）后由前端重试 config_get。用户取消 UAC 等失败以拒绝值返回。 */
+  configRepairPermissions(): Promise<void> {
+    return invokeTauri<void>("config_repair_permissions");
   },
   quickStartApply(request: QuickStartApplyRequest): Promise<QuickStartApplyReply> {
     return invokeTauri<QuickStartApplyReply>("quick_start_apply", { request });
@@ -399,9 +469,34 @@ export function onStatus(cb: (ev: RuntimeEvent) => void): Promise<UnlistenFn> {
   return listen<RuntimeEvent>(EVENT_STATUS, (e) => cb(e.payload));
 }
 
+/** 验证码风险预告载荷（`exv://browser-login` 首个 active=true 事件可选携带）：
+ * 30 分钟滚动窗口内已记录的学校表单登录次数达到阈值时下发；数字与 Rust 侧
+ * `login_attempt_tracker.rs` 常量同源，警示句模板只在 BrowserAuthWaitingModal 渲染。 */
+export interface LoginThrottleWarning {
+  attempts: number;
+  window_minutes: number;
+  threshold: number;
+}
+
 /** 桌面端浏览器认证等待，与 Core 的 VPN 连接状态分别报告。 */
-export function onBrowserLogin(cb: (active: boolean) => void): Promise<UnlistenFn> {
-  return listen<boolean>("exv://browser-login", (event) => cb(event.payload));
+export interface BrowserLoginEvent {
+  /** 当前用户明确选择的临时认证渠道；普通重复首事件保持冻结语义。 */
+  channel_override?: boolean;
+  active: boolean;
+  generation: number;
+  outcome?: "authenticated" | "cancelled";
+  /** 后台认证首事件的冻结呈现上下文；后续阶段沿同一 generation。 */
+  recovery?: { mode: "embedded" | "browser" | "headless"; auto_login: boolean };
+  stage?: string | null;
+  /** 自动恢复事件可选携带；旧载荷不要求轮次。 */
+  round?: 1 | 2;
+  throttle_warning?: LoginThrottleWarning | null;
+}
+
+export function onBrowserLogin(
+  cb: (event: BrowserLoginEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserLoginEvent>("exv://browser-login", (event) => cb(event.payload));
 }
 
 export function onLogs(cb: (log: LogEvent) => void): Promise<UnlistenFn> {
@@ -428,4 +523,8 @@ export function isNotWired(e: unknown): boolean {
     e !== null &&
     (e as { kind?: string }).kind === "not_wired"
   );
+}
+
+export function onAuthPreparation(cb: (event: AuthPreparationEvent) => void): Promise<UnlistenFn> {
+  return listen<AuthPreparationEvent>("exv://auth-preparation", event => cb(event.payload));
 }

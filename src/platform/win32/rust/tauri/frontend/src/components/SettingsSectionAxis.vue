@@ -33,27 +33,27 @@ const emit = defineEmits<{
   position: sticky;
   top: 0;
   z-index: 2;
-  display: grid;
-  grid-template-columns: repeat(var(--axis-count), minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   grid-column: 1;
   grid-row: 1;
   align-self: start;
-  gap: 2px;
+  gap: 5px;
   min-width: 0;
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 0;
+  margin-bottom: 18px;
   background: var(--surface-canvas);
 }
 .settings-axis__item {
   position: relative;
-  width: 100%;
-  min-height: 34px;
-  padding: 6px var(--space-3);
+  width: auto;
+  min-height: auto;
+  padding: 7px 12px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
   font-weight: 500;
   text-align: center;
   white-space: nowrap;
@@ -69,8 +69,12 @@ const emit = defineEmits<{
   background: transparent;
   content: "";
 }
-.settings-axis__item:hover, .settings-axis__item:focus-visible { background: var(--surface-subtle); color: var(--text-primary); }
+.settings-axis__item:not(.settings-axis__item--active):hover,
+.settings-axis__item:not(.settings-axis__item--active):focus-visible { background: var(--surface-subtle); color: var(--text-primary); }
+.settings-axis__item:hover,
+.settings-axis__item:focus,
+.settings-axis__item:active { transform: none; }
 .settings-axis__item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-.settings-axis__item--active { background: var(--accent-subtle); color: var(--text-primary); font-weight: 650; }
-.settings-axis__item--active::before { background: var(--accent); }
+.settings-axis__item--active { background: var(--accent-subtle); color: var(--accent); font-weight: 600; }
+.settings-axis__item--active::before { background: transparent; }
 </style>

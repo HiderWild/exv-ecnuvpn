@@ -1,7 +1,11 @@
 import type { ConnectPhase, RuntimeSnapshot, RuntimeState } from "../lib/ipc";
+import { errorStageLabelOf, reasonCopyOf } from "../lib/copy-tables";
 import {
   CONNECT_PHASE_ORDER,
+  ERROR_CODE_LABELS,
   STATE_UI,
+  disconnectDescriptionOf,
+  disconnectSemanticsOf,
   errorOf,
   phaseIndexOf,
   phaseLabelOf,
@@ -45,7 +49,7 @@ export const PRODUCT_PHASE_LABELS: Record<ConnectPhase, string> = {
   negotiating_tunnel: "建立通道",
   applying_platform_tunnel: "写入配置",
   attaching_packet_boundary: "启用通道",
-  starting_data_plane: "检查网络",
+  starting_data_plane: "启动数据通道",
 };
 
 interface ProductCopy {
@@ -61,7 +65,10 @@ const PRODUCT_COPY: Record<RuntimeState["state"], ProductCopy> = {
   stopping: { title: "断开中", severity: "attention" },
   reconciling: { title: "处理中", severity: "attention" },
   failed_clean: { title: "连接失败", severity: "error" },
-  failed_dirty: { title: "需要处理", severity: "blocking" },
+  // 「需要处理」已退役（2026-10-08 调研 §6 阶段 1，win32 树同构镜像）：failed_dirty
+  // 的默认标题改为「连接失败」；曾连上后断开的 episode 由 failureTitleFor 按
+  // disconnectSemanticsOf 分流为「连接已断开」，断开清理冲突（TEARDOWN）保留专门标题。
+  failed_dirty: { title: "连接失败", severity: "blocking" },
 };
 
 const PRODUCT_STATUS_BY_COARSE_PHASE: Record<CoarsePhase, ProductStatus> = {
@@ -150,14 +157,27 @@ function systemProxyFor(snapshot: RuntimeSnapshot): ProductSystemProxy {
 function reconnectFor(snapshot: RuntimeSnapshot): ProductReconnect {
   const wire = snapshot.reconnect;
   if (wire === null || wire === undefined) {
-    return { enabled: false, active: false, currentAttempt: 0, maxAttempts: 0 };
+    return { enabled: false, active: false, currentAttempt: 0, maxAttempts: 0, reason: "" };
   }
   return {
     enabled: wire.auto_reconnect,
     active: wire.active,
     currentAttempt: wire.current_attempt,
     maxAttempts: wire.max_attempts,
+    reason: wire.reason ?? "",
   };
+}
+
+/**
+ * S3 断开→重连过渡态判定：意外断开的 failed_* 红色终态仍被自动重连武装覆盖
+ * （`auto_reconnect` 开启且重连在途或仍有剩余次数）时属过渡期——呈现 attention
+ * 过渡态，红色（含断开红标题）仅保留给最终失败终态（武装解除或次数耗尽）。
+ */
+export function reconnectTransitionOf(snapshot: RuntimeSnapshot): boolean {
+  if (snapshot.runtime.state !== "failed_clean" && snapshot.runtime.state !== "failed_dirty") return false;
+  const wire = snapshot.reconnect;
+  if (wire?.auto_reconnect !== true) return false;
+  return wire.active === true || wire.current_attempt < wire.max_attempts;
 }
 
 /**
@@ -270,9 +290,12 @@ function connectionInfoFor(info: ProductConnectionInfo): ProductConnectionInfo {
   };
 
   return {
-    account: clean(info.account),
+    account: info.accountSource === "unavailable" ? null : clean(info.account),
+    ...(info.accountSource ? { accountSource: info.accountSource } : {}),
     vpnServer: clean(info.vpnServer),
     campusIp: clean(info.campusIp),
+    ...(info.protocol ? { protocol: info.protocol } : {}),
+    ...(info.routeRuleCount !== undefined ? { routeRuleCount: info.routeRuleCount } : {}),
   };
 }
 
@@ -329,13 +352,63 @@ function networkResourcesFor(): ProductNetworkResources {
   return { available: false };
 }
 
-function descriptionFor(runtime: RuntimeState): string | null {
+/** 失败终态类型收窄守卫（failed_clean / failed_dirty——两者均携带 `error`）。 */
+function isFailedRuntime(runtime: RuntimeState): runtime is Extract<RuntimeState, { state: "failed_clean" | "failed_dirty" }> {
+  return runtime.state === "failed_clean" || runtime.state === "failed_dirty";
+}
+
+// 阶段④导出：failed-notify 的失败终态 toast 复用同一标题/描述决策（「同一
+// episode 状态卡与 toast 说同一句话」纪律，计划 §3.4）。
+export function descriptionFor(runtime: RuntimeState, disconnect: boolean): string | null {
   if (runtime.state === "connected") {
     const summary = runtime.summary?.trim();
     return summary || null;
   }
 
+  if (isFailedRuntime(runtime)) {
+    const error = runtime.error;
+    if (error?.stage === "ERROR_STAGE_TEARDOWN" && error.code === "ERROR_CODE_OBSERVED_CONFLICT") {
+      return "断开后仍观察到本次连接资源，请重新断开；仍失败请导出日志反馈。";
+    }
+    if (error?.stage === "ERROR_STAGE_TEARDOWN" && error.code === "ERROR_CODE_OBSERVATION_FAILED") {
+      return "断开后的状态观测未能确认资源已清理；请重试确认，仍失败请导出日志反馈。";
+    }
+    // 阶段①（「需要处理」分流）：断开语义下优先给出行动指引；仅靠「曾连上」兜底
+    // 识别不出具体原因时沿用既有错误文案（原因透传是阶段 2 的 reason id 工作）。
+    // darwin wire 暂无重连 reason lane，reason 判据恒为 null。
+    if (disconnect) {
+      return disconnectDescriptionOf(error ?? null, null, null) ?? errorOf(runtime);
+    }
+    // 阶段③：稳定 reason id 文案（copy-tables 单一来源，与 win32 同源）优先于
+    // stage 泛化句；断开类 episode 不携带连接失败 reason id，与上一分支无竞争。
+    const reasonCopy = reasonCopyOf(error?.reason);
+    if (reasonCopy) {
+      return reasonCopy;
+    }
+    if (error && (error.code === "ERROR_CODE_UNSPECIFIED" || !ERROR_CODE_LABELS[error.code]) && error.stage) {
+      // T-22（修 F-8）：阶段名中文化（ErrorStage 15 值标签表）；未知 stage 回落
+      // 「准备连接」，绝不出现英文原文。
+      return `连接在「${errorStageLabelOf(error.stage)}」一步失败，原因尚不明确。请重试；仍失败请导出日志反馈。`;
+    }
+  }
   return errorOf(runtime);
+}
+
+/**
+ * 失败终态标题决策（阶段 1 改动 1.2，优先级自上而下）：
+ *   1. TEARDOWN（T-21 断开清理冲突）→ 保留处理语义专门标题（唯一配得上
+ *      「需要用户动作」的场景）；
+ *   2. 断开语义（disconnectSemanticsOf）→「连接已断开」；
+ *   3. 其余（含未知错误码）→「连接失败」。「需要处理」自本变更起不再出现。
+ */
+export function failureTitleFor(runtime: RuntimeState, fallback: string, disconnect: boolean): string {
+  if (!isFailedRuntime(runtime)) return fallback;
+  if (runtime.error?.stage === "ERROR_STAGE_TEARDOWN") {
+    if (runtime.error.code === "ERROR_CODE_OBSERVED_CONFLICT") return "断开后的清理未完成";
+    if (runtime.error.code === "ERROR_CODE_OBSERVATION_FAILED") return "无法确认清理结果";
+  }
+  if (disconnect) return "连接已断开";
+  return "连接失败";
 }
 
 function errorCodeFor(runtime: RuntimeState): string | null {
@@ -350,26 +423,68 @@ function errorCodeFor(runtime: RuntimeState): string | null {
   }
 }
 
-/** 将唯一业务事实 `RuntimeSnapshot` 翻译为 UI 不再自行猜测的产品呈现状态。 */
+/**
+ * 将唯一业务事实 `RuntimeSnapshot` 翻译为 UI 不再自行猜测的产品呈现状态。
+ *
+ * @param failureEntryPrevState 失败 episode 进入前一刻的 runtime 相位（阶段①断开
+ *   语义三判据之一；null = 未知/冷启动直接落在失败态——由 reason lane 兜底判定）。
+ *   由产品运行时在快照采纳时记录并传入。
+ */
 export function present(
   snapshot: RuntimeSnapshot,
   nowMs: number,
   connectionInfo: ProductConnectionInfo = EMPTY_PRODUCT_CONNECTION_INFO,
   coreStatus: ProductUiState["coreStatus"] = "normal",
+  failureEntryPrevState: RuntimeState["state"] | null = null,
 ): ProductUiState {
+  const stop = snapshot.stop_completion;
   const runtime = snapshot.runtime;
   const stateUi = STATE_UI[runtime.state];
   const copy = PRODUCT_COPY[runtime.state];
   const reconnect = reconnectFor(snapshot);
+  // S3 断开→重连过渡态：重连武装覆盖期间的失败终态呈现 attention 过渡，
+  // 不再闪红色；红色与断开语义呈现保留给最终失败终态。
+  const reconnectTransition = reconnectTransitionOf(snapshot);
+  // 阶段①（「需要处理」分流）：失败终态按断开语义三判据（stage / reason lane /
+  // 失败前已连接）分流标题、描述与按钮文案；非失败相位恒为 false。
+  // darwin wire 暂无重连 reason lane，reason 判据恒为 null。
+  const disconnect =
+    isFailedRuntime(runtime) &&
+    disconnectSemanticsOf(runtime.error ?? null, failureEntryPrevState, null, null);
+  // 终态沿真实清理义务或未完成的停止错误选择重试；进行中的原Stop继续等待。
+  const retryStop = (isFailedRuntime(runtime) || runtime.state === "idle") &&
+    Boolean(stop?.blocks_new_connect || (stop && !stop.stopped && stop.errors.some(error =>
+      error.stage === "ERROR_STAGE_TEARDOWN" || error.code === "STOP_DEADLINE_EXCEEDED")));
+  const stopRetryHint = runtime.state === "stopping"
+    ? "请等待停止完成。"
+    : reconnect.active ? "可取消当前自动恢复。"
+    : retryStop ? "请重新断开重试；仍失败请导出日志反馈。"
+    : "请重新连接重试；仍失败请导出日志反馈。";
+
+  // 已知引擎失联的业务说明由原 Tauri mapper 给出，错误码仍保留在 errorCode 与原快照。
+  const engineDisconnected = stop && !stop.stopped && !stop.blocks_new_connect && stop.errors.length > 0 &&
+    stop.errors.every(error => error.code === "ERROR_CODE_EFFECT_UNKNOWN" &&
+      error.stage === "ERROR_STAGE_PROTOCOL_SESSION" &&
+      error.reason === "session/engine_control_stream_ended" && Boolean(error.message?.trim()));
+  const stopErrorDetails = stop?.errors.map(error => [error.message, error.code].filter(Boolean).join(" ")).join("; ");
 
   return {
     coreStatus,
     operationId: snapshot.operation_id?.trim() || null,
     status: productStatus(runtime),
-    severity: copy.severity,
-    title: copy.title,
-    description: descriptionFor(runtime),
-    errorCode: errorCodeFor(runtime),
+    severity: reconnectTransition || stop?.errors.length || stop?.blocks_new_connect ? "attention" : copy.severity,
+    title: reconnectTransition ? "连接已断开，正在自动重连"
+      : stop?.errors.length && stop.stopped ? "连接已断开" : failureTitleFor(runtime, copy.title, disconnect),
+    description: engineDisconnected
+      ? `${stop.errors[0].message}${stopRetryHint}`
+      : stop?.errors.length
+      ? `${stop.stopped ? (stop.blocks_new_connect ? "连接已停止，但资源清理未完成。" : "连接已停止，但停止过程中发生错误。") : "断开连接时发生错误。"}${stopErrorDetails ? `${stopErrorDetails}。` : ""}${stopRetryHint}`
+      : stop?.blocks_new_connect ? `${stop.stopped ? "连接已停止，但资源清理未完成。" : "断开连接时发生错误，仍有资源清理工作。"}${stopRetryHint}`
+      : reconnectTransition ? "连接意外断开，正在自动重连；若自动重连最终未成功，可手动重新连接。"
+      : descriptionFor(runtime, disconnect),
+    disconnectSemantics: reconnectTransition ? false : disconnect,
+    errorCode: stop?.errors[0]?.code ?? errorCodeFor(runtime),
+    errorReason: runtime.state === "failed_clean" || runtime.state === "failed_dirty" ? runtime.error?.reason ?? null : null,
     stages: stagesFor(runtime),
     metrics: metricsFor(snapshot, nowMs),
     connectionInfo: connectionInfoFor(connectionInfo),
@@ -379,7 +494,7 @@ export function present(
     selfHeal: selfHealFor(snapshot),
     service: serviceFor(snapshot),
     networkResources: networkResourcesFor(),
-    connectEnabled: stateUi.connectEnabled,
-    stopEnabled: stateUi.stopEnabled,
+    connectEnabled: stateUi.connectEnabled && !stop?.blocks_new_connect,
+    stopEnabled: stateUi.stopEnabled || retryStop,
   };
 }

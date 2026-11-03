@@ -205,7 +205,12 @@ impl HostComposition {
             }
             HostEvent::ConnectionLost(error) => {
                 self.last_error = Some(error);
-                if matches!(self.phase, HostPhase::Connected | HostPhase::Connecting) {
+                if matches!(self.phase, HostPhase::Connected | HostPhase::Connecting | HostPhase::Stopping | HostPhase::Reconciling) {
+                    // 当前操作的失败终结命令等待；资源义务仍由宿主原停止回执约束。
+                    // Idle/Stopped 的迟到事件不能重开退出或已完成操作的受理门。
+                    if matches!(self.phase, HostPhase::Stopping | HostPhase::Reconciling) {
+                        self.admission_open = true;
+                    }
                     self.phase = HostPhase::Failed;
                     self.connect_phase = None;
                 }
@@ -261,4 +266,5 @@ impl Default for HostComposition {
         Self::new()
     }
 }
+
 

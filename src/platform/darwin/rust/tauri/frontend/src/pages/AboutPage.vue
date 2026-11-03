@@ -9,7 +9,10 @@ import {
 } from "../product/core-config";
 import { darwinCommandAdapter } from "../product/command-adapter-global";
 import { CHANGELOG_ENTRIES } from "../product/releases";
+import { PRODUCT_LICENSE_NOTICES } from "../product/licenses";
 import { PRODUCT_VERSION } from "../product/version";
+
+const licensesOpen = ref(false);
 
 /** 关于页（左侧栏独立入口；与设置/日志并列）。品牌展示（图标/应用名/副标题/版本/作者/仓库）
  * + 更新日志（最新发布记录常显）+ 未知核心配置只读。 */
@@ -78,29 +81,37 @@ function toggleVersion(version: string): void {
   <section class="about-page" aria-labelledby="about-title">
     <header class="about-hero">
       <img class="about-logo" src="../assets/exv-logo.svg" alt="EXV 产品 Logo" />
-      <div class="about-hero__text">
-        <p class="about-subtitle">for ECNU</p>
-        <h1 id="about-title">EXV</h1>
-        <div class="about-release">
-          <span>当前版本</span>
-          <strong class="about-version" data-testid="about-version">{{ PRODUCT_VERSION }}</strong>
-          <span class="about-release__divider" aria-hidden="true"></span>
-          <span>由 <strong data-testid="about-author">{{ AUTHOR }}</strong> 维护</span>
-        </div>
-      </div>
-      <a
-        class="about-repo"
-        data-testid="about-repository"
-        :href="REPOSITORY_URL"
-        rel="noopener noreferrer"
-        @click.prevent="openRepository"
-      >
-        <svg class="about-repo__icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
-        <span class="about-repo__label">{{ REPOSITORY_LABEL }}</span>
-      </a>
+      <div class="about-hero__text"><h1 id="about-title">EXV</h1><p class="about-subtitle">for ECNU</p></div>
     </header>
-
     <div class="about-body" data-testid="about-scroll-body">
+      <section class="about-metadata" aria-label="版本与仓库">
+        <div class="about-metadata__row"><span>当前版本</span><span><strong class="about-version" data-testid="about-version">{{ PRODUCT_VERSION }}</strong><span class="about-maintainer"> · 由 <strong data-testid="about-author">{{ AUTHOR }}</strong> 维护</span></span></div>
+        <div class="about-metadata__row"><span>GitHub 仓库</span>
+          <a
+            class="about-repo"
+            data-testid="about-repository"
+            :href="REPOSITORY_URL"
+            rel="noopener noreferrer"
+            @click.prevent="openRepository"
+          >
+            <svg class="about-repo__icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+            <span class="about-repo__label">{{ REPOSITORY_LABEL }}</span>
+          </a>
+        </div>
+      </section>
+      <section class="about-licenses-card" aria-labelledby="about-licenses-title">
+        <div class="about-licenses-row">
+          <h2 id="about-licenses-title">开源许可</h2>
+          <button type="button" data-testid="about-licenses-toggle" :aria-expanded="licensesOpen" aria-controls="about-license-notices" @click="licensesOpen = !licensesOpen">{{ licensesOpen ? "收起资料" : "查看许可" }}</button>
+        </div>
+        <div v-if="licensesOpen" id="about-license-notices" data-testid="about-licenses" class="about-license-notices">
+          <article v-for="notice in PRODUCT_LICENSE_NOTICES" :key="notice.source">
+            <h3>{{ notice.name }} · {{ notice.license }}</h3>
+            <p class="about-license-source">来源：{{ notice.source }}</p>
+            <pre>{{ notice.text }}</pre>
+          </article>
+        </div>
+      </section>
       <section class="about-changelog" data-testid="about-changelog" aria-labelledby="changelog-title">
         <header class="about-changelog__header">
           <h2 id="changelog-title">更新日志</h2>
@@ -124,12 +135,12 @@ function toggleVersion(version: string): void {
             >
               <span class="about-changelog__entry-head">
                 <span class="about-changelog__entry-version">v{{ entry.version }}</span>
+                <span class="about-changelog__entry-date">{{ entry.dateLabel }}</span>
                 <span v-if="index === 0" class="about-changelog__latest">最新发布记录</span>
                 <span v-if="entry.version === PRODUCT_VERSION" class="about-changelog__current">当前版本</span>
               </span>
-              <span class="about-changelog__entry-date">{{ entry.dateLabel }}</span>
-              <svg v-if="index !== 0" class="about-changelog__chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="m4 6 4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              <svg v-if="index !== 0" class="about-changelog__chevron" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+                <path d="M4 2 9 6 4 10Z" />
               </svg>
             </component>
             <div
@@ -173,7 +184,7 @@ function toggleVersion(version: string): void {
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  padding: var(--product-page-top-gap) 0 var(--space-6);
+  padding: 0;
 }
 
 .about-body {
@@ -184,83 +195,82 @@ function toggleVersion(version: string): void {
   scrollbar-gutter: stable;
 }
 
-.about-hero {
-  flex: none;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-4);
-  padding: 0 0 var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.about-logo { width: 68px; height: 68px; flex: none; }
-.about-hero__text { min-width: 0; }
-.about-hero__text h1 { margin: 0; font-size: clamp(28px, 3vw, 38px); line-height: 1; letter-spacing: -0.035em; }
-.about-subtitle { margin: 0 0 var(--space-1); color: var(--accent); font-size: 12px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
-.about-release { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-top: var(--space-2); color: var(--text-secondary); font-size: 12px; }
-.about-release strong { color: var(--text-primary); font-weight: 650; }
-.about-version { font-family: var(--font-mono); font-size: 14px; }
-.about-release__divider { width: 1px; height: 12px; background: var(--border-strong); }
+.about-hero { display:flex; flex:none; align-items:center; justify-content:center; gap:12px; padding:5px 0 25px; }
+.about-logo { width:48px; height:56px; object-fit:contain; flex:none; }
+.about-hero__text { min-width:0; }
+.about-hero__text h1 { margin:0; font-size: var(--font-size-display); line-height:36px; letter-spacing:0; }
+.about-subtitle { margin:0; color:var(--text-secondary); font-size: var(--font-size-caption); line-height:18px; }
+.about-version { font-size: var(--font-size-caption); font-weight:650; }
+.about-maintainer { font-size: var(--font-size-caption); color:var(--text-secondary); }
+.about-metadata { padding:0 18px; border:1px solid var(--border-subtle); border-radius:14px; background:var(--surface-panel); }
+.about-metadata__row { display:flex; justify-content:space-between; align-items:center; gap:12px; min-height:40px; color:var(--text-secondary); font-size: var(--font-size-caption); }
+.about-metadata__row + .about-metadata__row { border-top:1px solid var(--border-subtle); }
+.about-metadata__row > span:last-child { text-align:right; }
 .about-repo {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
   color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 550;
+  font-size: var(--font-size-caption);
+  font-weight:500;
   text-decoration: none;
   transition: color var(--motion-fast) var(--motion-ease);
 }
 .about-repo:hover { color: var(--accent); text-decoration: none; }
-.about-repo__icon { width: 16px; height: 16px; flex: none; }
+.about-repo__icon { display:none; }
 .about-repo__label { min-width: 0; overflow-wrap: anywhere; }
-.about-changelog { margin-top: var(--space-5); }
+.about-changelog { margin-top:18px; }
 .about-changelog__header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); padding: 0 0 var(--space-2); }
-.about-changelog__header h2 { margin: 0; font-size: 16px; letter-spacing: -0.01em; }
-.about-changelog__count { color: var(--text-secondary); font-size: 12px; font-weight: 400; }
-.about-changelog__list { border-top: 1px solid var(--border-subtle); }
-.about-changelog__entry { border-bottom: 1px solid var(--border-subtle); }
-.about-changelog__entry--latest { background: var(--accent-subtle); }
-.about-changelog__entry--latest .about-changelog__entry-toggle { cursor: default; }
-.about-changelog__current { color: var(--text-secondary); font-size: 11px; font-weight: 500; }
+.about-changelog__header h2 { margin: 0; font-size: var(--font-size-heading); letter-spacing: -0.01em; }
+.about-changelog__count { color: var(--text-secondary); font-size: var(--font-size-caption); font-weight: 400; }
+.about-changelog__list { display: grid; gap: 10px; }
+.about-changelog__entry { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; background: var(--surface-panel); }
+.about-changelog__entry--latest { border-color: color-mix(in srgb, var(--accent) 32%, var(--border-subtle)); }
+.about-changelog__current { color: var(--text-secondary); font-size: var(--font-size-caption); font-weight: 500; }
 .about-changelog__entry-toggle {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 16px;
+  grid-template-columns: minmax(0, 1fr) 16px;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
   min-height: 44px;
-  padding: var(--space-2) var(--space-3);
+  padding: 13px 16px;
   border: 0;
   border-radius: 0;
+  font-size: var(--font-size-caption);
   background: transparent;
   color: var(--text-primary);
   text-align: left;
   cursor: pointer;
 }
-.about-changelog__entry:not(.about-changelog__entry--latest) .about-changelog__entry-toggle:hover { background: var(--surface-subtle); }
+.about-changelog__entry-toggle:hover { background: var(--surface-subtle); }
+.about-changelog__entry--latest .about-changelog__entry-toggle { cursor: default; }
 .about-changelog__entry-toggle:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-.about-changelog__entry-head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.about-changelog__entry-version { font-family: var(--font-mono); font-size: 13px; font-weight: 650; white-space: nowrap; }
-.about-changelog__latest { color: var(--accent); font-size: 11px; font-weight: 650; white-space: nowrap; }
-.about-changelog__entry-date { color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
-.about-changelog__chevron { width: 16px; height: 16px; color: var(--text-secondary); transition: transform var(--motion-fast) var(--motion-ease); }
-.about-changelog__entry-toggle[aria-expanded="true"] .about-changelog__chevron { transform: rotate(180deg); }
-.about-changelog__section h3 { margin: var(--space-3) var(--space-3) var(--space-1); color: var(--text-primary); font-size: 13px; font-weight: 650; }
-.about-changelog__highlights { margin: 0; padding: var(--space-1) var(--space-5) var(--space-3) 34px; color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
-.about-changelog__highlights li { margin: var(--space-1) 0; padding-left: var(--space-1); }
+.about-changelog__entry-head { display: flex; flex-wrap:wrap; align-items:baseline; gap: var(--space-2); min-width: 0; }
+.about-changelog__entry-version { font-family: var(--font-mono); font-size: var(--font-size-caption); font-weight: 600; white-space: nowrap; }
+.about-changelog__latest { color: var(--accent); font-size: var(--font-size-caption); font-weight: 650; white-space: nowrap; }
+.about-changelog__entry-date { color: var(--text-secondary); font-size: var(--font-size-caption); white-space: nowrap; }
+.about-changelog__chevron { width: 12px; height: 12px; color: var(--text-secondary); transition: transform var(--motion-fast) var(--motion-ease); }
+.about-changelog__entry-toggle[aria-expanded="true"] .about-changelog__chevron { transform: rotate(90deg); }
+.about-changelog__content { padding:0 16px 15px; font-size: var(--font-size-caption); line-height:1.9; }
+.about-changelog__section h3 { margin:14px 0 5px; color: var(--text-primary); font-size: var(--font-size-heading); font-weight: 600; line-height:1.9; }
+.about-changelog__highlights { margin:5px 0 14px; padding-left:18px; color: var(--text-secondary); font-size: var(--font-size-caption); line-height: 1.9; }
+.about-changelog__highlights li { margin:0; padding:0; }
 .about-advanced { margin-top: var(--space-5); }
-.about-advanced h2 { margin: 0 0 var(--space-2); font-size: 14px; }
+.about-advanced h2 { margin: 0 0 var(--space-2); font-size: var(--font-size-heading); }
 .readonly-list { display: grid; gap: 0; }
-.readonly-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: 34px; border-top: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 12px; }
+.readonly-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: 34px; border-top: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: var(--font-size-caption); }
 .readonly-row span:last-child { color: var(--text-primary); font-weight: 600; text-align: right; }
-.about-state { margin: 0; color: var(--text-secondary); font-size: 13px; }
+.about-state { margin: 0; color: var(--text-secondary); font-size: var(--font-size-caption); }
 
-@media (max-width: 700px) {
-  .about-hero { grid-template-columns: auto minmax(0, 1fr); }
-  .about-logo { width: 56px; height: 56px; }
-  .about-repo { grid-column: 2; }
-}
+.about-licenses-card { margin-top:8px; padding:0 3px; }
+.about-licenses-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.about-licenses-row h2 { margin:0; color:var(--text-secondary); font-size: var(--font-size-heading); font-weight:500; }
+.about-licenses-row p, .about-license-source { margin: 4px 0 0; color: var(--text-secondary); font-size: var(--font-size-caption); overflow-wrap: anywhere; }
+.about-licenses-row button { flex:none; min-height:24px; padding:2px 8px; font-size: var(--font-size-body); }
+.about-license-notices article { border-top: 1px solid var(--border-subtle); margin-top: 16px; padding-top: 14px; }
+.about-license-notices h3 { margin: 0; font-size: var(--font-size-heading); }
+.about-license-notices pre { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--font-size-caption)/1.7 var(--font-mono); color: var(--text-secondary); }
+@media (max-width: 700px) { .about-changelog__entry-date { white-space:normal; } }
 </style>

@@ -8,11 +8,18 @@ import {
   createBrowserSafeAppearanceStorage,
 } from "./product/appearance";
 import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway } from "./product/core-config";
-import { computeLifecycleEffects, computeReconnectNotifyEffect, computeSelfHealNotify, shouldAutoConnectOnLaunch } from "./product/lifecycle-effects";
+import { installNativeContextMenuBan } from "./product/context-menu";
+import {
+  announceFailedSnapshot,
+  failureEpisodeNotified,
+  initFailedNotifyPort,
+} from "./product/failed-notify";
+import { dispatchLifecycleEffects, dispatchSystemNotification, type SystemNotificationKind, computeLifecycleEffects, computeSelfHealNotify, shouldAutoConnectOnLaunch, createReconnectNotificationTracker, reconnectPauseCopyOf, RECONNECTING_TITLE, RECONNECTING_BODY } from "./product/lifecycle-effects";
 import { LOGS_GATEWAY_KEY } from "./product/logs";
 import { createMockCoreConfigGateway, createMockLogsGateway } from "./product/mock-page-data";
-import { createMockRuntime, selectRuntimeSource, selectPreviewStatus } from "./product/mock-runtime";
+import { createMockRuntime, selectRuntimeSource, selectPreviewStatus, selectPreviewScenario, selectPreviewPhase, selectPreviewPage, selectPreviewModal, selectProgressPreview } from "./product/mock-runtime";
 import { createProductRuntime, PRODUCT_RUNTIME_KEY } from "./product/runtime";
+import { pushToast } from "./lib/toast";
 import {
   loadUiPreferences,
   provideUiPrefsGateway,
@@ -25,12 +32,24 @@ import "./styles/tokens.css";
 import "./styles/base.css";
 import "./styles/motion.css";
 import "./styles/ui-first-shell.css";
+import "./styles/dialogs.css";
+
+// S6b：全域禁用原生右键菜单（release 无 devtools 消费；日志条目自制菜单见 LogsPage）。
+installNativeContextMenuBan();
 
 const appearance = createAppearance(createBrowserSafeAppearanceStorage(() => window.localStorage));
 appearance.applyDocument(document.documentElement);
 const chrome = createWindowChromePort();
 const source = selectRuntimeSource(import.meta.env.DEV, window.location.search);
-const runtime = source === "mock" ? createMockRuntime(selectPreviewStatus(import.meta.env.DEV, window.location.search)) : createProductRuntime();
+if (source === "mock") {
+  const compact = new URLSearchParams(window.location.search).get("compact");
+  if (compact === "1") appearance.setMode("minimal");
+  if (compact === "0") appearance.setMode("advanced");
+}
+// 阶段④：真实运行时的快照采纳钩子喂失败终态通知（darwin 无 R1/R2 lane，无互斥项）。
+const mockRuntime = source === "mock" ? createMockRuntime(selectPreviewStatus(import.meta.env.DEV, window.location.search), undefined,
+  selectPreviewScenario(import.meta.env.DEV, window.location.search), selectPreviewPhase(import.meta.env.DEV, window.location.search)) : null;
+const runtime = mockRuntime ?? createProductRuntime(undefined, undefined, announceFailedSnapshot);
 /**
  * Core 在 Rust setup 中完成 bootstrap 后才暴露 Tauri gateway；主入口把这次读取注入
  * App，由 App 在首次挂载时只按 `requires_quick_start` 决定是否显示对话框。
@@ -39,7 +58,13 @@ const loadQuickStart = (): Promise<ConfigPayload> => {
   if (source === "mock") return Promise.resolve({ items: [], requires_quick_start: false });
   return kernel.configGet();
 };
-const app = createApp(App, {
+const modalScene = selectPreviewModal(import.meta.env.DEV, window.location.search);
+const progressScene = selectProgressPreview(import.meta.env.DEV, window.location.search);
+const root = import.meta.env.DEV && modalScene ? (await import("./components/DevModalScene.vue")).default
+  : import.meta.env.DEV && progressScene ? (await import("./components/DevProgressScene.vue")).default : App;
+const app = createApp(root, {
+  ...(mockRuntime && (modalScene || progressScene) ? { previewRuntime: mockRuntime } : {}),
+  ...(source === "mock" ? { initialPage: selectPreviewPage(import.meta.env.DEV, window.location.search) } : {}),
   loadQuickStart,
   onStartupReady: () => {
     // 运行时的身份刷新也读取 ConfigGet，必须等首次启动结论已被 App 接收。
@@ -71,13 +96,33 @@ if (source !== "mock") {
 }
 await loadUiPreferences();
 
+// 阶段④（D9 计划 §4.2-3/4）：失败终态通知的分发端口——前台用应用内 toast，后台
+// 经 `invokeTrayNotify` 升级为系统通知；前台抑制偏好沿用连接类语义。
+if (source !== "mock") {
+  initFailedNotifyPort({
+    unexpectedDisconnectEnabled: () => uiPreferencesState().value.unexpected_disconnect_notify,
+    disconnectNotifyEnabled: () => uiPreferencesState().value.disconnect_notify,
+    userStopping: () => runtime.state.value.status === "stopping",
+    isForeground: () => isWindowForeground(),
+    suppressWhenForeground: () => uiPreferencesState().value.suppress_notify_when_foreground,
+    toast: (message, kind) => pushToast(message, kind),
+    isCurrent: snapshot => (snapshot.operation_id == null || runtime.state.value.operationId === snapshot.operation_id)
+      && runtime.state.value.status === (snapshot.runtime.state.startsWith("failed_") ? "failed" : snapshot.runtime.state),
+    trayNotify: (title, body, kind = "failed", isCurrent) => {
+      void invokeTrayNotify(title, body, kind, isCurrent);
+    },
+  });
+}
+
 // 连接过渡效果分发：状态流 → hide-window / tray-notify / 启动自动连接。
 let previousStatus: ProductStatus | null = null;
+const reconnectNotifications = createReconnectNotificationTracker();
 // 2026-09-05 host 自愈（计划 §4.5）：selfHeal stage 去重游标（与 previousStatus 同模式；
 // null = 首快照只记录基线）。
 let prevSelfHealStage: string | null = null;
-// T8（v6 §2.8）：自动重连气泡游标——reconnect.active 上升沿（每周期一条）。
-let prevReconnectActive = false;
+// S5b：重连暂停提示去重游标——同一暂停事实只在出现沿提示一次；reason 清空或切换
+// 后重新武装。
+let prevReconnectPauseCopy: string | null = null;
 watch(
   runtime.state,
   (productState) => {
@@ -85,86 +130,80 @@ watch(
     const nextStatus = productState.status;
     const prevStatus = previousStatus;
     const isFirstSnapshot = prevStatus === null;
+    const observed = reconnectNotifications.observe(productState);
+    previousStatus = nextStatus;
+    if (observed.reconnectTrigger) {
+      // 应用内提示始终可见；系统通知单独遵循用户偏好及前台抑制。
+      pushToast(RECONNECTING_BODY, "warning");
+      const trigger = observed.reconnectTrigger;
+      void invokeTrayNotify(RECONNECTING_TITLE, RECONNECTING_BODY, "reconnecting",
+        () => reconnectNotifications.isCurrent(trigger, runtime.state.value));
+    }
+
+    // S5b：重连暂停事实（owner 失配/凭据清除）出现沿的应用内提示。
+    const pauseCopy = reconnectPauseCopyOf(productState.reconnect.reason);
+    if (pauseCopy !== null && pauseCopy !== prevReconnectPauseCopy) {
+      pushToast(pauseCopy, "warning");
+    }
+    prevReconnectPauseCopy = pauseCopy;
 
     // host 自愈失败气泡（§4.5 冻结）：仅非 failed → failed 进入时一次；respawning/
-    // succeeded 不弹。不参与前台异步探测（失败是必须知道的事件），同步分发即可。
+    // succeeded 不弹；系统发送同样读取最新偏好与前台事实。
     const nextSelfHealStage = productState.selfHeal.active ? productState.selfHeal.stage : null;
     for (const effect of computeSelfHealNotify(prevSelfHealStage, nextSelfHealStage)) {
       if (effect.kind === "tray-notify") {
-        void invokeTrayNotify(effect.title, effect.body);
+        void invokeTrayNotify(effect.title, effect.body, "self-heal-failed",
+          () => runtime.state.value.selfHeal.active && runtime.state.value.selfHeal.stage === "failed"
+            && runtime.state.value.operationId === productState.operationId);
       }
     }
     prevSelfHealStage = nextSelfHealStage;
 
-    // T8：重连上升沿气泡——与连接/断开气泡同走前台异步探测（E1 整改：不再
-    // 硬编码前台抑制失效）；等待期间状态再变由后续回调接管。游标仅在实际
-    // 分发后推进（与 previousStatus 同模式，避免探测间隙吞边沿）。
-    const nextReconnectActive = productState.reconnect.active;
-    if (!prevReconnectActive && nextReconnectActive) {
-      void (async () => {
-        const foreground = await isWindowForeground();
-        if (!nextReconnectActive) return;
-        for (const effect of computeReconnectNotifyEffect(
-          prevReconnectActive,
-          nextReconnectActive,
-          previousStatus !== null,
-          prefs,
-          { foreground },
-        )) {
-          if (effect.kind === "tray-notify") {
-            void invokeTrayNotify(effect.title, effect.body);
-          }
-        }
-        prevReconnectActive = nextReconnectActive;
-      })();
-    } else {
-      prevReconnectActive = nextReconnectActive;
-    }
+    // 事件与窗口动作仍在原生命周期分发；系统发送入口单独读取即时前台。
+    {
+      // 同一操作的展示刷新会重建对象；只在业务相位或操作归属改变时撤销旧效果。
+      if (runtime.state.value.status !== nextStatus || runtime.state.value.operationId !== productState.operationId) return;
 
-    // 前台状态异步探测后分发效果；等待期间状态再次变化则由后续回调接管（丢弃本次，避免错序）。
-    void (async () => {
-      const foreground = await isWindowForeground();
-      if (previousStatus !== prevStatus) return;
-
-      for (const effect of computeLifecycleEffects(prevStatus, nextStatus, prefs, { foreground })) {
-        if (effect.kind === "hide-window") {
-          void chrome.setVisible(false).catch((error: unknown) => {
+      const effects = computeLifecycleEffects(prevStatus, nextStatus, prefs, {
+        // 此处生成事件候选；真实前台事实仅由统一发送入口读取。
+        foreground: false,
+        // 阶段④ N-02 互斥：失败 episode 已有声音时「EXV 已断开」气泡让位。
+        failureEpisodeNotified: failureEpisodeNotified(),
+        automaticReconnect: observed.automaticReconnect,
+      });
+      void dispatchLifecycleEffects(effects, {
+        isCurrent: () => runtime.state.value.status === nextStatus && runtime.state.value.operationId === productState.operationId,
+        notify: (title, body) => invokeTrayNotify(title, body, nextStatus === "connected" ? "connected" : "disconnected",
+          () => runtime.state.value.status === nextStatus && runtime.state.value.operationId === productState.operationId),
+        hide: () => chrome.setVisible(false).catch((error: unknown) => {
             console.error("隐藏窗口失败", error);
-          });
-        } else if (effect.kind === "tray-notify") {
-          void invokeTrayNotify(effect.title, effect.body);
-        }
-      }
+          }),
+      });
 
-      previousStatus = nextStatus;
-    })();
+    }
 
     if (shouldAutoConnectOnLaunch(isFirstSnapshot, nextStatus, prefs)) {
       void runtime.connect();
     }
   },
-  { immediate: true },
+  { immediate: true, flush: "sync" },
 );
 
-/** 主窗口是否在前台（聚焦）：Darwin 壳经注入 adapter 的 isWindowFocused 提供；
- * mock/浏览器环境回退 false（不抑制）；探测失败也按「不在前台」处理（不阻断通知）。 */
+/** Darwin 沿原宿主 adapter 读取焦点；探测错误保留原始错误。 */
 async function isWindowForeground(): Promise<boolean> {
-  if (source === "mock") return false;
   const adapter = darwinCommandAdapter();
-  if (adapter === null || adapter.isWindowFocused === undefined) return false;
-  try {
-    return await adapter.isWindowFocused();
-  } catch (error) {
-    console.error("窗口前台状态检测失败", error);
-    return false;
-  }
+  if (!adapter?.isWindowFocused) throw new Error("窗口壳前台查询接口未注入");
+  return adapter.isWindowFocused();
 }
 
-async function invokeTrayNotify(title: string, body: string): Promise<void> {
+async function invokeTrayNotify(title: string, body: string, kind: SystemNotificationKind, isCurrent = () => true): Promise<void> {
   const adapter = darwinCommandAdapter();
   if (source === "mock" || adapter === null) return;
   try {
-    await adapter.call("tray_notify", { title, body });
+    await dispatchSystemNotification(kind, title, body, {
+      readPreferences: () => uiPreferencesState().value, isForeground: isWindowForeground, isCurrent,
+      send: async (title, body) => { await adapter.call("tray_notify", { title, body }); },
+    });
   } catch (error) {
     console.error("托盘通知失败", error);
   }
@@ -187,7 +226,7 @@ if (source === "mock") {
     "border-radius:999px",
     "background:rgba(255,255,255,.9)",
     "color:#4b5563",
-    "font:12px/1.2 system-ui,sans-serif",
+    "font: var(--font-size-caption)/1.2 system-ui,sans-serif",
   ].join(";");
   document.body.append(badge);
 }

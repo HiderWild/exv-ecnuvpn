@@ -83,15 +83,31 @@ function Get-ScheduledSummary([string]$Output) {
   return $null
 }
 
-# 源码契约：历代安装根的推导必须同时覆盖 per-user Programs 与两个 Program Files
-# 基座。powershell 子进程启动时会自动重置 ProgramFiles 环境变量，沙箱无法注入
-# 执行验证；Program Files 基座以源码断言覆盖，执行覆盖由 %LOCALAPPDATA%\Programs
-# 基座承担（同一条推导循环）。
+# 源码契约（S3c 清单驱动后）：历代安装根名称来自 install_manifest.tsv 的
+# install-legacy-3parent 行（锚定消费），3 父目录推导仍覆盖 per-user Programs 与
+# 两个 Program Files 基座。powershell 子进程启动时会自动重置 ProgramFiles
+# 环境变量，沙箱无法注入执行验证；Program Files 基座以源码断言覆盖，执行覆盖由
+# %LOCALAPPDATA%\Programs 基座承担（同一条推导循环）。
 $cleanupSource = Get-Content -LiteralPath $cleanupScript -Raw
 Assert-Contains $cleanupSource 'env:ProgramFiles' 'cleanup derives legacy roots from ProgramFiles'
 Assert-Contains $cleanupSource 'ProgramFiles\(x86\)' 'cleanup derives legacy roots from ProgramFiles(x86)'
-Assert-Contains $cleanupSource "'ECNU VPN'" 'cleanup covers the ECNU-era install root names'
-Assert-Contains $cleanupSource "'ECNU-VPN'" 'cleanup covers the ECNU-VPN-era install root names'
+Assert-Contains $cleanupSource 'install-legacy-3parent' 'cleanup consumes manifest install-legacy-3parent rows for legacy install root names'
+$manifestTsv = Join-Path $repoRoot 'src\platform\win32\windows_setup_rust\install_manifest.tsv'
+$manifestDataRows = @(
+  Get-Content -LiteralPath $manifestTsv -Encoding UTF8 |
+    Where-Object { $_ -and -not $_.StartsWith('#') } |
+    Select-Object -Skip 1
+)
+foreach ($legacyName in @('EXV', 'ECNU VPN', 'ECNU-VPN')) {
+  $legacyRows = @($manifestDataRows | Where-Object {
+    ($_ -split "`t", -1)[0] -eq 'install-legacy-3parent' -and ($_ -split "`t", -1)[1] -eq $legacyName })
+  if ($legacyRows.Count -ne 1) {
+    throw "EXPECT FAILED: manifest must carry exactly one install-legacy-3parent row for '$legacyName'"
+  }
+  if ((($legacyRows[0] -split "`t", -1)[7]) -ne 'delete_u1_only') {
+    throw "EXPECT FAILED: install-legacy-3parent row for '$legacyName' must be delete_u1_only"
+  }
+}
 
 # ④ 升级保留语义：用户数据树幸存，缓存/账本/服务态照清，历代安装根不清理。
 $sandbox = New-Sandbox
@@ -99,7 +115,8 @@ try {
   $userDataMarkers = @(
     (Join-Path $sandbox.UserProfile '.exv\config.json'),
     (Join-Path $sandbox.UserProfile '.exv\key.bin'),
-    (Join-Path $sandbox.LocalAppData 'EXV\profile\default\ui-preferences.json')
+    (Join-Path $sandbox.LocalAppData 'EXV\profile\default\ui-preferences.json'),
+    (Join-Path $sandbox.LocalAppData 'com.exv.vpn.desktop\EBWebView\Default\Local Storage\leveldb\000003.log')
   )
   $cacheMarkers = @(
     (Join-Path $sandbox.LocalAppData 'ExvVpn\journal\journal.bin'),
@@ -128,6 +145,7 @@ try {
     UserProfileRoot = $sandbox.UserProfile
     TempRoot = $sandbox.Temp
     SystemTempRoot = $sandbox.SystemTemp
+    ManifestPath = $manifestTsv
   } -PreserveUserData
   if ($run.ExitCode -ne 0) {
     throw "EXPECT FAILED: preserve-mode cleanup reported hard failure (exit=$($run.ExitCode)); output=$($run.Output)"
@@ -151,6 +169,7 @@ try {
     UserProfileRoot = $sandbox.UserProfile
     TempRoot = $sandbox.Temp
     SystemTempRoot = $sandbox.SystemTemp
+    ManifestPath = $manifestTsv
   }
   if ($run2.ExitCode -ne 0) {
     throw "EXPECT FAILED: full cleanup reported hard failure (exit=$($run2.ExitCode)); output=$($run2.Output)"
@@ -158,6 +177,7 @@ try {
   Assert-PathMissing (Join-Path $sandbox.LocalAppData 'Programs\ECNU VPN') 'full cleanup must remove the legacy ECNU-era install root'
   Assert-PathMissing (Join-Path $sandbox.UserProfile '.exv') 'full cleanup must remove the Rust config root'
   Assert-PathMissing (Join-Path $sandbox.LocalAppData 'EXV') 'full cleanup must remove the EXV app root'
+  Assert-PathMissing (Join-Path $sandbox.LocalAppData 'com.exv.vpn.desktop') 'full cleanup must remove the Tauri identifier WebView2 root (appearance localStorage must not survive uninstall)'
   Assert-PathPresent (Join-Path $sandbox.LocalAppData 'Programs\EXV\current-install-marker.bin') `
     'cleanup script must not touch the current install dir (uninstaller engine owns it)'
   $summary = Get-ScheduledSummary $run2.Output
@@ -197,6 +217,7 @@ try {
     UserProfileRoot = $sandbox2.UserProfile
     TempRoot = $sandbox2.Temp
     SystemTempRoot = $sandbox2.SystemTemp
+    ManifestPath = $manifestTsv
   }
   $sw.Stop()
   $stream.Close()

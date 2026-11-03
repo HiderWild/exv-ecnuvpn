@@ -132,6 +132,13 @@ impl KernelEngineControl for DetachedEngine {
         Err(GrpcClientError::ConnectionLost)
     }
 
+    async fn auth_receiver_control(
+        &mut self,
+        _request: exv_vpn_wire::generated::AuthReceiverControlRequest,
+    ) -> Result<exv_vpn_wire::generated::AuthReceiverControlReply, GrpcClientError> {
+        Err(GrpcClientError::ConnectionLost)
+    }
+
     async fn service_manage(
         &mut self,
         _request: ServiceManageRequest,
@@ -314,7 +321,7 @@ pub struct EngineControlGrpcClient {
     /// liveness 监视器任务。
     _monitor: tokio::task::JoinHandle<()>,
     /// 是否已向 engine 建立 owner lease（MaintainOwnerLease 握手；P1-b `core.owner`
-    /// 前置）。服务模式复用时还需探测当前连接，不能把历史握手当作存活证据。
+    /// 前置）。服务模式复用时消费原维护流的真实结束事实。
     owner_lease_established: bool,
     /// S3/D7：service-mode 连接时持有 `MaintainOwnerLease` bidi 流（engine 侧以此感知
     /// 连接存活；连接 EOF → engine 释放 connection-bound owner）。oneshot 为 `None`
@@ -633,13 +640,7 @@ impl EngineControlGrpcClient {
     pub async fn establish_owner_lease(&mut self) -> Result<(), GrpcClientError> {
         if self.owner_lease_established {
             if self.service_mode {
-                // tonic 可在服务重启后重连同名管道，Ping 成功不能证明旧租约有效。
                 // owner 绑定原连接；维护流结束后必须让路由重新认证并取得租约。
-                if self.service_lease.as_ref().is_none_or(|lease| lease._task.is_finished()) {
-                    return Err(GrpcClientError::ConnectionLost);
-                }
-                self.ping().await?;
-                // 探测等待期间也可能收到旧维护流 EOF，不能在该窗口复用旧 owner。
                 if self.service_lease.as_ref().is_none_or(|lease| lease._task.is_finished()) {
                     return Err(GrpcClientError::ConnectionLost);
                 }
@@ -793,26 +794,33 @@ pub fn hand_off_request<R: Default>(request: &mut R, secret: &mut ClearableSecre
 /// 铁律：日志绝不回流状态）；host 侧状态转发器
 /// （`kernel_control_service::spawn_status_forwarder`）把 [`EngineStatusEvent`]
 /// 归一化为 `WatchEvents` 的 `RuntimeEvent` 并驱动 composition 状态机。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EngineStatusEvent {
     /// 连接阶段推进（coarse = Connecting；携带细粒度 `ConnectPhase`）。
     Progress {
         operation_id: Vec<u8>,
         connect_phase: ConnectPhase,
+        reconnect_state: Option<exv_vpn_wire::generated::ReconnectState>,
     },
     /// 连接成功（coarse = Connected）——`set_phase(Connected)` 的唯一驱动；时间来自
     /// engine 确认数据面可用的 wall-clock，0 表示上游尚不能提供。
     Connected {
         operation_id: Vec<u8>,
         session_established_at_ms: Option<i64>,
+        reconnect_state: Option<exv_vpn_wire::generated::ReconnectState>,
     },
     /// 连接失败（coarse = Failed；携带结构化错误）。
     Failed {
         operation_id: Vec<u8>,
         error: VpnError,
+        reconnect_state: Option<exv_vpn_wire::generated::ReconnectState>,
     },
     /// 已停止 / 回 idle（coarse = Idle；停止收敛）。
-    Stopped { operation_id: Vec<u8> },
+    Stopped {
+        stop_completion: Option<exv_vpn_wire::generated::StopCompletion>,
+        operation_id: Vec<u8>,
+        reconnect_state: Option<exv_vpn_wire::generated::ReconnectState>,
+    },
 }
 
 /// `WatchEvents` 的 engine connect-status 事件流类型（host 侧归一化后；由调用方驱动）。
@@ -840,23 +848,36 @@ pub fn connect_status_from_wire(event: ConnectStatusEvent) -> Option<EngineStatu
     if operation_id.is_empty() {
         return None;
     }
+    if event.stop_completion.is_some() {
+        // 原 Engine 先记录 terminal 再发布摘要；stopped=false 的终态仍可携带
+        // coarse Stopping。Pending unary 不带摘要，不能按 coarse 覆盖完成合同。
+        return Some(EngineStatusEvent::Stopped {
+            stop_completion: event.stop_completion,
+            operation_id,
+            reconnect_state: event.reconnect_state,
+        });
+    }
     let connect_phase =
         ConnectPhase::try_from(event.connect_phase).unwrap_or(ConnectPhase::Unspecified);
     match StatsPhase::try_from(event.coarse_phase).unwrap_or(StatsPhase::Unspecified) {
-        StatsPhase::Connecting => Some(EngineStatusEvent::Progress {
+        StatsPhase::Connecting => Some(EngineStatusEvent::Progress { reconnect_state: event.reconnect_state,
             operation_id,
             connect_phase,
         }),
-        StatsPhase::Connected => Some(EngineStatusEvent::Connected {
+        StatsPhase::Connected => Some(EngineStatusEvent::Connected { reconnect_state: event.reconnect_state,
             operation_id,
             session_established_at_ms: (event.session_established_at_ms > 0)
                 .then_some(event.session_established_at_ms),
         }),
-        StatsPhase::Failed => Some(EngineStatusEvent::Failed {
+        StatsPhase::Failed => Some(EngineStatusEvent::Failed { reconnect_state: event.reconnect_state,
             operation_id,
             error: event.error?,
         }),
-        StatsPhase::Idle => Some(EngineStatusEvent::Stopped { operation_id }),
+        StatsPhase::Idle => Some(EngineStatusEvent::Stopped {
+            stop_completion: None,
+            reconnect_state: event.reconnect_state,
+            operation_id,
+        }),
         _ => None,
     }
 }
@@ -952,6 +973,14 @@ pub trait KernelEngineControl: Send + Sync {
 
     /// 查询 engine 内部深度自述（S3-B：Tier 2 零 UAC 通道）。
     ///
+    /// 固定官方认证接收端业务动作，经当前已认证 Engine 通道转发。
+    async fn auth_receiver_control(
+        &mut self,
+        _request: exv_vpn_wire::generated::AuthReceiverControlRequest,
+    ) -> Result<exv_vpn_wire::generated::AuthReceiverControlReply, GrpcClientError> {
+        Err(GrpcClientError::Rpc(Code::Unimplemented, "official_auth_receiver/control adapter is not implemented".into()))
+    }
+
     /// 真实实现直通 `HelperControl.ServiceManage`（`query` action）——只读自述，**无
     /// owner lease 要求**（transport peer gate only）：服务刚启动、尚未建立 owner 时 host
     /// 也要能问健康。报告只做健康/展示输入，**绝不作为授权材料**。
@@ -1087,6 +1116,15 @@ impl KernelEngineControl for EngineControlGrpcClient {
         // 绝不回流状态（D3 铁律——R1 已把日志→状态归一化退役）。
         let stream = self.stream_logs(resume_tick).await?;
         Ok(Box::pin(stream))
+    }
+
+    async fn auth_receiver_control(
+        &mut self,
+        request: exv_vpn_wire::generated::AuthReceiverControlRequest,
+    ) -> Result<exv_vpn_wire::generated::AuthReceiverControlReply, GrpcClientError> {
+        self.client.auth_receiver_control(request).await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| GrpcClientError::Rpc(status.code(), status.message().to_owned()))
     }
 
     async fn service_manage(

@@ -33,59 +33,42 @@ src/platform/win32/rust/tauri/        # 独立 workspace（独立 Cargo.lock）
 
 ## 构建 / 运行
 
-环境注意：cargo 不在标准 PATH；D: 磁盘接近满，target 在 D: 需注意剩余空间。
-
-```bash
-export PATH="/c/Users/user/.rustup/toolchains/1.96.0-x86_64-pc-windows-msvc/bin:$PATH"
-
-# 前端依赖（一次）
-cd src/platform/win32/rust/tauri/frontend && npm install
-
-# 前端开发服务器（tauri.conf.json beforeDevCommand 会自动起）
-cd src/platform/win32/rust/tauri && CARGO_TARGET_DIR=$(pwd)/target cargo run -p exv-ui
-
-# 仅 Rust 侧类型检查（不构建前端）
-cd src/platform/win32/rust/tauri && CARGO_TARGET_DIR=$(pwd)/target cargo check -p exv-ui
-
-# 前端独立构建
-cd src/platform/win32/rust/tauri/frontend && npm run build
-```
-
-### Windows 生产包构建约束
-
-生产包必须先执行 `npm run build`，再执行 `cargo build --release -p exv-ui`。
-`src/platform/win32/rust/tauri/Cargo.toml` 已启用 Tauri 的 `custom-protocol` feature；
-该 feature 关闭开发模式的 `devUrl`，让 release UI 从内置 `frontendDist` 加载资源。
-如果 release 构建日志出现 `DEP_TAURI_DEV=true`，产物仍会尝试访问
-`http://localhost:1420`，不得进入安装包；正确的生产构建必须出现
-`DEP_TAURI_DEV=false`。
-
-首次 `cargo check`/`run` 会拉取并编译 Tauri 依赖树（~数百 crate，数分钟到十几分钟）。
-
-### 当前 Tauri 生产组装入口
-
-Windows 下不要直接执行无扩展名的 `frontend\\node_modules\\.bin\\tauri` shim；PowerShell
-可能解析到不产生构建结果的 shim，随后把旧的 `exv-ui.exe` 复制进运行目录。当前唯一
-可复现的生产构建入口是：
+宿主负责提供 Rust、sccache、Node.js 与前端依赖。以下命令在候选工作树根目录执行；
+Rust 产物统一放到主仓 target。当前启用 custom-protocol，Rust 检查与单元测试之前
+同样需要生成真实前端资产。
 
 ```powershell
-# Ensure `cargo` and `rustc` are discoverable from your own Rust toolchain setup.
-cd src\\platform\\win32\\rust\\tauri
-npm exec --no-install --prefix .\\frontend tauri build -- --no-bundle
-cd ..\\..\\..\\..
-powershell -ExecutionPolicy Bypass -File scripts\\assemble-runtime-trio.ps1 `
-  -OutDir build\\release-ui-merged\\runtime-trio-current
-powershell -ExecutionPolicy Bypass -File scripts\\package-rust-setup.ps1 `
-  -SetupToolsDir build-setup-rust `
-  -OutDir build\\release-ui-merged -KeepInstallers 2
+$gitCommonDir = git rev-parse --path-format=absolute --git-common-dir
+$env:CARGO_TARGET_DIR = Join-Path (Split-Path $gitCommonDir) 'target'
+$env:RUSTC_WRAPPER = 'sccache'
+$env:CARGO_INCREMENTAL = '0'
+./scripts/clear-repository-build-artifacts.ps1 -KeepLatestInstaller
+npm.cmd --prefix src/platform/win32/rust/tauri/frontend run build
+cargo check --manifest-path src/platform/win32/rust/tauri/Cargo.toml -p exv-ui -j 1
+cargo test --manifest-path src/platform/win32/rust/tauri/Cargo.toml -p exv-ui -j 1
+./scripts/clear-repository-build-artifacts.ps1 -KeepLatestInstaller
 ```
 
-未传入 `-Version` 时，安装器版本默认取自 `app/tauri.conf.json`。
+### Windows 生产包构建与资源门禁
 
-`assemble-runtime-trio.ps1` 已固定调用 Windows `tauri.cmd`，并在复制前检查命令 shim
-存在；交付前必须核对 payload 中 `exv-ui.exe` 与
-`src\\platform\\win32\\rust\\tauri\\target\\release\\exv-ui.exe` 的 SHA-256 一致，
-不能只依据文件名或时间戳判断“最新”。
+生产包统一通过仓库 `scripts/assemble-runtime-trio.ps1` 调用 Windows `tauri.cmd build --no-bundle`。前端保持 `app/tauri.conf.json` 的相对目录 `../frontend/dist`，由 CLI 的 `beforeBuildCommand` 生成真实资产。所有 Rust 构建使用 sccache、incremental=0、单任务和主仓唯一 target；不得用 Windows 盘符绝对路径覆盖 `frontendDist`。
+
+在已隔离的候选工作树根目录执行，前端依赖需已由宿主提供：
+
+```powershell
+./scripts/clear-repository-build-artifacts.ps1 -KeepLatestInstaller
+./scripts/assemble-runtime-trio.ps1
+./scripts/build-rust-setup.ps1 -Jobs 1
+./scripts/package-rust-setup.ps1 -KeepInstallers 1
+# 完成载荷与源文件核验后立即清理，只保留共享目录最新安装包。
+./scripts/clear-repository-build-artifacts.ps1 -KeepLatestInstaller
+```
+
+未传 `-Version` 时安装器版本取自 `app/tauri.conf.json`。载荷中的 `exv-ui.exe` 必须与主仓 `target/release/exv-ui.exe` 的 SHA256 一致；不得只依据文件名或时间戳判定最新。
+
+应用 `build.rs` 的资源门禁使用 Tauri 实际配置解析，包含平台配置与 `TAURI_CONFIG` 合并结果。Windows 页面必须来自相对 `Directory`，拒绝外部 URL、绝对路径、文件列表和缺省资源。实际嵌入模式要求目录与 `index.html` 存在；开发服务器模式不要求预先生成前端输出。当前启用 `custom-protocol` 的 Rust 检查和单元测试同样需要先生成前端资产，不通过虚假入口文件绕过；无需新增 feature。
+
+Windows 盘符字符串可能先被 Tauri 解析为外部 URL，此时框架不嵌入资产，编译和打包仍可能成功。载荷 CRC 和源哈希仅证明包装一致。交付必须在清除 `target` 与 `dist` 后启动包内程序，并在实际安装位置图形观察正常产品页面；不得回填构建目录，也不得把页面 `ERR_FILE_NOT_FOUND` 的包用于继续业务验收。安装包只保留同级共享目录最新一份，不长期保留工作树运行副本。这一 Windows 约束不改变 Darwin 已有宿主资源路径。
 
 ## P4-a 阶段现状（诚实边界）
 

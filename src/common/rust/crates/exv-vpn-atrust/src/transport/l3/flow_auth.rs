@@ -99,6 +99,68 @@ struct ResponseData {
     ip: Option<WireIp>,
 }
 
+/// 同一响应只解码一次；匹配借用字段，授权成功才消费 token。
+pub(super) struct DecodedResponse(Response);
+
+pub(super) fn decode_response(payload: &[u8]) -> Result<DecodedResponse, FlowAuthError> {
+    if payload.len() > 65535 {
+        return Err(FlowAuthError::PayloadTooLarge);
+    }
+    #[cfg(test)]
+    RESPONSE_JSON_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let response = serde_json::from_slice(payload).map_err(|_| response_shape_error(payload))?;
+    Ok(DecodedResponse(response))
+}
+
+impl DecodedResponse {
+    pub(super) fn matches_flow(&self, expected_id: u64, flow: Ipv4Flow) -> bool {
+        match self.0.data.conntrack_hash.filter(|id| *id != 0) {
+            Some(id) => id == expected_id,
+            None => self.0.data.ip.as_ref().is_some_and(|ip| {
+                ip.atype == 0x0800
+                    && ip.protocol == flow.protocol
+                    && ip.dest_addr == flow.destination
+                    && ip.dest_port == flow.destination_port
+                    && ip.src_addr == flow.source
+                    && ip.src_port == flow.source_port
+            }),
+        }
+    }
+
+    pub(super) fn into_authorization(self, status: u8) -> Result<FlowAuthorization, FlowAuthError> {
+        let response = self.0;
+        if status == 0x84 {
+            return Ok(FlowAuthorization::RetryAfter(std::time::Duration::ZERO));
+        }
+        if (0x85..=0x87).contains(&status) {
+            return Ok(FlowAuthorization::RetryAfter(
+                std::time::Duration::from_secs(10),
+            ));
+        }
+        if status != 0 {
+            if response.code != 0 {
+                return Err(FlowAuthError::StatusWithCode {
+                    status,
+                    code: response.code,
+                });
+            }
+            return Err(FlowAuthError::Status(status));
+        }
+        // 上游只检查 status；EXV 不把显式非零业务码当作成功授权。
+        if response.code != 0 {
+            return Err(FlowAuthError::Rejected(response.code));
+        }
+        let token = match response.data.connect_token {
+            Some(serde_json::Value::String(value)) => Secret::new(value),
+            _ => return Err(FlowAuthError::InvalidToken),
+        };
+        if token.is_empty() || token.len() > 255 {
+            return Err(FlowAuthError::InvalidToken);
+        }
+        Ok(FlowAuthorization::Granted(token))
+    }
+}
+
 /// 解析已由 L3 codec 分离的 0x93 正文。缺失/零 ID 时才按完整 IPv4 五元组回退匹配。
 /// 非零但不同的 ID 不回退，避免把另一个等待中连接的 token 交给当前连接。
 ///
@@ -110,54 +172,11 @@ pub fn parse_response(
     expected_id: u64,
     flow: Ipv4Flow,
 ) -> Result<FlowAuthorization, FlowAuthError> {
-    if payload.len() > 65535 {
-        return Err(FlowAuthError::PayloadTooLarge);
-    }
-    let response: Response =
-        serde_json::from_slice(payload).map_err(|_| response_shape_error(payload))?;
-    let matches = match response.data.conntrack_hash.filter(|id| *id != 0) {
-        Some(id) => id == expected_id,
-        None => response.data.ip.is_some_and(|ip| {
-            ip.atype == 0x0800
-                && ip.protocol == flow.protocol
-                && ip.dest_addr == flow.destination
-                && ip.dest_port == flow.destination_port
-                && ip.src_addr == flow.source
-                && ip.src_port == flow.source_port
-        }),
-    };
-    if !matches {
+    let response = decode_response(payload)?;
+    if !response.matches_flow(expected_id, flow) {
         return Err(FlowAuthError::FlowMismatch);
     }
-    if status == 0x84 {
-        return Ok(FlowAuthorization::RetryAfter(std::time::Duration::ZERO));
-    }
-    if (0x85..=0x87).contains(&status) {
-        return Ok(FlowAuthorization::RetryAfter(
-            std::time::Duration::from_secs(10),
-        ));
-    }
-    if status != 0 {
-        if response.code != 0 {
-            return Err(FlowAuthError::StatusWithCode {
-                status,
-                code: response.code,
-            });
-        }
-        return Err(FlowAuthError::Status(status));
-    }
-    // 上游只检查 status；EXV 不把显式非零业务码当作成功授权。
-    if response.code != 0 {
-        return Err(FlowAuthError::Rejected(response.code));
-    }
-    let token = match response.data.connect_token {
-        Some(serde_json::Value::String(value)) => Secret::new(value),
-        _ => return Err(FlowAuthError::InvalidToken),
-    };
-    if token.is_empty() || token.len() > 255 {
-        return Err(FlowAuthError::InvalidToken);
-    }
-    Ok(FlowAuthorization::Granted(token))
+    response.into_authorization(status)
 }
 
 // 只投影固定字段的类型，不包含原始响应、token 或服务端 message。
@@ -173,6 +192,8 @@ fn response_shape_error(payload: &[u8]) -> FlowAuthError {
             Some(serde_json::Value::Object(_)) => "object",
         }
     }
+    #[cfg(test)]
+    RESPONSE_JSON_CALLS.with(|calls| calls.set(calls.get() + 1));
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
         return FlowAuthError::InvalidJson;
     };

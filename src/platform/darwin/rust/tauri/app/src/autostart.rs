@@ -11,9 +11,8 @@
 //!
 //! ## 幂等与自愈语义（win32 同源）
 //!
-//!   * `set(true)`：渲染 plist → 原子写（tmp + rename）→ `plutil -lint` 校验；
-//!     重复 set 写入同一内容，无害。lint 失败（渲染器 bug 级）删除坏文件并报错，
-//!     不给 launchd 留坏 plist。
+//!   * `set(true)`：渲染 plist → 原子写（tmp + rename），回复原文件操作结果；
+//!     重复 set 写入同一内容，无害。
 //!   * `set(false)`：删除文件；文件不存在即目标状态已达成，无害。
 //!   * `status`：文件存在且 Label 段等于本应用 label 才算 enabled（被第三方内容
 //!     占用视为未启用，下次 set(true) 自愈覆盖）。
@@ -29,7 +28,6 @@
 //! 偏好在运行时读取（S2 `should_start_silent` 的 argv ∨ prefs OR 语义，两处不漂移）。
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// `LaunchAgent` 的 label（= plist 文件名 stem，macOS 惯例二者一致）。
 pub(crate) const LAUNCH_AGENT_LABEL: &str = "com.exv.vpn.exv-vpn-darwin";
@@ -138,11 +136,11 @@ fn label_marker_line(text: &str) -> Option<&str> {
     None
 }
 
-/// 设置/清除登录自启动。`enabled=true` 写 plist（含 `plutil -lint` 校验）；
+/// 设置/清除登录自启动。`enabled=true` 原子写 plist；
 /// false 删除文件（不存在视为成功）。
 ///
 /// # Errors
-/// exe 路径不可解析、文件 IO 失败或 lint 校验失败。
+/// exe 路径不可解析或文件 IO 失败。
 pub(crate) fn set_autostart_at(plist: &Path, label: &str, enabled: bool) -> Result<(), String> {
     if !enabled {
         match std::fs::remove_file(plist) {
@@ -171,20 +169,6 @@ pub(crate) fn set_autostart_at(plist: &Path, label: &str, enabled: bool) -> Resu
         return Err(format!("rename LaunchAgent plist failed: {error}"));
     }
 
-    // 内容自检：plutil 是 macOS 自带的 plist 校验器（纯文件解析，无 TCC）。
-    // 失败说明渲染器产出非法 plist——删除坏文件并报错，不给 launchd 留坏状态。
-    let lint = Command::new("/usr/bin/plutil")
-        .arg("-lint")
-        .arg(plist)
-        .output()
-        .map_err(|e| format!("plutil -lint spawn failed: {e}"))?;
-    if !lint.status.success() {
-        let _ = std::fs::remove_file(plist);
-        return Err(format!(
-            "plutil -lint rejected the generated plist: {}",
-            String::from_utf8_lossy(&lint.stderr).trim()
-        ));
-    }
     Ok(())
 }
 
@@ -208,14 +192,13 @@ pub(crate) fn is_autostart_enabled() -> Result<bool, String> {
 
 // ---- Commands ----
 
-/// `autostart_set`：设置登录自启动并回报结果（ok = 执行真相源与目标一致）。
+/// `autostart_set`：设置登录自启动并回报原文件操作结果。
 /// 前端 `launch_at_login` 保存分流调用（ui-prefs.ts `setAutostart`）。
 #[allow(clippy::needless_pass_by_value)] // Tauri command 宏的固定签名形状
 #[tauri::command]
 pub(crate) fn autostart_set(enabled: bool) -> Result<serde_json::Value, String> {
     set_autostart(enabled)?;
-    let now_enabled = is_autostart_enabled().unwrap_or(!enabled);
-    Ok(serde_json::json!({ "ok": now_enabled == enabled }))
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 // ---- 测试 ----

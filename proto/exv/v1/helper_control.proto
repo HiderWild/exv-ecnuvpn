@@ -1,4 +1,5 @@
 
+
 // This file is the shared wire authority for the Windows helper topology's
 // declarative service. It does NOT expose fine-grained platform commands
 // (route/dns/device primitives); it only carries high-level declarative
@@ -45,7 +46,26 @@ import "exv/v1/common.proto";
 // Declarative control service owned by the Windows helper. It exposes high
 // level ownership, tunnel, and operation-introspection RPCs only; it does not
 // expose low-level platform mutation commands.
+// 当前已接纳的连接 operation；只用于关联，不替代既有传输认证。
+message HelperLatencyRefreshRequest {
+  bytes operation_id = 1;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
+// accepted 仅表示当前探测 owner 已受理；RTT 仍经现有 Stats 流到达。
+// 未连接或归属不符返回 FailedPrecondition；协议/端点不支持返回 Unimplemented。
+message HelperLatencyRefreshReply {
+  bool accepted = 1;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
 service HelperControl {
+  // 请求当前 Cisco 探测 owner 刷新；不等待回包，不改变连接状态。
+  rpc TriggerLatencyRefresh(HelperLatencyRefreshRequest)
+      returns (HelperLatencyRefreshReply);
+
   // Bidi lease-maintenance stream. The first authorization handshake
   // establishes the authenticated principal, a random OwnerLeaseId,
   // connection/channel identity, runtime epoch, and a non-forwardable
@@ -136,6 +156,9 @@ service HelperControl {
   // owner-lease requirement (transport peer gate only). Tier 2 v1 lands ONLY
   // the `query` action; install/repair/uninstall stay elevated-batch.
   rpc ServiceManage(ServiceManageRequest) returns (ServiceManageReply);
+
+  // 固定官方认证接收端；身份来自既有已认证控制通道。
+  rpc AuthReceiverControl(AuthReceiverControlRequest) returns (AuthReceiverControlReply);
 
   // Explicit graceful shutdown (2026-09-05 unfreeze, fourth). An authorized
   // peer (same transport auth surface as KeepAlive/ServiceManage) notifies the
@@ -375,9 +398,11 @@ message StopTunnelRequest {
 }
 
 message StopTunnelReply {
+  StopCompletion stop_completion = 4;
   oneof result {
     MutationReceipt stopped = 1;
     OperationFailed failed = 2;
+    EmptyOperationState pending = 3;
   }
   reserved 9000 to 9999;
   reserved 1000 to 1999;
@@ -522,6 +547,7 @@ message StreamConnectStatusRequest {
 // Security: carries no secrets, credentials, or free-text diagnostic stacks
 // (same invariants as LogEvent / StatsEvent).
 message ConnectStatusEvent {
+  StopCompletion stop_completion = 9;
   bytes operation_id = 1;   // 16 bytes; correlates to ApplyAccepted.operation_id
   ConnectPhase connect_phase = 2;  // fine 8-level phase (common.proto)
   StatsPhase coarse_phase = 3;     // coarse lifecycle stage (common.proto)
@@ -661,6 +687,53 @@ enum ShutdownOutcome {
 // with its SCM stop backstop regardless of the outcome.
 message ShutdownReply {
   ShutdownOutcome outcome = 1;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
+// 专用认证接收端业务契约；目标由宿主 Engine 固定识别。
+enum AuthReceiverAction {
+  AUTH_RECEIVER_ACTION_UNSPECIFIED = 0;
+  AUTH_RECEIVER_ACTION_INSPECT = 1;
+  AUTH_RECEIVER_ACTION_DISABLE_AND_STOP = 2;
+  AUTH_RECEIVER_ACTION_RESTORE = 3;
+  AUTH_RECEIVER_ACTION_READ_RECOVERY = 4;
+}
+message AuthReceiverControlRequest {
+  bytes operation_id = 1;
+  AuthReceiverAction action = 2;
+  uint64 deadline_monotonic_ns = 3;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+message AuthReceiverLaunchdTarget {
+  string domain = 1;
+  string label = 2;
+  bool disabled = 3;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+message AuthReceiverConfigSummary {
+  optional uint32 windows_start_type = 1;
+  optional bool windows_delayed_auto_start = 2;
+  repeated AuthReceiverLaunchdTarget launchd_targets = 3;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+message AuthReceiverStatus {
+  bool running = 1;
+  bool can_start = 2;
+  bool recovery_available = 3;
+  string source = 4;
+  AuthReceiverConfigSummary original_config = 5;
+  AuthReceiverConfigSummary current_config = 6;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+message AuthReceiverControlReply {
+  AuthReceiverStatus receiver = 1;
+  repeated string completed_steps = 2;
+  VpnError error = 3;
   reserved 1000 to 1999;
   reserved 9000 to 9999;
 }

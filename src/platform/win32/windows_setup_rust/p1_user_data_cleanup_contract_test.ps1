@@ -36,6 +36,8 @@ Assert-Contains -Text $uninstall -Pattern 'AppendError\(errors' -Message 'uninst
 Assert-Contains -Text $cleanup -Pattern 'rustConfigDir.*\.exv' -Message 'cleanup resolves the current Rust config root'
 Assert-Contains -Text $cleanup -Pattern 'rustConfigDir.*userProfile' -Message 'cleanup deletes the current Rust config root'
 Assert-Contains -Text $cleanup -Pattern 'appRoot.*localAppData' -Message 'cleanup deletes the legacy EXV app-data root'
+Assert-Contains -Text $cleanup -Pattern 'tauriWebView2Dir.*com\.exv\.vpn\.desktop' -Message 'cleanup resolves the Tauri identifier WebView2 data root (appearance localStorage host)'
+Assert-Contains -Text $cleanup -Pattern 'tauriWebView2Dir' -Message 'cleanup deletes the Tauri identifier WebView2 data root on full uninstall'
 Assert-Contains -Text $cleanup -Pattern 'machineResourceRoot.*programData' -Message 'cleanup deletes the machine resource journal and log root'
 
 # Exercise the real script against isolated directories.  NoProcessStop ensures the
@@ -54,6 +56,7 @@ try {
     (Join-Path $userProfile '.exv\key.bin'),
     (Join-Path $userProfile '.exv\logs\engine.jsonl'),
     (Join-Path $localAppData 'EXV\profile\default\ui-preferences.json'),
+    (Join-Path $localAppData 'com.exv.vpn.desktop\EBWebView\Default\Local Storage\leveldb\000003.log'),
     (Join-Path $localAppData 'ExvVpn\journal\state.json'),
     (Join-Path $programData 'ExvVpn\logs\engine.jsonl'),
     (Join-Path $programData 'exv\service.key')
@@ -66,8 +69,12 @@ try {
   $env:USERPROFILE = $userProfile
   $env:LOCALAPPDATA = $localAppData
   $env:ProgramData = $programData
+  # S3c：清理目标集由 install_manifest.tsv 生成（S3a -ManifestPath 约定）；沙箱执行
+  # 显式传入仓内清单，锚行缺失按 fail-closed 硬失败。
+  $manifestTsv = Join-Path $repoRoot 'src\platform\win32\windows_setup_rust\install_manifest.tsv'
   & $cleanupScript -Force -NoProcessStop -LocalAppDataRoot $localAppData -ProgramDataRoot $programData `
-    -TempRoot (Join-Path $testRoot 'Temp') -SystemTempRoot (Join-Path $testRoot 'SystemTemp') *> $null
+    -TempRoot (Join-Path $testRoot 'Temp') -SystemTempRoot (Join-Path $testRoot 'SystemTemp') `
+    -ManifestPath $manifestTsv *> $null
   $cleanupSucceeded = $?
   if (-not $cleanupSucceeded) {
     throw 'EXPECT FAILED: cleanup script reported failure'
@@ -75,6 +82,7 @@ try {
 
   Assert-PathMissing (Join-Path $userProfile '.exv') 'current Rust user state survives clear-user-data'
   Assert-PathMissing (Join-Path $localAppData 'EXV') 'legacy EXV user state survives clear-user-data'
+  Assert-PathMissing (Join-Path $localAppData 'com.exv.vpn.desktop') 'Tauri identifier WebView2 state (appearance localStorage) survives clear-user-data'
   Assert-PathMissing (Join-Path $localAppData 'ExvVpn') 'local fallback journal/log state survives clear-user-data'
   Assert-PathMissing (Join-Path $programData 'ExvVpn') 'machine journal/log state survives clear-user-data'
   Assert-PathMissing (Join-Path $programData 'exv') 'machine service state survives clear-user-data'

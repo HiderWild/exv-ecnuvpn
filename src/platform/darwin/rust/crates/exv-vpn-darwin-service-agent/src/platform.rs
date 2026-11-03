@@ -15,9 +15,10 @@
 use std::{env, fmt, path::Component, path::Path, str::FromStr};
 
 use crate::{
-    ArtifactPathId, SERVICE_AGENT_BINARY, SERVICE_AGENT_CLEANUP_ARTIFACTS,
-    SERVICE_AGENT_DESCRIPTOR, SERVICE_AGENT_STATE_LEAF, SERVICE_AGENT_UNINSTALL_ARTIFACTS,
-    SERVICE_ENGINE_BINARY, SERVICE_ENGINE_DESCRIPTOR, SERVICE_ENGINE_SOCKET_LEAF, RUNTIME_RESIDUE_PID_HEX_MAX,
+    ArtifactPathId, RUNTIME_RESIDUE_PID_HEX_MAX, SERVICE_AGENT_BINARY,
+    SERVICE_AGENT_CLEANUP_ARTIFACTS, SERVICE_AGENT_DESCRIPTOR, SERVICE_AGENT_STATE_LEAF,
+    SERVICE_AGENT_UNINSTALL_ARTIFACTS, SERVICE_ENGINE_BINARY, SERVICE_ENGINE_DESCRIPTOR,
+    SERVICE_ENGINE_SOCKET_LEAF,
 };
 
 /// 固定安装目录；没有任何 CLI 参数可以覆盖它。
@@ -302,12 +303,63 @@ pub enum ServiceControlAction {
 /// [`ServiceControlAction`] 并列；target 固定为 engine job）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineJobAction {
-    /// 幂等 bootstrap：`launchctl bootstrap system <engine plist>`；job 已加载
-    /// （bootstrap 失败但 `launchctl print system/<label>` 成功）视成功。
+    /// 对已注册 job 执行不带 -k 的 kickstart；明确缺席时 bootstrap 固定 plist 一次。
     EnsureBootstrap,
     /// `launchctl bootout system/com.exv.vpn.engine`（调用方决定失败语义）。
     Bootout,
 }
+/// 本次操作的原始失败，平台类别继续保持Copy。
+#[derive(Debug)]
+pub struct ServiceOperationFailure {
+    pub error: PlatformError,
+    pub reason: String,
+    pub truncated: bool,
+}
+impl From<PlatformError> for ServiceOperationFailure {
+    fn from(error: PlatformError) -> Self { Self { error, reason: String::new(), truncated: false } }
+}
+impl ServiceOperationFailure {
+    /// 在原Output尚存在处保存原因，按UTF-8边界限制2048字节。
+    pub fn with_reason(error: PlatformError, reason: &str) -> Self {
+        let mut end = reason.len().min(2048);
+        while !reason.is_char_boundary(end) { end -= 1; }
+        Self { error, reason: reason[..end].to_owned(), truncated: end != reason.len() }
+    }
+    /// action8 payload：28字节固定头及有界code、step、原因。
+    pub(crate) fn encode_detail(&self) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 28];
+        bytes[0] = 1; bytes[1] = 2;
+        let mut values = [None; 4];
+        let mut step = "";
+        match self.error {
+            PlatformError::ServiceControlCommandFailed { action, target, exit_code, signal, errno } => {
+                bytes[1] = 1;
+                bytes[2] = match action { "kickstart" => 1, "bootstrap" => 2, _ => 0 };
+                bytes[3] = if target == ENGINE_SERVICE_TARGET { 1 } else if target == ENGINE_PLIST_PATH { 2 } else { 0 };
+                values = [exit_code, signal, errno, None];
+            }
+            PlatformError::ServiceControlIoFailed { step: original_step, errno, restore_errno } => {
+                step = original_step; values = [None, None, errno, restore_errno];
+            }
+            _ => {}
+        }
+        for (index, value) in values.into_iter().enumerate() {
+            if let Some(value) = value {
+                bytes[4] |= 1 << index;
+                bytes[6 + index * 4..10 + index * 4].copy_from_slice(&value.to_be_bytes());
+            }
+        }
+        if self.truncated { bytes[4] |= 16; }
+        for (index, value) in [self.error.code(), step, self.reason.as_str()].into_iter().enumerate() {
+            let mut end = value.len().min(if index == 2 { 2048 } else { 64 });
+            while !value.is_char_boundary(end) { end -= 1; }
+            bytes[22 + index * 2..24 + index * 2].copy_from_slice(&(end as u16).to_be_bytes());
+            bytes.extend_from_slice(&value.as_bytes()[..end]);
+        }
+        bytes
+    }
+}
+
 /// 无泄密的稳定平台错误类别。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlatformError {
@@ -323,10 +375,26 @@ pub enum PlatformError {
     EnrolledOwnerMismatch,
     /// 固定服务控制操作失败。
     ServiceControlFailed,
+    /// 本次固定 launchctl 命令的原始结果（无后置状态复判）。
+    ServiceControlCommandFailed {
+        action: &'static str,
+        target: &'static str,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        errno: Option<i32>,
+    },
+    /// 可选服务IO动作的原errno及恢复身份错误；是否继续由调用方决定。
+    ServiceControlIoFailed {
+        step: &'static str,
+        errno: Option<i32>,
+        restore_errno: Option<i32>,
+    },
     /// 固定 artifact 的 nofollow/type/owner/identity guard 拒绝删除。
     ArtifactGuardRejected,
     /// 固定 artifact 的删除失败。
     ArtifactRemovalFailed,
+    /// 固定产物删除失败，保留原始系统错误码。
+    ArtifactRemovalIoFailed { step: &'static str, errno: Option<i32> },
     /// root-controlled socket parent 不符合 V1。
     SocketParentRejected,
     /// 固定 socket 无法建立或重验。
@@ -339,6 +407,13 @@ pub enum PlatformError {
     DaemonActionRejected,
     /// 固定 cleanup action 失败；不暴露底层路径或系统错误。
     CleanupFailed,
+    /// 系统代理清理失败，保留实际步骤与原始进程结果。
+    ProxyPolicyCleanupFailed {
+        step: &'static str,
+        errno: Option<i32>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    },
     /// 固定 Engine 进程无法启动。
     EngineLaunchFailed,
     /// CLI 不是 V1 固定字面量与参数数量。
@@ -357,15 +432,18 @@ impl PlatformError {
             Self::OwnerIdentityMalformed => "DARWIN_SERVICE_AGENT_SUDO_IDENTITY_MALFORMED",
             Self::InstallPreparationFailed => "DARWIN_SERVICE_AGENT_INSTALL_PREPARATION_FAILED",
             Self::EnrolledOwnerMismatch => "DARWIN_SERVICE_AGENT_ENROLLED_OWNER_MISMATCH",
-            Self::ServiceControlFailed => "DARWIN_SERVICE_AGENT_SERVICE_CONTROL_FAILED",
+            Self::ServiceControlFailed
+            | Self::ServiceControlCommandFailed { .. }
+            | Self::ServiceControlIoFailed { .. } => "DARWIN_SERVICE_AGENT_SERVICE_CONTROL_FAILED",
             Self::ArtifactGuardRejected => "DARWIN_SERVICE_AGENT_ARTIFACT_GUARD_REJECTED",
-            Self::ArtifactRemovalFailed => "DARWIN_SERVICE_AGENT_ARTIFACT_REMOVAL_FAILED",
+            Self::ArtifactRemovalFailed | Self::ArtifactRemovalIoFailed { .. } => "DARWIN_SERVICE_AGENT_ARTIFACT_REMOVAL_FAILED",
             Self::SocketParentRejected => "DARWIN_SERVICE_AGENT_SOCKET_PARENT_REJECTED",
             Self::SocketSetupFailed => "DARWIN_SERVICE_AGENT_SOCKET_SETUP_FAILED",
             Self::SocketPeerRejected => "DARWIN_SERVICE_AGENT_SOCKET_PEER_REJECTED",
             Self::SocketProtocolFailed => "DARWIN_SERVICE_AGENT_SOCKET_PROTOCOL_FAILED",
             Self::DaemonActionRejected => "DARWIN_SERVICE_AGENT_DAEMON_ACTION_REJECTED",
             Self::CleanupFailed => "DARWIN_SERVICE_AGENT_CLEANUP_FAILED",
+            Self::ProxyPolicyCleanupFailed { .. } => "DARWIN_SERVICE_AGENT_PROXY_POLICY_CLEANUP_FAILED",
             Self::EngineLaunchFailed => "DARWIN_SERVICE_AGENT_ENGINE_LAUNCH_FAILED",
             Self::CliUsage => "DARWIN_SERVICE_AGENT_CLI_USAGE",
             Self::OrdinaryUserRequired => "DARWIN_SERVICE_AGENT_ORDINARY_USER_REQUIRED",
@@ -375,11 +453,52 @@ impl PlatformError {
 
 impl fmt::Display for PlatformError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.code())
+        formatter.write_str(self.code())?;
+        if let Self::ServiceControlCommandFailed {
+            action,
+            target,
+            exit_code,
+            signal,
+            errno,
+        } = self
+        {
+            write!(
+                formatter,
+                " action={action} exit={exit_code:?} signal={signal:?} errno={errno:?} target={target}"
+            )?;
+        }
+        if let Self::ServiceControlIoFailed {
+            step,
+            errno,
+            restore_errno,
+        } = self
+        {
+            write!(
+                formatter,
+                " step={step} errno={errno:?} restore_errno={restore_errno:?}"
+            )?;
+        }
+        if let Self::ArtifactRemovalIoFailed { step, errno } = self {
+            write!(formatter, " step={step} errno={errno:?}")?;
+        }
+        if let Self::ProxyPolicyCleanupFailed { step, errno, exit_code, signal } = self {
+            write!(formatter, " step={step} errno={errno:?} exit={exit_code:?} signal={signal:?}")?;
+        }
+        Ok(())
     }
 }
 
 impl std::error::Error for PlatformError {}
+
+/// 可选动作失败允许继续；不使用终结错误的稳定前缀，避免抢占 Core 的首错摘要。
+fn optional_failure_detail(step: &str, error: PlatformError) -> String {
+    format!("optional service action failed step={step} error={error:?}")
+}
+fn report_optional_result(step: &str, result: Result<(), PlatformError>) {
+    if let Err(error) = result {
+        eprintln!("{}", optional_failure_detail(step, error));
+    }
+}
 
 /// 可替换的 fixed-path 平台 seam。
 ///
@@ -387,6 +506,10 @@ impl std::error::Error for PlatformError {}
 /// 方法都没有 path、label、command 或 argv 参数。真实实现只能映射 V1 常量；测试 fake
 /// 仅记录调用顺序，绝不触及系统位置。
 pub trait PrivilegedPlatform {
+    /// 既有维护/卸载内部清理 Engine 的固定代理例外字段；不接受外部设置输入。
+    fn cleanup_proxy_policy(&mut self, _uninstall: bool) -> Result<(), PlatformError> {
+        Ok(())
+    }
     /// 探测固定 descriptor 是否已存在；替换式 install 据此决定验证/bootout 路径。
     ///
     /// # Errors
@@ -450,8 +573,13 @@ pub trait PrivilegedPlatform {
     /// # Errors
     ///
     /// 固定 `launchctl` 序列执行失败时返回 [`PlatformError::ServiceControlFailed`]；
-    /// `EnsureBootstrap` 对已加载 job 幂等成功。
+    /// `EnsureBootstrap` 确保已注册 job 启动，不重启运行实例；命令失败保留原码。
     fn control_engine_job(&mut self, action: EngineJobAction) -> Result<(), PlatformError>;
+    /// 同一原动作的详细结果，默认保留既有平台类别。
+    fn control_engine_job_detailed(&mut self, action: EngineJobAction) -> Result<(), ServiceOperationFailure> {
+        self.control_engine_job(action).map_err(Into::into)
+    }
+
 
     /// W2.5：best-effort 停机信号——以 owner uid 连接 engine 固定端点后立即 EOF
     ///（无 tonic 栈，无法发送字面 `StopTunnel` RPC；uid 门连接+EOF 即既有会话循环
@@ -459,11 +587,9 @@ pub trait PrivilegedPlatform {
     ///
     /// # Errors
     ///
-    /// 本 best-effort 动作恒返回 `Ok`；底层失败由实现内部吞掉。
-    fn stop_engine_tunnel_best_effort(
-        &mut self,
-        owner: EnrolledOwner,
-    ) -> Result<(), PlatformError>;
+    /// 返回原动作错误，由既有best-effort调用方记录并继续后续动作。
+    fn stop_engine_tunnel_best_effort(&mut self, owner: EnrolledOwner)
+    -> Result<(), PlatformError>;
 
     /// 对唯一固定 artifact 执行 nofollow/type/owner/identity guarded removal。
     ///
@@ -534,6 +660,9 @@ pub trait PrivilegedPlatform {
     ///
     /// 无法枚举或无法安全打开父目录时返回稳定错误。
     fn sweep_runtime_residue(&mut self) -> Result<ResidueSweepReport, PlatformError>;
+
+    /// 服务产物已移除，清理当前日志前结束本进程的文件写入。
+    fn finish_uninstall_logging(&mut self) {}
 
     /// 卸载尾段：回收**空的**固定安装目录（安装目录本身与其父目录
     /// `/Library/Application Support/EXV`）。
@@ -616,22 +745,21 @@ pub fn install_with<P>(
 where
     P: PrivilegedPlatform,
 {
-    // 0. 先 best-effort 停掉 engine job：退役回收会递归删除 `DevCompanion/`，而旧
-    //    engine 进程可能正从该目录运行（macOS 允许删除运行中的二进制，但先停更干净，
-    //    也避免 launchd 在窗口内反复重启一个已被删除的程序）。engine 作业 label 新旧
-    //    一致，bootout 按 target 串而不是 plist，故即使 plist 已被回收也能停。
-    let _ = platform.control_engine_job(EngineJobAction::Bootout);
+    // 先停当前共享label的Engine job，再替换本代服务文件；保原best-effort政策。
+    report_optional_result(
+        "engine.bootout",
+        platform.control_engine_job(EngineJobAction::Bootout),
+    );
+    platform.cleanup_proxy_policy(false)?;
     let descriptor_present = platform.install_descriptor_present()?;
     if descriptor_present {
         platform.verify_enrolled_owner(owner)?;
         // best-effort：可能本就未 bootstrap；失败不阻断替换式重装。
-        let _ = platform.control_service(ServiceControlAction::Bootout);
+        report_optional_result(
+            "service.bootout",
+            platform.control_service(ServiceControlAction::Bootout),
+        );
     }
-    // 1. 一次性退役回收（2026-09-20，幂等）：停止并回收已退役组件——开发伴侣 daemon
-    //    （`com.exv.vpn.dev-companion`）、它的 plist 与 `DevCompanion/` 安装目录，以及
-    //    更早的 C++ 时代残留。目标缺席即成功；失败不静默（原样上抛）。安装新命名空间
-    //    之前完成，确保退役组件不会以 root 常驻继续存活。
-    retire_legacy_with(platform)?;
     if descriptor_present {
         // 替换式重装：严格精确匹配守卫（语义与 2026-09-20 前完全一致，不回退）。
         platform.remove_artifact(SERVICE_AGENT_DESCRIPTOR, ArtifactOwner::Root)?;
@@ -671,8 +799,8 @@ where
 /// 顺序契约：验证 owner（**descriptor 不在场时改走孤儿规则**，不再以守卫拒绝中止
 /// ——旧实现使「descriptor 缺失 + 残留在场」的机器确定性无法自清；owner 校验在任何
 /// 删除之前）→ best-effort 停机信号（engine 端点 uid 门连接+EOF）→ `bootout` engine
-/// job（best-effort：旧安装可能无 engine job；先停旧引擎再回收退役命名空间，回收会
-/// 删除旧引擎的安装目录）→ 一次性退役回收（幂等）→ `bootout` daemon（失败直接返回，
+/// job（best-effort：旧安装可能无 engine job；先停当前Engine再回收本代文件）→
+/// `bootout` daemon（失败直接返回，
 /// 绝不删除安装文件——防半卸载）→ guarded remove 全部固定 artifact（两份描述、
 /// state/log、两份二进制、两个 socket）→ 回收空的固定安装目录（**只 rmdir 空目录**；
 /// 非空即保留现场）。
@@ -690,15 +818,25 @@ where
         platform.verify_enrolled_owner(owner)?;
     }
     // best-effort：连不上端点/被拒一律忽略（停机权威是下面的 bootout SIGTERM）。
-    let _ = platform.stop_engine_tunnel_best_effort(owner);
-    // best-effort：旧安装（W2.5 前）没有 engine job；bootout 失败不阻断。先停 engine
-    // 再回收退役命名空间（回收会删除旧 engine 正在使用的安装目录）。
-    let _ = platform.control_engine_job(EngineJobAction::Bootout);
-    // 退役组件回收：与 install 同源，使「卸载服务」在老机器上也能清掉旧命名空间。
-    retire_legacy_with(platform)?;
+    report_optional_result(
+        "engine.nudge",
+        platform.stop_engine_tunnel_best_effort(owner),
+    );
+    // best-effort：旧安装（W2.5 前）没有 engine job；bootout失败不阻断。
+    // 当前Engine停止仍在本代文件清理前，不能随历史工具退役入口删除。
+    report_optional_result(
+        "engine.bootout",
+        platform.control_engine_job(EngineJobAction::Bootout),
+    );
     platform.control_service(ServiceControlAction::Bootout)?;
 
+    // 停止接纳新的 EnsureEngine 请求后，才可确认 Engine 停止并删除记录 inode。
+    platform.cleanup_proxy_policy(true)?;
+
     for artifact in SERVICE_AGENT_UNINSTALL_ARTIFACTS {
+        if artifact == ArtifactPathId::AgentLog {
+            platform.finish_uninstall_logging();
+        }
         if descriptor_present {
             platform.remove_artifact(artifact, expected_owner(artifact, owner))?;
         } else {
@@ -710,8 +848,7 @@ where
     platform.remove_empty_install_dirs()
 }
 
-/// 一次性回收历史/已退役组件遗留（2026-09-12 起用于预卸载；2026-09-20 起同时被
-/// install/uninstall 首段调用以完成开发伴侣退役）。
+/// 既有显式维护入口的历史组件回收；普通产品install/uninstall不再调用。
 ///
 /// 这些产物来自 C++ 时代与早期 Rust 形态，**当前产品代码无任何引用**；它们不在
 /// [`ArtifactPathId`] 契约内（那组是"当前服务真实会产生"的集合），因此单列一组
@@ -722,7 +859,8 @@ where
 /// 顺序契约：先 `bootout` 全部固定 label（否则 launchd 会因 `RunAtLoad`/`KeepAlive`
 /// 持续尝试拉起已删二进制）→ 再删 descriptor（含 `.previous` 残片）→ 最后递归回收安装
 /// 目录（父目录缺失视为无需回收的成功；逐件向 stderr 报告 `contract_key` 与维度）。
-/// 任一步的"目标本就不存在"视为成功（幂等）；guard 拒绝或删除失败原样上抛。
+/// bootout仅按当次原返回，非零不以print复判；文件缺席沿原删除规则处理，
+/// guard拒绝或删除失败原样上抛，不宣称所有历史job均已迁移。
 ///
 /// # Errors
 ///
@@ -824,7 +962,10 @@ pub fn start_with<P>(platform: &mut P) -> Result<(), PlatformError>
 where
     P: PrivilegedPlatform,
 {
-    let _ = platform.control_service(ServiceControlAction::Bootout);
+    report_optional_result(
+        "service.bootout",
+        platform.control_service(ServiceControlAction::Bootout),
+    );
     platform.control_service(ServiceControlAction::Bootstrap)?;
     platform.control_engine_job(EngineJobAction::EnsureBootstrap)
 }
@@ -839,6 +980,7 @@ pub fn cleanup_with<P>(platform: &mut P) -> Result<(), PlatformError>
 where
     P: PrivilegedPlatform,
 {
+    platform.cleanup_proxy_policy(false)?;
     for artifact in SERVICE_AGENT_CLEANUP_ARTIFACTS {
         platform
             .remove_artifact(artifact, ArtifactOwner::Root)
@@ -854,3 +996,4 @@ const fn expected_owner(artifact: ArtifactPathId, owner: EnrolledOwner) -> Artif
         _ => ArtifactOwner::Root,
     }
 }
+

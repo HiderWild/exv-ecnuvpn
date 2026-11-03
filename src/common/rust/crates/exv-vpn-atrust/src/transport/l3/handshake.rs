@@ -37,7 +37,7 @@ impl Default for IpRequestOptions {
     }
 }
 
-/// 固定阶段和数字错误，不包含 SID、响应正文或服务端 message。
+/// 阶段、分类、可选系统码及脱敏 I/O 原因；不包含 SID、响应正文或服务端 message。
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IpRequestError {
     /// 参数不符合本交互要求。
@@ -52,11 +52,13 @@ pub enum IpRequestError {
     /// 总时限耗尽；没有后台重试任务。
     #[error("IP request: timeout")]
     Timeout,
-    /// 流的读写错误，只有固定阶段和 `ErrorKind`。
-    #[error("IP request {stage}: {kind:?}")]
+    /// 原 I/O 阶段、类别、可选系统码与有界脱敏原因。
+    #[error("IP request {stage}: {kind:?}; os={raw_os_error:?}; {detail}")]
     Io {
         stage: &'static str,
         kind: ErrorKind,
+        raw_os_error: Option<i32>,
+        detail: String,
     },
     /// 方法协商响应不是 05 D0。
     #[error("IP request: invalid method response")]
@@ -91,6 +93,8 @@ fn io_error(stage: &'static str, error: &std::io::Error) -> IpRequestError {
     IpRequestError::Io {
         stage,
         kind: error.kind(),
+        raw_os_error: error.raw_os_error(),
+        detail: super::io_detail(error),
     }
 }
 

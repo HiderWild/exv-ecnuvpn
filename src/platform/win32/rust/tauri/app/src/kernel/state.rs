@@ -27,6 +27,20 @@ pub struct VpnError {
     pub code: String,
     /// 面向用户的简短描述（不含诊断栈）。
     pub message: String,
+    /// wire 已有阶段；前端仅以此说明失败发生处，不猜具体根因。
+    pub stage: Option<String>,
+    /// 稳定失败原因 id（EXV_UNFREEZE 2026-10-09，tag 8；`<域>/<细分>` 小写，空 =
+    /// 缺省）。前端 `lib/copy-tables.ts` 按 id 映射文案——单一文案来源，与壳侧
+    /// `wire.rs` 的 reason 文案表互指 + 一致性测试钉住。
+    pub reason: String,
+}
+
+/// 停止终态事实；None 表示旧端没有提供，不能解释成 stopped=false。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopCompletion {
+    pub stopped: bool,
+    pub blocks_new_connect: bool,
+    pub errors: Vec<VpnError>,
 }
 
 /// RuntimeSnapshot 的 state oneof 各分支。
@@ -150,6 +164,19 @@ pub struct SelfHealStatus {
     pub error_code: String,
 }
 
+/// 连接受理时冻结的会话身份投影（proto `SessionIdentity`；EXV_UNFREEZE 2026-10-04，
+/// bug3：会话活动期间设置页改协议/账号/服务器不得改写连接页显示）。仅显示，非授权
+/// 材料；`None` = 无活动会话身份（UI 回落当前配置）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIdentity {
+    /// 活动会话使用的协议："cisco" | "atrust"。
+    pub protocol: String,
+    /// 受理时冻结的账号；空 = 无（aTrust 经系统认证、无可读账号）。
+    pub username: String,
+    /// 受理时冻结的服务器地址；空 = 无。
+    pub server: String,
+}
+
 /// win32 engine SCM 服务状态（proto `ServiceStatus`；S3/D5，仅状态展示，非授权材料——
 /// 服务存在性不构成 capability，peer 身份只来自验证过的传输元数据 + PSK）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +218,8 @@ pub enum ServiceControlAction {
 /// RuntimeSnapshot 的 UI 视图（mirror 自 proto RuntimeSnapshot）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
+    #[serde(default)]
+    pub stop_completion: Option<StopCompletion>,
     pub runtime: RuntimeState,
     /// 单调 tick（WatchEvents resume 游标），0 表示未知。
     pub monotonic_tick: u64,
@@ -223,6 +252,9 @@ pub struct RuntimeSnapshot {
     /// 快照携带的 host 自愈进展（EXV_UNFREEZE 2026-09-05：`GetSnapshot`/`WatchEvents`
     /// 随状态附带；`None` = 无自愈上下文）。
     pub self_heal: Option<SelfHealStatus>,
+    /// 快照携带的会话身份投影（EXV_UNFREEZE 2026-10-04，bug3：`GetSnapshot`/
+    /// `WatchEvents` 随状态附带；`None` = 无活动会话身份，UI 回落当前配置）。
+    pub session_identity: Option<SessionIdentity>,
 }
 
 /// 运行时事件类型（proto RuntimeEventKind）。
@@ -266,6 +298,8 @@ pub enum OperationResult {
 /// Command（connect/stop/...）的统一回复形状。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationReply {
+    #[serde(default)]
+    pub stop_completion: Option<StopCompletion>,
     pub result: OperationResult,
     /// 本命令所属操作 id（UI 侧组装 intent 时生成，随回复回传前端做事件关联；
     /// `Some(hex16)` = 已受理（host 以该 id 关联状态事件），`None` = 未产生/被拒）。

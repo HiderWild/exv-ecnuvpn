@@ -3,7 +3,7 @@ use crate::log_sink::LogSink;
 use exv_vpn_cstp::session::{
     CstpControlEvent, IoDirection, SessionEndReason, SessionIoDiagnostics, SessionIoError,
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) fn identity(operation: &[u8]) -> Vec<(&'static str, String)> {
     vec![
@@ -55,7 +55,6 @@ pub(crate) fn io_fields(error: &SessionIoError) -> Vec<(&'static str, String)> {
 }
 pub(crate) struct SessionDiagnostics {
     started: Instant,
-    last_summary: Instant,
     read: Option<SessionIoDiagnostics>,
     write: Option<SessionIoDiagnostics>,
     pub keepalive_queued: u64,
@@ -69,7 +68,6 @@ impl SessionDiagnostics {
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
-            last_summary: Instant::now(),
             read: None,
             write: None,
             keepalive_queued: 0,
@@ -214,26 +212,16 @@ impl SessionDiagnostics {
         }
         fields
     }
-    pub fn periodic(&mut self, logs: &LogSink, operation: &[u8]) {
-        if self.last_summary.elapsed() >= Duration::from_secs(30) {
-            self.emit(logs, operation, "periodic");
-        }
-    }
     pub fn emit(&mut self, logs: &LogSink, operation: &[u8], trigger: &'static str) {
         let mut fields = identity(operation);
         fields.extend(self.fields());
         fields.push(("trigger", trigger.into()));
         logs.publish(
-            if trigger == "periodic" {
-                "debug"
-            } else {
-                "info"
-            },
+            "info",
             "cstp",
             "CSTP_SESSION_SUMMARY",
             "会话流量统计",
             &fields,
         );
-        self.last_summary = Instant::now();
     }
 }

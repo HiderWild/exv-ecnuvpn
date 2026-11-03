@@ -1,6 +1,7 @@
 //! aTrust 认证、节点选择与协议连接；平台网卡和路由由运行时随后应用。
 
 use crate::atrust_tunnel::{AtrustPacketTunnel, NodeIdentity, RawPacketChannels};
+use crate::log_sink::{LogLevel, LogSink};
 use exv_vpn_atrust::auth::origin::GatewayOrigin;
 use exv_vpn_atrust::{ConnectPurpose, OutboundTarget, Underlay};
 use exv_vpn_cstp::session::TunnelOffer;
@@ -44,6 +45,7 @@ pub(crate) async fn prepare(
     browser: BrowserSession,
     config: &ExvConfig,
     observed_certificate: Option<&[u8]>,
+    log: &LogSink,
 ) -> Result<PreparedAtrust, String> {
     let gateway = if config.server.contains("://") {
         config.server.clone()
@@ -76,7 +78,10 @@ pub(crate) async fn prepare(
     let nic = nics
         .first()
         .ok_or("aTrust physical interface unavailable")?;
-    let underlay = Arc::new(crate::atrust_underlay::PhysicalUnderlay::new(nic.ifindex)?);
+    let underlay = Arc::new(crate::atrust_underlay::PhysicalUnderlay::new_with_nodelay(
+        nic.ifindex,
+        config.atrust_tcp_nodelay,
+    )?);
     let session =
         crate::atrust_auth::authenticate_browser_session(browser, &gateway, underlay.clone())
             .await
@@ -119,6 +124,30 @@ pub(crate) async fn prepare(
         observed_certificate,
     )
     .await?;
+    log.emit(
+        LogLevel::Info,
+        "atrust",
+        "atrust.node.nodelay",
+        "aTrust data node TCP_NODELAY read back",
+        &[
+            (
+                "requested",
+                if config.atrust_tcp_nodelay {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
+            (
+                "actual",
+                match underlay.actual_node_nodelay() {
+                    Some(true) => "true",
+                    Some(false) => "false",
+                    None => "none",
+                },
+            ),
+        ],
+    );
     let (owner, channels) = AtrustPacketTunnel::open(
         stream,
         &session,

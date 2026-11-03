@@ -27,7 +27,7 @@
 //! ## 可观测性（2026-09-20 新增）
 //!
 //! GUI 启动的 app 没有可见 stderr（`open` 启动时 stdout/stderr 进 /dev/null），原先
-//! 「降级原因只写 stderr」等于没有诊断。现在每次投递都追加一行到
+//! 「降级原因只写 stderr」等于没有诊断。失败、授权拒绝或不可用原因追加到
 //! `~/Library/Application Support/EXV/notification.log`：策略、系统主版本、结果与有界细节
 //! （**不含标题/正文**，避免把用户内容写进诊断文件）。
 
@@ -70,14 +70,14 @@ impl NotificationStrategy {
     }
 }
 
-/// 一次投递的真实结果（新后端在系统回调里异步回报，用于落盘诊断）。
+/// 新后端的异步安排结果；失败与授权拒绝用于原文件诊断。
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DeliveryReport {
-    /// 系统已投递（`addNotificationRequest` 无错误返回）。
+    /// 系统已成功安排通知（`addNotificationRequest` 无错误，不表示用户已看到）。
     Delivered,
-    /// 授权被拒或授权调用报错（细节为系统本地化描述，已截断）。
+    /// 授权被拒或授权调用报错（细节为系统本地化描述，落盘时截断）。
     Denied(String),
-    /// 授权通过但投递失败。
+    /// 授权通过但安排通知失败。
     Failed(String),
 }
 
@@ -189,7 +189,7 @@ pub(crate) fn strategy_for(
 
 // ---- 投递结果与诊断落盘 ----
 
-/// `tray_notify` 的结果：前端据此决定是否应用内 toast 回退。
+/// 通知模块内部的提交结果，供后端策略回退判断；`tray_notify` 仍返回 void。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ShellNotifyOutcomeDto {
@@ -251,10 +251,10 @@ pub(crate) fn record_delivery(strategy: &str, major: Option<u32>, outcome: &str,
         });
 }
 
-/// 把新后端的异步结果落盘（在系统回调队列上被调用）。
+/// 把新后端的异步失败或拒绝落盘（在系统回调队列上被调用）。
 fn report_to_log(major: Option<u32>, report: DeliveryReport) {
     match report {
-        DeliveryReport::Delivered => record_delivery("modern", major, "delivered", ""),
+        DeliveryReport::Delivered => {}
         DeliveryReport::Denied(detail) => record_delivery("modern", major, "denied", &detail),
         DeliveryReport::Failed(detail) => record_delivery("modern", major, "failed", &detail),
     }
@@ -262,20 +262,13 @@ fn report_to_log(major: Option<u32>, report: DeliveryReport) {
 
 // ---- 发送编排 ----
 
-/// 旧路径（插件）：`show()` 只表示已交给系统（fire-and-forget），如实记为 `submitted`。
+/// 旧路径（插件）：`show()` 成功只表示已交给系统，原错误保留到文件诊断。
 fn legacy(app: &AppHandle, title: &str, body: &str, major: Option<u32>) -> ShellNotifyOutcomeDto {
     match app.notification().builder().title(title).body(body).show() {
-        Ok(()) => {
-            record_delivery("legacy", major, "submitted", "");
-            ShellNotifyOutcomeDto::submitted()
-        }
+        Ok(()) => ShellNotifyOutcomeDto::submitted(),
         Err(error) => {
             let detail = error.to_string();
             record_delivery("legacy", major, "failed", &detail);
-            #[allow(clippy::print_stderr)] // debug 壳 stderr 是辅助诊断通道
-            {
-                eprintln!("exv.notification: legacy send failed (degraded): {detail}");
-            }
             ShellNotifyOutcomeDto::degraded(DEGRADED_SEND_FAILED)
         }
     }
@@ -295,11 +288,7 @@ fn notify(app: &AppHandle, title: &str, body: &str) -> ShellNotifyOutcomeDto {
         NotificationStrategy::Modern => {
             let report = move |report: DeliveryReport| report_to_log(major, report);
             match notification_modern::submit(app, title.to_owned(), body.to_owned(), report) {
-                Ok(()) => {
-                    // 已提交给系统；真实结果（delivered/denied/failed）由异步回调落盘。
-                    record_delivery("modern", major, "submitted", "");
-                    ShellNotifyOutcomeDto::submitted()
-                }
+                Ok(()) => ShellNotifyOutcomeDto::submitted(),
                 Err(error) => {
                     record_delivery("modern", major, "submit-failed", &error);
                     let fallback = legacy(app, title, body, major);
@@ -317,15 +306,9 @@ fn notify(app: &AppHandle, title: &str, body: &str) -> ShellNotifyOutcomeDto {
 /// `tray_notify` Command（win32 前端 `tray_notify` 的 darwin 对应入口）。
 ///
 /// win32 前端期待 void 回复（失败仅 console.error），降级结果不回传、不伪造成功；
-/// 诊断细节落 `notification.log` 与 stderr。
+/// 原失败与拒绝细节落 `notification.log`。
 #[allow(clippy::needless_pass_by_value)] // Tauri command 宏的固定签名形状
 #[tauri::command]
 pub(crate) fn tray_notify(app: AppHandle, title: String, body: String) {
-    let outcome = notify(&app, &title, &body);
-    if let Some(reason) = outcome.degraded_reason {
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("exv.notification: tray_notify degraded: {reason}");
-        }
-    }
+    notify(&app, &title, &body);
 }

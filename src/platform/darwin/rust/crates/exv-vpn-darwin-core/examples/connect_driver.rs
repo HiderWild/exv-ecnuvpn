@@ -144,6 +144,7 @@ fn lookup_key(method: OperationMethod) -> Option<OperationLookupKey> {
 
 fn connect_request() -> ConnectRequest {
     ConnectRequest {
+        auth_binding: None,
         intent: Some(ConnectIntent {
             lookup_key: lookup_key(OperationMethod::Connect),
             request_digest: random_bytes(32),

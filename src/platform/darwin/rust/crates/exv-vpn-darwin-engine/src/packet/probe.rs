@@ -17,13 +17,14 @@
 //! **不做手动刷新 marker 文件**（win32 有、darwin 刻意不移植）：win32 前端
 //! 「立即刷新延迟」写用户配置目录的 marker 文件、writer 线程每秒轮询；darwin
 //! engine 是 root 进程、argv 固定无用户配置目录，路径共识不成立（上轮调研结论）。
-//! v1 = 周期 [`LATENCY_PING_INTERVAL_SECS`]（180s）探测；tauri 侧
-//! `trigger_latency_refresh` 命令由 UI 车道以 no-op 语义实现。
+//! 手动刷新由 [`ProbeState::request_refresh`] 复用同一探测状态机；无在途 ping 时立即
+//! 发送，有在途时最多合并一次后续。控制 RPC 与数据面 owner 接线另由管线提供。
 
 // 中文文档中的技术术语不逐个加反引号。
 #![allow(clippy::doc_markdown)]
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -64,6 +65,7 @@ pub struct LatencyProbeConfig {
 ///
 /// 注：不 derive `Debug`——持有的 `Codec` 无 `Debug` 实现（对齐 win32）。
 pub struct ProbeState {
+    active: bool,
     cfg: LatencyProbeConfig,
     kind: ProbeKind,
     dpd_timeouts: u32,
@@ -71,6 +73,8 @@ pub struct ProbeState {
     last_ping_sent: Instant,
     pending_dpd: Option<Instant>,
     pending_ping: Option<PendingPing>,
+    /// 在途 ping 完成或超时后最多补发一次，不累积点击次数。
+    refresh_queued: bool,
     next_ident: u16,
     codec: Codec,
 }
@@ -99,6 +103,7 @@ impl ProbeState {
             ProbeKind::Ping
         };
         Self {
+            active: true,
             cfg,
             kind,
             dpd_timeouts: 0,
@@ -106,6 +111,7 @@ impl ProbeState {
             last_ping_sent: Instant::now(),
             pending_dpd: None,
             pending_ping: None,
+            refresh_queued: false,
             next_ident: 0,
             codec: Codec::new(),
         }
@@ -113,6 +119,9 @@ impl ProbeState {
 
     /// 收到 DPD response：若有在途 DPD 请求 → 返回 RTT（ms）并清除请求。
     pub fn on_dpd_response(&mut self, now: Instant) -> Option<u64> {
+        if !self.active {
+            return None;
+        }
         let sent_at = self.pending_dpd.take()?;
         self.dpd_timeouts = 0;
         Some(rtt_ms(sent_at, now))
@@ -120,6 +129,9 @@ impl ProbeState {
 
     /// 收到一个入站包：若匹配在途 ping 的 echo reply → 返回 RTT（ms）并清除请求。
     pub fn on_icmp_echo_reply(&mut self, pkt: &[u8], now: Instant) -> Option<u64> {
+        if !self.active {
+            return None;
+        }
         let pending = self.pending_ping.take()?;
         if is_icmp_echo_reply(pkt, self.cfg.target, self.cfg.source, pending.ident) {
             Some(rtt_ms(pending.sent_at, now))
@@ -129,10 +141,30 @@ impl ProbeState {
         }
     }
 
-    /// 探测循环节拍：超时处理 → 周期触发。`send` 接收已编码的 CSTP 帧（调用方经
-    /// `write_channel` 发出；测试注入记录闭包）。win32 的手动刷新 marker 轮询分支
-    /// 不移植（见模块注释）。
+    /// 请求手动 ping：空闲立即发送，在途则合并一次后续刷新。
+    ///
+    /// `send` 使用管线现有 CSTP write_channel；本方法只安排探测，不表示收到回包。
+    pub fn request_refresh(&mut self, now: Instant, send: &mut dyn FnMut(Vec<u8>)) {
+        if !self.queue_refresh() {
+            return;
+        }
+        self.tick(now, send);
+    }
+
+    /// RPC 接纳只合并同一标记；通知用于唤醒 tick，不另带一份待发请求。
+    pub fn queue_refresh(&mut self) -> bool {
+        if self.active {
+            self.refresh_queued = true;
+        }
+        self.active
+    }
+
+    /// 探测循环节拍：超时处理 → 合并的手动 ping → 周期触发。`send` 接收已编码
+    /// 的 CSTP 帧（调用方经同一 `write_channel` 发出；测试注入记录闭包）。
     pub fn tick(&mut self, now: Instant, send: &mut dyn FnMut(Vec<u8>)) {
+        if !self.active {
+            return;
+        }
         // 1. 超时：DPD 无应答累计 → 回退 ping；ping 无应答清空。
         if let Some(sent_at) = self.pending_dpd
             && now.duration_since(sent_at) >= DPD_PROBE_TIMEOUT
@@ -150,7 +182,13 @@ impl ProbeState {
             self.pending_ping = None;
         }
 
-        // 2. 周期触发：DPD ~5s / ping `ping_interval`。
+        // 2. 手动刷新不覆盖在途 ident；匹配完成或超时后由下一 tick 补发一次。
+        if self.refresh_queued && self.pending_ping.is_none() {
+            self.refresh_queued = false;
+            self.fire_ping(now, send);
+        }
+
+        // 3. 周期触发：DPD ~5s / ping `ping_interval`。
         match self.kind {
             ProbeKind::Dpd => {
                 if now.duration_since(self.last_dpd_sent) >= DPD_PROBE_INTERVAL {
@@ -158,11 +196,21 @@ impl ProbeState {
                 }
             }
             ProbeKind::Ping => {
-                if now.duration_since(self.last_ping_sent) >= self.cfg.ping_interval {
+                if self.pending_ping.is_none()
+                    && now.duration_since(self.last_ping_sent) >= self.cfg.ping_interval
+                {
                     self.fire(now, send);
                 }
             }
         }
+    }
+
+    /// 数据面结束或 Stop 后关闭本探测 owner；旧 tap 和通知不能再写入统计。
+    pub fn deactivate(&mut self) {
+        self.active = false;
+        self.pending_ping = None;
+        self.pending_dpd = None;
+        self.refresh_queued = false;
     }
 
     /// 按当前通道发一次探测。
@@ -188,7 +236,10 @@ impl ProbeState {
         self.next_ident = self.next_ident.wrapping_add(1);
         let pkt = build_icmp_echo_request(self.cfg.source, self.cfg.target, ident, 0);
         if let Ok(frame) = self.codec.encode(&CstpFrame::Data(pkt)) {
-            self.pending_ping = Some(PendingPing { sent_at: now, ident });
+            self.pending_ping = Some(PendingPing {
+                sent_at: now,
+                ident,
+            });
             send(frame);
         }
     }
@@ -202,13 +253,30 @@ impl ProbeState {
 pub struct LatencyTap {
     probe: Arc<Mutex<ProbeState>>,
     stats: Arc<StatsRegistry>,
+    execution_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl LatencyTap {
     /// 绑定共享状态机与统计注册表（状态机 Arc 与管线 tick 驱动共用同一实例）。
     #[must_use]
     pub fn new(probe: Arc<Mutex<ProbeState>>, stats: Arc<StatsRegistry>) -> Self {
-        Self { probe, stats }
+        Self {
+            probe,
+            stats,
+            execution_cancel: None,
+        }
+    }
+
+    /// 生产 tap 绑定完整执行的取消句柄；装配期间已 Stop 也不得消费旧回包。
+    #[must_use]
+    pub fn for_execution(
+        probe: Arc<Mutex<ProbeState>>,
+        stats: Arc<StatsRegistry>,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        let mut tap = Self::new(probe, stats);
+        tap.execution_cancel = Some(cancel);
+        tap
     }
 
     /// 下行泵每个入站 IP payload 写 utun 之前调用一次；匹配即记录 RTT。
@@ -218,6 +286,14 @@ impl LatencyTap {
     /// 状态机互斥锁中毒（持锁线程 panic；探测路径无 panic 源）→ panic。
     pub fn on_inbound(&self, payload: &[u8]) {
         let mut probe = self.probe.lock().expect("latency probe lock");
+        if self
+            .execution_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            probe.deactivate();
+            return;
+        }
         if let Some(rtt) = probe.on_icmp_echo_reply(payload, Instant::now()) {
             self.stats.record_latency(rtt);
         }

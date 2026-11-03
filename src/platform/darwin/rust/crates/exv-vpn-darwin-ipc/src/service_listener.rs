@@ -13,6 +13,7 @@
 use std::{
     ffi::CString,
     fs::File,
+    io,
     os::{
         fd::AsRawFd,
         unix::{
@@ -20,7 +21,7 @@ use std::{
             fs::{FileTypeExt, MetadataExt},
         },
     },
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -29,7 +30,7 @@ use tokio::net::UnixListener;
 use crate::{
     auth::PreauthError,
     listener::with_private_umask,
-    path::{EndpointIdentity, RuntimeOwner, SocketPath},
+    path::{EndpointIdentity, MAX_UNIX_SOCKET_PATH_BYTES, RuntimeOwner, SocketPath},
     peer::{PeerLookup, SystemPeerLookup, VerifiedLocalPeer},
     tonic_bridge::AuthenticatedUnixStream,
 };
@@ -37,6 +38,46 @@ use crate::{
 /// service 形态固定端点 socket 的固定 mode（umask 0177 下 bind 产物；属主为
 /// owner uid、组位与其它位全零——目录本身 root 0755）。
 const SERVICE_SOCKET_MODE: u32 = 0o600;
+
+/// 仅 service 端点建立使用的原错误；认证和 peer 错误仍沿用 PreauthError。
+#[derive(Debug)]
+pub enum ServiceEndpointError {
+    /// 既有路径、身份或清理拒绝。
+    Existing(PreauthError),
+    /// 本次 connect 或 bind 的原 IO；不从 errno 重建错误。
+    Io {
+        step: &'static str,
+        source: io::Error,
+    },
+}
+
+impl From<PreauthError> for ServiceEndpointError {
+    fn from(error: PreauthError) -> Self {
+        Self::Existing(error)
+    }
+}
+
+impl std::fmt::Display for ServiceEndpointError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Existing(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Io { step, source } => write!(
+                formatter,
+                "Darwin service endpoint {step} failed: kind={:?} errno={:?}: {source}",
+                source.kind(), source.raw_os_error(),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ServiceEndpointError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Existing(error) => Some(error),
+            Self::Io { source, .. } => Some(source),
+        }
+    }
+}
 
 /// service 形态监听器的构造材料。
 pub struct ServiceListenerConfig {
@@ -151,48 +192,53 @@ impl ServiceListener {
     /// 1. 校验 parent directory：非 symlink 目录、属主 == 当前 euid（生产 root 的
     ///    root-controlled 固定安装目录）、无组/其他写位（服务代理
     ///    `ensure_root_controlled_directory` 的同款纪律）；
-    /// 2. 若 leaf 已存在：socket ∧ 属主 == owner uid ∧ 0600 → guarded remove；
+    /// 2. 若 leaf 已存在：socket ∧ 属主 == owner uid ∧ 0600，且原 connect 返回
+    ///    ECONNREFUSED 才回收；ENOENT 不删除而继续 bind，其他 IO 保留目标返回；
     ///    否则保留现场并拒绝（[`PreauthError::EndpointOwnership`]/
     ///    [`PreauthError::PathInvalid`]）；
-    /// 3. 私有 umask（0177）下 bind——产物 mode 恒 0600；
+    /// 3. 私有 umask（0177）下在同目录短临时路径bind，产物mode恒0600；
     /// 4. `fchownat(parent_fd, leaf, uid=owner, gid 不变, AT_SYMLINK_NOFOLLOW)`
     ///    （socket leaf 不能 open，属主变更走服务代理 `seal_bound_socket` 同款
     ///    parent-dirfd 路径；生产引擎 euid=0 可跨 uid 赋属，同 uid 测试自然成立）；
-    /// 5. 复验最终 identity（socket ∧ owner uid ∧ 0600）并记录，供 cleanup 复用。
+    /// 5. 复验identity，再以不覆盖目标的原子rename发布正式路径；cleanup沿该identity。
     ///
     /// # Errors
     ///
-    /// parent 不安全、stale leaf 不匹配、bind/属主/复验失败时返回稳定
-    /// [`PreauthError`]，且不删除任何非本次契约内的文件。
-    pub fn bind(config: ServiceListenerConfig) -> Result<Self, PreauthError> {
-        let ServiceListenerConfig {
-            socket_path,
-            owner_uid,
-            peer_lookup,
-        } = config;
+    /// parent、身份或清理拒绝保留既有 [`PreauthError`]；connect/bind 失败携带原 IO。
+    /// 不因任意连接失败删除目标。
+    pub fn bind(config: ServiceListenerConfig) -> Result<Self, ServiceEndpointError> {
+        Self::bind_with_connect(config, |path| std::os::unix::net::UnixStream::connect(path))
+    }
+
+    fn bind_with_connect(
+        config: ServiceListenerConfig,
+        connect: impl FnOnce(&Path) -> io::Result<std::os::unix::net::UnixStream>,
+    ) -> Result<Self, ServiceEndpointError> {
+        Self::bind_with_publication(config, connect, seal_service_socket, publish_service_socket)
+    }
+
+    // 局部阶段接缝用于暂停封印/发布；生产始终使用原封印与独占原子发布动作。
+    fn bind_with_publication(
+        config: ServiceListenerConfig,
+        connect: impl FnOnce(&Path) -> io::Result<std::os::unix::net::UnixStream>,
+        seal: impl FnOnce(&Path, u32) -> Result<(), PreauthError>,
+        publish: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    ) -> Result<Self, ServiceEndpointError> {
+        let ServiceListenerConfig { socket_path, owner_uid, peer_lookup } = config;
         validate_service_parent(socket_path.as_path())?;
-        remove_safe_stale_service_socket(socket_path.as_path(), owner_uid)?;
-        // SAFETY: service 形态在单线程 current_thread runtime 上、任何任务 spawn
-        // 之前完成本次 bind（engine 入口顺序），无并发文件创建者；guard 在返回前
-        // 恢复进程 umask。
-        let listener = with_private_umask(|| {
-            tokio::net::UnixListener::bind(socket_path.as_path())
-                .map_err(|_| PreauthError::Transport)
-        })?;
-        if let Err(error) = seal_service_socket(socket_path.as_path(), owner_uid) {
-            drop(listener);
-            // bind 成功但封印失败：本 listener 刚创建的 leaf 允许 guarded 回收。
-            let _ = remove_safe_stale_service_socket(socket_path.as_path(), owner_uid);
-            return Err(error);
+        remove_safe_stale_service_socket_with_connect(socket_path.as_path(), owner_uid, connect)?;
+        let (listener, mut pending) = bind_pending_service_socket(socket_path.as_path())?;
+        seal(&pending.path, owner_uid)?;
+        let endpoint = service_endpoint_identity(&pending.path, owner_uid)?;
+        publish(&pending.path, socket_path.as_path())
+            .map_err(|source| ServiceEndpointError::Io { step: "publish", source })?;
+        // rename后device/inode不变；后续失败仍只回收本次实际发布的端点。
+        pending.path = socket_path.as_path().to_path_buf();
+        if service_endpoint_identity(socket_path.as_path(), owner_uid)? != endpoint {
+            return Err(PreauthError::EndpointOwnership.into());
         }
-        let endpoint = service_endpoint_identity(socket_path.as_path(), owner_uid)?;
-        Ok(Self {
-            listener,
-            socket_path,
-            endpoint,
-            owner_uid,
-            peer_lookup,
-        })
+        pending.published = true;
+        Ok(Self { listener, socket_path, endpoint, owner_uid, peer_lookup })
     }
 
     /// 本端点期望的 owner uid（uid 门参数）。
@@ -244,6 +290,79 @@ impl ServiceListener {
     }
 }
 
+// 同目录临时socket只属于一次发布尝试。正常失败按创建inode回收；意外进程退出的
+// 临时leaf不作为后续启动前置，新的短名继续发布。正式路径与持久数据位置沿用。
+struct PendingServiceSocket {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    published: bool,
+}
+
+impl Drop for PendingServiceSocket {
+    fn drop(&mut self) {
+        if self.published { return; }
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else { return; };
+        if metadata.file_type().is_socket()
+            && metadata.dev() == self.device && metadata.ino() == self.inode
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn pending_socket_path(target: &Path, random: &[u8; 16]) -> Result<PathBuf, ServiceEndpointError> {
+    let parent = target.parent().ok_or(PreauthError::PathInvalid)?;
+    // 原正式路径允许103字节；极长parent同样保留单字节leaf的能力。
+    let budget = MAX_UNIX_SOCKET_PATH_BYTES.checked_sub(parent.as_os_str().as_bytes().len() + 1)
+        .filter(|budget| *budget > 0).ok_or(PreauthError::PathInvalid)?;
+    let length = budget.min(random.len());
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut name: Vec<u8> = random[..length].iter()
+        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()]).collect();
+    if length >= 4 { name[..2].copy_from_slice(b".s"); }
+    Ok(parent.join(std::ffi::OsStr::from_bytes(&name)))
+}
+
+fn bind_pending_service_socket(target: &Path) -> Result<(UnixListener, PendingServiceSocket), ServiceEndpointError> {
+    let mut last_collision = None;
+    for _ in 0..16 {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(|error| ServiceEndpointError::Io {
+            step: "temporary.name", source: io::Error::other(error.to_string()),
+        })?;
+        let path = pending_socket_path(target, &random)?;
+        if path == target { continue; }
+        let result = with_private_umask(|| UnixListener::bind(&path));
+        match result {
+            Ok(listener) => {
+                let metadata = std::fs::symlink_metadata(&path)
+                    .map_err(|source| ServiceEndpointError::Io { step: "temporary.identity", source })?;
+                let pending = PendingServiceSocket {
+                    path, device: metadata.dev(), inode: metadata.ino(), published: false,
+                };
+                return Ok((listener, pending));
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EADDRINUSE) => last_collision = Some(error),
+            Err(source) => return Err(ServiceEndpointError::Io { step: "bind", source }),
+        }
+    }
+    Err(ServiceEndpointError::Io {
+        step: "bind", source: last_collision.unwrap_or_else(|| io::Error::from_raw_os_error(libc::EADDRINUSE)),
+    })
+}
+
+fn publish_service_socket(source: &Path, target: &Path) -> io::Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let target = CString::new(target.as_os_str().as_bytes())?;
+    // SAFETY: 两个CString持有NUL结尾路径；同目录独占rename保留已存在的正式端点。
+    let result = unsafe {
+        libc::renameatx_np(libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, target.as_ptr(), libc::RENAME_EXCL)
+    };
+    if result != 0 { return Err(io::Error::last_os_error()); }
+    Ok(())
+}
+
 /// 当前进程 effective uid（bind/封印时刻的属主锚点；生产 = 0）。
 fn current_euid() -> u32 {
     // SAFETY: geteuid 只读取当前进程 credential。
@@ -264,30 +383,40 @@ fn validate_service_parent(socket_path: &Path) -> Result<(), PreauthError> {
 }
 
 /// 仅回收「socket ∧ 属主 == owner uid ∧ 0600」的 stale leaf；其他任何形态保留现场。
-fn remove_safe_stale_service_socket(socket_path: &Path, owner_uid: u32) -> Result<(), PreauthError> {
-    let metadata = match std::fs::symlink_metadata(socket_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(PreauthError::PathInvalid),
-    };
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
-        return Err(PreauthError::PathInvalid);
-    }
-    if metadata.uid() != owner_uid || metadata.mode() & 0o7777 != SERVICE_SOCKET_MODE {
-        return Err(PreauthError::EndpointOwnership);
-    }
-    // T7（UDS 偷取缺口修复）：文件属性全部匹配**不代表** stale——活引擎的 socket
-    // 同样满足。摘除前必须 connect 探活：可连=有本形态 engine 正在监听，摘除它
-    // 会把活实例的端点偷走（其 listener 变孤儿、新实例劫持后续连接）；连接被拒
-    // （ECONNREFUSED）才是真 stale。UDS 无 FIRST_PIPE_INSTANCE 等价物，这是
-    // darwin 侧"每用户单 engine"互斥的探活实现（D-d3 倾向：探活 connect）。
-    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
-        return Err(PreauthError::EndpointInUse);
-    }
-    std::fs::remove_file(socket_path).map_err(|_| PreauthError::CleanupRefused)
+fn remove_safe_stale_service_socket(socket_path: &Path, owner_uid: u32) -> Result<(), ServiceEndpointError> {
+    remove_safe_stale_service_socket_with_connect(socket_path, owner_uid, |path| {
+        std::os::unix::net::UnixStream::connect(path)
+    })
 }
 
-/// bind 后封印属主：`fchownat(uid=owner, gid 不变, NOFOLLOW)` 并复验最终 identity。
+fn remove_safe_stale_service_socket_with_connect(
+    socket_path: &Path,
+    owner_uid: u32,
+    connect: impl FnOnce(&Path) -> io::Result<std::os::unix::net::UnixStream>,
+) -> Result<(), ServiceEndpointError> {
+    let metadata = match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(PreauthError::PathInvalid.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+        return Err(PreauthError::PathInvalid.into());
+    }
+    if metadata.uid() != owner_uid || metadata.mode() & 0o7777 != SERVICE_SOCKET_MODE {
+        return Err(PreauthError::EndpointOwnership.into());
+    }
+    // 只消费原本这一次 connect；其他错误不是 stale，不能据此删除目标。
+    match connect(socket_path) {
+        Ok(_) => return Err(PreauthError::EndpointInUse.into()),
+        Err(error) if error.raw_os_error() == Some(libc::ECONNREFUSED) => {}
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+        Err(source) => return Err(ServiceEndpointError::Io { step: "stale.connect", source }),
+    }
+    std::fs::remove_file(socket_path).map_err(|_| PreauthError::CleanupRefused)?;
+    Ok(())
+}
+
+/// bind 后以 `fchownat(uid=owner, gid 不变, NOFOLLOW)` 设置属主；最终identity由bind统一记录。
 fn seal_service_socket(socket_path: &Path, owner_uid: u32) -> Result<(), PreauthError> {
     let parent = socket_path.parent().ok_or(PreauthError::PathInvalid)?;
     let leaf = socket_path.file_name().ok_or(PreauthError::PathInvalid)?;
@@ -308,7 +437,7 @@ fn seal_service_socket(socket_path: &Path, owner_uid: u32) -> Result<(), Preauth
     if chown_result != 0 {
         return Err(PreauthError::EndpointOwnership);
     }
-    service_endpoint_identity(socket_path, owner_uid).map(|_| ())
+    Ok(())
 }
 
 /// 读取并校验端点 identity：socket ∧ 属主 uid == owner uid ∧ 0600（gid 不钉死——

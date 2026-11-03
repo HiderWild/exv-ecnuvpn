@@ -27,7 +27,7 @@ use std::{
 };
 
 use crate::service_status::{
-    ServiceAgentFacts, ServiceAgentHealth, SERVICE_AGENT_BINARY_PATH, derive_health,
+    SERVICE_AGENT_BINARY_PATH, ServiceAgentFacts, ServiceAgentHealth, derive_health,
 };
 
 /// 提权执行等待上界——包含用户阅读弹窗与输入管理员密码的时间（系统弹窗无超时，
@@ -37,28 +37,16 @@ use crate::service_status::{
     reason = "5 分钟上界无更大单位的 std 构造器可读形式"
 )]
 const ELEVATION_BOUND: Duration = Duration::from_secs(300);
-/// 动作后就绪/移除等待上界（对齐 win32 `SERVICE_READY_TIMEOUT=15s` 的档位语义：
-/// 「双事实达成」在 darwin = socket 可连且 Status 未被拒）。
-const READINESS_BOUND: Duration = Duration::from_secs(15);
-/// 卸载后移除观察上界（win32 `wait_service_removed` 500ms 上界的 darwin 放宽档：
-/// bootout 异步终止 daemon 后 guarded remove 才能生效）。
-const REMOVAL_BOUND: Duration = Duration::from_secs(10);
-/// 就绪/移除轮询间隔。
-const READINESS_POLL: Duration = Duration::from_millis(250);
-
 /// 用户取消管理员授权（系统弹窗「取消」）的稳定码。
 pub(crate) const ELEVATION_DENIED_CODE: &str = "DARWIN_CORE_SERVICE_ELEVATION_DENIED";
 /// 提权执行失败（payload 非零退出/超时/无法启动 osascript）的稳定码。
 pub(crate) const ELEVATION_FAILED_CODE: &str = "DARWIN_CORE_SERVICE_ELEVATION_FAILED";
-/// 动作后等待就绪超时的稳定码。
-pub(crate) const SERVICE_NOT_READY_CODE: &str = "DARWIN_CORE_SERVICE_NOT_READY";
 /// start/ensure 在未安装态发起的稳定码。
 pub(crate) const SERVICE_NOT_INSTALLED_CODE: &str = "DARWIN_CORE_SERVICE_NOT_INSTALLED";
 /// 安装源二进制缺失（bundle 未随附且无已安装副本）的稳定码。
 pub(crate) const SERVICE_SOURCE_MISSING_CODE: &str = "DARWIN_CORE_SERVICE_AGENT_SOURCE_MISSING";
 
-/// 提权执行结果；`Failed` 携带失败细节（service agent 稳定码，或 stderr 有界尾部——
-/// 仅固定路径/系统文本，无秘密；供 typed message 与日志聚合诊断使用）。
+/// 提权执行结果；Failed保留原失败诊断，UI摘要另行有界，日志保留分项原因。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ElevationOutcome {
     /// payload 以退出码 0 完成；携带 stdout 原文（oneshot 场景解析 engine pid，
@@ -76,15 +64,13 @@ pub(crate) trait ServiceElevator: Send + Sync {
     fn run_admin_payload(&self, prompt: &str, payload: &str) -> ElevationOutcome;
 }
 
-/// 一次服务生命周期动作的稳定错误类别（全部携带最终探测事实供上层回填快照）。
+/// 一次服务生命周期动作的错误；facts仅记录动作前输入，不冒称动作后状态。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LifecycleError {
     /// 用户取消管理员授权。
     Denied(ServiceAgentFacts),
-    /// 提权执行失败或超界（细节=稳定码/有界 stderr，进 typed message 与日志）。
+    /// 提权执行失败或超界；原诊断进日志，typed message使用有界摘要。
     Failed(ServiceAgentFacts, String),
-    /// 动作后等待就绪超时（携带最后事实）。
-    NotReady(ServiceAgentFacts),
     /// start/ensure 在未安装态发起。
     NotInstalled(ServiceAgentFacts),
     /// 安装源二进制缺失。
@@ -156,20 +142,13 @@ pub(crate) struct ServicePayloads {
     /// **预卸载合并 payload**（2026-09-12，§5.1 step 2）：一次提权内按
     /// 「先停 → 再删」顺序完成全部 root 动作：
     ///
-    /// 1. `<runner> retire-legacy`：历史三个守护（bootout 固定 label + 删 descriptor
-    ///    与安装目录）；
-    /// 2. `<runner> sweep-runtime-residue`：`/private/tmp` 下 root 属主 runtime 残留
-    ///    （活会话跳过）；
-    /// 3. `<runner> uninstall --owner-uid N --owner-gid N`：当前服务的 descriptor +
-    ///    `ServiceAgent/` 安装目录（退役命名空间由 `retire-legacy` 回收）；
-    /// 4. `rm -f` 两个 root 属主 engine 日志——**必须排在停服务之后**：root engine
-    ///    运行期间会持续 append（实测 pump.log 持续增长），先删会被立即重建。
+    /// 1. `<runner> sweep-runtime-residue`：既有runtime残留（活会话跳过）；
+    /// 2. `<runner> uninstall --owner-uid N --owner-gid N`：停止当前服务并按owner
+    ///    守卫回收本代artifact及空的ServiceAgent目录；
+    /// 3. `rm -f` 两个root Engine日志，排在停止当前服务之后。
     ///
-    /// 用 `;` 串联而非 `&&`：单项失败不得阻断后续项。
-    ///
-    /// **结果判定契约**：本 payload 的退出码**不能**作为成功依据（`;` 串联下它只反映
-    /// 最后一项）。分项结果由**调用方**（壳命令 `pre_uninstall`）在提权返回后以
-    /// 后置 `lstat` 逐项核对得出（§5.3）；core 只负责按顺序发起这一次提权。
+    /// 各步骤原结果立即捕获，后续仍执行，最终返回首个真实失败；普通产品卸载不再
+    /// 自动退役历史开发工具，不以末步成功或后置lstat覆盖原失败。
     pub uninstall: String,
     /// `<runner> start`
     pub start: String,
@@ -218,9 +197,9 @@ pub(crate) fn build_payloads(
         install.push_str(&shell_quote(&engine.to_string_lossy()));
     }
     ServicePayloads {
-        install,
+        install: capture_service_output(&install),
         uninstall: build_purge_payload(&runner, owner_uid, owner_gid),
-        start: format!("{runner} start"),
+        start: capture_service_output(&format!("{runner} start")),
     }
 }
 
@@ -235,9 +214,51 @@ fn build_purge_payload(runner: &str, owner_uid: u32, owner_gid: u32) -> String {
         .map(|path| shell_quote(path))
         .collect::<Vec<_>>()
         .join(" ");
+    capture_service_output(&preserve_step_results(&[
+        format!("{runner} sweep-runtime-residue"),
+        format!("{runner} uninstall --owner-uid {owner_uid} --owner-gid {owner_gid}"),
+        format!("rm -f {logs}"),
+    ]))
+}
+
+/// 完整卸载在同一提权内先恢复官方配置；恢复失败立即退出，保留后续产物。
+fn build_full_uninstall_payload(paths: &ServiceAgentPaths, owner_uid: u32, owner_gid: u32) -> Option<String> {
+    let engine = paths.engine.as_deref().filter(|path| path.is_file())?;
+    let restore = format!("{} --internal-restore-auth-receiver --owner-uid {owner_uid}",
+        shell_quote(&engine.to_string_lossy()));
+    let purge = build_purge_payload(&shell_quote(&paths.source.to_string_lossy()), owner_uid, owner_gid);
+    Some(restored_uninstall_payload(&restore, &purge))
+}
+
+fn restored_uninstall_payload(restore: &str, purge: &str) -> String {
+    capture_service_output(&format!("{restore} || exit $?; ( {purge} )"))
+}
+
+/// AppleScript 成功仅返回 stdout：把原命令输出保存在本次 shell 内，失败仍走 stderr。
+/// 只供固定服务动作；oneshot PID 通道不经过此包装。
+fn capture_service_output(command: &str) -> String {
     format!(
-        "{runner} retire-legacy ; {runner} sweep-runtime-residue ; {runner} uninstall --owner-uid {owner_uid} --owner-gid {owner_gid} ; rm -f {logs}"
+        r#"exv_output=$( ( {command} ) 2>&1); exv_status=$?; if [ "$exv_status" -eq 0 ]; then printf '%s\n' "$exv_output"; else printf '%s\n' "$exv_output" >&2; fi; exit "$exv_status""#
     )
+}
+
+fn optional_service_failures(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| line.starts_with("optional service action failed step=")
+            || line.starts_with("service-uninstall retained directory="))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 每步仍依次执行，立即保存原退出码，最终返回首个真实失败。
+fn preserve_step_results(steps: &[String]) -> String {
+    let mut payload = String::from("exv_first=0; ");
+    for (index, step) in steps.iter().enumerate() {
+        payload.push_str(&format!(r#"{{ {step}; }} || {{ exv_code=$?; printf 'service-purge step={index} exit=%s\n' "$exv_code" >&2; if [ "$exv_first" -eq 0 ]; then exv_first=$exv_code; fi; }}; "#));
+    }
+    payload.push_str(r#"exit "$exv_first""#);
+    payload
 }
 
 /// W3 oneshot 提权弹窗文案（固定常量纪律：无引号/反斜杠，不进 `AppleScript`
@@ -376,9 +397,7 @@ pub(crate) struct ServiceLifecycle {
     probe: ServiceStatusProbe,
     paths: ServiceAgentPathsResolver,
     install_root_probe: InstallRootProbe,
-    readiness_poll: Duration,
-    readiness_bound: Duration,
-    removal_bound: Duration,
+    launch_requested_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     owner_uid: u32,
     owner_gid: u32,
 }
@@ -391,18 +410,18 @@ impl ServiceLifecycle {
         let gid = unsafe { libc::getgid() };
         Self {
             elevator: std::sync::Arc::new(OsascriptElevator),
-            probe: std::sync::Arc::new(|| Box::pin(crate::service_status::probe_service_agent_facts())),
+            probe: std::sync::Arc::new(|| {
+                Box::pin(crate::service_status::probe_service_agent_facts())
+            }),
             paths: std::sync::Arc::new(resolve_service_agent_paths),
             install_root_probe: std::sync::Arc::new(install_root_has_entries),
-            readiness_poll: READINESS_POLL,
-            readiness_bound: READINESS_BOUND,
-            removal_bound: REMOVAL_BOUND,
+            launch_requested_at: std::sync::Mutex::new(None),
             owner_uid: credentials.uid(),
             owner_gid: gid,
         }
     }
 
-    /// 测试构造：注入 elevator/探测/路径/轮询节奏（毫秒级钉死等待语义）。
+    /// 测试构造：注入 elevator/动作前输入/路径；旧测试时长参数不再参与动作后等待。
     #[allow(
         clippy::similar_names,
         reason = "owner uid/gid 是 service agent CLI 与 serve 描述的既有配对词汇"
@@ -411,8 +430,8 @@ impl ServiceLifecycle {
         elevator: std::sync::Arc<dyn ServiceElevator>,
         probe: ServiceStatusProbe,
         paths: ServiceAgentPathsResolver,
-        readiness_poll: Duration,
-        action_bound: Duration,
+        _readiness_poll: Duration,
+        _action_bound: Duration,
         owner_uid: u32,
         owner_gid: u32,
     ) -> Self {
@@ -423,12 +442,26 @@ impl ServiceLifecycle {
             // 夹具恒「安装根目录为空」：测试要断言该维度时显式
             // `with_install_root_probe` 注入，绝不触碰宿主 `/Library`。
             install_root_probe: std::sync::Arc::new(|| false),
-            readiness_poll,
-            readiness_bound: action_bound,
-            removal_bound: action_bound,
+            launch_requested_at: std::sync::Mutex::new(None),
             owner_uid,
             owner_gid,
         }
+    }
+
+    /// 成功发出的启动动作仅在当前Core内保留，供实际连接沿原启动窗口等待。
+    fn record_launch_requested(&self) {
+        *self.launch_requested_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(tokio::time::Instant::now());
+    }
+
+    pub(crate) fn launch_window_deadline(&self) -> Option<tokio::time::Instant> {
+        let launched = *self.launch_requested_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        launched.map(|at| at + crate::engine_lifecycle_real::BOOTSTRAP_DEADLINE)
+            .filter(|limit| *limit > tokio::time::Instant::now())
+    }
+
+    pub(crate) fn clear_launch_requested(&self) {
+        *self.launch_requested_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     async fn facts(&self) -> ServiceAgentFacts {
@@ -441,25 +474,6 @@ impl ServiceLifecycle {
         std::sync::Arc::clone(&self.probe)
     }
 
-    /// 有界轮询直到谓词成立或超界；返回最后事实（调用方据 `NotReady` 上报）。
-    async fn wait_until(
-        &self,
-        bound: Duration,
-        mut predicate: impl FnMut(&ServiceAgentFacts) -> bool,
-    ) -> ServiceAgentFacts {
-        let deadline = tokio::time::Instant::now() + bound;
-        loop {
-            let facts = self.facts().await;
-            if predicate(&facts) {
-                return facts;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return facts;
-            }
-            tokio::time::sleep(self.readiness_poll).await;
-        }
-    }
-
     /// 提权执行经 `spawn_blocking` 下沉阻塞线程：Core 是 `current_thread` runtime，
     /// 系统密码弹窗最长挂起 [`ELEVATION_BOUND`]，绝不能冻结 gRPC/事件循环。
     async fn run_elevated(
@@ -467,105 +481,111 @@ impl ServiceLifecycle {
         prompt: &str,
         payload: &str,
         facts: ServiceAgentFacts,
-    ) -> Result<(), LifecycleError> {
-        let elevator = std::sync::Arc::clone(&self.elevator);
-        let prompt = prompt.to_owned();
-        let payload = payload.to_owned();
-        let outcome =
-            tokio::task::spawn_blocking(move || elevator.run_admin_payload(&prompt, &payload))
-                .await
-                .unwrap_or_else(|join_error| {
-                    ElevationOutcome::Failed(format!("elevation worker failed: {join_error}"))
-                });
-        match outcome {
-            ElevationOutcome::Executed(_) => Ok(()),
+    ) -> Result<String, LifecycleError> {
+        match self.run_elevated_command(prompt, payload).await {
+            ElevationOutcome::Executed(output) => Ok(optional_service_failures(&output)),
             ElevationOutcome::Denied => Err(LifecycleError::Denied(facts)),
             ElevationOutcome::Failed(detail) => Err(LifecycleError::Failed(facts, detail)),
         }
     }
 
-    /// 安装/修复（win32 `[Install, Start, Verify]` 批量的 darwin 对应：service agent
-    /// `install` 单动词内含 bootout→覆写→bootstrap 的替换序列；随后有界等待
-    /// daemon 就绪）。
-    pub(crate) async fn install(&self) -> Result<ServiceAgentFacts, LifecycleError> {
+    /// 执行原提权命令，不生成或读取服务状态事实。
+    async fn run_elevated_command(&self, prompt: &str, payload: &str) -> ElevationOutcome {
+        let elevator = std::sync::Arc::clone(&self.elevator);
+        let prompt = prompt.to_owned();
+        let payload = payload.to_owned();
+        tokio::task::spawn_blocking(move || elevator.run_admin_payload(&prompt, &payload))
+            .await
+            .unwrap_or_else(|join_error| ElevationOutcome::Failed(format!("elevation worker failed: {join_error}")))
+    }
+
+    /// 安装/修复：只接纳service agent install命令自身的完成结果；返回仅含可选真实失败诊断。
+    pub(crate) async fn install(&self) -> Result<String, LifecycleError> {
         let facts = self.facts().await;
         let paths = (self.paths)();
         if !paths.source.is_file() {
             return Err(LifecycleError::SourceMissing(facts));
         }
         let payloads = build_payloads(&paths, self.owner_uid, self.owner_gid);
-        self.run_elevated(
+        let result = self.run_elevated(
             "EXV 需要安装系统级网络服务组件（复制服务并注册为系统守护进程）",
             &payloads.install,
             facts,
         )
-        .await?;
-        let final_facts = self.wait_until(self.readiness_bound, healthy).await;
-        if healthy(&final_facts) {
-            Ok(final_facts)
-        } else {
-            Err(LifecycleError::NotReady(final_facts))
-        }
+        .await;
+        if result.is_ok() { self.record_launch_requested(); }
+        result
     }
 
     /// 卸载（幂等；2026-09-12 起语义扩展为**预卸载合并动作**，§5.1 step 2）。
     ///
     /// 触发判据见 [`purge_needed`]：任一 service agent 产物在场或固定安装根目录非空即
     /// 提权一次，,[`build_payloads`] 的合并 payload 内一次完成
-    /// 「retire-legacy → sweep-runtime-residue → uninstall → 删 root engine 日志」。
+    /// 「sweep-runtime-residue → uninstall → 删 root engine 日志」。
     /// 全无残留时直接 Ok（不弹密码、无副作用）。
     ///
     /// 变更动作调用方（`kernel_control_service`）已在调用前尽力停业务
     /// （`stop_for_service_transition`），对应 §5.1 step 1；`sweep-runtime-residue`
     /// 对活会话另有 W10 活性跳过。
-    pub(crate) async fn uninstall(&self) -> Result<ServiceAgentFacts, LifecycleError> {
+    pub(crate) async fn uninstall(&self) -> Result<String, LifecycleError> {
+        self.uninstall_with_cleanup(false).await
+    }
+
+    pub(crate) async fn uninstall_with_cleanup(&self, full_cleanup: bool) -> Result<String, LifecycleError> {
         let facts = self.facts().await;
         if !purge_needed(&facts, (self.install_root_probe)()) {
-            return Ok(facts);
+            self.clear_launch_requested();
+            return Ok(String::new());
         }
-        let payloads = build_payloads(&(self.paths)(), self.owner_uid, self.owner_gid);
-        self.run_elevated(
+        let paths = (self.paths)();
+        let payload = if full_cleanup {
+            build_full_uninstall_payload(&paths, self.owner_uid, self.owner_gid)
+                .ok_or(LifecycleError::SourceMissing(facts))?
+        } else {
+            build_payloads(&paths, self.owner_uid, self.owner_gid).uninstall
+        };
+        let result = self.run_elevated(
             "EXV 需要管理员权限以移除系统级残留（停止并删除系统服务、历史守护进程、安装文件与运行时残留）",
-            &payloads.uninstall,
+            &payload,
             facts,
         )
-        .await?;
-        let final_facts = self
-            .wait_until(self.removal_bound, |facts| {
-                !facts.binary_present && !facts.socket_file_present
-            })
-            .await;
-        if installed(&final_facts) || final_facts.socket_file_present {
-            Err(LifecycleError::NotReady(final_facts))
-        } else {
-            Ok(final_facts)
+        .await;
+        if result.is_ok() { self.clear_launch_requested(); }
+        result
+    }
+
+    /// 已有真实 daemon 连接缺席后的原 start，不以第二次探测替代命令。
+    pub(crate) async fn start_after_daemon_absent(&self) -> Result<String, String> {
+        let payloads = build_payloads(&(self.paths)(), self.owner_uid, self.owner_gid);
+        match self.run_elevated_command("EXV 系统服务连接失败，需要管理员权限重新启动它", &payloads.start).await {
+            ElevationOutcome::Executed(output) => {
+                self.record_launch_requested();
+                Ok(optional_service_failures(&output))
+            }
+            ElevationOutcome::Denied => Err(ELEVATION_DENIED_CODE.to_owned()),
+            ElevationOutcome::Failed(detail) => Err(detail),
         }
     }
 
     /// 按需启动（win32 `PromptStart` 的 darwin 对应）：healthy 即幂等成功；已装
-    /// 未跑则提权 `start`（service agent 单动词内含 bootout-ignore→bootstrap）后等待
-    /// 就绪；未安装为稳定拒绝（Core 绝不自动安装——win32 同款，安装由 UI 编排）。
-    pub(crate) async fn ensure_running(&self) -> Result<ServiceAgentFacts, LifecycleError> {
+    /// 未跑则提权 `start` 并返回该命令原结果；未安装为稳定拒绝（Core 绝不自动安装——win32 同款，安装由 UI 编排）。
+    pub(crate) async fn ensure_running(&self) -> Result<String, LifecycleError> {
         let facts = self.facts().await;
         if healthy(&facts) {
-            return Ok(facts);
+            return Ok(String::new());
         }
         if !installed(&facts) {
             return Err(LifecycleError::NotInstalled(facts));
         }
         let payloads = build_payloads(&(self.paths)(), self.owner_uid, self.owner_gid);
-        self.run_elevated(
+        let result = self.run_elevated(
             "EXV 系统服务未在运行，需要管理员权限重新启动它",
             &payloads.start,
             facts,
         )
-        .await?;
-        let final_facts = self.wait_until(self.readiness_bound, healthy).await;
-        if healthy(&final_facts) {
-            Ok(final_facts)
-        } else {
-            Err(LifecycleError::NotReady(final_facts))
-        }
+        .await;
+        if result.is_ok() { self.record_launch_requested(); }
+        result
     }
 }
 
@@ -578,13 +598,25 @@ impl ServiceLifecycle {
 /// dimension=parent-guard`）；旧实现取到首个稳定码 token 即截断，会吞掉增强
 /// 维度。放宽后捕获稳定码起始的整行（固定常量与系统文本，无秘密），整行限
 /// 200 字符防长行 stderr 灌入 typed message 与日志。
-fn elevation_failure_detail(stderr: &str) -> String {
-    const STABLE_CODE_PREFIX: &str = "DARWIN_SERVICE_AGENT_";
+pub(crate) fn elevation_failure_detail(stderr: &str) -> String {
+    const STABLE_CODE_PREFIXES: [&str; 2] = ["DARWIN_SERVICE_AGENT_", "DARWIN_AUTH_RECEIVER_RESTORE_FAILED"];
     const DETAIL_BOUND: usize = 200;
-    if let Some(start) = stderr.find(STABLE_CODE_PREFIX) {
-        let tail = &stderr[start..];
+    // purge每步失败后立即写诊断；首步无稳定码时也不能被后一步错误抢占摘要。
+    let first_step = stderr.find("service-purge step=");
+    let first_failure = first_step.map_or(stderr, |end| &stderr[..end]);
+    if let Some(start) = STABLE_CODE_PREFIXES.iter().filter_map(|prefix| first_failure.find(prefix)).min() {
+        let tail = &first_failure[start..];
         let line_end = tail.find(['\n', '\r']).unwrap_or(tail.len());
         return tail[..line_end].chars().take(DETAIL_BOUND).collect();
+    }
+    if let Some(start) = first_step {
+        return stderr[start..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(DETAIL_BOUND)
+            .collect();
     }
     let trimmed = stderr.trim();
     if trimmed.is_empty() {
@@ -682,7 +714,11 @@ impl ServiceElevator for OsascriptElevator {
         if canceled {
             ElevationOutcome::Denied
         } else {
-            ElevationOutcome::Failed(elevation_failure_detail(&stderr))
+            ElevationOutcome::Failed(format!(
+                "{}\ndiagnostics: {}",
+                elevation_failure_detail(&stderr),
+                stderr.trim()
+            ))
         }
     }
 }
@@ -722,8 +758,8 @@ pub(crate) fn hermetic_lifecycle() -> ServiceLifecycle {
         std::sync::Arc::new(DeniedElevator),
         hermetic_healthy_probe(),
         std::sync::Arc::new(resolve_service_agent_paths),
-        READINESS_POLL,
-        READINESS_BOUND,
+        Duration::ZERO,
+        Duration::ZERO,
         501,
         20,
     )

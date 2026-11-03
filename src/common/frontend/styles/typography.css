@@ -1,0 +1,10 @@
+/* 两宿主共用四级文字字号；宿主字体族、颜色和布局保留各自入口。 */
+:root {
+  --font-size-caption: 13px;
+  --font-size-body: 14px;
+  --font-size-heading: 18px;
+  --font-size-display: 28px;
+  /* 兼容现有消费者，别名不新增字号档。 */
+  --font-size-control: var(--font-size-body);
+  --font-size-xs: var(--font-size-caption);
+}

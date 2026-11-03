@@ -30,7 +30,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.open, requestClos
 <template>
   <div
     v-if="open"
-    class="modal-overlay"
+    class="modal-overlay exv-dialog"
     data-testid="routes-modal"
     role="dialog"
     aria-modal="true"
@@ -41,7 +41,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.open, requestClos
     :aria-busy="busy"
     @click.self="requestClose"
   >
-    <div class="modal-card routes-modal-card">
+    <div class="modal-card routes-modal-card exv-dialog-card">
       <h2 id="routes-modal-title">路由设置</h2>
       <p class="modal-hint">经过 VPN 的目标网段；支持 CIDR（如 10.0.0.0/8）或单个 IP（视为 /32）。确认修改后，请在设置页点击“保存设置”应用。</p>
       <p v-if="errorMessage" class="routes-save-error" data-testid="routes-save-error" role="alert">{{ errorMessage }}</p>
@@ -60,8 +60,8 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.open, requestClos
 <style scoped>
 .modal-overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: var(--space-5); background: rgb(0 0 0 / 0.45); overflow: hidden; }
 .routes-modal-card { position: relative; width: min(100%, 820px); max-height: min(86vh, 820px); display: flex; flex-direction: column; overflow: hidden; padding: var(--space-6); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); box-shadow: 0 12px 32px rgb(0 0 0 / 0.28); color: var(--text-primary); }
-.routes-modal-card h2 { margin: 0 0 var(--space-2); font-size: 18px; }
-.modal-hint { margin: 0 0 var(--space-4); color: var(--text-secondary); font-size: 13px; }
-.routes-save-error { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); border-left: 2px solid var(--state-danger); background: color-mix(in srgb, var(--state-danger) 8%, transparent); color: var(--state-danger); font-size: 12px; line-height: 1.45; }
+.routes-modal-card h2 { margin: 0 0 var(--space-2); font-size: var(--font-size-heading); }
+.modal-hint { margin: 0 0 var(--space-4); color: var(--text-secondary); font-size: var(--font-size-caption); }
+.routes-save-error { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); border-left: 2px solid var(--state-danger); background: color-mix(in srgb, var(--state-danger) 8%, transparent); color: var(--state-danger); font-size: var(--font-size-caption); line-height: 1.45; }
 @media (max-width: 700px) { .routes-modal-card { padding: var(--space-4); } }
 </style>

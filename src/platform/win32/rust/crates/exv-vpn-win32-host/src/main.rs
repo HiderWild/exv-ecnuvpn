@@ -189,7 +189,7 @@ pub async fn run_core(args: CoreArgs) -> i32 {
         "info",
         "core",
         "core.start.lazy_engine",
-        "core booting without engine; oneshot engine provisioned on first business request",
+        "core booting without engine; oneshot engine provisioned on first connect request",
         &std::collections::BTreeMap::new(),
     );
 

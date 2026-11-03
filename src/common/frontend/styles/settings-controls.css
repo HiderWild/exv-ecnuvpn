@@ -1,0 +1,28 @@
+/* 原生 select 的内部选项宽度不得传播为设置页横向可滚动范围。
+   只在控件自身的布局边界截断绘制溢出，保留原生下拉和页面纵向滚动。 */
+.settings-page :is(.config-control, .server-choice, .authentication-mode-control, .preference-control):has(> select) {
+  overflow: clip;
+}
+
+/* 绘制边界内保留清晰键盘焦点，避免外描边被上述局部边界截断。 */
+.settings-page :is(.config-control, .server-choice, .authentication-mode-control, .preference-control):has(> select) :is(select, input, button):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* 实验性分区（双端统一）：卡片外缘 --state-warning 警示描边（浅/深色两套 token
+   均生效）；标题与提示行常显（其余分区头部 display:none）。选择器带 .settings-page
+   前缀抬高特异性，稳定压过各端 SettingsPage scoped 的 .settings-section 描边。 */
+.settings-page .settings-section.settings-experimental {
+  border-color: var(--state-warning);
+}
+.settings-page .settings-section.settings-experimental > .settings-section__header {
+  display: block;
+  padding-top: var(--space-3);
+}
+.settings-page .settings-section.settings-experimental .settings-experimental__note {
+  margin: 2px 0 0;
+  color: var(--state-warning);
+  font-size: var(--font-size-caption);
+  overflow-wrap: anywhere;
+}

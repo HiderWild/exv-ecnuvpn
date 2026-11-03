@@ -5,7 +5,7 @@ use super::{
     DataFrame, L3Frame,
     codec::split_ipv4_packets,
     flow_auth::{
-        FlowAuthError, FlowAuthRequest, FlowAuthorization, Ipv4Flow, parse_response, sign_request,
+        FlowAuthError, FlowAuthRequest, FlowAuthorization, Ipv4Flow, decode_response, sign_request,
     },
     packet_ipv4::{parse, reverse},
 };
@@ -359,31 +359,23 @@ impl PacketEngine {
         payload: &[u8],
         now: Instant,
     ) -> Result<PacketActions, PacketError> {
-        let mut matched = None;
-        // 授权响应低频扫描待授权项；已授权包路径只查 HashMap，不逐包扫描目录。
-        for (flow, entry) in &self.entries {
-            if !matches!(entry.state, State::Pending(_)) {
-                continue;
-            }
-            let decision = parse_response(status, payload, entry.id, *flow);
-            if matches!(decision, Err(FlowAuthError::FlowMismatch)) {
-                continue;
-            }
-            // 无法解释的 JSON 不归罪于当前遍历到的某条流。
-            if matches!(
-                decision,
-                Err(FlowAuthError::InvalidJson
-                    | FlowAuthError::InvalidResponseShape { .. }
-                    | FlowAuthError::PayloadTooLarge)
-            ) {
-                return Err(PacketError::Authorization(decision.expect_err("error")));
-            }
-            matched = Some((*flow, decision));
-            break;
-        }
-        let Some((flow, decision)) = matched else {
+        let mut pending = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry.state, State::Pending(_)));
+        let Some(first) = pending.next() else {
             return Ok(PacketActions::default());
         };
+        // 无 Pending 时沿用空结果；否则仅解码一次，再按原遍历顺序匹配。
+        let response = decode_response(payload)?;
+        let Some((flow, _)) = std::iter::once(first)
+            .chain(pending)
+            .find(|(flow, entry)| response.matches_flow(entry.id, **flow))
+        else {
+            return Ok(PacketActions::default());
+        };
+        let flow = *flow;
+        let decision = response.into_authorization(status);
         let mut entry = self.entries.remove(&flow).expect("matched entry");
         let State::Pending(mut pending) = entry.state else {
             unreachable!();
@@ -402,7 +394,15 @@ impl PacketEngine {
                 self.entries.insert(flow, entry);
             }
             Ok(FlowAuthorization::RetryAfter(delay)) if pending.attempts < 3 => {
-                pending.retry_at = Some(now + delay);
+                if delay.is_zero() {
+                    pending.attempts += 1;
+                    pending.retry_at = None;
+                    result.to_node.push(L3Frame::AuthRequest {
+                        payload: pending.signed.to_vec(),
+                    });
+                } else {
+                    pending.retry_at = Some(now + delay);
+                }
                 pending.deadline = now + delay + self.limits.auth_timeout;
                 entry.state = State::Pending(pending);
                 self.entries.insert(flow, entry);

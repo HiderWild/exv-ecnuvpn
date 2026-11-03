@@ -237,6 +237,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "zeroize",
 ]
 

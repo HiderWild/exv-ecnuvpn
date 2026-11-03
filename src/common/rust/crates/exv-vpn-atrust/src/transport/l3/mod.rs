@@ -36,3 +36,88 @@ pub use codec::{
     L3_MAX_PAYLOAD, L3_MAX_TOKEN_LEN, L3_VERSION, L3Decoder, L3Frame,
 };
 
+// 仅供 L3 握手/连接的原 I/O 捕获点使用，不保留原始错误对象或敏感正文。
+fn io_detail(error: &std::io::Error) -> String {
+    let detail = if let Some(code) = error.raw_os_error() {
+        std::io::Error::from_raw_os_error(code).to_string()
+    } else if let Some(tls) = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    {
+        match tls {
+            rustls::Error::AlertReceived(alert) => format!("rustls: AlertReceived({alert:?})"),
+            rustls::Error::DecryptError => "rustls: DecryptError".into(),
+            rustls::Error::EncryptError => "rustls: EncryptError".into(),
+            rustls::Error::InvalidMessage(detail) => format!("rustls: InvalidMessage({detail:?})"),
+            rustls::Error::PeerMisbehaved(_) => "rustls: PeerMisbehaved".into(),
+            rustls::Error::PeerIncompatible(_) => "rustls: PeerIncompatible".into(),
+            rustls::Error::InvalidCertificate(_) => "rustls: InvalidCertificate".into(),
+            rustls::Error::InappropriateMessage { .. } => "rustls: InappropriateMessage".into(),
+            rustls::Error::InappropriateHandshakeMessage { .. } => {
+                "rustls: InappropriateHandshakeMessage".into()
+            }
+            rustls::Error::PeerSentOversizedRecord => "rustls: PeerSentOversizedRecord".into(),
+            rustls::Error::HandshakeNotComplete => "rustls: HandshakeNotComplete".into(),
+            rustls::Error::General(detail) => {
+                format!("rustls: General: {}", redact_io_detail(detail))
+            }
+            _ => "rustls: other error (detail redacted)".into(),
+        }
+    } else {
+        redact_io_detail(&error.to_string())
+    };
+    let mut bounded = String::new();
+    for ch in detail.chars().filter(|ch| !ch.is_control()) {
+        if bounded.len() + ch.len_utf8() > 256 {
+            break;
+        }
+        bounded.push(ch);
+    }
+    bounded
+}
+
+fn redact_io_detail(text: &str) -> String {
+    let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
+    let lower = text.to_ascii_lowercase();
+    let sensitive_start = [
+        "cookie",
+        "authorization",
+        "password",
+        "passwd",
+        "credential",
+        "token",
+        "secret",
+        "bearer",
+        "username",
+        "webvpn",
+        "sid",
+        "ticket",
+        "signkey",
+        "sign_key",
+        "certificate",
+        "public key",
+        "private key",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min();
+    let prefix = &text[..sensitive_start.unwrap_or(text.len())];
+    let mut result = prefix
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("://") {
+                "[url redacted]"
+            } else if word.contains('=') {
+                "[value redacted]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if sensitive_start.is_some() {
+        result.push_str(" [sensitive detail redacted]");
+    }
+    result
+}
+

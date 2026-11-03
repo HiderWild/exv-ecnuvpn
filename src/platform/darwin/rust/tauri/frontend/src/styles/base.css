@@ -1,3 +1,6 @@
+@import "../../../../../../../common/frontend/styles/connection-texture.css";
+@import "../../../../../../../common/frontend/styles/settings-controls.css";
+
 *,
 *::before,
 *::after {
@@ -24,8 +27,8 @@ body {
   background: var(--surface-canvas);
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--font-size-body);
+  line-height: 1.6;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -40,27 +43,34 @@ textarea {
 
 button {
   min-height: 36px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-2) 13px;
   background: var(--surface-panel);
   color: var(--text-primary);
+  font-size: var(--font-size-body);
   cursor: pointer;
   touch-action: manipulation;
-  transition: transform var(--motion-fast) var(--motion-ease), opacity var(--motion-fast) var(--motion-ease);
+  transition: background-color var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-ease), box-shadow var(--motion-fast) var(--motion-ease);
+}
+
+/* 与基础 button 同权且后置：普通按钮使用中性悬停，组件语义底色优先。 */
+button:where(:hover:not(:disabled)) {
+  background: var(--surface-hover);
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--border-strong);
+  box-shadow: 0 3px 10px rgb(26 28 26 / 5%);
+  transform: translateY(-1px);
 }
 
 button:active:not(:disabled) {
-  transform: scale(0.98);
+  transform: translateY(0);
 }
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.52;
+  opacity: 0.55;
 }
 
 button.primary {
@@ -80,18 +90,27 @@ input[type="password"],
 textarea,
 select {
   width: 100%;
-  min-height: 36px;
+  min-height: var(--control-height);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface-raised);
+  border-radius: var(--radius-control);
+  padding: var(--space-2) 10px;
+  background: var(--surface-canvas);
   color: var(--text-primary);
+  font-size: var(--font-size-body);
 }
 
 input::placeholder,
 textarea::placeholder {
   color: var(--text-tertiary);
   opacity: 1;
+}
+
+/* 单眼保证（Area F/E 全局兜底）：隐藏 WebView2 为每个密码框渲染的原生
+   「显示密码/清除」按钮，防止与组件自绘眼睛并列成双；
+   WebKit/Gecko 不识别该伪元素，规则无害。 */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  display: none;
 }
 
 :focus-visible {
@@ -127,12 +146,12 @@ h3 {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border-subtle);
   border-radius: 999px;
   padding: var(--space-1) var(--space-3);
   background: var(--surface-subtle);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   line-height: 1;
 }
 
@@ -156,6 +175,13 @@ h3 {
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
   line-height: 1.5;
 }
+
+/* 浏览器默认标题/小字比例也收敛到共用四级，避免隐含第五档。 */
+h1 { font-size: var(--font-size-display); }
+h2, h3, h4, h5, h6 { font-size: var(--font-size-heading); }
+label { font-size: var(--font-size-body); }
+small, sub, sup { font-size: var(--font-size-caption); }
+pre, code, kbd, samp { font-size: inherit; }

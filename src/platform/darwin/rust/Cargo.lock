@@ -816,6 +816,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1099,6 +1105,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "exv-vpn-atrust"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ring",
+ "rustls",
+ "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "exv-vpn-cstp"
 version = "0.1.0"
 dependencies = [
@@ -1118,18 +1145,32 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-core"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
+ "bytes",
+ "exv-vpn-atrust",
  "exv-vpn-darwin-ipc",
  "exv-vpn-host",
  "exv-vpn-wire",
  "getrandom 0.4.3",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
+ "log",
+ "prost",
+ "rcgen",
+ "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "time",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "zeroize",
@@ -1137,19 +1178,25 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-engine"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
  "async-trait",
+ "exv-vpn-atrust",
  "exv-vpn-cstp",
  "exv-vpn-darwin-ipc",
  "exv-vpn-wire",
  "getrandom 0.4.3",
  "libc",
+ "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
+ "uuid",
  "zeroize",
 ]
 
@@ -1157,6 +1204,8 @@ dependencies = [
 name = "exv-vpn-darwin-ipc"
 version = "0.1.0"
 dependencies = [
+ "exv-vpn-atrust",
+ "exv-vpn-wire",
  "getrandom 0.4.3",
  "hmac",
  "hyper-util",
@@ -1169,19 +1218,21 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-service-agent"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "exv-vpn-darwin-tauri"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
  "block2",
+ "exv-vpn-atrust",
  "exv-vpn-darwin-core",
  "exv-vpn-darwin-ipc",
  "exv-vpn-wire",
+ "futures-util",
  "getrandom 0.4.3",
  "http",
  "libc",
@@ -1189,6 +1240,8 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-user-notifications",
+ "objc2-web-kit",
+ "prost",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1198,6 +1251,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "tonic",
  "zeroize",
 ]
@@ -2988,6 +3042,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3695,6 +3759,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4229,6 +4306,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -5013,6 +5101,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5321,6 +5421,23 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1",
+ "thiserror 2.0.20",
+ "utf-8",
+]
 
 [[package]]
 name = "typeid"
@@ -6263,6 +6380,15 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]

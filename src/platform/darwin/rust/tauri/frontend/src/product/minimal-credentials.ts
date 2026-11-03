@@ -84,9 +84,10 @@ export function planMinimalCredentials(
 }
 
 /** 分支 2 的清除载荷：core `config_set` 在该组合下清零并清空密码。 */
-export function clearedCredentialConfig(): ReadonlyArray<{ key: "password" | "remember_password"; value: string }> {
+export function clearedCredentialConfig(): ReadonlyArray<{ key: "password" | "remember_password" | "auto_reconnect"; value: string }> {
   return [
     { key: "password", value: "" },
     { key: "remember_password", value: "false" },
+    { key: "auto_reconnect", value: "false" },
   ];
 }

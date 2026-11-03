@@ -20,6 +20,7 @@ type StatusTerminalObserver = Arc<dyn Fn(&StatusEvent) + Send + Sync>;
 /// 一次连接状态事件（独立 status 通道的领域形态；R1b 由真实数据面驱动）。
 #[derive(Debug, Clone)]
 pub struct StatusEvent {
+    pub stop_completion: Option<generated::StopCompletion>,
     /// 16 字节 operation_id（= `OperationLookupKey.operation_id`；与 ApplyAccepted 关联）。
     pub operation_id: Vec<u8>,
     /// 细粒度 8 级连接阶段（common.proto `ConnectPhase`）。
@@ -66,6 +67,7 @@ impl StatusEvent {
             session_established_at_ms: 0,
             aftermath_verified: false,
             reconnect_state: None,
+            stop_completion: None,
         }
     }
 
@@ -80,6 +82,7 @@ impl StatusEvent {
             session_established_at_ms: wall_clock_ms(),
             aftermath_verified: false,
             reconnect_state: None,
+            stop_completion: None,
         }
     }
 
@@ -94,6 +97,7 @@ impl StatusEvent {
             session_established_at_ms: 0,
             aftermath_verified: false,
             reconnect_state: None,
+            stop_completion: None,
         }
     }
 
@@ -108,6 +112,7 @@ impl StatusEvent {
             session_established_at_ms: 0,
             aftermath_verified: false,
             reconnect_state: None,
+            stop_completion: None,
         }
     }
 
@@ -127,7 +132,7 @@ impl StatusEvent {
     /// T6a：一个「重连进行中」事件（coarse = Connecting + 重连遥测 tag 8）。
     ///
     /// `next_retry_at_ms > 0` = 退避已排定（事件预告下一次尝试）；`= 0` = 该次
-    /// 尝试在途。携带新铸造的尝试 `operation_id`。
+    /// 尝试在途。沿用受理会话的逻辑 `operation_id`。
     #[must_use]
     pub fn reconnecting(
         operation_id: Vec<u8>,
@@ -184,6 +189,7 @@ impl StatusEvent {
     pub fn to_wire(&self) -> generated::ConnectStatusEvent {
         generated::ConnectStatusEvent {
             own_tunnel_if_index: 0,
+            stop_completion: self.stop_completion.clone(),
             operation_id: self.operation_id.clone(),
             connect_phase: self.connect_phase as i32,
             coarse_phase: self.coarse_phase as i32,
@@ -212,6 +218,7 @@ fn wall_clock_ms() -> i64 {
 struct StatusPublisherInner {
     /// 最近一次真实状态，用于查询及订阅恢复；不是凭据或操作回执。
     latest: Option<StatusEvent>,
+    sequence: u64,
     /// 当前挂接的 `StreamConnectStatus` 推送通道（`last-writer-wins`：core 是唯一消费方）。
     push: Option<StatusPushSender>,
     /// engine 内部终态观察者（R2/P2-1）：`publish` 每次调用它；`grpc_server` 用它把
@@ -224,6 +231,7 @@ struct StatusPublisherInner {
 ///
 /// 注：不 derive `Debug`——内部终态观察者（`dyn Fn`）非 `Debug`。
 pub struct StatusPublisher {
+    pub(crate) admission: Arc<crate::tunnel_runtime::lifecycle::Admission>,
     inner: Mutex<StatusPublisherInner>,
     /// 观察者与快照/推送必须同序；观察者仍在 inner 锁外，允许查询最新状态。
     publish_order: Mutex<()>,
@@ -234,9 +242,11 @@ impl StatusPublisher {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            admission: Arc::new(crate::tunnel_runtime::lifecycle::Admission::default()),
             publish_order: Mutex::new(()),
             inner: Mutex::new(StatusPublisherInner {
                 latest: None,
+                sequence: 0,
                 push: None,
                 observer: None,
             }),
@@ -276,7 +286,10 @@ impl StatusPublisher {
             if inner.latest.as_ref().is_some_and(|latest| {
                 latest.operation_id == event.operation_id &&
                     matches!(latest.coarse_phase, StatsPhase::Failed | StatsPhase::Idle) &&
-                    matches!(event.coarse_phase, StatsPhase::Connecting | StatsPhase::Connected)
+                    matches!(event.coarse_phase, StatsPhase::Connecting | StatsPhase::Connected) &&
+                    !(latest.coarse_phase == StatsPhase::Failed &&
+                        event.coarse_phase == StatsPhase::Connecting &&
+                        event.reconnect_state.is_some_and(|state| state.attempt > 0))
             }) { return; }
             inner.observer.clone()
         };
@@ -284,6 +297,7 @@ impl StatusPublisher {
             observer(&event);
         }
         let mut inner = self.inner.lock().expect("status publisher lock");
+        inner.sequence += 1;
         inner.latest = Some(event.clone());
         if let Some(tx) = &inner.push {
             let wire = event.to_wire();
@@ -292,6 +306,12 @@ impl StatusPublisher {
                 inner.push = None;
             }
         }
+    }
+
+    /// 发布序列与最新值必须从同一锁快照取得，供 R1 观察受理后的完成。
+    pub fn snapshot(&self) -> (u64, Option<StatusEvent>) {
+        let inner = self.inner.lock().expect("status publisher lock");
+        (inner.sequence, inner.latest.clone())
     }
 
     pub fn latest(&self) -> Option<StatusEvent> {

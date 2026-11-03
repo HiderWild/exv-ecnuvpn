@@ -47,10 +47,6 @@ const SERVICE_AGENT_STATE_PATH: &str = "/Library/Application Support/EXV/Service
 /// 连接路径直连与探测共用）。
 pub(crate) const SERVICE_ENGINE_SOCKET_PATH: &str =
     "/Library/Application Support/EXV/ServiceAgent/engine.sock";
-/// W2.5：连接路径修复阶梯后有界等 engine 端点的上界/轮询间隔（对齐
-/// `service_lifecycle` READINESS 档位）。
-pub(crate) const ENGINE_ENDPOINT_WAIT_BOUND: Duration = Duration::from_secs(15);
-pub(crate) const ENGINE_ENDPOINT_WAIT_POLL: Duration = Duration::from_millis(250);
 /// socket connect 探测与 Status RPC 的有界上限（fail-soft；daemon 单线程接受连接，
 /// 忙碌窗口内查询最多等这么久就保守回落）。
 const PROBE_BOUND: Duration = Duration::from_secs(3);
@@ -72,12 +68,16 @@ pub(crate) struct ServiceAgentFacts {
     pub status_accepted: Option<bool>,
     /// W2.5 service engine 端点维度：engine.sock 文件在场。
     pub engine_socket_present: bool,
-    /// W2.5 service engine 端点维度：engine.sock 可连（有界 connect 成功；连接
-    /// 立即释放——engine 对单 client 半途关闭只关该连接）。
+    /// W2.5 service engine 端点维度：engine.sock 端点文件在场且为 socket 类型。
+    ///
+    /// 2026-09-30 修复（M1）：不再以 connect 探测——connect 会被 engine uid 门仅凭
+    /// peer uid 准入为一条完整会话并武装会话占用拒绝循环（`DARWIN_ENGINE_ATTEMPT_ACTIVE`
+    /// 故障根因）。stale socket（engine 崩溃残留：stat 判活但真实 connect
+    /// ECONNREFUSED）由连接路径的修复阶梯兜底（直连失败落入 EnsureEngine/有界等待）。
     pub engine_socket_connectable: bool,
 }
 
-/// W2.5：service engine 端点是否 healthy（文件在+可连；权威规范：客观事实
+/// W2.5：engine 端点是否 healthy（文件在场且为 socket；权威规范：客观事实
 /// 显示 down 才触发 core 修复介入）。
 #[must_use]
 pub(crate) fn engine_endpoint_healthy(facts: &ServiceAgentFacts) -> bool {
@@ -181,6 +181,13 @@ async fn probe_status_accepted() -> Option<bool> {
 /// 顺序：三个廉价 stat → 有界 connect → socket 可连时才做有界 Status RPC（不通时
 /// RPC 必然失败，直接省去）。全程无特权只读；任何一步失败都保守回落，不 panic。
 pub(crate) async fn probe_service_agent_facts() -> ServiceAgentFacts {
+    probe_service_agent_facts_for(SERVICE_ENGINE_SOCKET_PATH).await
+}
+
+/// [`probe_service_agent_facts`] 的 engine 端点参数化形态（生产恒传固定
+/// [`SERVICE_ENGINE_SOCKET_PATH`]，签名与语义不变；测试注入 temp 路径做
+/// hermetic 探测断言——T1 接缝）。
+async fn probe_service_agent_facts_for(engine_socket_path: &str) -> ServiceAgentFacts {
     let binary_present = path_present(SERVICE_AGENT_BINARY_PATH);
     let socket_file_present = path_present(SOCKET_PATH);
     let state_leaf_present = path_present(SERVICE_AGENT_STATE_PATH);
@@ -190,9 +197,9 @@ pub(crate) async fn probe_service_agent_facts() -> ServiceAgentFacts {
     } else {
         None
     };
-    let engine_socket_present = path_present(SERVICE_ENGINE_SOCKET_PATH);
+    let engine_socket_present = path_present(engine_socket_path);
     let engine_socket_connectable = if engine_socket_present {
-        engine_socket_connectable().await
+        engine_socket_connectable(engine_socket_path)
     } else {
         false
     };
@@ -207,10 +214,19 @@ pub(crate) async fn probe_service_agent_facts() -> ServiceAgentFacts {
     }
 }
 
-/// W2.5：有界探测 engine.sock 可连性（fail-soft；连接立即释放）。
-async fn engine_socket_connectable() -> bool {
-    match timeout(PROBE_BOUND, UnixStream::connect(SERVICE_ENGINE_SOCKET_PATH)).await {
-        Ok(Ok(_stream)) => true,
-        Ok(Err(_)) | Err(_) => false,
-    }
+/// W2.5→2026-09-30 修复（M1）：engine.sock 端点健康的非侵入判定——文件在场且为
+/// socket 类型（`S_IFSOCK`；fail-soft：stat 失败视为不健康）。
+///
+/// 不再以 connect 探测——connect 会被 engine uid 门仅凭 peer uid 准入为一条完整
+/// 会话并武装会话占用拒绝循环（`busy_reject_loop`/`SessionOccupiedService`，
+/// 2026-09-30 `DARWIN_ENGINE_ATTEMPT_ACTIVE` 故障根因）；紧随探针 1-2ms 的真实
+/// 控制会话会撞进占用窗口被恒拒。本函数是连接双探针、ServiceControl 查询探针与
+/// 修复阶梯轮询的唯一 engine 端点事实源——本体的「零 connect」覆盖全部调用点。
+fn engine_socket_connectable(path: &str) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.mode() & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFSOCK)
+        })
+        .unwrap_or(false)
 }

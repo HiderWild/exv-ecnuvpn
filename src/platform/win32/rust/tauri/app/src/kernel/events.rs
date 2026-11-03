@@ -12,7 +12,7 @@
 //! 快照缓存由 `snapshot` 命令维护（事件本身携带快照，前端可即时渲染）。
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 
@@ -61,7 +61,10 @@ pub fn emit_status(app: &AppHandle, event: &RuntimeEvent) -> tauri::Result<()> {
 /// `EventBus::subscribe` 按 resume_tick 重放当前快照，断线重放语义）→ 退避重连。
 ///
 /// StreamLogs（`exv://logs`）为 wire 缺口（见模块文档），当前不拉起。
-pub fn spawn_subscriptions(app: AppHandle, channel: Channel) -> Vec<tauri::async_runtime::JoinHandle<()>> {
+pub fn spawn_subscriptions(
+    app: AppHandle,
+    channel: Channel,
+) -> Vec<tauri::async_runtime::JoinHandle<()>> {
     let mut handles = Vec::new();
 
     // WatchEvents 订阅（经 CoreClient.open_watch_stream 打开流，语义与命令层一致）。
@@ -91,6 +94,19 @@ pub fn spawn_subscriptions(app: AppHandle, channel: Channel) -> Vec<tauri::async
                     Ok(wire_ev) => {
                         // 记录本地已见最大 tick，供断线后 resume（core 断线重放语义）。
                         resume_tick = resume_tick.max(wire_ev.monotonic_tick);
+                        let requests = app_status.state::<super::client::CoreState>().connection_requests.clone();
+                        let _ = dispatch_auth_acquisition(&requests, &channel_status, &wire_ev, {
+                            let app = app_status.clone();
+                            let requests = requests.clone();
+                            move |request, lease, attempt| async move {
+                                let profiles = exv_core::browser_cache_profile::BrowserDataDirs::from_frozen_profile(std::path::PathBuf::from(&request.browser_profile), request.browser_profile_explicit);
+                                // 冻结目录合同在原解析入口恢复 Default/Explicit，不迁移 Owned 目录。
+                                let school = super::client::school_auto_login_saved(&request.gateway, request.auto_login, std::path::Path::new(&request.config_dir));
+                                // Core 后台请求只使用静默 HTTP → 隐藏 Owned，不发布前台认证事件。
+                                super::client::acquire_browser_once(&requests, app.clone(), request.gateway, "headless".into(), lease, school, true, true, attempt, profiles,
+                                    |_, _| {}).await
+                            }
+                        });
                         let ui = wire::event_from_wire(&wire_ev);
                         if let Err(e) = emit_status(&app_status, &ui) {
                             tracing::debug!(target: "exv.events", "emit_status failed: {e}");
@@ -102,6 +118,10 @@ pub fn spawn_subscriptions(app: AppHandle, channel: Channel) -> Vec<tauri::async
                     }
                 }
             }
+            {
+                let state = app_status.state::<super::client::CoreState>();
+                state.connection_requests.auth_acquisitions.clear(&state.connection_requests);
+            }
             // 流 EOF = core 断开（或 stream 错误）→ T9 保守死亡复核（弱提示源）→ 退避重连。
             super::bootstrap::handle_core_disconnect(&app_status).await;
             tracing::warn!(target: "exv.events", "watch_events stream ended; reconnecting from tick {resume_tick}");
@@ -112,8 +132,44 @@ pub fn spawn_subscriptions(app: AppHandle, channel: Channel) -> Vec<tauri::async
 
     handles
 }
-
 /// WatchEvents 重连初始退避。
 const WATCH_RECONNECT_BASE: std::time::Duration = std::time::Duration::from_millis(200);
 /// WatchEvents 重连退避上限。
 const WATCH_RECONNECT_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 与真实订阅相同的同步派发入口；获取期间后续事件继续进入原映射。
+pub(super) fn dispatch_auth_acquisition<F, Fut>(
+    requests: &super::connection_request::ConnectionRequests,
+    channel: &Channel,
+    event: &exv_vpn_wire::generated::RuntimeEvent,
+    acquire: F,
+) -> Option<tokio::task::JoinHandle<()>>
+where
+    F: FnOnce(
+            exv_vpn_wire::generated::AtrustAuthAcquisition,
+            super::connection_request::ConnectionRequest,
+            exv_core::browser_auth::AuthAttempt,
+        ) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<
+            Output = (
+                Result<
+                    exv_vpn_win32_ipc::browser_session::BrowserSession,
+                    exv_core::atrust_browser::BrowserAuthError,
+                >,
+                super::connection_request::ConnectionRequest,
+            ),
+        > + Send
+        + 'static,
+{
+    let snapshot = event.snapshot.as_ref()?;
+    let ticket = requests
+        .auth_acquisitions
+        .observe(requests, snapshot.atrust_auth_acquisition.as_ref())?;
+    let requests = requests.clone();
+    let channel = channel.clone();
+    Some(tokio::spawn(super::auth_acquisition::consume(
+        requests, channel, ticket, acquire,
+    )))
+}

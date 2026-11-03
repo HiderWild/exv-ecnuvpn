@@ -1,7 +1,7 @@
 
 //! 连接痕迹（connection trace）存储——T1 载体（2026-09-27 计划 §2.1–§2.4）。
 //!
-//! 用途：连接受理时落一个持久痕迹文件，**善后验证完成后才删除**；连接前痕迹仍在
+//! 用途：连接受理时落一个持久痕迹文件，善后验证或 W2 实际回滚干净后才删除；连接前痕迹仍在
 //! （含损坏）即触发并行只读预检（计划 §三）。engine 是唯一写者（D1-b：全部写操作
 //! 经本 store 串行化，core 不直接落盘），因此：
 //!
@@ -163,14 +163,37 @@ pub struct TraceRecord {
     pub adapter_names: Vec<String>,
     /// 本连接注册的 NRPT 规则 owner GUID 清单（预检 NRPT 域；engine 装配后补写）。
     pub nrpt_owner_guids: Vec<String>,
+    /// 本连接**等效接纳**的外来 NRPT 形式清单（external-provided；2026-10-08 计划
+    /// 阶段 1）。台账语义：这些形式由外来规则提供、不归 EXV 所有——认领清理/
+    /// 善后只认 `EXV-NRPT:` owner 前缀，本清单仅作取证与下次连接重验对照，
+    /// **不驱动任何删除，也不期待这些规则消失**（防死锁约束）。schema v1 后补
+    /// 字段：`#[serde(default)]` 使旧文件仍可解析（缺键读空）。
+    #[serde(default)]
+    pub nrpt_external_forms: Vec<String>,
+    /// 本连接**静默精准接管**的外来 NRPT 形式清单（D8 阶段 2；2026-10-09 用户
+    /// 裁定）。台账语义同 `nrpt_external_forms`：仅取证（journal 有完整形状与
+    /// 完成标记，`scripts/repair-foreign-nrpt-rule.ps1 -Restore` 是唯一恢复路径）
+    /// ——teardown **不恢复**被接管规则（恢复=制造 EXV 不拥有的规则），善后
+    /// 只认 owner GUID 前缀。schema v1 后补字段：`#[serde(default)]` 兼容旧文件
+    /// （缺键读空；`ui_pid` 先例）。
+    #[serde(default)]
+    pub nrpt_taken_over_forms: Vec<String>,
     /// 本连接占用的本地代理端口清单（预检系统代理域；engine 装配后补写）。
     pub proxy_ports: Vec<u16>,
+    /// 本次实际回滚未竟的稳定域 id；不存错误文本、资源值或 operation 原数据。
+    /// schema v1 旧文件缺此键时仍可读；下次预检依据实际残留重新裁定。
+    #[serde(default)]
+    pub rollback_unresolved: Vec<String>,
 }
 
 /// 读 trace 文件的三态结局。
 ///
 /// [`TraceReadOutcome::Corrupt`] 不是"不存在"：损坏 = 善后未竟，预检必须看见它
 /// （计划 §三：触发条件是"trace 存在（含损坏）"）。
+// 三态枚举是既有对外形态（装箱 Present 会波及全部 match 点）；schema v1 后补
+// nrpt_external_forms 字段使变体大小差越过 lint 阈值，按值返回仍是冷路径
+// （读盘后单次消费），局部豁免。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TraceReadOutcome {
     /// 文件不存在（干净状态）。
@@ -186,10 +209,18 @@ pub enum TraceReadOutcome {
 /// 仅覆盖 §2.2 中"创建时不可知、装配后确定"的四个字段；`None` = 不改动。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TracePatch {
+    /// 实际回滚未竟域清单（整组替换，只写稳定域 id）。
+    pub rollback_unresolved: Option<Vec<String>>,
     /// 网卡名清单（整组替换）。
     pub adapter_names: Option<Vec<String>>,
     /// NRPT 规则 owner GUID 清单（整组替换）。
     pub nrpt_owner_guids: Option<Vec<String>>,
+    /// 等效接纳的外来 NRPT 形式清单（external-provided；整组替换；仅取证，
+    /// 不驱动删除）。
+    pub nrpt_external_forms: Option<Vec<String>>,
+    /// 静默精准接管的外来 NRPT 形式清单（D8 阶段 2；整组替换；仅取证——
+    /// journal 才是恢复依据，teardown 不恢复）。
+    pub nrpt_taken_over_forms: Option<Vec<String>>,
     /// 本地代理端口清单（整组替换）。
     pub proxy_ports: Option<Vec<u16>>,
     /// engine 进程 PID。
@@ -228,6 +259,15 @@ pub enum TraceStoreError {
 pub struct ConnectionTraceStore {
     /// trace 目录（已按 W14 建立并加固）。
     dir: PathBuf,
+}
+
+/// 锁内核对实际 UUID 后的事实，不把其他代次或原已缺失的文件声称为本次删除。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RollbackTraceEffect {
+    Deleted,
+    Preserved,
+    Absent,
+    Replaced,
 }
 
 impl ConnectionTraceStore {
@@ -315,7 +355,11 @@ impl ConnectionTraceStore {
     /// # Errors
     ///
     /// 文件不存在（[`TraceStoreError::Absent`]）/ 现有文件损坏 / 写入失败。
-    pub fn update_state(&self, user_sid: &str, new_state: TraceState) -> Result<(), TraceStoreError> {
+    pub fn update_state(
+        &self,
+        user_sid: &str,
+        new_state: TraceState,
+    ) -> Result<(), TraceStoreError> {
         self.modify(user_sid, |record| record.state = new_state)
     }
 
@@ -345,8 +389,14 @@ impl ConnectionTraceStore {
     /// # Errors
     ///
     /// 文件不存在 / 现有文件损坏 / 写入失败。
-    pub fn mark_established(&self, user_sid: &str, established_at_ms: u64) -> Result<(), TraceStoreError> {
-        self.modify(user_sid, |record| record.established_at_ms = established_at_ms)
+    pub fn mark_established(
+        &self,
+        user_sid: &str,
+        established_at_ms: u64,
+    ) -> Result<(), TraceStoreError> {
+        self.modify(user_sid, |record| {
+            record.established_at_ms = established_at_ms
+        })
     }
 
     /// 装配后补写网卡/NRPT/代理端口/engine PID（其余字段不动）。
@@ -356,11 +406,20 @@ impl ConnectionTraceStore {
     /// 文件不存在 / 现有文件损坏 / 写入失败（含超限）。
     pub fn patch_fields(&self, user_sid: &str, patch: &TracePatch) -> Result<(), TraceStoreError> {
         self.modify(user_sid, |record| {
+            if let Some(domains) = &patch.rollback_unresolved {
+                record.rollback_unresolved.clone_from(domains);
+            }
             if let Some(names) = &patch.adapter_names {
                 record.adapter_names.clone_from(names);
             }
             if let Some(guids) = &patch.nrpt_owner_guids {
                 record.nrpt_owner_guids.clone_from(guids);
+            }
+            if let Some(forms) = &patch.nrpt_external_forms {
+                record.nrpt_external_forms.clone_from(forms);
+            }
+            if let Some(forms) = &patch.nrpt_taken_over_forms {
+                record.nrpt_taken_over_forms.clone_from(forms);
             }
             if let Some(ports) = &patch.proxy_ports {
                 record.proxy_ports.clone_from(ports);
@@ -373,7 +432,8 @@ impl ConnectionTraceStore {
 
     /// 删除 trace。
     ///
-    /// **只在善后验证通过后调用**（删除权矩阵归调用方，§2.4；本 store 只负责
+    /// 善后验证通过后的删除（删除权矩阵归调用方，§2.4；W2 使用带 UUID 核对的
+    /// `finish_rollback`；本方法只负责
     /// 原子移除）。文件已不存在视为成功（幂等——删除意图已达成）。
     ///
     /// # Errors
@@ -387,6 +447,70 @@ impl ConnectionTraceStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(TraceStoreError::Io(e)),
         }
+    }
+
+    /// W2 阶段 5 有意修订旧失败留痕语义：真实资源清理干净才删本次 trace。
+    /// 读 UUID 和写/删保持同一个进程内写锁，避免覆写已经换代的 trace；不承诺跨进程原子性。
+    pub(crate) fn finish_rollback(
+        &self,
+        user_sid: &str,
+        connection_id: &str,
+        patch: &TracePatch,
+    ) -> Result<RollbackTraceEffect, TraceStoreError> {
+        self.with_connection(user_sid, connection_id, |mut record, path| {
+            let domains = patch.rollback_unresolved.as_deref().unwrap_or_default();
+            if domains.is_empty() {
+                fs::remove_file(path).map_err(TraceStoreError::Io)?;
+                Ok(RollbackTraceEffect::Deleted)
+            } else {
+                record.rollback_unresolved = domains.to_vec();
+                self.write_atomic(user_sid, &record, true)?;
+                Ok(RollbackTraceEffect::Preserved)
+            }
+        })
+    }
+
+    /// 沿用 trace 的 UUID 和写锁：必要收尾与新连接建痕互斥，回调不得等待或读写 trace。
+    pub(crate) fn finish_aftermath(
+        &self,
+        user_sid: &str,
+        connection_id: &str,
+        delete: bool,
+        on_current: impl FnOnce(),
+    ) -> Result<RollbackTraceEffect, TraceStoreError> {
+        self.with_connection(user_sid, connection_id, |mut record, path| {
+            // 本次会话确已停止时，内存材料仍应收口；磁盘失败另入 StopReport。
+            on_current();
+            if delete {
+                fs::remove_file(path).map_err(TraceStoreError::Io)?;
+                Ok(RollbackTraceEffect::Deleted)
+            } else {
+                record.state = TraceState::Aftermath;
+                self.write_atomic(user_sid, &record, true)?;
+                Ok(RollbackTraceEffect::Preserved)
+            }
+        })
+    }
+
+    /// 回滚与正常停止共用原 UUID 条件操作；没有第二份身份或持久化材料。
+    fn with_connection(
+        &self,
+        user_sid: &str,
+        connection_id: &str,
+        action: impl FnOnce(TraceRecord, PathBuf) -> Result<RollbackTraceEffect, TraceStoreError>,
+    ) -> Result<RollbackTraceEffect, TraceStoreError> {
+        validate_sid(user_sid)?;
+        let _guard = write_lock();
+        let path = self.trace_path(user_sid);
+        let record = match read_trace_at(&path)? {
+            TraceReadOutcome::Present(record) => record,
+            TraceReadOutcome::Absent => return Ok(RollbackTraceEffect::Absent),
+            TraceReadOutcome::Corrupt => return Err(TraceStoreError::Corrupt),
+        };
+        if record.connection_id != connection_id {
+            return Ok(RollbackTraceEffect::Replaced);
+        }
+        action(record, path)
     }
 
     /// `<dir>/trace-<user-sid>.json`。
@@ -484,13 +608,17 @@ fn validate_sid(user_sid: &str) -> Result<(), TraceStoreError> {
 /// 临时目录；对齐 `journal_path.rs` / `log_sink.rs`）。
 fn machine_connection_dir() -> PathBuf {
     if let Some(program_data) = std::env::var_os("PROGRAMDATA") {
-        let candidate = PathBuf::from(program_data).join("ExvVpn").join("connection");
+        let candidate = PathBuf::from(program_data)
+            .join("ExvVpn")
+            .join("connection");
         if dir_is_usable(&candidate) {
             return candidate;
         }
     }
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data).join("ExvVpn").join("connection");
+        return PathBuf::from(local_app_data)
+            .join("ExvVpn")
+            .join("connection");
     }
     std::env::temp_dir().join("ExvVpn").join("connection")
 }

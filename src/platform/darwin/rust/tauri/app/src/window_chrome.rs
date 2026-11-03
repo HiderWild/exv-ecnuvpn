@@ -24,7 +24,7 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use tauri::{LogicalSize, Manager, Runtime, State, WebviewWindow};
 
 const ADVANCED_MIN_WIDTH: f64 = 860.0;
-const ADVANCED_MIN_HEIGHT: f64 = 600.0;
+const ADVANCED_MIN_HEIGHT: f64 = 620.0;
 const ADVANCED_DEFAULT_WIDTH: f64 = 1180.0;
 const ADVANCED_DEFAULT_HEIGHT: f64 = 760.0;
 const MINIMAL_WIDTH: f64 = 328.0;
@@ -41,6 +41,14 @@ const TRAFFIC_LIGHTS_PX: f64 = 78.0;
 const ADVANCED_WEB_CONTROL_PX: f64 = 288.0;
 /// 极简模式 icon-only 两控件约 138px + 右缘 8px 距离 + 余量。
 const MINIMAL_WEB_CONTROL_PX: f64 = 168.0;
+
+/// 恢复完整窗口时，旧记忆尺寸不能绕过当前原生最低尺寸。
+fn advanced_restore_size(size: LogicalSize<f64>) -> LogicalSize<f64> {
+    LogicalSize::new(
+        size.width.max(ADVANCED_MIN_WIDTH),
+        size.height.max(ADVANCED_MIN_HEIGHT),
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowMode {
@@ -296,7 +304,7 @@ impl WindowChromeState {
                     .lock()
                     .map_err(|_| "窗口尺寸锁已损坏")?;
                 window
-                    .set_size(size)
+                    .set_size(advanced_restore_size(size))
                     .map_err(|error| format!("恢复完整窗口尺寸失败：{error}"))?;
                 if *self
                     .advanced_was_maximized
@@ -325,7 +333,7 @@ impl Default for WindowChromeState {
     }
 }
 
-/// 窗口模式切换（advanced 1180×760/min 860×600 ↔ minimal 328×136；不动装饰）。
+/// 窗口模式切换（advanced 1180×760/min 860×620 ↔ minimal 328×136；不动装饰）。
 #[tauri::command]
 pub(crate) async fn window_chrome_set_mode<R: Runtime>(
     window: WebviewWindow<R>,

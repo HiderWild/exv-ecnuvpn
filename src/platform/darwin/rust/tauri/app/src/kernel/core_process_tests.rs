@@ -243,6 +243,25 @@ fn fixed_launch_arguments_reject_zero_or_out_of_range_identity() {
     runtime.cleanup_empty().expect("clean empty test runtime");
 }
 
+#[test]
+fn direct_release_and_debug_resolve_only_their_shared_profile_from_a_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().expect("temporary repository layout");
+    let manifest = directory.path().join(".worktrees/c1/src/platform/darwin/rust/tauri/app");
+    fs::create_dir_all(&manifest).unwrap();
+    for profile in ["release", "debug"] {
+        let parent = directory.path().join("target").join(profile);
+        fs::create_dir_all(&parent).unwrap();
+        let binary = parent.join("exv-vpn-darwin-core");
+        fs::write(&binary, profile.as_bytes()).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let resolved = super::core_process::shared_profile_core_binary_at(&manifest, profile).unwrap();
+        assert_eq!(resolved, binary.canonicalize().unwrap());
+    }
+    fs::remove_file(directory.path().join("target/release/exv-vpn-darwin-core")).unwrap();
+    assert_eq!(super::core_process::shared_profile_core_binary_at(&manifest, "release"), Err(CoreProcessError::CoreBinaryMissing));
+}
+
 // ---- MAC-PACKAGE-12：无签名 `.app` bundle 布局的 Core resolver 布局判定 ----
 
 /// 构造真实 bundle 形状的临时目录（含产品名空格），返回 launcher exe 路径。
@@ -462,8 +481,8 @@ async fn ordinary_user_core_child_serves_config_idle_and_reaps() {
 
 /// MAC-OBS-13 S2 真实 Core smoke：起真实 Core 子进程，`logs_list` 在**无 Engine 会话、
 /// 无任何 VPN 连接**的情况下经同一认证 channel 返回 Core 聚合日志的真实分页。语义覆盖：
-/// 空库（`next_seq=1`）、`config_set` 真实节点入库后尾部拉取（条目不带 seq）、增量游标
-/// 续拉空页（`next_seq = last_seq + 1`）、`filter` 透传无匹配空页。
+/// 空库（`next_seq=1`）、成功配置不产生无内容日志、空页游标与filter透传。
+/// 非空条目序列化与游标由Core聚合器及日志RPC现有局部测试覆盖。
 #[tokio::test]
 #[ignore = "先构建固定 target/debug/exv-vpn-darwin-core，再运行这个真实普通用户 smoke"]
 async fn ordinary_user_core_child_serves_logs_list_without_an_engine_session() {
@@ -499,7 +518,7 @@ async fn ordinary_user_core_child_serves_logs_list_without_an_engine_session() {
             })
             .await
             .map_err(|error| error.to_string())?;
-        // config_set 的真实节点入库（CONFIG_SET）使聚合日志出现首条真实条目。
+        // 配置成功由原回复消费，不为日志分页制造生产成功流水。
         let tail = client
             .logs_list(LogsListRequest {
                 after_seq: 0,
@@ -509,13 +528,8 @@ async fn ordinary_user_core_child_serves_logs_list_without_an_engine_session() {
             .await
             .map_err(|error| error.to_string())?
             .into_inner();
-        assert_eq!(tail.entries.len(), 1, "初始拉取返回最近条目");
-        let event = tail.entries.first().expect("config entry");
-        assert_eq!(event.level, "info");
-        assert_eq!(event.component, "core");
-        assert_eq!(event.code, "CONFIG_SET");
-        assert_eq!(event.message, "configuration updated");
-        assert_eq!(tail.next_seq, 2, "游标 = 最后返回条目 seq + 1");
+        assert!(tail.entries.is_empty(), "配置成功不生成无内容日志");
+        assert_eq!(tail.next_seq, 1, "空库游标保持1");
 
         let incremental = client
             .logs_list(LogsListRequest {
@@ -527,7 +541,7 @@ async fn ordinary_user_core_child_serves_logs_list_without_an_engine_session() {
             .map_err(|error| error.to_string())?
             .into_inner();
         assert!(incremental.entries.is_empty(), "游标已追平应返回空页");
-        assert_eq!(incremental.next_seq, 2, "空页游标保持 last_seq + 1 稳健");
+        assert_eq!(incremental.next_seq, 1, "空页游标保持 last_seq + 1 稳健");
 
         let filtered = client
             .logs_list(LogsListRequest {

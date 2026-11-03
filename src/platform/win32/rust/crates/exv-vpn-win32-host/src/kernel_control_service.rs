@@ -1,5 +1,9 @@
 
 
+pub(crate) mod session_orchestration;
+mod auth_continuation;
+use auth_continuation::RecoveryRound;
+use session_orchestration::{SessionInput, SessionOutput};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -27,7 +31,7 @@ use exv_vpn_resource::authority::{
     ConnectionBinding, PeerCapability, PeerContext, VerifiedConnectionMetadata,
 };
 use exv_vpn_win32_config::{
-    ConnectionMode, ExvConfig, Protocol, load_for_startup, save_after_user_submission,
+    ConfigError, ConnectionMode, ExvConfig, Protocol, load_for_startup, save_after_user_submission,
 };
 use exv_vpn_win32_ipc::peer_auth::{SYSTEM_SID, VerifiedPipePeer, current_user_sid};
 use exv_vpn_win32_ipc::pipe_names::control_pipe_name_for_current_user;
@@ -41,12 +45,13 @@ use exv_vpn_win32_resource::system_proxy::{
 use exv_vpn_wire::generated::kernel_control_server::{KernelControl, KernelControlServer};
 use exv_vpn_wire::generated::{
     self as wire, ApplyTunnelReply, ApplyTunnelRequest, ConfigGetRequest, ConfigItem,
-    ConfigPayload, ConfigReply, ConfigSetRequest, ConnectPhase, ConnectRequest,
-    GetKernelOperationRequest, GetOperationRequest, InteractionResponse, KernelOperationReply,
-    LogsClearReply, LogsClearRequest, LogsListReply, LogsListRequest, ObserveOwnedStateRequest,
-    OperationReply, OperationState, ReconcileRequest, RuntimeEvent, RuntimeSnapshot,
-    ServiceControlReply, ServiceControlRequest, ServiceSelfReport, SnapshotRequest, StopRequest,
-    StopTunnelRequest, WatchEventsRequest, WatchStatsRequest, service_control_request,
+    ConfigPayload, ConfigReadFailure as WireConfigReadFailure, ConfigRecovery, ConfigReply,
+    ConfigSetRequest, ConnectPhase, ConnectRequest, GetKernelOperationRequest,
+    GetOperationRequest, InteractionResponse, KernelOperationReply, LogsClearReply,
+    LogsClearRequest, LogsListReply, LogsListRequest, ObserveOwnedStateRequest, OperationReply,
+    OperationState, ReconcileRequest, RuntimeEvent, RuntimeSnapshot, ServiceControlReply,
+    ServiceControlRequest, ServiceSelfReport, SnapshotRequest, StopRequest, StopTunnelRequest,
+    WatchEventsRequest, WatchStatsRequest, service_control_request,
 };
 use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE};
 use windows::Win32::Security::{
@@ -118,12 +123,19 @@ impl StatusAttachment {
 /// 2026-09-27：8 位置参数收敛为结构体——凭据处置、会话策略与冻结路由三组
 /// 语义按名传值，用户连接与 C3a 自动重连两条调用路径不再按位对齐）。
 struct RunConnectInputs {
+    /// 手动认证开始时的原始单调截止；自动重连沿用原恢复轮期限。
+    auth_deadline: Option<tokio::time::Instant>,
+    /// 浏览器候选的非秘密绑定；只在实际接纳时核对。
+    auth_binding: Option<wire::AuthBinding>,
     /// 一次性 UI 凭据（仅用户路径携带；自动重连恒 `None`，凭据从磁盘重组）。
     ui_credentials: Option<UiConnectionCredentials>,
     /// 是否把 UI 凭据持久化（remember_password）。
     persist_credentials: bool,
     /// 本次连接冻结的会话策略（用户路径在点击时刻读取；重连复用 `None`）。
     new_session_policy: Option<ReconnectSessionPolicy>,
+    /// 本次连接冻结的会话身份投影（用户路径在点击时刻读取；重连复用 `None`，
+    /// 沿用当前 lane——同一会话身份不随自动重连改变）。
+    new_session_identity: Option<SessionIdentity>,
     /// 重连路径核对的在途 dispatch id（防旧 attempt 迟到派发；用户路径 `None`）。
     expected_dispatch_id: Option<Uuid>,
     /// 受理时冻结的协议（重连不重读设置）。
@@ -149,6 +161,15 @@ struct ConnectDispatch {
     stop_required: bool,
 }
 
+/// 仅保存首次受理的派发关联；终态和资源所有权仍由 Engine 持有。
+#[derive(Clone)]
+struct AcceptedStop {
+    request_digest: Vec<u8>,
+    engine_required: bool,
+    operation_key: wire::OperationLookupKey,
+    attempt_id: Option<Uuid>,
+}
+
 async fn connect_cancelled(cancelled: &mut watch::Receiver<bool>) {
     while !*cancelled.borrow_and_update() {
         if cancelled.changed().await.is_err() {
@@ -169,16 +190,78 @@ struct StatusForwarderOwner {
     attach_attempt: u64,
     reattach_reason: &'static str,
     backoff: Duration,
+    /// T5/F9：detached 占位（新装无引擎）attach 失败的日志节流状态。
+    detached_log_throttle: DetachedAttachLogThrottle,
+}
+
+/// T5/F9：detached 占位 attach 失败的日志节流决策。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetachedAttachLogEmission {
+    /// 首次失败：保留一条 info（新装无引擎为预期态）。
+    First,
+    /// 周期心跳：一条 debug，携带自上次发射以来被静音的失败数。
+    Heartbeat { suppressed: u64 },
+    /// 静音期：不发射任何日志。
+    Suppressed,
+}
+
+/// T5/F9：状态转发器对 detached 占位（新装无引擎）attach 失败的日志节流状态。
+///
+/// 按需拉起模型下 core 启动即空槽，转发器每轮退避重试都会对占位订阅失败
+/// （100ms→5s 封顶，2026-10-10 实测 41 条/3.5 分钟刷屏），干扰真实故障归因。
+/// 规则：首个失败保留一条 info，其后静音，每 [`STATUS_DETACHED_LOG_INTERVAL`]
+/// 至多一条 debug 心跳（携带 suppressed 计数）；退避重试节奏本身不变。
+/// 真实 engine 的订阅失败不受此节流影响（仍走既有 warn 路径）。成功挂接或
+/// 槽换点后重置（新一轮 detached 失败重新从首条 info 起）。
+#[derive(Debug, Default)]
+struct DetachedAttachLogThrottle {
+    /// 已发射过首条 info。
+    logged_first: bool,
+    /// 自上次对外发射以来被静音的失败次数。
+    suppressed: u64,
+    /// 下一条 debug 心跳的到期时刻（tokio 时钟；测试经 `start_paused` 快进）。
+    next_debug_at: Option<tokio::time::Instant>,
+}
+
+impl DetachedAttachLogThrottle {
+    /// 记录一次 detached 占位 attach 失败，返回该次失败的日志决策。
+    fn record_failure(&mut self, now: tokio::time::Instant) -> DetachedAttachLogEmission {
+        if !self.logged_first {
+            self.logged_first = true;
+            self.suppressed = 0;
+            self.next_debug_at = Some(now + STATUS_DETACHED_LOG_INTERVAL);
+            return DetachedAttachLogEmission::First;
+        }
+        if self.next_debug_at.is_some_and(|deadline| now >= deadline) {
+            let suppressed = self.suppressed;
+            self.suppressed = 0;
+            self.next_debug_at = Some(now + STATUS_DETACHED_LOG_INTERVAL);
+            return DetachedAttachLogEmission::Heartbeat { suppressed };
+        }
+        self.suppressed += 1;
+        DetachedAttachLogEmission::Suppressed
+    }
+
+    /// 重置节流（成功挂接 / 槽换点：新一轮 detached 失败重新从首条 info 起）。
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl StatusForwarderOwner {
     fn log(&self, level: &str, code: &str, message: &str) {
-        let _ = self.logs.append_core(
-            level,
-            "kernel",
-            code,
-            message,
-            &BTreeMap::from([
+        self.log_with_fields(level, code, message, &[]);
+    }
+
+    /// 同 [`Self::log`]，但允许附加结构化字段（T5 心跳的 `suppressed` 计数）。
+    fn log_with_fields(
+        &self,
+        level: &str,
+        code: &str,
+        message: &str,
+        extra_fields: &[(String, String)],
+    ) {
+        let mut fields = BTreeMap::from([
                 ("core_pid".to_string(), std::process::id().to_string()),
                 (
                     "core_session_id".to_string(),
@@ -211,13 +294,17 @@ impl StatusForwarderOwner {
                     "failure_category".to_string(),
                     match code {
                         "kernel.forward.status_attach_failed" => "status_subscribe",
+                        "kernel.forward.status_attach_detached" => "status_subscribe_detached",
                         "kernel.forward.status_eof" => "stream_eof",
                         _ => "none",
                     }
                     .to_string(),
                 ),
-            ]),
-        );
+            ]);
+        for (key, value) in extra_fields {
+            fields.insert(key.clone(), value.clone());
+        }
+        let _ = self.logs.append_core(level, "kernel", code, message, &fields);
     }
 
     fn slot_swapped(&mut self, generation: u64) {
@@ -225,6 +312,8 @@ impl StatusForwarderOwner {
         StatusAttachment::advance(&self.attachment, generation);
         self.reattach_reason = "slot_swap";
         self.backoff = ENGINE_EVENT_RECONNECT_BASE;
+        // T5：换点即换 engine 形态——detached 节流周期随之重新起算。
+        self.detached_log_throttle.reset();
         self.log(
             "info",
             "kernel.forward.status_slot_swapped",
@@ -309,6 +398,9 @@ pub struct KernelControlService {
     core_session_id: Uuid,
     /// 同步短锁；只在 composition 或 engine 之后取得，持锁期间没有 await。
     connect_dispatch: Arc<std::sync::Mutex<Option<ConnectDispatch>>>,
+    // 仅保存受理身份、摘要、原 Engine 派发资格与关联，不存结果；随 Core 销毁。控制句柄/EngineSlot generation 不是 Engine
+    // 实例身份，不能据此淘汰旧键（否则旧 Stop 会改写新会话）。
+    accepted_stops: Arc<std::sync::Mutex<std::collections::HashMap<Vec<u8>, AcceptedStop>>>,
     /// 已取消的路由允许完成启动，但必须先退出才能开始下一次路由，避免迟到换槽。
     connect_route_lock: Arc<Mutex<()>>,
     /// R3-C1 `await_status_ready` 的有界等待上界（默认 [`STATUS_READY_WAIT`]；测试
@@ -316,6 +408,8 @@ pub struct KernelControlService {
     status_ready_wait: Duration,
     /// S3/D5：非提权 SCM 服务状态源（默认真实 `OpenSCManagerW`；测试注入确定性结果）。
     service_status_source: Arc<dyn ServiceStatusSource>,
+    network_probe: fn(Instant) -> serde_json::Value,
+    network_light_probe: fn(Instant) -> serde_json::Value,
     /// R2（T6b）：SCM 崩溃恢复配置（failure actions）只读查询 seam（默认真实
     /// `QueryServiceConfig2W`；测试注入确定性结果）。首次 R2 服务形态分类时一次性
     /// 核验并落稳定码（T13 实机验收的门输入；core 绝不修改服务配置）。
@@ -329,13 +423,9 @@ pub struct KernelControlService {
     /// SID-only 验证 + PSK-HMAC 挑战 + 返回客户端；测试注入 fake 换入 fake engine，
     /// 避免单测依赖真实 PSK 文件与服务管道）。
     service_connector: Arc<dyn ServiceEngineConnector>,
-    /// R2：keepalive 就绪探活 seam（服务 Start 后 `wait_for_service_ready` 用；默认 =
+    /// 独立服务查询的自述探针（默认 =
     /// [`RealServiceProbe`]，测试注入 fake 返回确定性结果）。
     service_probe: Arc<dyn ServiceProbe>,
-    /// R2：服务就绪轮询上界（默认 [`SERVICE_READY_TIMEOUT`]；测试注入短时长）。
-    service_ready_timeout: Duration,
-    /// R2：服务就绪轮询间隔（默认 [`SERVICE_READY_POLL`]；测试注入短间隔）。
-    service_ready_poll: Duration,
     /// S3/D3：最近一次连接路由的实际模式（0=auto / 1=service / 2=oneshot；快照 `mode`
     /// 展示用，缺省 auto）。
     selected_mode: Arc<AtomicU8>,
@@ -357,13 +447,21 @@ pub struct KernelControlService {
     /// 触发源；worker 拉起时换入自己的发送端并串行消费——天然杜绝并发重连；未拉起
     /// worker 时 `None`，信号被丢弃）。T6b 起载荷携带触发归类（R1 隧道断线 vs R2
     /// engine 失联按形态）。
-    reconnect_tx: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<ReconnectTrigger>>>>,
+    reconnect_tx: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<(ReconnectTrigger, Uuid)>>>>,
     /// 已受理连接的重连策略。它在用户点击连接时从已保存配置读取并冻结；连接期间的
     /// 设置保存只影响下一次用户连接，绝不能改变本会话的重连行为或 UI 投影。
     reconnect_session_policy: Arc<std::sync::Mutex<Option<ReconnectSessionPolicy>>>,
-    /// R2（T6b）：engine 失联标记（状态流 EOF / 订阅失败时置位；成功重挂状态流后
-    /// 清除）。边界 22：失联期间隧道状态未知——排队中的 R1（隧道断线）触发一律让位
-    /// 给 R2 分类（`drive_reconnect` 守卫读取本标记）。
+    /// S5b：Cisco 受理快照（受理时的已持久化账密对；一次性连接恒 `None`）。与
+    /// [`Self::reconnect_session_policy`] 同生命周期（新会话受理替换、显式 Stop 清空
+    /// 时 Drop 零化、显式"清除密码"降权点联动丢弃），单独存放以保持策略的 `Copy`。
+    reconnect_credential_snapshot: Arc<std::sync::Mutex<Option<AdmissionCredentialSnapshot>>>,
+    /// 用户受理时冻结的 aTrust 授权、网关及原浏览器缓存档案。
+    reconnect_atrust_context: Arc<std::sync::Mutex<Option<RecoveryAtrustContext>>>,
+    recovery_round: Arc<std::sync::Mutex<Option<RecoveryRound>>>,
+    // Core 生命周期内专用认证回执域；撤销记录后仍识别旧本地秘密回执。
+    auth_runtime_epoch: Uuid,
+    /// R2：控制面实际不可达或明确空会话时置位，同一次失联只分类一次。
+    /// 重挂或观察到存活会话后清除；订阅 EOF 本身不是引擎死亡证据。
     engine_lost: Arc<AtomicBool>,
     /// R2（T6b）：当前恢复事件的 reason id lane（wire `ReconnectStatus.reason` 的源）。
     /// EOF 分类时置位；Connected / 新用户会话 / 终态事件清除。仅状态上报。
@@ -443,64 +541,8 @@ pub use crate::guards::{RouteDecision, ServiceMode, decide_route};
 // keepalive 回复同一拍联言成立；任一单方事实只继续轮询，不产生 ready。
 // ---------------------------------------------------------------------------
 
-/// R2 默认服务就绪等待上界（`wait_for_service_ready`；服务 Start 后探活）。
-pub const SERVICE_READY_TIMEOUT: Duration = Duration::from_secs(15);
-/// R2 默认服务就绪轮询间隔。
-///
-/// SCM 查询是非提权的廉价本地调用；100ms 能把"服务已在 services.msc 出现/进入
-/// Running"与 UI 反馈之间的观察窗口压到亚秒级，同时仍由 `SERVICE_READY_TIMEOUT`
-/// 提供失败上界。
-pub const SERVICE_READY_POLL: Duration = Duration::from_millis(100);
 /// R2 单次 keepalive 探活 RPC 超时上界（`RealServiceProbe`）。
 pub const SERVICE_PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// R2 就绪达成来源（`ServiceReadiness.source`）。
-///
-/// 双采纳合同下值域收缩为两值：`ready=true ⇔ source==Both`。单方事实（仅 SCM
-/// running、或仅 keepalive 回复）不再有专属枚举值——它们不产生 ready，只进入轮询
-/// 下一拍或 `Timeout`（编译期暴露旧「先到先采纳」消费点，防止旧语义复活）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadinessSource {
-    /// 同一拍观察到 SCM Running **且** keepalive 回复（唯一 ready 形态）。
-    Both,
-    /// 有界轮询到期，双事实从未在同一拍成立。
-    Timeout,
-}
-
-/// R2 服务就绪判定结果（`wait_for_service_ready` 的产出；`ServiceControlReply` 的输入）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceReadiness {
-    /// engine 是否业务就绪（= 某一拍「SCM Running 且 keepalive 回复」联言达成）。
-    pub ready: bool,
-    /// 达成 / 失败来源（`ready=true ⇔ Both`；`ready=false` 恒为 `Timeout`）。
-    pub source: ReadinessSource,
-    /// 轮询窗口内最后一次 SCM 快照状态（`None` = SCM 查询失败 / 未查到）。
-    pub scm_state: Option<ServiceState>,
-    /// 轮询窗口内是否曾收到 keepalive 回复（诊断字段，**不参与 ready 判定**）。
-    pub keepalive: bool,
-    /// 轮询经过的毫秒数。
-    pub elapsed_ms: u64,
-}
-
-/// 单次业务操作（一次 connect / 一次显式 Start）的修复子进程预算（2026-09-08 计划
-/// 批 4）：bootstrap 或 service 连接观察到服务客观问题时，至多升级**一次** runas 修复
-/// 批量（1 次 UAC）——预算耗尽后原样上抛真实错误，不做修复循环。
-#[derive(Debug, Default)]
-struct RepairBudget {
-    spent: bool,
-}
-
-impl RepairBudget {
-    /// 尝试消耗一次修复名额：已消耗 → `false`（不再修复）。
-    fn try_spend(&mut self) -> bool {
-        if self.spent {
-            false
-        } else {
-            self.spent = true;
-            true
-        }
-    }
-}
 
 /// R2 keepalive 就绪探活 seam（测试注入 fake 返回确定性结果；产品 =
 /// [`RealServiceProbe`]）。
@@ -558,100 +600,6 @@ impl ServiceProbe for RealServiceProbe {
     }
 }
 
-/// R2 服务就绪判定（双采纳合同，4.1 真值表冻结）：SCM running **且** keepalive 回复
-/// **同一拍**联言成立才 ready；有界轮询。
-///
-/// 每拍同时采集两事实：先查询 SCM（廉价、非提权；查询失败按「非 Running」处理，仍进入
-/// 探活分支），再执行一次有界 keepalive 探活。任一单方事实都不返回 ready——SCM Running
-/// 而管道未被证明、或探活先行而 SCM 未收敛，都继续下一拍（管道可能下一拍就绪 / SCM
-/// 可能下一拍收敛）。单次探活不会占住整个 3s 的底层拨号重试：外层以一个轮询拍长为上界
-///（`max(poll_interval, 1ms).min(SERVICE_PROBE_ATTEMPT_TIMEOUT)`），悬挂探活不阻塞 SCM
-/// 轮询。`timeout` 到期仍未同拍达成 → `ready=false`（`source=Timeout`，携带最后一次
-/// SCM 状态与 keepalive 事实，供调用方按 4.2 分类产出可读信息）。
-pub async fn wait_for_service_ready(
-    source: &dyn ServiceStatusSource,
-    probe: &dyn ServiceProbe,
-    timeout: Duration,
-    poll_interval: Duration,
-) -> ServiceReadiness {
-    let start = std::time::Instant::now();
-    let mut scm_state: Option<ServiceState> = None;
-    let mut keepalive = false;
-    loop {
-        let elapsed = start.elapsed();
-        // 事实 1：SCM 快照（查询失败 Err 按「非 Running」处理，进入探活分支）。
-        let scm_running = match query_service_status(source, SERVICE_NAME) {
-            Ok(snap) => {
-                scm_state = Some(snap.state);
-                snap.state == ServiceState::Running
-            }
-            Err(_) => false,
-        };
-        // 事实 2：一次有界 keepalive 探活（拍长为硬上界，悬挂不阻塞下一拍 SCM 查询）。
-        let probe_deadline = poll_interval
-            .max(Duration::from_millis(1))
-            .min(SERVICE_PROBE_ATTEMPT_TIMEOUT);
-        let replied_this_tick = tokio::time::timeout(probe_deadline, probe.probe())
-            .await
-            .unwrap_or(false);
-        if replied_this_tick {
-            keepalive = true;
-        }
-        // 4.1 真值表：仅「同一拍 SCM Running 且探活回复」联言成立才 ready。
-        if scm_running && replied_this_tick {
-            return ServiceReadiness {
-                ready: true,
-                source: ReadinessSource::Both,
-                scm_state,
-                keepalive,
-                elapsed_ms: elapsed.as_millis() as u64,
-            };
-        }
-        if elapsed >= timeout {
-            return ServiceReadiness {
-                ready: false,
-                source: ReadinessSource::Timeout,
-                scm_state,
-                keepalive,
-                elapsed_ms: elapsed.as_millis() as u64,
-            };
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-/// 4.2 失败分类（冻结）：`source=Timeout` 的 [`ServiceReadiness`] → 稳定机器前缀 +
-/// 中文事实的可读信息（无秘密、无栈）。前缀按超时时事实组合分流：
-///
-/// - `scm_state == Running` 且 `keepalive == false` → `service_not_ready|`（SCM 在跑
-///   但控制面探活未响应——管道未被证明）；
-/// - SCM 非 Running / 未知 且 `keepalive == false` → `service_not_running|`；
-/// - `keepalive == true`（曾回复但从未与 Running 同拍）→ `service_not_running|`
-///   （SCM 侧未收敛；message 如实携带最后 SCM 状态与 keepalive 事实）。
-///
-/// 稳定前缀唯一产生层 = 本函数（[`KernelControlService::ensure_service_ready`] 与
-/// `service_control_start_reply` 共用）；任何外层不得再叠加前缀。
-fn readiness_failure_message(readiness: &ServiceReadiness) -> String {
-    let scm_desc = match readiness.scm_state {
-        Some(state) => format!("最后 SCM 状态={state:?}"),
-        None => "最后 SCM 状态未知".to_string(),
-    };
-    let elapsed = readiness.elapsed_ms;
-    if readiness.keepalive {
-        format!(
-            "service_not_running|服务未就绪（{elapsed}ms）：keepalive 探活曾回复，\
-             但未与 SCM Running 同拍达成（{scm_desc}）"
-        )
-    } else if readiness.scm_state == Some(ServiceState::Running) {
-        format!(
-            "service_not_ready|服务业务面未就绪（{elapsed}ms）：SCM 状态=Running，\
-             但控制面探活未响应"
-        )
-    } else {
-        format!("service_not_running|服务未运行（{elapsed}ms）：{scm_desc}，keepalive 未响应")
-    }
-}
-
 /// S3/D4：服务变更操作 seam（install/uninstall/start/stop）。
 ///
 /// 真实实现 = engine 子命令经 runas 提权（D4：host 非提权，SCM 操作在 engine 内）；
@@ -701,11 +649,10 @@ impl Default for EngineSubcommandServiceOps {
 #[tonic::async_trait]
 impl ServiceControlOps for EngineSubcommandServiceOps {
     async fn install(&self) -> Result<String, String> {
-        // 安装/修复 = 一次 runas 完成 [Install,Start,Verify]（含 REPAIR + SCM 启动 +
-        // keepalive 探活）。config_dir 经批量请求 JSON 传递（engine `RealServiceOps`
+        // 安装/修复 = 一次 runas 完成 [Install,Start]（含 REPAIR + 原SCM启动请求）。config_dir 经批量请求 JSON 传递（engine `RealServiceOps`
         // 从请求读并写入 SCM 启动参数）。
         run_service_batch(
-            vec![BatchStep::Install, BatchStep::Start, BatchStep::Verify],
+            vec![BatchStep::Install, BatchStep::Start],
             self.spawn.as_ref(),
         )
         .await
@@ -719,7 +666,7 @@ impl ServiceControlOps for EngineSubcommandServiceOps {
     }
     async fn start(&self) -> Result<String, String> {
         run_service_batch(
-            vec![BatchStep::Start, BatchStep::Verify],
+            vec![BatchStep::Start],
             self.spawn.as_ref(),
         )
         .await
@@ -996,6 +943,32 @@ unsafe impl Send for SendChild {}
 
 /// S3/D3：service engine 连接 seam（真实实现 = 读 PSK + 拨号稳定服务管道 + SID-only 验证
 /// + PSK-HMAC 双向挑战 + 返回客户端；测试注入 fake 换入 fake engine）。
+#[derive(Debug)]
+pub enum ServiceEngineConnectError {
+    Cancelled,
+    Dial(u32),
+    Hard(String),
+}
+impl From<String> for ServiceEngineConnectError {
+    fn from(detail: String) -> Self { Self::Hard(detail) }
+}
+impl std::fmt::Display for ServiceEngineConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("service connection cancelled"),
+            Self::Dial(code) => write!(f, "service pipe dial original win32 code={code}"),
+            Self::Hard(detail) => f.write_str(detail),
+        }
+    }
+}
+impl ServiceEngineConnectError {
+    fn endpoint_absent(&self) -> bool { matches!(self, Self::Dial(2 | 3)) }
+    fn status(self) -> Status {
+        if matches!(self, Self::Cancelled) { return Status::cancelled("connect cancelled during service dial"); }
+        Status::failed_precondition(format!("service_connect_failed|{self}"))
+    }
+}
+
 #[tonic::async_trait]
 pub trait ServiceEngineConnector: Send + Sync {
     /// 连接 service-mode engine 并返回控制面客户端（后续写路径经 [`EngineSlot`] 换入）。
@@ -1004,7 +977,7 @@ pub trait ServiceEngineConnector: Send + Sync {
     /// 用户 SID / PSK 不可读 / 拨号 / 认证 / channel 构建失败 → 携带原因的字符串。
     async fn connect_service_engine(
         &self,
-    ) -> Result<Arc<tokio::sync::Mutex<dyn KernelEngineControl>>, String>;
+    ) -> Result<Arc<tokio::sync::Mutex<dyn KernelEngineControl>>, ServiceEngineConnectError>;
 }
 
 /// 真实 service engine 连接器（S3/D2/D7/S6）：读 `%ProgramData%\exv\service.key` → 拨号
@@ -1017,7 +990,7 @@ pub struct RealServiceEngineConnector;
 impl ServiceEngineConnector for RealServiceEngineConnector {
     async fn connect_service_engine(
         &self,
-    ) -> Result<Arc<tokio::sync::Mutex<dyn KernelEngineControl>>, String> {
+    ) -> Result<Arc<tokio::sync::Mutex<dyn KernelEngineControl>>, ServiceEngineConnectError> {
         let psk = read_service_psk()?;
         // D12：服务管道名按安装用户（= 当前用户）SID 派生的常量名（安装时注册进服务
         // 启动参数——重装/修复即随迁；host 与安装用户同拓扑，当前用户 SID 即名字段）。
@@ -1029,7 +1002,10 @@ impl ServiceEngineConnector for RealServiceEngineConnector {
             &psk,
         )
         .await
-        .map_err(|e| format!("service engine connect failed: {e:?}"))?;
+        .map_err(|error| match error {
+            GrpcClientError::Transport(crate::grpc_transport::GrpcPipeError::Dial(code)) => ServiceEngineConnectError::Dial(code),
+            other => ServiceEngineConnectError::Hard(format!("service engine connect failed: {other:?}")),
+        })?;
         Ok(Arc::new(tokio::sync::Mutex::new(client)))
     }
 }
@@ -1062,9 +1038,12 @@ impl KernelControlService {
             snapshot_query_failed: Arc::new(AtomicBool::new(false)),
             core_session_id: Uuid::new_v4(),
             connect_dispatch: Arc::new(std::sync::Mutex::new(None)),
+            accepted_stops: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             connect_route_lock: Arc::new(Mutex::new(())),
             status_ready_wait: STATUS_READY_WAIT,
             service_status_source: Arc::new(RealServiceStatusSource),
+            network_probe: crate::network_diagnostics::collect_network,
+            network_light_probe: crate::network_diagnostics::collect_light_network,
             service_failure_actions_source: Arc::new(
                 crate::service_status::RealServiceFailureActionsSource,
             ),
@@ -1072,8 +1051,6 @@ impl KernelControlService {
             service_ops: Arc::new(EngineSubcommandServiceOps::new()),
             service_connector: Arc::new(RealServiceEngineConnector),
             service_probe: Arc::new(RealServiceProbe),
-            service_ready_timeout: SERVICE_READY_TIMEOUT,
-            service_ready_poll: SERVICE_READY_POLL,
             selected_mode: Arc::new(AtomicU8::new(ServiceMode::Auto.as_u8())),
             service_removed_override: Arc::new(AtomicBool::new(false)),
             service_control_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1081,6 +1058,10 @@ impl KernelControlService {
             reconnect_active: Arc::new(AtomicBool::new(false)),
             reconnect_tx: Arc::new(std::sync::Mutex::new(None)),
             reconnect_session_policy: Arc::new(std::sync::Mutex::new(None)),
+            reconnect_credential_snapshot: Arc::new(std::sync::Mutex::new(None)),
+            reconnect_atrust_context: Arc::new(std::sync::Mutex::new(None)),
+            recovery_round: Arc::new(std::sync::Mutex::new(None)),
+            auth_runtime_epoch: Uuid::new_v4(),
             engine_lost: Arc::new(AtomicBool::new(false)),
             reconnect_reason: Arc::new(std::sync::Mutex::new(None)),
             reconnect_config_cache: Arc::new(ReconnectConfigCache::new()),
@@ -1151,20 +1132,6 @@ impl KernelControlService {
     #[must_use]
     pub fn with_service_probe(mut self, probe: Arc<dyn ServiceProbe>) -> Self {
         self.service_probe = probe;
-        self
-    }
-
-    /// 注入服务就绪轮询上界（R2；测试注入短时长验证先到先采纳/超时语义，避免真实 15s）。
-    #[must_use]
-    pub fn with_service_ready_timeout(mut self, timeout: Duration) -> Self {
-        self.service_ready_timeout = timeout;
-        self
-    }
-
-    /// 注入服务就绪轮询间隔（R2；测试注入短间隔加快轮询收敛）。
-    #[must_use]
-    pub fn with_service_ready_poll(mut self, poll: Duration) -> Self {
-        self.service_ready_poll = poll;
         self
     }
 
@@ -1338,113 +1305,17 @@ impl KernelControlService {
         );
     }
 
-    /// Core-owned service bootstrap：确保服务正在运行且业务面已经可用。
-    ///
-    /// 这是 install、显式 Start 和 connect-after-install 的共同入口。仅在本次操作
-    /// 观察到 Stopped/Other/未知状态时提交一次提权 start；Running、StartPending、
-    /// `StopPending` 均不重复提交，由 SCM 自己收敛。提交发生竞态时，若随后查询已经
-    /// 变成 Running，仍按幂等成功处理。
-    async fn ensure_service_ready(&self) -> Result<ServiceReadiness, String> {
-        // P0-1：start 同样会把服务 engine 拉起建管——先退役 oneshot（D12 互斥；
-        // 覆盖 PromptStart/显式 Start/post-install readiness 三类调用方）。
+
+    /// 交付原 StartService 批量结果。成功是启动请求成功受理；实际IPC连接由后续消费者完成。
+    async fn ensure_service_ready(&self) -> Result<(), String> {
         self.retire_oneshot_engine_before_service_start().await;
-        let initial_state = self
-            .query_service_status_snapshot()
-            .map(|snapshot| snapshot.state);
-        // 这是一次连接/显式 Start 内的 bootstrap，不是后台守护：StartPending/StopPending
-        // 由 SCM 自己收敛，重复提交 start 只会制造 ERROR_SERVICE_ALREADY_RUNNING 竞态。
-        let needs_start = matches!(
-            initial_state,
-            None | Some(
-                ServiceState::Stopped | ServiceState::NotInstalled | ServiceState::Other(_)
-            )
-        );
-        self.logs
-            .append_core(
-                "info",
-                "kernel",
-                "kernel.service_bootstrap.observed",
-                "service bootstrap checked SCM state",
-                &BTreeMap::from([
-                    ("state".to_string(), format!("{initial_state:?}")),
-                    ("start_submitted".to_string(), needs_start.to_string()),
-                ]),
-            )
-            .ok();
-        if needs_start
-            && let Err(error) = self.service_ops.start().await {
-                let running_after_race = self
-                    .query_service_status_snapshot()
-                    .is_some_and(|snapshot| snapshot.state == ServiceState::Running);
-                if !running_after_race {
-                    return Err(format!("start service: {error}"));
-                }
-            }
-
-        let readiness = wait_for_service_ready(
-            self.service_status_source.as_ref(),
-            self.service_probe.as_ref(),
-            self.service_ready_timeout,
-            self.service_ready_poll,
-        )
-        .await;
-        if readiness.ready {
-            Ok(readiness)
-        } else {
-            // 4.2：失败分类与可读信息（稳定前缀 `service_not_running|` /
-            // `service_not_ready|`）在本层产生；外层透传，禁止叠前缀。
-            Err(readiness_failure_message(&readiness))
-        }
-    }
-
-    /// Connect 内的服务启动门禁（含修复子进程补洞升级，2026-09-08 计划批 4）。
-    ///
-    /// 服务启动阶段的 readiness 只允许完成一次；真正的业务面门禁由后面的
-    /// `connect_service_engine_with_bootstrap_retry` 完成（服务身份/PSK 握手 + owner
-    /// lease）。这里不能在 SCM 已 Running 后再次开一条 `KeepAlive` 管道，否则会与服务
-    /// accept-loop 的上一条 gRPC 管道释放形成竞态：探活成功而第二次 Dial(2)。
-    ///
-    /// **repair 补洞**：bootstrap 失败 = 服务客观事实有问题（start 提交失败 / 就绪
-    /// 不达成），且调用方正处于「需要业务」的上下文（connect / 显式 Start）→ 消耗
-    /// `budget` 的一次修复名额，runas 派 engine 修复子进程（`install` 批量 =
-    /// create-or-repair + Start + Verify，1 次 UAC）后重做 readiness。每次业务操作
-    /// 至多修复一次（budget 由 route/Start 建立）。
-    async fn ensure_service_ready_for_connect(
-        &self,
-        budget: &mut RepairBudget,
-    ) -> Result<ServiceReadiness, String> {
-        match self.ensure_service_ready().await {
-            Ok(readiness) => Ok(readiness),
-            Err(first) => {
-                if !budget.try_spend() {
-                    return Err(first);
-                }
-                let _ = self.logs.append_core(
-                    "warn",
-                    "kernel",
-                    "kernel.service.repair_escalated",
-                    &format!(
-                        "service bootstrap failed during a business request; escalating to repair batch (1 UAC): {first}"
-                    ),
-                    &BTreeMap::new(),
-                );
-                // P0-1：修复批量含 Start——先退役 oneshot 再提交（retire→install 序；
-                // 首次 ensure 已 retire 过，此处幂等兜底，防未来调用序变动）。
-                self.retire_oneshot_engine_before_service_start().await;
-                match self.service_ops.install().await {
-                    Ok(_) => self.ensure_service_ready().await.map_err(|second| {
-                        format!(
-                            "{first}; repair batch completed but service still not ready: {second}"
-                        )
-                    }),
-                    Err(repair) => Err(format!("{first}; repair batch failed: {repair}")),
-                }
-            }
-        }
+        self.service_ops.start().await
+            .map(|_| ())
+            .map_err(|error| format!("service_not_running|start service: {error}"))
     }
 
     /// S3/D3 + M3：auto 决策表路由（connect 派发前调用）。服务已安装但 stopped 时，
-    /// 由 Core 自动完成 start + readiness，再继续连接。
+    /// 由 Core 消费原start结果，再继续实际连接。
     ///
     /// - **Service**：服务已装且在跑 → 把 engine 槽换到服务 engine（SCM 常驻）后返回。
     /// - **`PromptStart`**：服务已装未跑 → Core bootstrap 后继续走 service engine。
@@ -1454,7 +1325,26 @@ impl KernelControlService {
     /// 服务状态查询失败（`None`）= **未知**（S5/MED[3] 加固）：安全兜底 oneshot（spawn
     /// engine 直连，不触碰 SCM、不因查询失败阻塞连接）。PSK 不可读 / 服务连接失败 →
     /// `failed_precondition`（服务模式必须持有共享秘密）。
+    /// Prepare 和最终 Connect 共用既有路由、EngineSlot 与 owner；唯一 ticker 读取此 mode。
+    async fn prepare_engine_control(&self, cancelled: Option<watch::Receiver<bool>>, establish_owner: bool) -> Result<RouteDecision, Status> {
+        let route = self.route_connect_for_attempt(cancelled).await?;
+        self.record_mode(ServiceMode::from_route(route));
+        self.events.refresh_service_mode(Some(self.mode_string()));
+        if establish_owner {
+            let engine = self.engine.current().await;
+            engine.lock().await.ensure_owner_lease().await.map_err(grpc_error_to_status)?;
+        }
+        Ok(route)
+    }
+
     async fn route_connect(&self) -> Result<RouteDecision, Status> {
+        self.route_connect_for_attempt(None).await
+    }
+
+    async fn route_connect_for_attempt(&self, cancelled: Option<watch::Receiver<bool>>) -> Result<RouteDecision, Status> {
+        if cancelled.as_ref().is_some_and(|cancelled| *cancelled.borrow()) {
+            return Err(Status::cancelled("connect cancelled before service route"));
+        }
         let snap = self.query_service_status_snapshot();
         let Some(snap) = snap else {
             self.logs
@@ -1481,25 +1371,23 @@ impl KernelControlService {
                 &BTreeMap::new(),
             )
             .ok();
-        let mut repair_budget = RepairBudget::default();
         match decide_route(snap.state) {
             RouteDecision::Service => {
                 // SCM 已经观察到 Running：不要在 connect 上重复执行 install/start 的
                 // readiness gate。真正的业务面门禁是 service pipe + owner lease；若服务
                 // 在这一个快照之后停止，下面的有界 bootstrap retry 会处理该竞态。
-                self.connect_service_engine_with_bootstrap_retry(&mut repair_budget)
+                self.connect_service_engine_with_bootstrap_retry(cancelled.clone())
                     .await?;
                 Ok(RouteDecision::Service)
             }
             RouteDecision::PromptStart => {
-                self.ensure_service_ready_for_connect(&mut repair_budget)
+                self.ensure_service_ready()
                     .await
                     // 4.2 前缀唯一层：bootstrap 错误已由 ensure 层携带稳定前缀
                     //（`service_not_running|` / `service_not_ready|`），此处原样上抛——
                     // 任何外层禁止叠前缀（不得再包 `service_start_failed|`）。
                     .map_err(Status::failed_precondition)?;
-                self.connect_service_engine_with_bootstrap_retry(&mut repair_budget)
-                    .await?;
+                self.ensure_service_engine_for_attempt(cancelled.clone()).await.map_err(ServiceEngineConnectError::status)?;
                 Ok(RouteDecision::Service)
             }
             RouteDecision::Oneshot => {
@@ -1625,28 +1513,16 @@ impl KernelControlService {
     /// 的 engine 侧状态由快照优选（`prefer_snapshot`）与状态转发器重放如实上屏，
     /// composition 不做无受理凭证的 Connecting 投影。
     async fn adopt_observed_session(&self, snapshot: &wire::RuntimeSnapshot) -> bool {
-        let Some(wire::runtime_snapshot::State::Connected(connected)) = snapshot.state.as_ref()
-        else {
+        let Some(wire::runtime_snapshot::State::Connected(_)) = snapshot.state.as_ref() else {
             return false;
         };
         let mut composition = self.composition.lock().await;
-        // ①对齐关联：被采纳会话的 operation_id 入 composition 登记册（16 字节才登记；
-        // 空 id 也可投影，只是无法参与陈旧过滤）。set_operation_id 顺带清空上一会话
-        // 残留（全新 core 本就为空）。
-        if let Ok(operation_id) = <[u8; 16]>::try_from(snapshot.operation_id.as_slice()) {
-            composition.set_operation_id(operation_id);
-        }
-        // ②投影 Connected：与状态转发器同一条事件路径（含会话起点采纳语义——engine
-        // 提供正值起点则原样采纳，缺失以 core 本地时钟首次观察时间补值）。
-        let event = EngineStatusEvent::Connected {
-            operation_id: snapshot.operation_id.clone(),
-            session_established_at_ms: (connected.session_established_at_ms > 0)
-                .then_some(connected.session_established_at_ms),
-        };
-        let Some((kind, adopted_snapshot)) =
-            runtime_event_from_status_locked(&event, &mut composition, &self.logs)
-        else {
-            return false;
+        let (_kind, _adopted_snapshot) = match self.accept_session_input(
+            &mut composition,
+            SessionInput::AdoptObservedSession(snapshot),
+        ) {
+            Ok(SessionOutput::Event(Some(event))) => event,
+            _ => return false,
         };
         let adopted_operation_id = composition
             .operation_id()
@@ -1654,17 +1530,6 @@ impl KernelControlService {
             .unwrap_or_default();
         let session_start = composition.session_established_at_ms().unwrap_or(0);
         drop(composition);
-        // ③统计种子：engine 快照样本（注册表即时读）种入总线统计 lane——发布链随
-        // 快照附加，UI 即时见累计字节/阶段。
-        if let Some(stats) = snapshot.stats {
-            self.events.publish_stats(runtime_stats_from_wire(stats));
-        }
-        // ④发布采纳过渡（总线装饰链附加 stats/proxy_tun/system_proxy/service/
-        // self_heal/reconnect 伴生；reconnect 此时无会话策略 → None，R2 状态机未动）。
-        self.events.publish(
-            kind,
-            snapshot_with_reconnect(adopted_snapshot, self.session_reconnect_status()),
-        );
         self.logs
             .append_core(
                 "info",
@@ -1704,20 +1569,39 @@ impl KernelControlService {
     /// 换入槽（后续写路径自动指向服务 engine）。幂等性由调用方（路由决策）保证——仅在
     /// Service 分支调用。
     ///
-    /// R2：对 connect-after-start 竞窗做**有界重试**（`connect_service_engine` 内部的
-    /// 拨号重试覆盖未绑管道的竞窗，此处兜底 SCM running 后 service engine 尚未就绪的
-    /// 窗口——少数尝试 + 小退避）。最终失败仍保持既有 `failed_precondition` 语义。
+    /// 实际连接及owner建立；暂态pipe拨号由底层原有限重试处理，身份/lease错误立即返回。
     async fn ensure_service_engine(&self) -> Result<(), Status> {
+        self.ensure_service_engine_for_attempt(None).await.map_err(ServiceEngineConnectError::status)
+    }
+
+    async fn ensure_service_engine_for_attempt(&self, cancelled: Option<watch::Receiver<bool>>) -> Result<(), ServiceEngineConnectError> {
+        if let Some(mut cancelled) = cancelled {
+            tokio::select! {
+                biased;
+                () = connect_cancelled(&mut cancelled) => Err(ServiceEngineConnectError::Cancelled),
+                result = self.ensure_service_engine_once() => result,
+            }
+        } else { self.ensure_service_engine_once().await }
+    }
+
+    async fn ensure_service_engine_once(&self) -> Result<(), ServiceEngineConnectError> {
         // 断开后立即重连：若槽内已是 service client（上次服务连接后未切换），复用其
         // owner lease（host 侧幂等）——否则新建连接 acquire 会被引擎以「peer already
         // owns」拒绝（旧连接 owner 未释放；peer 含 per-connection digest，新连接=新
         // peer）→ ConnectionLost（实测：断开后立刻重连必现，等 3s 后旧 owner 释放才恢复）。
-        // 复用失败（旧 client 已失效/服务重启）→ 落回下方新建路径。
+        // 仅明确 ConnectionLost（旧 client 已失效/服务重启）落回新建；其余原错误直接返回。
         if self.selected_mode.load(Ordering::SeqCst) == ServiceMode::Service.as_u8() {
             let current = self.engine.current().await;
             let mut guard = current.lock().await;
-            let reusable = guard.ensure_owner_lease().await.is_ok();
+            let lease_result = guard.ensure_owner_lease().await;
             drop(guard);
+            let reusable = match lease_result {
+                Ok(()) => true,
+                Err(GrpcClientError::ConnectionLost) => false,
+                Err(error) => return Err(ServiceEngineConnectError::Hard(format!(
+                    "service engine owner lease: {error:?}"
+                ))),
+            };
             if reusable {
                 self.logs
                     .append_core(
@@ -1731,127 +1615,40 @@ impl KernelControlService {
                 return Ok(());
             }
         }
-        const ATTEMPTS: u32 = 3;
-        const BACKOFF: Duration = Duration::from_millis(300);
-        let mut last_err = "no attempt".to_string();
-        for attempt in 0..ATTEMPTS {
-            match self.service_connector.connect_service_engine().await {
-                Ok(engine) => {
-                    // PSK/pipe 握手成功不等于 mutation 可用；先建立 owner lease，把
-                    // 不可用尽早收敛为 service_connect_failed，而不是等 ApplyTunnel 才
-                    // 映射成笼统的 engine control unavailable。
-                    {
-                        let mut guard = engine.lock().await;
-                        if let Err(error) = guard.ensure_owner_lease().await {
-                            last_err = format!("service engine owner lease: {error:?}");
-                            self.logs
-                                .append_core(
-                                    "warn",
-                                    "kernel",
-                                    "kernel.route.service_lease_failed",
-                                    &format!("service engine lease attempt {attempt}: {error:?}"),
-                                    &BTreeMap::new(),
-                                )
-                                .ok();
-                            if attempt + 1 < ATTEMPTS {
-                                tokio::time::sleep(BACKOFF).await;
-                            }
-                            continue;
-                        }
-                    }
-                    self.logs
-                        .append_core(
-                            "info",
-                            "kernel",
-                            "kernel.route.service_dial_ok",
-                            &format!("service engine dial+lease ok on attempt {attempt}; swapping to service engine"),
-                            &BTreeMap::new(),
-                        )
-                        .ok();
-                    self.swap_engine_for_route(engine).await;
-                    // 先切换维护策略，再让后续 connect 派发继续运行，避免 ticker 在
-                    // service engine 已换入、快照 mode 尚未更新的竞窗内发送 KeepAlive。
-                    self.record_mode(ServiceMode::Service);
-                    return Ok(());
-                }
-                Err(e) => {
-                    last_err = e.clone();
-                    self.logs
-                        .append_core(
-                            "warn",
-                            "kernel",
-                            "kernel.route.service_dial_failed",
-                            &format!("service engine dial attempt {attempt} failed: {e}"),
-                            &BTreeMap::new(),
-                        )
-                        .ok();
-                    if attempt + 1 < ATTEMPTS {
-                        tokio::time::sleep(BACKOFF).await;
-                    }
-                }
-            }
-        }
-        // R5：稳定前缀 `service_connect_failed|` ——UI 侧 map_status 映射为
-        // `AppError::ServiceConnectFailed`（modal 触发）；人读信息保持在后缀。
-        Err(Status::failed_precondition(format!(
-            "service_connect_failed|service engine connect: {last_err}"
-        )))
+        // 底层 pipe connector 已在原期限内重试实际拨号；这里不重试身份/协议/lease硬错误。
+        let engine = self.service_connector.connect_service_engine().await?;
+        engine.lock().await.ensure_owner_lease().await.map_err(|error| {
+            ServiceEngineConnectError::Hard(format!("service engine owner lease: {error:?}"))
+        })?;
+        self.swap_engine_for_route(engine).await;
+        self.record_mode(ServiceMode::Service);
+        Ok(())
     }
 
-    /// Service pipe 连接的一次性恢复边界：如果 engine 在本次连接刚开始时从 Running
-    /// 崩掉并已经回到 stopped，补做一次 bootstrap，再重试一次 service pipe。这里不
-    /// 开启常驻监控，也不对持续 Running 但业务面异常的服务无限重启。
-    /// Service pipe 连接的一次性恢复边界：如果 engine 在本次连接刚开始时从 Running
-    /// 崩掉并已经回到 stopped，补做一次 bootstrap，再重试一次 service pipe。这里不
-    /// 开启常驻监控，也不对持续 Running 但业务面异常的服务无限重启。
-    ///
-    /// **Running-but-unreachable 补洞（2026-09-08 计划批 4）**：服务 SCM 观察 Running
-    /// 但业务面连接失败（PSK 缺失/管道死/损坏——SCM restart 无法恢复的客观问题）→
-    /// 消耗 `budget` 的一次修复名额（runas 修复子进程）后重试一次。已 Stopped 的
-    /// 既有路径走 bootstrap（含同 budget 的 repair 升级）。
+    /// 仅原端点缺席且随后SCM明确Stopped才启动一次；硬错误不查询状态、不自动重装。
     async fn connect_service_engine_with_bootstrap_retry(
         &self,
-        budget: &mut RepairBudget,
+        cancelled: Option<watch::Receiver<bool>>,
     ) -> Result<(), Status> {
-        match self.ensure_service_engine().await {
+        match self.ensure_service_engine_for_attempt(cancelled.clone()).await {
             Ok(()) => Ok(()),
             Err(first_error) => {
+                if !first_error.endpoint_absent() { return Err(first_error.status()); }
                 let stopped = self
                     .query_service_status_snapshot()
                     .is_some_and(|snapshot| {
-                        snapshot.state.is_installed() && snapshot.state != ServiceState::Running
+                        snapshot.state == ServiceState::Stopped
                     });
                 if stopped {
-                    self.ensure_service_ready_for_connect(budget)
+                    self.ensure_service_ready()
                         .await
                         // 4.2 前缀唯一层：同 PromptStart 分支——ensure 层错误已带稳定
                         // 前缀，原样上抛，禁止叠前缀。
                         .map_err(Status::failed_precondition)?;
-                    return self.ensure_service_engine().await;
+                    return self.ensure_service_engine_for_attempt(cancelled).await.map_err(ServiceEngineConnectError::status);
                 }
-                // SCM Running 但业务面三次拨号+lease 全失败：客观损坏 → 修复子进程
-                // 补洞（1 次 UAC，消耗 budget）→ 重试一次；budget 已耗尽则原样上抛。
-                if !budget.try_spend() {
-                    return Err(first_error);
-                }
-                let _ = self.logs.append_core(
-                    "warn",
-                    "kernel",
-                    "kernel.service.repair_escalated",
-                    &format!(
-                        "service engine unreachable while SCM reports Running; escalating to repair batch (1 UAC): {first_error:?}"
-                    ),
-                    &BTreeMap::new(),
-                );
-                // P0-1：修复批量含 Start（install→restart 服务 engine）——先退役
-                // oneshot 再提交（retire→install 序；与另两处共用同一 helper）。
-                self.retire_oneshot_engine_before_service_start().await;
-                self.service_ops.install().await.map_err(|repair| {
-                    Status::failed_precondition(format!(
-                        "service_connect_failed|service engine connect: {first_error}; repair batch failed: {repair}"
-                    ))
-                })?;
-                self.ensure_service_engine().await
+                // 原 pipe/身份/owner 错误不能用再次安装覆盖；实际端点拨号已由底层有界处理。
+                Err(first_error.status())
             }
         }
     }
@@ -1876,24 +1673,28 @@ impl KernelControlService {
         let active = {
             let composition = self.composition.lock().await;
             !matches!(composition.phase(), HostPhase::Idle | HostPhase::Stopped)
+                || composition
+                    .stop_completion
+                    .as_ref()
+                    .is_some_and(|summary| summary.blocks_new_connect || !summary.stopped)
         };
         if !active {
             // Stopped 是 teardown 已完成但 admission 可能仍关闭的合法中间观测态。
             // 服务变更是下一次业务操作的边界，必须在这里补齐显式 reopen，不能因为
             // selected_mode 与 transition 来源不一致而提前返回并把后续 connect 永久锁死。
             let mut composition = self.composition.lock().await;
-            if composition.phase() == HostPhase::Stopped {
-                composition.apply(HostEvent::ReopenAdmission);
-            }
+            let _ = self.accept_session_input(&mut composition, SessionInput::ReopenAdmission);
             drop(composition);
             self.record_mode(ServiceMode::Auto);
             return Ok(());
         }
 
-        let runtime_epoch = {
-            let composition = self.composition.lock().await;
-            composition.runtime_epoch_bytes().to_vec()
+        let basis = {
+            let guard = self.composition.lock().await;
+            self.observation_basis(&guard)
         };
+        // 每次显式服务过渡是新操作；canonical identity 含 epoch，不含 operation_id。
+        let runtime_epoch = Uuid::new_v4().as_bytes().to_vec();
         let operation_id = Uuid::new_v4().as_bytes().to_vec();
         let request = StopTunnelRequest {
             lookup_key: Some(wire::OperationLookupKey {
@@ -1909,9 +1710,10 @@ impl KernelControlService {
         let lease_available = match engine.ensure_owner_lease().await {
             Ok(()) => true,
             Err(GrpcClientError::ConnectionLost) => {
-                // 旧 engine 已经断开时，业务连接实际上已经消失；继续做本地 teardown，
-                // 否则 admission 会永远保持 closed，后续 install/uninstall 也无法重试。
-                false
+                return Err(
+                    "stop engine before service transition: connection lost; stop is unconfirmed"
+                        .to_string(),
+                );
             }
             Err(e) => {
                 return Err(format!(
@@ -1919,11 +1721,54 @@ impl KernelControlService {
                 ));
             }
         };
+        let mut stop_summary = None;
         if lease_available {
             match engine.stop_tunnel(request).await {
-                Ok(_) => {}
+                Ok(reply) => {
+                    let completed = reply.stop_completion.as_ref().map_or_else(
+                        || {
+                            matches!(
+                                reply.result,
+                                Some(wire::stop_tunnel_reply::Result::Stopped(_))
+                            )
+                        },
+                        |summary| summary.stopped && !summary.blocks_new_connect,
+                    );
+                    stop_summary = reply.stop_completion;
+                    if let Some(summary) = &stop_summary {
+                        if !summary.errors.is_empty() {
+                            let _ = self.logs.append_core(
+                                "warn",
+                                "kernel",
+                                "kernel.service_transition.stop_cleanup_error",
+                                "service transition retained stop cleanup errors",
+                                &BTreeMap::from([(
+                                    "count".to_string(),
+                                    summary.errors.len().to_string(),
+                                )]),
+                            );
+                        }
+                    }
+                    if !completed {
+                        drop(engine);
+                        if let Some(summary) = stop_summary {
+                            let mut guard = self.composition.lock().await;
+                            let _ = self.accept_session_input(
+                                &mut guard,
+                                SessionInput::ServiceTransition {
+                                    basis,
+                                    summary: Some(summary),
+                                    completed: false,
+                                },
+                            );
+                        }
+                        return Err(
+                            "stop engine before service transition: cleanup incomplete".to_string()
+                        );
+                    }
+                }
                 Err(GrpcClientError::ConnectionLost) => {
-                    // 与 lease 阶段掉线相同：旧 engine 已不再可用，本地收敛仍必须继续。
+                    return Err("stop engine before service transition: connection lost; stop is unconfirmed".to_string());
                 }
                 Err(e) => {
                     return Err(format!("stop engine before service transition: {e:?}"));
@@ -1933,10 +1778,15 @@ impl KernelControlService {
         drop(engine);
 
         let mut composition = self.composition.lock().await;
-        composition.apply(HostEvent::Disconnect);
-        composition.apply(HostEvent::TeardownSideJoined(TeardownSide::ProtocolControl));
-        composition.apply(HostEvent::TeardownSideJoined(TeardownSide::PacketData));
-        composition.apply(HostEvent::ReopenAdmission);
+        self.accept_session_input(
+            &mut composition,
+            SessionInput::ServiceTransition {
+                basis,
+                summary: stop_summary,
+                completed: true,
+            },
+        )
+        .map_err(|error| error.message().to_string())?;
         drop(composition);
         self.record_mode(ServiceMode::Auto);
         Ok(())
@@ -2091,6 +1941,11 @@ impl KernelControlService {
 
     /// composition → dispatch，保证旧 attempt 的失败不能跨过 Stop 或新的受理。
     async fn apply_connect_failed_for_route(&self, attempt_id: Uuid, status: &Status) {
+        self.apply_connect_failed(attempt_id, status, true).await;
+    }
+
+    /// 服务路由错误与执行错误在调用边界区分，不把所有 Status 当作服务不可用。
+    async fn apply_connect_failed(&self, attempt_id: Uuid, status: &Status, service_route_failure: bool) {
         let mut composition = self.composition.lock().await;
         let current = {
             let dispatch = self
@@ -2099,14 +1954,30 @@ impl KernelControlService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             dispatch
                 .as_ref()
-                .is_some_and(|state| state.id == attempt_id && !*state.cancelled.borrow())
+                .filter(|state| state.id == attempt_id && !*state.cancelled.borrow())
+                .map(|state| state.attempt_applied)
         };
-        if !current {
+        let Some(attempt_applied) = current else {
             return;
+        };
+        let mut error = route_failure_wire_error(status);
+        // 执行路径只有本地 before_apply 的稳定通道拒绝可证明是派发前服务失败。
+        // 准备材料拒绝及 Apply 已调用后的 typed RPC/transport 失败保留原有快照回退；
+        // RPC Status 原样上浮；aTrust 材料及认证拒绝保留首因，不再伪装成忙。
+        let protocol = self.reconnect_session_policy.lock().ok()
+            .and_then(|policy| policy.map(|policy| policy.protocol)).unwrap_or(Protocol::Cisco);
+        if !service_route_failure && reconnect_authentication_terminal(status, protocol) {
+            error.code = wire::ErrorCode::Unauthorized as i32;
+            error.stage = wire::ErrorStage::AwaitingInteraction as i32;
+            error.reason = if matches!(status.code(), tonic::Code::Unauthenticated | tonic::Code::PermissionDenied) {
+                format!("atrust_recovery_auth_failed|{}", status.message())
+            } else { status.message().to_owned() };
+        } else if !service_route_failure
+            && (attempt_applied || !status.message().starts_with("status_stream_not_ready|"))
+        {
+            error.code = wire::ErrorCode::SessionBusy as i32;
         }
-        let error = route_failure_wire_error(status);
-        composition.set_last_wire_error(error.clone());
-        composition.apply(HostEvent::ConnectFailed(wire_vpn_error_to_domain(&error)));
+        let _ = self.accept_session_input(&mut composition, SessionInput::ConnectFailed(error));
         let snapshot = snapshot_for_phase(composition.phase(), &composition);
         // 仍持有 composition：身份校验、状态提交与 event tick 发布之间没有 await，
         // Stop 或新 Connect 不能先发布新态后再被本次旧 Failed 覆盖。
@@ -2114,38 +1985,274 @@ impl KernelControlService {
             .publish(wire::RuntimeEventKind::Transition, snapshot);
     }
 
-    /// 没有数据面或已有 Stop 确认回执时，收束屏障并重开连接受理。
-    async fn finish_local_stop(&self, attempt_id: Option<Uuid>) {
-        let mut composition = self.composition.lock().await;
-        {
-            let mut dispatch = self
-                .connect_dispatch
+    async fn stop_owned(
+        &self,
+        request: StopRequest,
+        deadline: tokio::time::Instant,
+    ) -> Result<OperationReply, Status> {
+        tokio::time::timeout_at(deadline, self.require_authorized()).await
+            .map_err(|_| stop_deadline_status("authorization"))??;
+        let intent = request.intent.ok_or_else(|| Status::invalid_argument("stop: missing stop intent"))?;
+        validate_stop_intent(&intent)?;
+        let mut composition = tokio::time::timeout_at(deadline, self.composition.lock()).await
+            .map_err(|_| stop_deadline_status("admission"))?;
+        if tokio::time::Instant::now() >= deadline { return Err(stop_deadline_status("admission")); }
+        let origin = composition.last_wire_error().cloned();
+        let prior_completion = composition.stop_completion.clone();
+        let admission = match self.accept_session_input(&mut composition, SessionInput::Stop(&intent))? {
+            SessionOutput::Stop(admission) => admission,
+            _ => unreachable!("stop output"),
+        };
+        let record = admission.record;
+        if !admission.replay {
+            // S5b：显式 Stop 结束连接会话——Cisco 受理快照随会话策略同点清空（Drop
+            // 零化；镜像 session_orchestration Stop 处理器对策略槽/aTrust 上下文的
+            // 清空点）。回放路径首次受理时已清空，不重复。
+            *self
+                .reconnect_credential_snapshot
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if dispatch.as_ref().map(|state| state.id) != attempt_id {
-                return;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            if let Some(error) = origin { composition.set_last_wire_error(error); }
+            if let Some(summary) = prior_completion { composition.stop_completion = Some(summary); }
+            // 接纳、关联和首次发布共用这个短临界区，不再排第二次锁。
+            self.events.publish(wire::RuntimeEventKind::Transition, snapshot_for_phase(composition.phase(), &composition));
+        }
+        if !record.engine_required {
+            if !admission.replay {
+                self.accept_session_input(&mut composition, SessionInput::StopLocal { attempt_id: record.attempt_id })?;
             }
-            if let Some(state) = dispatch.as_mut() {
-                state.stop_required = false;
+            return Ok(OperationReply { terminal: None });
+        }
+        // 在接纳短锁内、真实派发前建立通知；快速原终态不会落在订阅之前。
+        let completion_events = self.events.subscribe(0);
+        drop(composition);
+        let operation_id = record.operation_key.operation_id.as_slice().try_into().ok();
+        let attempt_id = record.attempt_id;
+        let service = self.clone();
+        let mut dispatch = tokio::spawn(async move {
+            if !admission.replay {
+                let generation = *service.engine.subscribe_swaps().borrow();
+                let ready = tokio::time::timeout_at(deadline, service.await_status_ready(generation)).await;
+                service.log_status_gate(attempt_id, Some(generation), if matches!(ready, Ok(Ok(()))) { "stop_attached" } else { "stop_without_status" });
+            }
+            let handle = tokio::time::timeout_at(deadline, service.engine.current()).await
+                .map_err(|_| stop_deadline_status("engine_slot"))?;
+            let mut engine = tokio::time::timeout_at(deadline, handle.lock_owned()).await
+                .map_err(|_| stop_deadline_status("engine_lock"))?;
+            if tokio::time::Instant::now() >= deadline { return Err(stop_deadline_status("before_owner")); }
+            tokio::time::timeout_at(deadline, engine.ensure_owner_lease()).await
+                .map_err(|_| stop_deadline_status("owner"))?
+                .map_err(|error| {
+                    let status = grpc_error_to_status(error);
+                    Status::new(status.code(), format!("stop/owner: {}", status.message()))
+                })?;
+            if tokio::time::Instant::now() >= deadline { return Err(stop_deadline_status("before_dispatch")); }
+            let mut key = record.operation_key;
+            key.method = wire::OperationMethod::StopTunnel as i32;
+            // 已派发后不 drop RPC/许可；用户截止只限制对本任务的等待。
+            let mut reply = engine.stop_tunnel(StopTunnelRequest { lookup_key: Some(key), request_digest: record.request_digest })
+                .await.map_err(grpc_error_to_status);
+            drop(engine);
+            if let Ok(reply) = &mut reply {
+                let pending = matches!(reply.result, Some(wire::stop_tunnel_reply::Result::Pending(_)) | None);
+                if !pending {
+                    if let Some(summary) = reply.stop_completion.clone() {
+                        reply.stop_completion = Some(service.finish_reported_stop(attempt_id, operation_id, summary, false).await);
+                    } else if matches!(reply.result, Some(wire::stop_tunnel_reply::Result::Stopped(_))) {
+                        let summary = wire::StopCompletion { stopped: true, blocks_new_connect: false, errors: vec![] };
+                        service.finish_reported_stop(attempt_id, operation_id, summary, false).await;
+                    } else {
+                        let error = match &reply.result {
+                            Some(wire::stop_tunnel_reply::Result::Failed(failed)) => failed.error.clone(),
+                            _ => None,
+                        };
+                        let mut summary = stop_failure_completion("engine_reply", &Status::unknown("stop failed without cleanup confirmation"));
+                        if let Some(error) = error { summary.errors = vec![error]; }
+                        reply.stop_completion = Some(service.finish_reported_stop(attempt_id, operation_id, summary, false).await);
+                    }
+                }
+            } else if let Err(status) = &reply && tokio::time::Instant::now() >= deadline {
+                service.finish_reported_stop(attempt_id, operation_id, stop_failure_completion("rpc", status), true).await;
+            }
+            reply.map(|reply| operation_reply_from_stop(&reply))
+        });
+        match tokio::time::timeout_at(deadline, &mut dispatch).await {
+            Ok(Ok(Ok(reply))) => {
+                if reply.terminal.is_none() {
+                    let service = self.clone();
+                    // 保留快速 Pending 回执；只有本次 owned 等待继续持有原 D。
+                    tokio::spawn(async move {
+                        let mut events = Box::pin(completion_events);
+                        loop {
+                            let expired = tokio::time::Instant::now() >= deadline
+                                || tokio::time::timeout_at(deadline, events.next()).await.is_err();
+                            let mut composition = service.composition.lock().await;
+                            let current_attempt = service.connect_dispatch.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref().map(|state| state.id);
+                            if composition.operation_id() != operation_id || current_attempt != attempt_id
+                                || composition.phase() != HostPhase::Stopping || composition.is_exiting() {
+                                return;
+                            }
+                            if expired {
+                                let summary = stop_failure_completion("completion", &stop_deadline_status("completion"));
+                                service.finish_reported_stop_locked(&mut composition, attempt_id, operation_id, summary, true);
+                                return;
+                            }
+                        }
+                    });
+                }
+                Ok(reply)
+            },
+            result => {
+                let status = match result {
+                    Ok(Ok(Err(status))) => status,
+                    Ok(Err(_)) => Status::internal("stop task failed"),
+                    Err(_) => stop_deadline_status("completion"),
+                    _ => unreachable!(),
+                };
+                let stage = if status.code() == Code::DeadlineExceeded { "completion" } else { "rpc" };
+                let summary = stop_failure_completion(stage, &status);
+                // 只获取本地短锁接纳失败，不等待 Engine/RPC；dispatch 保留真实清理所有权。
+                let summary = self.finish_reported_stop(attempt_id, operation_id, summary, true).await;
+                Ok(stop_failed_reply(summary))
             }
         }
-        composition.synthesize_data_plane_join();
-        if composition.phase() == HostPhase::Stopped {
-            composition.apply(HostEvent::ReopenAdmission);
+    }
+
+    async fn finish_reported_stop(
+        &self,
+        attempt_id: Option<Uuid>,
+        operation_id: Option<[u8; 16]>,
+        summary: wire::StopCompletion,
+        unconfirmed: bool,
+    ) -> wire::StopCompletion {
+        let mut composition = self.composition.lock().await;
+        self.finish_reported_stop_locked(&mut composition, attempt_id, operation_id, summary, unconfirmed)
+    }
+
+    fn finish_reported_stop_locked(
+        &self,
+        composition: &mut HostComposition,
+        attempt_id: Option<Uuid>,
+        operation_id: Option<[u8; 16]>,
+        summary: wire::StopCompletion,
+        unconfirmed: bool,
+    ) -> wire::StopCompletion {
+        let mut summary = summary;
+        if !summary.stopped && summary.errors.is_empty() {
+            summary.errors = stop_failure_completion("engine_reply", &Status::unknown("stop unconfirmed")).errors;
         }
-        // 同一有序边界内发布已确认的 Idle。显式 Stop 已结束重连会话，故无重连伴生。
-        let snapshot = snapshot_for_phase(composition.phase(), &composition);
-        self.events
-            .publish(wire::RuntimeEventKind::Transition, snapshot);
+        if composition.operation_id() == operation_id && !summary.stopped {
+            if unconfirmed && let Some(previous) = composition.stop_completion.as_ref() {
+                summary.blocks_new_connect |= previous.blocks_new_connect;
+                let mut errors = previous.errors.clone();
+                for error in summary.errors {
+                    if !errors.contains(&error) { errors.push(error); }
+                }
+                summary.errors = errors;
+            }
+            if let Some(origin) = composition.last_wire_error().cloned()
+                && !summary.errors.contains(&origin) {
+                summary.errors.insert(0, origin);
+            }
+        }
+        let _ = self.accept_session_input(
+            composition,
+            SessionInput::StopReported {
+                attempt_id,
+                operation_id,
+                summary: summary.clone(),
+            },
+        );
+        summary
     }
 
     /// 在用户连接受理时读取持久化配置，形成仅属于本次连接生命周期的重连策略。
     /// 设置保存不会覆盖它；下一次用户连接才会创建新的策略。
     fn reconnect_policy_for_new_session(&self) -> ReconnectSessionPolicy {
         match ExvConfig::load_from_dir(&self.config_dir) {
-            Ok(config) => ReconnectSessionPolicy::from_config(&config),
+            Ok(config) => {
+                let mut policy = ReconnectSessionPolicy::from_config(&config);
+                // S5b（C-10）：受理期冻结门=auto_reconnect && 有效凭据源的受理时点形态
+                //（Cisco=owner 匹配磁盘对；aTrust=受理事实——凭据门槛不再对网页登录
+                // 用户恒假）。ENGINE_LOST 时点由 `valid_reconnect_credential_source`
+                // 对活状态另行求值。
+                policy.auto_reconnect = config.auto_reconnect
+                    && admission_credential_source_valid(&config, &self.config_dir);
+                policy
+            }
             Err(_) => ReconnectSessionPolicy::disabled(),
         }
+    }
+
+    /// C-10（S5b）ENGINE_LOST 时点活评估的有效凭据源单一公式（worker 派发门、
+    /// `require_background_reconnect` 与 config_set 降权共用；darwin
+    /// `valid_reconnect_credential_source` 同构）：
+    ///
+    /// 有效凭据源 =（Cisco：受理快照存在）∨（Cisco：磁盘账密对 owner 匹配且与受理
+    /// 身份一致）∨（aTrust：`reconnect_atrust_context` 存在——受理事实即快照语义）。
+    ///
+    /// * 快照臂：受理时已持久化的账密对在内存——免疫连接中凭据/用户名修改（受理
+    ///   账户与磁盘已保存账户不一致时仍按受理账户重连，静默账号切换防线之一）；
+    /// * 磁盘臂：`has_saved_credential_pair`（S5a owner 匹配门）且冻结受理身份与当前
+    ///   配置用户名一致（受理身份缺席——策略生命周期洞——按磁盘对自身求值）；
+    /// * aTrust 臂：会话缓存与恢复材料（认证续段获取轮）承担重连凭据，受理时
+    ///   `RecoveryAtrustContext::capture` 落槽即为受理事实。
+    fn valid_reconnect_credential_source(&self, config: &ExvConfig) -> bool {
+        let protocol = self
+            .reconnect_session_policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|policy| policy.protocol)
+            .unwrap_or(config.protocol);
+        match protocol {
+            Protocol::Cisco => {
+                if self
+                    .reconnect_credential_snapshot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+                {
+                    return true;
+                }
+                config.has_saved_credential_pair(&self.config_dir)
+                    && self
+                        .events
+                        .current_session_identity()
+                        .is_none_or(|identity| identity.username == config.username)
+            }
+            Protocol::Atrust => self
+                .reconnect_atrust_context
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
+        }
+    }
+
+    fn background_reconnect_allowed(&self) -> bool {
+        // S5b（C-10）：活求值——auto_reconnect && 有效凭据源（受理快照 ∨ owner 匹配
+        // 磁盘对 ∨ aTrust 受理事实），不再对网页登录用户恒假；keep 分支仅改用户名后
+        // 磁盘对因 owner 失配失效时，受理快照臂继续承载受理账户的重连资格（免疫
+        // 连接中凭据/用户名修改）；无快照会话（一次性/已清除）仍按 owner 门暂停。
+        let Ok(config) = ExvConfig::load_from_dir(&self.config_dir) else {
+            return false;
+        };
+        config.auto_reconnect && self.valid_reconnect_credential_source(&config)
+    }
+
+    fn require_background_reconnect(&self) -> Result<(), Status> {
+        if self.background_reconnect_allowed() { Ok(()) }
+        else { Err(Status::cancelled("auto_reconnect_disabled")) }
+    }
+
+    /// 用户连接受理时读取持久化配置，形成本次会话冻结的身份投影（bug3）。配置不可读
+    /// → `None`（不伪造身份；连接随后会在凭据阶段以真实错误收束）。设置保存只写磁盘、
+    /// 不经过本方法，故不会改写活动会话的连接页显示。
+    fn session_identity_for_new_session(&self) -> Option<SessionIdentity> {
+        ExvConfig::load_from_dir(&self.config_dir)
+            .ok()
+            .map(|config| SessionIdentity::from_config(&config))
     }
 
     /// 未建立连接会话时不投影重连设置，避免把持久化配置误呈现为运行事实。
@@ -2155,11 +2262,16 @@ impl KernelControlService {
             .ok()
             .and_then(|policy| *policy)
             .map(|policy| {
-                let reason = self
-                    .reconnect_reason
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .map(R2Reason::as_str)
+                // S5b：暂停 reason（`RECONNECT_PAUSE_*`）优先于 R2 恢复事件 id——暂停
+                // 期间不存在真实恢复事件，engine_lost id 不得遮蔽暂停事实；未暂停时
+                // 沿 R2 reason lane（空串 = 无事件）。
+                let reason = policy
+                    .pause_reason
+                    .or(self
+                        .reconnect_reason
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .map(R2Reason::as_str))
                     .unwrap_or("");
                 reconnect_status_from_state(
                     self.reconnect_attempts.load(Ordering::Relaxed),
@@ -2232,13 +2344,27 @@ impl KernelControlService {
         intent: wire::ConnectIntent,
         inputs: RunConnectInputs,
     ) -> Result<Response<OperationReply>, Status> {
+        self.run_connect_with_receipt(intent, inputs, &mut None)
+            .await
+    }
+
+    /// 栈上回执只记录本轮真实受理的dispatch，不增加共享状态或新的取消权威。
+    async fn run_connect_with_receipt(
+        &self,
+        intent: wire::ConnectIntent,
+        inputs: RunConnectInputs,
+        admitted_dispatch: &mut Option<Uuid>,
+    ) -> Result<Response<OperationReply>, Status> {
         let RunConnectInputs {
-            ui_credentials,
+            auth_deadline,
+            auth_binding,
+            mut ui_credentials,
             persist_credentials,
-            new_session_policy,
+            mut new_session_policy,
+            mut new_session_identity,
             expected_dispatch_id,
-            frozen_protocol,
-            connection_mode,
+            mut frozen_protocol,
+            mut connection_mode,
         } = inputs;
         // R1：connect 受理即驱动状态机（Idle/Connected/Failed → Connecting）。
         // 失败（admission closed / teardown in progress）→ 明确拒绝，不进 Connecting。
@@ -2247,49 +2373,113 @@ impl KernelControlService {
             .as_ref()
             .and_then(|k| <[u8; 16]>::try_from(k.operation_id.as_slice()).ok());
         let attempt_id = Uuid::new_v4();
+        // S5b：快照接线形态标记——新用户会话（受理新策略）在凭据组装成功后冻结
+        // 受理快照；重连派发（不携带新策略）优先消费既有快照。
+        let snapshot_new_session = new_session_policy.is_some();
         let (cancel_sender, mut cancelled) = watch::channel(false);
         let mut composition = self.composition.lock().await;
-        {
-            let mut dispatch = self
-                .connect_dispatch
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // 自动重连退避期间可能已经受理了新的手动连接，或用户已经 Stop。
-            // 在既有 composition -> dispatch 线性化边界内核对原 attempt，避免旧
-            // timer 在检查后到状态机受理之间发生 TOCTOU 并覆盖新会话。
-            if let Some(expected_id) = expected_dispatch_id {
-                let still_current = dispatch.as_ref().is_some_and(|state| {
-                    state.id == expected_id && !*state.cancelled.borrow()
-                });
-                if !still_current {
-                    return Err(Status::cancelled(AUTO_RECONNECT_SUPERSEDED));
+        // 接纳线性化边界：绑定、策略、身份与稍后执行必须消费同一实际配置。
+        // 无绑定请求也冻结此快照，但不能推断为已验证认证绑定。
+        let mut admitted_config = if new_session_policy.is_some() {
+            let config = ExvConfig::load_from_dir(&self.config_dir);
+            if let Some(binding) = auth_binding.as_ref() {
+                let config = config.as_ref().map_err(|_| {
+                    Status::failed_precondition("auth_binding_changed|请重新发起连接")
+                })?;
+                validate_auth_binding(binding, config, ui_credentials.as_ref())?;
+            }
+            // 与既有读取失败回退一致：禁用重连且无身份；不能沿用接纳前的旧值。
+            // 后续配置/凭据组装仍按原入口报告真实I/O错误，不伪造成功读取。
+            let config = config.ok();
+            let mut policy = config
+                .as_ref()
+                .map(|config| {
+                    let mut policy = ReconnectSessionPolicy::from_config(config);
+                    // S5b（C-10）：受理期冻结门=auto_reconnect && 有效凭据源的受理
+                    // 时点形态（Cisco=owner 匹配磁盘对；aTrust=受理事实——凭据门槛
+                    // 不再对网页登录用户恒假）。
+                    policy.auto_reconnect = config.auto_reconnect
+                        && admission_credential_source_valid(config, &self.config_dir);
+                    policy
+                })
+                .unwrap_or_else(ReconnectSessionPolicy::disabled);
+            // S5b（一次性资格关闭）：Cisco 一次性 UI 凭据（persist=false）且磁盘上
+            // 没有与受理账户匹配的 owner 持久化凭据对——受理期即关闭本会话重连资格
+            //（堵静默账号切换：否则 ENGINE_LOST 重连会改用磁盘上另一账户的凭据，
+            // 而连接页身份冻结为一次性用户名）。已保存密文存在但归属账户不一致时
+            // 同时置暂停 reason（前端 toast 通道）。同账户一次性连接保留资格（磁盘
+            // 臂承担，快照不建）。
+            if !persist_credentials
+                && let Some(UiConnectionCredentials::Cisco(credentials)) = ui_credentials.as_ref()
+                && config.as_ref().is_some_and(|config| {
+                    config.protocol == Protocol::Cisco
+                        && !(config.has_saved_credential_pair(&self.config_dir)
+                            && config.username == credentials.username)
+                })
+            {
+                policy.auto_reconnect = false;
+                if config
+                    .as_ref()
+                    .is_some_and(|config| config.has_stored_password(&self.config_dir))
+                {
+                    policy.pause_reason = Some(RECONNECT_PAUSE_OWNER_MISMATCH);
                 }
             }
-            let effect = composition.apply(HostEvent::Connect);
-            if let HostEffect::ConnectRefused(reason) = effect {
-                return Err(Status::failed_precondition(format!("connect: {reason}")));
+            // S5b：新会话受理先清空上一会话的受理快照（与策略槽同生命周期——受理
+            // 替换；persist/磁盘组装成功后在 execute 路径重新冻结，一次性连接保持
+            // 空）。
+            *self
+                .reconnect_credential_snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            frozen_protocol = policy.protocol;
+            connection_mode = policy.connection_mode;
+            new_session_policy = Some(policy);
+            new_session_identity = config.as_ref().map(|config| {
+                let mut identity = SessionIdentity::from_config(config);
+                identity.username = match ui_credentials.as_ref() {
+                    Some(UiConnectionCredentials::Cisco(credentials)) => credentials.username.clone(),
+                    Some(UiConnectionCredentials::Atrust(_)) => new_session_identity.as_ref().map(|identity| identity.username.clone()).unwrap_or_default(),
+                    None if config.protocol == Protocol::Cisco => config.username.clone(),
+                    None => String::new(),
+                };
+                identity
+            });
+            config
+        } else {
+            None
+        };
+        self.accept_session_input(
+            &mut composition,
+            SessionInput::Connect {
+                operation_id,
+                attempt_id,
+                cancel_sender,
+                expected_dispatch_id,
+                policy: new_session_policy,
+                identity: new_session_identity.as_ref(),
+            },
+        )?;
+        // 与接纳共享 composition 边界；新设置不修改活动恢复的材料授权或目标。
+        let recovery_context = {
+            let mut context = self.reconnect_atrust_context.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if new_session_policy.is_some() {
+                *context = admitted_config.as_ref().filter(|config| config.protocol == Protocol::Atrust)
+                    .map(RecoveryAtrustContext::capture);
             }
-            if let Some(id) = operation_id {
-                composition.set_operation_id(id);
-            }
-            let stop_required = dispatch.as_ref().is_some_and(|state| state.stop_required);
-            *dispatch = Some(ConnectDispatch {
-                id: attempt_id,
-                cancelled: cancel_sender,
-                target_generation: None,
-                attempt_applied: false,
-                stop_required,
+            if expected_dispatch_id.is_some() { context.clone() } else { None }
+        };
+        if let Some(context) = recovery_context.clone() {
+            *self.recovery_round.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RecoveryRound {
+                round_operation: operation_id.expect("local reconnect operation"),
+                attempt: self.reconnect_attempts.load(Ordering::Relaxed), dispatch: attempt_id,
+                execution: intent.clone(), retired_execution: None, context, acquisition_started: false, continuation_queued: false,
+                ended: false, deadline: None, first_error: None, pending: None, interaction_id: None, cleanup: None,
             });
         }
-        if let Some(policy) = new_session_policy {
-            if let Ok(mut current) = self.reconnect_session_policy.lock() {
-                *current = Some(policy);
-            }
-            self.reconnect_attempts.store(0, Ordering::Relaxed);
-            self.reconnect_active.store(false, Ordering::Release);
-            // R2（T6b）：新用户会话开启——旧恢复事件清空（reason lane 随会话重置）。
-            *self.reconnect_reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        }
+        // 与Connect接纳同一composition临界区，拒绝路径不会生成受理回执。
+        *admitted_dispatch = Some(attempt_id);
         self.logs
             .append_core(
                 "info",
@@ -2314,7 +2504,6 @@ impl KernelControlService {
         // EXV_UNFREEZE 2026-09-05（自愈发布点表·冻结）：用户发起连接受理 → 清除自愈
         // 上下文（lane `None`）。随下一次自然事件生效（不发空刷新）——GetSnapshot 每次
         // 组装读当前缓存即已即时反映清除。
-        self.events.refresh_self_heal(None);
         drop(composition);
         // C1（ui-connect-stop-responsiveness）：受理即发布 Connecting 受理快照——
         // 发布点在 admission 之后、route_connect 之前，UI 事件链的第一手真相先于
@@ -2329,12 +2518,16 @@ impl KernelControlService {
                 Some(attempt_id),
                 self.reconnect_attempts.load(Ordering::Relaxed),
                 *self.engine.subscribe_swaps().borrow(),
-            ),
-        );
+            ), self.network_probe);
 
         let _route_guard = tokio::select! {
             biased;
             () = connect_cancelled(&mut cancelled) => return Err(Status::cancelled("connect cancelled before route")),
+            () = auth_continuation::prepare_deadline_elapsed(auth_deadline) => {
+                let status = auth_continuation::deadline_error();
+                self.apply_connect_failed_for_route(attempt_id, &status).await;
+                return Err(status);
+            }
             guard = self.connect_route_lock.lock() => guard,
         };
 
@@ -2348,12 +2541,15 @@ impl KernelControlService {
         // ——connect 已把状态机推进到 Connecting，但路由在派发前失败、engine 状态流永不
         // 携带 Failed → 不补发则快照卡死 Connecting（R5 根因，modal 触发依赖 Failed 相态）。
         // 已开始的 SCM 操作不强行丢弃；Stop 可独立收束，结果回来后只允许原操作继续。
-        let route_result = self.route_connect().await;
+        let route_result = self.prepare_engine_control(Some(cancelled.clone()), false).await;
+        let route_result = if auth_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            Err(auth_continuation::deadline_error())
+        } else { route_result };
         if *cancelled.borrow() || cancelled.has_changed().is_err() {
             self.log_status_gate(Some(attempt_id), None, "cancelled_after_route");
             return Err(Status::cancelled("connect cancelled during route"));
         }
-        let route = match route_result {
+        let _route = match route_result {
             Ok(route) => route,
             Err(status) => {
                 self.apply_connect_failed_for_route(attempt_id, &status)
@@ -2387,8 +2583,6 @@ impl KernelControlService {
             };
             state.target_generation = Some(target_generation);
         }
-        self.record_mode(ServiceMode::from_route(route));
-        self.events.refresh_service_mode(Some(self.mode_string()));
         // S3/D5 修复：connect 路由（含 ensure_service_ready 内部 bootstrap start 把
         // 服务从 Stopped 拉到 Running）后立即刷新 SCM 快照缓存——否则 WatchEvents
         // 发布的快照持续携带 connect 前的旧服务状态（UI 显示「已停止」而实际 Running）。
@@ -2424,6 +2618,7 @@ impl KernelControlService {
                 self.log_status_gate(Some(attempt_id), Some(target_generation), "cancelled");
                 return Err(Status::cancelled("connect cancelled before apply"));
             }
+            () = auth_continuation::prepare_deadline_elapsed(auth_deadline) => Err(auth_continuation::deadline_error()),
             result = self.await_status_ready(target_generation) => result,
         };
 
@@ -2434,6 +2629,29 @@ impl KernelControlService {
             return Err(status);
         }
 
+        if expected_dispatch_id.is_some() && frozen_protocol == Protocol::Atrust {
+            let material = recovery_context.as_ref()
+                .ok_or_else(atrust_recovery_material_required)
+                .and_then(RecoveryAtrustContext::load);
+            match material {
+                Ok((credentials, config)) => {
+                    ui_credentials = Some(credentials);
+                    admitted_config = Some(config);
+                }
+                Err(status) => {
+                    if status.message().starts_with("atrust_browser_required|") || status.message().starts_with("atrust_recovery_material|") {
+                        match self.acquire_recovery_material(attempt_id, &mut cancelled).await {
+                            Ok((credentials, config)) => { ui_credentials = Some(credentials); admitted_config = Some(config); }
+                            Err(failure) => { return Err(failure.status()); }
+                        }
+                    } else {
+                        self.apply_connect_failed(attempt_id, &status, false).await;
+                        return Err(status);
+                    }
+                }
+            }
+        }
+
         // engine 可能被慢 RPC 占用；此等待和后续 lease 准备均可取消，不占 dispatch。
         let mut engine = tokio::select! {
             biased;
@@ -2441,9 +2659,25 @@ impl KernelControlService {
                 self.log_status_gate(Some(attempt_id), Some(target_generation), "cancelled_waiting_engine");
                 return Err(Status::cancelled("connect cancelled waiting for engine"));
             }
+            () = auth_continuation::prepare_deadline_elapsed(auth_deadline) => {
+                let status = auth_continuation::deadline_error();
+                self.apply_connect_failed_for_route(attempt_id, &status).await;
+                return Err(status);
+            }
+            () = self.auth_deadline_elapsed(attempt_id) => {
+                let status = Status::deadline_exceeded("atrust_auth_acquisition|认证已超过本次截止时间");
+                self.finish_auth_before_apply(attempt_id, &status).await;
+                return Err(status);
+            }
             engine = target_engine.lock() => engine,
         };
-        let connect_result = execute_connect_tracked(
+        // S5b：受理快照接线——新用户会话在凭据组装成功后冻结快照（persist 受理=
+        // UI 账密对落盘成功；无 UI 凭据=磁盘组装成功），重连派发优先消费既有快照。
+        let snapshot_wiring = CredentialSnapshotWiring {
+            slot: Arc::clone(&self.reconnect_credential_snapshot),
+            new_session: snapshot_new_session,
+        };
+        let connect_result = execute_connect_dispatch(
             &mut *engine,
             &self.config_dir,
             intent,
@@ -2451,11 +2685,18 @@ impl KernelControlService {
             persist_credentials,
             Some(connection_mode),
             Some(frozen_protocol),
+            admitted_config,
             &self.reconnect_config_cache,
             // T4：UI PID 随每次连接信封发 engine（重连同源——同一 UI 仍活着）。
             self.ui_pid(),
             &mut cancelled,
+            auth_deadline.into_iter().chain(self.auth_prepare_deadline(attempt_id)).min(),
             || {
+                if auth_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    return Err(auth_continuation::deadline_error());
+                }
+                self.check_auth_deadline(attempt_id)?;
+                if expected_dispatch_id.is_some() { self.require_background_reconnect()?; }
                 // 极短线性化点：engine → dispatch；没有 await。Stop 若先标记取消，
                 // 此处禁止 Apply；Apply 若先登记义务，Stop 随后等待 engine 再清理。
                 let mut dispatch = self.connect_dispatch.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2472,6 +2713,7 @@ impl KernelControlService {
                     Err(Status::unavailable("status_stream_not_ready|status attachment changed during connect preparation"))
                 }
             },
+            Some(&snapshot_wiring),
         )
         .await;
         drop(engine);
@@ -2487,12 +2729,20 @@ impl KernelControlService {
         let (reply, zeroized) = match connect_result {
             Ok(result) => result,
             Err(status) => {
-                self.apply_connect_failed_for_route(attempt_id, &status)
-                    .await;
+                if !self.finish_auth_before_apply(attempt_id, &status).await {
+                    self.apply_connect_failed(attempt_id, &status, false).await;
+                }
                 return Err(status);
             }
         };
 
+        if expected_dispatch_id.is_some()
+            && let Some(wire::apply_tunnel_reply::Result::Failed(failed)) = reply.result.as_ref()
+            && let Some(error) = failed.error.as_ref() {
+            let mut composition = self.composition.lock().await;
+            let event = EngineStatusEvent::Failed { operation_id: operation_id.map(|id| id.to_vec()).unwrap_or_default(), error: error.clone(), reconnect_state: None };
+            let _ = self.accept_session_input(&mut composition, SessionInput::EngineEvent(&event));
+        }
         // 发送完成：`execute_connect` 已确定性零化 KernelControl wire 副本（明文不再驻留）。
         self.logs
             .append_core(
@@ -2520,143 +2770,32 @@ impl KernelControlService {
             .map(|state| state.id)
     }
 
-    /// C3a 自动重连 worker：串行消费状态转发器发来的掉线信号，驱动一次重连。
-    ///
-    /// 每个信号按序处理（天然防并发重连）；在途标记（`reconnect_active`）期间的新信号
-    /// 直接跳过（防重入）。重连前判定：`auto_reconnect` 未开启 → 跳过；`max_attempts`
-    /// 耗尽 → 跳过。每次实际重跑 connect 递增 `reconnect_attempts`（per-connection，
-    /// Connected 成功后由状态转发器清零）。重连凭据从磁盘重新组装（`run_connect` 内部
-    /// `execute_connect` load config + key.bin），不持有 engine 凭据。
-    ///
-    /// reconnect-backoff（2026-09-05）：`auto_reconnect_backoff` 开启时，每次派发
-    /// connect 前 sleep 退避延时（由 `reconnect_attempts` 派生：2s→4s→8s→16s→30s
-    /// cap；attempts 在 Connected 清零的既有语义使成功自动重置回 base）；关闭时走现状
-    /// 立即重连路径（不 sleep、行为零变化）。sleep 在占用在途标记之后、派发之前——
-    /// 睡眠期间到达的新掉线信号按防重入跳过；停机 abort worker 句柄（shutdown.rs
-    /// `set_reconnect_worker_task`）会取消进行中的 sleep。
-    ///
-    /// T6b（R2）：信号携带触发归类——
-    /// - **边界 22 守卫**：engine 失联期间（`engine_lost` 置位，EOF 分类所有）到达的
-    ///   R1（隧道断线）信号一律跳过——隧道状态在 engine 失联时未知，EOF 分类（R2）
-    ///   优先，杜绝把重连派发给已死 engine 的旧路径；
-    /// - **上限**：R2 触发在会话配置为 0（无限）时以 [`R2_MAX_ATTEMPTS_FALLBACK`]
-    ///   为上限（T6a 邻接裁量），非 0 时尊重会话配置；
-    /// - **oneshot 子门**：R2 oneshot 触发复核会话冻结的 `on_oneshot_engine_crash`
-    ///   （EOF 分类已判过；此处防分类与消费间的配置竞窗）；
-    /// - **服务形态自续**：R2 服务形态的重连若同步失败（engine 尚未被 SCM 拉回——
-    ///   竞窗属瞬态），把触发重新入队，由下一次 `drive_reconnect` 按递增的 attempts
-    ///   退避重试（复用同一退避/上限机制，上限耗尽自然终止）；oneshot 不自续——重提权
-    ///   是用户手势（UAC），自动重试弹窗不可接受，失败即终态（用户再点连接）。
-    async fn drive_reconnect(&self, trigger: ReconnectTrigger) {
-        // 边界 22：engine 失联期间的 R1（隧道断线）信号让位——EOF 分类（R2）优先。
-        if !trigger.is_engine_lost() && self.engine_lost.load(Ordering::Acquire) {
-            self.logs
-                .append_core(
-                    "info",
-                    "kernel",
-                    "kernel.reconnect.skip_engine_lost",
-                    "tunnel-loss trigger skipped while engine is lost (R2 classification owns recovery)",
-                    &BTreeMap::new(),
-                )
-                .ok();
+    async fn drive_reconnect_from(&self, trigger: ReconnectTrigger, expected_origin: Option<Uuid>) {
+        if trigger == ReconnectTrigger::AuthContinuation {
+            if let Some(dispatch_id) = expected_origin { self.continue_auth_recovery(dispatch_id).await; }
             return;
         }
-        // 防重入：上一次重连尝试仍在途（已派发、终态未到）→ 不重复触发。
-        if self.reconnect_active.load(Ordering::Acquire) {
-            self.logs
-                .append_core(
-                    "info",
-                    "kernel",
-                    "kernel.reconnect.skip_in_flight",
-                    "auto reconnect skipped: a reconnect attempt is still in flight",
-                    &BTreeMap::new(),
-                )
-                .ok();
-            return;
-        }
-        // 重连判定只读本会话冻结策略：设置保存只为下一次用户连接准备，绝不在
-        // 当前连接掉线后改变重连预算、退避或 UI 显示。
-        let Some(policy) = self
-            .reconnect_session_policy
-            .lock()
-            .ok()
-            .and_then(|policy| *policy)
-        else {
-            return;
+        if !self.background_reconnect_allowed() { return; }
+        let admission = {
+            let mut composition = self.composition.lock().await;
+            match self.accept_session_input(
+                &mut composition,
+                SessionInput::Reconnect {
+                    trigger,
+                    expected_origin,
+                },
+            ) {
+                Ok(SessionOutput::Reconnect(admission)) => admission,
+                _ => return,
+            }
         };
+        let (policy, origin_dispatch_id, attempt, effective_max) = admission;
         let ReconnectSessionPolicy {
-            auto_reconnect,
-            max_attempts: max,
             backoff,
-            on_oneshot_engine_crash,
             connection_mode,
             protocol,
+            ..
         } = policy;
-        if !auto_reconnect {
-            self.logs
-                .append_core(
-                    "info",
-                    "kernel",
-                    "kernel.reconnect.disabled",
-                    "retryable data-plane drop observed but auto_reconnect is disabled",
-                    &BTreeMap::new(),
-                )
-                .ok();
-            return;
-        }
-        // R2 oneshot 子门（§2.8，默认关）：重提权必然弹 UAC——仅当会话冻结的开关
-        // 开启时才允许该形态的自动重连。
-        if trigger == ReconnectTrigger::EngineLostOneshot && !on_oneshot_engine_crash {
-            self.logs
-                .append_core(
-                    "info",
-                    "kernel",
-                    "kernel.r2.oneshot_gated_off",
-                    "engine-lost reconnect skipped: reconnect_on_oneshot_engine_crash is disabled for this session",
-                    &BTreeMap::new(),
-                )
-                .ok();
-            *self.reconnect_reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(R2Reason::OneshotGatedOff);
-            return;
-        }
-        // R2 上限回退：会话配置 0（无限）时以 T6a 邻接裁量值为上限（R1 语义不变）。
-        let effective_max = if trigger.is_engine_lost() && max == 0 {
-            R2_MAX_ATTEMPTS_FALLBACK
-        } else {
-            max
-        };
-        let attempts = self.reconnect_attempts.load(Ordering::Relaxed);
-        if effective_max != 0 && attempts >= effective_max {
-            self.logs
-                .append_core(
-                    "warn",
-                    "kernel",
-                    "kernel.reconnect.exhausted",
-                    &format!("auto reconnect stopped: attempts={attempts} exhausted (max={effective_max})"),
-                    &BTreeMap::new(),
-                )
-                .ok();
-            return;
-        }
-
-        let Some(origin_dispatch_id) = self.current_reconnect_dispatch_id() else {
-            self.logs
-                .append_core(
-                    "info",
-                    "kernel",
-                    "kernel.reconnect.skip_superseded",
-                    "auto reconnect skipped: no current originating session",
-                    &BTreeMap::new(),
-                )
-                .ok();
-            return;
-        };
-
-        // 重连执行：占用在途标记 + 计数 + 复用 run_connect（凭据从磁盘重新组装）。
-        self.reconnect_active.store(true, Ordering::Release);
-        self.reconnect_attempts.fetch_add(1, Ordering::Relaxed);
-        let attempt = attempts + 1;
         self.logs
             .append_core(
                 "info",
@@ -2671,9 +2810,9 @@ impl KernelControlService {
                     },
                     connection_mode.as_str(),
                     match trigger {
-                        ReconnectTrigger::TunnelLoss => "tunnel_loss",
                         ReconnectTrigger::EngineLostService => "engine_lost_service",
                         ReconnectTrigger::EngineLostOneshot => "engine_lost_oneshot",
+                        ReconnectTrigger::AuthContinuation => "atrust_auth_continuation",
                     },
                 ),
                 &BTreeMap::new(),
@@ -2703,17 +2842,27 @@ impl KernelControlService {
                 .ok();
             tokio::time::sleep(delay).await;
         }
+        let intent = reconnect_intent();
+        let reconnect_operation_id = intent
+            .lookup_key
+            .as_ref()
+            .and_then(|key| key.operation_id.as_slice().try_into().ok());
+        let mut admitted_dispatch = None;
         match self
-            .run_connect(
-                reconnect_intent(),
+            .run_connect_with_receipt(
+                intent,
                 RunConnectInputs {
+                    auth_deadline: None,
+                    auth_binding: None,
                     ui_credentials: None,
                     persist_credentials: false,
                     new_session_policy: None,
+                    new_session_identity: None,
                     expected_dispatch_id: Some(origin_dispatch_id),
                     frozen_protocol: protocol,
                     connection_mode,
                 },
+                &mut admitted_dispatch,
             )
             .await
         {
@@ -2746,8 +2895,49 @@ impl KernelControlService {
                         .ok();
                     return;
                 }
+                if let Some(dispatch_id) = admitted_dispatch {
+                    let resume = {
+                        let _composition = self.composition.lock().await;
+                        let applied = self.connect_dispatch.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref().is_some_and(|state| state.id == dispatch_id && state.attempt_applied && !*state.cancelled.borrow());
+                        let mut record = self.recovery_round.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(round) = record.as_mut().filter(|round| round.dispatch == dispatch_id && !round.ended)
+                            && applied && reconnect_authentication_terminal(&status, protocol) {
+                            round.first_error.get_or_insert_with(|| wire::VpnError {
+                                code: wire::ErrorCode::Unauthorized as i32, stage: wire::ErrorStage::AwaitingInteraction as i32,
+                                reason: status.message().into(), ..Default::default()
+                            });
+                            round.continuation_queued = true;
+                            true
+                        } else { false }
+                    };
+                    if resume { self.continue_auth_recovery(dispatch_id).await; return; }
+                }
+                // 原本轮终结事实也覆盖真实 Failed 中的业务/未知错误；不伪装认证错误。
+                let acquisition_ended = self.recovery_round.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref().is_some_and(|round| Some(round.dispatch) == admitted_dispatch && round.ended);
+                if !acquisition_ended && !reconnect_authentication_terminal(&status, protocol) {
+                    let _composition = self.composition.lock().await;
+                    if admitted_dispatch.is_some() && self.current_reconnect_dispatch_id() == admitted_dispatch {
+                        self.clear_auth_round();
+                    }
+                }
                 // 同步失败：上报失败（ConnectFailed → 状态机 Failed），释放在途标记。
-                self.reconnect_active.store(false, Ordering::Release);
+                let retry_origin = {
+                    let mut composition = self.composition.lock().await;
+                    match self.accept_session_input(
+                        &mut composition,
+                        SessionInput::ReconnectFinished {
+                            operation_id: reconnect_operation_id,
+                            origin_dispatch_id,
+                            admitted_dispatch_id: admitted_dispatch,
+                            attempt,
+                        },
+                    ) {
+                        Ok(SessionOutput::Origin(origin)) => origin,
+                        _ => None,
+                    }
+                };
                 // run_connect 在持有本次派发锁时发布失败；这里不能让旧 worker 的迟到
                 // 错误（尤其 Cancel）覆盖新的连接或已经收束的 Idle。
                 self.logs
@@ -2766,7 +2956,8 @@ impl KernelControlService {
                 // R2 服务形态自续：同步失败多为 SCM 尚未把服务拉回的瞬态竞窗——重新
                 // 入队本触发，下一次 drive_reconnect 按递增 attempts 退避重试（上限
                 // 耗尽即终止）。oneshot 不自续（重提权 = 用户手势，见函数文档）。
-                if trigger == ReconnectTrigger::EngineLostService {
+                if trigger == ReconnectTrigger::EngineLostService
+                    && !acquisition_ended && !reconnect_authentication_terminal(&status, protocol) {
                     self.logs
                         .append_core(
                             "info",
@@ -2778,8 +2969,9 @@ impl KernelControlService {
                             &BTreeMap::new(),
                         )
                         .ok();
-                    if let Some(tx) = self.reconnect_tx.lock().unwrap().as_ref() {
-                        let _ = tx.send(ReconnectTrigger::EngineLostService);
+                    if let Some(origin) = retry_origin
+                        && let Some(tx) = self.reconnect_tx.lock().unwrap().as_ref() {
+                        let _ = tx.send((ReconnectTrigger::EngineLostService, origin));
                     }
                 }
             }
@@ -2792,12 +2984,12 @@ impl KernelControlService {
     #[must_use]
     pub fn spawn_reconnect_worker(&self) -> tokio::task::JoinHandle<()> {
         // 换入绑定本 worker 接收端的发送端：此后状态转发器的信号经该通道到达本 worker。
-        let (tx, mut rx) = mpsc::unbounded_channel::<ReconnectTrigger>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<(ReconnectTrigger, Uuid)>();
         *self.reconnect_tx.lock().unwrap() = Some(tx);
         let service = self.clone();
         tokio::spawn(async move {
-            while let Some(trigger) = rx.recv().await {
-                service.drive_reconnect(trigger).await;
+            while let Some((trigger, origin)) = rx.recv().await {
+                service.drive_reconnect_from(trigger, Some(origin)).await;
             }
         })
     }
@@ -2831,6 +3023,7 @@ impl KernelControlService {
             attach_attempt: 0,
             reattach_reason: "initial",
             backoff: Duration::ZERO,
+            detached_log_throttle: DetachedAttachLogThrottle::default(),
         };
         if owner.permit.is_none() {
             owner.log(
@@ -2845,6 +3038,7 @@ impl KernelControlService {
             "kernel.forward.status_started",
             "status forwarder owner started",
         );
+        let session = self.clone();
         let events = Arc::clone(&self.events);
         let composition = Arc::clone(&self.composition);
         let reconnect_tx = Arc::clone(&self.reconnect_tx);
@@ -2853,10 +3047,12 @@ impl KernelControlService {
         // 发布路径只读连接受理时冻结的策略，永不随 settings 保存重新取值。
         let reconnect_session_policy = Arc::clone(&self.reconnect_session_policy);
         // R2（T6b）：engine 失联标记 / reason lane / 一次性 SCM 恢复核验。
-        let engine_lost = Arc::clone(&self.engine_lost);
         let reconnect_reason = Arc::clone(&self.reconnect_reason);
         let scm_recovery_checked = Arc::clone(&self.scm_recovery_checked);
         let service_failure_actions_source = Arc::clone(&self.service_failure_actions_source);
+        let network_probe = self.network_probe;
+        let network_light_probe = self.network_light_probe;
+        let service_status_source = Arc::clone(&self.service_status_source);
         let connect_dispatch = Arc::clone(&self.connect_dispatch);
         let proxy_tun_probe = Arc::clone(&self.proxy_tun_probe);
         let system_proxy_probe = Arc::clone(&self.system_proxy_probe);
@@ -2878,11 +3074,18 @@ impl KernelControlService {
                     continue;
                 }
                 owner.attach_attempt += 1;
-                owner.log(
-                    "info",
-                    "kernel.forward.status_attach_attempt",
-                    "status forwarder subscribing to engine",
-                );
+                // T5/F9：detached 占位（新装无引擎为预期态）期间，每轮重试的
+                // attempt/失败日志一律走节流（见下方失败分支），否则退避 100ms→5s
+                // 封顶后仍每轮刷屏；真实 engine 的 attempt 日志保持原样。
+                let detached_placeholder =
+                    Arc::ptr_eq(&engine, &crate::grpc_control::detached_engine());
+                if !detached_placeholder {
+                    owner.log(
+                        "info",
+                        "kernel.forward.status_attach_attempt",
+                        "status forwarder subscribing to engine",
+                    );
+                }
                 let attach = tokio::select! {
                     biased;
                     changed = slot_swaps.changed() => {
@@ -2897,82 +3100,88 @@ impl KernelControlService {
                         guard.stream_connect_status().await
                     } => result,
                 };
-                let stream = {
-                    if let Ok(stream) = attach { stream } else {
-                        // 无法订阅（断线）：撤销就绪（R3-C3 防 stale-true——窗口内
-                        // 派发不误判已挂接）+ R2 收敛双保险（engine 不可达时若本机
-                        // 正在停机收敛,补数据面侧加入→Stopped/Idle）+ 发布断线过渡
-                        // + 退避后重试。R2（T6b）：控制面当前不可达——失联标记置位
-                        //（R1 触发让位；EOF 分类才产生 R2 恢复信号）。
-                        engine_lost.store(true, Ordering::Release);
+                let subscribed = attach.is_ok();
+                let stream = match attach {
+                    Ok(stream) => stream,
+                    Err(_) => {
                         StatusAttachment::revoke(&owner.attachment, owner.engine_generation);
-                        owner.log(
-                            "warn",
-                            "kernel.forward.status_attach_failed",
-                            "status forwarder failed to subscribe current engine (will backoff)",
-                        );
-                        refresh_bus_proxy_tun(&events, &proxy_tun_probe);
-                        refresh_bus_system_proxy(&events, &system_proxy_probe);
-                        {
-                            let mut composition_guard = composition.lock().await;
-                            let generation = slot_swaps.borrow();
-                            if *generation == owner.engine_generation {
-                                composition_guard.synthesize_data_plane_join();
-                                let snapshot = snapshot_with_reconnect(
-                                    disconnected_snapshot(&composition_guard),
-                                    reconnect_status_from_session(
-                                        &reconnect_attempts,
-                                        &reconnect_active,
-                                        &reconnect_session_policy,
-                                        &reconnect_reason,
-                                    ),
-                                );
-                                events.publish(wire::RuntimeEventKind::Transition, snapshot);
+                        if detached_placeholder {
+                            match owner
+                                .detached_log_throttle
+                                .record_failure(tokio::time::Instant::now())
+                            {
+                                DetachedAttachLogEmission::First => owner.log(
+                                    "info",
+                                    "kernel.forward.status_attach_detached",
+                                    "status forwarder attach failed on detached placeholder \
+                                     (fresh install without engine is expected); will keep \
+                                     retrying with backoff, logging throttled",
+                                ),
+                                DetachedAttachLogEmission::Heartbeat { suppressed } => {
+                                    owner.log_with_fields(
+                                        "debug",
+                                        "kernel.forward.status_attach_detached",
+                                        &format!(
+                                            "status forwarder still on detached placeholder \
+                                             (no engine yet, expected on fresh install); \
+                                             {suppressed} attach failures suppressed since \
+                                             last note"
+                                        ),
+                                        &[(
+                                            "suppressed".to_string(),
+                                            suppressed.to_string(),
+                                        )],
+                                    );
+                                }
+                                DetachedAttachLogEmission::Suppressed => {}
                             }
+                        } else {
+                            owner.log(
+                                "warn",
+                                "kernel.forward.status_attach_failed",
+                                "status forwarder failed to subscribe current engine (will backoff)",
+                            );
                         }
-                        if !owner
-                            .wait_for_retry(&mut slot_swaps, "attach_failed_backoff")
-                            .await
-                        {
-                            return;
+                        Box::pin(futures_util::stream::empty()) as crate::grpc_control::EngineStatusEventStream
+                    }
+                };
+                if subscribed {
+                    // attach-before-apply 就绪：status 流已挂接（engine `StatusPublisher`
+                    // 无快照、open 前事件丢弃）→ 写路径派发前可放心 apply。
+                    // 持有 swap 的只读借用直到发布结束；换点不能夹进检查和 attached=true 之间。
+                    let attached = {
+                        let generation = slot_swaps.borrow();
+                        if *generation == owner.engine_generation {
+                            owner.attachment.send_if_modified(|state| {
+                                if state.generation > owner.engine_generation {
+                                    return false;
+                                }
+                                *state = StatusAttachment {
+                                    generation: owner.engine_generation,
+                                    attached: true,
+                                };
+                                true
+                            })
+                        } else {
+                            false
                         }
+                    };
+                    if !attached {
+                        owner.slot_swapped(*slot_swaps.borrow_and_update());
                         continue;
                     }
-                };
-                // attach-before-apply 就绪：status 流已挂接（engine `StatusPublisher`
-                // 无快照、open 前事件丢弃）→ 写路径派发前可放心 apply。
-                // 持有 swap 的只读借用直到发布结束；换点不能夹进检查和 attached=true 之间。
-                let attached = {
-                    let generation = slot_swaps.borrow();
-                    if *generation == owner.engine_generation {
-                        owner.attachment.send_if_modified(|state| {
-                            if state.generation > owner.engine_generation {
-                                return false;
-                            }
-                            *state = StatusAttachment {
-                                generation: owner.engine_generation,
-                                attached: true,
-                            };
-                            true
-                        })
-                    } else {
-                        false
-                    }
-                };
-                if !attached {
-                    owner.slot_swapped(*slot_swaps.borrow_and_update());
-                    continue;
+                    owner.backoff = Duration::ZERO;
+                    // T5：真实挂接成功——detached 节流周期作废（再回占位时重新从首条 info 起）。
+                    owner.detached_log_throttle.reset();
+                    owner.log(
+                        "info",
+                        "kernel.forward.status_attached",
+                        "status forwarder attached to current engine",
+                    );
+                    // 新的订阅周期允许再次观察并分类控制面失联。
+                    // 挂接本身不宣告会话恢复；随后真实事件或观察事实才清除失联。
+                    owner.backoff = ENGINE_EVENT_RECONNECT_BASE;
                 }
-                owner.backoff = Duration::ZERO;
-                owner.log(
-                    "info",
-                    "kernel.forward.status_attached",
-                    "status forwarder attached to current engine",
-                );
-                // R2（T6b）：engine 已回归（状态流重新挂接）——清除失联标记；排队中的
-                // R1（隧道断线）信号此后按其本义处理（engine 活着，隧道断线是 R1）。
-                engine_lost.store(false, Ordering::Release);
-                owner.backoff = ENGINE_EVENT_RECONNECT_BASE;
                 let mut stream = stream;
                 let mut engine_swapped = false;
                 loop {
@@ -2993,13 +3202,11 @@ impl KernelControlService {
                             let Some(status_event) = status_event else {
                                 break;
                             };
-                            let status_received = Instant::now();
                             // R3-C2：终态事件（Connected/Failed/Idle）的 operation_id 与当前
                             // 在途操作不符 → 丢弃（防旧操作迟到终态驱动相态）；`None` = 丢弃。
                             // RT-SESSION-04：Connected 缺正值起点时在此归一化内采纳本地
                             // 时钟并落码 11（诊断只进日志聚合器）。
                             let mut composition_guard = composition.lock().await;
-                            let composition_wait = status_received.elapsed();
                             // 排队等待 composition 时可能已经换代；从核对到状态提交与
                             // publish 一直持有代次借用和 composition，禁止旧事件迟到投影。
                             let generation = slot_swaps.borrow();
@@ -3008,7 +3215,7 @@ impl KernelControlService {
                             }
                             let status_event = normalize_unexpected_stop(status_event, &composition_guard, &logs);
                             if let Some((kind, snapshot)) =
-                                runtime_event_from_status_locked(&status_event, &mut composition_guard, &logs)
+                                session.accept_session_input(&mut composition_guard, SessionInput::EngineEvent(&status_event)).ok().and_then(SessionOutput::event)
                             {
                                 let operation_id = Uuid::from_slice(&snapshot.operation_id).ok();
                                 network_monitor.invalidate_if_different(operation_id, owner.engine_generation);
@@ -3021,7 +3228,7 @@ impl KernelControlService {
                                             network_monitor.start(Arc::clone(&logs), SnapshotContext::new(
                                                 "connected_baseline", Some(operation_id), attempt_id,
                                                 reconnect_attempts.load(Ordering::Relaxed), owner.engine_generation,
-                                            ), operation_id, owner.engine_generation);
+                                            ), operation_id, owner.engine_generation, network_light_probe);
                                         }
                                     }
                                     EngineStatusEvent::Failed { .. } => {
@@ -3045,27 +3252,17 @@ impl KernelControlService {
                                         request_snapshot(Arc::clone(&logs), SnapshotContext::new(
                                             "retryable_disconnect", operation_id, attempt_id,
                                             reconnect_attempts.load(Ordering::Relaxed), owner.engine_generation,
-                                        ));
+                                        ), network_probe);
                                     }
-                                let probe_started = Instant::now();
                                 refresh_bus_proxy_tun(&events, &proxy_tun_probe);
-                                let proxy_tun_duration = probe_started.elapsed();
-                                let system_proxy_started = Instant::now();
                                 refresh_bus_system_proxy(&events, &system_proxy_probe);
-                                let system_proxy_duration = system_proxy_started.elapsed();
                                 // S3/D5 修复：Connected 过渡时刷新 SCM 服务状态缓存——
                                 // 服务可能由外部/bootstrap 启动，缓存若停留在 connect 前
                                 // 旧值，WatchEvents 快照会让 UI 显示「已停止」而实际 Running。
                                 //
-                                // C3a：Connected = 一次真实成功连接（新连接生命周期）——
-                                // 清零 per-connection 重连计数 + 释放重连在途标记（预算回到 0）。
-                                // R2（T6b）：恢复事件达成——reason lane 清空。
                                 if let EngineStatusEvent::Connected { .. } = &status_event {
-                                    reconnect_attempts.store(0, Ordering::Relaxed);
-                                    reconnect_active.store(false, Ordering::Release);
-                                    *reconnect_reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                                     if let Some(service_status) =
-                                        query_service_status(&RealServiceStatusSource, SERVICE_NAME)
+                                        query_service_status(service_status_source.as_ref(), SERVICE_NAME)
                                             .ok()
                                             .map(|snap| {
                                                 let health = derive_health(
@@ -3076,18 +3273,6 @@ impl KernelControlService {
                                     {
                                         events.refresh_service_status(Some(service_status));
                                     }
-                                }
-                                // C3a：任何终态（Failed/Stopped）都释放重连在途标记——
-                                // 本次重连尝试已结束（成功/失败），允许下一次可重试掉线触发。
-                                // R2（T6b）：恢复事件终态（engine 已回归并给出判定）——
-                                // reason lane 清空。
-                                if matches!(
-                                    &status_event,
-                                    EngineStatusEvent::Failed { .. }
-                                        | EngineStatusEvent::Stopped { .. }
-                                ) {
-                                    reconnect_active.store(false, Ordering::Release);
-                                    *reconnect_reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                                 }
                                 // 发布前附加当前连接冻结的重连状态；配置保存不会改变它。
                                 events.publish(
@@ -3102,43 +3287,7 @@ impl KernelControlService {
                                         ),
                                     ),
                                 );
-                                // C3a：可重试数据面掉线（stage=DataPlane + retry=
-                                // RetrySameOperation——C2 唯一来源）→ 触发自动重连。
-                                // 异步信号给重连 worker（worker 内再判 auto_reconnect 与
-                                // 预算/在途）；不阻塞事件循环。未开启 auto_reconnect 时
-                                // 由 worker 记「已掉线但未开启」日志；断线状态已先发布。
-                                if let EngineStatusEvent::Failed { error, .. } = &status_event
-                                    && is_retryable_disconnect(error) {
-                                        let mut timing_fields = BTreeMap::from([
-                                            ("operation_id".into(), operation_id.map_or_else(|| "unknown".into(), |id| id.to_string())),
-                                            ("engine_generation".into(), owner.engine_generation.to_string()),
-                                            ("reconnect_attempt".into(), reconnect_attempts.load(Ordering::Relaxed).to_string()),
-                                            ("composition_wait_ms".into(), composition_wait.as_millis().to_string()),
-                                            ("proxy_tun_probe_ms".into(), proxy_tun_duration.as_millis().to_string()),
-                                            ("system_proxy_probe_ms".into(), system_proxy_duration.as_millis().to_string()),
-                                            ("status_to_signal_ms".into(), status_received.elapsed().as_millis().to_string()),
-                                        ]);
-                                        if let Some(policy) = *reconnect_session_policy.lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner) {
-                                            timing_fields.insert("effective_auto_reconnect".into(), policy.auto_reconnect.to_string());
-                                            timing_fields.insert("effective_max_attempts".into(), policy.max_attempts.to_string());
-                                            timing_fields.insert("effective_backoff".into(), policy.backoff.to_string());
-                                        }
-                                        let _ = logs.append_core(
-                                            "info",
-                                            "kernel",
-                                            "kernel.reconnect.trigger",
-                                            "retryable data-plane drop detected; signaling reconnect worker",
-                                            &timing_fields,
-                                        );
-                                        // worker 未拉起时 `None`，信号丢弃（无重连语义）。
-                                        if let Some(tx) = reconnect_tx.lock().unwrap().as_ref() {
-                                            let _ = tx.send(ReconnectTrigger::TunnelLoss);
-                                        }
-                                        timing_fields.insert("status_to_signal_ms".into(), status_received.elapsed().as_millis().to_string());
-                                        let _ = logs.append_core("debug", "kernel", "kernel.reconnect.trigger_timing",
-                                            "状态接收至重连信号的宿主耗时", &timing_fields);
-                                    }
+
                             }
                         }
                     }
@@ -3147,13 +3296,44 @@ impl KernelControlService {
                     // 换点前已撤销 status_ready；回到循环后从 EngineSlot 重新挂接。
                     continue;
                 }
-                // 状态流 EOF = engine 断开：撤销就绪（R3-C3 防 stale-true——退避窗口内
-                // 派发不误判已挂接）→ R2 收敛双保险（engine 侧 Idle 终态可能随断线丢失
-                // → 若本机正在停机收敛,补数据面侧加入→Stopped/Idle）→ 发布断线过渡 +
-                // 退避重连（无 resume tick；状态机为单一事实源，重连后从当前 phase 继续）。
-                // R2（T6b）：EOF 即 engine 失联——失联标记置位（优先于任何排队中的 R1
-                // 触发，边界 22），随后按形态分类恢复动作（见下方 classify）。
-                engine_lost.store(true, Ordering::Release);
+                // EOF 仅结束订阅。撤销附着后观察同一控制面，存活会话不进入 R2。
+                StatusAttachment::revoke(&owner.attachment, owner.engine_generation);
+                let query_basis = {
+                    let guard = composition.lock().await;
+                    session.observation_basis(&guard)
+                };
+                let query_origin = query_basis.dispatch_id;
+                let observed = tokio::time::timeout(Duration::from_secs(3), async {
+                    engine.lock().await.observe_owned_state(ObserveOwnedStateRequest { lookup_key: None }).await
+                }).await.unwrap_or(Err(GrpcClientError::Timeout));
+                if let Ok(reply) = &observed
+                    && let Some(snapshot) = &reply.snapshot
+                    && !snapshot.operation_id.is_empty() {
+                    {
+                        let mut guard = composition.lock().await;
+                        let generation = slot_swaps.borrow();
+                        if *generation == owner.engine_generation {
+                            let _ = session.accept_session_input(
+                                &mut guard,
+                                SessionInput::ChannelSnapshot {
+                                    basis: query_basis,
+                                    snapshot,
+                                },
+                            );
+                        }
+                    }
+                    if !owner.wait_for_retry(&mut slot_swaps, "live_stream_reattach").await { return; }
+                    continue;
+                }
+                let confirmed_empty = matches!(&observed, Ok(reply) if reply.snapshot.as_ref().is_some_and(|snapshot|
+                    snapshot.operation_id.is_empty() && matches!(snapshot.state, Some(wire::runtime_snapshot::State::Idle(_)))));
+                let unreachable = matches!(&observed, Err(GrpcClientError::ConnectionLost | GrpcClientError::Timeout | GrpcClientError::Transport(_)))
+                    || matches!(&observed, Err(GrpcClientError::Rpc(Code::Unavailable, _)));
+                if !confirmed_empty && !unreachable {
+                    // 缺快照或业务拒绝只说明无法确认会话，不能凭空启动 R2。
+                    if !owner.wait_for_retry(&mut slot_swaps, "unconfirmed_stream_reattach").await { return; }
+                    continue;
+                }
                 network_monitor.record_stream_disconnect(&logs, owner.engine_generation);
                 StatusAttachment::revoke(&owner.attachment, owner.engine_generation);
                 owner.log(
@@ -3165,62 +3345,24 @@ impl KernelControlService {
                 refresh_bus_system_proxy(&events, &system_proxy_probe);
                 // R2 分类（T6b，计划 §2.7）：EOF 时连接在途/在线（Connecting/Connected/
                 // Reconciling——用户停机中的 Stopping 不属恢复对象）→ 按 engine 形态分流。
-                let mut r2_classified: Option<(R2Reason, Option<ReconnectTrigger>, ServiceMode)> =
-                    None;
-                {
-                    let mut composition_guard = composition.lock().await;
+                let r2_classified = {
+                    let mut guard = composition.lock().await;
                     let generation = slot_swaps.borrow();
                     if *generation == owner.engine_generation {
-                        let phase = composition_guard.phase();
-                        composition_guard.synthesize_data_plane_join();
-                        if matches!(
-                            phase,
-                            HostPhase::Connecting | HostPhase::Connected | HostPhase::Reconciling
+                        match session.accept_session_input(
+                            &mut guard,
+                            SessionInput::ChannelFault {
+                                basis: query_basis,
+                                subscribed,
+                            },
                         ) {
-                            // engine 已失联：在途重连尝试的终态事件永远不会再到达
-                            //（engine 重启即失忆，edge 19）——由 R2 接管恢复，先行释放
-                            // 在途标记，防止后续 R2 信号被 skip_in_flight 永久卡死。
-                            reconnect_active.store(false, Ordering::Release);
-                            let form =
-                                ServiceMode::from_u8(owner.selected_mode.load(Ordering::Relaxed));
-                            let oneshot_gated_on = reconnect_session_policy
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .is_some_and(|policy| policy.on_oneshot_engine_crash);
-                            let (reason, signal) = match form {
-                                // 服务形态（auto 无维护对象，与 service 同走被动等待——
-                                // 绝不提权）：等 SCM 拉回 + run_connect 路由重拨；随主
-                                // 开关（D11——drive_reconnect 的 auto_reconnect 判定）。
-                                ServiceMode::Service | ServiceMode::Auto => (
-                                    R2Reason::Service,
-                                    Some(ReconnectTrigger::EngineLostService),
-                                ),
-                                ServiceMode::Oneshot if oneshot_gated_on => (
-                                    R2Reason::Oneshot,
-                                    Some(ReconnectTrigger::EngineLostOneshot),
-                                ),
-                                // oneshot 且设置项关（默认）：不自动重连——断开过渡由下方
-                                // 快照发布呈现；通知出口归 T12。
-                                ServiceMode::Oneshot => (R2Reason::OneshotGatedOff, None),
-                            };
-                            // 先置 reason lane 再发布断线过渡——EOF 快照本身携带 reason id。
-                            *reconnect_reason
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
-                            r2_classified = Some((reason, signal, form));
+                            Ok(SessionOutput::Recovery(recovery)) => recovery,
+                            _ => None,
                         }
-                        let snapshot = snapshot_with_reconnect(
-                            disconnected_snapshot(&composition_guard),
-                            reconnect_status_from_session(
-                                &reconnect_attempts,
-                                &reconnect_active,
-                                &reconnect_session_policy,
-                                &reconnect_reason,
-                            ),
-                        );
-                        events.publish(wire::RuntimeEventKind::Transition, snapshot);
+                    } else {
+                        None
                     }
-                }
+                };
                 if let Some((reason, signal, form)) = r2_classified {
                     // 稳定 reason id 落结构化日志（与 wire `ReconnectStatus.reason` 同值；
                     // T12 气泡按 id 路由）。
@@ -3305,10 +3447,11 @@ impl KernelControlService {
                             }
                         }
                     }
-                    // worker 未拉起时 `None`，信号丢弃（无重连语义——与 R1 触发一致）。
+                    // 信号绑定观察前的派发身份；手动连接和 Stop 使排队旧信号失效。
                     if let Some(trigger) = signal
+                        && let Some(origin) = query_origin
                         && let Some(tx) = reconnect_tx.lock().unwrap().as_ref() {
-                            let _ = tx.send(trigger);
+                            let _ = tx.send((trigger, origin));
                         }
                 }
                 if !owner.wait_for_retry(&mut slot_swaps, "eof_backoff").await {
@@ -3692,18 +3835,77 @@ impl KernelControlService {
     }
 }
 
+fn connect_auth_deadline(metadata: &tonic::metadata::MetadataMap) -> Result<Option<tokio::time::Instant>, Status> {
+    let mut values = metadata.get_all("x-exv-auth-deadline-monotonic-ns").iter();
+    let Some(value) = values.next() else { return Ok(None); };
+    if values.next().is_some() { return Err(Status::invalid_argument("auth_control/duplicate deadline")); }
+    let value = value.to_str().ok().and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| Status::invalid_argument("auth_control/invalid deadline"))?;
+    auth_deadline_from_wire(value).map(Some)
+}
+
+fn auth_deadline_from_wire(value: u64) -> Result<tokio::time::Instant, Status> {
+    use exv_vpn_win32_ipc::auth_deadline::{AuthDeadline, AuthDeadlineError};
+    AuthDeadline::from_monotonic_ns(value).and_then(AuthDeadline::tokio_deadline).map_err(|error| match error {
+        AuthDeadlineError::Expired => Status::deadline_exceeded("auth_control/deadline expired"),
+        AuthDeadlineError::Invalid => Status::invalid_argument("auth_control/invalid deadline"),
+    })
+}
+
+fn auth_control_deadline(operation: &[u8], value: u64) -> Result<tokio::time::Instant, Status> {
+    if operation.len() != 16 { return Err(Status::invalid_argument("auth_control/operation_id must be 16 bytes")); }
+    auth_deadline_from_wire(value)
+}
+
 #[tonic::async_trait]
 impl KernelControl for KernelControlService {
     type WatchEventsStream = WatchEventsStream;
     type WatchStatsStream = WatchStatsStream;
+
+    async fn prepare_auth_control(
+        &self, request: Request<wire::PrepareAuthControlRequest>,
+    ) -> Result<Response<OperationReply>, Status> {
+        self.require_authorized().await?;
+        let request = request.into_inner();
+        let deadline = auth_control_deadline(&request.operation_id, request.deadline_monotonic_ns)?;
+        tokio::time::timeout_at(deadline, async {
+            let _route = self.connect_route_lock.lock().await;
+            self.prepare_engine_control(None, true).await?;
+            Ok(Response::new(OperationReply { terminal: None }))
+        }).await.map_err(|_| Status::deadline_exceeded("auth_control/prepare deadline exceeded"))?
+    }
+
+    async fn auth_receiver_control(
+        &self, request: Request<wire::AuthReceiverControlRequest>,
+    ) -> Result<Response<wire::AuthReceiverControlReply>, Status> {
+        self.require_authorized().await?;
+        let request = request.into_inner();
+        let deadline = auth_control_deadline(&request.operation_id, request.deadline_monotonic_ns)?;
+        if !matches!(wire::AuthReceiverAction::try_from(request.action), Ok(wire::AuthReceiverAction::Inspect | wire::AuthReceiverAction::DisableAndStop | wire::AuthReceiverAction::Restore | wire::AuthReceiverAction::ReadRecovery)) {
+            return Err(Status::invalid_argument("auth_receiver_control/action is required"));
+        }
+        tokio::time::timeout_at(deadline, async {
+            // 设置中的独立查询/恢复也准备同一 Engine，会话不会派发 ApplyTunnel。
+            let _route = self.connect_route_lock.lock().await;
+            self.prepare_engine_control(None, true).await?;
+            let engine = self.engine.current().await;
+            let reply = engine.lock().await.auth_receiver_control(request).await.map_err(grpc_error_to_status)?;
+            Ok(Response::new(reply))
+        }).await.map_err(|_| Status::deadline_exceeded("auth_receiver_control/deadline exceeded"))?
+    }
 
     async fn connect(
         &self,
         request: Request<ConnectRequest>,
     ) -> Result<Response<OperationReply>, Status> {
         let persist_credentials = persist_credentials_requested(&request);
+        let deadline = connect_auth_deadline(request.metadata());
         let mut req = request.into_inner();
-        self.connect_request(&mut req, persist_credentials).await
+        let deadline = match deadline {
+            Ok(deadline) => deadline,
+            Err(error) => { zeroize_connect_secret(&mut req); return Err(error); }
+        };
+        self.connect_request_with_deadline(&mut req, persist_credentials, deadline).await
     }
 
     async fn respond_interaction(
@@ -3711,8 +3913,14 @@ impl KernelControl for KernelControlService {
         request: Request<InteractionResponse>,
     ) -> Result<Response<OperationReply>, Status> {
         self.require_authorized().await?;
-        let response = request.into_inner();
-        validate_interaction_response(&response)?;
+        let mut response = request.into_inner();
+        if let Err(status) = validate_interaction_response(&response) {
+            response.response_payload.zeroize();
+            return Err(status);
+        }
+        if self.respond_auth_acquisition(&mut response).await? {
+            return Ok(Response::new(OperationReply { terminal: None }));
+        }
 
         // P3-c1：经 seam 转发 engine。engine 冻结 wire 无 interaction RPC → 真实实现
         // 返回 typed `Unimplemented`；2026-09-05 裁决维持现状（engine 无交互提示产生
@@ -3742,122 +3950,14 @@ impl KernelControl for KernelControlService {
         &self,
         request: Request<StopRequest>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.require_authorized().await?;
-        let req = request.into_inner();
-        let intent = req
-            .intent
-            .ok_or_else(|| Status::invalid_argument("stop: missing stop intent"))?;
-        validate_stop_intent(&intent)?;
-
-        // composition → dispatch；发出取消后即释放同步短锁，随后才等待 engine。
-        let mut composition = self.composition.lock().await;
-        let (attempt_id, stop_required, target_generation) = {
-            let mut dispatch = self
-                .connect_dispatch
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match dispatch.as_mut() {
-                Some(state) => {
-                    state.cancelled.send_replace(true);
-                    (Some(state.id), state.stop_required, state.target_generation)
-                }
-                // 无本会话记录时，保留真实清理可能存在的隧道的兼容路径。
-                None => (None, true, None),
-            }
-        };
-
-        // 用户显式停止即结束本连接生命周期；下一次连接必须重新读取已保存的重连设置。
-        if let Ok(mut policy) = self.reconnect_session_policy.lock() {
-            *policy = None;
-        }
-        self.reconnect_active.store(false, Ordering::Release);
-
-        // R1：stop 受理即驱动状态机（Connected/Connecting/Failed → Stopping）。
-        // 状态机单一事实源：用户 Stop 是唯一业务取消，立即反映到 phase。控制面（host）
-        // 侧即加入 teardown 屏障；engine 状态流先发 Idle（数据面侧）→ 双侧齐 → Stopped
-        //（R1 收敛；R2 再补 core 合成 Idle 双保险）。
-        let operation_id = intent
-            .lookup_key
-            .as_ref()
-            .and_then(|k| <[u8; 16]>::try_from(k.operation_id.as_slice()).ok());
-        {
-            composition.apply(HostEvent::Disconnect);
-            composition.apply(HostEvent::TeardownSideJoined(TeardownSide::ProtocolControl));
-            if let Some(id) = operation_id {
-                composition.set_operation_id(id);
-            }
-        }
-        drop(composition);
-        // C1（ui-connect-stop-responsiveness）：受理即发布 Stopping 受理快照——发布点
-        // 在 admission 之后、`await_status_ready` 之前，UI 即时离开乐观态（后续断开的
-        // 真实收敛仍由状态转发器端到端发布）。
-        self.publish_admission_snapshot().await;
-
-        if !stop_required {
-            // 本次连接没有创建数据面；控制面取消即完成，不向 engine 发送虚构的 Stop。
-            self.finish_local_stop(attempt_id).await;
-            self.log_status_gate(attempt_id, target_generation, "cancelled_without_apply");
-            return Ok(Response::new(OperationReply { terminal: None }));
-        }
-
-        let stop_generation = *self.engine.subscribe_swaps().borrow();
-        let readiness = self.await_status_ready(stop_generation).await;
-        self.log_status_gate(
-            attempt_id,
-            Some(stop_generation),
-            if readiness.is_ok() {
-                "stop_attached"
-            } else {
-                "stop_without_status"
-            },
-        );
-        // 已 Apply 的隧道始终需要真实停止；状态流不可达时依靠 Stop 的确认回执收束，
-        // 不因展示通道故障留下网络资源，也不进入 service repair。
-
-        // engine 派发：StopTunnel 携带 stop 意图的 lookup_key + request_digest。
-        let engine = self.engine.current().await;
-        let mut engine = engine.lock().await;
-        // P1-b lease 前置：StopTunnel 同样经 `bind_mutation` 要求 `core.owner`（幂等
-        // ensure——即使无 prior connect 或 engine 重连后也满足，避免
-        // `failed_precondition("no owner lease established")`）。
-        engine
-            .ensure_owner_lease()
+        let deadline = stop_request_deadline(&request)?;
+        let request = request.into_inner();
+        let service = self.clone();
+        // tonic 的传输期限会 drop handler；本次受理与清理责任属于这个 owned 任务。
+        tokio::spawn(async move { service.stop_owned(request, deadline).await })
             .await
-            .map_err(grpc_error_to_status)?;
-        // Bug E：engine-facing `StopTunnelRequest` 的 `wire_key.method` 必须是 engine
-        // `stop_tunnel` 期待的 `StopTunnel`——UI Stop 意图的 method=Stop 直接传给 engine
-        // 会让 `kernel_request_to_operation` 判 "kernel: operation: out of scope"。转换只改
-        // method，保留 runtime_epoch/operation_id。
-        let mut engine_key = intent.lookup_key.clone();
-        if let Some(key) = engine_key.as_mut() {
-            key.method = wire::OperationMethod::StopTunnel as i32;
-        }
-        let reply = engine
-            .stop_tunnel(StopTunnelRequest {
-                lookup_key: engine_key,
-                request_digest: intent.request_digest.clone(),
-            })
-            .await
-            .map_err(grpc_error_to_status)?;
-        drop(engine);
-
-        if matches!(
-            reply.result,
-            Some(wire::stop_tunnel_reply::Result::Stopped(_))
-        ) {
-            self.finish_local_stop(attempt_id).await;
-        }
-
-        self.logs
-            .append_core(
-                "info",
-                "kernel",
-                "kernel.stop.dispatched",
-                "stop dispatched to engine",
-                &BTreeMap::new(),
-            )
-            .ok();
-        Ok(Response::new(operation_reply_from_stop(&reply)))
+            .map_err(|_| Status::internal("stop: owned task ended unexpectedly"))?
+            .map(Response::new)
     }
 
     async fn reconcile(
@@ -3929,10 +4029,13 @@ impl KernelControl for KernelControlService {
     ) -> Result<Response<KernelOperationReply>, Status> {
         // 读路径不 gate（与 GetSnapshot/WatchEvents 一致）：路由到 engine GetOperation
         // 真实读取义务/操作 disposition。
-        let key = request
+        let mut key = request
             .into_inner()
             .key
             .ok_or_else(|| Status::invalid_argument("get_operation: missing operation key"))?;
+        if key.method == wire::OperationMethod::Stop as i32 {
+            key.method = wire::OperationMethod::StopTunnel as i32;
+        }
         let engine = self.engine.current().await;
         let mut engine = engine.lock().await;
         let op = engine
@@ -3952,7 +4055,7 @@ impl KernelControl for KernelControlService {
         // 查询失败只说明失去确认能力，不能把旧 Connected 继续作为现场事实。
         let query_basis = {
             let guard = self.composition.lock().await;
-            (guard.phase(), guard.operation_id())
+            self.observation_basis(&guard)
         };
         let engine_result = tokio::time::timeout(Duration::from_secs(3), async {
             let engine = self.engine.current().await;
@@ -3985,46 +4088,19 @@ impl KernelControl for KernelControlService {
                 None
             }
         };
-        let mut composition = self.composition.lock().await;
-        // 同名服务管道可重拨新进程而不换 EngineSlot；新引擎的空会话不能复活旧连接。
-        // 仅裁决查询前后仍属同一已连接操作的事实，避免查询途中建立新会话的竞态。
-        if query_basis.0 == HostPhase::Connected && composition.phase() == HostPhase::Connected
-            && query_basis.1 == composition.operation_id()
-            && engine_snapshot.as_ref().is_some_and(|snapshot| snapshot.operation_id.is_empty()
-                && matches!(snapshot.state, Some(wire::runtime_snapshot::State::Idle(_)))) {
-            let operation_id = composition.operation_id().map(|id| id.to_vec()).unwrap_or_default();
-            let _ = self.logs.append_core("warn", "connection", "kernel.connection.engine_session_missing",
-                "引擎报告没有活动会话，旧连接已经失效", &BTreeMap::new());
-            let event = EngineStatusEvent::Failed { operation_id, error: wire::VpnError {
-                code: wire::ErrorCode::EffectUnknown as i32, stage: wire::ErrorStage::DataPlane as i32,
-                certainty: wire::EffectCertainty::NoEffect as i32, retry: wire::RetryAdvice::RetrySameOperation as i32,
-                ..Default::default()
-            }};
-            if let Some((kind, snapshot)) = runtime_event_from_status_locked(&event, &mut composition, &self.logs) {
-                self.events.publish(kind, snapshot_with_reconnect(snapshot, self.session_reconnect_status()));
-                request_snapshot(Arc::clone(&self.logs), SnapshotContext::new("engine_session_missing",
-                    composition.operation_id().map(Uuid::from_bytes), None,
-                    self.reconnect_attempts.load(Ordering::Relaxed), *self.engine.subscribe_swaps().borrow()));
-                if let Some(tx) = self.reconnect_tx.lock().unwrap().as_ref() { let _ = tx.send(ReconnectTrigger::TunnelLoss); }
+        let (selected_snapshot, confirmed_session_start) = {
+            let mut composition = self.composition.lock().await;
+            match self.accept_session_input(
+                &mut composition,
+                SessionInput::Query {
+                    basis: query_basis,
+                    snapshot: engine_snapshot,
+                },
+            )? {
+                SessionOutput::Snapshot(snapshot, start) => (snapshot, start),
+                _ => unreachable!("query output"),
             }
-        }
-        let composition_snapshot = if engine_snapshot.is_none() {
-            disconnected_snapshot(&composition)
-        } else {
-            snapshot_for_phase(composition.phase(), &composition)
         };
-        let confirmed_session_start = composition.session_established_at_ms();
-        let selected_snapshot = prefer_snapshot(engine_snapshot, composition_snapshot);
-        let cached = self.events.current_snapshot();
-        let uncertain = matches!(selected_snapshot.state, Some(wire::runtime_snapshot::State::Reconciling(_)));
-        let recovered = matches!(selected_snapshot.state, Some(wire::runtime_snapshot::State::Connected(_)));
-        if (uncertain && cached.as_ref().is_some_and(|snapshot| matches!(snapshot.state, Some(wire::runtime_snapshot::State::Connected(_)))))
-            || (recovered && cached.as_ref().is_some_and(|snapshot| matches!(snapshot.state, Some(wire::runtime_snapshot::State::Reconciling(_))))) {
-            // 统计事件复用 EventBus 的状态，查询与推送必须一起撤下或恢复 Connected。
-            self.events.publish(wire::RuntimeEventKind::Transition,
-                snapshot_with_reconnect(selected_snapshot.clone(), self.session_reconnect_status()));
-        }
-        drop(composition);
         // P5-wire 方案 A：把 EventBus 统计 lane 的最新样本附加到快照（无样本 → None）。
         let stats = self.events.current_stats();
         // C5-wire：GetSnapshot 是 UI 拉取点——每次调用探测一次上游 proxy TUN 并刷新
@@ -4049,28 +4125,36 @@ impl KernelControl for KernelControlService {
         // lane 当前缓存——拉取通道每次组装都读缓存，对 `refresh_self_heal` 即时生效，
         // 包括 Connect 受理的清除；事件订阅者则要等下一次自然 publish）。
         let self_heal = self.events.current_self_heal();
-        Ok(Response::new(snapshot_with_reconnect(
-            snapshot_with_self_heal(
-                snapshot_with_service_context(
-                    snapshot_with_system_proxy(
-                        snapshot_with_proxy_tun(
-                            snapshot_with_stats(
-                                snapshot_with_confirmed_session_start(
-                                    selected_snapshot,
-                                    confirmed_session_start,
+        // bug3（EXV_UNFREEZE 2026-10-04）：拉取通道同源附加会话身份投影（读 lane 当前
+        // 缓存——连接受理置位、显式 Stop 清除即时反映）。
+        let session_identity = self.events.current_session_identity();
+        let mut selected_snapshot = selected_snapshot;
+        selected_snapshot.atrust_auth_acquisition = self.events.auth_acquisition_current.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        Ok(Response::new(snapshot_with_session_identity(
+            snapshot_with_reconnect(
+                snapshot_with_self_heal(
+                    snapshot_with_service_context(
+                        snapshot_with_system_proxy(
+                            snapshot_with_proxy_tun(
+                                snapshot_with_stats(
+                                    snapshot_with_confirmed_session_start(
+                                        selected_snapshot,
+                                        confirmed_session_start,
+                                    ),
+                                    stats,
                                 ),
-                                stats,
+                                proxy_tun,
                             ),
-                            proxy_tun,
+                            system_proxy,
                         ),
-                        system_proxy,
+                        service_status,
+                        Some(mode),
                     ),
-                    service_status,
-                    Some(mode),
+                    self_heal,
                 ),
-                self_heal,
+                reconnect,
             ),
-            reconnect,
+            session_identity,
         )))
     }
 
@@ -4138,6 +4222,17 @@ impl KernelControl for KernelControlService {
         }))
     }
 
+    async fn record_auth_diagnostic(&self, request: Request<wire::LogEvent>) -> Result<Response<wire::RecordAuthDiagnosticReply>, Status> {
+        self.require_authorized().await?;
+        let event = exv_vpn_wire::auth_diagnostic::normalize(request.into_inner()).map_err(Status::invalid_argument)?;
+        let logs = Arc::clone(&self.logs);
+        tokio::task::spawn_blocking(move || {
+            logs.append_core(&event.level, &event.component, &event.code, &event.message, &event.fields.into_iter().collect())
+        }).await.map_err(|_| Status::internal("auth_diagnostic/write_task"))?
+            .map_err(|_| Status::internal("auth_diagnostic/write_failed"))?;
+        Ok(Response::new(wire::RecordAuthDiagnosticReply { recorded: true }))
+    }
+
     async fn logs_clear(
         &self,
         _request: Request<LogsClearRequest>,
@@ -4161,17 +4256,55 @@ impl KernelControl for KernelControlService {
         _request: Request<ConfigGetRequest>,
     ) -> Result<Response<ConfigPayload>, Status> {
         // 读路径不 gate：返回非 secret 配置项。
-        let startup = load_for_startup(&self.config_dir)
-            .map_err(|e| Status::internal(format!("config_get: {e:?}")))?;
+        //
+        // S4（2026-10）：`load_for_startup` 内含三档读自愈（占用有界重试 →
+        // Owner=self 自修 DACL → 上抛）。第三档不可自愈时**不再笼统 internal**：
+        // 观测码 `config.read_failed`（warn，Win32 码+路径）+ payload 结构化
+        // `read_failure` 透出（前端弹明确错误与「以管理员身份修复权限」runas
+        // 入口）。禁令：该路径绝不重建/覆盖 config.json——读不了无法先备份，
+        // 覆盖等于丢配置（config crate 测试断言文件字节不变）。
+        let startup = match load_for_startup(&self.config_dir) {
+            Ok(startup) => startup,
+            Err(ConfigError::ReadFailed(failure)) => {
+                let message = format!(
+                    "config.json read failed after self-healing (win32 {}): {}",
+                    failure.win32_code(),
+                    failure.path.display()
+                );
+                let _ = self.logs.append_core(
+                    "warn",
+                    "kernel",
+                    "config.read_failed",
+                    &message,
+                    &BTreeMap::from([
+                        ("win32_code".to_string(), failure.win32_code().to_string()),
+                        ("path".to_string(), failure.path.display().to_string()),
+                    ]),
+                );
+                return Ok(Response::new(ConfigPayload {
+                    items: Vec::new(),
+                    requires_quick_start: false,
+                    config_recovery: None,
+                    read_failure: Some(WireConfigReadFailure {
+                        win32_code: failure.win32_code(),
+                        path: failure.path.display().to_string(),
+                    }),
+                }));
+            }
+            Err(e) => return Err(Status::internal(format!("config_get: {e:?}"))),
+        };
         let cfg = startup.config;
         // 开关与凭据可用性分开：记住开关可能开启但密文/密钥缺失。验证所得明文由
         // CredentialsBundle 的零化 guard 当场释放，ConfigGet 只返回布尔状态。
-        // T02：凭据按协议区分，因此切换协议后该值自动为 false——UI 显示“本协议没有
-        // 已保存密码”，而不是错误地复用另一种协议的密码。
-        let has_stored_password = cfg.remember_password
-            && !cfg.password.is_empty()
-            && crate::credential::load_credentials(&self.config_dir, cfg.protocol).is_ok();
+        // 2026-09-30 单对账密裁定：账号密码与 Cisco 完全共享，切换协议后同一对
+        // 凭据继续可用（T02 的按协议翻转语义已由用户裁定取代）。
+        let has_stored_password = cfg.has_stored_password(&self.config_dir);
+        let has_saved_credential_pair = cfg.has_saved_credential_pair(&self.config_dir);
         let items = vec![
+            ConfigItem {
+                key: "has_saved_credential_pair".into(),
+                value: has_saved_credential_pair.to_string(),
+            },
             ConfigItem {
                 key: "has_stored_password".into(),
                 value: has_stored_password.to_string(),
@@ -4183,6 +4316,8 @@ impl KernelControl for KernelControlService {
             ConfigItem { key: "cisco_server".into(), value: cfg.cisco_server },
             ConfigItem { key: "atrust_server".into(), value: cfg.atrust_server },
             ConfigItem { key: "atrust_auth_mode".into(), value: cfg.atrust_auth_mode },
+            ConfigItem { key: "atrust_auto_login".into(), value: cfg.atrust_auto_login.to_string() },
+            ConfigItem { key: "atrust_tcp_nodelay".into(), value: cfg.atrust_tcp_nodelay.to_string() },
             ConfigItem {
                 key: "campus_dns_domains".into(),
                 value: cfg.campus_dns_domains.join(","),
@@ -4244,6 +4379,14 @@ impl KernelControl for KernelControlService {
         Ok(Response::new(ConfigPayload {
             items,
             requires_quick_start: startup.requires_quick_start,
+            // R-D3-C：损坏修复报告仅当次损坏分支有值（core 不持久化）；wire 字段
+            // 只携带布尔 + 备份文件名，无路径、无秘密。
+            config_recovery: startup.config_recovery.map(|recovery| ConfigRecovery {
+                corrupted: recovery.corrupted,
+                backup_file: recovery.backup_file,
+            }),
+            // S4：能走到这里 = 读取成功（含三档自愈成功），无读失败可报。
+            read_failure: None,
         }))
     }
 
@@ -4251,173 +4394,47 @@ impl KernelControl for KernelControlService {
         &self,
         request: Request<ConfigSetRequest>,
     ) -> Result<Response<ConfigReply>, Status> {
-        // 写路径 gate：应用并持久化配置。
-        self.require_authorized().await?;
-        let mut cfg = ExvConfig::load_from_dir(&self.config_dir)
-            .map_err(|e| Status::internal(format!("config_set: load {e:?}")))?;
-        let previous_username = cfg.username.clone();
-        // T02：离开 Cisco 之前必须留下旧版本可读的配置备份（降级回退材料）。快照在应用
-        // 任何提交项之前取得——回退要还给用户的是**切换前**那份能正常工作的 Cisco 配置
-        // （含当时的服务器与密文），不是切换后的半成品。
-        let previous_protocol = cfg.protocol;
-        let backup_source = cfg.clone();
-        let mut password = None;
-        let mut submitted_server = None;
-        for item in request.into_inner().items {
-            match item.key.as_str() {
-                "server" => submitted_server = Some(item.value),
-                "cisco_server" => cfg.cisco_server = item.value,
-                "atrust_server" => cfg.atrust_server = item.value,
-                "atrust_auth_mode" => {
-                    if item.value != "browser" && item.value != "embedded" {
-                        return Err(Status::invalid_argument("config_set: atrust_auth_mode must be browser/embedded"));
-                    }
-                    cfg.atrust_auth_mode = item.value;
-                }
-                "campus_dns_domains" => {
-                    cfg.campus_dns_domains = exv_vpn_win32_config::parse_campus_dns_domains(&item.value)
-                        .map_err(|_| Status::invalid_argument("config_set: campus_dns_domains must be a comma-separated list of ASCII hostnames"))?;
-                }
-                "username" => cfg.username = item.value,
-                "remember_password" => {
-                    cfg.remember_password = item.value.parse().map_err(|_| {
-                        Status::invalid_argument("config_set: remember_password must be true/false")
-                    })?;
-                }
-                "routes" => {
-                    cfg.routes = item
-                        .value
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-                "user_agent" => cfg.user_agent = item.value,
-                "mtu" => {
-                    cfg.mtu = item
-                        .value
-                        .parse()
-                        .map_err(|_| Status::invalid_argument("config_set: mtu must be a number"))?;
-                }
-                "protocol" => {
-                    // 写路径必须严格：非法协议返回可理解错误，不得静默落回 Cisco。
-                    // （读路径对未知取值的局部回退只用于容忍更高版本写下的配置文件。）
-                    cfg.protocol = item.value.parse().map_err(|()| {
-                        Status::invalid_argument("config_set: protocol must be cisco/atrust")
-                    })?;
-                }
-                "connection_mode" => {
-                    cfg.connection_mode = item.value.parse().map_err(|()| {
-                        Status::invalid_argument(
-                            "config_set: connection_mode must be standard/compatibility",
-                        )
-                    })?;
-                }
-                "auto_reconnect" => {
-                    cfg.auto_reconnect = item.value.parse().map_err(|_| {
-                        Status::invalid_argument("config_set: auto_reconnect must be true/false")
-                    })?;
-                }
-                "auto_reconnect_max_attempts" => {
-                    cfg.auto_reconnect_max_attempts = item.value.parse().map_err(|_| {
-                        Status::invalid_argument(
-                            "config_set: auto_reconnect_max_attempts must be a number",
-                        )
-                    })?;
-                }
-                "auto_reconnect_backoff" => {
-                    cfg.auto_reconnect_backoff = item.value.parse().map_err(|_| {
-                        Status::invalid_argument(
-                            "config_set: auto_reconnect_backoff must be true/false",
-                        )
-                    })?;
-                }
-                "on_core_exit" => {
-                    // T4：core 退出策略（keep/teardown）；严格校验，未知值拒绝。
-                    cfg.on_core_exit = item.value.parse().map_err(|()| {
-                        Status::invalid_argument(
-                            "config_set: on_core_exit must be keep/teardown",
-                        )
-                    })?;
-                }
-                "reconnect_on_oneshot_engine_crash" => {
-                    cfg.reconnect_on_oneshot_engine_crash = item.value.parse().map_err(|_| {
-                        Status::invalid_argument(
-                            "config_set: reconnect_on_oneshot_engine_crash must be true/false",
-                        )
-                    })?;
-                }
-                "reconnect_notify" => {
-                    cfg.reconnect_notify = item.value.parse().map_err(|_| {
-                        Status::invalid_argument("config_set: reconnect_notify must be true/false")
-                    })?;
-                }
-                "password" => {
-                    password = Some(zeroize::Zeroizing::new(item.value));
-                }
-                _ => {
-                    return Err(Status::invalid_argument(format!(
-                        "config_set: unknown key '{}'",
-                        item.key
-                    )));
-                }
+        // T5/F10 观测码：config_set 落盘结果此前无任何日志（事故归因盲区）。成功
+        // info `config.set.saved`（含键数）；拒绝 warn `config.set.rejected`（含
+        // 错误摘要）。摘要取 Status 消息——既有校验文案均为静态串/键名，内部错误
+        // 为类型化 ConfigError（Io/Json/Crypto/Base64/Malformed，均不携带密码明文）。
+        // 实现体在固有方法 [`Self::config_set_apply`]（trait impl 块不容纳非成员）。
+        let key_count = request.get_ref().items.len();
+        let outcome = self.config_set_apply(request).await;
+        match &outcome {
+            Ok(_) => {
+                let _ = self.logs.append_core(
+                    "info",
+                    "kernel",
+                    "config.set.saved",
+                    &format!("config_set accepted and persisted ({key_count} keys)"),
+                    &BTreeMap::from([("keys".to_string(), key_count.to_string())]),
+                );
+            }
+            Err(status) => {
+                let _ = self.logs.append_core(
+                    "warn",
+                    "kernel",
+                    "config.set.rejected",
+                    &format!(
+                        "config_set rejected ({key_count} keys): {}",
+                        status.message()
+                    ),
+                    &BTreeMap::from([("keys".to_string(), key_count.to_string())]),
+                );
             }
         }
-        // 先完成整批协议选择，再把旧客户端的 server 字段写入活动协议。
-        // 未提交 server 时从该协议保存的地址投影，避免把切换前地址覆盖到另一侧。
-        if let Some(server) = submitted_server {
-            match cfg.protocol {
-                Protocol::Cisco => cfg.cisco_server = server,
-                Protocol::Atrust => cfg.atrust_server = server,
-            }
-        }
-        cfg.server = match cfg.protocol {
-            Protocol::Cisco => cfg.cisco_server.clone(),
-            Protocol::Atrust => cfg.atrust_server.clone(),
-        };
-        // 整批字段决定最终选择；加密函数会置 remember=true，不能让字段顺序覆盖遗忘。
-        // 单独更换账户不能继承旧账户密码。同账户显式切换 VPN 线路继续复用凭据。
-        if cfg.username != previous_username && password.as_ref().is_none_or(|value| value.is_empty()) {
-            cfg.password.zeroize();
-            cfg.password.clear();
-        }
-        if !cfg.remember_password {
-            cfg.password.zeroize();
-            cfg.password.clear();
-        } else if let Some(password) = password.filter(|value| !value.is_empty()) {
-            let mut key = match ExvConfig::load_key(&self.config_dir) {
-                Ok(Some(key)) => key,
-                Ok(None) => {
-                    return Err(Status::internal(
-                        "config_set: password key unavailable (reinstall?)",
-                    ));
-                }
-                Err(e) => {
-                    return Err(Status::internal(format!("config_set: password key read {e:?}")));
-                }
-            };
-            let encrypted = cfg.set_password_encrypted(&password, &key);
-            key.zeroize();
-            encrypted.map_err(|e| {
-                Status::internal(format!("config_set: password encrypt {e:?}"))
-            })?;
-        }
-        // T02：从 Cisco 切到别的协议时，先把**切换前**的配置写成备份。旧版本 EXV 不认识
-        // `protocol` 字段，会把 aTrust 门户地址当 CSTP 网关并把已封存密码发过去；有了这份
-        // 备份，回退时复制回 config.json 即可。备份写不出来就不允许这次切换（宁可拒绝，
-        // 也不让用户失去回退材料）。
-        if previous_protocol == Protocol::Cisco && cfg.protocol != Protocol::Cisco {
-            exv_vpn_win32_config::write_protocol_switch_backup(&self.config_dir, &backup_source)
-                .map_err(
-                    |e| Status::internal(format!("config_set: protocol switch backup {e:?}")),
-                )?;
-        }
-        save_after_user_submission(&self.config_dir, &cfg)
-            .map_err(|e| Status::internal(format!("config_set: save {e:?}")))?;
-        // 保存配置仅供下一次用户连接读取，不改变当前会话策略。
-        // 历史配置缓存同步失效；运行时发布和重连决策已经不再使用它。
-        self.reconnect_config_cache.invalidate();
-        Ok(Response::new(ConfigReply { ok: true }))
+        outcome
+    }
+
+    /// Windows 现役刷新仍走用户目录 marker；新增 RPC 尚不提供刷新能力。
+    async fn trigger_latency_refresh(
+        &self,
+        _request: Request<wire::KernelLatencyRefreshRequest>,
+    ) -> Result<Response<wire::KernelLatencyRefreshReply>, Status> {
+        Err(Status::unimplemented(
+            "Windows latency refresh RPC is not implemented",
+        ))
     }
 
     async fn service_control(
@@ -4472,19 +4489,7 @@ impl KernelControl for KernelControlService {
                         self.clear_service_removed_override();
                         // 存在性互斥（2026-09-08 计划批 2）：服务形态成为唯一权威；
                         // oneshot 已在批量提交前退役（P0-1 前置），此处无需再收进程。
-                        match self.ensure_service_ready().await {
-                            Ok(readiness) => self.service_control_start_reply(readiness).await,
-                            Err(error) => {
-                                // 批量 Ok 但 start/readiness 失败：同样是操作失败——
-                                // oneshot 仍存活则回滚心跳（饿死收口）。
-                                self.restore_oneshot_keepalive_if_engine_alive(
-                                    mode_before,
-                                    "install_start_failed",
-                                )
-                                .await;
-                                self.service_control_reply(true, Err(error)).await
-                            }
-                        }
+                        self.service_control_reply(true, Ok("服务安装及启动请求已完成".to_string())).await
                     }
                     Err(error) => {
                         // Install 失败（如 UAC 拒绝）：mode 已被 transition 翻走——
@@ -4529,16 +4534,14 @@ impl KernelControl for KernelControlService {
             }
             service_control_request::Action::Start(_) => {
                 self.require_authorized().await?;
-                // 显式 Start 是用户业务手势：bootstrap 失败 = 服务客观问题 → 允许一次
-                // 修复子进程补洞（2026-09-08 计划批 4）。
+                // 显式Start只返回原动作；错误缺少可可靠分类的原码时不自动重装。
                 let mode_before =
                     ServiceMode::from_u8(self.selected_mode.load(Ordering::SeqCst));
-                let mut repair_budget = RepairBudget::default();
-                match self
-                    .ensure_service_ready_for_connect(&mut repair_budget)
+                        match self
+                    .ensure_service_ready()
                     .await
                 {
-                    Ok(readiness) => self.service_control_start_reply(readiness).await,
+                    Ok(()) => self.service_control_reply(true, Ok("服务启动请求已完成".to_string())).await,
                     Err(error) => {
                         // Start 失败：ensure 内部的 retire 若收走未确认（提权子进程
                         // terminate 被拒），槽位保留——mode 仍为 Oneshot 时心跳本就
@@ -4631,6 +4634,258 @@ fn rotate_fingerprint_of(step_message: &str) -> Option<String> {
 }
 
 impl KernelControlService {
+    /// `ConfigSet` 的实现体（应用、校验、加密与落盘；T5/F10 观测码在 trait 方法
+    /// [`Self::config_set`] 外层统一发射）。
+    async fn config_set_apply(
+        &self,
+        request: Request<ConfigSetRequest>,
+    ) -> Result<Response<ConfigReply>, Status> {
+        // 写路径 gate：应用并持久化配置。
+        self.require_authorized().await?;
+        let mut cfg = ExvConfig::load_from_dir(&self.config_dir)
+            .map_err(|e| Status::internal(format!("config_set: load {e:?}")))?;
+        // T02：离开 Cisco 之前必须留下旧版本可读的配置备份（降级回退材料）。快照在应用
+        // 任何提交项之前取得——回退要还给用户的是**切换前**那份能正常工作的 Cisco 配置
+        // （含当时的服务器与密文），不是切换后的半成品。
+        let previous_protocol = cfg.protocol;
+        let backup_source = cfg.clone();
+        let mut password = None;
+        let mut submitted_server = None;
+        let mut submitted_auto_reconnect = None;
+        let mut submitted_remember_password = None;
+        for item in request.into_inner().items {
+            match item.key.as_str() {
+                "server" => submitted_server = Some(item.value),
+                "cisco_server" => cfg.cisco_server = item.value,
+                "atrust_server" => cfg.atrust_server = item.value,
+                "atrust_auth_mode" => {
+                    // C1（2026-10-10）放行 headless：与壳侧 configured_atrust_auth_mode
+                    // 三值集合（browser/embedded/headless）一致，新装默认 headless。
+                    if !matches!(item.value.as_str(), "browser" | "embedded" | "headless") {
+                        return Err(Status::invalid_argument("config_set: atrust_auth_mode must be browser/embedded/headless"));
+                    }
+                    cfg.atrust_auth_mode = item.value;
+                }
+                "atrust_auto_login" => {
+                    cfg.atrust_auto_login = item.value.parse().map_err(|_| Status::invalid_argument("config_set: atrust_auto_login must be true/false"))?;
+                }
+                "atrust_tcp_nodelay" => {
+                    cfg.atrust_tcp_nodelay = item.value.parse::<bool>().map_err(|_| {
+                        Status::invalid_argument("config_set: atrust_tcp_nodelay must be true/false")
+                    })?;
+                }
+                "campus_dns_domains" => {
+                    cfg.campus_dns_domains = exv_vpn_win32_config::parse_campus_dns_domains(&item.value)
+                        .map_err(|_| Status::invalid_argument("config_set: campus_dns_domains must be a comma-separated list of ASCII hostnames"))?;
+                }
+                "username" => cfg.username = item.value,
+                "remember_password" => {
+                    cfg.remember_password = item.value.parse().map_err(|_| {
+                        Status::invalid_argument("config_set: remember_password must be true/false")
+                    })?;
+                    submitted_remember_password = Some(cfg.remember_password);
+                }
+                "routes" => {
+                    cfg.routes = item
+                        .value
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
+                "user_agent" => cfg.user_agent = item.value,
+                "mtu" => {
+                    cfg.mtu = item
+                        .value
+                        .parse()
+                        .map_err(|_| Status::invalid_argument("config_set: mtu must be a number"))?;
+                }
+                "protocol" => {
+                    // 写路径必须严格：非法协议返回可理解错误，不得静默落回 Cisco。
+                    // （读路径对未知取值的局部回退只用于容忍更高版本写下的配置文件。）
+                    cfg.protocol = item.value.parse().map_err(|()| {
+                        Status::invalid_argument("config_set: protocol must be cisco/atrust")
+                    })?;
+                }
+                "connection_mode" => {
+                    cfg.connection_mode = item.value.parse().map_err(|()| {
+                        Status::invalid_argument(
+                            "config_set: connection_mode must be standard/compatibility",
+                        )
+                    })?;
+                }
+                "auto_reconnect" => {
+                    cfg.auto_reconnect = item.value.parse().map_err(|_| {
+                        Status::invalid_argument("config_set: auto_reconnect must be true/false")
+                    })?;
+                    submitted_auto_reconnect = Some(cfg.auto_reconnect);
+                }
+                "auto_reconnect_max_attempts" => {
+                    cfg.auto_reconnect_max_attempts = item.value.parse().map_err(|_| {
+                        Status::invalid_argument(
+                            "config_set: auto_reconnect_max_attempts must be a number",
+                        )
+                    })?;
+                }
+                "auto_reconnect_backoff" => {
+                    cfg.auto_reconnect_backoff = item.value.parse().map_err(|_| {
+                        Status::invalid_argument(
+                            "config_set: auto_reconnect_backoff must be true/false",
+                        )
+                    })?;
+                }
+                "on_core_exit" => {
+                    // T4：core 退出策略（keep/teardown）；严格校验，未知值拒绝。
+                    cfg.on_core_exit = item.value.parse().map_err(|()| {
+                        Status::invalid_argument(
+                            "config_set: on_core_exit must be keep/teardown",
+                        )
+                    })?;
+                }
+                "reconnect_on_oneshot_engine_crash" => {
+                    cfg.reconnect_on_oneshot_engine_crash = item.value.parse().map_err(|_| {
+                        Status::invalid_argument(
+                            "config_set: reconnect_on_oneshot_engine_crash must be true/false",
+                        )
+                    })?;
+                }
+                "reconnect_notify" => {
+                    cfg.reconnect_notify = item.value.parse().map_err(|_| {
+                        Status::invalid_argument("config_set: reconnect_notify must be true/false")
+                    })?;
+                }
+                "password" => {
+                    password = Some(zeroize::Zeroizing::new(item.value));
+                }
+                _ => {
+                    return Err(Status::invalid_argument(format!(
+                        "config_set: unknown key '{}'",
+                        item.key
+                    )));
+                }
+            }
+        }
+        // 先完成整批协议选择，再把旧客户端的 server 字段写入活动协议。
+        // 未提交 server 时从该协议保存的地址投影，避免把切换前地址覆盖到另一侧。
+        if let Some(server) = submitted_server {
+            match cfg.protocol {
+                Protocol::Cisco => cfg.cisco_server = server,
+                Protocol::Atrust => cfg.atrust_server = server,
+            }
+        }
+        cfg.server = match cfg.protocol {
+            Protocol::Cisco => cfg.cisco_server.clone(),
+            Protocol::Atrust => cfg.atrust_server.clone(),
+        };
+        // 整批字段决定最终选择；加密函数会置 remember=true，不能让字段顺序覆盖遗忘。
+        // S5a（2026-10-26 owner 标记，与 darwin 同构）：单独更换账户（keep 分支——
+        // 未提交新密码）不再清空旧账户密文——密文与 owner 原样保留，凭据对按
+        // `has_saved_credential_pair` 的 owner 匹配门失效（下方复核据此关闭自动
+        // 重连），改回原用户名即恢复资格。物理清空只由显式 remember=false 路径
+        // 触发。同账户显式切换 VPN 线路继续复用凭据。
+        if !cfg.remember_password {
+            // 显式清除路径：密文与 owner 一并物理清空（既有语义保留）。
+            cfg.password.zeroize();
+            cfg.password.clear();
+            cfg.password_owner_username.clear();
+        } else if let Some(password) = password.filter(|value| !value.is_empty()) {
+            let mut key = match ExvConfig::load_key(&self.config_dir) {
+                Ok(Some(key)) => key,
+                Ok(None) => {
+                    return Err(Status::internal(
+                        "config_set: password key unavailable (reinstall?)",
+                    ));
+                }
+                Err(e) => {
+                    return Err(Status::internal(format!("config_set: password key read {e:?}")));
+                }
+            };
+            let encrypted = cfg.set_password_encrypted(&password, &key);
+            key.zeroize();
+            encrypted.map_err(|e| {
+                Status::internal(format!("config_set: password encrypt {e:?}"))
+            })?;
+        }
+        // T02：从 Cisco 切到别的协议时，先把**切换前**的配置写成备份。旧版本 EXV 不认识
+        // `protocol` 字段，会把 aTrust 门户地址当 CSTP 网关并把已封存密码发过去；有了这份
+        // 备份，回退时复制回 config.json 即可。备份写不出来就不允许这次切换（宁可拒绝，
+        // 也不让用户失去回退材料）。
+        cfg.atrust_auth_mode_version = 1;
+        cfg.atrust_auto_login = cfg.atrust_auth_mode == "headless";
+        if submitted_remember_password == Some(false) {
+            cfg.auto_reconnect = false;
+        } else if !cfg.has_saved_credential_pair(&self.config_dir) {
+            if submitted_auto_reconnect == Some(true) {
+                return Err(Status::failed_precondition("config_set: auto_reconnect requires saved username and password"));
+            }
+            cfg.auto_reconnect = false;
+        }
+        if previous_protocol == Protocol::Cisco && cfg.protocol != Protocol::Cisco {
+            exv_vpn_win32_config::write_protocol_switch_backup(&self.config_dir, &backup_source)
+                .map_err(
+                    |e| Status::internal(format!("config_set: protocol switch backup {e:?}")),
+                )?;
+        }
+        save_after_user_submission(&self.config_dir, &cfg)
+            .map_err(|e| Status::internal(format!("config_set: save {e:?}")))?;
+        // 只更新后台许可；身份、协议、目标、预算与退避仍沿原会话。
+        let _composition = self.composition.lock().await;
+        // S5b（C-10，darwin `refresh_background_permission` 同构）：降权=活求值
+        //（auto_reconnect && 有效凭据源三臂——受理快照 ∨ owner 匹配磁盘对 ∨ aTrust
+        // 受理事实）；暂停分类两稳定 id（owner 失配/凭据清除）+ 清除密码联动丢弃
+        // 受理快照。注意 win32 配置层与 darwin 同样在凭据对失效时强制关闭
+        // auto_reconnect（上方 `has_saved_credential_pair` 复核）——磁盘对完整时的
+        // 关闭才视为用户主动关闭（无 toast）。
+        let allowed = cfg.auto_reconnect && self.valid_reconnect_credential_source(&cfg);
+        let (pause_reason, drop_snapshot) =
+            if allowed || cfg.has_saved_credential_pair(&self.config_dir) {
+                (None, false)
+            } else if cfg.has_stored_password(&self.config_dir) {
+                (Some(RECONNECT_PAUSE_OWNER_MISMATCH), false)
+            } else {
+                (Some(RECONNECT_PAUSE_CREDENTIALS_CLEARED), true)
+            };
+        let paused = if let Some(policy) = self
+            .reconnect_session_policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            let was_enabled = policy.auto_reconnect;
+            policy.auto_reconnect = allowed;
+            policy.pause_reason = pause_reason;
+            if drop_snapshot {
+                *self
+                    .reconnect_credential_snapshot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            !allowed && was_enabled
+        } else {
+            false
+        };
+        if !allowed {
+            if let Some(round) = self.recovery_round.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
+                round.pending.take();
+            }
+            self.events.set_auth_acquisition(None);
+        }
+        if paused {
+            // 暂停是可观察状态：重发布当前相位快照让 reason lane 立即到达前端（不等
+            // 下一次轮询/事件），toast 按 `reconnect_paused_*` id 路由。
+            self.events.publish(
+                wire::RuntimeEventKind::Transition,
+                snapshot_with_reconnect(
+                    snapshot_for_phase(_composition.phase(), &_composition),
+                    self.session_reconnect_status(),
+                ),
+            );
+        }
+        // 历史配置缓存同步失效；运行时发布和重连决策已经不再使用它。
+        self.reconnect_config_cache.invalidate();
+        Ok(Response::new(ConfigReply { ok: true }))
+    }
+
     /// 组装 `ServiceControl` 回复：post-action 服务状态 + `ok` + 人类可读信息。
     ///
     /// 查询失败（SCM 打开/读取异常）→ `ok=false` + 错误信息，`service_status` 留空；
@@ -4691,35 +4946,7 @@ impl KernelControlService {
         Some(service_status_to_wire(&snap, deepened))
     }
 
-    /// 组装 `ServiceControl` **Start** 回复（R2 双采纳）：以 [`wait_for_service_ready`] 的
-    /// 就绪事实驱动 `ok`/`message`（+ 最新 SCM 状态）。
-    ///
-    /// - 就绪（同一拍 SCM running 且 keepalive 回复，`source=Both`）→ `ok=true`，
-    ///   message 标注双事实达成来源；
-    /// - 超时（双事实从未同拍成立）→ `ok=false`，message 按 4.2 失败分类产出
-    ///   （稳定前缀 + 最后 SCM 状态 + keepalive 事实 + 耗时，前端可读）。
-    async fn service_control_start_reply(
-        &self,
-        readiness: ServiceReadiness,
-    ) -> Result<Response<ServiceControlReply>, Status> {
-        let (ok, message) = if readiness.ready {
-            // 双采纳下 ready 恒为 Both——双事实标注即达成来源（`ReadinessSource`
-            // 收缩后的机械改写：单方事实分支已不存在）。
-            (
-                true,
-                "服务已就绪（SCM running 且 keepalive 回复，同拍达成）".to_string(),
-            )
-        } else {
-            (false, readiness_failure_message(&readiness))
-        };
-        let service_status = self.query_service_status_wire();
-        self.events.refresh_service_status(service_status.clone());
-        Ok(Response::new(ServiceControlReply {
-            service_status,
-            ok,
-            message,
-        }))
-    }
+
 }
 
 impl KernelControlService {
@@ -4745,6 +4972,13 @@ impl KernelControlService {
         request: &mut ConnectRequest,
         persist_credentials: bool,
     ) -> Result<Response<OperationReply>, Status> {
+        self.connect_request_with_deadline(request, persist_credentials, None).await
+    }
+
+    async fn connect_request_with_deadline(
+        &self, request: &mut ConnectRequest, persist_credentials: bool,
+        auth_deadline: Option<tokio::time::Instant>,
+    ) -> Result<Response<OperationReply>, Status> {
         // 接纳日志之前也保留边界证据；禁止将请求载荷或凭据写入日志。
         self.logs.append_core(
             "info", "kernel", "kernel.connect.rpc_received",
@@ -4767,6 +5001,10 @@ impl KernelControlService {
             zeroize_connect_secret(request);
             return Err(error);
         }
+        #[derive(serde::Deserialize)]
+        struct AcceptedAccount { #[serde(default)] authenticated_username: String }
+        let accepted_account = serde_json::from_slice::<AcceptedAccount>(&request.secret_payload)
+            .map(|account| account.authenticated_username).unwrap_or_default();
         let ui_credentials = match take_ui_credentials(request) {
             Ok(credentials) => credentials,
             Err(error) => {
@@ -4778,6 +5016,12 @@ impl KernelControlService {
         // 用户点击连接这一刻读取已经保存的设置并冻结为会话策略；自动重连复用该
         // 策略，期间任何 ConfigSet 都只为下一次用户连接准备。
         let session_policy = self.reconnect_policy_for_new_session();
+        let mut session_identity = self.session_identity_for_new_session();
+        if let Some(identity) = session_identity.as_mut() {
+            if matches!(ui_credentials.as_ref(), Some(UiConnectionCredentials::Atrust(_))) {
+                identity.username = accepted_account;
+            }
+        }
         self.logs.append_core(
             "info", "kernel", "kernel.connect.payload_prepared",
             "connect payload parsed and session policy loaded before admission", &BTreeMap::new(),
@@ -4787,9 +5031,12 @@ impl KernelControlService {
         self.run_connect(
             intent,
             RunConnectInputs {
+                auth_deadline,
+                auth_binding: request.auth_binding.take(),
                 ui_credentials,
                 persist_credentials,
                 new_session_policy: Some(session_policy),
+                new_session_identity: session_identity,
                 expected_dispatch_id: None,
                 frozen_protocol: session_policy.protocol,
                 connection_mode: session_policy.connection_mode,
@@ -4812,18 +5059,92 @@ async fn execute_connect_tracked(
     persist_credentials: bool,
     connection_mode_override: Option<ConnectionMode>,
     protocol_override: Option<Protocol>,
+    admitted_config: Option<ExvConfig>,
     reconnect_cache: &ReconnectConfigCache,
     ui_pid: u32,
     cancelled: &mut watch::Receiver<bool>,
     before_apply: impl FnOnce() -> Result<(), Status> + Send,
+) -> Result<(ApplyTunnelReply, ConnectRequest), Status> {
+    execute_connect_tracked_before_deadline(
+        engine, config_dir, intent, ui_credentials, persist_credentials,
+        connection_mode_override, protocol_override, admitted_config,
+        reconnect_cache, ui_pid, cancelled, None, before_apply,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_connect_tracked_before_deadline(
+    engine: &mut dyn KernelEngineControl,
+    config_dir: &Path,
+    intent: wire::ConnectIntent,
+    ui_credentials: Option<UiConnectionCredentials>,
+    persist_credentials: bool,
+    connection_mode_override: Option<ConnectionMode>,
+    protocol_override: Option<Protocol>,
+    admitted_config: Option<ExvConfig>,
+    reconnect_cache: &ReconnectConfigCache,
+    ui_pid: u32,
+    cancelled: &mut watch::Receiver<bool>,
+    prepare_deadline: Option<tokio::time::Instant>,
+    before_apply: impl FnOnce() -> Result<(), Status> + Send,
+) -> Result<(ApplyTunnelReply, ConnectRequest), Status> {
+    // S5b：本签名保持稳定（auth 续段等既有调用方不接受理快照接线）；`run_connect`
+    // 生产路径走 [`execute_connect_dispatch`] 显式传入快照接线。
+    execute_connect_dispatch(
+        engine,
+        config_dir,
+        intent,
+        ui_credentials,
+        persist_credentials,
+        connection_mode_override,
+        protocol_override,
+        admitted_config,
+        reconnect_cache,
+        ui_pid,
+        cancelled,
+        prepare_deadline,
+        before_apply,
+        None,
+    )
+    .await
+}
+
+/// [`execute_connect_tracked_before_deadline`] 的 S5b 扩展体：新增受理快照接线
+/// `snapshot`（`None` = 不接线，与 S5b 前行为完全一致）。快照消费点（与 darwin
+/// 蓝本同构）：
+///
+/// - Cisco + UI 凭据 + `persist=true`：`persist_ui_credentials` 成功后冻结 UI 账密
+///   对（persist 受理=本 UI 账密对成为已持久化凭据对）；
+/// - Cisco + 无 UI 凭据（新会话）：磁盘组装成功后冻结磁盘账密对；
+/// - Cisco + 无 UI 凭据（重连派发）：优先消费既有快照组装 `secret_payload`（免疫
+///   连接中凭据/用户名修改），无快照回退 `load_credentials`（既有行为字节等价）。
+#[allow(clippy::too_many_arguments)]
+async fn execute_connect_dispatch(
+    engine: &mut dyn KernelEngineControl,
+    config_dir: &Path,
+    intent: wire::ConnectIntent,
+    ui_credentials: Option<UiConnectionCredentials>,
+    persist_credentials: bool,
+    connection_mode_override: Option<ConnectionMode>,
+    protocol_override: Option<Protocol>,
+    admitted_config: Option<ExvConfig>,
+    reconnect_cache: &ReconnectConfigCache,
+    ui_pid: u32,
+    cancelled: &mut watch::Receiver<bool>,
+    prepare_deadline: Option<tokio::time::Instant>,
+    before_apply: impl FnOnce() -> Result<(), Status> + Send,
+    snapshot: Option<&CredentialSnapshotWiring>,
 ) -> Result<(ApplyTunnelReply, ConnectRequest), Status> {
     // 先固定协议，再按相应材料类型组装；浏览器会话不经过 Cisco 密码持久化。
     let effective_protocol = ensure_selected_protocol_is_serviceable(config_dir, protocol_override)?;
 
     let (config, mut payload) = match (effective_protocol, ui_credentials) {
         (Protocol::Atrust, Some(UiConnectionCredentials::Atrust(browser))) => {
-            let config = ExvConfig::load_from_dir(config_dir)
-                .map_err(|e| Status::internal(format!("connect: config load: {e}")))?;
+            let config = match admitted_config {
+                Some(config) => config,
+                None => ExvConfig::load_from_dir(config_dir)
+                    .map_err(|e| Status::internal(format!("connect: config load: {e}")))?,
+            };
             let payload = browser.encode()
                 .map_err(|_| Status::invalid_argument("connect: invalid browser session"))?.to_vec();
             (config, payload)
@@ -4845,6 +5166,21 @@ async fn execute_connect_tracked(
                 persist_credentials,
                 reconnect_cache,
             )?;
+            // S5b：persist 受理=本 UI 账密对成为已持久化凭据对——冻结受理快照
+            //（重连组装优先使用，免疫连接中凭据/用户名修改）。持久化失败在上一步
+            // 已以内部错误收束，不建快照。
+            if persist_credentials
+                && let Some(wiring) = snapshot.filter(|wiring| wiring.new_session)
+            {
+                *wiring
+                    .slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(AdmissionCredentialSnapshot {
+                        username: credentials.username.clone(),
+                        password: zeroize::Zeroizing::new(credentials.password.clone()),
+                    });
+            }
             let payload = credentials
                 .to_bytes()
                 .map_err(|e| Status::internal(format!("connect: secret assembly: {e}")))?;
@@ -4852,12 +5188,51 @@ async fn execute_connect_tracked(
             (config, payload)
         }
         (Protocol::Cisco, None) => {
-            let mut bundle = load_credentials(config_dir, effective_protocol)
-                .map_err(credential_error_to_status)?;
-            let payload = bundle
-                .assemble_secret_payload()
-                .map_err(|e| Status::internal(format!("connect: secret assembly: {e}")))?;
-            (bundle.config, payload)
+            // S5b：重连派发优先受理快照组装（快照账户与密码即受理时已持久化的值，
+            // 免疫连接中凭据/用户名修改——重连会话与受理会话同账户同密码）。锁内只
+            // 做克隆，guard 不跨 await/组装。
+            let frozen_snapshot =
+                snapshot
+                    .filter(|wiring| !wiring.new_session)
+                    .and_then(|wiring| {
+                        wiring
+                            .slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                    });
+            if let Some(frozen) = frozen_snapshot {
+                let config = ExvConfig::load_from_dir(config_dir)
+                    .map_err(|e| Status::internal(format!("connect: config load: {e}")))?;
+                let package =
+                    CredentialPackage::new(frozen.username.clone(), frozen.password.as_str());
+                let payload = package
+                    .to_bytes()
+                    .map_err(|e| Status::internal(format!("connect: secret assembly: {e}")))?;
+                (config, payload)
+            } else {
+                let mut bundle = load_credentials(config_dir, effective_protocol)
+                    .map_err(credential_error_to_status)?;
+                // S5b：新会话磁盘组装成功后冻结受理快照（重连派发复用；一次性/恢复
+                // 派发不建快照——前者无持久化对，后者的槽位已携带原快照）。快照在
+                // 组装前捕获同一份解密材料（零化类型持有副本），组装成功后写入。
+                let frozen = snapshot.filter(|wiring| wiring.new_session).map(|_| {
+                    AdmissionCredentialSnapshot {
+                        username: bundle.config.username.clone(),
+                        password: zeroize::Zeroizing::new(bundle.password.as_str().to_owned()),
+                    }
+                });
+                let payload = bundle
+                    .assemble_secret_payload()
+                    .map_err(|e| Status::internal(format!("connect: secret assembly: {e}")))?;
+                if let (Some(frozen), Some(wiring)) = (frozen, snapshot) {
+                    *wiring
+                        .slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frozen);
+                }
+                (bundle.config, payload)
+            }
         }
     };
 
@@ -4883,6 +5258,7 @@ async fn execute_connect_tracked(
     let mode_support = tokio::select! {
         biased;
         () = connect_cancelled(cancelled) => Err(Status::cancelled("connect cancelled checking connection mode support")),
+        () = auth_continuation::prepare_deadline_elapsed(prepare_deadline) => Err(auth_continuation::deadline_error()),
         result = ensure_engine_supports_connection_mode(engine, connection_mode) => result,
     };
     if let Err(error) = mode_support {
@@ -4896,6 +5272,7 @@ async fn execute_connect_tracked(
     let lease_result = tokio::select! {
         biased;
         () = connect_cancelled(cancelled) => Err(Status::cancelled("connect cancelled preparing owner lease")),
+        () = auth_continuation::prepare_deadline_elapsed(prepare_deadline) => Err(auth_continuation::deadline_error()),
         result = engine.ensure_owner_lease() => result.map_err(grpc_error_to_status),
     };
     if let Err(error) = lease_result {
@@ -4972,6 +5349,35 @@ fn compatibility_mode_unavailable() -> Status {
 enum UiConnectionCredentials {
     Cisco(CredentialPackage),
     Atrust(exv_vpn_win32_ipc::browser_session::BrowserSession),
+}
+
+/// 将非秘密绑定及候选网关与本次接纳配置比较，不读取其它认证材料。
+fn validate_auth_binding(
+    binding: &wire::AuthBinding,
+    config: &ExvConfig,
+    credentials: Option<&UiConnectionCredentials>,
+) -> Result<(), Status> {
+    use exv_vpn_atrust::auth::origin::GatewayOrigin;
+    let mismatch = || Status::failed_precondition("auth_binding_changed|请重新发起连接");
+    let gateway =
+        crate::atrust_browser::validated_gateway(&config.server).map_err(|_| mismatch())?;
+    let configured = GatewayOrigin::parse(&gateway).map_err(|_| mismatch())?;
+    let candidate = GatewayOrigin::parse(&binding.gateway).map_err(|_| mismatch())?;
+    let mode = config.atrust_auth_mode.as_str();
+    let Some(UiConnectionCredentials::Atrust(session)) = credentials else {
+        return Err(mismatch());
+    };
+    let session_gateway = GatewayOrigin::parse(session.gateway()).map_err(|_| mismatch())?;
+    if binding.protocol != config.protocol.as_str()
+        || config.protocol != Protocol::Atrust
+        || !matches!(mode, "browser" | "embedded" | "headless")
+        || binding.mode != mode
+        || !candidate.same_origin(&configured)
+        || !session_gateway.same_origin(&candidate)
+    {
+        return Err(mismatch());
+    }
+    Ok(())
 }
 
 /// 解析本次 RPC 的 UI 一次性凭据。先取走并归零 wire bytes，再对零化类型解析副本做
@@ -5073,22 +5479,12 @@ fn ensure_selected_protocol_is_serviceable(
 
 /// 缺凭据是前端恢复流的稳定类别，其他配置/序列化错误保持原有内部错误语义。
 fn credential_error_to_status(error: CredentialError) -> Status {
-    if let CredentialError::ProtocolMismatch { stored, current } = error {
-        // 凭据按协议区分。这里**不**进入 `credential_required` 家族：当前协议的登录
-        // 材料不是密码（aTrust 走浏览器认证），提示用户输入密码是错的；UI 应据消息
-        // 让用户切换协议或重新选择服务器。
-        return Status::failed_precondition(format!(
-            "已保存的凭据属于 {stored}，当前选择的协议是 {current}；两种协议的凭据不通用。"
-        ));
-    }
     let code = match error {
         CredentialError::KeyMissing => Some("key_missing"),
         CredentialError::KeyRead(_) => Some("key_read"),
         CredentialError::PasswordEmpty => Some("password_not_remembered"),
         CredentialError::PasswordDecrypt(_) => Some("password_decrypt"),
-        CredentialError::Config(_)
-        | CredentialError::Serialize(_)
-        | CredentialError::ProtocolMismatch { .. } => None,
+        CredentialError::Config(_) | CredentialError::Serialize(_) => None,
     };
     match code {
         Some(code) => Status::failed_precondition(format!("credential_required|{code}")),
@@ -5350,11 +5746,13 @@ fn operation_reply_from_apply(reply: &ApplyTunnelReply) -> OperationReply {
     match reply.result.as_ref() {
         Some(wire::apply_tunnel_reply::Result::Applied(receipt)) => OperationReply {
             terminal: Some(wire::OperationTerminal {
+                stop_completion: None,
                 result: Some(wire::operation_terminal::Result::Succeeded(receipt.clone())),
             }),
         },
         Some(wire::apply_tunnel_reply::Result::Failed(failed)) => OperationReply {
             terminal: Some(wire::OperationTerminal {
+                stop_completion: None,
                 result: Some(wire::operation_terminal::Result::Failed(failed.clone())),
             }),
         },
@@ -5369,17 +5767,74 @@ fn operation_reply_from_apply(reply: &ApplyTunnelReply) -> OperationReply {
     }
 }
 
+const STOP_TOTAL_BUDGET: Duration = Duration::from_secs(20);
+
+fn stop_deadline_status(stage: &str) -> Status {
+    Status::deadline_exceeded(format!("stop/{stage}: stop completion unconfirmed"))
+}
+
+/// 标准 grpc-timeout 是逐跳剩余量；先消费 metadata，再解包消息。
+fn stop_request_deadline<T>(request: &Request<T>) -> Result<tokio::time::Instant, Status> {
+    let mut budget = STOP_TOTAL_BUDGET;
+    if let Some(value) = request.metadata().get("grpc-timeout") {
+        let text = value.to_str().map_err(|_| Status::invalid_argument("stop: invalid grpc-timeout"))?;
+        if text.len() < 2 || text.len() > 9 { return Err(Status::invalid_argument("stop: invalid grpc-timeout")); }
+        let (digits, unit) = text.split_at(text.len() - 1);
+        if !digits.bytes().all(|digit| digit.is_ascii_digit()) { return Err(Status::invalid_argument("stop: invalid grpc-timeout")); }
+        let value: u64 = digits.parse().map_err(|_| Status::invalid_argument("stop: invalid grpc-timeout"))?;
+        let duration = match unit {
+            "H" => Duration::from_secs(value * 3600), "M" => Duration::from_secs(value * 60),
+            "S" => Duration::from_secs(value), "m" => Duration::from_millis(value),
+            "u" => Duration::from_micros(value), "n" => Duration::from_nanos(value),
+            _ => return Err(Status::invalid_argument("stop: invalid grpc-timeout")),
+        };
+        budget = budget.min(duration);
+    }
+    Ok(tokio::time::Instant::now() + budget)
+}
+
+fn stop_failure_completion(stage: &str, status: &Status) -> wire::StopCompletion {
+    wire::StopCompletion { stopped: false, blocks_new_connect: false, errors: vec![wire::VpnError {
+        code: if status.code() == Code::DeadlineExceeded { wire::ErrorCode::DeadlineExceeded as i32 } else { wire::ErrorCode::EffectUnknown as i32 },
+        stage: wire::ErrorStage::Teardown as i32,
+        certainty: wire::EffectCertainty::Unknown as i32,
+        retry: wire::RetryAdvice::UseNewOperation as i32,
+        reason: format!("stop/{stage}: {}: {}", status.code(), status.message()),
+        ..Default::default()
+    }] }
+}
+
+fn stop_failed_reply(summary: wire::StopCompletion) -> OperationReply {
+    OperationReply { terminal: Some(wire::OperationTerminal {
+        result: Some(wire::operation_terminal::Result::Failed(wire::OperationFailed {
+            receipt: None, error: summary.errors.first().cloned(),
+        })), stop_completion: Some(summary),
+    }) }
+}
+
 /// `StopTunnelReply` → `OperationReply`。
 fn operation_reply_from_stop(reply: &wire::StopTunnelReply) -> OperationReply {
-    let terminal = reply.result.as_ref().map(|r| match r {
-        wire::stop_tunnel_reply::Result::Stopped(receipt) => wire::OperationTerminal {
-            result: Some(wire::operation_terminal::Result::Succeeded(receipt.clone())),
-        },
-        wire::stop_tunnel_reply::Result::Failed(failed) => wire::OperationTerminal {
-            result: Some(wire::operation_terminal::Result::Failed(failed.clone())),
-        },
-    });
-    OperationReply { terminal }
+    if !matches!(reply.result, Some(wire::stop_tunnel_reply::Result::Pending(_)) | None)
+        && let Some(summary) = reply.stop_completion.as_ref().filter(|summary| !summary.stopped) {
+        return stop_failed_reply(summary.clone());
+    }
+    let result = match reply.result.as_ref() {
+        Some(wire::stop_tunnel_reply::Result::Stopped(receipt)) => {
+            wire::operation_terminal::Result::Succeeded(receipt.clone())
+        }
+        Some(wire::stop_tunnel_reply::Result::Failed(failed)) => {
+            wire::operation_terminal::Result::Failed(failed.clone())
+        }
+        Some(wire::stop_tunnel_reply::Result::Pending(_)) | None => {
+            return OperationReply { terminal: None };
+        }
+    };
+    OperationReply {
+        terminal: Some(wire::OperationTerminal {
+            result: Some(result),
+            stop_completion: reply.stop_completion.clone(),
+        }),
+    }
 }
 
 /// `OperationState`（Reconcile 观察到的义务 disposition）→ `OperationReply`。
@@ -5468,7 +5923,9 @@ pub(crate) fn snapshot_for_phase(
             wire::FailedDirtyState {
                 last_error: composition.last_wire_error().cloned(),
                 context: Some(recovery_context_standin(composition)),
-                obligation: Some(recovery_obligation_standin(composition)),
+                obligation: composition.stop_completion.as_ref()
+                    .map_or(true, |summary| summary.blocks_new_connect)
+                    .then(|| recovery_obligation_standin(composition)),
             },
         )),
     };
@@ -5476,6 +5933,8 @@ pub(crate) fn snapshot_for_phase(
     // 发布/GetSnapshot 时附加（本函数只组装状态）。S3：service_status/mode 由
     // `snapshot_with_service_context` 在 GetSnapshot/发布时附加（缺省 None/空）。
     RuntimeSnapshot {
+        atrust_auth_acquisition: None,
+        stop_completion: composition.stop_completion.clone(),
         state,
         stats: None,
         proxy_tun: None,
@@ -5498,7 +5957,10 @@ pub(crate) fn snapshot_for_phase(
         // `adopt_observed_session` 与 `prefer_snapshot`（engine 快照原样选中）。
         relaunched_by_engine: false,
         headless: None,
-        engine_reconnect: None,
+        engine_reconnect: composition.engine_reconnect.clone(),
+        // EXV_UNFREEZE 2026-10-04（bug3）：会话身份投影，由 EventBus lane 在
+        // 发布/GetSnapshot 时附加；占位 None。
+        session_identity: None,
     }
 }
 
@@ -5659,7 +6121,8 @@ fn snapshot_with_system_proxy(
 ///
 /// `attempts`/`active` 取 host 侧 `reconnect_attempts`/`reconnect_active` 原子（C3a 状态
 /// 转发器维护）；`auto_reconnect`/`max_attempts` 由调用方从配置读（0 = unlimited）。
-/// `reason` 为 R2 恢复事件的稳定 id（T6b，wire tag 5；空串 = 无恢复事件）。
+/// `reason` 为稳定 reason id（T6b R2 恢复事件 id + S5b 重连暂停 id
+/// `RECONNECT_PAUSE_*`，wire tag 5；空串 = 无事件）。
 #[must_use]
 fn reconnect_status_from_state(
     attempts: u32,
@@ -5679,6 +6142,8 @@ fn reconnect_status_from_state(
 
 /// 将当前会话冻结策略与原子重连进展组合为运行时快照；没有会话则保持为空。
 /// R2（T6b）：reason lane（EOF 分类置位、终态清除）镜像为 wire `reason`。
+/// S5b：暂停 reason（`RECONNECT_PAUSE_*`，策略冻结字段）优先于 R2 恢复事件 id——
+/// 暂停期间不存在真实恢复事件，engine_lost id 不得遮蔽暂停事实。
 fn reconnect_status_from_session(
     attempts: &AtomicU32,
     active: &AtomicBool,
@@ -5687,10 +6152,12 @@ fn reconnect_status_from_session(
 ) -> Option<wire::ReconnectStatus> {
     session_policy.lock().ok().and_then(|policy| {
         (*policy).map(|policy| {
-            let reason = reason_lane
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .map(R2Reason::as_str)
+            let reason = policy
+                .pause_reason
+                .or(reason_lane
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .map(R2Reason::as_str))
                 .unwrap_or("");
             reconnect_status_from_state(
                 attempts.load(Ordering::Relaxed),
@@ -5714,6 +6181,21 @@ fn snapshot_with_reconnect(
     reconnect: Option<wire::ReconnectStatus>,
 ) -> RuntimeSnapshot {
     snapshot.reconnect = reconnect;
+    snapshot
+}
+
+/// 把连接受理时冻结的会话身份附加到 wire 快照（None → `session_identity` 留空）。
+///
+/// `EXV_UNFREEZE 2026-10-04`（bug3，见 common.proto 头注）：会话身份是**连接受理
+/// 时冻结**的显示投影——会话活动期间设置页改协议/账号/服务器不得改写连接页。
+/// 与 `reconnect` 同形态（None = 无活动会话身份，UI 回落当前配置）；由
+/// `EventBus::publish` 与 `GetSnapshot` 从 lane 缓存附加。
+#[must_use]
+fn snapshot_with_session_identity(
+    mut snapshot: RuntimeSnapshot,
+    identity: Option<wire::SessionIdentity>,
+) -> RuntimeSnapshot {
+    snapshot.session_identity = identity;
     snapshot
 }
 
@@ -5757,6 +6239,62 @@ pub(crate) fn self_heal_status_wire(
 /// 最长陈旧窗口 5s（可接受，C5 冻结裁决）。
 const RECONNECT_CONFIG_CACHE_TTL: Duration = Duration::from_secs(5);
 
+/// S5b：重连暂停的稳定 reason id（wire `ReconnectStatus.reason`；前端 toast 按 id
+/// 路由）。owner 失配=已保存密文归属账户与当前受理/配置账户不一致；清除=已保存
+/// 密文被显式清除（受理快照联动丢弃）。
+const RECONNECT_PAUSE_OWNER_MISMATCH: &str = "reconnect_paused_owner_mismatch";
+const RECONNECT_PAUSE_CREDENTIALS_CLEARED: &str = "reconnect_paused_credentials_cleared";
+
+/// S5b（2026-10-26 C-10 调和，与 darwin `AdmissionCredentialSnapshot` 同构）：Cisco
+/// 连接受理时对"已持久化凭据对"（用户名+解密密码）做的内存态快照。重连组装优先
+/// 使用快照值（免疫连接中的凭据/用户名修改——重连会话与受理会话同账户同密码）；
+/// 内存态零化类型，随会话策略同生命周期（新会话受理替换、显式 Stop 清空时 Drop
+/// 零化，显式"清除密码"降权点联动丢弃）。一次性连接（persist=false）不建快照——
+/// 其资格由受理期规则关闭。
+///
+/// 快照**不放进** [`ReconnectSessionPolicy`]（该结构保持 `Copy`——快照含
+/// `Zeroizing<String>` 不可 Copy），单独存于
+/// [`KernelControlService::reconnect_credential_snapshot`] 槽位，生命周期与策略槽
+/// 对齐（同点安装/清空）。
+#[derive(Clone)]
+struct AdmissionCredentialSnapshot {
+    username: String,
+    password: zeroize::Zeroizing<String>,
+}
+
+impl std::fmt::Debug for AdmissionCredentialSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 秘密不进任何 Debug 输出（结构可能随策略被派生 Debug 打印）。
+        f.debug_struct("AdmissionCredentialSnapshot")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// S5b：execute 路径的受理快照接线。`None` = 不接线（既有包装与 auth 续段路径，
+/// 行为与 S5b 前完全一致）。`new_session` 区分两种消费形态：新用户会话在凭据组装
+/// 成功后冻结快照；重连派发（`expected_dispatch_id` 在位）优先消费既有快照组装
+/// `secret_payload`，无快照回退磁盘组装（既有行为字节等价）。
+#[derive(Clone)]
+struct CredentialSnapshotWiring {
+    slot: Arc<std::sync::Mutex<Option<AdmissionCredentialSnapshot>>>,
+    new_session: bool,
+}
+
+/// S5b（C-10）受理时点的有效凭据源（冻结门形态；darwin
+/// `SessionReconnectPolicy::from_config` 同构）：Cisco=owner 匹配磁盘账密对
+/// （`has_saved_credential_pair`），aTrust=受理事实恒真——重连凭据由既有 session
+/// cache 与恢复材料（`reconnect_atrust_context`）承担，受理材料即快照语义，凭据
+/// 门槛不再对网页登录用户恒假。ENGINE_LOST 时点的活求值见
+/// [`KernelControlService::valid_reconnect_credential_source`]。
+fn admission_credential_source_valid(config: &ExvConfig, config_dir: &Path) -> bool {
+    match config.protocol {
+        Protocol::Cisco => config.has_saved_credential_pair(config_dir),
+        Protocol::Atrust => true,
+    }
+}
+
 /// 一次用户连接受理时冻结的重连策略；自动重连尝试复用同一份值。
 #[derive(Clone, Copy)]
 struct ReconnectSessionPolicy {
@@ -5771,6 +6309,10 @@ struct ReconnectSessionPolicy {
     /// 分支门控（默认关）。与 `auto_reconnect` 一样在连接受理时从 config 冻结；会话中
     /// 改设置只影响下一次用户连接。
     on_oneshot_engine_crash: bool,
+    /// S5b：重连暂停的稳定 reason id（`RECONNECT_PAUSE_*`；`None` = 无暂停事实）。
+    /// `&'static str` 保持 `Copy`；与 darwin `SessionReconnectPolicy::pause_reason`
+    /// 同构，经 wire `ReconnectStatus.reason` lane 下发（前端 toast 按 id 路由）。
+    pause_reason: Option<&'static str>,
 }
 
 impl ReconnectSessionPolicy {
@@ -5782,6 +6324,7 @@ impl ReconnectSessionPolicy {
             connection_mode: effective_connection_mode(config.protocol, config.connection_mode),
             protocol: config.protocol,
             on_oneshot_engine_crash: config.reconnect_on_oneshot_engine_crash,
+            pause_reason: None,
         }
     }
 
@@ -5793,6 +6336,91 @@ impl ReconnectSessionPolicy {
             connection_mode: ConnectionMode::Standard,
             protocol: Protocol::Cisco,
             on_oneshot_engine_crash: false,
+            pause_reason: None,
+        }
+    }
+}
+
+/// 不持有明文认证秘密的原配置快照；缓存候选只交原 Engine 完成实际认证。
+#[derive(Clone)]
+struct RecoveryAtrustContext {
+    config: ExvConfig,
+    profile: Result<crate::browser_cache_profile::BrowserDataDirs, String>,
+}
+impl RecoveryAtrustContext {
+    fn effective_mode(&self) -> &str {
+        "headless"
+    }
+    fn capture(config: &ExvConfig) -> Self {
+        Self {
+            config: {
+                let mut recovery = config.clone();
+                recovery.atrust_auth_mode = "headless".into();
+                recovery.atrust_auto_login = true;
+                recovery
+            },
+            profile: crate::browser_cache_profile::browser_data_dirs(),
+        }
+    }
+    fn load(&self) -> Result<(UiConnectionCredentials, ExvConfig), Status> {
+        // 自动登录关闭时不得读取旧会话或 SSO 档案。
+        let profile = self.profile.as_ref().map_err(|reason| Status::failed_precondition(
+            format!("atrust_recovery_material|{reason}；请重新登录"),
+        ))?;
+        let gateway = crate::atrust_browser::validated_gateway(&self.config.server)
+            .map_err(|_| Status::failed_precondition("atrust_recovery_material|原会话网关无效，请重新连接"))?;
+        let candidate = crate::atrust_session_cache::load(profile.cache_profile(), &gateway)
+            .map_err(|reason| Status::failed_precondition(format!("atrust_recovery_material|{reason}；请重新登录")))?
+            .ok_or_else(atrust_recovery_material_required)?;
+        let credentials = UiConnectionCredentials::Atrust(candidate);
+        let binding = wire::AuthBinding {
+            protocol: "atrust".into(), gateway,
+            mode: self.effective_mode().into(),
+        };
+        validate_auth_binding(&binding, &self.config, Some(&credentials))?;
+        Ok((credentials, self.config.clone()))
+    }
+}
+fn atrust_recovery_material_required() -> Status {
+    Status::failed_precondition("atrust_browser_required|自动恢复缺少 aTrust 登录材料，请重新登录后连接")
+}
+/// 只终结明确的材料拒绝或真实认证拒绝；原服务/传输暂时失败继续原预算。
+fn reconnect_authentication_terminal(status: &Status, protocol: Protocol) -> bool {
+    status.message().starts_with("atrust_auth_acquisition|")
+        || status.message().starts_with("atrust_browser_required|")
+        || status.message().starts_with("atrust_recovery_material|")
+        || status.message().starts_with("auth_binding_changed|")
+        || (protocol == Protocol::Atrust
+            && matches!(status.code(), tonic::Code::Unauthenticated | tonic::Code::PermissionDenied))
+}
+
+/// 连接受理时冻结的会话身份（bug3：连接页显示不得随设置保存变化）。
+///
+/// 与 [`ReconnectSessionPolicy`] 同点在用户连接受理时从配置冻结，并在同一
+/// 会话结束点（显式 Stop）清除。它**只用于连接页/极简页的显示投影**，不参与
+/// 路由或授权，也**绝不**经 `config_get` 下发（那是设置页数据源，返回冻结值会
+/// 让设置页显示旧设置）。
+#[derive(Clone)]
+struct SessionIdentity {
+    protocol: Protocol,
+    username: String,
+    server: String,
+}
+
+impl SessionIdentity {
+    fn from_config(config: &ExvConfig) -> Self {
+        Self {
+            protocol: config.protocol,
+            username: config.username.clone(),
+            server: config.server.clone(),
+        }
+    }
+
+    fn to_wire(&self) -> wire::SessionIdentity {
+        wire::SessionIdentity {
+            protocol: self.protocol.as_str().to_string(),
+            username: self.username.clone(),
+            server: self.server.clone(),
         }
     }
 }
@@ -5829,25 +6457,19 @@ impl R2Reason {
 /// 重连 worker 的触发归类（T6b 起随信号携带；决定 R1/R2 语义与守卫）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReconnectTrigger {
-    /// R1（隧道断线、engine 存活）：既有 C3a 触发——engine 状态流的可重试掉线事件。
-    TunnelLoss,
     /// R2 服务形态（engine 失联，EOF 分类）：无提权成本，随主开关（D11）。
     EngineLostService,
     /// R2 oneshot 形态（engine 失联，EOF 分类 + 设置项门控）：重连必然重新提权。
     EngineLostOneshot,
+    /// 原恢复轮一次续段，跳过普通重连的计数与预算接纳。
+    AuthContinuation,
 }
 
-impl ReconnectTrigger {
-    /// 是否 R2（engine 失联）触发。
-    const fn is_engine_lost(self) -> bool {
-        matches!(self, Self::EngineLostService | Self::EngineLostOneshot)
-    }
-}
 
 /// R2 尝试上限回退值（T6a 邻接裁量：取"完整实现退避表（2/4/8/16/30）所需的最少尝试
 /// 数"= 6）。会话配置 `auto_reconnect_max_attempts = 0`（无限，缺省）时，R2 触发以
 /// 本值为上限——engine 已失联，重连是对已死控制面的重试，必须有界（R1 隧道断线触发
-/// 的既有语义不变：0 仍为无限）。
+/// 自愈预算留在引擎）。
 const R2_MAX_ATTEMPTS_FALLBACK: u32 = 6;
 
 /// C5 缓存条目：上次磁盘读的取值 + 读取时刻。
@@ -6107,9 +6729,17 @@ fn recovery_obligation_standin(composition: &HostComposition) -> wire::RecoveryO
 // ---------------------------------------------------------------------------
 
 /// engine 事件转发器的初始重连退避。
+///
+/// T5/F9 预期态声明：按需拉起模型下，全新安装的 core 启动后 engine 槽指向规范
+/// detached 占位、直到首次连接请求按需拉起 oneshot engine——转发器对占位的订阅
+/// 失败是**预期噪音而非故障**，退避重试节奏（base→[`ENGINE_EVENT_RECONNECT_MAX`]
+/// 封顶）本身不变，仅其日志经 [`STATUS_DETACHED_LOG_INTERVAL`] 节流静音。
 const ENGINE_EVENT_RECONNECT_BASE: Duration = Duration::from_millis(100);
 /// engine 事件转发器的重连退避上限。
 const ENGINE_EVENT_RECONNECT_MAX: Duration = Duration::from_secs(5);
+/// T5/F9：状态转发器对 detached 占位（新装无引擎）attach 失败的日志节流间隔——
+/// 首次失败保留一条 info，其后每此时长至多一条 debug 心跳（含 suppressed 计数）。
+const STATUS_DETACHED_LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// engine 日志转发器的初始重连退避（R3；聚合-only 消费，断线缺口由 raw 离线对账）。
 const ENGINE_LOG_RECONNECT_BASE: Duration = Duration::from_millis(100);
 /// engine 日志转发器的重连退避上限。
@@ -6447,9 +7077,17 @@ pub struct EventBus {
     /// 最新自愈阶段缓存（`refresh_self_heal` 更新；`publish`/`GetSnapshot` 附加——
     /// mirror `proxy_tun` 方案 A，自愈窗口内没有自然事件，拉取通道每次组装读当前缓存）。
     self_heal_current: std::sync::Mutex<Option<wire::SelfHealStatus>>,
+    /// `EXV_UNFREEZE 2026-10-04`（bug3）会话身份缓存（连接受理冻结、显式 Stop 清除；
+    /// `publish`/`GetSnapshot` 附加——mirror `self_heal` lane，活动会话期间设置页保存
+    /// 不触发事件，但连接页每次组装都读本缓存，冻结身份即时生效）。
+    session_identity_current: std::sync::Mutex<Option<wire::SessionIdentity>>,
+    auth_acquisition_current: std::sync::Mutex<Option<wire::AtrustAuthAcquisition>>,
 }
 
 impl EventBus {
+    fn set_auth_acquisition(&self, request: Option<wire::AtrustAuthAcquisition>) {
+        *self.auth_acquisition_current.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = request;
+    }
     /// 构造空总线（无事件、无统计、无 proxy TUN 检测、tick=0）。
     #[must_use]
     pub fn new() -> Self {
@@ -6461,6 +7099,8 @@ impl EventBus {
             service_mode_current: std::sync::Mutex::new(None),
             stats_diagnostic: std::sync::Mutex::new(StatsForwarderDiagnostic::starting()),
             self_heal_current: std::sync::Mutex::new(None),
+            session_identity_current: std::sync::Mutex::new(None),
+            auth_acquisition_current: std::sync::Mutex::new(None),
         }
     }
 
@@ -6515,16 +7155,21 @@ impl EventBus {
         // 与上提前的 win32 语义一致：lane 缓存读取与 tick 铸造/`current` 写回串行化，
         // 避免较旧快照在较新 tick 之后写回。
         self.core.publish_composing(kind, |_tick| {
-            snapshot_with_self_heal(
-                snapshot_with_service_context(
-                    snapshot_with_system_proxy(
-                        snapshot_with_proxy_tun(snapshot, self.current_proxy_tun()),
-                        self.current_system_proxy(),
+            let mut snapshot = snapshot;
+            snapshot.atrust_auth_acquisition = self.auth_acquisition_current.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            snapshot_with_session_identity(
+                snapshot_with_self_heal(
+                    snapshot_with_service_context(
+                        snapshot_with_system_proxy(
+                            snapshot_with_proxy_tun(snapshot, self.current_proxy_tun()),
+                            self.current_system_proxy(),
+                        ),
+                        self.current_service_status(),
+                        self.current_service_mode(),
                     ),
-                    self.current_service_status(),
-                    self.current_service_mode(),
+                    self.current_self_heal(),
                 ),
-                self.current_self_heal(),
+                self.current_session_identity(),
             )
         })
     }
@@ -6652,6 +7297,24 @@ impl EventBus {
     #[must_use]
     pub fn current_self_heal(&self) -> Option<wire::SelfHealStatus> {
         self.self_heal_current.lock().unwrap().clone()
+    }
+
+    // -----------------------------------------------------------------------
+    // 2026-10-04 会话身份 lane（EXV_UNFREEZE wire `session_identity = 20`；
+    // mirror `self_heal`/`reconnect`：只缓存，不铸造 tick；连接受理冻结、显式
+    // Stop 清除；`publish`/`GetSnapshot` 附加到快照）。bug3 修复：活动会话期间
+    // 设置保存不改写连接页身份。
+    // -----------------------------------------------------------------------
+
+    /// 刷新会话身份缓存（`None` = 无活动会话身份；连接受理置位、显式 Stop 清除）。
+    pub fn refresh_session_identity(&self, identity: Option<wire::SessionIdentity>) {
+        *self.session_identity_current.lock().unwrap() = identity;
+    }
+
+    /// 最新会话身份（无 → `None`）。
+    #[must_use]
+    pub fn current_session_identity(&self) -> Option<wire::SessionIdentity> {
+        self.session_identity_current.lock().unwrap().clone()
     }
 
     /// 自愈阶段变化的显式发布点：以调用方组装的相位快照铸造新 tick 发布过渡事件。
@@ -6815,134 +7478,77 @@ fn reconnect_intent() -> wire::ConnectIntent {
 
 /// 生产调用者持有 composition 直到发布完成；测试包装只观察纯转换结果。
 /// 未请求停止却收到当前会话的 Idle，按意外掉线进入同一失败/重连流程。
+fn status_from_observed_snapshot(snapshot: &RuntimeSnapshot) -> Option<EngineStatusEvent> {
+    if snapshot.stop_completion.is_some() && !snapshot.operation_id.is_empty() {
+        return Some(EngineStatusEvent::Stopped {
+            operation_id: snapshot.operation_id.clone(),
+            stop_completion: snapshot.stop_completion.clone(),
+            reconnect_state: snapshot.engine_reconnect.clone(),
+        });
+    }
+
+    use wire::runtime_snapshot::State;
+    let operation_id = snapshot.operation_id.clone();
+    let reconnect_state = snapshot.engine_reconnect.clone();
+    Some(match snapshot.state.as_ref()? {
+        State::Connecting(state) => EngineStatusEvent::Progress {
+            operation_id, reconnect_state,
+            connect_phase: ConnectPhase::try_from(state.phase).unwrap_or(ConnectPhase::Unspecified),
+        },
+        State::Connected(state) => EngineStatusEvent::Connected {
+            operation_id, reconnect_state,
+            session_established_at_ms: (state.session_established_at_ms > 0).then_some(state.session_established_at_ms),
+        },
+        State::FailedDirty(state) => EngineStatusEvent::Failed {
+            operation_id, reconnect_state, error: state.last_error.clone()?,
+        },
+        State::Idle(_) => EngineStatusEvent::Stopped {
+            stop_completion: snapshot.stop_completion.clone(),
+            operation_id,
+            reconnect_state,
+        },
+        _ => return None,
+    })
+}
+
 fn normalize_unexpected_stop(
     event: EngineStatusEvent,
     composition: &HostComposition,
     logs: &LogAggregator,
 ) -> EngineStatusEvent {
-    if composition.phase() == HostPhase::Connected && !stale_terminal_operation(composition, &event)
-        && let EngineStatusEvent::Stopped { operation_id } = event {
-            let _ = logs.append_core("warn", "connection", "kernel.connection.unexpected_stop",
-                "未请求断开，但引擎报告当前会话已停止",
-                &BTreeMap::from([("operation_id".into(), Uuid::from_slice(&operation_id).map(|id| id.to_string()).unwrap_or_default())]));
-            return EngineStatusEvent::Failed {
-                operation_id,
-                error: wire::VpnError {
-                    code: wire::ErrorCode::EffectUnknown as i32,
-                    stage: wire::ErrorStage::DataPlane as i32,
-                    certainty: wire::EffectCertainty::NoEffect as i32,
-                    retry: wire::RetryAdvice::RetrySameOperation as i32,
-                    ..Default::default()
-                },
-            };
-        }
-    event
-}
-
-fn runtime_event_from_status_locked(
-    ev: &EngineStatusEvent,
-    guard: &mut HostComposition,
-    logs: &LogAggregator,
-) -> Option<(wire::RuntimeEventKind, RuntimeSnapshot)> {
-    // 终态事件陈旧过滤：有登记的在途操作且事件 operation_id 不符 → 丢弃（不驱动
-    // 状态机、不发布）。
-    if matches!(
-        ev,
-        EngineStatusEvent::Connected { .. }
-            | EngineStatusEvent::Failed { .. }
-            | EngineStatusEvent::Stopped { .. }
-    ) && stale_terminal_operation(guard, ev)
+    if composition.phase() == HostPhase::Connected
+        && !stale_terminal_operation(composition, &event)
+        && let EngineStatusEvent::Stopped {
+            operation_id,
+            reconnect_state,
+            stop_completion: None,
+        } = event
     {
-        return None;
+        let _ = logs.append_core(
+            "warn",
+            "connection",
+            "kernel.connection.unexpected_stop",
+            "未请求断开，但引擎报告当前会话已停止",
+            &BTreeMap::from([(
+                "operation_id".into(),
+                Uuid::from_slice(&operation_id)
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+            )]),
+        );
+        return EngineStatusEvent::Failed {
+            operation_id,
+            reconnect_state,
+            error: wire::VpnError {
+                code: wire::ErrorCode::EffectUnknown as i32,
+                stage: wire::ErrorStage::DataPlane as i32,
+                certainty: wire::EffectCertainty::NoEffect as i32,
+                retry: wire::RetryAdvice::RetrySameOperation as i32,
+                ..Default::default()
+            },
+        };
     }
-    match ev {
-        EngineStatusEvent::Progress { connect_phase, .. } => {
-            guard.apply(HostEvent::ConnectPhaseProgress(domain_connect_phase(
-                *connect_phase,
-            )));
-            Some((
-                wire::RuntimeEventKind::Transition,
-                snapshot_for_phase(guard.phase(), guard),
-            ))
-        }
-        EngineStatusEvent::Connected {
-            session_established_at_ms,
-            ..
-        } => {
-            if guard.phase() == HostPhase::Failed {
-                let _ = logs.append_core("debug", "connection", "kernel.connection.late_connected_ignored",
-                    "当前操作已经失败，忽略迟到的连接成功事件", &BTreeMap::new());
-                return None;
-            }
-            guard.apply(HostEvent::ProtocolEstablished);
-            // RT-SESSION-04：engine 提供正值起点 → 原样采纳（无码）；缺正值
-            //（`None` 或 `Some(<=0)`，`connect_status_from_wire` 已把非正归一为
-            // `None`）→ core 以本地时钟首次可靠观察时间为 adopted 起点 + 码 11
-            //（info，fields source="core_clock"）。同一会话已有确认事实时不重复
-            // 采纳（补值只增不减，与 `set_session_established_at_ms` 语义一致；
-            // `snapshot_with_confirmed_session_start` 行为不变）。
-            if session_established_at_ms.as_ref().is_some_and(|value| *value > 0)
-            {
-                guard.set_session_established_at_ms(*session_established_at_ms);
-            } else if guard
-                .session_established_at_ms().as_ref().is_none_or(|value| *value <= 0)
-            {
-                adopt_local_session_start(guard, logs, unix_now_ms());
-            }
-            let snapshot = snapshot_for_phase(guard.phase(), guard);
-            Some((wire::RuntimeEventKind::Transition, snapshot))
-        }
-        EngineStatusEvent::Failed { error, .. } => {
-            let previous_phase = guard.phase();
-            guard.set_last_wire_error(error.clone());
-            let domain_error = wire_vpn_error_to_domain(error);
-            if previous_phase == HostPhase::Connected {
-                guard.apply(HostEvent::ConnectionLost(domain_error));
-            } else {
-                guard.apply(HostEvent::ConnectFailed(domain_error));
-            }
-            let _ = logs.append_core(
-                "warn", "connection", "kernel.connection.failed",
-                "当前连接失败，已更新连接状态；是否重连由会话设置决定",
-                &BTreeMap::from([
-                    ("operation_id".into(), guard.operation_id().map(|id| Uuid::from_bytes(id).to_string()).unwrap_or_default()),
-                    ("previous_phase".into(), format!("{previous_phase:?}")),
-                    ("next_phase".into(), format!("{:?}", guard.phase())),
-                    ("error_stage".into(), error.stage.to_string()),
-                    ("error_code".into(), error.code.to_string()),
-                    ("retry_advice".into(), error.retry.to_string()),
-                ]),
-            );
-            Some((
-                wire::RuntimeEventKind::Transition,
-                snapshot_for_phase(guard.phase(), guard),
-            ))
-        }
-        EngineStatusEvent::Stopped { .. } => {
-            // engine 确认 teardown 完成：数据面（engine）侧加入屏障 → 与 host 侧
-            // 齐全后 Stopped（R1 收敛；R2 再补 core 合成 Idle 双保险）。
-            //
-            // S1.5 (D13) Paused 映射：减负断开后 engine 运行时进入 **Paused**（session
-            // 结束 + 路由清 + NIC 保留 adapter），host 侧**复用既有 Stopped 映射**——
-            // `connect_status_from_wire` 把 engine Idle 终态归一化为
-            // `EngineStatusEvent::Stopped`，此处数据面侧加入屏障 → Stopped → 显式
-            // ReopenAdmission → Idle。冻结 portable `HostComposition` 不动：Paused 是
-            // engine 运行时状态，host 只以 Stopped + 既有 fine-phase（`connect_phase`
-            // 寄存器）映射；网卡保留由退出清理阶段（engine teardown）收敛到 0 残留。
-            guard.apply(HostEvent::TeardownSideJoined(TeardownSide::PacketData));
-            let snapshot = snapshot_for_phase(guard.phase(), guard);
-            // S1（D14）：Stopped 快照先可观测（快照已组装，Stopped → wire Idle），
-            // 随后 controller 显式派发 ReopenAdmission——admission 重开 + phase 回落
-            // Idle，同进程二次 Connect 可受理（问题 A 闩锁修复）。**不**在
-            // TeardownSideJoined Released 臂内同步回落（Stopped pin 保持）；仅当
-            // 屏障确实释放（phase == Stopped）才重开——Stopping/Failed 等其余相
-            // 位 no-op，teardown 拒绝语义保留。
-            if guard.phase() == HostPhase::Stopped {
-                guard.apply(HostEvent::ReopenAdmission);
-            }
-            Some((wire::RuntimeEventKind::Transition, snapshot))
-        }
-    }
+    event
 }
 
 /// RT-SESSION-04：engine `Connected` 事件缺正值 `session_established_at_ms` 时，core
@@ -6950,14 +7556,6 @@ fn runtime_event_from_status_locked(
 /// fields `source="core_clock"`，每次 Connected 采纳事件至多一条）。已有确认事实时
 /// 不覆盖、不重复落码（补值只增不减）。`now_ms` 由调用方注入（生产 = 本地时钟；
 /// 测试注入确定性值——U9）。
-fn adopt_local_session_start(guard: &mut HostComposition, logs: &LogAggregator, now_ms: i64) {
-    emit_stats_diag(
-        logs,
-        StatsDiagCode::SessionAdopted,
-        [("source", "core_clock".to_string())],
-    );
-    guard.set_session_established_at_ms(Some(now_ms));
-}
 
 /// R3-C2：判定终态事件是否为"旧操作的迟到终态"——composition 有登记的在途操作且
 /// 事件 `operation_id` 与之不符。
@@ -6969,8 +7567,8 @@ fn stale_terminal_operation(composition: &HostComposition, ev: &EngineStatusEven
     let event_id = match ev {
         EngineStatusEvent::Connected { operation_id, .. }
         | EngineStatusEvent::Failed { operation_id, .. }
-        | EngineStatusEvent::Stopped { operation_id } => operation_id,
-        EngineStatusEvent::Progress { .. } => return false,
+        | EngineStatusEvent::Stopped { operation_id , .. } => operation_id,
+        EngineStatusEvent::Progress { operation_id, .. } => operation_id,
     };
     current.as_slice() != event_id.as_slice()
 }
@@ -6995,20 +7593,22 @@ fn domain_connect_phase(phase: ConnectPhase) -> exv_vpn_domain::model::ConnectPh
 /// R5：路由失败（PromptStart / service engine connect 失败）→ wire `VpnError`。
 ///
 /// 路由失败发生在派发前——engine 未观测到任何失败，故不伪造 engine 观测字段；
-/// code/stage/certainty/retry 取服务路由不可用的确定性语义（`SessionBusy` /
+/// code/stage/certainty/retry 取派发前服务路由不可用的确定性语义（`PlatformDependencyUnavailable` /
 /// `Admission` / `NoEffect` / `UseNewOperation`），subject 留空（`wire_vpn_error_to_domain`
 /// 回落确定性 runtime stand-in）。该错误只作快照 `FailedDirty.last_error` 的稳定 code
-/// 呈现；人读信息由 connect RPC 的 `failed_precondition` 消息承载。
+/// 呈现；UI 按 Admission 与空 native 识别服务不可用，真实会话忙保留原语义。
 fn route_failure_wire_error(_status: &Status) -> wire::VpnError {
     use wire::{EffectCertainty, ErrorCode, ErrorStage, RetryAdvice};
     wire::VpnError {
-        code: ErrorCode::SessionBusy as i32,
+        code: ErrorCode::PlatformDependencyUnavailable as i32,
         stage: ErrorStage::Admission as i32,
         certainty: EffectCertainty::NoEffect as i32,
         retry: RetryAdvice::UseNewOperation as i32,
         subject: None,
         resource: None,
         native: None,
+        reason: String::new(),
+        operation_detail: None,
     }
 }
 
@@ -7049,6 +7649,14 @@ fn wire_vpn_error_to_domain(error: &wire::VpnError) -> VpnError {
         Ok(wire::ErrorCode::ActiveSessionCannotReconcile) => {
             ErrorCode::ActiveSessionCannotReconcile
         }
+        // EXV_UNFREEZE 2026-10-09 显式裁定（复审 2.2-4）：SAML_REQUIRED(20) 归入
+        // 认证族 Unauthorized，而非走 `_ =>` 被误归「状态观测失败」。裁定依据：
+        // ① 该域错误当前仅测试消费（runtime_event_from_status 快照路径），无生产
+        // 行为分支；② 不为它扩 `exv-vpn-domain::ErrorCode` 变体——新增变体会级联
+        // 域侧全部穷举 match 与 reducer，收益为零（呈现层消费的是 wire reason id，
+        // 不是域码）。proto 头部「mirrors domain」纪律的这处分叉已登记于 D9 计划
+        // §2.6 风险表。
+        Ok(wire::ErrorCode::SamlRequired) => ErrorCode::Unauthorized,
         _ => ErrorCode::ObservationFailed,
     };
     let stage = match wire::ErrorStage::try_from(error.stage) {
@@ -7177,6 +7785,8 @@ fn disconnected_snapshot(composition: &HostComposition) -> RuntimeSnapshot {
     // Connected / Stopping / Reconciling + 查询失败 → Reconciling（已建立后的不确定
     // 态——语义正确保留：EOF 只表示链路断，不代表会话已回退，等待对账/引擎恢复）。
     wire::RuntimeSnapshot {
+        atrust_auth_acquisition: None,
+        stop_completion: None,
         state: Some(wire::runtime_snapshot::State::Reconciling(
             wire::ReconcilingState {
                 context: Some(recovery_context_standin(composition)),
@@ -7206,6 +7816,7 @@ fn disconnected_snapshot(composition: &HostComposition) -> RuntimeSnapshot {
         relaunched_by_engine: false,
         headless: None,
         engine_reconnect: None,
+        session_identity: None,
     }
 }
 

@@ -83,7 +83,12 @@ pub const CSTP_PACKET_TYPE_DPD_RESPONSE: u8 = 0x04;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEndReason {
     /// 服务器协议层终止，正文在 TLS 读取边界脱敏并限制长度。
-    ServerDisconnect { kind: u8, code: Option<u8>, reason: String, body_len: usize },
+    ServerDisconnect {
+        kind: u8,
+        code: Option<u8>,
+        reason: String,
+        body_len: usize,
+    },
     /// 读到 `Ok(0)`：网关 clean close（典型 = 网关 DPD 超时单方面断开会话）。
     GatewayClosedStream,
     /// TLS 读错误：保留方向、错误类别、原始系统码与安全诊断详情。
@@ -293,6 +298,64 @@ pub struct CstpSession {
     /// arrive on the data session's read path. Consumed by the engine's latency
     /// probe; a dropped consumer is non-fatal (control events are best-effort).
     pub control_rx: mpsc::UnboundedReceiver<CstpControlEvent>,
+    /// 双方任务完成回执，宿主必须持有到显式关闭。
+    pub tasks: CstpTasks,
+}
+
+/// CSTP 读写任务的实际完成回执；取消意图与等待完成分开。
+#[derive(Debug)]
+pub struct CstpTasks {
+    stop: tokio::sync::watch::Sender<bool>,
+    reader: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    writer: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    // 已收取结果属于owner；取消等待及重复close不能遗失。
+    errors: Vec<String>,
+}
+
+impl CstpTasks {
+    /// 请求双方退出；此调用本身不证明已停止。
+    pub fn request_close(&self) {
+        self.stop.send_replace(true);
+    }
+
+    /// 等待读写双方退出，即使一方异常也取得另一方回执。
+    /// # Errors
+    /// 保留脱敏的协议错误和任务异常类别，正常 EOF/远端结束不是待清理义务。
+    pub async fn close(&mut self) -> Result<(), String> {
+        self.request_close();
+        for (name, slot) in [
+            ("cstp_reader_join", &mut self.reader),
+            ("cstp_writer_join", &mut self.writer),
+        ] {
+            if let Some(task) = slot.as_mut() {
+                let result = task.await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => self.errors.push(error),
+                    Err(_) => self.errors.push(name.to_owned()),
+                }
+                slot.take();
+            }
+        }
+        if self.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(self.errors.join("; "))
+        }
+    }
+}
+
+impl Drop for CstpTasks {
+    fn drop(&mut self) {
+        // 未显式关闭时仍请求退出；句柄仅由此 owner 持有，显式 close 路径不会 detach。
+        self.request_close();
+        if let Some(reader) = &self.reader {
+            reader.abort();
+        }
+        if let Some(writer) = &self.writer {
+            writer.abort();
+        }
+    }
 }
 
 /// Typed failure of the CSTP CONNECT/session phase (plan §2.2).
@@ -460,7 +523,7 @@ impl CstpSession {
         // signal) ride a dedicated channel so the engine can time dead-peer RTT
         // without mixing control frames into the data payload stream.
         let (control_tx, control_rx) = mpsc::unbounded_channel::<CstpControlEvent>();
-        spawn_data_tasks(
+        let tasks = spawn_data_tasks(
             read_half, write_half, read_tx, write_rx, remainder, control_tx,
         );
 
@@ -470,6 +533,7 @@ impl CstpSession {
             write_channel: write_tx,
             read_channel: read_rx,
             control_rx,
+            tasks,
         })
     }
 }
@@ -671,15 +735,19 @@ fn session_end_reason_for_decode(
     outcome: &Result<Option<CstpFrame>, CodecError>,
 ) -> Option<SessionEndReason> {
     match outcome {
-        Ok(Some(CstpFrame::Control { kind: kind @ (0x05 | 0x09), body })) => {
-            Some(SessionEndReason::ServerDisconnect {
-                kind: *kind,
-                code: body.first().copied(),
-                reason: redact_io_detail(&String::from_utf8_lossy(body.get(1..).unwrap_or_default()))
-                    .chars().filter(|character| !character.is_control()).take(256).collect(),
-                body_len: body.len(),
-            })
-        }
+        Ok(Some(CstpFrame::Control {
+            kind: kind @ (0x05 | 0x09),
+            body,
+        })) => Some(SessionEndReason::ServerDisconnect {
+            kind: *kind,
+            code: body.first().copied(),
+            reason: redact_io_detail(&String::from_utf8_lossy(body.get(1..).unwrap_or_default()))
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(256)
+                .collect(),
+            body_len: body.len(),
+        }),
         Err(err) if !matches!(err, CodecError::UnknownControl(_)) => {
             Some(SessionEndReason::Codec(err.clone()))
         }
@@ -723,7 +791,9 @@ fn spawn_data_tasks(
     write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     offer_remainder: Vec<u8>,
     control_tx: mpsc::UnboundedSender<CstpControlEvent>,
-) {
+) -> CstpTasks {
+    let (stop, mut read_stop) = tokio::sync::watch::channel(false);
+    let mut write_stop = read_stop.clone();
     let write_control_tx = control_tx.clone();
     // 任一方向退出就取消另一方向；不能留下读任务永久等待，或让旧 TLS 会话跨重连存活。
     let (read_done, read_ended) = tokio::sync::oneshot::channel::<()>();
@@ -744,18 +814,29 @@ fn spawn_data_tasks(
                     Ok(Some(CstpFrame::Data(payload))) => {
                         if session_end_reason_for_data_send(&read_tx.send(payload)).is_some() {
                             diagnostics.publish(&control_tx);
-                            let _ = control_tx.send(CstpControlEvent::SessionEnded(SessionEndReason::ConsumerDropped));
-                            return;
+                            let _ = control_tx.send(CstpControlEvent::SessionEnded(
+                                SessionEndReason::ConsumerDropped,
+                            ));
+                            return Ok(());
                         }
                     }
                     outcome => {
-                        if let Some(event) = control_event_for_decode(&outcome) { let _ = control_tx.send(event); }
+                        if let Some(event) = control_event_for_decode(&outcome) {
+                            let _ = control_tx.send(event);
+                        }
                         if let Some(reason) = session_end_reason_for_decode(&outcome) {
                             diagnostics.publish(&control_tx);
+                            let failed = matches!(reason, SessionEndReason::Codec(_));
                             let _ = control_tx.send(CstpControlEvent::SessionEnded(reason));
-                            return;
+                            return if failed {
+                                Err("cstp_codec".to_owned())
+                            } else {
+                                Ok(())
+                            };
                         }
-                        if matches!(outcome, Ok(None)) { break; }
+                        if matches!(outcome, Ok(None)) {
+                            break;
+                        }
                     }
                 }
             }
@@ -771,32 +852,46 @@ fn spawn_data_tasks(
                     // 读任务退出（F4：原 `Ok(0) | Err(_) => break` 合并静默 → 拆分
                     // 可观测）。最后一条事件携带原因；控制面通道无消费端时静默失败
                     // （best-effort，与既有语义一致）。
+                    let failed = outcome.is_err();
                     if let Some(reason) = session_end_reason_for_read(&outcome) {
                         diagnostics.publish(&control_tx);
                         let _ = control_tx.send(CstpControlEvent::SessionEnded(reason));
                     }
-                    return;
+                    return if failed {
+                        Err("cstp_read_io".to_owned())
+                    } else {
+                        Ok(())
+                    };
                 }
             }
         }
     };
-    tokio::spawn(async move {
+    let reader = tokio::spawn(async move {
         let _done = read_done;
         tokio::select! {
-            _ = write_ended => {}
+            _ = read_stop.changed() => Ok(()),
+            _ = write_ended => Ok(()),
             _ = consumer.closed() => {
                 let _ = consumer_control.send(CstpControlEvent::SessionEnded(SessionEndReason::ConsumerDropped));
+                Ok(())
             }
-            _ = read_task => {}
+            result = read_task => result
         }
     });
-    tokio::spawn(async move {
+    let writer = tokio::spawn(async move {
         let _done = write_done;
         tokio::select! {
-            _ = read_ended => {}
-            _ = write_data_task(write_half, write_rx, write_control_tx) => {}
+            _ = write_stop.changed() => Ok(()),
+            _ = read_ended => Ok(()),
+            result = write_data_task(write_half, write_rx, write_control_tx) => result
         }
     });
+    CstpTasks {
+        errors: Vec::new(),
+        stop,
+        reader: Some(reader),
+        writer: Some(writer),
+    }
 }
 
 /// 将诊断放在实际写入与 flush 之后；独立 AsyncWrite seam 可复现断管及缓冲提交失败。
@@ -804,7 +899,7 @@ async fn write_data_task<W: tokio::io::AsyncWrite + Unpin>(
     mut write_half: W,
     mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     control_tx: mpsc::UnboundedSender<CstpControlEvent>,
-) {
+) -> Result<(), String> {
     let mut diagnostics = SessionIoDiagnostics::new(IoDirection::Write);
     while let Some(frame) = write_rx.recv().await {
         let write_result = async {
@@ -816,7 +911,7 @@ async fn write_data_task<W: tokio::io::AsyncWrite + Unpin>(
             let error = SessionIoError::new(IoDirection::Write, &error);
             diagnostics.publish(&control_tx);
             let _ = control_tx.send(CstpControlEvent::WriteFailed(error));
-            return;
+            return Err("cstp_write_io".to_owned());
         }
         diagnostics.record(frame.len());
         let control_write = match frame.get(6).copied() {
@@ -839,6 +934,7 @@ async fn write_data_task<W: tokio::io::AsyncWrite + Unpin>(
         }
     }
     diagnostics.publish(&control_tx);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

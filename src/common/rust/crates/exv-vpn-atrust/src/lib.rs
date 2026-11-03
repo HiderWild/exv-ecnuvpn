@@ -10,11 +10,13 @@
 //! | [`transport`] | 注入式 [`transport::Underlay`] 出口端口 |
 //! | [`transport::l3::codec`] | L3 帧编解码：显式消息边界、长度校验、畸形输入拒绝、分片/粘包流式解析 |
 //! | [`session`] | 会话关闭的幂等契约与有界排队预算：重复关闭、关闭后排空、迟到结果无法进入新会话、超预算入队被拒绝 |
+//! | [`browser_selection`] | 外部浏览器选择阶梯与进程内缓存策略（纯决策；浏览器探测与可用性判据由宿主注入，缓存槽由宿主持有） |
 //!
 //! # 本 crate 绝不做什么
 //!
 //! 协议库不创建或修改系统网卡、路由、系统 DNS、系统代理，不注册浏览器协议处理器，不启动
-//! 浏览器，不启动或依赖官方 aTrust / Go 上游运行时。库内**所有**出站连接必须经由注入的
+//! 浏览器，也不探测已安装浏览器（[`browser_selection`] 只消费宿主注入的探测结果），
+//! 不启动或依赖官方 aTrust / Go 上游运行时。库内**所有**出站连接必须经由注入的
 //! [`transport::Underlay`] 完成；本 crate 不提供默认拨号器，也不做任何隐式解析或直连。
 //! 外部浏览器请求沿用浏览器自身的网络，不受该端口约束（设计 §3.1）。
 //!
@@ -60,7 +62,9 @@
 //!    “命中 L3 / 需要 TCP 应用通道 / 不属于任何资源”分开表达，**不**把未匹配表述为未授权。
 
 pub mod auth;
+pub mod browser_selection;
 pub mod error;
+pub mod local_agent;
 pub mod resource;
 pub mod session;
 pub mod transport;

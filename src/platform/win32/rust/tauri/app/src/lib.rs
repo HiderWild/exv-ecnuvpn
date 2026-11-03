@@ -3,7 +3,9 @@
 
 // kernel 对外暴露：供集成测试/诊断驱动（`tests/drive_service_flow.rs`）在进程级
 // spawn 真实 core 并驱动 ServiceControl/Connect/Snapshot/LogsList，无需 GUI。
+mod atrust_scheme;
 mod autostart;
+mod config_acl_repair;
 pub mod kernel;
 mod lifecycle;
 mod log_export;
@@ -40,6 +42,13 @@ pub fn run() {
             // `--silent`（精确匹配）→ 仅记录、不改第一实例可见性；否则唤出主窗口
             // （show_main_window 与托盘 show 同一执行点）。遵守上述回调线程契约：
             // 只有线程安全的 AppHandle 操作 + tracing，零业务派发。
+            //
+            // L4 `aTrust://` 协议激活（S4）：注册命令以 URL 为参数启动/激活本应用，
+            // 走同一条「唤出主窗口」路径；此处仅额外记录激活来源，不新增业务语义。
+            if atrust_scheme::is_scheme_activation(&argv) {
+                tracing::info!(target: "exv::single_instance",
+                    "aTrust:// 协议激活：唤出主窗口（最小处理，不自动发起连接）");
+            }
             use lifecycle::ActivationDecision;
             match lifecycle::activation_decision(&argv) {
                 ActivationDecision::ShowMainWindow => lifecycle::show_main_window(app),
@@ -50,14 +59,61 @@ pub fn run() {
             }
         }))
         // CDP 消息包含会话 Cookie；开发构建也不能记录底层 WebSocket 帧。
-        .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
+        //
+        // A1-3（2026-10-09 区域 A，复审 R4 + 六区裁定 §二.A-2）：UI 生命周期事件的
+        // 文件 target 显式化。落点核实结论：tauri-plugin-log 2.9.0 的文件落点配置
+        // 是 `TargetKind::LogDir`（Windows 解析为 `%LOCALAPPDATA%\<identifier>\logs`
+        // 即 `com.exv.vpn.desktop\logs`，插件自管目录创建与轮转）；`TargetKind::Folder`
+        // 是「自定义路径」类别——按裁定 UI 日志**不写** `~/.exv/logs`（core 聚合日志
+        // 的领地）。2.9.0 的默认 targets 恰为 [Stdout, LogDir{None}]（本行旧形状
+        // 隐式依赖该默认），但复审对默认值的事实判断（误记为 Stdout+Webview）说明
+        // 这层隐式依赖很脆弱：插件升级改默认值会静默丢掉文件通道，2026-10-08 整程
+        // 更换事故「谁换了 UI 进程」的归因盲区（lifecycle target 持久证据零痕迹）
+        // 就会复现。此处显式钉住通道集合与文件名 ui.log，轮转上限从默认 40KB 提到
+        // 1MB（KeepOne），保证事故窗口的 lifecycle 事件不被日常日志快速刷掉；
+        // 仅既有 lifecycle 事件，不新增日志面。
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("ui.log".to_string()),
+                    }),
+                ])
+                .max_file_size(1024 * 1024)
+                .build(),
+        )
         .setup(|app| {
+            // C6 观测加固（2026-10-09 区域 C 计划 §2.6-1）：setup 最早处 logger canary。
+            // 刻意用 `log::`（tauri_plugin_log 桥接 fern 双通道：stdout + LogDir 轮转
+            // 文件）而非本文件其他位置的 `tracing::`（无全局 tracing subscriber，
+            // 恒丢弃——LogDir 里物理上不会出现）。与 main() 入口的 eprintln! canary
+            // 组成两层判读：入口行在+本行缺席=未到 setup 或 logger 未初始化；
+            // 两行都在而 stdout 无输出=纯 stdout 句柄问题。本行同时落 LogDir，
+            // 不依赖 stdout 句柄存活。
+            log::info!(
+                target: "exv.bootstrap",
+                "ui process setup reached profile={} pid={}",
+                if cfg!(debug_assertions) { "debug" } else { "release" },
+                std::process::id()
+            );
+
             // 前端自有设置存储（产品状态目录；解析失败时不 manage → Command 返回错误）。
             if let Some(store) = ui_prefs::UiPrefsStore::from_product_dir() {
                 app.manage(store);
             } else {
                 tracing::warn!(target: "exv.bootstrap",
                     "ui state dir unavailable; ui prefs commands will error");
+            }
+
+            // 学校登录尝试计数器（验证码风险预告）：与 ui_prefs 同一产品状态目录；
+            // 目录不可解析时不 manage——计数停用（embedded_auth 只记 warn），不影响认证。
+            if let Some(tracker) = kernel::login_attempt_tracker::LoginAttemptTracker::from_product_dir() {
+                app.manage(tracker);
+            } else {
+                tracing::warn!(target: "exv.bootstrap",
+                    "ui state dir unavailable; login attempt counting disabled");
             }
 
             // 快速入门「已见」标记（KI-13：与 core config.json 同目录；
@@ -71,6 +127,14 @@ pub fn run() {
             // core 进程归属（O3）：UI 宿主 spawn core → 拨号 → 管理 CoreState/
             // CoreSession → 挂事件订阅。core 缺失/拨号失败走降级路径（NotWired）。
             kernel::bootstrap::bootstrap(app)?;
+
+            // 系统浏览器认证开始后才准备证书和请求级Agent。
+            app.manage(kernel::local_agent::LocalAgentState::default());
+
+            // L4 `aTrust://` URL 协议注册（S4）：只在无人认领时注册到当前用户
+            // HKCU\Software\Classes；官方客户端在运行/已注册（或认领状态未知）一律
+            // 让位，只记录不阻断（见 atrust_scheme 模块注释的冲突守卫）。
+            atrust_scheme::ensure_registered();
 
             // 启动可见性（静默启动 ∨ prefs）：默认窗口 visible:false，此处决定是否亮出。
             lifecycle::apply_startup_visibility(app.handle());
@@ -95,9 +159,15 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect,
+            commands::auth_preparation_respond,
+            commands::auth_receiver_status,
+            commands::restore_official_auth_receiver,
             commands::atrust_browser_fallback,
             commands::atrust_browser_fallback_available,
+            commands::atrust_show_auth_window,
             commands::core_status,
+            commands::agent_sim_ca_uninstall,
+            atrust_scheme::atrust_scheme_unregister,
             commands::stop,
             commands::snapshot,
             commands::stats,
@@ -105,8 +175,8 @@ pub fn run() {
             commands::logs_clear,
             log_export::logs_export,
             commands::config_get,
-            commands::saved_password,
             commands::config_set,
+            config_acl_repair::config_repair_permissions,
             kernel::quick_start::quick_start_apply,
             commands::tunnel_address,
             commands::respond_interaction,
@@ -125,6 +195,7 @@ pub fn run() {
             window_chrome::window_chrome_set_mode,
             window_chrome::window_chrome_control,
             window_chrome::window_set_visible,
+            window_chrome::window_is_foreground,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EXV Tauri app");

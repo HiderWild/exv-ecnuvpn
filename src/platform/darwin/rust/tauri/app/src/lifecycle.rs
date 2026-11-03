@@ -32,8 +32,8 @@
 //! `lifecycle-effects.ts`（win32 同源迁移）；壳只提供机械 command
 //! [`shell_hide_main_window`]（隐藏 + 既有托盘/Dock 唤回接缝），不做决策。
 
-use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tauri::{App, AppHandle, Manager};
 
@@ -55,11 +55,21 @@ pub enum CloseDecision {
 
 /// 实际连接、重连或清理工作进行中时保留后台进程。
 fn background_work(snapshot: &RuntimeSnapshot) -> bool {
-    needs_background(&snapshot.runtime, snapshot.reconnect.as_ref().is_some_and(|state| state.active))
+    needs_background(
+        &snapshot.runtime,
+        snapshot
+            .reconnect
+            .as_ref()
+            .is_some_and(|state| state.active),
+    )
 }
 
 fn needs_background(state: &RuntimeState, reconnecting: bool) -> bool {
-    reconnecting || !matches!(state, RuntimeState::Idle { .. } | RuntimeState::FailedClean { .. })
+    reconnecting
+        || !matches!(
+            state,
+            RuntimeState::Idle { .. } | RuntimeState::FailedClean { .. }
+        )
 }
 
 /// 状态读取暂不可用时保留窗口对应的后台进程，用户仍可显式退出。
@@ -124,11 +134,14 @@ fn handle_close_request(window: &tauri::WebviewWindow) {
     tauri::async_runtime::spawn(async move {
         let prefs_app = app.clone();
         let preference = tauri::async_runtime::spawn_blocking(move || {
-            prefs_app.try_state::<UiPrefsStore>()
+            prefs_app
+                .try_state::<UiPrefsStore>()
                 .and_then(|store| store.get().ok())
                 .and_then(|prefs| prefs.close_preference)
                 .unwrap_or_else(|| DEFAULT_CLOSE_PREFERENCE.to_owned())
-        }).await.unwrap_or_else(|_| DEFAULT_CLOSE_PREFERENCE.to_owned());
+        })
+        .await
+        .unwrap_or_else(|_| DEFAULT_CLOSE_PREFERENCE.to_owned());
         let busy = if preference == "quit" || preference == "tray" {
             false
         } else if let Some(state) = app.try_state::<CoreState>() {
@@ -169,6 +182,23 @@ pub fn notify_core_shutdown(app: &AppHandle) {
 
 /// 在后台等待完整清理，保留 Core 的路由/网卡回收与空 runtime 目录删除路径。
 fn shutdown_core_after_hide(app: &AppHandle) {
+    let agent_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    if let Some(state) = app.try_state::<CoreState>() {
+        state.connection_requests.cancel();
+    }
+    let core_app = app.clone();
+    tauri::async_runtime::block_on(drain_agent_and_core(
+        crate::kernel::native_agent::stop_until(app, agent_deadline),
+        async move {
+            let _ = tauri::async_runtime::spawn_blocking(move || shutdown_core_runtime(&core_app))
+                .await;
+        },
+    ));
+    SHUTDOWN_FINISHED.store(true, Ordering::Release);
+    app.exit(0);
+}
+
+fn shutdown_core_runtime(app: &AppHandle) {
     crate::tray::remove(app);
 
     // 会话替换路径（bootstrap）已回收并发会话，故此处取到 `None` 属正常：进程 teardown
@@ -199,9 +229,6 @@ fn shutdown_core_after_hide(app: &AppHandle) {
             }
         }
     }
-
-    SHUTDOWN_FINISHED.store(true, Ordering::Release);
-    app.exit(0);
 }
 
 /// 在独立线程执行核心 runtime 清理并等待其结束（best-effort；返回失败说明文本）。
@@ -267,7 +294,9 @@ pub fn apply_startup_visibility(app: &AppHandle) {
 /// 是 no-op，且 tao 会跳过已最小化窗口的聚焦；未最小化时该调用为 no-op，与 win32
 /// 侧 `show_main_window` 逐行同构。
 pub(crate) fn show_main_window(app: &AppHandle) {
-    if SHUTDOWN_STARTED.load(Ordering::Acquire) { return; }
+    if SHUTDOWN_STARTED.load(Ordering::Acquire) {
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -295,20 +324,22 @@ pub(crate) fn shell_hide_main_window(app: AppHandle) -> Result<(), String> {
     hide_main_window(&app)
 }
 
+/// 只有主窗口的关闭动作交给托盘／退出策略；认证窗口沿用原生关闭。
+fn intercept_main_window_close(label: &str, intercept: impl FnOnce()) {
+    if label == "main" {
+        intercept();
+    }
+}
+
 /// `on_window_event` 的关闭/聚焦接线（main.rs Builder 挂载）。
 pub(crate) fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
-    match event {
-        tauri::WindowEvent::CloseRequested { api, .. } => {
-            // 关闭行为由 close_preference 与 Core 连接状态共同决定；
-            // prevent_close 统一接管，真正退出走 notify_core_shutdown。
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        intercept_main_window_close(window.label(), || {
             api.prevent_close();
-            if window.label() == "main"
-                && let Some(webview) = window.app_handle().get_webview_window("main")
-            {
+            if let Some(webview) = window.app_handle().get_webview_window("main") {
                 handle_close_request(&webview);
             }
-        }
-        _ => {}
+        });
     }
 }
 
@@ -317,12 +348,21 @@ pub(crate) fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::Reopen { .. } => show_main_window(app),
         tauri::RunEvent::ExitRequested { api, .. }
-            if !SHUTDOWN_FINISHED.load(Ordering::Acquire) => {
-                api.prevent_exit();
-                notify_core_shutdown(app);
-            }
+            if !SHUTDOWN_FINISHED.load(Ordering::Acquire) =>
+        {
+            api.prevent_exit();
+            notify_core_shutdown(app);
+        }
         _ => {}
     }
 }
 
 // ---- 纯函数测试（对齐 win32 lifecycle-effects 决策测试模式，落壳侧）----
+
+async fn drain_agent_and_core<A, C, T>(agent: A, core: C) -> T
+where
+    A: std::future::Future<Output = ()>,
+    C: std::future::Future<Output = T>,
+{
+    tokio::join!(agent, core).1
+}

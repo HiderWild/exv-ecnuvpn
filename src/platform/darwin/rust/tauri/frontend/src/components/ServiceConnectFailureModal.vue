@@ -28,6 +28,7 @@ import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../pro
  */
 const props = defineProps<{
   visible: boolean;
+  updateRequired?: boolean;
   /** 触发 modal 的 connect 失败文案（保留在页面上；取消时不清除）。 */
   errorMessage: string;
   /** 极简窗内紧凑渲染变体；不改变恢复序列语义。 */
@@ -98,7 +99,7 @@ async function runSequence(action: RecoveryAction): Promise<void> {
       // 重装后连接 = 安装服务（Core 自动停止运行中服务/安装/启动就绪）→ 服务连接。
       // 不拆显式 stop：架构约定服务常驻、不保留停止逻辑；install 内部 REPAIR 已处理
       // 运行中服务，拆 stop 既违背该约定又徒增一次 UAC。
-      await runStep("install", () => serviceOperations.run("repair"));
+      await runStep("install", () => serviceOperations.run(props.updateRequired ? "update" : "repair"));
     }
     // 两个路径都以 connect 收尾；host 按当前服务状态自动路由（oneshot / service）。
     await runStep("connect", () => runtime.connect());
@@ -124,7 +125,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 <template>
   <div
     v-if="visible"
-    class="modal-overlay"
+    class="modal-overlay exv-dialog"
     data-testid="service-failure-modal"
     :data-compact="compact ? 'true' : 'false'"
     role="dialog"
@@ -134,11 +135,11 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
     tabindex="-1"
     @keydown="onDialogKeydown"
   >
-    <div class="modal-card">
-      <div class="modal-body">
-        <h2 id="service-failure-modal-title">服务连接失败</h2>
+    <div class="modal-card exv-dialog-card">
+      <h2 id="service-failure-modal-title">{{ updateRequired ? "更新 EXV 系统服务" : "服务连接失败" }}</h2>
+      <div class="modal-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '详细说明' : undefined">
         <p class="modal-error" data-testid="service-failure-error">{{ errorMessage }}</p>
-        <p class="modal-hint">服务模式连接未成功。请选择恢复方式：</p>
+        <p class="modal-hint">{{ updateRequired ? "更新系统服务后将重新开始连接。" : "服务模式连接未成功。请选择恢复方式：" }}</p>
 
         <div
           v-if="actionError"
@@ -170,6 +171,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
       <div class="modal-actions">
         <button
           type="button"
+          v-if="!updateRequired"
           data-testid="service-failure-clean"
           :disabled="busyAction !== null"
           @click="runSequence('clean')"
@@ -182,7 +184,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
           :disabled="busyAction !== null"
           @click="runSequence('reinstall')"
         >
-          重装服务后连接
+          {{ updateRequired ? "更新服务并连接" : "重装服务后连接" }}
         </button>
         <button
           type="button"
@@ -224,7 +226,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 
 .modal-card h2 {
   margin-bottom: var(--space-2);
-  font-size: 18px;
+  font-size: var(--font-size-heading);
 }
 
 .modal-error {
@@ -233,13 +235,13 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   border: 1px solid var(--state-danger);
   border-radius: var(--radius-md);
   color: var(--state-danger);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-hint {
   margin-bottom: var(--space-4);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-action-error {
@@ -248,13 +250,13 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   border: 1px solid var(--state-danger);
   border-radius: var(--radius-md);
   color: var(--state-danger);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-pending {
   margin-bottom: var(--space-3);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .recovery-steps {
@@ -271,7 +273,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   padding: 0 var(--space-2);
   border-radius: var(--radius-md);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .recovery-step__marker {
@@ -327,7 +329,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 .modal-actions button {
   min-height: 34px;
   padding: var(--space-1) var(--space-3);
-  font-size: 13px;
+  font-size: var(--font-size-body);
 }
 
 .modal-actions button:disabled {
@@ -336,7 +338,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   color: var(--text-secondary);
 }
 
-/* 极简紧凑变体：面板收窄到 min(100%, 294px)，内容区裁切，动作按钮不换行。
+/* 极简紧凑变体：面板收窄到 min(100%, 294px)，正文独立滚动，动作按钮不换行。
    覆盖本模态自己的 440px 宽 / space-6 内边距 / 18px 标题。 */
 .modal-overlay[data-compact="true"] {
   padding: 8px;
@@ -353,18 +355,17 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 }
 
 .modal-overlay[data-compact="true"] .modal-card h2 {
-  overflow: hidden;
+  flex: none;
   margin-bottom: 3px;
-  font-size: 12px;
+  font-size: var(--font-size-heading);
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .modal-overlay[data-compact="true"] .modal-error {
   margin-bottom: 3px;
   padding: 3px 6px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.25;
 }
 
@@ -373,7 +374,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 .modal-overlay[data-compact="true"] .modal-pending,
 .modal-overlay[data-compact="true"] .recovery-step {
   margin-bottom: 3px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.25;
 }
 
@@ -387,13 +388,14 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   padding: 0 4px;
 }
 
-/* 内容区裁切，动作区始终可见（对齐历史 ModalShell 的 body/actions 分工）。 */
+/* 正文独立滚动，动作区始终可见（对齐历史 ModalShell 的 body/actions 分工）。 */
 .modal-overlay[data-compact="true"] .modal-body {
   display: grid;
   min-height: 0;
   flex: 1 1 auto;
   gap: 3px;
-  overflow: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .modal-overlay[data-compact="true"] .modal-actions {
@@ -406,7 +408,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   min-width: 0;
   min-height: 22px;
   padding: 2px 7px;
-  font-size: 11px;
+  font-size: var(--font-size-body);
   line-height: 1.1;
   white-space: nowrap;
 }
@@ -416,4 +418,10 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
     flex: 0 0 auto;
   }
 }
+
+/* 标题与动作固定，长说明独立滚动；不占用 Darwin 原生标题栏预算。 */
+.modal-overlay.exv-dialog .modal-card { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.modal-overlay.exv-dialog h2 { flex: none; }
+.modal-overlay.exv-dialog .modal-body { min-height: 1.3em; min-width: 0; overflow-y: auto; overflow-wrap: anywhere; overscroll-behavior: contain; padding: 3px; margin: 0 -3px; }
+.modal-overlay.exv-dialog :is(.modal-actions, .credential-modal-actions) { flex: none; padding: 5px 5px 8px; margin-left: -5px; margin-right: -5px; }
 </style>

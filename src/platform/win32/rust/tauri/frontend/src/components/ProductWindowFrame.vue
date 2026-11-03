@@ -129,5 +129,5 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-[data-testid="appearance-save-error"] { position: absolute; top: 34px; right: 8px; z-index: 20; max-width: calc(100% - 16px); margin: 0; padding: 8px; background: var(--surface-panel); color: var(--text-primary); }
+[data-testid="appearance-save-error"] { position: absolute; top: var(--titlebar-height); right: 8px; z-index: 20; max-width: calc(100% - 16px); margin: 0; padding: 8px; background: var(--surface-panel); color: var(--text-primary); }
 </style>

@@ -133,7 +133,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 <template>
   <div
     v-if="visible"
-    class="modal-overlay"
+    class="modal-overlay exv-dialog"
     data-testid="service-failure-modal"
     :data-compact="compact ? 'true' : 'false'"
     role="dialog"
@@ -143,9 +143,10 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
     tabindex="-1"
     @keydown="onDialogKeydown"
   >
-    <div class="modal-card">
-      <div class="modal-body">
-        <h2 id="service-failure-modal-title">服务连接失败</h2>
+    <div class="modal-card exv-dialog-card">
+      <h2 v-if="compact" id="service-failure-modal-title">服务连接失败</h2>
+      <div class="modal-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '详细说明' : undefined">
+        <h2 v-if="!compact" id="service-failure-modal-title">服务连接失败</h2>
         <p class="modal-error" data-testid="service-failure-error">{{ failurePhrase }}</p>
         <p class="modal-hint">服务引擎未能就绪，请选择恢复方式（不会自动降级）：</p>
 
@@ -174,6 +175,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
             <span class="recovery-step__label">{{ step.label }}</span>
           </div>
         </div>
+        <p v-if="compact" class="modal-footnote" data-testid="service-failure-uac-hint">一次性连接会重新弹 UAC；若弹窗打扰请改用安装服务形态。</p>
       </div>
 
       <div class="modal-actions">
@@ -204,7 +206,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
         </button>
       </div>
       <!-- D13 句式（2026-09-28 裁定）：无 UAC 等级建议句——不指导用户降低 UAC。 -->
-      <p class="modal-footnote" data-testid="service-failure-uac-hint">
+      <p v-if="!compact" class="modal-footnote" data-testid="service-failure-uac-hint">
         一次性连接会重新弹 UAC；若弹窗打扰请改用安装服务形态。
       </p>
     </div>
@@ -238,7 +240,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 
 .modal-card h2 {
   margin-bottom: var(--space-2);
-  font-size: 18px;
+  font-size: var(--font-size-heading);
 }
 
 .modal-error {
@@ -247,13 +249,13 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   border: 1px solid var(--state-danger);
   border-radius: var(--radius-md);
   color: var(--state-danger);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-hint {
   margin-bottom: var(--space-4);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-action-error {
@@ -262,13 +264,13 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   border: 1px solid var(--state-danger);
   border-radius: var(--radius-md);
   color: var(--state-danger);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-pending {
   margin-bottom: var(--space-3);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .recovery-steps {
@@ -285,7 +287,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   padding: 0 var(--space-2);
   border-radius: var(--radius-md);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .recovery-step__marker {
@@ -342,13 +344,13 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 .modal-footnote {
   margin-top: var(--space-2);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
 }
 
 .modal-actions button {
   min-height: 34px;
   padding: var(--space-1) var(--space-3);
-  font-size: 13px;
+  font-size: var(--font-size-body);
 }
 
 .modal-actions button:disabled {
@@ -357,7 +359,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   color: var(--text-secondary);
 }
 
-/* 极简紧凑变体：面板收窄到 min(100%, 294px)，内容区裁切，动作按钮不换行。
+/* 极简紧凑变体：面板收窄到 min(100%, 294px)，正文完整滚动，动作按钮不换行。
    覆盖本模态自己的 440px 宽 / space-6 内边距 / 18px 标题。 */
 .modal-overlay[data-compact="true"] {
   padding: 8px;
@@ -374,18 +376,15 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 }
 
 .modal-overlay[data-compact="true"] .modal-card h2 {
-  overflow: hidden;
   margin-bottom: 3px;
-  font-size: 12px;
+  font-size: var(--font-size-heading);
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .modal-overlay[data-compact="true"] .modal-error {
   margin-bottom: 3px;
   padding: 3px 6px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.25;
 }
 
@@ -394,13 +393,13 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
 .modal-overlay[data-compact="true"] .modal-pending,
 .modal-overlay[data-compact="true"] .recovery-step {
   margin-bottom: 3px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.25;
 }
 
 .modal-overlay[data-compact="true"] .modal-footnote {
   margin-top: 3px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   line-height: 1.25;
 }
 
@@ -414,13 +413,14 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   padding: 0 4px;
 }
 
-/* 内容区裁切，动作区始终可见（对齐历史 ModalShell 的 body/actions 分工）。 */
+/* 正文完整滚动，动作区始终可见（对齐历史 ModalShell 的 body/actions 分工）。 */
 .modal-overlay[data-compact="true"] .modal-body {
   display: grid;
   min-height: 0;
   flex: 1 1 auto;
   gap: 3px;
-  overflow: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .modal-overlay[data-compact="true"] .modal-actions {
@@ -433,7 +433,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
   min-width: 0;
   min-height: 22px;
   padding: 2px 7px;
-  font-size: 11px;
+  font-size: var(--font-size-body);
   line-height: 1.1;
   white-space: nowrap;
 }

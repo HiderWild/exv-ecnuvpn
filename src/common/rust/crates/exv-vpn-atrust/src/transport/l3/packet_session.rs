@@ -1,13 +1,18 @@
 //! 原始包与持续 L3 连接的活动循环。宿主只需提供有界包队列，不在此操作网卡。
 use super::{
+    L3Frame,
     connection::{ConnectionError, L3Connection},
     packet_engine::{FlowRejection, PacketActions, PacketEngine, PacketError},
 };
 use std::{
     fmt,
+    future::Future,
+    pin::Pin,
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+#[path = "packet_session_pending.rs"]
+mod pending;
 
 pub enum PacketEvent {
     Packet(Vec<u8>),
@@ -64,44 +69,57 @@ async fn run_inner(
     packets: &mut mpsc::Receiver<Vec<u8>>,
     events: &mpsc::Sender<PacketEvent>,
 ) -> Result<(), PacketSessionError> {
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut next_tick = tokio::time::Instant::now();
+    let mut pending = pending::Pending::new(connection.session().budget());
+    let sender = connection.sender();
+    type SendFuture = Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send>>;
+    let mut sending: Option<(SendFuture, usize)> = None;
+    let mut held_frame = None;
     loop {
-        let actions = tokio::select! {
-            frame=connection.recv()=>engine.receive(frame?,Instant::now())?,
-            packet=packets.recv()=>{
-                let Some(packet)=packet else {return Ok(());};
-                match engine.submit(packet,Instant::now()) {
-                    Ok(frames)=>PacketActions {to_node:frames,..PacketActions::default()},
-                    Err(error)=>{
-                        events.send(PacketEvent::Dropped(error)).await.map_err(|_|PacketSessionError::HostClosed)?;
-                        continue;
-                    }
-                }
+        // A recv releases its original L3 permit. This one-frame lookahead has
+        // independent ownership and never scans past a blocked data frame.
+        if held_frame.as_ref().is_some_and(|frame| {
+            !pending.over()
+                && (!matches!(frame, L3Frame::DataResponse { .. }) || pending.host_room())
+        }) {
+            pending.append(engine.receive(held_frame.take().expect("held frame"), Instant::now())?);
+        }
+        if sending.is_none() {
+            if let Some((frame, cost)) = pending.take_node() {
+                let sender = sender.clone();
+                sending = Some((Box::pin(async move { sender.send(frame).await }), cost));
             }
-            _=tick.tick()=>engine.tick(Instant::now()),
-        };
-        let sender = connection.sender();
-        for frame in actions.to_node {
-            sender.send(frame).await?;
         }
-        for packet in actions.to_host {
-            events
-                .send(PacketEvent::Packet(packet))
-                .await
-                .map_err(|_| PacketSessionError::HostClosed)?;
-        }
-        for rejected in actions.rejected {
-            events
-                .send(PacketEvent::Rejected(rejected))
-                .await
-                .map_err(|_| PacketSessionError::HostClosed)?;
-        }
-        for error in actions.dropped {
-            events
-                .send(PacketEvent::Dropped(error))
-                .await
-                .map_err(|_| PacketSessionError::HostClosed)?;
+        let tick_due = tokio::time::Instant::now() >= next_tick;
+        // Stop admitting fresh host work while a due tick waits for egress to
+        // drain. A missed tick is a single current-time action, never a backlog.
+        let admit_host = !tick_due && pending.node_room();
+        let run_tick = pending.node_empty() && !pending.over();
+        let has_send = sending.is_some();
+        tokio::select! {
+            () = events.closed() => return Err(PacketSessionError::HostClosed),
+            permit = events.reserve(), if pending.host_pending() => {
+                permit.map_err(|_| PacketSessionError::HostClosed)?.send(pending.take_event());
+            }
+            result = async { sending.as_mut().expect("in-flight send").0.as_mut().await }, if has_send => {
+                result?;
+                let (_, cost) = sending.take().expect("completed send");
+                pending.node_completed(cost);
+            }
+            frame=connection.recv(), if held_frame.is_none() => held_frame=Some(frame?),
+            packet=packets.recv(), if admit_host => {
+                let Some(packet)=packet else {return Ok(());};
+                let actions = match engine.submit(packet,Instant::now()) {
+                    Ok(frames)=>PacketActions {to_node:frames,..PacketActions::default()},
+                    Err(error)=>PacketActions {dropped:vec![error],..PacketActions::default()},
+                };
+                pending.append(actions);
+            }
+            _=tokio::time::sleep_until(next_tick), if run_tick => {
+                let tick_started = tokio::time::Instant::now();
+                pending.append(engine.tick(Instant::now()));
+                next_tick = tick_started + Duration::from_millis(250);
+            }
         }
     }
 }

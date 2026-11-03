@@ -228,10 +228,7 @@ fn finish_close_request(in_flight: &AtomicBool) {
     in_flight.store(false, Ordering::Release);
 }
 
-fn apply_close_decision<R: Runtime>(
-    app: &AppHandle<R>,
-    decision: CloseDecision,
-) {
+fn apply_close_decision<R: Runtime>(app: &AppHandle<R>, decision: CloseDecision) {
     match decision {
         CloseDecision::Quit => notify_core_shutdown(app),
         CloseDecision::Hide => {
@@ -242,10 +239,7 @@ fn apply_close_decision<R: Runtime>(
     }
 }
 
-async fn resolve_smart_close<R: Runtime>(
-    app: AppHandle<R>,
-    source: MainWindowCloseSource,
-) {
+async fn resolve_smart_close<R: Runtime>(app: AppHandle<R>, source: MainWindowCloseSource) {
     let started_at = Instant::now();
     let snapshot = match app.try_state::<CoreState>() {
         Some(state) => {
@@ -286,10 +280,7 @@ async fn resolve_smart_close<R: Runtime>(
                 snapshot_error = reason.label(),
                 "smart close could not obtain runtime snapshot; quitting"
             );
-            apply_close_decision(
-                &app,
-                smart_close_decision_from_snapshot_result(Err(reason)),
-            );
+            apply_close_decision(&app, smart_close_decision_from_snapshot_result(Err(reason)));
         }
     }
 }
@@ -334,8 +325,12 @@ pub(crate) fn request_main_window_close<R: Runtime>(
 
 fn hide_before_close<R: Runtime>(window: &WebviewWindow<R>) {
     match window.hide() {
-        Ok(()) => tracing::debug!(target: "exv.lifecycle", "main window hidden before close processing"),
-        Err(error) => tracing::warn!(target: "exv.lifecycle", "close hide failed; continuing close processing: {error}"),
+        Ok(()) => {
+            tracing::debug!(target: "exv.lifecycle", "main window hidden before close processing")
+        }
+        Err(error) => {
+            tracing::warn!(target: "exv.lifecycle", "close hide failed; continuing close processing: {error}")
+        }
     }
 }
 
@@ -370,11 +365,7 @@ enum QuitStopResult {
 }
 
 /// 在退出 UI 前经现有 KernelControl.Stop 停止当前 EngineSlot client，并有界等待 Idle/失败终态。
-async fn stop_until_terminal<S, O, OF>(
-    stop: S,
-    mut observe: O,
-    timeout: Duration,
-) -> QuitStopResult
+async fn stop_until_terminal<S, O, OF>(stop: S, mut observe: O, timeout: Duration) -> QuitStopResult
 where
     S: Future<Output = Result<(), ()>>,
     O: FnMut() -> OF,
@@ -422,11 +413,28 @@ async fn stop_core_before_quit<R: Runtime>(app: &AppHandle<R>) -> QuitStopResult
 }
 
 async fn shutdown_core_after_hide<R: Runtime>(app: &AppHandle<R>) {
-    match stop_core_before_quit(app).await {
-        QuitStopResult::Idle => tracing::info!(target: "exv.lifecycle", quit_stop_result = "idle", "explicit Quit confirmed the tunnel is idle"),
-        QuitStopResult::Failed => tracing::warn!(target: "exv.lifecycle", quit_stop_result = "failed", "explicit Quit could not confirm a clean tunnel stop"),
-        QuitStopResult::TimedOut => tracing::warn!(target: "exv.lifecycle", quit_stop_result = "timeout", "explicit Quit timed out waiting for tunnel stop"),
-        QuitStopResult::CoreUnavailable => tracing::warn!(target: "exv.lifecycle", quit_stop_result = "core_unavailable", "explicit Quit could not reach Core to stop the tunnel"),
+    let agent_deadline = Instant::now() + EXPLICIT_QUIT_STOP_TIMEOUT;
+    if let Some(state) = app.try_state::<CoreState>() {
+        state.connection_requests.cancel();
+    }
+    match drain_agent_and_core(
+        crate::kernel::local_agent::stop_until(app, agent_deadline),
+        stop_core_before_quit(app),
+    )
+    .await
+    {
+        QuitStopResult::Idle => {
+            tracing::info!(target: "exv.lifecycle", quit_stop_result = "idle", "explicit Quit confirmed the tunnel is idle")
+        }
+        QuitStopResult::Failed => {
+            tracing::warn!(target: "exv.lifecycle", quit_stop_result = "failed", "explicit Quit could not confirm a clean tunnel stop")
+        }
+        QuitStopResult::TimedOut => {
+            tracing::warn!(target: "exv.lifecycle", quit_stop_result = "timeout", "explicit Quit timed out waiting for tunnel stop")
+        }
+        QuitStopResult::CoreUnavailable => {
+            tracing::warn!(target: "exv.lifecycle", quit_stop_result = "core_unavailable", "explicit Quit could not reach Core to stop the tunnel")
+        }
     }
 
     tracing::info!(target: "exv.lifecycle", "core shutdown requested (O3: UI exit → core+engine terminate)");
@@ -436,10 +444,7 @@ async fn shutdown_core_after_hide<R: Runtime>(app: &AppHandle<R>) {
 
     // 1. Stop RPC 已完成有界观察后，中止订阅并释放 channel 克隆。
     if let Some(session) = app.try_state::<CoreSession>() {
-        let subs = session
-            .subscriptions
-            .lock()
-            .expect("subscriptions lock");
+        let subs = session.subscriptions.lock().expect("subscriptions lock");
         for handle in subs.iter() {
             handle.abort();
         }
@@ -519,4 +524,12 @@ pub(crate) fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+async fn drain_agent_and_core<A, C, T>(agent: A, core: C) -> T
+where
+    A: std::future::Future<Output = ()>,
+    C: std::future::Future<Output = T>,
+{
+    tokio::join!(agent, core).1
 }

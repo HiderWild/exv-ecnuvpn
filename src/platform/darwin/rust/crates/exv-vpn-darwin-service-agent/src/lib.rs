@@ -27,6 +27,7 @@
 use std::{convert::TryFrom, fmt};
 
 pub mod cli;
+pub mod file_log;
 pub mod macos;
 pub mod platform;
 pub mod socket;
@@ -74,6 +75,14 @@ pub enum ArtifactPathId {
     EngineDescriptor,
     /// W2.5 service engine 固定控制端点 identity。
     EngineSocketLeaf,
+    /// 当前Agent日志及其两代轮转副本。
+    AgentLog,
+    AgentLogFirst,
+    AgentLogSecond,
+    /// 当前Engine日志及其两代轮转副本。
+    EngineLog,
+    EngineLogFirst,
+    EngineLogSecond,
 }
 
 impl ArtifactPathId {
@@ -89,7 +98,20 @@ impl ArtifactPathId {
             Self::EngineBinary => "engine-binary",
             Self::EngineDescriptor => "engine-descriptor",
             Self::EngineSocketLeaf => "engine-socket-leaf",
+            Self::AgentLog => "agent-log",
+            Self::AgentLogFirst => "agent-log-first",
+            Self::AgentLogSecond => "agent-log-second",
+            Self::EngineLog => "engine-log",
+            Self::EngineLogFirst => "engine-log-first",
+            Self::EngineLogSecond => "engine-log-second",
         }
+    }
+
+    /// 卸载尾段清理的当前文件日志。
+    #[must_use]
+    pub const fn is_runtime_log(self) -> bool {
+        matches!(self, Self::AgentLog | Self::AgentLogFirst | Self::AgentLogSecond
+            | Self::EngineLog | Self::EngineLogFirst | Self::EngineLogSecond)
     }
 }
 
@@ -120,10 +142,9 @@ pub const SERVICE_AGENT_CLEANUP_ARTIFACTS: [ArtifactPathId; 2] =
 /// `uninstall` 所允许的全部 代理自有 artifact。
 ///
 /// 顺序固定为先撤销两份安装描述（daemon 与 W2.5 service engine job——不留可重新
-/// 激活的描述），再清理 state/log，再回收两份安装二进制，最后回收两个控制 socket
-///（daemon control.sock 与 engine engine.sock）。root executor 因此能在终止协调
-/// 完成前保留控制面。
-pub const SERVICE_AGENT_UNINSTALL_ARTIFACTS: [ArtifactPathId; 8] = [
+/// 激活的描述），再清理 state/旧log、两份二进制与两个控制socket；尾段关闭本进程
+/// 日志写入后清理当前日志及轮转。root executor 在终止协调完成前保留控制面。
+pub const SERVICE_AGENT_UNINSTALL_ARTIFACTS: [ArtifactPathId; 14] = [
     SERVICE_AGENT_DESCRIPTOR,
     SERVICE_ENGINE_DESCRIPTOR,
     SERVICE_AGENT_STATE_LEAF,
@@ -132,6 +153,12 @@ pub const SERVICE_AGENT_UNINSTALL_ARTIFACTS: [ArtifactPathId; 8] = [
     SERVICE_ENGINE_BINARY,
     SERVICE_AGENT_SOCKET_LEAF,
     SERVICE_ENGINE_SOCKET_LEAF,
+    ArtifactPathId::AgentLog,
+    ArtifactPathId::AgentLogFirst,
+    ArtifactPathId::AgentLogSecond,
+    ArtifactPathId::EngineLog,
+    ArtifactPathId::EngineLogFirst,
+    ArtifactPathId::EngineLogSecond,
 ];
 
 
@@ -195,9 +222,13 @@ pub enum ServiceAgentAction {
     Uninstall = 3,
     /// 清理固定 代理自有 leaf；必须由 root executor 执行。
     Cleanup = 4,
-    /// W2.5 root daemon 幂等确保 service engine job 已 bootstrap（`launchctl
-    /// bootstrap system <engine plist>`，已加载视成功）；零载荷 action frame。
+    /// root daemon 确保固定 service engine 启动：已注册执行不带-k的kickstart，
+    /// 明确缺席才bootstrap一次。成功帧仅表示原命令成功，实际IPC连接由Core完成。
     EnsureEngine = 6,
+    /// 只读详细响应能力选择。
+    EnsureEngineDetailCapability = 7,
+    /// 本次Ensure原错详情。
+    EnsureEngineDetailed = 8,
 }
 
 impl ServiceAgentAction {
@@ -220,7 +251,7 @@ impl ServiceAgentAction {
     /// 此动作是否会改变固定 代理自有 对象。
     #[must_use]
     pub const fn requires_root(self) -> bool {
-        !matches!(self, Self::Status)
+        !matches!(self, Self::Status | Self::EnsureEngineDetailCapability)
     }
 }
 
@@ -234,6 +265,8 @@ impl TryFrom<u8> for ServiceAgentAction {
             3 => Ok(Self::Uninstall),
             4 => Ok(Self::Cleanup),
             6 => Ok(Self::EnsureEngine),
+            7 => Ok(Self::EnsureEngineDetailCapability),
+            8 => Ok(Self::EnsureEngineDetailed),
             _ => Err(ServiceAgentError::UnknownAction),
         }
     }
@@ -594,3 +627,4 @@ impl ServiceAgentResponseV1 {
         }
     }
 }
+

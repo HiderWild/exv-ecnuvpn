@@ -342,6 +342,7 @@ try {
     'exv-engine.exe' = (Join-Path $runtimeTrioPath 'exv-engine.exe')
     'exv-ui.exe' = (Join-Path $runtimeTrioPath 'exv-ui.exe')
     'support\clear-local-user-config.ps1' = 'scripts\clear-local-user-config.ps1'
+    'support\install_manifest.tsv' = 'src\platform\win32\windows_setup_rust\install_manifest.tsv'
   }
   $sourceMap = [ordered]@{}
   foreach ($entry in $sourceCandidates.GetEnumerator()) {

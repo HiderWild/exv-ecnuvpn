@@ -14,18 +14,24 @@ param(
   [string]$TempRoot = "",
   [string]$SystemTempRoot = "",
   [string]$InstallDir = "",
-  [switch]$NoProcessStop
+  [switch]$NoProcessStop,
+  # S3c（S3a -ManifestPath 约定）：安装文件清单库路径。未传时按两候选探测（先随包
+  # 后仓内），两候选都不存在视为清单缺失，fail-closed 硬失败——见 Get-InstallManifestPath。
+  [string]$ManifestPath = ""
 )
 
 $ErrorActionPreference = 'Stop'
 $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
-# KI-13 ③：被锁文件成功登记 MoveFileEx 重启删除的数量。脚本以摘要行
+# KI-13 ③：只有移至唯一隔离路径的锁文件才允许登记 MoveFileEx 重启删除。
+# 成功登记数量以摘要行
 # 「EXV-CLEANUP-SUMMARY: scheduled=<n>」向调用方（卸载器）报告；全清或部分
 # 待重启都是成功语义，硬失败（重试与登记都做不到）才计入 $cleanupErrors 并
 # 以非零退出码结束。
 $script:scheduledRebootDeletes = 0
+$script:isolatedCleanupRoots = New-Object 'System.Collections.Generic.List[string]'
 
-# KI-13 ③：有限重试参数——3 次、间隔 500ms。重试仍锁才登记重启删除。
+# KI-13 ③：有限重试参数——3 次、间隔 500ms。重试仍锁先隔离；
+# 隔离失败报硬失败，不登记可能被新安装复用的原路径。
 $script:LockRetryCount = 3
 $script:LockRetryDelayMs = 500
 
@@ -174,21 +180,23 @@ function Assert-ConfigDirSafeForCleanup {
 function New-CleanupEntry {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Root
+    [Parameter(Mandatory = $true)][string]$Root,
+    [switch]$NoRebootDelete
   )
 
   return [PSCustomObject]@{
     Path = $Path
     Root = $Root
+    NoRebootDelete = [bool]$NoRebootDelete
   }
 }
 
 # --- KI-13 ③：被锁文件的有限重试 + 重启删除登记 -------------------------------
-# 语义分层（用户裁定 1/3）：
+# 语义分层（用户裁定 1/3，T6 同路径重装保护）：
 #   立即删除成功                       → 成功；
 #   重试后成功                         → 成功；
-#   仍锁但 MoveFileEx 重启删除登记成功 → 成功（摘要行报告 scheduled 计数）；
-#   登记也失败                         → 硬失败（cleanupErrors → 非零退出）。
+#   仍锁但移到唯一隔离路径并登记成功   → 成功（摘要行报告 scheduled 计数）；
+#   无法隔离或登记失败                 → 硬失败（cleanupErrors → 非零退出）。
 
 function Invoke-RebootDeleteRegistration {
   param(
@@ -196,6 +204,17 @@ function Invoke-RebootDeleteRegistration {
     [Parameter(Mandatory = $true)][string]$Reason
   )
 
+  $isolated = $false
+  foreach ($root in $script:isolatedCleanupRoots) {
+    if (Test-PathWithinRoot -Path $Path -Root $root) {
+      $isolated = $true
+      break
+    }
+  }
+  if (-not $isolated) {
+    Add-CleanupError -Path $Path -Reason 'reboot deletion refused outside a unique cleanup quarantine'
+    return $false
+  }
   if ([ExvCleanup.NativeMethods]::MoveFileEx($Path, $null, $script:MoveFileDelayUntilReboot)) {
     $script:scheduledRebootDeletes++
     Write-Host ("已登记重启删除（部分文件将在重启后自动删除）：" + $Path)
@@ -206,10 +225,81 @@ function Invoke-RebootDeleteRegistration {
   return $false
 }
 
-function Remove-FileWithLockHandling {
+function Move-ToUniqueCleanupQuarantine {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$Reason
+  )
+
+  # Keep the isolated path beside its EXV-owned source, on the same volume.
+  # A fresh GUID prevents a later installation from reusing the queued path.
+  $parent = Split-Path -Parent (Get-FullPath $Path)
+  Assert-PathUnderRoot -Path $Path -Root $parent
+  for ($attempt = 0; $attempt -lt 8; $attempt++) {
+    $candidate = Join-Path $parent ('.exv-uninstall-' + [guid]::NewGuid().ToString('N'))
+    Assert-PathUnderRoot -Path $candidate -Root $parent
+    if (Test-Path -LiteralPath $candidate) { continue }
+    try {
+      Move-Item -LiteralPath $Path -Destination $candidate -ErrorAction Stop
+      if ((Test-Path -LiteralPath $Path) -or -not (Test-Path -LiteralPath $candidate)) {
+        throw 'quarantine move did not leave exactly the isolated target'
+      }
+      $script:isolatedCleanupRoots.Add($candidate)
+      return $candidate
+    } catch {
+      Add-CleanupError -Path $Path -Reason ("locked target could not be isolated; no reboot deletion registered ($Reason): $($_.Exception.Message)")
+      return ''
+    }
+  }
+  Add-CleanupError -Path $Path -Reason "could not allocate unique quarantine path; no reboot deletion registered ($Reason)"
+  return ''
+}
+
+function Write-CleanupItem {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Action,
+    [Parameter(Mandatory = $true)][string]$Outcome
+  )
+
+  $source = 'C++-v3.3.x/Rust-current/2026-09-17-path-investigation'
+  $owner = 'EXV-service'
+  $category = 'runtime-or-installation'
+  $preserve = $false
+  if (($appRoot -and (Test-PathWithinRoot -Path $Path -Root $appRoot)) -or
+      ($rustConfigDir -and (Test-PathWithinRoot -Path $Path -Root $rustConfigDir)) -or
+      ($explicitConfigDir -and (Test-PathWithinRoot -Path $Path -Root $explicitConfigDir)) -or
+      ($redirectedConfigDir -and (Test-PathWithinRoot -Path $Path -Root $redirectedConfigDir)) -or
+      ($appWebView2Dir -and (Test-PathWithinRoot -Path $Path -Root $appWebView2Dir)) -or
+      ($tauriWebView2Dir -and (Test-PathWithinRoot -Path $Path -Root $tauriWebView2Dir)) -or
+      ($InstallDir -and (Test-PathWithinRoot -Path $Path -Root (Join-Path $InstallDir $script:installUserLeafRel)))) {
+    $source = 'C++-v3.3.x/Rust-current/T4b'
+    $owner = 'original-user'
+    $category = 'configuration-credential-or-profile'
+    $preserve = $true
+  } elseif (($localResourceRoot -and (Test-PathWithinRoot -Path $Path -Root $localResourceRoot)) -or
+            ($machineResourceRoot -and (Test-PathWithinRoot -Path $Path -Root $machineResourceRoot))) {
+    $source = 'Rust-current/2026-09-17-path-investigation'
+    $category = 'runtime-journal-or-log'
+  }
+  $record = [ordered]@{
+    path_or_id = (Get-FullPath $Path)
+    historical_source = $source
+    owner = $owner
+    category = $category
+    preserve_on_upgrade = $preserve
+    action = $Action
+    outcome = $Outcome
+  }
+  [Console]::WriteLine('EXV-CLEANUP-ITEM: ' + (ConvertTo-Json -InputObject $record -Compress))
+}
+
+function Remove-FileWithLockHandling {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Reason,
+    [switch]$NoRebootDelete,
+    [switch]$Isolated
   )
 
   for ($attempt = 1; $attempt -le $script:LockRetryCount; $attempt++) {
@@ -228,14 +318,54 @@ function Remove-FileWithLockHandling {
   if (-not (Test-Path -LiteralPath $Path)) {
     return $true
   }
-  return (Invoke-RebootDeleteRegistration -Path $Path -Reason $Reason)
+  if ($NoRebootDelete) {
+    Add-CleanupError -Path $Path -Reason "install path is locked; no reboot deletion registered ($Reason)"
+    return $false
+  }
+  if ($Isolated) {
+    return (Invoke-RebootDeleteRegistration -Path $Path -Reason $Reason)
+  }
+  $quarantine = Move-ToUniqueCleanupQuarantine -Path $Path -Reason $Reason
+  if (-not $quarantine) { return $false }
+  return (Remove-FileWithLockHandling -Path $quarantine -Reason $Reason -Isolated)
 }
 
 function Remove-TreeWithLockHandling {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Reason
+    [Parameter(Mandatory = $true)][string]$Reason,
+    [switch]$NoRebootDelete,
+    [switch]$Isolated
   )
+
+  # Walk only real directories inside this target. Remove junction/symlink
+  # children as links before a recursive Remove-Item, never entering targets.
+  $pending = New-Object 'System.Collections.Generic.Stack[string]'
+  $pending.Push($Path)
+  try {
+    while ($pending.Count -gt 0) {
+      $directory = $pending.Pop()
+      foreach ($child in (Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+        if (-not (Test-PathWithinRoot -Path $child.FullName -Root $Path)) {
+          throw "tree child escaped cleanup root: $($child.FullName)"
+        }
+        if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+          # Windows PowerShell 5.1 Remove-Item on a junction can throw a null
+          # reference; .NET Delete on the reparse node unlinks the node only.
+          if ($child.PSIsContainer) {
+            [IO.Directory]::Delete($child.FullName)
+          } else {
+            [IO.File]::Delete($child.FullName)
+          }
+        } elseif ($child.PSIsContainer) {
+          $pending.Push($child.FullName)
+        }
+      }
+    }
+  } catch {
+    Add-CleanupError -Path $Path -Reason ("tree boundary check failed; preserved: $($_.Exception.Message)")
+    return $false
+  }
 
   # 第一阶段：整树直接删除 + 有限重试。多数被锁场景在进程退出后的重试窗口内解除。
   for ($attempt = 1; $attempt -le $script:LockRetryCount; $attempt++) {
@@ -255,7 +385,37 @@ function Remove-TreeWithLockHandling {
     return $true
   }
 
-  # 第二阶段：残留清点——先逐文件（删除或登记），再按深序处理目录壳。登记顺序
+  if (-not $Isolated) {
+    if ($NoRebootDelete) {
+      Add-CleanupError -Path $Path -Reason "install path is locked; no reboot deletion registered ($Reason)"
+      return $false
+    }
+    $quarantine = Move-ToUniqueCleanupQuarantine -Path $Path -Reason $Reason
+    if (-not $quarantine) { return $false }
+    return (Remove-TreeWithLockHandling -Path $quarantine -Reason $Reason -Isolated)
+  }
+
+  # Only the unique quarantine tree reaches residual enumeration. Reject any
+  # linked child before Get-ChildItem -Recurse can cross a reparse boundary.
+  $pending = New-Object 'System.Collections.Generic.Stack[string]'
+  $pending.Push($Path)
+  try {
+    while ($pending.Count -gt 0) {
+      $directory = $pending.Pop()
+      foreach ($child in (Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+        if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+          Add-CleanupError -Path $child.FullName -Reason 'reparse child in isolated cleanup tree; preserved'
+          return $false
+        }
+        if ($child.PSIsContainer) { $pending.Push($child.FullName) }
+      }
+    }
+  } catch {
+    Add-CleanupError -Path $Path -Reason ("isolated tree boundary check failed: $($_.Exception.Message)")
+    return $false
+  }
+
+  # 第二阶段：仅隔离树的残留清点——先逐文件（删除或登记），再按深序处理目录壳。登记顺序
   # 即会话管理器重启时的删除顺序（文件在前、父目录在后），保证目录清空后可删。
   try {
     $remaining = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction Stop)
@@ -270,17 +430,17 @@ function Remove-TreeWithLockHandling {
       Sort-Object @{ Expression = { $_.FullName.Length } } -Descending
   )
   foreach ($file in $remainingFiles) {
-    $null = (Remove-FileWithLockHandling -Path $file.FullName -Reason $Reason)
+    $null = (Remove-FileWithLockHandling -Path $file.FullName -Reason $Reason -Isolated)
   }
   foreach ($dir in $remainingDirs) {
     if (Test-Path -LiteralPath $dir.FullName) {
-      if (-not (Remove-FileWithLockHandling -Path $dir.FullName -Reason "$Reason (directory shell)")) {
-        # 目录壳登记失败已由 Remove-FileWithLockHandling 记为硬失败；继续处理兄弟目录。
+      if (-not (Remove-FileWithLockHandling -Path $dir.FullName -Reason "$Reason (directory shell)" -Isolated)) {
+        # 删除或登记失败已由 Remove-FileWithLockHandling 计错；继续处理兄弟目录。
       }
     }
   }
   if (Test-Path -LiteralPath $Path) {
-    return (Remove-FileWithLockHandling -Path $Path -Reason "$Reason (tree root)")
+    return (Remove-FileWithLockHandling -Path $Path -Reason "$Reason (tree root)" -Isolated)
   }
   return $true
 }
@@ -307,7 +467,8 @@ function Remove-ConfigTarget {
 function Remove-ConfigTree {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Root
+    [Parameter(Mandatory = $true)][string]$Root,
+    [switch]$NoRebootDelete
   )
 
   Assert-PathUnderRoot -Path $Path -Root $Root
@@ -317,7 +478,7 @@ function Remove-ConfigTree {
   }
 
   if ($PSCmdlet.ShouldProcess($Path, (Zh '5Yig6ZmkIEVYViDmnKzlnLDnlKjmiLfphY3nva7nm67lvZU='))) {
-    if (Remove-TreeWithLockHandling -Path $Path -Reason 'tree cleanup') {
+    if (Remove-TreeWithLockHandling -Path $Path -Reason 'tree cleanup' -NoRebootDelete:$NoRebootDelete) {
       Write-Host ((Zh '5bey5Yig6Zmk77ya') + $Path)
     }
   }
@@ -391,7 +552,127 @@ function Get-RedirectedConfigDir {
   return $dir
 }
 
-function Add-ConfigCleanupTargets {
+# --- S3c：install_manifest.tsv 清单驱动目标集（单一真相源） --------------------
+# 清单 schema、根族语义与 -ManifestPath 探测约定见清单头注释
+# （src\platform\win32\windows_setup_rust\install_manifest.tsv，打包态随包注入 support\）。
+# 本脚本消费：configdir-leaf/pattern（anchor=configdir、lockdir）行 → 自定义/重定向
+# 配置根已知叶；userprofile/localappdata/programdata/temp 根族行 → 数据根目标；
+# install-legacy-3parent 行 → 历代安装根名称；installdir + delete_u1_only 行 →
+# 安装根内用户数据（exv-ui.exe.WebView2 UDF）。installdir 其余行（载荷/支撑/历代
+# 载荷，action=delete_always）归卸载器引擎，本脚本不消费；action=preserve 行
+# （如 Helper 安全隔离目录）仅登记备查，永不主动删除。
+
+function Get-InstallManifestPath {
+  if ($ManifestPath) {
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+      throw "install manifest not found (-ManifestPath): $ManifestPath"
+    }
+    return (Get-FullPath $ManifestPath)
+  }
+  # S3a 约定：先随包（本脚本与清单同在 support\ 下），后仓内（仓库根源码路径）。
+  $candidates = @(
+    (Join-Path $PSScriptRoot 'install_manifest.tsv'),
+    (Join-Path (Split-Path -Parent $PSScriptRoot) 'src\platform\win32\windows_setup_rust\install_manifest.tsv')
+  )
+  foreach ($candidate in $candidates) {
+    if (-not [string]::IsNullOrEmpty($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+      return (Get-FullPath $candidate)
+    }
+  }
+  throw ('install manifest missing (fail-closed): 未找到 install_manifest.tsv。' +
+    '请以 -ManifestPath 显式传入清单路径；随包形态应与本脚本同置于 support\ 目录，' +
+    '仓内/测试形态应位于仓库根 src\platform\win32\windows_setup_rust\install_manifest.tsv。' +
+    '清单是卸载清理目标的唯一真相源，缺失即拒绝执行清理。')
+}
+
+function Read-InstallManifest {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path
+  )
+
+  $expectedHeader = "scope`tpath`tclass`tintroduced`tremoved`tpipeline`tnoreboot`taction`tpurpose"
+  $rows = @()
+  $headerSeen = $false
+  foreach ($rawLine in (Get-Content -LiteralPath $Path -Encoding UTF8)) {
+    $line = "$rawLine".TrimEnd("`r")
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    if ($line.StartsWith('#')) { continue }
+    if (-not $headerSeen) {
+      if ($line -ne $expectedHeader) {
+        throw "install manifest header mismatch: $Path"
+      }
+      $headerSeen = $true
+      continue
+    }
+    $fields = $line -split "`t", -1
+    if ($fields.Count -ne 9) {
+      throw "install manifest row must have exactly 9 columns ($Path): $line"
+    }
+    $rows += [pscustomobject]@{
+      Scope = $fields[0]
+      Path = $fields[1]
+      Class = $fields[2]
+      Introduced = $fields[3]
+      Removed = $fields[4]
+      Pipeline = $fields[5]
+      NoReboot = $fields[6]
+      Action = $fields[7]
+      Purpose = $fields[8]
+    }
+  }
+  if (-not $headerSeen) { throw "install manifest has no header row: $Path" }
+  if ($rows.Count -lt 1) { throw "install manifest has no data rows: $Path" }
+  return $rows
+}
+
+function Get-ManifestRow {
+  # 按「scope|path」键取清单行；缺失或重复都是清单不完整，fail-closed 硬失败。
+  param(
+    [Parameter(Mandatory = $true)][string]$Key
+  )
+
+  $separator = $Key.IndexOf('|')
+  if ($separator -lt 1) {
+    throw "invalid manifest anchor key: $Key"
+  }
+  $scope = $Key.Substring(0, $separator)
+  $rowPath = $Key.Substring($separator + 1)
+  $matched = @($script:manifestRows | Where-Object { $_.Scope -eq $scope -and $_.Path -eq $rowPath })
+  if ($matched.Count -ne 1) {
+    throw "install manifest anchor row missing or duplicated (fail-closed): $Key"
+  }
+  return $matched[0]
+}
+
+function Get-ScopedTargetRoot {
+  # 断言根收紧（运行期护栏）：目标路径一律按根族根解析（Join-Path <根族根> <path>），
+  # 仅 New-CleanupEntry 的 Root 断言按本函数收紧——programdata 的 EXV\ 前缀行断言根
+  # 收紧为 ProgramData\EXV（exv/EXV 同一物理根，只动 Helper 子树）；localappdata 的
+  # Programs\EXV\ 前缀行断言根收紧为 %LOCALAPPDATA%\Programs\EXV（Programs 下只认
+  # EXV 自己的子树）。temp 根族由调用方双根展开，不经本函数。
+  param(
+    [Parameter(Mandatory = $true)][string]$Scope,
+    [Parameter(Mandatory = $true)][string]$RowPath
+  )
+
+  switch ($Scope) {
+    'userprofile' { return $userProfile }
+    'localappdata' {
+      if ($RowPath.StartsWith('Programs\EXV\')) { return $programsRoot }
+      return $localAppData
+    }
+    'programdata' {
+      if ($RowPath.StartsWith('EXV\')) { return (Join-Path $programData 'EXV') }
+      return $programData
+    }
+    default { throw "unsupported manifest root scope for target generation: $Scope" }
+  }
+}
+
+function Add-ManifestConfigTargets {
+  # 自定义/重定向配置根的已知 EXV 叶从清单 configdir-leaf 与 pattern 行生成。
+  # 自定义配置根可混放第三方文件，只治理清单已知 EXV 叶——删除管线全程
+  # -LiteralPath，通配只能经枚举展开（模式叶），不用宽泛 *.tmp 或前缀整树删除。
   param(
     [Parameter(Mandatory = $true)][ref]$PathTargets,
     [Parameter(Mandatory = $true)][ref]$TreeTargets,
@@ -400,56 +681,61 @@ function Add-ConfigCleanupTargets {
     [Parameter(Mandatory = $true)][string]$Root
   )
 
-  $profileWebView2Dir = Join-Path $ConfigDir 'WebView2'
-  $PathTargets.Value += @(
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'config.json') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'config.json.tmp') -Root $Root),
-    # KI-13/A（2026-09-28 复审 F2）：快速入门「已见」标记与 config.json 同目录；
-    # 默认 ~/.exv 走整树删除天然覆盖，重定向目录走本清单——必须显式列出。
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'quick-start.json') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'quick-start.json.tmp') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir '.key') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'key.bin') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'close-preference.json') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'exv.log') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'exv.pid') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'tunnel.js') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'route-ready') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'logs\aggregated.jsonl') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'exv-core-ipc-v1.registry.json') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'exv-core-ipc-v1.lock') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'exv-core-ipc-v1.sock') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'connect-attempt.json') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'connect-attempt.mutex') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'active-tunnel.mutex') -Root $Root)
-  )
-  $TreeTargets.Value += @(
-    (New-CleanupEntry -Path (Join-Path $profileWebView2Dir 'Default\Local Storage') -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $profileWebView2Dir 'EBWebView\Default\Local Storage') -Root $Root),
-    (New-CleanupEntry -Path $profileWebView2Dir -Root $Root),
-    (New-CleanupEntry -Path (Join-Path $ConfigDir 'WebView2.migrating') -Root $Root)
-  )
-  # 历史 C++ 原子文件命名来自 connection_attempt.cpp / tunnel_resource_lease.cpp。
-  # 自定义配置目录只按完整名称识别，不用宽泛的 *.tmp 或前缀整树删除。
-  $lockDirs = @((Join-Path $ConfigDir 'connect-attempt.lock'), (Join-Path $ConfigDir 'active-tunnel.lock'))
+  # 固定行（configdir-leaf）：path→逐文件、tree→整树、empty-dir→目录壳。
+  # 锁目录壳行（存在同级 <dir>\<owner 叶> 属主行的 empty-dir 行）计入锁目录列表，
+  # 由下方锁目录规则统一展开内部（含目录壳，深序先于配置根壳）；「.」行
+  # （preserve_with_shell）是配置根本身：内容一律保留，仅在删尽已知叶后目录为
+  # 空时移除目录壳——壳登记放在最后，保证锁目录壳先行清空。
+  $lockDirs = @()
+  $configRootShell = $false
+  foreach ($row in $script:manifestConfigLeafRows) {
+    if ($row.Action -eq 'preserve') { continue }
+    if ($row.Path -eq '.') {
+      $configRootShell = $true
+      continue
+    }
+    $targetPath = Join-Path $ConfigDir $row.Path
+    if ($row.Pipeline -eq 'empty-dir') {
+      $ownerRowPath = $row.Path + '\' + $script:manifestLockOwnerLeaf
+      if ($script:manifestLockOwnerLeaf -and
+          (@($script:manifestConfigLeafRows | Where-Object { $_.Path -eq $ownerRowPath }).Count -eq 1)) {
+        $lockDirs += $targetPath
+      } else {
+        $EmptyDirTargets.Value += (New-CleanupEntry -Path $targetPath -Root $Root)
+      }
+      continue
+    }
+    if ($row.Pipeline -eq 'tree') {
+      $TreeTargets.Value += (New-CleanupEntry -Path $targetPath -Root $Root -NoRebootDelete:($row.NoReboot -eq '1'))
+    } else {
+      $PathTargets.Value += (New-CleanupEntry -Path $targetPath -Root $Root -NoRebootDelete:($row.NoReboot -eq '1'))
+    }
+  }
+  # 模式叶（anchor=configdir）：枚举配置根直接子项，regex 匹配 basename。
   try {
     Assert-PathUnderRoot -Path $ConfigDir -Root $Root
     if (Test-Path -LiteralPath $ConfigDir -PathType Container) {
       foreach ($child in (Get-ChildItem -LiteralPath $ConfigDir -Force)) {
-        if (-not $child.PSIsContainer -and $child.Name -match '^connect-attempt\.json\.tmp\.[0-9]+$') {
-          $PathTargets.Value += (New-CleanupEntry -Path $child.FullName -Root $Root)
-        } elseif ($child.PSIsContainer -and $child.Name -match '^connect-attempt\.lock\.tmp\.attempt-[0-9]+-[1-9][0-9]*-[1-9][0-9]*$') {
-          $lockDirs += $child.FullName
+        foreach ($patternRow in $script:manifestConfigPatternRows) {
+          if ($child.Name -notmatch $patternRow.Regex) { continue }
+          if (-not $child.PSIsContainer -and $patternRow.Pipeline -eq 'path') {
+            $PathTargets.Value += (New-CleanupEntry -Path $child.FullName -Root $Root)
+          } elseif ($child.PSIsContainer -and $patternRow.Pipeline -eq 'empty-dir') {
+            # 临时锁目录：内部属主叶按锁目录规则展开，随后仅空时移除目录壳。
+            $lockDirs += $child.FullName
+          }
         }
       }
     }
     foreach ($lockDir in $lockDirs) {
       Assert-PathUnderRoot -Path $lockDir -Root $Root
-      $PathTargets.Value += (New-CleanupEntry -Path (Join-Path $lockDir 'owner.json') -Root $Root)
+      $PathTargets.Value += (New-CleanupEntry -Path (Join-Path $lockDir $script:manifestLockOwnerLeaf) -Root $Root)
       if (Test-Path -LiteralPath $lockDir -PathType Container) {
         foreach ($child in (Get-ChildItem -LiteralPath $lockDir -Force -File)) {
-          if ($child.Name -match '^owner\.json\.tmp\.[0-9]+$') {
-            $PathTargets.Value += (New-CleanupEntry -Path $child.FullName -Root $Root)
+          foreach ($patternRow in $script:manifestLockPatternRows) {
+            if ($child.Name -match $patternRow.Regex) {
+              $PathTargets.Value += (New-CleanupEntry -Path $child.FullName -Root $Root)
+            }
           }
         }
       }
@@ -458,7 +744,9 @@ function Add-ConfigCleanupTargets {
   } catch {
     Add-CleanupError -Path $ConfigDir -Reason $_.Exception.Message
   }
-  $EmptyDirTargets.Value += (New-CleanupEntry -Path $ConfigDir -Root $Root)
+  if ($configRootShell) {
+    $EmptyDirTargets.Value += (New-CleanupEntry -Path $ConfigDir -Root $Root)
+  }
 }
 
 function Remove-CleanupEntries {
@@ -482,16 +770,36 @@ function Remove-CleanupEntries {
     }
     $seen[$dedupeKey] = $true
 
+    $wasPresent = Test-Path -LiteralPath $entry.Path
+    $errorsBefore = $cleanupErrors.Count
+    $scheduledBefore = $script:scheduledRebootDeletes
+    $action = if ($WhatIfPreference) { 'preview_remove' } elseif ($EmptyDirectory) {
+      'remove_if_empty'
+    } else { 'remove' }
+    $outcome = if ($wasPresent) { 'found' } else { 'missing' }
     try {
       if ($EmptyDirectory) {
         Remove-EmptyDirectoryIfExists -Path $entry.Path -Root $entry.Root
       } elseif ($Tree) {
-        Remove-ConfigTree -Path $entry.Path -Root $entry.Root
+        Remove-ConfigTree -Path $entry.Path -Root $entry.Root -NoRebootDelete:$entry.NoRebootDelete
       } else {
         Remove-ConfigPath -Path $entry.Path -Root $entry.Root
       }
     } catch {
       Add-CleanupError -Path $entry.Path -Reason $_.Exception.Message
+    } finally {
+      if (-not $WhatIfPreference -and $wasPresent) {
+        if ($cleanupErrors.Count -gt $errorsBefore) {
+          $outcome = 'failed'
+        } elseif ($script:scheduledRebootDeletes -gt $scheduledBefore) {
+          $outcome = 'scheduled_isolated'
+        } elseif (-not (Test-Path -LiteralPath $entry.Path)) {
+          $outcome = 'removed'
+        } else {
+          $outcome = 'retained_nonempty'
+        }
+      }
+      Write-CleanupItem -Path $entry.Path -Action $action -Outcome $outcome
     }
   }
 }
@@ -570,7 +878,8 @@ function Get-ForceCommandText {
     '-Force'
   )
   foreach ($name in @('LocalAppDataRoot', 'ProgramDataRoot', 'UserProfileRoot',
-      'RoamingAppDataRoot', 'ConfigDir', 'InstallDir', 'TempRoot', 'SystemTempRoot')) {
+      'RoamingAppDataRoot', 'ConfigDir', 'InstallDir', 'TempRoot', 'SystemTempRoot',
+      'ManifestPath')) {
     $value = Get-Variable -Name $name -ValueOnly
     if ($value) {
       $parts += "-$name"
@@ -612,78 +921,154 @@ $userTemp = if ($TempRoot) { $TempRoot } elseif ($UserProfileRoot) {
 $systemTemp = if ($SystemTempRoot) { $SystemTempRoot } else {
   Join-Path ([Environment]::GetFolderPath('Windows')) 'Temp'
 }
-$appRoot = Join-Path $localAppData 'EXV'
-$profileRoot = Join-Path $appRoot 'profile'
-$profileDir = Join-Path $profileRoot 'default'
+# --- S3c：加载清单（fail-closed）并推导分类锚 ---------------------------------
+# 清单是清理目标的唯一真相源；以下锚行键同时是脚本与清单的契约——锚行缺失即
+# 清单不完整，硬失败（Get-ManifestRow）。Write-CleanupItem 的分类桶（用户配置/
+# journal/默认）按这些锚根做包含判定，属运行时控制流。
+$script:manifestRows = Read-InstallManifest -Path (Get-InstallManifestPath)
+$appRoot = Join-Path $localAppData (Get-ManifestRow 'localappdata|EXV').Path
 $redirectPath = Join-Path $appRoot 'profile.redirect'
-$programsRoot = Join-Path $localAppData 'Programs\EXV'
-$appWebView2Dir = Join-Path $programsRoot 'exv-ui.exe.WebView2'
-$rustConfigDir = if ($userProfile) { Join-Path $userProfile '.exv' } else { '' }
-$localResourceRoot = Join-Path $localAppData 'ExvVpn'
-$machineResourceRoot = Join-Path $programData 'ExvVpn'
-$serviceStateRoot = Join-Path $programData 'exv'
-$legacyHelperRoot = Join-Path $programData 'EXV\Helper'
+$appWebView2Dir = Join-Path $localAppData (Get-ManifestRow 'localappdata|Programs\EXV\exv-ui.exe.WebView2').Path
+$programsRoot = Split-Path -Parent $appWebView2Dir
+# Tauri identifier 命名的 WebView2 用户数据根（identifier 见
+# tauri/app/tauri.conf.json，改名须同步清单 localappdata|com.exv.vpn.desktop 行）：
+# EBWebView（前端外观域 localStorage——主题/完整极简模式持久化于此）与
+# tauri-plugin-log 的 logs 都在其下。2026-10-10 实录：该目录不在卸载清理范围时，
+# localStorage 跨卸载存活，重装后与「卸载即重置的快速入门已见标记」错配——极简
+# 小窗内溢出无极简适配的快速入门表单。按 EXV 专属根整树治理（同 KI-13 ⑤ 语义，
+# 不逐叶列举）。
+$tauriWebView2Dir = Join-Path $localAppData (Get-ManifestRow 'localappdata|com.exv.vpn.desktop').Path
+$rustConfigDir = if ($userProfile) { Join-Path $userProfile (Get-ManifestRow 'userprofile|.exv').Path } else { '' }
+$localResourceRoot = Join-Path $localAppData (Get-ManifestRow 'localappdata|ExvVpn').Path
+$machineResourceRoot = Join-Path $programData (Get-ManifestRow 'programdata|ExvVpn').Path
+# 安装根内用户数据（installdir + delete_u1_only；现役=exv-ui.exe.WebView2 UDF）。
+$script:installUserLeafRows = @($script:manifestRows |
+  Where-Object { $_.Scope -eq 'installdir' -and $_.Action -eq 'delete_u1_only' })
+if ($script:installUserLeafRows.Count -lt 1) {
+  throw 'install manifest missing installdir delete_u1_only row (fail-closed): exv-ui.exe.WebView2'
+}
+$script:installUserLeafRel = $script:installUserLeafRows[0].Path
+
+# 配置根已知叶行缓存 + 模式叶预解析（anchor=configdir/lockdir）+ 锁目录属主叶推导。
+$script:manifestConfigLeafRows = @($script:manifestRows | Where-Object { $_.Scope -eq 'configdir-leaf' })
+$script:manifestConfigPatternRows = @($script:manifestRows |
+  Where-Object { $_.Scope -eq 'pattern' -and $_.Path.StartsWith('configdir:') -and $_.Action -ne 'preserve' } |
+  ForEach-Object {
+    [pscustomobject]@{ Regex = $_.Path.Substring('configdir:'.Length); Pipeline = $_.Pipeline }
+  })
+$script:manifestLockPatternRows = @($script:manifestRows |
+  Where-Object { $_.Scope -eq 'pattern' -and $_.Path.StartsWith('lockdir:') -and $_.Action -ne 'preserve' } |
+  ForEach-Object {
+    [pscustomobject]@{ Regex = $_.Path.Substring('lockdir:'.Length) }
+  })
+# 锁目录壳行 = configdir-leaf 的 empty-dir 行；其属主叶行 = 同级 <dir>\<leaf> 的
+# path 行。属主叶名由该结构推导（现值 owner.json），临时锁目录按同一规则展开。
+$script:manifestLockDirRelPaths = @($script:manifestConfigLeafRows |
+  Where-Object { $_.Pipeline -eq 'empty-dir' -and $_.Path -ne '.' } |
+  ForEach-Object { $_.Path })
+$lockOwnerLeaves = @($script:manifestConfigLeafRows |
+  Where-Object { $_.Pipeline -eq 'path' -and ($script:manifestLockDirRelPaths -contains (Split-Path -Parent $_.Path)) } |
+  ForEach-Object { Split-Path -Leaf $_.Path } |
+  Sort-Object -Unique)
+$script:manifestLockOwnerLeaf = if ($lockOwnerLeaves.Count -eq 1) { $lockOwnerLeaves[0] } else { '' }
 
 $pathTargets = @()
 $treeTargets = @()
 $emptyDirTargets = @()
 
-# KI-13 ⑤：清单治理——EXV 专属根按「代码所有权」整树删除，不再按猜文件名逐叶列举。
-# %LOCALAPPDATA%\EXV 是产品固定命名空间（profile\default、ui-preferences.json、
-# profile.redirect、旧 Helper、历代 WebView2 状态都在其中），整树删除天然覆盖所有
-# 历代漂移叶；逐叶清单只保留给「自定义/重定向配置目录」（那里可能有第三方文件，
-# 只能删已知 EXV 叶）。未找到提示的日志噪音与漏删漂移叶的问题一并消除。
+# KI-13 ⑤ + S3c：清单治理——目标集从 install_manifest.tsv 生成（单一真相源，防
+# 三处手写清单漂移）。EXV 专属根按「代码所有权」整树删除，不再按猜文件名逐叶
+# 列举：%LOCALAPPDATA%\EXV 是产品固定命名空间（profile\default、
+# ui-preferences.json、profile.redirect、旧 Helper、历代 WebView2 状态都在其中），
+# 整树删除天然覆盖所有历代漂移叶；逐叶清单只保留给「自定义/重定向配置目录」
+# （那里可能有第三方文件，只能删已知 EXV 叶）。留在代码的运行时控制流：
+# action 列承载的 U1/U2 门控、历代安装根对当前安装根（及其后代）的排除、
+# quarantine 隔离命名域、锁重试/隔离/PFRO 登记管线。
 
 # KI-13 ④：PreserveUserData（升级语义）跳过用户数据段——连接配置（~/.exv）、
 # UI 偏好与 profile（%LOCALAPPDATA%\EXV）、凭据管理器、自定义/重定向配置目录、
 # 历代安装根（可能含 WebView2 用户数据）。缓存/账本/服务态照常清理。
 $redirectedConfigDir = ''
 if (-not $PreserveUserData) {
-  # %LOCALAPPDATA%\EXV 整树（含 profile、ui-preferences.json、profile.redirect、旧 Helper）。
-  $treeTargets += (
-    # The exact roots below are owned by EXV.  This is intentionally root-level
-    # cleanup after the user opted in, so unknown future state does not survive a
-    # reinstall merely because it was not in a file-by-file allow list.
-    (New-CleanupEntry -Path $appRoot -Root $localAppData)
-  )
-  if ($rustConfigDir) {
-    # ~/.exv：连接配置、加密凭据、wintun 预置位、聚合日志（当前 Rust 配置根）。
-    $treeTargets += (New-CleanupEntry -Path $rustConfigDir -Root $userProfile)
+  # 用户数据树：清单根族行（userprofile/localappdata，action=delete_u1_only）。
+  # The exact roots are owned by EXV.  This is intentionally root-level cleanup
+  # after the user opted in, so unknown future state does not survive a
+  # reinstall merely because it was not in a file-by-file allow list.
+  foreach ($row in @($script:manifestRows | Where-Object {
+      $_.Scope -in @('userprofile', 'localappdata') -and $_.Action -eq 'delete_u1_only' })) {
+    if ($row.Scope -eq 'userprofile' -and -not $userProfile) { continue }
+    $scopeRoot = if ($row.Scope -eq 'userprofile') { $userProfile } else { $localAppData }
+    $assertRoot = Get-ScopedTargetRoot -Scope $row.Scope -RowPath $row.Path
+    $treeTargets += (New-CleanupEntry -Path (Join-Path $scopeRoot $row.Path) -Root $assertRoot -NoRebootDelete:($row.NoReboot -eq '1'))
   }
 } else {
-  Write-Host "PreserveUserData: skip user-data trees ($appRoot, $rustConfigDir, credentials)"
+  Write-Host "PreserveUserData: skip user-data trees ($appRoot, $rustConfigDir, $tauriWebView2Dir, credentials)"
+  foreach ($retained in @($appRoot, $rustConfigDir, $appWebView2Dir, $tauriWebView2Dir)) {
+    if ($retained) {
+      $presence = if (Test-Path -LiteralPath $retained) { 'preserved' } else { 'missing' }
+      Write-CleanupItem -Path $retained -Action 'preserve' -Outcome $presence
+    }
+  }
+  if ($explicitConfigDir) {
+    $presence = if (Test-Path -LiteralPath $explicitConfigDir) { 'preserved' } else { 'missing' }
+    Write-CleanupItem -Path $explicitConfigDir -Action 'preserve' -Outcome $presence
+  }
+  if ($InstallDir) {
+    try {
+      foreach ($row in $script:installUserLeafRows) {
+        $installedWebView2 = Join-Path (Get-FullPath $InstallDir) $row.Path
+        $presence = if (Test-Path -LiteralPath $installedWebView2) { 'preserved' } else { 'missing' }
+        Write-CleanupItem -Path $installedWebView2 -Action 'preserve' -Outcome $presence
+      }
+    } catch {
+      Add-CleanupError -Path $InstallDir -Reason $_.Exception.Message
+    }
+  }
 }
 
-$pathTargets += (New-CleanupEntry -Path (Join-Path $programData 'exv-helper-session.json') -Root $programData)
-$pathTargets += (New-CleanupEntry -Path (Join-Path $serviceStateRoot 'service.key') -Root $programData)
-$machineLegacyProfile = Join-Path $serviceStateRoot 'profile\default'
-$pathTargets += (New-CleanupEntry -Path (Join-Path $machineLegacyProfile 'exv.log') -Root $programData)
-$treeTargets += @(
-  (New-CleanupEntry -Path $localResourceRoot -Root $localAppData),
-  (New-CleanupEntry -Path $machineResourceRoot -Root $programData),
-  (New-CleanupEntry -Path (Join-Path $userTemp 'ExvVpn') -Root $userTemp),
-  (New-CleanupEntry -Path (Join-Path $systemTemp 'ExvVpn') -Root $systemTemp),
-  (New-CleanupEntry -Path $legacyHelperRoot -Root (Join-Path $programData 'EXV')),
-  # 安装根下的 WebView2 用户数据目录是缓存性状态：全新卸载清除；升级保留语义下
-  # 也照清（升级覆盖安装本就会重建该目录）。
-  (New-CleanupEntry -Path (Join-Path $appWebView2Dir 'EBWebView\Default\Local Storage') -Root $programsRoot),
-  (New-CleanupEntry -Path $appWebView2Dir -Root $programsRoot)
-)
-if ($InstallDir) {
+# 机器数据（缓存/账本/服务态，action=delete_always）：U1 全新卸载与 U2 保留升级
+# 语义下都清，无 PreserveUserData 门。temp 根族行展开为用户/系统临时根两处。
+foreach ($row in @($script:manifestRows | Where-Object {
+    $_.Scope -in @('userprofile', 'localappdata', 'programdata', 'temp') -and $_.Action -eq 'delete_always' })) {
+  if ($row.Scope -eq 'userprofile' -and -not $userProfile) { continue }
+  $assertRoot = $null
+  if ($row.Scope -eq 'temp') {
+    $rowRoots = @($userTemp, $systemTemp)
+  } else {
+    $scopeRoot = if ($row.Scope -eq 'userprofile') { $userProfile } elseif ($row.Scope -eq 'localappdata') {
+      $localAppData
+    } else { $programData }
+    $rowRoots = @($scopeRoot)
+    $assertRoot = Get-ScopedTargetRoot -Scope $row.Scope -RowPath $row.Path
+  }
+  foreach ($rowRoot in $rowRoots) {
+    $entryRoot = if ($null -ne $assertRoot) { $assertRoot } else { $rowRoot }
+    $entry = New-CleanupEntry -Path (Join-Path $rowRoot $row.Path) -Root $entryRoot -NoRebootDelete:($row.NoReboot -eq '1')
+    if ($row.Pipeline -eq 'tree') {
+      $treeTargets += $entry
+    } elseif ($row.Pipeline -eq 'path') {
+      $pathTargets += $entry
+    } else {
+      $emptyDirTargets += $entry
+    }
+  }
+}
+
+# 安装根内用户数据（installdir + delete_u1_only，现役=exv-ui.exe.WebView2 UDF）：
+# 升级保留、全新卸载删除；禁重启删除登记（noreboot=1，同路径重装保护）。
+if ($InstallDir -and -not $PreserveUserData) {
   $installRoot = Get-FullPath $InstallDir
-  $treeTargets += (New-CleanupEntry -Path (Join-Path $installRoot 'exv-ui.exe.WebView2') -Root $installRoot)
+  foreach ($row in $script:installUserLeafRows) {
+    $treeTargets += (New-CleanupEntry -Path (Join-Path $installRoot $row.Path) -Root $installRoot -NoRebootDelete:($row.NoReboot -eq '1'))
+  }
 }
-$emptyDirTargets += @(
-  (New-CleanupEntry -Path $machineLegacyProfile -Root $programData),
-  (New-CleanupEntry -Path (Join-Path $serviceStateRoot 'profile') -Root $programData),
-  (New-CleanupEntry -Path $serviceStateRoot -Root $programData)
-)
 
-# KI-13 ⑥ 历代安装根漂移治理：ECNU VPN/ECNU-VPN 时代的 per-user 安装位与
-# C++ 时代的 Program Files 安装位（见 scripts/clear-windows-legacy-state.ps1 的
-# 考古）。仅在卸载链上下文（显式 -InstallDir）且非保留语义时整树清理；当前
-# 安装目录（及其后代）交给卸载器引擎处理，脚本侧绝不触碰——否则会连同活动
-# 卸载器映像一起登记重启删除，破坏同路径重装安全性。
+# KI-13 ⑥ 历代安装根漂移治理：安装名来自清单 install-legacy-3parent 行（ECNU
+# VPN/ECNU-VPN 时代的 per-user 安装位与 C++ 时代的 Program Files 安装位，考古见
+# scripts/clear-windows-legacy-state.ps1）。3 父目录推导与当前安装根（及其后代）
+# 的排除是运行时控制流：仅在卸载链上下文（显式 -InstallDir）且非保留语义时整树
+# 清理；当前安装目录交给卸载器引擎处理，脚本侧绝不触碰——否则会连同活动卸载器
+# 映像一起登记重启删除，破坏同路径重装安全性。
 if ($InstallDir -and -not $PreserveUserData) {
   $currentInstallRoot = Normalize-FullPath $InstallDir
   $legacyInstallParents = @()
@@ -696,10 +1081,13 @@ if ($InstallDir -and -not $PreserveUserData) {
   if (${env:ProgramFiles(x86)}) {
     $legacyInstallParents += ,@(${env:ProgramFiles(x86)}, ${env:ProgramFiles(x86)})
   }
+  $legacyInstallNames = @($script:manifestRows |
+    Where-Object { $_.Scope -eq 'install-legacy-3parent' -and $_.Action -ne 'preserve' } |
+    ForEach-Object { $_.Path })
   foreach ($pair in $legacyInstallParents) {
     $base = $pair[0]
     $root = $pair[1]
-    foreach ($name in @('EXV', 'ECNU VPN', 'ECNU-VPN')) {
+    foreach ($name in $legacyInstallNames) {
       $candidate = Join-Path $base $name
       $candidateNorm = Normalize-FullPath $candidate
       if ($candidateNorm.Equals($currentInstallRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -708,7 +1096,7 @@ if ($InstallDir -and -not $PreserveUserData) {
       if ($currentInstallRoot.StartsWith($candidateNorm + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
         continue
       }
-      $treeTargets += (New-CleanupEntry -Path $candidate -Root $root)
+      $treeTargets += (New-CleanupEntry -Path $candidate -Root $root -NoRebootDelete)
     }
   }
 }
@@ -720,7 +1108,7 @@ if ($explicitConfigDir -and -not $PreserveUserData) {
     Assert-ConfigDirSafeForCleanup -Path $explicitConfigDir -SharedRoots @(
       $userProfile, $localAppData, $roamingAppData, $programData, $env:SystemRoot, $env:ProgramFiles)
     $customConfigDir = Normalize-FullPath $explicitConfigDir
-    Add-ConfigCleanupTargets -PathTargets ([ref]$pathTargets) `
+    Add-ManifestConfigTargets -PathTargets ([ref]$pathTargets) `
       -TreeTargets ([ref]$treeTargets) -EmptyDirTargets ([ref]$emptyDirTargets) `
       -ConfigDir $customConfigDir -Root $customConfigDir
   } catch {
@@ -729,34 +1117,37 @@ if ($explicitConfigDir -and -not $PreserveUserData) {
 }
 
 # profile.redirect 的重定向目标（C++ 时代配置根）：必须在 %LOCALAPPDATA%\EXV
-# 整树删除之前解析。保留语义下跳过（重定向目标属于用户数据）。
-if (-not $PreserveUserData) {
+# 整树删除之前只读解析；保留语义仅记录已校验目标，不列入删除清单。
+try {
+  Assert-PathUnderRoot -Path $redirectPath -Root $appRoot
+  $redirectedConfigDir = Get-RedirectedConfigDir -RedirectPath $redirectPath -UserProfile $userProfile
+} catch {
+  Add-CleanupError -Path $redirectPath -Reason $_.Exception.Message
+}
+if ($redirectedConfigDir) {
   try {
-    Assert-PathUnderRoot -Path $redirectPath -Root $appRoot
-    $redirectedConfigDir = Get-RedirectedConfigDir -RedirectPath $redirectPath -UserProfile $userProfile
-  } catch {
-    Add-CleanupError -Path $redirectPath -Reason $_.Exception.Message
-  }
-  if ($redirectedConfigDir) {
-    try {
-      Assert-ConfigDirSafeForCleanup -Path $redirectedConfigDir -SharedRoots @(
-        $appRoot,
-        $localAppData,
-        $roamingAppData,
-        $userProfile
-        $programData
-        $env:SystemRoot
-        $env:ProgramFiles
-      )
-      $redirectedConfigDir = Get-FullPath $redirectedConfigDir
-      Add-ConfigCleanupTargets -PathTargets ([ref]$pathTargets) `
+    Assert-ConfigDirSafeForCleanup -Path $redirectedConfigDir -SharedRoots @(
+      $appRoot,
+      $localAppData,
+      $roamingAppData,
+      $userProfile
+      $programData
+      $env:SystemRoot
+      $env:ProgramFiles
+    )
+    $redirectedConfigDir = Get-FullPath $redirectedConfigDir
+    if ($PreserveUserData) {
+      $presence = if (Test-Path -LiteralPath $redirectedConfigDir) { 'preserved' } else { 'missing' }
+      Write-CleanupItem -Path $redirectedConfigDir -Action 'preserve' -Outcome $presence
+    } else {
+      Add-ManifestConfigTargets -PathTargets ([ref]$pathTargets) `
         -TreeTargets ([ref]$treeTargets) `
         -EmptyDirTargets ([ref]$emptyDirTargets) `
         -ConfigDir $redirectedConfigDir `
         -Root $redirectedConfigDir
-    } catch {
-      Add-CleanupError -Path $redirectedConfigDir -Reason $_.Exception.Message
     }
+  } catch {
+    Add-CleanupError -Path $redirectedConfigDir -Reason $_.Exception.Message
   }
 }
 
@@ -772,11 +1163,11 @@ if (-not $PreserveUserData) {
   }
 }
 
+# 即使有其它清理项硬失败，先报告已隔离并成功登记的数量；调用方必须显示
+# 待重启事实，不能因为脚本 exit 非零而丢失该摘要。
+[Console]::WriteLine("EXV-CLEANUP-SUMMARY: scheduled=$scheduledRebootDeletes")
+
 if ($cleanupErrors.Count -gt 0) {
   # KI-13 ③：只有硬失败（重试与重启删除登记都做不到）才非零退出。
   throw ("EXV cleanup incomplete ({0} errors):`n{1}" -f $cleanupErrors.Count, ($cleanupErrors -join "`n"))
 }
-
-# 成功摘要行（全清或部分待重启）：供卸载器汇总「部分文件将在重启后自动清理」
-# 的提示性文案；[Console]::WriteLine 保证进入真实 stdout（不随 Write-Host 流配置变化）。
-[Console]::WriteLine("EXV-CLEANUP-SUMMARY: scheduled=$scheduledRebootDeletes")

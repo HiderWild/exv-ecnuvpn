@@ -1,18 +1,19 @@
-//! 浏览器候选会话 → 已验证接收会话与资源目录的宿主无关编排。
+//! 浏览器候选会话 → 票据兑换结果与资源目录的宿主无关编排。
 //!
-//! 本模块只固定一条已被真实业务验证过的交接次序：同一网关上先复核浏览器源会话，再建立
-//! 独立接收会话，用一次性票据把源会话换成接收会话，复核接收会话后取资源目录，最后才构造
+//! 本模块沿用现有交接次序：同一网关上先复核浏览器源会话，再建立独立接收会话，
+//! 用一次性票据取得接收会话，获取资源所需材料后请求资源目录，最后才构造
 //! [`AuthenticatedAtrustSession`]。全部出站连接都经注入的 [`Underlay`]；本模块不拥有适配器、
 //! 路由、DNS 或任何服务，也不提供默认拨号器。资源请求体（`resource_request`）是宿主产品选择
 //! （例如 Windows 的 appList/favoriteAppList/featureCenter/uemSpace 组合），不是通用协议默认值。
 //!
-//! 本编排是可选协议操作：底层 [`AuthClient`] 的四个请求保持可独立使用，未来宿主不必采用
+//! 本编排是可选协议操作：底层 [`AuthClient`] 的公开请求保持可独立使用，未来宿主不必采用
 //! 浏览器交接路径。
 
+use super::AuthHttpError;
 use super::{AuthClient, AuthClientOptions};
 use crate::auth::browser_session::BrowserSession;
 use crate::auth::origin::GatewayOrigin;
-use crate::{ResourceCatalog, ResourceParseOptions, Secret, Underlay};
+use crate::{ResourceCatalog, ResourceError, ResourceParseOptions, Secret, Underlay};
 use std::sync::Arc;
 
 /// 交接失败的阶段标记。阶段名稳定，供宿主日志与 UI 映射。
@@ -23,6 +24,7 @@ pub enum AuthStage {
     Receiver,
     Ticket,
     Exchange,
+    /// 保留宿主阶段匹配的兼容面；当前交接不再产生兑换后复验阶段。
     Verified,
     Resources,
 }
@@ -31,26 +33,69 @@ pub enum AuthStage {
 #[derive(Debug)]
 pub struct AtrustAuthError {
     pub stage: AuthStage,
-    detail: String,
+    cause: AuthFailure,
 }
+
+#[derive(Debug)]
+enum AuthFailure {
+    Http(AuthHttpError),
+    ResourceMaterials(AuthHttpError),
+    Resource(ResourceError),
+    Message(&'static str),
+}
+
+impl From<AuthHttpError> for AuthFailure {
+    fn from(error: AuthHttpError) -> Self {
+        Self::Http(error)
+    }
+}
+impl From<ResourceError> for AuthFailure {
+    fn from(error: ResourceError) -> Self {
+        Self::Resource(error)
+    }
+}
+impl From<&'static str> for AuthFailure {
+    fn from(message: &'static str) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl std::fmt::Display for AuthFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(error) => std::fmt::Display::fmt(error, f),
+            Self::ResourceMaterials(error) => write!(f, "resource material request: {error}"),
+            Self::Resource(error) => std::fmt::Display::fmt(error, f),
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
 impl AtrustAuthError {
-    // detail 只用于格式化为脱敏文本；保持与原 Windows 实现相同的调用形态。
-    #[allow(clippy::needless_pass_by_value)]
-    fn at(stage: AuthStage, detail: impl ToString) -> Self {
+    fn at(stage: AuthStage, cause: impl Into<AuthFailure>) -> Self {
         Self {
             stage,
-            detail: detail.to_string(),
+            cause: cause.into(),
         }
     }
 }
 impl std::fmt::Display for AtrustAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "aTrust {:?}: {}", self.stage, self.detail)
+        write!(f, "aTrust {:?}: {}", self.stage, self.cause)
     }
 }
-impl std::error::Error for AtrustAuthError {}
+impl std::error::Error for AtrustAuthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            AuthFailure::Http(error) | AuthFailure::ResourceMaterials(error) => Some(error),
+            AuthFailure::Resource(error) => Some(error),
+            AuthFailure::Message(_) => None,
+        }
+    }
+}
 
-/// 仅在服务器确认独立接收会话已登录、资源已解析后构造。SID 不经过日志或子进程。
+/// 原票据兑换与资源请求、解析完成后的接收会话。它不表示 L3 或宿主隧道已连接。
+/// SID 不经过日志或子进程。
 pub struct AuthenticatedAtrustSession {
     client: AuthClient,
     catalog: ResourceCatalog,
@@ -157,22 +202,19 @@ pub async fn authenticate_browser_session(
         .await
         .map_err(|e| AtrustAuthError::at(AuthStage::Ticket, e))?;
     drop(source);
-    receiver
+    let exchange = receiver
         .exchange_sid_ticket(ticket)
         .await
         .map_err(|e| AtrustAuthError::at(AuthStage::Exchange, e))?;
-    if !receiver
-        .auth_config(false)
+    receiver
+        .admit_session_exchange(exchange)
+        .map_err(|e| AtrustAuthError::at(AuthStage::Exchange, e))?;
+    receiver
+        .prepare_resource_materials()
         .await
-        .map_err(|e| AtrustAuthError::at(AuthStage::Verified, e))?
-        .is_login
-        || receiver.sid().is_none()
-    {
-        return Err(AtrustAuthError::at(
-            AuthStage::Verified,
-            "ticket exchange did not authenticate receiver",
-        ));
-    }
+        .map_err(|error| {
+            AtrustAuthError::at(AuthStage::Resources, AuthFailure::ResourceMaterials(error))
+        })?;
     let resources = receiver
         .client_resource(resource_request)
         .await
@@ -181,7 +223,7 @@ pub async fn authenticate_browser_session(
         &resources,
         &ResourceParseOptions::with_sdpc_host(origin.host()),
     )
-    .map_err(|_| AtrustAuthError::at(AuthStage::Resources, "invalid resource catalog"))?;
+    .map_err(|e| AtrustAuthError::at(AuthStage::Resources, e))?;
     Ok(AuthenticatedAtrustSession {
         client: receiver,
         catalog,

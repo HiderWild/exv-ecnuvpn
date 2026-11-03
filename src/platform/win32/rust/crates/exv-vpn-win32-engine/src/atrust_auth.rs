@@ -22,10 +22,11 @@ pub use exv_vpn_atrust::auth::browser_handoff::{
 /// 这是产品选择而不是协议默认值，Common 交接函数按字节参数接收。
 const RESOURCE_REQUEST: &[u8] = br#"{"resourceType":{"sdpPolicy":{},"appList":{},"favoriteAppList":{},"featureCenter":{},"uemSpace":{"params":{"action":"login"}}}}"#;
 
-/// Windows 产品声明的 aTrust 协议身份；平台名是协议字段，绝不按编译 target 推导。
-/// （T6a 起对 crate 内重连路径可复用：源会话复核探测同一身份。）
+/// Windows 桌面/隧道路径的 aTrust 协议身份：`clientType=SDPClient`。
+/// 平台名是协议字段，绝不按编译 target 推导。（T6a 起对 crate 内重连路径可复用：
+/// 源会话复核探测同一身份。）
 pub(crate) fn client_identity() -> AuthClientIdentity {
-    AuthClientIdentity::new("SDPClient", "Windows", "zh-CN")
+    AuthClientIdentity::desktop("Windows", "zh-CN")
         .expect("static Windows client identity is valid")
 }
 

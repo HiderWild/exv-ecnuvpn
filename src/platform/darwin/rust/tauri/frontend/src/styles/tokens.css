@@ -1,3 +1,5 @@
+@import "../../../../../../../common/frontend/styles/typography.css";
+
 :root {
   color-scheme: light;
 
@@ -11,31 +13,37 @@
   --space-4: 16px;
   --space-5: 20px;
   --space-6: 24px;
-  /* 产品主页面共用的顶部留白：保留两档常规间距，避免各页自行漂移。 */
+  /* 旧页面迁移期间保留原顶部间距入口。 */
   --product-page-top-gap: 32px;
-  --radius-sm: 6px;
-  --radius-md: 10px;
+  --radius-sm: 8px;
+  --radius-md: 14px;
   --radius-lg: 14px;
 
   --surface-canvas: #f7f8fa;
   --surface-panel: #ffffff;
   --surface-subtle: #f0f2f5;
   --surface-raised: #ffffff;
-  --text-primary: #182230;
-  --text-secondary: #4f6073;
-  --text-tertiary: #617083;
+  --surface-hover: #e9edf2;
+  --state-success-subtle: #e8eee4;
+  --radius-control: 7px;
+  --control-height: 35px;
+  --text-primary: #322e2a;
+  --text-secondary: #71685f;
+  --text-tertiary: #71685f;
   --border-subtle: #dce1e7;
   --border-strong: #7b8796;
-  --focus-ring: #145fc8;
-  --state-success: #147653;
+  --focus-ring: var(--accent);
+  --state-success: #426a53;
   --state-warning: #985f00;
   --state-danger: #b4232c;
+  /* 危险色实底上的前景色（浅色为白字；深色 danger 偏亮，用深字保对比度）。 */
+  --state-danger-on: #ffffff;
   --shadow-raised: 0 8px 24px rgb(24 34 48 / 8%);
 
-  --accent: #2067d6;
-  --accent-strong: #174faa;
-  --accent-subtle: #e8f0ff;
-  --accent-on: #ffffff;
+  --accent: #9a2034;
+  --accent-strong: #7e192a;
+  --accent-subtle: #f4e4e8;
+  --accent-on: #fffdf9;
 
   /* 旧测试页面在后续组件迁移前继续使用的兼容语义别名。 */
   --bg: var(--surface-canvas);
@@ -56,47 +64,57 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-canvas: #13181f;
-  --surface-panel: #1b222b;
-  --surface-subtle: #171e26;
-  --surface-raised: #242e39;
-  --text-primary: #f1f5f9;
-  --text-secondary: #bdc9d6;
-  --text-tertiary: #9aaaba;
-  --border-subtle: #323e4b;
+  --surface-canvas: #151e27;
+  --surface-panel: #1b2732;
+  --surface-subtle: #111920;
+  --surface-raised: #1b2732;
+  --surface-hover: #34434e;
+  --state-success-subtle: #253c34;
+  --radius-md: 10px;
+  --radius-lg: 10px;
+  --text-primary: #edf1ed;
+  --text-secondary: #a4b2bd;
+  --text-tertiary: #a4b2bd;
+  --border-subtle: #34434e;
   --border-strong: #708297;
-  --focus-ring: #a9c8ff;
-  --state-success: #4bc994;
+  --focus-ring: var(--accent);
+  --state-success: #aee6cb;
   --state-warning: #f4ba5b;
   --state-danger: #ff9194;
+  --state-danger-on: #151e27;
   --shadow-raised: 0 10px 28px rgb(0 0 0 / 24%);
-  --accent: #79aaff;
-  --accent-strong: #a6c7ff;
-  --accent-subtle: #1d385d;
-  --accent-on: #10223c;
+  --accent: #aee6cb;
+  --accent-strong: #c5efdd;
+  --accent-subtle: #283f3b;
+  --accent-on: #132921;
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
     color-scheme: dark;
-    --surface-canvas: #13181f;
-    --surface-panel: #1b222b;
-    --surface-subtle: #171e26;
-    --surface-raised: #242e39;
-    --text-primary: #f1f5f9;
-    --text-secondary: #bdc9d6;
-    --text-tertiary: #9aaaba;
-    --border-subtle: #323e4b;
+    --surface-canvas: #151e27;
+    --surface-panel: #1b2732;
+    --surface-subtle: #111920;
+    --surface-raised: #1b2732;
+    --surface-hover: #34434e;
+    --state-success-subtle: #253c34;
+    --radius-md: 10px;
+    --radius-lg: 10px;
+    --text-primary: #edf1ed;
+    --text-secondary: #a4b2bd;
+    --text-tertiary: #a4b2bd;
+    --border-subtle: #34434e;
     --border-strong: #708297;
-    --focus-ring: #a9c8ff;
-    --state-success: #4bc994;
+    --focus-ring: var(--accent);
+    --state-success: #aee6cb;
     --state-warning: #f4ba5b;
     --state-danger: #ff9194;
+    --state-danger-on: #151e27;
     --shadow-raised: 0 10px 28px rgb(0 0 0 / 24%);
-    --accent: #79aaff;
-    --accent-strong: #a6c7ff;
-    --accent-subtle: #1d385d;
-    --accent-on: #10223c;
+    --accent: #aee6cb;
+    --accent-strong: #c5efdd;
+    --accent-subtle: #283f3b;
+    --accent-on: #132921;
   }
 }
 
@@ -183,5 +201,28 @@
     --accent-strong: #ffe0a5;
     --accent-subtle: #493411;
     --accent-on: #432d00;
+  }
+}
+
+:root[data-accent="ecnu"] {
+  --accent: #9a2034;
+  --accent-strong: #7e192a;
+  --accent-subtle: #f4e4e8;
+  --accent-on: #fffdf9;
+}
+
+:root[data-theme="dark"][data-accent="ecnu"] {
+  --accent: #aee6cb;
+  --accent-strong: #c5efdd;
+  --accent-subtle: #283f3b;
+  --accent-on: #132921;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"][data-accent="ecnu"] {
+    --accent: #aee6cb;
+    --accent-strong: #c5efdd;
+    --accent-subtle: #283f3b;
+    --accent-on: #132921;
   }
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted } from "vue";
 import SettingsRow from "./SettingsRow.vue";
+import AuthReceiverRecovery from "./AuthReceiverRecovery.vue";
 
 import { commandErrorMessage } from "../lib/command-error";
 import type { ServiceControlAction } from "../lib/ipc";
@@ -10,7 +11,9 @@ import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../pro
 import {
   isServiceRunning,
   serviceStateLabel,
+  tunnelSessionLabel,
   type ProductService,
+  type ProductStatus,
 } from "../product/types";
 
 const props = withDefaults(
@@ -84,6 +87,17 @@ const serviceLabel = computed(() => {
     case "installed":
       return serviceStateLabel(status.scmState);
   }
+});
+
+/**
+ * S6b 服务真话化：服务状态行同时呈现隧道/会话可用性（如「运行中 · 隧道未建立」）。
+ * 数据源为前端既有连接运行态；运行时不可读（测试替身未提供 state）时不呈现该段。
+ */
+type RuntimeStateReader = { state?: { value?: { status?: ProductStatus } } };
+const tunnelLabel = computed<string | null>(() => {
+  const reader = runtime as RuntimeStateReader | null;
+  const status = reader?.state?.value?.status;
+  return status === undefined ? null : tunnelSessionLabel(status);
 });
 
 /** MED [3]：checkbox 仅在明确「未安装」时可用；未知状态禁用并回退 oneshot。 */
@@ -181,6 +195,10 @@ async function runRepair(): Promise<void> {
   <div class="service-panel" data-testid="service-panel">
     <SettingsRow label="服务状态">
       <span class="service-status" data-testid="service-status">{{ serviceLabel }}</span>
+      <template v-if="tunnelLabel">
+        <span class="service-status__sep" aria-hidden="true">·</span>
+        <span class="service-status" data-testid="service-tunnel-status">{{ tunnelLabel }}</span>
+      </template>
     </SettingsRow>
 
     <div
@@ -251,6 +269,7 @@ async function runRepair(): Promise<void> {
         </button>
       </div>
     </SettingsRow>
+    <AuthReceiverRecovery v-if="!showConnectOptions" :operation-busy="anyBusy" />
   </div>
 </template>
 
@@ -262,16 +281,22 @@ async function runRepair(): Promise<void> {
 .service-hint {
   margin-bottom: 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .service-status {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+/* S6b 双信息分隔点：仅视觉分隔，读屏时两段文案连续可读。 */
+.service-status__sep {
+  color: var(--text-secondary);
+  font-size: var(--font-size-caption);
 }
 
 .service-option {
@@ -318,7 +343,7 @@ async function runRepair(): Promise<void> {
   border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--accent-on);
-  font-size: 13px;
+  font-size: var(--font-size-body);
   font-weight: 600;
   cursor: pointer;
 }

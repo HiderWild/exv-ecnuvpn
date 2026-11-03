@@ -302,6 +302,23 @@ where
         .unwrap_or_else(default_campus_dns_domains))
 }
 
+/// T6 标记值容错：非布尔取值（更高版本写入或手改文件）只把该字段局部回退
+/// false——与 ConnectionMode/Protocol/campus_dns_domains 同一条纪律，不让整份
+/// ExvConfig 回落默认值而丢失同一文档里的账户与密文。
+fn deserialize_provisioned_by_bootstrap<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(false))
+}
+
+/// false 不序列化：bootstrap 是该键唯一的落盘者（置位 true），用户提交后的
+/// config.json 键集与历史形态保持一致。
+fn provisioned_by_bootstrap_is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// User VPN configuration (MVP subset).
 ///
 /// Fields mirror the C++ `Config` JSON keys. `password` holds the AES-256-GCM
@@ -325,8 +342,20 @@ pub struct ExvConfig {
     pub cisco_server: String,
     /// aTrust 专属服务器地址，独立于当前协议保存。
     pub atrust_server: String,
-    /// aTrust 认证入口：`browser` 为系统浏览器，`embedded` 为学校网页内嵌认证。
+    /// aTrust 认证入口：`browser` 为系统浏览器，`embedded` 为学校网页内嵌认证，
+    /// `headless` 为无头优先（纯 HTTP 会话复用为主，播种/回退/挑战升窗由内嵌
+    /// 隐藏窗承担）。2026-10-10 起 C1 默认 `headless`（无头优先+自动认证编排）。
     pub atrust_auth_mode: String,
+    /// 模式权威版本；旧文件缺键时由读取入口迁移，新版兼容 bool 从模式派生。
+    pub atrust_auth_mode_version: u32,
+    /// 用户发起连接后才允许一次学校页面自动提交；2026-10-22 双端对齐裁定默认
+    /// 关闭（缺键同 false，与 darwin 侧一致；已显式保存的值不受影响）。账密
+    /// 不另设字段：与 Cisco 完全共享 `username`/
+    /// `password`/`remember_password` 单对凭据（2026-09-30 用户裁定，取代按
+    /// 网关/账号隔离的独立学校密码存储）。
+    pub atrust_auto_login: bool,
+    /// 数据节点 TCP_NODELAY；旧配置缺键为 false，下一次连接时应用。
+    pub atrust_tcp_nodelay: bool,
     /// 校园 DNS 搜索域；每个裸域名同时覆盖该域及其子域。
     #[serde(default = "default_campus_dns_domains", deserialize_with = "deserialize_campus_dns_domains")]
     pub campus_dns_domains: Vec<String>,
@@ -337,9 +366,18 @@ pub struct ExvConfig {
     pub username: String,
     /// AES-GCM sealed password (base64), or empty when not remembered.
     pub password: String,
-    /// 已封存密码所属的协议。写入密码时随当时的 [`ExvConfig::protocol`] 一起记录，
-    /// 使“认证材料按协议区分”成为结构约束而非约定：Cisco 的密码不会被当作
-    /// `aTrust` 会话材料消费（旧配置缺该键时为 Cisco，与密码字段的既有语义一致）。
+    /// S5a（2026-10-26 owner 标记，与 darwin 同构）：已封存密文归属的账户名。
+    /// 写入新密码时随写为当时的 [`ExvConfig::username`]；仅改用户名（设置模态
+    /// keep 分支只发 `username` 键）时密文与本字段原样保留——凭据对有效性由
+    /// `username == password_owner_username` 判定（[`ExvConfig::has_saved_-
+    /// credential_pair`]），改回原用户名即恢复资格。物理清空只发生在显式
+    /// `remember_password=false` / 清除密码路径（连同本字段一并清空）。旧配置缺
+    /// 该键时空串，读取入口按 owner=username 迁移（历史写路径在任何用户名变更时
+    /// 都清空密文，存量密文必然属于当前用户名，迁移保持存量行为）。
+    pub password_owner_username: String,
+    /// 已封存密码写入时记录的 [`ExvConfig::protocol`]（历史元数据）。2026-09-30 用户
+    /// 裁定账号密码与 Cisco 完全共享、全系统仅一对凭据后，该字段不再用于拒绝跨协议
+    /// 消费，仅保留给诊断与旧配置兼容（旧配置缺该键时为 Cisco）。
     pub password_protocol: Protocol,
     /// Whether `password` should be remembered across sessions.
     pub remember_password: bool,
@@ -369,6 +407,30 @@ pub struct ExvConfig {
     /// 「自动重连时发送通知」（T4/§2.8，既有托盘气泡通道；默认**开**，见
     /// [`default_reconnect_notify`]）。
     pub reconnect_notify: bool,
+    /// T6（2026-10-10 快速入门触发语义 D1/D2）：本份 config.json 是否仍处于
+    /// bootstrap 播种状态——**全新 provision（NotFound）与损坏修复两条 bootstrap
+    /// 路径**落盘时都会置位；用户显式提交（`save_after_user_submission` 卫生边界：
+    /// config_set / UI 凭据保存）成功后清除。`load_for_startup` 据此把
+    /// requires_quick_start 判定为「文件缺失/损坏**或**本标记为 true」，首启中断的
+    /// 新用户二次启动不再永久错过快速入门。core 内部字段：不进 config_get 白名单、
+    /// 前端不可见；非布尔取值局部回退 false（不丢整份配置），false 不序列化
+    /// （用户提交后的文件键集与历史形态保持一致，见
+    /// [`provisioned_by_bootstrap_is_false`]）。
+    #[serde(
+        deserialize_with = "deserialize_provisioned_by_bootstrap",
+        skip_serializing_if = "provisioned_by_bootstrap_is_false"
+    )]
+    pub provisioned_by_bootstrap: bool,
+}
+
+pub(crate) fn normalize_atrust_auth_fields(object: &mut serde_json::Map<String, serde_json::Value>) {
+    let mode = object.get("atrust_auth_mode").and_then(serde_json::Value::as_str).unwrap_or("browser");
+    let legacy = object.get("atrust_auth_mode_version").and_then(serde_json::Value::as_u64) != Some(1);
+    let automatic = object.get("atrust_auto_login").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let mode = if legacy && automatic { "headless" } else if legacy && mode == "headless" { "embedded" } else { mode }.to_owned();
+    object.insert("atrust_auto_login".into(), serde_json::Value::Bool(mode == "headless"));
+    object.insert("atrust_auth_mode".into(), serde_json::Value::String(mode));
+    object.insert("atrust_auth_mode_version".into(), serde_json::Value::from(1));
 }
 
 impl Default for ExvConfig {
@@ -378,10 +440,14 @@ impl Default for ExvConfig {
             cisco_server: DEFAULT_SERVER.to_string(),
             atrust_server: DEFAULT_ATRUST_SERVER.to_string(),
             atrust_auth_mode: "browser".to_string(),
+            atrust_auth_mode_version: 1,
+            atrust_auto_login: false,
+            atrust_tcp_nodelay: false,
             campus_dns_domains: default_campus_dns_domains(),
             protocol: Protocol::Atrust,
             username: String::new(),
             password: String::new(),
+            password_owner_username: String::new(),
             password_protocol: Protocol::Cisco,
             remember_password: false,
             routes: DEFAULT_ROUTES.iter().map(|r| (*r).to_string()).collect(),
@@ -394,6 +460,7 @@ impl Default for ExvConfig {
             on_core_exit: OnCoreExit::Keep,
             reconnect_on_oneshot_engine_crash: false,
             reconnect_notify: default_reconnect_notify(),
+            provisioned_by_bootstrap: false,
         }
     }
 }
@@ -509,9 +576,7 @@ impl ExvConfig {
             let value = if protocol == Protocol::Atrust { legacy_server.as_str() } else { DEFAULT_ATRUST_SERVER };
             object.insert("atrust_server".into(), serde_json::Value::String(value.into()));
         }
-        if !object.contains_key("atrust_auth_mode") {
-            object.insert("atrust_auth_mode".into(), serde_json::Value::String("browser".into()));
-        }
+        normalize_atrust_auth_fields(object);
         let Ok(mut cfg) = serde_json::from_value::<Self>(value) else {
             return Ok(Self::default());
         };
@@ -520,7 +585,19 @@ impl ExvConfig {
             Protocol::Cisco => cfg.cisco_server.clone(),
             Protocol::Atrust => cfg.atrust_server.clone(),
         };
+        // S5a：旧 config.json 缺 password_owner_username 键（反序列化为空串）时视为
+        // owner=当前用户名。历史写路径在任何用户名变更时都清空密文，故存量密文必然
+        // 属于当前用户名——迁移保证既有安装的凭据对继续有效。新代码写出的 owner
+        // 非空（keep 分支保留原值），不会误触发迁移。
+        cfg.reconcile_password_owner();
         Ok(cfg)
+    }
+
+    /// S5a 迁移入口（owner=username；语义见 [`ExvConfig::password_owner_username`]）。
+    pub fn reconcile_password_owner(&mut self) {
+        if self.password_owner_username.is_empty() && !self.password.is_empty() {
+            self.password_owner_username.clone_from(&self.username);
+        }
     }
 
     /// Persist this config to the resolved config directory (creating it if
@@ -541,6 +618,8 @@ impl ExvConfig {
     pub fn save_to_dir(&self, dir: &Path) -> Result<(), ConfigError> {
         let mut snapshot = self.clone();
         snapshot.sync_active_server();
+        snapshot.atrust_auth_mode_version = 1;
+        snapshot.atrust_auto_login = snapshot.atrust_auth_mode == "headless";
         let json = serde_json::to_string_pretty(&snapshot)?;
         write_config_json_atomically(dir, &json)
     }
@@ -625,12 +704,42 @@ impl ExvConfig {
         decrypt_password(&self.password, key)
     }
 
+    /// 保存密码的存在状态只验证密码，不把用户名混入该标志。
+    pub fn has_stored_password(&self, dir: &Path) -> bool {
+        self.remember_password && !self.password.is_empty()
+            && Self::load_key(dir).ok().flatten().is_some_and(|mut key| {
+                let decrypted = self.decrypt_password(&key);
+                key.fill(0);
+                decrypted.is_ok_and(|password| {
+                    let mut bytes = password.into_bytes();
+                    let present = !bytes.is_empty();
+                    bytes.fill(0);
+                    present
+                })
+            })
+    }
+
+    /// Cisco 与 aTrust 共享原保存凭据；临时凭据或会话缓存不授予后台许可。
+    ///
+    /// S5a owner 匹配门：凭据对有效还要求当前用户名与密文 owner（写入密码时的
+    /// 账户名）一致——keep 分支仅改用户名后此判定为假（后台重连资格暂停），改回
+    /// 原用户名立即恢复为真。重连资格（`background_reconnect_allowed` / 受理策略
+    /// / config_set 复核）共用本门。
+    pub fn has_saved_credential_pair(&self, dir: &Path) -> bool {
+        !self.username.trim().is_empty()
+            && self.username == self.password_owner_username
+            && self.has_stored_password(dir)
+    }
+
     /// Encrypt `plaintext` with `key` and store the ciphertext, marking the
     /// password as remembered.
     ///
     /// 2026-09-21（T02）：同时把 [`ExvConfig::password_protocol`] 记为写入时的
     /// [`ExvConfig::protocol`]。配置提交流程在所有键应用完毕后才封存密码，因此
     /// “同一批同时改协议与密码”也会得到匹配的协议标记。
+    ///
+    /// S5a：同时把 [`ExvConfig::password_owner_username`] 记为写入时的当前用户名
+    /// （replace 语义——owner 随写；调用方保证此时 `username` 已应用本批新值）。
     ///
     /// # Errors
     ///
@@ -643,6 +752,7 @@ impl ExvConfig {
     ) -> Result<(), ConfigError> {
         self.password = encrypt_password(plaintext, key)?;
         self.password_protocol = self.protocol;
+        self.password_owner_username.clone_from(&self.username);
         self.remember_password = !plaintext.is_empty();
         Ok(())
     }
@@ -730,4 +840,5 @@ fn create_temporary_config_file(dir: &Path) -> Result<(PathBuf, File), ConfigErr
     )
     .into())
 }
+
 

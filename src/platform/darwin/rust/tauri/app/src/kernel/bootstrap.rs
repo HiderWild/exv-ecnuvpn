@@ -40,6 +40,9 @@ pub(crate) fn bootstrap(app: &tauri::App) {
             eprintln!("exv.bootstrap: core session unavailable (degraded, NotWired): {error}");
         }
     }
+
+    // 系统浏览器认证开始后才准备证书与本轮Agent。
+    handle.manage(super::native_agent::NativeAgentState::default());
 }
 
 /// 把已就绪的 core 会话接入 managed 状态：通道句柄 + 事件订阅 + 会话容器。
@@ -70,7 +73,7 @@ fn install_session(handle: &AppHandle, mut started: core_process::CoreSession) {
 /// 用户点「连接」时的 Core 恢复入口（win32 `recover_stopped_core_for_connect` 的
 /// darwin 对应）——core 死亡的正路恢复。
 ///
-/// 日常 UI 只经 [`CoreState::probe_status`] 观察控制管道；不会枚举进程。当前次
+/// 控制面探测经 [`CoreState::probe_status`] 保留原 RPC 结果；不会枚举进程。当前次
 /// Connect 已返回 `CoreUnreachable` 才调用本函数：先复核管道（并发的第一个恢复
 /// 可能已完成），仍不可用则整会话重建（中止旧订阅 → 回收旧 core → 重拉 → 重挂
 /// 新订阅）后重试原请求。恢复闸门串行化并发恢复。
@@ -86,8 +89,12 @@ pub(crate) async fn recover_stopped_core_for_connect(
     let _gate = session.recovery.lock().await;
 
     // 并发 Connect 的第一个调用可能已经完成恢复；此处只用管道 RPC 复核，不观察进程。
-    if state.probe_status().await == super::client::CoreStatus::Normal {
-        return Ok(());
+    match state.probe_status().await {
+        Ok(super::client::CoreStatus::Normal) => return Ok(()),
+        Ok(super::client::CoreStatus::Stopped) => {}
+        Err(error) => {
+            eprintln!("exv.bootstrap: connect recovery control probe failed: {error}");
+        }
     }
 
     // 旧事件任务持有旧通道克隆，重开必然失败后自行退避；中止句柄加速释放。
@@ -103,7 +110,6 @@ pub(crate) async fn recover_stopped_core_for_connect(
     match core_process::start_core_session().await {
         Ok(started) => {
             install_session(app, started);
-            eprintln!("exv.bootstrap: core session rebuilt for connect");
             Ok(())
         }
         Err(error) => {

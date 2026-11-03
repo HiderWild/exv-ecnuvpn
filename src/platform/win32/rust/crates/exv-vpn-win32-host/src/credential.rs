@@ -54,16 +54,6 @@ pub enum CredentialError {
     PasswordEmpty,
     /// 密码解密失败（密钥不符 / 密文被篡改）。
     PasswordDecrypt(String),
-    /// 已封存密码属于另一种协议：不得把它当作当前协议的凭据消费。
-    ///
-    /// 2026-09-21（T02）：Cisco 密码与 `aTrust` 会话材料是两类不同凭据。用户切换协议
-    /// 后，旧协议留下的密码必须被显式拒绝，而不是被当作新协议的登录材料发送。
-    ProtocolMismatch {
-        /// 密码封存时记录的协议字面量。
-        stored: &'static str,
-        /// 当前选择的协议字面量。
-        current: &'static str,
-    },
     /// `secret_payload` 序列化失败。
     Serialize(String),
 }
@@ -76,10 +66,6 @@ impl fmt::Display for CredentialError {
             Self::KeyRead(e) => write!(f, "credential key read failed: {e}"),
             Self::PasswordEmpty => write!(f, "password not remembered"),
             Self::PasswordDecrypt(e) => write!(f, "password decrypt failed: {e}"),
-            Self::ProtocolMismatch { stored, current } => write!(
-                f,
-                "remembered credential belongs to {stored}, but the selected protocol is {current}"
-            ),
             Self::Serialize(e) => write!(f, "secret payload serialize failed: {e}"),
         }
     }
@@ -284,31 +270,16 @@ impl fmt::Debug for CredentialsBundle {
 /// # Errors
 /// config 读取失败 → [`CredentialError::Config`]；`key.bin` 缺失 →
 /// [`CredentialError::KeyMissing`]；`key.bin` 读取失败 → [`CredentialError::KeyRead`]；
-/// 已封存密码属于另一种协议 → [`CredentialError::ProtocolMismatch`]；
 /// 密码解密失败 → [`CredentialError::PasswordDecrypt`]；空明文（未记住）→
-/// [`CredentialError::PasswordEmpty`]。`protocol` 是本次连接的生效协议。
+/// [`CredentialError::PasswordEmpty`]。`protocol` 参数保留给调用方记录本次连接的
+/// 生效协议；2026-09-30 用户裁定账号密码跨协议完全共享（全系统仅一对凭据）后，
+/// 不再按 `password_protocol` 拒绝消费，该字段仅作历史元数据。
 pub fn load_credentials(
     config_dir: &Path,
-    protocol: Protocol,
+    _protocol: Protocol,
 ) -> Result<CredentialsBundle, CredentialError> {
     let config = ExvConfig::load_from_dir(config_dir)
         .map_err(|e| CredentialError::Config(e.to_string()))?;
-    // 2026-09-21（T02）：凭据按协议区分。切换协议后，另一种协议留下的密码必须先被
-    // 拒绝——既不尝试解密，也不进入 secret_payload。
-    //
-    // 比较对象是**本次连接的生效协议**（`protocol`）而不是磁盘上的当前选择：一次连接的
-    // 协议在会话受理时冻结，会话中改设置不该让重连去消费另一种协议的凭据
-    // （见 `ReconnectSessionPolicy::protocol`）。
-    //
-    // 前提是**确实存在待消费的密文**：没有记住密码时，报“已保存的凭据属于另一协议”
-    // 是在陈述一个不成立的事实，也会把用户挡在“请输入密码”的恢复流之外。
-    let has_stored_ciphertext = config.remember_password && !config.password.is_empty();
-    if has_stored_ciphertext && protocol != config.password_protocol {
-        return Err(CredentialError::ProtocolMismatch {
-            stored: config.password_protocol.as_str(),
-            current: protocol.as_str(),
-        });
-    }
     let mut key = match ExvConfig::load_key(config_dir) {
         Ok(Some(key)) => key,
         Ok(None) => return Err(CredentialError::KeyMissing),
@@ -338,6 +309,7 @@ pub fn load_credentials(
 #[must_use]
 pub fn build_connect_request(intent: ConnectIntent, secret_payload: Vec<u8>) -> ConnectRequest {
     ConnectRequest {
+        auth_binding: None,
         intent: Some(intent),
         secret_payload,
     }

@@ -14,7 +14,7 @@ function visibleTarget(element: HTMLElement): boolean {
 }
 
 /** 共用键盘边界；关闭仍委托各模态自己的 busy／取消语义。 */
-export function useDialogFocus(visible: () => boolean, requestClose: () => void) {
+export function useDialogFocus(visible: () => boolean, requestClose: () => void, options: { initialFocus?: string; nested?: boolean } = {}) {
   const dialog = ref<HTMLElement | null>(null);
   let previous: HTMLElement | null = null;
   let revision = 0;
@@ -59,10 +59,13 @@ export function useDialogFocus(visible: () => boolean, requestClose: () => void)
       const owner = active?.closest<HTMLElement>('[role="dialog"], [role="alertdialog"]');
       await nextTick();
       if (currentRevision !== revision || !visible() || !dialog.value) return;
-      previous = owner && !owner.contains(dialog.value) && returnTargets.has(owner)
+      // Teleport 的内层提示在 DOM 中不再属于外层；仍应回到本次添加／合并触发点。
+      previous = !options.nested && owner && !owner.contains(dialog.value) && returnTargets.has(owner)
         ? returnTargets.get(owner)! : active;
       returnTargets.set(dialog.value, previous);
-      (focusableElements(dialog.value)[0] ?? dialog.value).focus();
+      const elements = focusableElements(dialog.value);
+      const first = options.initialFocus ? elements.find(element => element.matches(options.initialFocus!)) : elements[0];
+      (first ?? dialog.value).focus();
       return;
     }
     const closing = dialog.value;

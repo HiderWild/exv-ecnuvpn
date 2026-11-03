@@ -23,7 +23,7 @@ pub use config::{
     DEFAULT_CAMPUS_DNS_DOMAINS, parse_campus_dns_domains, read_protocol_literal,
     write_protocol_switch_backup,
 };
-pub use config_hygiene::{StartupConfig, load_for_startup, save_after_user_submission};
-pub use error::ConfigError;
-pub use paths::{config_dir, config_path, key_path};
+pub use config_hygiene::{ConfigRecovery, StartupConfig, load_for_startup, save_after_user_submission};
+pub use error::{ConfigError, ConfigReadFailure};
+pub use paths::{config_dir, config_path, key_path, DEFAULT_CONFIG_SUBDIR};
 

@@ -4,17 +4,21 @@
 //! Engine；明确的 Connect/Stop 才复用同一已认证本地通道调用 Engine 的 `ApplyTunnel`/
 //! `StopTunnel`。本阶段不实现网络、CSTP 或 utun。
 
+mod session_orchestration;
+mod auth_continuation;
+
 use std::{
     future::Future,
     pin::Pin,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
 
 use exv_vpn_host::event_bus::EventBus;
+use exv_vpn_darwin_ipc::auth_deadline::{AuthDeadline, AuthDeadlineError};
 use exv_vpn_wire::generated as wire;
 use exv_vpn_wire::generated::{
     Attempt, ConfigGetRequest, ConfigItem, ConfigPayload, ConfigReply, ConfigSetRequest,
@@ -31,12 +35,14 @@ use tonic::{Code, Request, Response, Status, codegen::tokio_stream::Stream};
 use zeroize::Zeroize;
 
 mod sleep_recovery;
-use crate::network_diagnostics::{self, Context as DiagnosticContext, NetworkMonitor};
+mod cached_headless;
+use crate::atrust_session_cache;
+use crate::credential::normalized_connect_routes;
 
 use crate::{
     DarwinConfigError, DarwinConfigItem, DarwinUiConfig, EngineLifecycleError, Protocol,
-    SECRET_PAYLOAD_VERSION, SavedConnectEnvelopeError, UiCredentialPackage, build_connect_envelope,
-    build_saved_connect_envelope, config_hygiene,
+    SECRET_PAYLOAD_VERSION, ATRUST_SECRET_PAYLOAD_VERSION, SavedConnectEnvelopeError, UiSecretPayload, UiConnectMaterials, build_connect_envelope,
+    config_hygiene,
     engine_lifecycle_real::{EngineControlSession, launch_fixed_engine_session},
     log_aggregator::LogAggregator,
     log_control::LogControl,
@@ -44,7 +50,7 @@ use crate::{
     proxy_tun::ProxyTunCache,
     service_lifecycle::{
         ELEVATION_DENIED_CODE, ELEVATION_FAILED_CODE, LifecycleError, ServiceLifecycle,
-        ServiceStatusProbe, SERVICE_NOT_INSTALLED_CODE, SERVICE_NOT_READY_CODE,
+        ServiceStatusProbe, SERVICE_NOT_INSTALLED_CODE,
         SERVICE_SOURCE_MISSING_CODE,
     },
     stats::{LiveStatsState, TrafficSample},
@@ -64,18 +70,11 @@ const CONNECTION_ENGINE_ELEVATION_CODE: &str = "DARWIN_CORE_ENGINE_ELEVATION_FAI
 /// 不向 UI 泄露底层 IO 文本。
 const LOGS_CLEAR_IO_FAILED_CODE: &str = "DARWIN_LOGS_CLEAR_IO_FAILED";
 const CONNECTION_CREDENTIALS_MISSING_CODE: &str = "DARWIN_CORE_CONNECT_CREDENTIALS_MISSING";
-/// T02：所选协议在本版本不可用的稳定前缀（与 win32 同款词汇）。壳层 `map_status`
-/// 据此把它映射为 `protocol_unavailable`，避免落入通用 internal 文案后把「为什么
-/// 连不上」的具体原因丢掉（同 `service_not_running|`/`compatibility_mode_unavailable|`
-/// 先例）。
-const PROTOCOL_UNAVAILABLE_PREFIX: &str = "protocol_unavailable|";
-/// T02：aTrust 后端尚未接入时的拒绝原因（`failed_precondition`）。
-///
-/// 与 win32 `ensure_selected_protocol_is_serviceable` 同语义、同 code、同文案：aTrust
-/// 后端尚未接线时唯一正确的行为是**明确拒绝**，而不是静默按 Cisco（CSTP）去连 aTrust
-/// 服务器。原因点名协议与可行动的出路，前端连接失败面直接显示。
-const ATRUST_NOT_SERVICEABLE_REASON: &str =
-    "当前版本尚未接入 aTrust 后端；请在设置中改用 Cisco，或更新到支持 aTrust 的版本。";
+/// S2（2026-10-26 验收修复计划）：缓存探测**网络层失败**（underlay/tls/timeout
+/// 等未知结果）的独立 typed 码——与「网关明确报告未登录」
+/// （[`CONNECTION_CREDENTIALS_MISSING_CODE`]）分离；事故链：resolver 孤儿致
+/// 全系统 DNS 死路时 6s 探测超时曾被合流为凭据缺失，前端弹凭据模态是错误处方。
+const CONNECTION_PROBE_UNAVAILABLE_CODE: &str = "DARWIN_CORE_ATRUST_PROBE_UNAVAILABLE";
 /// W1-C（P7）：UI 一次性凭据载荷无法解析、版本非法或字段为空时的 typed 拒绝码
 /// （`invalid_argument`）——这是编程/契约错误，不触发前端凭据弹窗重试。
 const CONNECTION_CREDENTIALS_INVALID_CODE: &str = "DARWIN_CORE_CONNECT_CREDENTIALS_INVALID";
@@ -330,9 +329,11 @@ trait ConnectionEngine: Send {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReconnectSignal {
     /// 数据面掉线（可重试标记的主轨触发）。
-    DataPlaneDrop,
+    WakeResume,
     /// 引擎失联（service 形态；R2——launchd KeepAlive 自启，等待回归后重发）。
     EngineLost,
+    /// 原 worker 的同轮认证续段，不接纳新一轮预算。
+    AuthContinuation,
 }
 
 /// Core 观察到的 Engine 失联 typed 错误（状态流终止/进程死亡），MAC-LIFECYCLE-15 S1。
@@ -348,6 +349,7 @@ fn engine_lost_vpn_error() -> exv_vpn_wire::generated::VpnError {
         stage: ErrorStage::ProtocolSession as i32,
         certainty: EffectCertainty::Unknown as i32,
         retry: RetryAdvice::UseNewOperation as i32,
+        reason: "session/engine_control_stream_ended".into(),
         ..Default::default()
     }
 }
@@ -359,9 +361,11 @@ fn failed_clean_snapshot(
     last_error: exv_vpn_wire::generated::VpnError,
 ) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        atrust_auth_acquisition: None,
         engine_reconnect: None,
         headless: None,
         relaunched_by_engine: false,
+        stop_completion: None,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -376,6 +380,7 @@ fn failed_clean_snapshot(
                 proof: None,
             },
         )),
+        session_identity: None,
     }
 }
 
@@ -393,10 +398,51 @@ fn snapshot_with_proxy_tun(
 }
 
 /// 系统代理与外部 TUN 共享同一次快照刷新；各自读取失败保留空值，交给界面明确提示。
+fn snapshot_with_session_identity(
+    mut snapshot: RuntimeSnapshot,
+    identity: Option<wire::SessionIdentity>,
+) -> RuntimeSnapshot {
+    snapshot.session_identity = identity;
+    snapshot
+}
+
+/// 从即将编码的同一真实信封捕获非秘密身份，避免再读可变配置。
+fn encode_with_session_identity(envelope: crate::credential::DarwinConnectEnvelope) -> (Vec<u8>, wire::SessionIdentity) {
+    use crate::credential::DarwinConnectEnvelope;
+    use exv_vpn_darwin_ipc::connect_envelope::EngineConnectPayload;
+    let identity = match &envelope {
+        DarwinConnectEnvelope::Cisco(cisco) => wire::SessionIdentity {
+            protocol: "cisco".into(), username: cisco.username().into(), server: cisco.server().into(),
+        },
+        DarwinConnectEnvelope::Atrust(atrust) => match atrust.payload() {
+            EngineConnectPayload::Atrust(atrust) => wire::SessionIdentity {
+                protocol: "atrust".into(), username: String::new(), server: atrust.gateway().into(),
+            },
+            EngineConnectPayload::Cisco(cisco) => wire::SessionIdentity {
+                protocol: "cisco".into(), username: cisco.username().into(), server: cisco.server().into(),
+            },
+        },
+    };
+    (envelope.encode().to_vec(), identity)
+}
+
 fn snapshot_with_environment(snapshot: RuntimeSnapshot, cache: &ProxyTunCache) -> RuntimeSnapshot {
     let mut snapshot = snapshot_with_proxy_tun(snapshot, cache.current());
     snapshot.system_proxy = cache.system_proxy();
+    // 政策事实不延续到连接之外；R1/停止窗口不能沿用上次 Connected 的成功值。
+    if !matches!(snapshot.state.as_ref(), Some(runtime_snapshot::State::Connected(_)))
+        && let Some(proxy) = snapshot.system_proxy.as_mut()
+    {
+        proxy.bypass_merged = false;
+    }
     snapshot
+}
+
+fn observed_proxy_merged(reply: Option<wire::ObserveOwnedStateReply>, operation_id: &[u8]) -> bool {
+    reply.and_then(|reply| reply.snapshot)
+        .filter(|snapshot| snapshot.operation_id == operation_id)
+        .and_then(|snapshot| snapshot.system_proxy)
+        .is_some_and(|proxy| proxy.mode == "manual" && proxy.bypass_merged)
 }
 
 // ---------------------------------------------------------------------------
@@ -439,36 +485,26 @@ fn reconnect_backoff_delay(base: Duration, cap: Duration, attempt: u32) -> Durat
     Duration::from_nanos(u64::try_from(delay_ns).unwrap_or(u64::MAX))
 }
 
-/// 可重试数据面掉线判定（镜像 win32 `is_retryable_disconnect`）：engine
-/// `session_lost_vpn_error` 升级后的「`stage=DataPlane` + `retry=RetrySameOperation`」
-/// 是**唯一**来源（`code=EffectUnknown` 不参与判定——平台类通用码）；据此把「连接
-/// 建立后数据面掉线（可重试）」与「连接期失败（DoNotRetry / 其他 stage）」明确区分。
-/// 与 Core 自身的 Engine 失联终态（`ProtocolSession` + `UseNewOperation`）天然区分。
-#[must_use]
-fn is_retryable_disconnect(error: &wire::VpnError) -> bool {
-    error.stage == wire::ErrorStage::DataPlane as i32
-        && error.retry == wire::RetryAdvice::RetrySameOperation as i32
-}
-
 /// 组装 wire `ReconnectStatus`（纯字段映射，不读配置；镜像 win32）。
 ///
 /// `attempts`/`active` 取投影侧 `reconnect_attempts`/`reconnect_active` 原子（状态
 /// 投影维护）；`auto_reconnect`/`max_attempts` 由调用方从内存配置读（0 = unlimited）。
+/// `reason` 为稳定 reason id：S5b 起承载重连暂停事实（`RECONNECT_PAUSE_*`，前端
+/// toast 按 id 路由）；darwin 不产生 win32 的 R2 恢复事件 id，空串 = 无暂停事实。
 #[must_use]
 fn reconnect_status_from_state(
     attempts: u32,
     active: bool,
     auto_reconnect: bool,
     max_attempts: u32,
+    reason: &str,
 ) -> wire::ReconnectStatus {
     wire::ReconnectStatus {
         auto_reconnect,
         max_attempts,
         current_attempt: attempts,
         active,
-        // T6b（win32 首发第九次窄解冻）：R2 恢复事件 reason id 仅由 win32 core 置位；
-        // darwin R2 后置（计划 §2.6 darwin 解耦后置），恒空 = 无 R2 语义。
-        reason: String::new(),
+        reason: reason.to_owned(),
     }
 }
 
@@ -537,14 +573,44 @@ fn reconnect_stop_intent() -> wire::StopIntent {
 /// win32 `apply_connect_failed_for_route` 的 darwin 对应——把 gRPC `Status` 诚实
 /// 归类为「连接控制阶段失败 + 用新 operation 重试」：失败发生在 Engine 派发之前
 /// （凭据缺失/会话建立失败），数据面从未建立，不用 `DataPlane` 掉线标记（避免自
-/// 激活触发语义）；具体 grpc code/message 只进 `kernel.reconnect.failed` 诊断日志，
-/// 不进 wire（native 细节留空，不伪造分类）。
-fn reconnect_dispatch_vpn_error(_status: &Status) -> exv_vpn_wire::generated::VpnError {
+/// 激活触发语义）。仅生产点明确标记的缺材料原因保留为 reason，其他 gRPC 细节
+/// 留在诊断日志；不把服务端认证拒绝与材料缺失混为一类。
+fn auth_deadline_status(error: AuthDeadlineError) -> Status {
+    match error {
+        AuthDeadlineError::Invalid => Status::invalid_argument("DARWIN_CORE_AUTH_DEADLINE_INVALID"),
+        AuthDeadlineError::Expired => Status::deadline_exceeded("DARWIN_CORE_AUTH_DEADLINE_EXPIRED"),
+        AuthDeadlineError::Clock => Status::internal("DARWIN_CORE_AUTH_CLOCK_FAILED"),
+    }
+}
+fn check_auth_deadline(deadline: Option<AuthDeadline>) -> Result<(), Status> {
+    deadline.map(|deadline| deadline.remaining().map(|_| ()).map_err(auth_deadline_status)).unwrap_or(Ok(()))
+}
+
+fn connect_materials_missing(cause: &'static str) -> Status {
+    let mut status = Status::failed_precondition(CONNECTION_CREDENTIALS_MISSING_CODE);
+    status.metadata_mut().insert("x-exv-connect-cause", tonic::metadata::MetadataValue::from_static(cause));
+    status
+}
+
+fn reconnect_materials_missing(status: &Status) -> bool {
+    if status.code() != Code::FailedPrecondition { return false; }
+    let mut causes = status.metadata().get_all("x-exv-connect-cause").iter();
+    let Some(cause) = causes.next() else { return false; };
+    causes.next().is_none() && matches!(cause.to_str().ok(),
+        Some("atrust-material-missing" | "cisco-material-missing"))
+}
+
+fn reconnect_dispatch_vpn_error(status: &Status) -> exv_vpn_wire::generated::VpnError {
     exv_vpn_wire::generated::VpnError {
         code: exv_vpn_wire::generated::ErrorCode::EffectUnknown as i32,
         stage: exv_vpn_wire::generated::ErrorStage::ConnectingControl as i32,
         certainty: exv_vpn_wire::generated::EffectCertainty::Unknown as i32,
         retry: exv_vpn_wire::generated::RetryAdvice::UseNewOperation as i32,
+        reason: if reconnect_materials_missing(status) {
+            CONNECTION_CREDENTIALS_MISSING_CODE.into()
+        } else {
+            String::new()
+        },
         ..Default::default()
     }
 }
@@ -574,18 +640,38 @@ fn reconnect_exhausted_vpn_error() -> exv_vpn_wire::generated::VpnError {
     reconnect_dispatch_vpn_error(&Status::resource_exhausted("auto reconnect exhausted"))
 }
 
-/// 有界纯 libc 进程存活观察（MAC-LIFECYCLE-15 S1；判据参照
-/// `kill_matrix_real.rs` 的 `wait_for_engine_exit`：`kill(pid, 0)`）。
-///
-/// 对存活进程返回 0；进程已消失返回 ESRCH；非 root Core 探测 root Engine 得到
-/// EPERM——进程存在，视为存活。已知局限：僵尸进程对 `kill(pid, 0)` 仍返回成功
-/// （Engine 由服务代理 fork，退出后由其回收）；本检查只是会话复用前的第二道观察，
-/// 主判据是事件驱动的状态流终止观察点（见 `spawn_status_projection`）。
-fn engine_session_alive(pid: u32) -> bool {
-    // SAFETY: kill(2) 只读取参数；signal 0 不向目标进程发送任何信号。
-    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    result == 0
-        || (result == -1 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+/// 仅记录本次 Stop RPC 的原错误；未取得回执不证明资源已清或仍有残留。
+const STOP_TOTAL_BUDGET: Duration = Duration::from_secs(20);
+
+/// 标准 grpc-timeout 是逐跳剩余量；先消费 metadata，再解包消息。
+fn stop_request_deadline<T>(request: &Request<T>) -> Result<tokio::time::Instant, Status> {
+    let mut budget = STOP_TOTAL_BUDGET;
+    if let Some(value) = request.metadata().get("grpc-timeout") {
+        let text = value.to_str().map_err(|_| Status::invalid_argument("stop: invalid grpc-timeout"))?;
+        if text.len() < 2 || text.len() > 9 { return Err(Status::invalid_argument("stop: invalid grpc-timeout")); }
+        let (digits, unit) = text.split_at(text.len() - 1);
+        if !digits.bytes().all(|digit| digit.is_ascii_digit()) { return Err(Status::invalid_argument("stop: invalid grpc-timeout")); }
+        let value: u64 = digits.parse().map_err(|_| Status::invalid_argument("stop: invalid grpc-timeout"))?;
+        let duration = match unit {
+            "H" => Duration::from_secs(value * 3600), "M" => Duration::from_secs(value * 60),
+            "S" => Duration::from_secs(value), "m" => Duration::from_millis(value),
+            "u" => Duration::from_micros(value), "n" => Duration::from_nanos(value),
+            _ => return Err(Status::invalid_argument("stop: invalid grpc-timeout")),
+        };
+        budget = budget.min(duration);
+    }
+    Ok(tokio::time::Instant::now() + budget)
+}
+
+fn log_stop_unconfirmed(logs: &crate::log_aggregator::LogAggregator, error: &EngineLifecycleError) {
+    let fields = match error {
+        EngineLifecycleError::Observe(crate::ObserveError::Rpc(status)) => vec![
+            ("rpc_code", format!("{:?}", status.code())),
+            ("rpc_message", status.message().to_owned()),
+        ],
+        _ => vec![("error", format!("{error:?}"))],
+    };
+    logs.append_core("error", "core", "STOP_UNCONFIRMED", "停止RPC未取得完成回执", &fields);
 }
 
 /// Engine 会话拉起接缝：生产固定为服务代理的完整拉起路径；测试注入可计数的
@@ -616,6 +702,24 @@ enum LiveEngineSession {
 }
 
 impl LiveEngineSession {
+    fn proxy_observe_handle(&self) -> Option<crate::engine_lifecycle_real::EngineProxyObserveHandle> {
+        match self {
+            Self::Live(session) => session.proxy_observe_handle(),
+            #[cfg(test)]
+            Self::Fixture(_) => None,
+        }
+    }
+
+    fn latency_refresh_handle(&self) -> Option<EngineLatencyRefresh> {
+        match self {
+            Self::Live(session) => session
+                .latency_refresh_handle()
+                .map(EngineLatencyRefresh::Live),
+            #[cfg(test)]
+            Self::Fixture(session) => Some(session.latency_refresh_handle()),
+        }
+    }
+
     /// 本会话对应 Engine 进程的 pid（bootstrap `Ready` record 的真实 pid；服务
     /// 形态常驻 engine pid 未知，恒 0）。
     fn engine_pid(&self) -> u32 {
@@ -636,25 +740,6 @@ impl LiveEngineSession {
         }
     }
 
-    /// 复用前的 liveness 观察：生产会话形态=有界纯 libc 存活检查；服务形态=固定
-    /// 端点文件在场（engine 由 launchd 常驻；崩溃残留窗口由状态流 EOF 投影重置
-    /// 兜底——本检查只是复用前第二道观察）；fixture=受控存活标志。
-    fn is_alive(&self) -> bool {
-        match self {
-            Self::Live(session) => match session.kind() {
-                crate::engine_lifecycle_real::EngineSessionKind::Session => {
-                    engine_session_alive(session.engine_pid())
-                }
-                crate::engine_lifecycle_real::EngineSessionKind::Service => {
-                    std::path::Path::new(crate::service_status::SERVICE_ENGINE_SOCKET_PATH)
-                        .exists()
-                }
-            },
-            #[cfg(test)]
-            Self::Fixture(session) => session.is_alive(),
-        }
-    }
-
     /// 挂接 Engine 状态流（attach-before-apply：必须先挂流再 `ApplyTunnel`）。
     async fn attach_connect_status(
         &mut self,
@@ -665,7 +750,7 @@ impl LiveEngineSession {
                 .await
                 .map(|stream| EngineUpdateStream::Live(Box::new(stream))),
             #[cfg(test)]
-            Self::Fixture(session) => Ok(session.attach_connect_status()),
+            Self::Fixture(session) => session.attach_connect_status().await,
         }
     }
 
@@ -679,7 +764,7 @@ impl LiveEngineSession {
                 .await
                 .map(|stream| EngineUpdateStream::Live(Box::new(stream))),
             #[cfg(test)]
-            Self::Fixture(session) => Ok(session.attach_stats()),
+            Self::Fixture(session) => session.attach_stats(),
         }
     }
 
@@ -693,7 +778,7 @@ impl LiveEngineSession {
                 .await
                 .map(|stream| EngineUpdateStream::Live(Box::new(stream))),
             #[cfg(test)]
-            Self::Fixture(session) => Ok(session.attach_logs()),
+            Self::Fixture(session) => session.attach_logs(),
         }
     }
 
@@ -710,6 +795,14 @@ impl LiveEngineSession {
     }
 
     /// 把断开请求交给同一已认证 Engine 通道。
+    async fn auth_receiver_control(&mut self, request: wire::AuthReceiverControlRequest) -> Result<wire::AuthReceiverControlReply, EngineLifecycleError> {
+        match self {
+            Self::Live(session) => session.auth_receiver_control(request).await,
+            #[cfg(test)]
+            Self::Fixture(session) => session.auth_receiver_control(request),
+        }
+    }
+
     async fn stop_tunnel(
         &mut self,
         request: exv_vpn_wire::generated::StopTunnelRequest,
@@ -717,11 +810,11 @@ impl LiveEngineSession {
         match self {
             Self::Live(session) => session.stop_tunnel(request).await,
             #[cfg(test)]
-            Self::Fixture(session) => Ok(session.stop_tunnel(request)),
+            Self::Fixture(session) => session.stop_tunnel(request).await,
         }
     }
 
-    /// 关闭 Engine client；真实 Engine 会在唯一已认证连接结束后自行退出并清理。
+    /// 释放本会话 client；不读取 Engine 进程终态，也不生成 Stop 完成回执。
     fn close(self) -> Result<(), EngineLifecycleError> {
         match self {
             Self::Live(session) => session.close(),
@@ -743,6 +836,23 @@ impl LiveEngineSession {
 
 /// W2 心跳句柄的统一面：生产=克隆自已认证通道的 tonic client；fixture=共享记录器
 /// （测试观测点：记录每条 `KeepAlive` 的到达时刻与 tick）。
+enum EngineLatencyRefresh {
+    Live(crate::engine_lifecycle_real::EngineLatencyRefreshHandle),
+    #[cfg(test)]
+    UnsupportedFixture,
+}
+impl EngineLatencyRefresh {
+    async fn trigger(
+        &mut self,
+        operation_id: Vec<u8>,
+    ) -> Result<wire::HelperLatencyRefreshReply, Status> {
+        match self {
+            Self::Live(handle) => handle.trigger_latency_refresh(operation_id).await,
+            #[cfg(test)]
+            Self::UnsupportedFixture => Err(Status::unimplemented("fixture has no latency owner")),
+        }
+    }
+}
 enum EngineHeartbeat {
     Live(crate::engine_lifecycle_real::EngineHeartbeatHandle),
     #[cfg(test)]
@@ -818,36 +928,123 @@ impl<T> EngineUpdateStream<T> {
     }
 }
 
+/// S5b：重连暂停的稳定 reason id（wire `ReconnectStatus.reason`；前端 toast 按 id
+/// 路由）。owner 失配=已保存密文归属账户与当前受理/配置账户不一致；清除=已保存
+/// 密文被显式清除（受理快照联动丢弃）。
+const RECONNECT_PAUSE_OWNER_MISMATCH: &str = "reconnect_paused_owner_mismatch";
+const RECONNECT_PAUSE_CREDENTIALS_CLEARED: &str = "reconnect_paused_credentials_cleared";
+
+/// S5b（2026-10-26 C-10 调和）：Cisco 连接受理时对"已持久化凭据对"（用户名+解密
+/// 密码）做的内存态快照。重连组装优先使用快照值（免疫连接中的凭据/用户名修改，
+/// 重连会话与受理会话同账户同密码）；内存态零化类型，随会话策略同生命周期（新会
+/// 话受理替换、显式 Stop 清空时 Drop 零化），显式"清除密码"降权点联动丢弃。
+/// 一次性连接（persist=false）不建快照——其资格由受理期规则关闭。
+#[derive(Clone)]
+struct AdmissionCredentialSnapshot {
+    username: String,
+    password: zeroize::Zeroizing<String>,
+}
+
+impl std::fmt::Debug for AdmissionCredentialSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 秘密不进任何 Debug 输出（结构可能随策略被派生 Debug 打印）。
+        f.debug_struct("AdmissionCredentialSnapshot")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 /// 一次用户连接受理时冻结的重连策略；自动重连尝试复用同一份值。
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SessionReconnectPolicy {
+    atrust_auto_login: bool,
+    atrust_server: String,
+    auth_mode: String,
+    config_dir: String,
+    user_agent: String,
     enabled: bool,
     max_attempts: u32,
     backoff: bool,
+    protocol: Protocol,
+    identity: Option<wire::SessionIdentity>,
+    /// S5b：Cisco 受理快照（受理时的已持久化账密对；一次性连接恒 `None`）。
+    credential_snapshot: Option<AdmissionCredentialSnapshot>,
+    /// S5b：重连暂停的稳定 reason id（`RECONNECT_PAUSE_*`；`None` = 无暂停事实）。
+    pause_reason: Option<&'static str>,
 }
 
 impl SessionReconnectPolicy {
     fn from_config(config: &DarwinUiConfig) -> Self {
         Self {
-            enabled: config.auto_reconnect(),
+            atrust_auto_login: true,
+            atrust_server: config.atrust_server().to_owned(),
+            auth_mode: "headless".to_owned(),
+            config_dir: config.config_dir().to_string_lossy().into_owned(),
+            user_agent: config.user_agent().to_owned(),
+            // S5b（C-10）：受理期冻结值与活评估同公式——凭据门槛不再对网页登录
+            // 用户恒 false（aTrust 臂=会话缓存/恢复材料）；ENGINE_LOST 时点由
+            // `valid_reconnect_credential_source` 对活状态另行求值。
+            enabled: config.auto_reconnect() && valid_reconnect_credential_source(config, None),
             max_attempts: config.auto_reconnect_max_attempts(),
             backoff: config.auto_reconnect_backoff(),
+            protocol: config.protocol(),
+            identity: None,
+            credential_snapshot: None,
+            pause_reason: None,
         }
     }
 }
 
+/// C-10（S5b）ENGINE_LOST 时点活评估的有效凭据源单一公式（失联信号发射与 worker
+/// 消费两点共用）：
+///
+/// 有效凭据源 =（Cisco：受理快照存在）∨（Cisco：磁盘账密对 owner 匹配且与受理
+/// 身份一致）∨（aTrust：会话缓存或恢复材料）。
+///
+/// * 快照臂：受理时已持久化的账密对在内存——免疫连接中凭据/用户名修改（受理
+///   账户与磁盘已保存账户不一致时仍按受理账户重连，静默账号切换由本臂消灭）；
+/// * 磁盘臂：`has_saved_credential_pair`（owner 匹配门）且冻结受理身份与当前配置
+///   用户名一致（受理身份缺席——policy 生命周期洞——按磁盘对自身求值）；
+/// * aTrust 臂（S5b 路径结论验证）：重连凭据由既有 session cache 与 recovery
+///   material（认证续段获取轮）承担——受理材料即快照语义，无需另建账密快照。
+///   缓存命中为直接源；缓存缺席时恢复轮可再获取（auth continuation），故 aTrust
+///   会话的有效性由受理事实本身承载（获取失败仍按既有"一次尝试即收束"终止）。
+fn valid_reconnect_credential_source(
+    config: &DarwinUiConfig,
+    policy: Option<&SessionReconnectPolicy>,
+) -> bool {
+    let protocol = policy
+        .map(|policy| policy.protocol)
+        .unwrap_or_else(|| config.protocol());
+    match protocol {
+        Protocol::Cisco => {
+            if policy.is_some_and(|policy| policy.credential_snapshot.is_some()) {
+                return true;
+            }
+            config.has_saved_credential_pair()
+                && policy
+                    .and_then(|policy| policy.identity.as_ref())
+                    .map_or(true, |identity| identity.username == config.username())
+        }
+        Protocol::Atrust => true,
+    }
+}
+
 /// 当前会话策略与重连进度共同构成运行事实；尚未连接时不投影保存设置。
+/// S5b：暂停 reason lane（`RECONNECT_PAUSE_*`）镜像进 wire 供前端 toast 路由。
 fn session_reconnect_status(
     policy: &Mutex<Option<SessionReconnectPolicy>>,
     attempts: &AtomicU32,
     active: &AtomicBool,
 ) -> Option<wire::ReconnectStatus> {
-    (*lock_recover(policy)).map(|policy| {
+    lock_recover(policy).as_ref().map(|policy| {
         reconnect_status_from_state(
             attempts.load(Ordering::Relaxed),
             active.load(Ordering::Acquire),
             policy.enabled,
             policy.max_attempts,
+            policy.pause_reason.unwrap_or(""),
         )
     })
 }
@@ -859,7 +1056,12 @@ fn session_reconnect_status(
 /// 拥有 CSTP、utun 或任何网络数据通路。
 pub(crate) struct LiveConnectionProjection {
     /// 每次连接／停止递增，取消此前排队的唤醒或退避重连。
-    reconnect_generation: Arc<AtomicU64>,
+    reconnect_generation: Arc<session_orchestration::SessionAdmission>,
+    auth_runtime_epoch: Vec<u8>,
+    #[cfg(test)]
+    auth_acquisition_duration: Duration,
+    #[cfg(test)]
+    auth_cleanup_duration: Duration,
     config: Arc<Mutex<DarwinUiConfig>>,
     /// 用户连接受理时冻结；ConfigSet 只更新 config，自动重连复用本策略。
     reconnect_session_policy: Arc<Mutex<Option<SessionReconnectPolicy>>>,
@@ -877,6 +1079,8 @@ pub(crate) struct LiveConnectionProjection {
     logs: Arc<LogControl>,
     /// Engine 会话拉起接缝：生产=服务代理完整拉起；测试=可计数的 fixture 拉起。
     launch_session: SessionLaunch,
+    #[cfg(test)]
+    cached_session_probe: Option<cached_headless::ProbeSeam>,
     /// 上游代理 TUN 检测缓存（MAC-PROXY-16 S1，与 service 共享同一实例）：发布边界
     /// 只读附加，连接受理/断开终态边界刷新。
     proxy_tun: Arc<ProxyTunCache>,
@@ -904,8 +1108,7 @@ pub(crate) struct LiveConnectionProjection {
     /// P4 v2：服务生命周期执行器（连接挂钩 `ensure_running` 用；夹具默认恒
     /// healthy 探测，生产经 [`Self::with_service_seams`] 注入真实提权编排）。
     service_lifecycle: Arc<ServiceLifecycle>,
-    /// W2.5：服务形态连接路径接缝（facts→修复阶梯→固定端点直连；夹具默认恒
-    /// 回退会话路径）。
+    /// 服务形态原连接与一次恢复动作接缝。
     service_engine: Arc<ServiceEnginePath>,
     /// W2.5：当前会话形态的 `snapshot.mode` 值（会话建立点写入；发布边界附加。
     /// 会话/fixture 形态为空串——W3 补 "oneshot"）。
@@ -919,40 +1122,25 @@ pub(crate) struct LiveConnectionProjection {
 }
 
 /// W2.5 服务形态固定端点直连 future/接缝类型。
-type ServiceEngineConnectFuture = Pin<
-    Box<
-        dyn Future<
-                Output = Result<
-                    crate::engine_lifecycle_real::EngineControlSession,
-                    crate::engine_lifecycle_real::EngineLifecycleError,
-                >,
-            > + Send,
-    >,
->;
-type ServiceEngineConnect = Arc<dyn Fn() -> ServiceEngineConnectFuture + Send + Sync>;
-
-/// W2.5 服务形态连接路径的可注入接缝（生产默认真实探测/帧/直连；夹具默认恒
-/// 「engine down 且不可修复」——连接路径走既有会话路径，既有测试零扰动）。
 ///
-/// 编排语义（权威规范 §二.2.2 修复分层 + W2.5 设计 §3）：
-/// 1. facts healthy → 直连固定端点；
-/// 2. down → daemon socket 可连 → `EnsureEngine` 帧（免提权）；daemon 不在 →
-///    经 [`ServiceLifecycle::ensure_running`] 的既有 osascript `start`（该动词已
-///    扩展为同时确保 engine job bootstrap）；
-/// 3. 有界等端点（15s/250ms）→ 直连；任一步失败回退既有会话路径（过渡兼容，
-///    E8 的 `StartEngine` 会话路径删除随 W3 收口）。
+/// 2026-09-30 修复（M2b）：返回 [`LiveEngineSession`] 而非裸
+/// [`crate::engine_lifecycle_real::EngineControlSession`]——生产恒为 `Live` 变体
+///（行为不变）；测试可注入 `Fixture` 变体复现「attach 遭占用型拒绝」，
+/// 由原挂流返回驱动，不触碰宿主端点。
+type ServiceEngineConnectFuture =
+    Pin<Box<dyn Future<Output = Result<LiveEngineSession, EngineLifecycleError>> + Send>>;
+type ServiceEngineConnect = Arc<dyn Fn(Option<tokio::time::Instant>) -> ServiceEngineConnectFuture + Send + Sync>;
+
+/// 服务端点原连接、EnsureEngine 原帧接缝；probe 仅供独立模式展示选择。
 pub(crate) struct ServiceEnginePath {
     /// engine 端点事实探测（engine.sock 在+可连=healthy）。
     pub(crate) probe: ServiceStatusProbe,
-    /// `EnsureEngine` 帧发送（成功=true）。
+    /// `EnsureEngine` 完整原帧结果。
     pub(crate) ensure_engine: Arc<
-        dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
+        dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), crate::service_agent_client::EnsureEngineError>> + Send>> + Send + Sync,
     >,
     /// 固定端点直连（失败=Err）。
-    pub(crate) connect: ServiceEngineConnect,
-    /// 有界等端点的上界与轮询间隔。
-    pub(crate) wait_bound: Duration,
-    pub(crate) wait_poll: Duration,
+    connect: ServiceEngineConnect,
 }
 
 impl ServiceEnginePath {
@@ -968,19 +1156,19 @@ impl ServiceEnginePath {
                         crate::elevation::current_core_credentials(),
                     )
                     .await
-                    .is_ok()
                 })
             }),
-            connect: std::sync::Arc::new(|| {
-                Box::pin(crate::engine_lifecycle_real::connect_service_engine_session())
+            connect: std::sync::Arc::new(|deadline| {
+                Box::pin(async move {
+                    crate::engine_lifecycle_real::connect_service_engine_session_with_deadline(deadline)
+                        .await
+                        .map(LiveEngineSession::Live)
+                })
             }),
-            wait_bound: crate::service_status::ENGINE_ENDPOINT_WAIT_BOUND,
-            wait_poll: crate::service_status::ENGINE_ENDPOINT_WAIT_POLL,
         }
     }
 
-    /// 夹具默认接缝：engine 恒 down 且端点永不出现（连接路径直接回退会话路径；
-    /// 不触宿主文件系统/网络）。
+    /// 夹具默认原连接失败；不触宿主文件系统或网络。
     pub(crate) fn hermetic() -> Self {
         Self {
             probe: std::sync::Arc::new(|| {
@@ -990,20 +1178,20 @@ impl ServiceEnginePath {
                     ..crate::service_status::ServiceAgentFacts::default()
                 }))
             }),
-            ensure_engine: std::sync::Arc::new(|| Box::pin(std::future::ready(false))),
-            connect: std::sync::Arc::new(|| {
+            ensure_engine: std::sync::Arc::new(|| Box::pin(std::future::ready(Err(crate::service_agent_client::EnsureEngineError::InvalidOwner)))),
+            connect: std::sync::Arc::new(|_| {
                 Box::pin(std::future::ready(Err(
                     crate::engine_lifecycle_real::EngineLifecycleError::Bootstrap,
                 )))
             }),
-            wait_bound: Duration::from_millis(1),
-            wait_poll: Duration::from_millis(1),
         }
     }
 }
 
 /// 一次 operation 的状态投影参数包：状态投影任务所需的共享状态与身份信息。
 struct OperationProjection {
+    candidate_receipt: Option<atrust_session_cache::CandidateReceipt>,
+    generation: u64,
     stats_state: Arc<std::sync::Mutex<LiveStatsState>>,
     runtime_epoch: Vec<u8>,
     operation_id: Vec<u8>,
@@ -1018,6 +1206,51 @@ struct OperationProjection {
 }
 
 impl LiveConnectionProjection {
+    fn validate_latency_operation(&self, operation_id: &[u8]) -> Result<(), Status> {
+        let reject = || Status::failed_precondition("DARWIN_LATENCY_OWNER_NOT_ACTIVE");
+        let snapshot = self.events.current_snapshot().ok_or_else(reject)?;
+        if operation_id.len() != 16
+            || snapshot.operation_id != operation_id
+            || !matches!(
+                snapshot.state,
+                Some(wire::runtime_snapshot::State::Connected(_))
+            )
+        {
+            return Err(reject());
+        }
+        let identity = self
+            .reconnect_generation
+            .identity_for(operation_id)
+            .ok_or_else(reject)?;
+        if identity.protocol != "cisco" {
+            return Err(Status::unimplemented("当前协议不支持时延刷新"));
+        }
+        Ok(())
+    }
+
+    async fn trigger_latency_refresh(
+        &self,
+        operation_id: Vec<u8>,
+    ) -> Result<wire::KernelLatencyRefreshReply, Status> {
+        let mut handle = {
+            let session = self.session.lock().await;
+            self.validate_latency_operation(&operation_id)?;
+            session
+                .as_ref()
+                .and_then(LiveEngineSession::latency_refresh_handle)
+                .ok_or_else(|| Status::failed_precondition("DARWIN_LATENCY_OWNER_NOT_ACTIVE"))?
+        };
+        // 同一已认证 client 的短句柄；不持会话/组合锁等待 Engine。
+        let reply = handle.trigger(operation_id.clone()).await?;
+        self.validate_latency_operation(&operation_id)?;
+        if !reply.accepted {
+            return Err(Status::failed_precondition(
+                "DARWIN_LATENCY_REFRESH_NOT_ACCEPTED",
+            ));
+        }
+        Ok(wire::KernelLatencyRefreshReply { accepted: true })
+    }
+
     /// 以固定拉起接缝创建投影；`new` 传入生产接缝，测试注入可计数的 fixture
     /// 拉起。生产行为不因接缝存在而变化：每次 Connect 缺失会话时调用恰好一次。
     /// 事件经共享 [`EventBus`] 发布（tick 由总线铸造；构造期 initial Idle 已占
@@ -1033,11 +1266,18 @@ impl LiveConnectionProjection {
             config,
             reconnect_session_policy: Arc::new(Mutex::new(None)),
             session: Arc::new(tokio::sync::Mutex::new(None)),
-            reconnect_generation: Arc::new(AtomicU64::new(0)),
+            reconnect_generation: Arc::new(session_orchestration::SessionAdmission::default()),
+            auth_runtime_epoch: auth_continuation::interaction_id(),
+            #[cfg(test)]
+            auth_acquisition_duration: Duration::from_secs(300),
+            #[cfg(test)]
+            auth_cleanup_duration: STOP_TOTAL_BUDGET,
             events,
             stats_state: Arc::new(std::sync::Mutex::new(LiveStatsState::new())),
             logs,
             launch_session,
+            #[cfg(test)]
+            cached_session_probe: None,
             proxy_tun,
             reconnect_attempts: Arc::new(AtomicU32::new(0)),
             reconnect_active: Arc::new(AtomicBool::new(false)),
@@ -1089,94 +1329,36 @@ impl LiveConnectionProjection {
         self
     }
 
-    async fn connect(
-        &self,
-        request: &ConnectRequest,
-        ui_credentials: Option<UiCredentialPackage>,
-        persist_credentials: bool,
-    ) -> Result<OperationReply, Status> {
-        let generation = self.reconnect_generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-        self.reconnect_active.store(false, Ordering::Release);
-        self.connect_in_generation(request, ui_credentials, persist_credentials, generation, true).await
-    }
-
-    #[allow(
-        clippy::too_many_lines,
-        reason = "连接受理承载 attach-before-apply 的三条流挂接与入库节点，线性展开保持事实顺序可读"
-    )]
-    async fn connect_in_generation(
-        &self,
-        request: &ConnectRequest,
-        ui_credentials: Option<UiCredentialPackage>,
-        persist_credentials: bool,
-        generation: u64,
-        new_session: bool,
-    ) -> Result<OperationReply, Status> {
-        let intent = request
-            .intent
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
-        let lookup_key = intent
-            .lookup_key
-            .as_ref()
-            .filter(|key| key.operation_id.len() == 16)
-            .ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
-        let dispatch_started = std::time::Instant::now();
-        network_diagnostics::request_snapshot(
-            Arc::clone(self.logs.aggregator()), Arc::clone(&self.proxy_tun),
-            DiagnosticContext::new(&lookup_key.operation_id, generation, self.reconnect_attempts.load(Ordering::Relaxed)),
-            "connect_admitted",
-        );
-        // MAC-PROXY-16 S1 连接受理边界探测：此刻 Engine 尚未拉起/未 apply 隧道，
-        // 不存在己方 utun，探测事实不含自身（无特权只读；失败 fail open 到 None）。
-        self.proxy_tun.refresh();
-        let (secret_payload, plan) =
-            self.connect_payload_and_plan(ui_credentials, persist_credentials)?;
-        let mut session = self.session.lock().await;
-        if generation != self.reconnect_generation.load(Ordering::Acquire) {
-            return Err(Status::cancelled("连接已被后续用户操作取消"));
-        }
-        if new_session {
-            let config = lock_recover(&self.config);
-            *lock_recover(&self.reconnect_session_policy) =
-                Some(SessionReconnectPolicy::from_config(&config));
-            self.reconnect_attempts.store(0, Ordering::Relaxed);
-            self.reconnect_active.store(false, Ordering::Release);
-        }
-        // 复用前的 liveness 观察（MAC-LIFECYCLE-15 S1）：engine_pid 已死即丢弃旧会话，
-        // 本次 Connect 走完整拉起路径。这是状态流终止事件驱动重置之外的第二道观察点
-        // （覆盖 Engine 在无活动状态投影期间死亡的场景）。死会话的伴生 keepalive
-        // ticker 一并 abort（W2：不留孤儿 ticker）。
-        if session
-            .as_ref()
-            .is_some_and(|existing| !existing.is_alive())
-        {
-            *session = None;
-            self.abort_keepalive_ticker().await;
-        }
+    async fn prepare_engine_session(
+        &self, session: &mut Option<LiveEngineSession>, generation: u64,
+        auth_deadline: Option<AuthDeadline>,
+    ) -> Result<(), Status> {
+        self.check_service_attempt(generation, auth_deadline)?;
         if session.is_none() {
             // W3：连接传输判定唯一分叉（前端零逻辑；v3 §一 四态表）。服务在位
-            // （端点 healthy 或已装）走常驻端点+修复阶梯；未装/不可判定走 oneshot
+            //（端点 healthy 或已装）走常驻端点+修复阶梯；未装/不可判定走 oneshot
             // 一次性提权直拉（弹窗可能在此出现——对齐 PromptStart 的提权时机）。
-            let new_session = match self.resolve_transport().await {
+            let transport = self.await_auth_preparation(generation, auth_deadline, self.resolve_transport()).await?;
+            check_auth_deadline(auth_deadline)?;
+            let new_session = match transport {
                 ResolvedTransport::Service => {
-                    LiveEngineSession::Live(self.service_engine_session_or_reject().await?)
+                    self.service_engine_session_or_reject(generation, auth_deadline).await?
                 }
                 ResolvedTransport::Oneshot => {
-                    (self.launch_session)()
-                        .await
+                    self.await_auth_preparation(generation, auth_deadline, (self.launch_session)())
+                        .await?
                         .map_err(|error| engine_session_status(&error))?
                 }
             };
             // W2.5：会话形态即 mode 事实（发布边界附加；服务形态="service"）。
             *lock_recover(&self.engine_mode) = new_session.mode();
-            // W2 心跳：会话建立（session 槽位填充点）→ 拉起伴生 keepalive ticker
-            //（首拍立即，经克隆通道发送；观察流任务不刷心跳——ticker 是唯一发送方）。
-            let ticker = new_session
-                .heartbeat_handle()
-                .map(|heartbeat| spawn_keepalive_ticker(heartbeat, HEARTBEAT_PERIOD));
+            // W2 心跳：会话建立（session 槽位填充点）→ 拉起伴生 keepalive
+            // ticker（首拍立即，经克隆通道发送；观察流任务不刷心跳——ticker 是
+            // 唯一发送方）。
             {
-                let mut ticker_slot = self.keepalive_ticker.lock().await;
+                let mut ticker_slot = self.await_auth_preparation(generation, auth_deadline, self.keepalive_ticker.lock()).await?;
+                let ticker = new_session.heartbeat_handle()
+                    .map(|heartbeat| spawn_keepalive_ticker(heartbeat, HEARTBEAT_PERIOD));
                 if let Some(previous) = ticker_slot.take() {
                     previous.abort();
                 }
@@ -1184,6 +1366,7 @@ impl LiveConnectionProjection {
             }
             *session = Some(new_session);
             // MAC-OBS-13 S1：Engine 会话建立的真实节点入库（Core 自身事件）。
+            // 2026-09-30（M2b）：重建复用本建立块——每次真实建立各记一条。
             self.logs.aggregator().append_core(
                 "info",
                 "core",
@@ -1198,32 +1381,189 @@ impl LiveConnectionProjection {
                 )],
             );
         }
+        Ok(())
+    }
+
+    async fn prepare_auth_control(&self, deadline: AuthDeadline) -> Result<(), Status> {
+        let generation = self.reconnect_generation.current();
+        let mut session = self.await_auth_preparation(generation, Some(deadline), self.session.lock()).await?;
+        self.prepare_engine_session(&mut session, generation, Some(deadline)).await
+    }
+
+    async fn auth_receiver_control(&self, request: wire::AuthReceiverControlRequest, deadline: AuthDeadline) -> Result<wire::AuthReceiverControlReply, Status> {
+        let generation = self.reconnect_generation.current();
+        let mut session = self.await_auth_preparation(generation, Some(deadline), self.session.lock()).await?;
+        self.prepare_engine_session(&mut session, generation, Some(deadline)).await?;
+        let engine = session.as_mut().ok_or_else(|| Status::unavailable(CONNECTION_ENGINE_NOT_ATTACHED_CODE))?;
+        let result = self.await_auth_preparation(generation, Some(deadline), engine.auth_receiver_control(request)).await?
+            .map_err(|error| match error {
+                EngineLifecycleError::Observe(crate::ObserveError::Rpc(status)) => status,
+                error => engine_session_status(&error),
+            });
+        if result.as_ref().is_err_and(|status| status.code() == tonic::Code::Unimplemented) {
+            // 本次准备已发现旧引擎缺少接口；释放通道，服务更新后重新建立会话。
+            session.take();
+            if let Some(ticker) = self.keepalive_ticker.lock().await.take() {
+                ticker.abort();
+            }
+        }
+        result
+    }
+
+    async fn connect(
+        &self,
+        request: &ConnectRequest,
+        ui_credentials: Option<UiSecretPayload>,
+        persist_credentials: bool,
+    ) -> Result<OperationReply, Status> {
+        self.connect_with_auth_deadline(request, ui_credentials, persist_credentials, None).await
+    }
+
+    async fn connect_with_auth_deadline(
+        &self,
+        request: &ConnectRequest,
+        ui_credentials: Option<UiSecretPayload>,
+        persist_credentials: bool,
+        auth_deadline: Option<AuthDeadline>,
+    ) -> Result<OperationReply, Status> {
+        check_auth_deadline(auth_deadline)?;
+        let clear_auth_acquisition = self.auth_acquisition().is_some();
+        let generation = self.reconnect_generation.advance();
+        if clear_auth_acquisition { self.publish_auth_acquisition(); }
+        let result = self.connect_in_generation_with_auth_deadline(request, ui_credentials, persist_credentials, generation, true, None, auth_deadline).await;
+        self.reconnect_generation.finish_request(generation);
+        result
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "连接受理承载 attach-before-apply 的三条流挂接与入库节点，线性展开保持事实顺序可读"
+    )]
+    async fn connect_in_generation(
+        &self,
+        request: &ConnectRequest,
+        ui_credentials: Option<UiSecretPayload>,
+        persist_credentials: bool,
+        generation: u64,
+        new_session: bool,
+        recovery_policy: Option<SessionReconnectPolicy>,
+    ) -> Result<OperationReply, Status> {
+        self.connect_in_generation_with_auth_deadline(request, ui_credentials, persist_credentials,
+            generation, new_session, recovery_policy, None).await
+    }
+
+    async fn connect_in_generation_with_auth_deadline(
+        &self,
+        request: &ConnectRequest,
+        ui_credentials: Option<UiSecretPayload>,
+        persist_credentials: bool,
+        generation: u64,
+        new_session: bool,
+        recovery_policy: Option<SessionReconnectPolicy>,
+        auth_deadline: Option<AuthDeadline>,
+    ) -> Result<OperationReply, Status> {
+        self.connect_in_generation_material(request, ui_credentials, persist_credentials, generation,
+            new_session, recovery_policy, auth_deadline, false).await
+    }
+
+    async fn connect_in_generation_material(
+        &self, request: &ConnectRequest, ui_credentials: Option<UiSecretPayload>, persist_credentials: bool,
+        generation: u64, new_session: bool, recovery_policy: Option<SessionReconnectPolicy>,
+        auth_deadline: Option<AuthDeadline>, admitted_recovery_material: bool,
+    ) -> Result<OperationReply, Status> {
+        if new_session == recovery_policy.is_some() {
+            return Err(Status::invalid_argument(CONNECTION_CREDENTIALS_INVALID_CODE));
+        }
+        if !new_session { self.require_background_reconnect()?; }
+        if admitted_recovery_material && !self.admitted_auth_material(generation, auth_deadline) {
+            return Err(Status::cancelled("DARWIN_CORE_CONNECTION_CANCELLED"));
+        }
+        let intent = request
+            .intent
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
+        let lookup_key = intent
+            .lookup_key
+            .as_ref()
+            .filter(|key| key.operation_id.len() == 16)
+            .ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
+        if self.events.current_snapshot().is_some_and(|snapshot| snapshot.stop_completion.as_ref().is_some_and(|stop| stop.blocks_new_connect)) {
+            return Err(Status::failed_precondition("DARWIN_ENGINE_CLEANUP_INCOMPLETE：请先重新断开以重试清理"));
+        }
+        // MAC-PROXY-16 S1 连接受理边界探测：此刻 Engine 尚未拉起/未 apply 隧道，
+        // 不存在己方 utun，探测事实不含自身（无特权只读；失败 fail open 到 None）。
+        self.proxy_tun.refresh();
+        check_auth_deadline(auth_deadline)?;
+        let prepared = self.prepare_connect_payload_inner(ui_credentials, persist_credentials, recovery_policy, new_session, admitted_recovery_material)
+            .map(|(payload, plan, policy, receipt, identity, probe)|
+                (zeroize::Zeroizing::new(payload), plan, policy, receipt, identity, probe));
+        // 配置锁等待也消耗入口期限；过期优先于缺材料回退，已组装秘密按值零化。
+        check_auth_deadline(auth_deadline)?;
+        let (mut secret_payload, plan, mut admitted_policy, candidate_receipt, mut admitted_identity, cached_probe) = prepared?;
+        if new_session {
+            admitted_policy.identity = Some(admitted_identity.clone());
+        } else if let Some(identity) = admitted_policy.identity.as_ref() {
+            admitted_identity = identity.clone();
+        }
+        let auth_deadline = if (new_session || admitted_recovery_material) && admitted_policy.protocol == Protocol::Atrust { auth_deadline } else { None };
+        if let Some(probe) = cached_probe {
+            self.prepare_cached_headless(probe, candidate_receipt.as_ref(), generation, auth_deadline).await?;
+        }
+        let mut session = if admitted_recovery_material {
+            self.await_auth_preparation(generation, auth_deadline, self.session.lock()).await?
+        } else { match auth_deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline.tokio_deadline().map_err(auth_deadline_status)?, self.session.lock()).await
+                .map_err(|_| auth_deadline_status(AuthDeadlineError::Expired))?,
+            None => self.session.lock().await,
+        }};
+        check_auth_deadline(auth_deadline)?;
+        if generation != self.reconnect_generation.current() {
+            return Err(Status::cancelled("DARWIN_CORE_CONNECTION_CANCELLED"));
+        }
+        // 2026-09-30 修复（M2/M2b）：会话建立与 attach 三连流改为循环编排——attach
+        // 任一失败即清会话槽并 abort 伴生 keepalive ticker；若失败为占用型拒绝
+        //（`FailedPrecondition` + `DARWIN_ENGINE_ATTEMPT_ACTIVE`，即被 engine
+        // `SessionOccupiedService` 接管）则清槽后就地重建一次会话（`continue` 重走
+        // 本循环头部的会话建立块——resolve_transport→建立→ticker/mode 全部重建；
+        // ticker 槽的 take/abort 天然防双 ticker）。上界恒 1 次重建，不做循环；重建
+        // 后仍失败按原错误返回（generation 校验仍由本循环之后的既有检查承担）。
+        // engine 侧契约自述「busy 窗口内客户端按真实重试语义重连，直至被接纳」
+        //（service_runtime.rs `retry_until_served`）——M1 消除了探针制造者后，本重建
+        // 覆盖 service agent nudge（uninstall/服务变更路径的瞬时探针形态连接）残余
+        // 场景，把「用户必须手点重试」降为「本次连接自愈」。apply 阶段失败**不清槽**
+        //：attach 已成功证明通道健康，apply 的 typed 拒绝（ADOPT_*、attempt 门）与
+        // 会话可用性无关。
+        let mut occupied_rebuild_budget: u8 = 1;
+        let (connect_status_stream, engine_stats_stream, engine_logs_stream) = loop {
+            check_auth_deadline(auth_deadline)?;
+            self.prepare_engine_session(&mut session, generation, auth_deadline).await?;
+            check_auth_deadline(auth_deadline)?;
+            let attached = self.await_auth_preparation(generation, auth_deadline, attach_engine_streams(&mut session)).await?;
+            check_auth_deadline(auth_deadline)?;
+            match attached {
+                Ok(streams) => break streams,
+                Err(error) => {
+                    // attach 原失败清除此会话；占用型 typed 拒绝仍只重建一次。
+                    *session = None;
+                    self.await_auth_preparation(generation, auth_deadline, self.abort_keepalive_ticker()).await?;
+                    if occupied_rebuild_budget > 0 && is_engine_attempt_active(&error) {
+                        occupied_rebuild_budget -= 1;
+                        self.logs.aggregator().append_core(
+                            "info",
+                            "core",
+                            "ENGINE_SESSION_OCCUPIED_REBUILD",
+                            "attach was rejected by the occupied engine endpoint; dropped the poisoned channel and rebuilding the session once",
+                            &[],
+                        );
+                        continue;
+                    }
+                    return Err(engine_session_status(&error));
+                }
+            }
+        };
         let engine_pid = session.as_ref().map_or(0, LiveEngineSession::engine_pid);
-        let connect_status_stream = session
-            .as_mut()
-            .ok_or_else(|| Status::unavailable(CONNECTION_ENGINE_SESSION_CODE))?
-            .attach_connect_status()
-            .await
-            .map_err(|error| engine_session_status(&error))?;
-        // W-MVP-13：同一已认证控制通道上的既有 `StreamStats` 接缝；在 Apply 前挂接，
-        // 数据面建立后样本不丢。
-        let engine_stats_stream = session
-            .as_mut()
-            .ok_or_else(|| Status::unavailable(CONNECTION_ENGINE_SESSION_CODE))?
-            .attach_stats()
-            .await
-            .map_err(|error| engine_session_status(&error))?;
-        // MAC-OBS-13 S1：同一已认证控制通道上的既有 `StreamLogs` 接缝；同样在
-        // Apply 前挂接，管线启动期的 sink 事件不丢。每次 Connect 重挂即替换
-        // Engine 侧推送通道（last-writer-wins），旧 ingest 任务随旧流 EOF 自行退出。
-        let engine_logs_stream = session
-            .as_mut()
-            .ok_or_else(|| Status::unavailable(CONNECTION_ENGINE_SESSION_CODE))?
-            .attach_logs()
-            .await
-            .map_err(|error| engine_session_status(&error))?;
-        if generation != self.reconnect_generation.load(Ordering::Acquire) {
-            return Err(Status::cancelled("连接已被后续用户操作取消"));
+        if generation != self.reconnect_generation.current() {
+            return Err(Status::cancelled("DARWIN_CORE_CONNECTION_CANCELLED"));
         }
         let reply = {
             let session = session
@@ -1231,10 +1571,9 @@ impl LiveConnectionProjection {
                 .ok_or_else(|| Status::unavailable(CONNECTION_ENGINE_SESSION_CODE))?;
             let mut apply_key = lookup_key.clone();
             apply_key.method = exv_vpn_wire::generated::OperationMethod::ApplyTunnel as i32;
-            session
-                .apply_tunnel(exv_vpn_wire::generated::ApplyTunnelRequest {
-                    lookup_key: Some(apply_key),
-                    plan: Some(plan),
+            let build_request = |secret_payload| exv_vpn_wire::generated::ApplyTunnelRequest {
+                    lookup_key: Some(apply_key.clone()),
+                    plan: Some(plan.clone()),
                     request_digest: intent.request_digest.clone(),
                     secret_payload,
                     windows_connection_mode:
@@ -1242,11 +1581,66 @@ impl LiveConnectionProjection {
                     // T4 连接生命周期信封（EXV_UNFREEZE 2026-09-27）：测试/过渡构造用
                     // proto3 缺省值 = 信封缺省语义（engine 读作 legacy teardown / 不重连 / ui 未知）。
                     on_core_exit: exv_vpn_wire::generated::OnCoreExitPolicy::Unspecified as i32,
-                    reconnect_policy: None,
+                    reconnect_policy: Some(wire::ReconnectPolicyEnvelope {
+                        enabled: admitted_policy.enabled,
+                        on_oneshot_engine_crash: false,
+                        notify: false,
+                    }),
                     ui_pid: 0,
-                })
-                .await
-                .map_err(|error| engine_session_status(&error))?
+                };
+            let retry_payload = zeroize::Zeroizing::new(secret_payload.to_vec());
+            check_auth_deadline(auth_deadline)?;
+            if !new_session { self.require_background_reconnect()?; }
+            match session.apply_tunnel(build_request(std::mem::take(&mut *secret_payload))).await {
+                Err(error) if matches!(&error, EngineLifecycleError::Observe(crate::ObserveError::Rpc(status)) if status.code() == Code::FailedPrecondition && status.message() == "DARWIN_ENGINE_ADOPT_NEW_AUTH") => {
+                    self.reconnect_generation.clear_source(generation);
+                    let stop = reconnect_stop_intent();
+                    self.reconnect_generation.in_generation(generation, || {
+                        lock_recover(&self.stats_state).mark_finished();
+                        if !admitted_recovery_material { self.reconnect_active.store(false, Ordering::Release); }
+                        self.publish(pending_stop_snapshot(&StopRequest { intent: Some(stop.clone()) }, lookup_key.operation_id.clone()));
+                    });
+                    let mut stop_key = stop.lookup_key.expect("generated stop key");
+                    stop_key.method = wire::OperationMethod::StopTunnel as i32;
+                    let reply = match session.stop_tunnel(wire::StopTunnelRequest { lookup_key: Some(stop_key), request_digest: stop.request_digest }).await {
+                        Ok(reply) => reply,
+                        Err(error) => {
+                            self.reconnect_generation.in_generation(generation, || self.publish(session_orchestration::snapshot(&lookup_key.operation_id, session_orchestration::unconfirmed(), None)));
+                            return Err(engine_session_status(&error));
+                        }
+                    };
+                    let done = session_orchestration::completion(&reply);
+                    if !done.stopped || done.blocks_new_connect {
+                        self.reconnect_generation.in_generation(generation, || self.publish(session_orchestration::snapshot(&lookup_key.operation_id, done, None)));
+                        return Err(Status::failed_precondition("DARWIN_ENGINE_CLEANUP_INCOMPLETE：旧认证连接尚未完成停止，请重试断开"));
+                    }
+                    if generation != self.reconnect_generation.current() { return Err(Status::cancelled("DARWIN_CORE_CONNECTION_CANCELLED")); }
+                    if let Err(status) = check_auth_deadline(auth_deadline) {
+                        // 已清除旧来源，必须公布真实 Stop 回执；否则旧投影无法结束 Stopping。
+                        self.reconnect_generation.in_generation(generation, || {
+                            self.publish(session_orchestration::snapshot(&lookup_key.operation_id, done, None));
+                        });
+                        return Err(status);
+                    }
+                    if !new_session {
+                        if let Err(status) = self.require_background_reconnect() {
+                            // 许可撤销只阻止后续 Apply，原 Stop 的真实回执仍须收口。
+                            self.reconnect_generation.in_generation(generation, || {
+                                self.publish(session_orchestration::snapshot(&lookup_key.operation_id, done, None));
+                            });
+                            return Err(status);
+                        }
+                    }
+                    match session.apply_tunnel(build_request(retry_payload.to_vec())).await {
+                        Ok(reply) => reply,
+                        Err(error) => {
+                            self.reconnect_generation.in_generation(generation, || self.publish(session_orchestration::snapshot(&lookup_key.operation_id, done, Some(wire::VpnError { code: wire::ErrorCode::ObservationFailed as i32, stage: wire::ErrorStage::ConnectingControl as i32, retry: wire::RetryAdvice::UseNewOperation as i32, ..Default::default() }))));
+                            return Err(engine_session_status(&error));
+                        }
+                    }
+                }
+                result => result.map_err(|error| engine_session_status(&error))?,
+            }
         };
         let pending = match reply.result {
             Some(exv_vpn_wire::generated::apply_tunnel_reply::Result::Pending(pending))
@@ -1256,31 +1650,34 @@ impl LiveConnectionProjection {
             }
             _ => return Err(Status::internal(CONNECTION_ENGINE_SESSION_CODE)),
         };
-        self.publish(pending_connect_snapshot(
-            request,
-            pending.operation_id.clone(),
-        ));
-        // 新 operation：重置统计状态机（旧 operation 的任务持有旧 Arc，互不影响），
-        // 并登记 operation 身份供 `GetSnapshot` live 回放共用同一事实源（B-09①）。
-        {
+        self.reconnect_generation.install(generation, &pending.operation_id, Some(admitted_identity), |identity| {
+            self.proxy_tun.set_engine_proxy_merged(false);
+            if let Some(round) = lock_recover(&self.reconnect_generation.recovery).as_mut()
+                && round.generation == generation && !round.ended {
+                round.execution = pending.operation_id.clone();
+            }
+            if new_session {
+                *lock_recover(&self.reconnect_session_policy) = Some(admitted_policy);
+                self.reconnect_attempts.store(0, Ordering::Relaxed);
+                self.reconnect_active.store(false, Ordering::Release);
+            }
+            self.publish_with_identity(pending_connect_snapshot(request, pending.operation_id.clone()), identity);
             let mut state = lock_recover(&self.stats_state);
             *state = LiveStatsState::new();
             state.begin_operation(pending.operation_id.clone());
-        }
+        }).ok_or_else(|| Status::cancelled("DARWIN_CORE_CONNECTION_CANCELLED"))?;
         // MAC-OBS-13 S1：Engine 日志流消费任务（纯单向写聚合存储；流 EOF/错误仅
         // 结束消费，不触碰状态投影——「关闭实时流不影响连接状态」）。
         self.spawn_logs_ingest(engine_logs_stream);
-        self.logs.aggregator().append_core("debug", "kernel", "kernel.connect.dispatch_timing",
-            "连接受理至 Engine 派发完成的宿主耗时", &[
-                ("operation_id", lookup_key.operation_id.iter().map(|byte| format!("{byte:02x}")).collect()),
-                ("connection_generation", generation.to_string()),
-                ("dispatch_duration_ms", dispatch_started.elapsed().as_millis().to_string()),
-                ("engine_pid", engine_pid.to_string()),
-            ]);
+        if let Some(observer) = session.as_ref().and_then(LiveEngineSession::proxy_observe_handle) {
+            self.spawn_proxy_policy_observation(observer, generation, pending.operation_id.clone());
+        }
         self.spawn_status_projection(
             connect_status_stream,
             engine_stats_stream,
             OperationProjection {
+                candidate_receipt,
+                generation,
                 engine_mode: *lock_recover(&self.engine_mode),
                 stats_state: Arc::clone(&self.stats_state),
                 runtime_epoch: lookup_key.runtime_epoch.clone(),
@@ -1292,6 +1689,48 @@ impl LiveConnectionProjection {
             },
         );
         Ok(OperationReply { terminal: None })
+    }
+
+    /// 仅消费 Observe 快照中的代理事实，绝不将其占位 Idle 状态投影为业务状态。
+    fn spawn_proxy_policy_observation(
+        &self,
+        mut observer: crate::engine_lifecycle_real::EngineProxyObserveHandle,
+        generation: u64,
+        operation_id: Vec<u8>,
+    ) {
+        let admission = Arc::clone(&self.reconnect_generation);
+        let stats_state = Arc::clone(&self.stats_state);
+        let cache = Arc::clone(&self.proxy_tun);
+        let events = Arc::clone(&self.events);
+        tokio::spawn(async move {
+            loop {
+                let live = admission.accept(generation, &operation_id, |_| {
+                    lock_recover(&stats_state).is_live()
+                });
+                if live != Some(true) {
+                    let _ = admission.accept(generation, &operation_id, |_| cache.set_engine_proxy_merged(false));
+                    return;
+                }
+                let reply = tokio::time::timeout(Duration::from_secs(2), observer.observe())
+                    .await.ok().and_then(Result::ok);
+                let merged = observed_proxy_merged(reply, &operation_id);
+                let accepted = admission.accept(generation, &operation_id, |_| {
+                    let live = lock_recover(&stats_state).is_live();
+                    cache.set_engine_proxy_merged(live && merged);
+                    if let Some(snapshot) = events.current_snapshot()
+                        && snapshot.operation_id == operation_id
+                    {
+                        let updated = snapshot_with_environment(snapshot.clone(), &cache);
+                        if updated.system_proxy != snapshot.system_proxy {
+                            events.publish(RuntimeEventKind::Transition, updated);
+                        }
+                    }
+                    live
+                });
+                if accepted != Some(true) { return; }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
     }
 
     /// 消费 Engine `StreamLogs` 推送：逐条经脱敏边界写入聚合存储（S1 会话期聚合）。
@@ -1320,534 +1759,331 @@ impl LiveConnectionProjection {
         &self,
         mut engine_stats_stream: EngineUpdateStream<exv_vpn_wire::generated::StatsEvent>,
         stats_state: Arc<std::sync::Mutex<LiveStatsState>>,
+        generation: u64,
+        operation_id: Vec<u8>,
     ) {
         let events = Arc::clone(&self.events);
+        let admission = Arc::clone(&self.reconnect_generation);
         tokio::spawn(async move {
             let mut traffic = TrafficSample::new();
             loop {
                 let Ok(Some(sample)) = engine_stats_stream.message().await else {
                     break;
                 };
-                // 门控（Connected 且未终结）经 LiveStatsState 判定；T14 拆流后
-                // `publish_stats` 无总线级 Connected 守卫（恒铸同轴 tick、只进统计
-                // lane），非 Connected 样本是否发布由本层门控决定。
-                let normalized = {
-                    let mut state = lock_recover(&stats_state);
-                    state.observe(&sample, &mut traffic, 0)
-                };
-                if let Some(stats) = normalized {
-                    let published = events.publish_stats(stats);
-                    // 铸造后的样本（含 sample_tick）同步回缓存（B-09①）；终结后
-                    // 不复活样本（cache_minted 只在 live 时写入）。
-                    lock_recover(&stats_state).cache_minted(published);
-                }
-                if !lock_recover(&stats_state).is_live() {
-                    break;
-                }
+                let accepted = admission.accept(generation, &operation_id, |_| {
+                    let normalized = lock_recover(&stats_state).observe(&sample, &mut traffic, 0);
+                    if let Some(stats) = normalized {
+                        let published = events.publish_stats(stats);
+                        lock_recover(&stats_state).cache_minted(published);
+                    }
+                    lock_recover(&stats_state).is_live()
+                });
+                if accepted != Some(true) { break; }
+
             }
         });
     }
 
-    /// 消费 Engine 状态流与统计流，把真实事实投影为 UI 事件。
-    ///
-    /// 只接受当前 operation 的事件；阶段事件投影为对应 `Connecting` 快照；
-    /// coarse Connected 投影为 `Connected` 快照（附带当时的最新统计）；携带
-    /// `VpnError` 的事件投影为 Engine 自身的 `FailedClean` 终态并结束本次投影。
-    /// 统计流（W-MVP-13）由 [`Self::spawn_stats_projection`] 消费：经
-    /// [`crate::stats::LiveStatsState`] 门控，样本沿用既有 `WatchEvents` 通道的
-    /// wire `snapshot.stats` 字段到达 UI，不新增第二条 Core→UI 通道。
-    ///
-    /// MAC-LIFECYCLE-15 S1（Engine 失联终态）：状态流 EOF/transport 错误是 Engine
-    /// 失联的事件驱动观察点。此时若本次 operation 仍活着（未收到 Engine 失败终态、
-    /// 未显式 Stop），Core 发布 typed `FailedClean` 失联终态（`engine_lost_vpn_error`，
-    /// 不伪造 Engine 错误码）、终结统计发布，并按 pid 身份把死 session 槽位重置为
-    /// `None`——下一次 Connect 走完整拉起路径（服务代理启动新 Engine）。
-    ///
-    /// W3-2/P3（数据面自动重连）：Failed 终态在**事件进总线前**判定是否触发重连
-    /// （双轨：`is_retryable_disconnect` 主轨 + 本连接生命周期「曾 Connected」守卫轨
-    /// [`Self::reconnect_ever_connected`]），经信号通道异步通知单 worker；**Engine
-    /// 失联（流 EOF）路径一期明确不自动重连**——EOF 终态的 `engine_lost_vpn_error`
-    /// 携带 `ProtocolSession + UseNewOperation`（非可重试标记），且 Engine 进程已死，
-    /// 自动重连须经服务代理 fork 全新 root Engine，风暴风险不可控（对齐 win32 §8
-    /// 冻结边界；用户手动 Connect 仍走完整拉起路径）。
+    /// Core按当前已接纳派发来源消费Engine事实；已结束Failed经真实Stop报告收口。
+    /// Engine独占R1，service控制通道失联按现有冻结政策通知Core R2；旧EOF无权清新槽。
     #[allow(
         clippy::too_many_lines,
         reason = "状态投影承载阶段/终态/失联三类事实转换与对应入库节点，线性展开保持事实顺序可读"
     )]
     fn spawn_status_projection(
         &self,
-        mut connect_status_stream: EngineUpdateStream<exv_vpn_wire::generated::ConnectStatusEvent>,
-        engine_stats_stream: EngineUpdateStream<exv_vpn_wire::generated::StatsEvent>,
+        mut connect_status_stream: EngineUpdateStream<wire::ConnectStatusEvent>,
+        engine_stats_stream: EngineUpdateStream<wire::StatsEvent>,
         projection: OperationProjection,
     ) {
-        use exv_vpn_wire::generated::{Attempt, ConnectingState, runtime_snapshot};
-        let OperationProjection {
-            stats_state,
-            runtime_epoch,
-            operation_id,
-            intent,
-            session_slot,
-            keepalive_ticker,
-            engine_pid,
-            engine_mode: engine_mode_snapshot,
-        } = projection;
+        let OperationProjection { candidate_receipt, generation, stats_state, runtime_epoch, operation_id, intent,
+            session_slot, keepalive_ticker, engine_pid, engine_mode } = projection;
         let events = Arc::clone(&self.events);
         let proxy_tun = Arc::clone(&self.proxy_tun);
-        // W3-2/P3：重连状态/信号（与投影共享原子 + 信号通道）。
-        let reconnect_attempts = Arc::clone(&self.reconnect_attempts);
-        let reconnect_active = Arc::clone(&self.reconnect_active);
-        let reconnect_ever_connected = Arc::clone(&self.reconnect_ever_connected);
+        let admission = Arc::clone(&self.reconnect_generation);
+        let attempts = Arc::clone(&self.reconnect_attempts);
+        let active = Arc::clone(&self.reconnect_active);
+        let ever_connected = Arc::clone(&self.reconnect_ever_connected);
+        let policy = Arc::clone(&self.reconnect_session_policy);
+        let config_for_cache = Arc::clone(&self.config);
         let reconnect_tx = Arc::clone(&self.reconnect_tx);
-        let reconnect_generation = Arc::clone(&self.reconnect_generation);
-        // 该投影只可收口自己所属的连接 generation；用户已开始新连接时，迟到失败
-        // 事件绝不能 Stop 新管线。
-        let projection_generation = reconnect_generation.load(Ordering::Acquire);
-        let reconnect_session_policy = Arc::clone(&self.reconnect_session_policy);
-        // MAC-OBS-13 S1：连接期 Core 自身事实（Connected/失败/失联）入库用。
         let logs = Arc::clone(self.logs.aggregator());
-        self.spawn_stats_projection(engine_stats_stream, Arc::clone(&stats_state));
-        let diagnostic_context = DiagnosticContext::new(
-            &operation_id,
-            reconnect_generation.load(Ordering::Acquire),
-            reconnect_attempts.load(Ordering::Relaxed),
-        );
+        let service_status = Arc::clone(&self.service_status_cache);
+        self.spawn_stats_projection(engine_stats_stream, Arc::clone(&stats_state), generation, operation_id.clone());
         tokio::spawn(async move {
-            let mut network_monitor = NetworkMonitor::default();
-
-            // 快照出向边界统一附加最近代理 TUN 检测（MAC-PROXY-16 S1；mirror stats
-            // 方案 A；连接期沿用连接受理边界探测的最近结果，不重新探测）与自动重连
-            // 状态（只读会话冻结策略，不读取 ConfigSet 更新后的保存设置）。
-            // tick 由总线在 publish_gate 内铸造（W3-1/P1 S2）。
-            let publish = |snapshot: RuntimeSnapshot| {
-                events.publish(
-                    RuntimeEventKind::Transition,
-                    snapshot_with_reconnect(
-                        snapshot_with_environment(snapshot, &proxy_tun),
-                        session_reconnect_status(
-                            &reconnect_session_policy,
-                            &reconnect_attempts,
-                            &reconnect_active,
-                        ),
-                    ),
-                );
+            // 调用仅发生于本地accept临界区；这里不触发RPC。
+            let publish = |mut snapshot: RuntimeSnapshot, identity: Option<wire::SessionIdentity>| {
+                snapshot.atrust_auth_acquisition = lock_recover(&admission.recovery).as_ref().filter(|round| round.generation == admission.current() && !round.ended).and_then(|round| round.pending_request());
+                snapshot.mode = engine_mode.into();
+                snapshot.service_status = lock_recover(&service_status).clone();
+                events.publish(RuntimeEventKind::Transition, snapshot_with_reconnect(
+                    snapshot_with_environment(snapshot_with_session_identity(snapshot, identity), &proxy_tun), session_reconnect_status(&policy, &attempts, &active)));
             };
-            // 退出方式事实（W3-2/P3）：EOF/transport 失败 = Engine 失联（保持
-            // false）；Engine Failed 终态 break = Engine 进程仍存活（置 true——
-            // 数据面掉线重连/手动 Connect 复用会话，不重新拉起）。
-            let mut engine_alive_at_exit = false;
-            loop {
-                let Ok(event) = connect_status_stream.message().await else {
-                    break;
-                };
-                let Some(event) = event else {
-                    break;
-                };
-                if event.operation_id != operation_id {
-                    continue;
-                }
-                let status_received = std::time::Instant::now();
-                proxy_tun.set_owned_interface(
-                    event.own_tunnel_if_index,
-                    event.coarse_phase != wire::StatsPhase::Connecting as i32,
-                );
-                // Engine 把 coarse 置为 Connected 且阶段为 StartingDataPlane 时，
-                // 数据面已真实运行（Connected 充要条件由 Engine 保证）。
-                if event.coarse_phase == exv_vpn_wire::generated::StatsPhase::Connected as i32 {
-                    network_monitor.start(
-                        Arc::clone(&logs),
-                        Arc::clone(&proxy_tun),
-                        diagnostic_context.clone(),
-                    );
-                    // W3-2/P3：Connected = 一次真实成功连接（新连接生命周期）——
-                    // 清零 per-connection 重连计数 + 释放重连在途标记（预算/退避序列
-                    // 回到起点；镜像 win32 :2042-2044），并置位生命周期级「曾连接」
-                    // 守卫事实。先清零再发布——本条快照携带的 `ReconnectStatus` 即为
-                    // 清零后的事实。
-                    reconnect_attempts.store(0, Ordering::Relaxed);
-                    reconnect_active.store(false, Ordering::Release);
-                    reconnect_ever_connected.store(true, Ordering::Release);
-                    // B-09②：连接期缓存的样本带着 Engine 相位（如 Idle）与未铸造的
-                    // tick 0——直接附加会被前端 `hasUsableConnectedSample` 守卫拒绝
-                    // （统计首帧延迟约 1s）。发布经 `publish_composing`：铸造后的
-                    // tick 传入快照组装闭包（总线 publish_gate 内原子发生），
-                    // `connected_baseline` 以该 tick 重铸样本相位——`sample_tick` 与
-                    // 事件 `monotonic_tick` 同轴同值（与统计发布一致）。
-                    events.publish_composing(RuntimeEventKind::Transition, |tick_value| {
-                        let latest = {
-                            let mut state = lock_recover(&stats_state);
-                            let latest = state.connected_baseline(tick_value);
-                            state.mark_connected();
-                            latest
-                        };
-                        snapshot_with_reconnect(
-                            snapshot_with_environment(
-                                connected_snapshot(
-                                    &operation_id,
-                                    latest,
-                                    event.session_established_at_ms,
-                                ),
-                                &proxy_tun,
-                            ),
-                            session_reconnect_status(
-                                &reconnect_session_policy,
-                                &reconnect_attempts,
-                                &reconnect_active,
-                            ),
-                        )
-                    });
-                    // MAC-OBS-13 S1：连接终态（Connected）真实节点入库。
-                    logs.append_core(
-                        "info",
-                        "core",
-                        "CONNECTED",
-                        "data plane connected",
-                        &[("pid", engine_pid.to_string())],
-                    );
-                    continue;
-                }
-                if let Some(error) = event.error {
-                    // Engine 自身的失败终态：仅当 operation 仍活着时发布，避免
-                    // 显式 Stop 已回可重试态后被迟到的失败事件覆盖。
-                    if lock_recover(&stats_state).is_live() {
-                        lock_recover(&stats_state).mark_finished();
-                        // W3-2/P3：任何 Failed 终态都释放重连在途标记——本次重连
-                        // 尝试已结束（镜像 win32 :2058-2066）。
-                        reconnect_active.store(false, Ordering::Release);
-                        // MAC-OBS-13 S1：Engine 失败终态真实节点入库（typed 码，
-                        // 不含凭据/主机名）。
-                        logs.append_core(
-                            "error",
-                            "core",
-                            "ENGINE_FAILED",
-                            "engine reported failure",
-                            &[
-                                ("pid", engine_pid.to_string()),
-                                ("code", error.code.to_string()),
-                            ],
-                        );
-                        // W3-2/P3 触发双轨（事件进 bus 前判定）：主轨 = 可重试数据面
-                        // 掉线标记（engine `session_lost_vpn_error` 升级后的
-                        // stage=DataPlane + retry=RetrySameOperation）；守卫轨 = 本
-                        // 连接生命周期内曾到达 Connected（`reconnect_ever_connected`
-                        // ——链式重连尝试的掉线继续触发，预算/退避语义由此成立；
-                        // 连接期失败因引擎侧标记非 RetrySameOperation 被主轨拦下，
-                        // 守卫轨兜底拦截伪造标记的连接期掉线）。两轨同时成立才异步
-                        // 通知重连 worker（worker 内再判 auto_reconnect 开关/预算/
-                        // 在途）；worker 未拉起时信号丢弃（无重连语义）。
-                        let retryable_drop = is_retryable_disconnect(&error)
-                            && reconnect_ever_connected.load(Ordering::Acquire);
-                        network_monitor.record_and_stop(
-                            &logs,
-                            &diagnostic_context,
-                            "engine_failed",
-                        );
-                        if retryable_drop {
-                            // 该 Engine 失败保留空闲 utun/控制专用路由供可能的自动重连；
-                            // 在 Core 真正 Stop 并得到 Stopped 前不得发布 FailedClean。
-                            // D4/E2（复审）：可重试掉线的 pending_stop 伴生
-                            // reconnect.active=true——引擎侧 R1 期间 UI 可感知
-                            // "正在重连"（重连气泡的上升沿；快照伴生字段不再失真）。
-                            publish(snapshot_with_reconnect(
-                                pending_stop_snapshot(
-                                    &StopRequest {
-                                        intent: Some(reconnect_stop_intent()),
-                                    },
-                                    operation_id.clone(),
-                                ),
-                                Some(wire::ReconnectStatus {
-                                    reason: String::new(),
-                                    auto_reconnect: true,
-                                    max_attempts: 0,
-                                    current_attempt: 0,
-                                    active: true,
-                                }),
-                            ));
-                            // T4：R1 所有权已下沉 engine（v6 §2.7——引擎持 D9 驻留
-                            // 材料在连接任务内退避重拨，同 operation_id 保持投影
-                            // 连续）。core 不再对数据面掉线重发 Apply——只保留
-                            // pending_stop 投影（不停留在虚假 Connected），重连进度
-                            // 由引擎事件流驱动。worker 通道保留给 R2（引擎失联）。
-                            logs.append_core(
-                                "info",
-                                "kernel",
-                                "kernel.reconnect.engine_owned",
-                                "retryable data-plane drop projected; R1 reconnect is engine-owned",
-                                &[],
-                            );
-                            logs.append_core(
-                                "debug",
-                                "kernel",
-                                "kernel.reconnect.trigger_timing",
-                                "Engine 状态接收至重连信号的宿主耗时",
-                                &[
-                                    (
-                                        "operation_id",
-                                        operation_id
-                                            .iter()
-                                            .map(|byte| format!("{byte:02x}"))
-                                            .collect(),
-                                    ),
-                                    (
-                                        "status_to_signal_ms",
-                                        status_received.elapsed().as_millis().to_string(),
-                                    ),
-                                    (
-                                        "reconnect_attempt",
-                                        reconnect_attempts.load(Ordering::Relaxed).to_string(),
-                                    ),
-                                ],
-                            );
-                        } else {
-                            // 非可重试失败同样可能发生在 Engine 已写控制 /32、随后平台
-                            // 早退的窗口。先以真实 StopTunnel 收口；只有 Engine 确认
-                            // Stopped 才能对 UI 发布 FailedClean。
-                            let stop_intent = reconnect_stop_intent();
-                            let mut stop_key = stop_intent
-                                .lookup_key
-                                .clone()
-                                .expect("generated Stop intent has lookup key");
-                            stop_key.method =
-                                exv_vpn_wire::generated::OperationMethod::StopTunnel as i32;
-                            publish(pending_stop_snapshot(
-                                &StopRequest {
-                                    intent: Some(stop_intent.clone()),
-                                },
-                                operation_id.clone(),
-                            ));
-                            let stopped = {
-                                let mut session = session_slot.lock().await;
-                                match session.as_mut() {
-                                    Some(engine)
-                                        if projection_generation
-                                            == reconnect_generation.load(Ordering::Acquire)
-                                            && engine.is_alive() => engine
-                                        .stop_tunnel(exv_vpn_wire::generated::StopTunnelRequest {
-                                            lookup_key: Some(stop_key),
-                                            request_digest: stop_intent.request_digest,
-                                        })
-                                        .await
-                                        .map_or(false, |reply| matches!(
-                                            reply.result,
-                                            Some(exv_vpn_wire::generated::stop_tunnel_reply::Result::Stopped(_))
-                                        )),
-                                    _ => false,
-                                }
+            while let Ok(Some(event)) = connect_status_stream.message().await {
+                if event.operation_id != operation_id { continue; }
+                let failure = admission.accept(generation, &operation_id, |identity| {
+                    if !lock_recover(&stats_state).is_live() { return None; }
+                    proxy_tun.set_owned_interface(event.own_tunnel_if_index, event.coarse_phase != wire::StatsPhase::Connecting as i32);
+                    if event.coarse_phase == wire::StatsPhase::Connected as i32 {
+                        lock_recover(&admission.recovery).take();
+                        attempts.store(0, Ordering::Relaxed);
+                        active.store(false, Ordering::Release);
+                        ever_connected.store(true, Ordering::Release);
+                        events.publish_composing(RuntimeEventKind::Transition, |tick| {
+                            let latest = {
+                                let mut state = lock_recover(&stats_state);
+                                let latest = state.connected_baseline(tick);
+                                state.mark_connected();
+                                latest
                             };
-                            if stopped
-                                && projection_generation == reconnect_generation.load(Ordering::Acquire)
-                            {
-                                publish(failed_clean_snapshot(&operation_id, error));
-                            } else {
-                                logs.append_core(
-                                    "error",
-                                    "core",
-                                    "NONRETRY_CLEANUP_FAILED",
-                                    "non-retryable failure cleanup did not reach Engine Stopped",
-                                    &[("pid", engine_pid.to_string())],
-                                );
-                            }
-                        }
-                        // Engine 仍存活（失败后 attempt 槽已清空、会话可复用）：
-                        // 不重置 session 槽位（W3-2/P3：数据面掉线重连复用会话）。
-                        engine_alive_at_exit = true;
-                        break;
+                            let mut snapshot = connected_snapshot(&operation_id, latest, event.session_established_at_ms);
+                            snapshot.mode = engine_mode.into();
+                            snapshot.service_status = lock_recover(&service_status).clone();
+                            snapshot_with_reconnect(snapshot_with_environment(snapshot_with_session_identity(snapshot, identity.clone()), &proxy_tun), session_reconnect_status(&policy, &attempts, &active))
+                        });
+                        return None;
                     }
-                    // 迟到失败事件对应的 operation 已经结束，不得把它投影回 Connecting。
-                    continue;
-                }
-                publish(RuntimeSnapshot {
-                    engine_reconnect: None,
-                    headless: None,
-                    relaunched_by_engine: false,
-                    system_proxy: None,
-                    reconnect: None,
-                    self_heal: None,
-                    stats: None,
-                    proxy_tun: None,
-                    operation_id: operation_id.clone(),
-                    service_status: None,
-                    mode: String::new(),
-                    state: Some(runtime_snapshot::State::Connecting(ConnectingState {
-                        attempt: Some(Attempt {
-                            runtime_epoch: runtime_epoch.clone(),
-                            attempt_id: operation_id.clone(),
-                            intent: intent.clone(),
-                            prior_error: None,
-                        }),
-                        phase: event.connect_phase,
-                    })),
+                    if let Some(error) = event.error {
+                        if exv_vpn_darwin_ipc::atrust_auth_error::is_session_invalidated(&error)
+                            && let Some(receipt) = &candidate_receipt {
+                            let _config = lock_recover(&config_for_cache);
+                            let outcome = match receipt.forget_if_current() { Ok(true) => "forgotten", Ok(false) => "already_absent_or_replaced", Err(_) => "delete_failed" };
+                            logs.append_core("info", "core", "ATRUST_SESSION_CACHE_INVALIDATED", "源会话失效，等待用户重新网页登录", &[("outcome", outcome.to_owned())]);
+                        }
+                        // Failed是整个Engine执行的终态；retry advice不证明R1仍在运行。
+                        lock_recover(&stats_state).mark_finished();
+                        proxy_tun.set_engine_proxy_merged(false);
+                        let continuation = Self::queue_auth_continuation(&admission, generation, &operation_id, &error);
+                        active.store(continuation, Ordering::Release);
+                        logs.append_core("error", "core", "ENGINE_FAILED", "engine execution terminated", &[("code", error.code.to_string())]);
+                        identity.take();
+                        publish(session_orchestration::snapshot(&operation_id, session_orchestration::unconfirmed(), Some(error.clone())), None);
+                        return Some((error, continuation));
+                    }
+                    lock_recover(&stats_state).pause_connected();
+                    let engine_reconnect = event.reconnect_state.or_else(|| events.current_snapshot().and_then(|snapshot| snapshot.engine_reconnect));
+                    if engine_reconnect.is_some() { active.store(true, Ordering::Release); }
+                    publish(RuntimeSnapshot {
+                        operation_id: operation_id.clone(), engine_reconnect,
+                        state: Some(runtime_snapshot::State::Connecting(wire::ConnectingState {
+                            attempt: Some(wire::Attempt { runtime_epoch: runtime_epoch.clone(), attempt_id: operation_id.clone(), intent: intent.clone(), prior_error: None }),
+                            phase: event.connect_phase,
+                        })), ..Default::default()
+                    }, identity.clone());
+                    None
                 });
+                let Some(failure) = failure else { return; };
+                if let Some((error, continuation)) = failure {
+                    if continuation {
+                        if let Some(tx) = lock_recover(&reconnect_tx).as_ref() {
+                            let _ = tx.send((generation, ReconnectSignal::AuthContinuation));
+                        }
+                        return;
+                    }
+                    let deadline = tokio::time::Instant::now() + STOP_TOTAL_BUDGET;
+                    let completion = {
+                        let Ok(mut session) = tokio::time::timeout_at(deadline, session_slot.lock()).await else { return; };
+                        if tokio::time::Instant::now() >= deadline { return; }
+                        // 原投影任务持许可到真实RPC回执；失败事实已经在锁外发布。
+                        if admission.accept(generation, &operation_id, |_| ()).is_none() { return; }
+                        let stop = reconnect_stop_intent();
+                        let mut key = stop.lookup_key.expect("generated stop key");
+                        key.method = wire::OperationMethod::StopTunnel as i32;
+                        match session.as_mut() {
+                            Some(engine) => match engine.stop_tunnel(wire::StopTunnelRequest { lookup_key: Some(key), request_digest: stop.request_digest }).await {
+                                Ok(reply) => session_orchestration::completion(&reply),
+                                Err(error) => {
+                                    log_stop_unconfirmed(&logs, &error);
+                                    session_orchestration::rpc_failure(&error)
+                                },
+                            },
+                            _ => session_orchestration::unconfirmed(),
+                        }
+                    };
+                    admission.accept(generation, &operation_id, |identity| { identity.take(); publish(session_orchestration::snapshot(&operation_id, completion, Some(error)), None) });
+                    return;
+                }
             }
-            // 状态流终止（EOF/transport 错误）＝Engine 失联的事件驱动观察点：
-            // operation 仍活着时发布 Core 观察到的 typed 失联终态并终结统计发布。
-            // W3-2/P3：失联终态也是一次 Failed 终态——释放重连在途标记；但**不触发
-            // 自动重连**（见函数文档：服务代理 fork 风暴，一期明确排除；恢复路径 =
-            // 用户手动 Connect 走完整拉起）。Engine Failed 终态退出（Engine 存活）
-            // 不进入失联块——会话保留复用，统计状态在终态处置时已终结。
-            if !engine_alive_at_exit {
+            let reset = admission.accept(generation, &operation_id, |identity| {
+                identity.take();
                 if lock_recover(&stats_state).is_live() {
                     lock_recover(&stats_state).mark_finished();
-                    reconnect_active.store(false, Ordering::Release);
-                    // MAC-OBS-13 S1：Engine 失联真实节点入库。
-                    network_monitor.record_and_stop(
-                        &logs,
-                        &diagnostic_context,
-                        "stream_disconnect",
-                    );
-                    logs.append_core(
-                        "error",
-                        "core",
-                        "ENGINE_LOST",
-                        "engine status stream terminated while operation live",
-                        &[("pid", engine_pid.to_string())],
-                    );
-                    publish(failed_clean_snapshot(
-                        &operation_id,
-                        engine_lost_vpn_error(),
-                    ));
-                    // T5 R2：service 形态的引擎失联是可恢复故障（launchd KeepAlive
-                    // 自启）——主开关开启且本连接曾 Connected 时发 R2 信号，由重连
-                    // worker 等引擎回归后重发连接（v6 §2.7 R2=core；D-d6 代裁：随
-                    // 主开关）。oneshot 形态维持一期语义（F8：重连必然重新提权，
-                    // 手动出口）。终态快照仍如实发布；重连派发后的新操作事件将其
-                    // 取代。
-                    let r2_eligible = engine_mode_snapshot == "service"
-                        && reconnect_ever_connected.load(Ordering::Acquire)
-                        && lock_recover(&reconnect_session_policy)
-                            .as_ref()
-                            .is_some_and(|policy| policy.enabled);
-                    // A1（复审）：信号携带投影自身代次——迟到的旧投影 EOF 不得
-                    // 以"当前代次"误触发（与槽位重置的 pid 门同款防御）。
-                    if r2_eligible
-                        && projection_generation == reconnect_generation.load(Ordering::Acquire)
-                    {
-                        logs.append_core(
-                            "info",
-                            "kernel",
-                            "kernel.reconnect.r2_trigger",
-                            "engine lost in service form; signaling R2 reconnect worker (launchd self-heal expected)",
-                            &[],
-                        );
-                        if let Some(tx) = lock_recover(&reconnect_tx).as_ref() {
-                            let _ = tx.send((
-                                projection_generation,
-                                ReconnectSignal::EngineLost,
-                            ));
-                        }
+                    proxy_tun.set_engine_proxy_merged(false);
+                    active.store(false, Ordering::Release);
+                    // S5b（C-10）：资格判定改在 ENGINE_LOST 时点对活状态求值
+                    //（auto_reconnect && 有效凭据源——受理快照 / owner 匹配磁盘对 /
+                    // aTrust 会话缓存与恢复材料，见 `valid_reconnect_credential_source`），
+                    // 不再读受理时冻结的 policy.enabled——同时消灭凭据门槛对网页
+                    // 登录用户的恒假与 policy 生命周期洞（仅首会话安装+Stop 清空）。
+                    let r2_eligible = engine_mode == "service"
+                        && ever_connected.load(Ordering::Acquire)
+                        && {
+                            let config = lock_recover(&config_for_cache);
+                            config.auto_reconnect()
+                                && valid_reconnect_credential_source(&config, lock_recover(&policy).as_ref())
+                        };
+                    logs.append_core("error", "core", "ENGINE_LOST", "engine status stream ended", &[
+                        ("pid", engine_pid.to_string()), ("r2_eligible", r2_eligible.to_string()),
+                    ]);
+                    let mut completion = session_orchestration::unconfirmed();
+                    completion.errors = vec![engine_lost_vpn_error()];
+                    publish(session_orchestration::snapshot(&operation_id, completion, None), None);
+                    if r2_eligible {
+                        if let (Some(tx), Some(recovery_generation)) = (lock_recover(&reconnect_tx).as_ref(), admission.recovery_generation()) { let _ = tx.send((recovery_generation, ReconnectSignal::EngineLost)); }
                     }
                 }
-                // 死 session 槽位重置：仅当槽位仍是产生本状态流的那个 Engine（pid 身份）
-                // 时才清空——防止迟到的旧投影把并发重连已换入的新会话误删。EOF =
-                // Engine 失联证据，槽位随投影退出清空；Engine Failed 终态（Engine
-                // 存活）不重置——复用会话是 P3 掉线重连的生产路径。
-                let mut slot = session_slot.lock().await;
-                if slot.as_ref().map(LiveEngineSession::engine_pid) == Some(engine_pid) {
-                    *slot = None;
-                }
-                drop(slot);
-                // W2 心跳：失联会话的伴生 keepalive ticker 一并 abort——旧 ticker 持
-                // 的是死通道，继续空转只会打死引擎的误判面（新会话建立时会 spawn
-                // 新 ticker），不留孤儿。
-                if let Some(ticker) = keepalive_ticker.lock().await.take() {
-                    ticker.abort();
+            });
+            // 失败已发布；仅真实旧槽清理等待许可，不能挡住本地终态。
+            if reset.is_some() {
+                let deadline = tokio::time::Instant::now() + STOP_TOTAL_BUDGET;
+                let Ok(mut session) = tokio::time::timeout_at(deadline, session_slot.lock()).await else { return; };
+                if admission.accept(generation, &operation_id, |_| { session.take(); }).is_some() {
+                    if let Some(ticker) = keepalive_ticker.lock().await.take() { ticker.abort(); }
                 }
             }
         });
     }
 
     async fn stop(&self, request: &StopRequest) -> Result<OperationReply, Status> {
-        let generation = self.reconnect_generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        self.stop_with_deadline(request, tokio::time::Instant::now() + STOP_TOTAL_BUDGET).await
+    }
+
+    async fn stop_with_deadline(&self, request: &StopRequest, deadline: tokio::time::Instant) -> Result<OperationReply, Status> {
+        request.intent.as_ref().and_then(|intent| intent.lookup_key.as_ref()).filter(|key| key.operation_id.len() == 16)
+            .ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
+        let generation = self.reconnect_generation.retire();
+        self.proxy_tun.set_engine_proxy_merged(false);
         self.reconnect_active.store(false, Ordering::Release);
-        self.stop_in_generation(request, generation, false).await
+        self.stop_in_generation_with_deadline(request, generation, false, deadline).await
     }
 
     async fn stop_in_generation(&self, request: &StopRequest, generation: u64, preserve_reconnect_policy: bool) -> Result<OperationReply, Status> {
-        let intent = request
-            .intent
-            .as_ref()
+        self.stop_in_generation_with_deadline(request, generation, preserve_reconnect_policy, tokio::time::Instant::now() + STOP_TOTAL_BUDGET).await
+    }
+
+    async fn stop_in_generation_with_deadline(&self, request: &StopRequest, generation: u64, preserve_reconnect_policy: bool, deadline: tokio::time::Instant) -> Result<OperationReply, Status> {
+        let intent = request.intent.as_ref().ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
+        let lookup_key = intent.lookup_key.as_ref().filter(|key| key.operation_id.len() == 16)
             .ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
-        let lookup_key = intent
-            .lookup_key
-            .as_ref()
-            .filter(|key| key.operation_id.len() == 16)
-            .ok_or_else(|| Status::invalid_argument(CONNECTION_ENGINE_SESSION_CODE))?;
-        let mut session = self.session.lock().await;
-        if generation != self.reconnect_generation.load(Ordering::Acquire) {
-            return Err(Status::cancelled("停止已被后续用户操作取消"));
-        }
-        // 唤醒恢复只收束旧隧道，仍属于原连接会话；用户断开才结束冻结策略。
-        if !preserve_reconnect_policy {
-            *lock_recover(&self.reconnect_session_policy) = None;
-        }
         let operation_id = lookup_key.operation_id.clone();
-        // 死 session liveness 观察（MAC-LIFECYCLE-15 S1）：Engine 已死（或会话已因
-        // 状态流终止重置）时，网络资源已由 Engine 自退/内核回收，Core 不再欠网络
-        // 清理——发布 typed 失联终态并回可重试态，而非笼统 unavailable
-        // （W-RECOVERY-01：清理后可重试，不自动重连）。
-        if !session.as_ref().is_some_and(LiveEngineSession::is_alive) {
-            *session = None;
-            // W2 心跳：死会话清槽 → 伴生 ticker 一并 abort（不留孤儿）。
-            self.abort_keepalive_ticker().await;
-            lock_recover(&self.stats_state).mark_finished();
-            // W3-2/P3：终态释放重连在途标记（若重连尝试在途时 Engine 死亡）。
-            self.reconnect_active.store(false, Ordering::Release);
-            self.publish(failed_clean_snapshot(
-                &operation_id,
-                engine_lost_vpn_error(),
-            ));
-            return Ok(OperationReply { terminal: None });
-        }
-        self.publish(pending_stop_snapshot(request, operation_id.clone()));
-        let reply = {
-            let session = session
-                .as_mut()
-                .ok_or_else(|| Status::failed_precondition(CONNECTION_ENGINE_SESSION_CODE))?;
-            session
-                .attach_connect_status()
-                .await
-                .map_err(|error| engine_session_status(&error))?;
-            let mut stop_key = lookup_key.clone();
-            stop_key.method = exv_vpn_wire::generated::OperationMethod::StopTunnel as i32;
-            session
-                .stop_tunnel(exv_vpn_wire::generated::StopTunnelRequest {
-                    lookup_key: Some(stop_key),
-                    request_digest: intent.request_digest.clone(),
+        let mut stop_key = lookup_key.clone();
+        stop_key.method = wire::OperationMethod::StopTunnel as i32;
+        let stop = wire::StopTunnelRequest { lookup_key: Some(stop_key), request_digest: intent.request_digest.clone() };
+        let pending = pending_stop_snapshot(request, operation_id.clone());
+        let admission = Arc::clone(&self.reconnect_generation);
+        let session_slot = Arc::clone(&self.session);
+        let ticker_slot = Arc::clone(&self.keepalive_ticker);
+        let policy = Arc::clone(&self.reconnect_session_policy);
+        let stats = Arc::clone(&self.stats_state);
+        let active = Arc::clone(&self.reconnect_active);
+        let ever_connected = Arc::clone(&self.reconnect_ever_connected);
+        let proxy = Arc::clone(&self.proxy_tun);
+        let events = Arc::clone(&self.events);
+        let attempts = Arc::clone(&self.reconnect_attempts);
+        let service_status = Arc::clone(&self.service_status_cache);
+        let mode = *lock_recover(&self.engine_mode);
+        let logs = Arc::clone(self.logs.aggregator());
+        let previous = events.current_snapshot();
+        let previous_completion = previous.as_ref().and_then(|snapshot| snapshot.stop_completion.clone());
+        let origin = previous.as_ref().and_then(|snapshot| match snapshot.state.as_ref() {
+            Some(runtime_snapshot::State::FailedDirty(failed)) => failed.last_error.clone(),
+            Some(runtime_snapshot::State::FailedClean(failed)) => failed.last_error.clone(),
+            _ => None,
+        });
+        // 全部等待在本次局部任务内：传输 drop handler 不撤销受理或真实清理责任。
+        tokio::spawn(async move {
+            let publish: Arc<dyn Fn(wire::StopCompletion, bool) -> wire::StopCompletion + Send + Sync> = {
+                let admission = Arc::clone(&admission); let events = Arc::clone(&events);
+                let active = Arc::clone(&active); let stats = Arc::clone(&stats); let proxy = Arc::clone(&proxy);
+                let operation_id = operation_id.clone(); let policy = Arc::clone(&policy); let attempts = Arc::clone(&attempts);
+                let service_status = Arc::clone(&service_status);
+                Arc::new(move |mut completion, unconfirmed| {
+                    let deadline_only = unconfirmed && completion.errors.iter()
+                        .all(|error| error.code == wire::ErrorCode::DeadlineExceeded as i32);
+                    if !completion.stopped {
+                        if unconfirmed && let Some(previous) = previous_completion.as_ref() {
+                            completion.blocks_new_connect |= previous.blocks_new_connect;
+                            let mut errors = previous.errors.clone();
+                            for error in completion.errors {
+                                if !errors.contains(&error) { errors.push(error); }
+                            }
+                            completion.errors = errors;
+                        }
+                        if let Some(error) = origin.clone() && !completion.errors.contains(&error) { completion.errors.insert(0, error); }
+                    }
+                    admission.in_generation(generation, || {
+                        // 原RPC真实完成已发布时，join与期限的竞争不能用合成结果倒写。
+                        if deadline_only && let Some(current) = events.current_snapshot()
+                            && current.operation_id == operation_id && let Some(reported) = current.stop_completion {
+                            completion = reported;
+                            return;
+                        }
+                        lock_recover(&stats).mark_finished();
+                        active.store(false, Ordering::Release);
+                        let mut snapshot = session_orchestration::snapshot(&operation_id, completion.clone(), None);
+                        snapshot.mode = mode.into(); snapshot.service_status = lock_recover(&service_status).clone();
+                        events.publish(RuntimeEventKind::Transition, snapshot_with_reconnect(snapshot_with_environment(snapshot, &proxy), session_reconnect_status(&policy, &attempts, &active)));
+                    });
+                    completion
                 })
-                .await
-                .map_err(|error| engine_session_status(&error))?
-        };
-        if !matches!(
-            reply.result,
-            Some(exv_vpn_wire::generated::stop_tunnel_reply::Result::Stopped(
-                _
-            ))
-        ) {
-            return Err(Status::internal(CONNECTION_ENGINE_SESSION_CODE));
-        }
-        // Engine 已答复 Stopped（本次资源回收完成）：Core 发布真实 Idle 终态，
-        // UI 由此回到可重试状态。Engine 自身不发布 Idle 事件。终态 Idle 快照的
-        // `operation_id` 为空（win32 同款 `event.operation_id = snapshot.operation_id`）。
-        // W3-2/P3：显式 Stop 是终态——释放重连在途标记（对齐 win32 Stopped 终态；
-        // `reconnect_attempts` 不在此清零——计数只在 Connected 成功时清零，win32
-        // 同款语义）。守卫事实随之清零：新连接生命周期从「未连接」起算。
-        self.reconnect_active.store(false, Ordering::Release);
-        self.reconnect_ever_connected.store(false, Ordering::Release);
-        // MAC-OBS-13 S1：断开终态真实节点入库。
-        self.logs.aggregator().append_core(
-            "info",
-            "core",
-            "DISCONNECTED",
-            "tunnel stopped and resources reclaimed",
-            &[],
-        );
-        self.publish(idle_snapshot());
-        // MAC-PROXY-16 S1 断开终态边界探测：Engine 已回收己方 utun，此刻重新探测
-        // 能如实反映断开后的共存事实（本条 idle 事件沿用断开前最近结果）。
-        self.proxy_tun.set_owned_interface(0, true);
-        self.proxy_tun.refresh();
-        // W-MVP-13：Stop 终结当前 operation 的统计发布（统计任务随门控退出）。
-        lock_recover(&self.stats_state).mark_finished();
-        Ok(OperationReply { terminal: None })
+            };
+            if admission.in_generation(generation, || {
+                if !preserve_reconnect_policy { *lock_recover(&policy) = None; }
+                let mut pending = pending; pending.mode = mode.into(); pending.service_status = lock_recover(&service_status).clone();
+                events.publish(RuntimeEventKind::Transition, snapshot_with_reconnect(
+                    snapshot_with_environment(pending, &proxy), session_reconnect_status(&policy, &attempts, &active)));
+            }).is_none() { return Err(Status::cancelled("DARWIN_CORE_CONNECTION_CANCELLED")); }
+            let publish_late = Arc::clone(&publish);
+            let admission_late = Arc::clone(&admission);
+            let mut dispatch = tokio::spawn(async move {
+                let mut session = match tokio::time::timeout_at(deadline, session_slot.lock_owned()).await {
+                    Ok(session) => session,
+                    Err(_) => return session_orchestration::reply(publish_late(session_orchestration::deadline("session_lock"), true)),
+                };
+                if tokio::time::Instant::now() >= deadline || generation != admission_late.current() {
+                    return session_orchestration::reply(publish_late(session_orchestration::deadline("before_dispatch"), true));
+                }
+                let no_session = session.is_none();
+                let mut actual_completion = false;
+                let completion = match session.as_mut() {
+                    None => { let mut done = session_orchestration::unconfirmed(); done.errors = vec![engine_lost_vpn_error()]; done },
+                    Some(engine) => match engine.stop_tunnel(stop).await {
+                        Ok(reply) => {
+                            if matches!(reply.result, Some(wire::stop_tunnel_reply::Result::Pending(_))) { return OperationReply { terminal: None }; }
+                            actual_completion = true;
+                            session_orchestration::completion(&reply)
+                        },
+                        Err(error) => { log_stop_unconfirmed(&logs, &error); session_orchestration::rpc_failure(&error) },
+                    },
+                };
+                // session 许可一直持有到原RPC完成，晚到结果仍经原代际接纳。
+                if completion.stopped && !completion.blocks_new_connect && completion.errors.is_empty() {
+                    if generation == admission_late.current() {
+                        ever_connected.store(false, Ordering::Release);
+                        proxy.set_owned_interface(0, true);
+                    }
+                }
+                let completion = publish_late(completion, !actual_completion);
+                drop(session);
+                if no_session {
+                    let admission = Arc::clone(&admission_late);
+                    tokio::spawn(async move {
+                        let mut ticker = ticker_slot.lock().await;
+                        admission.in_generation(generation, || { if let Some(task) = ticker.take() { task.abort(); } });
+                    });
+                }
+                if completion.stopped && !completion.blocks_new_connect && completion.errors.is_empty()
+                    && generation == admission_late.current() {
+                    // 独立显示刷新不延长已经取得的真实停止回执。
+                    tokio::task::spawn_blocking(move || proxy.refresh());
+                }
+                session_orchestration::reply(completion)
+            });
+            match tokio::time::timeout_at(deadline, &mut dispatch).await {
+                Ok(Ok(reply)) => Ok(reply),
+                _ => Ok(session_orchestration::reply(publish(session_orchestration::deadline("completion"), true))),
+            }
+        }).await.map_err(|_| Status::internal("stop: owned task ended unexpectedly"))?
     }
 
     /// 在 Core UI session 收束时关闭唯一 Engine client 并读取 bootstrap 终态。
@@ -1859,6 +2095,8 @@ impl LiveConnectionProjection {
     /// （drop client 后 Engine 侧唯一已认证连接 EOF → 统一收敛 teardown），本包
     /// 只加速无主隧道的回收；隧道未在跑时跳过（不发多余 Stop）。
     pub(crate) async fn close(&self) -> Result<(), Status> {
+        self.reconnect_generation.retire();
+        self.proxy_tun.set_engine_proxy_merged(false);
         // W2 心跳：会话收束 → 伴生 ticker 一并 abort（与 session 槽同生命周期）。
         self.abort_keepalive_ticker().await;
         let mut session = self.session.lock().await;
@@ -1897,46 +2135,162 @@ impl LiveConnectionProjection {
         }
     }
 
-    /// W2.5 服务形态连接编排：facts healthy → 直连固定端点；down → 修复阶梯
-    /// （daemon socket 可连 → `EnsureEngine` 帧免提权拉起；daemon 不在 → 经
-    /// `service_lifecycle` 既有 osascript `start`——该动词已扩展为同时确保 engine
-    /// job bootstrap）→ 有界等端点 → 直连。
-    ///
-    /// 任一步失败返回 `None`（W3 起调用方 [`Self::service_engine_session_or_reject`]
-    /// 据此发出 typed 拒绝——E8 后不再回退会话引擎路径）。
-    async fn try_service_engine_session(&self) -> Option<EngineControlSession> {
-        let facts = (self.service_engine.probe)().await;
-        if !crate::service_status::engine_endpoint_healthy(&facts) {
-            let daemon_socket_connectable =
-                (self.service_lifecycle.probe())().await.socket_connectable;
-            let repaired = if daemon_socket_connectable {
-                (self.service_engine.ensure_engine)().await
-            } else {
-                self.service_lifecycle.ensure_running().await.is_ok()
-            };
-            if !repaired {
-                return None;
-            }
-            if !self.wait_engine_endpoint().await {
-                return None;
-            }
+    fn check_service_attempt(&self, generation: u64, deadline: Option<AuthDeadline>) -> Result<(), Status> {
+        check_auth_deadline(deadline)?;
+        if generation != self.reconnect_generation.current() {
+            return Err(Status::cancelled("DARWIN_CORE_CONNECTION_CANCELLED"));
         }
-        (self.service_engine.connect)().await.ok()
+        Ok(())
     }
 
-    /// W2.5：有界轮询 engine 端点 healthy（默认 15s/250ms；接缝注入毫秒级钉
-    /// 节奏）。
-    async fn wait_engine_endpoint(&self) -> bool {
-        let deadline = tokio::time::Instant::now() + self.service_engine.wait_bound;
+    fn service_attempt_error(&self, step: &str, error: impl std::fmt::Display) -> Status {
+        let message = format!("{step}: {error}");
+        self.logs.aggregator().append_core("error", "core", "SERVICE_ACTION", &message,
+            &[("action", "connect".to_string())]);
+        Status::failed_precondition(format!("{SERVICE_NOT_RUNNING_PREFIX}{message}"))
+    }
+
+    fn service_startup_deadline(&self, causes: &str) -> Status {
+        let message = format!("{causes}; service startup connection deadline expired");
+        self.logs.aggregator().append_core("error", "core", "SERVICE_ACTION", &message,
+            &[("action", "connect".to_string())]);
+        Status::deadline_exceeded(format!("{SERVICE_NOT_RUNNING_PREFIX}{message}"))
+    }
+
+    async fn await_service_connection<T>(
+        &self, generation: u64, deadline: Option<AuthDeadline>,
+        connect: impl std::future::Future<Output = T>,
+    ) -> Result<T, Status> {
+        let auth_limit = deadline.map(|deadline| deadline.tokio_deadline())
+            .transpose().map_err(auth_deadline_status)?;
+        tokio::pin!(connect);
         loop {
-            let facts = (self.service_engine.probe)().await;
-            if crate::service_status::engine_endpoint_healthy(&facts) {
-                return true;
+            tokio::select! {
+                biased;
+                result = &mut connect => {
+                    self.check_service_attempt(generation, None)?;
+                    return Ok(result);
+                }
+                _ = async { match auth_limit {
+                    Some(limit) => tokio::time::sleep_until(limit).await,
+                    None => std::future::pending::<()>().await,
+                }} => return Err(auth_deadline_status(AuthDeadlineError::Expired)),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                    self.check_service_attempt(generation, None)?;
+                }
             }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
+        }
+    }
+
+    /// 服务启动拨号复用原认证/取消等待，仅本次服务尝试附加原启动截止。
+    async fn await_service_connection_with_startup_deadline<T>(
+        &self, generation: u64, deadline: Option<AuthDeadline>, attempt_limit: tokio::time::Instant,
+        connect: impl std::future::Future<Output = T>,
+    ) -> Result<T, Status> {
+        tokio::select! {
+            biased;
+            result = self.await_service_connection(generation, deadline, connect) => result,
+            _ = tokio::time::sleep_until(attempt_limit) => {
+                Err(self.service_startup_deadline("service connection action still pending"))
             }
-            tokio::time::sleep(self.service_engine.wait_poll).await;
+        }
+    }
+
+    /// 同一次既有截止覆盖启动等待、恢复和最终连接；只重试尚未接通的端点。
+    async fn try_service_engine_session(&self, generation: u64, deadline: Option<AuthDeadline>) -> Result<LiveEngineSession, Status> {
+        self.check_service_attempt(generation, deadline)?;
+        let attempt_limit = match deadline {
+            Some(deadline) => deadline.tokio_deadline().map_err(auth_deadline_status)?,
+            None => tokio::time::Instant::now() + crate::engine_lifecycle_real::BOOTSTRAP_DEADLINE,
+        };
+        let error = match self.await_service_connection_with_startup_deadline(generation, deadline, attempt_limit,
+            (self.service_engine.connect)(None)).await? {
+            Ok(session) => {
+                self.check_service_attempt(generation, deadline)?;
+                if tokio::time::Instant::now() >= attempt_limit {
+                    return Err(self.service_startup_deadline("engine connection completed after the request deadline"));
+                }
+                self.service_lifecycle.clear_launch_requested();
+                return Ok(session);
+            }
+            Err(error) => error,
+        };
+        self.check_service_attempt(generation, deadline)?;
+        let absent = matches!(&error, EngineLifecycleError::ServiceConnect(source)
+            if matches!(source.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+        if !absent { return Err(self.service_attempt_error("initial connect", format!("{error}; {error:?}"))); }
+        let mut causes = format!("initial connect: {error}; {error:?}");
+        self.logs.aggregator().append_core("warn", "core", "SERVICE_ACTION", &error.to_string(),
+            &[("action", "initial connect".to_string())]);
+        if let Some(launch_limit) = self.service_lifecycle.launch_window_deadline() {
+            let connect = (self.service_engine.connect)(Some(launch_limit.min(attempt_limit)));
+            match self.await_service_connection_with_startup_deadline(generation, deadline, attempt_limit, connect).await? {
+                Ok(session) => {
+                    self.check_service_attempt(generation, deadline)?;
+                    if tokio::time::Instant::now() >= attempt_limit {
+                        return Err(self.service_startup_deadline(&causes));
+                    }
+                    self.service_lifecycle.clear_launch_requested();
+                    return Ok(session);
+                }
+                Err(error) => {
+                    causes.push_str(&format!("; launch window connect: {error}; {error:?}"));
+                    if !matches!(error, EngineLifecycleError::BootstrapConnectDeadline { .. }) {
+                        return Err(self.service_attempt_error("launch window connect", causes));
+                    }
+                    self.logs.aggregator().append_core("warn", "core", "SERVICE_ACTION", &causes,
+                        &[("action", "launch window connect".to_string())]);
+                }
+            }
+        }
+        self.check_service_attempt(generation, deadline)?;
+        if tokio::time::Instant::now() >= attempt_limit {
+            return Err(self.service_startup_deadline(&causes));
+        }
+        self.repair_ladder_and_connect(generation, deadline, attempt_limit, causes).await
+    }
+
+    async fn repair_ladder_and_connect(&self, generation: u64, deadline: Option<AuthDeadline>, attempt_limit: tokio::time::Instant, mut causes: String) -> Result<LiveEngineSession, Status> {
+        self.check_service_attempt(generation, deadline)?;
+        if let Err(error) = self.await_service_connection_with_startup_deadline(generation, deadline, attempt_limit, (self.service_engine.ensure_engine)()).await? {
+            self.check_service_attempt(generation, deadline)?;
+            if !error.daemon_absent() { return Err(self.service_attempt_error("ensure engine", format!("{causes}; {error}"))); }
+            causes.push_str(&format!("; ensure engine: {error}"));
+            self.logs.aggregator().append_core("warn", "core", "SERVICE_ACTION", &error.to_string(),
+                &[("action", "EnsureEngine connect; attempting start".to_string())]);
+            self.check_service_attempt(generation, deadline)?;
+            if tokio::time::Instant::now() >= attempt_limit {
+                return Err(self.service_startup_deadline(&causes));
+            }
+            let diagnostics = self.await_service_connection_with_startup_deadline(generation, deadline, attempt_limit,
+                self.service_lifecycle.start_after_daemon_absent()).await?
+                .map_err(|error| self.service_attempt_error("service start", format!("{causes}; {error}")))?;
+            if !diagnostics.is_empty() {
+                self.logs.aggregator().append_core("warn", "core", "SERVICE_ACTION", &diagnostics,
+                    &[("action", "start".to_string())]);
+            }
+        }
+        self.check_service_attempt(generation, deadline)?;
+        if tokio::time::Instant::now() >= attempt_limit {
+            return Err(self.service_startup_deadline(&causes));
+        }
+        let connect = (self.service_engine.connect)(Some(attempt_limit));
+        let result = self.await_service_connection_with_startup_deadline(generation, deadline, attempt_limit, connect).await?;
+        self.check_service_attempt(generation, None)?;
+        match result {
+            Ok(session) => {
+                self.check_service_attempt(generation, deadline)?;
+                if tokio::time::Instant::now() >= attempt_limit {
+                    return Err(self.service_startup_deadline("engine connection completed after the request deadline"));
+                }
+                self.service_lifecycle.clear_launch_requested();
+                Ok(session)
+            }
+            Err(error) => {
+                let detail = format!("{causes}; recovery action completed; final connect: {error}; {error:?}");
+                if check_auth_deadline(deadline).is_err() { return Err(Status::deadline_exceeded(detail)); }
+                Err(self.service_attempt_error("recovery action completed; final connect", format!("{causes}; {error}; {error:?}")))
+            }
         }
     }
 
@@ -1957,22 +2311,9 @@ impl LiveConnectionProjection {
         ResolvedTransport::Oneshot
     }
 
-    /// W3：Service 传输的会话获取——直连常驻端点；不可用时修复阶梯（daemon 在→
-    /// `EnsureEngine` 帧免提权；不在→osascript `start`）后有界重试。阶梯穷尽仍
-    /// 不可用 → `service_not_running|` typed 拒绝（壳层恢复 modal 出口；E8 后
-    /// 不再回退会话引擎路径），并刷新服务状态缓存供快照。
-    async fn service_engine_session_or_reject(
-        &self,
-    ) -> Result<EngineControlSession, Status> {
-        if let Some(session) = self.try_service_engine_session().await {
-            return Ok(session);
-        }
-        let facts = (self.service_lifecycle.probe())().await;
-        *lock_recover(&self.service_status_cache) =
-            Some(crate::service_status::wire_service_status(&facts));
-        Err(Status::failed_precondition(format!(
-            "{SERVICE_NOT_RUNNING_PREFIX}服务引擎经修复阶梯后仍不可用（常驻端点未能恢复）"
-        )))
+    /// 保留现有 UI 路由前缀，失败不追加状态探测或宣称服务已停止。
+    async fn service_engine_session_or_reject(&self, generation: u64, deadline: Option<AuthDeadline>) -> Result<LiveEngineSession, Status> {
+        self.try_service_engine_session(generation, deadline).await
     }
 
     /// P4 v2：服务变更（install/uninstall）前的业务停机——win32
@@ -2009,61 +2350,231 @@ impl LiveConnectionProjection {
                 &[("status", status.message().to_string())],
             );
         }
+        // 服务替换前释放旧控制通道；停止失败也不保留不可复用的会话和 ticker。
+        if let Err(status) = self.close().await {
+            self.logs.aggregator().append_core(
+                "error", "core", "SERVICE_TRANSITION_CLOSE_FAILED",
+                "服务变更前释放旧 Engine 会话失败",
+                &[("status", status.message().to_owned())],
+            );
+        }
     }
 
-    /// W1-C（P7）双分支（win32 `execute_connect` 对应）：UI 一次性凭据存在 → 用户名
-    /// 仅在 persist 时保存；临时连接使用内存副本的 UI username/password + config
-    /// 其余字段（`server`/`routes`/`mtu`/`user_agent`）组装 envelope；UI 凭据不存在 →
-    /// 维持 `build_saved_connect_envelope` 磁盘回退。修复连接弹窗死循环：此前 payload
-    /// 被直接 zeroize 丢弃、恒走磁盘回退。
-    ///
-    /// T02：装配 envelope 之前先判定所选协议能否被本版本服务（win32
-    /// `execute_connect_tracked` 同款顺序与语义）——aTrust 必须在此显式拒绝，
-    /// 既不落盘本次 UI 凭据、也不读取已保存密文。
-    ///
-    /// # Errors
-    ///
-    /// 所选协议为 aTrust（后端尚未接入）→ `failed_precondition`；凭据落盘失败 /
-    /// envelope 组装失败 → 既有 UI 凭据映射的 typed 拒绝。
-    fn connect_payload_and_plan(
+    fn prepare_connect_payload(
         &self,
-        ui_credentials: Option<UiCredentialPackage>,
+        ui_credentials: Option<UiSecretPayload>,
         persist_credentials: bool,
-    ) -> Result<(Vec<u8>, exv_vpn_wire::generated::TunnelPlan), Status> {
-        let mut config = lock_recover(&self.config);
-        ensure_selected_protocol_is_serviceable(config.protocol())?;
-        let payload = match ui_credentials {
-            Some(mut credentials) => {
+        recovery_policy: Option<SessionReconnectPolicy>,
+        new_session: bool,
+    ) -> Result<(Vec<u8>, exv_vpn_wire::generated::TunnelPlan, SessionReconnectPolicy, Option<atrust_session_cache::CandidateReceipt>, wire::SessionIdentity, Option<cached_headless::CachedProbeInput>), Status> {
+        self.prepare_connect_payload_inner(ui_credentials, persist_credentials, recovery_policy, new_session, false)
+    }
+
+    fn prepare_connect_payload_inner(
+        &self, ui_credentials: Option<UiSecretPayload>, persist_credentials: bool,
+        recovery_policy: Option<SessionReconnectPolicy>, new_session: bool, admitted_recovery_material: bool,
+    ) -> Result<(Vec<u8>, exv_vpn_wire::generated::TunnelPlan, SessionReconnectPolicy, Option<atrust_session_cache::CandidateReceipt>, wire::SessionIdentity, Option<cached_headless::CachedProbeInput>), Status> {
+        if recovery_policy.is_some() && (persist_credentials || (ui_credentials.is_some() && !admitted_recovery_material)) {
+            return Err(Status::invalid_argument(CONNECTION_CREDENTIALS_INVALID_CODE));
+        }
+        let mut saved_config = lock_recover(&self.config);
+        let mut temporary_config = recovery_policy.as_ref().map(|policy| {
+            saved_config.with_temporary_protocol(policy.protocol)
+                .with_temporary_atrust_server(&policy.atrust_server)
+        });
+        let config = temporary_config.as_mut().unwrap_or(&mut *saved_config);
+        if config.protocol() == Protocol::Atrust && config.atrust_server().is_empty() {
+            return Err(Status::failed_precondition("DARWIN_CORE_ATRUST_GATEWAY_INVALID: aTrust服务器未配置或无效，请在设置中填写网关"));
+        }
+        let mut admitted_policy = recovery_policy.clone().unwrap_or_else(|| SessionReconnectPolicy::from_config(config));
+        // Cisco 计划：mtu 随配置（既有语义；路由经信封 V1 携带）。aTrust 计划
+        // （M3 定稿）：mtu 同源 + 用户校园路由经 `ipv4_routes` 携带（aTrust V2
+        // 信封无路由字段——计划是 Cisco 信封 routes 的 aTrust 等价通道）。
+        let cisco_plan = |config: &DarwinUiConfig| exv_vpn_wire::generated::TunnelPlan {
+            mtu: config.mtu(),
+            ..Default::default()
+        };
+        let atrust_plan = |config: &DarwinUiConfig| exv_vpn_wire::generated::TunnelPlan {
+            mtu: config.mtu(),
+            ipv4_routes: normalized_connect_routes(config.routes())
+                .iter()
+                .filter_map(|text| {
+                    let (address, prefix) = text.split_once('/')?;
+                    let octets: [u8; 4] = address.parse::<std::net::Ipv4Addr>().ok()?.octets();
+                    let prefix_len: u32 = prefix.parse().ok()?;
+                    Some(exv_vpn_wire::generated::Ipv4Route {
+                        network: octets.to_vec(),
+                        prefix_len,
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        };
+        match (config.protocol(), ui_credentials) {
+            // Cisco：UI 优先 / 磁盘回退（W1-C 既有路径，字节不变）。
+            (Protocol::Cisco, Some(UiSecretPayload::Cisco(mut credentials))) => {
                 if persist_credentials {
                     config.apply_ui_credentials_and_save(&credentials.username, Some(credentials.password.as_str()))
                         .map_err(ui_persist_status)?;
+                    // S5b：persist 受理=本 UI 账密对成为已持久化凭据对——冻结受理
+                    // 快照（重连组装优先使用，免疫连接中凭据/用户名修改）。
+                    admitted_policy.credential_snapshot = Some(AdmissionCredentialSnapshot {
+                        username: credentials.username.clone(),
+                        password: zeroize::Zeroizing::new(credentials.password.clone()),
+                    });
+                } else if !(config.has_saved_credential_pair()
+                    && config.username() == credentials.username)
+                {
+                    // S5b（一次性资格关闭）：persist=false 的一次性连接，磁盘上没有
+                    // 与受理账户匹配的 owner 持久化凭据对——受理期即关闭本会话重连
+                    // 资格（堵静默账号切换：否则 ENGINE_LOST 重连会改用磁盘上另一
+                    // 账户的凭据而显示身份冻结为一次性用户名）。已保存密文存在但归
+                    // 属账户不一致时同时置暂停 reason（前端 toast 通道）。
+                    admitted_policy.enabled = false;
+                    if config.has_stored_password() {
+                        admitted_policy.pause_reason = Some(RECONNECT_PAUSE_OWNER_MISMATCH);
+                    }
                 }
                 let temporary = config.with_temporary_username(&credentials.username).map_err(ui_persist_status)?;
                 // 密码 ownership 移入 envelope（零化类型）；包内残留副本由 Drop 清零。
                 let password = std::mem::take(&mut credentials.password);
-                build_connect_envelope(&temporary, password)
-                    .map_err(ui_envelope_status)?
-                    .encode()
-                    .to_vec()
+                let envelope = build_connect_envelope(&temporary, UiConnectMaterials::Cisco { password })
+                    .map_err(ui_envelope_status)?;
+                let (payload, identity) = encode_with_session_identity(envelope);
+                Ok((payload, cisco_plan(&temporary), admitted_policy, None, identity, None))
             }
-            None => build_saved_connect_envelope(&config)
-                .map_err(|error| saved_envelope_status(&error))?
-                .encode()
-                .to_vec(),
-        };
-        Ok((
-            payload,
-            exv_vpn_wire::generated::TunnelPlan {
-                mtu: config.mtu(),
-                ..Default::default()
-            },
-        ))
+            (Protocol::Cisco, None) => {
+                // S5b：重连组装优先受理快照（免疫连接中凭据/用户名修改——快照账户
+                // 与密码即受理时已持久化的值）。
+                if let Some(snapshot) = recovery_policy
+                    .as_ref()
+                    .and_then(|policy| policy.credential_snapshot.as_ref())
+                {
+                    let temporary = config.with_temporary_username(&snapshot.username).map_err(ui_persist_status)?;
+                    let envelope = build_connect_envelope(
+                        &temporary,
+                        UiConnectMaterials::Cisco {
+                            password: snapshot.password.as_str().to_owned(),
+                        },
+                    )
+                    .map_err(ui_envelope_status)?;
+                    let (payload, identity) = encode_with_session_identity(envelope);
+                    return Ok((payload, cisco_plan(&temporary), admitted_policy, None, identity, None));
+                }
+                // 磁盘回退：单次读取已保存密码（与快照捕获同源）；envelope 组装与既有
+                // `build_saved_connect_envelope` 字节等价（load → build_connect_envelope）。
+                let password = zeroize::Zeroizing::new(config.load_saved_password()
+                    .map_err(|error| saved_envelope_status(&SavedConnectEnvelopeError::Config(error)))?);
+                let envelope = match build_connect_envelope(
+                    config,
+                    UiConnectMaterials::Cisco { password: password.as_str().to_owned() },
+                ) {
+                    Ok(crate::credential::DarwinConnectEnvelope::Cisco(envelope)) => envelope,
+                    Ok(crate::credential::DarwinConnectEnvelope::Atrust(_)) => {
+                        return Err(saved_envelope_status(&SavedConnectEnvelopeError::Envelope(
+                            exv_vpn_darwin_ipc::connect_envelope::ConnectEnvelopeError::InvalidProtocol,
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(saved_envelope_status(&SavedConnectEnvelopeError::Envelope(error)));
+                    }
+                };
+                // S5b：新会话受理时冻结磁盘账密对快照（一次性/恢复派发不建快照——
+                // 前者无持久化对，后者的 admitted_policy 已携带原快照）。
+                if new_session {
+                    admitted_policy.credential_snapshot = Some(AdmissionCredentialSnapshot {
+                        username: config.username().to_owned(),
+                        password,
+                    });
+                }
+                let (payload, identity) = encode_with_session_identity(crate::credential::DarwinConnectEnvelope::Cisco(envelope));
+                Ok((payload, cisco_plan(&config), admitted_policy, None, identity, None))
+            }
+            // aTrust（M1 受理面；M5 缓存接线）：UI v2 载荷 = 新认证（fresh 位由采集
+            // 路径置位）；**先写会话缓存再组装/发连接**（M1 冻结时序——失败不回滚，
+            // 候选复核兜底；写入失败只记非秘密日志，不阻断连接受理）。计划=mtu+用户
+            // 校园路由（Cisco 经信封 routes 携带同一配置；aTrust 信封无路由字段——
+            // wire 计划 ipv4_routes 是等价通道，engine 侧据此安装校园路由，win32
+            // "校园范围由 EXV 用户配置提供" 同源）。
+            (Protocol::Atrust, Some(UiSecretPayload::Atrust(atrust))) => {
+                let gateway = exv_vpn_darwin_ipc::browser_session::GatewayOrigin::parse(&format!("https://{}", config.atrust_server())).map_err(|_| Status::invalid_argument(CONNECTION_CREDENTIALS_INVALID_CODE))?;
+                if exv_vpn_darwin_ipc::browser_session::GatewayOrigin::parse(atrust.browser_session.gateway()).map_err(|_| Status::invalid_argument(CONNECTION_CREDENTIALS_INVALID_CODE))?.endpoint() != gateway.endpoint() {
+                    return Err(Status::invalid_argument(CONNECTION_CREDENTIALS_INVALID_CODE));
+                }
+                if let Err(error) =
+                    atrust_session_cache::save_with_username(config.config_dir(), &atrust.browser_session, &atrust.authenticated_username)
+                {
+                    self.logs.aggregator().append_core(
+                        "warn",
+                        "core",
+                        "ATRUST_SESSION_CACHE_SAVE_FAILED",
+                        "aTrust session cache write failed; connecting without a fresh cache entry",
+                        &[("error", error.message().to_string())],
+                    );
+                }
+                let receipt = atrust_session_cache::receipt(config.config_dir(), &atrust.browser_session);
+                let envelope = build_connect_envelope(
+                    &config,
+                    UiConnectMaterials::Atrust {
+                        fresh_authentication: atrust.fresh_authentication,
+                        browser_session: atrust.browser_session,
+                    },
+                )
+                .map_err(ui_envelope_status)?;
+                let (payload, mut identity) = encode_with_session_identity(envelope);
+                identity.username = atrust.authenticated_username;
+                Ok((payload, atrust_plan(&config), admitted_policy, receipt, identity, None))
+            }
+            // aTrust 无 UI 载荷：缓存继续 fresh=false，由 Engine 最终复核/采纳。
+            // 仅用户新建 headless 连接在 Apply 前先探测缓存事实；其他模式及后台
+            // 恢复沿既有流程。无候选同步请求凭据，由同次用户请求继续认证。
+            (Protocol::Atrust, None) => {
+                // 用户手动认证由本次浏览器交付候选；后台恢复保留已冻结的会话策略。
+                if new_session && config.atrust_auth_mode() != crate::AtrustAuthMode::Headless {
+                    return Err(connect_materials_missing("atrust-material-missing"));
+                }
+                let endpoint = format!("https://{}", config.atrust_server());
+                match atrust_session_cache::load_candidate(config.config_dir(), &endpoint) {
+                    Some(candidate) => {
+                        let authenticated_username = atrust_session_cache::username_for(config.config_dir(), &candidate).unwrap_or_default();
+                        let receipt = atrust_session_cache::receipt(config.config_dir(), &candidate);
+                        // 与候选、回执同一配置锁捕获；恢复派发不执行用户认证准备。
+                        let cached_probe = (new_session && config.atrust_auto_login()
+                            && config.atrust_auth_mode() == crate::AtrustAuthMode::Headless)
+                            .then(|| cached_headless::CachedProbeInput::capture(config, &candidate));
+                        let envelope = build_connect_envelope(
+                            &config,
+                            UiConnectMaterials::Atrust {
+                                fresh_authentication: false,
+                                browser_session: candidate,
+                            },
+                        )
+                        .map_err(ui_envelope_status)?;
+                        let (payload, mut identity) = encode_with_session_identity(envelope);
+                        identity.username = authenticated_username;
+                        Ok((payload, atrust_plan(&config), admitted_policy, receipt, identity, cached_probe))
+                    }
+                    None => Err(connect_materials_missing("atrust-material-missing")),
+                }
+            }
+            // 协议×材料不匹配：跨协议误投是契约错误，绝不静默改走另一协议。
+            (Protocol::Cisco, Some(UiSecretPayload::Atrust(_)))
+            | (Protocol::Atrust, Some(UiSecretPayload::Cisco(_))) => {
+                Err(Status::invalid_argument(CONNECTION_CREDENTIALS_INVALID_CODE))
+            }
+        }
     }
 
     /// 经共享总线发布过渡事件（tick 由总线铸造；快照出向边界附加最近 proxy TUN
     /// 检测、自动重连状态与 P4 v2 服务状态缓存伴生值——后两者均为内存直读，零
     /// 磁盘零探测）。事件 `operation_id` 镜像快照 `operation_id`（win32 同款）。
-    fn publish(&self, mut snapshot: RuntimeSnapshot) {
+    fn publish(&self, snapshot: RuntimeSnapshot) {
+        self.publish_with_identity(snapshot, None);
+    }
+
+    fn publish_with_identity(&self, mut snapshot: RuntimeSnapshot, identity: Option<wire::SessionIdentity>) {
+        snapshot = snapshot_with_session_identity(snapshot, identity);
+        snapshot.atrust_auth_acquisition = self.auth_acquisition();
         if let Some(status) = lock_recover(&self.service_status_cache).clone() {
             snapshot.service_status = Some(status);
         }
@@ -2088,20 +2599,80 @@ impl LiveConnectionProjection {
         )
     }
 
-    /// W3-2/P3：向重连 worker 发送一条掉线信号（worker 未拉起时 `None`，信号丢弃
-    /// ——无重连语义；状态投影触发点与测试注入共用）。
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "直接注入信号仅由串行防重入测试使用；生产信号全部来自状态投影触发点"
-        )
-    )]
+    /// S5b（C-10）：给定（冻结或合成的）会话策略，按当前活状态求值重连资格：
+    /// `auto_reconnect && valid_reconnect_credential_source`。ENGINE_LOST 发射点与
+    /// worker 消费点共用本判定。
+    fn reconnect_eligible_now(&self, policy: &SessionReconnectPolicy) -> bool {
+        let config = lock_recover(&self.config);
+        config.auto_reconnect() && valid_reconnect_credential_source(&config, Some(policy))
+    }
+
+    fn background_reconnect_allowed(&self) -> bool {
+        let config = lock_recover(&self.config);
+        // S5b（C-10）：后台重连资格=auto_reconnect && 有效凭据源（活求值）。有效源
+        // 含受理快照臂——keep 分支仅改用户名后磁盘对因 owner 失配失效时，受理快照
+        // 继续承载受理账户的重连资格（免疫连接中凭据/用户名修改）；无快照会话
+        // （一次性/已清除）仍按 owner 匹配门暂停。
+        if !config.auto_reconnect() {
+            return false;
+        }
+        let policy = lock_recover(&self.reconnect_session_policy);
+        valid_reconnect_credential_source(&config, policy.as_ref())
+    }
+
+    fn require_background_reconnect(&self) -> Result<(), Status> {
+        if self.background_reconnect_allowed() { Ok(()) }
+        else { Err(Status::cancelled("DARWIN_CORE_AUTO_RECONNECT_DISABLED")) }
+    }
+
+    fn refresh_background_permission(&self) {
+        let allowed = self.background_reconnect_allowed();
+        // S5b：暂停原因分类（toast reason lane）+ 清除密码联动丢弃受理快照。注意
+        // darwin 配置层在凭据对失效时会把 auto_reconnect 一并强制关闭（含 keep 分支
+        // 仅改用户名的场景）——"磁盘对完整时关闭"才视为用户主动关闭（无 toast）。
+        let (pause_reason, drop_snapshot) = {
+            let config = lock_recover(&self.config);
+            if allowed || config.has_saved_credential_pair() {
+                (None, false)
+            } else if config.has_stored_password() {
+                (Some(RECONNECT_PAUSE_OWNER_MISMATCH), false)
+            } else {
+                (Some(RECONNECT_PAUSE_CREDENTIALS_CLEARED), true)
+            }
+        };
+        let paused = if let Some(policy) = lock_recover(&self.reconnect_session_policy).as_mut() {
+            let was_enabled = policy.enabled;
+            policy.enabled = allowed;
+            policy.pause_reason = pause_reason;
+            if drop_snapshot {
+                policy.credential_snapshot = None;
+            }
+            !allowed && was_enabled
+        } else {
+            false
+        };
+        if !allowed {
+            if let Some(round) = lock_recover(&self.reconnect_generation.recovery).as_mut() {
+                round.take_pending();
+            }
+            self.publish_auth_acquisition();
+        }
+        if paused {
+            // 暂停是可观察状态：重发布当前快照让 reason lane 立即到达前端（不等
+            // 下一次轮询/事件），toast 按 reason id 路由。
+            if let Some(snapshot) = self.events.current_snapshot() {
+                let identity = snapshot.session_identity.clone();
+                self.publish_with_identity(snapshot, identity);
+            }
+        }
+    }
+
+    /// 唤醒恢复复用Core的已保存凭据接线；生产R1仍由Engine独占执行。
     fn signal_reconnect(&self) {
         if let Some(tx) = lock_recover(&self.reconnect_tx).as_ref() {
             let _ = tx.send((
-                self.reconnect_generation.load(Ordering::Acquire),
-                ReconnectSignal::DataPlaneDrop,
+                self.reconnect_generation.current(),
+                ReconnectSignal::WakeResume,
             ));
         }
     }
@@ -2109,7 +2680,7 @@ impl LiveConnectionProjection {
     /// W3-2/P3：消费一条掉线信号，驱动一次自动重连（镜像 win32 `drive_reconnect`）。
     ///
     /// 单 worker 串行消费 + 在途标记（`reconnect_active`）双重防重入：上一次重连
-    /// 已派发、终态未到时新信号直接跳过（`kernel.reconnect.skip_in_flight`）。重连
+    /// 已派发、终态未到时新信号直接跳过（不重复派发）。重连
     /// 前判定：`auto_reconnect` 未开启 → 跳过（`disabled`）；`max_attempts != 0` 且
     /// `attempts >= max` → 耗尽停止（`exhausted`——**停在 `FailedClean` 不回 `Idle`**，
     /// 对齐 win32：耗尽是失败事实，恢复由用户手动驱动）。每次实际派发递增
@@ -2135,19 +2706,14 @@ impl LiveConnectionProjection {
         reason = "判定链（防重入/开关/预算）+ 退避 + 派发/失败分支线性展开保持事实顺序可读，镜像 win32 drive_reconnect"
     )]
     async fn drive_reconnect(&self, kind: ReconnectSignal) {
+        if kind == ReconnectSignal::AuthContinuation {
+            self.continue_auth_recovery().await;
+            return;
+        }
         // 防重入首检：上一次重连尝试仍在途（已派发、终态未到）时新信号直接跳过。
         // R2 的预算内再入走 [`Self::drive_reconnect_reentry`]（在途标记保持占用，
         // 不得被自己的首检拦截——worker 单任务串行消费，无并发面）。
         if self.reconnect_active.load(Ordering::Acquire) {
-            self.logs
-                .aggregator()
-                .append_core(
-                    "info",
-                    "kernel",
-                    "kernel.reconnect.skip_in_flight",
-                    "auto reconnect skipped: a reconnect attempt is still in flight",
-                    &[],
-                );
             return;
         }
         self.drive_reconnect_reentry(kind).await;
@@ -2155,18 +2721,31 @@ impl LiveConnectionProjection {
 
     /// [`Self::drive_reconnect`] 的再入体：无防重入首检（调用方已持有在途语义）。
     async fn drive_reconnect_reentry(&self, kind: ReconnectSignal) {
-        let reconnect_started = std::time::Instant::now();
-        let generation = self.reconnect_generation.load(Ordering::Acquire);
-        // 当前连接的实际重连决策只读受理时冻结的策略。
-        let Some(SessionReconnectPolicy {
-            enabled,
-            max_attempts: max,
-            backoff,
-        }) = *lock_recover(&self.reconnect_session_policy)
-        else {
-            return;
+        let generation = self.reconnect_generation.current();
+        // S5b（C-10）：资格在信号消费时点对活状态求值（auto_reconnect && 有效凭据
+        // 源），与 ENGINE_LOST 发射点同一公式。policy 缺席（生命周期洞：仅首会话
+        // 安装+Stop 清空）时——ENGINE_LOST 按当前活配置合成策略继续（预算/退避取
+        // 当前配置值）；数据面信号维持既有"无冻结策略即结束"语义。
+        let frozen_policy = match self
+            .reconnect_generation
+            .in_generation(generation, || lock_recover(&self.reconnect_session_policy).clone())
+            .flatten()
+        {
+            Some(policy) => policy,
+            None if kind == ReconnectSignal::EngineLost => {
+                let synthesized = {
+                    let config = lock_recover(&self.config);
+                    SessionReconnectPolicy::from_config(&config)
+                };
+                if !self.reconnect_eligible_now(&synthesized) {
+                    return;
+                }
+                synthesized
+            }
+            None => return,
         };
-        if !enabled {
+        let SessionReconnectPolicy { max_attempts: max, backoff, .. } = frozen_policy;
+        if !self.reconnect_eligible_now(&frozen_policy) {
             self.logs
                 .aggregator()
                 .append_core(
@@ -2181,19 +2760,16 @@ impl LiveConnectionProjection {
             return;
         }
         // W3：oneshot 拦截（规范 §二.3「engine 失联→手动重连」；总纲 3）——只在
-        // 重连**必然再次提权**时拦截：上次会话形态确为 oneshot ∧ 会话槽已空/已死
-        // （engine 失联或已终结）∧ 传输仍解析为 Oneshot（用户未在此期间装服务）。
-        // 会话槽仍有活会话时重连走复用（零提权，放行）；形态未知（""=夹具/未建立）
-        // 不断言 oneshot 语义（放行）。稳定码只进日志；UI 的失败态「重试」按钮
-        // 即手动重连出口。
+        // 会话槽已空且传输仍为 Oneshot 时，保留用户手动提权出口。
+        // 槽内通道先尝试原 attach/RPC；occupied typed 拒绝的一次原重建例外
+        // 保持不变，不能由槽位在场承诺后续绝无 launch。
         let last_mode_oneshot = *lock_recover(&self.engine_mode) == "oneshot";
         let needs_launch = self
             .session
             .lock()
             .await
-            .as_ref()
-            .is_none_or(|existing| !existing.is_alive());
-        if generation != self.reconnect_generation.load(Ordering::Acquire) { return; }
+            .is_none();
+        if generation != self.reconnect_generation.current() { return; }
         if last_mode_oneshot
             && needs_launch
             && matches!(self.resolve_transport().await, ResolvedTransport::Oneshot)
@@ -2215,12 +2791,6 @@ impl LiveConnectionProjection {
         // T5：R2（EngineLost）的派发失败按预算退避重试——循环头的预算门拦截耗尽；
         // 数据面掉线（DataPlaneDrop）沿用一期"派发前失败即终态"。
         let r2_retry = kind == ReconnectSignal::EngineLost;
-        if r2_retry && attempts < if max == 0 { u32::MAX } else { max } {
-            self.logs.aggregator().append_core(
-                "info", "kernel", "kernel.reconnect.r2_mode",
-                "engine-lost reconnect: dispatch failures will retry within budget until the engine returns", &[],
-            );
-        }
         if max != 0 && attempts >= max {
             self.logs
                 .aggregator()
@@ -2243,71 +2813,49 @@ impl LiveConnectionProjection {
         }
 
         // 重连执行：占用在途标记 + 计数 + 复用 connect（凭据从磁盘重新组装）。
-        self.reconnect_active.store(true, Ordering::Release);
-        self.reconnect_attempts.fetch_add(1, Ordering::Relaxed);
+        // 用户 Stop 与退避占位共用既有 generation 门，旧 worker 不能重新占位。
+        if self.reconnect_generation.in_generation(generation, || {
+            self.reconnect_active.store(true, Ordering::Release);
+            self.reconnect_attempts.fetch_add(1, Ordering::Relaxed);
+            if r2_retry && backoff {
+                // 保留失联/停止未确认事实，仅及时发布真实在途状态供产品取消。
+                if let Some(snapshot) = self.events.current_snapshot() {
+                    let identity = snapshot.session_identity.clone();
+                    self.publish_with_identity(snapshot, identity);
+                }
+            }
+        }).is_none() { return; }
         let attempt = attempts + 1;
-        self.logs
-            .aggregator()
-            .append_core(
-                "info",
-                "kernel",
-                "kernel.reconnect.attempt",
-                &format!(
-                    "auto reconnect attempt {attempt} (max={})",
-                    if max == 0 {
-                        "unlimited".to_string()
-                    } else {
-                        max.to_string()
-                    }
-                ),
-                &[],
-            );
         // 自动重连只允许读取已持久化的凭据；绝不复用先前 UI 的一次性密码（connect
         // 侧 ui_credentials=None）。退避开启时在派发前 sleep（占用在途标记之后——
         // 睡眠期间新掉线信号按防重入跳过；关闭（默认）→ 零 sleep，立即重连）。
+        let dispatch_delay = if backoff {
+            reconnect_backoff_delay(self.reconnect_backoff_base, self.reconnect_backoff_cap, attempt)
+        } else {
+            Duration::ZERO
+        };
         if backoff {
-            let delay = reconnect_backoff_delay(
-                self.reconnect_backoff_base,
-                self.reconnect_backoff_cap,
-                attempt,
-            );
-            self.logs
-                .aggregator()
-                .append_core(
-                    "info",
-                    "kernel",
-                    "kernel.reconnect.backoff",
-                    &format!(
-                        "auto reconnect backoff: sleeping {} ms before attempt {attempt}",
-                        delay.as_millis()
-                    ),
-                    &[],
-                );
-            tokio::time::sleep(delay).await;
+            tokio::time::sleep(dispatch_delay).await;
         }
         // 退避期间用户可能已断开或重新连接，旧工作不能覆盖新意图。
-        if generation != self.reconnect_generation.load(Ordering::Acquire) { return; }
+        if generation != self.reconnect_generation.current() { return; }
         let intent = reconnect_intent();
         let operation_id = intent
             .lookup_key
             .as_ref()
             .map_or_else(Vec::new, |key| key.operation_id.clone());
         let request = ConnectRequest {
+            auth_binding: None,
             intent: Some(intent),
             secret_payload: Vec::new(),
         };
-        let dispatch_started = std::time::Instant::now();
-        let result = self.connect_in_generation(&request, None, false, generation, false).await;
-        self.logs.aggregator().append_core("debug", "kernel", "kernel.reconnect.dispatch_timing",
-            "自动重连退避及派发耗时", &[
-                ("operation_id", operation_id.iter().map(|byte| format!("{byte:02x}")).collect()),
-                ("connection_generation", generation.to_string()), ("reconnect_attempt", attempt.to_string()),
-                ("total_duration_ms", reconnect_started.elapsed().as_millis().to_string()),
-                ("dispatch_duration_ms", dispatch_started.elapsed().as_millis().to_string()),
-                ("effective_auto_reconnect", enabled.to_string()), ("effective_backoff", backoff.to_string()),
-                ("effective_max_attempts", max.to_string()), ("dispatch_ok", result.is_ok().to_string()),
-            ]);
-        if generation != self.reconnect_generation.load(Ordering::Acquire) { return; }
+        self.begin_auth_round(generation, &request, frozen_policy.clone(), kind);
+        let mut result = self.connect_in_generation(&request, None, false, generation, false, Some(frozen_policy)).await;
+        if result.as_ref().err().is_some_and(reconnect_materials_missing)
+            && self.has_auth_round(generation) {
+            result = self.acquire_and_apply_recovery(generation).await;
+        }
+        if generation != self.reconnect_generation.current() { return; }
         match result {
             Ok(_reply) => {
                 // 已派发：保持 in-flight（终态事件由状态投影清 reconnect_active）。
@@ -2320,29 +2868,33 @@ impl LiveConnectionProjection {
                         &format!(
                             "auto reconnect attempt {attempt} dispatched (credentials re-assembled from saved envelope)"
                         ),
-                        &[],
+                        &[("attempt", attempt.to_string()), ("max", max.to_string()),
+                            ("trigger", if r2_retry { "engine_lost" } else { "data_plane_drop" }.to_owned()),
+                            ("delay_ms", dispatch_delay.as_millis().to_string())],
                     );
             }
             Err(status) => {
+                if self.auth_round_ended(generation) { return; }
+                // 已精确观察到冻结协议缺材料时等待用户新请求，不能按引擎暂未恢复
+                // 无限重试。原清理收口保留真实 Stopped/Dirty 与清理错误优先级。
+                if reconnect_materials_missing(&status) {
+                    if self.reconnect_generation.in_generation(generation, || {
+                        self.reconnect_active.store(false, Ordering::Release);
+                    }).is_none() { return; }
+                    self.logs.aggregator().append_core("warn", "kernel", "kernel.reconnect.materials_missing",
+                        "冻结协议的认证材料缺失，结束自动恢复并等待用户显式重试", &[
+                            ("code", CONNECTION_CREDENTIALS_MISSING_CODE.to_owned()),
+                            ("attempt", attempt.to_string()), ("generation", generation.to_string()),
+                        ]);
+                    self.finish_reconnect_and_cleanup(generation, reconnect_dispatch_vpn_error(&status)).await;
+                    return;
+                }
                 // T5 R2：引擎失联触发的派发失败多为引擎尚未被 launchd 拉回（会话
                 // 建立失败）——预算未耗尽时退避后重试（循环头的预算门会拦截耗尽），
                 // 不发终态。数据面掉线触发沿用一期语义：派发前失败即终态。
                 if r2_retry
-                    && generation == self.reconnect_generation.load(Ordering::Acquire)
+                    && generation == self.reconnect_generation.current()
                 {
-                    self.logs
-                        .aggregator()
-                        .append_core(
-                            "info",
-                            "kernel",
-                            "kernel.reconnect.r2_retry",
-                            &format!(
-                                "engine-lost reconnect attempt {attempt} failed before dispatch (engine not back yet?); budget permitting, sleeping before the next attempt: code={:?} msg={}",
-                                status.code(),
-                                status.message()
-                            ),
-                            &[],
-                        );
                     // 无退避配置时 R2 也须给 launchd 拉回引擎留时间。
                     let delay = if backoff {
                         reconnect_backoff_delay(
@@ -2353,8 +2905,21 @@ impl LiveConnectionProjection {
                     } else {
                         std::time::Duration::from_secs(2)
                     };
+                    self.logs
+                        .aggregator()
+                        .append_core(
+                            "info",
+                            "kernel",
+                            "kernel.reconnect.r2_retry",
+                            &format!(
+                                "engine-lost reconnect attempt {attempt} failed before dispatch; budget permitting, sleeping before the next attempt: code={:?} msg={}",
+                                status.code(),
+                                status.message()
+                            ),
+                            &[("retry_delay_ms", delay.as_millis().to_string())],
+                        );
                     tokio::time::sleep(delay).await;
-                    if generation != self.reconnect_generation.load(Ordering::Acquire) {
+                    if generation != self.reconnect_generation.current() {
                         return;
                     }
                     // 再入驱动下一轮（预算门在轮首拦截耗尽；在途标记保持占用，
@@ -2390,7 +2955,7 @@ impl LiveConnectionProjection {
     /// 自动重连不再安排下一次尝试时，把 Engine 暂存的空闲 utun/控制路由走现有
     /// StopTunnel 完整回收。只有收到 Stopped 后才发布 FailedClean。
     async fn finish_reconnect_and_cleanup(&self, generation: u64, terminal_error: wire::VpnError) {
-        if generation != self.reconnect_generation.load(Ordering::Acquire) {
+        if generation != self.reconnect_generation.current() {
             return;
         }
         let intent = reconnect_stop_intent();
@@ -2399,8 +2964,12 @@ impl LiveConnectionProjection {
             .map(|snapshot| snapshot.operation_id).unwrap_or_default();
         let request = StopRequest { intent: Some(intent) };
         match self.stop_in_generation(&request, generation, false).await {
-            Ok(_) if generation == self.reconnect_generation.load(Ordering::Acquire) => {
-                self.publish(failed_clean_snapshot(&operation_id, terminal_error));
+            Ok(reply) if generation == self.reconnect_generation.current() => {
+                if let Some(completion) = reply.terminal.and_then(|terminal| terminal.stop_completion) {
+                    self.publish(session_orchestration::snapshot(&operation_id, completion, Some(terminal_error)));
+                } else {
+                    self.publish(failed_clean_snapshot(&operation_id, terminal_error));
+                }
             }
             Ok(_) => {}
             Err(status) => {
@@ -2415,24 +2984,6 @@ impl LiveConnectionProjection {
         }
     }
 
-    /// 用户在自动重连等待期间关闭开关时，取消旧 generation 并同步释放 Engine 暂存
-    /// 的资源；连接已正常 Connected 时仅保存下次会话设置，不主动断开。
-    async fn cancel_waiting_reconnect_after_setting_disabled(&self) {
-        let waiting = self.reconnect_active.load(Ordering::Acquire)
-            || (self.reconnect_ever_connected.load(Ordering::Acquire)
-                && !lock_recover(&self.stats_state).is_live());
-        if !waiting {
-            return;
-        }
-        let generation = self.reconnect_generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-        self.reconnect_active.store(false, Ordering::Release);
-        if let Some(policy) = lock_recover(&self.reconnect_session_policy).as_mut() {
-            policy.enabled = false;
-        }
-        self.finish_reconnect_and_cleanup(generation, reconnect_disabled_vpn_error())
-            .await;
-    }
-
     /// 拉起自动重连 worker（W3-2/P3）：换入绑定本 worker 接收端的发送端，此后状态
     /// 投影的掉线信号经该通道到达本 worker；单 worker 串行消费（天然防并发重连）。
     /// worker 持投影 `Arc` 克隆（轻量共享句柄，内部全部 `Arc`）。返回 `JoinHandle`
@@ -2443,7 +2994,7 @@ impl LiveConnectionProjection {
         *lock_recover(&self.reconnect_tx) = Some(tx);
         tokio::spawn(async move {
             while let Some((generation, kind)) = rx.recv().await {
-                if generation == self.reconnect_generation.load(Ordering::Acquire) {
+                if generation == self.reconnect_generation.current() {
                     self.drive_reconnect(kind).await;
                 }
             }
@@ -2461,7 +3012,7 @@ impl LiveConnectionProjection {
         Some(snapshot_with_reconnect(
             // 轮询回放路径不携带会话起点（0）——前端 adoptSnapshot 对缺失值保留
             // 上一已知值，事件路径的 Connected 快照才是该字段的事实源。
-            connected_snapshot(&operation_id, latest, 0),
+            snapshot_with_session_identity(connected_snapshot(&operation_id, latest, 0), self.reconnect_generation.identity_for(&operation_id)),
             self.reconnect_status(),
         ))
     }
@@ -2472,7 +3023,7 @@ fn saved_envelope_status(error: &SavedConnectEnvelopeError) -> Status {
         SavedConnectEnvelopeError::Envelope(
             exv_vpn_darwin_ipc::connect_envelope::ConnectEnvelopeError::InvalidUsername
             | exv_vpn_darwin_ipc::connect_envelope::ConnectEnvelopeError::InvalidPassword,
-        ) => Status::failed_precondition(CONNECTION_CREDENTIALS_MISSING_CODE),
+        ) => connect_materials_missing("cisco-material-missing"),
         _ => Status::failed_precondition(CONNECTION_ENGINE_SESSION_CODE),
     }
 }
@@ -2488,7 +3039,7 @@ fn saved_envelope_status(error: &SavedConnectEnvelopeError) -> Status {
 /// 不进入 Engine，请求 carrier 不再遗留原始字节。
 fn take_ui_credentials(
     request: &mut ConnectRequest,
-) -> Result<Option<UiCredentialPackage>, Status> {
+) -> Result<Option<UiSecretPayload>, Status> {
     let mut payload = std::mem::take(&mut request.secret_payload);
     if payload.is_empty() {
         return Ok(None);
@@ -2496,17 +3047,32 @@ fn take_ui_credentials(
     let parsed = parse_ui_secret_payload(&payload)
         .map_err(|_| Status::invalid_argument(CONNECTION_CREDENTIALS_INVALID_CODE));
     payload.zeroize();
-    let mut credentials = parsed?;
-    if credentials.version != SECRET_PAYLOAD_VERSION
-        || credentials.username.trim().is_empty()
-        || credentials.password.is_empty()
-    {
-        credentials.zeroize();
-        return Err(Status::invalid_argument(
-            CONNECTION_CREDENTIALS_INVALID_CODE,
-        ));
+    let credentials = parsed?;
+    match credentials {
+        UiSecretPayload::Cisco(mut credentials) => {
+            if credentials.version != SECRET_PAYLOAD_VERSION
+                || credentials.username.trim().is_empty()
+                || credentials.password.is_empty()
+            {
+                credentials.zeroize();
+                return Err(Status::invalid_argument(
+                    CONNECTION_CREDENTIALS_INVALID_CODE,
+                ));
+            }
+            Ok(Some(UiSecretPayload::Cisco(credentials)))
+        }
+        UiSecretPayload::Atrust(credentials) => {
+            // 解析层已校验（防御性复核）；会话秘密随局部值的 Drop 清零。
+            if credentials.version != ATRUST_SECRET_PAYLOAD_VERSION
+                || credentials.protocol != Protocol::Atrust.as_str()
+            {
+                return Err(Status::invalid_argument(
+                    CONNECTION_CREDENTIALS_INVALID_CODE,
+                ));
+            }
+            Ok(Some(UiSecretPayload::Atrust(credentials)))
+        }
     }
-    Ok(Some(credentials))
 }
 
 /// T02：连接入口的协议门禁（win32 `ensure_selected_protocol_is_serviceable` 同语义，
@@ -2520,14 +3086,6 @@ fn take_ui_credentials(
 ///
 /// 所选协议为 aTrust（后端尚未接线）→ `failed_precondition` + 点名 aTrust 的中文
 /// 消息；Cisco → `Ok(())`。
-fn ensure_selected_protocol_is_serviceable(protocol: Protocol) -> Result<(), Status> {
-    match protocol {
-        Protocol::Cisco => Ok(()),
-        Protocol::Atrust => Err(Status::failed_precondition(format!(
-            "{PROTOCOL_UNAVAILABLE_PREFIX}{ATRUST_NOT_SERVICEABLE_REASON}"
-        ))),
-    }
-}
 
 /// `persist=true` 是 Tauri→Core 请求元数据（win32 `:3433-3439` 逐字对应），刻意不进入
 /// engine envelope。只有精确 `"true"` 才允许持久化；缺失、格式不符或旧客户端全部保守
@@ -2568,15 +3126,22 @@ fn ui_envelope_status(error: exv_vpn_darwin_ipc::connect_envelope::ConnectEnvelo
 /// P4 v2：[`LifecycleError`] → typed `Status`（稳定码 + 中文 message；探测事实不
 /// 进错误 message——失败路径 UI 只展示 message，事实经面板 query 重新获取）。
 fn lifecycle_status(error: LifecycleError) -> Status {
+    const PROXY_POLICY_CLEANUP_FAILED_CODE: &str =
+        "DARWIN_SERVICE_AGENT_PROXY_POLICY_CLEANUP_FAILED";
     match error {
         LifecycleError::Denied(_) => Status::failed_precondition(format!(
             "{ELEVATION_DENIED_CODE}: 用户取消了管理员授权，服务操作未执行"
         )),
+        LifecycleError::Failed(_, detail)
+            if detail.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .any(|token| token == PROXY_POLICY_CLEANUP_FAILED_CODE) =>
+        {
+            Status::failed_precondition(format!(
+                "{ELEVATION_FAILED_CODE}: 清理旧系统代理失败，服务操作已中止。请重试；持续失败时反馈日志（{PROXY_POLICY_CLEANUP_FAILED_CODE}）。"
+            ))
+        }
         LifecycleError::Failed(_, detail) => Status::failed_precondition(format!(
             "{ELEVATION_FAILED_CODE}: 服务操作提权执行失败：{detail}"
-        )),
-        LifecycleError::NotReady(_) => Status::failed_precondition(format!(
-            "{SERVICE_NOT_READY_CODE}: 服务操作已提交但等待就绪超时，请稍后在服务面板重新查询状态"
         )),
         LifecycleError::NotInstalled(_) => Status::failed_precondition(format!(
             "{SERVICE_NOT_INSTALLED_CODE}: 服务未安装，请先安装服务"
@@ -2587,6 +3152,11 @@ fn lifecycle_status(error: LifecycleError) -> Status {
     }
 }
 
+/// 只追加实际可选失败，不将所有成功命令输出变成日志。
+fn service_action_detail(summary: &str, diagnostics: &str) -> String {
+    if diagnostics.is_empty() { summary.to_owned() } else { format!("{summary}; {diagnostics}") }
+}
+
 /// [`LifecycleError`] 的 `SERVICE_ACTION` 日志 detail 字段：稳定码；提权失败
 /// （`Failed`）再附增强 stderr 细节（service agent 稳定码 + artifact `contract_key` +
 /// 不符维度，`elevation_failure_detail` 已有界）。全部固定常量与系统文本，无秘密。
@@ -2594,7 +3164,6 @@ fn lifecycle_failure_detail(error: &LifecycleError) -> String {
     match error {
         LifecycleError::Denied(_) => ELEVATION_DENIED_CODE.to_string(),
         LifecycleError::Failed(_, detail) => format!("{ELEVATION_FAILED_CODE}: {detail}"),
-        LifecycleError::NotReady(_) => SERVICE_NOT_READY_CODE.to_string(),
         LifecycleError::NotInstalled(_) => SERVICE_NOT_INSTALLED_CODE.to_string(),
         LifecycleError::SourceMissing(_) => SERVICE_SOURCE_MISSING_CODE.to_string(),
     }
@@ -2623,6 +3192,16 @@ fn engine_session_status(error: &crate::EngineLifecycleError) -> Status {
                 "{SERVICE_CONNECT_FAILED_PREFIX}{CONNECTION_ENGINE_ELEVATION_CODE}: service agent 会话建立失败（服务在但启动 Engine 被拒或服务中途不可达）"
             ))
         }
+        crate::EngineLifecycleError::Observe(crate::ObserveError::Connect(error)) => {
+            Status::unavailable(format!(
+                "{CONNECTION_ENGINE_SESSION_CODE}: connect kind={:?} errno={:?}: {error}",
+                error.kind(),
+                error.raw_os_error(),
+            ))
+        }
+        crate::EngineLifecycleError::BootstrapConnectDeadline { .. } => {
+            Status::unavailable(format!("{CONNECTION_ENGINE_SESSION_CODE}: {error}"))
+        }
         // MAC-LIFECYCLE-15 S1：Engine 已进入 Common handler 的 typed 门（如重复连接的
         // `failed_precondition(DARWIN_ENGINE_ATTEMPT_ACTIVE)`）时原样透传 code 与
         // message，不再压成笼统 unavailable；其余 RPC/transport 失败仍映射为 Core
@@ -2634,6 +3213,60 @@ fn engine_session_status(error: &crate::EngineLifecycleError) -> Status {
         }
         _ => Status::unavailable(CONNECTION_ENGINE_SESSION_CODE),
     }
+}
+
+/// 2026-09-30 修复（M2/M2b）：attach 三连流（状态/统计/日志）一次性挂接，任一
+/// 失败返回该错误（调用方负责清槽/重建裁决）。挂接顺序与既有语义一致：attach-
+/// before-apply，三条流全部在 `ApplyTunnel` 之前挂上。
+async fn attach_engine_streams(
+    session: &mut tokio::sync::MutexGuard<'_, Option<LiveEngineSession>>,
+) -> Result<
+    (
+        EngineUpdateStream<wire::ConnectStatusEvent>,
+        EngineUpdateStream<wire::StatsEvent>,
+        EngineUpdateStream<wire::LogEvent>,
+    ),
+    EngineLifecycleError,
+> {
+    // 会话槽由调用方的建立块保证 Some；防御分支经 engine_session_status 映射回
+    // 既有 `unavailable(CONNECTION_ENGINE_SESSION_CODE)` 拒绝语义。
+    let connect_status_stream = session
+        .as_mut()
+        .ok_or(EngineLifecycleError::Bootstrap)?
+        .attach_connect_status()
+        .await?;
+    // W-MVP-13：同一已认证控制通道上的既有 `StreamStats` 接缝；在 Apply 前挂接，
+    // 数据面建立后样本不丢。
+    let engine_stats_stream = session
+        .as_mut()
+        .ok_or(EngineLifecycleError::Bootstrap)?
+        .attach_stats()
+        .await?;
+    // MAC-OBS-13 S1：同一已认证控制通道上的既有 `StreamLogs` 接缝；同样在 Apply
+    // 前挂接，管线启动期的 sink 事件不丢。每次 Connect 重挂即替换 Engine 侧推送
+    // 通道（last-writer-wins），旧 ingest 任务随旧流 EOF 自行退出。
+    let engine_logs_stream = session
+        .as_mut()
+        .ok_or(EngineLifecycleError::Bootstrap)?
+        .attach_logs()
+        .await?;
+    Ok((connect_status_stream, engine_stats_stream, engine_logs_stream))
+}
+
+/// 2026-09-30 修复（M2b）：engine 会话占用型拒绝稳定码（`SessionOccupiedService`
+/// 对 busy 窗口内全部 RPC 的恒拒词汇；core 透传条件见 `engine_session_status` 的
+/// MAC-LIFECYCLE-15 分支——code==FailedPrecondition ∧ message 含稳定码）。
+const ENGINE_ATTEMPT_ACTIVE_MESSAGE: &str = "DARWIN_ENGINE_ATTEMPT_ACTIVE";
+
+/// 判定 attach 失败是否为占用型拒绝（清槽后就地重建一次的唯一触发；与壳层
+/// `map_status` 分支条件对齐，避免 message 碰巧含该词的其他错误误入）。
+fn is_engine_attempt_active(error: &EngineLifecycleError) -> bool {
+    matches!(
+        error,
+        EngineLifecycleError::Observe(crate::engine_client::ObserveError::Rpc(status))
+            if status.code() == Code::FailedPrecondition
+                && status.message().contains(ENGINE_ATTEMPT_ACTIVE_MESSAGE)
+    )
 }
 
 /// 生产日志聚合语义层：默认路径（`config_dir()/logs/aggregated.jsonl`）打开；
@@ -2747,15 +3380,55 @@ impl ConnectionProjection {
     }
 }
 
+fn receiver_control_deadline(operation: &[u8], value: u64) -> Result<AuthDeadline, Status> {
+    if operation.len() != 16 { return Err(Status::invalid_argument("auth_control/operation_id must be 16 bytes")); }
+    AuthDeadline::from_monotonic_ns(value).map_err(auth_deadline_status)
+}
+
 #[tonic::async_trait]
 impl KernelControl for DarwinKernelControlService {
     type WatchEventsStream = WatchEventsStream;
     type WatchStatsStream = WatchStatsStream;
 
+    async fn trigger_latency_refresh(
+        &self,
+        request: Request<wire::KernelLatencyRefreshRequest>,
+    ) -> Result<Response<wire::KernelLatencyRefreshReply>, Status> {
+        let live = self.live_connection.as_deref()
+            .ok_or_else(|| Status::failed_precondition("DARWIN_LATENCY_OWNER_NOT_ACTIVE"))?;
+        live.trigger_latency_refresh(request.into_inner().operation_id).await.map(Response::new)
+    }
+
+    async fn prepare_auth_control(&self, request: Request<wire::PrepareAuthControlRequest>) -> Result<Response<OperationReply>, Status> {
+        let request = request.into_inner();
+        let deadline = receiver_control_deadline(&request.operation_id, request.deadline_monotonic_ns)?;
+        let live = self.live_connection.as_deref().ok_or_else(|| Status::failed_precondition(CONNECTION_ENGINE_NOT_ATTACHED_CODE))?;
+        live.prepare_auth_control(deadline).await?;
+        Ok(Response::new(OperationReply { terminal: None }))
+    }
+
+    async fn auth_receiver_control(&self, request: Request<wire::AuthReceiverControlRequest>) -> Result<Response<wire::AuthReceiverControlReply>, Status> {
+        let request = request.into_inner();
+        let deadline = receiver_control_deadline(&request.operation_id, request.deadline_monotonic_ns)?;
+        if !matches!(wire::AuthReceiverAction::try_from(request.action), Ok(wire::AuthReceiverAction::Inspect | wire::AuthReceiverAction::DisableAndStop | wire::AuthReceiverAction::Restore | wire::AuthReceiverAction::ReadRecovery)) {
+            return Err(Status::invalid_argument("auth_receiver_control/action is required"));
+        }
+        let live = self.live_connection.as_deref().ok_or_else(|| Status::failed_precondition(CONNECTION_ENGINE_NOT_ATTACHED_CODE))?;
+        live.auth_receiver_control(request, deadline).await.map(Response::new)
+    }
+
     async fn connect(
         &self,
         request: Request<ConnectRequest>,
     ) -> Result<Response<OperationReply>, Status> {
+        let auth_deadline = match AuthDeadline::from_metadata(request.metadata()) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                let mut request = request.into_inner();
+                request.secret_payload.zeroize();
+                return Err(auth_deadline_status(error));
+            }
+        };
         // W1-C（P7）：persist 元数据必须在 `into_inner` 之前读取（win32 :3433-3439）。
         let persist_credentials = persist_credentials_requested(&request);
         let mut request = request.into_inner();
@@ -2770,7 +3443,7 @@ impl KernelControl for DarwinKernelControlService {
             }
         };
         let result = if let Some(live) = self.live_connection.as_deref() {
-            live.connect(&request, ui_credentials, persist_credentials)
+            live.connect_with_auth_deadline(&request, ui_credentials, persist_credentials, auth_deadline)
                 .await
         } else {
             self.connection()
@@ -2791,17 +3464,25 @@ impl KernelControl for DarwinKernelControlService {
         request: Request<InteractionResponse>,
     ) -> Result<Response<OperationReply>, Status> {
         let mut request = request.into_inner();
+        let result = if let Some(live) = self.live_connection.as_deref() {
+            live.respond_auth_acquisition(&mut request)
+        } else { Ok(false) };
         request.response_payload.zeroize();
-        prep_only()
+        match result {
+            Ok(true) => Ok(Response::new(OperationReply { terminal: None })),
+            Ok(false) => prep_only(),
+            Err(status) => Err(status),
+        }
     }
 
     async fn stop(
         &self,
         request: Request<StopRequest>,
     ) -> Result<Response<OperationReply>, Status> {
+        let deadline = stop_request_deadline(&request)?;
         let request = request.into_inner();
         if let Some(live) = self.live_connection.as_deref() {
-            live.stop(&request).await.map(Response::new)
+            live.stop_with_deadline(&request, deadline).await.map(Response::new)
         } else {
             self.connection()
                 .and_then(|connection| connection.stop(&request))
@@ -2850,11 +3531,13 @@ impl KernelControl for DarwinKernelControlService {
             let reconnect = live.reconnect_status();
             let base = live.live_snapshot().unwrap_or_else(||
                 live.events.current_snapshot().unwrap_or_else(idle_snapshot));
-            snapshot_with_reconnect(snapshot_with_environment(base, proxy_tun), reconnect)
+            let identity = live.reconnect_generation.identity_for(&base.operation_id);
+            snapshot_with_reconnect(snapshot_with_environment(snapshot_with_session_identity(base, identity), proxy_tun), reconnect)
         } else {
             snapshot_with_environment(idle_snapshot(), proxy_tun)
         };
         snapshot.service_status = Some(service_status);
+        if let Some(live) = self.live_connection.as_deref() { snapshot.atrust_auth_acquisition = live.auth_acquisition(); }
         Ok(Response::new(snapshot))
     }
 
@@ -2901,6 +3584,16 @@ impl KernelControl for DarwinKernelControlService {
         Ok(Response::new(self.logs.list(&request.into_inner())))
     }
 
+    async fn record_auth_diagnostic(&self, request: Request<wire::LogEvent>) -> Result<Response<wire::RecordAuthDiagnosticReply>, Status> {
+        let event = exv_vpn_wire::auth_diagnostic::normalize(request.into_inner()).map_err(Status::invalid_argument)?;
+        let logs = Arc::clone(self.logs.aggregator());
+        tokio::task::spawn_blocking(move || {
+            let fields: Vec<_> = event.fields.iter().map(|(key, value)| (key.as_str(), value.clone())).collect();
+            logs.append_core(&event.level, &event.component, &event.code, &event.message, &fields);
+        }).await.map_err(|_| Status::internal("auth_diagnostic/write_task"))?;
+        Ok(Response::new(wire::RecordAuthDiagnosticReply { recorded: true }))
+    }
+
     async fn logs_clear(
         &self,
         _request: Request<LogsClearRequest>,
@@ -2923,12 +3616,25 @@ impl KernelControl for DarwinKernelControlService {
         &self,
         _request: Request<ConfigGetRequest>,
     ) -> Result<Response<ConfigPayload>, Status> {
-        // W3-3/P2b：读路径不 gate，但每次调用都经卫生层**重读磁盘**（win32
-        // `config_get` 同款）：missing/损坏 → 默认 bootstrap 落盘 +
-        // `requires_quick_start=true`；合法对象 → hydrate 已知字段保留未知字段 +
-        // 幂等原子写回 + false——`requires_quick_start` 由此真实产码（此前恒 false）。
+        // 每次重读磁盘；损坏先备份再默认修复，不可读则正常回复结构化失败，
+        // 不把旧内存配置冒充磁盘配置，也不以默认配置覆盖不可读文件。
         let config_dir = self.config().config_dir().to_path_buf();
-        let startup = config_hygiene::load_for_startup(&config_dir).map_err(config_status)?;
+        let startup = match config_hygiene::load_for_startup(&config_dir) {
+            Ok(startup) => startup,
+            Err(DarwinConfigError::ReadFailed { path, .. }) => {
+                return Ok(Response::new(ConfigPayload {
+                    items: Vec::new(),
+                    requires_quick_start: false,
+                    config_recovery: None,
+                    read_failure: Some(wire::ConfigReadFailure {
+                        // Darwin errno 不是 Win32 错误码；沿既有 wire 以 0 表示不可用。
+                        win32_code: 0,
+                        path: path.to_string_lossy().into_owned(),
+                    }),
+                }));
+            }
+            Err(error) => return Err(config_status(error)),
+        };
         let requires_quick_start = startup.requires_quick_start;
         // 关键：刷新进程内共享 `Arc<Mutex<DarwinUiConfig>>`——连接链路
         // `connect_payload_and_plan` 共享同一实例，不刷新则 Connect 组装 envelope
@@ -2947,6 +3653,11 @@ impl KernelControl for DarwinKernelControlService {
                 })
                 .collect(),
             requires_quick_start,
+            config_recovery: startup.config_recovery.map(|recovery| wire::ConfigRecovery {
+                corrupted: recovery.corrupted,
+                backup_file: recovery.backup_file,
+            }),
+            read_failure: None,
         }))
     }
 
@@ -2960,9 +3671,6 @@ impl KernelControl for DarwinKernelControlService {
             .into_iter()
             .map(|item| DarwinConfigItem::new(item.key, item.value))
             .collect::<Vec<_>>();
-        let disables_auto_reconnect = items
-            .iter()
-            .any(|item| item.key() == "auto_reconnect" && item.value() == "false");
         // MAC-OBS-13 S4：保存成功的敏感值登记进聚合存储的入库脱敏表——此后任何
         // 日志节点把该值拼进 message/fields，入库边界都替换为 `<redacted>`（值
         // 本身仍不作为日志内容；这是纵深防御接线，见 secret scan 端到端契约测试）。
@@ -2971,25 +3679,12 @@ impl KernelControl for DarwinKernelControlService {
             .find(|item| item.key() == "password")
             .map(|item| item.value().to_owned());
         self.config().apply_and_save(items).map_err(config_status)?;
-        if disables_auto_reconnect
-            && let Some(live) = self.live_connection.as_deref()
-        {
-            // 本次会话在掉线等待窗口时，用户关闭开关立即终止旧 generation 并请求
-            // StopTunnel；正常 Connected 时该方法不主动断开，只影响下一次掉线策略。
-            live.cancel_waiting_reconnect_after_setting_disabled().await;
+        if let Some(live) = self.live_connection.as_ref() {
+            live.refresh_background_permission();
         }
         if let Some(password) = saved_password {
             self.logs.aggregator().register_secret(&password);
         }
-        // MAC-OBS-13 S1：config 变更真实节点入库（只记键名，值永不入库——
-        // secret-bearing 键由 config 层拒绝，非敏感键的值也无诊断价值）。
-        self.logs.aggregator().append_core(
-            "info",
-            "core",
-            "CONFIG_SET",
-            "configuration updated",
-            &[],
-        );
         Ok(Response::new(ConfigReply { ok: true }))
     }
 
@@ -2998,8 +3693,8 @@ impl KernelControl for DarwinKernelControlService {
     /// [`ServiceLifecycle`] 以管理员提权执行固定 argv 的 service agent CLI 动词
     /// （一次授权一个动作，win32「1 动作 = 1 次 runas」同构），变更动作加
     /// 串行锁并在前置尽力停业务（[`LiveConnectionProjection::stop_for_service_transition`]，
-    /// win32 `stop_engine_for_transition` 对应）；回复携带 post-action 状态并刷新
-    /// 服务状态缓存（快照伴生值同源）。`rotate_key` 诚实空缺：darwin Engine 会话
+    /// win32 `stop_engine_for_transition` 对应）；动作回复只表示原命令结果，
+    /// 状态通过独立 query 获取。`rotate_key` 诚实空缺：darwin Engine 会话
     /// 使用一次性 ticket（无持久服务密钥），无密钥可轮换，typed 拒绝声明语义
     /// 不适用。
     #[allow(
@@ -3037,16 +3732,9 @@ impl KernelControl for DarwinKernelControlService {
                 ],
             );
         };
-        let reply_with = |facts: &crate::service_status::ServiceAgentFacts,
-                          message: &'static str|
-         -> Response<ServiceControlReply> {
-            let status = crate::service_status::wire_service_status(facts);
-            *lock_recover(&self.service_status_cache) = Some(status.clone());
-            Response::new(ServiceControlReply {
-                service_status: Some(status),
-                ok: true,
-                message: message.to_string(),
-            })
+        let reply_with = |message: &'static str| -> Response<ServiceControlReply> {
+            *lock_recover(&self.service_status_cache) = None;
+            Response::new(ServiceControlReply { service_status: None, ok: true, message: message.to_string() })
         };
         match request.into_inner().action {
             Some(Action::Query(_)) => {
@@ -3071,9 +3759,6 @@ impl KernelControl for DarwinKernelControlService {
                     "服务组件探测完成；{}",
                     revision.summarize()
                 );
-                // Query 成功路径入 aggregator（三字段观测才有出口；与 install/
-                // uninstall/start 的 record 同构）。
-                record("query", true, &message);
                 Ok(Response::new(ServiceControlReply {
                     service_status: Some(status),
                     ok: true,
@@ -3086,9 +3771,9 @@ impl KernelControl for DarwinKernelControlService {
                     live.stop_for_service_transition().await;
                 }
                 match self.service_lifecycle.install().await {
-                    Ok(facts) => {
-                        record("install", true, "service installed and started");
-                        Ok(reply_with(&facts, "服务安装完成并已启动。"))
+                    Ok(diagnostics) => {
+                        record("install", true, &service_action_detail("service install command completed", &diagnostics));
+                        Ok(reply_with("服务安装命令已完成。"))
                     }
                     Err(error) => {
                         record_failure("install", "service install failed", &error);
@@ -3096,15 +3781,26 @@ impl KernelControl for DarwinKernelControlService {
                     }
                 }
             }
-            Some(Action::Uninstall(_)) => {
+            Some(Action::Uninstall(request)) => {
                 let _guard = self.service_control_lock.lock().await;
                 if let Some(live) = self.live_connection.as_deref() {
                     live.stop_for_service_transition().await;
                 }
-                match self.service_lifecycle.uninstall().await {
-                    Ok(facts) => {
-                        record("uninstall", true, "service uninstalled");
-                        Ok(reply_with(&facts, "服务已卸载。"))
+                let result = if request.full_cleanup {
+                    self.service_lifecycle.uninstall_with_cleanup(true).await
+                } else {
+                    self.service_lifecycle.uninstall().await
+                };
+                match result {
+                    Ok(diagnostics) => {
+                        record("uninstall", true, &service_action_detail("service uninstall command completed", &diagnostics));
+                        let mut reply = reply_with("服务卸载命令已完成。");
+                        for line in diagnostics.lines().filter_map(|line| line.strip_prefix("service-uninstall retained directory=")) {
+                            if let Some(directory) = line.strip_suffix(" reason=nonempty") {
+                                reply.get_mut().message.push_str(&format!("\n已保留包含其他文件的目录：{}", directory.chars().take(200).collect::<String>()));
+                            }
+                        }
+                        Ok(reply)
                     }
                     Err(error) => {
                         record_failure("uninstall", "service uninstall failed", &error);
@@ -3115,16 +3811,9 @@ impl KernelControl for DarwinKernelControlService {
             Some(Action::Start(_)) => {
                 let _guard = self.service_control_lock.lock().await;
                 match self.service_lifecycle.ensure_running().await {
-                    Ok(facts) => {
-                        record("start", true, "service ensured running");
-                        Ok(reply_with(
-                            &facts,
-                            if facts.socket_connectable {
-                                "服务已在运行。"
-                            } else {
-                                "服务启动已提交。"
-                            },
-                        ))
+                    Ok(diagnostics) => {
+                        record("start", true, &service_action_detail("service start command completed or not required", &diagnostics));
+                        Ok(reply_with("服务启动命令已完成或无需启动。"))
                     }
                     Err(error) => {
                         record_failure("start", "service start failed", &error);
@@ -3165,9 +3854,11 @@ fn connected_snapshot(
     session_established_at_ms: i64,
 ) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        atrust_auth_acquisition: None,
         engine_reconnect: None,
         headless: None,
         relaunched_by_engine: false,
+        stop_completion: None,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -3182,6 +3873,7 @@ fn connected_snapshot(
                 session: Some(exv_vpn_wire::generated::ConnectedSession::default()),
             },
         )),
+        session_identity: None,
     }
 }
 
@@ -3192,9 +3884,11 @@ fn pending_connect_snapshot(request: &ConnectRequest, operation_id: Vec<u8>) -> 
         .and_then(|intent| intent.lookup_key.as_ref())
         .map_or_else(Vec::new, |key| key.runtime_epoch.clone());
     RuntimeSnapshot {
+        atrust_auth_acquisition: None,
         engine_reconnect: None,
         headless: None,
         relaunched_by_engine: false,
+        stop_completion: None,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -3212,14 +3906,17 @@ fn pending_connect_snapshot(request: &ConnectRequest, operation_id: Vec<u8>) -> 
             }),
             phase: ConnectPhase::ObservingOwnedState as i32,
         })),
+        session_identity: None,
     }
 }
 
 fn pending_stop_snapshot(request: &StopRequest, operation_id: Vec<u8>) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        atrust_auth_acquisition: None,
         engine_reconnect: None,
         headless: None,
         relaunched_by_engine: false,
+        stop_completion: None,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -3233,6 +3930,7 @@ fn pending_stop_snapshot(request: &StopRequest, operation_id: Vec<u8>) -> Runtim
             stop: request.intent.clone(),
             queued_connect: None,
         })),
+        session_identity: None,
     }
 }
 
@@ -3240,9 +3938,11 @@ fn pending_stop_snapshot(request: &StopRequest, operation_id: Vec<u8>) -> Runtim
 #[must_use]
 pub(crate) fn idle_snapshot() -> RuntimeSnapshot {
     RuntimeSnapshot {
+        atrust_auth_acquisition: None,
         engine_reconnect: None,
         headless: None,
         relaunched_by_engine: false,
+        stop_completion: None,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -3254,6 +3954,7 @@ pub(crate) fn idle_snapshot() -> RuntimeSnapshot {
         state: Some(runtime_snapshot::State::Idle(IdleState {
             last_cleanup: None,
         })),
+        session_identity: None,
     }
 }
 

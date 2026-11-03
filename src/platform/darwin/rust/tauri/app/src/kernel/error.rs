@@ -16,6 +16,14 @@ use serde::ser::SerializeStruct;
 /// P4-b 真实接线后扩展 gRPC/通道错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppError {
+    /// 本次本地请求已取消，不代表Core失联。
+    ConnectionCancelled,
+    /// 学校网页登录等待到期，保留可重新连接的提示，不归入通用内部错误。
+    BrowserLoginTimeout,
+    /// 学校网页登录失败（认证过程真实原因，已净化）。kind 与
+    /// `BrowserLoginTimeout` 同为 `browser_login_failed`，前端
+    /// `command-error.ts` 对该 kind 原样透传 message（S4b，2026-10-26）。
+    BrowserLoginFailed(String),
     /// Command 已定义但尚未接线到 core（P4-b 前占位）。
     NotWired(String),
     /// core 进程不可达（未启动/通道断开）。
@@ -47,6 +55,13 @@ impl serde::Serialize for AppError {
         S: serde::Serializer,
     {
         let (kind, code, message) = match self {
+            Self::ConnectionCancelled => ("connection_cancelled", None, "本次连接已取消。"),
+            Self::BrowserLoginTimeout => (
+                "browser_login_failed",
+                None,
+                "学校网页登录等待超时，请重新点击“连接”发起登录。",
+            ),
+            Self::BrowserLoginFailed(message) => ("browser_login_failed", None, message.as_str()),
             Self::NotWired(message) => ("not_wired", None, message.as_str()),
             Self::CoreUnreachable(message) => ("core_unreachable", None, message.as_str()),
             Self::CredentialRequired { code, message } => {
@@ -74,6 +89,11 @@ impl serde::Serialize for AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ConnectionCancelled => write!(f, "本次连接已取消。"),
+            Self::BrowserLoginTimeout => {
+                write!(f, "学校网页登录等待超时，请重新点击“连接”发起登录。")
+            }
+            Self::BrowserLoginFailed(m) => write!(f, "browser login failed: {m}"),
             Self::NotWired(m) => write!(f, "not wired to core: {m}"),
             Self::CoreUnreachable(m) => write!(f, "core unreachable: {m}"),
             Self::CredentialRequired { code, message } => {

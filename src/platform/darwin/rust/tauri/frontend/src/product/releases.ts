@@ -1,5 +1,6 @@
 import notes from "../../../../../../../../release-notes.json";
 import { PRODUCT_VERSION } from "./version";
+
 /** 关于页发布记录：按发布时间从新到旧维护，与当前安装版本分别展示。 */
 /**
  * 守卫说明（darwin 接入）：`verify-rust-only.sh` 以文本正则拒绝旧 macOS helper 路线，
@@ -69,7 +70,7 @@ const LEGACY_CHANGELOG_ENTRIES: ChangelogEntry[] = [
           "重新设计连接、设置、日志和关于页面，统一完整与极简窗口的连接操作及待处理交互。",
           "新增空闲、连接中、已连接的三态场景与过渡动效；减少动效时使用静态场景，按产品动效设置生效。",
           "连接运行信息集中展示账户、服务器、校园地址、在线时长、上传下载速率和累计流量。",
-          "设置按连接、应用、外观、通知和高级参数组织，支持主题、强调色、静默启动、自动连接及按连接事件发送通知。",
+          "设置按连接、服务、应用、外观、通知和实验性参数组织，支持主题、强调色、静默启动、自动连接及按连接事件发送通知。",
           "适配 macOS 标题栏与原生窗口拖动，修复拖动闪退；应用重复启动时激活已有实例。",
           "应用包统一显示 EXV 名称和产品图标，关于页项目链接可从 macOS 原生外部浏览器打开。",
         ],
@@ -205,19 +206,19 @@ const LEGACY_CHANGELOG_ENTRIES: ChangelogEntry[] = [
   },
 ];
 
-const noteVersion = PRODUCT_VERSION.split(/[+-]/)[0].split(".").map(Number);
-function releaseNoteAvailable(version: string): boolean {
+
+
+const current = PRODUCT_VERSION.split(/[+-]/)[0].split(".").map(Number);
+function available(version: string): boolean {
   const parts = version.split(".").map(Number);
   for (let index = 0; index < 3; index += 1) {
-    if (parts[index] !== noteVersion[index]) return parts[index] < noteVersion[index];
+    if (parts[index] !== current[index]) return parts[index] < current[index];
   }
   return true;
 }
 export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
-  ...notes.filter((entry) => releaseNoteAvailable(entry.version)).map((entry) => ({
+  ...notes.filter((entry) => available(entry.version)).map((entry) => ({
     version: entry.version, dateLabel: entry.dateLabel, highlights: entry.macos,
   })),
   ...LEGACY_CHANGELOG_ENTRIES,
 ];
-
-

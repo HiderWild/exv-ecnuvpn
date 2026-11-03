@@ -165,6 +165,12 @@ impl LiveStatsState {
         self.connected = true;
     }
 
+    /// Engine内部R1仍属同一次执行：暂停已连接样本，不终结该来源。
+    pub(crate) fn pause_connected(&mut self) {
+        self.connected = false;
+        self.latest = None;
+    }
+
     /// 当前 operation 终结（失败终态 / 显式 Stop）：停止发布并丢弃最新样本。
     pub(crate) fn mark_finished(&mut self) {
         self.connected = false;

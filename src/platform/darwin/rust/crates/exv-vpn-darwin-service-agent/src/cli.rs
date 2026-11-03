@@ -189,8 +189,8 @@ fn validated_runtime_dir(dir: &str) -> Result<String, PlatformError> {
 ///
 /// # Errors
 ///
-/// 解析、进程身份、固定 socket 或固定平台操作失败时返回稳定 [`PlatformError`]。
-pub fn run_process() -> Result<Option<ServiceAgentOutcome>, PlatformError> {
+/// 保留原平台错误；socket 启动失败还携带本次原 IO，由 main 的既有 stderr 消费。
+pub fn run_process() -> Result<Option<ServiceAgentOutcome>, Box<dyn std::error::Error + Send + Sync>> {
     match parse_process_command()? {
         CliCommand::Install => {
             MacosPlatform::install_from_current_process()?;
@@ -229,8 +229,10 @@ pub fn run_process() -> Result<Option<ServiceAgentOutcome>, PlatformError> {
             println!("{pid}");
             Ok(None)
         }
-        CliCommand::Status => request_from_ordinary_user(ServiceAgentAction::Status).map(Some),
-        CliCommand::Cleanup => request_from_ordinary_user(ServiceAgentAction::Cleanup).map(Some),
+        CliCommand::Status => request_from_ordinary_user(ServiceAgentAction::Status)
+            .map(Some).map_err(Into::into),
+        CliCommand::Cleanup => request_from_ordinary_user(ServiceAgentAction::Cleanup)
+            .map(Some).map_err(Into::into),
         CliCommand::RetireLegacy => {
             MacosPlatform::retire_legacy_from_current_process()?;
             Ok(None)
@@ -247,8 +249,32 @@ pub fn run_process() -> Result<Option<ServiceAgentOutcome>, PlatformError> {
             Ok(None)
         }
         CliCommand::Serve(owner) => {
-            serve_forever(owner)?;
-            Ok(None)
+            // S7：daemon 拉起关键事件落文件日志（bind 成功与否由 socket.rs 既有
+            // 路径决定；此处记录 serve 入口与启动失败类别）。
+            crate::macos::agent_log(
+                "info",
+                "SERVE_STARTED",
+                "daemon serve starting",
+                &[
+                    ("owner_uid", owner.uid().to_string()),
+                    ("pid", std::process::id().to_string()),
+                ],
+            );
+            match serve_forever(owner) {
+                Ok(()) => Ok(None),
+                Err(error) => {
+                    crate::macos::agent_log(
+                        "error",
+                        "SERVE_START_FAILED",
+                        "daemon serve failed to start",
+                        &[(
+                            "error",
+                            crate::macos::socket_startup_category(&error),
+                        )],
+                    );
+                    Err(error.into())
+                }
+            }
         }
     }
 }

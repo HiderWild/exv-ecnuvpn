@@ -1,0 +1,111 @@
+/* 双侧 TrafficMetricsPanel 的纯展示样式，仍由各 Vue 组件以 scoped 方式加载。 */
+.traffic-metrics-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.traffic-metric {
+  display: grid;
+  min-width: 0;
+  min-height: 32px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0;
+}
+
+.traffic-metric__arrow {
+  width: 20px;
+  height: 20px;
+  align-self: center;
+  overflow: visible;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.6;
+}
+
+.traffic-metric--upload .traffic-metric__arrow {
+  color: var(--state-warning, #e3a51a);
+}
+
+.traffic-metric--download .traffic-metric__arrow {
+  color: var(--accent, #2f6fed);
+}
+
+.traffic-metric__values {
+  display: grid;
+  min-width: 0;
+  min-height: 32px;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  align-content: center;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.traffic-metric__rate,
+.traffic-metric__total {
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-metric__rate {
+  color: var(--text-primary);
+  font-size: var(--font-size-body);
+  font-weight: 720;
+  line-height: 1.15;
+}
+
+.traffic-metric__total {
+  color: var(--text-tertiary);
+  font-size: var(--font-size-caption);
+  line-height: 1.1;
+}
+
+.traffic-metrics-panel--compact {
+  gap: 6px;
+}
+
+.traffic-metrics-panel--compact .traffic-metric {
+  min-height: 28px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 5px;
+}
+
+.traffic-metrics-panel--compact .traffic-metric__arrow {
+  width: 16px;
+  height: 16px;
+}
+
+.traffic-metrics-panel--compact .traffic-metric__rate {
+  font-size: var(--font-size-body);
+}
+
+/* 累计值模式视觉三行：箭头与标签；速率；累计值。数值区占满整列。 */
+.traffic-metric--with-totals {
+  grid-template-rows: auto auto;
+  row-gap: 4px;
+}
+
+.traffic-metric--with-totals .traffic-metric__arrow {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.traffic-metric__label {
+  grid-column: 2;
+  grid-row: 1;
+  color: var(--text-secondary);
+  font-size: var(--font-size-caption);
+}
+
+.traffic-metric--with-totals .traffic-metric__values {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+.traffic-metric__values { width:100%; }
+.traffic-metric__rate:focus-visible, .traffic-metric__total:focus-visible { outline:2px solid var(--focus-ring); }

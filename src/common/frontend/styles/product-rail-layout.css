@@ -1,0 +1,124 @@
+/* 两侧完整模式左栏共用布局；宿主标题栏与主内容保持各自样式入口。 */
+.product-rail {
+  display: flex;
+  container-name: product-rail;
+  container-type: inline-size;
+  width: 240px;
+  min-height: 0;
+  flex: none;
+  flex-direction: column;
+  gap: 28px;
+  padding: 26px 13px 16px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+  overflow: clip;
+}
+
+.product-brand {
+  flex: none;
+  min-height: 60px;
+  gap: 12px;
+  padding: 0 6px;
+}
+
+.product-brand img {
+  width: 49px;
+  height: 56px;
+  object-fit: contain;
+  flex: none;
+}
+
+.product-brand strong {
+  display: block;
+  font-size: var(--font-size-display);
+  font-weight: 700;
+  line-height: 34px;
+  letter-spacing: 0;
+}
+
+.product-brand span {
+  display: block;
+  color: var(--text-secondary);
+  font-size: var(--font-size-caption);
+  line-height: 18px;
+}
+
+.product-rail nav {
+  display: grid;
+  flex: none;
+  gap: 5px;
+}
+
+.product-rail nav button {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--font-size-body);
+  text-align: left;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.product-rail nav button:hover:not(.active) {
+  background: var(--surface-hover);
+}
+
+.product-rail nav button.active {
+  background: var(--accent-subtle);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.product-rail nav button.active::after {
+  width: 5px;
+  height: 5px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+:root[data-theme="dark"] .product-rail nav button.active {
+  border-radius: 3px;
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+/* 摘要始终来自已有 runtime；由原生最低高度与下方留白调整保证同时可见。 */
+.product-rail .connection-sidebar.product-rail__connection {
+  min-height: 0;
+  flex: none;
+  margin-top: auto;
+  padding: 20px 0 3px;
+}
+
+/* 快照单组字段：固定标签列，长值以键盘与 title 回读。 */
+.product-rail .connection-sidebar .info-row { grid-template-columns:54px minmax(0,1fr); gap:7px; }
+.product-rail .connection-sidebar .info-row dd { white-space:nowrap; }
+.product-rail .connection-sidebar .traffic-metrics-panel { gap:10px; margin-top:14px; padding-top:13px; border-top:1px solid var(--border-subtle); }
+.product-rail .traffic-metric .traffic-metric__label { font-size: var(--font-size-caption); }
+.product-rail .traffic-metric .traffic-metric__values { min-height:0; grid-template-rows:auto auto; gap:5px; }
+.product-rail .traffic-metric .traffic-metric__rate { font-size: var(--font-size-body); font-weight:600; line-height:1.6; }
+.product-rail .traffic-metric .traffic-metric__total { font-size: var(--font-size-caption); line-height:1.6; }
+
+/* 完整模式保持单列导航；较低窗口仅收紧留白，原生最小高度保证内容完整。 */
+@media (min-width: 701px) and (max-height: 800px) {
+  .product-window--advanced .product-rail { padding-top:12px; padding-bottom:12px; gap:12px; }
+  .product-window--advanced .product-brand { min-height:56px; }
+  .product-window--advanced .product-rail nav button > svg { flex:none; }
+  .product-window--advanced .product-rail__nav-text { white-space:nowrap; }
+  .product-window--advanced .product-rail .connection-sidebar.product-rail__connection { padding:0; }
+  .product-window--advanced .product-rail .connection-sidebar .sidebar-section { margin-top:10px; padding-top:10px; }
+  .product-window--advanced .product-rail .connection-sidebar .info-list { gap:4px; }
+  .product-window--advanced .product-rail .connection-sidebar .traffic-metrics-panel { margin-top:10px; padding-top:10px; }
+}
+
+/* 较低完整窗口只收紧留白，单列导航、字号和流量信息保持完整。 */
+@media (min-width: 701px) and (max-height: 660px) {
+  .product-window--advanced .product-rail { padding-top:10px; padding-bottom:10px; gap:8px; }
+  .product-window--advanced .product-rail .connection-sidebar .info-list { gap:3px; }
+}

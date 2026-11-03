@@ -127,7 +127,7 @@ export const CONNECT_PHASE_LABELS: Record<ConnectPhase, string> = {
   negotiating_tunnel: "协商隧道",
   applying_platform_tunnel: "应用平台隧道",
   attaching_packet_boundary: "挂接数据边界",
-  starting_data_plane: "启动数据面",
+  starting_data_plane: "启动数据通道",
 };
 
 /** 8 级 ConnectPhase 顺序（进度序号 = 下标 + 1）。 */
@@ -167,6 +167,9 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   ERROR_CODE_DEADLINE_EXCEEDED: "操作超时",
   ERROR_CODE_ACTIVE_ATTEMPT_CANNOT_RECONCILE: "进行中的连接无法恢复",
   ERROR_CODE_ACTIVE_SESSION_CANNOT_RECONCILE: "已连接会话无法恢复",
+  // EXV_UNFREEZE 2026-10-09（修撞码）：具体原因由 VpnError.reason=auth/saml_required
+  // 的 copy-tables 文案呈现，本行仅作 code 标签兜底。
+  ERROR_CODE_SAML_REQUIRED: "该服务器要求网页单点登录",
 };
 
 // ---------------------------------------------------------------------------
@@ -210,6 +213,99 @@ export function formatError(err: VpnError): string {
   return msg ? msg : err.code;
 }
 
+// ---------------------------------------------------------------------------
+// 「需要处理」分流（2026-10-08 调研 §6 阶段 1，win32 树同构镜像）：失败终态的
+// 断开语义判定与文案
+// ---------------------------------------------------------------------------
+// 「需要处理」不是用户语言：它同时覆盖三类语义完全不同的场景——「本次没连上」
+// （应呈现「连接失败 + 重试」）、「之前连着现在断了」（应呈现「连接已断开 +
+// 重新连接」）、「断开后清理冲突」（保留「断开后的清理未完成」处理语义）。
+// 这里用三个判据（error.stage / 重连 reason lane / 失败前是否已连接）把 failed_*
+// 终态分流为用户能据以行动的呈现；不改 host/engine 的 FailedClean/FailedDirty
+// 判定与恢复义务（那是治理事实），只分流呈现层。
+//
+// darwin 注记：当前 darwin wire 暂未携带重连 reason lane（`engine_reconnect` /
+// `reconnect.reason`），调用方恒传 null——判据实际生效的是 stage 与「失败前已
+// connected」两项；lane 分支与 win32 保持同一决策表，wire 解冻后零改动生效。
+
+/** 归一化 wire reason 字段：空串/空白 → null（与 proto3 缺省语义一致）。 */
+export function normalizeReason(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed : null;
+}
+
+/** R1 lane（`engine_reconnect.reason`）中断开语义的稳定 reason id（T-16/17 + 崩溃环）。 */
+const DISCONNECT_ENGINE_REASONS: ReadonlySet<string> = new Set([
+  "attempts_exhausted",
+  "auth_rejected",
+  "crash_loop",
+]);
+
+/** R2 lane（`reconnect.reason`）中断开语义的稳定 reason id（T-19 oneshot 退出且门关）。 */
+const DISCONNECT_RECONNECT_REASONS: ReadonlySet<string> = new Set(["engine_lost_oneshot_gated_off"]);
+
+/**
+ * 断开语义纯谓词（阶段 1 改动 1.1）：失败终态是否应按「连接已断开」呈现。
+ *
+ * 判据按优先级（调研 §6 改动 1.1）：
+ *   1. TEARDOWN（T-21 断开清理冲突）优先级最高、直接排除——那类保留
+ *      「断开后的清理未完成」处理语义，不是掉线；
+ *   2. `error.stage === ERROR_STAGE_DATA_PLANE`（T-15 数据面掉线）；
+ *   3. R1 lane reason ∈ {attempts_exhausted, auth_rejected, crash_loop}（T-16/17）；
+ *   4. R2 lane reason ∈ {engine_lost_oneshot_gated_off}（T-19）；
+ *   5. 兜底：失败前一刻已 `connected`（调用方只在 failed_* 终态上求值本谓词）。
+ *
+ * 纯函数、决策表可测；不读取快照之外的任何状态。
+ */
+export function disconnectSemanticsOf(
+  error: VpnError | null,
+  prevRuntimeState: RuntimeState["state"] | null,
+  engineReconnectReason: string | null,
+  reconnectReason: string | null = null,
+): boolean {
+  if (error?.stage === "ERROR_STAGE_TEARDOWN") return false;
+  if (error?.stage === "ERROR_STAGE_DATA_PLANE") return true;
+  const r1 = normalizeReason(engineReconnectReason);
+  if (r1 !== null && DISCONNECT_ENGINE_REASONS.has(r1)) return true;
+  const r2 = normalizeReason(reconnectReason);
+  if (r2 !== null && DISCONNECT_RECONNECT_REASONS.has(r2)) return true;
+  return prevRuntimeState === "connected";
+}
+
+/**
+ * 断开语义的描述文案（阶段 3 文案表中随阶段 1 落位的部分）：能被 stage / reason
+ * lane 识别的断开 episode 给出具体行动指引；识别不出（仅靠「曾连上」兜底）时返回
+ * null，由调用方沿用既有错误文案——具体原因透传是阶段 2 的 reason id 工作。
+ *
+ * darwin 注记：与 win32 `product/reconnect-notify.ts` 的 toast 表同一事实口径；
+ * lane 分支在 darwin wire 解冻 reason lane 前不会命中。
+ */
+export function disconnectDescriptionOf(
+  error: VpnError | null,
+  engineReconnectReason: string | null,
+  reconnectReason: string | null = null,
+): string | null {
+  // T-21 清理冲突有自己的专门文案（presenter/descriptionFor 既有分支），不在此分流。
+  if (error?.stage === "ERROR_STAGE_TEARDOWN") return null;
+  if (error?.stage === "ERROR_STAGE_DATA_PLANE") {
+    return "与 VPN 服务器的连接中断（可能是网络切换或对端断开）。点击“重新连接”即可恢复。";
+  }
+  switch (normalizeReason(engineReconnectReason)) {
+    case "attempts_exhausted":
+      return "网络持续不稳定，自动重连已停止；请检查网络后重新连接。";
+    case "auth_rejected":
+      return "登录凭据已失效，请重新连接；如再次失效请重新输入账号密码。";
+    case "crash_loop":
+      return "后台核心反复崩溃，已停止自动恢复；连接已断开并完成清理。请重启应用后重新连接。";
+    default:
+      break;
+  }
+  if (normalizeReason(reconnectReason) === "engine_lost_oneshot_gated_off") {
+    return "后台引擎已退出，连接已断开。重新连接会重新弹 UAC；若打扰请改用安装服务形态。";
+  }
+  return null;
+}
+
 /** 依据事件更新错误显示（规则1/2/3 的单一实现）。返回应写入 `error` 的新值。 */
 export function errorAfterEvent(ev: RuntimeEvent, prevError: unknown): unknown {
   const state = ev.snapshot.runtime;
@@ -245,18 +341,18 @@ export interface OpCorrelation {
 /**
  * 事件是否应驱动 UI（operation_id 关联过滤）：
  *   * C2 窗口规则：已点击（inFlightAction ≠ null）但回复未登记（activeOpId == null）
- *     → 放行一切事件（含受理快照；窗口由 4s 看门狗与回复/错误路径有界化，见 C4；
+ *     → 放行有操作 ID 的事件（含受理快照；现有窗口保留，见 C4；
  *     陈旧 pre-click 快照的「采纳但不解除」裁决在 runtime 侧）；
  *   * 无在途操作 → 跟随全局（空 id 或终态；带非空 id 的非终态事件是他人操作，不劫持）；
  *   * 有在途操作 → 只认 activeOpId 的事件；已显示终态后只接受同态终态重放；
- *   * 事件无操作 id → 仅终态放行（操作终结、host 清空 id 的收敛事件仍属当前操作）。
+ *   * 当前操作存在时，事件无操作 id → 不作为该操作的完成。
  */
 export function shouldApplyEvent(ev: RuntimeEvent, corr: OpCorrelation): boolean {
   const op = ev.snapshot.operation_id ?? ev.operation_id ?? null;
   const isTerm = isTerminalState(ev.snapshot.runtime);
   // C2（ui-connect-stop-responsiveness）：点击到回复之间的自操作确认窗口。
   if (corr.activeOpId == null && corr.inFlightAction != null) {
-    return true;
+    return op != null && op !== "";
   }
   if (corr.activeOpId == null) {
     return op == null || op === "" || isTerm;
@@ -266,8 +362,8 @@ export function shouldApplyEvent(ev: RuntimeEvent, corr: OpCorrelation): boolean
     if (corr.terminalReached) return isTerm; // 已显示终态：只接受同终态重放
     return true; // 在途：接受进度与终态
   }
-  // 事件无操作 id（操作终结、host 清空）→ 仅终态放行（属当前操作收敛）。
-  return isTerm;
+  // 缺操作 ID 的善后不能终结或改写当前操作；原回复及同 ID 事件负责完成。
+  return false;
 }
 
 /** 阶段文案（8 级）；未知 phase 回退原文。 */

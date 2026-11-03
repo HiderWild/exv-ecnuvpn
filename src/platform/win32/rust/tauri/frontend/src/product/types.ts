@@ -39,9 +39,19 @@ export interface ProductStage {
  *
  */
 export interface ProductConnectionInfo {
+  /** 已保存配置中的路由规则数量；未读到配置时缺省，不表示已应用路由数。 */
+  routeRuleCount?: number | null;
   account: string | null;
+  /** 配置账号只属于 Cisco；aTrust 尚无可信的认证身份数据口。 */
+  accountSource?: "configured" | "unavailable";
   vpnServer: string | null;
   campusIp: string | null;
+  /**
+   * 活动会话的协议（EXV_UNFREEZE 2026-10-04，bug3）。**仅当会话活动时**由会话身份
+   * 投影写入；无会话/非活动相位为 `undefined`，调用方应回落到当前配置的协议
+   * （极简页的协议/认证 UI 即据此冻结，避免会话中切换协议改写页面）。
+   */
+  protocol?: "cisco" | "atrust";
 }
 
 export const EMPTY_PRODUCT_CONNECTION_INFO: ProductConnectionInfo = Object.freeze({
@@ -101,6 +111,8 @@ export interface ProductReconnect {
   currentAttempt: number;
   /** 配置的重试预算（0 = 无限）。 */
   maxAttempts: number;
+  /** 重连 reason lane 稳定 id 原样透传（S5b 暂停事实；空串 = 无事实）。 */
+  reason: string;
 }
 
 /**
@@ -165,6 +177,28 @@ export function serviceStateLabel(scmState: ServiceScmState): string {
   }
 }
 
+/**
+ * S6b 服务真话化：连接运行态 → 隧道/会话可用性文案（双端同构）。
+ * 服务运行 ≠ 隧道可用——服务状态行需同时呈现连接运行态；无连接时明确
+ * 「隧道未建立」，避免「服务运行中」被误读为已可访问校园网。
+ */
+export function tunnelSessionLabel(status: ProductStatus): string {
+  switch (status) {
+    case "connected":
+      return "隧道已建立";
+    case "connecting":
+    case "awaiting":
+      return "隧道建立中";
+    case "stopping":
+      return "隧道断开中";
+    case "reconciling":
+      return "隧道状态核对中";
+    case "idle":
+    case "failed":
+      return "隧道未建立";
+  }
+}
+
 /** SCM 服务状态的产品语义（S3/D5；仅展示，非授权材料）。 */
 export type ProductServiceState =
   /** 尚未查询/查询失败：不得据此自动安装（MED [3]），连接回退 oneshot。 */
@@ -207,6 +241,14 @@ export interface ProductUiState {
   severity: ProductSeverity;
   title: string;
   description: string | null;
+  /**
+   * 阶段①（「需要处理」分流，2026-10-08 调研 §6）：failed 终态是否为「曾连上后
+   * 断开」语义——标题「连接已断开」、动作按钮「重新连接」；false/缺省 = 连接失败
+   * 语义（「连接失败」/「重试」）。仅 status === "failed" 时有意义；判定三判据
+   * （error.stage / 重连 reason lane / 失败前已连接）见 `lib/status-map.ts`
+   * `disconnectSemanticsOf`。
+   */
+  disconnectSemantics?: boolean;
   /** 当前失败/恢复错误的稳定码；页面据此选择可执行的处理说明。 */
   errorCode: string | null;
   stages: ProductStage[];

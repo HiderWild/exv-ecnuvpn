@@ -15,7 +15,7 @@ const dark = computed(() => appearance?.state.value.theme === "dark" || ((appear
 // 动效只受产品设置管（appearance.motion / props.reduced），不读取系统级
 // prefers-reduced-motion；系统「减少动态」开启不再停帧或切静态。
 const reduced = computed(() => props.reduced || appearance?.state.value.motion === "reduced");
-const accent = computed(() => ({ azure: "#388cf0", violet: "#8d77e6", jade: "#24a68e", amber: "#cd953a" }[appearance?.state.value.accent ?? "azure"]));
+const accent = computed(() => ({ ecnu: dark.value ? "#aee6cb" : "#9a2034", azure: "#388cf0", violet: "#8d77e6", jade: "#24a68e", amber: "#cd953a" }[appearance?.state.value.accent ?? "ecnu"]));
 let sculpture: ReturnType<typeof createConnectionSculpture> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let frame = 0;

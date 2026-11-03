@@ -5,6 +5,14 @@
 //! 命令面对齐 win32（名字 + wire DTO 形状，见 `kernel/`）。旧 camelCase 契约
 //!（core_start/core_retry/IdleSnapshotDto 等）已随旧 darwin 前端废弃：core 会话
 //! 在 setup 时 bootstrap（`kernel::bootstrap`），断流/连接恢复走整会话替换。
+//!
+//! A1-3 交接登记（2026-10-09 区域 A，六区裁定 §二.A-2）：win32 侧已为
+//! `tauri_plugin_log` 显式钉住文件 target（LogDir/ui.log，消除 UI 生命周期事件的
+//! 持久证据盲区）；**darwin 侧按裁定不在本区落地**——本壳无任何日志设施
+//! （无 tracing/log/tauri-plugin-log 依赖，诊断走 debug 壳 stderr，见
+//! `lifecycle.rs` 托盘降级注释），「对称加文件 target」实为引入整套日志栈，
+//! 超出本缺陷的 proportionate 范围。darwin 若需要同类归因能力，须另立独立项
+//! （引入日志栈 + lifecycle target 布线），不在 A1 执行范围。
 
 use tauri::Manager;
 
@@ -83,6 +91,9 @@ fn main() {
         .append_invoke_initialization_script(DARWIN_COMMAND_ADAPTER_INIT_SCRIPT)
         .manage(window_chrome::WindowChromeState::new())
         .setup(|app| {
+            if let Some(marker) = kernel::quick_start_marker::QuickStartMarkerStore::from_product_dir() {
+                app.manage(marker);
+            }
             // 前端自有设置存储（~/Library/Application Support/EXV/ui-preferences.json；
             // 产品状态目录解析失败时不 manage → Command 返回错误，不猜测路径）。
             if let Some(store) = ui_prefs::UiPrefsStore::from_product_dir() {
@@ -108,6 +119,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // ---- kernel 命令面（win32 名字 + win32 DTO 形状）----
             kernel::commands::connect,
+            kernel::commands::auth_preparation_respond,
+            kernel::commands::auth_receiver_status,
+            kernel::commands::restore_official_auth_receiver,
             kernel::commands::core_status,
             kernel::commands::stop,
             kernel::commands::snapshot,
@@ -115,9 +129,13 @@ fn main() {
             kernel::commands::logs_list,
             kernel::commands::logs_clear,
             kernel::commands::config_get,
-            kernel::commands::saved_password,
             kernel::commands::config_set,
             kernel::quick_start::quick_start_apply,
+            kernel::quick_start_marker::quick_start_seen_get,
+            kernel::quick_start_marker::quick_start_seen_mark,
+            kernel::commands::atrust_browser_status,
+            kernel::commands::atrust_browser_choose,
+            kernel::native_agent::native_agent_status,
             kernel::commands::tunnel_address,
             kernel::commands::respond_interaction,
             kernel::commands::trigger_latency_refresh,

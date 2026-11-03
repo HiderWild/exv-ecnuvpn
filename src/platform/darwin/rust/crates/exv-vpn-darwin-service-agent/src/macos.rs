@@ -17,23 +17,23 @@ use std::{
         unix::{
             fs::{MetadataExt, PermissionsExt},
             io::RawFd,
-            process::CommandExt,
+            process::{CommandExt, ExitStatusExt},
         },
     },
     path::Path,
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     ptr::addr_of_mut,
 };
 
 use crate::{
     ArtifactPathId, SERVICE_AGENT_LABEL,
     platform::{
-        ArtifactOwner, INSTALLED_ENGINE_PATH, INSTALL_ROOT_DIR, INSTALL_ROOT_DIR_LEAF,
-        SERVICE_AGENT_BINARY_PATH, SERVICE_AGENT_DESCRIPTOR_PATH, SERVICE_AGENT_INSTALL_DIR,
-        SERVICE_AGENT_INSTALL_DIR_LEAF, SERVICE_AGENT_SERVICE_TARGET, SERVICE_AGENT_SOCKET_PARENT,
-        SERVICE_AGENT_STATE_PATH, EnrolledOwner, ENGINE_BINARY_PATH, ENGINE_LABEL, ENGINE_PLIST_PATH,
-        ENGINE_SERVICE_TARGET, ENGINE_SOCKET_PATH, EngineJobAction, LAUNCHCTL_PATH,
-        LAUNCHCTL_SYSTEM_DOMAIN, OrphanDimension, PlatformError, PrivilegedPlatform,
+        ArtifactOwner, ENGINE_BINARY_PATH, ENGINE_LABEL, ENGINE_PLIST_PATH, ENGINE_SERVICE_TARGET,
+        ENGINE_SOCKET_PATH, EngineJobAction, EnrolledOwner, INSTALL_ROOT_DIR,
+        INSTALL_ROOT_DIR_LEAF, INSTALLED_ENGINE_PATH, LAUNCHCTL_PATH, LAUNCHCTL_SYSTEM_DOMAIN,
+        OrphanDimension, PlatformError, PrivilegedPlatform, SERVICE_AGENT_BINARY_PATH,
+        SERVICE_AGENT_DESCRIPTOR_PATH, SERVICE_AGENT_INSTALL_DIR, SERVICE_AGENT_INSTALL_DIR_LEAF,
+        SERVICE_AGENT_SERVICE_TARGET, SERVICE_AGENT_SOCKET_PARENT, SERVICE_AGENT_STATE_PATH,
         ServiceControlAction, engine_path_lexically_valid, install_with, legacy_guard_report_line,
         orphan_guard_report_line, require_process_root, retire_legacy_with, start_with,
         uninstall_with,
@@ -46,6 +46,77 @@ const ROOT_FILE_MODE: u32 = 0o600;
 const BINARY_MODE: u32 = 0o755;
 const DESCRIPTOR_MODE: u32 = 0o644;
 const SOCKET_MODE: u32 = 0o600;
+
+/// 服务代理文件日志快捷入口（component 固定 `agent`；S7；`pub(crate)` 供
+/// [`crate::cli`] 的 serve 挂点复用）。
+///
+/// 挂点纪律：事件字段只携带 pid/owner uid/决策布尔/错误类别（wire 契约「错误只
+/// 编码稳定类别」同纪律）；凭据/cookie/token/session id 一律不进日志（`file_log`
+/// 的 key 脱敏是兜底防线，不是许可）。写失败静默降级，不阻断业务。
+pub(crate) fn agent_log(level: &str, code: &str, message: &str, fields: &[(&str, String)]) {
+    crate::file_log::default_log().log(level, "agent", code, message, fields);
+}
+
+/// [`crate::macos::SocketStartupError`] 的稳定短类别（serve 启动失败日志字段用）。
+pub(crate) fn socket_startup_category(error: &SocketStartupError) -> String {
+    match error {
+        SocketStartupError::Existing(platform) => platform.code().to_owned(),
+        SocketStartupError::Io { step, .. } => format!("io:{step}"),
+    }
+}
+
+/// install 结果落日志（OK/FAILED；owner uid 供取证对齐）。
+fn install_logged(outcome: Result<(), PlatformError>, owner_uid: u32) -> Result<(), PlatformError> {
+    match outcome {
+        Ok(()) => {
+            agent_log(
+                "info",
+                "INSTALL_OK",
+                "service agent install finished",
+                &[("owner_uid", owner_uid.to_string())],
+            );
+            Ok(())
+        }
+        Err(error) => {
+            agent_log(
+                "error",
+                "INSTALL_FAILED",
+                "service agent install failed",
+                &[("error", error.code().to_owned())],
+            );
+            Err(error)
+        }
+    }
+}
+
+/// uninstall 结果落日志（OK/FAILED；owner uid 供取证对齐）。
+fn uninstall_logged(
+    outcome: Result<(), PlatformError>,
+    owner_uid: u32,
+) -> Result<(), PlatformError> {
+    match outcome {
+        Ok(()) => {
+            eprintln!("UNINSTALL_OK owner_uid={owner_uid}");
+            agent_log(
+                "info",
+                "UNINSTALL_OK",
+                "service agent uninstall finished",
+                &[("owner_uid", owner_uid.to_string())],
+            );
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("UNINSTALL_FAILED owner_uid={owner_uid} error={error}");
+            agent_log(
+                "error",
+                "UNINSTALL_FAILED",
+                "service agent uninstall failed",
+                &[("error", error.code().to_owned())],
+            );
+            Err(error)
+        }
+    }
+}
 
 /// macOS 固定路径平台实现；构造本身没有副作用。
 #[derive(Debug)]
@@ -129,9 +200,28 @@ impl MacosPlatform {
     /// 进程身份、`SUDO_UID`/`SUDO_GID`、固定 artifact 或 `bootstrap` 失败时返回稳定
     /// [`PlatformError`]。
     pub fn install_from_current_process() -> Result<(), PlatformError> {
-        let owner = Self::enrolled_developer_from_process()?;
-        let mut platform = Self::new();
-        install_with(&mut platform, owner, None)
+        let owner = match Self::enrolled_developer_from_process() {
+            Ok(owner) => owner,
+            Err(error) => {
+                agent_log(
+                    "error",
+                    "INSTALL_FAILED",
+                    "install rejected before artifacts",
+                    &[("error", error.code().to_owned())],
+                );
+                return Err(error);
+            }
+        };
+        agent_log(
+            "info",
+            "INSTALL_STARTED",
+            "service agent install started",
+            &[
+                ("owner_uid", owner.uid().to_string()),
+                ("pid", std::process::id().to_string()),
+            ],
+        );
+        install_logged(install_with(&mut Self::new(), owner, None), owner.uid())
     }
 
     /// 从 osascript 提权 root shell 运行替换式固定 install 顺序（显式 owner 形态）。
@@ -147,9 +237,27 @@ impl MacosPlatform {
         owner: EnrolledOwner,
         engine_path: Option<&str>,
     ) -> Result<(), PlatformError> {
-        Self::require_root_process()?;
+        if let Err(error) = Self::require_root_process() {
+            agent_log(
+                "error",
+                "INSTALL_FAILED",
+                "install rejected: caller is not root",
+                &[("error", error.code().to_owned())],
+            );
+            return Err(error);
+        }
+        agent_log(
+            "info",
+            "INSTALL_STARTED",
+            "service agent install started",
+            &[
+                ("owner_uid", owner.uid().to_string()),
+                ("engine_path_given", engine_path.is_some().to_string()),
+                ("pid", std::process::id().to_string()),
+            ],
+        );
         let mut platform = Self::new();
-        install_with(&mut platform, owner, engine_path)
+        install_logged(install_with(&mut platform, owner, engine_path), owner.uid())
     }
 
     /// 从当前显式 root CLI（sudo 上下文形态）运行固定 uninstall 顺序。
@@ -159,9 +267,28 @@ impl MacosPlatform {
     /// 进程身份、`SUDO_UID`/`SUDO_GID`、固定 descriptor owner、`bootout` 或任一固定
     /// artifact 删除失败时返回稳定 [`PlatformError`]。
     pub fn uninstall_from_current_process() -> Result<(), PlatformError> {
-        let owner = Self::enrolled_developer_from_process()?;
-        let mut platform = Self::new();
-        uninstall_with(&mut platform, owner)
+        let owner = match Self::enrolled_developer_from_process() {
+            Ok(owner) => owner,
+            Err(error) => {
+                agent_log(
+                    "error",
+                    "UNINSTALL_FAILED",
+                    "uninstall rejected before artifacts",
+                    &[("error", error.code().to_owned())],
+                );
+                return Err(error);
+            }
+        };
+        agent_log(
+            "info",
+            "UNINSTALL_STARTED",
+            "service agent uninstall started",
+            &[
+                ("owner_uid", owner.uid().to_string()),
+                ("pid", std::process::id().to_string()),
+            ],
+        );
+        uninstall_logged(uninstall_with(&mut Self::new(), owner), owner.uid())
     }
 
     /// 从 osascript 提权 root shell 运行固定 uninstall 顺序（显式 owner 形态）。
@@ -173,12 +300,27 @@ impl MacosPlatform {
     ///
     /// 非 real/effective root、固定 descriptor owner、`bootout` 或任一固定 artifact 删除
     /// 失败时返回稳定 [`PlatformError`]。
-    pub fn uninstall_from_current_process_with(
-        owner: EnrolledOwner,
-    ) -> Result<(), PlatformError> {
-        Self::require_root_process()?;
+    pub fn uninstall_from_current_process_with(owner: EnrolledOwner) -> Result<(), PlatformError> {
+        if let Err(error) = Self::require_root_process() {
+            agent_log(
+                "error",
+                "UNINSTALL_FAILED",
+                "uninstall rejected: caller is not root",
+                &[("error", error.code().to_owned())],
+            );
+            return Err(error);
+        }
+        agent_log(
+            "info",
+            "UNINSTALL_STARTED",
+            "service agent uninstall started",
+            &[
+                ("owner_uid", owner.uid().to_string()),
+                ("pid", std::process::id().to_string()),
+            ],
+        );
         let mut platform = Self::new();
-        uninstall_with(&mut platform, owner)
+        uninstall_logged(uninstall_with(&mut platform, owner), owner.uid())
     }
 
     /// 从 osascript 提权 root shell 清扫 root 属主 runtime 残留。
@@ -193,8 +335,44 @@ impl MacosPlatform {
     /// [`PlatformError`]。
     pub fn sweep_runtime_residue_from_current_process()
     -> Result<crate::platform::ResidueSweepReport, PlatformError> {
-        Self::require_root_process()?;
-        Self::sweep_runtime_residue_impl()
+        if let Err(error) = Self::require_root_process() {
+            agent_log(
+                "error",
+                "RESIDUE_SWEEP_FAILED",
+                "runtime residue sweep rejected: caller is not root",
+                &[("error", error.code().to_owned())],
+            );
+            return Err(error);
+        }
+        agent_log(
+            "info",
+            "RESIDUE_SWEEP_STARTED",
+            "runtime residue sweep started",
+            &[("pid", std::process::id().to_string())],
+        );
+        match Self::sweep_runtime_residue_impl() {
+            Ok(report) => {
+                agent_log(
+                    "info",
+                    "RESIDUE_SWEEP_OK",
+                    "runtime residue sweep finished",
+                    &[
+                        ("removed", report.removed.len().to_string()),
+                        ("skipped", report.skipped.len().to_string()),
+                    ],
+                );
+                Ok(report)
+            }
+            Err(error) => {
+                agent_log(
+                    "error",
+                    "RESIDUE_SWEEP_FAILED",
+                    "runtime residue sweep failed",
+                    &[("error", error.code().to_owned())],
+                );
+                Err(error)
+            }
+        }
     }
 
     /// 从 osascript 提权 root shell 一次性回收历史（已退役）组件遗留。
@@ -223,9 +401,42 @@ impl MacosPlatform {
     /// 非 real/effective root 或固定 `bootstrap` 失败时返回稳定 [`PlatformError`]；
     /// `bootout` 失败被忽略。
     pub fn start_from_current_process() -> Result<(), PlatformError> {
-        Self::require_root_process()?;
+        if let Err(error) = Self::require_root_process() {
+            agent_log(
+                "error",
+                "START_FAILED",
+                "daemon start rejected: caller is not root",
+                &[("error", error.code().to_owned())],
+            );
+            return Err(error);
+        }
+        agent_log(
+            "info",
+            "START_STARTED",
+            "daemon on-demand start began",
+            &[("pid", std::process::id().to_string())],
+        );
         let mut platform = Self::new();
-        start_with(&mut platform)
+        match start_with(&mut platform) {
+            Ok(()) => {
+                agent_log(
+                    "info",
+                    "START_OK",
+                    "daemon on-demand start finished",
+                    &[],
+                );
+                Ok(())
+            }
+            Err(error) => {
+                agent_log(
+                    "error",
+                    "START_FAILED",
+                    "daemon on-demand start failed",
+                    &[("error", error.code().to_owned())],
+                );
+                Err(error)
+            }
+        }
     }
 
     /// W3 oneshot：osascript 提权形态的 `start-engine-once` 入口——显式 owner、
@@ -245,15 +456,64 @@ impl MacosPlatform {
         core_pid: u32,
         engine_path: &str,
     ) -> Result<u32, PlatformError> {
-        Self::require_root_process()?;
+        let oneshot_rejected = |error: PlatformError| {
+            agent_log(
+                "error",
+                "ENGINE_ONESHOT_FAILED",
+                "one-shot engine launch rejected before spawn",
+                &[
+                    ("error", error.code().to_owned()),
+                    ("owner_uid", owner.uid().to_string()),
+                    ("core_pid", core_pid.to_string()),
+                ],
+            );
+            error
+        };
+        if let Err(error) = Self::require_root_process() {
+            return Err(oneshot_rejected(error));
+        }
         if !engine_path_is_valid(engine_path) {
-            return Err(PlatformError::CliUsage);
+            return Err(oneshot_rejected(PlatformError::CliUsage));
         }
-        validate_oneshot_runtime_dir(runtime_dir, owner.uid())?;
+        if let Err(error) = validate_oneshot_runtime_dir(runtime_dir, owner.uid()) {
+            return Err(oneshot_rejected(error));
+        }
         if core_pid == 0 {
-            return Err(PlatformError::CliUsage);
+            return Err(oneshot_rejected(PlatformError::CliUsage));
         }
-        spawn_engine_guarded(engine_path, runtime_dir, owner.uid(), core_pid)
+        agent_log(
+            "info",
+            "ENGINE_ONESHOT_STARTED",
+            "one-shot engine launch began",
+            &[
+                ("owner_uid", owner.uid().to_string()),
+                ("core_pid", core_pid.to_string()),
+                ("pid", std::process::id().to_string()),
+            ],
+        );
+        match spawn_engine_guarded(engine_path, runtime_dir, owner.uid(), core_pid) {
+            Ok(engine_pid) => {
+                agent_log(
+                    "info",
+                    "ENGINE_ONESHOT_OK",
+                    "one-shot engine launched",
+                    &[
+                        ("engine_pid", engine_pid.to_string()),
+                        ("core_pid", core_pid.to_string()),
+                    ],
+                );
+                Ok(engine_pid)
+            }
+            Err(error) => {
+                agent_log(
+                    "error",
+                    "ENGINE_ONESHOT_FAILED",
+                    "one-shot engine spawn failed",
+                    &[("error", error.code().to_owned())],
+                );
+                Err(error)
+            }
+        }
     }
 }
 
@@ -263,7 +523,77 @@ impl Default for MacosPlatform {
     }
 }
 
+const PROXY_POLICY_RECORD: &str =
+    "/Library/Application Support/EXV/ServiceAgent/proxy-policy-owner.json";
+const PROXY_POLICY_CLEANUP_ARG: &str = "--internal-cleanup-proxy-policy";
+
+fn proxy_cleanup_io(step: &'static str, error: &io::Error) -> PlatformError {
+    eprintln!("系统代理清理失败 step={step} error={error}");
+    PlatformError::ProxyPolicyCleanupFailed {
+        step, errno: error.raw_os_error(), exit_code: None, signal: None,
+    }
+}
+
+fn run_proxy_cleanup_engine(engine: &Path, argument: &str) -> io::Result<ExitStatus> {
+    Command::new(engine).arg(argument).stdin(Stdio::null()).status()
+}
+
+// 记录解析、文件锁及恢复语义由同一个 Engine 内部动作处理；测试接缝仅替换路径与执行器。
+pub(crate) fn cleanup_proxy_policy_at(
+    record: &Path,
+    installed_engine: &Path,
+    uninstall: bool,
+    fallback: impl FnOnce() -> Result<std::path::PathBuf, PlatformError>,
+    mut run: impl FnMut(&Path, &str) -> io::Result<ExitStatus>,
+) -> Result<(), PlatformError> {
+    if !record.try_exists().map_err(|error| proxy_cleanup_io("record.inspect", &error))? {
+        return Ok(());
+    }
+    let status = match run(installed_engine, PROXY_POLICY_CLEANUP_ARG) {
+        Ok(status) => status,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // 旧服务已卸载时，复用本次 Agent 同目录的 Engine；实际执行错误沿原结果返回。
+            let engine = fallback().map_err(|cause| {
+                eprintln!("系统代理清理执行器解析失败 previous_error={error} cause={cause}");
+                PlatformError::ProxyPolicyCleanupFailed {
+                    step: "engine.resolve_fallback", errno: None, exit_code: None, signal: None,
+                }
+            })?;
+            run(&engine, PROXY_POLICY_CLEANUP_ARG)
+                .map_err(|error| proxy_cleanup_io("engine.fallback", &error))?
+        }
+        Err(error) => return Err(proxy_cleanup_io("engine.installed", &error)),
+    };
+    if !status.success() {
+        let error = PlatformError::ProxyPolicyCleanupFailed {
+            step: "engine.cleanup", errno: None, exit_code: status.code(), signal: status.signal(),
+        };
+        eprintln!("系统代理清理执行失败 {error}");
+        return Err(error);
+    }
+    if uninstall {
+        fs::remove_file(record).map_err(|error| proxy_cleanup_io("record.remove", &error))?;
+    }
+    Ok(())
+}
+
 impl PrivilegedPlatform for MacosPlatform {
+    fn cleanup_proxy_policy(&mut self, uninstall: bool) -> Result<(), PlatformError> {
+        cleanup_proxy_policy_at(
+            Path::new(PROXY_POLICY_RECORD),
+            Path::new(INSTALLED_ENGINE_PATH),
+            uninstall,
+            || {
+                let source = crate::platform::resolve_engine_install_source(None)?;
+                if !engine_path_is_valid(&source) {
+                    return Err(PlatformError::InstallPreparationFailed);
+                }
+                Ok(std::path::PathBuf::from(source))
+            },
+            run_proxy_cleanup_engine,
+        )
+    }
+
     fn install_descriptor_present(&mut self) -> Result<bool, PlatformError> {
         stat_artifact(ArtifactPathId::InstallDescriptor).map(|identity| identity.is_some())
     }
@@ -272,40 +602,40 @@ impl PrivilegedPlatform for MacosPlatform {
         ensure_install_directory()?;
         ensure_absent(ArtifactPathId::InstallBinary)?;
 
-        let source_path =
-            env::current_exe().map_err(|_| PlatformError::InstallPreparationFailed)?;
-        let source_metadata =
-            fs::metadata(&source_path).map_err(|_| PlatformError::InstallPreparationFailed)?;
+        let source_path = env::current_exe()
+            .map_err(|error| install_io_failure("install_binary.current_exe", error))?;
+        let source_metadata = fs::metadata(&source_path)
+            .map_err(|error| install_io_failure("install_binary.source_metadata", error))?;
         if !source_metadata.is_file() {
             return Err(PlatformError::InstallPreparationFailed);
         }
 
-        let mut source =
-            File::open(source_path).map_err(|_| PlatformError::InstallPreparationFailed)?;
+        let mut source = File::open(source_path)
+            .map_err(|error| install_io_failure("install_binary.open_source", error))?;
         let mut destination = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(SERVICE_AGENT_BINARY_PATH)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
+            .map_err(|error| install_io_failure("install_binary.create_destination", error))?;
         io::copy(&mut source, &mut destination)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
+            .map_err(|error| install_io_failure("install_binary.copy", error))?;
         destination
             .sync_all()
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
+            .map_err(|error| install_io_failure("install_binary.sync_all", error))?;
         drop(destination);
 
         fs::set_permissions(
             SERVICE_AGENT_BINARY_PATH,
             fs::Permissions::from_mode(BINARY_MODE),
         )
+        .map_err(|error| install_io_failure("install_binary.set_permissions", error))?;
+        lchown_fixed_path(
+            SERVICE_AGENT_BINARY_PATH,
+            ROOT_UID,
+            ROOT_GID,
+            "install_binary.lchown",
+        )
         .map_err(|_| PlatformError::InstallPreparationFailed)?;
-        lchown_fixed_path(SERVICE_AGENT_BINARY_PATH, ROOT_UID, ROOT_GID)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
-        verify_artifact(
-            ArtifactPathId::InstallBinary,
-            ArtifactOwner::Root,
-            BINARY_MODE,
-        )?;
         Ok(())
     }
 
@@ -316,14 +646,15 @@ impl PrivilegedPlatform for MacosPlatform {
             SERVICE_AGENT_DESCRIPTOR_PATH,
             descriptor_contents(owner).as_bytes(),
             DESCRIPTOR_MODE,
+            "install_descriptor",
         )?;
-        lchown_fixed_path(SERVICE_AGENT_DESCRIPTOR_PATH, ROOT_UID, ROOT_GID)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
-        verify_artifact(
-            ArtifactPathId::InstallDescriptor,
-            ArtifactOwner::Root,
-            DESCRIPTOR_MODE,
-        )?;
+        lchown_fixed_path(
+            SERVICE_AGENT_DESCRIPTOR_PATH,
+            ROOT_UID,
+            ROOT_GID,
+            "install_descriptor.lchown",
+        )
+        .map_err(|_| PlatformError::InstallPreparationFailed)?;
         Ok(())
     }
 
@@ -337,14 +668,16 @@ impl PrivilegedPlatform for MacosPlatform {
             SERVICE_AGENT_STATE_PATH,
             engine_path.as_bytes(),
             ROOT_FILE_MODE,
+            "install_state",
         )?;
-        lchown_fixed_path(SERVICE_AGENT_STATE_PATH, ROOT_UID, ROOT_GID)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
-        verify_artifact(
-            ArtifactPathId::StateLeaf,
-            ArtifactOwner::Root,
-            ROOT_FILE_MODE,
+        lchown_fixed_path(
+            SERVICE_AGENT_STATE_PATH,
+            ROOT_UID,
+            ROOT_GID,
+            "install_state.lchown",
         )
+        .map_err(|_| PlatformError::InstallPreparationFailed)?;
+        Ok(())
     }
 
     fn verify_enrolled_owner(&mut self, owner: EnrolledOwner) -> Result<(), PlatformError> {
@@ -378,7 +711,13 @@ impl PrivilegedPlatform for MacosPlatform {
         orphan_remove_artifact(artifact)
     }
 
+    fn finish_uninstall_logging(&mut self) {
+        agent_log("info", "UNINSTALL_LOG_CLEANUP_STARTED", "service artifacts removed; cleaning local logs", &[]);
+        crate::file_log::default_log().shutdown();
+    }
+
     fn remove_empty_install_dirs(&mut self) -> Result<(), PlatformError> {
+        remove_empty_dir_guarded(SERVICE_AGENT_INSTALL_DIR, "logs")?;
         // 先子后父：安装目录为空才轮到父目录（父目录还含其它条目时 rmdir 失败即保留）。
         remove_empty_dir_guarded(INSTALL_ROOT_DIR, SERVICE_AGENT_INSTALL_DIR_LEAF)?;
         remove_empty_dir_guarded("/Library/Application Support", INSTALL_ROOT_DIR_LEAF)
@@ -406,33 +745,35 @@ impl PrivilegedPlatform for MacosPlatform {
         ensure_install_directory()?;
         ensure_absent(ArtifactPathId::EngineBinary)?;
 
-        let source_metadata =
-            fs::metadata(source).map_err(|_| PlatformError::InstallPreparationFailed)?;
+        let source_metadata = fs::metadata(source)
+            .map_err(|error| install_io_failure("install_engine_binary.source_metadata", error))?;
         if !source_metadata.is_file() {
             return Err(PlatformError::InstallPreparationFailed);
         }
-        let mut source = File::open(source).map_err(|_| PlatformError::InstallPreparationFailed)?;
+        let mut source = File::open(source)
+            .map_err(|error| install_io_failure("install_engine_binary.open_source", error))?;
         let mut destination = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(ENGINE_BINARY_PATH)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
+            .map_err(|error| install_io_failure("install_engine_binary.create_destination", error))?;
         io::copy(&mut source, &mut destination)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
+            .map_err(|error| install_io_failure("install_engine_binary.copy", error))?;
         destination
             .sync_all()
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
+            .map_err(|error| install_io_failure("install_engine_binary.sync_all", error))?;
         drop(destination);
 
         fs::set_permissions(ENGINE_BINARY_PATH, fs::Permissions::from_mode(BINARY_MODE))
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
-        lchown_fixed_path(ENGINE_BINARY_PATH, ROOT_UID, ROOT_GID)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
-        verify_artifact(
-            ArtifactPathId::EngineBinary,
-            ArtifactOwner::Root,
-            BINARY_MODE,
+            .map_err(|error| install_io_failure("install_engine_binary.set_permissions", error))?;
+        lchown_fixed_path(
+            ENGINE_BINARY_PATH,
+            ROOT_UID,
+            ROOT_GID,
+            "install_engine_binary.lchown",
         )
+        .map_err(|_| PlatformError::InstallPreparationFailed)?;
+        Ok(())
     }
 
     fn install_engine_descriptor(&mut self, owner: EnrolledOwner) -> Result<(), PlatformError> {
@@ -442,26 +783,36 @@ impl PrivilegedPlatform for MacosPlatform {
             ENGINE_PLIST_PATH,
             engine_descriptor_contents(owner).as_bytes(),
             DESCRIPTOR_MODE,
+            "install_engine_descriptor",
         )?;
-        lchown_fixed_path(ENGINE_PLIST_PATH, ROOT_UID, ROOT_GID)
-            .map_err(|_| PlatformError::InstallPreparationFailed)?;
-        verify_artifact(
-            ArtifactPathId::EngineDescriptor,
-            ArtifactOwner::Root,
-            DESCRIPTOR_MODE,
+        lchown_fixed_path(
+            ENGINE_PLIST_PATH,
+            ROOT_UID,
+            ROOT_GID,
+            "install_engine_descriptor.lchown",
         )
+        .map_err(|_| PlatformError::InstallPreparationFailed)?;
+        Ok(())
     }
 
     fn control_engine_job(&mut self, action: EngineJobAction) -> Result<(), PlatformError> {
         run_fixed_launchctl_for_engine(action)
     }
+    fn control_engine_job_detailed(&mut self, action: EngineJobAction) -> Result<(), crate::platform::ServiceOperationFailure> {
+        match action {
+            EngineJobAction::EnsureBootstrap => ensure_engine_started_detailed_with(|args| {
+                Command::new(LAUNCHCTL_PATH).env_clear().args(args).output()
+            }),
+            EngineJobAction::Bootout => run_fixed_launchctl_for_engine(action).map_err(Into::into),
+        }
+    }
+
 
     fn stop_engine_tunnel_best_effort(
         &mut self,
         owner: EnrolledOwner,
     ) -> Result<(), PlatformError> {
-        nudge_engine_endpoint_eof(owner);
-        Ok(())
+        nudge_engine_endpoint_eof(owner)
     }
 }
 
@@ -633,9 +984,7 @@ pub(crate) fn remove_socket_if_identity(
 ///
 /// 任何 nofollow ownership、mode 或 identity 重验失败时返回
 /// [`PlatformError::SocketSetupFailed`]。
-pub(crate) fn seal_bound_socket(
-    owner: EnrolledOwner,
-) -> Result<ArtifactIdentity, PlatformError> {
+pub(crate) fn seal_bound_socket(owner: EnrolledOwner) -> Result<ArtifactIdentity, PlatformError> {
     let initial =
         stat_artifact(ArtifactPathId::SocketLeaf)?.ok_or(PlatformError::SocketSetupFailed)?;
     validate_identity(
@@ -681,6 +1030,46 @@ pub(crate) fn seal_bound_socket(
     Ok(current)
 }
 
+/// 仅 socket 启动链持有的原错误，不扩大全局 Copy 平台错误。
+#[derive(Debug)]
+pub enum SocketStartupError {
+    /// 既有平台拒绝，保留原稳定类别。
+    Existing(PlatformError),
+    /// 本次 socket connect 或 bind 的原 IO。
+    Io {
+        step: &'static str,
+        source: io::Error,
+    },
+}
+
+impl From<PlatformError> for SocketStartupError {
+    fn from(error: PlatformError) -> Self {
+        Self::Existing(error)
+    }
+}
+
+impl std::fmt::Display for SocketStartupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Existing(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Io { step, source } => write!(
+                formatter,
+                "{} step={step} kind={:?} errno={:?}: {source}",
+                PlatformError::SocketSetupFailed, source.kind(), source.raw_os_error(),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SocketStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Existing(error) => Some(error),
+            Self::Io { source, .. } => Some(source),
+        }
+    }
+}
+
 /// stale control.sock 的回收计划（纯决策，单测钉死分流判据）。
 enum StaleSocketPlan {
     /// 身份精确匹配（enrolled uid+gid、socket、0600）：既有安全删除路径
@@ -713,31 +1102,38 @@ fn stale_socket_plan(identity: ArtifactIdentity, owner: EnrolledOwner) -> StaleS
 /// 精确匹配路径沿用既有拒绝（非 socket、symlink、owner/mode 不符或删除失败）；
 /// 孤儿路径拒绝于父目录守卫/叶类型/unlink（见 [`orphan_remove_leaf`]）。绝不删除
 /// 受控父目录中固定叶名之外的任何文件。
-pub(crate) fn remove_safe_stale_socket(owner: EnrolledOwner) -> Result<(), PlatformError> {
+pub(crate) fn remove_safe_stale_socket(owner: EnrolledOwner) -> Result<(), SocketStartupError> {
     let Some(identity) = stat_artifact(ArtifactPathId::SocketLeaf)? else {
         return Ok(());
     };
     match stale_socket_plan(identity, owner) {
-        StaleSocketPlan::StrictRemoval => {
-            // T7（UDS 偷取缺口镜像修复，对齐 ipc service_listener 的探活纪律）：
-            // 身份匹配不代表 stale——活 daemon 的 control.sock 同样匹配。摘除前
-            // connect 探活：可连=有 daemon 正在监听（ArtifactGuardRejected 拒绝
-            // 摘除）；连接被拒才是真 stale。防第二个 agent 实例偷走活端点。
-            if std::os::unix::net::UnixStream::connect(
-                crate::platform::SERVICE_AGENT_SOCKET_PATH,
-            )
-            .is_ok()
-            {
-                return Err(PlatformError::ArtifactGuardRejected);
-            }
-            remove_socket_if_identity(identity, owner)
-        }
+        StaleSocketPlan::StrictRemoval => remove_strict_stale_socket_with_connect(
+            || std::os::unix::net::UnixStream::connect(crate::platform::SERVICE_AGENT_SOCKET_PATH),
+            || remove_socket_if_identity(identity, owner),
+        ),
         // 身份不符的旧语义是直接 Err，失败推迟为 core 侧
         // `DARWIN_CORE_SERVICE_NOT_READY` 二次卡点；改为孤儿语义回收——父目录
         // root 属主且无 022 写位 + 非 symlink + 固定叶名即删除，不再要求残留
         // uid/gid/mode 与当前规格精确相等（预置该残留本身需要 root）。父目录
         // 缺失对运行中的 daemon 不可达（其二进制就在该目录内），无需专门处理。
-        StaleSocketPlan::OrphanRecycle => orphan_remove_artifact(ArtifactPathId::SocketLeaf),
+        StaleSocketPlan::OrphanRecycle => {
+            orphan_remove_artifact(ArtifactPathId::SocketLeaf).map_err(Into::into)
+        }
+    }
+}
+
+// 只消费生产原本的一次 connect；删除仍由捕获原 identity 的既有动作执行。
+fn remove_strict_stale_socket_with_connect(
+    connect: impl FnOnce() -> io::Result<std::os::unix::net::UnixStream>,
+    remove: impl FnOnce() -> Result<(), PlatformError>,
+) -> Result<(), SocketStartupError> {
+    match connect() {
+        Ok(_) => Err(PlatformError::ArtifactGuardRejected.into()),
+        Err(error) if error.raw_os_error() == Some(libc::ECONNREFUSED) => {
+            remove().map_err(Into::into)
+        }
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+        Err(source) => Err(SocketStartupError::Io { step: "stale.connect", source }),
     }
 }
 
@@ -817,6 +1213,42 @@ const fn fixed_artifact(artifact: ArtifactPathId) -> FixedArtifact {
             kind: ArtifactKind::Regular,
             mode: ROOT_FILE_MODE,
         },
+        ArtifactPathId::AgentLog => FixedArtifact {
+            parent: "/Library/Application Support/EXV/ServiceAgent/logs",
+            leaf: "service-agent.log",
+            kind: ArtifactKind::Regular,
+            mode: 0o644,
+        },
+        ArtifactPathId::AgentLogFirst => FixedArtifact {
+            parent: "/Library/Application Support/EXV/ServiceAgent/logs",
+            leaf: "service-agent.log.1",
+            kind: ArtifactKind::Regular,
+            mode: 0o644,
+        },
+        ArtifactPathId::AgentLogSecond => FixedArtifact {
+            parent: "/Library/Application Support/EXV/ServiceAgent/logs",
+            leaf: "service-agent.log.2",
+            kind: ArtifactKind::Regular,
+            mode: 0o644,
+        },
+        ArtifactPathId::EngineLog => FixedArtifact {
+            parent: "/Library/Application Support/EXV/ServiceAgent/logs",
+            leaf: "engine.log",
+            kind: ArtifactKind::Regular,
+            mode: 0o644,
+        },
+        ArtifactPathId::EngineLogFirst => FixedArtifact {
+            parent: "/Library/Application Support/EXV/ServiceAgent/logs",
+            leaf: "engine.log.1",
+            kind: ArtifactKind::Regular,
+            mode: 0o644,
+        },
+        ArtifactPathId::EngineLogSecond => FixedArtifact {
+            parent: "/Library/Application Support/EXV/ServiceAgent/logs",
+            leaf: "engine.log.2",
+            kind: ArtifactKind::Regular,
+            mode: 0o644,
+        },
         ArtifactPathId::SocketLeaf => FixedArtifact {
             parent: SERVICE_AGENT_SOCKET_PARENT,
             leaf: "control.sock",
@@ -849,13 +1281,18 @@ fn ensure_install_directory() -> Result<(), PlatformError> {
     if fs::symlink_metadata(install_dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(PlatformError::InstallPreparationFailed);
     }
-    fs::create_dir_all(install_dir).map_err(|_| PlatformError::InstallPreparationFailed)?;
+    fs::create_dir_all(install_dir)
+        .map_err(|error| install_io_failure("install_directory.create_dir_all", error))?;
     fs::set_permissions(install_dir, fs::Permissions::from_mode(0o755))
-        .map_err(|_| PlatformError::InstallPreparationFailed)?;
-    lchown_fixed_path(SERVICE_AGENT_INSTALL_DIR, ROOT_UID, ROOT_GID)
-        .map_err(|_| PlatformError::InstallPreparationFailed)?;
-    ensure_root_controlled_directory(install_dir)
-        .map_err(|_| PlatformError::InstallPreparationFailed)
+        .map_err(|error| install_io_failure("install_directory.set_permissions", error))?;
+    lchown_fixed_path(
+        SERVICE_AGENT_INSTALL_DIR,
+        ROOT_UID,
+        ROOT_GID,
+        "install_directory.lchown",
+    )
+    .map_err(|_| PlatformError::InstallPreparationFailed)?;
+    Ok(())
 }
 
 fn ensure_absent(artifact: ArtifactPathId) -> Result<(), PlatformError> {
@@ -873,18 +1310,33 @@ fn descriptor_contents(owner: EnrolledOwner) -> String {
     )
 }
 
-fn write_new_fixed_file(path: &str, contents: &[u8], mode: u32) -> Result<(), PlatformError> {
+// 安装命令已有stderr消费者；在原IO仍在手时交原因，main另交稳定失败码。
+fn install_io_failure(step: &str, error: io::Error) -> PlatformError {
+    eprintln!(
+        "install failed step={step} errno={:?} error={error}",
+        error.raw_os_error()
+    );
+    PlatformError::InstallPreparationFailed
+}
+
+fn write_new_fixed_file(
+    path: &str,
+    contents: &[u8],
+    mode: u32,
+    step_prefix: &'static str,
+) -> Result<(), PlatformError> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|_| PlatformError::InstallPreparationFailed)?;
+        .map_err(|error| install_io_failure(&format!("{step_prefix}.create_new"), error))?;
     file.write_all(contents)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| PlatformError::InstallPreparationFailed)?;
+        .map_err(|error| install_io_failure(&format!("{step_prefix}.write_all"), error))?;
+    file.sync_all()
+        .map_err(|error| install_io_failure(&format!("{step_prefix}.sync_all"), error))?;
     drop(file);
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|_| PlatformError::InstallPreparationFailed)
+        .map_err(|error| install_io_failure(&format!("{step_prefix}.set_permissions"), error))
 }
 
 // ---- 历史/已退役（一次性）组件清理 ----
@@ -921,6 +1373,15 @@ fn remove_empty_dir_guarded_by(
     leaf: &str,
     controlled_uid: u32,
 ) -> Result<(), PlatformError> {
+    remove_empty_dir_with_report(parent, leaf, controlled_uid, |detail| eprintln!("{detail}"))
+}
+
+fn remove_empty_dir_with_report(
+    parent: &str,
+    leaf: &str,
+    controlled_uid: u32,
+    mut report: impl FnMut(String),
+) -> Result<(), PlatformError> {
     match fs::symlink_metadata(parent) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(PlatformError::ArtifactGuardRejected),
@@ -939,7 +1400,8 @@ fn remove_empty_dir_guarded_by(
     if identity.kind != ArtifactKind::Directory || identity.uid != controlled_uid {
         return Err(PlatformError::ArtifactGuardRejected);
     }
-    let current = stat_at(parent.as_raw_fd(), &name)?.ok_or(PlatformError::ArtifactGuardRejected)?;
+    let current =
+        stat_at(parent.as_raw_fd(), &name)?.ok_or(PlatformError::ArtifactGuardRejected)?;
     if current.device != identity.device || current.inode != identity.inode {
         return Err(PlatformError::ArtifactGuardRejected);
     }
@@ -954,37 +1416,61 @@ fn remove_empty_dir_guarded_by(
             error.raw_os_error(),
             Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
         ) {
+            report(format!("service-uninstall retained directory={leaf} reason=nonempty"));
             return Ok(());
         }
-        return Err(PlatformError::ArtifactRemovalFailed);
+        return Err(PlatformError::ArtifactRemovalIoFailed { step: "rmdir", errno: error.raw_os_error() });
     }
     Ok(())
 }
 
 /// `bootout` 固定历史 label；label 必须先通过白名单校验。
 fn run_fixed_launchctl_bootout_label(label: &str) -> Result<(), PlatformError> {
-    if !crate::LEGACY_LAUNCHD_LABELS.contains(&label) {
-        return Err(PlatformError::CliUsage);
+    let target = match label {
+        "com.exv.helper" => "system/com.exv.helper",
+        "com.exv.dev-service-installer" => "system/com.exv.dev-service-installer",
+        "com.exv.helper.dev" => "system/com.exv.helper.dev",
+        "com.exv.vpn.dev-companion" => "system/com.exv.vpn.dev-companion",
+        _ => return Err(PlatformError::CliUsage),
+    };
+    // 保原维护命令的stdout/stderr继承，只有当次bootout结果决定返回。
+    legacy_bootout_result(
+        target,
+        Command::new(LAUNCHCTL_PATH)
+            .env_clear()
+            .args(["bootout", target])
+            .status(),
+    )
+}
+
+fn legacy_bootout_result(
+    target: &'static str,
+    status: io::Result<std::process::ExitStatus>,
+) -> Result<(), PlatformError> {
+    use std::os::unix::process::ExitStatusExt;
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(PlatformError::ServiceControlCommandFailed {
+            action: "bootout",
+            target,
+            exit_code: status.code(),
+            signal: status.signal(),
+            errno: None,
+        }),
+        Err(error) => {
+            eprintln!(
+                "launchctl bootout target={target} errno={:?} error={error}",
+                error.raw_os_error()
+            );
+            Err(PlatformError::ServiceControlCommandFailed {
+                action: "bootout",
+                target,
+                exit_code: None,
+                signal: None,
+                errno: error.raw_os_error(),
+            })
+        }
     }
-    let target = format!("system/{label}");
-    let status = Command::new(LAUNCHCTL_PATH)
-        .env_clear()
-        .args(["bootout", &target])
-        .status()
-        .map_err(|_| PlatformError::ServiceControlFailed)?;
-    if status.success() {
-        return Ok(());
-    }
-    // 幂等：job 本就不在系统域（历史残留已 bootout 过）视为成功——以 `print` 复核。
-    let probe = Command::new(LAUNCHCTL_PATH)
-        .env_clear()
-        .args(["print", &target])
-        .status()
-        .map_err(|_| PlatformError::ServiceControlFailed)?;
-    if probe.success() {
-        return Err(PlatformError::ServiceControlFailed);
-    }
-    Ok(())
 }
 
 /// 删除固定历史 descriptor（含 `.previous` 残片）。
@@ -1000,10 +1486,7 @@ fn guarded_remove_legacy_descriptor(leaf: &str) -> Result<(), PlatformError> {
     }
     match orphan_remove_leaf("/Library/LaunchDaemons", leaf, ROOT_UID) {
         Ok(OrphanDimension::Absent | OrphanDimension::ParentMissing) => Ok(()),
-        Ok(dimension) => {
-            eprintln!("{}", legacy_guard_report_line(None, leaf, dimension));
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err((error, dimension)) => {
             eprintln!("{}", legacy_guard_report_line(Some(error), leaf, dimension));
             Err(error)
@@ -1025,10 +1508,6 @@ fn remove_legacy_install_dir_guarded(leaf: &str) -> Result<(), PlatformError> {
     }
     match fs::symlink_metadata(LEGACY_INSTALL_DIR_PARENT) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            eprintln!(
-                "{}",
-                legacy_guard_report_line(None, leaf, OrphanDimension::ParentMissing)
-            );
             return Ok(());
         }
         Err(_) => return Err(PlatformError::ArtifactGuardRejected),
@@ -1039,8 +1518,8 @@ fn remove_legacy_install_dir_guarded(leaf: &str) -> Result<(), PlatformError> {
         }
     }
     ensure_root_controlled_directory(Path::new(LEGACY_INSTALL_DIR_PARENT))?;
-    let parent = File::open(LEGACY_INSTALL_DIR_PARENT)
-        .map_err(|_| PlatformError::ArtifactGuardRejected)?;
+    let parent =
+        File::open(LEGACY_INSTALL_DIR_PARENT).map_err(|_| PlatformError::ArtifactGuardRejected)?;
     let name = c_string(leaf)?;
     let Some(identity) = stat_at(parent.as_raw_fd(), &name)? else {
         return Ok(());
@@ -1067,10 +1546,6 @@ fn remove_legacy_install_dir_guarded(leaf: &str) -> Result<(), PlatformError> {
     let path = format!("{LEGACY_INSTALL_DIR_PARENT}/{leaf}");
     fs::remove_dir_all(&path).map_err(|_| PlatformError::ArtifactRemovalFailed)?;
     drop(parent);
-    eprintln!(
-        "{}",
-        legacy_guard_report_line(None, leaf, OrphanDimension::Recycled)
-    );
     Ok(())
 }
 
@@ -1086,40 +1561,157 @@ fn engine_descriptor_contents(owner: EnrolledOwner) -> String {
     )
 }
 
-/// W2.5：service engine job 的固定 launchctl 控制。
-///
-/// `EnsureBootstrap` 幂等语义：bootstrap 失败时以 `launchctl print system/<label>`
-/// 复核——job 已加载（print 退出码 0）即成功；`Bootout` 失败原样上抛（调用方
-/// 决定 best-effort 与否）。
+/// 固定 launchctl 命令只按本次子进程结果返回；不通过 print 复判。
 fn run_fixed_launchctl_for_engine(action: EngineJobAction) -> Result<(), PlatformError> {
-    let mut command = Command::new(LAUNCHCTL_PATH);
-    command.env_clear();
     match action {
-        EngineJobAction::EnsureBootstrap => {
-            command.args(["bootstrap", LAUNCHCTL_SYSTEM_DOMAIN, ENGINE_PLIST_PATH]);
-        }
+        EngineJobAction::EnsureBootstrap => ensure_engine_started_with(|args| {
+            Command::new(LAUNCHCTL_PATH).env_clear().args(args).output()
+        }),
         EngineJobAction::Bootout => {
-            command.args(["bootout", ENGINE_SERVICE_TARGET]);
+            let result = run_launchctl(
+                "bootout",
+                ENGINE_SERVICE_TARGET,
+                &["bootout", ENGINE_SERVICE_TARGET],
+            );
+            match &result {
+                Ok(()) => agent_log(
+                    "info",
+                    "ENGINE_JOB_BOOTOUT",
+                    "engine job bootout finished",
+                    &[],
+                ),
+                Err(error) => agent_log(
+                    "error",
+                    "ENGINE_JOB_BOOTOUT",
+                    "engine job bootout failed",
+                    &[("error", error.code().to_owned())],
+                ),
+            }
+            result
         }
     }
-    let status = command
-        .status()
-        .map_err(|_| PlatformError::ServiceControlFailed)?;
-    if status.success() {
-        return Ok(());
-    }
-    if matches!(action, EngineJobAction::EnsureBootstrap) {
-        // 已 bootstrap 视成功：`launchctl print` 探测 job 是否在系统域。
-        let probe = Command::new(LAUNCHCTL_PATH)
-            .env_clear()
-            .args(["print", ENGINE_SERVICE_TARGET])
-            .status()
-            .map_err(|_| PlatformError::ServiceControlFailed)?;
-        if probe.success() {
-            return Ok(());
+}
+
+/// kickstart 不带 -k：启动停止的已注册 job，也不打断已运行的实例。
+/// 只有原命令明确报告固定 system job 缺席时才首次注册；不追加 print 复验。
+fn ensure_engine_started_with(
+    mut run: impl FnMut(&[&str]) -> io::Result<std::process::Output>,
+) -> Result<(), PlatformError> {
+    ensure_engine_started_detailed_with(&mut run).map_err(|failure| failure.error)
+}
+fn ensure_engine_started_detailed_with(
+    mut run: impl FnMut(&[&str]) -> io::Result<std::process::Output>,
+) -> Result<(), crate::platform::ServiceOperationFailure> {
+    let output = run(&["kickstart", ENGINE_SERVICE_TARGET]);
+    let missing = output.as_ref().is_ok_and(|output| {
+        output.status.code() == Some(113)
+            && String::from_utf8_lossy(&output.stderr).trim()
+                == format!("Could not find service \"{ENGINE_LABEL}\" in domain for system")
+    });
+    let result = if missing {
+        launchctl_result_detailed("bootstrap", ENGINE_PLIST_PATH,
+            run(&["bootstrap", LAUNCHCTL_SYSTEM_DOMAIN, ENGINE_PLIST_PATH]))
+    } else {
+        launchctl_result_detailed("kickstart", ENGINE_SERVICE_TARGET, output)
+    };
+    // S7：拉起 engine 的关键事件落文件日志（字段=决策布尔+错误类别+原命令
+    // exit/signal/errno 数字；launchctl stderr 原文不落日志）。
+    match &result {
+        Ok(()) => agent_log(
+            "info",
+            "ENGINE_JOB_ENSURE",
+            "engine job ensured",
+            &[("bootstrapped", missing.to_string())],
+        ),
+        Err(failure) => {
+            let mut fields = vec![
+                ("bootstrapped", missing.to_string()),
+                ("error", failure.error.code().to_owned()),
+            ];
+            if let crate::platform::PlatformError::ServiceControlCommandFailed {
+                exit_code,
+                signal,
+                errno,
+                ..
+            } = &failure.error
+            {
+                fields.push(("exit_code", exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string())));
+                fields.push(("signal", signal.map_or_else(|| "none".to_owned(), |sig| sig.to_string())));
+                fields.push(("errno", errno.map_or_else(|| "none".to_owned(), |code| code.to_string())));
+            }
+            agent_log(
+                "error",
+                "ENGINE_JOB_ENSURE",
+                "engine job ensure failed",
+                &fields,
+            );
         }
     }
-    Err(PlatformError::ServiceControlFailed)
+    result
+}
+
+fn launchctl_result(
+    action: &'static str,
+    target: &'static str,
+    output: io::Result<std::process::Output>,
+) -> Result<(), PlatformError> {
+    launchctl_result_detailed(action, target, output).map_err(|failure| failure.error)
+}
+fn launchctl_result_detailed(
+    action: &'static str, target: &'static str, output: io::Result<std::process::Output>,
+) -> Result<(), crate::platform::ServiceOperationFailure> {
+    use crate::platform::ServiceOperationFailure;
+    use std::os::unix::process::ExitStatusExt;
+    match output {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output)
+            if action == "bootout"
+                && matches!(target, SERVICE_AGENT_SERVICE_TARGET | ENGINE_SERVICE_TARGET)
+                && output.status.code() == Some(libc::ESRCH)
+                && output.status.signal().is_none()
+                && String::from_utf8_lossy(&output.stderr).trim()
+                    == "Boot-out failed: 3: No such process" =>
+        {
+            eprintln!(
+                "服务启动项已卸载，跳过停止 action={action} target={target} exit=3 signal=None stderr={}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            Ok(())
+        }
+        Ok(output) => {
+            // 详细系统原因沿现有 stderr 交调用方，终结稳定行由 main 输出。
+            eprintln!(
+                "launchctl {action} target={target} stderr={}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            Err(ServiceOperationFailure::with_reason(PlatformError::ServiceControlCommandFailed {
+                action,
+                target,
+                exit_code: output.status.code(),
+                signal: output.status.signal(),
+                errno: None,
+            }, String::from_utf8_lossy(&output.stderr).trim()))
+        }
+        Err(error) => Err(ServiceOperationFailure::with_reason(PlatformError::ServiceControlCommandFailed {
+            action,
+            target,
+            exit_code: None,
+            signal: None,
+            errno: error.raw_os_error(),
+        }, &error.to_string())),
+    }
+}
+
+fn run_launchctl(
+    action: &'static str,
+    target: &'static str,
+    args: &[&str],
+) -> Result<(), PlatformError> {
+    launchctl_result(
+        action,
+        target,
+        Command::new(LAUNCHCTL_PATH).env_clear().args(args).output(),
+    )
 }
 
 /// W2.5：best-effort 停机信号——以 owner uid 连接 engine 固定端点后立即关闭。
@@ -1127,42 +1719,73 @@ fn run_fixed_launchctl_for_engine(action: EngineJobAction) -> Result<(), Platfor
 /// 无 tonic 栈、无法发送字面 `StopTunnel` RPC；uid 门连接 + 立即 EOF 即 engine 会话
 /// 循环的既有拆隧道触发器（idle：EOF→回 accept；busy：typed 拒绝不 evict——真正
 /// 的停机权威是随后的 bootout SIGTERM）。临时 `seteuid(owner)` 通过 engine 的
-/// uid 门（root euid 会被拒），随即恢复 root；有界 1s；任何失败静默忽略。
-fn nudge_engine_endpoint_eof(owner: EnrolledOwner) {
-    // SAFETY: seteuid 只改本进程 effective uid；root 恒可切换，saved uid 保持 root，
-    // 结束后恢复。单线程 CLI/daemon 临界区内无并发凭据依赖。
-    let dropped = unsafe { libc::seteuid(owner.uid()) } == 0;
-    if !dropped {
-        return;
+/// uid 门（root euid 会被拒），随即恢复 root；原操作错误返回给best-effort调用方，不追加探测。
+fn nudge_engine_endpoint_eof(owner: EnrolledOwner) -> Result<(), PlatformError> {
+    // SAFETY: 仅改变当前CLI effective uid；不新增身份查询。
+    if unsafe { libc::seteuid(owner.uid()) } != 0 {
+        return Err(PlatformError::ServiceControlIoFailed {
+            step: "nudge.seteuid",
+            errno: io::Error::last_os_error().raw_os_error(),
+            restore_errno: None,
+        });
     }
     let connect = std::os::unix::net::UnixStream::connect(ENGINE_SOCKET_PATH);
-    // SAFETY: 恢复 root effective uid（本函数入口即 root）。
-    unsafe { libc::seteuid(ROOT_UID) };
-    drop(connect.ok());
+    // SAFETY: 原动作结束总是尝试恢复入口root身份，立即保存其原errno。
+    let restore = if unsafe { libc::seteuid(ROOT_UID) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    };
+    let result = nudge_result(connect.map(drop), restore);
+    match &result {
+        Ok(()) => agent_log(
+            "info",
+            "ENGINE_NUDGE_EOF",
+            "engine endpoint eof nudge delivered",
+            &[],
+        ),
+        Err(error) => agent_log(
+            "warn",
+            "ENGINE_NUDGE_EOF",
+            "engine endpoint eof nudge failed",
+            &[("error", error.code().to_owned())],
+        ),
+    }
+    result
+}
+
+fn nudge_result(connect: io::Result<()>, restore: io::Result<()>) -> Result<(), PlatformError> {
+    let restore_errno = restore.as_ref().err().and_then(io::Error::raw_os_error);
+    match connect {
+        Err(error) => Err(PlatformError::ServiceControlIoFailed {
+            step: "nudge.connect",
+            errno: error.raw_os_error(),
+            restore_errno,
+        }),
+        Ok(()) => restore.map_err(|error| PlatformError::ServiceControlIoFailed {
+            step: "nudge.restore_uid",
+            errno: error.raw_os_error(),
+            restore_errno: None,
+        }),
+    }
 }
 
 fn run_fixed_launchctl(action: ServiceControlAction) -> Result<(), PlatformError> {
-    let mut command = Command::new(LAUNCHCTL_PATH);
-    command.env_clear();
     match action {
-        ServiceControlAction::Bootstrap => {
-            command.args([
+        ServiceControlAction::Bootstrap => run_launchctl(
+            "bootstrap",
+            SERVICE_AGENT_DESCRIPTOR_PATH,
+            &[
                 "bootstrap",
                 LAUNCHCTL_SYSTEM_DOMAIN,
                 SERVICE_AGENT_DESCRIPTOR_PATH,
-            ]);
-        }
-        ServiceControlAction::Bootout => {
-            command.args(["bootout", SERVICE_AGENT_SERVICE_TARGET]);
-        }
-    }
-    let status = command
-        .status()
-        .map_err(|_| PlatformError::ServiceControlFailed)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(PlatformError::ServiceControlFailed)
+            ],
+        ),
+        ServiceControlAction::Bootout => run_launchctl(
+            "bootout",
+            SERVICE_AGENT_SERVICE_TARGET,
+            &["bootout", SERVICE_AGENT_SERVICE_TARGET],
+        ),
     }
 }
 
@@ -1170,6 +1793,10 @@ fn guarded_remove_artifact(
     artifact: ArtifactPathId,
     owner: ArtifactOwner,
 ) -> Result<(), PlatformError> {
+    // 文件日志沿创建进程的umask落盘（现有产物0644）；固定目录与叶名复用既有回收规则。
+    if artifact.is_runtime_log() {
+        return orphan_remove_artifact(artifact);
+    }
     let expected_mode = fixed_artifact(artifact).mode;
     let Some(identity) = stat_artifact(artifact)? else {
         return Ok(());
@@ -1201,10 +1828,7 @@ fn orphan_remove_artifact(artifact: ArtifactPathId) -> Result<(), PlatformError>
     match orphan_remove_leaf(spec.parent, spec.leaf, ROOT_UID) {
         // 叶名缺席：无可回收，不产生报告（干净且父目录在场是正常子集）。
         Ok(OrphanDimension::Absent) => Ok(()),
-        Ok(disposition) => {
-            eprintln!("{}", orphan_guard_report_line(None, artifact, disposition));
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err((error, dimension)) => {
             eprintln!(
                 "{}",
@@ -1229,19 +1853,31 @@ fn orphan_remove_leaf(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(OrphanDimension::ParentMissing);
         }
-        Err(_) => return Err((PlatformError::ArtifactGuardRejected, OrphanDimension::ParentGuard)),
+        Err(_) => {
+            return Err((
+                PlatformError::ArtifactGuardRejected,
+                OrphanDimension::ParentGuard,
+            ));
+        }
         Ok(metadata) => {
             // 符号链接父目录：不受控（真实目标未知），拒绝。
             if metadata.file_type().is_symlink() {
-                return Err((PlatformError::ArtifactGuardRejected, OrphanDimension::ParentGuard));
+                return Err((
+                    PlatformError::ArtifactGuardRejected,
+                    OrphanDimension::ParentGuard,
+                ));
             }
         }
     }
     // 父目录受控校验（目录 + 属主 + 无 022 写位）与打开。
     ensure_directory_controlled_by(Path::new(parent), controlled_uid)
         .map_err(|error| (error, OrphanDimension::ParentGuard))?;
-    let parent_file = File::open(parent)
-        .map_err(|_| (PlatformError::ArtifactGuardRejected, OrphanDimension::ParentGuard))?;
+    let parent_file = File::open(parent).map_err(|_| {
+        (
+            PlatformError::ArtifactGuardRejected,
+            OrphanDimension::ParentGuard,
+        )
+    })?;
     let leaf = c_string(leaf).map_err(|error| (error, OrphanDimension::ParentGuard))?;
     // 固定叶名 fstatat NOFOLLOW：缺席=无可回收；Err 覆盖符号链接与不可 stat。
     let Some(identity) = stat_at(parent_file.as_raw_fd(), &leaf)
@@ -1251,12 +1887,18 @@ fn orphan_remove_leaf(
     };
     if identity.kind == ArtifactKind::Directory {
         // 目录占位固定叶名：绝不递归、不换 AT_REMOVEDIR——按不符拒绝。
-        return Err((PlatformError::ArtifactGuardRejected, OrphanDimension::LeafKind));
+        return Err((
+            PlatformError::ArtifactGuardRejected,
+            OrphanDimension::LeafKind,
+        ));
     }
     // device/inode 复核（TOCTOU 收窄到同一父 fd 内；变更即拒绝）。
     let current = stat_at(parent_file.as_raw_fd(), &leaf)
         .map_err(|error| (error, OrphanDimension::IdentityRace))?
-        .ok_or((PlatformError::ArtifactGuardRejected, OrphanDimension::IdentityRace))?;
+        .ok_or((
+            PlatformError::ArtifactGuardRejected,
+            OrphanDimension::IdentityRace,
+        ))?;
     if current.device != identity.device || current.inode != identity.inode {
         return Err((
             PlatformError::ArtifactGuardRejected,
@@ -1269,7 +1911,7 @@ fn orphan_remove_leaf(
     let result = unsafe { libc::unlinkat(parent_file.as_raw_fd(), leaf.as_ptr(), 0) };
     if result != 0 {
         return Err((
-            PlatformError::ArtifactRemovalFailed,
+            PlatformError::ArtifactRemovalIoFailed { step: "unlinkat", errno: io::Error::last_os_error().raw_os_error() },
             OrphanDimension::UnlinkFailed,
         ));
     }
@@ -1588,7 +2230,12 @@ impl MacosPlatform {
     }
 }
 
-fn lchown_fixed_path(path: &str, uid: u32, gid: u32) -> Result<(), PlatformError> {
+fn lchown_fixed_path(
+    path: &str,
+    uid: u32,
+    gid: u32,
+    step: &'static str,
+) -> Result<(), PlatformError> {
     let path = c_string(path)?;
     let uid = libc_uid(uid)?;
     let gid = libc_gid(gid)?;
@@ -1597,7 +2244,8 @@ fn lchown_fixed_path(path: &str, uid: u32, gid: u32) -> Result<(), PlatformError
     if result == 0 {
         Ok(())
     } else {
-        Err(PlatformError::ArtifactGuardRejected)
+        let error = io::Error::last_os_error();
+        Err(install_io_failure(step, error))
     }
 }
 
@@ -1628,3 +2276,4 @@ fn libc_uid(uid: u32) -> Result<libc::uid_t, PlatformError> {
 fn libc_gid(gid: u32) -> Result<libc::gid_t, PlatformError> {
     libc::gid_t::try_from(gid).map_err(|_| PlatformError::ArtifactGuardRejected)
 }
+

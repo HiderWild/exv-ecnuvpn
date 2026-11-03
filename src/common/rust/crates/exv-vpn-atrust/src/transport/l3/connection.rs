@@ -14,10 +14,7 @@ use crate::{
 };
 use std::{
     net::Ipv4Addr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
@@ -37,10 +34,17 @@ pub enum ConnectionError {
     BudgetExceeded,
     #[error("unexpected L3 frame direction")]
     UnexpectedDirection,
+    /// 保留公开错误变体以兼容调用方；本连接循环不再因缺心跳响应产生该错误。
     #[error("L3 heartbeat response timeout")]
     HeartbeatTimeout,
-    #[error("L3 I/O failed: {0:?}")]
-    Io(std::io::ErrorKind),
+    /// 原操作失败或读到 EOF；缺少原系统码时保留 None。
+    #[error("L3 I/O failed ({stage}): {kind:?}; os={raw_os_error:?}; {detail}")]
+    Io {
+        stage: &'static str,
+        kind: std::io::ErrorKind,
+        raw_os_error: Option<i32>,
+        detail: String,
+    },
     #[error("L3 handshake: {0}")]
     Handshake(#[from] IpRequestError),
     #[error("L3 codec: {0}")]
@@ -53,17 +57,27 @@ pub enum ConnectionError {
 pub struct ConnectionOptions {
     pub handshake: IpRequestOptions,
     pub heartbeat_interval: Duration,
+    /// 源码兼容位；所有值（包括0）均不参与校验或会话终结判断。
     pub heartbeat_miss_limit: u32,
 }
 impl Default for ConnectionOptions {
     fn default() -> Self {
         Self {
             handshake: IpRequestOptions::default(),
-            // 固定上游默认值；真实连续心跳仍需独立验证。
+            // 保留既有协议发送间隔，不用缺响应推断连接终结。
             heartbeat_interval: Duration::from_secs(5),
             heartbeat_miss_limit: 3,
         }
     }
+}
+
+/// 上行心跳的发送策略；候选由调用入口选择，既有产品入口保持 Periodic。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatPolicy {
+    /// 按固定周期发送，与上行业务写入无关。
+    Periodic,
+    /// 每次成功写入并提交后重新计时，只在持续空闲一个 interval 后发送。
+    IdleOnly,
 }
 
 struct Slot {
@@ -163,6 +177,23 @@ impl L3Connection {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        Self::open_with_heartbeat_policy(stream, sid, lifecycle, options, HeartbeatPolicy::Periodic)
+            .await
+    }
+
+    /// 从宿主已验证的流建立连接，并显式选择心跳候选。
+    /// # Errors
+    /// 无效配置、已关闭的会话、握手失败或握手被取消时返回错误。
+    pub async fn open_with_heartbeat_policy<S>(
+        stream: S,
+        sid: &Secret,
+        lifecycle: Session,
+        options: ConnectionOptions,
+        policy: HeartbeatPolicy,
+    ) -> Result<Self, ConnectionError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let limits = lifecycle.budget();
         if limits.max_units() == 0
             || limits.max_bytes() == 0
@@ -170,7 +201,6 @@ impl L3Connection {
             || limits.max_bytes() > Semaphore::MAX_PERMITS
             || u32::try_from(limits.max_bytes()).is_err()
             || options.heartbeat_interval.is_zero()
-            || options.heartbeat_miss_limit == 0
         {
             return Err(ConnectionError::InvalidOptions);
         }
@@ -197,6 +227,7 @@ impl L3Connection {
                 Budget::new(limits),
                 &guard.0,
                 options,
+                policy,
             )
             .await;
             if let Err(error) = result {
@@ -293,11 +324,6 @@ impl Drop for CloseOnDrop {
     }
 }
 
-#[derive(Default)]
-struct Health {
-    misses: AtomicU32,
-    read_paused: AtomicBool,
-}
 async fn run<S>(
     stream: S,
     outgoing: mpsc::Receiver<Queued<Zeroizing<Vec<u8>>>>,
@@ -305,41 +331,35 @@ async fn run<S>(
     budget: Budget,
     lifecycle: &Session,
     options: ConnectionOptions,
+    policy: HeartbeatPolicy,
 ) -> Result<(), ConnectionError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (read, write) = tokio::io::split(stream);
-    let health = Health::default();
     tokio::select! {
         biased;
         () = lifecycle.cancelled() => Ok(()),
-        result = read_loop(read, incoming, budget, &health) => result,
-        result = write_loop(write, outgoing, &health, options) => result,
+        result = read_loop(read, incoming, budget) => result,
+        result = write_loop(write, outgoing, options, policy) => result,
     }
 }
 async fn read_loop<R: AsyncRead + Unpin>(
     mut read: R,
     incoming: mpsc::Sender<Queued<L3Frame>>,
     budget: Budget,
-    health: &Health,
 ) -> Result<(), ConnectionError> {
     let mut decoder = L3Decoder::new();
     let mut bytes = [0; 4096];
     loop {
         if let Some(frame) = decoder.decode()? {
             match frame {
-                L3Frame::HeartbeatResponse { .. } => {
-                    health.misses.store(0, Ordering::Relaxed);
-                    continue;
-                }
+                L3Frame::HeartbeatResponse { .. } => continue,
                 L3Frame::AuthResponse { .. }
                 | L3Frame::DataResponse { .. }
                 | L3Frame::SecondVipResponse { .. } => {}
                 _ => return Err(ConnectionError::UnexpectedDirection),
             }
-            // 由本地消费者背压造成的暂停不能被报告为远端心跳故障。
-            health.read_paused.store(true, Ordering::Relaxed);
             let slot = budget.acquire(frame_size(&frame)?).await?;
             incoming
                 .send(Queued {
@@ -348,24 +368,39 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 })
                 .await
                 .map_err(|_| ConnectionError::Closed)?;
-            health.read_paused.store(false, Ordering::Relaxed);
             continue;
         }
         let size = read
             .read(&mut bytes)
             .await
-            .map_err(|e| ConnectionError::Io(e.kind()))?;
+            .map_err(|e| io_error("read", &e))?;
         if size == 0 {
             decoder.finish()?;
-            return Err(ConnectionError::Io(std::io::ErrorKind::UnexpectedEof));
+            return Err(ConnectionError::Io {
+                stage: "read",
+                kind: std::io::ErrorKind::UnexpectedEof,
+                raw_os_error: None,
+                detail: "stream reached EOF".into(),
+            });
         }
         decoder.feed(&bytes[..size]);
     }
 }
 async fn write_loop<W: AsyncWrite + Unpin>(
+    write: W,
+    outgoing: mpsc::Receiver<Queued<Zeroizing<Vec<u8>>>>,
+    options: ConnectionOptions,
+    policy: HeartbeatPolicy,
+) -> Result<(), ConnectionError> {
+    match policy {
+        HeartbeatPolicy::Periodic => periodic_write_loop(write, outgoing, options).await,
+        HeartbeatPolicy::IdleOnly => idle_write_loop(write, outgoing, options).await,
+    }
+}
+
+async fn periodic_write_loop<W: AsyncWrite + Unpin>(
     mut write: W,
     mut outgoing: mpsc::Receiver<Queued<Zeroizing<Vec<u8>>>>,
-    health: &Health,
     options: ConnectionOptions,
 ) -> Result<(), ConnectionError> {
     let mut ticks = tokio::time::interval_at(
@@ -377,8 +412,6 @@ async fn write_loop<W: AsyncWrite + Unpin>(
         tokio::select! {
             biased;
             _ = ticks.tick() => {
-                if health.read_paused.load(Ordering::Relaxed) { health.misses.store(0, Ordering::Relaxed); }
-                else if health.misses.fetch_add(1, Ordering::Relaxed) >= options.heartbeat_miss_limit { return Err(ConnectionError::HeartbeatTimeout); }
                 write_bytes(&mut write, &[5, 0x15, 0, 0]).await?;
             }
             item = outgoing.recv() => {
@@ -390,6 +423,32 @@ async fn write_loop<W: AsyncWrite + Unpin>(
         }
     }
 }
+
+async fn idle_write_loop<W: AsyncWrite + Unpin>(
+    mut write: W,
+    mut outgoing: mpsc::Receiver<Queued<Zeroizing<Vec<u8>>>>,
+    options: ConnectionOptions,
+) -> Result<(), ConnectionError> {
+    let idle = tokio::time::sleep(options.heartbeat_interval);
+    tokio::pin!(idle);
+    loop {
+        tokio::select! {
+            biased;
+            item = outgoing.recv() => {
+                let Some(item) = item else {return Ok(());};
+                write_bytes(&mut write, &item.value).await?;
+                // 成功 write+flush 才释放预算；同一时刻就绪的业务写推迟空闲截止。
+                drop(item);
+            }
+            () = &mut idle => {
+                write_bytes(&mut write, &[5, 0x15, 0, 0]).await?;
+            }
+        }
+        idle.as_mut()
+            .reset(tokio::time::Instant::now() + options.heartbeat_interval);
+    }
+}
+
 async fn write_bytes<W: AsyncWrite + Unpin>(
     write: &mut W,
     bytes: &[u8],
@@ -397,12 +456,18 @@ async fn write_bytes<W: AsyncWrite + Unpin>(
     write
         .write_all(bytes)
         .await
-        .map_err(|e| ConnectionError::Io(e.kind()))?;
-    write
-        .flush()
-        .await
-        .map_err(|e| ConnectionError::Io(e.kind()))
+        .map_err(|e| io_error("write", &e))?;
+    write.flush().await.map_err(|e| io_error("flush", &e))
 }
+fn io_error(stage: &'static str, error: &std::io::Error) -> ConnectionError {
+    ConnectionError::Io {
+        stage,
+        kind: error.kind(),
+        raw_os_error: error.raw_os_error(),
+        detail: super::io_detail(error),
+    }
+}
+
 fn frame_size(frame: &L3Frame) -> Result<usize, ConnectionError> {
     let size = match frame {
         L3Frame::AuthRequest { payload }

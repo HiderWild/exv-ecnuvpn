@@ -1,7 +1,7 @@
 import { computed, ref, type ComputedRef, type InjectionKey, type Ref } from "vue";
 
 export type ThemePreference = "system" | "light" | "dark";
-export type AccentPreference = "azure" | "violet" | "jade" | "amber";
+export type AccentPreference = "ecnu" | "azure" | "violet" | "jade" | "amber";
 export type MotionPreference = "normal" | "reduced";
 export type WindowModePreference = "advanced" | "minimal";
 
@@ -58,7 +58,7 @@ type AppearanceStorageGetter = () => AppearanceStorage | null | undefined;
 
 const DEFAULT_APPEARANCE: AppearanceState = {
   theme: "system",
-  accent: "azure",
+  accent: "ecnu",
   motion: "normal",
   mode: "advanced",
 };
@@ -126,7 +126,7 @@ function isThemePreference(value: unknown): value is ThemePreference {
 }
 
 function isAccentPreference(value: unknown): value is AccentPreference {
-  return value === "azure" || value === "violet" || value === "jade" || value === "amber";
+  return value === "ecnu" || value === "azure" || value === "violet" || value === "jade" || value === "amber";
 }
 
 function isMotionPreference(value: unknown): value is MotionPreference {

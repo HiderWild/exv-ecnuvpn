@@ -167,6 +167,34 @@ impl fmt::Debug for WebvpnCookie {
     }
 }
 
+/// 原登录响应发生拒绝的步骤，不表示后置查询结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginRejectionStage {
+    FormGet,
+    FormPost,
+    XmlInit,
+    XmlReply,
+}
+
+/// 原响应在既有业务分支中的拒绝原因，不推断网关内部根因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginRejectionReason {
+    HttpStatus,
+    GatewayErrorPage,
+    NoUsableCookie,
+    AuthRejected,
+    NonXmlReply,
+    CredentialsRequestedAgain,
+}
+
+/// 只保存本次原响应的必要事实；旧调用方没有上下文时保持 None。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginRejectionContext {
+    pub stage: LoginRejectionStage,
+    pub http_status: Option<u16>,
+    pub reason: LoginRejectionReason,
+}
+
 /// Typed failure of the `WebVPN` login phase (plan §2.2).
 #[derive(Debug)]
 pub enum LoginError {
@@ -195,6 +223,8 @@ pub enum LoginError {
         /// aggregate-auth XML channel's `<error>` node text / HTTP status),
         /// if the response carried one. Diagnostic only.
         detail: Option<String>,
+        /// 原响应的步骤、实际 HTTP 状态及固定原因；不混入 detail/a0。
+        context: Option<LoginRejectionContext>,
     },
     /// The gateway redirected the login to a SAML identity provider (CS-AUTH-04).
     SamlRequired,
@@ -221,7 +251,7 @@ impl LoginError {
     #[must_use]
     pub fn a0_result(&self) -> Option<&str> {
         match self {
-            LoginError::LoginRejected { detail } => detail.as_deref(),
+            LoginError::LoginRejected { detail, .. } => detail.as_deref(),
             _ => None,
         }
     }
@@ -230,7 +260,27 @@ impl LoginError {
     /// result code (`Some`) — or no detail (`None`) — as diagnostic detail.
     #[must_use]
     pub fn login_rejected_with_detail(detail: Option<String>) -> Self {
-        Self::LoginRejected { detail }
+        Self::LoginRejected {
+            detail,
+            context: None,
+        }
+    }
+
+    /// 只用于已收到的原失败响应，不补状态码、不发新请求。
+    fn rejected_response(
+        detail: Option<String>,
+        stage: LoginRejectionStage,
+        http_status: u16,
+        reason: LoginRejectionReason,
+    ) -> Self {
+        Self::LoginRejected {
+            detail,
+            context: Some(LoginRejectionContext {
+                stage,
+                http_status: Some(http_status),
+                reason,
+            }),
+        }
     }
 }
 
@@ -413,11 +463,7 @@ impl WebvpnLogin {
         .await
         {
             Ok(Some(session)) => return Ok(session),
-            Ok(None) => {
-                tracing::info!(
-                    "webvpn: aggregate-auth XML channel unavailable (UA refused / disabled); falling back to the form channel"
-                );
-            }
+            Ok(None) => {}
             Err(err) => return Err(err),
         }
         // FALLBACK: the measured form flow (the XML channel is the primary;
@@ -572,7 +618,12 @@ async fn form_channel_login(
         if !(200..=299).contains(&logon_page.status) {
             // The logon-GET rejection predates the credential POST, so no
             // `a0` result code exists to attach.
-            return Err(LoginError::login_rejected_with_detail(None));
+            return Err(LoginError::rejected_response(
+                None,
+                LoginRejectionStage::FormGet,
+                logon_page.status,
+                LoginRejectionReason::HttpStatus,
+            ));
         }
         let page_text = String::from_utf8_lossy(&logon_page.body);
 
@@ -723,25 +774,29 @@ async fn form_channel_login(
         // field). The code is NOT part of the typed contract: it is attached
         // as DIAGNOSTIC detail to the rejected-login error (the additive
         // `LoginRejected.detail` field, read back through
-        // [`LoginError::a0_result`]) and mirrored into the log line — so the
+        // [`LoginError::a0_result`]) alongside the original response context — so the
         // acceptance evidence can tell "credentials wrong" (`a0=15`) from
         // "request malformed" (`a0=8`/`114`/`115`/`16`) while the typed
         // variants keep their pinned names.
         let a0 = a0_code(&body_text);
-        let a0_diag = a0
-            .as_deref()
-            .map(|code| format!(" (a0={code})"))
-            .unwrap_or_default();
 
         // Any non-2xx status is a rejected login, even without a body marker.
         if !(200..=299).contains(&response.status) {
-            tracing::warn!("webvpn login rejected: HTTP {}{a0_diag}", response.status);
-            return Err(LoginError::login_rejected_with_detail(a0.clone()));
+            return Err(LoginError::rejected_response(
+                a0.clone(),
+                LoginRejectionStage::FormPost,
+                response.status,
+                LoginRejectionReason::HttpStatus,
+            ));
         }
         // Gateway error pages: auth.c checks both markers.
         if body_text.contains("+CSCOE+/error") || body_text.contains("login error") {
-            tracing::warn!("webvpn login rejected: gateway error page{a0_diag}");
-            return Err(LoginError::login_rejected_with_detail(a0.clone()));
+            return Err(LoginError::rejected_response(
+                a0.clone(),
+                LoginRejectionStage::FormPost,
+                response.status,
+                LoginRejectionReason::GatewayErrorPage,
+            ));
         }
         // Body variant of handle_saml_redirect() (plan §3.1, CS-AUTH-04): a
         // meta-refresh steering page to the SAML ACS is SAML detection — it is
@@ -768,8 +823,12 @@ async fn form_channel_login(
             .find_map(|(_, value)| cookie_value_named(value, "webvpn"))
             .filter(|value| !value.is_empty());
         let Some(cookie_value) = cookie_value else {
-            tracing::warn!("webvpn login rejected: no usable webvpn cookie{a0_diag}");
-            return Err(LoginError::login_rejected_with_detail(a0));
+            return Err(LoginError::rejected_response(
+                a0,
+                LoginRejectionStage::FormPost,
+                response.status,
+                LoginRejectionReason::NoUsableCookie,
+            ));
         };
 
         Ok(LoginSession {
@@ -850,13 +909,12 @@ async fn aggregate_auth_login(
         return Ok(None);
     }
     if !(200..=299).contains(&init_response.status) {
-        tracing::warn!(
-            "webvpn aggregate-auth init rejected: HTTP {}",
-            init_response.status
-        );
-        return Err(LoginError::login_rejected_with_detail(Some(
-            init_response.status.to_string(),
-        )));
+        return Err(LoginError::rejected_response(
+            Some(init_response.status.to_string()),
+            LoginRejectionStage::XmlInit,
+            init_response.status,
+            LoginRejectionReason::HttpStatus,
+        ));
     }
 
     let init_text = String::from_utf8_lossy(&init_response.body);
@@ -877,12 +935,11 @@ async fn aggregate_auth_login(
             return Ok(Some(session_from_aggregate(auth_request, &init_response)?));
         }
         AggregateAuthType::Error => {
-            tracing::warn!(
-                "webvpn aggregate-auth init rejected: {}",
-                auth_request.error_text.as_deref().unwrap_or("auth-rejected")
-            );
-            return Err(LoginError::login_rejected_with_detail(
+            return Err(LoginError::rejected_response(
                 auth_request.error_text,
+                LoginRejectionStage::XmlInit,
+                init_response.status,
+                LoginRejectionReason::AuthRejected,
             ));
         }
         AggregateAuthType::Challenge => return Err(LoginError::TwoFactorRequired),
@@ -949,13 +1006,12 @@ async fn aggregate_auth_login(
         return Err(LoginError::SamlRequired);
     }
     if !(200..=299).contains(&reply_response.status) {
-        tracing::warn!(
-            "webvpn aggregate-auth reply rejected: HTTP {}",
-            reply_response.status
-        );
-        return Err(LoginError::login_rejected_with_detail(Some(
-            reply_response.status.to_string(),
-        )));
+        return Err(LoginError::rejected_response(
+            Some(reply_response.status.to_string()),
+            LoginRejectionStage::XmlReply,
+            reply_response.status,
+            LoginRejectionReason::HttpStatus,
+        ));
     }
     let reply_text = String::from_utf8_lossy(&reply_response.body);
     if meta_refresh_steers_to_saml_acs(&reply_text) {
@@ -964,20 +1020,23 @@ async fn aggregate_auth_login(
     let Some(submitted) = parse_aggregate_auth_response(&reply_text) else {
         // The channel was open for the init but the reply is not
         // aggregate-auth XML: the submission was not accepted.
-        tracing::warn!("webvpn aggregate-auth reply was not config-auth XML");
-        return Err(LoginError::login_rejected_with_detail(None));
+        return Err(LoginError::rejected_response(
+            None,
+            LoginRejectionStage::XmlReply,
+            reply_response.status,
+            LoginRejectionReason::NonXmlReply,
+        ));
     };
     match submitted.classify() {
         AggregateAuthType::Success => {
             Ok(Some(session_from_aggregate(submitted, &reply_response)?))
         }
         AggregateAuthType::Error => {
-            tracing::warn!(
-                "webvpn aggregate-auth rejected credentials: {}",
-                submitted.error_text.as_deref().unwrap_or("auth-rejected")
-            );
-            Err(LoginError::login_rejected_with_detail(
+            Err(LoginError::rejected_response(
                 submitted.error_text,
+                LoginRejectionStage::XmlReply,
+                reply_response.status,
+                LoginRejectionReason::AuthRejected,
             ))
         }
         AggregateAuthType::Challenge => Err(LoginError::TwoFactorRequired),
@@ -987,8 +1046,12 @@ async fn aggregate_auth_login(
         // The gateway re-asked (auth-request / group-select): the one-shot
         // submission was not accepted in a single round.
         AggregateAuthType::GroupSelect | AggregateAuthType::AuthRequest => {
-            tracing::warn!("webvpn aggregate-auth re-asked for credentials after the auth-reply");
-            Err(LoginError::login_rejected_with_detail(None))
+            Err(LoginError::rejected_response(
+                None,
+                LoginRejectionStage::XmlReply,
+                reply_response.status,
+                LoginRejectionReason::CredentialsRequestedAgain,
+            ))
         }
     }
 }

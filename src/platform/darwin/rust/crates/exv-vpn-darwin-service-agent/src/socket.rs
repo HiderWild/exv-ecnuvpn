@@ -18,7 +18,7 @@ use crate::{
     ServiceAgentAction, ServiceAgentError, ServiceAgentOutcome, ServiceAgentRequestV1,
     ServiceAgentResponseV1, ExecutionIdentity, authorize_request,
     macos::{
-        ArtifactIdentity, MacosPlatform, UmaskGuard, ensure_socket_parent, peer_identity,
+        ArtifactIdentity, MacosPlatform, SocketStartupError, UmaskGuard, ensure_socket_parent, peer_identity,
         remove_safe_stale_socket, remove_socket_if_identity, seal_bound_socket,
         verify_root_socket_server,
     },
@@ -35,10 +35,10 @@ const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// # Errors
 ///
-/// daemon 不是 root、socket parent/bind/seal 失败或 listener 无法继续接受连接时返回稳定
-/// [`PlatformError`]。单个 client 的 peer/frame/EOF/timeout/cleanup 失败只关闭该连接，
+/// daemon 不是 root、parent/seal 或 listener 失败保留原平台类别，connect/bind 保留原 IO。
+/// 单个 client 的 peer/frame/EOF/timeout/cleanup 失败只关闭该连接，
 /// 不停止 listener。
-pub fn serve_forever(owner: EnrolledOwner) -> Result<(), PlatformError> {
+pub fn serve_forever(owner: EnrolledOwner) -> Result<(), SocketStartupError> {
     MacosPlatform::require_root_process()?;
     let socket = BoundSocket::bind(owner)?;
     let mut platform = MacosPlatform::for_serve();
@@ -109,8 +109,8 @@ where
     }
 
     match request.action() {
-        ServiceAgentAction::Status => {
-            Ok(ServiceAgentResponseV1::accepted(ServiceAgentAction::Status))
+        ServiceAgentAction::Status | ServiceAgentAction::EnsureEngineDetailCapability => {
+            Ok(ServiceAgentResponseV1::accepted(request.action()))
         }
         ServiceAgentAction::Cleanup => {
             let identity = ExecutionIdentity::from_verified_os_identity(0, peer.uid());
@@ -131,22 +131,51 @@ where
                 ServiceAgentError::DaemonActionRejected,
             ))
         }
-        // W2.5：幂等确保 service engine job 已 bootstrap（产出受 launchd 监护的
-        // engine，不做裸 spawn）——修复分层中 daemon 在场时的免提权拉起通道。
+        // 原固定启动命令成功后才回帧；这不是Engine端点或认证已完成。
+        // 已注册对象kickstart不重启，首次缺席才bootstrap。
+        // 变长动作只由wire入口持有原失败，固定帧入口拒绝错误路由且不执行动作。
+        ServiceAgentAction::EnsureEngineDetailed => Err(PlatformError::SocketProtocolFailed),
         ServiceAgentAction::EnsureEngine => {
             let identity = ExecutionIdentity::from_verified_os_identity(0, peer.uid());
             authorize_request(request, identity).map_err(|_| PlatformError::SocketPeerRejected)?;
             match platform.control_engine_job(crate::platform::EngineJobAction::EnsureBootstrap) {
                 Ok(()) => Ok(ServiceAgentResponseV1::accepted(
-                    ServiceAgentAction::EnsureEngine,
+                    request.action(),
                 )),
-                Err(_) => Ok(ServiceAgentResponseV1::rejected(
-                    ServiceAgentAction::EnsureEngine,
-                    ServiceAgentError::EnsureEngineFailed,
-                )),
+                Err(error) => {
+                    // V1兼容帧仍携稳定类别；原命令exit/signal/errno保留在本次动作日志。
+                    eprintln!("EnsureEngine original operation failed: {error}");
+                    Ok(ServiceAgentResponseV1::rejected(
+                        request.action(),
+                        ServiceAgentError::EnsureEngineFailed,
+                    ))
+                }
             }
         }
     }
+}
+
+/// 旧动作保持精确16B；只有显式action8附加本次详情。
+fn handle_daemon_wire_request<P: PrivilegedPlatform>(
+    platform: &mut P, request: ServiceAgentRequestV1, peer: EnrolledOwner, enrolled_owner: EnrolledOwner,
+) -> Result<Vec<u8>, PlatformError> {
+    if request.action() != ServiceAgentAction::EnsureEngineDetailed {
+        return handle_daemon_request(platform, request, peer, enrolled_owner).map(|response| response.encode().to_vec());
+    }
+    if peer.uid() != enrolled_owner.uid() || request.owner_uid() != peer.uid() {
+        return Err(PlatformError::SocketPeerRejected);
+    }
+    authorize_request(request, ExecutionIdentity::from_verified_os_identity(0, peer.uid()))
+        .map_err(|_| PlatformError::SocketPeerRejected)?;
+    let result = platform.control_engine_job_detailed(crate::platform::EngineJobAction::EnsureBootstrap);
+    let (header, detail) = match result {
+        Ok(()) => (ServiceAgentResponseV1::accepted(request.action()), Vec::new()),
+        Err(failure) => (ServiceAgentResponseV1::rejected(request.action(), ServiceAgentError::EnsureEngineFailed), failure.encode_detail()),
+    };
+    let mut bytes = header.encode().to_vec();
+    bytes.extend_from_slice(&(detail.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&detail);
+    Ok(bytes)
 }
 
 struct BoundSocket {
@@ -156,13 +185,13 @@ struct BoundSocket {
 }
 
 impl BoundSocket {
-    fn bind(owner: EnrolledOwner) -> Result<Self, PlatformError> {
+    fn bind(owner: EnrolledOwner) -> Result<Self, SocketStartupError> {
         ensure_socket_parent()?;
         remove_safe_stale_socket(owner)?;
         let listener = {
             let umask = UmaskGuard::restrictive();
             let listener = UnixListener::bind(crate::platform::SERVICE_AGENT_SOCKET_PATH)
-                .map_err(|_| PlatformError::SocketSetupFailed)?;
+                .map_err(|source| SocketStartupError::Io { step: "bind", source })?;
             drop(umask);
             listener
         };
@@ -200,7 +229,7 @@ where
     let request = ServiceAgentRequestV1::decode(&request_bytes)
         .map_err(|_| PlatformError::SocketProtocolFailed)?;
     require_eof(&mut stream)?;
-    let response = handle_daemon_request(platform, request, peer, enrolled_owner)?.encode();
+    let response = handle_daemon_wire_request(platform, request, peer, enrolled_owner)?;
     stream
         .write_all(&response)
         .and_then(|()| stream.shutdown(Shutdown::Write))

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import PasswordField from "./PasswordField.vue";
+import { useDialogFocus } from "./use-dialog-focus";
+import CredentialFields from "./CredentialFields.vue";
+import { pushToast } from "../lib/toast";
 import { credentialConfigFor } from "../product/core-config";
-import { handleCoreWakeFailure } from "../product/core-crash";
+import { handleCoreWakeFailure, isCoreUnreachable } from "../product/core-crash";
 import { computed, inject, ref, watch } from "vue";
 
 import RoutesEditor from "./RoutesEditor.vue";
@@ -11,36 +13,37 @@ import {
   type QuickStartApplyReply,
   type QuickStartApplyRequest,
 } from "../lib/ipc";
-import { APPEARANCE_KEY } from "../product/appearance";
+import { commandErrorMessage } from "../lib/command-error";
+import { APPEARANCE_KEY, type AppearanceState } from "../product/appearance";
 import {
   CORE_CONFIG_GATEWAY_KEY,
   PROTOCOL_OPTIONS,
   createCoreConfigGateway,
   defaultServerFor,
   protocolFromConfig,
+  type CoreConfigItem,
 } from "../product/core-config";
 import { PRODUCT_RUNTIME_KEY } from "../product/runtime";
 import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../product/service-operations";
 import {
   createQuickStartDraft,
   quickStartItems,
-  quickStartCredentialsMatch,
   validateQuickStartDraft,
   type QuickStartDraft,
 } from "../product/quick-start";
 import {
   editUiPreference,
   uiPrefsDraft,
-  uiPrefErrors,
   updateUiPreferences,
   type ClosePreference,
 } from "../product/ui-prefs";
 
 const props = withDefaults(defineProps<{
   open: boolean;
+  initialItems?: ReadonlyArray<CoreConfigItem>;
   /** 默认接真实 Tauri command；测试可注入确定性实现。 */
   apply?: (request: QuickStartApplyRequest) => Promise<QuickStartApplyReply>;
-  /** 应用根层在核心配置落盘后刷新运行时投影；resolve 前本对话框保持打开。 */
+  /** 独立刷新主界面；读取失败不改变已完成的保存或安装结果。 */
   afterCoreSaved?: () => Promise<void>;
 }>(), {
   apply: (request: QuickStartApplyRequest) => kernel.quickStartApply(request),
@@ -52,6 +55,7 @@ const emit = defineEmits<{
 }>();
 
 const appearance = inject(APPEARANCE_KEY, null);
+const compact = computed(() => appearance?.state.value.mode === "minimal");
 const chrome = inject(WINDOW_CHROME_PORT_KEY, null);
 const configGateway = inject(CORE_CONFIG_GATEWAY_KEY, null) ?? createCoreConfigGateway();
 const runtime = inject(PRODUCT_RUNTIME_KEY, null);
@@ -61,15 +65,43 @@ const serviceOperations = inject(
 );
 const advanced = ref(false);
 const submitting = ref(false);
+function requestSkip(): void {
+  if (!submitting.value && !appearance?.saving.value) {
+    draft.value.password = "";
+    emit("skip");
+  }
+}
+const { dialog, onDialogKeydown } = useDialogFocus(() => props.open, requestSkip);
 const submittedInstallService = ref(false);
-// 配置及安全回读已确认后，仅重试展示刷新，不再次发送密码或 ConfigSet。
-const savedAwaitingRefresh = ref(false);
+// 本次打开周期只完成一次；独立显示读取不重新提交保存或安装。
+const setupCompleted = ref(false);
 // 核心配置（含秘密）已经保存后，服务安装失败只重试本阶段，绝不重放配置提交。
 const savedAwaitingService = ref(false);
-const formFrozen = computed(() => savedAwaitingService.value || savedAwaitingRefresh.value);
+const formFrozen = computed(() => savedAwaitingService.value || setupCompleted.value);
 const submitError = ref<string | null>(null);
+// T4（F8）：偏好/外观收尾腿的非阻断提示条——失败不换按钮相位、不阻断完成，
+// 文案语义为「将在下次启动重试」；与 submitError（阻断行）分开展示。
+const preferenceNotice = ref<string | null>(null);
+// 首次提交的草稿/外观快照，供安装腿成功后的偏好收尾腿（含安装失败重试路径）使用。
+const pendingPreferences = ref<{ draft: QuickStartDraft; appearance: AppearanceState | undefined } | null>(null);
 const fieldErrors = ref<Partial<Record<"username" | "password" | "server", string>>>({});
 const draft = ref<QuickStartDraft>(createQuickStartDraft([]));
+const savedCredential = ref({ username: "", stored: false });
+const clearedPassword = ref(false);
+const usesCredentials = computed(() => draft.value.protocol === "cisco" || draft.value.atrust_auth_mode === "headless");
+const canKeepPassword = computed(() => savedCredential.value.stored && !clearedPassword.value
+  && draft.value.username.trim() === savedCredential.value.username.trim());
+const authDescription = computed(() => draft.value.atrust_auth_mode === "headless"
+  ? "账户与密码保存到本机，用于后续自动登录。"
+  : draft.value.atrust_auth_mode === "embedded"
+    ? "在 EXV 内嵌浏览器中完成学校统一认证。"
+    : "使用系统默认浏览器完成学校统一认证。连接时将检查 aTrust 服务；需要停用时会提示您，停用持续到您在设置中主动恢复。");
+function clearPasswordDraft(): void {
+  draft.value.password = "";
+  clearedPassword.value = true;
+  fieldErrors.value.password = undefined;
+}
+
 
 const routes = computed(() => draft.value.routes.split(",").map((item) => item.trim()).filter(Boolean));
 const routesSummary = computed(() => `${routes.value.length} 条路由`);
@@ -80,7 +112,6 @@ const selectedTheme = computed({
 });
 const submitLabel = computed(() => {
   if (savedAwaitingService.value) return submitting.value ? "正在安装服务…" : "重试安装服务";
-  if (savedAwaitingRefresh.value) return submitting.value ? "正在刷新…" : "重试刷新";
   if (!submitting.value) return "完成设置";
   return submittedInstallService.value ? "正在保存配置并安装服务…" : "正在保存配置…";
 });
@@ -89,16 +120,26 @@ const submitLabel = computed(() => {
 watch(
   () => props.open,
   (open, wasOpen) => {
-    if (!open || wasOpen) return;
+    if (!open) { draft.value.password = ""; return; }
+    if (wasOpen) return;
     advanced.value = false;
     submitting.value = false;
     submittedInstallService.value = false;
-    savedAwaitingRefresh.value = false;
+    setupCompleted.value = false;
     savedAwaitingService.value = false;
     submitError.value = null;
+    preferenceNotice.value = null;
+    pendingPreferences.value = null;
     fieldErrors.value = {};
+    clearedPassword.value = false;
+    const initial = props.initialItems ?? [];
+    savedCredential.value = {
+      username: initial.find(item => item.key === "username")?.value ?? "",
+      stored: initial.some(item => item.key === "has_saved_credential_pair" && item.value === "true")
+        && initial.some(item => item.key === "remember_password" && item.value === "true"),
+    };
     draft.value = {
-      ...createQuickStartDraft([]),
+      ...createQuickStartDraft(props.initialItems ?? []),
       // 「安装服务」是本次快速入门的清单项，作用域只到提交那一刻；不是持久化设置项，
       // 与连接页「安装服务后连接」的纯前端偏好无关（各自独立，不共享键）。
       launch_at_login: String(uiPrefsDraft.value.launch_at_login),
@@ -144,21 +185,48 @@ function saveAdvancedUiPreferences(pending: QuickStartDraft): Promise<boolean> {
   return updateUiPreferences(["launch_at_login", "auto_connect_on_launch", "minimize_to_tray_on_connect", "close_preference"]);
 }
 
-async function refreshSavedConfiguration(): Promise<void> {
-  submitting.value = true;
-  submitError.value = null;
+function finishSavedSetup(): void {
+  if (setupCompleted.value) return;
+  setupCompleted.value = true;
+  const displayRefresh = Promise.resolve().then(() => props.afterCoreSaved
+    ? props.afterCoreSaved()
+    : runtime?.configurationChanged({ strict: true }));
+  emit("complete");
+  void displayRefresh.catch((error: unknown) => {
+    const diagnostic = typeof error === "object" && error !== null
+      ? error as { kind?: unknown; code?: unknown }
+      : {};
+    const code = [diagnostic.kind, diagnostic.code]
+      .filter((value) => typeof value === "string" || typeof value === "number")
+      .join(" / ");
+    pushToast("配置已保存，主界面信息暂未更新" + (code ? `（${code}）` : ""), "warning");
+  });
+}
+
+/**
+ * ④ 偏好/外观收尾腿（T4/F8：改到安装腿之后执行）：失败只置非阻断提示条——
+ * 不换按钮相位、不阻断刷新与完成；两项保存器各自内部吞错返回布尔，这里的
+ * catch 只是兜底保险，保证本腿任何异常都不改变主链路。
+ */
+async function finishPreferenceTail(): Promise<void> {
+  const pending = pendingPreferences.value;
+  if (!pending) return;
+  const failed: string[] = [];
   try {
-    if (props.afterCoreSaved) {
-      await props.afterCoreSaved();
-    } else {
-      await runtime?.configurationChanged({ strict: true });
+    if (!(await saveAdvancedUiPreferences(pending.draft))) failed.push("界面偏好");
+    if (appearance?.motionDirty.value && !(await appearance.saveDraft(
+      chrome ? (mode) => chrome.setMode(mode) : undefined,
+      pending.appearance,
+    ))) {
+      failed.push("外观动效");
     }
-    emit("complete");
   } catch {
-    submitError.value = "配置已保存，但主界面刷新失败；请重试刷新。";
-  } finally {
-    submitting.value = false;
+    failed.push("界面偏好/外观动效");
   }
+  if (failed.length > 0) {
+    preferenceNotice.value = `${failed.join("、")}保存失败，将在下次启动重试。`;
+  }
+  pendingPreferences.value = null;
 }
 
 async function installSavedService(): Promise<void> {
@@ -168,33 +236,38 @@ async function installSavedService(): Promise<void> {
   }
   submitting.value = true;
   submitError.value = null;
+  let installed = false;
   try {
     const reply = await serviceOperations.run("install");
     if (!reply.ok) {
       submitError.value = reply.message || "配置已保存，但安装服务失败，请重试安装。";
       return;
     }
-    savedAwaitingService.value = false;
-    savedAwaitingRefresh.value = true;
-    await refreshSavedConfiguration();
-  } catch {
-    submitError.value = "配置已保存，但安装服务失败，请重试安装。";
+    installed = true;
+  } catch (error) {
+    // T4（F8 后半）：kind 透传——安装腿异常按 AppError kind 经 command-error
+    // 词表归一为可行动文案，不再吞成与原因无关的固定文案（恢复入口 R5 另行裁定）。
+    submitError.value = "配置已保存，但安装服务失败：" + commandErrorMessage(error, "请重试安装。");
+  } finally {
+    if (!installed) submitting.value = false;
+  }
+  if (!installed) return;
+  savedAwaitingService.value = false;
+  try {
+    await finishPreferenceTail();
+    finishSavedSetup();
   } finally {
     submitting.value = false;
   }
 }
 
 async function submit(): Promise<void> {
-  if (submitting.value || appearance?.saving.value) return;
+  if (setupCompleted.value || submitting.value || appearance?.saving.value) return;
   if (savedAwaitingService.value) {
     await installSavedService();
     return;
   }
-  if (savedAwaitingRefresh.value) {
-    await refreshSavedConfiguration();
-    return;
-  }
-  const errors = validateQuickStartDraft(draft.value);
+  const errors = validateQuickStartDraft(draft.value, { ...savedCredential.value, stored: canKeepPassword.value });
   fieldErrors.value = errors;
   submitError.value = null;
   if (Object.keys(errors).length > 0) return;
@@ -209,48 +282,40 @@ async function submit(): Promise<void> {
   submittedInstallService.value = pending.install_service === "true";
   submitting.value = true;
   try {
+    // ① ConfigSet：服务操作由应用级协调器独立执行，后端组合安装腿已删除（T4）。
     credentialConfigFor(configGateway).markSaved();
     const reply = await credentialConfigFor(configGateway).write(() => props.apply({
       items: quickStartItems(pending),
-      // 服务操作由应用级协调器独立执行，避免后端组合命令绕开唯一 busy/overlay。
-      install_service: false,
     }));
     if (!reply.ok) {
       submitError.value = reply.message ?? "快速入门提交失败，请检查设置后重试。";
       return;
     }
-    if (!(await saveAdvancedUiPreferences(pending))) {
-      submitError.value = "核心配置已保存，但前端偏好保存失败：" + Object.values(uiPrefErrors.value).filter(Boolean).join(" ") + "；草稿已保留，请重试。";
-      return;
-    }
-    if (appearance?.motionDirty.value && !(await appearance.saveDraft(chrome ? (mode) => chrome.setMode(mode) : undefined, pendingAppearance))) {
-      submitError.value = "核心配置已保存；" + (appearance.saveError.value ?? "外观保存失败，请重试。");
-      return;
-    }
-    // 只用安全回读验证身份与记住标记；密码不写入错误或运行时投影。
-    try {
-      const items = await configGateway.configGet();
-      credentialConfigFor(configGateway).apply(items);
-      if (!quickStartCredentialsMatch(pending.username, String(pending.password.length > 0), items)) {
-        submitError.value = "配置保存后的账户或记住密码状态未确认，请重试。";
-        return;
-      }
-    } catch {
-      submitError.value = "配置保存后回读失败，请重试。";
-      return;
-    }
+    // ③ 勾选安装则立即进入服务安装相位；④ 偏好/外观改到安装腿之后执行
+    // （T4/F8：偏好失败不再阻断安装腿，只置非阻断提示条）。
+    draft.value.password = "";
+    pending.password = "";
+    pendingPreferences.value = { draft: pending, appearance: pendingAppearance };
     if (submittedInstallService.value) {
       savedAwaitingService.value = true;
       await installSavedService();
     } else {
-      savedAwaitingRefresh.value = true;
-      await refreshSavedConfiguration();
+      await finishPreferenceTail();
+      finishSavedSetup();
     }
   } catch (error) {
     // T9（§2.9）：快速入门提交前唤醒 core 失败 → 全局「尝试重启程序 / 仅退出」模态。
     // 唤醒失败错误由壳层生成（不含凭据），可安全展示；其余异常保持与原因无关的
     // 固定文案（见 `QuickStartCredentials.test.ts` 的 `错误不携带凭据` 用例）。
     if (handleCoreWakeFailure(error)) return;
+    // A1-2（2026-10-09 区域 A）：壳层 ConfigSet 重试环（A1-1）耗尽后仍 core 不可达
+    // → 分流为「后台服务未就绪」的可重试文案（固定文案、不含凭据）。与
+    // `command-error.ts` 的全局 core_unreachable 映射并存：全局版服务 toast 路径，
+    // 对话框版更具体地指向「稍候重试」动作，两者各自固定、不互相改写。
+    if (isCoreUnreachable(error)) {
+      submitError.value = "配置保存失败：后台服务未就绪，请稍候重试；若反复失败请重启程序。";
+      return;
+    }
     submitError.value = "快速入门提交失败，请重试。";
   } finally {
     submitting.value = false;
@@ -261,14 +326,19 @@ async function submit(): Promise<void> {
 <template>
   <div
     v-if="open"
-    class="quick-start-overlay"
+    class="quick-start-overlay exv-dialog"
+    :data-compact="compact ? 'true' : 'false'"
     data-testid="quick-start-dialog"
     role="dialog"
     aria-modal="true"
     aria-labelledby="quick-start-title"
+    ref="dialog"
+    tabindex="-1"
+    :aria-busy="submitting"
+    @keydown="onDialogKeydown"
   >
     <section
-      class="quick-start-card"
+      class="quick-start-card exv-dialog-card"
       :class="{ 'quick-start-card--advanced': advanced }"
       data-testid="quick-start-dialog-card"
     >
@@ -300,26 +370,18 @@ async function submit(): Promise<void> {
         </div>
       </header>
 
+      <div class="quick-start-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '快速入门设置与提示' : undefined">
       <section v-if="!advanced" :inert="formFrozen" class="quick-start-fields" data-testid="quick-start-basic-fields">
-        <label>
-          登录账户
-          <input
-            :value="draft.username"
-            data-testid="quick-start-username"
-            autocomplete="username"
-            @input="updateText('username', $event)"
-          >
-          <span v-if="fieldErrors.username" class="field-error">{{ fieldErrors.username }}</span>
+        <label v-if="draft.protocol === 'atrust'">
+          认证通道
+          <select v-model="draft.atrust_auth_mode" data-testid="quick-start-atrust-auth-mode" @change="fieldErrors = {}">
+            <option value="browser">系统默认浏览器</option>
+            <option value="embedded">内嵌浏览器</option>
+            <option value="headless">自动登录</option>
+          </select>
         </label>
-        <label>
-          密码
-          <PasswordField
-            :model-value="draft.password"
-            data-testid="quick-start-password"
-            @update:model-value="draft.password = $event; fieldErrors.password = undefined"
-          />
-          <span v-if="fieldErrors.password" class="field-error">{{ fieldErrors.password }}</span>
-        </label>
+        <p v-if="draft.protocol === 'atrust'" class="protocol-note" data-testid="quick-start-atrust-note">{{ authDescription }}</p>
+        <CredentialFields v-if="usesCredentials" v-model:username="draft.username" v-model:password="draft.password" test-id-prefix="quick-start" :has-saved-password="canKeepPassword" :busy="submitting || formFrozen" :compact="compact" :show-clear="draft.protocol === 'atrust'" :username-error="fieldErrors.username" :password-error="fieldErrors.password" @update:username="fieldErrors.username = undefined" @update:password="fieldErrors.password = undefined" @clear-password="clearPasswordDraft" />
         <label class="check-row">
           <input
             :checked="draft.install_service === 'true'"
@@ -349,16 +411,14 @@ async function submit(): Promise<void> {
         data-testid="quick-start-advanced-fields"
       >
         <div class="quick-start-advanced-column" data-testid="quick-start-advanced-column">
-          <label>
-            登录账户
-            <input :value="draft.username" data-testid="quick-start-username" autocomplete="username" @input="updateText('username', $event)">
-            <span v-if="fieldErrors.username" class="field-error">{{ fieldErrors.username }}</span>
+          <label v-if="draft.protocol === 'atrust'">
+            认证通道
+            <select v-model="draft.atrust_auth_mode" data-testid="quick-start-atrust-auth-mode" @change="fieldErrors = {}">
+              <option value="browser">系统默认浏览器</option><option value="embedded">内嵌浏览器</option><option value="headless">自动登录</option>
+            </select>
           </label>
-          <label>
-            密码
-            <PasswordField :model-value="draft.password" data-testid="quick-start-password" @update:model-value="draft.password = $event; fieldErrors.password = undefined" />
-            <span v-if="fieldErrors.password" class="field-error">{{ fieldErrors.password }}</span>
-          </label>
+          <p v-if="draft.protocol === 'atrust'" class="protocol-note" data-testid="quick-start-atrust-note">{{ authDescription }}</p>
+          <CredentialFields v-if="usesCredentials" v-model:username="draft.username" v-model:password="draft.password" test-id-prefix="quick-start" :has-saved-password="canKeepPassword" :busy="submitting || formFrozen" :compact="compact" :show-clear="draft.protocol === 'atrust'" :username-error="fieldErrors.username" :password-error="fieldErrors.password" @update:username="fieldErrors.username = undefined" @update:password="fieldErrors.password = undefined" @clear-password="clearPasswordDraft" />
           <label class="check-row"><input :checked="draft.install_service === 'true'" data-testid="quick-start-install-service" type="checkbox" @change="updateBoolean('install_service', $event)">安装服务</label>
           <label>
             主题
@@ -370,13 +430,6 @@ async function submit(): Promise<void> {
             VPN 协议
             <select :value="draft.protocol" data-testid="quick-start-protocol" @change="onProtocolChange($event)">
               <option v-for="option in PROTOCOL_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
-          </label>
-          <label v-if="draft.protocol === 'atrust'">
-            aTrust 认证方式
-            <select v-model="draft.atrust_auth_mode" data-testid="quick-start-atrust-auth-mode">
-              <option value="browser">浏览器</option>
-              <option value="embedded">网页内嵌</option>
             </select>
           </label>
           <label>
@@ -400,13 +453,15 @@ async function submit(): Promise<void> {
         <div class="quick-start-advanced-column quick-start-route-column" data-testid="quick-start-advanced-column">
           <h3 data-testid="quick-start-route-column">路由设置</h3>
           <p>经过 VPN 的目标网段；支持 CIDR 或单个 IP。</p>
-          <RoutesEditor :routes="routes" @change="onRoutesChange" />
+          <RoutesEditor :routes="routes" :compact="compact" @change="onRoutesChange" />
         </div>
       </section>
 
       <p v-if="submitError" class="submit-error" data-testid="quick-start-submit-error">{{ submitError }}</p>
+      <p v-if="preferenceNotice" class="preference-notice" data-testid="quick-start-preference-notice">{{ preferenceNotice }}</p>
+      </div>
       <footer class="quick-start-actions">
-        <button type="button" data-testid="quick-start-skip" :disabled="submitting" @click="emit('skip')">暂时跳过</button>
+        <button type="button" data-testid="quick-start-skip" :disabled="submitting" @click="requestSkip">暂时跳过</button>
         <button type="button" class="quick-start-submit" data-testid="quick-start-submit" :disabled="submitting" @click="submit">
           {{ submitLabel }}
         </button>
@@ -417,12 +472,13 @@ async function submit(): Promise<void> {
 
 <style scoped>
 .quick-start-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: max(var(--space-4), env(safe-area-inset-top)) max(var(--space-4), env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom)) max(var(--space-4), env(safe-area-inset-left)); background: rgb(0 0 0 / 0.5); }
-.quick-start-card { box-sizing: border-box; width: min(100%, 620px); overflow: hidden; padding: var(--space-6); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 16px 48px rgb(0 0 0 / 0.32); transition: width 180ms ease; }
+.quick-start-card { max-height: calc(100dvh - 32px); display: flex; flex-direction: column; box-sizing: border-box; width: min(100%, 620px); overflow: hidden; padding: var(--space-6); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 16px 48px rgb(0 0 0 / 0.32); transition: width 180ms ease; }
 .quick-start-card--advanced { width: min(100%, 1180px); height: min(88dvh, 720px); display: flex; flex-direction: column; }
+.quick-start-body { min-height: 0; overflow-y: auto; }
 .quick-start-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-4); }
-.quick-start-card h2 { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 24px; }
+.quick-start-card h2 { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: var(--font-size-heading); }
 .quick-start-mode-control { display: inline-flex; flex: none; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border-subtle); border-radius: 8px; background: color-mix(in srgb, var(--surface-canvas) 84%, transparent); }
-.quick-start-mode-control__button { display: inline-flex; min-height: 28px; min-width: 48px; align-items: center; justify-content: center; padding: 0 var(--space-2); border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; line-height: 1; cursor: pointer; transition: background-color 120ms ease, color 120ms ease; }
+.quick-start-mode-control__button { display: inline-flex; min-height: 28px; min-width: 48px; align-items: center; justify-content: center; padding: 0 var(--space-2); border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: var(--font-size-body); line-height: 1; cursor: pointer; transition: background-color 120ms ease, color 120ms ease; }
 .quick-start-mode-control__button:hover:not(:disabled) { color: var(--text-primary); }
 .quick-start-mode-control__button--active { background: var(--accent-subtle); color: var(--accent-strong); }
 .quick-start-mode-control__button:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -2px; }
@@ -431,17 +487,20 @@ async function submit(): Promise<void> {
 .quick-start-advanced--three-columns { grid-template-columns: minmax(0, 1fr) minmax(0, .85fr) minmax(0, 1.15fr); column-gap: var(--space-5); flex: 1 1 auto; min-height: 0; }
 .quick-start-advanced-column { display: grid; align-content: start; min-width: 0; gap: var(--space-3); }
 .quick-start-route-column { min-height: 0; display: flex; flex-direction: column; }
-.quick-start-route-column h3 { margin: 0; font-size: 16px; }
-.quick-start-route-column > p { margin: calc(var(--space-1) * -1) 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
+.quick-start-route-column h3 { margin: 0; font-size: var(--font-size-heading); }
+.quick-start-route-column > p { margin: calc(var(--space-1) * -1) 0 0; color: var(--text-secondary); font-size: var(--font-size-caption); line-height: 1.4; }
 .quick-start-route-column :deep(.routes-editor) { flex: 1 1 auto; min-height: 0; }
 .quick-start-route-column :deep(.routes-list) { max-height: none; }
-label { display: grid; gap: var(--space-1); font-size: 13px; }
+label { display: grid; gap: var(--space-1); font-size: var(--font-size-body); }
 input, select { min-height: 36px; padding: 0 var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-subtle); color: var(--text-primary); }
 .check-row { display: flex; align-items: center; gap: var(--space-2); }
 .check-row input { min-height: auto; }
 .routes-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
-.field-error, .submit-error { color: var(--state-danger); font-size: 12px; }
+.protocol-note { margin: 0; color: var(--text-secondary); font-size: var(--font-size-caption); line-height: 1.5; }
+.field-error, .submit-error { color: var(--state-danger); font-size: var(--font-size-caption); }
 .submit-error { margin: var(--space-4) 0 0; }
+/* T4：偏好/外观收尾失败的非阻断提示条（warning 色，区别于 submit-error 的阻断红）。 */
+.preference-notice { margin: var(--space-3) 0 0; color: var(--state-warning); font-size: var(--font-size-caption); }
 .quick-start-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-5); }
 .quick-start-submit { border-color: var(--accent); background: var(--accent); color: var(--accent-on); font-weight: 600; }
 button:disabled { cursor: not-allowed; opacity: .65; }

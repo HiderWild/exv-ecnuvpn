@@ -66,7 +66,15 @@ windows = { version = "0.62.2", features = [
 # 相对路径：tauri/ → rust(..) → win32(../..) → platform(../../..) → src(../../../..) →
 # 仓库根(../../../../..) → src/common/rust/crates/exv-vpn-wire。
 exv-vpn-wire = { path = "../../../../../src/common/rust/crates/exv-vpn-wire" }
+# C4 原生系统浏览器认证：共享本地 Agent 服务端（AgentServer/TicketConsumer/
+# AutoLoginTrigger；零平台 IO，证书文件是唯一平台输入）。Root workspace 成员，
+# 跨 workspace path 依赖解析规则同 exv-vpn-wire。
+exv-vpn-atrust = { path = "../../../../../src/common/rust/crates/exv-vpn-atrust" }
 exv-vpn-win32-resource = { path = "../../../../../src/platform/win32/rust/crates/exv-vpn-win32-resource" }
 exv-vpn-win32-config = { path = "../crates/exv-vpn-win32-config" }
+# Win32 平台库：证书生成/信任（CurrentUser Root）、官方客户端探测与真实网关票据
+# 消费者——C1 收编 agent-sim 服务端语义后，生产服务端在 exv-vpn-atrust，
+# 本 crate 只余平台面与消费链（`AgentSim` 服务端降级为纯测试/研究工具）。
+exv-vpn-win32-agent-sim = { path = "../crates/exv-vpn-win32-agent-sim" }
 exv-core = { path = "../crates/exv-vpn-win32-host" }
 zeroize = "1.9.0"

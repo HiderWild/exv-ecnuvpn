@@ -1,6 +1,6 @@
 [package]
 name = "exv-vpn-darwin-engine"
-version = "4.1.1"
+version = "4.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,6 +14,9 @@ exv-vpn-darwin-ipc = { path = "../exv-vpn-darwin-ipc" }
 # WebVPN 登录、TLS bootstrap 与 CSTP session 直接复用 Common；Darwin 只补宿主网络实现。
 exv-vpn-cstp = { path = "../../../../../common/rust/crates/exv-vpn-cstp" }
 exv-vpn-wire = { path = "../../../../../common/rust/crates/exv-vpn-wire" }
+# M2（darwin aTrust）：Underlay trait、认证编排（browser_handoff）与 BrowserSession
+# 消费 Common aTrust 协议库（Common←平台方向，win32-engine 同款）。
+exv-vpn-atrust = { path = "../../../../../common/rust/crates/exv-vpn-atrust" }
 async-trait = "0.1"
 libc = "0.2"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
@@ -24,6 +27,16 @@ getrandom = "0.4"
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+
+# M3（darwin aTrust）数据面：节点 TLS（三重作用域证书，设计 §6.2）与每流身份
+# 事实（设计 §6.3）。版本与 win32-engine/Common 同源；rustls/tokio-rustls 自
+# M2 的 dev-deps 升为生产依赖（节点 TLS 是生产路径），features 同集。
+rustls = { version = "0.23.43", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-platform-verifier = "0.7.0"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "tls12", "ring"] }
+sha2 = "0.11.0"
+# device_id/connection_id 格式与 win32 逐字对齐（UUIDv4 simple + 大写-微秒）。
+uuid = { version = "1.24.0", features = ["v4"] }
 
 [[bin]]
 name = "exv-vpn-darwin-engine"

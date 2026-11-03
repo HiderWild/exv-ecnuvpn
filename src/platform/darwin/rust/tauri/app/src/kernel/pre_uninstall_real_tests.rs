@@ -48,7 +48,7 @@ fn real_enabled() -> bool {
 
 #[test]
 #[ignore = "真机非提权段清理：需 EXV_PRE_UNINSTALL_REAL=1 显式开启"]
-fn pre_uninstall_non_privileged_segment_removes_only_exv_artifacts() {
+fn pre_uninstall_cancelled_system_segment_preserves_user_artifacts() {
     if !real_enabled() {
         return;
     }
@@ -71,6 +71,9 @@ fn pre_uninstall_non_privileged_segment_removes_only_exv_artifacts() {
         pre_uninstall::ConnectionOutcome::Idle,
         &launcher,
     );
+
+    assert!(reply.aborted, "系统段未执行时完整卸载中止");
+    assert!(reply.elevation_skipped);
 
     println!("---- 逐项结果 ----");
     for item in &reply.items {

@@ -23,5 +23,5 @@ function useSystemBrowserFallback(): void { void interaction?.useSystemBrowserFa
 .browser-fallback { display:flex; align-items:center; gap:var(--space-2); }
 .browser-fallback__button { border:1px solid var(--border-subtle); border-radius:var(--radius-sm); padding:7px 12px; background:var(--surface-panel); color:var(--text-primary); font:inherit; cursor:pointer; }
 .browser-fallback__button:disabled { opacity:.6; cursor:wait; }
-.browser-fallback p { margin:0; color:var(--state-danger); font-size:13px; }
+.browser-fallback p { margin:0; color:var(--state-danger); font-size: var(--font-size-caption); }
 </style>

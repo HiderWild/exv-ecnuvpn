@@ -5,6 +5,7 @@
 //! 不含任何产品行为。实际实现由各叶 worker 在对应模块中填充。
 
 pub mod connection_binding;
+pub mod auth_deadline;
 pub mod browser_session;
 pub mod engine_protocol;
 pub mod grpc_planes;

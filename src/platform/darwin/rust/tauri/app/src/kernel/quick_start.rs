@@ -1,13 +1,12 @@
-//! 快速入门的最小后端编排（win32 `kernel/quick_start.rs` 的 darwin 移植）。
+//! 快速入门的最小配置入口：校验草稿后沿既有 Core ConfigSet 保存。
 //!
-//! 语义同 win32：校验用户表单 → 先保存配置（darwin core `ConfigSet`）→ 再按需
-//! 处理服务安装。差异仅在服务安装分支：darwin 的服务安装走**服务面板**（core
-//! `ServiceControl` 经服务代理提权执行），快速入门不代为安装；`install_service = true`
-//! 时以 `ok = false` + 可读 message 如实回报（前端不把快速入门显示成已完成安装）。
-//! 密码仅沿既有 Core ConfigSet 边界传递。快速入门按原始密码是否非空派生记住标志，
-//! 加密/清除仍由 Core 既有语义处理；普通设置的 ConfigSet 语义不变。
+//! 服务安装由前端在配置安全回读后，通过独立服务操作入口发起；本命令不组合安装。
+//! 密码仅沿既有 Core ConfigSet 边界传递。S5a（2026-10-26）：非空密码派生记住标志
+//! `remember_password=true` 一并提交；密码留空时**省略**该键——Core 对缺键保持
+//! 原值，已保存密文与 owner 不被"派生 false"误清除。普通设置的 ConfigSet 语义不变。
 
 use std::collections::BTreeSet;
+use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -20,13 +19,12 @@ use super::state::ServiceStatus;
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct QuickStartApplyRequest {
     pub items: Vec<ConfigItem>,
-    pub install_service: bool,
 }
 
 /// 快速入门提交结果。
 ///
-/// 配置保存失败走 command error；服务安装是后续独立副作用，因此其业务失败以可显示的
-/// `ok=false` 回复返回，前端不得把它显示成已完成。
+/// 配置保存失败走 command error；成功仅表示配置已保存。
+/// `service_status` 保留回复兼容形状，本入口恒为 `None`。
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct QuickStartApplyReply {
     pub ok: bool,
@@ -50,64 +48,67 @@ const ALLOWED_CONFIG_KEYS: &[&str] = &[
     "user_agent",
     "mtu",
     "protocol",
+    "atrust_server",
+    "atrust_auth_mode",
+    "atrust_auto_login",
+    "campus_dns_domains",
     "auto_reconnect",
     "auto_reconnect_max_attempts",
     "auto_reconnect_backoff",
 ];
 
 /// Tauri 快速入门命令。`app/src/main.rs` 统一负责命令注册。
+///
+/// A1-1d（2026-10-09 区域 A）：ConfigSet 阶段的有界重试环（[`super::retry`]，
+/// win32 同构参数化——darwin 无唤醒设施，`wake` 恒 `None` 纯退避：core 若死则
+/// 环耗尽后快速失败，交给连接路径的恢复语义）。darwin 宿主未运行，本改动为
+/// 参数化文本改动，未经本地编译/测试验证，如实登记。
 #[tauri::command]
 pub(crate) async fn quick_start_apply(
     state: State<'_, CoreState>,
     request: QuickStartApplyRequest,
 ) -> Result<QuickStartApplyReply, AppError> {
-    apply(&CoreClient, &state, request).await
+    apply(&CoreClient, &state, request, super::retry::NO_WAKE).await
 }
 
-/// 可在真实 Core gRPC 边界测试的编排实现。
-pub(crate) async fn apply(
+/// 可在真实 Core gRPC 边界测试的编排实现（带 ConfigSet 阶段的有界重试环）。
+///
+/// `wake` 参数化业务唤醒（win32 命令层注入 `ensure_core_available`；darwin 恒
+/// `None`，形状与 win32 [`apply`] 同构，未来落地唤醒设施时直接收编）。
+pub(crate) async fn apply<W, WFut>(
     client: &CoreClient,
     state: &CoreState,
     request: QuickStartApplyRequest,
-) -> Result<QuickStartApplyReply, AppError> {
+    wake: Option<W>,
+) -> Result<QuickStartApplyReply, AppError>
+where
+    W: FnMut() -> WFut,
+    WFut: Future<Output = Result<(), AppError>>,
+{
     let items = validate_and_prepare_items(request.items)?;
-    let saved = client.config_set(state, items).await?;
+    // 重试环只包裹 ConfigSet（幂等：原子全量重写），不包含独立服务操作。
+    let saved = super::retry::retry_on_core_unreachable(
+        || async { client.config_set(state, items.clone()).await },
+        wake,
+    )
+    .await?;
     if !saved {
         return Err(AppError::Internal(
-            "快速入门配置未能保存，未尝试安装服务".to_string(),
+            "快速入门配置未能保存".to_string(),
         ));
     }
 
-    if !request.install_service {
-        return Ok(QuickStartApplyReply {
-            ok: true,
-            service_status: None,
-            message: "快速入门配置已保存".to_string(),
-        });
-    }
-
-    // darwin 平台旁路（诚实语义）：服务安装由服务面板单独发起，快速入门不调用
-    // core ServiceControl；配置已真实保存，服务安装以 ok=false + 可读 message 如实回报。
-    Ok(darwin_service_install_reply())
-}
-
-/// darwin 服务安装分支的诚实回复：配置已保存，服务形态不适用。
-fn darwin_service_install_reply() -> QuickStartApplyReply {
-    QuickStartApplyReply {
-        ok: false,
+    Ok(QuickStartApplyReply {
+        ok: true,
         service_status: None,
-        message: "快速入门配置已保存；Darwin 的服务安装请在设置的服务面板单独进行。"
-            .to_string(),
-    }
+        message: "快速入门配置已保存".to_string(),
+    })
 }
 
 fn validate_and_prepare_items(items: Vec<ConfigItem>) -> Result<Vec<ConfigItem>, AppError> {
+    // 先检查整批键，避免账号或协议必填分支掩盖后续未知键／重复键。
     let mut keys = BTreeSet::new();
-    let mut required = BTreeSet::new();
-    let mut prepared = Vec::with_capacity(items.len());
-    let mut password = String::new();
-
-    for item in items {
+    for item in &items {
         if !ALLOWED_CONFIG_KEYS.contains(&item.key.as_str()) {
             return Err(AppError::Internal(format!(
                 "快速入门不接受配置项 '{}'",
@@ -120,41 +121,71 @@ fn validate_and_prepare_items(items: Vec<ConfigItem>) -> Result<Vec<ConfigItem>,
                 item.key
             )));
         }
-        if matches!(item.key.as_str(), "server" | "username") {
-            if item.value.trim().is_empty() {
-                return Err(AppError::Internal(format!(
-                    "快速入门配置项 '{}' 不能为空",
-                    item.key
-                )));
-            }
-            required.insert(item.key.clone());
-        }
-        match item.key.as_str() {
-            // 取出密码用于派生记住标志：既不入 prepared，也不被 core 的重复键检查看见。
-            "password" => password = item.value,
-            // 兼容旧请求字段，但不让旧复选框值覆盖快速入门的新规则。
-            "remember_password" => {}
-            _ => prepared.push(item),
-        }
     }
 
-    for required_key in ["server", "username"] {
-        if !required.contains(required_key) {
+    // 只使用本次请求的协议；缺键按旧Cisco入口，并在同批ConfigSet中明确写回。
+    let protocol = match items.iter().find(|item| item.key == "protocol") {
+        Some(item) => match item.value.trim() {
+            "cisco" => "cisco",
+            "atrust" => "atrust",
+            _ => return Err(AppError::Internal("快速入门协议必须为 cisco 或 atrust".to_string())),
+        },
+        None => "cisco",
+    };
+    let required_keys: &[&str] = if protocol == "atrust" {
+        &["atrust_server"]
+    } else {
+        &["server", "username"]
+    };
+    for required_key in required_keys {
+        let Some(item) = items.iter().find(|item| item.key == *required_key) else {
             return Err(AppError::Internal(format!(
                 "快速入门缺少配置项 '{required_key}'"
+            )));
+        };
+        if item.value.trim().is_empty() {
+            return Err(AppError::Internal(format!(
+                "快速入门配置项 '{required_key}' 不能为空"
             )));
         }
     }
 
+    let mut prepared = Vec::with_capacity(items.len() + 1);
+    let mut password = String::new();
+    for mut item in items {
+        match item.key.as_str() {
+            // 保留原始密码字节，仅由是否非空派生记住标志。
+            "password" => password = item.value,
+            "remember_password" => {}
+            "protocol" => {
+                item.value = protocol.to_string();
+                prepared.push(item);
+            }
+            // 未使用协议的显式字段仍原样送交Core校验，不删除也不补虚拟账号。
+            _ => prepared.push(item),
+        }
+    }
+    if !keys.contains("protocol") {
+        prepared.push(ConfigItem {
+            key: "protocol".to_string(),
+            value: protocol.to_string(),
+        });
+    }
     let remember_password = !password.is_empty();
     prepared.push(ConfigItem {
         key: "password".to_string(),
         value: password,
     });
-    prepared.push(ConfigItem {
-        key: "remember_password".to_string(),
-        value: remember_password.to_string(),
-    });
+    // S5a（2026-10-26）：密码留空时**省略**派生的 remember_password 键——Core 对
+    // 缺键保持原值，已保存密文与 owner 不被"派生 false"误清除（"留空保留原密码"
+    // 承诺在快速入门同样成立；前端 `quickStartItems` 同款少键）。非空密码仍派生
+    // true 一并提交（旧标志无论如何都会被覆盖为派生值，行为不变）。
+    if remember_password {
+        prepared.push(ConfigItem {
+            key: "remember_password".to_string(),
+            value: "true".to_string(),
+        });
+    }
 
     Ok(prepared)
 }

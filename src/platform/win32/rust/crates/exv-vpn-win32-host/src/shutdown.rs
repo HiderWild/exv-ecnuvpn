@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::sync::{Mutex, watch};
 
+use crate::kernel_control_service::session_orchestration::{accept_process_fact, ProcessFact};
 use crate::composition::{HostComposition, HostPhase};
 use crate::crash_recovery::{
     CrashRecovery, RespawnOutcome, SelfHealReporter, SelfHealStage, respawn_error_code,
@@ -100,10 +101,8 @@ pub struct CoreShutdownOutcome {
 ///    进程句柄 / 心跳（P2）三重保证随 core 退出）。
 /// 3. **core 退出**：`composition.exit()`——幂等业务 Stop、关闭 admission、撤销 packet leg。
 ///
-/// **R2 (a) CleanExit→synthesize 收敛保留在崩溃路径**：engine 异常死亡（状态流 EOF）时由
-/// 状态转发器（`kernel_control_service::spawn_status_forwarder`）合成数据面侧加入收敛
-/// Stopped/Idle；UI 关闭路径不等待 engine、不观测 CleanExit，故此处不再合成（core 即将
-/// 退出，无收敛必要）。
+/// 控制通道EOF或liveness丢失只表示现场不可确认，不合成停止双join。
+/// 显式退出仍按原owner发送业务停止并关闭本地接纳；不把发包等同于已停止回执。
 ///
 /// 调用方须在进入本函数前 drop 服务任务 / 事件转发器（释放对共享 engine client 的引用）。
 pub async fn shutdown_core(
@@ -124,7 +123,7 @@ pub async fn shutdown_core(
     let engine = supervisor.stop().await;
     // 3. composition.exit()（幂等业务 Stop）。
     let mut comp = composition.lock().await;
-    comp.exit();
+    let _ = accept_process_fact(&mut comp, ProcessFact::ExplicitQuit);
     let stop_requests = comp.stop_requests();
     let rpc_waiter_cancellations = comp.rpc_waiter_cancellations();
     let teardown_started = comp.teardown_started();
@@ -403,7 +402,11 @@ impl CoreRuntime {
                             // 不重复 teardown，避免把 Idle/Stopped 压成 Reconciling
                             // 关闭 admission。
                             if busy {
-                                self.composition.lock().await.on_helper_link_terminal();
+                                {
+                                    let mut composition = self.composition.lock().await;
+                                    let _ = accept_process_fact(
+                                        &mut composition, ProcessFact::ControlChannelLost);
+                                }
                             }
                             liveness_rx = None;
                         } else if let Some(recovery) = &crash_recovery {
@@ -474,7 +477,11 @@ impl CoreRuntime {
                         } else {
                             // 无崩溃自愈编排（测试/降级）：teardown 兜底 + 停止掉线监听
                             // （避免死循环；保留旧语义的 on_helper_link_terminal）。
-                            self.composition.lock().await.on_helper_link_terminal();
+                            {
+                                    let mut composition = self.composition.lock().await;
+                                    let _ = accept_process_fact(
+                                        &mut composition, ProcessFact::ControlChannelLost);
+                                }
                             liveness_rx = None;
                         }
                     }

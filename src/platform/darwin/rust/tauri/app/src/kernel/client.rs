@@ -12,6 +12,7 @@
 //! 服务代理健康探测（五态词汇复用），变更动作 typed 拒绝携带 CLI 指引——命令层
 //! 不再做平台旁路（见 `commands.rs`）。
 
+use exv_vpn_darwin_ipc::auth_deadline::{AuthDeadline, AuthDeadlineError};
 use std::sync::RwLock;
 
 use exv_vpn_wire::generated::kernel_control_client::KernelControlClient;
@@ -19,6 +20,21 @@ use exv_vpn_wire::generated::{self as wire};
 use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
+
+const STOP_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn stop_unconfirmed_reply(operation_id: Option<&[u8]>, stage: &str) -> OperationReply {
+    let error = super::state::VpnError {
+        code: "STOP_DEADLINE_EXCEEDED".into(),
+        message: format!("停止等待超时，尚未确认清理完成（{stage}）；可重试停止或修复服务。"),
+        reason: "stop/deadline_exceeded".into(),
+    };
+    OperationReply {
+        operation_id: operation_id.map(wire_map::hex),
+        stop_completion: Some(super::state::StopCompletion { stopped: false, blocks_new_connect: false, errors: vec![error.clone()] }),
+        result: super::state::OperationResult::Failed { error: Some(error) },
+    }
+}
 
 use super::core_process;
 use super::error::AppError;
@@ -54,15 +70,63 @@ pub(crate) struct ConnectIntent {
     pub credentials: Option<ConnectCredentials>,
     #[serde(default)]
     pub secret_payload: Option<String>,
+    #[serde(default)]
+    pub atrust_reauthenticate: Option<String>,
 }
 
 /// 配置读取的命令回复（core `ConfigGet` 透传形状）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct ConfigPayload {
     pub items: Vec<ConfigItem>,
-    /// 本次 ConfigGet 是否因配置缺失而 bootstrap 默认配置（darwin core 当前恒 false，
-    /// 如实透传；前端据此决定是否弹快速入门）。
+    /// 本次 ConfigGet 是否因配置缺失或损坏而创建默认配置。
     pub requires_quick_start: bool,
+    /// 仅本次修复的损坏恢复报告；旧回复缺字段时为 None。
+    #[serde(default)]
+    pub config_recovery: Option<ConfigRecovery>,
+    #[serde(default)]
+    pub read_failure: Option<ConfigReadFailure>,
+}
+
+/// 损坏恢复报告的 UI 侧镜像，只携带备份文件名。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ConfigRecovery {
+    pub corrupted: bool,
+    pub backup_file: String,
+}
+
+/// 沿既有 wire 的读取失败镜像；Darwin 的 win32_code 固定为 0，不展示错误号。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ConfigReadFailure {
+    pub win32_code: i32,
+    pub path: String,
+}
+
+impl ConfigPayload {
+    /// 配置消费者在分派协议或采用 items 之前传播真实读取失败。
+    pub(crate) fn ensure_readable(&self) -> Result<(), AppError> {
+        if let Some(failure) = &self.read_failure {
+            return Err(AppError::Internal(format!(
+                "读取配置文件失败：{}。EXV 未修改原文件。请检查文件和上级目录的访问权限后重试，或查看日志。",
+                failure.path,
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn config_payload_from_wire(reply: wire::ConfigPayload) -> ConfigPayload {
+    ConfigPayload {
+        items: inner_config_items(reply.items),
+        requires_quick_start: reply.requires_quick_start,
+        config_recovery: reply.config_recovery.map(|report| ConfigRecovery {
+            corrupted: report.corrupted,
+            backup_file: report.backup_file,
+        }),
+        read_failure: reply.read_failure.map(|failure| ConfigReadFailure {
+            win32_code: failure.win32_code,
+            path: failure.path,
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +167,8 @@ pub(crate) enum CoreStatus {
 /// Tauri managed state：UI 侧 core 会话状态 + 快照缓存（win32 同款）。
 #[derive(Debug, Default)]
 pub(crate) struct CoreState {
+    pub(crate) browser_selection: super::browser_auth::BrowserSelection,
+    pub(crate) connection_requests: super::connection_request::ConnectionRequests,
     /// 当前经过身份验证的 Core 控制通道。Core 意外退出后，只有恢复分支可以替换它；
     /// 其余命令仅克隆读取，不会触发进程探测或拉起。
     pub(crate) handle: RwLock<CoreHandle>,
@@ -136,12 +202,9 @@ impl CoreState {
         self.replace_handle(CoreHandle::NotWired);
     }
 
-    /// 日常管道健康结论。这里不观察进程，仅执行既有轻量 snapshot RPC。
-    pub(crate) async fn probe_status(&self) -> CoreStatus {
-        match CoreClient.snapshot(self).await {
-            Ok(_) => CoreStatus::Normal,
-            Err(_) => CoreStatus::Stopped,
-        }
+    /// 既有 snapshot RPC 的可达结果；读取失败保原错误，不推导 Core 已停止。
+    pub(crate) async fn probe_status(&self) -> Result<CoreStatus, AppError> {
+        CoreClient.snapshot(self).await.map(|_| CoreStatus::Normal)
     }
 
     /// 最近一次缓存快照（事件订阅/快照命令写入；诊断/测试读取面，win32 同款保留）。
@@ -224,6 +287,11 @@ const SERVICE_CONNECT_FAILED_PREFIX: &str = "service_connect_failed|";
 /// `ensure_selected_protocol_is_serviceable` 拒绝 aTrust 时发出，壳层据此把它保留为
 /// 可行动的中文原因，而不是落入通用 internal 文案。
 const PROTOCOL_UNAVAILABLE_PREFIX: &str = "protocol_unavailable|";
+/// 2026-09-30 修复（M3）：engine 会话占用稳定码（`SessionOccupiedService` 对 busy
+/// 窗口内全部 RPC 的恒拒词汇；core 经 MAC-LIFECYCLE-15 透传 failed_precondition +
+/// 原始 message）。分支条件与 core 透传条件对齐（code==FailedPrecondition ∧ message
+/// 含稳定码），避免 message 碰巧含该词的其他错误误入。
+const CODE_ENGINE_ATTEMPT_ACTIVE: &str = "DARWIN_ENGINE_ATTEMPT_ACTIVE";
 
 /// 把 tonic `Status` 映射为 UI 错误（win32 `map_status` 的 darwin 对应）：
 /// 服务路由前缀 → `ServiceNotRunning`/`ServiceConnectFailed`（恢复 modal）；
@@ -231,13 +299,45 @@ const PROTOCOL_UNAVAILABLE_PREFIX: &str = "protocol_unavailable|";
 /// `CoreUnreachable`；darwin 稳定拒绝码 → typed 变体（凭据缺失触发前端凭据模态）；
 /// 其余（含 Unimplemented，如 `respond_interaction`）→ `Internal`（携带稳定码 +
 /// 精简 message，按 win32 同款错误面透传）。
+pub(super) fn auth_deadline_app_error(error: AuthDeadlineError) -> AppError {
+    AppError::Internal(match error {
+        AuthDeadlineError::Invalid => "本机认证期限无效，请重新连接。",
+        AuthDeadlineError::Expired => "本次认证总期限已耗尽，未发起新的连接提交。",
+        AuthDeadlineError::Clock => "读取本机单调时钟失败，连接尚未提交。",
+    }.into())
+}
+
 fn map_status(s: Status) -> AppError {
     let message = s.message();
+    if s.code() == Code::DeadlineExceeded && message == "DARWIN_CORE_AUTH_DEADLINE_EXPIRED" {
+        return auth_deadline_app_error(AuthDeadlineError::Expired);
+    }
+    if s.code() == Code::DeadlineExceeded && message.starts_with("auth_receiver_control/") {
+        return AppError::BrowserLoginFailed(message.to_owned());
+    }
+    if s.code() == Code::InvalidArgument && message == "DARWIN_CORE_AUTH_DEADLINE_INVALID" {
+        return auth_deadline_app_error(AuthDeadlineError::Invalid);
+    }
+    if s.code() == Code::Internal && message == "DARWIN_CORE_AUTH_CLOCK_FAILED" {
+        return auth_deadline_app_error(AuthDeadlineError::Clock);
+    }
+    let mut causes = s.metadata().get_all("x-exv-connect-cause").iter();
+    let cause = causes.next().and_then(|cause| cause.to_str().ok());
+    if s.code() == Code::FailedPrecondition && causes.next().is_none()
+        && matches!(cause, Some("atrust-material-missing" | "cisco-material-missing")) {
+        return AppError::CredentialRequired { code: Some(CODE_CREDENTIALS_MISSING.to_owned()), message: "credential_required".into() };
+    }
+    if message == "DARWIN_CORE_CONNECTION_CANCELLED" {
+        return AppError::ConnectionCancelled;
+    }
     if let Some(rest) = message.strip_prefix(SERVICE_NOT_RUNNING_PREFIX) {
         return AppError::ServiceNotRunning(rest.to_string());
     }
     if let Some(rest) = message.strip_prefix(SERVICE_CONNECT_FAILED_PREFIX) {
         return AppError::ServiceConnectFailed(rest.to_string());
+    }
+    if message.starts_with("DARWIN_CORE_SERVICE_ELEVATION_FAILED:") {
+        return AppError::Internal(message.to_string());
     }
     if let Some(rest) = message.strip_prefix(PROTOCOL_UNAVAILABLE_PREFIX) {
         return AppError::ProtocolUnavailable(rest.trim().to_string());
@@ -245,6 +345,17 @@ fn map_status(s: Status) -> AppError {
     match s.code() {
         Code::Unavailable | Code::Cancelled | Code::Unknown | Code::DeadlineExceeded => {
             AppError::CoreUnreachable(format!("{}: {}", s.code(), message))
+        }
+        // 2026-09-30 修复（M3）：engine 会话占用稳定码保留稳定码打头的中文行动
+        // 文案（不新增 AppError 变体，沿用 D3 先例：Internal kind + 稳定码打头
+        // 中文指引，前端 command-error.ts 按稳定码透传）。修复后该错误应大幅减少
+        // 但不绝迹（service agent nudge 在 uninstall/服务变更路径仍可能瞬时占用），
+        // 此层是防御性可诊断性改进。
+        Code::FailedPrecondition if message.contains(CODE_ENGINE_ATTEMPT_ACTIVE) => {
+            AppError::Internal(
+                "DARWIN_ENGINE_ATTEMPT_ACTIVE: 连接通道被占用，请重试连接；若持续出现请重启应用。"
+                    .to_owned(),
+            )
         }
         _ => {
             if message.contains(CODE_CREDENTIALS_MISSING) {
@@ -279,7 +390,85 @@ fn ui_operation_reply_with_local_id(
     ui
 }
 
+pub(super) const AUTH_RECEIVER_UPDATE_REQUIRED: &str = "EXV_AUTH_RECEIVER_UPDATE_REQUIRED";
+fn auth_receiver_status(status: tonic::Status) -> AppError {
+    if status.code() == tonic::Code::Unimplemented {
+        AppError::ServiceConnectFailed(format!("{AUTH_RECEIVER_UPDATE_REQUIRED}：系统中运行的 EXV 引擎缺少认证接收端接口（RPC UNIMPLEMENTED）。请更新 EXV 系统服务后继续连接。"))
+    } else { map_status(status) }
+}
+
 impl CoreClient {
+    pub(super) async fn prepare_auth_control(&self, state: &CoreState, deadline: AuthDeadline) -> Result<(), AppError> {
+        let until = deadline.tokio_deadline().map_err(auth_deadline_app_error)?;
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("auth control: core not dialed".into()))?;
+        let mut client = KernelControlClient::new(channel);
+        tokio::time::timeout_at(until, client.prepare_auth_control(wire::PrepareAuthControlRequest {
+            operation_id: random_16()?, deadline_monotonic_ns: deadline.monotonic_ns(),
+        })).await.map_err(|_| auth_deadline_app_error(exv_vpn_darwin_ipc::auth_deadline::AuthDeadlineError::Expired))?
+            .map_err(map_status)?;
+        Ok(())
+    }
+
+    pub(super) async fn auth_receiver_control(&self, state: &CoreState, request: wire::AuthReceiverControlRequest) -> Result<wire::AuthReceiverControlReply, AppError> {
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("auth receiver: core not dialed".into()))?;
+        KernelControlClient::new(channel).auth_receiver_control(request).await.map(tonic::Response::into_inner).map_err(auth_receiver_status)
+    }
+
+    pub(crate) async fn trigger_latency_refresh(
+        &self,
+        state: &CoreState,
+        operation_id: &str,
+    ) -> Result<(), AppError> {
+        state
+            .cached_snapshot()
+            .filter(|snapshot| {
+                snapshot.operation_id.as_deref() == Some(operation_id)
+                    && matches!(
+                        snapshot.runtime,
+                        super::state::RuntimeState::Connected { .. }
+                    )
+            })
+            .ok_or_else(|| AppError::Internal("当前没有已确认的连接，无法刷新时延。".into()))?;
+        if operation_id.len() != 32 || !operation_id.is_ascii() {
+            return Err(AppError::Internal(
+                "当前连接标识不可用，请等待连接状态更新后重试。".into(),
+            ));
+        }
+        let operation_id = operation_id
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|value| u8::from_str_radix(value, 16).ok())
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                AppError::Internal("当前连接标识不可用，请等待连接状态更新后重试。".into())
+            })?;
+        let channel = state
+            .channel()
+            .ok_or_else(|| AppError::CoreUnreachable("时延刷新时后台连接不可用。".into()))?;
+        let mut client = KernelControlClient::new(channel);
+        let reply = client
+            .trigger_latency_refresh(wire::KernelLatencyRefreshRequest { operation_id })
+            .await
+            .map_err(|status| match status.code() {
+                Code::Unimplemented => {
+                    AppError::Internal("当前协议或后台版本不支持时延刷新。".into())
+                }
+                Code::FailedPrecondition => {
+                    AppError::Internal("当前连接未受理时延刷新，请确认连接后重试。".into())
+                }
+                _ => map_status(status),
+            })?
+            .into_inner();
+        if !reply.accepted {
+            return Err(AppError::Internal("后台未受理时延刷新，请重试。".into()));
+        }
+        Ok(())
+    }
+
     /// 发起连接（`KernelControl.Connect`）。
     ///
     /// R4 事件关联：调用方在组装 intent 时生成 operation_id（16 字节随机），
@@ -289,6 +478,60 @@ impl CoreClient {
         &self,
         state: &CoreState,
         intent: &ConnectIntent,
+    ) -> Result<OperationReply, AppError> {
+        let request = state.connection_requests.begin()?;
+        self.connect_for_request(state, intent, request).await
+    }
+
+    pub(crate) async fn connect_for_request(
+        &self,
+        state: &CoreState,
+        intent: &ConnectIntent,
+        local_request: std::sync::Arc<super::connection_request::ConnectionRequest>,
+    ) -> Result<OperationReply, AppError> {
+        let permit = std::sync::Arc::clone(&state.connection_requests.commit_gate)
+            .lock_owned()
+            .await;
+        self.connect_with_permit(state, intent, local_request, permit)
+            .await
+    }
+
+    /// 首次缓存尝试排队仍属于同一次认证准备，不能越过入口总期限提交。
+    pub(crate) async fn connect_for_request_with_deadline(
+        &self,
+        state: &CoreState,
+        intent: &ConnectIntent,
+        local_request: std::sync::Arc<super::connection_request::ConnectionRequest>,
+        deadline: AuthDeadline,
+    ) -> Result<OperationReply, AppError> {
+        let gate = std::sync::Arc::clone(&state.connection_requests.commit_gate);
+        let permit = tokio::select! { biased;
+            _ = local_request.cancelled() => return Err(AppError::ConnectionCancelled),
+            result = tokio::time::timeout_at(deadline.tokio_deadline().map_err(auth_deadline_app_error)?, gate.lock_owned()) => result.map_err(|_| AppError::Internal("本次认证总期限已耗尽，缓存连接尚未提交。".into()))?,
+        };
+        local_request.begin_submit()?;
+        deadline.remaining().map_err(auth_deadline_app_error)?;
+        self.connect_with_permit_and_auth_deadline(state, intent, local_request, permit, Some(deadline)).await
+    }
+
+    /// 最终配置复核和RPC提交共用已经取得的许可，不能在复核后重新排队。
+    pub(crate) async fn connect_with_permit(
+        &self,
+        state: &CoreState,
+        intent: &ConnectIntent,
+        local_request: std::sync::Arc<super::connection_request::ConnectionRequest>,
+        permit: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<OperationReply, AppError> {
+        self.connect_with_permit_and_auth_deadline(state, intent, local_request, permit, None).await
+    }
+
+    pub(super) async fn connect_with_permit_and_auth_deadline(
+        &self,
+        state: &CoreState,
+        intent: &ConnectIntent,
+        local_request: std::sync::Arc<super::connection_request::ConnectionRequest>,
+        permit: tokio::sync::OwnedMutexGuard<()>,
+        auth_deadline: Option<AuthDeadline>,
     ) -> Result<OperationReply, AppError> {
         let channel = state
             .channel()
@@ -307,35 +550,80 @@ impl CoreClient {
                 tonic::metadata::MetadataValue::from_static("true"),
             );
         }
+        local_request.begin_submit()?;
+        if let Some(deadline) = auth_deadline { deadline.write_metadata(request.metadata_mut()).map_err(auth_deadline_app_error)?; }
         let mut client = KernelControlClient::new(channel);
-        let reply = match client.connect(request).await.map_err(map_status) {
-            Ok(reply) => reply,
-            Err(error) => {
-                if matches!(error, AppError::CoreUnreachable(_)) {
-                    state.mark_stopped();
-                }
-                return Err(error);
-            }
-        };
-        Ok(ui_operation_reply_with_local_id(
-            reply.into_inner(),
-            &operation_id,
-        ))
+        let reply = super::connection_request::await_submitted(async move {
+            let _permit = permit;
+            let _request = local_request;
+            let reply = client
+                .connect(request)
+                .await
+                .map_err(map_status)?
+                .into_inner();
+            Ok(ui_operation_reply_with_local_id(reply, &operation_id))
+        })
+        .await;
+        if matches!(reply, Err(AppError::CoreUnreachable(_))) {
+            state.mark_stopped();
+        }
+        reply
     }
 
-    /// 停止连接（`KernelControl.Stop`）。operation_id 关联契约同 connect。
+    /// Stop取消本地候选，再等待已派发Connect的真实回复，随后发Core Stop。
     pub(crate) async fn stop(&self, state: &CoreState) -> Result<OperationReply, AppError> {
-        let channel = state
-            .channel()
-            .ok_or_else(|| AppError::CoreUnreachable("stop: core not dialed".to_string()))?;
+        self.stop_with_deadline(state, tokio::time::Instant::now() + STOP_TOTAL_BUDGET).await
+    }
+
+    pub(super) async fn stop_with_deadline(&self, state: &CoreState, deadline: tokio::time::Instant) -> Result<OperationReply, AppError> {
+        let deadline = deadline.min(tokio::time::Instant::now() + STOP_TOTAL_BUDGET);
+        state.connection_requests.cancel();
+        let gate = std::sync::Arc::clone(&state.connection_requests.commit_gate);
+        let permit = match tokio::time::timeout_at(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(5)), gate.lock_owned()).await {
+            Ok(permit) if tokio::time::Instant::now() < deadline => permit,
+            _ => return Ok(stop_unconfirmed_reply(None, "commit_gate")),
+        };
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("stop: core not dialed".into()))?;
         let operation_id = random_16()?;
-        let request = Request::new(wire_map::stop_request(operation_id.clone())?);
-        let mut client = KernelControlClient::new(channel);
-        let reply = client.stop(request).await.map_err(map_status)?;
-        Ok(ui_operation_reply_with_local_id(
-            reply.into_inner(),
-            &operation_id,
-        ))
+        let mut request = Request::new(wire_map::stop_request(operation_id.clone())?);
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() { return Ok(stop_unconfirmed_reply(None, "before_dispatch")); }
+        request.set_timeout(remaining);
+        let reply_id = operation_id.clone();
+        // 用户不再等待不会撤销已提交 Stop 或释放原提交许可。
+        let mut task = tokio::spawn(async move {
+            let _permit = permit;
+            let mut client = KernelControlClient::new(channel);
+            match client.stop(request).await {
+                Ok(reply) => Ok(ui_operation_reply_with_local_id(reply.into_inner(), &reply_id)),
+                Err(status) if status.code() == Code::DeadlineExceeded || status.code() == Code::Cancelled =>
+                    Ok(stop_unconfirmed_reply(Some(&reply_id), &format!("rpc: {status}"))),
+                Err(status) => Err(map_status(status)),
+            }
+        });
+        match tokio::time::timeout_at(deadline, &mut task).await {
+            Ok(result) => result.map_err(|_| AppError::Internal("停止控制任务异常退出，停止未确认。".into()))?,
+            Err(_) => Ok(stop_unconfirmed_reply(Some(&operation_id), "completion")),
+        }
+    }
+
+    /// 原 RespondInteraction 的后台材料薄发送。原请求与许可只在真实 RPC 回执后释放。
+    pub(super) async fn reply_auth_acquisition(
+        channel: Channel, interaction_id: Vec<u8>, runtime_epoch: Vec<u8>,
+        mut payload: zeroize::Zeroizing<Vec<u8>>,
+        owner: std::sync::Arc<super::connection_request::ConnectionRequest>,
+        permit: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(), AppError> {
+        super::connection_request::await_submitted(async move {
+            let _owner = owner;
+            let _permit = permit;
+            let response_payload = std::mem::take(&mut *payload);
+            let mut client = KernelControlClient::new(channel);
+            client.respond_interaction(wire::InteractionResponse {
+                interaction_id, runtime_epoch, response_payload,
+            }).await.map_err(map_status)?;
+            Ok(())
+        }).await
     }
 
     /// 拉取当前运行时快照（`KernelControl.GetSnapshot`），并更新缓存。
@@ -371,6 +659,12 @@ impl CoreClient {
     }
 
     /// 拉取日志历史分片（`KernelControl.LogsList`）。
+    pub(crate) async fn record_auth_diagnostic(&self, state: &CoreState, event: wire::LogEvent) -> Result<bool, AppError> {
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("auth diagnostic: core not dialed".into()))?;
+        KernelControlClient::new(channel).record_auth_diagnostic(event).await
+            .map(|reply| reply.into_inner().recorded).map_err(map_status)
+    }
+
     pub(crate) async fn logs_list(
         &self,
         state: &CoreState,
@@ -436,10 +730,7 @@ impl CoreClient {
             .await
             .map_err(map_status)?
             .into_inner();
-        Ok(ConfigPayload {
-            items: inner_config_items(reply.items),
-            requires_quick_start: reply.requires_quick_start,
-        })
+        Ok(config_payload_from_wire(reply))
     }
 
     /// 写入配置（`KernelControl.ConfigSet`）。
@@ -512,16 +803,32 @@ impl CoreClient {
         state: &CoreState,
         action: ServiceControlAction,
     ) -> Result<ServiceControlReply, AppError> {
+        self.service_control_request(state, wire_map::service_control_request(&action)).await
+    }
+
+    pub(crate) async fn full_uninstall(&self, state: &CoreState) -> Result<ServiceControlReply, AppError> {
+        self.service_control_request(state, wire_map::full_uninstall_request()).await
+    }
+
+    async fn service_control_request(
+        &self, state: &CoreState, request: wire::ServiceControlRequest,
+    ) -> Result<ServiceControlReply, AppError> {
         let channel = state.channel().ok_or_else(|| {
             AppError::CoreUnreachable("service_control: core not dialed".to_string())
         })?;
         let mut client = KernelControlClient::new(channel);
         let reply = client
-            .service_control(wire_map::service_control_request(&action))
+            .service_control(request)
             .await
             .map_err(map_status)?
             .into_inner();
-        Ok(wire_map::service_control_reply_from_wire(&reply))
+        let mut result = wire_map::service_control_reply_from_wire(&reply);
+        result.service_version = tokio::task::spawn_blocking(
+            exv_vpn_darwin_core::service_revision::service_bundle_status,
+        )
+        .await
+        .ok();
+        Ok(result)
     }
 
     /// 打开 `KernelControl.WatchEvents` server-streaming 订阅（事件订阅源）。
@@ -560,3 +867,4 @@ fn inner_config_items(items: Vec<wire::ConfigItem>) -> Vec<ConfigItem> {
         })
         .collect()
 }
+

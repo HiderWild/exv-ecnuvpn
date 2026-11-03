@@ -22,10 +22,28 @@ use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
 
+const STOP_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn stop_unconfirmed_reply(operation_id: Option<&[u8]>, stage: &str) -> OperationReply {
+    let error = super::state::VpnError {
+        code: "STOP_DEADLINE_EXCEEDED".into(),
+        message: format!("停止等待超时，尚未确认清理完成（{stage}）；可重试停止或修复服务。"),
+        reason: "stop/deadline_exceeded".into(),
+        stage: Some("ERROR_STAGE_TEARDOWN".into()),
+    };
+    OperationReply {
+        operation_id: operation_id.map(wire_map::hex),
+        stop_completion: Some(super::state::StopCompletion { stopped: false, blocks_new_connect: false, errors: vec![error.clone()] }),
+        result: super::state::OperationResult::Failed { error: Some(error) },
+    }
+}
+
 use super::core_transport::{CorePeer, GrpcPipeError, connect_core_channel};
 use super::error::AppError;
 use super::logs::{LogChunk, LogsClearReply};
-use super::state::{OperationReply, OperationResult, RuntimeSnapshot, ServiceControlAction, ServiceControlReply};
+use super::state::{
+    OperationReply, OperationResult, RuntimeSnapshot, ServiceControlAction, ServiceControlReply,
+};
 use super::stats::RuntimeStats;
 use super::wire::{self as wire_map};
 
@@ -68,6 +86,32 @@ pub struct ConfigPayload {
     /// 本次 ConfigGet 是否因配置缺失、空白、非 object 或不可解析而 bootstrap 默认配置。
     /// 不携带原始配置、异常细节或任何秘密。
     pub requires_quick_start: bool,
+    /// R-D3-C：当次启动损坏修复的一次性报告（core config_hygiene 损坏分支产出，
+    /// 不持久化）；缺失文件 bootstrap 与合法启动为 `None`。仅布尔 + 备份文件名。
+    #[serde(default)]
+    pub config_recovery: Option<ConfigRecovery>,
+    /// S4（2026-10）：config.json 读失败（三档自愈后仍不可读）的结构化报告；
+    /// 读取成功（含自愈成功）为 `None`。读失败绝不触发 bootstrap/覆盖（禁令）。
+    #[serde(default)]
+    pub read_failure: Option<ConfigReadFailure>,
+}
+
+/// R-D3-C 损坏恢复报告的 UI 侧镜像（wire `ConfigRecovery` → serde → 前端）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigRecovery {
+    pub corrupted: bool,
+    pub backup_file: String,
+}
+
+/// S4 读失败报告的 UI 侧镜像（wire `ConfigReadFailure` → serde → 前端）。
+/// 前端据此区分「损坏已恢复」（config_recovery）与「读不了」（本报告），
+/// 并对 ACL 类失败给出「以管理员身份修复权限」runas 入口。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigReadFailure {
+    /// Win32 原始错误码（5=拒绝访问、32=占用…；0=未知）。
+    pub win32_code: i32,
+    /// 读取失败的 config.json 全路径。
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,14 +167,12 @@ pub struct CoreState {
     /// 最近一次归一化统计缓存（stats-wire 方案 A：由 `snapshot` 命令从快照携带的
     /// `stats` 写入；`stats` 命令读取）。`RwLock`：命令层读/写。
     pub last_stats: RwLock<Option<RuntimeStats>>,
-    pub browser_login: exv_core::atrust_browser::BrowserLogin,
-    /// 仅覆盖 aTrust 会话取得后至 Core Connect/Stop RPC 收束的短事务；绝不跨越浏览器交互。
-    pub(crate) browser_commit_gate: tokio::sync::Mutex<()>,
+    pub connection_requests: crate::kernel::connection_request::ConnectionRequests,
 }
 
 impl CoreState {
     /// 以给定 handle 构造（其余字段取默认）。集成测试（crate 外）无法用
-    /// `..Default::default()` 字面量初始化（`browser_commit_gate` 为 crate 私有），
+    /// `..Default::default()` 字面量初始化（请求提交 gate 归 connection_request 管理），
     /// 经本构造绕过字段可见性（clippy 债务清偿 2026-09-27 顺带修复既有编译破损）。
     #[must_use]
     pub fn with_handle(handle: CoreHandle) -> Self {
@@ -221,10 +263,22 @@ pub struct CoreSession {
     pub crash_announced: std::sync::atomic::AtomicBool,
 }
 
+pub(super) fn encode_browser_candidate(session: &exv_vpn_win32_ipc::browser_session::BrowserSession, profile: &std::path::Path) -> Result<Vec<u8>, AppError> {
+    #[derive(serde::Serialize)]
+    struct Candidate<'a> {
+        #[serde(flatten)] session: &'a exv_vpn_win32_ipc::browser_session::BrowserSession,
+        authenticated_username: String,
+    }
+    serde_json::to_vec(&Candidate {
+        authenticated_username: exv_core::atrust_session_cache::username_for(profile, session).unwrap_or_default(),
+        session,
+    }).map_err(|_| AppError::browser_login_failed("无法编码浏览器登录会话"))
+}
+
 /// aTrust 浏览器认证结果及其待提交到 Core 的 owner lease。
 type BrowserAcquisition = (
     Vec<u8>,
-    Option<exv_core::atrust_browser::BrowserLoginLease>,
+    Option<crate::kernel::connection_request::ConnectionRequest>,
 );
 
 /// UI 侧对 core 的命令客户端（无状态 facade；真实会话状态在 CoreState）。
@@ -269,6 +323,24 @@ const PROTOCOL_UNAVAILABLE_PREFIX: &str = "protocol_unavailable|";
 /// 服务路由失败前缀 → typed `ServiceNotRunning` / `ServiceConnectFailed`（R5 modal
 /// 触发）；其余 → `Internal`（携带稳定 code + 精简 message）。
 fn map_status(s: Status) -> AppError {
+    // 已返回的业务来源优先于通用传输分类，保留服务原操作阶段与原因。
+    if let Some(rest) = s.message().strip_prefix(SERVICE_NOT_RUNNING_PREFIX)
+        .or_else(|| s.message().strip_prefix(SERVICE_START_FAILED_PREFIX)) {
+        return AppError::ServiceNotRunning(rest.trim().to_string());
+    }
+    if let Some(rest) = s.message().strip_prefix(SERVICE_CONNECT_FAILED_PREFIX) {
+        return AppError::ServiceConnectFailed(rest.trim().to_string());
+    }
+    if s.code() == Code::DeadlineExceeded
+        && ["auth_control/", "auth_receiver_control/", "atrust_auth_acquisition|"]
+            .iter().any(|prefix| s.message().starts_with(prefix))
+    {
+        return AppError::BrowserLoginFailed {
+            code: Some("auth_deadline_exceeded"),
+            message: "本次认证总期限已耗尽，请重新连接。",
+            server_detail: Some(exv_core::browser_auth::page_facts::sanitize_server_detail(s.message())),
+        };
+    }
     match s.code() {
         Code::Unavailable | Code::Cancelled | Code::Unknown | Code::DeadlineExceeded => {
             AppError::CoreUnreachable(format!("{}: {}", s.code(), s.message()))
@@ -291,6 +363,9 @@ fn map_status(s: Status) -> AppError {
                 AppError::CompatibilityModeUnavailable(rest.trim().to_string())
             } else if let Some(rest) = message.strip_prefix(PROTOCOL_UNAVAILABLE_PREFIX) {
                 AppError::ProtocolUnavailable(rest.trim().to_string())
+            } else if let Some(rest) = message.strip_prefix("preflight_blocked|") {
+                let reasons = rest.split('|').next().unwrap_or_default();
+                AppError::PreflightBlocked(reasons.to_string())
             } else {
                 AppError::Internal(format!("{}: {}", s.code(), s.message()))
             }
@@ -316,106 +391,222 @@ fn ui_operation_reply_with_local_id(
     ui
 }
 
+/// 活动 Owned/HTTP 驱动只把显式系统回退交给此处；期限、代际和控制沿用原尝试。
+pub(super) async fn acquire_with_system_fallback<'a, P, S, SFut>(
+    primary: P,
+    generation: u64,
+    action: &'a mut tokio::sync::watch::Receiver<exv_core::atrust_browser::LoginAction>,
+    attempt: &'a exv_core::browser_auth::AuthAttempt,
+    system: S,
+) -> Result<
+    exv_vpn_win32_ipc::browser_session::BrowserSession,
+    exv_core::atrust_browser::BrowserAuthError,
+>
+where
+    P: std::future::Future<
+            Output = Result<
+                exv_vpn_win32_ipc::browser_session::BrowserSession,
+                exv_core::atrust_browser::BrowserAuthError,
+            >,
+        >,
+    S: FnOnce(
+        u64,
+        &'a mut tokio::sync::watch::Receiver<exv_core::atrust_browser::LoginAction>,
+        &'a exv_core::browser_auth::AuthAttempt,
+    ) -> SFut,
+    SFut: std::future::Future<
+            Output = Result<
+                exv_vpn_win32_ipc::browser_session::BrowserSession,
+                exv_core::atrust_browser::BrowserAuthError,
+            >,
+        >,
+{
+    use exv_core::atrust_browser::BrowserAuthError;
+    use exv_core::browser_auth::{AuthControl, AuthErrorCode};
+    match primary.await {
+        Err(BrowserAuthError::Control {
+            control: AuthControl::UseSystemBrowser,
+            ..
+        }) => system(generation, action, attempt)
+            .await
+            .map_err(|mut error| {
+                if let BrowserAuthError::Auth {
+                    error: auth,
+                    compatibility_message,
+                } = &mut error
+                    && auth.code == AuthErrorCode::AcquisitionTimeout
+                {
+                    *compatibility_message = compatibility_message.replacen(
+                        "浏览器登录超时，请重试",
+                        "内嵌登录超时，请重试",
+                        1,
+                    );
+                }
+                error
+            }),
+        result => result,
+    }
+}
+
+/// 普通连接与 Core 认证续程共用原 owner、渠道、凭据与一次预算。
+pub(super) async fn acquire_browser_once<F: Fn(bool, u64)>(
+    requests: &super::connection_request::ConnectionRequests,
+    app: tauri::AppHandle,
+    server: String,
+    mode: String,
+    lease: super::connection_request::ConnectionRequest,
+    school_auto_login: Option<exv_core::school_auto_login::SchoolAutoLogin>,
+    automatic: bool,
+    silent: bool,
+    attempt: exv_core::browser_auth::AuthAttempt,
+    profiles: exv_core::browser_cache_profile::BrowserDataDirs,
+    status: F,
+) -> (
+    Result<
+        exv_vpn_win32_ipc::browser_session::BrowserSession,
+        exv_core::atrust_browser::BrowserAuthError,
+    >,
+    super::connection_request::ConnectionRequest,
+) {
+    let auth_intent = exv_core::browser_auth::AuthIntent::from_auto_login(automatic);
+    let generation = lease.generation();
+    let success_app = app.clone();
+    let interaction = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let success_interaction = interaction.clone();
+    let acquired = requests
+        .acquire_outcome_with_lease(
+            lease,
+            move |active| status(active, generation),
+            move |generation| {
+                if silent { return; }
+                super::commands::emit_browser_authenticated(&success_app, generation);
+                if success_interaction.load(std::sync::atomic::Ordering::Acquire) {
+                    crate::lifecycle::show_main_window(&success_app);
+                }
+            },
+            move |mut action| async move {
+                let mut selected = mode;
+                let mut selected_intent = auth_intent;
+                let mut credentials = school_auto_login;
+                loop {
+                    let result = if matches!(selected.as_str(), "headless" | "embedded") {
+                        super::embedded_auth::acquire_channels(
+                            &app, &server, generation, action.clone(), credentials.as_ref(), requests,
+                            &attempt, true, selected_intent, interaction.clone(), Some(&profiles), silent,
+                        ).await
+                    } else {
+                        super::system_auth::acquire(
+                            &app, &server, profiles.cache_profile(), generation, &mut action, &attempt,
+                            selected_intent, interaction.clone(),
+                        ).await
+                    };
+                    match result {
+                        Err(exv_core::atrust_browser::BrowserAuthError::Control { control: exv_core::browser_auth::AuthControl::UseSystemBrowser, .. }) if !silent => {
+                            selected = "browser".into();
+                            super::commands::emit_browser_channel_selected(&app, generation, &selected, false);
+                        }
+                        Err(exv_core::atrust_browser::BrowserAuthError::FallBackEmbedded) if !silent => {
+                            let saved_requested = requests.auth_preparation_actions(generation).ok()
+                                .is_some_and(|actions| *actions.borrow() == Some(super::connection_request::AuthPreparationAction::TrySavedLogin));
+                            if saved_requested {
+                                credentials = school_auto_login_saved(&server, true, &exv_vpn_win32_config::config_dir());
+                                if credentials.is_none() { return Err(exv_core::atrust_browser::BrowserAuthError::Host("未保存完整的学校用户名和密码".into())); }
+                            }
+                            selected_intent = exv_core::browser_auth::AuthIntent::from_auto_login(saved_requested);
+                            selected = if saved_requested { "headless" } else { "embedded" }.into();
+                            super::commands::emit_browser_channel_selected(&app, generation, &selected, saved_requested);
+                        }
+                        result => return result,
+                    }
+                }
+            },
+        )
+        .await;
+    acquired
+}
+
 impl CoreClient {
-    /// 发起连接（P4-b: KernelControl.Connect）。
-    ///
-    /// R4 事件关联：调用方在组装 intent 时生成 operation_id（16 字节 UUID），
-    /// host 以 lookup_key.operation_id 关联状态事件；同一 id 随 `OperationReply`
-    /// 回传前端，前端据此只让「当前用户操作」的事件驱动连接 UI。
-    pub async fn connect(
-        &self,
-        state: &CoreState,
-        intent: ConnectIntent,
-    ) -> Result<OperationReply, AppError> {
-        self.connect_with_login_status(state, intent, |_| {}).await
+    pub(super) async fn prepare_auth_control(&self, state: &CoreState, request: wire::PrepareAuthControlRequest) -> Result<(), AppError> {
+        let deadline = exv_vpn_win32_ipc::auth_deadline::AuthDeadline::from_monotonic_ns(request.deadline_monotonic_ns)
+            .and_then(|deadline| deadline.tokio_deadline())
+            .map_err(|_| AppError::browser_login_failed("认证准备已超过本次截止时间"))?;
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("auth control: core not dialed".into()))?;
+        let mut client = KernelControlClient::new(channel);
+        tokio::time::timeout_at(deadline, client.prepare_auth_control(request)).await
+            .map_err(|_| AppError::browser_login_failed("准备本地认证控制会话超过本次截止时间"))?
+            .map_err(map_status)?;
+        Ok(())
     }
 
-    pub async fn connect_with_login_status<F: Fn(bool)>(
+    pub(super) async fn auth_receiver_control(&self, state: &CoreState, request: wire::AuthReceiverControlRequest) -> Result<wire::AuthReceiverControlReply, AppError> {
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("auth receiver: core not dialed".into()))?;
+        KernelControlClient::new(channel).auth_receiver_control(request).await.map(tonic::Response::into_inner).map_err(map_status)
+    }
+
+    /// 通用 Core/手动驱动接线：非 aTrust 保持原 wire；aTrust 使用纯手动系统浏览器。
+    /// 正式 Tauri 命令通过 connect_with_auth_status 选择配置的认证通道。
+    pub async fn connect_with_system_browser(
         &self,
         state: &CoreState,
         intent: ConnectIntent,
-        status: F,
     ) -> Result<OperationReply, AppError> {
-        self.connect_with_browser_mode(state, intent, |server, _mode, lease| async move {
-            let root = std::env::var_os("LOCALAPPDATA")
-                .ok_or_else(|| AppError::browser_login_failed("无法定位 EXV 浏览器配置目录"))?;
-            let profile = std::path::PathBuf::from(root).join("EXV/atrust-browser");
-            let (session, lease) = state
-                .browser_login
-                .acquire_with_lease_held(lease, status, move |mut action| async move {
-                    exv_core::atrust_browser::acquire(&server, &profile, &mut action).await
-                })
-                .await
-                .map_err(AppError::browser_login_failed)?;
-            let payload = session
-                .encode()
-                .map(|bytes| bytes.to_vec())
-                .map_err(|_| AppError::browser_login_failed("无法编码浏览器登录会话"))?;
-            Ok((payload, Some(lease)))
-        })
+        self.connect_with_browser_mode(
+            state,
+            intent,
+            |server, _mode, lease, _school_auto_login, automatic, attempt| async move {
+                let (session, lease) = state
+                    .connection_requests
+                    .acquire_with_typed_lease_held(
+                        lease,
+                        |_| {},
+                        move |mut action| async move {
+                            let profile = super::browser_cache_profile::browser_data_dirs()?
+                                .cache_profile()
+                                .to_path_buf();
+                            // §7.10-3 渠道边界：系统浏览器是纯手动渠道，不承担自动填交。
+                            tokio::time::timeout_at(
+                                attempt.deadline(std::time::Duration::from_secs(300)),
+                                exv_core::atrust_browser::acquire_typed_with_intent(
+                                    &server, &profile, &mut action, None,
+                                    exv_core::browser_auth::AuthIntent::from_auto_login(automatic),
+                                ),
+                            ).await.map_err(|_| exv_core::atrust_browser::BrowserAuthError::Host("认证已超过本次截止时间".into()))?
+                        },
+                    )
+                    .await
+                    .map_err(AppError::browser_auth_failed)?;
+                let cache_profile = super::browser_cache_profile::browser_data_dirs().map_err(AppError::browser_login_failed)?.cache_profile().to_path_buf();
+                let payload = encode_browser_candidate(&session, &cache_profile)?;
+                Ok((payload, Some(lease)))
+            },
+        )
         .await
     }
 
     /// 按当前配置的 aTrust 登录模式选择受控 Chrome 或应用管理的独立 WebView。
-    pub async fn connect_with_auth_status<F: Fn(bool)>(
+    pub async fn connect_with_auth_status<F: Fn(bool, u64)>(
         &self,
         state: &CoreState,
         intent: ConnectIntent,
         app: tauri::AppHandle,
         status: F,
     ) -> Result<OperationReply, AppError> {
-        self.connect_with_browser_mode(state, intent, |server, mode, lease| async move {
-            let acquired = if mode == "embedded" {
-                state
-                    .browser_login
-                    .acquire_with_lease_held(lease, status, move |mut action| async move {
-                        match super::embedded_auth::acquire(&app, &server, action.clone()).await {
-                            Err(error) if error == super::embedded_auth::FALLBACK_REQUESTED => {
-                                let root = std::env::var_os("LOCALAPPDATA")
-                                    .ok_or_else(|| "无法定位 EXV 浏览器配置目录".to_owned())?;
-                                let profile = std::path::PathBuf::from(root).join("EXV/atrust-browser");
-                                exv_core::atrust_browser::acquire(&server, &profile, &mut action).await
-                            }
-                            result => result,
-                        }
-                    })
-                    .await
-                    .map_err(AppError::browser_login_failed)?
-            } else {
-                let root = std::env::var_os("LOCALAPPDATA")
-                    .ok_or_else(|| AppError::browser_login_failed("无法定位 EXV 浏览器配置目录"))?;
-                let profile = std::path::PathBuf::from(root).join("EXV/atrust-browser");
-                state
-                    .browser_login
-                    .acquire_with_lease_held(lease, status, move |mut action| async move {
-                        exv_core::atrust_browser::acquire(&server, &profile, &mut action).await
-                    })
-                    .await
-                    .map_err(AppError::browser_login_failed)?
-            };
-            let (session, lease) = acquired;
-            let payload = session
-                .encode()
-                .map(|bytes| bytes.to_vec())
-                .map_err(|_| AppError::browser_login_failed("无法编码浏览器登录会话"))?;
-            Ok((payload, Some(lease)))
-        })
-        .await
-    }
-
-    pub(super) async fn connect_with_browser<F, Fut>(
-        &self,
-        state: &CoreState,
-        intent: ConnectIntent,
-        acquire: F,
-    ) -> Result<OperationReply, AppError>
-    where
-        F: FnOnce(String) -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<u8>, AppError>>,
-    {
-        self.connect_with_browser_mode(state, intent, move |server, _mode, _lease| async move {
-            acquire(server).await.map(|payload| (payload, Some(_lease)))
-        })
+        self.connect_with_browser_mode(
+            state,
+            intent,
+            |server, mode, lease, school_auto_login, automatic, attempt| async move {
+                let profiles = super::browser_cache_profile::browser_data_dirs()
+                    .map_err(AppError::browser_login_failed)?;
+                let cache_profile = profiles.cache_profile().to_path_buf();
+                let (session, lease) = acquire_browser_once(
+                    &state.connection_requests, app, server, mode, lease, school_auto_login,
+                    automatic, false, attempt, profiles, status,
+                ).await;
+                let session = session.map_err(AppError::browser_auth_failed)?;
+                let payload = encode_browser_candidate(&session, &cache_profile)?;
+                Ok((payload, Some(lease)))
+            },
+        )
         .await
     }
 
@@ -426,22 +617,50 @@ impl CoreClient {
         acquire: F,
     ) -> Result<OperationReply, AppError>
     where
-        F: FnOnce(String, String, exv_core::atrust_browser::BrowserLoginLease) -> Fut,
+        F: FnOnce(
+            String,
+            String,
+            crate::kernel::connection_request::ConnectionRequest,
+            Option<exv_core::school_auto_login::SchoolAutoLogin>,
+            bool,
+            exv_core::browser_auth::AuthAttempt,
+        ) -> Fut,
         Fut: std::future::Future<Output = Result<BrowserAcquisition, AppError>>,
     {
         // 只记录固定阶段；不格式化 intent、Cookie、令牌或服务端响应。
         log::info!(target: "exv.connect", "connect.request_started");
-        let browser_generation = state.browser_login.generation();
+        if let Some(mut finished) = state.connection_requests.auth_acquisitions.clear(&state.connection_requests) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !*finished.borrow() {
+                    if finished.changed().await.is_err() { break; }
+                }
+            }).await.map_err(|_| AppError::browser_login_failed("取消浏览器登录超时；当前认证窗口仍在关闭，请稍后重试"))?;
+        }
+        let lease = state
+            .connection_requests
+            .begin(false)
+            .map_err(AppError::browser_login_failed)?;
         let channel = state
             .channel()
             .ok_or_else(|| AppError::CoreUnreachable("connect: core not dialed".to_string()))?;
-        let config = self.config_get(state).await?;
+        let config = tokio::select! {
+            biased;
+            () = lease.cancelled() => return Err(AppError::browser_login_failed("浏览器登录已取消")),
+            result = self.config_get(state) => result?,
+        };
         log::info!(target: "exv.connect", "connect.config_received");
         let atrust = config
             .items
             .iter()
             .any(|item| item.key == "protocol" && item.value == "atrust");
-        let mut browser_lease = None;
+        let operation_id = uuid::Uuid::new_v4().as_bytes().to_vec();
+        // 同一个绝对期限覆盖 Engine 准备、全部认证渠道和最终 Core 提交。
+        let auth_deadline = if atrust {
+            Some(exv_vpn_win32_ipc::auth_deadline::AuthDeadline::after(std::time::Duration::from_secs(300))
+                .map_err(|_| AppError::browser_login_failed("创建本次认证期限失败"))?)
+        } else { None };
+        let mut browser_lease = Some(lease);
+        let mut auth_binding = None;
         let browser_payload = if atrust {
             let server = config
                 .items
@@ -449,32 +668,62 @@ impl CoreClient {
                 .find(|item| item.key == "server")
                 .map(|item| item.value.clone())
                 .ok_or_else(|| AppError::Internal("aTrust 服务器尚未配置".into()))?;
-            let mode = configured_atrust_auth_mode(&config)?.to_owned();
-            // aTrust 只使用浏览器会话，不把 Cisco 密码或其持久化选择混入请求。
+            // Core 归一模式决定本次渠道，兼容字段不再覆盖。
+            let (mode, _) = resolved_atrust_auth_mode(&config)?;
+            let mode = mode.to_owned();
+            auth_binding = Some(wire::AuthBinding {
+                protocol: "atrust".into(),
+                gateway: exv_core::atrust_browser::validated_gateway(&server)
+                    .map_err(AppError::browser_login_failed)?,
+                mode: mode.clone(),
+            });
+            // T4c（2026-09-30 用户授权）：aTrust 自动登录读取与 Cisco 完全共享的单对
+            // 凭据（本次显式输入优先，其次本机已保存对），只用于学校登录页一次填交；
+            // 发往 Core 的连接请求仍不携带任何密码——浏览器会话是唯一认证材料。
+            let school_auto_login = school_auto_login_attempt(&config, &intent);
+            // 冻结授权和本次凭据来源；缺材料只在复用会话耗尽、确需填交时返回既有入口。
+            let automatic = mode == "headless";
             intent.credentials = None;
             intent.secret_payload = None;
-            let lease = state
-                .browser_login
-                .begin_with_generation(mode == "embedded", browser_generation)
+            let lease = browser_lease.take().expect("本请求持有唯一 lease");
+            lease
+                .set_auth_mode(matches!(mode.as_str(), "embedded" | "headless"))
                 .map_err(AppError::browser_login_failed)?;
+            let deadline = auth_deadline.expect("aTrust request has one deadline");
+            lease.set_auth_control_deadline(deadline.monotonic_ns());
+            let local_deadline = deadline.tokio_deadline().map_err(|_| AppError::browser_login_failed("认证准备已超过本次截止时间"))?;
+            tokio::select! {
+                biased;
+                () = lease.cancelled() => return Err(AppError::browser_login_failed("浏览器登录已取消")),
+                result = self.prepare_auth_control(state, wire::PrepareAuthControlRequest {
+                    operation_id: operation_id.clone(), deadline_monotonic_ns: deadline.monotonic_ns(),
+                }) => result?,
+            }
             log::info!(target: "exv.connect", "connect.browser_wait_started");
-            let candidate = acquire(server, mode, lease).await;
+            let candidate = acquire(server, mode, lease, school_auto_login, automatic,
+                exv_core::browser_auth::AuthAttempt::with_deadline(local_deadline)).await;
             if candidate.is_err() {
                 log::warn!(target: "exv.connect", "connect.browser_wait_failed");
             }
             let (payload, lease) = candidate?;
-            browser_lease = lease;
+            browser_lease =
+                Some(lease.ok_or_else(|| AppError::browser_login_failed("连接请求交接已失效"))?);
             log::info!(target: "exv.connect", "connect.browser_payload_received");
             Some(payload)
         } else {
             None
         };
-        let operation_id = uuid::Uuid::new_v4().as_bytes().to_vec();
         let mut body = wire_map::connect_request(&intent, operation_id.clone())?;
         if let Some(payload) = browser_payload {
             body.secret_payload = payload;
         }
+        body.auth_binding = auth_binding;
         let mut request = Request::new(body);
+        if let Some(deadline) = auth_deadline {
+            deadline.remaining().map_err(|_| AppError::browser_login_failed("认证已超过本次截止时间"))?;
+            request.metadata_mut().insert("x-exv-auth-deadline-monotonic-ns", deadline.monotonic_ns().to_string().parse()
+                .map_err(|_| AppError::Internal("编码本次认证期限失败".into()))?);
+        }
         // `persist` 是 host 配置写入的非秘密选择；engine 只接收固定的
         // `{version,username,password}` payload，绝不看到此元数据。
         if intent
@@ -488,7 +737,11 @@ impl CoreClient {
             );
         }
         let browser_commit_guard = if let Some(lease) = browser_lease.as_ref() {
-            let guard = state.browser_commit_gate.lock().await;
+            let guard = tokio::select! {
+                biased;
+                () = lease.cancelled() => return Err(AppError::browser_login_failed("浏览器登录已取消")),
+                guard = state.connection_requests.commit_gate.clone().lock_owned() => guard,
+            };
             if !lease.begin_core_connect() {
                 return Err(AppError::browser_login_failed("浏览器登录已取消"));
             }
@@ -496,73 +749,73 @@ impl CoreClient {
         } else {
             None
         };
-        let mut client = KernelControlClient::new(channel);
-        log::info!(target: "exv.connect", "connect.core_rpc_started");
-        let reply = match client.connect(request).await.map_err(map_status) {
-            Ok(reply) => reply,
-            Err(error) => {
-                log::warn!(target: "exv.connect", "connect.core_rpc_failed");
-                if matches!(error, AppError::CoreUnreachable(_)) {
-                    state.mark_stopped();
-                }
-                return Err(error);
-            }
-        };
-        log::info!(target: "exv.connect", "connect.core_rpc_returned");
-        drop(browser_commit_guard);
-        drop(browser_lease);
-        Ok(ui_operation_reply_with_local_id(
-            reply.into_inner(),
-            &operation_id,
-        ))
+        // RPC 一旦取得提交权就独立持有 lease/gate，调用方 drop 不代表远端撤销。
+        // 不建立队列；Stop 沿用五秒有界等待，超时只报告尚未确认停止。
+        tokio::spawn(async move {
+            let _guard = browser_commit_guard;
+            let _lease = browser_lease;
+            let mut client = KernelControlClient::new(channel);
+            log::info!(target: "exv.connect", "connect.core_rpc_started");
+            let reply = client.connect(request).await.map_err(map_status)?;
+            log::info!(target: "exv.connect", "connect.core_rpc_returned");
+            Ok(ui_operation_reply_with_local_id(
+                reply.into_inner(),
+                &operation_id,
+            ))
+        })
+        .await
+        .map_err(|_| AppError::Internal("连接请求执行任务异常结束；请断开后重试".into()))?
     }
 
     /// 停止连接（P4-b: KernelControl.Stop）。operation_id 关联契约同 connect。
     pub async fn stop(&self, state: &CoreState) -> Result<OperationReply, AppError> {
-        let cancelled_browser_login = state.browser_login.cancel_with_completion();
+        self.stop_with_deadline(state, tokio::time::Instant::now() + STOP_TOTAL_BUDGET).await
+    }
+
+    pub(super) async fn stop_with_deadline(&self, state: &CoreState, deadline: tokio::time::Instant) -> Result<OperationReply, AppError> {
+        let deadline = deadline.min(tokio::time::Instant::now() + STOP_TOTAL_BUDGET);
+        let recovery_auth_owner = state.connection_requests.has_auth_acquisition_owner();
+        if recovery_auth_owner { let _ = state.connection_requests.auth_acquisitions.clear(&state.connection_requests); }
+        let cancelled_browser_login = state.connection_requests.cancel_with_completion();
         if let Some(mut finished) = cancelled_browser_login {
-            let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let closed = tokio::time::timeout_at(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(5)), async {
                 loop {
-                    if *finished.borrow() {
-                        return true;
-                    }
-                    if finished.changed().await.is_err() {
-                        return *finished.borrow();
-                    }
+                    if *finished.borrow() { return true; }
+                    if finished.changed().await.is_err() { return *finished.borrow(); }
                 }
-            })
-            .await
-            .unwrap_or(false);
-            if !closed {
-                return Err(AppError::browser_login_failed(
-                    "取消浏览器登录超时；当前认证窗口仍在关闭，请稍后重试",
-                ));
+            }).await.unwrap_or(false);
+            if !closed { return Err(AppError::browser_login_failed("取消浏览器登录超时；当前认证窗口仍在关闭，请稍后重试")); }
+            if !recovery_auth_owner {
+                return Ok(OperationReply { stop_completion: None, result: OperationResult::Succeeded { effect_id: None, authority_epoch: None }, operation_id: None });
             }
-            return Ok(OperationReply {
-                result: OperationResult::Succeeded {
-                    effect_id: None,
-                    authority_epoch: None,
-                },
-                operation_id: None,
-            });
         }
-        let _browser_commit = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            state.browser_commit_gate.lock(),
-        )
-        .await
-        .map_err(|_| AppError::browser_login_failed("连接提交尚未结束，未确认停止"))?;
-        let channel = state
-            .channel()
-            .ok_or_else(|| AppError::CoreUnreachable("stop: core not dialed".to_string()))?;
+        let gate = std::sync::Arc::clone(&state.connection_requests.commit_gate);
+        let permit = match tokio::time::timeout_at(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(5)), gate.lock_owned()).await {
+            Ok(permit) if tokio::time::Instant::now() < deadline => permit,
+            _ => return Ok(stop_unconfirmed_reply(None, "commit_gate")),
+        };
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("stop: core not dialed".into()))?;
         let operation_id = uuid::Uuid::new_v4().as_bytes().to_vec();
-        let request = wire_map::stop_request(operation_id.clone())?;
-        let mut client = KernelControlClient::new(channel);
-        let reply = client.stop(request).await.map_err(map_status)?;
-        Ok(ui_operation_reply_with_local_id(
-            reply.into_inner(),
-            &operation_id,
-        ))
+        let mut request = Request::new(wire_map::stop_request(operation_id.clone())?);
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() { return Ok(stop_unconfirmed_reply(None, "before_dispatch")); }
+        request.set_timeout(remaining);
+        let reply_id = operation_id.clone();
+        // 用户不再等待不会撤销已提交 Stop 或释放原提交许可。
+        let mut task = tokio::spawn(async move {
+            let _permit = permit;
+            let mut client = KernelControlClient::new(channel);
+            match client.stop(request).await {
+                Ok(reply) => Ok(ui_operation_reply_with_local_id(reply.into_inner(), &reply_id)),
+                Err(status) if status.code() == Code::DeadlineExceeded || status.code() == Code::Cancelled =>
+                    Ok(stop_unconfirmed_reply(Some(&reply_id), &format!("rpc: {status}"))),
+                Err(status) => Err(map_status(status)),
+            }
+        });
+        match tokio::time::timeout_at(deadline, &mut task).await {
+            Ok(result) => result.map_err(|_| AppError::Internal("停止控制任务异常退出，停止未确认。".into()))?,
+            Err(_) => Ok(stop_unconfirmed_reply(Some(&operation_id), "completion")),
+        }
     }
 
     /// 拉取当前运行时快照（P4-b: KernelControl.GetSnapshot），并更新缓存。
@@ -615,6 +868,12 @@ impl CoreClient {
     }
 
     /// 拉取日志历史分片（KernelControl.LogsList 真实接线）。
+    pub(crate) async fn record_auth_diagnostic(&self, state: &CoreState, event: wire::LogEvent) -> Result<bool, AppError> {
+        let channel = state.channel().ok_or_else(|| AppError::CoreUnreachable("auth diagnostic: core not dialed".into()))?;
+        KernelControlClient::new(channel).record_auth_diagnostic(event).await
+            .map(|reply| reply.into_inner().recorded).map_err(map_status)
+    }
+
     pub async fn logs_list(
         &self,
         state: &CoreState,
@@ -690,6 +949,14 @@ impl CoreClient {
                 })
                 .collect(),
             requires_quick_start: inner.requires_quick_start,
+            config_recovery: inner.config_recovery.map(|r| ConfigRecovery {
+                corrupted: r.corrupted,
+                backup_file: r.backup_file,
+            }),
+            read_failure: inner.read_failure.map(|f| ConfigReadFailure {
+                win32_code: f.win32_code,
+                path: f.path,
+            }),
         })
     }
 
@@ -799,9 +1066,71 @@ fn configured_atrust_auth_mode(config: &ConfigPayload) -> Result<&str, AppError>
         .find(|item| item.key == "atrust_auth_mode")
         .map(|item| item.value.as_str())
         .unwrap_or("browser");
-    if matches!(mode, "browser" | "embedded") {
+    // S7 无头认证：新合法值 "headless"（独立新线，见 headless_auth 模块）。
+    if matches!(mode, "browser" | "embedded" | "headless") {
         Ok(mode)
     } else {
         Err(AppError::Internal("aTrust 登录方式配置无效".into()))
     }
 }
+
+/// Core 已完成旧配置迁移；渠道只消费归一后的模式。
+fn resolved_atrust_auth_mode(config: &ConfigPayload) -> Result<(&str, bool), AppError> {
+    Ok((configured_atrust_auth_mode(config)?, false))
+}
+
+/// T4c（2026-09-30 用户授权）：在 `atrust_auto_login` 开启时构建单次学校自动填交
+/// 尝试。凭据来源是与 Cisco 完全共享的单对账密——本次连接显式输入优先，没有显式
+/// 输入时读取本机已保存对（`username` + `remember_password` 封存的 `password`）。
+/// 任一来源缺失都返回 `None`；自动登录开启时调用方（C2 缺凭据前置门）据此以
+/// `credential_required` 拒绝连接并弹统一凭据模态，而非回落人工登录。
+/// 不记录任何凭据内容。
+fn school_auto_login_attempt(
+    config: &ConfigPayload,
+    intent: &ConnectIntent,
+) -> Option<exv_core::school_auto_login::SchoolAutoLogin> {
+    let value = |name: &str| {
+        config
+            .items
+            .iter()
+            .find(|item| item.key == name)
+            .map(|item| item.value.as_str())
+    };
+    if value("atrust_auth_mode") != Some("headless") {
+        return None;
+    }
+    let server = value("server")?.to_owned();
+    if let Some(credentials) = intent.credentials.as_ref()
+        && !credentials.username.trim().is_empty()
+        && !credentials.password.is_empty()
+    {
+        return exv_core::school_auto_login::SchoolAutoLogin::new(
+            &server,
+            credentials.username.trim().to_owned(),
+            credentials.password.clone(),
+        )
+        .ok();
+    }
+    school_auto_login_saved(&server, true, &exv_vpn_win32_config::config_dir())
+}
+
+/// 恢复仅沿已冻结授权、网关和原凭据目录加载；不重读最新设置。
+pub(super) fn school_auto_login_saved(
+    server: &str,
+    automatic: bool,
+    config_dir: &std::path::Path,
+) -> Option<exv_core::school_auto_login::SchoolAutoLogin> {
+    if !automatic {
+        return None;
+    }
+    let bundle =
+        exv_core::credential::load_credentials(config_dir, exv_vpn_win32_config::Protocol::Atrust)
+            .ok()?;
+    let username = bundle.config.username.trim().to_owned();
+    if username.is_empty() {
+        return None;
+    }
+    let password = bundle.password.as_str().to_owned();
+    exv_core::school_auto_login::SchoolAutoLogin::new(&server, username, password).ok()
+}
+

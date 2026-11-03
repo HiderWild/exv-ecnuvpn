@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, inject, onMounted } from "vue";
 import SettingsRow from "./SettingsRow.vue";
+import AuthReceiverRecovery from "./AuthReceiverRecovery.vue";
+import ServiceUpdateNotice from "./ServiceUpdateNotice.vue";
 
 import { commandErrorMessage } from "../lib/command-error";
+import { serviceInternalDiagnostic } from "../lib/service-error";
 import type { ServiceControlAction } from "../lib/ipc";
 import { pushToast } from "../lib/toast";
 import { PRODUCT_RUNTIME_KEY, type ProductRuntime } from "../product/runtime";
@@ -10,7 +13,9 @@ import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../pro
 import {
   isServiceRunning,
   serviceStateLabel,
+  tunnelSessionLabel,
   type ProductService,
+  type ProductStatus,
 } from "../product/types";
 
 const props = withDefaults(
@@ -58,17 +63,16 @@ function friendlyServiceMessage(action: ServiceControlAction | "repair", replyMe
       case "uninstall":
         return "服务卸载完成。";
       case "start":
-        return "服务已启动。";
+        return "服务启动命令已返回成功。";
       case "repair":
-        return "修复完成：服务已重新安装并由 Core 启动。";
+        return "服务修复命令已返回成功。";
       case "rotate_key":
         return "服务密钥已轮换。";
       case "query":
         return replyMessage;
     }
   }
-  // 非标准回复原样透传（rotate_key 的 host 冻结文案已含 fingerprint 与旧 engine
-  // 生效时点注明，走本路径原样呈现）。
+  // 非标准回复原样透传；rotate_key 仅保留兼容词汇，本Darwin面板不提供该入口。
   return replyMessage || "操作完成。";
 }
 
@@ -84,6 +88,17 @@ const serviceLabel = computed(() => {
     case "installed":
       return serviceStateLabel(status.scmState);
   }
+});
+
+/**
+ * S6b 服务真话化：服务状态行同时呈现隧道/会话可用性（如「运行中 · 隧道未建立」）。
+ * 数据源为前端既有连接运行态；运行时不可读（测试替身未提供 state）时不呈现该段。
+ */
+type RuntimeStateReader = { state?: { value?: { status?: ProductStatus } } };
+const tunnelLabel = computed<string | null>(() => {
+  const reader = runtime as RuntimeStateReader | null;
+  const status = reader?.state?.value?.status;
+  return status === undefined ? null : tunnelSessionLabel(status);
 });
 
 /** MED [3]：checkbox 仅在明确「未安装」时可用；未知状态禁用（探测兜底走一次性连接）。 */
@@ -111,19 +126,6 @@ function toggleAutoInstall(event: Event): void {
 
 function messageFor(error: unknown): string {
   return commandErrorMessage(error, "服务操作未完成，请稍后重试。");
-}
-
-/**
- * 服务控制命令的 `internal` 诊断已由 host 清理，可在对应的服务操作 toast 中显示。
- * 这条窄路径不能进入通用格式化器，连接页和凭据模态必须继续只获得稳定中文文案。
- */
-function serviceInternalDiagnostic(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) return null;
-  const detail = error as { kind?: unknown; code?: unknown; message?: unknown };
-  if (typeof detail.kind !== "string" || detail.kind.trim() !== "internal") return null;
-  if (typeof detail.message !== "string" || !detail.message.trim()) return null;
-  const code = typeof detail.code === "string" ? detail.code.trim() : "";
-  return `${detail.message.trim()}${code ? `（错误码：${code}）` : ""}`;
 }
 
 function messageForControlAction(action: ServiceControlAction, error: unknown): string {
@@ -161,7 +163,7 @@ async function runControl(action: ServiceControlAction): Promise<void> {
 
 /**
  * 修复安装（MED [2]）：直接 install（REPAIR 内部已处理运行中服务），不再先停服务——
- * 服务停止视为错误态，修复对策是启动；install 成功后的 start + readiness 由 Core 统一 bootstrap。
+ * 这里只呈现原修复命令结果；服务运行状态由既有独立状态展示负责。
  */
 async function runRepair(): Promise<void> {
   if (serviceOperations === null || anyBusy.value) return;
@@ -170,7 +172,7 @@ async function runRepair(): Promise<void> {
     if (!installReply.ok) {
       throw new Error(installReply.message || "安装服务失败。");
     }
-    pushToast(friendlyServiceMessage("repair", "修复完成：服务已重新安装并由 Core 启动。"), "success");
+    pushToast(friendlyServiceMessage("repair", installReply.message || "操作完成。"), "success");
   } catch (error) {
     pushToast(messageFor(error), "error");
   }
@@ -181,7 +183,16 @@ async function runRepair(): Promise<void> {
   <div class="service-panel" data-testid="service-panel">
     <SettingsRow label="服务状态">
       <span class="service-status" data-testid="service-status">{{ serviceLabel }}</span>
+      <template v-if="tunnelLabel">
+        <span class="service-status__sep" aria-hidden="true">·</span>
+        <span class="service-status" data-testid="service-tunnel-status">{{ tunnelLabel }}</span>
+      </template>
     </SettingsRow>
+
+    <SettingsRow v-if="serviceOperations?.version.value" label="已安装服务版本">
+      <span class="service-status" data-testid="service-version">修订 {{ serviceOperations.version.value.installed ?? '未知' }} · App 随附 {{ serviceOperations.version.value.bundled ?? '未知' }}{{ serviceOperations.version.value.matches_bundle === true ? ' · 文件一致' : '' }}</span>
+    </SettingsRow>
+    <ServiceUpdateNotice :operations="serviceOperations" :busy="busy" />
 
     <div
       v-if="showConnectOptions && service.status.kind === 'not_installed'"
@@ -240,17 +251,9 @@ async function runRepair(): Promise<void> {
         >
           卸载
         </button>
-        <button
-          v-if="service.status.kind === 'installed'"
-          type="button"
-          data-testid="service-rotate-key"
-          :disabled="anyBusy"
-          @click="runControl('rotate_key')"
-        >
-          重置服务密钥
-        </button>
       </div>
     </SettingsRow>
+    <AuthReceiverRecovery v-if="!showConnectOptions" :operation-busy="anyBusy" />
   </div>
 </template>
 
@@ -262,16 +265,22 @@ async function runRepair(): Promise<void> {
 .service-hint {
   margin-bottom: 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
 }
 
 .service-status {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-caption);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+/* S6b 双信息分隔点：仅视觉分隔，读屏时两段文案连续可读。 */
+.service-status__sep {
+  color: var(--text-secondary);
+  font-size: var(--font-size-caption);
 }
 
 .service-option {
@@ -318,7 +327,7 @@ async function runRepair(): Promise<void> {
   border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--accent-on);
-  font-size: 13px;
+  font-size: var(--font-size-body);
   font-weight: 600;
   cursor: pointer;
 }

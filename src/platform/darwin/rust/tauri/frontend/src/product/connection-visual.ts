@@ -4,7 +4,6 @@ import type { ProductUiState } from "./types";
 type ConnectionVisual = { state: "idle" | "working" | "connected"; paused: boolean };
 /** 可视化只投影现有事实；引擎恢复成功不等于 VPN 重新连接成功。 */
 export function connectionVisualFor(state: ProductUiState): ConnectionVisual {
-  if (state.coreStatus === "stopped") return { state: "idle", paused: true };
   if (state.selfHeal.active) {
     if (state.selfHeal.stage === "failed") return { state: "idle", paused: true };
     if (state.selfHeal.stage === "respawning") return { state: "working", paused: false };
@@ -35,5 +34,5 @@ export function useConnectionVisual(state: () => ProductUiState) {
     window.removeEventListener("focus", resume);
   });
   const visual = computed(() => connectionVisualFor(state()));
-  return { visualState: computed(() => visual.value.state), paused: computed(() => hidden.value || unfocused.value || visual.value.paused) };
+  return { viewportPaused: computed(() => hidden.value || unfocused.value), visualState: computed(() => visual.value.state), paused: computed(() => hidden.value || unfocused.value || visual.value.paused) };
 }

@@ -1,4 +1,5 @@
 
+
 //
 // This file is the canonical wire authority for the KernelControl service in
 // the exv.vpn.v1 namespace. It imports the shared types from common.proto and
@@ -33,17 +34,39 @@ syntax = "proto3";
 package exv.vpn.v1;
 
 import "exv/v1/common.proto";
+import "exv/v1/helper_control.proto";
 
 // A connect request. The intent captures the full lookup key, request digest,
 // and connection profile; any secret the scenario requires is carried as
 // one-shot bytes and cleared immediately after it is admitted.
+// 非秘密认证候选绑定；只在本次请求内传递，不落盘。
+message AuthBinding {
+  string protocol = 1;
+  string gateway = 2;
+  string mode = 3;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
 message ConnectRequest {
   ConnectIntent intent = 1;
   bytes secret_payload = 2;  // one-shot bytes, optional
+  AuthBinding auth_binding = 4; // tag 3 永久保留；旧调用方缺省不表示已核对
   // Tag 3 was vacated by the R1 removal of `auto_install_service` (install/service
   // and connect are independent routes). Recorded as reserved per tag discipline;
   // never reused. See the R1 removal unfreeze record.
   reserved 3;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
+// 仅编码进原 InteractionResponse.response_payload 的一次性 aTrust 认证回执。
+// candidate 沿原宿主候选格式；failed 沿原真实错误字段，空 oneof 表示没有结果。
+message AtrustAuthAcquisitionResult {
+  oneof result {
+    bytes candidate = 1;
+    VpnError failed = 2;
+  }
   reserved 1000 to 1999;
   reserved 9000 to 9999;
 }
@@ -109,9 +132,32 @@ message WatchStatsRequest {
 // Kernel lifecycle control service. Maps to Architecture section 9.1.
 // The acceptance controller must authenticate and hold a bootstrap capability
 // before triggering connect/stop/reconcile or submitting a secret.
+// 当前已接纳的连接 operation；只用于关联，不替代既有传输认证。
+message KernelLatencyRefreshRequest {
+  bytes operation_id = 1;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
+// accepted 仅表示当前探测 owner 已受理；RTT 仍经现有 Stats 流到达。
+// 未连接或归属不符返回 FailedPrecondition；协议/端点不支持返回 Unimplemented。
+message KernelLatencyRefreshReply {
+  bool accepted = 1;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
 service KernelControl {
+// 请求当前 Cisco 探测 owner 刷新；不等待回包，不改变连接状态。
+rpc TriggerLatencyRefresh(KernelLatencyRefreshRequest)
+    returns (KernelLatencyRefreshReply);
+
 // Connect begins a connect attempt.
 rpc Connect(ConnectRequest) returns (OperationReply);
+
+// 取得并保留控制会话；认证产物提交前不建立 VPN 数据面。
+rpc PrepareAuthControl(PrepareAuthControlRequest) returns (OperationReply);
+rpc AuthReceiverControl(AuthReceiverControlRequest) returns (AuthReceiverControlReply);
 
 // RespondInteraction answers an awaiting interaction prompt.
 rpc RespondInteraction(InteractionResponse) returns (OperationReply);
@@ -147,6 +193,10 @@ rpc LogsList(LogsListRequest) returns (LogsListReply);
 
 // LogsClear truncates the aggregated log file and resets the cursor.
 rpc LogsClear(LogsClearRequest) returns (LogsClearReply);
+
+// App authentication diagnostics enter the existing Core-owned log aggregate.
+// Best-effort only; this operation does not change authentication state.
+rpc RecordAuthDiagnostic(LogEvent) returns (RecordAuthDiagnosticReply);
 
 // ConfigGet returns the current product configuration (non-secret fields only).
 rpc ConfigGet(ConfigGetRequest) returns (ConfigPayload);
@@ -218,7 +268,10 @@ message ServiceStatusQuery {}
 message ServiceInstall {}
 
 // Uninstall the engine SCM service.
-message ServiceUninstall {}
+message ServiceUninstall {
+  // macOS完整卸载恢复官方认证服务并清理本用户恢复记录；普通服务卸载保持 false。
+  bool full_cleanup = 1;
+}
 
 // Start the engine SCM service.
 message ServiceStart {}
@@ -235,3 +288,13 @@ message ServiceControlReply {
   reserved 1000 to 1999;
   reserved 9000 to 9999;
 }
+
+message PrepareAuthControlRequest {
+  bytes operation_id = 1;
+  uint64 deadline_monotonic_ns = 2;
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
+// Acknowledges a bounded authentication diagnostic accepted by Core.
+message RecordAuthDiagnosticReply { bool recorded = 1; }

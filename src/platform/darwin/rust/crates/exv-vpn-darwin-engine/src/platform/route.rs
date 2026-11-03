@@ -42,9 +42,9 @@ pub struct AppliedRoute {
 pub enum ControlRouteUpdate {
     /// 已有精确路由与本次物理网关一致，未写 PF_ROUTE。
     Reused,
-    /// 原条目不存在，已创建并回读确认。
+    /// 原条目不存在，创建操作及其内核回执成功。
     Added,
-    /// 原条目存在但下一跳或接口不同，已变更并回读确认。
+    /// 原条目存在但下一跳或接口不同，变更操作及其内核回执成功。
     Changed,
 }
 
@@ -222,9 +222,13 @@ pub fn change(route: &AppliedRoute) -> Result<(), PlatformError> {
 /// 调用方在清理路径可把 ESRCH 视为已达目的状态）。
 pub fn delete(route: &AppliedRoute) -> Result<(), PlatformError> {
     let socket = RouteSocket::open()?;
-    match write_and_ack_inner(&socket, &route_message(RTM_DELETE, 1, route), 300) {
+    normalize_delete_result(write_and_ack_inner(&socket, &route_message(RTM_DELETE, 1, route), 300))
+}
+
+fn normalize_delete_result(result: Result<(), PlatformError>) -> Result<(), PlatformError> {
+    match result {
         Ok(()) => Ok(()),
-        Err(PlatformError::Route("ACK", error)) if error.raw_os_error() == Some(libc::ESRCH) => {
+        Err(PlatformError::Route("ACK" | "WRITE", error)) if error.raw_os_error() == Some(libc::ESRCH) => {
             Ok(())
         }
         Err(error) => Err(error),

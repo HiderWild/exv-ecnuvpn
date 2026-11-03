@@ -14,20 +14,27 @@ use zeroize::Zeroize;
 
 use crate::{
     elevation::current_core_credentials,
-    engine_client::{ObserveEndpoint, ObserveError, connect_authenticated_engine},
+    engine_client::{ObserveEndpoint, ObserveError, authenticate_connected_engine},
     service_lifecycle::run_oneshot_elevation,
     service_status::SERVICE_ENGINE_SOCKET_PATH,
 };
 
-const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(30);
+const BOOTSTRAP_DIAL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// 固定 Engine 控制会话的稳定错误。
 #[derive(Debug)]
 pub enum EngineLifecycleError {
     ServiceAgent,
+    ServiceConnect(std::io::Error),
     RuntimeDir(RuntimeDirError),
     Ticket(TicketError),
     Bootstrap,
+    /// 原启动连接预算到期；保最后已返回的IO，pending不冒充OS超时。
+    BootstrapConnectDeadline {
+        last_connect: Option<std::io::Error>,
+        connect_pending: bool,
+    },
     Observe(ObserveError),
 }
 
@@ -55,7 +62,7 @@ impl EngineSessionKind {
 
 /// Core 在一次 Engine 生命周期中持有的唯一 Common 控制通道。
 ///
-/// 该会话从 Engine 的 `Ready` record 建立，到 [`Self::close`] 读取终态 record 为止。
+/// 会话持有已认证 client；[`Self::close`] 只释放该 client，不读取进程终态。
 /// 它只承载已经批准的 Common `ObserveOwnedState`、`ApplyTunnel` 和 `StopTunnel`；不在
 /// 此处实现 CSTP、utun 或网络数据通路。
 pub struct EngineControlSession {
@@ -73,10 +80,40 @@ pub struct EngineControlSession {
 /// 会话槽位被 `&mut` 借用（连接/停止路径）期间 ticker 仍可独立发 `KeepAlive`
 /// ——同一 channel 上的独立 RPC，不与槽位互斥。
 pub struct EngineHeartbeatHandle {
-    client:
-        exv_vpn_wire::generated::helper_control_client::HelperControlClient<
-            tonic::transport::Channel,
-        >,
+    client: exv_vpn_wire::generated::helper_control_client::HelperControlClient<
+        tonic::transport::Channel,
+    >,
+}
+
+/// 只克隆当前已认证控制通道；Core 在释放会话槽位锁后调用刷新 RPC。
+pub struct EngineLatencyRefreshHandle {
+    client: wire::helper_control_client::HelperControlClient<tonic::transport::Channel>,
+}
+
+/// 只克隆已认证通道；代理政策观察不持有连接/停止会话槽位。
+pub(crate) struct EngineProxyObserveHandle {
+    client: wire::helper_control_client::HelperControlClient<tonic::transport::Channel>,
+}
+
+impl EngineProxyObserveHandle {
+    pub(crate) async fn observe(&mut self) -> Result<wire::ObserveOwnedStateReply, tonic::Status> {
+        self.client
+            .observe_owned_state(wire::ObserveOwnedStateRequest { lookup_key: None })
+            .await
+            .map(tonic::Response::into_inner)
+    }
+}
+
+impl EngineLatencyRefreshHandle {
+    pub async fn trigger_latency_refresh(
+        &mut self,
+        operation_id: Vec<u8>,
+    ) -> Result<wire::HelperLatencyRefreshReply, tonic::Status> {
+        self.client
+            .trigger_latency_refresh(wire::HelperLatencyRefreshRequest { operation_id })
+            .await
+            .map(tonic::Response::into_inner)
+    }
 }
 
 impl EngineHeartbeatHandle {
@@ -90,7 +127,9 @@ impl EngineHeartbeatHandle {
         tick: u64,
     ) -> Result<wire::KeepAliveReply, EngineLifecycleError> {
         self.client
-            .keep_alive(wire::KeepAliveRequest { monotonic_tick: tick })
+            .keep_alive(wire::KeepAliveRequest {
+                monotonic_tick: tick,
+            })
             .await
             .map(tonic::Response::into_inner)
             .map_err(|error| EngineLifecycleError::Observe(ObserveError::Rpc(error)))
@@ -98,6 +137,17 @@ impl EngineHeartbeatHandle {
 }
 
 impl EngineControlSession {
+    pub(crate) fn proxy_observe_handle(&self) -> Option<EngineProxyObserveHandle> {
+        self.client.as_ref().map(|client| EngineProxyObserveHandle { client: client.clone() })
+    }
+    #[must_use]
+    pub fn latency_refresh_handle(&self) -> Option<EngineLatencyRefreshHandle> {
+        self.client
+            .as_ref()
+            .map(|client| EngineLatencyRefreshHandle {
+                client: client.clone(),
+            })
+    }
     /// 读取当前 Engine owned-state。
     ///
     /// # Errors
@@ -109,6 +159,19 @@ impl EngineControlSession {
         self.client_mut()?
             .observe_owned_state(wire::ObserveOwnedStateRequest { lookup_key: None })
             .await
+            .map(tonic::Response::into_inner)
+            .map_err(|error| EngineLifecycleError::Observe(ObserveError::Rpc(error)))
+    }
+
+    /// 固定官方认证接收端的专用控制面，复用当前已认证通道。
+    ///
+    /// # Errors
+    ///
+    /// 返回本地认证通道或宿主动作失败。
+    pub async fn auth_receiver_control(
+        &mut self, request: wire::AuthReceiverControlRequest,
+    ) -> Result<wire::AuthReceiverControlReply, EngineLifecycleError> {
+        self.client_mut()?.auth_receiver_control(request).await
             .map(tonic::Response::into_inner)
             .map_err(|error| EngineLifecycleError::Observe(ObserveError::Rpc(error)))
     }
@@ -198,7 +261,7 @@ impl EngineControlSession {
     }
 
     /// 本次会话对应 Engine 进程的 pid（bootstrap `Ready` record 中的真实 pid；
-    /// 服务形态常驻 engine pid 未知，恒 0——liveness 走端点探测）。
+    /// 服务形态常驻 engine pid 未知，恒 0）。
     #[must_use]
     pub fn engine_pid(&self) -> u32 {
         self.engine_pid
@@ -217,18 +280,16 @@ impl EngineControlSession {
     /// client 已关闭（`close` 后）时返回 `None`。
     #[must_use]
     pub fn heartbeat_handle(&self) -> Option<EngineHeartbeatHandle> {
-        self.client
-            .as_ref()
-            .map(|client| EngineHeartbeatHandle {
-                client: client.clone(),
-            })
+        self.client.as_ref().map(|client| EngineHeartbeatHandle {
+            client: client.clone(),
+        })
     }
 
-    /// 关闭 Common client；Engine 会在唯一已认证连接结束后自行退出并清理运行时目录。
+    /// 释放本对象的 Common client，不等待 Engine 进程或生成 Stop 回执。
     ///
     /// # Errors
     ///
-    /// 当前实现释放 client 后固定返回 `Ok`；保留 `Result` 以承载后续有界终态读取。
+    /// 当前实现释放 client 后固定返回 `Ok`，此返回不表示资源清理完成。
     pub fn close(mut self) -> Result<(), EngineLifecycleError> {
         drop(self.client.take());
         Ok(())
@@ -248,7 +309,33 @@ impl EngineControlSession {
 
 impl std::fmt::Display for EngineLifecycleError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::ServiceConnect(error) = self {
+            return write!(formatter, "service Engine connect failed: {error} (errno={:?})", error.raw_os_error());
+        }
+        if let Self::BootstrapConnectDeadline {
+            last_connect,
+            connect_pending,
+        } = self
+        {
+            write!(
+                formatter,
+                "Darwin Engine connect bootstrap deadline expired budget={}s connect_pending={connect_pending}",
+                BOOTSTRAP_DEADLINE.as_secs(),
+            )?;
+            if let Some(error) = last_connect {
+                write!(
+                    formatter,
+                    " last_connect kind={:?} errno={:?}: {error}",
+                    error.kind(),
+                    error.raw_os_error(),
+                )?;
+            } else {
+                formatter.write_str("; no connect IO error returned before deadline")?;
+            }
+            return Ok(());
+        }
         let message = match self {
+            Self::ServiceConnect(_) | Self::BootstrapConnectDeadline { .. } => unreachable!(),
             Self::ServiceAgent => "Darwin service agent could not start Engine",
             Self::RuntimeDir(_) => "Darwin Engine runtime directory failed",
             Self::Ticket(_) => "Darwin Engine ticket bootstrap failed",
@@ -259,12 +346,19 @@ impl std::fmt::Display for EngineLifecycleError {
     }
 }
 
-impl std::error::Error for EngineLifecycleError {}
+impl std::error::Error for EngineLifecycleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BootstrapConnectDeadline { last_connect: Some(error), .. } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// 启动固定 Engine，并返回与其唯一对应的已认证 Common 控制会话。
 ///
-/// 调用者必须在完成本次业务请求后调用 [`EngineControlSession::close`]，以读取固定
-/// bootstrap 的终态 record。该函数不发送连接、CSTP、utun 或网络请求。
+/// 调用者在完成本次业务请求后调用 [`EngineControlSession::close`] 释放本对象的client。
+/// close不读取bootstrap终态；实际停止由既有Stop RPC回执报告。
 ///
 /// # Errors
 ///
@@ -292,12 +386,11 @@ pub async fn launch_fixed_engine_session() -> Result<EngineControlSession, Engin
     let engine_pid = {
         let runtime_dir_path = runtime_dir.as_path().to_path_buf();
         let core_pid = credentials.pid();
-        let launched = tokio::task::spawn_blocking(move || {
-            run_oneshot_elevation(&runtime_dir_path, core_pid)
-        })
-        .await
-        .map_err(|_| EngineLifecycleError::ServiceAgent)
-        .and_then(|outcome| outcome.map_err(|_| EngineLifecycleError::ServiceAgent));
+        let launched =
+            tokio::task::spawn_blocking(move || run_oneshot_elevation(&runtime_dir_path, core_pid))
+                .await
+                .map_err(|_| EngineLifecycleError::ServiceAgent)
+                .and_then(|outcome| outcome.map_err(|_| EngineLifecycleError::ServiceAgent));
         match launched {
             Ok(pid) => pid,
             Err(error) => {
@@ -307,15 +400,15 @@ pub async fn launch_fixed_engine_session() -> Result<EngineControlSession, Engin
             }
         }
     };
-    wait_for_engine_socket(socket_path.as_path()).await?;
-    // The root Engine owns the sealed runtime and its final cleanup from this point.
+    // 计时起点沿原启动等待位置；只在原预算内完成首次真实connect。
+    let deadline = tokio::time::Instant::now() + BOOTSTRAP_DEADLINE;
+    // 提权成功后Engine拥有ticket/runtime；释放本句柄不unlink，dial失败也不补删。
     drop(runtime_dir);
-
-    let client = connect_authenticated_engine(ObserveEndpoint::new(
-        socket_path,
-        ExpectedPeer::new(0, engine_pid),
-        auth_key,
-    ))
+    let stream = dial_engine_until_bootstrap_deadline(&socket_path, deadline).await?;
+    let client = authenticate_connected_engine(
+        ObserveEndpoint::new(socket_path, ExpectedPeer::new(0, engine_pid), auth_key),
+        stream,
+    )
     .await
     .map_err(EngineLifecycleError::Observe)?;
     Ok(EngineControlSession {
@@ -336,37 +429,100 @@ pub async fn launch_fixed_engine_session() -> Result<EngineControlSession, Engin
 ///
 /// 固定端点不可连、server peer uid 不符或 tonic channel 建立失败返回
 /// [`EngineLifecycleError::Observe`]（调用方按过渡兼容回退会话路径）。
-pub async fn connect_service_engine_session() -> Result<EngineControlSession, EngineLifecycleError> {
-    let socket_path = SocketPath::new(SERVICE_ENGINE_SOCKET_PATH)
-        .map_err(|_| EngineLifecycleError::Bootstrap)?;
-    let stream = tokio::net::UnixStream::connect(socket_path.as_path())
-        .await
-        .map_err(|_| {
-            EngineLifecycleError::Observe(ObserveError::Transport(
-                exv_vpn_darwin_ipc::auth::PreauthError::Transport,
-            ))
-        })?;
+pub async fn connect_service_engine_session() -> Result<EngineControlSession, EngineLifecycleError>
+{
+    connect_service_engine_session_with_deadline(None).await
+}
+
+pub(crate) async fn connect_service_engine_session_with_deadline(
+    deadline: Option<tokio::time::Instant>,
+) -> Result<EngineControlSession, EngineLifecycleError> {
+    let socket_path =
+        SocketPath::new(SERVICE_ENGINE_SOCKET_PATH).map_err(|_| EngineLifecycleError::Bootstrap)?;
+    let stream = match deadline {
+        Some(deadline) => dial_engine_until_bootstrap_deadline(&socket_path, deadline).await?,
+        None => tokio::net::UnixStream::connect(socket_path.as_path()).await
+            .map_err(EngineLifecycleError::ServiceConnect)?,
+    };
     let peer_lookup = SystemPeerLookup;
     let (channel, _verified_engine) =
         connect_service_authenticated_channel(stream, 0, &peer_lookup)
             .await
             .map_err(|error| EngineLifecycleError::Observe(ObserveError::Transport(error)))?;
     Ok(EngineControlSession {
-        client: Some(exv_vpn_wire::generated::helper_control_client::HelperControlClient::new(
-            channel,
-        )),
+        client: Some(
+            exv_vpn_wire::generated::helper_control_client::HelperControlClient::new(channel),
+        ),
         engine_pid: 0,
         kind: EngineSessionKind::Service,
     })
 }
 
-async fn wait_for_engine_socket(socket: &std::path::Path) -> Result<(), EngineLifecycleError> {
-    let deadline = tokio::time::Instant::now() + BOOTSTRAP_DEADLINE;
-    while !socket.exists() {
+/// 同一原预算内只重试尚未完成的connect；首次成功后交原认证，不重发材料。
+async fn dial_engine_until_bootstrap_deadline(
+    socket: &SocketPath,
+    deadline: tokio::time::Instant,
+) -> Result<tokio::net::UnixStream, EngineLifecycleError> {
+    dial_engine_until_bootstrap_deadline_with(deadline, || {
+        tokio::net::UnixStream::connect(socket.as_path())
+    })
+    .await
+}
+
+/// 原dial动作的局部接缝，测试注入该次IO/时间；没有第二预算或重试层。
+async fn dial_engine_until_bootstrap_deadline_with<T, F, Fut>(
+    deadline: tokio::time::Instant,
+    mut connect: F,
+) -> Result<T, EngineLifecycleError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    connect_until_bootstrap_deadline_with(deadline, || {
+        let attempt = connect();
+        async move { attempt.await.map_err(EngineLifecycleError::ServiceConnect) }
+    }).await.map_err(|error| match error {
+        EngineLifecycleError::ServiceConnect(source) =>
+            EngineLifecycleError::Observe(ObserveError::Connect(source)),
+        other => other,
+    })
+}
+
+/// 同一个实际连接的有限重试内核；服务恢复沿原请求期限复用，不重发恢复动作。
+pub(crate) async fn connect_until_bootstrap_deadline_with<T, F, Fut>(
+    deadline: tokio::time::Instant,
+    mut connect: F,
+) -> Result<T, EngineLifecycleError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, EngineLifecycleError>>,
+{
+    let mut last_connect = None;
+    loop {
         if tokio::time::Instant::now() >= deadline {
-            return Err(EngineLifecycleError::Bootstrap);
+            return Err(EngineLifecycleError::BootstrapConnectDeadline {
+                last_connect,
+                connect_pending: false,
+            });
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        match tokio::time::timeout_at(deadline, connect()).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(EngineLifecycleError::ServiceConnect(error)))
+                if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ECONNREFUSED)) =>
+            {
+                last_connect = Some(error);
+            }
+            Ok(Err(error)) => {
+                return Err(error);
+            }
+            Err(_) => {
+                return Err(EngineLifecycleError::BootstrapConnectDeadline {
+                    last_connect,
+                    connect_pending: true,
+                });
+            }
+        }
+        let next_attempt = tokio::time::Instant::now() + BOOTSTRAP_DIAL_INTERVAL;
+        tokio::time::sleep_until(next_attempt.min(deadline)).await;
     }
-    Ok(())
 }

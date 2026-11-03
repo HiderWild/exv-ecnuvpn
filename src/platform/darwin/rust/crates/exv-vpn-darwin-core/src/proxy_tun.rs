@@ -424,6 +424,8 @@ pub(crate) struct ProxyTunCache {
     refresh_allowed: AtomicBool,
     refreshed_at: Mutex<Option<Instant>>,
     system_proxy: Mutex<Option<wire::SystemProxyDetection>>,
+    /// 仅由当前已接纳 operation 的 Engine 有效回读更新；本机检测不能伪造此事实。
+    engine_proxy_merged: AtomicBool,
 }
 
 impl ProxyTunCache {
@@ -438,6 +440,7 @@ impl ProxyTunCache {
             refresh_allowed: AtomicBool::new(true),
             refreshed_at: Mutex::new(None),
             system_proxy: Mutex::new(None),
+            engine_proxy_merged: AtomicBool::new(false),
         }
     }
 
@@ -457,10 +460,17 @@ impl ProxyTunCache {
         }
     }
 
-    pub(crate) fn is_production(&self) -> bool { self.dynamic }
-
     pub(crate) fn system_proxy(&self) -> Option<wire::SystemProxyDetection> {
-        lock_recover(&self.system_proxy).clone()
+        let mut value = lock_recover(&self.system_proxy).clone();
+        if let Some(value) = value.as_mut() {
+            value.bypass_merged = value.mode == "manual"
+                && self.engine_proxy_merged.load(Ordering::Acquire);
+        }
+        value
+    }
+
+    pub(crate) fn set_engine_proxy_merged(&self, merged: bool) {
+        self.engine_proxy_merged.store(merged, Ordering::Release);
     }
 
     /// 探测一次并刷新缓存；探测失败 → `None`（不重试、不阻塞调用方——有界只读系统

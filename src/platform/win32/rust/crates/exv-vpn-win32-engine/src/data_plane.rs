@@ -47,6 +47,7 @@ use crate::stats::StatsRegistry;
 use crate::status::{StatusEvent, StatusPublisher};
 
 mod raw_packets;
+pub use raw_packets::RawPacketSnapshot;
 
 /// Wintun ring capacity for the engine data plane（同 acceptance `WINTUN_PROBE_RING_CAPACITY`）。
 pub const WINTUN_RING_CAPACITY: u32 = 1 << 20;
@@ -836,7 +837,7 @@ impl EngineDataPlane {
         read_channel: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
         log: Option<Arc<crate::log_sink::LogSink>>,
         aux: DataPlaneAux,
-    ) -> EngineDataPlaneThreads {
+    ) -> Result<EngineDataPlaneThreads, DataPlaneSpawnError> {
         let reader_stop = Arc::new(AtomicBool::new(false));
         let writer_stop = Arc::new(AtomicBool::new(false));
         let ring_received_bytes = Arc::new(AtomicU64::new(0));
@@ -844,9 +845,24 @@ impl EngineDataPlane {
         let failure_reported = Arc::new(AtomicBool::new(false));
         let active_operation_id = Arc::new(Mutex::new(aux.operation_id.clone()));
         let activated = Arc::new(AtomicBool::new(false));
+        // 首个线程启动前就有同一组 owner，部分成功也不 detach。
+        let mut threads = EngineDataPlaneThreads {
+            activated: activated.clone(),
+            failure_reported: failure_reported.clone(),
+            active_operation_id: active_operation_id.clone(),
+            reader_stop: reader_stop.clone(),
+            writer_stop: writer_stop.clone(),
+            reader: None,
+            writer: None,
+            ring_received_bytes: ring_received_bytes.clone(),
+            ring_sent_bytes: ring_sent_bytes.clone(),
+            raw_packet_stats: None,
+        };
         let reader_activated = activated.clone();
         let writer_activated = activated.clone();
-        let reader_guard = DataPlaneWorkerGuard { raw_packets: false, stop: reader_stop.clone(),
+        let reader_guard = DataPlaneWorkerGuard {
+            raw_packets: false,
+            stop: reader_stop.clone(),
             operation_id: active_operation_id.clone(),
             reported: failure_reported.clone(), worker: "wintun_reader", aux: aux.clone(), log: log.clone() };
         let writer_guard = DataPlaneWorkerGuard { raw_packets: false, stop: writer_stop.clone(),
@@ -859,7 +875,7 @@ impl EngineDataPlane {
         let reader_stop_flag = Arc::clone(&reader_stop);
         let ring_recv_counter = Arc::clone(&ring_received_bytes);
         let reader_stats = aux.stats.clone();
-        let reader = std::thread::spawn(move || {
+        if let Err(error) = threads.spawn_worker(true, "wintun_reader", move || {
             let guard = reader_guard;
             if !wait_for_data_plane_activation(&reader_activated, &reader_stop_flag) { return; }
             'reader: while !reader_stop_flag.load(Ordering::SeqCst) {
@@ -916,7 +932,7 @@ impl EngineDataPlane {
                     }
                 }
             }
-        });
+        }) { return Err(DataPlaneSpawnError { message: error, threads }); }
 
         // ---- writer 线程：read_channel（TLS）→ ring 计数 → session.send（ring）。 ----
         let writer_session = Arc::clone(&self.session);
@@ -932,7 +948,7 @@ impl EngineDataPlane {
         // Failed 事件；`None` 发布端 = 不接线，行为与 C2 之前一致）。
         let writer_operation_id = aux.operation_id.clone();
         // T3b（F6）：数据面掉线信号发射端（sweeper 清 live；`None` = 未接线）。
-        let writer = std::thread::spawn(move || {
+        if let Err(error) = threads.spawn_worker(false, "wintun_writer", move || {
             let failure = writer_guard;
             if !wait_for_data_plane_activation(&writer_activated, &writer_stop_flag) { return; }
             // T1 latency probe：状态机（DPD→ping fallback + 手动刷新标记）。
@@ -1112,19 +1128,9 @@ impl EngineDataPlane {
                 session_end.as_ref(),
             );
             diagnostics.emit(&writer_log, &writer_operation_id, "writer-exit");
-        });
+        }) { return Err(DataPlaneSpawnError { message: error, threads }); }
 
-        EngineDataPlaneThreads {
-            activated,
-            failure_reported,
-            active_operation_id,
-            reader_stop,
-            writer_stop,
-            reader: Some(reader),
-            writer: Some(writer),
-            ring_received_bytes,
-            ring_sent_bytes,
-        }
+        Ok(threads)
     }
 }
 
@@ -1151,9 +1157,50 @@ pub struct EngineDataPlaneThreads {
     ring_received_bytes: Arc<AtomicU64>,
     /// ring 发送字节计数（engine 数据面计数器；证据读取，不再来自 helper）。
     ring_sent_bytes: Arc<AtomicU64>,
+    /// 仅原始包桥接记录；CSTP 数据面不生成该快照。
+    raw_packet_stats: Option<Arc<raw_packets::RawPacketStats>>,
+}
+
+/// 部分 spawn 失败仍携带已经取得的线程组，交还原 LiveTunnel 统一 stop/join。
+pub struct DataPlaneSpawnError {
+    pub message: String,
+    pub threads: EngineDataPlaneThreads,
+}
+
+fn spawn_data_plane_worker(
+    name: &'static str,
+    work: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if SPAWN_FAILURE.with(|failure| failure.get() == Some(name)) {
+        return Err(std::io::Error::other("isolated worker spawn failure"));
+    }
+    std::thread::Builder::new().name(name.into()).spawn(work)
 }
 
 impl EngineDataPlaneThreads {
+    /// 累计原始包丢弃与等待；运行中各字段独立采样，join 后数值稳定。
+    #[must_use]
+    pub fn raw_packet_snapshot(&self) -> Option<RawPacketSnapshot> {
+        self.raw_packet_stats.as_ref().map(|stats| stats.snapshot())
+    }
+
+    fn spawn_worker(
+        &mut self,
+        reader: bool,
+        name: &'static str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> Result<(), String> {
+        let worker =
+            spawn_data_plane_worker(name, work).map_err(|error| format!("{name}:{error}"))?;
+        if reader {
+            self.reader = Some(worker);
+        } else {
+            self.writer = Some(worker);
+        }
+        Ok(())
+    }
+
     /// 只有 owner 安装会话并发布 Connected 后才允许工作线程处理包或报告失败。
     pub fn activate(&self) {
         self.activated.store(true, Ordering::Release);
@@ -1195,18 +1242,33 @@ impl EngineDataPlaneThreads {
     /// 幂等：重复调用 / `Drop` 兜底安全（线程句柄 `take()` 后为空）。
     #[must_use]
     pub fn stop_and_join(&mut self) -> (u64, u64) {
-        self.reader_stop.store(true, Ordering::SeqCst);
-        self.writer_stop.store(true, Ordering::SeqCst);
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-        if let Some(writer) = self.writer.take() {
-            let _ = writer.join();
-        }
+        let _ = self.stop_and_join_result();
         (
             self.ring_received_bytes.load(Ordering::SeqCst),
             self.ring_sent_bytes.load(Ordering::SeqCst),
         )
+    }
+
+    /// 同一停止/join 原语的可观察结果；已终止线程的 panic 不冒充成功。
+    pub(crate) fn stop_and_join_result(&mut self) -> Result<(), String> {
+        self.reader_stop.store(true, Ordering::SeqCst);
+        self.writer_stop.store(true, Ordering::SeqCst);
+        let mut failed = Vec::new();
+        if let Some(reader) = self.reader.take() {
+            if reader.join().is_err() {
+                failed.push("reader_join");
+            }
+        }
+        if let Some(writer) = self.writer.take() {
+            if writer.join().is_err() {
+                failed.push("writer_join");
+            }
+        }
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(failed.join("; "))
+        }
     }
 
     /// 当前累计 ring 收到字节（存活线程的实时计数器；`stop_and_join` 后不再变化）。
@@ -1291,6 +1353,10 @@ fn data_plane_drop_error() -> generated::VpnError {
             namespace: generated::NativeErrorNamespace::Win32 as i32,
             code: 0,
         }),
+        // T-15 掉线：断开语义由 stage=DataPlane 判据承载（阶段① 已消费），不设
+        // VpnError reason id（词表 §2.3）。
+        reason: String::new(),
+        operation_detail: None,
     }
 }
 

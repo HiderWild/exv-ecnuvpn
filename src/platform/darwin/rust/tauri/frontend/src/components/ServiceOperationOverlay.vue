@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, ref, watch } from "vue";
+import { computed, inject } from "vue";
+import { useDialogFocus } from "./use-dialog-focus";
 
 import { APPEARANCE_KEY } from "../product/appearance";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   visible: boolean;
   label: string;
-}>();
+  spinner?: boolean;
+  labelId?: string;
+  testId?: string;
+}>(), { spinner: true, labelId: "service-operation-overlay-label", testId: "service-operation-overlay" });
+const emit = defineEmits<{ escape: [] }>();
 
 /**
  * 极简适配：服务安装/卸载遮罩在 328px 窗口内也要可见。这是第三套独立适配
@@ -15,57 +20,33 @@ const props = defineProps<{
 const appearance = inject(APPEARANCE_KEY, null);
 const minimal = computed(() => appearance?.state.value.mode === "minimal");
 
-const dialog = ref<HTMLElement | null>(null);
-let previousActiveElement: HTMLElement | null = null;
-
-function keepFocusInDialog(event: KeyboardEvent): void {
-  if (event.key !== "Tab") return;
-  event.preventDefault();
-  dialog.value?.focus();
-}
-
-watch(
-  () => props.visible,
-  async (visible) => {
-    if (visible) {
-      previousActiveElement = document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-      await nextTick();
-      dialog.value?.focus();
-      return;
-    }
-
-    const focusTarget = previousActiveElement;
-    previousActiveElement = null;
-    await nextTick();
-    if (focusTarget?.isConnected) focusTarget.focus();
-  },
-);
+const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, () => emit("escape"), { initialFocus: "button, input, select, textarea, a[href]" });
 </script>
 
 <template>
   <div
     v-if="visible"
-    class="service-overlay"
+    class="service-overlay exv-dialog"
     :class="{ 'service-overlay--minimal': minimal }"
-    data-testid="service-operation-overlay"
+    :data-testid="testId"
     role="dialog"
     aria-modal="true"
-    aria-live="polite"
-    aria-labelledby="service-operation-overlay-label"
+    :aria-live="spinner ? 'polite' : undefined"
+    :aria-labelledby="labelId"
     tabindex="-1"
     ref="dialog"
-    @keydown="keepFocusInDialog"
+    @keydown="onDialogKeydown"
   >
-    <div class="service-overlay__card service-overlay__card--contained">
-      <div class="service-overlay__spinner" aria-hidden="true" />
-      <p id="service-operation-overlay-label" class="service-overlay__label service-overlay__label--wrap">{{ label }}</p>
+    <div class="service-overlay__card service-overlay__card--contained exv-dialog-card">
+      <div v-if="spinner" class="service-overlay__spinner" data-testid="service-overlay-spinner" aria-hidden="true" />
+      <p :id="labelId" class="service-overlay__label service-overlay__label--wrap" tabindex="0" role="region" aria-label="操作进度说明">{{ label }}</p>
+      <div v-if="$slots.default" class="service-overlay__extra"><slot /></div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.service-overlay__extra { min-height: 0; width: 100%; overflow-y: auto; }
 .service-overlay {
   position: fixed;
   inset: 0;
@@ -96,7 +77,7 @@ watch(
 .service-overlay__label {
   margin: 0;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--font-size-heading);
   line-height: 1.5;
   text-align: center;
 }
@@ -129,7 +110,7 @@ watch(
 }
 
 .service-overlay--minimal .service-overlay__label {
-  font-size: 12px;
+  font-size: var(--font-size-heading);
   line-height: 1.3;
 }
 
@@ -156,4 +137,9 @@ watch(
     padding: var(--space-5);
   }
 }
+/* 长操作说明可独立回读，加载图形保留在滚动区外。 */
+.service-overlay.exv-dialog .service-overlay__card { min-height: 0; overflow: hidden; }
+.service-overlay.exv-dialog .service-overlay__spinner { flex: none; }
+.service-overlay.exv-dialog .service-overlay__label { min-height: 1.3em; overflow-y: auto; padding: 3px; }
+.service-overlay.exv-dialog .service-overlay__label:focus-visible { outline-offset: -2px; }
 </style>

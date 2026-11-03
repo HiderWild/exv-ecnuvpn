@@ -1,6 +1,6 @@
 [package]
 name = "exv-ui"
-version = "4.1.1"
+version = "4.2.0"
 description = "EXV VPN desktop UI (Tauri v2). Frontend: Vue3 + Vite + TS. UI<->core via Tauri Command/Event (Phase 4, P4-b real KernelControl gRPC wiring)."
 authors = ["HiderWild"]
 edition.workspace = true
@@ -9,6 +9,9 @@ license.workspace = true
 
 [build-dependencies]
 tauri-build = { workspace = true }
+tauri-utils = "2"
+serde_json = { workspace = true }
+json-patch = "3"
 
 [dependencies]
 tauri = { workspace = true }
@@ -24,6 +27,7 @@ tracing = { workspace = true }
 
 # P4-b：core KernelControl gRPC client 依赖（版本与核心 workspace 同 0.14.x）。
 tonic = { workspace = true }
+prost = "0.14.4"
 http = { workspace = true }
 hyper-util = { workspace = true }
 tower = { workspace = true }
@@ -32,8 +36,14 @@ sha2 = { workspace = true }
 windows = { workspace = true }
 # 复用 core 侧 proto 生成代码（KernelControl client + wire 消息类型）。
 exv-vpn-wire = { workspace = true }
+# C4 共享本地 Agent 服务端（AgentServer + TicketConsumer/AutoLoginTrigger 注入点）。
+exv-vpn-atrust = { workspace = true }
 exv-vpn-win32-ipc = { path = "../../crates/exv-vpn-win32-ipc" }
 exv-vpn-win32-resource = { workspace = true }
 exv-vpn-win32-config = { workspace = true }
+# Win32 平台库：证书生成/信任（CurrentUser Root + 一键卸载）、官方客户端探测与
+# 真实网关票据消费者（生产服务端在 exv-vpn-atrust——C1 收编后 agent-sim 服务端
+# 不再进入生产接线）。
+exv-vpn-win32-agent-sim = { workspace = true }
 exv-core = { workspace = true }
 zeroize = { workspace = true }

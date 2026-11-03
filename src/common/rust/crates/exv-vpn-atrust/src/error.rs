@@ -286,30 +286,94 @@ impl fmt::Display for UnderlayErrorKind {
     }
 }
 
-/// 宿主出口端口返回的失败：只有症状与用途，没有自由文本。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+/// 宿主出口失败；Display 保持固定词汇，原捕获事实仅以有界脱敏字段提供。
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("underlay {purpose} target {kind}")]
 pub struct UnderlayError {
     kind: UnderlayErrorKind,
     purpose: ConnectPurpose,
+    operation: Option<&'static str>,
+    io_kind: Option<std::io::ErrorKind>,
+    raw_os_error: Option<i32>,
+    detail: Option<String>,
 }
 
 impl UnderlayError {
     /// 构造。
     #[must_use]
     pub fn new(kind: UnderlayErrorKind, purpose: ConnectPurpose) -> Self {
-        Self { kind, purpose }
+        Self {
+            kind,
+            purpose,
+            operation: None,
+            io_kind: None,
+            raw_os_error: None,
+            detail: None,
+        }
+    }
+
+    /// 在原 I/O 捕获点保留原字段，不推断缺省系统码。
+    #[must_use]
+    pub fn from_io(
+        kind: UnderlayErrorKind,
+        purpose: ConnectPurpose,
+        operation: &'static str,
+        error: &std::io::Error,
+    ) -> Self {
+        Self {
+            kind,
+            purpose,
+            operation: Some(operation),
+            io_kind: Some(error.kind()),
+            raw_os_error: error.raw_os_error(),
+            detail: Some(crate::auth::transport_error::io_detail(error)),
+        }
+    }
+
+    /// 非 I/O 原因（如解析端口文本或期限耗尽）不伪造 I/O 类别或原生码。
+    #[must_use]
+    pub fn with_detail(
+        kind: UnderlayErrorKind,
+        purpose: ConnectPurpose,
+        operation: &'static str,
+        detail: &str,
+    ) -> Self {
+        Self {
+            kind,
+            purpose,
+            operation: Some(operation),
+            io_kind: None,
+            raw_os_error: None,
+            detail: Some(crate::auth::transport_error::text_detail(detail)),
+        }
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> Option<&'static str> {
+        self.operation
+    }
+    #[must_use]
+    pub fn io_kind(&self) -> Option<std::io::ErrorKind> {
+        self.io_kind
+    }
+    #[must_use]
+    pub fn raw_os_error(&self) -> Option<i32> {
+        self.raw_os_error
+    }
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     /// 症状。
     #[must_use]
-    pub fn kind(self) -> UnderlayErrorKind {
+    pub fn kind(&self) -> UnderlayErrorKind {
         self.kind
     }
 
     /// 该失败发生在哪类目标上。
     #[must_use]
-    pub fn purpose(self) -> ConnectPurpose {
+    pub fn purpose(&self) -> ConnectPurpose {
         self.purpose
     }
 }

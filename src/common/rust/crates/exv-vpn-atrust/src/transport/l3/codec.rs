@@ -534,8 +534,9 @@ fn data_request_total(buffer: &[u8], max_payload: usize) -> Result<Option<usize>
 ///
 /// # Errors
 ///
-/// IPv4 头非法（`ihl < 5`、总长小于头长）、IP 版本既不是 4 也不是 6、或遇到 IPv6 包时
-/// 返回 [`L3CodecError`]；不会静默丢弃畸形包。
+/// 总长小于 IPv4 最小头长20字节、未知 IP 版本或 IPv6 返回 [`L3CodecError`]。
+/// 已知 IPv4 单元按声明总长拆分；IHL/校验和等完整包验证由调用方负责。
+/// 不扫描后续字节或以外层帧边界重新同步 IP 流。
 pub fn split_ipv4_packets(stream: &[u8]) -> Result<(Vec<&[u8]>, &[u8]), L3CodecError> {
     let mut packets = Vec::new();
     let mut rest = stream;
@@ -555,16 +556,10 @@ pub fn split_ipv4_packets(stream: &[u8]) -> Result<(Vec<&[u8]>, &[u8]), L3CodecE
         if rest.len() < 4 {
             return Ok((packets, rest));
         }
-        let header_len = usize::from(rest[0] & 0x0F) * 4;
-        if header_len < 20 {
-            return Err(L3CodecError::MalformedPacket {
-                reason: "ipv4 header length below 20 bytes",
-            });
-        }
         let total_len = be16(&rest[2..]);
-        if total_len < header_len {
+        if total_len < 20 {
             return Err(L3CodecError::MalformedPacket {
-                reason: "ipv4 total length below header length",
+                reason: "ipv4 total length below 20 bytes",
             });
         }
         if rest.len() < total_len {
