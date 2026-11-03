@@ -11,6 +11,7 @@ import { computeLifecycleEffects, computeSelfHealNotify, shouldAutoConnectOnLaun
 import { LOGS_GATEWAY_KEY } from "./product/logs";
 import { createMockCoreConfigGateway, createMockLogsGateway } from "./product/mock-page-data";
 import { createMockRuntime, selectRuntimeSource, selectPreviewStatus } from "./product/mock-runtime";
+import { announceReconnectSnapshot, initReconnectNotifyGate } from "./product/reconnect-notify";
 import { createProductRuntime, PRODUCT_RUNTIME_KEY } from "./product/runtime";
 import {
   loadUiPreferences,
@@ -29,7 +30,10 @@ const appearance = createAppearance(createBrowserSafeAppearanceStorage(() => win
 appearance.applyDocument(document.documentElement);
 const chrome = createWindowChromePort();
 const source = selectRuntimeSource(import.meta.env.DEV, window.location.search);
-const runtime = source === "mock" ? createMockRuntime(selectPreviewStatus(import.meta.env.DEV, window.location.search)) : createProductRuntime();
+// T12：真实运行时的快照采纳钩子喂重连通知（R1/R2 reason lane → toast）。
+const runtime = source === "mock"
+  ? createMockRuntime(selectPreviewStatus(import.meta.env.DEV, window.location.search))
+  : createProductRuntime(undefined, undefined, announceReconnectSnapshot);
 /**
  * Core 在 Rust setup 中完成 bootstrap 后才暴露 Tauri gateway；主入口把这次读取注入
  * App，由 App 在首次挂载时只按 `requires_quick_start` 决定是否显示对话框。
@@ -69,6 +73,12 @@ if (source !== "mock") {
   provideUiPrefsGateway(createTauriUiPrefsGateway());
 }
 await loadUiPreferences();
+
+// T12（§2.8）：重连通知门控经既有 config 链读取（config `reconnect_notify`，默认开；
+// 读取失败保持默认，事件判定时会再后台刷新）。
+if (source !== "mock") {
+  initReconnectNotifyGate(() => kernel.configGet());
+}
 
 // 连接过渡效果分发：状态流 → hide-window / tray-notify / 启动自动连接。
 let previousStatus: ProductStatus | null = null;

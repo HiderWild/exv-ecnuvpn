@@ -76,6 +76,25 @@ export interface ReconnectStatus {
   current_attempt: number;
   /** 重连尝试是否正在飞行中。 */
   active: boolean;
+  /**
+   * R2（T6b）恢复事件的稳定 reason id（engine_lost_service / engine_lost_oneshot /
+   * engine_lost_oneshot_gated_off；空 = 无 R2 事件）。通知文案按 id 路由（T12）。
+   */
+  reason?: string;
+}
+
+/**
+ * engine 侧 R1 自愈遥测（T6a 产出、T8 tag 19 随快照携带；经 core `GetSnapshot`
+ * 源化偏好到达）。仅状态上报；`reason` 为稳定 id（tunnel_lost / healed /
+ * heal_assembly_failed / heal_timeout / auth_rejected / attempts_exhausted）。
+ */
+export interface EngineReconnectState {
+  /** 本次事件描述的第几次尝试（触发事件即第 1 次）。 */
+  attempt: number;
+  /** 下次重试的墙钟时刻（UTC epoch ms；0 = 尝试在途/无下次）。 */
+  next_retry_at_ms: number;
+  /** 当前重连步骤的稳定 reason id；空 = 不适用。 */
+  reason: string;
 }
 
 /** host 自愈（engine 崩溃 respawn）状态（EXV_UNFREEZE 2026-09-05；仅状态上报——
@@ -123,6 +142,11 @@ export interface RuntimeSnapshot {
   system_proxy?: SystemProxyDetection | null;
   /** S4：快照携带的自动重连状态；null = 重连不适用/从未建立连接。仅状态上报。 */
   reconnect?: ReconnectStatus | null;
+  /**
+   * T8 tag 19：快照携带的 engine 侧 R1 自愈遥测；null = 无 R1 语义（core 快照
+   * 组装路径不带、engine `ObserveOwnedState` 透传时携带）。T12 通知按 reason 路由。
+   */
+  engine_reconnect?: EngineReconnectState | null;
   /** EXV_UNFREEZE 2026-09-05：快照携带的 host 自愈进展；null = 无自愈上下文。 */
   self_heal?: SelfHealStatus | null;
 }
@@ -261,6 +285,15 @@ interface ConfigPayloadWire {
 /** UI 对 Core 控制面的仅有两种结论：正常（已验证管道可通）或已停止。 */
 export type CoreStatus = "normal" | "stopped";
 
+/** T9（§2.9）core 生命周期事件：壳侧保守死亡判定后的弱提示广播。 */
+export type CoreLifecycleState = "crashed" | "recovered";
+
+export interface CoreLifecycleEvent {
+  state: CoreLifecycleState;
+  /** 涉及的 core 进程 pid；0 = UI 从未托管子进程。 */
+  core_pid: number;
+}
+
 // ---- Command 封装（P4-a：后端返回 not_wired 占位错误） ----
 
 /** 是否运行在 Tauri 外壳内（纯浏览器 `vite dev` 预览时无 IPC bridge）。 */
@@ -282,6 +315,12 @@ async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Prom
 export const kernel = {
   connect(intent: ConnectIntent): Promise<OperationReply> {
     return invokeTauri<OperationReply>("connect", { intent });
+  },
+  atrustBrowserFallback(): Promise<void> {
+    return invokeTauri<void>("atrust_browser_fallback");
+  },
+  atrustBrowserFallbackAvailable(): Promise<boolean> {
+    return invokeTauri<boolean>("atrust_browser_fallback_available");
   },
   stop(): Promise<OperationReply> {
     return invokeTauri<OperationReply>("stop");
@@ -333,6 +372,18 @@ export const kernel = {
   serviceControl(action: ServiceControlAction): Promise<ServiceControlReply> {
     return invokeTauri<ServiceControlReply>("service_control", { action });
   },
+  /** T9（§2.9）弱提示「重启 core」按钮：确认死亡后重拉；core 活着则幂等成功。 */
+  coreRestart(): Promise<void> {
+    return invokeTauri<void>("core_restart");
+  },
+  /** T9 唤醒失败模态「尝试重启程序」：relaunch 整个 app（O3 停机后新 UI 重新拉起 core）。 */
+  appRestart(): Promise<void> {
+    return invokeTauri<void>("app_restart");
+  },
+  /** T9 唤醒失败模态「仅退出」：退出整个 app（后台不残留 EXV 进程）。 */
+  appExit(): Promise<void> {
+    return invokeTauri<void>("app_exit");
+  },
 };
 
 // ---- Event 订阅（P4-b 接真实 WatchEvents/StreamLogs 后生效） ----
@@ -341,9 +392,16 @@ export const EVENT_STATUS = "exv://status";
 export const EVENT_LOGS = "exv://logs";
 export const EVENT_INTERACTION = "exv://interaction";
 export const EVENT_STATS = "exv://stats";
+/** T9（§2.9）：core 崩溃/恢复广播（壳侧保守死亡判定驱动；前端渲染弱提示横幅）。 */
+export const EVENT_CORE_LIFECYCLE = "exv://core-lifecycle";
 
 export function onStatus(cb: (ev: RuntimeEvent) => void): Promise<UnlistenFn> {
   return listen<RuntimeEvent>(EVENT_STATUS, (e) => cb(e.payload));
+}
+
+/** 桌面端浏览器认证等待，与 Core 的 VPN 连接状态分别报告。 */
+export function onBrowserLogin(cb: (active: boolean) => void): Promise<UnlistenFn> {
+  return listen<boolean>("exv://browser-login", (event) => cb(event.payload));
 }
 
 export function onLogs(cb: (log: LogEvent) => void): Promise<UnlistenFn> {
@@ -356,6 +414,11 @@ export function onLogs(cb: (log: LogEvent) => void): Promise<UnlistenFn> {
  */
 export function onStats(cb: (stats: RuntimeStats) => void): Promise<UnlistenFn> {
   return listen<RuntimeStats>(EVENT_STATS, (e) => cb(e.payload));
+}
+
+/** T9（§2.9）：core 崩溃/恢复事件订阅（弱提示横幅的唯一驱动源）。 */
+export function onCoreLifecycle(cb: (event: CoreLifecycleEvent) => void): Promise<UnlistenFn> {
+  return listen<CoreLifecycleEvent>(EVENT_CORE_LIFECYCLE, (e) => cb(e.payload));
 }
 
 /** 命令错误判定：后端占位错误 kind 为 not_wired。 */

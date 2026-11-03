@@ -50,7 +50,9 @@ const { toasts, dismiss } = useToasts();
   position: fixed;
   right: 16px;
   bottom: 16px;
-  z-index: 60;
+  /* T12 层级裁定：模态（50–70）> 崩溃横幅（55）> toast——一次性提醒位于最下层，
+     不与 T9 弱提示横幅/模态抢占可视层级。 */
+  z-index: 45;
   display: flex;
   flex-direction: column;
   gap: 8px;

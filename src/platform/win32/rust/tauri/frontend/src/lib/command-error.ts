@@ -17,13 +17,20 @@ export function commandErrorMessage(error: unknown, fallback: string): string {
   const message = typeof detail.message === "string" ? detail.message.trim() : "";
   const codeSuffix = code ? `（错误码：${code}）` : "";
 
+  // 该类型的 message 已由 Rust 固定文案表归一化；其他 internal 仍保持通用提示。
+  if (kind === "browser_login_failed") {
+    return message || "浏览器登录未完成，请重试；若持续出现请反馈应用日志。";
+  }
+
   const knownMessages: Record<string, string> = {
     credential_required: "需要填写账户和密码后才能连接。",
     failed_precondition: "当前操作的前置条件未满足，请检查服务状态后重试。",
     service_not_running: "VPN 服务尚未运行，请启动或修复服务后重试。",
     service_connect_failed: "无法连接 VPN 服务，请修复服务后重试。",
     compatibility_mode_unavailable: "当前 EXV 网络服务版本不支持兼容模式，请更新或修复 EXV 后重试。",
+    protocol_unavailable: "当前版本无法使用所选协议；请在设置中改用其它协议（例如 Cisco），或更新到支持该协议的 EXV 版本。",
     core_unreachable: "无法连接本地 VPN 核心，请确认服务状态后重试。",
+    core_wake_failed: "无法恢复后台核心进程；请重启程序后重试。",
     not_wired: "当前运行在预览环境，无法连接 VPN；请在 EXV 桌面应用中运行。",
     internal: "应用内部处理未完成，请重试；若持续出现请提交错误码。",
   };

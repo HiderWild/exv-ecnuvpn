@@ -1,6 +1,7 @@
 #include "windows_setup_rust/cli.hpp"
 
 #include "windows_setup_rust/app_paths.hpp"
+#include "windows_setup_rust/registry_install.hpp"
 #include "windows_setup_rust/util/command_line.hpp"
 
 #include <algorithm>
@@ -64,8 +65,13 @@ bool IsUninstallExecutableName(const std::wstring &path_or_name) {
   return EqualsIgnoreCase(FileNameOf(path_or_name), L"Uninstall.exe");
 }
 
+std::wstring ResolveDefaultInstallDir(const std::wstring &registered_install_dir,
+                                      const std::wstring &fallback_dir) {
+  return registered_install_dir.empty() ? fallback_dir : registered_install_dir;
+}
+
 std::wstring DefaultInstallDir() {
-  return DefaultPerUserInstallDir();
+  return ResolveDefaultInstallDir(ReadRegisteredInstallDir(), DefaultPerUserInstallDir());
 }
 
 std::wstring ResolveGuiInstallDir(bool uninstall, const CliOptions &options) {

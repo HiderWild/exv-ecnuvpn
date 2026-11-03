@@ -34,6 +34,13 @@ pub(crate) struct QuickStartApplyReply {
     pub message: String,
 }
 
+/// 快速入门允许写入的配置键，**必须覆盖前端草稿的完整键集**。
+///
+/// 前端 `product/quick-start.ts` 的 `DEFAULT_QUICK_START_CORE_DRAFT` 是另一处独立真相：
+/// 少一个键，`validate_and_prepare_items` 就会在抵达 Core 之前拒绝整次提交，用户侧只能
+/// 看到「快速入门提交失败，请重试。」，而 Core 日志里查不到任何记录（win32 2026-09-21 的
+/// `connection_mode` 就是这样漏掉的）。键序逐行对齐前端草稿，便于直接比对。
+/// `quick_start_apply_accepts_the_full_frontend_draft_key_set` 钉住这条不变量。
 const ALLOWED_CONFIG_KEYS: &[&str] = &[
     "server",
     "username",
@@ -42,6 +49,7 @@ const ALLOWED_CONFIG_KEYS: &[&str] = &[
     "routes",
     "user_agent",
     "mtu",
+    "protocol",
     "auto_reconnect",
     "auto_reconnect_max_attempts",
     "auto_reconnect_backoff",

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const VERSION_PATH: &str = "src/platform/darwin/rust/tauri/app/tauri.conf.json";
+const VERSION_PATH: &str = "release.json";
 const OVERRIDES: [(&str, &str); 5] = [
     ("RELEASE_VERSION", "release_version"),
     ("GIT_COMMIT", "git_commit"),
@@ -66,6 +66,7 @@ pub fn run() {
         watch(&host_root.join("tauri/app/tauri.conf.json"));
     }
     if let Some(root) = root {
+        watch(&root.join(VERSION_PATH));
         for path in git_watch_paths(&root) {
             watch(&path);
         }

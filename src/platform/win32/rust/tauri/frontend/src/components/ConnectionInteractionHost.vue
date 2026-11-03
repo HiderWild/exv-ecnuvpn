@@ -8,6 +8,7 @@ import { pushToast } from "../lib/toast";
 import { APPEARANCE_KEY } from "../product/appearance";
 import { connectionActionFor, type ProductConnectionAction } from "../product/connection-action";
 import { CONNECTION_INTERACTION_KEY } from "../product/connection-interaction";
+import { handleCoreWakeFailure } from "../product/core-crash";
 import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway, credentialConfigFor } from "../product/core-config";
 import {
   installServiceOnConnect,
@@ -22,7 +23,8 @@ const runtime = inject(PRODUCT_RUNTIME_KEY, null);
 const appearance = inject(APPEARANCE_KEY, null);
 const configGateway = inject(CORE_CONFIG_GATEWAY_KEY, null) ?? createCoreConfigGateway();
 const state = computed(() => runtime?.state.value ?? null);
-const actionBusy = ref(false);
+const actionBusy = ref<"connect" | "stop" | null>(null);
+let actionSequence = 0;
 // R3：与快速入门/连接页共用同一纯前端偏好键（默认 true）；用户切换经 setter 立即写回。
 const autoInstallService = computed({
   get: () => installServiceOnConnect.value,
@@ -65,7 +67,48 @@ watch(() => [state.value?.status, state.value?.operationId], settlePendingForget
 watch(minimal, () => { void credentialConfig.refresh(); }, { immediate: true });
 watch(() => state.value?.status, (status) => { if (status === "connected") void credentialConfig.refresh(); });
 
-const busy = computed(() => actionBusy.value || credentialSubmitting.value || credentialCancelling.value || serviceOperations?.busy.value === true);
+const fallbackAvailable = ref(false);
+const fallbackBusy = ref(false);
+const fallbackError = ref("");
+const browserLoginActive = computed(() => runtime?.browserLoginActive?.value === true
+  && state.value?.status === "connecting");
+let fallbackQuery = 0;
+watch(browserLoginActive, async (active) => {
+  const query = ++fallbackQuery;
+  fallbackAvailable.value = false;
+  fallbackError.value = "";
+  if (!active || !runtime?.atrustBrowserFallbackAvailable) return;
+  try {
+    const available = await runtime.atrustBrowserFallbackAvailable();
+    if (query === fallbackQuery) fallbackAvailable.value = browserLoginActive.value && available;
+  } catch {
+    if (query === fallbackQuery) fallbackAvailable.value = false;
+  }
+}, { immediate: true });
+
+async function useSystemBrowserFallback(): Promise<void> {
+  if (!fallbackAvailable.value || fallbackBusy.value || !browserLoginActive.value
+    || !runtime?.atrustBrowserFallback) return;
+  fallbackBusy.value = true;
+  fallbackError.value = "";
+  try {
+    await runtime.atrustBrowserFallback();
+    fallbackAvailable.value = false;
+  } catch {
+    fallbackError.value = "无法切换到系统浏览器，请取消本次登录后重试。";
+  } finally {
+    fallbackBusy.value = false;
+  }
+}
+
+const busy = computed(() => {
+  // 正在等待 Connect 返回时，已可取消的状态必须允许派发 Stop。
+  // 其他操作（凭据提交、安装服务、已发出的 Stop）仍保持互斥。
+  const canCancelConnect = actionBusy.value === "connect"
+    && state.value !== null && connectionActionFor(state.value).kind === "stop";
+  return (actionBusy.value !== null && !canCancelConnect)
+    || credentialSubmitting.value || credentialCancelling.value || serviceOperations?.busy.value === true;
+});
 const action = computed<ProductConnectionAction>(() => {
   const base = state.value ? connectionActionFor(state.value) : { kind: "none" as const, label: "处理中" as const, enabled: false };
   return { ...base, enabled: base.enabled && !busy.value };
@@ -127,8 +170,9 @@ watch(() => state.value?.status, settleCredentialCancellation);
 async function runAction(draft?: MinimalCredentialDraft): Promise<void> {
   if (runtime === null || state.value === null || busy.value) return;
   const next = connectionActionFor(state.value);
-  if (!next.enabled) return;
-  actionBusy.value = true;
+  if (!next.enabled || next.kind === "none") return;
+  const sequence = ++actionSequence;
+  actionBusy.value = next.kind;
   pendingForget = null;
   connectAttempt += 1;
   authModalDismissed.value = false;
@@ -144,9 +188,11 @@ async function runAction(draft?: MinimalCredentialDraft): Promise<void> {
       await runtime.stop();
     }
   } catch (error) {
-    handleActionError(error, draft !== undefined);
+    // 用户已取消或开始新操作后，旧连接的拒绝不得重新打开认证/恢复模态。
+    if (sequence === actionSequence) handleActionError(error, draft !== undefined);
   } finally {
-    actionBusy.value = false;
+    // 旧 Connect 的 finally 不得清除随后发出的 Stop 或新连接的忙碌状态。
+    if (sequence === actionSequence) actionBusy.value = null;
   }
 }
 
@@ -205,6 +251,8 @@ function handleActionError(error: unknown, fromMinimalForm: boolean): void {
     serviceModalVisible.value = true;
     return;
   }
+  // T9（§2.9）：连接前唤醒 core 失败 → 全局「尝试重启程序 / 仅退出」强报错模态。
+  if (handleCoreWakeFailure(error)) return;
   pushToast(messageFor(error), "error");
 }
 
@@ -223,6 +271,11 @@ async function submitCredentials(credentials: { username: string; password: stri
     credentialModalResetKey.value += 1;
     credentialModalVisible.value = false;
   } catch (error) {
+    // T9：凭据提交的连接前唤醒失败同样走全局强报错模态（不困在凭据模态内）。
+    if (handleCoreWakeFailure(error)) {
+      credentialModalVisible.value = false;
+      return;
+    }
     credentialModalError.value = messageFor(error);
   } finally {
     credentialSubmitting.value = false;
@@ -275,7 +328,7 @@ function recoveryCredentialsRequired(): void {
   openCredentialModal();
 }
 
-provide(CONNECTION_INTERACTION_KEY, { state, action, busy, autoInstallService, runAction });
+provide(CONNECTION_INTERACTION_KEY, { state, action, busy, autoInstallService, runAction, fallbackAvailable: computed(() => fallbackAvailable.value), fallbackBusy: computed(() => fallbackBusy.value), fallbackError: computed(() => fallbackError.value), useSystemBrowserFallback });
 </script>
 
 <template>
@@ -285,6 +338,7 @@ provide(CONNECTION_INTERACTION_KEY, { state, action, busy, autoInstallService, r
     :busy="busy"
     :run="runAction"
     :minimal="minimal"
+    :protocol="credentialConfig.state.value.protocol"
     :initial-username="credentialConfig.state.value.username || state?.connectionInfo.account || ''"
     :initial-server="credentialConfig.state.value.server"
     :remember-password="storedRememberPassword"

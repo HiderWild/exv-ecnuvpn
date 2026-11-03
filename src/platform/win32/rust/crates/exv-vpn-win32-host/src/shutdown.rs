@@ -8,7 +8,7 @@
 //!   （UI 进程仍存活、连接仍在 → 信号保持 `true`）；UI **彻底退出**（进程退出 / 传输层
 //!   掉线 / 显式通知）→ 信号翻转为 `false` → core 发起停机。
 //! - [`CoreRuntime`]：运行期编排——持有 UI 信号、共享 composition、engine 监督句柄与
-//!   KernelControl 服务/转发器任务；[`CoreRuntime::run`] 等待 UI 退出（或显式停机命令）后
+//!   `KernelControl` 服务/转发器任务；[`CoreRuntime::run`] 等待 UI 退出（或显式停机命令）后
 //!   执行有序停机；运行期监听 engine 掉线（liveness）→ 驱动
 //!   `composition.on_helper_link_terminal`（engine 死亡 ≠ core 死亡：撤销 admission +
 //!   teardown，core 继续服务 UI 直到 UI 退出）。
@@ -17,6 +17,7 @@
 //!      `composition.on_rpc_waiter_cancel`，RPC cancel ≠ 业务 Stop，spec §8.3/§9.1）；
 //!   2. engine **发退出包**（`StopTunnel` 业务停机，若在连）后即返——不等 engine 退；
 //!   3. `composition.exit()`（幂等业务 Stop，关 admission，撤 packet leg）→ core 退出。
+//!
 //!   退出包 / core 进程句柄 / 心跳（P2）三重保证 engine 随 core 退出；有界等待/强制
 //!   终止降为崩溃恢复/验证路径（`EngineSupervisor::verify_exit`）。
 
@@ -162,7 +163,7 @@ pub struct CoreRuntime {
     /// ——仅 oneshot 维护形态 respawn，2026-09-08 计划批 3）。`None` = 未接线（测试，
     /// 保持既有「总是 respawn」语义）。
     mode_gauge: Option<Arc<AtomicU8>>,
-    /// KernelControl 服务任务（P4 传输层；停机先中止 = 停止接收 UI 请求）。
+    /// `KernelControl` 服务任务（P4 传输层；停机先中止 = 停止接收 UI 请求）。
     serve_task: Option<tokio::task::JoinHandle<()>>,
     /// 事件转发器任务（持 engine client 引用；停机先中止释放引用）。
     forwarder_task: Option<tokio::task::JoinHandle<()>>,
@@ -173,12 +174,12 @@ pub struct CoreRuntime {
     /// C3a 自动重连 worker 任务（持服务克隆；停机先中止释放引用——否则 worker 永久
     /// 引用服务克隆）。
     reconnect_worker_task: Option<tokio::task::JoinHandle<()>>,
-    /// P2 KeepAlive 心跳 tick 任务（持 engine client 引用；停机先中止释放引用——engine
+    /// P2 `KeepAlive` 心跳 tick 任务（持 engine client 引用；停机先中止释放引用——engine
     /// 侧据此刷新 `last_heartbeat`，15s 未收到即自清理+自退出）。
     keepalive_ticker_task: Option<tokio::task::JoinHandle<()>>,
     /// P3 崩溃自愈编排（engine 掉线 → respawn 全链路）；`None` = 不自愈（测试/降级）。
     crash_recovery: Option<CrashRecovery>,
-    /// 2026-09-05 自愈上报 seam（阶段变化 → EventBus lane + 结构化日志）；`None` =
+    /// 2026-09-05 自愈上报 seam（阶段变化 → `EventBus` lane + 结构化日志）；`None` =
     /// 不上报（测试/降级）。
     self_heal_reporter: Option<Arc<dyn SelfHealReporter>>,
     /// 2026-09-05 自愈阶段显式发布的事件总线（`publish_self_heal_refresh`——自愈窗口
@@ -253,7 +254,7 @@ impl CoreRuntime {
         self.serving_rx.clone()
     }
 
-    /// 挂接 KernelControl 服务任务（P4 传输层 serve future；停机先中止）。
+    /// 挂接 `KernelControl` 服务任务（P4 传输层 serve future；停机先中止）。
     pub fn set_serve_task(&mut self, task: tokio::task::JoinHandle<()>) {
         self.serve_task = Some(task);
     }
@@ -283,7 +284,7 @@ impl CoreRuntime {
         self.reconnect_worker_task = Some(task);
     }
 
-    /// 挂接 KeepAlive 心跳 tick 任务（P2：`KernelControlService::spawn_keepalive_ticker`；
+    /// 挂接 `KeepAlive` 心跳 tick 任务（P2：`KernelControlService::spawn_keepalive_ticker`；
     /// 停机先中止——ticker 持 engine client Arc，须在 `shutdown_core` 前释放引用。
     /// 中止后 engine 不再收到心跳；core 停机时 engine 由退出包/进程句柄随行退出）。
     pub fn set_keepalive_ticker_task(&mut self, task: tokio::task::JoinHandle<()>) {
@@ -296,7 +297,7 @@ impl CoreRuntime {
         self.crash_recovery = Some(recovery);
     }
 
-    /// 挂接自愈上报 seam（2026-09-05 计划 §4.3：阶段变化 → EventBus lane + 结构化日志；
+    /// 挂接自愈上报 seam（2026-09-05 计划 §4.3：阶段变化 → `EventBus` lane + 结构化日志；
     /// 真实实现 = `EventBusSelfHealReporter`，测试用 recording fake）。
     pub fn set_self_heal_reporter(&mut self, reporter: Arc<dyn SelfHealReporter>) {
         self.self_heal_reporter = Some(reporter);
@@ -320,7 +321,7 @@ impl CoreRuntime {
     /// **停机信号**：`ui_rx.changed()`（[`UiLifetime::on_ui_exited`]，由传输层的
     /// UI 进程退出监视触发）或 `shutdown_rx.changed()`（显式停机命令）。**不**把 serve
     /// 任务 resolve 当 UI 断开信号——tonic `serve_with_incoming` 对单元素传入流在 accept
-    /// 后立即返回（流耗尽即 break，连接任务 detached 继续服务），其 JoinHandle 会假
+    /// 后立即返回（流耗尽即 break，连接任务 detached 继续服务），其 `JoinHandle` 会假
     /// resolve；真实 UI 退出由进程监视感知（见 `kernel_control_transport`）。
     pub async fn run(mut self) -> CoreShutdownOutcome {
         // 运行期：等 UI 彻底退出（O3：进程退出 → on_ui_exited）或显式停机命令；同时监听
@@ -355,7 +356,7 @@ impl CoreRuntime {
                 _ = shutdown_rx.changed() => break,
                 // engine 槽换点（provision/respawn/service 路由）：liveness 尚未接线时
                 // 尝试从 supervisor 获取新 engine 的掉线监听。
-                _ = async {
+                () = async {
                     if let Some(rx) = slot_swaps.as_mut() {
                         let _ = rx.changed().await;
                     } else {
@@ -420,18 +421,17 @@ impl CoreRuntime {
                                 "",
                             )
                             .await;
-                            match recovery.run_respawn(&mut *supervisor).await {
-                                Ok(outcome) => {
+                            match recovery.run_respawn(&mut supervisor).await {
+                                Ok(RespawnOutcome::Respawned { old_pid, new_pid }) => {
                                     // respawn 成功：新 supervisor 带新 liveness（初始 true），
                                     // 继续等 UI 退出 / 下次掉线。
                                     liveness_rx = supervisor.liveness();
-                                    tracing::info!(?outcome, "engine respawned (crash self-heal)");
+                                    tracing::info!(old_pid, new_pid, "engine respawned (crash self-heal)");
                                     // 2026-09-05 发布点 2（冻结表）：`succeeded` + 重建后
                                     // Idle 快照。既有缺陷修复：composition 重建为 Idle 后
                                     // 无人发布快照（新 engine 状态流不回放旧状态），UI 停留
                                     // 「处理中」——此处显式刷新告诉 UI「自愈完成，可重新
                                     // 连接」。
-                                    let RespawnOutcome::Respawned { old_pid, new_pid } = outcome;
                                     Self::report_self_heal_refresh(
                                         self.self_heal_reporter.as_ref(),
                                         self.self_heal_events.as_ref(),
@@ -442,6 +442,14 @@ impl CoreRuntime {
                                         "",
                                     )
                                     .await;
+                                }
+                                Ok(RespawnOutcome::AlreadyAlive { pid }) => {
+                                    // T6b 并发守卫：另一路径（连接路由 provisioner / R2
+                                    // oneshot 恢复）已把新 engine 换入槽——本路径让位，
+                                    // 不上报自愈（无自愈动作发生）。新 supervisor 的
+                                    // liveness 接管后续掉线监听。
+                                    liveness_rx = supervisor.liveness();
+                                    tracing::info!(pid, "respawn yielded: another path already swapped in a live engine");
                                 }
                                 Err(reason) => {
                                     // respawn 被阻/失败：回 Idle/报错（不自动重连）。停止
@@ -526,7 +534,7 @@ impl CoreRuntime {
 
     /// 2026-09-05 自愈发布点统一落地（计划 §4.3，发布点表三行共用）：
     ///
-    /// 1. 经 reporter 上报一次阶段变化（EventBus self_heal lane + `kernel.selfheal.*`
+    /// 1. 经 reporter 上报一次阶段变化（EventBus `self_heal` lane + `kernel.selfheal.*`
     ///    结构化日志）；
     /// 2. 以 composition **当前相位**组装快照经 `EventBus::publish_self_heal_refresh`
     ///    显式发布（复用既有 `publish(TRANSITION, ...)` 路径与 lane 附加链）——自愈窗口

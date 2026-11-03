@@ -34,7 +34,7 @@ pub enum FamilyStep {
     Mtu,
     /// Bypass route — installed before the tunnel routes (W20 leaf).
     Bypass,
-    /// System proxy exemption merge (design §5.3; TK1b) — after bypass, before
+    /// System proxy exemption merge (design §5.3; `TK1b`) — after bypass, before
     /// tunnel routes. `EXV_PAC_FAMILY_PENDING`: PAC wrap wiring is a separate task.
     SystemProxy,
     /// Tunnel routes — installed after the bypass (W20 leaf).
@@ -92,7 +92,7 @@ pub(crate) struct AppliedState {
     /// DNS applied fingerprint + original settings (GUID-keyed).
     dns: Option<DnsAppliedState>,
     /// 系统代理 family 的 compare-and-restore 输入（TK1b）：prestate + 写入后
-    /// 指纹。`None` = 该 family 未产生效果（SkipNoOp / PacDetectedSkip / SID 空）。
+    /// 指纹。`None` = 该 family 未产生效果（SkipNoOp / `PacDetectedSkip` / SID 空）。
     system_proxy: Option<SystemProxyApplied>,
 }
 
@@ -144,21 +144,44 @@ struct DnsAppliedState {
     original: DnsSettings,
 }
 
+/// [`build_apply_plan`] 的输入束（clippy 债务清偿 2026-09-27：8 个位置参数收敛为
+/// 结构体——字段与 `ApplyPlan` 的数据字段一一对应，调用点按名传值不再按位对齐）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyPlanInputs {
+    /// W18 类型：本次 apply 期望的地址行。
+    pub addresses: Vec<IpAddressRow>,
+    /// W19 类型：IPv4 接口 MTU 值。
+    pub mtu_v4: u32,
+    /// W19 类型：IPv6 接口 MTU 值（`None` = 不触碰 V6 行）。
+    pub mtu_v6: Option<u32>,
+    /// W20 类型：bypass 路由（隧道路由之前安装）。
+    pub bypass: Vec<RouteRow>,
+    /// W20 类型：隧道路由。
+    pub tunnel_routes: Vec<RouteRow>,
+    /// W21 类型：接口 DNS 设置。
+    pub dns: DnsSettings,
+    /// 系统代理豁免条目（设计 §5.4；空矢量 = family 零动作候选）。
+    pub proxy_exempt_entries: Vec<String>,
+    /// 发起用户 SID（系统代理写入必须落在该用户 HKU；空串 = 不执行该 family）。
+    pub originating_sid: String,
+}
+
 /// Build the apply plan: the family steps are the canonical fixed order with
 /// `Bypass` strictly before `Routes` (pure logic — bypass is installed before
 /// the tunnel routes, otherwise control traffic would be hijacked; WSP4 §3
 /// frozen).
 #[must_use]
-pub fn build_apply_plan(
-    addresses: Vec<IpAddressRow>,
-    mtu_v4: u32,
-    mtu_v6: Option<u32>,
-    bypass: Vec<RouteRow>,
-    tunnel_routes: Vec<RouteRow>,
-    dns: DnsSettings,
-    proxy_exempt_entries: Vec<String>,
-    originating_sid: String,
-) -> ApplyPlan {
+pub fn build_apply_plan(inputs: ApplyPlanInputs) -> ApplyPlan {
+    let ApplyPlanInputs {
+        addresses,
+        mtu_v4,
+        mtu_v6,
+        bypass,
+        tunnel_routes,
+        dns,
+        proxy_exempt_entries,
+        originating_sid,
+    } = inputs;
     ApplyPlan {
         // canonical 顺序（设计 §5.3）：address → MTU → bypass → **system_proxy**
         // → tunnel routes → DNS；cleanup 逆序自动获得（DNS 先撤、system_proxy
@@ -427,14 +450,12 @@ fn apply_step(
             )? {
                 SystemProxyApplyOutcome::SkippedNoProxy => {}
                 SystemProxyApplyOutcome::PacDetectedSkip => {}
-                SystemProxyApplyOutcome::Applied {
-                    step,
-                    written_fingerprint,
-                } => {
+                SystemProxyApplyOutcome::Applied { step } => {
                     state.system_proxy = Some(SystemProxyApplied {
                         prestate: step.prestate.clone(),
                         sid: step.originating_sid.clone(),
-                        written_fingerprint,
+                        // v0x03：写入后指纹随步骤记录携带（与写入态同源同值）。
+                        written_fingerprint: step.written_fingerprint.clone(),
                     });
                 }
             }

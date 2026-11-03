@@ -4,6 +4,9 @@
 //! （`service_not_running|`/`service_connect_failed|`），`ServiceNotRunning`/
 //! `ServiceConnectFailed` 变体与 win32 形状一致（kind 字符串同源），前端
 //! `ServiceConnectFailureModal` 恢复链在 darwin 同样激活。
+//!
+//! T02 起 core 的协议拒绝同样带前缀（`protocol_unavailable|`）→ `ProtocolUnavailable`，
+//! 与 win32 同 kind；否则「aTrust 后端尚未接入」会被通用 internal 文案顶掉。
 
 use std::fmt;
 
@@ -31,6 +34,9 @@ pub enum AppError {
     ServiceNotInstalled(String),
     /// 服务形态连接失败（P4 v2：`service_connect_failed|` 前缀 → 弹恢复 modal）。
     ServiceConnectFailed(String),
+    /// 所选协议在本版本不可用（T02：`protocol_unavailable|` 前缀 → 保留「为什么连不上」
+    /// 的可行动原因；win32 同款变体与 kind，用户可选回 Cisco 或更新版本）。
+    ProtocolUnavailable(String),
     /// 内部错误。
     Internal(String),
 }
@@ -51,6 +57,7 @@ impl serde::Serialize for AppError {
             Self::ServiceConnectFailed(message) => {
                 ("service_connect_failed", None, message.as_str())
             }
+            Self::ProtocolUnavailable(message) => ("protocol_unavailable", None, message.as_str()),
             Self::Internal(message) => ("internal", None, message.as_str()),
         };
         let mut output =
@@ -75,6 +82,7 @@ impl fmt::Display for AppError {
             Self::ServiceNotRunning(m) => write!(f, "service not running: {m}"),
             Self::ServiceNotInstalled(m) => write!(f, "service not installed: {m}"),
             Self::ServiceConnectFailed(m) => write!(f, "service connect failed: {m}"),
+            Self::ProtocolUnavailable(m) => write!(f, "protocol unavailable: {m}"),
             Self::Internal(m) => write!(f, "internal: {m}"),
         }
     }

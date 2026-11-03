@@ -9,8 +9,8 @@
 //! - **跨进程 sink**：`record` 把一行追加写 `EXV_TIMING_FILE` 指定文件（缺省
 //!   `%TEMP%\exv-timing-<pid>.log`）并 eprintln。helper/engine 是独立特权进程（无共享
 //!   console），文件 sink 保证 host 与 helper 的分段耗时都能落盘、按行合并归因。
-//!   行格式：`WALL_MS PID SELF_MS LABEL`（WALL_MS = Unix epoch 毫秒，供跨进程对齐；
-//!   SELF_MS = 自本进程启动的单调毫秒；LABEL = 分段名，见各调用点注释）。
+//!   行格式：`WALL_MS PID SELF_MS LABEL`（`WALL_MS` = Unix epoch 毫秒，供跨进程对齐；
+//!   `SELF_MS` = 自本进程启动的单调毫秒；LABEL = 分段名，见各调用点注释）。
 //!
 //! 使用说明（一句话）：给 `exv-vpn-win32-resource` / `exv-vpn-win32-acceptance` 加
 //! `--features timing` 重新构建并运行 acceptance 学校场景，分段耗时逐行追加写
@@ -76,7 +76,7 @@ pub struct Timed {
 
 impl Timed {
     /// 开始计一段；`Drop` 时把 elapsed ms 写 sink（feature 关闭时为空 ZST）。
-    #[must_use]
+    /// 未使用返回值由类型级 `#[must_use]`（见上）兜底，函数级不再重复标注。
     pub fn new(label: &'static str) -> Self {
         #[cfg(feature = "timing")]
         {

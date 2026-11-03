@@ -198,7 +198,7 @@ fn adapter_identity(
 ) -> Result<WintunIdentity, NativeError> {
     let mut luid = NET_LUID_LH::default();
     // SAFETY: luid 是有效输出参数（8 字节 union）；返回 BOOL 非零表示成功。
-    let ok = unsafe { (exports.get_adapter_luid)(handle, &mut luid) };
+    let ok = unsafe { (exports.get_adapter_luid)(handle, &raw mut luid) };
     if ok == 0 {
         return Err(NativeError::from_win32(
             unsafe { GetLastError().0 },
@@ -209,7 +209,7 @@ fn adapter_identity(
     let luid_value = unsafe { luid.Value };
     let mut ifindex = 0u32;
     // SAFETY: ifindex 是有效输出参数；返回 WIN32_ERROR，0 表示成功。
-    let rc_index = unsafe { ConvertInterfaceLuidToIndex(&luid, &mut ifindex) };
+    let rc_index = unsafe { ConvertInterfaceLuidToIndex(&raw const luid, &raw mut ifindex) };
     if rc_index.0 != 0 {
         return Err(NativeError::from_win32(
             rc_index.0,
@@ -218,7 +218,7 @@ fn adapter_identity(
     }
     let mut alias_buf = vec![0u16; 256];
     // SAFETY: alias_buf 是有效可变宽字符缓冲（长度以 u16 计，由 &mut [u16] 自带）。
-    let rc_alias = unsafe { ConvertInterfaceLuidToAlias(&luid, &mut alias_buf) };
+    let rc_alias = unsafe { ConvertInterfaceLuidToAlias(&raw const luid, &mut alias_buf) };
     if rc_alias.0 != 0 {
         return Err(NativeError::from_win32(
             rc_alias.0,

@@ -210,7 +210,14 @@ pub fn detect_upstream_proxy_tun(exv_interface: &str) -> Result<ProxyTunDetectio
 /// Enumerate all adapter records via two-pass `GetAdaptersAddresses`
 /// (same pattern as `direct_connect.rs` `find_physical_nics`, but `AF_UNSPEC`
 /// and no physical-NIC gating — detection needs every virtual adapter).
-fn enumerate_adapter_records() -> Result<Vec<AdapterRecord>, NativeError> {
+///
+/// 2026-09-27 起对 engine 预检（preflight 网卡/路由域的存活 ifindex 集）开放：
+/// 全量只读枚举，不含任何过滤或判定。
+///
+/// # Errors
+///
+/// `GetAdaptersAddresses` failure → [`NativeError`].
+pub fn enumerate_adapter_records() -> Result<Vec<AdapterRecord>, NativeError> {
     let mut size: u32 = 0;
     // SAFETY: first call only queries the required buffer size (adapter buffer
     // None; size filled by the system). AF_UNSPEC = 0 (windows crate constant).

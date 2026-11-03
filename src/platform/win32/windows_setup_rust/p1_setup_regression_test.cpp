@@ -40,6 +40,13 @@ std::vector<wchar_t *> Pointers(std::vector<std::wstring> &storage) {
 }  // namespace
 
 int main() {
+  Expect(exv::setup::ResolveDefaultInstallDir(L"D:\\Apps\\EXV", L"C:\\Users\\User\\AppData\\Local\\Programs\\EXV") ==
+             L"D:\\Apps\\EXV",
+         "default install directory preserves an existing registered custom path");
+  Expect(exv::setup::ResolveDefaultInstallDir(L"", L"C:\\Users\\User\\AppData\\Local\\Programs\\EXV") ==
+             L"C:\\Users\\User\\AppData\\Local\\Programs\\EXV",
+         "default install directory uses per-user fallback for a fresh install");
+
   {
     auto storage = MakeArgs({L"exv-setup.exe"});
     auto pointers = Pointers(storage);

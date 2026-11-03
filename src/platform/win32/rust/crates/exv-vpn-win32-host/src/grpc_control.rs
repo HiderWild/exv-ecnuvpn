@@ -13,7 +13,7 @@
 //! - **凭据一次性 + zeroize**：legacy `send_owned` 语义由 [`hand_off_request`] 保留——
 //!   请求按 move 交给 wire（`std::mem::take`，不复制其中的一次性 secret），本地
 //!   one-shot 源（[`crate::kernel_control::ClearableSecret`]）立即零化，调用方的请求
-//!   副本被 Default 化。注意：当前 HelperControl wire 尚无凭据字段（P1 基线 proto），
+//!   副本被 Default 化。注意：当前 `HelperControl` wire 尚无凭据字段（P1 基线 proto），
 //!   凭据落点由 P3 语义网关决策；本工具已就绪。
 //! - **事件/掉线感知**：engine→core 日志事件经 `stream_logs`（server-streaming）；
 //!   掉线由后台 liveness 监视器（周期性 `observe_owned_state` 探测）上报，调用方可经
@@ -167,7 +167,7 @@ pub fn detached_engine() -> Arc<tokio::sync::Mutex<dyn KernelEngineControl>> {
 /// 从已认证的 core 用户 SID 派生 owner lease principal。
 ///
 /// 这是客户端自己的身份，不是控制面服务端（engine）的身份；service engine
-/// 以 LocalSystem 运行时两者必然不同。C3a 自动重连意图的 `principal_digest` 与
+/// 以 `LocalSystem` 运行时两者必然不同。C3a 自动重连意图的 `principal_digest` 与
 /// UI 同源派生（复用本函数）。
 #[must_use]
 pub(crate) fn owner_principal_digest(core_user_sid: &str) -> Vec<u8> {
@@ -208,8 +208,8 @@ fn is_lost_status(s: &Status) -> bool {
 /// 统计流中传输错误项的稳定类别（RT-SEAM-01；host 内部类型，不进 wire）。
 ///
 /// 字符串化后即诊断 fields 的 `error_kind`（冻结枚举：
-/// transport/rpc_unauthenticated/rpc_permission_denied/rpc_unavailable/rpc_deadline/
-/// connection_lost/rpc_other）。与既有 `map_status`/`is_lost_status` 同口径，但**不
+/// `transport/rpc_unauthenticated/rpc_permission_denied/rpc_unavailable/rpc_deadline`/
+/// `connection_lost/rpc_other）。与既有` `map_status`/`is_lost_status` 同口径，但**不
 /// 改变**既有 `GrpcClientError` 行为——只是把流中错误项从"静默吞掉"改为"保留类别"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatsErrorKind {
@@ -314,7 +314,7 @@ pub struct EngineControlGrpcClient {
     /// liveness 监视器任务。
     _monitor: tokio::task::JoinHandle<()>,
     /// 是否已向 engine 建立 owner lease（MaintainOwnerLease 握手；P1-b `core.owner`
-    /// 前置）。幂等 guard：同一 client 已握手后 `ensure_owner_lease` 直接返回。
+    /// 前置）。服务模式复用时还需探测当前连接，不能把历史握手当作存活证据。
     owner_lease_established: bool,
     /// S3/D7：service-mode 连接时持有 `MaintainOwnerLease` bidi 流（engine 侧以此感知
     /// 连接存活；连接 EOF → engine 释放 connection-bound owner）。oneshot 为 `None`
@@ -329,10 +329,10 @@ pub struct EngineControlGrpcClient {
 ///
 /// core 连接 service-mode engine 后，握手完成即把流保持在本句柄中；本句柄 drop →
 /// 流关闭 → engine 侧 `maintain_owner_lease` 读到 EOF → 释放 connection-bound owner +
-/// terminate_connection + ownership_version++（旧 core 断线后新 core 可握手接管）。
+/// `terminate_connection` + `ownership_version++（旧` core 断线后新 core 可握手接管）。
 struct ServiceLease {
-    /// 保留发送端（向 engine 发 OwnershipTokenReceived 等消息的通道；当前未使用——
-    /// token 经 AcquireLease RPC 交付，发送端存活保证流不因 sender drop 而关）。
+    /// 保留发送端（向 engine 发 `OwnershipTokenReceived` 等消息的通道；当前未使用——
+    /// token 经 `AcquireLease` RPC 交付，发送端存活保证流不因 sender drop 而关）。
     _req_tx: mpsc::Sender<HostLeaseMessage>,
     /// 后台 drain 任务（消费 engine→core 的 lease 消息；流 EOF → 任务结束）。
     _task: tokio::task::JoinHandle<()>,
@@ -380,7 +380,7 @@ impl EngineControlGrpcClient {
     ///
     /// `psk` 是服务共享秘密（core 从 `%ProgramData%\exv\service.key` 读入，安装用户可读）。
     /// `expected_user_sid` 是**服务 engine（server）进程**的期望用户 SID——服务以
-    /// LocalSystem 运行，调用方应传
+    /// `LocalSystem` 运行，调用方应传
     /// [`SYSTEM_SID`](exv_vpn_win32_ipc::peer_auth::SYSTEM_SID)（`S-1-5-18`）；
     /// 自报 SID 不符 → fail closed（服务 engine 必须是特权系统服务，而非用户态冒名进程）。
     ///
@@ -614,14 +614,14 @@ impl EngineControlGrpcClient {
     /// 建立（或确认已建立）engine 侧 owner lease（`ApplyTunnel`/`StopTunnel` 的完整
     /// 前置，P1-b）：
     ///
-    /// 1. **MaintainOwnerLease 授权握手**——首条消息为 `LeaseHandshake`
+    /// 1. **`MaintainOwnerLease` 授权握手**——首条消息为 `LeaseHandshake`
     ///    （`principal_digest = SHA-256("sid:<core_user_sid>")`，镜像 engine
     ///    `verify_service_peer`/`verify_core_peer` 的 principal 派生；capability/channel
     ///    digest 各 32 字节占位——engine 只校验长度）。收到 `HandshakeAccepted` 即
     ///    `core.owner` 已建立
     ///    （engine 侧 `core.owner` 在 `release_lease` 前保持——一次性握手、stream 关闭
     ///    不影响已建立的 owner）。
-    /// 2. **AcquireLease**——建立 J52 lease 槽（`core.leases.lease(&owner.connection)`）：
+    /// 2. **`AcquireLease`**——建立 J52 lease 槽（`core.leases.lease(&owner.connection)`）：
     ///    `ApplyTunnel`/`StopTunnel` 的 W15 admit gate（`admit_and_gate`）要求该槽存在，
     ///    缺失时返回 `failed_precondition("no owner lease for gate")`。
     ///
@@ -632,6 +632,19 @@ impl EngineControlGrpcClient {
     /// 见 [`KernelEngineControl::ensure_owner_lease`]。
     pub async fn establish_owner_lease(&mut self) -> Result<(), GrpcClientError> {
         if self.owner_lease_established {
+            if self.service_mode {
+                // tonic 可在服务重启后重连同名管道，Ping 成功不能证明旧租约有效。
+                // owner 绑定原连接；维护流结束后必须让路由重新认证并取得租约。
+                if self.service_lease.as_ref().is_none_or(|lease| lease._task.is_finished()) {
+                    return Err(GrpcClientError::ConnectionLost);
+                }
+                self.ping().await?;
+                // 探测等待期间也可能收到旧维护流 EOF，不能在该窗口复用旧 owner。
+                if self.service_lease.as_ref().is_none_or(|lease| lease._task.is_finished()) {
+                    return Err(GrpcClientError::ConnectionLost);
+                }
+                return Ok(());
+            }
             return Ok(());
         }
         // 1. MaintainOwnerLease 授权握手（首条消息 = 授权握手）。
@@ -735,7 +748,7 @@ impl EngineControlGrpcClient {
 }
 
 /// 确定性 lease-acquire 操作 key（`OperationMethod::AcquireLease`；principal digest 由
-/// engine 以认证 peer 覆盖，method/runtime_epoch/operation_id 为合法 wire 形状）。
+/// engine 以认证 peer `覆盖，method/runtime_epoch/operation_id` 为合法 wire 形状）。
 fn lease_acquire_wire_key() -> OperationLookupKey {
     OperationLookupKey {
         principal_digest: vec![0x10; 32],
@@ -752,7 +765,7 @@ fn lease_acquire_wire_key() -> OperationLookupKey {
 /// 本地无明文（无需等待 RPC 返回，更不等待 `Drop`）。返回的请求交由 gRPC 发送；
 /// 其 wire 副本随请求 drop（P3 将补 generated message 发送后清零）。
 ///
-/// 当前 HelperControl wire 尚无凭据字段（P1 基线 proto）；当 P3 语义网关为某条
+/// 当前 `HelperControl` wire 尚无凭据字段（P1 基线 proto）；当 P3 语义网关为某条
 /// mutation 引入一次性 secret（如 `secret_payload`）时，把该请求的 `&mut` 与本函数
 /// 配对，即获得与 legacy 一致的发送后零化保证。
 ///
@@ -775,14 +788,14 @@ pub fn hand_off_request<R: Default>(request: &mut R, secret: &mut ClearableSecre
 
 /// 归一化的 engine connect-status 事件（R1：`WatchEvents` 真实订阅的源事件模型）。
 ///
-/// 状态只从 engine 独立 `StreamConnectStatus` 通道来（R1w 契约，载 operation_id +
-/// 8 级 ConnectPhase + coarse StatsPhase + 可选 err）。**日志已退役为纯输出**（D3
+/// 状态只从 engine 独立 `StreamConnectStatus` 通道来（R1w 契约，载 `operation_id` +
+/// 8 级 `ConnectPhase` + coarse `StatsPhase` + 可选 err）。**日志已退役为纯输出**（D3
 /// 铁律：日志绝不回流状态）；host 侧状态转发器
 /// （`kernel_control_service::spawn_status_forwarder`）把 [`EngineStatusEvent`]
 /// 归一化为 `WatchEvents` 的 `RuntimeEvent` 并驱动 composition 状态机。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineStatusEvent {
-    /// 连接阶段推进（coarse = Connecting；携带细粒度 ConnectPhase）。
+    /// 连接阶段推进（coarse = Connecting；携带细粒度 `ConnectPhase`）。
     Progress {
         operation_id: Vec<u8>,
         connect_phase: ConnectPhase,
@@ -818,9 +831,9 @@ pub type LogEventStream = Pin<Box<dyn Stream<Item = Result<LogEvent, Status>> + 
 
 /// 把 engine 的 `ConnectStatusEvent`（wire）归一化为 [`EngineStatusEvent`]。
 ///
-/// 按 coarse `StatsPhase` 分支：Connecting → Progress（带细粒度 ConnectPhase）；
+/// 按 coarse `StatsPhase` 分支：Connecting → Progress（带细粒度 `ConnectPhase`）；
 /// Connected → Connected；Failed → Failed（携带 err）；Idle → Stopped。其余 coarse
-/// （Unspecified/Stopping——R1w 状态流不产生）或空 operation_id → `None`。
+/// （Unspecified/Stopping——R1w 状态流不产生）或空 `operation_id` → `None`。
 #[must_use]
 pub fn connect_status_from_wire(event: ConnectStatusEvent) -> Option<EngineStatusEvent> {
     let operation_id = event.operation_id;
@@ -886,7 +899,7 @@ pub trait KernelEngineControl: Send + Sync {
         request: ObserveOwnedStateRequest,
     ) -> Result<ObserveOwnedStateReply, GrpcClientError>;
 
-    /// 发送一个 KeepAlive 心跳到 engine（P2 有界存留：engine 侧刷新 `last_heartbeat`
+    /// 发送一个 `KeepAlive` 心跳到 engine（P2 有界存留：engine 侧刷新 `last_heartbeat`
     /// 单调计时；15s 未收到 → 自清理+自退出，hung-core / 进程句柄路径故障兜底）。
     ///
     /// 由 [`spawn_keepalive_ticker`] 的独立 tick 任务按固定周期（默认 10s）调用；传输类
@@ -1218,7 +1231,7 @@ pub async fn query_service_self(
 }
 
 
-/// 拉起 core 侧 KeepAlive 心跳 tick 任务（P2 有界存留）：按 `period`（默认
+/// 拉起 core 侧 `KeepAlive` 心跳 tick 任务（P2 有界存留）：按 `period`（默认
 /// [`KEEPALIVE_PERIOD`] = 10s）周期发 `KeepAlive` 到 engine——engine 侧刷新
 /// `last_heartbeat`，15s 未收到即自清理+自退出（hung-core / 进程句柄路径故障兜底）。
 ///

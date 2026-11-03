@@ -9,6 +9,7 @@ const previewConfig: ReadonlyArray<{ key: CoreConfigKey; value: string }> = [
   { key: "routes", value: "10.0.0.0/8,172.16.0.0/12" },
   { key: "user_agent", value: "EXV Tauri Preview" },
   { key: "mtu", value: "1420" },
+  { key: "protocol", value: "cisco" },
 ];
 
 /**

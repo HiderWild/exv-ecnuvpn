@@ -28,7 +28,9 @@ export interface UiPreferences {
   connect_notify: boolean;
   /** 断开连接时发送通知。 */
   disconnect_notify: boolean;
-  /** 触发重连时发送通知（C5 自动重连落地前仅开关+文案，效果待接线）。 */
+  /** 遗留键（存储兼容，T12 归并）：与 core config `reconnect_notify`（计划 §2.8/T4）
+   * 同名的前端旧开关，效果从未接线。重连通知门控由 core config 键统一承担
+   * （`reconnect-notify.ts`）；本键不再渲染/消费，仅保留读写以兼容旧偏好文件。 */
   reconnect_notify: boolean;
   /** 窗口在前台（聚焦）时抑制所有连接类通知；优先级最高。 */
   suppress_notify_when_foreground: boolean;
@@ -38,7 +40,8 @@ export interface UiPreferences {
   show_latency: boolean;
 }
 
-/** 全部可保存键（页面据此渲染控件；旧 connection_state_notifications 不再渲染/可编辑）。 */
+/** 全部可保存键（页面据此渲染控件；旧 connection_state_notifications 与
+ * reconnect_notify（T12 归并至 core config）不再渲染/可编辑）。 */
 export const UI_PREF_KEYS = [
   "close_preference",
   "minimize_to_tray_on_connect",
@@ -46,7 +49,6 @@ export const UI_PREF_KEYS = [
   "silent_startup",
   "connect_notify",
   "disconnect_notify",
-  "reconnect_notify",
   "suppress_notify_when_foreground",
   "auto_connect_on_launch",
   "show_latency",

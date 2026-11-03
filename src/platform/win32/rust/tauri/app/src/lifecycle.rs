@@ -3,7 +3,7 @@
 //!   * 关闭按钮行为由 ui_prefs 的 `close_preference` 驱动（[`close_decision`] 纯函数）：
 //!     先隐藏窗口，再在后台处理 `quit` → O3 停机；`tray` → 留在托盘；
 //!     `smart` → 读取一次有界的新鲜运行时快照，有活动连接或恢复时驻留，否则退出。
-//!   * 彻底退出 → [`notify_core_shutdown`] → O3：core 经管道关闭感知 UI 退出 → 有序停机。
+//!   * 彻底退出 → [`notify_core_shutdown`] 先经 KernelControl.Stop 停止真实引擎隧道并观察终态，随后 core 经管道 EOF 有序退出。
 //!   * 启动可见性：`--silent` 参数（单次）∨ prefs `silent_startup` → 不弹窗仅托盘；
 //!     否则显示主窗口（[`resolve_startup_visibility`] 纯函数）。
 //!   * 第二实例激活（2026-09-05 单实例计划）：[`activation_decision`] 纯函数把第二实例
@@ -18,6 +18,7 @@
 //! pipe-close 感知自行退出（[`super::kernel::core_process::CoreChild`] 有意不做 Drop
 //! 自动 terminate——kill 会打断有序停机）。
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,8 @@ use crate::ui_prefs::{CLOSE_PREFERENCE_VALUES, DEFAULT_CLOSE_PREFERENCE, UiPrefs
 
 /// smart close 查询 runtime 快照的上限；查询失败不阻止用户退出。
 const SMART_CLOSE_SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(1_200);
+/// 显式 Quit 的 Stop + Idle/失败快照确认总时限。
+const EXPLICIT_QUIT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// 同一关闭操作只允许一个决策任务，避免双击或多入口重复退出/查询。
 static CLOSE_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// 标题栏和托盘退出共用一次停机，避免重复释放托盘和订阅。
@@ -183,6 +186,27 @@ pub fn activation_decision(argv: &[String]) -> ActivationDecision {
     }
 }
 
+// ---- T9（§2.9）唤醒失败模态的整程动作 ----
+
+/// 「尝试重启程序」：relaunch 整个 app（tauri 既有 restart API）。
+///
+/// 后果：当前窗口与所有界面状态关闭，UI 退出触发 O3 停机链路（core 经管道 EOF 有序
+/// 退出、engine 一并终止），随后新 UI 进程启动并重新 spawn core。适用于 core 唤醒
+/// 失败（含挂死：进程在、管道不通——kill 会打断有序停机，整程重启是唯一干净出路）。
+#[tauri::command]
+pub fn app_restart(app: AppHandle) {
+    tracing::info!(target: "exv.lifecycle", "app restart requested (core wake failure modal)");
+    app.restart();
+}
+
+/// 「仅退出」：退出整个 app（O3 停机链路：core 经管道 EOF 有序退出，engine 一并终止；
+/// 后台不会继续运行任何 EXV 进程）。
+#[tauri::command]
+pub fn app_exit(app: AppHandle) {
+    tracing::info!(target: "exv.lifecycle", "app exit requested (core wake failure modal)");
+    app.exit(0);
+}
+
 // ---- 纯函数测试 ----
 
 // ---- 关闭协调 ----
@@ -334,16 +358,83 @@ pub fn notify_core_shutdown<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
     let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || shutdown_core_after_hide(&app));
+    tauri::async_runtime::spawn(async move { shutdown_core_after_hide(&app).await });
 }
 
-fn shutdown_core_after_hide<R: Runtime>(app: &AppHandle<R>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitStopResult {
+    Idle,
+    Failed,
+    TimedOut,
+    CoreUnavailable,
+}
+
+/// 在退出 UI 前经现有 KernelControl.Stop 停止当前 EngineSlot client，并有界等待 Idle/失败终态。
+async fn stop_until_terminal<S, O, OF>(
+    stop: S,
+    mut observe: O,
+    timeout: Duration,
+) -> QuitStopResult
+where
+    S: Future<Output = Result<(), ()>>,
+    O: FnMut() -> OF,
+    OF: Future<Output = Result<RuntimeSnapshot, ()>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    match tokio::time::timeout_at(deadline, stop).await {
+        Ok(Ok(())) => {}
+        Ok(Err(())) => return QuitStopResult::Failed,
+        Err(_) => return QuitStopResult::TimedOut,
+    }
+
+    loop {
+        let snapshot = match tokio::time::timeout_at(deadline, observe()).await {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(())) => return QuitStopResult::Failed,
+            Err(_) => return QuitStopResult::TimedOut,
+        };
+        match snapshot.runtime {
+            RuntimeState::Idle { .. } => return QuitStopResult::Idle,
+            RuntimeState::FailedClean { .. } | RuntimeState::FailedDirty { .. } => {
+                return QuitStopResult::Failed;
+            }
+            _ => {}
+        }
+        if tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(100)))
+            .await
+            .is_err()
+        {
+            return QuitStopResult::TimedOut;
+        }
+    }
+}
+
+async fn stop_core_before_quit<R: Runtime>(app: &AppHandle<R>) -> QuitStopResult {
+    let Some(state) = app.try_state::<CoreState>() else {
+        return QuitStopResult::CoreUnavailable;
+    };
+    stop_until_terminal(
+        async { CoreClient.stop(&state).await.map(|_| ()).map_err(|_| ()) },
+        || async { CoreClient.snapshot(&state).await.map_err(|_| ()) },
+        EXPLICIT_QUIT_STOP_TIMEOUT,
+    )
+    .await
+}
+
+async fn shutdown_core_after_hide<R: Runtime>(app: &AppHandle<R>) {
+    match stop_core_before_quit(app).await {
+        QuitStopResult::Idle => tracing::info!(target: "exv.lifecycle", quit_stop_result = "idle", "explicit Quit confirmed the tunnel is idle"),
+        QuitStopResult::Failed => tracing::warn!(target: "exv.lifecycle", quit_stop_result = "failed", "explicit Quit could not confirm a clean tunnel stop"),
+        QuitStopResult::TimedOut => tracing::warn!(target: "exv.lifecycle", quit_stop_result = "timeout", "explicit Quit timed out waiting for tunnel stop"),
+        QuitStopResult::CoreUnavailable => tracing::warn!(target: "exv.lifecycle", quit_stop_result = "core_unavailable", "explicit Quit could not reach Core to stop the tunnel"),
+    }
+
     tracing::info!(target: "exv.lifecycle", "core shutdown requested (O3: UI exit → core+engine terminate)");
 
     // 0. 移除托盘图标。
     crate::tray::remove_tray();
 
-    // 1. 中止事件订阅（停止 emit + 释放 channel 克隆，加速管道断开）。
+    // 1. Stop RPC 已完成有界观察后，中止订阅并释放 channel 克隆。
     if let Some(session) = app.try_state::<CoreSession>() {
         let subs = session
             .subscriptions
@@ -355,10 +446,9 @@ fn shutdown_core_after_hide<R: Runtime>(app: &AppHandle<R>) {
         tracing::info!(target: "exv.lifecycle", count = subs.len(), "event subscriptions aborted");
     }
 
-    // 2. 应用退出。core 由 pipe-close 感知自行有序停机（见模块文档）。
+    // 2. Core 通过 Pipe EOF 感知 UI 退出；服务隧道仅在上面的显式业务 Stop 时结束。
     app.exit(0);
 }
-
 // ---- setup ----
 
 /// 注册托盘回调 + 决定启动可见性（托盘本体在 lib.rs 的 Builder 之后经 [`install`] 安装）。

@@ -6,6 +6,7 @@
 #include "windows_setup_rust/resource.hpp"
 #include "windows_setup_rust/shortcuts.hpp"
 #include "windows_setup_rust/uninstall_engine.hpp"
+#include "windows_setup_rust/webview2_runtime.hpp"
 #include "windows_setup_rust/util/command_line.hpp"
 #include "windows_setup_rust/ui/icon_bitmaps.hpp"
 #include "windows_setup_rust/ui/theme.hpp"
@@ -2344,6 +2345,21 @@ int RunGui(bool uninstall, const CliOptions &options) {
 }  // namespace
 
 int RunInstallerGui(const CliOptions &options) {
+  if (!IsWebView2EvergreenRuntimeInstalled()) {
+    const int answer = MessageBoxW(nullptr, kWebView2RuntimePrompt, L"EXV 安装前置条件",
+                                   MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1);
+    if (answer == IDYES) {
+      const auto opened = reinterpret_cast<INT_PTR>(ShellExecuteW(
+          nullptr, L"open", kWebView2OfficialDownloadUrl, nullptr, nullptr, SW_SHOWNORMAL));
+      if (opened <= 32) {
+        MessageBoxW(nullptr,
+                    L"无法自动打开微软官方下载页。请手动访问下方官方链接，安装 Evergreen Runtime 后重新运行本安装程序：\n"
+                    L"https://developer.microsoft.com/microsoft-edge/webview2/",
+                    L"EXV 安装前置条件", MB_OK | MB_ICONWARNING);
+      }
+    }
+    return 1;
+  }
   return RunGui(false, options);
 }
 

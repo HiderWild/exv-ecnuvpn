@@ -31,6 +31,43 @@ use zeroize::Zeroize;
 /// engine 侧解析时校验，未知版本拒绝。
 pub const SECRET_PAYLOAD_VERSION: u32 = 1;
 
+/// 同一次连接携带一种认证材料；浏览器会话不会被当成 Cisco 密码使用。
+#[derive(Debug)]
+pub enum ConnectionCredentials {
+    Cisco(EngineCredentials),
+    Atrust(exv_vpn_win32_ipc::browser_session::BrowserSession),
+}
+
+/// 解析版本化连接材料，所有返回路径均清除传入的 wire 副本。
+/// # Errors
+/// 无效消息返回固定分类，错误不包含输入字段内容。
+pub fn parse_connection_credentials(
+    bytes: &mut Vec<u8>,
+) -> Result<Option<ConnectionCredentials>, &'static str> {
+    let wire = zeroize::Zeroizing::new(std::mem::take(bytes));
+    if wire.is_empty() {
+        return Ok(None);
+    }
+    #[derive(Deserialize)]
+    struct Header {
+        version: u32,
+    }
+    let header: Header =
+        serde_json::from_slice(&wire).map_err(|_| "secret payload invalid JSON header")?;
+    match header.version {
+        1 => parse_secret_payload(&wire)
+            .map(EngineCredentials::from_package)
+            .map(ConnectionCredentials::Cisco)
+            .map(Some)
+            .map_err(|_| "secret payload invalid Cisco credentials"),
+        2 => exv_vpn_win32_ipc::browser_session::BrowserSession::decode(&wire)
+            .map(ConnectionCredentials::Atrust)
+            .map(Some)
+            .map_err(|_| "secret payload invalid aTrust browser session"),
+        _ => Err("secret payload unsupported version"),
+    }
+}
+
 /// 解析 `secret_payload` 的 typed 错误。失败路径不携带任何明文字节。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretPayloadError {

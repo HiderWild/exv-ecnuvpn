@@ -45,7 +45,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use exv_vpn_cstp::connector::{BootstrapConfig, TrustPolicy};
 use exv_vpn_cstp::session::{CstpControlEvent, CstpSession, SessionError};
 use exv_vpn_cstp::webvpn::{LoginError, WebvpnLogin};
-use exv_vpn_win32_config::ConnectionMode;
+use exv_vpn_win32_config::{ConnectionMode, Protocol};
 use exv_vpn_wire::generated;
 use generated::ConnectPhase;
 use tokio::sync::mpsc;
@@ -55,7 +55,7 @@ use crate::data_plane::{
 };
 use crate::log_sink::{LogLevel, LogSink};
 use crate::platform_tunnel::{NicOwner, PlatformFacts, RouteCleanupObligations, RouteOwner};
-use crate::secret_payload::EngineCredentials;
+use crate::secret_payload::ConnectionCredentials;
 use crate::status::{StatusEvent, StatusPublisher};
 use crate::system_proxy_journal::SystemProxyJournal;
 use crate::vgdc_connect::{
@@ -108,9 +108,9 @@ pub struct ApplyContext {
     /// wire 传入的 domain 隧道计划（`opaque_intent` 用于关联；真实 apply 以 CSTP
     /// offer 为准——address/prefix/mtu/dns/routes 来自真实协商）。
     pub plan: exv_vpn_domain::ports::TunnelPlan,
-    /// 一次性 CSTP 凭据（`EngineCredentials`，零化类型；登录消费后立即 zeroize）。
+    /// 一次性协议认证材料；Cisco 密码或 aTrust 浏览器候选会话。
     /// `None` = 未提供凭据（真实运行时 fail closed；fake 容忍）。
-    pub credentials: Option<EngineCredentials>,
+    pub credentials: Option<ConnectionCredentials>,
     /// apply operation_id（status 事件关联）。
     pub operation_id: Vec<u8>,
     /// 状态推送端点（服务共享的 StatusPublisher）。
@@ -243,6 +243,8 @@ pub(crate) fn tunnel_error_to_wire(err: &TunnelError) -> generated::VpnError {
         stage: if matches!(err.kind, TunnelErrorKind::PlatformDependency | TunnelErrorKind::Platform) {
             if err.connect_phase == ConnectPhase::ObservingOwnedState {
                 generated::ErrorStage::ObservingOwnedState as i32
+            } else if err.connect_phase == ConnectPhase::ConnectingControl {
+                generated::ErrorStage::ConnectingControl as i32
             } else if err.connect_phase == ConnectPhase::StartingDataPlane {
                 generated::ErrorStage::StartingDataPlane as i32
             } else {
@@ -338,7 +340,7 @@ impl TunnelError {
 
 /// `start_apply` 启动决策（P2：已连接时采纳复用，不拒绝）。
 ///
-/// 纯函数——仅由 `assembling`/`is_connected` 两个快照输入决定，无副作用、可单测。
+/// 纯函数——按组装状态、live 状态与本次是否携带新凭据作出启动决策。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartDecision {
     /// 有在途组装（assembling=true）→ 拒绝，返回 `DuplicateConnect`（CONNECT_IN_PROGRESS）。
@@ -350,12 +352,17 @@ enum StartDecision {
     Proceed,
 }
 
-/// 决策逻辑（纯函数，可单测）。
+/// 决策逻辑（纯函数，可单测）。携带新凭据表示用户明确发起新连接，即使旧 live
+/// 协议和连接模式相同也必须进入组装；没有新凭据时才允许接管现有会话。
 #[inline]
-fn decide_start_apply(is_assembling: bool, is_connected: bool) -> StartDecision {
+fn decide_start_apply(
+    is_assembling: bool,
+    is_connected: bool,
+    has_new_credentials: bool,
+) -> StartDecision {
     if is_assembling {
         StartDecision::RefuseDuplicate
-    } else if is_connected {
+    } else if is_connected && !has_new_credentials {
         StartDecision::Adopt
     } else {
         StartDecision::Proceed
@@ -488,19 +495,51 @@ struct EngineCstp {
     lost_tx: std::sync::mpsc::Sender<DataPlaneLost>,
 }
 
-/// **session owner + route owner 的 per-connection 存活状态**（apply 成功后的存活状态；
-/// 减负断开 / 退出清理消费）。NIC owner 独立于本结构常驻（`RealTunnelRuntime.nic`）。
-///
-/// **字段声明顺序即 Drop 顺序（W17 SAFETY-ORDER + 资源逆序）**：`data_plane_threads`
-/// （先 join）→ `data_plane`（session `WintunEndSession`）→ `cstp`（CSTP 通道 drop →
-/// TLS 数据任务退出）→ `route`（restore 地址/路由/DNS，adapter 保留）——任何退出路径
-/// 都保证 session 先于 adapter 结束、CSTP 任务先于 adapter close。
+enum PreparedPackets {
+    Cisco {
+        write_channel: mpsc::UnboundedSender<Vec<u8>>,
+        read_channel: Arc<Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
+        control_rx: Arc<Mutex<mpsc::UnboundedReceiver<CstpControlEvent>>>,
+        latency_cfg: LatencyProbeConfig,
+    },
+    Atrust {
+        owner: crate::atrust_tunnel::AtrustPacketTunnel,
+        channels: crate::atrust_tunnel::RawPacketChannels,
+    },
+}
+
+/// aTrust 节点连接及驱动该连接的运行时句柄。
+struct EngineAtrust {
+    owner: crate::atrust_tunnel::AtrustPacketTunnel,
+    runtime: tokio::runtime::Handle,
+    _lost_tx: Option<std::sync::mpsc::Sender<DataPlaneLost>>,
+}
+
+impl EngineAtrust {
+    // LiveTunnel 的同步清理也可能由 RPC 的 Tokio 上下文调用。
+    // 在独立线程驱动 close，避免嵌套 block_on；返回前等待节点任务释放连接。
+    fn close(mut self) -> Result<(), String> {
+        std::thread::Builder::new()
+            .name("atrust-close".into())
+            .spawn(move || self.runtime.block_on(self.owner.close()))
+            .map_err(|_| "engine: cannot start aTrust cleanup worker".to_owned())?
+            .join()
+            .map_err(|_| "engine: aTrust cleanup worker stopped".to_owned())?
+    }
+}
+
+/// 每次连接的协议、数据面与路由持有者；NIC 独立常驻于 RealTunnelRuntime。
+/// 显式断开和 Drop 均先标记 aTrust 正常退出，再 join 网卡线程、结束网卡 session、
+/// 关闭协议连接，最后清理路由。aTrust 的异步关闭由 EngineAtrust 桥接。
 struct LiveTunnel {
+    protocol: Protocol,
     connection_mode: ConnectionMode,
     data_plane_threads: Option<EngineDataPlaneThreads>,
     data_plane: Option<EngineDataPlane>,
     cstp: Option<EngineCstp>,
+    atrust: Option<EngineAtrust>,
     route: Option<RouteOwner>,
+    campus_dns: Option<crate::nrpt_worker::NrptWorkerLease>,
     diagnostics: Option<RuntimeDiagnostics>,
 }
 
@@ -511,11 +550,14 @@ impl LiveTunnel {
         diagnostics: RuntimeDiagnostics,
     ) -> Self {
         Self {
+            protocol: Protocol::Cisco,
             connection_mode,
             data_plane_threads: None,
             data_plane: None,
             cstp: None,
+            atrust: None,
             route: Some(route),
+            campus_dns: None,
             diagnostics: Some(diagnostics),
         }
     }
@@ -537,6 +579,9 @@ impl LiveTunnel {
             diag.emit("tunnel.runtime.live_cleanup", reason, "started", []);
         }
         let result = (|| {
+            if let Some(atrust) = &self.atrust {
+                atrust.owner.begin_host_shutdown();
+            }
             // 1. 停数据面线程（先 join，再放 session Arc 克隆；W17 SAFETY-ORDER）。
             if let Some(mut threads) = self.data_plane_threads.take() {
                 let _ = threads.stop_and_join();
@@ -546,11 +591,30 @@ impl LiveTunnel {
             self.data_plane = None;
             // 3. 关闭 CSTP 通道（drop write/read channel → TLS 任务退出）。
             self.cstp = None;
+            // 节点自身的错误不能跳过本机路由清理；待清理后再返回。
+            let protocol_result = self.atrust.take().map_or(Ok(()), EngineAtrust::close);
+            if let Err(category) = protocol_result
+                && let Some(diag) = &self.diagnostics
+            {
+                diag.emit(
+                    "tunnel.protocol.termination",
+                    "packet_worker_terminated",
+                    "failed",
+                    [("failure_category".into(), category)],
+                );
+            }
+            // 校园 DNS 规则先撤销，再撤去到解析器的校园路由；失败保留 owner 供重试。
+            if let Some(worker) = self.campus_dns.as_mut() {
+                worker.shutdown()?;
+            }
+            self.campus_dns = None;
             // 4. 逆序清 route（地址/路由/MTU/DNS）——adapter 保留（D12 网卡惰性存续）。
             if let Some(route) = self.route.as_mut() {
                 route.clear()?;
             }
             self.route = None;
+            // 协议终止结果单独记录。对端 EOF 不应让已成功撤销路由/DNS 的旧 live
+            // 被保留；只有本地资源清理失败才需要保留 owner 供重试。
             Ok(())
         })();
         if let Some(diag) = &self.diagnostics {
@@ -577,46 +641,67 @@ impl Drop for LiveTunnel {
         let had_resources = self.data_plane_threads.is_some()
             || self.data_plane.is_some()
             || self.cstp.is_some()
-            || self.route.is_some();
+            || self.atrust.is_some()
+            || self.route.is_some()
+            || self.campus_dns.is_some();
         let started = Instant::now();
-        if had_resources {
-            if let Some(diag) = &self.diagnostics {
-                diag.emit(
-                    "tunnel.runtime.live_cleanup",
-                    "live_drop_fallback",
-                    "started",
-                    [],
-                );
-            }
+        if had_resources
+            && let Some(diag) = &self.diagnostics
+        {
+            diag.emit(
+                "tunnel.runtime.live_cleanup",
+                "live_drop_fallback",
+                "started",
+                [],
+            );
         }
         // 兜底：任何未显式 disconnect 的退出路径都先 join 数据面、再逆序清理。
+        if let Some(atrust) = &self.atrust {
+            atrust.owner.begin_host_shutdown();
+        }
         if let Some(mut threads) = self.data_plane_threads.take() {
             let _ = threads.stop_and_join();
         }
         self.data_plane = None;
         self.cstp = None;
+        let protocol_result = self.atrust.take().map_or(Ok(()), EngineAtrust::close);
+        if let Err(category) = protocol_result
+            && let Some(diag) = &self.diagnostics
+        {
+            diag.emit(
+                "tunnel.protocol.termination",
+                "packet_worker_terminated",
+                "failed",
+                [("failure_category".into(), category)],
+            );
+        }
+        let dns_result = self.campus_dns.as_mut().map_or(Ok(()), |worker| worker.shutdown());
+        self.campus_dns = None;
         // route 兜底清理（best-effort；adapter 由 NicOwner 在退出序 close）。
         let result = if let Some(mut route) = self.route.take() {
             route.clear()
         } else {
             Ok(())
         };
-        if had_resources {
-            if let Some(diag) = &self.diagnostics {
-                diag.emit(
-                    "tunnel.runtime.live_cleanup",
-                    "live_drop_fallback",
-                    if result.is_ok() {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
-                    [(
-                        "elapsed_ms".into(),
-                        started.elapsed().as_millis().to_string(),
-                    )],
-                );
-            }
+        // Drop 兜底无法重试错误，但清理诊断仍只反映本地资源清理结果；协议终止
+        // 已通过上方独立的脱敏事件记录。
+        let result = result.and(dns_result);
+        if had_resources
+            && let Some(diag) = &self.diagnostics
+        {
+            diag.emit(
+                "tunnel.runtime.live_cleanup",
+                "live_drop_fallback",
+                if result.is_ok() {
+                    "completed"
+                } else {
+                    "failed"
+                },
+                [(
+                    "elapsed_ms".into(),
+                    started.elapsed().as_millis().to_string(),
+                )],
+            );
         }
     }
 }
@@ -748,6 +833,18 @@ fn live_sweeper_step(
                     // S4：掉线清 live 与减负断开同语义——置 Paused（下次连接
                     // start_apply 清）。
                     rt.paused.store(true, Ordering::SeqCst);
+                    // T6a：R1 触发点——隧道已死且 live 已清，engine 自愈接管
+                    //（门控在驱动内：材料在/无在途循环/隧道确死/reconnect.enabled）。
+                    // 同步非阻塞（驱动只做判定并 spawn 自愈循环）。
+                    if let Some(driver) = rt
+                        .reconnect
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                    {
+                        driver.on_tunnel_lost();
+                    }
                     SweeperStep::ClearedLive
                 }
                 None => {
@@ -837,6 +934,13 @@ pub struct RealTunnelRuntime {
     generation: std::sync::atomic::AtomicU64,
     /// 保存最近受理的操作身份，供没有 ApplyContext 的取消/退出入口记录。
     diagnostics: Mutex<Option<RuntimeDiagnostics>>,
+    /// 连接门（T4）：装配成功（install_live 之后）经它把 trace 推 Live 并回写
+    /// 装配字段（网卡/NRPT owner/engine PID）。`None` = 未接线（测试构造器）。
+    trace_gate: Option<Arc<crate::connect_gate::ConnectGate>>,
+    /// R1 重连驱动（T6a）：sweeper 清除死亡隧道的 live 之后回调其触发入口。
+    /// **Weak**——强引用由 `HelperControlService` 持有，防止 运行时↔驱动 强引用
+    /// 环阻止 `RealTunnelRuntime::Drop` 的兜底清理。`None` = 未接线（测试构造器）。
+    reconnect: Mutex<Option<std::sync::Weak<crate::reconnect::ReconnectDriver>>>,
 }
 
 impl RealTunnelRuntime {
@@ -910,7 +1014,28 @@ impl RealTunnelRuntime {
             nic_reused_count: std::sync::atomic::AtomicUsize::new(0),
             generation: std::sync::atomic::AtomicU64::new(0),
             diagnostics: Mutex::new(None),
+            trace_gate: None,
+            reconnect: Mutex::new(None),
         }
+    }
+
+    /// 注入连接门（T4）：`grpc_server::with_real_tunnel` 生产组装用；测试构造器
+    /// 保持 `None`（装配路径维持既有行为，无痕回写）。
+    #[must_use]
+    pub fn with_trace_gate(mut self, gate: Arc<crate::connect_gate::ConnectGate>) -> Self {
+        self.trace_gate = Some(gate);
+        self
+    }
+
+    /// 注入 R1 重连驱动（T6a）：`grpc_server::with_real_tunnel` 在驱动构造后调用
+    /// （驱动需先持有运行时 `Arc`，故此处只存 `Weak`）。sweeper 的 `ClearedLive`
+    /// 分支经它触发 engine 自愈；未注入（测试构造器）时掉线维持既有行为（清
+    /// live + Paused，不自愈）。
+    pub fn attach_reconnect(&self, driver: &Arc<crate::reconnect::ReconnectDriver>) {
+        *self
+            .reconnect
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(driver));
     }
 
     fn diagnostic_context(&self) -> Option<RuntimeDiagnostics> {
@@ -937,8 +1062,36 @@ impl RealTunnelRuntime {
     /// # Errors
     /// config 读取失败（文件系统错误）→ `String`（fail closed）。
     fn load_config(&self) -> Result<exv_vpn_win32_config::ExvConfig, String> {
-        exv_vpn_win32_config::ExvConfig::load_from_dir(&self.config_dir)
-            .map_err(|e| format!("config-load:{e}"))
+        // 连接阶段必须读取实际配置，不能沿用首次启动时缺文件即生成默认值的语义。
+        let path = self.config_dir.join("config.json");
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            format!("config-load: read {}: kind={:?}, os={:?}",
+                path.display(), error.kind(), error.raw_os_error())
+        })?;
+        let parse_error = |error: serde_json::Error| {
+            // serde 的完整错误可能含字段值；这里只记录类别与位置。
+            format!("config-load: parse category={:?}, line={}, column={}",
+                error.classify(), error.line(), error.column())
+        };
+        let raw: serde_json::Value = serde_json::from_str(&text).map_err(&parse_error)?;
+        if let Some(protocol) = raw.get("protocol")
+            && !matches!(protocol.as_str(), Some("cisco" | "atrust"))
+        {
+            return Err("config-load: unsupported explicit protocol".into());
+        }
+        serde_json::from_value(raw).map_err(parse_error)
+    }
+
+    fn load_connection_config(&self, credentials: &ConnectionCredentials) -> Result<exv_vpn_win32_config::ExvConfig, String> {
+        let config = self.load_config()?;
+        let protocol = match credentials {
+            ConnectionCredentials::Cisco(_) => Protocol::Cisco,
+            ConnectionCredentials::Atrust(_) => Protocol::Atrust,
+        };
+        if config.protocol != protocol {
+            return Err("config-load: credential protocol/config mismatch".into());
+        }
+        Ok(config)
     }
 
     /// 立即延迟刷新标记与服务安装时固定的用户配置目录保持一致。
@@ -960,9 +1113,10 @@ impl RealTunnelRuntime {
             }
         }
         pending.retain(|routes| !routes.is_empty());
-        if groups_before > 0 {
-            if let Some(diag) = self.diagnostic_context() {
-                diag.emit(
+        if groups_before > 0
+            && let Some(diag) = self.diagnostic_context()
+        {
+            diag.emit(
                     "tunnel.route.cleanup",
                     "pending_rollback_recovery",
                     if errors.is_empty() {
@@ -976,7 +1130,6 @@ impl RealTunnelRuntime {
                         ("detail".into(), errors.join("; ")),
                     ],
                 );
-            }
         }
         if errors.is_empty() {
             Ok(())
@@ -996,11 +1149,11 @@ impl RealTunnelRuntime {
             .lock()
             .map_err(|_| "live lock".to_string())?
             .take();
-        if let Some(mut previous) = previous {
-            if let Err(error) = previous.disconnect_for("before_new_connection") {
-                *self.live.lock().map_err(|_| "live lock".to_string())? = Some(previous);
-                return Err(error);
-            }
+        if let Some(mut previous) = previous
+            && let Err(error) = previous.disconnect_for("before_new_connection")
+        {
+            *self.live.lock().map_err(|_| "live lock".to_string())? = Some(previous);
+            return Err(error);
         }
         self.retry_pending_routes()
     }
@@ -1039,9 +1192,18 @@ impl RealTunnelRuntime {
 impl TunnelRuntime for RealTunnelRuntime {
     fn start_apply(self: Arc<Self>, ctx: ApplyContext) -> Result<(), TunnelError> {
         use std::sync::atomic::Ordering;
+        // v1/无载荷保持既有 Cisco 语义；v2 明确请求浏览器认证的 aTrust。
+        let requested_protocol = match ctx.credentials.as_ref() {
+            Some(ConnectionCredentials::Atrust(_)) => Protocol::Atrust,
+            _ => Protocol::Cisco,
+        };
         let _commit = self.lifecycle_commit.lock().expect("runtime commit lock");
         let decision =
-            decide_start_apply(self.assembling.load(Ordering::SeqCst), self.is_connected());
+            decide_start_apply(
+                self.assembling.load(Ordering::SeqCst),
+                self.is_connected(),
+                ctx.credentials.is_some(),
+            );
         match decision {
             StartDecision::RefuseDuplicate => {
                 return Err(TunnelError {
@@ -1062,7 +1224,7 @@ impl TunnelRuntime for RealTunnelRuntime {
                     .lock()
                     .expect("live lock")
                     .as_ref()
-                    .filter(|live| live.connection_mode == ctx.connection_mode)
+                    .filter(|live| live.connection_mode == ctx.connection_mode && live.protocol == requested_protocol)
                     .and_then(|live| live.data_plane_threads.as_ref())
                     .is_some_and(|threads| {
                         threads.rebind_operation_with(&ctx.operation_id, || {
@@ -1105,12 +1267,11 @@ impl TunnelRuntime for RealTunnelRuntime {
         let status = Arc::clone(&ctx.status);
         let stats = Arc::clone(&ctx.stats);
         std::thread::spawn(move || {
-            let result = RealTunnelRuntime::run_assemble_with_reset(
+            // run_assemble_with_reset 内部处理 assemble 结果的 status 推送；
+            // assembling 复位在该函数内完成（含 panic 保护）。返回 ()，无需绑定。
+            RealTunnelRuntime::run_assemble_with_reset(
                 &rt, ctx, cancel, &stats, &status, &op_id,
             );
-            // run_assemble_with_reset 内部处理 assemble 结果的 status 推送；
-            // assembling 复位在该函数内完成（含 panic 保护）。
-            let _ = result;
         });
         Ok(())
     }
@@ -1167,11 +1328,11 @@ impl TunnelRuntime for RealTunnelRuntime {
                     .map_err(|_| "live lock".to_string())?
                     .take()
             };
-            if let Some(tunnel) = live.as_mut() {
-                if let Err(error) = tunnel.disconnect() {
-                    *self.live.lock().map_err(|_| "live lock".to_string())? = live;
-                    return Err(error);
-                }
+            if let Some(tunnel) = live.as_mut()
+                && let Err(error) = tunnel.disconnect()
+            {
+                *self.live.lock().map_err(|_| "live lock".to_string())? = live;
+                return Err(error);
             }
             self.retry_pending_routes()?;
             // 减负断开完成：置 Paused 标记（D13；下次连接 start_apply 清）。
@@ -1273,15 +1434,15 @@ impl Drop for RealTunnelRuntime {
             let _ = live.disconnect();
         }
         for pending in self.pending_routes.get_mut().expect("pending routes lock") {
-            if let Err(error) = pending.retry_clear() {
-                if let Some(diag) = &diagnostics {
-                    diag.emit(
-                        "tunnel.route.cleanup",
-                        "runtime_drop",
-                        "failed",
-                        [("detail".into(), error)],
-                    );
-                }
+            if let Err(error) = pending.retry_clear()
+                && let Some(diag) = &diagnostics
+            {
+                diag.emit(
+                    "tunnel.route.cleanup",
+                    "runtime_drop",
+                    "failed",
+                    [("detail".into(), error)],
+                );
             }
         }
         if let Some(nic) = self.nic.get_mut().expect("nic lock").take() {
@@ -1298,6 +1459,75 @@ impl Drop for RealTunnelRuntime {
                 )],
             );
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PublicAssemblyFailure {
+    reason_id: &'static str,
+    message: &'static str,
+}
+
+/// 仅把封闭的已知原因映射为用户可见文案；任意错误文本（可能含路径或网络信息）不外显。
+fn public_assembly_failure(detail: &str) -> Option<PublicAssemblyFailure> {
+    let reason = if detail.starts_with("engine: config-load: read ")
+        || detail.starts_with("engine: config-load: parse ")
+        || detail == "engine: config-load: unsupported explicit protocol"
+    {
+        PublicAssemblyFailure {
+            reason_id: "connection_config_read_or_parse_failed",
+            message: "EXV 无法读取或解析连接配置。请检查应用配置权限和配置有效性，然后重启重试。",
+        }
+    } else if matches!(
+        detail,
+        "node-tls-verification-failed"
+            | "node-peer-certificate-mismatch"
+            | "node-tls-name"
+            | "node-certificate-invalid"
+            | "observed-certificate-scope-mismatch"
+            | "node-platform-verifier"
+            | "node-tls-config"
+    ) {
+        PublicAssemblyFailure {
+            reason_id: "atrust_node_tls_verification_failed",
+            message: "aTrust 节点身份验证失败。请检查系统时间和网络；仍失败请导出日志联系管理员。",
+        }
+    } else if matches!(
+        detail,
+        "aTrust authorized resource node group unavailable"
+            | "aTrust observed-certificate node absent from authorized catalog"
+            | "aTrust node unavailable"
+            | "aTrust node does not belong to selected resource group"
+    ) {
+        PublicAssemblyFailure {
+            reason_id: "atrust_authorized_node_unavailable",
+            message: "当前账号的 aTrust 授权资源中没有可用节点。请重新登录刷新授权；仍失败请联系管理员。",
+        }
+    } else {
+        return None;
+    };
+    Some(reason)
+}
+
+/// 已知原因只写固定、脱敏的结构化事件；其它错误保留现有诊断详情。
+fn emit_assemble_failure_log(log: &LogSink, error: &TunnelError) {
+    let phase = format!("{:?}", error.connect_phase);
+    if let Some(public) = public_assembly_failure(&error.detail) {
+        log.emit(
+            LogLevel::Warn,
+            "engine",
+            "tunnel.assemble.failed",
+            public.message,
+            &[("reason_id", public.reason_id), ("phase", &phase)],
+        );
+    } else {
+        log.emit(
+            LogLevel::Warn,
+            "engine",
+            "tunnel.assemble.failed",
+            "tunnel assembly failed (diagnostic; state on StreamConnectStatus)",
+            &[("detail", &error.detail), ("phase", &phase)],
+        );
     }
 }
 
@@ -1362,15 +1592,7 @@ impl RealTunnelRuntime {
                         ("error_kind".into(), format!("{:?}", err.kind)),
                     ],
                 );
-                let detail = err.detail.clone();
-                let phase = err.connect_phase;
-                log.emit(
-                    LogLevel::Warn,
-                    "engine",
-                    "tunnel.assemble.failed",
-                    "tunnel assembly failed (diagnostic; state on StreamConnectStatus)",
-                    &[("detail", &detail), ("phase", &format!("{phase:?}"))],
-                );
+                emit_assemble_failure_log(&log, &err);
                 stats.registry().set_phase(generated::StatsPhase::Failed);
                 let wire = tunnel_error_to_wire(&err);
                 status.publish(StatusEvent::failed(op_id.to_vec(), err.connect_phase, wire));
@@ -1544,319 +1766,351 @@ impl RealTunnelRuntime {
             return Err(Self::cancelled_error(ConnectPhase::ObservingOwnedState));
         }
 
-        let config = self.load_config().map_err(|e| {
-            TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}"))
-        })?;
-        let hostname = config.server.clone();
-        let user_agent = config.user_agent.clone();
-        let campus_routes = config.routes.clone();
-
-        // 凭据：来自 `ApplyTunnelRequest.secret_payload`（一次性，零化类型）。未提供
-        // → fail closed（真实登录必须有凭据；不静默回退）。
-        let mut credentials = ctx.credentials.ok_or_else(|| TunnelError {
+        // 认证材料与本次磁盘配置必须一致，再进入任何网关认证分支。
+        let credentials = ctx.credentials.ok_or_else(|| TunnelError {
             kind: TunnelErrorKind::MissingCredentials,
             connect_phase: ConnectPhase::ConnectingControl,
             code: 0,
             a0: 0,
             detail: "engine: no credentials provided".to_string(),
         })?;
-
-        // ---- 阶段 1：登录 + CSTP 控制面协商（真实学校网关；plan 来自真实 offer）。
-        //      **session owner**：登录/CSTP/TLS 通道在此建立，offer 由此产出。 ----
-        ctx.status.publish(StatusEvent::connecting(
-            ctx.operation_id.clone(),
-            ConnectPhase::ConnectingControl,
-        ));
-        // 网关解析：VGDC 双线（DoH 直连 + 绑物理网卡 UDP/53 兜底），物理出口 ifindex
-        // 自动发现；解析出**真实网关地址**（222.66.117.109），供 login/CSTP 直连。
-        // `perform_login` 内部用 `gateway_addr` 参数自建 BootstrapConfig（不带
-        // resolver）——必须预解析真实地址传入，绝不传占位符。
-        //
-        // **C4/G-⑤ 物理出口绑定（R1b 落地）**：CSTP 控制面 socket 用 `IP_UNICAST_IF`
-        // 钉在物理网卡出口——否则（本机 Mihomo TUN 默认路由下）控制面/data 走 Mihomo
-        // 代理路径，隧道数据面无回包（实测：engine 的 222.66.117.109:443 连接源地址
-        // 是 198.18.0.1=Mihomo，ring_sent=0）。解析器与 binder 共用同一物理 ifindex。
-        let nics = exv_vpn_win32_resource::vgdc_dns::find_physical_nics().map_err(|e| {
-            TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: nics:{e}"))
-        })?;
-        let physical_nic = nics.first().ok_or_else(|| {
-            TunnelError::plain(ConnectPhase::ConnectingControl, "engine: no physical nic")
-        })?;
-        let physical_ifindex = physical_nic.ifindex;
-        let dns_diag = diagnostics.clone();
-        let dns_observer: Arc<GatewayResolutionObserver> = Arc::new(move |observation| {
-            let mut fields = BTreeMap::from([
-                (
-                    "elapsed_ms".into(),
-                    observation.elapsed.as_millis().to_string(),
-                ),
-                (
-                    "resolved_gateway".into(),
-                    observation
-                        .address
-                        .map_or_else(|| "unavailable".into(), |value| value.to_string()),
-                ),
-            ]);
-            if let Some(failed_layers) = observation.failed_layers {
-                fields.insert("reported_failed_layers".into(), failed_layers.to_string());
-            }
-            if let Some(source) = observation.source {
-                use exv_vpn_win32_resource::vgdc_dns::ResolutionSource;
-                fields.insert("resolution_source".into(), source.as_str().into());
-                fields.insert(
-                    "resolution_mode".into(),
-                    match source {
-                        ResolutionSource::System => "ip_literal",
-                        ResolutionSource::Doh(_) => "doh",
-                        ResolutionSource::Udp53(_) => "udp53",
-                    }
-                    .into(),
-                );
-                match source {
-                    ResolutionSource::Doh(ip) | ResolutionSource::Udp53(ip) => {
-                        fields.insert("resolver_addr".into(), ip.to_string());
-                    }
-                    _ => {}
-                }
-            }
-            dns_diag.emit(
-                "tunnel.gateway.resolved",
-                "actual_gateway_resolution",
-                if observation.address.is_some() {
-                    "completed"
-                } else {
-                    "failed"
-                },
-                fields,
-            );
-        });
-        let gateway_resolver = production_gateway_resolver_observed(
-            physical_ifindex,
-            CSTP_GATEWAY_PORT,
-            Some(dns_observer),
-        )
-        .map_err(|e| TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}")))?;
-        let socket_binder = socket_binder_for_mode(connection_mode, physical_ifindex);
-        let resolver = gateway_resolver.clone();
-        let gateway_addr = self.rt.block_on(resolver(&hostname)).map_err(|e| {
+        let config = self.load_connection_config(&credentials).map_err(|e| {
             TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}"))
         })?;
-        if is_cancelled() {
-            return Err(Self::cancelled_error(ConnectPhase::ConnectingControl));
-        }
-        // 网关 bypass /32 行（2026-09-08 计划 T2）：VGDC 解析地址驱动（地址来源唯一
-        // 化——拒绝手填，config 无网关 IP 字段），与解析器/binder 同一物理出口发现
-        // 结果。行在 apply 内先于全部隧道路由入表；网关所在校园网段随后整段进隧道，
-        // 路由表层对网关的选路由本 /32 覆盖到物理出口（socket binder 之外的第二层
-        // 独立防御）。fake-ip / IPv6 防御拒绝（fail-closed）。
-        let gateway_ip = match gateway_addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
-            std::net::IpAddr::V6(_) => {
-                return Err(TunnelError::plain(
-                    ConnectPhase::ConnectingControl,
-                    "engine: gateway resolved to IPv6 (VGDC dual-line is v4-only)",
-                ));
-            }
-        };
-        // 登录 socket 与 CSTP 控制面使用同一次会话冻结的出口策略。
-        // `production_socket_binder` 与 CSTP 的 `BootstrapConfig.socket_binder`
-        // 复用同一闭包——否则登录 TLS（aggregate-auth XML 通道 + form 通道的
-        // logon GET / credential POST）在 Mihomo TUN 默认路由下走代理路径，登录
-        // 流量绕过物理出口（与 R1b 已修的 CSTP 控制面 C4/G-⑤ 同机理）。
-        let login = self
-            .rt
-            .block_on(WebvpnLogin::perform_login_with_socket_binder(
-                &hostname,
-                gateway_addr,
-                TrustPolicy::Production, // 真实学校链（同 school.rs 策略）
-                None,
-                credentials.username.as_bytes(),
-                credentials.password.as_bytes(),
-                &user_agent,
-                socket_binder.clone(),
-            ))
-            .map_err(|err| {
-                // 凭据一次性契约：登录失败同样一次消费后立即 zeroize。
-                credentials.zeroize();
-                ctx.log.emit(
-                    LogLevel::Warn,
-                    "engine",
-                    "tunnel.login.failed",
-                    "login failed (diagnostic; state on StreamConnectStatus)",
-                    &[("detail", &format!("{:?}", err))],
-                );
-                TunnelError::login(&err)
-            })?;
-        // 凭据一次性契约：登录已消费 → 立即 zeroize（不等待 ApplyContext Drop）。
-        credentials.zeroize();
-        if is_cancelled() {
-            // 取消：登录已消费，未建任何资源——直接中断。
-            return Err(Self::cancelled_error(ConnectPhase::ConnectingControl));
-        }
+        diagnostics.emit(
+            "tunnel.config.loaded",
+            "connection_configuration",
+            "observed",
+            [
+                ("directory".into(), self.config_dir.display().to_string()),
+                ("file_exists".into(), self.config_dir.join("config.json").is_file().to_string()),
+                ("protocol".into(), config.protocol.to_string()),
+            ],
+        );
+        let hostname = config.server.clone();
+        let user_agent = config.user_agent.clone();
+        let campus_routes = config.routes.clone();
 
-        let cfg = BootstrapConfig {
-            hostname: hostname.clone(),
-            // 已预解析真实网关地址；CSTP bootstrap 不再重复解析（同 acceptance engine
-            // 的 `real_ip` 直连语义；`gateway_resolver` 置 None——已解析）。
-            gateway_addr,
-            trust: TrustPolicy::Production,
-            dtls_offered: false, // MVP：TLS/CSTP only（offer 出现 dtls 即拒绝）
-            deadline: None,
-            // 标准模式绑定物理出口；兼容模式使用系统选路，两者与登录 socket 策略一致。
-            socket_binder,
-            gateway_resolver: None,
-        };
-        let actual_endpoints = Mutex::new(None);
-        let socket_observer = |socket: &tokio::net::TcpStream| {
-            *actual_endpoints.lock().expect("socket observation lock") = Some(
-                socket
-                    .local_addr()
-                    .and_then(|local| socket.peer_addr().map(|peer| (local, peer))),
-            );
-            let mut fields = connected_socket_fields(socket);
-            fields.insert("connection_mode".into(), connection_mode.as_str().into());
-            if let Ok(address) = socket.local_addr() {
-                fields.insert("socket_selected_source".into(), address.ip().to_string());
+        let (offer, campus_dns_servers, bypasses, prepared_packets) = match credentials {
+            ConnectionCredentials::Atrust(browser) => {
+                ctx.status.publish(StatusEvent::connecting(
+                    ctx.operation_id.clone(), ConnectPhase::ConnectingControl,
+                ));
+                let certificate = match std::fs::read(self.config_dir.join("atrust-node-certificate.der")) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(_) => return Err(TunnelError::plain(ConnectPhase::ConnectingControl,
+                        "engine: cannot read explicitly configured aTrust node certificate")),
+                };
+                let prepared = self.rt.block_on(crate::atrust_prepare::prepare(
+                    browser, &config, certificate.as_deref(),
+                )).map_err(|error| TunnelError::plain(ConnectPhase::ConnectingControl, error))?;
+                (prepared.offer, prepared.campus_dns_servers, prepared.bypasses, PreparedPackets::Atrust {
+                    owner: prepared.owner, channels: prepared.channels,
+                })
             }
-            fields.extend([
-                (
-                    "selected_physical_ifindex".into(),
-                    physical_nic.ifindex.to_string(),
-                ),
-                (
-                    "selected_physical_luid".into(),
-                    physical_nic.luid.to_string(),
-                ),
-                (
-                    "selected_physical_source".into(),
-                    physical_nic.local_ip.to_string(),
-                ),
-                (
-                    "selected_physical_gateway".into(),
-                    physical_nic.gateway.to_string(),
-                ),
-            ]);
-            diagnostics.emit(
-                "tunnel.cstp.connected_socket",
-                "validated_cstp_session",
-                "connected",
-                fields,
-            );
-        };
-        let session = self
-            .rt
-            .block_on(CstpSession::open_with_user_agent_observed(
-                cfg,
-                Some(&login),
-                Some(&user_agent),
-                Some(&socket_observer),
-            ))
-            .map_err(|err| TunnelError::session(err))?;
-        // 在写入校园路由前，以长期 CSTP socket 的实际源地址确定出口。
-        // 兼容模式不能在此切回物理网卡，否则将改变已经建立的连接路径。
-        let (bypass_row, egress_ifindex) = match connection_mode {
-            ConnectionMode::Standard => (
-                exv_vpn_win32_resource::routes::gateway_bypass_row(physical_nic, gateway_ip)
-                    .map_err(|error| {
-                        TunnelError::plain(
+            ConnectionCredentials::Cisco(mut credentials) => {
+                // ---- 阶段 1：登录 + CSTP 控制面协商（真实学校网关；plan 来自真实 offer）。
+                //      **session owner**：登录/CSTP/TLS 通道在此建立，offer 由此产出。 ----
+                ctx.status.publish(StatusEvent::connecting(
+                    ctx.operation_id.clone(),
+                    ConnectPhase::ConnectingControl,
+                ));
+                // 网关解析：VGDC 双线（DoH 直连 + 绑物理网卡 UDP/53 兜底），物理出口 ifindex
+                // 自动发现；解析出**真实网关地址**（222.66.117.109），供 login/CSTP 直连。
+                // `perform_login` 内部用 `gateway_addr` 参数自建 BootstrapConfig（不带
+                // resolver）——必须预解析真实地址传入，绝不传占位符。
+                //
+                // **C4/G-⑤ 物理出口绑定（R1b 落地）**：CSTP 控制面 socket 用 `IP_UNICAST_IF`
+                // 钉在物理网卡出口——否则（本机 Mihomo TUN 默认路由下）控制面/data 走 Mihomo
+                // 代理路径，隧道数据面无回包（实测：engine 的 222.66.117.109:443 连接源地址
+                // 是 198.18.0.1=Mihomo，ring_sent=0）。解析器与 binder 共用同一物理 ifindex。
+                let nics = exv_vpn_win32_resource::vgdc_dns::find_physical_nics().map_err(|e| {
+                    TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: nics:{e}"))
+                })?;
+                let physical_nic = nics.first().ok_or_else(|| {
+                    TunnelError::plain(ConnectPhase::ConnectingControl, "engine: no physical nic")
+                })?;
+                let physical_ifindex = physical_nic.ifindex;
+                let dns_diag = diagnostics.clone();
+                let dns_observer: Arc<GatewayResolutionObserver> = Arc::new(move |observation| {
+                    let mut fields = BTreeMap::from([
+                        (
+                            "elapsed_ms".into(),
+                            observation.elapsed.as_millis().to_string(),
+                        ),
+                        (
+                            "resolved_gateway".into(),
+                            observation
+                                .address
+                                .map_or_else(|| "unavailable".into(), |value| value.to_string()),
+                        ),
+                    ]);
+                    if let Some(failed_layers) = observation.failed_layers {
+                        fields.insert("reported_failed_layers".into(), failed_layers.to_string());
+                    }
+                    if let Some(source) = observation.source {
+                        use exv_vpn_win32_resource::vgdc_dns::ResolutionSource;
+                        fields.insert("resolution_source".into(), source.as_str().into());
+                        fields.insert(
+                            "resolution_mode".into(),
+                            match source {
+                                ResolutionSource::System => "ip_literal",
+                                ResolutionSource::Doh(_) => "doh",
+                                ResolutionSource::Udp53(_) => "udp53",
+                            }
+                            .into(),
+                        );
+                        match source {
+                            ResolutionSource::Doh(ip) | ResolutionSource::Udp53(ip) => {
+                                fields.insert("resolver_addr".into(), ip.to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                    dns_diag.emit(
+                        "tunnel.gateway.resolved",
+                        "actual_gateway_resolution",
+                        if observation.address.is_some() {
+                            "completed"
+                        } else {
+                            "failed"
+                        },
+                        fields,
+                    );
+                });
+                let gateway_resolver = production_gateway_resolver_observed(
+                    physical_ifindex,
+                    CSTP_GATEWAY_PORT,
+                    Some(dns_observer),
+                )
+                .map_err(|e| TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}")))?;
+                let socket_binder = socket_binder_for_mode(connection_mode, physical_ifindex);
+                let resolver = gateway_resolver.clone();
+                let gateway_addr = self.rt.block_on(resolver(&hostname)).map_err(|e| {
+                    TunnelError::plain(ConnectPhase::ConnectingControl, format!("engine: {e}"))
+                })?;
+                if is_cancelled() {
+                    return Err(Self::cancelled_error(ConnectPhase::ConnectingControl));
+                }
+                // 网关 bypass /32 行（2026-09-08 计划 T2）：VGDC 解析地址驱动（地址来源唯一
+                // 化——拒绝手填，config 无网关 IP 字段），与解析器/binder 同一物理出口发现
+                // 结果。行在 apply 内先于全部隧道路由入表；网关所在校园网段随后整段进隧道，
+                // 路由表层对网关的选路由本 /32 覆盖到物理出口（socket binder 之外的第二层
+                // 独立防御）。fake-ip / IPv6 防御拒绝（fail-closed）。
+                let gateway_ip = match gateway_addr.ip() {
+                    std::net::IpAddr::V4(ip) => ip,
+                    std::net::IpAddr::V6(_) => {
+                        return Err(TunnelError::plain(
                             ConnectPhase::ConnectingControl,
-                            format!("engine: bypass-row:{error:?}"),
-                        )
-                    })?,
-                physical_ifindex,
-            ),
-            ConnectionMode::Compatibility => {
-                let endpoints = actual_endpoints
-                    .into_inner()
-                    .expect("socket observation lock")
-                    .ok_or_else(|| {
-                        TunnelError::plain(
-                            ConnectPhase::ConnectingControl,
-                            "engine: established CSTP socket endpoints unavailable",
-                        )
-                    })?
-                    .map_err(|error| {
-                        TunnelError::plain(
-                            ConnectPhase::ConnectingControl,
-                            format!("engine: CSTP endpoint query:{error}"),
-                        )
+                            "engine: gateway resolved to IPv6 (VGDC dual-line is v4-only)",
+                        ));
+                    }
+                };
+                // 登录 socket 与 CSTP 控制面使用同一次会话冻结的出口策略。
+                // `production_socket_binder` 与 CSTP 的 `BootstrapConfig.socket_binder`
+                // 复用同一闭包——否则登录 TLS（aggregate-auth XML 通道 + form 通道的
+                // logon GET / credential POST）在 Mihomo TUN 默认路由下走代理路径，登录
+                // 流量绕过物理出口（与 R1b 已修的 CSTP 控制面 C4/G-⑤ 同机理）。
+                let login = self
+                    .rt
+                    .block_on(WebvpnLogin::perform_login_with_socket_binder(
+                        &hostname,
+                        gateway_addr,
+                        TrustPolicy::Production, // 真实学校链（同 school.rs 策略）
+                        None,
+                        credentials.username.as_bytes(),
+                        credentials.password.as_bytes(),
+                        &user_agent,
+                        socket_binder.clone(),
+                    ))
+                    .map_err(|err| {
+                        // 凭据一次性契约：登录失败同样一次消费后立即 zeroize。
+                        credentials.zeroize();
+                        ctx.log.emit(
+                            LogLevel::Warn,
+                            "engine",
+                            "tunnel.login.failed",
+                            "login failed (diagnostic; state on StreamConnectStatus)",
+                            &[("detail", &format!("{:?}", err))],
+                        );
+                        TunnelError::login(&err)
                     })?;
-                let own_ifindex = self
-                    .nic
-                    .lock()
-                    .expect("nic lock")
-                    .as_ref()
-                    .map(NicOwner::ifindex);
-                observed_cstp_bypass(gateway_addr, endpoints, own_ifindex)?
+                // 凭据一次性契约：登录已消费 → 立即 zeroize（不等待 ApplyContext Drop）。
+                credentials.zeroize();
+                if is_cancelled() {
+                    // 取消：登录已消费，未建任何资源——直接中断。
+                    return Err(Self::cancelled_error(ConnectPhase::ConnectingControl));
+                }
+
+                let cfg = BootstrapConfig {
+                    hostname: hostname.clone(),
+                    // 已预解析真实网关地址；CSTP bootstrap 不再重复解析（同 acceptance engine
+                    // 的 `real_ip` 直连语义；`gateway_resolver` 置 None——已解析）。
+                    gateway_addr,
+                    trust: TrustPolicy::Production,
+                    dtls_offered: false, // MVP：TLS/CSTP only（offer 出现 dtls 即拒绝）
+                    deadline: None,
+                    // 标准模式绑定物理出口；兼容模式使用系统选路，两者与登录 socket 策略一致。
+                    socket_binder,
+                    gateway_resolver: None,
+                };
+                let actual_endpoints = Mutex::new(None);
+                let socket_observer = |socket: &tokio::net::TcpStream| {
+                    *actual_endpoints.lock().expect("socket observation lock") = Some(
+                        socket
+                            .local_addr()
+                            .and_then(|local| socket.peer_addr().map(|peer| (local, peer))),
+                    );
+                    let mut fields = connected_socket_fields(socket);
+                    fields.insert("connection_mode".into(), connection_mode.as_str().into());
+                    if let Ok(address) = socket.local_addr() {
+                        fields.insert("socket_selected_source".into(), address.ip().to_string());
+                    }
+                    fields.extend([
+                        (
+                            "selected_physical_ifindex".into(),
+                            physical_nic.ifindex.to_string(),
+                        ),
+                        (
+                            "selected_physical_luid".into(),
+                            physical_nic.luid.to_string(),
+                        ),
+                        (
+                            "selected_physical_source".into(),
+                            physical_nic.local_ip.to_string(),
+                        ),
+                        (
+                            "selected_physical_gateway".into(),
+                            physical_nic.gateway.to_string(),
+                        ),
+                    ]);
+                    diagnostics.emit(
+                        "tunnel.cstp.connected_socket",
+                        "validated_cstp_session",
+                        "connected",
+                        fields,
+                    );
+                };
+                let session = self
+                    .rt
+                    .block_on(CstpSession::open_with_user_agent_observed(
+                        cfg,
+                        Some(&login),
+                        Some(&user_agent),
+                        Some(&socket_observer),
+                    ))
+                    .map_err(TunnelError::session)?;
+                // 在写入校园路由前，以长期 CSTP socket 的实际源地址确定出口。
+                // 兼容模式不能在此切回物理网卡，否则将改变已经建立的连接路径。
+                let (bypass_row, egress_ifindex) = match connection_mode {
+                    ConnectionMode::Standard => (
+                        exv_vpn_win32_resource::routes::gateway_bypass_row(physical_nic, gateway_ip)
+                            .map_err(|error| {
+                                TunnelError::plain(
+                                    ConnectPhase::ConnectingControl,
+                                    format!("engine: bypass-row:{error:?}"),
+                                )
+                            })?,
+                        physical_ifindex,
+                    ),
+                    ConnectionMode::Compatibility => {
+                        let endpoints = actual_endpoints
+                            .into_inner()
+                            .expect("socket observation lock")
+                            .ok_or_else(|| {
+                                TunnelError::plain(
+                                    ConnectPhase::ConnectingControl,
+                                    "engine: established CSTP socket endpoints unavailable",
+                                )
+                            })?
+                            .map_err(|error| {
+                                TunnelError::plain(
+                                    ConnectPhase::ConnectingControl,
+                                    format!("engine: CSTP endpoint query:{error}"),
+                                )
+                            })?;
+                        let own_ifindex = self
+                            .nic
+                            .lock()
+                            .expect("nic lock")
+                            .as_ref()
+                            .map(NicOwner::ifindex);
+                        observed_cstp_bypass(gateway_addr, endpoints, own_ifindex)?
+                    }
+                };
+                diagnostics.emit(
+                    "tunnel.gateway.egress",
+                    "gateway_bypass_selection",
+                    "observed",
+                    [
+                        ("connection_mode".into(), connection_mode.as_str().into()),
+                        ("egress_ifindex".into(), egress_ifindex.to_string()),
+                        ("egress_luid".into(), bypass_row.interface_luid.to_string()),
+                        ("gateway_ip".into(), gateway_ip.to_string()),
+                        ("next_hop".into(), bypass_row.next_hop.to_string()),
+                        ("route_metric".into(), bypass_row.metric.to_string()),
+                    ],
+                );
+                let offer = session.offer_plan.clone();
+                diagnostics.emit(
+                    "tunnel.cstp.effective_parameters",
+                    "negotiated_offer",
+                    "observed",
+                    [
+                        ("mtu".into(), offer.mtu.to_string()),
+                        (
+                            "keepalive_interval_secs".into(),
+                            crate::data_plane::CSTP_KEEPALIVE_INTERVAL_SECS.to_string(),
+                        ),
+                        ("dpd_probe_enabled".into(), DPD_PROBE_ENABLED.to_string()),
+                        (
+                            "ping_probe_interval_secs".into(),
+                            LATENCY_PING_INTERVAL_SECS.to_string(),
+                        ),
+                    ],
+                );
+                ctx.log.emit(
+                    LogLevel::Info,
+                    "engine",
+                    "tunnel.offer.received",
+                    "CSTP offer received (diagnostic)",
+                    &[
+                        ("address", &offer.ipv4_address.to_string()),
+                        ("prefix", &offer.prefix.to_string()),
+                        ("mtu", &offer.mtu.to_string()),
+                        (
+                            "dns",
+                            &offer
+                                .dns_servers
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        ),
+                        ("routes", &offer.routes.join(",")),
+                    ],
+                );
+                // 拆流：write_channel（reader 线程发 TLS）克隆 + read_channel（writer 线程收
+                // TLS 解码帧）包 Arc<Mutex>。**先作局部持有**——只有全部可失败步骤（apply /
+                // data-plane start）成功后才落进 `LiveTunnel`；任何中途错误路径局部 drop 即关闭
+                // CSTP 通道（TLS 任务退出、学校连接断开），不泄漏连接。
+                let write_channel = session.write_channel.clone();
+                let read_channel = Arc::new(Mutex::new(session.read_channel));
+                // T1 latency probe：持有 CSTP 控制面接收端（DPD response），并据真实 offer
+                // 构建探测配置（目标 = 客户端隧道子网网络基地址；真实学校网关 S5 验证）。
+                let control_rx = Arc::new(Mutex::new(session.control_rx));
+                let latency_cfg = LatencyProbeConfig {
+                    target: network_base(offer.ipv4_address, offer.prefix),
+                    source: offer.ipv4_address,
+                    dpd_enabled: DPD_PROBE_ENABLED,
+                    ping_interval: Duration::from_secs(LATENCY_PING_INTERVAL_SECS),
+                    refresh_marker: Some(self.refresh_marker_path()),
+                };
+                (offer.clone(), offer.dns_servers.iter().map(ToString::to_string).collect::<Vec<_>>(), vec![bypass_row], PreparedPackets::Cisco {
+                    write_channel, read_channel, control_rx, latency_cfg,
+                })
             }
-        };
-        diagnostics.emit(
-            "tunnel.gateway.egress",
-            "gateway_bypass_selection",
-            "observed",
-            [
-                ("connection_mode".into(), connection_mode.as_str().into()),
-                ("egress_ifindex".into(), egress_ifindex.to_string()),
-                ("egress_luid".into(), bypass_row.interface_luid.to_string()),
-                ("gateway_ip".into(), gateway_ip.to_string()),
-                ("next_hop".into(), bypass_row.next_hop.to_string()),
-                ("route_metric".into(), bypass_row.metric.to_string()),
-            ],
-        );
-        let offer = session.offer_plan.clone();
-        diagnostics.emit(
-            "tunnel.cstp.effective_parameters",
-            "negotiated_offer",
-            "observed",
-            [
-                ("mtu".into(), offer.mtu.to_string()),
-                (
-                    "keepalive_interval_secs".into(),
-                    crate::data_plane::CSTP_KEEPALIVE_INTERVAL_SECS.to_string(),
-                ),
-                ("dpd_probe_enabled".into(), DPD_PROBE_ENABLED.to_string()),
-                (
-                    "ping_probe_interval_secs".into(),
-                    LATENCY_PING_INTERVAL_SECS.to_string(),
-                ),
-            ],
-        );
-        ctx.log.emit(
-            LogLevel::Info,
-            "engine",
-            "tunnel.offer.received",
-            "CSTP offer received (diagnostic)",
-            &[
-                ("address", &offer.ipv4_address.to_string()),
-                ("prefix", &offer.prefix.to_string()),
-                ("mtu", &offer.mtu.to_string()),
-                (
-                    "dns",
-                    &offer
-                        .dns_servers
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(","),
-                ),
-                ("routes", &offer.routes.join(",")),
-            ],
-        );
-        // 拆流：write_channel（reader 线程发 TLS）克隆 + read_channel（writer 线程收
-        // TLS 解码帧）包 Arc<Mutex>。**先作局部持有**——只有全部可失败步骤（apply /
-        // data-plane start）成功后才落进 `LiveTunnel`；任何中途错误路径局部 drop 即关闭
-        // CSTP 通道（TLS 任务退出、学校连接断开），不泄漏连接。
-        let write_channel = session.write_channel.clone();
-        let read_channel = Arc::new(Mutex::new(session.read_channel));
-        // T1 latency probe：持有 CSTP 控制面接收端（DPD response），并据真实 offer
-        // 构建探测配置（目标 = 客户端隧道子网网络基地址；真实学校网关 S5 验证）。
-        let control_rx = Arc::new(Mutex::new(session.control_rx));
-        let latency_cfg = LatencyProbeConfig {
-            target: network_base(offer.ipv4_address, offer.prefix),
-            source: offer.ipv4_address,
-            dpd_enabled: DPD_PROBE_ENABLED,
-            ping_interval: Duration::from_secs(LATENCY_PING_INTERVAL_SECS),
-            refresh_marker: Some(self.refresh_marker_path()),
         };
         if is_cancelled() {
             // 取消：drop 局部 CSTP 通道（TLS 任务退出），无其它资源——直接中断。
@@ -1945,17 +2199,18 @@ impl RealTunnelRuntime {
         //     计划网关 bypass /32 族）。发起用户 SID 一并传入（系统代理豁免写入该
         //     用户 HKU；None = 跳过 system_proxy 族）。系统代理账本一并传入
         //     （apply 记账 / clear 清账；J4 接线）。bypass 行来自阶段 1 的 VGDC
-        //     解析结果（Some 恒成立——构造失败已在阶段 1 fail-closed）。
+        //     解析结果；aTrust 可含认证网关和数据节点的多条旁路。
         let route_result = {
             let guard = self.nic.lock().expect("nic lock");
             let nic = guard.as_ref().expect("nic ensured");
-            if bypass_row.interface_luid == nic.luid() {
+            if bypasses.iter().any(|row| row.interface_luid == nic.luid()) {
                 Err("engine: gateway bypass points into EXV's own tunnel".into())
             } else {
-                nic.apply_offer(
+                nic.apply_offer_with_bypasses(
                     &offer,
                     &campus_routes,
-                    Some(&bypass_row),
+                    &config.campus_dns_domains,
+                    &bypasses,
                     self.core_user_sid.clone(),
                     &self.journal,
                 )
@@ -2134,49 +2389,81 @@ impl RealTunnelRuntime {
                 }
             })
         };
-        let threads = plane.spawn_data_plane(
-            write_channel.clone(),
-            &read_channel,
-            Some(Arc::clone(&ctx.log)),
-            DataPlaneAux {
-                // T1 Part A：数据面计数（reader→tx/writer→rx，方向映射见
-                // data_plane::count_reader_upload/count_writer_download）。
-                stats: Some(Arc::clone(ctx.stats.registry())),
-                // T1 Part B：延迟探测（DPD→ping fallback + 手动刷新标记）。
-                latency: Some(latency_cfg),
-                control_rx: Some(Arc::clone(&control_rx)),
-                // C2：掉线状态上报（read_channel 关闭 → Failed(DataPlane,
-                // RetrySameOperation)；自动重连前置，见 data_plane::on_read_channel_closed）。
-                status: Some(Arc::clone(&ctx.status)),
-                operation_id: ctx.operation_id.clone(),
-                // T3b（F6）：掉线信号发射端——writer 检测 read_channel 关闭时先发
-                // 信号（sweeper 清 live）再上报。
-                notify_data_plane_lost: Some(Arc::clone(&notify_data_plane_lost)),
-            },
-        );
-        // 全部可失败步骤已成功：落进 LiveTunnel（session owner + route owner 存活；
-        // NIC owner 常驻 `self.nic`）。
+        let aux = DataPlaneAux {
+            stats: Some(Arc::clone(ctx.stats.registry())),
+            latency: None, control_rx: None,
+            status: Some(Arc::clone(&ctx.status)),
+            operation_id: ctx.operation_id.clone(),
+            notify_data_plane_lost: Some(notify_data_plane_lost),
+        };
+        let (threads, cstp, atrust, protocol) = match prepared_packets {
+            PreparedPackets::Cisco { write_channel, read_channel, control_rx, latency_cfg } => {
+                let threads = plane.spawn_data_plane(write_channel.clone(), &read_channel,
+                    Some(Arc::clone(&ctx.log)), DataPlaneAux {
+                        latency: Some(latency_cfg), control_rx: Some(control_rx.clone()), ..aux
+                    });
+                (threads, Some(EngineCstp { write_channel, read_channel,
+                    control_rx: Some(control_rx), lost_tx }), None, Protocol::Cisco)
+            }
+            PreparedPackets::Atrust { owner, channels } => {
+                let threads = plane.spawn_raw_packet_data_plane(channels.outgoing, channels.incoming,
+                    Some(Arc::clone(&ctx.log)), aux);
+                (threads, None, Some(EngineAtrust { owner, runtime: self.rt.handle().clone(),
+                    _lost_tx: Some(lost_tx) }), Protocol::Atrust)
+            }
+        };
+        // 数据面已可传输后再安装校园域名规则；连接终态只能在规则回读成功后发布。
+        let mut live = LiveTunnel {
+            protocol,
+            connection_mode,
+            data_plane_threads: Some(threads),
+            data_plane: Some(plane),
+            atrust,
+            cstp,
+            route: Some(route),
+            campus_dns: None,
+            diagnostics: Some(live_diagnostics),
+        };
+        // T4：NRPT owner 标记随 lease 建立即捕获（worker 移入 live 后不再可及），
+        // 供装配成功回写 trace 的 nrpt_owner_guids。
+        let mut nrpt_owner_guids: Vec<String> = Vec::new();
+        match crate::nrpt_worker::NrptWorkerLease::start(&config.campus_dns_domains, &campus_dns_servers) {
+            Ok(worker) => {
+                if let Some(marker) = worker.as_ref().and_then(|lease| lease.owner_guid()) {
+                    nrpt_owner_guids.push(marker.to_owned());
+                }
+                live.campus_dns = worker;
+            }
+            Err(error) => {
+                live.campus_dns = error.worker.map(|lease| *lease);
+                let cleaned = self.cleanup_or_retain(live, "campus_dns_start_failed");
+                if nic_newly_created && cleaned.is_ok() {
+                    let _ = self.nic.lock().expect("nic lock").take();
+                }
+                return Err(TunnelError::plain(ConnectPhase::ApplyingPlatformTunnel, error.message));
+            }
+        }
         self.install_live(
-            LiveTunnel {
-                connection_mode,
-                data_plane_threads: Some(threads),
-                data_plane: Some(plane),
-                cstp: Some(EngineCstp {
-                    write_channel,
-                    read_channel,
-                    control_rx: Some(control_rx),
-                    // P1-1：发送端第二份安放——LiveTunnel drop（disconnect/teardown/
-                    // Drop 兜底）即关停 sweeper，覆盖 writer 线程卡死、其闭包副本永不
-                    // 释放的泄漏边界。
-                    lost_tx,
-                }),
-                route: Some(route),
-                diagnostics: Some(live_diagnostics),
-            },
+            live,
             &ctx.status,
             &ctx.stats,
             &ctx.operation_id,
         )?;
+        // T4 装配成功回写：trace connecting → live + 网卡/NRPT owner/engine PID 补丁
+        // （端口清单暂空——系统代理 PAC 回环端口深藏于 route owner 的 teardown 所有权，
+        // 与预检代理域的接线一并后置）。失败只告警：装配已成功，痕迹写失败不得
+        // 拆毁活隧道；connecting 残留下次预检兜底。
+        if let Some(gate) = &self.trace_gate {
+            gate.mark_live(
+                &crate::connection_trace::TracePatch {
+                    adapter_names: Some(vec![self.adapter_name.clone()]),
+                    nrpt_owner_guids: Some(nrpt_owner_guids),
+                    proxy_ports: Some(Vec::new()),
+                    engine_pid: Some(std::process::id()),
+                },
+                &ctx.log,
+            );
+        }
         ctx.log.emit(
             LogLevel::Info,
             "engine",

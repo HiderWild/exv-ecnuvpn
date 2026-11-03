@@ -2,6 +2,7 @@
 import { computed, inject, ref, watch } from "vue";
 
 import type { ProductConnectionAction } from "../product/connection-action";
+import type { Protocol } from "../product/core-config";
 import type { MinimalCredentialDraft } from "../product/minimal-credentials";
 import { planMinimalCredentials } from "../product/minimal-credentials";
 import type { ProductUiState } from "../product/types";
@@ -11,6 +12,7 @@ import {
   setInstallServiceOnConnect,
 } from "../product/install-service-preference";
 import { uiPreferencesState } from "../product/ui-prefs";
+import AtrustBrowserFallback from "./AtrustBrowserFallback.vue";
 import MinimalTrafficSummary from "./MinimalTrafficSummary.vue";
 import PasswordField from "./PasswordField.vue";
 import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway, revealSavedPassword } from "../product/core-config";
@@ -26,6 +28,7 @@ import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway, revealSavedPassword }
 const props = withDefaults(defineProps<{
   state: ProductUiState;
   action: ProductConnectionAction;
+  protocol?: Protocol;
   /** core 配置中的已有用户名（连接身份投影）。 */
   initialUsername?: string;
   initialServer?: string;
@@ -36,6 +39,7 @@ const props = withDefaults(defineProps<{
   /** 极简内联凭据错误（credential_required / 认证失败重新输入）。 */
   credentialError?: string | null;
 }>(), {
+  protocol: "cisco" as Protocol,
   initialUsername: "",
   initialServer: "",
   rememberPassword: false,
@@ -43,7 +47,7 @@ const props = withDefaults(defineProps<{
   credentialError: null as string | null,
 });
 
-const emit = defineEmits<{ run: [draft: MinimalCredentialDraft] }>();
+const emit = defineEmits<{ run: [draft?: MinimalCredentialDraft] }>();
 const configGateway = inject(CORE_CONFIG_GATEWAY_KEY, null) ?? createCoreConfigGateway();
 
 const { visualState, paused } = useConnectionVisual(() => props.state);
@@ -84,11 +88,15 @@ const plan = computed(() => planMinimalCredentials(
   { username: username.value, password: password.value, remember: remember.value },
   { hasStoredPassword: props.hasStoredPassword, storedUsername: props.initialUsername },
 ));
-const actionDisabled = computed(() => !props.action.enabled || (props.action.kind === "connect" && plan.value.blocked));
+const actionDisabled = computed(() => !props.action.enabled || (props.protocol === "cisco" && props.action.kind === "connect" && plan.value.blocked));
 const matchingStoredPassword = computed(() => props.hasStoredPassword && username.value.trim() === props.initialUsername.trim());
 
 function requestAction(): void {
   if (actionDisabled.value) return;
+  if (props.protocol === "atrust") {
+    emit("run", undefined);
+    return;
+  }
   emit("run", { username: username.value, password: password.value, remember: remember.value });
 }
 </script>
@@ -130,6 +138,11 @@ function requestAction(): void {
         <p v-if="showLatency" class="minimal-traffic__line">
           <b>连接时延</b> {{ displayMetric(availableMetrics?.latency) }}
         </p>
+      </div>
+
+      <div v-else-if="protocol === 'atrust'" class="minimal-authentication" data-testid="minimal-authentication">
+        <p class="minimal-authentication__note">aTrust 将在浏览器中完成校园认证。</p>
+        <AtrustBrowserFallback />
       </div>
 
       <form v-else class="minimal-form" @submit.prevent="requestAction">
@@ -276,6 +289,21 @@ function requestAction(): void {
   border-color: var(--border-strong);
   background: var(--surface-panel);
   color: var(--text-primary);
+}
+
+.minimal-authentication {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+
+.minimal-authentication__note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
 }
 
 .minimal-form {

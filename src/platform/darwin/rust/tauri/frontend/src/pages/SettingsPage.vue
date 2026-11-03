@@ -14,13 +14,13 @@ import { PRODUCT_RUNTIME_KEY, type ProductRuntime } from "../product/runtime";
 import {
   CORE_CONFIG_FIELDS,
   CORE_CONFIG_GATEWAY_KEY,
+  PROTOCOL_OPTIONS,
   createCoreConfigGateway,
   credentialConfigFor,
   revealSavedPassword,
   isCoreConfigKey,
-  isVpnServerPreset,
   normalizeCoreConfigValue,
-  normalizeServerValue,
+  vpnServerPreset,
   VPN_SERVERS,
   type CoreConfigGateway,
   type CoreConfigKey,
@@ -82,6 +82,7 @@ const sections = [
 /** 连接与网络分栏：core 配置中留在本栏的字段（user_agent / mtu 迁入实验性功能）。 */
 const CONNECTION_KEYS: readonly CoreConfigKey[] = [
   "server",
+  "protocol",
   "username",
   "password",
   "remember_password",
@@ -145,12 +146,12 @@ function updateBoolean(key: CoreConfigKey, event: Event): void {
 
 /**
  * VPN 服务器下拉：预设地址或「自定义」。
- * 初始按草稿归一（命中预设选预设，否则自定义）；用户显式切换用 serverChoice 覆盖；
- * 手填命中预设时归一回到预设项（与旧 C++ applyServerChoice 一致）。
+ * 初始按草稿归一命中预设（返回**预设项的原值**，带 `https://` 的 aTrust 入口也能回显）
+ * 否则「自定义」；用户显式切换用 serverChoice 覆盖；手填命中预设时归一回到预设项
+ * （与旧 C++ applyServerChoice 一致）。
  */
 function deriveServerChoice(): string {
-  const value = normalizeServerValue(drafts.value.server ?? "");
-  return isVpnServerPreset(value) ? value : "custom";
+  return vpnServerPreset(drafts.value.server ?? "")?.value ?? "custom";
 }
 
 const serverChoice = ref(deriveServerChoice());
@@ -167,10 +168,31 @@ function onServerChoiceChange(event: Event): void {
   const value = (event.target as HTMLSelectElement).value;
   feedback.value.server = undefined;
   serverChoice.value = value;
-  if (value !== "custom") {
-    drafts.value.server = value;
-    scheduleAutoSave();
+  if (value === "custom") return;
+  drafts.value.server = value;
+  // 预设自带协议：CSTP 网关只服务 Cisco，统一认证入口只服务 aTrust。一次显式选择就把
+  // 服务器与协议写成一致的一对，避免留下「aTrust 入口 + Cisco 协议」这种会被连接入口
+  // 拒绝（或更糟：静默按 CSTP 去连）的组合。
+  //
+  // 只有 Core 确实暴露了 protocol 键时才联动：不认识该键的旧 Core 会被整批拒绝，
+  // 此时保留「只改服务器」的旧行为，绝不替 Core 发明它不认识的键。
+  const preset = vpnServerPreset(value);
+  if (
+    preset
+    && drafts.value.protocol !== preset.protocol
+    && knownFields.value.some((field) => field.key === "protocol")
+  ) {
+    drafts.value.protocol = preset.protocol;
+    feedback.value.protocol = undefined;
   }
+  scheduleAutoSave();
+}
+
+/** 协议下拉写入草稿；选项即白名单，非法值在这里不可能出现。 */
+function onProtocolChange(event: Event): void {
+  drafts.value.protocol = (event.target as HTMLSelectElement).value;
+  feedback.value.protocol = undefined;
+  scheduleAutoSave();
 }
 
 /** 密码框写入：与其它表单输入同等对待，进入自动保存的防抖窗口。 */
@@ -667,6 +689,16 @@ onUnmounted(() => {
                       @input="updateText(field.key, $event)"
                     >
                   </div>
+                  <select
+                    v-else-if="field.kind === 'protocol'"
+                    class="settings-protocol-preference"
+                    :data-testid="`input-${field.key}`"
+                    :value="drafts[field.key] ?? 'cisco'"
+                    :aria-label="field.label"
+                    @change="onProtocolChange($event)"
+                  >
+                    <option v-for="option in PROTOCOL_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
+                  </select>
                   <input
                     v-else-if="field.kind === 'number'"
                     :data-testid="`input-${field.key}`"

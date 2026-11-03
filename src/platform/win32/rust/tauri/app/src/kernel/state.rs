@@ -117,6 +117,22 @@ pub struct ReconnectStatus {
     pub current_attempt: u32,
     /// 重连尝试是否正在飞行中。
     pub active: bool,
+    /// R2（T6b，第九次窄解冻 tag 5）恢复事件的稳定 reason id（空 = 无 R2 事件）。
+    /// UI 文案按 id 路由（T12）；不是授权材料。
+    pub reason: String,
+}
+
+/// engine 侧 R1 自愈遥测（proto `ReconnectState`，common.proto 第十次窄解冻随
+/// `RuntimeSnapshot.engine_reconnect` tag 19 到 UI；T8 采纳快照分量）。仅状态上报。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineReconnectState {
+    /// 本次事件描述的第几次尝试（触发事件即第 1 次）。
+    pub attempt: u32,
+    /// 下次重试的墙钟时刻（UTC epoch ms；0 = 尝试在途/无下次）。
+    pub next_retry_at_ms: i64,
+    /// 当前重连步骤的稳定 reason id（如 `tunnel_lost` / `healed` /
+    /// `attempts_exhausted`；空 = 不适用）。UI 文案按 id 路由（T12）。
+    pub reason: String,
 }
 
 /// host 自愈（engine 崩溃 respawn）状态（proto `SelfHealStatus`；EXV_UNFREEZE
@@ -200,6 +216,10 @@ pub struct RuntimeSnapshot {
     /// 快照携带的自动重连状态（S4：`GetSnapshot`/`WatchEvents` 随状态附带；
     /// `None` = 重连不适用/从未建立连接）。
     pub reconnect: Option<ReconnectStatus>,
+    /// 快照携带的 engine 侧 R1 自愈遥测（T8 tag 19：engine `ObserveOwnedState`
+    /// 快照携带最近一次状态事件的重连分量，core `GetSnapshot` 源化偏好透传；
+    /// `None` = 无 R1 语义）。T12 通知出口按 `reason` id 路由气泡文案。
+    pub engine_reconnect: Option<EngineReconnectState>,
     /// 快照携带的 host 自愈进展（EXV_UNFREEZE 2026-09-05：`GetSnapshot`/`WatchEvents`
     /// 随状态附带；`None` = 无自愈上下文）。
     pub self_heal: Option<SelfHealStatus>,

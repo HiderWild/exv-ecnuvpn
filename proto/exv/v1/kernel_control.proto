@@ -1,4 +1,33 @@
 
+//
+// This file is the canonical wire authority for the KernelControl service in
+// the exv.vpn.v1 namespace. It imports the shared types from common.proto and
+// defines only the request messages and the service; all reply/state/event
+// types (OperationReply, KernelOperationReply, RuntimeSnapshot, RuntimeEvent)
+// live in common.proto.
+//
+// Domain code never exposes generated types directly. The acceptance
+// controller only submits the fields required by the fixed scenario; it must
+// pass transport peer authentication and a test-run bootstrap capability
+// before it may trigger connect/stop/reconcile or submit a secret.
+//
+// Security invariants:
+//   * Secrets travel only as one-shot bytes and are cleared from the generated
+//     message immediately after being moved into a zeroable Rust buffer.
+//   * Snapshots and events never carry passwords, cookies, raw certificates,
+//     native handles, or free-text diagnostic stacks.
+//   * No field self-reports platform identity; peer identity is derived
+//     exclusively from verified transport metadata.
+//   * Stop is the only in-connection business cancellation; RPC future
+//     cancellation is not Stop. Reconcile explicitly retries the current
+//     obligation in FailedDirty/Reconciling.
+//
+// Field tags are permanently assigned and never reused. Reserved ranges:
+//   reserved 9000 to 9999  : internal / future use, never shipped
+//   reserved 1000 to 1999  : burn-in guard for each message
+// A tag that is vacated is recorded as a reserved range in this file before
+// any reuse is ever permitted; reuse is forbidden by policy.
+
 syntax = "proto3";
 
 package exv.vpn.v1;
@@ -67,6 +96,16 @@ message WatchEventsRequest {
   reserved 9000 to 9999;
 }
 
+// Request for KernelControl.WatchStats (T14 per-flow split; eleventh unfreeze —
+// see the header block). The client may resume from the last seen
+// `RuntimeStats.sample_tick` (same monotonic axis as WatchEvents ticks); an
+// empty request starts from the current cached sample.
+message WatchStatsRequest {
+  uint64 resume_tick = 1;  // 0 means start from the current cached sample
+  reserved 1000 to 1999;
+  reserved 9000 to 9999;
+}
+
 // Kernel lifecycle control service. Maps to Architecture section 9.1.
 // The acceptance controller must authenticate and hold a bootstrap capability
 // before triggering connect/stop/reconcile or submitting a secret.
@@ -91,6 +130,16 @@ rpc GetSnapshot(SnapshotRequest) returns (RuntimeSnapshot);
 
 // WatchEvents streams runtime snapshots and transitions.
 rpc WatchEvents(WatchEventsRequest) returns (stream RuntimeEvent);
+
+// WatchStats streams normalized runtime statistics samples (T14 per-flow
+// split; eleventh unfreeze — see the header block). Server-streaming: the
+// client may resume from the last seen sample_tick; 0 starts from the current
+// cached sample. This is the product stats channel for the UI, DISTINCT from
+// WatchEvents (state transitions/snapshots): per-sample statistics no longer
+// ride the state stream, so a slow/hung stats consumer only exercises this
+// stream's h2 flow-control window and never delays state events or unary RPCs
+// on the same connection. Samples carry no secrets (see RuntimeStats).
+rpc WatchStats(WatchStatsRequest) returns (stream RuntimeStats);
 
 // LogsList returns a page of aggregated log entries (incremental via after_seq;
 // 0 returns the recent tail). Read path, not gate-gated.

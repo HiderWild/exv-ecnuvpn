@@ -220,12 +220,17 @@ const CODE_SERVICE_NOT_INSTALLED: &str = "DARWIN_CORE_SERVICE_NOT_INSTALLED";
 /// 失败时发出，壳层据此分流恢复 modal）。
 const SERVICE_NOT_RUNNING_PREFIX: &str = "service_not_running|";
 const SERVICE_CONNECT_FAILED_PREFIX: &str = "service_connect_failed|";
+/// T02：所选协议在本版本不可用的前缀（win32 同款词汇）；core 在
+/// `ensure_selected_protocol_is_serviceable` 拒绝 aTrust 时发出，壳层据此把它保留为
+/// 可行动的中文原因，而不是落入通用 internal 文案。
+const PROTOCOL_UNAVAILABLE_PREFIX: &str = "protocol_unavailable|";
 
 /// 把 tonic `Status` 映射为 UI 错误（win32 `map_status` 的 darwin 对应）：
 /// 服务路由前缀 → `ServiceNotRunning`/`ServiceConnectFailed`（恢复 modal）；
-/// transport 类 → `CoreUnreachable`；darwin 稳定拒绝码 → typed 变体
-/// （凭据缺失触发前端凭据模态）；其余（含 Unimplemented，如 `respond_interaction`）
-/// → `Internal`（携带稳定码 + 精简 message，按 win32 同款错误面透传）。
+/// 协议不可用前缀 → `ProtocolUnavailable`（保留原因）；transport 类 →
+/// `CoreUnreachable`；darwin 稳定拒绝码 → typed 变体（凭据缺失触发前端凭据模态）；
+/// 其余（含 Unimplemented，如 `respond_interaction`）→ `Internal`（携带稳定码 +
+/// 精简 message，按 win32 同款错误面透传）。
 fn map_status(s: Status) -> AppError {
     let message = s.message();
     if let Some(rest) = message.strip_prefix(SERVICE_NOT_RUNNING_PREFIX) {
@@ -233,6 +238,9 @@ fn map_status(s: Status) -> AppError {
     }
     if let Some(rest) = message.strip_prefix(SERVICE_CONNECT_FAILED_PREFIX) {
         return AppError::ServiceConnectFailed(rest.to_string());
+    }
+    if let Some(rest) = message.strip_prefix(PROTOCOL_UNAVAILABLE_PREFIX) {
+        return AppError::ProtocolUnavailable(rest.trim().to_string());
     }
     match s.code() {
         Code::Unavailable | Code::Cancelled | Code::Unknown | Code::DeadlineExceeded => {

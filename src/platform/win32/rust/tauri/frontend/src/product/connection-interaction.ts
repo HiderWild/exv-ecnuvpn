@@ -9,6 +9,10 @@ export interface ConnectionInteraction {
   busy: ComputedRef<boolean>;
   autoInstallService: Ref<boolean>;
   runAction: () => Promise<void>;
+  fallbackAvailable: ComputedRef<boolean>;
+  fallbackBusy: ComputedRef<boolean>;
+  fallbackError: ComputedRef<string>;
+  useSystemBrowserFallback: () => Promise<void>;
 }
 
 export const CONNECTION_INTERACTION_KEY: InjectionKey<ConnectionInteraction> = Symbol("exv.connection.interaction");

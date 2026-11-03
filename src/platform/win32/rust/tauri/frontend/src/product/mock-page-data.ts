@@ -1,8 +1,15 @@
 import type { LogEvent } from "../lib/ipc";
-import { DEFAULT_CONNECTION_MODE, type CoreConfigGateway, type CoreConfigKey } from "./core-config";
+import {
+  DEFAULT_CONNECTION_MODE,
+  DEFAULT_PROTOCOL,
+  type CoreConfigGateway,
+  type CoreConfigKey,
+} from "./core-config";
 import type { LogsGateway } from "./logs";
 
 const previewConfig: ReadonlyArray<{ key: CoreConfigKey; value: string }> = [
+  // 预览保持 Cisco：与旧预览行为一致，协议能力由设置页/快速入门的真实选择覆盖。
+  { key: "protocol", value: DEFAULT_PROTOCOL },
   { key: "server", value: "vpn.preview.example" },
   { key: "username", value: "preview-user" },
   { key: "remember_password", value: "false" },

@@ -24,10 +24,13 @@
 //! 与计划。
 
 use crate::native_error::{NativeError, NativeErrorKind};
-use crate::system_proxy::{RawInternetSettings, RawValue, capture_for_user, snapshot_from_raw};
+use crate::system_proxy::{
+    ERROR_SYSTEM_PROXY_MALFORMED, RawInternetSettings, RawValue, capture_for_user,
+    snapshot_from_raw,
+};
 use crate::system_proxy_family::{
-    ReplayDecision, RestoreDecision, RestoreOp, SystemProxyFamilyStep, ValueName, compute_restore,
-    decide, decide_replay,
+    ERROR_SYSTEM_PROXY_FAMILY_MALFORMED, ReplayDecision, RestoreDecision, RestoreOp,
+    SystemProxyFamilyStep, ValueName, compute_restore, decide, decide_replay,
 };
 use std::time::Instant;
 
@@ -58,7 +61,7 @@ pub fn fingerprint_prestate(raw: &RawInternetSettings) -> Vec<u8> {
             // 同一文本恒得同一指纹）。
             RawValue::Sz(s) => {
                 buf.push(3);
-                let units: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+                let units: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
                 buf.extend_from_slice(&units);
             }
         }
@@ -81,13 +84,14 @@ pub enum SystemProxyApplyOutcome {
     SkippedNoProxy,
     /// Automatic / WPAD：typed skip（v1 不接线 PAC）。
     PacDetectedSkip,
-    /// Manual/Mixed：已合并写入 + 广播。携带 journal 落盘所需的步骤记录与
-    /// 「写入后」指纹（还原时的 compare 基准）。
+    /// Manual/Mixed：已合并写入 + 广播。携带 journal 落盘所需的步骤记录
+    ///（prestate + 期望条目 + 写入后指纹——还原时的 compare 基准即
+    /// `step.written_fingerprint`，payload v0x03 起随步骤记录自带，不再另置
+    /// 重复字段）。`Box`：步骤记录是 journal 级大对象而两个 skip 变体零尺寸，
+    /// 装箱消除变体间尺寸差（枚举按最大变体分配，热路径全是 skip 判定）。
     Applied {
         /// apply 成功前由调用方落盘的步骤记录。
-        step: SystemProxyFamilyStep,
-        /// 写入后立即重读五值得到的指纹（= 我们写入状态的基准指纹）。
-        written_fingerprint: Vec<u8>,
+        step: Box<SystemProxyFamilyStep>,
     },
 }
 
@@ -202,6 +206,24 @@ pub struct SystemProxyDiagnostic {
 #[must_use]
 pub fn safe_system_proxy_error_reason(error: &NativeError) -> Option<&'static str> {
     let message = error.message.as_str();
+    let malformed_prefix = format!("{ERROR_SYSTEM_PROXY_MALFORMED}: ");
+    if let Some(detail) = message.strip_prefix(malformed_prefix.as_str()) {
+        if detail.starts_with("ProxyEnable=false 但 ProxyServer 解析出端点") {
+            return Some("disabled_with_endpoint");
+        }
+        if detail.starts_with("ProxyServer 含未知 scheme '") {
+            return Some("unknown_scheme");
+        }
+        if detail == "ProxyServer 含 '=' 但某分段缺少 '='" {
+            return Some("segment_missing_equals");
+        }
+    }
+    let family_malformed_prefix = format!("{ERROR_SYSTEM_PROXY_FAMILY_MALFORMED}: ");
+    if message.strip_prefix(family_malformed_prefix.as_str())
+        == Some("Manual/Mixed 快照却解析不出端点")
+    {
+        return Some("manual_mixed_without_endpoint");
+    }
     if let Some(reason) = message.strip_prefix("pac_script_unwrappable: ") {
         return Some(match reason {
             "empty script" => "empty_script",
@@ -258,6 +280,15 @@ fn observe_proxy_stage(
     });
 }
 
+fn proxy_enable_capture_outcome(value: &RawValue) -> &'static str {
+    match value {
+        RawValue::Absent => "missing",
+        RawValue::Dword(0) => "dword_zero",
+        RawValue::Dword(_) => "dword_nonzero",
+        RawValue::Sz(_) | RawValue::Other { .. } => "non_dword",
+    }
+}
+
 /// 生产观测入口。观测不改变代理计划、注册表效果和 best-effort 降级语义。
 ///
 /// # Errors
@@ -276,10 +307,18 @@ pub fn plan_system_proxy_apply_observed(
         started,
         captured.as_ref().err(),
     );
+    let prestate = captured?;
+    observe_proxy_stage(
+        observe,
+        "capture_enable",
+        proxy_enable_capture_outcome(&prestate.proxy_enable),
+        started,
+        None,
+    );
     plan_system_proxy_apply_from_prestate_observed(
         originating_sid,
         desired_entries,
-        captured?,
+        prestate,
         observe,
     )
 }
@@ -313,8 +352,21 @@ fn plan_system_proxy_apply_from_prestate_observed(
     observe: &dyn Fn(SystemProxyDiagnostic),
 ) -> Result<SystemProxyApplyPlan, NativeError> {
     let started = Instant::now();
-    let snapshot = snapshot_from_raw(&prestate)?;
-    match decide(&snapshot, desired_entries)? {
+    let snapshot = match snapshot_from_raw(&prestate) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            observe_proxy_stage(observe, "snapshot", "failed", started, Some(&error));
+            return Err(error);
+        }
+    };
+    let action = match decide(&snapshot, desired_entries) {
+        Ok(action) => action,
+        Err(error) => {
+            observe_proxy_stage(observe, "decide", "failed", started, Some(&error));
+            return Err(error);
+        }
+    };
+    match action {
         crate::system_proxy_family::FamilyAction::SkipNoOp => {
             observe_proxy_stage(observe, "plan", "disabled", started, None);
             // Disabled：零动作零账本（拍板结论 4）。
@@ -450,7 +502,7 @@ fn zero_effect_plan(
 
 /// commit 阶段（§4.2 效果点）：消费计划执行注册表写入 + 广播。
 ///
-/// Manual/Mixed → `write_override_for_user`（内含 WinINET 广播）；Automatic/PAC →
+/// Manual/Mixed → `write_override_for_user`（内含 `WinINET` 广播）；Automatic/PAC →
 /// `AutoConfigURL` 改指 plan 端点 + 显式广播（零扰动 §5.6：端点已在 plan 阶段可
 /// 服务，此处只做注册表写入与刷新）。`registry_effect == false` 的计划是防御性
 /// no-op（调用方本就不应记账或 commit）。
@@ -566,23 +618,21 @@ pub fn apply_from_prestate(
             let _broadcasted =
                 crate::system_proxy_override::write_override_for_user(originating_sid, &merged)?;
             let written = capture_for_user(originating_sid)?;
-            let written_fingerprint = fingerprint_prestate(&written);
             Ok(SystemProxyApplyOutcome::Applied {
-                // v0x03：步骤记录自带写入后指纹（与本 outcome 的指纹同源同值）。
-                step: SystemProxyFamilyStep {
+                // v0x03：步骤记录自带写入后指纹（写入后重读五值指纹即还原 compare 基准）。
+                step: Box::new(SystemProxyFamilyStep {
                     prestate,
                     desired_entries: desired_entries.to_vec(),
                     originating_sid: originating_sid.to_owned(),
                     pac_detected: false,
-                    written_fingerprint: written_fingerprint.clone(),
-                },
-                written_fingerprint,
+                    written_fingerprint: fingerprint_prestate(&written),
+                }),
             })
         }
     }
 }
 
-/// 取出合并结果（`decide` 的 MergeAndWrite 变体重放；避免 FamilyAction 携带
+/// 取出合并结果（`decide` 的 `MergeAndWrite` 变体重放；避免 `FamilyAction` 携带
 /// String 导致的 match 借用纠缠——纯读函数，成本可忽略）。
 fn decide_merged(
     snapshot: &crate::system_proxy::SystemProxySnapshot,
@@ -608,7 +658,7 @@ pub enum SystemProxyRestoreOutcome {
         /// 删除的原本不存在值个数。
         deletes: usize,
     },
-    /// 指纹不等：第三方中途改动，typed skip（调用方记 restore_failures）。
+    /// 指纹不等：第三方中途改动，typed skip（调用方记 `restore_failures`）。
     TypedSkip,
 }
 
@@ -701,15 +751,12 @@ where
     let mut write_backs = 0usize;
     let mut deletes = 0usize;
     for (value_name, value) in fields {
-        match value {
-            RawValue::Absent => {
-                delete(sid, value_name)?;
-                deletes += 1;
-            }
-            _ => {
-                write_back(sid, value_name, value)?;
-                write_backs += 1;
-            }
+        if value == &RawValue::Absent {
+            delete(sid, value_name)?;
+            deletes += 1;
+        } else {
+            write_back(sid, value_name, value)?;
+            write_backs += 1;
         }
     }
     Ok((write_backs, deletes))
@@ -727,7 +774,7 @@ pub enum SystemProxyReplayOutcome {
     },
     /// 注册表已等于 prestate（含退化全等）→ 零写入，幂等清账即可。
     AlreadyClean,
-    /// 用户手工改动等指纹不符 → 弃权：零写入，记 restore_failures 日志后清账。
+    /// 用户手工改动等指纹不符 → 弃权：零写入，记 `restore_failures` 日志后清账。
     SkipForfeit,
     /// capture 或还原写入硬失败 → **记录不得被调用方清除**（保留待下次重试）。
     HardFailure,

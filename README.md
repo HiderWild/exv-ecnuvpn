@@ -26,6 +26,7 @@ scripts/                    构建与打包脚本
 前置环境（本仓库不代管工具链安装）：
 
 - Rust（rustup，含 cargo）
+- sccache（全部 Rust 构建使用）
 - Node.js ≥ 20 与 npm
 - CMake + Ninja（构建安装器与打包工具）
 - PowerShell（Windows 自带）或 pwsh
@@ -38,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
 ```
 
 脚本会在干净的临时 worktree 中完成 前端构建 → 三件套组装 → 安装器打包 →
-载荷自检，成功后输出安装包路径、SHA256 与检验报告（默认位于 `build\release\`）。
+载荷自检，成功后输出安装包路径、SHA256 与检验报告（默认位于仓库同级 `exv-artifacts`）。
 脚本只构建已提交的内容，未提交的改动不会进入安装包。
 
 开发调试（不打包）：
@@ -47,8 +48,14 @@ powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
 cd src\platform\win32\rust\tauri\frontend
 npm ci
 cd ..
-cargo cargo check --workspace   # 核心与平台工作区按各自 Cargo.toml 分别检查
+cargo check --workspace   # 核心与平台工作区按各自 Cargo.toml 分别检查
 ```
+
+## 版本与 macOS 构建
+
+产品版本由根 `release.json` 统一管理。运行 `python scripts/release.py version set 4.2.0` 同步两端配置与产品组件；发布前运行 `python scripts/release.py version check --notes`。用户更新摘要写在 `release-notes.json`，分别描述两端功能和体验。
+
+macOS 在原生宿主准备 Rust、sccache、Node.js 与 npm，依次执行 `scripts/build-unsigned.sh`、`scripts/package-unsigned.sh`、`scripts/package-dmg.sh`。DMG 所需 Python 依赖由宿主提供；脚本会列出缺失项。
 
 ## 许可
 

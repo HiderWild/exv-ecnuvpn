@@ -3,8 +3,8 @@
 
 // kernel 对外暴露：供集成测试/诊断驱动（`tests/drive_service_flow.rs`）在进程级
 // spawn 真实 core 并驱动 ServiceControl/Connect/Snapshot/LogsList，无需 GUI。
-pub mod kernel;
 mod autostart;
+pub mod kernel;
 mod lifecycle;
 mod log_export;
 mod toast;
@@ -48,7 +48,8 @@ pub fn run() {
                 }
             }
         }))
-        .plugin(tauri_plugin_log::Builder::new().build())
+        // CDP 消息包含会话 Cookie；开发构建也不能记录底层 WebSocket 帧。
+        .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
         .setup(|app| {
             // 前端自有设置存储（产品状态目录；解析失败时不 manage → Command 返回错误）。
             if let Some(store) = ui_prefs::UiPrefsStore::from_product_dir() {
@@ -73,9 +74,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // 系统关闭与自绘关闭按钮共用 lifecycle 的单一关闭协调器。
-                    api.prevent_close();
                     if window.label() == "main" {
+                        // 系统关闭与自绘关闭按钮共用 lifecycle 的单一关闭协调器。
+                        api.prevent_close();
                         if let Some(webview) = window.app_handle().get_webview_window("main") {
                             lifecycle::request_main_window_close(
                                 webview,
@@ -89,6 +90,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect,
+            commands::atrust_browser_fallback,
+            commands::atrust_browser_fallback_available,
             commands::core_status,
             commands::stop,
             commands::snapshot,
@@ -105,6 +108,9 @@ pub fn run() {
             commands::trigger_latency_refresh,
             commands::service_control,
             commands::open_external,
+            commands::core_restart,
+            lifecycle::app_restart,
+            lifecycle::app_exit,
             ui_prefs::ui_prefs_get,
             ui_prefs::ui_prefs_set,
             autostart::autostart_set,

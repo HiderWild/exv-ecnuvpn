@@ -10,12 +10,23 @@ export const CORE_CONFIG_KEYS = [
   "routes",
   "user_agent",
   "mtu",
+  "protocol",
   "auto_reconnect",
   "auto_reconnect_max_attempts",
   "auto_reconnect_backoff",
 ] as const;
 
 export type CoreConfigKey = (typeof CORE_CONFIG_KEYS)[number];
+
+/** 连接协议取值；与 Core `Protocol` 枚举的稳定字面量逐字一致（小写、大小写敏感）。 */
+export const CORE_PROTOCOLS = ["cisco", "atrust"] as const;
+export type CoreProtocol = (typeof CORE_PROTOCOLS)[number];
+
+/** 协议选项文案：aTrust 走外部浏览器统一认证、EXV 不接收学校密码，标签必须把这点说清。 */
+export const PROTOCOL_OPTIONS: readonly { value: CoreProtocol; label: string }[] = [
+  { value: "cisco", label: "Cisco AnyConnect（用户名密码）" },
+  { value: "atrust", label: "aTrust（浏览器登录/统一认证）" },
+];
 
 export interface CoreConfigItem {
   key: string;
@@ -75,7 +86,7 @@ export interface CoreConfigField {
   key: CoreConfigKey;
   label: string;
   description: string;
-  kind: "text" | "password" | "boolean" | "routes" | "mtu" | "number" | "server";
+  kind: "text" | "password" | "boolean" | "routes" | "mtu" | "number" | "server" | "protocol";
 }
 
 export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
@@ -86,16 +97,25 @@ export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
   { key: "routes", label: "路由", description: "由EXV处理的流量的目标地址范围", kind: "routes" },
   { key: "user_agent", label: "User-Agent", description: "连接请求使用的客户端标识。", kind: "text" },
   { key: "mtu", label: "MTU", description: "网络接口的正整数 MTU。", kind: "mtu" },
+  { key: "protocol", label: "协议", description: "决定登录方式：Cisco 使用下方登录账户与密码直连；aTrust 通过外部浏览器完成学校统一认证，EXV 不接收学校密码。", kind: "protocol" },
   { key: "auto_reconnect", label: "自动重连", description: "连接意外断开时自动重新连接（下次连接生效）。", kind: "boolean" },
   { key: "auto_reconnect_max_attempts", label: "自动重连次数", description: "仅在开启自动重连后可设置；0 表示无限重连；达到次数后不再重连。", kind: "number" },
   { key: "auto_reconnect_backoff", label: "自动重连退避", description: "仅在开启自动重连后可设置；开启后掉线按 2s→4s→8s→16s→30s 退避重连，成功连接后重置。", kind: "boolean" },
 ];
 
+/** VPN 服务器预设。每条预设自带协议：统一认证入口只服务 aTrust，CSTP 网关只服务 Cisco。 */
+export interface VpnServerPreset {
+  label: string;
+  value: string;
+  protocol: CoreProtocol;
+}
+
 /** VPN 服务器预设地址（与旧 C++ distribution/ecnu.json 对齐；默认 vpn-cn）。 */
-export const VPN_SERVERS: readonly { label: string; value: string }[] = [
-  { label: "ECNU CN", value: "vpn-cn.ecnu.edu.cn" },
-  { label: "ECNU CT", value: "vpn-ct.ecnu.edu.cn" },
-  { label: "ECNU LT", value: "vpn-lt.ecnu.edu.cn" },
+export const VPN_SERVERS: readonly VpnServerPreset[] = [
+  { label: "ECNU CN", value: "vpn-cn.ecnu.edu.cn", protocol: "cisco" },
+  { label: "ECNU CT", value: "vpn-ct.ecnu.edu.cn", protocol: "cisco" },
+  { label: "ECNU LT", value: "vpn-lt.ecnu.edu.cn", protocol: "cisco" },
+  { label: "ECNU aTrust", value: "https://vpn.ecnu.edu.cn", protocol: "atrust" },
 ];
 
 /** 归一化 VPN 服务器地址：去除协议前缀、尾部斜杠并统一小写。 */
@@ -103,8 +123,14 @@ export function normalizeServerValue(raw: string): string {
   return raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
 }
 
+/** 命中的预设项（按归一形比较，带 `https://` 的 aTrust 入口同样命中）；未命中返回 undefined。 */
+export function vpnServerPreset(value: string): VpnServerPreset | undefined {
+  const normalized = normalizeServerValue(value);
+  return VPN_SERVERS.find((server) => normalizeServerValue(server.value) === normalized);
+}
+
 export function isVpnServerPreset(value: string): boolean {
-  return VPN_SERVERS.some((server) => server.value === value);
+  return vpnServerPreset(value) !== undefined;
 }
 
 export type NormalizedCoreConfigValue =
@@ -157,6 +183,15 @@ export function normalizeCoreConfigValue(key: CoreConfigKey, raw: string): Norma
     return raw === "true" || raw === "false"
       ? { ok: true, value: raw }
       : { ok: false, message: "记住密码只能是 true 或 false。" };
+  }
+
+  // 协议取值必须原样送达 Core 的严格写路径：非法值在提交前以中文报错，
+  // 绝不静默改成 cisco（那会让用户以为选中的协议生效了）。
+  if (key === "protocol") {
+    const value = raw.trim();
+    return (CORE_PROTOCOLS as readonly string[]).includes(value)
+      ? { ok: true, value }
+      : { ok: false, message: "协议只能是 cisco 或 atrust。" };
   }
 
   if (key === "server") {

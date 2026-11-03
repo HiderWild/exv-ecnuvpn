@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tonic::Code;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -19,7 +19,7 @@ use crate::{
     config_paths::{atomic_write, config_dir, config_path, key_path},
 };
 
-const CONFIG_KEYS: [&str; 10] = [
+const CONFIG_KEYS: [&str; 11] = [
     "server",
     "username",
     "password",
@@ -27,6 +27,7 @@ const CONFIG_KEYS: [&str; 10] = [
     "routes",
     "user_agent",
     "mtu",
+    "protocol",
     "auto_reconnect",
     "auto_reconnect_max_attempts",
     "auto_reconnect_backoff",
@@ -45,6 +46,62 @@ const DEFAULT_ROUTES: [&str; 8] = [
 ];
 const DEFAULT_USER_AGENT: &str = "AnyConnect Win_x86_64 4.10.05095";
 const DEFAULT_MTU: u32 = 1290;
+
+/// 本次连接使用的 VPN 协议（与 win32 `Protocol` 同构）。
+///
+/// 2026-09-21（T02）：协议是**显式**配置项——同一个域名不靠名字猜协议。缺失
+/// （旧配置）或未知取值一律解释为 [`Protocol::Cisco`]，保持升级前的行为；用户选择
+/// aTrust 必须由显式写入该字段表达。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    /// Cisco AnyConnect / CSTP（现有协议，缺省值）。
+    #[default]
+    Cisco,
+    /// 华师大 aTrust（外部浏览器统一认证）。
+    Atrust,
+}
+
+impl Protocol {
+    /// 稳定配置字面量；也用于 `ConfigGet` 字段表与不含凭据的诊断日志。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cisco => "cisco",
+            Self::Atrust => "atrust",
+        }
+    }
+}
+
+impl fmt::Display for Protocol {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Protocol {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "cisco" => Ok(Self::Cisco),
+            "atrust" => Ok(Self::Atrust),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Protocol {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        // 配置文件可能来自更高版本。与 win32 同一条纪律：未知字符串只局部回退为
+        // cisco，不让整份配置回落默认值而丢掉同一文档里的账户、服务器与密文。
+        Ok(value.parse().unwrap_or_default())
+    }
+}
 
 /// Core 配置边界使用的一个键值项。
 #[derive(Clone, PartialEq, Eq)]
@@ -94,6 +151,7 @@ pub enum DarwinConfigError {
     InvalidRoutes,
     InvalidMtu,
     InvalidUserAgent,
+    InvalidProtocol,
     InvalidAutoReconnect,
     InvalidAutoReconnectMaxAttempts,
     InvalidAutoReconnectBackoff,
@@ -113,6 +171,7 @@ impl DarwinConfigError {
             | Self::InvalidRoutes
             | Self::InvalidMtu
             | Self::InvalidUserAgent
+            | Self::InvalidProtocol
             | Self::InvalidAutoReconnect
             | Self::InvalidAutoReconnectMaxAttempts
             | Self::InvalidAutoReconnectBackoff => Code::InvalidArgument,
@@ -131,6 +190,7 @@ impl DarwinConfigError {
             Self::InvalidRoutes => "DARWIN_CONFIG_INVALID_ROUTES",
             Self::InvalidMtu => "DARWIN_CONFIG_INVALID_MTU",
             Self::InvalidUserAgent => "DARWIN_CONFIG_INVALID_USER_AGENT",
+            Self::InvalidProtocol => "DARWIN_CONFIG_INVALID_PROTOCOL",
             Self::InvalidAutoReconnect => "DARWIN_CONFIG_INVALID_AUTO_RECONNECT",
             Self::InvalidAutoReconnectMaxAttempts => {
                 "DARWIN_CONFIG_INVALID_AUTO_RECONNECT_MAX_ATTEMPTS"
@@ -177,6 +237,8 @@ pub(crate) struct DarwinStoredConfig {
     #[serde(rename = "useragent")]
     user_agent: String,
     mtu: u32,
+    /// 本次连接使用的协议；旧配置缺该键（结构体级 `#[serde(default)]`）时为 Cisco。
+    protocol: Protocol,
     auto_reconnect: bool,
     auto_reconnect_max_attempts: u32,
     auto_reconnect_backoff: bool,
@@ -195,6 +257,8 @@ impl Default for DarwinStoredConfig {
                 .collect(),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
             mtu: DEFAULT_MTU,
+            // T02：默认协议逐字同 win32 `ExvConfig::default()`——cisco。
+            protocol: Protocol::Cisco,
             auto_reconnect: false,
             auto_reconnect_max_attempts: 0,
             auto_reconnect_backoff: false,
@@ -315,6 +379,8 @@ impl DarwinUiConfig {
             DarwinConfigItem::new("routes", self.inner.routes.join(",")),
             DarwinConfigItem::new("user_agent", self.inner.user_agent.clone()),
             DarwinConfigItem::new("mtu", self.inner.mtu.to_string()),
+            // 键序对齐 win32 `config_get` 字段表（mtu → protocol → 自动重连三项）。
+            DarwinConfigItem::new("protocol", self.inner.protocol.as_str()),
             DarwinConfigItem::new("auto_reconnect", self.inner.auto_reconnect.to_string()),
             DarwinConfigItem::new(
                 "auto_reconnect_max_attempts",
@@ -351,6 +417,13 @@ impl DarwinUiConfig {
     #[must_use]
     pub const fn mtu(&self) -> u32 {
         self.inner.mtu
+    }
+
+    /// T02：本次连接使用的协议。连接入口据此判定协议可服务性（aTrust 尚未接入
+    /// 本版本时必须显式拒绝，绝不静默按 Cisco 连接）。
+    #[must_use]
+    pub const fn protocol(&self) -> Protocol {
+        self.inner.protocol
     }
 
     /// W3-3/P2b：启动卫生层（`config_hygiene`）构造接缝——从**已验证**的存储记录
@@ -479,6 +552,7 @@ struct ConfigUpdate {
     routes: Option<Vec<String>>,
     user_agent: Option<String>,
     mtu: Option<u32>,
+    protocol: Option<Protocol>,
     auto_reconnect: Option<bool>,
     auto_reconnect_max_attempts: Option<u32>,
     auto_reconnect_backoff: Option<bool>,
@@ -510,6 +584,7 @@ impl ConfigUpdate {
                 "routes" => update.routes = Some(parse_routes(&value)?),
                 "user_agent" => update.user_agent = Some(validate_user_agent(&value)?),
                 "mtu" => update.mtu = Some(parse_mtu(&value)?),
+                "protocol" => update.protocol = Some(parse_protocol(&value)?),
                 "auto_reconnect" => {
                     update.auto_reconnect = Some(parse_auto_reconnect(&value)?);
                 }
@@ -550,6 +625,9 @@ impl ConfigUpdate {
         }
         if let Some(mtu) = self.mtu {
             candidate.mtu = mtu;
+        }
+        if let Some(protocol) = self.protocol {
+            candidate.protocol = protocol;
         }
         if let Some(auto_reconnect) = self.auto_reconnect {
             candidate.auto_reconnect = auto_reconnect;
@@ -672,6 +750,15 @@ fn validate_user_agent(value: &str) -> Result<String, DarwinConfigError> {
         return Err(DarwinConfigError::InvalidUserAgent);
     }
     Ok(value.to_owned())
+}
+
+/// T02：写路径必须严格——非法协议报错，绝不静默落回 cisco（读路径对未知取值的
+/// 局部回退只用于容忍更高版本写下的配置文件）。取值大小写敏感，与 win32
+/// `Protocol::from_str` 同源。
+fn parse_protocol(value: &str) -> Result<Protocol, DarwinConfigError> {
+    value
+        .parse::<Protocol>()
+        .map_err(|()| DarwinConfigError::InvalidProtocol)
 }
 
 fn split_csv(value: &str) -> Vec<String> {

@@ -28,7 +28,7 @@ use crate::grpc_server::HelperControlService;
 /// The verified transport identity of the connected core peer.
 ///
 /// Derived ONLY from verified transport metadata (`GetNamedPipeClientProcessId`
-/// + token SID read-back); a client-supplied field can never fabricate identity
+/// plus token SID read-back); a client-supplied field can never fabricate identity
 /// (spec §9.4: "PeerContext 只由已验证 connection metadata 构造").
 #[derive(Clone)]
 pub struct TransportPeerInfo {
@@ -127,6 +127,14 @@ fn digest32(bytes: &[u8]) -> [u8; 32] {
 /// `false` = 后续实例（多实例服务：每个连接一个实例，旧实例被占用时不影响新实例创建）。
 /// `max_instances`：管道最大实例数（oneshot 用 1；service 用 N 支持连接/重连并存）。
 ///
+/// **FIRST_PIPE_INSTANCE 纪律（D12，2026-09-27 管道名统一）**：控制面名是每用户 sid
+/// 段常量名（`ipc::pipe_names::control_pipe_name`），本标志语义升级为「防抢注 + **每用户
+/// 单 engine 互斥**」——`first_instance=true` 的创建被同名首实例持有者（另一个 engine）
+/// 拒绝（`ERROR_ACCESS_DENIED`），OS 级保证同一用户至多一个 engine 持有控制面名（计划
+/// §四 edge 20）。两形态的首个建管必须走 `first_instance=true`：oneshot =
+/// [`serve_named_pipe`]；service = [`ServiceAcceptor::serve_one`] 首轮。后续实例
+/// （`first_instance=false`）是同一 server 的多客户端扩容，不参与互斥。
+///
 /// 修复（2026-08-23）：service 此前单实例（max=1 + first=true），`serve_with_incoming`
 /// 对每个连接 `tokio::spawn` 不 await，连接存活时管道名被占 → 下轮重建恒
 /// `ERROR_PIPE_BUSY(231)` → 服务退出（连接后即死）。多实例让每次 accept 用独立实例。
@@ -163,6 +171,60 @@ pub fn create_control_pipe_server(
     }
 }
 
+/// 首实例冲突判定（D12）：另一个 engine 已持同名首实例——`FILE_FLAG_FIRST_PIPE_INSTANCE`
+/// 冲突 → `ERROR_ACCESS_DENIED`(5)；同名实例数满 → `ERROR_PIPE_BUSY`(231)。两者都按
+/// 「名字被另一个 engine 占用」处理。
+fn is_first_instance_conflict(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(5) | Some(231))
+}
+
+/// 建控制面管道**首实例**，含 D12 bootstrap 有界重试（oneshot/service 两形态共用）。
+///
+/// **过渡属性（T11 一次切换，无兼容期）**：旧版本 engine 持旧名（oneshot =
+/// per-PID 实例名 `exv-engine-{pid}-c`；服务 = 裸常量名 `exv-engine-service-c`）——
+/// 新名与旧名**不同**，跨版本首实例互不冲突（升级窗口零互斥竞态；retire→install 序
+/// 在 host 侧闭合，见 `engine_provisioner::retire_oneshot_engine` 注记）。同名冲突只剩
+/// 一种：**同版本残留 engine 仍在跑**（如 core 崩溃后孤儿 oneshot 未及退出）。残留者
+/// 会在自身生命周期出口退场（oneshot 的 core 句柄/心跳超时；服务的 SCM stop），故短时
+/// 有界重试（3 次 × 1s）即可收敛；超时仍冲突 → **诚实失败**（错误点名 D12 单 engine
+/// 互斥），**不杀外部进程**——残留 engine 可能仍在服务其 core，进程回收是 host 侧
+/// retire/respawn 的职责，不是 engine 自我兜权的边界。
+///
+/// # Errors
+/// 首实例冲突重试耗尽 → 携带 D12 语义的错误串；其它建管失败 → `create control pipe: ...`。
+async fn create_first_instance_with_bootstrap_retry(
+    name: &str,
+    core_sid: &str,
+    max_instances: usize,
+) -> Result<NamedPipeServer, String> {
+    const CONFLICT_RETRIES: u32 = 3;
+    const CONFLICT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+    let mut last_conflict: Option<std::io::Error> = None;
+    for attempt in 0..=CONFLICT_RETRIES {
+        match create_control_pipe_server(name, core_sid, true, max_instances) {
+            Ok(server) => return Ok(server),
+            Err(e) if is_first_instance_conflict(&e) => {
+                tracing::warn!(
+                    attempt,
+                    error = %e,
+                    "control pipe first instance held by another engine (D12 per-user single-engine mutex), bounded bootstrap retry"
+                );
+                last_conflict = Some(e);
+                if attempt < CONFLICT_RETRIES {
+                    tokio::time::sleep(CONFLICT_RETRY_INTERVAL).await;
+                }
+            }
+            Err(e) => return Err(format!("create control pipe: {e}")),
+        }
+    }
+    Err(format!(
+        "control pipe {name} first instance still held by another engine after bounded retry \
+         (per-user single-engine mutex, D12): {} — a same-version engine for this user is still \
+         running; stop/retire it before restarting",
+        last_conflict.map_or_else(|| "unknown".to_string(), |e| e.to_string())
+    ))
+}
+
 /// Verify the connected core (client) peer: its pid must equal `expected_host_pid` and its
 /// user SID must equal `expected_core_sid`. Any identity query failure fails closed.
 ///
@@ -180,7 +242,7 @@ pub fn verify_core_peer(
     // live out-param for the call.
     if let Err(e) = unsafe {
         GetNamedPipeClientProcessId(
-            HANDLE(server.as_raw_handle() as *mut core::ffi::c_void),
+            HANDLE(server.as_raw_handle()),
             &raw mut pid,
         )
     } {
@@ -341,8 +403,9 @@ pub async fn serve_named_pipe(
     expected_host_pid: u32,
     service: HelperControlServer<HelperControlService>,
 ) -> Result<(), String> {
-    let server = create_control_pipe_server(name, core_sid, true, 1)
-        .map_err(|e| format!("create control pipe: {e}"))?;
+    // D12：首实例创建（每用户单 engine 互斥）；同版本残留 engine 占名 → 有界 bootstrap
+    // 重试（3×1s）后诚实失败。
+    let server = create_first_instance_with_bootstrap_retry(name, core_sid, 1).await?;
     server
         .connect()
         .await
@@ -468,7 +531,8 @@ pub async fn accept_loop<S: AcceptServe>(
 /// 上报 `Err`（循环终止）。exe 路径 + SYSTEM 的既有 SID 验证保留为 fail-closed 兜底；
 /// PSK 是 service 模式的主认证机制（D2），自报身份是其上的 server 身份确认（S6）。
 pub struct ServiceAcceptor {
-    /// 控制面 Named Pipe 名（服务模式为稳定名，非按 core PID 唯一）。
+    /// 控制面 Named Pipe 名（D12：安装用户 sid 段常量名，与 oneshot 同源——
+    /// `ipc::pipe_names::control_pipe_name`；服务启动参数传入）。
     name: String,
     /// 授权 core 用户 SID（安装用户；管道 DACL + 每次 accept 的 peer 验证）。
     core_sid: String,
@@ -541,48 +605,61 @@ impl ServiceAcceptor {
 
 impl AcceptServe for ServiceAcceptor {
     async fn serve_one(&mut self) -> Result<bool, String> {
-        // 多实例管道：首个连接 first=true 建首实例；其后 first=false 建后续实例（每次
-        // accept 独立实例，旧实例被连接占用时不影响新实例创建——根治单实例下重建
-        // ERROR_PIPE_BUSY 导致的「连接后服务退出」）。瞬时建管失败仍有界重试兜底。
+        // 多实例管道：首个连接 first=true 建首实例（D12：每用户单 engine 互斥 + bootstrap
+        // 有界重试——同版本残留 engine 占名 3×1s 后诚实失败）；其后 first=false 建后续
+        // 实例（每次 accept 独立实例，旧实例被连接占用时不影响新实例创建——根治单实例
+        // 下重建 ERROR_PIPE_BUSY 导致的「连接后服务退出」）。后续实例的瞬时建管失败仍由
+        // 下方 5×100ms 有界重试兜底。
         const SERVICE_PIPE_MAX_INSTANCES: usize = 4;
-        let first_instance = !self.first_instance_created;
-        let mut server = None;
-        for attempt in 0..5u32 {
-            match create_control_pipe_server(
+        let server = if !self.first_instance_created {
+            match create_first_instance_with_bootstrap_retry(
                 &self.name,
                 &self.core_sid,
-                first_instance,
                 SERVICE_PIPE_MAX_INSTANCES,
-            ) {
-                Ok(s) => {
-                    server = Some(s);
-                    self.first_instance_created = true;
-                    if let Some(mut ready) = self.ready.take() {
-                        ready.report_ready()?;
-                        // S3/Tier 2：建管 + report_ready 成功 → 控制面就绪（query 读同一
-                        // 事实）。ready oneshot 是一次性通知；AtomicBool 是可查询持久布尔。
-                        self.control_plane_ready.store(true, Ordering::SeqCst);
-                    }
-                    break;
-                }
-                Err(e) if attempt < 4 => {
-                    tracing::warn!(
-                        attempt,
-                        error = %e,
-                        "create control pipe transient failure, retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                Err(e) => {
-                    let error = format!("create control pipe: {e}");
+            )
+            .await
+            {
+                Ok(server) => server,
+                Err(error) => {
                     if let Some(mut ready) = self.ready.take() {
                         let _ = ready.report_error(error.clone());
                     }
                     return Err(error);
                 }
             }
+        } else {
+            let mut created = None;
+            for attempt in 0..5u32 {
+                match create_control_pipe_server(
+                    &self.name,
+                    &self.core_sid,
+                    false,
+                    SERVICE_PIPE_MAX_INSTANCES,
+                ) {
+                    Ok(s) => {
+                        created = Some(s);
+                        break;
+                    }
+                    Err(e) if attempt < 4 => {
+                        tracing::warn!(
+                            attempt,
+                            error = %e,
+                            "create control pipe transient failure, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    Err(e) => return Err(format!("create control pipe: {e}")),
+                }
+            }
+            created.expect("bounded retry yields a pipe or returns")
+        };
+        self.first_instance_created = true;
+        if let Some(mut ready) = self.ready.take() {
+            ready.report_ready()?;
+            // S3/Tier 2：建管 + report_ready 成功 → 控制面就绪（query 读同一
+            // 事实）。ready oneshot 是一次性通知；AtomicBool 是可查询持久布尔。
+            self.control_plane_ready.store(true, Ordering::SeqCst);
         }
-        let server = server.expect("bounded retry yields a pipe or returns");
         server
             .connect()
             .await

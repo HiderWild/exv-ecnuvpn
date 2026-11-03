@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
 
-use super::core_transport::{connect_core_channel, CorePeer, GrpcPipeError};
+use super::core_transport::{CorePeer, GrpcPipeError, connect_core_channel};
 use super::error::AppError;
 use super::logs::{LogChunk, LogsClearReply};
-use super::state::{OperationReply, RuntimeSnapshot, ServiceControlAction, ServiceControlReply};
+use super::state::{OperationReply, OperationResult, RuntimeSnapshot, ServiceControlAction, ServiceControlReply};
 use super::stats::RuntimeStats;
 use super::wire::{self as wire_map};
 
@@ -82,9 +82,7 @@ pub enum CoreHandle {
     /// 尚未建立到 core 的通道（core 未启动 / 拨号失败）。
     NotWired,
     /// 已拨号并验证 core server 的通道。
-    Dialed {
-        channel: Channel,
-    },
+    Dialed { channel: Channel },
 }
 
 /// UI 对 Core 控制面的两态结论。日常探测只依据已验证管道上的 RPC 是否可通，
@@ -111,7 +109,6 @@ impl CoreHandle {
             Self::NotWired => None,
         }
     }
-
 }
 
 /// Tauri managed state：UI 侧 core 会话状态 + 快照缓存。
@@ -126,9 +123,23 @@ pub struct CoreState {
     /// 最近一次归一化统计缓存（stats-wire 方案 A：由 `snapshot` 命令从快照携带的
     /// `stats` 写入；`stats` 命令读取）。`RwLock`：命令层读/写。
     pub last_stats: RwLock<Option<RuntimeStats>>,
+    pub browser_login: exv_core::atrust_browser::BrowserLogin,
+    /// 仅覆盖 aTrust 会话取得后至 Core Connect/Stop RPC 收束的短事务；绝不跨越浏览器交互。
+    pub(crate) browser_commit_gate: tokio::sync::Mutex<()>,
 }
 
 impl CoreState {
+    /// 以给定 handle 构造（其余字段取默认）。集成测试（crate 外）无法用
+    /// `..Default::default()` 字面量初始化（`browser_commit_gate` 为 crate 私有），
+    /// 经本构造绕过字段可见性（clippy 债务清偿 2026-09-27 顺带修复既有编译破损）。
+    #[must_use]
+    pub fn with_handle(handle: CoreHandle) -> Self {
+        Self {
+            handle: RwLock::new(handle),
+            ..Self::default()
+        }
+    }
+
     /// 取得当前已验证通道的副本。`None` 即 UI 所见「Core 已停止」。
     #[must_use]
     pub fn channel(&self) -> Option<Channel> {
@@ -205,7 +216,16 @@ pub struct CoreSession {
     /// 连接恢复的串行闸门。并发点击连接只允许一个调用检查子进程/重拉 Core，避免
     /// 同一 UI PID 下竞争同一个控制管道。
     pub recovery: tokio::sync::Mutex<()>,
+    /// T9（§2.9）：core 崩溃事件的边沿去重标志。`true` = 已向前端广播过「core 已崩溃」，
+    /// 待恢复广播（重拉成功/管道复通）时复位——避免订阅循环的退避重试重复广播。
+    pub crash_announced: std::sync::atomic::AtomicBool,
 }
+
+/// aTrust 浏览器认证结果及其待提交到 Core 的 owner lease。
+type BrowserAcquisition = (
+    Vec<u8>,
+    Option<exv_core::atrust_browser::BrowserLoginLease>,
+);
 
 /// UI 侧对 core 的命令客户端（无状态 facade；真实会话状态在 CoreState）。
 #[derive(Debug, Default)]
@@ -242,6 +262,8 @@ const SERVICE_START_FAILED_PREFIX: &str = "service_start_failed|";
 const SERVICE_CONNECT_FAILED_PREFIX: &str = "service_connect_failed|";
 const CREDENTIAL_REQUIRED_PREFIX: &str = "credential_required|";
 const COMPATIBILITY_MODE_UNAVAILABLE_PREFIX: &str = "compatibility_mode_unavailable|";
+/// T02 协议不可用的稳定前缀（host `ensure_selected_protocol_is_serviceable`）。
+const PROTOCOL_UNAVAILABLE_PREFIX: &str = "protocol_unavailable|";
 
 /// 把 tonic `Status` 映射为 UI 错误：transport 类 → `CoreUnreachable`；
 /// 服务路由失败前缀 → typed `ServiceNotRunning` / `ServiceConnectFailed`（R5 modal
@@ -267,6 +289,8 @@ fn map_status(s: Status) -> AppError {
                 AppError::ServiceConnectFailed(rest.trim().to_string())
             } else if let Some(rest) = message.strip_prefix(COMPATIBILITY_MODE_UNAVAILABLE_PREFIX) {
                 AppError::CompatibilityModeUnavailable(rest.trim().to_string())
+            } else if let Some(rest) = message.strip_prefix(PROTOCOL_UNAVAILABLE_PREFIX) {
+                AppError::ProtocolUnavailable(rest.trim().to_string())
             } else {
                 AppError::Internal(format!("{}: {}", s.code(), s.message()))
             }
@@ -303,11 +327,154 @@ impl CoreClient {
         state: &CoreState,
         intent: ConnectIntent,
     ) -> Result<OperationReply, AppError> {
+        self.connect_with_login_status(state, intent, |_| {}).await
+    }
+
+    pub async fn connect_with_login_status<F: Fn(bool)>(
+        &self,
+        state: &CoreState,
+        intent: ConnectIntent,
+        status: F,
+    ) -> Result<OperationReply, AppError> {
+        self.connect_with_browser_mode(state, intent, |server, _mode, lease| async move {
+            let root = std::env::var_os("LOCALAPPDATA")
+                .ok_or_else(|| AppError::browser_login_failed("无法定位 EXV 浏览器配置目录"))?;
+            let profile = std::path::PathBuf::from(root).join("EXV/atrust-browser");
+            let (session, lease) = state
+                .browser_login
+                .acquire_with_lease_held(lease, status, move |mut action| async move {
+                    exv_core::atrust_browser::acquire(&server, &profile, &mut action).await
+                })
+                .await
+                .map_err(AppError::browser_login_failed)?;
+            let payload = session
+                .encode()
+                .map(|bytes| bytes.to_vec())
+                .map_err(|_| AppError::browser_login_failed("无法编码浏览器登录会话"))?;
+            Ok((payload, Some(lease)))
+        })
+        .await
+    }
+
+    /// 按当前配置的 aTrust 登录模式选择受控 Chrome 或应用管理的独立 WebView。
+    pub async fn connect_with_auth_status<F: Fn(bool)>(
+        &self,
+        state: &CoreState,
+        intent: ConnectIntent,
+        app: tauri::AppHandle,
+        status: F,
+    ) -> Result<OperationReply, AppError> {
+        self.connect_with_browser_mode(state, intent, |server, mode, lease| async move {
+            let acquired = if mode == "embedded" {
+                state
+                    .browser_login
+                    .acquire_with_lease_held(lease, status, move |mut action| async move {
+                        match super::embedded_auth::acquire(&app, &server, action.clone()).await {
+                            Err(error) if error == super::embedded_auth::FALLBACK_REQUESTED => {
+                                let root = std::env::var_os("LOCALAPPDATA")
+                                    .ok_or_else(|| "无法定位 EXV 浏览器配置目录".to_owned())?;
+                                let profile = std::path::PathBuf::from(root).join("EXV/atrust-browser");
+                                exv_core::atrust_browser::acquire(&server, &profile, &mut action).await
+                            }
+                            result => result,
+                        }
+                    })
+                    .await
+                    .map_err(AppError::browser_login_failed)?
+            } else {
+                let root = std::env::var_os("LOCALAPPDATA")
+                    .ok_or_else(|| AppError::browser_login_failed("无法定位 EXV 浏览器配置目录"))?;
+                let profile = std::path::PathBuf::from(root).join("EXV/atrust-browser");
+                state
+                    .browser_login
+                    .acquire_with_lease_held(lease, status, move |mut action| async move {
+                        exv_core::atrust_browser::acquire(&server, &profile, &mut action).await
+                    })
+                    .await
+                    .map_err(AppError::browser_login_failed)?
+            };
+            let (session, lease) = acquired;
+            let payload = session
+                .encode()
+                .map(|bytes| bytes.to_vec())
+                .map_err(|_| AppError::browser_login_failed("无法编码浏览器登录会话"))?;
+            Ok((payload, Some(lease)))
+        })
+        .await
+    }
+
+    pub(super) async fn connect_with_browser<F, Fut>(
+        &self,
+        state: &CoreState,
+        intent: ConnectIntent,
+        acquire: F,
+    ) -> Result<OperationReply, AppError>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u8>, AppError>>,
+    {
+        self.connect_with_browser_mode(state, intent, move |server, _mode, _lease| async move {
+            acquire(server).await.map(|payload| (payload, Some(_lease)))
+        })
+        .await
+    }
+
+    pub(super) async fn connect_with_browser_mode<F, Fut>(
+        &self,
+        state: &CoreState,
+        mut intent: ConnectIntent,
+        acquire: F,
+    ) -> Result<OperationReply, AppError>
+    where
+        F: FnOnce(String, String, exv_core::atrust_browser::BrowserLoginLease) -> Fut,
+        Fut: std::future::Future<Output = Result<BrowserAcquisition, AppError>>,
+    {
+        // 只记录固定阶段；不格式化 intent、Cookie、令牌或服务端响应。
+        log::info!(target: "exv.connect", "connect.request_started");
+        let browser_generation = state.browser_login.generation();
         let channel = state
             .channel()
             .ok_or_else(|| AppError::CoreUnreachable("connect: core not dialed".to_string()))?;
+        let config = self.config_get(state).await?;
+        log::info!(target: "exv.connect", "connect.config_received");
+        let atrust = config
+            .items
+            .iter()
+            .any(|item| item.key == "protocol" && item.value == "atrust");
+        let mut browser_lease = None;
+        let browser_payload = if atrust {
+            let server = config
+                .items
+                .iter()
+                .find(|item| item.key == "server")
+                .map(|item| item.value.clone())
+                .ok_or_else(|| AppError::Internal("aTrust 服务器尚未配置".into()))?;
+            let mode = configured_atrust_auth_mode(&config)?.to_owned();
+            // aTrust 只使用浏览器会话，不把 Cisco 密码或其持久化选择混入请求。
+            intent.credentials = None;
+            intent.secret_payload = None;
+            let lease = state
+                .browser_login
+                .begin_with_generation(mode == "embedded", browser_generation)
+                .map_err(AppError::browser_login_failed)?;
+            log::info!(target: "exv.connect", "connect.browser_wait_started");
+            let candidate = acquire(server, mode, lease).await;
+            if candidate.is_err() {
+                log::warn!(target: "exv.connect", "connect.browser_wait_failed");
+            }
+            let (payload, lease) = candidate?;
+            browser_lease = lease;
+            log::info!(target: "exv.connect", "connect.browser_payload_received");
+            Some(payload)
+        } else {
+            None
+        };
         let operation_id = uuid::Uuid::new_v4().as_bytes().to_vec();
-        let mut request = Request::new(wire_map::connect_request(&intent, operation_id.clone())?);
+        let mut body = wire_map::connect_request(&intent, operation_id.clone())?;
+        if let Some(payload) = browser_payload {
+            body.secret_payload = payload;
+        }
+        let mut request = Request::new(body);
         // `persist` 是 host 配置写入的非秘密选择；engine 只接收固定的
         // `{version,username,password}` payload，绝不看到此元数据。
         if intent
@@ -320,16 +487,30 @@ impl CoreClient {
                 tonic::metadata::MetadataValue::from_static("true"),
             );
         }
+        let browser_commit_guard = if let Some(lease) = browser_lease.as_ref() {
+            let guard = state.browser_commit_gate.lock().await;
+            if !lease.begin_core_connect() {
+                return Err(AppError::browser_login_failed("浏览器登录已取消"));
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let mut client = KernelControlClient::new(channel);
+        log::info!(target: "exv.connect", "connect.core_rpc_started");
         let reply = match client.connect(request).await.map_err(map_status) {
             Ok(reply) => reply,
             Err(error) => {
+                log::warn!(target: "exv.connect", "connect.core_rpc_failed");
                 if matches!(error, AppError::CoreUnreachable(_)) {
                     state.mark_stopped();
                 }
                 return Err(error);
             }
         };
+        log::info!(target: "exv.connect", "connect.core_rpc_returned");
+        drop(browser_commit_guard);
+        drop(browser_lease);
         Ok(ui_operation_reply_with_local_id(
             reply.into_inner(),
             &operation_id,
@@ -338,6 +519,39 @@ impl CoreClient {
 
     /// 停止连接（P4-b: KernelControl.Stop）。operation_id 关联契约同 connect。
     pub async fn stop(&self, state: &CoreState) -> Result<OperationReply, AppError> {
+        let cancelled_browser_login = state.browser_login.cancel_with_completion();
+        if let Some(mut finished) = cancelled_browser_login {
+            let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if *finished.borrow() {
+                        return true;
+                    }
+                    if finished.changed().await.is_err() {
+                        return *finished.borrow();
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+            if !closed {
+                return Err(AppError::browser_login_failed(
+                    "取消浏览器登录超时；当前认证窗口仍在关闭，请稍后重试",
+                ));
+            }
+            return Ok(OperationReply {
+                result: OperationResult::Succeeded {
+                    effect_id: None,
+                    authority_epoch: None,
+                },
+                operation_id: None,
+            });
+        }
+        let _browser_commit = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.browser_commit_gate.lock(),
+        )
+        .await
+        .map_err(|_| AppError::browser_login_failed("连接提交尚未结束，未确认停止"))?;
         let channel = state
             .channel()
             .ok_or_else(|| AppError::CoreUnreachable("stop: core not dialed".to_string()))?;
@@ -575,5 +789,19 @@ impl CoreClient {
             .await
             .map_err(map_status)?;
         Ok(reply.into_inner())
+    }
+}
+
+fn configured_atrust_auth_mode(config: &ConfigPayload) -> Result<&str, AppError> {
+    let mode = config
+        .items
+        .iter()
+        .find(|item| item.key == "atrust_auth_mode")
+        .map(|item| item.value.as_str())
+        .unwrap_or("browser");
+    if matches!(mode, "browser" | "embedded") {
+        Ok(mode)
+    } else {
+        Err(AppError::Internal("aTrust 登录方式配置无效".into()))
     }
 }

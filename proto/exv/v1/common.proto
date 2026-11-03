@@ -509,12 +509,67 @@ message SystemProxyDetection {
   reserved 9000 to 9999;
 }
 
+
+// EXV_UNFREEZE (2026-09-27): tenth narrow unfreeze for the T8 adoption
+// handshake — a relaunched core asks a surviving engine "any live session to
+// adopt?" over the per-user constant control pipe (same plan, stage T8 §2.6 /
+// boundary 19). The engine-side snapshot (HelperControl.ObserveOwnedState)
+// gains the adoption facts; see the RuntimeSnapshot block below for the exact
+// fields. This message block also records that `ReconnectState` (defined below
+// since this unfreeze) MOVED here from helper_control.proto: same
+// exv.vpn.v1 package, identical generated symbol and tags — the move is
+// wire-invisible (the LogEvent move precedent) and exists only so
+// RuntimeSnapshot can carry engine R1 telemetry without a circular import
+// (helper_control imports common).
 message ReconnectStatus {
   bool auto_reconnect = 1;    // config: auto-reconnect switch
   uint32 max_attempts = 2;    // config: retry budget (0 = unlimited)
   uint32 current_attempt = 3; // retries already performed (per-connection)
   bool active = 4;            // a reconnect attempt is in flight
+  string reason = 5;          // stable id of the R2 episode ("" = none)
   reserved 9000 to 9999;
+}
+
+// Engine-side R1 self-heal progress telemetry (EXV_UNFREEZE 2026-09-27, T6a
+// eighth unfreeze; since the tenth unfreeze — see the header block — this
+// message lives in common.proto, MOVED from helper_control.proto: same
+// exv.vpn.v1 package, identical generated symbol, wire-invisible move).
+//
+// Rides `ConnectStatusEvent.reconnect_state` (helper_control, engine → core
+// push) and `RuntimeSnapshot.engine_reconnect` (this file, T8 adoption
+// snapshot) — an old peer ignores the field. Stable reason ids are an engine
+// contract (win32 engine `reconnect.rs`); they route UI text, never
+// authorization.
+message ReconnectState {
+  // 1-based attempt counter this event describes (the trigger event is attempt 1).
+  uint32 attempt = 1;
+  // Wall-clock epoch ms (UTC) of the next scheduled retry; 0 = none (attempt in
+  // flight / already reconnected / terminal).
+  int64 next_retry_at_ms = 2;
+  // Stable reason id for the current reconnect step (e.g. tunnel_lost,
+  // auth_rejected, attempts_exhausted). Empty = not applicable.
+  string reason = 3;
+  reserved 9000 to 9999;
+  reserved 1000 to 1999;
+}
+
+// Keep-headless session facts carried by `RuntimeSnapshot.headless` (EXV_UNFREEZE
+// 2026-09-27, tenth unfreeze — T8 adoption handshake, same plan stage T8):
+// what the engine knows about the core-death episode that left the tunnel
+// alive without an owner. Mirrors the win32 engine `aftermath::HeadlessSession`.
+// Diagnostic/adoption context only — never authorization material.
+message HeadlessFacts {
+  // PID of the dead core (transport-verified peer) that left the headless
+  // session behind; the adopting core must not conflate itself with it.
+  uint32 core_pid = 1;
+  // Wall-clock epoch ms (UTC) at which the engine entered the headless state;
+  // 0 = unknown.
+  int64 since_ms = 2;
+  // The on-core-exit policy in effect when the core died: "keep" (the only
+  // value a headless session can carry today; "teardown" never goes headless).
+  string policy = 3;
+  reserved 9000 to 9999;
+  reserved 1000 to 1999;
 }
 
 message SelfHealStatus {
@@ -725,6 +780,9 @@ message RuntimeSnapshot {
   SystemProxyDetection system_proxy = 14;
   ReconnectStatus reconnect = 15;
   SelfHealStatus self_heal = 16;
+  bool relaunched_by_engine = 17;    // T10-reserved: engine sets false until T10 lands
+  HeadlessFacts headless = 18;       // keep-headless episode facts (None = not headless)
+  ReconnectState engine_reconnect = 19;  // engine R1 telemetry of the latest status event (None = none)
   reserved 9000 to 9999;
 }
 

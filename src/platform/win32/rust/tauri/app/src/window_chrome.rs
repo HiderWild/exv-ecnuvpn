@@ -502,6 +502,11 @@ pub async fn window_set_visible<R: Runtime>(
     }
 }
 
+#[cfg(not(windows))]
+pub fn install<R: Runtime>(_app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+    Ok(())
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;

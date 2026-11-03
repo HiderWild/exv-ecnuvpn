@@ -4,9 +4,9 @@
 //   * 进入 connected：`minimize_to_tray_on_connect` → 隐藏窗口；
 //     `connect_notify` → 托盘气泡「已连接」。
 //   * 离开 connected（任一非连接态）：`disconnect_notify` → 托盘气泡「已断开」（窗口不动）。
-//   * 触发重连（`reconnect_notify` → 「正在重连」）：当前 ProductStatus 无专门重连态
-//     （idle/connecting/awaiting/connected/stopping/reconciling/failed），无法感知重连
-//     触发事件；开关与文案已在设置页就绪，效果接线待 C5 自动重连落地。
+//   * 重连过程通知（R1/R2 reason id → toast）不在此处：T12 起由
+//     `reconnect-notify.ts` 承担，门控是 core config `reconnect_notify`
+//     （§2.8/T4）；旧 ui-pref 同名键已归并为遗留存储兼容键。
 //   * 前台抑制：窗口在前台（聚焦）且 `suppress_notify_when_foreground` 开启时，抑制全部
 //     连接类通知（隐藏窗口动作不受影响）。前台状态由调用方（main.ts）判定后作为
 //     `NotifyContext` 传入，本函数保持纯函数。

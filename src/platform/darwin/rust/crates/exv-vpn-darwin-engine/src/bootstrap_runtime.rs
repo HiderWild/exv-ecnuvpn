@@ -1035,6 +1035,8 @@ impl HelperControl for EngineControlService {
                 is_cancelled,
                 &|phase| {
                     let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
+                        aftermath_verified: false,
+                        reconnect_state: None,
                         own_tunnel_if_index: 0,
                         session_established_at_ms: 0,
                         operation_id: task_operation_id.clone(),
@@ -1062,6 +1064,8 @@ impl HelperControl for EngineControlService {
                         );
                     }
                     let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
+                        aftermath_verified: false,
+                        reconnect_state: None,
                         own_tunnel_if_index: 0,
                         session_established_at_ms: 0,
                         operation_id: task_operation_id,
@@ -1112,6 +1116,8 @@ impl HelperControl for EngineControlService {
                                 &[],
                             );
                             let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
+                                aftermath_verified: false,
+                                reconnect_state: None,
                                 own_tunnel_if_index: 0,
                                 session_established_at_ms: 0,
                                 operation_id: task_operation_id,
@@ -1137,6 +1143,8 @@ impl HelperControl for EngineControlService {
                                 ],
                             );
                             let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
+                                aftermath_verified: false,
+                                reconnect_state: None,
                                 own_tunnel_if_index: 0,
                                 session_established_at_ms: 0,
                                 operation_id: task_operation_id,
@@ -1179,6 +1187,8 @@ impl HelperControl for EngineControlService {
                         ],
                     );
                     let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
+                        aftermath_verified: false,
+                        reconnect_state: None,
                         own_tunnel_if_index: 0,
                         session_established_at_ms: 0,
                         operation_id: task_operation_id,
@@ -1370,6 +1380,8 @@ async fn run_tunnel_pipeline(
             ],
         );
         let _ = runtime.status_tx.send(wire::ConnectStatusEvent {
+            aftermath_verified: false,
+            reconnect_state: None,
             own_tunnel_if_index: own_tunnel_if_index.load(Ordering::Relaxed),
             session_established_at_ms: session_started_ms.load(Ordering::Relaxed),
             operation_id: operation_id.clone(),

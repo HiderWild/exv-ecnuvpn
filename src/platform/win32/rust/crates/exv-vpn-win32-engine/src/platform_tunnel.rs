@@ -10,7 +10,7 @@
 //!   纯验收组装工件——本移植**不带**；
 //! - DAD 收敛轮询（:2094-2106，10s deadline）实测 DadState 恒 Tentative、纯烧
 //!   budget——本移植**不带**（如需「路由可查」，R1c 用真实路由回读/短沉降替代）。
-//! 移除三个等待后 apply ≈ 0.3s（R0 归因 §4）。
+//!   移除三个等待后 apply ≈ 0.3s（R0 归因 §4）。
 //!
 //! **W24 路由残留根因修复（保留）**：路由安装后**回读生效行**（Windows 存有效
 //! metric，实测 5 -> 10），restore 用回读行做全字段精确 remove——避免请求行全字段
@@ -38,6 +38,7 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
+use sha2::Digest as _;
 
 use exv_vpn_cstp::session::TunnelOffer;
 use exv_vpn_win32_resource::dns::{DnsApplier, DnsCapture};
@@ -188,6 +189,19 @@ fn record_owned_route(
             ownership.borrowed += 1;
         }
     }
+}
+
+// 多个控制/数据出口共用同一清理账本；中途失败保留已取得的所有权供外层回滚。
+fn install_bypass_rows(
+    rows: &[RouteRow],
+    installed: &mut Vec<OwnedRoute>,
+    ownership: &mut RouteOwnershipFacts,
+    mut install: impl FnMut(&RouteRow) -> Result<RouteInstallOutcome, NativeError>,
+) -> Result<(), NativeError> {
+    for row in rows {
+        record_owned_route(installed, ownership, install(row)?);
+    }
+    Ok(())
 }
 
 /// 记录每条路由的请求身份及真实回读结果，避免失败后只剩一个 API 名称。
@@ -496,7 +510,7 @@ unsafe impl Send for NicOwner {}
 impl NicOwner {
     /// **首次连接建 adapter（D12）**：`WintunLibrary::load` + `WintunAdapter::create`
     /// + 接口级配置（DAD 禁用 + 接口启用，均跨连接存续）。重复调用由协调者保证
-    /// 不触发（`nic` 已存在则复用）。
+    ///   不触发（`nic` 已存在则复用）。
     ///
     /// # Errors
     ///
@@ -595,6 +609,27 @@ impl NicOwner {
         core_user_sid: Option<String>,
         journal: &SystemProxyJournal,
     ) -> Result<(RouteOwner, PlatformFacts), RouteApplyError> {
+        self.apply_offer_with_bypasses(
+            offer,
+            campus_routes,
+            &[],
+            bypass.map(std::slice::from_ref).unwrap_or(&[]),
+            core_user_sid,
+            journal,
+        )
+    }
+
+    /// 先安装全部控制/数据节点旁路，再安装校园路由；清理沿用同一 owner 逆序执行。
+    /// 每行必须由运行时根据真实出口构造，本方法不推测节点地址。
+    pub fn apply_offer_with_bypasses(
+        &self,
+        offer: &TunnelOffer,
+        campus_routes: &[String],
+        campus_dns_domains: &[String],
+        bypasses: &[RouteRow],
+        core_user_sid: Option<String>,
+        journal: &SystemProxyJournal,
+    ) -> Result<(RouteOwner, PlatformFacts), RouteApplyError> {
         // 接口启用（路由安装前；WSP3 顺序 address → enable → route）。接口级配置
         // 在 ensure 时已启用，但地址 apply 后再次启用是既有 W17 路径，保持幂等。
         let _ = enable_interface_best_effort(self.adapter.ifindex());
@@ -602,10 +637,13 @@ impl NicOwner {
             self.luid(),
             self.adapter.ifindex(),
             offer,
-            campus_routes,
-            bypass,
-            core_user_sid,
-            journal,
+            RouteApplyInputs {
+                campus_routes,
+                campus_dns_domains,
+                bypasses,
+                core_user_sid,
+                journal,
+            },
         )
     }
 }
@@ -680,6 +718,17 @@ enum RecordCommitOutcome {
     CommitFailed(NativeError),
 }
 
+/// [`RouteOwner::apply`] 的输入束（clippy 债务清偿 2026-09-27：8 个位置参数
+/// 收敛为结构体——校园路由/DNS 域/bypass 行/发起 SID/系统代理账本本就是同一组
+/// 「按连接下发的意图」，按名传值不再按位对齐）。
+struct RouteApplyInputs<'a> {
+    campus_routes: &'a [String],
+    campus_dns_domains: &'a [String],
+    bypasses: &'a [RouteRow],
+    core_user_sid: Option<String>,
+    journal: &'a SystemProxyJournal,
+}
+
 impl RouteOwner {
     /// 五族 leaf apply（bypass /32（`Option`，物理出口）→ address → MTU →
     /// 隧道路由 + 校园路由 → DNS，admission-first）。
@@ -697,11 +746,15 @@ impl RouteOwner {
         luid: u64,
         ifindex: u32,
         offer: &TunnelOffer,
-        campus_routes: &[String],
-        bypass: Option<&RouteRow>,
-        core_user_sid: Option<String>,
-        journal: &SystemProxyJournal,
+        inputs: RouteApplyInputs<'_>,
     ) -> Result<(Self, PlatformFacts), RouteApplyError> {
+        let RouteApplyInputs {
+            campus_routes,
+            campus_dns_domains,
+            bypasses,
+            core_user_sid,
+            journal,
+        } = inputs;
         // ---- admission-first：plan 整体校验（W22 语义，零效果拒绝）。 ----
         let address: Ipv4Addr = offer.ipv4_address;
         let prefix: u8 = offer.prefix;
@@ -763,16 +816,16 @@ impl RouteOwner {
             //      增补，2026-09-08）。本次真正创建的行 push 首位 ⇒ clear 逆序
             //      **最后**移除、失败回滚最后撤（I4）；pre-existing 行只借用，不纳入
             //      owner。 ----
-            if let Some(bypass) = bypass {
-                // 不再按 destination 跨接口清扫：同 gateway /32 可能属于系统、上游
-                // TUN 或其它 VPN。Create 成功才取得所有权；已存在精确行只借用。
-                let outcome = install_route_logged(bypass, "gateway_bypass", ifindex, &route_log)
-                    .map_err(|e| {
-                        route_native_code = Some(e.code);
-                        format!("bypass-install:{e:?}")
-                    })?;
-                record_owned_route(&mut installed_routes, &mut route_ownership, outcome);
-            }
+            install_bypass_rows(
+                bypasses,
+                &mut installed_routes,
+                &mut route_ownership,
+                |row| install_route_logged(row, "gateway_bypass", ifindex, &route_log),
+            )
+            .map_err(|e| {
+                route_native_code = Some(e.code);
+                format!("bypass-install:{e:?}")
+            })?;
 
             // ---- 隧道路由族 + 校园路由族（W20 leaf：精确行安装，回读生效行，逆序清理）。 ----
             for route in offer.routes.iter().chain(campus_routes.iter()) {
@@ -813,13 +866,9 @@ impl RouteOwner {
                 let proxy_log = journal.log();
                 let observe = |event| log_system_proxy_stage(&proxy_log, luid, event);
                 let proxy_started = Instant::now();
-                let desired: Vec<String> = campus_routes
-                    .iter()
-                    .filter_map(|r| {
-                        exv_vpn_win32_resource::system_proxy_override::cidr_to_wildcard_opt(r)
-                            .map(|e| e.as_str().to_owned())
-                    })
-                    .collect();
+                let desired = campus_proxy_bypasses(campus_routes, campus_dns_domains);
+                // 仅用摘要核对服务与发起用户身份，不记录原始 SID。
+                let user_hash: String = sha2::Sha256::digest(sid.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
                 proxy_log.emit(
                     LogLevel::Debug,
                     "system-proxy",
@@ -827,6 +876,7 @@ impl RouteOwner {
                     "系统代理豁免输入已派生",
                     &[
                         ("ifindex", &ifindex.to_string()),
+                        ("originating_user_hash", user_hash.as_str()),
                         ("campus_route_count", &campus_routes.len().to_string()),
                         ("desired_entry_count", &desired.len().to_string()),
                         (
@@ -1071,3 +1121,17 @@ impl RouteOwner {
 // ---------------------------------------------------------------------------
 // 单元测试：纯逻辑（路由目标解析）。真实特权路径由集成/业务门禁覆盖。
 // ---------------------------------------------------------------------------
+
+/// 系统代理必须在本地解析校园域名，避免显式 HTTP 代理重新将其送入 FakeIP 路径。
+fn campus_proxy_bypasses(routes: &[String], domains: &[String]) -> Vec<String> {
+    let mut entries: Vec<String> = routes.iter().filter_map(|route| {
+        exv_vpn_win32_resource::system_proxy_override::cidr_to_wildcard_opt(route)
+            .map(|entry| entry.as_str().to_owned())
+    }).collect();
+    for domain in domains {
+        for entry in [domain.clone(), format!("*.{domain}")] {
+            if !entries.contains(&entry) { entries.push(entry); }
+        }
+    }
+    entries
+}

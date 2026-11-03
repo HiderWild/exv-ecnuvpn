@@ -14,9 +14,9 @@ use sha2::{Digest, Sha256};
 
 use super::logs::LogEvent;
 use super::state::{
-    ConnectPhase, OperationReply, OperationResult, ProxyTunAdapter, ProxyTunDetection,
-    ReconnectStatus, RuntimeEvent, RuntimeEventKind, RuntimeSnapshot, RuntimeState,
-    SelfHealStatus, ServiceControlAction, ServiceControlReply, ServiceStatus,
+    ConnectPhase, EngineReconnectState, OperationReply, OperationResult, ProxyTunAdapter,
+    ProxyTunDetection, ReconnectStatus, RuntimeEvent, RuntimeEventKind, RuntimeSnapshot,
+    RuntimeState, SelfHealStatus, ServiceControlAction, ServiceControlReply, ServiceStatus,
     SystemProxyDetection, VpnError,
 };
 use super::stats::{RuntimeStats, StatsPhase};
@@ -190,6 +190,10 @@ pub fn snapshot_from_wire(
             .as_ref()
             .map(system_proxy_detection_from_wire),
         reconnect: wire_snap.reconnect.as_ref().map(reconnect_status_from_wire),
+        engine_reconnect: wire_snap
+            .engine_reconnect
+            .as_ref()
+            .map(engine_reconnect_state_from_wire),
         self_heal: wire_snap.self_heal.as_ref().map(self_heal_status_from_wire),
     }
 }
@@ -215,6 +219,7 @@ pub fn event_from_wire(ev: &wire::RuntimeEvent) -> RuntimeEvent {
             mode: String::new(),
             system_proxy: None,
             reconnect: None,
+            engine_reconnect: None,
             self_heal: None,
         });
     RuntimeEvent {
@@ -284,8 +289,10 @@ pub fn log_event_from_wire(ev: &wire::LogEvent) -> LogEvent {
 }
 
 /// wire `RuntimeStats` → UI `RuntimeStats`（stats-wire 方案 A；字段一一对应）。
+/// wire RuntimeStats → UI 侧 RuntimeStats（T14 拆流起 WatchStats 流的样本也经此
+/// 映射——原先只服务快照伴生字段）。
 #[must_use]
-fn stats_from_wire(w: &wire::RuntimeStats) -> RuntimeStats {
+pub fn stats_from_wire(w: &wire::RuntimeStats) -> RuntimeStats {
     RuntimeStats {
         rx_bytes: w.rx_bytes,
         tx_bytes: w.tx_bytes,
@@ -341,7 +348,8 @@ fn system_proxy_detection_from_wire(w: &wire::SystemProxyDetection) -> SystemPro
     }
 }
 
-/// wire `ReconnectStatus` → UI `ReconnectStatus`（S4；字段一一对应）。
+/// wire `ReconnectStatus` → UI `ReconnectStatus`（S4；字段一一对应；T6b tag 5
+/// `reason` 稳定 id 透传——前端 T12 按 id 路由通知文案）。
 #[must_use]
 fn reconnect_status_from_wire(w: &wire::ReconnectStatus) -> ReconnectStatus {
     ReconnectStatus {
@@ -349,6 +357,18 @@ fn reconnect_status_from_wire(w: &wire::ReconnectStatus) -> ReconnectStatus {
         max_attempts: w.max_attempts,
         current_attempt: w.current_attempt,
         active: w.active,
+        reason: w.reason.clone(),
+    }
+}
+
+/// wire `ReconnectState` → UI `EngineReconnectState`（T8 tag 19；字段一一对应，
+/// `reason` 稳定 id 透传——前端 T12 按 id 路由通知文案）。
+#[must_use]
+fn engine_reconnect_state_from_wire(w: &wire::ReconnectState) -> EngineReconnectState {
+    EngineReconnectState {
+        attempt: w.attempt,
+        next_retry_at_ms: w.next_retry_at_ms,
+        reason: w.reason.clone(),
     }
 }
 
@@ -422,6 +442,10 @@ fn vpn_error_from_wire(err: &wire::VpnError) -> VpnError {
             Some(13 | 127 | 193) => "Wintun 本地组件损坏或版本不匹配。请覆盖安装官方 EXV 后重试。",
             _ => "Wintun 网络组件自动恢复失败。请查看日志或修复安装后重试。",
         }
+    } else if err.code == wire::ErrorCode::EffectUnknown as i32
+        && err.stage == wire::ErrorStage::ConnectingControl as i32
+    {
+        "连接准备未完成。请查看日志中的原因和处理建议后重试。"
     } else if err.code == wire::ErrorCode::EffectUnknown as i32
         && err.stage == wire::ErrorStage::ApplyingPlatformTunnel as i32
     {

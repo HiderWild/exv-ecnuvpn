@@ -18,7 +18,11 @@ mod crypto;
 mod error;
 mod paths;
 
-pub use config::{ConnectionMode, ExvConfig};
+pub use config::{
+    ConnectionMode, ExvConfig, OnCoreExit, PROTOCOL_SWITCH_BACKUP_FILE, Protocol,
+    DEFAULT_CAMPUS_DNS_DOMAINS, parse_campus_dns_domains, read_protocol_literal,
+    write_protocol_switch_backup,
+};
 pub use config_hygiene::{StartupConfig, load_for_startup, save_after_user_submission};
 pub use error::ConfigError;
 pub use paths::{config_dir, config_path, key_path};

@@ -8,7 +8,7 @@
 //! - **固定管道名** `\\.\pipe\exv-log`（对齐 C++ `\\.\pipe\exv-helper` 固定名模式）——
 //!   任意调用者连同一名字即可发日志，与 UI 访问方式一致；
 //! - **多实例**：core 预创建 `LOG_PIPE_MAX_INSTANCES` 个实例，每实例一条 accept 线程
-//!   （参考 C++ helper_daemon 固定名多实例 accept 循环），多客户端可同时连入；
+//!   （参考 C++ `helper_daemon` 固定名多实例 accept 循环），多客户端可同时连入；
 //!   client 断开后 accept 循环重建额外实例（支持重连）；
 //! - **帧 wire 格式**：`LogEvent` JSON 帧（u32 BE 长度前缀 + JSON，与控制面同款）；
 //!   `message` 不含时间戳——core 侧统一加 `[+NNN.NN s]` 落盘（core 是唯一日志层）。

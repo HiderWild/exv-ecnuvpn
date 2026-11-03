@@ -13,7 +13,9 @@ pub struct PreparedWintun {
 pub struct DependencyError {
     pub configured: PathBuf,
     pub installed: PathBuf,
-    pub original: NativeError,
+    // Box：错误按值穿过返回链，装箱主因错误把 Err 变体压回常规尺寸（clippy
+    // result_large_err 债务清偿 2026-09-27；语义不变，仅存储位置移堆）。
+    pub original: Box<NativeError>,
     pub fallback: Option<NativeError>,
 }
 
@@ -60,7 +62,7 @@ pub fn prepare_from(
     Err(DependencyError {
         configured: configured.into(),
         installed: installed.into(),
-        original,
+        original: Box::new(original),
         fallback,
     })
 }

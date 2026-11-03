@@ -68,4 +68,5 @@ windows = { version = "0.62.2", features = [
 exv-vpn-wire = { path = "../../../../../src/common/rust/crates/exv-vpn-wire" }
 exv-vpn-win32-resource = { path = "../../../../../src/platform/win32/rust/crates/exv-vpn-win32-resource" }
 exv-vpn-win32-config = { path = "../crates/exv-vpn-win32-config" }
+exv-core = { path = "../crates/exv-vpn-win32-host" }
 zeroize = "1.9.0"

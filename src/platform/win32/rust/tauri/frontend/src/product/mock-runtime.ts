@@ -118,6 +118,8 @@ export function createMockRuntime(
     async triggerLatencyRefresh(): Promise<void> {
       // 模拟运行时不制造虚假延迟样本；保持现有快照（延迟经真实 snapshot 到达）。
     },
+    async atrustBrowserFallbackAvailable(): Promise<boolean> { return false; },
+    async atrustBrowserFallback(): Promise<void> { throw new Error("模拟模式不支持系统浏览器登录。"); },
     async serviceControl(_action: ServiceControlAction): Promise<ServiceControlReply> {
       // 模拟模式不伪装真实 SCM 操作；返回占位 reply（界面明确「模拟」）。
       return { service_status: null, ok: false, message: "模拟模式不执行真实服务控制。" };

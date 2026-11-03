@@ -11,7 +11,7 @@ import {
   type QuickStartApplyRequest,
 } from "../lib/ipc";
 import { APPEARANCE_KEY, type AppearanceState } from "../product/appearance";
-import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway } from "../product/core-config";
+import { CORE_CONFIG_GATEWAY_KEY, PROTOCOL_OPTIONS, createCoreConfigGateway } from "../product/core-config";
 import { PRODUCT_RUNTIME_KEY } from "../product/runtime";
 import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../product/service-operations";
 import {
@@ -348,6 +348,12 @@ async function submit(): Promise<void> {
             VPN 服务器
             <input :value="draft.server" data-testid="quick-start-server" @input="updateText('server', $event)">
             <span v-if="fieldErrors.server" class="field-error">{{ fieldErrors.server }}</span>
+          </label>
+          <label>
+            协议
+            <select v-model="draft.protocol" data-testid="quick-start-protocol">
+              <option v-for="option in PROTOCOL_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
           </label>
           <label class="check-row"><input :checked="draft.auto_reconnect === 'true'" data-testid="quick-start-auto-reconnect" type="checkbox" @change="updateBoolean('auto_reconnect', $event)">自动重连</label>
           <label>

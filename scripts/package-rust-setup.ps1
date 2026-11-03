@@ -25,20 +25,8 @@ function Get-FullPath([string]$Candidate, [string]$Label) {
 }
 
 function Resolve-ProductVersion([string]$RequestedVersion, [string]$RepositoryRoot) {
-  $version = $RequestedVersion
-  if ([string]::IsNullOrWhiteSpace($version)) {
-    $configPath = Join-Path $RepositoryRoot 'src\platform\win32\rust\tauri\app\tauri.conf.json'
-    try {
-      $config = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-      $version = [string]$config.version
-    } catch {
-      throw "unable to read product version from ${configPath}: $($_.Exception.Message)"
-    }
-  }
-  if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw "product version must use major.minor.patch: $version"
-  }
-  return $version
+  . (Join-Path $PSScriptRoot 'product-version.ps1')
+  return Get-ExvProductVersion $RepositoryRoot $RequestedVersion
 }
 
 function Test-SamePath([string]$Left, [string]$Right) {

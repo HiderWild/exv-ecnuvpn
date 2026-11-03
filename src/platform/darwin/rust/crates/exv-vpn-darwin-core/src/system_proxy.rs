@@ -222,3 +222,12 @@ mod native {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+mod native {
+    pub(super) fn primary_network_interfaces() -> Vec<(String, bool)> {
+        Vec::new()
+    }
+    pub(super) fn read() -> Result<super::ProxySettings, ()> {
+        Err(())
+    }
+}

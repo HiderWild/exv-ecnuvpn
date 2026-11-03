@@ -1,9 +1,9 @@
 //! core/engine 共用的构建身份采集，不修改发行版或打包参数。
 //!
-//! 覆盖语义：构建命令可显式设置 EXV_BUILD_RELEASE_VERSION、EXV_BUILD_GIT_COMMIT、
-//! EXV_BUILD_GIT_DIRTY、EXV_BUILD_PROFILE、EXV_BUILD_TARGET。设置即覆盖自动值；
+//! 覆盖语义：构建命令可显式设置 `EXV_BUILD_RELEASE_VERSION、EXV_BUILD_GIT_COMMIT`、
+//! `EXV_BUILD_GIT_DIRTY、EXV_BUILD_PROFILE、EXV_BUILD_TARGET。设置即覆盖自动值`；
 //! 空值、非法值及显式 unknown 都记录 unknown，绝不悄悄回退。日志列出覆盖字段名。
-//! PROFILE 是 Cargo 的 debug/release 继承族；精确自定义名称由 EXV_BUILD_PROFILE 声明。
+//! PROFILE 是 Cargo 的 debug/release 继承族；精确自定义名称由 `EXV_BUILD_PROFILE` 声明。
 //! Git 只读取本地 HEAD 和已跟踪改动；无仓库或命令失败时记录 unknown。
 //! 追踪源码、HEAD、index、当前 ref 和 packed-refs；不扫描 target，不注入墙钟时间，
 //! 保持相同源码/环境下输出稳定，以便 sccache 重用。
@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const VERSION_PATH: &str = "src/platform/win32/rust/tauri/app/tauri.conf.json";
+const VERSION_PATH: &str = "release.json";
 const OVERRIDES: [(&str, &str); 5] = [
     ("RELEASE_VERSION", "release_version"),
     ("GIT_COMMIT", "git_commit"),
@@ -66,6 +66,7 @@ pub fn run() {
         watch(&host_root.join("tauri/app/tauri.conf.json"));
     }
     if let Some(root) = root {
+        watch(&root.join(VERSION_PATH));
         for path in git_watch_paths(&root) {
             watch(&path);
         }
@@ -257,17 +258,18 @@ fn git_watch_paths(root: &Path) -> BTreeSet<PathBuf> {
             }
         }
     }
-    if let Some(reference) = git_text(root, &["symbolic-ref", "-q", "HEAD"]) {
-        if let Some(path) = git_text(root, &["rev-parse", "--git-path", &reference]) {
-            let path = PathBuf::from(path);
-            let resolved = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            if resolved.exists() {
-                paths.insert(resolved);
-            }
+    // （clippy 机械修复 2026-09-27 T5：let 链折叠嵌套 if——新工具链 clippy::all 拒绝。）
+    if let Some(reference) = git_text(root, &["symbolic-ref", "-q", "HEAD"])
+        && let Some(path) = git_text(root, &["rev-parse", "--git-path", &reference])
+    {
+        let path = PathBuf::from(path);
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        if resolved.exists() {
+            paths.insert(resolved);
         }
     }
     if let Some(files) = git(root, &["ls-files", "-z"]) {

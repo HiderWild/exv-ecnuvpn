@@ -1,6 +1,6 @@
 [package]
 name = "exv-ui"
-version = "0.1.0"
+version = "4.1.0"
 description = "EXV VPN desktop UI (Tauri v2). Frontend: Vue3 + Vite + TS. UI<->core via Tauri Command/Event (Phase 4, P4-b real KernelControl gRPC wiring)."
 authors = ["HiderWild"]
 edition.workspace = true
@@ -13,6 +13,7 @@ tauri-build = { workspace = true }
 [dependencies]
 tauri = { workspace = true }
 tauri-plugin-log = { workspace = true }
+log = "0.4"
 # 应用级单实例（第二实例激活既有窗口）；注册须在 plugin 链中先于业务插件（lib.rs）。
 tauri-plugin-single-instance = { workspace = true }
 serde = { workspace = true }
@@ -31,6 +32,8 @@ sha2 = { workspace = true }
 windows = { workspace = true }
 # 复用 core 侧 proto 生成代码（KernelControl client + wire 消息类型）。
 exv-vpn-wire = { workspace = true }
+exv-vpn-win32-ipc = { path = "../../crates/exv-vpn-win32-ipc" }
 exv-vpn-win32-resource = { workspace = true }
 exv-vpn-win32-config = { workspace = true }
+exv-core = { workspace = true }
 zeroize = { workspace = true }

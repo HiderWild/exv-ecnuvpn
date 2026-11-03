@@ -11,8 +11,10 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <aclapi.h>
 
 #include <algorithm>
+#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -127,6 +129,109 @@ std::wstring WriteCleanupDiagnosticLog(const HiddenProcessResult &cleanup,
   return temp_file;
 }
 
+bool GetCurrentImagePath(fs::path &path, std::wstring &error) {
+  std::vector<wchar_t> buffer(32768);
+  const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+  if (length == 0 || length >= buffer.size()) {
+    error = L"无法确定当前卸载器映像路径（error=" + std::to_wstring(GetLastError()) + L"）";
+    return false;
+  }
+  path = fs::path(std::wstring(buffer.data(), length));
+  return true;
+}
+
+bool SameNormalizedWindowsPath(const fs::path &left, const fs::path &right, bool &same,
+                               std::wstring &error) {
+  std::error_code ec;
+  const auto left_absolute = fs::absolute(left, ec).lexically_normal();
+  if (ec) {
+    error = L"无法规范化当前卸载器映像路径";
+    return false;
+  }
+  const auto right_absolute = fs::absolute(right, ec).lexically_normal();
+  if (ec) {
+    error = L"无法规范化安装文件路径：" + right.wstring();
+    return false;
+  }
+  auto left_text = left_absolute.native();
+  auto right_text = right_absolute.native();
+  std::replace(left_text.begin(), left_text.end(), L'/', L'\\');
+  std::replace(right_text.begin(), right_text.end(), L'/', L'\\');
+  if (left_text.size() > INT_MAX || right_text.size() > INT_MAX) {
+    error = L"卸载器映像路径过长";
+    return false;
+  }
+  const int comparison = CompareStringOrdinal(left_text.data(), static_cast<int>(left_text.size()),
+                                              right_text.data(), static_cast<int>(right_text.size()), TRUE);
+  if (comparison == 0) {
+    error = L"无法比较当前卸载器映像路径";
+    return false;
+  }
+  same = comparison == CSTR_EQUAL;
+  return true;
+}
+
+bool CreateImageQuarantineDirectory(const fs::path &root, const fs::path &image,
+                                   fs::path &directory, std::wstring &error) {
+  PSID owner = nullptr;
+  PSID group = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  const DWORD security_error = GetNamedSecurityInfoW(
+      const_cast<LPWSTR>(root.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+      &owner, &group, &dacl, nullptr, &descriptor);
+  if (security_error != ERROR_SUCCESS || !descriptor) {
+    error = L"无法读取安装目录 ACL，拒绝移动运行中的卸载器（error=" +
+            std::to_wstring(security_error) + L"）";
+    if (descriptor) LocalFree(descriptor);
+    return false;
+  }
+  if (!SetSecurityDescriptorControl(descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
+    const DWORD control_error = GetLastError();
+    LocalFree(descriptor);
+    error = L"无法保护卸载器隔离目录 ACL（error=" + std::to_wstring(control_error) + L"）";
+    return false;
+  }
+  SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+  const auto parent = root.parent_path();
+  if (parent.empty()) {
+    LocalFree(descriptor);
+    error = L"无法在安装目录同卷创建卸载器隔离目录";
+    return false;
+  }
+  wchar_t image_volume[MAX_PATH] = {};
+  wchar_t parent_volume[MAX_PATH] = {};
+  if (!GetVolumePathNameW(image.c_str(), image_volume, MAX_PATH) ||
+      !GetVolumePathNameW(parent.c_str(), parent_volume, MAX_PATH) ||
+      _wcsicmp(image_volume, parent_volume) != 0) {
+    LocalFree(descriptor);
+    error = L"无法确认卸载器隔离目录与安装目录位于同一卷";
+    return false;
+  }
+
+  static volatile LONG sequence = 0;
+  const auto base = L".exv-uninstall-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                    std::to_wstring(GetTickCount64());
+  for (int attempt = 0; attempt < 32; ++attempt) {
+    const auto suffix = std::to_wstring(InterlockedIncrement(&sequence));
+    const auto candidate = parent / (base + L"-" + suffix);
+    if (CreateDirectoryW(candidate.c_str(), &attributes)) {
+      directory = candidate;
+      LocalFree(descriptor);
+      return true;
+    }
+    const DWORD create_error = GetLastError();
+    if (create_error != ERROR_ALREADY_EXISTS) {
+      LocalFree(descriptor);
+      error = L"无法创建卸载器隔离目录（error=" + std::to_wstring(create_error) + L"）";
+      return false;
+    }
+  }
+  LocalFree(descriptor);
+  error = L"无法创建唯一的卸载器隔离目录";
+  return false;
+}
+
 DeleteTreeResult DeleteTreeBestEffort(const fs::path &root) {
   DeleteTreeResult result;
   std::error_code ec;
@@ -155,8 +260,75 @@ DeleteTreeResult DeleteTreeBestEffort(const fs::path &root) {
     return result;
   }
 
+  bool relocated_running_image = false;
+  bool found_running_image = false;
+  fs::path quarantined_image_path;
+  fs::path current_image;
+  std::wstring image_path_error;
+  if (!GetCurrentImagePath(current_image, image_path_error)) {
+    result.ok = false;
+    result.error = image_path_error;
+    return result;  // Fail closed before deleting anything if self-image identity is unknown.
+  }
+  auto running_image_file = files.end();
+  bool equivalent_alias_found = false;
+  for (auto file = files.begin(); file != files.end(); ++file) {
+    bool exact_path = false;
+    if (!SameNormalizedWindowsPath(current_image, *file, exact_path, image_path_error)) {
+      result.ok = false;
+      result.error = image_path_error;
+      return result;
+    }
+    if (exact_path) {
+      running_image_file = file;
+      break;
+    }
+    std::error_code equivalent_error;
+    if (fs::equivalent(*file, current_image, equivalent_error)) {
+      equivalent_alias_found = true;
+    } else if (equivalent_error) {
+      result.ok = false;
+      AppendError(result.error, L"无法确认安装文件是否与当前卸载器映像别名：" + file->wstring());
+      return result;
+    }
+  }
+  if (running_image_file == files.end() && equivalent_alias_found) {
+    result.ok = false;
+    result.error = L"安装目录只包含当前卸载器映像的别名，拒绝移动或登记该别名路径";
+    return result;
+  }
+  if (running_image_file != files.end()) {
+    found_running_image = true;
+    fs::path quarantine_dir;
+    if (!CreateImageQuarantineDirectory(root, *running_image_file, quarantine_dir, image_path_error)) {
+      result.ok = false;
+      AppendError(result.error, image_path_error);
+      files.erase(running_image_file);  // Never schedule deletion of the still-running image at its installed path.
+    } else {
+      const auto quarantined_image = quarantine_dir / running_image_file->filename();
+      if (!MoveFileExW(running_image_file->c_str(), quarantined_image.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        const DWORD move_error = GetLastError();
+        std::error_code cleanup_error;
+        fs::remove(quarantine_dir, cleanup_error);
+        result.ok = false;
+        AppendError(result.error, L"无法将运行中的卸载器移入隔离目录（error=" +
+                                      std::to_wstring(move_error) + L"）");
+        files.erase(running_image_file);  // Fail closed: never queue the active image's original path.
+      } else {
+        *running_image_file = quarantined_image;
+        quarantined_image_path = quarantined_image;
+        relocated_running_image = true;
+      }
+    }
+  }
+
   for (const auto &f : files) {
     AccumulateDeletion(result, DeleteOrSchedule(f));
+    if (relocated_running_image && f == quarantined_image_path) {
+      // Always try the exact unique quarantine parent, even if deleting the image
+      // succeeded immediately; a missing parent is a successful no-op.
+      AccumulateDeletion(result, DeleteOrSchedule(quarantined_image_path.parent_path()));
+    }
   }
   std::sort(dirs.begin(), dirs.end(),
             [](const fs::path &a, const fs::path &b) {
@@ -165,7 +337,18 @@ DeleteTreeResult DeleteTreeBestEffort(const fs::path &root) {
   for (const auto &d : dirs) {
     AccumulateDeletion(result, DeleteOrSchedule(d));
   }
-  AccumulateDeletion(result, DeleteOrSchedule(root));
+  if (found_running_image) {
+    std::error_code root_error;
+    if (fs::remove(root, root_error)) {
+      // The installation path is now free for an immediate reinstall.
+    } else {
+      result.ok = false;
+      AppendError(result.error, L"安装目录仍有未删除文件，未登记安装目录本身的重启删除（remove=" +
+                                    std::to_wstring(root_error.value()) + L"）");
+    }
+  } else {
+    AccumulateDeletion(result, DeleteOrSchedule(root));
+  }
   return result;
 }
 

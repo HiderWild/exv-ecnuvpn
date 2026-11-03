@@ -17,7 +17,12 @@ project(exv-setup-rust LANGUAGES CXX RC)
 
 include(CTest)
 
-set(EXV_PRODUCT_VERSION "4.0.0" CACHE STRING "EXV product version baked into the installer registry entry")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../../../release.json" EXV_RELEASE_JSON)
+string(JSON EXV_SOURCE_VERSION GET "${EXV_RELEASE_JSON}" version)
+set(EXV_PRODUCT_VERSION "${EXV_SOURCE_VERSION}" CACHE STRING "EXV product version")
+if(NOT EXV_PRODUCT_VERSION STREQUAL EXV_SOURCE_VERSION)
+  message(FATAL_ERROR "EXV_PRODUCT_VERSION differs from release.json")
+endif()
 
 set(EXV_RUST_SETUP_PAYLOAD_SOURCES
   payload/crc32.cpp
@@ -41,6 +46,7 @@ set(EXV_RUST_SETUP_ENGINE_SOURCES
   uninstall_engine.cpp
   payload/embedded_payload.cpp
   ui/setup_window.cpp
+  webview2_runtime.cpp
   ui/icon_bitmaps.cpp
   ${EXV_RUST_SETUP_PAYLOAD_SOURCES}
 )
@@ -106,14 +112,22 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME installer_service_stop_budget COMMAND service_stop_test)
   set_tests_properties(installer_service_stop_budget PROPERTIES TIMEOUT 10)
-  add_executable(setup_cli_options_test p1_setup_regression_test.cpp cli.cpp app_paths.cpp)
+  add_executable(setup_cli_options_test p1_setup_regression_test.cpp cli.cpp app_paths.cpp registry_install.cpp)
   target_include_directories(setup_cli_options_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
-  target_link_libraries(setup_cli_options_test PRIVATE shell32 ole32)
+  target_link_libraries(setup_cli_options_test PRIVATE shell32 ole32 advapi32)
   if(MINGW)
     target_link_options(setup_cli_options_test PRIVATE -static -static-libgcc -static-libstdc++)
   endif()
   add_test(NAME setup_cli_elevation_context COMMAND setup_cli_options_test)
   set_tests_properties(setup_cli_elevation_context PROPERTIES TIMEOUT 10)
+  add_executable(webview2_runtime_test tests/webview2_runtime_test.cpp webview2_runtime.cpp)
+  target_include_directories(webview2_runtime_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
+  target_link_libraries(webview2_runtime_test PRIVATE advapi32)
+  if(MINGW)
+    target_link_options(webview2_runtime_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  add_test(NAME webview2_runtime_detection COMMAND webview2_runtime_test)
+  set_tests_properties(webview2_runtime_detection PROPERTIES TIMEOUT 10)
   add_executable(install_service_state_test tests/install_service_state_test.cpp progress_model.cpp)
   target_include_directories(install_service_state_test PRIVATE ${EXV_RUST_SETUP_INCLUDE_ROOT})
   target_link_libraries(install_service_state_test PRIVATE shell32)

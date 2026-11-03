@@ -256,7 +256,7 @@ pub async fn connect_engine_channel(
 /// 1. **PID 交叉核验**：自报 PID 必须等于 `GetNamedPipeServerProcessId`（管道对端进程，
 ///    OS 权威，无需 `OpenProcess` 特权——标准用户对 SYSTEM 会话 0 服务进程 `OpenProcess`
 ///    必失败，S5 真机实测 err=5）；
-/// 2. **SID 比对**：自报 SID 必须等于 `expected_sid`（服务 engine 由 SCM 以 LocalSystem
+/// 2. **SID 比对**：自报 SID 必须等于 `expected_sid`（服务 engine 由 SCM 以 `LocalSystem`
 ///    运行 → [`SYSTEM_SID`]）。
 ///
 /// 取代旧 `verify_engine_server_sid_only` 的 `process_sid`（`OpenProcess` 读 SYSTEM 进程
@@ -358,7 +358,7 @@ pub async fn service_peer_handshake(
 }
 
 /// 服务模式 pre-gRPC PSK-HMAC 挑战（client 侧，D2，握手第 1–3 步）：读取 server nonce →
-/// 应答 `HMAC(psk, nonce_e || "c2e")` + 自己的 nonce_s → 恒时验证 server 应答
+/// 应答 `HMAC(psk, nonce_e || "c2e")` + 自己的 `nonce_s` → 恒时验证 server 应答
 /// `HMAC(psk, nonce_s || "e2c")`。与 engine `psk_challenge_server` 逐帧对称。
 ///
 /// 注：完整握手（身份帧 + 本挑战）由 [`service_peer_handshake`] 编排——调用方应优先使用
@@ -457,13 +457,10 @@ impl Service<Uri> for ServicePipeConnector {
         let warm = self.warm.take();
         let fut = async move {
             // warm 连接已完整握手（身份 + PSK）；重连现场拨号 + 现场握手（不绕过认证）。
-            let (pipe, peer) = match warm {
-                Some((pipe, peer)) => (pipe, peer),
-                None => {
-                    let mut pipe = dial_control_pipe_with_retry(&pipe_name).await?;
-                    let peer = service_peer_handshake(&mut pipe, &expected_sid, &psk).await?;
-                    (pipe, peer)
-                }
+            let (pipe, peer) = if let Some((pipe, peer)) = warm { (pipe, peer) } else {
+                let mut pipe = dial_control_pipe_with_retry(&pipe_name).await?;
+                let peer = service_peer_handshake(&mut pipe, &expected_sid, &psk).await?;
+                (pipe, peer)
             };
             *verified_peer.lock().expect("verified peer lock") = Some(peer);
             Ok(TokioIo::new(pipe))

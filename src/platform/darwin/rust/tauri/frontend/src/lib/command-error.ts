@@ -23,6 +23,7 @@ export function commandErrorMessage(error: unknown, fallback: string): string {
     service_not_running: "VPN 服务尚未运行，请启动或修复服务后重试。",
     service_not_installed: "服务未安装。可到服务面板安装常驻服务；未安装时点击连接将请求管理员密码以一次性运行引擎（不安装系统服务）。",
     service_connect_failed: "无法连接 VPN 服务，请修复服务后重试。",
+    protocol_unavailable: "当前版本尚未接入 aTrust 后端；请在设置中改用 Cisco，或更新到支持 aTrust 的版本。",
     core_unreachable: "无法连接本地 VPN 核心，请确认服务状态后重试。",
     not_wired: "当前运行在预览环境，无法连接 VPN；请在 EXV 桌面应用中运行。",
     internal: "应用内部处理未完成，请重试；若持续出现请提交错误码。",

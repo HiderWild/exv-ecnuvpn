@@ -1,0 +1,31 @@
+# EXV aTrust 协议库（T03 最小切片）。
+# 依赖只取根 workspace 已声明的 workspace 依赖，不引入新第三方 crate。
+# 目录位于 src/common/rust/crates/*，由根 Cargo.toml 的 members glob 覆盖，无需修改根 manifest。
+
+[package]
+name = "exv-vpn-atrust"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+tokio-rustls.workspace = true
+ring.workspace = true
+
+[lints]
+workspace = true
+

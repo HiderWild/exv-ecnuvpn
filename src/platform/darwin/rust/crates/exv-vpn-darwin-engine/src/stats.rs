@@ -259,6 +259,8 @@ async fn sample_loop(
         let sample = registry.snapshot();
         let sequence = next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let event = wire::StatsEvent {
+            reconnect_attempts_total: 0,
+            reconnect_successes_total: 0,
             sequence,
             timestamp_ms: sample.timestamp_ms,
             phase: sample.phase as i32,

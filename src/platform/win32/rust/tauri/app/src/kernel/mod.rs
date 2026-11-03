@@ -4,6 +4,7 @@ pub mod client;
 pub mod commands;
 pub mod core_process;
 pub mod core_transport;
+pub mod embedded_auth;
 pub mod error;
 pub mod events;
 pub mod latency;

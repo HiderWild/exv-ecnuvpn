@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-core"
-version = "0.1.0"
+version = "4.1.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1129,7 +1129,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -1138,11 +1137,10 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-engine"
-version = "0.1.0"
+version = "4.1.0"
 dependencies = [
  "async-trait",
  "exv-vpn-cstp",
- "exv-vpn-darwin-core",
  "exv-vpn-darwin-ipc",
  "exv-vpn-wire",
  "getrandom 0.4.3",
@@ -1158,7 +1156,6 @@ dependencies = [
 name = "exv-vpn-darwin-ipc"
 version = "0.1.0"
 dependencies = [
- "exv-vpn-wire",
  "getrandom 0.4.3",
  "hmac",
  "hyper-util",
@@ -1171,14 +1168,14 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-service-agent"
-version = "0.1.0"
+version = "4.1.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "exv-vpn-darwin-tauri"
-version = "0.1.0"
+version = "4.1.0"
 dependencies = [
  "block2",
  "exv-vpn-darwin-core",
@@ -1198,7 +1195,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
- "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

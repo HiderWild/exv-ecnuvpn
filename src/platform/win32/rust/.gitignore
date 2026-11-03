@@ -1,1 +1,3 @@
 target/
+# cargo TMP 重定向工作目录（.cargo/config.toml force TMP=.build-tmp），永远不入库
+.build-tmp/

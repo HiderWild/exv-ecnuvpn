@@ -14,5 +14,5 @@
 ## 流程约定
 
 - 不使用 CI 强制门禁；提交者自行保证构建与基本回归。
-- 发布版本以 `CHANGELOG.md` 为准，版本号来源为
-  `src/platform/win32/rust/tauri/app/tauri.conf.json` 的 `version`。
+- 产品版本唯一来源是根 `release.json`。改版使用 `python scripts/release.py version set <版本>`，核对使用 `version check --notes`；两端版本与用户更新摘要一并维护。
+- `release-notes.json` 面向用户记录功能、体验和修复；关于页、CHANGELOG 与 Release 使用同一版本内容。

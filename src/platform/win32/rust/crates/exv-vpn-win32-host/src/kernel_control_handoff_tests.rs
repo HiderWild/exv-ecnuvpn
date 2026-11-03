@@ -11,11 +11,10 @@ impl tokio_stream::Stream for ObservedStatusStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let result = self.rx.poll_recv(cx);
-        if result.is_ready() {
-            if let Some(polled) = &self.polled {
+        if result.is_ready()
+            && let Some(polled) = &self.polled {
                 polled.notify_one();
             }
-        }
         result
     }
 }

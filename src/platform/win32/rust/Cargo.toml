@@ -16,6 +16,7 @@ exv-vpn-data-plane = { path = "../../../common/rust/crates/exv-vpn-data-plane" }
 exv-vpn-wire = { path = "../../../common/rust/crates/exv-vpn-wire" }
 exv-vpn-local-rpc = { path = "../../../common/rust/crates/exv-vpn-local-rpc" }
 exv-vpn-cstp = { path = "../../../common/rust/crates/exv-vpn-cstp" }
+exv-vpn-atrust = { path = "../../../common/rust/crates/exv-vpn-atrust" }
 exv-vpn-runtime = { path = "../../../common/rust/crates/exv-vpn-runtime" }
 exv-vpn-host = { path = "../../../common/rust/crates/exv-vpn-host" }
 exv-vpn-helper = { path = "../../../common/rust/crates/exv-vpn-helper" }

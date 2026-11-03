@@ -33,6 +33,11 @@ use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+use crate::aftermath::{
+    open_process_liveness, preflight_verifier, AftermathDriver, LeaseStreamGauge,
+};
+use crate::connect_gate::{ConnectEnvelope, ConnectGate};
+use crate::connection_trace::{TraceKind, TraceOnCoreExit, TraceReconnectPolicy};
 use crate::grpc_transport::NamedPipeConnectInfo;
 use crate::heartbeat::HeartbeatWatch;
 use crate::log_sink::{LogLevel, LogSink};
@@ -40,9 +45,7 @@ use crate::mutation_ingress::MutationIngress;
 use crate::owner_lease::{LeaseIssue, OwnerLeaseManager};
 use crate::stats::StatsPublisher;
 use crate::status::{StatusEvent, StatusPublisher};
-use crate::secret_payload::{
-    EngineCredentials, SecretPayloadError, SECRET_PAYLOAD_VERSION,
-};
+use crate::secret_payload::ConnectionCredentials;
 use crate::tunnel_runtime::{ApplyContext, FakeTunnelRuntime, TunnelRuntime};
 
 /// The capability lifetime for a freshly bound operation capability (monotonic ms).
@@ -74,6 +77,60 @@ fn windows_connection_mode_from_wire(
     }
 }
 
+/// T4：wire `on_core_exit` → trace 策略。**UNSPECIFIED/缺省（旧 core 不发 tag 6）
+/// 折算为 Teardown**——升级兼容语义：新 engine + 旧 core 保持遗留行为（core 亡即
+/// 拆），新 core 永远显式发送其配置值（默认 keep，D6）。未知判别值同样保守折算
+/// Teardown（proto3 保证实际只出现枚举定义值）。
+fn on_core_exit_from_wire(value: i32) -> TraceOnCoreExit {
+    match generated::OnCoreExitPolicy::try_from(value) {
+        Ok(generated::OnCoreExitPolicy::Keep) => TraceOnCoreExit::Keep,
+        _ => TraceOnCoreExit::Teardown,
+    }
+}
+
+/// T4：wire `reconnect_policy` → trace 镜像。缺省（旧 core 不发 tag 7）=
+/// `{enabled:false, on_oneshot_engine_crash:false, notify:true}`——T4 前 engine
+/// 从不重连的既有状态；新 core 必须显式设全三子字段（proto 头注契约）。
+fn reconnect_policy_from_wire(value: Option<&generated::ReconnectPolicyEnvelope>) -> TraceReconnectPolicy {
+    match value {
+        Some(envelope) => TraceReconnectPolicy {
+            enabled: envelope.enabled,
+            on_oneshot_engine_crash: envelope.on_oneshot_engine_crash,
+            notify: envelope.notify,
+        },
+        None => TraceReconnectPolicy {
+            enabled: false,
+            on_oneshot_engine_crash: false,
+            notify: true,
+        },
+    }
+}
+
+/// T4：凭据类型 → 隧道种类（与 `start_apply` 的协议判定同源：无凭据按 Cisco）。
+fn kind_from_credentials(credentials: &Option<ConnectionCredentials>) -> TraceKind {
+    match credentials {
+        Some(ConnectionCredentials::Atrust(_)) => TraceKind::Atrust,
+        _ => TraceKind::Cisco,
+    }
+}
+
+/// T8：keep 无头态 → wire `HeadlessFacts`（EXV_UNFREEZE tag 18，第十次窄解冻）。
+///
+/// 纯字段映射：`since_ms` 饱和换 i64（Unix 毫秒在可预见未来远不及 i64 上限）；
+/// `policy` 冻结字符串 "keep"（无头态只可能由 keep 策略进入，`Teardown` 防御映射
+/// "teardown"——观察字段，非授权材料）。
+fn headless_facts_wire(session: crate::aftermath::HeadlessSession) -> generated::HeadlessFacts {
+    generated::HeadlessFacts {
+        core_pid: session.core_pid,
+        since_ms: i64::try_from(session.since_ms).unwrap_or(i64::MAX),
+        policy: match session.policy {
+            TraceOnCoreExit::Keep => "keep",
+            TraceOnCoreExit::Teardown => "teardown",
+        }
+        .to_string(),
+    }
+}
+
 /// The engine's connection-handling mode (S3/D7). Decides whether the engine releases
 /// the connection-bound owner when the `MaintainOwnerLease` stream EOFs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +157,14 @@ const RETRY_ADVICE_DO_NOT_RETRY: i32 = 1;
 #[derive(Clone)]
 pub struct MonotonicClock {
     start: std::time::Instant,
+}
+
+impl Default for MonotonicClock {
+    /// 与 [`MonotonicClock::new`] 同义（锚定构造时刻）——`Instant` 的 derive
+    /// `Default` 会给出 epoch 零点，语义错误，故手动委托。
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MonotonicClock {
@@ -241,6 +306,20 @@ pub struct HelperControlService {    core: Arc<Mutex<HelperControlCore>>,
     /// `main.rs` 注入既有 scm_stop watch 的 Sender 克隆（`with_shutdown_signal`）；
     /// `None` = oneshot / 测试默认 → `Shutdown` 回 `NOT_APPLICABLE`（不接管生命周期）。
     shutdown_signal: Option<ShutdownSignal>,
+    /// 连接门（T4 连接时序接线）：受理即建痕 + 痕在即预检 + 装配回写。`None` =
+    /// 测试/旧构造器未接线（连接路径维持既有行为，无痕保护）；生产由
+    /// [`Self::with_real_tunnel`] 构建（engine 形态由该调用点显式传入）。
+    trace_gate: Option<Arc<ConnectGate>>,
+    /// 兜底善后驱动（T5）：core 死亡策略分叉（EOF+PID 复核）、崩溃环/R1 终态
+    /// 钩子、断开路径验证。`None` = 测试/旧构造器未接线（EOF/stop 维持既有行为）。
+    aftermath: Option<Arc<AftermathDriver>>,
+    /// R1 重连驱动（T6a）：材料驻留（D9）+ 掉线自愈状态机。强引用在此（运行时
+    /// 侧只持 Weak，见 `attach_reconnect`）。`None` = 测试/旧构造器未接线
+    ///（掉线维持既有行为：清 live + Paused，不自愈）。
+    reconnect: Option<Arc<crate::reconnect::ReconnectDriver>>,
+    /// service 形态按 peer PID 的在途 lease 流量规（T5 EOF 细则：EOF on one
+    /// connection ≠ core death——分叉只在同 PID 最后一根流结束时评估）。
+    lease_streams: Arc<LeaseStreamGauge>,
 }
 
 /// A 32-byte SHA-256 digest of `bytes`.
@@ -415,6 +494,9 @@ impl HelperControlService {
     /// startup args (`--dll`, `--adapter-name`, `--config-dir`, `--journal-dir`). The
     /// machine-dir log sink is wired by the caller.
     ///
+    /// T4：`engine_form` 是本进程实际形态（service / oneshot），随连接门写入 trace；
+    /// 由 `run_engine` 按 `EngineExitForm` 传入。
+    ///
     /// **系统代理账本启动回放钩子**（2026-09-05 账本计划 §4.5）：本构造器在服务组装
     /// （serving 之前）执行 `SystemProxyJournal::open_and_replay`——崩溃残留的步骤记录
     /// 在控制面可用前完成三态裁决与还原；oneshot 与 service 两形态共用（`run_engine`
@@ -429,6 +511,7 @@ impl HelperControlService {
         config_dir: PathBuf,
         core_user_sid: Option<String>,
         journal_dir: PathBuf,
+        engine_form: crate::connection_trace::TraceEngineMode,
     ) -> Self {
         // §4.5：open → recover 三态分派（Corrupt 隔离 / TornTail compact 修复）→
         // LIFO 回放。open 失败 = 禁用账本态（本会话无账本保护，继续启动）。
@@ -436,18 +519,63 @@ impl HelperControlService {
             &journal_dir,
             Arc::clone(&log),
         );
-        Self::with_tunnel_runtime(
-            log,
-            Arc::new(
-                crate::tunnel_runtime::RealTunnelRuntime::new_with_config_dir_and_sid_and_journal(
-                    wintun_dll,
-                    adapter_name,
-                    config_dir,
-                    core_user_sid,
-                    journal,
-                ),
-            ),
-        )
+        // T4 连接门：engine 形态由调用点（run_engine 按本进程实际形态）显式传入，
+        // 不从 `in_service_mode()` 之后的状态回读——门在服务组装期即需定型。
+        // store 打开失败由门自身降级（受理时 fail closed，见 connect_gate）。
+        let trace_gate = Arc::new(ConnectGate::open(
+            engine_form,
+            core_user_sid.clone(),
+            config_dir.clone(),
+            &log,
+        ));
+        // T5 验证器输入（预检受理路径同一事实源）：发起用户 SID + 校园命名空间。
+        // 在 core_user_sid 被 runtime 构造消费前取齐。
+        let gate_user_sid = core_user_sid;
+        let campus_namespaces = trace_gate.campus_namespaces_ref();
+        let runtime = Arc::new(
+            crate::tunnel_runtime::RealTunnelRuntime::new_with_config_dir_and_sid_and_journal(
+                wintun_dll,
+                adapter_name,
+                config_dir,
+                gate_user_sid.clone(),
+                journal,
+            )
+            .with_trace_gate(Arc::clone(&trace_gate)),
+        );
+        let mut service = Self::with_tunnel_runtime(log, Arc::clone(&runtime) as Arc<dyn TunnelRuntime>);
+        service.trace_gate = Some(Arc::clone(&trace_gate));
+        // T5 兜底善后驱动：生产接缝 = OpenProcess 存活性谓词 + 预检验证器
+        // （user_sid/校园命名空间取自门——与预检受理路径同一事实源）。
+        // T10 core 拉起器：仅 service 形态装配真实 WTS spawner（SYSTEM 服务持
+        // SE_TCB；oneshot 提权 spawn 会遗传管理员令牌违反「core 永不特权」，
+        // 计划 §2.5 拉起底质②后置——keep 分叉另按痕形态判别兜底）。
+        let relaunch_spawner = (engine_form == crate::connection_trace::TraceEngineMode::Service)
+            .then(crate::core_relaunch::wts_spawner);
+        let aftermath = Arc::new(AftermathDriver::new(
+            Some(Arc::clone(&trace_gate)),
+            runtime.clone(),
+            Arc::clone(&service.log),
+            Some(Arc::clone(&service.status)),
+            Some(Arc::clone(&service.stats)),
+            open_process_liveness(),
+            preflight_verifier(gate_user_sid, campus_namespaces),
+            relaunch_spawner,
+        ));
+        service.aftermath = Some(Arc::clone(&aftermath));
+        // T6a R1 重连驱动：材料驻留 + 掉线自愈（触发点 = 运行时 sweeper 的
+        // ClearedLive 分支，经 attach_reconnect 挂 Weak；终态无头分叉复用上面的
+        // 善后驱动）。
+        let reconnect = Arc::new(crate::reconnect::ReconnectDriver::new(
+            Some(trace_gate),
+            Arc::clone(&runtime) as Arc<dyn TunnelRuntime>,
+            Arc::clone(&service.log),
+            Arc::clone(&service.status),
+            Arc::clone(&service.stats),
+            Arc::clone(&aftermath),
+        ));
+        runtime.attach_reconnect(&reconnect);
+        service.reconnect = Some(reconnect);
+        service
     }
 
     /// Build the endpoint with an explicit log sink AND an explicit tunnel runtime seam.
@@ -544,6 +672,10 @@ impl HelperControlService {
                 psk_present: false,
             }),
             shutdown_signal: None,
+            trace_gate: None,
+            aftermath: None,
+            reconnect: None,
+            lease_streams: Arc::new(LeaseStreamGauge::new()),
         }
     }
 
@@ -621,6 +753,120 @@ impl HelperControlService {
     #[must_use]
     pub fn runtime_handle(&self) -> Arc<dyn TunnelRuntime> {
         Arc::clone(&self.runtime)
+    }
+
+    /// T5 兜底善后驱动句柄（main.rs 的 oneshot 随行退出收口用；`None` = 未接线
+    /// 构造——旧构造器/测试默认，退出路径维持既有行为）。
+    #[must_use]
+    pub fn aftermath_driver(&self) -> Option<Arc<AftermathDriver>> {
+        self.aftermath.clone()
+    }
+
+    /// T6a R1 重连驱动句柄（观测/后续阶段接线用；`None` = 未接线构造——
+    /// 旧构造器/测试默认，掉线维持既有行为）。
+    #[must_use]
+    pub fn reconnect_driver(&self) -> Option<Arc<crate::reconnect::ReconnectDriver>> {
+        self.reconnect.clone()
+    }
+
+    /// T4 连接门受理（计划 §2.1–§2.4/§三）：受理即建痕、痕在（含损坏）即预检，
+    /// 先于 admission 与任何系统变更。分路：
+    ///
+    /// - **在途组装**（`is_assembling`）：跳过——在途尝试持有痕迹，本次连接将由
+    ///   `start_apply` 拒为 duplicate，痕迹语义不变。
+    /// - **既有连接 + 无新凭据**（Adopt 路径）：跳过——既有痕迹继续描述该连接
+    ///   （采纳不换连接代次）。
+    /// - **既有连接 + 新凭据** / **Paused 保网卡态（D12）**：本 engine 自留状态，
+    ///   预检前提「无存活 engine 会话」不成立 → 删旧建新（不跑预检）。Paused 态的
+    ///   删除权依据 = 减负断开（D13）已完成的会话善后（痕迹删除权「断开路径已
+    ///   验证后删」的 T4 最小实现：懒删除，落在下一次受理点）。
+    /// - **其余（新 engine / 遗留孤儿）**：全量路径 `ensure_connect_trace`——create
+    ///   撞遗留即预检，未决发现阻断（稳定 reason id），干净则删旧建新。
+    ///
+    /// # Errors
+    ///
+    /// 门拒绝（预检阻断 / 载体不可用）→ `Status::failed_precondition`，消息形态
+    /// `preflight_blocked|<id>[,<id>…]|<摘要>` 或 `<载体 reason_id>|<摘要>`（core 侧
+    /// 既有 `稳定码|文案` 约定；UI 文案按 id 路由，后置阶段）。
+    async fn admit_through_gate(
+        &self,
+        extensions: &Extensions,
+        kind: TraceKind,
+        has_credentials: bool,
+        on_core_exit: TraceOnCoreExit,
+        reconnect: TraceReconnectPolicy,
+        ui_pid: u32,
+    ) -> Result<(), Status> {
+        let Some(gate) = self.trace_gate.as_ref() else {
+            return Ok(()); // 测试/旧构造器未接线：连接路径维持既有行为。
+        };
+        // core PID 取自**传输层已验证 peer**（与 bind_mutation 同一事实源），不经
+        // 任何客户端自报字段（proto 安全不变量）。
+        let core_pid = extensions
+            .get::<NamedPipeConnectInfo>()
+            .ok_or_else(|| Status::unauthenticated("transport peer not verified"))?
+            .0
+            .process_id;
+        // T10：受理期记录 core 会话事实（core 活着时 `ProcessIdToSessionId` 必可
+        // 查得——EOF 时 core 已死不可再查，这正是记录点选在受理期的原因）。
+        if let Some(driver) = self.aftermath.as_ref() {
+            driver.note_core_session(core_pid, ui_pid);
+        }
+        let envelope = ConnectEnvelope {
+            core_pid,
+            ui_pid,
+            on_core_exit,
+            reconnect,
+            kind,
+        };
+        // 分路（见方法文档）：自留状态走 replace，其余走全量预检路径。
+        let in_flight = self.runtime.is_assembling();
+        let live_adopt = self.runtime.is_connected() && !has_credentials;
+        if in_flight || live_adopt {
+            self.log.emit(
+                LogLevel::Debug,
+                "engine",
+                "connect.gate.skipped",
+                "连接门跳过（在途组装或既有连接采纳；痕迹语义不变）",
+                &[("in_flight", in_flight.to_string().as_str())],
+            );
+            return Ok(());
+        }
+        let self_retained = self.runtime.is_connected() || self.runtime.is_paused();
+        let outcome = if self_retained {
+            gate.replace_connect_trace(&envelope)
+        } else {
+            gate.ensure_connect_trace(&envelope, &self.log).await
+        };
+        // T10：非跳过路径（新受理/自留重建）放行即 core 回归在场——崩溃环账本
+        // 归零（环已断，新会话新起点；采纳跳过路径不清：采纳的 core 是拉起
+        // 记录内进程，其死亡仍按复死计）。
+        if outcome.is_ok()
+            && let Some(driver) = self.aftermath.as_ref()
+        {
+            driver.note_core_returned();
+        }
+        match outcome {
+            Ok(_) => Ok(()),
+            Err(rejection) => {
+                let joined = rejection.reason_ids.join(",");
+                // 外层稳定码：预检未决发现 → `preflight_blocked`；载体类失败 →
+                // `connect_gate_failed`（两类都携带逐项 reason id，UI 按内层 id 路由）。
+                let outer = if rejection
+                    .reason_ids
+                    .iter()
+                    .any(|id| id.starts_with("trace_"))
+                {
+                    "connect_gate_failed"
+                } else {
+                    "preflight_blocked"
+                };
+                Err(Status::failed_precondition(format!(
+                    "{outer}|{joined}|{}",
+                    rejection.summary
+                )))
+            }
+        }
     }
 
     /// The authenticated transport peer for this request, or `Err(Status)` fail-closed.
@@ -725,38 +971,17 @@ impl HelperControlService {
     /// zeroize the wire copy immediately (P3-b1). An absent/empty payload yields
     /// `Ok(None)` — no credentials provided is a valid caller choice.
     ///
-    /// The returned [`EngineCredentials`] is a zeroizing type: it is never persisted,
-    /// never logged, and `Drop` clears the plaintext. R1b: the credentials are consumed
-    /// directly by the tunnel runtime at apply time (parsed and moved into
-    /// [`ApplyContext`]); no pending-credentials slot is retained.
+    /// 返回的认证材料按协议区分，各自持有可零化的敏感字段，不持久化或记录。
+    /// 材料直接移入 [`ApplyContext`]，供运行时消费；不保留待取凭据槽位。
     ///
     /// # Errors
     /// Malformed or unsupported-version payload → `Err(Status)`, and the wire copy is
     /// still zeroized before returning (fail closed, no plaintext lingers).
     fn parse_secret_payload(
         payload_bytes: &mut Vec<u8>,
-    ) -> Result<Option<EngineCredentials>, Status> {
-        if payload_bytes.is_empty() {
-            return Ok(None);
-        }
-        let parsed = crate::secret_payload::parse_secret_payload(payload_bytes).map_err(|e| {
-            let msg = match e {
-                SecretPayloadError::UnsupportedVersion(v) => {
-                    format!("secret payload unsupported version {v} (expected {SECRET_PAYLOAD_VERSION})")
-                }
-                SecretPayloadError::Decode(d) => format!("secret payload decode failed: {d}"),
-            };
-            // Fail closed: no plaintext may linger even on a malformed payload.
-            payload_bytes.zeroize();
-            Status::invalid_argument(msg)
-        });
-        match parsed {
-            Ok(package) => {
-                payload_bytes.zeroize();
-                Ok(Some(EngineCredentials::from_package(package)))
-            }
-            Err(status) => Err(status),
-        }
+    ) -> Result<Option<ConnectionCredentials>, Status> {
+        crate::secret_payload::parse_connection_credentials(payload_bytes)
+            .map_err(Status::invalid_argument)
     }
 }
 
@@ -805,6 +1030,14 @@ impl HelperControl for HelperControlService {
         request: Request<Streaming<generated::HostLeaseMessage>>,
     ) -> Result<Response<Self::MaintainOwnerLeaseStream>, Status> {
         let (peer, connection) = self.transport_peer(request.extensions())?;
+        // T5：EOF 策略分叉按 peer PID 评估——PID 取自传输层已验证 peer（与
+        // bind_mutation 同一事实源，不经任何客户端自报字段）。
+        let peer_pid = request
+            .extensions()
+            .get::<NamedPipeConnectInfo>()
+            .ok_or_else(|| Status::unauthenticated("transport peer not verified"))?
+            .0
+            .process_id;
         let mut inbound = request.into_inner();
 
         let (tx, rx) = mpsc::channel::<Result<generated::HelperLeaseMessage, Status>>(16);
@@ -814,6 +1047,10 @@ impl HelperControl for HelperControlService {
         let log = self.log.clone();
         // S3/D7: service mode releases the connection-bound owner when this stream EOFs.
         let connection_mode = self.connection_mode;
+        // T5：在途 lease 流量规（打开即计；EOF 注销后归零才评估 core 死亡分叉）。
+        let lease_streams = Arc::clone(&self.lease_streams);
+        lease_streams.register(peer_pid);
+        let aftermath = self.aftermath.clone();
 
         tokio::spawn(async move {
             let mut lease_established = false;
@@ -880,17 +1117,17 @@ impl HelperControl for HelperControlService {
                         }
                         {
                             let mut core = core.lock().expect("helper core lock");
-                            if let Some(existing) = &core.owner {
-                                if existing.peer != peer {
-                                    log.emit(
-                                        LogLevel::Warn,
-                                        "auth",
-                                        "lease.handshake.refused",
-                                        "owner handshake refused (peer already owns)",
-                                        &[],
-                                    );
-                                    break;
-                                }
+                            if let Some(existing) = &core.owner
+                                && existing.peer != peer
+                            {
+                                log.emit(
+                                    LogLevel::Warn,
+                                    "auth",
+                                    "lease.handshake.refused",
+                                    "owner handshake refused (peer already owns)",
+                                    &[],
+                                );
+                                break;
                             }
                             owner_lease_id = Uuid::new_v4();
                             core.owner = Some(OwnerSession {
@@ -996,26 +1233,42 @@ impl HelperControl for HelperControlService {
             // version so a NEW core can handshake-take-over. Tunnel/admission persistent
             // state is RETAINED (D7: 仅隧道/admission 持久状态保留) — the service keeps
             // the applied tunnel / admission watermarks across core disconnects.
+            //
+            // T5（EOF 细则）：owner 释放**之后**再评估兜底善后分叉——同 peer PID 的
+            // 在途 lease 流归零 + core PID 复核确死时，按痕状态×策略收口（情形①④）：
+            // teardown 策略/connecting 态 → teardown+验证+删痕；keep 策略 → 无头续存
+            //（隧道不动，拉起归 T10、采纳归 T8）；core 存活（优雅断开/换代）→ 维持
+            // 既有"释放等新 owner"语义。EOF on one connection ≠ core death。
             if connection_mode == ConnectionMode::Service {
-                let mut core = core.lock().expect("helper core lock");
-                // Clone the binding out of the borrow before the mutable terminate call.
-                let release = core
-                    .owner
-                    .as_ref()
-                    .filter(|owner| owner.connection == connection)
-                    .map(|owner| owner.connection.clone());
-                if let Some(conn) = release {
-                    let _ = core.leases.terminate_connection(&conn);
-                    core.owner = None;
-                    core.ownership_version = core.ownership_version.saturating_add(1);
-                    log.emit(
-                        LogLevel::Info,
-                        "auth",
-                        "lease.owner.released-on-eof",
-                        "service owner released on connection EOF (new core may take over)",
-                        &[],
-                    );
+                // 释放 owner：短作用域持锁（善后分叉是秒级异步，不跨锁持有）。
+                {
+                    let mut core = core.lock().expect("helper core lock");
+                    // Clone the binding out of the borrow before the mutable terminate call.
+                    let release = core
+                        .owner
+                        .as_ref()
+                        .filter(|owner| owner.connection == connection)
+                        .map(|owner| owner.connection.clone());
+                    if let Some(conn) = release {
+                        let _ = core.leases.terminate_connection(&conn);
+                        core.owner = None;
+                        core.ownership_version = core.ownership_version.saturating_add(1);
+                        log.emit(
+                            LogLevel::Info,
+                            "auth",
+                            "lease.owner.released-on-eof",
+                            "service owner released on connection EOF (new core may take over)",
+                            &[],
+                        );
+                    }
                 }
+                let remaining = lease_streams.release(peer_pid);
+                if let Some(aftermath) = aftermath {
+                    aftermath.on_owner_stream_eof(peer_pid, remaining).await;
+                }
+            } else {
+                // oneshot：owner 跨流保持（既有语义）；量规注销防泄漏（计数对称）。
+                let _ = lease_streams.release(peer_pid);
             }
             drop(tx);
         });
@@ -1046,13 +1299,60 @@ impl HelperControl for HelperControlService {
                     context: None, obligation: None }),
             _ => generated::runtime_snapshot::State::Idle(generated::IdleState { last_cleanup: None }),
         };
+        // T8 采纳握手快照分量（EXV_UNFREEZE tag 17/18/19，第十次窄解冻）：
+        // 重启后的 core 以本快照判定「engine 有无活隧道/无头会话可采纳」。全部是
+        // 观测事实，不产生任何动作——采纳/投影归 core，拉起归 T10。
+        // * stats：注册表即时聚合读（lock-free 原子）；速率恒 0（速率归 core 按累计
+        //   增量归一化）、engine_sequence 0（非推送流样本，无推送序号）。
+        // * engine_reconnect：最近一次状态事件携带的 R1 遥测（无重连语义 → None）。
+        // * headless：keep 无头态在册事实（teardown/无会话 → None）。
+        // * relaunched_by_engine（T10 置真）：当前问话的 core 是否 engine 拉起——
+        //   transport 验证的对端 pid ∈ 拉起记录（pid/拉起时刻账本，T8 预留契约）。
+        let stats_sample = self.stats.registry().snapshot();
+        let engine_reconnect = latest
+            .as_ref()
+            .and_then(|event| event.reconnect_state)
+            .map(|state| generated::ReconnectState {
+                attempt: state.attempt,
+                next_retry_at_ms: state.next_retry_at_ms,
+                reason: state.reason.to_owned(),
+            });
+        let headless = self
+            .aftermath
+            .as_ref()
+            .and_then(|driver| driver.headless().current())
+            .map(headless_facts_wire);
+        let relaunched_by_engine = self
+            .aftermath
+            .as_ref()
+            .zip(
+                request
+                    .extensions()
+                    .get::<NamedPipeConnectInfo>()
+                    .map(|info| info.0.process_id),
+            )
+            .is_some_and(|(driver, peer_pid)| driver.headless().relaunched_pid_matches(peer_pid));
         let core = self.core.lock().expect("helper core lock");
         Ok(Response::new(generated::ObserveOwnedStateReply {
             // 来自真实运行时事件，不能用 Idle 占位掩盖当前连接/掉线状态。
             snapshot: Some(generated::RuntimeSnapshot {
                 state: Some(state),
                 operation_id: latest.map(|event| event.operation_id).unwrap_or_default(),
-                // stats-wire 方案 A：helper 的 Idle 占位快照无统计样本（core 负责填）。
+                // stats-wire 方案 A：统计样本随快照携带（T8 起引擎侧也填——采纳 core
+                // 用作初始样本；普通 core 会以自己的事件总线样本覆盖）。
+                stats: Some(generated::RuntimeStats {
+                    rx_bytes: stats_sample.rx_bytes,
+                    tx_bytes: stats_sample.tx_bytes,
+                    rx_rate_bps: 0,
+                    tx_rate_bps: 0,
+                    latency_ms: stats_sample.latency_ms,
+                    phase: stats_sample.phase as i32,
+                    engine_sequence: 0,
+                    sample_tick: 0,
+                }),
+                engine_reconnect,
+                headless,
+                relaunched_by_engine,
                 ..Default::default()
             }),
             authority_fence: Some(wire_fence(&core)),
@@ -1173,6 +1473,10 @@ impl HelperControl for HelperControlService {
             // and zeroized below. No plaintext stays in the request carrier.
             mut secret_payload,
             windows_connection_mode,
+            // T4 连接生命周期信封（EXV_UNFREEZE 2026-09-27；缺省语义见 proto 头注）。
+            on_core_exit,
+            reconnect_policy,
+            ui_pid,
         } = request.into_inner();
         let wire_key = lookup_key
             .as_ref()
@@ -1183,8 +1487,8 @@ impl HelperControl for HelperControlService {
             .ok_or_else(|| Status::invalid_argument("apply: missing tunnel plan"))?;
         // All core-guarded admission work runs in a scope block so the `MutexGuard`
         // is dropped structurally BEFORE the runtime's async-start (`start_apply` 受理即回，
-        // 不需要跨 await 持锁；`operation_id`/`ctx` 为 owned 值，可存活）。
-        let (operation_id, ctx) = {
+        // 不需要跨 await 持锁；`operation_id`/`ctx` 为 owned 值，可存活)。
+        let (operation_id, ctx, envelope_kind, envelope_has_credentials, retained_session) = {
             let mut core = self.core.lock().expect("helper core lock");
             let (_peer, key, digest) = self.bind_mutation(
                 &extensions,
@@ -1197,12 +1501,37 @@ impl HelperControl for HelperControlService {
             let plan = convert::tunnel_plan_from_wire(wire_plan)
                 .map_err(|e| Status::invalid_argument(format!("apply: {e}")))?;
 
+            // T6a（D9 材料驻留捕获）：重连开启且携带凭据时，在 wire 副本被解析
+            // 零化**之前**复制一份（此后明文只随 ctx 一次性消费 + 本驻留副本）。
+            // 门拒绝路径不 arm——副本随 Zeroizing 丢弃。
+            let reconnect_enabled = reconnect_policy_from_wire(reconnect_policy.as_ref()).enabled;
+            let retained = self
+                .reconnect
+                .as_ref()
+                .filter(|_| reconnect_enabled && !secret_payload.is_empty())
+                .map(|driver| (driver, secret_payload.clone(), plan.clone()));
+
             // P3-b1: parse the one-shot secret_payload into engine credentials and zeroize
             // the wire copy immediately. R1b: the credentials are consumed by the tunnel
             // runtime at apply time (never parked in a pending slot).
             let credentials = Self::parse_secret_payload(&mut secret_payload)?;
             let connection_mode =
                 windows_connection_mode_from_wire(windows_connection_mode)?;
+            // T4：连接门只消费凭据的**种类与有无**（kind / Adopt 分路），不占凭据本体
+            //（随 ctx 移交运行时）。
+            let envelope_kind = kind_from_credentials(&credentials);
+            let envelope_has_credentials = credentials.is_some();
+            let retained_session = retained.map(|(driver, bytes, plan)| {
+                (
+                    Arc::clone(driver),
+                    crate::reconnect::RetainedSession::new(
+                        envelope_kind,
+                        connection_mode,
+                        plan,
+                        crate::reconnect::RetainedMaterial::new(bytes),
+                    ),
+                )
+            });
 
             let subject = Self::owned_token_subject(&core, &request_digest);
             let effect_uuid = Uuid::new_v4();
@@ -1252,8 +1581,59 @@ impl HelperControl for HelperControlService {
                 stats: Arc::clone(&self.stats),
                 log: Arc::clone(&self.log),
             };
-            (operation_id, ctx)
+            (
+                operation_id,
+                ctx,
+                envelope_kind,
+                envelope_has_credentials,
+                retained_session,
+            )
         };
+
+        // T4 连接门（计划 §2.1–§2.4/§三）：受理即建痕 + 痕在即预检。位于 admission
+        // （引擎内部记账，非系统变更）之后、`start_apply`（登录/网卡/路由等一切系统
+        // 变更的开端）之前；分路（在途组装/采纳/自留状态）见 `admit_through_gate`。
+        if let Err(gate_error) = self
+            .admit_through_gate(
+                &extensions,
+                envelope_kind,
+                envelope_has_credentials,
+                on_core_exit_from_wire(on_core_exit),
+                reconnect_policy_from_wire(reconnect_policy.as_ref()),
+                ui_pid,
+            )
+            .await
+        {
+            // 已 admission 的操作以 Failed 终态收口（镜像 start_apply 受理拒绝路径：
+            // 终态观察者据此写回 terminal，不静默悬挂），再向调用方回结构化错误。
+            self.stats
+                .registry()
+                .set_phase(generated::StatsPhase::Failed);
+            self.status.publish(StatusEvent::failed(
+                operation_id.clone(),
+                generated::ConnectPhase::ObservingOwnedState,
+                wire_error(
+                    wire_key,
+                    generated::ErrorCode::ObservedConflict as i32,
+                    &format!("connect gate refused: {gate_error}"),
+                ),
+            ));
+            self.log.emit(
+                LogLevel::Warn,
+                "platform",
+                "mutation.apply.gate_refused",
+                "connect refused by preflight gate (diagnostic; state on StreamConnectStatus)",
+                &[("detail", gate_error.message())],
+            );
+            return Err(gate_error);
+        }
+        // T6a：门放行后武装 R1 自愈（材料驻留 D9；替换任何先前会话的材料——新
+        // 受理的连接取代旧驻留）。位于 `start_apply` 之前：受理成功即武装，
+        // 组装失败（连接未成）时驻留无害——触发点（sweeper ClearedLive）只在
+        // 已安装 Live 隧道死亡时出现。
+        if let Some((driver, session)) = retained_session {
+            driver.arm(session);
+        }
         // A1b: the real assembly is async-start — `start_apply` 受理即回，组装在后台
         // thread 内逐段执行，终态（Connected/Failed）由后台 thread 经 status 通道
         // 发布（handler 不等待、不记账——记账式假连接已退役）。The reply is the
@@ -1362,9 +1742,26 @@ impl HelperControl for HelperControlService {
         })
         .await
         .map_err(|e| Status::internal(format!("stop: disconnect join: {e}")))?;
-        let mut core = self.core.lock().expect("helper core lock");
-        core.applied_tunnel = None;
-        core.pending_apply.clear();
+        {
+            let mut core = self.core.lock().expect("helper core lock");
+            core.applied_tunnel = None;
+            core.pending_apply.clear();
+        }
+        // T6a：用户显式断开 → R1 材料驻留解除并零化（后续掉线信号不再自愈）。
+        if let Some(driver) = &self.reconnect {
+            driver.disarm("user_stop");
+        }
+        // T5 断开路径善后验证（core 删除权前提"善后已验证"）：disconnect 已完成
+        //（成败均如实进入验证——失败会体现为残留）；预检探针复验 + trace hint，
+        // 干净 → 痕 Aftermath→删 + verified（挂到下方 Idle 终态事件上 wire，core/UI
+        // 可清除本地会话状态）；残留 → 痕留 Aftermath + 未验证（下次连接预检阻断）。
+        // 顺序纪律：先拆后验（紧急断开不被预检阻塞）；验证秒级且在 stop 回复前完成，
+        // 使 verified 信号随本操作的 Idle 终态一次送达（不静默悬挂）。
+        let aftermath_verified = match &self.aftermath {
+            Some(aftermath) => aftermath.verify_disconnect_aftermath().await.verified,
+            // 未接线构造（测试/旧路径）：维持既有行为，不携带验证结论。
+            None => false,
+        };
         if let Err(e) = disconnect {
             // Disconnect failure: report it on the status channel as a typed failure, but
             // still return the stop receipt (the caller must not retry stop forever).
@@ -1380,6 +1777,7 @@ impl HelperControl for HelperControlService {
         // P5-a: the tunnel is torn down — the engine returns to idle.
         self.stats.registry().set_phase(generated::StatsPhase::Idle);
         let canonical_input_digest = digest32(&request_digest);
+        let mut core = self.core.lock().expect("helper core lock");
         let receipt = build_wire_receipt(&core, wire_key, canonical_input_digest, effect_uuid);
         let terminal = generated::OperationTerminal {
             result: Some(generated::operation_terminal::Result::Succeeded(receipt.clone())),
@@ -1390,7 +1788,11 @@ impl HelperControl for HelperControlService {
         // teardown/convergence (core-synthesized Idle + engine-first Idle) behind it.
         // 发布顺序锁会调用终态观察者；不能持 helper core 锁进入发布，避免锁顺序倒置。
         drop(core);
-        self.status.publish(StatusEvent::idle(wire_key.operation_id.clone()));
+        // T5：Idle 终态事件携带善后验证结论（EXV_UNFREEZE tag 7）。
+        self.status.publish(StatusEvent::idle_with_aftermath(
+            wire_key.operation_id.clone(),
+            aftermath_verified,
+        ));
         // R1: PURE DIAGNOSTIC — no state semantics ride on this log code; state
         // flows only on StreamConnectStatus (the Idle event published above).
         self.log.emit(

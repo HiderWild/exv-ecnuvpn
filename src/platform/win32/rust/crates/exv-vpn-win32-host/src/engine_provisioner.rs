@@ -63,30 +63,46 @@ pub struct EngineProvisioner {
     gate: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// [`EngineProvisioner::new`] 的依赖束（clippy 债务清偿 2026-09-27：9 个位置参数
+/// 收敛为结构体——provisioner 的依赖本就是一组共享句柄 + 三个接缝，按名传值）。
+pub struct EngineProvisionerDeps {
+    /// 共享 supervisor（与 `CoreRuntime` 共持——provision/respawn/停机三方互斥）。
+    pub supervisor: Arc<Mutex<EngineSupervisor>>,
+    /// 共享 engine 控制面槽（换点即服务/转发器/ticker 重指向）。
+    pub slot: EngineSlot,
+    /// 共享 composition（provision 成功后身份重建）。
+    pub composition: Arc<Mutex<HostComposition>>,
+    /// core 进程用户 SID（engine peer 组装与 client 连接）。
+    pub user_sid: String,
+    /// 共享日志聚合器。
+    pub logs: Arc<LogAggregator>,
+    /// 已验证 UI peer cell（serve 回填；provision 前 `None` = fail closed）。
+    pub ui_peer: Arc<std::sync::RwLock<Option<VerifiedPipePeer>>>,
+    /// 提权拉起工厂（生产 = `EngineSupervisor::spawn_product`；测试注入 fake）。
+    pub factory: Arc<dyn RespawnSupervisorFactory>,
+    /// engine 控制面连接器（生产 = gRPC Named Pipe；测试注入 fake）。
+    pub connector: Arc<dyn RespawnClientConnector>,
+    /// 拉起前 0 残留探测（respawn 同款硬断言输入）。
+    pub residue: Arc<dyn ResidueProbe>,
+}
+
+/// 连接产物：engine 控制面 + 存活 watch（与 `EngineSlot` 槽内元素同形态）。
+type EngineConnection = (Arc<Mutex<dyn KernelEngineControl>>, watch::Receiver<bool>);
+
 impl EngineProvisioner {
     /// 生产构造（真实 factory/connector/residue；`ui_peer` cell 由 serve 回填）。
     #[must_use]
-    pub fn new(
-        supervisor: Arc<Mutex<EngineSupervisor>>,
-        slot: EngineSlot,
-        composition: Arc<Mutex<HostComposition>>,
-        user_sid: String,
-        logs: Arc<LogAggregator>,
-        ui_peer: Arc<std::sync::RwLock<Option<VerifiedPipePeer>>>,
-        factory: Arc<dyn RespawnSupervisorFactory>,
-        connector: Arc<dyn RespawnClientConnector>,
-        residue: Arc<dyn ResidueProbe>,
-    ) -> Self {
+    pub fn new(deps: EngineProvisionerDeps) -> Self {
         Self {
-            supervisor,
-            slot,
-            composition,
-            user_sid,
-            logs,
-            ui_peer,
-            factory,
-            connector,
-            residue,
+            supervisor: deps.supervisor,
+            slot: deps.slot,
+            composition: deps.composition,
+            user_sid: deps.user_sid,
+            logs: deps.logs,
+            ui_peer: deps.ui_peer,
+            factory: deps.factory,
+            connector: deps.connector,
+            residue: deps.residue,
             gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -115,12 +131,21 @@ impl EngineProvisioner {
         if self.slot_engine_alive().await {
             return Ok(EnsureOutcome::Reused);
         }
-        self.provision().await.map(|()| EnsureOutcome::Provisioned)
+        self.provision().await
     }
 
     /// 退役 oneshot engine（服务 install 成功后的存在性互斥边界）：
     /// 终止 supervisor 持有的 oneshot 子进程（业务停机已由 transition stop 完成，
     /// 此处只收进程）+ 槽换回 detached 占位。幂等。
+    ///
+    /// **retire→install 序与 D12 管道名的过渡属性（T11）**：retire 先杀本 core 持有的
+    /// oneshot（无论其持旧名还是新名——杀进程按 supervisor 句柄，与管道名无关），随后
+    /// 服务绑定新名（安装用户 sid 段常量名）。**跨版本升级**（旧版本 engine 在跑）时
+    /// 旧持有者持旧名（per-PID 名/裸常量服务名），与新名不同——首实例互不冲突，升级
+    /// 窗口零互斥竞态；同名冲突只剩"同版本残留 engine"一种，由 engine 建管侧的
+    /// bootstrap 有界重试 + 诚实失败收口（`grpc_transport::
+    /// create_first_instance_with_bootstrap_retry`）。本函数不杀非本 core 持有的进程
+    ///（孤儿 oneshot 由其自身的 core 句柄/心跳超时退场）。
     pub async fn retire_oneshot_engine(&self) {
         {
             let mut supervisor = self.supervisor.lock().await;
@@ -149,13 +174,27 @@ impl EngineProvisioner {
     }
 
     /// 拉起全链（见模块文档步骤 3-8）。调用方已持串行门且确认槽内无存活 engine。
-    async fn provision(&self) -> Result<(), Status> {
+    async fn provision(&self) -> Result<EnsureOutcome, Status> {
         let Some(ui_peer) = self.ui_peer.read().unwrap().clone() else {
             return Err(Status::failed_precondition(
                 "engine_provision_failed|ui peer not established; cannot provision engine",
             ));
         };
         let mut supervisor = self.supervisor.lock().await;
+        // T6b（R2 oneshot 门控开启）并发守卫：liveness respawn 路径与本 provisioner 不
+        // 共享串行门、仅共享 supervisor 互斥——等待本锁期间对方可能已完成 respawn 并把
+        // 新 engine 换入槽。锁内复核槽内存活即让位（复用，零 UAC），不得回收/覆盖他人
+        // 刚拉起的新 engine（verify_exit 会误杀新进程）。
+        if self.slot_engine_alive().await {
+            let _ = self.logs.append_core(
+                "info",
+                "kernel",
+                "kernel.engine.provision_yielded",
+                "another path already swapped in a live engine while provision waited on the supervisor lock; reusing it",
+                &BTreeMap::new(),
+            );
+            return Ok(EnsureOutcome::Reused);
+        }
         // 回收残留旧 child（此前 engine 死亡未被 respawn 路径回收）。
         if supervisor.pid().is_some() {
             supervisor.verify_exit(RETIRE_OLD_EXIT_WAIT_MS);
@@ -251,7 +290,7 @@ impl EngineProvisioner {
             &format!("oneshot engine provisioned on demand (pid={new_pid})"),
             &BTreeMap::new(),
         );
-        Ok(())
+        Ok(EnsureOutcome::Provisioned)
     }
 
     /// 有界就绪等待（拨号+认证+keepalive 确认；上界 [`ONESHOT_READY_TIMEOUT`]）。
@@ -259,13 +298,11 @@ impl EngineProvisioner {
     async fn connect_with_ready_wait(
         &self,
         pid: u32,
-    ) -> Result<(Arc<Mutex<dyn KernelEngineControl>>, watch::Receiver<bool>), String> {
+    ) -> Result<EngineConnection, String> {
         let start = Instant::now();
         loop {
-            let outcome: Result<
-                (Arc<Mutex<dyn KernelEngineControl>>, watch::Receiver<bool>),
-                String,
-            > = match self.connector.connect(pid, &self.user_sid).await {
+            let outcome: Result<EngineConnection, String> =
+                match self.connector.connect(pid, &self.user_sid).await {
                 Ok((engine, liveness)) => {
                     let confirmed = {
                         let mut guard = engine.lock().await;

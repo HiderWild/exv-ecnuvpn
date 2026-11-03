@@ -41,6 +41,8 @@ pub mod composition;
 pub mod control_client;
 pub mod crash_recovery;
 pub mod credential;
+pub mod atrust_browser;
+pub mod atrust_session_cache;
 pub mod engine_lifecycle;
 pub mod engine_provisioner;
 pub mod grpc_control;

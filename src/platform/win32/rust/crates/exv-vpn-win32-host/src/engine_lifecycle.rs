@@ -10,7 +10,7 @@
 //!   （`Arc<Mutex<dyn KernelEngineControl>>`，与 `KernelControlService` 共享）与掉线
 //!   liveness 接收端（`watch::Receiver<bool>`，`EngineControlGrpcClient` 的 pub 字段）。
 //! - **stop（D1 解耦，判据 8）**：[`EngineSupervisor::stop`] **发退出包**（`StopTunnel`
-//!   业务停机，若已连接）后**即返**——不再 wait_exit 等 engine 自退（engine 回 Idle
+//!   业务停机，若已连接）后**即返**——不再 `wait_exit` 等 engine 自退（engine 回 Idle
 //!   常驻，由退出包 / core 进程句柄 / 心跳（P2）三重保证随 core 退出）。UI 只等 core
 //!   退、不等 engine 退（无递归等待，UI 关闭即时响应）。有界等待/强制终止降为崩溃
 //!   恢复/验证路径（[`EngineSupervisor::verify_exit`]，P3 respawn 前回收旧 engine 用）。
@@ -36,7 +36,7 @@ use crate::process_lifecycle::{
 
 /// 共享 engine 控制面槽（P3 崩溃自愈 / 2026-09-08 按需拉起的换点）。
 ///
-/// 服务（`KernelControlService`）、状态/统计/日志转发器与 KeepAlive tick 任务共享同一
+/// 服务（`KernelControlService`）、状态/统计/日志转发器与 `KeepAlive` tick 任务共享同一
 /// `EngineSlot`；engine respawn/provision 后经 [`EngineSlot::swap`] 换入新 client——
 /// 转发器在下一轮重连即从 [`EngineSlot::current`] 拿到新 engine，无需 abort/重拉转发器。
 ///
@@ -81,6 +81,7 @@ impl EngineSlot {
     }
 
     /// 订阅 engine 控制面换点通知（服务/respawn/provision 路由切换状态流时使用）。
+    #[must_use]
     pub fn subscribe_swaps(&self) -> watch::Receiver<u64> {
         self.swaps.subscribe()
     }
@@ -202,7 +203,9 @@ impl EngineSupervisor {
         if !exe.exists() {
             return Err(EngineSpawnError::BinNotFound);
         }
-        let args = engine_args_for_spawn();
+        // D12：管道名/authority 名按 core 用户 SID 派生；SID 不可解析/非法 → spawn
+        // 前置失败（不拉 UAC）。
+        let args = engine_args_for_spawn().map_err(EngineSpawnError::SpawnFailed)?;
         let (pid, handle) = spawner
             .spawn(&exe, &args)
             .map_err(EngineSpawnError::SpawnFailed)?;
@@ -260,7 +263,7 @@ impl EngineSupervisor {
     }
 
     /// 有序停止 engine（D1 解耦 / 判据 8）：发**退出包**（`StopTunnel` 业务停机，若已
-    /// 连接）后**即返**——不再 wait_exit 等 engine 自退（engine 回 Idle 常驻，由退出包
+    /// 连接）后**即返**——不再 `wait_exit` 等 engine 自退（engine 回 Idle 常驻，由退出包
     /// / core 进程句柄 / 心跳（P2）三重保证随 core 退出）。
     ///
     /// 关闭级联（UX）：UI 关 → 通知 core → 本方法发退出包 → `composition.exit()` →

@@ -36,7 +36,7 @@ impl DnsCapture {
         let mut storage = DNS_INTERFACE_SETTINGS { Version: 1, ..Default::default() };
         // SAFETY: storage 是调用方所有、Version=1 的 v1 结构，由 Get 原地填充；内嵌
         // 字符串由系统分配，用毕必须 FreeInterfaceDnsSettings 释放（下方解析后释放）。
-        let rc = unsafe { GetInterfaceDnsSettings(*interface_guid, &mut storage) }.0;
+        let rc = unsafe { GetInterfaceDnsSettings(*interface_guid, &raw mut storage) }.0;
         if rc != 0 {
             return Err(NativeError::from_win32(
                 rc,
@@ -46,7 +46,7 @@ impl DnsCapture {
         let nameservers = pwstr_list(storage.NameServer);
         let search_suffixes = pwstr_list(storage.SearchList);
         // SAFETY: Get 成功，storage 持有系统分配的字符串；必须恰好释放一次。
-        unsafe { FreeInterfaceDnsSettings(&mut storage) };
+        unsafe { FreeInterfaceDnsSettings(&raw mut storage) };
         Ok(DnsSettings::new(nameservers, search_suffixes))
     }
 }
@@ -161,7 +161,7 @@ fn set_dns(interface_guid: &GUID, settings: &DnsSettings) -> Result<(), NativeEr
     let (v1_settings, keep_v1) = dns_settings_v1(&nameserver, &search);
     // SAFETY: v1_settings 是合法 v1 结构，PWSTR 指向 keep_v1 的 HSTRING 缓冲区
     // （调用期间存活）。
-    let rc_v1 = unsafe { SetInterfaceDnsSettings(*interface_guid, &v1_settings).0 };
+    let rc_v1 = unsafe { SetInterfaceDnsSettings(*interface_guid, &raw const v1_settings).0 };
     drop(keep_v1);
     if rc_v1 == 0 {
         return Ok(());
@@ -200,8 +200,8 @@ fn dns_settings_v1(nameserver: &str, search: &str) -> (DNS_INTERFACE_SETTINGS, V
     settings.Flags = flags;
     let ns = HSTRING::from(nameserver);
     let sl = HSTRING::from(search);
-    settings.NameServer = PWSTR::from_raw(ns.as_ptr() as *mut u16);
-    settings.SearchList = PWSTR::from_raw(sl.as_ptr() as *mut u16);
+    settings.NameServer = PWSTR::from_raw(ns.as_ptr().cast_mut());
+    settings.SearchList = PWSTR::from_raw(sl.as_ptr().cast_mut());
     (settings, vec![ns, sl])
 }
 

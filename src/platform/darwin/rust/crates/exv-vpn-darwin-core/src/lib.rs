@@ -30,7 +30,7 @@ pub(crate) mod service_lifecycle;
 pub(crate) mod stats;
 pub(crate) mod ui_runner;
 
-pub use config::{DarwinConfigError, DarwinConfigItem, DarwinUiConfig};
+pub use config::{DarwinConfigError, DarwinConfigItem, DarwinUiConfig, Protocol};
 pub use credential::{
     SECRET_PAYLOAD_VERSION, SavedConnectEnvelopeError, UiCredentialPackage,
     UiCredentialPayloadError, build_connect_envelope, build_saved_connect_envelope,

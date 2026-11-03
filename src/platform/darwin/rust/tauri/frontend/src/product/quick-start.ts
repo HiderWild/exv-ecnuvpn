@@ -23,6 +23,7 @@ const DEFAULT_QUICK_START_CORE_DRAFT: Record<CoreConfigKey, string> = {
   ].join(","),
   user_agent: "AnyConnect Win_x86_64 4.10.05095",
   mtu: "1290",
+  protocol: "cisco",
   auto_reconnect: "false",
   auto_reconnect_max_attempts: "0",
   auto_reconnect_backoff: "false",

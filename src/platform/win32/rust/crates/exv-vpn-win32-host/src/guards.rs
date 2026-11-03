@@ -13,7 +13,7 @@ pub enum RouteDecision {
     Oneshot,
 }
 
-/// 连接守卫：服务生命周期状态 → 连接路由（纯函数，穷尽；`Other(u32)` 归 PromptStart，
+/// 连接守卫：服务生命周期状态 → 连接路由（纯函数，穷尽；`Other(u32)` 归 `PromptStart`，
 /// 与「已装非运行」同语义）。
 #[must_use]
 pub fn decide_route(state: ServiceState) -> RouteDecision {
@@ -116,7 +116,6 @@ pub enum BlockReason {
 
 /// 启动守卫：只有「已安装且已停止/未知」才需要提交 start（对齐 `ensure_service_ready`
 /// 的 `needs_start`——不重复提交 Running/StartPending/StopPending/Paused）。
-#[must_use]
 pub fn can_start(service: ServiceState) -> Result<(), BlockReason> {
     match service {
         ServiceState::Stopped | ServiceState::NotInstalled | ServiceState::Other(_) => Ok(()),
@@ -130,7 +129,6 @@ pub fn can_start(service: ServiceState) -> Result<(), BlockReason> {
 
 /// 卸载守卫（跨维度）：服务已安装 + 隧道空闲。运行中/过渡态交由
 /// `stop_engine_for_transition` 先收敛（本守卫不拒绝——卸载语义是「先停引擎、再删服务」）。
-#[must_use]
 pub fn can_uninstall(service: ServiceState, tunnel: TunnelCoarse) -> Result<(), BlockReason> {
     if !service.is_installed() {
         return Err(BlockReason::ServiceNotInstalled);

@@ -6,6 +6,7 @@
 #include "windows_setup_rust/process_control.hpp"
 #include "windows_setup_rust/registry_install.hpp"
 #include "windows_setup_rust/service_control.hpp"
+#include "windows_setup_rust/webview2_runtime.hpp"
 #include "windows_setup_rust/shortcuts.hpp"
 #include "windows_setup_rust/uninstaller_copy.hpp"
 
@@ -247,6 +248,11 @@ InstallResult RunInstall(const InstallRequest &request, ProgressModel *progress)
 
   if (request.install_dir.empty()) {
     result.error = L"empty install dir";
+    return result;
+  }
+  if (!IsWebView2EvergreenRuntimeInstalled()) {
+    result.error = kWebView2MissingRuntimeMessage;
+    status(result.error.c_str(), 0.0);
     return result;
   }
 

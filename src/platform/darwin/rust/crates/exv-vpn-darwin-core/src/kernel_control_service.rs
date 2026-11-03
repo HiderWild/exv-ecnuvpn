@@ -22,7 +22,8 @@ use exv_vpn_wire::generated::{
     InteractionResponse, KernelOperationReply, LogsClearReply, LogsClearRequest, LogsListReply,
     LogsListRequest, OperationReply, ReconcileRequest, RuntimeEvent, RuntimeEventKind,
     RuntimeSnapshot, ServiceControlReply, ServiceControlRequest, SnapshotRequest, StopRequest,
-    StoppingState, WatchEventsRequest, kernel_control_server::KernelControl, runtime_snapshot,
+    StoppingState, WatchEventsRequest, WatchStatsRequest, kernel_control_server::KernelControl,
+    runtime_snapshot,
 };
 use tokio::sync::{oneshot, watch};
 use tokio_stream::StreamExt;
@@ -33,7 +34,7 @@ mod sleep_recovery;
 use crate::network_diagnostics::{self, Context as DiagnosticContext, NetworkMonitor};
 
 use crate::{
-    DarwinConfigError, DarwinConfigItem, DarwinUiConfig, EngineLifecycleError,
+    DarwinConfigError, DarwinConfigItem, DarwinUiConfig, EngineLifecycleError, Protocol,
     SECRET_PAYLOAD_VERSION, SavedConnectEnvelopeError, UiCredentialPackage, build_connect_envelope,
     build_saved_connect_envelope, config_hygiene,
     engine_lifecycle_real::{EngineControlSession, launch_fixed_engine_session},
@@ -63,6 +64,18 @@ const CONNECTION_ENGINE_ELEVATION_CODE: &str = "DARWIN_CORE_ENGINE_ELEVATION_FAI
 /// 不向 UI 泄露底层 IO 文本。
 const LOGS_CLEAR_IO_FAILED_CODE: &str = "DARWIN_LOGS_CLEAR_IO_FAILED";
 const CONNECTION_CREDENTIALS_MISSING_CODE: &str = "DARWIN_CORE_CONNECT_CREDENTIALS_MISSING";
+/// T02：所选协议在本版本不可用的稳定前缀（与 win32 同款词汇）。壳层 `map_status`
+/// 据此把它映射为 `protocol_unavailable`，避免落入通用 internal 文案后把「为什么
+/// 连不上」的具体原因丢掉（同 `service_not_running|`/`compatibility_mode_unavailable|`
+/// 先例）。
+const PROTOCOL_UNAVAILABLE_PREFIX: &str = "protocol_unavailable|";
+/// T02：aTrust 后端尚未接入时的拒绝原因（`failed_precondition`）。
+///
+/// 与 win32 `ensure_selected_protocol_is_serviceable` 同语义、同 code、同文案：aTrust
+/// 后端尚未接线时唯一正确的行为是**明确拒绝**，而不是静默按 Cisco（CSTP）去连 aTrust
+/// 服务器。原因点名协议与可行动的出路，前端连接失败面直接显示。
+const ATRUST_NOT_SERVICEABLE_REASON: &str =
+    "当前版本尚未接入 aTrust 后端；请在设置中改用 Cisco，或更新到支持 aTrust 的版本。";
 /// W1-C（P7）：UI 一次性凭据载荷无法解析、版本非法或字段为空时的 typed 拒绝码
 /// （`invalid_argument`）——这是编程/契约错误，不触发前端凭据弹窗重试。
 const CONNECTION_CREDENTIALS_INVALID_CODE: &str = "DARWIN_CORE_CONNECT_CREDENTIALS_INVALID";
@@ -139,6 +152,11 @@ impl SessionShutdown {
 /// `WatchEvents` server-streaming 响应体（win32 同款 boxed stream；事件源是共享
 /// [`EventBus`] 的订阅流——多订阅者 fan-out、resume 重放，见 [`EventBus::subscribe`]）。
 type WatchEventsStream = Pin<Box<dyn Stream<Item = Result<RuntimeEvent, Status>> + Send>>;
+
+/// `WatchStats` server-streaming 响应体（T14 拆流，win32 同款：统计样本独立流，
+/// 事件源是共享 [`EventBus`] 的统计 lane——`subscribe_stats`，见
+/// [`EventBus::subscribe_stats`]）。
+type WatchStatsStream = Pin<Box<dyn Stream<Item = Result<wire::RuntimeStats, Status>> + Send>>;
 
 /// 10b 的认证 UI-facing service。
 #[derive(Clone)]
@@ -330,6 +348,9 @@ fn failed_clean_snapshot(
     last_error: exv_vpn_wire::generated::VpnError,
 ) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        engine_reconnect: None,
+        headless: None,
+        relaunched_by_engine: false,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -434,6 +455,9 @@ fn reconnect_status_from_state(
         max_attempts,
         current_attempt: attempts,
         active,
+        // T6b（win32 首发第九次窄解冻）：R2 恢复事件 reason id 仅由 win32 core 置位；
+        // darwin R2 后置（计划 §2.6 darwin 解耦后置），恒空 = 无 R2 语义。
+        reason: String::new(),
     }
 }
 
@@ -1201,6 +1225,11 @@ impl LiveConnectionProjection {
                     secret_payload,
                     windows_connection_mode:
                         exv_vpn_wire::generated::WindowsConnectionMode::Standard as i32,
+                    // T4 连接生命周期信封（EXV_UNFREEZE 2026-09-27）：测试/过渡构造用
+                    // proto3 缺省值 = 信封缺省语义（engine 读作 legacy teardown / 不重连 / ui 未知）。
+                    on_core_exit: exv_vpn_wire::generated::OnCoreExitPolicy::Unspecified as i32,
+                    reconnect_policy: None,
+                    ui_pid: 0,
                 })
                 .await
                 .map_err(|error| engine_session_status(&error))?
@@ -1266,12 +1295,12 @@ impl LiveConnectionProjection {
     }
 
     /// 消费 Engine 统计流：归一化样本并按门控发布（W-MVP-13；W3-1/P1 S2 对齐 win32
-    /// `publish_stats` 语义）。样本经 [`EventBus::publish_stats`] 进总线——当前快照为
-    /// Connected 时核心铸新 tick 并把携带样本的 `Snapshot` 重发给 `WatchEvents`
-    /// 订阅者（事件 kind 由 Transition 对齐为 win32 的 Snapshot；前端两态都渲染快照
-    /// 内容）；铸造后的样本写回缓存（B-09①）：`GetSnapshot` live 回放与已发布统计
-    /// 一致。operation 终结（失败/Stop）后丢弃流，Engine 采样 task 随接收端 drop
-    /// 自行退出，不留跨 operation 的统计发布者。
+    /// `publish_stats` 语义）。样本经 [`EventBus::publish_stats`] 进总线（T14 拆流：
+    /// 铸造同轴 tick、写缓存、广播统计 lane——**不再**向 `WatchEvents` 重发快照；
+    /// 统计的 wire 交付走独立 `WatchStats` 流，挂死的统计消费者只降级该流）；铸造后
+    /// 的样本写回缓存（B-09①）：`GetSnapshot` live 回放与已发布统计一致。operation
+    /// 终结（失败/Stop）后丢弃流，Engine 采样 task 随接收端 drop 自行退出，不留跨
+    /// operation 的统计发布者。
     fn spawn_stats_projection(
         &self,
         mut engine_stats_stream: EngineUpdateStream<exv_vpn_wire::generated::StatsEvent>,
@@ -1284,9 +1313,9 @@ impl LiveConnectionProjection {
                 let Ok(Some(sample)) = engine_stats_stream.message().await else {
                     break;
                 };
-                // 门控（Connected 且未终结）经 LiveStatsState 判定；`publish_stats`
-                // 侧另有总线级 Connected 守卫（当前快照非 Connected 时不重发、不
-                // 铸 tick），两层一致时才产生 UI 事件。
+                // 门控（Connected 且未终结）经 LiveStatsState 判定；T14 拆流后
+                // `publish_stats` 无总线级 Connected 守卫（恒铸同轴 tick、只进统计
+                // lane），非 Connected 样本是否发布由本层门控决定。
                 let normalized = {
                     let mut state = lock_recover(&stats_state);
                     state.observe(&sample, &mut traffic, 0)
@@ -1597,6 +1626,9 @@ impl LiveConnectionProjection {
                     continue;
                 }
                 publish(RuntimeSnapshot {
+                    engine_reconnect: None,
+                    headless: None,
+                    relaunched_by_engine: false,
                     system_proxy: None,
                     reconnect: None,
                     self_heal: None,
@@ -1924,12 +1956,22 @@ impl LiveConnectionProjection {
     /// 其余字段（`server`/`routes`/`mtu`/`user_agent`）组装 envelope；UI 凭据不存在 →
     /// 维持 `build_saved_connect_envelope` 磁盘回退。修复连接弹窗死循环：此前 payload
     /// 被直接 zeroize 丢弃、恒走磁盘回退。
+    ///
+    /// T02：装配 envelope 之前先判定所选协议能否被本版本服务（win32
+    /// `execute_connect_tracked` 同款顺序与语义）——aTrust 必须在此显式拒绝，
+    /// 既不落盘本次 UI 凭据、也不读取已保存密文。
+    ///
+    /// # Errors
+    ///
+    /// 所选协议为 aTrust（后端尚未接入）→ `failed_precondition`；凭据落盘失败 /
+    /// envelope 组装失败 → 既有 UI 凭据映射的 typed 拒绝。
     fn connect_payload_and_plan(
         &self,
         ui_credentials: Option<UiCredentialPackage>,
         persist_credentials: bool,
     ) -> Result<(Vec<u8>, exv_vpn_wire::generated::TunnelPlan), Status> {
         let mut config = lock_recover(&self.config);
+        ensure_selected_protocol_is_serviceable(config.protocol())?;
         let payload = match ui_credentials {
             Some(mut credentials) => {
                 if persist_credentials {
@@ -2346,6 +2388,26 @@ fn take_ui_credentials(
     Ok(Some(credentials))
 }
 
+/// T02：连接入口的协议门禁（win32 `ensure_selected_protocol_is_serviceable` 同语义，
+/// 差异仅在 darwin 没有 `windows_connection_mode` 这类会话级覆盖参数）。
+///
+/// 顺序有意如此：用户选 aTrust 时最可行动的原因是「后端未接入本版本」，而不是
+/// 「你保存的密码对不上」。判定只读内存配置的 `protocol`，既不装载磁盘凭据、也不
+/// 组装 envelope、不写入任何密码——拒绝发生在**任何凭据被使用之前**。
+///
+/// # Errors
+///
+/// 所选协议为 aTrust（后端尚未接线）→ `failed_precondition` + 点名 aTrust 的中文
+/// 消息；Cisco → `Ok(())`。
+fn ensure_selected_protocol_is_serviceable(protocol: Protocol) -> Result<(), Status> {
+    match protocol {
+        Protocol::Cisco => Ok(()),
+        Protocol::Atrust => Err(Status::failed_precondition(format!(
+            "{PROTOCOL_UNAVAILABLE_PREFIX}{ATRUST_NOT_SERVICEABLE_REASON}"
+        ))),
+    }
+}
+
 /// `persist=true` 是 Tauri→Core 请求元数据（win32 `:3433-3439` 逐字对应），刻意不进入
 /// engine envelope。只有精确 `"true"` 才允许持久化；缺失、格式不符或旧客户端全部保守
 /// 视为本次使用。
@@ -2567,6 +2629,7 @@ impl ConnectionProjection {
 #[tonic::async_trait]
 impl KernelControl for DarwinKernelControlService {
     type WatchEventsStream = WatchEventsStream;
+    type WatchStatsStream = WatchStatsStream;
 
     async fn connect(
         &self,
@@ -2688,6 +2751,23 @@ impl KernelControl for DarwinKernelControlService {
             .events
             .subscribe(resume_tick)
             .map(Ok::<RuntimeEvent, Status>);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    /// `WatchStats` 真实订阅（T14 拆流，对齐 win32 形状）：一行统计 lane 订阅。
+    /// resume 语义见 [`EventBus::subscribe_stats`]——0 = 重放当前缓存样本；随后转发
+    /// `sample_tick` 递增的现场样本（`publish_stats` 铸造，与事件 tick 同轴）。拆流
+    /// 后统计样本不再随 `WatchEvents` 重发——挂死的统计消费者只降级本流（h2 按流
+    /// 流控），事件流与一元 RPC 照常。
+    async fn watch_stats(
+        &self,
+        request: Request<WatchStatsRequest>,
+    ) -> Result<Response<Self::WatchStatsStream>, Status> {
+        let resume_tick = request.into_inner().resume_tick;
+        let stream = self
+            .events
+            .subscribe_stats(resume_tick)
+            .map(Ok::<wire::RuntimeStats, Status>);
         Ok(Response::new(Box::pin(stream)))
     }
 
@@ -2964,6 +3044,9 @@ fn connected_snapshot(
     session_established_at_ms: i64,
 ) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        engine_reconnect: None,
+        headless: None,
+        relaunched_by_engine: false,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -2988,6 +3071,9 @@ fn pending_connect_snapshot(request: &ConnectRequest, operation_id: Vec<u8>) -> 
         .and_then(|intent| intent.lookup_key.as_ref())
         .map_or_else(Vec::new, |key| key.runtime_epoch.clone());
     RuntimeSnapshot {
+        engine_reconnect: None,
+        headless: None,
+        relaunched_by_engine: false,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -3010,6 +3096,9 @@ fn pending_connect_snapshot(request: &ConnectRequest, operation_id: Vec<u8>) -> 
 
 fn pending_stop_snapshot(request: &StopRequest, operation_id: Vec<u8>) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        engine_reconnect: None,
+        headless: None,
+        relaunched_by_engine: false,
         system_proxy: None,
         reconnect: None,
         self_heal: None,
@@ -3030,6 +3119,9 @@ fn pending_stop_snapshot(request: &StopRequest, operation_id: Vec<u8>) -> Runtim
 #[must_use]
 pub(crate) fn idle_snapshot() -> RuntimeSnapshot {
     RuntimeSnapshot {
+        engine_reconnect: None,
+        headless: None,
+        relaunched_by_engine: false,
         system_proxy: None,
         reconnect: None,
         self_heal: None,

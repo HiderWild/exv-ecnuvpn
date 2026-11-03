@@ -100,7 +100,7 @@ pub fn assert_no_residue(report: &ResidueReport) -> Result<(), String> {
     Ok(())
 }
 
-/// 真实系统残留探测：`GetAdaptersAddresses`（AF_UNSPEC，全 adapter）+ `GetIpForwardTable2`
+/// 真实系统残留探测：`GetAdaptersAddresses`（`AF_UNSPEC，全` adapter）+ `GetIpForwardTable2`
 /// （IPv4 全路由行）。只读，不改任何系统状态（探测是证据采集，非行为）。
 pub struct SystemResidueProbe {
     /// engine 创建的 Wintun adapter 名（`ENGINE_ADAPTER_NAME` = `ExvEngine`）。
@@ -227,6 +227,11 @@ impl ResidueProbe for SystemResidueProbe {
 pub enum RespawnOutcome {
     /// 新 engine 已拉起并接好（新 PID）。
     Respawned { old_pid: u32, new_pid: u32 },
+    /// 槽内已有存活 engine（T6b 并发守卫）——respawn 让位，未发生任何拉起/回收。
+    /// liveness 翻转与 respawn 执行之间，另一条路径（连接路由内 provisioner /
+    /// R2 oneshot 恢复）可能已把新 engine 换入槽；此时本路径必须直接复用，
+    /// 不得 `teardown/verify_exit（会误杀新` engine）。
+    AlreadyAlive { pid: u32 },
 }
 
 /// respawn 失败（fail-closed typed 拒绝；阻断自愈并报告）。
@@ -301,7 +306,7 @@ pub trait SelfHealReporter: Send + Sync {
     fn report(&self, stage: SelfHealStage, old_pid: u32, new_pid: u32, error_code: &str);
 }
 
-/// `RespawnError` → 稳定 error_code（计划 §4.2 冻结码表；五变体穷尽映射，无秘密、
+/// `RespawnError` → 稳定 `error_code（计划` §4.2 冻结码表；五变体穷尽映射，无秘密、
 /// 无栈——与 wire `SelfHealStatus.error_code` 同源）。
 #[must_use]
 pub fn respawn_error_code(error: &RespawnError) -> &'static str {
@@ -347,8 +352,8 @@ pub trait RespawnClientConnector: Send + Sync {
     ) -> Result<(Arc<Mutex<dyn KernelEngineControl>>, watch::Receiver<bool>), String>;
 }
 
-/// 生产 client 连接器：`EngineControlGrpcClient::connect`（管道名按 core PID 唯一——
-/// respawn 后 core PID 不变，管道名不变；新 engine 建同名管道）。
+/// 生产 client 连接器：`EngineControlGrpcClient::connect`（管道名按 core 用户 SID 派生的
+/// 常量名，D12——respawn 后新 engine 以同名重建首实例，core 拨同名即达）。
 pub struct GrpcClientConnector;
 
 #[tonic::async_trait]
@@ -358,10 +363,10 @@ impl RespawnClientConnector for GrpcClientConnector {
         engine_pid: u32,
         user_sid: &str,
     ) -> Result<(Arc<Mutex<dyn KernelEngineControl>>, watch::Receiver<bool>), String> {
-        let client =
-            EngineControlGrpcClient::connect(&engine_control_pipe_name(), engine_pid, user_sid)
-                .await
-                .map_err(|e| format!("engine control connect failed: {e:?}"))?;
+        let pipe = engine_control_pipe_name(user_sid)?;
+        let client = EngineControlGrpcClient::connect(&pipe, engine_pid, user_sid)
+            .await
+            .map_err(|e| format!("engine control connect failed: {e:?}"))?;
         let liveness = client.liveness();
         let engine: Arc<Mutex<dyn KernelEngineControl>> = Arc::new(Mutex::new(client));
         Ok((engine, liveness))
@@ -433,6 +438,16 @@ impl CrashRecovery {
         &self,
         supervisor: &mut EngineSupervisor,
     ) -> Result<RespawnOutcome, RespawnError> {
+        // 0. T6b 并发守卫：liveness 翻转（旧 engine 的 watch 翻 false）到本路径拿到
+        // supervisor 锁之间，另一条路径（连接路由内 provisioner / R2 oneshot 恢复）可能
+        // 已 respawn/provision 并把新 engine 换入槽。槽内 engine 存活即让位（复用）——
+        // 后续步骤（teardown/verify_exit）会误杀刚拉起的新 engine。
+        if self.slot_engine_alive().await {
+            return Ok(RespawnOutcome::AlreadyAlive {
+                pid: supervisor.pid().unwrap_or(0),
+            });
+        }
+
         // 1. teardown 兜底（engine 死 ≠ core 死：撤销 admission + packet leg + teardown）。
         self.composition.lock().await.on_helper_link_terminal();
 
@@ -479,6 +494,14 @@ impl CrashRecovery {
     /// + actor 绑定——"回 Idle/报错"的 Idle 侧。
     async fn rebuild_composition(&self, new_peer: &VerifiedPipePeer) -> Result<(), String> {
         rebind_composition(&self.composition, new_peer, &self.ui_peer).await
+    }
+
+    /// 槽内 engine 是否存活（T6b 并发守卫输入）：`ensure_owner_lease` 幂等确认——
+    /// detached 占位/死 client 返回 `ConnectionLost` → 不存活。
+    async fn slot_engine_alive(&self) -> bool {
+        let current = self.slot.current().await;
+        let mut guard = current.lock().await;
+        guard.ensure_owner_lease().await.is_ok()
     }
 }
 

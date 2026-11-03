@@ -38,9 +38,10 @@ pub struct EventBus {
     /// 最新事件（含快照；resume / 断线重放路径）。`std::sync::Mutex`（同步访问，
     /// 不跨 await 持锁）。
     current: Mutex<Option<RuntimeEvent>>,
-    /// 统计 fan-out（归一化后；供进程内订阅者消费，与事件 lane 互不干扰）。
+    /// 统计 fan-out（归一化后；供进程内订阅者与 `WatchStats` wire 订阅消费，与事件
+    /// lane 互不干扰）。
     stats_live: broadcast::Sender<wire::RuntimeStats>,
-    /// 最新统计（`publish_stats` 更新；已连接时与重发的快照使用同一 tick）。
+    /// 最新统计（`publish_stats` 更新；`sample_tick` 与事件 tick 同轴严格递增）。
     stats_current: Mutex<Option<wire::RuntimeStats>>,
 }
 
@@ -151,47 +152,22 @@ impl EventBus {
     // 统计 lane：与 wire 事件 lane 共存于同一总线（互不干扰；tick 对齐关联）。
     // -----------------------------------------------------------------------
 
-    /// 发布一条归一化统计并更新 `stats_current`。若当前状态为已连接，则为该样本铸造
-    /// 新 tick，并把携带该统计的 `SNAPSHOT` 重发到 `WatchEvents`；这使 UI 能持续
-    /// 收到速率、累计量和会话起点，而不是只停在首次连接快照。其他状态不生成伪刷新，
-    /// 样本沿用当前 tick。
+    /// 发布一条归一化统计并更新 `stats_current`：铸造下一 tick（与事件 tick 同一
+    /// 严格递增轴）→ 写 `stats_current` → 广播到统计 lane。
+    ///
+    /// T14 拆流（§2.10.2）：统计样本**不再**随 `SNAPSHOT` 重发到事件 lane——那条
+    /// 混载路径正是被拆掉的对象。统计的 wire 交付走独立流（`WatchStats`，
+    /// `subscribe_stats`），挂死的统计消费者只降级该流（h2 按流流控），事件 lane 与
+    /// 拉取路径（`GetSnapshot` 经 `current_stats` 附加最新样本）照常。铸造 tick 使
+    /// `sample_tick` 严格递增（`subscribe_stats` 的 resume 过滤依赖此性质）；事件
+    /// lane 因此出现 tick 空洞——`subscribe` 只按 `> resume_tick` 过滤，空洞无影响。
     pub fn publish_stats(&self, mut stats: wire::RuntimeStats) -> wire::RuntimeStats {
         let _publish_gate = self.publish_gate.lock().unwrap();
-        let current_snapshot = self.current_snapshot();
-        let should_republish = matches!(
-            current_snapshot.as_ref().and_then(|snapshot| snapshot.state.as_ref()),
-            Some(wire::runtime_snapshot::State::Connected(_))
-        );
-        let tick = if should_republish {
-            self.next_tick()
-        } else {
-            self.current_tick()
-        };
+        let tick = self.next_tick();
         stats.sample_tick = tick;
         *self.stats_current.lock().unwrap() = Some(stats);
         // 无订阅者时 send 失败（无 receiver）——忽略；stats_current 已更新。
         let _ = self.stats_live.send(stats);
-
-        // 统计随 RuntimeSnapshot 交付给 UI；若只更新内部 lane，已连接的 UI 会永久
-        // 停在首次无样本快照。仅在 Connected 快照上重发，避免 Idle/Connecting 阶段
-        // 因后台采样产生伪状态刷新。
-        if let Some(snapshot) = current_snapshot.filter(|snapshot| {
-            matches!(
-                snapshot.state.as_ref(),
-                Some(wire::runtime_snapshot::State::Connected(_))
-            )
-        }) {
-            let mut snapshot = snapshot;
-            snapshot.stats = Some(stats);
-            let event = RuntimeEvent {
-                monotonic_tick: tick,
-                kind: wire::RuntimeEventKind::Snapshot as i32,
-                snapshot: Some(snapshot.clone()),
-                operation_id: snapshot.operation_id,
-            };
-            *self.current.lock().unwrap() = Some(event.clone());
-            let _ = self.live.send(event);
-        }
         stats
     }
 

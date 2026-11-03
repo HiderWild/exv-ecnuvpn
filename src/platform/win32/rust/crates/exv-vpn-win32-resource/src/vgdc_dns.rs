@@ -18,12 +18,12 @@
 //!
 //! 与 C3（`exv-vpn-cstp` connector `socket_binder` seam）衔接：本模块的
 //! [`resolve_gateway_dual_line`] 产出真实物理出口 IP 供 CSTP connector 连接；
-//! [`socket_binder_for_ifindex`] 供给 `BootstrapConfig.socket_binder`（IP_UNICAST_IF
+//! [`socket_binder_for_ifindex`] 供给 `BootstrapConfig.socket_binder`（`IP_UNICAST_IF`
 //! 绑物理网卡，控制面连接不走 Mihomo 默认路由）。生产装配点（engine 拉起后、connect
 //! 前）见 `exv-engine::vgdc_connect`。
 //!
 //! 与 acceptance 的差异：`resolve_gateway_dual_line` 改为 **async**（tokio 原生，DoH
-//! 直接 await，不 block_on 外部 runtime）；acceptance 侧提供同步 shim 兼容既有调用面。
+//! 直接 await，不 `block_on` 外部 runtime）；acceptance 侧提供同步 shim 兼容既有调用面。
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::windows::io::AsRawSocket;
@@ -40,9 +40,9 @@ use windows::Win32::Networking::WinSock::{
 
 /// 每层解析 deadline（spec VGDC-05：全程有 deadline，不再出现无限挂起）。
 const LAYER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
-/// UDP/53 单次查询读写超时（proxy_safe_resolver 同款 2s）。
+/// UDP/53 `单次查询读写超时（proxy_safe_resolver` 同款 2s）。
 const DNS_UDP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-/// DNS 查询 ID（proxy_safe_resolver 同款冻结值）。
+/// DNS 查询 `ID（proxy_safe_resolver` 同款冻结值）。
 const DNS_QUERY_ID: [u8; 2] = [0x12, 0x34];
 /// `IF_TYPE_ETHERNET_CSMACD`（物理以太网）。
 const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
@@ -71,7 +71,7 @@ pub struct NicInfo {
 pub enum ResolutionSource {
     /// gateway host 本身就是 IPv4 字面量（无需 DNS；fake-ip 过滤后直接采用）。
     System,
-    /// DoH 线路成功（记录 endpoint）。
+    /// `DoH` 线路成功（记录 endpoint）。
     Doh(Ipv4Addr),
     /// 绑物理网卡 UDP/53 线路成功（记录 resolver）。
     Udp53(Ipv4Addr),
@@ -89,7 +89,7 @@ impl ResolutionSource {
     }
 }
 
-/// DoH 线路 typed 错误（逐层记录；不 panic）。
+/// `DoH` 线路 typed 错误（逐层记录；不 panic）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DohErrorKind {
     /// TCP 连接失败（端点不可达）。
@@ -98,7 +98,7 @@ pub enum DohErrorKind {
     TlsFailed(String),
     /// HTTP 状态非 200。
     HttpStatus(u16),
-    /// DoH JSON `Status` 非 0（DNS 层失败）。
+    /// `DoH` JSON `Status` 非 0（DNS 层失败）。
     DnsStatus(u64),
     /// 响应无法解析（非 HTTP / 非 JSON / 缺字段）。
     BadResponse(String),
@@ -159,10 +159,10 @@ impl Udp53ErrorKind {
     }
 }
 
-/// 单层解析错误（L1 DoH 或 L2 UDP/53；证据逐层记录）。
+/// 单层解析错误（L1 `DoH` 或 L2 UDP/53；证据逐层记录）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveLayerError {
-    /// DoH 线路失败。
+    /// `DoH` 线路失败。
     Doh {
         /// 失败 endpoint。
         endpoint: Ipv4Addr,
@@ -192,10 +192,10 @@ impl ResolveLayerError {
     }
 }
 
-/// DoH endpoint 配置（endpoint IP + 查询路径）。
+/// `DoH` endpoint 配置（endpoint IP + 查询路径）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DohEndpoint {
-    /// DoH 服务器 IP（TCP 443）。
+    /// `DoH` 服务器 IP（TCP 443）。
     pub ip: Ipv4Addr,
     /// JSON API 路径（阿里 `/resolve`；Cloudflare `/dns-query`）。
     pub path: &'static str,
@@ -205,11 +205,11 @@ pub struct DohEndpoint {
 /// [`DualLineConfig::production`]）。
 #[derive(Debug, Clone)]
 pub struct DualLineConfig {
-    /// DoH endpoint 列表（按优先级；一条失败 → 下一条）。
+    /// `DoH` endpoint 列表（按优先级；一条失败 → 下一条）。
     pub doh_endpoints: Vec<DohEndpoint>,
-    /// TLS 客户端配置（生产 = rustls-platform-verifier；测试 = 注入 TestRoots）。
+    /// TLS 客户端配置（生产 = rustls-platform-verifier；测试 = 注入 `TestRoots`）。
     pub doh_client_config: std::sync::Arc<rustls::ClientConfig>,
-    /// UDP/53 resolver 列表（按优先级；proxy_safe_resolver 同款三公共 resolver）。
+    /// UDP/53 resolver `列表（按优先级；proxy_safe_resolver` 同款三公共 resolver）。
     pub udp53_resolvers: Vec<SocketAddr>,
     /// 绑物理网卡 ifindex（None = 不绑——仅测试假 socket 使用；生产恒为 Some）。
     pub udp53_ifindex: Option<u32>,
@@ -254,7 +254,7 @@ impl DualLineConfig {
     }
 }
 
-/// fake-ip 检测：198.18.0.0/15（RFC 2544 / Clash fake-ip 池；proxy_safe_resolver
+/// fake-ip 检测：198.18.0.0/15（RFC 2544 / Clash fake-ip `池；proxy_safe_resolver`
 /// `is_fake_ip_v4` 同款语义）。
 #[must_use]
 pub fn is_fake_ip_v4(ip: Ipv4Addr) -> bool {
@@ -266,7 +266,7 @@ pub fn is_fake_ip_v4(ip: Ipv4Addr) -> bool {
 // L1：DoH（HTTPS；proxy-safe TLS wiring——school.rs / controlled.rs 同款）。
 // ---------------------------------------------------------------------------
 
-/// 对单个 DoH endpoint 执行 `name=A` JSON 查询；fake-ip 结果过滤。
+/// 对单个 `DoH` endpoint 执行 `name=A` JSON 查询；fake-ip 结果过滤。
 ///
 /// `endpoint` 是 TCP 目标（生产 `(ip, 443)`；测试指向假 HTTPS 服务器）；
 /// `server_name` 是 TLS SNI + 证书校验名（生产 = endpoint IP；测试 = 注入根 SAN）。
@@ -321,7 +321,7 @@ pub async fn doh_query(
     parse_doh_response(&raw)
 }
 
-/// DoH JSON 响应解析（HTTP 状态 + `Status` + `Answer[]` 过滤 fake-ip 后的首个 A 记录）。
+/// `DoH` JSON 响应解析（HTTP 状态 + `Status` + `Answer[]` 过滤 fake-ip 后的首个 A 记录）。
 ///
 /// # Errors
 ///
@@ -393,7 +393,7 @@ fn url_encode_host(host: &str) -> String {
 // 绑网卡 = `IP_UNICAST_IF` setsockopt，Windows 语义等价物）。
 // ---------------------------------------------------------------------------
 
-/// 构造 DNS A 查询（id `0x1234`、RD=1、qdcount=1；proxy_safe_resolver 同款字节布局）。
+/// 构造 DNS A 查询（id `0x1234`、`RD=1、qdcount=1；proxy_safe_resolver` 同款字节布局）。
 ///
 /// # Errors
 ///
@@ -416,7 +416,7 @@ fn build_dns_query(host: &str) -> Result<Vec<u8>, Udp53ErrorKind> {
 
 /// 跳过 DNS name（普通标签与压缩指针均支持；返回 name 之后的偏移）。
 ///
-/// 语义与 proxy_safe_resolver 的 `skip_name` 一致：遇到压缩指针（`0xC0`）即认为
+/// 语义与 `proxy_safe_resolver` 的 `skip_name` 一致：遇到压缩指针（`0xC0`）即认为
 /// name 结束于指针之后（answer 记录边界在指针之后；question name 不会压缩）。
 fn skip_name(resp: &[u8], mut off: usize) -> Result<usize, Udp53ErrorKind> {
     loop {
@@ -553,11 +553,11 @@ pub fn dns_a_query_udp(
 /// 双线可信解析（fake-ip 过滤；逐层 typed 错误收集）——**async 生产入口**。
 ///
 /// gateway host 为 IPv4 字面量时直接采用（`ResolutionSource::System`；fake-ip 字面量
-/// 拒绝）；否则按配置顺序试 DoH 全部 endpoint，再试 UDP/53 全部 resolver。
+/// 拒绝）；否则按配置顺序试 `DoH` 全部 endpoint，再试 UDP/53 全部 resolver。
 ///
 /// UDP/53 线路是 std 同步 socket（`read_timeout` 2s 有界阻塞），在 async 上下文内直接
-/// 调用——与 acceptance 参考语义一致，单次查询以 DNS_UDP_TIMEOUT 为界、整体由
-/// LAYER_DEADLINE 约束，不 panic。
+/// 调用——与 acceptance 参考语义一致，单次查询以 `DNS_UDP_TIMEOUT` 为界、整体由
+/// `LAYER_DEADLINE` 约束，不 panic。
 ///
 /// # Errors
 ///
@@ -623,14 +623,14 @@ pub async fn resolve_gateway_dual_line(
             Ok(mut ips) => {
                 let ip = ips.remove(0);
                 crate::timing::record_elapsed(
-                    &format!("resource.vgdc_dns.udp53_ok:{}", resolver_ip),
+                    &format!("resource.vgdc_dns.udp53_ok:{resolver_ip}"),
                     layer_start,
                 );
                 return Ok((ip, ResolutionSource::Udp53(resolver_ip)));
             }
             Err(kind) => {
                 crate::timing::record_elapsed(
-                    &format!("resource.vgdc_dns.udp53_fail:{}", resolver_ip),
+                    &format!("resource.vgdc_dns.udp53_fail:{resolver_ip}"),
                     layer_start,
                 );
                 layer_errors.push(ResolveLayerError::Udp53 {

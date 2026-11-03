@@ -27,19 +27,27 @@ pub struct StatsSample {
     pub phase: StatsPhase,
     /// 采样时刻 wall-clock epoch 毫秒（UTC；0 = 未知）。
     pub timestamp_ms: i64,
+    /// T6a：累计 R1 自愈尝试次数（per engine boot）。
+    pub reconnect_attempts_total: u64,
+    /// T6a：累计 R1 自愈成功次数（per engine boot）。
+    pub reconnect_successes_total: u64,
 }
 
 /// 数据面可写的统计注册表（lock-free 累计 + 阶段）。
 ///
-/// 数据面线程在 packet 边界调用 `record_rx`/`record_tx`（data_plane.rs 方向计数）；
-/// 隧道运行时在连接/掉线边界调用 `set_phase`（tunnel_runtime.rs），延迟探测
+/// 数据面线程在 packet 边界调用 `record_rx`/`record_tx`（`data_plane.rs` 方向计数）；
+/// 隧道运行时在连接/掉线边界调用 `set_phase`（`tunnel_runtime.rs`），延迟探测
 /// （DPD/ping fallback）调用 `record_latency`；采样 task 以 relaxed 序读取，永不加锁。
+/// T6a：R1 重连驱动在自愈边界调用 `record_reconnect_attempt`/`record_reconnect_success`
+///（`reconnect.rs`——计数与状态事件分走 `stats`/`status` 两通道）。
 #[derive(Debug)]
 pub struct StatsRegistry {
     rx_bytes: AtomicU64,
     tx_bytes: AtomicU64,
     latency_ms: AtomicU64,
     phase: AtomicU8,
+    reconnect_attempts: AtomicU64,
+    reconnect_successes: AtomicU64,
 }
 
 impl StatsRegistry {
@@ -51,6 +59,8 @@ impl StatsRegistry {
             tx_bytes: AtomicU64::new(0),
             latency_ms: AtomicU64::new(0),
             phase: AtomicU8::new(StatsPhase::Idle as u8),
+            reconnect_attempts: AtomicU64::new(0),
+            reconnect_successes: AtomicU64::new(0),
         }
     }
 
@@ -69,6 +79,16 @@ impl StatsRegistry {
         self.latency_ms.store(ms, Ordering::Relaxed);
     }
 
+    /// T6a：记录一次 R1 自愈尝试开始（累计；per engine boot 不清零）。
+    pub fn record_reconnect_attempt(&self) {
+        self.reconnect_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// T6a：记录一次 R1 自愈成功（隧道恢复 Live；累计）。
+    pub fn record_reconnect_success(&self) {
+        self.reconnect_successes.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 设置当前连接阶段（`StatsPhase`）。
     pub fn set_phase(&self, phase: StatsPhase) {
         self.phase.store(phase as u8, Ordering::Relaxed);
@@ -83,6 +103,8 @@ impl StatsRegistry {
             latency_ms: self.latency_ms.load(Ordering::Relaxed),
             phase: phase_from_u8(self.phase.load(Ordering::Relaxed)),
             timestamp_ms: wall_clock_ms(),
+            reconnect_attempts_total: self.reconnect_attempts.load(Ordering::Relaxed),
+            reconnect_successes_total: self.reconnect_successes.load(Ordering::Relaxed),
         }
     }
 }
@@ -268,6 +290,8 @@ async fn sample_loop(
             rx_rate,
             tx_rate,
             latency_ms: sample.latency_ms,
+            reconnect_attempts_total: sample.reconnect_attempts_total,
+            reconnect_successes_total: sample.reconnect_successes_total,
         };
         if tx.send(Ok(event)).await.is_err() {
             // 客户端断线：采样 task 自行退出；重连由 open_stream 重新挂接。

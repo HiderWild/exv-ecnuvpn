@@ -1,8 +1,9 @@
-import { ref, type InjectionKey, type Ref } from "vue";
+import { readonly, ref, type InjectionKey, type Ref } from "vue";
 
 import {
   kernel,
   onStatus,
+  onBrowserLogin,
   type ConnectCredentials,
   type ConnectIntent,
   type CoreStatus,
@@ -44,15 +45,19 @@ export interface ProductGateway {
   /** Core 存续状态：仅由已认证控制管道的可用性判定。 */
   coreStatus?(): Promise<CoreStatus>;
   onStatus(listener: (event: RuntimeEvent) => void): Promise<StopListening>;
+  onBrowserLogin?(listener: (active: boolean) => void): Promise<StopListening>;
   /** T1：请求一次延迟刷新（engine 数据面立即 ping；新延迟经后续快照 stats 到达）。 */
   triggerLatencyRefresh(): Promise<void>;
   /** S3/D5：服务控制（query/install/uninstall/start）。 */
   serviceControl(action: ServiceControlAction): Promise<ServiceControlReply>;
   /** 连接身份与校内地址；真实网关读取 core 配置并探测 EXV 隧道适配器。 */
   connectionInfo?(): Promise<ProductConnectionInfo>;
+  atrustBrowserFallbackAvailable?(): Promise<boolean>;
+  atrustBrowserFallback?(): Promise<void>;
 }
 
 export interface ProductRuntime {
+  readonly browserLoginActive?: Readonly<Ref<boolean>>;
   readonly state: Readonly<Ref<ProductUiState>>;
   readonly source: "real" | "mock";
   start(): Promise<void>;
@@ -70,6 +75,8 @@ export interface ProductRuntime {
    * 返回 reply（含 post-action 服务状态 + ok + 人类可读信息）。
    */
   serviceControl(action: ServiceControlAction): Promise<ServiceControlReply>;
+  atrustBrowserFallbackAvailable?(): Promise<boolean>;
+  atrustBrowserFallback?(): Promise<void>;
   dispose(): void;
 }
 
@@ -83,8 +90,11 @@ export const tauriProductGateway: ProductGateway = {
   snapshot: () => kernel.snapshot(),
   coreStatus: () => kernel.coreStatus(),
   onStatus: (listener) => onStatus(listener),
+  onBrowserLogin: (listener) => onBrowserLogin(listener),
   triggerLatencyRefresh: () => kernel.triggerLatencyRefresh(),
   serviceControl: (action) => kernel.serviceControl(action),
+  atrustBrowserFallbackAvailable: () => kernel.atrustBrowserFallbackAvailable(),
+  atrustBrowserFallback: () => kernel.atrustBrowserFallback(),
   async connectionInfo(): Promise<ProductConnectionInfo> {
     const [config, campusIp] = await Promise.all([
       kernel.configGet(),
@@ -250,10 +260,17 @@ function optimisticProductState(base: ProductUiState, pendingAction: PendingActi
  * 从真实或测试 gateway 构造统一产品运行时。
  *
  * 状态事件的固定顺序：先过滤，再写入快照/产品状态，再计算错误，最后写 terminal 标记。
+ *
+ * @param gateway 网关（缺省 Tauri 真实网关；测试注入内存实现）。
+ * @param now 时钟（测试注入）。
+ * @param onAdoptedSnapshot T12：快照采纳钩子——每次成功采纳一份完整快照（事件与
+ *   `GetSnapshot` 轮询同一点）后回调；重连通知出口（`reconnect-notify`）经此喂入
+ *   R1/R2 reason lane。缺省无操作。
  */
 export function createProductRuntime(
   gateway: ProductGateway = tauriProductGateway,
   now: () => number = Date.now,
+  onAdoptedSnapshot: (snapshot: RuntimeSnapshot) => void = () => undefined,
 ): ProductRuntime {
   let latestSnapshot = idleSnapshot();
   let displayError: DisplayError = undefined;
@@ -263,6 +280,8 @@ export function createProductRuntime(
   let coreStatus: CoreStatus = "stopped";
   let connectionStateConfirmed = true;
   let unlisten: StopListening | null = null;
+  let unlistenBrowser: StopListening | null = null;
+  const browserWaiting = ref(false);
   let startPromise: Promise<void> | null = null;
   let liveSnapshotTimer: ReturnType<typeof setInterval> | null = null;
   let liveSnapshotInFlight = false;
@@ -270,6 +289,7 @@ export function createProductRuntime(
   let coreStatusInFlight = false;
   let connectionInfoInFlight: Promise<boolean> | null = null;
   let pendingAction: PendingAction = null;
+  let userOperationSequence = 0;
   /** C3（2026-09-05）：最近一次被采纳状态事件的时间。事件链在流动时轮询让位——
    *  仅当事件静默（饥饿）超过一个周期才拉一次 GetSnapshot 兜底。 */
   let lastEventAppliedAt: number | null = null;
@@ -298,6 +318,13 @@ export function createProductRuntime(
       base.description = "与后台的状态通信已中断，正在重新确认连接。";
     }
     state.value = optimisticProductState(base, pendingAction);
+    if (browserWaiting.value && pendingAction !== "stop") {
+      state.value = {
+        ...state.value, status: "connecting", severity: "attention",
+        title: "等待浏览器登录", description: "请在打开的浏览器中完成学校统一认证。",
+        connectEnabled: false, stopEnabled: true, metrics: null, errorCode: null,
+      };
+    }
   }
 
   /**
@@ -306,6 +333,12 @@ export function createProductRuntime(
    * Connected 且新值缺失时才保留旧值，断开/新会话/新正值仍按新快照直接替换。
    */
   function adoptSnapshot(snapshot: RuntimeSnapshot, queryBasis?: RuntimeSnapshot): boolean {
+    const adopted = adoptSnapshotInner(snapshot, queryBasis);
+    if (adopted) onAdoptedSnapshot(latestSnapshot);
+    return adopted;
+  }
+
+  function adoptSnapshotInner(snapshot: RuntimeSnapshot, queryBasis?: RuntimeSnapshot): boolean {
     if (queryBasis && queryBasis !== latestSnapshot &&
       (queryBasis.operation_id !== latestSnapshot.operation_id || queryBasis.runtime.state !== latestSnapshot.runtime.state)) return false;
     // `GetSnapshot` 是异步兜底，不得把已经由事件确认的较新状态倒灌回页面。服务安装
@@ -613,6 +646,7 @@ export function createProductRuntime(
   }
 
   function resetForUserOperation(action: Exclude<PendingAction, null>): void {
+    userOperationSequence += 1;
     stopLiveSnapshotRefresh();
     stopTransitionSnapshotRefresh();
     // 新操作发起：重置事件静默基准（此前事件属旧操作），乐观窗口首拍即可兜底。
@@ -628,6 +662,9 @@ export function createProductRuntime(
 
   function handleStatus(event: RuntimeEvent): void {
     if (disposed) return;
+    // 浏览器授权在 Core 受理 Connect 之前完成；此时旧 Idle 不是本次连接终态。
+    // Stop 仍消费真实清理事件，不能让取消流程被浏览器等待遮住。
+    if (browserWaiting.value && pendingAction !== "stop" && event.snapshot.runtime.state === "idle") return;
     const currentSessionUncertain = latestSnapshot.runtime.state === "connected" &&
       event.snapshot.runtime.state === "reconciling" &&
       (event.snapshot.operation_id ?? event.operation_id) === correlation.activeOpId;
@@ -704,6 +741,14 @@ export function createProductRuntime(
         unlisten = stopListening;
         if (latestSnapshot.runtime.state === "connected") startLiveSnapshotRefresh();
       }
+      if (gateway.onBrowserLogin) {
+        const stopBrowser = await gateway.onBrowserLogin((active) => {
+          if (disposed) return;
+          browserWaiting.value = active;
+          writeState();
+        });
+        if (disposed) stopBrowser(); else unlistenBrowser = stopBrowser;
+      }
       startCoreStatusRefresh();
       void refreshCoreStatus();
     })();
@@ -719,12 +764,15 @@ export function createProductRuntime(
   async function connect(credentials?: ConnectCredentials): Promise<string | void> {
     sessionAccount = credentials?.username.trim() || null;
     resetForUserOperation("connect");
+    const sequence = userOperationSequence;
     try {
       // 先派发连接请求，身份/校内地址刷新不能阻塞用户看到连接中的即时反馈。
       const reply = await gateway.connect({
         ...NO_PROFILE_CONNECT_INTENT,
         ...(credentials ? { credentials } : {}),
       });
+      // Stop 或新 Connect 已开始时，迟到回复不再接管当前操作的事件关联。
+      if (sequence !== userOperationSequence) return;
       coreStatus = "normal";
       // C2 窗口生命周期：RPC 回复登记 activeOpId 即关闭窗口（受理快照先到的常态下
       // 窗口已在 handleStatus 解除；此处覆盖回复先到、事件后到的时序，见 F4）。
@@ -733,19 +781,26 @@ export function createProductRuntime(
       void refreshConnectionInfo();
       return correlation.activeOpId ?? undefined;
     } catch (error) {
-      releasePendingAction();
+      if (sequence !== userOperationSequence) throw error;
+      browserWaiting.value = false;
+      // 被取消的旧 connect 不得清掉随后发起、尚未结束的 stop。
+      if (pendingAction !== "stop") releasePendingAction();
       writeState();
       throw error;
     }
   }
 
   async function stop(): Promise<void> {
+    browserWaiting.value = false;
     resetForUserOperation("stop");
+    const sequence = userOperationSequence;
     try {
       const reply = await gateway.stop();
+      if (sequence !== userOperationSequence) return;
       correlation.activeOpId = operationIdOf(reply);
       correlation = { ...correlation, inFlightAction: null };
     } catch (error) {
+      if (sequence !== userOperationSequence) throw error;
       releasePendingAction();
       writeState();
       throw error;
@@ -784,18 +839,31 @@ export function createProductRuntime(
     return reply;
   }
 
+  async function atrustBrowserFallbackAvailable(): Promise<boolean> {
+    return await gateway.atrustBrowserFallbackAvailable?.() ?? false;
+  }
+
+  async function atrustBrowserFallback(): Promise<void> {
+    if (!gateway.atrustBrowserFallback) throw new Error("系统浏览器 fallback 当前不可用。");
+    await gateway.atrustBrowserFallback();
+  }
+
   function dispose(): void {
     disposed = true;
+    browserWaiting.value = false;
     stopLiveSnapshotRefresh();
     stopCoreStatusRefresh();
     stopTransitionSnapshotRefresh();
     disarmPendingActionWatchdog();
     unlisten?.();
     unlisten = null;
+    unlistenBrowser?.();
+    unlistenBrowser = null;
   }
 
   return {
     source: "real",
+    browserLoginActive: readonly(browserWaiting),
     state,
     start,
     connect,
@@ -803,6 +871,8 @@ export function createProductRuntime(
     configurationChanged,
     triggerLatencyRefresh,
     serviceControl,
+    atrustBrowserFallbackAvailable,
+    atrustBrowserFallback,
     dispose,
   };
 }

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import notes from "../../../../../../../../release-notes.json";
+
 import { inject, onMounted, ref } from "vue";
 
 import {
@@ -57,7 +59,7 @@ export interface ChangelogEntry {
   sections?: { title: string; highlights: string[] }[];
 }
 
-const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+const LEGACY_CHANGELOG_ENTRIES: ChangelogEntry[] = [
   {
     version: "4.0.0",
     dateLabel: "2026-08-25 · 更新至 2026-09-13",
@@ -245,6 +247,22 @@ const CHANGELOG_ENTRIES: ChangelogEntry[] = [
     ],
   },
 ];
+
+const noteVersion = PRODUCT_VERSION.split(/[+-]/)[0].split(".").map(Number);
+function releaseNoteAvailable(version: string): boolean {
+  const parts = version.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (parts[index] !== noteVersion[index]) return parts[index] < noteVersion[index];
+  }
+  return true;
+}
+const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+  ...notes.filter((entry) => releaseNoteAvailable(entry.version)).map((entry) => ({
+    version: entry.version, dateLabel: entry.dateLabel, highlights: entry.windows,
+  })),
+  ...LEGACY_CHANGELOG_ENTRIES,
+];
+
 
 // 最新发布记录常显；只保存历史条目的展开状态。
 const latestVersion = CHANGELOG_ENTRIES[0]?.version;

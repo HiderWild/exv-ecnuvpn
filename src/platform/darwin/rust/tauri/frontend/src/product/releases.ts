@@ -1,3 +1,5 @@
+import notes from "../../../../../../../../release-notes.json";
+import { PRODUCT_VERSION } from "./version";
 /** 关于页发布记录：按发布时间从新到旧维护，与当前安装版本分别展示。 */
 /**
  * 守卫说明（darwin 接入）：`verify-rust-only.sh` 以文本正则拒绝旧 macOS helper 路线，
@@ -14,7 +16,7 @@ export interface ChangelogEntry {
   sections?: { title: string; highlights: string[] }[];
 }
 
-export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+const LEGACY_CHANGELOG_ENTRIES: ChangelogEntry[] = [
   {
     version: "4.0.0",
     dateLabel: "2026-08-25 · 更新至 2026-09-13",
@@ -202,4 +204,20 @@ export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
     ],
   },
 ];
+
+const noteVersion = PRODUCT_VERSION.split(/[+-]/)[0].split(".").map(Number);
+function releaseNoteAvailable(version: string): boolean {
+  const parts = version.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (parts[index] !== noteVersion[index]) return parts[index] < noteVersion[index];
+  }
+  return true;
+}
+export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+  ...notes.filter((entry) => releaseNoteAvailable(entry.version)).map((entry) => ({
+    version: entry.version, dateLabel: entry.dateLabel, highlights: entry.macos,
+  })),
+  ...LEGACY_CHANGELOG_ENTRIES,
+];
+
 

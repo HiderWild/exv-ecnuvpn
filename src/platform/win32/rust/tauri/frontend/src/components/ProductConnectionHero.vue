@@ -17,6 +17,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   action: [];
   settings: [];
+  logs: [];
   "update:autoInstall": [value: boolean];
 }>();
 
@@ -38,6 +39,12 @@ function updateAutoInstall(event: Event): void {
       <p v-if="description" aria-live="polite" aria-atomic="true">{{ description }}</p>
       <div v-if="state.status === 'idle' || state.status === 'failed'" class="connection-target">
         <button type="button" @click="emit('settings')">连接设置 <span aria-hidden="true">↗</span></button>
+        <button
+          v-if="state.status === 'failed'"
+          data-testid="connection-error-logs"
+          type="button"
+          @click="emit('logs')"
+        >查看日志</button>
       </div>
       <label
         v-if="props.showAutoInstallOption"

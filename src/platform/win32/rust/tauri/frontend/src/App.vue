@@ -6,12 +6,19 @@ import SettingsPage from "./pages/SettingsPage.vue";
 import AboutPage from "./pages/AboutPage.vue";
 import ProductWindowFrame from "./components/ProductWindowFrame.vue";
 import ConnectionInteractionHost from "./components/ConnectionInteractionHost.vue";
+import CoreCrashBanner from "./components/CoreCrashBanner.vue";
+import CoreWakeFailureModal from "./components/CoreWakeFailureModal.vue";
 import MinimalConnectionView from "./components/MinimalConnectionView.vue";
 import ToastStack from "./components/ToastStack.vue";
 import QuickStartDialog from "./components/QuickStartDialog.vue";
 import ServiceOperationOverlay from "./components/ServiceOperationOverlay.vue";
-import { kernel, type ConfigPayload } from "./lib/ipc";
+import { kernel, onCoreLifecycle, type ConfigPayload, type CoreLifecycleEvent } from "./lib/ipc";
 import { APPEARANCE_KEY } from "./product/appearance";
+import {
+  announceCoreLifecycle,
+  useCoreCrashBanner,
+  useCoreWakeFailureModal,
+} from "./product/core-crash";
 import { quickStartShouldOpen } from "./product/quick-start";
 import { PRODUCT_RUNTIME_KEY } from "./product/runtime";
 import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "./product/service-operations";
@@ -20,8 +27,18 @@ import { WINDOW_CHROME_PORT_KEY } from "./product/window-chrome";
 const props = withDefaults(defineProps<{
   /** 主入口在 Core gateway 就绪后读取的配置健康结论；测试可注入真实形状的回复。 */
   loadQuickStart?: () => Promise<ConfigPayload>;
+  /** T9：core 生命周期事件订阅源；测试可注入，缺省订阅真实 tauri 事件。 */
+  subscribeCoreLifecycle?: (callback: (event: CoreLifecycleEvent) => void) => Promise<() => void>;
 }>(), {
   loadQuickStart: () => kernel.configGet(),
+  subscribeCoreLifecycle: (callback: (event: CoreLifecycleEvent) => void) => {
+    // 纯浏览器/测试预览无 tauri 事件桥（与 main.ts 的 runtime 启动门同一判定）：
+    // 无订阅即无横幅，不报错。
+    if (typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)) {
+      return Promise.resolve(() => undefined);
+    }
+    return onCoreLifecycle(callback);
+  },
 });
 const emit = defineEmits<{ startupReady: [] }>();
 
@@ -45,6 +62,11 @@ const startupReady = ref(false);
 const runtime = inject(PRODUCT_RUNTIME_KEY)!;
 const serviceOperations = createServiceOperationCoordinator((action) => runtime.serviceControl(action));
 provide(SERVICE_OPERATION_KEY, serviceOperations);
+// T9（§2.9）：core 崩溃弱提示横幅 + 唤醒失败模态（全局挂载，状态在 product/core-crash）。
+const coreCrash = useCoreCrashBanner();
+const coreWakeFailure = useCoreWakeFailureModal();
+const requestAppRestart = (): Promise<void> => coreWakeFailure.restartApp();
+const requestAppExit = (): Promise<void> => coreWakeFailure.exitApp();
 
 async function finishQuickStart(): Promise<void> {
   await runtime.configurationChanged({ strict: true });
@@ -52,6 +74,13 @@ async function finishQuickStart(): Promise<void> {
 }
 
 onMounted(async () => {
+  // T9：core 生命周期事件订阅（crashed/recovered 驱动弱提示横幅显隐）。
+  try {
+    await props.subscribeCoreLifecycle(announceCoreLifecycle);
+  } catch (error) {
+    // 纯浏览器预览无 tauri 事件桥；横幅在该环境下不启用，不影响其余界面。
+    console.error("core 生命周期事件订阅失败", error);
+  }
   try {
     quickStartOpen.value = quickStartShouldOpen(await props.loadQuickStart());
   } catch (error) {
@@ -65,12 +94,13 @@ onMounted(async () => {
 </script>
 
 <template>
-  <ConnectionInteractionHost v-if="startupReady" v-slot="{ state, action, run, minimal, initialUsername, initialServer, rememberPassword, hasStoredPassword, credentialError }">
+  <ConnectionInteractionHost v-if="startupReady" v-slot="{ state, action, run, minimal, protocol, initialUsername, initialServer, rememberPassword, hasStoredPassword, credentialError }">
     <ProductWindowFrame :mode="mode" :chrome="chrome" :appearance="appearance" :current-page="current" @navigate="current = $event">
       <MinimalConnectionView
         v-if="minimal && state"
         :state="state"
         :action="action"
+        :protocol="protocol"
         :initial-username="initialUsername"
         :initial-server="initialServer"
         :remember-password="rememberPassword"
@@ -82,10 +112,24 @@ onMounted(async () => {
     </ProductWindowFrame>
   </ConnectionInteractionHost>
   <ToastStack :mode="mode" />
+  <CoreCrashBanner
+    :visible="coreCrash.visible.value"
+    :busy="coreCrash.busy.value"
+    :mode="mode"
+    @restart="coreCrash.restart()"
+    @dismiss="coreCrash.dismiss()"
+  />
   <QuickStartDialog
     :open="quickStartOpen"
     :after-core-saved="finishQuickStart"
     @skip="quickStartOpen = false"
+  />
+  <CoreWakeFailureModal
+    :visible="coreWakeFailure.visible.value"
+    :message="coreWakeFailure.message.value"
+    :compact="mode === 'minimal'"
+    @restart-app="requestAppRestart"
+    @exit-app="requestAppExit"
   />
   <Teleport to="body">
     <ServiceOperationOverlay :visible="serviceOperations.busy.value" :label="serviceOperations.label.value" />

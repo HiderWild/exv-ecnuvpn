@@ -46,6 +46,8 @@ use windows::Win32::System::Threading::WaitForSingleObject;
 use crate::stats::StatsRegistry;
 use crate::status::{StatusEvent, StatusPublisher};
 
+mod raw_packets;
+
 /// Wintun ring capacity for the engine data plane（同 acceptance `WINTUN_PROBE_RING_CAPACITY`）。
 pub const WINTUN_RING_CAPACITY: u32 = 1 << 20;
 
@@ -67,6 +69,7 @@ pub struct EngineDataPlane {
 
 /// 两个工作线程共享一次失败上报；正常停止不制造掉线，提前退出（含 unwind）不能静默。
 struct DataPlaneWorkerGuard {
+    raw_packets: bool,
     stop: Arc<AtomicBool>,
     reported: Arc<AtomicBool>,
     operation_id: Arc<Mutex<Vec<u8>>>,
@@ -88,8 +91,15 @@ impl DataPlaneWorkerGuard {
                     ("operation_id", &uuid::Uuid::from_slice(&operation_id).map(|id| id.to_string()).unwrap_or_default()),
                     ("native_code", &native_code.map(|code| code.to_string()).unwrap_or_default())]);
         }
-        on_data_plane_lost(&self.aux.notify_data_plane_lost, &self.log, &self.aux.status,
-            &operation_id, self.aux.stats.as_deref(), reason);
+        if self.raw_packets {
+            log_data_plane_lifecycle(&self.log, &operation_id,
+                "tunnel.dataplane.loss-observed", "before_cleanup_notification", None);
+            if let Some(notify) = &self.aux.notify_data_plane_lost { notify(); }
+            publish_data_plane_failure(&self.aux.status, &operation_id, self.aux.stats.as_deref());
+        } else {
+            on_data_plane_lost(&self.aux.notify_data_plane_lost, &self.log, &self.aux.status,
+                &operation_id, self.aux.stats.as_deref(), reason);
+        }
     }
 }
 
@@ -105,7 +115,7 @@ impl Drop for DataPlaneWorkerGuard {
 /// 一致（只做 ring 计数器诊断，不写 registry、不探测延迟、不发布状态）。
 ///
 /// 注：不 derive `Debug`——`StatusPublisher` 无 `Debug` 实现（内部持 `dyn Fn`）。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct DataPlaneAux {
     /// 共享统计注册表（数据面计数 + 延迟写入；`None` = 不接线）。
     pub stats: Option<Arc<StatsRegistry>>,
@@ -122,19 +132,6 @@ pub struct DataPlaneAux {
     /// （`tunnel_runtime::assemble`）预制在闭包内，writer 无需感知世代细节（复审
     /// P2-5）。`None` = 未接线（行为与 T3 之前一致）。
     pub notify_data_plane_lost: Option<Arc<dyn Fn() + Send + Sync>>,
-}
-
-impl Default for DataPlaneAux {
-    fn default() -> Self {
-        Self {
-            stats: None,
-            latency: None,
-            control_rx: None,
-            status: None,
-            operation_id: Vec::new(),
-            notify_data_plane_lost: None,
-        }
-    }
 }
 
 /// 方向映射（T1 核对结论）：reader 消费 ring 里的**出站**包（本地应用上传 →
@@ -286,33 +283,32 @@ impl ProbeState {
     /// 帧（writer 线程经 write_channel 发出；测试注入记录闭包）。
     fn tick(&mut self, now: Instant, send: &mut dyn FnMut(Vec<u8>)) {
         // 1. 超时：DPD 无应答累计 → 回退 ping；ping 无应答清空。
-        if let Some(sent_at) = self.pending_dpd {
-            if now.duration_since(sent_at) >= DPD_PROBE_TIMEOUT {
-                self.pending_dpd = None;
-                self.dpd_timeouts += 1;
-                if self.dpd_timeouts >= DPD_MAX_TIMEOUTS {
-                    // 学校网关不应答 DPD → 永久回退 ping（真实验证 S5）。
-                    self.kind = ProbeKind::Ping;
-                }
+        if let Some(sent_at) = self.pending_dpd
+            && now.duration_since(sent_at) >= DPD_PROBE_TIMEOUT
+        {
+            self.pending_dpd = None;
+            self.dpd_timeouts += 1;
+            if self.dpd_timeouts >= DPD_MAX_TIMEOUTS {
+                // 学校网关不应答 DPD → 永久回退 ping（真实验证 S5）。
+                self.kind = ProbeKind::Ping;
             }
         }
-        if let Some(pending) = self.pending_ping {
-            if now.duration_since(pending.sent_at) >= PING_PROBE_TIMEOUT {
-                self.pending_ping = None;
-            }
+        if let Some(pending) = self.pending_ping
+            && now.duration_since(pending.sent_at) >= PING_PROBE_TIMEOUT
+        {
+            self.pending_ping = None;
         }
 
         // 2. 手动刷新标记（前端「立即刷新延迟」）：轮询本地标记文件，发现新值立即探测。
         if now.duration_since(self.last_marker_check) >= MARKER_POLL_INTERVAL {
             self.last_marker_check = now;
-            if let Some(marker) = &self.cfg.refresh_marker {
-                if let Some(ts) = read_refresh_marker(marker) {
-                    if ts > self.last_marker_seen {
-                        self.last_marker_seen = ts;
-                        self.fire(now, send);
-                        return;
-                    }
-                }
+            if let Some(marker) = &self.cfg.refresh_marker
+                && let Some(ts) = read_refresh_marker(marker)
+                && ts > self.last_marker_seen
+            {
+                self.last_marker_seen = ts;
+                self.fire(now, send);
+                return;
             }
         }
 
@@ -850,10 +846,10 @@ impl EngineDataPlane {
         let activated = Arc::new(AtomicBool::new(false));
         let reader_activated = activated.clone();
         let writer_activated = activated.clone();
-        let reader_guard = DataPlaneWorkerGuard { stop: reader_stop.clone(),
+        let reader_guard = DataPlaneWorkerGuard { raw_packets: false, stop: reader_stop.clone(),
             operation_id: active_operation_id.clone(),
             reported: failure_reported.clone(), worker: "wintun_reader", aux: aux.clone(), log: log.clone() };
-        let writer_guard = DataPlaneWorkerGuard { stop: writer_stop.clone(),
+        let writer_guard = DataPlaneWorkerGuard { raw_packets: false, stop: writer_stop.clone(),
             operation_id: active_operation_id.clone(),
             reported: failure_reported.clone(), worker: "wintun_writer", aux: aux.clone(), log: log.clone() };
 
@@ -973,12 +969,11 @@ impl EngineDataPlane {
                         }
                         match control_event_action(&event, &mut seen_unknown_kinds) {
                             EventAction::ProbeRtt => {
-                                if let Some(probe) = probe.as_mut() {
-                                    if let Some(stats) = &writer_stats {
-                                        if let Some(rtt) = probe.on_dpd_response(Instant::now()) {
-                                            stats.record_latency(rtt);
-                                        }
-                                    }
+                                if let Some(probe) = probe.as_mut()
+                                    && let Some(stats) = &writer_stats
+                                    && let Some(rtt) = probe.on_dpd_response(Instant::now())
+                                {
+                                    stats.record_latency(rtt);
                                 }
                             }
                             EventAction::ReplyDpd => {
@@ -1086,12 +1081,11 @@ impl EngineDataPlane {
                 if let Some(pkt) = pkt {
                     // T1：匹配的 ICMP echo reply → 算 ping RTT 写 registry（入站包
                     // 仍正常送进 ring）。
-                    if let Some(probe) = probe.as_mut() {
-                        if let Some(stats) = &writer_stats {
-                            if let Some(rtt) = probe.on_icmp_echo_reply(&pkt, Instant::now()) {
-                                stats.record_latency(rtt);
-                            }
-                        }
+                    if let Some(probe) = probe.as_mut()
+                        && let Some(stats) = &writer_stats
+                        && let Some(rtt) = probe.on_icmp_echo_reply(&pkt, Instant::now())
+                    {
+                        stats.record_latency(rtt);
                     }
                     let sent = writer_session.lock().expect("session 锁").send(&pkt);
                     if sent.is_ok() {
@@ -1394,6 +1388,14 @@ fn on_read_channel_closed(
             }
         }
     }
+    publish_data_plane_failure(status, operation_id, stats);
+}
+
+fn publish_data_plane_failure(
+    status: &Option<Arc<StatusPublisher>>,
+    operation_id: &[u8],
+    stats: Option<&StatsRegistry>,
+) {
     if let Some(stats) = stats {
         // 掉线窗口快照诚实化：stats phase = Failed（快照不再报告 Connected）。
         stats.set_phase(generated::StatsPhase::Failed);

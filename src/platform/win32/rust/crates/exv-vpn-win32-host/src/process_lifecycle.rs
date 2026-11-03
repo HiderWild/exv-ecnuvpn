@@ -11,7 +11,8 @@
 //!   的 `exv-win32-engine`（legacy JSON frame）只供 acceptance 场景，非生产 core 的
 //!   engine；
 //! - [`engine_control_pipe_name`] + [`engine_args_for_spawn`]：构造 engine 启动参数（控制面
-//!   管道名按 core PID 唯一、wintun.dll 路径、journal 目录、authority 名、host pid、adapter
+//!   管道名/authority 名按 core 用户 SID 派生（D12 常量名，单一事实源在
+//!   `exv_vpn_win32_ipc::pipe_names`）、wintun.dll 路径、journal 目录、host pid、adapter
 //!   名、user SID），对齐生产 engine bin（`exv-engine` main）的解析契约；
 //! - [`spawn_engine_elevated`]：ShellExecuteExW(runas) 提权 spawn，返回 `(pid, handle)`；
 //! - [`verify_process_elevated`]：观测进程 token 是否 elevated（fail closed）；
@@ -61,9 +62,7 @@ fn default_wintun_dll_path() -> PathBuf {
 /// 解析 wintun.dll 路径（`EXV_RUST_VPN_WINTUN_DLL` env 或 `~/.exv` 冻结默认）。
 #[must_use]
 pub fn resolve_wintun_dll_path() -> PathBuf {
-    std::env::var_os("EXV_RUST_VPN_WINTUN_DLL")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_wintun_dll_path)
+    std::env::var_os("EXV_RUST_VPN_WINTUN_DLL").map_or_else(default_wintun_dll_path, PathBuf::from)
 }
 
 /// 按 `CommandLineToArgvW` 兼容规则引用一个 Windows 命令行参数。
@@ -89,7 +88,7 @@ fn quote_windows_argument(value: &str) -> String {
             continue;
         }
         if ch == '"' {
-            for _ in 0..(backslashes * 2 + 1) {
+            for _ in 0..=(backslashes * 2) {
                 quoted.push('\\');
             }
             quoted.push('"');
@@ -119,7 +118,7 @@ fn windows_command_line(args: &[String]) -> String {
 }
 
 /// engine bin 的可执行路径（测试流：`CARGO_BIN_EXE_exv-engine`；bin 流：
-/// `current_exe` 同目录 sibling）。**生产 engine = `exv-engine`**（HelperControl
+/// `current_exe` 同目录 sibling）。**生产 engine = `exv-engine`**（`HelperControl`
 /// gRPC server，P1-b）；acceptance 的 `exv-win32-engine`（legacy JSON frame）只供
 /// acceptance 场景，不是 core 的 gRPC client 契约对象。
 #[must_use]
@@ -140,17 +139,25 @@ pub fn engine_bin_path() -> Option<PathBuf> {
     Some(dir.join(name))
 }
 
-/// engine 控制面 Named Pipe 名（按 core PID 唯一——同一 core 反复拉起 engine 不冲突）。
+/// engine 控制面 Named Pipe 名（**每用户 sid 段常量名**，D12/T11 管道名统一）。
+///
+/// `\\.\pipe\exv-engine-c-{user-sid}`（单一事实源在
+/// `exv_vpn_win32_ipc::pipe_names::control_pipe_name`——服务/oneshot 两形态与 host 拨号
+/// 侧共用）。同一用户的新 core 从自己的 SID 即可算出与现存 engine 相同的名字（采纳免
+/// 发现记录）；不同用户天然互不串扰（sid 段保多用户并行，复审 F2）。历史上的按 core
+/// PID 实例化命名已被取代（来历与被取代原因见计划 §2.6 历史注记）。
 ///
 /// 与 [`engine_args_for_spawn`] 中的 `--control-pipe` 值一致；core 提权拉起 engine 后用
 /// 它连接（`EngineControlGrpcClient::connect`，P1-c）。命名沿用 helper 约定的 `-c` 后缀。
-#[must_use]
-pub fn engine_control_pipe_name() -> String {
-    let host_pid = std::process::id();
-    format!(r"\\.\pipe\exv-engine-{host_pid}-c")
+///
+/// # Errors
+/// SID 文法非法（ipc canonical 校验拒绝——名字段防注入）→ 携带原因的字符串。
+pub fn engine_control_pipe_name(user_sid: &str) -> Result<String, String> {
+    exv_vpn_win32_ipc::pipe_names::control_pipe_name(user_sid)
+        .map_err(|e| format!("control pipe name for user {user_sid}: {e}"))
 }
 
-/// engine 的启动参数（core 侧构造；管道名按 core PID 唯一）。
+/// engine 的启动参数（core 侧构造；控制面/authority 名按**core 用户 SID** 派生，D12）。
 ///
 /// 参数契约与生产 engine bin（`exv-engine` main）对齐：必需 `--control-pipe`、
 /// `--dll`、`--host-pid`；可选 `--journal-dir`/`--authority-name`/`--adapter-name`/
@@ -163,37 +170,47 @@ pub fn engine_control_pipe_name() -> String {
 ///
 /// `--user-sid` 携带 **core** 进程的用户 SID：engine 用它建控制面管道 DACL，授权普通用户
 /// core 连接（engine 是特权进程，默认 ACL 只含 SYSTEM/Administrators，普通 core 会被拒）。
+/// 管道名与 authority 名（`Local\exv-engine-{sid}-authority`）同由该 SID 派生——SID 是
+/// 命名输入，**不可解析即无法构造参数**（fail closed，不再省略后回退：名字必须与
+/// core/agent 两侧一致，引擎侧无从自行回退出同名）。`--host-pid` 与命名无关（engine
+/// 侧 oneshot 生命周期 = core 进程句柄等待 + peer PID 复核的输入），保持传递。
 ///
 /// 与 acceptance 的差异：**不传 `--log-pipe`**——产品日志通道是 gRPC `StreamLogs`（P2 聚合），
 /// legacy JSON log pipe 仅 acceptance 使用；传入会让 engine 空转重试一个不存在的 server。
-#[must_use]
-pub fn engine_args_for_spawn() -> Vec<String> {
+///
+/// # Errors
+/// core 用户 SID 不可解析（极罕见——本进程必有用户 token）或 SID 文法非法 → 携带原因
+/// 的字符串（调用方按 spawn 失败处理，不拉 UAC）。
+pub fn engine_args_for_spawn() -> Result<Vec<String>, String> {
     let host_pid = std::process::id();
+    let core_sid = current_user_sid().ok_or_else(|| {
+        "cannot resolve core user SID for control pipe naming (D12)".to_string()
+    })?;
+    let control_pipe = engine_control_pipe_name(&core_sid)?;
+    let authority =
+        exv_vpn_win32_ipc::pipe_names::authority_name(&core_sid).map_err(|e| format!("{e}"))?;
     let journal_dir = exv_vpn_win32_resource::journal_path::JournalPath::machine_default()
         .as_path()
         .display()
         .to_string();
     let dll = resolve_wintun_dll_path().display().to_string();
-    let mut args = vec![
+    Ok(vec![
         "--control-pipe".to_string(),
-        engine_control_pipe_name(),
+        control_pipe,
         "--dll".to_string(),
         dll,
         "--journal-dir".to_string(),
         journal_dir,
         "--authority-name".to_string(),
-        format!("Local\\exv-engine-{host_pid}-authority"),
+        authority,
         "--host-pid".to_string(),
         host_pid.to_string(),
         "--adapter-name".to_string(),
         ENGINE_ADAPTER_NAME.to_string(),
-    ];
-    // SID 不可解析（极罕见）时省略该参数，engine 回退本进程用户 SID——同用户拓扑下两者相等。
-    if let Some(sid) = current_user_sid() {
-        args.push("--user-sid".to_string());
-        args.push(sid);
-    }
-    args
+        // SID 已解析成功（上方 fail closed），--user-sid 恒传递。
+        "--user-sid".to_string(),
+        core_sid,
+    ])
 }
 
 /// 当前进程的用户 SID（engine 用它建控制面 DACL；与 acceptance `peer_auth` 同源）。
@@ -230,7 +247,7 @@ pub fn verify_process_elevated(pid: u32) -> bool {
     };
     let mut token = HANDLE::default();
     // SAFETY: OpenProcessToken 写入 token 句柄；成功后需关闭。
-    let Ok(_) = (unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) }) else {
+    let Ok(()) = (unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) }) else {
         // SAFETY: process 句柄使用后关闭。
         unsafe {
             let _ = CloseHandle(process);
@@ -246,7 +263,7 @@ pub fn verify_process_elevated(pid: u32) -> bool {
     elevated
 }
 
-/// 读取 token 的 TokenElevation 事实。
+/// 读取 token 的 `TokenElevation` 事实。
 fn read_token_elevated(token: HANDLE) -> bool {
     let mut elevated = false;
     let mut size = 0u32;
@@ -307,7 +324,7 @@ pub fn collect_uac_events_for(exe_name: &str, start_time_iso: &str) -> u32 {
 /// （engine 是 helper 的同构特权进程——普通 core 拉起、UAC 静默通过或拒绝）。返回的
 /// `HANDLE` 由调用者持有（推荐包装进 [`EngineChild`]）。
 ///
-/// `SEE_MASK_FLAG_NO_UI`：engine bin 缺失时 ShellExecuteExW 直接返回错误（不弹 Windows
+/// `SEE_MASK_FLAG_NO_UI`：engine bin 缺失时 `ShellExecuteExW` 直接返回错误（不弹 Windows
 /// "找不到文件" 系统对话框），失败统一落到下方可读的 `Err(...)`。
 ///
 /// # Errors
@@ -360,8 +377,8 @@ pub fn spawn_engine_elevated(exe: &Path, args: &[String]) -> Result<(u32, HANDLE
 
 /// 等待进程退出（有界；**不关闭句柄**——句柄所有权由调用方持有）。
 ///
-/// 返回 `true` 当进程已 signaled（WAIT_OBJECT_0）；`false` 当超时（进程仍存活）或等待
-/// 失败（WAIT_FAILED——fail closed，不把失败当作已退出）。
+/// 返回 `true` 当进程已 `signaled（WAIT_OBJECT_0`）；`false` 当超时（进程仍存活）或等待
+/// `失败（WAIT_FAILED——fail` closed，不把失败当作已退出）。
 #[must_use]
 pub fn wait_process_exit(handle: HANDLE, timeout_ms: u32) -> bool {
     // SAFETY: handle 是有效进程句柄；超时返回 WAIT_TIMEOUT，失败返回 WAIT_FAILED。
@@ -437,7 +454,7 @@ impl EngineChild {
         }
         let mut code = 0u32;
         // SAFETY: handle 是有效进程句柄；GetExitCodeProcess 读取退出码（进程已退出）。
-        let ok = unsafe { GetExitCodeProcess(self.handle, &mut code) }.is_ok();
+        let ok = unsafe { GetExitCodeProcess(self.handle, &raw mut code) }.is_ok();
         // SAFETY: handle 使用后关闭；此后本结构不再持有。
         unsafe {
             let _ = CloseHandle(self.handle);

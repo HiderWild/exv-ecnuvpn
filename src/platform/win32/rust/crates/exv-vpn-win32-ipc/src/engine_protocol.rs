@@ -7,7 +7,7 @@
 //!
 //! 本模块冻结：
 //! - 帧 wire 格式：u32 BE 长度前缀 + JSON（serde），与 `scenarios::controlled` 的
-//!   write_json/read_json 同款（WSP1 冻结的 byte-mode pipe 帧形状）；
+//!   `write_json/read_json` 同款（WSP1 冻结的 byte-mode pipe 帧形状）；
 //! - 握手类型（`EngineHelloReq`/`EngineHelloReply`）：engine 与 core 在命令循环前完成
 //!   双向身份交换（engine 侧验 core 的 pid+SID；core 侧验 engine 的 pid+SID）；
 //! - 命令消息集（`CoreToEngine`）与事件/回复消息集（`EngineToCore`）；
@@ -35,7 +35,7 @@ use crate::peer_auth::VerifiedPipePeer;
 
 /// 帧头长度（u32 BE）。
 pub const FRAME_LEN_BYTES: usize = 4;
-/// 控制面单帧上限（1 MiB）——防御失控消息，与 controlled.rs 的 read_json 上限一致。
+/// 控制面单帧上限（1 MiB）——防御失控消息，与 controlled.rs 的 `read_json` 上限一致。
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
 
 /// 控制面帧 I/O 错误。
@@ -378,7 +378,7 @@ fn process_sid_from_pid(pid: u32) -> Option<String> {
     sid
 }
 
-/// 从 token 读取 TokenUser SID 字符串。
+/// 从 token 读取 `TokenUser` SID 字符串。
 fn token_user_sid_to_string(token: windows::Win32::Foundation::HANDLE) -> Option<String> {
     let mut buff = [0u8; 4096];
     let mut ret = 0u32;

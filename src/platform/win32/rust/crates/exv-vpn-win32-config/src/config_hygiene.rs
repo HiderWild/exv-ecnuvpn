@@ -4,7 +4,11 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::{ConfigError, ExvConfig, config::write_config_json_atomically, paths::config_path};
+use crate::{
+    ConfigError, ExvConfig, Protocol,
+    config::{DEFAULT_ATRUST_SERVER, DEFAULT_SERVER, write_config_json_atomically},
+    paths::config_path,
+};
 
 /// The configuration made available to startup callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +39,8 @@ pub fn load_for_startup(dir: &Path) -> Result<StartupConfig, ConfigError> {
         Ok(Value::Object(object)) => object,
         Ok(_) | Err(_) => return bootstrap_default(dir),
     };
+    let mut object = object;
+    hydrate_legacy_server_fields(&mut object);
     let config = match serde_json::from_value::<ExvConfig>(Value::Object(object.clone())) {
         Ok(config) => config,
         Err(_) => return bootstrap_default(dir),
@@ -63,6 +69,46 @@ fn bootstrap_default(dir: &Path) -> Result<StartupConfig, ConfigError> {
         config,
         requires_quick_start: true,
     })
+}
+
+/// 将旧活动 server 迁移为协议专属服务器字段，与 `load_from_dir` 保持一致。
+fn hydrate_legacy_server_fields(object: &mut Map<String, Value>) {
+    let protocol = object
+        .get("protocol")
+        .and_then(Value::as_str)
+        .and_then(|raw| raw.parse::<Protocol>().ok())
+        .unwrap_or(Protocol::Cisco);
+    if !object.contains_key("protocol") {
+        object.insert("protocol".into(), Value::String(Protocol::Cisco.as_str().into()));
+    }
+    if !object.contains_key("server") {
+        let default = match protocol {
+            Protocol::Cisco => DEFAULT_SERVER,
+            Protocol::Atrust => DEFAULT_ATRUST_SERVER,
+        };
+        object.insert("server".into(), Value::String(default.into()));
+    }
+    let legacy_server = object
+        .get("server")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !object.contains_key("cisco_server") {
+        let value = if protocol == Protocol::Cisco {
+            legacy_server.as_str()
+        } else {
+            DEFAULT_SERVER
+        };
+        object.insert("cisco_server".into(), Value::String(value.into()));
+    }
+    if !object.contains_key("atrust_server") {
+        let value = if protocol == Protocol::Atrust {
+            legacy_server.as_str()
+        } else {
+            DEFAULT_ATRUST_SERVER
+        };
+        object.insert("atrust_server".into(), Value::String(value.into()));
+    }
 }
 
 fn hydrate_known_fields(

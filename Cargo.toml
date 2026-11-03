@@ -13,6 +13,9 @@ license = "MIT"
 bytes = "1.12.1"
 futures-util = "0.3.34"
 http = "1.5.0"
+http-body-util = "0.1.4"
+hyper = { version = "1.11.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 prost = "0.14.4"
 prost-types = "0.14.4"
 protoc-bin-vendored = "3.2.0"
@@ -23,6 +26,7 @@ rustls-platform-verifier = "0.7.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+ring = "0.17.14"
 subtle = "2.6.1"
 tempfile = "3.27.0"
 thiserror = "2.0.20"

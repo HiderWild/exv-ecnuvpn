@@ -537,7 +537,7 @@ pub fn observe_gateway_egress(
     let mut ifindex = 0u32;
     // SAFETY: best_route 的 LUID 来自成功的 GetBestRoute2；ifindex 是有效输出地址。
     let index_code = unsafe {
-        ConvertInterfaceLuidToIndex(&best_route.InterfaceLuid, &raw mut ifindex)
+        ConvertInterfaceLuidToIndex(&raw const best_route.InterfaceLuid, &raw mut ifindex)
     }
     .0;
     if index_code != 0 {
@@ -601,10 +601,11 @@ pub fn find_rows_for_dest(dest: Ipv4Addr, prefix_len: u8) -> Result<Vec<RouteRow
     };
     let mut out = Vec::new();
     for r in rows {
-        if let Some(row) = from_api_row(r) {
-            if row.network == wanted && row.prefix_len == prefix_len {
-                out.push(row);
-            }
+        if let Some(row) = from_api_row(r)
+            && row.network == wanted
+            && row.prefix_len == prefix_len
+        {
+            out.push(row);
         }
     }
     // SAFETY: 释放系统分配的表。

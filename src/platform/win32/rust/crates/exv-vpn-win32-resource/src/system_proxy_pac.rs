@@ -69,7 +69,6 @@ fn err_fetch(kind: NativeErrorKind, code: u32, reason: String) -> NativeError {
 ///
 /// 原文为空、已带包装别名、声明缺失或多处、装配后括号不平衡时，返回
 /// `kind = Protocol`、message 以 `pac_script_unwrappable:` 开头的类型化错误。
-#[must_use]
 pub fn wrap_pac_script(original: &str, exempt: &[String]) -> Result<String, NativeError> {
     if original.trim().is_empty() {
         return Err(err_unwrappable("empty script"));
@@ -303,10 +302,10 @@ impl Drop for PacEndpoint {
         //    join 至多等一个窗口。
         self.worker.shutdown.store(true, Ordering::SeqCst);
         // 2) join 回收线程。
-        if let Ok(mut slot) = self.worker.handle.lock() {
-            if let Some(handle) = slot.take() {
-                let _ = handle.join();
-            }
+        if let Ok(mut slot) = self.worker.handle.lock()
+            && let Some(handle) = slot.take()
+        {
+            let _ = handle.join();
         }
     }
 }
@@ -515,7 +514,7 @@ fn find_header_end(raw: &[u8]) -> Option<usize> {
     raw.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-/// 解析 `http://127.0.0.1[:port]/…` 形式的 loopback URL 为 SocketAddr。
+/// 解析 `http://127.0.0.1[:port]/…` 形式的 loopback URL 为 `SocketAddr`。
 fn parse_loopback_http_url(url: &str) -> Result<SocketAddr, NativeError> {
     const HTTPS_HINT: &str =
         "https PAC URL unsupported in v1 (most proxy PACs are local http://127.0.0.1)";
@@ -547,7 +546,7 @@ fn parse_loopback_http_url(url: &str) -> Result<SocketAddr, NativeError> {
     Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
 }
 
-/// 拆 `host:port`；缺省端口为 80（PAC AutoConfigURL 常省略）。
+/// 拆 `host:port`；缺省端口为 80（PAC `AutoConfigURL` 常省略）。
 fn split_host_port(authority: &str) -> Result<(String, u16), NativeError> {
     match authority.rsplit_once(':') {
         Some((host, port)) => {

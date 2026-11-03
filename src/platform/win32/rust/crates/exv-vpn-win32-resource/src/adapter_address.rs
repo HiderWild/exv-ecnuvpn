@@ -14,7 +14,7 @@ use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_INET, SOCKET_ADDRESS
 
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 
-/// 按适配器 FriendlyName 读取第一个 IPv4 单播地址。
+/// 按适配器 `FriendlyName` 读取第一个 IPv4 单播地址。
 ///
 /// # Errors
 ///

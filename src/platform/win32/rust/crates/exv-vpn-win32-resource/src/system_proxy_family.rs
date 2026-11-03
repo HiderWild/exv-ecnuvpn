@@ -17,7 +17,7 @@
 //!   第三方中途改动是 typed skip，绝不强写（设计 §5.3）；
 //! - [`decide_replay`]：崩溃回放的三态裁决（§4.3 冻结）——比较序先 `written` 后
 //!   `prestate`：当前等于写入态且写入态异于 prestate → [`ReplayDecision::Restore`]；
-//!   当前等于 prestate（含退化全等，冻结返回 AlreadyClean）→
+//!   当前等于 prestate（含退化全等，冻结返回 `AlreadyClean`）→
 //!   [`ReplayDecision::AlreadyClean`]；其余（含用户手工修改）→
 //!   [`ReplayDecision::SkipForfeit`]（弃权清除，绝不强写）。
 //!
@@ -351,7 +351,7 @@ pub enum ReplayDecision {
     /// 含退化全等 `current==written==prestate`（零效果写入不可能记账；防御性
     /// 冻结其返回值为 AlreadyClean——还原将是零效果冗余写 + 广播）。
     AlreadyClean,
-    /// 其余（含用户中途手工修改）→ 绝不强写，记 restore_failures 日志后弃权清除
+    /// 其余（含用户中途手工修改）→ 绝不强写，记 `restore_failures` 日志后弃权清除
     /// （指纹不符即不再拥有，保留记录只会永久空转）。
     SkipForfeit,
 }

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, inject } from "vue";
+import AtrustBrowserFallback from "../components/AtrustBrowserFallback.vue";
 import ProductActionBar from "../components/ProductActionBar.vue";
 import ProductConnectionHero from "../components/ProductConnectionHero.vue";
 import ProductConnectionVisualStage from "../components/ProductConnectionVisualStage.vue";
 import { CONNECTION_INTERACTION_KEY } from "../product/connection-interaction";
-const emit = defineEmits<{ navigate: [page: 'settings'] }>();
+const emit = defineEmits<{ navigate: [page: 'settings' | 'logs'] }>();
 
 const { state: productState, busy: actionBusy, autoInstallService, runAction } = inject(CONNECTION_INTERACTION_KEY)!;
 const stateDescription = computed(() => {
@@ -39,8 +40,11 @@ const stateDescription = computed(() => {
         :auto-install="autoInstallService"
         @action="runAction"
         @settings="emit('navigate', 'settings')"
+        @logs="emit('navigate', 'logs')"
         @update:auto-install="autoInstallService = $event"
       />
+
+      <AtrustBrowserFallback />
 
       <div class="connection-layout">
         <ProductConnectionVisualStage :state="productState" />
@@ -79,6 +83,7 @@ const stateDescription = computed(() => {
 .operation-pending {
   margin-bottom: var(--space-4);
 }
+
 
 .connection-layout {
   container:connection-main / inline-size;

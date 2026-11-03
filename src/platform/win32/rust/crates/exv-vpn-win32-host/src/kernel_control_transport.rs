@@ -12,7 +12,7 @@
 //! [`UiKernelControlHandles`]。**UI 退出检测**：tonic `serve_with_incoming` 对单元素
 //! 传入流在 accept 后立即返回（流耗尽即 break，连接任务被 detached 继续服务）——
 //! serve 任务句柄**不能**当"UI 连接断开"信号（会假 resolve 触发假停机）。真实信号是
-//! [`spawn_ui_exit_watcher`]：监视已验证的 UI **进程**（OpenProcess + WaitForSingleObject）
+//! [`spawn_ui_exit_watcher`]：监视已验证的 UI **进程**（`OpenProcess` + `WaitForSingleObject`）
 //! 退出 → `UiLifetime::on_ui_exited` → `CoreRuntime` 感知停机；serve 任务以 pending 流
 //! 保持存活到 core 停机（abort）释放服务引用。UI 最小化到托盘进程仍存活，信号保持
 //! `true`，core 存活。
@@ -45,8 +45,8 @@ use crate::kernel_control_service::KernelControlService;
 use crate::shutdown::UiLifetime;
 
 /// SYNCHRONIZE（0x00100000）：等待进程句柄退出所需的最小访问权（OpenProcess）。
-/// windows crate 0.62 将其挂在 FileSystem 的 FILE_ACCESS_RIGHTS 下；此处直接构造
-/// PROCESS_ACCESS_RIGHTS 避免依赖位置（数值 = 标准 access right，稳定）。
+/// windows crate 0.62 将其挂在 `FileSystem` 的 `FILE_ACCESS_RIGHTS` 下；此处直接构造
+/// `PROCESS_ACCESS_RIGHTS` 避免依赖位置（数值 = 标准 access right，稳定）。
 const SYNCHRONIZE: PROCESS_ACCESS_RIGHTS = PROCESS_ACCESS_RIGHTS(0x0010_0000);
 
 /// windows `HANDLE`（`*mut c_void`）非 `Send` 的等待封装：进程句柄是线程安全的句柄值，
@@ -87,6 +87,7 @@ fn digest32(bytes: &[u8]) -> [u8; 32] {
 /// 经 `LookupAccountSidW` 解析 SID 的 account name（gate 授权需要；任何失败返回空串——
 /// 调用方据此 fail closed）。`pub` 供 core 入口（bin crate）构造 composition 绑定的
 /// engine peer 身份时复用。
+#[must_use]
 pub fn lookup_account_name(sid: &str) -> String {
     let sid_str = windows::core::HSTRING::from(sid);
     let mut sid_ptr = PSID(std::ptr::null_mut());
@@ -145,7 +146,7 @@ pub fn verify_ui_peer(
     let mut pid = 0u32;
     // SAFETY: `server.as_raw_handle()` 是已连接的 server pipe 句柄，`pid` 是活输出参数。
     if let Err(e) = unsafe {
-        GetNamedPipeClientProcessId(HANDLE(server.as_raw_handle() as *mut c_void), &raw mut pid)
+        GetNamedPipeClientProcessId(HANDLE(server.as_raw_handle().cast::<c_void>()), &raw mut pid)
     } {
         return Err(format!("ui process query failed: {e}"));
     }
@@ -178,7 +179,7 @@ pub fn verify_ui_peer(
     })
 }
 
-/// 创建 UI-facing 控制面管道（FIRST_INSTANCE + REJECT_REMOTE_CLIENTS；DACL = SYSTEM +
+/// 创建 UI-facing `控制面管道（FIRST_INSTANCE` + `REJECT_REMOTE_CLIENTS；DACL` = SYSTEM +
 /// `ui_sid`，经 `PipeSecurity` 冻结形状）。
 ///
 /// # Errors
@@ -204,7 +205,7 @@ pub fn create_kernel_control_pipe_server(
     // SAFETY: `attributes` 是活的 `SECURITY_ATTRIBUTES`，其 `lpSecurityDescriptor` 指向
     // `security` 拥有的活 descriptor；两者同一作用域内本调用期间存活。tokio 把指针原样
     // 作为 `CreateNamedPipeW` 的 `lpSecurityAttributes` 转发，创建时复制 DACL。
-    unsafe { options.create_with_security_attributes_raw(name, &raw mut attributes as *mut c_void) }
+    unsafe { options.create_with_security_attributes_raw(name, (&raw mut attributes).cast::<c_void>()) }
 }
 
 /// `serve_kernel_control_pipe` 返回的句柄组（P4 经 `CoreRuntime::set_serve_task` /
@@ -215,7 +216,7 @@ pub struct UiKernelControlHandles {
     pub ui_peer: VerifiedPipePeer,
     /// 运行 `KernelControl` tonic serve 的任务。**不是"UI 断开"信号**——tonic
     /// `serve_with_incoming` 对单元素流在 accept 后立即返回（见模块文档），若把它的
-    /// JoinHandle 当 UI 退出判据会假停机；serve 任务以 pending 流保持存活，由
+    /// `JoinHandle` 当 UI 退出判据会假停机；serve 任务以 pending 流保持存活，由
     /// [`spawn_ui_exit_watcher`] 在 UI 进程退出时发真实信号。停机时 abort 本任务以释放
     /// router 持有的服务引用（停止接收 UI 请求）。
     pub serve_task: tokio::task::JoinHandle<()>,
@@ -229,7 +230,7 @@ pub struct UiKernelControlHandles {
     /// C3a 自动重连 worker 任务（持服务克隆；停机先中止以释放引用——否则 worker 永久
     /// 引用服务克隆）。
     pub reconnect_worker: tokio::task::JoinHandle<()>,
-    /// P2 KeepAlive 心跳 tick 任务（持 engine 控制面 Arc；停机先中止以释放引用——
+    /// P2 `KeepAlive` 心跳 tick 任务（持 engine 控制面 Arc；停机先中止以释放引用——
     /// engine 侧据此刷新 `last_heartbeat`，15s 未收到即自清理+自退出）。
     pub keepalive_ticker: tokio::task::JoinHandle<()>,
 }
@@ -246,12 +247,9 @@ fn spawn_ui_exit_watcher(ui_pid: u32, ui: UiLifetime) {
     tokio::spawn(async move {
         // SAFETY: OpenProcess 打开同用户 UI 进程句柄（SYNCHRONIZE 足以等待退出）；
         // 失败即认为 UI 已退出（fail-safe）。
-        let handle = match unsafe { OpenProcess(SYNCHRONIZE, false, ui_pid) } {
-            Ok(handle) => handle,
-            Err(_) => {
-                ui.on_ui_exited();
-                return;
-            }
+        let handle = if let Ok(handle) = unsafe { OpenProcess(SYNCHRONIZE, false, ui_pid) } { handle } else {
+            ui.on_ui_exited();
+            return;
         };
         // WaitForSingleObject 是阻塞调用 → spawn_blocking 隔离（不占异步 worker）。
         // WaitHandle 提供 Send（windows HANDLE 非 Send，见上）；必须经方法调用触发

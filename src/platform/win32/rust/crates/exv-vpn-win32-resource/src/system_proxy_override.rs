@@ -371,7 +371,7 @@ pub fn write_override_for_user(sid: &str, merged: &str) -> Result<bool, NativeEr
 /// 按 `RawValue` 的 type+data 字节级写回发起用户的任一受管值（设计 §5.3
 /// 「存在 → 按 type+data 字节级写回」）。
 ///
-/// [`RawValue::Sz`] 以 UTF-16LE 单元 + 尾部 NUL（REG_SZ 存储契约）；
+/// [`RawValue::Sz`] 以 UTF-16LE 单元 + 尾部 `NUL（REG_SZ` 存储契约）；
 /// [`RawValue::Dword`] 以 4 字节小端；[`RawValue::Other`] 原样写回原始
 /// type + 数据字节。值打开/写入失败 → 类型化错误。
 ///
@@ -454,7 +454,7 @@ pub fn write_back_value_for_user(sid: &str, value: ValueName, data: &RawValue) -
 
 /// 删除发起用户的受管值（设计 §5.3「原本不存在 → 还原时删除该值」）。
 ///
-/// 值已不存在（ERROR_FILE_NOT_FOUND）→ 幂等成功（删除意图已满足）。
+/// `值已不存在（ERROR_FILE_NOT_FOUND`）→ 幂等成功（删除意图已满足）。
 ///
 /// # Errors
 ///

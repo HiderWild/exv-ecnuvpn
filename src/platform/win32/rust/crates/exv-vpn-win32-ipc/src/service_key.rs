@@ -29,8 +29,8 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
         ipad[i] ^= key[i];
         opad[i] ^= key[i];
     }
-    let inner = Sha256::digest(&[&ipad[..], msg].concat());
-    let out = Sha256::digest(&[&opad[..], &inner[..]].concat());
+    let inner = Sha256::digest([&ipad[..], msg].concat());
+    let out = Sha256::digest([&opad[..], &inner[..]].concat());
     let mut o = [0u8; 32];
     o.copy_from_slice(&out);
     o
@@ -99,7 +99,7 @@ pub fn write_service_psk(installer_sid: &str) -> Result<[u8; 32], String> {
             windows::core::PCWSTR(wide.as_ptr()),
             GENERIC_WRITE.0,
             FILE_SHARE_READ,
-            Some(&raw const attributes as *const _),
+            Some((&raw const attributes).cast()),
             CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL,
             None,

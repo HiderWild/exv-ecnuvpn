@@ -40,7 +40,11 @@ pub struct QuickStartApplyReply {
 /// `connection_mode` 就是这样漏掉的）。键序逐行对齐前端草稿，便于直接比对。
 /// `quick_start_apply_accepts_the_full_frontend_draft_key_set` 钉住这条不变量。
 const ALLOWED_CONFIG_KEYS: &[&str] = &[
+    "protocol",
     "server",
+    "cisco_server",
+    "atrust_server",
+    "atrust_auth_mode",
     "username",
     "password",
     "remember_password",
@@ -51,15 +55,30 @@ const ALLOWED_CONFIG_KEYS: &[&str] = &[
     "auto_reconnect",
     "auto_reconnect_max_attempts",
     "auto_reconnect_backoff",
+    // T4 重连两设置项（§2.8；连接信封镜像键）。
+    "reconnect_on_oneshot_engine_crash",
+    "reconnect_notify",
 ];
 
 /// Tauri 快速入门命令。`app/src/lib.rs` 统一负责命令注册。
+///
+/// T9（§2.9 业务唤醒）：快速入门 = 保存配置 + 服务安装，同属关键业务动作——core
+/// 不可达时先确认死亡并重拉（有界等待就绪），唤醒成功后重试原编排；唤醒失败 →
+/// typed `CoreWakeFailed`（前端弹「尝试重启程序 / 仅退出」模态）。
 #[tauri::command]
 pub async fn quick_start_apply(
+    app: tauri::AppHandle,
     state: State<'_, CoreState>,
+    session: State<'_, super::client::CoreSession>,
     request: QuickStartApplyRequest,
 ) -> Result<QuickStartApplyReply, AppError> {
-    apply(&CoreClient, &state, request).await
+    match apply(&CoreClient, &state, request.clone()).await {
+        Err(AppError::CoreUnreachable(_)) => {
+            super::bootstrap::ensure_core_available(&app, &state, &session).await?;
+            apply(&CoreClient, &state, request).await
+        }
+        other => other,
+    }
 }
 
 /// 可在真实 Core gRPC 边界测试的编排实现。

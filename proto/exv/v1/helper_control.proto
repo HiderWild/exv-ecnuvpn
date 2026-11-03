@@ -1,4 +1,37 @@
 
+// This file is the shared wire authority for the Windows helper topology's
+// declarative service. It does NOT expose fine-grained platform commands
+// (route/dns/device primitives); it only carries high-level declarative
+// operations. The wire AcquireLease maps to domain AcquireOwnership.
+// Domain code never exposes generated types directly.
+//
+// WIRE DECISION (productization Phase 1, P1-1/P1-2): product core<->engine
+// wire is tonic gRPC over this proto contract ONLY. The self-developed JSON
+// frame protocol (src/platform/win32/rust/crates/exv-vpn-win32-ipc/src/
+// engine_protocol.rs, u32 BE length + JSON) is legacy / acceptance-only: it is
+// retained for the acceptance harness and as the raw-dump serialization
+// reference, never used as a product channel. Log streaming between engine
+// (server) and core (client) is defined here as HelperControl.StreamLogs.
+//
+// Field tags are permanently assigned and never reused. Reserved ranges:
+//   reserved 9000 to 9999  : internal / future use, never shipped
+//   reserved 1000 to 1999  : burn-in guard for each message
+// A tag that is vacated is recorded as a reserved range in this file before
+// any reuse is ever permitted; reuse is forbidden by policy.
+//
+// Security invariants (mirrored from common.proto section 9.2):
+//   * Peer identity is derived exclusively from verified transport metadata,
+//     never from a client-supplied field; no field self-reports platform
+//     identity.
+//   * Capabilities are non-forwardable, not logged, not persisted in plaintext,
+//     not reused, compared in constant time, and revoked on Stop, OwnerLost,
+//     authority restart, or expiry. Only digests are retained for
+//     correlation/audit and are never treated as authorization material.
+//   * Secrets travel only as one-shot bytes and are never persisted, logged,
+//     or replayed; they are cleared immediately after authorization.
+//   * Every cross-process VpnError uses the canonical ErrorSubject oneof from
+//     common.proto with exactly six branches.
+
 syntax = "proto3";
 
 package exv.vpn.v1;
@@ -268,6 +301,37 @@ message ApplyTunnelRequest {
   bytes request_digest = 3;  // 32 bytes
   bytes secret_payload = 4;  // one-shot CSTP credentials; zeroized after use
   WindowsConnectionMode windows_connection_mode = 5;
+  // EXV_UNFREEZE 2026-09-27 (T4 connect-lifecycle envelope; see the header block).
+  // Policy mirrors for the engine's connection trace; NEVER authorization material.
+  // Absent (old core) reads as TEARDOWN — legacy semantics. New cores always send
+  // their configured value (default KEEP, decision D6).
+  OnCoreExitPolicy on_core_exit = 6;
+  // Absent (old core) reads as {enabled:false, on_oneshot_engine_crash:false,
+  // notify:true} — the pre-T4 "engine never reconnects" state.
+  ReconnectPolicyEnvelope reconnect_policy = 7;
+  // The UI process id behind the core (core startup arg --ui-pid); 0 = unknown.
+  // Lets the engine's relaunched core (T10) find the live UI's pipe; recorded in
+  // the connection trace (§2.9 gap ①).
+  uint32 ui_pid = 8;
+  reserved 9000 to 9999;
+  reserved 1000 to 1999;
+}
+
+// What the engine does with the connection when its core goes away
+// (EXV_UNFREEZE 2026-09-27, T4; plan §2.5/§2.6, decision D6).
+enum OnCoreExitPolicy {
+  ON_CORE_EXIT_POLICY_UNSPECIFIED = 0;  // absent/old core → read as TEARDOWN (legacy)
+  ON_CORE_EXIT_POLICY_KEEP = 1;         // keep the tunnel, await core re-adoption
+  ON_CORE_EXIT_POLICY_TEARDOWN = 2;     // tear down and run aftermath (legacy)
+}
+
+// Reconnect policy mirror carried per connect (EXV_UNFREEZE 2026-09-27, T4; plan
+// §2.7/§2.8 — mirrors core config keys into the trace). All sub-fields must be set
+// explicitly by new cores (proto3 scalar defaults otherwise).
+message ReconnectPolicyEnvelope {
+  bool enabled = 1;                    // config `auto_reconnect` (R1 master switch)
+  bool on_oneshot_engine_crash = 2;    // config `reconnect_on_oneshot_engine_crash` (R2 oneshot gate; default off)
+  bool notify = 3;                     // config `reconnect_notify` (tray-bubble notifications; default on)
   reserved 9000 to 9999;
   reserved 1000 to 1999;
 }
@@ -418,6 +482,10 @@ message StatsEvent {
   uint64 rx_rate = 6;       // sampled bytes/sec since the prior sample; 0 = none
   uint64 tx_rate = 7;       // sampled bytes/sec since the prior sample; 0 = none
   uint64 latency_ms = 8;    // 0 = unknown/unavailable
+  // EXV_UNFREEZE 2026-09-27 (T6a engine-side R1 reconnect, eighth unfreeze):
+  // cumulative R1 self-heal counters per engine boot (0 = pre-T6a engine / none).
+  uint64 reconnect_attempts_total = 9;   // reconnect attempts started (engine self-heal)
+  uint64 reconnect_successes_total = 10; // reconnect attempts that reached a Live tunnel
   reserved 9000 to 9999;
   reserved 1000 to 1999;
 }
@@ -464,9 +532,26 @@ message ConnectStatusEvent {
   // 当前宿主 Engine 实际持有的隧道接口索引；0 表示当前事件无接口事实。
   // Darwin 用于外部 TUN 只读检测时排除 EXV 自身；不决定另一宿主行为。
   uint32 own_tunnel_if_index = 6;
+  // EXV_UNFREEZE 2026-09-27 (T5 engine 兜底善后，第七次窄解冻)：断开/善后终态
+  // 事件的「清理已验证」信号。true = engine 已完成善后并复验干净（连接痕迹已删，
+  // core/UI 可安全清除本地会话状态——core 侧删除权前提"善后已验证"由此满足）；
+  // false = 未验证 / 残留 / 不适用（旧 engine 或非终态事件缺省 false）。只随
+  // coarse_phase = Idle 的终态事件携带语义；携带的是验证结论，绝不是授权材料。
+  bool aftermath_verified = 7;
+  // EXV_UNFREEZE 2026-09-27 (T6a engine 侧 R1 重连，第八次窄解冻)：重连生命周期的
+  // 进度遥测。只随 engine 自愈事件（reconnecting / reconnected / R1 终态）携带；
+  // 缺省 = 无重连语义（旧 engine / 非重连事件）。进度与结论遥测，绝不是授权材料。
+  ReconnectState reconnect_state = 8;
   reserved 9000 to 9999;
   reserved 1000 to 1999;
 }
+
+// Engine-side R1 self-heal progress telemetry (EXV_UNFREEZE 2026-09-27, T6a
+// eighth unfreeze). ReconnectState now lives in common.proto (moved there by
+// the tenth unfreeze — 2026-09-27, T8 adoption handshake — so
+// RuntimeSnapshot.engine_reconnect can carry it without a circular import;
+// same exv.vpn.v1 package, identical generated symbol, wire-invisible move).
+// See common.proto for the field contract.
 
 // ---------------------------------------------------------------------------
 // KeepAlive (P2: bounded-retention heartbeat)

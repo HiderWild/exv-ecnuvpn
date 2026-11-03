@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import PasswordField from "./PasswordField.vue";
 import { credentialConfigFor } from "../product/core-config";
+import { handleCoreWakeFailure } from "../product/core-crash";
 import { computed, inject, ref, watch } from "vue";
 
 import RoutesEditor from "./RoutesEditor.vue";
@@ -11,7 +12,13 @@ import {
   type QuickStartApplyRequest,
 } from "../lib/ipc";
 import { APPEARANCE_KEY } from "../product/appearance";
-import { CORE_CONFIG_GATEWAY_KEY, createCoreConfigGateway } from "../product/core-config";
+import {
+  CORE_CONFIG_GATEWAY_KEY,
+  PROTOCOL_OPTIONS,
+  createCoreConfigGateway,
+  defaultServerFor,
+  protocolFromConfig,
+} from "../product/core-config";
 import { PRODUCT_RUNTIME_KEY } from "../product/runtime";
 import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../product/service-operations";
 import {
@@ -105,6 +112,7 @@ watch(
 
 function updateText(key: keyof QuickStartDraft, event: Event): void {
   draft.value[key] = (event.target as HTMLInputElement).value;
+  if (key === "server") draft.value[draft.value.protocol === "atrust" ? "atrust_server" : "cisco_server"] = draft.value.server;
   if (key === "username" || key === "password" || key === "server") {
     fieldErrors.value = { ...fieldErrors.value, [key]: undefined };
   }
@@ -117,6 +125,15 @@ function updateBoolean(key: "auto_reconnect" | "install_service", event: Event):
 
 function onRoutesChange(nextRoutes: string[]): void {
   draft.value.routes = nextRoutes.join(",");
+}
+
+/** 协议切换时保存当前侧的服务器，再恢复另一协议各自保存的服务器。 */
+function onProtocolChange(event: Event): void {
+  const next = protocolFromConfig((event.target as HTMLSelectElement).value);
+  const previous = protocolFromConfig(draft.value.protocol);
+  draft.value[previous === "atrust" ? "atrust_server" : "cisco_server"] = draft.value.server;
+  draft.value.protocol = next;
+  draft.value.server = draft.value[next === "atrust" ? "atrust_server" : "cisco_server"] || defaultServerFor(next);
 }
 
 function saveAdvancedUiPreferences(pending: QuickStartDraft): Promise<boolean> {
@@ -229,10 +246,11 @@ async function submit(): Promise<void> {
       savedAwaitingRefresh.value = true;
       await refreshSavedConfiguration();
     }
-  } catch {
-    // 刻意不回显异常原文：apply 的传输错误文本可能内嵌密码（见
-    // `QuickStartCredentials.test.ts` 的 `错误不携带凭据` 用例），因此这里必须保持
-    // 与原因无关的固定文案。真实拒绝原因需从别处诊断。
+  } catch (error) {
+    // T9（§2.9）：快速入门提交前唤醒 core 失败 → 全局「尝试重启程序 / 仅退出」模态。
+    // 唤醒失败错误由壳层生成（不含凭据），可安全展示；其余异常保持与原因无关的
+    // 固定文案（见 `QuickStartCredentials.test.ts` 的 `错误不携带凭据` 用例）。
+    if (handleCoreWakeFailure(error)) return;
     submitError.value = "快速入门提交失败，请重试。";
   } finally {
     submitting.value = false;
@@ -348,6 +366,19 @@ async function submit(): Promise<void> {
           </label>
         </div>
         <div class="quick-start-advanced-column" data-testid="quick-start-advanced-column">
+          <label>
+            VPN 协议
+            <select :value="draft.protocol" data-testid="quick-start-protocol" @change="onProtocolChange($event)">
+              <option v-for="option in PROTOCOL_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label v-if="draft.protocol === 'atrust'">
+            aTrust 认证方式
+            <select v-model="draft.atrust_auth_mode" data-testid="quick-start-atrust-auth-mode">
+              <option value="browser">浏览器</option>
+              <option value="embedded">网页内嵌</option>
+            </select>
+          </label>
           <label>
             VPN 服务器
             <input :value="draft.server" data-testid="quick-start-server" @input="updateText('server', $event)">

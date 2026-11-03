@@ -70,7 +70,7 @@ impl NetworkMonitor {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.revision = state.revision.wrapping_add(1);
         state.key = None;
         state.cached = None;
@@ -80,7 +80,7 @@ impl NetworkMonitor {
         let different = self
             .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .key
             .is_some_and(|key| {
                 Some(key.operation_id) != operation_id || key.engine_generation != generation
@@ -123,7 +123,7 @@ impl NetworkMonitor {
         if self
             .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .key
             == Some(key)
         {
@@ -131,7 +131,7 @@ impl NetworkMonitor {
         }
         self.cancel();
         let revision = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.key = Some(key);
             state.revision
         };
@@ -181,7 +181,7 @@ impl NetworkMonitor {
                             &mut previous_outcome,
                         ),
                         Err(_) => {
-                            emit_monitor_skip(&logs, &context, "timeout", &mut previous_outcome)
+                            emit_monitor_skip(&logs, &context, "timeout", &mut previous_outcome);
                         }
                     }
                 } else {
@@ -200,7 +200,7 @@ impl NetworkMonitor {
             task.abort();
         }
         let cached = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.revision = state.revision.wrapping_add(1);
             state.key = None;
             state.cached.take()
@@ -237,7 +237,7 @@ impl NetworkMonitor {
         let key = self
             .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .key;
         if let Some(key) = key.filter(|key| key.engine_generation == generation) {
             let context = SnapshotContext::new(
@@ -292,7 +292,7 @@ fn commit_monitor_sample(
     context: &SnapshotContext,
 ) -> Option<(&'static str, BTreeMap<String, String>)> {
     let state = state.upgrade()?;
-    let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+    let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if state.key != Some(key) || state.revision != revision {
         return None;
     }

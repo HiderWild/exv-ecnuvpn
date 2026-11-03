@@ -298,10 +298,10 @@ impl LogSink {
         let (tx, rx) = mpsc::channel(STREAM_CAPACITY);
         if resume_tick > 0 {
             for (tick, event) in &inner.history {
-                if *tick > resume_tick {
-                    if tx.try_send(Ok(event.clone())).is_err() {
-                        break; // 通道满：补拉 best-effort，不阻塞。
-                    }
+                if *tick > resume_tick
+                    && tx.try_send(Ok(event.clone())).is_err()
+                {
+                    break; // 通道满：补拉 best-effort，不阻塞。
                 }
             }
         }
@@ -318,7 +318,7 @@ impl LogSink {
     /// 是否挂接着至少一条推送通道（测试/观测）。
     #[must_use]
     pub fn is_push_attached(&self) -> bool {
-        self.inner.lock().expect("log sink mutex").push.is_empty() == false
+        !self.inner.lock().expect("log sink mutex").push.is_empty()
     }
 
     /// 当前 raw dump 文件路径（未创建时也只是候选路径）。

@@ -2,7 +2,7 @@
 // 产品化（2026-08-19，随 host 一致）：engine 为特权产品进程，隐藏控制台黑框。
 #![windows_subsystem = "windows"]
 
-//! 特权 **engine** 进程二进制（生产控制面 = HelperControl gRPC，P1-b）。
+//! 特权 **engine** 进程二进制（生产控制面 = `HelperControl` gRPC，P1-b）。
 //!
 //! 被 core（普通权限，`exv-core`）经 `ShellExecuteExW(runas)` 提权拉起
 //! （`engine_bin_path` 定位本二进制 = `exv-engine(.exe)`），是两进程架构中的
@@ -12,7 +12,7 @@
 //! 的控制面参数（对齐 `EngineControlGrpcClient::connect` 的管道 + 双向 peer 认证），
 //! 组装 [`HelperControlService`]，经 `grpc_transport::serve_named_pipe` 建控制面
 //! Named Pipe（DACL = SYSTEM + core 用户 SID）→ accept 一个 core 连接 → 双向认证 →
-//! serve HelperControl gRPC。
+//! serve `HelperControl` gRPC。
 //!
 //! **进程生命周期**（D1 解耦：engine 生命周期 = core 生命周期，业务停机与进程退出解耦）：
 //! - 业务停机：core 发 `StopTunnel` → [`HelperControlService`] 拆隧道 + publish Idle →
@@ -23,7 +23,7 @@
 //!   未收到 → 自清理 + 自退出——硬时间界兜底）。**两退出路径都无条件走完整序**
 //!   （P3 折叠项：cancel → 有界等待 → teardown → post Idle → 300ms flush → 退）——
 //!   进程句柄路径下 core 正常停机已完成业务 teardown（二次 teardown 幂等，`live.take`
-//!   为 None → Ok），但 core 在 connect 中/已连接时被杀（无 StopTunnel 业务停机）必须
+//!   为 None → Ok），但 core 在 connect 中/已连接时被杀（无 `StopTunnel` 业务停机）必须
 //!   由本路径兜底撤网卡/路由（判据 4：任意时刻被杀 0 路由残留）。
 //!
 //! 与 acceptance `exv-win32-engine`（legacy JSON frame 命令循环）的差异：本二进制是
@@ -106,7 +106,7 @@ struct EngineArgs {
     /// wintun.dll 路径（本 MVP 阶段由 engine 侧后续 slice 消费）。
     dll: PathBuf,
     /// durable journal 目录（`--journal-dir`；2026-09-05 账本计划起真正接线：系统代理
-    /// 账本的 open_and_replay 与运行期记账都在此目录，host 传机器级稳定路径
+    /// 账本的 `open_and_replay` 与运行期记账都在此目录，host 传机器级稳定路径
     /// `%ProgramData%\ExvVpn\journal`，崩溃/重启后同路径可回放）。
     journal_dir: PathBuf,
     /// `Local\`-scoped authority mutex 名（后续 authority 组合使用）。
@@ -118,7 +118,7 @@ struct EngineArgs {
     /// core 进程显式传入的用户 SID——engine 用它建控制面管道 DACL（授权普通用户 core
     /// 连接）；缺省时回退 engine 本进程用户 SID（同用户拓扑下两者相等）。
     core_user_sid: Option<String>,
-    /// 用户配置目录；服务形态不能依赖 LocalSystem 的 `%USERPROFILE%`。
+    /// 用户配置目录；服务形态不能依赖 `LocalSystem` 的 `%USERPROFILE%`。
     config_dir: PathBuf,
     /// 服务形态是否收到有效的显式 `--config-dir`（SCM 启动必须带该参数）。
     config_dir_explicit: bool,
@@ -154,7 +154,7 @@ fn parse_fields(argv: &[String]) -> EngineArgs {
             "--control-pipe" => a.control_pipe = argv.get(i + 1).cloned().unwrap_or_default(),
             "--dll" => a.dll = PathBuf::from(argv.get(i + 1).cloned().unwrap_or_default()),
             "--journal-dir" => {
-                a.journal_dir = PathBuf::from(argv.get(i + 1).cloned().unwrap_or_default())
+                a.journal_dir = PathBuf::from(argv.get(i + 1).cloned().unwrap_or_default());
             }
             "--authority-name" => a.authority_name = argv.get(i + 1).cloned().unwrap_or_default(),
             "--host-pid" => {
@@ -275,7 +275,7 @@ enum EngineExitTrigger {
 /// - **service**：连续 accept-loop（`serve_named_pipe_loop`）→ SCM stop 信号 →
 ///   [`service_exit_cleanup`]（无心跳 watchdog、无 core-pid watch）。
 ///
-/// `shutdown_tx`（2026-09-05 方案 B，增参穿入）：`run_service_main` 把**既有** scm_stop
+/// `shutdown_tx`（2026-09-05 方案 B，增参穿入）：`run_service_main` 把**既有** `scm_stop`
 /// watch 的 Sender 克隆传入（`Some`），`run_engine` 转交 `HelperControlService`
 /// （`with_shutdown_signal`）——`Shutdown` RPC 受理后延迟触发与 SCM stop 相同的 watch，
 /// 不新增第二根通道。`EngineExitForm` 定义于 `service.rs`（计划领地不可改），故经本
@@ -313,6 +313,12 @@ async fn run_engine(
         // 发起用户 SID：系统代理豁免写入该用户 HKU（engine 以服务身份运行）。
         Some(core_sid.clone()),
         args.journal_dir.clone(),
+        // T4 连接门：本进程实际形态（service / oneshot）随受理写入连接痕迹。
+        if matches!(form, EngineExitForm::Service { .. }) {
+            exv_engine::connection_trace::TraceEngineMode::Service
+        } else {
+            exv_engine::connection_trace::TraceEngineMode::Oneshot
+        },
     );
     // S3/D7：service 形态启用 owner 断线释放（连接 EOF → 释放 owner + version++）。
     // oneshot 保持一次性 owner（host 握手后关流，owner 跨 stream 保持）。
@@ -329,6 +335,10 @@ async fn run_engine(
     };
     let runtime = service.runtime_handle();
     let status = service.status_publisher();
+    // T5 兜底善后驱动：oneshot 随行退出路径在完整停机序（teardown→Idle→flush）之后
+    // 收口连接痕（复验干净→删；残留→留 Aftermath 给下次预检）。keep 无头续存在
+    // oneshot 形态依赖 T10（拉起底质+心跳退出动作策略化），退出即终局。
+    let aftermath = service.aftermath_driver();
 
     match form {
         EngineExitForm::Oneshot {
@@ -353,6 +363,11 @@ async fn run_engine(
             let trigger = await_core_process_exit(process_wait, heartbeat_watch).await;
             // 完整序（含「关机瞬间 connect 中」）：teardown → post Idle → flush → 退。
             shutdown_after_trigger(trigger, runtime, status).await;
+            // T5：退出前善后收口（teardown 已完成——此处只复验+摘要+（干净）删痕；
+            // core 已死/引擎将亡，无人再驱动善后，删除权归 engine §2.4）。
+            if let Some(aftermath) = aftermath {
+                aftermath.on_engine_exit().await;
+            }
         }
         EngineExitForm::Service { scm_stop } => {
             let mut ready = ready_tx.map(ControlPlaneReady::new);
@@ -511,7 +526,7 @@ fn dispatch_service_batch(argv: &[String]) -> Result<i32, String> {
     outcome.map(|()| 0).map_err(|e| format!("service-batch failed: {e}"))
 }
 
-/// 注册 SCM ServiceMain 并阻塞当前线程直至服务停止（`--service` 入口）。
+/// 注册 SCM `ServiceMain` 并阻塞当前线程直至服务停止（`--service` 入口）。
 ///
 /// 必须由 SCM 启动（`StartServiceCtrlDispatcherW` 要求服务控制分派器环境）；直接运行会
 /// 失败（`ERROR_FAILED_SERVICE_CONTROLLER_CONNECT`）——诚实报告该限制。
@@ -523,7 +538,7 @@ fn run_service_dispatcher() -> Result<i32, String> {
 
 define_windows_service!(ffi_service_main, service_main_handler);
 
-/// SCM ServiceMain 入口（`define_windows_service!` 生成的 FFI 回调委托至此；在 SCM
+/// SCM `ServiceMain` 入口（`define_windows_service!` 生成的 FFI 回调委托至此；在 SCM
 /// 派发的后台线程执行）。任何失败记日志并以非零码退（SCM 观察 Stopped + 退出码）。
 fn service_main_handler(arguments: Vec<OsString>) {
     if let Err(e) = run_service_main(&arguments) {
@@ -550,7 +565,7 @@ fn record_service_startup_error(error: &str) {
     let _ = writeln!(file, "service_startup_error: {error}");
 }
 
-/// 服务主路径（SCM 派发线程）：注册控制处理器 → 报告 StartPending → 等待控制面 ready
+/// 服务主路径（SCM 派发线程）：注册控制处理器 → 报告 `StartPending` → 等待控制面 ready
 /// → 报告 Running → 运行 engine（service 形态）→ 报告 Stopped。
 fn run_service_main(arguments: &[OsString]) -> Result<(), String> {
     let service_argv: Vec<String> = arguments
@@ -630,7 +645,7 @@ fn run_service_main(arguments: &[OsString]) -> Result<(), String> {
         }
     });
 
-    let exit_code = if run.is_ok() { 0 } else { 1 };
+    let exit_code = u32::from(run.is_err());
     status_handle
         .set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
@@ -677,10 +692,10 @@ async fn service_exit_cleanup(
 /// **两退出路径无条件走同一完整序**（P3 折叠项[1]）：
 /// - [`EngineExitTrigger::HeartbeatTimeout`]：自清理 + 自退出——cancel 在途组装 →
 ///   teardown 撤网卡/路由 → post Idle → 300ms flush。
-/// - [`EngineExitTrigger::CoreProcessExited`]：core 正常关机已由 StopTunnel 完成业务
+/// - [`EngineExitTrigger::CoreProcessExited`]：core 正常关机已由 `StopTunnel` 完成业务
 ///   teardown + Idle → **二次 teardown 幂等**（[`RealTunnelRuntime::teardown`] 的
-///   `live.take()` 为 None → Ok，no-op）→ post Idle（空 operation_id，host 侧空 id
-///   过滤丢弃）→ 300ms flush。但 core 在 connect 中/已连接时被杀（无 StopTunnel 业务
+///   `live.take()` 为 None → Ok，no-op）→ post Idle（空 `operation_id，host` 侧空 id
+///   过滤丢弃）→ 300ms flush。但 core 在 connect 中/已连接时被杀（无 `StopTunnel` 业务
 ///   停机）必须由本路径兜底撤网卡/路由——判据 4「任意时刻被杀 0 路由残留」的 engine
 ///   侧核心。
 ///
@@ -703,7 +718,7 @@ async fn shutdown_after_trigger(
 /// core 进程句柄 signaled（[`EngineExitTrigger::CoreProcessExited`]）或心跳超时
 /// （[`EngineExitTrigger::HeartbeatTimeout`]）。
 ///
-/// - **业务停机与进程退出解耦**：StopTunnel 只做业务停机（拆隧道 + publish Idle），
+/// - **业务停机与进程退出解耦**：`StopTunnel` 只做业务停机（拆隧道 + publish Idle），
 ///   engine 回 Idle **常驻**，不触发本等待——进程退出仅由上述两类信号触发。
 /// - 300ms flush 由调用方在自清理（心跳路径 teardown→Idle）之后执行，保证顺序
 ///   teardown → Idle → flush → 退。

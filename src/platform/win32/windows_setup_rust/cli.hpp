@@ -42,6 +42,10 @@ std::optional<CliOptions> ParseCli(int argc, wchar_t **argv);
 // Default per-user install directory: %LOCALAPPDATA%\Programs\EXV
 std::wstring DefaultInstallDir();
 
+// Existing per-user installs keep their registered location on upgrades.
+std::wstring ResolveDefaultInstallDir(const std::wstring &registered_install_dir,
+                                      const std::wstring &fallback_dir);
+
 // GUI directory resolution keeps uninstall empty when /D was not supplied so
 // the uninstall engine can read the registered custom install directory.
 std::wstring ResolveGuiInstallDir(bool uninstall, const CliOptions &options);

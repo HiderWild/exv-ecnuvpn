@@ -7,6 +7,7 @@ import SettingsRow from "../components/SettingsRow.vue";
 import PasswordField from "../components/PasswordField.vue";
 import SettingsSectionAxis from "../components/SettingsSectionAxis.vue";
 import { pushToast } from "../lib/toast";
+import { handleCoreWakeFailure } from "../product/core-crash";
 import { APPEARANCE_KEY, type Appearance } from "../product/appearance";
 import { WINDOW_CHROME_PORT_KEY } from "../product/window-chrome";
 import { PRODUCT_RUNTIME_KEY, type ProductRuntime } from "../product/runtime";
@@ -18,12 +19,14 @@ import {
   createCoreConfigGateway,
   credentialConfigFor,
   connectionModeFromConfig,
+  protocolFromConfig,
   revealSavedPassword,
   isCoreConfigKey,
   isVpnServerPreset,
+  defaultServerFor,
   normalizeCoreConfigValue,
   normalizeServerValue,
-  VPN_SERVERS,
+  vpnServersFor,
   type CoreConfigGateway,
   type CoreConfigKey,
 } from "../product/core-config";
@@ -81,7 +84,7 @@ const sections = [
   { id: "experimental", label: "高级" },
 ] as const;
 
-/** 连接与网络分栏：core 配置中留在本栏的字段（user_agent / mtu 迁入高级）。 */
+/** 连接与网络分栏；两侧协议专属服务器只保存在草稿中，当前活动地址通过 `server` 编辑。 */
 const CONNECTION_KEYS: readonly CoreConfigKey[] = [
   "server",
   "username",
@@ -89,9 +92,12 @@ const CONNECTION_KEYS: readonly CoreConfigKey[] = [
   "remember_password",
   "connection_mode",
   "routes",
+  "campus_dns_domains",
   "auto_reconnect",
   "auto_reconnect_max_attempts",
   "auto_reconnect_backoff",
+  "reconnect_on_oneshot_engine_crash",
+  "reconnect_notify",
 ];
 
 const accents = [
@@ -121,14 +127,36 @@ const visibleFields = computed(() =>
       (field) =>
         (CONNECTION_KEYS as readonly string[]).includes(field.key) ||
         field.key === "password",
-    ).filter(
-      (field) =>
-        field.key === "auto_reconnect" ||
-        (field.key !== "auto_reconnect_max_attempts" &&
-          field.key !== "auto_reconnect_backoff") ||
-        drafts.value.auto_reconnect === "true",
-    ),
+    )
+      .filter((field) => field.key !== "connection_mode" || protocol.value === "cisco")
+      .filter((field) => protocol.value === "cisco" || !["username", "password", "remember_password"].includes(field.key))
+      .filter((field) => visibleConnectionField(field.key)),
   );
+
+/**
+ * T4 新设置项的可见性门控（计划 §2.8）：
+ * - `reconnect_on_oneshot_engine_crash`：仅**未安装服务**且主开关（auto_reconnect）
+ *   开启时展示——服务形态的 engine 崩溃由 SCM 自恢复，与一次性提权无关；
+ * - `reconnect_notify`：仅主开关开启时展示（可修改、可生效）；
+ * - 既有 `auto_reconnect_max_attempts` / `auto_reconnect_backoff` 维持主开关门控。
+ * 服务安装态取运行时快照（`ProductService.status`）；运行时不可用或未知时
+ * 保守隐藏 oneshot 项（未知状态不展示 UAC 相关开关）。
+ */
+function visibleConnectionField(key: CoreConfigKey): boolean {
+  const masterOn = drafts.value.auto_reconnect === "true";
+  if (key === "auto_reconnect") return true;
+  const slaveOfMaster = [
+    "auto_reconnect_max_attempts",
+    "auto_reconnect_backoff",
+    "reconnect_on_oneshot_engine_crash",
+    "reconnect_notify",
+  ];
+  if (slaveOfMaster.includes(key) && !masterOn) return false;
+  if (key === "reconnect_on_oneshot_engine_crash") {
+    return runtime?.state.value.service.status.kind === "not_installed";
+  }
+  return true;
+}
 
 function experimentalDraft(key: "mtu" | "user_agent"): string {
   return fieldDraft(key);
@@ -136,6 +164,7 @@ function experimentalDraft(key: "mtu" | "user_agent"): string {
 
 function updateText(key: CoreConfigKey, event: Event): void {
   drafts.value[key] = (event.target as HTMLInputElement).value;
+  if (key === "server") drafts.value[protocol.value === "atrust" ? "atrust_server" : "cisco_server"] = drafts.value.server;
   feedback.value[key] = undefined;
   scheduleAutoSave();
 }
@@ -146,14 +175,20 @@ function updateBoolean(key: CoreConfigKey, event: Event): void {
   scheduleAutoSave();
 }
 
+/** 当前草稿协议；缺失或未知取值保守按 Cisco 显示（与后端读路径一致），写入仍走严格校验。 */
+const protocol = computed(() => protocolFromConfig(drafts.value.protocol));
+
+/** 服务器预设只展示当前协议可用的地址（Cisco 三地与 aTrust 门户互不通用）。 */
+const serverPresets = computed(() => vpnServersFor(protocol.value));
+
 /**
- * VPN 服务器下拉：预设地址或「自定义」。
+ * VPN 服务器下拉：当前协议的预设地址或「自定义」。
  * 初始按草稿归一（命中预设选预设，否则自定义）；用户显式切换用 serverChoice 覆盖；
  * 手填命中预设时归一回到预设项（与旧 C++ applyServerChoice 一致）。
  */
 function deriveServerChoice(): string {
-  const value = normalizeServerValue(drafts.value.server ?? "");
-  return isVpnServerPreset(value) ? value : "custom";
+  const value = normalizeServerValue(drafts.value.server ?? "", protocol.value);
+  return isVpnServerPreset(value, protocol.value) ? value : "custom";
 }
 
 const serverChoice = ref(deriveServerChoice());
@@ -165,6 +200,26 @@ watch(
   },
 );
 
+/** 切换协议时将活动服务器保存到对应侧，并恢复另一侧已保存的服务器。 */
+function onProtocolChange(next: "cisco" | "atrust"): void {
+  if (next === protocol.value) return;
+  const previous = protocol.value;
+  drafts.value[previous === "atrust" ? "atrust_server" : "cisco_server"] = drafts.value.server ?? "";
+  drafts.value.protocol = next;
+  const key = next === "atrust" ? "atrust_server" : "cisco_server";
+  drafts.value.server = drafts.value[key] || defaultServerFor(next);
+  drafts.value[key] = drafts.value.server;
+  feedback.value.protocol = undefined;
+  feedback.value.server = undefined;
+  scheduleAutoSave();
+}
+
+function setAtrustAuthMode(mode: "browser" | "embedded"): void {
+  drafts.value.atrust_auth_mode = mode;
+  feedback.value.atrust_auth_mode = undefined;
+  scheduleAutoSave();
+}
+
 /** 下拉切换：选预设直接写回草稿；选「自定义」保留当前值交由文本框续编辑。 */
 function onServerChoiceChange(event: Event): void {
   const value = (event.target as HTMLSelectElement).value;
@@ -172,6 +227,7 @@ function onServerChoiceChange(event: Event): void {
   serverChoice.value = value;
   if (value !== "custom") {
     drafts.value.server = value;
+    drafts.value[protocol.value === "atrust" ? "atrust_server" : "cisco_server"] = value;
     scheduleAutoSave();
   }
 }
@@ -262,6 +318,13 @@ async function load(): Promise<void> {
     const nextDrafts: Record<string, string> = {};
     for (const item of nextItems) if (isCoreConfigKey(item.key)) nextDrafts[item.key] = item.value;
     nextDrafts["connection_mode"] = connectionModeFromConfig(nextDrafts["connection_mode"]);
+    // 未知协议（更高版本写入）保守显示 Cisco；旧配置缺失协议时也按 Cisco 迁移。
+    nextDrafts["protocol"] = protocolFromConfig(nextDrafts["protocol"]);
+    const selectedProtocol = protocolFromConfig(nextDrafts["protocol"]);
+    nextDrafts["cisco_server"] ||= selectedProtocol === "cisco" ? nextDrafts["server"] ?? defaultServerFor("cisco") : defaultServerFor("cisco");
+    nextDrafts["atrust_server"] ||= selectedProtocol === "atrust" ? nextDrafts["server"] ?? defaultServerFor("atrust") : defaultServerFor("atrust");
+    nextDrafts["server"] = nextDrafts[selectedProtocol === "atrust" ? "atrust_server" : "cisco_server"] ?? nextDrafts["server"] ?? defaultServerFor(selectedProtocol);
+    nextDrafts["atrust_auth_mode"] = nextDrafts["atrust_auth_mode"] === "embedded" ? "embedded" : "browser";
     // 密码是 AES-GCM 密文 blob，core 不回显：始终以空起始，由用户显式输入新密码。
     nextDrafts["password"] = "";
     items.value = nextItems;
@@ -357,7 +420,7 @@ async function saveAll(): Promise<void> {
   for (const field of knownFields.value) {
     const raw = drafts.value[field.key] ?? "";
     if (raw === (original.value[field.key] ?? "")) continue;
-    const normalized = normalizeCoreConfigValue(field.key, raw);
+    const normalized = normalizeCoreConfigValue(field.key, raw, { protocol: protocol.value });
     if (!normalized.ok) {
       feedback.value[field.key] = normalized.message;
       return; // 校验错误内联；不提交
@@ -422,6 +485,9 @@ async function saveAll(): Promise<void> {
     }
     pushToast("设置已保存。", "success");
   } catch (error) {
+    // T9（§2.9）：保存设置前唤醒 core 失败 → 全局「尝试重启程序 / 仅退出」模态；
+    // 草稿保留（下次保存会再次尝试唤醒）。
+    if (handleCoreWakeFailure(error)) return;
     const detail = error instanceof Error ? error.message : String(error);
     pushToast(completed.concat(stage + "保存失败：" + detail + "；未完成草稿已保留，请重试。").join("；"), "error");
   } finally {
@@ -615,6 +681,22 @@ onUnmounted(() => {
             <span>{{ loadError }}</span><button type="button" data-testid="retry-settings" @click="load">重试</button>
           </div>
           <template v-else>
+            <div class="protocol-choice" data-testid="protocol-choice">
+              <span class="protocol-choice__label">连接协议</span>
+              <div class="protocol-segment" role="group" aria-label="连接协议">
+                <button type="button" data-testid="protocol-atrust" :aria-pressed="protocol === 'atrust'" @click="onProtocolChange('atrust')">
+                  <span>aTrust</span><span class="protocol-segment__new">新</span>
+                </button>
+                <button type="button" data-testid="protocol-cisco" :aria-pressed="protocol === 'cisco'" @click="onProtocolChange('cisco')">Cisco</button>
+              </div>
+            </div>
+            <div v-if="protocol === 'atrust'" class="protocol-choice protocol-choice--auth" data-testid="atrust-auth-choice">
+              <span class="protocol-choice__label">aTrust 认证</span>
+              <div class="protocol-segment" role="group" aria-label="aTrust 认证方式">
+                <button type="button" data-testid="atrust-auth-browser" :aria-pressed="drafts.atrust_auth_mode !== 'embedded'" @click="setAtrustAuthMode('browser')">浏览器</button>
+                <button type="button" data-testid="atrust-auth-embedded" :aria-pressed="drafts.atrust_auth_mode === 'embedded'" @click="setAtrustAuthMode('embedded')">网页内嵌</button>
+              </div>
+            </div>
             <div v-if="connectionFields.length" class="settings-fields-grid">
               <SettingsRow
                 v-for="field in connectionFields"
@@ -644,7 +726,7 @@ onUnmounted(() => {
                       :aria-label="field.label"
                       @change="onServerChoiceChange($event)"
                     >
-                      <option v-for="server in VPN_SERVERS" :key="server.value" :value="server.value">{{ server.value }}</option>
+                      <option v-for="server in serverPresets" :key="server.value" :value="server.value">{{ server.value }}</option>
                       <option value="custom">自定义</option>
                     </select>
                     <input
@@ -678,6 +760,7 @@ onUnmounted(() => {
                   >
                     <option v-for="mode in CONNECTION_MODE_OPTIONS" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
                   </select>
+
                   <PasswordField
                     v-else-if="field.kind === 'password'"
                     :model-value="drafts.password ?? ''"
@@ -805,12 +888,9 @@ onUnmounted(() => {
                 <span>{{ uiPrefsDraft.disconnect_notify ? "开启" : "关闭" }}</span>
               </label><div v-if="uiPrefError('disconnect_notify')" class="preference-error" data-testid="ui-pref-error-disconnect_notify" role="alert"><span>{{ uiPrefError('disconnect_notify') }}</span><button type="button" data-testid="ui-pref-retry-disconnect_notify" @click="retryUiPreference('disconnect_notify')">重试</button></div></div>
             </SettingsRow>
-            <SettingsRow class="settings-row--dense" label="触发重连时发送通知" description="触发重连时显示系统通知弹窗；仅在开启自动重连后真正生效。">
-              <div class="preference-control"><label class="boolean-control">
-                <input data-testid="ui-pref-reconnect_notify" type="checkbox" :checked="uiPrefsDraft.reconnect_notify" :disabled="isUiPrefSaving('reconnect_notify')" aria-label="触发重连时发送通知" @change="saveUiPreference('reconnect_notify', ($event.target as HTMLInputElement).checked)">
-                <span>{{ uiPrefsDraft.reconnect_notify ? "开启" : "关闭" }}</span>
-              </label><div v-if="uiPrefError('reconnect_notify')" class="preference-error" data-testid="ui-pref-error-reconnect_notify" role="alert"><span>{{ uiPrefError('reconnect_notify') }}</span><button type="button" data-testid="ui-pref-retry-reconnect_notify" @click="retryUiPreference('reconnect_notify')">重试</button></div></div>
-            </SettingsRow>
+            <!-- T12 归并：旧「触发重连时发送通知」前端偏好键与 core config
+                 `reconnect_notify`（§2.8/T4）同名，重连通知门控归并到连接分区的
+                 core config 设置行（随主开关可见性门控）；本区不再渲染重连通知开关。 -->
             <SettingsRow class="settings-row--dense" label="窗口在前台时不发送通知" description="主窗口可见时无需发送连接类通知；优先级最高。">
               <div class="preference-control"><label class="boolean-control">
                 <input data-testid="ui-pref-suppress_notify_when_foreground" type="checkbox" :checked="uiPrefsDraft.suppress_notify_when_foreground" :disabled="isUiPrefSaving('suppress_notify_when_foreground')" aria-label="窗口在前台时不发送通知" @change="saveUiPreference('suppress_notify_when_foreground', ($event.target as HTMLInputElement).checked)">
@@ -922,6 +1002,13 @@ onUnmounted(() => {
 .settings-section__header h2 { margin: 0 0 2px; font-size: 16px; }
 .settings-section__header p { font-size: 12px; }
 .settings-section__lead { padding: var(--space-1) 0 0; }
+.protocol-choice { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 12px 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); margin: 10px 0; }
+.protocol-choice--auth { margin-top: -2px; }
+.protocol-choice__label { font-size: 13px; font-weight: 600; }
+.protocol-segment { display: inline-flex; gap: 3px; padding: 3px; border-radius: 999px; background: var(--surface-subtle); }
+.protocol-segment button { position: relative; border: 0; border-radius: 999px; background: transparent; color: var(--text-secondary); padding: 7px 14px; cursor: pointer; font: inherit; }
+.protocol-segment button[aria-pressed="true"] { background: var(--surface-raised); color: var(--text-primary); box-shadow: 0 1px 4px rgb(0 0 0 / 16%); outline: 1px solid var(--border-subtle); }
+.protocol-segment__new { position: absolute; top: -7px; left: -3px; min-width: 16px; padding: 1px 4px; border-radius: 7px; background: var(--accent); color: var(--accent-on); font-size: 9px; line-height: 1.2; font-weight: 700; }
 .settings-fields-grid { display: grid; grid-template-columns: minmax(0, 1fr); }
 .settings-fields-grid .settings-row--wide { grid-column: 1 / -1; }
 .settings-state { margin: 0; padding: var(--space-3) 0; color: var(--text-secondary); font-size: 13px; }
@@ -951,6 +1038,7 @@ onUnmounted(() => {
 
 @media (max-width: 1000px) {
   .settings-fields-grid { grid-template-columns: 1fr; }
+  .protocol-choice { align-items: flex-start; flex-direction: column; }
   .settings-fields-grid .settings-row--wide { grid-column: auto; }
   .settings-section__header { align-items: flex-start; }
   .server-choice { width: 100%; flex-direction: column; align-items: stretch; }

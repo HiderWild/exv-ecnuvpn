@@ -29,7 +29,7 @@ const NATIVE_CODE_SYSTEM_PROXY_ENDPOINT_INVALID: u32 = 0x0000_0002;
 /// 本模块使用的参数类错误 raw code（`ERROR_INVALID_PARAMETER` = 87，Unknown 类）。
 const ERROR_INVALID_PARAMETER_CODE: u32 = 87;
 
-/// REG_DWORD 数据损坏时的占位 raw code（`ERROR_NO_SYSTEM_RESOURCES` = 1450，Unknown 类）。
+/// `REG_DWORD` 数据损坏时的占位 raw code（`ERROR_NO_SYSTEM_RESOURCES` = 1450，Unknown 类）。
 const ERROR_NO_SYSTEM_RESOURCES_CODE: u32 = 1450;
 
 /// 单个代理端点（规范化后，无凭据；设计 §5.1）。
@@ -81,7 +81,7 @@ impl RawValue {
         !matches!(self, Self::Absent)
     }
 
-    /// REG_SZ 文本（仅 [`RawValue::Sz`] 有值；其余 None）。
+    /// `REG_SZ` 文本（仅 [`RawValue::Sz`] 有值；其余 None）。
     #[must_use]
     pub fn as_sz(&self) -> Option<&str> {
         match self {
@@ -129,8 +129,8 @@ pub enum SystemProxyMode {
     Mixed,
 }
 
-/// 规范化系统代理快照（present / mode / endpoints / bypass_entries / pac_url /
-/// auto_discovery）。
+/// 规范化系统代理快照（present / mode / endpoints / `bypass_entries` / `pac_url` /
+/// `auto_discovery`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemProxySnapshot {
     /// 四态模式。
@@ -183,9 +183,9 @@ pub enum TopologyKind {
 /// - IPv6 括号形式 `[::1]:7890` 支持（host 去括号存储）。
 /// - 带 `user@host` 凭据形式的条目拒绝报 `system_proxy_endpoint_invalid`
 ///   （fail-closed，不静默剥离）。
-/// - mode 判定：manual=有端点；automatic=有 pac_url 或 `AutoDetect=true`；
+/// - mode 判定：manual=有端点；automatic=有 `pac_url` 或 `AutoDetect=true`；
 ///   两者皆有=Mixed；皆无=Disabled。
-/// - `ProxyOverride` 按分号拆分为 bypass_entries（空段跳过）。
+/// - `ProxyOverride` 按分号拆分为 `bypass_entries（空段跳过`）。
 ///
 /// # Errors
 ///
@@ -417,7 +417,7 @@ pub fn capture_for_user(sid: &str) -> Result<RawInternetSettings, NativeError> {
     result
 }
 
-/// 逐值 `RegQueryValueExW`（键已打开）。值不存在（ERROR_FILE_NOT_FOUND）→ Absent；
+/// 逐值 `RegQueryValueExW`（`键已打开）。值不存在（ERROR_FILE_NOT_FOUND`）→ Absent；
 /// 其他失败 → typed 错误。
 fn query_values(key: HKEY) -> Result<RawInternetSettings, NativeError> {
     Ok(RawInternetSettings {
@@ -429,7 +429,7 @@ fn query_values(key: HKEY) -> Result<RawInternetSettings, NativeError> {
     })
 }
 
-/// 单值查询：REG_DWORD → [`RawValue::Dword`]；REG_SZ → [`RawValue::Sz`]（去 NUL）；
+/// `单值查询：REG_DWORD` → [`RawValue::Dword`]；`REG_SZ` → [`RawValue::Sz`]（去 NUL）；
 /// 其他类型 → [`RawValue::Other`]（type + 原始数据字节）；不存在 → [`RawValue::Absent`]。
 fn query_value(key: HKEY, name: &str) -> Result<RawValue, NativeError> {
     let name_w = HSTRING::from(name);

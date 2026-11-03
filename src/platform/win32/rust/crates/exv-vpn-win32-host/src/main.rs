@@ -43,7 +43,7 @@ use exv_core::crash_recovery::{
     CrashRecovery, GrpcClientConnector, ProductSupervisorFactory, SystemResidueProbe,
 };
 use exv_core::engine_lifecycle::{EngineSlot, EngineSupervisor};
-use exv_core::engine_provisioner::EngineProvisioner;
+use exv_core::engine_provisioner::{EngineProvisioner, EngineProvisionerDeps};
 use exv_core::kernel_control_service::{EventBusSelfHealReporter, KernelControlService};
 use exv_core::kernel_control_transport::{lookup_account_name, serve_kernel_control_pipe};
 use exv_core::log_aggregator::LogAggregator;
@@ -215,12 +215,14 @@ pub async fn run_core(args: CoreArgs) -> i32 {
     // 失败（password key unavailable）→ connect KeyMissing（dbg-auth 2026-08-23 根因 #1）。
     let _ = exv_vpn_win32_config::ExvConfig::ensure_key(&exv_vpn_win32_config::config_dir());
     // 服务持共享日志聚合器；main 侧保留一份 Arc 供停机结果落盘（UI 可观测全生命周期）。
-    let (shared_composition, mut service) = KernelControlService::from_composition(
+    let (shared_composition, service) = KernelControlService::from_composition(
         composition,
         engine_slot.clone(),
         exv_vpn_win32_config::config_dir(),
         Arc::clone(&logs),
     );
+    // T4/§2.9 缺口①：UI PID 记入服务，随连接信封发 engine（连接痕迹 + 拉起回带）。
+    let mut service = service.with_ui_pid(args.ui_pid);
     // UI 生命周期信号（O3 强绑定）：CoreRuntime 与 serve 传输层共享同一事实——传输层
     // 的 UI 进程退出监视触发 on_ui_exited，run 的 select 等待同一信号。
     let ui = UiLifetime::new();
@@ -233,20 +235,39 @@ pub async fn run_core(args: CoreArgs) -> i32 {
     //     supervisor 互斥句柄；维护形态句柄供 run 循环 respawn 分流（批 3）；槽换点
     //     通知用于 provision 后重新获取 liveness。
     let ui_peer_cell = Arc::new(std::sync::RwLock::new(None::<VerifiedPipePeer>));
-    let provisioner = Arc::new(EngineProvisioner::new(
-        runtime.supervisor_handle(),
-        engine_slot.clone(),
-        Arc::clone(&shared_composition),
-        user_sid.clone(),
-        Arc::clone(&logs),
-        Arc::clone(&ui_peer_cell),
-        Arc::new(ProductSupervisorFactory),
-        Arc::new(GrpcClientConnector),
-        Arc::new(SystemResidueProbe {
+    let provisioner = Arc::new(EngineProvisioner::new(EngineProvisionerDeps {
+        supervisor: runtime.supervisor_handle(),
+        slot: engine_slot.clone(),
+        composition: Arc::clone(&shared_composition),
+        user_sid: user_sid.clone(),
+        logs: Arc::clone(&logs),
+        ui_peer: Arc::clone(&ui_peer_cell),
+        factory: Arc::new(ProductSupervisorFactory),
+        connector: Arc::new(GrpcClientConnector),
+        residue: Arc::new(SystemResidueProbe {
             adapter_name: ENGINE_ADAPTER_NAME.to_string(),
         }),
-    ));
+    }));
     service.set_engine_provisioner(Arc::clone(&provisioner));
+    // Core 启动时先观察已由 SCM 启动的服务 live，避免 UI 初始 Idle 后再次认证。
+    // 此只读路径不启动服务、不取得 owner lease；服务未运行时保留 detached 按需连接。
+    // T8 采纳握手：本调用在 UI 控制面 serve **之前**执行（时序判断）——重启 core 在
+    // UI 接入前完成「engine 有无活会话」询问与采纳投影，UI 的首次 GetSnapshot/
+    // WatchEvents 即见「已连接」而非空白；拨不上（无 engine）= 正常全新启动，零惩罚
+    //（单次 + 日志，见 `observe_running_service_at_startup`）。
+    match service.observe_running_service_at_startup().await {
+        Ok(true) => {}
+        Ok(false) => {}
+        Err(category) => {
+            let _ = logs.append_core(
+                "warn",
+                "core",
+                "core.start.service_observation_failed",
+                "无法在启动时观察已运行服务的连接状态；仍继续提供 Core 控制面",
+                &std::collections::BTreeMap::from([("category".into(), category.to_string())]),
+            );
+        }
+    }
     runtime.set_slot_swaps(engine_slot.subscribe_swaps());
     runtime.set_mode_gauge(service.selected_mode_handle());
 

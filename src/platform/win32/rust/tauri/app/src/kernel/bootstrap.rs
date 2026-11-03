@@ -12,16 +12,32 @@
 //!
 //! **防御降级**：core 二进制缺失或拨号失败（例如开发壳未随附 core、启动竞态）→
 //! 记录 warning，保留 `NotWired` handle，UI 照常打开（命令返回 `CoreUnreachable`，
-//! 前端展示 "core 未连接"；用户点连接时经 [`recover_stopped_core_for_connect`] 恢复）
+//! 前端展示 "core 未连接"；用户业务动作时经 [`ensure_core_available`] 唤醒恢复）
 //! ——不把启动失败升级为进程崩溃。
+//!
+//! ## T9（§2.9）未连接态 core 崩溃响应
+//!
+//! - **死亡判定（保守）**：[`assess_core_death`]——控制管道 RPC 不可达 **且** UI 托管
+//!   子进程确认退出（OS 级 `try_wait` 信号）才判死；单次 RPC 失败/超时（core 忙/
+//!   抖动/挂死）一律归 [`CoreDeathVerdict::Unresponsive`]，不判死、不重拉。
+//! - **弱提示源**：WatchEvents 订阅流断开（EOF/拨号失败）→ [`handle_core_disconnect`]
+//!   保守复核，确认死亡才广播 `exv://core-lifecycle`（crashed）事件。
+//! - **业务唤醒**：[`ensure_core_available`]——确认死亡后重拉（参数沿用
+//!   [`super::core_process::core_args_for_spawn`] 既有契约），有界等待就绪并原子替换
+//!   会话；失败返回 typed `AppError::CoreWakeFailed`（前端弹「尝试重启程序 / 仅退出」
+//!   模态）。日志走 `exv.core_recovery` target 的稳定码。
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Manager};
 
-use super::client::{dial_core, CoreHandle, CoreSession, CoreState};
+use super::client::{dial_core, CoreHandle, CoreSession, CoreState, CoreStatus};
 use super::core_process::{core_bin_path, spawn_core};
 use super::core_transport::current_user_sid;
 use super::error::AppError;
-use super::events::spawn_subscriptions;
+use super::events::{
+    emit_core_lifecycle, spawn_subscriptions, CoreLifecycleEvent, CoreLifecycleState,
+};
 
 /// 执行 core 启动接线（幂等性由调用方保证——setup 只调一次）。
 ///
@@ -78,11 +94,14 @@ pub fn bootstrap(app: &mut tauri::App) -> tauri::Result<()> {
         handle: std::sync::RwLock::new(handle),
         last_snapshot: Default::default(),
         last_stats: Default::default(),
+        browser_login: Default::default(),
+        browser_commit_gate: Default::default(),
     });
     handle_ref.manage(CoreSession {
         child: std::sync::Mutex::new(child),
         subscriptions: std::sync::Mutex::new(Vec::new()),
         recovery: tokio::sync::Mutex::new(()),
+        crash_announced: std::sync::atomic::AtomicBool::new(false),
     });
 
     // 4. 拨号成功 → 挂事件订阅（emit 到前端；快照缓存由 snapshot 命令维护）。
@@ -101,60 +120,204 @@ pub fn bootstrap(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 用户点“连接”时的唯一 Core 恢复入口。
+/// UI 侧 core 死亡判定的三态结论（T9 §2.9；保守准则见 [`assess_core_death`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreDeathVerdict {
+    /// 控制管道 RPC 可通——core 存活。
+    Normal,
+    /// 管道不可达 **且** UI 托管子进程已确认退出（OS 级退出信号）——判定死亡。
+    /// `core_pid = 0` 表示 UI 从未托管子进程（bootstrap 降级；唤醒路径允许直接拉起）。
+    Dead { core_pid: u32 },
+    /// 管道不可达但子进程仍在运行——core 挂死/忙/抖动，**不判死**（不自动重启）。
+    Unresponsive,
+}
+
+/// 死亡判定的有界探测时限：core 挂死时 RPC 可能永远不回，超时按不可达处理
+/// （不判死的子进程校验兜底，不会把挂死误判为存活之外的任何动作）。
+const CORE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 保守死亡判定：管道不可达 **且** 子进程退出信号确认才判死。
 ///
-/// 日常 UI 只经 [`CoreState::probe_status`] 观察控制管道；**不会**枚举进程，也不会尝试
-/// 拉起 Core。只有当前次 Connect 已返回 `CoreUnreachable` 才调用本函数：先确认 UI
-/// 托管的子进程是否退出，确认后才静默重拉、等待并认证新管道、替换会话、重试原请求。
-pub async fn recover_stopped_core_for_connect(
+/// 依据（§2.9）：单次管道失败/超时可能是 core 忙或传输抖动——只有 OS 级
+/// `try_wait` 返回退出（或从未托管）才允许判死并重拉；子进程查询句柄失败时
+/// 保守归 [`CoreDeathVerdict::Unresponsive`]（与 [`CoreChild::has_exited`] 的
+/// fail-closed 语义一致）。
+pub async fn assess_core_death(state: &CoreState, session: &CoreSession) -> CoreDeathVerdict {
+    // 日常探测只依据已验证管道上的轻量 snapshot RPC；有界等待防挂死 core 卡死判定。
+    let reachable = match tokio::time::timeout(CORE_PROBE_TIMEOUT, state.probe_status()).await {
+        Ok(status) => status == CoreStatus::Normal,
+        Err(_) => {
+            tracing::warn!(target: "exv.core_recovery", "core_death_assess.probe_timeout");
+            false
+        }
+    };
+    if reachable {
+        return CoreDeathVerdict::Normal;
+    }
+    // 这是唯一允许的“进程是否已退出”检查：依赖 UI 自己 spawn 后保存的 Child 句柄，
+    // 不扫描系统进程表，也不会误把同名外部进程视为本 core。
+    let exited_pid = session
+        .child
+        .lock()
+        .map(|mut child| match child.as_mut() {
+            None => Some(0),
+            Some(core) => core.has_exited().then_some(core.pid()),
+        })
+        .unwrap_or(None);
+    match exited_pid {
+        Some(core_pid) => CoreDeathVerdict::Dead { core_pid },
+        None => CoreDeathVerdict::Unresponsive,
+    }
+}
+
+/// 崩溃广播的边沿触发：首次进入崩溃态返回 `Some`（调用方应 emit），重复返回 `None`。
+pub(super) fn crash_event_if_newly_dead(
+    announced: &AtomicBool,
+    core_pid: u32,
+) -> Option<CoreLifecycleEvent> {
+    if announced.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    Some(CoreLifecycleEvent {
+        state: CoreLifecycleState::Crashed,
+        core_pid,
+    })
+}
+
+/// 恢复广播：此前广播过崩溃才返回 `Some`（调用方应 emit recovered），并复位标志。
+pub(super) fn recovered_event_if_previously_crashed(
+    announced: &AtomicBool,
+    core_pid: u32,
+) -> Option<CoreLifecycleEvent> {
+    if !announced.swap(false, Ordering::AcqRel) {
+        return None;
+    }
+    Some(CoreLifecycleEvent {
+        state: CoreLifecycleState::Recovered,
+        core_pid,
+    })
+}
+
+/// WatchEvents 流断开后的保守死亡复核（T9 弱提示源）。
+///
+/// 由订阅循环在流 EOF / 重订阅失败时调用；与唤醒路径共用 `recovery` 串行闸门，
+/// 消除「判死-广播崩溃」与「重拉-广播恢复」之间的竞态窗口。
+pub async fn handle_core_disconnect(app: &AppHandle) {
+    let (Some(state), Some(session)) = (app.try_state::<CoreState>(), app.try_state::<CoreSession>())
+    else {
+        return;
+    };
+    let _gate = session.recovery.lock().await;
+    if let CoreDeathVerdict::Dead { core_pid } = assess_core_death(&state, &session).await {
+        if let Some(event) = crash_event_if_newly_dead(&session.crash_announced, core_pid) {
+            tracing::warn!(target: "exv.core_recovery", core_pid, "core_crash_detected");
+            if let Err(error) = emit_core_lifecycle(app, &event) {
+                tracing::warn!(target: "exv.core_recovery", "core crash event emit failed: {error}");
+            }
+        }
+    }
+}
+
+/// 业务唤醒（T9 §2.9）的结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreWake {
+    /// core 本就可用（管道复通；若此前广播过崩溃则顺带广播恢复）。
+    AlreadyAvailable,
+    /// 确认死亡后已重拉并就绪。
+    Restarted { core_pid: u32 },
+}
+
+/// 业务唤醒入口（连接 / 保存设置 / 快速入门 / 弱提示「重启 core」按钮共用）。
+///
+/// 语义：core 活着直接放行（零额外成本）；管道不可达时按 [`assess_core_death`]
+/// 保守判定——确认死亡才静默重拉（参数沿用既有 spawn 契约）、有界等待就绪并原子
+/// 替换会话（handle + 订阅 + 子进程句柄）；唤醒失败返回 typed
+/// [`AppError::CoreWakeFailed`]（前端弹强报错模态），core 挂死（进程在、管道不通）
+/// 不强杀、同样归唤醒失败。并发调用经 `recovery` 闸门串行。
+///
+/// # Errors
+/// 唤醒失败 → `AppError::CoreWakeFailed`（重拉失败 / 子进程仍在但管道不可达）。
+pub async fn ensure_core_available(
     app: &AppHandle,
     state: &CoreState,
     session: &CoreSession,
-) -> Result<(), AppError> {
+) -> Result<CoreWake, AppError> {
     let _gate = session.recovery.lock().await;
 
-    // 并发 Connect 的第一个调用可能已经完成恢复；此处只用管道 RPC 复核，不观察进程。
-    if state.probe_status().await == super::client::CoreStatus::Normal {
-        return Ok(());
-    }
-
-    // 这是唯一允许的“进程是否已退出”检查。依赖 UI 自己 spawn 后保存的 Child 句柄，
-    // 不扫描系统进程表，也不会误把同名外部进程视为本 Core。
-    let exited = session
-        .child
-        .lock()
-        .map(|mut child| child.as_mut().is_none_or(super::core_process::CoreChild::has_exited))
-        .unwrap_or(false);
-    if !exited {
-        return Err(AppError::CoreUnreachable(
-            "connect: core control pipe is unavailable while the managed core process is still running"
-                .to_string(),
-        ));
-    }
-
-    let executable = core_bin_path().ok_or_else(|| {
-        AppError::CoreUnreachable("connect: core executable is unavailable for recovery".to_string())
-    })?;
-    let mut replacement = spawn_core(&executable)
-        .map_err(|error| AppError::CoreUnreachable(format!("connect: restart core failed: {error}")))?;
-    let pid = replacement.pid();
-    // core 刚 spawn 时命名管道尚在创建。有限重试只等待本次受控重拉的就绪，不做后台轮询。
-    match dial_spawned_core(pid).await {
-        Ok((channel, _)) => {
-            state.replace_handle(CoreHandle::Dialed {
-                channel: channel.clone(),
-            });
-            replace_subscriptions(app, session, channel);
-            if let Ok(mut child) = session.child.lock() {
-                *child = Some(replacement);
-            }
-            tracing::info!(target: "exv.bootstrap", core_pid = pid, "core recovered for user connect");
-            Ok(())
+    match assess_core_death(state, session).await {
+        CoreDeathVerdict::Normal => {
+            // 管道复通（例如并发恢复已完成 / 外部拉起的新 core 已接管同名管道）。
+            let current_pid = session
+                .child
+                .lock()
+                .ok()
+                .and_then(|child| child.as_ref().map(super::core_process::CoreChild::pid))
+                .unwrap_or(0);
+            announce_recovery_if_previously_crashed(app, session, current_pid);
+            tracing::info!(target: "exv.core_recovery", "core_wake.already_available");
+            Ok(CoreWake::AlreadyAvailable)
         }
-        Err(error) => {
-            replacement.terminate();
-            state.mark_stopped();
-            Err(error)
+        CoreDeathVerdict::Dead { core_pid } => {
+            tracing::warn!(target: "exv.core_recovery", dead_pid = core_pid, "core_wake.restart_started");
+            let executable = core_bin_path().ok_or_else(|| {
+                tracing::warn!(target: "exv.core_recovery", "core_wake.restart_failed: executable unavailable");
+                state.mark_stopped();
+                AppError::CoreWakeFailed(
+                    "core wake: core executable is unavailable for recovery".to_string(),
+                )
+            })?;
+            let mut replacement = spawn_core(&executable).map_err(|error| {
+                tracing::warn!(target: "exv.core_recovery", "core_wake.restart_failed: spawn failed");
+                state.mark_stopped();
+                AppError::CoreWakeFailed(format!("core wake: restart core failed: {error}"))
+            })?;
+            let pid = replacement.pid();
+            // core 刚 spawn 时命名管道尚在创建。有限重试只等待本次受控重拉的就绪。
+            match dial_spawned_core(pid).await {
+                Ok((channel, _)) => {
+                    state.replace_handle(CoreHandle::Dialed {
+                        channel: channel.clone(),
+                    });
+                    replace_subscriptions(app, session, channel);
+                    if let Ok(mut child) = session.child.lock() {
+                        *child = Some(replacement);
+                    }
+                    announce_recovery_if_previously_crashed(app, session, pid);
+                    tracing::info!(target: "exv.core_recovery", core_pid = pid, "core_wake.restart_succeeded");
+                    Ok(CoreWake::Restarted { core_pid: pid })
+                }
+                Err(error) => {
+                    replacement.terminate();
+                    state.mark_stopped();
+                    tracing::warn!(target: "exv.core_recovery", core_pid = pid, "core_wake.restart_failed: dial failed");
+                    Err(AppError::CoreWakeFailed(format!(
+                        "core wake: restarted core did not become ready: {error}"
+                    )))
+                }
+            }
+        }
+        CoreDeathVerdict::Unresponsive => {
+            // core 挂死（进程在、管道不通）：不强杀（kill 会打断有序停机），交由
+            // 唤醒失败模态的「尝试重启程序」走 O3 整程重启兜底。
+            tracing::warn!(target: "exv.core_recovery", "core_wake.refused_core_alive");
+            Err(AppError::CoreWakeFailed(
+                "core wake: core process is still running but its control pipe is unreachable"
+                    .to_string(),
+            ))
+        }
+    }
+}
+
+/// 唤醒成功后若此前广播过崩溃，广播一次恢复（撤下前端弱提示横幅）。
+fn announce_recovery_if_previously_crashed(
+    app: &AppHandle,
+    session: &CoreSession,
+    core_pid: u32,
+) {
+    if let Some(event) = recovered_event_if_previously_crashed(&session.crash_announced, core_pid) {
+        tracing::info!(target: "exv.core_recovery", core_pid, "core_recovery_announced");
+        if let Err(error) = emit_core_lifecycle(app, &event) {
+            tracing::warn!(target: "exv.core_recovery", "core recovery event emit failed: {error}");
         }
     }
 }

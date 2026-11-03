@@ -11,6 +11,7 @@
 //! 订阅源拉起 tokio task，`stream.next()` → `app.emit`。返回句柄供停机时中止。
 //! 快照缓存由 `snapshot` 命令维护（事件本身携带快照，前端可即时渲染）。
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
@@ -21,6 +22,32 @@ use super::wire;
 
 /// WatchEvents 订阅的 Event 名。
 pub const EVENT_STATUS: &str = "exv://status";
+
+/// core 生命周期事件名（T9 §2.9：core 崩溃弱提示 / 恢复广播）。
+pub const EVENT_CORE_LIFECYCLE: &str = "exv://core-lifecycle";
+
+/// core 生命周期事件的结论（serde snake_case：`crashed` / `recovered`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreLifecycleState {
+    /// core 已确认死亡（保守判定：管道断 + 子进程退出信号）。
+    Crashed,
+    /// core 已恢复可用（重拉成功 / 管道复通）。
+    Recovered,
+}
+
+/// `exv://core-lifecycle` 事件 payload。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CoreLifecycleEvent {
+    pub state: CoreLifecycleState,
+    /// 涉及的 core 进程 pid（`0` = UI 从未托管子进程）。
+    pub core_pid: u32,
+}
+
+/// 广播一次 core 生命周期事件（前端据此渲染/撤下「core 已崩溃」弱提示横幅）。
+pub fn emit_core_lifecycle(app: &AppHandle, event: &CoreLifecycleEvent) -> tauri::Result<()> {
+    app.emit(EVENT_CORE_LIFECYCLE, event)
+}
 
 /// 向主窗口广播一次运行时事件。
 pub fn emit_status(app: &AppHandle, event: &RuntimeEvent) -> tauri::Result<()> {
@@ -50,6 +77,8 @@ pub fn spawn_subscriptions(app: AppHandle, channel: Channel) -> Vec<tauri::async
                 Ok(stream) => stream,
                 Err(e) => {
                     tracing::warn!(target: "exv.events", "watch_events subscribe failed: {e}; reconnecting");
+                    // 订阅拨号失败与流 EOF 同源（core 亡/管道断）→ 保守死亡复核（T9 弱提示源）。
+                    super::bootstrap::handle_core_disconnect(&app_status).await;
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(WATCH_RECONNECT_MAX);
                     continue;
@@ -73,7 +102,8 @@ pub fn spawn_subscriptions(app: AppHandle, channel: Channel) -> Vec<tauri::async
                     }
                 }
             }
-            // 流 EOF = core 断开（或 stream 错误）→ 退避重连。
+            // 流 EOF = core 断开（或 stream 错误）→ T9 保守死亡复核（弱提示源）→ 退避重连。
+            super::bootstrap::handle_core_disconnect(&app_status).await;
             tracing::warn!(target: "exv.events", "watch_events stream ended; reconnecting from tick {resume_tick}");
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(WATCH_RECONNECT_MAX);

@@ -8,7 +8,7 @@
 //! `logs_list`/`logs_clear`/`config_get`/`config_set` 已真实接线（KernelControl RPC），
 //! `stats` 从 snapshot 维护的缓存读取（尚无样本时返回 typed NotWired 占位）。
 
-use tauri::State;
+use tauri::{Emitter, State};
 
 use super::client::{ConfigItem, ConnectIntent, CoreClient, CoreSession, CoreState, CoreStatus};
 use super::error::AppError;
@@ -27,14 +27,39 @@ pub async fn connect(
     session: State<'_, CoreSession>,
     intent: ConnectIntent,
 ) -> Result<OperationReply, AppError> {
-    match CoreClient.connect(&state, intent.clone()).await {
+    let browser_status = |active| {
+        let _ = app.emit("exv://browser-login", active);
+    };
+    match CoreClient
+        .connect_with_auth_status(&state, intent.clone(), app.clone(), browser_status)
+        .await
+    {
         Ok(reply) => Ok(reply),
         Err(AppError::CoreUnreachable(_)) => {
-            super::bootstrap::recover_stopped_core_for_connect(&app, &state, &session).await?;
-            CoreClient.connect(&state, intent).await
+            // T9（§2.9 业务唤醒）：core 不可达时先确认死亡并重拉（活着则幂等放行），
+            // 唤醒失败 → typed CoreWakeFailed（前端弹「尝试重启程序 / 仅退出」模态）。
+            super::bootstrap::ensure_core_available(&app, &state, &session).await?;
+            CoreClient
+                .connect_with_auth_status(&state, intent, app.clone(), browser_status)
+                .await
         }
         Err(error) => Err(error),
     }
+}
+
+/// 请求当前内嵌 aTrust 登录切换到系统默认 Edge/Chrome。
+#[tauri::command]
+pub fn atrust_browser_fallback(state: State<'_, CoreState>) -> Result<(), AppError> {
+    state
+        .browser_login
+        .request_system_browser_fallback()
+        .map_err(AppError::Internal)
+}
+
+/// 仅当本次 aTrust 登录正在使用内嵌窗口时显示系统浏览器回退按钮。
+#[tauri::command]
+pub fn atrust_browser_fallback_available(state: State<'_, CoreState>) -> bool {
+    state.browser_login.system_browser_fallback_available()
 }
 
 /// UI 的 Core 两态健康检查。仅由控制管道实际可通与否得出，绝不扫描进程或拉起 Core。
@@ -90,9 +115,17 @@ pub async fn saved_password(
     username: String,
     server: String,
 ) -> Result<Option<super::saved_password::PasswordForDisplay>, String> {
-    let current = CoreClient.config_get(&state).await
+    let current = CoreClient
+        .config_get(&state)
+        .await
         .map_err(|_| "无法读取当前配置的已保存密码".to_string())?;
-    let value = |key: &str| current.items.iter().find(|item| item.key == key).map(|item| item.value.as_str());
+    let value = |key: &str| {
+        current
+            .items
+            .iter()
+            .find(|item| item.key == key)
+            .map(|item| item.value.as_str())
+    };
     if value("username") != Some(username.as_str()) || value("server") != Some(server.as_str()) {
         return Err("当前账户已变化，请重新按住查看密码".to_string());
     }
@@ -107,12 +140,36 @@ pub async fn stats(state: State<'_, CoreState>) -> Result<RuntimeStats, AppError
 }
 
 /// 写入配置（KernelControl.ConfigSet 真实接线；返回 ok 标志）。
+///
+/// T9（§2.9 业务唤醒）：保存设置是关键业务动作——core 不可达时先确认死亡并重拉
+/// （有界等待就绪），唤醒成功后重试原请求；唤醒失败 → typed `CoreWakeFailed`。
 #[tauri::command]
 pub async fn config_set(
+    app: tauri::AppHandle,
     state: State<'_, CoreState>,
+    session: State<'_, CoreSession>,
     items: Vec<ConfigItem>,
 ) -> Result<bool, AppError> {
-    CoreClient.config_set(&state, items).await
+    match CoreClient.config_set(&state, items.clone()).await {
+        Err(AppError::CoreUnreachable(_)) => {
+            super::bootstrap::ensure_core_available(&app, &state, &session).await?;
+            CoreClient.config_set(&state, items).await
+        }
+        other => other,
+    }
+}
+
+/// T9（§2.9）弱提示横幅的「重启 core」按钮：确认死亡后重拉；core 活着则幂等成功。
+/// 失败返回 typed `CoreWakeFailed`（前端以弱提示 toast 呈现，横幅保留）。
+#[tauri::command]
+pub async fn core_restart(
+    app: tauri::AppHandle,
+    state: State<'_, CoreState>,
+    session: State<'_, CoreSession>,
+) -> Result<(), AppError> {
+    super::bootstrap::ensure_core_available(&app, &state, &session)
+        .await
+        .map(|_| ())
 }
 
 /// 读取 EXV Wintun 适配器当前的 IPv4 单播地址。

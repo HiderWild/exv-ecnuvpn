@@ -49,12 +49,17 @@ impl NamedPipeByteStream {
     /// name fail (anti-squatting, WSP1 §2) and `PIPE_REJECT_REMOTE_CLIENTS` (WSP1 §2) refuses
     /// remote clients at the NT layer.
     ///
+    /// D12（2026-09-27 管道名统一）后本标志的语义升级：对控制面这类**每用户 sid 段
+    /// 常量名**的管道，首实例冲突（`ERROR_ACCESS_DENIED`）不再只是"防抢注"，同时是
+    /// **每用户单 engine 互斥**——同名即同一用户的另一个 engine 仍在运行，OS 级锁
+    /// 拒绝第二个 engine 持名（计划 §四 edge 20）。
+    ///
     /// The pipe is created with no explicit DACL (the caller's default ACL applies); use
     /// [`create_server_with_dacl`](Self::create_server_with_dacl) to grant a specific user.
     ///
     /// # Errors
     /// Returns `Err(PipeIoError::Io(code))` if `CreateNamedPipeW` fails (e.g. the name is
-    /// already owned by another first instance, WSP1 §2 anti-squatting).
+    /// already owned by another first instance, WSP1 §2 anti-squatting / D12 单 engine 互斥).
     pub fn create_server(name: &str, max_instances: u32) -> Result<Self, PipeIoError> {
         Self::create_server_with_dacl(name, max_instances, None)
     }
@@ -70,10 +75,14 @@ impl NamedPipeByteStream {
     /// When `allowed_user_sid` is `None` the pipe is created with no explicit DACL, preserving
     /// the [`create_server`](Self::create_server) behavior.
     ///
+    /// 首实例带 `FILE_FLAG_FIRST_PIPE_INSTANCE`：**防抢注 + 每用户单 engine 互斥
+    /// （D12）**——sid 段常量名下，第二个同名 engine 的首实例创建必然失败，OS 级
+    /// 保证同一用户至多一个 engine 持有控制面名。
+    ///
     /// # Errors
     /// Returns `Err(PipeIoError::Io(code))` if the DACL cannot be materialized or
     /// `CreateNamedPipeW` fails (e.g. the name is already owned by another first instance,
-    /// WSP1 §2 anti-squatting).
+    /// WSP1 §2 anti-squatting / D12 单 engine 互斥).
     pub fn create_server_with_dacl(
         name: &str,
         max_instances: u32,
@@ -83,9 +92,10 @@ impl NamedPipeByteStream {
     }
 
     /// 创建同名的**额外** server 实例（不带 `FILE_FLAG_FIRST_PIPE_INSTANCE`）。第一个
-    /// 实例由 [`create_server_with_dacl`](Self::create_server_with_dacl) 建（反 squat，
-    /// 确保唯一 server 持名）；其余实例供多客户端同时连入（如 log 管道——engine + 未来
-    /// UI 各占一个实例）。断开后由 accept 循环重建同款额外实例。
+    /// 实例由 [`create_server_with_dacl`](Self::create_server_with_dacl) 建（反 squat +
+    /// D12 每用户单 engine 互斥，确保唯一 server 持名）；其余实例供多客户端同时连入
+    /// （如 log 管道——engine + 未来 UI 各占一个实例）。断开后由 accept 循环重建同款
+    /// 额外实例。
     ///
     /// `max_instances` 必须与第一实例一致（`CreateNamedPipeW` 以它作为该管道名的总实例
     /// 上限）。
@@ -112,6 +122,8 @@ impl NamedPipeByteStream {
             PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
         );
         let mut open_flags = PIPE_ACCESS_DUPLEX.0;
+        // 首实例标志（D12 纪律化）：防抢注（WSP1 §2）+ 每用户单 engine 互斥——sid 段
+        // 常量名下，同名首实例只能有一个持有者，第二个 engine 的创建被 OS 拒绝。
         if first_instance {
             open_flags |= FILE_FLAG_FIRST_PIPE_INSTANCE.0;
         }
@@ -124,7 +136,7 @@ impl NamedPipeByteStream {
         let sec_attrs = sec.as_ref().map(PipeSecurity::as_attributes);
         let lp_security_attrs = sec_attrs
             .as_ref()
-            .map(|a| a as *const SECURITY_ATTRIBUTES);
+            .map(std::ptr::from_ref::<SECURITY_ATTRIBUTES>);
         // SAFETY: `wide` is a live, null-terminated wide buffer for the lifetime of this call;
         // `lp_security_attrs` (when `Some`) points at the live `sec_attrs` copy, whose
         // `lpSecurityDescriptor` points at the live `sec`-owned descriptor. The returned handle

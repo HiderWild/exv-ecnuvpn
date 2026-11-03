@@ -16,9 +16,16 @@ pub const SERVICE_NAME: &str = "exv-engine";
 /// SCM 显示名。
 pub const SERVICE_DISPLAY_NAME: &str = "EXV Engine Service";
 
-/// 服务模式控制面 Named Pipe 名（稳定名；oneshot 按 core PID 唯一，见
-/// host `engine_control_pipe_name`）。
-pub const SERVICE_CONTROL_PIPE: &str = r"\\.\pipe\exv-engine-service-c";
+// 服务模式控制面 Named Pipe 名（D12/T11 管道名统一）：不再是裸常量——按**安装用户
+// SID** 派生的每用户常量名 `\\.\pipe\exv-engine-c-{user-sid}`（单一事实源在
+// `exv_vpn_win32_ipc::pipe_names::control_pipe_name`，与 oneshot 形态同名）。安装/修复
+// 时由 [`service_launch_arguments`] 写进服务启动参数（`--control-pipe`），服务引擎启动
+// 后绑定该名；host 拨号侧（探活/连接）用同一函数从自己的 SID 算名——sid 段保 B 用户
+// oneshot 并行（复审 F2），首实例 `FILE_FLAG_FIRST_PIPE_INSTANCE` 即每用户单 engine
+// 互斥（计划 §四 edge 20）。旧裸常量名 `exv-engine-service-c` 一次切换废弃（无兼容期：
+// 跨版本名字不同，首实例互不冲突，见 grpc_transport 的过渡属性注记）。
+// （T11 移除了此处的旧管道名常量——单一事实源已上提 exv_vpn_win32_ipc::pipe_names；
+//  本注记保留管道名裁定的出处，改为普通注释不再附在任何条目上。）
 
 /// engine 创建的 Wintun adapter 名（与 host `ENGINE_ADAPTER_NAME` 一致）。
 pub const ENGINE_ADAPTER_NAME: &str = "ExvEngine";
@@ -145,6 +152,10 @@ pub fn parse_install_options(argv: &[String]) -> Result<ServiceInstallOptions, S
         Some(sid) => sid,
         None => return Err("cannot resolve core user SID for service pipe DACL".to_string()),
     };
+    // D12：该 SID 同时是控制面管道名的 sid 段（写入服务启动参数）——ipc canonical
+    // 文法校验 fail closed（防注入值被拼入内核对象名）。
+    exv_vpn_win32_ipc::pipe_names::validate_user_sid(&core_user_sid)
+        .map_err(|e| format!("service install user SID rejected: {e}"))?;
     Ok(ServiceInstallOptions {
         dll,
         adapter_name,
@@ -213,13 +224,23 @@ pub(crate) fn service_marked_for_delete(e: &windows_service::Error) -> bool {
     )
 }
 
-/// 服务启动参数（SCM 启动时传给 ServiceMain）：`--service` + 控制面稳定管道 + dll +
-/// adapter 名 + 授权 SID + 用户配置目录。
-fn service_launch_arguments(options: &ServiceInstallOptions) -> Vec<OsString> {
-    vec![
+/// 服务启动参数（SCM 启动时传给 ServiceMain）：`--service` + 控制面管道名（D12：按
+/// **安装用户 SID** 派生的每用户常量名）+ dll + adapter 名 + 授权 SID + 用户配置目录。
+///
+/// 管道名随 `--user-sid` 变化：sid 段保多用户并行（B 用户装自己的服务得到自己的名字）。
+/// 名字变更（如本统一迁移）即启动参数变更——已存在服务的**修复路径**
+/// （`ChangeServiceConfig`，`install_service` 内）会重配启动参数，服务随之重绑新名。
+///
+/// # Errors
+/// SID 文法非法（[`parse_install_options`] 已前置校验；此处 fail closed 兜底）→ 携带
+/// 原因的字符串。
+fn service_launch_arguments(options: &ServiceInstallOptions) -> Result<Vec<OsString>, String> {
+    let control_pipe = exv_vpn_win32_ipc::pipe_names::control_pipe_name(&options.core_user_sid)
+        .map_err(|e| format!("service control pipe name: {e}"))?;
+    Ok(vec![
         OsString::from("--service"),
         OsString::from("--control-pipe"),
-        OsString::from(SERVICE_CONTROL_PIPE),
+        OsString::from(control_pipe),
         OsString::from("--dll"),
         OsString::from(&options.dll),
         OsString::from("--adapter-name"),
@@ -228,7 +249,7 @@ fn service_launch_arguments(options: &ServiceInstallOptions) -> Vec<OsString> {
         OsString::from(&options.core_user_sid),
         OsString::from("--config-dir"),
         OsString::from(&options.config_dir),
-    ]
+    ])
 }
 
 /// 安装（或修复）engine SCM 服务（`--service-install`）。本机 admin（runas 提权边界内）。
@@ -241,6 +262,9 @@ fn service_launch_arguments(options: &ServiceInstallOptions) -> Vec<OsString> {
 pub fn install_service(argv: &[String]) -> Result<(), String> {
     let options = parse_install_options(argv)?;
     let exe = std::env::current_exe().map_err(|e| format!("cannot resolve engine bin: {e}"))?;
+    // D12：控制面管道名按安装用户 SID 派生（启动参数随 sid 段变化；新建/修复路径共用
+    // 同一份 launch_arguments——修复路径 ChangeServiceConfig 重配即完成名字迁移）。
+    let launch_arguments = service_launch_arguments(&options)?;
     let manager =
         ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
             .map_err(scm_error)?;
@@ -254,7 +278,7 @@ pub fn install_service(argv: &[String]) -> Result<(), String> {
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
         executable_path: exe,
-        launch_arguments: service_launch_arguments(&options),
+        launch_arguments,
         dependencies: vec![],
         account_name: None, // LocalSystem（特权服务）。
         account_password: None,

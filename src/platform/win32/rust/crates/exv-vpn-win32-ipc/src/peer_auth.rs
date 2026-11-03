@@ -13,8 +13,8 @@ use windows::core::PWSTR;
 
 use crate::named_pipe_io::NamedPipeByteStream;
 
-/// The well-known LocalSystem account SID（`NT AUTHORITY\SYSTEM`）。服务模式 engine 由 SCM
-/// 以 LocalSystem 运行——core 侧验证 service engine（server）进程身份时以此为准（D2：
+/// The well-known `LocalSystem` account SID（`NT AUTHORITY\SYSTEM`）。服务模式 engine 由 SCM
+/// 以 `LocalSystem` 运行——core 侧验证 service engine（server）进程身份时以此为准（D2：
 /// 服务 engine 必须是特权系统服务，而非用户态冒名进程）。
 pub const SYSTEM_SID: &str = "S-1-5-18";
 
@@ -49,12 +49,12 @@ pub fn current_process_identity() -> Option<ProcessIdentity> {
 // 编解码统一放 ipc（engine 与 host 共享），避免两侧线格式漂移。
 // ---------------------------------------------------------------------------
 
-/// Self-identity frame header length：pid（u32 LE）+ sid_len（u16 LE）。
+/// Self-identity frame header length：pid（u32 LE）+ `sid_len（u16` LE）。
 pub const IDENTITY_FRAME_HEADER_LEN: usize = 6;
 /// SID 字符串长度上限（真实 SID 远短于此；恶意超长帧 fail closed）。
 pub const IDENTITY_FRAME_MAX_SID_LEN: usize = 512;
 
-/// Encodes a self-identity frame（pid + sid_len + sid）。SID 超长 → 截断到上限
+/// Encodes a self-identity frame（pid + `sid_len` + sid）。SID 超长 → 截断到上限
 /// （解码方比对真实期望 SID 时会 mismatch → fail closed，不会放行）。
 #[must_use]
 pub fn encode_identity_frame(identity: &ProcessIdentity) -> Vec<u8> {
