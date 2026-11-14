@@ -95,6 +95,7 @@ std::wstring BuildUninstallElevationParameters(const CliOptions &options) {
   append_value(L"--local-app-data-root", options.local_app_data_root);
   append_value(L"--roaming-app-data-root", options.roaming_app_data_root);
   append_value(L"--config-dir", options.config_dir);
+  append_value(L"--browser-data-dir", options.browser_data_dir);
   append_value(L"--temp-root", options.temp_root);
   return parameters;
 }
@@ -210,6 +211,12 @@ CliParseResult ParseCli(int argc, wchar_t **argv) {
       continue;
     }
     consumed = consume_value(L"--config-dir", opts.config_dir);
+    if (consumed < 0) return result;
+    if (consumed > 0) {
+      note(first_uninstall_only, i - 1, arg);
+      continue;
+    }
+    consumed = consume_value(L"--browser-data-dir", opts.browser_data_dir);
     if (consumed < 0) return result;
     if (consumed > 0) {
       note(first_uninstall_only, i - 1, arg);

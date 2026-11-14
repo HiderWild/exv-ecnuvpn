@@ -116,6 +116,7 @@ pub(crate) struct AtrustMaterials {
     pub(crate) language: String,
     pub(crate) resource_request: Vec<u8>,
     pub(crate) resolver_domains: Vec<String>,
+    pub(crate) atrust_dns_enabled: bool,
 }
 
 impl AtrustMaterials {
@@ -129,6 +130,7 @@ impl AtrustMaterials {
             language: payload.language().to_owned(),
             resource_request: payload.resource_request().to_vec(),
             resolver_domains: payload.resolver_domains().to_vec(),
+            atrust_dns_enabled: payload.atrust_dns_enabled(),
         }
     }
 }
@@ -143,6 +145,7 @@ pub(crate) struct PipelineIdentity {
     pub(crate) username: String,
     pub(crate) protocol: ProtocolKind,
     pub(crate) resolver_domains: Vec<String>,
+    pub(crate) atrust_dns_enabled: bool,
 }
 
 /// T2/M6 采纳裁决（纯函数面——裁决表三维：身份匹配×协议×fresh 的唯一权威，
@@ -258,6 +261,7 @@ pub fn install_signal_shutdown() {
 
 /// Engine 的本地连接协调状态：单活动尝试、权威 offer 持有者与状态广播。
 pub(crate) struct EngineRuntime {
+    reconnect_fault: Mutex<Option<crate::reconnect_fault::ReconnectFault>>,
     surface: std::sync::RwLock<Arc<dyn crate::platform::surface::PlatformSurface>>,
     attempt: Mutex<Option<ActiveAttempt>>,
     /// 只仲裁本Engine的装配接纳与Stop；不覆盖协议/浏览器状态。
@@ -322,6 +326,11 @@ impl EngineRuntime {
         Self::with_explicit_stop(None)
     }
 
+    /// oneshot 沿已验证的发起用户创建运行时；提权身份仅用于宿主操作。
+    fn new_oneshot_for_owner(owner_uid: u32) -> Self {
+        Self::with_owner_and_explicit_stop(owner_uid, None)
+    }
+
     /// W2.5 service 形态构造：显式停止槽在位（`Shutdown` RPC 实装）。
     pub(crate) fn new_service() -> Self {
         Self::with_explicit_stop(Some(TriggerSlot::default()))
@@ -344,6 +353,7 @@ impl EngineRuntime {
         let (status_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             surface: std::sync::RwLock::new(Arc::new(crate::platform::surface::RealSurface)),
+            reconnect_fault: Mutex::new(None),
             attempt: Mutex::new(None),
             lifecycle_gate: tokio::sync::Mutex::new(()),
             execution_changed: tokio::sync::Notify::new(),
@@ -512,6 +522,19 @@ impl EngineRuntime {
         } else {
             current
         }
+    }
+
+    fn consume_reconnect_fault(&self) -> bool {
+        let operation = self.current_operation_id();
+        let consumed = self.reconnect_fault.lock().ok()
+            .and_then(|mut fault| fault.as_mut().map(|fault| fault.poll(&operation)))
+            .unwrap_or(false);
+        if consumed {
+            self.logs.publish("warn", "packet", "RECONNECT_FAULT_CONSUMED",
+                "外部验收标记已消费，当前连接的传输任务将退出",
+                &crate::session_diagnostics::identity(&operation));
+        }
+        consumed
     }
 
     /// T2：采纳事件重放所需的管线事实（ifindex/纪元）。
@@ -1443,7 +1466,12 @@ async fn run_observe_bootstrap(
     let (sender, incoming) = AuthenticatedIncoming::channel(1);
     // 顶层保留 EngineRuntime 句柄：统一退出收敛要置 shutdown/cancel 并观察
     // attempt/live 收尾，不再让 service 独占 runtime。
-    let engine_runtime = Arc::new(EngineRuntime::new());
+    let engine_runtime = Arc::new(EngineRuntime::new_oneshot_for_owner(args.owner_uid));
+    // 沿本轮 per-core runtime 目录启用；service 形态保持原启动与目录规则。
+    if std::fs::read(args.runtime_dir.join("exv-native-acceptance.opt-in")).ok().as_deref() == Some(b"connected-transport\n") {
+        *engine_runtime.reconnect_fault.lock().expect("reconnect fault lock") =
+            Some(crate::reconnect_fault::ReconnectFault::new(args.runtime_dir.clone()));
+    }
     let service = EngineControlService::from_runtime(Arc::clone(&engine_runtime));
     let server = tokio::spawn(async move {
         Server::builder()
@@ -1843,6 +1871,7 @@ impl HelperControl for EngineControlService {
                     server: envelope.server().to_owned(),
                     username: envelope.username().to_owned(),
                     protocol: ProtocolKind::Cisco,
+                    atrust_dns_enabled: true,
                     resolver_domains: envelope.resolver_domains().to_vec(),
                 },
                 false,
@@ -1852,6 +1881,7 @@ impl HelperControl for EngineControlService {
                     server: atrust.gateway().to_owned(),
                     username: atrust_auth::ATRUST_IDENTITY_USERNAME_PLACEHOLDER.to_owned(),
                     protocol: ProtocolKind::Atrust,
+            atrust_dns_enabled: atrust.atrust_dns_enabled(),
                     resolver_domains: atrust.resolver_domains().to_vec(),
                 },
                 atrust.fresh_authentication(),
@@ -2033,6 +2063,7 @@ impl HelperControl for EngineControlService {
             server: server.clone(),
             username: envelope.username().to_owned(),
             protocol: ProtocolKind::Cisco,
+            atrust_dns_enabled: true,
             resolver_domains: envelope.resolver_domains().to_vec(),
         };
         let (username, password) = envelope.take_credentials();
@@ -2167,6 +2198,7 @@ impl HelperControl for EngineControlService {
                                         server: server.clone(),
                                         username: username.clone(),
                                         protocol: ProtocolKind::Cisco,
+                                        atrust_dns_enabled: true,
                                         resolver_domains,
                                     };
                                     campus_routes = routes.clone();
@@ -2964,6 +2996,10 @@ async fn run_cisco_data_plane(
         {
             break;
         }
+        if runtime.consume_reconnect_fault() {
+            // 终止本次真实 CSTP 任务；原控制通道/泵观察和 SessionLost 出口接续。
+            close_cstp_tasks(runtime, cstp_tasks).await;
+        }
         if pumps.either_finished() {
             // 任一泵死亡 = 数据面失败，不维持 Connected。
             runtime.logs.publish(
@@ -3553,6 +3589,7 @@ fn spawn_atrust_connect_attempt(
             server: atrust.gateway().to_owned(),
             username: atrust_auth::ATRUST_IDENTITY_USERNAME_PLACEHOLDER.to_owned(),
             protocol: ProtocolKind::Atrust,
+            atrust_dns_enabled: atrust.atrust_dns_enabled(),
             resolver_domains: atrust.resolver_domains().to_vec(),
         };
         run_atrust_connection(
@@ -3672,6 +3709,7 @@ async fn run_atrust_connection(
             break AtrustOutcome::SessionLost("session_lost", None);
         };
         let resolver_domains = resident.resolver_domains.clone();
+        let atrust_dns_enabled = resident.atrust_dns_enabled;
         let (egress, mut prepared) = match establish(resident).await {
             AtrustEstablishOutcome::Ready { egress, prepared } => (egress, prepared),
             AtrustEstablishOutcome::Cancelled => {
@@ -3837,7 +3875,7 @@ async fn run_atrust_connection(
             plan_mtu,
             campus_routes.clone(),
             &cancel,
-            PipelineIdentity { resolver_domains, ..identity.clone() },
+            PipelineIdentity { resolver_domains, atrust_dns_enabled, ..identity.clone() },
         )
         .await;
         if !matches!(attempt, AtrustOutcome::SessionLost(_, _)) {
@@ -4163,7 +4201,7 @@ async fn run_atrust_data_plane(
     // 之后（门轨 B 的解析探针需要隧道 DNS /32 已入路由表）。失败=typed 平台
     // 步骤失败（外来同名冲突/写入/HUP/门未装载），按逆序回滚本管线已应用项。
     let mut installed_resolvers: Vec<crate::campus_resolver::InstalledResolver> = Vec::new();
-    {
+    if pipeline_identity.atrust_dns_enabled && !pipeline_identity.resolver_domains.is_empty() {
         let atrust = &prepared;
         let (installed, error) = runtime.surface().install_resolvers(
             &pipeline_identity.resolver_domains,
@@ -4203,8 +4241,7 @@ async fn run_atrust_data_plane(
         wire::ConnectPhase::StartingDataPlane,
         wire::StatsPhase::Connecting,
     );
-    let proxy_domains = installed_resolvers.iter().map(|resolver| resolver.domain.clone()).collect::<Vec<_>>();
-    runtime.apply_proxy_policy(&applied_routes, &proxy_domains);
+    runtime.apply_proxy_policy(&applied_routes, &pipeline_identity.resolver_domains);
     // 数据泵按会话形态接线（设计 §6.1）：CSTP=帧泵（上行包编码 CSTP Data 帧，
     // 下行收 Data payload；无界通道）；aTrust=原始包泵（上行剥 AF 头的原始
     // IPv4 字节入有界 mpsc 喂 Common `run_packets`，`PacketEvent::Packet` 下行
@@ -4262,6 +4299,11 @@ async fn run_atrust_data_plane(
             || TERMINATION_REQUESTED.load(Ordering::SeqCst)
         {
             break;
+        }
+        if runtime.consume_reconnect_fault() {
+            if let Some(owner) = protocol_owner.lock().await.as_ref() {
+                owner.fail_transport_for_acceptance();
+            }
         }
         if pumps.either_finished() {
             // 任一泵死亡 = 数据面失败，不维持 Connected。

@@ -29,7 +29,6 @@ Common 不是跨进程、跨宿主的联合状态机，也不规定 Windows 与 
 - 产品 CLI；
 - Linux native adapter、Linux 原生调试或 Linux 原生交付结论。
 
-`exv-vpn-acceptance` 仅是 test-only 的自动化调试入口，不是产品 CLI，也不进入
 安装包。
 
 ## 规格与重新接线

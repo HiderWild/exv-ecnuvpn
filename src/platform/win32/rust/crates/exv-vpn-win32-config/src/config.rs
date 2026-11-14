@@ -356,6 +356,8 @@ pub struct ExvConfig {
     pub atrust_auto_login: bool,
     /// 数据节点 TCP_NODELAY；旧配置缺键为 false，下一次连接时应用。
     pub atrust_tcp_nodelay: bool,
+    /// aTrust 校园域名解析接管；新装与旧配置缺键均关闭，下次连接生效。
+    pub atrust_dns_enabled: bool,
     /// 校园 DNS 搜索域；每个裸域名同时覆盖该域及其子域。
     #[serde(default = "default_campus_dns_domains", deserialize_with = "deserialize_campus_dns_domains")]
     pub campus_dns_domains: Vec<String>,
@@ -443,6 +445,7 @@ impl Default for ExvConfig {
             atrust_auth_mode_version: 1,
             atrust_auto_login: false,
             atrust_tcp_nodelay: false,
+            atrust_dns_enabled: false,
             campus_dns_domains: default_campus_dns_domains(),
             protocol: Protocol::Atrust,
             username: String::new(),

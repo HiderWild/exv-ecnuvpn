@@ -4,6 +4,7 @@ import type { BrowserLoginMilestone } from "../lib/ipc";
 import { useDialogFocus } from "./use-dialog-focus";
 const props = defineProps<{
   visible: boolean;
+  ticketRefreshReason?: "missing" | "expired";
   compact: boolean;
   mode: "embedded" | "browser" | "headless";
   /** 后台认证使用本次冻结意图；普通连接沿用原等待文案。 */
@@ -16,10 +17,10 @@ const emit = defineEmits<{ cancel: [] }>();
 const instruction = computed(() => props.mode === "browser"
   ? "请在浏览器中完成学校认证。"
   : props.mode === "headless"
-    ? "正在无窗口认证流程中等待学校响应；需要交互时可打开登录窗口。"
+    ? "自动登录正在等待学校响应；需要交互时可打开内嵌浏览器。"
     : props.autoLogin === true
-      ? "正在内嵌登录窗口自动完成学校认证。"
-      : "请在内嵌登录窗口完成学校认证。");
+      ? "正在内嵌浏览器自动完成学校认证。"
+      : "请在内嵌浏览器完成学校认证。");
 const milestoneMessage = computed(() => {
   switch (props.milestone) {
     case "recovering": return "首次认证遇到异常，正在自动重试（2/2）…";
@@ -44,6 +45,7 @@ const { dialog, onDialogKeydown } = useDialogFocus(() => props.visible, cancel);
       <h2 id="browser-login-title">等待学校网页登录</h2>
       <div class="browser-login-body" role="region" aria-label="网页登录说明" tabindex="0">
         <p>{{ instruction }}</p>
+        <p v-if="ticketRefreshReason && milestone !== 'awaiting_manual'" data-testid="web-login-ticket-refresh" role="status">正在获取登录票据，本次认证时间会稍长。后续连接可复用登录信息，连接会更快。</p>
         <p v-if="mode === 'browser'" data-testid="web-login-manual-browser">登录由你在浏览器中手动完成，EXV 不会自动填写或提交账户密码；连接建立后浏览器页面如提示异常，可直接关闭，不影响 EXV 连接。</p>
         <p v-if="milestoneMessage" role="status" aria-live="polite" data-testid="web-login-milestone">{{ milestoneMessage }}</p>
       </div>

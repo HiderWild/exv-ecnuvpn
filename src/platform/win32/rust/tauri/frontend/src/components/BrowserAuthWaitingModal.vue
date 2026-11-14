@@ -35,6 +35,7 @@ import ServiceOperationOverlay from "./ServiceOperationOverlay.vue";
  */
 const props = withDefaults(defineProps<{
   visible: boolean;
+  ticketRefreshReason?: "missing" | "expired" | null;
   /** "waiting" 等待人工认证；"auto-login" 自动登录进行中；"error" 认证失败回应。 */
   mode?: "waiting" | "auto-login" | "error";
   /** 仅内嵌模式为 true（可切系统浏览器回退）；错误态不据此隐藏选项。 */
@@ -105,6 +106,7 @@ function requestCancel(): void {
     @escape="requestCancel"
   >
     <div class="auth-wait-body" :tabindex="minimal ? 0 : undefined" :role="minimal ? 'region' : undefined" :aria-label="minimal ? '认证详细说明' : undefined">
+      <p v-if="!isError && ticketRefreshReason && stage !== 'awaiting_manual'" class="auth-wait-note" data-testid="auth-wait-ticket-refresh" role="status">正在获取登录票据，本次认证时间会稍长。后续连接可复用登录信息，连接会更快。</p>
       <p v-if="!isError && (isAutoLogin || stage === 'recovering')" class="auth-wait-stage" data-testid="auth-wait-stage" aria-live="polite">{{ stageLabel }}</p>
       <p v-else-if="!isError" class="auth-wait-note">完成学校认证后，EXV 将继续建立连接。</p>
       <!-- E10：不设 isError 守卫——错误态（重试决策点）正是预告价值峰值时刻。 -->

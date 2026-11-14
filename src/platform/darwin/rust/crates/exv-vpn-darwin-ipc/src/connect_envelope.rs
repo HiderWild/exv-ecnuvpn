@@ -432,6 +432,8 @@ fn validate_resolver_domains(domains: &[String]) -> Result<(), ConnectEnvelopeEr
 // ---------------------------------------------------------------------------
 
 const VERSION_V2: u16 = 2;
+// aTrust DNS 开关的显式连接信封；旧 V2 解码为关闭，Cisco V1/V3 保持原字节。
+const VERSION_ATRUST_DNS: u16 = 4;
 /// V2 wire 的协议判别位取值（u8）。
 const PROTOCOL_TAG_CISCO: u8 = 1;
 const PROTOCOL_TAG_ATRUST: u8 = 2;
@@ -466,6 +468,7 @@ pub struct DarwinAtrustConnect {
     fresh_authentication: bool,
     /// Core 当前配置投影；空列表表示不安装 resolver。
     resolver_domains: Vec<String>,
+    atrust_dns_enabled: bool,
     profile_digest: [u8; DIGEST_LEN],
 }
 
@@ -505,6 +508,9 @@ impl DarwinAtrustConnect {
     pub fn resolver_domains(&self) -> &[String] {
         &self.resolver_domains
     }
+
+    #[must_use]
+    pub const fn atrust_dns_enabled(&self) -> bool { self.atrust_dns_enabled }
 
     /// 非秘密 profile `摘要（gateway/platform/language/resource_request/fresh/resolver_domains` 的
     /// SHA-256；不含 `browser_session），仅作请求关联`。
@@ -596,7 +602,8 @@ impl DarwinEngineConnectV2 {
                     resource_request,
                     fresh_authentication,
                     resolver_domains: vec!["ecnu.edu.cn".to_owned()],
-                    profile_digest: digest,
+                    atrust_dns_enabled: false,
+                    profile_digest: digest_atrust_dns_profile(digest, false),
                 }),
             }),
             Err(error) => {
@@ -616,15 +623,30 @@ impl DarwinEngineConnectV2 {
         let EngineConnectPayload::Atrust(atrust) = &mut self.payload else {
             return Err(ConnectEnvelopeError::InvalidProtocol);
         };
-        atrust.profile_digest = digest_atrust_profile(
+        atrust.profile_digest = digest_atrust_dns_profile(digest_atrust_profile(
             &atrust.gateway,
             &atrust.platform,
             &atrust.language,
             &atrust.resource_request,
             atrust.fresh_authentication,
             &domains,
-        );
+        ), atrust.atrust_dns_enabled);
         atrust.resolver_domains = domains;
+        Ok(self)
+    }
+
+    /// 显式传递本次连接的 aTrust DNS 开关，域列表仍完整保存给代理消费者。
+    /// # Errors
+    /// Cisco 载荷返回协议不匹配；Cisco DNS 沿既有行为。
+    pub fn with_atrust_dns_enabled(mut self, enabled: bool) -> Result<Self, ConnectEnvelopeError> {
+        let EngineConnectPayload::Atrust(atrust) = &mut self.payload else {
+            return Err(ConnectEnvelopeError::InvalidProtocol);
+        };
+        atrust.atrust_dns_enabled = enabled;
+        atrust.profile_digest = digest_atrust_dns_profile(digest_atrust_profile(
+            &atrust.gateway, &atrust.platform, &atrust.language, &atrust.resource_request,
+            atrust.fresh_authentication, &atrust.resolver_domains,
+        ), enabled);
         Ok(self)
     }
 
@@ -690,7 +712,8 @@ impl DarwinEngineConnectV2 {
         if cursor.take_exact(MAGIC.len())? != MAGIC {
             return Err(ConnectEnvelopeError::InvalidEncoding);
         }
-        if cursor.read_u16()? != VERSION_V2 {
+        let version = cursor.read_u16()?;
+        if !matches!(version, VERSION_V2 | VERSION_ATRUST_DNS) {
             return Err(ConnectEnvelopeError::UnsupportedVersion);
         }
         match cursor.read_u8()? {
@@ -698,12 +721,12 @@ impl DarwinEngineConnectV2 {
                 let envelope = DarwinEngineConnectV1::decode_body(&mut cursor)?;
                 Ok(Self::new_cisco(envelope))
             }
-            PROTOCOL_TAG_ATRUST => Self::decode_atrust_body(&mut cursor),
+            PROTOCOL_TAG_ATRUST => Self::decode_atrust_body(&mut cursor, version),
             _ => Err(ConnectEnvelopeError::InvalidProtocol),
         }
     }
 
-    fn decode_atrust_body(cursor: &mut Cursor<'_>) -> Result<Self, ConnectEnvelopeError> {
+    fn decode_atrust_body(cursor: &mut Cursor<'_>, version: u16) -> Result<Self, ConnectEnvelopeError> {
         let gateway = cursor.read_string()?;
         let browser_session = cursor.read_vec()?;
         let platform = cursor.read_string()?;
@@ -719,6 +742,9 @@ impl DarwinEngineConnectV2 {
         for _ in 0..domain_count {
             domains.push(cursor.read_string()?);
         }
+        let enabled = if version == VERSION_ATRUST_DNS {
+            match cursor.read_u8()? { 0 => false, 1 => true, _ => return Err(ConnectEnvelopeError::InvalidEncoding) }
+        } else { false };
         let digest = cursor.take_exact(DIGEST_LEN)?;
         if !cursor.is_finished() {
             return Err(ConnectEnvelopeError::InvalidEncoding);
@@ -733,11 +759,15 @@ impl DarwinEngineConnectV2 {
             language,
             resource_request,
             fresh_authentication,
-        )?.with_resolver_domains(domains)?;
+        )?.with_resolver_domains(domains)?.with_atrust_dns_enabled(enabled)?;
         let EngineConnectPayload::Atrust(atrust) = &value.payload else {
             return Err(ConnectEnvelopeError::InvalidEncoding);
         };
-        if atrust.profile_digest != profile_digest {
+        let expected = if version == VERSION_V2 {
+            digest_atrust_profile(&atrust.gateway, &atrust.platform, &atrust.language,
+                &atrust.resource_request, atrust.fresh_authentication, &atrust.resolver_domains)
+        } else { atrust.profile_digest };
+        if expected != profile_digest {
             return Err(ConnectEnvelopeError::DigestMismatch);
         }
         Ok(value)
@@ -753,7 +783,7 @@ impl DarwinEngineConnectV2 {
     pub fn encode(self) -> Zeroizing<Vec<u8>> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
-        push_u16(&mut bytes, VERSION_V2);
+        push_u16(&mut bytes, match &self.payload { EngineConnectPayload::Cisco(_) => VERSION_V2, EngineConnectPayload::Atrust(_) => VERSION_ATRUST_DNS });
         match self.payload {
             EngineConnectPayload::Cisco(envelope) => {
                 bytes.push(PROTOCOL_TAG_CISCO);
@@ -781,6 +811,7 @@ impl DarwinEngineConnectV2 {
                 for domain in &atrust.resolver_domains {
                     push_string(&mut bytes, domain);
                 }
+                bytes.push(u8::from(atrust.atrust_dns_enabled));
                 bytes.extend_from_slice(&atrust.profile_digest);
             }
         }
@@ -818,6 +849,14 @@ fn validate_ascii_token(
         return Err(error);
     }
     Ok(())
+}
+
+fn digest_atrust_dns_profile(legacy: [u8; DIGEST_LEN], enabled: bool) -> [u8; DIGEST_LEN] {
+    let mut digest = Sha256::new();
+    digest.update(b"EXV-DARWIN-CONNECT-PROFILE-V4-ATRUST-DNS\0");
+    digest.update(legacy);
+    digest.update([u8::from(enabled)]);
+    digest.finalize().into()
 }
 
 /// aTrust 非秘密 profile `摘要（browser_session` 绝不参与）。

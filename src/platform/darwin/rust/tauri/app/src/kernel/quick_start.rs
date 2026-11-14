@@ -50,6 +50,7 @@ const ALLOWED_CONFIG_KEYS: &[&str] = &[
     "protocol",
     "atrust_server",
     "atrust_auth_mode",
+    "atrust_dns_enabled",
     "atrust_auto_login",
     "campus_dns_domains",
     "auto_reconnect",
@@ -188,4 +189,29 @@ fn validate_and_prepare_items(items: Vec<ConfigItem>) -> Result<Vec<ConfigItem>,
     }
 
     Ok(prepared)
+}
+
+/// 向导证书检查只读，沿用宿主现有证书目录和用户根信任。
+#[derive(Debug, Serialize)]
+pub(crate) struct QuickStartCertificateStatus { trusted: bool }
+
+fn certificate_status(preparation: crate::kernel::native_agent::CertificatePreparation) -> QuickStartCertificateStatus {
+    QuickStartCertificateStatus { trusted: matches!(preparation, crate::kernel::native_agent::CertificatePreparation::Ready) }
+}
+
+#[tauri::command]
+pub(crate) async fn quick_start_certificate_inspect() -> Result<QuickStartCertificateStatus, AppError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        super::native_agent::inspect_agent_certificate().map(certificate_status)
+            .map_err(|error| AppError::Internal(error.to_string()))
+    }).await.map_err(|error| AppError::Internal(error.to_string()))?
+}
+
+/// 仅在向导本次勾选时调用；实际安装或取消错误原样返回，配置保存不重放。
+#[tauri::command]
+pub(crate) async fn quick_start_certificate_install() -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        super::native_agent::prepare_agent_certificate(true).map(|_| ())
+            .map_err(|error| AppError::Internal(error.to_string()))
+    }).await.map_err(|error| AppError::Internal(error.to_string()))?
 }

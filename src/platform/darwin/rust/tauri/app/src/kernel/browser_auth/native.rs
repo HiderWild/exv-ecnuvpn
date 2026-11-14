@@ -126,6 +126,13 @@ async fn wait_for_ticket(
             _ = &mut cancel => return Err(CANCELLED.into()),
             _ = tokio::time::sleep_until(deadline) => return Err(NATIVE_TICKET_TIMEOUT.to_owned()),
             delivery = rx.recv() => match delivery {
+                Some(TicketDelivery::AuthenticatedSession { session, username }) => {
+                    options.emit(AuthMilestone::GatewayConfirming);
+                    let mut artifact = AuthArtifact::new(session, AuthSource::SystemBrowser);
+                    artifact.authenticated_username = username;
+                    artifact.interactive = true;
+                    return Ok(artifact);
+                }
                 Some(TicketDelivery::Session(session)) => {
                     options.emit(AuthMilestone::GatewayConfirming);
                     let mut artifact = AuthArtifact::new(session, AuthSource::SystemBrowser);

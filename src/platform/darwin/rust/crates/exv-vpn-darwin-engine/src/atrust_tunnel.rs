@@ -374,6 +374,11 @@ impl AtrustPacketTunnel {
         self.host_shutdown.store(true, Ordering::Release);
     }
 
+    /// 隔离验收调用：故障作用于当前真实协议任务，原 join 观察链负责上报。
+    pub(crate) fn fail_transport_for_acceptance(&self) {
+        if let Some(worker) = &self.worker { worker.abort(); }
+    }
+
     /// 兼容入口：稳定类别来自同一缓存，不重复 join。
     pub(crate) async fn close(&mut self) -> Result<(), &'static str> {
         self.close_observed().await.result()

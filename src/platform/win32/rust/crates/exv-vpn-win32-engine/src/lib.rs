@@ -13,6 +13,7 @@ pub mod connect_ledger;
 pub mod connection_trace;
 pub mod core_relaunch;
 pub mod reconnect;
+mod reconnect_fault;
 mod secure_write;
 mod version_marker;
 pub mod atrust_auth;

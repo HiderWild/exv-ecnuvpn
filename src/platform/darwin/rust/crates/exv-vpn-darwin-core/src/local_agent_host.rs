@@ -65,6 +65,16 @@ pub trait GatewayExchange: Send + Sync {
         user_agent: &'a str,
         ticket: Secret,
     ) -> Pin<Box<dyn Future<Output = Result<BrowserSession, ExchangeFailure>> + Send + 'a>>;
+
+    /// 非秘密账户随同一兑换结果返回；旧兑换端口未提供时保持缺值。
+    fn exchange_with_username<'a>(
+        &'a self,
+        gateway: &'a str,
+        user_agent: &'a str,
+        ticket: Secret,
+    ) -> Pin<Box<dyn Future<Output = Result<(BrowserSession, String), ExchangeFailure>> + Send + 'a>> {
+        Box::pin(async move { self.exchange(gateway, user_agent, ticket).await.map(|session| (session, String::new())) })
+    }
 }
 
 /// 生产兑换实现：每张票据新建 `AuthClient`（R2 配方 `r2_ticket_consume.rs` 同链）：
@@ -124,6 +134,15 @@ impl GatewayExchange for AuthClientExchange {
         user_agent: &'a str,
         ticket: Secret,
     ) -> Pin<Box<dyn Future<Output = Result<BrowserSession, ExchangeFailure>> + Send + 'a>> {
+        Box::pin(async move { self.exchange_with_username(gateway, user_agent, ticket).await.map(|(session, _)| session) })
+    }
+
+    fn exchange_with_username<'a>(
+        &'a self,
+        gateway: &'a str,
+        user_agent: &'a str,
+        ticket: Secret,
+    ) -> Pin<Box<dyn Future<Output = Result<(BrowserSession, String), ExchangeFailure>> + Send + 'a>> {
         let underlay = Arc::clone(&self.underlay);
         Box::pin(async move {
             let identity = AuthClientIdentity::browser("Mac", "zh-CN")
@@ -179,6 +198,7 @@ impl GatewayExchange for AuthClientExchange {
                 exchange.cookie_header().to_string()
             };
             BrowserSession::new(gateway.to_owned(), header, effective_user_agent)
+                .map(|session| (session, exchange.authenticated_username.unwrap_or_default()))
                 .map_err(|_| ExchangeFailure::Local("session_shape"))
         })
     }
@@ -187,6 +207,8 @@ impl GatewayExchange for AuthClientExchange {
 /// 等待方收到的票据兑换交付。
 #[derive(Debug)]
 pub enum TicketDelivery {
+    /// 兑换响应同时提供了实际账户。
+    AuthenticatedSession { session: BrowserSession, username: String },
     /// 兑换成功：可提交的候选会话（网关=等待方冻结网关）。
     Session(BrowserSession),
     /// 兑换失败（分类见 [`ExchangeFailure`]）；等待方决定是否继续等下一张票。
@@ -575,7 +597,7 @@ impl TicketConsumer for HostTicketConsumer {
                 "[local_agent] 开始兑换票据 gateway={gateway} ua_len={}",
                 user_agent.len()
             );
-            let outcome = inner.exchange.exchange(&gateway, &user_agent, ticket).await;
+            let outcome = inner.exchange.exchange_with_username(&gateway, &user_agent, ticket).await;
             match &outcome {
                 Ok(_) => eprintln!("[local_agent] 票据兑换成功"),
                 Err(failure) => eprintln!("[local_agent] 票据兑换失败: {failure:?}"),
@@ -607,7 +629,8 @@ impl TicketConsumer for HostTicketConsumer {
                 ticket_consumed.store(false, Ordering::Release);
             }
             let delivery = match outcome {
-                Ok(session) => TicketDelivery::Session(session),
+                Ok((session, username)) if !username.is_empty() => TicketDelivery::AuthenticatedSession { session, username },
+                Ok((session, _)) => TicketDelivery::Session(session),
                 Err(failure) => TicketDelivery::Failed(failure),
             };
             if tx.send(delivery).await.is_err() {

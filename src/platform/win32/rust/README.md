@@ -36,7 +36,6 @@ ownership、effect certainty、取消与 stale-completion 规则）保留在 Rus
 - 产品 CLI；
 - Linux native adapter、Linux 原生调试或 Linux 原生交付结论。
 
-`exv-vpn-win32-acceptance` 仅是 test-only 的自动化调试入口，不是产品 CLI，
 也不进入安装包。
 
 ## 规格与重新接线

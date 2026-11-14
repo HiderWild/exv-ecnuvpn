@@ -5,7 +5,7 @@ EXV 是华东师范大学校园 VPN（ECNU VPN / aTrust 之外亦支持 Cisco �
 
 - **Windows**：Tauri 桌面应用 + 后台引擎服务，支持 TUN / 系统代理两种连接模式，
   内置校园分流路由与网关旁路。
-- **macOS**：同构的桌面应用与 utun 隧道（darwin 侧发布物随后补齐）。
+- **macOS**：Tauri 桌面应用与 utun 隧道，支持校园 VPN 连接与认证。
 
 本仓库为 4.x Rust 产品线。相关能力与已知限制见 `CHANGELOG.md`。
 
@@ -53,7 +53,7 @@ cargo check --workspace   # 核心与平台工作区按各自 Cargo.toml 分别�
 
 ## 版本与 macOS 构建
 
-产品版本由根 `release.json` 统一管理。运行 `python scripts/release.py version set 4.2.0` 同步两端配置与产品组件；发布前运行 `python scripts/release.py version check --notes`。用户更新摘要写在 `release-notes.json`，分别描述两端功能和体验。
+产品版本由根 `release.json` 统一管理。运行 `python scripts/release.py version set 4.2.1` 同步两端配置与产品组件；发布前运行 `python scripts/release.py version check --notes`。用户更新摘要写在 `release-notes.json`，分别描述两端功能和体验。
 
 macOS 在原生宿主准备 Rust、sccache、Node.js 与 npm，依次执行 `scripts/build-unsigned.sh`、`scripts/package-unsigned.sh`、`scripts/package-dmg.sh`。DMG 所需 Python 依赖由宿主提供；脚本会列出缺失项。
 

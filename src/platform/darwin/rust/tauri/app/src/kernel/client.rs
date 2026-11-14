@@ -323,6 +323,10 @@ fn map_status(s: Status) -> AppError {
     }
     let mut causes = s.metadata().get_all("x-exv-connect-cause").iter();
     let cause = causes.next().and_then(|cause| cause.to_str().ok());
+    if s.code() == Code::FailedPrecondition && cause == Some("atrust-cache-expired")
+        && causes.next().is_none() {
+        return AppError::CredentialRequired { code: Some("DARWIN_CORE_ATRUST_CACHE_EXPIRED".into()), message: "credential_required".into() };
+    }
     if s.code() == Code::FailedPrecondition && causes.next().is_none()
         && matches!(cause, Some("atrust-material-missing" | "cisco-material-missing")) {
         return AppError::CredentialRequired { code: Some(CODE_CREDENTIALS_MISSING.to_owned()), message: "credential_required".into() };

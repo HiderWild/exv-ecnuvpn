@@ -27,6 +27,7 @@ import {
   atrustAuthModeFromConfig,
   isCoreConfigKey,
   normalizeCoreConfigValue,
+  sanitizeCustomServerInput,
   vpnServerPreset,
   vpnServersFor,
   protocolFromConfig,
@@ -94,6 +95,7 @@ const CONNECTION_KEYS: readonly CoreConfigKey[] = [
   "atrust_server",
   "atrust_auth_mode",
   "campus_dns_domains",
+  "atrust_dns_enabled",
   "protocol",
   "username",
   "password",
@@ -145,6 +147,45 @@ const visibleFields = computed(() =>
         drafts.value.auto_reconnect === "true",
     ),
   );
+
+/** 主连接信息、独立流量控制卡、其余连接偏好按用户操作顺序呈现。 */
+const connectionGroups = computed(() => {
+  const mainKeys: readonly string[] = ["protocol", "atrust_auth_mode", "server", "atrust_server", "username"];
+  const trafficKeys: readonly string[] = ["routes", "atrust_dns_enabled", "campus_dns_domains"];
+  const fields = connectionFields.value;
+  return [
+    { id: "main", fields: fields.filter(field => mainKeys.includes(field.key)).sort((a, b) => mainKeys.indexOf(a.key) - mainKeys.indexOf(b.key)) },
+    { id: "traffic", fields: trafficKeys.flatMap(key => fields.filter(field => field.key === key && (key !== "atrust_dns_enabled" || protocol.value === "atrust"))) },
+    { id: "preferences", fields: fields.filter(field => !mainKeys.includes(field.key) && !trafficKeys.includes(field.key)) },
+  ].filter(group => group.fields.length > 0);
+});
+
+const serverInputComposing = ref(false);
+/** 编辑框呈现域名；历史配置中的协议外壳保留在草稿中，未编辑时不会重写。 */
+function customServerDisplay(key: CoreConfigKey): string {
+  return (drafts.value[key] ?? "").replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
+function startServerComposition(): void {
+  serverInputComposing.value = true;
+  clearAutoSaveTimer();
+}
+function endServerComposition(key: CoreConfigKey, event: Event): void {
+  serverInputComposing.value = false;
+  updateCustomServer(key, event);
+}
+function updateCustomServer(key: CoreConfigKey, event: Event): void {
+  if (serverInputComposing.value || (event as InputEvent).isComposing) return;
+  const input = event.target as HTMLInputElement;
+  const raw = input.value;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const value = sanitizeCustomServerInput(raw);
+  input.value = value;
+  if (start !== null && end !== null) {
+    input.setSelectionRange(sanitizeCustomServerInput(raw.slice(0, start)).length, sanitizeCustomServerInput(raw.slice(0, end)).length);
+  }
+  updateText(key, event);
+}
 
 function experimentalDraft(key: "mtu" | "user_agent"): string {
   return fieldDraft(key);
@@ -348,7 +389,7 @@ async function load(): Promise<void> {
   try {
     const nextItems = await gateway.configGet();
     credentialConfig.apply(nextItems);
-    const nextDrafts: Record<string, string> = { username: "", remember_password: "false", auto_reconnect: "false" };
+    const nextDrafts: Record<string, string> = { username: "", remember_password: "false", auto_reconnect: "false", atrust_dns_enabled: "false", campus_dns_domains: "", routes: "" };
     for (const item of nextItems) if (isCoreConfigKey(item.key)) nextDrafts[item.key] = item.value;
     nextDrafts.atrust_auth_mode = atrustAuthModeFromConfig(nextDrafts.atrust_auth_mode);
     // 密码是 AES-GCM 密文 blob，core 不回显：始终以空起始，由用户显式输入新密码。
@@ -459,6 +500,7 @@ function setAppearanceMotion(value: "normal" | "reduced"): void {
  * 外观的归属分流应用。校验错误仍内联提示且不提交（脏态保留，下次变更再重试）。
  */
 async function saveAll(): Promise<void> {
+  if (serverInputComposing.value) return;
   if (saving.value || appearance.saving.value) return;
 
   // 分流一：core 配置脏键。
@@ -581,8 +623,10 @@ onUnmounted(flushPendingAutoSave);
             <span>{{ loadError }}</span><button type="button" data-testid="retry-settings" @click="load">重试</button>
           </div>
           <template v-else>
-            <div v-if="connectionFields.length" class="settings-fields-grid">
-              <template v-for="field in connectionFields" :key="field.key">
+            <section v-for="group in connectionGroups" :key="group.id" :class="{ 'settings-traffic': group.id === 'traffic' }" :data-testid="group.id === 'traffic' ? 'settings-traffic' : undefined" :aria-labelledby="group.id === 'traffic' ? 'settings-traffic-title' : undefined">
+              <header v-if="group.id === 'traffic'" class="settings-traffic__header"><h3 id="settings-traffic-title">流量控制</h3><p>路由与 DNS 设置在下次连接生效。</p></header>
+              <div class="settings-fields-grid">
+              <template v-for="field in group.fields" :key="field.key">
               <section v-if="field.key === 'username'" class="settings-credentials" data-testid="settings-credentials" aria-labelledby="settings-credentials-title">
                 <header class="settings-credentials__header"><h3 id="settings-credentials-title">账户与密码</h3><button type="button" class="routes-edit-button" data-testid="credential-change-button" @click="openPasswordModal">修改</button></header>
                 <p v-if="protocol === 'atrust'" class="protocol-choice__note" data-testid="atrust-auth-note">通过aTrust协议连接时，用户名和密码仅影响自动登录模式。</p>
@@ -591,7 +635,7 @@ onUnmounted(flushPendingAutoSave);
               </section>
               <SettingsRow v-else
                 :class="{ 'settings-row--dense': true, 'settings-row--wide': field.kind === 'routes' }"
-                :label="field.label"
+                :label="field.kind === 'server' ? 'VPN 服务器' : field.label"
                 :description="field.description"
                 :data-testid="`setting-${field.key}`"
               >
@@ -623,9 +667,11 @@ onUnmounted(flushPendingAutoSave);
                       :data-testid="`input-${field.key}-custom`"
                       type="text"
                       autocomplete="off"
-                      :value="drafts[field.key] ?? ''"
+                      :value="customServerDisplay(field.key)"
                       :aria-label="`${field.label}（自定义）`"
-                      @input="updateText(field.key, $event)"
+                      @input="updateCustomServer(field.key, $event)"
+                      @compositionstart="startServerComposition"
+                      @compositionend="endServerComposition(field.key, $event)"
                     >
                   </div>
                   <div
@@ -641,9 +687,9 @@ onUnmounted(flushPendingAutoSave);
                     <button type="button" data-testid="protocol-cisco" :aria-pressed="protocol === 'cisco'" @click="setProtocol('cisco')">Cisco</button>
                   </div>
                   <div v-else-if="field.kind === 'auth_mode'" class="atrust-auth-choice">
-                    <div class="protocol-segment" role="group" aria-label="aTrust 认证方式">
+                    <div class="protocol-segment" role="group" aria-label="认证通道">
                       <button type="button" data-testid="atrust-auth-browser" :aria-pressed="drafts.atrust_auth_mode === 'browser'" @click="setAtrustAuthMode('browser')">系统浏览器</button>
-                      <button type="button" data-testid="atrust-auth-embedded" :aria-pressed="drafts.atrust_auth_mode === 'embedded'" @click="setAtrustAuthMode('embedded')">网页内嵌</button>
+                      <button type="button" data-testid="atrust-auth-embedded" :aria-pressed="drafts.atrust_auth_mode === 'embedded'" @click="setAtrustAuthMode('embedded')">内嵌浏览器</button>
                       <button type="button" data-testid="atrust-auth-headless" :aria-pressed="drafts.atrust_auth_mode === 'headless'" @click="setAtrustAuthMode('headless')">自动登录</button>
                     </div>
 
@@ -684,8 +730,8 @@ onUnmounted(flushPendingAutoSave);
                 </div>
               </SettingsRow>
               </template>
-            </div>
-            <p v-else class="settings-state">暂无</p>
+              </div>
+            </section>
           </template>
 
         </section>
@@ -972,4 +1018,8 @@ onUnmounted(flushPendingAutoSave);
 .protocol-segment button[aria-pressed="true"] { background: var(--accent-subtle); color: var(--accent); box-shadow: none; font-weight: 600; }
 .protocol-segment button:disabled { cursor: not-allowed; opacity: 0.55; }
 .protocol-segment__new { position: absolute; top: -7px; left: -3px; min-width: 16px; padding: 1px 4px; border-radius: 7px; background: var(--accent); color: var(--accent-on); font-size: var(--font-size-caption); line-height: 1.2; font-weight: 700; }
+.settings-traffic { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: 12px; }
+.settings-traffic__header { margin-bottom: 8px; }
+.settings-traffic__header h3 { margin: 0; font-size: var(--font-size-body); }
+.settings-traffic__header p { margin: 5px 0 0; color: var(--text-secondary); font-size: var(--font-size-caption); }
 </style>

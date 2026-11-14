@@ -198,33 +198,31 @@ fn remove_user_path(path: &Path, label: &str) -> ItemOutcome {
 /// 用户态段：删除无需提权的全部 EXV 产物。
 ///
 /// 顺序不敏感，但结果顺序固定，便于用户逐项核对。
-///
-/// `manual` 收集"需用户手动处理"的提示（不合并进逐项状态）。
-fn run_user_side(home: &Path, manual: &mut Vec<String>) -> Vec<ItemOutcome> {
+fn run_user_side(home: &Path) -> Vec<ItemOutcome> {
+    // 与现役配置入口保持 EXV_CONFIG_DIR > USERPROFILE > HOME 的解析顺序。
+    let configured = std::env::var_os("EXV_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|profile| PathBuf::from(profile).join(".exv"))
+        });
+    run_user_side_with_config(home, configured.as_deref())
+}
+
+fn run_user_side_with_config(home: &Path, configured: Option<&Path>) -> Vec<ItemOutcome> {
     let mut items = Vec::new();
 
-    // 1) 配置与凭据（`~/.exv`：config.json + key.bin + logs/）。
-    //
-    // **白名单纪律（W0 的实测加固）**：`config_paths::config_dir()` 会被 `EXV_CONFIG_DIR`
-    // 覆盖，而本项是 `purge_owned_tree`（整树清除）。若直接采信该环境变量，攻击者/误设
-    // 可令卸载器**递归删除任意目录**——实测把 `EXV_CONFIG_DIR` 指向一个含用户文件的
-    // `/private/tmp` 目录，整棵树被删光（用户态无提权，但仍是越权删除）。
-    // 因此这里**只认代码常量推导的 `$HOME/.exv`**；`EXV_CONFIG_DIR` 指向别处时跳过并
-    // 在结果里如实报告（用户可手动删除）。该变量在生产路径中无任何设置点（仅测试用）。
-    match resolve_config_dir(home) {
-        Ok(config_dir) => {
-            if config_dir.exists() {
-                items.push(clear_dir_then_remove(&config_dir, "配置与已保存凭据"));
-            } else {
-                items.push(ItemOutcome::absent("配置与已保存凭据"));
-            }
-        }
-        Err(reason) => {
-            items.push(ItemOutcome::skipped("配置与已保存凭据", reason.as_str()));
-            manual.push(format!(
-                "配置目录不在 `$HOME/.exv`（{reason}）；为避免误删，未自动清理。请手动确认后删除该目录。"
-            ));
-        }
+    // 默认 EXV 独占根清整树；环境覆盖目录可能混放文档，只处理已知 EXV 叶。
+    let config_dir = home.join(".exv");
+    if config_dir.exists() {
+        items.push(clear_dir_then_remove(&config_dir, "配置与已保存凭据"));
+    } else {
+        items.push(ItemOutcome::absent("配置与已保存凭据"));
+    }
+    if let Some(custom) = configured.filter(|path| *path != config_dir.as_path()) {
+        items.extend(clear_custom_config(custom));
     }
 
     // 2) 前端偏好文件所在的目录（`~/Library/Application Support/EXV`）。
@@ -250,6 +248,10 @@ fn run_user_side(home: &Path, manual: &mut Vec<String>) -> Vec<ItemOutcome> {
     // label 必须逐项区分：此前按路径末段取名会让前三项同名
     // （`com.exv.vpn.desktop`），用户看到三行一样的内容，无法判断哪项是什么。
     for (relative, label) in [
+        (
+            "Library/Application Support/EXV/atrust-browser",
+            "受控浏览器登录资料",
+        ),
         ("Library/WebKit/com.exv.vpn.desktop", "网页缓存（WebKit）"),
         ("Library/Caches/com.exv.vpn.desktop", "网络缓存（Caches）"),
         (
@@ -290,27 +292,65 @@ fn run_user_side(home: &Path, manual: &mut Vec<String>) -> Vec<ItemOutcome> {
     items
 }
 
-/// 解析**允许被整树清除**的配置目录。
-///
-/// 只接受代码常量推导的 `$HOME/.exv`。`EXV_CONFIG_DIR` 只在**同值**时被接受（等价于未设，
-/// 保留 `config_paths::config_dir()` 的语义自证）；指向别处一律拒绝——那是环境变量派生的
-/// 任意路径，不得进入整树清除（W0；实测可删任意用户目录）。
-fn resolve_config_dir(home: &Path) -> Result<PathBuf, String> {
-    // 纯函数：环境读取只发生在这一处入口，便于单测直接注入而不触碰进程环境
-    // （进程级 env 在并行测试里会串味到其它用例）。
-    resolve_config_dir_with(home, std::env::var("EXV_CONFIG_DIR").ok().as_deref())
-}
-
-/// [`resolve_config_dir`] 的纯函数内核（`override_value` = `EXV_CONFIG_DIR` 的原始值）。
-fn resolve_config_dir_with(home: &Path, override_value: Option<&str>) -> Result<PathBuf, String> {
-    let canonical = home.join(".exv");
-    let Some(value) = override_value else {
-        return Ok(canonical);
-    };
-    if value.is_empty() || Path::new(value) == canonical {
-        return Ok(canonical);
+/// 自定义配置根不归 EXV 独占；只删除现役配置/密钥和严格命名的认证缓存。
+fn clear_custom_config(dir: &Path) -> Vec<ItemOutcome> {
+    const LABEL: &str = "自定义配置与认证数据";
+    if root_is_symlink(dir) {
+        return vec![ItemOutcome::skipped(LABEL, Refusal::Symlink.reason())];
     }
-    Err(format!("EXV_CONFIG_DIR={value}"))
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return vec![ItemOutcome::absent(LABEL)];
+        }
+        Err(error) => {
+            return vec![ItemOutcome::failed(
+                LABEL,
+                format!("{}: {error}；请检查目录权限后重试。", dir.display()),
+            )];
+        }
+    };
+    let mut items = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                items.push(ItemOutcome::failed(
+                    LABEL,
+                    format!("读取目录失败：{error}；请检查目录权限后重试。"),
+                ));
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let cache = [("atrust-session-", 8), ("atrust-sso-", 64)]
+            .iter()
+            .any(|(prefix, length)| {
+                name.strip_prefix(*prefix)
+                    .and_then(|suffix| suffix.strip_suffix(".bin"))
+                    .is_some_and(|digest| {
+                        digest.len() == *length
+                            && digest.bytes().all(|byte| {
+                                byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+                            })
+                    })
+            });
+        if cache
+            || matches!(
+                name,
+                "config.json" | "key.bin" | "config.protocol-switch-backup.json" | "quick-start.json"
+            )
+        {
+            items.push(remove_file_at(&entry.path(), &format!("{LABEL}（{name}）")));
+        }
+    }
+    if items.is_empty() {
+        items.push(ItemOutcome::absent(LABEL));
+    }
+    items
 }
 
 /// 删除单个文件（不做目录语义）。
@@ -543,12 +583,22 @@ pub(crate) type ElevationLauncher =
 /// 提权失败/取消**不阻断**用户态清理，但必须在结果中把"系统级残留仍在"列为独立项
 /// （不得呈现为整体完成）；而连接未停是**硬前置**，它不满足就不允许进入删除。
 ///
-/// `home` 与 `app_path` 可注入（测试用假沙箱）；生产由调用方给真实路径。
+/// 生产沿用环境配置解析；普通测试从内核入口注入沙箱用户态段。
 pub(crate) fn run(
     home: &Path,
     app_path: &Path,
     connection: ConnectionOutcome,
     launcher: &ElevationLauncher,
+) -> PreUninstallReply {
+    run_with_user_side(app_path, connection, launcher, || run_user_side(home))
+}
+
+/// 用户态目标由调用方注入；连接和系统段成功后才执行。
+fn run_with_user_side(
+    app_path: &Path,
+    connection: ConnectionOutcome,
+    launcher: &ElevationLauncher,
+    user_side: impl FnOnce() -> Vec<ItemOutcome>,
 ) -> PreUninstallReply {
     let mut reply = PreUninstallReply {
         items: Vec::new(),
@@ -615,7 +665,7 @@ pub(crate) fn run(
     // [2] 必要系统步骤成功后清理用户域。
     reply
         .items
-        .extend(run_user_side(home, &mut reply.manual_actions));
+        .extend(user_side());
 
     // [3] 应用本体（最后：删掉 bundle 后进程仍可继续，但已无二进制可再执行）。
     let (outcome, manual) = remove_app_bundle(app_path);

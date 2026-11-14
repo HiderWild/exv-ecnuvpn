@@ -44,7 +44,7 @@ export interface ProductConnectionInfo {
   /** 活动身份协议由现有接纳投影提供，不能由配置刷新覆写。 */
   protocol?: "cisco" | "atrust";
   account: string | null;
-  /** 配置账号只属于 Cisco；aTrust 尚无可信的认证身份数据口。 */
+  /** 账户来自已接纳会话身份；未返回本次账户时为 unavailable。 */
   accountSource?: "configured" | "unavailable";
   vpnServer: string | null;
   campusIp: string | null;

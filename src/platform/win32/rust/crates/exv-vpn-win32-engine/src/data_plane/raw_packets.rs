@@ -118,7 +118,7 @@ impl EngineDataPlane {
     pub fn spawn_raw_packet_data_plane(
         &self,
         outgoing: mpsc::Sender<Vec<u8>>,
-        mut incoming: mpsc::Receiver<Vec<u8>>,
+        incoming: mpsc::Receiver<Vec<u8>>,
         log: Option<Arc<crate::log_sink::LogSink>>,
         aux: DataPlaneAux,
     ) -> Result<EngineDataPlaneThreads, DataPlaneSpawnError> {
@@ -217,37 +217,11 @@ impl EngineDataPlane {
         }
         let writer_session = self.session.clone();
         let writer_gate = activated.clone();
-        let writer_flag = writer_stop.clone();
         let writer_counter = ring_sent_bytes.clone();
-        let writer_stats = aux.stats;
         let writer_observation = raw_packet_stats;
         if let Err(error) = threads.spawn_worker(false, "wintun_raw_writer", move || {
-            let guard = writer_guard;
-            if !wait_for_data_plane_activation(&writer_gate, &writer_flag) {
-                return;
-            }
-            while !writer_flag.load(Ordering::Acquire) {
-                match incoming.try_recv() {
-                    Ok(packet) => {
-                        let result = writer_session.lock().expect("session 锁").send(&packet);
-                        if let Err(error) = record_wintun_write(
-                            result,
-                            packet.len(),
-                            &writer_counter,
-                            writer_stats.as_deref(),
-                            &writer_observation,
-                        ) {
-                            guard.report("wintun_send_failed", Some(error.code), None);
-                            break;
-                        }
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => writer_observation.sleep(false),
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        guard.report("raw_protocol_closed", None, None);
-                        break;
-                    }
-                }
-            }
+            run_raw_writer(writer_guard, &writer_gate, incoming, &writer_counter,
+                &writer_observation, |packet| writer_session.lock().expect("session 锁").send(packet));
         }) {
             return Err(DataPlaneSpawnError {
                 message: error,
@@ -255,6 +229,43 @@ impl EngineDataPlane {
             });
         }
         Ok(threads)
+    }
+}
+
+// 与 CSTP 一样只注入 ring 写入，生产与测试执行同一 raw writer 循环。
+pub(super) fn run_raw_writer(
+    guard: DataPlaneWorkerGuard,
+    activated: &AtomicBool,
+    mut incoming: mpsc::Receiver<Vec<u8>>,
+    writer_counter: &AtomicU64,
+    writer_observation: &RawPacketStats,
+    mut send_packet: impl FnMut(&[u8]) -> Result<(), exv_vpn_win32_resource::native_error::NativeError>,
+) {
+    let writer_flag = &guard.stop;
+    let writer_stats = &guard.aux.stats;
+    if !wait_for_data_plane_activation(activated, writer_flag) { return; }
+    while !writer_flag.load(Ordering::Acquire) {
+        if guard.poll_reconnect_fault() { break; }
+        match incoming.try_recv() {
+            Ok(packet) => {
+                let result = send_packet(&packet);
+                if let Err(error) = record_wintun_write(
+                    result,
+                    packet.len(),
+                    &writer_counter,
+                    writer_stats.as_deref(),
+                    &writer_observation,
+                ) {
+                    guard.report("wintun_send_failed", Some(error.code), None);
+                    break;
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty) => writer_observation.sleep(false),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                guard.report("raw_protocol_closed", None, None);
+                break;
+            }
+        }
     }
 }
 

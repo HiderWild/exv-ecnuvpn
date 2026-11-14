@@ -29,8 +29,8 @@ export const SHARED_CORE_FIELD_COPY: Readonly<Record<string, SharedSettingFieldC
     description: "aTrust 网关地址（Cisco 服务器单独保存）。",
   },
   atrust_auth_mode: {
-    label: "aTrust 认证方式",
-    description: "浏览器登录打开系统浏览器手动认证，不填充账户和密码；网页内嵌在学校网页中完成认证；无窗口优先用无头会话自动登录，需要时静默回退内嵌窗口。",
+    label: "认证通道",
+    description: "系统浏览器打开默认浏览器完成认证；内嵌浏览器在应用窗口中完成认证；自动登录使用保存的登录信息，需要交互时打开内嵌浏览器。",
   },
   username: {
     label: "登录账户",
@@ -45,12 +45,16 @@ export const SHARED_CORE_FIELD_COPY: Readonly<Record<string, SharedSettingFieldC
     description: "勾选后密码随配置保存；关闭则连接时需手动输入。",
   },
   routes: {
-    label: "路由",
+    label: "IP 路由",
     description: "由EXV处理的流量的目标地址范围",
+  },
+  atrust_dns_enabled: {
+    label: "aTrust 校园 DNS 解析",
+    description: "开启后，所列域名及其子域使用 VPN 下发的 DNS 解析；关闭后使用系统默认解析。下次连接生效。",
   },
   campus_dns_domains: {
     label: "校园 DNS 域名",
-    description: "Cisco 与 aTrust 均生效，所填域名及其子域通过 VPN 下发的 DNS 解析。多个域名用英文逗号分隔；留空关闭。服务端未提供 DNS 时，请清空此项后重试连接。",
+    description: "填写域名后缀，多个域名用英文逗号分隔。aTrust 的解析由上方开关控制；Cisco 沿用校园域名解析设置。修改在下次连接生效。",
   },
   user_agent: {
     label: "User-Agent",

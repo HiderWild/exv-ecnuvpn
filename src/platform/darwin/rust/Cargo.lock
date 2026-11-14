@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-core"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-engine"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "async-trait",
  "exv-vpn-atrust",
@@ -1218,14 +1218,14 @@ dependencies = [
 
 [[package]]
 name = "exv-vpn-darwin-service-agent"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "exv-vpn-darwin-tauri"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "block2",
  "exv-vpn-atrust",

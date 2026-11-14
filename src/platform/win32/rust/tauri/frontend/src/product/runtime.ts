@@ -63,6 +63,7 @@ export interface ProductRuntime {
   readonly browserLoginCancelled?: Readonly<Ref<{ generation: number } | null>>;
   readonly browserAuthenticated?: Readonly<Ref<{ attempt: number; generation: number } | null>>;
   /** §7.9：宿主经 `exv://browser-login` 回传的认证阶段；等待结束即清空。 */
+  readonly ticketRefreshReason?: Readonly<Ref<"missing" | "expired" | null>>;
   readonly browserLoginStage?: Readonly<Ref<string | null>>;
   /** 验证码风险预告：30 分钟窗口内已多次表单登录时，本次认证等待期间携带的频次
    * 预告数字；认证结束/新连接发起即清空。模态据此渲染「可能触发验证码」提示。 */
@@ -424,6 +425,7 @@ export function createProductRuntime(
   const browserLoginGeneration = ref<number | null>(null);
   const browserAuthenticated = ref<{ attempt: number; generation: number } | null>(null);
   /** §7.9：宿主回传的自动登录阶段；等待结束（active=false）即清空。 */
+  const ticketRefreshReason = ref<"missing" | "expired" | null>(null);
   const browserLoginStage = ref<string | null>(null);
   /** 验证码风险预告（2026-10-07）：本次认证开始事件携带的窗口内登录频次预告；
    * 认证结束（active=false）/新连接发起（retire）即清空。 */
@@ -442,6 +444,7 @@ export function createProductRuntime(
     browserLoginRecovery.value = null;
     browserLoginGeneration.value = null;
     browserLoginStage.value = null;
+    ticketRefreshReason.value = null;
     loginThrottleWarning.value = null;
     if (browserOwnerGeneration !== null) retiredBrowserGeneration = Math.max(retiredBrowserGeneration, browserOwnerGeneration);
     browserOwnerGeneration = null;
@@ -892,7 +895,7 @@ export function createProductRuntime(
     lastEventAppliedAt = null;
     displayError = null;
     // 重试 Stop 尚未取得新结果，原真实清理义务仍有效；只有新 Connect 清理旧摘要。
-    if (action === "connect") latestSnapshot = { ...latestSnapshot, stop_completion: null };
+    if (action === "connect") latestSnapshot = { ...latestSnapshot, stop_completion: null, session_identity: null };
     correlation = { activeOpId: null, terminalReached: false, inFlightAction: action };
     pendingAction = action;
     // P0-3：记录路径与起点——超时上界/副文案按路径区分（连接路径用发起时快照判定）。
@@ -1039,6 +1042,9 @@ export function createProductRuntime(
             && (generation > retiredBrowserGeneration || generation === cancelledWaitTerminalPierce)) {
             browserLoginCancelled.value = { generation };
           }
+          if (!active || generation !== browserLoginGeneration.value || stage === "awaiting_manual"
+            || (typeof event !== "boolean" && event.channel_override)) ticketRefreshReason.value = null;
+          if (active && stage !== "awaiting_manual" && typeof event !== "boolean" && event.ticket_refresh_reason) ticketRefreshReason.value = event.ticket_refresh_reason;
           // 同一认证请求恢复中只保留一行提示，直到真实人工介入或本次等待结束。
           const keepRecovery = generation === browserLoginGeneration.value
             && browserLoginStage.value === "recovering" && stage !== "awaiting_manual";
@@ -1270,6 +1276,7 @@ export function createProductRuntime(
     browserLoginGeneration: readonly(browserLoginGeneration),
     browserAuthenticated: readonly(browserAuthenticated),
     browserLoginStage: readonly(browserLoginStage),
+    ticketRefreshReason: readonly(ticketRefreshReason),
     loginThrottleWarning: readonly(loginThrottleWarning),
     state,
     start,

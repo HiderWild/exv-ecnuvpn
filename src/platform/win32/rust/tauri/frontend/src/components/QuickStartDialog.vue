@@ -20,6 +20,8 @@ import {
   PROTOCOL_OPTIONS,
   createCoreConfigGateway,
   defaultServerFor,
+  normalizeServerValue,
+  sanitizeCustomServerInput,
   protocolFromConfig,
   type CoreConfigItem,
 } from "../product/core-config";
@@ -27,6 +29,8 @@ import { PRODUCT_RUNTIME_KEY } from "../product/runtime";
 import { createServiceOperationCoordinator, SERVICE_OPERATION_KEY } from "../product/service-operations";
 import {
   createQuickStartDraft,
+  quickStartCertificateGateway,
+  type QuickStartCertificateGateway,
   quickStartItems,
   validateQuickStartDraft,
   type QuickStartDraft,
@@ -40,12 +44,14 @@ import {
 
 const props = withDefaults(defineProps<{
   open: boolean;
+  certificateGateway?: QuickStartCertificateGateway;
   initialItems?: ReadonlyArray<CoreConfigItem>;
   /** 默认接真实 Tauri command；测试可注入确定性实现。 */
   apply?: (request: QuickStartApplyRequest) => Promise<QuickStartApplyReply>;
   /** 独立刷新主界面；读取失败不改变已完成的保存或安装结果。 */
   afterCoreSaved?: () => Promise<void>;
 }>(), {
+  certificateGateway: () => quickStartCertificateGateway,
   apply: (request: QuickStartApplyRequest) => kernel.quickStartApply(request),
 });
 
@@ -77,7 +83,20 @@ const submittedInstallService = ref(false);
 const setupCompleted = ref(false);
 // 核心配置（含秘密）已经保存后，服务安装失败只重试本阶段，绝不重放配置提交。
 const savedAwaitingService = ref(false);
-const formFrozen = computed(() => savedAwaitingService.value || setupCompleted.value);
+const savedAwaitingCertificate = ref(false);
+const installCertificate = ref(true);
+const needsCertificate = computed(() => draft.value.protocol === "atrust" && draft.value.atrust_auth_mode === "browser");
+const authOptions = [
+  { value: "browser", label: "系统浏览器" },
+  { value: "embedded", label: "内嵌浏览器" },
+  { value: "headless", label: "自动登录" },
+] as const;
+const themeOptions = [
+  { value: "system", label: "跟随系统" },
+  { value: "light", label: "浅色" },
+  { value: "dark", label: "深色" },
+] as const;
+const formFrozen = computed(() => savedAwaitingService.value || savedAwaitingCertificate.value || setupCompleted.value);
 const submitError = ref<string | null>(null);
 // T4（F8）：偏好/外观收尾腿的非阻断提示条——失败不换按钮相位、不阻断完成，
 // 文案语义为「将在下次启动重试」；与 submitError（阻断行）分开展示。
@@ -111,6 +130,7 @@ const selectedTheme = computed({
   set: (theme: "system" | "light" | "dark") => appearance?.setTheme(theme),
 });
 const submitLabel = computed(() => {
+  if (savedAwaitingCertificate.value) return submitting.value ? "正在准备证书…" : "重试准备证书";
   if (savedAwaitingService.value) return submitting.value ? "正在安装服务…" : "重试安装服务";
   if (!submitting.value) return "完成设置";
   return submittedInstallService.value ? "正在保存配置并安装服务…" : "正在保存配置…";
@@ -127,6 +147,8 @@ watch(
     submittedInstallService.value = false;
     setupCompleted.value = false;
     savedAwaitingService.value = false;
+    savedAwaitingCertificate.value = false;
+    installCertificate.value = true;
     submitError.value = null;
     preferenceNotice.value = null;
     pendingPreferences.value = null;
@@ -152,7 +174,13 @@ watch(
 );
 
 function updateText(key: keyof QuickStartDraft, event: Event): void {
-  draft.value[key] = (event.target as HTMLInputElement).value;
+  const input = event.target as HTMLInputElement;
+  if ((event as InputEvent).isComposing) return;
+  // 编辑投影沿现有裸域名归一化去除 URL 外壳，持久值仍由 quickStartItems 按协议生成。
+  const value = key === "server" || key === "atrust_server"
+    ? sanitizeCustomServerInput(normalizeServerValue(input.value, "cisco")) : input.value;
+  input.value = value;
+  draft.value[key] = value;
   if (key === "server") draft.value[draft.value.protocol === "atrust" ? "atrust_server" : "cisco_server"] = draft.value.server;
   if (key === "username" || key === "password" || key === "server") {
     fieldErrors.value = { ...fieldErrors.value, [key]: undefined };
@@ -261,8 +289,36 @@ async function installSavedService(): Promise<void> {
   }
 }
 
+async function prepareSavedCertificate(): Promise<void> {
+  submitting.value = true;
+  submitError.value = null;
+  try {
+    const status = await props.certificateGateway.inspect();
+    if (!status.trusted) await props.certificateGateway.install();
+  } catch (error) {
+    const message = error instanceof Error ? error.message
+      : typeof error === "object" && error !== null && "message" in error ? String(error.message) : String(error);
+    submitError.value = `配置已保存，但证书准备失败：${message}。请重试准备证书。`;
+    submitting.value = false;
+    return;
+  }
+  savedAwaitingCertificate.value = false;
+  try {
+    if (submittedInstallService.value) {
+      savedAwaitingService.value = true;
+      await installSavedService();
+    } else {
+      await finishPreferenceTail();
+      finishSavedSetup();
+    }
+  } finally {
+    submitting.value = false;
+  }
+}
+
 async function submit(): Promise<void> {
   if (setupCompleted.value || submitting.value || appearance?.saving.value) return;
+  if (savedAwaitingCertificate.value) { await prepareSavedCertificate(); return; }
   if (savedAwaitingService.value) {
     await installSavedService();
     return;
@@ -279,6 +335,7 @@ async function submit(): Promise<void> {
   const pendingAppearance = appearance
     ? { ...appearance.state.value, motion: appearance.draft.value.motion }
     : undefined;
+  const prepareCertificate = needsCertificate.value && installCertificate.value;
   submittedInstallService.value = pending.install_service === "true";
   submitting.value = true;
   try {
@@ -296,7 +353,10 @@ async function submit(): Promise<void> {
     draft.value.password = "";
     pending.password = "";
     pendingPreferences.value = { draft: pending, appearance: pendingAppearance };
-    if (submittedInstallService.value) {
+    if (prepareCertificate) {
+      savedAwaitingCertificate.value = true;
+      await prepareSavedCertificate();
+    } else if (submittedInstallService.value) {
       savedAwaitingService.value = true;
       await installSavedService();
     } else {
@@ -370,17 +430,21 @@ async function submit(): Promise<void> {
         </div>
       </header>
 
-      <div class="quick-start-body" :tabindex="compact ? 0 : undefined" :role="compact ? 'region' : undefined" :aria-label="compact ? '快速入门设置与提示' : undefined">
+      <div class="quick-start-body" tabindex="0" role="region" aria-label="快速入门设置与提示">
       <section v-if="!advanced" :inert="formFrozen" class="quick-start-fields" data-testid="quick-start-basic-fields">
-        <label v-if="draft.protocol === 'atrust'">
-          认证通道
-          <select v-model="draft.atrust_auth_mode" data-testid="quick-start-atrust-auth-mode" @change="fieldErrors = {}">
-            <option value="browser">系统默认浏览器</option>
-            <option value="embedded">内嵌浏览器</option>
-            <option value="headless">自动登录</option>
-          </select>
-        </label>
+        <div v-if="draft.protocol === 'atrust'" class="quick-start-choice-field">
+          <span>认证通道</span>
+          <div class="quick-start-choice" role="group" aria-label="认证通道" data-testid="quick-start-atrust-auth-mode">
+            <button v-for="option in authOptions" :key="option.value" type="button" :data-value="option.value"
+              :aria-pressed="draft.atrust_auth_mode === option.value" :disabled="submitting || formFrozen"
+              @click="draft.atrust_auth_mode = option.value; fieldErrors = {}">{{ option.label }}</button>
+          </div>
+        </div>
         <p v-if="draft.protocol === 'atrust'" class="protocol-note" data-testid="quick-start-atrust-note">{{ authDescription }}</p>
+        <label v-if="needsCertificate" class="check-row">
+          <input v-model="installCertificate" data-testid="quick-start-certificate" type="checkbox" :disabled="submitting || formFrozen">
+          安装系统浏览器登录证书
+        </label>
         <CredentialFields v-if="usesCredentials" v-model:username="draft.username" v-model:password="draft.password" test-id-prefix="quick-start" :has-saved-password="canKeepPassword" :busy="submitting || formFrozen" :compact="compact" :show-clear="draft.protocol === 'atrust'" :username-error="fieldErrors.username" :password-error="fieldErrors.password" @update:username="fieldErrors.username = undefined" @update:password="fieldErrors.password = undefined" @clear-password="clearPasswordDraft" />
         <label class="check-row">
           <input
@@ -391,14 +455,14 @@ async function submit(): Promise<void> {
           >
           安装服务
         </label>
-        <label>
-          主题
-          <select v-model="selectedTheme" data-testid="quick-start-theme">
-            <option value="system">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
-          </select>
-        </label>
+        <div class="quick-start-choice-field">
+          <span>主题</span>
+          <div class="quick-start-choice" role="group" aria-label="主题" data-testid="quick-start-theme">
+            <button v-for="option in themeOptions" :key="option.value" type="button" :data-value="option.value"
+              :aria-pressed="selectedTheme === option.value" :disabled="submitting || formFrozen || appearance?.saving.value"
+              @click="selectedTheme = option.value">{{ option.label }}</button>
+          </div>
+        </div>
         <div class="routes-summary">
           <span data-testid="quick-start-routes-summary">{{ routesSummary }}</span>
         </div>
@@ -411,19 +475,29 @@ async function submit(): Promise<void> {
         data-testid="quick-start-advanced-fields"
       >
         <div class="quick-start-advanced-column" data-testid="quick-start-advanced-column">
-          <label v-if="draft.protocol === 'atrust'">
-            认证通道
-            <select v-model="draft.atrust_auth_mode" data-testid="quick-start-atrust-auth-mode" @change="fieldErrors = {}">
-              <option value="browser">系统默认浏览器</option><option value="embedded">内嵌浏览器</option><option value="headless">自动登录</option>
-            </select>
-          </label>
+          <div v-if="draft.protocol === 'atrust'" class="quick-start-choice-field">
+          <span>认证通道</span>
+          <div class="quick-start-choice" role="group" aria-label="认证通道" data-testid="quick-start-atrust-auth-mode">
+            <button v-for="option in authOptions" :key="option.value" type="button" :data-value="option.value"
+              :aria-pressed="draft.atrust_auth_mode === option.value" :disabled="submitting || formFrozen"
+              @click="draft.atrust_auth_mode = option.value; fieldErrors = {}">{{ option.label }}</button>
+          </div>
+        </div>
           <p v-if="draft.protocol === 'atrust'" class="protocol-note" data-testid="quick-start-atrust-note">{{ authDescription }}</p>
+        <label v-if="needsCertificate" class="check-row">
+          <input v-model="installCertificate" data-testid="quick-start-certificate" type="checkbox" :disabled="submitting || formFrozen">
+          安装系统浏览器登录证书
+        </label>
           <CredentialFields v-if="usesCredentials" v-model:username="draft.username" v-model:password="draft.password" test-id-prefix="quick-start" :has-saved-password="canKeepPassword" :busy="submitting || formFrozen" :compact="compact" :show-clear="draft.protocol === 'atrust'" :username-error="fieldErrors.username" :password-error="fieldErrors.password" @update:username="fieldErrors.username = undefined" @update:password="fieldErrors.password = undefined" @clear-password="clearPasswordDraft" />
           <label class="check-row"><input :checked="draft.install_service === 'true'" data-testid="quick-start-install-service" type="checkbox" @change="updateBoolean('install_service', $event)">安装服务</label>
-          <label>
-            主题
-            <select v-model="selectedTheme" data-testid="quick-start-theme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
-          </label>
+          <div class="quick-start-choice-field">
+          <span>主题</span>
+          <div class="quick-start-choice" role="group" aria-label="主题" data-testid="quick-start-theme">
+            <button v-for="option in themeOptions" :key="option.value" type="button" :data-value="option.value"
+              :aria-pressed="selectedTheme === option.value" :disabled="submitting || formFrozen || appearance?.saving.value"
+              @click="selectedTheme = option.value">{{ option.label }}</button>
+          </div>
+        </div>
         </div>
         <div class="quick-start-advanced-column" data-testid="quick-start-advanced-column">
           <label>
@@ -434,7 +508,7 @@ async function submit(): Promise<void> {
           </label>
           <label>
             VPN 服务器
-            <input :value="draft.server" data-testid="quick-start-server" @input="updateText('server', $event)">
+            <input :value="normalizeServerValue(draft.server, 'cisco')" data-testid="quick-start-server" @input="updateText('server', $event)" @compositionend="updateText('server', $event)">
             <span v-if="fieldErrors.server" class="field-error">{{ fieldErrors.server }}</span>
           </label>
           <label class="check-row"><input :checked="draft.auto_reconnect === 'true'" data-testid="quick-start-auto-reconnect" type="checkbox" @change="updateBoolean('auto_reconnect', $event)">自动重连</label>
@@ -472,7 +546,7 @@ async function submit(): Promise<void> {
 
 <style scoped>
 .quick-start-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: max(var(--space-4), env(safe-area-inset-top)) max(var(--space-4), env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom)) max(var(--space-4), env(safe-area-inset-left)); background: rgb(0 0 0 / 0.5); }
-.quick-start-card { max-height: calc(100dvh - 32px); display: flex; flex-direction: column; box-sizing: border-box; width: min(100%, 620px); overflow: hidden; padding: var(--space-6); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 16px 48px rgb(0 0 0 / 0.32); transition: width 180ms ease; }
+.quick-start-card { max-height: calc(100dvh - 32px); display: flex; flex-direction: column; box-sizing: border-box; width: min(100%, 680px); max-height: calc(100dvh - 2 * var(--space-4)); display: flex; flex-direction: column; overflow: hidden; padding: var(--space-6); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 16px 48px rgb(0 0 0 / 0.32); transition: width 180ms ease; }
 .quick-start-card--advanced { width: min(100%, 1180px); height: min(88dvh, 720px); display: flex; flex-direction: column; }
 .quick-start-body { min-height: 0; overflow-y: auto; }
 .quick-start-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-4); }
@@ -484,19 +558,19 @@ async function submit(): Promise<void> {
 .quick-start-mode-control__button:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -2px; }
 .quick-start-fields, .quick-start-advanced { display: grid; gap: var(--space-3); margin-top: var(--space-5); }
 .quick-start-advanced { padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
-.quick-start-advanced--three-columns { grid-template-columns: minmax(0, 1fr) minmax(0, .85fr) minmax(0, 1.15fr); column-gap: var(--space-5); flex: 1 1 auto; min-height: 0; }
+.quick-start-advanced--three-columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr); column-gap: var(--space-5); flex: 1 1 auto; min-height: 0; }
 .quick-start-advanced-column { display: grid; align-content: start; min-width: 0; gap: var(--space-3); }
 .quick-start-route-column { min-height: 0; display: flex; flex-direction: column; }
 .quick-start-route-column h3 { margin: 0; font-size: var(--font-size-heading); }
 .quick-start-route-column > p { margin: calc(var(--space-1) * -1) 0 0; color: var(--text-secondary); font-size: var(--font-size-caption); line-height: 1.4; }
 .quick-start-route-column :deep(.routes-editor) { flex: 1 1 auto; min-height: 0; }
 .quick-start-route-column :deep(.routes-list) { max-height: none; }
-label { display: grid; gap: var(--space-1); font-size: var(--font-size-body); }
-input, select { min-height: 36px; padding: 0 var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-subtle); color: var(--text-primary); }
+label { min-width: 0; overflow-wrap: anywhere; display: grid; gap: var(--space-1); font-size: var(--font-size-body); }
+input, select { box-sizing: border-box; min-width: 0; max-width: 100%; width: 100%; min-height: 36px; padding: 0 var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-subtle); color: var(--text-primary); }
 .check-row { display: flex; align-items: center; gap: var(--space-2); }
-.check-row input { min-height: auto; }
+.check-row input { width: auto; flex: none; min-height: auto; }
 .routes-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
-.protocol-note { margin: 0; color: var(--text-secondary); font-size: var(--font-size-caption); line-height: 1.5; }
+.protocol-note { overflow-wrap: anywhere; margin: 0; color: var(--text-secondary); font-size: var(--font-size-caption); line-height: 1.5; }
 .field-error, .submit-error { color: var(--state-danger); font-size: var(--font-size-caption); }
 .submit-error { margin: var(--space-4) 0 0; }
 /* T4：偏好/外观收尾失败的非阻断提示条（warning 色，区别于 submit-error 的阻断红）。 */
@@ -505,9 +579,9 @@ input, select { min-height: 36px; padding: 0 var(--space-2); border: 1px solid v
 .quick-start-submit { border-color: var(--accent); background: var(--accent); color: var(--accent-on); font-weight: 600; }
 button:disabled { cursor: not-allowed; opacity: .65; }
 
-@media (max-width: 760px) {
+@media (max-width: 1000px) {
   .quick-start-card--advanced { width: min(100%, 620px); height: auto; max-height: min(88dvh, 720px); }
-  .quick-start-advanced--three-columns { grid-template-columns: minmax(0, 1fr); overflow: hidden; }
+  .quick-start-advanced--three-columns { grid-template-columns: minmax(0, 1fr); }
   .quick-start-route-column { min-height: 280px; }
 }
 
@@ -519,4 +593,12 @@ button:disabled { cursor: not-allowed; opacity: .65; }
 
 .motion-reduced .quick-start-card,
 [data-motion="reduced"] .quick-start-card { transition: none; }
+/* 与设置页多档按钮一致：当前项可见，键盘焦点清晰，窄列允许完整换行。 */
+.quick-start-choice-field { display: grid; min-width: 0; gap: var(--space-1); font-size: var(--font-size-body); }
+.quick-start-choice { display: flex; flex-wrap: wrap; min-width: 0; gap: 2px; padding: 2px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-subtle); }
+.quick-start-choice button { flex: 1 1 auto; min-width: 0; min-height: 36px; padding: var(--space-1) var(--space-2); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); white-space: normal; overflow-wrap: anywhere; }
+.quick-start-choice button[aria-pressed="true"] { background: var(--accent-subtle); color: var(--accent-strong); }
+.quick-start-choice button:focus-visible, .quick-start-body:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -2px; }
+.quick-start-header { flex-wrap: wrap; }
+.submit-error { overflow-wrap: anywhere; }
 </style>

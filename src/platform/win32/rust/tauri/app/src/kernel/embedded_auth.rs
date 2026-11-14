@@ -376,7 +376,7 @@ fn embedded_error_message(error: &exv_core::browser_auth::AuthError) -> String {
             error.legacy_message()
         }
         Code::AcquisitionTimeout => "内嵌登录超时，请重试".into(),
-        Code::ChannelOpenFailed => "无法打开 aTrust 内嵌登录窗口".into(),
+        Code::ChannelOpenFailed => "无法打开 aTrust 内嵌浏览器".into(),
         Code::ChannelTransportFailed if error.operation == AuthOperation::Observe => {
             "登录窗口已关闭".into()
         }

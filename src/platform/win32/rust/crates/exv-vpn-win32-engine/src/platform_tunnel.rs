@@ -697,6 +697,7 @@ impl NicOwner {
             offer,
             campus_routes,
             &[],
+            true,
             bypass.map(std::slice::from_ref).unwrap_or(&[]),
             core_user_sid,
             journal,
@@ -710,6 +711,7 @@ impl NicOwner {
         offer: &TunnelOffer,
         campus_routes: &[String],
         campus_dns_domains: &[String],
+        dns_enabled: bool,
         bypasses: &[RouteRow],
         core_user_sid: Option<String>,
         journal: &SystemProxyJournal,
@@ -728,6 +730,7 @@ impl NicOwner {
             RouteApplyInputs {
                 campus_routes,
                 campus_dns_domains,
+                dns_enabled,
                 bypasses,
                 core_user_sid,
                 journal,
@@ -753,10 +756,7 @@ pub struct RouteOwner {
     mtu_applied: Option<MtuSnapshot>,
     mtu_original: Option<MtuSnapshot>,
     /// DNS applied fingerprint + 原始快照（GUID-keyed）。
-    dns_pending: bool,
-    dns_fingerprint: DnsFingerprint,
-    dns_original: DnsSettings,
-    dns_guid: GUID,
+    dns_state: Option<(DnsFingerprint, DnsSettings, GUID)>,
     /// 系统代理豁免族已生效状态（设计 §5.3；`None` = 未生效——SID 缺失 /
     /// 无系统代理 / PAC fail-closed / 记账或 commit 失败降级）。
     system_proxy: Option<SystemProxyApplied>,
@@ -810,9 +810,25 @@ enum RecordCommitOutcome {
 /// [`RouteOwner::apply`] 的输入束（clippy 债务清偿 2026-09-27：8 个位置参数
 /// 收敛为结构体——校园路由/DNS 域/bypass 行/发起 SID/系统代理账本本就是同一组
 /// 「按连接下发的意图」，按名传值不再按位对齐）。
+/// DNS 消费点的本次连接策略；完整域列表仍由代理消费者单独持有。
+pub(crate) struct DnsPolicy<'a> {
+    pub(crate) enabled: bool,
+    configured_domains: &'a [String],
+}
+impl<'a> DnsPolicy<'a> {
+    pub(crate) fn new(protocol: exv_vpn_win32_config::Protocol, atrust_enabled: bool, configured_domains: &'a [String]) -> Self {
+        Self { enabled: protocol == exv_vpn_win32_config::Protocol::Cisco || atrust_enabled, configured_domains }
+    }
+    pub(crate) fn domains(&self) -> &'a [String] { if self.enabled { self.configured_domains } else { &[] } }
+    fn apply_adapter<T, E>(&self, apply: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E> {
+        if self.enabled { apply().map(Some) } else { Ok(None) }
+    }
+}
+
 struct RouteApplyInputs<'a> {
     campus_routes: &'a [String],
     campus_dns_domains: &'a [String],
+    dns_enabled: bool,
     bypasses: &'a [RouteRow],
     core_user_sid: Option<String>,
     journal: &'a SystemProxyJournal,
@@ -840,6 +856,7 @@ impl RouteOwner {
         let RouteApplyInputs {
             campus_routes,
             campus_dns_domains,
+            dns_enabled,
             bypasses,
             core_user_sid,
             journal,
@@ -937,6 +954,7 @@ impl RouteOwner {
             }
 
             // ---- DNS 族（W21 leaf：applied fingerprint + 原始快照）。 ----
+            dns_state = DnsPolicy { enabled: dns_enabled, configured_domains: campus_dns_domains }.apply_adapter(|| {
             let guid = luid_to_guid(luid).ok_or("luid-to-guid:failed")?;
             let dns_original =
                 DnsCapture::capture(&guid).map_err(|e| format!("dns-capture:{e:?}"))?;
@@ -946,7 +964,8 @@ impl RouteOwner {
             );
             let dns_fingerprint =
                 DnsApplier::apply(&guid, &dns_settings).map_err(|e| format!("dns-apply:{e:?}"))?;
-            dns_state = Some((dns_fingerprint, dns_original, guid));
+                Ok::<_, String>((dns_fingerprint, dns_original, guid))
+            })?;
 
             // ---- 系统代理豁免族（设计 §5.3 + 2026-09-05 账本计划 §4.2 J50-WAL）。
             //      豁免条目 = 校园路由按拍板规则派生（IP 精确直通 + /8-/16-/24 整段
@@ -1101,11 +1120,10 @@ impl RouteOwner {
             mtu_applied: Some(mtu),
             routes_applied,
             route_ownership,
-            dns_applied: offer.dns_servers.iter().map(ToString::to_string).collect(),
+            dns_applied: if dns_state.is_some() { offer.dns_servers.iter().map(ToString::to_string).collect() } else { Vec::new() },
             luid,
             ifindex,
         };
-        let (fingerprint, original, guid) = dns_state.expect("dns applied (apply ok)");
         Ok((
             Self {
                 luid,
@@ -1113,10 +1131,7 @@ impl RouteOwner {
                 installed_routes,
                 mtu_applied: mtu_state.as_ref().map(|(a, _)| a.clone()),
                 mtu_original: mtu_state.as_ref().map(|(_, o)| o.clone()),
-                dns_pending: true,
-                dns_fingerprint: fingerprint,
-                dns_original: original,
-                dns_guid: guid,
+                dns_state,
                 system_proxy: system_proxy_state,
                 journal: journal.clone(),
             },
@@ -1154,7 +1169,7 @@ impl RouteOwner {
 
     fn remaining_steps(&self) -> Vec<&'static str> {
         let mut steps = Vec::new();
-        if self.dns_pending {
+        if self.dns_state.is_some() {
             steps.push("dns_restore");
         }
         if self.system_proxy.is_some() {
@@ -1174,14 +1189,14 @@ impl RouteOwner {
 
     fn clear_steps(&mut self, report: &mut StopReport) -> Result<(), String> {
         // DNS 逆序。
-        if self.dns_pending {
+        if let Some((fingerprint, original, guid)) = self.dns_state.as_ref() {
             let result =
-                DnsApplier::restore(&self.dns_guid, &self.dns_fingerprint, &self.dns_original)
+                DnsApplier::restore(guid, fingerprint, original)
                     .map(|_| ())
                     .map_err(|e| format!("dns-restore:{e:?}"));
             report.action(LedgerDomain::RouteFamily, "dns_restore", &result);
             result?;
-            self.dns_pending = false;
+            self.dns_state = None;
         }
         // 系统代理族逆序（设计 §5.3：DNS 先撤、system_proxy 在路由/bypass 之前撤）。
         // 两态 compare-and-restore（§2 表）：指纹等 → 精确还原 / 不等 → typed skip
@@ -1331,3 +1346,4 @@ fn campus_proxy_bypasses(routes: &[String], domains: &[String]) -> Vec<String> {
     }
     entries
 }
+

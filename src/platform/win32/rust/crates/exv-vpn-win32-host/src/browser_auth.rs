@@ -207,6 +207,18 @@ pub enum AuthMilestone {
     AwaitingManual,
 }
 
+/// 由本次缓存读取和网关探测事实决定的重取原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TicketRefreshReason {
+    Missing,
+    Expired,
+}
+impl TicketRefreshReason {
+    pub const fn as_str(self) -> &'static str {
+        match self { Self::Missing => "missing", Self::Expired => "expired" }
+    }
+}
+
 /// 用户控制信号与真实错误分开；转人工和渠道回退不是错误码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthControl {
@@ -394,6 +406,7 @@ pub enum InitialNavigation {
 /// 未来实现需要在取消 future 后收束已创建资源，close 幂等且不取消其他 owner。
 /// 系统浏览器 observe 可以使用 CDP，但 inject_once 永远 UnsupportedOperation。
 pub trait ChannelTrait: Send {
+    fn ticket_refresh_reason(&self) -> Option<TicketRefreshReason> { None }
     fn capabilities(&self) -> ChannelCapabilities;
     fn open(&mut self, request: ChannelRequest) -> ChannelFuture<'_, ()>;
     fn initial_navigation(&self) -> InitialNavigation {
@@ -422,6 +435,7 @@ pub trait ChannelTrait: Send {
 
 /// AppHandle 相关注入面。编排器统一发阶段及每 acquire 至多一次表单计数。
 pub trait AuthEventSink: Send + Sync {
+    fn ticket_refresh(&self, _reason: TicketRefreshReason) {}
     fn milestone(&self, milestone: AuthMilestone);
     fn progress(&self, _progress: AuthProgress) {}
     /// 每轮原始失败，供宿主持久诊断；呈现摘要与恢复策略保持各自流程。

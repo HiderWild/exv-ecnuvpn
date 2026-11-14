@@ -347,6 +347,8 @@ impl AuthCheck {
 /// 自身的 `Drop` 零化（本结构无需额外 Drop）。
 #[derive(Default)]
 pub struct SessionExchange {
+    /// 本次票据兑换响应中的非秘密账户；未返回时保持缺值。
+    pub authenticated_username: Option<String>,
     pub sid: Option<Secret>,
     pub sid_sig: Option<Secret>,
     pub sid_legacy: Option<Secret>,
@@ -425,6 +427,8 @@ impl std::fmt::Debug for SessionExchange {
 fn parse_session_exchange(raw: &[u8]) -> Result<SessionExchange, AuthHttpError> {
     #[derive(Deserialize)]
     struct Wire {
+        #[serde(rename = "onlineInfo", default)]
+        online_info: serde_json::Value,
         #[serde(default)]
         sid: Option<String>,
         #[serde(rename = "sid.sig", default)]
@@ -460,6 +464,11 @@ fn parse_session_exchange(raw: &[u8]) -> Result<SessionExchange, AuthHttpError> 
     // 自身的 Drop 承接零化义务（换出的 String 即刻进入 Secret）。
     let into = |value: Option<String>| value.map(Secret::new);
     Ok(SessionExchange {
+        authenticated_username: wire.online_info.get("username")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|username| !username.is_empty())
+            .map(str::to_owned),
         sid: into(std::mem::take(&mut wire.sid)),
         sid_sig: into(std::mem::take(&mut wire.sid_sig)),
         sid_legacy: into(std::mem::take(&mut wire.sid_legacy)),
@@ -1313,3 +1322,4 @@ where
         result = &mut connection => { result.map_err(|error| transport_error::http_failure("http.driver", &error))?; receive.await }
     }
 }
+

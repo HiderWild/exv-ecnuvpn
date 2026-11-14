@@ -97,9 +97,9 @@ impl LiveConnectionProjection {
                                 &[],
                             );
                         }
-                        Err(Status::failed_precondition(
-                            CONNECTION_CREDENTIALS_MISSING_CODE,
-                        ))
+                        let mut status = Status::failed_precondition(CONNECTION_CREDENTIALS_MISSING_CODE);
+                        status.metadata_mut().insert("x-exv-connect-cause", "atrust-cache-expired".parse().expect("固定缓存原因"));
+                        Err(status)
                     }
                     Err(error) => {
                         self.logs.aggregator().append_core(

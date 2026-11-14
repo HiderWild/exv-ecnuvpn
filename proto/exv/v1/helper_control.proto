@@ -336,6 +336,8 @@ message ApplyTunnelRequest {
   // Lets the engine's relaunched core (T10) find the live UI's pipe; recorded in
   // the connection trace (§2.9 gap ①).
   uint32 ui_pid = 8;
+  // aTrust 校园 DNS 接管开关；缺字段为 false，Cisco 沿既有 DNS 行为。
+  bool atrust_dns_enabled = 9;
   reserved 9000 to 9999;
   reserved 1000 to 1999;
 }

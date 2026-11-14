@@ -1,3 +1,4 @@
+import { kernel } from "../lib/ipc";
 import {
   DEFAULT_CONNECTION_MODE,
   defaultServerFor,
@@ -36,6 +37,7 @@ const DEFAULT_QUICK_START_CORE_DRAFT: Record<CoreConfigKey, string> = {
     "202.120.80.0/20",
     "219.228.144.0/22",
   ].join(","),
+  atrust_dns_enabled: "false",
   campus_dns_domains: "ecnu.edu.cn",
   user_agent: "AnyConnect Win_x86_64 4.10.05095",
   mtu: "1290",
@@ -253,3 +255,13 @@ export function quickStartItems(draft: QuickStartDraft): CoreConfigItem[] {
       return { key, value: normalized.ok ? normalized.value : draft[key] };
     });
 }
+
+/** 证书选择仅属于本次向导，信任状态由宿主现有证书入口提供。 */
+export interface QuickStartCertificateGateway {
+  inspect(): Promise<{ trusted: boolean }>;
+  install(): Promise<void>;
+}
+export const quickStartCertificateGateway: QuickStartCertificateGateway = {
+  inspect: () => kernel.quickStartCertificateInspect(),
+  install: () => kernel.quickStartCertificateInstall(),
+};

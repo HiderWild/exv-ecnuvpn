@@ -10,6 +10,7 @@
 exv_vpn_darwin_ipc::embed_service_revision!();
 
 mod bootstrap_runtime;
+mod reconnect_fault;
 mod connect_gate;
 mod core_exit_policy;
 #[path = "../../../build_identity.rs"]

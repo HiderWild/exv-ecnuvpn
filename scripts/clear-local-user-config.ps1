@@ -11,6 +11,7 @@ param(
   [string]$UserProfileRoot = "",
   [string]$RoamingAppDataRoot = "",
   [string]$ConfigDir = "",
+  [string]$BrowserDataDir = "",
   [string]$TempRoot = "",
   [string]$SystemTempRoot = "",
   [string]$InstallDir = "",
@@ -272,6 +273,8 @@ function Write-CleanupItem {
       ($redirectedConfigDir -and (Test-PathWithinRoot -Path $Path -Root $redirectedConfigDir)) -or
       ($appWebView2Dir -and (Test-PathWithinRoot -Path $Path -Root $appWebView2Dir)) -or
       ($tauriWebView2Dir -and (Test-PathWithinRoot -Path $Path -Root $tauriWebView2Dir)) -or
+      ($ownedAuthWebViewDir -and (Test-PathWithinRoot -Path $Path -Root $ownedAuthWebViewDir)) -or
+      ($explicitBrowserDir -and (Test-PathWithinRoot -Path $Path -Root $explicitBrowserDir)) -or
       ($InstallDir -and (Test-PathWithinRoot -Path $Path -Root (Join-Path $InstallDir $script:installUserLeafRel)))) {
     $source = 'C++-v3.3.x/Rust-current/T4b'
     $owner = 'original-user'
@@ -448,7 +451,8 @@ function Remove-TreeWithLockHandling {
 function Remove-ConfigTarget {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Root
+    [Parameter(Mandatory = $true)][string]$Root,
+    [switch]$NoRebootDelete
   )
 
   Assert-PathUnderRoot -Path $Path -Root $Root
@@ -458,7 +462,7 @@ function Remove-ConfigTarget {
   }
 
   if ($PSCmdlet.ShouldProcess($Path, (Zh '5Yig6ZmkIEVYViDmnKzlnLDnlKjmiLfphY3nva7mlofku7Y='))) {
-    if (Remove-FileWithLockHandling -Path $Path -Reason 'single-file cleanup') {
+    if (Remove-FileWithLockHandling -Path $Path -Reason 'single-file cleanup' -NoRebootDelete:$NoRebootDelete) {
       Write-Host ((Zh '5bey5Yig6Zmk77ya') + $Path)
     }
   }
@@ -487,7 +491,8 @@ function Remove-ConfigTree {
 function Remove-ConfigPath {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Root
+    [Parameter(Mandatory = $true)][string]$Root,
+    [switch]$NoRebootDelete
   )
 
   Assert-PathUnderRoot -Path $Path -Root $Root
@@ -501,7 +506,7 @@ function Remove-ConfigPath {
     throw "Expected an EXV file but found a directory; preserved: $Path"
   }
 
-  Remove-ConfigTarget -Path $Path -Root $Root
+  Remove-ConfigTarget -Path $Path -Root $Root -NoRebootDelete:$NoRebootDelete
 }
 
 function Remove-EmptyDirectoryIfExists {
@@ -657,6 +662,7 @@ function Get-ScopedTargetRoot {
 
   switch ($Scope) {
     'userprofile' { return $userProfile }
+    'roamingappdata' { return $roamingAppData }
     'localappdata' {
       if ($RowPath.StartsWith('Programs\EXV\')) { return $programsRoot }
       return $localAppData
@@ -783,7 +789,7 @@ function Remove-CleanupEntries {
       } elseif ($Tree) {
         Remove-ConfigTree -Path $entry.Path -Root $entry.Root -NoRebootDelete:$entry.NoRebootDelete
       } else {
-        Remove-ConfigPath -Path $entry.Path -Root $entry.Root
+        Remove-ConfigPath -Path $entry.Path -Root $entry.Root -NoRebootDelete:$entry.NoRebootDelete
       }
     } catch {
       Add-CleanupError -Path $entry.Path -Reason $_.Exception.Message
@@ -878,7 +884,7 @@ function Get-ForceCommandText {
     '-Force'
   )
   foreach ($name in @('LocalAppDataRoot', 'ProgramDataRoot', 'UserProfileRoot',
-      'RoamingAppDataRoot', 'ConfigDir', 'InstallDir', 'TempRoot', 'SystemTempRoot',
+      'RoamingAppDataRoot', 'ConfigDir', 'BrowserDataDir', 'InstallDir', 'TempRoot', 'SystemTempRoot',
       'ManifestPath')) {
     $value = Get-Variable -Name $name -ValueOnly
     if ($value) {
@@ -914,6 +920,9 @@ $explicitConfigDir = if ($PSBoundParameters.ContainsKey('ConfigDir')) { $ConfigD
   # 提权后环境可能属于另一管理员，不把该账户的 EXV_CONFIG_DIR 当成发起者配置。
   ''
 } else { $env:EXV_CONFIG_DIR }
+$explicitBrowserDir = if ($PSBoundParameters.ContainsKey('BrowserDataDir')) { $BrowserDataDir } elseif ($UserProfileRoot) {
+  ''
+} else { $env:EXV_ATRUST_BROWSER_DATA_DIR }
 $programData = Get-ProgramDataRoot
 $userTemp = if ($TempRoot) { $TempRoot } elseif ($UserProfileRoot) {
   Join-Path $localAppData 'Temp'
@@ -938,6 +947,7 @@ $programsRoot = Split-Path -Parent $appWebView2Dir
 # 小窗内溢出无极简适配的快速入门表单。按 EXV 专属根整树治理（同 KI-13 ⑤ 语义，
 # 不逐叶列举）。
 $tauriWebView2Dir = Join-Path $localAppData (Get-ManifestRow 'localappdata|com.exv.vpn.desktop').Path
+$ownedAuthWebViewDir = Join-Path $roamingAppData (Get-ManifestRow 'roamingappdata|EXV\atrust-webview').Path
 $rustConfigDir = if ($userProfile) { Join-Path $userProfile (Get-ManifestRow 'userprofile|.exv').Path } else { '' }
 $localResourceRoot = Join-Path $localAppData (Get-ManifestRow 'localappdata|ExvVpn').Path
 $machineResourceRoot = Join-Path $programData (Get-ManifestRow 'programdata|ExvVpn').Path
@@ -995,15 +1005,15 @@ if (-not $PreserveUserData) {
   # after the user opted in, so unknown future state does not survive a
   # reinstall merely because it was not in a file-by-file allow list.
   foreach ($row in @($script:manifestRows | Where-Object {
-      $_.Scope -in @('userprofile', 'localappdata') -and $_.Action -eq 'delete_u1_only' })) {
+      $_.Scope -in @('userprofile', 'localappdata', 'roamingappdata') -and $_.Action -eq 'delete_u1_only' })) {
     if ($row.Scope -eq 'userprofile' -and -not $userProfile) { continue }
-    $scopeRoot = if ($row.Scope -eq 'userprofile') { $userProfile } else { $localAppData }
+    $scopeRoot = if ($row.Scope -eq 'userprofile') { $userProfile } elseif ($row.Scope -eq 'roamingappdata') { $roamingAppData } else { $localAppData }
     $assertRoot = Get-ScopedTargetRoot -Scope $row.Scope -RowPath $row.Path
     $treeTargets += (New-CleanupEntry -Path (Join-Path $scopeRoot $row.Path) -Root $assertRoot -NoRebootDelete:($row.NoReboot -eq '1'))
   }
 } else {
   Write-Host "PreserveUserData: skip user-data trees ($appRoot, $rustConfigDir, $tauriWebView2Dir, credentials)"
-  foreach ($retained in @($appRoot, $rustConfigDir, $appWebView2Dir, $tauriWebView2Dir)) {
+  foreach ($retained in @($appRoot, $rustConfigDir, $appWebView2Dir, $tauriWebView2Dir, $ownedAuthWebViewDir)) {
     if ($retained) {
       $presence = if (Test-Path -LiteralPath $retained) { 'preserved' } else { 'missing' }
       Write-CleanupItem -Path $retained -Action 'preserve' -Outcome $presence
@@ -1012,6 +1022,10 @@ if (-not $PreserveUserData) {
   if ($explicitConfigDir) {
     $presence = if (Test-Path -LiteralPath $explicitConfigDir) { 'preserved' } else { 'missing' }
     Write-CleanupItem -Path $explicitConfigDir -Action 'preserve' -Outcome $presence
+  }
+  if ($explicitBrowserDir) {
+    $presence = if (Test-Path -LiteralPath $explicitBrowserDir) { 'preserved' } else { 'missing' }
+    Write-CleanupItem -Path $explicitBrowserDir -Action 'preserve' -Outcome $presence
   }
   if ($InstallDir) {
     try {
@@ -1023,6 +1037,30 @@ if (-not $PreserveUserData) {
     } catch {
       Add-CleanupError -Path $InstallDir -Reason $_.Exception.Message
     }
+  }
+}
+
+# 显式浏览器根可能混放其他文件；只消费清单 browserdir 模式命中的 EXV 资料。
+if ($explicitBrowserDir -and -not $PreserveUserData) {
+  try {
+    Assert-ConfigDirSafeForCleanup -Path $explicitBrowserDir -SharedRoots @(
+      $userProfile, $localAppData, $roamingAppData, $programData, $userTemp, $systemTemp)
+    $browserRoot = Get-FullPath $explicitBrowserDir
+    Assert-PathUnderRoot -Path $browserRoot -Root $browserRoot
+    $browserPatterns = @($script:manifestRows | Where-Object {
+      $_.Scope -eq 'pattern' -and $_.Path.StartsWith('browserdir:') -and $_.Action -eq 'delete_u1_only' })
+    if (Test-Path -LiteralPath $browserRoot -PathType Container) {
+      foreach ($child in (Get-ChildItem -LiteralPath $browserRoot -Force)) {
+        foreach ($row in $browserPatterns) {
+          if ($child.Name -notmatch $row.Path.Substring('browserdir:'.Length)) { continue }
+          $entry = New-CleanupEntry -Path $child.FullName -Root $browserRoot -NoRebootDelete:($row.NoReboot -eq '1')
+          if ($child.PSIsContainer -and $row.Pipeline -eq 'tree') { $treeTargets += $entry }
+          elseif (-not $child.PSIsContainer -and $row.Pipeline -eq 'path') { $pathTargets += $entry }
+        }
+      }
+    }
+  } catch {
+    Add-CleanupError -Path $explicitBrowserDir -Reason $_.Exception.Message
   }
 }
 

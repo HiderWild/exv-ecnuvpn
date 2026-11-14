@@ -12,8 +12,8 @@ watch(() => props.expanded, (expanded, wasExpanded) => {
 // 收起时保留活动会话的最后一帧；新空闲配置不能改写正在退出的会话。
 const session = computed<ProductUiState>((previous) => props.expanded ? props.state : previous ?? props.state);
 const metrics = computed(() => session.value.metrics?.availability === "available" ? session.value.metrics : null);
-const account = computed(() => session.value.connectionInfo.accountSource === "unavailable"
-  ? "通过系统认证，无法获取" : display(session.value.connectionInfo.account));
+const account = computed(() => session.value.connectionInfo.account?.trim() || (session.value.connectionInfo.accountSource === "unavailable"
+  ? "认证服务未返回账户信息" : "—"));
 const protocol = computed(() => {
   const value = session.value.connectionInfo.protocol;
   return value === "cisco" ? "Cisco" : value === "atrust" ? "aTrust" : "—";

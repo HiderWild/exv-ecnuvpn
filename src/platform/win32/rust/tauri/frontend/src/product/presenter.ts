@@ -319,7 +319,7 @@ function connectionInfoFor(info: ProductConnectionInfo): ProductConnectionInfo {
   };
 
   return {
-    account: info.accountSource === "unavailable" ? null : clean(info.account),
+    account: clean(info.account),
     ...(info.accountSource ? { accountSource: info.accountSource } : {}),
     vpnServer: clean(info.vpnServer),
     campusIp: clean(info.campusIp),

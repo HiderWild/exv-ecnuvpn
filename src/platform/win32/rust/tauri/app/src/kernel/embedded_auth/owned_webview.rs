@@ -767,6 +767,11 @@ pub(super) struct HostDependencies {
     pub silent: bool,
 }
 impl AuthEventSink for HostDependencies {
+    fn ticket_refresh(&self, reason: TicketRefreshReason) {
+        if !self.silent {
+            super::super::commands::emit_browser_ticket_refresh(&self.app, self.generation, reason);
+        }
+    }
     fn round_failure(&self, round: AuthRound, error: &AuthError) {
         crate::kernel::auth_diagnostics::round_failure(&self.app, self.generation, round, error);
     }

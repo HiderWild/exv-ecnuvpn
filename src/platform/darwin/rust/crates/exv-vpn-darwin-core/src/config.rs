@@ -19,7 +19,7 @@ use crate::{
     config_paths::{atomic_write, config_dir, config_path, key_path},
 };
 
-const CONFIG_KEYS: [&str; 15] = [
+const CONFIG_KEYS: [&str; 16] = [
     "server",
     "username",
     "password",
@@ -32,6 +32,7 @@ const CONFIG_KEYS: [&str; 15] = [
     "atrust_server",
     "atrust_auth_mode",
     "atrust_auto_login",
+    "atrust_dns_enabled",
     "campus_dns_domains",
     "auto_reconnect",
     "auto_reconnect_max_attempts",
@@ -39,6 +40,7 @@ const CONFIG_KEYS: [&str; 15] = [
 ];
 
 const DEFAULT_SERVER: &str = "vpn-cn.ecnu.edu.cn";
+const DEFAULT_ATRUST_SERVER: &str = "vpn.ecnu.edu.cn";
 /// M1：校园 DNS 搜索域默认值（与 win32 `DEFAULT_CAMPUS_DNS_DOMAINS` 同值共享语义）。
 const DEFAULT_CAMPUS_DNS_DOMAINS: [&str; 1] = ["ecnu.edu.cn"];
 const DEFAULT_ROUTES: [&str; 8] = [
@@ -221,6 +223,7 @@ pub enum DarwinConfigError {
     InvalidAtrustServer,
     InvalidAtrustAuthMode,
     InvalidAtrustAutoLogin,
+    InvalidAtrustDnsEnabled,
     InvalidCampusDnsDomains,
     InvalidAutoReconnect,
     InvalidAutoReconnectMaxAttempts,
@@ -249,6 +252,7 @@ impl DarwinConfigError {
             | Self::InvalidAtrustServer
             | Self::InvalidAtrustAuthMode
             | Self::InvalidAtrustAutoLogin
+            | Self::InvalidAtrustDnsEnabled
             | Self::InvalidCampusDnsDomains
             | Self::InvalidAutoReconnect
             | Self::InvalidAutoReconnectMaxAttempts
@@ -272,6 +276,7 @@ impl DarwinConfigError {
             Self::InvalidAtrustServer => "DARWIN_CONFIG_INVALID_ATRUST_SERVER",
             Self::InvalidAtrustAuthMode => "DARWIN_CONFIG_INVALID_ATRUST_AUTH_MODE",
             Self::InvalidAtrustAutoLogin => "DARWIN_CONFIG_INVALID_ATRUST_AUTO_LOGIN",
+            Self::InvalidAtrustDnsEnabled => "DARWIN_CONFIG_INVALID_ATRUST_DNS_ENABLED",
             Self::InvalidCampusDnsDomains => "DARWIN_CONFIG_INVALID_CAMPUS_DNS_DOMAINS",
             Self::InvalidAutoReconnect => "DARWIN_CONFIG_INVALID_AUTO_RECONNECT",
             Self::InvalidAutoReconnectMaxAttempts => {
@@ -339,15 +344,15 @@ pub(crate) struct DarwinStoredConfig {
     ///   aTrust——darwin 新装默认激活 aTrust（与前端 `RECOMMENDED_PROTOCOL` 对齐）。
     #[serde(default = "default_protocol_for_missing_key")]
     protocol: Protocol,
-    /// aTrust 网关（裸主机名，与 `server` 同款约定）。M1 新键：**空 = 未配置**——
-    /// darwin 不给默认网关（已有 Cisco 安装基数；不学 win32 新装默认 aTrust）。旧
-    /// 配置缺该键时为空串，语义即「未配置」，与读路径回退一致。
+    /// aTrust 网关（裸主机名）；新装与缺键采用校园预设，已有地址原样读取。
     atrust_server: String,
     /// aTrust 认证入口模式（M1 新键；默认 headless，见 [`AtrustAuthMode`]）。
     atrust_auth_mode: AtrustAuthMode,
     atrust_auth_mode_version: u32,
     /// 用户发起连接后允许一次学校表单填交；新装与旧配置缺键均默认关闭。
     atrust_auto_login: bool,
+    /// aTrust 校园域名解析接管；缺键关闭，下次连接生效。
+    atrust_dns_enabled: bool,
     /// 校园 DNS 搜索域（M1 新键）。**键形=列表**（win32 共享语义/前向兼容——多域
     /// 属前向能力，首发 UI 仅单域编辑）；旧配置缺键或值非法时回默认 `ecnu.edu.cn`。
     #[serde(default = "default_campus_dns_domains", deserialize_with = "deserialize_campus_dns_domains")]
@@ -382,11 +387,12 @@ impl Default for DarwinStoredConfig {
             user_agent: DEFAULT_USER_AGENT.to_owned(),
             mtu: DEFAULT_MTU,
             protocol: default_protocol_for_missing_key(),
-            // aTrust 三键默认——未配置网关 / browser / ecnu.edu.cn。
-            atrust_server: String::new(),
+            // aTrust 默认校园网关，跳过向导后设置与连接共用该值。
+            atrust_server: DEFAULT_ATRUST_SERVER.to_owned(),
             atrust_auth_mode: AtrustAuthMode::Browser,
             atrust_auth_mode_version: 1,
             atrust_auto_login: false,
+            atrust_dns_enabled: false,
             campus_dns_domains: default_campus_dns_domains(),
             auto_reconnect: false,
             auto_reconnect_max_attempts: 0,
@@ -544,8 +550,9 @@ impl DarwinUiConfig {
             // M1：aTrust 三键插在 protocol 之后（win32 把 aTrust 设置组同样排在协议位
             // 附近），自动重连三项与 has_stored_password 顺延。
             DarwinConfigItem::new("protocol", self.inner.protocol.as_str()),
-            DarwinConfigItem::new("atrust_server", self.inner.atrust_server.clone()),
+            DarwinConfigItem::new("atrust_server", self.atrust_server()),
             DarwinConfigItem::new("atrust_auth_mode", self.inner.atrust_auth_mode.as_str()),
+            DarwinConfigItem::new("atrust_dns_enabled", self.inner.atrust_dns_enabled.to_string()),
             DarwinConfigItem::new(
                 "campus_dns_domains",
                 self.inner.campus_dns_domains.join(","),
@@ -597,10 +604,10 @@ impl DarwinUiConfig {
         self.inner.protocol
     }
 
-    /// M1：aTrust 网关（裸主机名；空 = 未配置）。
+    /// aTrust 网关（裸主机名）；旧版本保存的空值在读取时采用校园预设。
     #[must_use]
     pub fn atrust_server(&self) -> &str {
-        &self.inner.atrust_server
+        if self.inner.atrust_server.trim().is_empty() { DEFAULT_ATRUST_SERVER } else { &self.inner.atrust_server }
     }
 
     /// aTrust 认证入口模式（默认 browser）。
@@ -615,7 +622,11 @@ impl DarwinUiConfig {
         self.inner.atrust_auto_login
     }
 
-    /// 校园 DNS 域列表；完整传入当前连接的 Cisco V3 或 aTrust V2 载荷。
+    /// aTrust 校园域名解析接管开关。
+    #[must_use]
+    pub const fn atrust_dns_enabled(&self) -> bool { self.inner.atrust_dns_enabled }
+
+    /// 校园 DNS 域列表；完整传入当前连接的 Cisco V3 或 aTrust 载荷。
     #[must_use]
     pub fn campus_dns_domains(&self) -> &[String] {
         &self.inner.campus_dns_domains
@@ -786,6 +797,7 @@ struct ConfigUpdate {
     atrust_server: Option<String>,
     atrust_auth_mode: Option<AtrustAuthMode>,
     atrust_auto_login: Option<bool>,
+    atrust_dns_enabled: Option<bool>,
     campus_dns_domains: Option<Vec<String>>,
     auto_reconnect: Option<bool>,
     auto_reconnect_max_attempts: Option<u32>,
@@ -832,6 +844,9 @@ impl ConfigUpdate {
                     update.atrust_auto_login = Some(
                         parse_strict_bool(&value).ok_or(DarwinConfigError::InvalidAtrustAutoLogin)?,
                     );
+                }
+                "atrust_dns_enabled" => {
+                    update.atrust_dns_enabled = Some(parse_strict_bool(&value).ok_or(DarwinConfigError::InvalidAtrustDnsEnabled)?);
                 }
                 "campus_dns_domains" => {
                     update.campus_dns_domains = Some(parse_campus_dns_domains(&value)?);
@@ -888,6 +903,7 @@ impl ConfigUpdate {
         }
         candidate.atrust_auth_mode_version = 1;
         candidate.atrust_auto_login = candidate.atrust_auth_mode == AtrustAuthMode::Headless;
+        if let Some(enabled) = self.atrust_dns_enabled { candidate.atrust_dns_enabled = enabled; }
         if let Some(campus_dns_domains) = self.campus_dns_domains {
             candidate.campus_dns_domains = campus_dns_domains;
         }
@@ -1157,3 +1173,4 @@ fn parse_windows_ipv4(value: &str) -> Option<[u8; 4]> {
         .collect::<Option<Vec<_>>>()?;
     octets.try_into().ok()
 }
+

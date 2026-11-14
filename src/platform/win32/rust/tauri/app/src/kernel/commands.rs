@@ -64,6 +64,18 @@ pub(crate) fn emit_browser_login_stage(app: &tauri::AppHandle, generation: u64, 
     );
 }
 
+/// 缓存判定后的取票进度继续归属于原认证请求。
+pub(crate) fn emit_browser_ticket_refresh(
+    app: &tauri::AppHandle,
+    generation: u64,
+    reason: exv_core::browser_auth::TicketRefreshReason,
+) {
+    let _ = app.emit("exv://browser-login", serde_json::json!({
+        "active": true, "generation": generation, "stage": "opening",
+        "ticket_refresh_reason": reason.as_str(),
+    }));
+}
+
 pub(super) fn emit_browser_authenticated(app: &tauri::AppHandle, generation: u64) {
     let _ = app.emit("exv://browser-login", BrowserLoginStatus {
         active: false, generation, outcome: Some("authenticated"), stage: None, round: None, throttle_warning: None, recovery: None,

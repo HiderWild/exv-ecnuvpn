@@ -717,6 +717,7 @@ provide(CONNECTION_INTERACTION_KEY, { state, action, busy, autoInstallService, r
     :allow-system-browser="fallbackAvailable"
     :channel="authChannel"
     :stage="autoLoginStage"
+    :ticket-refresh-reason="runtime?.ticketRefreshReason?.value ?? null"
     :throttle-warning="loginThrottleWarning"
     :busy="authWaitBusy"
     :error="authFailure ? authFailure.message : fallbackError"

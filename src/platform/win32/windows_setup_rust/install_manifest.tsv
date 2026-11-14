@@ -29,6 +29,7 @@ installdir	support\clear-windows-legacy-state.ps1	support	3.3.6	4.0.0	path	0	del
 userprofile	.exv	user-data	4.0.0		tree	0	delete_u1_only	Rust 默认配置根：config.json、key.bin、凭据、wintun 预置、聚合日志
 localappdata	EXV	user-data	3.3.2		tree	0	delete_u1_only	产品固定命名空间：profile\default、ui-preferences.json、profile.redirect、旧 Helper、历代 WebView2 状态
 localappdata	com.exv.vpn.desktop	user-data	4.0.0		tree	0	delete_u1_only	Tauri identifier WebView2 数据根（外观域 localStorage+logs）；2026-10-10 起纳入卸载清理
+roamingappdata	EXV\atrust-webview	user-data	4.2.1		tree	1	delete_u1_only	EXV 内嵌认证 WebView2 专属 profile：Cookie、登录存储；保留数据模式留存
 localappdata	Programs\EXV\exv-ui.exe.WebView2\EBWebView\Default\Local Storage	user-data	3.3.2		tree	1	delete_u1_only	默认/旧安装根旁 WebView2 登录局部存储（保留语义下不清）
 localappdata	Programs\EXV\exv-ui.exe.WebView2	user-data	3.3.2		tree	1	delete_u1_only	默认/旧安装根旁 WebView2 用户数据根（用户登录数据）
 # --- 机器数据（U1/U2 都删）---
@@ -77,6 +78,9 @@ configdir-leaf	connect-attempt.lock	user-data	3.3.2		empty-dir	0	delete_u1_only	
 configdir-leaf	active-tunnel.lock	user-data	3.3.2		empty-dir	0	delete_u1_only	隧道锁目录壳（删叶后仅空时移除）
 configdir-leaf	.	user-data	3.3.2		empty-dir	0	preserve_with_shell	配置根本身：内容一律保留，仅在删尽已知叶后目录为空时移除目录壳
 # --- 模式叶（pattern；regex 锚定匹配根的直接子项 basename）---
+pattern	browserdir:^(chrome|edge|webview|manual-persistent)$	user-data	4.2.1		tree	1	delete_u1_only	EXV 受控浏览器及内嵌认证 profile 子树；自定义根内其他目录留存
+pattern	browserdir:^(session|sso)-[0-9a-f]{64}\.dpapi$	user-data	4.2.1		path	1	delete_u1_only	EXV DPAPI 会话和 SSO Cookie 缓存
+pattern	browserdir:^manual-username-[0-9a-f]{64}\.json$	user-data	4.2.1		path	1	delete_u1_only	EXV 人工认证账户记忆
 pattern	configdir:^config\.corrupt-backup-[0-9]+\.json$	user-data	dev		path	0	delete_u1_only	损坏配置整字节备份（core 修复前备份；严格 Unix 毫秒时间戳；dev=开发中未发布）
 pattern	configdir:^connect-attempt\.json\.tmp\.[0-9]+$	user-data	3.3.2		path	0	delete_u1_only	连接尝试原子保存残留（严格完整数字后缀）
 pattern	configdir:^connect-attempt\.lock\.tmp\.attempt-[0-9]+-[1-9][0-9]*-[1-9][0-9]*$	user-data	3.3.2		empty-dir	0	delete_u1_only	临时锁目录（内部 owner.json 按锁目录规则展开，随后仅空时移除）

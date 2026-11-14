@@ -107,6 +107,8 @@ fn network_base(addr: Ipv4Addr, prefix: u8) -> Ipv4Addr {
 
 /// 组装请求上下文（一次连接的一次性数据；凭据消费后由调用方/运行时零化）。
 pub struct ApplyContext {
+    /// Core 连接信封显式传入；R1 重连沿用本次逻辑连接值。
+    pub atrust_dns_enabled: bool,
     /// Core 冻结的本次逻辑会话模式；自动重连沿用，不读取实时设置来覆盖。
     pub connection_mode: ConnectionMode,
     /// wire 传入的 domain 隧道计划（`opaque_intent` 用于关联；真实 apply 以 CSTP
@@ -1339,6 +1341,7 @@ fn live_sweeper_loop(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptanceFaultOnce {
     AfterControlBeforeNic,
+    ConnectedTransport,
 }
 
 /// 真实组装运行时（A1b 异步形态）：`start_apply` 受理即回，组装在后台 thread 内
@@ -1351,6 +1354,7 @@ pub enum AcceptanceFaultOnce {
 /// **S1.5 三 owner**：`nic`（Mutex<Option<NicOwner>>）为 NIC owner，跨连接存续（D12）；
 /// `live`（session owner + route owner）为 per-connection 存活状态。
 pub struct RealTunnelRuntime {
+    reconnect_fault_dir: Option<PathBuf>,
     /// 显式隔离验收输入；每个 engine runtime 在统一装配边界最多消费一次。
     acceptance_fault_once: std::sync::atomic::AtomicBool,
     /// 专用异步运行时（登录/CSTP；`block_on`，不阻塞调用方 async worker）。
@@ -1470,6 +1474,7 @@ impl RealTunnelRuntime {
     ) -> Self {
         Self {
             acceptance_fault_once: std::sync::atomic::AtomicBool::new(false),
+            reconnect_fault_dir: None,
             rt: Some(
                 tokio::runtime::Runtime::new()
                     .expect("engine: tokio runtime（登录/CSTP 需要异步运行时）"),
@@ -1508,9 +1513,10 @@ impl RealTunnelRuntime {
 
     /// 仅由启动前已验证的隔离验收输入启用，不读环境或配置文件。
     #[must_use]
-    pub fn with_acceptance_fault_once(self, fault: Option<AcceptanceFaultOnce>) -> Self {
+    pub fn with_acceptance_fault_once(mut self, fault: Option<AcceptanceFaultOnce>) -> Self {
         self.acceptance_fault_once
-            .store(fault.is_some(), std::sync::atomic::Ordering::SeqCst);
+            .store(fault == Some(AcceptanceFaultOnce::AfterControlBeforeNic), std::sync::atomic::Ordering::SeqCst);
+        self.reconnect_fault_dir = (fault == Some(AcceptanceFaultOnce::ConnectedTransport)).then(|| self.config_dir.clone());
         self
     }
 
@@ -3102,6 +3108,8 @@ impl RealTunnelRuntime {
             packets: prepared_packets,
             control,
         } = prepared;
+        let dns_policy = crate::platform_tunnel::DnsPolicy::new(config.protocol, ctx.atrust_dns_enabled, &config.campus_dns_domains);
+        let dns_domains = dns_policy.domains();
         let mut live = control;
         // 失败时通道保留到显式协议清理之后；成功时只在 spawn 点取走。
         let mut prepared_packets = Some(prepared_packets);
@@ -3244,6 +3252,7 @@ impl RealTunnelRuntime {
                         &offer,
                         &campus_routes,
                         &config.campus_dns_domains,
+                        dns_policy.enabled,
                         &bypasses,
                         self.core_user_sid.clone(),
                         &self.journal,
@@ -3402,6 +3411,8 @@ impl RealTunnelRuntime {
                 })
             };
             let aux = DataPlaneAux {
+                reconnect_fault: self.reconnect_fault_dir.as_ref().map(|directory|
+                    Arc::new(Mutex::new(crate::reconnect_fault::ReconnectFault::new(directory.clone())))),
                 stats: Some(Arc::clone(ctx.stats.registry())),
                 latency: None,
                 control_rx: None,
@@ -3486,7 +3497,7 @@ impl RealTunnelRuntime {
             let mut nrpt_acceptance =
                 self.inner_runtime()
                     .block_on(crate::preflight::determine_nrpt_acceptance(
-                        &config.campus_dns_domains,
+                        dns_domains,
                         &campus_dns_servers,
                     ));
             if !nrpt_acceptance.accept_forms().is_empty() {
@@ -3518,7 +3529,7 @@ impl RealTunnelRuntime {
                 let outcome =
                     self.inner_runtime()
                         .block_on(crate::nrpt_takeover::takeover_foreign_nrpt(
-                            &config.campus_dns_domains,
+                            dns_domains,
                             &campus_dns_servers,
                             &mut covered_fingerprints,
                             &ctx.log,
@@ -3557,12 +3568,12 @@ impl RealTunnelRuntime {
             }
             let mut campus_dns_start = if nrpt_acceptance
                 .decision
-                .accepts_all(&config.campus_dns_domains)
+                .accepts_all(dns_domains)
             {
                 Ok(None)
             } else {
                 crate::nrpt_worker::NrptWorkerLease::start(
-                    &config.campus_dns_domains,
+                    dns_domains,
                     &campus_dns_servers,
                     nrpt_acceptance.accept_forms(),
                 )
@@ -3591,7 +3602,7 @@ impl RealTunnelRuntime {
                 let claim = self
                     .inner_runtime()
                     .block_on(crate::preflight::claim_clean_own_nrpt(
-                        &config.campus_dns_domains,
+                        dns_domains,
                         &campus_dns_servers,
                     ));
                 ctx.log.emit(
@@ -3620,7 +3631,7 @@ impl RealTunnelRuntime {
                 }
                 // claim 已有前置快照是重试的等效输入；错误先返回，不追加 reaccept。
                 // 同步 trace 与实际 worker 消费者，接管仍自行精确定位非等效目标。
-                let can_skip_worker = claim.can_skip_worker(&config.campus_dns_domains);
+                let can_skip_worker = claim.can_skip_worker(dns_domains);
                 nrpt_acceptance.decision = claim.decision;
                 nrpt_external_forms = nrpt_acceptance.accept_forms().to_vec();
                 if !claim.foreign_present.is_empty() {
@@ -3630,7 +3641,7 @@ impl RealTunnelRuntime {
                     let outcome =
                         self.inner_runtime()
                             .block_on(crate::nrpt_takeover::takeover_foreign_nrpt(
-                                &config.campus_dns_domains,
+                                dns_domains,
                                 &campus_dns_servers,
                                 &mut covered_fingerprints,
                                 &ctx.log,
@@ -3671,7 +3682,7 @@ impl RealTunnelRuntime {
                     Ok(None)
                 } else {
                     crate::nrpt_worker::NrptWorkerLease::start(
-                        &config.campus_dns_domains,
+                        dns_domains,
                         &campus_dns_servers,
                         nrpt_acceptance.accept_forms(),
                     )

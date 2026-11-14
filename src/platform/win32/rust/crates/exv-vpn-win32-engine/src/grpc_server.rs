@@ -1580,6 +1580,7 @@ impl HelperControl for HelperControlService {
             on_core_exit,
             reconnect_policy,
             ui_pid,
+            atrust_dns_enabled,
         } = request.into_inner();
         let wire_key = lookup_key
             .as_ref()
@@ -1633,7 +1634,7 @@ impl HelperControl for HelperControlService {
                         connection_mode,
                         plan,
                         crate::reconnect::RetainedMaterial::new(bytes),
-                    ),
+                    ).with_atrust_dns_enabled(atrust_dns_enabled),
                 )
             });
 
@@ -1677,6 +1678,7 @@ impl HelperControl for HelperControlService {
             // StartingDataPlane -> Connected) — the bookkeeping placeholder signals
             // are RETIRED (R1b).
             let ctx = ApplyContext {
+                atrust_dns_enabled,
                 plan,
                 credentials,
                 connection_mode,

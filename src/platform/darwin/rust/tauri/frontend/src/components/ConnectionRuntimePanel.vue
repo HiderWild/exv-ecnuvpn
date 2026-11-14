@@ -25,7 +25,7 @@ const reconnect = computed(() => props.state.reconnect.active ? `重连中 · �
     </div>
     <dl class="runtime-panel__identity">
       <div v-if="connected"><dt>校内地址</dt><dd>{{ state.connectionInfo.campusIp ?? '—' }}</dd></div>
-      <div><dt>配置账户</dt><dd>{{ state.connectionInfo.accountSource === 'unavailable' ? '通过系统认证，无法获取' : state.connectionInfo.account ?? '—' }}</dd></div>
+      <div><dt>用户名</dt><dd>{{ state.connectionInfo.account?.trim() || (state.connectionInfo.accountSource === 'unavailable' ? '认证服务未返回账户信息' : '—') }}</dd></div>
       <div><dt>配置服务器</dt><dd>{{ state.connectionInfo.vpnServer ?? '—' }}</dd></div>
     </dl>
     <div v-if="state.reconnect.enabled || state.reconnect.active" class="runtime-panel__reconnect" data-testid="reconnect-status"><span>自动重连</span><strong>{{ reconnect }}</strong></div>

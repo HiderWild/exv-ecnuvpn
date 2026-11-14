@@ -499,7 +499,7 @@ watch([selectedLevels, searchQuery], () => {
   <section class="logs-page" aria-labelledby="logs-title">
     <header class="logs-page__header">
       <div>
-        <h1 id="logs-title">连接日志</h1>
+        <h1 id="logs-title">日志</h1>
       </div>
     </header>
 

@@ -34,6 +34,7 @@ pub(super) struct EmbeddedChannel {
     round: u64,
     generation: u64,
     intent: AuthIntent,
+    username_cookie: String,
 }
 impl EmbeddedChannel {
     pub(super) fn open(
@@ -45,6 +46,7 @@ impl EmbeddedChannel {
         intent: AuthIntent,
     ) -> Result<Self, String> {
         let label = format!("atrust-auth-{}", random_label_suffix());
+        let username_cookie = super::username_observation_cookie();
         let navigation_label = label.clone();
         let startup_navigation = Arc::new(AtomicU64::new(0));
         let navigation_events = startup_navigation.clone();
@@ -64,9 +66,10 @@ impl EmbeddedChannel {
         .visible(visible)
         .initialization_script(PAGE_STARTUP_SCRIPT)
         .initialization_script_for_all_frames(include_str!("owned_portal_guard.js"))
-        .initialization_script(if intent.fresh() {
-            super::username_memory_script(super::external::profile_root().ok().and_then(|root| super::remembered_username(&root, &context.gateway)).as_deref())
-        } else { String::new() })
+        .initialization_script({
+            let remembered = if intent.fresh() { super::external::profile_root().ok().and_then(|root| super::remembered_username(&root, &context.gateway)) } else { None };
+            super::username_memory_script(remembered.as_deref()).replace(super::USERNAME_COOKIE, &username_cookie)
+        })
         .focused(visible)
         .on_new_window(|url, _| {
             if owned_navigation_allowed(&url) {
@@ -111,7 +114,7 @@ impl EmbeddedChannel {
         };
         let window = builder
             .build()
-            .map_err(|_| "无法打开内嵌登录窗口".to_owned())?;
+            .map_err(|_| "无法打开内嵌浏览器".to_owned())?;
         let closed = destroyed.clone();
         let closed_event = destroyed_event.clone();
         window.on_window_event(move |event| {
@@ -133,6 +136,7 @@ impl EmbeddedChannel {
             round,
             generation: owner,
             intent,
+            username_cookie,
         })
     }
 
@@ -424,7 +428,7 @@ impl ChannelTrait for EmbeddedChannel {
             let cookies = read_cookies(self.window.clone(), sso_cookie_url()?).await?;
             Ok(cookies
                 .iter()
-                .find(|(key, _)| key == super::USERNAME_COOKIE)
+                .find(|(key, _)| key == &self.username_cookie)
                 .and_then(|(_, value)| super::observed_username(value)))
         })
     }

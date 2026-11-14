@@ -1,3 +1,4 @@
+import { kernel } from "../lib/ipc";
 import type { ConfigReadFailure, ConfigRecovery } from "../lib/ipc";
 import {
   defaultServerFor,
@@ -26,6 +27,7 @@ const DEFAULT_QUICK_START_CORE_DRAFT: Record<CoreConfigKey, string> = {
   server: defaultServerFor("cisco"),
   atrust_server: defaultServerFor(RECOMMENDED_PROTOCOL),
   atrust_auth_mode: "browser",
+  atrust_dns_enabled: "false",
   campus_dns_domains: "ecnu.edu.cn",
   username: "",
   password: "",
@@ -205,3 +207,13 @@ export async function markQuickStartSeen(): Promise<void> {
     console.error("快速入门已见标记写入失败", error);
   }
 }
+
+/** 证书选择仅属于本次向导，信任状态由宿主现有证书入口提供。 */
+export interface QuickStartCertificateGateway {
+  inspect(): Promise<{ trusted: boolean }>;
+  install(): Promise<void>;
+}
+export const quickStartCertificateGateway: QuickStartCertificateGateway = {
+  inspect: () => kernel.quickStartCertificateInspect(),
+  install: () => kernel.quickStartCertificateInstall(),
+};

@@ -131,6 +131,8 @@ fn main() {
             kernel::commands::config_get,
             kernel::commands::config_set,
             kernel::quick_start::quick_start_apply,
+            kernel::quick_start::quick_start_certificate_inspect,
+            kernel::quick_start::quick_start_certificate_install,
             kernel::quick_start_marker::quick_start_seen_get,
             kernel::quick_start_marker::quick_start_seen_mark,
             kernel::commands::atrust_browser_status,

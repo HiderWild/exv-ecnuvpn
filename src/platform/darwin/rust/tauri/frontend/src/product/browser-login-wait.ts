@@ -4,9 +4,11 @@ import type { BrowserLoginEvent, BrowserLoginMilestone } from "../lib/ipc";
 export function createBrowserLoginWait() {
   let latest = -1;
   let retired = -1;
+  let ticketRefreshReason: BrowserLoginEvent["ticket_refresh_reason"];
   let milestone: BrowserLoginMilestone | undefined;
   let recovery: BrowserLoginEvent["recovery"];
   return {
+    get ticketRefreshReason() { return ticketRefreshReason; },
     get milestone() { return milestone; },
     get generation() { return latest; },
     get retired() { return retired; },
@@ -20,6 +22,8 @@ export function createBrowserLoginWait() {
       if (event.outcome !== undefined && event.generation !== latest) return false;
       if (event.generation !== latest) recovery = event.active && event.recovery ? { ...event.recovery } : undefined;
       else if (event.active && event.channel_override && event.recovery) recovery = { ...event.recovery };
+      if (!event.active || event.generation !== latest || event.milestone === "awaiting_manual" || event.channel_override) ticketRefreshReason = undefined;
+      if (event.active && event.milestone !== "awaiting_manual" && event.ticket_refresh_reason) ticketRefreshReason = event.ticket_refresh_reason;
       // 只保留同一请求的恢复提示；真实人工阶段、新请求及终结按原事件显示。
       const keepRecovery = event.generation === latest && milestone === "recovering"
         && event.milestone !== "awaiting_manual";
@@ -28,6 +32,6 @@ export function createBrowserLoginWait() {
       if (!event.active) retired = Math.max(retired, event.generation);
       return true;
     },
-    retire(): void { retired = Math.max(retired, latest); milestone = undefined; recovery = undefined; },
+    retire(): void { retired = Math.max(retired, latest); milestone = undefined; recovery = undefined; ticketRefreshReason = undefined; },
   };
 }

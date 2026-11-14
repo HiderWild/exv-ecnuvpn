@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "exv-core"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "base64",
  "bytes",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "exv-engine"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "base64",
  "exv-vpn-atrust",

@@ -1920,6 +1920,7 @@ void StartUninstallWorker(AppState *app) {
     req.local_app_data_root = app->options.local_app_data_root;
     req.roaming_app_data_root = app->options.roaming_app_data_root;
     req.config_dir = app->options.config_dir;
+    req.browser_data_dir = app->options.browser_data_dir;
     req.temp_root = app->options.temp_root;
     req.include_credential_manager = app->options.include_credential_manager;
     req.credential_cleanup_note = app->options.credential_cleanup_note;

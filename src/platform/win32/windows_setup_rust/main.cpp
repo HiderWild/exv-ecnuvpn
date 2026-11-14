@@ -55,6 +55,7 @@ void CaptureInitiatingUserContext(exv::setup::CliOptions &options) {
   options.local_app_data_root = ReadEnvironmentVariable(L"LOCALAPPDATA");
   options.roaming_app_data_root = ReadEnvironmentVariable(L"APPDATA");
   options.config_dir = ReadEnvironmentVariable(L"EXV_CONFIG_DIR");
+  options.browser_data_dir = ReadEnvironmentVariable(L"EXV_ATRUST_BROWSER_DATA_DIR");
   options.temp_root = ReadCurrentTempRoot();
   options.initiating_user_sid = exv::setup::CurrentProcessUserSid();
   // Preserve the fact that capture already happened even if an environment value or

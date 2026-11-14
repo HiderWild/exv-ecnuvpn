@@ -80,6 +80,16 @@ struct DataPlaneWorkerGuard {
 }
 
 impl DataPlaneWorkerGuard {
+    fn poll_reconnect_fault(&self) -> bool {
+        if self.stop.load(Ordering::Acquire) { return false; }
+        let consumed = self.aux.reconnect_fault.as_ref().is_some_and(|fault| {
+            let operation = self.operation_id.lock().unwrap_or_else(|error| error.into_inner());
+            fault.lock().unwrap_or_else(|error| error.into_inner()).poll(&operation)
+        });
+        if consumed { self.report("acceptance_reconnect_fault", None, None); }
+        consumed
+    }
+
     fn report(&self, trigger: &str, native_code: Option<u32>, reason: Option<&SessionEndReason>) {
         let operation_guard = self.operation_id.lock().unwrap_or_else(|error| error.into_inner());
         if self.stop.load(Ordering::Acquire) || self.reported.swap(true, Ordering::AcqRel) { return; }
@@ -118,6 +128,9 @@ impl Drop for DataPlaneWorkerGuard {
 /// 注：不 derive `Debug`——`StatusPublisher` 无 `Debug` 实现（内部持 `dyn Fn`）。
 #[derive(Clone, Default)]
 pub struct DataPlaneAux {
+    /// 隔离验收目录；无显式验收启动时为空。
+    #[doc(hidden)]
+    pub reconnect_fault: Option<Arc<Mutex<crate::reconnect_fault::ReconnectFault>>>,
     /// 共享统计注册表（数据面计数 + 延迟写入；`None` = 不接线）。
     pub stats: Option<Arc<StatsRegistry>>,
     /// 延迟探测配置（`None` = 关闭延迟探测）。
@@ -937,201 +950,214 @@ impl EngineDataPlane {
         // ---- writer 线程：read_channel（TLS）→ ring 计数 → session.send（ring）。 ----
         let writer_session = Arc::clone(&self.session);
         let tls_reader = Arc::clone(read_channel);
-        let writer_stop_flag = Arc::clone(&writer_stop);
         let ring_sent_counter = Arc::clone(&ring_sent_bytes);
-        let writer_stats = aux.stats.clone();
-        let writer_latency = aux.latency.clone();
-        let writer_control_rx = aux.control_rx.clone();
         let probe_tx = write_channel.clone();
-        let writer_log = log.clone();
-        // C2：掉线状态上报端点与关联 operation_id（read_channel 关闭时发布
-        // Failed 事件；`None` 发布端 = 不接线，行为与 C2 之前一致）。
-        let writer_operation_id = aux.operation_id.clone();
-        // T3b（F6）：数据面掉线信号发射端（sweeper 清 live；`None` = 未接线）。
         if let Err(error) = threads.spawn_worker(false, "wintun_writer", move || {
-            let failure = writer_guard;
-            if !wait_for_data_plane_activation(&writer_activated, &writer_stop_flag) { return; }
-            // T1 latency probe：状态机（DPD→ping fallback + 手动刷新标记）。
-            let mut probe = writer_latency.map(ProbeState::new);
-            // F2：周期 CSTP keepalive（0x07 空 body）——帧只编码一次；节拍器初始化
-            // `last = Some(线程启动时刻 ≈ 连接建立时刻)`，首帧在第 15s（对齐 darwin
-            // 时序）。生命周期与 writer 线程同生共死，零新增关停管道。
-            let keepalive_frame = Codec::encode_raw(CSTP_PACKET_TYPE_KEEPALIVE, &[])
-                .expect("keepalive frame encodes within bounds");
-            let mut keepalive = KeepaliveTicker::new(
-                Duration::from_secs(CSTP_KEEPALIVE_INTERVAL_SECS),
-                Instant::now(),
-            );
-            // F1：DPD 应答帧（0x04 空 body）——帧只编码一次。
-            let dpd_response_frame = build_dpd_response_frame();
-            // F5：未知控制 kind 去重表（每 kind 每会话至多 1 条 Warn）+ 会话终结
-            // 原因 stash（掉线单条 Warn 携带）。
-            let mut seen_unknown_kinds: Vec<u8> = Vec::new();
-            let mut session_end: Option<SessionEndReason> = None;
-            let mut diagnostics = DataPlaneDiagnostics::new();
-            let mut exit_reason = "stop_requested";
-            // 引擎 data 通道是 tokio unbounded receiver：轮询 `try_recv`（空则短睡，
-            // 保持 stop 标志的可达性），收到解码后的 IP 包 → session.send。
-            while !writer_stop_flag.load(Ordering::SeqCst) {
-                // F5：排空 CSTP 控制面事件（drain——消除事件积压；1ms 轮询下无性能
-                // 影响），按冻结分派表处置。
-                if let Some(ctrl) = &writer_control_rx {
-                    let mut guard = ctrl.lock().expect("control rx 锁");
-                    while let Ok(event) = guard.try_recv() {
-                        diagnostics.observe(&event);
-                        if let CstpControlEvent::WriteFailed(error) = &event {
-                            log_write_failure(&writer_log, &writer_operation_id, error);
-                            diagnostics.emit(&writer_log, &writer_operation_id, "tls-write-failed");
-                        }
-                        match control_event_action(&event, &mut seen_unknown_kinds) {
-                            EventAction::ProbeRtt => {
-                                if let Some(probe) = probe.as_mut()
-                                    && let Some(stats) = &writer_stats
-                                    && let Some(rtt) = probe.on_dpd_response(Instant::now())
-                                {
-                                    stats.record_latency(rtt);
-                                }
-                            }
-                            EventAction::ReplyDpd => {
-                                // F1：无条件应答（与 DPD_PROBE_ENABLED 无关——这是
-                                // 被动应答网关，不是主动探测）。失败 = TLS 写任务
-                                // 已死 → stderr 单行诊断，不发状态事件、不重试；
-                                // 掉线统一由 read-channel 关闭路径上报。
-                                if probe_tx.send(dpd_response_frame.clone()).is_ok() {
-                                    diagnostics.dpd_reply_queued += 1;
-                                } else {
-                                    diagnostics.control_queue_failures += 1;
-                                    eprintln!(
-                                        "[info] engine data-plane: DPD reply send failed (TLS write task exited)"
-                                    );
-                                }
-                            }
-                            EventAction::Ignore => {}
-                            EventAction::WarnUnknownKind(kind) => {
-                                if let Some(log) = &writer_log {
-                                    log.emit(
-                                        crate::log_sink::LogLevel::Warn,
-                                        "engine",
-                                        "tunnel.dataplane.unknown-control",
-                                        "unknown CSTP control frame ignored (once per kind)",
-                                        &[("kind", &format!("{kind:#04x}"))],
-                                    );
-                                }
-                            }
-                            EventAction::StashSessionEnd(reason) => {
-                                // F5：stash，不单独成日志——掉线单条 Warn 携带。
-                                session_end.get_or_insert(reason);
-                            }
-                        }
-                    }
-                }
-                // 写侧任务结束也会使隧道不可用，不必等待读侧 EOF。
-                if session_end.is_none() && probe_tx.is_closed() {
-                    session_end = Some(SessionEndReason::Io(SessionIoError::new(
-                        IoDirection::Write, &std::io::Error::from(std::io::ErrorKind::BrokenPipe),
-                    )));
-                }
-                if session_end.is_some() {
-                    exit_reason = "session_terminated";
-                    failure.report("session_terminated", None, session_end.as_ref());
-                    break;
-                }
-                // F2：周期 CSTP keepalive（无条件、不判空闲；15s × ~8 字节开销可
-                // 忽略）。发送失败只 stderr 单行（同 F1 失败语义）。
-                if keepalive.due(Instant::now()) {
-                    if probe_tx.send(keepalive_frame.clone()).is_ok() {
-                        diagnostics.keepalive_queued += 1;
-                    } else {
-                        diagnostics.control_queue_failures += 1;
-                        eprintln!(
-                            "[info] engine data-plane: keepalive send failed (TLS write task exited)"
-                        );
-                    }
-                }
-                // T1：探测节拍（周期 ping / 手动标记 / 超时回退）。
-                if let Some(probe) = probe.as_mut() {
-                    probe.tick(Instant::now(), &mut |frame: Vec<u8>| {
-                        // 发送失败 = TLS-write 任务已退出（write_rx drop）→ 忽略（探测
-                        // 请求是尽力而为，数据面仍继续）。
-                        if probe_tx.send(frame).is_err() {
-                            diagnostics.control_queue_failures += 1;
-                        }
-                    });
-                }
-                if diagnostics.last_summary.elapsed() >= Duration::from_secs(30) {
-                    diagnostics.emit(&writer_log, &writer_operation_id, "periodic");
-                }
-                let pkt = match tls_reader.lock().expect("tls reader 锁").try_recv() {
-                    Ok(pkt) => Some(pkt),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        std::thread::sleep(Duration::from_millis(1));
-                        None
-                    }
-                    Err(_) => {
-                        exit_reason = "read_channel_closed";
-                        // read_channel 关闭 = TLS-read 任务已退出 → 先发数据面掉线
-                        // 信号（sweeper 异步清 live，F6/S4），再 C2 掉线状态上报
-                        // （Failed(DataPlane, RetrySameOperation)；自动重连前置）+
-                        // 恰好一条带 reason 的 Warn（F5；reason 来自 SessionEnded
-                        // stash，writer 先观察到关闭的理论罕见场景下省略原因字段）。
-                        // TLS read 在最终控制事件入队后才关闭 data channel；再次排空
-                        // 消除首次 drain 与关闭观察之间的竞态，避免丢失真实错误原因。
-                        if let Some(ctrl) = &writer_control_rx {
-                            while let Ok(event) = ctrl.lock().expect("control rx 锁").try_recv() {
-                                diagnostics.observe(&event);
-                                match event {
-                                    CstpControlEvent::SessionEnded(reason) => {
-                                        session_end.get_or_insert(reason);
-                                    }
-                                    CstpControlEvent::WriteFailed(error) => {
-                                        log_write_failure(&writer_log, &writer_operation_id, &error)
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        failure.report("read_channel_closed", None, session_end.as_ref());
-                        break;
-                    }
-                };
-                if let Some(pkt) = pkt {
-                    // T1：匹配的 ICMP echo reply → 算 ping RTT 写 registry（入站包
-                    // 仍正常送进 ring）。
-                    if let Some(probe) = probe.as_mut()
-                        && let Some(stats) = &writer_stats
-                        && let Some(rtt) = probe.on_icmp_echo_reply(&pkt, Instant::now())
-                    {
-                        stats.record_latency(rtt);
-                    }
-                    let sent = writer_session.lock().expect("session 锁").send(&pkt);
-                    if sent.is_ok() {
-                        count_writer_download(
-                            &ring_sent_counter,
-                            writer_stats.as_deref(),
-                            pkt.len() as u64,
-                        );
-                    } else if let Err(error) = sent {
-                        // 环满是单包背压；其它错误意味着 ring 已失效，不能继续显示在线。
-                        if error.code != windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW.0 {
-                            exit_reason = "wintun_send_failed";
-                            failure.report(exit_reason, Some(error.code), None);
-                            break;
-                        }
-                    }
-                }
-            }
-            log_data_plane_lifecycle(
-                &writer_log,
-                &writer_operation_id,
-                "tunnel.dataplane.writer-exit",
-                exit_reason,
-                session_end.as_ref(),
-            );
-            diagnostics.emit(&writer_log, &writer_operation_id, "writer-exit");
+            run_cstp_writer(writer_guard, &writer_activated, &tls_reader, probe_tx,
+                &ring_sent_counter, |packet| writer_session.lock().expect("session 锁").send(packet));
         }) { return Err(DataPlaneSpawnError { message: error, threads }); }
 
         Ok(threads)
     }
+}
+
+// 保留生产 writer 的完整控制/收包循环，仅把原生 ring 写入作为局部 IO 参数。
+fn run_cstp_writer(
+    failure: DataPlaneWorkerGuard,
+    activated: &AtomicBool,
+    tls_reader: &Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+    probe_tx: mpsc::UnboundedSender<Vec<u8>>,
+    ring_sent_counter: &AtomicU64,
+    mut send_packet: impl FnMut(&[u8]) -> Result<(), exv_vpn_win32_resource::native_error::NativeError>,
+) {
+    let writer_stop_flag = &failure.stop;
+    let writer_stats = &failure.aux.stats;
+    let writer_latency = failure.aux.latency.clone();
+    let writer_control_rx = &failure.aux.control_rx;
+    let writer_log = &failure.log;
+    let writer_operation_id = failure.aux.operation_id.clone();
+    if !wait_for_data_plane_activation(activated, writer_stop_flag) { return; }
+    // T1 latency probe：状态机（DPD→ping fallback + 手动刷新标记）。
+    let mut probe = writer_latency.map(ProbeState::new);
+    // F2：周期 CSTP keepalive（0x07 空 body）——帧只编码一次；节拍器初始化
+    // `last = Some(线程启动时刻 ≈ 连接建立时刻)`，首帧在第 15s（对齐 darwin
+    // 时序）。生命周期与 writer 线程同生共死，零新增关停管道。
+    let keepalive_frame = Codec::encode_raw(CSTP_PACKET_TYPE_KEEPALIVE, &[])
+        .expect("keepalive frame encodes within bounds");
+    let mut keepalive = KeepaliveTicker::new(
+        Duration::from_secs(CSTP_KEEPALIVE_INTERVAL_SECS),
+        Instant::now(),
+    );
+    // F1：DPD 应答帧（0x04 空 body）——帧只编码一次。
+    let dpd_response_frame = build_dpd_response_frame();
+    // F5：未知控制 kind 去重表（每 kind 每会话至多 1 条 Warn）+ 会话终结
+    // 原因 stash（掉线单条 Warn 携带）。
+    let mut seen_unknown_kinds: Vec<u8> = Vec::new();
+    let mut session_end: Option<SessionEndReason> = None;
+    let mut diagnostics = DataPlaneDiagnostics::new();
+    let mut exit_reason = "stop_requested";
+    // 引擎 data 通道是 tokio unbounded receiver：轮询 `try_recv`（空则短睡，
+    // 保持 stop 标志的可达性），收到解码后的 IP 包 → session.send。
+    while !writer_stop_flag.load(Ordering::SeqCst) {
+        if failure.poll_reconnect_fault() {
+            exit_reason = "acceptance_reconnect_fault";
+            break;
+        }
+        // F5：排空 CSTP 控制面事件（drain——消除事件积压；1ms 轮询下无性能
+        // 影响），按冻结分派表处置。
+        if let Some(ctrl) = &writer_control_rx {
+            let mut guard = ctrl.lock().expect("control rx 锁");
+            while let Ok(event) = guard.try_recv() {
+                diagnostics.observe(&event);
+                if let CstpControlEvent::WriteFailed(error) = &event {
+                    log_write_failure(&writer_log, &writer_operation_id, error);
+                    diagnostics.emit(&writer_log, &writer_operation_id, "tls-write-failed");
+                }
+                match control_event_action(&event, &mut seen_unknown_kinds) {
+                    EventAction::ProbeRtt => {
+                        if let Some(probe) = probe.as_mut()
+                            && let Some(stats) = &writer_stats
+                            && let Some(rtt) = probe.on_dpd_response(Instant::now())
+                        {
+                            stats.record_latency(rtt);
+                        }
+                    }
+                    EventAction::ReplyDpd => {
+                        // F1：无条件应答（与 DPD_PROBE_ENABLED 无关——这是
+                        // 被动应答网关，不是主动探测）。失败 = TLS 写任务
+                        // 已死 → stderr 单行诊断，不发状态事件、不重试；
+                        // 掉线统一由 read-channel 关闭路径上报。
+                        if probe_tx.send(dpd_response_frame.clone()).is_ok() {
+                            diagnostics.dpd_reply_queued += 1;
+                        } else {
+                            diagnostics.control_queue_failures += 1;
+                            eprintln!(
+                                "[info] engine data-plane: DPD reply send failed (TLS write task exited)"
+                            );
+                        }
+                    }
+                    EventAction::Ignore => {}
+                    EventAction::WarnUnknownKind(kind) => {
+                        if let Some(log) = &writer_log {
+                            log.emit(
+                                crate::log_sink::LogLevel::Warn,
+                                "engine",
+                                "tunnel.dataplane.unknown-control",
+                                "unknown CSTP control frame ignored (once per kind)",
+                                &[("kind", &format!("{kind:#04x}"))],
+                            );
+                        }
+                    }
+                    EventAction::StashSessionEnd(reason) => {
+                        // F5：stash，不单独成日志——掉线单条 Warn 携带。
+                        session_end.get_or_insert(reason);
+                    }
+                }
+            }
+        }
+        // 写侧任务结束也会使隧道不可用，不必等待读侧 EOF。
+        if session_end.is_none() && probe_tx.is_closed() {
+            session_end = Some(SessionEndReason::Io(SessionIoError::new(
+                IoDirection::Write, &std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+            )));
+        }
+        if session_end.is_some() {
+            exit_reason = "session_terminated";
+            failure.report("session_terminated", None, session_end.as_ref());
+            break;
+        }
+        // F2：周期 CSTP keepalive（无条件、不判空闲；15s × ~8 字节开销可
+        // 忽略）。发送失败只 stderr 单行（同 F1 失败语义）。
+        if keepalive.due(Instant::now()) {
+            if probe_tx.send(keepalive_frame.clone()).is_ok() {
+                diagnostics.keepalive_queued += 1;
+            } else {
+                diagnostics.control_queue_failures += 1;
+                eprintln!(
+                    "[info] engine data-plane: keepalive send failed (TLS write task exited)"
+                );
+            }
+        }
+        // T1：探测节拍（周期 ping / 手动标记 / 超时回退）。
+        if let Some(probe) = probe.as_mut() {
+            probe.tick(Instant::now(), &mut |frame: Vec<u8>| {
+                // 发送失败 = TLS-write 任务已退出（write_rx drop）→ 忽略（探测
+                // 请求是尽力而为，数据面仍继续）。
+                if probe_tx.send(frame).is_err() {
+                    diagnostics.control_queue_failures += 1;
+                }
+            });
+        }
+        if diagnostics.last_summary.elapsed() >= Duration::from_secs(30) {
+            diagnostics.emit(&writer_log, &writer_operation_id, "periodic");
+        }
+        let pkt = match tls_reader.lock().expect("tls reader 锁").try_recv() {
+            Ok(pkt) => Some(pkt),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(1));
+                None
+            }
+            Err(_) => {
+                exit_reason = "read_channel_closed";
+                // read_channel 关闭 = TLS-read 任务已退出 → 先发数据面掉线
+                // 信号（sweeper 异步清 live，F6/S4），再 C2 掉线状态上报
+                // （Failed(DataPlane, RetrySameOperation)；自动重连前置）+
+                // 恰好一条带 reason 的 Warn（F5；reason 来自 SessionEnded
+                // stash，writer 先观察到关闭的理论罕见场景下省略原因字段）。
+                // TLS read 在最终控制事件入队后才关闭 data channel；再次排空
+                // 消除首次 drain 与关闭观察之间的竞态，避免丢失真实错误原因。
+                if let Some(ctrl) = &writer_control_rx {
+                    while let Ok(event) = ctrl.lock().expect("control rx 锁").try_recv() {
+                        diagnostics.observe(&event);
+                        match event {
+                            CstpControlEvent::SessionEnded(reason) => {
+                                session_end.get_or_insert(reason);
+                            }
+                            CstpControlEvent::WriteFailed(error) => {
+                                log_write_failure(&writer_log, &writer_operation_id, &error)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                failure.report("read_channel_closed", None, session_end.as_ref());
+                break;
+            }
+        };
+        if let Some(pkt) = pkt {
+            // T1：匹配的 ICMP echo reply → 算 ping RTT 写 registry（入站包
+            // 仍正常送进 ring）。
+            if let Some(probe) = probe.as_mut()
+                && let Some(stats) = &writer_stats
+                && let Some(rtt) = probe.on_icmp_echo_reply(&pkt, Instant::now())
+            {
+                stats.record_latency(rtt);
+            }
+            let sent = send_packet(&pkt);
+            if sent.is_ok() {
+                count_writer_download(
+                    &ring_sent_counter,
+                    writer_stats.as_deref(),
+                    pkt.len() as u64,
+                );
+            } else if let Err(error) = sent {
+                // 环满是单包背压；其它错误意味着 ring 已失效，不能继续显示在线。
+                if error.code != windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW.0 {
+                    exit_reason = "wintun_send_failed";
+                    failure.report(exit_reason, Some(error.code), None);
+                    break;
+                }
+            }
+        }
+    }
+    log_data_plane_lifecycle(
+        &writer_log,
+        &writer_operation_id,
+        "tunnel.dataplane.writer-exit",
+        exit_reason,
+        session_end.as_ref(),
+    );
+    diagnostics.emit(&writer_log, &writer_operation_id, "writer-exit");
 }
 
 /// engine 数据面线程句柄（DP-03）：ring→CSTP reader + CSTP→ring writer，直连 engine

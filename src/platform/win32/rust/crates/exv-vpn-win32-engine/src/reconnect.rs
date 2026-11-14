@@ -176,6 +176,7 @@ pub struct RetainedSession {
     kind: TraceKind,
     /// 冻结的连接模式（标准/兼容；自动重连沿用，不读实时设置）。
     connection_mode: ConnectionMode,
+    atrust_dns_enabled: bool,
     /// 冻结的 domain 隧道计划（`opaque_intent` 关联用；真实 apply 以协商 offer 为准）。
     plan: exv_vpn_domain::ports::TunnelPlan,
     /// 认证材料（D9）。
@@ -183,6 +184,11 @@ pub struct RetainedSession {
 }
 
 impl RetainedSession {
+    pub fn with_atrust_dns_enabled(mut self, enabled: bool) -> Self {
+        self.atrust_dns_enabled = enabled;
+        self
+    }
+
     /// 组装会话驻留（`grpc_server::apply_tunnel` 在重连开启时捕获）。
     #[must_use]
     pub fn new(
@@ -196,6 +202,7 @@ impl RetainedSession {
             operation_id,
             kind,
             connection_mode,
+            atrust_dns_enabled: false,
             plan,
             material,
         }
@@ -675,6 +682,7 @@ impl ReconnectDriver {
             operation_id: session.operation_id.clone(),
             kind: session.kind,
             connection_mode: session.connection_mode,
+            atrust_dns_enabled: session.atrust_dns_enabled,
             plan: session.plan.clone(),
             material: session.material.copy_bytes(),
         })
@@ -696,6 +704,7 @@ impl ReconnectDriver {
             return HealOutcome::Terminal(reason::AUTH_REJECTED);
         };
         let ctx = ApplyContext {
+            atrust_dns_enabled: facts.atrust_dns_enabled,
             connection_mode: facts.connection_mode,
             plan: facts.plan.clone(),
             credentials,
@@ -879,6 +888,7 @@ impl ReconnectDriver {
 
 /// 单次尝试携带的会话事实（材料副本 + 组装上下文）。
 struct SessionFacts {
+    atrust_dns_enabled: bool,
     operation_id: Vec<u8>,
     kind: TraceKind,
     connection_mode: ConnectionMode,

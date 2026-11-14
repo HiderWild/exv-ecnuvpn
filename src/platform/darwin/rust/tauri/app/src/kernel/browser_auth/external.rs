@@ -1237,6 +1237,7 @@ pub(super) struct ExternalChannel {
     cdp: Cdp,
     tab: LoginTab,
     app: Option<tauri::AppHandle>,
+    username_cookie: String,
 }
 impl ExternalChannel {
     pub(super) async fn open(
@@ -1254,10 +1255,10 @@ impl ExternalChannel {
             browser_profile(&root, choice.browser)
         };
         let mut channel = Self::open_owned_profile(choice, &profile).await?;
-        if intent.fresh() {
-            let script = super::username_memory_script(
-                super::remembered_username(&root, gateway).as_deref(),
-            );
+        {
+            let remembered = if intent.fresh() { super::remembered_username(&root, gateway) } else { None };
+            let script = super::username_memory_script(remembered.as_deref())
+                .replace(super::USERNAME_COOKIE, &channel.username_cookie);
             // 注册在 open 内完成：编排器拿到通道后的首次 Page.navigate 之前，
             // 脚本对全部后续新文档（网关页 → 学校 SSO 跳转链）生效；失败不再
             // 静默吞掉（账户记忆是可选功能，失败只诊断）。
@@ -1297,6 +1298,7 @@ impl ExternalChannel {
             cdp,
             tab,
             app: None,
+            username_cookie: super::username_observation_cookie(),
         })
     }
 
@@ -1471,7 +1473,7 @@ impl ChannelTrait for ExternalChannel {
                 .and_then(|cookies| {
                     cookies
                         .iter()
-                        .find(|cookie| cookie["name"] == super::USERNAME_COOKIE)
+                        .find(|cookie| cookie["name"] == self.username_cookie)
                 })
                 .and_then(|cookie| cookie["value"].as_str())
                 .and_then(super::observed_username))

@@ -704,6 +704,7 @@ UninstallResult RunUninstall(const UninstallRequest &request, ProgressModel *pro
       append_path(L"-LocalAppDataRoot", request.local_app_data_root);
       append_path(L"-RoamingAppDataRoot", request.roaming_app_data_root);
       append_path(L"-ConfigDir", request.config_dir);
+      append_path(L"-BrowserDataDir", request.browser_data_dir);
       append_path(L"-TempRoot", request.temp_root);
       // KI-13 (2026-09-28 review F2): 300s budget covers the pathological worst
       // case (AV scanning + per-locked-file retries + legacy tree sweeps); a

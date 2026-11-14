@@ -1572,6 +1572,7 @@ impl LiveConnectionProjection {
             let mut apply_key = lookup_key.clone();
             apply_key.method = exv_vpn_wire::generated::OperationMethod::ApplyTunnel as i32;
             let build_request = |secret_payload| exv_vpn_wire::generated::ApplyTunnelRequest {
+                    atrust_dns_enabled: false,
                     lookup_key: Some(apply_key.clone()),
                     plan: Some(plan.clone()),
                     request_digest: intent.request_digest.clone(),

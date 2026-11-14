@@ -79,11 +79,12 @@
 .exv-dialog.exv-dialog .quick-start-header h2 { margin: 0; }
 .exv-dialog.exv-dialog .quick-start-mode-control { background: var(--surface-subtle); }
 .exv-dialog.exv-dialog .quick-start-mode-control__button--active { background: var(--surface-panel); color: var(--accent); }
+/* 正文由 quick-start-body 滚动；内层留白容纳焦点环，不向滚动边界外扩张。 */
 .exv-dialog.exv-dialog :is(.quick-start-fields, .quick-start-advanced) {
   min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
   padding: 6px;
-  margin: 0 -6px;
+  margin: 0;
   gap: 18px 20px;
   border: 0;
 }

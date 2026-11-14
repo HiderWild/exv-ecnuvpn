@@ -92,7 +92,7 @@ impl AppError {
             let page = matches!(auth.code, Code::ClientInstallRequired | Code::FailedPage | Code::Stalled | Code::GatewayThrottled);
             if !page || auth.native_code.is_some() {
                 let stage = match auth.operation {
-                    AuthOperation::Open => "启动认证渠道", AuthOperation::Navigate => "打开认证页",
+                    AuthOperation::Open => "启动认证通道", AuthOperation::Navigate => "打开认证页",
                     AuthOperation::Observe => "读取认证进度", AuthOperation::Probe => "检查网关登录状态",
                     AuthOperation::Reuse => "复用已保存会话", AuthOperation::Inject => "提交学校登录信息",
                     AuthOperation::Extract => "取得网关认证会话", AuthOperation::Present => "显示认证窗口",
@@ -209,7 +209,7 @@ impl AppError {
             "aTrust 认证入口无效",
             "无法定位 aTrust 内嵌浏览器数据目录",
             "无法准备 aTrust 内嵌浏览器数据目录",
-            "无法打开 aTrust 内嵌登录窗口",
+            "无法打开 aTrust 内嵌浏览器",
             "登录已取消",
             "内嵌登录超时，请重试",
             "登录窗口已关闭",

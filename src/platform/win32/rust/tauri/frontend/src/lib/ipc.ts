@@ -424,6 +424,12 @@ export const kernel = {
   configRepairPermissions(): Promise<void> {
     return invokeTauri<void>("config_repair_permissions");
   },
+  quickStartCertificateInspect(): Promise<{ trusted: boolean }> {
+    return invokeTauri<{ trusted: boolean }>("quick_start_certificate_inspect");
+  },
+  quickStartCertificateInstall(): Promise<void> {
+    return invokeTauri<void>("quick_start_certificate_install");
+  },
   quickStartApply(request: QuickStartApplyRequest): Promise<QuickStartApplyReply> {
     return invokeTauri<QuickStartApplyReply>("quick_start_apply", { request });
   },
@@ -479,7 +485,11 @@ export interface LoginThrottleWarning {
 }
 
 /** 桌面端浏览器认证等待，与 Core 的 VPN 连接状态分别报告。 */
+export type TicketRefreshReason = "missing" | "expired";
+
 export interface BrowserLoginEvent {
+  /** 仅由宿主真实缓存判定发送；缺省保持常规进度。 */
+  ticket_refresh_reason?: TicketRefreshReason;
   /** 当前用户明确选择的临时认证渠道；普通重复首事件保持冻结语义。 */
   channel_override?: boolean;
   active: boolean;

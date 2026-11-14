@@ -17,6 +17,7 @@ struct UninstallRequest {
   std::wstring local_app_data_root;
   std::wstring roaming_app_data_root;
   std::wstring config_dir;
+  std::wstring browser_data_dir;
   std::wstring temp_root;
   bool include_credential_manager{true};
   std::wstring credential_cleanup_note;

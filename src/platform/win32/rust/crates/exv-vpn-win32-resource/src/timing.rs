@@ -1,21 +1,4 @@
 
-//! 特性门控连接耗时计时埋点（R0 计划 §3 行 R0 / 修订 9 [P2-10]：插桩进 win32-resource
-//! 产品代码，逐 Win32 API 级归因）。
-//!
-//! - **默认关闭零开销**：所有入口在 `timing` feature 关闭时编译为空实现（调用点为
-//!   无条件调用，但实体是空函数/ZST，LLVM 直接消除）——默认构建不改变任何产品语义、
-//!   零额外执行（观察者效应最小化，计划 §5）。
-//! - **只加计时、不改行为**：调用点只在返回/收尾处 `record`，绝不插入等待/轮询/重试。
-//! - **跨进程 sink**：`record` 把一行追加写 `EXV_TIMING_FILE` 指定文件（缺省
-//!   `%TEMP%\exv-timing-<pid>.log`）并 eprintln。helper/engine 是独立特权进程（无共享
-//!   console），文件 sink 保证 host 与 helper 的分段耗时都能落盘、按行合并归因。
-//!   行格式：`WALL_MS PID SELF_MS LABEL`（`WALL_MS` = Unix epoch 毫秒，供跨进程对齐；
-//!   `SELF_MS` = 自本进程启动的单调毫秒；LABEL = 分段名，见各调用点注释）。
-//!
-//! 使用说明（一句话）：给 `exv-vpn-win32-resource` / `exv-vpn-win32-acceptance` 加
-//! `--features timing` 重新构建并运行 acceptance 学校场景，分段耗时逐行追加写
-//! `%TEMP%\exv-timing-*.log`（可用 `EXV_TIMING_FILE` 覆盖到单个合并文件），结束按
-//! LABEL 汇总即得归因表。
 
 #[cfg(feature = "timing")]
 use std::io::Write;

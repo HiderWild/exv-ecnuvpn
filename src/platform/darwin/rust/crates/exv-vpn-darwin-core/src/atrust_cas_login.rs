@@ -391,6 +391,7 @@ impl CasLoginClient {
                 .map(|value| Secret::new(value.expose()))
         }
         SessionExchange {
+            authenticated_username: None,
             sid: take(&self.gateway_cookies, "sid"),
             sid_sig: take(&self.gateway_cookies, "sid.sig"),
             sid_legacy: take(&self.gateway_cookies, "sid-legacy"),

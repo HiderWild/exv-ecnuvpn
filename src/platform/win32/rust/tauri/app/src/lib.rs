@@ -178,6 +178,8 @@ pub fn run() {
             commands::config_set,
             config_acl_repair::config_repair_permissions,
             kernel::quick_start::quick_start_apply,
+            kernel::quick_start::quick_start_certificate_inspect,
+            kernel::quick_start::quick_start_certificate_install,
             commands::tunnel_address,
             commands::respond_interaction,
             commands::trigger_latency_refresh,

@@ -164,7 +164,7 @@ export function createMockRuntime(
   const previewInfo = {
     protocol: "cisco",
     routeRuleCount: 2,
-    account: "preview-user",
+    account: scenario === "compact-long" ? null : "preview-user",
     ...(scenario === "compact-long" ? { accountSource: "unavailable" as const } : {}),
     vpnServer: scenario === "compact-long" ? "very-long-preview-vpn-server.example.edu:8443" : "vpn.preview.example",
     campusIp: "10.88.88.5",

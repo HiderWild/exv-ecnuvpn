@@ -15,7 +15,7 @@ const availableMetrics = computed(() =>
   props.state.metrics?.availability === "available" ? props.state.metrics : null,
 );
 const connectionInfo = computed(() => props.state.connectionInfo);
-const account = computed(() => connectionInfo.value.accountSource === "unavailable" ? "通过系统认证，无法获取" : connectionInfo.value.account ?? "—");
+const account = computed(() => connectionInfo.value.account?.trim() || (connectionInfo.value.accountSource === "unavailable" ? "认证服务未返回账户信息" : "—"));
 const displayMetric = (value: string | null | undefined): string => value ?? "—";
 /** 连接时延显示开关（已生效偏好）：关闭时不渲染该行（默认关闭）。 */
 const showLatency = computed(() => uiPreferencesState().value.show_latency);

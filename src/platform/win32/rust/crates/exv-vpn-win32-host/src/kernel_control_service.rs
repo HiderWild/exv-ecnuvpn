@@ -4318,6 +4318,7 @@ impl KernelControl for KernelControlService {
             ConfigItem { key: "atrust_auth_mode".into(), value: cfg.atrust_auth_mode },
             ConfigItem { key: "atrust_auto_login".into(), value: cfg.atrust_auto_login.to_string() },
             ConfigItem { key: "atrust_tcp_nodelay".into(), value: cfg.atrust_tcp_nodelay.to_string() },
+            ConfigItem { key: "atrust_dns_enabled".into(), value: cfg.atrust_dns_enabled.to_string() },
             ConfigItem {
                 key: "campus_dns_domains".into(),
                 value: cfg.campus_dns_domains.join(","),
@@ -4673,6 +4674,9 @@ impl KernelControlService {
                     cfg.atrust_tcp_nodelay = item.value.parse::<bool>().map_err(|_| {
                         Status::invalid_argument("config_set: atrust_tcp_nodelay must be true/false")
                     })?;
+                }
+                "atrust_dns_enabled" => {
+                    cfg.atrust_dns_enabled = item.value.parse::<bool>().map_err(|_| Status::invalid_argument("config_set: atrust_dns_enabled must be true/false"))?;
                 }
                 "campus_dns_domains" => {
                     cfg.campus_dns_domains = exv_vpn_win32_config::parse_campus_dns_domains(&item.value)
@@ -5550,6 +5554,7 @@ fn apply_request_from_connect(
     let request_digest = connection_mode_bound_digest(&intent.request_digest, connection_mode);
     let plan = plan_from_config(config, &request_digest);
     Ok(ApplyTunnelRequest {
+        atrust_dns_enabled: config.atrust_dns_enabled,
         lookup_key: Some(lookup_key),
         plan: Some(plan),
         request_digest,

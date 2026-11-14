@@ -42,7 +42,7 @@ impl FrozenLogin {
                     "" => AuthMode::Browser,
                     _ => {
                         return Err(AppError::Internal(
-                            "当前网页登录方式无效，请重新选择认证方式。".into(),
+                            "当前认证通道无效，请重新选择认证通道。".into(),
                         ));
                     }
                 };
@@ -138,6 +138,8 @@ struct BrowserLoginEvent {
     outcome: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery: Option<RecoveryPresentation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ticket_refresh_reason: Option<&'static str>,
 }
 #[derive(Clone, serde::Serialize)]
 struct RecoveryPresentation {
@@ -165,14 +167,54 @@ pub(super) fn emit_browser_channel_selected(
     }));
 }
 
+// 观察接缝只存在于当前测试任务内，替换最后的 UI 发送端；请求、缓存判断和
+// LoginEventGuard 的载荷、发送时机、里程碑与收尾全部仍执行生产路径。
+
+#[derive(Clone)]
+enum LoginEventTarget {
+    App(tauri::AppHandle),
+    #[cfg(test)]
+    Observer(Arc<std::sync::Mutex<Vec<serde_json::Value>>>),
+}
+impl LoginEventTarget {
+    fn project_temporary_mode(&self, event: &mut BrowserLoginEvent) {
+        match self {
+            Self::App(app) => event.project_temporary_mode(app),
+            #[cfg(test)]
+            Self::Observer(_) => {}
+        }
+    }
+    fn emit(&self, event: BrowserLoginEvent) {
+        match self {
+            Self::App(app) => {
+                let _ = app.emit("exv://browser-login", event);
+            }
+            #[cfg(test)]
+            Self::Observer(events) => {
+                events.lock().unwrap().push(serde_json::to_value(event).unwrap());
+            }
+        }
+    }
+}
+
 pub(super) struct LoginEventGuard {
-    app: tauri::AppHandle,
+    target: LoginEventTarget,
     event: BrowserLoginEvent,
     ended: bool,
 }
 impl LoginEventGuard {
     fn new(app: &tauri::AppHandle, generation: u64, mode: AuthMode) -> Self {
-        Self::begin(app, generation, mode, None)
+        Self::begin(LoginEventTarget::App(app.clone()), generation, mode, None)
+    }
+    fn for_connection(app: Option<&tauri::AppHandle>, generation: u64, mode: AuthMode) -> Option<Self> {
+        if let Some(app) = app {
+            return Some(Self::new(app, generation, mode));
+        }
+        #[cfg(test)]
+        if let Ok(events) = LOGIN_EVENT_OBSERVER.try_with(Arc::clone) {
+            return Some(Self::begin(LoginEventTarget::Observer(events), generation, mode, None));
+        }
+        None
     }
     pub(super) fn recovery(
         app: &tauri::AppHandle,
@@ -180,10 +222,10 @@ impl LoginEventGuard {
         mode: AuthMode,
         auto_login: bool,
     ) -> Self {
-        Self::begin(app, generation, mode, Some(auto_login))
+        Self::begin(LoginEventTarget::App(app.clone()), generation, mode, Some(auto_login))
     }
     fn begin(
-        app: &tauri::AppHandle,
+        target: LoginEventTarget,
         generation: u64,
         mode: AuthMode,
         recovery: Option<bool>,
@@ -199,6 +241,7 @@ impl LoginEventGuard {
             milestone: browser_auth::AuthMilestone::Opening,
             round: None,
             outcome: None,
+            ticket_refresh_reason: None,
             recovery: recovery.map(|auto_login| RecoveryPresentation {
                 mode: match mode {
                     AuthMode::Embedded => "embedded",
@@ -208,9 +251,9 @@ impl LoginEventGuard {
                 auto_login,
             }),
         };
-        let _ = app.emit("exv://browser-login", event.clone());
+        target.emit(event.clone());
         Self {
-            app: app.clone(),
+            target,
             event,
             ended: false,
         }
@@ -223,8 +266,8 @@ impl LoginEventGuard {
         self.event.active = false;
         self.event.outcome = Some("cancelled");
         self.event.recovery = None;
-        self.event.project_temporary_mode(&self.app);
-        let _ = self.app.emit("exv://browser-login", self.event.clone());
+        self.target.project_temporary_mode(&mut self.event);
+        self.target.emit(self.event.clone());
     }
     pub(super) fn authenticated(&mut self, interactive: bool) {
         if self.ended {
@@ -234,21 +277,26 @@ impl LoginEventGuard {
         self.event.active = false;
         self.event.outcome = Some("authenticated");
         self.event.recovery = None;
-        self.event.project_temporary_mode(&self.app);
-        let _ = self.app.emit("exv://browser-login", self.event.clone());
-        if interactive
-            && self
-                .app
+        self.target.project_temporary_mode(&mut self.event);
+        self.target.emit(self.event.clone());
+        match &self.target {
+            LoginEventTarget::App(app) if interactive && app
                 .get_webview_window("main")
-                .is_some_and(|window| window.is_visible().unwrap_or(false))
-        {
-            crate::lifecycle::show_main_window(&self.app);
+                .is_some_and(|window| window.is_visible().unwrap_or(false)) => {
+                crate::lifecycle::show_main_window(app);
+            }
+            _ => {}
         }
     }
 }
 impl LoginEventGuard {
+    fn ticket_refresh(&self, reason: &'static str) {
+        let mut update = self.event.clone();
+        update.ticket_refresh_reason = Some(reason);
+        self.target.emit(update);
+    }
     pub(super) fn milestone_sink(&self) -> Arc<dyn Fn(browser_auth::AuthMilestone) + Send + Sync> {
-        let app = self.app.clone();
+        let target = self.target.clone();
         let event = self.event.clone();
         Arc::new(move |milestone| {
             let mut update = event.clone();
@@ -256,8 +304,8 @@ impl LoginEventGuard {
             update.milestone = milestone;
             update.round =
                 matches!(milestone, browser_auth::AuthMilestone::Recovering).then_some(2);
-            update.project_temporary_mode(&app);
-            let _ = app.emit("exv://browser-login", update);
+            target.project_temporary_mode(&mut update);
+            target.emit(update);
         })
     }
 }
@@ -266,8 +314,8 @@ impl Drop for LoginEventGuard {
         if !self.ended {
             self.event.active = false;
             self.event.recovery = None;
-            self.event.project_temporary_mode(&self.app);
-        let _ = self.app.emit("exv://browser-login", self.event.clone());
+            self.target.project_temporary_mode(&mut self.event);
+            self.target.emit(self.event.clone());
         }
     }
 }
@@ -377,6 +425,7 @@ where
         deadline.tokio_deadline().map_err(auth_deadline_app_error)?,
     )
     .await?;
+    let mut ticket_refresh_reason = None;
     if let Some(origin) = &intent.atrust_reauthenticate {
         frozen.validate_reauthentication(origin)?;
     } else if frozen.auto_login {
@@ -388,7 +437,13 @@ where
             .connect_for_request_with_deadline(state, &cache_intent, Arc::clone(&request), deadline)
             .await
         {
-            Err(AppError::CredentialRequired { .. }) => {}
+            Err(AppError::CredentialRequired { code, .. }) => {
+                ticket_refresh_reason = match code.as_deref() {
+                    Some("DARWIN_CORE_ATRUST_CACHE_EXPIRED") => Some("expired"),
+                    Some("DARWIN_CORE_CONNECT_CREDENTIALS_MISSING") => Some("missing"),
+                    _ => None,
+                };
+            }
             result => {
                 request.begin_submit()?;
                 return result;
@@ -397,7 +452,10 @@ where
     }
     request.begin_submit()?;
     deadline.remaining().map_err(auth_deadline_app_error)?;
-    let mut events = app.map(|app| LoginEventGuard::new(app, request.generation(), frozen.mode));
+    let mut events = LoginEventGuard::for_connection(app, request.generation(), frozen.mode);
+    if let (Some(events), Some(reason)) = (&events, ticket_refresh_reason) {
+        events.ticket_refresh(reason);
+    }
     let options = AuthOptions {
         deadline: Some(deadline.tokio_deadline().map_err(auth_deadline_app_error)?),
         auto_login: frozen.auto_login,

@@ -11,6 +11,7 @@ export const CORE_CONFIG_KEYS = [
   "atrust_server",
   "atrust_auth_mode",
   "campus_dns_domains",
+  "atrust_dns_enabled",
   "username",
   "password",
   "remember_password",
@@ -135,6 +136,7 @@ export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
   { key: "password", kind: "password", ...SHARED_CORE_FIELD_COPY.password },
   { key: "remember_password", kind: "boolean", ...SHARED_CORE_FIELD_COPY.remember_password },
   { key: "routes", kind: "routes", ...SHARED_CORE_FIELD_COPY.routes },
+  { key: "atrust_dns_enabled", kind: "boolean", ...SHARED_CORE_FIELD_COPY.atrust_dns_enabled },
   { key: "campus_dns_domains", kind: "campus_domains", ...SHARED_CORE_FIELD_COPY.campus_dns_domains },
   { key: "user_agent", kind: "text", ...SHARED_CORE_FIELD_COPY.user_agent },
   { key: "mtu", kind: "mtu", ...SHARED_CORE_FIELD_COPY.mtu },
@@ -169,6 +171,20 @@ export function defaultServerFor(protocol: CoreProtocol): string {
   return vpnServersFor(protocol)[0]?.value ?? "";
 }
 
+/** 自定义域名输入仅保留 ASCII 字母、数字、连字符和点；空串供编辑使用。 */
+export function sanitizeCustomServerInput(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9.-]/g, "");
+}
+
+/** 对已有带协议地址去除外壳后检查域名结构，预设读取仍沿原归一化路径。 */
+function validServerDomain(raw: string): boolean {
+  const domain = raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  if (!domain) return true;
+  return domain.length <= 253 && domain.split(".").every(label =>
+    label.length >= 1 && label.length <= 63 && /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label),
+  );
+}
+
 /** 归一化 VPN 服务器地址：去除协议前缀、尾部斜杠并统一小写（Cisco 与 aTrust 均存裸域名——core 同款规范化）。 */
 export function normalizeServerValue(raw: string): string {
   return raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
@@ -194,6 +210,12 @@ export function isCoreConfigKey(key: string): key is CoreConfigKey {
 }
 
 export function normalizeCoreConfigValue(key: CoreConfigKey, raw: string): NormalizedCoreConfigValue {
+  if (key === "atrust_dns_enabled") {
+    return raw === "true" || raw === "false"
+      ? { ok: true, value: raw }
+      : { ok: false, message: "aTrust 校园 DNS 解析只能是 true 或 false。" };
+  }
+
   if (key === "routes") {
     return {
       ok: true,
@@ -251,7 +273,7 @@ export function normalizeCoreConfigValue(key: CoreConfigKey, raw: string): Norma
     const value = raw.trim();
     return (ATRUST_AUTH_MODES as readonly string[]).includes(value)
       ? { ok: true, value }
-      : { ok: false, message: "aTrust 认证方式只能是 embedded、browser 或 headless。" };
+      : { ok: false, message: "aTrust 认证通道只能是 embedded、browser 或 headless。" };
   }
 
   // 校园 DNS 域名与 Core 保持列表语义，完整保存规范化后的各域。
@@ -264,6 +286,7 @@ export function normalizeCoreConfigValue(key: CoreConfigKey, raw: string): Norma
   }
 
   if (key === "server" || key === "atrust_server") {
+    if (!validServerDomain(raw)) return { ok: false, message: "VPN 服务器域名格式无效，请检查标签长度及首尾连字符。" };
     return { ok: true, value: normalizeServerValue(raw) };
   }
 

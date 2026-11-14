@@ -141,7 +141,7 @@ export function createMockRuntime(
   let currentSnapshot = scenarioSnapshot(scenario, initialStatus, now());
   let finishFlight: (() => void) | null = null;
   const previewInfo = {
-    account: "preview-user",
+    account: scenario === "compact-long" ? null : "preview-user",
     ...(scenario === "compact-long" ? { accountSource: "unavailable" as const } : {}),
     vpnServer: "vpn.preview.example",
     campusIp: "10.88.88.5",

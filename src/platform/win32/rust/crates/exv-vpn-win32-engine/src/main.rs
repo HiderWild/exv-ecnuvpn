@@ -157,10 +157,11 @@ fn parse_fields(argv: &[String]) -> Result<EngineArgs, String> {
                 if a.acceptance_fault_once.is_some() {
                     return Err("--acceptance-fault-once must occur once".into());
                 }
-                if argv.get(i + 1).map(String::as_str) != Some("after-control-before-nic") {
-                    return Err("--acceptance-fault-once requires after-control-before-nic".into());
-                }
-                a.acceptance_fault_once = Some(exv_engine::tunnel_runtime::AcceptanceFaultOnce::AfterControlBeforeNic);
+                a.acceptance_fault_once = Some(match argv.get(i + 1).map(String::as_str) {
+                    Some("after-control-before-nic") => exv_engine::tunnel_runtime::AcceptanceFaultOnce::AfterControlBeforeNic,
+                    Some("connected-transport") => exv_engine::tunnel_runtime::AcceptanceFaultOnce::ConnectedTransport,
+                    _ => return Err("--acceptance-fault-once requires after-control-before-nic or connected-transport".into()),
+                });
             }
             "--control-pipe" => a.control_pipe = argv.get(i + 1).cloned().unwrap_or_default(),
             "--dll" => a.dll = PathBuf::from(argv.get(i + 1).cloned().unwrap_or_default()),
@@ -316,7 +317,7 @@ fn validate_acceptance_directory(config: &std::path::Path, profile: &std::path::
     }
     let marker = std::fs::read(resolved.join(ACCEPTANCE_MARKER))
         .map_err(|e| format!("acceptance fault: isolated opt-in marker missing: {e}"))?;
-    if marker != ACCEPTANCE_MARKER_BYTES { return Err("acceptance fault: isolated opt-in marker content invalid".into()); }
+    if marker != ACCEPTANCE_MARKER_BYTES && marker != b"connected-transport\n" { return Err("acceptance fault: isolated opt-in marker content invalid".into()); }
     Ok(())
 }
 
@@ -324,7 +325,15 @@ fn validate_acceptance_fault(args: &EngineArgs, core_sid: &str) -> Result<(), St
     if args.acceptance_fault_once.is_none() { return Ok(()); }
     if !args.config_dir_explicit { return Err("acceptance fault: explicit absolute --config-dir required".into()); }
     let profile = acceptance_profile_directory(core_sid)?;
-    validate_acceptance_directory(&args.config_dir, &profile, &exv_vpn_win32_config::config_dir())
+    validate_acceptance_directory(&args.config_dir, &profile, &exv_vpn_win32_config::config_dir())?;
+    let expected: &[u8] = match args.acceptance_fault_once {
+        Some(exv_engine::tunnel_runtime::AcceptanceFaultOnce::ConnectedTransport) => b"connected-transport\n",
+        _ => ACCEPTANCE_MARKER_BYTES,
+    };
+    if std::fs::read(args.config_dir.join(ACCEPTANCE_MARKER)).ok().as_deref() != Some(expected) {
+        return Err("acceptance fault: opt-in marker does not match selected fault".into());
+    }
+    Ok(())
 }
 
 /// 同步阻塞等待进程退出（`OpenProcess` fail-safe + `WaitForSingleObject` INFINITE）。

@@ -17,6 +17,7 @@ export const CORE_CONFIG_KEYS = [
   "connection_mode",
   "routes",
   "campus_dns_domains",
+  "atrust_dns_enabled",
   "user_agent",
   "mtu",
   "auto_reconnect",
@@ -155,6 +156,7 @@ export const CORE_CONFIG_FIELDS: readonly CoreConfigField[] = [
   { key: "remember_password", kind: "boolean", ...SHARED_CORE_FIELD_COPY.remember_password },
   { key: "connection_mode", label: "连接模式", description: "标准模式优先直连；特定网络环境下连接不稳定时可尝试兼容模式。更改在下次手动连接时生效。", kind: "connection_mode" },
   { key: "routes", kind: "routes", ...SHARED_CORE_FIELD_COPY.routes },
+  { key: "atrust_dns_enabled", kind: "boolean", ...SHARED_CORE_FIELD_COPY.atrust_dns_enabled },
   { key: "campus_dns_domains", kind: "text", ...SHARED_CORE_FIELD_COPY.campus_dns_domains },
   { key: "user_agent", kind: "text", ...SHARED_CORE_FIELD_COPY.user_agent },
   { key: "mtu", kind: "mtu", ...SHARED_CORE_FIELD_COPY.mtu },
@@ -190,6 +192,20 @@ export function vpnServersFor(protocol: Protocol): ReadonlyArray<{ label: string
 /** 指定协议的推荐地址（该协议首个预设）；没有预设时返回空串。 */
 export function defaultServerFor(protocol: Protocol): string {
   return vpnServersFor(protocol)[0]?.value ?? "";
+}
+
+/** 自定义域名输入仅保留 ASCII 字母、数字、连字符和点；空串供编辑使用。 */
+export function sanitizeCustomServerInput(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9.-]/g, "");
+}
+
+/** 对已有带协议地址去除外壳后检查域名结构，预设读取仍沿原归一化路径。 */
+function validServerDomain(raw: string): boolean {
+  const domain = raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  if (!domain) return true;
+  return domain.length <= 253 && domain.split(".").every(label =>
+    label.length >= 1 && label.length <= 63 && /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label),
+  );
 }
 
 /**
@@ -251,13 +267,19 @@ export function normalizeCoreConfigValue(
     // configured_atrust_auth_mode 的取值集合一致。
     return raw === "browser" || raw === "embedded" || raw === "headless"
       ? { ok: true, value: raw }
-      : { ok: false, message: "aTrust 认证方式只能是 browser、embedded 或 headless。" };
+      : { ok: false, message: "aTrust 认证通道只能是 browser、embedded 或 headless。" };
   }
 
   if (key === "connection_mode") {
     return raw === "standard" || raw === "compatibility"
       ? { ok: true, value: raw }
       : { ok: false, message: "连接模式只能是 standard 或 compatibility。" };
+  }
+
+  if (key === "atrust_dns_enabled") {
+    return raw === "true" || raw === "false"
+      ? { ok: true, value: raw }
+      : { ok: false, message: "aTrust 校园 DNS 解析只能是 true 或 false。" };
   }
 
   if (key === "routes") {
@@ -343,6 +365,7 @@ export function normalizeCoreConfigValue(
   }
 
   if (key === "server" || key === "cisco_server" || key === "atrust_server") {
+    if (!validServerDomain(raw)) return { ok: false, message: "VPN 服务器域名格式无效，请检查标签长度及首尾连字符。" };
     const protocol = key === "cisco_server" ? "cisco" : key === "atrust_server" ? "atrust" : options.protocol ?? DEFAULT_PROTOCOL;
     return { ok: true, value: normalizeServerValue(raw, protocol) };
   }

@@ -204,7 +204,7 @@ where
     };
     ticket.owner.set_auth_control_deadline(deadline.monotonic_ns());
     if !matches!(ticket.wire.mode.as_str(), "embedded" | "browser" | "headless") {
-        return Err(AppError::Internal("恢复认证方式无效，请重新连接。".into()));
+        return Err(AppError::Internal("恢复认证通道无效，请重新连接。".into()));
     }
     let mode = AuthMode::Headless;
     let context = AuthContext::freeze(&ticket.wire.gateway, &ticket.wire.user_agent)

@@ -42,7 +42,7 @@ export interface ProductConnectionInfo {
   /** 已保存配置中的路由规则数量；未读到配置时缺省，不表示已应用路由数。 */
   routeRuleCount?: number | null;
   account: string | null;
-  /** 配置账号只属于 Cisco；aTrust 尚无可信的认证身份数据口。 */
+  /** 账户来自已接纳会话身份；未返回本次账户时为 unavailable。 */
   accountSource?: "configured" | "unavailable";
   vpnServer: string | null;
   campusIp: string | null;

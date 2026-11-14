@@ -41,6 +41,7 @@ struct CliOptions {
   std::wstring local_app_data_root;
   std::wstring roaming_app_data_root;
   std::wstring config_dir;
+  std::wstring browser_data_dir;
   std::wstring temp_root;
   bool include_credential_manager{true};
   std::wstring credential_cleanup_note;
@@ -69,9 +70,9 @@ struct CliParseResult {
 //     内部提权旗标 --elevated-worker --pipe --token --pfro-sweep-dir
 //     （提权 worker 子进程即本映像；独立传入无害：无有效管道即退）。
 //   卸载器（映像名为 Uninstall.exe 或带 /uninstall）：/uninstall、/D=<目录>、
-//     /clear-user-data、/preserve-user-data、runas 往返七旗标
+//     /clear-user-data、/preserve-user-data、runas 往返用户上下文旗标
 //     --initiating-user-context --initiating-user-sid --user-profile-root
-//     --local-app-data-root --roaming-app-data-root --config-dir --temp-root
+//     --local-app-data-root --roaming-app-data-root --config-dir --browser-data-dir --temp-root
 //     （完备枚举以 BuildUninstallElevationParameters 生成侧为准）。
 //   白名单外参数（含 /S、/silent、布尔旗标、位置参数）一律 InvalidArgument。
 CliParseResult ParseCli(int argc, wchar_t **argv);

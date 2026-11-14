@@ -649,7 +649,7 @@ export function createProductRuntime(
     businessVersion += 1;
     stopLiveSnapshotRefresh();
     displayError = null;
-    if (action === "connect") latestSnapshot = { ...latestSnapshot, stop_completion: null };
+    if (action === "connect") latestSnapshot = { ...latestSnapshot, stop_completion: null, session_identity: null };
     correlation = { activeOpId: null, terminalReached: false, inFlightAction: action };
     pendingAction = action;
     writeState();

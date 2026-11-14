@@ -1332,6 +1332,7 @@ impl AuthOrchestrator<'_> {
                         }
                     })
                     .or_else(|| {
+                        if !options.auto_login || manual_requested { return None; }
                         options.config_dir.as_ref().and_then(|dir| {
                             exv_vpn_darwin_core::atrust_auth_storage::username_for_session(
                                 dir,
@@ -1592,6 +1593,12 @@ pub(super) fn remember_username(
         .map_err(|_| "无法保存学校账户记忆".into())
 }
 pub(super) const USERNAME_COOKIE: &str = "__exv_manual_username";
+/// 只隔离 EXV 的账户观察字段，网关与 SSO 认证 Cookie 沿原生命周期。
+fn username_observation_cookie() -> String {
+    let mut bytes = [0_u8; 8];
+    getrandom::fill(&mut bytes).expect("system randomness is available");
+    format!("{USERNAME_COOKIE}_{}", bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+}
 pub(super) fn observed_username(value: &str) -> Option<String> {
     if value.len() > 2048 || value.len() % 2 != 0 {
         return None;
@@ -1619,3 +1626,4 @@ form.addEventListener('submit',observe,true);const button=form.querySelector('bu
 if(!setup()){const observer=new MutationObserver(()=>{if(setup())observer.disconnect();});observer.observe(document,{childList:true,subtree:true});addEventListener('pagehide',()=>observer.disconnect(),{once:true});}})()"#;
     body.replace("__USERNAME__", &username)
 }
+

@@ -362,8 +362,8 @@ pub fn build_connect_envelope(
             },
         ) => {
             // 宿主补全端点（Common origin.rs 模块注释：补 https:// 是宿主职责），
-            // 规范化与校验由信封经 GatewayOrigin 完成；atrust_server 未配置（空）
-            // 在同一处得到 InvalidGateway。
+            // 旧空值由配置访问器采用校园预设；非空网关的规范化与校验
+            // 由信封经 GatewayOrigin 完成。
             let endpoint = format!("https://{}", config.atrust_server());
             let session_wire = browser_session
                 .encode()
@@ -377,6 +377,7 @@ pub fn build_connect_envelope(
                 fresh_authentication,
             )
             .and_then(|envelope| envelope.with_resolver_domains(config.campus_dns_domains().to_vec()))
+            .and_then(|envelope| envelope.with_atrust_dns_enabled(config.atrust_dns_enabled()))
             .map(DarwinConnectEnvelope::Atrust)
         }
         (Protocol::Cisco, UiConnectMaterials::Atrust { .. })

@@ -392,6 +392,12 @@ export const kernel = {
   configSet(items: ConfigItem[]): Promise<boolean> {
     return invokeTauri<boolean>("config_set", { items });
   },
+  quickStartCertificateInspect(): Promise<{ trusted: boolean }> {
+    return invokeTauri<{ trusted: boolean }>("quick_start_certificate_inspect");
+  },
+  quickStartCertificateInstall(): Promise<void> {
+    return invokeTauri<void>("quick_start_certificate_install");
+  },
   quickStartApply(request: QuickStartApplyRequest): Promise<QuickStartApplyReply> {
     return invokeTauri<QuickStartApplyReply>("quick_start_apply", { request });
   },
@@ -482,7 +488,11 @@ export function isNotWired(e: unknown): boolean {
 export type BrowserLoginMilestone = "opening" | "school_login" | "submitting" | "gateway_confirming" | "awaiting_manual" | "recovering" | "ticket_invalid";
 
 /** 仅承载本地认证等待呈现，代次与里程碑均来自连接请求。 */
+export type TicketRefreshReason = "missing" | "expired";
+
 export interface BrowserLoginEvent {
+  /** 仅由宿主真实缓存判定发送；缺省保持常规进度。 */
+  ticket_refresh_reason?: TicketRefreshReason;
   /** 当前用户明确选择的临时认证渠道；普通重复首事件保持冻结语义。 */
   channel_override?: boolean;
   active: boolean;

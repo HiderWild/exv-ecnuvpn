@@ -100,6 +100,7 @@ let credentialBrowserOwner: { attempt: number; generation: number } | null = nul
 let credentialAuthenticatedAttempt: number | null = null;
 async function connectForAuthentication(...args: Parameters<NonNullable<typeof runtime>["connect"]>) {
   waitEvents.retire();
+  ticketRefreshReason.value = undefined;
   loginCancelPierceGeneration = null;
   const attempt = connectAttempt;
   pendingConnect = attempt;
@@ -188,6 +189,7 @@ async function runAction(draft?: MinimalCredentialDraft): Promise<void> {
   connectAttempt += 1;
   const attempt = connectAttempt;
   waitEvents.retire();
+  ticketRefreshReason.value = undefined;
   loginCancelPierceGeneration = null;
   if (next.kind === "connect") loginCancellationNotified = false;
   credentialBrowserOwner = null;
@@ -275,6 +277,7 @@ function finishLoginCancellation(): void {
   userAuthenticationActive.value = false;
   webLoginPending.value = false;
   waitEvents.retire();
+  ticketRefreshReason.value = undefined;
   // S3 终局穿透令牌：本次取消代次的终局事件可穿透 retire 进入收口。
   loginCancelPierceGeneration = waitEvents.generation >= 0 ? waitEvents.generation : null;
   authModalDismissed.value = true;
@@ -423,7 +426,7 @@ async function reenterCredentials(): Promise<void> {
       const current = await authenticationConfig();
       if (attempt !== connectAttempt) return;
       if (!attemptAuthentication || attemptAuthentication.protocol !== "atrust" || current.protocol !== attemptAuthentication.protocol || current.server !== attemptAuthentication.server || current.mode !== attemptAuthentication.mode || current.autoLogin !== attemptAuthentication.autoLogin) {
-        throw new Error("连接协议、网关或认证方式已变化，或连接来自上次启动。请关闭旧提示并重新连接。");
+        throw new Error("连接协议、网关或认证通道已变化，或连接来自上次启动。请关闭旧提示并重新连接。");
       }
       await connectForAuthentication(undefined, attemptAuthentication.server);
     } catch (error) {
@@ -465,6 +468,7 @@ const webLoginMode = ref<AtrustAuthMode>("embedded");
 const webLoginAutoLogin = ref<boolean | undefined>();
 const webLoginMilestone = ref<BrowserLoginMilestone | undefined>();
 const webLoginCancelling = ref(false);
+const ticketRefreshReason = ref<"missing" | "expired">();
 const waitEvents = createBrowserLoginWait();
 let unlistenBrowser: (() => void | Promise<void>) | null = null;
 let unmounted = false;
@@ -512,6 +516,7 @@ onMounted(async () => {
       }
       webLoginPending.value = event.active;
       webLoginMilestone.value = waitEvents.milestone;
+      ticketRefreshReason.value = waitEvents.ticketRefreshReason;
     });
     if (unmounted) void unlisten(); else unlistenBrowser = unlisten;
   } catch { /* 预览不提供原生事件。 */ }
@@ -563,6 +568,7 @@ watch(() => state.value?.status, status => {
   pendingConnect = null;
   webLoginPending.value = false;
   waitEvents.retire();
+  ticketRefreshReason.value = undefined;
 }, { flush: "sync" });
 
 provide(CONNECTION_INTERACTION_KEY, { state, action, busy, autoInstallService, runAction });
@@ -618,6 +624,6 @@ provide(CONNECTION_INTERACTION_KEY, { state, action, busy, autoInstallService, r
   />
   <ResolverConflictModal :visible="!preparationEvent && (resolverConflictVisible)" :compact="minimal" :conflict="null"
     @close="dismissResolverConflict" @adjust="dismissResolverConflict(); emit('resolverConflictAdjust')" />
-  <BrowserLoginWaitModal :visible="!preparationEvent && (userAuthenticationActive && webLoginPending)" :compact="minimal" :mode="webLoginMode" :auto-login="webLoginAutoLogin" :milestone="webLoginMilestone" :cancelling="webLoginCancelling"
+  <BrowserLoginWaitModal :visible="!preparationEvent && (userAuthenticationActive && webLoginPending)" :compact="minimal" :mode="webLoginMode" :auto-login="webLoginAutoLogin" :milestone="webLoginMilestone" :ticket-refresh-reason="ticketRefreshReason" :cancelling="webLoginCancelling"
     @cancel="cancelWebLogin" />
 </template>

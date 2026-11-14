@@ -21,6 +21,7 @@ struct SystemBrowserAdapter<'a> {
     session: Option<String>,
     profile: &'a Path,
     intent: AuthIntent,
+    username_cookie: String,
     gateway: String,
     user_agent: String,
     sequence: u64,
@@ -67,6 +68,7 @@ impl<'a> SystemBrowserAdapter<'a> {
             session: None,
             profile,
             intent,
+            username_cookie: format!("{}_{}", crate::browser_cache_profile::USERNAME_COOKIE, uuid::Uuid::new_v4().simple()),
             gateway: String::new(),
             user_agent: PLAIN_CHROME_USER_AGENT.into(),
             sequence: 0,
@@ -160,9 +162,10 @@ impl ChannelTrait for SystemBrowserAdapter<'_> {
             }
             self.call("Network.enable", json!({}), AuthOperation::Open)
                 .await?;
-            if self.intent == AuthIntent::FreshManual {
-                let script = crate::browser_cache_profile::username_memory_script(
-                    crate::browser_cache_profile::remembered_username(self.profile, &self.gateway).as_deref());
+            {
+                let remembered = if self.intent == AuthIntent::FreshManual { crate::browser_cache_profile::remembered_username(self.profile, &self.gateway) } else { None };
+                let script = crate::browser_cache_profile::username_memory_script(remembered.as_deref())
+                    .replace(crate::browser_cache_profile::USERNAME_COOKIE, &self.username_cookie);
                 // 账户记忆是可选功能；脚本失败不改变认证结果。
                 // Page.enable 是生效前提：缺省时 Chrome 受理注册并返回 identifier
                 // 但脚本对后续导航一律不执行（2026-10-26 darwin 真机确证同款缺陷）。
@@ -414,10 +417,12 @@ impl ChannelTrait for SystemBrowserAdapter<'_> {
             if self.completed {
                 return Ok(());
             }
-            let username = if self.intent == AuthIntent::FreshManual {
-                self.call("Network.getCookies", json!({"urls":[crate::school_auto_login::SCHOOL_LOGIN_ORIGIN]}), AuthOperation::Extract).await.ok()
-                    .and_then(|reply| reply["cookies"].as_array().and_then(|cookies| cookies.iter().find(|cookie| cookie["name"] == crate::browser_cache_profile::USERNAME_COOKIE)).and_then(|cookie| cookie["value"].as_str()).and_then(crate::browser_cache_profile::observed_username))
-            } else { None };
+            let username = self.call("Network.getCookies", json!({"urls":[crate::school_auto_login::SCHOOL_LOGIN_ORIGIN]}), AuthOperation::Extract).await.ok()
+                    .and_then(|reply| reply["cookies"].as_array().and_then(|cookies| cookies.iter().find(|cookie| cookie["name"] == self.username_cookie)).and_then(|cookie| cookie["value"].as_str()).and_then(crate::browser_cache_profile::observed_username))
+            ;
+            if username.is_none() && self.intent == AuthIntent::FreshManual {
+                crate::atrust_session_cache::forget(self.profile, &self.gateway);
+            }
             if let Some(username) = &username {
                 let _ = crate::browser_cache_profile::remember_username(self.profile, &self.gateway, username);
             }

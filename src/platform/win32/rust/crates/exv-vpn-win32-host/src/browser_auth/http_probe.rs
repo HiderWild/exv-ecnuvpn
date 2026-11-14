@@ -18,6 +18,7 @@ pub struct HttpProbeAdapter {
     gateway: String,
     cached: Option<BrowserSession>,
     cache_error: Option<AuthError>,
+    ticket_refresh_reason: Option<TicketRefreshReason>,
     deadline: Option<Instant>,
     completed: bool,
 }
@@ -29,6 +30,7 @@ impl HttpProbeAdapter {
             gateway: String::new(),
             cached: None,
             cache_error: None,
+            ticket_refresh_reason: None,
             deadline: None,
             completed: false,
         }
@@ -122,6 +124,9 @@ fn cas_session(gateway: &str, outcome: CasOutcome) -> Result<ReuseOutcome, AuthE
 }
 
 impl ChannelTrait for HttpProbeAdapter {
+    fn ticket_refresh_reason(&self) -> Option<TicketRefreshReason> {
+        self.ticket_refresh_reason
+    }
     fn capabilities(&self) -> ChannelCapabilities {
         ChannelCapabilities {
             injection: InjectionCapability::Unavailable,
@@ -138,8 +143,10 @@ impl ChannelTrait for HttpProbeAdapter {
             self.gateway = request.gateway_origin;
             self.deadline = Some(Instant::now() + HTTP_BUDGET);
             self.completed = false;
+            self.ticket_refresh_reason = None;
             match crate::atrust_session_cache::load(&self.profile, &self.gateway) {
                 Ok(cached) => {
+                    self.ticket_refresh_reason = cached.is_none().then_some(TicketRefreshReason::Missing);
                     self.cached = cached;
                     self.cache_error = None;
                 }
@@ -198,6 +205,7 @@ impl ChannelTrait for HttpProbeAdapter {
             let status = probe_status(probe)?;
             if matches!(status, SessionStatus::LoggedOut { .. }) {
                 self.cached = None;
+                self.ticket_refresh_reason = Some(TicketRefreshReason::Expired);
             }
             Ok(status)
         })
@@ -279,6 +287,7 @@ impl ChannelTrait for HttpProbeAdapter {
         Box::pin(async move {
             self.cached = None;
             self.cache_error = None;
+            self.ticket_refresh_reason = None;
             self.deadline = None;
             Ok(())
         })

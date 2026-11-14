@@ -948,6 +948,13 @@ impl AuthOrchestrator<'_> {
         let session = if matches!(status, SessionStatus::LoggedIn) {
             self.extract(channel, control, deadline, manual).await?
         } else {
+            // 只有缓存读取与网关明确未登录产生原因；探测失败和未知结果不冒充失效。
+            let reason = if matches!(status, SessionStatus::LoggedOut { .. }) {
+                Some(TicketRefreshReason::Expired)
+            } else { channel.ticket_refresh_reason() };
+            if let Some(reason) = reason {
+                self.events.ticket_refresh(reason);
+            }
             if matches!(status, SessionStatus::LoggedOut { .. }) {
                 match self
                     .operation(
